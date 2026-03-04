@@ -1,6 +1,6 @@
-import { MMKV } from 'react-native-mmkv';
+import { createStorage } from './storage';
 
-export const storage = new MMKV({ id: 'pocket-ai-settings' });
+export const storage = createStorage('pocket-ai-settings');
 
 export interface AppSettings {
     temperature: number;

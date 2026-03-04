@@ -1,8 +1,8 @@
-import { MMKV } from 'react-native-mmkv';
+import { createStorage } from './storage';
 import { ModelMetadata } from './ModelCatalogService';
 import RNFS from 'react-native-fs';
 
-export const storage = new MMKV();
+export const storage = createStorage();
 
 class LocalStorageRegistry {
     private static readonly MODELS_KEY = 'downloaded_models_registry';

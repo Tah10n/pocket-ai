@@ -1,5 +1,4 @@
-import RNBackgroundDownloader, { DownloadTask } from 'react-native-background-downloader';
-import RNFS from 'react-native-fs';
+import RNFS, { DownloadResult, DownloadProgressCallbackResult } from 'react-native-fs';
 import { hardwareListenerService } from './HardwareListenerService';
 import { ModelMetadata } from './ModelCatalogService';
 
@@ -13,105 +12,103 @@ export interface DownloadProgress {
 
 type ProgressListener = (progress: DownloadProgress[]) => void;
 
+interface ActiveDownload {
+    jobId: number;
+    promise: Promise<DownloadResult>;
+}
+
 class ModelDownloadManager {
-    private tasks: Map<string, DownloadTask> = new Map();
+    private activeDownloads: Map<string, ActiveDownload> = new Map();
     private progresses: Map<string, DownloadProgress> = new Map();
     private listeners: Set<ProgressListener> = new Set();
 
-    constructor() {
-        this.hydrateExistingTasks();
-    }
-
-    private async hydrateExistingTasks() {
-        const activeTasks = await RNBackgroundDownloader.checkForExistingDownloads();
-        for (let task of activeTasks) {
-            this.tasks.set(task.id, task);
-            this.attachTaskListeners(task.id, task);
-        }
-    }
-
-    private attachTaskListeners(modelId: string, task: DownloadTask) {
-        task.begin((expectedBytes) => {
-            this.updateProgress(modelId, { status: 'downloading', totalBytes: expectedBytes, bytesWritten: 0, percent: 0 });
-        })
-            .progress((percent) => {
-                this.updateProgress(modelId, { status: 'downloading', percent, bytesWritten: task.totalBytes * percent, totalBytes: task.totalBytes });
-            })
-            .done(async () => {
-                this.updateProgress(modelId, { status: 'verifying' });
-                const isValid = await this.verifyChecksum(modelId, task.dest);
-                if (isValid) {
-                    this.updateProgress(modelId, { status: 'done', percent: 1 });
-                } else {
-                    this.updateProgress(modelId, { status: 'failed' });
-                    await RNFS.unlink(task.dest);
-                }
-                this.tasks.delete(modelId);
-            })
-            .error((error) => {
-                console.error(`Download failed: ${error}`);
-                this.updateProgress(modelId, { status: 'failed' });
-                this.tasks.delete(modelId);
-            });
-    }
-
-    async startDownload(model: ModelMetadata, expectedSha256: string = ''): Promise<void> {
+    /**
+     * Start downloading a model file using RNFS.downloadFile.
+     * Throws 'CELLULAR_DATA_WARNING' if on cellular network.
+     */
+    async startDownload(model: ModelMetadata, _expectedSha256: string = ''): Promise<void> {
         const status = hardwareListenerService.getCurrentStatus();
         if (status.networkType === 'cellular') {
-            // In a real app, throw a specific error or trigger a warning dialog.
             throw new Error('CELLULAR_DATA_WARNING');
         }
 
         const destPath = `${RNFS.DocumentDirectoryPath}/${model.id.replace(/\//g, '_')}.bin`;
 
-        let task = RNBackgroundDownloader.download({
-            id: model.id,
-            url: model.downloadUrl,
-            destination: destPath,
-        });
-
-        this.tasks.set(model.id, task);
         this.progresses.set(model.id, {
             modelId: model.id,
             percent: 0,
             bytesWritten: 0,
             totalBytes: model.sizeBytes,
-            status: 'pending'
+            status: 'pending',
+        });
+        this.notifyListeners();
+
+        const { jobId, promise } = RNFS.downloadFile({
+            fromUrl: model.downloadUrl,
+            toFile: destPath,
+            progressDivider: 5, // Report progress every 5%
+            begin: (res) => {
+                this.updateProgress(model.id, {
+                    status: 'downloading',
+                    totalBytes: res.contentLength,
+                });
+            },
+            progress: (res: DownloadProgressCallbackResult) => {
+                const percent = res.contentLength > 0 ? res.bytesWritten / res.contentLength : 0;
+                this.updateProgress(model.id, {
+                    status: 'downloading',
+                    percent,
+                    bytesWritten: res.bytesWritten,
+                    totalBytes: res.contentLength,
+                });
+            },
         });
 
-        this.attachTaskListeners(model.id, task);
-    }
+        this.activeDownloads.set(model.id, { jobId, promise });
 
-    pauseDownload(modelId: string) {
-        const task = this.tasks.get(modelId);
-        if (task) {
-            task.pause();
-            this.updateProgress(modelId, { status: 'paused' });
+        try {
+            const result = await promise;
+            if (result.statusCode === 200) {
+                this.updateProgress(model.id, { status: 'verifying' });
+                const isValid = await this.verifyChecksum(model.id, destPath);
+                if (isValid) {
+                    this.updateProgress(model.id, { status: 'done', percent: 1 });
+                } else {
+                    this.updateProgress(model.id, { status: 'failed' });
+                    await RNFS.unlink(destPath).catch(() => { });
+                }
+            } else {
+                console.error(`[ModelDownloadManager] Download failed with status: ${result.statusCode}`);
+                this.updateProgress(model.id, { status: 'failed' });
+            }
+        } catch (error) {
+            console.error(`[ModelDownloadManager] Download error:`, error);
+            this.updateProgress(model.id, { status: 'failed' });
+        } finally {
+            this.activeDownloads.delete(model.id);
         }
     }
 
-    resumeDownload(modelId: string) {
-        const task = this.tasks.get(modelId);
-        if (task) {
-            task.resume();
-            this.updateProgress(modelId, { status: 'downloading' });
-        }
-    }
-
+    /**
+     * Cancel an active download.
+     */
     cancelDownload(modelId: string) {
-        const task = this.tasks.get(modelId);
-        if (task) {
-            task.stop();
-            this.tasks.delete(modelId);
+        const download = this.activeDownloads.get(modelId);
+        if (download) {
+            RNFS.stopDownload(download.jobId);
+            this.activeDownloads.delete(modelId);
             this.progresses.delete(modelId);
             this.notifyListeners();
         }
     }
 
+    /**
+     * Validate the downloaded file integrity.
+     */
     async verifyChecksum(modelId: string, filePath: string): Promise<boolean> {
         try {
             const hash = await RNFS.hash(filePath, 'sha256');
-            return !!hash; // Validate against expectedSha256 in a production scenario
+            return !!hash; // In production, compare against expectedSha256
         } catch {
             return false;
         }
@@ -125,7 +122,7 @@ class ModelDownloadManager {
 
     private updateProgress(modelId: string, partial: Partial<DownloadProgress>) {
         const existing = this.progresses.get(modelId) || {
-            modelId, percent: 0, bytesWritten: 0, totalBytes: 0, status: 'pending'
+            modelId, percent: 0, bytesWritten: 0, totalBytes: 0, status: 'pending' as const,
         };
         this.progresses.set(modelId, { ...existing, ...partial });
         this.notifyListeners();

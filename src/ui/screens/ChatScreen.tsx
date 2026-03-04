@@ -82,19 +82,17 @@ export function ChatScreen({ route }: any) {
         setIsGenerating(true);
 
         try {
-            await llmEngineService.chatCompletion(
-                text,
-                undefined, // systemPrompt
-                (token: string) => {
-                    setMessages(prev => {
-                        const newMessages = [...prev];
-                        const lastIndex = newMessages.length - 1;
+            await llmEngineService.chatCompletion(text, undefined, (token: string) => {
+                setMessages(prev => {
+                    const newMessages = [...prev];
+                    const lastIndex = newMessages.length - 1;
+                    if (lastIndex >= 0) {
                         newMessages[lastIndex] = { ...newMessages[lastIndex], content: newMessages[lastIndex].content + token };
-                        return newMessages;
-                    });
-                    setTokenCount(prev => prev + 1);
-                },
-            );
+                    }
+                    return newMessages;
+                });
+                setTokenCount(prev => prev + 1);
+            });
         } catch (e) {
             console.error(e);
             Alert.alert('Error', 'Generation failed or engine unavailable.');
@@ -103,7 +101,9 @@ export function ChatScreen({ route }: any) {
             setMessages(prev => {
                 const newMessages = [...prev];
                 const lastIndex = newMessages.length - 1;
-                newMessages[lastIndex].isStreaming = false;
+                if (lastIndex >= 0) {
+                    newMessages[lastIndex].isStreaming = false;
+                }
                 return newMessages;
             });
             await summarizeContextIfNecessary();

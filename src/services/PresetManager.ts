@@ -1,6 +1,6 @@
-import { MMKV } from 'react-native-mmkv';
+import { createStorage } from './storage';
 
-const storage = new MMKV({ id: 'pocket-ai-presets' });
+const storage = createStorage('pocket-ai-presets');
 
 export interface SystemPromptPreset {
     id: string;

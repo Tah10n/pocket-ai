@@ -78,7 +78,7 @@ class ModelDownloadManager {
                     await RNFS.unlink(destPath).catch(() => { });
                 }
             } else {
-                console.error(`[ModelDownloadManager] Download failed with status: ${result.statusCode}`);
+                console.error(`[ModelDownloadManager] Download failed (${result.statusCode}) for ${model.downloadUrl}`);
                 this.updateProgress(model.id, { status: 'failed' });
             }
         } catch (error) {
@@ -117,7 +117,9 @@ class ModelDownloadManager {
     subscribe(listener: ProgressListener) {
         this.listeners.add(listener);
         listener(Array.from(this.progresses.values()));
-        return () => this.listeners.delete(listener);
+        return () => {
+            this.listeners.delete(listener);
+        };
     }
 
     private updateProgress(modelId: string, partial: Partial<DownloadProgress>) {
@@ -135,3 +137,5 @@ class ModelDownloadManager {
 }
 
 export const modelDownloadManager = new ModelDownloadManager();
+
+

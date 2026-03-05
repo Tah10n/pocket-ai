@@ -25,6 +25,13 @@ const resources = {
             },
             models: {
                 title: 'Models',
+                featured: 'Top models',
+                searchResults: 'Search results',
+                searchPlaceholder: 'Search Hugging Face (GGUF)...',
+                clearSearch: 'Clear search',
+                noResults: 'No models found',
+                loadFailed: 'Failed to load models',
+                sizeUnknown: 'Unknown',
                 download: 'Download',
                 cancel: 'Cancel',
                 ready: 'Ready to use',
@@ -63,6 +70,13 @@ const resources = {
             },
             models: {
                 title: 'Модели',
+                featured: 'Популярные модели',
+                searchResults: 'Результаты поиска',
+                searchPlaceholder: 'Поиск по Hugging Face (GGUF)...',
+                clearSearch: 'Очистить поиск',
+                noResults: 'Модели не найдены',
+                loadFailed: 'Не удалось загрузить модели',
+                sizeUnknown: 'Неизвестно',
                 download: 'Скачать',
                 cancel: 'Отмена',
                 ready: 'Готово к использованию',
@@ -93,3 +107,7 @@ i18n
     });
 
 export default i18n;
+
+
+
+

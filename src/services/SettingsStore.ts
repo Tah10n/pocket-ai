@@ -69,7 +69,10 @@ export function getChatHistoryIndex(): string[] {
 }
 
 export function deleteChatHistory(chatId: string) {
-    storage.delete(`${CHAT_HISTORY_PREFIX}${chatId}`);
+    storage.remove(`${CHAT_HISTORY_PREFIX}${chatId}`);
     const index = getChatHistoryIndex().filter(id => id !== chatId);
     storage.set('chat_history_index', JSON.stringify(index));
 }
+
+
+

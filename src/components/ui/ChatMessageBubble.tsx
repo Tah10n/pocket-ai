@@ -32,7 +32,7 @@ export const ChatMessageBubble = ({ isUser, content, isStreaming, tokensPerSec }
     <View className="flex-col items-start gap-1 mb-6">
       <View className="flex-row items-end gap-2 max-w-[85%]">
         <View className="w-6 h-6 rounded-full bg-primary items-center justify-center shrink-0 shadow-lg">
-          <MaterialSymbols name="smart_toy" size={14} className="text-white" />
+          <MaterialSymbols name="smart-toy" size={14} className="text-white" />
         </View>
         <View className="bg-primary/5 dark:bg-primary/10 border border-primary/10 px-4 py-2.5 rounded-xl rounded-bl-none">
           <Text className={`text-[15px] leading-relaxed text-slate-900 dark:text-slate-100 ${isStreaming ? 'italic' : ''}`}>

@@ -1,5 +1,5 @@
 import React from 'react';
-import { View, Text, TouchableOpacity, ImageBackground } from 'react-native';
+import { View, Text, Pressable, ImageBackground } from 'react-native';
 import { MaterialSymbols } from './MaterialSymbols';
 
 export interface ModelListItemProps {
@@ -42,31 +42,50 @@ export const ModelListItem = ({ name, sizeMB, status, fitsInRam, onAction, image
           {isDownloading ? (
             <View className="flex-1 bg-slate-100 dark:bg-slate-800 items-center justify-center py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 overflow-hidden relative">
               <View className="absolute left-0 top-0 bottom-0 bg-primary/20" style={{ width: `${(downloadProgress || 0) * 100}%` }} />
-              <TouchableOpacity onPress={() => onAction?.('cancel')} className="flex-1 w-full items-center justify-center">
-                <Text className="text-primary dark:text-primary text-[11px] font-bold">Cancel ({( (downloadProgress || 0) * 100).toFixed(0)}%)</Text>
-              </TouchableOpacity>
+              <Pressable 
+                onPress={() => onAction?.('cancel')} 
+                style={({ pressed }) => [{ opacity: pressed ? 0.7 : 1 }]}
+                className="flex-1 w-full items-center justify-center"
+              >
+                <Text className="text-primary dark:text-primary text-[10px] font-bold">Cancel ({( (downloadProgress || 0) * 100).toFixed(0)}%)</Text>
+              </Pressable>
             </View>
           ) : status === 'available' && (
-            <TouchableOpacity onPress={() => onAction?.('download')} className="flex-1 bg-slate-100 dark:bg-slate-800 items-center justify-center py-1.5 rounded-lg border border-slate-200 dark:border-slate-700">
-              <Text className="text-slate-900 dark:text-slate-100 text-[11px] font-bold">Download</Text>
-            </TouchableOpacity>
+            <Pressable 
+              onPress={() => onAction?.('download')} 
+              style={({ pressed }) => [{ opacity: pressed ? 0.7 : 1 }]}
+              className="flex-1 bg-slate-100 dark:bg-slate-800 items-center justify-center py-1.5 rounded-lg border border-slate-200 dark:border-slate-700"
+            >
+              <Text className="text-slate-900 dark:text-slate-100 text-[10px] font-bold">Download</Text>
+            </Pressable>
           )}
           
           {status === 'downloaded' && (
-            <TouchableOpacity onPress={() => onAction?.('load')} className="flex-1 bg-primary items-center justify-center py-1.5 rounded-lg">
-              <Text className="text-white text-[11px] font-bold">Load Model</Text>
-            </TouchableOpacity>
+            <Pressable 
+              onPress={() => onAction?.('load')} 
+              style={({ pressed }) => [{ opacity: pressed ? 0.9 : 1, transform: [{ scale: pressed ? 0.98 : 1 }] }]}
+              className="flex-1 bg-primary items-center justify-center py-1.5 rounded-lg"
+            >
+              <Text className="text-white text-[10px] font-bold">Load Model</Text>
+            </Pressable>
           )}
 
           {status === 'active' && (
-            <TouchableOpacity onPress={() => onAction?.('unload')} className="flex-1 bg-slate-200 dark:bg-white/10 items-center justify-center py-1.5 rounded-lg">
-              <Text className="text-slate-900 dark:text-white text-[11px] font-bold">Unload</Text>
-            </TouchableOpacity>
+            <Pressable 
+              onPress={() => onAction?.('unload')} 
+              style={({ pressed }) => [{ opacity: pressed ? 0.7 : 1 }]}
+              className="flex-1 bg-slate-200 dark:bg-white/10 items-center justify-center py-1.5 rounded-lg"
+            >
+              <Text className="text-slate-900 dark:text-white text-[10px] font-bold">Unload</Text>
+            </Pressable>
           )}
           
-          <TouchableOpacity className="px-3 bg-slate-100 dark:bg-slate-800 items-center justify-center rounded-lg border border-slate-200 dark:border-slate-700">
-            <MaterialSymbols name="more_horiz" size={16} className="text-slate-500" />
-          </TouchableOpacity>
+          <Pressable 
+            style={({ pressed }) => [{ opacity: pressed ? 0.7 : 1 }]}
+            className="px-3 bg-slate-100 dark:bg-slate-800 items-center justify-center rounded-lg border border-slate-200 dark:border-slate-700"
+          >
+            <MaterialSymbols name="more-horiz" size={16} className="text-slate-500" />
+          </Pressable>
         </View>
       </View>
     </View>

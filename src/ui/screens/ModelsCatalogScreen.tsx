@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { View, ScrollView, TextInput, TouchableOpacity, Text, ActivityIndicator, Alert } from 'react-native';
+import { View, ScrollView, TextInput, Pressable, Text, ActivityIndicator, Alert } from 'react-native';
 import { MaterialSymbols } from '../../components/ui/MaterialSymbols';
 import { ActiveModelCard } from '../../components/ui/ActiveModelCard';
 import { ModelListItem } from '../../components/ui/ModelListItem';
@@ -87,10 +87,13 @@ export const ModelsCatalogScreen = () => {
         <View className="flex-1 bg-background-light dark:bg-background-dark max-w-md w-full mx-auto border-x border-slate-200 dark:border-slate-800">
             <View className="pt-6 px-4 bg-background-light/80 dark:bg-background-dark/80 z-10">
                 <View className="flex-row items-center justify-between mb-4 mt-8">
-                    <TouchableOpacity className="flex-row items-center -ml-1">
-                        <MaterialSymbols name="chevron_left" size={28} className="text-primary" />
+                    <Pressable 
+                        style={({ pressed }) => [{ opacity: pressed ? 0.7 : 1 }]}
+                        className="flex-row items-center -ml-1"
+                    >
+                        <MaterialSymbols name="chevron-left" size={28} className="text-primary" />
                         <Text className="text-sm font-medium text-primary">Back</Text>
-                    </TouchableOpacity>
+                    </Pressable>
                     <Text className="text-lg font-bold tracking-tight text-slate-900 dark:text-slate-100">Model Catalog</Text>
                 </View>
 
@@ -105,30 +108,33 @@ export const ModelsCatalogScreen = () => {
                         onChangeText={setSearchQuery}
                     />
                     {searchQuery.length > 0 && (
-                        <TouchableOpacity onPress={() => setSearchQuery('')}>
+                        <Pressable 
+                            onPress={() => setSearchQuery('')} 
+                            style={({ pressed }) => [{ opacity: pressed ? 0.7 : 1 }]}
+                        >
                             <MaterialSymbols name="close" size={18} className="text-slate-400" />
-                        </TouchableOpacity>
+                        </Pressable>
                     )}
                 </View>
 
                 {/* Tabs */}
                 <View className="flex-row gap-6 border-b border-slate-200 dark:border-primary/20">
-                    <TouchableOpacity 
+                    <Pressable 
                         onPress={() => setActiveTab('All Models')}
                         className={`items-center pb-2 border-b-2 ${activeTab === 'All Models' ? 'border-primary' : 'border-transparent'}`}
                     >
                         <Text className={`text-sm ${activeTab === 'All Models' ? 'font-bold text-primary' : 'font-medium text-slate-500 dark:text-slate-400'}`}>
                             All Models
                         </Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity 
+                    </Pressable>
+                    <Pressable 
                         onPress={() => setActiveTab('Downloaded')}
                         className={`items-center pb-2 border-b-2 ${activeTab === 'Downloaded' ? 'border-primary' : 'border-transparent'}`}
                     >
                         <Text className={`text-sm ${activeTab === 'Downloaded' ? 'font-bold text-primary' : 'font-medium text-slate-500 dark:text-slate-400'}`}>
                             Downloaded
                         </Text>
-                    </TouchableOpacity>
+                    </Pressable>
                 </View>
             </View>
 

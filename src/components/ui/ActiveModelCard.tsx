@@ -1,5 +1,5 @@
 import React from 'react';
-import { View, Text, TouchableOpacity, ImageBackground } from 'react-native';
+import { View, Text, Pressable, ImageBackground } from 'react-native';
 import { BlurView } from 'expo-blur';
 import { MaterialSymbols } from './MaterialSymbols';
 
@@ -34,17 +34,23 @@ export const ActiveModelCard = ({ onSwapModel }: ActiveModelCardProps) => {
           <View className="gap-1">
             <View className="flex-row items-center gap-1">
               <MaterialSymbols name="memory" size={16} className="text-slate-500 dark:text-slate-400" />
-              <Text className="text-slate-500 dark:text-slate-400 text-sm">4.8GB RAM</Text>
+              <Text className="text-slate-500 dark:text-slate-400 text-xs">4.8GB RAM</Text>
             </View>
             <View className="flex-row items-center gap-1">
               <MaterialSymbols name="speed" size={16} className="text-slate-500 dark:text-slate-400" />
-              <Text className="text-slate-500 dark:text-slate-400 text-sm">42 t/s</Text>
+              <Text className="text-slate-500 dark:text-slate-400 text-xs">42 t/s</Text>
             </View>
           </View>
           
-          <TouchableOpacity onPress={onSwapModel} activeOpacity={0.8} className="px-4 h-9 bg-primary items-center justify-center rounded-lg shadow-lg">
-            <Text className="text-white text-sm font-semibold">Swap Model</Text>
-          </TouchableOpacity>
+          <Pressable 
+            onPress={onSwapModel} 
+            style={({ pressed }) => [
+              { transform: [{ scale: pressed ? 0.98 : 1 }], opacity: pressed ? 0.9 : 1 }
+            ]}
+            className="px-4 h-9 bg-primary items-center justify-center rounded-lg shadow-lg"
+          >
+            <Text className="text-white text-[13px] font-semibold">Swap Model</Text>
+          </Pressable>
         </View>
       </View>
     </View>

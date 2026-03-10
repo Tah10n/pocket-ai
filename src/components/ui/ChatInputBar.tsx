@@ -1,5 +1,5 @@
 import React from 'react';
-import { View, TextInput, TouchableOpacity } from 'react-native';
+import { View, TextInput, Pressable } from 'react-native';
 import { MaterialSymbols } from './MaterialSymbols';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -24,9 +24,9 @@ export const ChatInputBar = ({ onSubmit }: ChatInputBarProps) => {
       style={{ paddingBottom: Math.max(insets.bottom, 16) }}
     >
       <View className="flex-row items-end gap-2">
-        <TouchableOpacity className="p-2 text-primary hover:bg-primary/10 rounded-full transition-colors">
-          <MaterialSymbols name="add_circle" size={24} className="text-primary" />
-        </TouchableOpacity>
+        <Pressable className="p-2 text-primary hover:bg-primary/10 rounded-full transition-colors active:opacity-70">
+          <MaterialSymbols name="add-circle" size={24} className="text-primary" />
+        </Pressable>
         
         <View className="flex-1 relative">
           <View className="w-full bg-primary/5 dark:bg-primary/10 border border-primary/20 rounded-2xl px-4 py-2 min-h-[44px] justify-center">
@@ -41,9 +41,12 @@ export const ChatInputBar = ({ onSubmit }: ChatInputBarProps) => {
           </View>
         </View>
         
-        <TouchableOpacity onPress={handleSubmit} className="bg-primary h-[44px] w-[44px] rounded-full shadow-lg items-center justify-center">
-          <MaterialSymbols name="arrow_upward" size={20} className="text-white" />
-        </TouchableOpacity>
+        <Pressable 
+          onPress={handleSubmit} 
+          className="bg-primary h-[44px] w-[44px] rounded-full shadow-lg items-center justify-center active:opacity-90"
+        >
+          <MaterialSymbols name="arrow-upward" size={20} className="text-white" />
+        </Pressable>
       </View>
       
       {insets.bottom === 0 && (

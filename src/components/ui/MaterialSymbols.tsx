@@ -1,29 +1,31 @@
-import React from 'react';
-import { Text, TextProps } from 'react-native';
+import React, { forwardRef } from 'react';
+import { Text } from 'react-native';
+import { MaterialIcons } from '@expo/vector-icons';
+import { cssInterop } from 'react-native-css-interop';
 
-export interface MaterialSymbolsProps extends TextProps {
-  name: string;
+export interface MaterialSymbolsProps {
+  name: React.ComponentProps<typeof MaterialIcons>['name'];
   size?: number;
   color?: string;
   className?: string;
 }
 
-export const MaterialSymbols = ({ name, size = 24, className = '', style, ...rest }: MaterialSymbolsProps) => {
-  return (
-    <Text
-      className={className}
-      style={[
-        {
-          fontFamily: 'Material Symbols Outlined',
-          fontSize: size,
-          includeFontPadding: false,
-          textAlignVertical: 'center',
-        },
-        style,
-      ]}
-      {...rest}
-    >
-      {name}
-    </Text>
-  );
-};
+const MaterialSymbolsBase = forwardRef<Text, MaterialSymbolsProps>(
+  ({ name, size = 24, color, className, ...rest }, ref) => {
+    return (
+      <MaterialIcons
+        ref={ref as any}
+        name={name}
+        size={size}
+        color={color}
+        {...rest}
+      />
+    );
+  }
+);
+
+cssInterop(MaterialSymbolsBase, {
+  className: 'style',
+});
+
+export const MaterialSymbols = MaterialSymbolsBase;

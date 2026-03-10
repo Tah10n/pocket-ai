@@ -13,6 +13,7 @@ export function createStorage(id?: string): MMKV {
         }
 
         // Lazily require MMKV so the app can still boot if NitroModules/MMKV native code isn't available.
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
         const mmkvModule = require('react-native-mmkv') as MmkvModule;
         const createMMKV = mmkvModule.createMMKV;
 

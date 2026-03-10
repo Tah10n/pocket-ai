@@ -8,7 +8,9 @@ import 'react-native-reanimated';
 
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { ThemeProvider as CustomThemeProvider } from '../src/providers/ThemeProvider';
+import { hardwareListenerService } from '../src/services/HardwareListenerService';
 import '../src/i18n';
+import '../global.css';
 
 function patchExpoKeepAwake() {
   if (!__DEV__) return;
@@ -57,6 +59,11 @@ export const unstable_settings = {
 export default function RootLayout() {
   const colorScheme = useColorScheme();
   const [isReady, setIsReady] = useState(false);
+
+  useEffect(() => {
+    hardwareListenerService.start();
+    return () => hardwareListenerService.stop();
+  }, []);
 
   useEffect(() => {
     async function prepare() {

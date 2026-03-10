@@ -6,25 +6,23 @@ import HomeScreen from '../app/(tabs)/index';
 jest.mock('expo-router', () => ({
     Link: ({ children }: any) => <>{children}</>,
     useRouter: () => ({ push: jest.fn(), replace: jest.fn() }),
+    Stack: {
+        Screen: () => null,
+    },
 }));
 
 jest.mock('expo-image', () => ({
     Image: () => 'Image',
 }));
 
-jest.mock('react-native-device-info', () => ({
-    getVersion: () => '1.0.0',
-    getBuildNumber: () => '1',
-}));
-
 // Mock NativeEventEmitter
 jest.mock('react-native/Libraries/EventEmitter/NativeEventEmitter');
 
-
 describe('HomeScreen', () => {
-    it('renders successfully', () => {
+    it('renders successfully with translation keys', () => {
         const { getByText } = render(<HomeScreen />);
-        expect(getByText('Welcome!')).toBeTruthy();
-        expect(getByText('Step 1: Try it')).toBeTruthy();
+        // Since i18next mock returns keys, check for them
+        expect(getByText('models.title')).toBeTruthy();
+        expect(getByText('models.featured')).toBeTruthy();
     });
 });

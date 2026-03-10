@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, StyleSheet, FlatList, TextInput, Button, Alert, TouchableOpacity } from 'react-native';
+import { View, Text, StyleSheet, FlatList, TextInput, Button, Alert } from 'react-native';
 import { presetManager, SystemPromptPreset } from '../../services/PresetManager';
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '../../providers/ThemeProvider';

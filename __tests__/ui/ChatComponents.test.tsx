@@ -3,10 +3,6 @@ import { render, fireEvent } from '@testing-library/react-native';
 import { MessageBubble } from '../../src/ui/components/MessageBubble';
 import { MarkdownRenderer } from '../../src/ui/components/MarkdownRenderer';
 
-jest.mock('react-native/Libraries/Components/Clipboard/Clipboard', () => ({
-    setString: jest.fn(),
-}));
-
 describe('MessageBubble', () => {
     it('renders user message correctly', () => {
         const { getByText } = render(

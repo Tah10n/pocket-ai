@@ -96,24 +96,29 @@ describe('ModelCatalogService', () => {
         expect(firstUrl).toContain('search=phi%20gguf');
     });
 
-    it('returns models even when file size is missing', async () => {
+    it('retrieves file size from detailed fetch when missing from summary', async () => {
         (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(8 * 1024 * 1024 * 1024); // 8GB
         (DeviceInfo.getFreeDiskStorage as jest.Mock).mockResolvedValue(50 * 1024 * 1024 * 1024); // 50GB
 
         global.fetch = jest.fn((url: string) => {
             if (url.includes('/api/models?')) {
+                // Search result: siblings without sizes
                 return Promise.resolve({
                     ok: true,
                     json: () => Promise.resolve([
                         {
                             id: 'nosize-model',
                             sha: 'deadbeef',
+                            siblings: [
+                                { rfilename: 'model.Q4_K_M.gguf' }
+                            ]
                         },
                     ]),
                 });
             }
 
             if (url.includes('/api/models/nosize-model')) {
+                // Detail result: siblings with sizes
                 return Promise.resolve({
                     ok: true,
                     json: () => Promise.resolve({
@@ -122,6 +127,11 @@ describe('ModelCatalogService', () => {
                         siblings: [
                             {
                                 rfilename: 'model.Q4_K_M.gguf',
+                                size: 2.5 * 1024 * 1024 * 1024,
+                                lfs: {
+                                    size: 2.5 * 1024 * 1024 * 1024,
+                                    sha256: 'somehash'
+                                }
                             },
                         ],
                     }),
@@ -139,7 +149,7 @@ describe('ModelCatalogService', () => {
         const available = await modelCatalogService.getAvailableModels();
         expect(available).toHaveLength(1);
         expect(available[0].id).toBe('nosize-model');
-        expect(available[0].sizeBytes).toBe(0);
+        expect(available[0].sizeBytes).toBeGreaterThan(0);
         expect(available[0].downloadUrl).toContain('/resolve/deadbeef/model.Q4_K_M.gguf');
     });
 });

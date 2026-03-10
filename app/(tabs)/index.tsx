@@ -1,5 +1,5 @@
-import { ModelCatalogScreen } from '../../src/ui/screens/ModelCatalogScreen';
+import { HomeScreen } from '../../src/ui/screens/HomeScreen';
 
-export default function HomeScreen() {
-  return <ModelCatalogScreen />;
+export default function HomeTab() {
+  return <HomeScreen />;
 }

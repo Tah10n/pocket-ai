@@ -1,4 +1,4 @@
-import { AppState, NativeEventSubscription, Platform } from 'react-native';
+import { AppState, NativeEventSubscription } from 'react-native';
 import NetInfo, { NetInfoState } from '@react-native-community/netinfo';
 
 export type ThermalState = 'nominal' | 'fair' | 'serious' | 'critical';
@@ -21,22 +21,29 @@ class HardwareListenerService {
         thermalState: 'nominal',
     };
 
+    private started = false;
     private memoryWarningSub?: NativeEventSubscription;
     private netInfoUnsubscribe?: () => void;
 
     start() {
+        if (this.started) return;
+        this.started = true;
+
         this.memoryWarningSub = AppState.addEventListener('memoryWarning', this.handleMemoryWarning);
         this.netInfoUnsubscribe = NetInfo.addEventListener(this.handleNetworkChange);
 
-        // Mocking thermal state for now as standard RN doesn't expose it directly without custom native modules.
-        if (Platform.OS === 'ios') {
-            // In a real implementation: subscribe to NSProcessInfoThermalStateDidChangeNotification
-        }
+        // NOTE: In a production app with New Architecture, 
+        // thermal state should be provided via a TurboModule or NitroModule.
     }
 
     stop() {
+        if (!this.started) return;
+        this.started = false;
+
         this.memoryWarningSub?.remove();
+        this.memoryWarningSub = undefined;
         this.netInfoUnsubscribe?.();
+        this.netInfoUnsubscribe = undefined;
     }
 
     subscribe(listener: Listener) {
@@ -45,12 +52,20 @@ class HardwareListenerService {
         return () => this.listeners.delete(listener);
     }
 
+    /**
+     * Manually reset the low memory flag. 
+     * Usually called after a model is successfully unloaded.
+     */
+    resetLowMemoryFlag() {
+        this.updateStatus({ isLowMemory: false });
+    }
+
     private handleMemoryWarning = () => {
+        console.warn('[HardwareListener] System memory warning received!');
         this.updateStatus({ isLowMemory: true });
-        // Reset after some time assuming memory was freed
-        setTimeout(() => {
-            this.updateStatus({ isLowMemory: false });
-        }, 5000);
+        // We no longer use setTimeout to reset. 
+        // The consumer (e.g. LLMEngineService) should handle unloading 
+        // and then we can reset the flag if needed, or wait for next GC.
     };
 
     private handleNetworkChange = (state: NetInfoState) => {
@@ -67,6 +82,13 @@ class HardwareListenerService {
 
     getCurrentStatus() {
         return this.currentStatus;
+    }
+
+    /**
+     * Set thermal state from native side (e.g. via TurboModule callback)
+     */
+    setThermalState(state: ThermalState) {
+        this.updateStatus({ thermalState: state });
     }
 }
 

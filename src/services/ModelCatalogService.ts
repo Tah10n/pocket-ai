@@ -7,6 +7,7 @@ export interface ModelMetadata {
     contextWindow: number;
     sizeBytes: number;
     downloadUrl: string;
+    sha256?: string;
 }
 
 type HuggingFaceModelSummary = {
@@ -80,7 +81,7 @@ function isLikelyModelGguf(filename: string, sizeBytes: number | null): boolean 
     if (lowered.includes('tokenizer')) return false;
     if (lowered.includes('vocab')) return false;
     if (lowered.includes('mmproj')) return false;
-    if (typeof sizeBytes === 'number' && sizeBytes < MIN_GGUF_BYTES) return false;
+    if (typeof sizeBytes !== 'number' || sizeBytes < MIN_GGUF_BYTES) return false;
     return true;
 }
 
@@ -272,6 +273,7 @@ export class ModelCatalogService {
                 contextWindow: 4096,
                 sizeBytes: picked.sizeBytes,
                 downloadUrl: buildHuggingFaceResolveUrl(repoId, revision, picked.filename),
+                sha256: picked.sha256,
             });
         }
 

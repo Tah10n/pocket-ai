@@ -1,5 +1,8 @@
 import React from 'react';
-import { View, ScrollView, Pressable, Text } from 'react-native';
+import { Box } from '@/components/ui/box';
+import { ScrollView } from '@/components/ui/scroll-view';
+import { Pressable } from '@/components/ui/pressable';
+import { Text } from '@/components/ui/text';
 import { useRouter } from 'expo-router';
 import { HeaderBar } from '../../components/ui/HeaderBar';
 import { ActiveModelCard } from '../../components/ui/ActiveModelCard';
@@ -13,7 +16,7 @@ export const HomeScreen = () => {
     const router = useRouter();
 
     return (
-        <View className="flex-1 bg-background-light dark:bg-background-dark">
+        <Box className="flex-1 bg-background-0 dark:bg-background-950">
             <HeaderBar title="Pocket AI" showProfile={true} />
             
             <ScrollView 
@@ -23,27 +26,24 @@ export const HomeScreen = () => {
             >
                 <ActiveModelCard onSwapModel={() => router.push('/(tabs)/models' as any)} />
                 
-                <View className="px-4 py-6">
+                <Box className="px-4 py-6">
                     <Pressable 
                         onPress={() => router.push('/(tabs)/chat')}
-                        style={({ pressed }) => [
-                          { transform: [{ scale: pressed ? 0.98 : 1 }], opacity: pressed ? 0.9 : 1 }
-                        ]}
-                        className="flex-row w-full items-center justify-center rounded-xl h-14 bg-primary shadow-xl shadow-primary/20 gap-3"
+                        className="flex-row w-full items-center justify-center rounded-xl h-14 bg-primary-500 shadow-xl shadow-primary-500/20 gap-3 active:scale-95 active:opacity-90 transition-all"
                     >
-                        <MaterialSymbols name="add-comment" size={22} className="text-white" />
-                        <Text className="text-white text-base font-bold">New Chat</Text>
+                        <MaterialSymbols name="add-comment" size={22} className="text-typography-0" />
+                        <Text className="text-typography-0 text-base font-bold">New Chat</Text>
                     </Pressable>
-                </View>
+                </Box>
 
-                <View className="px-4">
-                    <Text className="text-slate-900 dark:text-slate-100 text-lg font-bold leading-tight tracking-tight">Quick Actions</Text>
-                </View>
+                <Box className="px-4">
+                    <Text className="text-typography-900 dark:text-typography-100 text-lg font-bold leading-tight tracking-tight">Quick Actions</Text>
+                </Box>
 
                 <QuickActionsGrid onCatalogPress={() => router.push('/(tabs)/models' as any)} />
                 
                 <RecentConversationsList />
             </ScrollView>
-        </View>
+        </Box>
     );
 };

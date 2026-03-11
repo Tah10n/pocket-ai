@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
-import { View, StyleSheet, AccessibilityInfo } from 'react-native';
+import { AccessibilityInfo } from 'react-native';
+import { Box } from '@/components/ui/box';
 import { MarkdownRenderer } from './MarkdownRenderer';
 
 interface Props {
@@ -20,35 +21,18 @@ export function MessageBubble({ role, content, isStreaming }: Props) {
     }, [isStreaming, announced, role]);
 
     return (
-        <View
-            style={[styles.bubble, role === 'user' ? styles.userBubble : styles.assistantBubble]}
+        <Box
+            className={`max-w-[80%] p-3 my-1.5 rounded-xl ${
+                role === 'user' 
+                    ? 'self-end bg-success-200 rounded-br-sm' 
+                    : 'self-start bg-background-0 rounded-bl-sm border border-outline-200'
+            }`}
             // Suppress screen reader chatter during token streaming
             // Read out the entire block only when not streaming or focused
             importantForAccessibility={isStreaming ? 'no-hide-descendants' : 'yes'}
             accessibilityLiveRegion={isStreaming ? 'none' : 'polite'}
         >
             <MarkdownRenderer content={content} />
-        </View>
+        </Box>
     );
 }
-
-const styles = StyleSheet.create({
-    bubble: {
-        maxWidth: '85%',
-        padding: 12,
-        marginVertical: 6,
-        borderRadius: 12,
-    },
-    userBubble: {
-        alignSelf: 'flex-end',
-        backgroundColor: '#DCF8C6',
-        borderBottomRightRadius: 2,
-    },
-    assistantBubble: {
-        alignSelf: 'flex-start',
-        backgroundColor: '#FFFFFF',
-        borderBottomLeftRadius: 2,
-        borderColor: '#E5E5E5',
-        borderWidth: 1,
-    }
-});

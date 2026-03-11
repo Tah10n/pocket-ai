@@ -1,59 +1,53 @@
-import React from 'react';
-import { View, TextInput, Pressable } from 'react-native';
+import React, { useState } from 'react';
+import { Box } from '@/components/ui/box';
+import { Input, InputField } from '@/components/ui/input';
+import { Pressable } from '@/components/ui/pressable';
 import { MaterialSymbols } from './MaterialSymbols';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-export interface ChatInputBarProps {
-  onSubmit?: (text: string) => void;
+interface ChatInputBarProps {
+    onSendMessage: (content: string) => void;
 }
 
-export const ChatInputBar = ({ onSubmit }: ChatInputBarProps) => {
-  const insets = useSafeAreaInsets();
-  const [text, setText] = React.useState('');
+export const ChatInputBar = ({ onSendMessage }: ChatInputBarProps) => {
+    const [message, setMessage] = useState('');
+    const insets = useSafeAreaInsets();
 
-  const handleSubmit = () => {
-      if (text.trim() && onSubmit) {
-          onSubmit(text.trim());
-          setText('');
-      }
-  };
+    const handleSend = () => {
+        if (message.trim()) {
+            onSendMessage(message.trim());
+            setMessage('');
+        }
+    };
 
-  return (
-    <View 
-      className="p-4 bg-background-light dark:bg-background-dark border-t border-primary/10"
-      style={{ paddingBottom: Math.max(insets.bottom, 16) }}
-    >
-      <View className="flex-row items-end gap-2">
-        <Pressable className="p-2 text-primary hover:bg-primary/10 rounded-full transition-colors active:opacity-70">
-          <MaterialSymbols name="add-circle" size={24} className="text-primary" />
-        </Pressable>
-        
-        <View className="flex-1 relative">
-          <View className="w-full bg-primary/5 dark:bg-primary/10 border border-primary/20 rounded-2xl px-4 py-2 min-h-[44px] justify-center">
-            <TextInput 
-              className="text-slate-900 dark:text-slate-100 text-sm max-h-32"
-              placeholder="Ask anything..."
-              placeholderTextColor="#94a3b8"
-              multiline
-              value={text}
-              onChangeText={setText}
-            />
-          </View>
-        </View>
-        
-        <Pressable 
-          onPress={handleSubmit} 
-          className="bg-primary h-[44px] w-[44px] rounded-full shadow-lg items-center justify-center active:opacity-90"
+    return (
+        <Box 
+            className="bg-transparent border-t border-outline-200 dark:border-outline-800 px-4 py-3"
+            style={{ paddingBottom: Math.max(insets.bottom, 16) }}
         >
-          <MaterialSymbols name="arrow-upward" size={20} className="text-white" />
-        </Pressable>
-      </View>
-      
-      {insets.bottom === 0 && (
-        <View className="mt-3 items-center">
-            <View className="h-1 w-32 bg-slate-300 dark:bg-slate-700 rounded-full opacity-50" />
-        </View>
-      )}
-    </View>
-  );
+            <Box className="flex-row items-end gap-2 bg-background-100 dark:bg-background-800/80 rounded-2xl px-3 py-2 border border-outline-200 dark:border-outline-800">
+                <Input className="flex-1 bg-transparent border-0 min-h-[40px] max-h-32">
+                    <InputField
+                        className="text-typography-900 dark:text-typography-0 text-base"
+                        placeholder="Type a message..."
+                        placeholderTextColor="text-typography-400"
+                        multiline
+                        value={message}
+                        onChangeText={setMessage}
+                    />
+                </Input>
+                
+                <Pressable 
+                    onPress={handleSend}
+                    className={`p-2 rounded-xl mb-0.5 active:scale-95 transition-all ${message.trim() ? 'bg-primary-500' : 'bg-background-300 dark:bg-background-700'}`}
+                >
+                    <MaterialSymbols 
+                        name="send" 
+                        size={20} 
+                        className={message.trim() ? 'text-typography-0' : 'text-typography-500'} 
+                    />
+                </Pressable>
+            </Box>
+        </Box>
+    );
 };

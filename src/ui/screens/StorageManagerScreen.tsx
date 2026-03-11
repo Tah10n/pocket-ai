@@ -1,5 +1,8 @@
 import React, { useEffect, useState } from 'react';
-import { View, Text, FlatList, Button, StyleSheet } from 'react-native';
+import { Box } from '@/components/ui/box';
+import { Text } from '@/components/ui/text';
+import { Button, ButtonText } from '@/components/ui/button';
+import { FlashList } from '@shopify/flash-list';
 import { localStorageRegistry } from '../../services/LocalStorageRegistry';
 import { ModelMetadata } from '../../services/ModelCatalogService';
 
@@ -20,29 +23,26 @@ export function StorageManagerScreen() {
     };
 
     return (
-        <View style={styles.container}>
-            <Text style={styles.header}>Storage Manager</Text>
-            <FlatList
-                data={downloadedModels}
-                keyExtractor={(item) => item.id}
-                renderItem={({ item }) => (
-                    <View style={styles.item}>
-                        <View>
-                            <Text style={styles.title}>{item.name}</Text>
-                            <Text>{(item.sizeBytes / 1024 / 1024 / 1024).toFixed(2)} GB</Text>
-                        </View>
-                        <Button title="Offload" onPress={() => handleDelete(item.id)} color="red" />
-                    </View>
-                )}
-                ListEmptyComponent={<Text>No downloaded models.</Text>}
-            />
-        </View>
+        <Box className="flex-1 p-4 bg-background-0 dark:bg-background-950">
+            <Text className="text-2xl font-bold mb-4 text-typography-900 dark:text-typography-100">Storage Manager</Text>
+            <Box className="flex-1 w-full flex">
+                <FlashList
+                    data={downloadedModels}
+                    keyExtractor={(item) => item.id}
+                    renderItem={({ item }) => (
+                        <Box className="flex-row justify-between py-3 border-b border-outline-200 dark:border-outline-800">
+                            <Box>
+                                <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">{item.name}</Text>
+                                <Text className="text-typography-600 dark:text-typography-400">{(item.sizeBytes / 1024 / 1024 / 1024).toFixed(2)} GB</Text>
+                            </Box>
+                            <Button action="negative" size="sm" onPress={() => handleDelete(item.id)}>
+                                <ButtonText>Offload</ButtonText>
+                            </Button>
+                        </Box>
+                    )}
+                    ListEmptyComponent={<Text className="text-typography-500 mt-4 text-center">No downloaded models.</Text>}
+                />
+            </Box>
+        </Box>
     );
 }
-
-const styles = StyleSheet.create({
-    container: { flex: 1, padding: 16 },
-    header: { fontSize: 24, fontWeight: 'bold', marginBottom: 16 },
-    item: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 12, borderBottomWidth: 1, borderColor: '#ccc' },
-    title: { fontSize: 16, fontWeight: '600' }
-});

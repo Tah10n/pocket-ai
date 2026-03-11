@@ -5,9 +5,9 @@ module.exports = {
   theme: {
     extend: {
       colors: {
-        "primary": "#3211d4",
-        "background-light": "#f6f6f8",
-        "background-dark": "#131022",
+        "primary-500": "#3211d4",
+        "background-0": "#f6f6f8",
+        "background-950": "#131022",
       },
       fontFamily: {
         "display": ["Inter", "sans-serif"]

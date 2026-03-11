@@ -1,5 +1,7 @@
 import React from 'react';
-import { View, Text, Pressable } from 'react-native';
+import { Box } from '@/components/ui/box';
+import { Text } from '@/components/ui/text';
+import { Pressable } from '@/components/ui/pressable';
 import { MaterialSymbols } from './MaterialSymbols';
 
 const actions = [
@@ -14,23 +16,22 @@ interface QuickActionsGridProps {
 
 export const QuickActionsGrid = ({ onCatalogPress }: QuickActionsGridProps) => {
   return (
-    <View className="flex-row gap-3 pt-6 px-4">
+    <Box className="flex-row gap-3 pt-6 px-4">
       {actions.map((action) => (
         <Pressable
           key={action.id}
           onPress={action.id === 'catalog' ? onCatalogPress : undefined}
-          style={({ pressed }) => [{ opacity: pressed ? 0.7 : 1, backgroundColor: pressed ? 'rgba(50, 17, 212, 0.05)' : 'transparent' }]}
-          className="flex-1 flex-col items-center justify-center p-4 rounded-xl bg-white dark:bg-primary/5 border border-slate-200 dark:border-primary/10"
+          className="flex-1 flex-col items-center justify-center p-4 rounded-xl bg-background-0 dark:bg-primary-500/5 border border-outline-200 dark:border-primary-500/10 active:opacity-70 active:bg-primary-500/5"
         >
 
-          <View className="w-12 h-12 rounded-full bg-primary/10 items-center justify-center mb-2">
-            <MaterialSymbols name={action.icon} size={24} className="text-primary dark:text-slate-300" />
-          </View>
-          <Text className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+          <Box className="w-12 h-12 rounded-full bg-primary-500/10 items-center justify-center mb-2">
+            <MaterialSymbols name={action.icon} size={24} className="text-primary-500 dark:text-typography-300" />
+          </Box>
+          <Text className="text-xs font-semibold text-typography-700 dark:text-typography-300">
             {action.label}
           </Text>
         </Pressable>
       ))}
-    </View>
+    </Box>
   );
 };

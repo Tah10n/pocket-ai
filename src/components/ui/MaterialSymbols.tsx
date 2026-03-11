@@ -1,5 +1,5 @@
 import React, { forwardRef } from 'react';
-import { Text } from 'react-native';
+import { Text } from '@/components/ui/text';
 import { MaterialIcons } from '@expo/vector-icons';
 import { cssInterop } from 'react-native-css-interop';
 

@@ -1,5 +1,10 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, StyleSheet, FlatList, TextInput, Button, Alert } from 'react-native';
+import { Alert } from 'react-native';
+import { Box } from '@/components/ui/box';
+import { Text } from '@/components/ui/text';
+import { Input, InputField } from '@/components/ui/input';
+import { Button, ButtonText } from '@/components/ui/button';
+import { FlashList } from '@shopify/flash-list';
 import { presetManager, SystemPromptPreset } from '../../services/PresetManager';
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '../../providers/ThemeProvider';
@@ -67,70 +72,70 @@ export function PresetManagerScreen() {
     };
 
     const renderItem = ({ item }: { item: SystemPromptPreset }) => (
-        <View style={[styles.card, { borderColor: colors.border, backgroundColor: colors.surface }]}>
-            <View style={styles.cardHeader}>
-                <Text style={[styles.title, { color: colors.text }]}>{item.name} {item.isBuiltIn && '(Built-in)'}</Text>
+        <Box className="border border-outline-200 dark:border-outline-800 rounded-lg p-4 mb-3 bg-background-0 dark:bg-background-950">
+            <Box className="flex-row justify-between items-center mb-2">
+                <Text className="text-base font-bold text-typography-900 dark:text-typography-100">{item.name} {item.isBuiltIn && '(Built-in)'}</Text>
                 {!item.isBuiltIn && (
-                    <View style={styles.actions}>
-                        <Button title={t('common.edit')} onPress={() => startEditing(item)} />
-                        <Button title={t('common.delete')} color="red" onPress={() => handleDelete(item.id)} />
-                    </View>
+                    <Box className="flex-row gap-2">
+                        <Button action="primary" size="sm" onPress={() => startEditing(item)}>
+                            <ButtonText>{t('common.edit')}</ButtonText>
+                        </Button>
+                        <Button action="negative" size="sm" onPress={() => handleDelete(item.id)}>
+                            <ButtonText>{t('common.delete')}</ButtonText>
+                        </Button>
+                    </Box>
                 )}
-            </View>
-            <Text style={[styles.promptText, { color: colors.text }]} numberOfLines={3}>
+            </Box>
+            <Text className="text-sm opacity-80 text-typography-700 dark:text-typography-400" numberOfLines={3}>
                 {item.systemPrompt}
             </Text>
-        </View>
+        </Box>
     );
 
     return (
-        <View style={[styles.container, { backgroundColor: colors.background }]}>
-            <Text style={[styles.header, { color: colors.text }]}>{t('settings.presets')}</Text>
+        <Box className="flex-1 bg-background-0 dark:bg-background-950">
+            <Text className="text-2xl font-bold p-4 text-typography-900 dark:text-typography-100">{t('settings.presets')}</Text>
 
-            <View style={[styles.editor, { borderColor: colors.border, backgroundColor: colors.surface }]}>
-                <TextInput
-                    style={[styles.input, { borderColor: colors.border, color: colors.text }]}
-                    placeholder="Preset Name"
-                    placeholderTextColor="#888"
-                    value={editName}
-                    onChangeText={setEditName}
-                />
-                <TextInput
-                    style={[styles.input, { borderColor: colors.border, height: 80, color: colors.text }]}
-                    placeholder="System Prompt"
-                    placeholderTextColor="#888"
-                    multiline
-                    value={editPrompt}
-                    onChangeText={setEditPrompt}
-                />
-                <View style={styles.editorActions}>
-                    <Button title={editingId ? t('common.save') : t('common.add')} onPress={handleSave} />
+            <Box className="p-4 border border-outline-200 dark:border-outline-800 m-4 rounded-lg bg-background-0 dark:bg-background-950">
+                <Input className="mb-3">
+                    <InputField
+                        placeholder="Preset Name"
+                        placeholderTextColor="text-typography-500"
+                        value={editName}
+                        onChangeText={setEditName}
+                        className="text-typography-900 dark:text-typography-100 p-2"
+                    />
+                </Input>
+                <Input className="h-20 mb-3">
+                    <InputField
+                        placeholder="System Prompt"
+                        placeholderTextColor="text-typography-500"
+                        multiline
+                        value={editPrompt}
+                        onChangeText={setEditPrompt}
+                        className="text-typography-900 dark:text-typography-100 p-2"
+                        textAlignVertical="top"
+                    />
+                </Input>
+                <Box className="flex-row justify-start gap-3">
+                    <Button action="primary" onPress={handleSave}>
+                        <ButtonText>{editingId ? t('common.save') : t('common.add')}</ButtonText>
+                    </Button>
                     {editingId && (
-                        <Button title={t('common.cancel')} onPress={() => { setEditingId(null); setEditName(''); setEditPrompt(''); }} color="gray" />
+                        <Button action="secondary" onPress={() => { setEditingId(null); setEditName(''); setEditPrompt(''); }}>
+                            <ButtonText>{t('common.cancel')}</ButtonText>
+                        </Button>
                     )}
-                </View>
-            </View>
+                </Box>
+            </Box>
 
-            <FlatList
-                data={presets}
-                keyExtractor={item => item.id}
-                renderItem={renderItem}
-                contentContainerStyle={styles.list}
-            />
-        </View>
+            <Box className="flex-1 px-4 pb-8">
+                <FlashList
+                    data={presets}
+                    keyExtractor={item => item.id}
+                    renderItem={renderItem}
+                />
+            </Box>
+        </Box>
     );
 }
-
-const styles = StyleSheet.create({
-    container: { flex: 1 },
-    header: { fontSize: 24, fontWeight: 'bold', padding: 16 },
-    list: { paddingHorizontal: 16, paddingBottom: 32 },
-    card: { borderWidth: 1, borderRadius: 8, padding: 16, marginBottom: 12 },
-    cardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
-    title: { fontSize: 16, fontWeight: 'bold' },
-    actions: { flexDirection: 'row', gap: 8 },
-    promptText: { fontSize: 14, opacity: 0.8 },
-    editor: { padding: 16, borderWidth: 1, margin: 16, borderRadius: 8 },
-    input: { borderWidth: 1, borderRadius: 4, padding: 8, marginBottom: 12 },
-    editorActions: { flexDirection: 'row', justifyContent: 'flex-start', gap: 12 }
-});

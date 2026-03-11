@@ -1,5 +1,5 @@
 import React, { useEffect } from 'react';
-import { Text } from 'react-native';
+import { Text } from '@/components/ui/text';
 import Animated, {
   useSharedValue,
   useAnimatedStyle,
@@ -12,6 +12,8 @@ import Animated, {
  * Smooth blinking cursor appended to streaming AI text.
  * Uses react-native-reanimated for performant 60fps animation.
  */
+const AnimatedText = Animated.createAnimatedComponent(Text);
+
 export const StreamingCursor = () => {
   const opacity = useSharedValue(1);
 
@@ -28,17 +30,11 @@ export const StreamingCursor = () => {
   }));
 
   return (
-    <Animated.Text
-      style={[
-        {
-          fontSize: 15,
-          lineHeight: 22,
-          color: '#3211d4',
-        },
-        animatedStyle,
-      ]}
+    <AnimatedText
+      className="text-md leading-md text-primary-500"
+      style={animatedStyle}
     >
       ▋
-    </Animated.Text>
+    </AnimatedText>
   );
 };

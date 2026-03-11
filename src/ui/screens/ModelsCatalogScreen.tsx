@@ -1,5 +1,12 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { View, ScrollView, TextInput, Pressable, Text, ActivityIndicator, Alert } from 'react-native';
+import { Alert } from 'react-native';
+import { Box } from '@/components/ui/box';
+import { FlashList } from '@shopify/flash-list';
+import type { ListRenderItem } from '@shopify/flash-list';
+import { Input, InputField } from '@/components/ui/input';
+import { Spinner } from '@/components/ui/spinner';
+import { Text } from '@/components/ui/text';
+import { Pressable } from '@/components/ui/pressable';
 import { MaterialSymbols } from '../../components/ui/MaterialSymbols';
 import { ActiveModelCard } from '../../components/ui/ActiveModelCard';
 import { ModelListItem } from '../../components/ui/ModelListItem';
@@ -80,108 +87,113 @@ export const ModelsCatalogScreen = () => {
 
     // Calculate display models based on active tab
     const displayModels = activeTab === 'Downloaded' 
-        ? downloadedModels.map(m => ({ ...m, fitsInRam: true })) // Simplification for downloaded models
+        ? downloadedModels.map(m => ({ ...m, fitsInRam: true } as unknown as ModelMetadata)) // Simplification for downloaded models
         : availableModels;
 
     return (
-        <View className="flex-1 bg-background-light dark:bg-background-dark max-w-md w-full mx-auto border-x border-slate-200 dark:border-slate-800">
-            <View className="pt-6 px-4 bg-background-light/80 dark:bg-background-dark/80 z-10">
-                <View className="flex-row items-center justify-between mb-4 mt-8">
+        <Box className="flex-1 bg-background-0 dark:bg-background-950 max-w-md w-full mx-auto border-x border-outline-200 dark:border-outline-800">
+            <Box className="pt-6 px-4 bg-background-0/80 dark:bg-background-950/80 z-10">
+                <Box className="flex-row items-center justify-between mb-4 mt-8">
                     <Pressable 
-                        style={({ pressed }) => [{ opacity: pressed ? 0.7 : 1 }]}
-                        className="flex-row items-center -ml-1"
+                        className="flex-row items-center -ml-1 active:opacity-70"
                     >
-                        <MaterialSymbols name="chevron-left" size={28} className="text-primary" />
-                        <Text className="text-sm font-medium text-primary">Back</Text>
+                        <MaterialSymbols name="chevron-left" size={28} className="text-primary-500" />
+                        <Text className="text-sm font-medium text-primary-500">Back</Text>
                     </Pressable>
-                    <Text className="text-lg font-bold tracking-tight text-slate-900 dark:text-slate-100">Model Catalog</Text>
-                </View>
+                    <Text className="text-lg font-bold tracking-tight text-typography-900 dark:text-typography-100">Model Catalog</Text>
+                </Box>
 
                 {/* Search Bar */}
-                <View className="flex-row w-full items-center rounded-lg bg-slate-200/50 dark:bg-primary/10 overflow-hidden mb-4 h-10 px-3">
-                    <MaterialSymbols name="search" size={20} className="text-slate-500 dark:text-primary/70" />
-                    <TextInput 
-                        className="flex-1 h-full ml-2 text-sm text-slate-900 dark:text-slate-100"
-                        placeholder="Search models..."
-                        placeholderTextColor="#94a3b8"
-                        value={searchQuery}
-                        onChangeText={setSearchQuery}
-                    />
+                <Box className="flex-row w-full items-center rounded-lg bg-background-200/50 dark:bg-primary-500/10 mb-4 h-10 px-3">
+                    <MaterialSymbols name="search" size={20} className="text-typography-500 dark:text-primary-500/70" />
+                    <Input className="flex-1 h-full ml-2 border-0 bg-transparent flex items-center justify-center">
+                        <InputField 
+                            className="text-sm text-typography-900 dark:text-typography-100 -mt-2"
+                            placeholder="Search models..."
+                            placeholderTextColor="text-typography-400"
+                            value={searchQuery}
+                            onChangeText={setSearchQuery}
+                        />
+                    </Input>
                     {searchQuery.length > 0 && (
                         <Pressable 
                             onPress={() => setSearchQuery('')} 
-                            style={({ pressed }) => [{ opacity: pressed ? 0.7 : 1 }]}
+                            className="active:opacity-70"
                         >
-                            <MaterialSymbols name="close" size={18} className="text-slate-400" />
+                            <MaterialSymbols name="close" size={18} className="text-typography-400" />
                         </Pressable>
                     )}
-                </View>
+                </Box>
 
                 {/* Tabs */}
-                <View className="flex-row gap-6 border-b border-slate-200 dark:border-primary/20">
+                <Box className="flex-row gap-6 border-b border-outline-200 dark:border-primary-500/20">
                     <Pressable 
                         onPress={() => setActiveTab('All Models')}
-                        className={`items-center pb-2 border-b-2 ${activeTab === 'All Models' ? 'border-primary' : 'border-transparent'}`}
+                        className={`items-center pb-2 border-b-2 ${activeTab === 'All Models' ? 'border-primary-500' : 'border-transparent'}`}
                     >
-                        <Text className={`text-sm ${activeTab === 'All Models' ? 'font-bold text-primary' : 'font-medium text-slate-500 dark:text-slate-400'}`}>
+                        <Text className={`text-sm ${activeTab === 'All Models' ? 'font-bold text-primary-500' : 'font-medium text-typography-500 dark:text-typography-400'}`}>
                             All Models
                         </Text>
                     </Pressable>
                     <Pressable 
                         onPress={() => setActiveTab('Downloaded')}
-                        className={`items-center pb-2 border-b-2 ${activeTab === 'Downloaded' ? 'border-primary' : 'border-transparent'}`}
+                        className={`items-center pb-2 border-b-2 ${activeTab === 'Downloaded' ? 'border-primary-500' : 'border-transparent'}`}
                     >
-                        <Text className={`text-sm ${activeTab === 'Downloaded' ? 'font-bold text-primary' : 'font-medium text-slate-500 dark:text-slate-400'}`}>
+                        <Text className={`text-sm ${activeTab === 'Downloaded' ? 'font-bold text-primary-500' : 'font-medium text-typography-500 dark:text-typography-400'}`}>
                             Downloaded
                         </Text>
                     </Pressable>
-                </View>
-            </View>
+                </Box>
+            </Box>
 
-            <ScrollView className="flex-1 p-4" showsVerticalScrollIndicator={false}>
-                {activeModelId && <ActiveModelCard />}
+            <Box className="flex-1 px-4 pt-4">
+                {activeModelId && <Box className="mb-4"><ActiveModelCard /></Box>}
                 
-                <View className="mt-4">
+                <Box className="flex-1 min-h-[300px]">
                     {activeTab === 'All Models' && loading && availableModels.length === 0 ? (
-                        <View className="py-12 items-center">
-                            <ActivityIndicator size="large" color="#3b82f6" />
-                        </View>
+                        <Box className="py-12 items-center">
+                            <Spinner size="large" className="text-primary-500" />
+                        </Box>
                     ) : (
-                        displayModels.map(model => {
-                            const isDownloaded = localStorageRegistry.isModelDownloaded(model.id);
-                            const isActive = activeModelId === model.id;
-                            
-                            const progress = progresses.find(p => p.modelId === model.id);
-                            const isDownloading = progress?.status === 'downloading' || progress?.status === 'pending' || progress?.status === 'verifying';
-                            const downloadProgress = typeof progress?.percent === 'number' ? progress.percent : 0;
+                        <FlashList
+                            data={displayModels}
+                            showsVerticalScrollIndicator={false}
+                            renderItem={({ item: model }) => {
+                                const isDownloaded = localStorageRegistry.isModelDownloaded(model.id);
+                                const isActive = activeModelId === model.id;
+                                
+                                const progress = progresses.find(p => p.modelId === model.id);
+                                const isDownloading = progress?.status === 'downloading' || progress?.status === 'pending' || progress?.status === 'verifying';
+                                const downloadProgress = typeof progress?.percent === 'number' ? progress.percent : 0;
 
-                            let status: 'active' | 'downloaded' | 'available' = 'available';
-                            if (isActive) status = 'active';
-                            else if (isDownloaded) status = 'downloaded';
+                                let status: 'active' | 'downloaded' | 'available' = 'available';
+                                if (isActive) status = 'active';
+                                else if (isDownloaded) status = 'downloaded';
 
-                            const sizeMB = 'sizeMB' in model ? model.sizeMB : (model.sizeBytes / 1024 / 1024);
-                            
-                            // Using generic images since HF doesn't provide them easily, unless we have it in store.
-                            const imageUrl = "https://lh3.googleusercontent.com/aida-public/AB6AXuBzxg9E9wLZxtg8yHcR5e4oapN5ydJEAg2UzLt3mM7C2PZj8mdUd2aNzRS4afK2FWvySbPIkHyGk8w_QvhaV7-5LTWoTBOhQsJXQI6tmqDyS65zanPiH6JV-D9L6jx57cL05D6S4oSqcUgC5Riy-LSHUdAzfaGOSgS_3K0bFl7kcwP3a_9sOE1sChjyL4banu_i0weZ7zo7YQ8zJxwVTkbNyyRiYBVCy2Rgd7wvbybEXI0Ar_KdBiBCbnfhX5B_lpfyP_TtLsgeS2Vp";
+                                const sizeMB = 'sizeMB' in model ? model.sizeMB : (model.sizeBytes / 1024 / 1024);
+                                
+                                const imageUrl = "https://lh3.googleusercontent.com/aida-public/AB6AXuBzxg9E9wLZxtg8yHcR5e4oapN5ydJEAg2UzLt3mM7C2PZj8mdUd2aNzRS4afK2FWvySbPIkHyGk8w_QvhaV7-5LTWoTBOhQsJXQI6tmqDyS65zanPiH6JV-D9L6jx57cL05D6S4oSqcUgC5Riy-LSHUdAzfaGOSnS_3K0bFl7kcwP3a_9sOE1sChjyL4banu_i0weZ7zo7YQ8zJxwVTkbNyyRiYBVCy2Rgd7wvbybEXI0Ar_KdBiBCbnfhX5B_lpfyP_TtLsgeS2Vp";
 
-                            return (
-                                <ModelListItem 
-                                    key={model.id} 
-                                    id={model.id}
-                                    name={model.name}
-                                    sizeMB={sizeMB as number}
-                                    fitsInRam={('fitsInRam' in model) ? (model as any).fitsInRam : true}
-                                    status={status}
-                                    isDownloading={isDownloading}
-                                    downloadProgress={downloadProgress}
-                                    imageUrl={imageUrl}
-                                    onAction={(action) => handleModelAction(model.id, action)}
-                                />
-                            );
-                        })
+                                return (
+                                    <Box className="mb-4">
+                                        <ModelListItem 
+                                            id={model.id}
+                                            name={model.name}
+                                            sizeMB={sizeMB as number}
+                                            fitsInRam={('fitsInRam' in model) ? (model as any).fitsInRam : true}
+                                            status={status}
+                                            isDownloading={isDownloading}
+                                            downloadProgress={downloadProgress}
+                                            imageUrl={imageUrl}
+                                            onAction={(action) => handleModelAction(model.id, action)}
+                                        />
+                                    </Box>
+                                );
+                            }}
+                        />
                     )}
-                </View>
-            </ScrollView>
-        </View>
+                </Box>
+            </Box>
+        </Box>
     );
 };

@@ -1,5 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, FlatList, TouchableOpacity, StyleSheet } from 'react-native';
+import { Box } from '@/components/ui/box';
+import { Text } from '@/components/ui/text';
+import { Pressable } from '@/components/ui/pressable';
+import { FlashList } from '@shopify/flash-list';
 import { presetManager, SystemPromptPreset } from '../../services/PresetManager';
 import { updateSettings, getSettings } from '../../services/SettingsStore';
 import { useTheme } from '../../providers/ThemeProvider';
@@ -25,47 +28,34 @@ export function PresetSelector({ onPresetSelected }: Props) {
     };
 
     return (
-        <View style={[styles.container, { backgroundColor: colors.surface }]}>
-            <Text style={[styles.title, { color: colors.text }]}>Choose a Role</Text>
-            <FlatList
+        <Box className="flex-row items-center justify-between px-4 h-16 bg-background-0/80 dark:bg-background-950/80">
+            <Text className="text-base font-semibold mb-2 text-typography-900">Choose a Role</Text>
+            <FlashList
                 data={presets}
                 keyExtractor={(item) => item.id}
                 horizontal
                 showsHorizontalScrollIndicator={false}
                 renderItem={({ item }) => (
-                    <TouchableOpacity
-                        style={[
-                            styles.chip,
-                            { borderColor: colors.border },
-                            activeId === item.id && { backgroundColor: colors.primary, borderColor: colors.primary },
-                        ]}
+                    <Pressable
+                        className={`px-4 py-2 rounded-full border mr-2 ${
+                            activeId === item.id 
+                                ? 'bg-primary-500 border-primary-500' 
+                                : 'bg-transparent border-outline-300 dark:border-outline-700'
+                        }`}
                         onPress={() => handleSelect(item)}
                     >
                         <Text
-                            style={[
-                                styles.chipText,
-                                { color: colors.text },
-                                activeId === item.id && { color: '#fff' },
-                            ]}
+                            className={`text-sm ${
+                                activeId === item.id 
+                                    ? 'text-typography-0' 
+                                    : 'text-typography-900'
+                            }`}
                         >
                             {item.name}
                         </Text>
-                    </TouchableOpacity>
+                    </Pressable>
                 )}
             />
-        </View>
+        </Box>
     );
 }
-
-const styles = StyleSheet.create({
-    container: { padding: 12 },
-    title: { fontSize: 16, fontWeight: '600', marginBottom: 8 },
-    chip: {
-        paddingHorizontal: 16,
-        paddingVertical: 8,
-        borderRadius: 20,
-        borderWidth: 1,
-        marginRight: 8,
-    },
-    chipText: { fontSize: 14 },
-});

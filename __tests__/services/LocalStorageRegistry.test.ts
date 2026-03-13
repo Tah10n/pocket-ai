@@ -1,63 +1,60 @@
-import RNFS from 'react-native-fs';
-import { localStorageRegistry, storage } from '../../src/services/LocalStorageRegistry';
+import { registry } from '../../src/services/LocalStorageRegistry';
+import { LifecycleStatus, ModelMetadata } from '../../src/types/models';
+import * as FileSystem from 'expo-file-system/legacy';
+
+jest.mock('expo-file-system/legacy', () => ({
+  deleteAsync: jest.fn().mockResolvedValue(undefined),
+  getInfoAsync: jest.fn().mockResolvedValue({ exists: true }),
+  readDirectoryAsync: jest.fn().mockResolvedValue([]),
+  documentDirectory: 'test-dir/',
+}));
+
+jest.mock('../../src/services/storage', () => ({
+  createStorage: jest.fn().mockReturnValue({
+    getString: jest.fn(),
+    set: jest.fn(),
+  }),
+}));
+
+const mockModel: ModelMetadata = {
+  id: 'test/model',
+  name: 'model',
+  author: 'test',
+  size: 1000,
+  downloadUrl: 'http://example.com/model.gguf',
+  localPath: 'model.gguf',
+  fitsInRam: true,
+  lifecycleStatus: LifecycleStatus.DOWNLOADED,
+  downloadProgress: 1,
+};
 
 describe('LocalStorageRegistry', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    (storage as any).clearAll?.();
-    storage.remove('downloaded_models_registry');
-    storage.remove('active_model_id');
   });
 
-  it('resets corrupted downloaded models payload', () => {
-    storage.set('downloaded_models_registry', '{');
-    expect(localStorageRegistry.getDownloadedModels()).toEqual([]);
-    expect(storage.getString('downloaded_models_registry')).toBeUndefined();
+  it('should remove model and delete file', async () => {
+    // Mock getModels to return our model
+    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([mockModel]);
+    (registry.getModel as jest.Mock) = jest.fn().mockReturnValue(mockModel);
+    (registry.saveModels as jest.Mock) = jest.fn();
+
+    await registry.removeModel(mockModel.id);
+
+    expect(FileSystem.deleteAsync).toHaveBeenCalled();
+    expect(registry.saveModels).toHaveBeenCalledWith([]);
   });
 
-  it('sets and clears active model id', () => {
-    localStorageRegistry.setActiveModelId('m1');
-    expect(localStorageRegistry.getActiveModelId()).toBe('m1');
-    localStorageRegistry.setActiveModelId(null);
-    expect(localStorageRegistry.getActiveModelId()).toBeNull();
-  });
+  it('should validate registry and reset status if file is missing', async () => {
+    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([mockModel]);
+    (registry.saveModels as jest.Mock) = jest.fn();
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: false });
 
-  it('clears active model id when removing that model', async () => {
-    const model = {
-      id: 'repo/model',
-      name: 'Model',
-      parameters: '7B',
-      contextWindow: 2048,
-      sizeBytes: 123,
-      downloadUrl: 'https://example.com/model.gguf',
-    };
+    await registry.validateRegistry();
 
-    localStorageRegistry.addModel(model);
-    localStorageRegistry.setActiveModelId(model.id);
-
-    (RNFS.unlink as jest.Mock).mockResolvedValue(undefined);
-
-    await localStorageRegistry.removeModel(model.id);
-
-    expect(localStorageRegistry.getActiveModelId()).toBeNull();
-  });
-
-  it('notifies subscribers on changes', () => {
-    const listener = jest.fn();
-    const unsub = localStorageRegistry.subscribe(listener);
-
-    localStorageRegistry.setActiveModelId('m2');
-    localStorageRegistry.addModel({
-      id: 'a',
-      name: 'A',
-      parameters: '3B',
-      contextWindow: 2048,
-      sizeBytes: 1,
-      downloadUrl: 'https://example.com/a.gguf',
-    });
-
-    expect(listener).toHaveBeenCalled();
-    unsub();
+    expect(registry.saveModels).toHaveBeenCalled();
+    const updatedModels = (registry.saveModels as jest.Mock).mock.calls[0][0];
+    expect(updatedModels[0].lifecycleStatus).toBe(LifecycleStatus.AVAILABLE);
+    expect(updatedModels[0].localPath).toBeUndefined();
   });
 });
-

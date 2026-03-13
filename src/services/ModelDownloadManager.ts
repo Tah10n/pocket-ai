@@ -1,178 +1,217 @@
-import RNFS, { DownloadResult, DownloadProgressCallbackResult } from 'react-native-fs';
+/* eslint-disable import/namespace */
+import * as FileSystem from 'expo-file-system/legacy';
+import { Paths } from 'expo-file-system';
+import { useDownloadStore } from '../store/downloadStore';
+import { ModelMetadata, LifecycleStatus } from '../types/models';
+import { registry } from './LocalStorageRegistry';
+import { MODELS_DIR } from './FileSystemSetup';
 import { hardwareListenerService } from './HardwareListenerService';
-import { localStorageRegistry } from './LocalStorageRegistry';
-import { ModelMetadata } from './ModelCatalogService';
 
-export interface DownloadProgress {
-    modelId: string;
-    percent: number;
-    bytesWritten: number;
-    totalBytes: number;
-    status: 'pending' | 'downloading' | 'paused' | 'done' | 'failed' | 'verifying';
-    error?: string;
+export class ModelDownloadManager {
+  private static instance: ModelDownloadManager;
+  private resumable: any = null;
+  private isProcessing = false;
+
+  private constructor() {
+    // Subscribe to store changes to trigger queue processing
+    useDownloadStore.subscribe(
+      () => this.processQueue()
+    );
+    // Initial check
+    this.processQueue();
+  }
+
+  public static getInstance(): ModelDownloadManager {
+    if (!ModelDownloadManager.instance) {
+      ModelDownloadManager.instance = new ModelDownloadManager();
+    }
+    return ModelDownloadManager.instance;
+  }
+
+  /**
+   * Check the queue and start next download if idle.
+   */
+  private async processQueue() {
+    if (this.isProcessing) return;
+    
+    const { queue, activeModelId, setActiveModel } = useDownloadStore.getState();
+    
+    // If already downloading something, stay idle
+    if (activeModelId) return;
+
+    // Find next queued model
+    const next = queue.find(m => m.lifecycleStatus === LifecycleStatus.QUEUED);
+    if (next) {
+      this.isProcessing = true;
+      setActiveModel(next.id);
+      try {
+        await this.downloadModel(next);
+      } catch (e) {
+        console.error(`[ModelDownloadManager] Failed to download ${next.id}`, e);
+        setActiveModel(null);
+      } finally {
+        this.isProcessing = false;
+        // Trigger next check
+        this.processQueue();
+      }
+    }
+  }
+
+  private async downloadModel(model: ModelMetadata) {
+    const { updateModelInQueue, removeFromQueue, setActiveModel } = useDownloadStore.getState();
+
+    try {
+      const freeSpace = Paths.availableDiskSpace;
+      const REQUIRED_BUFFER = 1024 * 1024 * 1024; // 1 GB
+      if (freeSpace < model.size + REQUIRED_BUFFER) {
+        throw new Error('DISK_SPACE_LOW');
+      }
+    } catch (e: any) {
+      console.error(`[ModelDownloadManager] Pre-download check failed for ${model.id}:`, e.message);
+      updateModelInQueue(model.id, { lifecycleStatus: LifecycleStatus.AVAILABLE });
+      removeFromQueue(model.id);
+      setActiveModel(null);
+      throw e;
+    }
+
+    const fileName = model.id.replace(/\//g, '_') + '.gguf';
+    const localUri = MODELS_DIR + fileName;
+
+    const callback = (downloadProgress: any) => {
+      const progress = downloadProgress.totalBytesWritten / downloadProgress.totalBytesExpectedToWrite;
+      updateModelInQueue(model.id, { 
+        downloadProgress: progress,
+        lifecycleStatus: LifecycleStatus.DOWNLOADING 
+      });
+    };
+
+    // Extract actual resumeData string from saved state if it exists
+    let resumeString: string | undefined = undefined;
+    if (model.resumeData) {
+      try {
+        const pauseState = JSON.parse(model.resumeData);
+        resumeString = pauseState.resumeData || model.resumeData;
+      } catch (e) {
+        resumeString = model.resumeData;
+      }
+    }
+
+    // Prepare DownloadResumable
+    this.resumable = FileSystem.createDownloadResumable(
+      this.getDownloadUrl(model.id),
+      localUri,
+      {},
+      callback,
+      resumeString
+    );
+
+    try {
+      updateModelInQueue(model.id, { lifecycleStatus: LifecycleStatus.DOWNLOADING });
+      
+      const result = await this.resumable.downloadAsync();
+      
+      if (!result) {
+        console.warn(`[ModelDownloadManager] downloadAsync returned undefined. Task cancelled or paused.`);
+        return;
+      }
+
+      // On some Android environments, status might be missing from result
+      if (result.status && result.status >= 400) {
+        throw new Error(`Download failed with HTTP status ${result.status}`);
+      }
+
+      // Verification: Fast File Size Check instead of slow JS SHA256
+      updateModelInQueue(model.id, { lifecycleStatus: LifecycleStatus.VERIFYING });
+      
+      const fileInfo = await FileSystem.getInfoAsync(localUri);
+      if (!fileInfo.exists) {
+        throw new Error('File does not exist after download');
+      }
+
+      // Check if size matches. We allow a small 1MB variance just in case headers were slightly off,
+      // but usually they should match exactly.
+      const downloadedSize = fileInfo.size;
+      const expectedSize = model.size;
+
+      if (expectedSize > 0 && Math.abs(downloadedSize - expectedSize) > 1024 * 1024) {
+        // If file is significantly smaller, it means download was corrupted or cut off
+        throw new Error(`Size mismatch: Expected ${expectedSize} but got ${downloadedSize}`);
+      }
+
+      // Success
+      const completedModel: ModelMetadata = {
+        ...model,
+        localPath: fileName,
+        downloadedAt: Date.now(),
+        lifecycleStatus: LifecycleStatus.DOWNLOADED,
+        downloadProgress: 1,
+        // We bypass full hash to prevent 2-minute UI freeze.
+        sha256: model.sha256 || 'verified-by-size', 
+      };
+
+      registry.updateModel(completedModel);
+      removeFromQueue(model.id);
+      console.log(`[ModelDownloadManager] Downloaded and verified: ${model.id}`);
+
+    } catch (e: any) {
+      console.error(`[ModelDownloadManager] Error during download: ${model.id}`, e);
+
+      // If it fails, save resume data if we can, but remove from queue to prevent infinite retry loops.
+      const savable = this.resumable ? this.resumable.savable() : null;
+      updateModelInQueue(model.id, { 
+        resumeData: savable ? JSON.stringify(savable) : undefined,
+        lifecycleStatus: LifecycleStatus.AVAILABLE 
+      });
+      removeFromQueue(model.id);
+      setActiveModel(null);
+
+      throw e;
+    } finally {
+      this.resumable = null;
+    }
+    }
+
+  private getDownloadUrl(modelId: string): string {
+    const model = useDownloadStore.getState().queue.find(m => m.id === modelId);
+    return model?.downloadUrl || `https://huggingface.co/${modelId}/resolve/main/model.gguf`;
+  }
+
+  public async pauseDownload(modelId: string) {
+    if (this.resumable && useDownloadStore.getState().activeModelId === modelId) {
+      const pauseResult = await this.resumable.pauseAsync();
+      useDownloadStore.getState().updateModelInQueue(modelId, { 
+        resumeData: JSON.stringify(pauseResult),
+        lifecycleStatus: LifecycleStatus.QUEUED 
+      });
+      useDownloadStore.getState().setActiveModel(null);
+    }
+  }
+
+  public async cancelDownload(modelId: string) {
+    const { removeFromQueue, activeModelId, setActiveModel } = useDownloadStore.getState();
+    if (activeModelId === modelId) {
+      if (this.resumable) {
+        await this.resumable.pauseAsync(); // Stop active one
+      }
+      setActiveModel(null);
+    }
+    
+    // Remove from queue first to stop UI
+    removeFromQueue(modelId);
+
+    // Delete the partial file to free up disk space
+    try {
+      const fileName = modelId.replace(/\//g, '_') + '.gguf';
+      const localUri = MODELS_DIR + fileName;
+      const fileInfo = await FileSystem.getInfoAsync(localUri);
+      if (fileInfo.exists) {
+        await FileSystem.deleteAsync(localUri, { idempotent: true });
+        console.log(`[ModelDownloadManager] Deleted partial download for ${modelId}`);
+      }
+    } catch (e) {
+      console.error(`[ModelDownloadManager] Failed to delete partial file for ${modelId}`, e);
+    }
+  }
 }
 
-type ProgressListener = (progress: DownloadProgress[]) => void;
-
-interface ActiveDownload {
-    jobId: number;
-    promise: Promise<DownloadResult>;
-}
-
-class ModelDownloadManager {
-    private activeDownloads: Map<string, ActiveDownload> = new Map();
-    private progresses: Map<string, DownloadProgress> = new Map();
-    private listeners: Set<ProgressListener> = new Set();
-
-    /**
-     * Check if there is enough free space on the disk.
-     * Reserves 1GB as a safety buffer.
-     */
-    async checkAvailableSpace(requiredBytes: number): Promise<boolean> {
-        try {
-            const info = await RNFS.getFSInfo();
-            const buffer = 1024 * 1024 * 1024; // 1GB buffer
-            return info.freeSpace > (requiredBytes + buffer);
-        } catch (e) {
-            console.error('[ModelDownloadManager] Failed to get FS info', e);
-            return true; // Fallback to true if we can't check
-        }
-    }
-
-    /**
-     * Start downloading a model file using RNFS.downloadFile.
-     * Throws 'CELLULAR_DATA_WARNING' if on cellular network.
-     * Throws 'DISK_SPACE_LOW' if not enough space.
-     */
-    async startDownload(model: ModelMetadata): Promise<void> {
-        const status = hardwareListenerService.getCurrentStatus();
-        if (status.networkType === 'cellular') {
-            throw new Error('CELLULAR_DATA_WARNING');
-        }
-
-        const hasSpace = await this.checkAvailableSpace(model.sizeBytes);
-        if (!hasSpace) {
-            this.updateProgress(model.id, { status: 'failed', error: 'DISK_SPACE_LOW' });
-            throw new Error('DISK_SPACE_LOW');
-        }
-
-        const destPath = `${RNFS.DocumentDirectoryPath}/${model.id.replace(/\//g, '_')}.bin`;
-
-        this.progresses.set(model.id, {
-            modelId: model.id,
-            percent: 0,
-            bytesWritten: 0,
-            totalBytes: model.sizeBytes,
-            status: 'pending',
-        });
-        this.notifyListeners();
-
-        const { jobId, promise } = RNFS.downloadFile({
-            fromUrl: model.downloadUrl,
-            toFile: destPath,
-            progressDivider: 5, // Report progress every 5%
-            begin: (res) => {
-                this.updateProgress(model.id, {
-                    status: 'downloading',
-                    totalBytes: res.contentLength,
-                });
-            },
-            progress: (res: DownloadProgressCallbackResult) => {
-                const percent = res.contentLength > 0 ? res.bytesWritten / res.contentLength : 0;
-                this.updateProgress(model.id, {
-                    status: 'downloading',
-                    percent,
-                    bytesWritten: res.bytesWritten,
-                    totalBytes: res.contentLength,
-                });
-            },
-        });
-
-        this.activeDownloads.set(model.id, { jobId, promise });
-
-        try {
-            const result = await promise;
-            if (result.statusCode === 200) {
-                this.updateProgress(model.id, { status: 'verifying' });
-                const isValid = await this.verifyChecksum(model.id, destPath, model.sha256);
-                if (isValid) {
-                    localStorageRegistry.addModel(model);
-                    this.updateProgress(model.id, { status: 'done', percent: 1 });
-                } else {
-                    this.updateProgress(model.id, { status: 'failed', error: 'CHECKSUM_MISMATCH' });
-                    await RNFS.unlink(destPath).catch(() => { });
-                }
-            } else {
-                console.error(`[ModelDownloadManager] Download failed (${result.statusCode}) for ${model.downloadUrl}`);
-                this.updateProgress(model.id, { status: 'failed', error: `HTTP_${result.statusCode}` });
-            }
-        } catch (error) {
-            console.error(`[ModelDownloadManager] Download error:`, error);
-            this.updateProgress(model.id, { status: 'failed', error: 'DOWNLOAD_ERROR' });
-        } finally {
-            this.activeDownloads.delete(model.id);
-        }
-    }
-
-    /**
-     * Cancel an active download.
-     */
-    cancelDownload(modelId: string) {
-        const download = this.activeDownloads.get(modelId);
-        if (download) {
-            RNFS.stopDownload(download.jobId);
-            this.activeDownloads.delete(modelId);
-            this.progresses.delete(modelId);
-            this.notifyListeners();
-        }
-    }
-
-    /**
-     * Validate the downloaded file integrity.
-     */
-    async verifyChecksum(modelId: string, filePath: string, expectedSha256?: string): Promise<boolean> {
-        if (!expectedSha256) {
-            console.warn(`[ModelDownloadManager] No expected SHA256 provided for ${modelId}, skipping verification.`);
-            return true;
-        }
-
-        try {
-            const hash = await RNFS.hash(filePath, 'sha256');
-            const isValid = hash.toLowerCase() === expectedSha256.toLowerCase();
-            if (!isValid) {
-                console.error(`[ModelDownloadManager] Checksum mismatch for ${modelId}. Expected: ${expectedSha256}, Got: ${hash}`);
-            }
-            return isValid;
-        } catch (e) {
-            console.error(`[ModelDownloadManager] Failed to compute hash for ${modelId}`, e);
-            return false;
-        }
-    }
-
-    subscribe(listener: ProgressListener) {
-        this.listeners.add(listener);
-        listener(Array.from(this.progresses.values()));
-        return () => {
-            this.listeners.delete(listener);
-        };
-    }
-
-    private updateProgress(modelId: string, partial: Partial<DownloadProgress>) {
-        const existing = this.progresses.get(modelId) || {
-            modelId,
-            percent: 0,
-            bytesWritten: 0,
-            totalBytes: 0,
-            status: 'pending' as const,
-        };
-        this.progresses.set(modelId, { ...existing, ...partial });
-        this.notifyListeners();
-    }
-
-    private notifyListeners() {
-        const arr = Array.from(this.progresses.values());
-        this.listeners.forEach((l) => l(arr));
-    }
-}
-
-export const modelDownloadManager = new ModelDownloadManager();
+export const modelDownloadManager = ModelDownloadManager.getInstance();

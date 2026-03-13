@@ -1,5 +1,6 @@
 import { useState, useCallback } from 'react';
 import { llmEngineService } from '../services/LLMEngineService';
+import { EngineStatus } from '../types/models';
 
 export interface ChatMessage {
   id: string;
@@ -35,7 +36,7 @@ export const useChatSession = () => {
         let currentText = "";
 
         try {
-            if (llmEngineService.getState() !== 'ready') {
+            if (llmEngineService.getState().status !== EngineStatus.READY) {
                 throw new Error("Model is not loaded or engine is not ready. Please select and load a model in the Models tab.");
             }
 

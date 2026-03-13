@@ -10,6 +10,18 @@ jest.mock('expo-constants', () => ({
   manifest: {},
 }));
 
+jest.mock('expo-blur', () => ({
+  BlurView: ({ children }: any) => children ?? null,
+}));
+
+jest.mock('expo-clipboard', () => ({
+  setStringAsync: jest.fn().mockResolvedValue(undefined),
+}));
+
+jest.mock('@expo/vector-icons', () => ({
+  MaterialIcons: () => null,
+}));
+
 // Mock Appearance
 jest.mock('react-native/Libraries/Utilities/Appearance', () => {
     return {
@@ -34,6 +46,10 @@ jest.mock('react-native-css-interop', () => ({
 
 jest.mock('nativewind', () => ({
     styled: (Component) => Component,
+    useColorScheme: () => ({
+        colorScheme: 'light',
+        setColorScheme: jest.fn(),
+    }),
 }));
 
 // Mocking react-native-fs

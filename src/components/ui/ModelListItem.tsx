@@ -19,7 +19,7 @@ export interface ModelListItemProps {
 
 export const ModelListItem = ({ name, sizeMB, status, fitsInRam, onAction, imageUrl, isDownloading, downloadProgress }: ModelListItemProps) => {
   return (
-    <Box className="flex-row rounded-xl overflow-hidden bg-background-0 dark:bg-background-800/40 border border-outline-200 dark:border-outline-800 p-3 gap-4 mb-4">
+    <Box className="flex-row rounded-xl overflow-hidden bg-background-50 dark:bg-background-900/40 border border-outline-200 dark:border-outline-800 p-4 gap-4">
       <ImageBackground 
         source={{ uri: imageUrl || "https://lh3.googleusercontent.com/aida-public/AB6AXuClqJ0QsvXxhk32IfvK9KR5KtKAebI2v0rQoKXNy9mkHBiAObgp7YdhdUq5xwpkxuyWoQbIyMn0P30tRnXdEOKSYVGsploFFf1XtDHSwMsIPhjvSRFrDjPWgzhAljeVNZ3cZ6ym66vftvisNupauWLox5PJrkTbqhbloaqXDgiZj1qT0SsAuStE6i4Soe2hjJoI3nTW3JUsoxZIl4tHTOw3EuP3iOrvvHMD5CoSzAe7n2qDV2814t7j2xZ5BAeRiwiWaqLJHxzmwUzz" }}
         className="size-20 shrink-0 rounded-lg bg-background-200 dark:bg-background-800 overflow-hidden" 
@@ -39,7 +39,7 @@ export const ModelListItem = ({ name, sizeMB, status, fitsInRam, onAction, image
           )}
         </Box>
         
-        <Text className="text-xs text-typography-500 dark:text-typography-400 mt-0.5">Size: {(sizeMB / 1024).toFixed(1)} GB</Text>
+        <Text className="text-xs text-typography-500 dark:text-typography-400 mt-1">Size: {(sizeMB / 1024).toFixed(1)} GB</Text>
         
         <Box className="mt-3 flex-row gap-2">
           {isDownloading ? (

@@ -5,7 +5,6 @@ import { Pressable } from '@/components/ui/pressable';
 import { FlashList } from '@shopify/flash-list';
 import { presetManager, SystemPromptPreset } from '../../services/PresetManager';
 import { updateSettings, getSettings } from '../../services/SettingsStore';
-import { useTheme } from '../../providers/ThemeProvider';
 
 interface Props {
     onPresetSelected?: (preset: SystemPromptPreset) => void;
@@ -14,8 +13,6 @@ interface Props {
 export function PresetSelector({ onPresetSelected }: Props) {
     const [presets, setPresets] = useState<SystemPromptPreset[]>([]);
     const [activeId, setActiveId] = useState<string | null>(null);
-    const { colors } = useTheme();
-
     useEffect(() => {
         setPresets(presetManager.getPresets());
         setActiveId(getSettings().activePresetId);

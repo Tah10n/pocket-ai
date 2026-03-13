@@ -8,6 +8,7 @@ export interface ModelMetadata {
     sizeBytes: number;
     downloadUrl: string;
     sha256?: string;
+    fitsInRam?: boolean;
 }
 
 type HuggingFaceModelSummary = {

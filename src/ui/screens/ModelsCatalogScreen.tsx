@@ -2,25 +2,27 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Alert } from 'react-native';
 import { Box } from '@/components/ui/box';
 import { FlashList } from '@shopify/flash-list';
-import type { ListRenderItem } from '@shopify/flash-list';
 import { Input, InputField } from '@/components/ui/input';
 import { Spinner } from '@/components/ui/spinner';
 import { Text } from '@/components/ui/text';
 import { Pressable } from '@/components/ui/pressable';
 import { MaterialSymbols } from '../../components/ui/MaterialSymbols';
-import { ActiveModelCard } from '../../components/ui/ActiveModelCard';
+import { ActiveModelHeroCard } from '../../components/ui/ActiveModelHeroCard';
 import { ModelListItem } from '../../components/ui/ModelListItem';
-import { useModelsStore } from '../../store/modelsStore';
 import { modelCatalogService, ModelMetadata } from '../../services/ModelCatalogService';
 import { modelDownloadManager, DownloadProgress } from '../../services/ModelDownloadManager';
 import { localStorageRegistry } from '../../services/LocalStorageRegistry';
+import { useRouter } from 'expo-router';
+import { typographyColors } from '../../utils/themeTokens';
 
 export const ModelsCatalogScreen = () => {
     const [activeTab, setActiveTab] = useState<'All Models' | 'Downloaded'>('All Models');
-    const { setActiveModel, activeModelId, downloadedModels } = useModelsStore();
+    const router = useRouter();
     
     // Core data state
     const [availableModels, setAvailableModels] = useState<ModelMetadata[]>([]);
+    const [downloadedModels, setDownloadedModels] = useState<ModelMetadata[]>(() => localStorageRegistry.getDownloadedModels());
+    const [activeModelId, setActiveModelId] = useState<string | null>(() => localStorageRegistry.getActiveModelId());
     const [loading, setLoading] = useState(true);
     const [searchQuery, setSearchQuery] = useState('');
     const [progresses, setProgresses] = useState<DownloadProgress[]>([]);
@@ -52,6 +54,13 @@ export const ModelsCatalogScreen = () => {
     }, []);
 
     useEffect(() => {
+        return localStorageRegistry.subscribe(() => {
+            setDownloadedModels(localStorageRegistry.getDownloadedModels());
+            setActiveModelId(localStorageRegistry.getActiveModelId());
+        });
+    }, []);
+
+    useEffect(() => {
         if (activeTab === 'All Models') {
             const delayMs = searchQuery.trim().length > 0 ? 400 : 0;
             const handle = setTimeout(() => loadModels(searchQuery), delayMs);
@@ -77,24 +86,33 @@ export const ModelsCatalogScreen = () => {
                 modelDownloadManager.cancelDownload(modelId);
                 break;
             case 'load':
-                setActiveModel(modelId);
+                localStorageRegistry.setActiveModelId(modelId);
                 break;
             case 'unload':
-                setActiveModel(null);
+                localStorageRegistry.setActiveModelId(null);
                 break;
         }
     };
 
     // Calculate display models based on active tab
     const displayModels = activeTab === 'Downloaded' 
-        ? downloadedModels.map(m => ({ ...m, fitsInRam: true } as unknown as ModelMetadata)) // Simplification for downloaded models
+        ? downloadedModels.map(m => ({ ...m, fitsInRam: true } as ModelMetadata)) // Simplification for downloaded models
         : availableModels;
+
+    const activeModelMeta = activeModelId
+        ? displayModels.find(m => m.id === activeModelId) ?? downloadedModels.find(m => m.id === activeModelId)
+        : null;
+
+    const activeModelName = activeModelMeta?.name ?? 'Active Model';
+    const activeModelFits =
+        activeModelMeta && 'fitsInRam' in activeModelMeta ? (activeModelMeta.fitsInRam ?? true) : true;
 
     return (
         <Box className="flex-1 bg-background-0 dark:bg-background-950 max-w-md w-full mx-auto border-x border-outline-200 dark:border-outline-800">
             <Box className="pt-6 px-4 bg-background-0/80 dark:bg-background-950/80 z-10">
                 <Box className="flex-row items-center justify-between mb-4 mt-8">
                     <Pressable 
+                        onPress={() => router.back()}
                         className="flex-row items-center -ml-1 active:opacity-70"
                     >
                         <MaterialSymbols name="chevron-left" size={28} className="text-primary-500" />
@@ -104,13 +122,13 @@ export const ModelsCatalogScreen = () => {
                 </Box>
 
                 {/* Search Bar */}
-                <Box className="flex-row w-full items-center rounded-lg bg-background-200/50 dark:bg-primary-500/10 mb-4 h-10 px-3">
-                    <MaterialSymbols name="search" size={20} className="text-typography-500 dark:text-primary-500/70" />
+                <Box className="flex-row w-full items-center rounded-lg bg-background-50 dark:bg-background-900/60 mb-4 h-10 px-3 border border-outline-200 dark:border-outline-800">
+                    <MaterialSymbols name="search" size={20} className="text-typography-500 dark:text-typography-400" />
                     <Input className="flex-1 h-full ml-2 border-0 bg-transparent flex items-center justify-center">
                         <InputField 
                             className="text-sm text-typography-900 dark:text-typography-100 -mt-2"
                             placeholder="Search models..."
-                            placeholderTextColor="text-typography-400"
+                            placeholderTextColor={typographyColors[400]}
                             value={searchQuery}
                             onChangeText={setSearchQuery}
                         />
@@ -147,9 +165,20 @@ export const ModelsCatalogScreen = () => {
             </Box>
 
             <Box className="flex-1 px-4 pt-4">
-                {activeModelId && <Box className="mb-4"><ActiveModelCard /></Box>}
+                {activeModelId && (
+                    <Box className="mb-4">
+                        <ActiveModelHeroCard
+                            name={activeModelName}
+                            fitsInRam={activeModelFits}
+                            memoryUsedGB={4.2}
+                            memoryTotalGB={8}
+                            onChat={() => router.push('/(tabs)/chat' as any)}
+                            onUnload={() => handleModelAction(activeModelId, 'unload')}
+                        />
+                    </Box>
+                )}
                 
-                <Box className="flex-1 min-h-[300px]">
+                <Box className="flex-1 min-h-80">
                     {activeTab === 'All Models' && loading && availableModels.length === 0 ? (
                         <Box className="py-12 items-center">
                             <Spinner size="large" className="text-primary-500" />
@@ -157,6 +186,7 @@ export const ModelsCatalogScreen = () => {
                     ) : (
                         <FlashList
                             data={displayModels}
+                            keyExtractor={(item) => item.id}
                             showsVerticalScrollIndicator={false}
                             renderItem={({ item: model }) => {
                                 const isDownloaded = localStorageRegistry.isModelDownloaded(model.id);

@@ -7,7 +7,7 @@ import { Button, ButtonText } from '@/components/ui/button';
 import { FlashList } from '@shopify/flash-list';
 import { presetManager, SystemPromptPreset } from '../../services/PresetManager';
 import { useTranslation } from 'react-i18next';
-import { useTheme } from '../../providers/ThemeProvider';
+import { typographyColors } from '../../utils/themeTokens';
 
 export function PresetManagerScreen() {
     const [presets, setPresets] = useState<SystemPromptPreset[]>([]);
@@ -16,7 +16,6 @@ export function PresetManagerScreen() {
     const [editPrompt, setEditPrompt] = useState('');
 
     const { t } = useTranslation();
-    const { colors } = useTheme();
 
     useEffect(() => {
         loadPresets();
@@ -100,7 +99,7 @@ export function PresetManagerScreen() {
                 <Input className="mb-3">
                     <InputField
                         placeholder="Preset Name"
-                        placeholderTextColor="text-typography-500"
+                        placeholderTextColor={typographyColors[500]}
                         value={editName}
                         onChangeText={setEditName}
                         className="text-typography-900 dark:text-typography-100 p-2"
@@ -109,7 +108,7 @@ export function PresetManagerScreen() {
                 <Input className="h-20 mb-3">
                     <InputField
                         placeholder="System Prompt"
-                        placeholderTextColor="text-typography-500"
+                        placeholderTextColor={typographyColors[500]}
                         multiline
                         value={editPrompt}
                         onChangeText={setEditPrompt}

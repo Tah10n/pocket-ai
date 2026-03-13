@@ -31,7 +31,7 @@ export const StreamingCursor = () => {
 
   return (
     <AnimatedText
-      className="text-md leading-md text-primary-500"
+      className="text-base leading-relaxed opacity-70"
       style={animatedStyle}
     >
       ▋

@@ -12,7 +12,7 @@ interface ActiveModelCardProps {
 
 export const ActiveModelCard = ({ onSwapModel }: ActiveModelCardProps) => {
   return (
-    <Box className="mx-4 mt-4 rounded-xl shadow-xl bg-background-0 dark:bg-primary-500/10 border border-outline-200 dark:border-primary-500/20 overflow-hidden">
+    <Box className="mx-4 mt-4 rounded-xl shadow-xl bg-background-50 dark:bg-primary-500/10 border border-outline-200 dark:border-primary-500/20 overflow-hidden">
       <ImageBackground 
         source={{ uri: "https://lh3.googleusercontent.com/aida-public/AB6AXuBgeacQzvDee5FRz4IolAFCYeRdjSi5o964zo1nH9_1RSd9jOXPsbeN7v2xGEizVFs5ap4YlxkkTvYwU7gAsmGYx5fdjy-EXVSDSplqL6g442DP_jqpWlBitLu19YImIfHJbZYQpZv3VcFmqTpeZ_4PyHInFynYgjtublbwQyS1CMUs9W381FQ7AEcDpX-74bUZcI2DZBNIMXsm5MVuPa4uPRBjhiiHrtM3aM-1xahPOz-5J7NEKxdVQg4hCDW573lexS2Kb4VbxWDV" }} 
         className="w-full aspect-video justify-end"

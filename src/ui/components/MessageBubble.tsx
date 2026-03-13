@@ -22,7 +22,7 @@ export function MessageBubble({ role, content, isStreaming }: Props) {
 
     return (
         <Box
-            className={`max-w-[80%] p-3 my-1.5 rounded-xl ${
+            className={`max-w-4/5 p-3 my-1.5 rounded-xl ${
                 role === 'user' 
                     ? 'self-end bg-success-200 rounded-br-sm' 
                     : 'self-start bg-background-0 rounded-bl-sm border border-outline-200'

@@ -1,6 +1,7 @@
 import React from 'react';
 import { render } from '@testing-library/react-native';
 import HomeScreen from '../app/(tabs)/index';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 // Mock expo-router components
 jest.mock('expo-router', () => ({
@@ -20,9 +21,18 @@ jest.mock('react-native/Libraries/EventEmitter/NativeEventEmitter');
 
 describe('HomeScreen', () => {
     it('renders successfully with translation keys', () => {
-        const { getByText } = render(<HomeScreen />);
-        // Since i18next mock returns keys, check for them
-        expect(getByText('models.title')).toBeTruthy();
-        expect(getByText('models.featured')).toBeTruthy();
+        const { getByText } = render(
+            <SafeAreaProvider
+                initialMetrics={{
+                    frame: { x: 0, y: 0, width: 390, height: 844 },
+                    insets: { top: 0, left: 0, right: 0, bottom: 0 },
+                }}
+            >
+                <HomeScreen />
+            </SafeAreaProvider>
+        );
+        expect(getByText('Pocket AI')).toBeTruthy();
+        expect(getByText('New Chat')).toBeTruthy();
+        expect(getByText('Quick Actions')).toBeTruthy();
     });
 });

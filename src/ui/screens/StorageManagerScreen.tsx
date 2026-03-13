@@ -15,6 +15,7 @@ export function StorageManagerScreen() {
 
     useEffect(() => {
         loadModels();
+        return localStorageRegistry.subscribe(loadModels);
     }, []);
 
     const handleDelete = async (id: string) => {

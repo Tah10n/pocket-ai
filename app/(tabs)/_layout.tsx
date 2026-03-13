@@ -13,6 +13,7 @@ export default function TabLayout() {
         tabBarActiveTintColor: '#3211d4', // primary-500
         tabBarInactiveTintColor: '#64748b', // typography-500
         headerShown: false,
+        tabBarHideOnKeyboard: true,
         tabBarStyle: {
             backgroundColor: isDark ? 'rgba(19, 16, 34, 0.9)' : 'rgba(246, 246, 248, 0.9)',
             borderTopColor: isDark ? 'rgba(50, 17, 212, 0.2)' : 'rgba(50, 17, 212, 0.1)',

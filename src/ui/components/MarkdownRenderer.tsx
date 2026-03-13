@@ -27,7 +27,7 @@ export const MarkdownRenderer = ({ content }: MarkdownRendererProps) => {
                             className="flex-row items-center gap-1.5 active:opacity-70 bg-primary-500/10 px-2 py-1 rounded-md"
                         >
                             <MaterialSymbols name="content-copy" size={14} className="text-primary-600" />
-                            <Text className="text-[10px] font-bold text-primary-600 uppercase">Copy Code</Text>
+                            <Text className="text-2xs font-bold text-primary-600 uppercase">Copy Code</Text>
                         </Pressable>
                     </Box>
                     <Box className="p-4">

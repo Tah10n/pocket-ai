@@ -24,7 +24,7 @@ const mockConversations: Conversation[] = [
 export const RecentConversationsList = () => {
   const renderItem: ListRenderItem<Conversation> = ({ item: conv }) => (
     <Pressable 
-      className="flex-row items-center p-4 rounded-xl bg-background-0 dark:bg-primary-500/5 border border-outline-200 dark:border-primary-500/10 transition-colors active:opacity-70"
+      className="flex-row items-center p-4 rounded-xl bg-background-50 dark:bg-primary-500/5 border border-outline-200 dark:border-primary-500/10 transition-colors active:opacity-70"
     >
       <Box className="size-10 rounded-lg bg-background-100 dark:bg-primary-500/20 items-center justify-center shrink-0">
         <MaterialSymbols name={conv.icon} size={20} className="text-primary-500" />
@@ -56,6 +56,8 @@ export const RecentConversationsList = () => {
         <FlashList<Conversation>
           data={mockConversations}
           ItemSeparatorComponent={() => <Box className="h-3" />}
+          keyExtractor={(item) => item.id}
+          scrollEnabled={false}
           renderItem={renderItem}
         />
       </Box>

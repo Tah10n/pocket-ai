@@ -6,20 +6,22 @@ import { Pressable } from '@/components/ui/pressable';
 import { HeaderBar } from '../../components/ui/HeaderBar';
 import { MaterialSymbols } from '../../components/ui/MaterialSymbols';
 import { useDeviceMetrics } from '../../../src/hooks/useDeviceMetrics';
-import { useSettingsStore } from '../../../src/store/settingsStore';
-import { useAppStore } from '../../../src/store/useAppStore';
+import { useTheme } from '../../../src/providers/ThemeProvider';
+import { llmEngineService } from '../../../src/services/LLMEngineService';
 
 
 export const SettingsScreen = () => {
-    const { theme, setTheme } = useSettingsStore();
+    const { resolvedMode, setTheme } = useTheme();
     const metrics = useDeviceMetrics();
-    const { deviceResources, clearCache } = useAppStore();
+
+    const clearCache = async () => {
+        await llmEngineService.unload();
+    };
 
     return (
         <Box className="flex-1 bg-background-0 dark:bg-background-950 max-w-2xl w-full mx-auto pb-24">
             <HeaderBar 
                 title="Settings" 
-                onBack={() => {}} 
                 showProfile={true} 
             />
 
@@ -29,7 +31,7 @@ export const SettingsScreen = () => {
                     Appearance
                 </Text>
                 
-                <Box className="bg-background-0 dark:bg-background-900 rounded-xl overflow-hidden border border-outline-200 dark:border-outline-800 mb-8">
+                <Box className="bg-background-50 dark:bg-background-900/50 rounded-xl overflow-hidden border border-outline-200 dark:border-outline-800 mb-8">
                     {/* Theme Mode Segment */}
                     <Box className="flex-row px-4 py-4 items-center justify-between border-b border-outline-200 dark:border-outline-800">
                         <Box className="flex-row items-center gap-3">
@@ -41,16 +43,16 @@ export const SettingsScreen = () => {
                         
                         <Box className="flex-row h-9 w-40 items-center justify-between rounded-lg bg-background-100 dark:bg-background-800 p-1">
                             <Pressable 
-                                onPress={() => setTheme('Light')}
-                                className={`flex-1 h-full items-center justify-center rounded-md px-2 ${theme === 'Light' ? 'bg-background-0 dark:bg-background-700 shadow-sm' : 'bg-transparent'}`}
+                                onPress={() => setTheme('light')}
+                                className={`flex-1 h-full items-center justify-center rounded-md px-2 ${resolvedMode === 'light' ? 'bg-background-0 dark:bg-background-700 shadow-sm' : 'bg-transparent'}`}
                             >
-                                <Text className={`text-xs font-semibold ${theme === 'Light' ? 'text-primary-600 dark:text-typography-0' : 'text-typography-500 dark:text-typography-400'}`}>Light</Text>
+                                <Text className={`text-xs font-semibold ${resolvedMode === 'light' ? 'text-primary-600 dark:text-typography-0' : 'text-typography-500 dark:text-typography-400'}`}>Light</Text>
                             </Pressable>
                             <Pressable 
-                                onPress={() => setTheme('Dark')}
-                                className={`flex-1 h-full items-center justify-center rounded-md px-2 ${theme === 'Dark' ? 'bg-background-0 dark:bg-background-700 shadow-sm' : 'bg-transparent'}`}
+                                onPress={() => setTheme('dark')}
+                                className={`flex-1 h-full items-center justify-center rounded-md px-2 ${resolvedMode === 'dark' ? 'bg-background-0 dark:bg-background-700 shadow-sm' : 'bg-transparent'}`}
                             >
-                                <Text className={`text-xs font-semibold ${theme === 'Dark' ? 'text-primary-600 dark:text-typography-0' : 'text-typography-500 dark:text-typography-400'}`}>Dark</Text>
+                                <Text className={`text-xs font-semibold ${resolvedMode === 'dark' ? 'text-primary-600 dark:text-typography-0' : 'text-typography-500 dark:text-typography-400'}`}>Dark</Text>
                             </Pressable>
                         </Box>
                     </Box>
@@ -77,7 +79,7 @@ export const SettingsScreen = () => {
                     Performance & Resources
                 </Text>
                 
-                <Box className="bg-background-0 dark:bg-background-900 rounded-xl overflow-hidden border border-outline-200 dark:border-outline-800 mb-8">
+                <Box className="bg-background-50 dark:bg-background-900/50 rounded-xl overflow-hidden border border-outline-200 dark:border-outline-800 mb-8">
                     {/* Storage Info */}
                     <Box className="p-4 border-b border-outline-200 dark:border-outline-800">
                         <Box className="flex-row justify-between items-center mb-3">
@@ -130,20 +132,20 @@ export const SettingsScreen = () => {
                         <Box className="flex-row items-center justify-between bg-background-100 dark:bg-background-800/50 p-3 rounded-lg">
                             <Box className="items-center flex-1 border-r border-outline-200 dark:border-outline-700">
                                 <Text className="text-xs text-typography-500 uppercase font-bold">Total</Text>
-                                <Text className="text-lg font-bold text-typography-900 dark:text-typography-100">{deviceResources.totalRAM} GB</Text>
+                                <Text className="text-lg font-bold text-typography-900 dark:text-typography-100">{metrics?.ram.totalGB ?? 0} GB</Text>
                             </Box>
                             <Box className="items-center flex-1 border-r border-outline-200 dark:border-outline-700">
                                 <Text className="text-xs text-typography-500 uppercase font-bold">Available</Text>
-                                <Text className="text-lg font-bold text-primary-500">{deviceResources.availableRAM.toFixed(2)} GB</Text>
+                                <Text className="text-lg font-bold text-primary-500">{(metrics?.ram.availableGB ?? 0).toFixed(2)} GB</Text>
                             </Box>
                             <Box className="items-center flex-1">
                                 <Text className="text-xs text-typography-500 uppercase font-bold">Cached</Text>
-                                <Text className="text-lg font-bold text-typography-400 dark:text-typography-500">{deviceResources.cachedRAM.toFixed(2)} GB</Text>
+                                <Text className="text-lg font-bold text-typography-400 dark:text-typography-500">{(metrics?.ram.cachedGB ?? 0).toFixed(2)} GB</Text>
                             </Box>
                         </Box>
                         
                         <Pressable 
-                            onPress={clearCache} 
+                            onPress={clearCache}
                             className="mt-4 w-full py-2 bg-primary-500/10 items-center justify-center rounded-lg active:opacity-70"
                         >
                             <Text className="text-primary-600 text-sm font-semibold">Clear Active Cache</Text>
@@ -156,7 +158,7 @@ export const SettingsScreen = () => {
                     Privacy & Security
                 </Text>
                 
-                <Box className="bg-background-0 dark:bg-background-900/50 rounded-xl overflow-hidden border border-outline-200 dark:border-outline-800 mb-8">
+                <Box className="bg-background-50 dark:bg-background-900/50 rounded-xl overflow-hidden border border-outline-200 dark:border-outline-800 mb-8">
                     <Pressable 
                         className="flex-row px-4 py-4 items-center justify-between active:opacity-70"
                     >

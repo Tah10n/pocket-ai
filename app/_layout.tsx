@@ -6,9 +6,9 @@ import * as SplashScreen from 'expo-splash-screen';
 import { useEffect, useState } from 'react';
 import 'react-native-reanimated';
 
-import { useColorScheme } from '@/hooks/use-color-scheme';
-import { ThemeProvider as CustomThemeProvider } from '../src/providers/ThemeProvider';
+import { ThemeProvider as CustomThemeProvider, useTheme } from '../src/providers/ThemeProvider';
 import { hardwareListenerService } from '../src/services/HardwareListenerService';
+import { bootstrapApp } from '../src/services/AppBootstrap';
 import '../src/i18n';
 import '../global.css';
 
@@ -57,7 +57,6 @@ export const unstable_settings = {
 };
 
 export default function RootLayout() {
-  const colorScheme = useColorScheme();
   const [isReady, setIsReady] = useState(false);
 
   useEffect(() => {
@@ -68,7 +67,7 @@ export default function RootLayout() {
   useEffect(() => {
     async function prepare() {
       try {
-        // Any async initialization can go here
+        await bootstrapApp();
       } catch (e) {
         console.warn('[RootLayout] Error during preparation:', e);
       } finally {
@@ -86,13 +85,21 @@ export default function RootLayout() {
 
   return (
     <CustomThemeProvider>
-      <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-        <Stack>
-          <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-          <Stack.Screen name="modal" options={{ presentation: 'modal', title: 'Modal' }} />
-        </Stack>
-        <StatusBar style="auto" />
-      </ThemeProvider>
+      <RootNavigator />
     </CustomThemeProvider>
+  );
+}
+
+function RootNavigator() {
+  const { resolvedMode } = useTheme();
+
+  return (
+    <ThemeProvider value={resolvedMode === 'dark' ? DarkTheme : DefaultTheme}>
+      <Stack>
+        <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+        <Stack.Screen name="modal" options={{ presentation: 'modal', title: 'Modal' }} />
+      </Stack>
+      <StatusBar style="auto" />
+    </ThemeProvider>
   );
 }

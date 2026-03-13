@@ -29,13 +29,13 @@ export const useDeviceMetrics = () => {
     const totalMem = Device.totalMemory ? Device.totalMemory / (1024 * 1024 * 1024) : 16;
     
     setMetrics({
-      storage: {
+        storage: {
         totalGB: 256,
         usedGB: 216,
         appsGB: 128,
         systemGB: 64,
         otherGB: 24,
-        usedPercentage: 84
+        usedPercentage: 82
       },
       ram: {
         totalGB: Math.round(totalMem),

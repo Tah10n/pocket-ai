@@ -1,8 +1,10 @@
 import React, { createContext, useContext, useState, useEffect, useMemo } from 'react';
-import { useColorScheme as useSystemColorScheme, StyleSheet } from 'react-native';
+import { useColorScheme as useSystemColorScheme } from 'react-native';
+import { useColorScheme as useNativewindColorScheme } from 'nativewind';
 import { getSettings, updateSettings } from '../services/SettingsStore';
 
-type ThemeMode = 'light' | 'dark';
+type ThemeMode = 'light' | 'dark' | 'system';
+type ResolvedThemeMode = 'light' | 'dark';
 
 interface ThemeColors {
     background: string;
@@ -18,66 +20,67 @@ interface ThemeColors {
 }
 
 const lightColors: ThemeColors = {
-    background: '#F5F5F5',
-    surface: '#FFFFFF',
-    text: '#1A1A1A',
-    textSecondary: '#6B6B6B',
-    primary: '#007AFF',
-    border: '#E5E5E5',
-    error: '#FF3B30',
-    warning: '#FF9500',
-    success: '#34C759',
-    inputBackground: '#FFFFFF',
+    background: '#f6f6f8',
+    surface: '#ffffff',
+    text: '#0f172a',
+    textSecondary: '#64748b',
+    primary: '#3211d4',
+    border: '#e2e8f0',
+    error: '#ef4444',
+    warning: '#f59e0b',
+    success: '#10b981',
+    inputBackground: '#ffffff',
 };
 
 const darkColors: ThemeColors = {
-    background: '#000000',
-    surface: '#1C1C1E',
-    text: '#FFFFFF',
-    textSecondary: '#8E8E93',
-    primary: '#0A84FF',
-    border: '#38383A',
-    error: '#FF453A',
-    warning: '#FF9F0A',
-    success: '#30D158',
-    inputBackground: '#2C2C2E',
+    background: '#131022',
+    surface: '#0f172a',
+    text: '#ffffff',
+    textSecondary: '#94a3b8',
+    primary: '#3211d4',
+    border: '#1f2937',
+    error: '#f87171',
+    warning: '#fbbf24',
+    success: '#34d399',
+    inputBackground: '#0f172a',
 };
 
 interface ThemeContextValue {
     mode: ThemeMode;
+    resolvedMode: ResolvedThemeMode;
     colors: ThemeColors;
     toggleTheme: () => void;
     setTheme: (mode: ThemeMode) => void;
 }
 
 const ThemeContext = createContext<ThemeContextValue>({
-    mode: 'light',
+    mode: 'system',
+    resolvedMode: 'light',
     colors: lightColors,
-    toggleTheme: () => { },
-    setTheme: () => { },
+    toggleTheme: () => {},
+    setTheme: () => {},
 });
 
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
     const systemScheme = useSystemColorScheme();
-    const [mode, setMode] = useState<ThemeMode>(() => {
-        const settings = getSettings();
-        if (settings.theme === 'system') {
+    const { setColorScheme } = useNativewindColorScheme();
+    const [mode, setMode] = useState<ThemeMode>(() => getSettings().theme ?? 'system');
+
+    const resolvedMode: ResolvedThemeMode = useMemo(() => {
+        if (mode === 'system') {
             return systemScheme === 'dark' ? 'dark' : 'light';
         }
-        return settings.theme === 'dark' ? 'dark' : 'light';
-    });
+        return mode;
+    }, [mode, systemScheme]);
 
     useEffect(() => {
-        const settings = getSettings();
-        if (settings.theme === 'system') {
-            setMode(systemScheme === 'dark' ? 'dark' : 'light');
-        }
-    }, [systemScheme]);
+        setColorScheme(resolvedMode);
+    }, [resolvedMode, setColorScheme]);
 
     const toggleTheme = () => {
-        const newMode = mode === 'light' ? 'dark' : 'light';
-        setMode(newMode);
-        updateSettings({ theme: newMode });
+        const nextMode = resolvedMode === 'dark' ? 'light' : 'dark';
+        setMode(nextMode);
+        updateSettings({ theme: nextMode });
     };
 
     const setTheme = (newMode: ThemeMode) => {
@@ -85,10 +88,10 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
         updateSettings({ theme: newMode });
     };
 
-    const colors = useMemo(() => (mode === 'dark' ? darkColors : lightColors), [mode]);
+    const colors = useMemo(() => (resolvedMode === 'dark' ? darkColors : lightColors), [resolvedMode]);
 
     return (
-        <ThemeContext.Provider value={{ mode, colors, toggleTheme, setTheme }}>
+        <ThemeContext.Provider value={{ mode, resolvedMode, colors, toggleTheme, setTheme }}>
             {children}
         </ThemeContext.Provider>
     );

@@ -2,12 +2,14 @@ import React, { forwardRef } from 'react';
 import { Text } from '@/components/ui/text';
 import { MaterialIcons } from '@expo/vector-icons';
 import { cssInterop } from 'react-native-css-interop';
+import type { StyleProp, TextStyle } from 'react-native';
 
 export interface MaterialSymbolsProps {
   name: React.ComponentProps<typeof MaterialIcons>['name'];
   size?: number;
   color?: string;
   className?: string;
+  style?: StyleProp<TextStyle>;
 }
 
 const MaterialSymbolsBase = forwardRef<Text, MaterialSymbolsProps>(
@@ -23,6 +25,8 @@ const MaterialSymbolsBase = forwardRef<Text, MaterialSymbolsProps>(
     );
   }
 );
+
+MaterialSymbolsBase.displayName = 'MaterialSymbols';
 
 cssInterop(MaterialSymbolsBase, {
   className: 'style',

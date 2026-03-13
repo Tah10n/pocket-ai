@@ -17,7 +17,7 @@ export const HomeScreen = () => {
 
     return (
         <Box className="flex-1 bg-background-0 dark:bg-background-950">
-            <HeaderBar title="Pocket AI" showProfile={true} />
+            <HeaderBar title="Pocket AI" showProfile={false} />
             
             <ScrollView 
                 className="flex-1"

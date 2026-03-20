@@ -111,6 +111,9 @@ const ModelCardComponent = ({
             <Button size="sm" action="secondary" onPress={() => onUnload()}>
               <ButtonText>Unload</ButtonText>
             </Button>
+            <Button size="sm" action="negative" onPress={() => onDelete(model.id)}>
+              <MaterialIcons name="delete" size={16} className="text-white" />
+            </Button>
           </>
         )}
       </Box>

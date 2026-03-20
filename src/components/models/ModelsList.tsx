@@ -122,6 +122,12 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
     setPage,
   } = useModelsStore();
 
+  const refreshDownloadedModels = useCallback(() => {
+    if (activeTab === 'Downloaded') {
+      modelCatalogService.getLocalModels().then(setModels);
+    }
+  }, [activeTab]);
+
   const fetchModels = useCallback(
     async (query: string, page: number, append: boolean) => {
       if (append) {
@@ -246,14 +252,26 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
         'This model may exceed your device RAM and cause crashes. Load anyway?',
         [
           { text: 'Cancel', style: 'cancel' },
-          { text: 'Load Anyway', onPress: () => loadModel(modelId) },
+          {
+            text: 'Load Anyway',
+            onPress: async () => {
+              await loadModel(modelId);
+              refreshDownloadedModels();
+            },
+          },
         ],
       );
       return;
     }
 
     await loadModel(modelId);
-  }, [loadModel, models]);
+    refreshDownloadedModels();
+  }, [loadModel, models, refreshDownloadedModels]);
+
+  const handleUnload = useCallback(async () => {
+    await unloadModel();
+    refreshDownloadedModels();
+  }, [refreshDownloadedModels, unloadModel]);
 
   const handleDelete = useCallback((modelId: string) => {
     Alert.alert(
@@ -265,18 +283,21 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
           text: 'Delete',
           style: 'destructive',
           onPress: async () => {
+            if (engineState.activeModelId === modelId) {
+              await unloadModel();
+            }
             await registry.removeModel(modelId);
             if (activeTab === 'All Models') {
               resetPagination();
-              fetchModels(searchQuery, 0, false);
+              await fetchModels(searchQuery, 0, false);
             } else {
-              modelCatalogService.getLocalModels().then(setModels);
+              refreshDownloadedModels();
             }
           },
         },
       ],
     );
-  }, [activeTab, fetchModels, resetPagination, searchQuery]);
+  }, [activeTab, engineState.activeModelId, fetchModels, refreshDownloadedModels, resetPagination, searchQuery, unloadModel]);
 
   const handleLoadMore = useCallback(() => {
     if (!hasMore || isFetchingMore || activeTab !== 'All Models') {
@@ -362,7 +383,7 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
                 model={item}
                 onDownload={handleDownload}
                 onLoad={handleLoad}
-                onUnload={unloadModel}
+                onUnload={handleUnload}
                 onDelete={handleDelete}
                 onCancel={cancelDownload}
                 onChat={() => router.push('/chat')}

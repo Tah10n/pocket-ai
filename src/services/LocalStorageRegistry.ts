@@ -2,7 +2,6 @@ import * as FileSystem from 'expo-file-system/legacy';
 import { createStorage } from './storage';
 import { ModelMetadata, LifecycleStatus } from '../types/models';
 import { MODELS_DIR } from './FileSystemSetup';
-import { useDownloadStore } from '../store/downloadStore';
 
 const REGISTRY_KEY = 'models-registry';
 
@@ -80,7 +79,7 @@ export class LocalStorageRegistry {
    * Validate the registry on startup: check if files exist and update status.
    * Also performs Garbage Collection: deletes files in MODELS_DIR that are neither completed nor currently queued.
    */
-  public async validateRegistry(): Promise<void> {
+  public async validateRegistry(queuedFileNames: string[] = []): Promise<void> {
     const models = this.getModels();
     let changed = false;
 
@@ -94,6 +93,9 @@ export class LocalStorageRegistry {
             console.warn(`[LocalStorageRegistry] File missing for ${model.id}, resetting to available`);
             model.lifecycleStatus = LifecycleStatus.AVAILABLE;
             model.localPath = undefined;
+            changed = true;
+          } else if (model.lifecycleStatus === LifecycleStatus.ACTIVE) {
+            model.lifecycleStatus = LifecycleStatus.DOWNLOADED;
             changed = true;
           }
         }
@@ -113,14 +115,7 @@ export class LocalStorageRegistry {
         const isCompleted = models.some(m => m.localPath === filename);
         
         if (!isCompleted) {
-          // If it's not a completed model, check if it's currently in the download queue
-          // We can reconstruct the expected filename from the queued model's ID
-          const queue = useDownloadStore.getState().queue;
-          
-          const isQueued = queue.some((q: ModelMetadata) => {
-            const expectedFileName = q.id.replace(/\//g, '_') + '.gguf';
-            return expectedFileName === filename;
-          });
+          const isQueued = queuedFileNames.includes(filename);
 
           if (!isQueued) {
             // It's neither completed nor queued -> it's a dead partial download. Delete it.

@@ -28,25 +28,35 @@ const mockModel: ModelMetadata = {
   downloadProgress: 1,
 };
 
+function createMockModel(overrides: Partial<ModelMetadata> = {}): ModelMetadata {
+  return {
+    ...mockModel,
+    localPath: 'model.gguf',
+    lifecycleStatus: LifecycleStatus.DOWNLOADED,
+    ...overrides,
+  };
+}
+
 describe('LocalStorageRegistry', () => {
   beforeEach(() => {
     jest.clearAllMocks();
   });
 
   it('should remove model and delete file', async () => {
+    const model = createMockModel();
     // Mock getModels to return our model
-    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([mockModel]);
-    (registry.getModel as jest.Mock) = jest.fn().mockReturnValue(mockModel);
+    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([model]);
+    (registry.getModel as jest.Mock) = jest.fn().mockReturnValue(model);
     (registry.saveModels as jest.Mock) = jest.fn();
 
-    await registry.removeModel(mockModel.id);
+    await registry.removeModel(model.id);
 
     expect(FileSystem.deleteAsync).toHaveBeenCalled();
     expect(registry.saveModels).toHaveBeenCalledWith([]);
   });
 
   it('should validate registry and reset status if file is missing', async () => {
-    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([mockModel]);
+    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([createMockModel()]);
     (registry.saveModels as jest.Mock) = jest.fn();
     (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: false });
 
@@ -56,5 +66,18 @@ describe('LocalStorageRegistry', () => {
     const updatedModels = (registry.saveModels as jest.Mock).mock.calls[0][0];
     expect(updatedModels[0].lifecycleStatus).toBe(LifecycleStatus.AVAILABLE);
     expect(updatedModels[0].localPath).toBeUndefined();
+  });
+
+  it('should normalize persisted active models back to downloaded on bootstrap', async () => {
+    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([
+      createMockModel({ lifecycleStatus: LifecycleStatus.ACTIVE }),
+    ]);
+    (registry.saveModels as jest.Mock) = jest.fn();
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: true });
+
+    await registry.validateRegistry();
+
+    const updatedModels = (registry.saveModels as jest.Mock).mock.calls[0][0];
+    expect(updatedModels[0].lifecycleStatus).toBe(LifecycleStatus.DOWNLOADED);
   });
 });

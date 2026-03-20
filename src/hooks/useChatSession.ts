@@ -1,6 +1,7 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { llmEngineService } from '../services/LLMEngineService';
 import { EngineStatus } from '../types/models';
+import { getSettings, saveChatHistory } from '../services/SettingsStore';
 
 export interface ChatMessage {
   id: string;
@@ -10,9 +11,45 @@ export interface ChatMessage {
   tokensPerSec?: number;
 }
 
+function createSessionId() {
+  return `chat-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+}
+
 export const useChatSession = () => {
     const [messages, setMessages] = useState<ChatMessage[]>([]);
     const [isGenerating, setIsGenerating] = useState(false);
+    const sessionIdRef = useRef<string>(createSessionId());
+    const createdAtRef = useRef<number | null>(null);
+
+    useEffect(() => {
+        if (messages.length === 0) {
+            return;
+        }
+
+        const persistedMessages = messages
+            .filter((message) => message.isUser || message.content.trim().length > 0)
+            .map((message) => ({
+                role: message.isUser ? 'user' as const : 'assistant' as const,
+                content: message.content,
+            }));
+
+        if (persistedMessages.length === 0) {
+            return;
+        }
+
+        const timestamp = createdAtRef.current ?? Date.now();
+        createdAtRef.current = timestamp;
+
+        const settings = getSettings();
+        saveChatHistory({
+            id: sessionIdRef.current,
+            messages: persistedMessages,
+            modelId: settings.activeModelId ?? 'No Model',
+            presetId: settings.activePresetId,
+            createdAt: timestamp,
+            updatedAt: Date.now(),
+        });
+    }, [messages]);
     
     const appendUserMessage = useCallback(async (text: string) => {
         const newMsg: ChatMessage = {

@@ -16,6 +16,21 @@ jest.mock('expo-blur', () => ({
   BlurView: ({ children }: any) => children ?? null,
 }));
 
+jest.mock('expo-file-system/legacy', () => ({
+  createDownloadResumable: jest.fn().mockReturnValue({
+    downloadAsync: jest.fn().mockResolvedValue({ status: 200 }),
+    pauseAsync: jest.fn().mockResolvedValue({ resumeData: 'resume-data' }),
+    savable: jest.fn().mockReturnValue({ resumeData: 'resume-data' }),
+  }),
+  getInfoAsync: jest.fn().mockResolvedValue({ exists: true, size: 1024 }),
+  readDirectoryAsync: jest.fn().mockResolvedValue([]),
+  deleteAsync: jest.fn().mockResolvedValue(undefined),
+  getFreeDiskStorageAsync: jest.fn().mockResolvedValue(10 * 1024 * 1024 * 1024),
+  makeDirectoryAsync: jest.fn().mockResolvedValue(undefined),
+  documentDirectory: 'test-dir/',
+  cacheDirectory: 'test-cache/',
+}));
+
 jest.mock('expo-clipboard', () => ({
   setStringAsync: jest.fn().mockResolvedValue(undefined),
 }));

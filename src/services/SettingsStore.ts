@@ -9,6 +9,7 @@ export interface AppSettings {
     theme: 'light' | 'dark' | 'system';
     language: 'en' | 'ru';
     activePresetId: string | null;
+    activeModelId: string | null;
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -18,12 +19,15 @@ const DEFAULT_SETTINGS: AppSettings = {
     theme: 'system',
     language: 'en',
     activePresetId: null,
+    activeModelId: null,
 };
 
 const SETTINGS_KEY = 'app_settings';
 
 type SettingsListener = (settings: AppSettings) => void;
 const settingsListeners: Set<SettingsListener> = new Set();
+type ChatHistoryListener = () => void;
+const chatHistoryListeners: Set<ChatHistoryListener> = new Set();
 
 function normalizeLanguage(language: unknown): 'en' | 'ru' {
     if (typeof language !== 'string') return DEFAULT_SETTINGS.language;
@@ -48,6 +52,7 @@ function sanitizeSettings(input: Partial<AppSettings>): AppSettings {
         theme: input.theme === 'light' || input.theme === 'dark' || input.theme === 'system' ? input.theme : DEFAULT_SETTINGS.theme,
         language: normalizeLanguage(input.language),
         activePresetId: typeof input.activePresetId === 'string' ? input.activePresetId : null,
+        activeModelId: typeof input.activeModelId === 'string' ? input.activeModelId : null,
     };
 }
 
@@ -78,16 +83,45 @@ export function subscribeSettings(listener: SettingsListener) {
     return () => settingsListeners.delete(listener);
 }
 
+function notifyChatHistoryListeners() {
+    chatHistoryListeners.forEach((listener) => listener());
+}
+
+export function subscribeChatHistory(listener: ChatHistoryListener) {
+    chatHistoryListeners.add(listener);
+    listener();
+    return () => chatHistoryListeners.delete(listener);
+}
+
 // Chat history persistence
 const CHAT_HISTORY_PREFIX = 'chat_history_';
 
 export interface ChatHistoryEntry {
     id: string;
-    messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>;
+    messages: { role: 'user' | 'assistant' | 'system'; content: string }[];
     modelId: string;
     presetId: string | null;
     createdAt: number;
     updatedAt: number;
+}
+
+export interface ChatHistorySummary {
+    id: string;
+    title: string;
+    modelId: string;
+    presetId: string | null;
+    createdAt: number;
+    updatedAt: number;
+}
+
+function deriveChatTitle(entry: ChatHistoryEntry): string {
+    const firstUserMessage = entry.messages.find((message) => message.role === 'user' && message.content.trim().length > 0);
+    if (!firstUserMessage) {
+        return 'New Conversation';
+    }
+
+    const normalized = firstUserMessage.content.replace(/\s+/g, ' ').trim();
+    return normalized.length > 48 ? `${normalized.slice(0, 45)}...` : normalized;
 }
 
 export function saveChatHistory(entry: ChatHistoryEntry) {
@@ -99,6 +133,8 @@ export function saveChatHistory(entry: ChatHistoryEntry) {
         index.push(entry.id);
         storage.set('chat_history_index', JSON.stringify(index));
     }
+
+    notifyChatHistoryListeners();
 }
 
 export function getChatHistory(chatId: string): ChatHistoryEntry | null {
@@ -130,6 +166,7 @@ export function deleteChatHistory(chatId: string) {
     storage.remove(`${CHAT_HISTORY_PREFIX}${chatId}`);
     const index = getChatHistoryIndex().filter(id => id !== chatId);
     storage.set('chat_history_index', JSON.stringify(index));
+    notifyChatHistoryListeners();
 }
 
 export function repairChatHistoryIndex() {
@@ -141,9 +178,27 @@ export function repairChatHistoryIndex() {
 
     if (removed > 0) {
         storage.set('chat_history_index', JSON.stringify(repaired));
+        notifyChatHistoryListeners();
     }
 
     return { removed, total: index.length };
+}
+
+export function getChatHistorySummaries(limit?: number): ChatHistorySummary[] {
+    const entries = getChatHistoryIndex()
+        .map((id) => getChatHistory(id))
+        .filter((entry): entry is ChatHistoryEntry => !!entry)
+        .sort((left, right) => right.updatedAt - left.updatedAt);
+
+    const slicedEntries = typeof limit === 'number' ? entries.slice(0, limit) : entries;
+    return slicedEntries.map((entry) => ({
+        id: entry.id,
+        title: deriveChatTitle(entry),
+        modelId: entry.modelId,
+        presetId: entry.presetId,
+        createdAt: entry.createdAt,
+        updatedAt: entry.updatedAt,
+    }));
 }
 
 

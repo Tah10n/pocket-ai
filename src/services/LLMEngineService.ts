@@ -2,9 +2,10 @@ import { initLlama, releaseAllLlama, LlamaContext, TokenData, NativeCompletionRe
 import * as FileSystem from 'expo-file-system/legacy';
 import DeviceInfo from 'react-native-device-info';
 import { hardwareListenerService } from './HardwareListenerService';
-import { ModelMetadata, LifecycleStatus, EngineStatus, EngineState } from '../types/models';
+import { EngineStatus, EngineState } from '../types/models';
 import { registry } from './LocalStorageRegistry';
 import { MODELS_DIR } from './FileSystemSetup';
+import { updateSettings } from './SettingsStore';
 
 type StateListener = (state: EngineState) => void;
 
@@ -115,17 +116,11 @@ class LLMEngineService {
           }
         }
 
-        // Update registry: mark as active, others as downloaded
-        const allModels = registry.getModels();
-        const updatedModels = allModels.map(m => ({
-          ...m,
-          lifecycleStatus: m.id === modelId ? LifecycleStatus.ACTIVE : (m.lifecycleStatus === LifecycleStatus.ACTIVE ? LifecycleStatus.DOWNLOADED : m.lifecycleStatus)
-        }));
-        registry.saveModels(updatedModels);
-
         this.updateState({ ...this.state, status: EngineStatus.READY, loadProgress: 1 });
+        updateSettings({ activeModelId: modelId });
       } catch (e) {
         console.error('[LLMEngine] Failed to initialize', e);
+        updateSettings({ activeModelId: null });
         this.updateState({ ...this.state, status: EngineStatus.ERROR, lastError: String(e) });
         throw e;
       } finally {
@@ -145,18 +140,12 @@ class LLMEngineService {
     // to prevent a concurrent load() call from thinking no init is in progress
     this.initPromise = null;
     
-    if (this.state.activeModelId) {
-      const model = registry.getModel(this.state.activeModelId);
-      if (model) {
-        registry.updateModel({ ...model, lifecycleStatus: LifecycleStatus.DOWNLOADED });
-      }
-    }
-
     this.updateState({
       status: EngineStatus.IDLE,
       activeModelId: undefined,
       loadProgress: 0,
     });
+    updateSettings({ activeModelId: null });
     hardwareListenerService.resetLowMemoryFlag();
   }
 
@@ -229,7 +218,7 @@ class LLMEngineService {
       const totalMemory = await DeviceInfo.getTotalMemory();
       // Heuristic: model size + 20% overhead should be less than 80% of total RAM
       return (modelSize * 1.2) < (totalMemory * 0.8);
-    } catch (e) {
+    } catch {
       return false;
     }
   }

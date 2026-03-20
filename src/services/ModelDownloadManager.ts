@@ -1,10 +1,8 @@
-/* eslint-disable import/namespace */
 import * as FileSystem from 'expo-file-system/legacy';
 import { useDownloadStore } from '../store/downloadStore';
 import { ModelMetadata, LifecycleStatus } from '../types/models';
 import { registry } from './LocalStorageRegistry';
 import { MODELS_DIR } from './FileSystemSetup';
-import { hardwareListenerService } from './HardwareListenerService';
 
 export class ModelDownloadManager {
   private static instance: ModelDownloadManager;
@@ -33,21 +31,21 @@ export class ModelDownloadManager {
   private async processQueue() {
     if (this.isProcessing) return;
     
-    const { queue, activeModelId, setActiveModel } = useDownloadStore.getState();
+    const { queue, activeDownloadId, setActiveDownload } = useDownloadStore.getState();
     
     // If already downloading something, stay idle
-    if (activeModelId) return;
+    if (activeDownloadId) return;
 
     // Find next queued model
     const next = queue.find(m => m.lifecycleStatus === LifecycleStatus.QUEUED);
     if (next) {
       this.isProcessing = true;
-      setActiveModel(next.id);
+      setActiveDownload(next.id);
       try {
         await this.downloadModel(next);
       } catch (e) {
         console.error(`[ModelDownloadManager] Failed to download ${next.id}`, e);
-        setActiveModel(null);
+        setActiveDownload(null);
       } finally {
         this.isProcessing = false;
         // Trigger next check
@@ -57,7 +55,7 @@ export class ModelDownloadManager {
   }
 
   private async downloadModel(model: ModelMetadata) {
-    const { updateModelInQueue, removeFromQueue, setActiveModel } = useDownloadStore.getState();
+    const { updateModelInQueue, removeFromQueue, setActiveDownload } = useDownloadStore.getState();
 
     try {
       const freeSpace = await FileSystem.getFreeDiskStorageAsync();
@@ -69,7 +67,7 @@ export class ModelDownloadManager {
       console.error(`[ModelDownloadManager] Pre-download check failed for ${model.id}:`, e.message);
       updateModelInQueue(model.id, { lifecycleStatus: LifecycleStatus.AVAILABLE });
       removeFromQueue(model.id);
-      setActiveModel(null);
+      setActiveDownload(null);
       throw e;
     }
 
@@ -90,7 +88,7 @@ export class ModelDownloadManager {
       try {
         const pauseState = JSON.parse(model.resumeData);
         resumeString = pauseState.resumeData || model.resumeData;
-      } catch (e) {
+      } catch {
         resumeString = model.resumeData;
       }
     }
@@ -162,7 +160,7 @@ export class ModelDownloadManager {
         lifecycleStatus: LifecycleStatus.AVAILABLE 
       });
       removeFromQueue(model.id);
-      setActiveModel(null);
+      setActiveDownload(null);
 
       throw e;
     } finally {
@@ -176,26 +174,26 @@ export class ModelDownloadManager {
   }
 
   public async pauseDownload(modelId: string) {
-    if (this.resumable && useDownloadStore.getState().activeModelId === modelId) {
+    if (this.resumable && useDownloadStore.getState().activeDownloadId === modelId) {
       const pauseResult = await this.resumable.pauseAsync();
       useDownloadStore.getState().updateModelInQueue(modelId, { 
         resumeData: JSON.stringify(pauseResult),
         // No PAUSED status in enum, use QUEUED so it can be resumed
         lifecycleStatus: LifecycleStatus.QUEUED 
       });
-      useDownloadStore.getState().setActiveModel(null);
+      useDownloadStore.getState().setActiveDownload(null);
       // Reset processing flag so the queue can accept new downloads
       this.isProcessing = false;
     }
   }
 
   public async cancelDownload(modelId: string) {
-    const { removeFromQueue, activeModelId, setActiveModel } = useDownloadStore.getState();
-    if (activeModelId === modelId) {
+    const { removeFromQueue, activeDownloadId, setActiveDownload } = useDownloadStore.getState();
+    if (activeDownloadId === modelId) {
       if (this.resumable) {
         await this.resumable.pauseAsync(); // Stop active one
       }
-      setActiveModel(null);
+      setActiveDownload(null);
     }
     
     // Remove from queue first to stop UI

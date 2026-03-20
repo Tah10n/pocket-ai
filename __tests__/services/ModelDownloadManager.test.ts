@@ -38,7 +38,7 @@ const mockModel: ModelMetadata = {
 describe('ModelDownloadManager Basic', () => {
   beforeEach(async () => {
     jest.clearAllMocks();
-    useDownloadStore.setState({ queue: [], activeModelId: null });
+    useDownloadStore.setState({ queue: [], activeDownloadId: null });
     (modelDownloadManager as any).isProcessing = false;
     await new Promise(r => setTimeout(r, 10)); // Yield tick
   });

@@ -1,55 +1,65 @@
-# Welcome to your Expo app 👋
+# Pocket AI App
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+Expo Router React Native app for an offline-first local AI assistant. The app focuses on GGUF model discovery, download, verification, local loading through `llama.rn`, and an on-device chat experience.
 
-## Get started
+## Scripts
 
-1. Install dependencies
-
-   ```bash
-   npm install
-   ```
-
-2. Start the app
-
-   ```bash
-   npx expo start
-   ```
-
-In the output, you'll find options to open the app in a
-
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
-
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
-
-## Get a fresh project
-
-When you're ready, run:
+Install dependencies:
 
 ```bash
-npm run reset-project
+npm install
 ```
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+Start the Expo app:
 
-## Learn more
+```bash
+npm start
+```
 
-To learn more about developing your project with Expo, look at the following resources:
+Run lint:
 
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
+```bash
+npm run lint
+```
+
+Run tests:
+
+```bash
+npm test
+```
+
+## Current app structure
+
+The codebase uses Expo Router for routes and keeps app logic under `src/`.
+
+```text
+app/
+├── app/                 # Expo Router entrypoints and tab routes
+├── src/
+│   ├── components/      # Shared UI and feature-level reusable components
+│   ├── hooks/           # UI hooks and screen-facing state helpers
+│   ├── i18n/            # i18n bootstrap and translations
+│   ├── lib/             # Small shared adapters, including MMKV wiring
+│   ├── providers/       # React providers such as theming
+│   ├── services/        # Persistence, model catalog, downloads, engine, bootstrap
+│   ├── store/           # Zustand stores and persist adapters
+│   ├── types/           # Shared TypeScript types
+│   ├── ui/screens/      # Screen components rendered by Expo Router routes
+│   └── utils/           # UI and domain utilities
+├── __tests__/           # Jest tests
+└── README.md
+```
+
+## Conventions
+
+- Write repository documentation and code comments in English.
+- Keep shared reusable building blocks in `src/components`.
+- Keep route-facing screen components in `src/ui/screens`.
+- Use `src/store` as the single home for Zustand store modules.
+- Use `src/services` for app services and persistence helpers rather than putting that logic into components.
 
 ## Documentation
 
-- [UI Architecture & Components Guidelines](./docs/ui-architecture.md): Essential reading for creating, modifying, or importing UI components correctly.
-- [New Architecture Migration Guide](./docs/new-architecture.md): Details about React Native New Architecture, build processes, and specific native module instructions.
-
-## Join the community
-
-Join our community of developers creating universal apps.
-
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+- [../IMPLEMENTATION_PLAN.md](../IMPLEMENTATION_PLAN.md): delivery roadmap and current phase status.
+- [UI Architecture & Components Guidelines](./docs/ui-architecture.md): guidance for creating and modifying UI components.
+- [New Architecture Migration Guide](./docs/new-architecture.md): notes for React Native New Architecture and native-module-related setup.

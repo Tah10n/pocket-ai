@@ -1,27 +1,55 @@
-import React, { ComponentProps } from 'react';
+import React, { ComponentProps, useEffect, useState } from 'react';
 import { Box } from '@/components/ui/box';
 import { Text } from '@/components/ui/text';
 import { Pressable } from '@/components/ui/pressable';
 import { MaterialSymbols } from './MaterialSymbols';
 import { FlashList, ListRenderItem } from '@shopify/flash-list';
+import {
+  getChatHistorySummaries,
+  subscribeChatHistory,
+  type ChatHistorySummary,
+} from '@/services/SettingsStore';
 
 type IconName = ComponentProps<typeof MaterialSymbols>['name'];
 
-interface Conversation {
-  id: string;
+interface Conversation extends ChatHistorySummary {
   title: string;
   model: string;
   time: string;
   icon: IconName;
 }
 
-const mockConversations: Conversation[] = [
-  { id: '1', title: 'Optimize React Component performance', model: 'Llama 3 8B', time: '2 hours ago', icon: 'chat-bubble' },
-  { id: '2', title: 'Python script for data analysis', model: 'Mistral 7B', time: 'Yesterday', icon: 'code' },
-  { id: '3', title: 'Creative writing: Space odyssey', model: 'Gemma 2B', time: '3 days ago', icon: 'draw' },
-];
+function formatRelativeTime(timestamp: number): string {
+  const diffMs = Date.now() - timestamp;
+  const diffMinutes = Math.max(1, Math.floor(diffMs / (60 * 1000)));
+
+  if (diffMinutes < 60) return `${diffMinutes} min ago`;
+
+  const diffHours = Math.floor(diffMinutes / 60);
+  if (diffHours < 24) return `${diffHours} hr ago`;
+
+  const diffDays = Math.floor(diffHours / 24);
+  if (diffDays < 7) return `${diffDays} day${diffDays === 1 ? '' : 's'} ago`;
+
+  return new Date(timestamp).toLocaleDateString();
+}
 
 export const RecentConversationsList = () => {
+  const [summaries, setSummaries] = useState<ChatHistorySummary[]>(() => getChatHistorySummaries(5));
+
+  useEffect(() => {
+    return subscribeChatHistory(() => {
+      setSummaries(getChatHistorySummaries(5));
+    });
+  }, []);
+
+  const conversations: Conversation[] = summaries.map((summary) => ({
+    ...summary,
+    model: summary.modelId.split('/').pop() ?? summary.modelId,
+    time: formatRelativeTime(summary.updatedAt),
+    icon: 'chat-bubble',
+  }));
+
   const renderItem: ListRenderItem<Conversation> = ({ item: conv }) => (
     <Pressable 
       className="flex-row items-center p-4 rounded-xl bg-background-50 dark:bg-primary-500/5 border border-outline-200 dark:border-primary-500/10 transition-colors active:opacity-70"
@@ -53,13 +81,24 @@ export const RecentConversationsList = () => {
       </Box>
 
       <Box className="flex-1 min-h-80">
-        <FlashList<Conversation>
-          data={mockConversations}
-          ItemSeparatorComponent={() => <Box className="h-3" />}
-          keyExtractor={(item) => item.id}
-          scrollEnabled={false}
-          renderItem={renderItem}
-        />
+        {conversations.length > 0 ? (
+          <FlashList<Conversation>
+            data={conversations}
+            ItemSeparatorComponent={() => <Box className="h-3" />}
+            keyExtractor={(item) => item.id}
+            scrollEnabled={false}
+            renderItem={renderItem}
+          />
+        ) : (
+          <Box className="rounded-xl border border-dashed border-outline-200 bg-background-50 px-4 py-6 dark:border-primary-500/10 dark:bg-primary-500/5">
+            <Text className="text-sm font-semibold text-typography-700 dark:text-typography-200">
+              No conversations yet
+            </Text>
+            <Text className="mt-2 text-sm text-typography-500 dark:text-typography-400">
+              Start a chat and your recent conversations will appear here.
+            </Text>
+          </Box>
+        )}
       </Box>
     </Box>
   );

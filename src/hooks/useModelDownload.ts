@@ -5,7 +5,7 @@ import { ModelMetadata } from '../types/models';
 
 export function useModelDownload() {
   const queue = useDownloadStore((state) => state.queue);
-  const activeModelId = useDownloadStore((state) => state.activeModelId);
+  const activeDownloadId = useDownloadStore((state) => state.activeDownloadId);
   const addToQueue = useDownloadStore((state) => state.addToQueue);
 
   const startDownload = useCallback((model: ModelMetadata) => {
@@ -26,7 +26,7 @@ export function useModelDownload() {
 
   return {
     queue,
-    activeModelId,
+    activeDownloadId,
     startDownload,
     pauseDownload,
     cancelDownload,

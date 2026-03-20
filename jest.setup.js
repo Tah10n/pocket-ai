@@ -2,6 +2,8 @@
 import 'react-native/jest/setup';
 import 'react-native-gesture-handler/jestSetup';
 
+process.env.EXPO_OS = process.env.EXPO_OS || 'web';
+
 // Mock Expo Constants
 jest.mock('expo-constants', () => ({
   expoConfig: {
@@ -21,6 +23,8 @@ jest.mock('expo-clipboard', () => ({
 jest.mock('@expo/vector-icons', () => ({
   MaterialIcons: () => null,
 }));
+
+jest.mock('@expo/vector-icons/MaterialIcons', () => () => null);
 
 // Mock Appearance
 jest.mock('react-native/Libraries/Utilities/Appearance', () => {
@@ -45,6 +49,7 @@ jest.mock('react-native-css-interop', () => ({
 }));
 
 jest.mock('nativewind', () => ({
+    cssInterop: (Component) => Component,
     styled: (Component) => Component,
     useColorScheme: () => ({
         colorScheme: 'light',

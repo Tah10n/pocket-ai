@@ -24,56 +24,138 @@ const HF_BASE_URL = 'https://huggingface.co';
 const MIN_GGUF_BYTES = 50 * 1024 * 1024;
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
+export type ModelCatalogErrorCode = 'rate_limited' | 'network' | 'unknown';
+
+export class ModelCatalogError extends Error {
+  public readonly code: ModelCatalogErrorCode;
+
+  constructor(code: ModelCatalogErrorCode, message: string) {
+    super(message);
+    this.code = code;
+    this.name = 'ModelCatalogError';
+  }
+}
+
+export function getModelCatalogErrorMessage(error: unknown): string {
+  if (error instanceof ModelCatalogError) {
+    if (error.code === 'rate_limited') {
+      return 'Hugging Face rate limit reached. Please wait a moment and try again.';
+    }
+
+    if (error.code === 'network') {
+      return 'Network error while loading models. Check your connection and try again.';
+    }
+  }
+
+  return 'Could not load models right now. Please try again.';
+}
+
+export interface ModelCatalogSearchResult {
+  models: ModelMetadata[];
+  hasMore: boolean;
+  warning?: ModelCatalogError;
+}
+
 export class ModelCatalogService {
-  private searchCache: Map<string, { data: ModelMetadata[]; timestamp: number }> = new Map();
+  private searchCache: Map<
+    string,
+    { data: ModelMetadata[]; timestamp: number; hasMore: boolean }
+  > = new Map();
+  private readonly fetchChunkSize = 30;
 
   /**
    * Fetch GGUF models from Hugging Face with caching and offline support.
    */
-  public async searchModels(query: string = 'gguf'): Promise<ModelMetadata[]> {
+  public async searchModels(
+    query: string = 'gguf',
+    options?: { page?: number; pageSize?: number }
+  ): Promise<ModelCatalogSearchResult> {
     const isConnected = hardwareListenerService.getCurrentStatus().isConnected;
+    const page = options?.page ?? 0;
+    const pageSize = options?.pageSize ?? 20;
+    const requiredLimit = Math.max((page + 1) * pageSize, pageSize);
+    const sliceStart = page * pageSize;
+    const sliceEnd = sliceStart + pageSize;
     
     // If offline, return only downloaded/local models from registry that match query
     if (!isConnected) {
       console.log('[ModelCatalogService] Offline mode: fetching from local registry');
-      const localModels = registry.getModels();
-      return localModels.filter(m => 
-        m.name.toLowerCase().includes(query.toLowerCase()) || 
-        m.id.toLowerCase().includes(query.toLowerCase())
-      );
+      return this.getLocalSearchResults(query, page, pageSize);
     }
 
     const cacheKey = query.toLowerCase();
     const cached = this.searchCache.get(cacheKey);
-    if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
-      return this.mergeWithRegistry(cached.data);
+    if (cached && Date.now() - cached.timestamp < CACHE_TTL && cached.data.length >= requiredLimit) {
+      return {
+        models: this.mergeWithRegistry(cached.data.slice(sliceStart, sliceEnd)),
+        hasMore: cached.hasMore,
+      };
     }
 
     try {
       const normalizedQuery = this.normalizeQuery(query);
-      const url = `${HF_BASE_URL}/api/models?search=${encodeURIComponent(normalizedQuery)}&limit=20&full=true&config=true`;
-      
-      const response = await fetch(url);
-      if (!response.ok) throw new Error(`HF Search failed: ${response.status}`);
-
-      const data = await response.json() as HuggingFaceModelSummary[];
       const totalMemory = await this.getTotalMemory();
-      const baseModels = this.transformHFResponse(data, totalMemory);
-      const models = await this.fetchFileSizes(baseModels, totalMemory);
-      
-      this.searchCache.set(cacheKey, { data: models, timestamp: Date.now() });
-      return this.mergeWithRegistry(models);
+      const { models, hasMore } = await this.fetchCatalogPage(
+        normalizedQuery,
+        sliceEnd,
+        totalMemory,
+      );
+
+      this.searchCache.set(cacheKey, { data: models, timestamp: Date.now(), hasMore });
+      return {
+        models: this.mergeWithRegistry(models.slice(sliceStart, sliceEnd)),
+        hasMore,
+      };
     } catch (e) {
       console.error('[ModelCatalogService] Search failed', e);
-      // Fallback to local registry on error
-      return this.mergeWithRegistry([]);
+
+      if (e instanceof ModelCatalogError) {
+        if (page === 0) {
+          const fallback = this.getLocalSearchResults(query, page, pageSize);
+          return {
+            ...fallback,
+            warning: e,
+          };
+        }
+
+        throw e;
+      }
+
+      const networkError = new ModelCatalogError('network', 'Model catalog request failed');
+      if (page === 0) {
+        const fallback = this.getLocalSearchResults(query, page, pageSize);
+        return {
+          ...fallback,
+          warning: networkError,
+        };
+      }
+
+      throw networkError;
     }
+  }
+
+  private getLocalSearchResults(
+    query: string,
+    page: number,
+    pageSize: number,
+  ): ModelCatalogSearchResult {
+    const sliceStart = page * pageSize;
+    const sliceEnd = sliceStart + pageSize;
+    const filtered = registry.getModels().filter((model) =>
+      model.name.toLowerCase().includes(query.toLowerCase()) ||
+      model.id.toLowerCase().includes(query.toLowerCase()),
+    );
+
+    return {
+      models: filtered.slice(sliceStart, sliceEnd),
+      hasMore: sliceEnd < filtered.length,
+    };
   }
 
   private async getTotalMemory(): Promise<number> {
     try {
       return await DeviceInfo.getTotalMemory();
-    } catch (e) {
+    } catch {
       return 8 * 1024 * 1024 * 1024; // Fallback 8GB
     }
   }
@@ -89,7 +171,7 @@ export class ModelCatalogService {
           const fitsInRam = size < totalMemory * 0.8;
           return { ...model, size, fitsInRam };
         }
-      } catch (e) {
+      } catch {
         console.warn(`[ModelCatalogService] Failed to fetch size for ${model.id}`);
       }
       return model;
@@ -104,6 +186,48 @@ export class ModelCatalogService {
       results.push(...batchResults);
     }
     return results;
+  }
+
+  private async fetchCatalogPage(
+    normalizedQuery: string,
+    minimumResults: number,
+    totalMemory: number,
+  ): Promise<{ models: ModelMetadata[]; hasMore: boolean }> {
+    let requestLimit = Math.max(minimumResults, this.fetchChunkSize);
+
+    while (true) {
+      const data = await this.fetchHuggingFaceModels(normalizedQuery, requestLimit);
+      const baseModels = this.transformHFResponse(data, totalMemory);
+      const models = await this.fetchFileSizes(baseModels, totalMemory);
+      const exhausted = data.length < requestLimit;
+
+      if (models.length > minimumResults || exhausted) {
+        return {
+          models,
+          hasMore: !exhausted && models.length > minimumResults,
+        };
+      }
+
+      requestLimit += Math.max(this.fetchChunkSize, minimumResults);
+    }
+  }
+
+  private async fetchHuggingFaceModels(
+    normalizedQuery: string,
+    limit: number,
+  ): Promise<HuggingFaceModelSummary[]> {
+    const url = `${HF_BASE_URL}/api/models?search=${encodeURIComponent(normalizedQuery)}&limit=${limit}&full=true&config=true`;
+    const response = await fetch(url);
+
+    if (!response.ok) {
+      if (response.status === 429) {
+        throw new ModelCatalogError('rate_limited', `HF Search rate limited: ${response.status}`);
+      }
+
+      throw new ModelCatalogError('network', `HF Search failed: ${response.status}`);
+    }
+
+    return response.json() as Promise<HuggingFaceModelSummary[]>;
   }
 
   private normalizeQuery(query: string): string {
@@ -123,13 +247,14 @@ export class ModelCatalogService {
       // We prefer Q4_K_M or similar if multiple exist, but any .gguf will do.
       const ggufs = item.siblings.filter(s => {
         const name = s.rfilename || s.filename || '';
-        return name.toLowerCase().endsWith('.gguf');
+        const size = s.size || s.lfs?.size || 0;
+        return name.toLowerCase().endsWith('.gguf') && (size === 0 || size >= MIN_GGUF_BYTES);
       });
 
       if (ggufs.length === 0) continue;
 
       // Try to find a Q4/Q5 variant, otherwise just take the first one
-      let ggufSibling = ggufs.find(s => (s.rfilename || '').includes('Q4_K_M')) || ggufs[0];
+      const ggufSibling = ggufs.find(s => (s.rfilename || '').includes('Q4_K_M')) || ggufs[0];
 
       const size = ggufSibling.size || ggufSibling.lfs?.size || 0;
       const fitsInRam = size > 0 ? size < totalMemory * 0.8 : true; // Assume true if size unknown

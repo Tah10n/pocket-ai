@@ -16,7 +16,7 @@ interface ModelCardProps {
   isActive: boolean;
 }
 
-export const ModelCard = memo(({
+const ModelCardComponent = ({
   model,
   onDownload,
   onLoad,
@@ -116,7 +116,11 @@ export const ModelCard = memo(({
       </Box>
     </Box>
   );
-}, (prevProps, nextProps) => {
+};
+
+ModelCardComponent.displayName = 'ModelCard';
+
+export const ModelCard = memo(ModelCardComponent, (prevProps, nextProps) => {
   // Custom comparison to ensure fast check since model is an object
   return prevProps.isActive === nextProps.isActive &&
          prevProps.model.id === nextProps.model.id &&

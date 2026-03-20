@@ -2,12 +2,13 @@ import * as FileSystem from 'expo-file-system/legacy';
 import { createStorage } from './storage';
 import { ModelMetadata, LifecycleStatus } from '../types/models';
 import { MODELS_DIR } from './FileSystemSetup';
+import { useDownloadStore } from '../store/downloadStore';
 
 const REGISTRY_KEY = 'models-registry';
 
 export class LocalStorageRegistry {
   private static instance: LocalStorageRegistry;
-  private storage = createStorage('models-registry');
+  private storage = createStorage(REGISTRY_KEY);
 
   private constructor() {}
 
@@ -114,8 +115,6 @@ export class LocalStorageRegistry {
         if (!isCompleted) {
           // If it's not a completed model, check if it's currently in the download queue
           // We can reconstruct the expected filename from the queued model's ID
-          // Import useDownloadStore inside the loop to avoid circular dependency issues at boot
-          const { useDownloadStore } = require('../store/downloadStore');
           const queue = useDownloadStore.getState().queue;
           
           const isQueued = queue.some((q: ModelMetadata) => {

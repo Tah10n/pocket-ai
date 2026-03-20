@@ -1,6 +1,5 @@
 /* eslint-disable import/namespace */
 import * as FileSystem from 'expo-file-system/legacy';
-import { Paths } from 'expo-file-system';
 import { useDownloadStore } from '../store/downloadStore';
 import { ModelMetadata, LifecycleStatus } from '../types/models';
 import { registry } from './LocalStorageRegistry';
@@ -61,9 +60,9 @@ export class ModelDownloadManager {
     const { updateModelInQueue, removeFromQueue, setActiveModel } = useDownloadStore.getState();
 
     try {
-      const freeSpace = Paths.availableDiskSpace;
+      const freeSpace = await FileSystem.getFreeDiskStorageAsync();
       const REQUIRED_BUFFER = 1024 * 1024 * 1024; // 1 GB
-      if (freeSpace < model.size + REQUIRED_BUFFER) {
+      if (freeSpace !== undefined && freeSpace < model.size + REQUIRED_BUFFER) {
         throw new Error('DISK_SPACE_LOW');
       }
     } catch (e: any) {
@@ -181,9 +180,12 @@ export class ModelDownloadManager {
       const pauseResult = await this.resumable.pauseAsync();
       useDownloadStore.getState().updateModelInQueue(modelId, { 
         resumeData: JSON.stringify(pauseResult),
+        // No PAUSED status in enum, use QUEUED so it can be resumed
         lifecycleStatus: LifecycleStatus.QUEUED 
       });
       useDownloadStore.getState().setActiveModel(null);
+      // Reset processing flag so the queue can accept new downloads
+      this.isProcessing = false;
     }
   }
 

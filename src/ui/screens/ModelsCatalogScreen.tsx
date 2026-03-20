@@ -1,15 +1,16 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { Alert, FlatList } from 'react-native';
+import { Alert } from 'react-native';
+import { FlashList } from '@shopify/flash-list';
 import { Box } from '@/components/ui/box';
 import { Spinner } from '@/components/ui/spinner';
 import { Text } from '@/components/ui/text';
-import { SearchHeader } from '../../../components/ui/SearchHeader';
-import { ModelCard } from '../../../components/ui/ModelCard';
+import { SearchHeader } from '@/components/ui/SearchHeader';
+import { ModelCard } from '@/components/ui/ModelCard';
 import { modelCatalogService } from '../../services/ModelCatalogService';
 import { registry } from '../../services/LocalStorageRegistry';
 import { useModelDownload } from '../../hooks/useModelDownload';
 import { useLLMEngine } from '../../hooks/useLLMEngine';
-import { ModelMetadata, LifecycleStatus } from '../../types/models';
+import { ModelMetadata, LifecycleStatus, EngineStatus } from '../../types/models';
 import { useRouter } from 'expo-router';
 import { hardwareListenerService } from '../../services/HardwareListenerService';
 
@@ -139,7 +140,7 @@ export const ModelsCatalogScreen = () => {
             <Text className="mt-4 text-typography-500">Searching Hugging Face...</Text>
           </Box>
         ) : (
-          <FlatList
+          <FlashList
             data={displayModels}
             keyExtractor={(item) => item.id}
             renderItem={({ item }) => (
@@ -163,7 +164,7 @@ export const ModelsCatalogScreen = () => {
         )}
       </Box>
 
-      {engineState.status === 'initializing' && (
+      {engineState.status === EngineStatus.INITIALIZING && (
         <Box className="absolute bottom-0 left-0 right-0 bg-primary-500 p-2 items-center flex-row justify-center">
           <Spinner className="text-white mr-2" />
           <Text className="text-white font-bold">Warming up model... {Math.round(engineState.loadProgress > 1 ? engineState.loadProgress : engineState.loadProgress * 100)}%</Text>

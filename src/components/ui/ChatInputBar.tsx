@@ -46,7 +46,7 @@ export const ChatInputBar = ({ onSendMessage }: ChatInputBarProps) => {
 
                 <Pressable 
                     onPress={handleSend}
-                    className={`h-10 w-10 items-center justify-center rounded-full active:scale-95 transition-all ${message.trim() ? 'bg-primary-500' : 'bg-background-200 dark:bg-background-800'}`}
+                    className={`h-10 w-10 items-center justify-center rounded-full active:opacity-70 ${message.trim() ? 'bg-primary-500' : 'bg-background-200 dark:bg-background-800'}`}
                 >
                     <MaterialSymbols 
                         name="arrow-upward" 

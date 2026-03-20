@@ -57,8 +57,9 @@ export class ModelCatalogService {
       if (!response.ok) throw new Error(`HF Search failed: ${response.status}`);
 
       const data = await response.json() as HuggingFaceModelSummary[];
-      const baseModels = this.transformHFResponse(data);
-      const models = await this.fetchFileSizes(baseModels);
+      const totalMemory = await this.getTotalMemory();
+      const baseModels = this.transformHFResponse(data, totalMemory);
+      const models = await this.fetchFileSizes(baseModels, totalMemory);
       
       this.searchCache.set(cacheKey, { data: models, timestamp: Date.now() });
       return this.mergeWithRegistry(models);
@@ -69,14 +70,15 @@ export class ModelCatalogService {
     }
   }
 
-  private async fetchFileSizes(models: ModelMetadata[]): Promise<ModelMetadata[]> {
-    let totalMemory = 8 * 1024 * 1024 * 1024;
+  private async getTotalMemory(): Promise<number> {
     try {
-      totalMemory = await DeviceInfo.getTotalMemory();
+      return await DeviceInfo.getTotalMemory();
     } catch (e) {
-      // Fallback
+      return 8 * 1024 * 1024 * 1024; // Fallback 8GB
     }
+  }
 
+  private async fetchFileSizes(models: ModelMetadata[], totalMemory: number): Promise<ModelMetadata[]> {
     const fetchSize = async (model: ModelMetadata): Promise<ModelMetadata> => {
       if (model.size > 0) return model;
       try {
@@ -93,7 +95,15 @@ export class ModelCatalogService {
       return model;
     };
 
-    return Promise.all(models.map(fetchSize));
+    // Process in batches of 5 to avoid HuggingFace rate-limiting
+    const BATCH_SIZE = 5;
+    const results: ModelMetadata[] = [];
+    for (let i = 0; i < models.length; i += BATCH_SIZE) {
+      const batch = models.slice(i, i + BATCH_SIZE);
+      const batchResults = await Promise.all(batch.map(fetchSize));
+      results.push(...batchResults);
+    }
+    return results;
   }
 
   private normalizeQuery(query: string): string {
@@ -102,9 +112,8 @@ export class ModelCatalogService {
     return trimmed.toLowerCase().includes('gguf') ? trimmed : `${trimmed} gguf`;
   }
 
-  private transformHFResponse(data: HuggingFaceModelSummary[]): ModelMetadata[] {
+  private transformHFResponse(data: HuggingFaceModelSummary[], totalMemory: number): ModelMetadata[] {
     const results: ModelMetadata[] = [];
-    const totalMemory = 8 * 1024 * 1024 * 1024; // Default 8GB if DeviceInfo fails, we'll improve this
 
     for (const item of data) {
       const repoId = item.id || item.modelId;

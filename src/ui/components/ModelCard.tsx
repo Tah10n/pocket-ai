@@ -2,7 +2,7 @@ import React from 'react';
 import { Box } from '@/components/ui/box';
 import { Text } from '@/components/ui/text';
 import { Button, ButtonText } from '@/components/ui/button';
-import { MaterialSymbols } from '../../components/ui/MaterialSymbols';
+import { MaterialSymbols } from '@/components/ui/MaterialSymbols';
 
 interface ModelCardProps {
     model: any;

@@ -39,6 +39,9 @@ export const useDownloadStore = create<DownloadState>()(
       {
         name: 'download-queue-storage',
         storage: createJSONStorage(() => mmkvStorage),
+        // Do NOT persist activeModelId — after a restart, no real download is running.
+        // Persisting it would leave the UI in a permanent "downloading" spinner state.
+        partialize: (state) => ({ queue: state.queue }),
       }
     )
   )

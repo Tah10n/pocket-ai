@@ -137,11 +137,13 @@ class LLMEngineService {
   }
 
   public async unload(): Promise<void> {
-    this.initPromise = null;
     if (this.context) {
       await releaseAllLlama();
       this.context = null;
     }
+    // Reset initPromise only after the context has been fully released
+    // to prevent a concurrent load() call from thinking no init is in progress
+    this.initPromise = null;
     
     if (this.state.activeModelId) {
       const model = registry.getModel(this.state.activeModelId);

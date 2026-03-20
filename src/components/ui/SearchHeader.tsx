@@ -4,7 +4,7 @@ import { Input, InputField } from './input';
 import { Text } from './text';
 import { Pressable } from './pressable';
 import MaterialIcons from '@expo/vector-icons/MaterialIcons';
-import { typographyColors } from '../../src/utils/themeTokens';
+import { typographyColors } from '../../utils/themeTokens';
 
 interface SearchHeaderProps {
   searchQuery: string;

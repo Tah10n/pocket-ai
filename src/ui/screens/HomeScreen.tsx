@@ -4,11 +4,11 @@ import { ScrollView } from '@/components/ui/scroll-view';
 import { Pressable } from '@/components/ui/pressable';
 import { Text } from '@/components/ui/text';
 import { useRouter } from 'expo-router';
-import { HeaderBar } from '../../components/ui/HeaderBar';
-import { ActiveModelCard } from '../../components/ui/ActiveModelCard';
-import { QuickActionsGrid } from '../../components/ui/QuickActionsGrid';
-import { RecentConversationsList } from '../../components/ui/RecentConversationsList';
-import { MaterialSymbols } from '../../components/ui/MaterialSymbols';
+import { HeaderBar } from '@/components/ui/HeaderBar';
+import { ActiveModelCard } from '@/components/ui/ActiveModelCard';
+import { QuickActionsGrid } from '@/components/ui/QuickActionsGrid';
+import { RecentConversationsList } from '@/components/ui/RecentConversationsList';
+import { MaterialSymbols } from '@/components/ui/MaterialSymbols';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 export const HomeScreen = () => {
@@ -29,7 +29,7 @@ export const HomeScreen = () => {
                 <Box className="px-4 py-6">
                     <Pressable 
                         onPress={() => router.push('/(tabs)/chat')}
-                        className="flex-row w-full items-center justify-center rounded-xl h-14 bg-primary-500 shadow-xl shadow-primary-500/20 gap-3 active:scale-95 active:opacity-90 transition-all"
+                        className="flex-row w-full items-center justify-center rounded-xl h-14 bg-primary-500 shadow-xl gap-3 active:opacity-80"
                     >
                         <MaterialSymbols name="add-comment" size={22} className="text-typography-0" />
                         <Text className="text-typography-0 text-base font-bold">New Chat</Text>

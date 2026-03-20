@@ -47,7 +47,7 @@ export const ActiveModelCard = ({ onSwapModel }: ActiveModelCardProps) => {
           
           <Pressable 
             onPress={onSwapModel} 
-            className="px-4 h-9 bg-primary-500 items-center justify-center rounded-lg shadow-lg active:scale-95 active:opacity-90 transition-all"
+            className="px-4 h-9 bg-primary-500 items-center justify-center rounded-lg active:opacity-80"
           >
             <Text className="text-typography-0 text-sm font-semibold">Swap Model</Text>
           </Pressable>

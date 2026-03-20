@@ -1,21 +1,26 @@
 import React from 'react';
+import { Alert } from 'react-native';
 import { Box } from '@/components/ui/box';
 import { Text } from '@/components/ui/text';
 import { ScrollView } from '@/components/ui/scroll-view';
 import { Pressable } from '@/components/ui/pressable';
-import { HeaderBar } from '../../components/ui/HeaderBar';
-import { MaterialSymbols } from '../../components/ui/MaterialSymbols';
-import { useDeviceMetrics } from '../../../src/hooks/useDeviceMetrics';
-import { useTheme } from '../../../src/providers/ThemeProvider';
-import { llmEngineService } from '../../../src/services/LLMEngineService';
+import { HeaderBar } from '@/components/ui/HeaderBar';
+import { MaterialSymbols } from '@/components/ui/MaterialSymbols';
+import { useDeviceMetrics } from '../../hooks/useDeviceMetrics';
+import { useTheme } from '../../providers/ThemeProvider';
+import { llmEngineService } from '../../services/LLMEngineService';
 
 
 export const SettingsScreen = () => {
-    const { resolvedMode, setTheme } = useTheme();
+    const { mode, resolvedMode, setTheme } = useTheme();
     const metrics = useDeviceMetrics();
 
-    const clearCache = async () => {
+    const unloadActiveModel = async () => {
         await llmEngineService.unload();
+    };
+
+    const handleLanguagePress = () => {
+        Alert.alert('Language', 'Language selection will be available in a future update.');
     };
 
     return (
@@ -41,24 +46,31 @@ export const SettingsScreen = () => {
                             <Text className="font-medium text-typography-900 dark:text-typography-100">Theme Mode</Text>
                         </Box>
                         
-                        <Box className="flex-row h-9 w-40 items-center justify-between rounded-lg bg-background-100 dark:bg-background-800 p-1">
+                        <Box className="flex-row h-9 w-56 items-center justify-between rounded-lg bg-background-100 dark:bg-background-800 p-1">
                             <Pressable 
                                 onPress={() => setTheme('light')}
-                                className={`flex-1 h-full items-center justify-center rounded-md px-2 ${resolvedMode === 'light' ? 'bg-background-0 dark:bg-background-700 shadow-sm' : 'bg-transparent'}`}
+                                className={`flex-1 h-full items-center justify-center rounded-md px-2 ${mode === 'light' ? 'bg-background-0 dark:bg-background-700 shadow-sm' : 'bg-transparent'}`}
                             >
-                                <Text className={`text-xs font-semibold ${resolvedMode === 'light' ? 'text-primary-600 dark:text-typography-0' : 'text-typography-500 dark:text-typography-400'}`}>Light</Text>
+                                <Text className={`text-xs font-semibold ${mode === 'light' ? 'text-primary-600 dark:text-typography-0' : 'text-typography-500 dark:text-typography-400'}`}>Light</Text>
+                            </Pressable>
+                            <Pressable 
+                                onPress={() => setTheme('system')}
+                                className={`flex-1 h-full items-center justify-center rounded-md px-2 ${mode === 'system' ? 'bg-background-0 dark:bg-background-700 shadow-sm' : 'bg-transparent'}`}
+                            >
+                                <Text className={`text-xs font-semibold ${mode === 'system' ? 'text-primary-600 dark:text-typography-0' : 'text-typography-500 dark:text-typography-400'}`}>System</Text>
                             </Pressable>
                             <Pressable 
                                 onPress={() => setTheme('dark')}
-                                className={`flex-1 h-full items-center justify-center rounded-md px-2 ${resolvedMode === 'dark' ? 'bg-background-0 dark:bg-background-700 shadow-sm' : 'bg-transparent'}`}
+                                className={`flex-1 h-full items-center justify-center rounded-md px-2 ${mode === 'dark' ? 'bg-background-0 dark:bg-background-700 shadow-sm' : 'bg-transparent'}`}
                             >
-                                <Text className={`text-xs font-semibold ${resolvedMode === 'dark' ? 'text-primary-600 dark:text-typography-0' : 'text-typography-500 dark:text-typography-400'}`}>Dark</Text>
+                                <Text className={`text-xs font-semibold ${mode === 'dark' ? 'text-primary-600 dark:text-typography-0' : 'text-typography-500 dark:text-typography-400'}`}>Dark</Text>
                             </Pressable>
                         </Box>
                     </Box>
                     
                     {/* Language Segment */}
                     <Pressable 
+                        onPress={handleLanguagePress}
                         className="flex-row px-4 py-4 items-center justify-between active:opacity-70"
                     >
                         <Box className="flex-row items-center gap-3">
@@ -145,10 +157,10 @@ export const SettingsScreen = () => {
                         </Box>
                         
                         <Pressable 
-                            onPress={clearCache}
-                            className="mt-4 w-full py-2 bg-primary-500/10 items-center justify-center rounded-lg active:opacity-70"
+                            onPress={unloadActiveModel}
+                            className="mt-4 w-full py-2 bg-warning-500/10 items-center justify-center rounded-lg active:opacity-70"
                         >
-                            <Text className="text-primary-600 text-sm font-semibold">Clear Active Cache</Text>
+                            <Text className="text-warning-600 text-sm font-semibold">Unload Active Model</Text>
                         </Pressable>
                     </Box>
                 </Box>

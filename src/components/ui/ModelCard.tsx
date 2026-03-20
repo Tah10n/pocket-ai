@@ -2,7 +2,7 @@ import React, { memo } from 'react';
 import { Box } from './box';
 import { Text } from './text';
 import { Button, ButtonText } from './button';
-import { ModelMetadata, LifecycleStatus } from '../../src/types/models';
+import { ModelMetadata, LifecycleStatus } from '../../types/models';
 import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 
 interface ModelCardProps {

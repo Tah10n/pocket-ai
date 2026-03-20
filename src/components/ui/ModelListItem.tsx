@@ -64,7 +64,7 @@ export const ModelListItem = ({ name, sizeMB, status, fitsInRam, onAction, image
           {status === 'downloaded' && (
             <Pressable 
               onPress={() => onAction?.('load')} 
-              className="flex-1 bg-primary-500 items-center justify-center py-1.5 rounded-lg active:opacity-90 active:scale-95"
+              className="flex-1 bg-primary-500 items-center justify-center py-1.5 rounded-lg active:opacity-80"
             >
               <Text className="text-typography-0 text-xs font-bold">Load Model</Text>
             </Pressable>

@@ -16,7 +16,7 @@ export const useChatSession = () => {
     
     const appendUserMessage = useCallback(async (text: string) => {
         const newMsg: ChatMessage = {
-            id: Date.now().toString(),
+            id: `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
             isUser: true,
             content: text
         };
@@ -24,7 +24,7 @@ export const useChatSession = () => {
         setMessages(prev => [...prev, newMsg]);
         setIsGenerating(true);
         
-        const replyId = (Date.now() + 1).toString();
+        const replyId = `${Date.now() + 1}-${Math.random().toString(36).slice(2, 9)}`;
         setMessages(prev => [...prev, {
             id: replyId,
             isUser: false,

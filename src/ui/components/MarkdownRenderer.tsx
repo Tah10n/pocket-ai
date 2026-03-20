@@ -4,7 +4,7 @@ import { Text } from '@/components/ui/text';
 import { Pressable } from '@/components/ui/pressable';
 import Markdown, { MarkdownIt } from 'react-native-markdown-display';
 import * as Clipboard from 'expo-clipboard';
-import { MaterialSymbols } from '../../components/ui/MaterialSymbols';
+import { MaterialSymbols } from '@/components/ui/MaterialSymbols';
 
 interface MarkdownRendererProps {
     content: string;

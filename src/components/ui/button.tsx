@@ -1,5 +1,8 @@
 import React from 'react';
-import { Pressable, Text, PressableProps, TextProps } from 'react-native';
+import { Pressable } from './pressable';
+import { Text } from './text';
+import { PressableProps, TextProps } from 'react-native';
+
 
 interface ButtonProps extends PressableProps {
   action?: 'primary' | 'secondary' | 'positive' | 'negative' | 'default';

@@ -44,6 +44,7 @@ To learn more about developing your project with Expo, look at the following res
 
 ## Documentation
 
+- [UI Architecture & Components Guidelines](./docs/ui-architecture.md): Essential reading for creating, modifying, or importing UI components correctly.
 - [New Architecture Migration Guide](./docs/new-architecture.md): Details about React Native New Architecture, build processes, and specific native module instructions.
 
 ## Join the community

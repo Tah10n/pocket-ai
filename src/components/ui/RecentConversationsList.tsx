@@ -1,22 +1,23 @@
-import React, { ComponentProps, useEffect, useState } from 'react';
+import React, { ComponentProps } from 'react';
 import { Box } from '@/components/ui/box';
 import { Text } from '@/components/ui/text';
 import { Pressable } from '@/components/ui/pressable';
 import { MaterialSymbols } from './MaterialSymbols';
 import { FlashList, ListRenderItem } from '@shopify/flash-list';
-import {
-  getChatHistorySummaries,
-  subscribeChatHistory,
-  type ChatHistorySummary,
-} from '@/services/SettingsStore';
+import { useChatStore } from '../../store/chatStore';
+import { ConversationIndexItem, toConversationIndexItem } from '../../types/chat';
 
 type IconName = ComponentProps<typeof MaterialSymbols>['name'];
 
-interface Conversation extends ChatHistorySummary {
-  title: string;
+interface Conversation extends ConversationIndexItem {
   model: string;
   time: string;
   icon: IconName;
+}
+
+interface RecentConversationsListProps {
+  onDeleteConversation?: (conversation: ConversationIndexItem) => void;
+  onOpenConversation?: (conversation: ConversationIndexItem) => void;
 }
 
 function formatRelativeTime(timestamp: number): string {
@@ -34,14 +35,14 @@ function formatRelativeTime(timestamp: number): string {
   return new Date(timestamp).toLocaleDateString();
 }
 
-export const RecentConversationsList = () => {
-  const [summaries, setSummaries] = useState<ChatHistorySummary[]>(() => getChatHistorySummaries(5));
-
-  useEffect(() => {
-    return subscribeChatHistory(() => {
-      setSummaries(getChatHistorySummaries(5));
-    });
-  }, []);
+export const RecentConversationsList = ({
+  onDeleteConversation,
+  onOpenConversation,
+}: RecentConversationsListProps) => {
+  const threads = useChatStore((state) => state.threads);
+  const summaries = Object.values(threads)
+    .map(toConversationIndexItem)
+    .sort((left, right) => right.updatedAt - left.updatedAt);
 
   const conversations: Conversation[] = summaries.map((summary) => ({
     ...summary,
@@ -51,33 +52,49 @@ export const RecentConversationsList = () => {
   }));
 
   const renderItem: ListRenderItem<Conversation> = ({ item: conv }) => (
-    <Pressable 
-      className="flex-row items-center p-4 rounded-xl bg-background-50 dark:bg-primary-500/5 border border-outline-200 dark:border-primary-500/10 transition-colors active:opacity-70"
-    >
-      <Box className="size-10 rounded-lg bg-background-100 dark:bg-primary-500/20 items-center justify-center shrink-0">
-        <MaterialSymbols name={conv.icon} size={20} className="text-primary-500" />
-      </Box>
-      
-      <Box className="ml-3 flex-1 overflow-hidden">
-        <Text className="text-typography-900 dark:text-typography-100 font-semibold truncate" numberOfLines={1}>{conv.title}</Text>
-        <Box className="flex-row items-center gap-2 mt-0.5">
-          <Text className="text-typography-500 dark:text-typography-400 text-xs">{conv.model}</Text>
-          <Box className="w-1 h-1 rounded-full bg-outline-400" />
-          <Text className="text-typography-500 dark:text-typography-400 text-xs">{conv.time}</Text>
+    <Box className="flex-row items-center rounded-xl bg-background-50 dark:bg-primary-500/5 border border-outline-200 dark:border-primary-500/10">
+      <Pressable 
+        testID={`recent-conversation-${conv.id}`}
+        onPress={() => {
+          onOpenConversation?.(conv);
+        }}
+        className="flex-1 flex-row items-center p-4 active:opacity-70"
+      >
+        <Box className="size-10 rounded-lg bg-background-100 dark:bg-primary-500/20 items-center justify-center shrink-0">
+          <MaterialSymbols name={conv.icon} size={20} className="text-primary-500" />
+        </Box>
+        
+        <Box className="ml-3 flex-1 overflow-hidden">
+          <Text className="text-typography-900 dark:text-typography-100 font-semibold truncate" numberOfLines={1}>{conv.title}</Text>
+          <Box className="flex-row items-center gap-2 mt-0.5">
+            <Text className="text-typography-500 dark:text-typography-400 text-xs">{conv.model}</Text>
+            <Box className="w-1 h-1 rounded-full bg-outline-400" />
+            <Text className="text-typography-500 dark:text-typography-400 text-xs">{conv.time}</Text>
+          </Box>
+        </Box>
+      </Pressable>
+
+      <Box className="ml-3 flex-row items-center gap-1">
+        <Pressable
+          testID={`delete-conversation-${conv.id}`}
+          onPress={() => {
+            onDeleteConversation?.(conv);
+          }}
+          className="h-9 w-9 items-center justify-center rounded-full bg-background-100 dark:bg-background-900/60 active:opacity-70"
+        >
+          <MaterialSymbols name="delete-outline" size={18} className="text-error-500" />
+        </Pressable>
+        <Box className="pr-4">
+          <MaterialSymbols name="chevron-right" size={20} className="text-typography-400" />
         </Box>
       </Box>
-      
-      <MaterialSymbols name="chevron-right" size={20} className="text-typography-400" />
-    </Pressable>
+    </Box>
   );
 
   return (
     <Box className="px-4 mt-8 pb-4">
-      <Box className="flex-row items-center justify-between mb-4">
+      <Box className="mb-4">
         <Text className="text-typography-900 dark:text-typography-100 text-lg font-bold leading-tight tracking-tight">Recent Conversations</Text>
-        <Pressable>
-          <Text className="text-primary-500 text-xs font-bold uppercase tracking-wider">See All</Text>
-        </Pressable>
       </Box>
 
       <Box className="flex-1 min-h-80">

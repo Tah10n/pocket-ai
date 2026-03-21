@@ -1,4 +1,5 @@
 import React from 'react';
+import { Alert } from 'react-native';
 import { Box } from '@/components/ui/box';
 import { ScrollView } from '@/components/ui/scroll-view';
 import { Pressable } from '@/components/ui/pressable';
@@ -10,10 +11,36 @@ import { QuickActionsGrid } from '@/components/ui/QuickActionsGrid';
 import { RecentConversationsList } from '@/components/ui/RecentConversationsList';
 import { MaterialSymbols } from '@/components/ui/MaterialSymbols';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useChatStore } from '../../store/chatStore';
+import { ConversationIndexItem } from '../../types/chat';
 
 export const HomeScreen = () => {
     const insets = useSafeAreaInsets();
     const router = useRouter();
+    const setActiveThread = useChatStore((state) => state.setActiveThread);
+    const deleteThread = useChatStore((state) => state.deleteThread);
+
+    const handleOpenConversation = (conversation: ConversationIndexItem) => {
+        setActiveThread(conversation.id);
+        router.push('/(tabs)/chat' as any);
+    };
+
+    const handleDeleteConversation = (conversation: ConversationIndexItem) => {
+        Alert.alert(
+            'Delete conversation',
+            `Delete "${conversation.title}" from your recent chats?`,
+            [
+                { text: 'Cancel', style: 'cancel' },
+                {
+                    text: 'Delete',
+                    style: 'destructive',
+                    onPress: () => {
+                        deleteThread(conversation.id);
+                    },
+                },
+            ],
+        );
+    };
 
     return (
         <Box className="flex-1 bg-background-0 dark:bg-background-950">
@@ -42,7 +69,10 @@ export const HomeScreen = () => {
 
                 <QuickActionsGrid onCatalogPress={() => router.push('/(tabs)/models' as any)} />
                 
-                <RecentConversationsList />
+                <RecentConversationsList
+                    onOpenConversation={handleOpenConversation}
+                    onDeleteConversation={handleDeleteConversation}
+                />
             </ScrollView>
         </Box>
     );

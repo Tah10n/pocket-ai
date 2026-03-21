@@ -1,4 +1,5 @@
 import {
+  clearLegacyChatHistory,
   getSettings,
   getChatHistorySummaries,
   repairChatHistoryIndex,
@@ -13,6 +14,10 @@ describe('SettingsStore (Stage A)', () => {
     (storage as any).clearAll?.();
     storage.remove('app_settings');
     storage.remove('chat_history_index');
+  });
+
+  it('defaults new installs to 90 day chat retention', () => {
+    expect(getSettings().chatRetentionDays).toBe(90);
   });
 
   it('normalizes language values', () => {
@@ -34,6 +39,27 @@ describe('SettingsStore (Stage A)', () => {
     expect(getSettings().activeModelId).toBeNull();
   });
 
+  it('normalizes chat retention settings as nullable positive day counts', () => {
+    updateSettings({ chatRetentionDays: 90 });
+    expect(getSettings().chatRetentionDays).toBe(90);
+
+    updateSettings({ chatRetentionDays: '365' as any });
+    expect(getSettings().chatRetentionDays).toBe(365);
+
+    updateSettings({ chatRetentionDays: 0 as any });
+    expect(getSettings().chatRetentionDays).toBeNull();
+  });
+
+  it('preserves legacy installs without a chat retention setting', () => {
+    storage.set('app_settings', JSON.stringify({
+      theme: 'system',
+      language: 'en',
+      activeModelId: 'author/model-q4',
+    }));
+
+    expect(getSettings().chatRetentionDays).toBeNull();
+  });
+
   it('resets corrupted settings payload', () => {
     storage.set('app_settings', '{');
     expect(getSettings().language).toBe('en');
@@ -53,6 +79,13 @@ describe('SettingsStore (Stage A)', () => {
 
     const res = repairChatHistoryIndex();
     expect(res.removed).toBe(1);
+    expect(JSON.parse(storage.getString('chat_history_index') || '[]')).toEqual(['chat-1']);
+  });
+
+  it('sanitizes chat history index entries before consumers read them', () => {
+    storage.set('chat_history_index', JSON.stringify(['chat-1', ' chat-1 ', '', null, 5]));
+
+    expect(getChatHistorySummaries()).toEqual([]);
     expect(JSON.parse(storage.getString('chat_history_index') || '[]')).toEqual(['chat-1']);
   });
 
@@ -98,6 +131,21 @@ describe('SettingsStore (Stage A)', () => {
 
     expect(listener).toHaveBeenCalledTimes(1);
     unsubscribe();
+  });
+
+  it('clears legacy chat history keys and index together', () => {
+    saveChatHistory({
+      id: 'chat-1',
+      messages: [{ role: 'user', content: 'hello there' }],
+      modelId: 'm1',
+      presetId: null,
+      createdAt: 1,
+      updatedAt: 1,
+    });
+
+    expect(clearLegacyChatHistory()).toBe(1);
+    expect(storage.getString('chat_history_chat-1')).toBeUndefined();
+    expect(JSON.parse(storage.getString('chat_history_index') || '[]')).toEqual([]);
   });
 });
 

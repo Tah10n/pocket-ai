@@ -1,76 +1,603 @@
 import React, { useEffect } from 'react';
-import { render, act, waitFor } from '@testing-library/react-native';
+import { act, render, waitFor } from '@testing-library/react-native';
 import { useChatSession } from '../../src/hooks/useChatSession';
 import { llmEngineService } from '../../src/services/LLMEngineService';
-import { getSettings, saveChatHistory } from '../../src/services/SettingsStore';
+import { getSettings } from '../../src/services/SettingsStore';
 import { EngineStatus } from '../../src/types/models';
+import { useChatStore } from '../../src/store/chatStore';
+import { AppState } from 'react-native';
+import {
+  buildInferenceMessagesForThread,
+  getThreadTruncationState,
+  MAX_CONTEXT_MESSAGES,
+  resolvePresetSnapshot,
+  SUMMARY_PLACEHOLDER_CONTENT,
+} from '../../src/hooks/useChatSession';
+import { presetManager } from '../../src/services/PresetManager';
 
 jest.mock('../../src/services/LLMEngineService', () => ({
   llmEngineService: {
     getState: jest.fn(),
     chatCompletion: jest.fn(),
+    stopCompletion: jest.fn(),
   },
 }));
 
 jest.mock('../../src/services/SettingsStore', () => ({
   getSettings: jest.fn(),
-  saveChatHistory: jest.fn(),
+}));
+
+jest.mock('../../src/services/PresetManager', () => ({
+  presetManager: {
+    getPreset: jest.fn().mockReturnValue({
+      id: 'preset-1',
+      name: 'Helpful Assistant',
+      systemPrompt: 'Be concise.',
+    }),
+  },
 }));
 
 describe('useChatSession', () => {
+  let appStateListener: ((state: 'active' | 'background' | 'inactive') => void) | undefined;
+
+  function renderHookHarness() {
+    let session: ReturnType<typeof useChatSession> | null = null;
+
+    const Harness = () => {
+      const value = useChatSession();
+      useEffect(() => {
+        session = value;
+      }, [value]);
+      return null;
+    };
+
+    render(<Harness />);
+    return () => session;
+  }
+
   beforeEach(() => {
     jest.clearAllMocks();
+    useChatStore.setState({ threads: {}, activeThreadId: null });
+    appStateListener = undefined;
+    (presetManager.getPreset as jest.Mock).mockReset();
+    (presetManager.getPreset as jest.Mock).mockReturnValue({
+      id: 'preset-1',
+      name: 'Helpful Assistant',
+      systemPrompt: 'Be concise.',
+    });
     (getSettings as jest.Mock).mockReturnValue({
       activeModelId: 'author/model-q4',
       activePresetId: 'preset-1',
+      temperature: 0.7,
+      topP: 0.9,
+      maxTokens: 1024,
     });
     (llmEngineService.getState as jest.Mock).mockReturnValue({
       status: EngineStatus.READY,
     });
     (llmEngineService.chatCompletion as jest.Mock).mockImplementation(
-      async (_prompt: string, _system: string, onToken?: (token: string) => void) => {
+      async ({ onToken }: { onToken?: (token: string) => void }) => {
         onToken?.('Hello back');
         return { text: 'Hello back' };
       },
     );
+    (llmEngineService.stopCompletion as jest.Mock).mockResolvedValue(undefined);
+    jest.spyOn(AppState, 'addEventListener').mockImplementation((type: any, listener: any) => {
+      if (type === 'change') {
+        appStateListener = listener;
+      }
+
+      return {
+        remove: jest.fn(),
+      } as any;
+    });
   });
 
-  it('persists chat history when a conversation is created', async () => {
-    let session: ReturnType<typeof useChatSession> | null = null;
-
-    const Harness = () => {
-      const value = useChatSession();
-
-      useEffect(() => {
-        session = value;
-      }, [value]);
-
-      return null;
-    };
-
-    render(<Harness />);
+  it('creates and persists a thread-backed conversation', async () => {
+    const getSession = renderHookHarness();
 
     await act(async () => {
-      await session?.appendUserMessage('Hello there');
+      await getSession()?.appendUserMessage('Hello there');
     });
 
     await waitFor(() => {
-      expect(saveChatHistory).toHaveBeenCalled();
+      expect(useChatStore.getState().getConversationIndex()).toHaveLength(1);
     });
 
-    const lastCall = (saveChatHistory as jest.Mock).mock.calls.at(-1)?.[0];
-    expect(lastCall).toEqual(
+    const thread = useChatStore.getState().getActiveThread();
+    expect(thread?.modelId).toBe('author/model-q4');
+    expect(thread?.presetId).toBe('preset-1');
+    expect(thread?.presetSnapshot).toEqual({
+      id: 'preset-1',
+      name: 'Helpful Assistant',
+      systemPrompt: 'Be concise.',
+    });
+    expect(thread?.messages.map((message) => message.role)).toEqual(['user', 'assistant']);
+    expect(thread?.messages.at(-1)?.content).toBe('Hello back');
+  });
+
+  it('stops generation and preserves the partial assistant response', async () => {
+    let onToken: ((token: string) => void) | undefined;
+    let resolveCompletion: (() => void) | undefined;
+
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementation(
+      ({ onToken: tokenHandler }: { onToken?: (token: string) => void }) =>
+        new Promise((resolve) => {
+          onToken = tokenHandler;
+          resolveCompletion = () => resolve({ text: 'Stopped' });
+        }),
+    );
+
+    const getSession = renderHookHarness();
+
+    let sendPromise: Promise<void> | undefined;
+    await act(async () => {
+      sendPromise = getSession()?.appendUserMessage('Long answer please');
+    });
+
+    await waitFor(() => {
+      expect(useChatStore.getState().getActiveThread()?.status).toBe('generating');
+    });
+
+    await act(async () => {
+      onToken?.('Partial answer');
+    });
+
+    await act(async () => {
+      await getSession()?.stopGeneration();
+      resolveCompletion?.();
+      await sendPromise;
+    });
+
+    const thread = useChatStore.getState().getActiveThread();
+    expect(llmEngineService.stopCompletion).toHaveBeenCalled();
+    expect(thread?.status).toBe('stopped');
+    expect(thread?.messages.at(-1)).toEqual(
       expect.objectContaining({
-        modelId: 'author/model-q4',
-        presetId: 'preset-1',
+        role: 'assistant',
+        content: 'Partial answer',
+        state: 'stopped',
+      }),
+    );
+  });
+
+  it('regenerates the last assistant response in-place', async () => {
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Hello there');
+    });
+
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      async ({ onToken }: { onToken?: (token: string) => void }) => {
+        onToken?.('Fresh reply');
+        return { text: 'Fresh reply' };
+      },
+    );
+
+    await act(async () => {
+      await getSession()?.regenerateLastResponse();
+    });
+
+    const thread = useChatStore.getState().getActiveThread();
+    expect(thread?.messages).toHaveLength(2);
+    expect(thread?.messages.at(-1)).toEqual(
+      expect.objectContaining({
+        role: 'assistant',
+        content: 'Fresh reply',
+        state: 'complete',
+        regeneratesMessageId: expect.any(String),
+      }),
+    );
+  });
+
+  it('regenerates from a selected user message after editing it', async () => {
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Original prompt');
+    });
+
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      async ({ onToken }: { onToken?: (token: string) => void }) => {
+        onToken?.('Edited branch reply');
+        return { text: 'Edited branch reply' };
+      },
+    );
+
+    await act(async () => {
+      await getSession()?.regenerateFromUserMessage(
+        useChatStore.getState().getActiveThread()?.messages[0].id ?? '',
+        'Edited prompt',
+      );
+    });
+
+    const thread = useChatStore.getState().getActiveThread();
+    expect(thread?.messages).toHaveLength(2);
+    expect(thread?.messages[0]).toEqual(
+      expect.objectContaining({
+        role: 'user',
+        content: 'Edited prompt',
+      }),
+    );
+    expect(thread?.messages[1]).toEqual(
+      expect.objectContaining({
+        role: 'assistant',
+        content: 'Edited branch reply',
+        state: 'complete',
+      }),
+    );
+    expect(llmEngineService.chatCompletion).toHaveBeenLastCalledWith(
+      expect.objectContaining({
         messages: [
-          { role: 'user', content: 'Hello there' },
-          { role: 'assistant', content: 'Hello back' },
+          { role: 'system', content: 'Be concise.' },
+          { role: 'user', content: 'Edited prompt' },
         ],
       }),
     );
-    expect(lastCall.id).toEqual(expect.any(String));
-    expect(lastCall.createdAt).toEqual(expect.any(Number));
-    expect(lastCall.updatedAt).toEqual(expect.any(Number));
+  });
+
+  it('keeps backgrounded generation alive until completion resolves', async () => {
+    let onToken: ((token: string) => void) | undefined;
+    let resolveCompletion: (() => void) | undefined;
+
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementation(
+      ({ onToken: tokenHandler }: { onToken?: (token: string) => void }) =>
+        new Promise((resolve) => {
+          onToken = tokenHandler;
+          resolveCompletion = () => resolve({ text: 'Finished in background' });
+        }),
+    );
+
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      void getSession()?.appendUserMessage('Continue while backgrounded');
+    });
+
+    await waitFor(() => {
+      expect(useChatStore.getState().getActiveThread()?.status).toBe('generating');
+    });
+
+    await act(async () => {
+      appStateListener?.('background');
+      onToken?.('Finished in background');
+      resolveCompletion?.();
+    });
+
+    await waitFor(() => {
+      expect(useChatStore.getState().getActiveThread()?.status).toBe('idle');
+    });
+
+    expect(useChatStore.getState().getActiveThread()?.messages.at(-1)).toEqual(
+      expect.objectContaining({
+        role: 'assistant',
+        content: 'Finished in background',
+        state: 'complete',
+      }),
+    );
+  });
+
+  it('marks orphaned generating state as stopped when returning to foreground', async () => {
+    renderHookHarness();
+
+    await act(async () => {
+      useChatStore.setState({
+        threads: {
+          'thread-1': {
+            id: 'thread-1',
+            title: 'Recovered thread',
+          modelId: 'author/model-q4',
+          presetId: 'preset-1',
+          presetSnapshot: {
+            id: 'preset-1',
+            name: 'Helpful Assistant',
+            systemPrompt: 'Be concise.',
+          },
+          paramsSnapshot: {
+            temperature: 0.7,
+            topP: 0.9,
+              maxTokens: 1024,
+            },
+            messages: [
+              {
+                id: 'assistant-1',
+                role: 'assistant',
+                content: 'Partial reply',
+                createdAt: 1,
+                state: 'stopped',
+              },
+            ],
+            createdAt: 1,
+            updatedAt: 1,
+            status: 'generating',
+          },
+        },
+        activeThreadId: 'thread-1',
+      });
+    });
+
+    await act(async () => {
+      appStateListener?.('background');
+      appStateListener?.('active');
+    });
+
+    expect(useChatStore.getState().getActiveThread()?.status).toBe('stopped');
+  });
+
+  it('builds inference context from frozen preset snapshot, history, and params', async () => {
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('First prompt');
+    });
+
+    (getSettings as jest.Mock).mockReturnValue({
+      activeModelId: 'author/model-q4',
+      activePresetId: 'preset-2',
+      temperature: 1.4,
+      topP: 0.4,
+      maxTokens: 256,
+    });
+    (presetManager.getPreset as jest.Mock).mockReturnValueOnce({
+      id: 'preset-2',
+      name: 'Changed Preset',
+      systemPrompt: 'Use a different tone.',
+    });
+
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      async ({ onToken }: { onToken?: (token: string) => void }) => {
+        onToken?.('Frozen reply');
+        return { text: 'Frozen reply' };
+      },
+    );
+
+    await act(async () => {
+      await getSession()?.regenerateLastResponse();
+    });
+
+    expect(llmEngineService.chatCompletion).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        messages: expect.arrayContaining([
+          { role: 'system', content: 'Be concise.' },
+          { role: 'user', content: 'First prompt' },
+        ]),
+        params: {
+          temperature: 0.7,
+          top_p: 0.9,
+          n_predict: 1024,
+        },
+      }),
+    );
+  });
+
+  it('blocks continuing a thread when another model is currently loaded', async () => {
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('First prompt');
+    });
+
+    (getSettings as jest.Mock).mockReturnValue({
+      activeModelId: 'author/model-q8',
+      activePresetId: 'preset-1',
+      temperature: 0.7,
+      topP: 0.9,
+      maxTokens: 1024,
+    });
+
+    await expect(getSession()?.appendUserMessage('Use a different model now')).rejects.toThrow(
+      'This conversation is pinned to author/model-q4. Load that model before continuing this thread.',
+    );
+  });
+
+  it('blocks regenerating a thread when another model is currently loaded', async () => {
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('First prompt');
+    });
+
+    (getSettings as jest.Mock).mockReturnValue({
+      activeModelId: 'author/model-q8',
+      activePresetId: 'preset-1',
+      temperature: 0.7,
+      topP: 0.9,
+      maxTokens: 1024,
+    });
+
+    await expect(getSession()?.regenerateLastResponse()).rejects.toThrow(
+      'This conversation is pinned to author/model-q4. Load that model before regenerating this response.',
+    );
+  });
+
+  it('switches to another saved thread when opening a conversation explicitly', async () => {
+    const threadOneId = useChatStore.getState().createThread({
+      modelId: 'author/model-q4',
+      presetId: 'preset-1',
+      presetSnapshot: {
+        id: 'preset-1',
+        name: 'Helpful Assistant',
+        systemPrompt: 'Be concise.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 1024,
+      },
+    });
+    const threadTwoId = useChatStore.getState().createThread({
+      modelId: 'author/model-q4',
+      presetId: 'preset-1',
+      presetSnapshot: {
+        id: 'preset-1',
+        name: 'Helpful Assistant',
+        systemPrompt: 'Be concise.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 1024,
+      },
+    });
+
+    useChatStore.getState().appendMessage(threadOneId, {
+      id: 'user-1',
+      role: 'user',
+      content: 'First thread',
+      createdAt: 1,
+      state: 'complete',
+    });
+    useChatStore.getState().appendMessage(threadTwoId, {
+      id: 'user-2',
+      role: 'user',
+      content: 'Second thread',
+      createdAt: 2,
+      state: 'complete',
+    });
+    useChatStore.getState().setActiveThread(threadOneId);
+
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      getSession()?.openThread(threadTwoId);
+    });
+
+    expect(useChatStore.getState().activeThreadId).toBe(threadTwoId);
+  });
+
+  it('exposes prompt builder helpers for preset resolution and context assembly', () => {
+    (presetManager.getPreset as jest.Mock).mockReset();
+    (presetManager.getPreset as jest.Mock).mockReturnValue({
+      id: 'preset-1',
+      name: 'Helpful Assistant',
+      systemPrompt: 'Be concise.',
+    });
+
+    const snapshot = resolvePresetSnapshot('preset-1');
+
+    expect(snapshot).toEqual({
+      id: 'preset-1',
+      name: 'Helpful Assistant',
+      systemPrompt: 'Be concise.',
+    });
+
+    const messages = buildInferenceMessagesForThread({
+      id: 'thread-1',
+      title: 'Example',
+      modelId: 'author/model-q4',
+      presetId: 'preset-1',
+      presetSnapshot: snapshot,
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 1024,
+      },
+      messages: [
+        {
+          id: 'user-1',
+          role: 'user',
+          content: 'Hello',
+          createdAt: 1,
+          state: 'complete',
+        },
+        {
+          id: 'assistant-1',
+          role: 'assistant',
+          content: 'Hi',
+          createdAt: 2,
+          state: 'complete',
+        },
+      ],
+      createdAt: 1,
+      updatedAt: 2,
+      status: 'idle',
+    });
+
+    expect(messages).toEqual([
+      { role: 'system', content: 'Be concise.' },
+      { role: 'user', content: 'Hello' },
+      { role: 'assistant', content: 'Hi' },
+    ]);
+  });
+
+  it('truncates older history deterministically and exposes summarize affordance state', () => {
+    const snapshot = resolvePresetSnapshot('preset-1');
+    const thread = {
+      id: 'thread-1',
+      title: 'Long thread',
+      modelId: 'author/model-q4',
+      presetId: 'preset-1',
+      presetSnapshot: snapshot,
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 1024,
+      },
+      messages: Array.from({ length: MAX_CONTEXT_MESSAGES + 4 }, (_, index) => ({
+        id: `message-${index + 1}`,
+        role: index % 2 === 0 ? ('user' as const) : ('assistant' as const),
+        content: `Message ${index + 1}`,
+        createdAt: index + 1,
+        state: 'complete' as const,
+      })),
+      createdAt: 1,
+      updatedAt: 2,
+      status: 'idle' as const,
+    };
+
+    const messages = buildInferenceMessagesForThread(thread);
+    const truncationState = getThreadTruncationState(thread);
+
+    expect(messages).toHaveLength(MAX_CONTEXT_MESSAGES - 1);
+    expect(messages[0]).toEqual({ role: 'system', content: 'Be concise.' });
+    expect(messages[1]).toEqual({ role: 'user', content: 'Message 7' });
+    expect(truncationState).toEqual({
+      truncatedMessageIds: ['message-1', 'message-2', 'message-3', 'message-4', 'message-5', 'message-6'],
+      shouldOfferSummary: true,
+    });
+  });
+
+  it('creates a persisted summary placeholder when truncation is active', async () => {
+    const threadId = useChatStore.getState().createThread({
+      modelId: 'author/model-q4',
+      presetId: 'preset-1',
+      presetSnapshot: {
+        id: 'preset-1',
+        name: 'Helpful Assistant',
+        systemPrompt: 'Be concise.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 1024,
+      },
+    });
+
+    for (let index = 0; index < MAX_CONTEXT_MESSAGES + 4; index += 1) {
+      useChatStore.getState().appendMessage(threadId, {
+        id: `message-${index + 1}`,
+        role: index % 2 === 0 ? 'user' : 'assistant',
+        content: `Message ${index + 1}`,
+        createdAt: index + 1,
+        state: 'complete',
+      });
+    }
+
+    useChatStore.getState().setActiveThread(threadId);
+    const getSession = renderHookHarness();
+
+    let created = false;
+    await act(async () => {
+      created = getSession()?.createSummaryPlaceholder() ?? false;
+    });
+
+    expect(created).toBe(true);
+    expect(useChatStore.getState().getActiveThread()?.summary).toEqual(
+      expect.objectContaining({
+        content: SUMMARY_PLACEHOLDER_CONTENT,
+        sourceMessageIds: ['message-1', 'message-2', 'message-3', 'message-4', 'message-5', 'message-6'],
+      }),
+    );
   });
 });

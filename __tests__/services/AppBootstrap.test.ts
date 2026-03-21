@@ -9,10 +9,13 @@ jest.mock('i18next', () => ({
 jest.mock('../../src/services/PresetManager', () => ({
   presetManager: {
     getPresets: jest.fn(),
+    getPreset: jest.fn(),
   },
 }));
 
 jest.mock('../../src/services/SettingsStore', () => ({
+  clearLegacyChatHistory: jest.fn(),
+  getChatHistoryEntries: jest.fn().mockReturnValue([]),
   getSettings: jest.fn(),
   repairChatHistoryIndex: jest.fn(),
   updateSettings: jest.fn(),
@@ -45,14 +48,30 @@ jest.mock('../../src/services/LLMEngineService', () => ({
   },
 }));
 
+const mockMergeImportedThreads = jest.fn();
+const mockPruneExpiredThreads = jest.fn();
+
+jest.mock('../../src/store/chatStore', () => ({
+  useChatStore: {
+    getState: () => ({
+      mergeImportedThreads: mockMergeImportedThreads,
+      pruneExpiredThreads: mockPruneExpiredThreads,
+    }),
+  },
+}));
+
 import { bootstrapApp } from '../../src/services/AppBootstrap';
 import { llmEngineService } from '../../src/services/LLMEngineService';
 import { registry } from '../../src/services/LocalStorageRegistry';
-import { getSettings, updateSettings } from '../../src/services/SettingsStore';
+import { clearLegacyChatHistory, getChatHistoryEntries, getSettings, updateSettings } from '../../src/services/SettingsStore';
 
 describe('AppBootstrap', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockMergeImportedThreads.mockReset();
+    mockMergeImportedThreads.mockReturnValue(0);
+    mockPruneExpiredThreads.mockReset();
+    mockPruneExpiredThreads.mockReturnValue(0);
   });
 
   it('restores the persisted active model when the file is still available', async () => {
@@ -64,6 +83,7 @@ describe('AppBootstrap', () => {
       topP: 0.9,
       maxTokens: 2048,
       theme: 'system',
+      chatRetentionDays: null,
     });
     (registry.getModel as jest.Mock).mockReturnValue({
       id: 'author/model-q4',
@@ -85,6 +105,7 @@ describe('AppBootstrap', () => {
       topP: 0.9,
       maxTokens: 2048,
       theme: 'system',
+      chatRetentionDays: null,
     });
     (registry.getModel as jest.Mock).mockReturnValue(undefined);
 
@@ -92,5 +113,47 @@ describe('AppBootstrap', () => {
 
     expect(llmEngineService.load).not.toHaveBeenCalled();
     expect(updateSettings).toHaveBeenCalledWith({ activeModelId: null });
+  });
+
+  it('migrates legacy chat history entries into the thread store during bootstrap', async () => {
+    (getSettings as jest.Mock).mockReturnValue({
+      language: 'en',
+      activePresetId: null,
+      activeModelId: null,
+      temperature: 0.7,
+      topP: 0.9,
+      maxTokens: 2048,
+      theme: 'system',
+      chatRetentionDays: 90,
+    });
+    (getChatHistoryEntries as jest.Mock).mockReturnValue([
+      {
+        id: 'chat-1',
+        messages: [
+          { role: 'user', content: 'Legacy prompt' },
+          { role: 'assistant', content: 'Legacy reply' },
+        ],
+        modelId: 'author/model-q4',
+        presetId: null,
+        createdAt: 10,
+        updatedAt: 20,
+      },
+    ]);
+
+    await bootstrapApp();
+
+    expect(mockMergeImportedThreads).toHaveBeenCalledWith([
+      expect.objectContaining({
+        id: 'chat-1',
+        modelId: 'author/model-q4',
+        title: 'Legacy prompt',
+        messages: [
+          expect.objectContaining({ role: 'user', content: 'Legacy prompt' }),
+          expect.objectContaining({ role: 'assistant', content: 'Legacy reply' }),
+        ],
+      }),
+    ]);
+    expect(clearLegacyChatHistory).toHaveBeenCalled();
+    expect(mockPruneExpiredThreads).toHaveBeenCalledWith(90);
   });
 });

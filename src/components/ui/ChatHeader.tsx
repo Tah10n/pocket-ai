@@ -11,6 +11,10 @@ interface ChatHeaderProps {
   title: string;
   memoryLabel: string;
   badgeLabel?: string;
+  statusLabel?: string;
+  detailLabel?: string;
+  canStartNewChat?: boolean;
+  onStartNewChat?: () => void;
   onBack?: () => void;
   onMenu?: () => void;
 }
@@ -19,55 +23,92 @@ export const ChatHeader = ({
   title,
   memoryLabel,
   badgeLabel = 'Local Model',
+  statusLabel,
+  detailLabel,
+  canStartNewChat = true,
+  onStartNewChat,
   onBack,
   onMenu,
 }: ChatHeaderProps) => {
   const insets = useSafeAreaInsets();
   const containerClassName = "bg-background-0/80 dark:bg-background-950/80";
+  const metadataTextClassName = 'text-xs text-typography-500 dark:text-typography-400';
 
   const content = (
-    <>
+    <Box className="flex-row items-start px-4 py-3">
       {onBack ? (
         <Pressable
           onPress={onBack}
-          className="mr-3 h-10 w-10 items-center justify-center rounded-full active:opacity-70"
+          className="mr-3 h-10 w-10 shrink-0 items-center justify-center rounded-full active:opacity-70"
         >
           <MaterialSymbols name="arrow-back-ios-new" size={22} className="text-primary-500" />
         </Pressable>
       ) : (
-        <Box className="mr-3 h-10 w-10" />
+        <Box className="mr-3 h-10 w-10 shrink-0" />
       )}
 
-      <Box className="flex-1">
-        <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">
-          {title}
-        </Text>
-        <Box className="mt-1 self-start rounded-full bg-primary-500/10 dark:bg-primary-500/20 px-2 py-0.5">
-          <Text className="text-2xs font-semibold uppercase tracking-wide text-primary-500">
-            {badgeLabel}
-          </Text>
-        </Box>
-      </Box>
+      <Box className="min-w-0 flex-1">
+        <Box className="flex-row items-start gap-3">
+          <Box className="min-w-0 flex-1">
+            <Text
+              numberOfLines={1}
+              className="text-base font-semibold text-typography-900 dark:text-typography-100"
+            >
+              {title}
+            </Text>
+            <Box className="mt-1 flex-row flex-wrap items-center gap-2">
+              <Box className="max-w-full shrink rounded-full bg-primary-500/10 dark:bg-primary-500/20 px-2 py-0.5">
+                <Text
+                  numberOfLines={1}
+                  className="text-2xs font-semibold uppercase tracking-wide text-primary-500"
+                >
+                  {badgeLabel}
+                </Text>
+              </Box>
+              <Box className="max-w-full shrink rounded-full border border-primary-500/20 bg-primary-500/10 dark:bg-primary-500/20 px-3 py-1">
+                <Text numberOfLines={1} className="text-xs font-semibold text-primary-500">
+                  {memoryLabel}
+                </Text>
+              </Box>
+              {statusLabel ? (
+                <Text numberOfLines={1} className={metadataTextClassName}>
+                  {statusLabel}
+                </Text>
+              ) : null}
+            </Box>
+            {detailLabel ? (
+              <Text numberOfLines={1} className={`mt-1 ${metadataTextClassName}`}>
+                {detailLabel}
+              </Text>
+            ) : null}
+          </Box>
 
-      <Box className="flex-row items-center gap-2">
-        <Box className="rounded-full border border-primary-500/20 bg-primary-500/10 dark:bg-primary-500/20 px-3 py-1">
-          <Text className="text-xs font-semibold text-primary-500">{memoryLabel}</Text>
+          <Box className="shrink-0 flex-row items-center gap-2">
+            {canStartNewChat ? (
+              <Pressable
+                onPress={onStartNewChat}
+                className="h-9 w-9 items-center justify-center rounded-full border border-primary-500/20 bg-primary-500/10 active:opacity-70"
+              >
+                <MaterialSymbols name="edit-square" size={18} className="text-primary-500" />
+              </Pressable>
+            ) : null}
+            <Pressable
+              onPress={onMenu}
+              className="h-9 w-9 items-center justify-center rounded-full active:opacity-70"
+            >
+              <MaterialSymbols name="more-vert" size={20} className="text-typography-500 dark:text-typography-400" />
+            </Pressable>
+          </Box>
         </Box>
-        <Pressable
-          onPress={onMenu}
-          className="h-9 w-9 items-center justify-center rounded-full active:opacity-70"
-        >
-          <MaterialSymbols name="more-vert" size={20} className="text-typography-500 dark:text-typography-400" />
-        </Pressable>
       </Box>
-    </>
+    </Box>
   );
 
   return (
     <Box className="z-10 w-full overflow-hidden border-b border-outline-200 dark:border-outline-800">
       {Platform.OS === 'android' ? (
         <Box className={containerClassName} style={{ paddingTop: insets.top }}>
-          <Box className="h-14 flex-row items-center px-4">{content}</Box>
+          {content}
         </Box>
       ) : (
         <BlurView
@@ -76,7 +117,7 @@ export const ChatHeader = ({
           className={containerClassName}
           style={{ paddingTop: insets.top }}
         >
-          <Box className="h-14 flex-row items-center px-4">{content}</Box>
+          {content}
         </BlurView>
       )}
     </Box>

@@ -10,6 +10,7 @@ export interface AppSettings {
     language: 'en' | 'ru';
     activePresetId: string | null;
     activeModelId: string | null;
+    chatRetentionDays: number | null;
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -20,9 +21,12 @@ const DEFAULT_SETTINGS: AppSettings = {
     language: 'en',
     activePresetId: null,
     activeModelId: null,
+    chatRetentionDays: 90,
 };
 
 const SETTINGS_KEY = 'app_settings';
+const CHAT_HISTORY_INDEX_KEY = 'chat_history_index';
+const CHAT_HISTORY_PREFIX = 'chat_history_';
 
 type SettingsListener = (settings: AppSettings) => void;
 const settingsListeners: Set<SettingsListener> = new Set();
@@ -44,6 +48,23 @@ function clampNumber(value: unknown, min: number, max: number, fallback: number)
     return Math.min(max, Math.max(min, n));
 }
 
+function normalizeChatRetentionDays(value: unknown): number | null {
+    if (value === undefined) {
+        return DEFAULT_SETTINGS.chatRetentionDays;
+    }
+
+    if (value == null || value === '') {
+        return null;
+    }
+
+    const normalized = typeof value === 'number' ? value : Number(value);
+    if (!Number.isFinite(normalized) || normalized <= 0) {
+        return null;
+    }
+
+    return Math.round(normalized);
+}
+
 function sanitizeSettings(input: Partial<AppSettings>): AppSettings {
     return {
         temperature: clampNumber(input.temperature, 0, 2, DEFAULT_SETTINGS.temperature),
@@ -53,26 +74,51 @@ function sanitizeSettings(input: Partial<AppSettings>): AppSettings {
         language: normalizeLanguage(input.language),
         activePresetId: typeof input.activePresetId === 'string' ? input.activePresetId : null,
         activeModelId: typeof input.activeModelId === 'string' ? input.activeModelId : null,
+        chatRetentionDays: normalizeChatRetentionDays(input.chatRetentionDays),
     };
 }
 
-export function getSettings(): AppSettings {
-    const raw = storage.getString(SETTINGS_KEY);
-    if (!raw) return { ...DEFAULT_SETTINGS };
+function readJsonValue<T>(key: string): T | null {
+    const raw = storage.getString(key);
+    if (!raw) {
+        return null;
+    }
+
     try {
-        const parsed = JSON.parse(raw) as Partial<AppSettings>;
-        return sanitizeSettings({ ...DEFAULT_SETTINGS, ...parsed });
-    } catch (e) {
-        console.warn('[SettingsStore] Corrupted settings payload, resetting.', e);
-        storage.remove(SETTINGS_KEY);
+        return JSON.parse(raw) as T;
+    } catch (error) {
+        console.warn(`[SettingsStore] Corrupted JSON payload (${key}), removing.`, error);
+        storage.remove(key);
+        return null;
+    }
+}
+
+function writeJsonValue(key: string, value: unknown) {
+    storage.set(key, JSON.stringify(value));
+}
+
+export function getSettings(): AppSettings {
+    const parsed = readJsonValue<Partial<AppSettings>>(SETTINGS_KEY);
+    if (!parsed) {
         return { ...DEFAULT_SETTINGS };
     }
+
+    const hasExplicitChatRetention =
+        typeof parsed === 'object' &&
+        parsed !== null &&
+        Object.prototype.hasOwnProperty.call(parsed, 'chatRetentionDays');
+
+    return sanitizeSettings({
+        ...DEFAULT_SETTINGS,
+        ...parsed,
+        chatRetentionDays: hasExplicitChatRetention ? parsed.chatRetentionDays : null,
+    });
 }
 
 export function updateSettings(partial: Partial<AppSettings>) {
     const current = getSettings();
     const updated = sanitizeSettings({ ...current, ...partial });
-    storage.set(SETTINGS_KEY, JSON.stringify(updated));
+    writeJsonValue(SETTINGS_KEY, updated);
     settingsListeners.forEach((l) => l(updated));
     return updated;
 }
@@ -80,7 +126,9 @@ export function updateSettings(partial: Partial<AppSettings>) {
 export function subscribeSettings(listener: SettingsListener) {
     settingsListeners.add(listener);
     listener(getSettings());
-    return () => settingsListeners.delete(listener);
+    return () => {
+        settingsListeners.delete(listener);
+    };
 }
 
 function notifyChatHistoryListeners() {
@@ -90,11 +138,10 @@ function notifyChatHistoryListeners() {
 export function subscribeChatHistory(listener: ChatHistoryListener) {
     chatHistoryListeners.add(listener);
     listener();
-    return () => chatHistoryListeners.delete(listener);
+    return () => {
+        chatHistoryListeners.delete(listener);
+    };
 }
-
-// Chat history persistence
-const CHAT_HISTORY_PREFIX = 'chat_history_';
 
 export interface ChatHistoryEntry {
     id: string;
@@ -114,6 +161,57 @@ export interface ChatHistorySummary {
     updatedAt: number;
 }
 
+function getChatHistoryStorageKey(chatId: string) {
+    return `${CHAT_HISTORY_PREFIX}${chatId}`;
+}
+
+function sanitizeChatHistoryIndex(input: unknown): string[] {
+    if (!Array.isArray(input)) {
+        return [];
+    }
+
+    const uniqueIds = new Set<string>();
+    for (const value of input) {
+        if (typeof value !== 'string') {
+            continue;
+        }
+
+        const normalized = value.trim();
+        if (!normalized) {
+            continue;
+        }
+
+        uniqueIds.add(normalized);
+    }
+
+    return [...uniqueIds];
+}
+
+function readChatHistoryIndex() {
+    return readJsonValue<unknown>(CHAT_HISTORY_INDEX_KEY);
+}
+
+function writeChatHistoryIndex(index: string[]) {
+    writeJsonValue(CHAT_HISTORY_INDEX_KEY, index);
+}
+
+function loadChatHistoryEntry(chatId: string): ChatHistoryEntry | null {
+    return readJsonValue<ChatHistoryEntry>(getChatHistoryStorageKey(chatId));
+}
+
+function getIndexedChatHistoryEntries(): ChatHistoryEntry[] {
+    return getChatHistoryIndex()
+        .map((id) => getChatHistory(id))
+        .filter((entry): entry is ChatHistoryEntry => !!entry);
+}
+
+export function getChatHistoryEntries(limit?: number): ChatHistoryEntry[] {
+    const entries = getIndexedChatHistoryEntries()
+        .sort((left, right) => right.updatedAt - left.updatedAt);
+
+    return typeof limit === 'number' ? entries.slice(0, limit) : entries;
+}
+
 function deriveChatTitle(entry: ChatHistoryEntry): string {
     const firstUserMessage = entry.messages.find((message) => message.role === 'user' && message.content.trim().length > 0);
     if (!firstUserMessage) {
@@ -125,48 +223,65 @@ function deriveChatTitle(entry: ChatHistoryEntry): string {
 }
 
 export function saveChatHistory(entry: ChatHistoryEntry) {
-    storage.set(`${CHAT_HISTORY_PREFIX}${entry.id}`, JSON.stringify(entry));
+    writeJsonValue(getChatHistoryStorageKey(entry.id), entry);
 
-    // Update index
     const index = getChatHistoryIndex();
     if (!index.includes(entry.id)) {
-        index.push(entry.id);
-        storage.set('chat_history_index', JSON.stringify(index));
+        writeChatHistoryIndex([...index, entry.id]);
     }
 
     notifyChatHistoryListeners();
 }
 
 export function getChatHistory(chatId: string): ChatHistoryEntry | null {
-    const raw = storage.getString(`${CHAT_HISTORY_PREFIX}${chatId}`);
-    if (!raw) return null;
-    try {
-        return JSON.parse(raw);
-    } catch (e) {
-        console.warn(`[SettingsStore] Corrupted chat history entry (${chatId}), removing.`, e);
-        storage.remove(`${CHAT_HISTORY_PREFIX}${chatId}`);
-        return null;
-    }
+    return loadChatHistoryEntry(chatId);
 }
 
 export function getChatHistoryIndex(): string[] {
-    const raw = storage.getString('chat_history_index');
-    if (!raw) return [];
-    try {
-        const parsed = JSON.parse(raw);
-        return Array.isArray(parsed) ? parsed : [];
-    } catch (e) {
-        console.warn('[SettingsStore] Corrupted chat history index, resetting.', e);
-        storage.remove('chat_history_index');
+    const parsed = readChatHistoryIndex();
+    if (!parsed) {
         return [];
     }
+
+    const sanitized = sanitizeChatHistoryIndex(parsed);
+    const shouldRewrite =
+        !Array.isArray(parsed) ||
+        sanitized.length !== parsed.length ||
+        sanitized.some((id, index) => id !== parsed[index]);
+
+    if (shouldRewrite) {
+        writeChatHistoryIndex(sanitized);
+    }
+
+    return sanitized;
 }
 
 export function deleteChatHistory(chatId: string) {
-    storage.remove(`${CHAT_HISTORY_PREFIX}${chatId}`);
+    storage.remove(getChatHistoryStorageKey(chatId));
     const index = getChatHistoryIndex().filter(id => id !== chatId);
-    storage.set('chat_history_index', JSON.stringify(index));
+    writeChatHistoryIndex(index);
     notifyChatHistoryListeners();
+}
+
+export function clearLegacyChatHistory() {
+    const indexedIds = getChatHistoryIndex();
+    const legacyKeys = storage
+        .getAllKeys()
+        .filter((key) => key !== CHAT_HISTORY_INDEX_KEY && key.startsWith(CHAT_HISTORY_PREFIX));
+    const clearedConversationIds = new Set<string>(indexedIds);
+
+    legacyKeys.forEach((key) => {
+        clearedConversationIds.add(key.slice(CHAT_HISTORY_PREFIX.length));
+        storage.remove(key);
+    });
+
+    writeChatHistoryIndex([]);
+
+    if (indexedIds.length > 0 || legacyKeys.length > 0) {
+        notifyChatHistoryListeners();
+    }
+
+    return clearedConversationIds.size;
 }
 
 export function repairChatHistoryIndex() {
@@ -177,7 +292,7 @@ export function repairChatHistoryIndex() {
     const removed = index.length - repaired.length;
 
     if (removed > 0) {
-        storage.set('chat_history_index', JSON.stringify(repaired));
+        writeChatHistoryIndex(repaired);
         notifyChatHistoryListeners();
     }
 
@@ -185,12 +300,7 @@ export function repairChatHistoryIndex() {
 }
 
 export function getChatHistorySummaries(limit?: number): ChatHistorySummary[] {
-    const entries = getChatHistoryIndex()
-        .map((id) => getChatHistory(id))
-        .filter((entry): entry is ChatHistoryEntry => !!entry)
-        .sort((left, right) => right.updatedAt - left.updatedAt);
-
-    const slicedEntries = typeof limit === 'number' ? entries.slice(0, limit) : entries;
+    const slicedEntries = getChatHistoryEntries(limit);
     return slicedEntries.map((entry) => ({
         id: entry.id,
         title: deriveChatTitle(entry),

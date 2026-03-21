@@ -1,0 +1,63 @@
+import React from 'react';
+import { act, fireEvent, render } from '@testing-library/react-native';
+import * as Clipboard from 'expo-clipboard';
+import { CodeBlock } from '../../src/components/ui/CodeBlock';
+
+jest.useFakeTimers();
+
+jest.mock('react-native-css-interop', () => {
+  const mockReact = require('react');
+  return {
+    createInteropElement: mockReact.createElement,
+  };
+});
+
+jest.mock('expo-clipboard', () => ({
+  setStringAsync: jest.fn().mockResolvedValue(undefined),
+}));
+
+jest.mock('@/components/ui/box', () => {
+  const mockReact = require('react');
+  const { View } = require('react-native');
+  return {
+    Box: ({ children }: any) => mockReact.createElement(View, null, children),
+  };
+});
+
+jest.mock('@/components/ui/text', () => {
+  const mockReact = require('react');
+  const { Text } = require('react-native');
+  return {
+    Text: ({ children }: any) => mockReact.createElement(Text, null, children),
+  };
+});
+
+jest.mock('@/components/ui/pressable', () => {
+  const mockReact = require('react');
+  const { Pressable } = require('react-native');
+  return {
+    Pressable: ({ children, ...props }: any) => mockReact.createElement(Pressable, props, children),
+  };
+});
+
+describe('CodeBlock', () => {
+  it('copies the code and shows temporary feedback', async () => {
+    const { getByTestId, getByText, queryByText } = render(
+      <CodeBlock language="ts" code={'const x = 1;'} />,
+    );
+
+    await act(async () => {
+      fireEvent.press(getByTestId('copy-code-button'));
+    });
+
+    expect(Clipboard.setStringAsync).toHaveBeenCalledWith('const x = 1;');
+    expect(getByText('Copied')).toBeTruthy();
+
+    await act(async () => {
+      jest.advanceTimersByTime(1500);
+    });
+
+    expect(queryByText('Copied')).toBeNull();
+    expect(getByText('Copy Code')).toBeTruthy();
+  });
+});

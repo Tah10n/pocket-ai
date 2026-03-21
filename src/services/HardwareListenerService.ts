@@ -10,6 +10,25 @@ export interface HardwareStatus {
     thermalState: ThermalState;
 }
 
+export interface ChatHardwareBannerInputs {
+    showLowMemoryWarning: boolean;
+    showThermalWarning: boolean;
+    thermalState: ThermalState;
+}
+
+/**
+ * Chat should only depend on banner-oriented warning inputs rather than the
+ * raw hardware status object. This keeps the screen contract stable even if
+ * the service gains more device signals later.
+ */
+export function getChatHardwareBannerInputs(status: HardwareStatus): ChatHardwareBannerInputs {
+    return {
+        showLowMemoryWarning: status.isLowMemory,
+        showThermalWarning: status.thermalState === 'serious' || status.thermalState === 'critical',
+        thermalState: status.thermalState,
+    };
+}
+
 type Listener = (status: HardwareStatus) => void;
 
 class HardwareListenerService {
@@ -49,7 +68,9 @@ class HardwareListenerService {
     subscribe(listener: Listener) {
         this.listeners.add(listener);
         listener(this.currentStatus);
-        return () => this.listeners.delete(listener);
+        return () => {
+            this.listeners.delete(listener);
+        };
     }
 
     /**

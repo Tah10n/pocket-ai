@@ -1,118 +1,398 @@
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { AppState, AppStateStatus } from 'react-native';
+import { useCallback, useEffect, useRef } from 'react';
 import { llmEngineService } from '../services/LLMEngineService';
+import { getSettings } from '../services/SettingsStore';
+import { presetManager } from '../services/PresetManager';
 import { EngineStatus } from '../types/models';
-import { getSettings, saveChatHistory } from '../services/SettingsStore';
+import {
+  ChatMessage,
+  ChatThread,
+  DEFAULT_PRESET_SNAPSHOT,
+  DEFAULT_SYSTEM_PROMPT,
+  PresetSnapshot,
+  createChatId,
+  toConversationIndexItem,
+} from '../types/chat';
+import { getThreadInferenceWindow, useChatStore } from '../store/chatStore';
 
-export interface ChatMessage {
-  id: string;
-  isUser: boolean;
-  content: string;
-  isStreaming?: boolean;
-  tokensPerSec?: number;
+export const MAX_CONTEXT_MESSAGES = 24;
+export const SUMMARY_PLACEHOLDER_CONTENT =
+  'Summary generation is not available yet. Older messages stay visible in the thread, but only the most recent context is sent to the model right now.';
+export const SUMMARY_AFFORDANCE_MIN_TRUNCATED_MESSAGES = 1;
+
+export function resolvePresetSnapshot(presetId: string | null): PresetSnapshot {
+  if (!presetId) {
+    return { ...DEFAULT_PRESET_SNAPSHOT };
+  }
+
+  const preset = presetManager.getPreset(presetId);
+  if (!preset) {
+    return {
+      id: presetId,
+      name: 'Missing Preset',
+      systemPrompt: DEFAULT_SYSTEM_PROMPT,
+    };
+  }
+
+  return {
+    id: preset.id,
+    name: preset.name,
+    systemPrompt: preset.systemPrompt,
+  };
 }
 
-function createSessionId() {
-  return `chat-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+export function buildInferenceMessagesForThread(thread: ChatThread) {
+  return getThreadInferenceWindow(thread, MAX_CONTEXT_MESSAGES).messages;
+}
+
+export function getThreadTruncationState(thread: ChatThread) {
+  const { truncatedMessageIds } = getThreadInferenceWindow(thread, MAX_CONTEXT_MESSAGES);
+
+  return {
+    truncatedMessageIds,
+    shouldOfferSummary:
+      truncatedMessageIds.length >= SUMMARY_AFFORDANCE_MIN_TRUNCATED_MESSAGES,
+  };
 }
 
 export const useChatSession = () => {
-    const [messages, setMessages] = useState<ChatMessage[]>([]);
-    const [isGenerating, setIsGenerating] = useState(false);
-    const sessionIdRef = useRef<string>(createSessionId());
-    const createdAtRef = useRef<number | null>(null);
+  const activeThread = useChatStore((state) => state.getActiveThread());
+  const threads = useChatStore((state) => state.threads);
+  const conversationIndex = Object.values(threads)
+    .map(toConversationIndexItem)
+    .sort((left, right) => right.updatedAt - left.updatedAt);
+  const createThread = useChatStore((state) => state.createThread);
+  const appendMessage = useChatStore((state) => state.appendMessage);
+  const createAssistantPlaceholder = useChatStore((state) => state.createAssistantPlaceholder);
+  const deleteMessageBranch = useChatStore((state) => state.deleteMessageBranch);
+  const deleteThreadState = useChatStore((state) => state.deleteThread);
+  const stopAssistantMessage = useChatStore((state) => state.stopAssistantMessage);
+  const finalizeAssistantMessage = useChatStore((state) => state.finalizeAssistantMessage);
+  const patchAssistantMessage = useChatStore((state) => state.patchAssistantMessage);
+  const replaceBranchFromUserMessage = useChatStore((state) => state.replaceBranchFromUserMessage);
+  const replaceLastAssistantMessage = useChatStore((state) => state.replaceLastAssistantMessage);
+  const finalizeThreadStatus = useChatStore((state) => state.finalizeThreadStatus);
+  const setActiveThread = useChatStore((state) => state.setActiveThread);
+  const setThreadSummary = useChatStore((state) => state.setThreadSummary);
+  const currentGenerationRef = useRef<{
+    threadId: string;
+    messageId: string;
+    stopRequested: boolean;
+  } | null>(null);
+  const appStateRef = useRef<AppStateStatus>(AppState.currentState ?? 'active');
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (nextAppState) => {
+      const previousAppState = appStateRef.current;
+      appStateRef.current = nextAppState;
 
-    useEffect(() => {
-        if (messages.length === 0) {
-            return;
-        }
+      const returnedToForeground =
+        (previousAppState === 'background' || previousAppState === 'inactive') &&
+        nextAppState === 'active';
 
-        const persistedMessages = messages
-            .filter((message) => message.isUser || message.content.trim().length > 0)
-            .map((message) => ({
-                role: message.isUser ? 'user' as const : 'assistant' as const,
-                content: message.content,
-            }));
+      if (!returnedToForeground) {
+        return;
+      }
 
-        if (persistedMessages.length === 0) {
-            return;
-        }
+      const state = useChatStore.getState();
+      const activeThread = state.getActiveThread();
 
-        const timestamp = createdAtRef.current ?? Date.now();
-        createdAtRef.current = timestamp;
+      // Recovery path: if the app returns with persisted "generating" state but
+      // no live completion in flight, treat it as an interrupted session.
+      if (activeThread?.status === 'generating' && !currentGenerationRef.current) {
+        state.finalizeThreadStatus(activeThread.id, 'stopped');
+      }
+    });
 
-        const settings = getSettings();
-        saveChatHistory({
-            id: sessionIdRef.current,
-            messages: persistedMessages,
-            modelId: settings.activeModelId ?? 'No Model',
-            presetId: settings.activePresetId,
-            createdAt: timestamp,
-            updatedAt: Date.now(),
-        });
-    }, [messages]);
-    
-    const appendUserMessage = useCallback(async (text: string) => {
-        const newMsg: ChatMessage = {
-            id: `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
-            isUser: true,
-            content: text
-        };
-        
-        setMessages(prev => [...prev, newMsg]);
-        setIsGenerating(true);
-        
-        const replyId = `${Date.now() + 1}-${Math.random().toString(36).slice(2, 9)}`;
-        setMessages(prev => [...prev, {
-            id: replyId,
-            isUser: false,
-            content: '',
-            isStreaming: true,
-            tokensPerSec: 0
-        }]);
-        
-        let currentText = "";
-
-        try {
-            if (llmEngineService.getState().status !== EngineStatus.READY) {
-                throw new Error("Model is not loaded or engine is not ready. Please select and load a model in the Models tab.");
-            }
-
-            let tokensCount = 0;
-            const startTime = Date.now();
-
-            await llmEngineService.chatCompletion(
-                text,
-                "You are a helpful AI assistant. Answer concisely and accurately.",
-                (token) => {
-                    currentText += token;
-                    tokensCount++;
-                    const elapsedSec = (Date.now() - startTime) / 1000;
-                    const ts = elapsedSec > 0 ? tokensCount / elapsedSec : 0;
-                    
-                    setMessages(prev => prev.map(m => 
-                        m.id === replyId ? { ...m, content: currentText, tokensPerSec: ts } : m
-                    ));
-                }
-            );
-
-            // Finalize streaming
-            setMessages(prev => prev.map(m => 
-                m.id === replyId ? { ...m, isStreaming: false } : m
-            ));
-
-        } catch (e: any) {
-            setMessages(prev => prev.map(m => 
-                m.id === replyId ? { ...m, content: currentText + (currentText.length > 0 ? '\n\n' : '') + `[Error: ${e.message}]`, isStreaming: false } : m
-            ));
-        } finally {
-            setIsGenerating(false);
-        }
-        
-    }, []);
-
-    return {
-        messages,
-        isGenerating,
-        appendUserMessage
+    return () => {
+      subscription.remove();
     };
+  }, []);
+
+  const runAssistantCompletion = useCallback(async (threadId: string, assistantMessageId: string) => {
+    const thread = useChatStore.getState().getThread(threadId);
+    if (!thread) {
+      throw new Error('Thread not found');
+    }
+
+    currentGenerationRef.current = {
+      threadId,
+      messageId: assistantMessageId,
+      stopRequested: false,
+    };
+
+    let currentText = '';
+    let tokensCount = 0;
+    const startTime = Date.now();
+
+    try {
+      const messages = buildInferenceMessagesForThread(thread);
+
+      await llmEngineService.chatCompletion({
+        messages,
+        params: {
+          temperature: thread.paramsSnapshot.temperature,
+          top_p: thread.paramsSnapshot.topP,
+          n_predict: thread.paramsSnapshot.maxTokens,
+        },
+        onToken: (token) => {
+          currentText += token;
+          tokensCount += 1;
+          const elapsedSec = (Date.now() - startTime) / 1000;
+          const tokensPerSec = elapsedSec > 0 ? tokensCount / elapsedSec : 0;
+
+          patchAssistantMessage(threadId, assistantMessageId, {
+            content: currentText,
+            tokensPerSec,
+            state: 'streaming',
+          });
+        },
+      });
+
+      if (currentGenerationRef.current?.stopRequested) {
+        stopAssistantMessage(threadId, assistantMessageId);
+        finalizeThreadStatus(threadId, 'stopped');
+        return;
+      }
+
+      finalizeAssistantMessage(threadId, assistantMessageId, currentText);
+      finalizeThreadStatus(threadId, 'idle');
+    } catch (error) {
+      if (currentGenerationRef.current?.stopRequested) {
+        stopAssistantMessage(threadId, assistantMessageId);
+        finalizeThreadStatus(threadId, 'stopped');
+        return;
+      }
+
+      const message =
+        error instanceof Error ? error.message : 'Unknown chat generation error';
+
+      patchAssistantMessage(threadId, assistantMessageId, {
+        content:
+          currentText + (currentText.length > 0 ? '\n\n' : '') + `[Error: ${message}]`,
+        state: 'error',
+        errorCode: 'generation_failed',
+      });
+      finalizeThreadStatus(threadId, 'error');
+      throw error;
+    } finally {
+      currentGenerationRef.current = null;
+    }
+  }, [finalizeAssistantMessage, finalizeThreadStatus, patchAssistantMessage, stopAssistantMessage]);
+
+  const ensureThreadCanGenerate = useCallback((thread: ChatThread, actionLabel: string) => {
+    if (thread.status === 'generating') {
+      throw new Error('A response is already being generated for this thread.');
+    }
+
+    if (llmEngineService.getState().status !== EngineStatus.READY) {
+      throw new Error('Model is not loaded or engine is not ready. Please select and load a model in the Models tab.');
+    }
+
+    const settings = getSettings();
+    if (settings.activeModelId !== thread.modelId) {
+      throw new Error(
+        `This conversation is pinned to ${thread.modelId}. Load that model before ${actionLabel}.`,
+      );
+    }
+  }, []);
+
+  const appendUserMessage = useCallback(async (text: string) => {
+    const settings = getSettings();
+    const activeModelId = settings.activeModelId;
+
+    if (!activeModelId) {
+      throw new Error('Model is not loaded or engine is not ready. Please select and load a model in the Models tab.');
+    }
+
+    if (llmEngineService.getState().status !== EngineStatus.READY) {
+      throw new Error('Model is not loaded or engine is not ready. Please select and load a model in the Models tab.');
+    }
+
+    if (activeThread?.status === 'generating') {
+      throw new Error('A response is already being generated for this thread.');
+    }
+
+    if (activeThread && activeThread.modelId !== activeModelId) {
+      throw new Error(
+        `This conversation is pinned to ${activeThread.modelId}. Load that model before continuing this thread.`,
+      );
+    }
+
+    const threadId =
+      activeThread?.id ??
+      createThread({
+        modelId: activeModelId,
+        presetId: settings.activePresetId,
+        presetSnapshot: resolvePresetSnapshot(settings.activePresetId),
+        paramsSnapshot: {
+          temperature: settings.temperature,
+          topP: settings.topP,
+          maxTokens: settings.maxTokens,
+        },
+      });
+
+    setActiveThread(threadId);
+
+    const userMessage: ChatMessage = {
+      id: createChatId('message'),
+      role: 'user',
+      content: text,
+      createdAt: Date.now(),
+      state: 'complete',
+    };
+
+    appendMessage(threadId, userMessage);
+
+    const assistantMessageId = createAssistantPlaceholder(threadId);
+
+    await runAssistantCompletion(threadId, assistantMessageId);
+  }, [activeThread, appendMessage, createAssistantPlaceholder, createThread, runAssistantCompletion, setActiveThread]);
+
+  const stopGeneration = useCallback(async () => {
+    if (!currentGenerationRef.current) {
+      return;
+    }
+
+    currentGenerationRef.current.stopRequested = true;
+    await llmEngineService.stopCompletion();
+  }, []);
+
+  const regenerateFromUserMessage = useCallback(async (messageId: string, nextContent: string) => {
+    if (!activeThread) {
+      return false;
+    }
+
+    const normalizedContent = nextContent.trim();
+    if (!normalizedContent) {
+      throw new Error('Message cannot be empty.');
+    }
+
+    ensureThreadCanGenerate(activeThread, 'regenerating this response');
+
+    const assistantMessageId = replaceBranchFromUserMessage(
+      activeThread.id,
+      messageId,
+      normalizedContent,
+    );
+    if (!assistantMessageId) {
+      throw new Error('The selected message could not be regenerated.');
+    }
+
+    await runAssistantCompletion(activeThread.id, assistantMessageId);
+
+    return true;
+  }, [activeThread, ensureThreadCanGenerate, replaceBranchFromUserMessage, runAssistantCompletion]);
+
+  const regenerateLastResponse = useCallback(async () => {
+    if (!activeThread) {
+      return false;
+    }
+
+    const lastUserMessage = [...activeThread.messages]
+      .reverse()
+      .find((message) => message.role === 'user' && message.content.trim().length > 0);
+    if (!lastUserMessage) {
+      return false;
+    }
+
+    ensureThreadCanGenerate(activeThread, 'regenerating this response');
+
+    const assistantMessageId = replaceLastAssistantMessage(activeThread.id);
+    if (!assistantMessageId) {
+      return regenerateFromUserMessage(lastUserMessage.id, lastUserMessage.content);
+    }
+
+    await runAssistantCompletion(activeThread.id, assistantMessageId);
+
+    return true;
+  }, [
+    activeThread,
+    ensureThreadCanGenerate,
+    regenerateFromUserMessage,
+    replaceLastAssistantMessage,
+    runAssistantCompletion,
+  ]);
+
+  const createSummaryPlaceholder = useCallback(() => {
+    if (!activeThread) {
+      return false;
+    }
+
+    const { truncatedMessageIds, shouldOfferSummary } = getThreadTruncationState(activeThread);
+    if (!shouldOfferSummary) {
+      return false;
+    }
+
+    setThreadSummary(activeThread.id, {
+      content: SUMMARY_PLACEHOLDER_CONTENT,
+      createdAt: Date.now(),
+      sourceMessageIds: truncatedMessageIds,
+    });
+
+    return true;
+  }, [activeThread, setThreadSummary]);
+
+  const startNewChat = useCallback(() => {
+    if (activeThread?.status === 'generating') {
+      throw new Error('Stop the current response before starting a new chat.');
+    }
+
+    setActiveThread(null);
+  }, [activeThread, setActiveThread]);
+
+  const openThread = useCallback((threadId: string) => {
+    if (activeThread?.status === 'generating' && activeThread.id !== threadId) {
+      throw new Error('Stop the current response before switching conversations.');
+    }
+
+    const thread = useChatStore.getState().getThread(threadId);
+    if (!thread) {
+      throw new Error('The selected conversation is no longer available.');
+    }
+
+    setActiveThread(threadId);
+  }, [activeThread, setActiveThread]);
+
+  const deleteThread = useCallback((threadId: string) => {
+    if (currentGenerationRef.current?.threadId === threadId) {
+      throw new Error('Stop the current response before deleting this conversation.');
+    }
+
+    deleteThreadState(threadId);
+  }, [deleteThreadState]);
+
+  const deleteMessage = useCallback((messageId: string) => {
+    if (!activeThread) {
+      return false;
+    }
+
+    if (activeThread.status === 'generating') {
+      throw new Error('Stop the current response before editing this conversation.');
+    }
+
+    const deleted = deleteMessageBranch(activeThread.id, messageId);
+    return deleted;
+  }, [activeThread, deleteMessageBranch]);
+
+  const truncationState = activeThread
+    ? getThreadTruncationState(activeThread)
+    : { truncatedMessageIds: [], shouldOfferSummary: false };
+
+  return {
+    activeThread,
+    conversationIndex,
+    messages: activeThread?.messages ?? [],
+    isGenerating: activeThread?.status === 'generating',
+    shouldOfferSummary: truncationState.shouldOfferSummary,
+    truncatedMessageCount: truncationState.truncatedMessageIds.length,
+    appendUserMessage,
+    deleteMessage,
+    deleteThread,
+    openThread,
+    stopGeneration,
+    regenerateFromUserMessage,
+    regenerateLastResponse,
+    createSummaryPlaceholder,
+    startNewChat,
+  };
 };

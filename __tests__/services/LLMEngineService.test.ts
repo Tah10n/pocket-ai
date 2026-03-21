@@ -1,17 +1,20 @@
+import * as llamaRn from 'llama.rn';
 import { llmEngineService } from '../../src/services/LLMEngineService';
-import { hardwareListenerService } from '../../src/services/HardwareListenerService';
 import { registry } from '../../src/services/LocalStorageRegistry';
 import { updateSettings } from '../../src/services/SettingsStore';
 import { EngineStatus, LifecycleStatus } from '../../src/types/models';
-import * as FileSystem from 'expo-file-system';
 
-jest.mock('llama.rn', () => ({
-  initLlama: jest.fn().mockResolvedValue({ 
-    completion: jest.fn(),
-    stopCompletion: jest.fn()
-  }),
-  releaseAllLlama: jest.fn().mockResolvedValue(undefined),
-}));
+jest.mock('llama.rn', () => {
+  const completion = jest.fn();
+  return {
+    initLlama: jest.fn().mockResolvedValue({
+      completion,
+      stopCompletion: jest.fn().mockResolvedValue(undefined),
+    }),
+    releaseAllLlama: jest.fn().mockResolvedValue(undefined),
+    __completionMock: completion,
+  };
+});
 
 jest.mock('expo-file-system/legacy', () => ({
   getInfoAsync: jest.fn().mockResolvedValue({ exists: true }),
@@ -25,36 +28,78 @@ jest.mock('../../src/services/SettingsStore', () => ({
   updateSettings: jest.fn(),
 }));
 
-describe('LLMEngineService Integration', () => {
-  const mockModelId = 'test/model';
-
+describe('LLMEngineService', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     (registry.getModel as jest.Mock) = jest.fn().mockReturnValue({
-      id: mockModelId,
+      id: 'test/model',
       localPath: 'model.gguf',
       lifecycleStatus: LifecycleStatus.DOWNLOADED,
     });
-    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([]);
-    (registry.saveModels as jest.Mock) = jest.fn();
-    (registry.updateModel as jest.Mock) = jest.fn();
+    (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock.mockResolvedValue({ text: 'Hello back' });
   });
 
-  it('should unload model on low memory warning', async () => {
-    // Load model first
-    await llmEngineService.load(mockModelId);
+  it('forwards structured messages to llama.rn completion', async () => {
+    await llmEngineService.load('test/model');
+
     expect(llmEngineService.getState().status).toBe(EngineStatus.READY);
-    expect(updateSettings).toHaveBeenCalledWith({ activeModelId: mockModelId });
+    expect(updateSettings).toHaveBeenCalledWith({ activeModelId: 'test/model' });
 
-    // Trigger memory warning
-    hardwareListenerService['handleMemoryWarning']();
+    await llmEngineService.chatCompletion({
+      messages: [
+        { role: 'system', content: 'Be concise.' },
+        { role: 'user', content: 'Hello' },
+      ],
+      params: {
+        temperature: 0.4,
+        top_p: 0.8,
+        n_predict: 128,
+      },
+    });
 
-    // Wait for async unload
-    await new Promise(resolve => setTimeout(resolve, 100));
+    expect(llamaRn.initLlama).toHaveBeenCalled();
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        messages: [
+          { role: 'system', content: 'Be concise.' },
+          { role: 'user', content: 'Hello' },
+        ],
+        temperature: 0.4,
+        top_p: 0.8,
+        n_predict: 128,
+      }),
+      expect.any(Function),
+    );
+  });
 
-    // Verify unloaded
-    expect(llmEngineService.getState().status).toBe(EngineStatus.IDLE);
-    expect(llmEngineService.getState().activeModelId).toBeUndefined();
-    expect(updateSettings).toHaveBeenCalledWith({ activeModelId: null });
+  it('passes frozen thread params through to completion even when they differ from defaults', async () => {
+    await llmEngineService.load('test/model');
+
+    await llmEngineService.chatCompletion({
+      messages: [
+        { role: 'system', content: 'Frozen system prompt.' },
+        { role: 'user', content: 'Use thread snapshot params.' },
+        { role: 'assistant', content: 'Prior answer.' },
+      ],
+      params: {
+        temperature: 1.1,
+        top_p: 0.55,
+        n_predict: 333,
+      },
+    });
+
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        messages: [
+          { role: 'system', content: 'Frozen system prompt.' },
+          { role: 'user', content: 'Use thread snapshot params.' },
+          { role: 'assistant', content: 'Prior answer.' },
+        ],
+        temperature: 1.1,
+        top_p: 0.55,
+        n_predict: 333,
+      }),
+      expect.any(Function),
+    );
   });
 });

@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { Alert } from 'react-native';
 import { Box } from '@/components/ui/box';
 import { Text } from '@/components/ui/text';
@@ -9,11 +9,54 @@ import { MaterialSymbols } from '@/components/ui/MaterialSymbols';
 import { useDeviceMetrics } from '../../hooks/useDeviceMetrics';
 import { useTheme } from '../../providers/ThemeProvider';
 import { llmEngineService } from '../../services/LLMEngineService';
+import { getSettings, subscribeSettings, updateSettings } from '../../services/SettingsStore';
+import { useChatStore } from '../../store/chatStore';
 
+const CHAT_RETENTION_OPTIONS = [
+    {
+        label: 'Keep Forever',
+        description: 'Keep every conversation until you remove it manually.',
+        days: null,
+    },
+    {
+        label: '30 Days',
+        description: 'Auto-delete chats that have been inactive for a month.',
+        days: 30,
+    },
+    {
+        label: '90 Days',
+        description: 'A balanced cleanup window for older conversations.',
+        days: 90,
+    },
+    {
+        label: '1 Year',
+        description: 'Retain long-running projects without keeping everything forever.',
+        days: 365,
+    },
+] as const;
+
+function formatRetentionLabel(days: number | null) {
+    if (days == null) {
+        return 'forever';
+    }
+
+    if (days === 365) {
+        return '1 year';
+    }
+
+    return `${days} days`;
+}
 
 export const SettingsScreen = () => {
-    const { mode, resolvedMode, setTheme } = useTheme();
+    const { mode, setTheme } = useTheme();
     const metrics = useDeviceMetrics();
+    const [chatRetentionDays, setChatRetentionDays] = useState<number | null>(() => getSettings().chatRetentionDays);
+
+    useEffect(() => {
+        return subscribeSettings((settings) => {
+            setChatRetentionDays(settings.chatRetentionDays);
+        });
+    }, []);
 
     const unloadActiveModel = async () => {
         await llmEngineService.unload();
@@ -21,6 +64,44 @@ export const SettingsScreen = () => {
 
     const handleLanguagePress = () => {
         Alert.alert('Language', 'Language selection will be available in a future update.');
+    };
+
+    const applyChatRetention = (days: number | null) => {
+        updateSettings({ chatRetentionDays: days });
+        const deletedCount = useChatStore.getState().pruneExpiredThreads(days);
+
+        if (deletedCount > 0) {
+            Alert.alert(
+                'Conversation cleanup complete',
+                `Removed ${deletedCount} old conversation${deletedCount === 1 ? '' : 's'} that exceeded the new retention window.`,
+            );
+        }
+    };
+
+    const handleChatRetentionPress = (days: number | null) => {
+        if (days === chatRetentionDays) {
+            return;
+        }
+
+        if (days == null) {
+            applyChatRetention(days);
+            return;
+        }
+
+        Alert.alert(
+            'Enable auto-delete for old chats?',
+            `Chats inactive for more than ${formatRetentionLabel(days)} will be removed automatically. The currently open chat is kept.`,
+            [
+                { text: 'Cancel', style: 'cancel' },
+                {
+                    text: 'Apply',
+                    style: 'destructive',
+                    onPress: () => {
+                        applyChatRetention(days);
+                    },
+                },
+            ],
+        );
     };
 
     return (
@@ -162,6 +243,45 @@ export const SettingsScreen = () => {
                         >
                             <Text className="text-warning-600 text-sm font-semibold">Unload Active Model</Text>
                         </Pressable>
+                    </Box>
+                </Box>
+
+                <Text className="text-xs font-semibold uppercase tracking-wider text-typography-500 dark:text-typography-400 ml-4 mb-2">
+                    Conversation History
+                </Text>
+
+                <Box className="bg-background-50 dark:bg-background-900/50 rounded-xl overflow-hidden border border-outline-200 dark:border-outline-800 mb-8">
+                    {CHAT_RETENTION_OPTIONS.map((option, index) => {
+                        const isActive = chatRetentionDays === option.days;
+
+                        return (
+                            <Pressable
+                                key={option.label}
+                                onPress={() => handleChatRetentionPress(option.days)}
+                                className={`px-4 py-4 active:opacity-70 ${index < CHAT_RETENTION_OPTIONS.length - 1 ? 'border-b border-outline-200 dark:border-outline-800' : ''}`}
+                            >
+                                <Box className="flex-row items-start justify-between gap-3">
+                                    <Box className="flex-1">
+                                        <Text className="font-medium text-typography-900 dark:text-typography-100">
+                                            {option.label}
+                                        </Text>
+                                        <Text className="mt-1 text-sm text-typography-500 dark:text-typography-400">
+                                            {option.description}
+                                        </Text>
+                                    </Box>
+                                    <Box className={`rounded-full px-3 py-1 ${isActive ? 'bg-primary-500/15' : 'bg-background-100 dark:bg-background-800/80'}`}>
+                                        <Text className={`text-xs font-bold uppercase tracking-wide ${isActive ? 'text-primary-600 dark:text-primary-400' : 'text-typography-500 dark:text-typography-400'}`}>
+                                            {isActive ? 'Active' : formatRetentionLabel(option.days)}
+                                        </Text>
+                                    </Box>
+                                </Box>
+                            </Pressable>
+                        );
+                    })}
+                    <Box className="px-4 py-3 bg-background-100 dark:bg-background-800/40 border-t border-outline-200 dark:border-outline-800">
+                        <Text className="text-xs text-typography-500 dark:text-typography-400">
+                            Auto-delete uses the last activity time for each chat. The currently open chat is never removed automatically.
+                        </Text>
                     </Box>
                 </Box>
 

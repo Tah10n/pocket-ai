@@ -3,6 +3,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 import DeviceInfo from 'react-native-device-info';
 import { hardwareListenerService } from './HardwareListenerService';
 import { EngineStatus, EngineState } from '../types/models';
+import { LlmChatCompletionOptions } from '../types/chat';
 import { registry } from './LocalStorageRegistry';
 import { MODELS_DIR } from './FileSystemSetup';
 import { updateSettings } from './SettingsStore';
@@ -149,12 +150,11 @@ class LLMEngineService {
     hardwareListenerService.resetLowMemoryFlag();
   }
 
-  public async chatCompletion(
-    prompt: string,
-    systemPrompt?: string,
-    onToken?: (token: string) => void,
-    params?: { temperature?: number; top_p?: number; n_predict?: number },
-  ): Promise<NativeCompletionResult> {
+  public async chatCompletion({
+    messages,
+    onToken,
+    params,
+  }: LlmChatCompletionOptions): Promise<NativeCompletionResult> {
     if (this.state.status === EngineStatus.INITIALIZING && this.initPromise) {
       await this.initPromise;
     }
@@ -162,12 +162,6 @@ class LLMEngineService {
     if (!this.context || this.state.status !== EngineStatus.READY) {
       throw new Error('Engine not ready');
     }
-
-    const messages = [];
-    if (systemPrompt) {
-      messages.push({ role: 'system', content: systemPrompt });
-    }
-    messages.push({ role: 'user', content: prompt });
 
     const result = await this.context.completion(
       {

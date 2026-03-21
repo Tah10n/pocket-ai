@@ -1,4 +1,5 @@
 import React from 'react';
+import { useTranslation } from 'react-i18next';
 import { Box } from '@/components/ui/box';
 import { Pressable } from '@/components/ui/pressable';
 import { ScrollView } from '@/components/ui/scroll-view';
@@ -21,10 +22,10 @@ type FilterChipProps = {
   onPress: () => void;
 };
 
-const STATUS_OPTIONS: { label: string; value: LifecycleStatus }[] = [
-  { label: 'Available', value: LifecycleStatus.AVAILABLE },
-  { label: 'Downloading', value: LifecycleStatus.DOWNLOADING },
-  { label: 'Downloaded', value: LifecycleStatus.DOWNLOADED },
+const STATUS_OPTIONS: { labelKey: string; value: LifecycleStatus }[] = [
+  { labelKey: 'models.filterAvailable', value: LifecycleStatus.AVAILABLE },
+  { labelKey: 'models.filterDownloading', value: LifecycleStatus.DOWNLOADING },
+  { labelKey: 'models.filterDownloaded', value: LifecycleStatus.DOWNLOADED },
 ];
 
 const SIZE_OPTIONS: { label: string; value: ModelSizeRange }[] = [
@@ -60,6 +61,7 @@ export const ModelsFilter = ({
   onClear,
   showStatusFilters,
 }: ModelsFilterProps) => {
+  const { t } = useTranslation();
   const hasActiveFilters =
     filters.fitsInRamOnly || filters.statuses.length > 0 || filters.sizeRanges.length > 0;
 
@@ -67,11 +69,11 @@ export const ModelsFilter = ({
     <Box className="gap-3 border-b border-outline-200 bg-background-0 px-4 py-3 dark:border-outline-800 dark:bg-background-950">
       <Box className="flex-row items-center justify-between">
         <Text className="text-sm font-semibold text-typography-700 dark:text-typography-200">
-          Filters
+          {t('models.filtersTitle')}
         </Text>
         {hasActiveFilters ? (
           <Pressable onPress={onClear} className="rounded-full px-2 py-1 active:opacity-70">
-            <Text className="text-xs font-semibold text-primary-500">Clear</Text>
+            <Text className="text-xs font-semibold text-primary-500">{t('common.clear')}</Text>
           </Pressable>
         ) : null}
       </Box>
@@ -79,7 +81,7 @@ export const ModelsFilter = ({
       <ScrollView horizontal showsHorizontalScrollIndicator={false}>
         <Box className="flex-row gap-2">
           <FilterChip
-            label="Fits in RAM"
+            label={t('models.fitsInRam')}
             active={filters.fitsInRamOnly}
             onPress={() => onFitsInRamToggle(!filters.fitsInRamOnly)}
           />
@@ -88,7 +90,7 @@ export const ModelsFilter = ({
             ? STATUS_OPTIONS.map((option) => (
                 <FilterChip
                   key={option.value}
-                  label={option.label}
+                  label={t(option.labelKey)}
                   active={filters.statuses.includes(option.value)}
                   onPress={() => onStatusToggle(option.value)}
                 />

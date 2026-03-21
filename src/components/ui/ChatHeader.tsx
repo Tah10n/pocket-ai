@@ -15,6 +15,8 @@ interface ChatHeaderProps {
   detailLabel?: string;
   canStartNewChat?: boolean;
   onStartNewChat?: () => void;
+  onOpenModelControls?: () => void;
+  canOpenModelControls?: boolean;
   onBack?: () => void;
   onMenu?: () => void;
 }
@@ -27,6 +29,8 @@ export const ChatHeader = ({
   detailLabel,
   canStartNewChat = true,
   onStartNewChat,
+  onOpenModelControls,
+  canOpenModelControls = true,
   onBack,
   onMenu,
 }: ChatHeaderProps) => {
@@ -84,6 +88,21 @@ export const ChatHeader = ({
           </Box>
 
           <Box className="shrink-0 flex-row items-center gap-2">
+            {onOpenModelControls ? (
+              <Pressable
+                onPress={onOpenModelControls}
+                disabled={!canOpenModelControls}
+                className={`h-9 w-9 items-center justify-center rounded-full ${canOpenModelControls
+                  ? 'border border-primary-500/20 bg-primary-500/10 active:opacity-70'
+                  : 'bg-background-100 dark:bg-background-900/60'}`}
+              >
+                <MaterialSymbols
+                  name="tune"
+                  size={18}
+                  className={canOpenModelControls ? 'text-primary-500' : 'text-typography-400 dark:text-typography-500'}
+                />
+              </Pressable>
+            ) : null}
             {canStartNewChat ? (
               <Pressable
                 onPress={onStartNewChat}

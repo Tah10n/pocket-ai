@@ -1,5 +1,6 @@
 import React from 'react';
 import { Modal } from 'react-native';
+import { useTranslation } from 'react-i18next';
 import { Box } from '@/components/ui/box';
 import { Pressable } from '@/components/ui/pressable';
 import { ScrollView } from '@/components/ui/scroll-view';
@@ -11,9 +12,12 @@ interface ConversationSwitcherSheetProps {
   visible: boolean;
   activeThreadId: string | null;
   conversations: ConversationIndexItem[];
+  activePresetName?: string;
+  canOpenPresetSelector?: boolean;
   onClose: () => void;
   onSelectConversation: (threadId: string) => void;
   onStartNewChat: () => void;
+  onOpenPresetSelector?: () => void;
   onManageConversations?: () => void;
 }
 
@@ -21,11 +25,15 @@ export function ConversationSwitcherSheet({
   visible,
   activeThreadId,
   conversations,
+  activePresetName,
+  canOpenPresetSelector = true,
   onClose,
   onSelectConversation,
   onStartNewChat,
+  onOpenPresetSelector,
   onManageConversations,
 }: ConversationSwitcherSheetProps) {
+  const { t } = useTranslation();
   return (
     <Modal visible={visible} animationType="fade" transparent onRequestClose={onClose}>
       <Box className="flex-1 justify-end bg-black/40">
@@ -34,10 +42,10 @@ export function ConversationSwitcherSheet({
           <Box className="mb-4 flex-row items-center justify-between">
             <Box>
               <Text className="text-lg font-semibold text-typography-900 dark:text-typography-100">
-                Conversations
+                {t('chat.conversationSwitcher.title')}
               </Text>
               <Text className="mt-1 text-sm text-typography-500 dark:text-typography-400">
-                Switch threads without losing your current context.
+                {t('chat.conversationSwitcher.subtitle')}
               </Text>
             </Box>
             <Pressable
@@ -48,7 +56,7 @@ export function ConversationSwitcherSheet({
             </Pressable>
           </Box>
 
-          <Box className="mb-4 flex-row gap-3">
+          <Box className="mb-3 flex-row gap-3">
             <Pressable
               onPress={() => {
                 onClose();
@@ -58,7 +66,7 @@ export function ConversationSwitcherSheet({
             >
               <MaterialSymbols name="edit-square" size={18} className="text-primary-500" />
               <Text className="text-sm font-semibold text-primary-500">
-                Start New Chat
+                {t('chat.conversationSwitcher.startNewChat')}
               </Text>
             </Pressable>
 
@@ -72,11 +80,45 @@ export function ConversationSwitcherSheet({
               >
                 <MaterialSymbols name="manage-search" size={18} className="text-typography-700 dark:text-typography-200" />
                 <Text className="text-sm font-semibold text-typography-700 dark:text-typography-200">
-                  Manage
+                  {t('common.manage')}
                 </Text>
               </Pressable>
-            ) : null}
+              ) : null}
           </Box>
+
+          {onOpenPresetSelector ? (
+            <Box className="mb-4">
+              <Pressable
+                onPress={() => {
+                  onClose();
+                  onOpenPresetSelector();
+                }}
+                disabled={!canOpenPresetSelector}
+                className={`rounded-2xl border px-4 py-3 ${canOpenPresetSelector
+                  ? 'border-outline-200 bg-background-50 active:opacity-80 dark:border-outline-800 dark:bg-background-900/60'
+                  : 'border-outline-100 bg-background-100/80 dark:border-outline-900 dark:bg-background-900/40'}`}
+              >
+                <Box className="flex-row items-center justify-between gap-3">
+                  <Box className="min-w-0 flex-1">
+                    <Text className="text-sm font-semibold text-typography-900 dark:text-typography-100">
+                      {t('chat.conversationSwitcher.presetTitle')}
+                    </Text>
+                    <Text className="mt-1 text-sm text-typography-500 dark:text-typography-400" numberOfLines={1}>
+                      {canOpenPresetSelector
+                        ? t('chat.conversationSwitcher.presetCurrent', { name: activePresetName ?? t('common.default') })
+                        : t('chat.conversationSwitcher.presetBlocked')}
+                    </Text>
+                  </Box>
+
+                  <MaterialSymbols
+                    name="tune"
+                    size={18}
+                    className={canOpenPresetSelector ? 'text-typography-500 dark:text-typography-300' : 'text-typography-300 dark:text-typography-600'}
+                  />
+                </Box>
+              </Pressable>
+            </Box>
+          ) : null}
 
           <ScrollView showsVerticalScrollIndicator={false}>
             <Box className="gap-3 pb-2">
@@ -110,7 +152,7 @@ export function ConversationSwitcherSheet({
                             numberOfLines={1}
                             className="mt-1 text-xs text-typography-500 dark:text-typography-400"
                           >
-                            {modelLabel} • {conversation.messageCount} message{conversation.messageCount === 1 ? '' : 's'}
+                            {modelLabel} • {t('chat.messageCount', { count: conversation.messageCount })}
                           </Text>
                           {conversation.lastMessagePreview ? (
                             <Text
@@ -125,7 +167,7 @@ export function ConversationSwitcherSheet({
                         {isActive ? (
                           <Box className="rounded-full bg-primary-500/10 px-2 py-1">
                             <Text className="text-2xs font-semibold uppercase tracking-wide text-primary-500">
-                              Active
+                              {t('common.active')}
                             </Text>
                           </Box>
                         ) : (
@@ -138,10 +180,10 @@ export function ConversationSwitcherSheet({
               ) : (
                 <Box className="rounded-2xl border border-dashed border-outline-200 px-4 py-6 dark:border-outline-800">
                   <Text className="text-sm font-semibold text-typography-700 dark:text-typography-200">
-                    No saved conversations yet
+                    {t('chat.conversationSwitcher.emptyTitle')}
                   </Text>
                   <Text className="mt-2 text-sm text-typography-500 dark:text-typography-400">
-                    Start chatting and your saved threads will appear here.
+                    {t('chat.conversationSwitcher.emptyDescription')}
                   </Text>
                 </Box>
               )}

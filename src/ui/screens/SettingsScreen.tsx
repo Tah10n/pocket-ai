@@ -1,309 +1,652 @@
-import React, { useEffect, useState } from 'react';
-import { Alert } from 'react-native';
-import { Box } from '@/components/ui/box';
-import { Text } from '@/components/ui/text';
-import { ScrollView } from '@/components/ui/scroll-view';
-import { Pressable } from '@/components/ui/pressable';
-import { HeaderBar } from '@/components/ui/HeaderBar';
+import React, { useCallback, useEffect, useState } from 'react';
+import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { useBottomTabBarHeight } from '@react-navigation/bottom-tabs';
+import { useFocusEffect } from '@react-navigation/native';
+import { router } from 'expo-router';
+import { useTranslation } from 'react-i18next';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MaterialSymbols } from '@/components/ui/MaterialSymbols';
 import { useDeviceMetrics } from '../../hooks/useDeviceMetrics';
+import { useLLMEngine } from '../../hooks/useLLMEngine';
 import { useTheme } from '../../providers/ThemeProvider';
 import { llmEngineService } from '../../services/LLMEngineService';
 import { getSettings, subscribeSettings, updateSettings } from '../../services/SettingsStore';
-import { useChatStore } from '../../store/chatStore';
 
-const CHAT_RETENTION_OPTIONS = [
-    {
-        label: 'Keep Forever',
-        description: 'Keep every conversation until you remove it manually.',
-        days: null,
+const styles = StyleSheet.create({
+    screen: {
+        flex: 1,
+        width: '100%',
+        maxWidth: 768,
+        alignSelf: 'center',
     },
-    {
-        label: '30 Days',
-        description: 'Auto-delete chats that have been inactive for a month.',
-        days: 30,
+    scrollView: {
+        flex: 1,
     },
-    {
-        label: '90 Days',
-        description: 'A balanced cleanup window for older conversations.',
-        days: 90,
+    header: {
+        borderBottomWidth: StyleSheet.hairlineWidth,
     },
-    {
-        label: '1 Year',
-        description: 'Retain long-running projects without keeping everything forever.',
-        days: 365,
+    headerBar: {
+        height: 56,
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        paddingHorizontal: 16,
     },
-] as const;
+    headerTitleRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+    },
+    iconBubble: {
+        height: 40,
+        width: 40,
+        borderRadius: 20,
+        alignItems: 'center',
+        justifyContent: 'center',
+        marginRight: 12,
+    },
+    headerTitle: {
+        fontSize: 20,
+        fontWeight: '700',
+    },
+    scrollContent: {
+        flexGrow: 1,
+        paddingHorizontal: 16,
+        paddingTop: 24,
+    },
+    sectionTitle: {
+        marginLeft: 4,
+        marginBottom: 8,
+        fontSize: 11,
+        fontWeight: '700',
+        textTransform: 'uppercase',
+        letterSpacing: 1,
+    },
+    card: {
+        borderWidth: 1,
+        borderRadius: 24,
+        overflow: 'hidden',
+        marginBottom: 24,
+    },
+    row: {
+        paddingHorizontal: 16,
+        paddingVertical: 16,
+    },
+    rowBorder: {
+        borderBottomWidth: StyleSheet.hairlineWidth,
+    },
+    rowTop: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+    },
+    rowLeading: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        flex: 1,
+        marginRight: 12,
+    },
+    rowIcon: {
+        width: 40,
+        height: 40,
+        borderRadius: 12,
+        alignItems: 'center',
+        justifyContent: 'center',
+        marginRight: 12,
+    },
+    rowTextWrap: {
+        flex: 1,
+    },
+    rowTitle: {
+        fontSize: 15,
+        fontWeight: '600',
+    },
+    rowSubtitle: {
+        marginTop: 4,
+        fontSize: 12,
+        lineHeight: 17,
+    },
+    rowTrailing: {
+        flexDirection: 'row',
+        alignItems: 'center',
+    },
+    rowTrailingText: {
+        marginRight: 4,
+        fontSize: 14,
+        fontWeight: '600',
+    },
+    segmentedControl: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        width: '100%',
+        borderRadius: 14,
+        padding: 4,
+        marginTop: 16,
+    },
+    segmentButton: {
+        flex: 1,
+        minHeight: 42,
+        borderRadius: 12,
+        alignItems: 'center',
+        justifyContent: 'center',
+        paddingHorizontal: 8,
+    },
+    segmentText: {
+        fontSize: 13,
+        fontWeight: '700',
+    },
+    resourcesWrap: {
+        padding: 16,
+        gap: 14,
+    },
+    resourceCard: {
+        borderRadius: 22,
+        borderWidth: 1,
+        padding: 16,
+    },
+    resourceHeader: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        marginBottom: 12,
+    },
+    resourceTitleWrap: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        flex: 1,
+        marginRight: 12,
+    },
+    resourceIcon: {
+        width: 40,
+        height: 40,
+        borderRadius: 12,
+        alignItems: 'center',
+        justifyContent: 'center',
+        marginRight: 12,
+    },
+    resourceTitle: {
+        fontSize: 16,
+        fontWeight: '700',
+    },
+    resourceSubtitle: {
+        marginTop: 2,
+        fontSize: 12,
+        lineHeight: 17,
+    },
+    percentBadge: {
+        borderRadius: 999,
+        paddingHorizontal: 12,
+        paddingVertical: 6,
+    },
+    percentBadgeText: {
+        fontSize: 12,
+        fontWeight: '800',
+    },
+    primaryMetricRow: {
+        flexDirection: 'row',
+        alignItems: 'flex-end',
+        justifyContent: 'space-between',
+        marginBottom: 14,
+    },
+    primaryMetricValue: {
+        fontSize: 28,
+        fontWeight: '800',
+    },
+    primaryMetricLabel: {
+        marginTop: 2,
+        fontSize: 12,
+        fontWeight: '600',
+    },
+    primaryMetricHint: {
+        fontSize: 12,
+        fontWeight: '700',
+    },
+    usageTrack: {
+        height: 12,
+        borderRadius: 999,
+        overflow: 'hidden',
+    },
+    usageFill: {
+        height: '100%',
+        borderRadius: 999,
+    },
+    usageLegendRow: {
+        marginTop: 10,
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+    },
+    usageLegendText: {
+        fontSize: 12,
+        fontWeight: '600',
+    },
+    statGrid: {
+        flexDirection: 'row',
+        flexWrap: 'wrap',
+        marginTop: 14,
+        marginHorizontal: -4,
+    },
+    statChip: {
+        width: '50%',
+        paddingHorizontal: 4,
+        paddingBottom: 8,
+    },
+    statChipInner: {
+        borderRadius: 16,
+        borderWidth: 1,
+        paddingHorizontal: 12,
+        paddingVertical: 10,
+    },
+    statChipLabel: {
+        fontSize: 11,
+        fontWeight: '700',
+        textTransform: 'uppercase',
+        letterSpacing: 0.6,
+    },
+    statChipValue: {
+        marginTop: 4,
+        fontSize: 15,
+        fontWeight: '700',
+    },
+    unloadButton: {
+        marginTop: 8,
+        borderRadius: 14,
+        alignItems: 'center',
+        justifyContent: 'center',
+        paddingVertical: 12,
+    },
+    unloadButtonText: {
+        fontSize: 14,
+        fontWeight: '700',
+    },
+});
 
-function formatRetentionLabel(days: number | null) {
-    if (days == null) {
-        return 'forever';
+function clampPercentage(value: number) {
+    if (!Number.isFinite(value)) {
+        return 0;
     }
 
-    if (days === 365) {
-        return '1 year';
-    }
+    return Math.max(0, Math.min(100, value));
+}
 
-    return `${days} days`;
+function formatGb(value: number) {
+    return `${value.toFixed(value >= 10 ? 1 : 2)} GB`;
+}
+
+function formatPercent(value: number) {
+    return `${Math.round(clampPercentage(value))}%`;
 }
 
 export const SettingsScreen = () => {
-    const { mode, setTheme } = useTheme();
-    const metrics = useDeviceMetrics();
-    const [chatRetentionDays, setChatRetentionDays] = useState<number | null>(() => getSettings().chatRetentionDays);
+    const { t, i18n } = useTranslation();
+    const insets = useSafeAreaInsets();
+    const tabBarHeight = useBottomTabBarHeight();
+    const { mode, resolvedMode, setTheme, colors } = useTheme();
+    const { metrics, refresh } = useDeviceMetrics();
+    const { state: engineState, isReady: isEngineReady } = useLLMEngine();
+    const [settings, setSettings] = useState(() => getSettings());
+
+    const isDark = resolvedMode === 'dark';
+    const cardBackground = isDark ? 'rgba(15, 23, 42, 0.72)' : colors.surface;
+    const mutedBackground = isDark ? 'rgba(30, 41, 59, 0.85)' : '#eef2f7';
+    const selectedBackground = isDark ? '#111827' : '#ffffff';
+    const trackBackground = isDark ? 'rgba(51, 65, 85, 0.9)' : '#e2e8f0';
+    const resourceCardBackground = isDark ? 'rgba(15, 23, 42, 0.95)' : '#f8fafc';
 
     useEffect(() => {
-        return subscribeSettings((settings) => {
-            setChatRetentionDays(settings.chatRetentionDays);
+        return subscribeSettings((nextSettings) => {
+            setSettings(nextSettings);
         });
     }, []);
 
-    const unloadActiveModel = async () => {
-        await llmEngineService.unload();
-    };
+    useFocusEffect(
+        useCallback(() => {
+            void refresh();
+        }, [refresh]),
+    );
 
     const handleLanguagePress = () => {
-        Alert.alert('Language', 'Language selection will be available in a future update.');
+        const nextLang = settings.language === 'en' ? 'ru' : 'en';
+        updateSettings({ language: nextLang });
+        i18n.changeLanguage(nextLang);
     };
 
-    const applyChatRetention = (days: number | null) => {
-        updateSettings({ chatRetentionDays: days });
-        const deletedCount = useChatStore.getState().pruneExpiredThreads(days);
-
-        if (deletedCount > 0) {
-            Alert.alert(
-                'Conversation cleanup complete',
-                `Removed ${deletedCount} old conversation${deletedCount === 1 ? '' : 's'} that exceeded the new retention window.`,
-            );
-        }
+    const handlePresetsPress = () => {
+        router.push('/presets' as any);
     };
 
-    const handleChatRetentionPress = (days: number | null) => {
-        if (days === chatRetentionDays) {
-            return;
-        }
+    const unloadActiveModel = async () => {
+        await llmEngineService.unload();
+        await refresh();
+    };
 
-        if (days == null) {
-            applyChatRetention(days);
-            return;
-        }
+    const renderThemeButton = (themeMode: 'light' | 'dark' | 'system', label: string) => {
+        const isSelected = mode === themeMode;
 
-        Alert.alert(
-            'Enable auto-delete for old chats?',
-            `Chats inactive for more than ${formatRetentionLabel(days)} will be removed automatically. The currently open chat is kept.`,
-            [
-                { text: 'Cancel', style: 'cancel' },
-                {
-                    text: 'Apply',
-                    style: 'destructive',
-                    onPress: () => {
-                        applyChatRetention(days);
-                    },
-                },
-            ],
+        return (
+            <Pressable
+                key={themeMode}
+                onPress={() => setTheme(themeMode)}
+                style={[
+                    styles.segmentButton,
+                    { backgroundColor: isSelected ? selectedBackground : 'transparent' },
+                    !isDark && isSelected ? shadowStyles.light : null,
+                ]}
+            >
+                <Text
+                    style={[
+                        styles.segmentText,
+                        {
+                            color: isSelected ? colors.primary : colors.textSecondary,
+                        },
+                    ]}
+                >
+                    {label}
+                </Text>
+            </Pressable>
         );
     };
 
+    const renderStatChip = (label: string, value: string) => (
+        <View style={styles.statChip}>
+            <View style={[styles.statChipInner, { borderColor: colors.border, backgroundColor: mutedBackground }]}>
+                <Text style={[styles.statChipLabel, { color: colors.textSecondary }]}>{label}</Text>
+                <Text style={[styles.statChipValue, { color: colors.text }]}>{value}</Text>
+            </View>
+        </View>
+    );
+
+    const ramTotal = metrics?.ram.totalGB ?? 0;
+    const ramUsed = metrics?.ram.usedGB ?? 0;
+    const ramFree = metrics?.ram.freeGB ?? Math.max(ramTotal - ramUsed, 0);
+    const ramUsedPercentage = metrics?.ram.usedPercentage ?? (ramTotal > 0 ? (ramUsed / ramTotal) * 100 : 0);
+
+    const storageTotal = metrics?.storage.totalGB ?? 0;
+    const storageUsed = metrics?.storage.usedGB ?? 0;
+    const storageFree = metrics?.storage.freeGB ?? Math.max(storageTotal - storageUsed, 0);
+    const storageUsedPercentage = metrics?.storage.usedPercentage ?? (storageTotal > 0 ? (storageUsed / storageTotal) * 100 : 0);
+    const downloadedModelsGB = metrics?.storage.downloadedModelsGB ?? 0;
+    const downloadedModelsCount = metrics?.storage.downloadedModelsCount ?? 0;
+    const canForceUnloadModel = isEngineReady && Boolean(engineState.activeModelId);
+
     return (
-        <Box className="flex-1 bg-background-0 dark:bg-background-950 max-w-2xl w-full mx-auto pb-24">
-            <HeaderBar 
-                title="Settings" 
-                showProfile={true} 
-            />
-
-            <ScrollView className="flex-1 mt-6 px-4" showsVerticalScrollIndicator={false}>
-                {/* Appearance Section */}
-                <Text className="text-xs font-semibold uppercase tracking-wider text-typography-500 dark:text-typography-400 ml-4 mb-2">
-                    Appearance
-                </Text>
-                
-                <Box className="bg-background-50 dark:bg-background-900/50 rounded-xl overflow-hidden border border-outline-200 dark:border-outline-800 mb-8">
-                    {/* Theme Mode Segment */}
-                    <Box className="flex-row px-4 py-4 items-center justify-between border-b border-outline-200 dark:border-outline-800">
-                        <Box className="flex-row items-center gap-3">
-                            <Box className="bg-info-500/20 p-2 rounded-lg">
-                                <MaterialSymbols name="palette" size={20} className="text-info-500" />
-                            </Box>
-                            <Text className="font-medium text-typography-900 dark:text-typography-100">Theme Mode</Text>
-                        </Box>
-                        
-                        <Box className="flex-row h-9 w-56 items-center justify-between rounded-lg bg-background-100 dark:bg-background-800 p-1">
-                            <Pressable 
-                                onPress={() => setTheme('light')}
-                                className={`flex-1 h-full items-center justify-center rounded-md px-2 ${mode === 'light' ? 'bg-background-0 dark:bg-background-700 shadow-sm' : 'bg-transparent'}`}
-                            >
-                                <Text className={`text-xs font-semibold ${mode === 'light' ? 'text-primary-600 dark:text-typography-0' : 'text-typography-500 dark:text-typography-400'}`}>Light</Text>
-                            </Pressable>
-                            <Pressable 
-                                onPress={() => setTheme('system')}
-                                className={`flex-1 h-full items-center justify-center rounded-md px-2 ${mode === 'system' ? 'bg-background-0 dark:bg-background-700 shadow-sm' : 'bg-transparent'}`}
-                            >
-                                <Text className={`text-xs font-semibold ${mode === 'system' ? 'text-primary-600 dark:text-typography-0' : 'text-typography-500 dark:text-typography-400'}`}>System</Text>
-                            </Pressable>
-                            <Pressable 
-                                onPress={() => setTheme('dark')}
-                                className={`flex-1 h-full items-center justify-center rounded-md px-2 ${mode === 'dark' ? 'bg-background-0 dark:bg-background-700 shadow-sm' : 'bg-transparent'}`}
-                            >
-                                <Text className={`text-xs font-semibold ${mode === 'dark' ? 'text-primary-600 dark:text-typography-0' : 'text-typography-500 dark:text-typography-400'}`}>Dark</Text>
-                            </Pressable>
-                        </Box>
-                    </Box>
-                    
-                    {/* Language Segment */}
-                    <Pressable 
-                        onPress={handleLanguagePress}
-                        className="flex-row px-4 py-4 items-center justify-between active:opacity-70"
-                    >
-                        <Box className="flex-row items-center gap-3">
-                            <Box className="bg-primary-500/20 p-2 rounded-lg">
-                                <MaterialSymbols name="language" size={20} className="text-primary-600" />
-                            </Box>
-                            <Text className="font-medium text-typography-900 dark:text-typography-100">Language</Text>
-                        </Box>
-                        <Box className="flex-row items-center gap-1">
-                            <Text className="text-sm text-typography-500 dark:text-typography-400">English (US)</Text>
-                            <MaterialSymbols name="chevron-right" size={20} className="text-typography-400" />
-                        </Box>
-                    </Pressable>
-                </Box>
-
-                {/* Performance & Resources Section */}
-                <Text className="text-xs font-semibold uppercase tracking-wider text-typography-500 dark:text-typography-400 ml-4 mb-2">
-                    Performance & Resources
-                </Text>
-                
-                <Box className="bg-background-50 dark:bg-background-900/50 rounded-xl overflow-hidden border border-outline-200 dark:border-outline-800 mb-8">
-                    {/* Storage Info */}
-                    <Box className="p-4 border-b border-outline-200 dark:border-outline-800">
-                        <Box className="flex-row justify-between items-center mb-3">
-                            <Box className="flex-row items-center gap-3">
-                                <Box className="bg-warning-500/20 p-2 rounded-lg">
-                                    <MaterialSymbols name="storage" size={20} className="text-warning-500" />
-                                </Box>
-                                <Text className="font-medium text-typography-900 dark:text-typography-100">Device Storage</Text>
-                            </Box>
-                            <Text className="text-xs font-bold text-typography-500 italic">{metrics?.storage.usedPercentage || 0}% Used</Text>
-                        </Box>
-                        
-                        {/* Storage Bar */}
-                        <Box className="w-full bg-background-200 dark:bg-background-800 h-2.5 rounded-full overflow-hidden flex-row">
-                            <Box className="bg-primary-500 h-full" style={{ width: `${(metrics?.storage.appsGB || 0) / (metrics?.storage.totalGB || 1) * 100}%` }} />
-                            <Box className="bg-info-400 h-full" style={{ width: `${(metrics?.storage.systemGB || 0) / (metrics?.storage.totalGB || 1) * 100}%` }} />
-                            <Box className="bg-background-400 h-full" style={{ width: `${(metrics?.storage.otherGB || 0) / (metrics?.storage.totalGB || 1) * 100}%` }} />
-                        </Box>
-                        
-                        {/* Storage Legend */}
-                        <Box className="mt-3 flex-row gap-4">
-                            <Box className="flex-row items-center gap-1">
-                                <Box className="w-2 h-2 rounded-full bg-primary-500" />
-                                <Text className="text-xs text-typography-500 dark:text-typography-400 uppercase font-bold">Apps ({metrics?.storage.appsGB || 0}GB)</Text>
-                            </Box>
-                            <Box className="flex-row items-center gap-1">
-                                <Box className="w-2 h-2 rounded-full bg-info-400" />
-                                <Text className="text-xs text-typography-500 dark:text-typography-400 uppercase font-bold">System ({metrics?.storage.systemGB || 0}GB)</Text>
-                            </Box>
-                            <Box className="flex-row items-center gap-1">
-                                <Box className="w-2 h-2 rounded-full bg-background-400" />
-                                <Text className="text-xs text-typography-500 dark:text-typography-400 uppercase font-bold">Other ({metrics?.storage.otherGB || 0}GB)</Text>
-                            </Box>
-                        </Box>
-                    </Box>
-
-
-                    {/* RAM Usage */}
-                    <Box className="p-4">
-                        <Box className="flex-row justify-between items-center mb-3">
-                            <Box className="flex-row items-center gap-3">
-                                <Box className="bg-success-500/20 p-2 rounded-lg">
-                                    <MaterialSymbols name="memory" size={20} className="text-success-500" />
-                                </Box>
-                                <Text className="font-medium text-typography-900 dark:text-typography-100">Memory (RAM)</Text>
-                            </Box>
-                            <Text className="text-xs font-bold text-success-500">Optimized</Text>
-                        </Box>
-                        
-                        <Box className="flex-row items-center justify-between bg-background-100 dark:bg-background-800/50 p-3 rounded-lg">
-                            <Box className="items-center flex-1 border-r border-outline-200 dark:border-outline-700">
-                                <Text className="text-xs text-typography-500 uppercase font-bold">Total</Text>
-                                <Text className="text-lg font-bold text-typography-900 dark:text-typography-100">{metrics?.ram.totalGB ?? 0} GB</Text>
-                            </Box>
-                            <Box className="items-center flex-1 border-r border-outline-200 dark:border-outline-700">
-                                <Text className="text-xs text-typography-500 uppercase font-bold">Available</Text>
-                                <Text className="text-lg font-bold text-primary-500">{(metrics?.ram.availableGB ?? 0).toFixed(2)} GB</Text>
-                            </Box>
-                            <Box className="items-center flex-1">
-                                <Text className="text-xs text-typography-500 uppercase font-bold">Cached</Text>
-                                <Text className="text-lg font-bold text-typography-400 dark:text-typography-500">{(metrics?.ram.cachedGB ?? 0).toFixed(2)} GB</Text>
-                            </Box>
-                        </Box>
-                        
-                        <Pressable 
-                            onPress={unloadActiveModel}
-                            className="mt-4 w-full py-2 bg-warning-500/10 items-center justify-center rounded-lg active:opacity-70"
-                        >
-                            <Text className="text-warning-600 text-sm font-semibold">Unload Active Model</Text>
-                        </Pressable>
-                    </Box>
-                </Box>
-
-                <Text className="text-xs font-semibold uppercase tracking-wider text-typography-500 dark:text-typography-400 ml-4 mb-2">
-                    Conversation History
-                </Text>
-
-                <Box className="bg-background-50 dark:bg-background-900/50 rounded-xl overflow-hidden border border-outline-200 dark:border-outline-800 mb-8">
-                    {CHAT_RETENTION_OPTIONS.map((option, index) => {
-                        const isActive = chatRetentionDays === option.days;
-
-                        return (
-                            <Pressable
-                                key={option.label}
-                                onPress={() => handleChatRetentionPress(option.days)}
-                                className={`px-4 py-4 active:opacity-70 ${index < CHAT_RETENTION_OPTIONS.length - 1 ? 'border-b border-outline-200 dark:border-outline-800' : ''}`}
-                            >
-                                <Box className="flex-row items-start justify-between gap-3">
-                                    <Box className="flex-1">
-                                        <Text className="font-medium text-typography-900 dark:text-typography-100">
-                                            {option.label}
-                                        </Text>
-                                        <Text className="mt-1 text-sm text-typography-500 dark:text-typography-400">
-                                            {option.description}
-                                        </Text>
-                                    </Box>
-                                    <Box className={`rounded-full px-3 py-1 ${isActive ? 'bg-primary-500/15' : 'bg-background-100 dark:bg-background-800/80'}`}>
-                                        <Text className={`text-xs font-bold uppercase tracking-wide ${isActive ? 'text-primary-600 dark:text-primary-400' : 'text-typography-500 dark:text-typography-400'}`}>
-                                            {isActive ? 'Active' : formatRetentionLabel(option.days)}
-                                        </Text>
-                                    </Box>
-                                </Box>
-                            </Pressable>
-                        );
-                    })}
-                    <Box className="px-4 py-3 bg-background-100 dark:bg-background-800/40 border-t border-outline-200 dark:border-outline-800">
-                        <Text className="text-xs text-typography-500 dark:text-typography-400">
-                            Auto-delete uses the last activity time for each chat. The currently open chat is never removed automatically.
+        <View style={[styles.screen, { backgroundColor: colors.background }]}>
+            <View
+                style={[
+                    styles.header,
+                    {
+                        paddingTop: insets.top,
+                        borderBottomColor: colors.border,
+                        backgroundColor: colors.background,
+                    },
+                ]}
+            >
+                <View style={styles.headerBar}>
+                    <View style={styles.headerTitleRow}>
+                        <View style={[styles.iconBubble, { backgroundColor: 'rgba(50, 17, 212, 0.10)' }]}>
+                            <MaterialSymbols name="settings" size={22} color={colors.primary} />
+                        </View>
+                        <Text style={[styles.headerTitle, { color: colors.text }]}>
+                            {t('settings.title')}
                         </Text>
-                    </Box>
-                </Box>
+                    </View>
+                </View>
+            </View>
 
-                {/* Privacy & Security Section */}
-                <Text className="text-xs font-semibold uppercase tracking-wider text-typography-500 dark:text-typography-400 ml-4 mb-2">
-                    Privacy & Security
+            <ScrollView
+                style={styles.scrollView}
+                showsVerticalScrollIndicator={false}
+                contentContainerStyle={[styles.scrollContent, { paddingBottom: tabBarHeight + 24 }]}
+            >
+                <Text style={[styles.sectionTitle, { color: colors.textSecondary }]}>
+                    {t('settings.appearance')}
                 </Text>
-                
-                <Box className="bg-background-50 dark:bg-background-900/50 rounded-xl overflow-hidden border border-outline-200 dark:border-outline-800 mb-8">
-                    <Pressable 
-                        className="flex-row px-4 py-4 items-center justify-between active:opacity-70"
-                    >
-                        <Box className="flex-row items-center gap-3">
-                            <Box className="bg-info-400/20 p-2 rounded-lg">
-                                <MaterialSymbols name="visibility-off" size={20} className="text-info-400" />
-                            </Box>
-                            <Text className="font-medium text-typography-900 dark:text-typography-100">Privacy Report</Text>
-                        </Box>
-                        <MaterialSymbols name="chevron-right" size={20} className="text-typography-400" />
+
+                <View style={[styles.card, { backgroundColor: cardBackground, borderColor: colors.border }]}>
+                    <View style={[styles.row, styles.rowBorder, { borderBottomColor: colors.border }]}>
+                        <View style={styles.rowTop}>
+                            <View style={styles.rowLeading}>
+                                <View style={[styles.rowIcon, { backgroundColor: 'rgba(59, 130, 246, 0.18)' }]}>
+                                    <MaterialSymbols name="palette" size={20} color={colors.primary} />
+                                </View>
+                                <View style={styles.rowTextWrap}>
+                                    <Text style={[styles.rowTitle, { color: colors.text }]}>
+                                        {t('settings.themeMode')}
+                                    </Text>
+                                    <Text style={[styles.rowSubtitle, { color: colors.textSecondary }]}>
+                                        {t('settings.themeDescription')}
+                                    </Text>
+                                </View>
+                            </View>
+                        </View>
+
+                        <View style={[styles.segmentedControl, { backgroundColor: mutedBackground }]}>
+                            {renderThemeButton('light', t('settings.themeLight'))}
+                            {renderThemeButton('system', t('settings.themeSystem'))}
+                            {renderThemeButton('dark', t('settings.themeDark'))}
+                        </View>
+                    </View>
+
+                    <Pressable onPress={handleLanguagePress} style={styles.row}>
+                        <View style={styles.rowTop}>
+                            <View style={styles.rowLeading}>
+                                <View style={[styles.rowIcon, { backgroundColor: 'rgba(50, 17, 212, 0.18)' }]}>
+                                    <MaterialSymbols name="language" size={20} color={colors.primary} />
+                                </View>
+                                <View style={styles.rowTextWrap}>
+                                    <Text style={[styles.rowTitle, { color: colors.text }]}>
+                                        {t('settings.language')}
+                                    </Text>
+                                    <Text style={[styles.rowSubtitle, { color: colors.textSecondary }]}>
+                                        {t('settings.languageDescription')}
+                                    </Text>
+                                </View>
+                            </View>
+
+                            <View style={styles.rowTrailing}>
+                                <Text style={[styles.rowTrailingText, { color: colors.primary }]}>
+                                    {settings.language === 'en' ? t('settings.languageEnglish') : t('settings.languageRussian')}
+                                </Text>
+                                <MaterialSymbols name="chevron-right" size={20} color={colors.textSecondary} />
+                            </View>
+                        </View>
                     </Pressable>
-                </Box>
+                </View>
+
+                <Text style={[styles.sectionTitle, { color: colors.textSecondary }]}>
+                    {t('settings.systemConfiguration')}
+                </Text>
+
+                <View style={[styles.card, { backgroundColor: cardBackground, borderColor: colors.border }]}>
+                    <Pressable onPress={handlePresetsPress} style={styles.row}>
+                        <View style={styles.rowTop}>
+                            <View style={styles.rowLeading}>
+                                <View style={[styles.rowIcon, { backgroundColor: 'rgba(245, 158, 11, 0.18)' }]}>
+                                    <MaterialSymbols name="tune" size={20} color={colors.warning} />
+                                </View>
+                                <View style={styles.rowTextWrap}>
+                                    <Text style={[styles.rowTitle, { color: colors.text }]}>
+                                        {t('settings.presets')}
+                                    </Text>
+                                    <Text style={[styles.rowSubtitle, { color: colors.textSecondary }]}>
+                                        {t('settings.presetsDescription')}
+                                    </Text>
+                                </View>
+                            </View>
+
+                            <MaterialSymbols name="chevron-right" size={20} color={colors.textSecondary} />
+                        </View>
+                    </Pressable>
+                </View>
+
+                <Text style={[styles.sectionTitle, { color: colors.textSecondary }]}>
+                    {t('settings.resources')}
+                </Text>
+
+                <View style={[styles.card, { backgroundColor: cardBackground, borderColor: colors.border }]}>
+                    <View style={styles.resourcesWrap}>
+                        <View style={[styles.resourceCard, { backgroundColor: resourceCardBackground, borderColor: colors.border }]}>
+                            <View style={styles.resourceHeader}>
+                                <View style={styles.resourceTitleWrap}>
+                                    <View style={[styles.resourceIcon, { backgroundColor: 'rgba(79, 70, 229, 0.14)' }]}>
+                                        <MaterialSymbols name="memory" size={20} color={colors.primary} />
+                                    </View>
+                                    <View style={styles.rowTextWrap}>
+                                        <Text style={[styles.resourceTitle, { color: colors.text }]}>
+                                            {t('settings.memoryTitle')}
+                                        </Text>
+                                        <Text style={[styles.resourceSubtitle, { color: colors.textSecondary }]}>
+                                            {t('settings.memoryDescription')}
+                                        </Text>
+                                    </View>
+                                </View>
+
+                                <View style={[styles.percentBadge, { backgroundColor: 'rgba(79, 70, 229, 0.12)' }]}>
+                                    <Text style={[styles.percentBadgeText, { color: colors.primary }]}>
+                                        {formatPercent(ramUsedPercentage)}
+                                    </Text>
+                                </View>
+                            </View>
+
+                            <View style={styles.primaryMetricRow}>
+                                <View>
+                                    <Text style={[styles.primaryMetricValue, { color: colors.text }]}>
+                                        {formatGb(ramUsed)}
+                                    </Text>
+                                    <Text style={[styles.primaryMetricLabel, { color: colors.textSecondary }]}>
+                                        {t('settings.memoryInUseOf', { total: formatGb(ramTotal) })}
+                                    </Text>
+                                </View>
+                                <Text style={[styles.primaryMetricHint, { color: colors.primary }]}>
+                                    {t('settings.memoryFree', { value: formatGb(ramFree) })}
+                                </Text>
+                            </View>
+
+                            <View style={[styles.usageTrack, { backgroundColor: trackBackground }]}>
+                                <View
+                                    style={[
+                                        styles.usageFill,
+                                        {
+                                            width: `${clampPercentage(ramUsedPercentage)}%`,
+                                            backgroundColor: '#4f46e5',
+                                        },
+                                    ]}
+                                />
+                            </View>
+                            <View style={styles.usageLegendRow}>
+                                <Text style={[styles.usageLegendText, { color: colors.textSecondary }]}>
+                                    {t('settings.memoryBusy')}
+                                </Text>
+                                <Text style={[styles.usageLegendText, { color: colors.textSecondary }]}>
+                                    {t('settings.memoryAvailable', { value: formatGb(ramFree) })}
+                                </Text>
+                            </View>
+
+                            <View style={styles.statGrid}>
+                                {renderStatChip(t('settings.used'), formatGb(ramUsed))}
+                                {renderStatChip(t('settings.free'), formatGb(ramFree))}
+                                {renderStatChip(t('settings.total'), formatGb(ramTotal))}
+                                {renderStatChip(t('settings.load'), formatPercent(ramUsedPercentage))}
+                            </View>
+
+                            <Pressable
+                                disabled={!canForceUnloadModel}
+                                onPress={canForceUnloadModel ? unloadActiveModel : undefined}
+                                style={[
+                                    styles.unloadButton,
+                                    {
+                                        backgroundColor: canForceUnloadModel ? 'rgba(239, 68, 68, 0.12)' : mutedBackground,
+                                        opacity: canForceUnloadModel ? 1 : 0.55,
+                                    },
+                                ]}
+                            >
+                                <Text
+                                    style={[
+                                        styles.unloadButtonText,
+                                        { color: canForceUnloadModel ? colors.error : colors.textSecondary },
+                                    ]}
+                                >
+                                    {t('settings.forceUnloadModel')}
+                                </Text>
+                            </Pressable>
+                        </View>
+
+                        <View style={[styles.resourceCard, { backgroundColor: resourceCardBackground, borderColor: colors.border }]}>
+                            <View style={styles.resourceHeader}>
+                                <View style={styles.resourceTitleWrap}>
+                                    <View style={[styles.resourceIcon, { backgroundColor: 'rgba(20, 184, 166, 0.14)' }]}>
+                                        <MaterialSymbols name="storage" size={20} color="#0f766e" />
+                                    </View>
+                                    <View style={styles.rowTextWrap}>
+                                        <Text style={[styles.resourceTitle, { color: colors.text }]}>
+                                            {t('settings.storageTitle')}
+                                        </Text>
+                                        <Text style={[styles.resourceSubtitle, { color: colors.textSecondary }]}>
+                                            {t('settings.storageDescription')}
+                                        </Text>
+                                    </View>
+                                </View>
+
+                                <View style={[styles.percentBadge, { backgroundColor: 'rgba(20, 184, 166, 0.12)' }]}>
+                                    <Text style={[styles.percentBadgeText, { color: '#0f766e' }]}>
+                                        {formatPercent(storageUsedPercentage)}
+                                    </Text>
+                                </View>
+                            </View>
+
+                            <View style={styles.primaryMetricRow}>
+                                <View>
+                                    <Text style={[styles.primaryMetricValue, { color: colors.text }]}>
+                                        {formatGb(storageUsed)}
+                                    </Text>
+                                    <Text style={[styles.primaryMetricLabel, { color: colors.textSecondary }]}>
+                                        {t('settings.storageUsedOf', { total: formatGb(storageTotal) })}
+                                    </Text>
+                                </View>
+                                <Text style={[styles.primaryMetricHint, { color: '#0f766e' }]}>
+                                    {t('settings.storageFree', { value: formatGb(storageFree) })}
+                                </Text>
+                            </View>
+
+                            <View style={[styles.usageTrack, { backgroundColor: trackBackground }]}>
+                                <View
+                                    style={[
+                                        styles.usageFill,
+                                        {
+                                            width: `${clampPercentage(storageUsedPercentage)}%`,
+                                            backgroundColor: '#14b8a6',
+                                        },
+                                    ]}
+                                />
+                            </View>
+                            <View style={styles.usageLegendRow}>
+                                <Text style={[styles.usageLegendText, { color: colors.textSecondary }]}>
+                                    {t('settings.storageOccupied')}
+                                </Text>
+                                <Text style={[styles.usageLegendText, { color: colors.textSecondary }]}>
+                                    {t('settings.storageAvailable', { value: formatGb(storageFree) })}
+                                </Text>
+                            </View>
+
+                            <View style={styles.statGrid}>
+                                {renderStatChip(t('settings.used'), formatGb(storageUsed))}
+                                {renderStatChip(t('settings.free'), formatGb(storageFree))}
+                                {renderStatChip(t('settings.total'), formatGb(storageTotal))}
+                                {renderStatChip(t('settings.modelsUsage', { count: downloadedModelsCount }), formatGb(downloadedModelsGB))}
+                            </View>
+                        </View>
+                    </View>
+                </View>
             </ScrollView>
-        </Box>
+        </View>
     );
 };
+
+const shadowStyles = StyleSheet.create({
+    light: {
+        shadowColor: '#0f172a',
+        shadowOpacity: 0.08,
+        shadowRadius: 8,
+        shadowOffset: { width: 0, height: 2 },
+        elevation: 2,
+    },
+});

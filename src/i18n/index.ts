@@ -1,96 +1,14 @@
 import i18n from 'i18next';
 import { initReactI18next } from 'react-i18next';
+import enLocale from './locales/en.json';
+import ruLocale from './locales/ru.json';
 
 const resources = {
     en: {
-        translation: {
-            chat: {
-                title: 'Chat',
-                inputPlaceholder: 'Ask local AI...',
-                send: 'Send',
-                stop: 'Stop',
-                regenerate: 'Regenerate',
-                warmingUp: 'Warming up model...',
-                memoryWarning: 'Low memory warning',
-                thermalWarning: 'Device is overheating!',
-            },
-            settings: {
-                title: 'Settings',
-                temperature: 'Temperature',
-                topP: 'Top-P',
-                maxTokens: 'Max Tokens',
-                darkMode: 'Dark Mode',
-                language: 'Language',
-                presets: 'System Prompt Presets',
-            },
-            models: {
-                title: 'Models',
-                featured: 'Top models',
-                searchResults: 'Search results',
-                searchPlaceholder: 'Search Hugging Face (GGUF)...',
-                clearSearch: 'Clear search',
-                noResults: 'No models found',
-                loadFailed: 'Failed to load models',
-                sizeUnknown: 'Unknown',
-                download: 'Download',
-                cancel: 'Cancel',
-                ready: 'Ready to use',
-                storageManager: 'Storage Manager',
-                offload: 'Offload',
-            },
-            common: {
-                save: 'Save',
-                delete: 'Delete',
-                cancel: 'Cancel',
-                edit: 'Edit',
-                add: 'Add',
-            },
-        },
+        translation: enLocale,
     },
     ru: {
-        translation: {
-            chat: {
-                title: 'Чат',
-                inputPlaceholder: 'Спросите ИИ...',
-                send: 'Отправить',
-                stop: 'Стоп',
-                regenerate: 'Перегенерировать',
-                warmingUp: 'Загрузка модели...',
-                memoryWarning: 'Предупреждение: мало памяти',
-                thermalWarning: 'Устройство перегревается!',
-            },
-            settings: {
-                title: 'Настройки',
-                temperature: 'Температура',
-                topP: 'Top-P',
-                maxTokens: 'Макс. токенов',
-                darkMode: 'Тёмная тема',
-                language: 'Язык',
-                presets: 'Пресеты системных промптов',
-            },
-            models: {
-                title: 'Модели',
-                featured: 'Популярные модели',
-                searchResults: 'Результаты поиска',
-                searchPlaceholder: 'Поиск по Hugging Face (GGUF)...',
-                clearSearch: 'Очистить поиск',
-                noResults: 'Модели не найдены',
-                loadFailed: 'Не удалось загрузить модели',
-                sizeUnknown: 'Неизвестно',
-                download: 'Скачать',
-                cancel: 'Отмена',
-                ready: 'Готово к использованию',
-                storageManager: 'Управление хранилищем',
-                offload: 'Удалить',
-            },
-            common: {
-                save: 'Сохранить',
-                delete: 'Удалить',
-                cancel: 'Отмена',
-                edit: 'Редактировать',
-                add: 'Добавить',
-            },
-        },
+        translation: ruLocale,
     },
 };
 
@@ -107,7 +25,3 @@ i18n
     });
 
 export default i18n;
-
-
-
-

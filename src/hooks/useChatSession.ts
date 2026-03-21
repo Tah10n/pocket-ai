@@ -1,7 +1,7 @@
 import { AppState, AppStateStatus } from 'react-native';
 import { useCallback, useEffect, useRef } from 'react';
 import { llmEngineService } from '../services/LLMEngineService';
-import { getSettings } from '../services/SettingsStore';
+import { GenerationParameters, getGenerationParametersForModel, getSettings } from '../services/SettingsStore';
 import { presetManager } from '../services/PresetManager';
 import { EngineStatus } from '../types/models';
 import {
@@ -19,6 +19,7 @@ export const MAX_CONTEXT_MESSAGES = 24;
 export const SUMMARY_PLACEHOLDER_CONTENT =
   'Summary generation is not available yet. Older messages stay visible in the thread, but only the most recent context is sent to the model right now.';
 export const SUMMARY_AFFORDANCE_MIN_TRUNCATED_MESSAGES = 1;
+const DEFAULT_CONTEXT_SIZE = 2048;
 
 interface ActiveGenerationState {
   threadId: string;
@@ -96,6 +97,7 @@ export const useChatSession = () => {
   const finalizeThreadStatus = useChatStore((state) => state.finalizeThreadStatus);
   const setActiveThread = useChatStore((state) => state.setActiveThread);
   const setThreadSummary = useChatStore((state) => state.setThreadSummary);
+  const updateThreadParamsSnapshot = useChatStore((state) => state.updateThreadParamsSnapshot);
   const appStateRef = useRef<AppStateStatus>(AppState.currentState ?? 'active');
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (nextAppState) => {
@@ -141,6 +143,11 @@ export const useChatSession = () => {
     let tokensCount = 0;
     const startTime = Date.now();
 
+    const maxContextSize =
+      typeof llmEngineService.getContextSize === 'function'
+        ? llmEngineService.getContextSize()
+        : DEFAULT_CONTEXT_SIZE;
+
     try {
       const messages = buildInferenceMessagesForThread(thread);
 
@@ -149,7 +156,7 @@ export const useChatSession = () => {
         params: {
           temperature: thread.paramsSnapshot.temperature,
           top_p: thread.paramsSnapshot.topP,
-          n_predict: thread.paramsSnapshot.maxTokens,
+          n_predict: Math.min(thread.paramsSnapshot.maxTokens, maxContextSize),
         },
         onToken: (token) => {
           currentText += token;
@@ -198,6 +205,25 @@ export const useChatSession = () => {
     }
   }, [finalizeAssistantMessage, finalizeThreadStatus, patchAssistantMessage, stopAssistantMessage]);
 
+  const syncThreadParameters = useCallback((thread: ChatThread, nextParams?: GenerationParameters) => {
+    const resolvedParams = nextParams ?? getGenerationParametersForModel(thread.modelId);
+    const paramsChanged =
+      thread.paramsSnapshot.temperature !== resolvedParams.temperature
+      || thread.paramsSnapshot.topP !== resolvedParams.topP
+      || thread.paramsSnapshot.maxTokens !== resolvedParams.maxTokens;
+
+    if (paramsChanged) {
+      updateThreadParamsSnapshot(thread.id, resolvedParams);
+    }
+
+    return paramsChanged
+      ? {
+          ...thread,
+          paramsSnapshot: resolvedParams,
+        }
+      : thread;
+  }, [updateThreadParamsSnapshot]);
+
   const ensureThreadCanGenerate = useCallback((thread: ChatThread, actionLabel: string) => {
     if (thread.status === 'generating') {
       throw new Error('A response is already being generated for this thread.');
@@ -218,6 +244,7 @@ export const useChatSession = () => {
   const appendUserMessage = useCallback(async (text: string) => {
     const settings = getSettings();
     const activeModelId = settings.activeModelId;
+    const activeModelParams = getGenerationParametersForModel(activeModelId);
 
     if (!activeModelId) {
       throw new Error('Model is not loaded or engine is not ready. Please select and load a model in the Models tab.');
@@ -243,14 +270,14 @@ export const useChatSession = () => {
         modelId: activeModelId,
         presetId: settings.activePresetId,
         presetSnapshot: resolvePresetSnapshot(settings.activePresetId),
-        paramsSnapshot: {
-          temperature: settings.temperature,
-          topP: settings.topP,
-          maxTokens: settings.maxTokens,
-        },
+        paramsSnapshot: activeModelParams,
       });
 
     setActiveThread(threadId);
+
+    if (activeThread) {
+      syncThreadParameters(activeThread, activeModelParams);
+    }
 
     const userMessage: ChatMessage = {
       id: createChatId('message'),
@@ -265,7 +292,7 @@ export const useChatSession = () => {
     const assistantMessageId = createAssistantPlaceholder(threadId);
 
     await runAssistantCompletion(threadId, assistantMessageId);
-  }, [activeThread, appendMessage, createAssistantPlaceholder, createThread, runAssistantCompletion, setActiveThread]);
+  }, [activeThread, appendMessage, createAssistantPlaceholder, createThread, runAssistantCompletion, setActiveThread, syncThreadParameters]);
 
   const stopGeneration = useCallback(async () => {
     if (!sharedGenerationState.current) {
@@ -286,10 +313,11 @@ export const useChatSession = () => {
       throw new Error('Message cannot be empty.');
     }
 
-    ensureThreadCanGenerate(activeThread, 'regenerating this response');
+    const syncedThread = syncThreadParameters(activeThread);
+    ensureThreadCanGenerate(syncedThread, 'regenerating this response');
 
     const assistantMessageId = replaceBranchFromUserMessage(
-      activeThread.id,
+      syncedThread.id,
       messageId,
       normalizedContent,
     );
@@ -297,10 +325,10 @@ export const useChatSession = () => {
       throw new Error('The selected message could not be regenerated.');
     }
 
-    await runAssistantCompletion(activeThread.id, assistantMessageId);
+    await runAssistantCompletion(syncedThread.id, assistantMessageId);
 
     return true;
-  }, [activeThread, ensureThreadCanGenerate, replaceBranchFromUserMessage, runAssistantCompletion]);
+  }, [activeThread, ensureThreadCanGenerate, replaceBranchFromUserMessage, runAssistantCompletion, syncThreadParameters]);
 
   const regenerateLastResponse = useCallback(async () => {
     if (!activeThread) {
@@ -314,14 +342,15 @@ export const useChatSession = () => {
       return false;
     }
 
-    ensureThreadCanGenerate(activeThread, 'regenerating this response');
+    const syncedThread = syncThreadParameters(activeThread);
+    ensureThreadCanGenerate(syncedThread, 'regenerating this response');
 
-    const assistantMessageId = replaceLastAssistantMessage(activeThread.id);
+    const assistantMessageId = replaceLastAssistantMessage(syncedThread.id);
     if (!assistantMessageId) {
       return regenerateFromUserMessage(lastUserMessage.id, lastUserMessage.content);
     }
 
-    await runAssistantCompletion(activeThread.id, assistantMessageId);
+    await runAssistantCompletion(syncedThread.id, assistantMessageId);
 
     return true;
   }, [
@@ -330,6 +359,7 @@ export const useChatSession = () => {
     regenerateFromUserMessage,
     replaceLastAssistantMessage,
     runAssistantCompletion,
+    syncThreadParameters,
   ]);
 
   const createSummaryPlaceholder = useCallback(() => {
@@ -369,8 +399,9 @@ export const useChatSession = () => {
       throw new Error('The selected conversation is no longer available.');
     }
 
+    syncThreadParameters(thread);
     setActiveThread(threadId);
-  }, [activeThread, setActiveThread]);
+  }, [activeThread, setActiveThread, syncThreadParameters]);
 
   const deleteThread = useCallback((threadId: string) => {
     if (sharedGenerationState.current?.threadId === threadId) {

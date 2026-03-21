@@ -3,6 +3,8 @@
 Expo Router React Native app for an offline-first local AI assistant. The app focuses on GGUF model discovery, download, verification, local loading through `llama.rn`, and an on-device chat experience.
 
 Home shows a short recent-conversations slice, while the dedicated `All Conversations` screen handles full history management with search, rename, open, and delete actions.
+Settings now include theme/language controls, generation parameters, and a routed preset manager where seeded and user-created presets can all be added, edited, activated, or deleted.
+Theme switching is currently stabilized with a hybrid approach: the app theme source of truth still lives in `ThemeProvider`, but `SettingsScreen` intentionally uses plain React Native `StyleSheet` styling as a safety workaround for a NativeWind / `react-native-css-interop` dev-time crash that was reproducible during theme changes.
 
 ## Scripts
 
@@ -101,12 +103,40 @@ app/
 - Keep route-facing screen components in `src/ui/screens`.
 - Use `src/store` as the single home for Zustand store modules.
 - Use `src/services` for app services and persistence helpers rather than putting that logic into components.
+- Prefer NativeWind primitives and `className` for shared UI, but document and preserve targeted React Native `StyleSheet` fallbacks when they are used to avoid verified runtime stability issues.
+- Treat localization as part of the definition of done for user-facing UI.
+- Any new user-visible button label, title, description, tab label, alert copy, empty state, filter label, or menu item must be added to both `src/i18n/locales/en.json` and `src/i18n/locales/ru.json`, then consumed via `t(...)` instead of hard-coded inline strings.
+- The only normal exceptions are developer-only logs, temporary test doubles/mocks, and other text that never ships to end users.
+
+## Localization Workflow
+
+When adding or changing user-facing copy:
+
+1. Add the new translation key to `src/i18n/locales/en.json`.
+2. Add the matching key to `src/i18n/locales/ru.json`.
+3. Use the key from the component or screen with `useTranslation()` and `t(...)`.
+4. Avoid shipping mixed-language UI by not leaving new English-only fallback strings in production components.
+
+Example:
+
+```tsx
+const { t } = useTranslation();
+
+<Text>{t('home.newChat')}</Text>
+```
 
 ## Documentation
 
 - [../IMPLEMENTATION_PLAN.md](../IMPLEMENTATION_PLAN.md): delivery roadmap and current phase status.
 - [UI Architecture & Components Guidelines](./docs/ui-architecture.md): guidance for creating and modifying UI components.
 - [New Architecture Migration Guide](./docs/new-architecture.md): notes for React Native New Architecture and native-module-related setup.
+
+## Theme Notes
+
+- Theme persistence and the app-wide resolved mode live in `src/providers/ThemeProvider.tsx`.
+- `app/(tabs)/_layout.tsx` reads the resolved theme from that provider so tabs stay in sync with the rest of the app.
+- `app/_layout.tsx` contains a dev-only guard for the `react-native-css-interop` upgrade-warning crash that can occur when React Navigation proxy props are stringified during theme-related rerenders.
+- `src/ui/screens/SettingsScreen.tsx` is intentionally implemented with React Native primitives and `StyleSheet` right now; do not convert it back to NativeWind wrappers without re-verifying theme switching on device.
 
 ## Android Smoke Automation
 

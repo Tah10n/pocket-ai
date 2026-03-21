@@ -6,12 +6,22 @@ import { EngineStatus, EngineState } from '../types/models';
 import { LlmChatCompletionOptions } from '../types/chat';
 import { registry } from './LocalStorageRegistry';
 import { MODELS_DIR } from './FileSystemSetup';
-import { updateSettings } from './SettingsStore';
+import {
+  getModelLoadParametersForModel,
+  updateSettings,
+} from './SettingsStore';
+
+interface LoadModelOptions {
+  forceReload?: boolean;
+}
 
 type StateListener = (state: EngineState) => void;
+const DEFAULT_CONTEXT_SIZE = 2048;
 
 class LLMEngineService {
   private context: LlamaContext | null = null;
+  private activeContextSize = DEFAULT_CONTEXT_SIZE;
+  private activeGpuLayers: number | null = null;
   private state: EngineState = {
     status: EngineStatus.IDLE,
     loadProgress: 0,
@@ -32,15 +42,19 @@ class LLMEngineService {
   /**
    * Determine the number of GPU layers based on device RAM.
    */
+  private suggestGpuLayersForTotalMemory(totalMemory: number): number {
+    const totalGB = totalMemory / (1024 * 1024 * 1024);
+
+    if (totalGB >= 12) return 35;
+    if (totalGB >= 8) return 20;
+    if (totalGB >= 6) return 10;
+    return 0;
+  }
+
   private async calculateGpuLayers(): Promise<number> {
     try {
       const totalMemory = await DeviceInfo.getTotalMemory();
-      const totalGB = totalMemory / (1024 * 1024 * 1024);
-
-      if (totalGB >= 12) return 35;
-      if (totalGB >= 8) return 20;
-      if (totalGB >= 6) return 10;
-      return 0;
+      return this.suggestGpuLayersForTotalMemory(totalMemory);
     } catch (e) {
       console.error('[LLMEngine] Failed to calculate GPU layers', e);
       return 0;
@@ -50,23 +64,28 @@ class LLMEngineService {
   /**
    * Initialize the llama.rn engine and load a GGUF model from disk.
    */
-  public async load(modelId: string): Promise<void> {
+  public async load(modelId: string, options?: LoadModelOptions): Promise<void> {
     const model = registry.getModel(modelId);
     if (!model || !model.localPath) {
       throw new Error(`Model ${modelId} not found or not downloaded`);
     }
+    const forceReload = options?.forceReload === true;
 
-    if (this.state.status === EngineStatus.READY && this.state.activeModelId === modelId) {
+    if (this.state.status === EngineStatus.READY && this.state.activeModelId === modelId && !forceReload) {
       return;
     }
 
-    if (this.state.status === EngineStatus.INITIALIZING && this.initPromise && this.state.activeModelId === modelId) {
+    if (this.state.status === EngineStatus.INITIALIZING && this.initPromise && this.state.activeModelId === modelId && !forceReload) {
       await this.initPromise;
       return;
     }
 
+    if (this.state.status === EngineStatus.INITIALIZING && this.initPromise && this.state.activeModelId === modelId && forceReload) {
+      await this.initPromise;
+    }
+
     // Unload current if different
-    if (this.state.activeModelId && this.state.activeModelId !== modelId) {
+    if (this.state.activeModelId && (this.state.activeModelId !== modelId || forceReload)) {
       await this.unload();
     }
 
@@ -84,13 +103,15 @@ class LLMEngineService {
           throw new Error(`Model file not found at ${modelPath}`);
         }
 
-        const gpuLayers = await this.calculateGpuLayers();
+        const loadParams = getModelLoadParametersForModel(modelId);
+        const gpuLayers = loadParams.gpuLayers ?? await this.calculateGpuLayers();
+        let resolvedGpuLayers = gpuLayers;
 
         try {
           this.context = await initLlama(
             {
               model: modelPath,
-              n_ctx: 2048,
+              n_ctx: loadParams.contextSize,
               n_gpu_layers: gpuLayers,
               flash_attn_type: 'auto',
             },
@@ -101,10 +122,11 @@ class LLMEngineService {
         } catch (gpuError) {
           if (gpuLayers > 0) {
             console.warn('[LLMEngine] GPU init failed, falling back to CPU', gpuError);
+            resolvedGpuLayers = 0;
             this.context = await initLlama(
               {
                 model: modelPath,
-                n_ctx: 2048,
+                n_ctx: loadParams.contextSize,
                 n_gpu_layers: 0,
                 flash_attn_type: 'auto',
               },
@@ -117,6 +139,8 @@ class LLMEngineService {
           }
         }
 
+        this.activeContextSize = loadParams.contextSize;
+        this.activeGpuLayers = resolvedGpuLayers;
         this.updateState({ ...this.state, status: EngineStatus.READY, loadProgress: 1 });
         updateSettings({ activeModelId: modelId });
       } catch (e) {
@@ -137,6 +161,8 @@ class LLMEngineService {
       await releaseAllLlama();
       this.context = null;
     }
+    this.activeContextSize = DEFAULT_CONTEXT_SIZE;
+    this.activeGpuLayers = null;
     // Reset initPromise only after the context has been fully released
     // to prevent a concurrent load() call from thinking no init is in progress
     this.initPromise = null;
@@ -189,6 +215,18 @@ class LLMEngineService {
 
   public getState(): EngineState {
     return this.state;
+  }
+
+  public getContextSize(): number {
+    return this.activeContextSize;
+  }
+
+  public getLoadedGpuLayers(): number | null {
+    return this.activeGpuLayers;
+  }
+
+  public async getRecommendedGpuLayers(): Promise<number> {
+    return this.calculateGpuLayers();
   }
 
   public subscribe(listener: StateListener): () => void {

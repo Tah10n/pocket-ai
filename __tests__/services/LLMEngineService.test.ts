@@ -1,7 +1,7 @@
 import * as llamaRn from 'llama.rn';
 import { llmEngineService } from '../../src/services/LLMEngineService';
 import { registry } from '../../src/services/LocalStorageRegistry';
-import { updateSettings } from '../../src/services/SettingsStore';
+import { getModelLoadParametersForModel, updateSettings } from '../../src/services/SettingsStore';
 import { EngineStatus, LifecycleStatus } from '../../src/types/models';
 
 jest.mock('llama.rn', () => {
@@ -25,6 +25,10 @@ jest.mock('react-native-device-info', () => ({
 }));
 
 jest.mock('../../src/services/SettingsStore', () => ({
+  getModelLoadParametersForModel: jest.fn().mockReturnValue({
+    contextSize: 2048,
+    gpuLayers: null,
+  }),
   updateSettings: jest.fn(),
 }));
 
@@ -101,5 +105,24 @@ describe('LLMEngineService', () => {
       }),
       expect.any(Function),
     );
+  });
+
+  it('loads the model with saved context and gpu preferences', async () => {
+    (getModelLoadParametersForModel as jest.Mock).mockReturnValueOnce({
+      contextSize: 4096,
+      gpuLayers: 12,
+    });
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    expect(llamaRn.initLlama).toHaveBeenCalledWith(
+      expect.objectContaining({
+        n_ctx: 4096,
+        n_gpu_layers: 12,
+      }),
+      expect.any(Function),
+    );
+    expect(llmEngineService.getContextSize()).toBe(4096);
+    expect(llmEngineService.getLoadedGpuLayers()).toBe(12);
   });
 });

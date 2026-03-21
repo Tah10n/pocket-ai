@@ -47,7 +47,48 @@ function patchExpoKeepAwake() {
   }
 }
 
+function patchCssInteropUpgradeWarningCrash() {
+  if (!__DEV__) return;
+
+  const globalAny = globalThis as unknown as { __pocketAiCssInteropPatched?: boolean };
+  if (globalAny.__pocketAiCssInteropPatched) return;
+  globalAny.__pocketAiCssInteropPatched = true;
+
+  try {
+    const renderComponentModule = require('react-native-css-interop/dist/runtime/native/render-component') as {
+      renderComponent?: (...args: any[]) => any;
+    };
+
+    if (typeof renderComponentModule.renderComponent !== 'function') return;
+
+    const originalRenderComponent = renderComponentModule.renderComponent;
+    renderComponentModule.renderComponent = (...args: any[]) => {
+      try {
+        return originalRenderComponent(...args);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const sharedState = args[1] as { canUpgradeWarn?: boolean } | undefined;
+
+        // react-native-css-interop can crash while stringifying React Navigation
+        // proxy props for a dev-only upgrade warning. Retry once without warning.
+        if (
+          sharedState?.canUpgradeWarn &&
+          /Couldn't find a navigation context/i.test(message)
+        ) {
+          sharedState.canUpgradeWarn = false;
+          return originalRenderComponent(...args);
+        }
+
+        throw error;
+      }
+    };
+  } catch (error) {
+    console.warn('[RootLayout] Failed to patch react-native-css-interop warning crash', error);
+  }
+}
+
 patchExpoKeepAwake();
+patchCssInteropUpgradeWarningCrash();
 
 // Prevent the splash screen from auto-hiding before we are ready.
 SplashScreen.preventAutoHideAsync().catch((e) => console.warn('[SplashScreen] preventAutoHideAsync failed', e));
@@ -98,6 +139,7 @@ function RootNavigator() {
       <Stack>
         <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
         <Stack.Screen name="conversations" options={{ headerShown: false }} />
+        <Stack.Screen name="presets" options={{ headerShown: false }} />
         <Stack.Screen name="modal" options={{ presentation: 'modal', title: 'Modal' }} />
       </Stack>
       <StatusBar style="auto" />

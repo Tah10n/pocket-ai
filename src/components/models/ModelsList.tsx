@@ -23,6 +23,7 @@ import {
 import { EngineStatus, LifecycleStatus, type ModelMetadata } from '@/types/models';
 import { ModelsFilter } from './ModelsFilter';
 import { ModelsSort } from './ModelsSort';
+import { useTranslation } from 'react-i18next';
 
 interface ModelsListProps {
   activeTab: 'All Models' | 'Downloaded';
@@ -96,6 +97,7 @@ function sortModels(models: ModelMetadata[], sort: ModelSortPreference): ModelMe
 }
 
 export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
+  const { t } = useTranslation();
   const router = useRouter();
   const [models, setModels] = useState<ModelMetadata[]>([]);
   const [loading, setLoading] = useState(false);
@@ -231,29 +233,29 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
     const status = hardwareListenerService.getCurrentStatus();
     if (status.networkType === 'cellular') {
       Alert.alert(
-        'Cellular Data Warning',
-        'You are on a cellular network. Large downloads may incur costs. Proceed?',
+        t('models.cellularWarningTitle'),
+        t('models.cellularWarningMessage'),
         [
-          { text: 'Cancel', style: 'cancel' },
-          { text: 'Download Anyway', onPress: () => startDownload(model) },
+          { text: t('common.cancel'), style: 'cancel' },
+          { text: t('models.downloadAnyway'), onPress: () => startDownload(model) },
         ],
       );
       return;
     }
 
     startDownload(model);
-  }, [startDownload]);
+  }, [startDownload, t]);
 
   const handleLoad = useCallback(async (modelId: string) => {
     const model = models.find((item) => item.id === modelId);
     if (model && model.fitsInRam === false) {
       Alert.alert(
-        'Memory Warning',
-        'This model may exceed your device RAM and cause crashes. Load anyway?',
+        t('models.memoryWarningTitle'),
+        t('models.memoryWarningMessage'),
         [
-          { text: 'Cancel', style: 'cancel' },
+          { text: t('common.cancel'), style: 'cancel' },
           {
-            text: 'Load Anyway',
+            text: t('models.loadAnyway'),
             onPress: async () => {
               await loadModel(modelId);
               refreshDownloadedModels();
@@ -266,7 +268,7 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
 
     await loadModel(modelId);
     refreshDownloadedModels();
-  }, [loadModel, models, refreshDownloadedModels]);
+  }, [loadModel, models, refreshDownloadedModels, t]);
 
   const handleUnload = useCallback(async () => {
     await unloadModel();
@@ -275,12 +277,12 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
 
   const handleDelete = useCallback((modelId: string) => {
     Alert.alert(
-      'Delete Model',
-      'Are you sure you want to delete this model from your device?',
+      t('models.deleteTitle'),
+      t('models.deleteMessage'),
       [
-        { text: 'Cancel', style: 'cancel' },
+        { text: t('common.cancel'), style: 'cancel' },
         {
-          text: 'Delete',
+          text: t('common.delete'),
           style: 'destructive',
           onPress: async () => {
             if (engineState.activeModelId === modelId) {
@@ -297,7 +299,7 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
         },
       ],
     );
-  }, [activeTab, engineState.activeModelId, fetchModels, refreshDownloadedModels, resetPagination, searchQuery, unloadModel]);
+  }, [activeTab, engineState.activeModelId, fetchModels, refreshDownloadedModels, resetPagination, searchQuery, t, unloadModel]);
 
   const handleLoadMore = useCallback(() => {
     if (!hasMore || isFetchingMore || activeTab !== 'All Models') {
@@ -313,16 +315,16 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
   const emptyState = (
     <Box className="flex-1 items-center justify-center px-6 pt-20">
       <Text className="text-center text-base font-semibold text-typography-700 dark:text-typography-200">
-        No models found
+        {t('models.noResults', 'No models found')}
       </Text>
       <Text className="mt-2 text-center text-sm text-typography-500 dark:text-typography-400">
         {hasFilters
-          ? 'Try clearing one or more filters to broaden the catalog.'
-          : 'Try a different search term or load more results.'}
+          ? t('models.emptyFiltered')
+          : t('models.emptySearchHint')}
       </Text>
       {hasFilters ? (
         <Button size="sm" className="mt-4" onPress={clearFilters}>
-          <ButtonText>Clear filters</ButtonText>
+          <ButtonText>{t('models.clearFilters')}</ButtonText>
         </Button>
       ) : null}
     </Box>
@@ -337,14 +339,14 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
       ) : null}
 
       {hasMore ? (
-        <Button action="secondary" size="md" onPress={handleLoadMore} disabled={isFetchingMore}>
+          <Button action="secondary" size="md" onPress={handleLoadMore} disabled={isFetchingMore}>
           <ButtonText className="text-typography-900 dark:text-typography-100">
-            {isFetchingMore ? 'Loading...' : 'More'}
+            {isFetchingMore ? t('common.loading') : t('common.more')}
           </ButtonText>
         </Button>
       ) : filteredModels.length > 0 ? (
         <Text className="text-center text-xs text-typography-400 dark:text-typography-500">
-          You have reached the end of the catalog results.
+          {t('models.catalogEnd')}
         </Text>
       ) : null}
     </Box>
@@ -372,7 +374,7 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
         {loading && models.length === 0 ? (
           <Box className="flex-1 items-center justify-center">
             <Spinner size="large" />
-            <Text className="mt-4 text-typography-500">Searching Hugging Face...</Text>
+            <Text className="mt-4 text-typography-500">{t('models.searching', 'Searching Hugging Face...')}</Text>
           </Box>
         ) : (
           <FlashList
@@ -400,7 +402,7 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
         <Box className="absolute bottom-0 left-0 right-0 flex-row items-center justify-center bg-primary-500 p-2">
           <Spinner className="mr-2 text-white" />
           <Text className="font-bold text-white">
-            Warming up model...{' '}
+            {t('chat.warmingUp')}{' '}
             {Math.round(
               engineState.loadProgress > 1
                 ? engineState.loadProgress

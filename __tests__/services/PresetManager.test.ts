@@ -1,5 +1,14 @@
 import { presetManager } from '../../src/services/PresetManager';
-import { getSettings, updateSettings } from '../../src/services/SettingsStore';
+import {
+    getModelLoadParametersForModel,
+    getGenerationParametersForModel,
+    getSettings,
+    resetModelLoadParametersForModel,
+    resetGenerationParametersForModel,
+    updateModelLoadParametersForModel,
+    updateGenerationParametersForModel,
+    updateSettings,
+} from '../../src/services/SettingsStore';
 
 jest.mock('react-native-mmkv', () => {
     const store: Record<string, string> = {};
@@ -15,9 +24,11 @@ jest.mock('react-native-mmkv', () => {
 describe('PresetManager', () => {
     it('returns default presets on first access', () => {
         const presets = presetManager.getPresets();
-        expect(presets.length).toBeGreaterThanOrEqual(4);
+        expect(presets.length).toBeGreaterThanOrEqual(10);
         expect(presets.some(p => p.name === 'Helpful Assistant')).toBe(true);
         expect(presets.some(p => p.name === 'Code Expert')).toBe(true);
+        expect(presets.some(p => p.name === 'Study Tutor')).toBe(true);
+        expect(presets.some(p => p.name === 'Product Manager')).toBe(true);
     });
 
     it('adds a custom preset', () => {
@@ -27,9 +38,36 @@ describe('PresetManager', () => {
         expect(all.some(p => p.id === preset.id)).toBe(true);
     });
 
-    it('prevents deleting built-in presets', () => {
-        const builtIn = presetManager.getPresets().find(p => p.isBuiltIn);
-        expect(() => presetManager.deletePreset(builtIn!.id)).toThrow('Cannot delete built-in presets');
+    it('allows deleting default seeded presets', () => {
+        presetManager.deletePreset('code-expert');
+        expect(presetManager.getPreset('code-expert')).toBeUndefined();
+    });
+
+    it('allows editing default seeded presets', () => {
+        const updated = presetManager.updatePreset('helpful-assistant', {
+            name: 'Helpful Assistant Custom',
+            systemPrompt: 'You are a customized default preset.',
+        });
+
+        expect(updated.isBuiltIn).toBe(false);
+        expect(updated.name).toBe('Helpful Assistant Custom');
+        expect(updated.systemPrompt).toBe('You are a customized default preset.');
+    });
+
+    it('normalizes legacy built-in flags without resurrecting deleted defaults', () => {
+        const legacyPreset = {
+            id: 'helpful-assistant',
+            name: 'Helpful Assistant',
+            systemPrompt: 'Legacy preset',
+            isBuiltIn: true,
+        };
+
+        (presetManager as any).savePresets([legacyPreset]);
+
+        const normalized = presetManager.getPresets();
+        expect(normalized).toHaveLength(1);
+        expect(normalized[0].isBuiltIn).toBe(false);
+        expect(normalized[0].id).toBe('helpful-assistant');
     });
 });
 
@@ -45,5 +83,83 @@ describe('SettingsStore', () => {
         const updated = updateSettings({ temperature: 1.0 });
         expect(updated.temperature).toBe(1.0);
         expect(updated.topP).toBe(0.9); // unchanged
+    });
+
+    it('stores model generation parameters independently per model', () => {
+        updateSettings({ temperature: 0.6, topP: 0.85, maxTokens: 1024, modelParamsByModelId: {} });
+        updateGenerationParametersForModel('author/model-a', { temperature: 1.2, maxTokens: 1536 });
+        updateGenerationParametersForModel('author/model-b', { topP: 0.4 });
+
+        expect(getGenerationParametersForModel('author/model-a')).toEqual({
+            temperature: 1.2,
+            topP: 0.85,
+            maxTokens: 1536,
+        });
+        expect(getGenerationParametersForModel('author/model-b')).toEqual({
+            temperature: 0.6,
+            topP: 0.4,
+            maxTokens: 1024,
+        });
+        expect(getSettings().modelParamsByModelId).toEqual({
+            'author/model-a': {
+                temperature: 1.2,
+                topP: 0.85,
+                maxTokens: 1536,
+            },
+            'author/model-b': {
+                temperature: 0.6,
+                topP: 0.4,
+                maxTokens: 1024,
+            },
+        });
+    });
+
+    it('resets model generation parameters back to the defaults', () => {
+        updateSettings({ temperature: 0.7, topP: 0.9, maxTokens: 2048, modelParamsByModelId: {} });
+        updateGenerationParametersForModel('author/model-a', {
+            temperature: 1.4,
+            topP: 0.35,
+            maxTokens: 512,
+        });
+
+        const reset = resetGenerationParametersForModel('author/model-a');
+
+        expect(reset.temperature).toBe(0.7);
+        expect(reset.topP).toBe(0.9);
+        expect(reset.maxTokens).toBe(2048);
+        expect(getGenerationParametersForModel('author/model-a')).toEqual({
+            temperature: 0.7,
+            topP: 0.9,
+            maxTokens: 2048,
+        });
+        expect(getSettings().modelParamsByModelId).toEqual({});
+    });
+
+    it('stores model load parameters independently per model', () => {
+        updateSettings({ modelLoadParamsByModelId: {} });
+        updateModelLoadParametersForModel('author/model-a', { contextSize: 4096, gpuLayers: 18 });
+        updateModelLoadParametersForModel('author/model-b', { gpuLayers: 4 });
+
+        expect(getModelLoadParametersForModel('author/model-a')).toEqual({
+            contextSize: 4096,
+            gpuLayers: 18,
+        });
+        expect(getModelLoadParametersForModel('author/model-b')).toEqual({
+            contextSize: 2048,
+            gpuLayers: 4,
+        });
+    });
+
+    it('resets model load parameters back to defaults', () => {
+        updateSettings({ modelLoadParamsByModelId: {} });
+        updateModelLoadParametersForModel('author/model-a', { contextSize: 6144, gpuLayers: 24 });
+
+        resetModelLoadParametersForModel('author/model-a');
+
+        expect(getModelLoadParametersForModel('author/model-a')).toEqual({
+            contextSize: 2048,
+            gpuLayers: null,
+        });
+        expect(getSettings().modelLoadParamsByModelId).toEqual({});
     });
 });

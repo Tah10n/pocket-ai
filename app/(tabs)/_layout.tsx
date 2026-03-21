@@ -1,11 +1,13 @@
 import { Tabs } from 'expo-router';
 import React from 'react';
-import { useColorScheme } from 'react-native';
+import { useTranslation } from 'react-i18next';
 import { MaterialSymbols } from '../../src/components/ui/MaterialSymbols';
+import { useTheme } from '../../src/providers/ThemeProvider';
 
 export default function TabLayout() {
-  const colorScheme = useColorScheme();
-  const isDark = colorScheme === 'dark';
+  const { t } = useTranslation();
+  const { resolvedMode } = useTheme();
+  const isDark = resolvedMode === 'dark';
 
   return (
     <Tabs
@@ -24,28 +26,28 @@ export default function TabLayout() {
       <Tabs.Screen
         name="index"
         options={{
-          title: 'Home',
+          title: t('tabs.home'),
           tabBarIcon: ({ color }) => <MaterialSymbols size={28} name="home" color={color} />,
         }}
       />
       <Tabs.Screen
         name="chat"
         options={{
-          title: 'Chat',
+          title: t('tabs.chat'),
           tabBarIcon: ({ color }) => <MaterialSymbols size={28} name="chat" color={color} />,
         }}
       />
       <Tabs.Screen
         name="models"
         options={{
-          title: 'Models',
+          title: t('tabs.models'),
           tabBarIcon: ({ color }) => <MaterialSymbols size={28} name="hub" color={color} />,
         }}
       />
       <Tabs.Screen
         name="settings"
         options={{
-          title: 'Settings',
+          title: t('tabs.settings'),
           tabBarIcon: ({ color }) => <MaterialSymbols size={28} name="settings" color={color} />,
         }}
       />

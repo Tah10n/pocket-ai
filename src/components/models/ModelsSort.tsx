@@ -1,4 +1,5 @@
 import React from 'react';
+import { useTranslation } from 'react-i18next';
 import { Box } from '@/components/ui/box';
 import { Pressable } from '@/components/ui/pressable';
 import { ScrollView } from '@/components/ui/scroll-view';
@@ -10,17 +11,18 @@ interface ModelsSortProps {
   onSortChange: (sort: ModelSortPreference) => void;
 }
 
-const SORT_OPTIONS: { label: string; field: ModelSortField }[] = [
-  { label: 'Name', field: 'name' },
-  { label: 'Size', field: 'size' },
-  { label: 'Downloaded First', field: 'downloaded' },
+const SORT_OPTIONS: { labelKey: string; field: ModelSortField }[] = [
+  { labelKey: 'models.sortName', field: 'name' },
+  { labelKey: 'models.sortSize', field: 'size' },
+  { labelKey: 'models.sortDownloadedFirst', field: 'downloaded' },
 ];
 
 export const ModelsSort = ({ sort, onSortChange }: ModelsSortProps) => {
+  const { t } = useTranslation();
   return (
     <Box className="gap-2 border-b border-outline-200 bg-background-0 px-4 py-3 dark:border-outline-800 dark:bg-background-950">
       <Text className="text-sm font-semibold text-typography-700 dark:text-typography-200">
-        Sort
+        {t('models.sortTitle')}
       </Text>
 
       <ScrollView horizontal showsHorizontalScrollIndicator={false}>
@@ -54,7 +56,7 @@ export const ModelsSort = ({ sort, onSortChange }: ModelsSortProps) => {
                     isActive ? 'text-typography-0' : 'text-typography-700 dark:text-typography-200'
                   }`}
                 >
-                  {option.label}
+                  {t(option.labelKey)}
                   {showDirection ? ` ${sort.direction === 'asc' ? '↑' : '↓'}` : ''}
                 </Text>
               </Pressable>

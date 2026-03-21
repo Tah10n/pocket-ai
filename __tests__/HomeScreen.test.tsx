@@ -32,7 +32,6 @@ describe('HomeScreen', () => {
             </SafeAreaProvider>
         );
         expect(getByText('Pocket AI')).toBeTruthy();
-        expect(getByText('New Chat')).toBeTruthy();
-        expect(getByText('Quick Actions')).toBeTruthy();
+        expect(getByText('home.newChat')).toBeTruthy();
     });
 });

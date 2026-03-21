@@ -31,6 +31,7 @@ const mockDeleteMessage = jest.fn();
 const mockStop = jest.fn();
 const mockCreateSummaryPlaceholder = jest.fn();
 const mockRouterPush = jest.fn();
+let lastPresetSelectorProps: any = null;
 const mockStartNewChat = jest.fn(() => {
   require('../../src/store/chatStore').useChatStore.getState().setActiveThread(null);
 });
@@ -67,6 +68,7 @@ jest.mock('../../src/components/ui/ChatHeader', () => {
       badgeLabel,
       detailLabel,
       onMenu,
+      onOpenModelControls,
     }: any) =>
       mockReact.createElement(
         View,
@@ -87,6 +89,13 @@ jest.mock('../../src/components/ui/ChatHeader', () => {
           { testID: 'menu-button', onPress: onMenu },
           mockReact.createElement(Text, null, 'Menu'),
         ),
+        onOpenModelControls
+          ? mockReact.createElement(
+              Pressable,
+              { testID: 'model-controls-button', onPress: onOpenModelControls },
+              mockReact.createElement(Text, null, 'Model controls'),
+            )
+          : null,
       ),
   };
 });
@@ -150,11 +159,21 @@ jest.mock('../../src/components/ui/ConversationSwitcherSheet', () => {
   const { Pressable, Text, View } = require('react-native');
 
   return {
-    ConversationSwitcherSheet: ({ visible, conversations, onSelectConversation }: any) =>
+    ConversationSwitcherSheet: ({ visible, conversations, onSelectConversation, onOpenPresetSelector }: any) =>
       visible
         ? mockReact.createElement(
             View,
             { testID: 'conversation-switcher' },
+            onOpenPresetSelector
+              ? mockReact.createElement(
+                  Pressable,
+                  {
+                    testID: 'open-preset-selector',
+                    onPress: onOpenPresetSelector,
+                  },
+                  mockReact.createElement(Text, null, 'Presets'),
+                )
+              : null,
             conversations.map((conversation: any) =>
               mockReact.createElement(
                 Pressable,
@@ -165,6 +184,63 @@ jest.mock('../../src/components/ui/ConversationSwitcherSheet', () => {
                 },
                 mockReact.createElement(Text, null, conversation.title),
               ),
+            ),
+          )
+        : null,
+  };
+});
+
+jest.mock('@/components/ui/PresetSelectorSheet', () => {
+  const mockReact = require('react');
+  const { Pressable, Text, View } = require('react-native');
+
+  return {
+    PresetSelectorSheet: (props: any) => {
+      lastPresetSelectorProps = props;
+      const { visible, onSelectPreset } = props;
+      return visible
+        ? mockReact.createElement(
+            View,
+            { testID: 'preset-selector' },
+            mockReact.createElement(
+              Pressable,
+              {
+                testID: 'preset-option-default',
+                onPress: () => onSelectPreset(null),
+              },
+              mockReact.createElement(Text, null, 'Default preset'),
+            ),
+            mockReact.createElement(
+              Pressable,
+              {
+                testID: 'preset-option-preset-2',
+                onPress: () => onSelectPreset('preset-2'),
+              },
+              mockReact.createElement(Text, null, 'Preset 2'),
+            ),
+          )
+        : null;
+    },
+  };
+});
+
+jest.mock('@/components/ui/ModelParametersSheet', () => {
+  const mockReact = require('react');
+  const { Pressable, Text, View } = require('react-native');
+
+  return {
+    ModelParametersSheet: ({ visible, onResetParamField }: any) =>
+      visible
+        ? mockReact.createElement(
+            View,
+            { testID: 'model-parameters-sheet' },
+            mockReact.createElement(
+              Pressable,
+              {
+                testID: 'reset-top-p-button',
+                onPress: () => onResetParamField('topP'),
+              },
+              mockReact.createElement(Text, null, 'Reset Top-P'),
             ),
           )
         : null,
@@ -223,6 +299,29 @@ jest.mock('../../src/hooks/useChatSession', () => ({
     createSummaryPlaceholder: mockCreateSummaryPlaceholder,
     startNewChat: mockStartNewChat,
   }),
+  resolvePresetSnapshot: (presetId: string | null) => {
+    if (presetId === 'preset-2') {
+      return {
+        id: 'preset-2',
+        name: 'Research Analyst',
+        systemPrompt: 'Organize findings clearly.',
+      };
+    }
+
+    if (presetId === 'preset-1') {
+      return {
+        id: 'preset-1',
+        name: 'Helpful Assistant',
+        systemPrompt: 'Be concise.',
+      };
+    }
+
+    return {
+      id: null,
+      name: 'Default',
+      systemPrompt: 'You are a helpful AI assistant.',
+    };
+  },
 }));
 
 jest.mock('../../src/services/HardwareListenerService', () => ({
@@ -249,6 +348,7 @@ jest.mock('../../src/services/HardwareListenerService', () => ({
 
 const { ChatScreen, getNextShouldStickToBottom } = require('../../src/ui/screens/ChatScreen');
 const { useChatStore } = require('../../src/store/chatStore');
+const { updateSettings } = require('../../src/services/SettingsStore');
 
 describe('ChatScreen', () => {
   beforeEach(() => {
@@ -259,6 +359,7 @@ describe('ChatScreen', () => {
     mockCreateSummaryPlaceholder.mockClear();
     mockRouterPush.mockClear();
     mockStartNewChat.mockClear();
+    lastPresetSelectorProps = null;
     hardwareStatusListener = null;
     mockHardwareBannerInputs = {
       showLowMemoryWarning: false,
@@ -269,6 +370,20 @@ describe('ChatScreen', () => {
       activeModelId: 'author/model-q4',
       status: 'ready',
     };
+    updateSettings({
+      activePresetId: 'preset-1',
+      temperature: 0.7,
+      topP: 0.9,
+      maxTokens: 2048,
+      modelParamsByModelId: {
+        'author/model-q4': {
+          temperature: 0.7,
+          topP: 0.6,
+          maxTokens: 1024,
+        },
+      },
+      modelLoadParamsByModelId: {},
+    });
     useChatStore.setState({
       threads: {
         'thread-1': {
@@ -283,7 +398,7 @@ describe('ChatScreen', () => {
           },
           paramsSnapshot: {
             temperature: 0.7,
-            topP: 0.9,
+            topP: 0.6,
             maxTokens: 1024,
           },
           messages: [
@@ -344,7 +459,7 @@ describe('ChatScreen', () => {
 
     expect(getByText('Restored conversation')).toBeTruthy();
     expect(getByText('Helpful Assistant')).toBeTruthy();
-    expect(getByText('T0.7 • TopP 0.9 • 1024 tok')).toBeTruthy();
+    expect(getByText('T0.7 • TopP 0.6 • 1024 tok')).toBeTruthy();
     expect(getByText('Saved user prompt')).toBeTruthy();
     expect(getByText('Saved assistant reply')).toBeTruthy();
   });
@@ -353,7 +468,7 @@ describe('ChatScreen', () => {
     const { getByTestId, getByText } = render(React.createElement(ChatScreen));
 
     fireEvent.press(getByTestId('regenerate-message-message-1'));
-    expect(getByText('Editing earlier message')).toBeTruthy();
+    expect(getByText('chat.editEarlierMessage')).toBeTruthy();
 
     await act(async () => {
       fireEvent.press(getByTestId('send-button'));
@@ -369,7 +484,7 @@ describe('ChatScreen', () => {
     rerender(React.createElement(ChatScreen));
 
     expect(mockStartNewChat).toHaveBeenCalledTimes(1);
-    expect(getByText('No messages yet')).toBeTruthy();
+    expect(getByText('chat.noMessages')).toBeTruthy();
     expect(queryByText('Saved user prompt')).toBeNull();
   });
 
@@ -381,7 +496,7 @@ describe('ChatScreen', () => {
 
     const { queryByTestId, getByText } = render(React.createElement(ChatScreen));
 
-    expect(getByText('Load a model to continue chatting')).toBeTruthy();
+    expect(getByText('chat.loadModelWarning')).toBeTruthy();
     expect(queryByTestId('regenerate-message-message-1')).toBeNull();
   });
 
@@ -408,7 +523,7 @@ describe('ChatScreen', () => {
 
     const { getByTestId, getByText } = render(React.createElement(ChatScreen));
 
-    expect(getByText('Generating')).toBeTruthy();
+    expect(getByText('chat.statusGenerating')).toBeTruthy();
     fireEvent.press(getByTestId('stop-button'));
     expect(mockStop).toHaveBeenCalledTimes(1);
   });
@@ -422,8 +537,8 @@ describe('ChatScreen', () => {
 
     const { getByText } = render(React.createElement(ChatScreen));
 
-    expect(getByText('Memory pressure detected')).toBeTruthy();
-    expect(getByText('The active model may be unloaded to keep the app responsive.')).toBeTruthy();
+    expect(getByText('chat.memoryPressureTitle')).toBeTruthy();
+    expect(getByText('chat.memoryPressureDescription')).toBeTruthy();
   });
 
   it('offers a model recovery action from the disabled banner', () => {
@@ -434,7 +549,7 @@ describe('ChatScreen', () => {
 
     const { getByText } = render(React.createElement(ChatScreen));
 
-    fireEvent.press(getByText('Download Model'));
+    fireEvent.press(getByText('chat.downloadModel'));
     expect(mockRouterPush).toHaveBeenCalledWith('/(tabs)/models');
   });
 
@@ -447,8 +562,8 @@ describe('ChatScreen', () => {
 
     const { getByText } = render(React.createElement(ChatScreen));
 
-    expect(getByText('Device is running hot')).toBeTruthy();
-    expect(getByText('Device temperature is critical. Pause generation or switch to a smaller model.')).toBeTruthy();
+    expect(getByText('chat.thermalTitle')).toBeTruthy();
+    expect(getByText('chat.thermalDescriptionCritical')).toBeTruthy();
   });
 
   it('updates hardware warning banners when the service publishes a new status', () => {
@@ -471,7 +586,7 @@ describe('ChatScreen', () => {
       });
     });
 
-    expect(getByText('Device is running hot')).toBeTruthy();
+    expect(getByText('chat.thermalTitle')).toBeTruthy();
   });
 
   it('shows summarize affordance when older messages are truncated from prompt context', () => {
@@ -493,8 +608,8 @@ describe('ChatScreen', () => {
 
     const { getByText } = render(React.createElement(ChatScreen));
 
-    expect(getByText('Older messages are being trimmed from the model context')).toBeTruthy();
-    fireEvent.press(getByText('Summarize chat'));
+    expect(getByText('chat.summaryTrimmedTitle')).toBeTruthy();
+    fireEvent.press(getByText('chat.summarizeChat'));
     expect(mockCreateSummaryPlaceholder).toHaveBeenCalledTimes(1);
   });
 
@@ -515,7 +630,7 @@ describe('ChatScreen', () => {
 
     const { getByText } = render(React.createElement(ChatScreen));
 
-    expect(getByText('Summary placeholder')).toBeTruthy();
+    expect(getByText('chat.summaryPlaceholderTitle')).toBeTruthy();
     expect(getByText('Summary generation is not available yet.')).toBeTruthy();
   });
 
@@ -548,5 +663,80 @@ describe('ChatScreen', () => {
     fireEvent.press(getByTestId('conversation-option-thread-2'));
 
     expect(mockOpenThread).toHaveBeenCalledWith('thread-2');
+  });
+
+  it('opens preset selection from the overflow sheet and updates the active thread preset', () => {
+    const { getByTestId, getByText, rerender } = render(React.createElement(ChatScreen));
+
+    fireEvent.press(getByTestId('menu-button'));
+    fireEvent.press(getByTestId('open-preset-selector'));
+    fireEvent.press(getByTestId('preset-option-preset-2'));
+    rerender(React.createElement(ChatScreen));
+
+    expect(getByText('Research Analyst')).toBeTruthy();
+    expect(useChatStore.getState().getActiveThread()?.presetSnapshot).toEqual(
+      expect.objectContaining({
+        id: 'preset-2',
+        name: 'Research Analyst',
+        systemPrompt: 'Organize findings clearly.',
+      }),
+    );
+  });
+
+  it('passes the current thread preset to the selector instead of the global preset', () => {
+    updateSettings({ activePresetId: 'preset-2' });
+    useChatStore.setState({
+      threads: {
+        'thread-1': {
+          ...useChatStore.getState().threads['thread-1'],
+          presetId: 'preset-1',
+          presetSnapshot: {
+            id: 'preset-1',
+            name: 'Helpful Assistant',
+            systemPrompt: 'Be concise.',
+          },
+        },
+      },
+      activeThreadId: 'thread-1',
+    });
+
+    const { getByTestId } = render(React.createElement(ChatScreen));
+
+    fireEvent.press(getByTestId('menu-button'));
+    fireEvent.press(getByTestId('open-preset-selector'));
+
+    expect(lastPresetSelectorProps?.activePresetId).toBe('preset-1');
+  });
+
+  it('allows resetting the preset back to the default state', () => {
+    const { getByTestId, getByText, rerender } = render(React.createElement(ChatScreen));
+
+    fireEvent.press(getByTestId('menu-button'));
+    fireEvent.press(getByTestId('open-preset-selector'));
+    fireEvent.press(getByTestId('preset-option-default'));
+    rerender(React.createElement(ChatScreen));
+
+    expect(getByText('Default')).toBeTruthy();
+    expect(useChatStore.getState().getActiveThread()?.presetId).toBeNull();
+    expect(useChatStore.getState().getActiveThread()?.presetSnapshot).toEqual(
+      expect.objectContaining({
+        id: null,
+        name: 'Default',
+        systemPrompt: 'You are a helpful AI assistant.',
+      }),
+    );
+  });
+
+  it('resets a single generation parameter from the model controls sheet', () => {
+    const { getByTestId, getByText, rerender } = render(React.createElement(ChatScreen));
+
+    expect(getByText('T0.7 • TopP 0.6 • 1024 tok')).toBeTruthy();
+
+    fireEvent.press(getByTestId('model-controls-button'));
+    fireEvent.press(getByTestId('reset-top-p-button'));
+    rerender(React.createElement(ChatScreen));
+
+    expect(getByText('T0.7 • TopP 0.9 • 1024 tok')).toBeTruthy();
+    expect(useChatStore.getState().getActiveThread()?.paramsSnapshot.topP).toBe(0.9);
   });
 });

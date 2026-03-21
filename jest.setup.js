@@ -26,6 +26,7 @@ jest.mock('expo-file-system/legacy', () => ({
   readDirectoryAsync: jest.fn().mockResolvedValue([]),
   deleteAsync: jest.fn().mockResolvedValue(undefined),
   getFreeDiskStorageAsync: jest.fn().mockResolvedValue(10 * 1024 * 1024 * 1024),
+  getTotalDiskCapacityAsync: jest.fn().mockResolvedValue(100 * 1024 * 1024 * 1024),
   makeDirectoryAsync: jest.fn().mockResolvedValue(undefined),
   documentDirectory: 'test-dir/',
   cacheDirectory: 'test-cache/',
@@ -87,6 +88,8 @@ jest.mock('react-native-fs', () => ({
 // Mocking react-native-device-info
 jest.mock('react-native-device-info', () => ({
     getTotalMemory: jest.fn().mockResolvedValue(8 * 1024 * 1024 * 1024),
+    getUsedMemory: jest.fn().mockResolvedValue(5 * 1024 * 1024 * 1024),
+    getTotalDiskCapacity: jest.fn().mockResolvedValue(100 * 1024 * 1024 * 1024),
     getFreeDiskStorage: jest.fn().mockResolvedValue(10 * 1024 * 1024 * 1024),
 }));
 

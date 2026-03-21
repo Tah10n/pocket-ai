@@ -41,6 +41,19 @@ This ensures that tools (TypeScript, ESLint, Metro bundler) automatically resolv
 
 ## Component Guidelines
 
-* **Styling**: We strictly use NativeWind (`className`) for styling. Avoid inline `style={{ ... }}` unless dealing with dynamic runtime calculations (like `safeAreaInsets`).
+* **Styling**: Prefer NativeWind (`className`) for styling. Use inline styles or `StyleSheet` when dealing with dynamic runtime calculations (like `safeAreaInsets`) or when a documented runtime-stability workaround requires plain React Native primitives.
 * **Icons**: Use the centralized `MaterialSymbols` component (`@/components/ui/MaterialSymbols`) instead of importing directly from `@expo/vector-icons`.
 * **CSS Interop**: All base primitive components must be wrapped in NativeWind's `cssInterop` object so they can seamlessly accept and process `className` props without throwing unhandled UI update crashes.
+* **Interop Exceptions**: If a screen is a verified trigger for an upstream NativeWind / `react-native-css-interop` runtime issue, a screen-local fallback to React Native primitives is acceptable, but it must be documented in the file itself and in `app/README.md`. The current example is `src/ui/screens/SettingsScreen.tsx`, which intentionally avoids NativeWind wrappers to keep theme switching stable.
+* **Localization**: New user-facing copy must not be hard-coded directly into production components. Add every new visible string to both `src/i18n/locales/en.json` and `src/i18n/locales/ru.json`, then render it through `useTranslation()` and `t(...)`.
+* **What counts as user-facing copy**: Buttons, section titles, helper text, alert messages, empty states, tab labels, modal copy, filter chips, sort labels, and menu actions.
+* **Allowed exceptions**: Developer-only console output, non-user-facing telemetry/debug text, and intentional test-only mock strings.
+
+## Localization Checklist
+
+Before considering a UI change complete:
+
+1. Check whether the change introduces any new visible text.
+2. If yes, add keys for that text in both locale files.
+3. Use `t(...)` in the component instead of inline literals.
+4. Verify that the screen does not become mixed-language when switching to either supported locale.

@@ -61,21 +61,26 @@ const ThemeContext = createContext<ThemeContextValue>({
     setTheme: () => {},
 });
 
+function resolveThemeMode(mode: ThemeMode, systemScheme: 'light' | 'dark' | null | undefined): ResolvedThemeMode {
+    if (mode === 'system') {
+        return systemScheme === 'dark' ? 'dark' : 'light';
+    }
+
+    return mode;
+}
+
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
     const systemScheme = useSystemColorScheme();
     const { setColorScheme } = useNativewindColorScheme();
     const [mode, setMode] = useState<ThemeMode>(() => getSettings().theme ?? 'system');
 
     const resolvedMode: ResolvedThemeMode = useMemo(() => {
-        if (mode === 'system') {
-            return systemScheme === 'dark' ? 'dark' : 'light';
-        }
-        return mode;
+        return resolveThemeMode(mode, systemScheme);
     }, [mode, systemScheme]);
 
     useEffect(() => {
-        setColorScheme(resolvedMode);
-    }, [resolvedMode, setColorScheme]);
+        setColorScheme(mode);
+    }, [mode, setColorScheme]);
 
     const toggleTheme = () => {
         const nextMode = resolvedMode === 'dark' ? 'light' : 'dark';

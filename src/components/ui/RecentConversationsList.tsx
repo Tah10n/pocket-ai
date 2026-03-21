@@ -4,6 +4,7 @@ import { Text } from '@/components/ui/text';
 import { Pressable } from '@/components/ui/pressable';
 import { MaterialSymbols } from './MaterialSymbols';
 import { FlashList, ListRenderItem } from '@shopify/flash-list';
+import { useTranslation } from 'react-i18next';
 import { useChatStore } from '../../store/chatStore';
 import { ConversationIndexItem, toConversationIndexItem } from '../../types/chat';
 import {
@@ -34,6 +35,7 @@ export const RecentConversationsList = ({
   onViewAllConversations,
   maxVisible = DEFAULT_MAX_VISIBLE_CONVERSATIONS,
 }: RecentConversationsListProps) => {
+  const { t } = useTranslation();
   const threads = useChatStore((state) => state.threads);
   const summaries = Object.values(threads)
     .map(toConversationIndexItem)
@@ -91,7 +93,7 @@ export const RecentConversationsList = ({
   return (
     <Box className="px-4 mt-8 pb-4">
       <Box className="mb-4 flex-row items-center justify-between gap-3">
-        <Text className="text-typography-900 dark:text-typography-100 text-lg font-bold leading-tight tracking-tight">Recent Conversations</Text>
+        <Text className="text-typography-900 dark:text-typography-100 text-lg font-bold leading-tight tracking-tight">{t('home.recentConversations')}</Text>
         {shouldShowViewAll ? (
           <Pressable
             testID="view-all-conversations"
@@ -99,7 +101,7 @@ export const RecentConversationsList = ({
             className="rounded-full border border-primary-500/20 bg-primary-500/10 px-3 py-2 active:opacity-70"
           >
             <Text className="text-xs font-semibold uppercase tracking-wide text-primary-500">
-              See All
+              {t('home.seeAll')}
             </Text>
           </Pressable>
         ) : null}
@@ -117,10 +119,10 @@ export const RecentConversationsList = ({
         ) : (
           <Box className="rounded-xl border border-dashed border-outline-200 bg-background-50 px-4 py-6 dark:border-primary-500/10 dark:bg-primary-500/5">
             <Text className="text-sm font-semibold text-typography-700 dark:text-typography-200">
-              No conversations yet
+              {t('home.noConversationsTitle')}
             </Text>
             <Text className="mt-2 text-sm text-typography-500 dark:text-typography-400">
-              Start a chat and your recent conversations will appear here.
+              {t('home.noConversationsDescription')}
             </Text>
           </Box>
         )}

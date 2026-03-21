@@ -2,7 +2,7 @@ import React, { useEffect } from 'react';
 import { act, render, waitFor } from '@testing-library/react-native';
 import { useChatSession } from '../../src/hooks/useChatSession';
 import { llmEngineService } from '../../src/services/LLMEngineService';
-import { getSettings } from '../../src/services/SettingsStore';
+import { getGenerationParametersForModel, getSettings } from '../../src/services/SettingsStore';
 import { EngineStatus } from '../../src/types/models';
 import { useChatStore } from '../../src/store/chatStore';
 import { AppState } from 'react-native';
@@ -26,6 +26,7 @@ jest.mock('../../src/services/LLMEngineService', () => ({
 
 jest.mock('../../src/services/SettingsStore', () => ({
   getSettings: jest.fn(),
+  getGenerationParametersForModel: jest.fn(),
 }));
 
 jest.mock('../../src/services/PresetManager', () => ({
@@ -74,6 +75,11 @@ describe('useChatSession', () => {
       topP: 0.9,
       maxTokens: 1024,
     });
+    (getGenerationParametersForModel as jest.Mock).mockImplementation((modelId: string | null | undefined) => ({
+      temperature: 0.7,
+      topP: 0.9,
+      maxTokens: modelId ? 1024 : 2048,
+    }));
     (llmEngineService.getState as jest.Mock).mockReturnValue({
       status: EngineStatus.READY,
     });

@@ -382,6 +382,40 @@ describe('chatStore', () => {
     );
   });
 
+  it('updates the preset snapshot for an existing thread', () => {
+    const threadId = useChatStore.getState().createThread({
+      modelId: 'author/model-q4',
+      presetId: 'preset-1',
+      presetSnapshot: {
+        id: 'preset-1',
+        name: 'Helpful Assistant',
+        systemPrompt: 'Be concise.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 1024,
+      },
+    });
+
+    useChatStore.getState().updateThreadPresetSnapshot(threadId, 'preset-2', {
+      id: 'preset-2',
+      name: 'Research Analyst',
+      systemPrompt: 'Organize findings clearly.',
+    });
+
+    expect(useChatStore.getState().getThread(threadId)).toEqual(
+      expect.objectContaining({
+        presetId: 'preset-2',
+        presetSnapshot: {
+          id: 'preset-2',
+          name: 'Research Analyst',
+          systemPrompt: 'Organize findings clearly.',
+        },
+      }),
+    );
+  });
+
   it('derives a stable truncated title from the first user message', () => {
     const threadId = useChatStore.getState().createThread({
       modelId: 'author/model-q4',

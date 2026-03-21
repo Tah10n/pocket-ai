@@ -7,14 +7,15 @@ import { Text } from '@/components/ui/text';
 import { useRouter } from 'expo-router';
 import { HeaderBar } from '@/components/ui/HeaderBar';
 import { ActiveModelCard } from '@/components/ui/ActiveModelCard';
-import { QuickActionsGrid } from '@/components/ui/QuickActionsGrid';
 import { RecentConversationsList } from '@/components/ui/RecentConversationsList';
 import { MaterialSymbols } from '@/components/ui/MaterialSymbols';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useTranslation } from 'react-i18next';
 import { useChatSession } from '../../hooks/useChatSession';
 import { ConversationIndexItem } from '../../types/chat';
 
 export const HomeScreen = () => {
+    const { t } = useTranslation();
     const insets = useSafeAreaInsets();
     const router = useRouter();
     const { deleteThread, openThread } = useChatSession();
@@ -24,24 +25,24 @@ export const HomeScreen = () => {
             openThread(conversation.id);
             router.push('/(tabs)/chat' as any);
         } catch (error: any) {
-            Alert.alert('Cannot open conversation', error?.message || 'Action failed');
+            Alert.alert(t('home.openConversationErrorTitle'), error?.message || t('common.actionFailed'));
         }
     };
 
     const handleDeleteConversation = (conversation: ConversationIndexItem) => {
         Alert.alert(
-            'Delete conversation',
-            `Delete "${conversation.title}" from your recent chats?`,
+            t('home.deleteConversationTitle'),
+            t('home.deleteConversationMessage', { title: conversation.title }),
             [
-                { text: 'Cancel', style: 'cancel' },
+                { text: t('common.cancel'), style: 'cancel' },
                 {
-                    text: 'Delete',
+                    text: t('common.delete'),
                     style: 'destructive',
                     onPress: () => {
                         try {
                             deleteThread(conversation.id);
                         } catch (error: any) {
-                            Alert.alert('Cannot delete conversation', error?.message || 'Action failed');
+                            Alert.alert(t('home.deleteConversationErrorTitle'), error?.message || t('common.actionFailed'));
                         }
                     },
                 },
@@ -66,15 +67,9 @@ export const HomeScreen = () => {
                         className="flex-row w-full items-center justify-center rounded-xl h-14 bg-primary-500 shadow-xl gap-3 active:opacity-80"
                     >
                         <MaterialSymbols name="add-comment" size={22} className="text-typography-0" />
-                        <Text className="text-typography-0 text-base font-bold">New Chat</Text>
+                        <Text className="text-typography-0 text-base font-bold">{t('home.newChat')}</Text>
                     </Pressable>
                 </Box>
-
-                <Box className="px-4">
-                    <Text className="text-typography-900 dark:text-typography-100 text-lg font-bold leading-tight tracking-tight">Quick Actions</Text>
-                </Box>
-
-                <QuickActionsGrid onCatalogPress={() => router.push('/(tabs)/models' as any)} />
                 
                 <RecentConversationsList
                     onOpenConversation={handleOpenConversation}

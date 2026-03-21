@@ -34,6 +34,8 @@ interface ChatStoreState {
   mergeImportedThreads: (threads: ChatThread[]) => number;
   pruneExpiredThreads: (retentionDays: number | null, now?: number) => number;
   setActiveThread: (threadId: string | null) => void;
+  updateThreadPresetSnapshot: (threadId: string, presetId: string | null, presetSnapshot: PresetSnapshot) => void;
+  updateThreadParamsSnapshot: (threadId: string, paramsSnapshot: GenerationParamsSnapshot) => void;
   appendMessage: (threadId: string, message: ChatMessage) => void;
   createAssistantPlaceholder: (threadId: string) => string;
   stopAssistantMessage: (threadId: string, messageId: string) => void;
@@ -198,6 +200,51 @@ export const useChatStore = create<ChatStoreState>()(
       },
 
       setActiveThread: (threadId) => set({ activeThreadId: threadId }),
+
+      updateThreadPresetSnapshot: (threadId, presetId, presetSnapshot) =>
+        set((state) => {
+          const existingThread = state.threads[threadId];
+          if (!existingThread) {
+            return state;
+          }
+
+          return {
+            threads: {
+              ...state.threads,
+              [threadId]: updateThreadMetadata({
+                ...existingThread,
+                presetId,
+                presetSnapshot: {
+                  id: presetSnapshot.id,
+                  name: presetSnapshot.name,
+                  systemPrompt: presetSnapshot.systemPrompt,
+                },
+              }),
+            },
+          };
+        }),
+
+      updateThreadParamsSnapshot: (threadId, paramsSnapshot) =>
+        set((state) => {
+          const existingThread = state.threads[threadId];
+          if (!existingThread) {
+            return state;
+          }
+
+          return {
+            threads: {
+              ...state.threads,
+              [threadId]: {
+                ...existingThread,
+                paramsSnapshot: {
+                  temperature: paramsSnapshot.temperature,
+                  topP: paramsSnapshot.topP,
+                  maxTokens: paramsSnapshot.maxTokens,
+                },
+              },
+            },
+          };
+        }),
 
       appendMessage: (threadId, message) =>
         set((state) => {

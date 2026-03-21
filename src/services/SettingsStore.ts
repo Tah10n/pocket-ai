@@ -2,6 +2,17 @@ import { createStorage } from './storage';
 
 export const storage = createStorage('pocket-ai-settings');
 
+export interface GenerationParameters {
+    temperature: number;
+    topP: number;
+    maxTokens: number;
+}
+
+export interface ModelLoadParameters {
+    contextSize: number;
+    gpuLayers: number | null;
+}
+
 export interface AppSettings {
     temperature: number;
     topP: number;
@@ -11,17 +22,32 @@ export interface AppSettings {
     activePresetId: string | null;
     activeModelId: string | null;
     chatRetentionDays: number | null;
+    modelParamsByModelId: Record<string, GenerationParameters>;
+    modelLoadParamsByModelId: Record<string, ModelLoadParameters>;
 }
 
-const DEFAULT_SETTINGS: AppSettings = {
+export const DEFAULT_GENERATION_PARAMETERS: GenerationParameters = {
     temperature: 0.7,
     topP: 0.9,
     maxTokens: 2048,
+};
+
+export const DEFAULT_MODEL_LOAD_PARAMETERS: ModelLoadParameters = {
+    contextSize: 2048,
+    gpuLayers: null,
+};
+
+const DEFAULT_SETTINGS: AppSettings = {
+    temperature: DEFAULT_GENERATION_PARAMETERS.temperature,
+    topP: DEFAULT_GENERATION_PARAMETERS.topP,
+    maxTokens: DEFAULT_GENERATION_PARAMETERS.maxTokens,
     theme: 'system',
     language: 'en',
     activePresetId: null,
     activeModelId: null,
     chatRetentionDays: 90,
+    modelParamsByModelId: {},
+    modelLoadParamsByModelId: {},
 };
 
 const SETTINGS_KEY = 'app_settings';
@@ -65,16 +91,73 @@ function normalizeChatRetentionDays(value: unknown): number | null {
     return Math.round(normalized);
 }
 
-function sanitizeSettings(input: Partial<AppSettings>): AppSettings {
+function sanitizeGenerationParameters(input: Partial<GenerationParameters> | undefined): GenerationParameters {
     return {
-        temperature: clampNumber(input.temperature, 0, 2, DEFAULT_SETTINGS.temperature),
-        topP: clampNumber(input.topP, 0, 1, DEFAULT_SETTINGS.topP),
-        maxTokens: Math.round(clampNumber(input.maxTokens, 1, 8192, DEFAULT_SETTINGS.maxTokens)),
+        temperature: clampNumber(input?.temperature, 0, 2, DEFAULT_GENERATION_PARAMETERS.temperature),
+        topP: clampNumber(input?.topP, 0, 1, DEFAULT_GENERATION_PARAMETERS.topP),
+        maxTokens: Math.round(clampNumber(input?.maxTokens, 1, 8192, DEFAULT_GENERATION_PARAMETERS.maxTokens)),
+    };
+}
+
+function sanitizeModelParamsByModelId(input: unknown): Record<string, GenerationParameters> {
+    if (!input || typeof input !== 'object' || Array.isArray(input)) {
+        return {};
+    }
+
+    return Object.entries(input).reduce<Record<string, GenerationParameters>>((acc, [modelId, params]) => {
+        const normalizedModelId = typeof modelId === 'string' ? modelId.trim() : '';
+        if (!normalizedModelId) {
+            return acc;
+        }
+
+        acc[normalizedModelId] = sanitizeGenerationParameters(params as Partial<GenerationParameters>);
+        return acc;
+    }, {});
+}
+
+function sanitizeModelLoadParameters(input: Partial<ModelLoadParameters> | undefined): ModelLoadParameters {
+    const rawGpuLayers = input?.gpuLayers;
+    const normalizedGpuLayers =
+        rawGpuLayers == null
+            ? null
+            : Math.round(clampNumber(rawGpuLayers, 0, 80, DEFAULT_MODEL_LOAD_PARAMETERS.gpuLayers ?? 0));
+
+    return {
+        contextSize: Math.round(clampNumber(input?.contextSize, 512, 8192, DEFAULT_MODEL_LOAD_PARAMETERS.contextSize)),
+        gpuLayers: normalizedGpuLayers,
+    };
+}
+
+function sanitizeModelLoadParamsByModelId(input: unknown): Record<string, ModelLoadParameters> {
+    if (!input || typeof input !== 'object' || Array.isArray(input)) {
+        return {};
+    }
+
+    return Object.entries(input).reduce<Record<string, ModelLoadParameters>>((acc, [modelId, params]) => {
+        const normalizedModelId = typeof modelId === 'string' ? modelId.trim() : '';
+        if (!normalizedModelId) {
+            return acc;
+        }
+
+        acc[normalizedModelId] = sanitizeModelLoadParameters(params as Partial<ModelLoadParameters>);
+        return acc;
+    }, {});
+}
+
+function sanitizeSettings(input: Partial<AppSettings>): AppSettings {
+    const generationDefaults = sanitizeGenerationParameters(input);
+
+    return {
+        temperature: generationDefaults.temperature,
+        topP: generationDefaults.topP,
+        maxTokens: generationDefaults.maxTokens,
         theme: input.theme === 'light' || input.theme === 'dark' || input.theme === 'system' ? input.theme : DEFAULT_SETTINGS.theme,
         language: normalizeLanguage(input.language),
         activePresetId: typeof input.activePresetId === 'string' ? input.activePresetId : null,
         activeModelId: typeof input.activeModelId === 'string' ? input.activeModelId : null,
         chatRetentionDays: normalizeChatRetentionDays(input.chatRetentionDays),
+        modelParamsByModelId: sanitizeModelParamsByModelId(input.modelParamsByModelId),
+        modelLoadParamsByModelId: sanitizeModelLoadParamsByModelId(input.modelLoadParamsByModelId),
     };
 }
 
@@ -121,6 +204,121 @@ export function updateSettings(partial: Partial<AppSettings>) {
     writeJsonValue(SETTINGS_KEY, updated);
     settingsListeners.forEach((l) => l(updated));
     return updated;
+}
+
+export function resetParameters() {
+    return updateSettings({
+        temperature: DEFAULT_GENERATION_PARAMETERS.temperature,
+        topP: DEFAULT_GENERATION_PARAMETERS.topP,
+        maxTokens: DEFAULT_GENERATION_PARAMETERS.maxTokens,
+    });
+}
+
+export function getGenerationParametersForModel(modelId: string | null | undefined): GenerationParameters {
+    const settings = getSettings();
+    const normalizedModelId = typeof modelId === 'string' ? modelId.trim() : '';
+    if (!normalizedModelId) {
+        return sanitizeGenerationParameters(settings);
+    }
+
+    const storedParams = settings.modelParamsByModelId?.[normalizedModelId];
+    if (storedParams) {
+        return sanitizeGenerationParameters(storedParams);
+    }
+
+    return sanitizeGenerationParameters(settings);
+}
+
+export function updateGenerationParametersForModel(
+    modelId: string | null | undefined,
+    partial: Partial<GenerationParameters>,
+) {
+    const normalizedModelId = typeof modelId === 'string' ? modelId.trim() : '';
+    const currentSettings = getSettings();
+    const nextParams = sanitizeGenerationParameters({
+        ...getGenerationParametersForModel(normalizedModelId),
+        ...partial,
+    });
+
+    if (!normalizedModelId) {
+        return updateSettings(nextParams);
+    }
+
+    return updateSettings({
+        modelParamsByModelId: {
+            ...currentSettings.modelParamsByModelId,
+            [normalizedModelId]: nextParams,
+        },
+    });
+}
+
+export function resetGenerationParametersForModel(modelId: string | null | undefined) {
+    const normalizedModelId = typeof modelId === 'string' ? modelId.trim() : '';
+    const currentSettings = getSettings();
+
+    if (!normalizedModelId) {
+        return updateSettings(DEFAULT_GENERATION_PARAMETERS);
+    }
+
+    const nextModelParamsByModelId = { ...currentSettings.modelParamsByModelId };
+    delete nextModelParamsByModelId[normalizedModelId];
+
+    return updateSettings({
+        modelParamsByModelId: nextModelParamsByModelId,
+    });
+}
+
+export function getModelLoadParametersForModel(modelId: string | null | undefined): ModelLoadParameters {
+    const settings = getSettings();
+    const normalizedModelId = typeof modelId === 'string' ? modelId.trim() : '';
+    if (!normalizedModelId) {
+        return { ...DEFAULT_MODEL_LOAD_PARAMETERS };
+    }
+
+    const storedParams = settings.modelLoadParamsByModelId?.[normalizedModelId];
+    if (storedParams) {
+        return sanitizeModelLoadParameters(storedParams);
+    }
+
+    return { ...DEFAULT_MODEL_LOAD_PARAMETERS };
+}
+
+export function updateModelLoadParametersForModel(
+    modelId: string | null | undefined,
+    partial: Partial<ModelLoadParameters>,
+) {
+    const normalizedModelId = typeof modelId === 'string' ? modelId.trim() : '';
+    if (!normalizedModelId) {
+        return getSettings();
+    }
+
+    const currentSettings = getSettings();
+    const nextParams = sanitizeModelLoadParameters({
+        ...getModelLoadParametersForModel(normalizedModelId),
+        ...partial,
+    });
+
+    return updateSettings({
+        modelLoadParamsByModelId: {
+            ...currentSettings.modelLoadParamsByModelId,
+            [normalizedModelId]: nextParams,
+        },
+    });
+}
+
+export function resetModelLoadParametersForModel(modelId: string | null | undefined) {
+    const normalizedModelId = typeof modelId === 'string' ? modelId.trim() : '';
+    if (!normalizedModelId) {
+        return getSettings();
+    }
+
+    const currentSettings = getSettings();
+    const nextModelLoadParamsByModelId = { ...currentSettings.modelLoadParamsByModelId };
+    delete nextModelLoadParamsByModelId[normalizedModelId];
+
+    return updateSettings({
+        modelLoadParamsByModelId: nextModelLoadParamsByModelId,
+    });
 }
 
 export function subscribeSettings(listener: SettingsListener) {

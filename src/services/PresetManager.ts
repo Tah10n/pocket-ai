@@ -16,27 +16,78 @@ const DEFAULT_PRESETS: SystemPromptPreset[] = [
         id: 'helpful-assistant',
         name: 'Helpful Assistant',
         systemPrompt: 'You are a helpful, harmless, and honest AI assistant. Provide clear, concise answers.',
-        isBuiltIn: true,
+        isBuiltIn: false,
     },
     {
         id: 'code-expert',
         name: 'Code Expert',
         systemPrompt: 'You are an expert programmer. Write clean, efficient code with clear explanations. Use best practices and modern patterns.',
-        isBuiltIn: true,
+        isBuiltIn: false,
     },
     {
         id: 'translator',
         name: 'Translator',
         systemPrompt: 'You are a professional translator. Translate text accurately while preserving the original tone and meaning. Ask for the target language if not specified.',
-        isBuiltIn: true,
+        isBuiltIn: false,
     },
     {
         id: 'creative-writer',
         name: 'Creative Writer',
         systemPrompt: 'You are a creative writer. Help with stories, poems, scripts, and other creative text. Be imaginative and engaging.',
-        isBuiltIn: true,
+        isBuiltIn: false,
+    },
+    {
+        id: 'study-tutor',
+        name: 'Study Tutor',
+        systemPrompt: 'You are a patient tutor. Explain concepts step by step, adapt to the learner level, and include short examples or practice questions when helpful.',
+        isBuiltIn: false,
+    },
+    {
+        id: 'research-analyst',
+        name: 'Research Analyst',
+        systemPrompt: 'You are a careful research analyst. Organize findings clearly, separate facts from assumptions, highlight tradeoffs, and call out uncertainty when evidence is limited.',
+        isBuiltIn: false,
+    },
+    {
+        id: 'product-manager',
+        name: 'Product Manager',
+        systemPrompt: 'You are a pragmatic product manager. Clarify goals, identify user needs, compare options, surface risks, and recommend the smallest effective next step.',
+        isBuiltIn: false,
+    },
+    {
+        id: 'summarizer',
+        name: 'Summarizer',
+        systemPrompt: 'You are an expert summarizer. Turn long content into crisp, well-structured summaries with the key points, decisions, and open questions.',
+        isBuiltIn: false,
+    },
+    {
+        id: 'brainstorm-partner',
+        name: 'Brainstorm Partner',
+        systemPrompt: 'You are a creative brainstorming partner. Generate multiple distinct ideas, vary the approaches, and balance originality with practical execution.',
+        isBuiltIn: false,
+    },
+    {
+        id: 'data-analyst',
+        name: 'Data Analyst',
+        systemPrompt: 'You are a data analyst. Interpret tables, metrics, and trends carefully, explain your reasoning, and suggest concrete follow-up analyses when appropriate.',
+        isBuiltIn: false,
     },
 ];
+
+function normalizeStoredPresets(storedPresets: SystemPromptPreset[]): SystemPromptPreset[] {
+    let didChange = false;
+
+    const normalized = storedPresets.map((preset) => {
+        if (preset.isBuiltIn) {
+            didChange = true;
+            return { ...preset, isBuiltIn: false };
+        }
+
+        return preset;
+    });
+
+    return didChange ? normalized : storedPresets;
+}
 
 class PresetManager {
     getPresets(): SystemPromptPreset[] {
@@ -46,7 +97,15 @@ class PresetManager {
             this.savePresets(DEFAULT_PRESETS);
             return [...DEFAULT_PRESETS];
         }
-        return JSON.parse(raw);
+
+        const parsed = JSON.parse(raw) as SystemPromptPreset[];
+        const normalized = normalizeStoredPresets(parsed);
+
+        if (normalized !== parsed) {
+            this.savePresets(normalized);
+        }
+
+        return normalized;
     }
 
     getPreset(id: string): SystemPromptPreset | undefined {
@@ -70,7 +129,6 @@ class PresetManager {
         const presets = this.getPresets();
         const index = presets.findIndex(p => p.id === id);
         if (index === -1) throw new Error(`Preset ${id} not found`);
-        if (presets[index].isBuiltIn) throw new Error('Cannot modify built-in presets');
 
         presets[index] = { ...presets[index], ...updates };
         this.savePresets(presets);
@@ -81,7 +139,6 @@ class PresetManager {
         const presets = this.getPresets();
         const preset = presets.find(p => p.id === id);
         if (!preset) throw new Error(`Preset ${id} not found`);
-        if (preset.isBuiltIn) throw new Error('Cannot delete built-in presets');
 
         this.savePresets(presets.filter(p => p.id !== id));
     }

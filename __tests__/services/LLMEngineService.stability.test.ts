@@ -28,6 +28,14 @@ jest.mock('expo-file-system/legacy', () => ({
     documentDirectory: '/mock/',
 }));
 
+jest.mock('../../src/services/SettingsStore', () => ({
+    getModelLoadParametersForModel: jest.fn().mockReturnValue({
+        contextSize: 2048,
+        gpuLayers: null,
+    }),
+    updateSettings: jest.fn(),
+}));
+
 jest.mock('react-native-fs', () => ({
     DocumentDirectoryPath: '/mock/path',
     exists: jest.fn().mockResolvedValue(true),

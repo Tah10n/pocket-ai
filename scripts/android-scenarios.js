@@ -203,6 +203,18 @@ function buildScenarios() {
         await ctx.expectText("Swap Model");
       },
     },
+    {
+      id: "all-conversations",
+      description: "Verify the Home screen See All CTA opens the conversations management screen.",
+      run: async (ctx) => {
+        await goToHome(ctx);
+        await ctx.tapText("See All");
+        await ctx.expectText("All Conversations");
+        await ctx.expectText("New Chat");
+        await ctx.pressBack();
+        await ctx.expectText("Pocket AI");
+      },
+    },
   ];
 }
 
@@ -412,12 +424,24 @@ function parseUiNodes(xml) {
 }
 
 function matchesLabel(node, label) {
+  const normalizedLabel = normalizeUiLabel(label);
+  const normalizedText = normalizeUiLabel(node.text);
+  const normalizedContentDesc = normalizeUiLabel(node.contentDesc);
+
   return (
     node.text === label
     || node.contentDesc === label
     || node.contentDesc.endsWith(`, ${label}`)
     || node.contentDesc.includes(`, ${label},`)
+    || normalizedText === normalizedLabel
+    || normalizedContentDesc === normalizedLabel
+    || normalizedContentDesc.endsWith(`, ${normalizedLabel}`)
+    || normalizedContentDesc.includes(`, ${normalizedLabel},`)
   );
+}
+
+function normalizeUiLabel(value) {
+  return (value || "").replace(/\s+/g, " ").trim().toLowerCase();
 }
 
 function pickBestNode(nodes) {

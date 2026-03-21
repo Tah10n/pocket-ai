@@ -11,18 +11,21 @@ import { QuickActionsGrid } from '@/components/ui/QuickActionsGrid';
 import { RecentConversationsList } from '@/components/ui/RecentConversationsList';
 import { MaterialSymbols } from '@/components/ui/MaterialSymbols';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useChatStore } from '../../store/chatStore';
+import { useChatSession } from '../../hooks/useChatSession';
 import { ConversationIndexItem } from '../../types/chat';
 
 export const HomeScreen = () => {
     const insets = useSafeAreaInsets();
     const router = useRouter();
-    const setActiveThread = useChatStore((state) => state.setActiveThread);
-    const deleteThread = useChatStore((state) => state.deleteThread);
+    const { deleteThread, openThread } = useChatSession();
 
     const handleOpenConversation = (conversation: ConversationIndexItem) => {
-        setActiveThread(conversation.id);
-        router.push('/(tabs)/chat' as any);
+        try {
+            openThread(conversation.id);
+            router.push('/(tabs)/chat' as any);
+        } catch (error: any) {
+            Alert.alert('Cannot open conversation', error?.message || 'Action failed');
+        }
     };
 
     const handleDeleteConversation = (conversation: ConversationIndexItem) => {
@@ -35,7 +38,11 @@ export const HomeScreen = () => {
                     text: 'Delete',
                     style: 'destructive',
                     onPress: () => {
-                        deleteThread(conversation.id);
+                        try {
+                            deleteThread(conversation.id);
+                        } catch (error: any) {
+                            Alert.alert('Cannot delete conversation', error?.message || 'Action failed');
+                        }
                     },
                 },
             ],
@@ -72,6 +79,7 @@ export const HomeScreen = () => {
                 <RecentConversationsList
                     onOpenConversation={handleOpenConversation}
                     onDeleteConversation={handleDeleteConversation}
+                    onViewAllConversations={() => router.push('/conversations' as any)}
                 />
             </ScrollView>
         </Box>

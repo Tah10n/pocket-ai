@@ -2,6 +2,8 @@
 
 Expo Router React Native app for an offline-first local AI assistant. The app focuses on GGUF model discovery, download, verification, local loading through `llama.rn`, and an on-device chat experience.
 
+Home shows a short recent-conversations slice, while the dedicated `All Conversations` screen handles full history management with search, rename, open, and delete actions.
+
 ## Scripts
 
 Install dependencies:
@@ -126,6 +128,7 @@ It will:
 - Bottom tab navigation (`Home`, `Chat`, `Models`, `Settings`)
 - `New Chat` CTA navigation
 - `Swap Model` CTA navigation
+- `See All` conversation-management navigation
 
 Each run writes screenshots and a JSON report under `artifacts/android-scenarios/`.
 

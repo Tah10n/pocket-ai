@@ -14,6 +14,7 @@ import {
   PresetSnapshot,
   createChatId,
   deriveThreadTitle,
+  normalizeConversationTitle,
   sanitizeHydratedThread,
   toConversationIndexItem,
 } from '../types/chat';
@@ -38,6 +39,7 @@ interface ChatStoreState {
   stopAssistantMessage: (threadId: string, messageId: string) => void;
   finalizeAssistantMessage: (threadId: string, messageId: string, content: string) => void;
   deleteThread: (threadId: string) => void;
+  renameThread: (threadId: string, title: string) => boolean;
   deleteMessageBranch: (threadId: string, messageId: string) => boolean;
   patchAssistantMessage: (
     threadId: string,
@@ -58,7 +60,12 @@ interface ChatStoreState {
 }
 
 function updateThreadMetadata(thread: ChatThread): ChatThread {
-  const title = deriveThreadTitle(thread.messages);
+  const derivedTitle = deriveThreadTitle(thread.messages);
+  const title =
+    thread.titleSource === 'manual'
+      ? normalizeConversationTitle(thread.title) || derivedTitle
+      : derivedTitle;
+
   return {
     ...thread,
     title,
@@ -97,6 +104,7 @@ export const useChatStore = create<ChatStoreState>()(
         const thread: ChatThread = {
           id,
           title: title ?? 'New Conversation',
+          titleSource: title ? 'manual' : 'derived',
           modelId,
           presetId,
           presetSnapshot: {
@@ -259,6 +267,36 @@ export const useChatStore = create<ChatStoreState>()(
             activeThreadId: nextActiveThreadId,
           };
         }),
+
+      renameThread: (threadId, title) => {
+        const normalizedTitle = normalizeConversationTitle(title);
+        const existingThread = get().threads[threadId];
+        if (!existingThread) {
+          return false;
+        }
+
+        set((state) => {
+          const thread = state.threads[threadId];
+          if (!thread) {
+            return state;
+          }
+
+          const nextThread = updateThreadMetadata({
+            ...thread,
+            title: normalizedTitle || deriveThreadTitle(thread.messages),
+            titleSource: normalizedTitle ? 'manual' : 'derived',
+          });
+
+          return {
+            threads: {
+              ...state.threads,
+              [threadId]: nextThread,
+            },
+          };
+        });
+
+        return true;
+      },
 
       deleteMessageBranch: (threadId, messageId) => {
         const thread = get().threads[threadId];

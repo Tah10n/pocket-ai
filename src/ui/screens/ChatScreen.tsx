@@ -543,6 +543,9 @@ export const ChatScreen = () => {
                         Alert.alert('Cannot start a new chat', error?.message || 'Action failed');
                     }
                 }}
+                onManageConversations={() => {
+                    router.push('/conversations' as any);
+                }}
             />
         </Box>
     );

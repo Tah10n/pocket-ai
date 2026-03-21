@@ -34,6 +34,7 @@ export interface ChatMessage {
 export interface ChatThread {
   id: string;
   title: string;
+  titleSource?: 'derived' | 'manual';
   modelId: string;
   presetId: string | null;
   presetSnapshot: PresetSnapshot;
@@ -95,6 +96,10 @@ export function deriveThreadTitle(messages: Pick<ChatMessage, 'role' | 'content'
   return normalized.length > 48 ? `${normalized.slice(0, 45)}...` : normalized;
 }
 
+export function normalizeConversationTitle(title: string) {
+  return title.replace(/\s+/g, ' ').trim();
+}
+
 export function toConversationIndexItem(thread: ChatThread): ConversationIndexItem {
   const lastMessage = [...thread.messages]
     .reverse()
@@ -131,6 +136,7 @@ export function sanitizeHydratedThread(thread: ChatThread): ChatThread {
       topP: thread.paramsSnapshot.topP,
       maxTokens: thread.paramsSnapshot.maxTokens,
     },
+    titleSource: thread.titleSource === 'manual' ? 'manual' : 'derived',
     messages: sanitizedMessages,
     status: removedStreamingMessages && thread.status === 'generating' ? 'stopped' : thread.status,
     updatedAt: removedStreamingMessages ? Date.now() : thread.updatedAt,

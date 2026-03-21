@@ -6,6 +6,10 @@ import { MaterialSymbols } from './MaterialSymbols';
 import { FlashList, ListRenderItem } from '@shopify/flash-list';
 import { useChatStore } from '../../store/chatStore';
 import { ConversationIndexItem, toConversationIndexItem } from '../../types/chat';
+import {
+  formatConversationUpdatedAt,
+  getConversationModelLabel,
+} from '../../utils/conversations';
 
 type IconName = ComponentProps<typeof MaterialSymbols>['name'];
 
@@ -18,26 +22,17 @@ interface Conversation extends ConversationIndexItem {
 interface RecentConversationsListProps {
   onDeleteConversation?: (conversation: ConversationIndexItem) => void;
   onOpenConversation?: (conversation: ConversationIndexItem) => void;
+  onViewAllConversations?: () => void;
+  maxVisible?: number;
 }
 
-function formatRelativeTime(timestamp: number): string {
-  const diffMs = Date.now() - timestamp;
-  const diffMinutes = Math.max(1, Math.floor(diffMs / (60 * 1000)));
-
-  if (diffMinutes < 60) return `${diffMinutes} min ago`;
-
-  const diffHours = Math.floor(diffMinutes / 60);
-  if (diffHours < 24) return `${diffHours} hr ago`;
-
-  const diffDays = Math.floor(diffHours / 24);
-  if (diffDays < 7) return `${diffDays} day${diffDays === 1 ? '' : 's'} ago`;
-
-  return new Date(timestamp).toLocaleDateString();
-}
+const DEFAULT_MAX_VISIBLE_CONVERSATIONS = 5;
 
 export const RecentConversationsList = ({
   onDeleteConversation,
   onOpenConversation,
+  onViewAllConversations,
+  maxVisible = DEFAULT_MAX_VISIBLE_CONVERSATIONS,
 }: RecentConversationsListProps) => {
   const threads = useChatStore((state) => state.threads);
   const summaries = Object.values(threads)
@@ -46,10 +41,12 @@ export const RecentConversationsList = ({
 
   const conversations: Conversation[] = summaries.map((summary) => ({
     ...summary,
-    model: summary.modelId.split('/').pop() ?? summary.modelId,
-    time: formatRelativeTime(summary.updatedAt),
+    model: getConversationModelLabel(summary.modelId),
+    time: formatConversationUpdatedAt(summary.updatedAt),
     icon: 'chat-bubble',
   }));
+  const visibleConversations = conversations.slice(0, maxVisible);
+  const shouldShowViewAll = Boolean(onViewAllConversations) && conversations.length > maxVisible;
 
   const renderItem: ListRenderItem<Conversation> = ({ item: conv }) => (
     <Box className="flex-row items-center rounded-xl bg-background-50 dark:bg-primary-500/5 border border-outline-200 dark:border-primary-500/10">
@@ -93,14 +90,25 @@ export const RecentConversationsList = ({
 
   return (
     <Box className="px-4 mt-8 pb-4">
-      <Box className="mb-4">
+      <Box className="mb-4 flex-row items-center justify-between gap-3">
         <Text className="text-typography-900 dark:text-typography-100 text-lg font-bold leading-tight tracking-tight">Recent Conversations</Text>
+        {shouldShowViewAll ? (
+          <Pressable
+            testID="view-all-conversations"
+            onPress={onViewAllConversations}
+            className="rounded-full border border-primary-500/20 bg-primary-500/10 px-3 py-2 active:opacity-70"
+          >
+            <Text className="text-xs font-semibold uppercase tracking-wide text-primary-500">
+              See All
+            </Text>
+          </Pressable>
+        ) : null}
       </Box>
 
       <Box className="flex-1 min-h-80">
-        {conversations.length > 0 ? (
+        {visibleConversations.length > 0 ? (
           <FlashList<Conversation>
-            data={conversations}
+            data={visibleConversations}
             ItemSeparatorComponent={() => <Box className="h-3" />}
             keyExtractor={(item) => item.id}
             scrollEnabled={false}

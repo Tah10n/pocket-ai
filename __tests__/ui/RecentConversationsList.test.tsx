@@ -109,7 +109,7 @@ describe('RecentConversationsList', () => {
     jest.restoreAllMocks();
   });
 
-  it('renders every conversation from the store', () => {
+  it('renders only the recent slice and shows See All when more conversations exist', () => {
     const threads = Object.fromEntries(
       Array.from({ length: 6 }, (_, index) => {
         const thread = createThread(index + 1, 1_000_000 - index * 60_000);
@@ -123,14 +123,14 @@ describe('RecentConversationsList', () => {
       }),
     );
 
-    const { getByText, queryByText } = render(<RecentConversationsList />);
+    const { getByText, queryByText } = render(<RecentConversationsList onViewAllConversations={jest.fn()} />);
 
     expect(getByText('Conversation 1')).toBeTruthy();
     expect(getByText('Conversation 2')).toBeTruthy();
     expect(getByText('Conversation 3')).toBeTruthy();
     expect(getByText('Conversation 4')).toBeTruthy();
     expect(getByText('Conversation 5')).toBeTruthy();
-    expect(getByText('Conversation 6')).toBeTruthy();
-    expect(queryByText('See All')).toBeNull();
+    expect(queryByText('Conversation 6')).toBeNull();
+    expect(getByText('See All')).toBeTruthy();
   });
 });

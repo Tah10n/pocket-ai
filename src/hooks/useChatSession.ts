@@ -20,6 +20,27 @@ export const SUMMARY_PLACEHOLDER_CONTENT =
   'Summary generation is not available yet. Older messages stay visible in the thread, but only the most recent context is sent to the model right now.';
 export const SUMMARY_AFFORDANCE_MIN_TRUNCATED_MESSAGES = 1;
 
+interface ActiveGenerationState {
+  threadId: string;
+  messageId: string;
+  stopRequested: boolean;
+}
+
+const sharedGenerationState: { current: ActiveGenerationState | null } = {
+  current: null,
+};
+
+function isMatchingGeneration(threadId: string, messageId: string) {
+  return (
+    sharedGenerationState.current?.threadId === threadId &&
+    sharedGenerationState.current?.messageId === messageId
+  );
+}
+
+export function resetSharedGenerationStateForTests() {
+  sharedGenerationState.current = null;
+}
+
 export function resolvePresetSnapshot(presetId: string | null): PresetSnapshot {
   if (!presetId) {
     return { ...DEFAULT_PRESET_SNAPSHOT };
@@ -71,14 +92,10 @@ export const useChatSession = () => {
   const patchAssistantMessage = useChatStore((state) => state.patchAssistantMessage);
   const replaceBranchFromUserMessage = useChatStore((state) => state.replaceBranchFromUserMessage);
   const replaceLastAssistantMessage = useChatStore((state) => state.replaceLastAssistantMessage);
+  const renameThreadState = useChatStore((state) => state.renameThread);
   const finalizeThreadStatus = useChatStore((state) => state.finalizeThreadStatus);
   const setActiveThread = useChatStore((state) => state.setActiveThread);
   const setThreadSummary = useChatStore((state) => state.setThreadSummary);
-  const currentGenerationRef = useRef<{
-    threadId: string;
-    messageId: string;
-    stopRequested: boolean;
-  } | null>(null);
   const appStateRef = useRef<AppStateStatus>(AppState.currentState ?? 'active');
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (nextAppState) => {
@@ -98,7 +115,7 @@ export const useChatSession = () => {
 
       // Recovery path: if the app returns with persisted "generating" state but
       // no live completion in flight, treat it as an interrupted session.
-      if (activeThread?.status === 'generating' && !currentGenerationRef.current) {
+      if (activeThread?.status === 'generating' && !sharedGenerationState.current) {
         state.finalizeThreadStatus(activeThread.id, 'stopped');
       }
     });
@@ -114,7 +131,7 @@ export const useChatSession = () => {
       throw new Error('Thread not found');
     }
 
-    currentGenerationRef.current = {
+    sharedGenerationState.current = {
       threadId,
       messageId: assistantMessageId,
       stopRequested: false,
@@ -148,7 +165,7 @@ export const useChatSession = () => {
         },
       });
 
-      if (currentGenerationRef.current?.stopRequested) {
+      if (isMatchingGeneration(threadId, assistantMessageId) && sharedGenerationState.current?.stopRequested) {
         stopAssistantMessage(threadId, assistantMessageId);
         finalizeThreadStatus(threadId, 'stopped');
         return;
@@ -157,7 +174,7 @@ export const useChatSession = () => {
       finalizeAssistantMessage(threadId, assistantMessageId, currentText);
       finalizeThreadStatus(threadId, 'idle');
     } catch (error) {
-      if (currentGenerationRef.current?.stopRequested) {
+      if (isMatchingGeneration(threadId, assistantMessageId) && sharedGenerationState.current?.stopRequested) {
         stopAssistantMessage(threadId, assistantMessageId);
         finalizeThreadStatus(threadId, 'stopped');
         return;
@@ -175,7 +192,9 @@ export const useChatSession = () => {
       finalizeThreadStatus(threadId, 'error');
       throw error;
     } finally {
-      currentGenerationRef.current = null;
+      if (isMatchingGeneration(threadId, assistantMessageId)) {
+        sharedGenerationState.current = null;
+      }
     }
   }, [finalizeAssistantMessage, finalizeThreadStatus, patchAssistantMessage, stopAssistantMessage]);
 
@@ -249,11 +268,11 @@ export const useChatSession = () => {
   }, [activeThread, appendMessage, createAssistantPlaceholder, createThread, runAssistantCompletion, setActiveThread]);
 
   const stopGeneration = useCallback(async () => {
-    if (!currentGenerationRef.current) {
+    if (!sharedGenerationState.current) {
       return;
     }
 
-    currentGenerationRef.current.stopRequested = true;
+    sharedGenerationState.current.stopRequested = true;
     await llmEngineService.stopCompletion();
   }, []);
 
@@ -354,12 +373,19 @@ export const useChatSession = () => {
   }, [activeThread, setActiveThread]);
 
   const deleteThread = useCallback((threadId: string) => {
-    if (currentGenerationRef.current?.threadId === threadId) {
+    if (sharedGenerationState.current?.threadId === threadId) {
       throw new Error('Stop the current response before deleting this conversation.');
     }
 
     deleteThreadState(threadId);
   }, [deleteThreadState]);
+
+  const renameThread = useCallback((threadId: string, title: string) => {
+    const renamed = renameThreadState(threadId, title);
+    if (!renamed) {
+      throw new Error('The selected conversation is no longer available.');
+    }
+  }, [renameThreadState]);
 
   const deleteMessage = useCallback((messageId: string) => {
     if (!activeThread) {
@@ -388,6 +414,7 @@ export const useChatSession = () => {
     appendUserMessage,
     deleteMessage,
     deleteThread,
+    renameThread,
     openThread,
     stopGeneration,
     regenerateFromUserMessage,

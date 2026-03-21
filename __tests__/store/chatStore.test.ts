@@ -411,6 +411,48 @@ describe('chatStore', () => {
     );
   });
 
+  it('keeps a manually renamed title after more messages are added', () => {
+    const threadId = useChatStore.getState().createThread({
+      modelId: 'author/model-q4',
+      presetId: null,
+      presetSnapshot: {
+        id: null,
+        name: 'Default',
+        systemPrompt: 'You are helpful.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 1024,
+      },
+    });
+
+    useChatStore.getState().appendMessage(threadId, {
+      id: 'user-1',
+      role: 'user',
+      content: 'Original opening prompt',
+      createdAt: Date.now(),
+      state: 'complete',
+    });
+
+    expect(useChatStore.getState().renameThread(threadId, 'Project Planning')).toBe(true);
+
+    useChatStore.getState().appendMessage(threadId, {
+      id: 'assistant-1',
+      role: 'assistant',
+      content: 'Let us outline the work.',
+      createdAt: Date.now(),
+      state: 'complete',
+    });
+
+    expect(useChatStore.getState().getThread(threadId)).toEqual(
+      expect.objectContaining({
+        title: 'Project Planning',
+        titleSource: 'manual',
+      }),
+    );
+  });
+
   it('prunes inactive threads that fall outside the retention window', () => {
     const now = 100 * 24 * 60 * 60 * 1000;
     const staleThread = buildThread('thread-stale', now - 95 * 24 * 60 * 60 * 1000);

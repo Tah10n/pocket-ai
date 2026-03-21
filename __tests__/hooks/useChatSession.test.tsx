@@ -10,6 +10,7 @@ import {
   buildInferenceMessagesForThread,
   getThreadTruncationState,
   MAX_CONTEXT_MESSAGES,
+  resetSharedGenerationStateForTests,
   resolvePresetSnapshot,
   SUMMARY_PLACEHOLDER_CONTENT,
 } from '../../src/hooks/useChatSession';
@@ -38,7 +39,7 @@ jest.mock('../../src/services/PresetManager', () => ({
 }));
 
 describe('useChatSession', () => {
-  let appStateListener: ((state: 'active' | 'background' | 'inactive') => void) | undefined;
+  let appStateListeners: Array<(state: 'active' | 'background' | 'inactive') => void>;
 
   function renderHookHarness() {
     let session: ReturnType<typeof useChatSession> | null = null;
@@ -58,7 +59,8 @@ describe('useChatSession', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     useChatStore.setState({ threads: {}, activeThreadId: null });
-    appStateListener = undefined;
+    resetSharedGenerationStateForTests();
+    appStateListeners = [];
     (presetManager.getPreset as jest.Mock).mockReset();
     (presetManager.getPreset as jest.Mock).mockReturnValue({
       id: 'preset-1',
@@ -84,7 +86,7 @@ describe('useChatSession', () => {
     (llmEngineService.stopCompletion as jest.Mock).mockResolvedValue(undefined);
     jest.spyOn(AppState, 'addEventListener').mockImplementation((type: any, listener: any) => {
       if (type === 'change') {
-        appStateListener = listener;
+        appStateListeners.push(listener);
       }
 
       return {
@@ -92,6 +94,12 @@ describe('useChatSession', () => {
       } as any;
     });
   });
+
+  function emitAppState(state: 'active' | 'background' | 'inactive') {
+    appStateListeners.forEach((listener) => {
+      listener(state);
+    });
+  }
 
   it('creates and persists a thread-backed conversation', async () => {
     const getSession = renderHookHarness();
@@ -260,7 +268,7 @@ describe('useChatSession', () => {
     });
 
     await act(async () => {
-      appStateListener?.('background');
+      emitAppState('background');
       onToken?.('Finished in background');
       resolveCompletion?.();
     });
@@ -318,11 +326,51 @@ describe('useChatSession', () => {
     });
 
     await act(async () => {
-      appStateListener?.('background');
-      appStateListener?.('active');
+      emitAppState('background');
+      emitAppState('active');
     });
 
     expect(useChatStore.getState().getActiveThread()?.status).toBe('stopped');
+  });
+
+  it('does not stop a live generation when another hook instance returns to foreground', async () => {
+    let onToken: ((token: string) => void) | undefined;
+    let resolveCompletion: (() => void) | undefined;
+
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementation(
+      ({ onToken: tokenHandler }: { onToken?: (token: string) => void }) =>
+        new Promise((resolve) => {
+          onToken = tokenHandler;
+          resolveCompletion = () => resolve({ text: 'Completed normally' });
+        }),
+    );
+
+    const getPrimarySession = renderHookHarness();
+    renderHookHarness();
+
+    await act(async () => {
+      void getPrimarySession()?.appendUserMessage('Keep streaming');
+    });
+
+    await waitFor(() => {
+      expect(useChatStore.getState().getActiveThread()?.status).toBe('generating');
+    });
+
+    await act(async () => {
+      emitAppState('background');
+      emitAppState('active');
+    });
+
+    expect(useChatStore.getState().getActiveThread()?.status).toBe('generating');
+
+    await act(async () => {
+      onToken?.('Completed normally');
+      resolveCompletion?.();
+    });
+
+    await waitFor(() => {
+      expect(useChatStore.getState().getActiveThread()?.status).toBe('idle');
+    });
   });
 
   it('builds inference context from frozen preset snapshot, history, and params', async () => {
@@ -464,6 +512,43 @@ describe('useChatSession', () => {
     });
 
     expect(useChatStore.getState().activeThreadId).toBe(threadTwoId);
+  });
+
+  it('blocks deleting a live generating thread from another hook instance', async () => {
+    let resolveCompletion: (() => void) | undefined;
+
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveCompletion = () => resolve({ text: 'Stopped elsewhere' });
+        }),
+    );
+
+    const getPrimarySession = renderHookHarness();
+    const getSecondarySession = renderHookHarness();
+
+    await act(async () => {
+      void getPrimarySession()?.appendUserMessage('Please stream');
+    });
+
+    await waitFor(() => {
+      expect(useChatStore.getState().getActiveThread()?.status).toBe('generating');
+    });
+
+    const threadId = useChatStore.getState().activeThreadId;
+    expect(() => getSecondarySession()?.deleteThread(threadId ?? '')).toThrow(
+      'Stop the current response before deleting this conversation.',
+    );
+    expect(threadId ? useChatStore.getState().getThread(threadId) : null).not.toBeNull();
+
+    await act(async () => {
+      await getSecondarySession()?.stopGeneration();
+      resolveCompletion?.();
+    });
+
+    await waitFor(() => {
+      expect(useChatStore.getState().getActiveThread()?.status).toBe('stopped');
+    });
   });
 
   it('exposes prompt builder helpers for preset resolution and context assembly', () => {

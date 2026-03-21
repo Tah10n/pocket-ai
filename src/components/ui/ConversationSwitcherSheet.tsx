@@ -14,6 +14,7 @@ interface ConversationSwitcherSheetProps {
   onClose: () => void;
   onSelectConversation: (threadId: string) => void;
   onStartNewChat: () => void;
+  onManageConversations?: () => void;
 }
 
 export function ConversationSwitcherSheet({
@@ -23,6 +24,7 @@ export function ConversationSwitcherSheet({
   onClose,
   onSelectConversation,
   onStartNewChat,
+  onManageConversations,
 }: ConversationSwitcherSheetProps) {
   return (
     <Modal visible={visible} animationType="fade" transparent onRequestClose={onClose}>
@@ -46,18 +48,35 @@ export function ConversationSwitcherSheet({
             </Pressable>
           </Box>
 
-          <Pressable
-            onPress={() => {
-              onClose();
-              onStartNewChat();
-            }}
-            className="mb-4 flex-row items-center justify-center gap-2 rounded-2xl border border-primary-500/20 bg-primary-500/10 px-4 py-3 active:opacity-80"
-          >
-            <MaterialSymbols name="edit-square" size={18} className="text-primary-500" />
-            <Text className="text-sm font-semibold text-primary-500">
-              Start New Chat
-            </Text>
-          </Pressable>
+          <Box className="mb-4 flex-row gap-3">
+            <Pressable
+              onPress={() => {
+                onClose();
+                onStartNewChat();
+              }}
+              className="flex-1 flex-row items-center justify-center gap-2 rounded-2xl border border-primary-500/20 bg-primary-500/10 px-4 py-3 active:opacity-80"
+            >
+              <MaterialSymbols name="edit-square" size={18} className="text-primary-500" />
+              <Text className="text-sm font-semibold text-primary-500">
+                Start New Chat
+              </Text>
+            </Pressable>
+
+            {onManageConversations ? (
+              <Pressable
+                onPress={() => {
+                  onClose();
+                  onManageConversations();
+                }}
+                className="flex-row items-center justify-center gap-2 rounded-2xl border border-outline-200 bg-background-50 px-4 py-3 active:opacity-80 dark:border-outline-800 dark:bg-background-900/60"
+              >
+                <MaterialSymbols name="manage-search" size={18} className="text-typography-700 dark:text-typography-200" />
+                <Text className="text-sm font-semibold text-typography-700 dark:text-typography-200">
+                  Manage
+                </Text>
+              </Pressable>
+            ) : null}
+          </Box>
 
           <ScrollView showsVerticalScrollIndicator={false}>
             <Box className="gap-3 pb-2">

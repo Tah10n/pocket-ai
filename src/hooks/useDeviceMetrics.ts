@@ -21,11 +21,20 @@ export interface DeviceMetrics {
   };
 }
 
+interface UseDeviceMetricsOptions {
+  enabled?: boolean;
+  refreshIntervalMs?: number;
+}
+
 function bytesToGb(value: number) {
   return value / (1024 * 1024 * 1024);
 }
 
-export const useDeviceMetrics = () => {
+export const useDeviceMetrics = (options: UseDeviceMetricsOptions = {}) => {
+  const {
+    enabled = true,
+    refreshIntervalMs = 15000,
+  } = options;
   const [metrics, setMetrics] = useState<DeviceMetrics | null>(null);
   const isMountedRef = useRef(true);
 
@@ -105,16 +114,22 @@ export const useDeviceMetrics = () => {
 
   useEffect(() => {
     isMountedRef.current = true;
+    if (!enabled) {
+      return () => {
+        isMountedRef.current = false;
+      };
+    }
+
     void loadMetrics();
     const intervalId = setInterval(() => {
       void loadMetrics();
-    }, 15000);
+    }, refreshIntervalMs);
 
     return () => {
       isMountedRef.current = false;
       clearInterval(intervalId);
     };
-  }, [loadMetrics]);
+  }, [enabled, loadMetrics, refreshIntervalMs]);
 
   return { metrics, refresh: loadMetrics };
 };

@@ -1,15 +1,22 @@
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { Box } from '@/components/ui/box';
 import { SearchHeader } from '@/components/ui/SearchHeader';
 import { ModelsList } from '@/components/models/ModelsList';
-import { useRouter } from 'expo-router';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useModelsStore } from '@/store/modelsStore';
 
 export const ModelsCatalogScreen = () => {
   const router = useRouter();
-  const [activeTab, setActiveTab] = useState<'All Models' | 'Downloaded'>('All Models');
+  const params = useLocalSearchParams<{ initialTab?: string }>();
+  const requestedTab = params.initialTab === 'downloaded' ? 'Downloaded' : 'All Models';
+  const [activeTab, setActiveTab] = useState<'All Models' | 'Downloaded'>(requestedTab);
   const [searchQuery, setSearchQuery] = useState('');
   const resetPagination = useModelsStore((state) => state.resetPagination);
+
+  useEffect(() => {
+    setActiveTab(requestedTab);
+    resetPagination();
+  }, [requestedTab, resetPagination]);
 
   const handleSearchChange = useCallback((query: string) => {
     setSearchQuery(query);
@@ -29,6 +36,7 @@ export const ModelsCatalogScreen = () => {
         activeTab={activeTab}
         onTabChange={handleTabChange}
         onBack={() => router.back()}
+        onOpenStorage={() => router.push('/storage' as any)}
       />
       <ModelsList activeTab={activeTab} searchQuery={searchQuery} />
     </Box>

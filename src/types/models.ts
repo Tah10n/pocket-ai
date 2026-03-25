@@ -20,6 +20,9 @@ export interface ModelMetadata {
   lifecycleStatus: LifecycleStatus;
   downloadProgress: number;
   resumeData?: string;
+  maxContextTokens?: number;
+  modelType?: string;
+  architectures?: string[];
 }
 
 export enum EngineStatus {

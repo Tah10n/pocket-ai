@@ -13,12 +13,23 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTranslation } from 'react-i18next';
 import { useChatSession } from '../../hooks/useChatSession';
 import { ConversationIndexItem } from '../../types/chat';
+import { useLLMEngine } from '@/hooks/useLLMEngine';
+import { registry } from '@/services/LocalStorageRegistry';
 
 export const HomeScreen = () => {
     const { t } = useTranslation();
     const insets = useSafeAreaInsets();
     const router = useRouter();
     const { deleteThread, openThread } = useChatSession();
+    const { state: engineState } = useLLMEngine();
+
+    const handleOpenModelPicker = () => {
+        const hasDownloadedModels = registry.getModels().some((model) => Boolean(model.localPath));
+        const params = engineState.activeModelId || !hasDownloadedModels
+            ? undefined
+            : { initialTab: 'downloaded' as const };
+        router.push({ pathname: '/(tabs)/models', params } as any);
+    };
 
     const handleOpenConversation = (conversation: ConversationIndexItem) => {
         try {
@@ -59,7 +70,7 @@ export const HomeScreen = () => {
                 contentContainerStyle={{ paddingBottom: insets.bottom + 100 }}
                 showsVerticalScrollIndicator={false}
             >
-                <ActiveModelCard onSwapModel={() => router.push('/(tabs)/models' as any)} />
+                <ActiveModelCard onSwapModel={handleOpenModelPicker} />
                 
                 <Box className="px-4 py-6">
                     <Pressable 

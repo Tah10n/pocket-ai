@@ -131,6 +131,7 @@ describe('RecentConversationsList', () => {
     expect(getByText('Conversation 4')).toBeTruthy();
     expect(getByText('Conversation 5')).toBeTruthy();
     expect(queryByText('Conversation 6')).toBeNull();
-    expect(getByText('See All')).toBeTruthy();
+    expect(getByText('home.seeAll')).toBeTruthy();
   });
 });
+

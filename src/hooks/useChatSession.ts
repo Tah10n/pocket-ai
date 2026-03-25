@@ -156,6 +156,9 @@ export const useChatSession = () => {
         params: {
           temperature: thread.paramsSnapshot.temperature,
           top_p: thread.paramsSnapshot.topP,
+          top_k: thread.paramsSnapshot.topK,
+          min_p: thread.paramsSnapshot.minP,
+          penalty_repeat: thread.paramsSnapshot.repetitionPenalty,
           n_predict: Math.min(thread.paramsSnapshot.maxTokens, maxContextSize),
         },
         onToken: (token) => {
@@ -210,6 +213,9 @@ export const useChatSession = () => {
     const paramsChanged =
       thread.paramsSnapshot.temperature !== resolvedParams.temperature
       || thread.paramsSnapshot.topP !== resolvedParams.topP
+      || thread.paramsSnapshot.topK !== resolvedParams.topK
+      || thread.paramsSnapshot.minP !== resolvedParams.minP
+      || thread.paramsSnapshot.repetitionPenalty !== resolvedParams.repetitionPenalty
       || thread.paramsSnapshot.maxTokens !== resolvedParams.maxTokens;
 
     if (paramsChanged) {

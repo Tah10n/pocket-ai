@@ -195,6 +195,9 @@ class LLMEngineService {
         n_predict: params?.n_predict ?? 512,
         temperature: params?.temperature ?? 0.7,
         top_p: params?.top_p ?? 0.9,
+        top_k: params?.top_k ?? 40,
+        min_p: params?.min_p ?? 0.05,
+        penalty_repeat: params?.penalty_repeat ?? 1,
         stop: ['</s>', '<|im_end|>', '<|end|>'],
       },
       (data: TokenData) => {

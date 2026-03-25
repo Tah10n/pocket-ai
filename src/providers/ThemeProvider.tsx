@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useMemo } from 'react';
 import { useColorScheme as useSystemColorScheme } from 'react-native';
 import { useColorScheme as useNativewindColorScheme } from 'nativewind';
-import { getSettings, updateSettings } from '../services/SettingsStore';
+import { getSettings, subscribeSettings, updateSettings } from '../services/SettingsStore';
 
 type ThemeMode = 'light' | 'dark' | 'system';
 type ResolvedThemeMode = 'light' | 'dark';
@@ -81,6 +81,14 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     useEffect(() => {
         setColorScheme(mode);
     }, [mode, setColorScheme]);
+
+    useEffect(() => {
+        return subscribeSettings((nextSettings) => {
+            setMode((currentMode) => (
+                currentMode === nextSettings.theme ? currentMode : nextSettings.theme
+            ));
+        });
+    }, []);
 
     const toggleTheme = () => {
         const nextMode = resolvedMode === 'dark' ? 'light' : 'dark';

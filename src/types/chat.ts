@@ -5,6 +5,9 @@ export type ChatThreadStatus = 'idle' | 'generating' | 'stopped' | 'error';
 export interface GenerationParamsSnapshot {
   temperature: number;
   topP: number;
+  topK: number;
+  minP: number;
+  repetitionPenalty: number;
   maxTokens: number;
 }
 
@@ -68,6 +71,9 @@ export interface LlmChatCompletionOptions {
   params?: {
     temperature?: number;
     top_p?: number;
+    top_k?: number;
+    min_p?: number;
+    penalty_repeat?: number;
     n_predict?: number;
   };
 }
@@ -134,6 +140,9 @@ export function sanitizeHydratedThread(thread: ChatThread): ChatThread {
     paramsSnapshot: {
       temperature: thread.paramsSnapshot.temperature,
       topP: thread.paramsSnapshot.topP,
+      topK: thread.paramsSnapshot.topK ?? 40,
+      minP: thread.paramsSnapshot.minP ?? 0.05,
+      repetitionPenalty: thread.paramsSnapshot.repetitionPenalty ?? 1,
       maxTokens: thread.paramsSnapshot.maxTokens,
     },
     titleSource: thread.titleSource === 'manual' ? 'manual' : 'derived',

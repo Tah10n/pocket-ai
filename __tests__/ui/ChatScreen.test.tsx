@@ -459,7 +459,7 @@ describe('ChatScreen', () => {
 
     expect(getByText('Restored conversation')).toBeTruthy();
     expect(getByText('Helpful Assistant')).toBeTruthy();
-    expect(getByText('T0.7 • TopP 0.6 • 1024 tok')).toBeTruthy();
+    expect(getByText('T0.7 • P0.6 • K40 • 1024 tok')).toBeTruthy();
     expect(getByText('Saved user prompt')).toBeTruthy();
     expect(getByText('Saved assistant reply')).toBeTruthy();
   });
@@ -730,13 +730,13 @@ describe('ChatScreen', () => {
   it('resets a single generation parameter from the model controls sheet', () => {
     const { getByTestId, getByText, rerender } = render(React.createElement(ChatScreen));
 
-    expect(getByText('T0.7 • TopP 0.6 • 1024 tok')).toBeTruthy();
+    expect(getByText('T0.7 • P0.6 • K40 • 1024 tok')).toBeTruthy();
 
     fireEvent.press(getByTestId('model-controls-button'));
     fireEvent.press(getByTestId('reset-top-p-button'));
     rerender(React.createElement(ChatScreen));
 
-    expect(getByText('T0.7 • TopP 0.9 • 1024 tok')).toBeTruthy();
+    expect(getByText('T0.7 • P0.9 • K40 • 1024 tok')).toBeTruthy();
     expect(useChatStore.getState().getActiveThread()?.paramsSnapshot.topP).toBe(0.9);
   });
 });

@@ -13,6 +13,7 @@ interface SearchHeaderProps {
   activeTab: 'All Models' | 'Downloaded';
   onTabChange: (tab: 'All Models' | 'Downloaded') => void;
   onBack?: () => void;
+  onOpenStorage?: () => void;
 }
 
 export const SearchHeader: React.FC<SearchHeaderProps> = ({
@@ -21,6 +22,7 @@ export const SearchHeader: React.FC<SearchHeaderProps> = ({
   activeTab,
   onTabChange,
   onBack,
+  onOpenStorage,
 }) => {
   const { t } = useTranslation();
   return (
@@ -32,7 +34,13 @@ export const SearchHeader: React.FC<SearchHeaderProps> = ({
           </Pressable>
         )}
         <Text className="text-lg font-bold text-typography-900 dark:text-typography-100">{t('models.catalogTitle')}</Text>
-        <Box className="w-7" />
+        {onOpenStorage ? (
+          <Pressable onPress={onOpenStorage} className="active:opacity-70">
+            <MaterialIcons name="storage" size={22} className="text-primary-500" />
+          </Pressable>
+        ) : (
+          <Box className="w-7" />
+        )}
       </Box>
 
       {/* Search Bar */}

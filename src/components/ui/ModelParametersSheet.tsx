@@ -15,6 +15,7 @@ interface ModelParametersSheetProps {
   modelLabel: string;
   params: GenerationParameters;
   defaultParams: GenerationParameters;
+  modelMaxContextTokens?: number;
   loadParamsDraft: ModelLoadParameters;
   defaultLoadParams: ModelLoadParameters;
   recommendedGpuLayers: number;
@@ -132,6 +133,7 @@ export function ModelParametersSheet({
   modelLabel,
   params,
   defaultParams,
+  modelMaxContextTokens,
   loadParamsDraft,
   defaultLoadParams,
   recommendedGpuLayers,
@@ -148,8 +150,14 @@ export function ModelParametersSheet({
   onApplyReload,
 }: ModelParametersSheetProps) {
   const { t } = useTranslation();
+  const contextWindowCeiling = modelMaxContextTokens
+    ? Math.max(512, Math.min(8192, modelMaxContextTokens))
+    : 8192;
   const maxTokensFloor = Math.min(128, loadParamsDraft.contextSize);
-  const maxTokensCeiling = Math.max(maxTokensFloor, loadParamsDraft.contextSize);
+  const maxTokensCeiling = Math.max(
+    maxTokensFloor,
+    Math.min(loadParamsDraft.contextSize, contextWindowCeiling),
+  );
 
   return (
     <Modal visible={visible} animationType="fade" transparent onRequestClose={onClose}>
@@ -217,14 +225,14 @@ export function ModelParametersSheet({
                 description={t('chat.modelControls.contextWindowDescription')}
                 valueLabel={`${Math.round(loadParamsDraft.contextSize)} tok`}
                 minLabel="512"
-                maxLabel="8192"
+                maxLabel={`${contextWindowCeiling}`}
                 minimumValue={512}
-                maximumValue={8192}
+                maximumValue={contextWindowCeiling}
                 step={512}
-                value={loadParamsDraft.contextSize}
+                value={Math.min(loadParamsDraft.contextSize, contextWindowCeiling)}
                 onValueChange={(value) => onChangeLoadParams({ contextSize: Math.round(value) })}
                 onReset={() => onResetLoadField('contextSize')}
-                isResetDisabled={loadParamsDraft.contextSize === defaultLoadParams.contextSize}
+                isResetDisabled={loadParamsDraft.contextSize === Math.min(defaultLoadParams.contextSize, contextWindowCeiling)}
               />
 
               <SliderRow
@@ -295,6 +303,51 @@ export function ModelParametersSheet({
                 onValueChange={(value) => onChangeParams({ topP: Number(value.toFixed(2)) })}
                 onReset={() => onResetParamField('topP')}
                 isResetDisabled={params.topP === defaultParams.topP}
+              />
+
+              <SliderRow
+                label={t('chat.modelControls.topK')}
+                description={t('chat.modelControls.topKDescription')}
+                valueLabel={`${Math.round(params.topK)}`}
+                minLabel={t('chat.modelControls.topKMin')}
+                maxLabel={t('chat.modelControls.topKMax')}
+                minimumValue={0}
+                maximumValue={200}
+                step={1}
+                value={params.topK}
+                onValueChange={(value) => onChangeParams({ topK: Math.round(value) })}
+                onReset={() => onResetParamField('topK')}
+                isResetDisabled={params.topK === defaultParams.topK}
+              />
+
+              <SliderRow
+                label={t('chat.modelControls.minP')}
+                description={t('chat.modelControls.minPDescription')}
+                valueLabel={formatDecimal(params.minP)}
+                minLabel={t('chat.modelControls.minPMin')}
+                maxLabel={t('chat.modelControls.minPMax')}
+                minimumValue={0}
+                maximumValue={1}
+                step={0.01}
+                value={params.minP}
+                onValueChange={(value) => onChangeParams({ minP: Number(value.toFixed(2)) })}
+                onReset={() => onResetParamField('minP')}
+                isResetDisabled={params.minP === defaultParams.minP}
+              />
+
+              <SliderRow
+                label={t('chat.modelControls.repetitionPenalty')}
+                description={t('chat.modelControls.repetitionPenaltyDescription')}
+                valueLabel={formatDecimal(params.repetitionPenalty)}
+                minLabel={t('chat.modelControls.repetitionPenaltyMin')}
+                maxLabel={t('chat.modelControls.repetitionPenaltyMax')}
+                minimumValue={0}
+                maximumValue={2}
+                step={0.05}
+                value={params.repetitionPenalty}
+                onValueChange={(value) => onChangeParams({ repetitionPenalty: Number(value.toFixed(2)) })}
+                onReset={() => onResetParamField('repetitionPenalty')}
+                isResetDisabled={params.repetitionPenalty === defaultParams.repetitionPenalty}
               />
 
               <SliderRow

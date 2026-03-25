@@ -8,6 +8,17 @@ type HuggingFaceModelSummary = {
   modelId?: string;
   sha?: string;
   siblings?: HuggingFaceSibling[];
+  config?: HuggingFaceModelConfig;
+};
+
+type HuggingFaceModelConfig = {
+  max_position_embeddings?: number;
+  n_positions?: number;
+  max_sequence_length?: number;
+  seq_length?: number;
+  sliding_window?: number;
+  model_type?: string;
+  architectures?: string[];
 };
 
 type HuggingFaceSibling = {
@@ -259,6 +270,7 @@ export class ModelCatalogService {
       const size = ggufSibling.size || ggufSibling.lfs?.size || 0;
       const fitsInRam = size > 0 ? size < totalMemory * 0.8 : true; // Assume true if size unknown
       const fileName = ggufSibling.rfilename || ggufSibling.filename || 'model.gguf';
+      const maxContextTokens = this.resolveMaxContextTokens(item.config);
 
       results.push({
         id: repoId,
@@ -270,6 +282,9 @@ export class ModelCatalogService {
         lifecycleStatus: LifecycleStatus.AVAILABLE,
         downloadProgress: 0,
         sha256: ggufSibling.lfs?.sha256,
+        maxContextTokens,
+        modelType: item.config?.model_type,
+        architectures: item.config?.architectures,
       });
     }
 
@@ -300,6 +315,24 @@ export class ModelCatalogService {
 
   public async getLocalModels(): Promise<ModelMetadata[]> {
     return registry.getModels();
+  }
+
+  private resolveMaxContextTokens(config?: HuggingFaceModelConfig): number | undefined {
+    const candidates = [
+      config?.max_position_embeddings,
+      config?.n_positions,
+      config?.max_sequence_length,
+      config?.seq_length,
+      config?.sliding_window,
+    ];
+
+    for (const candidate of candidates) {
+      if (typeof candidate === 'number' && Number.isFinite(candidate) && candidate >= 256) {
+        return Math.round(candidate);
+      }
+    }
+
+    return undefined;
   }
 }
 

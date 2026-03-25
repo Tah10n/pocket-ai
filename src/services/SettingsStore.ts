@@ -5,6 +5,9 @@ export const storage = createStorage('pocket-ai-settings');
 export interface GenerationParameters {
     temperature: number;
     topP: number;
+    topK: number;
+    minP: number;
+    repetitionPenalty: number;
     maxTokens: number;
 }
 
@@ -16,6 +19,9 @@ export interface ModelLoadParameters {
 export interface AppSettings {
     temperature: number;
     topP: number;
+    topK: number;
+    minP: number;
+    repetitionPenalty: number;
     maxTokens: number;
     theme: 'light' | 'dark' | 'system';
     language: 'en' | 'ru';
@@ -29,6 +35,9 @@ export interface AppSettings {
 export const DEFAULT_GENERATION_PARAMETERS: GenerationParameters = {
     temperature: 0.7,
     topP: 0.9,
+    topK: 40,
+    minP: 0.05,
+    repetitionPenalty: 1,
     maxTokens: 2048,
 };
 
@@ -40,6 +49,9 @@ export const DEFAULT_MODEL_LOAD_PARAMETERS: ModelLoadParameters = {
 const DEFAULT_SETTINGS: AppSettings = {
     temperature: DEFAULT_GENERATION_PARAMETERS.temperature,
     topP: DEFAULT_GENERATION_PARAMETERS.topP,
+    topK: DEFAULT_GENERATION_PARAMETERS.topK,
+    minP: DEFAULT_GENERATION_PARAMETERS.minP,
+    repetitionPenalty: DEFAULT_GENERATION_PARAMETERS.repetitionPenalty,
     maxTokens: DEFAULT_GENERATION_PARAMETERS.maxTokens,
     theme: 'system',
     language: 'en',
@@ -50,9 +62,9 @@ const DEFAULT_SETTINGS: AppSettings = {
     modelLoadParamsByModelId: {},
 };
 
-const SETTINGS_KEY = 'app_settings';
-const CHAT_HISTORY_INDEX_KEY = 'chat_history_index';
-const CHAT_HISTORY_PREFIX = 'chat_history_';
+export const SETTINGS_KEY = 'app_settings';
+export const CHAT_HISTORY_INDEX_KEY = 'chat_history_index';
+export const CHAT_HISTORY_PREFIX = 'chat_history_';
 
 type SettingsListener = (settings: AppSettings) => void;
 const settingsListeners: Set<SettingsListener> = new Set();
@@ -95,6 +107,9 @@ function sanitizeGenerationParameters(input: Partial<GenerationParameters> | und
     return {
         temperature: clampNumber(input?.temperature, 0, 2, DEFAULT_GENERATION_PARAMETERS.temperature),
         topP: clampNumber(input?.topP, 0, 1, DEFAULT_GENERATION_PARAMETERS.topP),
+        topK: Math.round(clampNumber(input?.topK, 0, 200, DEFAULT_GENERATION_PARAMETERS.topK)),
+        minP: clampNumber(input?.minP, 0, 1, DEFAULT_GENERATION_PARAMETERS.minP),
+        repetitionPenalty: clampNumber(input?.repetitionPenalty, 0, 2, DEFAULT_GENERATION_PARAMETERS.repetitionPenalty),
         maxTokens: Math.round(clampNumber(input?.maxTokens, 1, 8192, DEFAULT_GENERATION_PARAMETERS.maxTokens)),
     };
 }
@@ -150,6 +165,9 @@ function sanitizeSettings(input: Partial<AppSettings>): AppSettings {
     return {
         temperature: generationDefaults.temperature,
         topP: generationDefaults.topP,
+        topK: generationDefaults.topK,
+        minP: generationDefaults.minP,
+        repetitionPenalty: generationDefaults.repetitionPenalty,
         maxTokens: generationDefaults.maxTokens,
         theme: input.theme === 'light' || input.theme === 'dark' || input.theme === 'system' ? input.theme : DEFAULT_SETTINGS.theme,
         language: normalizeLanguage(input.language),
@@ -206,10 +224,20 @@ export function updateSettings(partial: Partial<AppSettings>) {
     return updated;
 }
 
+export function resetSettings() {
+    storage.remove(SETTINGS_KEY);
+    const defaults = { ...DEFAULT_SETTINGS };
+    settingsListeners.forEach((listener) => listener(defaults));
+    return defaults;
+}
+
 export function resetParameters() {
     return updateSettings({
         temperature: DEFAULT_GENERATION_PARAMETERS.temperature,
         topP: DEFAULT_GENERATION_PARAMETERS.topP,
+        topK: DEFAULT_GENERATION_PARAMETERS.topK,
+        minP: DEFAULT_GENERATION_PARAMETERS.minP,
+        repetitionPenalty: DEFAULT_GENERATION_PARAMETERS.repetitionPenalty,
         maxTokens: DEFAULT_GENERATION_PARAMETERS.maxTokens,
     });
 }

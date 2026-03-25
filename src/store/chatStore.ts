@@ -19,6 +19,10 @@ import {
   toConversationIndexItem,
 } from '../types/chat';
 
+const FALLBACK_TOP_K = 40;
+const FALLBACK_MIN_P = 0.05;
+const FALLBACK_REPETITION_PENALTY = 1;
+
 interface CreateThreadInput {
   modelId: string;
   presetId: string | null;
@@ -33,6 +37,7 @@ interface ChatStoreState {
   createThread: (input: CreateThreadInput) => string;
   mergeImportedThreads: (threads: ChatThread[]) => number;
   pruneExpiredThreads: (retentionDays: number | null, now?: number) => number;
+  clearAllThreads: () => number;
   setActiveThread: (threadId: string | null) => void;
   updateThreadPresetSnapshot: (threadId: string, presetId: string | null, presetSnapshot: PresetSnapshot) => void;
   updateThreadParamsSnapshot: (threadId: string, paramsSnapshot: GenerationParamsSnapshot) => void;
@@ -117,6 +122,9 @@ export const useChatStore = create<ChatStoreState>()(
           paramsSnapshot: {
             temperature: paramsSnapshot.temperature,
             topP: paramsSnapshot.topP,
+            topK: paramsSnapshot.topK ?? FALLBACK_TOP_K,
+            minP: paramsSnapshot.minP ?? FALLBACK_MIN_P,
+            repetitionPenalty: paramsSnapshot.repetitionPenalty ?? FALLBACK_REPETITION_PENALTY,
             maxTokens: paramsSnapshot.maxTokens,
           },
           messages: [],
@@ -199,6 +207,20 @@ export const useChatStore = create<ChatStoreState>()(
         return expiredThreadIds.length;
       },
 
+      clearAllThreads: () => {
+        const threadCount = Object.keys(get().threads).length;
+        if (threadCount === 0) {
+          return 0;
+        }
+
+        set({
+          threads: {},
+          activeThreadId: null,
+        });
+
+        return threadCount;
+      },
+
       setActiveThread: (threadId) => set({ activeThreadId: threadId }),
 
       updateThreadPresetSnapshot: (threadId, presetId, presetSnapshot) =>
@@ -239,6 +261,9 @@ export const useChatStore = create<ChatStoreState>()(
                 paramsSnapshot: {
                   temperature: paramsSnapshot.temperature,
                   topP: paramsSnapshot.topP,
+                  topK: paramsSnapshot.topK ?? FALLBACK_TOP_K,
+                  minP: paramsSnapshot.minP ?? FALLBACK_MIN_P,
+                  repetitionPenalty: paramsSnapshot.repetitionPenalty ?? FALLBACK_REPETITION_PENALTY,
                   maxTokens: paramsSnapshot.maxTokens,
                 },
               },

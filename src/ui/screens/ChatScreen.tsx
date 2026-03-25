@@ -23,6 +23,7 @@ import { llmEngineService } from '../../services/LLMEngineService';
 import { EngineStatus } from '../../types/models';
 import { ChatMessage } from '../../types/chat';
 import { getChatHardwareBannerInputs, hardwareListenerService } from '../../services/HardwareListenerService';
+import { registry } from '../../services/LocalStorageRegistry';
 import { useChatStore } from '../../store/chatStore';
 import {
     DEFAULT_MODEL_LOAD_PARAMETERS,
@@ -39,6 +40,9 @@ import {
 } from '../../services/SettingsStore';
 
 const AUTO_SCROLL_BOTTOM_THRESHOLD = 96;
+const FALLBACK_TOP_K = 40;
+const FALLBACK_MIN_P = 0.05;
+const FALLBACK_REPETITION_PENALTY = 1;
 
 export function getNextShouldStickToBottom(
     currentValue: boolean,
@@ -123,9 +127,21 @@ export const ChatScreen = () => {
             ? (engineState.activeModelId.split('/').pop() ?? engineState.activeModelId)
             : t('chat.noModelHeader'));
     const configurableModelId = activeThread?.modelId ?? settings.activeModelId ?? null;
-    const currentParams = getGenerationParametersForModel(configurableModelId);
+    const rawCurrentParams = getGenerationParametersForModel(configurableModelId);
+    const currentParams = {
+        ...rawCurrentParams,
+        topK: rawCurrentParams.topK ?? FALLBACK_TOP_K,
+        minP: rawCurrentParams.minP ?? FALLBACK_MIN_P,
+        repetitionPenalty: rawCurrentParams.repetitionPenalty ?? FALLBACK_REPETITION_PENALTY,
+    };
     const currentLoadParams = getModelLoadParametersForModel(configurableModelId);
-    const defaultParams = getGenerationParametersForModel(null);
+    const rawDefaultParams = getGenerationParametersForModel(null);
+    const defaultParams = {
+        ...rawDefaultParams,
+        topK: rawDefaultParams.topK ?? FALLBACK_TOP_K,
+        minP: rawDefaultParams.minP ?? FALLBACK_MIN_P,
+        repetitionPenalty: rawDefaultParams.repetitionPenalty ?? FALLBACK_REPETITION_PENALTY,
+    };
     const defaultLoadParams = getModelLoadParametersForModel(null);
     const resolvedGpuLayers = currentLoadParams.gpuLayers ?? recommendedGpuLayers;
     const applyButtonLabel = settings.activeModelId === configurableModelId ? t('models.applyAndReload') : t('models.saveLoadProfile');
@@ -146,10 +162,17 @@ export const ChatScreen = () => {
         : (engineState.activeModelId
             ? (engineState.activeModelId.split('/').pop() ?? engineState.activeModelId)
             : t('chat.noModelHeader'));
-    const paramsSource = activeThread?.paramsSnapshot ?? currentParams;
+    const rawParamsSource = activeThread?.paramsSnapshot ?? currentParams;
+    const paramsSource = {
+        ...rawParamsSource,
+        topK: rawParamsSource.topK ?? FALLBACK_TOP_K,
+        minP: rawParamsSource.minP ?? FALLBACK_MIN_P,
+        repetitionPenalty: rawParamsSource.repetitionPenalty ?? FALLBACK_REPETITION_PENALTY,
+    };
     const paramsLabel = configurableModelId
-        ? `T${paramsSource.temperature} • TopP ${paramsSource.topP} • ${paramsSource.maxTokens} tok`
+        ? `T${paramsSource.temperature} • P${paramsSource.topP} • K${paramsSource.topK} • ${paramsSource.maxTokens} tok`
         : undefined;
+    const configurableModel = configurableModelId ? registry.getModel(configurableModelId) : undefined;
     const thermalWarningMessage = hardwareBannerInputs.thermalState === 'critical'
         ? t('chat.thermalDescriptionCritical')
         : t('chat.thermalDescriptionElevated');
@@ -701,6 +724,7 @@ export const ChatScreen = () => {
                 modelLabel={modelLabel}
                 params={paramsSource}
                 defaultParams={defaultParams}
+                modelMaxContextTokens={configurableModel?.maxContextTokens}
                 loadParamsDraft={draftLoadParams}
                 defaultLoadParams={defaultLoadParams}
                 recommendedGpuLayers={recommendedGpuLayers}
@@ -762,6 +786,9 @@ export const ChatScreen = () => {
                         updateThreadParamsSnapshot(activeThread.id, {
                             temperature: resetParams.temperature,
                             topP: resetParams.topP,
+                            topK: resetParams.topK,
+                            minP: resetParams.minP,
+                            repetitionPenalty: resetParams.repetitionPenalty,
                             maxTokens: resetParams.maxTokens,
                         });
                     }

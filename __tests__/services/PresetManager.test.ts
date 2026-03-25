@@ -93,22 +93,34 @@ describe('SettingsStore', () => {
         expect(getGenerationParametersForModel('author/model-a')).toEqual({
             temperature: 1.2,
             topP: 0.85,
+            topK: 40,
+            minP: 0.05,
+            repetitionPenalty: 1,
             maxTokens: 1536,
         });
         expect(getGenerationParametersForModel('author/model-b')).toEqual({
             temperature: 0.6,
             topP: 0.4,
+            topK: 40,
+            minP: 0.05,
+            repetitionPenalty: 1,
             maxTokens: 1024,
         });
         expect(getSettings().modelParamsByModelId).toEqual({
             'author/model-a': {
                 temperature: 1.2,
                 topP: 0.85,
+                topK: 40,
+                minP: 0.05,
+                repetitionPenalty: 1,
                 maxTokens: 1536,
             },
             'author/model-b': {
                 temperature: 0.6,
                 topP: 0.4,
+                topK: 40,
+                minP: 0.05,
+                repetitionPenalty: 1,
                 maxTokens: 1024,
             },
         });
@@ -130,6 +142,9 @@ describe('SettingsStore', () => {
         expect(getGenerationParametersForModel('author/model-a')).toEqual({
             temperature: 0.7,
             topP: 0.9,
+            topK: 40,
+            minP: 0.05,
+            repetitionPenalty: 1,
             maxTokens: 2048,
         });
         expect(getSettings().modelParamsByModelId).toEqual({});

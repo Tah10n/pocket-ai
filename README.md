@@ -2,7 +2,7 @@
 
 Expo Router React Native app for an offline-first local AI assistant. The app focuses on GGUF model discovery, download, verification, local loading through `llama.rn`, and an on-device chat experience.
 
-Home shows a short recent-conversations slice, while the dedicated `All Conversations` screen handles full history management with search, rename, open, and delete actions.
+Home shows a short recent-conversations slice, a simplified active-model card without decorative artwork, and a context-aware model CTA that can send users straight to downloaded models when no model is currently loaded.
 Settings now include theme/language controls, generation parameters, and a routed preset manager where seeded and user-created presets can all be added, edited, activated, or deleted.
 Theme switching is currently stabilized with a hybrid approach: the app theme source of truth still lives in `ThemeProvider`, but `SettingsScreen` intentionally uses plain React Native `StyleSheet` styling as a safety workaround for a NativeWind / `react-native-css-interop` dev-time crash that was reproducible during theme changes.
 
@@ -131,6 +131,19 @@ const { t } = useTranslation();
 - [UI Architecture & Components Guidelines](./docs/ui-architecture.md): guidance for creating and modifying UI components.
 - [New Architecture Migration Guide](./docs/new-architecture.md): notes for React Native New Architecture and native-module-related setup.
 
+## Model Controls
+
+- The chat model-controls sheet exposes the runtime generation controls used by local inference: `temperature`, `topP`, `topK`, `minP`, `repetition penalty`, `context window`, and `max tokens`.
+- Generation settings are saved in `SettingsStore`, snapshotted into each chat thread, and forwarded into `llama.rn` through the chat session pipeline so active chats stay reproducible.
+- `Reset all` and per-field reset actions restore the app defaults for both load-time and sampling-related controls.
+
+## Hugging Face Metadata
+
+- The model catalog now reads optional Hugging Face `config` metadata when it is available for a GGUF entry.
+- The app currently derives capability hints such as `maxContextTokens`, `modelType`, and `architectures` from fields like `max_position_embeddings`, `n_positions`, `max_sequence_length`, `seq_length`, and `sliding_window`.
+- When a model exposes a known context-size limit, the chat parameter UI uses that value to clamp `Context window` and `Max tokens` so the controls stay within the model's advertised range.
+- Additional Hugging Face metadata is treated as advisory unless the local runtime explicitly supports it; unsupported config fields are not surfaced as editable controls yet.
+
 ## Theme Notes
 
 - Theme persistence and the app-wide resolved mode live in `src/providers/ThemeProvider.tsx`.
@@ -154,10 +167,10 @@ It will:
 
 `npm run android:scenarios:emulator` builds on top of that launcher and executes a small set of baseline user flows using `adb` and Android UI hierarchy dumps. The current scenarios cover:
 
-- Home screen smoke (`Pocket AI`, `New Chat`, `Quick Actions`, `Swap Model`)
+- Home screen smoke (`Pocket AI`, `New Chat`, `Quick Actions`, active model CTA)
 - Bottom tab navigation (`Home`, `Chat`, `Models`, `Settings`)
 - `New Chat` CTA navigation
-- `Swap Model` CTA navigation
+- Active model CTA navigation, including the downloaded-models path when no model is loaded
 - `See All` conversation-management navigation
 
 Each run writes screenshots and a JSON report under `artifacts/android-scenarios/`.

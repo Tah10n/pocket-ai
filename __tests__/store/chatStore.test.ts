@@ -368,11 +368,14 @@ describe('chatStore', () => {
 
     expect(useChatStore.getState().getThread(threadId)).toEqual(
       expect.objectContaining({
-        paramsSnapshot: {
+        paramsSnapshot: expect.objectContaining({
           temperature: 0.7,
           topP: 0.9,
+          topK: 40,
+          minP: 0.05,
+          repetitionPenalty: 1,
           maxTokens: 1024,
-        },
+        }),
         presetSnapshot: {
           id: 'preset-1',
           name: 'Helpful Assistant',
@@ -510,3 +513,4 @@ describe('chatStore', () => {
     expect(useChatStore.getState().getThread(recentThread.id)).toEqual(recentThread);
   });
 });
+

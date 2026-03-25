@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useBottomTabBarHeight } from '@react-navigation/bottom-tabs';
-import { useFocusEffect } from '@react-navigation/native';
+import { useFocusEffect, useIsFocused } from '@react-navigation/native';
 import { router } from 'expo-router';
 import { useTranslation } from 'react-i18next';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -10,6 +10,7 @@ import { useDeviceMetrics } from '../../hooks/useDeviceMetrics';
 import { useLLMEngine } from '../../hooks/useLLMEngine';
 import { useTheme } from '../../providers/ThemeProvider';
 import { llmEngineService } from '../../services/LLMEngineService';
+import { getAppStorageMetrics, type AppStorageMetrics } from '../../services/StorageManagerService';
 import { getSettings, subscribeSettings, updateSettings } from '../../services/SettingsStore';
 
 const styles = StyleSheet.create({
@@ -272,6 +273,24 @@ function formatGb(value: number) {
     return `${value.toFixed(value >= 10 ? 1 : 2)} GB`;
 }
 
+function formatBytes(value: number) {
+    if (!Number.isFinite(value) || value <= 0) {
+        return '0 MB';
+    }
+
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let size = value;
+    let unitIndex = 0;
+
+    while (size >= 1024 && unitIndex < units.length - 1) {
+        size /= 1024;
+        unitIndex += 1;
+    }
+
+    const precision = size >= 10 || unitIndex === 0 ? 0 : 1;
+    return `${size.toFixed(precision)} ${units[unitIndex]}`;
+}
+
 function formatPercent(value: number) {
     return `${Math.round(clampPercentage(value))}%`;
 }
@@ -280,10 +299,12 @@ export const SettingsScreen = () => {
     const { t, i18n } = useTranslation();
     const insets = useSafeAreaInsets();
     const tabBarHeight = useBottomTabBarHeight();
+    const isFocused = useIsFocused();
     const { mode, resolvedMode, setTheme, colors } = useTheme();
-    const { metrics, refresh } = useDeviceMetrics();
+    const { metrics, refresh } = useDeviceMetrics({ enabled: isFocused, refreshIntervalMs: 1000 });
     const { state: engineState, isReady: isEngineReady } = useLLMEngine();
     const [settings, setSettings] = useState(() => getSettings());
+    const [appStorageMetrics, setAppStorageMetrics] = useState<AppStorageMetrics | null>(null);
 
     const isDark = resolvedMode === 'dark';
     const cardBackground = isDark ? 'rgba(15, 23, 42, 0.72)' : colors.surface;
@@ -304,6 +325,25 @@ export const SettingsScreen = () => {
         }, [refresh]),
     );
 
+    useFocusEffect(
+        useCallback(() => {
+            let isActive = true;
+
+            const loadAppStorageMetrics = async () => {
+                const nextMetrics = await getAppStorageMetrics();
+                if (isActive) {
+                    setAppStorageMetrics(nextMetrics);
+                }
+            };
+
+            void loadAppStorageMetrics();
+
+            return () => {
+                isActive = false;
+            };
+        }, []),
+    );
+
     const handleLanguagePress = () => {
         const nextLang = settings.language === 'en' ? 'ru' : 'en';
         updateSettings({ language: nextLang });
@@ -312,6 +352,10 @@ export const SettingsScreen = () => {
 
     const handlePresetsPress = () => {
         router.push('/presets' as any);
+    };
+
+    const handleStorageManagerPress = () => {
+        router.push('/storage' as any);
     };
 
     const unloadActiveModel = async () => {
@@ -364,8 +408,7 @@ export const SettingsScreen = () => {
     const storageUsed = metrics?.storage.usedGB ?? 0;
     const storageFree = metrics?.storage.freeGB ?? Math.max(storageTotal - storageUsed, 0);
     const storageUsedPercentage = metrics?.storage.usedPercentage ?? (storageTotal > 0 ? (storageUsed / storageTotal) * 100 : 0);
-    const downloadedModelsGB = metrics?.storage.downloadedModelsGB ?? 0;
-    const downloadedModelsCount = metrics?.storage.downloadedModelsCount ?? 0;
+    const appFilesBytes = appStorageMetrics?.appFilesBytes ?? 0;
     const canForceUnloadModel = isEngineReady && Boolean(engineState.activeModelId);
 
     return (
@@ -457,7 +500,7 @@ export const SettingsScreen = () => {
                 </Text>
 
                 <View style={[styles.card, { backgroundColor: cardBackground, borderColor: colors.border }]}>
-                    <Pressable onPress={handlePresetsPress} style={styles.row}>
+                    <Pressable onPress={handlePresetsPress} style={[styles.row, styles.rowBorder, { borderBottomColor: colors.border }]}>
                         <View style={styles.rowTop}>
                             <View style={styles.rowLeading}>
                                 <View style={[styles.rowIcon, { backgroundColor: 'rgba(245, 158, 11, 0.18)' }]}>
@@ -469,6 +512,26 @@ export const SettingsScreen = () => {
                                     </Text>
                                     <Text style={[styles.rowSubtitle, { color: colors.textSecondary }]}>
                                         {t('settings.presetsDescription')}
+                                    </Text>
+                                </View>
+                            </View>
+
+                            <MaterialSymbols name="chevron-right" size={20} color={colors.textSecondary} />
+                        </View>
+                    </Pressable>
+
+                    <Pressable onPress={handleStorageManagerPress} style={styles.row}>
+                        <View style={styles.rowTop}>
+                            <View style={styles.rowLeading}>
+                                <View style={[styles.rowIcon, { backgroundColor: 'rgba(20, 184, 166, 0.18)' }]}>
+                                    <MaterialSymbols name="storage" size={20} color="#0f766e" />
+                                </View>
+                                <View style={styles.rowTextWrap}>
+                                    <Text style={[styles.rowTitle, { color: colors.text }]}>
+                                        {t('settings.storageManager')}
+                                    </Text>
+                                    <Text style={[styles.rowSubtitle, { color: colors.textSecondary }]}>
+                                        {t('settings.storageManagerDescription')}
                                     </Text>
                                 </View>
                             </View>
@@ -631,7 +694,7 @@ export const SettingsScreen = () => {
                                 {renderStatChip(t('settings.used'), formatGb(storageUsed))}
                                 {renderStatChip(t('settings.free'), formatGb(storageFree))}
                                 {renderStatChip(t('settings.total'), formatGb(storageTotal))}
-                                {renderStatChip(t('settings.modelsUsage', { count: downloadedModelsCount }), formatGb(downloadedModelsGB))}
+                                {renderStatChip(t('settings.appFilesUsage'), formatBytes(appFilesBytes))}
                             </View>
                         </View>
                     </View>

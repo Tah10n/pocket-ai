@@ -68,6 +68,9 @@ function buildThreadFromLegacyHistory(entry: ChatHistoryEntry, settings: AppSett
     paramsSnapshot: {
       temperature: settings.temperature,
       topP: settings.topP,
+      topK: settings.topK ?? 40,
+      minP: settings.minP ?? 0.05,
+      repetitionPenalty: settings.repetitionPenalty ?? 1,
       maxTokens: settings.maxTokens,
     },
     messages,

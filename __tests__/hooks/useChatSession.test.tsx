@@ -416,11 +416,11 @@ describe('useChatSession', () => {
           { role: 'system', content: 'Be concise.' },
           { role: 'user', content: 'First prompt' },
         ]),
-        params: {
+        params: expect.objectContaining({
           temperature: 0.7,
           top_p: 0.9,
           n_predict: 1024,
-        },
+        }),
       }),
     );
   });
@@ -692,3 +692,8 @@ describe('useChatSession', () => {
     );
   });
 });
+
+
+
+
+

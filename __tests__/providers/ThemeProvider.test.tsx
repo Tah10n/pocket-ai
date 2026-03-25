@@ -1,11 +1,12 @@
 import React from 'react';
 import * as ReactNative from 'react-native';
 import { Pressable, Text } from 'react-native';
-import { fireEvent, render } from '@testing-library/react-native';
+import { act, fireEvent, render } from '@testing-library/react-native';
 import { ThemeProvider, useTheme } from '../../src/providers/ThemeProvider';
-import { getSettings, updateSettings } from '../../src/services/SettingsStore';
+import { getSettings, subscribeSettings, updateSettings } from '../../src/services/SettingsStore';
 
 const mockSetColorScheme = jest.fn();
+let settingsListener: ((settings: any) => void) | null = null;
 
 jest.mock('nativewind', () => ({
   useColorScheme: () => ({
@@ -15,6 +16,7 @@ jest.mock('nativewind', () => ({
 
 jest.mock('../../src/services/SettingsStore', () => ({
   getSettings: jest.fn(),
+  subscribeSettings: jest.fn(),
   updateSettings: jest.fn(),
 }));
 
@@ -33,12 +35,18 @@ function ThemeProbe() {
 }
 
 const mockGetSettings = getSettings as jest.MockedFunction<typeof getSettings>;
+const mockSubscribeSettings = subscribeSettings as jest.MockedFunction<typeof subscribeSettings>;
 const mockUpdateSettings = updateSettings as jest.MockedFunction<typeof updateSettings>;
 
 describe('ThemeProvider', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockSetColorScheme.mockReset();
+    settingsListener = null;
+    mockSubscribeSettings.mockImplementation((listener: any) => {
+      settingsListener = listener;
+      return jest.fn();
+    });
   });
 
   afterEach(() => {
@@ -78,5 +86,27 @@ describe('ThemeProvider', () => {
     fireEvent.press(getByTestId('set-system'));
 
     expect(mockUpdateSettings).toHaveBeenCalledWith({ theme: 'system' });
+  });
+
+  it('reacts to settings updates that happen outside the provider', () => {
+    mockGetSettings.mockReturnValue({
+      theme: 'dark',
+    } as any);
+    jest.spyOn(ReactNative, 'useColorScheme').mockReturnValue('light');
+
+    const { getByTestId } = render(
+      <ThemeProvider>
+        <ThemeProbe />
+      </ThemeProvider>,
+    );
+
+    act(() => {
+      settingsListener?.({
+        theme: 'system',
+      });
+    });
+
+    expect(getByTestId('theme-mode').props.children).toBe('system');
+    expect(getByTestId('resolved-mode').props.children).toBe('light');
   });
 });

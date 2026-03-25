@@ -189,7 +189,6 @@ export function PresetManagerScreen() {
                     data={presets}
                     keyExtractor={(item) => item.id}
                     renderItem={renderItem}
-                    estimatedItemSize={104}
                 />
             </Box>
 

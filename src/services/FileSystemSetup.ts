@@ -1,4 +1,3 @@
-/* eslint-disable import/namespace */
 import * as FileSystem from 'expo-file-system/legacy';
 
 // @ts-ignore

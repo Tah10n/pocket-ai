@@ -68,11 +68,33 @@ Run lint:
 npm run lint
 ```
 
+Run TypeScript checks:
+
+```bash
+npm run typecheck
+```
+
 Run tests:
 
 ```bash
 npm test
 ```
+
+## Verification Workflow
+
+Before merging changes, run the full local quality gate:
+
+```bash
+npm run typecheck
+npm run lint
+npm test
+```
+
+Notes about expected console noise during `npm test`:
+
+- MMKV-backed services log fallback warnings under Jest because native MMKV is unavailable in the test environment and the app intentionally falls back to in-memory storage.
+- Some tests intentionally exercise failure paths such as corrupted settings payloads, Hugging Face rate limiting, and GPU fallback; those scenarios log warnings or errors even when the suite passes.
+- Treat the process exit code and Jest summary as the source of truth for pass/fail.
 
 ## Current app structure
 

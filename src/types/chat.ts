@@ -5,9 +5,9 @@ export type ChatThreadStatus = 'idle' | 'generating' | 'stopped' | 'error';
 export interface GenerationParamsSnapshot {
   temperature: number;
   topP: number;
-  topK: number;
-  minP: number;
-  repetitionPenalty: number;
+  topK?: number;
+  minP?: number;
+  repetitionPenalty?: number;
   maxTokens: number;
 }
 

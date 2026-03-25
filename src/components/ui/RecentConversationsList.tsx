@@ -117,7 +117,6 @@ export const RecentConversationsList = ({
             keyExtractor={(item) => item.id}
             scrollEnabled={false}
             renderItem={renderItem}
-            estimatedItemSize={92}
           />
         ) : (
           <Box className="rounded-xl border border-dashed border-outline-200 bg-background-50 px-4 py-6 dark:border-primary-500/10 dark:bg-primary-500/5">

@@ -6,7 +6,7 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 const mockPush = jest.fn();
 const mockReplace = jest.fn();
 const mockGetModels = jest.fn(() => []);
-let mockEngineState = {
+let mockEngineState: { activeModelId: string | null } = {
     activeModelId: 'author/model-q4',
 };
 
@@ -51,7 +51,7 @@ jest.mock('@/hooks/useLLMEngine', () => ({
 
 jest.mock('@/services/LocalStorageRegistry', () => ({
     registry: {
-        getModels: (...args: any[]) => mockGetModels(...args),
+        getModels: () => mockGetModels(),
     },
 }));
 

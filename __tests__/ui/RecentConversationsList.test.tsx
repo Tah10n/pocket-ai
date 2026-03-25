@@ -2,7 +2,7 @@ import React from 'react';
 import { render } from '@testing-library/react-native';
 import { RecentConversationsList } from '../../src/components/ui/RecentConversationsList';
 import { useChatStore } from '../../src/store/chatStore';
-import { ChatThread } from '../../src/types/chat';
+import { ChatThread, GenerationParamsSnapshot } from '../../src/types/chat';
 
 jest.mock('@shopify/flash-list', () => {
   const mockReact = require('react');
@@ -69,6 +69,20 @@ jest.mock('@/components/ui/pressable', () => {
 
 const mockUseChatStore = useChatStore as jest.MockedFunction<typeof useChatStore>;
 
+function createGenerationParamsSnapshot(
+  overrides: Partial<GenerationParamsSnapshot> = {},
+): GenerationParamsSnapshot {
+  return {
+    temperature: 0.7,
+    topP: 0.9,
+    topK: 40,
+    minP: 0.05,
+    repetitionPenalty: 1,
+    maxTokens: 1024,
+    ...overrides,
+  };
+}
+
 function createThread(index: number, updatedAt: number): ChatThread {
   return {
     id: `thread-${index}`,
@@ -80,11 +94,7 @@ function createThread(index: number, updatedAt: number): ChatThread {
       name: 'Default',
       systemPrompt: '',
     },
-    paramsSnapshot: {
-      temperature: 0.7,
-      topP: 0.9,
-      maxTokens: 512,
-    },
+    paramsSnapshot: createGenerationParamsSnapshot({ maxTokens: 512 }),
     messages: [
       {
         id: `message-${index}`,

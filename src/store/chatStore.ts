@@ -804,19 +804,20 @@ export function getThreadInferenceWindow(
     normalizedHistoryMessages[0]?.role === 'assistant' &&
     historyMessages[effectiveHistoryStartIndex - 1]?.role === 'user';
 
-  if (shouldBackfillLeadingUserMessage) {
+  if (shouldBackfillLeadingUserMessage && promptTokenBudget != null) {
+    const resolvedPromptTokenBudget = promptTokenBudget;
     const leadingUserMessage = historyMessages[effectiveHistoryStartIndex - 1];
     const leadingUserTokens = estimateLlmMessageTokens(leadingUserMessage);
     const canBackfillLeadingUserMessage =
       estimateLlmMessagesTokens(normalizedHistoryMessages) + leadingUserTokens
-        <= promptTokenBudget;
+        <= resolvedPromptTokenBudget;
 
     if (canBackfillLeadingUserMessage) {
       effectiveHistoryStartIndex -= 1;
       normalizedHistoryMessages = historyMessages.slice(effectiveHistoryStartIndex);
     } else if (
       normalizedHistoryMessages.length === 1 &&
-      leadingUserTokens <= promptTokenBudget
+      leadingUserTokens <= resolvedPromptTokenBudget
     ) {
       effectiveHistoryStartIndex -= 1;
       normalizedHistoryMessages = [leadingUserMessage];

@@ -1,10 +1,16 @@
-jest.mock('i18next', () => ({
-  __esModule: true,
-  default: {
+jest.mock('i18next', () => {
+  const mockI18nInstance = {
     language: 'en',
+    use: jest.fn().mockReturnThis(),
+    init: jest.fn().mockResolvedValue(undefined),
     changeLanguage: jest.fn().mockResolvedValue(undefined),
-  },
-}));
+  };
+
+  return {
+    __esModule: true,
+    createInstance: jest.fn(() => mockI18nInstance),
+  };
+});
 
 jest.mock('../../src/services/PresetManager', () => ({
   presetManager: {

@@ -419,7 +419,6 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
             renderItem={renderModelItem}
             ListEmptyComponent={renderEmptyState}
             ListFooterComponent={renderFooter}
-            estimatedItemSize={184}
           />
         )}
       </Box>

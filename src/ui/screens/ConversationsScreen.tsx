@@ -447,7 +447,6 @@ export function ConversationsScreen() {
           keyboardShouldPersistTaps="handled"
           contentContainerStyle={{ padding: 16, paddingBottom: insets.bottom + 32 }}
           ItemSeparatorComponent={() => <Box className="h-4" />}
-          estimatedItemSize={172}
         />
       ) : (
         <Box className="flex-1 px-4 pb-6" style={{ paddingTop: 24 + insets.top / 4 }}>

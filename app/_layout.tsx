@@ -55,6 +55,7 @@ function patchCssInteropUpgradeWarningCrash() {
   globalAny.__pocketAiCssInteropPatched = true;
 
   try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const renderComponentModule = require('react-native-css-interop/dist/runtime/native/render-component') as {
       renderComponent?: (...args: any[]) => any;
     };

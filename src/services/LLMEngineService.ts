@@ -202,7 +202,7 @@ class LLMEngineService {
 
   private async runExclusiveOperation<T>(operation: () => Promise<T>): Promise<T> {
     const previousOperation = this.operationQueue;
-    let releaseQueue: (() => void) | null = null;
+    let releaseQueue: () => void = () => undefined;
 
     this.operationQueue = new Promise<void>((resolve) => {
       releaseQueue = resolve;
@@ -213,7 +213,7 @@ class LLMEngineService {
     try {
       return await operation();
     } finally {
-      releaseQueue?.();
+      releaseQueue();
     }
   }
 

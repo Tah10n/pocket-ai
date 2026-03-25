@@ -49,4 +49,29 @@ describe('ModelDownloadManager Basic', () => {
 
     expect(FileSystem.createDownloadResumable).toHaveBeenCalled();
   });
+
+  it('verifies a downloaded file when the size matches', async () => {
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValueOnce({ exists: true, size: 1000 });
+
+    await expect(modelDownloadManager.verifyChecksum(mockModel, 'test-dir/model.gguf')).resolves.toBe('verified-by-size');
+  });
+
+  it('fails verification when the downloaded file is missing', async () => {
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValueOnce({ exists: false, size: 0 });
+
+    await expect(modelDownloadManager.verifyChecksum(mockModel, 'test-dir/model.gguf')).rejects.toThrow(
+      'File does not exist after download',
+    );
+  });
+
+  it('fails verification when the downloaded file size is too different', async () => {
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValueOnce({
+      exists: true,
+      size: mockModel.size + 2 * 1024 * 1024,
+    });
+
+    await expect(modelDownloadManager.verifyChecksum(mockModel, 'test-dir/model.gguf')).rejects.toThrow(
+      'Size mismatch',
+    );
+  });
 });

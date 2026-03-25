@@ -31,6 +31,7 @@ const mockDeleteMessage = jest.fn();
 const mockStop = jest.fn();
 const mockCreateSummaryPlaceholder = jest.fn();
 const mockRouterPush = jest.fn();
+const mockGetRecommendedGpuLayers = jest.fn(() => new Promise<number>(() => {}));
 let lastPresetSelectorProps: any = null;
 const mockStartNewChat = jest.fn(() => {
   require('../../src/store/chatStore').useChatStore.getState().setActiveThread(null);
@@ -53,6 +54,12 @@ jest.mock('../../src/hooks/useLLMEngine', () => ({
   useLLMEngine: () => ({
     state: mockEngineState,
   }),
+}));
+
+jest.mock('../../src/services/LLMEngineService', () => ({
+  llmEngineService: {
+    getRecommendedGpuLayers: () => mockGetRecommendedGpuLayers(),
+  },
 }));
 
 jest.mock('../../src/components/ui/ChatHeader', () => {
@@ -526,6 +533,23 @@ describe('ChatScreen', () => {
     expect(getByText('chat.statusGenerating')).toBeTruthy();
     fireEvent.press(getByTestId('stop-button'));
     expect(mockStop).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not stop generation when the screen unmounts', () => {
+    useChatStore.setState({
+      threads: {
+        'thread-1': {
+          ...useChatStore.getState().threads['thread-1'],
+          status: 'generating',
+        },
+      },
+      activeThreadId: 'thread-1',
+    });
+
+    const { unmount } = render(React.createElement(ChatScreen));
+    unmount();
+
+    expect(mockStop).not.toHaveBeenCalled();
   });
 
   it('shows a low-memory warning banner when hardware inputs require it', () => {

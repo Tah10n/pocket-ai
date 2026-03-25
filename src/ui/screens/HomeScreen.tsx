@@ -15,6 +15,7 @@ import { useChatSession } from '../../hooks/useChatSession';
 import { ConversationIndexItem } from '../../types/chat';
 import { useLLMEngine } from '@/hooks/useLLMEngine';
 import { registry } from '@/services/LocalStorageRegistry';
+import { getReportedErrorMessage } from '../../services/AppError';
 
 export const HomeScreen = () => {
     const { t } = useTranslation();
@@ -36,7 +37,10 @@ export const HomeScreen = () => {
             openThread(conversation.id);
             router.push('/(tabs)/chat' as any);
         } catch (error: any) {
-            Alert.alert(t('home.openConversationErrorTitle'), error?.message || t('common.actionFailed'));
+            Alert.alert(
+                t('home.openConversationErrorTitle'),
+                getReportedErrorMessage('HomeScreen.handleOpenConversation', error, t),
+            );
         }
     };
 
@@ -53,7 +57,10 @@ export const HomeScreen = () => {
                         try {
                             deleteThread(conversation.id);
                         } catch (error: any) {
-                            Alert.alert(t('home.deleteConversationErrorTitle'), error?.message || t('common.actionFailed'));
+                            Alert.alert(
+                                t('home.deleteConversationErrorTitle'),
+                                getReportedErrorMessage('HomeScreen.handleDeleteConversation', error, t),
+                            );
                         }
                     },
                 },

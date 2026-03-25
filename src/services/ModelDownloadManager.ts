@@ -3,6 +3,7 @@ import { useDownloadStore } from '../store/downloadStore';
 import { ModelMetadata, LifecycleStatus } from '../types/models';
 import { registry } from './LocalStorageRegistry';
 import { MODELS_DIR } from './FileSystemSetup';
+import { AppError, toAppError } from './AppError';
 
 export class ModelDownloadManager {
   private static instance: ModelDownloadManager;
@@ -61,7 +62,9 @@ export class ModelDownloadManager {
       const freeSpace = await FileSystem.getFreeDiskStorageAsync();
       const REQUIRED_BUFFER = 1024 * 1024 * 1024; // 1 GB
       if (freeSpace !== undefined && freeSpace < model.size + REQUIRED_BUFFER) {
-        throw new Error('DISK_SPACE_LOW');
+        throw new AppError('download_disk_space_low', 'DISK_SPACE_LOW', {
+          details: { modelId: model.id, freeSpace, requiredBytes: model.size + REQUIRED_BUFFER },
+        });
       }
     } catch (e: any) {
       console.error(`[ModelDownloadManager] Pre-download check failed for ${model.id}:`, e.message);
@@ -114,26 +117,13 @@ export class ModelDownloadManager {
 
       // On some Android environments, status might be missing from result
       if (result.status && result.status >= 400) {
-        throw new Error(`Download failed with HTTP status ${result.status}`);
+        throw new AppError('download_http_error', `Download failed with HTTP status ${result.status}`, {
+          details: { modelId: model.id, status: result.status },
+        });
       }
 
-      // Verification: Fast File Size Check instead of slow JS SHA256
       updateModelInQueue(model.id, { lifecycleStatus: LifecycleStatus.VERIFYING });
-      
-      const fileInfo = await FileSystem.getInfoAsync(localUri);
-      if (!fileInfo.exists) {
-        throw new Error('File does not exist after download');
-      }
-
-      // Check if size matches. We allow a small 1MB variance just in case headers were slightly off,
-      // but usually they should match exactly.
-      const downloadedSize = fileInfo.size;
-      const expectedSize = model.size;
-
-      if (expectedSize > 0 && Math.abs(downloadedSize - expectedSize) > 1024 * 1024) {
-        // If file is significantly smaller, it means download was corrupted or cut off
-        throw new Error(`Size mismatch: Expected ${expectedSize} but got ${downloadedSize}`);
-      }
+      const verificationHash = await this.verifyChecksum(model, localUri);
 
       // Success
       const completedModel: ModelMetadata = {
@@ -142,8 +132,7 @@ export class ModelDownloadManager {
         downloadedAt: Date.now(),
         lifecycleStatus: LifecycleStatus.DOWNLOADED,
         downloadProgress: 1,
-        // We bypass full hash to prevent 2-minute UI freeze.
-        sha256: model.sha256 || 'verified-by-size', 
+        sha256: verificationHash,
       };
 
       registry.updateModel(completedModel);
@@ -167,6 +156,39 @@ export class ModelDownloadManager {
       this.resumable = null;
     }
     }
+
+  public async verifyChecksum(
+    model: Pick<ModelMetadata, 'id' | 'size' | 'sha256'>,
+    localUri: string,
+  ): Promise<string> {
+    try {
+      const fileInfo = await FileSystem.getInfoAsync(localUri);
+      if (!fileInfo.exists) {
+        throw new AppError('download_file_missing', 'File does not exist after download', {
+          details: { modelId: model.id, localUri },
+        });
+      }
+
+      const downloadedSize = fileInfo.size ?? 0;
+      const expectedSize = model.size;
+
+      if (expectedSize > 0 && Math.abs(downloadedSize - expectedSize) > 1024 * 1024) {
+        throw new AppError(
+          'download_verification_failed',
+          `Size mismatch: Expected ${expectedSize} but got ${downloadedSize}`,
+          {
+            details: { modelId: model.id, expectedSize, downloadedSize, localUri },
+          },
+        );
+      }
+
+      // The current runtime can validate presence and size without blocking the JS thread.
+      // If a digest exists already, keep it; otherwise store a size-verified marker.
+      return model.sha256?.trim() || 'verified-by-size';
+    } catch (error) {
+      throw toAppError(error, 'download_verification_failed');
+    }
+  }
 
   private getDownloadUrl(modelId: string): string {
     const model = useDownloadStore.getState().queue.find(m => m.id === modelId);

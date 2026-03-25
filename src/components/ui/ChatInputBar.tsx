@@ -7,6 +7,8 @@ import { Pressable } from '@/components/ui/pressable';
 import { MaterialSymbols } from './MaterialSymbols';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { typographyColors } from '../../utils/themeTokens';
+import { useTranslation } from 'react-i18next';
+import { getReportedErrorMessage } from '../../services/AppError';
 
 interface ChatInputBarProps {
     onSendMessage: (content: string) => Promise<void> | void;
@@ -33,10 +35,11 @@ export const ChatInputBar = ({
 }: ChatInputBarProps) => {
     const [internalMessage, setInternalMessage] = useState('');
     const insets = useSafeAreaInsets();
+    const { t } = useTranslation();
     const isControlled = typeof draft === 'string';
     const message = isControlled ? draft : internalMessage;
     const canSend = !disabled && !isSending && message.trim().length > 0;
-    const placeholder = disabled ? 'Load a model to start chatting...' : 'Type a message...';
+    const placeholder = disabled ? t('chat.inputPlaceholderDisabled') : t('chat.inputPlaceholder');
 
     const setMessage = (value: string) => {
         if (isControlled) {
@@ -63,7 +66,10 @@ export const ChatInputBar = ({
 
             await handleSend();
         } catch (error: any) {
-            Alert.alert('Cannot send message', error.message || 'Action failed');
+            Alert.alert(
+                t('chat.sendErrorTitle'),
+                getReportedErrorMessage('ChatInputBar.handlePrimaryAction', error, t),
+            );
         }
     };
 
@@ -91,7 +97,7 @@ export const ChatInputBar = ({
                                 className="rounded-full border border-primary-500/20 bg-primary-500/10 px-3 py-1.5 active:opacity-70"
                             >
                                 <Text className="text-xs font-semibold uppercase tracking-wide text-primary-500">
-                                    Cancel
+                                    {t('common.cancel')}
                                 </Text>
                             </Pressable>
                         ) : null}

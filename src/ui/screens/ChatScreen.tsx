@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
     Alert,
     FlatList,
@@ -25,6 +25,7 @@ import { ChatMessage } from '../../types/chat';
 import { getChatHardwareBannerInputs, hardwareListenerService } from '../../services/HardwareListenerService';
 import { registry } from '../../services/LocalStorageRegistry';
 import { useChatStore } from '../../store/chatStore';
+import { getReportedErrorMessage } from '../../services/AppError';
 import {
     DEFAULT_MODEL_LOAD_PARAMETERS,
     getGenerationParametersForModel,
@@ -151,7 +152,7 @@ export const ChatScreen = () => {
         || isApplyingModelReload
     );
     const canApplyReload = Boolean(configurableModelId) && !isGenerating && !isApplyingModelReload;
-    const displayMessages = [...messages].reverse();
+    const displayMessages = useMemo(() => [...messages].reverse(), [messages]);
     const hasMessages = displayMessages.length > 0;
     const lastMessage = messages[messages.length - 1];
     const lastMessageSignature = lastMessage
@@ -178,6 +179,10 @@ export const ChatScreen = () => {
         : t('chat.thermalDescriptionElevated');
     const modelRecoveryActionLabel = hasActiveModel ? t('chat.openModels') : t('chat.downloadModel');
     const activePresetLabel = activeThread?.presetSnapshot.name ?? (settings.activePresetId ? resolvePresetSnapshot(settings.activePresetId).name : t('common.default'));
+
+    const showAlertForError = useCallback((titleKey: string, scope: string, error: unknown) => {
+        Alert.alert(t(titleKey), getReportedErrorMessage(scope, error, t));
+    }, [t]);
 
     const scrollToLatestMessage = useCallback((animated: boolean, preferIndex = true) => {
         if (preferIndex) {
@@ -279,7 +284,7 @@ export const ChatScreen = () => {
         scheduleScrollToLatestMessage(false, hasForcedFollowPass);
     };
 
-    const handleLastMessageLayout = (_event: LayoutChangeEvent) => {
+    const handleLastMessageLayout = useCallback((_event: LayoutChangeEvent) => {
         const hasForcedFollowPass = forcedFollowPassesRef.current > 0;
 
         if (!messages.length || (!shouldStickToBottomRef.current && !hasForcedFollowPass)) {
@@ -287,7 +292,7 @@ export const ChatScreen = () => {
         }
 
         scheduleScrollToLatestMessage(false, hasForcedFollowPass);
-    };
+    }, [messages.length, scheduleScrollToLatestMessage]);
 
     const resumeFollowingLatestMessage = () => {
         shouldStickToBottomRef.current = true;
@@ -327,24 +332,24 @@ export const ChatScreen = () => {
             resumeFollowingLatestMessage();
             router.push('/(tabs)/chat' as any);
         } catch (error: any) {
-            Alert.alert(t('chat.switchConversationErrorTitle'), error?.message || t('common.actionFailed'));
+            showAlertForError('chat.switchConversationErrorTitle', 'ChatScreen.handleSelectConversation', error);
         }
     };
 
-    const handleBeginRegenerateFromMessage = (message: ChatMessage) => {
+    const handleBeginRegenerateFromMessage = useCallback((message: ChatMessage) => {
         setPendingRegenerateMessage({
             messageId: message.id,
             originalContent: message.content,
         });
         setComposerDraft(message.content);
-    };
+    }, []);
 
-    const handleCancelComposerMode = () => {
+    const handleCancelComposerMode = useCallback(() => {
         setPendingRegenerateMessage(null);
         setComposerDraft('');
-    };
+    }, []);
 
-    const handleDeleteMessage = (message: ChatMessage) => {
+    const handleDeleteMessage = useCallback((message: ChatMessage) => {
         Alert.alert(
             t('chat.deleteMessageTitle'),
             message.role === 'user'
@@ -362,13 +367,13 @@ export const ChatScreen = () => {
                                 handleCancelComposerMode();
                             }
                         } catch (error: any) {
-                            Alert.alert(t('chat.deleteMessageErrorTitle'), error?.message || t('common.actionFailed'));
+                            showAlertForError('chat.deleteMessageErrorTitle', 'ChatScreen.handleDeleteMessage', error);
                         }
                     },
                 },
             ],
         );
-    };
+    }, [deleteMessage, pendingRegenerateMessage?.messageId, showAlertForError, t, handleCancelComposerMode]);
 
     useEffect(() => {
         return hardwareListenerService.subscribe((nextStatus) => {
@@ -383,6 +388,10 @@ export const ChatScreen = () => {
     }, []);
 
     useEffect(() => {
+        if (!isModelParametersOpen) {
+            return;
+        }
+
         let isCancelled = false;
 
         void llmEngineService.getRecommendedGpuLayers()
@@ -400,7 +409,7 @@ export const ChatScreen = () => {
         return () => {
             isCancelled = true;
         };
-    }, []);
+    }, [isModelParametersOpen]);
 
     useEffect(() => {
         if (!isModelParametersOpen) {
@@ -466,7 +475,7 @@ export const ChatScreen = () => {
                 await llmEngineService.load(configurableModelId, { forceReload: true });
             }
         } catch (error: any) {
-            Alert.alert(t('chat.applyModelSettingsErrorTitle'), error?.message || t('common.actionFailed'));
+            showAlertForError('chat.applyModelSettingsErrorTitle', 'ChatScreen.handleApplyLoadParams', error);
         } finally {
             setApplyingModelReload(false);
         }
@@ -491,6 +500,30 @@ export const ChatScreen = () => {
         scheduleScrollToLatestMessage(false, true);
         scheduleForcedScrollBurst();
     }, [listResetNonce, scheduleForcedScrollBurst, scheduleScrollToLatestMessage, scrollToLatestMessage]);
+
+    const renderChatMessage = useCallback(({ item: msg, index }: { item: ChatMessage; index: number }) => (
+        <ChatMessageBubble
+            id={msg.id}
+            isUser={msg.role === 'user'}
+            content={msg.content}
+            isStreaming={msg.state === 'streaming'}
+            tokensPerSec={msg.tokensPerSec}
+            canDelete={msg.state !== 'streaming'}
+            canRegenerate={
+                msg.role === 'user'
+                && msg.state === 'complete'
+                && !isGenerating
+                && !isInputDisabled
+            }
+            onDelete={() => {
+                handleDeleteMessage(msg);
+            }}
+            onRegenerate={() => {
+                handleBeginRegenerateFromMessage(msg);
+            }}
+            onLayout={index === 0 ? handleLastMessageLayout : undefined}
+        />
+    ), [handleBeginRegenerateFromMessage, handleDeleteMessage, handleLastMessageLayout, isGenerating, isInputDisabled]);
 
     return (
         <Box className="flex-1 bg-background-0 dark:bg-background-950 max-w-2xl w-full mx-auto border-x border-primary-500/10">
@@ -621,29 +654,8 @@ export const ChatScreen = () => {
                             }}
                             ItemSeparatorComponent={() => <Box className="h-6" />}
                             keyExtractor={(item) => item.id}
-                            renderItem={({ item: msg, index }) => (
-                                <ChatMessageBubble
-                                    id={msg.id}
-                                    isUser={msg.role === 'user'}
-                                    content={msg.content}
-                                    isStreaming={msg.state === 'streaming'}
-                                    tokensPerSec={msg.tokensPerSec}
-                                    canDelete={msg.state !== 'streaming'}
-                                    canRegenerate={
-                                        msg.role === 'user'
-                                        && msg.state === 'complete'
-                                        && !isGenerating
-                                        && !isInputDisabled
-                                    }
-                                    onDelete={() => {
-                                        handleDeleteMessage(msg);
-                                    }}
-                                    onRegenerate={() => {
-                                        handleBeginRegenerateFromMessage(msg);
-                                    }}
-                                    onLayout={index === 0 ? handleLastMessageLayout : undefined}
-                                />
-                            )}
+                            renderItem={renderChatMessage}
+                            initialNumToRender={12}
                         />
                     ) : (
                         <Box className="flex-1 items-center justify-center px-6">
@@ -688,7 +700,7 @@ export const ChatScreen = () => {
                         handleCancelComposerMode();
                         resumeFollowingLatestMessage();
                     } catch (error: any) {
-                        Alert.alert(t('conversations.startNewChatErrorTitle'), error?.message || t('common.actionFailed'));
+                        showAlertForError('conversations.startNewChatErrorTitle', 'ChatScreen.startNewChat', error);
                     }
                 }}
                 onManageConversations={() => {

@@ -3,7 +3,6 @@ import { hardwareListenerService } from '../../src/services/HardwareListenerServ
 import { registry } from '../../src/services/LocalStorageRegistry';
 import DeviceInfo from 'react-native-device-info';
 import { initLlama, releaseAllLlama } from 'llama.rn';
-import RNFS from 'react-native-fs';
 
 jest.mock('../../src/services/LocalStorageRegistry', () => ({
     registry: {
@@ -53,6 +52,8 @@ describe('LLMEngineService Stability', () => {
 
     beforeEach(() => {
         jest.clearAllMocks();
+        (initLlama as jest.Mock).mockReset();
+        (releaseAllLlama as jest.Mock).mockResolvedValue(undefined);
         (registry.getModel as jest.Mock).mockReturnValue({
             id: mockModel.id,
             localPath: 'model.gguf',
@@ -60,10 +61,17 @@ describe('LLMEngineService Stability', () => {
         });
         (registry.getModels as jest.Mock).mockReturnValue([]);
         // Reset singleton state
-        // @ts-ignore
-        llmEngineService.state = 'uninitialized';
-        // @ts-ignore
-        llmEngineService.context = null;
+        (llmEngineService as any).state = {
+            status: 'idle',
+            loadProgress: 0,
+        };
+        (llmEngineService as any).context = null;
+        (llmEngineService as any).initPromise = null;
+        (llmEngineService as any).operationQueue = Promise.resolve();
+        (llmEngineService as any).activeCompletionPromise = null;
+        (llmEngineService as any).isUnloading = false;
+        (llmEngineService as any).activeContextSize = 2048;
+        (llmEngineService as any).activeGpuLayers = null;
         hardwareListenerService.resetLowMemoryFlag();
     });
 
@@ -129,5 +137,64 @@ describe('LLMEngineService Stability', () => {
         
         // Ensure flag is reset after unload
         expect(hardwareListenerService.getCurrentStatus().isLowMemory).toBe(false);
+    });
+
+    it('serializes concurrent load requests and leaves the newest model active', async () => {
+        (registry.getModel as jest.Mock).mockImplementation((modelId: string) => ({
+            id: modelId,
+            localPath: `${modelId.replace('/', '_')}.gguf`,
+            lifecycleStatus: 'downloaded',
+        }));
+
+        let resolveFirstLoad: (() => void) | undefined;
+        (initLlama as jest.Mock)
+            .mockImplementationOnce(() => new Promise((resolve) => {
+                resolveFirstLoad = () => resolve({});
+            }))
+            .mockResolvedValueOnce({});
+
+        const firstLoad = llmEngineService.load('repo/model-a');
+        const secondLoad = llmEngineService.load('repo/model-b');
+
+        while ((initLlama as jest.Mock).mock.calls.length === 0) {
+            await Promise.resolve();
+        }
+        resolveFirstLoad?.();
+        await Promise.all([firstLoad, secondLoad]);
+
+        expect(initLlama).toHaveBeenCalledTimes(2);
+        expect(releaseAllLlama).toHaveBeenCalledTimes(1);
+        expect(llmEngineService.getState()).toEqual(
+            expect.objectContaining({
+                status: 'ready',
+                activeModelId: 'repo/model-b',
+            }),
+        );
+    });
+
+    it('stops an in-flight completion before unloading the model', async () => {
+        let resolveCompletion: ((value: { text: string }) => void) | undefined;
+        const stopCompletion = jest.fn().mockImplementation(async () => {
+            resolveCompletion?.({ text: 'Stopped during unload' });
+        });
+
+        (initLlama as jest.Mock).mockResolvedValue({
+            completion: jest.fn(() => new Promise((resolve) => {
+                resolveCompletion = resolve;
+            })),
+            stopCompletion,
+        });
+
+        await llmEngineService.load(mockModel.id);
+        const completionPromise = llmEngineService.chatCompletion({
+            messages: [{ role: 'user', content: 'Hello' }],
+            params: { n_predict: 16 },
+        });
+
+        await llmEngineService.unload();
+
+        await expect(completionPromise).resolves.toEqual({ text: 'Stopped during unload' });
+        expect(stopCompletion).toHaveBeenCalled();
+        expect(llmEngineService.getState().status).toBe('idle');
     });
 });

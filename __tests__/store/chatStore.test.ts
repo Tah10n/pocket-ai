@@ -1,5 +1,6 @@
 import { ChatThread } from '../../src/types/chat';
-import { useChatStore } from '../../src/store/chatStore';
+import { getThreadInferenceWindow, useChatStore } from '../../src/store/chatStore';
+import { storage } from '../../src/store/storage';
 
 function buildThread(id: string, updatedAt: number): ChatThread {
   return {
@@ -35,6 +36,7 @@ function buildThread(id: string, updatedAt: number): ChatThread {
 describe('chatStore', () => {
   beforeEach(() => {
     useChatStore.setState({ threads: {}, activeThreadId: null });
+    storage.remove('chat-store');
   });
 
   it('creates a thread and conversation index entry', () => {
@@ -511,6 +513,121 @@ describe('chatStore', () => {
     expect(useChatStore.getState().getThread(staleThread.id)).toBeNull();
     expect(useChatStore.getState().getThread(activeOldThread.id)).toEqual(activeOldThread);
     expect(useChatStore.getState().getThread(recentThread.id)).toEqual(recentThread);
+  });
+
+  it('persists and rehydrates a saved thread', async () => {
+    const threadId = useChatStore.getState().createThread({
+      modelId: 'author/model-q4',
+      presetId: 'preset-1',
+      presetSnapshot: {
+        id: 'preset-1',
+        name: 'Helpful Assistant',
+        systemPrompt: 'Be concise.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 1024,
+      },
+    });
+
+    useChatStore.getState().appendMessage(threadId, {
+      id: 'user-1',
+      role: 'user',
+      content: 'Persist this thread',
+      createdAt: 1,
+      state: 'complete',
+    });
+
+    const persistedSnapshot = storage.getString('chat-store');
+    expect(persistedSnapshot).toContain('Persist this thread');
+
+    useChatStore.setState({ threads: {}, activeThreadId: null });
+    storage.set('chat-store', persistedSnapshot ?? '');
+    await useChatStore.persist.rehydrate();
+
+    expect(useChatStore.getState().activeThreadId).toBe(threadId);
+    expect(useChatStore.getState().getThread(threadId)).toEqual(
+      expect.objectContaining({
+        id: threadId,
+        messages: [
+          expect.objectContaining({
+            id: 'user-1',
+            content: 'Persist this thread',
+          }),
+        ],
+      }),
+    );
+  });
+
+  it('keeps only the newest coherent turn when the response reserve squeezes prompt history', () => {
+    const longMessage = 'A'.repeat(120);
+    const thread: ChatThread = {
+      id: 'thread-budget',
+      title: 'Budget thread',
+      modelId: 'author/model-q4',
+      presetId: 'preset-1',
+      presetSnapshot: {
+        id: 'preset-1',
+        name: 'Helpful Assistant',
+        systemPrompt: 'Be concise.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        topK: 40,
+        minP: 0.05,
+        repetitionPenalty: 1,
+        maxTokens: 70,
+      },
+      messages: [
+        {
+          id: 'message-1',
+          role: 'user',
+          content: `${longMessage}-1`,
+          createdAt: 1,
+          state: 'complete',
+        },
+        {
+          id: 'message-2',
+          role: 'assistant',
+          content: `${longMessage}-2`,
+          createdAt: 2,
+          state: 'complete',
+        },
+        {
+          id: 'message-3',
+          role: 'user',
+          content: `${longMessage}-3`,
+          createdAt: 3,
+          state: 'complete',
+        },
+        {
+          id: 'message-4',
+          role: 'assistant',
+          content: `${longMessage}-4`,
+          createdAt: 4,
+          state: 'complete',
+        },
+      ],
+      createdAt: 1,
+      updatedAt: 4,
+      status: 'idle',
+    };
+
+    const { messages, truncatedMessageIds } = getThreadInferenceWindow(thread, {
+      maxContextMessages: 24,
+      maxContextTokens: 150,
+      responseReserveTokens: 70,
+      promptSafetyMarginTokens: 24,
+    });
+
+    expect(messages).toEqual([
+      { role: 'system', content: 'Be concise.' },
+      { role: 'user', content: `${longMessage}-3` },
+      { role: 'assistant', content: `${longMessage}-4` },
+    ]);
+    expect(truncatedMessageIds).toEqual(['message-1', 'message-2']);
   });
 });
 

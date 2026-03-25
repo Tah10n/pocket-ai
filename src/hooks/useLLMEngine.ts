@@ -12,19 +12,11 @@ export function useLLMEngine() {
   }, []);
 
   const loadModel = useCallback(async (modelId: string) => {
-    try {
-      await llmEngineService.load(modelId);
-    } catch (e) {
-      console.error('[useLLMEngine] Failed to load model', e);
-    }
+    await llmEngineService.load(modelId);
   }, []);
 
   const unloadModel = useCallback(async () => {
-    try {
-      await llmEngineService.unload();
-    } catch (e) {
-      console.error('[useLLMEngine] Failed to unload model', e);
-    }
+    await llmEngineService.unload();
   }, []);
 
   return {

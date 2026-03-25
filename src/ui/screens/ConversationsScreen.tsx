@@ -1,4 +1,4 @@
-import React, { useDeferredValue, useEffect, useState } from 'react';
+import React, { useCallback, useDeferredValue, useEffect, useMemo, useState } from 'react';
 import { Alert } from 'react-native';
 import { useRouter } from 'expo-router';
 import { FlashList, ListRenderItem } from '@shopify/flash-list';
@@ -19,6 +19,7 @@ import {
 import { getSettings, subscribeSettings, updateSettings } from '../../services/SettingsStore';
 import { useChatStore } from '../../store/chatStore';
 import { typographyColors } from '../../utils/themeTokens';
+import { getReportedErrorMessage } from '../../services/AppError';
 
 const CHAT_RETENTION_OPTIONS = [
   {
@@ -74,9 +75,11 @@ export function ConversationsScreen() {
   const [editingTitle, setEditingTitle] = useState('');
   const [chatRetentionDays, setChatRetentionDays] = useState<number | null>(() => getSettings().chatRetentionDays);
 
-  const filteredConversations = conversationIndex.filter((conversation) =>
-    matchesConversationSearch(conversation, deferredSearchQuery),
-  );
+  const filteredConversations = useMemo(() => (
+    conversationIndex.filter((conversation) =>
+      matchesConversationSearch(conversation, deferredSearchQuery),
+    )
+  ), [conversationIndex, deferredSearchQuery]);
 
   useEffect(() => {
     return subscribeSettings((settings) => {
@@ -84,21 +87,24 @@ export function ConversationsScreen() {
     });
   }, []);
 
-  const resetRenameState = () => {
+  const resetRenameState = useCallback(() => {
     setEditingThreadId(null);
     setEditingTitle('');
-  };
+  }, []);
 
-  const handleOpenConversation = (threadId: string) => {
+  const handleOpenConversation = useCallback((threadId: string) => {
     try {
       openThread(threadId);
       router.push('/(tabs)/chat' as any);
     } catch (error: any) {
-      Alert.alert(t('conversations.openErrorTitle'), error?.message || t('common.actionFailed'));
+      Alert.alert(
+        t('conversations.openErrorTitle'),
+        getReportedErrorMessage('ConversationsScreen.handleOpenConversation', error, t),
+      );
     }
-  };
+  }, [openThread, router, t]);
 
-  const handleDeleteConversation = (conversation: ConversationIndexItem) => {
+  const handleDeleteConversation = useCallback((conversation: ConversationIndexItem) => {
     Alert.alert(
       t('conversations.deleteTitle'),
       t('conversations.deleteMessage', { title: conversation.title }),
@@ -114,15 +120,18 @@ export function ConversationsScreen() {
                 resetRenameState();
               }
             } catch (error: any) {
-              Alert.alert(t('conversations.deleteErrorTitle'), error?.message || t('common.actionFailed'));
+              Alert.alert(
+                t('conversations.deleteErrorTitle'),
+                getReportedErrorMessage('ConversationsScreen.handleDeleteConversation', error, t),
+              );
             }
           },
         },
       ],
     );
-  };
+  }, [deleteThread, editingThreadId, resetRenameState, t]);
 
-  const handleSaveRename = () => {
+  const handleSaveRename = useCallback(() => {
     if (!editingThreadId) {
       return;
     }
@@ -137,9 +146,12 @@ export function ConversationsScreen() {
       renameThread(editingThreadId, normalizedTitle);
       resetRenameState();
     } catch (error: any) {
-      Alert.alert(t('conversations.renameErrorTitle'), error?.message || t('common.actionFailed'));
+      Alert.alert(
+        t('conversations.renameErrorTitle'),
+        getReportedErrorMessage('ConversationsScreen.handleSaveRename', error, t),
+      );
     }
-  };
+  }, [editingThreadId, editingTitle, renameThread, resetRenameState, t]);
 
   const applyChatRetention = (days: number | null) => {
     updateSettings({ chatRetentionDays: days });
@@ -179,7 +191,7 @@ export function ConversationsScreen() {
     );
   };
 
-  const renderItem: ListRenderItem<ConversationIndexItem> = ({ item }) => {
+  const renderItem = useCallback<ListRenderItem<ConversationIndexItem>>(({ item }) => {
     const isActive = activeThread?.id === item.id;
     const isEditing = editingThreadId === item.id;
 
@@ -298,7 +310,7 @@ export function ConversationsScreen() {
         ) : null}
       </Box>
     );
-  };
+  }, [activeThread?.id, editingThreadId, editingTitle, handleDeleteConversation, handleOpenConversation, handleSaveRename, resetRenameState, t]);
 
   return (
     <Box className="flex-1 bg-background-0 dark:bg-background-950">
@@ -338,7 +350,10 @@ export function ConversationsScreen() {
                 startNewChat();
                 router.push('/(tabs)/chat' as any);
               } catch (error: any) {
-                Alert.alert(t('conversations.startNewChatErrorTitle'), error?.message || t('common.actionFailed'));
+                Alert.alert(
+                  t('conversations.startNewChatErrorTitle'),
+                  getReportedErrorMessage('ConversationsScreen.startNewChat', error, t),
+                );
               }
             }}
             className="rounded-full border border-primary-500/20 bg-primary-500 px-4 py-3 active:opacity-80"
@@ -432,6 +447,7 @@ export function ConversationsScreen() {
           keyboardShouldPersistTaps="handled"
           contentContainerStyle={{ padding: 16, paddingBottom: insets.bottom + 32 }}
           ItemSeparatorComponent={() => <Box className="h-4" />}
+          estimatedItemSize={172}
         />
       ) : (
         <Box className="flex-1 px-4 pb-6" style={{ paddingTop: 24 + insets.top / 4 }}>

@@ -13,13 +13,20 @@ import {
   createChatId,
   toConversationIndexItem,
 } from '../types/chat';
-import { getThreadInferenceWindow, useChatStore } from '../store/chatStore';
+import {
+  DEFAULT_INFERENCE_PROMPT_SAFETY_MARGIN_TOKENS,
+  estimateLlmMessagesTokens,
+  getThreadInferenceWindow,
+  type ThreadInferenceWindowOptions,
+  useChatStore,
+} from '../store/chatStore';
 
 export const MAX_CONTEXT_MESSAGES = 24;
 export const SUMMARY_PLACEHOLDER_CONTENT =
   'Summary generation is not available yet. Older messages stay visible in the thread, but only the most recent context is sent to the model right now.';
 export const SUMMARY_AFFORDANCE_MIN_TRUNCATED_MESSAGES = 1;
 const DEFAULT_CONTEXT_SIZE = 2048;
+const STREAM_PATCH_INTERVAL_MS = 32;
 
 interface ActiveGenerationState {
   threadId: string;
@@ -63,12 +70,31 @@ export function resolvePresetSnapshot(presetId: string | null): PresetSnapshot {
   };
 }
 
-export function buildInferenceMessagesForThread(thread: ChatThread) {
-  return getThreadInferenceWindow(thread, MAX_CONTEXT_MESSAGES).messages;
+interface InferenceBudgetOptions {
+  maxContextMessages?: number;
+  maxContextTokens?: number;
+  responseReserveTokens?: number;
+  promptSafetyMarginTokens?: number;
 }
 
-export function getThreadTruncationState(thread: ChatThread) {
-  const { truncatedMessageIds } = getThreadInferenceWindow(thread, MAX_CONTEXT_MESSAGES);
+function resolveInferenceOptions(
+  thread: ChatThread,
+  options?: InferenceBudgetOptions,
+): ThreadInferenceWindowOptions {
+  return {
+    maxContextMessages: options?.maxContextMessages ?? MAX_CONTEXT_MESSAGES,
+    maxContextTokens: options?.maxContextTokens,
+    responseReserveTokens: options?.responseReserveTokens ?? thread.paramsSnapshot.maxTokens,
+    promptSafetyMarginTokens: options?.promptSafetyMarginTokens,
+  };
+}
+
+export function buildInferenceMessagesForThread(thread: ChatThread, options?: InferenceBudgetOptions) {
+  return getThreadInferenceWindow(thread, resolveInferenceOptions(thread, options)).messages;
+}
+
+export function getThreadTruncationState(thread: ChatThread, options?: InferenceBudgetOptions) {
+  const { truncatedMessageIds } = getThreadInferenceWindow(thread, resolveInferenceOptions(thread, options));
 
   return {
     truncatedMessageIds,
@@ -142,14 +168,50 @@ export const useChatSession = () => {
     let currentText = '';
     let tokensCount = 0;
     const startTime = Date.now();
+    let flushTimeout: ReturnType<typeof setTimeout> | null = null;
 
     const maxContextSize =
       typeof llmEngineService.getContextSize === 'function'
         ? llmEngineService.getContextSize()
         : DEFAULT_CONTEXT_SIZE;
 
+    const flushAssistantPatch = () => {
+      if (flushTimeout) {
+        clearTimeout(flushTimeout);
+        flushTimeout = null;
+      }
+
+      const elapsedSec = (Date.now() - startTime) / 1000;
+      const tokensPerSec = elapsedSec > 0 ? tokensCount / elapsedSec : 0;
+
+      patchAssistantMessage(threadId, assistantMessageId, {
+        content: currentText,
+        tokensPerSec,
+        state: 'streaming',
+      });
+    };
+
+    const scheduleAssistantPatch = () => {
+      if (flushTimeout) {
+        return;
+      }
+
+      flushTimeout = setTimeout(() => {
+        flushTimeout = null;
+        flushAssistantPatch();
+      }, STREAM_PATCH_INTERVAL_MS);
+    };
+
     try {
-      const messages = buildInferenceMessagesForThread(thread);
+      const messages = buildInferenceMessagesForThread(thread, {
+        maxContextTokens: maxContextSize,
+        responseReserveTokens: thread.paramsSnapshot.maxTokens,
+      });
+      const estimatedPromptTokens = estimateLlmMessagesTokens(messages);
+      const maxPredictTokens = Math.max(
+        1,
+        maxContextSize - estimatedPromptTokens - DEFAULT_INFERENCE_PROMPT_SAFETY_MARGIN_TOKENS,
+      );
 
       await llmEngineService.chatCompletion({
         messages,
@@ -159,32 +221,28 @@ export const useChatSession = () => {
           top_k: thread.paramsSnapshot.topK,
           min_p: thread.paramsSnapshot.minP,
           penalty_repeat: thread.paramsSnapshot.repetitionPenalty,
-          n_predict: Math.min(thread.paramsSnapshot.maxTokens, maxContextSize),
+          n_predict: Math.min(thread.paramsSnapshot.maxTokens, maxPredictTokens),
         },
         onToken: (token) => {
           currentText += token;
           tokensCount += 1;
-          const elapsedSec = (Date.now() - startTime) / 1000;
-          const tokensPerSec = elapsedSec > 0 ? tokensCount / elapsedSec : 0;
-
-          patchAssistantMessage(threadId, assistantMessageId, {
-            content: currentText,
-            tokensPerSec,
-            state: 'streaming',
-          });
+          scheduleAssistantPatch();
         },
       });
 
       if (isMatchingGeneration(threadId, assistantMessageId) && sharedGenerationState.current?.stopRequested) {
+        flushAssistantPatch();
         stopAssistantMessage(threadId, assistantMessageId);
         finalizeThreadStatus(threadId, 'stopped');
         return;
       }
 
+      flushAssistantPatch();
       finalizeAssistantMessage(threadId, assistantMessageId, currentText);
       finalizeThreadStatus(threadId, 'idle');
     } catch (error) {
       if (isMatchingGeneration(threadId, assistantMessageId) && sharedGenerationState.current?.stopRequested) {
+        flushAssistantPatch();
         stopAssistantMessage(threadId, assistantMessageId);
         finalizeThreadStatus(threadId, 'stopped');
         return;
@@ -193,6 +251,7 @@ export const useChatSession = () => {
       const message =
         error instanceof Error ? error.message : 'Unknown chat generation error';
 
+      flushAssistantPatch();
       patchAssistantMessage(threadId, assistantMessageId, {
         content:
           currentText + (currentText.length > 0 ? '\n\n' : '') + `[Error: ${message}]`,
@@ -202,6 +261,10 @@ export const useChatSession = () => {
       finalizeThreadStatus(threadId, 'error');
       throw error;
     } finally {
+      if (flushTimeout) {
+        clearTimeout(flushTimeout);
+      }
+
       if (isMatchingGeneration(threadId, assistantMessageId)) {
         sharedGenerationState.current = null;
       }
@@ -437,8 +500,18 @@ export const useChatSession = () => {
     return deleted;
   }, [activeThread, deleteMessageBranch]);
 
+  const activeContextTokenBudget =
+    activeThread &&
+    llmEngineService.getState().status === EngineStatus.READY &&
+    llmEngineService.getState().activeModelId === activeThread.modelId
+      ? llmEngineService.getContextSize()
+      : undefined;
+
   const truncationState = activeThread
-    ? getThreadTruncationState(activeThread)
+    ? getThreadTruncationState(activeThread, {
+        maxContextTokens: activeContextTokenBudget,
+        responseReserveTokens: activeThread.paramsSnapshot.maxTokens,
+      })
     : { truncatedMessageIds: [], shouldOfferSummary: false };
 
   return {

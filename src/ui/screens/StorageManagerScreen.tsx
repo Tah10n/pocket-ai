@@ -15,6 +15,7 @@ import {
     resetAppSettings,
     type AppStorageMetrics,
 } from '../../services/StorageManagerService';
+import { getReportedErrorMessage } from '../../services/AppError';
 
 const styles = StyleSheet.create({
     screen: { flex: 1, width: '100%', maxWidth: 768, alignSelf: 'center' },
@@ -145,7 +146,10 @@ export function StorageManagerScreen() {
             setBusyAction(key);
             await action();
         } catch (error: any) {
-            Alert.alert(t('storageManager.actionFailedTitle'), error?.message || t('common.actionFailed'));
+            Alert.alert(
+                t('storageManager.actionFailedTitle'),
+                getReportedErrorMessage('StorageManagerScreen.runBusyAction', error, t),
+            );
         } finally {
             if (mountedRef.current) {
                 setBusyAction(null);

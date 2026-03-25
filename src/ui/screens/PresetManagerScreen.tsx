@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Alert, Modal } from 'react-native';
 import { FlashList } from '@shopify/flash-list';
 import { Box } from '@/components/ui/box';
@@ -12,6 +12,7 @@ import { useTranslation } from 'react-i18next';
 import { presetManager, SystemPromptPreset } from '../../services/PresetManager';
 import { getSettings, subscribeSettings, updateSettings } from '../../services/SettingsStore';
 import { typographyColors } from '../../utils/themeTokens';
+import { getReportedErrorMessage } from '../../services/AppError';
 
 interface EditorState {
     preset: SystemPromptPreset | null;
@@ -48,23 +49,23 @@ export function PresetManagerScreen() {
         [activePresetId, presets, t],
     );
 
-    const openCreatePreset = () => {
+    const openCreatePreset = useCallback(() => {
         setDraftName('');
         setDraftPrompt('');
         setEditorState({ preset: null, visible: true });
-    };
+    }, []);
 
-    const openEditPreset = (preset: SystemPromptPreset) => {
+    const openEditPreset = useCallback((preset: SystemPromptPreset) => {
         setDraftName(preset.name);
         setDraftPrompt(preset.systemPrompt);
         setEditorState({ preset, visible: true });
-    };
+    }, []);
 
-    const closeEditor = () => {
+    const closeEditor = useCallback(() => {
         setEditorState({ preset: null, visible: false });
         setDraftName('');
         setDraftPrompt('');
-    };
+    }, []);
 
     const handleSaveAndActivate = () => {
         const trimmedName = draftName.trim();
@@ -93,7 +94,10 @@ export function PresetManagerScreen() {
             loadPresets();
             closeEditor();
         } catch (e: any) {
-            Alert.alert(t('presets.validationErrorTitle'), e.message);
+            Alert.alert(
+                t('presets.validationErrorTitle'),
+                getReportedErrorMessage('PresetManagerScreen.handleSaveAndActivate', e, t),
+            );
         }
     };
 
@@ -120,7 +124,7 @@ export function PresetManagerScreen() {
         ]);
     };
 
-    const renderItem = ({ item }: { item: SystemPromptPreset }) => {
+    const renderItem = useCallback(({ item }: { item: SystemPromptPreset }) => {
         const isActive = item.id === activePresetId;
 
         return (
@@ -155,7 +159,7 @@ export function PresetManagerScreen() {
                 </Box>
             </Pressable>
         );
-    };
+    }, [activePresetId, openEditPreset, t]);
 
     return (
         <Box className="flex-1 bg-background-0 dark:bg-background-950">
@@ -185,6 +189,7 @@ export function PresetManagerScreen() {
                     data={presets}
                     keyExtractor={(item) => item.id}
                     renderItem={renderItem}
+                    estimatedItemSize={104}
                 />
             </Box>
 

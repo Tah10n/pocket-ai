@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Alert } from 'react-native';
-import { FlashList } from '@shopify/flash-list';
+import { FlashList, ListRenderItem } from '@shopify/flash-list';
 import { useRouter } from 'expo-router';
 import { Box } from '@/components/ui/box';
 import { Button, ButtonText } from '@/components/ui/button';
@@ -24,6 +24,7 @@ import { EngineStatus, LifecycleStatus, type ModelMetadata } from '@/types/model
 import { ModelsFilter } from './ModelsFilter';
 import { ModelsSort } from './ModelsSort';
 import { useTranslation } from 'react-i18next';
+import { getReportedErrorMessage } from '@/services/AppError';
 
 interface ModelsListProps {
   activeTab: 'All Models' | 'Downloaded';
@@ -229,6 +230,10 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
     return sortModels(filtered, sort);
   }, [activeTab, displayModels, filters, sort]);
 
+  const showModelActionError = useCallback((scope: string, error: unknown) => {
+    Alert.alert(t('models.actionFailedTitle'), getReportedErrorMessage(scope, error, t));
+  }, [t]);
+
   const handleDownload = useCallback((model: ModelMetadata) => {
     const status = hardwareListenerService.getCurrentStatus();
     if (status.networkType === 'cellular') {
@@ -246,6 +251,15 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
     startDownload(model);
   }, [startDownload, t]);
 
+  const performLoad = useCallback(async (modelId: string) => {
+    try {
+      await loadModel(modelId);
+      refreshDownloadedModels();
+    } catch (error) {
+      showModelActionError('ModelsList.performLoad', error);
+    }
+  }, [loadModel, refreshDownloadedModels, showModelActionError]);
+
   const handleLoad = useCallback(async (modelId: string) => {
     const model = models.find((item) => item.id === modelId);
     if (model && model.fitsInRam === false) {
@@ -257,8 +271,7 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
           {
             text: t('models.loadAnyway'),
             onPress: async () => {
-              await loadModel(modelId);
-              refreshDownloadedModels();
+              await performLoad(modelId);
             },
           },
         ],
@@ -266,14 +279,17 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
       return;
     }
 
-    await loadModel(modelId);
-    refreshDownloadedModels();
-  }, [loadModel, models, refreshDownloadedModels, t]);
+    await performLoad(modelId);
+  }, [models, performLoad, t]);
 
   const handleUnload = useCallback(async () => {
-    await unloadModel();
-    refreshDownloadedModels();
-  }, [refreshDownloadedModels, unloadModel]);
+    try {
+      await unloadModel();
+      refreshDownloadedModels();
+    } catch (error) {
+      showModelActionError('ModelsList.handleUnload', error);
+    }
+  }, [refreshDownloadedModels, showModelActionError, unloadModel]);
 
   const handleDelete = useCallback((modelId: string) => {
     Alert.alert(
@@ -285,21 +301,25 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
           text: t('common.delete'),
           style: 'destructive',
           onPress: async () => {
-            if (engineState.activeModelId === modelId) {
-              await unloadModel();
-            }
-            await registry.removeModel(modelId);
-            if (activeTab === 'All Models') {
-              resetPagination();
-              await fetchModels(searchQuery, 0, false);
-            } else {
-              refreshDownloadedModels();
+            try {
+              if (engineState.activeModelId === modelId) {
+                await unloadModel();
+              }
+              await registry.removeModel(modelId);
+              if (activeTab === 'All Models') {
+                resetPagination();
+                await fetchModels(searchQuery, 0, false);
+              } else {
+                refreshDownloadedModels();
+              }
+            } catch (error) {
+              showModelActionError('ModelsList.handleDelete', error);
             }
           },
         },
       ],
     );
-  }, [activeTab, engineState.activeModelId, fetchModels, refreshDownloadedModels, resetPagination, searchQuery, t, unloadModel]);
+  }, [activeTab, engineState.activeModelId, fetchModels, refreshDownloadedModels, resetPagination, searchQuery, showModelActionError, t, unloadModel]);
 
   const handleLoadMore = useCallback(() => {
     if (!hasMore || isFetchingMore || activeTab !== 'All Models') {
@@ -312,7 +332,7 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
   const hasFilters =
     filters.fitsInRamOnly || filters.statuses.length > 0 || filters.sizeRanges.length > 0;
 
-  const emptyState = (
+  const emptyState = useMemo(() => (
     <Box className="flex-1 items-center justify-center px-6 pt-20">
       <Text className="text-center text-base font-semibold text-typography-700 dark:text-typography-200">
         {t('models.noResults', 'No models found')}
@@ -328,9 +348,9 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
         </Button>
       ) : null}
     </Box>
-  );
+  ), [clearFilters, hasFilters, t]);
 
-  const footer = activeTab === 'All Models' ? (
+  const footer = useMemo(() => (activeTab === 'All Models' ? (
     <Box className="pb-6 pt-2">
       {loadMoreError ? (
         <Box className="mb-3 rounded-xl border border-error-300 bg-background-error px-4 py-3 dark:border-error-800">
@@ -339,7 +359,7 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
       ) : null}
 
       {hasMore ? (
-          <Button action="secondary" size="md" onPress={handleLoadMore} disabled={isFetchingMore}>
+        <Button action="secondary" size="md" onPress={handleLoadMore} disabled={isFetchingMore}>
           <ButtonText className="text-typography-900 dark:text-typography-100">
             {isFetchingMore ? t('common.loading') : t('common.more')}
           </ButtonText>
@@ -350,7 +370,23 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
         </Text>
       ) : null}
     </Box>
-  ) : null;
+  ) : null), [activeTab, filteredModels.length, handleLoadMore, hasMore, isFetchingMore, loadMoreError, t]);
+
+  const renderModelItem = useCallback<ListRenderItem<ModelMetadata>>(({ item }) => (
+    <ModelCard
+      model={item}
+      onDownload={handleDownload}
+      onLoad={handleLoad}
+      onUnload={handleUnload}
+      onDelete={handleDelete}
+      onCancel={cancelDownload}
+      onChat={() => router.push('/chat')}
+      isActive={engineState.activeModelId === item.id}
+    />
+  ), [cancelDownload, engineState.activeModelId, handleDelete, handleDownload, handleLoad, handleUnload, router]);
+
+  const renderEmptyState = useCallback(() => emptyState, [emptyState]);
+  const renderFooter = useCallback(() => footer, [footer]);
 
   return (
     <>
@@ -380,20 +416,10 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
           <FlashList
             data={filteredModels}
             keyExtractor={(item) => item.id}
-            renderItem={({ item }) => (
-              <ModelCard
-                model={item}
-                onDownload={handleDownload}
-                onLoad={handleLoad}
-                onUnload={handleUnload}
-                onDelete={handleDelete}
-                onCancel={cancelDownload}
-                onChat={() => router.push('/chat')}
-                isActive={engineState.activeModelId === item.id}
-              />
-            )}
-            ListEmptyComponent={() => emptyState}
-            ListFooterComponent={() => footer}
+            renderItem={renderModelItem}
+            ListEmptyComponent={renderEmptyState}
+            ListFooterComponent={renderFooter}
+            estimatedItemSize={184}
           />
         )}
       </Box>

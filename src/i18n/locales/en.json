@@ -22,7 +22,19 @@
     "more": "More",
     "search": "Search",
     "default": "Default",
-    "actionFailed": "Action failed"
+    "actionFailed": "Action failed",
+    "errors": {
+      "engineNotReady": "Load a local model before continuing.",
+      "engineBusy": "Finish or stop the current operation before starting another one.",
+      "engineUnloading": "The current model is unloading. Wait a moment and try again.",
+      "modelNotFound": "The selected model is no longer available on this device.",
+      "modelLoadFailed": "The model could not be loaded. Try again or choose a different profile.",
+      "downloadDiskSpaceLow": "There is not enough free storage to finish this download.",
+      "downloadHttpError": "The download failed because the remote server returned an error.",
+      "downloadVerificationFailed": "The downloaded file could not be verified. Try downloading it again.",
+      "downloadFileMissing": "The downloaded file could not be found on disk.",
+      "messageEmpty": "Type a message before sending."
+    }
   },
   "home": {
     "newChat": "New Chat",
@@ -38,7 +50,9 @@
   "chat": {
     "title": "Chat",
     "inputPlaceholder": "Ask local AI...",
+    "inputPlaceholderDisabled": "Load a model to start chatting...",
     "send": "Send",
+    "sendErrorTitle": "Cannot send message",
     "stop": "Stop",
     "regenerate": "Regenerate",
     "warmingUp": "Warming up model...",
@@ -271,6 +285,7 @@
   },
   "models": {
     "title": "Models",
+    "actionFailedTitle": "Cannot update model",
     "featured": "Top models",
     "searchResults": "Search results",
     "searchPlaceholder": "Search Hugging Face (GGUF)...",

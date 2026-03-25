@@ -19,6 +19,7 @@ import { presetManager } from '../../src/services/PresetManager';
 jest.mock('../../src/services/LLMEngineService', () => ({
   llmEngineService: {
     getState: jest.fn(),
+    getContextSize: jest.fn(),
     chatCompletion: jest.fn(),
     stopCompletion: jest.fn(),
   },
@@ -83,6 +84,7 @@ describe('useChatSession', () => {
     (llmEngineService.getState as jest.Mock).mockReturnValue({
       status: EngineStatus.READY,
     });
+    (llmEngineService.getContextSize as jest.Mock).mockReturnValue(2048);
     (llmEngineService.chatCompletion as jest.Mock).mockImplementation(
       async ({ onToken }: { onToken?: (token: string) => void }) => {
         onToken?.('Hello back');
@@ -425,6 +427,30 @@ describe('useChatSession', () => {
     );
   });
 
+  it('caps n_predict to the remaining estimated context budget', async () => {
+    const getSession = renderHookHarness();
+    const longPrompt = 'A'.repeat(120);
+
+    (llmEngineService.getContextSize as jest.Mock).mockReturnValue(150);
+    (getGenerationParametersForModel as jest.Mock).mockImplementation(() => ({
+      temperature: 0.7,
+      topP: 0.9,
+      maxTokens: 70,
+    }));
+
+    await act(async () => {
+      await getSession()?.appendUserMessage(longPrompt);
+    });
+
+    expect(llmEngineService.chatCompletion).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        params: expect.objectContaining({
+          n_predict: 41,
+        }),
+      }),
+    );
+  });
+
   it('blocks continuing a thread when another model is currently loaded', async () => {
     const getSession = renderHookHarness();
 
@@ -647,6 +673,42 @@ describe('useChatSession', () => {
       truncatedMessageIds: ['message-1', 'message-2', 'message-3', 'message-4', 'message-5', 'message-6'],
       shouldOfferSummary: true,
     });
+  });
+
+  it('shrinks the inference window further when the token budget is tight', () => {
+    const snapshot = resolvePresetSnapshot('preset-1');
+    const longMessage = 'A'.repeat(240);
+    const thread = {
+      id: 'thread-budget',
+      title: 'Token budget thread',
+      modelId: 'author/model-q4',
+      presetId: 'preset-1',
+      presetSnapshot: snapshot,
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 96,
+      },
+      messages: Array.from({ length: 8 }, (_, index) => ({
+        id: `message-${index + 1}`,
+        role: index % 2 === 0 ? ('user' as const) : ('assistant' as const),
+        content: `${longMessage}-${index + 1}`,
+        createdAt: index + 1,
+        state: 'complete' as const,
+      })),
+      createdAt: 1,
+      updatedAt: 2,
+      status: 'idle' as const,
+    };
+
+    const messages = buildInferenceMessagesForThread(thread, {
+      maxContextTokens: 200,
+      responseReserveTokens: 96,
+    });
+
+    expect(messages[0]).toEqual({ role: 'system', content: 'Be concise.' });
+    expect(messages).toHaveLength(2);
+    expect(messages[1]).toEqual({ role: 'user', content: `${longMessage}-7` });
   });
 
   it('creates a persisted summary placeholder when truncation is active', async () => {

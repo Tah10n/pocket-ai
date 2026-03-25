@@ -643,11 +643,61 @@ export interface ThreadInferenceWindow {
   truncatedMessageIds: string[];
 }
 
+export interface ThreadInferenceWindowOptions {
+  maxContextMessages: number;
+  maxContextTokens?: number;
+  responseReserveTokens?: number;
+  promptSafetyMarginTokens?: number;
+}
+
+const CHARS_PER_ESTIMATED_TOKEN = 4;
+const MESSAGE_TOKEN_OVERHEAD = 6;
+export const DEFAULT_INFERENCE_PROMPT_SAFETY_MARGIN_TOKENS = 64;
+
+export function estimateLlmMessageTokens(message: LlmChatMessage) {
+  return Math.max(1, Math.ceil(message.content.trim().length / CHARS_PER_ESTIMATED_TOKEN)) + MESSAGE_TOKEN_OVERHEAD;
+}
+
+export function estimateLlmMessagesTokens(messages: LlmChatMessage[]) {
+  return messages.reduce((total, message) => total + estimateLlmMessageTokens(message), 0);
+}
+
+function getMinimumRequiredHistoryTokens(historyMessages: LlmChatMessage[]) {
+  if (historyMessages.length === 0) {
+    return 0;
+  }
+
+  const lastMessage = historyMessages[historyMessages.length - 1];
+  let total = estimateLlmMessageTokens(lastMessage);
+
+  if (lastMessage.role === 'assistant') {
+    const previousMessage = historyMessages[historyMessages.length - 2];
+    if (previousMessage?.role === 'user') {
+      total += estimateLlmMessageTokens(previousMessage);
+    }
+  }
+
+  return total;
+}
+
+function resolveInferenceWindowOptions(
+  optionsOrMaxContextMessages: number | ThreadInferenceWindowOptions,
+): ThreadInferenceWindowOptions {
+  if (typeof optionsOrMaxContextMessages === 'number') {
+    return {
+      maxContextMessages: optionsOrMaxContextMessages,
+    };
+  }
+
+  return optionsOrMaxContextMessages;
+}
+
 export function getThreadInferenceWindow(
   thread: ChatThread,
-  maxContextMessages: number,
+  optionsOrMaxContextMessages: number | ThreadInferenceWindowOptions,
   latestUserMessage?: ChatMessage,
 ): ThreadInferenceWindow {
+  const options = resolveInferenceWindowOptions(optionsOrMaxContextMessages);
   const systemMessages: LlmChatMessage[] = [];
 
   if (thread.presetSnapshot.systemPrompt.trim().length > 0) {
@@ -682,25 +732,108 @@ export function getThreadInferenceWindow(
     });
   }
 
-  const reservedSlots = Math.min(systemMessages.length, maxContextMessages);
-  const maxHistoryMessages = Math.max(maxContextMessages - reservedSlots, 0);
-  let historyStartIndex =
+  const reservedSlots = Math.min(systemMessages.length, options.maxContextMessages);
+  const maxHistoryMessages = Math.max(options.maxContextMessages - reservedSlots, 0);
+  let effectiveHistoryStartIndex =
     historyMessages.length <= maxHistoryMessages
       ? 0
       : historyMessages.length - maxHistoryMessages;
-  let normalizedHistoryMessages = historyMessages.slice(historyStartIndex);
+  let normalizedHistoryMessages = historyMessages.slice(effectiveHistoryStartIndex);
+  let promptTokenBudget: number | null = null;
+
+  if (typeof options.maxContextTokens === 'number' && options.maxContextTokens > 0) {
+    const targetReservedResponseTokens = Math.max(
+      0,
+      Math.round(options.responseReserveTokens ?? thread.paramsSnapshot.maxTokens),
+    );
+    const systemTokenCount = estimateLlmMessagesTokens(systemMessages);
+    const promptSafetyMargin = Math.max(
+      0,
+      Math.round(options.promptSafetyMarginTokens ?? DEFAULT_INFERENCE_PROMPT_SAFETY_MARGIN_TOKENS),
+    );
+    const totalPromptBudget = Math.max(
+      0,
+      Math.round(options.maxContextTokens) - promptSafetyMargin - systemTokenCount,
+    );
+    const minimumRequiredHistoryTokens = getMinimumRequiredHistoryTokens(normalizedHistoryMessages);
+    const canFitMinimumRequiredHistory =
+      minimumRequiredHistoryTokens === 0 || minimumRequiredHistoryTokens <= totalPromptBudget;
+    const effectiveReservedResponseTokens = canFitMinimumRequiredHistory
+      ? Math.min(
+          targetReservedResponseTokens,
+          Math.max(totalPromptBudget - minimumRequiredHistoryTokens, 0),
+        )
+      : 0;
+
+    promptTokenBudget = Math.max(
+      0,
+      totalPromptBudget - effectiveReservedResponseTokens,
+    );
+
+    let consumedPromptTokens = 0;
+    let nextHistoryCount = 0;
+
+    for (let index = normalizedHistoryMessages.length - 1; index >= 0; index -= 1) {
+      const messageTokens = estimateLlmMessageTokens(normalizedHistoryMessages[index]);
+      const canFitMore = consumedPromptTokens + messageTokens <= promptTokenBudget;
+
+      if (!canFitMore) {
+        break;
+      }
+
+      consumedPromptTokens += messageTokens;
+      nextHistoryCount += 1;
+    }
+
+    if (
+      nextHistoryCount === 0 &&
+      normalizedHistoryMessages.length > 0 &&
+      !canFitMinimumRequiredHistory
+    ) {
+      nextHistoryCount = 1;
+    }
+
+    effectiveHistoryStartIndex = historyMessages.length - nextHistoryCount;
+    normalizedHistoryMessages = historyMessages.slice(effectiveHistoryStartIndex);
+  }
+
+  const shouldBackfillLeadingUserMessage =
+    promptTokenBudget != null &&
+    effectiveHistoryStartIndex > 0 &&
+    normalizedHistoryMessages.length > 0 &&
+    normalizedHistoryMessages[0]?.role === 'assistant' &&
+    historyMessages[effectiveHistoryStartIndex - 1]?.role === 'user';
+
+  if (shouldBackfillLeadingUserMessage) {
+    const leadingUserMessage = historyMessages[effectiveHistoryStartIndex - 1];
+    const leadingUserTokens = estimateLlmMessageTokens(leadingUserMessage);
+    const canBackfillLeadingUserMessage =
+      estimateLlmMessagesTokens(normalizedHistoryMessages) + leadingUserTokens
+        <= promptTokenBudget;
+
+    if (canBackfillLeadingUserMessage) {
+      effectiveHistoryStartIndex -= 1;
+      normalizedHistoryMessages = historyMessages.slice(effectiveHistoryStartIndex);
+    } else if (
+      normalizedHistoryMessages.length === 1 &&
+      leadingUserTokens <= promptTokenBudget
+    ) {
+      effectiveHistoryStartIndex -= 1;
+      normalizedHistoryMessages = [leadingUserMessage];
+    }
+  }
 
   while (
-    historyStartIndex > 0 &&
-    normalizedHistoryMessages.length > 1 &&
+    effectiveHistoryStartIndex > 0 &&
+    normalizedHistoryMessages.length > 0 &&
     normalizedHistoryMessages[0]?.role === 'assistant'
   ) {
-    historyStartIndex += 1;
-    normalizedHistoryMessages = historyMessages.slice(historyStartIndex);
+    effectiveHistoryStartIndex += 1;
+    normalizedHistoryMessages = historyMessages.slice(effectiveHistoryStartIndex);
   }
 
   const truncatedMessageIds = eligibleMessages
-    .slice(0, historyStartIndex)
+    .slice(0, effectiveHistoryStartIndex)
     .map((message) => message.id);
 
   return {
@@ -712,7 +845,7 @@ export function getThreadInferenceWindow(
 export function buildThreadMessagesForInference(
   thread: ChatThread,
   latestUserMessage?: ChatMessage,
-  maxContextMessages = Number.MAX_SAFE_INTEGER,
+  optionsOrMaxContextMessages: number | ThreadInferenceWindowOptions = Number.MAX_SAFE_INTEGER,
 ) {
-  return getThreadInferenceWindow(thread, maxContextMessages, latestUserMessage).messages;
+  return getThreadInferenceWindow(thread, optionsOrMaxContextMessages, latestUserMessage).messages;
 }

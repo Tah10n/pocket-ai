@@ -33,7 +33,7 @@ describe('ChatInputBar', () => {
       <ChatInputBar onSendMessage={onSendMessage} />,
     );
 
-    const input = getByPlaceholderText('Type a message...');
+    const input = getByPlaceholderText('chat.inputPlaceholder');
 
     fireEvent.changeText(input, 'Hello from enter');
     fireEvent(input, 'submitEditing', {
@@ -46,6 +46,6 @@ describe('ChatInputBar', () => {
       expect(onSendMessage).toHaveBeenCalledWith('Hello from enter');
     });
 
-    expect(getByPlaceholderText('Type a message...').props.value).toBe('');
+    expect(getByPlaceholderText('chat.inputPlaceholder').props.value).toBe('');
   });
 });

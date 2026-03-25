@@ -1,4 +1,4 @@
-import React, { ComponentProps } from 'react';
+import React, { ComponentProps, useCallback, useMemo } from 'react';
 import { Box } from '@/components/ui/box';
 import { Text } from '@/components/ui/text';
 import { Pressable } from '@/components/ui/pressable';
@@ -37,20 +37,22 @@ export const RecentConversationsList = ({
 }: RecentConversationsListProps) => {
   const { t } = useTranslation();
   const threads = useChatStore((state) => state.threads);
-  const summaries = Object.values(threads)
-    .map(toConversationIndexItem)
-    .sort((left, right) => right.updatedAt - left.updatedAt);
+  const summaries = useMemo(() => (
+    Object.values(threads)
+      .map(toConversationIndexItem)
+      .sort((left, right) => right.updatedAt - left.updatedAt)
+  ), [threads]);
 
-  const conversations: Conversation[] = summaries.map((summary) => ({
+  const conversations: Conversation[] = useMemo(() => summaries.map((summary) => ({
     ...summary,
     model: getConversationModelLabel(summary.modelId),
     time: formatConversationUpdatedAt(summary.updatedAt),
     icon: 'chat-bubble',
-  }));
-  const visibleConversations = conversations.slice(0, maxVisible);
+  })), [summaries]);
+  const visibleConversations = useMemo(() => conversations.slice(0, maxVisible), [conversations, maxVisible]);
   const shouldShowViewAll = Boolean(onViewAllConversations) && conversations.length > maxVisible;
 
-  const renderItem: ListRenderItem<Conversation> = ({ item: conv }) => (
+  const renderItem = useCallback<ListRenderItem<Conversation>>(({ item: conv }) => (
     <Box className="flex-row items-center rounded-xl bg-background-50 dark:bg-primary-500/5 border border-outline-200 dark:border-primary-500/10">
       <Pressable 
         testID={`recent-conversation-${conv.id}`}
@@ -88,7 +90,7 @@ export const RecentConversationsList = ({
         </Box>
       </Box>
     </Box>
-  );
+  ), [onDeleteConversation, onOpenConversation]);
 
   return (
     <Box className="px-4 mt-8 pb-4">
@@ -115,6 +117,7 @@ export const RecentConversationsList = ({
             keyExtractor={(item) => item.id}
             scrollEnabled={false}
             renderItem={renderItem}
+            estimatedItemSize={92}
           />
         ) : (
           <Box className="rounded-xl border border-dashed border-outline-200 bg-background-50 px-4 py-6 dark:border-primary-500/10 dark:bg-primary-500/5">

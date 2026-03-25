@@ -126,6 +126,18 @@ jest.mock('react-native-reanimated', () => {
     return Reanimated;
 });
 
+jest.mock('@react-navigation/native', () => {
+    const React = require('react');
+    const actual = jest.requireActual('@react-navigation/native');
+
+    return {
+        ...actual,
+        useFocusEffect: (effect) => {
+            React.useEffect(() => effect(), [effect]);
+        },
+    };
+});
+
 // Mocking llama.rn
 jest.mock('llama.rn', () => ({
     initLlama: jest.fn(),

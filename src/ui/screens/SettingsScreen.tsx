@@ -358,6 +358,10 @@ export const SettingsScreen = () => {
         router.push('/storage' as any);
     };
 
+    const handleLegalPress = () => {
+        router.push('/legal' as any);
+    };
+
     const unloadActiveModel = async () => {
         await llmEngineService.unload();
         await refresh();
@@ -520,7 +524,7 @@ export const SettingsScreen = () => {
                         </View>
                     </Pressable>
 
-                    <Pressable onPress={handleStorageManagerPress} style={styles.row}>
+                    <Pressable onPress={handleStorageManagerPress} style={[styles.row, styles.rowBorder, { borderBottomColor: colors.border }]}>
                         <View style={styles.rowTop}>
                             <View style={styles.rowLeading}>
                                 <View style={[styles.rowIcon, { backgroundColor: 'rgba(20, 184, 166, 0.18)' }]}>
@@ -532,6 +536,26 @@ export const SettingsScreen = () => {
                                     </Text>
                                     <Text style={[styles.rowSubtitle, { color: colors.textSecondary }]}>
                                         {t('settings.storageManagerDescription')}
+                                    </Text>
+                                </View>
+                            </View>
+
+                            <MaterialSymbols name="chevron-right" size={20} color={colors.textSecondary} />
+                        </View>
+                    </Pressable>
+
+                    <Pressable onPress={handleLegalPress} style={styles.row}>
+                        <View style={styles.rowTop}>
+                            <View style={styles.rowLeading}>
+                                <View style={[styles.rowIcon, { backgroundColor: 'rgba(50, 17, 212, 0.18)' }]}>
+                                    <MaterialSymbols name="security" size={20} color={colors.primary} />
+                                </View>
+                                <View style={styles.rowTextWrap}>
+                                    <Text style={[styles.rowTitle, { color: colors.text }]}>
+                                        {t('settings.privacyDisclosures')}
+                                    </Text>
+                                    <Text style={[styles.rowSubtitle, { color: colors.textSecondary }]}>
+                                        {t('settings.privacyDisclosuresDescription')}
                                     </Text>
                                 </View>
                             </View>

@@ -1,5 +1,5 @@
 {
-  "name": "app",
+  "name": "pocket-ai",
   "main": "expo-router/entry",
   "version": "1.0.0",
   "scripts": {
@@ -17,7 +17,11 @@
     "web": "expo start --web",
     "lint": "expo lint",
     "test": "node ./node_modules/jest/bin/jest.js --runInBand",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "verify:release": "npm run typecheck && npm run lint && npm test",
+    "build:android:preview": "eas build --platform android --profile preview",
+    "build:android:production": "eas build --platform android --profile production",
+    "build:all:production": "eas build --platform all --profile production"
   },
   "dependencies": {
     "@expo-google-fonts/inter": "^0.4.2",
@@ -74,6 +78,7 @@
     "@types/jest": "29.5.14",
     "@types/react": "~19.1.0",
     "babel-preset-expo": "~54.0.10",
+    "eas-cli": "^18.4.0",
     "eslint": "^9.25.0",
     "eslint-config-expo": "~10.0.0",
     "jest-expo": "^47.0.1",
@@ -86,7 +91,7 @@
     "type": "all",
     "jsSrcsDir": "src",
     "android": {
-      "javaPackageName": "com.anonymous.app"
+      "javaPackageName": "com.antigravity.pocketai"
     }
   }
 }

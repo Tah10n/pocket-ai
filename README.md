@@ -80,6 +80,20 @@ Run tests:
 npm test
 ```
 
+Run the release verification gate:
+
+```bash
+npm run verify:release
+```
+
+Create EAS builds with the committed profiles:
+
+```bash
+npm run build:android:preview
+npm run build:android:production
+npm run build:all:production
+```
+
 ## Verification Workflow
 
 Before merging changes, run the full local quality gate:
@@ -152,6 +166,8 @@ const { t } = useTranslation();
 - [../IMPLEMENTATION_PLAN.md](../IMPLEMENTATION_PLAN.md): delivery roadmap and current phase status.
 - [UI Architecture & Components Guidelines](./docs/ui-architecture.md): guidance for creating and modifying UI components.
 - [New Architecture Migration Guide](./docs/new-architecture.md): notes for React Native New Architecture and native-module-related setup.
+- [Privacy & Disclosures](./docs/privacy-disclosures.md): release-facing summary of local inference, storage, and network behavior.
+- [Release Checklist](./docs/release-checklist.md): build profiles, metadata, and manual pre-release QA steps.
 
 ## Model Controls
 

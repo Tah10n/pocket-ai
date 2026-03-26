@@ -5,6 +5,7 @@ Expo Router React Native app for an offline-first local AI assistant. The app fo
 Home shows a short recent-conversations slice, a simplified active-model card without decorative artwork, and a context-aware model CTA that can send users straight to downloaded models when no model is currently loaded.
 Settings now include theme/language controls, generation parameters, and a routed preset manager where seeded and user-created presets can all be added, edited, activated, or deleted.
 Theme switching is currently stabilized with a hybrid approach: the app theme source of truth still lives in `ThemeProvider`, but `SettingsScreen` intentionally uses plain React Native `StyleSheet` styling as a safety workaround for a NativeWind / `react-native-css-interop` dev-time crash that was reproducible during theme changes.
+Internal routed screens now use a shared screen shell so headers, content width, safe-area handling, and bottom spacing stay visually aligned across Home, Models, Conversations, Presets, Storage, Legal, and Chat-adjacent flows.
 
 ## Scripts
 
@@ -144,6 +145,14 @@ app/
 - Any new user-visible button label, title, description, tab label, alert copy, empty state, filter label, or menu item must be added to both `src/i18n/locales/en.json` and `src/i18n/locales/ru.json`, then consumed via `t(...)` instead of hard-coded inline strings.
 - The only normal exceptions are developer-only logs, temporary test doubles/mocks, and other text that never ships to end users.
 
+## Screen Layout Notes
+
+- `src/components/ui/ScreenShell.tsx` is the shared layout primitive for internal routed screens.
+- `ScreenHeaderShell` owns top safe-area spacing, translucent header chrome, border treatment, and max-width alignment.
+- `ScreenContent` keeps the main content column aligned with the header width instead of letting each screen choose its own container rules.
+- Reuse existing header components (`HeaderBar`, `ChatHeader`, `SearchHeader`) when possible; if a screen needs a custom header, build it inside `ScreenHeaderShell`.
+- Tab screens should account for the active bottom tab bar height when setting bottom padding for scrollable content.
+
 ## Localization Workflow
 
 When adding or changing user-facing copy:
@@ -186,6 +195,7 @@ const { t } = useTranslation();
 
 - Theme persistence and the app-wide resolved mode live in `src/providers/ThemeProvider.tsx`.
 - `app/(tabs)/_layout.tsx` reads the resolved theme from that provider so tabs stay in sync with the rest of the app.
+- `app/(tabs)/_layout.tsx` also defines the shared tab-bar height and vertical padding contract that tabbed screens should respect when calculating bottom content spacing.
 - `app/_layout.tsx` contains a dev-only guard for the `react-native-css-interop` upgrade-warning crash that can occur when React Navigation proxy props are stringified during theme-related rerenders.
 - `src/ui/screens/SettingsScreen.tsx` is intentionally implemented with React Native primitives and `StyleSheet` right now; do not convert it back to NativeWind wrappers without re-verifying theme switching on device.
 

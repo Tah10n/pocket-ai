@@ -88,8 +88,44 @@ function patchCssInteropUpgradeWarningCrash() {
   }
 }
 
+function patchDeprecatedReactNativeSafeAreaView() {
+  if (!__DEV__) return;
+
+  const globalAny = globalThis as unknown as { __pocketAiSafeAreaViewPatched?: boolean };
+  if (globalAny.__pocketAiSafeAreaViewPatched) return;
+  globalAny.__pocketAiSafeAreaViewPatched = true;
+
+  try {
+    // Some upstream dev-time views still access react-native's deprecated
+    // SafeAreaView export. Redirect them to react-native-safe-area-context.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const reactNative = require('react-native') as Record<string, unknown>;
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const safeAreaContext = require('react-native-safe-area-context') as {
+      SafeAreaView?: unknown;
+    };
+
+    const descriptor = Object.getOwnPropertyDescriptor(reactNative, 'SafeAreaView');
+    if (!descriptor?.get || !descriptor.configurable) return;
+
+    const replacement = safeAreaContext.SafeAreaView;
+    if (!replacement) return;
+
+    Object.defineProperty(reactNative, 'SafeAreaView', {
+      configurable: true,
+      enumerable: descriptor.enumerable ?? true,
+      get() {
+        return replacement;
+      },
+    });
+  } catch (error) {
+    console.warn('[RootLayout] Failed to patch deprecated SafeAreaView access', error);
+  }
+}
+
 patchExpoKeepAwake();
 patchCssInteropUpgradeWarningCrash();
+patchDeprecatedReactNativeSafeAreaView();
 
 // Prevent the splash screen from auto-hiding before we are ready.
 SplashScreen.preventAutoHideAsync().catch((e) => console.warn('[SplashScreen] preventAutoHideAsync failed', e));

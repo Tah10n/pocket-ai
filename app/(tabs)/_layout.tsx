@@ -17,8 +17,12 @@ export default function TabLayout() {
         headerShown: false,
         tabBarHideOnKeyboard: true,
         tabBarStyle: {
-            backgroundColor: isDark ? 'rgba(19, 16, 34, 0.9)' : 'rgba(246, 246, 248, 0.9)',
-            borderTopColor: isDark ? 'rgba(50, 17, 212, 0.2)' : 'rgba(50, 17, 212, 0.1)',
+            height: 72,
+            paddingTop: 8,
+            paddingBottom: 10,
+            backgroundColor: isDark ? 'rgba(19, 16, 34, 0.96)' : 'rgba(246, 246, 248, 0.96)',
+            borderTopColor: isDark ? 'rgba(148, 163, 184, 0.14)' : 'rgba(100, 116, 139, 0.12)',
+            borderTopWidth: 1,
             elevation: 0,
             shadowOpacity: 0,
         }

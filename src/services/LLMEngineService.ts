@@ -158,6 +158,25 @@ class LLMEngineService {
     }
   }
 
+  public async interruptActiveCompletion(): Promise<void> {
+    const activeCompletion = this.activeCompletionPromise;
+    if (!activeCompletion) {
+      return;
+    }
+
+    try {
+      await this.stopCompletion();
+    } catch (error) {
+      console.warn('[LLMEngine] Failed to interrupt active completion', error);
+    }
+
+    try {
+      await activeCompletion;
+    } catch {
+      // Completion failures are handled by the chat flow that initiated them.
+    }
+  }
+
   public getState(): EngineState {
     return this.state;
   }

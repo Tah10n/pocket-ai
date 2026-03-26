@@ -21,6 +21,7 @@ export interface ChatSummary {
   content: string;
   createdAt: number;
   sourceMessageIds: string[];
+  isPlaceholder?: boolean;
 }
 
 export interface ChatMessage {

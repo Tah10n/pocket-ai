@@ -327,14 +327,18 @@ export const useChatSession = () => {
       throw new Error('A response is already being generated for this thread.');
     }
 
-    if (activeThread && activeThread.modelId !== activeModelId) {
-      throw new Error(
-        `This conversation is pinned to ${activeThread.modelId}. Load that model before continuing this thread.`,
-      );
-    }
+    const shouldStartNewThreadForActiveModel =
+      activeThread != null && activeThread.modelId !== activeModelId;
 
     const threadId =
-      activeThread?.id ??
+      shouldStartNewThreadForActiveModel
+        ? createThread({
+            modelId: activeModelId,
+            presetId: settings.activePresetId,
+            presetSnapshot: resolvePresetSnapshot(settings.activePresetId),
+            paramsSnapshot: activeModelParams,
+          })
+        : activeThread?.id ??
       createThread({
         modelId: activeModelId,
         presetId: settings.activePresetId,
@@ -344,7 +348,7 @@ export const useChatSession = () => {
 
     setActiveThread(threadId);
 
-    if (activeThread) {
+    if (activeThread && !shouldStartNewThreadForActiveModel) {
       syncThreadParameters(activeThread, activeModelParams);
     }
 
@@ -445,6 +449,7 @@ export const useChatSession = () => {
       content: SUMMARY_PLACEHOLDER_CONTENT,
       createdAt: Date.now(),
       sourceMessageIds: truncatedMessageIds,
+      isPlaceholder: true,
     });
 
     return true;

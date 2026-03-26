@@ -175,7 +175,8 @@ export async function clearActiveCache() {
   }
 }
 
-export function clearChatHistory() {
+export async function clearChatHistory() {
+  await llmEngineService.interruptActiveCompletion();
   const removedThreads = useChatStore.getState().clearAllThreads();
   const removedLegacyEntries = clearLegacyChatHistory();
   return removedThreads + removedLegacyEntries;

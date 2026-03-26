@@ -8,7 +8,7 @@ All UI components in this project are strictly centralized in one directory to p
 
 This is the **only** directory where UI components should live. It contains both:
 1. **Primitives**: Base wrapper elements for NativeWind/Gluestack styling (e.g., `box.tsx`, `text.tsx`, `pressable.tsx`, `input.tsx`).
-2. **Custom Components**: Application-specific composite components (e.g., `ChatHeader.tsx`, `ActiveModelCard.tsx`, `ModelListItem.tsx`, `QuickActionsGrid.tsx`).
+2. **Custom Components**: Application-specific composite components (e.g., `ChatHeader.tsx`, `ScreenShell.tsx`, `ActiveModelCard.tsx`, `ModelListItem.tsx`, `QuickActionsGrid.tsx`).
 
 > **⚠️ Warning:** Do not create or use the legacy `app/components/` directory. It has been completely deprecated and removed to maintain a single source of truth in `src`.
 
@@ -48,6 +48,31 @@ This ensures that tools (TypeScript, ESLint, Metro bundler) automatically resolv
 * **Localization**: New user-facing copy must not be hard-coded directly into production components. Add every new visible string to both `src/i18n/locales/en.json` and `src/i18n/locales/ru.json`, then render it through `useTranslation()` and `t(...)`.
 * **What counts as user-facing copy**: Buttons, section titles, helper text, alert messages, empty states, tab labels, modal copy, filter chips, sort labels, and menu actions.
 * **Allowed exceptions**: Developer-only console output, non-user-facing telemetry/debug text, and intentional test-only mock strings.
+
+## Screen Layout Conventions
+
+Screen-level chrome should be standardized instead of reimplemented per route.
+
+### Shared shell
+
+Use `@/components/ui/ScreenShell` for internal routed screens:
+
+- `ScreenHeaderShell`: wraps the top safe-area inset, translucent header background, border, max width, and iOS blur behavior.
+- `ScreenContent`: keeps the main content column aligned to the same max width as the header.
+
+This should be the default for screens such as conversations, presets, legal, storage, and model catalog flows.
+
+### Header patterns
+
+- Reuse `HeaderBar.tsx`, `ChatHeader.tsx`, or `SearchHeader.tsx` when one of those patterns matches the screen.
+- If a screen needs a custom header, build it inside `ScreenHeaderShell` instead of hand-rolling its own safe-area and border container.
+- Keep internal screen headers visually consistent: 44px touch targets, 56px content row height where practical, matching horizontal padding, and the same border treatment.
+
+### Content width and bottom spacing
+
+- Route-level screens should keep their main content centered with the same max-width contract as the header.
+- Scrollable tab screens must pad their bottom content against the current bottom tab bar height instead of hard-coded values.
+- Non-tab routed screens should still include safe-area bottom padding so the last card or action is not flush with the device edge.
 
 ## Localization Checklist
 

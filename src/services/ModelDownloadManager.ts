@@ -38,7 +38,11 @@ export class ModelDownloadManager {
     if (activeDownloadId) return;
 
     // Find next queued model
-    const next = queue.find(m => m.lifecycleStatus === LifecycleStatus.QUEUED);
+    const next = queue.find((m) => (
+      m.lifecycleStatus === LifecycleStatus.QUEUED ||
+      m.lifecycleStatus === LifecycleStatus.DOWNLOADING ||
+      m.lifecycleStatus === LifecycleStatus.VERIFYING
+    ));
     if (next) {
       this.isProcessing = true;
       setActiveDownload(next.id);

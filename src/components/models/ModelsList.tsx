@@ -1,5 +1,6 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Alert } from 'react-native';
+import { useBottomTabBarHeight } from '@react-navigation/bottom-tabs';
 import { FlashList, ListRenderItem } from '@shopify/flash-list';
 import { useRouter } from 'expo-router';
 import { Box } from '@/components/ui/box';
@@ -97,8 +98,21 @@ function sortModels(models: ModelMetadata[], sort: ModelSortPreference): ModelMe
   });
 }
 
+function mergeUniqueModelsById(models: ModelMetadata[]): ModelMetadata[] {
+  const seen = new Set<string>();
+  return models.filter((model) => {
+    if (seen.has(model.id)) {
+      return false;
+    }
+
+    seen.add(model.id);
+    return true;
+  });
+}
+
 export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
   const { t } = useTranslation();
+  const tabBarHeight = useBottomTabBarHeight();
   const router = useRouter();
   const [models, setModels] = useState<ModelMetadata[]>([]);
   const [loading, setLoading] = useState(false);
@@ -108,6 +122,7 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
     warningMessage: null,
     loadMoreError: null,
   });
+  const latestFetchIdRef = useRef(0);
 
   const { startDownload, cancelDownload, queue } = useModelDownload();
   const { loadModel, unloadModel, state: engineState } = useLLMEngine();
@@ -133,11 +148,15 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
 
   const fetchModels = useCallback(
     async (query: string, page: number, append: boolean) => {
+      const fetchId = latestFetchIdRef.current + 1;
+      latestFetchIdRef.current = fetchId;
+
       if (append) {
         setIsFetchingMore(true);
         setFetchState((current) => ({ ...current, loadMoreError: null }));
       } else {
         setLoading(true);
+        setIsFetchingMore(false);
         setFetchState({ warningMessage: null, loadMoreError: null });
       }
 
@@ -147,13 +166,25 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
           pageSize: pagination.pageSize,
         });
 
+        if (fetchId !== latestFetchIdRef.current) {
+          return;
+        }
+
         setHasMore(result.hasMore);
-        setModels((current) => (append ? [...current, ...result.models] : result.models));
+        setModels((current) => (
+          append
+            ? mergeUniqueModelsById([...current, ...result.models])
+            : result.models
+        ));
         setFetchState({
           warningMessage: result.warning ? getModelCatalogErrorMessage(result.warning) : null,
           loadMoreError: null,
         });
       } catch (error) {
+        if (fetchId !== latestFetchIdRef.current) {
+          return;
+        }
+
         const message = getModelCatalogErrorMessage(error);
 
         if (append) {
@@ -163,6 +194,10 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
           setFetchState({ warningMessage: message, loadMoreError: null });
         }
       } finally {
+        if (fetchId !== latestFetchIdRef.current) {
+          return;
+        }
+
         if (append) {
           setIsFetchingMore(false);
         } else {
@@ -181,7 +216,10 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
       return () => clearTimeout(timer);
     }
 
+    latestFetchIdRef.current += 1;
     setHasMore(false);
+    setLoading(false);
+    setIsFetchingMore(false);
     setFetchState({ warningMessage: null, loadMoreError: null });
     modelCatalogService.getLocalModels().then(setModels);
   }, [activeTab, fetchModels, pagination.page, searchQuery]);
@@ -419,6 +457,7 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
             renderItem={renderModelItem}
             ListEmptyComponent={renderEmptyState}
             ListFooterComponent={renderFooter}
+            contentContainerStyle={{ paddingBottom: tabBarHeight + 24 }}
           />
         )}
       </Box>

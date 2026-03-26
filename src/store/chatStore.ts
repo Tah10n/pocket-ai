@@ -707,7 +707,7 @@ export function getThreadInferenceWindow(
     });
   }
 
-  if (thread.summary) {
+  if (thread.summary && !thread.summary.isPlaceholder) {
     systemMessages.push({
       role: 'system',
       content: `Conversation summary:\n${thread.summary.content}`,

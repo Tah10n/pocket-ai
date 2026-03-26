@@ -451,12 +451,14 @@ describe('useChatSession', () => {
     );
   });
 
-  it('blocks continuing a thread when another model is currently loaded', async () => {
+  it('starts a new thread when another model is currently loaded', async () => {
     const getSession = renderHookHarness();
 
     await act(async () => {
       await getSession()?.appendUserMessage('First prompt');
     });
+
+    const originalThread = useChatStore.getState().getActiveThread();
 
     (getSettings as jest.Mock).mockReturnValue({
       activeModelId: 'author/model-q8',
@@ -466,9 +468,18 @@ describe('useChatSession', () => {
       maxTokens: 1024,
     });
 
-    await expect(getSession()?.appendUserMessage('Use a different model now')).rejects.toThrow(
-      'This conversation is pinned to author/model-q4. Load that model before continuing this thread.',
-    );
+    await act(async () => {
+      await getSession()?.appendUserMessage('Use a different model now');
+    });
+
+    const state = useChatStore.getState();
+    const activeThread = state.getActiveThread();
+
+    expect(activeThread?.id).not.toBe(originalThread?.id);
+    expect(activeThread?.modelId).toBe('author/model-q8');
+    expect(activeThread?.messages.map((message) => message.role)).toEqual(['user', 'assistant']);
+    expect(originalThread?.modelId).toBe('author/model-q4');
+    expect(state.getConversationIndex()).toHaveLength(2);
   });
 
   it('blocks regenerating a thread when another model is currently loaded', async () => {
@@ -746,11 +757,21 @@ describe('useChatSession', () => {
     });
 
     expect(created).toBe(true);
-    expect(useChatStore.getState().getActiveThread()?.summary).toEqual(
+    const activeThread = useChatStore.getState().getActiveThread();
+    expect(activeThread?.summary).toEqual(
       expect.objectContaining({
         content: SUMMARY_PLACEHOLDER_CONTENT,
         sourceMessageIds: ['message-1', 'message-2', 'message-3', 'message-4', 'message-5', 'message-6'],
+        isPlaceholder: true,
       }),
+    );
+    expect(buildInferenceMessagesForThread(activeThread!)).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: 'system',
+          content: expect.stringContaining(SUMMARY_PLACEHOLDER_CONTENT),
+        }),
+      ]),
     );
   });
 });

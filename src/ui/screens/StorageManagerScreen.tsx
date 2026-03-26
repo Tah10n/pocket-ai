@@ -5,6 +5,7 @@ import { useRouter } from 'expo-router';
 import { useTranslation } from 'react-i18next';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MaterialSymbols } from '@/components/ui/MaterialSymbols';
+import { ScreenHeaderShell } from '@/components/ui/ScreenShell';
 import { useTheme } from '../../providers/ThemeProvider';
 import { hardwareListenerService, type HardwareStatus } from '../../services/HardwareListenerService';
 import {
@@ -207,7 +208,7 @@ export function StorageManagerScreen() {
                     style: 'destructive',
                     onPress: () => {
                         void runBusyAction('chat', async () => {
-                            clearChatHistory();
+                            await clearChatHistory();
                         });
                     },
                 },
@@ -238,8 +239,8 @@ export function StorageManagerScreen() {
     const downloadedModels = appMetrics?.downloadedModels ?? [];
 
     return (
-        <View style={[styles.screen, { backgroundColor: colors.background }]}>
-            <View style={[styles.header, { paddingTop: insets.top, borderBottomColor: colors.border, backgroundColor: colors.background }]}>
+        <View style={{ flex: 1, backgroundColor: colors.background }}>
+            <ScreenHeaderShell>
                 <View style={styles.headerBar}>
                     <Pressable
                         onPress={() => {
@@ -258,64 +259,66 @@ export function StorageManagerScreen() {
                         <Text style={[styles.headerSubtitle, { color: colors.textSecondary }]}>{t('storageManager.subtitle')}</Text>
                     </View>
                 </View>
-            </View>
+            </ScreenHeaderShell>
 
-            <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={[styles.content, { paddingBottom: insets.bottom + 32 }]}>
-                {hardwareStatus.isLowMemory ? (
-                    <View style={[styles.card, { backgroundColor: warningBackground, borderColor: warningBorder }]}>
-                        <Text style={[styles.warningTitle, { color: warningText }]}>{t('storageManager.lowMemoryTitle')}</Text>
-                        <Text style={[styles.warningText, { color: warningText }]}>{t('storageManager.lowMemoryDescription')}</Text>
+            <View style={styles.screen}>
+                <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={[styles.content, { paddingBottom: insets.bottom + 32 }]}>
+                    {hardwareStatus.isLowMemory ? (
+                        <View style={[styles.card, { backgroundColor: warningBackground, borderColor: warningBorder }]}>
+                            <Text style={[styles.warningTitle, { color: warningText }]}>{t('storageManager.lowMemoryTitle')}</Text>
+                            <Text style={[styles.warningText, { color: warningText }]}>{t('storageManager.lowMemoryDescription')}</Text>
+                        </View>
+                    ) : null}
+
+                    <View style={[styles.card, { backgroundColor: cardBackground, borderColor: colors.border }]}>
+                        <Text style={[styles.sectionTitle, { color: colors.text }]}>{t('storageManager.actionsTitle')}</Text>
+                        <Text style={[styles.sectionSubtitle, { color: colors.textSecondary, marginTop: 4 }]}>{t('storageManager.actionsDescription')}</Text>
+                        <View style={{ gap: 12, marginTop: 16 }}>
+                            <ActionCard title={t('storageManager.clearCacheTitle')} description={t('storageManager.clearCacheDescription')} meta={formatBytes(appMetrics?.cacheBytes ?? 0)} busy={busyAction === 'cache'} disabled={busyAction !== null} buttonLabel={busyAction === 'cache' ? t('common.loading') : t('common.clear')} colors={{ text: colors.text, textSecondary: colors.textSecondary, border: colors.border, error: colors.error }} mutedBackground={mutedBackground} onPress={handleClearCache} />
+                            <ActionCard title={t('storageManager.clearChatHistoryTitle')} description={t('storageManager.clearChatHistoryDescription')} meta={formatBytes(appMetrics?.chatHistoryBytes ?? 0)} busy={busyAction === 'chat'} disabled={busyAction !== null} buttonLabel={busyAction === 'chat' ? t('common.loading') : t('common.clear')} colors={{ text: colors.text, textSecondary: colors.textSecondary, border: colors.border, error: colors.error }} mutedBackground={mutedBackground} onPress={handleClearChatHistory} />
+                            <ActionCard title={t('storageManager.resetSettingsTitle')} description={t('storageManager.resetSettingsDescription')} busy={busyAction === 'settings'} disabled={busyAction !== null} buttonLabel={busyAction === 'settings' ? t('common.loading') : t('common.reset')} colors={{ text: colors.text, textSecondary: colors.textSecondary, border: colors.border, error: colors.error }} mutedBackground={mutedBackground} onPress={handleResetSettings} />
+                        </View>
                     </View>
-                ) : null}
 
-                <View style={[styles.card, { backgroundColor: cardBackground, borderColor: colors.border }]}>
-                    <Text style={[styles.sectionTitle, { color: colors.text }]}>{t('storageManager.actionsTitle')}</Text>
-                    <Text style={[styles.sectionSubtitle, { color: colors.textSecondary, marginTop: 4 }]}>{t('storageManager.actionsDescription')}</Text>
-                    <View style={{ gap: 12, marginTop: 16 }}>
-                        <ActionCard title={t('storageManager.clearCacheTitle')} description={t('storageManager.clearCacheDescription')} meta={formatBytes(appMetrics?.cacheBytes ?? 0)} busy={busyAction === 'cache'} disabled={busyAction !== null} buttonLabel={busyAction === 'cache' ? t('common.loading') : t('common.clear')} colors={{ text: colors.text, textSecondary: colors.textSecondary, border: colors.border, error: colors.error }} mutedBackground={mutedBackground} onPress={handleClearCache} />
-                        <ActionCard title={t('storageManager.clearChatHistoryTitle')} description={t('storageManager.clearChatHistoryDescription')} meta={formatBytes(appMetrics?.chatHistoryBytes ?? 0)} busy={busyAction === 'chat'} disabled={busyAction !== null} buttonLabel={busyAction === 'chat' ? t('common.loading') : t('common.clear')} colors={{ text: colors.text, textSecondary: colors.textSecondary, border: colors.border, error: colors.error }} mutedBackground={mutedBackground} onPress={handleClearChatHistory} />
-                        <ActionCard title={t('storageManager.resetSettingsTitle')} description={t('storageManager.resetSettingsDescription')} busy={busyAction === 'settings'} disabled={busyAction !== null} buttonLabel={busyAction === 'settings' ? t('common.loading') : t('common.reset')} colors={{ text: colors.text, textSecondary: colors.textSecondary, border: colors.border, error: colors.error }} mutedBackground={mutedBackground} onPress={handleResetSettings} />
-                    </View>
-                </View>
-
-                <View style={[styles.card, { backgroundColor: cardBackground, borderColor: colors.border }]}>
-                    <Text style={[styles.sectionTitle, { color: colors.text }]}>{t('storageManager.downloadedModelsTitle', { count: downloadedModels.length })}</Text>
-                    <Text style={[styles.sectionSubtitle, { color: colors.textSecondary, marginTop: 4 }]}>{t('storageManager.downloadedModelsDescription')}</Text>
-                    <View style={{ gap: 12, marginTop: 16 }}>
-                        {downloadedModels.length === 0 ? (
-                            <View style={[styles.item, { borderColor: colors.border, backgroundColor: mutedBackground }]}>
-                                <Text style={[styles.itemTitle, { color: colors.text }]}>{t('storageManager.emptyModelsTitle')}</Text>
-                                <Text style={[styles.itemSubtitle, { color: colors.textSecondary }]}>{t('storageManager.emptyModelsDescription')}</Text>
-                            </View>
-                        ) : downloadedModels.map((model) => {
-                            const actionKey: BusyAction = `offload:${model.id}`;
-                            const isActive = appMetrics?.activeModelId === model.id;
-                            return (
-                                <View key={model.id} style={[styles.item, { borderColor: colors.border, backgroundColor: mutedBackground }]}>
-                                    <View style={styles.itemRow}>
-                                        <View style={styles.headerTextWrap}>
-                                            <Text style={[styles.itemTitle, { color: colors.text }]}>{model.name}</Text>
-                                            <Text style={[styles.itemSubtitle, { color: colors.textSecondary }]}>{model.author} • {formatBytes(model.size)}</Text>
-                                            {isActive ? (
-                                                <View style={[styles.activeBadge, { backgroundColor: 'rgba(50, 17, 212, 0.12)' }]}>
-                                                    <Text style={[styles.activeBadgeText, { color: colors.primary }]}>{t('storageManager.activeModelBadge')}</Text>
-                                                </View>
-                                            ) : null}
-                                        </View>
-                                        <Pressable
-                                            disabled={busyAction !== null}
-                                            onPress={() => handleDeleteModel(model.id, model.name)}
-                                            style={[styles.button, { backgroundColor: 'rgba(239, 68, 68, 0.12)' }]}
-                                        >
-                                            <Text style={[styles.buttonText, { color: colors.error }]}>{busyAction === actionKey ? t('common.loading') : t('common.delete')}</Text>
-                                        </Pressable>
-                                    </View>
+                    <View style={[styles.card, { backgroundColor: cardBackground, borderColor: colors.border }]}>
+                        <Text style={[styles.sectionTitle, { color: colors.text }]}>{t('storageManager.downloadedModelsTitle', { count: downloadedModels.length })}</Text>
+                        <Text style={[styles.sectionSubtitle, { color: colors.textSecondary, marginTop: 4 }]}>{t('storageManager.downloadedModelsDescription')}</Text>
+                        <View style={{ gap: 12, marginTop: 16 }}>
+                            {downloadedModels.length === 0 ? (
+                                <View style={[styles.item, { borderColor: colors.border, backgroundColor: mutedBackground }]}>
+                                    <Text style={[styles.itemTitle, { color: colors.text }]}>{t('storageManager.emptyModelsTitle')}</Text>
+                                    <Text style={[styles.itemSubtitle, { color: colors.textSecondary }]}>{t('storageManager.emptyModelsDescription')}</Text>
                                 </View>
-                            );
-                        })}
+                            ) : downloadedModels.map((model) => {
+                                const actionKey: BusyAction = `offload:${model.id}`;
+                                const isActive = appMetrics?.activeModelId === model.id;
+                                return (
+                                    <View key={model.id} style={[styles.item, { borderColor: colors.border, backgroundColor: mutedBackground }]}>
+                                        <View style={styles.itemRow}>
+                                            <View style={styles.headerTextWrap}>
+                                                <Text style={[styles.itemTitle, { color: colors.text }]}>{model.name}</Text>
+                                                <Text style={[styles.itemSubtitle, { color: colors.textSecondary }]}>{model.author} • {formatBytes(model.size)}</Text>
+                                                {isActive ? (
+                                                    <View style={[styles.activeBadge, { backgroundColor: 'rgba(50, 17, 212, 0.12)' }]}>
+                                                        <Text style={[styles.activeBadgeText, { color: colors.primary }]}>{t('storageManager.activeModelBadge')}</Text>
+                                                    </View>
+                                                ) : null}
+                                            </View>
+                                            <Pressable
+                                                disabled={busyAction !== null}
+                                                onPress={() => handleDeleteModel(model.id, model.name)}
+                                                style={[styles.button, { backgroundColor: 'rgba(239, 68, 68, 0.12)' }]}
+                                            >
+                                                <Text style={[styles.buttonText, { color: colors.error }]}>{busyAction === actionKey ? t('common.loading') : t('common.delete')}</Text>
+                                            </Pressable>
+                                        </View>
+                                    </View>
+                                );
+                            })}
+                        </View>
                     </View>
-                </View>
-            </ScrollView>
+                </ScrollView>
+            </View>
         </View>
     );
 }

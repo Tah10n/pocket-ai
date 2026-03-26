@@ -4,8 +4,8 @@ import { useBottomTabBarHeight } from '@react-navigation/bottom-tabs';
 import { useFocusEffect, useIsFocused } from '@react-navigation/native';
 import { router } from 'expo-router';
 import { useTranslation } from 'react-i18next';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MaterialSymbols } from '@/components/ui/MaterialSymbols';
+import { ScreenHeaderShell } from '@/components/ui/ScreenShell';
 import { useDeviceMetrics } from '../../hooks/useDeviceMetrics';
 import { useLLMEngine } from '../../hooks/useLLMEngine';
 import { useTheme } from '../../providers/ThemeProvider';
@@ -297,7 +297,6 @@ function formatPercent(value: number) {
 
 export const SettingsScreen = () => {
     const { t, i18n } = useTranslation();
-    const insets = useSafeAreaInsets();
     const tabBarHeight = useBottomTabBarHeight();
     const isFocused = useIsFocused();
     const { mode, resolvedMode, setTheme, colors } = useTheme();
@@ -416,17 +415,8 @@ export const SettingsScreen = () => {
     const canForceUnloadModel = isEngineReady && Boolean(engineState.activeModelId);
 
     return (
-        <View style={[styles.screen, { backgroundColor: colors.background }]}>
-            <View
-                style={[
-                    styles.header,
-                    {
-                        paddingTop: insets.top,
-                        borderBottomColor: colors.border,
-                        backgroundColor: colors.background,
-                    },
-                ]}
-            >
+        <View style={{ flex: 1, backgroundColor: colors.background }}>
+            <ScreenHeaderShell>
                 <View style={styles.headerBar}>
                     <View style={styles.headerTitleRow}>
                         <View style={[styles.iconBubble, { backgroundColor: 'rgba(50, 17, 212, 0.10)' }]}>
@@ -437,67 +427,65 @@ export const SettingsScreen = () => {
                         </Text>
                     </View>
                 </View>
-            </View>
+            </ScreenHeaderShell>
 
-            <ScrollView
-                style={styles.scrollView}
-                showsVerticalScrollIndicator={false}
-                contentContainerStyle={[styles.scrollContent, { paddingBottom: tabBarHeight + 24 }]}
-            >
-                <Text style={[styles.sectionTitle, { color: colors.textSecondary }]}>
-                    {t('settings.appearance')}
-                </Text>
+            <View style={styles.screen}>
+                <ScrollView
+                    style={styles.scrollView}
+                    showsVerticalScrollIndicator={false}
+                    contentContainerStyle={[styles.scrollContent, { paddingBottom: tabBarHeight + 24 }]}
+                >
+                    <Text style={[styles.sectionTitle, { color: colors.textSecondary }]}>
+                        {t('settings.appearance')}
+                    </Text>
 
-                <View style={[styles.card, { backgroundColor: cardBackground, borderColor: colors.border }]}>
-                    <View style={[styles.row, styles.rowBorder, { borderBottomColor: colors.border }]}>
-                        <View style={styles.rowTop}>
-                            <View style={styles.rowLeading}>
-                                <View style={[styles.rowIcon, { backgroundColor: 'rgba(59, 130, 246, 0.18)' }]}>
-                                    <MaterialSymbols name="palette" size={20} color={colors.primary} />
-                                </View>
-                                <View style={styles.rowTextWrap}>
-                                    <Text style={[styles.rowTitle, { color: colors.text }]}>
-                                        {t('settings.themeMode')}
-                                    </Text>
-                                    <Text style={[styles.rowSubtitle, { color: colors.textSecondary }]}>
-                                        {t('settings.themeDescription')}
-                                    </Text>
+                    <View style={[styles.card, { backgroundColor: cardBackground, borderColor: colors.border }]}>
+                        <View style={[styles.row, styles.rowBorder, { borderBottomColor: colors.border }]}>
+                            <View style={styles.rowTop}>
+                                <View style={styles.rowLeading}>
+                                    <View style={[styles.rowIcon, { backgroundColor: 'rgba(59, 130, 246, 0.18)' }]}>
+                                        <MaterialSymbols name="palette" size={20} color={colors.primary} />
+                                    </View>
+                                    <View style={styles.rowTextWrap}>
+                                        <Text style={[styles.rowTitle, { color: colors.text }]}>
+                                            {t('settings.themeMode')}
+                                        </Text>
+                                        <Text style={[styles.rowSubtitle, { color: colors.textSecondary }]}>
+                                            {t('settings.themeDescription')}
+                                        </Text>
+                                    </View>
                                 </View>
                             </View>
+                            <View style={[styles.segmentedControl, { backgroundColor: mutedBackground }]}>
+                                {renderThemeButton('light', t('settings.themeLight'))}
+                                {renderThemeButton('system', t('settings.themeSystem'))}
+                                {renderThemeButton('dark', t('settings.themeDark'))}
+                            </View>
                         </View>
-
-                        <View style={[styles.segmentedControl, { backgroundColor: mutedBackground }]}>
-                            {renderThemeButton('light', t('settings.themeLight'))}
-                            {renderThemeButton('system', t('settings.themeSystem'))}
-                            {renderThemeButton('dark', t('settings.themeDark'))}
-                        </View>
+                        <Pressable onPress={handleLanguagePress} style={styles.row}>
+                            <View style={styles.rowTop}>
+                                <View style={styles.rowLeading}>
+                                    <View style={[styles.rowIcon, { backgroundColor: 'rgba(50, 17, 212, 0.18)' }]}>
+                                        <MaterialSymbols name="language" size={20} color={colors.primary} />
+                                    </View>
+                                    <View style={styles.rowTextWrap}>
+                                        <Text style={[styles.rowTitle, { color: colors.text }]}>
+                                            {t('settings.language')}
+                                        </Text>
+                                        <Text style={[styles.rowSubtitle, { color: colors.textSecondary }]}>
+                                            {t('settings.languageDescription')}
+                                        </Text>
+                                    </View>
+                                </View>
+                                <View style={styles.rowTrailing}>
+                                    <Text style={[styles.rowTrailingText, { color: colors.primary }]}>
+                                        {settings.language === 'en' ? t('settings.languageEnglish') : t('settings.languageRussian')}
+                                    </Text>
+                                    <MaterialSymbols name="chevron-right" size={20} color={colors.textSecondary} />
+                                </View>
+                            </View>
+                        </Pressable>
                     </View>
-
-                    <Pressable onPress={handleLanguagePress} style={styles.row}>
-                        <View style={styles.rowTop}>
-                            <View style={styles.rowLeading}>
-                                <View style={[styles.rowIcon, { backgroundColor: 'rgba(50, 17, 212, 0.18)' }]}>
-                                    <MaterialSymbols name="language" size={20} color={colors.primary} />
-                                </View>
-                                <View style={styles.rowTextWrap}>
-                                    <Text style={[styles.rowTitle, { color: colors.text }]}>
-                                        {t('settings.language')}
-                                    </Text>
-                                    <Text style={[styles.rowSubtitle, { color: colors.textSecondary }]}>
-                                        {t('settings.languageDescription')}
-                                    </Text>
-                                </View>
-                            </View>
-
-                            <View style={styles.rowTrailing}>
-                                <Text style={[styles.rowTrailingText, { color: colors.primary }]}>
-                                    {settings.language === 'en' ? t('settings.languageEnglish') : t('settings.languageRussian')}
-                                </Text>
-                                <MaterialSymbols name="chevron-right" size={20} color={colors.textSecondary} />
-                            </View>
-                        </View>
-                    </Pressable>
-                </View>
 
                 <Text style={[styles.sectionTitle, { color: colors.textSecondary }]}>
                     {t('settings.systemConfiguration')}
@@ -723,7 +711,8 @@ export const SettingsScreen = () => {
                         </View>
                     </View>
                 </View>
-            </ScrollView>
+                </ScrollView>
+            </View>
         </View>
     );
 };

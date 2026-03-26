@@ -63,7 +63,7 @@ export function PresetSelectorSheet({
                 }}
                 className="flex-row items-center justify-center gap-2 rounded-2xl border border-outline-200 bg-background-50 px-4 py-3 active:opacity-80 dark:border-outline-800 dark:bg-background-900/60"
               >
-                <MaterialSymbols name="settings_suggest" size={18} className="text-typography-700 dark:text-typography-200" />
+                <MaterialSymbols name="tune" size={18} className="text-typography-700 dark:text-typography-200" />
                 <Text className="text-sm font-semibold text-typography-700 dark:text-typography-200">
                   {t('chat.presetSelector.manage')}
                 </Text>

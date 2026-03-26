@@ -8,6 +8,7 @@ import { Box } from '@/components/ui/box';
 import { Input, InputField } from '@/components/ui/input';
 import { MaterialSymbols } from '@/components/ui/MaterialSymbols';
 import { Pressable } from '@/components/ui/pressable';
+import { ScreenContent, ScreenHeaderShell } from '@/components/ui/ScreenShell';
 import { Text } from '@/components/ui/text';
 import { useChatSession } from '../../hooks/useChatSession';
 import { ConversationIndexItem } from '../../types/chat';
@@ -191,6 +192,57 @@ export function ConversationsScreen() {
     );
   };
 
+  const renderRetentionCard = () => (
+    <Box className="rounded-3xl border border-outline-200 bg-background-50 p-4 dark:border-outline-800 dark:bg-background-900/60">
+      <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">
+        {t('conversations.retention.title')}
+      </Text>
+      <Text className="mt-1 text-sm text-typography-500 dark:text-typography-400">
+        {t('conversations.retention.description')}
+      </Text>
+
+      <Box className="mt-4 gap-3">
+        {CHAT_RETENTION_OPTIONS.map((option) => {
+          const isActive = option.days === chatRetentionDays;
+
+          return (
+            <Pressable
+              key={option.labelKey}
+              testID={`retention-option-${option.days == null ? 'forever' : option.days}`}
+              onPress={() => {
+                handleChatRetentionPress(option.days);
+              }}
+              className={`rounded-2xl border px-4 py-3 active:opacity-80 ${isActive
+                ? 'border-primary-500/30 bg-primary-500/10'
+                : 'border-outline-200 bg-background-0 dark:border-outline-800 dark:bg-background-950/60'}`}
+            >
+              <Box className="flex-row items-start justify-between gap-3">
+                <Box className="min-w-0 flex-1">
+                  <Text className={`text-sm font-semibold ${isActive
+                    ? 'text-primary-600 dark:text-primary-400'
+                    : 'text-typography-900 dark:text-typography-100'}`}>
+                    {t(option.labelKey)}
+                  </Text>
+                  <Text className="mt-1 text-xs leading-5 text-typography-500 dark:text-typography-400">
+                    {t(option.descriptionKey)}
+                  </Text>
+                </Box>
+
+                <Box className={`rounded-full px-2 py-1 ${isActive ? 'bg-primary-500/15' : 'bg-background-100 dark:bg-background-900/60'}`}>
+                  <Text className={`text-2xs font-semibold uppercase tracking-wide ${isActive
+                    ? 'text-primary-600 dark:text-primary-400'
+                    : 'text-typography-500 dark:text-typography-400'}`}>
+                    {isActive ? t('common.active') : formatRetentionLabel(option.days, t)}
+                  </Text>
+                </Box>
+              </Box>
+            </Pressable>
+          );
+        })}
+      </Box>
+    </Box>
+  );
+
   const renderItem = useCallback<ListRenderItem<ConversationIndexItem>>(({ item }) => {
     const isActive = activeThread?.id === item.id;
     const isEditing = editingThreadId === item.id;
@@ -314,10 +366,7 @@ export function ConversationsScreen() {
 
   return (
     <Box className="flex-1 bg-background-0 dark:bg-background-950">
-      <Box
-        className="border-b border-outline-200 bg-background-0 px-4 pb-4 dark:border-outline-800 dark:bg-background-950"
-        style={{ paddingTop: insets.top + 8 }}
-      >
+      <ScreenHeaderShell contentClassName="px-4 pb-4 pt-2">
         <Box className="flex-row items-center gap-3">
           <Pressable
             testID="conversations-back"
@@ -329,7 +378,7 @@ export function ConversationsScreen() {
 
               router.replace('/' as any);
             }}
-            className="h-11 w-11 items-center justify-center rounded-full bg-background-100 active:opacity-70 dark:bg-background-900/60"
+            className="h-11 w-11 items-center justify-center rounded-full bg-background-50 active:opacity-70 dark:bg-background-900/60"
           >
             <MaterialSymbols name="arrow-back-ios-new" size={20} className="text-primary-500" />
           </Pressable>
@@ -388,80 +437,37 @@ export function ConversationsScreen() {
             </Pressable>
           ) : null}
         </Box>
+      </ScreenHeaderShell>
 
-        <Box className="mt-4 rounded-3xl border border-outline-200 bg-background-50 p-4 dark:border-outline-800 dark:bg-background-900/60">
-          <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">
-            {t('conversations.retention.title')}
-          </Text>
-          <Text className="mt-1 text-sm text-typography-500 dark:text-typography-400">
-            {t('conversations.retention.description')}
-          </Text>
+      <ScreenContent className="flex-1 px-4 pt-4">
+        {renderRetentionCard()}
 
-          <Box className="mt-4 gap-3">
-            {CHAT_RETENTION_OPTIONS.map((option) => {
-              const isActive = option.days === chatRetentionDays;
-
-              return (
-                <Pressable
-                  key={option.labelKey}
-                  testID={`retention-option-${option.days == null ? 'forever' : option.days}`}
-                  onPress={() => {
-                    handleChatRetentionPress(option.days);
-                  }}
-                  className={`rounded-2xl border px-4 py-3 active:opacity-80 ${isActive
-                    ? 'border-primary-500/30 bg-primary-500/10'
-                    : 'border-outline-200 bg-background-0 dark:border-outline-800 dark:bg-background-950/60'}`}
-                >
-                  <Box className="flex-row items-start justify-between gap-3">
-                    <Box className="min-w-0 flex-1">
-                      <Text className={`text-sm font-semibold ${isActive
-                        ? 'text-primary-600 dark:text-primary-400'
-                        : 'text-typography-900 dark:text-typography-100'}`}>
-                        {t(option.labelKey)}
-                      </Text>
-                      <Text className="mt-1 text-xs leading-5 text-typography-500 dark:text-typography-400">
-                        {t(option.descriptionKey)}
-                      </Text>
-                    </Box>
-
-                    <Box className={`rounded-full px-2 py-1 ${isActive ? 'bg-primary-500/15' : 'bg-background-100 dark:bg-background-900/60'}`}>
-                      <Text className={`text-2xs font-semibold uppercase tracking-wide ${isActive
-                        ? 'text-primary-600 dark:text-primary-400'
-                        : 'text-typography-500 dark:text-typography-400'}`}>
-                        {isActive ? t('common.active') : formatRetentionLabel(option.days, t)}
-                      </Text>
-                    </Box>
-                  </Box>
-                </Pressable>
-              );
-            })}
+        {filteredConversations.length > 0 ? (
+          <Box className="flex-1 pt-4">
+            <FlashList
+              data={filteredConversations}
+              keyExtractor={(item) => item.id}
+              renderItem={renderItem}
+              keyboardShouldPersistTaps="handled"
+              contentContainerStyle={{ paddingBottom: insets.bottom + 32 }}
+              ItemSeparatorComponent={() => <Box className="h-4" />}
+            />
           </Box>
-        </Box>
-      </Box>
-
-      {filteredConversations.length > 0 ? (
-        <FlashList
-          data={filteredConversations}
-          keyExtractor={(item) => item.id}
-          renderItem={renderItem}
-          keyboardShouldPersistTaps="handled"
-          contentContainerStyle={{ padding: 16, paddingBottom: insets.bottom + 32 }}
-          ItemSeparatorComponent={() => <Box className="h-4" />}
-        />
-      ) : (
-        <Box className="flex-1 px-4 pb-6" style={{ paddingTop: 24 + insets.top / 4 }}>
-          <Box className="rounded-3xl border border-dashed border-outline-200 bg-background-50 px-5 py-6 dark:border-outline-800 dark:bg-background-900/60">
-            <Text className="text-base font-semibold text-typography-800 dark:text-typography-100">
-              {conversationIndex.length === 0 ? t('conversations.emptyTitle') : t('conversations.emptySearchTitle')}
-            </Text>
-            <Text className="mt-2 text-sm text-typography-500 dark:text-typography-400">
-              {conversationIndex.length === 0
-                ? t('conversations.emptyDescription')
-                : t('conversations.emptySearchDescription')}
-            </Text>
+        ) : (
+          <Box className="flex-1 pb-6 pt-4">
+            <Box className="rounded-3xl border border-dashed border-outline-200 bg-background-50 px-5 py-6 dark:border-outline-800 dark:bg-background-900/60">
+              <Text className="text-base font-semibold text-typography-800 dark:text-typography-100">
+                {conversationIndex.length === 0 ? t('conversations.emptyTitle') : t('conversations.emptySearchTitle')}
+              </Text>
+              <Text className="mt-2 text-sm text-typography-500 dark:text-typography-400">
+                {conversationIndex.length === 0
+                  ? t('conversations.emptyDescription')
+                  : t('conversations.emptySearchDescription')}
+              </Text>
+            </Box>
           </Box>
-        </Box>
-      )}
+        )}
+      </ScreenContent>
     </Box>
   );
 }

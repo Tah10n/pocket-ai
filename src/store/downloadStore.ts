@@ -13,6 +13,22 @@ interface DownloadState {
   updateModelInQueue: (modelId: string, updates: Partial<ModelMetadata>) => void;
 }
 
+export function normalizePersistedDownloadQueue(queue: ModelMetadata[]): ModelMetadata[] {
+  return queue.map((model) => {
+    if (
+      model.lifecycleStatus === LifecycleStatus.DOWNLOADING ||
+      model.lifecycleStatus === LifecycleStatus.VERIFYING
+    ) {
+      return {
+        ...model,
+        lifecycleStatus: LifecycleStatus.QUEUED,
+      };
+    }
+
+    return model;
+  });
+}
+
 export const useDownloadStore = create<DownloadState>()(
   subscribeWithSelector(
     persist(
@@ -42,6 +58,14 @@ export const useDownloadStore = create<DownloadState>()(
         // Do NOT persist activeDownloadId — after a restart, no real download is running.
         // Persisting it would leave the UI in a permanent "downloading" spinner state.
         partialize: (state) => ({ queue: state.queue }),
+        onRehydrateStorage: () => (state) => {
+          if (!state) {
+            return;
+          }
+
+          state.activeDownloadId = null;
+          state.queue = normalizePersistedDownloadQueue(state.queue);
+        },
       }
     )
   )

@@ -3,7 +3,8 @@ import { Box } from './box';
 import { Input, InputField } from './input';
 import { Text } from './text';
 import { Pressable } from './pressable';
-import MaterialIcons from '@expo/vector-icons/MaterialIcons';
+import { MaterialSymbols } from './MaterialSymbols';
+import { ScreenHeaderShell } from './ScreenShell';
 import { useTranslation } from 'react-i18next';
 import { typographyColors } from '../../utils/themeTokens';
 
@@ -25,29 +26,43 @@ export const SearchHeader: React.FC<SearchHeaderProps> = ({
   onOpenStorage,
 }) => {
   const { t } = useTranslation();
+
   return (
-    <Box className="pt-6 px-4 bg-background-0 dark:bg-background-950 z-10">
-      <Box className="flex-row items-center justify-between mb-4 mt-2">
-        {onBack && (
-          <Pressable onPress={onBack} className="active:opacity-70">
-            <MaterialIcons name="chevron-left" size={28} className="text-primary-500" />
-          </Pressable>
-        )}
-        <Text className="text-lg font-bold text-typography-900 dark:text-typography-100">{t('models.catalogTitle')}</Text>
-        {onOpenStorage ? (
-          <Pressable onPress={onOpenStorage} className="active:opacity-70">
-            <MaterialIcons name="storage" size={22} className="text-primary-500" />
+    <ScreenHeaderShell contentClassName="px-4 pb-4 pt-2">
+      <Box className="flex-row items-center gap-3">
+        {onBack ? (
+          <Pressable
+            onPress={onBack}
+            className="h-11 w-11 items-center justify-center rounded-full bg-background-50 active:opacity-70 dark:bg-background-900/60"
+          >
+            <MaterialSymbols name="arrow-back-ios-new" size={20} className="text-primary-500" />
           </Pressable>
         ) : (
-          <Box className="w-7" />
+          <Box className="h-11 w-11" />
+        )}
+
+        <Box className="flex-1">
+          <Text className="text-xl font-bold text-typography-900 dark:text-typography-100">
+            {t('models.catalogTitle')}
+          </Text>
+        </Box>
+
+        {onOpenStorage ? (
+          <Pressable
+            onPress={onOpenStorage}
+            className="h-11 w-11 items-center justify-center rounded-full bg-background-50 active:opacity-70 dark:bg-background-900/60"
+          >
+            <MaterialSymbols name="storage" size={20} className="text-primary-500" />
+          </Pressable>
+        ) : (
+          <Box className="h-11 w-11" />
         )}
       </Box>
 
-      {/* Search Bar */}
-      <Box className="flex-row w-full items-center rounded-lg bg-background-50 dark:bg-background-900/60 mb-4 h-10 px-3 border border-outline-200 dark:border-outline-800">
-        <MaterialIcons name="search" size={20} className="text-typography-500 dark:text-typography-400" />
-        <Input className="flex-1 h-full ml-2 border-0 bg-transparent flex items-center justify-center">
-          <InputField 
+      <Box className="mt-4 flex-row w-full items-center rounded-2xl bg-background-50 dark:bg-background-900/60 h-12 px-3 border border-outline-200 dark:border-outline-800">
+        <MaterialSymbols name="search" size={20} className="text-typography-500 dark:text-typography-400" />
+        <Input className="ml-2 flex-1 h-full border-0 bg-transparent justify-center">
+          <InputField
             className="text-sm text-typography-900 dark:text-typography-100"
             placeholder={t('models.searchPlaceholder')}
             placeholderTextColor={typographyColors[400]}
@@ -55,20 +70,19 @@ export const SearchHeader: React.FC<SearchHeaderProps> = ({
             onChangeText={onSearchChange}
           />
         </Input>
-        {searchQuery.length > 0 && (
-          <Pressable onPress={() => onSearchChange('')} className="active:opacity-70">
-            <MaterialIcons name="close" size={18} className="text-typography-400" />
+        {searchQuery.length > 0 ? (
+          <Pressable onPress={() => onSearchChange('')} className="h-9 w-9 items-center justify-center rounded-full active:opacity-70">
+            <MaterialSymbols name="close" size={18} className="text-typography-400" />
           </Pressable>
-        )}
+        ) : null}
       </Box>
 
-      {/* Tabs */}
-      <Box className="flex-row gap-6 border-b border-outline-200 dark:border-primary-500/20">
+      <Box className="mt-4 flex-row gap-6 border-b border-outline-200 dark:border-primary-500/20">
         {(['All Models', 'Downloaded'] as const).map((tab) => (
-          <Pressable 
+          <Pressable
             key={tab}
             onPress={() => onTabChange(tab)}
-            className={`items-center pb-2 border-b-2 ${activeTab === tab ? 'border-primary-500' : 'border-transparent'}`}
+            className={`items-center pb-3 border-b-2 ${activeTab === tab ? 'border-primary-500' : 'border-transparent'}`}
           >
             <Text className={`text-sm ${activeTab === tab ? 'font-bold text-primary-500' : 'font-medium text-typography-500 dark:text-typography-400'}`}>
               {tab === 'All Models' ? t('models.tabAllModels') : t('models.tabDownloaded')}
@@ -76,6 +90,6 @@ export const SearchHeader: React.FC<SearchHeaderProps> = ({
           </Pressable>
         ))}
       </Box>
-    </Box>
+    </ScreenHeaderShell>
   );
 };

@@ -4,6 +4,7 @@ import { useRouter } from 'expo-router';
 import { useTranslation } from 'react-i18next';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MaterialSymbols } from '@/components/ui/MaterialSymbols';
+import { ScreenHeaderShell } from '@/components/ui/ScreenShell';
 import { useTheme } from '../../providers/ThemeProvider';
 
 const styles = StyleSheet.create({
@@ -99,8 +100,8 @@ export function LegalScreen() {
     ], [colors.primary, colors.warning]);
 
     return (
-        <View style={[styles.screen, { backgroundColor: colors.background }]}>
-            <View style={[styles.header, { paddingTop: insets.top, borderBottomColor: colors.border, backgroundColor: colors.background }]}>
+        <View style={{ flex: 1, backgroundColor: colors.background }}>
+            <ScreenHeaderShell>
                 <View style={styles.headerBar}>
                     <Pressable
                         testID="legal-back-button"
@@ -120,33 +121,35 @@ export function LegalScreen() {
                         <Text style={[styles.headerSubtitle, { color: colors.textSecondary }]}>{t('legal.subtitle')}</Text>
                     </View>
                 </View>
-            </View>
+            </ScreenHeaderShell>
 
-            <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={[styles.content, { paddingBottom: insets.bottom + 32 }]}>
-                <View style={[styles.introCard, { backgroundColor: cardBackground, borderColor: colors.border }]}>
-                    <Text style={[styles.introEyebrow, { color: colors.primary }]}>{t('legal.eyebrow')}</Text>
-                    <Text style={[styles.introTitle, { color: colors.text }]}>{t('legal.introTitle')}</Text>
-                    <Text style={[styles.introBody, { color: colors.textSecondary }]}>{t('legal.introDescription')}</Text>
-                </View>
+            <View style={styles.screen}>
+                <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={[styles.content, { paddingBottom: insets.bottom + 32 }]}>
+                    <View style={[styles.introCard, { backgroundColor: cardBackground, borderColor: colors.border }]}>
+                        <Text style={[styles.introEyebrow, { color: colors.primary }]}>{t('legal.eyebrow')}</Text>
+                        <Text style={[styles.introTitle, { color: colors.text }]}>{t('legal.introTitle')}</Text>
+                        <Text style={[styles.introBody, { color: colors.textSecondary }]}>{t('legal.introDescription')}</Text>
+                    </View>
 
-                {sections.map((section) => (
-                    <View
-                        key={section.id}
-                        testID={`legal-section-${section.id}`}
-                        style={[styles.sectionCard, { backgroundColor: cardBackground, borderColor: colors.border }]}
-                    >
-                        <View style={styles.sectionHeader}>
-                            <View style={[styles.sectionIcon, { backgroundColor: section.iconBackground }]}>
-                                <MaterialSymbols name={section.icon as any} size={20} color={section.iconColor} />
-                            </View>
-                            <View style={styles.sectionTextWrap}>
-                                <Text style={[styles.sectionTitle, { color: colors.text }]}>{t(section.titleKey)}</Text>
-                                <Text style={[styles.sectionBody, { color: colors.textSecondary }]}>{t(section.bodyKey)}</Text>
+                    {sections.map((section) => (
+                        <View
+                            key={section.id}
+                            testID={`legal-section-${section.id}`}
+                            style={[styles.sectionCard, { backgroundColor: cardBackground, borderColor: colors.border }]}
+                        >
+                            <View style={styles.sectionHeader}>
+                                <View style={[styles.sectionIcon, { backgroundColor: section.iconBackground }]}>
+                                    <MaterialSymbols name={section.icon as any} size={20} color={section.iconColor} />
+                                </View>
+                                <View style={styles.sectionTextWrap}>
+                                    <Text style={[styles.sectionTitle, { color: colors.text }]}>{t(section.titleKey)}</Text>
+                                    <Text style={[styles.sectionBody, { color: colors.textSecondary }]}>{t(section.bodyKey)}</Text>
+                                </View>
                             </View>
                         </View>
-                    </View>
-                ))}
-            </ScrollView>
+                    ))}
+                </ScrollView>
+            </View>
         </View>
     );
 }

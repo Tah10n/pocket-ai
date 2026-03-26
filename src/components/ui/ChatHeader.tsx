@@ -1,11 +1,9 @@
 import React from 'react';
-import { Platform } from 'react-native';
 import { Box } from '@/components/ui/box';
 import { Text } from '@/components/ui/text';
 import { Pressable } from '@/components/ui/pressable';
-import { BlurView } from 'expo-blur';
 import { MaterialSymbols } from './MaterialSymbols';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { ScreenHeaderShell } from './ScreenShell';
 
 interface ChatHeaderProps {
   title: string;
@@ -34,8 +32,6 @@ export const ChatHeader = ({
   onBack,
   onMenu,
 }: ChatHeaderProps) => {
-  const insets = useSafeAreaInsets();
-  const containerClassName = "bg-background-0/80 dark:bg-background-950/80";
   const metadataTextClassName = 'text-xs text-typography-500 dark:text-typography-400';
 
   const content = (
@@ -124,21 +120,8 @@ export const ChatHeader = ({
   );
 
   return (
-    <Box className="z-10 w-full overflow-hidden border-b border-outline-200 dark:border-outline-800">
-      {Platform.OS === 'android' ? (
-        <Box className={containerClassName} style={{ paddingTop: insets.top }}>
-          {content}
-        </Box>
-      ) : (
-        <BlurView
-          intensity={80}
-          tint="default"
-          className={containerClassName}
-          style={{ paddingTop: insets.top }}
-        >
-          {content}
-        </BlurView>
-      )}
-    </Box>
+    <ScreenHeaderShell maxWidthClassName="max-w-2xl">
+      {content}
+    </ScreenHeaderShell>
   );
 };

@@ -1,11 +1,13 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Alert, Modal } from 'react-native';
 import { FlashList } from '@shopify/flash-list';
+import { useRouter } from 'expo-router';
 import { Box } from '@/components/ui/box';
 import { Button, ButtonText } from '@/components/ui/button';
 import { Input, InputField } from '@/components/ui/input';
 import { MaterialSymbols } from '@/components/ui/MaterialSymbols';
 import { Pressable } from '@/components/ui/pressable';
+import { ScreenContent, ScreenHeaderShell } from '@/components/ui/ScreenShell';
 import { ScrollView } from '@/components/ui/scroll-view';
 import { Text } from '@/components/ui/text';
 import { useTranslation } from 'react-i18next';
@@ -20,6 +22,7 @@ interface EditorState {
 }
 
 export function PresetManagerScreen() {
+    const router = useRouter();
     const [presets, setPresets] = useState<SystemPromptPreset[]>([]);
     const [activePresetId, setActivePresetId] = useState<string | null>(() => getSettings().activePresetId);
     const [editorState, setEditorState] = useState<EditorState>({ preset: null, visible: false });
@@ -163,34 +166,51 @@ export function PresetManagerScreen() {
 
     return (
         <Box className="flex-1 bg-background-0 dark:bg-background-950">
-            <Box className="border-b border-outline-200 px-4 pb-4 pt-4 dark:border-outline-800">
+            <ScreenHeaderShell contentClassName="px-4 pb-4 pt-2">
                 <Box className="flex-row items-center justify-between gap-3">
-                    <Box className="flex-1">
-                        <Text className="text-2xl font-bold text-typography-900 dark:text-typography-100">
-                            {t('settings.presets')}
-                        </Text>
-                        <Text className="mt-1 text-sm text-typography-500 dark:text-typography-400">
-                            {t('presets.activePreset', { name: activePresetName })}
-                        </Text>
+                    <Box className="flex-row items-center gap-3 flex-1">
+                        <Pressable
+                            onPress={() => {
+                                if (router.canGoBack()) {
+                                    router.back();
+                                    return;
+                                }
+
+                                router.replace('/(tabs)/settings' as any);
+                            }}
+                            className="h-11 w-11 items-center justify-center rounded-full bg-background-50 active:opacity-70 dark:bg-background-900/60"
+                        >
+                            <MaterialSymbols name="arrow-back-ios-new" size={20} className="text-primary-500" />
+                        </Pressable>
+
+                        <Box className="flex-1">
+                            <Text className="text-xl font-bold text-typography-900 dark:text-typography-100">
+                                {t('settings.presets')}
+                            </Text>
+                            <Text className="mt-1 text-sm text-typography-500 dark:text-typography-400">
+                                {t('presets.activePreset', { name: activePresetName })}
+                            </Text>
+                        </Box>
                     </Box>
 
                     <Pressable
                         onPress={openCreatePreset}
-                        className="flex-row items-center gap-2 rounded-full bg-primary-500 px-4 py-2 active:opacity-80"
+                        className="flex-row items-center gap-2 rounded-full bg-primary-500 px-4 py-3 active:opacity-80"
                     >
                         <MaterialSymbols name="add" size={18} className="text-typography-0" />
                         <Text className="text-sm font-semibold text-typography-0">{t('presets.addPreset')}</Text>
                     </Pressable>
                 </Box>
-            </Box>
+            </ScreenHeaderShell>
 
-            <Box className="flex-1 px-4 pb-8 pt-4">
+            <ScreenContent className="flex-1 px-4 pb-8 pt-4">
                 <FlashList
                     data={presets}
                     keyExtractor={(item) => item.id}
                     renderItem={renderItem}
+                    contentContainerStyle={{ paddingBottom: 24 }}
                 />
-            </Box>
+            </ScreenContent>
 
             <Modal visible={editorState.visible} animationType="slide" transparent onRequestClose={closeEditor}>
                 <Box className="flex-1 justify-end bg-black/40">

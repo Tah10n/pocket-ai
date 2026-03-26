@@ -6,9 +6,14 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 const mockPush = jest.fn();
 const mockReplace = jest.fn();
 const mockGetModels = jest.fn(() => []);
+const mockStartNewChat = jest.fn();
 let mockEngineState: { activeModelId: string | null } = {
     activeModelId: 'author/model-q4',
 };
+
+jest.mock('@react-navigation/bottom-tabs', () => ({
+    useBottomTabBarHeight: () => 0,
+}));
 
 // Mock expo-router components
 jest.mock('expo-router', () => ({
@@ -40,6 +45,7 @@ jest.mock('../src/hooks/useChatSession', () => ({
     useChatSession: () => ({
         deleteThread: jest.fn(),
         openThread: jest.fn(),
+        startNewChat: mockStartNewChat,
     }),
 }));
 
@@ -64,6 +70,7 @@ describe('HomeScreen', () => {
         mockReplace.mockReset();
         mockGetModels.mockReset();
         mockGetModels.mockReturnValue([]);
+        mockStartNewChat.mockReset();
         mockEngineState = {
             activeModelId: 'author/model-q4',
         };
@@ -107,5 +114,23 @@ describe('HomeScreen', () => {
             pathname: '/(tabs)/models',
             params: undefined,
         });
+    });
+
+    it('starts a fresh chat before navigating to the chat tab', () => {
+        const { getByText } = render(
+            <SafeAreaProvider
+                initialMetrics={{
+                    frame: { x: 0, y: 0, width: 390, height: 844 },
+                    insets: { top: 0, left: 0, right: 0, bottom: 0 },
+                }}
+            >
+                <HomeScreen />
+            </SafeAreaProvider>
+        );
+
+        fireEvent.press(getByText('home.newChat'));
+
+        expect(mockStartNewChat).toHaveBeenCalled();
+        expect(mockPush).toHaveBeenCalledWith('/(tabs)/chat');
     });
 });

@@ -140,13 +140,14 @@ export const ChatInputBar = ({
                     <Input className="flex-1 bg-transparent border-0 h-10 max-h-28">
                         <InputField
                             accessibilityLabel={t('chat.inputAccessibilityLabel')}
-                            className="h-10 text-[15px] leading-5 text-typography-900 dark:text-typography-0"
+                            className="h-10 py-0 text-[15px] text-typography-900 dark:text-typography-0"
                             placeholder={placeholder}
                             placeholderTextColor={typographyColors[400]}
                             keyboardType="default"
                             returnKeyType="send"
                             enterKeyHint="send"
                             submitBehavior="submit"
+                            textAlignVertical="center"
                             value={message}
                             onChangeText={setMessage}
                             onSubmitEditing={() => {

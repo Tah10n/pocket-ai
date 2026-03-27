@@ -14,30 +14,60 @@ interface ChatHeaderProps {
   statusTone?: 'neutral' | 'accent' | 'warning';
   canStartNewChat?: boolean;
   onStartNewChat?: () => void;
+  onOpenPresetSelector?: () => void;
+  canOpenPresetSelector?: boolean;
   onOpenModelControls?: () => void;
   canOpenModelControls?: boolean;
   onBack?: () => void;
-  onMenu?: () => void;
 }
 
 function HeaderChip({
   label,
   tone = 'neutral',
+  onPress,
+  disabled = false,
+  accessibilityLabel,
 }: {
   label: string;
   tone?: 'neutral' | 'accent' | 'warning';
+  onPress?: () => void;
+  disabled?: boolean;
+  accessibilityLabel?: string;
 }) {
   const toneClassName = tone === 'accent'
     ? 'border border-primary-500/20 bg-primary-500/10 text-primary-700 dark:bg-primary-500/20 dark:text-primary-200'
     : tone === 'warning'
       ? 'border border-warning-400/30 bg-warning-100 text-warning-800 dark:border-warning-600/40 dark:bg-warning-900/50 dark:text-warning-100'
       : 'border border-outline-200 bg-background-50 text-typography-700 dark:border-outline-700 dark:bg-background-900/70 dark:text-typography-200';
-
-  return (
-    <Box className={`max-w-full shrink rounded-full px-2 py-0.5 ${toneClassName}`}>
+  const content = (
+    <>
       <Text numberOfLines={1} className="text-[10px] font-semibold">
         {label}
       </Text>
+      {onPress ? (
+        <MaterialSymbols name="keyboard-arrow-down" size={12} className="text-current" />
+      ) : null}
+    </>
+  );
+
+  if (onPress) {
+    return (
+      <Pressable
+        onPress={onPress}
+        disabled={disabled}
+        accessibilityRole="button"
+        accessibilityLabel={accessibilityLabel}
+        hitSlop={8}
+        className={`max-w-full shrink flex-row items-center gap-0.5 rounded-full px-2 py-0.5 active:opacity-70 ${toneClassName} ${disabled ? 'opacity-60' : ''}`}
+      >
+        {content}
+      </Pressable>
+    );
+  }
+
+  return (
+    <Box className={`max-w-full shrink flex-row items-center gap-0.5 rounded-full px-2 py-0.5 ${toneClassName}`}>
+      {content}
     </Box>
   );
 }
@@ -78,10 +108,11 @@ export const ChatHeader = ({
   statusTone = 'neutral',
   canStartNewChat = true,
   onStartNewChat,
+  onOpenPresetSelector,
+  canOpenPresetSelector = true,
   onOpenModelControls,
   canOpenModelControls = true,
   onBack,
-  onMenu,
 }: ChatHeaderProps) => {
   const { t } = useTranslation();
   const isModelUnavailable = modelLabel === t('chat.modelUnavailable');
@@ -118,7 +149,15 @@ export const ChatHeader = ({
 
               {(presetLabel || statusLabel) ? (
                 <Box className="mt-1 flex-row flex-wrap items-center gap-x-1.5 gap-y-1">
-                  {presetLabel ? <HeaderChip label={presetLabel} tone="accent" /> : null}
+                  {presetLabel ? (
+                    <HeaderChip
+                      label={presetLabel}
+                      tone="accent"
+                      onPress={onOpenPresetSelector}
+                      disabled={!canOpenPresetSelector}
+                      accessibilityLabel={t('chat.headerPresetAccessibilityLabel')}
+                    />
+                  ) : null}
                   {statusLabel ? <HeaderStatus label={statusLabel} tone={statusTone} /> : null}
                 </Box>
               ) : null}
@@ -158,30 +197,23 @@ export const ChatHeader = ({
               ) : null}
 
               {onStartNewChat ? (
-                canStartNewChat ? (
-                  <Pressable
-                    onPress={onStartNewChat}
-                    accessibilityRole="button"
-                    accessibilityLabel={t('chat.headerNewChatAccessibilityLabel')}
-                    hitSlop={8}
-                    className="h-8 w-8 items-center justify-center rounded-full bg-primary-500/10 active:opacity-70"
-                  >
-                    <MaterialSymbols name="edit-square" size={17} className="text-primary-500" />
-                  </Pressable>
-                ) : (
-                  <Box className="h-8 w-8 shrink-0" />
-                )
+                <Pressable
+                  onPress={onStartNewChat}
+                  disabled={!canStartNewChat}
+                  accessibilityRole="button"
+                  accessibilityLabel={t('chat.headerNewChatAccessibilityLabel')}
+                  hitSlop={8}
+                  className={`h-8 w-8 items-center justify-center rounded-full active:opacity-70 ${canStartNewChat
+                    ? 'bg-primary-500/10'
+                    : 'bg-background-100 dark:bg-background-900/60'}`}
+                >
+                  <MaterialSymbols
+                    name="edit-square"
+                    size={17}
+                    className={canStartNewChat ? 'text-primary-500' : 'text-typography-400 dark:text-typography-500'}
+                  />
+                </Pressable>
               ) : null}
-
-              <Pressable
-                onPress={onMenu}
-                accessibilityRole="button"
-                accessibilityLabel={t('chat.headerMenuAccessibilityLabel')}
-                hitSlop={8}
-                className="h-8 w-8 items-center justify-center rounded-full active:opacity-70"
-              >
-                <MaterialSymbols name="more-horiz" size={19} className="text-typography-500 dark:text-typography-400" />
-              </Pressable>
             </Box>
           </Box>
         </Box>

@@ -107,6 +107,7 @@
     "noModelBadge": "Нет модели",
     "localModelBadge": "Локальная модель",
     "headerBackAccessibilityLabel": "Вернуться назад",
+    "headerPresetAccessibilityLabel": "Открыть выбор пресета для этого чата",
     "headerModelControlsAccessibilityLabel": "Открыть параметры модели",
     "headerNewChatAccessibilityLabel": "Начать новый чат",
     "headerMenuAccessibilityLabel": "Открыть меню разговора",

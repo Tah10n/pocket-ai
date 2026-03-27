@@ -133,4 +133,21 @@ describe('HomeScreen', () => {
         expect(mockStartNewChat).toHaveBeenCalled();
         expect(mockPush).toHaveBeenCalledWith('/(tabs)/chat');
     });
+
+    it('opens conversation history management from the recent chats header', () => {
+        const { getByTestId } = render(
+            <SafeAreaProvider
+                initialMetrics={{
+                    frame: { x: 0, y: 0, width: 390, height: 844 },
+                    insets: { top: 0, left: 0, right: 0, bottom: 0 },
+                }}
+            >
+                <HomeScreen />
+            </SafeAreaProvider>
+        );
+
+        fireEvent.press(getByTestId('manage-conversations-button'));
+
+        expect(mockPush).toHaveBeenCalledWith('/conversations');
+    });
 });

@@ -49,7 +49,7 @@ export const RecentConversationsList = ({
     icon: 'chat-bubble',
   })), [summaries]);
   const visibleConversations = useMemo(() => conversations.slice(0, maxVisible), [conversations, maxVisible]);
-  const shouldShowViewAll = Boolean(onViewAllConversations) && conversations.length > maxVisible;
+  const canManageConversations = Boolean(onViewAllConversations);
 
   const renderConversation = useCallback((conv: Conversation) => (
     <Box className="flex-row items-center rounded-xl bg-background-50 dark:bg-primary-500/5 border border-outline-200 dark:border-primary-500/10">
@@ -95,14 +95,15 @@ export const RecentConversationsList = ({
     <Box className="mt-5 px-4 pb-3">
       <Box className="mb-3 flex-row items-center justify-between gap-3">
         <Text className="text-typography-900 dark:text-typography-100 text-lg font-bold leading-tight tracking-tight">{t('home.recentConversations')}</Text>
-        {shouldShowViewAll ? (
+        {canManageConversations ? (
           <Pressable
-            testID="view-all-conversations"
+            testID="manage-conversations-button"
             onPress={onViewAllConversations}
-            className="rounded-full border border-primary-500/20 bg-primary-500/10 px-3 py-2 active:opacity-70"
+            className="flex-row items-center gap-1.5 rounded-full border border-primary-500/20 bg-primary-500/10 px-3 py-2 active:opacity-70"
           >
+            <MaterialSymbols name="history" size={16} className="text-primary-500" />
             <Text className="text-xs font-semibold uppercase tracking-wide text-primary-500">
-              {t('home.seeAll')}
+              {t('common.manage')}
             </Text>
           </Pressable>
         ) : null}

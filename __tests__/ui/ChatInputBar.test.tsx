@@ -116,4 +116,17 @@ describe('ChatInputBar', () => {
       paddingBottom: 49,
     });
   });
+
+  it('centers single-line composer text without extra vertical padding', () => {
+    const onSendMessage = jest.fn();
+    const { getByPlaceholderText } = render(
+      <ChatInputBar onSendMessage={onSendMessage} />,
+    );
+
+    const input = getByPlaceholderText('chat.inputPlaceholder');
+
+    expect(input.props.textAlignVertical).toBe('center');
+    expect(input.props.className).toContain('py-0');
+    expect(input.props.className).not.toContain('leading-5');
+  });
 });

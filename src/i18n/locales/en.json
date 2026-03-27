@@ -107,6 +107,7 @@
     "noModelBadge": "No Model",
     "localModelBadge": "Local Model",
     "headerBackAccessibilityLabel": "Go back",
+    "headerPresetAccessibilityLabel": "Open the preset picker for this chat",
     "headerModelControlsAccessibilityLabel": "Open model controls",
     "headerNewChatAccessibilityLabel": "Start a new chat",
     "headerMenuAccessibilityLabel": "Open conversation menu",

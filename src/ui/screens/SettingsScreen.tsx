@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useBottomTabBarHeight } from '@react-navigation/bottom-tabs';
 import { useFocusEffect, useIsFocused } from '@react-navigation/native';
-import { router } from 'expo-router';
+import { useRouter } from 'expo-router';
 import { useTranslation } from 'react-i18next';
 import { MaterialSymbols } from '@/components/ui/MaterialSymbols';
 import { ScreenHeaderShell } from '@/components/ui/ScreenShell';
@@ -27,11 +27,21 @@ const styles = StyleSheet.create({
         borderBottomWidth: StyleSheet.hairlineWidth,
     },
     headerBar: {
-        height: 52,
+        minHeight: 56,
         flexDirection: 'row',
         alignItems: 'center',
-        justifyContent: 'space-between',
+        gap: 12,
         paddingHorizontal: 16,
+    },
+    backButton: {
+        height: 42,
+        width: 42,
+        borderRadius: 21,
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
+    headerTextWrap: {
+        flex: 1,
     },
     headerTitleRow: {
         flexDirection: 'row',
@@ -297,6 +307,7 @@ function formatPercent(value: number) {
 
 export const SettingsScreen = () => {
     const { t, i18n } = useTranslation();
+    const router = useRouter();
     const tabBarHeight = useBottomTabBarHeight();
     const isFocused = useIsFocused();
     const { mode, resolvedMode, setTheme, colors } = useTheme();
@@ -306,6 +317,7 @@ export const SettingsScreen = () => {
     const [appStorageMetrics, setAppStorageMetrics] = useState<AppStorageMetrics | null>(null);
 
     const isDark = resolvedMode === 'dark';
+    const canGoBack = router.canGoBack();
     const cardBackground = isDark ? 'rgba(15, 23, 42, 0.72)' : colors.surface;
     const mutedBackground = isDark ? 'rgba(30, 41, 59, 0.85)' : '#eef2f7';
     const selectedBackground = isDark ? '#111827' : '#ffffff';
@@ -418,13 +430,29 @@ export const SettingsScreen = () => {
         <View style={{ flex: 1, backgroundColor: colors.background }}>
             <ScreenHeaderShell>
                 <View style={styles.headerBar}>
-                    <View style={styles.headerTitleRow}>
-                        <View style={[styles.iconBubble, { backgroundColor: 'rgba(50, 17, 212, 0.10)' }]}>
-                            <MaterialSymbols name="settings" size={22} color={colors.primary} />
+                    <Pressable
+                        testID="settings-back-button"
+                        onPress={() => {
+                            if (canGoBack) {
+                                router.back();
+                                return;
+                            }
+
+                            router.replace('/' as any);
+                        }}
+                        style={[styles.backButton, { backgroundColor: mutedBackground }]}
+                    >
+                        <MaterialSymbols name="arrow-back-ios-new" size={18} color={colors.primary} />
+                    </Pressable>
+                    <View style={styles.headerTextWrap}>
+                        <View style={styles.headerTitleRow}>
+                            <View style={[styles.iconBubble, { backgroundColor: 'rgba(50, 17, 212, 0.10)' }]}>
+                                <MaterialSymbols name="settings" size={22} color={colors.primary} />
+                            </View>
+                            <Text style={[styles.headerTitle, { color: colors.text }]}>
+                                {t('settings.title')}
+                            </Text>
                         </View>
-                        <Text style={[styles.headerTitle, { color: colors.text }]}>
-                            {t('settings.title')}
-                        </Text>
                     </View>
                 </View>
             </ScreenHeaderShell>

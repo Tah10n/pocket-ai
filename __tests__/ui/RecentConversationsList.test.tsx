@@ -1,5 +1,5 @@
 import React from 'react';
-import { render } from '@testing-library/react-native';
+import { fireEvent, render } from '@testing-library/react-native';
 import { RecentConversationsList } from '../../src/components/ui/RecentConversationsList';
 import { useChatStore } from '../../src/store/chatStore';
 import { ChatThread, GenerationParamsSnapshot } from '../../src/types/chat';
@@ -119,7 +119,7 @@ describe('RecentConversationsList', () => {
     jest.restoreAllMocks();
   });
 
-  it('renders only the recent slice and shows See All when more conversations exist', () => {
+  it('renders only the recent slice and shows the manage button next to the section title', () => {
     const threads = Object.fromEntries(
       Array.from({ length: 6 }, (_, index) => {
         const thread = createThread(index + 1, 1_000_000 - index * 60_000);
@@ -141,7 +141,28 @@ describe('RecentConversationsList', () => {
     expect(getByText('Conversation 4')).toBeTruthy();
     expect(getByText('Conversation 5')).toBeTruthy();
     expect(queryByText('Conversation 6')).toBeNull();
-    expect(getByText('home.seeAll')).toBeTruthy();
+    expect(getByText('common.manage')).toBeTruthy();
+  });
+
+  it('keeps the manage button available even when every conversation already fits in the preview', () => {
+    const thread = createThread(1, 1_000_000);
+    const onViewAllConversations = jest.fn();
+
+    mockUseChatStore.mockImplementation((selector: any) =>
+      selector({
+        threads: {
+          [thread.id]: thread,
+        },
+      }),
+    );
+
+    const { getByTestId } = render(
+      <RecentConversationsList onViewAllConversations={onViewAllConversations} />,
+    );
+
+    fireEvent.press(getByTestId('manage-conversations-button'));
+
+    expect(onViewAllConversations).toHaveBeenCalledTimes(1);
   });
 });
 

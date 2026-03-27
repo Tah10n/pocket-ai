@@ -27,7 +27,6 @@ beforeAll(() => {
 });
 
 const mockRegenerateFromUserMessage = jest.fn();
-const mockOpenThread = jest.fn();
 const mockDeleteMessage = jest.fn();
 const mockStop = jest.fn();
 const mockCreateSummaryPlaceholder = jest.fn();
@@ -75,32 +74,47 @@ jest.mock('../../src/components/ui/ChatHeader', () => {
       statusLabel,
       presetLabel,
       modelLabel,
-      onMenu,
+      onOpenPresetSelector,
+      canOpenPresetSelector,
       onOpenModelControls,
+      canOpenModelControls,
     }: any) =>
       mockReact.createElement(
         View,
         null,
         mockReact.createElement(Text, null, title),
-        presetLabel ? mockReact.createElement(Text, null, presetLabel) : null,
-        modelLabel ? mockReact.createElement(Text, null, modelLabel) : null,
-        statusLabel ? mockReact.createElement(Text, null, statusLabel) : null,
-        canStartNewChat
+        presetLabel
           ? mockReact.createElement(
               Pressable,
-              { testID: 'new-chat-button', onPress: onStartNewChat },
+              {
+                testID: 'preset-button',
+                onPress: onOpenPresetSelector,
+                disabled: !canOpenPresetSelector,
+              },
+              mockReact.createElement(Text, null, presetLabel),
+            )
+          : null,
+        modelLabel ? mockReact.createElement(Text, null, modelLabel) : null,
+        statusLabel ? mockReact.createElement(Text, null, statusLabel) : null,
+        onStartNewChat
+          ? mockReact.createElement(
+              Pressable,
+              {
+                testID: 'new-chat-button',
+                onPress: onStartNewChat,
+                disabled: !canStartNewChat,
+              },
               mockReact.createElement(Text, null, 'New chat'),
             )
           : null,
-        mockReact.createElement(
-          Pressable,
-          { testID: 'menu-button', onPress: onMenu },
-          mockReact.createElement(Text, null, 'Menu'),
-        ),
         onOpenModelControls
           ? mockReact.createElement(
               Pressable,
-              { testID: 'model-controls-button', onPress: onOpenModelControls },
+              {
+                testID: 'model-controls-button',
+                onPress: onOpenModelControls,
+                disabled: !canOpenModelControls,
+              },
               mockReact.createElement(Text, null, 'Model controls'),
             )
           : null,
@@ -159,42 +173,6 @@ jest.mock('../../src/components/ui/ChatMessageBubble', () => {
             )
           : null,
       ),
-  };
-});
-
-jest.mock('../../src/components/ui/ConversationSwitcherSheet', () => {
-  const mockReact = require('react');
-  const { Pressable, Text, View } = require('react-native');
-
-  return {
-    ConversationSwitcherSheet: ({ visible, conversations, onSelectConversation, onOpenPresetSelector }: any) =>
-      visible
-        ? mockReact.createElement(
-            View,
-            { testID: 'conversation-switcher' },
-            onOpenPresetSelector
-              ? mockReact.createElement(
-                  Pressable,
-                  {
-                    testID: 'open-preset-selector',
-                    onPress: onOpenPresetSelector,
-                  },
-                  mockReact.createElement(Text, null, 'Presets'),
-                )
-              : null,
-            conversations.map((conversation: any) =>
-              mockReact.createElement(
-                Pressable,
-                {
-                  key: conversation.id,
-                  testID: `conversation-option-${conversation.id}`,
-                  onPress: () => onSelectConversation(conversation.id),
-                },
-                mockReact.createElement(Text, null, conversation.title),
-              ),
-            ),
-          )
-        : null,
   };
 });
 
@@ -306,10 +284,8 @@ jest.mock('../../src/hooks/useChatSession', () => ({
       0,
     ),
     appendUserMessage: jest.fn(),
-    conversationIndex: require('../../src/store/chatStore').useChatStore.getState().getConversationIndex(),
     deleteMessage: mockDeleteMessage,
     deleteThread: jest.fn(),
-    openThread: mockOpenThread,
     stopGeneration: mockStop,
     regenerateFromUserMessage: mockRegenerateFromUserMessage,
     createSummaryPlaceholder: mockCreateSummaryPlaceholder,
@@ -386,7 +362,6 @@ describe('ChatScreen', () => {
 
   beforeEach(() => {
     mockRegenerateFromUserMessage.mockClear();
-    mockOpenThread.mockClear();
     mockDeleteMessage.mockClear();
     mockStop.mockClear();
     mockCreateSummaryPlaceholder.mockClear();
@@ -638,6 +613,39 @@ describe('ChatScreen', () => {
     expect(mockStop).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps header actions visible but disabled while a response is generating', () => {
+    useChatStore.setState({
+      threads: {
+        'thread-1': {
+          ...useChatStore.getState().threads['thread-1'],
+          messages: [
+            ...useChatStore.getState().threads['thread-1'].messages,
+            {
+              id: 'message-3',
+              role: 'assistant',
+              content: 'Streaming reply',
+              createdAt: 3,
+              state: 'streaming',
+            },
+          ],
+          status: 'generating',
+        },
+      },
+      activeThreadId: 'thread-1',
+    });
+
+    const { getByTestId, queryByTestId } = render(React.createElement(ChatScreen));
+
+    expect(getByTestId('new-chat-button')).toBeTruthy();
+    expect(getByTestId('model-controls-button')).toBeTruthy();
+
+    fireEvent.press(getByTestId('new-chat-button'));
+    fireEvent.press(getByTestId('model-controls-button'));
+
+    expect(mockStartNewChat).not.toHaveBeenCalled();
+    expect(queryByTestId('model-parameters-sheet')).toBeNull();
+  });
+
   it('does not stop generation when the screen unmounts', () => {
     useChatStore.setState({
       threads: {
@@ -786,42 +794,10 @@ describe('ChatScreen', () => {
     expect(getByText('Summary generation is not available yet.')).toBeTruthy();
   });
 
-  it('opens the conversation switcher and selects another thread', () => {
-    useChatStore.setState({
-      threads: {
-        ...useChatStore.getState().threads,
-        'thread-2': {
-          ...useChatStore.getState().threads['thread-1'],
-          id: 'thread-2',
-          title: 'Another conversation',
-          messages: [
-            {
-              id: 'message-4',
-              role: 'user',
-              content: 'Another thread',
-              createdAt: 4,
-              state: 'complete',
-            },
-          ],
-          updatedAt: 4,
-        },
-      },
-      activeThreadId: 'thread-1',
-    });
-
-    const { getByTestId } = render(React.createElement(ChatScreen));
-
-    fireEvent.press(getByTestId('menu-button'));
-    fireEvent.press(getByTestId('conversation-option-thread-2'));
-
-    expect(mockOpenThread).toHaveBeenCalledWith('thread-2');
-  });
-
-  it('opens preset selection from the overflow sheet and updates the active thread preset', () => {
+  it('opens preset selection from the header and updates the active thread preset', () => {
     const { getByTestId, getByText, rerender } = render(React.createElement(ChatScreen));
 
-    fireEvent.press(getByTestId('menu-button'));
-    fireEvent.press(getByTestId('open-preset-selector'));
+    fireEvent.press(getByTestId('preset-button'));
     fireEvent.press(getByTestId('preset-option-preset-2'));
     rerender(React.createElement(ChatScreen));
 
@@ -854,8 +830,7 @@ describe('ChatScreen', () => {
 
     const { getByTestId } = render(React.createElement(ChatScreen));
 
-    fireEvent.press(getByTestId('menu-button'));
-    fireEvent.press(getByTestId('open-preset-selector'));
+    fireEvent.press(getByTestId('preset-button'));
 
     expect(lastPresetSelectorProps?.activePresetId).toBe('preset-1');
   });
@@ -863,8 +838,7 @@ describe('ChatScreen', () => {
   it('allows resetting the preset back to the default state', () => {
     const { getByTestId, getByText, rerender } = render(React.createElement(ChatScreen));
 
-    fireEvent.press(getByTestId('menu-button'));
-    fireEvent.press(getByTestId('open-preset-selector'));
+    fireEvent.press(getByTestId('preset-button'));
     fireEvent.press(getByTestId('preset-option-default'));
     rerender(React.createElement(ChatScreen));
 

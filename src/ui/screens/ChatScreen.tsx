@@ -22,7 +22,6 @@ import { ChatMessageBubble } from '@/components/ui/ChatMessageBubble';
 import { ChatInputBar } from '@/components/ui/ChatInputBar';
 import { ModelParametersSheet } from '@/components/ui/ModelParametersSheet';
 import { useTranslation } from 'react-i18next';
-import { ConversationSwitcherSheet } from '@/components/ui/ConversationSwitcherSheet';
 import { PresetSelectorSheet } from '@/components/ui/PresetSelectorSheet';
 import { resolvePresetSnapshot, useChatSession } from '../../hooks/useChatSession';
 import { useLLMEngine } from '../../hooks/useLLMEngine';
@@ -118,14 +117,12 @@ export function handleAndroidBackNavigation({
 export const ChatScreen = () => {
     const {
         activeThread,
-        conversationIndex,
         messages,
         isGenerating,
         shouldOfferSummary,
         truncatedMessageCount,
         appendUserMessage,
         deleteMessage,
-        openThread,
         stopGeneration,
         regenerateFromUserMessage,
         createSummaryPlaceholder,
@@ -138,11 +135,9 @@ export const ChatScreen = () => {
     const [hardwareStatus, setHardwareStatus] = useState(() => hardwareListenerService.getCurrentStatus());
     const [composerDraft, setComposerDraft] = useState('');
     const [androidKeyboardInset, setAndroidKeyboardInset] = useState(0);
-    const [isConversationSwitcherOpen, setConversationSwitcherOpen] = useState(false);
     const [isPresetSelectorOpen, setPresetSelectorOpen] = useState(false);
     const [isModelParametersOpen, setModelParametersOpen] = useState(false);
     const [isApplyingModelReload, setApplyingModelReload] = useState(false);
-    const [listResetNonce, setListResetNonce] = useState(0);
     const [settings, setSettings] = useState(() => getSettings());
     const [recommendedGpuLayers, setRecommendedGpuLayers] = useState(0);
     const [draftLoadParams, setDraftLoadParams] = useState<ModelLoadParameters>({
@@ -439,11 +434,6 @@ export const ChatScreen = () => {
         scrollToLatestMessage,
     ]);
 
-    const resumeFollowingLatestMessage = () => {
-        setListResetNonce((current) => current + 1);
-        armFollowLatestMessage(true);
-    };
-
     const handleSendMessage = async (content: string) => {
         armFollowLatestMessage(false);
         if (pendingRegenerateMessage) {
@@ -468,16 +458,6 @@ export const ChatScreen = () => {
         } catch (error) {
             setComposerDraft(content);
             throw error;
-        }
-    };
-
-    const handleSelectConversation = (threadId: string) => {
-        try {
-            openThread(threadId);
-            resumeFollowingLatestMessage();
-            router.push('/(tabs)/chat' as any);
-        } catch (error: any) {
-            showAlertForError('chat.switchConversationErrorTitle', 'ChatScreen.handleSelectConversation', error);
         }
     };
 
@@ -633,7 +613,7 @@ export const ChatScreen = () => {
         clearForcedScrollTimeouts();
         setPendingRegenerateMessage(null);
         setComposerDraft('');
-        setConversationSwitcherOpen(false);
+        setPresetSelectorOpen(false);
         setModelParametersOpen(false);
         setApplyingModelReload(false);
     }, [activeThread?.id, clearForcedScrollTimeouts]);
@@ -705,16 +685,6 @@ export const ChatScreen = () => {
         scheduleScrollToLatestMessage(false, hasForcedFollowPass);
     }, [lastMessageSignature, messages.length, scheduleScrollToLatestMessage]);
 
-    useEffect(() => {
-        if (listResetNonce === 0) {
-            return;
-        }
-
-        scrollToLatestMessage(false);
-        scheduleScrollToLatestMessage(false, true);
-        scheduleForcedScrollBurst();
-    }, [listResetNonce, scheduleForcedScrollBurst, scheduleScrollToLatestMessage, scrollToLatestMessage]);
-
     const renderChatMessage = useCallback(({ item: msg, index }: { item: ChatMessage; index: number }) => (
         <ChatMessageBubble
             id={msg.id}
@@ -760,10 +730,11 @@ export const ChatScreen = () => {
                 onOpenModelControls={() => {
                     setModelParametersOpen(true);
                 }}
-                canOpenModelControls={Boolean(configurableModelId)}
-                onMenu={() => {
-                    setConversationSwitcherOpen(true);
+                onOpenPresetSelector={() => {
+                    setPresetSelectorOpen(true);
                 }}
+                canOpenPresetSelector={!isGenerating}
+                canOpenModelControls={Boolean(configurableModelId) && !isGenerating}
                 onBack={canGoBack ? () => router.back() : undefined}
             />
 
@@ -845,7 +816,7 @@ export const ChatScreen = () => {
                     <Box className="flex-1" onLayout={handleListViewportLayout}>
                         {hasMessages ? (
                             <FlatList
-                                key={`${activeThread?.id ?? 'no-thread'}:${listResetNonce}`}
+                                key={activeThread?.id ?? 'no-thread'}
                                 ref={listRef}
                                 data={displayMessages}
                                 extraData={`${lastMessageSignature}:${pendingRegenerateMessage?.messageId ?? 'none'}:${isInputDisabled ? 'disabled' : 'enabled'}`}
@@ -947,33 +918,6 @@ export const ChatScreen = () => {
                     </View>
                 )}
             </Box>
-
-            <ConversationSwitcherSheet
-                visible={isConversationSwitcherOpen}
-                activeThreadId={activeThread?.id ?? null}
-                conversations={conversationIndex}
-                onClose={() => {
-                    setConversationSwitcherOpen(false);
-                }}
-                onSelectConversation={handleSelectConversation}
-                onStartNewChat={() => {
-                    try {
-                        startNewChat();
-                        handleCancelComposerMode();
-                        resumeFollowingLatestMessage();
-                    } catch (error: any) {
-                        showAlertForError('conversations.startNewChatErrorTitle', 'ChatScreen.startNewChat', error);
-                    }
-                }}
-                onManageConversations={() => {
-                    router.push('/conversations' as any);
-                }}
-                activePresetName={activePresetLabel}
-                canOpenPresetSelector={!isGenerating}
-                onOpenPresetSelector={() => {
-                    setPresetSelectorOpen(true);
-                }}
-            />
 
             <PresetSelectorSheet
                 visible={isPresetSelectorOpen}

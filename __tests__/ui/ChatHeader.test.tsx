@@ -57,7 +57,7 @@ describe('ChatHeader', () => {
         title="Hi"
         presetLabel="Helpful Assistant"
         modelLabel={modelLabel}
-        onMenu={jest.fn()}
+        onOpenPresetSelector={jest.fn()}
       />,
     );
 

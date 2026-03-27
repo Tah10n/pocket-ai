@@ -11,8 +11,8 @@ Use this checklist before cutting a preview or production release. It is written
 - App display name: `Pocket AI`
 - Expo slug: `pocket-ai`
 - Deep-link scheme: `pocketai`
-- Android application ID: `com.antigravity.pocketai`
-- iOS bundle identifier: `com.antigravity.pocketai`
+- Android application ID: `com.github.tah10n.pocketai`
+- iOS bundle identifier: `com.github.tah10n.pocketai`
 - EAS profiles in [`eas.json`](../eas.json): `development`, `preview`, `production`
 
 ## Pre-flight checks

@@ -93,7 +93,7 @@
     "type": "all",
     "jsSrcsDir": "src",
     "android": {
-      "javaPackageName": "com.antigravity.pocketai"
+      "javaPackageName": "com.github.tah10n.pocketai"
     }
   }
 }

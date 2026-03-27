@@ -50,7 +50,7 @@ The app includes warnings for risky operations such as low-disk downloads, cellu
 
 For the release configuration currently committed here:
 
-- Android package name: `com.antigravity.pocketai`
+- Android package name: `com.github.tah10n.pocketai`
 - Android auto-backup is disabled to avoid backing up local chat and model state
 - Android permissions are limited to `INTERNET` and `VIBRATE`
 

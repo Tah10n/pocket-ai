@@ -11,7 +11,7 @@
     "newArchEnabled": true,
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.antigravity.pocketai"
+      "bundleIdentifier": "com.github.tah10n.pocketai"
     },
     "android": {
       "permissions": [
@@ -27,7 +27,7 @@
       },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
-      "package": "com.antigravity.pocketai"
+      "package": "com.github.tah10n.pocketai"
     },
     "web": {
       "output": "static",

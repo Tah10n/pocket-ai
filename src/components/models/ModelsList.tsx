@@ -23,7 +23,6 @@ import {
 } from '@/store/modelsStore';
 import { EngineStatus, LifecycleStatus, type ModelMetadata } from '@/types/models';
 import { ModelsFilter } from './ModelsFilter';
-import { ModelsSort } from './ModelsSort';
 import { useTranslation } from 'react-i18next';
 import { getReportedErrorMessage } from '@/services/AppError';
 
@@ -371,7 +370,7 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
     filters.fitsInRamOnly || filters.statuses.length > 0 || filters.sizeRanges.length > 0;
 
   const emptyState = useMemo(() => (
-    <Box className="flex-1 items-center justify-center px-6 pt-20">
+    <Box className="flex-1 items-center px-6 pb-8 pt-12">
       <Text className="text-center text-base font-semibold text-typography-700 dark:text-typography-200">
         {t('models.noResults', 'No models found')}
       </Text>
@@ -389,7 +388,7 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
   ), [clearFilters, hasFilters, t]);
 
   const footer = useMemo(() => (activeTab === 'All Models' ? (
-    <Box className="pb-6 pt-2">
+    <Box className="pb-5 pt-1">
       {loadMoreError ? (
         <Box className="mb-3 rounded-xl border border-error-300 bg-background-error px-4 py-3 dark:border-error-800">
           <Text className="text-sm text-error-700 dark:text-error-300">{loadMoreError}</Text>
@@ -430,25 +429,26 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
     <>
       <ModelsFilter
         filters={filters}
+        sort={sort}
         onFitsInRamToggle={setFitsInRamOnly}
         onStatusToggle={toggleStatus}
         onSizeRangeToggle={toggleSizeRange}
+        onSortChange={setSort}
         onClear={clearFilters}
         showStatusFilters={activeTab === 'All Models'}
       />
-      <ModelsSort sort={sort} onSortChange={setSort} />
 
-      <Box className="flex-1 px-4 pt-4">
+      <Box className="flex-1 px-4 pt-2">
         {warningMessage ? (
-          <Box className="mb-4 rounded-xl border border-warning-300 bg-background-warning px-4 py-3 dark:border-warning-800">
+          <Box className="mb-3 rounded-xl border border-warning-300 bg-background-warning px-4 py-3 dark:border-warning-800">
             <Text className="text-sm text-warning-700 dark:text-warning-300">{warningMessage}</Text>
           </Box>
         ) : null}
 
         {loading && models.length === 0 ? (
-          <Box className="flex-1 items-center justify-center">
+          <Box className="flex-1 items-center justify-start pt-16">
             <Spinner size="large" />
-            <Text className="mt-4 text-typography-500">{t('models.searching', 'Searching Hugging Face...')}</Text>
+            <Text className="mt-3 text-typography-500">{t('models.searching', 'Searching Hugging Face...')}</Text>
           </Box>
         ) : (
           <FlashList
@@ -457,7 +457,7 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
             renderItem={renderModelItem}
             ListEmptyComponent={renderEmptyState}
             ListFooterComponent={renderFooter}
-            contentContainerStyle={{ paddingBottom: tabBarHeight + 24 }}
+            contentContainerStyle={{ paddingBottom: tabBarHeight + 16 }}
           />
         )}
       </Box>

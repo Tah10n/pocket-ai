@@ -10,6 +10,8 @@
     "android:emulator": "node ./scripts/android-smoke.js --emulator --screenshot artifacts/android-emulator-smoke.png",
     "android:scenarios": "node ./scripts/android-scenarios.js",
     "android:scenarios:emulator": "node ./scripts/android-scenarios.js --emulator",
+    "android:screens": "node ./scripts/android-screen-capture.js",
+    "android:screens:emulator": "node ./scripts/android-screen-capture.js --emulator",
     "check:android": "npm test && npm run lint && npm run android:smoke",
     "check:android:emulator": "npm test && npm run lint && npm run android:emulator",
     "check:android:scenarios": "npm test && npm run lint && npm run android:scenarios:emulator",

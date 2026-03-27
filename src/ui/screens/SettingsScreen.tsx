@@ -27,7 +27,7 @@ const styles = StyleSheet.create({
         borderBottomWidth: StyleSheet.hairlineWidth,
     },
     headerBar: {
-        height: 56,
+        height: 52,
         flexDirection: 'row',
         alignItems: 'center',
         justifyContent: 'space-between',
@@ -38,12 +38,12 @@ const styles = StyleSheet.create({
         alignItems: 'center',
     },
     iconBubble: {
-        height: 40,
-        width: 40,
-        borderRadius: 20,
+        height: 36,
+        width: 36,
+        borderRadius: 18,
         alignItems: 'center',
         justifyContent: 'center',
-        marginRight: 12,
+        marginRight: 10,
     },
     headerTitle: {
         fontSize: 20,
@@ -52,11 +52,11 @@ const styles = StyleSheet.create({
     scrollContent: {
         flexGrow: 1,
         paddingHorizontal: 16,
-        paddingTop: 24,
+        paddingTop: 18,
     },
     sectionTitle: {
         marginLeft: 4,
-        marginBottom: 8,
+        marginBottom: 6,
         fontSize: 11,
         fontWeight: '700',
         textTransform: 'uppercase',
@@ -64,13 +64,13 @@ const styles = StyleSheet.create({
     },
     card: {
         borderWidth: 1,
-        borderRadius: 24,
+        borderRadius: 20,
         overflow: 'hidden',
-        marginBottom: 24,
+        marginBottom: 18,
     },
     row: {
         paddingHorizontal: 16,
-        paddingVertical: 16,
+        paddingVertical: 14,
     },
     rowBorder: {
         borderBottomWidth: StyleSheet.hairlineWidth,
@@ -87,12 +87,12 @@ const styles = StyleSheet.create({
         marginRight: 12,
     },
     rowIcon: {
-        width: 40,
-        height: 40,
+        width: 36,
+        height: 36,
         borderRadius: 12,
         alignItems: 'center',
         justifyContent: 'center',
-        marginRight: 12,
+        marginRight: 10,
     },
     rowTextWrap: {
         flex: 1,
@@ -121,11 +121,11 @@ const styles = StyleSheet.create({
         width: '100%',
         borderRadius: 14,
         padding: 4,
-        marginTop: 16,
+        marginTop: 12,
     },
     segmentButton: {
         flex: 1,
-        minHeight: 42,
+        minHeight: 40,
         borderRadius: 12,
         alignItems: 'center',
         justifyContent: 'center',
@@ -136,19 +136,19 @@ const styles = StyleSheet.create({
         fontWeight: '700',
     },
     resourcesWrap: {
-        padding: 16,
-        gap: 14,
+        padding: 14,
+        gap: 12,
     },
     resourceCard: {
-        borderRadius: 22,
+        borderRadius: 20,
         borderWidth: 1,
-        padding: 16,
+        padding: 14,
     },
     resourceHeader: {
         flexDirection: 'row',
         alignItems: 'center',
         justifyContent: 'space-between',
-        marginBottom: 12,
+        marginBottom: 10,
     },
     resourceTitleWrap: {
         flexDirection: 'row',
@@ -157,12 +157,12 @@ const styles = StyleSheet.create({
         marginRight: 12,
     },
     resourceIcon: {
-        width: 40,
-        height: 40,
+        width: 36,
+        height: 36,
         borderRadius: 12,
         alignItems: 'center',
         justifyContent: 'center',
-        marginRight: 12,
+        marginRight: 10,
     },
     resourceTitle: {
         fontSize: 16,
@@ -186,7 +186,7 @@ const styles = StyleSheet.create({
         flexDirection: 'row',
         alignItems: 'flex-end',
         justifyContent: 'space-between',
-        marginBottom: 14,
+        marginBottom: 12,
     },
     primaryMetricValue: {
         fontSize: 28,
@@ -211,7 +211,7 @@ const styles = StyleSheet.create({
         borderRadius: 999,
     },
     usageLegendRow: {
-        marginTop: 10,
+        marginTop: 8,
         flexDirection: 'row',
         alignItems: 'center',
         justifyContent: 'space-between',
@@ -223,13 +223,13 @@ const styles = StyleSheet.create({
     statGrid: {
         flexDirection: 'row',
         flexWrap: 'wrap',
-        marginTop: 14,
+        marginTop: 12,
         marginHorizontal: -4,
     },
     statChip: {
         width: '50%',
         paddingHorizontal: 4,
-        paddingBottom: 8,
+        paddingBottom: 6,
     },
     statChipInner: {
         borderRadius: 16,
@@ -249,7 +249,7 @@ const styles = StyleSheet.create({
         fontWeight: '700',
     },
     unloadButton: {
-        marginTop: 8,
+        marginTop: 6,
         borderRadius: 14,
         alignItems: 'center',
         justifyContent: 'center',

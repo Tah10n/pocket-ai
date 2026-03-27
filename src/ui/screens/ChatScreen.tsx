@@ -1,15 +1,23 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
     Alert,
+    BackHandler,
+    Dimensions,
     FlatList,
+    Keyboard,
+    KeyboardAvoidingView,
     LayoutChangeEvent,
+    KeyboardEvent,
     NativeScrollEvent,
     NativeSyntheticEvent,
+    Platform,
+    View,
 } from 'react-native';
+import { useFocusEffect } from '@react-navigation/native';
 import { Box } from '@/components/ui/box';
 import { Text } from '@/components/ui/text';
-import { Pressable } from '@/components/ui/pressable';
 import { ChatHeader } from '@/components/ui/ChatHeader';
+import { ChatStatusBanner } from '@/components/ui/ChatStatusBanner';
 import { ChatMessageBubble } from '@/components/ui/ChatMessageBubble';
 import { ChatInputBar } from '@/components/ui/ChatInputBar';
 import { ModelParametersSheet } from '@/components/ui/ModelParametersSheet';
@@ -44,6 +52,39 @@ const AUTO_SCROLL_BOTTOM_THRESHOLD = 96;
 const FALLBACK_TOP_K = 40;
 const FALLBACK_MIN_P = 0.05;
 const FALLBACK_REPETITION_PENALTY = 1;
+const SHOULD_USE_KEYBOARD_AVOIDING_VIEW = Platform.OS === 'ios';
+
+export function getAndroidKeyboardOverlapCompensation({
+    baseWindowHeight,
+    currentWindowHeight,
+    keyboardHeight,
+}: {
+    baseWindowHeight: number;
+    currentWindowHeight: number;
+    keyboardHeight: number;
+}) {
+    const resizedBySystem = Math.max(0, baseWindowHeight - currentWindowHeight);
+    return Math.max(0, keyboardHeight - resizedBySystem);
+}
+
+export function getAndroidKeyboardSpacerHeight({
+    viewportCompensation,
+    composerBottomY,
+    keyboardTopY,
+    gap = 8,
+}: {
+    viewportCompensation: number;
+    composerBottomY?: number | null;
+    keyboardTopY?: number | null;
+    gap?: number;
+}) {
+    const measuredOverlap =
+        typeof composerBottomY === 'number' && typeof keyboardTopY === 'number'
+            ? Math.max(0, composerBottomY + gap - keyboardTopY)
+            : 0;
+
+    return Math.max(viewportCompensation, measuredOverlap);
+}
 
 export function getNextShouldStickToBottom(
     currentValue: boolean,
@@ -57,6 +98,21 @@ export function getNextShouldStickToBottom(
     const distanceFromBottom = Math.max(nativeEvent.contentOffset.y, 0);
 
     return distanceFromBottom < AUTO_SCROLL_BOTTOM_THRESHOLD;
+}
+
+export function handleAndroidBackNavigation({
+    canGoBack,
+    onGoBack,
+}: {
+    canGoBack: boolean;
+    onGoBack: () => void;
+}) {
+    if (!canGoBack) {
+        return false;
+    }
+
+    onGoBack();
+    return true;
 }
 
 export const ChatScreen = () => {
@@ -81,6 +137,7 @@ export const ChatScreen = () => {
     const canGoBack = router.canGoBack();
     const [hardwareStatus, setHardwareStatus] = useState(() => hardwareListenerService.getCurrentStatus());
     const [composerDraft, setComposerDraft] = useState('');
+    const [androidKeyboardInset, setAndroidKeyboardInset] = useState(0);
     const [isConversationSwitcherOpen, setConversationSwitcherOpen] = useState(false);
     const [isPresetSelectorOpen, setPresetSelectorOpen] = useState(false);
     const [isModelParametersOpen, setModelParametersOpen] = useState(false);
@@ -100,8 +157,13 @@ export const ChatScreen = () => {
     const updateThreadParamsSnapshot = useChatStore((state) => state.updateThreadParamsSnapshot);
     const listRef = useRef<FlatList<ChatMessage> | null>(null);
     const autoScrollFrameRef = useRef<number | null>(null);
+    const keyboardMeasureFrameRef = useRef<number | null>(null);
     const forcedScrollTimeoutsRef = useRef<ReturnType<typeof setTimeout>[]>([]);
     const forcedFollowPassesRef = useRef(0);
+    const baseWindowHeightRef = useRef(Dimensions.get('window').height);
+    const isKeyboardVisibleRef = useRef(false);
+    const androidKeyboardMetricsRef = useRef<{ height: number; topY: number } | null>(null);
+    const composerContainerRef = useRef<View | null>(null);
     const isUserInteractingRef = useRef(false);
     const shouldStickToBottomRef = useRef(true);
     const hasActiveModel = Boolean(engineState.activeModelId);
@@ -114,6 +176,11 @@ export const ChatScreen = () => {
             : activeThread?.status === 'error'
                 ? t('chat.statusError')
                 : undefined;
+    const statusTone = activeThread?.status === 'generating'
+        ? 'accent'
+        : activeThread?.status === 'error'
+            ? 'warning'
+            : 'neutral';
     const hardwareBannerInputs = getChatHardwareBannerInputs(
         // T013: keep the chat banner contract scoped to banner-ready inputs.
         // T049 can render low-memory / overheating UI from this adapter without
@@ -121,12 +188,9 @@ export const ChatScreen = () => {
         hardwareStatus,
     );
     const listBottomPadding =
-        hardwareBannerInputs.showLowMemoryWarning || hardwareBannerInputs.showThermalWarning ? 32 : 24;
+        hardwareBannerInputs.showLowMemoryWarning || hardwareBannerInputs.showThermalWarning ? 22 : 14;
 
-    const headerTitle = activeThread?.title
-        ?? (engineState.activeModelId
-            ? (engineState.activeModelId.split('/').pop() ?? engineState.activeModelId)
-            : t('chat.noModelHeader'));
+    const headerTitle = activeThread?.title ?? t('chat.newChatTitle');
     const configurableModelId = activeThread?.modelId ?? settings.activeModelId ?? null;
     const rawCurrentParams = getGenerationParametersForModel(configurableModelId);
     const currentParams = {
@@ -134,6 +198,7 @@ export const ChatScreen = () => {
         topK: rawCurrentParams.topK ?? FALLBACK_TOP_K,
         minP: rawCurrentParams.minP ?? FALLBACK_MIN_P,
         repetitionPenalty: rawCurrentParams.repetitionPenalty ?? FALLBACK_REPETITION_PENALTY,
+        reasoningEnabled: rawCurrentParams.reasoningEnabled === true,
     };
     const currentLoadParams = getModelLoadParametersForModel(configurableModelId);
     const rawDefaultParams = getGenerationParametersForModel(null);
@@ -142,6 +207,7 @@ export const ChatScreen = () => {
         topK: rawDefaultParams.topK ?? FALLBACK_TOP_K,
         minP: rawDefaultParams.minP ?? FALLBACK_MIN_P,
         repetitionPenalty: rawDefaultParams.repetitionPenalty ?? FALLBACK_REPETITION_PENALTY,
+        reasoningEnabled: rawDefaultParams.reasoningEnabled === true,
     };
     const defaultLoadParams = getModelLoadParametersForModel(null);
     const resolvedGpuLayers = currentLoadParams.gpuLayers ?? recommendedGpuLayers;
@@ -162,23 +228,33 @@ export const ChatScreen = () => {
         ? (activeThread.modelId.split('/').pop() ?? activeThread.modelId)
         : (engineState.activeModelId
             ? (engineState.activeModelId.split('/').pop() ?? engineState.activeModelId)
-            : t('chat.noModelHeader'));
+            : t('chat.modelUnavailable'));
     const rawParamsSource = activeThread?.paramsSnapshot ?? currentParams;
     const paramsSource = {
         ...rawParamsSource,
         topK: rawParamsSource.topK ?? FALLBACK_TOP_K,
         minP: rawParamsSource.minP ?? FALLBACK_MIN_P,
         repetitionPenalty: rawParamsSource.repetitionPenalty ?? FALLBACK_REPETITION_PENALTY,
+        reasoningEnabled: rawParamsSource.reasoningEnabled === true,
     };
-    const paramsLabel = configurableModelId
-        ? `T${paramsSource.temperature} • P${paramsSource.topP} • K${paramsSource.topK} • ${paramsSource.maxTokens} tok`
-        : undefined;
     const configurableModel = configurableModelId ? registry.getModel(configurableModelId) : undefined;
     const thermalWarningMessage = hardwareBannerInputs.thermalState === 'critical'
         ? t('chat.thermalDescriptionCritical')
         : t('chat.thermalDescriptionElevated');
-    const modelRecoveryActionLabel = hasActiveModel ? t('chat.openModels') : t('chat.downloadModel');
+    const recoveryTitle = hasActiveModel ? t('chat.warmingUp') : t('chat.loadModelWarning');
+    const recoveryDescription = hasActiveModel ? t('chat.warmingUpDescription') : t('chat.loadModelDescription');
     const activePresetLabel = activeThread?.presetSnapshot.name ?? (settings.activePresetId ? resolvePresetSnapshot(settings.activePresetId).name : t('common.default'));
+    const shouldShowRecoveryBanner = isInputDisabled && hasMessages;
+    const shouldShowRecoveryCard = isInputDisabled && !hasMessages;
+    const hasDownloadedModels = registry.getModels().some((model) => Boolean(model.localPath));
+    const modelRecoveryActionRoute = hasDownloadedModels
+        ? { pathname: '/(tabs)/models', params: { initialTab: 'downloaded' as const } }
+        : '/(tabs)/models';
+    const resolvedModelRecoveryActionLabel = hasActiveModel
+        ? t('chat.openModels')
+        : hasDownloadedModels
+            ? t('chat.loadModel')
+            : t('chat.downloadModel');
 
     const showAlertForError = useCallback((titleKey: string, scope: string, error: unknown) => {
         Alert.alert(t(titleKey), getReportedErrorMessage(scope, error, t));
@@ -274,6 +350,47 @@ export const ChatScreen = () => {
         scheduleScrollToLatestMessage(false, hasForcedFollowPass);
     };
 
+    const updateAndroidKeyboardInsetFromLayout = useCallback(() => {
+        if (Platform.OS !== 'android') {
+            return;
+        }
+
+        const keyboardMetrics = androidKeyboardMetricsRef.current;
+        const composerContainer = composerContainerRef.current;
+
+        if (!keyboardMetrics) {
+            setAndroidKeyboardInset(0);
+            return;
+        }
+
+        const viewportCompensation = getAndroidKeyboardOverlapCompensation({
+            baseWindowHeight: baseWindowHeightRef.current,
+            currentWindowHeight: Dimensions.get('window').height,
+            keyboardHeight: keyboardMetrics.height,
+        });
+
+        if (!composerContainer || typeof composerContainer.measureInWindow !== 'function') {
+            setAndroidKeyboardInset(viewportCompensation);
+            return;
+        }
+
+        if (keyboardMeasureFrameRef.current !== null) {
+            cancelAnimationFrame(keyboardMeasureFrameRef.current);
+        }
+
+        keyboardMeasureFrameRef.current = requestAnimationFrame(() => {
+            keyboardMeasureFrameRef.current = null;
+
+            composerContainer.measureInWindow((_x, y, _width, height) => {
+                setAndroidKeyboardInset(getAndroidKeyboardSpacerHeight({
+                    viewportCompensation,
+                    composerBottomY: y + height,
+                    keyboardTopY: keyboardMetrics.topY,
+                }));
+            });
+        });
+    }, []);
+
     const handleListContentSizeChange = () => {
         const hasForcedFollowPass = forcedFollowPassesRef.current > 0;
 
@@ -294,11 +411,10 @@ export const ChatScreen = () => {
         scheduleScrollToLatestMessage(false, hasForcedFollowPass);
     }, [messages.length, scheduleScrollToLatestMessage]);
 
-    const resumeFollowingLatestMessage = () => {
+    const armFollowLatestMessage = useCallback((burst = false) => {
         shouldStickToBottomRef.current = true;
         isUserInteractingRef.current = false;
-        forcedFollowPassesRef.current = 6;
-        setListResetNonce((current) => current + 1);
+        forcedFollowPassesRef.current = burst ? 6 : 1;
         clearForcedScrollTimeouts();
 
         if (autoScrollFrameRef.current !== null) {
@@ -307,23 +423,52 @@ export const ChatScreen = () => {
         }
 
         if (messages.length || activeThread) {
-            scrollToLatestMessage(false);
+            scrollToLatestMessage(false, false);
             scheduleScrollToLatestMessage(false, true);
-            scheduleForcedScrollBurst();
+
+            if (burst) {
+                scheduleForcedScrollBurst();
+            }
         }
+    }, [
+        activeThread,
+        clearForcedScrollTimeouts,
+        messages.length,
+        scheduleForcedScrollBurst,
+        scheduleScrollToLatestMessage,
+        scrollToLatestMessage,
+    ]);
+
+    const resumeFollowingLatestMessage = () => {
+        setListResetNonce((current) => current + 1);
+        armFollowLatestMessage(true);
     };
 
     const handleSendMessage = async (content: string) => {
-        resumeFollowingLatestMessage();
+        armFollowLatestMessage(false);
         if (pendingRegenerateMessage) {
-            await regenerateFromUserMessage(pendingRegenerateMessage.messageId, content);
+            const targetMessage = pendingRegenerateMessage;
             setPendingRegenerateMessage(null);
             setComposerDraft('');
+
+            try {
+                await regenerateFromUserMessage(targetMessage.messageId, content);
+            } catch (error) {
+                setPendingRegenerateMessage(targetMessage);
+                setComposerDraft(content);
+                throw error;
+            }
+
             return;
         }
 
-        await appendUserMessage(content);
         setComposerDraft('');
+        try {
+            await appendUserMessage(content);
+        } catch (error) {
+            setComposerDraft(content);
+            throw error;
+        }
     };
 
     const handleSelectConversation = (threadId: string) => {
@@ -388,6 +533,48 @@ export const ChatScreen = () => {
     }, []);
 
     useEffect(() => {
+        if (Platform.OS !== 'android') {
+            return;
+        }
+
+        baseWindowHeightRef.current = Dimensions.get('window').height;
+
+        const dimensionsSubscription = Dimensions.addEventListener('change', ({ window }) => {
+            if (!isKeyboardVisibleRef.current) {
+                baseWindowHeightRef.current = window.height;
+            }
+        });
+
+        const keyboardShowSubscription = Keyboard.addListener('keyboardDidShow', (event: KeyboardEvent) => {
+            isKeyboardVisibleRef.current = true;
+            androidKeyboardMetricsRef.current = {
+                height: event.endCoordinates.height,
+                topY: event.endCoordinates.screenY > 0
+                    ? event.endCoordinates.screenY
+                    : Math.max(0, Dimensions.get('screen').height - event.endCoordinates.height),
+            };
+            updateAndroidKeyboardInsetFromLayout();
+        });
+
+        const keyboardHideSubscription = Keyboard.addListener('keyboardDidHide', () => {
+            isKeyboardVisibleRef.current = false;
+            androidKeyboardMetricsRef.current = null;
+            setAndroidKeyboardInset(0);
+            baseWindowHeightRef.current = Dimensions.get('window').height;
+        });
+
+        return () => {
+            if (keyboardMeasureFrameRef.current !== null) {
+                cancelAnimationFrame(keyboardMeasureFrameRef.current);
+                keyboardMeasureFrameRef.current = null;
+            }
+            dimensionsSubscription.remove();
+            keyboardShowSubscription.remove();
+            keyboardHideSubscription.remove();
+        };
+    }, [updateAndroidKeyboardInsetFromLayout]);
+
+    useEffect(() => {
         if (!isModelParametersOpen) {
             return;
         }
@@ -427,6 +614,12 @@ export const ChatScreen = () => {
         return () => {
             if (autoScrollFrameRef.current !== null) {
                 cancelAnimationFrame(autoScrollFrameRef.current);
+                autoScrollFrameRef.current = null;
+            }
+
+            if (keyboardMeasureFrameRef.current !== null) {
+                cancelAnimationFrame(keyboardMeasureFrameRef.current);
+                keyboardMeasureFrameRef.current = null;
             }
 
             clearForcedScrollTimeouts();
@@ -481,6 +674,27 @@ export const ChatScreen = () => {
         }
     };
 
+    useFocusEffect(
+        useCallback(() => {
+            if (Platform.OS !== 'android') {
+                return undefined;
+            }
+
+            const subscription = BackHandler.addEventListener('hardwareBackPress', () => (
+                handleAndroidBackNavigation({
+                    canGoBack: router.canGoBack(),
+                    onGoBack: () => {
+                        router.back();
+                    },
+                })
+            ));
+
+            return () => {
+                subscription.remove();
+            };
+        }, [router]),
+    );
+
     useEffect(() => {
         const hasForcedFollowPass = forcedFollowPassesRef.current > 0;
 
@@ -506,6 +720,7 @@ export const ChatScreen = () => {
             id={msg.id}
             isUser={msg.role === 'user'}
             content={msg.content}
+            thoughtContent={msg.thoughtContent}
             isStreaming={msg.state === 'streaming'}
             tokensPerSec={msg.tokensPerSec}
             canDelete={msg.state !== 'streaming'}
@@ -526,20 +741,21 @@ export const ChatScreen = () => {
     ), [handleBeginRegenerateFromMessage, handleDeleteMessage, handleLastMessageLayout, isGenerating, isInputDisabled]);
 
     return (
-        <Box className="flex-1 bg-background-0 dark:bg-background-950 max-w-2xl w-full mx-auto border-x border-primary-500/10">
-            <ChatHeader 
+        <Box className="flex-1 w-full max-w-2xl mx-auto bg-background-0 dark:bg-background-950">
+            <ChatHeader
                 title={headerTitle}
-                badgeLabel={activeThread?.presetSnapshot.name ?? (hasActiveModel ? t('chat.localModelBadge') : t('chat.noModelBadge'))}
-                detailLabel={paramsLabel}
-                memoryLabel={modelLabel}
+                presetLabel={activePresetLabel}
+                modelLabel={modelLabel}
                 statusLabel={statusLabel}
+                statusTone={statusTone}
                 canStartNewChat={!isGenerating}
                 onStartNewChat={() => {
-                    void Promise.resolve(startNewChat()).catch(() => {
-                        // The button is hidden while a response is generating, but
-                        // this guard prevents unhandled promise noise during state races.
-                    });
-                    handleCancelComposerMode();
+                    try {
+                        startNewChat();
+                        handleCancelComposerMode();
+                    } catch (error: any) {
+                        showAlertForError('conversations.startNewChatErrorTitle', 'ChatScreen.startNewChat', error);
+                    }
                 }}
                 onOpenModelControls={() => {
                     setModelParametersOpen(true);
@@ -551,140 +767,186 @@ export const ChatScreen = () => {
                 onBack={canGoBack ? () => router.back() : undefined}
             />
 
-            <Box className="flex-1 p-4">
-                {isInputDisabled ? (
-                    <Box className="mb-4 rounded-2xl border border-warning-300 bg-warning-50 px-4 py-3 dark:border-warning-700 dark:bg-warning-950/40">
-                        <Text className="text-sm font-semibold text-warning-700 dark:text-warning-300">
-                            {t('chat.loadModelWarning', 'Load a model to continue chatting')}
-                        </Text>
-                        <Text className="mt-1 text-sm text-warning-700/80 dark:text-warning-300/80">
-                            {t('chat.loadModelDescription')}
-                        </Text>
-                        <Pressable
-                            onPress={() => {
-                                router.push('/(tabs)/models' as any);
-                            }}
-                            className="mt-3 self-start rounded-full border border-warning-400/30 bg-warning-100 px-3 py-2 active:opacity-70 dark:border-warning-600/40 dark:bg-warning-900/40"
-                        >
-                            <Text className="text-sm font-medium text-warning-800 dark:text-warning-200">
-                                {modelRecoveryActionLabel}
-                            </Text>
-                        </Pressable>
-                    </Box>
-                ) : null}
-
-                {activeThread?.status === 'stopped' ? (
-                    <Box className="mb-4 rounded-2xl border border-primary-500/15 bg-primary-500/5 px-4 py-3">
-                        <Text className="text-sm font-medium text-primary-600 dark:text-primary-400">
-                            {t('chat.generationStopped')}
-                        </Text>
-                    </Box>
-                ) : null}
-
-                {shouldOfferSummary ? (
-                    <Box className="mb-4 rounded-2xl border border-primary-500/15 bg-primary-500/5 px-4 py-3">
-                        <Text className="text-sm font-semibold text-primary-700 dark:text-primary-300">
-                            {t('chat.summaryTrimmedTitle')}
-                        </Text>
-                        <Text className="mt-1 text-sm text-primary-700/80 dark:text-primary-300/80">
-                            {t('chat.summaryTrimmedDescription', { count: truncatedMessageCount })}
-                        </Text>
-                        <Pressable
-                            onPress={createSummaryPlaceholder}
-                            className="mt-3 self-start rounded-full border border-primary-500/20 bg-primary-500/10 px-3 py-2 active:opacity-70"
-                        >
-                            <Text className="text-sm font-medium text-primary-600 dark:text-primary-400">
-                                {t('chat.summarizeChat')}
-                            </Text>
-                        </Pressable>
-                    </Box>
-                ) : null}
-
-                {activeThread?.summary ? (
-                    <Box className="mb-4 rounded-2xl border border-outline-200 bg-background-50 px-4 py-3 dark:border-outline-800 dark:bg-background-900/60">
-                        <Text className="text-sm font-semibold text-typography-700 dark:text-typography-200">
-                            {t('chat.summaryPlaceholderTitle')}
-                        </Text>
-                        <Text className="mt-1 text-sm text-typography-600 dark:text-typography-300">
-                            {activeThread.summary.content}
-                        </Text>
-                    </Box>
-                ) : null}
-
-                {hardwareBannerInputs.showLowMemoryWarning ? (
-                    <Box className="mb-4 rounded-2xl border border-warning-300 bg-warning-50 px-4 py-3 dark:border-warning-700 dark:bg-warning-950/40">
-                        <Text className="text-sm font-semibold text-warning-700 dark:text-warning-300">
-                            {t('chat.memoryPressureTitle')}
-                        </Text>
-                        <Text className="mt-1 text-sm text-warning-700/80 dark:text-warning-300/80">
-                            {t('chat.memoryPressureDescription')}
-                        </Text>
-                    </Box>
-                ) : null}
-
-                {hardwareBannerInputs.showThermalWarning ? (
-                    <Box className="mb-4 rounded-2xl border border-warning-300 bg-warning-50 px-4 py-3 dark:border-warning-700 dark:bg-warning-950/40">
-                        <Text className="text-sm font-semibold text-warning-700 dark:text-warning-300">
-                            {t('chat.thermalTitle')}
-                        </Text>
-                        <Text className="mt-1 text-sm text-warning-700/80 dark:text-warning-300/80">
-                            {thermalWarningMessage}
-                        </Text>
-                    </Box>
-                ) : null}
-                <Box className="flex-1" onLayout={handleListViewportLayout}>
-                    {hasMessages ? (
-                        <FlatList
-                            key={`${activeThread?.id ?? 'no-thread'}:${listResetNonce}`}
-                            ref={listRef}
-                            data={displayMessages}
-                            extraData={`${lastMessageSignature}:${pendingRegenerateMessage?.messageId ?? 'none'}:${isInputDisabled ? 'disabled' : 'enabled'}`}
-                            inverted
-                            showsVerticalScrollIndicator={false}
-                            scrollEventThrottle={16}
-                            contentContainerStyle={{ paddingTop: listBottomPadding, flexGrow: 1 }}
-                            onContentSizeChange={handleListContentSizeChange}
-                            onScroll={handleListScroll}
-                            onScrollBeginDrag={handleListScrollBeginDrag}
-                            onScrollEndDrag={handleListScrollEndDrag}
-                            onMomentumScrollEnd={handleListMomentumScrollEnd}
-                            onScrollToIndexFailed={() => {
-                                scrollToLatestMessage(false, false);
-                                scheduleForcedScrollBurst();
-                            }}
-                            ItemSeparatorComponent={() => <Box className="h-6" />}
-                            keyExtractor={(item) => item.id}
-                            renderItem={renderChatMessage}
-                            initialNumToRender={12}
-                        />
-                    ) : (
-                        <Box className="flex-1 items-center justify-center px-6">
-                            <Text className="text-base font-semibold text-typography-700 dark:text-typography-300">
-                                {t('chat.noMessages', 'No messages yet')}
-                            </Text>
-                            <Text className="mt-2 text-center text-sm text-typography-500 dark:text-typography-400">
-                                {activeThread
-                                    ? t('chat.emptyExistingThread')
-                                    : t('chat.emptyNewThread')}
-                            </Text>
+            <Box className="flex-1">
+                <Box className="flex-1 px-3 pt-1.5">
+                    {shouldShowRecoveryBanner ? (
+                        <Box className="mb-3">
+                            <ChatStatusBanner
+                                title={recoveryTitle}
+                                description={recoveryDescription}
+                                actionLabel={resolvedModelRecoveryActionLabel}
+                                onAction={() => {
+                                    router.push(modelRecoveryActionRoute as any);
+                                }}
+                                tone="warning"
+                                iconName={hasActiveModel ? 'hourglass-empty' : 'download'}
+                                testID="chat-recovery-banner"
+                            />
                         </Box>
-                    )}
-                </Box>
-            </Box>
+                    ) : null}
 
-            <ChatInputBar
-                draft={composerDraft}
-                onDraftChange={setComposerDraft}
-                onSendMessage={handleSendMessage}
-                onStopGeneration={stopGeneration}
-                disabled={isInputDisabled}
-                isSending={isGenerating}
-                modeLabel={pendingRegenerateMessage ? t('chat.editEarlierMessage') : undefined}
-                modeDescription={pendingRegenerateMessage
-                    ? t('chat.editEarlierMessageDescription')
-                    : undefined}
-                onCancelMode={pendingRegenerateMessage ? handleCancelComposerMode : undefined}
-            />
+                    {activeThread?.status === 'stopped' ? (
+                        <Box className="mb-3">
+                            <ChatStatusBanner
+                                title={t('chat.statusStopped')}
+                                description={t('chat.generationStopped')}
+                                tone="info"
+                                iconName="pause-circle-outline"
+                            />
+                        </Box>
+                    ) : null}
+
+                    {shouldOfferSummary ? (
+                        <Box className="mb-3">
+                            <ChatStatusBanner
+                                title={t('chat.summaryTrimmedTitle')}
+                                description={t('chat.summaryTrimmedDescription', { count: truncatedMessageCount })}
+                                actionLabel={t('chat.summarizeChat')}
+                                onAction={createSummaryPlaceholder}
+                                tone="info"
+                                iconName="summarize"
+                            />
+                        </Box>
+                    ) : null}
+
+                    {activeThread?.summary ? (
+                        <Box className="mb-3">
+                            <ChatStatusBanner
+                                title={t('chat.summaryPlaceholderTitle')}
+                                description={activeThread.summary.content}
+                                tone="neutral"
+                                iconName="notes"
+                            />
+                        </Box>
+                    ) : null}
+
+                    {hardwareBannerInputs.showLowMemoryWarning ? (
+                        <Box className="mb-3">
+                            <ChatStatusBanner
+                                title={t('chat.memoryPressureTitle')}
+                                description={t('chat.memoryPressureDescription')}
+                                tone="warning"
+                                iconName="memory"
+                            />
+                        </Box>
+                    ) : null}
+
+                    {hardwareBannerInputs.showThermalWarning ? (
+                        <Box className="mb-3">
+                            <ChatStatusBanner
+                                title={t('chat.thermalTitle')}
+                                description={thermalWarningMessage}
+                                tone="warning"
+                                iconName="whatshot"
+                            />
+                        </Box>
+                    ) : null}
+
+                    <Box className="flex-1" onLayout={handleListViewportLayout}>
+                        {hasMessages ? (
+                            <FlatList
+                                key={`${activeThread?.id ?? 'no-thread'}:${listResetNonce}`}
+                                ref={listRef}
+                                data={displayMessages}
+                                extraData={`${lastMessageSignature}:${pendingRegenerateMessage?.messageId ?? 'none'}:${isInputDisabled ? 'disabled' : 'enabled'}`}
+                                inverted
+                                showsVerticalScrollIndicator={false}
+                                scrollEventThrottle={16}
+                                keyboardShouldPersistTaps="handled"
+                                contentContainerStyle={{ paddingTop: listBottomPadding, paddingBottom: 4, flexGrow: 1 }}
+                                onContentSizeChange={handleListContentSizeChange}
+                                onScroll={handleListScroll}
+                                onScrollBeginDrag={handleListScrollBeginDrag}
+                                onScrollEndDrag={handleListScrollEndDrag}
+                                onMomentumScrollEnd={handleListMomentumScrollEnd}
+                                onScrollToIndexFailed={() => {
+                                    scrollToLatestMessage(false, false);
+                                    scheduleForcedScrollBurst();
+                                }}
+                                ItemSeparatorComponent={() => <Box className="h-2" />}
+                                keyExtractor={(item) => item.id}
+                                renderItem={renderChatMessage}
+                                initialNumToRender={12}
+                            />
+                        ) : shouldShowRecoveryCard ? (
+                            <Box className="flex-1 items-center px-1 pt-12 pb-8">
+                                <ChatStatusBanner
+                                    title={recoveryTitle}
+                                    description={recoveryDescription}
+                                    actionLabel={resolvedModelRecoveryActionLabel}
+                                    onAction={() => {
+                                        router.push(modelRecoveryActionRoute as any);
+                                    }}
+                                    tone="warning"
+                                    iconName={hasActiveModel ? 'hourglass-empty' : 'download'}
+                                    centered
+                                    testID="chat-recovery-card"
+                                />
+                            </Box>
+                        ) : (
+                            <Box className="flex-1 items-center px-6 pt-14 pb-8">
+                                <Text className="text-xl font-semibold text-typography-800 dark:text-typography-100">
+                                    {t('chat.noMessages')}
+                                </Text>
+                                <Text className="mt-2 text-center text-sm leading-6 text-typography-500 dark:text-typography-400">
+                                    {activeThread
+                                        ? t('chat.emptyExistingThread')
+                                        : t('chat.emptyNewThread')}
+                                </Text>
+                            </Box>
+                        )}
+                    </Box>
+                </Box>
+
+                {SHOULD_USE_KEYBOARD_AVOIDING_VIEW ? (
+                    <KeyboardAvoidingView
+                        testID="chat-keyboard-avoiding-view"
+                        behavior="padding"
+                        keyboardVerticalOffset={0}
+                    >
+                        <ChatInputBar
+                            draft={composerDraft}
+                            onDraftChange={setComposerDraft}
+                            onSendMessage={handleSendMessage}
+                            onStopGeneration={stopGeneration}
+                            disabled={isInputDisabled}
+                            isSending={isGenerating}
+                            modeLabel={pendingRegenerateMessage ? t('chat.editEarlierMessage') : undefined}
+                            modeDescription={pendingRegenerateMessage
+                                ? t('chat.editEarlierMessageDescription')
+                                : undefined}
+                            onCancelMode={pendingRegenerateMessage ? handleCancelComposerMode : undefined}
+                        />
+                    </KeyboardAvoidingView>
+                ) : (
+                    <View
+                        ref={composerContainerRef}
+                        testID="chat-keyboard-avoiding-view"
+                        onLayout={() => {
+                            if (isKeyboardVisibleRef.current) {
+                                updateAndroidKeyboardInsetFromLayout();
+                            }
+                        }}
+                    >
+                        <ChatInputBar
+                            draft={composerDraft}
+                            onDraftChange={setComposerDraft}
+                            onSendMessage={handleSendMessage}
+                            onStopGeneration={stopGeneration}
+                            disabled={isInputDisabled}
+                            isSending={isGenerating}
+                            modeLabel={pendingRegenerateMessage ? t('chat.editEarlierMessage') : undefined}
+                            modeDescription={pendingRegenerateMessage
+                                ? t('chat.editEarlierMessageDescription')
+                                : undefined}
+                            onCancelMode={pendingRegenerateMessage ? handleCancelComposerMode : undefined}
+                        />
+                        {androidKeyboardInset > 0 ? (
+                            <Box testID="chat-android-keyboard-spacer" style={{ height: androidKeyboardInset }} />
+                        ) : null}
+                    </View>
+                )}
+            </Box>
 
             <ConversationSwitcherSheet
                 visible={isConversationSwitcherOpen}
@@ -795,14 +1057,7 @@ export const ChatScreen = () => {
                     });
 
                     if (activeThread && activeThread.modelId === configurableModelId) {
-                        updateThreadParamsSnapshot(activeThread.id, {
-                            temperature: resetParams.temperature,
-                            topP: resetParams.topP,
-                            topK: resetParams.topK,
-                            minP: resetParams.minP,
-                            repetitionPenalty: resetParams.repetitionPenalty,
-                            maxTokens: resetParams.maxTokens,
-                        });
+                        updateThreadParamsSnapshot(activeThread.id, resetParams);
                     }
                 }}
                 onApplyReload={handleApplyLoadParams}

@@ -37,8 +37,8 @@ export const ActiveModelCard = ({ onSwapModel }: ActiveModelCardProps) => {
   const ctaLabel = hasActiveModel ? 'Swap Model' : hasDownloadedModels ? 'Choose Model' : 'Browse Models';
 
   return (
-    <Box className="mx-4 mt-4 rounded-xl shadow-xl bg-background-50 dark:bg-primary-500/10 border border-outline-200 dark:border-primary-500/20 overflow-hidden">
-      <Box className="border-b border-outline-200 px-4 py-3 dark:border-outline-800">
+    <Box className="mx-4 mt-3 rounded-xl border border-outline-200 bg-background-50 shadow-xl dark:border-primary-500/20 dark:bg-primary-500/10 overflow-hidden">
+      <Box className="border-b border-outline-200 px-4 py-2.5 dark:border-outline-800">
         <Box className="flex-row items-center gap-2">
           <Box className={statusDotClassName} />
           <Text className="text-xs font-medium text-typography-500 dark:text-typography-400 uppercase tracking-widest">
@@ -47,16 +47,16 @@ export const ActiveModelCard = ({ onSwapModel }: ActiveModelCardProps) => {
         </Box>
       </Box>
 
-      <Box className="px-4 py-4 gap-1">
+      <Box className="px-4 py-3.5 gap-0.5">
         <Text className="text-typography-500 dark:text-typography-400 text-sm font-medium">Active Model</Text>
-        <Box className="flex-row items-baseline gap-2">
+        <Box className="flex-row flex-wrap items-baseline gap-2">
             <Text className="text-typography-900 dark:text-typography-100 text-xl font-bold tracking-tight">{modelName}</Text>
             <Box className="px-2 py-0.5 bg-primary-500/20 rounded-full">
                 <Text className="text-xs font-normal text-primary-500">{modelTag}</Text>
             </Box>
         </Box>
 
-        <Box className="flex-row items-end justify-between mt-2">
+        <Box className="mt-1.5 flex-row items-start justify-between gap-4">
           <Box className="gap-1">
             <Box className="flex-row items-center gap-1">
               <MaterialSymbols name="memory" size={16} className="text-typography-500 dark:text-typography-400" />
@@ -70,7 +70,7 @@ export const ActiveModelCard = ({ onSwapModel }: ActiveModelCardProps) => {
           
           <Pressable 
             onPress={onSwapModel} 
-            className="px-4 h-9 bg-primary-500 items-center justify-center rounded-lg active:opacity-80"
+            className="h-9 shrink-0 items-center justify-center rounded-lg bg-primary-500 px-3.5 active:opacity-80"
           >
             <Text className="text-typography-0 text-sm font-semibold">{ctaLabel}</Text>
           </Pressable>

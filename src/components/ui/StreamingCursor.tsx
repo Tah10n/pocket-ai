@@ -14,7 +14,11 @@ import Animated, {
  */
 const AnimatedText = Animated.createAnimatedComponent(Text);
 
-export const StreamingCursor = () => {
+export const StreamingCursor = ({
+  compact = false,
+}: {
+  compact?: boolean;
+}) => {
   const opacity = useSharedValue(1);
 
   useEffect(() => {
@@ -31,10 +35,12 @@ export const StreamingCursor = () => {
 
   return (
     <AnimatedText
-      className="text-base leading-relaxed opacity-70"
+      className={compact
+        ? 'text-xs leading-4 text-typography-400 opacity-60 dark:text-typography-500'
+        : 'text-sm leading-6 text-typography-500 opacity-70 dark:text-typography-400'}
       style={animatedStyle}
     >
-      ▋
+      ▏
     </AnimatedText>
   );
 };

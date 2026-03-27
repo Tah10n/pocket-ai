@@ -28,7 +28,7 @@ export const SearchHeader: React.FC<SearchHeaderProps> = ({
   const { t } = useTranslation();
 
   return (
-    <ScreenHeaderShell contentClassName="px-4 pb-4 pt-2">
+    <ScreenHeaderShell contentClassName="px-4 pb-3 pt-1">
       <Box className="flex-row items-center gap-3">
         {onBack ? (
           <Pressable
@@ -59,7 +59,7 @@ export const SearchHeader: React.FC<SearchHeaderProps> = ({
         )}
       </Box>
 
-      <Box className="mt-4 flex-row w-full items-center rounded-2xl bg-background-50 dark:bg-background-900/60 h-12 px-3 border border-outline-200 dark:border-outline-800">
+      <Box className="mt-3 flex-row h-11 w-full items-center rounded-xl border border-outline-200 bg-background-50 px-3 dark:border-outline-800 dark:bg-background-900/60">
         <MaterialSymbols name="search" size={20} className="text-typography-500 dark:text-typography-400" />
         <Input className="ml-2 flex-1 h-full border-0 bg-transparent justify-center">
           <InputField
@@ -77,12 +77,12 @@ export const SearchHeader: React.FC<SearchHeaderProps> = ({
         ) : null}
       </Box>
 
-      <Box className="mt-4 flex-row gap-6 border-b border-outline-200 dark:border-primary-500/20">
+      <Box className="mt-3 flex-row gap-5 border-b border-outline-200 dark:border-primary-500/20">
         {(['All Models', 'Downloaded'] as const).map((tab) => (
           <Pressable
             key={tab}
             onPress={() => onTabChange(tab)}
-            className={`items-center pb-3 border-b-2 ${activeTab === tab ? 'border-primary-500' : 'border-transparent'}`}
+            className={`items-center border-b-2 pb-2.5 ${activeTab === tab ? 'border-primary-500' : 'border-transparent'}`}
           >
             <Text className={`text-sm ${activeTab === tab ? 'font-bold text-primary-500' : 'font-medium text-typography-500 dark:text-typography-400'}`}>
               {tab === 'All Models' ? t('models.tabAllModels') : t('models.tabDownloaded')}

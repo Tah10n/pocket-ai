@@ -166,6 +166,7 @@ export const useChatSession = () => {
     };
 
     let currentText = '';
+    let currentThoughtText = '';
     let tokensCount = 0;
     const startTime = Date.now();
     let flushTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -186,6 +187,7 @@ export const useChatSession = () => {
 
       patchAssistantMessage(threadId, assistantMessageId, {
         content: currentText,
+        thoughtContent: currentThoughtText || undefined,
         tokensPerSec,
         state: 'streaming',
       });
@@ -213,7 +215,7 @@ export const useChatSession = () => {
         maxContextSize - estimatedPromptTokens - DEFAULT_INFERENCE_PROMPT_SAFETY_MARGIN_TOKENS,
       );
 
-      await llmEngineService.chatCompletion({
+      const completion = await llmEngineService.chatCompletion({
         messages,
         params: {
           temperature: thread.paramsSnapshot.temperature,
@@ -222,9 +224,23 @@ export const useChatSession = () => {
           min_p: thread.paramsSnapshot.minP,
           penalty_repeat: thread.paramsSnapshot.repetitionPenalty,
           n_predict: Math.min(thread.paramsSnapshot.maxTokens, maxPredictTokens),
+          enable_thinking: thread.paramsSnapshot.reasoningEnabled === true,
+          reasoning_format: thread.paramsSnapshot.reasoningEnabled === true ? 'auto' : 'none',
         },
         onToken: (token) => {
-          currentText += token;
+          if (typeof token === 'string') {
+            currentText += token;
+          } else {
+            if (token.content !== undefined) {
+              currentText = token.content;
+            } else if (token.reasoningContent === undefined) {
+              currentText += token.token;
+            }
+
+            if (token.reasoningContent !== undefined) {
+              currentThoughtText = token.reasoningContent;
+            }
+          }
           tokensCount += 1;
           scheduleAssistantPatch();
         },
@@ -238,7 +254,12 @@ export const useChatSession = () => {
       }
 
       flushAssistantPatch();
-      finalizeAssistantMessage(threadId, assistantMessageId, currentText);
+      finalizeAssistantMessage(
+        threadId,
+        assistantMessageId,
+        completion.content || currentText,
+        completion.reasoning_content || currentThoughtText || undefined,
+      );
       finalizeThreadStatus(threadId, 'idle');
     } catch (error) {
       if (isMatchingGeneration(threadId, assistantMessageId) && sharedGenerationState.current?.stopRequested) {
@@ -255,6 +276,7 @@ export const useChatSession = () => {
       patchAssistantMessage(threadId, assistantMessageId, {
         content:
           currentText + (currentText.length > 0 ? '\n\n' : '') + `[Error: ${message}]`,
+        thoughtContent: currentThoughtText || undefined,
         state: 'error',
         errorCode: 'generation_failed',
       });
@@ -279,7 +301,8 @@ export const useChatSession = () => {
       || thread.paramsSnapshot.topK !== resolvedParams.topK
       || thread.paramsSnapshot.minP !== resolvedParams.minP
       || thread.paramsSnapshot.repetitionPenalty !== resolvedParams.repetitionPenalty
-      || thread.paramsSnapshot.maxTokens !== resolvedParams.maxTokens;
+      || thread.paramsSnapshot.maxTokens !== resolvedParams.maxTokens
+      || (thread.paramsSnapshot.reasoningEnabled === true) !== (resolvedParams.reasoningEnabled === true);
 
     if (paramsChanged) {
       updateThreadParamsSnapshot(thread.id, resolvedParams);

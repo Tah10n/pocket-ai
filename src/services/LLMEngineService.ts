@@ -132,11 +132,18 @@ class LLMEngineService {
         top_k: params?.top_k ?? 40,
         min_p: params?.min_p ?? 0.05,
         penalty_repeat: params?.penalty_repeat ?? 1,
+        enable_thinking: params?.enable_thinking ?? false,
+        reasoning_format: params?.reasoning_format ?? 'none',
         stop: ['</s>', '<|im_end|>', '<|end|>'],
       },
       (data: TokenData) => {
-        if (onToken && data.token) {
-          onToken(data.token);
+        if (onToken && (data.token || data.content !== undefined || data.reasoning_content !== undefined)) {
+          onToken({
+            token: data.token ?? '',
+            content: data.content,
+            reasoningContent: data.reasoning_content,
+            accumulatedText: data.accumulated_text,
+          });
         }
       },
     );

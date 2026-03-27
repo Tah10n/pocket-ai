@@ -77,6 +77,7 @@ describe('SettingsStore', () => {
         expect(settings.temperature).toBe(0.7);
         expect(settings.topP).toBe(0.9);
         expect(settings.maxTokens).toBe(2048);
+        expect(settings.reasoningEnabled).toBe(false);
     });
 
     it('updates settings partially', () => {
@@ -97,6 +98,7 @@ describe('SettingsStore', () => {
             minP: 0.05,
             repetitionPenalty: 1,
             maxTokens: 1536,
+            reasoningEnabled: false,
         });
         expect(getGenerationParametersForModel('author/model-b')).toEqual({
             temperature: 0.6,
@@ -105,6 +107,7 @@ describe('SettingsStore', () => {
             minP: 0.05,
             repetitionPenalty: 1,
             maxTokens: 1024,
+            reasoningEnabled: false,
         });
         expect(getSettings().modelParamsByModelId).toEqual({
             'author/model-a': {
@@ -114,6 +117,7 @@ describe('SettingsStore', () => {
                 minP: 0.05,
                 repetitionPenalty: 1,
                 maxTokens: 1536,
+                reasoningEnabled: false,
             },
             'author/model-b': {
                 temperature: 0.6,
@@ -122,6 +126,7 @@ describe('SettingsStore', () => {
                 minP: 0.05,
                 repetitionPenalty: 1,
                 maxTokens: 1024,
+                reasoningEnabled: false,
             },
         });
     });
@@ -146,8 +151,33 @@ describe('SettingsStore', () => {
             minP: 0.05,
             repetitionPenalty: 1,
             maxTokens: 2048,
+            reasoningEnabled: false,
         });
         expect(getSettings().modelParamsByModelId).toEqual({});
+    });
+
+    it('stores reasoning preference independently per model', () => {
+        updateSettings({ reasoningEnabled: false, modelParamsByModelId: {} });
+        updateGenerationParametersForModel('author/model-a', { reasoningEnabled: true });
+
+        expect(getGenerationParametersForModel('author/model-a')).toEqual({
+            temperature: 0.7,
+            topP: 0.9,
+            topK: 40,
+            minP: 0.05,
+            repetitionPenalty: 1,
+            maxTokens: 2048,
+            reasoningEnabled: true,
+        });
+        expect(getGenerationParametersForModel('author/model-b')).toEqual({
+            temperature: 0.7,
+            topP: 0.9,
+            topK: 40,
+            minP: 0.05,
+            repetitionPenalty: 1,
+            maxTokens: 2048,
+            reasoningEnabled: false,
+        });
     });
 
     it('stores model load parameters independently per model', () => {

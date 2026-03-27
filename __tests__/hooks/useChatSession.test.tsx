@@ -80,6 +80,7 @@ describe('useChatSession', () => {
       temperature: 0.7,
       topP: 0.9,
       maxTokens: modelId ? 1024 : 2048,
+      reasoningEnabled: false,
     }));
     (llmEngineService.getState as jest.Mock).mockReturnValue({
       status: EngineStatus.READY,
@@ -130,6 +131,85 @@ describe('useChatSession', () => {
     });
     expect(thread?.messages.map((message) => message.role)).toEqual(['user', 'assistant']);
     expect(thread?.messages.at(-1)?.content).toBe('Hello back');
+  });
+
+  it('stores reasoning separately from the final assistant content when the engine exposes it', async () => {
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      async ({ onToken }: { onToken?: (token: any) => void }) => {
+        onToken?.({
+          token: 'reason-1',
+          reasoningContent: 'Thinking through the answer',
+        });
+        onToken?.({
+          token: 'answer-1',
+          content: 'Visible answer',
+          reasoningContent: 'Thinking through the answer',
+        });
+
+        return {
+          text: '<think>Thinking through the answer</think>Visible answer',
+          content: 'Visible answer',
+          reasoning_content: 'Thinking through the answer',
+        };
+      },
+    );
+
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Explain this');
+    });
+
+    const assistantMessage = useChatStore.getState().getActiveThread()?.messages.at(-1);
+
+    expect(assistantMessage).toEqual(
+      expect.objectContaining({
+        role: 'assistant',
+        content: 'Visible answer',
+        thoughtContent: 'Thinking through the answer',
+        state: 'complete',
+      }),
+    );
+  });
+
+  it('does not force reasoning flags when the model profile leaves reasoning disabled', async () => {
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Hello there');
+    });
+
+    expect(llmEngineService.chatCompletion).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        params: expect.objectContaining({
+          enable_thinking: false,
+          reasoning_format: 'none',
+        }),
+      }),
+    );
+  });
+
+  it('enables reasoning flags when the model profile opts in', async () => {
+    (getGenerationParametersForModel as jest.Mock).mockImplementation((modelId: string | null | undefined) => ({
+      temperature: 0.7,
+      topP: 0.9,
+      maxTokens: modelId ? 1024 : 2048,
+      reasoningEnabled: true,
+    }));
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Explain this with reasoning');
+    });
+
+    expect(llmEngineService.chatCompletion).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        params: expect.objectContaining({
+          enable_thinking: true,
+          reasoning_format: 'auto',
+        }),
+      }),
+    );
   });
 
   it('stops generation and preserves the partial assistant response', async () => {

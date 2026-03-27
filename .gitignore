@@ -33,6 +33,7 @@ artifacts/
 
 # local env files
 .env*.local
+.local/
 
 # typescript
 *.tsbuildinfo

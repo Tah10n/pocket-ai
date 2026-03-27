@@ -3,7 +3,6 @@ import { Box } from '@/components/ui/box';
 import { Text } from '@/components/ui/text';
 import { Pressable } from '@/components/ui/pressable';
 import { MaterialSymbols } from './MaterialSymbols';
-import { FlashList, ListRenderItem } from '@shopify/flash-list';
 import { useTranslation } from 'react-i18next';
 import { useChatStore } from '../../store/chatStore';
 import { ConversationIndexItem, toConversationIndexItem } from '../../types/chat';
@@ -52,20 +51,20 @@ export const RecentConversationsList = ({
   const visibleConversations = useMemo(() => conversations.slice(0, maxVisible), [conversations, maxVisible]);
   const shouldShowViewAll = Boolean(onViewAllConversations) && conversations.length > maxVisible;
 
-  const renderItem = useCallback<ListRenderItem<Conversation>>(({ item: conv }) => (
+  const renderConversation = useCallback((conv: Conversation) => (
     <Box className="flex-row items-center rounded-xl bg-background-50 dark:bg-primary-500/5 border border-outline-200 dark:border-primary-500/10">
       <Pressable 
         testID={`recent-conversation-${conv.id}`}
         onPress={() => {
           onOpenConversation?.(conv);
         }}
-        className="flex-1 flex-row items-center p-4 active:opacity-70"
+        className="flex-1 flex-row items-center p-3.5 active:opacity-70"
       >
-        <Box className="size-10 rounded-lg bg-background-100 dark:bg-primary-500/20 items-center justify-center shrink-0">
-          <MaterialSymbols name={conv.icon} size={20} className="text-primary-500" />
+        <Box className="size-9 shrink-0 items-center justify-center rounded-lg bg-background-100 dark:bg-primary-500/20">
+          <MaterialSymbols name={conv.icon} size={18} className="text-primary-500" />
         </Box>
         
-        <Box className="ml-3 flex-1 overflow-hidden">
+        <Box className="ml-2.5 flex-1 overflow-hidden">
           <Text className="text-typography-900 dark:text-typography-100 font-semibold truncate" numberOfLines={1}>{conv.title}</Text>
           <Box className="flex-row items-center gap-2 mt-0.5">
             <Text className="text-typography-500 dark:text-typography-400 text-xs">{conv.model}</Text>
@@ -75,7 +74,7 @@ export const RecentConversationsList = ({
         </Box>
       </Pressable>
 
-      <Box className="ml-3 flex-row items-center gap-1">
+      <Box className="ml-2 flex-row items-center gap-1">
         <Pressable
           testID={`delete-conversation-${conv.id}`}
           onPress={() => {
@@ -93,8 +92,8 @@ export const RecentConversationsList = ({
   ), [onDeleteConversation, onOpenConversation]);
 
   return (
-    <Box className="px-4 mt-8 pb-4">
-      <Box className="mb-4 flex-row items-center justify-between gap-3">
+    <Box className="mt-5 px-4 pb-3">
+      <Box className="mb-3 flex-row items-center justify-between gap-3">
         <Text className="text-typography-900 dark:text-typography-100 text-lg font-bold leading-tight tracking-tight">{t('home.recentConversations')}</Text>
         {shouldShowViewAll ? (
           <Pressable
@@ -109,17 +108,17 @@ export const RecentConversationsList = ({
         ) : null}
       </Box>
 
-      <Box className="flex-1 min-h-80">
+      <Box>
         {visibleConversations.length > 0 ? (
-          <FlashList<Conversation>
-            data={visibleConversations}
-            ItemSeparatorComponent={() => <Box className="h-3" />}
-            keyExtractor={(item) => item.id}
-            scrollEnabled={false}
-            renderItem={renderItem}
-          />
+          <Box className="gap-3">
+            {visibleConversations.map((conversation) => (
+              <React.Fragment key={conversation.id}>
+                {renderConversation(conversation)}
+              </React.Fragment>
+            ))}
+          </Box>
         ) : (
-          <Box className="rounded-xl border border-dashed border-outline-200 bg-background-50 px-4 py-6 dark:border-primary-500/10 dark:bg-primary-500/5">
+          <Box className="rounded-xl border border-dashed border-outline-200 bg-background-50 px-4 py-5 dark:border-primary-500/10 dark:bg-primary-500/5">
             <Text className="text-sm font-semibold text-typography-700 dark:text-typography-200">
               {t('home.noConversationsTitle')}
             </Text>

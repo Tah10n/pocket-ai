@@ -8,24 +8,26 @@ export default function TabLayout() {
   const { t } = useTranslation();
   const { resolvedMode } = useTheme();
   const isDark = resolvedMode === 'dark';
+  const tabBarStyle = {
+    height: 72,
+    paddingTop: 8,
+    paddingBottom: 10,
+    backgroundColor: isDark ? 'rgba(19, 16, 34, 0.96)' : 'rgba(246, 246, 248, 0.96)',
+    borderTopColor: isDark ? 'rgba(148, 163, 184, 0.14)' : 'rgba(100, 116, 139, 0.12)',
+    borderTopWidth: 1,
+    elevation: 0,
+    shadowOpacity: 0,
+  } as const;
 
   return (
     <Tabs
+      backBehavior="history"
       screenOptions={{
         tabBarActiveTintColor: '#3211d4', // primary-500
         tabBarInactiveTintColor: '#64748b', // typography-500
         headerShown: false,
         tabBarHideOnKeyboard: true,
-        tabBarStyle: {
-            height: 72,
-            paddingTop: 8,
-            paddingBottom: 10,
-            backgroundColor: isDark ? 'rgba(19, 16, 34, 0.96)' : 'rgba(246, 246, 248, 0.96)',
-            borderTopColor: isDark ? 'rgba(148, 163, 184, 0.14)' : 'rgba(100, 116, 139, 0.12)',
-            borderTopWidth: 1,
-            elevation: 0,
-            shadowOpacity: 0,
-        }
+        tabBarStyle,
       }}>
       <Tabs.Screen
         name="index"
@@ -39,6 +41,9 @@ export default function TabLayout() {
         options={{
           title: t('tabs.chat'),
           tabBarIcon: ({ color }) => <MaterialSymbols size={28} name="chat" color={color} />,
+          tabBarStyle: {
+            display: 'none',
+          },
         }}
       />
       <Tabs.Screen

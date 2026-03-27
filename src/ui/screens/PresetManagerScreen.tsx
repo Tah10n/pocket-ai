@@ -166,7 +166,7 @@ export function PresetManagerScreen() {
 
     return (
         <Box className="flex-1 bg-background-0 dark:bg-background-950">
-            <ScreenHeaderShell contentClassName="px-4 pb-4 pt-2">
+            <ScreenHeaderShell contentClassName="px-4 pb-3 pt-1">
                 <Box className="flex-row items-center justify-between gap-3">
                     <Box className="flex-row items-center gap-3 flex-1">
                         <Pressable
@@ -203,7 +203,7 @@ export function PresetManagerScreen() {
                 </Box>
             </ScreenHeaderShell>
 
-            <ScreenContent className="flex-1 px-4 pb-8 pt-4">
+            <ScreenContent className="flex-1 px-4 pb-6 pt-3">
                 <FlashList
                     data={presets}
                     keyExtractor={(item) => item.id}
@@ -215,8 +215,8 @@ export function PresetManagerScreen() {
             <Modal visible={editorState.visible} animationType="slide" transparent onRequestClose={closeEditor}>
                 <Box className="flex-1 justify-end bg-black/40">
                     <Pressable className="flex-1" onPress={closeEditor} />
-                    <Box className="max-h-[88%] rounded-t-3xl bg-background-0 px-5 pb-8 pt-5 dark:bg-background-950">
-                        <Box className="mb-4 flex-row items-center justify-between gap-3">
+                    <Box className="max-h-[88%] rounded-t-3xl bg-background-0 px-5 pb-6 pt-4 dark:bg-background-950">
+                        <Box className="mb-3 flex-row items-center justify-between gap-3">
                             <Box className="flex-1">
                                 <Text className="text-lg font-semibold text-typography-900 dark:text-typography-100">
                                     {editorTitle}
@@ -268,7 +268,7 @@ export function PresetManagerScreen() {
                             </Box>
                         </ScrollView>
 
-                        <Box className="mt-5 flex-row gap-3">
+                        <Box className="mt-4 flex-row gap-3">
                             <Button action="primary" className="flex-1" onPress={handleSaveAndActivate}>
                                 <ButtonText>{t('presets.saveAndActivate')}</ButtonText>
                             </Button>

@@ -1,5 +1,6 @@
 import React from 'react';
 import { act, fireEvent, render } from '@testing-library/react-native';
+import { Alert } from 'react-native';
 
 jest.mock('react-native-css-interop', () => {
   const mockReact = require('react');
@@ -72,8 +73,8 @@ jest.mock('../../src/components/ui/ChatHeader', () => {
       canStartNewChat,
       onStartNewChat,
       statusLabel,
-      badgeLabel,
-      detailLabel,
+      presetLabel,
+      modelLabel,
       onMenu,
       onOpenModelControls,
     }: any) =>
@@ -81,8 +82,8 @@ jest.mock('../../src/components/ui/ChatHeader', () => {
         View,
         null,
         mockReact.createElement(Text, null, title),
-        badgeLabel ? mockReact.createElement(Text, null, badgeLabel) : null,
-        detailLabel ? mockReact.createElement(Text, null, detailLabel) : null,
+        presetLabel ? mockReact.createElement(Text, null, presetLabel) : null,
+        modelLabel ? mockReact.createElement(Text, null, modelLabel) : null,
         statusLabel ? mockReact.createElement(Text, null, statusLabel) : null,
         canStartNewChat
           ? mockReact.createElement(
@@ -236,11 +237,19 @@ jest.mock('@/components/ui/ModelParametersSheet', () => {
   const { Pressable, Text, View } = require('react-native');
 
   return {
-    ModelParametersSheet: ({ visible, onResetParamField }: any) =>
+    ModelParametersSheet: ({ visible, onResetParamField, onChangeParams }: any) =>
       visible
         ? mockReact.createElement(
             View,
             { testID: 'model-parameters-sheet' },
+            mockReact.createElement(
+              Pressable,
+              {
+                testID: 'enable-reasoning-button',
+                onPress: () => onChangeParams({ reasoningEnabled: true }),
+              },
+              mockReact.createElement(Text, null, 'Enable reasoning'),
+            ),
             mockReact.createElement(
               Pressable,
               {
@@ -353,11 +362,28 @@ jest.mock('../../src/services/HardwareListenerService', () => ({
   getChatHardwareBannerInputs: () => mockHardwareBannerInputs,
 }));
 
-const { ChatScreen, getNextShouldStickToBottom } = require('../../src/ui/screens/ChatScreen');
+const {
+  ChatScreen,
+  getNextShouldStickToBottom,
+  getAndroidKeyboardOverlapCompensation,
+  getAndroidKeyboardSpacerHeight,
+  handleAndroidBackNavigation,
+} = require('../../src/ui/screens/ChatScreen');
 const { useChatStore } = require('../../src/store/chatStore');
 const { updateSettings } = require('../../src/services/SettingsStore');
+const { registry } = require('../../src/services/LocalStorageRegistry');
 
 describe('ChatScreen', () => {
+  let alertSpy: jest.SpyInstance;
+
+  beforeAll(() => {
+    alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(jest.fn());
+  });
+
+  afterAll(() => {
+    alertSpy.mockRestore();
+  });
+
   beforeEach(() => {
     mockRegenerateFromUserMessage.mockClear();
     mockOpenThread.mockClear();
@@ -366,6 +392,7 @@ describe('ChatScreen', () => {
     mockCreateSummaryPlaceholder.mockClear();
     mockRouterPush.mockClear();
     mockStartNewChat.mockClear();
+    alertSpy.mockClear();
     lastPresetSelectorProps = null;
     hardwareStatusListener = null;
     mockHardwareBannerInputs = {
@@ -377,6 +404,7 @@ describe('ChatScreen', () => {
       activeModelId: 'author/model-q4',
       status: 'ready',
     };
+    registry.saveModels([]);
     updateSettings({
       activePresetId: 'preset-1',
       temperature: 0.7,
@@ -387,6 +415,7 @@ describe('ChatScreen', () => {
           temperature: 0.7,
           topP: 0.6,
           maxTokens: 1024,
+          reasoningEnabled: false,
         },
       },
       modelLoadParamsByModelId: {},
@@ -407,6 +436,7 @@ describe('ChatScreen', () => {
             temperature: 0.7,
             topP: 0.6,
             maxTokens: 1024,
+            reasoningEnabled: false,
           },
           messages: [
             {
@@ -461,18 +491,56 @@ describe('ChatScreen', () => {
     ).toBe(false);
   });
 
-  it('renders messages from the restored active thread', () => {
-    const { getByText } = render(React.createElement(ChatScreen));
+  it('compensates only the portion of the Android keyboard that still overlaps the resized viewport', () => {
+    expect(getAndroidKeyboardOverlapCompensation({
+      baseWindowHeight: 2400,
+      currentWindowHeight: 2140,
+      keyboardHeight: 320,
+    })).toBe(60);
+  });
 
+  it('keeps enough spacer to lift the composer above the keyboard when resize alone is not enough', () => {
+    expect(getAndroidKeyboardSpacerHeight({
+      viewportCompensation: 20,
+      composerBottomY: 2190,
+      keyboardTopY: 2140,
+    })).toBe(58);
+  });
+
+  it('uses stack history first for Android back when chat was pushed from another screen', () => {
+    const onGoBack = jest.fn();
+
+    expect(handleAndroidBackNavigation({
+      canGoBack: true,
+      onGoBack,
+    })).toBe(true);
+    expect(onGoBack).toHaveBeenCalledTimes(1);
+  });
+
+  it('lets the navigator fall through when there is no stack history for Android back', () => {
+    const onGoBack = jest.fn();
+
+    expect(handleAndroidBackNavigation({
+      canGoBack: false,
+      onGoBack,
+    })).toBe(false);
+    expect(onGoBack).not.toHaveBeenCalled();
+  });
+
+  it('renders messages from the restored active thread', () => {
+    const { getByTestId, getByText, queryByText } = render(React.createElement(ChatScreen));
+
+    expect(getByTestId('chat-keyboard-avoiding-view')).toBeTruthy();
     expect(getByText('Restored conversation')).toBeTruthy();
     expect(getByText('Helpful Assistant')).toBeTruthy();
-    expect(getByText('T0.7 • P0.6 • K40 • 1024 tok')).toBeTruthy();
+    expect(getByText('model-q4')).toBeTruthy();
     expect(getByText('Saved user prompt')).toBeTruthy();
     expect(getByText('Saved assistant reply')).toBeTruthy();
+    expect(queryByText('T0.7 • P0.6 • K40 • 1024 tok')).toBeNull();
   });
 
   it('starts message-scoped regenerate flow from a user bubble', async () => {
-    const { getByTestId, getByText } = render(React.createElement(ChatScreen));
+    const { getByTestId, getByText, queryByText } = render(React.createElement(ChatScreen));
 
     fireEvent.press(getByTestId('regenerate-message-message-1'));
     expect(getByText('chat.editEarlierMessage')).toBeTruthy();
@@ -481,6 +549,7 @@ describe('ChatScreen', () => {
       fireEvent.press(getByTestId('send-button'));
     });
     expect(mockRegenerateFromUserMessage).toHaveBeenCalledWith('message-1', 'Edited from test');
+    expect(queryByText('chat.editEarlierMessage')).toBeNull();
   });
 
   it('starts a new chat and clears the current thread from the screen', () => {
@@ -495,6 +564,24 @@ describe('ChatScreen', () => {
     expect(queryByText('Saved user prompt')).toBeNull();
   });
 
+  it('shows an alert instead of throwing when header new chat fails synchronously', () => {
+    mockStartNewChat.mockImplementationOnce(() => {
+      throw new Error('Stop the current response before starting a new chat.');
+    });
+
+    const { getByTestId, getByText } = render(React.createElement(ChatScreen));
+
+    expect(getByText('Saved user prompt')).toBeTruthy();
+
+    fireEvent.press(getByTestId('new-chat-button'));
+
+    expect(alertSpy).toHaveBeenCalledWith(
+      'conversations.startNewChatErrorTitle',
+      'common.errors.engineBusy',
+    );
+    expect(getByText('Saved user prompt')).toBeTruthy();
+  });
+
   it('hides regenerate control when the engine is not ready', () => {
     mockEngineState = {
       activeModelId: null,
@@ -505,6 +592,22 @@ describe('ChatScreen', () => {
 
     expect(getByText('chat.loadModelWarning')).toBeTruthy();
     expect(queryByTestId('regenerate-message-message-1')).toBeNull();
+  });
+
+  it('replaces the empty-state prompt with a recovery card when no model is loaded for a new chat', () => {
+    mockEngineState = {
+      activeModelId: null,
+      status: 'idle',
+    };
+    useChatStore.setState({
+      threads: {},
+      activeThreadId: null,
+    });
+
+    const { getByText, queryByText } = render(React.createElement(ChatScreen));
+
+    expect(getByText('chat.loadModelWarning')).toBeTruthy();
+    expect(queryByText('chat.noMessages')).toBeNull();
   });
 
   it('shows stop control while a response is generating', () => {
@@ -575,6 +678,31 @@ describe('ChatScreen', () => {
 
     fireEvent.press(getByText('chat.downloadModel'));
     expect(mockRouterPush).toHaveBeenCalledWith('/(tabs)/models');
+  });
+
+  it('offers a load-model recovery action when downloaded models already exist', () => {
+    mockEngineState = {
+      activeModelId: null,
+      status: 'idle',
+    };
+    registry.saveModels([
+      {
+        id: 'downloaded-model',
+        name: 'Downloaded model',
+        author: 'Test',
+        size: 1024,
+        localPath: 'downloaded-model.gguf',
+        lifecycleStatus: 'downloaded',
+      },
+    ]);
+
+    const { getByText } = render(React.createElement(ChatScreen));
+
+    fireEvent.press(getByText('chat.loadModel'));
+    expect(mockRouterPush).toHaveBeenCalledWith({
+      pathname: '/(tabs)/models',
+      params: { initialTab: 'downloaded' },
+    });
   });
 
   it('shows an overheating warning banner when thermal state is elevated', () => {
@@ -752,15 +880,26 @@ describe('ChatScreen', () => {
   });
 
   it('resets a single generation parameter from the model controls sheet', () => {
-    const { getByTestId, getByText, rerender } = render(React.createElement(ChatScreen));
+    const { getByTestId, rerender } = render(React.createElement(ChatScreen));
 
-    expect(getByText('T0.7 • P0.6 • K40 • 1024 tok')).toBeTruthy();
+    expect(useChatStore.getState().getActiveThread()?.paramsSnapshot.topP).toBe(0.6);
 
     fireEvent.press(getByTestId('model-controls-button'));
     fireEvent.press(getByTestId('reset-top-p-button'));
     rerender(React.createElement(ChatScreen));
 
-    expect(getByText('T0.7 • P0.9 • K40 • 1024 tok')).toBeTruthy();
     expect(useChatStore.getState().getActiveThread()?.paramsSnapshot.topP).toBe(0.9);
+  });
+
+  it('updates the active thread reasoning toggle from the model controls sheet', () => {
+    const { getByTestId, rerender } = render(React.createElement(ChatScreen));
+
+    expect(useChatStore.getState().getActiveThread()?.paramsSnapshot.reasoningEnabled).not.toBe(true);
+
+    fireEvent.press(getByTestId('model-controls-button'));
+    fireEvent.press(getByTestId('enable-reasoning-button'));
+    rerender(React.createElement(ChatScreen));
+
+    expect(useChatStore.getState().getActiveThread()?.paramsSnapshot.reasoningEnabled).toBe(true);
   });
 });

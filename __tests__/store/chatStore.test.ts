@@ -560,6 +560,167 @@ describe('chatStore', () => {
     );
   });
 
+  it('uses the visible assistant answer for conversation previews when thoughts are present', () => {
+    const threadId = useChatStore.getState().createThread({
+      modelId: 'author/model-q4',
+      presetId: null,
+      presetSnapshot: {
+        id: null,
+        name: 'Default',
+        systemPrompt: 'You are helpful.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 1024,
+      },
+    });
+
+    useChatStore.getState().appendMessage(threadId, {
+      id: 'user-1',
+      role: 'user',
+      content: 'Explain this',
+      createdAt: 1,
+      state: 'complete',
+    });
+    useChatStore.getState().appendMessage(threadId, {
+      id: 'assistant-1',
+      role: 'assistant',
+      content: '<think>Hidden reasoning</think>\n\nVisible answer',
+      createdAt: 2,
+      state: 'complete',
+    });
+
+    expect(useChatStore.getState().getConversationIndex()[0]?.lastMessagePreview).toBe('Visible answer');
+  });
+
+  it('skips pure thought-only assistant messages when building conversation previews', () => {
+    const threadId = useChatStore.getState().createThread({
+      modelId: 'author/model-q4',
+      presetId: null,
+      presetSnapshot: {
+        id: null,
+        name: 'Default',
+        systemPrompt: 'You are helpful.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 1024,
+      },
+    });
+
+    useChatStore.getState().appendMessage(threadId, {
+      id: 'user-1',
+      role: 'user',
+      content: 'Explain this',
+      createdAt: 1,
+      state: 'complete',
+    });
+    useChatStore.getState().appendMessage(threadId, {
+      id: 'assistant-1',
+      role: 'assistant',
+      content: '<think>Hidden reasoning only</think>',
+      createdAt: 2,
+      state: 'complete',
+    });
+
+    expect(useChatStore.getState().getConversationIndex()[0]?.lastMessagePreview).toBe('Explain this');
+  });
+
+  it('strips leading assistant thoughts from the inference window', () => {
+    const thread: ChatThread = {
+      id: 'thread-thoughts',
+      title: 'Thought thread',
+      modelId: 'author/model-q4',
+      presetId: null,
+      presetSnapshot: {
+        id: null,
+        name: 'Default',
+        systemPrompt: 'You are helpful.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        topK: 40,
+        minP: 0.05,
+        repetitionPenalty: 1,
+        maxTokens: 1024,
+      },
+      messages: [
+        {
+          id: 'message-1',
+          role: 'user',
+          content: 'Explain this',
+          createdAt: 1,
+          state: 'complete',
+        },
+        {
+          id: 'message-2',
+          role: 'assistant',
+          content: '<think>Hidden reasoning</think>\n\nVisible answer',
+          createdAt: 2,
+          state: 'complete',
+        },
+      ],
+      createdAt: 1,
+      updatedAt: 2,
+      status: 'idle',
+    };
+
+    expect(getThreadInferenceWindow(thread, 24).messages).toEqual([
+      { role: 'system', content: 'You are helpful.' },
+      { role: 'user', content: 'Explain this' },
+      { role: 'assistant', content: 'Visible answer' },
+    ]);
+  });
+
+  it('omits pure thought-only assistant turns from the inference window', () => {
+    const thread: ChatThread = {
+      id: 'thread-thoughts-only',
+      title: 'Thought-only thread',
+      modelId: 'author/model-q4',
+      presetId: null,
+      presetSnapshot: {
+        id: null,
+        name: 'Default',
+        systemPrompt: 'You are helpful.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        topK: 40,
+        minP: 0.05,
+        repetitionPenalty: 1,
+        maxTokens: 1024,
+      },
+      messages: [
+        {
+          id: 'message-1',
+          role: 'user',
+          content: 'Explain this',
+          createdAt: 1,
+          state: 'complete',
+        },
+        {
+          id: 'message-2',
+          role: 'assistant',
+          content: '<think>Hidden reasoning only</think>',
+          createdAt: 2,
+          state: 'complete',
+        },
+      ],
+      createdAt: 1,
+      updatedAt: 2,
+      status: 'idle',
+    };
+
+    expect(getThreadInferenceWindow(thread, 24).messages).toEqual([
+      { role: 'system', content: 'You are helpful.' },
+      { role: 'user', content: 'Explain this' },
+    ]);
+  });
+
   it('keeps only the newest coherent turn when the response reserve squeezes prompt history', () => {
     const longMessage = 'A'.repeat(120);
     const thread: ChatThread = {

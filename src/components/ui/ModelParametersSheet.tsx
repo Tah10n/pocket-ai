@@ -45,6 +45,8 @@ interface SliderRowProps {
   onValueChange: (value: number) => void;
   onReset?: () => void;
   isResetDisabled?: boolean;
+  variant?: 'standalone' | 'embedded';
+  showDivider?: boolean;
 }
 
 function SliderRow({
@@ -60,10 +62,15 @@ function SliderRow({
   onValueChange,
   onReset,
   isResetDisabled = false,
+  variant = 'standalone',
+  showDivider = false,
 }: SliderRowProps) {
   const { t } = useTranslation();
   return (
-    <Box className="rounded-3xl border border-outline-200 bg-background-50 p-4 dark:border-outline-800 dark:bg-background-900/70">
+    <Box className={variant === 'embedded'
+      ? `${showDivider ? 'mt-4 border-t border-primary-500/12 pt-4 dark:border-primary-500/20' : ''}`
+      : 'rounded-3xl border border-outline-200 bg-background-50 p-4 dark:border-outline-800 dark:bg-background-900/70'}
+    >
       <Box className="flex-row items-start justify-between gap-3">
         <Box className="min-w-0 flex-1">
           <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">
@@ -118,6 +125,99 @@ function SliderRow({
         <Text className="text-xs font-medium text-typography-400 dark:text-typography-500">
           {maxLabel}
         </Text>
+      </Box>
+    </Box>
+  );
+}
+
+interface ToggleRowProps {
+  label: string;
+  description: string;
+  value: boolean;
+  enabledLabel: string;
+  disabledLabel: string;
+  onValueChange: (value: boolean) => void;
+  onReset?: () => void;
+  isResetDisabled?: boolean;
+}
+
+function ToggleRow({
+  label,
+  description,
+  value,
+  enabledLabel,
+  disabledLabel,
+  onValueChange,
+  onReset,
+  isResetDisabled = false,
+}: ToggleRowProps) {
+  const { t } = useTranslation();
+
+  return (
+    <Box className="rounded-3xl border border-outline-200 bg-background-50 p-4 dark:border-outline-800 dark:bg-background-900/70">
+      <Box className="flex-row items-start justify-between gap-3">
+        <Box className="min-w-0 flex-1">
+          <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">
+            {label}
+          </Text>
+          <Text className="mt-1 text-sm leading-5 text-typography-500 dark:text-typography-400">
+            {description}
+          </Text>
+        </Box>
+
+        <Box className="rounded-full border border-primary-500/15 bg-primary-500/10 px-3 py-1.5">
+          <Text className="text-sm font-semibold text-primary-500">
+            {value ? enabledLabel : disabledLabel}
+          </Text>
+        </Box>
+      </Box>
+
+      {onReset ? (
+        <Box className="mt-3 flex-row justify-end">
+          <Pressable
+            onPress={onReset}
+            disabled={isResetDisabled}
+            className={`rounded-full px-3 py-1.5 ${isResetDisabled
+              ? 'bg-background-100 dark:bg-background-900/60'
+              : 'border border-primary-500/20 bg-primary-500/10 active:opacity-80'}`}
+          >
+            <Text className={`text-xs font-semibold ${isResetDisabled
+              ? 'text-typography-400 dark:text-typography-500'
+              : 'text-primary-500'}`}>
+              {t('common.reset')}
+            </Text>
+          </Pressable>
+        </Box>
+      ) : null}
+
+      <Box className="mt-4 flex-row gap-2">
+        <Pressable
+          testID="reasoning-option-off"
+          onPress={() => onValueChange(false)}
+          className={`flex-1 rounded-2xl border px-3 py-3 active:opacity-80 ${!value
+            ? 'border-primary-500 bg-primary-500/10'
+            : 'border-outline-200 bg-background-0 dark:border-outline-800 dark:bg-background-950/70'}`}
+        >
+          <Text className={`text-center text-sm font-semibold ${!value
+            ? 'text-primary-500'
+            : 'text-typography-700 dark:text-typography-200'}`}>
+            {disabledLabel}
+          </Text>
+        </Pressable>
+
+        <Pressable
+          testID="reasoning-option-on"
+          onPress={() => onValueChange(true)}
+          className={`flex-1 rounded-2xl border px-3 py-3 active:opacity-80 ${value
+            ? 'border-primary-500 bg-primary-500/10'
+            : 'border-outline-200 bg-background-0 dark:border-outline-800 dark:bg-background-950/70'}`}
+        >
+          <Text className={`text-center text-sm font-semibold ${value
+            ? 'text-primary-500'
+            : 'text-typography-700 dark:text-typography-200'}`}>
+            {enabledLabel}
+          </Text>
+        </Pressable>
       </Box>
     </Box>
   );
@@ -211,61 +311,6 @@ export function ModelParametersSheet({
 
           <ScrollView showsVerticalScrollIndicator={false}>
             <Box className="gap-4 pb-2">
-              <Box className="rounded-3xl border border-primary-500/15 bg-primary-500/5 p-4">
-                <Text className="text-xs font-semibold uppercase tracking-wider text-primary-500">
-                  {t('chat.modelControls.runtimeReload')}
-                </Text>
-                <Text className="mt-2 text-sm leading-5 text-typography-600 dark:text-typography-300">
-                  {t('chat.modelControls.runtimeReloadDescription')}
-                </Text>
-              </Box>
-
-              <SliderRow
-                label={t('chat.modelControls.contextWindow')}
-                description={t('chat.modelControls.contextWindowDescription')}
-                valueLabel={`${Math.round(loadParamsDraft.contextSize)} tok`}
-                minLabel="512"
-                maxLabel={`${contextWindowCeiling}`}
-                minimumValue={512}
-                maximumValue={contextWindowCeiling}
-                step={512}
-                value={Math.min(loadParamsDraft.contextSize, contextWindowCeiling)}
-                onValueChange={(value) => onChangeLoadParams({ contextSize: Math.round(value) })}
-                onReset={() => onResetLoadField('contextSize')}
-                isResetDisabled={loadParamsDraft.contextSize === Math.min(defaultLoadParams.contextSize, contextWindowCeiling)}
-              />
-
-              <SliderRow
-                label={t('chat.modelControls.gpuLayers')}
-                description={t('chat.modelControls.gpuLayersDescription', { count: recommendedGpuLayers })}
-                valueLabel={t('chat.modelControls.gpuLayersValue', { count: Math.round(loadParamsDraft.gpuLayers ?? 0) })}
-                minLabel="0"
-                maxLabel="80"
-                minimumValue={0}
-                maximumValue={80}
-                step={1}
-                value={loadParamsDraft.gpuLayers ?? 0}
-                onValueChange={(value) => onChangeLoadParams({ gpuLayers: Math.round(value) })}
-                onReset={() => onResetLoadField('gpuLayers')}
-                isResetDisabled={(loadParamsDraft.gpuLayers ?? recommendedGpuLayers) === (defaultLoadParams.gpuLayers ?? recommendedGpuLayers)}
-              />
-
-              {showApplyReload ? (
-                <Pressable
-                  onPress={onApplyReload}
-                  disabled={!canApplyReload || isApplyingReload || !modelId}
-                  className={`rounded-2xl px-4 py-3 ${canApplyReload && !isApplyingReload && modelId
-                    ? 'border border-primary-500/20 bg-primary-500/10 active:opacity-80'
-                    : 'bg-background-100 dark:bg-background-900/60'}`}
-                >
-                  <Text className={`text-center text-sm font-semibold ${canApplyReload && !isApplyingReload && modelId
-                    ? 'text-primary-500'
-                    : 'text-typography-400 dark:text-typography-500'}`}>
-                    {isApplyingReload ? t('chat.modelControls.reloading') : applyButtonLabel}
-                  </Text>
-                </Pressable>
-              ) : null}
-
               <Box className="rounded-3xl border border-outline-200 bg-background-50 p-4 dark:border-outline-800 dark:bg-background-900/70">
                 <Text className="text-xs font-semibold uppercase tracking-wider text-primary-500">
                   {t('chat.modelControls.liveSampling')}
@@ -274,6 +319,17 @@ export function ModelParametersSheet({
                   {t('chat.modelControls.liveSamplingDescription')}
                 </Text>
               </Box>
+
+              <ToggleRow
+                label={t('chat.modelControls.reasoning')}
+                description={t('chat.modelControls.reasoningDescription')}
+                value={params.reasoningEnabled === true}
+                enabledLabel={t('chat.modelControls.reasoningOn')}
+                disabledLabel={t('chat.modelControls.reasoningOff')}
+                onValueChange={(value) => onChangeParams({ reasoningEnabled: value })}
+                onReset={() => onResetParamField('reasoningEnabled')}
+                isResetDisabled={(params.reasoningEnabled === true) === (defaultParams.reasoningEnabled === true)}
+              />
 
               <SliderRow
                 label={t('chat.modelControls.temperature')}
@@ -364,6 +420,64 @@ export function ModelParametersSheet({
                 onReset={() => onResetParamField('maxTokens')}
                 isResetDisabled={params.maxTokens === defaultParams.maxTokens}
               />
+
+              <Box className="rounded-3xl border border-primary-500/15 bg-primary-500/5 p-4">
+                <Text className="text-xs font-semibold uppercase tracking-wider text-primary-500">
+                  {t('chat.modelControls.runtimeReload')}
+                </Text>
+                <Text className="mt-2 text-sm leading-5 text-typography-600 dark:text-typography-300">
+                  {t('chat.modelControls.runtimeReloadDescription')}
+                </Text>
+
+                <SliderRow
+                  label={t('chat.modelControls.contextWindow')}
+                  description={t('chat.modelControls.contextWindowDescription')}
+                  valueLabel={`${Math.round(loadParamsDraft.contextSize)} tok`}
+                  minLabel="512"
+                  maxLabel={`${contextWindowCeiling}`}
+                  minimumValue={512}
+                  maximumValue={contextWindowCeiling}
+                  step={512}
+                  value={Math.min(loadParamsDraft.contextSize, contextWindowCeiling)}
+                  onValueChange={(value) => onChangeLoadParams({ contextSize: Math.round(value) })}
+                  onReset={() => onResetLoadField('contextSize')}
+                  isResetDisabled={loadParamsDraft.contextSize === Math.min(defaultLoadParams.contextSize, contextWindowCeiling)}
+                  variant="embedded"
+                />
+
+                <SliderRow
+                  label={t('chat.modelControls.gpuLayers')}
+                  description={t('chat.modelControls.gpuLayersDescription', { count: recommendedGpuLayers })}
+                  valueLabel={t('chat.modelControls.gpuLayersValue', { count: Math.round(loadParamsDraft.gpuLayers ?? 0) })}
+                  minLabel="0"
+                  maxLabel="80"
+                  minimumValue={0}
+                  maximumValue={80}
+                  step={1}
+                  value={loadParamsDraft.gpuLayers ?? 0}
+                  onValueChange={(value) => onChangeLoadParams({ gpuLayers: Math.round(value) })}
+                  onReset={() => onResetLoadField('gpuLayers')}
+                  isResetDisabled={(loadParamsDraft.gpuLayers ?? recommendedGpuLayers) === (defaultLoadParams.gpuLayers ?? recommendedGpuLayers)}
+                  variant="embedded"
+                  showDivider
+                />
+
+                {showApplyReload ? (
+                  <Pressable
+                    onPress={onApplyReload}
+                    disabled={!canApplyReload || isApplyingReload || !modelId}
+                    className={`mt-4 rounded-2xl px-4 py-3 ${canApplyReload && !isApplyingReload && modelId
+                      ? 'border border-primary-500/20 bg-primary-500/10 active:opacity-80'
+                      : 'bg-background-100 dark:bg-background-900/60'}`}
+                  >
+                    <Text className={`text-center text-sm font-semibold ${canApplyReload && !isApplyingReload && modelId
+                      ? 'text-primary-500'
+                      : 'text-typography-400 dark:text-typography-500'}`}>
+                      {isApplyingReload ? t('chat.modelControls.reloading') : applyButtonLabel}
+                    </Text>
+                  </Pressable>
+                ) : null}
+              </Box>
             </Box>
           </ScrollView>
         </Box>

@@ -216,9 +216,48 @@ describe('ConversationsScreen', () => {
       </SafeAreaProvider>,
     );
 
+    fireEvent.press(getByTestId('retention-toggle'));
     fireEvent.press(getByTestId('retention-option-forever'));
 
     expect(mockUpdateSettings).toHaveBeenCalledWith({ chatRetentionDays: null });
     expect(mockPruneExpiredThreads).toHaveBeenCalledWith(null);
+  });
+
+  it('keeps chat retention collapsed until the user expands it', () => {
+    mockUseChatSession.mockReturnValue({
+      activeThread: null,
+      conversationIndex: [],
+      messages: [],
+      isGenerating: false,
+      shouldOfferSummary: false,
+      truncatedMessageCount: 0,
+      appendUserMessage: jest.fn(),
+      deleteMessage: jest.fn(),
+      deleteThread: jest.fn(),
+      renameThread: jest.fn(),
+      openThread: jest.fn(),
+      stopGeneration: jest.fn(),
+      regenerateFromUserMessage: jest.fn(),
+      regenerateLastResponse: jest.fn(),
+      createSummaryPlaceholder: jest.fn(),
+      startNewChat: jest.fn(),
+    } as any);
+
+    const { getByTestId, queryByTestId } = render(
+      <SafeAreaProvider
+        initialMetrics={{
+          frame: { x: 0, y: 0, width: 390, height: 844 },
+          insets: { top: 0, left: 0, right: 0, bottom: 0 },
+        }}
+      >
+        <ConversationsScreen />
+      </SafeAreaProvider>,
+    );
+
+    expect(queryByTestId('retention-option-forever')).toBeNull();
+
+    fireEvent.press(getByTestId('retention-toggle'));
+
+    expect(getByTestId('retention-option-forever')).toBeTruthy();
   });
 });

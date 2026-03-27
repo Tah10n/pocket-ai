@@ -6,88 +6,253 @@ const { spawnSync } = require("child_process");
 
 const cliOptions = parseCliOptions(process.argv.slice(2));
 const projectRoot = path.resolve(__dirname, "..");
-const artifactsRoot = path.join(projectRoot, "artifacts", "android-scenarios");
+const defaultArtifactsRoot = path.join(projectRoot, "artifacts", "android-screen-capture");
+const artifactsRoot = cliOptions.outputDir
+  ? path.resolve(projectRoot, cliOptions.outputDir)
+  : defaultArtifactsRoot;
 const dumpPathOnDevice = "/sdcard/window_dump.xml";
-const homeSectionLabel = "Recent Conversations";
-const activeModelCtaLabels = ["Swap Model", "Choose Model", "Browse Models"];
+const homeLauncherLabel = "Pocket AI";
+const HOME_SECTION_LABELS = ["Recent Conversations", "Недавние разговоры"];
+const HOME_TAB_LABELS = ["Home", "Главная"];
+const SETTINGS_TAB_LABELS = ["Settings", "Настройки"];
+const SETTINGS_TITLE_LABELS = ["Settings", "Настройки"];
+const THEME_MODE_LABELS = ["Theme Mode", "Тема"];
+const LANGUAGE_ROW_LABELS = ["Language", "Язык"];
+const ACTIVE_MODEL_CTA_LABELS = ["Swap Model", "Choose Model", "Browse Models"];
+const defaultScreenIds = ["home", "chat", "models", "settings", "presets", "storage", "legal"];
 
 main().catch((error) => {
-  console.error(`[android-scenarios] ${error.message}`);
+  console.error(`[android-screen-capture] ${error.message}`);
   process.exit(1);
 });
 
 async function main() {
-  const scenarios = buildScenarios();
+  const screens = buildScreens();
 
   if (cliOptions.list) {
-    printScenarioList(scenarios);
+    printScreenList(screens);
     return;
   }
 
-  const selectedScenarios = cliOptions.scenario
-    ? scenarios.filter((scenario) => scenario.id === cliOptions.scenario)
-    : scenarios;
-
-  if (selectedScenarios.length === 0) {
-    throw new Error(
-      cliOptions.scenario
-        ? `Unknown scenario "${cliOptions.scenario}". Run with --list to see available scenarios.`
-        : "No scenarios were selected."
-    );
-  }
-
+  const selectedScreens = selectScreens(screens, cliOptions.screens);
   fs.mkdirSync(artifactsRoot, { recursive: true });
 
-  launchApp();
+  if (!cliOptions.skipLaunch) {
+    launchApp();
+  }
 
   const adbPath = resolveAdbPath();
   const serial = resolveTargetSerial(adbPath, cliOptions);
-  const context = createScenarioContext(adbPath, serial);
+  const context = createCaptureContext(adbPath, serial);
   const results = [];
 
-  await dismissDebuggerBannerIfPresent(adbPath, serial);
+  await context.ensureAppVisible();
+  await ensureEnglishUi(context);
 
-  for (const scenario of selectedScenarios) {
+  for (const screen of selectedScreens) {
     const startedAt = Date.now();
-    log(`Running scenario: ${scenario.id}`);
+    log(`Capturing screen: ${screen.id}`);
 
     try {
-      await scenario.run(context);
-      const screenshotPath = context.captureScreenshot(`${scenario.id}.png`);
+      await screen.run(context);
+      const screenshotPath = context.captureScreenshot(`${screen.id}.png`);
       results.push({
-        id: scenario.id,
-        status: "passed",
+        id: screen.id,
+        status: "captured",
         durationMs: Date.now() - startedAt,
         screenshotPath,
       });
-      log(`PASS ${scenario.id}`);
+      log(`CAPTURED ${screen.id}`);
     } catch (error) {
-      const screenshotPath = context.captureScreenshot(`${scenario.id}-failed.png`);
+      const screenshotPath = context.captureScreenshot(`${screen.id}-failed.png`);
       results.push({
-        id: scenario.id,
+        id: screen.id,
         status: "failed",
         durationMs: Date.now() - startedAt,
         screenshotPath,
         error: error.message,
       });
-      writeReport(results);
+      writeReport(serial, results);
       throw error;
     }
   }
 
-  writeReport(results);
-  log(`Completed ${results.length} basic scenario(s).`);
+  writeReport(serial, results);
+  log(`Captured ${results.length} screen(s).`);
 }
 
-function createScenarioContext(adbPath, serial) {
+function buildScreens() {
+  return [
+    {
+      id: "current",
+      description: "Capture the currently visible screen without any navigation.",
+      run: async (ctx) => {
+        await ctx.dismissDebuggerBanner();
+      },
+    },
+    {
+      id: "home",
+      description: "Capture the Home tab.",
+      run: async (ctx) => {
+        await goToHome(ctx);
+        await ctx.expectText("Pocket AI");
+        await ctx.expectText("New Chat");
+        await ctx.expectText(HOME_SECTION_LABELS[0]);
+        await ctx.expectAnyText(ACTIVE_MODEL_CTA_LABELS);
+      },
+    },
+    {
+      id: "chat",
+      description: "Capture the Chat tab empty state.",
+      run: async (ctx) => {
+        await goToHome(ctx);
+        await ctx.tapText("Chat");
+        await ctx.expectText("Load a model to continue chatting");
+      },
+    },
+    {
+      id: "models",
+      description: "Capture the Models catalog tab.",
+      run: async (ctx) => {
+        await goToHome(ctx);
+        await ctx.tapText("Models");
+        await ctx.expectText("Model Catalog");
+        await ctx.expectText("All Models");
+      },
+    },
+    {
+      id: "settings",
+      description: "Capture the Settings tab.",
+      run: async (ctx) => {
+        await goToSettings(ctx);
+        await ctx.expectText("Theme Mode");
+        await ctx.expectText("Language");
+      },
+    },
+    {
+      id: "presets",
+      description: "Capture the System Prompt Presets screen.",
+      run: async (ctx) => {
+        await goToSettings(ctx);
+        await ctx.tapText("System Prompt Presets");
+        await ctx.expectText("System Prompt Presets");
+        await ctx.expectText("Add Preset");
+      },
+    },
+    {
+      id: "storage",
+      description: "Capture the Storage Manager screen.",
+      run: async (ctx) => {
+        await goToSettings(ctx);
+        await ctx.tapText("Storage Manager");
+        await ctx.expectText("Storage Manager");
+        await ctx.expectText("Cleanup actions");
+      },
+    },
+    {
+      id: "legal",
+      description: "Capture the Privacy & Disclosures screen.",
+      run: async (ctx) => {
+        await goToSettings(ctx);
+        await ctx.tapText("Privacy & Disclosures");
+        await ctx.expectText("Privacy & Disclosures");
+        await ctx.expectText("Pocket AI is designed for local-first usage.");
+      },
+    },
+  ];
+}
+
+async function goToHome(ctx) {
+  await ctx.ensureAppVisible();
+  await ctx.dismissDebuggerBanner();
+
+  const homeSectionNode = await ctx.findAnyNodeNow(HOME_SECTION_LABELS, { visibleOnly: true });
+  if (homeSectionNode) {
+    await ctx.expectText("Pocket AI");
+    return;
+  }
+
+  const launcherNode = await ctx.findNodeNow(homeLauncherLabel, { visibleOnly: true });
+  if (launcherNode) {
+    await ctx.tapText(homeLauncherLabel, {
+      afterTapDelayMs: 1_500,
+      timeoutMs: 5_000,
+    });
+    await ctx.expectText(homeSectionLabel, { timeoutMs: 25_000 });
+    await ctx.expectText("Pocket AI");
+    return;
+  }
+
+  const homeTabNode = await ctx.findAnyNodeNow(HOME_TAB_LABELS, { visibleOnly: true });
+  if (homeTabNode) {
+    await ctx.tapAnyText(HOME_TAB_LABELS, { afterTapDelayMs: 500 });
+  }
+
+  await ctx.expectAnyText(HOME_SECTION_LABELS, { timeoutMs: 25_000 });
+  await ctx.expectText("Pocket AI");
+}
+
+async function goToSettings(ctx) {
+  await goToHome(ctx);
+  await ctx.tapAnyText(SETTINGS_TAB_LABELS);
+  await ctx.expectAnyText(SETTINGS_TITLE_LABELS);
+  await ctx.expectAnyText(THEME_MODE_LABELS);
+}
+
+async function ensureEnglishUi(ctx) {
+  await goToSettings(ctx);
+
+  const languageNode = await ctx.findAnyNodeNow(LANGUAGE_ROW_LABELS, {
+    visibleOnly: true,
+  });
+  if (!languageNode) {
+    throw new Error("Could not find the language row while preparing English screen captures.");
+  }
+
+  if (languageNode.label === LANGUAGE_ROW_LABELS[0]) {
+    return;
+  }
+
+  await ctx.tapAnyText([LANGUAGE_ROW_LABELS[1]]);
+  await ctx.expectText(LANGUAGE_ROW_LABELS[0], { timeoutMs: 5_000 });
+  await ctx.expectText(THEME_MODE_LABELS[0], { timeoutMs: 5_000 });
+  await goToHome(ctx);
+}
+
+function createCaptureContext(adbPath, serial) {
   return {
     serial,
+    ensureAppVisible: async () => {
+      const homeNode = await findAnyNodeNow(adbPath, serial, HOME_SECTION_LABELS, {
+        visibleOnly: true,
+      });
+      if (homeNode) {
+        return;
+      }
+
+      const launcherNode = await findNodeNow(adbPath, serial, homeLauncherLabel, {
+        visibleOnly: true,
+      });
+      if (launcherNode) {
+        runChecked(adbPath, [
+          "-s",
+          serial,
+          "shell",
+          "input",
+          "tap",
+          `${launcherNode.bounds.centerX}`,
+          `${launcherNode.bounds.centerY}`,
+        ]);
+        await delay(1_500);
+      }
+    },
     dismissDebuggerBanner: async () => {
       await dismissDebuggerBannerIfPresent(adbPath, serial);
     },
+    findNodeNow: async (label, options = {}) => findNodeNow(adbPath, serial, label, options),
+    findAnyNodeNow: async (labels, options = {}) => findAnyNodeNow(adbPath, serial, labels, options),
     tapText: async (label, options = {}) => {
       await dismissDebuggerBannerIfPresent(adbPath, serial);
-
       const node = await waitForNode(adbPath, serial, label, {
         timeoutMs: options.timeoutMs,
         visibleOnly: true,
@@ -97,18 +262,41 @@ function createScenarioContext(adbPath, serial) {
         throw new Error(`"${label}" was found but has no tap bounds.`);
       }
 
-      const { centerX, centerY } = node.bounds;
       runChecked(adbPath, [
         "-s",
         serial,
         "shell",
         "input",
         "tap",
-        `${centerX}`,
-        `${centerY}`,
+        `${node.bounds.centerX}`,
+        `${node.bounds.centerY}`,
       ]);
 
       await delay(options.afterTapDelayMs ?? 800);
+    },
+    tapAnyText: async (labels, options = {}) => {
+      await dismissDebuggerBannerIfPresent(adbPath, serial);
+      const { label, node } = await waitForAnyNode(adbPath, serial, labels, {
+        timeoutMs: options.timeoutMs,
+        visibleOnly: true,
+      });
+
+      if (!node.bounds) {
+        throw new Error(`"${label}" was found but has no tap bounds.`);
+      }
+
+      runChecked(adbPath, [
+        "-s",
+        serial,
+        "shell",
+        "input",
+        "tap",
+        `${node.bounds.centerX}`,
+        `${node.bounds.centerY}`,
+      ]);
+
+      await delay(options.afterTapDelayMs ?? 800);
+      return label;
     },
     expectText: async (label, options = {}) => {
       await waitForNode(adbPath, serial, label, {
@@ -121,36 +309,6 @@ function createScenarioContext(adbPath, serial) {
         timeoutMs: options.timeoutMs,
         visibleOnly: true,
       });
-    },
-    tapAnyText: async (labels, options = {}) => {
-      await dismissDebuggerBannerIfPresent(adbPath, serial);
-
-      const { label, node } = await waitForAnyNode(adbPath, serial, labels, {
-        timeoutMs: options.timeoutMs,
-        visibleOnly: true,
-      });
-
-      if (!node.bounds) {
-        throw new Error(`"${label}" was found but has no tap bounds.`);
-      }
-
-      const { centerX, centerY } = node.bounds;
-      runChecked(adbPath, [
-        "-s",
-        serial,
-        "shell",
-        "input",
-        "tap",
-        `${centerX}`,
-        `${centerY}`,
-      ]);
-
-      await delay(options.afterTapDelayMs ?? 800);
-      return label;
-    },
-    pressBack: async () => {
-      runChecked(adbPath, ["-s", serial, "shell", "input", "keyevent", "4"]);
-      await delay(700);
     },
     captureScreenshot: (fileName) => {
       const screenshotPath = path.join(artifactsRoot, fileName);
@@ -176,102 +334,65 @@ function createScenarioContext(adbPath, serial) {
   };
 }
 
-function buildScenarios() {
-  return [
-    {
-      id: "home-smoke",
-      description: "Verify the home screen loads and key call-to-actions are visible.",
-      run: async (ctx) => {
-        await goToHome(ctx);
-        await ctx.expectText("Pocket AI");
-        await ctx.expectText("New Chat");
-        await ctx.expectText(homeSectionLabel);
-        await ctx.expectAnyText(activeModelCtaLabels);
-      },
-    },
-    {
-      id: "bottom-tabs",
-      description: "Verify bottom tab navigation across Home, Chat, Models, and Settings.",
-      run: async (ctx) => {
-        await goToHome(ctx);
-        await ctx.tapText("Chat");
-        await ctx.expectText("Load a model to continue chatting");
+function selectScreens(screens, requestedScreenIds) {
+  const requested = requestedScreenIds.length === 0
+    ? [...defaultScreenIds]
+    : expandRequestedScreenIds(requestedScreenIds, screens);
 
-        await ctx.tapText("Models");
-        await ctx.expectText("Model Catalog");
-        await ctx.expectText("All Models");
-        await ctx.expectText("Downloaded");
+  const screenMap = new Map(screens.map((screen) => [screen.id, screen]));
+  const selected = [];
 
-        await ctx.tapText("Settings");
-        await ctx.expectText("Theme Mode");
-        await ctx.expectText("Language");
-        await ctx.expectText("Storage Manager");
+  for (const screenId of requested) {
+    const screen = screenMap.get(screenId);
+    if (!screen) {
+      throw new Error(
+        `Unknown screen "${screenId}". Run with --list to see available screen ids.`
+      );
+    }
 
-        await ctx.tapText("Home");
-        await ctx.expectText(homeSectionLabel);
-      },
-    },
-    {
-      id: "new-chat-cta",
-      description: "Verify the Home screen New Chat button opens the chat screen empty state.",
-      run: async (ctx) => {
-        await goToHome(ctx);
-        await ctx.tapText("New Chat");
-        await ctx.expectText("Load a model to continue chatting");
-        await ctx.tapText("Home");
-        await ctx.expectText("New Chat");
-      },
-    },
-    {
-      id: "swap-model-cta",
-      description: "Verify the Home screen active-model CTA opens the model catalog.",
-      run: async (ctx) => {
-        await goToHome(ctx);
-        await ctx.tapAnyText(activeModelCtaLabels);
-        await ctx.expectText("Model Catalog");
-        await ctx.expectText("All Models");
-        await ctx.expectText("Downloaded");
-        await ctx.tapText("Home");
-        await ctx.expectAnyText(activeModelCtaLabels);
-      },
-    },
-  ];
+    if (!selected.some((entry) => entry.id === screen.id)) {
+      selected.push(screen);
+    }
+  }
+
+  if (selected.length === 0) {
+    throw new Error("No screens were selected.");
+  }
+
+  return selected;
 }
 
-async function goToHome(ctx) {
-  await ctx.dismissDebuggerBanner();
+function expandRequestedScreenIds(requestedScreenIds, screens) {
+  const knownScreenIds = new Set(screens.map((screen) => screen.id));
+  const expanded = [];
 
-  const adbPath = resolveAdbPath();
-  const homeSectionNode = await findNodeNow(adbPath, ctx.serial, homeSectionLabel, {
-    visibleOnly: true,
-  });
-  if (homeSectionNode) {
-    await ctx.expectText("Pocket AI");
-    return;
+  for (const screenId of requestedScreenIds) {
+    if (screenId === "all") {
+      expanded.push(...defaultScreenIds);
+      continue;
+    }
+
+    if (!knownScreenIds.has(screenId)) {
+      expanded.push(screenId);
+      continue;
+    }
+
+    expanded.push(screenId);
   }
 
-  const pocketAiLauncherNode = await findNodeNow(adbPath, ctx.serial, "Pocket AI", {
-    visibleOnly: true,
-  });
-
-  if (pocketAiLauncherNode) {
-    await ctx.tapText("Pocket AI", { afterTapDelayMs: 1_500, timeoutMs: 5_000 });
-    await ctx.expectText(homeSectionLabel, { timeoutMs: 25_000 });
-    await ctx.expectText("Pocket AI");
-    return;
-  }
-
-  const homeNode = await findNodeNow(adbPath, ctx.serial, "Home");
-  if (homeNode) {
-    await ctx.tapText("Home", { afterTapDelayMs: 500 });
-  }
-
-  await ctx.expectText(homeSectionLabel, { timeoutMs: 25_000 });
-  await ctx.expectText("Pocket AI");
+  return expanded;
 }
 
 function launchApp() {
-  const args = [path.join(__dirname, "android-smoke.js"), "--screenshot", path.join("artifacts", "android-scenarios", "bootstrap.png")];
+  const bootstrapRelativePath = path.relative(
+    projectRoot,
+    path.join(artifactsRoot, "bootstrap.png")
+  );
+  const args = [
+    path.join(__dirname, "android-smoke.js"),
+    "--screenshot",
+    bootstrapRelativePath,
+  ];
 
   if (cliOptions.emulator) {
     args.push("--emulator");
@@ -304,7 +425,7 @@ function launchApp() {
   }
 
   if (result.status !== 0) {
-    throw new Error("Failed to launch the Android app before running scenarios.");
+    throw new Error("Failed to launch the Android app before capturing screens.");
   }
 }
 
@@ -420,7 +541,20 @@ async function waitForAnyNode(adbPath, serial, labels, options = {}) {
     await delay(600);
   }
 
-  throw new Error(`Timed out waiting for any of: ${labels.map((label) => `"${label}"`).join(", ")}.`);
+  throw new Error(
+    `Timed out waiting for any of: ${labels.map((label) => `"${label}"`).join(", ")}.`
+  );
+}
+
+async function findAnyNodeNow(adbPath, serial, labels, options = {}) {
+  for (const label of labels) {
+    const node = await findNodeNow(adbPath, serial, label, options);
+    if (node) {
+      return { label, node };
+    }
+  }
+
+  return null;
 }
 
 async function findNodeNow(adbPath, serial, label, options = {}) {
@@ -593,27 +727,28 @@ function decodeXmlEntities(value) {
     .replace(/&#10;/g, "\n");
 }
 
-function writeReport(results) {
+function writeReport(serial, results) {
   const reportPath = path.join(artifactsRoot, "latest-report.json");
   fs.writeFileSync(
     reportPath,
     JSON.stringify(
       {
         generatedAt: new Date().toISOString(),
-        scenarioCount: results.length,
+        serial,
+        screenCount: results.length,
         results,
       },
       null,
       2
     )
   );
-  log(`Wrote scenario report to ${reportPath}`);
+  log(`Wrote screen capture report to ${reportPath}`);
 }
 
-function printScenarioList(scenarios) {
-  console.log("Available Android scenarios:");
-  for (const scenario of scenarios) {
-    console.log(`- ${scenario.id}: ${scenario.description}`);
+function printScreenList(screens) {
+  console.log("Available Android screen capture targets:");
+  for (const screen of screens) {
+    console.log(`- ${screen.id}: ${screen.description}`);
   }
 }
 
@@ -621,11 +756,13 @@ function parseCliOptions(argv) {
   const options = {
     emulator: false,
     skipBuild: false,
+    skipLaunch: false,
     list: false,
     avd: null,
     serial: null,
-    scenario: null,
     port: null,
+    outputDir: null,
+    screens: [],
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -638,6 +775,11 @@ function parseCliOptions(argv) {
 
     if (arg === "--skip-build") {
       options.skipBuild = true;
+      continue;
+    }
+
+    if (arg === "--skip-launch") {
+      options.skipLaunch = true;
       continue;
     }
 
@@ -656,13 +798,24 @@ function parseCliOptions(argv) {
       continue;
     }
 
-    if (arg === "--scenario") {
-      options.scenario = readCliValue(argv, ++index, "--scenario");
+    if (arg === "--screen") {
+      const rawValue = readCliValue(argv, ++index, "--screen");
+      options.screens.push(
+        ...rawValue
+          .split(",")
+          .map((value) => value.trim())
+          .filter(Boolean)
+      );
       continue;
     }
 
     if (arg === "--port") {
       options.port = readCliValue(argv, ++index, "--port");
+      continue;
+    }
+
+    if (arg === "--output-dir") {
+      options.outputDir = readCliValue(argv, ++index, "--output-dir");
       continue;
     }
 
@@ -687,16 +840,18 @@ function readCliValue(argv, index, flagName) {
 }
 
 function printHelp() {
-  console.log("Usage: node ./scripts/android-scenarios.js [options]");
+  console.log("Usage: node ./scripts/android-screen-capture.js [options]");
   console.log("");
   console.log("Options:");
-  console.log("  --emulator                 Run scenarios on an Android emulator");
-  console.log("  --avd <name>               Use a specific AVD when starting an emulator");
+  console.log("  --emulator                 Run against an Android emulator");
+  console.log("  --avd <name>               Use a specific AVD when launching an emulator");
   console.log("  --serial <serial>          Target a specific connected device");
-  console.log("  --scenario <id>            Run only one scenario");
+  console.log("  --screen <id[,id...]>      Capture one or more named screens");
   console.log("  --skip-build               Reuse the existing debug APK");
+  console.log("  --skip-launch              Skip android-smoke and only drive the current app state");
   console.log("  --port <number>            Forward a specific Metro port to android-smoke");
-  console.log("  --list                     Print available scenarios");
+  console.log("  --output-dir <path>        Store screenshots and report under a custom directory");
+  console.log("  --list                     Print available screen ids");
 }
 
 function runCapture(command, args) {
@@ -737,7 +892,7 @@ function runChecked(command, args, options = {}) {
 }
 
 function log(message) {
-  console.log(`[android-scenarios] ${message}`);
+  console.log(`[android-screen-capture] ${message}`);
 }
 
 function delay(ms) {

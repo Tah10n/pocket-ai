@@ -1,3 +1,5 @@
+import { getVisibleMessageContent } from '../utils/chatPresentation';
+
 export type ChatMessageRole = 'system' | 'user' | 'assistant';
 export type ChatMessageState = 'complete' | 'streaming' | 'stopped' | 'error';
 export type ChatThreadStatus = 'idle' | 'generating' | 'stopped' | 'error';
@@ -9,6 +11,7 @@ export interface GenerationParamsSnapshot {
   minP?: number;
   repetitionPenalty?: number;
   maxTokens: number;
+  reasoningEnabled?: boolean;
 }
 
 export interface PresetSnapshot {
@@ -28,6 +31,7 @@ export interface ChatMessage {
   id: string;
   role: ChatMessageRole;
   content: string;
+  thoughtContent?: string;
   createdAt: number;
   state: ChatMessageState;
   tokensPerSec?: number;
@@ -68,7 +72,12 @@ export interface LlmChatMessage {
 
 export interface LlmChatCompletionOptions {
   messages: LlmChatMessage[];
-  onToken?: (token: string) => void;
+  onToken?: (token: string | {
+    token: string;
+    content?: string;
+    reasoningContent?: string;
+    accumulatedText?: string;
+  }) => void;
   params?: {
     temperature?: number;
     top_p?: number;
@@ -76,6 +85,8 @@ export interface LlmChatCompletionOptions {
     min_p?: number;
     penalty_repeat?: number;
     n_predict?: number;
+    enable_thinking?: boolean;
+    reasoning_format?: 'none' | 'auto' | 'deepseek';
   };
 }
 
@@ -110,7 +121,11 @@ export function normalizeConversationTitle(title: string) {
 export function toConversationIndexItem(thread: ChatThread): ConversationIndexItem {
   const lastMessage = [...thread.messages]
     .reverse()
-    .find((message) => message.content.trim().length > 0);
+    .find((message) => getVisibleMessageContent(message.role, message.content).trim().length > 0);
+
+  const lastMessagePreview = lastMessage
+    ? getVisibleMessageContent(lastMessage.role, lastMessage.content)
+    : undefined;
 
   return {
     id: thread.id,
@@ -119,9 +134,7 @@ export function toConversationIndexItem(thread: ChatThread): ConversationIndexIt
     modelId: thread.modelId,
     presetId: thread.presetId,
     messageCount: thread.messages.length,
-    lastMessagePreview: lastMessage?.content
-      ? lastMessage.content.slice(0, 80)
-      : undefined,
+    lastMessagePreview: lastMessagePreview?.slice(0, 80),
   };
 }
 
@@ -145,6 +158,7 @@ export function sanitizeHydratedThread(thread: ChatThread): ChatThread {
       minP: thread.paramsSnapshot.minP ?? 0.05,
       repetitionPenalty: thread.paramsSnapshot.repetitionPenalty ?? 1,
       maxTokens: thread.paramsSnapshot.maxTokens,
+      reasoningEnabled: thread.paramsSnapshot.reasoningEnabled === true,
     },
     titleSource: thread.titleSource === 'manual' ? 'manual' : 'derived',
     messages: sanitizedMessages,

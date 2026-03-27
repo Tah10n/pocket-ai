@@ -95,7 +95,7 @@ export const HomeScreen = () => {
                 >
                     <ActiveModelCard onSwapModel={handleOpenModelPicker} />
 
-                    <Box className="px-4 py-6">
+                    <Box className="px-4 pb-2 pt-3">
                         <Pressable
                             onPress={handleStartNewChat}
                             className="flex-row w-full items-center justify-center rounded-xl h-14 bg-primary-500 shadow-xl gap-3 active:opacity-80"

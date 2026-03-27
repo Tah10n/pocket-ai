@@ -18,6 +18,7 @@ import {
   sanitizeHydratedThread,
   toConversationIndexItem,
 } from '../types/chat';
+import { getVisibleMessageContent } from '../utils/chatPresentation';
 
 const FALLBACK_TOP_K = 40;
 const FALLBACK_MIN_P = 0.05;
@@ -44,14 +45,14 @@ interface ChatStoreState {
   appendMessage: (threadId: string, message: ChatMessage) => void;
   createAssistantPlaceholder: (threadId: string) => string;
   stopAssistantMessage: (threadId: string, messageId: string) => void;
-  finalizeAssistantMessage: (threadId: string, messageId: string, content: string) => void;
+  finalizeAssistantMessage: (threadId: string, messageId: string, content: string, thoughtContent?: string) => void;
   deleteThread: (threadId: string) => void;
   renameThread: (threadId: string, title: string) => boolean;
   deleteMessageBranch: (threadId: string, messageId: string) => boolean;
   patchAssistantMessage: (
     threadId: string,
     messageId: string,
-    updates: Partial<Pick<ChatMessage, 'content' | 'tokensPerSec' | 'state' | 'errorCode'>>,
+    updates: Partial<Pick<ChatMessage, 'content' | 'thoughtContent' | 'tokensPerSec' | 'state' | 'errorCode'>>,
   ) => void;
   replaceLastAssistantMessage: (threadId: string) => string | null;
   replaceBranchFromUserMessage: (
@@ -126,6 +127,7 @@ export const useChatStore = create<ChatStoreState>()(
             minP: paramsSnapshot.minP ?? FALLBACK_MIN_P,
             repetitionPenalty: paramsSnapshot.repetitionPenalty ?? FALLBACK_REPETITION_PENALTY,
             maxTokens: paramsSnapshot.maxTokens,
+            reasoningEnabled: paramsSnapshot.reasoningEnabled === true,
           },
           messages: [],
           createdAt: now,
@@ -265,6 +267,7 @@ export const useChatStore = create<ChatStoreState>()(
                   minP: paramsSnapshot.minP ?? FALLBACK_MIN_P,
                   repetitionPenalty: paramsSnapshot.repetitionPenalty ?? FALLBACK_REPETITION_PENALTY,
                   maxTokens: paramsSnapshot.maxTokens,
+                  reasoningEnabled: paramsSnapshot.reasoningEnabled === true,
                 },
               },
             },
@@ -300,6 +303,7 @@ export const useChatStore = create<ChatStoreState>()(
           id: messageId,
           role: 'assistant',
           content: '',
+          thoughtContent: undefined,
           createdAt: Date.now(),
           state: 'streaming',
         });
@@ -312,9 +316,10 @@ export const useChatStore = create<ChatStoreState>()(
         });
       },
 
-      finalizeAssistantMessage: (threadId, messageId, content) => {
+      finalizeAssistantMessage: (threadId, messageId, content, thoughtContent) => {
         get().patchAssistantMessage(threadId, messageId, {
           content,
+          thoughtContent,
           state: 'complete',
           errorCode: undefined,
         });
@@ -470,6 +475,7 @@ export const useChatStore = create<ChatStoreState>()(
                   id: nextMessageId,
                   role: 'assistant' as ChatMessageRole,
                   content: '',
+                  thoughtContent: undefined,
                   createdAt: Date.now(),
                   state: 'streaming' as ChatMessageState,
                   regeneratesMessageId: target.id,
@@ -535,6 +541,7 @@ export const useChatStore = create<ChatStoreState>()(
               id: nextAssistantMessageId,
               role: 'assistant',
               content: '',
+              thoughtContent: undefined,
               createdAt: Date.now(),
               state: 'streaming',
             },
@@ -715,11 +722,13 @@ export function getThreadInferenceWindow(
   }
 
   const eligibleMessages = thread.messages.filter(
-    (message) => message.state !== 'error' && message.content.trim().length > 0,
+    (message) =>
+      message.state !== 'error'
+      && getVisibleMessageContent(message.role, message.content).trim().length > 0,
   );
   const historyMessages = eligibleMessages.map<LlmChatMessage>((message) => ({
     role: message.role,
-    content: message.content,
+    content: getVisibleMessageContent(message.role, message.content),
   }));
 
   if (

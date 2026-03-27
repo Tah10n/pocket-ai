@@ -45,6 +45,18 @@ Run the same scenarios on an emulator:
 npm run android:scenarios:emulator
 ```
 
+Capture the current Android UI screens without running the scenario pack:
+
+```bash
+npm run android:screens
+```
+
+Run the same screen-capture flow on an emulator:
+
+```bash
+npm run android:screens:emulator
+```
+
 Run tests, lint, and the Android smoke check together:
 
 ```bash
@@ -184,6 +196,22 @@ const { t } = useTranslation();
 - Generation settings are saved in `SettingsStore`, snapshotted into each chat thread, and forwarded into `llama.rn` through the chat session pipeline so active chats stay reproducible.
 - `Reset all` and per-field reset actions restore the app defaults for both load-time and sampling-related controls.
 
+## Chat Surface Notes
+
+- `src/ui/screens/ChatScreen.tsx` keeps the chat header compact: thread title first, then preset/model metadata, with transient generation status shown separately.
+- `src/components/ui/ChatHeader.tsx` keeps the right-side action row width stable while generation starts, so the title and metadata do not reflow when the `new chat` action becomes temporarily unavailable.
+- Missing-model recovery now uses a single coherent path: the chat either shows a warning banner above existing history or a centered recovery card for empty threads, and routes to `Download Model`, `Load Model`, or `Open Models` depending on current availability.
+- The composer uses platform-specific keyboard handling: iOS keeps the screen-level `KeyboardAvoidingView`, while Android relies on native `adjustResize` and avoids an extra JS-side resize wrapper to reduce send-time layout jumps.
+- `src/components/ui/ChatInputBar.tsx` preserves the full bottom safe-area inset instead of capping it, so the composer and send button stay fully above the iPhone home-indicator / gesture area.
+- `src/components/ui/ChatMessageBubble.tsx` renders the final assistant reply in the main bubble and shows model reasoning inside a separate expandable `Thinking` / `Thought` bubble when `llama.rn` exposes `reasoning_content`.
+- Assistant copy actions now copy only the final assistant markdown, without the reasoning trace.
+- Conversation previews and inference history use the visible assistant reply instead of the saved thought trace, while still falling back safely when no separate reasoning payload exists.
+
+## Conversations Surface Notes
+
+- `src/ui/screens/ConversationsScreen.tsx` keeps `Chat Retention` collapsed by default so the saved-thread list remains the primary focus on smaller screens.
+- The retention card still exposes the full set of cleanup windows, but only after the user expands the compact summary card.
+
 ## Hugging Face Metadata
 
 - The model catalog now reads optional Hugging Face `config` metadata when it is available for a GGUF entry.
@@ -213,13 +241,14 @@ It will:
 
 `npm run android:emulator` uses the same flow but prefers an AVD and writes a screenshot to `artifacts/android-emulator-smoke.png`, which is useful for visual smoke checks and scripted UI scenarios.
 
+`npm run android:screens:emulator` launches the app, drives a deterministic screen-capture flow, and writes screenshots plus a JSON report under `artifacts/android-screen-capture/`. Before taking artifacts, the runner normalizes the app language back to English from either supported locale so text anchors such as `Recent Conversations`, `Storage Manager`, and `Load a model to continue chatting` stay stable.
+
 `npm run android:scenarios:emulator` builds on top of that launcher and executes a small set of baseline user flows using `adb` and Android UI hierarchy dumps. The current scenarios cover:
 
-- Home screen smoke (`Pocket AI`, `New Chat`, `Quick Actions`, active model CTA)
+- Home screen smoke (`Pocket AI`, `New Chat`, `Recent Conversations`, active model CTA)
 - Bottom tab navigation (`Home`, `Chat`, `Models`, `Settings`)
 - `New Chat` CTA navigation
-- Active model CTA navigation, including the downloaded-models path when no model is loaded
-- `See All` conversation-management navigation
+- Active model CTA navigation, including `Browse Models`, `Choose Model`, and `Swap Model` states
 
 Each run writes screenshots and a JSON report under `artifacts/android-scenarios/`.
 

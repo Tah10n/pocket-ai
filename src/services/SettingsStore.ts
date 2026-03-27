@@ -9,6 +9,7 @@ export interface GenerationParameters {
     minP: number;
     repetitionPenalty: number;
     maxTokens: number;
+    reasoningEnabled?: boolean;
 }
 
 export interface ModelLoadParameters {
@@ -23,6 +24,7 @@ export interface AppSettings {
     minP: number;
     repetitionPenalty: number;
     maxTokens: number;
+    reasoningEnabled?: boolean;
     theme: 'light' | 'dark' | 'system';
     language: 'en' | 'ru';
     activePresetId: string | null;
@@ -39,6 +41,7 @@ export const DEFAULT_GENERATION_PARAMETERS: GenerationParameters = {
     minP: 0.05,
     repetitionPenalty: 1,
     maxTokens: 2048,
+    reasoningEnabled: false,
 };
 
 export const DEFAULT_MODEL_LOAD_PARAMETERS: ModelLoadParameters = {
@@ -53,6 +56,7 @@ const DEFAULT_SETTINGS: AppSettings = {
     minP: DEFAULT_GENERATION_PARAMETERS.minP,
     repetitionPenalty: DEFAULT_GENERATION_PARAMETERS.repetitionPenalty,
     maxTokens: DEFAULT_GENERATION_PARAMETERS.maxTokens,
+    reasoningEnabled: DEFAULT_GENERATION_PARAMETERS.reasoningEnabled,
     theme: 'system',
     language: 'en',
     activePresetId: null,
@@ -111,6 +115,7 @@ function sanitizeGenerationParameters(input: Partial<GenerationParameters> | und
         minP: clampNumber(input?.minP, 0, 1, DEFAULT_GENERATION_PARAMETERS.minP),
         repetitionPenalty: clampNumber(input?.repetitionPenalty, 0, 2, DEFAULT_GENERATION_PARAMETERS.repetitionPenalty),
         maxTokens: Math.round(clampNumber(input?.maxTokens, 1, 8192, DEFAULT_GENERATION_PARAMETERS.maxTokens)),
+        reasoningEnabled: input?.reasoningEnabled === true,
     };
 }
 
@@ -169,6 +174,7 @@ function sanitizeSettings(input: Partial<AppSettings>): AppSettings {
         minP: generationDefaults.minP,
         repetitionPenalty: generationDefaults.repetitionPenalty,
         maxTokens: generationDefaults.maxTokens,
+        reasoningEnabled: generationDefaults.reasoningEnabled,
         theme: input.theme === 'light' || input.theme === 'dark' || input.theme === 'system' ? input.theme : DEFAULT_SETTINGS.theme,
         language: normalizeLanguage(input.language),
         activePresetId: typeof input.activePresetId === 'string' ? input.activePresetId : null,
@@ -239,6 +245,7 @@ export function resetParameters() {
         minP: DEFAULT_GENERATION_PARAMETERS.minP,
         repetitionPenalty: DEFAULT_GENERATION_PARAMETERS.repetitionPenalty,
         maxTokens: DEFAULT_GENERATION_PARAMETERS.maxTokens,
+        reasoningEnabled: DEFAULT_GENERATION_PARAMETERS.reasoningEnabled,
     });
 }
 

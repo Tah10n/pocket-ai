@@ -22,6 +22,16 @@ interface ChatInputBarProps {
     onCancelMode?: () => void;
 }
 
+export const BASE_COMPOSER_TOP_PADDING = 5;
+export const BASE_COMPOSER_BOTTOM_PADDING = 15;
+
+export function getComposerContainerPadding(bottomInset: number) {
+    return {
+        paddingTop: BASE_COMPOSER_TOP_PADDING,
+        paddingBottom: BASE_COMPOSER_BOTTOM_PADDING + Math.max(bottomInset, 0),
+    };
+}
+
 export const ChatInputBar = ({
     onSendMessage,
     onStopGeneration,
@@ -40,6 +50,7 @@ export const ChatInputBar = ({
     const message = isControlled ? draft : internalMessage;
     const canSend = !disabled && !isSending && message.trim().length > 0;
     const placeholder = disabled ? t('chat.inputPlaceholderDisabled') : t('chat.inputPlaceholder');
+    const containerStyle = getComposerContainerPadding(insets.bottom);
 
     const setMessage = (value: string) => {
         if (isControlled) {
@@ -52,8 +63,15 @@ export const ChatInputBar = ({
 
     const handleSend = async () => {
         if (canSend) {
-            await onSendMessage(message.trim());
+            const nextMessage = message.trim();
             setMessage('');
+
+            try {
+                await onSendMessage(nextMessage);
+            } catch (error) {
+                setMessage(nextMessage);
+                throw error;
+            }
         }
     };
 
@@ -74,46 +92,55 @@ export const ChatInputBar = ({
     };
 
     return (
-        <Box 
-            className="bg-background-0/80 dark:bg-background-950/80 border-t border-outline-200 dark:border-outline-800 px-4 pt-3"
-            style={{ paddingBottom: Math.max(insets.bottom, 16) }}
+        <Box
+            testID="chat-input-bar-container"
+            className="border-t border-outline-200 bg-background-0/95 px-4 dark:border-outline-800 dark:bg-background-950/95"
+            style={containerStyle}
         >
             {modeLabel ? (
-                <Box className="mb-3 rounded-2xl border border-primary-500/15 bg-primary-500/5 px-4 py-3">
+                <Box className="mb-1.5 rounded-[20px] border border-primary-500/15 bg-primary-500/5 px-3 py-2">
                     <Box className="flex-row items-start justify-between gap-3">
-                        <Box className="min-w-0 flex-1">
-                            <Text className="text-sm font-semibold text-primary-700 dark:text-primary-300">
-                                {modeLabel}
-                            </Text>
-                            {modeDescription ? (
-                                <Text className="mt-1 text-sm text-primary-700/80 dark:text-primary-300/80">
-                                    {modeDescription}
+                        <Box className="min-w-0 flex-1 flex-row items-start gap-3">
+                            <Box className="mt-0.5 h-6 w-6 items-center justify-center rounded-full bg-primary-500/10 dark:bg-primary-500/20">
+                                <MaterialSymbols name="edit" size={14} className="text-primary-500" />
+                            </Box>
+                            <Box className="min-w-0 flex-1">
+                                <Text numberOfLines={1} className="text-sm font-semibold text-primary-700 dark:text-primary-300">
+                                    {modeLabel}
                                 </Text>
-                            ) : null}
+                                {modeDescription ? (
+                                    <Text numberOfLines={2} className="mt-0.5 text-xs leading-4 text-primary-700/80 dark:text-primary-300/80">
+                                        {modeDescription}
+                                    </Text>
+                                ) : null}
+                            </Box>
                         </Box>
+
                         {onCancelMode ? (
                             <Pressable
                                 onPress={onCancelMode}
-                                className="rounded-full border border-primary-500/20 bg-primary-500/10 px-3 py-1.5 active:opacity-70"
+                                accessibilityRole="button"
+                                accessibilityLabel={t('common.cancel')}
+                                hitSlop={8}
+                                className="h-6 w-6 items-center justify-center rounded-full bg-primary-500/10 active:opacity-70"
                             >
-                                <Text className="text-xs font-semibold uppercase tracking-wide text-primary-500">
-                                    {t('common.cancel')}
-                                </Text>
+                                <MaterialSymbols name="close" size={14} className="text-primary-500" />
                             </Pressable>
                         ) : null}
                     </Box>
                 </Box>
             ) : null}
 
-            <Box className="flex-row items-end gap-2">
-                <Pressable className="h-10 w-10 items-center justify-center rounded-full bg-background-50 dark:bg-background-900/60 border border-outline-200 dark:border-outline-700 active:opacity-70">
-                    <MaterialSymbols name="add-circle" size={22} className="text-typography-600 dark:text-typography-300" />
-                </Pressable>
-
-                <Box className="flex-1 flex-row items-end rounded-2xl px-3 py-2 border border-outline-200 dark:border-outline-800 bg-background-50 dark:bg-background-900/60">
-                    <Input className="flex-1 bg-transparent border-0 min-h-10 max-h-32">
+            <Box className="flex-row items-center gap-2">
+                <Box
+                    className={`flex-1 flex-row items-center rounded-[26px] border px-3.5 min-h-10 ${disabled
+                        ? 'border-outline-200 bg-background-50 dark:border-outline-800 dark:bg-background-900/70'
+                        : 'border-outline-200 bg-background-50 dark:border-outline-700 dark:bg-background-900/80'}`}
+                >
+                    <Input className="flex-1 bg-transparent border-0 h-10 max-h-28">
                         <InputField
-                            className="text-typography-900 dark:text-typography-0 text-base leading-relaxed"
+                            accessibilityLabel={t('chat.inputAccessibilityLabel')}
+                            className="h-10 text-[15px] leading-5 text-typography-900 dark:text-typography-0"
                             placeholder={placeholder}
                             placeholderTextColor={typographyColors[400]}
                             keyboardType="default"
@@ -130,15 +157,20 @@ export const ChatInputBar = ({
                     </Input>
                 </Box>
 
-                <Pressable 
+                <Pressable
                     onPress={handlePrimaryAction}
                     disabled={!isSending && !canSend}
-                    className={`h-10 w-10 items-center justify-center rounded-full active:opacity-70 ${isSending || canSend ? 'bg-primary-500' : 'bg-background-200 dark:bg-background-800'}`}
+                    accessibilityRole="button"
+                    accessibilityLabel={isSending ? t('chat.stopAccessibilityLabel') : t('chat.sendAccessibilityLabel')}
+                    hitSlop={8}
+                    className={`h-10 w-10 items-center justify-center rounded-full active:opacity-70 ${isSending || canSend
+                        ? 'bg-primary-500'
+                        : 'bg-background-200 dark:bg-background-800'}`}
                 >
-                    <MaterialSymbols 
-                        name={isSending ? 'stop' : 'arrow-upward'} 
-                        size={20} 
-                        className={isSending || canSend ? 'text-typography-0' : 'text-typography-500'} 
+                    <MaterialSymbols
+                        name={isSending ? 'stop' : 'arrow-upward'}
+                        size={18}
+                        className={isSending || canSend ? 'text-typography-0' : 'text-typography-500'}
                     />
                 </Pressable>
             </Box>

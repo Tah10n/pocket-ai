@@ -19,7 +19,7 @@ interface ScreenContentProps {
   testID?: string;
 }
 
-function joinClassNames(...values: Array<string | undefined>) {
+function joinClassNames(...values: (string | undefined)[]) {
   return values.filter(Boolean).join(' ');
 }
 
@@ -27,7 +27,7 @@ export function ScreenHeaderShell({
   children,
   contentClassName,
   contentStyle,
-  maxWidthClassName = 'max-w-3xl',
+  maxWidthClassName = 'max-w-2xl',
   testID,
 }: ScreenHeaderShellProps) {
   const insets = useSafeAreaInsets();
@@ -71,7 +71,7 @@ export function ScreenContent({
   return (
     <Box
       testID={testID}
-      className={joinClassNames('mx-auto w-full max-w-3xl', className)}
+      className={joinClassNames('mx-auto w-full max-w-2xl', className)}
       style={style}
     >
       {children}

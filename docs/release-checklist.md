@@ -2,6 +2,10 @@
 
 Last updated: 2026-03-27
 
+## Purpose
+
+Use this checklist before cutting a preview or production release. It is written for maintainers of this repository and focuses on the local-model workflow, mobile UX stability, and release-facing metadata.
+
 ## Build configuration
 
 - App display name: `Pocket AI`
@@ -9,9 +13,9 @@ Last updated: 2026-03-27
 - Deep-link scheme: `pocketai`
 - Android application ID: `com.antigravity.pocketai`
 - iOS bundle identifier: `com.antigravity.pocketai`
-- EAS profiles committed in [`eas.json`](../eas.json): `development`, `preview`, `production`
+- EAS profiles in [`eas.json`](../eas.json): `development`, `preview`, `production`
 
-## Pre-flight
+## Pre-flight checks
 
 Run the local verification gate before cutting a build:
 
@@ -25,6 +29,12 @@ This expands to:
 npm run typecheck
 npm run lint
 npm test
+```
+
+If the release affects model loading, chat, downloads, storage, or navigation behavior, also run an Android emulator smoke pass:
+
+```bash
+npm run android:emulator
 ```
 
 ## Build commands
@@ -41,8 +51,8 @@ npm run build:all:production
 
 ### Clean start
 
-- Install a fresh build on a clean device/emulator.
-- Confirm the splash screen, app icon, name, and package metadata match `Pocket AI`.
+- Install a fresh build on a clean device or emulator.
+- Confirm the splash screen, app icon, display name, and package metadata match `Pocket AI`.
 - Confirm first launch reaches the tab shell without bootstrap crashes.
 
 ### Model flow
@@ -50,7 +60,7 @@ npm run build:all:production
 - Open `Models`.
 - Search the Hugging Face catalog while online.
 - Open `Filter` and `Sort` and confirm both panels stay collapsed by default, open independently, and do not permanently steal list height.
-- Apply at least one filter and one sort option from the dropdown panels, then confirm the list updates immediately and the active choices remain reflected in the controls.
+- Apply at least one filter and one sort option and confirm the list updates immediately.
 - Download a GGUF model and wait for verification to finish.
 - Load the model and confirm the app reports the engine as ready.
 - Unload the model and confirm the UI returns to the unloaded state.
@@ -59,22 +69,20 @@ npm run build:all:production
 
 - Open `Chat` and send a prompt with a loaded model.
 - Confirm streaming, stop, and regenerate behavior.
-- While sending, confirm the chat surface does not visibly jump: the header should stay stable and the composer should not resize twice on Android.
-- On a device with a bottom gesture area or home indicator, confirm the composer keeps its full bottom safe-area padding and the send button never drops into the unsafe zone.
-- If the active model exposes reasoning, expand `Thinking` / `Thought` and confirm the main reply stays outside the inner thought bubble.
-- Copy an assistant reply and confirm the clipboard contains only the final message, not the reasoning trace.
-- In a development build, confirm `t/s` appears in the same compact metadata row as the message action icons and remains visible after generation completes.
+- While sending, confirm the header stays stable and the composer does not visibly jump on Android.
+- On a device with a gesture area or home indicator, confirm the composer keeps safe bottom spacing and the send button never falls into the unsafe zone.
+- If the active model exposes reasoning, expand `Thinking` or `Thought` and confirm the main reply remains outside the inner reasoning bubble.
+- Copy an assistant reply and confirm the clipboard contains only the final assistant message, not the reasoning trace.
 - Leave and reopen the app, then confirm the active thread restores correctly.
-- Open `All Conversations`, search, rename, and delete a thread.
+- Open `All Conversations`, then search, rename, and delete a thread.
 - Expand `Chat Retention`, change the retention window, and confirm the control starts collapsed again after applying.
 
 ### Settings and disclosures
 
 - Switch theme between `light`, `system`, and `dark`.
 - Switch language between English and Russian.
-- After switching to Russian, run `npm run android:screens:emulator` and confirm the capture flow still succeeds because the runner restores an English UI baseline before writing artifacts.
-- Open `Privacy & Disclosures` from `Settings` and confirm the content renders.
-- Open `Presets` and confirm preset editing still works.
+- Open `Privacy & Disclosures` from `Settings` and confirm the content renders correctly.
+- Open `Presets` and confirm preset creation, editing, activation, and deletion still work.
 
 ### Storage and cleanup
 
@@ -83,8 +91,16 @@ npm run build:all:production
 - Clear chat history and confirm saved threads are removed.
 - Reset settings and confirm defaults are restored.
 
-## Release docs to keep aligned
+## Release-facing files to keep aligned
+
+When release behavior or product messaging changes, check these files together:
 
 - [`README.md`](../README.md)
+- [`app.json`](../app.json)
+- [`eas.json`](../eas.json)
 - [`docs/privacy-disclosures.md`](./privacy-disclosures.md)
-- [`../IMPLEMENTATION_PLAN.md`](../../IMPLEMENTATION_PLAN.md)
+
+## Notes
+
+- `Pocket AI` depends on native modules for local inference, so release validation should use native builds rather than Expo Go.
+- Emulator smoke checks are useful, but they are not a substitute for testing at least one real device when changing model loading, storage, or long-running chat behavior.

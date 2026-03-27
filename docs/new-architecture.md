@@ -1,22 +1,39 @@
 # React Native New Architecture
 
-This document outlines the setup, build process, and module-specific notes for running the Pocket AI application with React Native's New Architecture (Fabric and TurboModules).
+Last updated: 2026-03-27
 
-## Architecture Overview
+## Overview
 
-The application is now running on the New Architecture, which provides:
-- Synchronous layout rendering (Fabric)
-- Lazy native module initialization (TurboModules)
-- Better performance and interoperability with Native code
+Pocket AI targets React Native's New Architecture by default. The app depends on native modules that benefit from Fabric, TurboModules, JSI, and Hermes-backed execution.
 
-## Build Process & Environment Setup
+In this repository, New Architecture is enabled in two places:
 
-To ensure stable builds with the New Architecture, follow these guidelines:
+- [`app.json`](../app.json) via `expo.newArchEnabled`
+- [`android/gradle.properties`](../android/gradle.properties) via `newArchEnabled=true`
 
-### Android
-The New Architecture is enabled via `newArchEnabled=true` in `android/gradle.properties`.
+## Why it matters here
 
-To clean the build environment and rebuild:
+Pocket AI is not just a UI shell. It relies on native integrations for local storage and on-device inference, so architecture mismatches tend to fail as runtime errors, missing modules, or unstable model-loading behavior rather than simple visual regressions.
+
+The most sensitive areas are:
+
+- local storage setup through MMKV
+- JSI-heavy inference through `llama.rn`
+- React Navigation and screen layout behavior under Fabric
+
+## Current native-project layout
+
+- The Android native project is committed in this repository.
+- An `ios/` directory is not currently committed here.
+
+If you generate or commit an iOS native project later, keep New Architecture enabled during Pod installation and verify that all native dependencies remain compatible.
+
+## Android notes
+
+The committed Android project already has New Architecture enabled.
+
+To clean and rebuild Android locally:
+
 ```bash
 cd android
 ./gradlew clean
@@ -24,38 +41,53 @@ cd ..
 npm run android
 ```
 
-### iOS
-The New Architecture is enabled via the `RCT_NEW_ARCH_ENABLED=1` flag during Pod installation.
+If you are debugging stale native behavior after dependency changes, also consider reinstalling dependencies and rebuilding the app from scratch.
 
-To clean the build environment and rebuild:
-```bash
-cd ios
-rm -rf Pods
-rm -rf build
-pod install
-cd ..
-npm run ios
-```
+## iOS notes
 
-## Native Modules Attention
+This repository currently does not commit an `ios/` directory. If you need local iOS native sources, generate them through the Expo native workflow first, then ensure New Architecture stays enabled when installing Pods.
 
-Several foundational native modules require specific attention when running with the New Architecture:
+When debugging iOS-specific native issues after generating the project, verify:
 
-### 1. `react-native-mmkv`
-- **Version**: `4.x+`
-- **Notes**: MMKV v4 is a significant rewrite utilizing `react-native-nitro-modules` for ultra-fast C++ based synchronous access.
-- **Migration Note**: `new MMKV()` is highly discouraged or removed. Always use the provided `createMMKV({ id: ... })` factory method for instantiation. Check `storage.ts` for the updated implementation.
+- Pod installation was performed with New Architecture enabled
+- native dependencies are compatible with the current React Native version
+- any generated native state is not stale after dependency or config changes
 
-### 2. `react-native-nitro-modules`
-- **Notes**: This is a supporting framework required by the new MMKV and potentially other high-performance native modules. Ensure its version stays aligned with React Native and MMKV requirements.
+## Module-specific notes
 
-### 3. `llama.rn` (LLM Engine)
-- **Notes**: This custom native integration provides local LLM inference. It relies heavily on JSI and native threads. If memory crashes or JSI errors occur during context generation or model loading, verify that the module's C++ bindings are fully compatible with the active React Native version's TurboModule interop layer.
+### `react-native-mmkv`
 
-### 4. `react-native-reanimated` & `react-native-screens`
-- **Notes**: Both libraries have deep integration with Fabric. Always keep them updated. React Navigation depends heavily on `react-native-screens` performing synchronous layout under the New Architecture.
+- Use the `createMMKV(...)` factory pattern rather than direct constructor-based setup.
+- The current storage wrapper lives in [`src/services/storage.ts`](../src/services/storage.ts).
+- This wrapper also includes a safe in-memory fallback for unsupported environments such as tests or web.
 
-## Troubleshooting
+### `react-native-nitro-modules`
 
-- **Build Failures After Branch Switching**: If you switch from an old architecture branch to a new one, aggressively clean node_modules and native caches.
-- **"Module not found" in Native**: If a library claims a TurboModule is missing, ensure it has been linked properly, and for iOS, ensure `RCT_NEW_ARCH_ENABLED=1` was present during `pod install`.
+- Keep this dependency aligned with the React Native and MMKV versions used by the app.
+- If MMKV or other Nitro-backed modules fail to initialize, treat version compatibility as a primary suspect.
+
+### `llama.rn`
+
+- This is the core local-inference integration.
+- It relies heavily on native threads and JSI bindings.
+- If model loading, context creation, or generation starts failing after a React Native upgrade, verify `llama.rn` compatibility before assuming the app logic is at fault.
+
+### `react-native-reanimated` and `react-native-screens`
+
+- These libraries are deeply involved in navigation and layout behavior under Fabric.
+- Keep them aligned with the active React Native version.
+- If you see navigation glitches, layout instability, or screen-mount issues after upgrades, check these libraries early.
+
+## Common failure modes
+
+- TurboModule not found at runtime
+- JSI crashes during model load or generation
+- Native module available in one build flavor but missing in another
+- Behavior changes after dependency upgrades without a full native rebuild
+
+## Practical troubleshooting
+
+- Clean and rebuild native artifacts after major dependency changes.
+- Verify New Architecture is enabled consistently in app config and native config.
+- Confirm native dependencies are compatible with the current React Native version.
+- Check whether the issue reproduces on a fresh install instead of only on a reused debug build.

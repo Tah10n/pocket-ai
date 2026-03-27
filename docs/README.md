@@ -1,0 +1,20 @@
+# Documentation Guide
+
+This folder contains the public maintainer-facing documentation for Pocket AI.
+
+## Documents
+
+- [`privacy-disclosures.md`](./privacy-disclosures.md): summary of what stays on-device, when the app uses the network, and which local-data controls are available
+- [`release-checklist.md`](./release-checklist.md): pre-release verification steps, manual QA flow, and release-facing files that must stay aligned
+- [`new-architecture.md`](./new-architecture.md): notes about React Native New Architecture, native-module expectations, and troubleshooting direction
+- [`ui-architecture.md`](./ui-architecture.md): conventions for UI structure, imports, layout, styling, and localization
+
+## When to update these files
+
+Review this folder whenever you change:
+
+- product messaging in the public `README`
+- privacy or network behavior
+- release flow or build metadata
+- native architecture assumptions
+- UI component conventions or localization rules

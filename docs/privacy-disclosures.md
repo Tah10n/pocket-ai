@@ -1,16 +1,19 @@
 # Privacy & Disclosures
 
-Last updated: 2026-03-26
+Last updated: 2026-03-27
 
-## Product summary
+## Summary
 
-Pocket AI is an offline-first mobile assistant focused on local GGUF models. The app is designed so that chat inference runs on-device after a model has been downloaded and loaded into memory.
+Pocket AI is an offline-first mobile assistant built around local GGUF models. After a model has been downloaded and loaded, chat inference runs on-device instead of through a hosted chat-completion API.
+
+This document summarizes the current behavior of the app as configured in this repository. It is intended as a product-facing disclosure summary, not a legal policy template.
 
 ## What stays on-device
 
 - Chat prompts and generated responses stay on the device during local inference.
-- Downloaded GGUF models are stored in app-managed local storage.
-- Conversation history, system-prompt presets, and generation settings are persisted locally on the device.
+- Downloaded GGUF files are stored in app-managed local storage.
+- Conversation history is persisted locally on the device.
+- System prompt presets and generation settings are persisted locally on the device.
 - Storage cleanup controls are available in-app through `Storage Manager` and `All Conversations`.
 
 ## When the app uses the network
@@ -18,31 +21,39 @@ Pocket AI is an offline-first mobile assistant focused on local GGUF models. The
 Pocket AI uses the network only for model-management flows:
 
 - Hugging Face model catalog search
-- Optional Hugging Face metadata/config fetches used for model hints
+- Optional metadata and config fetches used for model hints
 - Model file downloads from remote hosting endpoints
 
-The app does not use a hosted chat-completion API in the v1 release flow.
-
-## Device-resource disclosures
-
-- Large models can exceed available RAM, reduce responsiveness, or trigger operating-system pressure.
-- The app warns before risky operations such as low-disk downloads, cellular downloads, and models that may not fit into RAM.
-- The app monitors memory and thermal state so it can warn the user and unload the active model when needed.
+The current release flow in this repository does not send chat prompts to a hosted chat-completion API.
 
 ## Local data controls
 
-Users can:
+Users can manage local data directly in the app:
 
 - offload downloaded models
 - unload the active model
 - clear persisted chat history
 - reset settings
-- manage retention for old conversations
+- manage retention for older conversations
 
-## Android release note
+## Device and resource limits
 
-For the release configuration committed in this repository:
+Local inference is constrained by the device:
 
-- the Android app identifier is `com.antigravity.pocketai`
-- Android auto-backup is disabled to avoid backing up local chat/model state through platform backup flows
-- only the minimal `INTERNET` and `VIBRATE` permissions are declared in the app config
+- large GGUF models can exceed available RAM
+- large downloads can exceed available storage
+- sustained inference can increase thermal pressure and reduce responsiveness
+
+The app includes warnings for risky operations such as low-disk downloads, cellular downloads, and models that may not fit into available memory. When required, the app can unload the active model to protect stability.
+
+## Release configuration in this repository
+
+For the release configuration currently committed here:
+
+- Android package name: `com.antigravity.pocketai`
+- Android auto-backup is disabled to avoid backing up local chat and model state
+- Android permissions are limited to `INTERNET` and `VIBRATE`
+
+## Scope note
+
+This document describes the behavior of the code in this repository at the time of writing. If the product's privacy or networking behavior changes, this file should be updated alongside [`README.md`](../README.md) and [`app.json`](../app.json).

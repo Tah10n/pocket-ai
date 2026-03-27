@@ -1,79 +1,77 @@
-# Pocket AI App
+# Pocket AI
 
-Expo Router React Native app for an offline-first local AI assistant. The app focuses on GGUF model discovery, download, verification, local loading through `llama.rn`, and an on-device chat experience.
+Pocket AI is an offline-first mobile app for discovering, downloading, and chatting with local AI models directly on your device.
 
-Home shows a short recent-conversations slice, a simplified active-model card without decorative artwork, and a context-aware model CTA that can send users straight to downloaded models when no model is currently loaded.
-Settings now include theme/language controls, generation parameters, and a routed preset manager where seeded and user-created presets can all be added, edited, activated, or deleted.
-Theme switching is currently stabilized with a hybrid approach: the app theme source of truth still lives in `ThemeProvider`, but `SettingsScreen` intentionally uses plain React Native `StyleSheet` styling as a safety workaround for a NativeWind / `react-native-css-interop` dev-time crash that was reproducible during theme changes.
-Internal routed screens now use a shared screen shell so headers, content width, safe-area handling, and bottom spacing stay visually aligned across Home, Models, Conversations, Presets, Storage, Legal, and Chat-adjacent flows.
+The project is built around a simple local-first flow:
 
-## Scripts
+1. Search GGUF models from Hugging Face.
+2. Download and verify a model on the device.
+3. Load it through `llama.rn`.
+4. Chat locally without routing prompts through a hosted chat-completion API.
 
-Install dependencies:
+## Highlights
+
+- On-device chat with local GGUF models
+- Hugging Face model discovery, download, and local file management
+- Persistent chat history stored on the device
+- System prompt presets for different assistant behaviors
+- Runtime generation controls such as temperature, top-p, top-k, min-p, repetition penalty, context window, and max tokens
+- Storage manager for unloading or offloading models and clearing local data
+- Conversation retention controls
+- English and Russian localization
+
+## Why Pocket AI
+
+Pocket AI is designed around privacy, ownership, and a practical mobile workflow for local inference. Once a model is downloaded and loaded, inference stays on the device. The network is used for model discovery, metadata fetches, and downloads, but not for hosted chat completion in the current release flow.
+
+## Tech stack
+
+- Expo + React Native
+- Expo Router
+- TypeScript
+- NativeWind
+- Zustand
+- MMKV
+- `llama.rn` for on-device inference
+
+## Getting started
+
+### Prerequisites
+
+- Node.js and npm
+- Android Studio for Android builds
+- Xcode for iOS builds
+- A native development environment, because local inference depends on native modules
+
+`Pocket AI` is not a pure Expo Go app. Features such as local model loading rely on native integrations, so use a native build workflow.
+
+### Install dependencies
 
 ```bash
 npm install
 ```
 
-Start the Expo app:
+### Run the app
+
+Start Metro:
 
 ```bash
 npm start
 ```
 
-Run an Android smoke check:
+Run on Android:
 
 ```bash
-npm run android:smoke
+npm run android
 ```
 
-Run the Android smoke check on an emulator and save a screenshot:
+Run on iOS:
 
 ```bash
-npm run android:emulator
+npm run ios
 ```
 
-Run the basic UI scenarios against the current Android target:
-
-```bash
-npm run android:scenarios
-```
-
-Run the same scenarios on an emulator:
-
-```bash
-npm run android:scenarios:emulator
-```
-
-Capture the current Android UI screens without running the scenario pack:
-
-```bash
-npm run android:screens
-```
-
-Run the same screen-capture flow on an emulator:
-
-```bash
-npm run android:screens:emulator
-```
-
-Run tests, lint, and the Android smoke check together:
-
-```bash
-npm run check:android
-```
-
-Run tests, lint, and the emulator workflow together:
-
-```bash
-npm run check:android:emulator
-```
-
-Run tests, lint, and the emulator UI scenarios together:
-
-```bash
-npm run check:android:scenarios
-```
+## Useful scripts
 
 Run lint:
 
@@ -81,7 +79,7 @@ Run lint:
 npm run lint
 ```
 
-Run TypeScript checks:
+Run type checks:
 
 ```bash
 npm run typecheck
@@ -93,178 +91,49 @@ Run tests:
 npm test
 ```
 
-Run the release verification gate:
+Run the local release verification gate:
 
 ```bash
 npm run verify:release
 ```
 
-Create EAS builds with the committed profiles:
+Run the Android emulator smoke flow:
 
 ```bash
-npm run build:android:preview
-npm run build:android:production
-npm run build:all:production
+npm run android:emulator
 ```
 
-## Verification Workflow
-
-Before merging changes, run the full local quality gate:
+Run the Android emulator UI scenarios:
 
 ```bash
-npm run typecheck
-npm run lint
-npm test
+npm run android:scenarios:emulator
 ```
 
-Notes about expected console noise during `npm test`:
+## Product notes
 
-- MMKV-backed services log fallback warnings under Jest because native MMKV is unavailable in the test environment and the app intentionally falls back to in-memory storage.
-- Some tests intentionally exercise failure paths such as corrupted settings payloads, Hugging Face rate limiting, and GPU fallback; those scenarios log warnings or errors even when the suite passes.
-- Treat the process exit code and Jest summary as the source of truth for pass/fail.
+- Inference is local after a model has been downloaded and loaded.
+- Chat history, presets, settings, and downloaded model references are persisted on-device.
+- Network access is limited to model-management flows such as Hugging Face search, metadata fetches, and model downloads.
+- Large GGUF models may exceed the RAM or storage available on smaller devices.
 
-## Current app structure
-
-The codebase uses Expo Router for routes and keeps app logic under `src/`.
+## Repository layout
 
 ```text
-app/
-├── app/                 # Expo Router entrypoints and tab routes
-├── src/
-│   ├── components/      # Shared UI and feature-level reusable components
-│   ├── hooks/           # UI hooks and screen-facing state helpers
-│   ├── i18n/            # i18n bootstrap and translations
-│   ├── lib/             # Small shared adapters, including MMKV wiring
-│   ├── providers/       # React providers such as theming
-│   ├── services/        # Persistence, model catalog, downloads, engine, bootstrap
-│   ├── store/           # Zustand stores and persist adapters
-│   ├── types/           # Shared TypeScript types
-│   ├── ui/screens/      # Screen components rendered by Expo Router routes
-│   └── utils/           # UI and domain utilities
-├── __tests__/           # Jest tests
-└── README.md
-```
-
-## Conventions
-
-- Write repository documentation and code comments in English.
-- Keep shared reusable building blocks in `src/components`.
-- Keep route-facing screen components in `src/ui/screens`.
-- Use `src/store` as the single home for Zustand store modules.
-- Use `src/services` for app services and persistence helpers rather than putting that logic into components.
-- Prefer NativeWind primitives and `className` for shared UI, but document and preserve targeted React Native `StyleSheet` fallbacks when they are used to avoid verified runtime stability issues.
-- Treat localization as part of the definition of done for user-facing UI.
-- Any new user-visible button label, title, description, tab label, alert copy, empty state, filter label, or menu item must be added to both `src/i18n/locales/en.json` and `src/i18n/locales/ru.json`, then consumed via `t(...)` instead of hard-coded inline strings.
-- The only normal exceptions are developer-only logs, temporary test doubles/mocks, and other text that never ships to end users.
-
-## Screen Layout Notes
-
-- `src/components/ui/ScreenShell.tsx` is the shared layout primitive for internal routed screens.
-- `ScreenHeaderShell` owns top safe-area spacing, translucent header chrome, border treatment, and max-width alignment.
-- `ScreenContent` keeps the main content column aligned with the header width instead of letting each screen choose its own container rules.
-- Reuse existing header components (`HeaderBar`, `ChatHeader`, `SearchHeader`) when possible; if a screen needs a custom header, build it inside `ScreenHeaderShell`.
-- Tab screens should account for the active bottom tab bar height when setting bottom padding for scrollable content.
-
-## Localization Workflow
-
-When adding or changing user-facing copy:
-
-1. Add the new translation key to `src/i18n/locales/en.json`.
-2. Add the matching key to `src/i18n/locales/ru.json`.
-3. Use the key from the component or screen with `useTranslation()` and `t(...)`.
-4. Avoid shipping mixed-language UI by not leaving new English-only fallback strings in production components.
-
-Example:
-
-```tsx
-const { t } = useTranslation();
-
-<Text>{t('home.newChat')}</Text>
+app/         Expo Router entrypoints and route definitions
+src/         Application logic, components, screens, services, and stores
+__tests__/   Jest test suite
+docs/        Product and engineering notes
+scripts/     Local automation and Android QA helpers
+assets/      Icons, splash assets, and other static files
 ```
 
 ## Documentation
 
-- [../IMPLEMENTATION_PLAN.md](../IMPLEMENTATION_PLAN.md): delivery roadmap and current phase status.
-- [UI Architecture & Components Guidelines](./docs/ui-architecture.md): guidance for creating and modifying UI components.
-- [New Architecture Migration Guide](./docs/new-architecture.md): notes for React Native New Architecture and native-module-related setup.
-- [Privacy & Disclosures](./docs/privacy-disclosures.md): release-facing summary of local inference, storage, and network behavior.
-- [Release Checklist](./docs/release-checklist.md): build profiles, metadata, and manual pre-release QA steps.
+- [Privacy & Disclosures](./docs/privacy-disclosures.md)
+- [Release Checklist](./docs/release-checklist.md)
+- [New Architecture Notes](./docs/new-architecture.md)
+- [UI Architecture Guidelines](./docs/ui-architecture.md)
 
-## Model Controls
+## Current status
 
-- The chat model-controls sheet exposes the runtime generation controls used by local inference: `temperature`, `topP`, `topK`, `minP`, `repetition penalty`, `context window`, and `max tokens`.
-- Generation settings are saved in `SettingsStore`, snapshotted into each chat thread, and forwarded into `llama.rn` through the chat session pipeline so active chats stay reproducible.
-- `Reset all` and per-field reset actions restore the app defaults for both load-time and sampling-related controls.
-
-## Chat Surface Notes
-
-- `src/ui/screens/ChatScreen.tsx` keeps the chat header compact: thread title first, then preset/model metadata, with transient generation status shown separately.
-- `src/components/ui/ChatHeader.tsx` keeps the right-side action row width stable while generation starts, so the title and metadata do not reflow when the `new chat` action becomes temporarily unavailable.
-- Missing-model recovery now uses a single coherent path: the chat either shows a warning banner above existing history or a centered recovery card for empty threads, and routes to `Download Model`, `Load Model`, or `Open Models` depending on current availability.
-- The composer uses platform-specific keyboard handling: iOS keeps the screen-level `KeyboardAvoidingView`, while Android relies on native `adjustResize` and avoids an extra JS-side resize wrapper to reduce send-time layout jumps.
-- `src/components/ui/ChatInputBar.tsx` preserves the full bottom safe-area inset instead of capping it, so the composer and send button stay fully above the iPhone home-indicator / gesture area.
-- `src/components/ui/ChatMessageBubble.tsx` renders the final assistant reply in the main bubble and shows model reasoning inside a separate expandable `Thinking` / `Thought` bubble when `llama.rn` exposes `reasoning_content`.
-- Assistant copy actions now copy only the final assistant markdown, without the reasoning trace.
-- Conversation previews and inference history use the visible assistant reply instead of the saved thought trace, while still falling back safely when no separate reasoning payload exists.
-
-## Conversations Surface Notes
-
-- `src/ui/screens/ConversationsScreen.tsx` keeps `Chat Retention` collapsed by default so the saved-thread list remains the primary focus on smaller screens.
-- The retention card still exposes the full set of cleanup windows, but only after the user expands the compact summary card.
-
-## Hugging Face Metadata
-
-- The model catalog now reads optional Hugging Face `config` metadata when it is available for a GGUF entry.
-- The app currently derives capability hints such as `maxContextTokens`, `modelType`, and `architectures` from fields like `max_position_embeddings`, `n_positions`, `max_sequence_length`, `seq_length`, and `sliding_window`.
-- When a model exposes a known context-size limit, the chat parameter UI uses that value to clamp `Context window` and `Max tokens` so the controls stay within the model's advertised range.
-- Additional Hugging Face metadata is treated as advisory unless the local runtime explicitly supports it; unsupported config fields are not surfaced as editable controls yet.
-
-## Theme Notes
-
-- Theme persistence and the app-wide resolved mode live in `src/providers/ThemeProvider.tsx`.
-- `app/(tabs)/_layout.tsx` reads the resolved theme from that provider so tabs stay in sync with the rest of the app.
-- `app/(tabs)/_layout.tsx` also defines the shared tab-bar height and vertical padding contract that tabbed screens should respect when calculating bottom content spacing.
-- `app/_layout.tsx` contains a dev-only guard for the `react-native-css-interop` upgrade-warning crash that can occur when React Navigation proxy props are stringified during theme-related rerenders.
-- `src/ui/screens/SettingsScreen.tsx` is intentionally implemented with React Native primitives and `StyleSheet` right now; do not convert it back to NativeWind wrappers without re-verifying theme switching on device.
-
-## Android Smoke Automation
-
-`npm run android:smoke` is a non-interactive Android launch path intended for local smoke checks and agent-driven verification.
-
-It will:
-
-- resolve `adb` and `emulator` from the Android SDK even when they are not on `PATH`
-- reuse an existing Metro server or start one on a free port in the `8081-8090` range
-- reuse a connected Android device or boot the first available AVD
-- build and install the debug APK
-- set up `adb reverse` and open the Expo development client against the selected Metro port
-
-`npm run android:emulator` uses the same flow but prefers an AVD and writes a screenshot to `artifacts/android-emulator-smoke.png`, which is useful for visual smoke checks and scripted UI scenarios.
-
-`npm run android:screens:emulator` launches the app, drives a deterministic screen-capture flow, and writes screenshots plus a JSON report under `artifacts/android-screen-capture/`. Before taking artifacts, the runner normalizes the app language back to English from either supported locale so text anchors such as `Recent Conversations`, `Storage Manager`, and `Load a model to continue chatting` stay stable.
-
-`npm run android:scenarios:emulator` builds on top of that launcher and executes a small set of baseline user flows using `adb` and Android UI hierarchy dumps. The current scenarios cover:
-
-- Home screen smoke (`Pocket AI`, `New Chat`, `Recent Conversations`, active model CTA)
-- Bottom tab navigation (`Home`, `Chat`, `Models`, `Settings`)
-- `New Chat` CTA navigation
-- Active model CTA navigation, including `Browse Models`, `Choose Model`, and `Swap Model` states
-
-Each run writes screenshots and a JSON report under `artifacts/android-scenarios/`.
-
-Optional environment variables:
-
-- `ANDROID_SERIAL`: target a specific connected device
-- `ANDROID_AVD`: force a specific emulator name when no device is connected
-- `ANDROID_SKIP_BUILD=1`: skip Gradle assembly and reuse the existing debug APK
-- `ANDROID_SMOKE_PORT=8081`: change the first port checked for Metro reuse/startup
-- `ANDROID_SMOKE_SCREENSHOT=artifacts/android-smoke.png`: save a screenshot after launch
-
-CLI flags are also supported:
-
-- `--emulator`: force emulator usage
-- `--avd <name>`: choose a specific AVD
-- `--serial <serial>`: choose a specific connected device
-- `--skip-build`: reuse the existing debug APK
-- `--port <number>`: override the first Metro port to probe
-- `--screenshot [path]`: save a screenshot after launch
+The app is in active development. The current focus is a stable local-model experience: better model management, predictable mobile UX, and release-ready privacy and storage controls.

@@ -1,84 +1,111 @@
 # UI Architecture & Component Guide
 
-## Folder Structure
+Last updated: 2026-03-27
 
-All UI components in this project are strictly centralized in one directory to prevent duplication, broken imports, and confusion.
+## Purpose
 
-**Directory:** `app/src/components/ui/`
+This guide documents the conventions used for UI structure, imports, styling, layout, and localization in Pocket AI. It is intended for contributors who are adding or modifying screens and reusable components.
 
-This is the **only** directory where UI components should live. It contains both:
-1. **Primitives**: Base wrapper elements for NativeWind/Gluestack styling (e.g., `box.tsx`, `text.tsx`, `pressable.tsx`, `input.tsx`).
-2. **Custom Components**: Application-specific composite components (e.g., `ChatHeader.tsx`, `ScreenShell.tsx`, `ActiveModelCard.tsx`, `ModelListItem.tsx`, `QuickActionsGrid.tsx`).
+## Folder ownership
 
-> **⚠️ Warning:** Do not create or use the legacy `app/components/` directory. It has been completely deprecated and removed to maintain a single source of truth in `src`.
+Reusable UI components live under:
 
-## Imports & Aliases
+`src/components/ui/`
 
-To make imports clean and refactor-friendly regardless of file depth, the project uses TypeScript path aliases.
+This directory contains both:
 
-Whenever you need to import a UI component, **always** use the `@/components/ui/...` alias:
+1. Base primitives used by the design system and NativeWind interop
+2. App-specific composite components such as `ChatHeader`, `ScreenShell`, and model-related cards
+
+Do not create parallel component trees such as:
+
+- `components/`
+- `app/components/`
+- duplicated UI primitives inside feature folders
+
+The goal is one clear source of truth for reusable UI.
+
+## Imports and aliases
+
+Use the `@/...` alias for application imports whenever possible:
 
 ```tsx
-// ✅ Correct (Absolute Alias)
 import { Box } from '@/components/ui/box';
 import { ActiveModelCard } from '@/components/ui/ActiveModelCard';
 import { MaterialSymbols } from '@/components/ui/MaterialSymbols';
-
-// ❌ Incorrect (Fragile Relative Paths)
-import { Box } from '../../components/ui/box';
-import { ActiveModelCard } from '../../../src/components/ui/ActiveModelCard';
-import { MaterialSymbols } from '../../components/ui/MaterialSymbols';
 ```
 
-### How it works
-Behind the scenes in `app/tsconfig.json`, the `@/*` alias is cleanly mapped to `./src/*`:
+Avoid fragile deep relative imports such as:
+
+```tsx
+import { Box } from '../../components/ui/box';
+import { ActiveModelCard } from '../../../src/components/ui/ActiveModelCard';
+```
+
+The alias is defined in [`tsconfig.json`](../tsconfig.json):
+
 ```json
 "paths": {
   "@/*": ["./src/*"]
 }
 ```
-This ensures that tools (TypeScript, ESLint, Metro bundler) automatically resolve `@/components/...` to `app/src/components/...`.
 
-## Component Guidelines
+## Component rules
 
-* **Styling**: Prefer NativeWind (`className`) for styling. Use inline styles or `StyleSheet` when dealing with dynamic runtime calculations (like `safeAreaInsets`) or when a documented runtime-stability workaround requires plain React Native primitives.
-* **Icons**: Use the centralized `MaterialSymbols` component (`@/components/ui/MaterialSymbols`) instead of importing directly from `@expo/vector-icons`.
-* **CSS Interop**: All base primitive components must be wrapped in NativeWind's `cssInterop` object so they can seamlessly accept and process `className` props without throwing unhandled UI update crashes.
-* **Interop Exceptions**: If a screen is a verified trigger for an upstream NativeWind / `react-native-css-interop` runtime issue, a screen-local fallback to React Native primitives is acceptable, but it must be documented in the file itself and in `app/README.md`. The current example is `src/ui/screens/SettingsScreen.tsx`, which intentionally avoids NativeWind wrappers to keep theme switching stable.
-* **Localization**: New user-facing copy must not be hard-coded directly into production components. Add every new visible string to both `src/i18n/locales/en.json` and `src/i18n/locales/ru.json`, then render it through `useTranslation()` and `t(...)`.
-* **What counts as user-facing copy**: Buttons, section titles, helper text, alert messages, empty states, tab labels, modal copy, filter chips, sort labels, and menu actions.
-* **Allowed exceptions**: Developer-only console output, non-user-facing telemetry/debug text, and intentional test-only mock strings.
+- Prefer NativeWind `className` styling for reusable UI.
+- Use inline styles or `StyleSheet` when values are driven by runtime layout, safe-area math, or a documented framework workaround.
+- Use the shared `MaterialSymbols` wrapper instead of importing icon implementations ad hoc across screens.
+- Keep application logic in hooks, services, or stores rather than burying it inside presentational components.
 
-## Screen Layout Conventions
+## NativeWind and interop notes
 
-Screen-level chrome should be standardized instead of reimplemented per route.
+- Shared primitives should support the project's NativeWind interop expectations.
+- If a verified upstream issue makes NativeWind wrappers unstable for a specific screen, a screen-local fallback to plain React Native primitives is acceptable.
+- When such an exception exists, document it in the affected file and keep the repository documentation aligned.
 
-### Shared shell
+The current notable exception is [`src/ui/screens/SettingsScreen.tsx`](../src/ui/screens/SettingsScreen.tsx), which intentionally uses a safer React Native `StyleSheet` approach to avoid a verified theme-switching crash.
 
-Use `@/components/ui/ScreenShell` for internal routed screens:
+## Screen layout conventions
 
-- `ScreenHeaderShell`: wraps the top safe-area inset, translucent header background, border, max width, and iOS blur behavior.
-- `ScreenContent`: keeps the main content column aligned to the same max width as the header.
+Screen-level chrome should be standardized rather than rebuilt from scratch per route.
 
-This should be the default for screens such as conversations, presets, legal, storage, and model catalog flows.
+Use [`@/components/ui/ScreenShell`](../src/components/ui/ScreenShell.tsx) for internal routed screens:
 
-### Header patterns
+- `ScreenHeaderShell` handles top safe-area spacing, header chrome, border treatment, and width alignment.
+- `ScreenContent` keeps the content column aligned with the same width contract as the header.
 
-- Reuse `HeaderBar.tsx`, `ChatHeader.tsx`, or `SearchHeader.tsx` when one of those patterns matches the screen.
-- If a screen needs a custom header, build it inside `ScreenHeaderShell` instead of hand-rolling its own safe-area and border container.
-- Keep internal screen headers visually consistent: 44px touch targets, 56px content row height where practical, matching horizontal padding, and the same border treatment.
+This should be the default for screens such as conversations, presets, legal, storage, and model-management flows.
 
-### Content width and bottom spacing
+## Header patterns
 
-- Route-level screens should keep their main content centered with the same max-width contract as the header.
-- Scrollable tab screens must pad their bottom content against the current bottom tab bar height instead of hard-coded values.
-- Non-tab routed screens should still include safe-area bottom padding so the last card or action is not flush with the device edge.
+- Reuse existing header components such as `HeaderBar`, `ChatHeader`, and `SearchHeader` when the pattern already fits.
+- If a screen needs a custom header, build it inside `ScreenHeaderShell` instead of hand-rolling a separate safe-area and border container.
+- Keep touch targets, horizontal padding, and border treatment visually consistent across internal screens.
 
-## Localization Checklist
+## Content width and bottom spacing
+
+- Keep routed screen content aligned to the same max-width contract as the header.
+- Scrollable tab screens should pad bottom content against the active tab bar height rather than hard-coded values.
+- Non-tab routed screens should still include bottom safe-area spacing so the last card or action does not sit flush with the device edge.
+
+## Localization checklist
 
 Before considering a UI change complete:
 
-1. Check whether the change introduces any new visible text.
-2. If yes, add keys for that text in both locale files.
-3. Use `t(...)` in the component instead of inline literals.
-4. Verify that the screen does not become mixed-language when switching to either supported locale.
+1. Check whether the change introduces any visible text.
+2. Add translation keys to both [`src/i18n/locales/en.json`](../src/i18n/locales/en.json) and [`src/i18n/locales/ru.json`](../src/i18n/locales/ru.json).
+3. Render the copy through `useTranslation()` and `t(...)` rather than inline literals.
+4. Verify the screen does not become mixed-language in either supported locale.
+
+User-facing copy includes:
+
+- buttons
+- section titles
+- helper text
+- alerts
+- empty states
+- filter and sort labels
+- tab labels
+- menu actions
+
+Normal exceptions are developer-only logs, diagnostics, and intentional test-only strings.

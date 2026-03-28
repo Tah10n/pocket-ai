@@ -3,9 +3,10 @@ import {
   ModelCatalogError,
   modelCatalogService,
 } from '../../src/services/ModelCatalogService';
+import { huggingFaceTokenService } from '../../src/services/HuggingFaceTokenService';
 import { hardwareListenerService } from '../../src/services/HardwareListenerService';
 import { registry } from '../../src/services/LocalStorageRegistry';
-import { LifecycleStatus, type ModelMetadata } from '../../src/types/models';
+import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../src/types/models';
 
 jest.mock('../../src/services/HardwareListenerService', () => ({
   hardwareListenerService: {
@@ -61,6 +62,13 @@ function makeRepoWithUnknownSize(id: string, filename = 'model.Q4_K_M.gguf') {
   };
 }
 
+function makeGatedRepo(id: string, filename = 'model.Q4_K_M.gguf') {
+  return {
+    ...makeRepoWithUnknownSize(id, filename),
+    gated: 'manual',
+  };
+}
+
 function makeLocalModel(id: string): ModelMetadata {
   return {
     id,
@@ -70,15 +78,19 @@ function makeLocalModel(id: string): ModelMetadata {
     downloadUrl: `https://example.com/${id}.gguf`,
     localPath: `${id.replace('/', '_')}.gguf`,
     fitsInRam: true,
+    accessState: ModelAccessState.PUBLIC,
+    isGated: false,
+    isPrivate: false,
     lifecycleStatus: LifecycleStatus.DOWNLOADED,
     downloadProgress: 1,
   };
 }
 
 describe('ModelCatalogService', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     jest.clearAllMocks();
     (modelCatalogService as any).searchCache.clear();
+    await huggingFaceTokenService.clearToken();
     mockedRegistry.getModels.mockReturnValue([]);
     mockedRegistry.getModel.mockReturnValue(undefined);
     (hardwareListenerService.getCurrentStatus as jest.Mock).mockReturnValue({ isConnected: true });
@@ -171,11 +183,16 @@ describe('ModelCatalogService', () => {
 
   it('keeps GGUF entries even when the list response omits file size metadata', async () => {
     global.fetch = jest.fn((input: RequestInfo | URL, init?: RequestInit) => {
-      if (typeof input === 'string' && init?.method === 'HEAD') {
+      if (typeof input === 'string' && input.includes('/tree/main?recursive=true')) {
         return Promise.resolve({
-          headers: {
-            get: jest.fn().mockReturnValue(String(2 * 1024 * 1024 * 1024)),
-          },
+          ok: true,
+          json: () => Promise.resolve([
+            {
+              path: 'model.Q4_K_M.gguf',
+              size: 2 * 1024 * 1024 * 1024,
+              lfs: { sha256: 'tree-sha' },
+            },
+          ]),
         });
       }
 
@@ -190,11 +207,119 @@ describe('ModelCatalogService', () => {
     expect(result.models).toHaveLength(1);
     expect(result.models[0].id).toBe('org/unknown-size-model');
     expect(result.models[0].size).toBe(2 * 1024 * 1024 * 1024);
+    expect(result.models[0].sha256).toBe('tree-sha');
+    expect((global.fetch as jest.Mock).mock.calls[1][0]).toContain('/tree/main?recursive=true');
+  });
+
+  it('keeps nullable size when both list and tree metadata omit the file size', async () => {
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      if (typeof input === 'string' && input.includes('/tree/main?recursive=true')) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve([
+            {
+              path: 'model.Q4_K_M.gguf',
+            },
+          ]),
+        });
+      }
+
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve([makeRepoWithUnknownSize('org/still-unknown-size-model')]),
+      });
+    }) as jest.Mock;
+
+    const result = await modelCatalogService.searchModels('phi');
+
+    expect(result.models).toHaveLength(1);
+    expect(result.models[0].size).toBeNull();
+    expect(result.models[0].fitsInRam).toBeNull();
+  });
+
+  it('marks gated models as auth_required when no token is configured', async () => {
+    global.fetch = jest.fn(() =>
+      Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve([makeGatedRepo('org/gated-model')]),
+      }),
+    ) as jest.Mock;
+
+    const result = await modelCatalogService.searchModels('phi');
+
+    expect(result.models[0].accessState).toBe(ModelAccessState.AUTH_REQUIRED);
+    expect(result.models[0].isGated).toBe(true);
+  });
+
+  it('marks gated models as access_denied when the tree endpoint rejects the configured token', async () => {
+    await huggingFaceTokenService.saveToken('hf_test_token');
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      if (String(input).includes('/tree/main?recursive=true')) {
+        return Promise.resolve({
+          ok: false,
+          status: 403,
+          json: () => Promise.resolve([]),
+        });
+      }
+
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve([makeGatedRepo('org/denied-model')]),
+      });
+    }) as jest.Mock;
+
+    const result = await modelCatalogService.searchModels('phi');
+
+    expect(result.models[0].accessState).toBe(ModelAccessState.ACCESS_DENIED);
+  });
+
+  it('revalidates size-known gated models with the tree endpoint before marking them authorized', async () => {
+    await huggingFaceTokenService.saveToken('hf_test_token');
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      if (String(input).includes('/tree/main?recursive=true')) {
+        return Promise.resolve({
+          ok: false,
+          status: 403,
+          json: () => Promise.resolve([]),
+        });
+      }
+
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve([
+          {
+            ...makeRepo('org/size-known-gated-model'),
+            gated: 'manual',
+          },
+        ]),
+      });
+    }) as jest.Mock;
+
+    const result = await modelCatalogService.searchModels('phi');
+
+    expect(result.models[0].accessState).toBe(ModelAccessState.ACCESS_DENIED);
+    expect((global.fetch as jest.Mock).mock.calls[1][0]).toContain('/tree/main?recursive=true');
   });
 
   it('keeps loading more source repos until it can prove there is another filtered page', async () => {
     global.fetch = jest.fn((input: RequestInfo | URL) => {
       const url = String(input);
+
+      if (url.includes('cursor=page-2')) {
+        const repos = Array.from({ length: 30 }, (_, index) =>
+          index === 0
+            ? makeRepo('org/model-10')
+            : makeRepo(`org/not-gguf-next-${index}`, 1024, 'README.md'),
+        );
+
+        return Promise.resolve({
+          ok: true,
+          headers: {
+            get: jest.fn().mockReturnValue(null),
+          },
+          json: () => Promise.resolve(repos),
+        });
+      }
 
       if (url.includes('limit=30')) {
         const repos = Array.from({ length: 30 }, (_, index) =>
@@ -205,19 +330,13 @@ describe('ModelCatalogService', () => {
 
         return Promise.resolve({
           ok: true,
-          json: () => Promise.resolve(repos),
-        });
-      }
-
-      if (url.includes('limit=60')) {
-        const repos = Array.from({ length: 60 }, (_, index) =>
-          index < 11
-            ? makeRepo(`org/model-${index}`)
-            : makeRepo(`org/not-gguf-${index}`, 1024, 'README.md'),
-        );
-
-        return Promise.resolve({
-          ok: true,
+          headers: {
+            get: jest.fn((headerName: string) => (
+              headerName === 'link'
+                ? '<https://huggingface.co/api/models?search=phi%20gguf&limit=30&cursor=page-2>; rel="next"'
+                : null
+            )),
+          },
           json: () => Promise.resolve(repos),
         });
       }
@@ -247,5 +366,29 @@ describe('ModelCatalogService', () => {
 
     expect(result.models).toHaveLength(2);
     expect(result.hasMore).toBe(false);
+  });
+
+  it('invalidates the search cache when the Hugging Face token changes', async () => {
+    global.fetch = jest.fn(() =>
+      Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve([makeRepo('org/token-aware-model')]),
+      }),
+    ) as jest.Mock;
+
+    await modelCatalogService.searchModels('phi', { page: 0, pageSize: 1 });
+    await modelCatalogService.searchModels('phi', { page: 0, pageSize: 1 });
+
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+
+    await huggingFaceTokenService.saveToken('hf_test_token');
+    await modelCatalogService.searchModels('phi', { page: 0, pageSize: 1 });
+
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    expect((global.fetch as jest.Mock).mock.calls[1][1]).toMatchObject({
+      headers: {
+        Authorization: 'Bearer hf_test_token',
+      },
+    });
   });
 });

@@ -1,5 +1,6 @@
 import { registry } from '../../src/services/LocalStorageRegistry';
-import { LifecycleStatus, ModelMetadata } from '../../src/types/models';
+import { LifecycleStatus, ModelAccessState, ModelMetadata } from '../../src/types/models';
+import { normalizePersistedModelMetadata } from '../../src/services/ModelMetadataNormalizer';
 import * as FileSystem from 'expo-file-system/legacy';
 
 jest.mock('expo-file-system/legacy', () => ({
@@ -24,6 +25,9 @@ const mockModel: ModelMetadata = {
   downloadUrl: 'http://example.com/model.gguf',
   localPath: 'model.gguf',
   fitsInRam: true,
+  accessState: ModelAccessState.PUBLIC,
+  isGated: false,
+  isPrivate: false,
   lifecycleStatus: LifecycleStatus.DOWNLOADED,
   downloadProgress: 1,
 };
@@ -79,5 +83,23 @@ describe('LocalStorageRegistry', () => {
 
     const updatedModels = (registry.saveModels as jest.Mock).mock.calls[0][0];
     expect(updatedModels[0].lifecycleStatus).toBe(LifecycleStatus.DOWNLOADED);
+  });
+
+  it('normalizes legacy persisted metadata with missing access fields and zero size', () => {
+    const normalized = normalizePersistedModelMetadata({
+      id: 'legacy/model',
+      name: 'legacy',
+      author: 'legacy',
+      size: 0,
+      downloadUrl: 'http://example.com/model.gguf',
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+    });
+
+    expect(normalized.size).toBeNull();
+    expect(normalized.fitsInRam).toBeNull();
+    expect(normalized.accessState).toBe(ModelAccessState.PUBLIC);
+    expect(normalized.isGated).toBe(false);
+    expect(normalized.isPrivate).toBe(false);
   });
 });

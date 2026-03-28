@@ -2,6 +2,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 import { createStorage } from './storage';
 import { ModelMetadata, LifecycleStatus } from '../types/models';
 import { MODELS_DIR } from './FileSystemSetup';
+import { normalizePersistedModelMetadata } from './ModelMetadataNormalizer';
 
 const REGISTRY_KEY = 'models-registry';
 
@@ -25,7 +26,18 @@ export class LocalStorageRegistry {
     const rawData = this.storage.getString(REGISTRY_KEY);
     if (!rawData) return [];
     try {
-      return JSON.parse(rawData);
+      const parsed = JSON.parse(rawData) as unknown;
+      if (!Array.isArray(parsed)) {
+        return [];
+      }
+
+      return parsed
+        .filter((entry): entry is Partial<ModelMetadata> & { id: string } => (
+          Boolean(entry) &&
+          typeof entry === 'object' &&
+          typeof (entry as { id?: unknown }).id === 'string'
+        ))
+        .map((entry) => normalizePersistedModelMetadata(entry));
     } catch (e) {
       console.error('[LocalStorageRegistry] Failed to parse registry data', e);
       return [];
@@ -36,7 +48,10 @@ export class LocalStorageRegistry {
    * Save the entire list of models.
    */
   public saveModels(models: ModelMetadata[]): void {
-    this.storage.set(REGISTRY_KEY, JSON.stringify(models));
+    this.storage.set(
+      REGISTRY_KEY,
+      JSON.stringify(models.map((model) => normalizePersistedModelMetadata(model))),
+    );
   }
 
   /**
@@ -45,10 +60,11 @@ export class LocalStorageRegistry {
   public updateModel(model: ModelMetadata): void {
     const models = this.getModels();
     const index = models.findIndex((m) => m.id === model.id);
+    const normalized = normalizePersistedModelMetadata(model);
     if (index !== -1) {
-      models[index] = model;
+      models[index] = normalized;
     } else {
-      models.push(model);
+      models.push(normalized);
     }
     this.saveModels(models);
   }

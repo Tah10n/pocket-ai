@@ -14,6 +14,7 @@ This document summarizes the current behavior of the app as configured in this r
 - Downloaded GGUF files are stored in app-managed local storage.
 - Conversation history is persisted locally on the device.
 - System prompt presets and generation settings are persisted locally on the device.
+- An optional Hugging Face access token can be stored locally in secure device storage for gated or private model downloads.
 - Storage cleanup controls are available in-app through `Storage Manager` and `All Conversations`.
 
 ## When the app uses the network
@@ -23,6 +24,7 @@ Pocket AI uses the network only for model-management flows:
 - Hugging Face model catalog search
 - Optional metadata and config fetches used for model hints
 - Model file downloads from remote hosting endpoints
+- If a Hugging Face access token is configured, it is attached only to Hugging Face requests that require authenticated access to gated or private repositories
 
 The current release flow in this repository does not send chat prompts to a hosted chat-completion API.
 

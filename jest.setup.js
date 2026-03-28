@@ -4,6 +4,35 @@ import 'react-native-gesture-handler/jestSetup';
 
 process.env.EXPO_OS = process.env.EXPO_OS || 'web';
 
+const mockExpoRouter = {
+  push: jest.fn(),
+  replace: jest.fn(),
+  back: jest.fn(),
+  canGoBack: jest.fn().mockReturnValue(true),
+  setParams: jest.fn(),
+};
+
+jest.mock('expo-router', () => {
+  const React = require('react');
+
+  const Passthrough = ({ children }: any) => children ?? null;
+  const ScreenOnly = () => null;
+  const Stack = Object.assign(Passthrough, { Screen: ScreenOnly });
+  const Tabs = Object.assign(Passthrough, { Screen: ScreenOnly });
+
+  return {
+    Stack,
+    Tabs,
+    Slot: Passthrough,
+    Redirect: () => null,
+    Link: ({ children }: any) => children ?? null,
+    useRouter: () => mockExpoRouter,
+    useLocalSearchParams: jest.fn(() => ({})),
+    useSegments: jest.fn(() => []),
+    router: mockExpoRouter,
+  };
+});
+
 // Mock Expo Constants
 jest.mock('expo-constants', () => ({
   expoConfig: {
@@ -35,6 +64,24 @@ jest.mock('expo-file-system/legacy', () => ({
 jest.mock('expo-clipboard', () => ({
   setStringAsync: jest.fn().mockResolvedValue(undefined),
 }));
+
+jest.mock('expo-secure-store', () => {
+  let storage = {};
+
+  return {
+    setItemAsync: jest.fn(async (key, value) => {
+      storage[key] = value;
+    }),
+    getItemAsync: jest.fn(async (key) => storage[key] ?? null),
+    deleteItemAsync: jest.fn(async (key) => {
+      delete storage[key];
+    }),
+    isAvailableAsync: jest.fn(async () => true),
+    __resetMock: () => {
+      storage = {};
+    },
+  };
+}, { virtual: true });
 
 jest.mock('@expo/vector-icons', () => ({
   MaterialIcons: () => null,

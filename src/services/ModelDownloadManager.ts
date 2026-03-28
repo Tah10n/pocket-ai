@@ -1,9 +1,12 @@
 import * as FileSystem from 'expo-file-system/legacy';
 import { useDownloadStore } from '../store/downloadStore';
-import { ModelMetadata, LifecycleStatus } from '../types/models';
+import { ModelAccessState, ModelMetadata, LifecycleStatus } from '../types/models';
 import { registry } from './LocalStorageRegistry';
 import { MODELS_DIR } from './FileSystemSetup';
 import { AppError, toAppError } from './AppError';
+import { huggingFaceTokenService } from './HuggingFaceTokenService';
+
+const HF_BASE_URL = 'https://huggingface.co';
 
 export class ModelDownloadManager {
   private static instance: ModelDownloadManager;
@@ -63,11 +66,18 @@ export class ModelDownloadManager {
     const { updateModelInQueue, removeFromQueue, setActiveDownload } = useDownloadStore.getState();
 
     try {
+      if (model.size === null) {
+        throw new AppError('download_size_unknown', 'MODEL_SIZE_UNKNOWN', {
+          details: { modelId: model.id },
+        });
+      }
+
       const freeSpace = await FileSystem.getFreeDiskStorageAsync();
       const REQUIRED_BUFFER = 1024 * 1024 * 1024; // 1 GB
-      if (freeSpace !== undefined && freeSpace < model.size + REQUIRED_BUFFER) {
+      const requiredModelBytes = model.size ?? 0;
+      if (freeSpace !== undefined && freeSpace < requiredModelBytes + REQUIRED_BUFFER) {
         throw new AppError('download_disk_space_low', 'DISK_SPACE_LOW', {
-          details: { modelId: model.id, freeSpace, requiredBytes: model.size + REQUIRED_BUFFER },
+          details: { modelId: model.id, freeSpace, requiredBytes: requiredModelBytes + REQUIRED_BUFFER },
         });
       }
     } catch (e: any) {
@@ -102,9 +112,9 @@ export class ModelDownloadManager {
 
     // Prepare DownloadResumable
     this.resumable = FileSystem.createDownloadResumable(
-      this.getDownloadUrl(model.id),
+      model.downloadUrl,
       localUri,
-      {},
+      await this.buildDownloadOptions(model),
       callback,
       resumeString
     );
@@ -176,7 +186,7 @@ export class ModelDownloadManager {
       const downloadedSize = fileInfo.size ?? 0;
       const expectedSize = model.size;
 
-      if (expectedSize > 0 && Math.abs(downloadedSize - expectedSize) > 1024 * 1024) {
+      if (typeof expectedSize === 'number' && expectedSize > 0 && Math.abs(downloadedSize - expectedSize) > 1024 * 1024) {
         throw new AppError(
           'download_verification_failed',
           `Size mismatch: Expected ${expectedSize} but got ${downloadedSize}`,
@@ -194,9 +204,24 @@ export class ModelDownloadManager {
     }
   }
 
-  private getDownloadUrl(modelId: string): string {
-    const model = useDownloadStore.getState().queue.find(m => m.id === modelId);
-    return model?.downloadUrl || `https://huggingface.co/${modelId}/resolve/main/model.gguf`;
+  private async buildDownloadOptions(model: ModelMetadata): Promise<{ headers?: Record<string, string> }> {
+    const requiresAuth = model.accessState !== ModelAccessState.PUBLIC || model.isGated || model.isPrivate;
+    const isHuggingFaceDownload = model.downloadUrl.startsWith(HF_BASE_URL);
+
+    if (!requiresAuth || !isHuggingFaceDownload) {
+      return {};
+    }
+
+    const token = await huggingFaceTokenService.getToken();
+    if (!token) {
+      return {};
+    }
+
+    return {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    };
   }
 
   public async pauseDownload(modelId: string) {

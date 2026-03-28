@@ -9,6 +9,7 @@ import { ScreenHeaderShell } from '@/components/ui/ScreenShell';
 import { useDeviceMetrics } from '../../hooks/useDeviceMetrics';
 import { useLLMEngine } from '../../hooks/useLLMEngine';
 import { useTheme } from '../../providers/ThemeProvider';
+import { huggingFaceTokenService } from '../../services/HuggingFaceTokenService';
 import { llmEngineService } from '../../services/LLMEngineService';
 import { getAppStorageMetrics, type AppStorageMetrics } from '../../services/StorageManagerService';
 import { getSettings, subscribeSettings, updateSettings } from '../../services/SettingsStore';
@@ -315,6 +316,7 @@ export const SettingsScreen = () => {
     const { state: engineState, isReady: isEngineReady } = useLLMEngine();
     const [settings, setSettings] = useState(() => getSettings());
     const [appStorageMetrics, setAppStorageMetrics] = useState<AppStorageMetrics | null>(null);
+    const [hasHuggingFaceToken, setHasHuggingFaceToken] = useState(() => huggingFaceTokenService.getCachedState().hasToken);
 
     const isDark = resolvedMode === 'dark';
     const canGoBack = router.canGoBack();
@@ -327,6 +329,12 @@ export const SettingsScreen = () => {
     useEffect(() => {
         return subscribeSettings((nextSettings) => {
             setSettings(nextSettings);
+        });
+    }, []);
+
+    useEffect(() => {
+        return huggingFaceTokenService.subscribe((state) => {
+            setHasHuggingFaceToken(state.hasToken);
         });
     }, []);
 
@@ -371,6 +379,10 @@ export const SettingsScreen = () => {
 
     const handleLegalPress = () => {
         router.push('/legal' as any);
+    };
+
+    const handleHuggingFaceTokenPress = () => {
+        router.push('/huggingface-token' as any);
     };
 
     const unloadActiveModel = async () => {
@@ -557,6 +569,33 @@ export const SettingsScreen = () => {
                             </View>
 
                             <MaterialSymbols name="chevron-right" size={20} color={colors.textSecondary} />
+                        </View>
+                    </Pressable>
+
+                    <Pressable onPress={handleHuggingFaceTokenPress} style={[styles.row, styles.rowBorder, { borderBottomColor: colors.border }]}>
+                        <View style={styles.rowTop}>
+                            <View style={styles.rowLeading}>
+                                <View style={[styles.rowIcon, { backgroundColor: 'rgba(99, 102, 241, 0.16)' }]}>
+                                    <MaterialSymbols name="key" size={20} color={colors.primary} />
+                                </View>
+                                <View style={styles.rowTextWrap}>
+                                    <Text style={[styles.rowTitle, { color: colors.text }]}>
+                                        {t('settings.huggingFaceToken')}
+                                    </Text>
+                                    <Text style={[styles.rowSubtitle, { color: colors.textSecondary }]}>
+                                        {t('settings.huggingFaceTokenDescription')}
+                                    </Text>
+                                </View>
+                            </View>
+
+                            <View style={styles.rowTrailing}>
+                                <Text style={[styles.rowTrailingText, { color: colors.primary }]}>
+                                    {hasHuggingFaceToken
+                                        ? t('settings.huggingFaceTokenConfigured')
+                                        : t('settings.huggingFaceTokenMissing')}
+                                </Text>
+                                <MaterialSymbols name="chevron-right" size={20} color={colors.textSecondary} />
+                            </View>
                         </View>
                     </Pressable>
 

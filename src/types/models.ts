@@ -7,16 +7,27 @@ export enum LifecycleStatus {
   ACTIVE = 'active',
 }
 
+export enum ModelAccessState {
+  PUBLIC = 'public',
+  AUTH_REQUIRED = 'auth_required',
+  AUTHORIZED = 'authorized',
+  ACCESS_DENIED = 'access_denied',
+}
+
 export interface ModelMetadata {
   id: string;
   name: string;
   author: string;
-  size: number;
+  size: number | null;
   downloadUrl: string; // HF resolve URL
+  resolvedFileName?: string;
   localPath?: string;
   downloadedAt?: number;
   sha256?: string;
-  fitsInRam: boolean;
+  fitsInRam: boolean | null;
+  accessState: ModelAccessState;
+  isGated: boolean;
+  isPrivate: boolean;
   lifecycleStatus: LifecycleStatus;
   downloadProgress: number;
   resumeData?: string;

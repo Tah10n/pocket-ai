@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { persist, createJSONStorage, subscribeWithSelector } from 'zustand/middleware';
 import { mmkvStorage } from '../lib/mmkv';
 import { ModelMetadata, LifecycleStatus } from '../types/models';
+import { normalizePersistedModelMetadata } from '../services/ModelMetadataNormalizer';
 
 interface DownloadState {
   queue: ModelMetadata[];
@@ -15,17 +16,18 @@ interface DownloadState {
 
 export function normalizePersistedDownloadQueue(queue: ModelMetadata[]): ModelMetadata[] {
   return queue.map((model) => {
+    const normalizedModel = normalizePersistedModelMetadata(model);
     if (
-      model.lifecycleStatus === LifecycleStatus.DOWNLOADING ||
-      model.lifecycleStatus === LifecycleStatus.VERIFYING
+      normalizedModel.lifecycleStatus === LifecycleStatus.DOWNLOADING ||
+      normalizedModel.lifecycleStatus === LifecycleStatus.VERIFYING
     ) {
       return {
-        ...model,
+        ...normalizedModel,
         lifecycleStatus: LifecycleStatus.QUEUED,
       };
     }
 
-    return model;
+    return normalizedModel;
   });
 }
 
@@ -38,7 +40,15 @@ export const useDownloadStore = create<DownloadState>()(
 
         addToQueue: (model) => set((state) => {
           if (state.queue.find(m => m.id === model.id)) return state;
-          return { queue: [...state.queue, { ...model, lifecycleStatus: LifecycleStatus.QUEUED }] };
+          return {
+            queue: [
+              ...state.queue,
+              normalizePersistedModelMetadata({
+                ...model,
+                lifecycleStatus: LifecycleStatus.QUEUED,
+              }),
+            ],
+          };
         }),
 
         removeFromQueue: (modelId) => set((state) => ({
@@ -49,7 +59,11 @@ export const useDownloadStore = create<DownloadState>()(
         setActiveDownload: (modelId) => set({ activeDownloadId: modelId }),
 
         updateModelInQueue: (modelId, updates) => set((state) => ({
-          queue: state.queue.map(m => m.id === modelId ? { ...m, ...updates } : m)
+          queue: state.queue.map((model) => (
+            model.id === modelId
+              ? normalizePersistedModelMetadata({ ...model, ...updates })
+              : model
+          )),
         })),
       }),
       {

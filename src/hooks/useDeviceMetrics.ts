@@ -63,7 +63,7 @@ export const useDeviceMetrics = (options: UseDeviceMetricsOptions = {}) => {
         || model.lifecycleStatus === LifecycleStatus.ACTIVE
       ));
       const downloadedModelsBytes = downloadedModels.reduce((sum, model) => (
-        sum + Math.max(model.size, 0)
+        sum + Math.max(model.size ?? 0, 0)
       ), 0);
 
       if (!isMountedRef.current) {

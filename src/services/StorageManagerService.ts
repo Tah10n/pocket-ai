@@ -118,7 +118,7 @@ function getActiveModelEstimateBytes() {
     return 0;
   }
 
-  const baseModelBytes = Math.max(activeModel.size, 0);
+  const baseModelBytes = Math.max(activeModel.size ?? 0, 0);
   const contextBytes = Math.max(
     llmEngineService.getContextSize() * ESTIMATED_CONTEXT_BYTES_PER_TOKEN,
     MIN_ESTIMATED_CONTEXT_BYTES,
@@ -129,7 +129,7 @@ function getActiveModelEstimateBytes() {
 
 export async function getAppStorageMetrics(): Promise<AppStorageMetrics> {
   const downloadedModels = getDownloadedModels();
-  const modelsBytes = downloadedModels.reduce((sum, model) => sum + Math.max(model.size, 0), 0);
+  const modelsBytes = downloadedModels.reduce((sum, model) => sum + Math.max(model.size ?? 0, 0), 0);
   const [cacheBytes] = await Promise.all([
     getDirectorySizeBytes(CACHE_DIR),
   ]);

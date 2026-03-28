@@ -23,7 +23,9 @@ export const ActiveModelCard = ({ onSwapModel }: ActiveModelCardProps) => {
   const modelName = activeModel?.name ?? 'Choose a local model';
   const modelTag = activeModel ? activeModel.author : 'Offline';
   const memoryLabel = activeModel
-    ? `${(activeModel.size / (1024 * 1024 * 1024)).toFixed(1)} GB file`
+    ? activeModel.size === null
+      ? 'Unknown size'
+      : `${(activeModel.size / (1024 * 1024 * 1024)).toFixed(1)} GB file`
     : hasDownloadedModels
       ? `${downloadedModels.length} downloaded ${downloadedModels.length === 1 ? 'model' : 'models'}`
       : 'Download and load a GGUF model';

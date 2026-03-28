@@ -1,7 +1,9 @@
 import DeviceInfo from 'react-native-device-info';
-import { ModelMetadata, LifecycleStatus } from '../types/models';
+import { ModelAccessState, ModelMetadata, LifecycleStatus } from '../types/models';
 import { hardwareListenerService } from './HardwareListenerService';
 import { registry } from './LocalStorageRegistry';
+import { huggingFaceTokenService } from './HuggingFaceTokenService';
+import { normalizePersistedModelMetadata } from './ModelMetadataNormalizer';
 
 type HuggingFaceModelSummary = {
   id?: string;
@@ -9,6 +11,8 @@ type HuggingFaceModelSummary = {
   sha?: string;
   siblings?: HuggingFaceSibling[];
   config?: HuggingFaceModelConfig;
+  gated?: boolean | string;
+  private?: boolean;
 };
 
 type HuggingFaceModelConfig = {
@@ -29,6 +33,28 @@ type HuggingFaceSibling = {
     size?: number;
     sha256?: string;
   };
+};
+
+type HuggingFaceTreeEntry = {
+  path?: string;
+  rfilename?: string;
+  filename?: string;
+  size?: number;
+  lfs?: {
+    size?: number;
+    sha256?: string;
+    oid?: string;
+  };
+};
+
+type HuggingFaceModelsPage = {
+  items: HuggingFaceModelSummary[];
+  nextCursor: string | null;
+};
+
+type HuggingFaceTreeResponse = {
+  entries: HuggingFaceTreeEntry[];
+  status: number;
 };
 
 const HF_BASE_URL = 'https://huggingface.co';
@@ -64,15 +90,34 @@ export function getModelCatalogErrorMessage(error: unknown): string {
 export interface ModelCatalogSearchResult {
   models: ModelMetadata[];
   hasMore: boolean;
+  nextCursor: string | null;
   warning?: ModelCatalogError;
 }
 
+type CatalogCacheEntry = {
+  data: ModelMetadata[];
+  timestamp: number;
+  nextCursor: string | null;
+  exhausted: boolean;
+};
+
+type CatalogFetchState = {
+  models: ModelMetadata[];
+  nextCursor: string | null;
+  exhausted: boolean;
+};
+
 export class ModelCatalogService {
-  private searchCache: Map<
-    string,
-    { data: ModelMetadata[]; timestamp: number; hasMore: boolean }
-  > = new Map();
+  private searchCache: Map<string, CatalogCacheEntry> = new Map();
   private readonly fetchChunkSize = 30;
+  private authCacheVersion = 0;
+
+  constructor() {
+    huggingFaceTokenService.subscribe(() => {
+      this.authCacheVersion += 1;
+      this.searchCache.clear();
+    });
+  }
 
   /**
    * Fetch GGUF models from Hugging Face with caching and offline support.
@@ -82,11 +127,12 @@ export class ModelCatalogService {
     options?: { page?: number; pageSize?: number }
   ): Promise<ModelCatalogSearchResult> {
     const isConnected = hardwareListenerService.getCurrentStatus().isConnected;
+    const authToken = await huggingFaceTokenService.getToken();
     const page = options?.page ?? 0;
     const pageSize = options?.pageSize ?? 20;
-    const requiredLimit = Math.max((page + 1) * pageSize, pageSize);
     const sliceStart = page * pageSize;
     const sliceEnd = sliceStart + pageSize;
+    const requiredVisibleCount = sliceEnd + 1;
     
     // If offline, return only downloaded/local models from registry that match query
     if (!isConnected) {
@@ -94,28 +140,48 @@ export class ModelCatalogService {
       return this.getLocalSearchResults(query, page, pageSize);
     }
 
-    const cacheKey = query.toLowerCase();
-    const cached = this.searchCache.get(cacheKey);
-    if (cached && Date.now() - cached.timestamp < CACHE_TTL && cached.data.length >= requiredLimit) {
-      return {
-        models: this.mergeWithRegistry(cached.data.slice(sliceStart, sliceEnd)),
-        hasMore: cached.hasMore,
-      };
-    }
-
     try {
       const normalizedQuery = this.normalizeQuery(query);
-      const totalMemory = await this.getTotalMemory();
-      const { models, hasMore } = await this.fetchCatalogPage(
-        normalizedQuery,
-        sliceEnd,
-        totalMemory,
-      );
+      const cacheKey = `${normalizedQuery}::${authToken ? 'auth' : 'anon'}::${this.authCacheVersion}`;
+      const cached = this.searchCache.get(cacheKey);
+      const isCacheFresh = Boolean(cached) && Date.now() - (cached?.timestamp ?? 0) < CACHE_TTL;
+      let cacheEntry: CatalogCacheEntry = isCacheFresh && cached
+        ? cached
+        : {
+            data: [],
+            timestamp: 0,
+            nextCursor: null,
+            exhausted: false,
+          };
 
-      this.searchCache.set(cacheKey, { data: models, timestamp: Date.now(), hasMore });
+      if (cacheEntry.data.length < requiredVisibleCount && !cacheEntry.exhausted) {
+        const totalMemory = await this.getTotalMemory();
+        const fetched = await this.fetchCatalogPage(
+          normalizedQuery,
+          requiredVisibleCount,
+          totalMemory,
+          authToken,
+          {
+            models: cacheEntry.data,
+            nextCursor: cacheEntry.nextCursor,
+            exhausted: cacheEntry.exhausted,
+          },
+        );
+
+        cacheEntry = {
+          data: fetched.models,
+          timestamp: Date.now(),
+          nextCursor: fetched.nextCursor,
+          exhausted: fetched.exhausted,
+        };
+        this.searchCache.set(cacheKey, cacheEntry);
+      }
+
+      const hasMore = cacheEntry.data.length > sliceEnd || !cacheEntry.exhausted;
       return {
-        models: this.mergeWithRegistry(models.slice(sliceStart, sliceEnd)),
+        models: this.mergeWithRegistry(cacheEntry.data.slice(sliceStart, sliceEnd)),
         hasMore,
+        nextCursor: cacheEntry.nextCursor,
       };
     } catch (e) {
       console.error('[ModelCatalogService] Search failed', e);
@@ -160,7 +226,15 @@ export class ModelCatalogService {
     return {
       models: filtered.slice(sliceStart, sliceEnd),
       hasMore: sliceEnd < filtered.length,
+      nextCursor: null,
     };
+  }
+
+  public async refreshModelMetadata(model: ModelMetadata): Promise<ModelMetadata> {
+    const totalMemory = await this.getTotalMemory();
+    const authToken = await huggingFaceTokenService.getToken();
+    const [resolved] = await this.resolveMissingModelMetadata([model], totalMemory, authToken);
+    return resolved ?? model;
   }
 
   private async getTotalMemory(): Promise<number> {
@@ -171,29 +245,60 @@ export class ModelCatalogService {
     }
   }
 
-  private async fetchFileSizes(models: ModelMetadata[], totalMemory: number): Promise<ModelMetadata[]> {
-    const fetchSize = async (model: ModelMetadata): Promise<ModelMetadata> => {
-      if (model.size > 0) return model;
-      try {
-        const response = await fetch(model.downloadUrl, { method: 'HEAD' });
-        const contentLength = response.headers.get('content-length');
-        if (contentLength) {
-          const size = parseInt(contentLength, 10);
-          const fitsInRam = size < totalMemory * 0.8;
-          return { ...model, size, fitsInRam };
-        }
-      } catch {
-        console.warn(`[ModelCatalogService] Failed to fetch size for ${model.id}`);
+  private async resolveMissingModelMetadata(
+    models: ModelMetadata[],
+    totalMemory: number,
+    authToken: string | null,
+  ): Promise<ModelMetadata[]> {
+    const resolveModel = async (model: ModelMetadata): Promise<ModelMetadata> => {
+      const hasKnownSize = typeof model.size === 'number' && model.size > 0;
+      const requiresAuthValidation = Boolean(authToken) && (
+        model.accessState !== ModelAccessState.PUBLIC ||
+        model.isGated ||
+        model.isPrivate
+      );
+
+      if (hasKnownSize && !requiresAuthValidation) {
+        return model;
       }
+
+      try {
+        const treeResponse = await this.fetchHuggingFaceModelTree(model.id, authToken);
+        const selectedEntry = this.selectTreeEntryForModel(model, treeResponse.entries);
+        const accessState = this.resolveTreeAccessState(model, authToken, treeResponse.status);
+
+        if (!selectedEntry) {
+          return normalizePersistedModelMetadata({
+            ...model,
+            accessState,
+          });
+        }
+
+        const resolvedFileName = this.getFileName(selectedEntry);
+        const size = this.getFileSize(selectedEntry);
+        const fitsInRam = size === null ? null : size < totalMemory * 0.8;
+
+        return normalizePersistedModelMetadata({
+          ...model,
+          size,
+          fitsInRam,
+          accessState,
+          resolvedFileName,
+          downloadUrl: `${HF_BASE_URL}/${model.id}/resolve/main/${resolvedFileName}`,
+          sha256: this.getFileSha(selectedEntry) ?? model.sha256,
+        });
+      } catch (error) {
+        console.warn(`[ModelCatalogService] Failed to resolve tree metadata for ${model.id}`, error);
+      }
+
       return model;
     };
 
-    // Process in batches of 5 to avoid HuggingFace rate-limiting
     const BATCH_SIZE = 5;
     const results: ModelMetadata[] = [];
     for (let i = 0; i < models.length; i += BATCH_SIZE) {
       const batch = models.slice(i, i + BATCH_SIZE);
-      const batchResults = await Promise.all(batch.map(fetchSize));
+      const batchResults = await Promise.all(batch.map(resolveModel));
       results.push(...batchResults);
     }
     return results;
@@ -203,32 +308,48 @@ export class ModelCatalogService {
     normalizedQuery: string,
     minimumResults: number,
     totalMemory: number,
-  ): Promise<{ models: ModelMetadata[]; hasMore: boolean }> {
-    let requestLimit = Math.max(minimumResults, this.fetchChunkSize);
+    authToken: string | null,
+    initialState: CatalogFetchState,
+  ): Promise<CatalogFetchState> {
+    let models = [...initialState.models];
+    let nextCursor = initialState.nextCursor;
+    let exhausted = initialState.exhausted;
 
-    while (true) {
-      const data = await this.fetchHuggingFaceModels(normalizedQuery, requestLimit);
-      const baseModels = this.transformHFResponse(data, totalMemory);
-      const models = await this.fetchFileSizes(baseModels, totalMemory);
-      const exhausted = data.length < requestLimit;
+    while (models.length < minimumResults && !exhausted) {
+      const page = await this.fetchHuggingFaceModels(
+        normalizedQuery,
+        this.fetchChunkSize,
+        authToken,
+        nextCursor,
+      );
+      const baseModels = this.transformHFResponse(page.items, totalMemory, authToken);
+      const hydratedModels = await this.resolveMissingModelMetadata(baseModels, totalMemory, authToken);
+      models = this.mergeUniqueModelsById([...models, ...hydratedModels]);
+      nextCursor = page.nextCursor;
+      exhausted = page.nextCursor === null;
 
-      if (models.length > minimumResults || exhausted) {
-        return {
-          models,
-          hasMore: !exhausted && models.length > minimumResults,
-        };
+      if (page.items.length === 0) {
+        exhausted = true;
       }
-
-      requestLimit += Math.max(this.fetchChunkSize, minimumResults);
     }
+
+    return {
+      models,
+      nextCursor,
+      exhausted,
+    };
   }
 
   private async fetchHuggingFaceModels(
     normalizedQuery: string,
     limit: number,
-  ): Promise<HuggingFaceModelSummary[]> {
-    const url = `${HF_BASE_URL}/api/models?search=${encodeURIComponent(normalizedQuery)}&limit=${limit}&full=true&config=true`;
-    const response = await fetch(url);
+    authToken: string | null,
+    nextCursor: string | null = null,
+  ): Promise<HuggingFaceModelsPage> {
+    const url = nextCursor ?? `${HF_BASE_URL}/api/models?search=${encodeURIComponent(normalizedQuery)}&limit=${limit}&full=true&config=true`;
+    const response = await fetch(url, {
+      headers: this.buildHeaders(authToken),
+    });
 
     if (!response.ok) {
       if (response.status === 429) {
@@ -238,7 +359,14 @@ export class ModelCatalogService {
       throw new ModelCatalogError('network', `HF Search failed: ${response.status}`);
     }
 
-    return response.json() as Promise<HuggingFaceModelSummary[]>;
+    return {
+      items: await response.json() as HuggingFaceModelSummary[],
+      nextCursor: this.parseNextCursor(
+        typeof response.headers?.get === 'function'
+          ? response.headers.get('link')
+          : null,
+      ),
+    };
   }
 
   private normalizeQuery(query: string): string {
@@ -247,7 +375,11 @@ export class ModelCatalogService {
     return trimmed.toLowerCase().includes('gguf') ? trimmed : `${trimmed} gguf`;
   }
 
-  private transformHFResponse(data: HuggingFaceModelSummary[], totalMemory: number): ModelMetadata[] {
+  private transformHFResponse(
+    data: HuggingFaceModelSummary[],
+    totalMemory: number,
+    authToken: string | null,
+  ): ModelMetadata[] {
     const results: ModelMetadata[] = [];
 
     for (const item of data) {
@@ -267,25 +399,35 @@ export class ModelCatalogService {
       // Try to find a Q4/Q5 variant, otherwise just take the first one
       const ggufSibling = ggufs.find(s => (s.rfilename || '').includes('Q4_K_M')) || ggufs[0];
 
-      const size = ggufSibling.size || ggufSibling.lfs?.size || 0;
-      const fitsInRam = size > 0 ? size < totalMemory * 0.8 : true; // Assume true if size unknown
+      const size = ggufSibling.size || ggufSibling.lfs?.size || null;
+      const fitsInRam = typeof size === 'number' ? size < totalMemory * 0.8 : null;
       const fileName = ggufSibling.rfilename || ggufSibling.filename || 'model.gguf';
       const maxContextTokens = this.resolveMaxContextTokens(item.config);
+      const requiresAuth = Boolean(item.gated) || item.private === true;
+      const accessState = requiresAuth
+        ? authToken
+          ? ModelAccessState.AUTHORIZED
+          : ModelAccessState.AUTH_REQUIRED
+        : ModelAccessState.PUBLIC;
 
-      results.push({
+      results.push(normalizePersistedModelMetadata({
         id: repoId,
         name: repoId.split('/').pop() || repoId,
         author: repoId.split('/')[0],
-        size: size,
+        size,
         downloadUrl: `${HF_BASE_URL}/${repoId}/resolve/main/${fileName}`,
+        resolvedFileName: fileName,
         fitsInRam,
+        accessState,
+        isGated: Boolean(item.gated),
+        isPrivate: item.private === true,
         lifecycleStatus: LifecycleStatus.AVAILABLE,
         downloadProgress: 0,
         sha256: ggufSibling.lfs?.sha256,
         maxContextTokens,
         modelType: item.config?.model_type,
         architectures: item.config?.architectures,
-      });
+      }));
     }
 
     return results;
@@ -315,6 +457,134 @@ export class ModelCatalogService {
 
   public async getLocalModels(): Promise<ModelMetadata[]> {
     return registry.getModels();
+  }
+
+  private async fetchHuggingFaceModelTree(
+    repoId: string,
+    authToken: string | null,
+  ): Promise<HuggingFaceTreeResponse> {
+    const response = await fetch(`${HF_BASE_URL}/api/models/${repoId}/tree/main?recursive=true`, {
+      headers: this.buildHeaders(authToken),
+    });
+
+    if (!response.ok) {
+      return {
+        entries: [],
+        status: response.status,
+      };
+    }
+
+    return {
+      entries: await response.json() as HuggingFaceTreeEntry[],
+      status: response.status,
+    };
+  }
+
+  private selectTreeEntryForModel(
+    model: ModelMetadata,
+    entries: HuggingFaceTreeEntry[],
+  ): HuggingFaceTreeEntry | undefined {
+    if (model.resolvedFileName) {
+      const exactMatch = entries.find((entry) => this.getFileName(entry) === model.resolvedFileName);
+      if (exactMatch) {
+        return exactMatch;
+      }
+    }
+
+    return this.selectPreferredGgufEntry(entries);
+  }
+
+  private selectPreferredGgufEntry<T extends HuggingFaceSibling | HuggingFaceTreeEntry>(
+    entries: T[],
+  ): T | undefined {
+    const ggufs = entries.filter((entry) => {
+      const name = this.getFileName(entry);
+      const size = this.getFileSize(entry);
+      return name.toLowerCase().endsWith('.gguf') && (size === null || size >= MIN_GGUF_BYTES);
+    });
+
+    return ggufs.find((entry) => this.getFileName(entry).includes('Q4_K_M')) ?? ggufs[0];
+  }
+
+  private getFileName(entry: HuggingFaceSibling | HuggingFaceTreeEntry): string {
+    return entry.rfilename || entry.filename || ('path' in entry ? entry.path : '') || '';
+  }
+
+  private getFileSize(entry: HuggingFaceSibling | HuggingFaceTreeEntry): number | null {
+    const size = entry.size || entry.lfs?.size;
+    return typeof size === 'number' && size > 0 ? size : null;
+  }
+
+  private getFileSha(entry: HuggingFaceSibling | HuggingFaceTreeEntry): string | undefined {
+    const lfs = entry.lfs as { sha256?: string; oid?: string } | undefined;
+    return lfs?.sha256 || lfs?.oid;
+  }
+
+  private parseNextCursor(linkHeader: string | null): string | null {
+    if (!linkHeader) {
+      return null;
+    }
+
+    const nextLinkPart = linkHeader
+      .split(',')
+      .map((part) => part.trim())
+      .find((part) => /rel="?next"?/i.test(part));
+
+    if (!nextLinkPart) {
+      return null;
+    }
+
+    const match = nextLinkPart.match(/<([^>]+)>/);
+    return match?.[1] ?? null;
+  }
+
+  private mergeUniqueModelsById(models: ModelMetadata[]): ModelMetadata[] {
+    const seen = new Set<string>();
+    return models.filter((model) => {
+      if (seen.has(model.id)) {
+        return false;
+      }
+
+      seen.add(model.id);
+      return true;
+    });
+  }
+
+  private resolveTreeAccessState(
+    model: ModelMetadata,
+    authToken: string | null,
+    responseStatus: number,
+  ): ModelAccessState {
+    if (responseStatus === 401 || responseStatus === 403) {
+      return authToken
+        ? ModelAccessState.ACCESS_DENIED
+        : ModelAccessState.AUTH_REQUIRED;
+    }
+
+    if (model.accessState === ModelAccessState.AUTH_REQUIRED && authToken) {
+      return ModelAccessState.AUTHORIZED;
+    }
+
+    if (
+      responseStatus >= 200 &&
+      responseStatus < 300 &&
+      authToken &&
+      (model.isGated || model.isPrivate || model.accessState !== ModelAccessState.PUBLIC)
+    ) {
+      return ModelAccessState.AUTHORIZED;
+    }
+
+    return model.accessState;
+  }
+
+  private buildHeaders(authToken: string | null): HeadersInit | undefined {
+    if (!authToken) {
+      return undefined;
+    }
+
+    return {
+      Authorization: `Bearer ${authToken}`,
+    };
   }
 
   private resolveMaxContextTokens(config?: HuggingFaceModelConfig): number | undefined {

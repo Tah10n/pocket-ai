@@ -297,7 +297,7 @@ export function StorageManagerScreen() {
                                         <View style={styles.itemRow}>
                                             <View style={styles.headerTextWrap}>
                                                 <Text style={[styles.itemTitle, { color: colors.text }]}>{model.name}</Text>
-                                                <Text style={[styles.itemSubtitle, { color: colors.textSecondary }]}>{model.author} • {formatBytes(model.size)}</Text>
+                                                <Text style={[styles.itemSubtitle, { color: colors.textSecondary }]}>{model.author} • {model.size === null ? t('models.sizeUnknown') : formatBytes(model.size)}</Text>
                                                 {isActive ? (
                                                     <View style={[styles.activeBadge, { backgroundColor: 'rgba(50, 17, 212, 0.12)' }]}>
                                                         <Text style={[styles.activeBadgeText, { color: colors.primary }]}>{t('storageManager.activeModelBadge')}</Text>

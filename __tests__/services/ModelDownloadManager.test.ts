@@ -1,7 +1,8 @@
 import { modelDownloadManager } from '../../src/services/ModelDownloadManager';
 import { useDownloadStore } from '../../src/store/downloadStore';
-import { LifecycleStatus, ModelMetadata } from '../../src/types/models';
+import { LifecycleStatus, ModelAccessState, ModelMetadata } from '../../src/types/models';
 import * as FileSystem from 'expo-file-system/legacy';
+import { huggingFaceTokenService } from '../../src/services/HuggingFaceTokenService';
 
 jest.mock('expo-file-system', () => ({
   Paths: {
@@ -24,6 +25,12 @@ jest.mock('../../src/services/LocalStorageRegistry', () => ({
   },
 }));
 
+jest.mock('../../src/services/HuggingFaceTokenService', () => ({
+  huggingFaceTokenService: {
+    getToken: jest.fn().mockResolvedValue(null),
+  },
+}));
+
 const mockModel: ModelMetadata = {
   id: 'test/model',
   name: 'model',
@@ -31,6 +38,9 @@ const mockModel: ModelMetadata = {
   size: 1000,
   downloadUrl: 'http://example.com/model.gguf',
   fitsInRam: true,
+  accessState: ModelAccessState.PUBLIC,
+  isGated: false,
+  isPrivate: false,
   lifecycleStatus: LifecycleStatus.AVAILABLE,
   downloadProgress: 0,
 };
@@ -38,6 +48,7 @@ const mockModel: ModelMetadata = {
 describe('ModelDownloadManager Basic', () => {
   beforeEach(async () => {
     jest.clearAllMocks();
+    (huggingFaceTokenService.getToken as jest.Mock).mockResolvedValue(null);
     useDownloadStore.setState({ queue: [], activeDownloadId: null });
     (modelDownloadManager as any).isProcessing = false;
     await new Promise(r => setTimeout(r, 10)); // Yield tick
@@ -45,7 +56,7 @@ describe('ModelDownloadManager Basic', () => {
 
   it('should add model to queue and start download', async () => {
     useDownloadStore.getState().addToQueue(mockModel);
-    await (modelDownloadManager as any).processQueue();
+    await new Promise(r => setTimeout(r, 0));
 
     expect(FileSystem.createDownloadResumable).toHaveBeenCalled();
   });
@@ -67,11 +78,52 @@ describe('ModelDownloadManager Basic', () => {
   it('fails verification when the downloaded file size is too different', async () => {
     (FileSystem.getInfoAsync as jest.Mock).mockResolvedValueOnce({
       exists: true,
-      size: mockModel.size + 2 * 1024 * 1024,
+      size: (mockModel.size ?? 0) + 2 * 1024 * 1024,
     });
 
     await expect(modelDownloadManager.verifyChecksum(mockModel, 'test-dir/model.gguf')).rejects.toThrow(
       'Size mismatch',
+    );
+  });
+
+  it('skips size mismatch verification when the expected size is unknown', async () => {
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValueOnce({ exists: true, size: 42 });
+
+    await expect(
+      modelDownloadManager.verifyChecksum({ ...mockModel, size: null }, 'test-dir/model.gguf'),
+    ).resolves.toBe('verified-by-size');
+  });
+
+  it('rejects downloads that still have unknown size at preflight time', async () => {
+    useDownloadStore.setState({ queue: [], activeDownloadId: null });
+
+    await expect(
+      (modelDownloadManager as any).downloadModel({ ...mockModel, size: null }),
+    ).rejects.toThrow('MODEL_SIZE_UNKNOWN');
+
+    expect(FileSystem.createDownloadResumable).not.toHaveBeenCalled();
+  });
+
+  it('attaches the bearer token when downloading gated Hugging Face models', async () => {
+    (huggingFaceTokenService.getToken as jest.Mock).mockResolvedValue('hf_secret_token');
+
+    await (modelDownloadManager as any).downloadModel({
+      ...mockModel,
+      downloadUrl: 'https://huggingface.co/org/model/resolve/main/model.gguf',
+      accessState: ModelAccessState.AUTHORIZED,
+      isGated: true,
+    });
+
+    expect(FileSystem.createDownloadResumable).toHaveBeenCalledWith(
+      'https://huggingface.co/org/model/resolve/main/model.gguf',
+      expect.any(String),
+      {
+        headers: {
+          Authorization: 'Bearer hf_secret_token',
+        },
+      },
+      expect.any(Function),
+      undefined,
     );
   });
 });

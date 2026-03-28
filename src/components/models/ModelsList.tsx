@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Alert } from 'react-native';
+import { Alert, Linking } from 'react-native';
 import { useBottomTabBarHeight } from '@react-navigation/bottom-tabs';
 import { FlashList, ListRenderItem } from '@shopify/flash-list';
 import { useRouter } from 'expo-router';
@@ -14,17 +14,19 @@ import {
   modelCatalogService,
   getModelCatalogErrorMessage,
 } from '@/services/ModelCatalogService';
+import { AppError, getReportedErrorMessage } from '@/services/AppError';
 import { hardwareListenerService } from '@/services/HardwareListenerService';
+import { huggingFaceTokenService } from '@/services/HuggingFaceTokenService';
 import { registry } from '@/services/LocalStorageRegistry';
 import {
   useModelsStore,
+  MODELS_PAGE_SIZE,
   type ModelFilterCriteria,
   type ModelSortPreference,
 } from '@/store/modelsStore';
-import { EngineStatus, LifecycleStatus, type ModelMetadata } from '@/types/models';
+import { EngineStatus, LifecycleStatus, ModelAccessState, type ModelMetadata } from '@/types/models';
 import { ModelsFilter } from './ModelsFilter';
 import { useTranslation } from 'react-i18next';
-import { getReportedErrorMessage } from '@/services/AppError';
 
 interface ModelsListProps {
   activeTab: 'All Models' | 'Downloaded';
@@ -73,6 +75,10 @@ function matchesSize(model: ModelMetadata, filters: ModelFilterCriteria): boolea
     return true;
   }
 
+  if (model.size === null) {
+    return false;
+  }
+
   const sizeInGb = model.size / (1024 * 1024 * 1024);
   return filters.sizeRanges.some((sizeRange) => {
     if (sizeRange === 'small') return sizeInGb < 2;
@@ -84,7 +90,9 @@ function matchesSize(model: ModelMetadata, filters: ModelFilterCriteria): boolea
 function sortModels(models: ModelMetadata[], sort: ModelSortPreference): ModelMetadata[] {
   return [...models].sort((left, right) => {
     if (sort.field === 'size') {
-      return sort.direction === 'asc' ? left.size - right.size : right.size - left.size;
+      const leftSize = left.size ?? Number.MAX_SAFE_INTEGER;
+      const rightSize = right.size ?? Number.MAX_SAFE_INTEGER;
+      return sort.direction === 'asc' ? leftSize - rightSize : rightSize - leftSize;
     }
 
     if (sort.field === 'downloaded') {
@@ -117,26 +125,24 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
   const [loading, setLoading] = useState(false);
   const [isFetchingMore, setIsFetchingMore] = useState(false);
   const [hasMore, setHasMore] = useState(true);
+  const [page, setPage] = useState(0);
   const [{ warningMessage, loadMoreError }, setFetchState] = useState<FetchState>({
     warningMessage: null,
     loadMoreError: null,
   });
   const latestFetchIdRef = useRef(0);
+  const requestKeyRef = useRef(`${activeTab}:${searchQuery}`);
 
   const { startDownload, cancelDownload, queue } = useModelDownload();
   const { loadModel, unloadModel, state: engineState } = useLLMEngine();
   const {
     filters,
     sort,
-    pagination,
     setFitsInRamOnly,
     toggleStatus,
     toggleSizeRange,
     setSort,
     clearFilters,
-    resetPagination,
-    fetchNextPage,
-    setPage,
   } = useModelsStore();
 
   const refreshDownloadedModels = useCallback(() => {
@@ -162,7 +168,7 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
       try {
         const result = await modelCatalogService.searchModels(query, {
           page,
-          pageSize: pagination.pageSize,
+          pageSize: MODELS_PAGE_SIZE,
         });
 
         if (fetchId !== latestFetchIdRef.current) {
@@ -187,7 +193,7 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
         const message = getModelCatalogErrorMessage(error);
 
         if (append) {
-          setPage(Math.max(page - 1, 0));
+          setPage((current) => Math.max(current - 1, 0));
           setFetchState((current) => ({ ...current, loadMoreError: message }));
         } else {
           setFetchState({ warningMessage: message, loadMoreError: null });
@@ -204,24 +210,57 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
         }
       }
     },
-    [pagination.pageSize, setPage],
+    [],
   );
 
   useEffect(() => {
+    let isFirstNotification = true;
+
+    return huggingFaceTokenService.subscribe(() => {
+      if (isFirstNotification) {
+        isFirstNotification = false;
+        return;
+      }
+
+      if (activeTab !== 'All Models') {
+        return;
+      }
+
+      if (page === 0) {
+        void fetchModels(searchQuery, 0, false);
+        return;
+      }
+
+      setPage(0);
+    });
+  }, [activeTab, fetchModels, page, searchQuery]);
+
+  useEffect(() => {
+    const requestKey = `${activeTab}:${searchQuery}`;
+    const requestChanged = requestKeyRef.current !== requestKey;
+
+    if (requestChanged) {
+      requestKeyRef.current = requestKey;
+      if (page !== 0) {
+        setPage(0);
+        return;
+      }
+    }
+
     if (activeTab === 'All Models') {
-      const currentPage = pagination.page;
-      const append = currentPage > 0;
-      const timer = setTimeout(() => fetchModels(searchQuery, currentPage, append), 400);
+      const append = page > 0;
+      const timer = setTimeout(() => fetchModels(searchQuery, page, append), 400);
       return () => clearTimeout(timer);
     }
 
     latestFetchIdRef.current += 1;
+    setPage(0);
     setHasMore(false);
     setLoading(false);
     setIsFetchingMore(false);
     setFetchState({ warningMessage: null, loadMoreError: null });
     modelCatalogService.getLocalModels().then(setModels);
-  }, [activeTab, fetchModels, pagination.page, searchQuery]);
+  }, [activeTab, fetchModels, page, searchQuery]);
 
   const displayModels = useMemo(() => {
     return models.map((model) => {
@@ -271,7 +310,57 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
     Alert.alert(t('models.actionFailedTitle'), getReportedErrorMessage(scope, error, t));
   }, [t]);
 
+  const openTokenSettings = useCallback(() => {
+    router.push('/huggingface-token' as any);
+  }, [router]);
+
+  const openModelPage = useCallback(async (modelId: string) => {
+    try {
+      await Linking.openURL(`https://huggingface.co/${modelId}`);
+    } catch (error) {
+      showModelActionError('ModelsList.openModelPage', error);
+    }
+  }, [showModelActionError]);
+
   const handleDownload = useCallback((model: ModelMetadata) => {
+    const startPreparedDownload = async () => {
+      try {
+        if (model.accessState === ModelAccessState.AUTH_REQUIRED) {
+          openTokenSettings();
+          return;
+        }
+
+        if (model.accessState === ModelAccessState.ACCESS_DENIED) {
+          await openModelPage(model.id);
+          return;
+        }
+
+        const resolvedModel = model.size === null
+          ? await modelCatalogService.refreshModelMetadata(model)
+          : model;
+
+        if (resolvedModel.accessState === ModelAccessState.AUTH_REQUIRED) {
+          openTokenSettings();
+          return;
+        }
+
+        if (resolvedModel.accessState === ModelAccessState.ACCESS_DENIED) {
+          await openModelPage(resolvedModel.id);
+          return;
+        }
+
+        if (resolvedModel.size === null) {
+          throw new AppError('download_size_unknown', 'MODEL_SIZE_UNKNOWN', {
+            details: { modelId: model.id },
+          });
+        }
+
+        startDownload(resolvedModel);
+      } catch (error) {
+        showModelActionError('ModelsList.handleDownload', error);
+      }
+    };
+
     const status = hardwareListenerService.getCurrentStatus();
     if (status.networkType === 'cellular') {
       Alert.alert(
@@ -279,14 +368,14 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
         t('models.cellularWarningMessage'),
         [
           { text: t('common.cancel'), style: 'cancel' },
-          { text: t('models.downloadAnyway'), onPress: () => startDownload(model) },
+          { text: t('models.downloadAnyway'), onPress: () => { void startPreparedDownload(); } },
         ],
       );
       return;
     }
 
-    startDownload(model);
-  }, [startDownload, t]);
+    void startPreparedDownload();
+  }, [openModelPage, openTokenSettings, showModelActionError, startDownload, t]);
 
   const performLoad = useCallback(async (modelId: string) => {
     try {
@@ -344,8 +433,11 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
               }
               await registry.removeModel(modelId);
               if (activeTab === 'All Models') {
-                resetPagination();
-                await fetchModels(searchQuery, 0, false);
+                if (page === 0) {
+                  await fetchModels(searchQuery, 0, false);
+                } else {
+                  setPage(0);
+                }
               } else {
                 refreshDownloadedModels();
               }
@@ -356,15 +448,15 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
         },
       ],
     );
-  }, [activeTab, engineState.activeModelId, fetchModels, refreshDownloadedModels, resetPagination, searchQuery, showModelActionError, t, unloadModel]);
+  }, [activeTab, engineState.activeModelId, fetchModels, page, refreshDownloadedModels, searchQuery, showModelActionError, t, unloadModel]);
 
   const handleLoadMore = useCallback(() => {
     if (!hasMore || isFetchingMore || activeTab !== 'All Models') {
       return;
     }
 
-    fetchNextPage();
-  }, [activeTab, fetchNextPage, hasMore, isFetchingMore]);
+    setPage((current) => current + 1);
+  }, [activeTab, hasMore, isFetchingMore]);
 
   const hasFilters =
     filters.fitsInRamOnly || filters.statuses.length > 0 || filters.sizeRanges.length > 0;
@@ -413,6 +505,8 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
     <ModelCard
       model={item}
       onDownload={handleDownload}
+      onConfigureToken={openTokenSettings}
+      onOpenModelPage={openModelPage}
       onLoad={handleLoad}
       onUnload={handleUnload}
       onDelete={handleDelete}
@@ -420,7 +514,7 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
       onChat={() => router.push('/chat')}
       isActive={engineState.activeModelId === item.id}
     />
-  ), [cancelDownload, engineState.activeModelId, handleDelete, handleDownload, handleLoad, handleUnload, router]);
+  ), [cancelDownload, engineState.activeModelId, handleDelete, handleDownload, handleLoad, handleUnload, openModelPage, openTokenSettings, router]);
 
   const renderEmptyState = useCallback(() => emptyState, [emptyState]);
   const renderFooter = useCallback(() => footer, [footer]);

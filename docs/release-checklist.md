@@ -1,6 +1,6 @@
 # Release Checklist
 
-Last updated: 2026-03-27
+Last updated: 2026-03-28
 
 ## Purpose
 
@@ -59,8 +59,14 @@ npm run build:all:production
 
 - Open `Models`.
 - Search the Hugging Face catalog while online.
+- Search for a public GGUF model whose list metadata does not expose a reliable size and confirm the card shows a resolved size or `Unknown`, never `0.00 GB`.
 - Open `Filter` and `Sort` and confirm both panels stay collapsed by default, open independently, and do not permanently steal list height.
 - Apply at least one filter and one sort option and confirm the list updates immediately.
+- Scroll through at least three catalog pages and confirm autoload appends unique results without jumping back or duplicating model IDs.
+- Force a later-page failure if possible and confirm the footer keeps earlier results visible and offers a retry path.
+- Search for a gated Hugging Face model with no token configured and confirm the primary action routes into token setup instead of a normal download.
+- Save a valid Hugging Face token and confirm a newly accessible gated model leaves the locked state without restarting the app.
+- Save an invalid or insufficient Hugging Face token and confirm the affected model shows `Access denied` with a recovery path.
 - Download a GGUF model and wait for verification to finish.
 - Load the model and confirm the app reports the engine as ready.
 - Unload the model and confirm the UI returns to the unloaded state.
@@ -82,6 +88,7 @@ npm run build:all:production
 - Switch theme between `light`, `system`, and `dark`.
 - Switch language between English and Russian.
 - Open `Privacy & Disclosures` from `Settings` and confirm the content renders correctly.
+- Open the Hugging Face token screen from `Settings`, verify save and clear both work, and confirm the token field remains masked.
 - Open `Presets` and confirm preset creation, editing, activation, and deletion still work.
 
 ### Storage and cleanup

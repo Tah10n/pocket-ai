@@ -11,13 +11,21 @@ export const ModelsCatalogScreen = () => {
   const requestedTab = params.initialTab === 'downloaded' ? 'Downloaded' : 'All Models';
   const [activeTab, setActiveTab] = useState<'All Models' | 'Downloaded'>(requestedTab);
   const [searchQuery, setSearchQuery] = useState('');
+  const [searchSessionKey, setSearchSessionKey] = useState(0);
 
   useEffect(() => {
     setActiveTab(requestedTab);
   }, [requestedTab]);
 
   const handleSearchChange = useCallback((query: string) => {
-    setSearchQuery(query);
+    setSearchQuery((current) => {
+      if (current === query) {
+        return current;
+      }
+
+      setSearchSessionKey((sessionKey) => sessionKey + 1);
+      return query;
+    });
   }, []);
 
   const handleTabChange = useCallback((tab: 'All Models' | 'Downloaded') => {
@@ -35,7 +43,11 @@ export const ModelsCatalogScreen = () => {
         onOpenStorage={() => router.push('/storage' as any)}
       />
       <ScreenContent className="flex-1">
-        <ModelsList activeTab={activeTab} searchQuery={searchQuery} />
+        <ModelsList
+          activeTab={activeTab}
+          searchQuery={searchQuery}
+          searchSessionKey={searchSessionKey}
+        />
       </ScreenContent>
     </Box>
   );

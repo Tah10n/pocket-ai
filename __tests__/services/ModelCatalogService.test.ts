@@ -156,12 +156,15 @@ describe('ModelCatalogService', () => {
       }),
     ) as jest.Mock;
 
-    await expect(modelCatalogService.searchModels('phi', { page: 1, pageSize: 10 })).rejects.toMatchObject({
+    await expect(modelCatalogService.searchModels('phi', {
+      cursor: 'https://huggingface.co/api/models?search=phi%20gguf&limit=30&cursor=page-2',
+      pageSize: 10,
+    })).rejects.toMatchObject({
       code: 'rate_limited',
     });
   });
 
-  it('sets hasMore false when a full raw page still cannot prove another filtered result exists', async () => {
+  it('sets hasMore false when the response has no next cursor header', async () => {
     const repos = Array.from({ length: 10 }, (_, index) =>
       index < 3
         ? makeRepo(`org/model-${index}`)
@@ -175,7 +178,7 @@ describe('ModelCatalogService', () => {
       }),
     ) as jest.Mock;
 
-    const result = await modelCatalogService.searchModels('phi', { page: 0, pageSize: 10 });
+    const result = await modelCatalogService.searchModels('phi', { pageSize: 10 });
 
     expect(result.models).toHaveLength(3);
     expect(result.hasMore).toBe(false);
@@ -301,25 +304,9 @@ describe('ModelCatalogService', () => {
     expect((global.fetch as jest.Mock).mock.calls[1][0]).toContain('/tree/main?recursive=true');
   });
 
-  it('keeps loading more source repos until it can prove there is another filtered page', async () => {
+  it('derives hasMore from the next cursor header without extra page-proving fetches', async () => {
     global.fetch = jest.fn((input: RequestInfo | URL) => {
       const url = String(input);
-
-      if (url.includes('cursor=page-2')) {
-        const repos = Array.from({ length: 30 }, (_, index) =>
-          index === 0
-            ? makeRepo('org/model-10')
-            : makeRepo(`org/not-gguf-next-${index}`, 1024, 'README.md'),
-        );
-
-        return Promise.resolve({
-          ok: true,
-          headers: {
-            get: jest.fn().mockReturnValue(null),
-          },
-          json: () => Promise.resolve(repos),
-        });
-      }
 
       if (url.includes('limit=30')) {
         const repos = Array.from({ length: 30 }, (_, index) =>
@@ -347,11 +334,12 @@ describe('ModelCatalogService', () => {
       });
     }) as jest.Mock;
 
-    const result = await modelCatalogService.searchModels('phi', { page: 0, pageSize: 10 });
+    const result = await modelCatalogService.searchModels('phi', { pageSize: 10 });
 
     expect(result.models).toHaveLength(10);
     expect(result.hasMore).toBe(true);
-    expect((global.fetch as jest.Mock).mock.calls).toHaveLength(2);
+    expect(result.nextCursor).toContain('cursor=page-2');
+    expect((global.fetch as jest.Mock).mock.calls).toHaveLength(1);
   });
 
   it('sets hasMore false when the API returns fewer repos than requested', async () => {
@@ -362,10 +350,53 @@ describe('ModelCatalogService', () => {
       }),
     ) as jest.Mock;
 
-    const result = await modelCatalogService.searchModels('phi', { page: 0, pageSize: 10 });
+    const result = await modelCatalogService.searchModels('phi', { pageSize: 10 });
 
     expect(result.models).toHaveLength(2);
     expect(result.hasMore).toBe(false);
+  });
+
+  it('uses the parsed next cursor URL for follow-up cursor batches', async () => {
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.includes('cursor=page-2')) {
+        return Promise.resolve({
+          ok: true,
+          headers: {
+            get: jest.fn((headerName: string) => (
+              headerName === 'link'
+                ? '<https://huggingface.co/api/models?search=phi%20gguf&limit=30&cursor=page-3>; rel="next", <https://huggingface.co/api/models?search=phi%20gguf&limit=30&cursor=page-1>; rel="prev"'
+                : null
+            )),
+          },
+          json: () => Promise.resolve([makeRepo('org/model-2')]),
+        });
+      }
+
+      return Promise.resolve({
+        ok: true,
+        headers: {
+          get: jest.fn((headerName: string) => (
+            headerName === 'link'
+              ? '<https://huggingface.co/api/models?search=phi%20gguf&limit=30&cursor=page-2>; rel="next", <https://huggingface.co/api/models?search=phi%20gguf&limit=30&cursor=page-0>; rel="prev"'
+              : null
+          )),
+        },
+        json: () => Promise.resolve([makeRepo('org/model-1')]),
+      });
+    }) as jest.Mock;
+
+    const firstPage = await modelCatalogService.searchModels('phi', { pageSize: 1 });
+    const secondPage = await modelCatalogService.searchModels('phi', {
+      cursor: firstPage.nextCursor,
+      pageSize: 1,
+    });
+
+    expect(firstPage.nextCursor).toContain('cursor=page-2');
+    expect((global.fetch as jest.Mock).mock.calls[1][0]).toContain('cursor=page-2');
+    expect(secondPage.models[0].id).toBe('org/model-2');
+    expect(secondPage.nextCursor).toContain('cursor=page-3');
   });
 
   it('invalidates the search cache when the Hugging Face token changes', async () => {
@@ -376,13 +407,13 @@ describe('ModelCatalogService', () => {
       }),
     ) as jest.Mock;
 
-    await modelCatalogService.searchModels('phi', { page: 0, pageSize: 1 });
-    await modelCatalogService.searchModels('phi', { page: 0, pageSize: 1 });
+    await modelCatalogService.searchModels('phi', { pageSize: 1 });
+    await modelCatalogService.searchModels('phi', { pageSize: 1 });
 
     expect(global.fetch).toHaveBeenCalledTimes(1);
 
     await huggingFaceTokenService.saveToken('hf_test_token');
-    await modelCatalogService.searchModels('phi', { page: 0, pageSize: 1 });
+    await modelCatalogService.searchModels('phi', { pageSize: 1 });
 
     expect(global.fetch).toHaveBeenCalledTimes(2);
     expect((global.fetch as jest.Mock).mock.calls[1][1]).toMatchObject({

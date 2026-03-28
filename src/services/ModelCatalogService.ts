@@ -95,16 +95,13 @@ export interface ModelCatalogSearchResult {
 }
 
 type CatalogCacheEntry = {
-  data: ModelMetadata[];
+  result: Omit<ModelCatalogSearchResult, 'warning'>;
   timestamp: number;
-  nextCursor: string | null;
-  exhausted: boolean;
 };
 
-type CatalogFetchState = {
+type CatalogBatchResult = {
   models: ModelMetadata[];
   nextCursor: string | null;
-  exhausted: boolean;
 };
 
 export class ModelCatalogService {
@@ -124,71 +121,61 @@ export class ModelCatalogService {
    */
   public async searchModels(
     query: string = 'gguf',
-    options?: { page?: number; pageSize?: number }
+    options?: { cursor?: string | null; pageSize?: number }
   ): Promise<ModelCatalogSearchResult> {
     const isConnected = hardwareListenerService.getCurrentStatus().isConnected;
     const authToken = await huggingFaceTokenService.getToken();
-    const page = options?.page ?? 0;
+    const cursor = options?.cursor ?? null;
     const pageSize = options?.pageSize ?? 20;
-    const sliceStart = page * pageSize;
-    const sliceEnd = sliceStart + pageSize;
-    const requiredVisibleCount = sliceEnd + 1;
     
     // If offline, return only downloaded/local models from registry that match query
     if (!isConnected) {
       console.log('[ModelCatalogService] Offline mode: fetching from local registry');
-      return this.getLocalSearchResults(query, page, pageSize);
+      return this.getLocalSearchResults(query);
     }
 
     try {
       const normalizedQuery = this.normalizeQuery(query);
-      const cacheKey = `${normalizedQuery}::${authToken ? 'auth' : 'anon'}::${this.authCacheVersion}`;
+      const cursorKey = cursor ?? '__initial__';
+      const cacheKey = `${normalizedQuery}::${cursorKey}::${pageSize}::${authToken ? 'auth' : 'anon'}::${this.authCacheVersion}`;
       const cached = this.searchCache.get(cacheKey);
       const isCacheFresh = Boolean(cached) && Date.now() - (cached?.timestamp ?? 0) < CACHE_TTL;
-      let cacheEntry: CatalogCacheEntry = isCacheFresh && cached
-        ? cached
-        : {
-            data: [],
-            timestamp: 0,
-            nextCursor: null,
-            exhausted: false,
-          };
-
-      if (cacheEntry.data.length < requiredVisibleCount && !cacheEntry.exhausted) {
-        const totalMemory = await this.getTotalMemory();
-        const fetched = await this.fetchCatalogPage(
-          normalizedQuery,
-          requiredVisibleCount,
-          totalMemory,
-          authToken,
-          {
-            models: cacheEntry.data,
-            nextCursor: cacheEntry.nextCursor,
-            exhausted: cacheEntry.exhausted,
-          },
-        );
-
-        cacheEntry = {
-          data: fetched.models,
-          timestamp: Date.now(),
-          nextCursor: fetched.nextCursor,
-          exhausted: fetched.exhausted,
+      if (isCacheFresh && cached) {
+        return {
+          ...cached.result,
+          models: this.mergeWithRegistry(cached.result.models),
         };
-        this.searchCache.set(cacheKey, cacheEntry);
       }
 
-      const hasMore = cacheEntry.data.length > sliceEnd || !cacheEntry.exhausted;
+      const totalMemory = await this.getTotalMemory();
+      const fetched = await this.fetchCatalogBatch(
+        normalizedQuery,
+        pageSize,
+        totalMemory,
+        authToken,
+        cursor,
+      );
+      const result = {
+        models: fetched.models,
+        hasMore: fetched.nextCursor !== null,
+        nextCursor: fetched.nextCursor,
+      };
+
+      this.searchCache.set(cacheKey, {
+        result,
+        timestamp: Date.now(),
+      });
+
       return {
-        models: this.mergeWithRegistry(cacheEntry.data.slice(sliceStart, sliceEnd)),
-        hasMore,
-        nextCursor: cacheEntry.nextCursor,
+        ...result,
+        models: this.mergeWithRegistry(result.models),
       };
     } catch (e) {
       console.error('[ModelCatalogService] Search failed', e);
 
       if (e instanceof ModelCatalogError) {
-        if (page === 0) {
-          const fallback = this.getLocalSearchResults(query, page, pageSize);
+        if (cursor === null) {
+          const fallback = this.getLocalSearchResults(query);
           return {
             ...fallback,
             warning: e,
@@ -199,8 +186,8 @@ export class ModelCatalogService {
       }
 
       const networkError = new ModelCatalogError('network', 'Model catalog request failed');
-      if (page === 0) {
-        const fallback = this.getLocalSearchResults(query, page, pageSize);
+      if (cursor === null) {
+        const fallback = this.getLocalSearchResults(query);
         return {
           ...fallback,
           warning: networkError,
@@ -213,19 +200,15 @@ export class ModelCatalogService {
 
   private getLocalSearchResults(
     query: string,
-    page: number,
-    pageSize: number,
   ): ModelCatalogSearchResult {
-    const sliceStart = page * pageSize;
-    const sliceEnd = sliceStart + pageSize;
     const filtered = registry.getModels().filter((model) =>
       model.name.toLowerCase().includes(query.toLowerCase()) ||
       model.id.toLowerCase().includes(query.toLowerCase()),
     );
 
     return {
-      models: filtered.slice(sliceStart, sliceEnd),
-      hasMore: sliceEnd < filtered.length,
+      models: filtered,
+      hasMore: false,
       nextCursor: null,
     };
   }
@@ -304,16 +287,16 @@ export class ModelCatalogService {
     return results;
   }
 
-  private async fetchCatalogPage(
+  private async fetchCatalogBatch(
     normalizedQuery: string,
     minimumResults: number,
     totalMemory: number,
     authToken: string | null,
-    initialState: CatalogFetchState,
-  ): Promise<CatalogFetchState> {
-    let models = [...initialState.models];
-    let nextCursor = initialState.nextCursor;
-    let exhausted = initialState.exhausted;
+    initialCursor: string | null,
+  ): Promise<CatalogBatchResult> {
+    let models: ModelMetadata[] = [];
+    let nextCursor = initialCursor;
+    let exhausted = false;
 
     while (models.length < minimumResults && !exhausted) {
       const page = await this.fetchHuggingFaceModels(
@@ -336,7 +319,6 @@ export class ModelCatalogService {
     return {
       models,
       nextCursor,
-      exhausted,
     };
   }
 

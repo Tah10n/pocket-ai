@@ -12,8 +12,10 @@ The project is built around a simple local-first flow:
 ## Highlights
 
 - On-device chat with local GGUF models
-- Hugging Face model discovery, download, and local file management
+- Hugging Face model discovery with cursor-based catalog loading and local file management
 - Optional local Hugging Face access token support for gated or private model repositories
+- Locked and access-denied states for gated Hugging Face models instead of generic download failures
+- Explicit `Unknown` size handling when Hugging Face does not expose trustworthy GGUF metadata yet
 - Persistent chat history stored on the device
 - System prompt presets for different assistant behaviors
 - Runtime generation controls such as temperature, top-p, top-k, min-p, repetition penalty, context window, and max tokens
@@ -116,6 +118,7 @@ npm run android:scenarios:emulator
 - Chat history, presets, settings, and downloaded model references are persisted on-device.
 - Network access is limited to model-management flows such as Hugging Face search, metadata fetches, and model downloads.
 - If a Hugging Face access token is configured, it stays on-device and is attached only to gated or private Hugging Face requests that require it.
+- The model catalog can show public, locked, and access-denied Hugging Face repositories in the same search flow.
 - Large GGUF models may exceed the RAM or storage available on smaller devices.
 
 ## Repository layout

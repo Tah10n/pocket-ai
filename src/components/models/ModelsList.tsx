@@ -31,6 +31,7 @@ import { useTranslation } from 'react-i18next';
 interface ModelsListProps {
   activeTab: 'All Models' | 'Downloaded';
   searchQuery: string;
+  searchSessionKey?: number | string;
 }
 
 type FetchState = {
@@ -117,7 +118,7 @@ function mergeUniqueModelsById(models: ModelMetadata[]): ModelMetadata[] {
   });
 }
 
-export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
+export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsListProps) => {
   const { t } = useTranslation();
   const tabBarHeight = useBottomTabBarHeight();
   const router = useRouter();
@@ -125,13 +126,16 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
   const [loading, setLoading] = useState(false);
   const [isFetchingMore, setIsFetchingMore] = useState(false);
   const [hasMore, setHasMore] = useState(true);
-  const [page, setPage] = useState(0);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [tokenRevision, setTokenRevision] = useState(0);
+  const [manualRefreshRevision, setManualRefreshRevision] = useState(0);
   const [{ warningMessage, loadMoreError }, setFetchState] = useState<FetchState>({
     warningMessage: null,
     loadMoreError: null,
   });
   const latestFetchIdRef = useRef(0);
-  const requestKeyRef = useRef(`${activeTab}:${searchQuery}`);
+  const appendInFlightRef = useRef(false);
+  const lastAutoLoadCursorRef = useRef<string | null>(null);
 
   const { startDownload, cancelDownload, queue } = useModelDownload();
   const { loadModel, unloadModel, state: engineState } = useLLMEngine();
@@ -144,6 +148,35 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
     setSort,
     clearFilters,
   } = useModelsStore();
+  const effectiveSearchSessionKey = searchSessionKey ?? searchQuery;
+  const statusesSessionKey = useMemo(
+    () => [...filters.statuses].sort().join('|'),
+    [filters.statuses],
+  );
+  const sizeRangesSessionKey = useMemo(
+    () => [...filters.sizeRanges].sort().join('|'),
+    [filters.sizeRanges],
+  );
+  const sessionIdentity = useMemo(() => ([
+    activeTab,
+    String(effectiveSearchSessionKey),
+    filters.fitsInRamOnly ? 'fits' : 'any',
+    statusesSessionKey,
+    sizeRangesSessionKey,
+    `${sort.field}:${sort.direction}`,
+    `token:${tokenRevision}`,
+    `refresh:${manualRefreshRevision}`,
+  ].join('::')), [
+    activeTab,
+    effectiveSearchSessionKey,
+    filters.fitsInRamOnly,
+    manualRefreshRevision,
+    sizeRangesSessionKey,
+    sort.direction,
+    sort.field,
+    statusesSessionKey,
+    tokenRevision,
+  ]);
 
   const refreshDownloadedModels = useCallback(() => {
     if (activeTab === 'Downloaded') {
@@ -152,22 +185,26 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
   }, [activeTab]);
 
   const fetchModels = useCallback(
-    async (query: string, page: number, append: boolean) => {
+    async (query: string, cursor: string | null, append: boolean) => {
       const fetchId = latestFetchIdRef.current + 1;
       latestFetchIdRef.current = fetchId;
 
       if (append) {
+        appendInFlightRef.current = true;
         setIsFetchingMore(true);
         setFetchState((current) => ({ ...current, loadMoreError: null }));
       } else {
+        appendInFlightRef.current = false;
         setLoading(true);
         setIsFetchingMore(false);
         setFetchState({ warningMessage: null, loadMoreError: null });
+        setHasMore(true);
+        setNextCursor(null);
       }
 
       try {
         const result = await modelCatalogService.searchModels(query, {
-          page,
+          cursor,
           pageSize: MODELS_PAGE_SIZE,
         });
 
@@ -176,6 +213,7 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
         }
 
         setHasMore(result.hasMore);
+        setNextCursor(result.nextCursor);
         setModels((current) => (
           append
             ? mergeUniqueModelsById([...current, ...result.models])
@@ -193,20 +231,23 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
         const message = getModelCatalogErrorMessage(error);
 
         if (append) {
-          setPage((current) => Math.max(current - 1, 0));
           setFetchState((current) => ({ ...current, loadMoreError: message }));
         } else {
+          setModels([]);
+          setHasMore(false);
+          setNextCursor(null);
           setFetchState({ warningMessage: message, loadMoreError: null });
         }
       } finally {
-        if (fetchId !== latestFetchIdRef.current) {
-          return;
-        }
-
         if (append) {
-          setIsFetchingMore(false);
+          appendInFlightRef.current = false;
+          if (fetchId === latestFetchIdRef.current) {
+            setIsFetchingMore(false);
+          }
         } else {
-          setLoading(false);
+          if (fetchId === latestFetchIdRef.current) {
+            setLoading(false);
+          }
         }
       }
     },
@@ -221,46 +262,39 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
         isFirstNotification = false;
         return;
       }
-
-      if (activeTab !== 'All Models') {
-        return;
-      }
-
-      if (page === 0) {
-        void fetchModels(searchQuery, 0, false);
-        return;
-      }
-
-      setPage(0);
+      setTokenRevision((current) => current + 1);
     });
-  }, [activeTab, fetchModels, page, searchQuery]);
+  }, []);
 
   useEffect(() => {
-    const requestKey = `${activeTab}:${searchQuery}`;
-    const requestChanged = requestKeyRef.current !== requestKey;
-
-    if (requestChanged) {
-      requestKeyRef.current = requestKey;
-      if (page !== 0) {
-        setPage(0);
-        return;
-      }
-    }
-
-    if (activeTab === 'All Models') {
-      const append = page > 0;
-      const timer = setTimeout(() => fetchModels(searchQuery, page, append), 400);
-      return () => clearTimeout(timer);
-    }
-
     latestFetchIdRef.current += 1;
-    setPage(0);
-    setHasMore(false);
+    appendInFlightRef.current = false;
+    lastAutoLoadCursorRef.current = null;
+    setModels([]);
+    setHasMore(activeTab === 'All Models');
+    setNextCursor(null);
     setLoading(false);
     setIsFetchingMore(false);
     setFetchState({ warningMessage: null, loadMoreError: null });
-    modelCatalogService.getLocalModels().then(setModels);
-  }, [activeTab, fetchModels, page, searchQuery]);
+
+    if (activeTab === 'All Models') {
+      const timer = setTimeout(() => {
+        void fetchModels(searchQuery, null, false);
+      }, 400);
+      return () => clearTimeout(timer);
+    }
+
+    const fetchId = latestFetchIdRef.current + 1;
+    latestFetchIdRef.current = fetchId;
+    modelCatalogService.getLocalModels().then((localModels) => {
+      if (fetchId !== latestFetchIdRef.current) {
+        return;
+      }
+
+      setModels(localModels);
+      setHasMore(false);
+    });
+  }, [activeTab, fetchModels, searchQuery, sessionIdentity]);
 
   const displayModels = useMemo(() => {
     return models.map((model) => {
@@ -433,11 +467,7 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
               }
               await registry.removeModel(modelId);
               if (activeTab === 'All Models') {
-                if (page === 0) {
-                  await fetchModels(searchQuery, 0, false);
-                } else {
-                  setPage(0);
-                }
+                setManualRefreshRevision((current) => current + 1);
               } else {
                 refreshDownloadedModels();
               }
@@ -448,15 +478,30 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
         },
       ],
     );
-  }, [activeTab, engineState.activeModelId, fetchModels, page, refreshDownloadedModels, searchQuery, showModelActionError, t, unloadModel]);
+  }, [activeTab, engineState.activeModelId, refreshDownloadedModels, showModelActionError, t, unloadModel]);
 
-  const handleLoadMore = useCallback(() => {
-    if (!hasMore || isFetchingMore || activeTab !== 'All Models') {
+  const handleLoadMore = useCallback((source: 'auto' | 'manual' = 'manual') => {
+    if (
+      activeTab !== 'All Models' ||
+      !hasMore ||
+      !nextCursor ||
+      loading ||
+      isFetchingMore ||
+      appendInFlightRef.current
+    ) {
       return;
     }
 
-    setPage((current) => current + 1);
-  }, [activeTab, hasMore, isFetchingMore]);
+    if (source === 'auto') {
+      if (loadMoreError || lastAutoLoadCursorRef.current === nextCursor) {
+        return;
+      }
+
+      lastAutoLoadCursorRef.current = nextCursor;
+    }
+
+    void fetchModels(searchQuery, nextCursor, true);
+  }, [activeTab, fetchModels, hasMore, isFetchingMore, loadMoreError, loading, nextCursor, searchQuery]);
 
   const hasFilters =
     filters.fitsInRamOnly || filters.statuses.length > 0 || filters.sizeRanges.length > 0;
@@ -487,10 +532,14 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
         </Box>
       ) : null}
 
-      {hasMore ? (
-        <Button action="secondary" size="md" onPress={handleLoadMore} disabled={isFetchingMore}>
+      {hasMore && nextCursor ? (
+        <Button action="secondary" size="md" onPress={() => handleLoadMore('manual')} disabled={isFetchingMore}>
           <ButtonText className="text-typography-900 dark:text-typography-100">
-            {isFetchingMore ? t('common.loading') : t('common.more')}
+            {isFetchingMore
+              ? t('common.loading')
+              : loadMoreError
+                ? t('common.retry', 'Retry')
+                : t('common.more')}
           </ButtonText>
         </Button>
       ) : filteredModels.length > 0 ? (
@@ -499,7 +548,7 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
         </Text>
       ) : null}
     </Box>
-  ) : null), [activeTab, filteredModels.length, handleLoadMore, hasMore, isFetchingMore, loadMoreError, t]);
+  ) : null), [activeTab, filteredModels.length, handleLoadMore, hasMore, isFetchingMore, loadMoreError, nextCursor, t]);
 
   const renderModelItem = useCallback<ListRenderItem<ModelMetadata>>(({ item }) => (
     <ModelCard
@@ -552,6 +601,8 @@ export const ModelsList = ({ activeTab, searchQuery }: ModelsListProps) => {
             ListEmptyComponent={renderEmptyState}
             ListFooterComponent={renderFooter}
             contentContainerStyle={{ paddingBottom: tabBarHeight + 16 }}
+            onEndReached={() => handleLoadMore('auto')}
+            onEndReachedThreshold={0.6}
           />
         )}
       </Box>

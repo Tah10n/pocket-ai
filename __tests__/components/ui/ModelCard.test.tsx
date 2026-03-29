@@ -28,6 +28,14 @@ jest.mock('../../../src/components/ui/button', () => {
   };
 });
 
+jest.mock('../../../src/components/ui/pressable', () => {
+  const mockReact = require('react');
+  const { Pressable } = require('react-native');
+  return {
+    Pressable: ({ children, ...props }: any) => mockReact.createElement(Pressable, props, children),
+  };
+});
+
 function buildModel(accessState: ModelAccessState): ModelMetadata {
   return {
     id: 'org/model',
@@ -47,9 +55,11 @@ function buildModel(accessState: ModelAccessState): ModelMetadata {
 describe('ModelCard', () => {
   it('renders a token CTA for auth-required models', () => {
     const onConfigureToken = jest.fn();
+    const onOpenDetails = jest.fn();
     const screen = render(
       <ModelCard
         model={buildModel(ModelAccessState.AUTH_REQUIRED)}
+        onOpenDetails={onOpenDetails}
         onDownload={jest.fn()}
         onConfigureToken={onConfigureToken}
         onOpenModelPage={jest.fn()}
@@ -65,6 +75,8 @@ describe('ModelCard', () => {
     expect(screen.getByText('models.requiresToken')).toBeTruthy();
     fireEvent.press(screen.getByText('models.setToken'));
     expect(onConfigureToken).toHaveBeenCalledTimes(1);
+    fireEvent.press(screen.getByTestId('model-details-org/model'));
+    expect(onOpenDetails).toHaveBeenCalledWith('org/model');
   });
 
   it('renders an open-on-hf CTA for access-denied models', () => {
@@ -72,6 +84,7 @@ describe('ModelCard', () => {
     const screen = render(
       <ModelCard
         model={buildModel(ModelAccessState.ACCESS_DENIED)}
+        onOpenDetails={jest.fn()}
         onDownload={jest.fn()}
         onConfigureToken={jest.fn()}
         onOpenModelPage={onOpenModelPage}
@@ -87,5 +100,49 @@ describe('ModelCard', () => {
     expect(screen.getByText('models.accessDenied')).toBeTruthy();
     fireEvent.press(screen.getByText('models.openOnHuggingFace'));
     expect(onOpenModelPage).toHaveBeenCalledWith('org/model');
+  });
+
+  it('rerenders visible model text when name or author changes', () => {
+    const screen = render(
+      <ModelCard
+        model={buildModel(ModelAccessState.PUBLIC)}
+        onOpenDetails={jest.fn()}
+        onDownload={jest.fn()}
+        onConfigureToken={jest.fn()}
+        onOpenModelPage={jest.fn()}
+        onLoad={jest.fn()}
+        onUnload={jest.fn()}
+        onDelete={jest.fn()}
+        onCancel={jest.fn()}
+        onChat={jest.fn()}
+        isActive={false}
+      />,
+    );
+
+    expect(screen.getByText('Model')).toBeTruthy();
+    expect(screen.getByText('org')).toBeTruthy();
+
+    screen.rerender(
+      <ModelCard
+        model={{
+          ...buildModel(ModelAccessState.PUBLIC),
+          name: 'Updated Model',
+          author: 'updated-org',
+        }}
+        onOpenDetails={jest.fn()}
+        onDownload={jest.fn()}
+        onConfigureToken={jest.fn()}
+        onOpenModelPage={jest.fn()}
+        onLoad={jest.fn()}
+        onUnload={jest.fn()}
+        onDelete={jest.fn()}
+        onCancel={jest.fn()}
+        onChat={jest.fn()}
+        isActive={false}
+      />,
+    );
+
+    expect(screen.getByText('Updated Model')).toBeTruthy();
+    expect(screen.getByText('updated-org')).toBeTruthy();
   });
 });

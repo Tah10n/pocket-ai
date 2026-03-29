@@ -1,11 +1,14 @@
 import * as SecureStore from 'expo-secure-store';
+import { AppError } from './AppError';
 
 export interface HuggingFaceTokenState {
   hasToken: boolean;
   updatedAt: number;
 }
 
-type Listener = (state: HuggingFaceTokenState) => void;
+export type HuggingFaceTokenStateChangeSource = 'replay' | 'hydrate' | 'mutation';
+
+type Listener = (state: HuggingFaceTokenState, source: HuggingFaceTokenStateChangeSource) => void;
 
 const HF_TOKEN_KEY = 'huggingface-access-token';
 
@@ -16,7 +19,6 @@ export class HuggingFaceTokenService {
     updatedAt: Date.now(),
   };
   private availabilityPromise: Promise<boolean> | null = null;
-  private memoryFallbackToken: string | null = null;
 
   constructor() {
     void this.refreshState();
@@ -28,7 +30,7 @@ export class HuggingFaceTokenService {
 
   public subscribe(listener: Listener) {
     this.listeners.add(listener);
-    listener(this.getCachedState());
+    listener(this.getCachedState(), 'replay');
     return () => {
       this.listeners.delete(listener);
     };
@@ -50,11 +52,14 @@ export class HuggingFaceTokenService {
       return this.clearToken();
     }
 
-    if (await this.isSecureStoreAvailable()) {
-      await SecureStore.setItemAsync(HF_TOKEN_KEY, trimmed);
-    } else {
-      this.memoryFallbackToken = trimmed;
+    if (!await this.isSecureStoreAvailable()) {
+      throw new AppError(
+        'action_failed',
+        'Secure storage is unavailable on this device. Hugging Face tokens cannot be saved.',
+      );
     }
+
+    await SecureStore.setItemAsync(HF_TOKEN_KEY, trimmed);
 
     this.emit(true);
     return this.getCachedState();
@@ -66,8 +71,6 @@ export class HuggingFaceTokenService {
     if (await this.isSecureStoreAvailable()) {
       await SecureStore.deleteItemAsync(HF_TOKEN_KEY);
     }
-
-    this.memoryFallbackToken = null;
 
     if (hadToken || this.state.hasToken) {
       this.emit(false);
@@ -90,7 +93,7 @@ export class HuggingFaceTokenService {
     };
 
     if (previousHasToken !== hasToken) {
-      this.listeners.forEach((listener) => listener(this.getCachedState()));
+      this.listeners.forEach((listener) => listener(this.getCachedState(), 'hydrate'));
     }
 
     return this.getCachedState();
@@ -101,7 +104,7 @@ export class HuggingFaceTokenService {
       return SecureStore.getItemAsync(HF_TOKEN_KEY);
     }
 
-    return this.memoryFallbackToken;
+    return null;
   }
 
   private async isSecureStoreAvailable(): Promise<boolean> {
@@ -118,7 +121,7 @@ export class HuggingFaceTokenService {
       updatedAt: Date.now(),
     };
 
-    this.listeners.forEach((listener) => listener(this.getCachedState()));
+    this.listeners.forEach((listener) => listener(this.getCachedState(), 'mutation'));
   }
 }
 

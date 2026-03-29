@@ -20,7 +20,7 @@ This directory contains both:
 Do not create parallel component trees such as:
 
 - `components/`
-- `app/components/`
+- `routes/components/`
 - duplicated UI primitives inside feature folders
 
 The goal is one clear source of truth for reusable UI.

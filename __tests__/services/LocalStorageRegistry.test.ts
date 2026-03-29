@@ -1,7 +1,13 @@
-import { registry } from '../../src/services/LocalStorageRegistry';
+import { LocalStorageRegistry, registry } from '../../src/services/LocalStorageRegistry';
 import { LifecycleStatus, ModelAccessState, ModelMetadata } from '../../src/types/models';
 import { normalizePersistedModelMetadata } from '../../src/services/ModelMetadataNormalizer';
 import * as FileSystem from 'expo-file-system/legacy';
+
+const mockStorage = {
+  getString: jest.fn(),
+  set: jest.fn(),
+  remove: jest.fn(),
+};
 
 jest.mock('expo-file-system/legacy', () => ({
   deleteAsync: jest.fn().mockResolvedValue(undefined),
@@ -11,11 +17,12 @@ jest.mock('expo-file-system/legacy', () => ({
 }));
 
 jest.mock('../../src/services/storage', () => ({
-  createStorage: jest.fn().mockReturnValue({
-    getString: jest.fn(),
-    set: jest.fn(),
-  }),
+  createStorage: jest.fn().mockReturnValue(mockStorage),
 }));
+
+const originalGetModels = registry.getModels.bind(registry);
+const originalGetModel = registry.getModel.bind(registry);
+const originalSaveModels = registry.saveModels.bind(registry);
 
 const mockModel: ModelMetadata = {
   id: 'test/model',
@@ -44,6 +51,11 @@ function createMockModel(overrides: Partial<ModelMetadata> = {}): ModelMetadata 
 describe('LocalStorageRegistry', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    (registry as any).getModels = originalGetModels;
+    (registry as any).getModel = originalGetModel;
+    (registry as any).saveModels = originalSaveModels;
+    (registry as any).cachedModels = null;
+    (registry as any).cachedModelsById = null;
   });
 
   it('should remove model and delete file', async () => {
@@ -101,5 +113,20 @@ describe('LocalStorageRegistry', () => {
     expect(normalized.accessState).toBe(ModelAccessState.PUBLIC);
     expect(normalized.isGated).toBe(false);
     expect(normalized.isPrivate).toBe(false);
+  });
+
+  it('hydrates the registry from storage once and serves repeated lookups from cache', () => {
+    mockStorage.getString.mockReturnValue(JSON.stringify([mockModel]));
+    const freshRegistry = new (LocalStorageRegistry as any)();
+    (freshRegistry as any).storage = mockStorage;
+
+    const firstModel = freshRegistry.getModel(mockModel.id);
+    const secondModel = freshRegistry.getModel(mockModel.id);
+    const allModels = freshRegistry.getModels();
+
+    expect(firstModel?.id).toBe(mockModel.id);
+    expect(secondModel?.id).toBe(mockModel.id);
+    expect(allModels).toHaveLength(1);
+    expect(mockStorage.getString).toHaveBeenCalledTimes(1);
   });
 });

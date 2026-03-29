@@ -3,11 +3,13 @@ import { useTranslation } from 'react-i18next';
 import { Box } from './box';
 import { Text } from './text';
 import { Button, ButtonText } from './button';
+import { Pressable } from './pressable';
 import { ModelAccessState, ModelMetadata, LifecycleStatus } from '../../types/models';
 import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 
 interface ModelCardProps {
   model: ModelMetadata;
+  onOpenDetails: (modelId: string) => void;
   onDownload: (model: ModelMetadata) => void;
   onConfigureToken: () => void;
   onOpenModelPage: (modelId: string) => void;
@@ -21,6 +23,7 @@ interface ModelCardProps {
 
 const ModelCardComponent = ({
   model,
+  onOpenDetails,
   onDownload,
   onConfigureToken,
   onOpenModelPage,
@@ -70,6 +73,15 @@ const ModelCardComponent = ({
           <Text className="text-xs text-typography-500 dark:text-typography-400">{model.author}</Text>
         </Box>
         <Box className="items-end gap-1.5">
+          <Pressable
+            testID={`model-details-${model.id}`}
+            onPress={() => onOpenDetails(model.id)}
+            className="h-8 w-8 items-center justify-center rounded-full bg-background-100 active:opacity-80 dark:bg-background-800"
+            accessibilityRole="button"
+            accessibilityLabel={t('models.details')}
+          >
+            <MaterialIcons name="open-in-new" size={16} className="text-typography-700 dark:text-typography-200" />
+          </Pressable>
           {accessBadge ? (
             <Box className={`${accessBadge.className} px-2 py-0.5 rounded`}>
               <Text className={`text-[10px] font-bold ${accessBadge.textClassName}`}>{accessBadge.text}</Text>
@@ -174,6 +186,8 @@ export const ModelCard = memo(ModelCardComponent, (prevProps, nextProps) => {
   // Custom comparison to ensure fast check since model is an object
   return prevProps.isActive === nextProps.isActive &&
          prevProps.model.id === nextProps.model.id &&
+         prevProps.model.name === nextProps.model.name &&
+         prevProps.model.author === nextProps.model.author &&
          prevProps.model.lifecycleStatus === nextProps.model.lifecycleStatus &&
          prevProps.model.downloadProgress === nextProps.model.downloadProgress &&
          prevProps.model.fitsInRam === nextProps.model.fitsInRam &&

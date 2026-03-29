@@ -11,6 +11,7 @@ interface ModelsFilterProps {
   filters: ModelFilterCriteria;
   sort: ModelSortPreference;
   onFitsInRamToggle: (enabled: boolean) => void;
+  onNoTokenRequiredToggle: (enabled: boolean) => void;
   onStatusToggle: (status: LifecycleStatus) => void;
   onSizeRangeToggle: (sizeRange: ModelSizeRange) => void;
   onSortChange: (sort: ModelSortPreference) => void;
@@ -51,6 +52,8 @@ const SIZE_OPTIONS: { label: string; value: ModelSizeRange }[] = [
 ];
 
 const SORT_OPTIONS: { labelKey: string; field: ModelSortField }[] = [
+  { labelKey: 'models.sortMostDownloaded', field: 'downloads' },
+  { labelKey: 'models.sortMostPopular', field: 'likes' },
   { labelKey: 'models.sortName', field: 'name' },
   { labelKey: 'models.sortSize', field: 'size' },
   { labelKey: 'models.sortDownloadedFirst', field: 'downloaded' },
@@ -151,6 +154,7 @@ function OptionRow({
 function getActiveFilterCount(filters: ModelFilterCriteria) {
   return (
     (filters.fitsInRamOnly ? 1 : 0)
+    + (filters.noTokenRequiredOnly ? 1 : 0)
     + filters.statuses.length
     + filters.sizeRanges.length
   );
@@ -162,7 +166,7 @@ function getSortSummary(t: (key: string) => string, sort: ModelSortPreference) {
     return '';
   }
 
-  if (sort.field === 'downloaded') {
+  if (sort.field === 'downloaded' || sort.field === 'downloads' || sort.field === 'likes') {
     return t(activeOption.labelKey);
   }
 
@@ -173,6 +177,7 @@ export const ModelsFilter = ({
   filters,
   sort,
   onFitsInRamToggle,
+  onNoTokenRequiredToggle,
   onStatusToggle,
   onSizeRangeToggle,
   onSortChange,
@@ -235,6 +240,13 @@ export const ModelsFilter = ({
               onPress={() => onFitsInRamToggle(!filters.fitsInRamOnly)}
             />
 
+            <OptionRow
+              testID="filter-option-no-token-required"
+              label={t('models.noTokenRequired')}
+              active={filters.noTokenRequiredOnly}
+              onPress={() => onNoTokenRequiredToggle(!filters.noTokenRequiredOnly)}
+            />
+
             {showStatusFilters ? (
               <Box className="my-1 h-px bg-outline-200 dark:bg-outline-800" />
             ) : null}
@@ -275,13 +287,13 @@ export const ModelsFilter = ({
             {SORT_OPTIONS.map((option) => {
               const isActive = sort.field === option.field;
               const nextDirection =
-                option.field === 'downloaded'
+                option.field === 'downloaded' || option.field === 'downloads' || option.field === 'likes'
                   ? 'desc'
                   : isActive && sort.direction === 'asc'
                     ? 'desc'
                     : 'asc';
               const trailingLabel =
-                option.field === 'downloaded'
+                option.field === 'downloaded' || option.field === 'downloads' || option.field === 'likes'
                   ? undefined
                   : isActive
                     ? (sort.direction === 'asc' ? '↑' : '↓')

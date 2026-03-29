@@ -59,14 +59,20 @@ npm run build:all:production
 
 - Open `Models`.
 - Search the Hugging Face catalog while online.
+- On first catalog open with no Hugging Face token configured, confirm guided discovery defaults to RAM-friendly public models and offers `Show full catalog`.
 - Search for a public GGUF model whose list metadata does not expose a reliable size and confirm the card shows a resolved size or `Unknown`, never `0.00 GB`.
 - Open `Filter` and `Sort` and confirm both panels stay collapsed by default, open independently, and do not permanently steal list height.
-- Apply at least one filter and one sort option and confirm the list updates immediately.
+- Apply `No token required` and confirm gated/private repositories are excluded.
+- Apply `Most downloaded` and `Most popular` and confirm the catalog order updates without breaking cursor pagination.
 - Scroll through at least three catalog pages and confirm autoload appends unique results without jumping back or duplicating model IDs.
 - Force a later-page failure if possible and confirm the footer keeps earlier results visible and offers a retry path.
+- After a later-page failure, use `Retry` and confirm the catalog resumes from the same cursor without duplicating models or getting stuck on an expired buffered page.
+- Relaunch the app after a successful catalog load and confirm the recent first-page results appear quickly from local cache, then refresh cleanly when the network is available.
 - Search for a gated Hugging Face model with no token configured and confirm the primary action routes into token setup instead of a normal download.
 - Save a valid Hugging Face token and confirm a newly accessible gated model leaves the locked state without restarting the app.
 - Save an invalid or insufficient Hugging Face token and confirm the affected model shows `Access denied` with a recovery path.
+- Open model details from a catalog card and confirm description, tags, popularity metrics, and the `Open on HF` action render without breaking list navigation.
+- Change the Hugging Face token state, then reopen a gated or private model from the catalog and confirm the card plus detail screen agree on `Locked`, `Access denied`, or authorized access instead of showing stale access labels.
 - Download a GGUF model and wait for verification to finish.
 - Load the model and confirm the app reports the engine as ready.
 - Unload the model and confirm the UI returns to the unloaded state.
@@ -88,7 +94,7 @@ npm run build:all:production
 - Switch theme between `light`, `system`, and `dark`.
 - Switch language between English and Russian.
 - Open `Privacy & Disclosures` from `Settings` and confirm the content renders correctly.
-- Open the Hugging Face token screen from `Settings`, verify save and clear both work, and confirm the token field remains masked.
+- Open the Hugging Face token screen from `Settings`, verify save and clear both work, confirm the token field remains masked, and verify the education copy plus `Get token` external-link CTA.
 - Open `Presets` and confirm preset creation, editing, activation, and deletion still work.
 
 ### Storage and cleanup

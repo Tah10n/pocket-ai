@@ -20,6 +20,8 @@ export interface ModelMetadata {
   author: string;
   size: number | null;
   downloadUrl: string; // HF resolve URL
+  allowUnknownSizeDownload?: boolean;
+  requiresTreeProbe?: boolean;
   resolvedFileName?: string;
   localPath?: string;
   downloadedAt?: number;
@@ -34,6 +36,16 @@ export interface ModelMetadata {
   maxContextTokens?: number;
   modelType?: string;
   architectures?: string[];
+  baseModels?: string[];
+  license?: string;
+  languages?: string[];
+  datasets?: string[];
+  quantizedBy?: string;
+  modelCreator?: string;
+  downloads?: number | null;
+  likes?: number | null;
+  tags?: string[];
+  description?: string;
 }
 
 export enum EngineStatus {

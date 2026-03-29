@@ -19,6 +19,14 @@ function normalizeSize(value: unknown): number | null {
   return Math.round(value);
 }
 
+function normalizeNullableCount(value: unknown): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    return null;
+  }
+
+  return Math.round(value);
+}
+
 function normalizeLifecycleStatus(value: unknown): LifecycleStatus {
   return Object.values(LifecycleStatus).includes(value as LifecycleStatus)
     ? value as LifecycleStatus
@@ -40,6 +48,19 @@ function normalizeNonEmptyString(value: unknown): string | undefined {
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
+function normalizeStringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const normalized = value
+    .filter((entry): entry is string => typeof entry === 'string')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+
+  return normalized.length > 0 ? normalized : undefined;
+}
+
 export function normalizePersistedModelMetadata(
   model: PersistedModelMetadata,
 ): ModelMetadata {
@@ -59,6 +80,8 @@ export function normalizePersistedModelMetadata(
     author: normalizedAuthor,
     size,
     downloadUrl,
+    allowUnknownSizeDownload: model.allowUnknownSizeDownload === true,
+    requiresTreeProbe: model.requiresTreeProbe === true,
     resolvedFileName: normalizeNonEmptyString(model.resolvedFileName),
     localPath: normalizeNonEmptyString(model.localPath),
     downloadedAt: typeof model.downloadedAt === 'number' && Number.isFinite(model.downloadedAt)
@@ -80,8 +103,16 @@ export function normalizePersistedModelMetadata(
       ? Math.round(model.maxContextTokens)
       : undefined,
     modelType: normalizeNonEmptyString(model.modelType),
-    architectures: Array.isArray(model.architectures)
-      ? model.architectures.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0)
-      : undefined,
+    architectures: normalizeStringArray(model.architectures),
+    baseModels: normalizeStringArray(model.baseModels),
+    license: normalizeNonEmptyString(model.license),
+    languages: normalizeStringArray(model.languages),
+    datasets: normalizeStringArray(model.datasets),
+    quantizedBy: normalizeNonEmptyString(model.quantizedBy),
+    modelCreator: normalizeNonEmptyString(model.modelCreator),
+    downloads: normalizeNullableCount(model.downloads),
+    likes: normalizeNullableCount(model.likes),
+    tags: normalizeStringArray(model.tags),
+    description: normalizeNonEmptyString(model.description),
   };
 }

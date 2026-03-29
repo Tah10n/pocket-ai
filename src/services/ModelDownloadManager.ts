@@ -66,7 +66,7 @@ export class ModelDownloadManager {
     const { updateModelInQueue, removeFromQueue, setActiveDownload } = useDownloadStore.getState();
 
     try {
-      if (model.size === null) {
+      if (model.size === null && !model.allowUnknownSizeDownload) {
         throw new AppError('download_size_unknown', 'MODEL_SIZE_UNKNOWN', {
           details: { modelId: model.id },
         });
@@ -75,7 +75,7 @@ export class ModelDownloadManager {
       const freeSpace = await FileSystem.getFreeDiskStorageAsync();
       const REQUIRED_BUFFER = 1024 * 1024 * 1024; // 1 GB
       const requiredModelBytes = model.size ?? 0;
-      if (freeSpace !== undefined && freeSpace < requiredModelBytes + REQUIRED_BUFFER) {
+      if (model.size !== null && freeSpace !== undefined && freeSpace < requiredModelBytes + REQUIRED_BUFFER) {
         throw new AppError('download_disk_space_low', 'DISK_SPACE_LOW', {
           details: { modelId: model.id, freeSpace, requiredBytes: requiredModelBytes + REQUIRED_BUFFER },
         });
@@ -146,7 +146,7 @@ export class ModelDownloadManager {
         downloadedAt: Date.now(),
         lifecycleStatus: LifecycleStatus.DOWNLOADED,
         downloadProgress: 1,
-        sha256: verificationHash,
+        sha256: verificationHash ?? model.sha256,
       };
 
       registry.updateModel(completedModel);
@@ -174,7 +174,7 @@ export class ModelDownloadManager {
   public async verifyChecksum(
     model: Pick<ModelMetadata, 'id' | 'size' | 'sha256'>,
     localUri: string,
-  ): Promise<string> {
+  ): Promise<string | undefined> {
     try {
       const fileInfo = await FileSystem.getInfoAsync(localUri);
       if (!fileInfo.exists) {
@@ -196,9 +196,9 @@ export class ModelDownloadManager {
         );
       }
 
-      // The current runtime can validate presence and size without blocking the JS thread.
-      // If a digest exists already, keep it; otherwise store a size-verified marker.
-      return model.sha256?.trim() || 'verified-by-size';
+      // The current runtime only validates file presence and, when known, expected size.
+      // Keep any real digest metadata, but do not fabricate a checksum marker.
+      return model.sha256?.trim() || undefined;
     } catch (error) {
       throw toAppError(error, 'download_verification_failed');
     }

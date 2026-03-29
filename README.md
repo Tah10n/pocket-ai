@@ -13,9 +13,15 @@ The project is built around a simple local-first flow:
 
 - On-device chat with local GGUF models
 - Hugging Face model discovery with cursor-based catalog loading and local file management
+- Guided catalog defaults that prioritize RAM-friendly, token-free models on first open
+- Popularity-aware Hugging Face sorting with `Most downloaded` and `Most popular`
 - Optional local Hugging Face access token support for gated or private model repositories
+- Token education flow with a direct link to Hugging Face token settings
 - Locked and access-denied states for gated Hugging Face models instead of generic download failures
+- Routed model details flow with tags, popularity, access state, and Hugging Face deep links
 - Explicit `Unknown` size handling when Hugging Face does not expose trustworthy GGUF metadata yet
+- Confirmed warning path before downloading a model whose file size still cannot be verified
+- Bounded on-device catalog cache for recent first-page results and recent model details, with online revalidation on reopen
 - Persistent chat history stored on the device
 - System prompt presets for different assistant behaviors
 - Runtime generation controls such as temperature, top-p, top-k, min-p, repetition penalty, context window, and max tokens
@@ -100,6 +106,18 @@ Run the local release verification gate:
 npm run verify:release
 ```
 
+Run the default change verification gate:
+
+```bash
+npm run verify:mobile-change
+```
+
+Run the Android-inclusive change verification gate:
+
+```bash
+npm run verify:mobile-change:android
+```
+
 Run the Android emulator smoke flow:
 
 ```bash
@@ -118,13 +136,16 @@ npm run android:scenarios:emulator
 - Chat history, presets, settings, and downloaded model references are persisted on-device.
 - Network access is limited to model-management flows such as Hugging Face search, metadata fetches, and model downloads.
 - If a Hugging Face access token is configured, it stays on-device and is attached only to gated or private Hugging Face requests that require it.
-- The model catalog can show public, locked, and access-denied Hugging Face repositories in the same search flow.
+- The model catalog can start in a guided discovery mode that favors RAM-friendly public models, then switch back to the full Hugging Face catalog on demand.
+- The model catalog can show public, locked, and access-denied Hugging Face repositories in the same search flow, with popularity sorting and routed model details.
+- Recent first-page catalog results and recently opened model details are cached locally so the catalog can reopen quickly and still refresh from Hugging Face when the network is available.
+- If a model still has no trustworthy size, Pocket AI asks for explicit confirmation before starting a download with limited storage estimates and size verification.
 - Large GGUF models may exceed the RAM or storage available on smaller devices.
 
 ## Repository layout
 
 ```text
-app/         Expo Router entrypoints and route definitions
+app          Expo Router entrypoints and route definitions
 src/         Application logic, components, screens, services, and stores
 __tests__/   Jest test suite
 docs/        Product and engineering notes

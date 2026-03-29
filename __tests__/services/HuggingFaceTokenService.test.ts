@@ -35,8 +35,9 @@ describe('HuggingFaceTokenService', () => {
     await service.clearToken();
     unsubscribe();
 
-    expect(listener).toHaveBeenCalledWith(expect.objectContaining({ hasToken: false }));
-    expect(listener).toHaveBeenCalledWith(expect.objectContaining({ hasToken: true }));
+    expect(listener).toHaveBeenCalledWith(expect.objectContaining({ hasToken: false }), 'replay');
+    expect(listener).toHaveBeenCalledWith(expect.objectContaining({ hasToken: true }), 'mutation');
+    expect(listener).toHaveBeenCalledWith(expect.objectContaining({ hasToken: false }), 'mutation');
   });
 
   it('emits an updated state after startup when secure storage already contains a token', async () => {
@@ -47,8 +48,18 @@ describe('HuggingFaceTokenService', () => {
     service.subscribe(listener);
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(listener).toHaveBeenCalledWith(expect.objectContaining({ hasToken: false }));
-    expect(listener).toHaveBeenCalledWith(expect.objectContaining({ hasToken: true }));
+    expect(listener).toHaveBeenCalledWith(expect.objectContaining({ hasToken: false }), 'replay');
+    expect(listener).toHaveBeenCalledWith(expect.objectContaining({ hasToken: true }), 'hydrate');
     await expect(service.getToken()).resolves.toBe('hf_bootstrap_token');
+  });
+
+  it('rejects token saves when secure storage is unavailable', async () => {
+    (SecureStore.isAvailableAsync as jest.Mock).mockResolvedValue(false);
+    const service = new HuggingFaceTokenService();
+
+    await expect(service.saveToken('hf_secret_token')).rejects.toThrow(
+      'Secure storage is unavailable on this device.',
+    );
+    await expect(service.getToken()).resolves.toBeNull();
   });
 });

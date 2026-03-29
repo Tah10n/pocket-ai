@@ -12,6 +12,8 @@ interface ModelsSortProps {
 }
 
 const SORT_OPTIONS: { labelKey: string; field: ModelSortField }[] = [
+  { labelKey: 'models.sortMostDownloaded', field: 'downloads' },
+  { labelKey: 'models.sortMostPopular', field: 'likes' },
   { labelKey: 'models.sortName', field: 'name' },
   { labelKey: 'models.sortSize', field: 'size' },
   { labelKey: 'models.sortDownloadedFirst', field: 'downloaded' },
@@ -29,7 +31,11 @@ export const ModelsSort = ({ sort, onSortChange }: ModelsSortProps) => {
         <Box className="flex-row gap-2">
           {SORT_OPTIONS.map((option) => {
             const isActive = sort.field === option.field;
-            const showDirection = option.field !== 'downloaded' && isActive;
+            const showDirection =
+              option.field !== 'downloaded'
+              && option.field !== 'downloads'
+              && option.field !== 'likes'
+              && isActive;
 
             return (
               <Pressable
@@ -39,6 +45,8 @@ export const ModelsSort = ({ sort, onSortChange }: ModelsSortProps) => {
                     field: option.field,
                     direction:
                       option.field === 'downloaded'
+                      || option.field === 'downloads'
+                      || option.field === 'likes'
                         ? 'desc'
                         : isActive && sort.direction === 'asc'
                           ? 'desc'

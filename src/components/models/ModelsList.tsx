@@ -11,10 +11,12 @@ import { Text } from '@/components/ui/text';
 import { useLLMEngine } from '@/hooks/useLLMEngine';
 import { useModelDownload } from '@/hooks/useModelDownload';
 import {
+  type CatalogServerSort,
   modelCatalogService,
   getModelCatalogErrorMessage,
+  getHuggingFaceModelUrl,
 } from '@/services/ModelCatalogService';
-import { AppError, getReportedErrorMessage } from '@/services/AppError';
+import { getReportedErrorMessage } from '@/services/AppError';
 import { hardwareListenerService } from '@/services/HardwareListenerService';
 import { huggingFaceTokenService } from '@/services/HuggingFaceTokenService';
 import { registry } from '@/services/LocalStorageRegistry';
@@ -26,6 +28,10 @@ import {
 } from '@/store/modelsStore';
 import { EngineStatus, LifecycleStatus, ModelAccessState, type ModelMetadata } from '@/types/models';
 import { ModelsFilter } from './ModelsFilter';
+import {
+  shouldBootstrapCatalogSession,
+  shouldResetCatalogForTokenEvent,
+} from './modelsListSession';
 import { useTranslation } from 'react-i18next';
 
 interface ModelsListProps {
@@ -38,6 +44,18 @@ type FetchState = {
   warningMessage: string | null;
   loadMoreError: string | null;
 };
+
+function resolveServerSort(sort: ModelSortPreference): CatalogServerSort | null {
+  if (sort.field === 'downloads') {
+    return 'downloads';
+  }
+
+  if (sort.field === 'likes') {
+    return 'likes';
+  }
+
+  return null;
+}
 
 function getStatusWeight(status: LifecycleStatus): number {
   if (status === LifecycleStatus.ACTIVE) return 3;
@@ -88,6 +106,18 @@ function matchesSize(model: ModelMetadata, filters: ModelFilterCriteria): boolea
   });
 }
 
+function matchesTokenRequirement(model: ModelMetadata, filters: ModelFilterCriteria): boolean {
+  if (!filters.noTokenRequiredOnly) {
+    return true;
+  }
+
+  return (
+    model.accessState === ModelAccessState.PUBLIC
+    && model.isGated === false
+    && model.isPrivate === false
+  );
+}
+
 function sortModels(models: ModelMetadata[], sort: ModelSortPreference): ModelMetadata[] {
   return [...models].sort((left, right) => {
     if (sort.field === 'size') {
@@ -98,6 +128,14 @@ function sortModels(models: ModelMetadata[], sort: ModelSortPreference): ModelMe
 
     if (sort.field === 'downloaded') {
       return getStatusWeight(right.lifecycleStatus) - getStatusWeight(left.lifecycleStatus);
+    }
+
+    if (sort.field === 'downloads') {
+      return (right.downloads ?? -1) - (left.downloads ?? -1);
+    }
+
+    if (sort.field === 'likes') {
+      return (right.likes ?? -1) - (left.likes ?? -1);
     }
 
     return sort.direction === 'asc'
@@ -128,6 +166,10 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
   const [hasMore, setHasMore] = useState(true);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [tokenRevision, setTokenRevision] = useState(0);
+  const [isTokenStateHydrated, setIsTokenStateHydrated] = useState(false);
+  const [hasTokenConfigured, setHasTokenConfigured] = useState(
+    () => huggingFaceTokenService.getCachedState().hasToken,
+  );
   const [manualRefreshRevision, setManualRefreshRevision] = useState(0);
   const [{ warningMessage, loadMoreError }, setFetchState] = useState<FetchState>({
     warningMessage: null,
@@ -142,12 +184,18 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
   const {
     filters,
     sort,
+    discoveryMode,
+    applyDiscoveryPreset,
+    syncDiscoveryTokenState,
+    showFullCatalog,
     setFitsInRamOnly,
+    setNoTokenRequiredOnly,
     toggleStatus,
     toggleSizeRange,
     setSort,
     clearFilters,
   } = useModelsStore();
+  const serverSort = useMemo(() => resolveServerSort(sort), [sort]);
   const effectiveSearchSessionKey = searchSessionKey ?? searchQuery;
   const statusesSessionKey = useMemo(
     () => [...filters.statuses].sort().join('|'),
@@ -161,6 +209,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
     activeTab,
     String(effectiveSearchSessionKey),
     filters.fitsInRamOnly ? 'fits' : 'any',
+    filters.noTokenRequiredOnly ? 'public-only' : 'any-token',
     statusesSessionKey,
     sizeRangesSessionKey,
     `${sort.field}:${sort.direction}`,
@@ -170,6 +219,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
     activeTab,
     effectiveSearchSessionKey,
     filters.fitsInRamOnly,
+    filters.noTokenRequiredOnly,
     manualRefreshRevision,
     sizeRangesSessionKey,
     sort.direction,
@@ -185,7 +235,12 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
   }, [activeTab]);
 
   const fetchModels = useCallback(
-    async (query: string, cursor: string | null, append: boolean) => {
+    async (
+      query: string,
+      cursor: string | null,
+      append: boolean,
+      preserveExistingResults: boolean = false,
+    ) => {
       const fetchId = latestFetchIdRef.current + 1;
       latestFetchIdRef.current = fetchId;
 
@@ -197,15 +252,19 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
         appendInFlightRef.current = false;
         setLoading(true);
         setIsFetchingMore(false);
-        setFetchState({ warningMessage: null, loadMoreError: null });
-        setHasMore(true);
-        setNextCursor(null);
+        setFetchState((current) => ({ ...current, warningMessage: null, loadMoreError: null }));
+        if (!preserveExistingResults) {
+          setHasMore(true);
+          setNextCursor(null);
+          setModels([]);
+        }
       }
 
       try {
         const result = await modelCatalogService.searchModels(query, {
           cursor,
           pageSize: MODELS_PAGE_SIZE,
+          sort: serverSort,
         });
 
         if (fetchId !== latestFetchIdRef.current) {
@@ -233,9 +292,11 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
         if (append) {
           setFetchState((current) => ({ ...current, loadMoreError: message }));
         } else {
-          setModels([]);
-          setHasMore(false);
-          setNextCursor(null);
+          if (!preserveExistingResults) {
+            setModels([]);
+            setHasMore(false);
+            setNextCursor(null);
+          }
           setFetchState({ warningMessage: message, loadMoreError: null });
         }
       } finally {
@@ -251,22 +312,70 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
         }
       }
     },
-    [],
+    [serverSort],
   );
 
   useEffect(() => {
-    let isFirstNotification = true;
-
-    return huggingFaceTokenService.subscribe(() => {
-      if (isFirstNotification) {
-        isFirstNotification = false;
-        return;
+    return huggingFaceTokenService.subscribe((state, source) => {
+      setHasTokenConfigured(state.hasToken);
+      if (source === 'hydrate' || source === 'mutation') {
+        setIsTokenStateHydrated(true);
       }
-      setTokenRevision((current) => current + 1);
+
+      if (shouldResetCatalogForTokenEvent(source)) {
+        setTokenRevision((current) => current + 1);
+      }
     });
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+
+    void huggingFaceTokenService.refreshState()
+      .then((state) => {
+        if (cancelled) {
+          return;
+        }
+
+        setHasTokenConfigured(state.hasToken);
+        setIsTokenStateHydrated(true);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setIsTokenStateHydrated(true);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (activeTab !== 'All Models' || !isTokenStateHydrated) {
+      return;
+    }
+
+    if (discoveryMode === 'uninitialized') {
+      applyDiscoveryPreset({ hasToken: hasTokenConfigured });
+      return;
+    }
+
+    syncDiscoveryTokenState(hasTokenConfigured);
+  }, [
+    activeTab,
+    applyDiscoveryPreset,
+    discoveryMode,
+    hasTokenConfigured,
+    isTokenStateHydrated,
+    syncDiscoveryTokenState,
+  ]);
+
+  useEffect(() => {
+    if (!shouldBootstrapCatalogSession(activeTab, discoveryMode, isTokenStateHydrated)) {
+      return;
+    }
+
     latestFetchIdRef.current += 1;
     appendInFlightRef.current = false;
     lastAutoLoadCursorRef.current = null;
@@ -278,9 +387,21 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
     setFetchState({ warningMessage: null, loadMoreError: null });
 
     if (activeTab === 'All Models') {
+      const cachedResult = modelCatalogService.getCachedSearchResult(searchQuery, {
+        cursor: null,
+        pageSize: MODELS_PAGE_SIZE,
+        sort: serverSort,
+      });
+
+      if (cachedResult) {
+        setModels(cachedResult.models);
+        setHasMore(cachedResult.hasMore);
+        setNextCursor(cachedResult.nextCursor);
+      }
+
       const timer = setTimeout(() => {
-        void fetchModels(searchQuery, null, false);
-      }, 400);
+        void fetchModels(searchQuery, null, false, Boolean(cachedResult));
+      }, cachedResult ? 0 : 400);
       return () => clearTimeout(timer);
     }
 
@@ -294,15 +415,43 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
       setModels(localModels);
       setHasMore(false);
     });
-  }, [activeTab, fetchModels, searchQuery, sessionIdentity]);
+  }, [activeTab, discoveryMode, fetchModels, isTokenStateHydrated, searchQuery, serverSort, sessionIdentity]);
 
   const displayModels = useMemo(() => {
+    const registryModels = typeof registry.getModels === 'function'
+      ? registry.getModels()
+      : [];
+    const localModelsById = new Map(
+      registryModels.map((localModel) => [localModel.id, localModel] as const),
+    );
+
     return models.map((model) => {
       let finalModel = { ...model };
-      const localModel = registry.getModel(model.id);
+      const localModel = localModelsById.get(model.id);
 
       if (localModel) {
-        finalModel = { ...finalModel, ...localModel };
+        finalModel = {
+          ...finalModel,
+          size: finalModel.size ?? localModel.size,
+          resolvedFileName: finalModel.resolvedFileName ?? localModel.resolvedFileName,
+          localPath: localModel.localPath,
+          downloadedAt: localModel.downloadedAt,
+          sha256: finalModel.sha256 ?? localModel.sha256,
+          fitsInRam: finalModel.fitsInRam ?? localModel.fitsInRam,
+          accessState: finalModel.accessState,
+          isGated: finalModel.isGated,
+          isPrivate: finalModel.isPrivate,
+          lifecycleStatus: localModel.lifecycleStatus,
+          downloadProgress: localModel.downloadProgress,
+          resumeData: localModel.resumeData,
+          maxContextTokens: finalModel.maxContextTokens ?? localModel.maxContextTokens,
+          modelType: finalModel.modelType ?? localModel.modelType,
+          architectures: finalModel.architectures ?? localModel.architectures,
+          downloads: finalModel.downloads ?? localModel.downloads,
+          likes: finalModel.likes ?? localModel.likes,
+          tags: finalModel.tags ?? localModel.tags,
+          description: finalModel.description ?? localModel.description,
+        };
       }
 
       if (engineState.activeModelId === finalModel.id) {
@@ -313,7 +462,18 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
 
       const queuedItem = queue.find((item) => item.id === finalModel.id);
       if (queuedItem) {
-        finalModel = { ...finalModel, ...queuedItem };
+        finalModel = {
+          ...finalModel,
+          size: finalModel.size ?? queuedItem.size,
+          resolvedFileName: finalModel.resolvedFileName ?? queuedItem.resolvedFileName,
+          localPath: queuedItem.localPath ?? finalModel.localPath,
+          downloadedAt: queuedItem.downloadedAt ?? finalModel.downloadedAt,
+          sha256: finalModel.sha256 ?? queuedItem.sha256,
+          fitsInRam: finalModel.fitsInRam ?? queuedItem.fitsInRam,
+          lifecycleStatus: queuedItem.lifecycleStatus,
+          downloadProgress: queuedItem.downloadProgress,
+          resumeData: queuedItem.resumeData,
+        };
       }
 
       return finalModel;
@@ -327,6 +487,10 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
       }
 
       if (!matchesStatus(model, filters, activeTab)) {
+        return false;
+      }
+
+      if (!matchesTokenRequirement(model, filters)) {
         return false;
       }
 
@@ -350,11 +514,18 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
 
   const openModelPage = useCallback(async (modelId: string) => {
     try {
-      await Linking.openURL(`https://huggingface.co/${modelId}`);
+      await Linking.openURL(getHuggingFaceModelUrl(modelId));
     } catch (error) {
       showModelActionError('ModelsList.openModelPage', error);
     }
   }, [showModelActionError]);
+
+  const openModelDetails = useCallback((modelId: string) => {
+    router.push({
+      pathname: '/model-details',
+      params: { modelId },
+    } as any);
+  }, [router]);
 
   const handleDownload = useCallback((model: ModelMetadata) => {
     const startPreparedDownload = async () => {
@@ -384,9 +555,23 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
         }
 
         if (resolvedModel.size === null) {
-          throw new AppError('download_size_unknown', 'MODEL_SIZE_UNKNOWN', {
-            details: { modelId: model.id },
-          });
+          Alert.alert(
+            t('models.unknownSizeWarningTitle'),
+            t('models.unknownSizeWarningMessage'),
+            [
+              { text: t('common.cancel'), style: 'cancel' },
+              {
+                text: t('models.downloadWithLimitedVerification'),
+                onPress: () => {
+                  startDownload({
+                    ...resolvedModel,
+                    allowUnknownSizeDownload: true,
+                  });
+                },
+              },
+            ],
+          );
+          return;
         }
 
         startDownload(resolvedModel);
@@ -504,7 +689,10 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
   }, [activeTab, fetchModels, hasMore, isFetchingMore, loadMoreError, loading, nextCursor, searchQuery]);
 
   const hasFilters =
-    filters.fitsInRamOnly || filters.statuses.length > 0 || filters.sizeRanges.length > 0;
+    filters.fitsInRamOnly
+    || filters.noTokenRequiredOnly
+    || filters.statuses.length > 0
+    || filters.sizeRanges.length > 0;
 
   const emptyState = useMemo(() => (
     <Box className="flex-1 items-center px-6 pb-8 pt-12">
@@ -523,6 +711,30 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
       ) : null}
     </Box>
   ), [clearFilters, hasFilters, t]);
+
+  const discoveryBanner = useMemo(() => {
+    if (activeTab !== 'All Models' || discoveryMode !== 'guided') {
+      return null;
+    }
+
+    return (
+      <Box className="mb-3 rounded-2xl border border-primary-200 bg-primary-500/10 px-4 py-3 dark:border-primary-800">
+        <Text className="text-sm font-semibold text-primary-700 dark:text-primary-300">
+          {t('models.guidedDiscoveryTitle')}
+        </Text>
+        <Text className="mt-1 text-sm text-primary-700/90 dark:text-primary-200">
+          {hasTokenConfigured
+            ? t('models.guidedDiscoveryWithToken')
+            : t('models.guidedDiscoveryWithoutToken')}
+        </Text>
+        <Button action="secondary" size="sm" className="mt-3 self-start" onPress={showFullCatalog}>
+          <ButtonText className="text-typography-900 dark:text-typography-100">
+            {t('models.showFullCatalog')}
+          </ButtonText>
+        </Button>
+      </Box>
+    );
+  }, [activeTab, discoveryMode, hasTokenConfigured, showFullCatalog, t]);
 
   const footer = useMemo(() => (activeTab === 'All Models' ? (
     <Box className="pb-5 pt-1">
@@ -553,6 +765,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
   const renderModelItem = useCallback<ListRenderItem<ModelMetadata>>(({ item }) => (
     <ModelCard
       model={item}
+      onOpenDetails={openModelDetails}
       onDownload={handleDownload}
       onConfigureToken={openTokenSettings}
       onOpenModelPage={openModelPage}
@@ -563,10 +776,11 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
       onChat={() => router.push('/chat')}
       isActive={engineState.activeModelId === item.id}
     />
-  ), [cancelDownload, engineState.activeModelId, handleDelete, handleDownload, handleLoad, handleUnload, openModelPage, openTokenSettings, router]);
+  ), [cancelDownload, engineState.activeModelId, handleDelete, handleDownload, handleLoad, handleUnload, openModelDetails, openModelPage, openTokenSettings, router]);
 
   const renderEmptyState = useCallback(() => emptyState, [emptyState]);
   const renderFooter = useCallback(() => footer, [footer]);
+  const isCatalogInitializing = activeTab === 'All Models' && !isTokenStateHydrated;
 
   return (
     <>
@@ -574,6 +788,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
         filters={filters}
         sort={sort}
         onFitsInRamToggle={setFitsInRamOnly}
+        onNoTokenRequiredToggle={setNoTokenRequiredOnly}
         onStatusToggle={toggleStatus}
         onSizeRangeToggle={toggleSizeRange}
         onSortChange={setSort}
@@ -582,13 +797,15 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
       />
 
       <Box className="flex-1 px-4 pt-2">
+        {discoveryBanner}
+
         {warningMessage ? (
           <Box className="mb-3 rounded-xl border border-warning-300 bg-background-warning px-4 py-3 dark:border-warning-800">
             <Text className="text-sm text-warning-700 dark:text-warning-300">{warningMessage}</Text>
           </Box>
         ) : null}
 
-        {loading && models.length === 0 ? (
+        {(isCatalogInitializing || (loading && models.length === 0)) ? (
           <Box className="flex-1 items-center justify-start pt-16">
             <Spinner size="large" />
             <Text className="mt-3 text-typography-500">{t('models.searching', 'Searching Hugging Face...')}</Text>

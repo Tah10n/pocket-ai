@@ -152,6 +152,21 @@ function createScenarioContext(adbPath, serial) {
       runChecked(adbPath, ["-s", serial, "shell", "input", "keyevent", "4"]);
       await delay(700);
     },
+    swipeUp: async () => {
+      runChecked(adbPath, [
+        "-s",
+        serial,
+        "shell",
+        "input",
+        "swipe",
+        "540",
+        "1700",
+        "540",
+        "700",
+        "250",
+      ]);
+      await delay(900);
+    },
     captureScreenshot: (fileName) => {
       const screenshotPath = path.join(artifactsRoot, fileName);
       fs.mkdirSync(path.dirname(screenshotPath), { recursive: true });
@@ -233,6 +248,43 @@ function buildScenarios() {
         await ctx.expectText("Downloaded");
         await ctx.tapText("Home");
         await ctx.expectAnyText(activeModelCtaLabels);
+      },
+    },
+    {
+      id: "hf-catalog-hardening",
+      description: "Verify guided discovery, new HF catalog controls, and routed model details.",
+      run: async (ctx) => {
+        await goToHome(ctx);
+        await ctx.tapAnyText(activeModelCtaLabels);
+        await ctx.expectText("Model Catalog");
+        await ctx.expectText("Guided discovery is on", { timeoutMs: 15_000 });
+        await ctx.expectText("Show full catalog");
+
+        await ctx.tapText("Filters");
+        await ctx.expectText("No token required");
+
+        await ctx.tapText("Sort");
+        await ctx.expectText("Most downloaded");
+        await ctx.expectText("Most popular");
+        await ctx.tapText("Sort");
+
+        await ctx.tapText("Details", { timeoutMs: 15_000 });
+        await ctx.expectText("Model details");
+        await ctx.expectText("Open on HF");
+      },
+    },
+    {
+      id: "hf-token-education",
+      description: "Verify the token education screen and external-token CTA are reachable from Settings.",
+      run: async (ctx) => {
+        await goToHome(ctx);
+        await ctx.tapText("Settings");
+        await ctx.expectText("Hugging Face Token");
+        await ctx.tapText("Hugging Face Token");
+        await ctx.expectText("Access token");
+        await ctx.swipeUp();
+        await ctx.expectText("What this token does");
+        await ctx.expectText("Get token");
       },
     },
   ];

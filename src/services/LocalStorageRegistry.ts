@@ -9,6 +9,8 @@ const REGISTRY_KEY = 'models-registry';
 export class LocalStorageRegistry {
   private static instance: LocalStorageRegistry;
   private storage = createStorage(REGISTRY_KEY);
+  private cachedModels: ModelMetadata[] | null = null;
+  private cachedModelsById: Map<string, ModelMetadata> | null = null;
 
   private constructor() {}
 
@@ -23,35 +25,19 @@ export class LocalStorageRegistry {
    * Get all models from the registry.
    */
   public getModels(): ModelMetadata[] {
-    const rawData = this.storage.getString(REGISTRY_KEY);
-    if (!rawData) return [];
-    try {
-      const parsed = JSON.parse(rawData) as unknown;
-      if (!Array.isArray(parsed)) {
-        return [];
-      }
-
-      return parsed
-        .filter((entry): entry is Partial<ModelMetadata> & { id: string } => (
-          Boolean(entry) &&
-          typeof entry === 'object' &&
-          typeof (entry as { id?: unknown }).id === 'string'
-        ))
-        .map((entry) => normalizePersistedModelMetadata(entry));
-    } catch (e) {
-      console.error('[LocalStorageRegistry] Failed to parse registry data', e);
-      return [];
-    }
+    return this.getCachedModels().map((model) => normalizePersistedModelMetadata(model));
   }
 
   /**
    * Save the entire list of models.
    */
   public saveModels(models: ModelMetadata[]): void {
+    const normalizedModels = models.map((model) => normalizePersistedModelMetadata(model));
     this.storage.set(
       REGISTRY_KEY,
-      JSON.stringify(models.map((model) => normalizePersistedModelMetadata(model))),
+      JSON.stringify(normalizedModels),
     );
+    this.updateCache(normalizedModels);
   }
 
   /**
@@ -150,7 +136,54 @@ export class LocalStorageRegistry {
    * Get a specific model by ID.
    */
   public getModel(modelId: string): ModelMetadata | undefined {
-    return this.getModels().find((m) => m.id === modelId);
+    const model = this.getCachedModelsById().get(modelId);
+    return model ? normalizePersistedModelMetadata(model) : undefined;
+  }
+
+  private getCachedModels(): ModelMetadata[] {
+    if (this.cachedModels === null) {
+      this.updateCache(this.readModelsFromStorage());
+    }
+
+    return this.cachedModels ?? [];
+  }
+
+  private getCachedModelsById(): Map<string, ModelMetadata> {
+    if (this.cachedModelsById === null) {
+      this.updateCache(this.readModelsFromStorage());
+    }
+
+    return this.cachedModelsById ?? new Map<string, ModelMetadata>();
+  }
+
+  private updateCache(models: ModelMetadata[]): void {
+    this.cachedModels = models.map((model) => normalizePersistedModelMetadata(model));
+    this.cachedModelsById = new Map(this.cachedModels.map((model) => [model.id, model]));
+  }
+
+  private readModelsFromStorage(): ModelMetadata[] {
+    const rawData = this.storage.getString(REGISTRY_KEY);
+    if (!rawData) {
+      return [];
+    }
+
+    try {
+      const parsed = JSON.parse(rawData) as unknown;
+      if (!Array.isArray(parsed)) {
+        return [];
+      }
+
+      return parsed
+        .filter((entry): entry is Partial<ModelMetadata> & { id: string } => (
+          Boolean(entry) &&
+          typeof entry === 'object' &&
+          typeof (entry as { id?: unknown }).id === 'string'
+        ))
+        .map((entry) => normalizePersistedModelMetadata(entry));
+    } catch (e) {
+      console.error('[LocalStorageRegistry] Failed to parse registry data', e);
+      return [];
+    }
   }
 }
 

@@ -180,6 +180,7 @@ function RootNavigator() {
         <Stack.Screen name="storage" options={{ headerShown: false }} />
         <Stack.Screen name="legal" options={{ headerShown: false }} />
         <Stack.Screen name="huggingface-token" options={{ headerShown: false }} />
+        <Stack.Screen name="model-details" options={{ headerShown: false }} />
         <Stack.Screen name="modal" options={{ presentation: 'modal', title: 'Modal' }} />
       </Stack>
       <StatusBar style="auto" />

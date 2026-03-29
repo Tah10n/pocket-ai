@@ -3,6 +3,7 @@ import { useDownloadStore } from '../../src/store/downloadStore';
 import { LifecycleStatus, ModelAccessState, ModelMetadata } from '../../src/types/models';
 import * as FileSystem from 'expo-file-system/legacy';
 import { huggingFaceTokenService } from '../../src/services/HuggingFaceTokenService';
+import { registry } from '../../src/services/LocalStorageRegistry';
 
 jest.mock('expo-file-system', () => ({
   Paths: {
@@ -45,6 +46,8 @@ const mockModel: ModelMetadata = {
   downloadProgress: 0,
 };
 
+const mockedRegistry = registry as jest.Mocked<typeof registry>;
+
 describe('ModelDownloadManager Basic', () => {
   beforeEach(async () => {
     jest.clearAllMocks();
@@ -64,7 +67,15 @@ describe('ModelDownloadManager Basic', () => {
   it('verifies a downloaded file when the size matches', async () => {
     (FileSystem.getInfoAsync as jest.Mock).mockResolvedValueOnce({ exists: true, size: 1000 });
 
-    await expect(modelDownloadManager.verifyChecksum(mockModel, 'test-dir/model.gguf')).resolves.toBe('verified-by-size');
+    await expect(modelDownloadManager.verifyChecksum(mockModel, 'test-dir/model.gguf')).resolves.toBeUndefined();
+  });
+
+  it('preserves a real checksum when size validation succeeds', async () => {
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValueOnce({ exists: true, size: 1000 });
+
+    await expect(
+      modelDownloadManager.verifyChecksum({ ...mockModel, sha256: 'tree-sha' }, 'test-dir/model.gguf'),
+    ).resolves.toBe('tree-sha');
   });
 
   it('fails verification when the downloaded file is missing', async () => {
@@ -91,7 +102,7 @@ describe('ModelDownloadManager Basic', () => {
 
     await expect(
       modelDownloadManager.verifyChecksum({ ...mockModel, size: null }, 'test-dir/model.gguf'),
-    ).resolves.toBe('verified-by-size');
+    ).resolves.toBeUndefined();
   });
 
   it('rejects downloads that still have unknown size at preflight time', async () => {
@@ -102,6 +113,28 @@ describe('ModelDownloadManager Basic', () => {
     ).rejects.toThrow('MODEL_SIZE_UNKNOWN');
 
     expect(FileSystem.createDownloadResumable).not.toHaveBeenCalled();
+  });
+
+  it('allows unknown-size downloads after an explicit warning confirmation', async () => {
+    useDownloadStore.setState({ queue: [], activeDownloadId: null });
+
+    await expect(
+      (modelDownloadManager as any).downloadModel({
+        ...mockModel,
+        size: null,
+        allowUnknownSizeDownload: true,
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(FileSystem.getFreeDiskStorageAsync).toHaveBeenCalled();
+    expect(FileSystem.createDownloadResumable).toHaveBeenCalled();
+    expect(mockedRegistry.updateModel).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'test/model',
+        size: null,
+        sha256: undefined,
+      }),
+    );
   });
 
   it('attaches the bearer token when downloading gated Hugging Face models', async () => {

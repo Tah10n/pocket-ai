@@ -50,6 +50,7 @@
       ],
       "expo-font",
       "./plugins/withAndroidReleaseConfig",
+      "./plugins/withAndroidSystemMetrics",
       "expo-secure-store"
     ],
     "experiments": {

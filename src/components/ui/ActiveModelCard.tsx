@@ -25,7 +25,7 @@ export const ActiveModelCard = ({ onSwapModel }: ActiveModelCardProps) => {
   const memoryLabel = activeModel
     ? activeModel.size === null
       ? 'Unknown size'
-      : `${(activeModel.size / (1024 * 1024 * 1024)).toFixed(1)} GB file`
+      : `${(activeModel.size / (1024 * 1024 * 1024)).toFixed(1)} GB on disk`
     : hasDownloadedModels
       ? `${downloadedModels.length} downloaded ${downloadedModels.length === 1 ? 'model' : 'models'}`
       : 'Download and load a GGUF model';

@@ -280,8 +280,22 @@ function clampPercentage(value: number) {
     return Math.max(0, Math.min(100, value));
 }
 
-function formatGb(value: number) {
-    return `${value.toFixed(value >= 10 ? 1 : 2)} GB`;
+function formatSystemCapacity(value: number) {
+    if (!Number.isFinite(value) || value <= 0) {
+        return '0 MB';
+    }
+
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let size = value;
+    let unitIndex = 0;
+
+    while (size >= 1000 && unitIndex < units.length - 1) {
+        size /= 1000;
+        unitIndex += 1;
+    }
+
+    const precision = unitIndex >= 3 ? 1 : (size >= 10 || unitIndex === 0 ? 0 : 1);
+    return `${size.toFixed(precision)} ${units[unitIndex]}`;
 }
 
 function formatBytes(value: number) {
@@ -417,8 +431,8 @@ export const SettingsScreen = () => {
         );
     };
 
-    const renderStatChip = (label: string, value: string) => (
-        <View style={styles.statChip}>
+    const renderStatChip = (key: string, label: string, value: string) => (
+        <View key={key} style={styles.statChip}>
             <View style={[styles.statChipInner, { borderColor: colors.border, backgroundColor: mutedBackground }]}>
                 <Text style={[styles.statChipLabel, { color: colors.textSecondary }]}>{label}</Text>
                 <Text style={[styles.statChipValue, { color: colors.text }]}>{value}</Text>
@@ -426,17 +440,37 @@ export const SettingsScreen = () => {
         </View>
     );
 
-    const ramTotal = metrics?.ram.totalGB ?? 0;
-    const ramUsed = metrics?.ram.usedGB ?? 0;
-    const ramFree = metrics?.ram.freeGB ?? Math.max(ramTotal - ramUsed, 0);
-    const ramUsedPercentage = metrics?.ram.usedPercentage ?? (ramTotal > 0 ? (ramUsed / ramTotal) * 100 : 0);
+    const ramTotalBytes = metrics?.ram.totalBytes ?? 0;
+    const ramUsedBytes = metrics?.ram.usedBytes ?? 0;
+    const ramAvailableBytes = metrics?.ram.availableBytes ?? 0;
+    const ramAppUsedBytes = metrics?.ram.appUsedBytes ?? 0;
+    const ramUsedPercentage = metrics?.ram.usedPercentage ?? 0;
+    const isSystemRamSource = metrics?.ram.source === 'system';
 
-    const storageTotal = metrics?.storage.totalGB ?? 0;
-    const storageUsed = metrics?.storage.usedGB ?? 0;
-    const storageFree = metrics?.storage.freeGB ?? Math.max(storageTotal - storageUsed, 0);
-    const storageUsedPercentage = metrics?.storage.usedPercentage ?? (storageTotal > 0 ? (storageUsed / storageTotal) * 100 : 0);
+    const storageTotalBytes = metrics?.storage.totalBytes ?? 0;
+    const storageUsedBytes = metrics?.storage.usedBytes ?? 0;
+    const storageFreeBytes = metrics?.storage.freeBytes ?? Math.max(storageTotalBytes - storageUsedBytes, 0);
+    const storageUsedPercentage = metrics?.storage.usedPercentage ?? (storageTotalBytes > 0 ? (storageUsedBytes / storageTotalBytes) * 100 : 0);
     const appFilesBytes = appStorageMetrics?.appFilesBytes ?? 0;
     const canForceUnloadModel = isEngineReady && Boolean(engineState.activeModelId);
+    const ramPrimaryValue = formatSystemCapacity(isSystemRamSource ? ramUsedBytes : ramAppUsedBytes);
+    const ramPrimaryLabel = isSystemRamSource
+        ? t('settings.memoryInUseOf', { total: formatSystemCapacity(ramTotalBytes) })
+        : t('settings.memoryAppUsage');
+    const ramPrimaryHint = isSystemRamSource
+        ? t('settings.memoryAvailable', { value: formatSystemCapacity(ramAvailableBytes) })
+        : t('settings.memoryDeviceTotal', { value: formatSystemCapacity(ramTotalBytes) });
+    const ramStatItems = isSystemRamSource
+        ? [
+            { key: 'ram-used', label: t('settings.used'), value: formatSystemCapacity(ramUsedBytes) },
+            { key: 'ram-available', label: t('settings.available'), value: formatSystemCapacity(ramAvailableBytes) },
+            { key: 'ram-total', label: t('settings.total'), value: formatSystemCapacity(ramTotalBytes) },
+            { key: 'ram-app', label: t('settings.appMemory'), value: formatSystemCapacity(ramAppUsedBytes) },
+        ]
+        : [
+            { key: 'ram-app', label: t('settings.appMemory'), value: formatSystemCapacity(ramAppUsedBytes) },
+            { key: 'ram-device-total', label: t('settings.deviceTotal'), value: formatSystemCapacity(ramTotalBytes) },
+        ];
 
     return (
         <View style={{ flex: 1, backgroundColor: colors.background }}>
@@ -637,57 +671,57 @@ export const SettingsScreen = () => {
                                             {t('settings.memoryTitle')}
                                         </Text>
                                         <Text style={[styles.resourceSubtitle, { color: colors.textSecondary }]}>
-                                            {t('settings.memoryDescription')}
+                                            {t(isSystemRamSource ? 'settings.memoryDescription' : 'settings.memoryDescriptionFallback')}
                                         </Text>
                                     </View>
                                 </View>
 
-                                <View style={[styles.percentBadge, { backgroundColor: 'rgba(79, 70, 229, 0.12)' }]}>
-                                    <Text style={[styles.percentBadgeText, { color: colors.primary }]}>
-                                        {formatPercent(ramUsedPercentage)}
-                                    </Text>
-                                </View>
+                                {isSystemRamSource ? (
+                                    <View style={[styles.percentBadge, { backgroundColor: 'rgba(79, 70, 229, 0.12)' }]}>
+                                        <Text style={[styles.percentBadgeText, { color: colors.primary }]}>
+                                            {formatPercent(ramUsedPercentage)}
+                                        </Text>
+                                    </View>
+                                ) : null}
                             </View>
 
                             <View style={styles.primaryMetricRow}>
                                 <View>
                                     <Text style={[styles.primaryMetricValue, { color: colors.text }]}>
-                                        {formatGb(ramUsed)}
+                                        {ramPrimaryValue}
                                     </Text>
                                     <Text style={[styles.primaryMetricLabel, { color: colors.textSecondary }]}>
-                                        {t('settings.memoryInUseOf', { total: formatGb(ramTotal) })}
+                                        {ramPrimaryLabel}
                                     </Text>
                                 </View>
                                 <Text style={[styles.primaryMetricHint, { color: colors.primary }]}>
-                                    {t('settings.memoryFree', { value: formatGb(ramFree) })}
+                                    {ramPrimaryHint}
                                 </Text>
                             </View>
 
-                            <View style={[styles.usageTrack, { backgroundColor: trackBackground }]}>
-                                <View
-                                    style={[
-                                        styles.usageFill,
-                                        {
-                                            width: `${clampPercentage(ramUsedPercentage)}%`,
-                                            backgroundColor: '#4f46e5',
-                                        },
-                                    ]}
-                                />
-                            </View>
-                            <View style={styles.usageLegendRow}>
-                                <Text style={[styles.usageLegendText, { color: colors.textSecondary }]}>
-                                    {t('settings.memoryBusy')}
-                                </Text>
-                                <Text style={[styles.usageLegendText, { color: colors.textSecondary }]}>
-                                    {t('settings.memoryAvailable', { value: formatGb(ramFree) })}
-                                </Text>
-                            </View>
+                            {isSystemRamSource ? (
+                                <>
+                                    <View style={[styles.usageTrack, { backgroundColor: trackBackground }]}>
+                                        <View
+                                            style={[
+                                                styles.usageFill,
+                                                {
+                                                    width: `${clampPercentage(ramUsedPercentage)}%`,
+                                                    backgroundColor: '#4f46e5',
+                                                },
+                                            ]}
+                                        />
+                                    </View>
+                                    <View style={styles.usageLegendRow}>
+                                        <Text style={[styles.usageLegendText, { color: colors.textSecondary }]}>
+                                            {t('settings.memoryBusy')}
+                                        </Text>
+                                    </View>
+                                </>
+                            ) : null}
 
                             <View style={styles.statGrid}>
-                                {renderStatChip(t('settings.used'), formatGb(ramUsed))}
-                                {renderStatChip(t('settings.free'), formatGb(ramFree))}
-                                {renderStatChip(t('settings.total'), formatGb(ramTotal))}
-                                {renderStatChip(t('settings.load'), formatPercent(ramUsedPercentage))}
+                                {ramStatItems.map((item) => renderStatChip(item.key, item.label, item.value))}
                             </View>
 
                             <Pressable
@@ -738,14 +772,14 @@ export const SettingsScreen = () => {
                             <View style={styles.primaryMetricRow}>
                                 <View>
                                     <Text style={[styles.primaryMetricValue, { color: colors.text }]}>
-                                        {formatGb(storageUsed)}
+                                        {formatSystemCapacity(storageUsedBytes)}
                                     </Text>
                                     <Text style={[styles.primaryMetricLabel, { color: colors.textSecondary }]}>
-                                        {t('settings.storageUsedOf', { total: formatGb(storageTotal) })}
+                                        {t('settings.storageUsedOf', { total: formatSystemCapacity(storageTotalBytes) })}
                                     </Text>
                                 </View>
                                 <Text style={[styles.primaryMetricHint, { color: '#0f766e' }]}>
-                                    {t('settings.storageFree', { value: formatGb(storageFree) })}
+                                    {t('settings.storageFree', { value: formatSystemCapacity(storageFreeBytes) })}
                                 </Text>
                             </View>
 
@@ -764,16 +798,13 @@ export const SettingsScreen = () => {
                                 <Text style={[styles.usageLegendText, { color: colors.textSecondary }]}>
                                     {t('settings.storageOccupied')}
                                 </Text>
-                                <Text style={[styles.usageLegendText, { color: colors.textSecondary }]}>
-                                    {t('settings.storageAvailable', { value: formatGb(storageFree) })}
-                                </Text>
                             </View>
 
                             <View style={styles.statGrid}>
-                                {renderStatChip(t('settings.used'), formatGb(storageUsed))}
-                                {renderStatChip(t('settings.free'), formatGb(storageFree))}
-                                {renderStatChip(t('settings.total'), formatGb(storageTotal))}
-                                {renderStatChip(t('settings.appFilesUsage'), formatBytes(appFilesBytes))}
+                                {renderStatChip('storage-used', t('settings.used'), formatSystemCapacity(storageUsedBytes))}
+                                {renderStatChip('storage-free', t('settings.free'), formatSystemCapacity(storageFreeBytes))}
+                                {renderStatChip('storage-total', t('settings.total'), formatSystemCapacity(storageTotalBytes))}
+                                {renderStatChip('storage-app-files', t('settings.appFilesUsage'), formatBytes(appFilesBytes))}
                             </View>
                         </View>
                     </View>

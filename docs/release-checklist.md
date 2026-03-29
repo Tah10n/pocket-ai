@@ -1,6 +1,6 @@
 # Release Checklist
 
-Last updated: 2026-03-28
+Last updated: 2026-03-29
 
 ## Purpose
 
@@ -93,6 +93,7 @@ npm run build:all:production
 
 - Switch theme between `light`, `system`, and `dark`.
 - Switch language between English and Russian.
+- Open `Settings` and confirm the `Memory (RAM)` card refreshes while the screen stays open, the Android `App` memory value responds when loading or unloading a model, and the RAM plus storage cards do not repeat the same free or available value in multiple places.
 - Open `Privacy & Disclosures` from `Settings` and confirm the content renders correctly.
 - Open the Hugging Face token screen from `Settings`, verify save and clear both work, confirm the token field remains masked, and verify the education copy plus `Get token` external-link CTA.
 - Open `Presets` and confirm preset creation, editing, activation, and deletion still work.

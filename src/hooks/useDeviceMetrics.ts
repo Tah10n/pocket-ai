@@ -2,10 +2,15 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import * as Device from 'expo-device';
 import DeviceInfo from 'react-native-device-info';
 import { registry } from '../services/LocalStorageRegistry';
+import { getSystemMemorySnapshot } from '../services/SystemMetricsService';
 import { LifecycleStatus } from '../types/models';
 
 export interface DeviceMetrics {
   storage: {
+    totalBytes: number;
+    usedBytes: number;
+    freeBytes: number;
+    downloadedModelsBytes: number;
     totalGB: number;
     usedGB: number;
     freeGB: number;
@@ -14,10 +19,16 @@ export interface DeviceMetrics {
     usedPercentage: number;
   };
   ram: {
+    totalBytes: number;
+    usedBytes: number | null;
+    availableBytes: number | null;
+    appUsedBytes: number;
     totalGB: number;
-    usedGB: number;
-    freeGB: number;
-    usedPercentage: number;
+    usedGB: number | null;
+    freeGB: number | null;
+    appUsedGB: number;
+    usedPercentage: number | null;
+    source: 'system' | 'process';
   };
 }
 
@@ -40,6 +51,7 @@ export const useDeviceMetrics = (options: UseDeviceMetricsOptions = {}) => {
 
   const loadMetrics = useCallback(async () => {
     try {
+      const systemMemorySnapshot = await getSystemMemorySnapshot().catch(() => null);
       const [
         totalMemoryBytes,
         usedMemoryBytes,
@@ -52,9 +64,15 @@ export const useDeviceMetrics = (options: UseDeviceMetricsOptions = {}) => {
         DeviceInfo.getFreeDiskStorage().catch(() => 0),
       ]);
 
-      const totalMemoryGB = bytesToGb(totalMemoryBytes);
-      const usedMemoryGB = bytesToGb(usedMemoryBytes);
-      const freeMemoryGB = Math.max(totalMemoryGB - usedMemoryGB, 0);
+      const isSystemMemoryAvailable = systemMemorySnapshot !== null;
+      const resolvedTotalMemoryBytes = systemMemorySnapshot?.totalBytes ?? totalMemoryBytes;
+      const resolvedUsedMemoryBytes = systemMemorySnapshot?.usedBytes ?? null;
+      const resolvedFreeMemoryBytes = systemMemorySnapshot?.availableBytes ?? null;
+      const appUsedMemoryBytes = systemMemorySnapshot?.appUsedBytes ?? usedMemoryBytes;
+      const totalMemoryGB = bytesToGb(resolvedTotalMemoryBytes);
+      const usedMemoryGB = resolvedUsedMemoryBytes === null ? null : bytesToGb(resolvedUsedMemoryBytes);
+      const freeMemoryGB = resolvedFreeMemoryBytes === null ? null : bytesToGb(resolvedFreeMemoryBytes);
+      const appUsedMemoryGB = bytesToGb(appUsedMemoryBytes);
       const totalStorageGB = bytesToGb(totalDiskBytes);
       const freeStorageGB = bytesToGb(freeDiskBytes);
       const usedStorageGB = Math.max(totalStorageGB - freeStorageGB, 0);
@@ -72,6 +90,10 @@ export const useDeviceMetrics = (options: UseDeviceMetricsOptions = {}) => {
 
       setMetrics({
         storage: {
+          totalBytes: totalDiskBytes,
+          usedBytes: Math.max(totalDiskBytes - freeDiskBytes, 0),
+          freeBytes: freeDiskBytes,
+          downloadedModelsBytes,
           totalGB: totalStorageGB,
           usedGB: usedStorageGB,
           freeGB: freeStorageGB,
@@ -80,10 +102,18 @@ export const useDeviceMetrics = (options: UseDeviceMetricsOptions = {}) => {
           usedPercentage: totalStorageGB > 0 ? (usedStorageGB / totalStorageGB) * 100 : 0,
         },
         ram: {
+          totalBytes: resolvedTotalMemoryBytes,
+          usedBytes: resolvedUsedMemoryBytes,
+          availableBytes: resolvedFreeMemoryBytes,
+          appUsedBytes: appUsedMemoryBytes,
           totalGB: totalMemoryGB,
           usedGB: usedMemoryGB,
           freeGB: freeMemoryGB,
-          usedPercentage: totalMemoryGB > 0 ? (usedMemoryGB / totalMemoryGB) * 100 : 0,
+          appUsedGB: appUsedMemoryGB,
+          usedPercentage: isSystemMemoryAvailable && usedMemoryGB !== null && totalMemoryGB > 0
+            ? (usedMemoryGB / totalMemoryGB) * 100
+            : null,
+          source: isSystemMemoryAvailable ? 'system' : 'process',
         },
       });
     } catch (error) {
@@ -95,6 +125,10 @@ export const useDeviceMetrics = (options: UseDeviceMetricsOptions = {}) => {
 
       setMetrics({
         storage: {
+          totalBytes: 0,
+          usedBytes: 0,
+          freeBytes: 0,
+          downloadedModelsBytes: 0,
           totalGB: 0,
           usedGB: 0,
           freeGB: 0,
@@ -103,10 +137,16 @@ export const useDeviceMetrics = (options: UseDeviceMetricsOptions = {}) => {
           usedPercentage: 0,
         },
         ram: {
+          totalBytes: 0,
+          usedBytes: null,
+          availableBytes: null,
+          appUsedBytes: 0,
           totalGB: 0,
-          usedGB: 0,
-          freeGB: 0,
-          usedPercentage: 0,
+          usedGB: null,
+          freeGB: null,
+          appUsedGB: 0,
+          usedPercentage: null,
+          source: 'process',
         },
       });
     }

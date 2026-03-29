@@ -22,6 +22,7 @@ export interface ModelMetadata {
   downloadUrl: string; // HF resolve URL
   allowUnknownSizeDownload?: boolean;
   requiresTreeProbe?: boolean;
+  hfRevision?: string;
   resolvedFileName?: string;
   localPath?: string;
   downloadedAt?: number;

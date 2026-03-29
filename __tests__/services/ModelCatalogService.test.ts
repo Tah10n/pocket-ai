@@ -42,7 +42,6 @@ function makeRepo(
 ) {
   return {
     id,
-    sha: 'deadbeef',
     siblings: [
       {
         rfilename: filename,
@@ -55,7 +54,6 @@ function makeRepo(
 function makeRepoWithUnknownSize(id: string, filename = 'model.Q4_K_M.gguf') {
   return {
     id,
-    sha: 'deadbeef',
     siblings: [
       {
         rfilename: filename,
@@ -67,7 +65,6 @@ function makeRepoWithUnknownSize(id: string, filename = 'model.Q4_K_M.gguf') {
 function makeFilenameOnlyRepo(id: string) {
   return {
     id,
-    sha: 'deadbeef',
     siblings: [
       {
         filename: 'model.Q8_0.gguf',
@@ -91,8 +88,25 @@ function makeGatedRepo(id: string, filename = 'model.Q4_K_M.gguf') {
 function makeIncompletePublicRepo(id: string) {
   return {
     id,
-    sha: 'deadbeef',
     tags: ['gguf', 'chat'],
+  };
+}
+
+function makeRevisionRepo(
+  id: string,
+  revision = 'cafebabe1234',
+  filename = 'folder/model Q4+#.gguf',
+  size = 1.5 * 1024 * 1024 * 1024,
+) {
+  return {
+    id,
+    sha: revision,
+    siblings: [
+      {
+        rfilename: filename,
+        size,
+      },
+    ],
   };
 }
 
@@ -111,6 +125,29 @@ function makeLocalModel(id: string): ModelMetadata {
     lifecycleStatus: LifecycleStatus.DOWNLOADED,
     downloadProgress: 1,
   };
+}
+
+function createDeferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((nextResolve, nextReject) => {
+    resolve = nextResolve;
+    reject = nextReject;
+  });
+
+  return { promise, resolve, reject };
+}
+
+async function waitForMockCallCount(mockFn: jest.Mock, expectedCallCount: number): Promise<void> {
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    if (mockFn.mock.calls.length >= expectedCallCount) {
+      return;
+    }
+
+    await Promise.resolve();
+  }
+
+  expect(mockFn.mock.calls.length).toBeGreaterThanOrEqual(expectedCallCount);
 }
 
 describe('ModelCatalogService', () => {
@@ -250,6 +287,46 @@ describe('ModelCatalogService', () => {
 
     expect(fallbackResult.models[0].id).toBe('org/auth-fallback-model');
     expect(fallbackResult.warning?.code).toBe('rate_limited');
+  });
+
+  it('retries the first-page search when the auth token changes mid-flight and keeps only the fresh cache entry', async () => {
+    await huggingFaceTokenService.saveToken('hf_token_a');
+    const firstPage = createDeferred<any>();
+    const service = new ModelCatalogService();
+
+    global.fetch = (
+      jest.fn()
+        .mockImplementationOnce(() => firstPage.promise)
+        .mockImplementationOnce(() => Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve([makeRepo('org/auth-new-model')]),
+          headers: {
+            get: jest.fn(() => null),
+          },
+        }))
+    ) as jest.Mock;
+
+    const pendingResult = service.searchModels('phi', { pageSize: 10 });
+    await waitForMockCallCount(global.fetch as jest.Mock, 1);
+    await huggingFaceTokenService.saveToken('hf_token_b');
+    firstPage.resolve({
+      ok: true,
+      json: () => Promise.resolve([makeRepo('org/auth-old-model')]),
+      headers: {
+        get: jest.fn(() => null),
+      },
+    });
+
+    const result = await pendingResult;
+    const coldStartService = new ModelCatalogService();
+    const cachedResult = coldStartService.getCachedSearchResult('phi', { pageSize: 10 });
+
+    expect(result.models[0].id).toBe('org/auth-new-model');
+    expect(cachedResult?.models[0].id).toBe('org/auth-new-model');
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+
+    coldStartService.dispose();
+    service.dispose();
   });
 
   it('throws load-more errors for later pages instead of silently falling back', async () => {
@@ -546,14 +623,13 @@ describe('ModelCatalogService', () => {
     expect(result.models[0].accessState).toBe(ModelAccessState.ACCESS_DENIED);
   });
 
-  it('revalidates size-known gated models with the tree endpoint before marking them authorized', async () => {
+  it('revalidates size-known gated models with a lightweight file access probe before marking them authorized', async () => {
     await huggingFaceTokenService.saveToken('hf_test_token');
     global.fetch = jest.fn((input: RequestInfo | URL) => {
-      if (String(input).includes('/tree/main?recursive=true')) {
+      if (String(input).includes('/resolve/main/model.Q4_K_M.gguf')) {
         return Promise.resolve({
           ok: false,
           status: 403,
-          json: () => Promise.resolve([]),
         });
       }
 
@@ -571,7 +647,49 @@ describe('ModelCatalogService', () => {
     const result = await modelCatalogService.searchModels('phi');
 
     expect(result.models[0].accessState).toBe(ModelAccessState.ACCESS_DENIED);
-    expect((global.fetch as jest.Mock).mock.calls[1][0]).toContain('/tree/main?recursive=true');
+    expect((global.fetch as jest.Mock).mock.calls[1][0]).toContain('/resolve/main/model.Q4_K_M.gguf');
+    expect((global.fetch as jest.Mock).mock.calls[1][1]).toMatchObject({ method: 'HEAD' });
+  });
+
+  it('falls back to a ranged GET probe when the resolved-file HEAD request is unsupported', async () => {
+    await huggingFaceTokenService.saveToken('hf_test_token');
+    global.fetch = jest.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).includes('/resolve/main/model.Q4_K_M.gguf')) {
+        if (init?.method === 'HEAD') {
+          return Promise.resolve({
+            ok: false,
+            status: 405,
+          });
+        }
+
+        return Promise.resolve({
+          ok: true,
+          status: 206,
+        });
+      }
+
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve([
+          {
+            ...makeRepo('org/head-unsupported-gated-model'),
+            gated: 'manual',
+          },
+        ]),
+      });
+    }) as jest.Mock;
+
+    const result = await modelCatalogService.searchModels('phi');
+
+    expect(result.models[0].accessState).toBe(ModelAccessState.AUTHORIZED);
+    expect((global.fetch as jest.Mock).mock.calls[1][1]).toMatchObject({ method: 'HEAD' });
+    expect((global.fetch as jest.Mock).mock.calls[2][1]).toMatchObject({
+      method: 'GET',
+      headers: expect.objectContaining({
+        Authorization: 'Bearer hf_test_token',
+        Range: 'bytes=0-0',
+      }),
+    });
   });
 
   it('derives hasMore from the next cursor header without extra page-proving fetches', async () => {
@@ -947,6 +1065,49 @@ describe('ModelCatalogService', () => {
     expect(modelCatalogService.getCachedModel(localModel.id)?.accessState).toBe(ModelAccessState.PUBLIC);
   });
 
+  it('does not reuse authorized snapshots after the token disappears outside mutation listeners', async () => {
+    await huggingFaceTokenService.saveToken('hf_test_token');
+
+    global.fetch = jest.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === 'HEAD') {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+        });
+      }
+
+      return Promise.resolve({
+        ok: true,
+        headers: {
+          get: jest.fn(() => null),
+        },
+        json: () => Promise.resolve([
+          {
+            id: 'org/external-token-model',
+            gated: 'manual',
+            siblings: [
+              {
+                rfilename: 'model.Q4_K_M.gguf',
+                size: 2 * 1024 * 1024 * 1024,
+              },
+            ],
+          },
+        ]),
+      });
+    }) as jest.Mock;
+
+    await modelCatalogService.searchModels('phi');
+
+    await SecureStore.deleteItemAsync('huggingface-access-token');
+    await huggingFaceTokenService.refreshState();
+
+    const coldStartService = new ModelCatalogService();
+    const cachedModel = coldStartService.getCachedModel('org/external-token-model');
+    coldStartService.dispose();
+
+    expect(cachedModel).toBeNull();
+  });
+
   it('includes popularity metadata from Hugging Face list responses', async () => {
     global.fetch = jest.fn(() =>
       Promise.resolve({
@@ -1003,6 +1164,132 @@ describe('ModelCatalogService', () => {
     const firstUrl = (global.fetch as jest.Mock).mock.calls[0][0] as string;
     expect(firstUrl).toContain('sort=likes');
     expect(firstUrl).toContain('direction=-1');
+  });
+
+  it('builds revision-aware download URLs and URL-encodes GGUF file paths', async () => {
+    global.fetch = jest.fn(() =>
+      Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve([makeRevisionRepo('org/revision-model')]),
+      }),
+    ) as jest.Mock;
+
+    const result = await modelCatalogService.searchModels('phi');
+
+    expect(result.models[0].hfRevision).toBe('cafebabe1234');
+    expect(result.models[0].downloadUrl).toBe(
+      'https://huggingface.co/org/revision-model/resolve/cafebabe1234/folder/model%20Q4%2B%23.gguf',
+    );
+  });
+
+  it('uses the resolved revision instead of main for tree and README lookups', async () => {
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.includes('/tree/cafebabe1234?recursive=true')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve([
+            {
+              path: 'folder/model Q4+#.gguf',
+              size: 2 * 1024 * 1024 * 1024,
+            },
+          ]),
+        });
+      }
+
+      if (url.endsWith('/raw/cafebabe1234/README.md')) {
+        return Promise.resolve({
+          ok: true,
+          text: () => Promise.resolve('# Model\n\nRevision scoped README summary text.'),
+        });
+      }
+
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({
+          id: 'org/revision-detail-model',
+          sha: 'cafebabe1234',
+          siblings: [
+            {
+              rfilename: 'folder/model Q4+#.gguf',
+            },
+          ],
+        }),
+      });
+    }) as jest.Mock;
+
+    const result = await modelCatalogService.getModelDetails('org/revision-detail-model');
+    const fetchCalls = (global.fetch as jest.Mock).mock.calls.map(([url]) => String(url));
+
+    expect(result.hfRevision).toBe('cafebabe1234');
+    expect(result.downloadUrl).toBe(
+      'https://huggingface.co/org/revision-detail-model/resolve/cafebabe1234/folder/model%20Q4%2B%23.gguf',
+    );
+    expect(result.description).toBe('Revision scoped README summary text.');
+    expect(fetchCalls).toContain(
+      'https://huggingface.co/api/models/org/revision-detail-model/tree/cafebabe1234?recursive=true',
+    );
+    expect(fetchCalls).toContain(
+      'https://huggingface.co/org/revision-detail-model/raw/cafebabe1234/README.md',
+    );
+    expect(fetchCalls.some((url) => url.includes('/tree/main?recursive=true'))).toBe(false);
+    expect(fetchCalls.some((url) => url.endsWith('/raw/main/README.md'))).toBe(false);
+  });
+
+  it('URL-encodes revisions that contain slashes for tree, raw, and resolve URLs', async () => {
+    const revision = 'refs/pr/1';
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.includes('/tree/refs%2Fpr%2F1?recursive=true')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve([
+            {
+              path: 'folder/model Q4+#.gguf',
+              size: 2 * 1024 * 1024 * 1024,
+            },
+          ]),
+        });
+      }
+
+      if (url.endsWith('/raw/refs%2Fpr%2F1/README.md')) {
+        return Promise.resolve({
+          ok: true,
+          text: () => Promise.resolve('# Model\n\nSlash revision README summary text.'),
+        });
+      }
+
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({
+          id: 'org/slash-revision-detail-model',
+          sha: revision,
+          siblings: [
+            {
+              rfilename: 'folder/model Q4+#.gguf',
+            },
+          ],
+        }),
+      });
+    }) as jest.Mock;
+
+    const result = await modelCatalogService.getModelDetails('org/slash-revision-detail-model');
+    const fetchCalls = (global.fetch as jest.Mock).mock.calls.map(([url]) => String(url));
+
+    expect(result.hfRevision).toBe(revision);
+    expect(result.downloadUrl).toBe(
+      'https://huggingface.co/org/slash-revision-detail-model/resolve/refs%2Fpr%2F1/folder/model%20Q4%2B%23.gguf',
+    );
+    expect(fetchCalls).toContain(
+      'https://huggingface.co/api/models/org/slash-revision-detail-model/tree/refs%2Fpr%2F1?recursive=true',
+    );
+    expect(fetchCalls).toContain(
+      'https://huggingface.co/org/slash-revision-detail-model/raw/refs%2Fpr%2F1/README.md',
+    );
   });
 
   it('loads README summary text for model details', async () => {
@@ -1099,11 +1386,18 @@ describe('ModelCatalogService', () => {
     expect(result.modelCreator).toBe('Meta');
   });
 
-  it('keeps gated model details locked when tree validation fails after the details payload succeeds', async () => {
+  it('keeps gated model details locked when access validation fails after the details payload succeeds', async () => {
     await huggingFaceTokenService.saveToken('hf_test_token');
 
     global.fetch = jest.fn((input: RequestInfo | URL) => {
       const url = String(input);
+
+      if (url.includes('/resolve/main/model.Q4_K_M.gguf')) {
+        return Promise.resolve({
+          ok: false,
+          status: 429,
+        });
+      }
 
       if (url.includes('/tree/main?recursive=true')) {
         return Promise.resolve({
@@ -1139,6 +1433,62 @@ describe('ModelCatalogService', () => {
     const result = await modelCatalogService.getModelDetails('org/detail-gated-model');
 
     expect(result.accessState).toBe(ModelAccessState.AUTH_REQUIRED);
+  });
+
+  it('retries model details when the auth token changes mid-flight and keeps only the fresh snapshot', async () => {
+    await huggingFaceTokenService.saveToken('hf_token_a');
+    const firstDetails = createDeferred<any>();
+    const service = new ModelCatalogService();
+    let apiCallCount = 0;
+
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.includes('/raw/main/README.md')) {
+        return Promise.resolve({
+          ok: false,
+          status: 404,
+          text: () => Promise.resolve(''),
+        });
+      }
+
+      apiCallCount += 1;
+      if (apiCallCount === 1) {
+        return firstDetails.promise;
+      }
+
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({
+          ...makeRepo('org/detail-race-model'),
+          id: 'org/detail-race-model',
+          downloads: 99,
+        }),
+      });
+    }) as jest.Mock;
+
+    const pendingResult = service.getModelDetails('org/detail-race-model');
+    await waitForMockCallCount(global.fetch as jest.Mock, 1);
+    await huggingFaceTokenService.saveToken('hf_token_b');
+    firstDetails.resolve({
+      ok: true,
+      json: () => Promise.resolve({
+        ...makeRepo('org/detail-race-model'),
+        id: 'org/detail-race-model',
+        downloads: 1,
+      }),
+    });
+
+    const result = await pendingResult;
+    const coldStartService = new ModelCatalogService();
+    const cachedModel = coldStartService.getCachedModel('org/detail-race-model');
+
+    expect(result.downloads).toBe(99);
+    expect(cachedModel?.downloads).toBe(99);
+    expect(apiCallCount).toBe(2);
+
+    coldStartService.dispose();
+    service.dispose();
   });
 
   it('hydrates recent model details from persisted snapshots across service instances', async () => {
@@ -1185,6 +1535,163 @@ describe('ModelCatalogService', () => {
     expect(cachedModel?.license).toBe('apache-2.0');
     expect(cachedModel?.modelType).toBe('llama');
     expect(cachedModel?.quantizedBy).toBe('bartowski');
+  });
+
+  it('dedupes concurrent tree probes for the same repo and revision', async () => {
+    const service = new ModelCatalogService();
+    const treeResponse = createDeferred<any>();
+    const refreshTarget: ModelMetadata = {
+      id: 'org/tree-dedupe-model',
+      name: 'tree-dedupe-model',
+      author: 'org',
+      size: null,
+      downloadUrl: 'https://huggingface.co/org/tree-dedupe-model/resolve/deadbeef/model.gguf',
+      hfRevision: 'deadbeef',
+      resolvedFileName: 'model.gguf',
+      fitsInRam: null,
+      accessState: ModelAccessState.PUBLIC,
+      isGated: false,
+      isPrivate: false,
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+      requiresTreeProbe: true,
+    };
+
+    global.fetch = jest.fn(() => treeResponse.promise) as jest.Mock;
+
+    const pendingLeft = service.refreshModelMetadata(refreshTarget);
+    const pendingRight = service.refreshModelMetadata(refreshTarget);
+    treeResponse.resolve({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve([
+        { path: 'model.gguf', size: 2 * 1024 * 1024 * 1024 },
+      ]),
+      headers: {
+        get: jest.fn(() => null),
+      },
+    });
+
+    const [left, right] = await Promise.all([pendingLeft, pendingRight]);
+
+    expect(left.size).toBe(2 * 1024 * 1024 * 1024);
+    expect(right.size).toBe(2 * 1024 * 1024 * 1024);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+
+    service.dispose();
+  });
+
+  it('dedupes concurrent lightweight auth probes for the same gated file', async () => {
+    await huggingFaceTokenService.saveToken('hf_test_token');
+    const service = new ModelCatalogService();
+    const headResponse = createDeferred<any>();
+    const refreshTarget: ModelMetadata = {
+      id: 'org/probe-dedupe-model',
+      name: 'probe-dedupe-model',
+      author: 'org',
+      size: 2 * 1024 * 1024 * 1024,
+      downloadUrl: 'https://huggingface.co/org/probe-dedupe-model/resolve/deadbeef/model.gguf',
+      hfRevision: 'deadbeef',
+      resolvedFileName: 'model.gguf',
+      fitsInRam: true,
+      accessState: ModelAccessState.AUTH_REQUIRED,
+      isGated: true,
+      isPrivate: false,
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+    };
+
+    global.fetch = jest.fn(() => headResponse.promise) as jest.Mock;
+
+    const pendingLeft = service.refreshModelMetadata(refreshTarget);
+    const pendingRight = service.refreshModelMetadata(refreshTarget);
+    headResponse.resolve({
+      ok: true,
+      status: 200,
+    });
+
+    const [left, right] = await Promise.all([pendingLeft, pendingRight]);
+
+    expect(left.accessState).toBe(ModelAccessState.AUTHORIZED);
+    expect(right.accessState).toBe(ModelAccessState.AUTHORIZED);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+
+    service.dispose();
+  });
+
+  it('reuses recent gated access probe results across later metadata refreshes', async () => {
+    await huggingFaceTokenService.saveToken('hf_test_token');
+    const service = new ModelCatalogService();
+
+    global.fetch = jest.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === 'HEAD') {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+        });
+      }
+
+      return Promise.resolve({
+        ok: true,
+        headers: {
+          get: jest.fn(() => null),
+        },
+        json: () => Promise.resolve([
+          {
+            id: 'org/probe-cache-model',
+            gated: 'manual',
+            siblings: [
+              {
+                rfilename: 'model.Q4_K_M.gguf',
+                size: 2 * 1024 * 1024 * 1024,
+              },
+            ],
+          },
+        ]),
+      });
+    }) as jest.Mock;
+
+    const initialResult = await service.searchModels('phi');
+    await service.refreshModelMetadata(initialResult.models[0]);
+
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+
+    service.dispose();
+  });
+
+  it('dedupes concurrent README fetches for the same detailed model revision', async () => {
+    const service = new ModelCatalogService();
+    const readmeResponse = createDeferred<any>();
+    let readmeCallCount = 0;
+
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.endsWith('/raw/main/README.md')) {
+        readmeCallCount += 1;
+        return readmeResponse.promise;
+      }
+
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve(makeRepo('org/readme-dedupe-model')),
+      });
+    }) as jest.Mock;
+
+    const pendingLeft = service.getModelDetails('org/readme-dedupe-model');
+    const pendingRight = service.getModelDetails('org/readme-dedupe-model');
+    readmeResponse.resolve({
+      ok: true,
+      text: () => Promise.resolve('# Model\n\nShared README summary for both requests.'),
+    });
+
+    const [left, right] = await Promise.all([pendingLeft, pendingRight]);
+
+    expect(left.description).toBe('Shared README summary for both requests.');
+    expect(right.description).toBe('Shared README summary for both requests.');
+    expect(readmeCallCount).toBe(1);
+
+    service.dispose();
   });
 
   it('throws model detail errors instead of returning a fabricated fallback model', async () => {

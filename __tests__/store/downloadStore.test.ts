@@ -1,4 +1,8 @@
-import { normalizePersistedDownloadQueue } from '../../src/store/downloadStore';
+import {
+  getQueuedDownloadFileNames,
+  normalizePersistedDownloadQueue,
+  useDownloadStore,
+} from '../../src/store/downloadStore';
 import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../src/types/models';
 
 function buildQueuedModel(
@@ -21,6 +25,10 @@ function buildQueuedModel(
 }
 
 describe('downloadStore', () => {
+  beforeEach(() => {
+    useDownloadStore.setState({ queue: [], activeDownloadId: null });
+  });
+
   it('normalizes in-flight persisted downloads back to queued state', () => {
     expect(
       normalizePersistedDownloadQueue([
@@ -47,5 +55,25 @@ describe('downloadStore', () => {
     expect(normalized.size).toBeNull();
     expect(normalized.fitsInRam).toBeNull();
     expect(normalized.accessState).toBe(ModelAccessState.PUBLIC);
+  });
+
+  it('keeps both revision-aware and legacy partial filenames queued during bootstrap', () => {
+    useDownloadStore.setState({
+      queue: [
+        {
+          ...buildQueuedModel('legacy/model', LifecycleStatus.QUEUED),
+          resolvedFileName: 'model.Q4_K_M.gguf',
+          hfRevision: 'cafebabe1234',
+        },
+      ],
+      activeDownloadId: null,
+    });
+
+    const queuedFileNames = getQueuedDownloadFileNames();
+
+    expect(queuedFileNames).toContain('legacy_model.gguf');
+    expect(
+      queuedFileNames.some((fileName) => fileName.startsWith('model-cafebabe1234-') && fileName.endsWith('.gguf')),
+    ).toBe(true);
   });
 });

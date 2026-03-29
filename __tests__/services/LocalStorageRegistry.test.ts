@@ -2,6 +2,7 @@ import { LocalStorageRegistry, registry } from '../../src/services/LocalStorageR
 import { LifecycleStatus, ModelAccessState, ModelMetadata } from '../../src/types/models';
 import { normalizePersistedModelMetadata } from '../../src/services/ModelMetadataNormalizer';
 import * as FileSystem from 'expo-file-system/legacy';
+import DeviceInfo from 'react-native-device-info';
 
 const mockStorage = {
   getString: jest.fn(),
@@ -18,6 +19,10 @@ jest.mock('expo-file-system/legacy', () => ({
 
 jest.mock('../../src/services/storage', () => ({
   createStorage: jest.fn().mockReturnValue(mockStorage),
+}));
+
+jest.mock('react-native-device-info', () => ({
+  getTotalMemory: jest.fn(),
 }));
 
 const originalGetModels = registry.getModels.bind(registry);
@@ -51,6 +56,7 @@ function createMockModel(overrides: Partial<ModelMetadata> = {}): ModelMetadata 
 describe('LocalStorageRegistry', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(8 * 1024 * 1024 * 1024);
     (registry as any).getModels = originalGetModels;
     (registry as any).getModel = originalGetModel;
     (registry as any).saveModels = originalSaveModels;
@@ -95,6 +101,36 @@ describe('LocalStorageRegistry', () => {
 
     const updatedModels = (registry.saveModels as jest.Mock).mock.calls[0][0];
     expect(updatedModels[0].lifecycleStatus).toBe(LifecycleStatus.DOWNLOADED);
+  });
+
+  it('hydrates unknown downloaded model sizes from the local file during registry validation', async () => {
+    (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(1024);
+    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([
+      createMockModel({ size: null, fitsInRam: null }),
+    ]);
+    (registry.saveModels as jest.Mock) = jest.fn();
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: true, size: 2048 });
+
+    await registry.validateRegistry();
+
+    const updatedModels = (registry.saveModels as jest.Mock).mock.calls[0][0];
+    expect(updatedModels[0].size).toBe(2048);
+    expect(updatedModels[0].fitsInRam).toBe(false);
+  });
+
+  it('recomputes fitsInRam for downloaded models when legacy persisted metadata is missing the flag', async () => {
+    (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(1024);
+    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([
+      createMockModel({ size: 2048, fitsInRam: null }),
+    ]);
+    (registry.saveModels as jest.Mock) = jest.fn();
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: true, size: 2048 });
+
+    await registry.validateRegistry();
+
+    const updatedModels = (registry.saveModels as jest.Mock).mock.calls[0][0];
+    expect(updatedModels[0].size).toBe(2048);
+    expect(updatedModels[0].fitsInRam).toBe(false);
   });
 
   it('normalizes legacy persisted metadata with missing access fields and zero size', () => {

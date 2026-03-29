@@ -3,6 +3,7 @@ import { persist, createJSONStorage, subscribeWithSelector } from 'zustand/middl
 import { mmkvStorage } from '../lib/mmkv';
 import { ModelMetadata, LifecycleStatus } from '../types/models';
 import { normalizePersistedModelMetadata } from '../services/ModelMetadataNormalizer';
+import { getCandidateModelDownloadFileNames } from '../utils/modelFiles';
 
 interface DownloadState {
   queue: ModelMetadata[];
@@ -86,8 +87,10 @@ export const useDownloadStore = create<DownloadState>()(
 );
 
 export function getQueuedDownloadFileNames(): string[] {
-  return useDownloadStore
-    .getState()
-    .queue
-    .map((model) => model.id.replace(/\//g, '_') + '.gguf');
+  return Array.from(new Set(
+    useDownloadStore
+      .getState()
+      .queue
+      .flatMap((model) => getCandidateModelDownloadFileNames(model)),
+  ));
 }

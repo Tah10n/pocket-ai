@@ -1,3 +1,4 @@
+import DeviceInfo from 'react-native-device-info';
 import * as FileSystem from 'expo-file-system/legacy';
 import { createStorage } from './storage';
 import { ModelMetadata, LifecycleStatus } from '../types/models';
@@ -5,6 +6,8 @@ import { MODELS_DIR } from './FileSystemSetup';
 import { normalizePersistedModelMetadata } from './ModelMetadataNormalizer';
 
 const REGISTRY_KEY = 'models-registry';
+const FITS_IN_RAM_HEADROOM_RATIO = 0.8;
+const DEFAULT_TOTAL_MEMORY_BYTES = 8 * 1024 * 1024 * 1024;
 
 export class LocalStorageRegistry {
   private static instance: LocalStorageRegistry;
@@ -83,6 +86,7 @@ export class LocalStorageRegistry {
    */
   public async validateRegistry(queuedFileNames: string[] = []): Promise<void> {
     const models = this.getModels();
+    const totalMemory = await this.getTotalMemory();
     let changed = false;
 
     // 1. Check if recorded files actually exist
@@ -99,6 +103,28 @@ export class LocalStorageRegistry {
           } else if (model.lifecycleStatus === LifecycleStatus.ACTIVE) {
             model.lifecycleStatus = LifecycleStatus.DOWNLOADED;
             changed = true;
+          }
+
+          const resolvedSize = (
+            info.exists &&
+            typeof info.size === 'number' &&
+            Number.isFinite(info.size) &&
+            info.size > 0
+          )
+            ? Math.round(info.size)
+            : null;
+
+          if (resolvedSize !== null && model.size !== resolvedSize) {
+            model.size = resolvedSize;
+            changed = true;
+          }
+
+          if (resolvedSize !== null) {
+            const fitsInRam = resolvedSize < totalMemory * FITS_IN_RAM_HEADROOM_RATIO;
+            if (model.fitsInRam !== fitsInRam) {
+              model.fitsInRam = fitsInRam;
+              changed = true;
+            }
           }
         }
       }
@@ -183,6 +209,14 @@ export class LocalStorageRegistry {
     } catch (e) {
       console.error('[LocalStorageRegistry] Failed to parse registry data', e);
       return [];
+    }
+  }
+
+  private async getTotalMemory(): Promise<number> {
+    try {
+      return await DeviceInfo.getTotalMemory();
+    } catch {
+      return DEFAULT_TOTAL_MEMORY_BYTES;
     }
   }
 }

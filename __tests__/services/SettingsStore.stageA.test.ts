@@ -145,7 +145,7 @@ describe('SettingsStore (Stage A)', () => {
 
     expect(clearLegacyChatHistory()).toBe(1);
     expect(storage.getString('chat_history_chat-1')).toBeUndefined();
-    expect(JSON.parse(storage.getString('chat_history_index') || '[]')).toEqual([]);
+    expect(storage.getString('chat_history_index')).toBeUndefined();
   });
 });
 

@@ -9,6 +9,14 @@ import {
   type CatalogCacheAuthScope,
   type CatalogCacheScope,
 } from './ModelCatalogCacheStore';
+import {
+  buildHuggingFaceModelApiUrl,
+  buildHuggingFaceRawUrl,
+  buildHuggingFaceResolveUrl,
+  buildHuggingFaceTreeUrl,
+  getHuggingFaceModelUrl,
+  HF_BASE_URL,
+} from '../utils/huggingFaceUrls';
 
 type HuggingFaceModelSummary = {
   id?: string;
@@ -101,6 +109,17 @@ type CatalogBatchResult = {
   nextCursor: string | null;
 };
 
+type CatalogRequestContext = {
+  authToken: string | null;
+  hasAuthToken: boolean;
+  authVersion: number;
+};
+
+type ResolvedFileProbeCacheEntry = {
+  state: ModelAccessState | null;
+  timestamp: number;
+};
+
 type ResolveTreeAccessStateOptions = {
   allowAuthorization?: boolean;
 };
@@ -112,17 +131,14 @@ type CreateTreeProbeCandidateOptions = {
 export type CatalogServerSort = 'downloads' | 'likes';
 export type ModelCatalogErrorCode = 'rate_limited' | 'network' | 'unknown';
 
-const HF_BASE_URL = 'https://huggingface.co';
 const MIN_GGUF_BYTES = 50 * 1024 * 1024;
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 const PERSISTENT_CACHE_MAX_AGE = 24 * 60 * 60 * 1000; // 24 hours
+const ACCESS_PROBE_CACHE_TTL = 2 * 60 * 1000; // 2 minutes
 const README_SUMMARY_MAX_LENGTH = 320;
 
-export function getHuggingFaceModelUrl(modelId: string): string {
-  return `${HF_BASE_URL}/${modelId}`;
-}
-
 export const HUGGING_FACE_TOKEN_SETTINGS_URL = `${HF_BASE_URL}/settings/tokens`;
+export { getHuggingFaceModelUrl };
 
 export class ModelCatalogError extends Error {
   public readonly code: ModelCatalogErrorCode;
@@ -131,6 +147,13 @@ export class ModelCatalogError extends Error {
     super(message);
     this.code = code;
     this.name = 'ModelCatalogError';
+  }
+}
+
+class StaleCatalogAuthError extends Error {
+  constructor() {
+    super('Catalog auth context changed while the request was in flight');
+    this.name = 'StaleCatalogAuthError';
   }
 }
 
@@ -161,6 +184,10 @@ export class ModelCatalogService {
   private persistentCache = new ModelCatalogCacheStore();
   private authCacheVersion = 0;
   private bufferedCursorSequence = 0;
+  private treeRequestCache: Map<string, Promise<HuggingFaceTreeResponse>> = new Map();
+  private readmeRequestCache: Map<string, Promise<ReadmeModelData | undefined>> = new Map();
+  private resolvedFileProbeCache: Map<string, Promise<ModelAccessState | null>> = new Map();
+  private resolvedFileProbeStateCache: Map<string, ResolvedFileProbeCacheEntry> = new Map();
   private readonly unsubscribeFromTokenService: () => void;
 
   constructor() {
@@ -170,15 +197,49 @@ export class ModelCatalogService {
       }
 
       this.authCacheVersion += 1;
-      this.bufferedCursorSequence = 0;
-      this.searchCache.clear();
-      this.modelSnapshotCache.clear();
-      this.persistentCache.clearAll();
+      this.clearCache();
     });
   }
 
   public dispose(): void {
     this.unsubscribeFromTokenService();
+  }
+
+  public getPersistentCacheBytes(): number {
+    return this.persistentCache.getPersistedSizeBytes();
+  }
+
+  public clearCache(): void {
+    this.bufferedCursorSequence = 0;
+    this.searchCache.clear();
+    this.modelSnapshotCache.clear();
+    this.treeRequestCache.clear();
+    this.readmeRequestCache.clear();
+    this.resolvedFileProbeCache.clear();
+    this.resolvedFileProbeStateCache.clear();
+    this.persistentCache.clearAll();
+  }
+
+  private async createRequestContext(): Promise<CatalogRequestContext> {
+    while (true) {
+      const authVersion = this.authCacheVersion;
+      const authToken = await huggingFaceTokenService.getToken();
+      if (authVersion !== this.authCacheVersion) {
+        continue;
+      }
+
+      return {
+        authToken,
+        hasAuthToken: Boolean(authToken),
+        authVersion,
+      };
+    }
+  }
+
+  private assertRequestContextIsCurrent(requestContext: CatalogRequestContext): void {
+    if (this.authCacheVersion !== requestContext.authVersion) {
+      throw new StaleCatalogAuthError();
+    }
   }
 
   /**
@@ -188,12 +249,20 @@ export class ModelCatalogService {
     query: string = 'gguf',
     options?: { cursor?: string | null; pageSize?: number; sort?: CatalogServerSort | null },
   ): Promise<ModelCatalogSearchResult> {
-    const authToken = await huggingFaceTokenService.getToken();
+    return this.searchModelsInternal(query, options, 0);
+  }
+
+  private async searchModelsInternal(
+    query: string,
+    options: { cursor?: string | null; pageSize?: number; sort?: CatalogServerSort | null } | undefined,
+    retryCount: number,
+  ): Promise<ModelCatalogSearchResult> {
+    const requestContext = await this.createRequestContext();
     const cursor = options?.cursor ?? null;
     const pageSize = options?.pageSize ?? 20;
     const sort = options?.sort ?? null;
     const normalizedQuery = this.normalizeQuery(query);
-    const hasAuthToken = Boolean(authToken);
+    const hasAuthToken = requestContext.hasAuthToken;
     const cacheKey = this.buildMemorySearchCacheKey(
       normalizedQuery,
       cursor,
@@ -208,7 +277,7 @@ export class ModelCatalogService {
     if (cached && (isCacheFresh || isBufferedCursor)) {
       return {
         ...cached.result,
-        models: this.mergeWithRegistry(cached.result.models),
+        models: this.mergeWithRegistry(cached.result.models, this.getAuthScope(hasAuthToken)),
       };
     }
 
@@ -240,10 +309,11 @@ export class ModelCatalogService {
         normalizedQuery,
         pageSize,
         totalMemory,
-        authToken,
+        requestContext,
         cursor,
         sort,
       );
+      this.assertRequestContextIsCurrent(requestContext);
       const result = {
         models: fetched.models,
         hasMore: fetched.nextCursor !== null,
@@ -263,9 +333,17 @@ export class ModelCatalogService {
 
       return {
         ...result,
-        models: this.mergeWithRegistry(result.models),
+        models: this.mergeWithRegistry(result.models, this.getAuthScope(hasAuthToken)),
       };
     } catch (e) {
+      if (e instanceof StaleCatalogAuthError) {
+        if (cursor === null && retryCount < 1) {
+          return this.searchModelsInternal(query, options, retryCount + 1);
+        }
+
+        throw new ModelCatalogError('network', 'Catalog auth context changed during request');
+      }
+
       console.error('[ModelCatalogService] Search failed', e);
 
       if (e instanceof ModelCatalogError) {
@@ -294,20 +372,56 @@ export class ModelCatalogService {
   }
 
   public getCachedModel(modelId: string): ModelMetadata | null {
-    const cached = this.modelSnapshotCache.get(modelId);
-    const merged = this.mergeModelWithRegistry(cached);
-    if (merged) {
-      return merged;
-    }
-
-    const persisted = this.persistentCache.getModelSnapshot(modelId, PERSISTENT_CACHE_MAX_AGE);
-    const mergedPersisted = this.mergeModelWithRegistry(persisted ?? undefined);
-    if (mergedPersisted) {
-      this.upsertModelSnapshots([mergedPersisted]);
-      return mergedPersisted;
+    const cachedSnapshot = this.getCachedModelSnapshot(modelId);
+    if (cachedSnapshot) {
+      const merged = this.mergeModelWithRegistry(cachedSnapshot.model);
+      if (merged) {
+        this.cacheModelSnapshotsInMemory([merged], cachedSnapshot.authScope);
+        return merged;
+      }
     }
 
     return registry.getModel(modelId) ?? null;
+  }
+
+  private getCachedModelSnapshot(
+    modelId: string,
+  ): { model: ModelMetadata; authScope: CatalogCacheAuthScope } | null {
+    for (const authScope of this.getSnapshotReadScopes()) {
+      const inMemorySnapshot = this.modelSnapshotCache.get(
+        this.buildModelSnapshotCacheKey(modelId, authScope),
+      );
+      if (inMemorySnapshot) {
+        return { model: inMemorySnapshot, authScope };
+      }
+
+      const persistedSnapshot = this.persistentCache.getModelSnapshot(
+        modelId,
+        authScope,
+        PERSISTENT_CACHE_MAX_AGE,
+      );
+      if (persistedSnapshot) {
+        return { model: persistedSnapshot, authScope };
+      }
+    }
+
+    return null;
+  }
+
+  private getSnapshotReadScopes(): CatalogCacheAuthScope[] {
+    const currentScope = this.getCurrentSnapshotAuthScope();
+    return currentScope === 'auth' ? ['auth', 'anon'] : ['anon'];
+  }
+
+  private getCurrentSnapshotAuthScope(): CatalogCacheAuthScope {
+    return this.getAuthScope(huggingFaceTokenService.getCachedState().hasToken);
+  }
+
+  private buildModelSnapshotCacheKey(
+    modelId: string,
+    authScope: CatalogCacheAuthScope,
+  ): string {
+    return `${modelId}::${authScope}`;
   }
 
   public getCachedSearchResult(
@@ -353,7 +467,7 @@ export class ModelCatalogService {
     if (isMemoryEntryFresh && memoryEntry) {
       return {
         ...memoryEntry.result,
-        models: this.mergeWithRegistry(memoryEntry.result.models),
+        models: this.mergeWithRegistry(memoryEntry.result.models, this.getAuthScope(hasToken)),
       };
     }
 
@@ -365,7 +479,7 @@ export class ModelCatalogService {
       return null;
     }
 
-    const mergedModels = this.mergeWithRegistry(persistentEntry.models);
+    const mergedModels = this.mergeWithRegistry(persistentEntry.models, this.getAuthScope(hasToken));
     return {
       ...persistentEntry,
       models: mergedModels,
@@ -390,89 +504,137 @@ export class ModelCatalogService {
   }
 
   public async getModelDetails(modelId: string): Promise<ModelMetadata> {
-    const authToken = await huggingFaceTokenService.getToken();
+    return this.getModelDetailsInternal(modelId, 0);
+  }
+
+  private async getModelDetailsInternal(modelId: string, retryCount: number): Promise<ModelMetadata> {
+    const requestContext = await this.createRequestContext();
     const totalMemory = await this.getTotalMemory();
-    const cachedModel = this.getCachedModel(modelId);
-    const fallbackModel = cachedModel ?? this.createFallbackModel(modelId);
-    const response = await fetch(`${HF_BASE_URL}/api/models/${modelId}`, {
-      headers: this.buildHeaders(authToken),
-    });
-    let detailedModel = fallbackModel;
 
-    if (response.ok) {
-      const payload = await response.json() as HuggingFaceModelSummary;
-      detailedModel = this.buildModelMetadataFromPayload(payload, totalMemory, authToken, fallbackModel);
-      const [resolvedModel] = await this.resolveMissingModelMetadata([detailedModel], totalMemory, authToken);
-      detailedModel = resolvedModel ?? detailedModel;
-    } else if (response.status === 401 || response.status === 403) {
-      detailedModel = normalizePersistedModelMetadata({
-        ...fallbackModel,
-        accessState: authToken
-          ? ModelAccessState.ACCESS_DENIED
-          : ModelAccessState.AUTH_REQUIRED,
+    try {
+      const cachedModel = this.getCachedModel(modelId);
+      const fallbackModel = cachedModel ?? this.createFallbackModel(modelId);
+      const response = await fetch(buildHuggingFaceModelApiUrl(modelId), {
+        headers: this.buildHeaders(requestContext.authToken),
       });
-    } else {
-      throw new ModelCatalogError('network', `HF model details failed: ${response.status}`);
-    }
+      let detailedModel = fallbackModel;
 
-    const readmeData = await this.fetchModelReadmeData(modelId, authToken).catch((error) => {
-      console.warn(`[ModelCatalogService] Failed to load README summary for ${modelId}`, error);
-      return undefined;
-    });
+      if (response.ok) {
+        const payload = await response.json() as HuggingFaceModelSummary;
+        this.assertRequestContextIsCurrent(requestContext);
+        detailedModel = this.buildModelMetadataFromPayload(
+          payload,
+          totalMemory,
+          requestContext.authToken,
+          fallbackModel,
+        );
+        const [resolvedModel] = await this.resolveMissingModelMetadata(
+          [detailedModel],
+          totalMemory,
+          requestContext,
+        );
+        detailedModel = resolvedModel ?? detailedModel;
+      } else if (response.status === 401 || response.status === 403) {
+        detailedModel = normalizePersistedModelMetadata({
+          ...fallbackModel,
+          accessState: requestContext.authToken
+            ? ModelAccessState.ACCESS_DENIED
+            : ModelAccessState.AUTH_REQUIRED,
+        });
+      } else {
+        throw new ModelCatalogError('network', `HF model details failed: ${response.status}`);
+      }
 
-    if (readmeData) {
-      detailedModel = normalizePersistedModelMetadata({
-        ...detailedModel,
-        description: readmeData.description ?? detailedModel.description,
-        modelType: this.resolveStringMetadata(
-          detailedModel.modelType,
-          readmeData.cardData?.model_type,
-        ),
-        baseModels: this.resolveStringArrayMetadata(
-          detailedModel.baseModels,
-          readmeData.cardData?.base_model,
-        ),
-        license: this.resolveStringMetadata(
-          detailedModel.license,
-          readmeData.cardData?.license,
-        ),
-        languages: this.resolveStringArrayMetadata(
-          detailedModel.languages,
-          readmeData.cardData?.language,
-        ),
-        datasets: this.resolveStringArrayMetadata(
-          detailedModel.datasets,
-          readmeData.cardData?.datasets,
-        ),
-        quantizedBy: this.resolveStringMetadata(
-          detailedModel.quantizedBy,
-          readmeData.cardData?.quantized_by,
-        ),
-        modelCreator: this.resolveStringMetadata(
-          detailedModel.modelCreator,
-          readmeData.cardData?.model_creator,
-        ),
+      const readmeData = await this.fetchModelReadmeData(
+        modelId,
+        detailedModel.hfRevision,
+        requestContext,
+      ).catch((error) => {
+        if (error instanceof StaleCatalogAuthError) {
+          throw error;
+        }
+
+        console.warn(`[ModelCatalogService] Failed to load README summary for ${modelId}`, error);
+        return undefined;
       });
-    }
 
-    this.upsertModelSnapshots([detailedModel]);
-    return this.mergeModelWithRegistry(detailedModel) ?? detailedModel;
+      if (readmeData) {
+        detailedModel = normalizePersistedModelMetadata({
+          ...detailedModel,
+          description: readmeData.description ?? detailedModel.description,
+          modelType: this.resolveStringMetadata(
+            detailedModel.modelType,
+            readmeData.cardData?.model_type,
+          ),
+          baseModels: this.resolveStringArrayMetadata(
+            detailedModel.baseModels,
+            readmeData.cardData?.base_model,
+          ),
+          license: this.resolveStringMetadata(
+            detailedModel.license,
+            readmeData.cardData?.license,
+          ),
+          languages: this.resolveStringArrayMetadata(
+            detailedModel.languages,
+            readmeData.cardData?.language,
+          ),
+          datasets: this.resolveStringArrayMetadata(
+            detailedModel.datasets,
+            readmeData.cardData?.datasets,
+          ),
+          quantizedBy: this.resolveStringMetadata(
+            detailedModel.quantizedBy,
+            readmeData.cardData?.quantized_by,
+          ),
+          modelCreator: this.resolveStringMetadata(
+            detailedModel.modelCreator,
+            readmeData.cardData?.model_creator,
+          ),
+        });
+      }
+
+      this.assertRequestContextIsCurrent(requestContext);
+      this.upsertModelSnapshots([detailedModel], this.getAuthScope(requestContext.hasAuthToken));
+      return this.mergeModelWithRegistry(detailedModel) ?? detailedModel;
+    } catch (error) {
+      if (error instanceof StaleCatalogAuthError && retryCount < 1) {
+        return this.getModelDetailsInternal(modelId, retryCount + 1);
+      }
+
+      throw error;
+    }
   }
 
   public async refreshModelMetadata(model: ModelMetadata): Promise<ModelMetadata> {
+    return this.refreshModelMetadataInternal(model, 0);
+  }
+
+  private async refreshModelMetadataInternal(
+    model: ModelMetadata,
+    retryCount: number,
+  ): Promise<ModelMetadata> {
+    const requestContext = await this.createRequestContext();
     const totalMemory = await this.getTotalMemory();
-    const authToken = await huggingFaceTokenService.getToken();
-    const [resolved] = await this.resolveMissingModelMetadata([model], totalMemory, authToken);
-    const refreshed = resolved ?? model;
-    this.upsertModelSnapshots([refreshed]);
-    return refreshed;
+    try {
+      const [resolved] = await this.resolveMissingModelMetadata([model], totalMemory, requestContext);
+      this.assertRequestContextIsCurrent(requestContext);
+      const refreshed = resolved ?? model;
+      this.upsertModelSnapshots([refreshed], this.getAuthScope(requestContext.hasAuthToken));
+      return refreshed;
+    } catch (error) {
+      if (error instanceof StaleCatalogAuthError && retryCount < 1) {
+        return this.refreshModelMetadataInternal(model, retryCount + 1);
+      }
+
+      throw error;
+    }
   }
 
   public async getLocalModels(): Promise<ModelMetadata[]> {
     const localModels = registry.getModels().map((model) => (
-      this.mergeModelWithRegistry(this.modelSnapshotCache.get(model.id) ?? model) ?? model
+      this.getCachedModel(model.id) ?? model
     ));
-    this.upsertModelSnapshots(localModels);
+    this.upsertModelSnapshots(localModels, 'anon');
     return localModels;
   }
 
@@ -482,7 +644,7 @@ export class ModelCatalogService {
       model.id.toLowerCase().includes(query.toLowerCase()),
     );
     const merged = filtered.map((model) => this.mergeModelWithRegistry(model) ?? model);
-    this.upsertModelSnapshots(merged);
+    this.upsertModelSnapshots(merged, 'anon');
 
     return {
       models: merged,
@@ -502,11 +664,11 @@ export class ModelCatalogService {
   private async resolveMissingModelMetadata(
     models: ModelMetadata[],
     totalMemory: number,
-    authToken: string | null,
+    requestContext: CatalogRequestContext,
   ): Promise<ModelMetadata[]> {
     const resolveModel = async (model: ModelMetadata): Promise<ModelMetadata | null> => {
       const hasKnownSize = typeof model.size === 'number' && model.size > 0;
-      const requiresAuthValidation = Boolean(authToken) && (
+      const requiresAuthValidation = requestContext.hasAuthToken && (
         model.accessState !== ModelAccessState.PUBLIC ||
         model.isGated ||
         model.isPrivate
@@ -516,12 +678,32 @@ export class ModelCatalogService {
         return model;
       }
 
+      if (hasKnownSize && requiresAuthValidation) {
+        const probedAccessState = await this.probeResolvedModelAccess(model, requestContext);
+        if (probedAccessState) {
+          return normalizePersistedModelMetadata({
+            ...model,
+            accessState: probedAccessState,
+            requiresTreeProbe: false,
+          });
+        }
+      }
+
       try {
-        const treeResponse = await this.fetchHuggingFaceModelTree(model.id, authToken);
+        const treeResponse = await this.fetchHuggingFaceModelTree(
+          model.id,
+          model.hfRevision,
+          requestContext,
+        );
         const selectedEntry = this.selectTreeEntryForModel(model, treeResponse.entries);
-        const accessState = this.resolveTreeAccessState(model, authToken, treeResponse.status, {
+        const accessState = this.resolveTreeAccessState(
+          model,
+          requestContext.authToken,
+          treeResponse.status,
+          {
           allowAuthorization: treeResponse.isComplete || selectedEntry !== undefined,
-        });
+          },
+        );
 
         if (!selectedEntry) {
           if (
@@ -550,11 +732,16 @@ export class ModelCatalogService {
           fitsInRam,
           accessState,
           requiresTreeProbe: false,
+          hfRevision: model.hfRevision,
           resolvedFileName,
-          downloadUrl: `${HF_BASE_URL}/${model.id}/resolve/main/${resolvedFileName}`,
+          downloadUrl: buildHuggingFaceResolveUrl(model.id, resolvedFileName, model.hfRevision),
           sha256: this.getFileSha(selectedEntry) ?? model.sha256,
         });
       } catch (error) {
+        if (error instanceof StaleCatalogAuthError) {
+          throw error;
+        }
+
         console.warn(`[ModelCatalogService] Failed to resolve tree metadata for ${model.id}`, error);
       }
 
@@ -576,7 +763,7 @@ export class ModelCatalogService {
     normalizedQuery: string,
     minimumResults: number,
     totalMemory: number,
-    authToken: string | null,
+    requestContext: CatalogRequestContext,
     initialCursor: string | null,
     sort: CatalogServerSort | null,
   ): Promise<CatalogBatchResult> {
@@ -595,12 +782,16 @@ export class ModelCatalogService {
       const page = await this.fetchHuggingFaceModels(
         normalizedQuery,
         requestLimit,
-        authToken,
+        requestContext,
         requestedCursor,
         sort,
       );
-      const baseModels = this.transformHFResponse(page.items, totalMemory, authToken);
-      const hydratedModels = await this.resolveMissingModelMetadata(baseModels, totalMemory, authToken);
+      const baseModels = this.transformHFResponse(page.items, totalMemory, requestContext.authToken);
+      const hydratedModels = await this.resolveMissingModelMetadata(
+        baseModels,
+        totalMemory,
+        requestContext,
+      );
       models = this.mergeUniqueModelsById([...models, ...hydratedModels]);
       nextCursor = this.resolveNextCatalogCursor(requestedCursor, page.nextCursor, visitedCursors);
       exhausted = nextCursor === null;
@@ -616,7 +807,7 @@ export class ModelCatalogService {
       nextCursor,
       minimumResults,
       sort,
-      Boolean(authToken),
+      requestContext.hasAuthToken,
     );
   }
 
@@ -693,14 +884,15 @@ export class ModelCatalogService {
   private async fetchHuggingFaceModels(
     normalizedQuery: string,
     limit: number,
-    authToken: string | null,
+    requestContext: CatalogRequestContext,
     nextCursor: string | null = null,
     sort: CatalogServerSort | null = null,
   ): Promise<HuggingFaceModelsPage> {
     const url = nextCursor ?? this.buildSearchUrl(normalizedQuery, limit, sort);
     const response = await fetch(url, {
-      headers: this.buildHeaders(authToken),
+      headers: this.buildHeaders(requestContext.authToken),
     });
+    this.assertRequestContextIsCurrent(requestContext);
 
     if (!response.ok) {
       if (response.status === 429) {
@@ -710,8 +902,11 @@ export class ModelCatalogService {
       throw new ModelCatalogError('network', `HF Search failed: ${response.status}`);
     }
 
+    const items = await response.json() as HuggingFaceModelSummary[];
+    this.assertRequestContextIsCurrent(requestContext);
+
     return {
-      items: await response.json() as HuggingFaceModelSummary[],
+      items,
       nextCursor: this.parseNextCursor(
         typeof response.headers?.get === 'function'
           ? response.headers.get('link')
@@ -780,6 +975,7 @@ export class ModelCatalogService {
       const size = this.getFileSize(ggufSibling) ?? item.gguf?.total ?? null;
       const fitsInRam = typeof size === 'number' ? size < totalMemory * 0.8 : null;
       const fileName = this.getFileName(ggufSibling) || 'model.gguf';
+      const hfRevision = item.sha ?? undefined;
       const maxContextTokens = this.resolveMaxContextTokens(item.config) ?? item.gguf?.context_length;
       const requiresAuth = Boolean(item.gated) || item.private === true;
       const accessState = requiresAuth
@@ -791,7 +987,8 @@ export class ModelCatalogService {
         name: repoId.split('/').pop() || repoId,
         author: item.author || repoId.split('/')[0],
         size,
-        downloadUrl: `${HF_BASE_URL}/${repoId}/resolve/main/${fileName}`,
+        downloadUrl: buildHuggingFaceResolveUrl(repoId, fileName, hfRevision),
+        hfRevision,
         resolvedFileName: fileName,
         fitsInRam,
         accessState,
@@ -823,11 +1020,11 @@ export class ModelCatalogService {
     repoId: string,
     options?: CreateTreeProbeCandidateOptions,
   ): ModelMetadata | null {
+    const requiresAuth = Boolean(item.gated) || item.private === true;
     if (!this.hasGgufCatalogSignal(repoId, item.tags)) {
       return null;
     }
 
-    const requiresAuth = Boolean(item.gated) || item.private === true;
     if (!requiresAuth && options?.allowPublic !== true) {
       return null;
     }
@@ -837,7 +1034,7 @@ export class ModelCatalogService {
       name: repoId.split('/').pop() || repoId,
       author: item.author || repoId.split('/')[0],
       size: null,
-      downloadUrl: `${HF_BASE_URL}/${repoId}/resolve/main/model.gguf`,
+      downloadUrl: buildHuggingFaceResolveUrl(repoId, 'model.gguf', item.sha ?? undefined),
       fitsInRam: null,
       accessState: requiresAuth
         ? ModelAccessState.AUTH_REQUIRED
@@ -847,6 +1044,7 @@ export class ModelCatalogService {
       lifecycleStatus: LifecycleStatus.AVAILABLE,
       downloadProgress: 0,
       requiresTreeProbe: true,
+      hfRevision: item.sha ?? undefined,
       maxContextTokens: this.resolveMaxContextTokens(item.config) ?? item.gguf?.context_length,
       modelType: item.config?.model_type ?? item.gguf?.architecture,
       baseModels: this.resolveStringArrayMetadata(undefined, item.cardData?.base_model),
@@ -868,6 +1066,7 @@ export class ModelCatalogService {
     fallbackModel: ModelMetadata,
   ): ModelMetadata {
     const repoId = payload.id || payload.modelId || fallbackModel.id;
+    const hfRevision = payload.sha ?? fallbackModel.hfRevision;
     const selectedEntry = this.selectPreferredGgufEntry(payload.siblings ?? []);
     const resolvedFileName = selectedEntry
       ? this.getFileName(selectedEntry)
@@ -885,8 +1084,9 @@ export class ModelCatalogService {
       author: payload.author || repoId.split('/')[0],
       size,
       downloadUrl: resolvedFileName
-        ? `${HF_BASE_URL}/${repoId}/resolve/main/${resolvedFileName}`
+        ? buildHuggingFaceResolveUrl(repoId, resolvedFileName, hfRevision)
         : fallbackModel.downloadUrl,
+      hfRevision,
       resolvedFileName,
       fitsInRam,
       accessState: this.resolveDetailAccessState(requiresAuth, authToken, fallbackModel.accessState),
@@ -914,7 +1114,7 @@ export class ModelCatalogService {
       name: modelId.split('/').pop() || modelId,
       author: modelId.split('/')[0] || 'unknown',
       size: null,
-      downloadUrl: `${HF_BASE_URL}/${modelId}/resolve/main/model.gguf`,
+      downloadUrl: buildHuggingFaceResolveUrl(modelId, 'model.gguf', undefined),
       fitsInRam: null,
       accessState: ModelAccessState.PUBLIC,
       isGated: false,
@@ -924,9 +1124,12 @@ export class ModelCatalogService {
     });
   }
 
-  private mergeWithRegistry(remoteModels: ModelMetadata[]): ModelMetadata[] {
+  private mergeWithRegistry(
+    remoteModels: ModelMetadata[],
+    authScope: CatalogCacheAuthScope = 'anon',
+  ): ModelMetadata[] {
     const merged = remoteModels.map((model) => this.mergeModelWithRegistry(model) ?? model);
-    this.upsertModelSnapshots(merged);
+    this.upsertModelSnapshots(merged, authScope);
     return merged;
   }
 
@@ -943,6 +1146,7 @@ export class ModelCatalogService {
     return normalizePersistedModelMetadata({
       ...remoteModel,
       size: remoteModel.size ?? localModel.size,
+      hfRevision: remoteModel.hfRevision ?? localModel.hfRevision,
       resolvedFileName: remoteModel.resolvedFileName ?? localModel.resolvedFileName,
       localPath: localModel.localPath,
       downloadedAt: localModel.downloadedAt,
@@ -970,81 +1174,195 @@ export class ModelCatalogService {
     });
   }
 
-  private upsertModelSnapshots(models: ModelMetadata[]) {
+  private cacheModelSnapshotsInMemory(
+    models: ModelMetadata[],
+    authScope: CatalogCacheAuthScope,
+  ) {
     const normalizedModels = models.map((model) => normalizePersistedModelMetadata(model));
     normalizedModels.forEach((model) => {
-      this.modelSnapshotCache.set(model.id, model);
+      this.modelSnapshotCache.set(this.buildModelSnapshotCacheKey(model.id, authScope), model);
     });
-    this.persistentCache.putModelSnapshots(normalizedModels);
+  }
+
+  private upsertModelSnapshots(
+    models: ModelMetadata[],
+    authScope: CatalogCacheAuthScope = 'anon',
+  ) {
+    const normalizedModels = models.map((model) => normalizePersistedModelMetadata(model));
+    this.cacheModelSnapshotsInMemory(normalizedModels, authScope);
+    this.persistentCache.putModelSnapshots(normalizedModels, authScope);
   }
 
   private async fetchHuggingFaceModelTree(
     repoId: string,
-    authToken: string | null,
+    revision: string | undefined,
+    requestContext: CatalogRequestContext,
   ): Promise<HuggingFaceTreeResponse> {
-    let nextCursor: string | null = `${HF_BASE_URL}/api/models/${repoId}/tree/main?recursive=true`;
-    const visitedCursors = new Set<string>();
-    const entries: HuggingFaceTreeEntry[] = [];
-    let status = 200;
-    let isComplete = true;
+    return this.withInFlightDedup(
+      this.treeRequestCache,
+      this.buildRequestCacheKey('tree', repoId, revision, requestContext),
+      async () => {
+        let nextCursor: string | null = buildHuggingFaceTreeUrl(repoId, revision);
+        const visitedCursors = new Set<string>();
+        const entries: HuggingFaceTreeEntry[] = [];
+        let status = 200;
+        let isComplete = true;
 
-    while (nextCursor !== null) {
-      const requestedCursor = nextCursor;
-      visitedCursors.add(requestedCursor);
+        while (nextCursor !== null) {
+          const requestedCursor = nextCursor;
+          visitedCursors.add(requestedCursor);
 
-      const response = await fetch(requestedCursor, {
-        headers: this.buildHeaders(authToken),
-      });
+          const response = await fetch(requestedCursor, {
+            headers: this.buildHeaders(requestContext.authToken),
+          });
+          this.assertRequestContextIsCurrent(requestContext);
 
-      if (!response.ok) {
-        if (entries.length > 0) {
-          console.warn(`[ModelCatalogService] Tree pagination stopped early for ${repoId}: ${response.status}`);
-          isComplete = false;
-          break;
+          if (!response.ok) {
+            if (entries.length > 0) {
+              console.warn(`[ModelCatalogService] Tree pagination stopped early for ${repoId}: ${response.status}`);
+              isComplete = false;
+              break;
+            }
+
+            return {
+              entries: [],
+              status: response.status,
+              isComplete: false,
+            };
+          }
+
+          status = response.status;
+          entries.push(...await response.json() as HuggingFaceTreeEntry[]);
+          this.assertRequestContextIsCurrent(requestContext);
+          nextCursor = this.resolveNextCatalogCursor(
+            requestedCursor,
+            this.parseNextCursor(
+              typeof response.headers?.get === 'function'
+                ? response.headers.get('link')
+                : null,
+            ),
+            visitedCursors,
+          );
         }
 
         return {
-          entries: [],
-          status: response.status,
-          isComplete: false,
+          entries,
+          status,
+          isComplete,
         };
-      }
-
-      status = response.status;
-      entries.push(...await response.json() as HuggingFaceTreeEntry[]);
-      nextCursor = this.resolveNextCatalogCursor(
-        requestedCursor,
-        this.parseNextCursor(
-          typeof response.headers?.get === 'function'
-            ? response.headers.get('link')
-            : null,
-        ),
-        visitedCursors,
-      );
-    }
-
-    return {
-      entries,
-      status,
-      isComplete,
-    };
+      },
+    );
   }
 
   private async fetchModelReadmeData(
     repoId: string,
-    authToken: string | null,
+    revision: string | undefined,
+    requestContext: CatalogRequestContext,
   ): Promise<ReadmeModelData | undefined> {
-    const response = await fetch(`${getHuggingFaceModelUrl(repoId)}/raw/main/README.md`, {
-      headers: this.buildHeaders(authToken),
-    });
+    return this.withInFlightDedup(
+      this.readmeRequestCache,
+      this.buildRequestCacheKey('readme', repoId, revision, requestContext),
+      async () => {
+        const response = await fetch(buildHuggingFaceRawUrl(repoId, 'README.md', revision), {
+          headers: this.buildHeaders(requestContext.authToken),
+        });
+        this.assertRequestContextIsCurrent(requestContext);
 
-    if (!response.ok) {
-      return undefined;
+        if (!response.ok) {
+          return undefined;
+        }
+
+        const markdown = await response.text();
+        this.assertRequestContextIsCurrent(requestContext);
+        const readmeData = this.extractReadmeData(markdown);
+        return readmeData.description || readmeData.cardData ? readmeData : undefined;
+      },
+    );
+  }
+
+  private async probeResolvedModelAccess(
+    model: Pick<ModelMetadata, 'id' | 'resolvedFileName' | 'hfRevision'>,
+    requestContext: CatalogRequestContext,
+  ): Promise<ModelAccessState | null> {
+    const resolvedFileName = model.resolvedFileName;
+    if (!requestContext.authToken || !resolvedFileName) {
+      return null;
     }
 
-    const markdown = await response.text();
-    const readmeData = this.extractReadmeData(markdown);
-    return readmeData.description || readmeData.cardData ? readmeData : undefined;
+    const cacheKey = this.buildRequestCacheKey(
+      'probe',
+      model.id,
+      model.hfRevision,
+      requestContext,
+      model.resolvedFileName,
+    );
+    const cachedState = this.getCachedResolvedFileProbeState(cacheKey);
+    if (cachedState !== undefined) {
+      return cachedState;
+    }
+
+    return this.withInFlightDedup(
+      this.resolvedFileProbeCache,
+      cacheKey,
+      async () => {
+        const probeUrl = buildHuggingFaceResolveUrl(
+          model.id,
+          resolvedFileName,
+          model.hfRevision,
+        );
+        const cacheResolvedProbeState = (state: ModelAccessState | null): ModelAccessState | null => {
+          this.setCachedResolvedFileProbeState(cacheKey, state);
+          return state;
+        };
+
+        try {
+          const headResponse = await fetch(probeUrl, {
+            method: 'HEAD',
+            headers: this.buildHeaders(requestContext.authToken),
+          });
+          this.assertRequestContextIsCurrent(requestContext);
+          const headState = this.resolveResolvedFileProbeState(
+            headResponse.status,
+            requestContext.authToken,
+          );
+          if (headState) {
+            return cacheResolvedProbeState(headState);
+          }
+
+          if (headResponse.ok) {
+            return cacheResolvedProbeState(ModelAccessState.AUTHORIZED);
+          }
+
+          if (!this.shouldRetryResolvedFileProbe(headResponse.status)) {
+            return cacheResolvedProbeState(null);
+          }
+
+          const getResponse = await fetch(probeUrl, {
+            method: 'GET',
+            headers: {
+              ...(this.buildHeaders(requestContext.authToken) ?? {}),
+              Range: 'bytes=0-0',
+            },
+          });
+          this.assertRequestContextIsCurrent(requestContext);
+          const getState = this.resolveResolvedFileProbeState(
+            getResponse.status,
+            requestContext.authToken,
+          );
+          if (getState) {
+            return cacheResolvedProbeState(getState);
+          }
+
+          return cacheResolvedProbeState(getResponse.ok ? ModelAccessState.AUTHORIZED : null);
+        } catch (error) {
+          if (error instanceof StaleCatalogAuthError) {
+            throw error;
+          }
+
+          return cacheResolvedProbeState(null);
+        }
+      },
+    );
   }
 
   private extractReadmeData(markdown: string): ReadmeModelData {
@@ -1307,6 +1625,67 @@ export class ModelCatalogService {
     return lfs?.sha256 || lfs?.oid;
   }
 
+  private getCachedResolvedFileProbeState(key: string): ModelAccessState | null | undefined {
+    const cachedEntry = this.resolvedFileProbeStateCache.get(key);
+    if (!cachedEntry) {
+      return undefined;
+    }
+
+    if (Date.now() - cachedEntry.timestamp > ACCESS_PROBE_CACHE_TTL) {
+      this.resolvedFileProbeStateCache.delete(key);
+      return undefined;
+    }
+
+    return cachedEntry.state;
+  }
+
+  private setCachedResolvedFileProbeState(
+    key: string,
+    state: ModelAccessState | null,
+  ): void {
+    this.resolvedFileProbeStateCache.set(key, {
+      state,
+      timestamp: Date.now(),
+    });
+  }
+
+  private buildRequestCacheKey(
+    scope: 'tree' | 'readme' | 'probe',
+    repoId: string,
+    revision: string | undefined,
+    requestContext: CatalogRequestContext,
+    extraSegment?: string,
+  ): string {
+    return [
+      scope,
+      repoId,
+      revision ?? '__default__',
+      extraSegment ?? '__none__',
+      requestContext.hasAuthToken ? 'auth' : 'anon',
+      requestContext.authVersion,
+    ].join('::');
+  }
+
+  private async withInFlightDedup<T>(
+    requestMap: Map<string, Promise<T>>,
+    key: string,
+    load: () => Promise<T>,
+  ): Promise<T> {
+    const cachedPromise = requestMap.get(key);
+    if (cachedPromise) {
+      return cachedPromise;
+    }
+
+    const requestPromise = load().finally(() => {
+      if (requestMap.get(key) === requestPromise) {
+        requestMap.delete(key);
+      }
+    });
+
+    requestMap.set(key, requestPromise);
+    return requestPromise;
+  }
+
   private parseNextCursor(linkHeader: string | null): string | null {
     if (!linkHeader) {
       return null;
@@ -1477,9 +1856,7 @@ export class ModelCatalogService {
     options?: ResolveTreeAccessStateOptions,
   ): ModelAccessState {
     if (responseStatus === 401 || responseStatus === 403) {
-      return authToken
-        ? ModelAccessState.ACCESS_DENIED
-        : ModelAccessState.AUTH_REQUIRED;
+      return this.resolveDeniedAccessState(authToken);
     }
 
     if (
@@ -1493,6 +1870,27 @@ export class ModelCatalogService {
     }
 
     return model.accessState;
+  }
+
+  private resolveResolvedFileProbeState(
+    responseStatus: number,
+    authToken: string | null,
+  ): ModelAccessState | null {
+    if (responseStatus === 401 || responseStatus === 403) {
+      return this.resolveDeniedAccessState(authToken);
+    }
+
+    return null;
+  }
+
+  private shouldRetryResolvedFileProbe(responseStatus: number): boolean {
+    return responseStatus === 405 || responseStatus === 501;
+  }
+
+  private resolveDeniedAccessState(authToken: string | null): ModelAccessState {
+    return authToken
+      ? ModelAccessState.ACCESS_DENIED
+      : ModelAccessState.AUTH_REQUIRED;
   }
 
   private resolveDetailAccessState(

@@ -1,4 +1,4 @@
-import type { ModelMetadata } from '../types/models';
+import { ModelAccessState, type ModelMetadata } from '../types/models';
 import { normalizePersistedModelMetadata } from './ModelMetadataNormalizer';
 import { createStorage } from './storage';
 
@@ -27,7 +27,9 @@ type SearchCacheEntry = {
 };
 
 type SnapshotCacheEntry = {
+  key: string;
   id: string;
+  authScope: CatalogCacheAuthScope;
   timestamp: number;
   model: ModelMetadata;
 };
@@ -43,6 +45,19 @@ const SNAPSHOT_CACHE_KEY = 'catalog-snapshot-cache-v1';
 const PERSISTED_CACHE_VERSION = 1;
 const MAX_PERSISTED_SEARCH_ENTRIES = 6;
 const MAX_PERSISTED_SNAPSHOT_ENTRIES = 40;
+const PERSISTED_CACHE_KEYS = [SEARCH_CACHE_KEY, SNAPSHOT_CACHE_KEY] as const;
+
+function getTextByteLength(value: string | null | undefined) {
+  if (!value) {
+    return 0;
+  }
+
+  if (typeof TextEncoder !== 'undefined') {
+    return new TextEncoder().encode(value).length;
+  }
+
+  return unescape(encodeURIComponent(value)).length;
+}
 
 function isSort(value: unknown): value is CatalogCacheSort {
   return value === null || value === 'downloads' || value === 'likes';
@@ -60,6 +75,17 @@ function normalizeModels(models: unknown): ModelMetadata[] {
       && typeof (entry as { id?: unknown }).id === 'string'
     ))
     .map((entry) => normalizePersistedModelMetadata(entry));
+}
+
+function inferSnapshotAuthScope(model: ModelMetadata): CatalogCacheAuthScope {
+  return model.accessState === ModelAccessState.AUTHORIZED
+    || model.accessState === ModelAccessState.ACCESS_DENIED
+    ? 'auth'
+    : 'anon';
+}
+
+function buildSnapshotKey(modelId: string, authScope: CatalogCacheAuthScope): string {
+  return `${modelId}::${authScope}`;
 }
 
 function normalizeSearchResult(value: unknown): CatalogCacheResult | null {
@@ -138,7 +164,9 @@ function normalizeSnapshotEntry(value: unknown): SnapshotCacheEntry | null {
   }
 
   const candidate = value as {
+    key?: unknown;
     id?: unknown;
+    authScope?: unknown;
     timestamp?: unknown;
     model?: unknown;
   };
@@ -153,8 +181,16 @@ function normalizeSnapshotEntry(value: unknown): SnapshotCacheEntry | null {
     return null;
   }
 
+  const authScope = candidate.authScope === 'auth' || candidate.authScope === 'anon'
+    ? candidate.authScope
+    : inferSnapshotAuthScope(model);
+
   return {
+    key: typeof candidate.key === 'string'
+      ? candidate.key
+      : buildSnapshotKey(candidate.id, authScope),
     id: candidate.id,
+    authScope,
     timestamp: typeof candidate.timestamp === 'number' && Number.isFinite(candidate.timestamp)
       ? Math.round(candidate.timestamp)
       : 0,
@@ -201,8 +237,12 @@ export class ModelCatalogCacheStore {
     this.persistSearchEntries();
   }
 
-  public getModelSnapshot(modelId: string, maxAgeMs: number): ModelMetadata | null {
-    const entry = this.snapshotEntries.get(modelId);
+  public getModelSnapshot(
+    modelId: string,
+    authScope: CatalogCacheAuthScope,
+    maxAgeMs: number,
+  ): ModelMetadata | null {
+    const entry = this.snapshotEntries.get(buildSnapshotKey(modelId, authScope));
     if (!entry) {
       return null;
     }
@@ -214,11 +254,14 @@ export class ModelCatalogCacheStore {
     return normalizePersistedModelMetadata(entry.model);
   }
 
-  public putModelSnapshots(models: ModelMetadata[]): void {
+  public putModelSnapshots(models: ModelMetadata[], authScope: CatalogCacheAuthScope): void {
     const timestamp = Date.now();
     models.forEach((model) => {
-      this.snapshotEntries.set(model.id, {
+      const key = buildSnapshotKey(model.id, authScope);
+      this.snapshotEntries.set(key, {
+        key,
         id: model.id,
+        authScope,
         timestamp,
         model: normalizePersistedModelMetadata(model),
       });
@@ -226,6 +269,17 @@ export class ModelCatalogCacheStore {
 
     this.pruneSnapshotEntries();
     this.persistSnapshotEntries();
+  }
+
+  public getPersistedSizeBytes(): number {
+    return PERSISTED_CACHE_KEYS.reduce((sum, key) => {
+      const value = this.storage.getString(key);
+      if (!value) {
+        return sum;
+      }
+
+      return sum + getTextByteLength(key) + getTextByteLength(value);
+    }, 0);
   }
 
   public clearAll(): void {
@@ -249,7 +303,7 @@ export class ModelCatalogCacheStore {
       normalizeSnapshotEntry,
     );
     snapshotPayload.forEach((entry) => {
-      this.snapshotEntries.set(entry.id, entry);
+      this.snapshotEntries.set(entry.key, entry);
     });
   }
 
@@ -316,7 +370,7 @@ export class ModelCatalogCacheStore {
   private pruneSnapshotEntries(): void {
     const staleEntries = this.getSortedSnapshotEntries().slice(MAX_PERSISTED_SNAPSHOT_ENTRIES);
     staleEntries.forEach((entry) => {
-      this.snapshotEntries.delete(entry.id);
+      this.snapshotEntries.delete(entry.key);
     });
   }
 

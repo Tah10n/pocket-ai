@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
-import { mmkvStorage } from '../store/storage';
+import { mmkvStorage, storage } from '../store/storage';
 import {
   ChatMessage,
   ChatMessageRole,
@@ -23,6 +23,7 @@ import { getVisibleMessageContent } from '../utils/chatPresentation';
 const FALLBACK_TOP_K = 40;
 const FALLBACK_MIN_P = 0.05;
 const FALLBACK_REPETITION_PENALTY = 1;
+const CHAT_STORE_STORAGE_KEY = 'chat-store';
 
 interface CreateThreadInput {
   modelId: string;
@@ -79,6 +80,12 @@ function updateThreadMetadata(thread: ChatThread): ChatThread {
     title,
     updatedAt: Date.now(),
   };
+}
+
+function clearPersistedChatStoreIfEmpty(threads: Record<string, ChatThread>) {
+  if (Object.keys(threads).length === 0) {
+    storage.remove(CHAT_STORE_STORAGE_KEY);
+  }
 }
 
 const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000;
@@ -189,11 +196,14 @@ export const useChatStore = create<ChatStoreState>()(
           return 0;
         }
 
+        let nextThreadsSnapshot: Record<string, ChatThread> | null = null;
+
         set((state) => {
           const nextThreads = { ...state.threads };
           expiredThreadIds.forEach((threadId) => {
             delete nextThreads[threadId];
           });
+          nextThreadsSnapshot = nextThreads;
 
           const nextActiveThreadId =
             state.activeThreadId && nextThreads[state.activeThreadId]
@@ -206,12 +216,17 @@ export const useChatStore = create<ChatStoreState>()(
           };
         });
 
+        if (nextThreadsSnapshot) {
+          clearPersistedChatStoreIfEmpty(nextThreadsSnapshot);
+        }
+
         return expiredThreadIds.length;
       },
 
       clearAllThreads: () => {
         const threadCount = Object.keys(get().threads).length;
         if (threadCount === 0) {
+          storage.remove(CHAT_STORE_STORAGE_KEY);
           return 0;
         }
 
@@ -219,6 +234,7 @@ export const useChatStore = create<ChatStoreState>()(
           threads: {},
           activeThreadId: null,
         });
+        storage.remove(CHAT_STORE_STORAGE_KEY);
 
         return threadCount;
       },
@@ -325,7 +341,9 @@ export const useChatStore = create<ChatStoreState>()(
         });
       },
 
-      deleteThread: (threadId) =>
+      deleteThread: (threadId) => {
+        let nextThreadsSnapshot: Record<string, ChatThread> | null = null;
+
         set((state) => {
           if (!state.threads[threadId]) {
             return state;
@@ -333,6 +351,7 @@ export const useChatStore = create<ChatStoreState>()(
 
           const nextThreads = { ...state.threads };
           delete nextThreads[threadId];
+          nextThreadsSnapshot = nextThreads;
 
           const nextActiveThreadId =
             state.activeThreadId !== threadId
@@ -343,7 +362,12 @@ export const useChatStore = create<ChatStoreState>()(
             threads: nextThreads,
             activeThreadId: nextActiveThreadId,
           };
-        }),
+        });
+
+        if (nextThreadsSnapshot) {
+          clearPersistedChatStoreIfEmpty(nextThreadsSnapshot);
+        }
+      },
 
       renameThread: (threadId, title) => {
         const normalizedTitle = normalizeConversationTitle(title);

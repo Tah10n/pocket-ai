@@ -3,6 +3,7 @@ import {
   ModelAccessState,
   type ModelMetadata,
 } from '../types/models';
+import { buildHuggingFaceResolveUrl } from '../utils/huggingFaceUrls';
 
 type PersistedModelMetadata = Partial<ModelMetadata> & {
   id: string;
@@ -65,7 +66,9 @@ export function normalizePersistedModelMetadata(
   model: PersistedModelMetadata,
 ): ModelMetadata {
   const size = normalizeSize(model.size);
-  const downloadUrl = normalizeNonEmptyString(model.downloadUrl) ?? `https://huggingface.co/${model.id}/resolve/main/model.gguf`;
+  const normalizedRevision = normalizeNonEmptyString(model.hfRevision);
+  const downloadUrl = normalizeNonEmptyString(model.downloadUrl)
+    ?? buildHuggingFaceResolveUrl(model.id, 'model.gguf', normalizedRevision);
   const normalizedName = normalizeNonEmptyString(model.name) ?? model.id.split('/').pop() ?? model.id;
   const normalizedAuthor = normalizeNonEmptyString(model.author) ?? model.id.split('/')[0] ?? 'unknown';
   const lifecycleStatus = normalizeLifecycleStatus(model.lifecycleStatus);
@@ -82,6 +85,7 @@ export function normalizePersistedModelMetadata(
     downloadUrl,
     allowUnknownSizeDownload: model.allowUnknownSizeDownload === true,
     requiresTreeProbe: model.requiresTreeProbe === true,
+    hfRevision: normalizedRevision,
     resolvedFileName: normalizeNonEmptyString(model.resolvedFileName),
     localPath: normalizeNonEmptyString(model.localPath),
     downloadedAt: typeof model.downloadedAt === 'number' && Number.isFinite(model.downloadedAt)

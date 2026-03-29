@@ -433,6 +433,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
         finalModel = {
           ...finalModel,
           size: finalModel.size ?? localModel.size,
+          hfRevision: finalModel.hfRevision ?? localModel.hfRevision,
           resolvedFileName: finalModel.resolvedFileName ?? localModel.resolvedFileName,
           localPath: localModel.localPath,
           downloadedAt: localModel.downloadedAt,
@@ -465,6 +466,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
         finalModel = {
           ...finalModel,
           size: finalModel.size ?? queuedItem.size,
+          hfRevision: finalModel.hfRevision ?? queuedItem.hfRevision,
           resolvedFileName: finalModel.resolvedFileName ?? queuedItem.resolvedFileName,
           localPath: queuedItem.localPath ?? finalModel.localPath,
           downloadedAt: queuedItem.downloadedAt ?? finalModel.downloadedAt,

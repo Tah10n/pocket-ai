@@ -1,12 +1,17 @@
+import DeviceInfo from 'react-native-device-info';
 import * as FileSystem from 'expo-file-system/legacy';
+import * as RNFS from 'react-native-fs';
 import { useDownloadStore } from '../store/downloadStore';
 import { ModelAccessState, ModelMetadata, LifecycleStatus } from '../types/models';
 import { registry } from './LocalStorageRegistry';
 import { MODELS_DIR } from './FileSystemSetup';
 import { AppError, toAppError } from './AppError';
 import { huggingFaceTokenService } from './HuggingFaceTokenService';
+import { HF_BASE_URL } from '../utils/huggingFaceUrls';
+import { getCandidateModelDownloadFileNames } from '../utils/modelFiles';
 
-const HF_BASE_URL = 'https://huggingface.co';
+const FITS_IN_RAM_HEADROOM_RATIO = 0.8;
+const DEFAULT_TOTAL_MEMORY_BYTES = 8 * 1024 * 1024 * 1024;
 
 export class ModelDownloadManager {
   private static instance: ModelDownloadManager;
@@ -88,7 +93,7 @@ export class ModelDownloadManager {
       throw e;
     }
 
-    const fileName = model.id.replace(/\//g, '_') + '.gguf';
+    const fileName = await this.resolveDownloadFileName(model);
     const localUri = MODELS_DIR + fileName;
 
     const callback = (downloadProgress: any) => {
@@ -138,14 +143,27 @@ export class ModelDownloadManager {
 
       updateModelInQueue(model.id, { lifecycleStatus: LifecycleStatus.VERIFYING });
       const verificationHash = await this.verifyChecksum(model, localUri);
+      const downloadedFileInfo = await FileSystem.getInfoAsync(localUri);
+      const downloadedSize = (
+        downloadedFileInfo.exists &&
+        typeof downloadedFileInfo.size === 'number' &&
+        Number.isFinite(downloadedFileInfo.size) &&
+        downloadedFileInfo.size > 0
+      )
+        ? Math.round(downloadedFileInfo.size)
+        : model.size;
+      const fitsInRam = await this.resolveFitsInRam(downloadedSize);
 
       // Success
       const completedModel: ModelMetadata = {
         ...model,
+        size: downloadedSize ?? null,
+        fitsInRam,
         localPath: fileName,
         downloadedAt: Date.now(),
         lifecycleStatus: LifecycleStatus.DOWNLOADED,
         downloadProgress: 1,
+        allowUnknownSizeDownload: false,
         sha256: verificationHash ?? model.sha256,
       };
 
@@ -187,6 +205,7 @@ export class ModelDownloadManager {
       const expectedSize = model.size;
 
       if (typeof expectedSize === 'number' && expectedSize > 0 && Math.abs(downloadedSize - expectedSize) > 1024 * 1024) {
+        await this.deleteCorruptedDownload(localUri, model.id);
         throw new AppError(
           'download_verification_failed',
           `Size mismatch: Expected ${expectedSize} but got ${downloadedSize}`,
@@ -196,9 +215,26 @@ export class ModelDownloadManager {
         );
       }
 
-      // The current runtime only validates file presence and, when known, expected size.
-      // Keep any real digest metadata, but do not fabricate a checksum marker.
-      return model.sha256?.trim() || undefined;
+      const expectedHash = this.normalizeSha256Digest(model.sha256);
+      if (!expectedHash) {
+        return undefined;
+      }
+
+      const actualHash = this.normalizeSha256Digest(
+        await RNFS.hash(this.toNativeFilePath(localUri), 'sha256'),
+      );
+      if (!actualHash || actualHash !== expectedHash) {
+        await this.deleteCorruptedDownload(localUri, model.id);
+        throw new AppError(
+          'download_verification_failed',
+          `Checksum mismatch for ${model.id}`,
+          {
+            details: { modelId: model.id, expectedHash, actualHash, localUri },
+          },
+        );
+      }
+
+      return actualHash;
     } catch (error) {
       throw toAppError(error, 'download_verification_failed');
     }
@@ -239,7 +275,8 @@ export class ModelDownloadManager {
   }
 
   public async cancelDownload(modelId: string) {
-    const { removeFromQueue, activeDownloadId, setActiveDownload } = useDownloadStore.getState();
+    const { queue, removeFromQueue, activeDownloadId, setActiveDownload } = useDownloadStore.getState();
+    const queuedModel = queue.find((model) => model.id === modelId);
     if (activeDownloadId === modelId) {
       if (this.resumable) {
         await this.resumable.pauseAsync(); // Stop active one
@@ -252,15 +289,105 @@ export class ModelDownloadManager {
 
     // Delete the partial file to free up disk space
     try {
-      const fileName = modelId.replace(/\//g, '_') + '.gguf';
-      const localUri = MODELS_DIR + fileName;
-      const fileInfo = await FileSystem.getInfoAsync(localUri);
-      if (fileInfo.exists) {
-        await FileSystem.deleteAsync(localUri, { idempotent: true });
-        console.log(`[ModelDownloadManager] Deleted partial download for ${modelId}`);
-      }
+      await this.deleteDownloadFiles(
+        queuedModel
+          ? this.getDownloadFileNameCandidates(queuedModel)
+          : getCandidateModelDownloadFileNames({
+            id: modelId,
+            resolvedFileName: undefined,
+            hfRevision: undefined,
+          }),
+        modelId,
+      );
     } catch (e) {
       console.error(`[ModelDownloadManager] Failed to delete partial file for ${modelId}`, e);
+    }
+  }
+
+  private getDownloadFileNameCandidates(
+    model: Pick<ModelMetadata, 'id' | 'resolvedFileName' | 'hfRevision' | 'localPath'>,
+  ): string[] {
+    const candidates = getCandidateModelDownloadFileNames(model);
+    return model.localPath
+      ? Array.from(new Set([model.localPath, ...candidates]))
+      : candidates;
+  }
+
+  private async resolveDownloadFileName(
+    model: Pick<ModelMetadata, 'id' | 'resolvedFileName' | 'hfRevision' | 'localPath'>,
+  ): Promise<string> {
+    const candidates = this.getDownloadFileNameCandidates(model);
+
+    for (const candidate of candidates) {
+      const info = await FileSystem.getInfoAsync(MODELS_DIR + candidate);
+      if (info.exists) {
+        return candidate;
+      }
+    }
+
+    return candidates[0];
+  }
+
+  private async deleteDownloadFiles(fileNames: string[], modelId: string): Promise<void> {
+    let deletedAnyFile = false;
+
+    for (const fileName of Array.from(new Set(fileNames))) {
+      const localUri = MODELS_DIR + fileName;
+      const fileInfo = await FileSystem.getInfoAsync(localUri);
+      if (!fileInfo.exists) {
+        continue;
+      }
+
+      await FileSystem.deleteAsync(localUri, { idempotent: true });
+      deletedAnyFile = true;
+    }
+
+    if (deletedAnyFile) {
+      console.log(`[ModelDownloadManager] Deleted partial download for ${modelId}`);
+    }
+  }
+
+  private normalizeSha256Digest(value: string | undefined): string | undefined {
+    if (typeof value !== 'string') {
+      return undefined;
+    }
+
+    const trimmed = value.trim().toLowerCase();
+    if (!trimmed) {
+      return undefined;
+    }
+
+    return trimmed.startsWith('sha256:')
+      ? trimmed.slice('sha256:'.length)
+      : trimmed;
+  }
+
+  private toNativeFilePath(fileUri: string): string {
+    if (!fileUri.startsWith('file://')) {
+      return fileUri;
+    }
+
+    return decodeURI(fileUri.replace(/^file:\/+/, '/'));
+  }
+
+  private async resolveFitsInRam(size: number | null): Promise<boolean | null> {
+    if (typeof size !== 'number' || !Number.isFinite(size) || size <= 0) {
+      return null;
+    }
+
+    try {
+      const totalMemory = await DeviceInfo.getTotalMemory();
+      return size < totalMemory * FITS_IN_RAM_HEADROOM_RATIO;
+    } catch {
+      return size < DEFAULT_TOTAL_MEMORY_BYTES * FITS_IN_RAM_HEADROOM_RATIO;
+    }
+  }
+
+  private async deleteCorruptedDownload(localUri: string, modelId: string): Promise<void> {
+    try {
+      await FileSystem.deleteAsync(localUri, { idempotent: true });
+    } catch (error) {
+      console.warn(`[ModelDownloadManager] Failed to delete corrupted download for ${modelId}`, error);
     }
   }
 }

@@ -425,6 +425,11 @@ function readChatHistoryIndex() {
 }
 
 function writeChatHistoryIndex(index: string[]) {
+    if (index.length === 0) {
+        storage.remove(CHAT_HISTORY_INDEX_KEY);
+        return;
+    }
+
     writeJsonValue(CHAT_HISTORY_INDEX_KEY, index);
 }
 

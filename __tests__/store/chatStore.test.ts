@@ -345,6 +345,51 @@ describe('chatStore', () => {
     expect(useChatStore.getState().activeThreadId).toBe(firstThreadId);
   });
 
+  it('removes persisted chat-store when deleting the last thread', () => {
+    const threadId = useChatStore.getState().createThread({
+      modelId: 'author/model-q4',
+      presetId: null,
+      presetSnapshot: {
+        id: null,
+        name: 'Default',
+        systemPrompt: 'You are helpful.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 1024,
+      },
+    });
+
+    expect(storage.getString('chat-store')).toBeTruthy();
+
+    useChatStore.getState().deleteThread(threadId);
+
+    expect(useChatStore.getState().getThread(threadId)).toBeNull();
+    expect(storage.getString('chat-store')).toBeUndefined();
+  });
+
+  it('removes persisted chat-store when clearing all threads', () => {
+    useChatStore.getState().createThread({
+      modelId: 'author/model-q4',
+      presetId: null,
+      presetSnapshot: {
+        id: null,
+        name: 'Default',
+        systemPrompt: 'You are helpful.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 1024,
+      },
+    });
+
+    expect(storage.getString('chat-store')).toBeTruthy();
+    expect(useChatStore.getState().clearAllThreads()).toBe(1);
+    expect(storage.getString('chat-store')).toBeUndefined();
+  });
+
   it('captures preset and params snapshots immutably at thread creation', () => {
     const paramsSnapshot = {
       temperature: 0.7,

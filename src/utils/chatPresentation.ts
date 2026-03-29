@@ -1,7 +1,6 @@
 import type { ChatMessageRole } from '../types/chat';
 
-const THINK_OPEN_TAG_REGEX = /^\s*<think\b[^>]*>/i;
-const THINK_CLOSE_TAG_REGEX = /<\/think>/i;
+const REASONING_OPEN_TAG_REGEX = /^\s*<(think|thinking)\b[^>]*>/i;
 
 export interface AssistantPresentation {
   finalContent: string;
@@ -16,13 +15,26 @@ function trimBoundaryBlankLines(content: string) {
     .replace(/\n+$/, '');
 }
 
+function findReasoningCloseTag(content: string, cursor: number, tagName: string) {
+  const closeTagRegex = new RegExp(`</${tagName}>`, 'i');
+  const closeMatch = content.slice(cursor).match(closeTagRegex);
+  if (!closeMatch || closeMatch.index == null) {
+    return null;
+  }
+
+  return {
+    index: cursor + closeMatch.index,
+    length: closeMatch[0].length,
+  };
+}
+
 export function getAssistantPresentation(
   content: string,
   options: {
     isStreaming?: boolean;
   } = {},
 ): AssistantPresentation {
-  if (!content || !THINK_OPEN_TAG_REGEX.test(content)) {
+  if (!content || !REASONING_OPEN_TAG_REGEX.test(content)) {
     return {
       finalContent: trimBoundaryBlankLines(content),
       thoughtContent: '',
@@ -36,15 +48,20 @@ export function getAssistantPresentation(
 
   while (true) {
     const remaining = content.slice(cursor);
-    const openMatch = remaining.match(THINK_OPEN_TAG_REGEX);
+    const openMatch = remaining.match(REASONING_OPEN_TAG_REGEX);
     if (!openMatch) {
       break;
     }
 
-    cursor += openMatch[0].length;
-    const closeMatch = content.slice(cursor).match(THINK_CLOSE_TAG_REGEX);
+    const tagName = openMatch[1]?.toLowerCase();
+    if (!tagName) {
+      break;
+    }
 
-    if (!closeMatch || closeMatch.index == null) {
+    cursor += openMatch[0].length;
+    const closeMatch = findReasoningCloseTag(content, cursor, tagName);
+
+    if (!closeMatch) {
       thoughtParts.push(trimBoundaryBlankLines(content.slice(cursor)));
       return {
         finalContent: '',
@@ -54,9 +71,9 @@ export function getAssistantPresentation(
       };
     }
 
-    const closeIndex = cursor + closeMatch.index;
+    const closeIndex = closeMatch.index;
     thoughtParts.push(trimBoundaryBlankLines(content.slice(cursor, closeIndex)));
-    cursor = closeIndex + closeMatch[0].length;
+    cursor = closeIndex + closeMatch.length;
   }
 
   return {

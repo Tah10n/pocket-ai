@@ -115,6 +115,27 @@ describe('ChatMessageBubble', () => {
     expect(Clipboard.setStringAsync).toHaveBeenCalledWith(finalContent);
   });
 
+  it('renders a thinking-tag disclosure and keeps tags out of the visible answer', async () => {
+    const content = '<thinking>internal chain</thinking>\n\n**Visible answer**\n\n- bullet';
+    const finalContent = '**Visible answer**\n\n- bullet';
+    const { getByTestId, getByText, queryByText } = render(
+      <ChatMessageBubble id="assistant-thinking" isUser={false} content={content} />,
+    );
+
+    expect(getByText(finalContent)).toBeTruthy();
+    expect(queryByText(/<thinking>/i)).toBeNull();
+
+    fireEvent.press(getByTestId('thought-toggle-assistant-thinking'));
+
+    expect(getByText('internal chain')).toBeTruthy();
+
+    await act(async () => {
+      fireEvent.press(getByTestId('copy-message-assistant-thinking'));
+    });
+
+    expect(Clipboard.setStringAsync).toHaveBeenCalledWith(finalContent);
+  });
+
   it('keeps explicit thought content out of the main assistant message', async () => {
     const { getByTestId, getByText, queryByText } = render(
       <ChatMessageBubble
@@ -151,6 +172,20 @@ describe('ChatMessageBubble', () => {
     fireEvent.press(getByTestId('thought-toggle-assistant-3'));
 
     expect(getByTestId('thought-panel-assistant-3')).toBeTruthy();
+    expect(getByText(/Planning the answer step by step/)).toBeTruthy();
+    expect(getByTestId('streaming-cursor')).toBeTruthy();
+  });
+
+  it('shows a live thought panel for an unclosed thinking tag while streaming', () => {
+    const content = '<thinking>Planning the answer step by step';
+    const { getByTestId, getByText, queryByText } = render(
+      <ChatMessageBubble id="assistant-thinking-stream" isUser={false} content={content} isStreaming />,
+    );
+
+    expect(queryByText(/<thinking>/i)).toBeNull();
+
+    fireEvent.press(getByTestId('thought-toggle-assistant-thinking-stream'));
+
     expect(getByText(/Planning the answer step by step/)).toBeTruthy();
     expect(getByTestId('streaming-cursor')).toBeTruthy();
   });

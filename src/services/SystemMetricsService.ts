@@ -33,7 +33,9 @@ export async function getSystemMemorySnapshot(): Promise<SystemMemorySnapshot | 
   const totalBytes = toSafeByteCount(snapshot.totalBytes);
   const availableBytes = toSafeByteCount(snapshot.availableBytes);
   const usedBytes = toSafeByteCount(snapshot.usedBytes || totalBytes - availableBytes);
-  const appUsedBytes = toSafeByteCount(snapshot.appUsedBytes);
+  const appResidentBytes = toSafeByteCount(snapshot.appResidentBytes);
+  const appPssBytes = toSafeByteCount(snapshot.appPssBytes);
+  const appUsedBytes = appPssBytes || appResidentBytes || toSafeByteCount(snapshot.appUsedBytes);
 
   if (totalBytes <= 0) {
     return null;
@@ -43,7 +45,9 @@ export async function getSystemMemorySnapshot(): Promise<SystemMemorySnapshot | 
     totalBytes,
     availableBytes: Math.min(availableBytes, totalBytes),
     usedBytes: Math.min(Math.max(usedBytes, 0), totalBytes),
-    appUsedBytes,
+    appUsedBytes: Math.min(Math.max(appUsedBytes, 0), totalBytes),
+    appResidentBytes: appResidentBytes > 0 ? Math.min(appResidentBytes, totalBytes) : undefined,
+    appPssBytes: appPssBytes > 0 ? Math.min(appPssBytes, totalBytes) : undefined,
     lowMemory: snapshot.lowMemory === true,
     thresholdBytes: toSafeByteCount(snapshot.thresholdBytes),
   };

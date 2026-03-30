@@ -60,6 +60,47 @@ function makeSizedGatedRepo(id: string) {
   };
 }
 
+function makeTextGenerationRepo(id: string) {
+  return {
+    id,
+    pipeline_tag: 'text-generation',
+    tags: ['gguf', 'chat'],
+    siblings: [
+      {
+        rfilename: 'model.Q4_K_M.gguf',
+        size: 2 * 1024 * 1024 * 1024,
+      },
+    ],
+  };
+}
+
+function makeImageGenerationRepo(id: string) {
+  return {
+    id,
+    pipeline_tag: 'text-to-image',
+    tags: ['gguf', 'diffusers', 'flux'],
+    siblings: [
+      {
+        rfilename: 'model.Q4_K_M.gguf',
+        size: 2 * 1024 * 1024 * 1024,
+      },
+    ],
+  };
+}
+
+function makePipelineLessImageRepo(id: string) {
+  return {
+    id,
+    tags: ['gguf', 'diffusers', 'stable-diffusion'],
+    siblings: [
+      {
+        rfilename: 'model.Q4_K_M.gguf',
+        size: 2 * 1024 * 1024 * 1024,
+      },
+    ],
+  };
+}
+
 describe('ModelCatalogService regressions', () => {
   let service: ModelCatalogService;
 
@@ -98,6 +139,40 @@ describe('ModelCatalogService regressions', () => {
     expect(result.models).toHaveLength(1);
     expect(result.models[0].id).toBe('org/locked-GGUF');
     expect(result.models[0].accessState).toBe(ModelAccessState.AUTH_REQUIRED);
+  });
+
+  it('drops GGUF repos that Hugging Face marks as image-generation pipelines', async () => {
+    global.fetch = jest.fn(() =>
+      Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve([
+          makeImageGenerationRepo('org/flux-image-model'),
+          makeTextGenerationRepo('org/chat-model'),
+        ]),
+      }),
+    ) as jest.Mock;
+
+    const result = await service.searchModels('phi');
+
+    expect(result.models).toHaveLength(1);
+    expect(result.models[0].id).toBe('org/chat-model');
+  });
+
+  it('drops GGUF repos with diffusion/image tags even when pipeline metadata is missing', async () => {
+    global.fetch = jest.fn(() =>
+      Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve([
+          makePipelineLessImageRepo('org/tag-only-image-model'),
+          makeTextGenerationRepo('org/chat-model'),
+        ]),
+      }),
+    ) as jest.Mock;
+
+    const result = await service.searchModels('phi');
+
+    expect(result.models).toHaveLength(1);
+    expect(result.models[0].id).toBe('org/chat-model');
   });
 
   it('drops gated repos when the list payload omits both siblings and gguf catalog hints', async () => {

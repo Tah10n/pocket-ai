@@ -30,6 +30,7 @@ type HuggingFaceModelSummary = {
   downloads?: number;
   likes?: number;
   tags?: string[];
+  pipeline_tag?: string;
   cardData?: HuggingFaceModelCardData;
   gguf?: {
     total?: number;
@@ -136,6 +137,38 @@ const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 const PERSISTENT_CACHE_MAX_AGE = 24 * 60 * 60 * 1000; // 24 hours
 const ACCESS_PROBE_CACHE_TTL = 2 * 60 * 1000; // 2 minutes
 const README_SUMMARY_MAX_LENGTH = 320;
+const EXCLUDED_CATALOG_PIPELINE_TAGS = new Set([
+  'text-to-image',
+  'image-to-image',
+  'image-text-to-text',
+  'image-classification',
+  'image-segmentation',
+  'zero-shot-image-classification',
+  'object-detection',
+  'depth-estimation',
+  'visual-question-answering',
+  'document-question-answering',
+  'video-classification',
+  'video-text-to-text',
+  'text-to-video',
+  'image-to-video',
+  'text-to-audio',
+  'audio-to-audio',
+  'audio-classification',
+  'automatic-speech-recognition',
+]);
+const EXCLUDED_CATALOG_SIGNAL_EXACT_MATCHES = new Set([
+  'diffusers',
+  'stable-diffusion',
+  'image-generation',
+  'clip-vision-model',
+]);
+const EXCLUDED_CATALOG_SIGNAL_FRAGMENTS = [
+  'stable-diffusion',
+  'sdxl',
+  'diffusion',
+  'flux',
+];
 
 export const HUGGING_FACE_TOKEN_SETTINGS_URL = `${HF_BASE_URL}/settings/tokens`;
 export { getHuggingFaceModelUrl };
@@ -275,9 +308,10 @@ export class ModelCatalogService {
     const isCacheFresh = Boolean(cached) && Date.now() - (cached?.timestamp ?? 0) < CACHE_TTL;
 
     if (cached && (isCacheFresh || isBufferedCursor)) {
+      const filteredCachedModels = this.filterCatalogSearchModels(cached.result.models);
       return {
         ...cached.result,
-        models: this.mergeWithRegistry(cached.result.models, this.getAuthScope(hasAuthToken)),
+        models: this.mergeWithRegistry(filteredCachedModels, this.getAuthScope(hasAuthToken)),
       };
     }
 
@@ -314,8 +348,9 @@ export class ModelCatalogService {
         sort,
       );
       this.assertRequestContextIsCurrent(requestContext);
+      const filteredModels = this.filterCatalogSearchModels(fetched.models);
       const result = {
-        models: fetched.models,
+        models: filteredModels,
         hasMore: fetched.nextCursor !== null,
         nextCursor: fetched.nextCursor,
       };
@@ -465,9 +500,10 @@ export class ModelCatalogService {
     const isMemoryEntryFresh = Boolean(memoryEntry) && Date.now() - (memoryEntry?.timestamp ?? 0) < CACHE_TTL;
 
     if (isMemoryEntryFresh && memoryEntry) {
+      const filteredMemoryModels = this.filterCatalogSearchModels(memoryEntry.result.models);
       return {
         ...memoryEntry.result,
-        models: this.mergeWithRegistry(memoryEntry.result.models, this.getAuthScope(hasToken)),
+        models: this.mergeWithRegistry(filteredMemoryModels, this.getAuthScope(hasToken)),
       };
     }
 
@@ -479,7 +515,8 @@ export class ModelCatalogService {
       return null;
     }
 
-    const mergedModels = this.mergeWithRegistry(persistentEntry.models, this.getAuthScope(hasToken));
+    const filteredPersistedModels = this.filterCatalogSearchModels(persistentEntry.models);
+    const mergedModels = this.mergeWithRegistry(filteredPersistedModels, this.getAuthScope(hasToken));
     return {
       ...persistentEntry,
       models: mergedModels,
@@ -951,6 +988,9 @@ export class ModelCatalogService {
     for (const item of data) {
       const repoId = item.id || item.modelId;
       if (!repoId) continue;
+      if (!this.isCatalogSummarySupported(item)) {
+        continue;
+      }
 
       const hasSiblingMetadata = Array.isArray(item.siblings) && item.siblings.length > 0;
       const probeCandidate = this.createTreeProbeCandidate(item, repoId, {
@@ -1122,6 +1162,55 @@ export class ModelCatalogService {
       lifecycleStatus: LifecycleStatus.AVAILABLE,
       downloadProgress: 0,
     });
+  }
+
+  private filterCatalogSearchModels(models: ModelMetadata[]): ModelMetadata[] {
+    return models.filter((model) => this.isCatalogModelSupported(model));
+  }
+
+  private isCatalogSummarySupported(item: HuggingFaceModelSummary): boolean {
+    return !this.hasUnsupportedCatalogSignals({
+      pipelineTag: item.pipeline_tag,
+      tags: item.tags,
+      modelTypes: [
+        item.config?.model_type,
+        item.cardData?.model_type,
+        item.gguf?.architecture,
+      ],
+      architectures: item.config?.architectures,
+    });
+  }
+
+  private isCatalogModelSupported(model: ModelMetadata): boolean {
+    return !this.hasUnsupportedCatalogSignals({
+      tags: model.tags,
+      modelTypes: [model.modelType],
+      architectures: model.architectures,
+    });
+  }
+
+  private hasUnsupportedCatalogSignals(options: {
+    pipelineTag?: string;
+    tags?: string[];
+    modelTypes?: (string | undefined)[];
+    architectures?: string[];
+  }): boolean {
+    const pipelineTag = this.normalizeCatalogSignal(options.pipelineTag);
+    if (pipelineTag && EXCLUDED_CATALOG_PIPELINE_TAGS.has(pipelineTag)) {
+      return true;
+    }
+
+    const signals = [
+      ...this.normalizeCatalogSignals(options.tags),
+      ...this.normalizeCatalogSignals(options.modelTypes),
+      ...this.normalizeCatalogSignals(options.architectures),
+    ];
+
+    return signals.some((signal) => (
+      EXCLUDED_CATALOG_PIPELINE_TAGS.has(signal)
+      || EXCLUDED_CATALOG_SIGNAL_EXACT_MATCHES.has(signal)
+      || EXCLUDED_CATALOG_SIGNAL_FRAGMENTS.some((fragment) => signal.includes(fragment))
+    ));
   }
 
   private mergeWithRegistry(
@@ -1934,6 +2023,25 @@ export class ModelCatalogService {
       : typeof fallbackValue === 'string' && fallbackValue.trim().length > 0
         ? fallbackValue.trim()
         : undefined;
+  }
+
+  private normalizeCatalogSignal(value: string | null | undefined): string | null {
+    if (typeof value !== 'string') {
+      return null;
+    }
+
+    const normalized = value.trim().toLowerCase();
+    return normalized.length > 0 ? normalized : null;
+  }
+
+  private normalizeCatalogSignals(values: (string | undefined)[] | undefined): string[] {
+    if (!Array.isArray(values)) {
+      return [];
+    }
+
+    return values
+      .map((value) => this.normalizeCatalogSignal(value))
+      .filter((value): value is string => value !== null);
   }
 
   private resolveStringArrayMetadata(

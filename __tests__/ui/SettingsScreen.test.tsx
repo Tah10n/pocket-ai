@@ -2,6 +2,7 @@ import React from 'react';
 import { fireEvent, render } from '@testing-library/react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { SettingsScreen } from '../../src/ui/screens/SettingsScreen';
+import { getAppStorageMetrics } from '../../src/services/StorageManagerService';
 
 const mockBack = jest.fn();
 const mockReplace = jest.fn();
@@ -126,7 +127,7 @@ jest.mock('../../src/services/LLMEngineService', () => ({
 }));
 
 jest.mock('../../src/services/StorageManagerService', () => ({
-  getAppStorageMetrics: jest.fn().mockResolvedValue({ appFilesBytes: 0 }),
+  getAppStorageMetrics: jest.fn().mockResolvedValue({ appFilesBytes: 12_000_000_000 }),
 }));
 
 jest.mock('../../src/services/SettingsStore', () => ({
@@ -152,6 +153,7 @@ describe('SettingsScreen', () => {
     mockReplace.mockReset();
     mockPush.mockReset();
     mockCanGoBack = true;
+    (getAppStorageMetrics as jest.Mock).mockResolvedValue({ appFilesBytes: 12_000_000_000 });
     mockDeviceMetricsResult = {
       metrics: {
         ram: createSystemRamMetrics(),
@@ -182,14 +184,27 @@ describe('SettingsScreen', () => {
   });
 
   it('renders the Android system RAM variant with availability and app memory breakdown', () => {
-    const { getByText, queryByText } = renderScreen();
+    const { getByText, getByTestId, queryByText } = renderScreen();
 
     expect(getByText('settings.memoryDescription')).toBeTruthy();
     expect(getByText('63%')).toBeTruthy();
-    expect(getByText('settings.available')).toBeTruthy();
     expect(getByText('settings.appMemory')).toBeTruthy();
-    expect(getByText('settings.memoryAvailable')).toBeTruthy();
+    expect(getByText('settings.appFilesUsage')).toBeTruthy();
+    expect(getByText('settings.available')).toBeTruthy();
+    expect(getByText('settings.free')).toBeTruthy();
+    expect(getByTestId('settings-memory-track')).toBeTruthy();
+    expect(getByTestId('settings-memory-used-fill')).toBeTruthy();
+    expect(getByTestId('settings-memory-app-fill')).toBeTruthy();
+    expect(getByTestId('settings-storage-track')).toBeTruthy();
+    expect(getByTestId('settings-storage-used-fill')).toBeTruthy();
+    expect(getByTestId('settings-storage-app-fill')).toBeTruthy();
+    expect(queryByText('settings.memoryAvailable')).toBeNull();
+    expect(queryByText('settings.memoryBusy')).toBeNull();
+    expect(queryByText('settings.storageOccupied')).toBeNull();
+    expect(queryByText('settings.used')).toBeNull();
+    expect(queryByText('settings.total')).toBeNull();
     expect(queryByText('settings.deviceTotal')).toBeNull();
+    expect(queryByText(/·/)).toBeNull();
   });
 
   it('renders the process-only RAM fallback without fabricated free or busy system metrics', () => {
@@ -201,13 +216,30 @@ describe('SettingsScreen', () => {
       refresh: jest.fn(),
     };
 
-    const { getByText, queryByText } = renderScreen();
+    const { getByText, getByTestId, queryByText, queryByTestId } = renderScreen();
 
     expect(getByText('settings.memoryDescriptionFallback')).toBeTruthy();
     expect(getByText('settings.memoryAppUsage')).toBeTruthy();
-    expect(getByText('settings.memoryDeviceTotal')).toBeTruthy();
+    expect(getByText('settings.appMemory')).toBeTruthy();
     expect(getByText('settings.deviceTotal')).toBeTruthy();
+    expect(getByTestId('settings-memory-app-fill')).toBeTruthy();
+    expect(queryByTestId('settings-memory-track')).toBeNull();
+    expect(queryByTestId('settings-memory-used-fill')).toBeNull();
+    expect(queryByText('settings.memoryDeviceTotal')).toBeNull();
     expect(queryByText('settings.memoryBusy')).toBeNull();
     expect(queryByText('settings.available')).toBeNull();
+  });
+
+  it('renders the storage app-footprint bar instead of the old stat chips', async () => {
+    const { findByText, getByTestId, queryByText } = renderScreen();
+
+    expect(await findByText('settings.appFilesUsage')).toBeTruthy();
+    expect(queryByText('settings.free')).toBeTruthy();
+    expect(getByTestId('settings-storage-track')).toBeTruthy();
+    expect(getByTestId('settings-storage-used-fill')).toBeTruthy();
+    expect(getByTestId('settings-storage-app-fill')).toBeTruthy();
+    expect(queryByText('settings.storageOccupied')).toBeNull();
+    expect(queryByText('settings.used')).toBeNull();
+    expect(queryByText('settings.total')).toBeNull();
   });
 });

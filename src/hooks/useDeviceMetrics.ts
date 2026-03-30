@@ -68,7 +68,11 @@ export const useDeviceMetrics = (options: UseDeviceMetricsOptions = {}) => {
       const resolvedTotalMemoryBytes = systemMemorySnapshot?.totalBytes ?? totalMemoryBytes;
       const resolvedUsedMemoryBytes = systemMemorySnapshot?.usedBytes ?? null;
       const resolvedFreeMemoryBytes = systemMemorySnapshot?.availableBytes ?? null;
-      const appUsedMemoryBytes = systemMemorySnapshot?.appUsedBytes ?? usedMemoryBytes;
+      // Prefer live resident bytes for the UI card because Android can throttle
+      // PSS sampling and return stale values across rapid polls.
+      const appUsedMemoryBytes = systemMemorySnapshot?.appResidentBytes
+        ?? systemMemorySnapshot?.appUsedBytes
+        ?? usedMemoryBytes;
       const totalMemoryGB = bytesToGb(resolvedTotalMemoryBytes);
       const usedMemoryGB = resolvedUsedMemoryBytes === null ? null : bytesToGb(resolvedUsedMemoryBytes);
       const freeMemoryGB = resolvedFreeMemoryBytes === null ? null : bytesToGb(resolvedFreeMemoryBytes);

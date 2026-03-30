@@ -147,127 +147,160 @@ const styles = StyleSheet.create({
         fontWeight: '700',
     },
     resourcesWrap: {
-        padding: 14,
-        gap: 12,
+        gap: 14,
+        marginBottom: 18,
     },
     resourceCard: {
-        borderRadius: 20,
+        borderRadius: 18,
         borderWidth: 1,
-        padding: 14,
+        padding: 16,
+        overflow: 'hidden',
     },
     resourceHeader: {
         flexDirection: 'row',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        marginBottom: 10,
+        alignItems: 'flex-start',
+        marginBottom: 16,
     },
     resourceTitleWrap: {
         flexDirection: 'row',
-        alignItems: 'center',
+        alignItems: 'flex-start',
         flex: 1,
-        marginRight: 12,
     },
     resourceIcon: {
-        width: 36,
-        height: 36,
-        borderRadius: 12,
+        width: 40,
+        height: 40,
+        borderRadius: 14,
         alignItems: 'center',
         justifyContent: 'center',
-        marginRight: 10,
+        marginRight: 12,
     },
     resourceTitle: {
-        fontSize: 16,
+        fontSize: 17,
         fontWeight: '700',
     },
     resourceSubtitle: {
-        marginTop: 2,
+        marginTop: 3,
         fontSize: 12,
-        lineHeight: 17,
-    },
-    percentBadge: {
-        borderRadius: 999,
-        paddingHorizontal: 12,
-        paddingVertical: 6,
-    },
-    percentBadgeText: {
-        fontSize: 12,
-        fontWeight: '800',
+        lineHeight: 18,
     },
     primaryMetricRow: {
         flexDirection: 'row',
-        alignItems: 'flex-end',
+        alignItems: 'stretch',
         justifyContent: 'space-between',
-        marginBottom: 12,
+        gap: 16,
+        marginBottom: 18,
+    },
+    primaryMetricCopy: {
+        flex: 1,
     },
     primaryMetricValue: {
         fontSize: 28,
         fontWeight: '800',
+        fontVariant: ['tabular-nums'],
     },
     primaryMetricLabel: {
-        marginTop: 2,
+        marginTop: 4,
         fontSize: 12,
         fontWeight: '600',
+        lineHeight: 18,
     },
-    primaryMetricHint: {
-        fontSize: 12,
-        fontWeight: '700',
-    },
-    usageTrack: {
-        height: 12,
-        borderRadius: 999,
-        overflow: 'hidden',
-    },
-    usageFill: {
-        height: '100%',
-        borderRadius: 999,
-    },
-    usageLegendRow: {
-        marginTop: 8,
-        flexDirection: 'row',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-    },
-    usageLegendText: {
-        fontSize: 12,
-        fontWeight: '600',
-    },
-    statGrid: {
-        flexDirection: 'row',
-        flexWrap: 'wrap',
-        marginTop: 12,
-        marginHorizontal: -4,
-    },
-    statChip: {
-        width: '50%',
-        paddingHorizontal: 4,
-        paddingBottom: 6,
-    },
-    statChipInner: {
+    metricAside: {
+        minWidth: 110,
         borderRadius: 16,
         borderWidth: 1,
         paddingHorizontal: 12,
-        paddingVertical: 10,
+        paddingVertical: 12,
+        alignSelf: 'flex-start',
     },
-    statChipLabel: {
+    metricAsideLabel: {
         fontSize: 11,
         fontWeight: '700',
-        textTransform: 'uppercase',
         letterSpacing: 0.6,
+        textTransform: 'uppercase',
     },
-    statChipValue: {
-        marginTop: 4,
-        fontSize: 15,
+    metricAsideValue: {
+        marginTop: 6,
+        fontSize: 16,
+        fontWeight: '800',
+        fontVariant: ['tabular-nums'],
+    },
+    usageStack: {
+        gap: 14,
+    },
+    usageMeter: {
+        gap: 8,
+    },
+    usageLegendStack: {
+        gap: 8,
+    },
+    usageTrack: {
+        height: 10,
+        borderRadius: 999,
+        overflow: 'hidden',
+        position: 'relative',
+    },
+    usageFill: {
+        position: 'absolute',
+        top: 0,
+        left: 0,
+        bottom: 0,
+        borderRadius: 999,
+    },
+    usageDetailRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: 12,
+    },
+    usageDetailLabel: {
+        flex: 1,
+        fontSize: 12,
         fontWeight: '700',
+        lineHeight: 16,
+    },
+    usageLegendLabelWrap: {
+        flex: 1,
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 8,
+    },
+    usageLegendDot: {
+        width: 8,
+        height: 8,
+        borderRadius: 999,
+        flexShrink: 0,
+    },
+    usageLegendLabel: {
+        flexShrink: 1,
+        fontSize: 12,
+        fontWeight: '700',
+        lineHeight: 16,
+    },
+    usageDetailValue: {
+        fontSize: 12,
+        fontWeight: '700',
+        lineHeight: 16,
+        textAlign: 'right',
+        fontVariant: ['tabular-nums'],
+    },
+    resourceFooter: {
+        marginTop: 18,
+        paddingTop: 14,
+        borderTopWidth: StyleSheet.hairlineWidth,
     },
     unloadButton: {
-        marginTop: 6,
-        borderRadius: 14,
+        alignSelf: 'flex-start',
+        flexDirection: 'row',
         alignItems: 'center',
         justifyContent: 'center',
-        paddingVertical: 12,
+        gap: 8,
+        borderRadius: 12,
+        borderWidth: 1,
+        paddingHorizontal: 14,
+        paddingVertical: 10,
     },
     unloadButtonText: {
-        fontSize: 14,
+        fontSize: 13,
         fontWeight: '700',
     },
 });
@@ -320,6 +353,115 @@ function formatPercent(value: number) {
     return `${Math.round(clampPercentage(value))}%`;
 }
 
+function UsageMeter({
+    label,
+    value,
+    percentage,
+    fillColor,
+    trackBackground,
+    labelColor,
+    valueColor,
+    testID,
+}: {
+    label: string;
+    value: string;
+    percentage: number;
+    fillColor: string;
+    trackBackground: string;
+    labelColor: string;
+    valueColor: string;
+    testID: string;
+}) {
+    return (
+        <View style={styles.usageMeter}>
+            <View style={styles.usageDetailRow}>
+                <Text style={[styles.usageDetailLabel, { color: labelColor }]}>{label}</Text>
+                <Text style={[styles.usageDetailValue, { color: valueColor }]}>{value}</Text>
+            </View>
+            <View style={[styles.usageTrack, { backgroundColor: trackBackground }]}>
+                <View
+                    testID={testID}
+                    style={[
+                        styles.usageFill,
+                        {
+                            width: `${clampPercentage(percentage)}%`,
+                            backgroundColor: fillColor,
+                        },
+                    ]}
+                />
+            </View>
+        </View>
+    );
+}
+
+function LayeredUsageMeter({
+    rows,
+    basePercentage,
+    baseFillColor,
+    overlayPercentage,
+    overlayFillColor,
+    trackBackground,
+    labelColor,
+    valueColor,
+    trackTestID,
+    baseTestID,
+    overlayTestID,
+}: {
+    rows: {
+        label: string;
+        value: string;
+        color: string;
+    }[];
+    basePercentage: number;
+    baseFillColor: string;
+    overlayPercentage: number;
+    overlayFillColor: string;
+    trackBackground: string;
+    labelColor: string;
+    valueColor: string;
+    trackTestID: string;
+    baseTestID: string;
+    overlayTestID: string;
+}) {
+    return (
+        <View style={styles.usageMeter}>
+            <View style={styles.usageLegendStack}>
+                {rows.map((row) => (
+                    <View key={`${row.label}-${row.value}`} style={styles.usageDetailRow}>
+                        <View style={styles.usageLegendLabelWrap}>
+                            <View style={[styles.usageLegendDot, { backgroundColor: row.color }]} />
+                            <Text style={[styles.usageLegendLabel, { color: labelColor }]}>{row.label}</Text>
+                        </View>
+                        <Text style={[styles.usageDetailValue, { color: valueColor }]}>{row.value}</Text>
+                    </View>
+                ))}
+            </View>
+            <View testID={trackTestID} style={[styles.usageTrack, { backgroundColor: trackBackground }]}>
+                <View
+                    testID={baseTestID}
+                    style={[
+                        styles.usageFill,
+                        {
+                            width: `${clampPercentage(basePercentage)}%`,
+                            backgroundColor: baseFillColor,
+                        },
+                    ]}
+                />
+                <View
+                    testID={overlayTestID}
+                    style={[
+                        styles.usageFill,
+                        {
+                            width: `${clampPercentage(overlayPercentage)}%`,
+                            backgroundColor: overlayFillColor,
+                        },
+                    ]}
+                />
+            </View>
+        </View>
+    );
+}
+
 export const SettingsScreen = () => {
     const { t, i18n } = useTranslation();
     const router = useRouter();
@@ -338,7 +480,14 @@ export const SettingsScreen = () => {
     const mutedBackground = isDark ? 'rgba(30, 41, 59, 0.85)' : '#eef2f7';
     const selectedBackground = isDark ? '#111827' : '#ffffff';
     const trackBackground = isDark ? 'rgba(51, 65, 85, 0.9)' : '#e2e8f0';
-    const resourceCardBackground = isDark ? 'rgba(15, 23, 42, 0.95)' : '#f8fafc';
+    const resourceCardBackground = isDark ? 'rgba(15, 23, 42, 0.95)' : '#ffffff';
+    const resourceAsideBackground = isDark ? 'rgba(30, 41, 59, 0.82)' : '#f8fafc';
+    const memoryAccent = colors.primary;
+    const memoryAccentSoft = isDark ? '#8b7cff' : '#6d5efc';
+    const storageAccent = isDark ? '#2dd4bf' : '#0f766e';
+    const storageAccentSoft = isDark ? '#5eead4' : '#14b8a6';
+    const destructiveBackground = isDark ? 'rgba(248, 113, 113, 0.14)' : 'rgba(239, 68, 68, 0.08)';
+    const destructiveBorder = isDark ? 'rgba(248, 113, 113, 0.3)' : 'rgba(239, 68, 68, 0.18)';
 
     useEffect(() => {
         return subscribeSettings((nextSettings) => {
@@ -431,20 +580,12 @@ export const SettingsScreen = () => {
         );
     };
 
-    const renderStatChip = (key: string, label: string, value: string) => (
-        <View key={key} style={styles.statChip}>
-            <View style={[styles.statChipInner, { borderColor: colors.border, backgroundColor: mutedBackground }]}>
-                <Text style={[styles.statChipLabel, { color: colors.textSecondary }]}>{label}</Text>
-                <Text style={[styles.statChipValue, { color: colors.text }]}>{value}</Text>
-            </View>
-        </View>
-    );
-
     const ramTotalBytes = metrics?.ram.totalBytes ?? 0;
     const ramUsedBytes = metrics?.ram.usedBytes ?? 0;
     const ramAvailableBytes = metrics?.ram.availableBytes ?? 0;
     const ramAppUsedBytes = metrics?.ram.appUsedBytes ?? 0;
     const ramUsedPercentage = metrics?.ram.usedPercentage ?? 0;
+    const ramAppUsedPercentage = ramTotalBytes > 0 ? (ramAppUsedBytes / ramTotalBytes) * 100 : 0;
     const isSystemRamSource = metrics?.ram.source === 'system';
 
     const storageTotalBytes = metrics?.storage.totalBytes ?? 0;
@@ -452,25 +593,22 @@ export const SettingsScreen = () => {
     const storageFreeBytes = metrics?.storage.freeBytes ?? Math.max(storageTotalBytes - storageUsedBytes, 0);
     const storageUsedPercentage = metrics?.storage.usedPercentage ?? (storageTotalBytes > 0 ? (storageUsedBytes / storageTotalBytes) * 100 : 0);
     const appFilesBytes = appStorageMetrics?.appFilesBytes ?? 0;
+    const appStoragePercentage = storageTotalBytes > 0 ? (appFilesBytes / storageTotalBytes) * 100 : 0;
     const canForceUnloadModel = isEngineReady && Boolean(engineState.activeModelId);
     const ramPrimaryValue = formatSystemCapacity(isSystemRamSource ? ramUsedBytes : ramAppUsedBytes);
     const ramPrimaryLabel = isSystemRamSource
         ? t('settings.memoryInUseOf', { total: formatSystemCapacity(ramTotalBytes) })
         : t('settings.memoryAppUsage');
-    const ramPrimaryHint = isSystemRamSource
-        ? t('settings.memoryAvailable', { value: formatSystemCapacity(ramAvailableBytes) })
-        : t('settings.memoryDeviceTotal', { value: formatSystemCapacity(ramTotalBytes) });
-    const ramStatItems = isSystemRamSource
-        ? [
-            { key: 'ram-used', label: t('settings.used'), value: formatSystemCapacity(ramUsedBytes) },
-            { key: 'ram-available', label: t('settings.available'), value: formatSystemCapacity(ramAvailableBytes) },
-            { key: 'ram-total', label: t('settings.total'), value: formatSystemCapacity(ramTotalBytes) },
-            { key: 'ram-app', label: t('settings.appMemory'), value: formatSystemCapacity(ramAppUsedBytes) },
-        ]
-        : [
-            { key: 'ram-app', label: t('settings.appMemory'), value: formatSystemCapacity(ramAppUsedBytes) },
-            { key: 'ram-device-total', label: t('settings.deviceTotal'), value: formatSystemCapacity(ramTotalBytes) },
-        ];
+    const ramAsideLabel = isSystemRamSource ? t('settings.available') : t('settings.deviceTotal');
+    const ramAsideValue = formatSystemCapacity(isSystemRamSource ? ramAvailableBytes : ramTotalBytes);
+    const ramSystemUsageSummary = formatPercent(ramUsedPercentage);
+    const ramAppUsageSummary = formatSystemCapacity(ramAppUsedBytes);
+    const ramUsedTrackPercentage = clampPercentage(ramUsedPercentage);
+    const ramAppTrackPercentage = Math.min(clampPercentage(ramAppUsedPercentage), ramUsedTrackPercentage);
+    const storageSystemUsageSummary = formatPercent(storageUsedPercentage);
+    const storageAppUsageSummary = formatBytes(appFilesBytes);
+    const storageUsedTrackPercentage = clampPercentage(storageUsedPercentage);
+    const storageAppTrackPercentage = Math.min(clampPercentage(appStoragePercentage), storageUsedTrackPercentage);
 
     return (
         <View style={{ flex: 1, backgroundColor: colors.background }}>
@@ -658,154 +796,178 @@ export const SettingsScreen = () => {
                     {t('settings.resources')}
                 </Text>
 
-                <View style={[styles.card, { backgroundColor: cardBackground, borderColor: colors.border }]}>
-                    <View style={styles.resourcesWrap}>
-                        <View style={[styles.resourceCard, { backgroundColor: resourceCardBackground, borderColor: colors.border }]}>
-                            <View style={styles.resourceHeader}>
-                                <View style={styles.resourceTitleWrap}>
-                                    <View style={[styles.resourceIcon, { backgroundColor: 'rgba(79, 70, 229, 0.14)' }]}>
-                                        <MaterialSymbols name="memory" size={20} color={colors.primary} />
-                                    </View>
-                                    <View style={styles.rowTextWrap}>
-                                        <Text style={[styles.resourceTitle, { color: colors.text }]}>
-                                            {t('settings.memoryTitle')}
-                                        </Text>
-                                        <Text style={[styles.resourceSubtitle, { color: colors.textSecondary }]}>
-                                            {t(isSystemRamSource ? 'settings.memoryDescription' : 'settings.memoryDescriptionFallback')}
-                                        </Text>
-                                    </View>
+                <View style={styles.resourcesWrap}>
+                    <View
+                        style={[
+                            styles.resourceCard,
+                            { backgroundColor: resourceCardBackground, borderColor: colors.border },
+                            !isDark ? shadowStyles.light : null,
+                        ]}
+                    >
+                        <View style={styles.resourceHeader}>
+                            <View style={styles.resourceTitleWrap}>
+                                <View style={[styles.resourceIcon, { backgroundColor: 'rgba(79, 70, 229, 0.12)' }]}>
+                                    <MaterialSymbols name="memory" size={20} color={memoryAccent} />
                                 </View>
-
-                                {isSystemRamSource ? (
-                                    <View style={[styles.percentBadge, { backgroundColor: 'rgba(79, 70, 229, 0.12)' }]}>
-                                        <Text style={[styles.percentBadgeText, { color: colors.primary }]}>
-                                            {formatPercent(ramUsedPercentage)}
-                                        </Text>
-                                    </View>
-                                ) : null}
-                            </View>
-
-                            <View style={styles.primaryMetricRow}>
-                                <View>
-                                    <Text style={[styles.primaryMetricValue, { color: colors.text }]}>
-                                        {ramPrimaryValue}
+                                <View style={styles.rowTextWrap}>
+                                    <Text style={[styles.resourceTitle, { color: colors.text }]}>
+                                        {t('settings.memoryTitle')}
                                     </Text>
-                                    <Text style={[styles.primaryMetricLabel, { color: colors.textSecondary }]}>
-                                        {ramPrimaryLabel}
+                                    <Text style={[styles.resourceSubtitle, { color: colors.textSecondary }]}>
+                                        {t(isSystemRamSource ? 'settings.memoryDescription' : 'settings.memoryDescriptionFallback')}
                                     </Text>
                                 </View>
-                                <Text style={[styles.primaryMetricHint, { color: colors.primary }]}>
-                                    {ramPrimaryHint}
-                                </Text>
                             </View>
-
-                            {isSystemRamSource ? (
-                                <>
-                                    <View style={[styles.usageTrack, { backgroundColor: trackBackground }]}>
-                                        <View
-                                            style={[
-                                                styles.usageFill,
-                                                {
-                                                    width: `${clampPercentage(ramUsedPercentage)}%`,
-                                                    backgroundColor: '#4f46e5',
-                                                },
-                                            ]}
-                                        />
-                                    </View>
-                                    <View style={styles.usageLegendRow}>
-                                        <Text style={[styles.usageLegendText, { color: colors.textSecondary }]}>
-                                            {t('settings.memoryBusy')}
-                                        </Text>
-                                    </View>
-                                </>
-                            ) : null}
-
-                            <View style={styles.statGrid}>
-                                {ramStatItems.map((item) => renderStatChip(item.key, item.label, item.value))}
-                            </View>
-
-                            <Pressable
-                                disabled={!canForceUnloadModel}
-                                onPress={canForceUnloadModel ? unloadActiveModel : undefined}
-                                style={[
-                                    styles.unloadButton,
-                                    {
-                                        backgroundColor: canForceUnloadModel ? 'rgba(239, 68, 68, 0.12)' : mutedBackground,
-                                        opacity: canForceUnloadModel ? 1 : 0.55,
-                                    },
-                                ]}
-                            >
-                                <Text
-                                    style={[
-                                        styles.unloadButtonText,
-                                        { color: canForceUnloadModel ? colors.error : colors.textSecondary },
-                                    ]}
-                                >
-                                    {t('settings.forceUnloadModel')}
-                                </Text>
-                            </Pressable>
                         </View>
 
-                        <View style={[styles.resourceCard, { backgroundColor: resourceCardBackground, borderColor: colors.border }]}>
-                            <View style={styles.resourceHeader}>
-                                <View style={styles.resourceTitleWrap}>
-                                    <View style={[styles.resourceIcon, { backgroundColor: 'rgba(20, 184, 166, 0.14)' }]}>
-                                        <MaterialSymbols name="storage" size={20} color="#0f766e" />
-                                    </View>
-                                    <View style={styles.rowTextWrap}>
-                                        <Text style={[styles.resourceTitle, { color: colors.text }]}>
-                                            {t('settings.storageTitle')}
-                                        </Text>
-                                        <Text style={[styles.resourceSubtitle, { color: colors.textSecondary }]}>
-                                            {t('settings.storageDescription')}
-                                        </Text>
-                                    </View>
-                                </View>
-
-                                <View style={[styles.percentBadge, { backgroundColor: 'rgba(20, 184, 166, 0.12)' }]}>
-                                    <Text style={[styles.percentBadgeText, { color: '#0f766e' }]}>
-                                        {formatPercent(storageUsedPercentage)}
-                                    </Text>
-                                </View>
-                            </View>
-
-                            <View style={styles.primaryMetricRow}>
-                                <View>
-                                    <Text style={[styles.primaryMetricValue, { color: colors.text }]}>
-                                        {formatSystemCapacity(storageUsedBytes)}
-                                    </Text>
-                                    <Text style={[styles.primaryMetricLabel, { color: colors.textSecondary }]}>
-                                        {t('settings.storageUsedOf', { total: formatSystemCapacity(storageTotalBytes) })}
-                                    </Text>
-                                </View>
-                                <Text style={[styles.primaryMetricHint, { color: '#0f766e' }]}>
-                                    {t('settings.storageFree', { value: formatSystemCapacity(storageFreeBytes) })}
+                        <View style={styles.primaryMetricRow}>
+                            <View style={styles.primaryMetricCopy}>
+                                <Text style={[styles.primaryMetricValue, { color: colors.text }]}>
+                                    {ramPrimaryValue}
+                                </Text>
+                                <Text style={[styles.primaryMetricLabel, { color: colors.textSecondary }]}>
+                                    {ramPrimaryLabel}
                                 </Text>
                             </View>
+                            <View style={[styles.metricAside, { backgroundColor: resourceAsideBackground, borderColor: colors.border }]}>
+                                <Text style={[styles.metricAsideLabel, { color: colors.textSecondary }]}>
+                                    {ramAsideLabel}
+                                </Text>
+                                <Text style={[styles.metricAsideValue, { color: memoryAccent }]}>
+                                    {ramAsideValue}
+                                </Text>
+                            </View>
+                        </View>
 
-                            <View style={[styles.usageTrack, { backgroundColor: trackBackground }]}>
-                                <View
-                                    style={[
-                                        styles.usageFill,
+                        <View style={styles.usageStack}>
+                            {isSystemRamSource ? (
+                                <LayeredUsageMeter
+                                    rows={[
                                         {
-                                            width: `${clampPercentage(storageUsedPercentage)}%`,
-                                            backgroundColor: '#14b8a6',
+                                            label: t('settings.systemUsage'),
+                                            value: ramSystemUsageSummary,
+                                            color: memoryAccent,
+                                        },
+                                        {
+                                            label: t('settings.appMemory'),
+                                            value: ramAppUsageSummary,
+                                            color: memoryAccentSoft,
                                         },
                                     ]}
+                                    basePercentage={ramUsedTrackPercentage}
+                                    baseFillColor={memoryAccent}
+                                    overlayPercentage={ramAppTrackPercentage}
+                                    overlayFillColor={memoryAccentSoft}
+                                    trackBackground={trackBackground}
+                                    labelColor={colors.textSecondary}
+                                    valueColor={colors.text}
+                                    trackTestID="settings-memory-track"
+                                    baseTestID="settings-memory-used-fill"
+                                    overlayTestID="settings-memory-app-fill"
                                 />
+                            ) : null}
+                            {!isSystemRamSource ? (
+                                <UsageMeter
+                                    label={t('settings.appMemory')}
+                                    value={ramAppUsageSummary}
+                                    percentage={ramAppUsedPercentage}
+                                    fillColor={memoryAccentSoft}
+                                    trackBackground={trackBackground}
+                                    labelColor={colors.textSecondary}
+                                    valueColor={colors.text}
+                                    testID="settings-memory-app-fill"
+                                />
+                            ) : null}
+                        </View>
+
+                        {canForceUnloadModel ? (
+                            <View style={[styles.resourceFooter, { borderTopColor: colors.border }]}>
+                                <Pressable
+                                    onPress={unloadActiveModel}
+                                    style={[
+                                        styles.unloadButton,
+                                        {
+                                            backgroundColor: destructiveBackground,
+                                            borderColor: destructiveBorder,
+                                        },
+                                    ]}
+                                >
+                                    <MaterialSymbols name="close" size={18} color={colors.error} />
+                                    <Text style={[styles.unloadButtonText, { color: colors.error }]}>
+                                        {t('settings.forceUnloadModel')}
+                                    </Text>
+                                </Pressable>
                             </View>
-                            <View style={styles.usageLegendRow}>
-                                <Text style={[styles.usageLegendText, { color: colors.textSecondary }]}>
-                                    {t('settings.storageOccupied')}
+                        ) : null}
+                    </View>
+
+                    <View
+                        style={[
+                            styles.resourceCard,
+                            { backgroundColor: resourceCardBackground, borderColor: colors.border },
+                            !isDark ? shadowStyles.light : null,
+                        ]}
+                    >
+                        <View style={styles.resourceHeader}>
+                            <View style={styles.resourceTitleWrap}>
+                                <View style={[styles.resourceIcon, { backgroundColor: 'rgba(20, 184, 166, 0.12)' }]}>
+                                    <MaterialSymbols name="storage" size={20} color={storageAccent} />
+                                </View>
+                                <View style={styles.rowTextWrap}>
+                                    <Text style={[styles.resourceTitle, { color: colors.text }]}>
+                                        {t('settings.storageTitle')}
+                                    </Text>
+                                    <Text style={[styles.resourceSubtitle, { color: colors.textSecondary }]}>
+                                        {t('settings.storageDescription')}
+                                    </Text>
+                                </View>
+                            </View>
+                        </View>
+
+                        <View style={styles.primaryMetricRow}>
+                            <View style={styles.primaryMetricCopy}>
+                                <Text style={[styles.primaryMetricValue, { color: colors.text }]}>
+                                    {formatSystemCapacity(storageUsedBytes)}
+                                </Text>
+                                <Text style={[styles.primaryMetricLabel, { color: colors.textSecondary }]}>
+                                    {t('settings.storageUsedOf', { total: formatSystemCapacity(storageTotalBytes) })}
                                 </Text>
                             </View>
-
-                            <View style={styles.statGrid}>
-                                {renderStatChip('storage-used', t('settings.used'), formatSystemCapacity(storageUsedBytes))}
-                                {renderStatChip('storage-free', t('settings.free'), formatSystemCapacity(storageFreeBytes))}
-                                {renderStatChip('storage-total', t('settings.total'), formatSystemCapacity(storageTotalBytes))}
-                                {renderStatChip('storage-app-files', t('settings.appFilesUsage'), formatBytes(appFilesBytes))}
+                            <View style={[styles.metricAside, { backgroundColor: resourceAsideBackground, borderColor: colors.border }]}>
+                                <Text style={[styles.metricAsideLabel, { color: colors.textSecondary }]}>
+                                    {t('settings.free')}
+                                </Text>
+                                <Text style={[styles.metricAsideValue, { color: storageAccent }]}>
+                                    {formatSystemCapacity(storageFreeBytes)}
+                                </Text>
                             </View>
+                        </View>
+
+                        <View style={styles.usageStack}>
+                            <LayeredUsageMeter
+                                rows={[
+                                    {
+                                        label: t('settings.systemUsage'),
+                                        value: storageSystemUsageSummary,
+                                        color: storageAccent,
+                                    },
+                                    {
+                                        label: t('settings.appFilesUsage'),
+                                        value: storageAppUsageSummary,
+                                        color: storageAccentSoft,
+                                    },
+                                ]}
+                                basePercentage={storageUsedTrackPercentage}
+                                baseFillColor={storageAccent}
+                                overlayPercentage={storageAppTrackPercentage}
+                                overlayFillColor={storageAccentSoft}
+                                trackBackground={trackBackground}
+                                labelColor={colors.textSecondary}
+                                valueColor={colors.text}
+                                trackTestID="settings-storage-track"
+                                baseTestID="settings-storage-used-fill"
+                                overlayTestID="settings-storage-app-fill"
+                            />
                         </View>
                     </View>
                 </View>

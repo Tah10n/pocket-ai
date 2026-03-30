@@ -1,11 +1,13 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Linking } from 'react-native';
+import DeviceInfo from 'react-native-device-info';
 import { useBottomTabBarHeight } from '@react-navigation/bottom-tabs';
 import { FlashList, ListRenderItem } from '@shopify/flash-list';
 import { useRouter } from 'expo-router';
 import { Box } from '@/components/ui/box';
 import { Button, ButtonText } from '@/components/ui/button';
 import { ModelCard } from '@/components/ui/ModelCard';
+import { ModelParametersSheet } from '@/components/ui/ModelParametersSheet';
 import { Spinner } from '@/components/ui/spinner';
 import { Text } from '@/components/ui/text';
 import { useLLMEngine } from '@/hooks/useLLMEngine';
@@ -19,7 +21,21 @@ import {
 import { getReportedErrorMessage } from '@/services/AppError';
 import { hardwareListenerService } from '@/services/HardwareListenerService';
 import { huggingFaceTokenService } from '@/services/HuggingFaceTokenService';
+import { llmEngineService } from '@/services/LLMEngineService';
 import { registry } from '@/services/LocalStorageRegistry';
+import { offloadModel } from '@/services/StorageManagerService';
+import {
+  DEFAULT_MODEL_LOAD_PARAMETERS,
+  getGenerationParametersForModel,
+  getModelLoadParametersForModel,
+  getSettings,
+  resetGenerationParametersForModel,
+  resetModelLoadParametersForModel,
+  subscribeSettings,
+  updateGenerationParametersForModel,
+  updateModelLoadParametersForModel,
+  type ModelLoadParameters,
+} from '@/services/SettingsStore';
 import {
   useModelsStore,
   MODELS_PAGE_SIZE,
@@ -27,6 +43,11 @@ import {
   type ModelSortPreference,
 } from '@/store/modelsStore';
 import { EngineStatus, LifecycleStatus, ModelAccessState, type ModelMetadata } from '@/types/models';
+import {
+  clampContextWindowTokens,
+  resolveContextWindowCeiling,
+} from '@/utils/contextWindow';
+import { hasPersistedLoadProfileChanges } from '@/utils/modelLoadProfile';
 import { ModelsFilter } from './ModelsFilter';
 import {
   shouldBootstrapCatalogSession,
@@ -167,6 +188,16 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [tokenRevision, setTokenRevision] = useState(0);
   const [isTokenStateHydrated, setIsTokenStateHydrated] = useState(false);
+  const [isModelParametersOpen, setModelParametersOpen] = useState(false);
+  const [modelParametersModelId, setModelParametersModelId] = useState<string | null>(null);
+  const [settings, setSettings] = useState(() => getSettings());
+  const [recommendedGpuLayers, setRecommendedGpuLayers] = useState(0);
+  const [measuredContextWindowCeiling, setMeasuredContextWindowCeiling] = useState<number | null>(null);
+  const [draftLoadParams, setDraftLoadParams] = useState<ModelLoadParameters>({
+    contextSize: DEFAULT_MODEL_LOAD_PARAMETERS.contextSize,
+    gpuLayers: 0,
+  });
+  const [isApplyingModelProfile, setApplyingModelProfile] = useState(false);
   const [hasTokenConfigured, setHasTokenConfigured] = useState(
     () => huggingFaceTokenService.getCachedState().hasToken,
   );
@@ -178,6 +209,15 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
   const latestFetchIdRef = useRef(0);
   const appendInFlightRef = useRef(false);
   const lastAutoLoadCursorRef = useRef<string | null>(null);
+  const hasUserScrolledCatalogRef = useRef(false);
+  const loadDraftSourceRef = useRef<{
+    contextSize: 'current' | 'default' | 'user';
+    gpuLayers: 'current' | 'default' | 'user';
+  }>({
+    contextSize: 'current',
+    gpuLayers: 'current',
+  });
+  const loadDraftSeedRef = useRef<string | null>(null);
 
   const { startDownload, cancelDownload, queue } = useModelDownload();
   const { loadModel, unloadModel, state: engineState } = useLLMEngine();
@@ -233,6 +273,12 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
       modelCatalogService.getLocalModels().then(setModels);
     }
   }, [activeTab]);
+
+  useEffect(() => {
+    return subscribeSettings((nextSettings) => {
+      setSettings(nextSettings);
+    });
+  }, []);
 
   const fetchModels = useCallback(
     async (
@@ -379,6 +425,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
     latestFetchIdRef.current += 1;
     appendInFlightRef.current = false;
     lastAutoLoadCursorRef.current = null;
+    hasUserScrolledCatalogRef.current = false;
     setModels([]);
     setHasMore(activeTab === 'All Models');
     setNextCursor(null);
@@ -505,6 +552,58 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
 
     return sortModels(filtered, sort);
   }, [activeTab, displayModels, filters, sort]);
+
+  const configurableModel = useMemo(() => {
+    if (!modelParametersModelId) {
+      return undefined;
+    }
+
+    return displayModels.find((model) => model.id === modelParametersModelId)
+      ?? registry.getModel(modelParametersModelId);
+  }, [displayModels, modelParametersModelId]);
+  const configurableModelId = configurableModel?.id ?? modelParametersModelId;
+  const configurableModelAccessState = configurableModel?.accessState;
+  const configurableModelIsGated = configurableModel?.isGated === true;
+  const configurableModelIsPrivate = configurableModel?.isPrivate === true;
+  const configurableModelHasVerifiedContextWindow = configurableModel?.hasVerifiedContextWindow === true;
+  const configurableModelMaxContextTokens = configurableModel?.maxContextTokens;
+  const configurableModelSize = configurableModel?.size ?? null;
+  const modelParametersLabel = configurableModel?.name
+    ?? (configurableModelId?.split('/').pop() ?? configurableModelId ?? '');
+  const currentParams = getGenerationParametersForModel(configurableModelId);
+  const defaultParams = getGenerationParametersForModel(null);
+  const currentLoadParams = getModelLoadParametersForModel(configurableModelId);
+  const defaultLoadParams = getModelLoadParametersForModel(null);
+  const baseContextWindowCeiling = useMemo(() => resolveContextWindowCeiling({
+    modelMaxContextTokens: configurableModelMaxContextTokens,
+    modelSizeBytes: configurableModelSize,
+  }), [configurableModelMaxContextTokens, configurableModelSize]);
+  const contextWindowCeiling = measuredContextWindowCeiling ?? baseContextWindowCeiling;
+  const effectiveCurrentLoadParams = {
+    contextSize: clampContextWindowTokens(currentLoadParams.contextSize, contextWindowCeiling),
+    gpuLayers: currentLoadParams.gpuLayers,
+  };
+  const effectiveDefaultLoadParams = {
+    contextSize: clampContextWindowTokens(defaultLoadParams.contextSize, contextWindowCeiling),
+    gpuLayers: defaultLoadParams.gpuLayers,
+  };
+  const draftPersistedGpuLayers = loadDraftSourceRef.current.gpuLayers === 'current'
+    ? (currentLoadParams.gpuLayers ?? null)
+    : loadDraftSourceRef.current.gpuLayers === 'default'
+      ? (effectiveDefaultLoadParams.gpuLayers ?? null)
+      : draftLoadParams.gpuLayers;
+  const modelParametersApplyButtonLabel = settings.activeModelId === configurableModelId
+    ? t('models.applyAndReload')
+    : t('models.saveLoadProfile');
+  const showApplyReload = Boolean(configurableModelId) && (
+    hasPersistedLoadProfileChanges({
+      draftContextSize: draftLoadParams.contextSize,
+      draftPersistedGpuLayers,
+      persistedLoadParams: currentLoadParams,
+    })
+    || isApplyingModelProfile
+  );
+  const canApplyReload = Boolean(configurableModelId) && !isApplyingModelProfile;
 
   const showModelActionError = useCallback((scope: string, error: unknown) => {
     Alert.alert(t('models.actionFailedTitle'), getReportedErrorMessage(scope, error, t));
@@ -645,27 +744,230 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
       [
         { text: t('common.cancel'), style: 'cancel' },
         {
-          text: t('common.delete'),
-          style: 'destructive',
+          text: t('models.deleteKeepSettings'),
           onPress: async () => {
             try {
-              if (engineState.activeModelId === modelId) {
-                await unloadModel();
-              }
-              await registry.removeModel(modelId);
+              await offloadModel(modelId, { preserveSettings: true });
               if (activeTab === 'All Models') {
                 setManualRefreshRevision((current) => current + 1);
               } else {
                 refreshDownloadedModels();
               }
             } catch (error) {
-              showModelActionError('ModelsList.handleDelete', error);
+              showModelActionError('ModelsList.handleDelete.keepSettings', error);
+            }
+          },
+        },
+        {
+          text: t('models.deleteResetSettings'),
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await offloadModel(modelId, { preserveSettings: false });
+              if (activeTab === 'All Models') {
+                setManualRefreshRevision((current) => current + 1);
+              } else {
+                refreshDownloadedModels();
+              }
+            } catch (error) {
+              showModelActionError('ModelsList.handleDelete.resetSettings', error);
             }
           },
         },
       ],
     );
-  }, [activeTab, engineState.activeModelId, refreshDownloadedModels, showModelActionError, t, unloadModel]);
+  }, [activeTab, refreshDownloadedModels, showModelActionError, t]);
+
+  const handleOpenModelSettings = useCallback((modelId: string) => {
+    setModelParametersModelId(modelId);
+    setModelParametersOpen(true);
+  }, []);
+
+  useEffect(() => {
+    if (!isModelParametersOpen) {
+      setMeasuredContextWindowCeiling(null);
+      loadDraftSourceRef.current = {
+        contextSize: 'current',
+        gpuLayers: 'current',
+      };
+      loadDraftSeedRef.current = null;
+      return;
+    }
+
+    let isCancelled = false;
+    const refreshTargetModel = configurableModelId ? registry.getModel(configurableModelId) : undefined;
+    const shouldRefreshModelMetadata = refreshTargetModel?.hasVerifiedContextWindow !== true;
+
+    setMeasuredContextWindowCeiling(null);
+
+    void llmEngineService.getRecommendedGpuLayers()
+      .then((nextGpuLayers: number) => {
+        if (!isCancelled) {
+          setRecommendedGpuLayers(nextGpuLayers);
+        }
+      })
+      .catch(() => {
+        if (!isCancelled) {
+          setRecommendedGpuLayers(0);
+        }
+      });
+
+    void Promise.all([
+      DeviceInfo.getTotalMemory().catch(() => null),
+      shouldRefreshModelMetadata && refreshTargetModel
+        ? modelCatalogService.refreshModelMetadata(refreshTargetModel).catch(() => refreshTargetModel)
+        : Promise.resolve(refreshTargetModel),
+    ])
+      .then(([totalMemoryBytes, resolvedModel]) => {
+        if (!isCancelled) {
+          setMeasuredContextWindowCeiling(resolveContextWindowCeiling({
+            modelMaxContextTokens: resolvedModel?.maxContextTokens,
+            modelSizeBytes: resolvedModel?.size ?? null,
+            totalMemoryBytes,
+          }));
+        }
+      })
+      .catch(() => {
+        if (!isCancelled) {
+          setMeasuredContextWindowCeiling(null);
+        }
+      });
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [
+    configurableModelAccessState,
+    configurableModelHasVerifiedContextWindow,
+    configurableModelId,
+    configurableModelIsGated,
+    configurableModelIsPrivate,
+    configurableModelMaxContextTokens,
+    configurableModelSize,
+    isModelParametersOpen,
+  ]);
+
+  useEffect(() => {
+    if (!isModelParametersOpen) {
+      return;
+    }
+
+    const seedKey = configurableModelId ?? '__no-model__';
+    const shouldInitializeDraft = loadDraftSeedRef.current !== seedKey;
+
+    if (shouldInitializeDraft) {
+      loadDraftSourceRef.current = {
+        contextSize: 'current',
+        gpuLayers: 'current',
+      };
+      loadDraftSeedRef.current = seedKey;
+    }
+
+    setDraftLoadParams((current) => {
+      const nextContextSize = shouldInitializeDraft
+        ? effectiveCurrentLoadParams.contextSize
+        : (
+          loadDraftSourceRef.current.contextSize === 'current'
+            ? effectiveCurrentLoadParams.contextSize
+            : loadDraftSourceRef.current.contextSize === 'default'
+              ? effectiveDefaultLoadParams.contextSize
+              : clampContextWindowTokens(current.contextSize, contextWindowCeiling)
+        );
+      const nextGpuLayers = shouldInitializeDraft
+        ? (currentLoadParams.gpuLayers ?? recommendedGpuLayers)
+        : (
+          loadDraftSourceRef.current.gpuLayers === 'current'
+            ? (currentLoadParams.gpuLayers ?? recommendedGpuLayers)
+            : loadDraftSourceRef.current.gpuLayers === 'default'
+              ? (effectiveDefaultLoadParams.gpuLayers ?? recommendedGpuLayers)
+              : current.gpuLayers
+        );
+
+      if (
+        current.contextSize === nextContextSize
+        && current.gpuLayers === nextGpuLayers
+      ) {
+        return current;
+      }
+
+      return {
+        contextSize: nextContextSize,
+        gpuLayers: nextGpuLayers,
+      };
+    });
+  }, [
+    configurableModelId,
+    contextWindowCeiling,
+    currentLoadParams.gpuLayers,
+    effectiveCurrentLoadParams.contextSize,
+    effectiveDefaultLoadParams.contextSize,
+    effectiveDefaultLoadParams.gpuLayers,
+    isModelParametersOpen,
+    recommendedGpuLayers,
+  ]);
+
+  const handleApplyLoadParams = useCallback(async () => {
+    if (!configurableModelId) {
+      return;
+    }
+
+    setApplyingModelProfile(true);
+
+    try {
+      const nextContextSize = clampContextWindowTokens(
+        draftLoadParams.contextSize,
+        contextWindowCeiling,
+      );
+      const nextGpuLayers = loadDraftSourceRef.current.gpuLayers === 'current'
+        ? (currentLoadParams.gpuLayers ?? null)
+        : loadDraftSourceRef.current.gpuLayers === 'default'
+          ? (effectiveDefaultLoadParams.gpuLayers ?? null)
+          : draftLoadParams.gpuLayers;
+      const defaultContextSize = clampContextWindowTokens(
+        DEFAULT_MODEL_LOAD_PARAMETERS.contextSize,
+        contextWindowCeiling,
+      );
+      const isResetToDefaultProfile =
+        nextContextSize === defaultContextSize
+        && (nextGpuLayers ?? recommendedGpuLayers) === recommendedGpuLayers;
+
+      if (nextContextSize !== draftLoadParams.contextSize) {
+        setDraftLoadParams((current) => ({
+          ...current,
+          contextSize: nextContextSize,
+        }));
+      }
+
+      if (isResetToDefaultProfile) {
+        resetModelLoadParametersForModel(configurableModelId);
+      } else {
+        updateModelLoadParametersForModel(configurableModelId, {
+          contextSize: nextContextSize,
+          gpuLayers: nextGpuLayers,
+        });
+      }
+
+      if (settings.activeModelId === configurableModelId) {
+        await llmEngineService.load(configurableModelId, { forceReload: true });
+        refreshDownloadedModels();
+      }
+    } catch (error) {
+      showModelActionError('ModelsList.handleApplyLoadParams', error);
+    } finally {
+      setApplyingModelProfile(false);
+    }
+  }, [
+    configurableModelId,
+    contextWindowCeiling,
+    currentLoadParams.gpuLayers,
+    draftLoadParams.contextSize,
+    draftLoadParams.gpuLayers,
+    effectiveDefaultLoadParams.gpuLayers,
+    recommendedGpuLayers,
+    refreshDownloadedModels,
+    settings.activeModelId,
+    showModelActionError,
+  ]);
 
   const handleLoadMore = useCallback((source: 'auto' | 'manual' = 'manual') => {
     if (
@@ -680,7 +982,11 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
     }
 
     if (source === 'auto') {
-      if (loadMoreError || lastAutoLoadCursorRef.current === nextCursor) {
+      if (
+        !hasUserScrolledCatalogRef.current ||
+        loadMoreError ||
+        lastAutoLoadCursorRef.current === nextCursor
+      ) {
         return;
       }
 
@@ -689,6 +995,13 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
 
     void fetchModels(searchQuery, nextCursor, true);
   }, [activeTab, fetchModels, hasMore, isFetchingMore, loadMoreError, loading, nextCursor, searchQuery]);
+
+  const handleCatalogScroll = useCallback((event: any) => {
+    const offsetY = event?.nativeEvent?.contentOffset?.y;
+    if (typeof offsetY === 'number' && offsetY > 0) {
+      hasUserScrolledCatalogRef.current = true;
+    }
+  }, []);
 
   const hasFilters =
     filters.fitsInRamOnly
@@ -772,13 +1085,14 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
       onConfigureToken={openTokenSettings}
       onOpenModelPage={openModelPage}
       onLoad={handleLoad}
+      onOpenSettings={handleOpenModelSettings}
       onUnload={handleUnload}
       onDelete={handleDelete}
       onCancel={cancelDownload}
       onChat={() => router.push('/chat')}
       isActive={engineState.activeModelId === item.id}
     />
-  ), [cancelDownload, engineState.activeModelId, handleDelete, handleDownload, handleLoad, handleUnload, openModelDetails, openModelPage, openTokenSettings, router]);
+  ), [cancelDownload, engineState.activeModelId, handleDelete, handleDownload, handleLoad, handleOpenModelSettings, handleUnload, openModelDetails, openModelPage, openTokenSettings, router]);
 
   const renderEmptyState = useCallback(() => emptyState, [emptyState]);
   const renderFooter = useCallback(() => footer, [footer]);
@@ -820,6 +1134,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
             ListEmptyComponent={renderEmptyState}
             ListFooterComponent={renderFooter}
             contentContainerStyle={{ paddingBottom: tabBarHeight + 16 }}
+            onScroll={handleCatalogScroll}
             onEndReached={() => handleLoadMore('auto')}
             onEndReachedThreshold={0.6}
           />
@@ -840,6 +1155,75 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
           </Text>
         </Box>
       ) : null}
+
+      <ModelParametersSheet
+        visible={isModelParametersOpen}
+        modelId={configurableModelId}
+        modelLabel={modelParametersLabel}
+        params={currentParams}
+        defaultParams={defaultParams}
+        contextWindowCeiling={contextWindowCeiling}
+        loadParamsDraft={draftLoadParams}
+        defaultLoadParams={effectiveDefaultLoadParams}
+        recommendedGpuLayers={recommendedGpuLayers}
+        applyButtonLabel={modelParametersApplyButtonLabel}
+        canApplyReload={canApplyReload}
+        isApplyingReload={isApplyingModelProfile}
+        showApplyReload={showApplyReload}
+        onClose={() => {
+          setModelParametersOpen(false);
+        }}
+        onChangeParams={(partial) => {
+          updateGenerationParametersForModel(configurableModelId, partial);
+        }}
+        onChangeLoadParams={(partial) => {
+          if (partial.contextSize !== undefined) {
+            loadDraftSourceRef.current.contextSize = 'user';
+          }
+          if (partial.gpuLayers !== undefined) {
+            loadDraftSourceRef.current.gpuLayers = 'user';
+          }
+
+          setDraftLoadParams((current) => ({
+            ...current,
+            ...partial,
+            contextSize: partial.contextSize === undefined
+              ? current.contextSize
+              : clampContextWindowTokens(partial.contextSize, contextWindowCeiling),
+          }));
+        }}
+        onResetParamField={(field) => {
+          const resetParams = getGenerationParametersForModel(null);
+          const partial = { [field]: resetParams[field] } as Partial<typeof resetParams>;
+          updateGenerationParametersForModel(configurableModelId, partial);
+        }}
+        onResetLoadField={(field) => {
+          if (field === 'contextSize') {
+            loadDraftSourceRef.current.contextSize = 'default';
+          } else {
+            loadDraftSourceRef.current.gpuLayers = 'default';
+          }
+
+          setDraftLoadParams((current) => ({
+            ...current,
+            [field]: field === 'gpuLayers'
+              ? (effectiveDefaultLoadParams.gpuLayers ?? recommendedGpuLayers)
+              : effectiveDefaultLoadParams.contextSize,
+          }));
+        }}
+        onReset={() => {
+          loadDraftSourceRef.current = {
+            contextSize: 'default',
+            gpuLayers: 'default',
+          };
+          resetGenerationParametersForModel(configurableModelId);
+          setDraftLoadParams({
+            contextSize: effectiveDefaultLoadParams.contextSize,
+            gpuLayers: effectiveDefaultLoadParams.gpuLayers ?? recommendedGpuLayers,
+          });
+        }}
+        onApplyReload={handleApplyLoadParams}
+      />
     </>
   );
 };

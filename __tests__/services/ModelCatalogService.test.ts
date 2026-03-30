@@ -20,6 +20,7 @@ jest.mock('../../src/services/LocalStorageRegistry', () => ({
   registry: {
     getModels: jest.fn(),
     getModel: jest.fn(),
+    updateModel: jest.fn(),
   },
 }));
 
@@ -194,6 +195,71 @@ describe('ModelCatalogService', () => {
 
     const firstUrl = (global.fetch as jest.Mock).mock.calls[0][0] as string;
     expect(firstUrl).toContain('search=phi%20gguf');
+  });
+
+  it('keeps the largest context ceiling from summary config, cardData, and gguf metadata', async () => {
+    global.fetch = jest.fn(() =>
+      Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve([
+          {
+            ...makeRepo('org/summary-long-context-model'),
+            config: {
+              max_position_embeddings: 8192,
+            },
+            cardData: {
+              context_length: '32768',
+            },
+            gguf: {
+              total: 1.5 * 1024 * 1024 * 1024,
+              context_length: 65536,
+              architecture: 'llama',
+            },
+          },
+        ]),
+      }),
+    ) as jest.Mock;
+
+    const result = await modelCatalogService.searchModels('summary-long-context-model');
+
+    expect(result.models[0]).toEqual(expect.objectContaining({
+      id: 'org/summary-long-context-model',
+      maxContextTokens: 65536,
+    }));
+  });
+
+  it('preserves verified local context ceilings when unverified search results report a smaller value', async () => {
+    const localModel: ModelMetadata = {
+      ...makeLocalModel('org/verified-local-context-model'),
+      maxContextTokens: 32768,
+      hasVerifiedContextWindow: true,
+    };
+    mockedRegistry.getModel.mockImplementation((modelId: string) => (
+      modelId === localModel.id ? localModel : undefined
+    ));
+
+    global.fetch = jest.fn(() =>
+      Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve([
+          {
+            ...makeRepo(localModel.id),
+            config: {
+              max_position_embeddings: 8192,
+            },
+          },
+        ]),
+      }),
+    ) as jest.Mock;
+
+    const result = await modelCatalogService.searchModels('verified-local-context-model');
+
+    expect(result.models[0]).toEqual(expect.objectContaining({
+      id: localModel.id,
+      localPath: localModel.localPath,
+      maxContextTokens: 32768,
+      hasVerifiedContextWindow: true,
+    }));
   });
 
   it('returns local models with a warning when the first page is rate limited', async () => {
@@ -1344,6 +1410,7 @@ describe('ModelCatalogService', () => {
           ok: true,
           text: () => Promise.resolve([
             '---',
+            'context_length: 65536',
             'license: apache-2.0',
             'datasets:',
             '  - ultrachat_200k',
@@ -1368,6 +1435,10 @@ describe('ModelCatalogService', () => {
             model_type: 'llama',
           },
           config: {
+            max_position_embeddings: 8192,
+            rope_scaling: {
+              original_max_position_embeddings: 32768,
+            },
             architectures: ['LlamaForCausalLM'],
           },
         }),
@@ -1384,9 +1455,188 @@ describe('ModelCatalogService', () => {
     expect(result.datasets).toEqual(['ultrachat_200k']);
     expect(result.quantizedBy).toBe('bartowski');
     expect(result.modelCreator).toBe('Meta');
+    expect(result.maxContextTokens).toBe(65536);
   });
 
-  it('keeps gated model details locked when access validation fails after the details payload succeeds', async () => {
+  it('hydrates context ceilings from README front matter even when no summary or cardData is present', async () => {
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.endsWith('/raw/main/README.md')) {
+        return Promise.resolve({
+          ok: true,
+          text: () => Promise.resolve([
+            '---',
+            'context_length: 65536',
+            '---',
+            '',
+          ].join('\n')),
+        });
+      }
+
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve(makeRepo('org/readme-context-only-model')),
+      });
+    }) as jest.Mock;
+
+    const result = await modelCatalogService.getModelDetails('org/readme-context-only-model');
+
+    expect(result.maxContextTokens).toBe(65536);
+  });
+
+  it('parses 32k-style context ceilings from README front matter', async () => {
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.endsWith('/raw/main/README.md')) {
+        return Promise.resolve({
+          ok: true,
+          text: () => Promise.resolve([
+            '---',
+            'context_length: 32k',
+            '---',
+            '',
+          ].join('\n')),
+        });
+      }
+
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve(makeRepo('org/readme-context-shorthand-model')),
+      });
+    }) as jest.Mock;
+
+    const result = await modelCatalogService.getModelDetails('org/readme-context-shorthand-model');
+
+    expect(result.maxContextTokens).toBe(32768);
+    expect(result.hasVerifiedContextWindow).toBe(true);
+  });
+
+  it('keeps the largest available context ceiling from nested Hugging Face config metadata', async () => {
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.endsWith('/raw/main/README.md')) {
+        return Promise.resolve({
+          ok: false,
+          status: 404,
+          text: () => Promise.resolve(''),
+        });
+      }
+
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({
+          ...makeRepo('org/long-context-detail-model'),
+          config: {
+            max_position_embeddings: 8192,
+            text_config: {
+              model_max_length: 32768,
+            },
+            rope_scaling: {
+              original_max_position_embeddings: 65536,
+            },
+          },
+        }),
+      });
+    }) as jest.Mock;
+
+    const result = await modelCatalogService.getModelDetails('org/long-context-detail-model');
+
+    expect(result.maxContextTokens).toBe(65536);
+  });
+
+  it('keeps fallback context ceilings unverified when detail sources do not expose them', async () => {
+    const service = new ModelCatalogService();
+    const localModel: ModelMetadata = {
+      ...makeLocalModel('org/unverified-fallback-context-model'),
+      accessState: ModelAccessState.PUBLIC,
+      maxContextTokens: 32768,
+      hasVerifiedContextWindow: false,
+    };
+    mockedRegistry.getModel.mockImplementation((modelId: string) => (
+      modelId === localModel.id ? localModel : undefined
+    ));
+
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.endsWith('/raw/main/README.md')) {
+        return Promise.resolve({
+          ok: false,
+          status: 404,
+          text: () => Promise.resolve(''),
+        });
+      }
+
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve(makeRepo(localModel.id)),
+      });
+    }) as jest.Mock;
+
+    const result = await service.getModelDetails(localModel.id);
+
+    expect(result.maxContextTokens).toBe(32768);
+    expect(result.hasVerifiedContextWindow).toBe(false);
+    expect(mockedRegistry.updateModel).toHaveBeenCalledWith(expect.objectContaining({
+      id: localModel.id,
+      maxContextTokens: 32768,
+      hasVerifiedContextWindow: false,
+    }));
+
+    service.dispose();
+  });
+
+  it('prefers fresher verified detail context ceilings over stale verified local metadata', async () => {
+    const service = new ModelCatalogService();
+    const localModel: ModelMetadata = {
+      ...makeLocalModel('org/stale-verified-context-model'),
+      accessState: ModelAccessState.PUBLIC,
+      maxContextTokens: 32768,
+      hasVerifiedContextWindow: true,
+    };
+    mockedRegistry.getModel.mockImplementation((modelId: string) => (
+      modelId === localModel.id ? localModel : undefined
+    ));
+
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.endsWith('/raw/main/README.md')) {
+        return Promise.resolve({
+          ok: false,
+          status: 404,
+          text: () => Promise.resolve(''),
+        });
+      }
+
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({
+          ...makeRepo(localModel.id),
+          config: {
+            max_position_embeddings: 8192,
+          },
+        }),
+      });
+    }) as jest.Mock;
+
+    const result = await service.getModelDetails(localModel.id);
+
+    expect(result.maxContextTokens).toBe(8192);
+    expect(result.hasVerifiedContextWindow).toBe(true);
+    expect(mockedRegistry.updateModel).toHaveBeenCalledWith(expect.objectContaining({
+      id: localModel.id,
+      maxContextTokens: 8192,
+      hasVerifiedContextWindow: true,
+    }));
+
+    service.dispose();
+  });
+
+  it('keeps gated model details authorized when later access validation is temporarily unavailable', async () => {
     await huggingFaceTokenService.saveToken('hf_test_token');
 
     global.fetch = jest.fn((input: RequestInfo | URL) => {
@@ -1432,7 +1682,51 @@ describe('ModelCatalogService', () => {
 
     const result = await modelCatalogService.getModelDetails('org/detail-gated-model');
 
+    expect(result.accessState).toBe(ModelAccessState.AUTHORIZED);
+  });
+
+  it('does not treat auth fallbacks as verified context metadata for downloaded gated models', async () => {
+    const service = new ModelCatalogService();
+    const localModel: ModelMetadata = {
+      ...makeLocalModel('org/detail-gated-local-model'),
+      accessState: ModelAccessState.AUTHORIZED,
+      isGated: true,
+      maxContextTokens: 8192,
+      hasVerifiedContextWindow: false,
+    };
+    mockedRegistry.getModel.mockImplementation((modelId: string) => (
+      modelId === localModel.id ? localModel : undefined
+    ));
+
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.endsWith('/raw/main/README.md')) {
+        return Promise.resolve({
+          ok: false,
+          status: 403,
+          text: () => Promise.resolve(''),
+        });
+      }
+
+      return Promise.resolve({
+        ok: false,
+        status: 401,
+      });
+    }) as jest.Mock;
+
+    const result = await service.getModelDetails(localModel.id);
+
     expect(result.accessState).toBe(ModelAccessState.AUTH_REQUIRED);
+    expect(result.maxContextTokens).toBe(8192);
+    expect(result.hasVerifiedContextWindow).toBe(false);
+    expect(mockedRegistry.updateModel).toHaveBeenCalledWith(expect.objectContaining({
+      id: localModel.id,
+      hasVerifiedContextWindow: false,
+      maxContextTokens: 8192,
+    }));
+
+    service.dispose();
   });
 
   it('retries model details when the auth token changes mid-flight and keeps only the fresh snapshot', async () => {
@@ -1537,6 +1831,299 @@ describe('ModelCatalogService', () => {
     expect(cachedModel?.quantizedBy).toBe('bartowski');
   });
 
+  it('refreshes stale context ceilings for known-size public models through the detail endpoint', async () => {
+    const service = new ModelCatalogService();
+    const refreshTarget: ModelMetadata = {
+      id: 'org/stale-context-model',
+      name: 'stale-context-model',
+      author: 'org',
+      size: 2 * 1024 * 1024 * 1024,
+      downloadUrl: 'https://huggingface.co/org/stale-context-model/resolve/main/model.gguf',
+      resolvedFileName: 'model.gguf',
+      localPath: 'stale-context-model.gguf',
+      fitsInRam: true,
+      accessState: ModelAccessState.PUBLIC,
+      isGated: false,
+      isPrivate: false,
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      maxContextTokens: 8192,
+      hasVerifiedContextWindow: false,
+    };
+    mockedRegistry.getModel.mockImplementation((modelId: string) => (
+      modelId === refreshTarget.id ? refreshTarget : undefined
+    ));
+
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.endsWith('/raw/main/README.md')) {
+        return Promise.resolve({
+          ok: false,
+          status: 404,
+          text: () => Promise.resolve(''),
+        });
+      }
+
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({
+          ...makeRepo('org/stale-context-model', 2 * 1024 * 1024 * 1024),
+          config: {
+            max_position_embeddings: 8192,
+            rope_scaling: {
+              original_max_position_embeddings: 32768,
+            },
+          },
+        }),
+      });
+    }) as jest.Mock;
+
+    const refreshed = await service.refreshModelMetadata(refreshTarget);
+
+    expect(refreshed.maxContextTokens).toBe(32768);
+    expect(mockedRegistry.updateModel).toHaveBeenCalledWith(expect.objectContaining({
+      id: refreshTarget.id,
+      localPath: refreshTarget.localPath,
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      maxContextTokens: 32768,
+      hasVerifiedContextWindow: true,
+    }));
+    expect((global.fetch as jest.Mock).mock.calls.some(([input]) => (
+      String(input).includes('/api/models/org/stale-context-model')
+    ))).toBe(true);
+
+    service.dispose();
+  });
+
+  it('refreshes unverified long context ceilings through the detail endpoint even above the default threshold', async () => {
+    const service = new ModelCatalogService();
+    const refreshTarget: ModelMetadata = {
+      id: 'org/stale-long-context-model',
+      name: 'stale-long-context-model',
+      author: 'org',
+      size: 2 * 1024 * 1024 * 1024,
+      downloadUrl: 'https://huggingface.co/org/stale-long-context-model/resolve/main/model.gguf',
+      resolvedFileName: 'model.gguf',
+      localPath: 'stale-long-context-model.gguf',
+      fitsInRam: true,
+      accessState: ModelAccessState.PUBLIC,
+      isGated: false,
+      isPrivate: false,
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      maxContextTokens: 32768,
+      hasVerifiedContextWindow: false,
+    };
+    mockedRegistry.getModel.mockImplementation((modelId: string) => (
+      modelId === refreshTarget.id ? refreshTarget : undefined
+    ));
+
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.endsWith('/raw/main/README.md')) {
+        return Promise.resolve({
+          ok: false,
+          status: 404,
+          text: () => Promise.resolve(''),
+        });
+      }
+
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({
+          ...makeRepo('org/stale-long-context-model', 2 * 1024 * 1024 * 1024),
+          config: {
+            rope_scaling: {
+              original_max_position_embeddings: 65536,
+            },
+          },
+        }),
+      });
+    }) as jest.Mock;
+
+    const refreshed = await service.refreshModelMetadata(refreshTarget);
+
+    expect(refreshed.maxContextTokens).toBe(65536);
+    expect(refreshed.hasVerifiedContextWindow).toBe(true);
+    expect((global.fetch as jest.Mock).mock.calls.some(([input]) => (
+      String(input).includes('/api/models/org/stale-long-context-model')
+    ))).toBe(true);
+
+    service.dispose();
+  });
+
+  it('refreshes context ceilings for size-less local models through the detail endpoint in a single pass', async () => {
+    const service = new ModelCatalogService();
+    const refreshTarget: ModelMetadata = {
+      id: 'org/size-less-context-model',
+      name: 'size-less-context-model',
+      author: 'org',
+      size: null,
+      downloadUrl: 'https://huggingface.co/org/size-less-context-model/resolve/main/model.gguf',
+      resolvedFileName: 'model.gguf',
+      localPath: 'size-less-context-model.gguf',
+      fitsInRam: true,
+      accessState: ModelAccessState.PUBLIC,
+      isGated: false,
+      isPrivate: false,
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      maxContextTokens: 8192,
+      hasVerifiedContextWindow: false,
+    };
+    mockedRegistry.getModel.mockImplementation((modelId: string) => (
+      modelId === refreshTarget.id ? refreshTarget : undefined
+    ));
+
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.endsWith('/raw/main/README.md')) {
+        return Promise.resolve({
+          ok: false,
+          status: 404,
+          text: () => Promise.resolve(''),
+        });
+      }
+
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({
+          ...makeRepo('org/size-less-context-model', 2 * 1024 * 1024 * 1024, 'model.gguf'),
+          config: {
+            rope_scaling: {
+              original_max_position_embeddings: 32768,
+            },
+          },
+        }),
+      });
+    }) as jest.Mock;
+
+    const refreshed = await service.refreshModelMetadata(refreshTarget);
+
+    expect(refreshed.size).toBe(2 * 1024 * 1024 * 1024);
+    expect(refreshed.maxContextTokens).toBe(32768);
+    expect(refreshed.hasVerifiedContextWindow).toBe(true);
+    expect((global.fetch as jest.Mock).mock.calls.some(([input]) => (
+      String(input).includes('/tree/')
+    ))).toBe(false);
+
+    service.dispose();
+  });
+
+  it('refreshes stale context ceilings for gated models through the detail endpoint when a token is available', async () => {
+    await huggingFaceTokenService.saveToken('hf_test_token');
+    const service = new ModelCatalogService();
+    const refreshTarget: ModelMetadata = {
+      id: 'org/stale-gated-context-model',
+      name: 'stale-gated-context-model',
+      author: 'org',
+      size: 2 * 1024 * 1024 * 1024,
+      downloadUrl: 'https://huggingface.co/org/stale-gated-context-model/resolve/main/model.gguf',
+      resolvedFileName: 'model.gguf',
+      localPath: 'stale-gated-context-model.gguf',
+      fitsInRam: true,
+      accessState: ModelAccessState.AUTH_REQUIRED,
+      isGated: true,
+      isPrivate: false,
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      maxContextTokens: 8192,
+      hasVerifiedContextWindow: false,
+    };
+    mockedRegistry.getModel.mockImplementation((modelId: string) => (
+      modelId === refreshTarget.id ? refreshTarget : undefined
+    ));
+
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.endsWith('/raw/main/README.md')) {
+        return Promise.resolve({
+          ok: false,
+          status: 404,
+          text: () => Promise.resolve(''),
+        });
+      }
+
+      if (url.includes('/api/models/org/stale-gated-context-model')) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({
+            ...makeRepo('org/stale-gated-context-model', 2 * 1024 * 1024 * 1024),
+            gated: 'manual',
+            config: {
+              max_position_embeddings: 8192,
+              rope_scaling: {
+                original_max_position_embeddings: 32768,
+              },
+            },
+          }),
+        });
+      }
+
+      if (url.includes('/resolve/')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+        });
+      }
+
+      throw new Error(`Unexpected fetch URL: ${url}`);
+    }) as jest.Mock;
+
+    const refreshed = await service.refreshModelMetadata(refreshTarget);
+
+    expect(refreshed.accessState).toBe(ModelAccessState.AUTHORIZED);
+    expect(refreshed.maxContextTokens).toBe(32768);
+    expect(mockedRegistry.updateModel).toHaveBeenCalledWith(expect.objectContaining({
+      id: refreshTarget.id,
+      localPath: refreshTarget.localPath,
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      accessState: ModelAccessState.AUTHORIZED,
+      maxContextTokens: 32768,
+      hasVerifiedContextWindow: true,
+    }));
+    expect((global.fetch as jest.Mock).mock.calls.some(([input]) => (
+      String(input).includes('/api/models/org/stale-gated-context-model')
+    ))).toBe(true);
+
+    service.dispose();
+  });
+
+  it('does not refetch detail metadata after a short context ceiling has already been verified', async () => {
+    const service = new ModelCatalogService();
+    const refreshTarget: ModelMetadata = {
+      id: 'org/verified-short-context-model',
+      name: 'verified-short-context-model',
+      author: 'org',
+      size: 2 * 1024 * 1024 * 1024,
+      downloadUrl: 'https://huggingface.co/org/verified-short-context-model/resolve/main/model.gguf',
+      resolvedFileName: 'model.gguf',
+      localPath: 'verified-short-context-model.gguf',
+      fitsInRam: true,
+      accessState: ModelAccessState.PUBLIC,
+      isGated: false,
+      isPrivate: false,
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      maxContextTokens: 8192,
+      hasVerifiedContextWindow: true,
+    };
+    global.fetch = jest.fn(() => {
+      throw new Error('detail endpoint should not be requested for a verified short-context model');
+    }) as jest.Mock;
+
+    const refreshed = await service.refreshModelMetadata(refreshTarget);
+
+    expect(refreshed.maxContextTokens).toBe(8192);
+    expect(global.fetch).not.toHaveBeenCalled();
+
+    service.dispose();
+  });
+
   it('dedupes concurrent tree probes for the same repo and revision', async () => {
     const service = new ModelCatalogService();
     const treeResponse = createDeferred<any>();
@@ -1555,6 +2142,7 @@ describe('ModelCatalogService', () => {
       lifecycleStatus: LifecycleStatus.AVAILABLE,
       downloadProgress: 0,
       requiresTreeProbe: true,
+      hasVerifiedContextWindow: true,
     };
 
     global.fetch = jest.fn(() => treeResponse.promise) as jest.Mock;
@@ -1599,6 +2187,8 @@ describe('ModelCatalogService', () => {
       isPrivate: false,
       lifecycleStatus: LifecycleStatus.AVAILABLE,
       downloadProgress: 0,
+      maxContextTokens: 8192,
+      hasVerifiedContextWindow: true,
     };
 
     global.fetch = jest.fn(() => headResponse.promise) as jest.Mock;
@@ -1652,7 +2242,11 @@ describe('ModelCatalogService', () => {
     }) as jest.Mock;
 
     const initialResult = await service.searchModels('phi');
-    await service.refreshModelMetadata(initialResult.models[0]);
+    await service.refreshModelMetadata({
+      ...initialResult.models[0],
+      maxContextTokens: 8192,
+      hasVerifiedContextWindow: true,
+    });
 
     expect(global.fetch).toHaveBeenCalledTimes(2);
 

@@ -274,7 +274,7 @@ export const useChatStore = create<ChatStoreState>()(
           return {
             threads: {
               ...state.threads,
-              [threadId]: {
+              [threadId]: updateThreadMetadata({
                 ...existingThread,
                 paramsSnapshot: {
                   temperature: paramsSnapshot.temperature,
@@ -285,7 +285,7 @@ export const useChatStore = create<ChatStoreState>()(
                   maxTokens: paramsSnapshot.maxTokens,
                   reasoningEnabled: paramsSnapshot.reasoningEnabled === true,
                 },
-              },
+              }),
             },
           };
         }),
@@ -684,6 +684,8 @@ export interface ThreadInferenceWindowOptions {
 const CHARS_PER_ESTIMATED_TOKEN = 4;
 const MESSAGE_TOKEN_OVERHEAD = 6;
 export const DEFAULT_INFERENCE_PROMPT_SAFETY_MARGIN_TOKENS = 64;
+const RESPONSE_RESERVE_BALANCING_MIN_TOKENS = 256;
+const MAX_RESPONSE_RESERVE_SHARE_OF_PROMPT_BUDGET = 0.5;
 
 export function estimateLlmMessageTokens(message: LlmChatMessage) {
   return Math.max(1, Math.ceil(message.content.trim().length / CHARS_PER_ESTIMATED_TOKEN)) + MESSAGE_TOKEN_OVERHEAD;
@@ -691,6 +693,24 @@ export function estimateLlmMessageTokens(message: LlmChatMessage) {
 
 export function estimateLlmMessagesTokens(messages: LlmChatMessage[]) {
   return messages.reduce((total, message) => total + estimateLlmMessageTokens(message), 0);
+}
+
+function resolveBalancedResponseReserveTokens(
+  requestedResponseTokens: number,
+  totalPromptBudget: number,
+) {
+  const normalizedRequestedResponseTokens = Math.max(0, Math.round(requestedResponseTokens));
+
+  if (normalizedRequestedResponseTokens <= RESPONSE_RESERVE_BALANCING_MIN_TOKENS) {
+    return Math.min(normalizedRequestedResponseTokens, totalPromptBudget);
+  }
+
+  const balancedReserveCap = Math.max(
+    RESPONSE_RESERVE_BALANCING_MIN_TOKENS,
+    Math.floor(totalPromptBudget * MAX_RESPONSE_RESERVE_SHARE_OF_PROMPT_BUDGET),
+  );
+
+  return Math.min(normalizedRequestedResponseTokens, totalPromptBudget, balancedReserveCap);
 }
 
 function getMinimumRequiredHistoryTokens(historyMessages: LlmChatMessage[]) {
@@ -791,9 +811,13 @@ export function getThreadInferenceWindow(
     const minimumRequiredHistoryTokens = getMinimumRequiredHistoryTokens(normalizedHistoryMessages);
     const canFitMinimumRequiredHistory =
       minimumRequiredHistoryTokens === 0 || minimumRequiredHistoryTokens <= totalPromptBudget;
+    const balancedReservedResponseTokens = resolveBalancedResponseReserveTokens(
+      targetReservedResponseTokens,
+      totalPromptBudget,
+    );
     const effectiveReservedResponseTokens = canFitMinimumRequiredHistory
       ? Math.min(
-          targetReservedResponseTokens,
+          balancedReservedResponseTokens,
           Math.max(totalPromptBudget - minimumRequiredHistoryTokens, 0),
         )
       : 0;

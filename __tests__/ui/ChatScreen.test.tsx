@@ -1,5 +1,5 @@
 import React from 'react';
-import { act, fireEvent, render } from '@testing-library/react-native';
+import { act, fireEvent, render, waitFor } from '@testing-library/react-native';
 import { Alert } from 'react-native';
 
 jest.mock('react-native-css-interop', () => {
@@ -32,10 +32,25 @@ const mockStop = jest.fn();
 const mockCreateSummaryPlaceholder = jest.fn();
 const mockRouterPush = jest.fn();
 const mockGetRecommendedGpuLayers = jest.fn(() => new Promise<number>(() => {}));
+const mockLoadModel = jest.fn().mockResolvedValue(undefined);
+const mockGetTotalMemory = jest.fn().mockResolvedValue(8 * 1024 * 1024 * 1024);
+const mockRefreshModelMetadata = jest.fn((model) => Promise.resolve(model));
 let lastPresetSelectorProps: any = null;
+let lastModelParametersSheetProps: any = null;
 const mockStartNewChat = jest.fn(() => {
   require('../../src/store/chatStore').useChatStore.getState().setActiveThread(null);
 });
+
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+
+  return { promise, resolve, reject };
+}
 let hardwareStatusListener: ((status: any) => void) | null = null;
 let mockHardwareBannerInputs = {
   showLowMemoryWarning: false,
@@ -59,6 +74,17 @@ jest.mock('../../src/hooks/useLLMEngine', () => ({
 jest.mock('../../src/services/LLMEngineService', () => ({
   llmEngineService: {
     getRecommendedGpuLayers: () => mockGetRecommendedGpuLayers(),
+    load: (...args: any[]) => mockLoadModel(...args),
+  },
+}));
+
+jest.mock('react-native-device-info', () => ({
+  getTotalMemory: () => mockGetTotalMemory(),
+}));
+
+jest.mock('../../src/services/ModelCatalogService', () => ({
+  modelCatalogService: {
+    refreshModelMetadata: (model: any) => mockRefreshModelMetadata(model),
   },
 }));
 
@@ -215,11 +241,14 @@ jest.mock('@/components/ui/ModelParametersSheet', () => {
   const { Pressable, Text, View } = require('react-native');
 
   return {
-    ModelParametersSheet: ({ visible, onResetParamField, onChangeParams }: any) =>
-      visible
+    ModelParametersSheet: (props: any) => {
+      lastModelParametersSheetProps = props;
+      const { visible, onReset, onResetParamField, onChangeParams, loadParamsDraft } = props;
+      return visible
         ? mockReact.createElement(
             View,
             { testID: 'model-parameters-sheet' },
+            mockReact.createElement(Text, { testID: 'context-size-value' }, String(loadParamsDraft.contextSize)),
             mockReact.createElement(
               Pressable,
               {
@@ -236,8 +265,17 @@ jest.mock('@/components/ui/ModelParametersSheet', () => {
               },
               mockReact.createElement(Text, null, 'Reset Top-P'),
             ),
+            mockReact.createElement(
+              Pressable,
+              {
+                testID: 'reset-all-button',
+                onPress: onReset,
+              },
+              mockReact.createElement(Text, null, 'Reset all'),
+            ),
           )
-        : null,
+        : null;
+    },
   };
 });
 
@@ -346,7 +384,10 @@ const {
   handleAndroidBackNavigation,
 } = require('../../src/ui/screens/ChatScreen');
 const { useChatStore } = require('../../src/store/chatStore');
-const { updateSettings } = require('../../src/services/SettingsStore');
+const {
+  getSettings,
+  updateSettings,
+} = require('../../src/services/SettingsStore');
 const { registry } = require('../../src/services/LocalStorageRegistry');
 
 describe('ChatScreen', () => {
@@ -369,6 +410,8 @@ describe('ChatScreen', () => {
     mockStartNewChat.mockClear();
     alertSpy.mockClear();
     lastPresetSelectorProps = null;
+    lastModelParametersSheetProps = null;
+    mockLoadModel.mockClear();
     hardwareStatusListener = null;
     mockHardwareBannerInputs = {
       showLowMemoryWarning: false,
@@ -380,11 +423,15 @@ describe('ChatScreen', () => {
       status: 'ready',
     };
     registry.saveModels([]);
+    mockGetTotalMemory.mockClear();
+    mockGetTotalMemory.mockResolvedValue(8 * 1024 * 1024 * 1024);
+    mockRefreshModelMetadata.mockClear();
+    mockRefreshModelMetadata.mockImplementation((model) => Promise.resolve(model));
     updateSettings({
       activePresetId: 'preset-1',
       temperature: 0.7,
       topP: 0.9,
-      maxTokens: 2048,
+      maxTokens: 512,
       modelParamsByModelId: {
         'author/model-q4': {
           temperature: 0.7,
@@ -875,5 +922,401 @@ describe('ChatScreen', () => {
     rerender(React.createElement(ChatScreen));
 
     expect(useChatStore.getState().getActiveThread()?.paramsSnapshot.reasoningEnabled).toBe(true);
+  });
+
+  it('keeps the reset context window draft instead of restoring the saved override', () => {
+    updateSettings({
+      modelLoadParamsByModelId: {
+        'author/model-q4': {
+          contextSize: 8192,
+          gpuLayers: null,
+        },
+      },
+    });
+
+    const { getByTestId } = render(React.createElement(ChatScreen));
+
+    fireEvent.press(getByTestId('model-controls-button'));
+    expect(lastModelParametersSheetProps?.loadParamsDraft.contextSize).toBe(8192);
+
+    fireEvent.press(getByTestId('reset-all-button'));
+
+    expect(lastModelParametersSheetProps?.loadParamsDraft.contextSize).toBe(4096);
+    expect(getByTestId('context-size-value').props.children).toBe('4096');
+  });
+
+  it('keeps apply visible when an old saved context override is clamped by the current ceiling', async () => {
+    updateSettings({
+      modelLoadParamsByModelId: {
+        'author/model-q4': {
+          contextSize: 32768,
+          gpuLayers: null,
+        },
+      },
+    });
+    registry.saveModels([
+      {
+        id: 'author/model-q4',
+        name: 'Q4 model',
+        author: 'Test',
+        size: 512 * 1024 * 1024,
+        maxContextTokens: 8192,
+        hasVerifiedContextWindow: true,
+        localPath: 'author-model-q4.gguf',
+        lifecycleStatus: 'downloaded',
+      },
+    ]);
+
+    const { getByTestId } = render(React.createElement(ChatScreen));
+
+    await act(async () => {
+      fireEvent.press(getByTestId('model-controls-button'));
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(lastModelParametersSheetProps?.loadParamsDraft.contextSize).toBe(8192);
+      expect(lastModelParametersSheetProps?.showApplyReload).toBe(true);
+    });
+  });
+
+  it('does not persist a gpuLayers=0 override when apply runs before recommendations resolve', async () => {
+    mockGetRecommendedGpuLayers.mockReturnValueOnce(new Promise<number>(() => {}));
+
+    const { getByTestId } = render(React.createElement(ChatScreen));
+
+    await act(async () => {
+      fireEvent.press(getByTestId('model-controls-button'));
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      lastModelParametersSheetProps.onChangeLoadParams({
+        contextSize: 8192,
+      });
+    });
+
+    await act(async () => {
+      await lastModelParametersSheetProps.onApplyReload();
+    });
+
+    expect(getSettings().modelLoadParamsByModelId['author/model-q4']).toEqual({
+      contextSize: 8192,
+      gpuLayers: null,
+    });
+  });
+
+  it('keeps gpuLayers on auto when the field is reset before recommendations resolve', async () => {
+    mockGetRecommendedGpuLayers.mockReturnValueOnce(new Promise<number>(() => {}));
+    updateSettings({
+      modelLoadParamsByModelId: {
+        'author/model-q4': {
+          contextSize: 4096,
+          gpuLayers: 12,
+        },
+      },
+    });
+
+    const { getByTestId } = render(React.createElement(ChatScreen));
+
+    await act(async () => {
+      fireEvent.press(getByTestId('model-controls-button'));
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      lastModelParametersSheetProps.onResetLoadField('gpuLayers');
+      lastModelParametersSheetProps.onChangeLoadParams({
+        contextSize: 8192,
+      });
+    });
+
+    await act(async () => {
+      await lastModelParametersSheetProps.onApplyReload();
+    });
+
+    expect(getSettings().modelLoadParamsByModelId['author/model-q4']).toEqual({
+      contextSize: 8192,
+      gpuLayers: null,
+    });
+  });
+
+  it('keeps gpuLayers on auto when reset all is applied before recommendations resolve', async () => {
+    mockGetRecommendedGpuLayers.mockReturnValueOnce(new Promise<number>(() => {}));
+    updateSettings({
+      modelLoadParamsByModelId: {
+        'author/model-q4': {
+          contextSize: 4096,
+          gpuLayers: 12,
+        },
+      },
+    });
+
+    const { getByTestId } = render(React.createElement(ChatScreen));
+
+    await act(async () => {
+      fireEvent.press(getByTestId('model-controls-button'));
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      fireEvent.press(getByTestId('reset-all-button'));
+    });
+
+    await act(async () => {
+      await lastModelParametersSheetProps.onApplyReload();
+    });
+
+    expect(getSettings().modelLoadParamsByModelId['author/model-q4']).toBeUndefined();
+  });
+
+  it('passes a RAM-aware context window ceiling into the model controls sheet', async () => {
+    const { ESTIMATED_CONTEXT_BYTES_PER_TOKEN, resolveContextWindowCeiling } = require('../../src/utils/contextWindow');
+    const totalMemoryBytes = 8 * 1024 * 1024 * 1024;
+    const expectedCeiling = 4096;
+    const modelSizeBytes = Math.floor(
+      ((totalMemoryBytes * 0.8) - expectedCeiling * ESTIMATED_CONTEXT_BYTES_PER_TOKEN) / 1.2,
+    );
+
+    registry.saveModels([
+      {
+        id: 'author/model-q4',
+        name: 'Q4 model',
+        author: 'Test',
+        size: modelSizeBytes,
+        maxContextTokens: 8192,
+        hasVerifiedContextWindow: true,
+        localPath: 'author-model-q4.gguf',
+        lifecycleStatus: 'downloaded',
+      },
+    ]);
+
+    const { getByTestId } = render(React.createElement(ChatScreen));
+
+    await act(async () => {
+      fireEvent.press(getByTestId('model-controls-button'));
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(lastModelParametersSheetProps?.contextWindowCeiling).toBe(resolveContextWindowCeiling({
+        modelMaxContextTokens: 8192,
+        modelSizeBytes,
+        totalMemoryBytes,
+      }));
+    });
+  });
+
+  it('surfaces context window ceilings above 8192 when the model supports them', async () => {
+    registry.saveModels([
+      {
+        id: 'author/model-q4',
+        name: 'Q4 model',
+        author: 'Test',
+        size: 512 * 1024 * 1024,
+        maxContextTokens: 32768,
+        hasVerifiedContextWindow: true,
+        localPath: 'author-model-q4.gguf',
+        lifecycleStatus: 'downloaded',
+      },
+    ]);
+
+    const { getByTestId } = render(React.createElement(ChatScreen));
+
+    await act(async () => {
+      fireEvent.press(getByTestId('model-controls-button'));
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(lastModelParametersSheetProps?.contextWindowCeiling).toBe(32768);
+    });
+  });
+
+  it('refreshes stale model metadata before calculating the context window ceiling', async () => {
+    registry.saveModels([
+      {
+        id: 'author/model-q4',
+        name: 'Q4 model',
+        author: 'Test',
+        size: 512 * 1024 * 1024,
+        maxContextTokens: 8192,
+        hasVerifiedContextWindow: false,
+        localPath: 'author-model-q4.gguf',
+        lifecycleStatus: 'downloaded',
+      },
+    ]);
+    mockRefreshModelMetadata.mockResolvedValueOnce({
+      id: 'author/model-q4',
+      name: 'Q4 model',
+      author: 'Test',
+      size: 512 * 1024 * 1024,
+      maxContextTokens: 32768,
+      hasVerifiedContextWindow: true,
+      localPath: 'author-model-q4.gguf',
+      lifecycleStatus: 'downloaded',
+    });
+
+    const { getByTestId } = render(React.createElement(ChatScreen));
+
+    await act(async () => {
+      fireEvent.press(getByTestId('model-controls-button'));
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(mockRefreshModelMetadata).toHaveBeenCalledWith(expect.objectContaining({
+        id: 'author/model-q4',
+        maxContextTokens: 8192,
+      }));
+      expect(lastModelParametersSheetProps?.contextWindowCeiling).toBe(32768);
+    });
+  });
+
+  it('refreshes unverified long-context metadata before calculating the context window ceiling', async () => {
+    registry.saveModels([
+      {
+        id: 'author/model-q4',
+        name: 'Q4 model',
+        author: 'Test',
+        size: 512 * 1024 * 1024,
+        maxContextTokens: 32768,
+        hasVerifiedContextWindow: false,
+        localPath: 'author-model-q4.gguf',
+        lifecycleStatus: 'downloaded',
+      },
+    ]);
+    mockRefreshModelMetadata.mockResolvedValueOnce({
+      id: 'author/model-q4',
+      name: 'Q4 model',
+      author: 'Test',
+      size: 512 * 1024 * 1024,
+      maxContextTokens: 65536,
+      hasVerifiedContextWindow: true,
+      localPath: 'author-model-q4.gguf',
+      lifecycleStatus: 'downloaded',
+    });
+
+    const { getByTestId } = render(React.createElement(ChatScreen));
+
+    await act(async () => {
+      fireEvent.press(getByTestId('model-controls-button'));
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(mockRefreshModelMetadata).toHaveBeenCalledWith(expect.objectContaining({
+        id: 'author/model-q4',
+        maxContextTokens: 32768,
+        hasVerifiedContextWindow: false,
+      }));
+      expect(lastModelParametersSheetProps?.contextWindowCeiling).toBe(65536);
+    });
+  });
+
+  it('preserves unsaved load-parameter edits while async recommendations are still resolving', async () => {
+    const recommendedGpuLayers = createDeferred<number>();
+    const refreshedModel = {
+      id: 'author/model-q4',
+      name: 'Q4 model',
+      author: 'Test',
+      size: 512 * 1024 * 1024,
+      maxContextTokens: 32768,
+      localPath: 'author-model-q4.gguf',
+      lifecycleStatus: 'downloaded',
+    };
+    const refreshedMetadata = createDeferred<typeof refreshedModel>();
+
+    mockGetRecommendedGpuLayers.mockReturnValueOnce(recommendedGpuLayers.promise);
+    mockRefreshModelMetadata.mockReturnValueOnce(refreshedMetadata.promise);
+    registry.saveModels([
+      {
+        ...refreshedModel,
+        maxContextTokens: 8192,
+        hasVerifiedContextWindow: false,
+      },
+    ]);
+
+    const { getByTestId } = render(React.createElement(ChatScreen));
+
+    await act(async () => {
+      fireEvent.press(getByTestId('model-controls-button'));
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      lastModelParametersSheetProps.onChangeLoadParams({
+        contextSize: 8192,
+        gpuLayers: 12,
+      });
+    });
+
+    await act(async () => {
+      recommendedGpuLayers.resolve(20);
+      refreshedMetadata.resolve(refreshedModel);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(lastModelParametersSheetProps?.loadParamsDraft.contextSize).toBe(8192);
+    expect(lastModelParametersSheetProps?.loadParamsDraft.gpuLayers).toBe(12);
+  });
+
+  it('re-clamps a user draft when async RAM checks lower the context window ceiling', async () => {
+    const { ESTIMATED_CONTEXT_BYTES_PER_TOKEN, resolveContextWindowCeiling } = require('../../src/utils/contextWindow');
+    const totalMemoryBytes = 8 * 1024 * 1024 * 1024;
+    const loweredCeiling = 4096;
+    const modelSizeBytes = Math.floor(
+      ((totalMemoryBytes * 0.8) - loweredCeiling * ESTIMATED_CONTEXT_BYTES_PER_TOKEN) / 1.2,
+    );
+    const totalMemory = createDeferred<number>();
+
+    mockGetTotalMemory.mockReturnValueOnce(totalMemory.promise);
+    registry.saveModels([
+      {
+        id: 'author/model-q4',
+        name: 'Q4 model',
+        author: 'Test',
+        size: modelSizeBytes,
+        maxContextTokens: 32768,
+        hasVerifiedContextWindow: true,
+        localPath: 'author-model-q4.gguf',
+        lifecycleStatus: 'downloaded',
+      },
+    ]);
+
+    const { getByTestId } = render(React.createElement(ChatScreen));
+
+    await act(async () => {
+      fireEvent.press(getByTestId('model-controls-button'));
+      await Promise.resolve();
+    });
+
+    expect(lastModelParametersSheetProps?.contextWindowCeiling).toBe(32768);
+
+    await act(async () => {
+      lastModelParametersSheetProps.onChangeLoadParams({
+        contextSize: 8192,
+      });
+    });
+
+    expect(lastModelParametersSheetProps?.loadParamsDraft.contextSize).toBe(8192);
+    expect(getByTestId('context-size-value').props.children).toBe('8192');
+
+    await act(async () => {
+      totalMemory.resolve(totalMemoryBytes);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(lastModelParametersSheetProps?.contextWindowCeiling).toBe(resolveContextWindowCeiling({
+        modelMaxContextTokens: 32768,
+        modelSizeBytes,
+        totalMemoryBytes,
+      }));
+      expect(lastModelParametersSheetProps?.loadParamsDraft.contextSize).toBe(loweredCeiling);
+      expect(getByTestId('context-size-value').props.children).toBe(String(loweredCeiling));
+    });
   });
 });

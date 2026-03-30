@@ -24,8 +24,8 @@ The project is built around a simple local-first flow:
 - Bounded on-device catalog cache for recent first-page results and recent model details, with online revalidation on reopen
 - Persistent chat history stored on the device
 - System prompt presets for different assistant behaviors
-- Runtime generation controls such as temperature, top-p, top-k, min-p, repetition penalty, context window, and max tokens
-- Storage manager for unloading or offloading models and clearing local data
+- Per-model generation controls such as temperature, top-p, top-k, min-p, repetition penalty, context window, and max tokens, plus saved load profiles for GPU layers
+- Storage manager for unloading or offloading models, optionally keeping or resetting saved model settings, and clearing local data
 - Conversation retention controls
 - English and Russian localization
 
@@ -133,13 +133,16 @@ npm run android:scenarios:emulator
 ## Product notes
 
 - Inference is local after a model has been downloaded and loaded.
-- Chat history, presets, settings, and downloaded model references are persisted on-device.
+- Chat history, presets, settings, downloaded model references, and per-model generation or load profiles are persisted on-device.
 - Network access is limited to model-management flows such as Hugging Face search, metadata fetches, and model downloads.
 - If a Hugging Face access token is configured, it stays on-device and is attached only to gated or private Hugging Face requests that require it.
 - The model catalog can start in a guided discovery mode that favors RAM-friendly public models, then switch back to the full Hugging Face catalog on demand.
 - The model catalog can show public, locked, and access-denied Hugging Face repositories in the same search flow, with popularity sorting and routed model details.
 - Recent first-page catalog results and recently opened model details are cached locally so the catalog can reopen quickly and still refresh from Hugging Face when the network is available.
 - If a model still has no trustworthy size, Pocket AI asks for explicit confirmation before starting a download with limited storage estimates and size verification.
+- A downloaded model can be opened into a saved settings sheet where sampling changes apply immediately and load-profile changes are saved for the next load or an explicit reload.
+- Context window controls are bounded by verified model metadata and estimated device RAM headroom before the model is loaded.
+- When a downloaded model is removed, Pocket AI can keep its saved per-model settings for a future download or reset them at the same time.
 - Large GGUF models may exceed the RAM or storage available on smaller devices.
 
 ## Repository layout

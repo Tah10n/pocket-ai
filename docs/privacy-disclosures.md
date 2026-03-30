@@ -13,19 +13,19 @@ This document summarizes the current behavior of the app as configured in this r
 - Chat prompts and generated responses stay on the device during local inference.
 - Downloaded GGUF files are stored in app-managed local storage.
 - Conversation history is persisted locally on the device.
-- System prompt presets and generation settings are persisted locally on the device.
+- System prompt presets, generation settings, and model-specific load profiles are persisted locally on the device.
 - An optional Hugging Face access token can be stored locally in secure device storage for gated or private model downloads.
 - Catalog metadata such as resolved GGUF size, access state, and local download status is cached locally only for app behavior and is not synced to a hosted account service.
 - Recent first-page Hugging Face catalog results and recently opened model-detail snapshots are stored in a bounded on-device cache so the catalog can reopen quickly on this device.
 - Hugging Face popularity metadata, tag summaries, and routed model-detail state are cached locally only to improve catalog browsing on this device.
-- Storage cleanup controls are available in-app through `Storage Manager` and `All Conversations`.
+- Storage cleanup controls are available in-app through `Storage Manager` and `All Conversations`, including model removal that can keep or reset saved per-model settings.
 
 ## When the app uses the network
 
 Pocket AI uses the network only for model-management flows:
 
 - Hugging Face model catalog search
-- Optional metadata, README summary, and config fetches used for model hints, popularity sorting, size recovery, and gated-model access checks
+- Optional metadata, README summary, and config fetches used for model hints, popularity sorting, size recovery, context-window recovery, and gated-model access checks
 - Model file downloads from remote hosting endpoints
 - If a Hugging Face access token is configured, it is attached only to Hugging Face requests that require authenticated access to gated or private repositories
 - When a user taps through to Hugging Face from the token screen or a model detail view, the app opens the public Hugging Face site in the device browser
@@ -38,7 +38,7 @@ The current release flow in this repository does not send chat prompts to a host
 
 Users can manage local data directly in the app:
 
-- offload downloaded models
+- offload downloaded models while keeping or resetting saved per-model settings
 - unload the active model
 - clear persisted chat history
 - reset settings
@@ -51,6 +51,7 @@ Local inference is constrained by the device:
 - large GGUF models can exceed available RAM
 - large downloads can exceed available storage
 - sustained inference can increase thermal pressure and reduce responsiveness
+- the maximum context window exposed in model controls can be reduced by verified model limits and estimated RAM headroom on the current device
 
 The app includes warnings for risky operations such as low-disk downloads, cellular downloads, and models that may not fit into available memory. When required, the app can unload the active model to protect stability.
 

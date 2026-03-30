@@ -25,7 +25,7 @@ export const MAX_CONTEXT_MESSAGES = 24;
 export const SUMMARY_PLACEHOLDER_CONTENT =
   'Summary generation is not available yet. Older messages stay visible in the thread, but only the most recent context is sent to the model right now.';
 export const SUMMARY_AFFORDANCE_MIN_TRUNCATED_MESSAGES = 1;
-const DEFAULT_CONTEXT_SIZE = 2048;
+const DEFAULT_CONTEXT_SIZE = 4096;
 const STREAM_PATCH_INTERVAL_MS = 32;
 
 interface ActiveGenerationState {

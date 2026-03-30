@@ -48,6 +48,16 @@ type HuggingFaceModelCardData = {
   datasets?: string[];
   model_creator?: string;
   quantized_by?: string;
+  context_length?: number | string;
+  max_position_embeddings?: number | string;
+  n_positions?: number | string;
+  max_sequence_length?: number | string;
+  seq_length?: number | string;
+  sliding_window?: number | string;
+  model_max_length?: number | string;
+  n_ctx?: number | string;
+  n_ctx_train?: number | string;
+  num_ctx?: number | string;
 };
 
 type HuggingFaceModelConfig = {
@@ -56,6 +66,17 @@ type HuggingFaceModelConfig = {
   max_sequence_length?: number;
   seq_length?: number;
   sliding_window?: number;
+  context_length?: number;
+  model_max_length?: number;
+  n_ctx?: number;
+  n_ctx_train?: number;
+  num_ctx?: number;
+  original_max_position_embeddings?: number;
+  text_config?: HuggingFaceModelConfig;
+  rope_scaling?: {
+    original_max_position_embeddings?: number;
+    max_position_embeddings?: number;
+  };
   model_type?: string;
   architectures?: string[];
 };
@@ -96,6 +117,7 @@ type HuggingFaceTreeResponse = {
 type ReadmeModelData = {
   description?: string;
   cardData?: Partial<HuggingFaceModelCardData>;
+  maxContextTokens?: number;
 };
 
 type ReadmeFrontMatterValue = string | string[];
@@ -555,15 +577,18 @@ export class ModelCatalogService {
         headers: this.buildHeaders(requestContext.authToken),
       });
       let detailedModel = fallbackModel;
+      let hasVerifiedContextWindow = fallbackModel.hasVerifiedContextWindow === true;
 
       if (response.ok) {
         const payload = await response.json() as HuggingFaceModelSummary;
         this.assertRequestContextIsCurrent(requestContext);
+        const payloadMaxContextTokens = this.resolveSummaryMaxContextTokens(payload);
         detailedModel = this.buildModelMetadataFromPayload(
           payload,
           totalMemory,
           requestContext.authToken,
           fallbackModel,
+          payloadMaxContextTokens,
         );
         const [resolvedModel] = await this.resolveMissingModelMetadata(
           [detailedModel],
@@ -571,6 +596,7 @@ export class ModelCatalogService {
           requestContext,
         );
         detailedModel = resolvedModel ?? detailedModel;
+        hasVerifiedContextWindow = hasVerifiedContextWindow || typeof payloadMaxContextTokens === 'number';
       } else if (response.status === 401 || response.status === 403) {
         detailedModel = normalizePersistedModelMetadata({
           ...fallbackModel,
@@ -599,6 +625,10 @@ export class ModelCatalogService {
         detailedModel = normalizePersistedModelMetadata({
           ...detailedModel,
           description: readmeData.description ?? detailedModel.description,
+          maxContextTokens: this.resolveMergedMaxContextTokens(
+            detailedModel.maxContextTokens,
+            readmeData.maxContextTokens,
+          ),
           modelType: this.resolveStringMetadata(
             detailedModel.modelType,
             readmeData.cardData?.model_type,
@@ -630,9 +660,18 @@ export class ModelCatalogService {
         });
       }
 
+      if (typeof readmeData?.maxContextTokens === 'number') {
+        hasVerifiedContextWindow = true;
+      }
+
+      detailedModel = normalizePersistedModelMetadata({
+        ...detailedModel,
+        hasVerifiedContextWindow,
+      });
+
       this.assertRequestContextIsCurrent(requestContext);
       this.upsertModelSnapshots([detailedModel], this.getAuthScope(requestContext.hasAuthToken));
-      return this.mergeModelWithRegistry(detailedModel) ?? detailedModel;
+      return this.syncRegistryModelIfPresent(detailedModel);
     } catch (error) {
       if (error instanceof StaleCatalogAuthError && retryCount < 1) {
         return this.getModelDetailsInternal(modelId, retryCount + 1);
@@ -651,13 +690,25 @@ export class ModelCatalogService {
     retryCount: number,
   ): Promise<ModelMetadata> {
     const requestContext = await this.createRequestContext();
-    const totalMemory = await this.getTotalMemory();
     try {
+      const canRefreshDetailsForContextWindow = (
+        model.hasVerifiedContextWindow !== true
+        && (
+          model.accessState === ModelAccessState.PUBLIC
+          || requestContext.hasAuthToken
+        )
+      );
+
+      if (canRefreshDetailsForContextWindow) {
+        return this.getModelDetailsInternal(model.id, retryCount);
+      }
+
+      const totalMemory = await this.getTotalMemory();
       const [resolved] = await this.resolveMissingModelMetadata([model], totalMemory, requestContext);
       this.assertRequestContextIsCurrent(requestContext);
       const refreshed = resolved ?? model;
       this.upsertModelSnapshots([refreshed], this.getAuthScope(requestContext.hasAuthToken));
-      return refreshed;
+      return this.syncRegistryModelIfPresent(refreshed);
     } catch (error) {
       if (error instanceof StaleCatalogAuthError && retryCount < 1) {
         return this.refreshModelMetadataInternal(model, retryCount + 1);
@@ -1016,7 +1067,7 @@ export class ModelCatalogService {
       const fitsInRam = typeof size === 'number' ? size < totalMemory * 0.8 : null;
       const fileName = this.getFileName(ggufSibling) || 'model.gguf';
       const hfRevision = item.sha ?? undefined;
-      const maxContextTokens = this.resolveMaxContextTokens(item.config) ?? item.gguf?.context_length;
+      const maxContextTokens = this.resolveSummaryMaxContextTokens(item);
       const requiresAuth = Boolean(item.gated) || item.private === true;
       const accessState = requiresAuth
         ? ModelAccessState.AUTH_REQUIRED
@@ -1085,7 +1136,7 @@ export class ModelCatalogService {
       downloadProgress: 0,
       requiresTreeProbe: true,
       hfRevision: item.sha ?? undefined,
-      maxContextTokens: this.resolveMaxContextTokens(item.config) ?? item.gguf?.context_length,
+      maxContextTokens: this.resolveSummaryMaxContextTokens(item),
       modelType: item.config?.model_type ?? item.gguf?.architecture,
       baseModels: this.resolveStringArrayMetadata(undefined, item.cardData?.base_model),
       license: this.resolveStringMetadata(undefined, item.cardData?.license),
@@ -1104,6 +1155,7 @@ export class ModelCatalogService {
     totalMemory: number,
     authToken: string | null,
     fallbackModel: ModelMetadata,
+    payloadMaxContextTokens?: number,
   ): ModelMetadata {
     const repoId = payload.id || payload.modelId || fallbackModel.id;
     const hfRevision = payload.sha ?? fallbackModel.hfRevision;
@@ -1129,11 +1181,11 @@ export class ModelCatalogService {
       hfRevision,
       resolvedFileName,
       fitsInRam,
-      accessState: this.resolveDetailAccessState(requiresAuth, authToken, fallbackModel.accessState),
+      accessState: this.resolveDetailAccessState(requiresAuth, authToken),
       isGated: Boolean(payload.gated),
       isPrivate: payload.private === true,
       sha256: selectedEntry ? this.getFileSha(selectedEntry) ?? fallbackModel.sha256 : fallbackModel.sha256,
-      maxContextTokens: this.resolveMaxContextTokens(payload.config) ?? payload.gguf?.context_length ?? fallbackModel.maxContextTokens,
+      maxContextTokens: payloadMaxContextTokens ?? fallbackModel.maxContextTokens,
       modelType: payload.config?.model_type ?? payload.cardData?.model_type ?? fallbackModel.modelType,
       architectures: payload.config?.architectures ?? fallbackModel.architectures,
       baseModels: this.resolveStringArrayMetadata(fallbackModel.baseModels, payload.cardData?.base_model),
@@ -1232,6 +1284,11 @@ export class ModelCatalogService {
       return remoteModel;
     }
 
+    const {
+      maxContextTokens,
+      hasVerifiedContextWindow,
+    } = this.resolveMergedContextWindowMetadata(remoteModel, localModel);
+
     return normalizePersistedModelMetadata({
       ...remoteModel,
       size: remoteModel.size ?? localModel.size,
@@ -1247,7 +1304,8 @@ export class ModelCatalogService {
       lifecycleStatus: localModel.lifecycleStatus,
       downloadProgress: localModel.downloadProgress,
       resumeData: localModel.resumeData,
-      maxContextTokens: remoteModel.maxContextTokens ?? localModel.maxContextTokens,
+      maxContextTokens,
+      hasVerifiedContextWindow,
       modelType: remoteModel.modelType ?? localModel.modelType,
       architectures: remoteModel.architectures ?? localModel.architectures,
       baseModels: remoteModel.baseModels ?? localModel.baseModels,
@@ -1261,6 +1319,45 @@ export class ModelCatalogService {
       tags: remoteModel.tags ?? localModel.tags,
       description: remoteModel.description ?? localModel.description,
     });
+  }
+
+  private resolveMergedContextWindowMetadata(
+    remoteModel: ModelMetadata,
+    localModel: ModelMetadata,
+  ): Pick<ModelMetadata, 'maxContextTokens' | 'hasVerifiedContextWindow'> {
+    const remoteHasVerifiedContextWindow = remoteModel.hasVerifiedContextWindow === true;
+    const localHasVerifiedContextWindow = localModel.hasVerifiedContextWindow === true;
+
+    if (remoteHasVerifiedContextWindow) {
+      return {
+        maxContextTokens: remoteModel.maxContextTokens ?? localModel.maxContextTokens,
+        hasVerifiedContextWindow: true,
+      };
+    }
+
+    if (localHasVerifiedContextWindow) {
+      return {
+        maxContextTokens: localModel.maxContextTokens ?? remoteModel.maxContextTokens,
+        hasVerifiedContextWindow: true,
+      };
+    }
+
+    return {
+      maxContextTokens: this.resolveMergedMaxContextTokens(
+        remoteModel.maxContextTokens,
+        localModel.maxContextTokens,
+      ),
+      hasVerifiedContextWindow: false,
+    };
+  }
+
+  private syncRegistryModelIfPresent(model: ModelMetadata): ModelMetadata {
+    const mergedModel = this.mergeModelWithRegistry(model) ?? model;
+    if (registry.getModel(model.id)) {
+      registry.updateModel(mergedModel);
+    }
+
+    return mergedModel;
   }
 
   private cacheModelSnapshotsInMemory(
@@ -1364,7 +1461,13 @@ export class ModelCatalogService {
         const markdown = await response.text();
         this.assertRequestContextIsCurrent(requestContext);
         const readmeData = this.extractReadmeData(markdown);
-        return readmeData.description || readmeData.cardData ? readmeData : undefined;
+        return (
+          readmeData.description
+          || readmeData.cardData
+          || typeof readmeData.maxContextTokens === 'number'
+        )
+          ? readmeData
+          : undefined;
       },
     );
   }
@@ -1472,6 +1575,7 @@ export class ModelCatalogService {
     return {
       description: this.extractReadmeSummaryFromBody(body),
       cardData: frontMatter ? this.mapReadmeFrontMatterToCardData(frontMatter) : undefined,
+      maxContextTokens: frontMatter ? this.resolveFrontMatterMaxContextTokens(frontMatter) : undefined,
     };
   }
 
@@ -1596,6 +1700,24 @@ export class ModelCatalogService {
     }
 
     return Object.keys(cardData).length > 0 ? cardData : undefined;
+  }
+
+  private resolveFrontMatterMaxContextTokens(
+    frontMatter: Record<string, ReadmeFrontMatterValue>,
+  ): number | undefined {
+    return this.resolveLargestContextTokenValue([
+      this.getFrontMatterString(frontMatter, 'context_length'),
+      this.getFrontMatterString(frontMatter, 'max_position_embeddings'),
+      this.getFrontMatterString(frontMatter, 'n_positions'),
+      this.getFrontMatterString(frontMatter, 'max_sequence_length'),
+      this.getFrontMatterString(frontMatter, 'seq_length'),
+      this.getFrontMatterString(frontMatter, 'sliding_window'),
+      this.getFrontMatterString(frontMatter, 'model_max_length'),
+      this.getFrontMatterString(frontMatter, 'n_ctx'),
+      this.getFrontMatterString(frontMatter, 'n_ctx_train'),
+      this.getFrontMatterString(frontMatter, 'num_ctx'),
+      this.getFrontMatterString(frontMatter, 'original_max_position_embeddings'),
+    ]);
   }
 
   private normalizeFrontMatterScalar(value: string): string {
@@ -1985,7 +2107,6 @@ export class ModelCatalogService {
   private resolveDetailAccessState(
     requiresAuth: boolean,
     authToken: string | null,
-    fallbackAccessState: ModelAccessState,
   ): ModelAccessState {
     if (!requiresAuth) {
       return ModelAccessState.PUBLIC;
@@ -1995,14 +2116,10 @@ export class ModelCatalogService {
       return ModelAccessState.AUTH_REQUIRED;
     }
 
-    if (
-      fallbackAccessState === ModelAccessState.AUTHORIZED
-      || fallbackAccessState === ModelAccessState.ACCESS_DENIED
-    ) {
-      return fallbackAccessState;
-    }
-
-    return ModelAccessState.AUTH_REQUIRED;
+    // A successful gated/private details fetch with a bearer token proves the
+    // current auth context can read the repo metadata. Later tree/probe checks
+    // may still downgrade this to access denied for the selected file.
+    return ModelAccessState.AUTHORIZED;
   }
 
   private hasGgufCatalogSignal(repoId: string, tags?: string[]): boolean {
@@ -2133,22 +2250,113 @@ export class ModelCatalogService {
     };
   }
 
+  private normalizeContextTokenValue(value: unknown): number | undefined {
+    if (typeof value === 'number' && Number.isFinite(value) && value >= 256) {
+      return Math.round(value);
+    }
+
+    if (typeof value === 'string') {
+      const normalizedValue = value.trim().toLowerCase().replace(/[_\s,]/g, '');
+      const shorthandMatch = normalizedValue.match(/^(\d+(?:\.\d+)?)([km])?(?:tokens?)?$/);
+      const multiplier = shorthandMatch?.[2] === 'm'
+        ? 1024 * 1024
+        : shorthandMatch?.[2] === 'k'
+          ? 1024
+          : 1;
+      const normalized = shorthandMatch
+        ? Number(shorthandMatch[1]) * multiplier
+        : Number(normalizedValue);
+      if (Number.isFinite(normalized) && normalized >= 256) {
+        return Math.round(normalized);
+      }
+    }
+
+    return undefined;
+  }
+
+  private resolveLargestContextTokenValue(values: unknown[]): number | undefined {
+    let resolved: number | undefined;
+
+    for (const value of values) {
+      const normalized = this.normalizeContextTokenValue(value);
+      if (normalized === undefined) {
+        continue;
+      }
+
+      resolved = resolved === undefined ? normalized : Math.max(resolved, normalized);
+    }
+
+    return resolved;
+  }
+
+  private resolveCardDataMaxContextTokens(
+    cardData?: Partial<HuggingFaceModelCardData>,
+  ): number | undefined {
+    if (!cardData) {
+      return undefined;
+    }
+
+    return this.resolveLargestContextTokenValue([
+      cardData.context_length,
+      cardData.max_position_embeddings,
+      cardData.n_positions,
+      cardData.max_sequence_length,
+      cardData.seq_length,
+      cardData.sliding_window,
+      cardData.model_max_length,
+      cardData.n_ctx,
+      cardData.n_ctx_train,
+      cardData.num_ctx,
+    ]);
+  }
+
+  private resolveSummaryMaxContextTokens(
+    summary?: Pick<HuggingFaceModelSummary, 'config' | 'cardData' | 'gguf'>,
+  ): number | undefined {
+    if (!summary) {
+      return undefined;
+    }
+
+    return this.resolveLargestContextTokenValue([
+      this.resolveMaxContextTokens(summary.config),
+      this.resolveCardDataMaxContextTokens(summary.cardData),
+      summary.gguf?.context_length,
+    ]);
+  }
+
+  private resolveMergedMaxContextTokens(...values: (number | undefined)[]): number | undefined {
+    return this.resolveLargestContextTokenValue(values);
+  }
+
   private resolveMaxContextTokens(config?: HuggingFaceModelConfig): number | undefined {
-    const candidates = [
+    return this.resolveLargestContextTokenValue([
       config?.max_position_embeddings,
       config?.n_positions,
       config?.max_sequence_length,
       config?.seq_length,
       config?.sliding_window,
-    ];
-
-    for (const candidate of candidates) {
-      if (typeof candidate === 'number' && Number.isFinite(candidate) && candidate >= 256) {
-        return Math.round(candidate);
-      }
-    }
-
-    return undefined;
+      config?.context_length,
+      config?.model_max_length,
+      config?.n_ctx,
+      config?.n_ctx_train,
+      config?.num_ctx,
+      config?.original_max_position_embeddings,
+      config?.rope_scaling?.original_max_position_embeddings,
+      config?.rope_scaling?.max_position_embeddings,
+      config?.text_config?.max_position_embeddings,
+      config?.text_config?.n_positions,
+      config?.text_config?.max_sequence_length,
+      config?.text_config?.seq_length,
+      config?.text_config?.sliding_window,
+      config?.text_config?.context_length,
+      config?.text_config?.model_max_length,
+      config?.text_config?.n_ctx,
+      config?.text_config?.n_ctx_train,
+      config?.text_config?.num_ctx,
+      config?.text_config?.original_max_position_embeddings,
+      config?.text_config?.rope_scaling?.original_max_position_embeddings,
+      config?.text_config?.rope_scaling?.max_position_embeddings,
+    ]);
   }
 }
 

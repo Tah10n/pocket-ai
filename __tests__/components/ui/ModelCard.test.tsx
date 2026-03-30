@@ -64,6 +64,7 @@ describe('ModelCard', () => {
         onConfigureToken={onConfigureToken}
         onOpenModelPage={jest.fn()}
         onLoad={jest.fn()}
+        onOpenSettings={jest.fn()}
         onUnload={jest.fn()}
         onDelete={jest.fn()}
         onCancel={jest.fn()}
@@ -89,6 +90,7 @@ describe('ModelCard', () => {
         onConfigureToken={jest.fn()}
         onOpenModelPage={onOpenModelPage}
         onLoad={jest.fn()}
+        onOpenSettings={jest.fn()}
         onUnload={jest.fn()}
         onDelete={jest.fn()}
         onCancel={jest.fn()}
@@ -111,6 +113,7 @@ describe('ModelCard', () => {
         onConfigureToken={jest.fn()}
         onOpenModelPage={jest.fn()}
         onLoad={jest.fn()}
+        onOpenSettings={jest.fn()}
         onUnload={jest.fn()}
         onDelete={jest.fn()}
         onCancel={jest.fn()}
@@ -134,6 +137,7 @@ describe('ModelCard', () => {
         onConfigureToken={jest.fn()}
         onOpenModelPage={jest.fn()}
         onLoad={jest.fn()}
+        onOpenSettings={jest.fn()}
         onUnload={jest.fn()}
         onDelete={jest.fn()}
         onCancel={jest.fn()}
@@ -144,5 +148,59 @@ describe('ModelCard', () => {
 
     expect(screen.getByText('Updated Model')).toBeTruthy();
     expect(screen.getByText('updated-org')).toBeTruthy();
+  });
+
+  it('renders a settings CTA for downloaded models', () => {
+    const onOpenSettings = jest.fn();
+    const screen = render(
+      <ModelCard
+        model={{
+          ...buildModel(ModelAccessState.PUBLIC),
+          lifecycleStatus: LifecycleStatus.DOWNLOADED,
+        }}
+        onOpenDetails={jest.fn()}
+        onDownload={jest.fn()}
+        onConfigureToken={jest.fn()}
+        onOpenModelPage={jest.fn()}
+        onLoad={jest.fn()}
+        onOpenSettings={onOpenSettings}
+        onUnload={jest.fn()}
+        onDelete={jest.fn()}
+        onCancel={jest.fn()}
+        onChat={jest.fn()}
+        isActive={false}
+      />,
+    );
+
+    fireEvent.press(screen.getByText('models.settings'));
+
+    expect(onOpenSettings).toHaveBeenCalledWith('org/model');
+  });
+
+  it('keeps a settings CTA for active models', () => {
+    const onOpenSettings = jest.fn();
+    const screen = render(
+      <ModelCard
+        model={{
+          ...buildModel(ModelAccessState.PUBLIC),
+          lifecycleStatus: LifecycleStatus.ACTIVE,
+        }}
+        onOpenDetails={jest.fn()}
+        onDownload={jest.fn()}
+        onConfigureToken={jest.fn()}
+        onOpenModelPage={jest.fn()}
+        onLoad={jest.fn()}
+        onOpenSettings={onOpenSettings}
+        onUnload={jest.fn()}
+        onDelete={jest.fn()}
+        onCancel={jest.fn()}
+        onChat={jest.fn()}
+        isActive
+      />,
+    );
+
+    fireEvent.press(screen.getByText('models.settings'));
+
+    expect(onOpenSettings).toHaveBeenCalledWith('org/model');
   });
 });

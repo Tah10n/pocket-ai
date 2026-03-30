@@ -29,4 +29,15 @@ describe('ModelMetadataNormalizer', () => {
     expect(normalized.isGated).toBe(false);
     expect(normalized.isPrivate).toBe(false);
   });
+
+  it('preserves the verified context-window marker when present', () => {
+    const normalized = normalizePersistedModelMetadata({
+      id: 'legacy/model',
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      hasVerifiedContextWindow: true,
+    });
+
+    expect(normalized.hasVerifiedContextWindow).toBe(true);
+  });
 });

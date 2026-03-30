@@ -35,6 +35,7 @@ export interface ModelMetadata {
   downloadProgress: number;
   resumeData?: string;
   maxContextTokens?: number;
+  hasVerifiedContextWindow?: boolean;
   modelType?: string;
   architectures?: string[];
   baseModels?: string[];

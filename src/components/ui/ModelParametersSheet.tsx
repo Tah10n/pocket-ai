@@ -8,6 +8,11 @@ import { ScrollView } from '@/components/ui/scroll-view';
 import { Text } from '@/components/ui/text';
 import { MaterialSymbols } from './MaterialSymbols';
 import { GenerationParameters, ModelLoadParameters } from '../../services/SettingsStore';
+import {
+  DEFAULT_CONTEXT_WINDOW_TOKENS,
+  MAX_CONTEXT_WINDOW_TOKENS,
+  MIN_CONTEXT_WINDOW_TOKENS,
+} from '../../utils/contextWindow';
 
 interface ModelParametersSheetProps {
   visible: boolean;
@@ -15,7 +20,7 @@ interface ModelParametersSheetProps {
   modelLabel: string;
   params: GenerationParameters;
   defaultParams: GenerationParameters;
-  modelMaxContextTokens?: number;
+  contextWindowCeiling?: number;
   loadParamsDraft: ModelLoadParameters;
   defaultLoadParams: ModelLoadParameters;
   recommendedGpuLayers: number;
@@ -233,7 +238,7 @@ export function ModelParametersSheet({
   modelLabel,
   params,
   defaultParams,
-  modelMaxContextTokens,
+  contextWindowCeiling,
   loadParamsDraft,
   defaultLoadParams,
   recommendedGpuLayers,
@@ -250,13 +255,13 @@ export function ModelParametersSheet({
   onApplyReload,
 }: ModelParametersSheetProps) {
   const { t } = useTranslation();
-  const contextWindowCeiling = modelMaxContextTokens
-    ? Math.max(512, Math.min(8192, modelMaxContextTokens))
-    : 8192;
+  const resolvedContextWindowCeiling = contextWindowCeiling
+    ? Math.max(MIN_CONTEXT_WINDOW_TOKENS, Math.min(MAX_CONTEXT_WINDOW_TOKENS, contextWindowCeiling))
+    : DEFAULT_CONTEXT_WINDOW_TOKENS;
   const maxTokensFloor = Math.min(128, loadParamsDraft.contextSize);
   const maxTokensCeiling = Math.max(
     maxTokensFloor,
-    Math.min(loadParamsDraft.contextSize, contextWindowCeiling),
+    Math.min(loadParamsDraft.contextSize, resolvedContextWindowCeiling),
   );
 
   return (
@@ -434,14 +439,14 @@ export function ModelParametersSheet({
                   description={t('chat.modelControls.contextWindowDescription')}
                   valueLabel={`${Math.round(loadParamsDraft.contextSize)} tok`}
                   minLabel="512"
-                  maxLabel={`${contextWindowCeiling}`}
-                  minimumValue={512}
-                  maximumValue={contextWindowCeiling}
+                  maxLabel={`${resolvedContextWindowCeiling}`}
+                  minimumValue={MIN_CONTEXT_WINDOW_TOKENS}
+                  maximumValue={resolvedContextWindowCeiling}
                   step={512}
-                  value={Math.min(loadParamsDraft.contextSize, contextWindowCeiling)}
+                  value={Math.min(loadParamsDraft.contextSize, resolvedContextWindowCeiling)}
                   onValueChange={(value) => onChangeLoadParams({ contextSize: Math.round(value) })}
                   onReset={() => onResetLoadField('contextSize')}
-                  isResetDisabled={loadParamsDraft.contextSize === Math.min(defaultLoadParams.contextSize, contextWindowCeiling)}
+                  isResetDisabled={loadParamsDraft.contextSize === Math.min(defaultLoadParams.contextSize, resolvedContextWindowCeiling)}
                   variant="embedded"
                 />
 
@@ -461,25 +466,37 @@ export function ModelParametersSheet({
                   variant="embedded"
                   showDivider
                 />
-
-                {showApplyReload ? (
-                  <Pressable
-                    onPress={onApplyReload}
-                    disabled={!canApplyReload || isApplyingReload || !modelId}
-                    className={`mt-4 rounded-2xl px-4 py-3 ${canApplyReload && !isApplyingReload && modelId
-                      ? 'border border-primary-500/20 bg-primary-500/10 active:opacity-80'
-                      : 'bg-background-100 dark:bg-background-900/60'}`}
-                  >
-                    <Text className={`text-center text-sm font-semibold ${canApplyReload && !isApplyingReload && modelId
-                      ? 'text-primary-500'
-                      : 'text-typography-400 dark:text-typography-500'}`}>
-                      {isApplyingReload ? t('chat.modelControls.reloading') : applyButtonLabel}
-                    </Text>
-                  </Pressable>
-                ) : null}
               </Box>
             </Box>
           </ScrollView>
+
+          {showApplyReload ? (
+            <Box testID="model-apply-footer" className="mt-4 border-t border-outline-200 pt-4 dark:border-outline-800">
+              <Box className="mb-3 rounded-2xl border border-primary-500/15 bg-primary-500/10 px-4 py-3">
+                <Text className="text-xs font-semibold uppercase tracking-wider text-primary-500">
+                  {t('chat.modelControls.pendingLoadProfileTitle')}
+                </Text>
+                <Text className="mt-1 text-sm leading-5 text-typography-700 dark:text-typography-200">
+                  {t('chat.modelControls.pendingLoadProfileDescription')}
+                </Text>
+              </Box>
+
+              <Pressable
+                testID="apply-model-settings-button"
+                onPress={onApplyReload}
+                disabled={!canApplyReload || isApplyingReload || !modelId}
+                className={`rounded-2xl px-4 py-3 ${canApplyReload && !isApplyingReload && modelId
+                  ? 'border border-primary-500/20 bg-primary-500/10 active:opacity-80'
+                  : 'bg-background-100 dark:bg-background-900/60'}`}
+              >
+                <Text className={`text-center text-sm font-semibold ${canApplyReload && !isApplyingReload && modelId
+                  ? 'text-primary-500'
+                  : 'text-typography-400 dark:text-typography-500'}`}>
+                  {isApplyingReload ? t('chat.modelControls.reloading') : applyButtonLabel}
+                </Text>
+              </Pressable>
+            </Box>
+          ) : null}
         </Box>
       </Box>
     </Modal>

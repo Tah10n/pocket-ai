@@ -3,6 +3,7 @@ import {
     getModelLoadParametersForModel,
     getGenerationParametersForModel,
     getSettings,
+    resetAllParametersForModel,
     resetModelLoadParametersForModel,
     resetGenerationParametersForModel,
     updateModelLoadParametersForModel,
@@ -76,7 +77,7 @@ describe('SettingsStore', () => {
         const settings = getSettings();
         expect(settings.temperature).toBe(0.7);
         expect(settings.topP).toBe(0.9);
-        expect(settings.maxTokens).toBe(2048);
+        expect(settings.maxTokens).toBe(512);
         expect(settings.reasoningEnabled).toBe(false);
     });
 
@@ -157,7 +158,7 @@ describe('SettingsStore', () => {
     });
 
     it('stores reasoning preference independently per model', () => {
-        updateSettings({ reasoningEnabled: false, modelParamsByModelId: {} });
+        updateSettings({ reasoningEnabled: false, maxTokens: 512, modelParamsByModelId: {} });
         updateGenerationParametersForModel('author/model-a', { reasoningEnabled: true });
 
         expect(getGenerationParametersForModel('author/model-a')).toEqual({
@@ -166,7 +167,7 @@ describe('SettingsStore', () => {
             topK: 40,
             minP: 0.05,
             repetitionPenalty: 1,
-            maxTokens: 2048,
+            maxTokens: 512,
             reasoningEnabled: true,
         });
         expect(getGenerationParametersForModel('author/model-b')).toEqual({
@@ -175,7 +176,7 @@ describe('SettingsStore', () => {
             topK: 40,
             minP: 0.05,
             repetitionPenalty: 1,
-            maxTokens: 2048,
+            maxTokens: 512,
             reasoningEnabled: false,
         });
     });
@@ -190,7 +191,7 @@ describe('SettingsStore', () => {
             gpuLayers: 18,
         });
         expect(getModelLoadParametersForModel('author/model-b')).toEqual({
-            contextSize: 2048,
+            contextSize: 4096,
             gpuLayers: 4,
         });
     });
@@ -202,9 +203,67 @@ describe('SettingsStore', () => {
         resetModelLoadParametersForModel('author/model-a');
 
         expect(getModelLoadParametersForModel('author/model-a')).toEqual({
-            contextSize: 2048,
+            contextSize: 4096,
             gpuLayers: null,
         });
         expect(getSettings().modelLoadParamsByModelId).toEqual({});
+    });
+
+    it('clears all persisted per-model settings when a model is removed', () => {
+        updateSettings({
+            temperature: 0.6,
+            topP: 0.85,
+            maxTokens: 1024,
+            modelParamsByModelId: {},
+            modelLoadParamsByModelId: {},
+        });
+        updateGenerationParametersForModel('author/model-a', {
+            temperature: 1.1,
+            maxTokens: 512,
+        });
+        updateModelLoadParametersForModel('author/model-a', {
+            contextSize: 8192,
+            gpuLayers: 18,
+        });
+        updateGenerationParametersForModel('author/model-b', {
+            topP: 0.4,
+        });
+        updateModelLoadParametersForModel('author/model-b', {
+            contextSize: 6144,
+            gpuLayers: 4,
+        });
+
+        resetAllParametersForModel('author/model-a');
+
+        expect(getGenerationParametersForModel('author/model-a')).toEqual({
+            temperature: 0.6,
+            topP: 0.85,
+            topK: 40,
+            minP: 0.05,
+            repetitionPenalty: 1,
+            maxTokens: 1024,
+            reasoningEnabled: false,
+        });
+        expect(getModelLoadParametersForModel('author/model-a')).toEqual({
+            contextSize: 4096,
+            gpuLayers: null,
+        });
+        expect(getSettings().modelParamsByModelId).toEqual({
+            'author/model-b': {
+                temperature: 0.6,
+                topP: 0.4,
+                topK: 40,
+                minP: 0.05,
+                repetitionPenalty: 1,
+                maxTokens: 1024,
+                reasoningEnabled: false,
+            },
+        });
+        expect(getSettings().modelLoadParamsByModelId).toEqual({
+            'author/model-b': {
+                contextSize: 6144,
+                gpuLayers: 4,
+            },
+        });
     });
 });

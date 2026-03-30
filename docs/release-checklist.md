@@ -74,7 +74,11 @@ npm run build:all:production
 - Open model details from a catalog card and confirm description, tags, popularity metrics, and the `Open on HF` action render without breaking list navigation.
 - Change the Hugging Face token state, then reopen a gated or private model from the catalog and confirm the card plus detail screen agree on `Locked`, `Access denied`, or authorized access instead of showing stale access labels.
 - Download a GGUF model and wait for verification to finish.
+- On a downloaded model card, confirm the secondary `Settings` action opens the model controls sheet without leaving the list.
+- In model controls, confirm the context-window ceiling reflects the verified model limit or estimated device RAM headroom instead of exposing an obviously unsafe maximum.
+- Change the context window or GPU layers and confirm the sheet shows the pending load-profile state plus `Save load profile` for an inactive model or `Apply & reload` for the active model.
 - Load the model and confirm the app reports the engine as ready.
+- With the model active, apply a changed load profile and confirm the model reloads successfully with the updated settings.
 - Unload the model and confirm the UI returns to the unloaded state.
 
 ### Chat and history
@@ -85,6 +89,7 @@ npm run build:all:production
 - On a device with a gesture area or home indicator, confirm the composer keeps safe bottom spacing and the send button never falls into the unsafe zone.
 - If the active model exposes reasoning, expand `Thinking` or `Thought` and confirm the main reply remains outside the inner reasoning bubble.
 - Copy an assistant reply and confirm the clipboard contains only the final assistant message, not the reasoning trace.
+- Raise `Max tokens` for the active chat profile and confirm the app still keeps room for recent chat history instead of dropping to an empty prompt window unnecessarily.
 - Leave and reopen the app, then confirm the active thread restores correctly.
 - Open `All Conversations`, then search, rename, and delete a thread.
 - Expand `Chat Retention`, change the retention window, and confirm the control starts collapsed again after applying.
@@ -101,7 +106,8 @@ npm run build:all:production
 ### Storage and cleanup
 
 - Open `Storage Manager`.
-- Offload a downloaded model and confirm active-model state stays consistent.
+- Remove a downloaded model with `Delete and keep settings` and confirm the file is removed while its saved per-model settings remain available after downloading the same model again.
+- Remove a downloaded model with `Delete and reset settings` and confirm both the file and the saved per-model settings are cleared.
 - Clear chat history and confirm saved threads are removed.
 - Reset settings and confirm defaults are restored.
 

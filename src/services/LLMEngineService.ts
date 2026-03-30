@@ -11,13 +11,14 @@ import {
   updateSettings,
 } from './SettingsStore';
 import { AppError, toAppError } from './AppError';
+import { resolveContextWindowCeiling } from '../utils/contextWindow';
 
 interface LoadModelOptions {
   forceReload?: boolean;
 }
 
 type StateListener = (state: EngineState) => void;
-const DEFAULT_CONTEXT_SIZE = 2048;
+const DEFAULT_CONTEXT_SIZE = 4096;
 
 class LLMEngineService {
   private context: LlamaContext | null = null;
@@ -91,7 +92,12 @@ class LLMEngineService {
         await this.unloadInternal();
       }
 
-      this.initPromise = this.initializeModel(modelId, model.localPath);
+      this.initPromise = this.initializeModel(
+        modelId,
+        model.localPath,
+        model.maxContextTokens,
+        model.size ?? null,
+      );
       await this.initPromise;
     });
   }
@@ -243,7 +249,12 @@ class LLMEngineService {
     }
   }
 
-  private async initializeModel(modelId: string, localPath: string): Promise<void> {
+  private async initializeModel(
+    modelId: string,
+    localPath: string,
+    modelMaxContextTokens?: number,
+    modelSizeBytes?: number | null,
+  ): Promise<void> {
     try {
       this.isUnloading = false;
       this.updateState({
@@ -262,14 +273,31 @@ class LLMEngineService {
       }
 
       const loadParams = getModelLoadParametersForModel(modelId);
-      const gpuLayers = loadParams.gpuLayers ?? await this.calculateGpuLayers();
+      let totalMemoryBytes: number | null = null;
+      try {
+        totalMemoryBytes = await DeviceInfo.getTotalMemory();
+      } catch (error) {
+        console.warn('[LLMEngine] Failed to resolve total device memory', error);
+      }
+
+      const resolvedContextSize = resolveContextWindowCeiling({
+        modelMaxContextTokens,
+        modelSizeBytes: typeof fileInfo.size === 'number' ? fileInfo.size : modelSizeBytes ?? null,
+        totalMemoryBytes,
+        appMaxContextTokens: loadParams.contextSize,
+      });
+      const gpuLayers = loadParams.gpuLayers ?? (
+        totalMemoryBytes != null
+          ? this.suggestGpuLayersForTotalMemory(totalMemoryBytes)
+          : await this.calculateGpuLayers()
+      );
       let resolvedGpuLayers = gpuLayers;
 
       try {
         this.context = await initLlama(
           {
             model: modelPath,
-            n_ctx: loadParams.contextSize,
+            n_ctx: resolvedContextSize,
             n_gpu_layers: gpuLayers,
             flash_attn_type: 'auto',
           },
@@ -284,7 +312,7 @@ class LLMEngineService {
           this.context = await initLlama(
             {
               model: modelPath,
-              n_ctx: loadParams.contextSize,
+              n_ctx: resolvedContextSize,
               n_gpu_layers: 0,
               flash_attn_type: 'auto',
             },
@@ -297,7 +325,7 @@ class LLMEngineService {
         }
       }
 
-      this.activeContextSize = loadParams.contextSize;
+      this.activeContextSize = resolvedContextSize;
       this.activeGpuLayers = resolvedGpuLayers;
       this.updateState({ ...this.state, status: EngineStatus.READY, loadProgress: 1 });
       updateSettings({ activeModelId: modelId });

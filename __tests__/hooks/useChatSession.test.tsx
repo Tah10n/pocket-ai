@@ -79,7 +79,7 @@ describe('useChatSession', () => {
     (getGenerationParametersForModel as jest.Mock).mockImplementation((modelId: string | null | undefined) => ({
       temperature: 0.7,
       topP: 0.9,
-      maxTokens: modelId ? 1024 : 2048,
+      maxTokens: modelId ? 1024 : 512,
       reasoningEnabled: false,
     }));
     (llmEngineService.getState as jest.Mock).mockReturnValue({
@@ -193,7 +193,7 @@ describe('useChatSession', () => {
     (getGenerationParametersForModel as jest.Mock).mockImplementation((modelId: string | null | undefined) => ({
       temperature: 0.7,
       topP: 0.9,
-      maxTokens: modelId ? 1024 : 2048,
+      maxTokens: modelId ? 1024 : 512,
       reasoningEnabled: true,
     }));
     const getSession = renderHookHarness();

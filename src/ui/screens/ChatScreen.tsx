@@ -13,6 +13,7 @@ import {
     Platform,
     View,
 } from 'react-native';
+import DeviceInfo from 'react-native-device-info';
 import { useFocusEffect } from '@react-navigation/native';
 import { Box } from '@/components/ui/box';
 import { Text } from '@/components/ui/text';
@@ -31,6 +32,7 @@ import { EngineStatus } from '../../types/models';
 import { ChatMessage } from '../../types/chat';
 import { getChatHardwareBannerInputs, hardwareListenerService } from '../../services/HardwareListenerService';
 import { registry } from '../../services/LocalStorageRegistry';
+import { modelCatalogService } from '../../services/ModelCatalogService';
 import { useChatStore } from '../../store/chatStore';
 import { getReportedErrorMessage } from '../../services/AppError';
 import {
@@ -46,6 +48,11 @@ import {
     updateGenerationParametersForModel,
     type ModelLoadParameters,
 } from '../../services/SettingsStore';
+import {
+    clampContextWindowTokens,
+    resolveContextWindowCeiling,
+} from '../../utils/contextWindow';
+import { hasPersistedLoadProfileChanges } from '../../utils/modelLoadProfile';
 
 const AUTO_SCROLL_BOTTOM_THRESHOLD = 96;
 const FALLBACK_TOP_K = 40;
@@ -140,6 +147,7 @@ export const ChatScreen = () => {
     const [isApplyingModelReload, setApplyingModelReload] = useState(false);
     const [settings, setSettings] = useState(() => getSettings());
     const [recommendedGpuLayers, setRecommendedGpuLayers] = useState(0);
+    const [measuredContextWindowCeiling, setMeasuredContextWindowCeiling] = useState<number | null>(null);
     const [draftLoadParams, setDraftLoadParams] = useState<ModelLoadParameters>({
         contextSize: DEFAULT_MODEL_LOAD_PARAMETERS.contextSize,
         gpuLayers: 0,
@@ -150,6 +158,14 @@ export const ChatScreen = () => {
     } | null>(null);
     const updateThreadPresetSnapshot = useChatStore((state) => state.updateThreadPresetSnapshot);
     const updateThreadParamsSnapshot = useChatStore((state) => state.updateThreadParamsSnapshot);
+    const loadDraftSourceRef = useRef<{
+        contextSize: 'current' | 'default' | 'user';
+        gpuLayers: 'current' | 'default' | 'user';
+    }>({
+        contextSize: 'current',
+        gpuLayers: 'current',
+    });
+    const loadDraftSeedRef = useRef<string | null>(null);
     const listRef = useRef<FlatList<ChatMessage> | null>(null);
     const autoScrollFrameRef = useRef<number | null>(null);
     const keyboardMeasureFrameRef = useRef<number | null>(null);
@@ -205,14 +221,6 @@ export const ChatScreen = () => {
         reasoningEnabled: rawDefaultParams.reasoningEnabled === true,
     };
     const defaultLoadParams = getModelLoadParametersForModel(null);
-    const resolvedGpuLayers = currentLoadParams.gpuLayers ?? recommendedGpuLayers;
-    const applyButtonLabel = settings.activeModelId === configurableModelId ? t('models.applyAndReload') : t('models.saveLoadProfile');
-    const showApplyReload = Boolean(configurableModelId) && (
-        draftLoadParams.contextSize !== currentLoadParams.contextSize
-        || draftLoadParams.gpuLayers !== resolvedGpuLayers
-        || isApplyingModelReload
-    );
-    const canApplyReload = Boolean(configurableModelId) && !isGenerating && !isApplyingModelReload;
     const displayMessages = useMemo(() => [...messages].reverse(), [messages]);
     const hasMessages = displayMessages.length > 0;
     const lastMessage = messages[messages.length - 1];
@@ -233,6 +241,40 @@ export const ChatScreen = () => {
         reasoningEnabled: rawParamsSource.reasoningEnabled === true,
     };
     const configurableModel = configurableModelId ? registry.getModel(configurableModelId) : undefined;
+    const configurableModelAccessState = configurableModel?.accessState;
+    const configurableModelIsGated = configurableModel?.isGated === true;
+    const configurableModelIsPrivate = configurableModel?.isPrivate === true;
+    const configurableModelHasVerifiedContextWindow = configurableModel?.hasVerifiedContextWindow === true;
+    const configurableModelMaxContextTokens = configurableModel?.maxContextTokens;
+    const configurableModelSize = configurableModel?.size ?? null;
+    const baseContextWindowCeiling = useMemo(() => resolveContextWindowCeiling({
+        modelMaxContextTokens: configurableModelMaxContextTokens,
+        modelSizeBytes: configurableModelSize,
+    }), [configurableModelMaxContextTokens, configurableModelSize]);
+    const contextWindowCeiling = measuredContextWindowCeiling ?? baseContextWindowCeiling;
+    const effectiveCurrentLoadParams = {
+        contextSize: clampContextWindowTokens(currentLoadParams.contextSize, contextWindowCeiling),
+        gpuLayers: currentLoadParams.gpuLayers,
+    };
+    const effectiveDefaultLoadParams = {
+        contextSize: clampContextWindowTokens(defaultLoadParams.contextSize, contextWindowCeiling),
+        gpuLayers: defaultLoadParams.gpuLayers,
+    };
+    const draftPersistedGpuLayers = loadDraftSourceRef.current.gpuLayers === 'current'
+        ? (currentLoadParams.gpuLayers ?? null)
+        : loadDraftSourceRef.current.gpuLayers === 'default'
+            ? (effectiveDefaultLoadParams.gpuLayers ?? null)
+            : draftLoadParams.gpuLayers;
+    const applyButtonLabel = settings.activeModelId === configurableModelId ? t('models.applyAndReload') : t('models.saveLoadProfile');
+    const showApplyReload = Boolean(configurableModelId) && (
+        hasPersistedLoadProfileChanges({
+            draftContextSize: draftLoadParams.contextSize,
+            draftPersistedGpuLayers,
+            persistedLoadParams: currentLoadParams,
+        })
+        || isApplyingModelReload
+    );
+    const canApplyReload = Boolean(configurableModelId) && !isGenerating && !isApplyingModelReload;
     const thermalWarningMessage = hardwareBannerInputs.thermalState === 'critical'
         ? t('chat.thermalDescriptionCritical')
         : t('chat.thermalDescriptionElevated');
@@ -560,6 +602,10 @@ export const ChatScreen = () => {
         }
 
         let isCancelled = false;
+        const refreshTargetModel = configurableModelId ? registry.getModel(configurableModelId) : undefined;
+        const shouldRefreshModelMetadata = refreshTargetModel?.hasVerifiedContextWindow !== true;
+
+        setMeasuredContextWindowCeiling(null);
 
         void llmEngineService.getRecommendedGpuLayers()
             .then((nextGpuLayers: number) => {
@@ -573,22 +619,105 @@ export const ChatScreen = () => {
                 }
             });
 
+        void Promise.all([
+            DeviceInfo.getTotalMemory().catch(() => null),
+            shouldRefreshModelMetadata && refreshTargetModel
+                ? modelCatalogService.refreshModelMetadata(refreshTargetModel).catch(() => refreshTargetModel)
+                : Promise.resolve(refreshTargetModel),
+        ])
+            .then(([totalMemoryBytes, resolvedModel]) => {
+                if (!isCancelled) {
+                    setMeasuredContextWindowCeiling(resolveContextWindowCeiling({
+                        modelMaxContextTokens: resolvedModel?.maxContextTokens,
+                        modelSizeBytes: resolvedModel?.size ?? null,
+                        totalMemoryBytes,
+                    }));
+                }
+            })
+            .catch(() => {
+                if (!isCancelled) {
+                    setMeasuredContextWindowCeiling(null);
+                }
+            });
+
         return () => {
             isCancelled = true;
         };
-    }, [isModelParametersOpen]);
+    }, [
+        configurableModelAccessState,
+        configurableModelHasVerifiedContextWindow,
+        configurableModelId,
+        configurableModelIsGated,
+        configurableModelIsPrivate,
+        configurableModelMaxContextTokens,
+        configurableModelSize,
+        isModelParametersOpen,
+    ]);
 
     useEffect(() => {
         if (!isModelParametersOpen) {
+            setMeasuredContextWindowCeiling(null);
+            loadDraftSourceRef.current = {
+                contextSize: 'current',
+                gpuLayers: 'current',
+            };
+            loadDraftSeedRef.current = null;
             return;
         }
 
-        const nextLoadParams = getModelLoadParametersForModel(configurableModelId);
-        setDraftLoadParams({
-            contextSize: nextLoadParams.contextSize,
-            gpuLayers: nextLoadParams.gpuLayers ?? recommendedGpuLayers,
+        const seedKey = configurableModelId ?? '__no-model__';
+        const shouldInitializeDraft = loadDraftSeedRef.current !== seedKey;
+
+        if (shouldInitializeDraft) {
+            loadDraftSourceRef.current = {
+                contextSize: 'current',
+                gpuLayers: 'current',
+            };
+            loadDraftSeedRef.current = seedKey;
+        }
+
+        setDraftLoadParams((current) => {
+            const nextContextSize = shouldInitializeDraft
+                ? effectiveCurrentLoadParams.contextSize
+                : (
+                    loadDraftSourceRef.current.contextSize === 'current'
+                        ? effectiveCurrentLoadParams.contextSize
+                        : loadDraftSourceRef.current.contextSize === 'default'
+                            ? effectiveDefaultLoadParams.contextSize
+                            : clampContextWindowTokens(current.contextSize, contextWindowCeiling)
+                );
+            const nextGpuLayers = shouldInitializeDraft
+                ? (currentLoadParams.gpuLayers ?? recommendedGpuLayers)
+                : (
+                    loadDraftSourceRef.current.gpuLayers === 'current'
+                        ? (currentLoadParams.gpuLayers ?? recommendedGpuLayers)
+                        : loadDraftSourceRef.current.gpuLayers === 'default'
+                            ? (effectiveDefaultLoadParams.gpuLayers ?? recommendedGpuLayers)
+                            : current.gpuLayers
+                );
+
+            if (
+                current.contextSize === nextContextSize
+                && current.gpuLayers === nextGpuLayers
+            ) {
+                return current;
+            }
+
+            return {
+                contextSize: nextContextSize,
+                gpuLayers: nextGpuLayers,
+            };
         });
-    }, [configurableModelId, isModelParametersOpen, recommendedGpuLayers, settings.modelLoadParamsByModelId]);
+    }, [
+        configurableModelId,
+        contextWindowCeiling,
+        currentLoadParams.gpuLayers,
+        effectiveDefaultLoadParams.contextSize,
+        effectiveDefaultLoadParams.gpuLayers,
+        effectiveCurrentLoadParams.contextSize,
+        isModelParametersOpen,
+        recommendedGpuLayers,
+    ]);
 
     useEffect(() => {
         return () => {
@@ -631,16 +760,36 @@ export const ChatScreen = () => {
         setApplyingModelReload(true);
 
         try {
+            const nextContextSize = clampContextWindowTokens(
+                draftLoadParams.contextSize,
+                contextWindowCeiling,
+            );
+            const nextGpuLayers = loadDraftSourceRef.current.gpuLayers === 'current'
+                ? (currentLoadParams.gpuLayers ?? null)
+                : loadDraftSourceRef.current.gpuLayers === 'default'
+                    ? (effectiveDefaultLoadParams.gpuLayers ?? null)
+                    : draftLoadParams.gpuLayers;
+            const defaultContextSize = clampContextWindowTokens(
+                DEFAULT_MODEL_LOAD_PARAMETERS.contextSize,
+                contextWindowCeiling,
+            );
             const isResetToDefaultProfile =
-                draftLoadParams.contextSize === DEFAULT_MODEL_LOAD_PARAMETERS.contextSize
-                && draftLoadParams.gpuLayers === recommendedGpuLayers;
+                nextContextSize === defaultContextSize
+                && (nextGpuLayers ?? recommendedGpuLayers) === recommendedGpuLayers;
+
+            if (nextContextSize !== draftLoadParams.contextSize) {
+                setDraftLoadParams((current) => ({
+                    ...current,
+                    contextSize: nextContextSize,
+                }));
+            }
 
             if (isResetToDefaultProfile) {
                 resetModelLoadParametersForModel(configurableModelId);
             } else {
                 updateModelLoadParametersForModel(configurableModelId, {
-                    contextSize: draftLoadParams.contextSize,
-                    gpuLayers: draftLoadParams.gpuLayers,
+                    contextSize: nextContextSize,
+                    gpuLayers: nextGpuLayers,
                 });
             }
 
@@ -942,9 +1091,9 @@ export const ChatScreen = () => {
                 modelLabel={modelLabel}
                 params={paramsSource}
                 defaultParams={defaultParams}
-                modelMaxContextTokens={configurableModel?.maxContextTokens}
+                contextWindowCeiling={contextWindowCeiling}
                 loadParamsDraft={draftLoadParams}
-                defaultLoadParams={defaultLoadParams}
+                defaultLoadParams={effectiveDefaultLoadParams}
                 recommendedGpuLayers={recommendedGpuLayers}
                 applyButtonLabel={applyButtonLabel}
                 canApplyReload={canApplyReload}
@@ -965,9 +1114,19 @@ export const ChatScreen = () => {
                     }
                 }}
                 onChangeLoadParams={(partial) => {
+                    if (partial.contextSize !== undefined) {
+                        loadDraftSourceRef.current.contextSize = 'user';
+                    }
+                    if (partial.gpuLayers !== undefined) {
+                        loadDraftSourceRef.current.gpuLayers = 'user';
+                    }
+
                     setDraftLoadParams((current) => ({
                         ...current,
                         ...partial,
+                        contextSize: partial.contextSize === undefined
+                            ? current.contextSize
+                            : clampContextWindowTokens(partial.contextSize, contextWindowCeiling),
                     }));
                 }}
                 onResetParamField={(field) => {
@@ -985,19 +1144,29 @@ export const ChatScreen = () => {
                     }
                 }}
                 onResetLoadField={(field) => {
+                    if (field === 'contextSize') {
+                        loadDraftSourceRef.current.contextSize = 'default';
+                    } else {
+                        loadDraftSourceRef.current.gpuLayers = 'default';
+                    }
+
                     setDraftLoadParams((current) => ({
                         ...current,
                         [field]: field === 'gpuLayers'
-                            ? recommendedGpuLayers
-                            : DEFAULT_MODEL_LOAD_PARAMETERS.contextSize,
+                            ? (effectiveDefaultLoadParams.gpuLayers ?? recommendedGpuLayers)
+                            : effectiveDefaultLoadParams.contextSize,
                     }));
                 }}
                 onReset={() => {
+                    loadDraftSourceRef.current = {
+                        contextSize: 'default',
+                        gpuLayers: 'default',
+                    };
                     resetGenerationParametersForModel(configurableModelId);
                     const resetParams = getGenerationParametersForModel(configurableModelId);
                     setDraftLoadParams({
-                        contextSize: DEFAULT_MODEL_LOAD_PARAMETERS.contextSize,
-                        gpuLayers: recommendedGpuLayers,
+                        contextSize: effectiveDefaultLoadParams.contextSize,
+                        gpuLayers: effectiveDefaultLoadParams.gpuLayers ?? recommendedGpuLayers,
                     });
 
                     if (activeThread && activeThread.modelId === configurableModelId) {

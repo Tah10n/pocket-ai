@@ -26,6 +26,7 @@ jest.mock('../../src/services/LLMEngineService', () => ({
     getState: jest.fn().mockReturnValue({ activeModelId: null }),
     getContextSize: jest.fn().mockReturnValue(2048),
     interruptActiveCompletion: jest.fn().mockResolvedValue(undefined),
+    unload: jest.fn().mockResolvedValue(undefined),
   },
 }));
 
@@ -49,6 +50,7 @@ jest.mock('../../src/services/SettingsStore', () => ({
   CHAT_HISTORY_PREFIX: 'chat_history_',
   SETTINGS_KEY: 'app_settings',
   clearLegacyChatHistory: jest.fn(),
+  resetAllParametersForModel: jest.fn(),
   resetSettings: jest.fn(),
   storage: {
     getAllKeys: jest.fn().mockReturnValue([]),
@@ -59,10 +61,15 @@ jest.mock('../../src/services/SettingsStore', () => ({
 import { clearChatHistory } from '../../src/services/StorageManagerService';
 import { clearActiveCache } from '../../src/services/StorageManagerService';
 import { getAppStorageMetrics } from '../../src/services/StorageManagerService';
+import { offloadModel } from '../../src/services/StorageManagerService';
 import { llmEngineService } from '../../src/services/LLMEngineService';
 import { registry } from '../../src/services/LocalStorageRegistry';
 import { modelCatalogService } from '../../src/services/ModelCatalogService';
-import { clearLegacyChatHistory, storage as settingsStorage } from '../../src/services/SettingsStore';
+import {
+  clearLegacyChatHistory,
+  resetAllParametersForModel,
+  storage as settingsStorage,
+} from '../../src/services/SettingsStore';
 import { useChatStore } from '../../src/store/chatStore';
 import { storage as appStorage } from '../../src/store/storage';
 import * as FileSystem from 'expo-file-system/legacy';
@@ -206,5 +213,33 @@ describe('StorageManagerService', () => {
     await expect(clearActiveCache()).resolves.toBe(0);
 
     expect(mockedModelCatalogService.clearCache).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves persisted per-model settings by default when offloading a model', async () => {
+    await expect(offloadModel('org/model')).resolves.toBeUndefined();
+
+    expect(mockedRegistry.removeModel).toHaveBeenCalledWith('org/model');
+    expect(resetAllParametersForModel).not.toHaveBeenCalled();
+  });
+
+  it('can clear persisted per-model settings while offloading a model', async () => {
+    await expect(offloadModel('org/model', { preserveSettings: false })).resolves.toBeUndefined();
+
+    expect(mockedRegistry.removeModel).toHaveBeenCalledWith('org/model');
+    expect(resetAllParametersForModel).toHaveBeenCalledWith('org/model');
+  });
+
+  it('unloads the active model before removing it and optionally resetting its settings', async () => {
+    (llmEngineService.getState as jest.Mock).mockReturnValue({ activeModelId: 'org/model' });
+    (llmEngineService.unload as jest.Mock).mockResolvedValue(undefined);
+
+    await expect(offloadModel('org/model', { preserveSettings: false })).resolves.toBeUndefined();
+
+    expect(llmEngineService.unload).toHaveBeenCalledTimes(1);
+    expect(mockedRegistry.removeModel).toHaveBeenCalledWith('org/model');
+    expect(resetAllParametersForModel).toHaveBeenCalledWith('org/model');
+    expect((llmEngineService.unload as jest.Mock).mock.invocationCallOrder[0]).toBeLessThan(
+      mockedRegistry.removeModel.mock.invocationCallOrder[0],
+    );
   });
 });

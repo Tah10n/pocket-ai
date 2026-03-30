@@ -106,6 +106,7 @@ export function normalizePersistedModelMetadata(
     maxContextTokens: typeof model.maxContextTokens === 'number' && Number.isFinite(model.maxContextTokens)
       ? Math.round(model.maxContextTokens)
       : undefined,
+    hasVerifiedContextWindow: model.hasVerifiedContextWindow === true,
     modelType: normalizeNonEmptyString(model.modelType),
     architectures: normalizeStringArray(model.architectures),
     baseModels: normalizeStringArray(model.baseModels),

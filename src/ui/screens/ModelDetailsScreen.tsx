@@ -307,7 +307,7 @@ export function ModelDetailsScreen() {
                 </Box>
 
                 <Box className="mt-4 flex-row flex-wrap gap-3">
-                  {(model.accessState === ModelAccessState.AUTH_REQUIRED || model.accessState === ModelAccessState.ACCESS_DENIED) ? (
+                  {model.accessState === ModelAccessState.AUTH_REQUIRED ? (
                     <Button onPress={handleOpenTokenSettings}>
                       <ButtonText>{t('models.setToken')}</ButtonText>
                     </Button>

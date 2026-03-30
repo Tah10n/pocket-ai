@@ -14,6 +14,7 @@ interface ModelCardProps {
   onConfigureToken: () => void;
   onOpenModelPage: (modelId: string) => void;
   onLoad: (id: string) => void;
+  onOpenSettings: (id: string) => void;
   onUnload: () => void;
   onDelete: (id: string) => void;
   onCancel: (id: string) => void;
@@ -28,6 +29,7 @@ const ModelCardComponent = ({
   onConfigureToken,
   onOpenModelPage,
   onLoad,
+  onOpenSettings,
   onUnload,
   onDelete,
   onCancel,
@@ -128,7 +130,7 @@ const ModelCardComponent = ({
         </Box>
       )}
 
-      <Box className="flex-row gap-2">
+      <Box className="flex-row flex-wrap gap-2">
         {model.lifecycleStatus === LifecycleStatus.AVAILABLE && (
           model.accessState === ModelAccessState.AUTH_REQUIRED ? (
             <Button size="sm" className="flex-1" onPress={onConfigureToken}>
@@ -156,6 +158,9 @@ const ModelCardComponent = ({
             <Button size="sm" className="flex-1" onPress={() => onLoad(model.id)}>
               <ButtonText>{t('models.load')}</ButtonText>
             </Button>
+            <Button size="sm" action="secondary" className="flex-1" onPress={() => onOpenSettings(model.id)}>
+              <ButtonText>{t('models.settings')}</ButtonText>
+            </Button>
             <Button size="sm" action="negative" onPress={() => onDelete(model.id)}>
               <MaterialIcons name="delete" size={16} className="text-white" />
             </Button>
@@ -166,6 +171,9 @@ const ModelCardComponent = ({
           <>
             <Button size="sm" action="positive" className="flex-1" onPress={onChat}>
               <ButtonText>{t('models.chat')}</ButtonText>
+            </Button>
+            <Button size="sm" action="secondary" className="flex-1" onPress={() => onOpenSettings(model.id)}>
+              <ButtonText>{t('models.settings')}</ButtonText>
             </Button>
             <Button size="sm" action="secondary" onPress={() => onUnload()}>
               <ButtonText>{t('models.unload')}</ButtonText>

@@ -1,4 +1,5 @@
 import { createStorage } from './storage';
+import { MAX_CONTEXT_WINDOW_TOKENS } from '../utils/contextWindow';
 
 export const storage = createStorage('pocket-ai-settings');
 
@@ -40,12 +41,12 @@ export const DEFAULT_GENERATION_PARAMETERS: GenerationParameters = {
     topK: 40,
     minP: 0.05,
     repetitionPenalty: 1,
-    maxTokens: 2048,
+    maxTokens: 512,
     reasoningEnabled: false,
 };
 
 export const DEFAULT_MODEL_LOAD_PARAMETERS: ModelLoadParameters = {
-    contextSize: 2048,
+    contextSize: 4096,
     gpuLayers: null,
 };
 
@@ -143,7 +144,12 @@ function sanitizeModelLoadParameters(input: Partial<ModelLoadParameters> | undef
             : Math.round(clampNumber(rawGpuLayers, 0, 80, DEFAULT_MODEL_LOAD_PARAMETERS.gpuLayers ?? 0));
 
     return {
-        contextSize: Math.round(clampNumber(input?.contextSize, 512, 8192, DEFAULT_MODEL_LOAD_PARAMETERS.contextSize)),
+        contextSize: Math.round(clampNumber(
+            input?.contextSize,
+            512,
+            MAX_CONTEXT_WINDOW_TOKENS,
+            DEFAULT_MODEL_LOAD_PARAMETERS.contextSize,
+        )),
         gpuLayers: normalizedGpuLayers,
     };
 }
@@ -352,6 +358,25 @@ export function resetModelLoadParametersForModel(modelId: string | null | undefi
     delete nextModelLoadParamsByModelId[normalizedModelId];
 
     return updateSettings({
+        modelLoadParamsByModelId: nextModelLoadParamsByModelId,
+    });
+}
+
+export function resetAllParametersForModel(modelId: string | null | undefined) {
+    const normalizedModelId = typeof modelId === 'string' ? modelId.trim() : '';
+    if (!normalizedModelId) {
+        return getSettings();
+    }
+
+    const currentSettings = getSettings();
+    const nextModelParamsByModelId = { ...currentSettings.modelParamsByModelId };
+    const nextModelLoadParamsByModelId = { ...currentSettings.modelLoadParamsByModelId };
+
+    delete nextModelParamsByModelId[normalizedModelId];
+    delete nextModelLoadParamsByModelId[normalizedModelId];
+
+    return updateSettings({
+        modelParamsByModelId: nextModelParamsByModelId,
         modelLoadParamsByModelId: nextModelLoadParamsByModelId,
     });
 }

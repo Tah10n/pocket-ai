@@ -1,8 +1,11 @@
 import * as llamaRn from 'llama.rn';
+import * as FileSystem from 'expo-file-system/legacy';
+import DeviceInfo from 'react-native-device-info';
 import { llmEngineService } from '../../src/services/LLMEngineService';
 import { registry } from '../../src/services/LocalStorageRegistry';
 import { getModelLoadParametersForModel, updateSettings } from '../../src/services/SettingsStore';
 import { EngineStatus, LifecycleStatus } from '../../src/types/models';
+import { ESTIMATED_CONTEXT_BYTES_PER_TOKEN } from '../../src/utils/contextWindow';
 
 jest.mock('llama.rn', () => {
   const completion = jest.fn();
@@ -124,5 +127,65 @@ describe('LLMEngineService', () => {
     );
     expect(llmEngineService.getContextSize()).toBe(4096);
     expect(llmEngineService.getLoadedGpuLayers()).toBe(12);
+  });
+
+  it('loads contexts larger than 8192 when the model supports them', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue({
+      id: 'test/model',
+      localPath: 'model.gguf',
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      maxContextTokens: 32768,
+    });
+    (getModelLoadParametersForModel as jest.Mock).mockReturnValueOnce({
+      contextSize: 16384,
+      gpuLayers: 0,
+    });
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    expect(llamaRn.initLlama).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        n_ctx: 16384,
+        n_gpu_layers: 0,
+      }),
+      expect.any(Function),
+    );
+    expect(llmEngineService.getContextSize()).toBe(16384);
+  });
+
+  it('clamps requested context size to the safe device ceiling before loading', async () => {
+    const totalMemoryBytes = 8 * 1024 * 1024 * 1024;
+    const safeContextSize = 4096;
+    const modelSizeBytes = Math.floor(
+      ((totalMemoryBytes * 0.8) - safeContextSize * ESTIMATED_CONTEXT_BYTES_PER_TOKEN) / 1.2,
+    );
+
+    (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(totalMemoryBytes);
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValueOnce({
+      exists: true,
+      size: modelSizeBytes,
+    });
+    (registry.getModel as jest.Mock).mockReturnValue({
+      id: 'test/model',
+      localPath: 'model.gguf',
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      size: modelSizeBytes,
+      maxContextTokens: 8192,
+    });
+    (getModelLoadParametersForModel as jest.Mock).mockReturnValueOnce({
+      contextSize: 8192,
+      gpuLayers: 0,
+    });
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    expect(llamaRn.initLlama).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        n_ctx: safeContextSize,
+        n_gpu_layers: 0,
+      }),
+      expect.any(Function),
+    );
+    expect(llmEngineService.getContextSize()).toBe(safeContextSize);
   });
 });

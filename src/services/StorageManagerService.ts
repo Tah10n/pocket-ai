@@ -10,15 +10,18 @@ import {
   CHAT_HISTORY_PREFIX,
   SETTINGS_KEY,
   clearLegacyChatHistory,
+  resetAllParametersForModel,
   resetSettings,
   storage as settingsStorage,
 } from './SettingsStore';
 import { LifecycleStatus, ModelMetadata } from '../types/models';
+import {
+  ESTIMATED_CONTEXT_BYTES_PER_TOKEN,
+  ESTIMATED_MODEL_RUNTIME_OVERHEAD_FACTOR,
+} from '../utils/contextWindow';
 
 const CHAT_STORE_KEY = 'chat-store';
 const MIN_DIRECTORY_SIZE_FALLBACK_BYTES = 0;
-const ESTIMATED_MODEL_RUNTIME_OVERHEAD_FACTOR = 0.2;
-const ESTIMATED_CONTEXT_BYTES_PER_TOKEN = 2 * 1024;
 const MIN_ESTIMATED_CONTEXT_BYTES = 64 * 1024 * 1024;
 
 type PersistedChatStorePayload = {
@@ -37,6 +40,10 @@ export interface AppStorageMetrics {
   appFilesBytes: number;
   activeModelEstimateBytes: number;
   activeModelId: string | null;
+}
+
+interface OffloadModelOptions {
+  preserveSettings?: boolean;
 }
 
 function getTextByteLength(value: string | null | undefined) {
@@ -226,12 +233,18 @@ export async function getAppStorageMetrics(): Promise<AppStorageMetrics> {
   };
 }
 
-export async function offloadModel(modelId: string) {
+export async function offloadModel(modelId: string, options?: OffloadModelOptions) {
+  const preserveSettings = options?.preserveSettings !== false;
+
   if (llmEngineService.getState().activeModelId === modelId) {
     await llmEngineService.unload();
   }
 
   await registry.removeModel(modelId);
+
+  if (!preserveSettings) {
+    resetAllParametersForModel(modelId);
+  }
 }
 
 export async function clearActiveCache() {

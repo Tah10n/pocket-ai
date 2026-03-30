@@ -466,6 +466,57 @@ describe('chatStore', () => {
     );
   });
 
+  it('updates thread activity when params snapshot changes', () => {
+    const threadId = useChatStore.getState().createThread({
+      modelId: 'author/model-q4',
+      presetId: 'preset-1',
+      presetSnapshot: {
+        id: 'preset-1',
+        name: 'Helpful Assistant',
+        systemPrompt: 'Be concise.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 1024,
+      },
+    });
+    const before = useChatStore.getState().getThread(threadId);
+    expect(before).toBeTruthy();
+
+    const originalDateNow = Date.now;
+    Date.now = jest.fn(() => (before?.updatedAt ?? 0) + 5_000);
+
+    try {
+      useChatStore.getState().updateThreadParamsSnapshot(threadId, {
+        temperature: 1.1,
+        topP: 0.4,
+        topK: 60,
+        minP: 0.1,
+        repetitionPenalty: 1.2,
+        maxTokens: 512,
+        reasoningEnabled: true,
+      });
+    } finally {
+      Date.now = originalDateNow;
+    }
+
+    expect(useChatStore.getState().getThread(threadId)).toEqual(
+      expect.objectContaining({
+        updatedAt: (before?.updatedAt ?? 0) + 5_000,
+        paramsSnapshot: {
+          temperature: 1.1,
+          topP: 0.4,
+          topK: 60,
+          minP: 0.1,
+          repetitionPenalty: 1.2,
+          maxTokens: 512,
+          reasoningEnabled: true,
+        },
+      }),
+    );
+  });
+
   it('derives a stable truncated title from the first user message', () => {
     const threadId = useChatStore.getState().createThread({
       modelId: 'author/model-q4',
@@ -834,6 +885,61 @@ describe('chatStore', () => {
       { role: 'assistant', content: `${longMessage}-4` },
     ]);
     expect(truncatedMessageIds).toEqual(['message-1', 'message-2']);
+  });
+
+  it('does not let a large response reserve evict short history from a roomy context window', () => {
+    const thread: ChatThread = {
+      id: 'thread-balanced-reserve',
+      title: 'Balanced reserve thread',
+      modelId: 'author/model-q4',
+      presetId: 'preset-1',
+      presetSnapshot: {
+        id: 'preset-1',
+        name: 'Helpful Assistant',
+        systemPrompt: 'Be concise.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        topK: 40,
+        minP: 0.05,
+        repetitionPenalty: 1,
+        maxTokens: 2048,
+      },
+      messages: Array.from({ length: 12 }, (_, index) => ({
+        id: `message-${index + 1}`,
+        role: index % 2 === 0 ? ('user' as const) : ('assistant' as const),
+        content: `m${index + 1}`,
+        createdAt: index + 1,
+        state: 'complete' as const,
+      })),
+      createdAt: 1,
+      updatedAt: 12,
+      status: 'idle',
+    };
+
+    const { messages, truncatedMessageIds } = getThreadInferenceWindow(thread, {
+      maxContextMessages: 24,
+      maxContextTokens: 2048,
+      responseReserveTokens: 2048,
+    });
+
+    expect(messages).toEqual([
+      { role: 'system', content: 'Be concise.' },
+      { role: 'user', content: 'm1' },
+      { role: 'assistant', content: 'm2' },
+      { role: 'user', content: 'm3' },
+      { role: 'assistant', content: 'm4' },
+      { role: 'user', content: 'm5' },
+      { role: 'assistant', content: 'm6' },
+      { role: 'user', content: 'm7' },
+      { role: 'assistant', content: 'm8' },
+      { role: 'user', content: 'm9' },
+      { role: 'assistant', content: 'm10' },
+      { role: 'user', content: 'm11' },
+      { role: 'assistant', content: 'm12' },
+    ]);
+    expect(truncatedMessageIds).toEqual([]);
   });
 });
 

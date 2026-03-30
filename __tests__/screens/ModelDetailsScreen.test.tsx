@@ -155,6 +155,30 @@ describe('ModelDetailsScreen', () => {
     expect(mockRouter.push).toHaveBeenCalledWith('/huggingface-token');
   });
 
+  it('keeps access-denied recovery on Hugging Face instead of showing token setup again', async () => {
+    const accessDeniedModel: ModelMetadata = {
+      ...mockDetailModel,
+      accessState: ModelAccessState.ACCESS_DENIED,
+      isGated: true,
+    };
+    const { modelCatalogService } = jest.requireMock('../../src/services/ModelCatalogService');
+    modelCatalogService.getCachedModel.mockReturnValue(accessDeniedModel);
+    modelCatalogService.getModelDetails.mockResolvedValue(accessDeniedModel);
+
+    const screen = render(<ModelDetailsScreen />);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(screen.queryByText('models.setToken')).toBeNull();
+
+    fireEvent.press(screen.getByText('models.openOnHuggingFace'));
+
+    expect(Linking.openURL).toHaveBeenCalledWith('https://huggingface.co/org/model');
+    expect(mockRouter.push).not.toHaveBeenCalledWith('/huggingface-token');
+  });
+
   it('renders enriched metadata fields when the model exposes them', async () => {
     const screen = render(<ModelDetailsScreen />);
 

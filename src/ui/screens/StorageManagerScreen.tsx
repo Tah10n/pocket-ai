@@ -166,11 +166,19 @@ export function StorageManagerScreen() {
             [
                 { text: t('common.cancel'), style: 'cancel' },
                 {
-                    text: t('common.delete'),
-                    style: 'destructive',
+                    text: t('storageManager.deleteModelKeepSettings'),
                     onPress: () => {
                         void runBusyAction(`offload:${modelId}`, async () => {
-                            await offloadModel(modelId);
+                            await offloadModel(modelId, { preserveSettings: true });
+                        });
+                    },
+                },
+                {
+                    text: t('storageManager.deleteModelResetSettings'),
+                    style: 'destructive',
+                    onPress: () => {
+                        void runBusyAction(`offload:${modelId}:reset`, async () => {
+                            await offloadModel(modelId, { preserveSettings: false });
                         });
                     },
                 },

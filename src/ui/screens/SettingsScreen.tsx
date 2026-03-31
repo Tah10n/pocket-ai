@@ -91,9 +91,9 @@ function SettingsNavCard({
     onPress: () => void;
 }) {
     return (
-        <ScreenPressableCard onPress={onPress} variant="inset" padding="compact">
+        <ScreenPressableCard onPress={onPress} padding="compact">
             <Box className="flex-row items-center gap-3">
-                <Box className={`h-10 w-10 items-center justify-center rounded-2xl ${iconWrapClassName}`}>
+                <Box className={`h-10 w-10 items-center justify-center overflow-hidden rounded-2xl ${iconWrapClassName}`}>
                     <MaterialSymbols name={iconName} size={20} className={iconClassName} />
                 </Box>
 
@@ -243,7 +243,6 @@ export const SettingsScreen = () => {
 
     const isDark = resolvedMode === 'dark';
     const trackBackground = isDark ? withAlpha(semanticColorTokens.outline[700], 0.9) : semanticColorTokens.outline[200];
-    const resourceAsideBackground = isDark ? withAlpha(semanticColorTokens.background[800], 0.82) : semanticColorTokens.background[50];
     const memoryAccent = colors.primary;
     const memoryAccentSoft = isDark ? semanticColorTokens.primary[300] : semanticColorTokens.primary[400];
     const storageAccent = colors.success;
@@ -411,7 +410,7 @@ export const SettingsScreen = () => {
                                     title={t('settings.presets')}
                                     description={t('settings.presetsDescription')}
                                     iconName="tune"
-                                    iconWrapClassName="bg-warning-500/15 dark:bg-warning-500/20"
+                                    iconWrapClassName="rounded-2xl bg-warning-100 dark:bg-warning-500/20"
                                     iconClassName="text-warning-700 dark:text-warning-200"
                                     onPress={handlePresetsPress}
                                 />
@@ -474,10 +473,8 @@ export const SettingsScreen = () => {
                                         </Box>
 
                                         <ScreenCard
-                                            variant="inset"
                                             padding="compact"
                                             className="min-w-[110px] self-start"
-                                            style={{ backgroundColor: resourceAsideBackground }}
                                         >
                                             <Text className="text-2xs font-semibold uppercase tracking-wide text-typography-500 dark:text-typography-400">
                                                 {ramAsideLabel}
@@ -571,10 +568,8 @@ export const SettingsScreen = () => {
                                         </Box>
 
                                         <ScreenCard
-                                            variant="inset"
                                             padding="compact"
                                             className="min-w-[110px] self-start"
-                                            style={{ backgroundColor: resourceAsideBackground }}
                                         >
                                             <Text className="text-2xs font-semibold uppercase tracking-wide text-typography-500 dark:text-typography-400">
                                                 {t('settings.free')}

@@ -30,6 +30,9 @@ export default function TabLayout() {
         tabBarItemStyle: {
           paddingVertical: 4,
         },
+        tabBarIconStyle: {
+          marginTop: -10,
+        },
         tabBarLabelStyle: {
           fontSize: 12,
           fontWeight: '600',

@@ -1,6 +1,5 @@
 import React from 'react';
 import { Alert } from 'react-native';
-import { useBottomTabBarHeight } from '@react-navigation/bottom-tabs';
 import { Box } from '@/components/ui/box';
 import { ScrollView } from '@/components/ui/scroll-view';
 import { Text } from '@/components/ui/text';
@@ -10,18 +9,16 @@ import { ScreenActionPill, ScreenContent, ScreenStack } from '@/components/ui/Sc
 import { ActiveModelCard } from '@/components/ui/ActiveModelCard';
 import { RecentConversationsList } from '@/components/ui/RecentConversationsList';
 import { MaterialSymbols } from '@/components/ui/MaterialSymbols';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTranslation } from 'react-i18next';
 import { useChatSession } from '../../hooks/useChatSession';
 import { ConversationIndexItem } from '../../types/chat';
 import { useLLMEngine } from '@/hooks/useLLMEngine';
 import { registry } from '@/services/LocalStorageRegistry';
 import { getReportedErrorMessage } from '../../services/AppError';
+import { screenLayoutMetrics } from '../../utils/themeTokens';
 
 export const HomeScreen = () => {
     const { t } = useTranslation();
-    const insets = useSafeAreaInsets();
-    const tabBarHeight = useBottomTabBarHeight();
     const router = useRouter();
     const { deleteThread, openThread, startNewChat } = useChatSession();
     const { state: engineState } = useLLMEngine();
@@ -86,10 +83,11 @@ export const HomeScreen = () => {
         <Box className="flex-1 bg-background-0 dark:bg-background-950">
             <HeaderBar title="Pocket AI" showBrand />
 
-            <ScreenContent className="flex-1">
+            <ScreenContent testID="home-screen-content" className="flex-1" style={{ paddingBottom: 0 }}>
                 <ScrollView
+                    testID="home-scroll-view"
                     className="flex-1"
-                    contentContainerStyle={{ paddingBottom: tabBarHeight + Math.max(insets.bottom, 24) }}
+                    contentContainerStyle={{ paddingBottom: screenLayoutMetrics.contentBottomInset }}
                     showsVerticalScrollIndicator={false}
                 >
                     <ScreenStack className="pt-3" gap="loose">

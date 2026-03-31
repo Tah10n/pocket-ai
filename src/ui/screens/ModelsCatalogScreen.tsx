@@ -43,7 +43,7 @@ export const ModelsCatalogScreen = () => {
         onBack={undefined}
         onOpenStorage={() => router.push('/storage' as any)}
       />
-      <ScreenContent className="flex-1">
+      <ScreenContent testID="models-screen-content" className="flex-1" style={{ paddingBottom: 0 }}>
         <ModelsList
           activeTab={activeTab}
           searchQuery={searchQuery}

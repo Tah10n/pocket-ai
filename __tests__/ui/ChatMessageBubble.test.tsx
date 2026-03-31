@@ -14,7 +14,14 @@ jest.mock('../../src/components/ui/MarkdownRenderer', () => {
   const mockReact = require('react');
   const { Text } = require('react-native');
   return {
-    MarkdownRenderer: ({ content }: any) => mockReact.createElement(Text, { testID: 'markdown-renderer' }, content),
+    MarkdownRenderer: ({ content, selectable }: any) => mockReact.createElement(
+      Text,
+      {
+        testID: 'markdown-renderer',
+        selectableProp: selectable,
+      },
+      content,
+    ),
   };
 });
 
@@ -91,6 +98,7 @@ describe('ChatMessageBubble', () => {
     );
 
     expect(getByTestId('markdown-renderer')).toBeTruthy();
+    expect(getByTestId('markdown-renderer').props.selectableProp).toBe(true);
     expect(getByTestId('message-bubble-shell-assistant-1').props.className).toContain('px-3 py-1.5');
   });
 

@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Linking } from 'react-native';
 import DeviceInfo from 'react-native-device-info';
-import { useBottomTabBarHeight } from '@react-navigation/bottom-tabs';
 import { FlashList, ListRenderItem } from '@shopify/flash-list';
 import { useRouter } from 'expo-router';
 import { Box } from '@/components/ui/box';
@@ -49,6 +48,7 @@ import {
   resolveContextWindowCeiling,
 } from '@/utils/contextWindow';
 import { hasPersistedLoadProfileChanges } from '@/utils/modelLoadProfile';
+import { screenLayoutMetrics } from '@/utils/themeTokens';
 import { ModelsFilter } from './ModelsFilter';
 import { type ModelsCatalogTab } from './modelTabs';
 import {
@@ -165,7 +165,6 @@ function mergeUniqueModelsById(models: ModelMetadata[]): ModelMetadata[] {
 
 export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsListProps) => {
   const { t } = useTranslation();
-  const tabBarHeight = useBottomTabBarHeight();
   const router = useRouter();
   const [models, setModels] = useState<ModelMetadata[]>([]);
   const [loading, setLoading] = useState(false);
@@ -1030,7 +1029,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
   }, [activeTab, discoveryMode, hasTokenConfigured, showFullCatalog, t]);
 
   const footer = useMemo(() => (activeTab === 'all' ? (
-    <Box className="pb-4 pt-1">
+    <Box className="pt-1">
       {loadMoreError ? (
         <Box className="mb-2.5 rounded-2xl border border-error-300 bg-background-error px-3 py-2.5 dark:border-error-800">
           <Text className="text-sm text-error-700 dark:text-error-300">{loadMoreError}</Text>
@@ -1111,7 +1110,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
             ItemSeparatorComponent={renderItemSeparator}
             ListEmptyComponent={renderEmptyState}
             ListFooterComponent={renderFooter}
-            contentContainerStyle={{ flexGrow: 1, paddingBottom: tabBarHeight + 12 }}
+            contentContainerStyle={{ flexGrow: 1, paddingBottom: screenLayoutMetrics.contentBottomInset }}
             onScroll={handleCatalogScroll}
             onEndReached={() => handleLoadMore('auto')}
             onEndReachedThreshold={0.6}

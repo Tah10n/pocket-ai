@@ -1,5 +1,4 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { useBottomTabBarHeight } from '@react-navigation/bottom-tabs';
 import { useFocusEffect, useIsFocused } from '@react-navigation/native';
 import { useRouter } from 'expo-router';
 import { useTranslation } from 'react-i18next';
@@ -24,7 +23,7 @@ import { huggingFaceTokenService } from '../../services/HuggingFaceTokenService'
 import { llmEngineService } from '../../services/LLMEngineService';
 import { getAppStorageMetrics, type AppStorageMetrics } from '../../services/StorageManagerService';
 import { getSettings, subscribeSettings, updateSettings } from '../../services/SettingsStore';
-import { semanticColorTokens, withAlpha } from '../../utils/themeTokens';
+import { screenLayoutMetrics, semanticColorTokens, withAlpha } from '../../utils/themeTokens';
 
 function clampPercentage(value: number) {
     if (!Number.isFinite(value)) {
@@ -234,7 +233,6 @@ function LayeredUsageMeter({
 export const SettingsScreen = () => {
     const { t, i18n } = useTranslation();
     const router = useRouter();
-    const tabBarHeight = useBottomTabBarHeight();
     const isFocused = useIsFocused();
     const { mode, resolvedMode, setTheme, colors } = useTheme();
     const { metrics, refresh } = useDeviceMetrics({ enabled: isFocused, refreshIntervalMs: 1000 });
@@ -363,7 +361,10 @@ export const SettingsScreen = () => {
             />
 
             <ScrollView className="flex-1" showsVerticalScrollIndicator={false}>
-                <ScreenContent style={{ paddingTop: 18, paddingBottom: tabBarHeight + 24 }}>
+                <ScreenContent
+                    testID="settings-screen-content"
+                    style={{ paddingTop: 18, paddingBottom: screenLayoutMetrics.contentBottomInset }}
+                >
                     <ScreenStack gap="loose">
                         <Box>
                             <ScreenSectionLabel>{t('settings.appearance')}</ScreenSectionLabel>

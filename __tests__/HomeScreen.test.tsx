@@ -2,6 +2,7 @@ import React from 'react';
 import { fireEvent, render } from '@testing-library/react-native';
 import HomeScreen from '../app/(tabs)/index';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
+import { screenLayoutMetrics } from '../src/utils/themeTokens';
 
 const mockPush = jest.fn();
 const mockNavigate = jest.fn();
@@ -64,6 +65,14 @@ jest.mock('@/services/LocalStorageRegistry', () => ({
 
 // Mock NativeEventEmitter
 jest.mock('react-native/Libraries/EventEmitter/NativeEventEmitter');
+
+function flattenStyle(style: any) {
+    if (Array.isArray(style)) {
+        return style.reduce((result, entry) => ({ ...result, ...flattenStyle(entry) }), {});
+    }
+
+    return style ?? {};
+}
 
 describe('HomeScreen', () => {
     beforeEach(() => {
@@ -154,5 +163,24 @@ describe('HomeScreen', () => {
         fireEvent.press(getByTestId('manage-conversations-button'));
 
         expect(mockPush).toHaveBeenCalledWith('/conversations');
+    });
+
+    it('keeps the home scroll area flush with the tab chrome without extra footer gap', () => {
+        const { getByTestId } = render(
+            <SafeAreaProvider
+                initialMetrics={{
+                    frame: { x: 0, y: 0, width: 390, height: 844 },
+                    insets: { top: 0, left: 0, right: 0, bottom: 0 },
+                }}
+            >
+                <HomeScreen />
+            </SafeAreaProvider>
+        );
+
+        const screenContentStyle = flattenStyle(getByTestId('home-screen-content').props.style);
+        const scrollViewContentStyle = flattenStyle(getByTestId('home-scroll-view').props.contentContainerStyle);
+
+        expect(screenContentStyle.paddingBottom).toBe(0);
+        expect(scrollViewContentStyle.paddingBottom).toBe(screenLayoutMetrics.contentBottomInset);
     });
 });

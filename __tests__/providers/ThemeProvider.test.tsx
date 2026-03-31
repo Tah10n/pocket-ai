@@ -70,7 +70,7 @@ describe('ThemeProvider', () => {
     expect(getByTestId('theme-mode').props.children).toBe('system');
     expect(getByTestId('resolved-mode').props.children).toBe('dark');
     expect(getByTestId('primary-color').props.children).toBe('#1f7aff');
-    expect(getByTestId('navigation-card').props.children).toBe('rgba(17, 27, 42, 0.92)');
+    expect(getByTestId('navigation-card').props.children).toBe('rgba(21, 33, 52, 0.94)');
     expect(mockSetColorScheme).toHaveBeenCalledWith('system');
     expect(mockUpdateSettings).not.toHaveBeenCalled();
   });

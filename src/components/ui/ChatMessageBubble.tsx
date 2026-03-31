@@ -194,7 +194,7 @@ export const ChatMessageBubble = ({
                         <StreamingCursor />
                       </Text>
                     ) : (
-                      <MarkdownRenderer content={thoughtContent} />
+                      <MarkdownRenderer content={thoughtContent} selectable />
                     )
                   ) : (
                     <Text className="text-sm leading-6 text-typography-500 dark:text-typography-400">
@@ -218,7 +218,7 @@ export const ChatMessageBubble = ({
               <StreamingCursor />
             </Text>
           ) : assistantBodyContent ? (
-            <MarkdownRenderer content={assistantBodyContent} />
+            <MarkdownRenderer content={assistantBodyContent} selectable />
           ) : null}
         </Box>
       </Box>

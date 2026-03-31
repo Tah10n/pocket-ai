@@ -3,6 +3,7 @@ import { fireEvent, render } from '@testing-library/react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { SettingsScreen } from '../../src/ui/screens/SettingsScreen';
 import { getAppStorageMetrics } from '../../src/services/StorageManagerService';
+import { screenLayoutMetrics } from '../../src/utils/themeTokens';
 
 const mockBack = jest.fn();
 const mockReplace = jest.fn();
@@ -69,6 +70,14 @@ function renderScreen() {
       <SettingsScreen />
     </SafeAreaProvider>,
   );
+}
+
+function flattenStyle(style: any) {
+  if (Array.isArray(style)) {
+    return style.reduce((result, entry) => ({ ...result, ...flattenStyle(entry) }), {});
+  }
+
+  return style ?? {};
 }
 
 jest.mock('@react-navigation/bottom-tabs', () => ({
@@ -239,5 +248,12 @@ describe('SettingsScreen', () => {
     expect(queryByText('settings.storageOccupied')).toBeNull();
     expect(queryByText('settings.used')).toBeNull();
     expect(queryByText('settings.total')).toBeNull();
+  });
+
+  it('uses the shared content inset instead of adding extra tab bar spacing', () => {
+    const { getByTestId } = renderScreen();
+
+    expect(flattenStyle(getByTestId('settings-screen-content').props.style).paddingBottom)
+      .toBe(screenLayoutMetrics.contentBottomInset);
   });
 });

@@ -72,6 +72,7 @@ describe('ModelsCatalogScreen', () => {
   it('opens on the downloaded tab from route params and keeps tab changes on one screen', () => {
     const { getByTestId } = render(<ModelsCatalogScreen />);
 
+    expect(getByTestId('models-screen-content').props.style).toMatchObject({ paddingBottom: 0 });
     expect(getByTestId('models-active-tab').props.children).toBe('downloaded');
     expect(getByTestId('models-list-state').props.children).toBe('downloaded:');
 

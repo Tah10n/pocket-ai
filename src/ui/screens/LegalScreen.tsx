@@ -97,7 +97,7 @@ export function LegalScreen() {
                 <ScreenContent className="pt-5" style={{ paddingBottom: insets.bottom + 32 }}>
                     <ScreenStack gap="loose">
                         <ScreenCard tone="accent" className="px-5 py-5">
-                            <Text className="text-xs font-extrabold uppercase tracking-[0.18em] text-primary-500">
+                            <Text className="text-xs font-extrabold uppercase tracking-wide text-primary-500">
                                 {t('legal.eyebrow')}
                             </Text>
                             <Text className="mt-3 text-2xl font-extrabold tracking-tight text-typography-900 dark:text-typography-100">

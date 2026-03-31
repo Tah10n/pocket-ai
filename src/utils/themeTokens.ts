@@ -189,7 +189,7 @@ export const screenLayoutTokens = {
   bannerWarningClassName: 'rounded-2xl border border-warning-300 bg-background-warning px-4 py-3 dark:border-warning-800',
   bannerErrorClassName: 'rounded-2xl border border-error-300 bg-background-error px-4 py-3 dark:border-error-800',
   fieldLabelClassName: 'text-xs font-semibold uppercase tracking-wide text-typography-500 dark:text-typography-400',
-  sectionLabelClassName: 'px-1 text-xs font-semibold uppercase tracking-[0.18em] text-typography-500 dark:text-typography-400',
+  sectionLabelClassName: 'px-1 text-xs font-semibold uppercase tracking-wide text-typography-500 dark:text-typography-400',
   textFieldClassName: 'min-h-12 rounded-2xl border border-outline-200 bg-background-0 px-3 dark:border-outline-700 dark:bg-background-950/70',
   compactTextFieldClassName: 'min-h-11 rounded-2xl border border-outline-200 bg-background-0 px-3 dark:border-outline-700 dark:bg-background-950/70',
   prominentTextFieldClassName: 'min-h-14 justify-center rounded-[28px] border border-outline-200 bg-background-0 px-4 dark:border-outline-700 dark:bg-background-950/70',

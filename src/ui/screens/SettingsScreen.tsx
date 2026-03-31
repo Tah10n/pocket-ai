@@ -478,7 +478,7 @@ export const SettingsScreen = () => {
                                             className="min-w-[110px] self-start"
                                             style={{ backgroundColor: resourceAsideBackground }}
                                         >
-                                            <Text className="text-2xs font-semibold uppercase tracking-[0.18em] text-typography-500 dark:text-typography-400">
+                                            <Text className="text-2xs font-semibold uppercase tracking-wide text-typography-500 dark:text-typography-400">
                                                 {ramAsideLabel}
                                             </Text>
                                             <Text className="mt-2 text-base font-extrabold text-primary-500">
@@ -575,7 +575,7 @@ export const SettingsScreen = () => {
                                             className="min-w-[110px] self-start"
                                             style={{ backgroundColor: resourceAsideBackground }}
                                         >
-                                            <Text className="text-2xs font-semibold uppercase tracking-[0.18em] text-typography-500 dark:text-typography-400">
+                                            <Text className="text-2xs font-semibold uppercase tracking-wide text-typography-500 dark:text-typography-400">
                                                 {t('settings.free')}
                                             </Text>
                                             <Text className="mt-2 text-base font-extrabold text-success-600 dark:text-success-300">

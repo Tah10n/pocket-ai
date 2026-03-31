@@ -43,7 +43,7 @@ export const ActiveModelCard = ({ onSwapModel }: ActiveModelCardProps) => {
       <Box className="border-b border-outline-200 px-4 py-2.5 dark:border-outline-800">
         <Box className="flex-row items-center gap-2">
           <Box className={statusDotClassName} />
-          <Text className="text-xs font-medium text-typography-500 dark:text-typography-400 uppercase tracking-widest">
+          <Text className="text-xs font-medium text-typography-500 dark:text-typography-400 uppercase tracking-wide">
             {statusLabel}
           </Text>
         </Box>

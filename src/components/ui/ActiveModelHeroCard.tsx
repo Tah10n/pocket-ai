@@ -38,7 +38,7 @@ export const ActiveModelHeroCard = ({
         <Box className="flex-1 justify-between p-4">
           <Box className="flex-row items-center gap-2">
             <Box className="w-2 h-2 rounded-full bg-success-500" />
-            <Text className="text-xs font-semibold uppercase tracking-widest text-typography-0">Active</Text>
+            <Text className="text-xs font-semibold uppercase tracking-wide text-typography-0">Active</Text>
           </Box>
           <Box className="flex-row items-center gap-2">
             <MaterialSymbols name="memory" size={16} className="text-typography-0" />
@@ -65,7 +65,7 @@ export const ActiveModelHeroCard = ({
             </Box>
           </Box>
           <Box className="items-end">
-            <Text className="text-xs uppercase tracking-widest text-typography-500 dark:text-typography-400">
+            <Text className="text-xs uppercase tracking-wide text-typography-500 dark:text-typography-400">
               Memory Occupancy
             </Text>
             <Text className="text-sm font-semibold text-typography-900 dark:text-typography-100">

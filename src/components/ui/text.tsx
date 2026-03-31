@@ -11,7 +11,7 @@ export const textRoleClassNames = {
   body: 'text-sm leading-6 text-typography-800 dark:text-typography-100',
   bodyMuted: 'text-sm leading-5 text-typography-500 dark:text-typography-300',
   caption: 'text-xs leading-4 text-typography-500 dark:text-typography-400',
-  eyebrow: 'text-2xs font-semibold uppercase tracking-[0.18em] text-typography-500 dark:text-typography-400',
+  eyebrow: 'text-2xs font-semibold uppercase tracking-wide text-typography-500 dark:text-typography-400',
   action: 'text-sm font-semibold leading-5',
   chip: 'text-xs font-semibold leading-4',
   metric: 'text-[28px] font-extrabold leading-tight tracking-tight text-typography-900 dark:text-typography-100',

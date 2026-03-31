@@ -400,11 +400,7 @@ export function HeaderActionButton({
   testID,
 }: HeaderActionButtonProps) {
   const isDisabled = disabled || !onPress;
-  const toneClassName = tone === 'accent'
-    ? 'border-primary-500/15 bg-primary-500/10'
-    : tone === 'destructive'
-      ? 'border-error-500/15 bg-error-500/10'
-      : 'border-outline-200 bg-background-50 dark:border-outline-700 dark:bg-background-900/70';
+  const containerClassName = 'bg-primary-500/10 dark:bg-primary-500/15';
   const iconClassName = tone === 'accent'
     ? 'text-primary-600 dark:text-primary-300'
     : tone === 'destructive'
@@ -419,7 +415,7 @@ export function HeaderActionButton({
       accessibilityRole="button"
       accessibilityLabel={accessibilityLabel}
       hitSlop={8}
-      className={joinClassNames(`${screenChromeTokens.headerActionClassName} shrink-0 items-center justify-center rounded-full border ${toneClassName} ${isDisabled ? 'opacity-55' : 'active:opacity-80'}`, className)}
+      className={joinClassNames(`${screenChromeTokens.headerActionClassName} shrink-0 items-center justify-center rounded-full ${containerClassName} ${isDisabled ? 'opacity-55' : 'active:opacity-80'}`, className)}
     >
       <MaterialSymbols name={iconName} size={screenChromeTokens.headerActionIconSizePx} className={iconClassName} />
     </Pressable>
@@ -492,11 +488,9 @@ export function ScreenIconButton({
   disabled,
   ...props
 }: ScreenIconButtonProps) {
-  const toneClassName = tone === 'primary'
-    ? 'border-primary-500/15 bg-primary-500/10'
-    : tone === 'danger'
-      ? 'border-error-500/15 bg-error-500/10'
-      : 'border-outline-200 bg-background-0 dark:border-outline-700 dark:bg-background-950/70';
+  const toneClassName = tone === 'danger'
+    ? 'bg-error-500/10 dark:bg-error-500/15'
+    : 'bg-primary-500/10 dark:bg-primary-500/15';
   const resolvedIconClassName = tone === 'primary'
     ? 'text-primary-500'
     : tone === 'danger'
@@ -512,7 +506,6 @@ export function ScreenIconButton({
       className={joinClassNames(
         buttonLayoutTokens.screenIconButtonClassNameBySize[size],
         screenLayoutTokens.iconButtonClassName,
-        'border',
         toneClassName,
         disabled ? 'opacity-55' : 'active:opacity-70',
         className,

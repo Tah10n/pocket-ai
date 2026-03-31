@@ -50,7 +50,7 @@ function IconActionButton({
       tone={isDestructive ? 'danger' : 'neutral'}
       className={`border-0 ${isDestructive
         ? 'bg-error-500/10 dark:bg-error-500/15'
-        : 'bg-background-100 dark:bg-background-800'}`}
+        : 'bg-primary-500/10 dark:bg-primary-500/15'}`}
       iconClassName={isDestructive ? 'text-error-500' : 'text-typography-500 dark:text-typography-300'}
     />
   );

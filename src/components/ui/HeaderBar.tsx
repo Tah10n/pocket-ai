@@ -45,7 +45,7 @@ export const HeaderBar = ({
             accessibilityLabel={resolvedBackAccessibilityLabel}
           />
         ) : showBrand ? (
-          <Box className="h-11 w-11 items-center justify-center rounded-full border border-primary-500/15 bg-primary-500/10">
+          <Box className="h-11 w-11 items-center justify-center rounded-full bg-primary-500/10 dark:bg-primary-500/15">
             <MaterialSymbols name={brandIconName} size={21} className="text-primary-500" />
           </Box>
         ) : (

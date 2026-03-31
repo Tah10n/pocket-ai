@@ -1,5 +1,5 @@
 import React, { useCallback, useDeferredValue, useEffect, useMemo, useState } from 'react';
-import { Alert } from 'react-native';
+import { Alert, KeyboardAvoidingView, Modal } from 'react-native';
 import { useRouter } from 'expo-router';
 import { FlashList, ListRenderItem } from '@shopify/flash-list';
 import { useTranslation } from 'react-i18next';
@@ -17,8 +17,8 @@ import {
   ScreenInlineInput,
   ScreenIconButton,
   ScreenPressableCard,
+  ScreenSheet,
   ScreenStack,
-  ScreenTextField,
 } from '@/components/ui/ScreenShell';
 import { Text } from '@/components/ui/text';
 import { useChatSession } from '../../hooks/useChatSession';
@@ -104,6 +104,10 @@ export function ConversationsScreen() {
   const activeRetentionOption = useMemo(
     () => CHAT_RETENTION_OPTIONS.find((option) => option.days === chatRetentionDays) ?? CHAT_RETENTION_OPTIONS[0],
     [chatRetentionDays],
+  );
+  const editingConversation = useMemo(
+    () => conversationIndex.find((conversation) => conversation.id === editingThreadId) ?? null,
+    [conversationIndex, editingThreadId],
   );
 
   useEffect(() => {
@@ -318,7 +322,6 @@ export function ConversationsScreen() {
 
   const renderItem = useCallback<ListRenderItem<ConversationIndexItem>>(({ item }) => {
     const isActive = activeThread?.id === item.id;
-    const isEditing = editingThreadId === item.id;
 
     return (
       <ScreenCard>
@@ -326,9 +329,7 @@ export function ConversationsScreen() {
           <Pressable
             testID={`conversation-row-${item.id}`}
             onPress={() => {
-              if (!isEditing) {
-                handleOpenConversation(item.id);
-              }
+              handleOpenConversation(item.id);
             }}
             accessibilityRole="button"
             accessibilityLabel={item.title}
@@ -336,7 +337,7 @@ export function ConversationsScreen() {
           >
             <Box className="flex-row items-center gap-2">
               <Text
-                numberOfLines={isEditing ? undefined : 1}
+                numberOfLines={1}
                 className="flex-1 text-base font-semibold text-typography-900 dark:text-typography-100"
               >
                 {item.title}
@@ -363,65 +364,33 @@ export function ConversationsScreen() {
             )}
           </Pressable>
 
-          {!isEditing ? (
-            <Box className="flex-row items-center gap-2">
-              <ScreenIconButton
-                testID={`rename-conversation-${item.id}`}
-                onPress={() => {
-                  setEditingThreadId(item.id);
-                  setEditingTitle(item.title);
-                }}
-                accessibilityLabel={`${t('conversations.renameLabel')} ${item.title}`}
-                iconName="edit"
-              />
-
-              <ScreenIconButton
-                testID={`delete-conversation-${item.id}`}
-                onPress={() => {
-                  handleDeleteConversation(item);
-                }}
-                accessibilityLabel={`${t('common.delete')} ${item.title}`}
-                iconName="delete-outline"
-                size="compact"
-                tone="danger"
-                className="shrink-0 border-0"
-              />
-            </Box>
-          ) : null}
-        </Box>
-
-        {isEditing ? (
-          <ScreenCard className="mt-3.5 border-primary-500/20 bg-primary-500/5 dark:border-primary-400/25" variant="inset" padding="compact">
-            <Text className="text-xs font-semibold uppercase tracking-wide text-primary-500">
-              {t('conversations.renameLabel')}
-            </Text>
-
-            <ScreenTextField
-              testID={`rename-input-${item.id}`}
-              size="compact"
-              containerClassName="mt-2.5"
-              placeholder={t('conversations.renamePlaceholder')}
-              value={editingTitle}
-              onChangeText={setEditingTitle}
-              autoFocus
-              returnKeyType="done"
-              onSubmitEditing={handleSaveRename}
+          <Box className="flex-row items-center gap-2">
+            <ScreenIconButton
+              testID={`rename-conversation-${item.id}`}
+              onPress={() => {
+                setEditingThreadId(item.id);
+                setEditingTitle(item.title);
+              }}
+              accessibilityLabel={`${t('conversations.renameLabel')} ${item.title}`}
+              iconName="edit"
             />
 
-            <Box className="mt-2.5 flex-row justify-end gap-3">
-              <Button action="secondary" size="sm" onPress={resetRenameState}>
-                <ButtonText>{t('common.cancel')}</ButtonText>
-              </Button>
-
-              <Button testID={`save-rename-${item.id}`} size="sm" onPress={handleSaveRename}>
-                <ButtonText>{t('common.save')}</ButtonText>
-              </Button>
-            </Box>
-          </ScreenCard>
-        ) : null}
+            <ScreenIconButton
+              testID={`delete-conversation-${item.id}`}
+              onPress={() => {
+                handleDeleteConversation(item);
+              }}
+              accessibilityLabel={`${t('common.delete')} ${item.title}`}
+              iconName="delete-outline"
+              size="compact"
+              tone="danger"
+              className="shrink-0 border-0"
+            />
+          </Box>
+        </Box>
       </ScreenCard>
     );
-  }, [activeThread?.id, editingThreadId, editingTitle, handleDeleteConversation, handleOpenConversation, handleSaveRename, resetRenameState, t]);
+  }, [activeThread?.id, handleDeleteConversation, handleOpenConversation, t]);
 
   return (
     <Box className="flex-1 bg-background-0 dark:bg-background-950">
@@ -520,6 +489,57 @@ export function ConversationsScreen() {
           )}
         </ScreenStack>
       </ScreenContent>
+
+      <Modal visible={editingThreadId !== null} animationType="fade" transparent onRequestClose={resetRenameState}>
+        <KeyboardAvoidingView behavior="padding" style={{ flex: 1 }} keyboardVerticalOffset={0}>
+          <Box className="flex-1 justify-end bg-black/45">
+            <Pressable className="flex-1" onPress={resetRenameState} />
+            <ScreenSheet className="pb-8">
+              <Box className="mb-5 flex-row items-start justify-between gap-4">
+                <Box className="min-w-0 flex-1">
+                  <Text className="text-lg font-semibold text-typography-900 dark:text-typography-100">
+                    {t('conversations.renameTitle')}
+                  </Text>
+                  <Text className="mt-1 text-sm leading-5 text-typography-500 dark:text-typography-400">
+                    {editingConversation?.title ?? t('conversations.renameLabel')}
+                  </Text>
+                </Box>
+
+                <ScreenIconButton
+                  onPress={resetRenameState}
+                  accessibilityLabel={t('common.cancel')}
+                  iconName="close"
+                />
+              </Box>
+
+              <ScreenInlineInput
+                testID={editingThreadId ? `rename-input-${editingThreadId}` : 'rename-input'}
+                className="mt-1"
+                placeholder={t('conversations.renamePlaceholder')}
+                value={editingTitle}
+                onChangeText={setEditingTitle}
+                autoFocus
+                returnKeyType="done"
+                blurOnSubmit
+                onSubmitEditing={handleSaveRename}
+              />
+
+              <Box className="mt-4 flex-row gap-3">
+                <Button action="secondary" className="flex-1" onPress={resetRenameState}>
+                  <ButtonText>{t('common.cancel')}</ButtonText>
+                </Button>
+                <Button
+                  testID={editingThreadId ? `save-rename-${editingThreadId}` : 'save-rename'}
+                  className="flex-1"
+                  onPress={handleSaveRename}
+                >
+                  <ButtonText>{t('common.save')}</ButtonText>
+                </Button>
+              </Box>
+            </ScreenSheet>
+          </Box>
+        </KeyboardAvoidingView>
+      </Modal>
     </Box>
   );
 }

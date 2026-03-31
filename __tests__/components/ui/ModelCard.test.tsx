@@ -16,6 +16,7 @@ jest.mock('../../../src/components/ui/text', () => {
   const { Text } = require('react-native');
   return {
     Text: ({ children, ...props }: any) => mockReact.createElement(Text, props, children),
+    composeTextRole: (_role: string, className = '') => className,
   };
 });
 
@@ -28,11 +29,31 @@ jest.mock('../../../src/components/ui/button', () => {
   };
 });
 
+jest.mock('../../../src/components/ui/ScreenShell', () => {
+  const mockReact = require('react');
+  const { Pressable, View } = require('react-native');
+  return {
+    ScreenCard: ({ children, ...props }: any) => mockReact.createElement(View, props, children),
+    ScreenActionPill: ({ children, onPress, ...props }: any) =>
+      mockReact.createElement(Pressable, { onPress, ...props }, children),
+    ScreenIconButton: ({ onPress, ...props }: any) =>
+      mockReact.createElement(Pressable, { onPress, ...props }),
+  };
+});
+
 jest.mock('../../../src/components/ui/pressable', () => {
   const mockReact = require('react');
   const { Pressable } = require('react-native');
   return {
     Pressable: ({ children, ...props }: any) => mockReact.createElement(Pressable, props, children),
+  };
+});
+
+jest.mock('../../../src/components/ui/MaterialSymbols', () => {
+  const mockReact = require('react');
+  const { Text } = require('react-native');
+  return {
+    MaterialSymbols: ({ name }: any) => mockReact.createElement(Text, null, name),
   };
 });
 

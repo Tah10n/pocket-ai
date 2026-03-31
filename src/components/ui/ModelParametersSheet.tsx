@@ -3,10 +3,11 @@ import { Modal } from 'react-native';
 import Slider from '@react-native-community/slider';
 import { useTranslation } from 'react-i18next';
 import { Box } from '@/components/ui/box';
+import { Button, ButtonText } from '@/components/ui/button';
 import { Pressable } from '@/components/ui/pressable';
 import { ScrollView } from '@/components/ui/scroll-view';
+import { ScreenBadge, ScreenCard, ScreenIconButton, ScreenSheet } from '@/components/ui/ScreenShell';
 import { Text } from '@/components/ui/text';
-import { MaterialSymbols } from './MaterialSymbols';
 import { GenerationParameters, ModelLoadParameters } from '../../services/SettingsStore';
 import {
   DEFAULT_CONTEXT_WINDOW_TOKENS,
@@ -72,9 +73,12 @@ function SliderRow({
 }: SliderRowProps) {
   const { t } = useTranslation();
   return (
-    <Box className={variant === 'embedded'
-      ? `${showDivider ? 'mt-4 border-t border-primary-500/12 pt-4 dark:border-primary-500/20' : ''}`
-      : 'rounded-3xl border border-outline-200 bg-background-50 p-4 dark:border-outline-800 dark:bg-background-900/70'}
+    <ScreenCard
+      variant={variant === 'embedded' ? 'inset' : 'surface'}
+      padding="default"
+      className={variant === 'embedded'
+        ? `${showDivider ? 'mt-4 border-t border-primary-500/12 pt-4 dark:border-primary-500/20' : ''} border-primary-500/10 bg-background-0/60 dark:border-primary-500/10 dark:bg-background-950/30`
+        : undefined}
     >
       <Box className="flex-row items-start justify-between gap-3">
         <Box className="min-w-0 flex-1">
@@ -86,28 +90,21 @@ function SliderRow({
           </Text>
         </Box>
 
-        <Box className="rounded-full border border-primary-500/15 bg-primary-500/10 px-3 py-1.5">
-          <Text className="text-sm font-semibold text-primary-500">
-            {valueLabel}
-          </Text>
-        </Box>
+        <ScreenBadge tone="accent" className="px-3 py-1.5">
+          {valueLabel}
+        </ScreenBadge>
       </Box>
 
       {onReset ? (
         <Box className="mt-3 flex-row justify-end">
-          <Pressable
+          <Button
             onPress={onReset}
+            action="softPrimary"
+            size="xs"
             disabled={isResetDisabled}
-            className={`rounded-full px-3 py-1.5 ${isResetDisabled
-              ? 'bg-background-100 dark:bg-background-900/60'
-              : 'border border-primary-500/20 bg-primary-500/10 active:opacity-80'}`}
           >
-            <Text className={`text-xs font-semibold ${isResetDisabled
-              ? 'text-typography-400 dark:text-typography-500'
-              : 'text-primary-500'}`}>
-              {t('common.reset')}
-            </Text>
-          </Pressable>
+            <ButtonText>{t('common.reset')}</ButtonText>
+          </Button>
         </Box>
       ) : null}
 
@@ -131,7 +128,7 @@ function SliderRow({
           {maxLabel}
         </Text>
       </Box>
-    </Box>
+    </ScreenCard>
   );
 }
 
@@ -159,7 +156,7 @@ function ToggleRow({
   const { t } = useTranslation();
 
   return (
-    <Box className="rounded-3xl border border-outline-200 bg-background-50 p-4 dark:border-outline-800 dark:bg-background-900/70">
+    <ScreenCard>
       <Box className="flex-row items-start justify-between gap-3">
         <Box className="min-w-0 flex-1">
           <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">
@@ -170,61 +167,46 @@ function ToggleRow({
           </Text>
         </Box>
 
-        <Box className="rounded-full border border-primary-500/15 bg-primary-500/10 px-3 py-1.5">
-          <Text className="text-sm font-semibold text-primary-500">
-            {value ? enabledLabel : disabledLabel}
-          </Text>
-        </Box>
+        <ScreenBadge tone="accent" className="px-3 py-1.5">
+          {value ? enabledLabel : disabledLabel}
+        </ScreenBadge>
       </Box>
 
       {onReset ? (
         <Box className="mt-3 flex-row justify-end">
-          <Pressable
+          <Button
             onPress={onReset}
+            action="softPrimary"
+            size="xs"
             disabled={isResetDisabled}
-            className={`rounded-full px-3 py-1.5 ${isResetDisabled
-              ? 'bg-background-100 dark:bg-background-900/60'
-              : 'border border-primary-500/20 bg-primary-500/10 active:opacity-80'}`}
           >
-            <Text className={`text-xs font-semibold ${isResetDisabled
-              ? 'text-typography-400 dark:text-typography-500'
-              : 'text-primary-500'}`}>
-              {t('common.reset')}
-            </Text>
-          </Pressable>
+            <ButtonText>{t('common.reset')}</ButtonText>
+          </Button>
         </Box>
       ) : null}
 
       <Box className="mt-4 flex-row gap-2">
-        <Pressable
+        <Button
           testID="reasoning-option-off"
           onPress={() => onValueChange(false)}
-          className={`flex-1 rounded-2xl border px-3 py-3 active:opacity-80 ${!value
-            ? 'border-primary-500 bg-primary-500/10'
-            : 'border-outline-200 bg-background-0 dark:border-outline-800 dark:bg-background-950/70'}`}
+          action={!value ? 'softPrimary' : 'secondary'}
+          size="sm"
+          className="flex-1 rounded-2xl"
         >
-          <Text className={`text-center text-sm font-semibold ${!value
-            ? 'text-primary-500'
-            : 'text-typography-700 dark:text-typography-200'}`}>
-            {disabledLabel}
-          </Text>
-        </Pressable>
+          <ButtonText>{disabledLabel}</ButtonText>
+        </Button>
 
-        <Pressable
+        <Button
           testID="reasoning-option-on"
           onPress={() => onValueChange(true)}
-          className={`flex-1 rounded-2xl border px-3 py-3 active:opacity-80 ${value
-            ? 'border-primary-500 bg-primary-500/10'
-            : 'border-outline-200 bg-background-0 dark:border-outline-800 dark:bg-background-950/70'}`}
+          action={value ? 'softPrimary' : 'secondary'}
+          size="sm"
+          className="flex-1 rounded-2xl"
         >
-          <Text className={`text-center text-sm font-semibold ${value
-            ? 'text-primary-500'
-            : 'text-typography-700 dark:text-typography-200'}`}>
-            {enabledLabel}
-          </Text>
-        </Pressable>
+          <ButtonText>{enabledLabel}</ButtonText>
+        </Button>
       </Box>
-    </Box>
+    </ScreenCard>
   );
 }
 
@@ -268,7 +250,7 @@ export function ModelParametersSheet({
     <Modal visible={visible} animationType="fade" transparent onRequestClose={onClose}>
       <Box className="flex-1 justify-end bg-black/45">
         <Pressable className="flex-1" onPress={onClose} />
-        <Box className="max-h-[82%] rounded-t-[32px] bg-background-0 px-5 pb-8 pt-5 dark:bg-background-950">
+        <ScreenSheet className="max-h-[82%] pb-8">
           <Box className="mb-5 flex-row items-start justify-between gap-4">
             <Box className="min-w-0 flex-1">
               <Text className="text-lg font-semibold text-typography-900 dark:text-typography-100">
@@ -281,15 +263,14 @@ export function ModelParametersSheet({
               </Text>
             </Box>
 
-            <Pressable
+            <ScreenIconButton
               onPress={onClose}
-              className="h-10 w-10 items-center justify-center rounded-full bg-background-100 active:opacity-70 dark:bg-background-900/60"
-            >
-              <MaterialSymbols name="close" size={20} className="text-typography-600 dark:text-typography-300" />
-            </Pressable>
+              accessibilityLabel={t('common.cancel')}
+              iconName="close"
+            />
           </Box>
 
-          <Box className="mb-4 flex-row items-center justify-between rounded-2xl border border-primary-500/15 bg-primary-500/10 px-4 py-3">
+          <ScreenCard className="mb-4 flex-row items-center justify-between" tone="accent" variant="inset" padding="compact">
             <Box className="min-w-0 flex-1 pr-3">
               <Text className="text-xs font-semibold uppercase tracking-wider text-primary-500">
                 {t('chat.modelControls.activeProfile')}
@@ -299,31 +280,26 @@ export function ModelParametersSheet({
               </Text>
             </Box>
 
-            <Pressable
+            <Button
               onPress={onReset}
+              action="softPrimary"
+              size="sm"
               disabled={!modelId}
-              className={`rounded-full px-4 py-2 ${modelId
-                ? 'border border-primary-500/20 bg-primary-500/10 active:opacity-80'
-                : 'bg-background-100 dark:bg-background-900/60'}`}
             >
-              <Text className={`text-sm font-semibold ${modelId
-                ? 'text-primary-500'
-                : 'text-typography-400 dark:text-typography-500'}`}>
-                {t('common.resetAll')}
-              </Text>
-            </Pressable>
-          </Box>
+              <ButtonText>{t('common.resetAll')}</ButtonText>
+            </Button>
+          </ScreenCard>
 
           <ScrollView showsVerticalScrollIndicator={false}>
             <Box className="gap-4 pb-2">
-              <Box className="rounded-3xl border border-outline-200 bg-background-50 p-4 dark:border-outline-800 dark:bg-background-900/70">
+              <ScreenCard>
                 <Text className="text-xs font-semibold uppercase tracking-wider text-primary-500">
                   {t('chat.modelControls.liveSampling')}
                 </Text>
                 <Text className="mt-2 text-sm leading-5 text-typography-600 dark:text-typography-300">
                   {t('chat.modelControls.liveSamplingDescription')}
                 </Text>
-              </Box>
+              </ScreenCard>
 
               <ToggleRow
                 label={t('chat.modelControls.reasoning')}
@@ -426,7 +402,7 @@ export function ModelParametersSheet({
                 isResetDisabled={params.maxTokens === defaultParams.maxTokens}
               />
 
-              <Box className="rounded-3xl border border-primary-500/15 bg-primary-500/5 p-4">
+              <ScreenCard tone="accent">
                 <Text className="text-xs font-semibold uppercase tracking-wider text-primary-500">
                   {t('chat.modelControls.runtimeReload')}
                 </Text>
@@ -466,38 +442,34 @@ export function ModelParametersSheet({
                   variant="embedded"
                   showDivider
                 />
-              </Box>
+              </ScreenCard>
             </Box>
           </ScrollView>
 
           {showApplyReload ? (
             <Box testID="model-apply-footer" className="mt-4 border-t border-outline-200 pt-4 dark:border-outline-800">
-              <Box className="mb-3 rounded-2xl border border-primary-500/15 bg-primary-500/10 px-4 py-3">
+              <ScreenCard className="mb-3" tone="accent" variant="inset" padding="compact">
                 <Text className="text-xs font-semibold uppercase tracking-wider text-primary-500">
                   {t('chat.modelControls.pendingLoadProfileTitle')}
                 </Text>
                 <Text className="mt-1 text-sm leading-5 text-typography-700 dark:text-typography-200">
                   {t('chat.modelControls.pendingLoadProfileDescription')}
                 </Text>
-              </Box>
+              </ScreenCard>
 
-              <Pressable
+              <Button
                 testID="apply-model-settings-button"
                 onPress={onApplyReload}
+                action="softPrimary"
+                size="sm"
                 disabled={!canApplyReload || isApplyingReload || !modelId}
-                className={`rounded-2xl px-4 py-3 ${canApplyReload && !isApplyingReload && modelId
-                  ? 'border border-primary-500/20 bg-primary-500/10 active:opacity-80'
-                  : 'bg-background-100 dark:bg-background-900/60'}`}
+                className="w-full rounded-2xl"
               >
-                <Text className={`text-center text-sm font-semibold ${canApplyReload && !isApplyingReload && modelId
-                  ? 'text-primary-500'
-                  : 'text-typography-400 dark:text-typography-500'}`}>
-                  {isApplyingReload ? t('chat.modelControls.reloading') : applyButtonLabel}
-                </Text>
-              </Pressable>
+                <ButtonText>{isApplyingReload ? t('chat.modelControls.reloading') : applyButtonLabel}</ButtonText>
+              </Button>
             </Box>
           ) : null}
-        </Box>
+        </ScreenSheet>
       </Box>
     </Modal>
   );

@@ -13,15 +13,18 @@ import {
     Platform,
     View,
 } from 'react-native';
+import { useBottomTabBarHeight } from '@react-navigation/bottom-tabs';
 import DeviceInfo from 'react-native-device-info';
 import { useFocusEffect } from '@react-navigation/native';
 import { Box } from '@/components/ui/box';
+import { Button, ButtonText } from '@/components/ui/button';
 import { Text } from '@/components/ui/text';
 import { ChatHeader } from '@/components/ui/ChatHeader';
 import { ChatStatusBanner } from '@/components/ui/ChatStatusBanner';
 import { ChatMessageBubble } from '@/components/ui/ChatMessageBubble';
 import { ChatInputBar } from '@/components/ui/ChatInputBar';
 import { ModelParametersSheet } from '@/components/ui/ModelParametersSheet';
+import { MaterialSymbols } from '@/components/ui/MaterialSymbols';
 import { useTranslation } from 'react-i18next';
 import { PresetSelectorSheet } from '@/components/ui/PresetSelectorSheet';
 import { resolvePresetSnapshot, useChatSession } from '../../hooks/useChatSession';
@@ -53,6 +56,7 @@ import {
     resolveContextWindowCeiling,
 } from '../../utils/contextWindow';
 import { hasPersistedLoadProfileChanges } from '../../utils/modelLoadProfile';
+import { screenLayoutMetrics } from '../../utils/themeTokens';
 
 const AUTO_SCROLL_BOTTOM_THRESHOLD = 96;
 const FALLBACK_TOP_K = 40;
@@ -64,13 +68,24 @@ export function getAndroidKeyboardOverlapCompensation({
     baseWindowHeight,
     currentWindowHeight,
     keyboardHeight,
+    coveredBottomInset = 0,
+    gap = 8,
 }: {
     baseWindowHeight: number;
     currentWindowHeight: number;
     keyboardHeight: number;
+    coveredBottomInset?: number;
+    gap?: number;
 }) {
     const resizedBySystem = Math.max(0, baseWindowHeight - currentWindowHeight);
-    return Math.max(0, keyboardHeight - resizedBySystem);
+    const reservedInsetAdjustment = Math.max(0, coveredBottomInset - gap);
+    const compensation = Math.max(0, keyboardHeight - resizedBySystem - reservedInsetAdjustment);
+
+    if (coveredBottomInset > 0) {
+        return Math.max(gap, compensation);
+    }
+
+    return compensation;
 }
 
 export function getAndroidKeyboardSpacerHeight({
@@ -138,7 +153,7 @@ export const ChatScreen = () => {
     const { state: engineState } = useLLMEngine();
     const { t } = useTranslation();
     const router = useRouter();
-    const canGoBack = router.canGoBack();
+    const tabBarHeight = useBottomTabBarHeight();
     const [hardwareStatus, setHardwareStatus] = useState(() => hardwareListenerService.getCurrentStatus());
     const [composerDraft, setComposerDraft] = useState('');
     const [androidKeyboardInset, setAndroidKeyboardInset] = useState(0);
@@ -180,16 +195,12 @@ export const ChatScreen = () => {
     const hasActiveModel = Boolean(engineState.activeModelId);
     const isEngineReady = engineState.status === EngineStatus.READY;
     const isInputDisabled = !hasActiveModel || !isEngineReady;
-    const statusLabel = activeThread?.status === 'generating'
-        ? t('chat.statusGenerating')
-        : activeThread?.status === 'stopped'
-            ? t('chat.statusStopped')
-            : activeThread?.status === 'error'
-                ? t('chat.statusError')
-                : undefined;
-    const statusTone = activeThread?.status === 'generating'
-        ? 'accent'
+    const statusLabel = activeThread?.status === 'stopped'
+        ? t('chat.statusStopped')
         : activeThread?.status === 'error'
+            ? t('chat.statusError')
+            : undefined;
+    const statusTone = activeThread?.status === 'error'
             ? 'warning'
             : 'neutral';
     const hardwareBannerInputs = getChatHardwareBannerInputs(
@@ -292,6 +303,9 @@ export const ChatScreen = () => {
         : hasDownloadedModels
             ? t('chat.loadModel')
             : t('chat.downloadModel');
+    const headerModelLabel = shouldShowRecoveryCard && !hasActiveModel
+        ? undefined
+        : modelLabel;
 
     const showAlertForError = useCallback((titleKey: string, scope: string, error: unknown) => {
         Alert.alert(t(titleKey), getReportedErrorMessage(scope, error, t));
@@ -404,6 +418,8 @@ export const ChatScreen = () => {
             baseWindowHeight: baseWindowHeightRef.current,
             currentWindowHeight: Dimensions.get('window').height,
             keyboardHeight: keyboardMetrics.height,
+            coveredBottomInset: tabBarHeight,
+            gap: screenLayoutMetrics.keyboardComposerGap,
         });
 
         if (!composerContainer || typeof composerContainer.measureInWindow !== 'function') {
@@ -423,10 +439,11 @@ export const ChatScreen = () => {
                     viewportCompensation,
                     composerBottomY: y + height,
                     keyboardTopY: keyboardMetrics.topY,
+                    gap: screenLayoutMetrics.keyboardComposerGap,
                 }));
             });
         });
-    }, []);
+    }, [tabBarHeight]);
 
     const handleListContentSizeChange = () => {
         const hasForcedFollowPass = forcedFollowPassesRef.current > 0;
@@ -864,7 +881,7 @@ export const ChatScreen = () => {
             <ChatHeader
                 title={headerTitle}
                 presetLabel={activePresetLabel}
-                modelLabel={modelLabel}
+                modelLabel={headerModelLabel}
                 statusLabel={statusLabel}
                 statusTone={statusTone}
                 canStartNewChat={!isGenerating}
@@ -884,7 +901,7 @@ export const ChatScreen = () => {
                 }}
                 canOpenPresetSelector={!isGenerating}
                 canOpenModelControls={Boolean(configurableModelId) && !isGenerating}
-                onBack={canGoBack ? () => router.back() : undefined}
+                onBack={undefined}
             />
 
             <Box className="flex-1">
@@ -896,7 +913,7 @@ export const ChatScreen = () => {
                                 description={recoveryDescription}
                                 actionLabel={resolvedModelRecoveryActionLabel}
                                 onAction={() => {
-                                    router.push(modelRecoveryActionRoute as any);
+                                    router.navigate(modelRecoveryActionRoute as any);
                                 }}
                                 tone="warning"
                                 iconName={hasActiveModel ? 'hourglass-empty' : 'download'}
@@ -989,19 +1006,55 @@ export const ChatScreen = () => {
                                 initialNumToRender={12}
                             />
                         ) : shouldShowRecoveryCard ? (
-                            <Box className="flex-1 items-center px-1 pt-12 pb-8">
-                                <ChatStatusBanner
-                                    title={recoveryTitle}
-                                    description={recoveryDescription}
-                                    actionLabel={resolvedModelRecoveryActionLabel}
-                                    onAction={() => {
-                                        router.push(modelRecoveryActionRoute as any);
-                                    }}
-                                    tone="warning"
-                                    iconName={hasActiveModel ? 'hourglass-empty' : 'download'}
-                                    centered
+                            <Box className="flex-1 justify-center px-3 pb-10">
+                                <Box
                                     testID="chat-recovery-card"
-                                />
+                                    className="items-center rounded-[20px] border border-warning-300/70 bg-warning-50/80 px-6 py-8 dark:border-warning-800 dark:bg-warning-950/35"
+                                >
+                                    <Box className="h-16 w-16 items-center justify-center rounded-full bg-warning-500/10 dark:bg-warning-500/15">
+                                        <MaterialSymbols
+                                            name={hasActiveModel ? 'hourglass-empty' : 'download'}
+                                            size={28}
+                                            className="text-warning-700 dark:text-warning-200"
+                                        />
+                                    </Box>
+
+                                    {hasActiveModel ? (
+                                        <Box className="mt-4 rounded-full border border-outline-200 bg-background-0 px-3 py-1.5 dark:border-outline-700 dark:bg-background-950/70">
+                                            <Text className="text-xs font-semibold uppercase tracking-wide text-typography-600 dark:text-typography-300">
+                                                {modelLabel}
+                                            </Text>
+                                        </Box>
+                                    ) : null}
+
+                                    <Text className="mt-5 text-center text-[22px] font-semibold leading-7 text-typography-900 dark:text-typography-100">
+                                        {recoveryTitle}
+                                    </Text>
+                                    <Text className="mt-3 text-center text-sm leading-6 text-typography-600 dark:text-typography-300">
+                                        {recoveryDescription}
+                                    </Text>
+
+                                    <Button
+                                        size="md"
+                                        className="mt-6 min-w-[220px] self-stretch"
+                                        onPress={() => {
+                                            router.navigate(modelRecoveryActionRoute as any);
+                                        }}
+                                    >
+                                        <MaterialSymbols
+                                            name={hasActiveModel ? 'tune' : 'download'}
+                                            size={18}
+                                            className="text-typography-0"
+                                        />
+                                        <ButtonText>{resolvedModelRecoveryActionLabel}</ButtonText>
+                                    </Button>
+
+                                    <Text className="mt-4 text-center text-xs leading-5 text-typography-500 dark:text-typography-400">
+                                        {activeThread
+                                            ? t('chat.emptyExistingThread')
+                                            : t('chat.emptyNewThread')}
+                                    </Text>
+                                </Box>
                             </Box>
                         ) : (
                             <Box className="flex-1 items-center px-6 pt-14 pb-8">
@@ -1022,7 +1075,7 @@ export const ChatScreen = () => {
                     <KeyboardAvoidingView
                         testID="chat-keyboard-avoiding-view"
                         behavior="padding"
-                        keyboardVerticalOffset={0}
+                        keyboardVerticalOffset={tabBarHeight}
                     >
                         <ChatInputBar
                             draft={composerDraft}

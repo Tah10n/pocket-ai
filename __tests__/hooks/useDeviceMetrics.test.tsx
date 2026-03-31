@@ -1,7 +1,8 @@
 import React, { useEffect } from 'react';
-import { render, waitFor } from '@testing-library/react-native';
+import { act, render, waitFor } from '@testing-library/react-native';
+import AccessibilityInfo from 'react-native/Libraries/Components/AccessibilityInfo/AccessibilityInfo';
 import DeviceInfo from 'react-native-device-info';
-import { useDeviceMetrics } from '../../src/hooks/useDeviceMetrics';
+import { useDeviceMetrics, useMotionPreferences } from '../../src/hooks/useDeviceMetrics';
 import { getSystemMemorySnapshot } from '../../src/services/SystemMetricsService';
 
 jest.mock('../../src/services/SystemMetricsService', () => ({
@@ -34,6 +35,7 @@ describe('useDeviceMetrics', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    (AccessibilityInfo as any).__resetAccessibilityState?.();
     (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(8 * GB);
     (DeviceInfo.getUsedMemory as jest.Mock).mockResolvedValue(5 * GB);
     (DeviceInfo.getTotalDiskCapacity as jest.Mock).mockResolvedValue(100 * GB);
@@ -92,4 +94,53 @@ describe('useDeviceMetrics', () => {
   expect(getMetrics()?.metrics?.storage.usedBytes).toBe(75 * GB);
   expect(getMetrics()?.metrics?.storage.freeBytes).toBe(25 * GB);
 });
+
+  it('downgrades motion when reduced motion is enabled at runtime', async () => {
+    let currentValue: ReturnType<typeof useMotionPreferences> | null = null;
+
+    const Harness = () => {
+      const value = useMotionPreferences();
+      useEffect(() => {
+        currentValue = value;
+      }, [value]);
+      return null;
+    };
+
+    render(<Harness />);
+
+    await waitFor(() => {
+      expect(currentValue?.motionPreset).toBe('full');
+    });
+
+    await act(async () => {
+      (AccessibilityInfo as any).__setReduceMotionEnabled?.(true);
+    });
+
+    await waitFor(() => {
+      expect(currentValue?.motionPreset).toBe('minimal');
+      expect(currentValue?.prefersReducedMotion).toBe(true);
+      expect(currentValue?.routeDurationMs).toBe(0);
+    });
+  });
+
+  it('uses reduced motion profile on weak devices even when accessibility motion is off', async () => {
+    (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(4 * GB);
+    let currentValue: ReturnType<typeof useMotionPreferences> | null = null;
+
+    const Harness = () => {
+      const value = useMotionPreferences();
+      useEffect(() => {
+        currentValue = value;
+      }, [value]);
+      return null;
+    };
+
+    render(<Harness />);
+
+    await waitFor(() => {
+      expect(currentValue?.motionPreset).toBe('reduced');
+      expect(currentValue?.isWeakDevice).toBe(true);
+      expect(currentValue?.sheetDurationMs).toBe(160);
+    });
+  });
 });

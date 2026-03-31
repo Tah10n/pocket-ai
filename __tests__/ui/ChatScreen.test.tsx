@@ -10,10 +10,15 @@ jest.mock('react-native-css-interop', () => {
   };
 });
 
+jest.mock('@react-navigation/bottom-tabs', () => ({
+  useBottomTabBarHeight: () => 0,
+}));
+
 jest.mock('expo-router', () => ({
   useRouter: () => ({
     canGoBack: () => false,
     back: jest.fn(),
+    navigate: mockRouterNavigate,
     push: mockRouterPush,
   }),
 }));
@@ -30,6 +35,7 @@ const mockRegenerateFromUserMessage = jest.fn();
 const mockDeleteMessage = jest.fn();
 const mockStop = jest.fn();
 const mockCreateSummaryPlaceholder = jest.fn();
+const mockRouterNavigate = jest.fn();
 const mockRouterPush = jest.fn();
 const mockGetRecommendedGpuLayers = jest.fn(() => new Promise<number>(() => {}));
 const mockLoadModel = jest.fn().mockResolvedValue(undefined);
@@ -293,6 +299,7 @@ jest.mock('@/components/ui/text', () => {
   const { Text } = require('react-native');
 
   return {
+    composeTextRole: (_role: string, className?: string) => className ?? '',
     Text: ({ children }: any) => mockReact.createElement(Text, null, children),
   };
 });
@@ -406,6 +413,7 @@ describe('ChatScreen', () => {
     mockDeleteMessage.mockClear();
     mockStop.mockClear();
     mockCreateSummaryPlaceholder.mockClear();
+    mockRouterNavigate.mockClear();
     mockRouterPush.mockClear();
     mockStartNewChat.mockClear();
     alertSpy.mockClear();
@@ -519,6 +527,16 @@ describe('ChatScreen', () => {
       currentWindowHeight: 2140,
       keyboardHeight: 320,
     })).toBe(60);
+  });
+
+  it('keeps only a small gap when the tab bar area is already part of the covered keyboard space', () => {
+    expect(getAndroidKeyboardOverlapCompensation({
+      baseWindowHeight: 2400,
+      currentWindowHeight: 2154,
+      keyboardHeight: 320,
+      coveredBottomInset: 74,
+      gap: 12,
+    })).toBe(12);
   });
 
   it('keeps enough spacer to lift the composer above the keyboard when resize alone is not enough', () => {
@@ -653,9 +671,9 @@ describe('ChatScreen', () => {
       activeThreadId: 'thread-1',
     });
 
-    const { getByTestId, getByText } = render(React.createElement(ChatScreen));
+    const { getByTestId, queryByText } = render(React.createElement(ChatScreen));
 
-    expect(getByText('chat.statusGenerating')).toBeTruthy();
+    expect(queryByText('chat.statusGenerating')).toBeNull();
     fireEvent.press(getByTestId('stop-button'));
     expect(mockStop).toHaveBeenCalledTimes(1);
   });
@@ -732,7 +750,7 @@ describe('ChatScreen', () => {
     const { getByText } = render(React.createElement(ChatScreen));
 
     fireEvent.press(getByText('chat.downloadModel'));
-    expect(mockRouterPush).toHaveBeenCalledWith('/(tabs)/models');
+    expect(mockRouterNavigate).toHaveBeenCalledWith('/(tabs)/models');
   });
 
   it('offers a load-model recovery action when downloaded models already exist', () => {
@@ -754,7 +772,7 @@ describe('ChatScreen', () => {
     const { getByText } = render(React.createElement(ChatScreen));
 
     fireEvent.press(getByText('chat.loadModel'));
-    expect(mockRouterPush).toHaveBeenCalledWith({
+    expect(mockRouterNavigate).toHaveBeenCalledWith({
       pathname: '/(tabs)/models',
       params: { initialTab: 'downloaded' },
     });

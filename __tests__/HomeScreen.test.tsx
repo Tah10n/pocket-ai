@@ -4,6 +4,7 @@ import HomeScreen from '../app/(tabs)/index';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 const mockPush = jest.fn();
+const mockNavigate = jest.fn();
 const mockReplace = jest.fn();
 const mockGetModels = jest.fn(() => []);
 const mockStartNewChat = jest.fn();
@@ -18,7 +19,7 @@ jest.mock('@react-navigation/bottom-tabs', () => ({
 // Mock expo-router components
 jest.mock('expo-router', () => ({
     Link: ({ children }: any) => <>{children}</>,
-    useRouter: () => ({ push: mockPush, replace: mockReplace }),
+    useRouter: () => ({ push: mockPush, navigate: mockNavigate, replace: mockReplace }),
     Stack: {
         Screen: () => null,
     },
@@ -67,6 +68,7 @@ jest.mock('react-native/Libraries/EventEmitter/NativeEventEmitter');
 describe('HomeScreen', () => {
     beforeEach(() => {
         mockPush.mockReset();
+        mockNavigate.mockReset();
         mockReplace.mockReset();
         mockGetModels.mockReset();
         mockGetModels.mockReturnValue([]);
@@ -76,8 +78,8 @@ describe('HomeScreen', () => {
         };
     });
 
-    it('renders successfully with translation keys', () => {
-        const { getByText } = render(
+    it('renders successfully with translation keys and root chrome accessibility affordances', () => {
+        const { getByLabelText, getByText, queryByLabelText } = render(
             <SafeAreaProvider
                 initialMetrics={{
                     frame: { x: 0, y: 0, width: 390, height: 844 },
@@ -89,6 +91,9 @@ describe('HomeScreen', () => {
         );
         expect(getByText('Pocket AI')).toBeTruthy();
         expect(getByText('home.newChat')).toBeTruthy();
+        expect(getByLabelText('home.newChat')).toBeTruthy();
+        expect(getByLabelText('common.manage')).toBeTruthy();
+        expect(queryByLabelText('Go back')).toBeNull();
     });
 
     it('opens the full catalog when there is no active or downloaded model', () => {
@@ -110,7 +115,7 @@ describe('HomeScreen', () => {
 
         fireEvent.press(getByTestId('active-model-card'));
 
-        expect(mockPush).toHaveBeenCalledWith({
+        expect(mockNavigate).toHaveBeenCalledWith({
             pathname: '/(tabs)/models',
             params: undefined,
         });
@@ -131,7 +136,7 @@ describe('HomeScreen', () => {
         fireEvent.press(getByText('home.newChat'));
 
         expect(mockStartNewChat).toHaveBeenCalled();
-        expect(mockPush).toHaveBeenCalledWith('/(tabs)/chat');
+        expect(mockNavigate).toHaveBeenCalledWith('/(tabs)/chat');
     });
 
     it('opens conversation history management from the recent chats header', () => {

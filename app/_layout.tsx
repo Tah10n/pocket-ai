@@ -1,12 +1,14 @@
-import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native';
+import { ThemeProvider } from '@react-navigation/native';
 import { requireOptionalNativeModule } from 'expo-modules-core';
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import * as SplashScreen from 'expo-splash-screen';
 import { useEffect, useState } from 'react';
 import 'react-native-reanimated';
+import { useTranslation } from 'react-i18next';
 
 import { ThemeProvider as CustomThemeProvider, useTheme } from '../src/providers/ThemeProvider';
+import { useMotionPreferences } from '../src/hooks/useDeviceMetrics';
 import { hardwareListenerService } from '../src/services/HardwareListenerService';
 import { bootstrapApp } from '../src/services/AppBootstrap';
 import '../src/i18n';
@@ -169,11 +171,20 @@ export default function RootLayout() {
 }
 
 function RootNavigator() {
-  const { resolvedMode } = useTheme();
+  const { colors, navigationTheme } = useTheme();
+  const { t } = useTranslation();
+  const motion = useMotionPreferences();
 
   return (
-    <ThemeProvider value={resolvedMode === 'dark' ? DarkTheme : DefaultTheme}>
-      <Stack>
+    <ThemeProvider value={navigationTheme}>
+      <Stack
+        screenOptions={{
+          animation: motion.motionPreset === 'full' ? 'default' : 'none',
+          contentStyle: {
+            backgroundColor: colors.background,
+          },
+        }}
+      >
         <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
         <Stack.Screen name="conversations" options={{ headerShown: false }} />
         <Stack.Screen name="presets" options={{ headerShown: false }} />
@@ -181,9 +192,16 @@ function RootNavigator() {
         <Stack.Screen name="legal" options={{ headerShown: false }} />
         <Stack.Screen name="huggingface-token" options={{ headerShown: false }} />
         <Stack.Screen name="model-details" options={{ headerShown: false }} />
-        <Stack.Screen name="modal" options={{ presentation: 'modal', title: 'Modal' }} />
+        <Stack.Screen
+          name="modal"
+          options={{
+            presentation: 'modal',
+            title: t('common.more'),
+            animation: motion.motionPreset === 'full' ? 'fade' : 'none',
+          }}
+        />
       </Stack>
-      <StatusBar style="auto" />
+      <StatusBar style={colors.statusBarStyle} />
     </ThemeProvider>
   );
 }

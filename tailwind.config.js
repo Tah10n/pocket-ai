@@ -1,5 +1,7 @@
 /** @type {import('tailwindcss').Config} */
-const colors = require("tailwindcss/colors");
+const themeContract = require("./src/utils/theme-contract.json");
+
+const semanticColors = themeContract.colors;
 
 module.exports = {
   darkMode: "class",
@@ -8,45 +10,21 @@ module.exports = {
   theme: {
     extend: {
       colors: {
-        primary: {
-          500: "#3211d4",
-          600: "#2a0fbd",
-        },
+        primary: semanticColors.primary,
         background: {
-          0: "#f6f6f8",
-          50: "#ffffff",
-          100: colors.slate[100],
-          200: colors.slate[200],
-          300: colors.slate[300],
-          400: colors.slate[400],
-          700: colors.slate[700],
-          800: colors.slate[800],
-          900: colors.slate[900],
-          950: "#131022",
+          ...semanticColors.background,
+          muted: semanticColors.background[100],
+          error: semanticColors.error[50],
+          warning: semanticColors.warning[50],
+          success: semanticColors.success[50],
+          info: semanticColors.info[50],
         },
-        typography: {
-          0: "#ffffff",
-          100: colors.slate[100],
-          200: colors.slate[200],
-          300: colors.slate[300],
-          400: colors.slate[400],
-          500: colors.slate[500],
-          600: colors.slate[600],
-          700: colors.slate[700],
-          800: colors.slate[800],
-          900: colors.slate[900],
-        },
-        outline: {
-          200: colors.slate[200],
-          300: colors.slate[300],
-          400: colors.slate[400],
-          700: colors.slate[700],
-          800: colors.slate[800],
-        },
-        success: colors.emerald,
-        info: colors.blue,
-        warning: colors.amber,
-        error: colors.red,
+        typography: semanticColors.typography,
+        outline: semanticColors.outline,
+        success: semanticColors.success,
+        info: semanticColors.info,
+        warning: semanticColors.warning,
+        error: semanticColors.error,
       },
       fontFamily: {
         display: ["Inter", "sans-serif"],

@@ -1,54 +1,20 @@
-import React, { createContext, useContext, useState, useEffect, useMemo } from 'react';
+import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
 import { useColorScheme as useSystemColorScheme } from 'react-native';
 import { useColorScheme as useNativewindColorScheme } from 'nativewind';
 import { getSettings, subscribeSettings, updateSettings } from '../services/SettingsStore';
-
-type ThemeMode = 'light' | 'dark' | 'system';
-type ResolvedThemeMode = 'light' | 'dark';
-
-interface ThemeColors {
-    background: string;
-    surface: string;
-    text: string;
-    textSecondary: string;
-    primary: string;
-    border: string;
-    error: string;
-    warning: string;
-    success: string;
-    inputBackground: string;
-}
-
-const lightColors: ThemeColors = {
-    background: '#f6f6f8',
-    surface: '#ffffff',
-    text: '#0f172a',
-    textSecondary: '#64748b',
-    primary: '#3211d4',
-    border: '#e2e8f0',
-    error: '#ef4444',
-    warning: '#f59e0b',
-    success: '#10b981',
-    inputBackground: '#ffffff',
-};
-
-const darkColors: ThemeColors = {
-    background: '#131022',
-    surface: '#0f172a',
-    text: '#ffffff',
-    textSecondary: '#94a3b8',
-    primary: '#3211d4',
-    border: '#1f2937',
-    error: '#f87171',
-    warning: '#fbbf24',
-    success: '#34d399',
-    inputBackground: '#0f172a',
-};
+import {
+    createNavigationTheme,
+    getThemeColors,
+    type ResolvedThemeMode,
+    type ThemeColors,
+    type ThemeMode,
+} from '../utils/themeTokens';
 
 interface ThemeContextValue {
     mode: ThemeMode;
     resolvedMode: ResolvedThemeMode;
     colors: ThemeColors;
+    navigationTheme: ReturnType<typeof createNavigationTheme>;
     toggleTheme: () => void;
     setTheme: (mode: ThemeMode) => void;
 }
@@ -56,7 +22,8 @@ interface ThemeContextValue {
 const ThemeContext = createContext<ThemeContextValue>({
     mode: 'system',
     resolvedMode: 'light',
-    colors: lightColors,
+    colors: getThemeColors('light'),
+    navigationTheme: createNavigationTheme('light'),
     toggleTheme: () => {},
     setTheme: () => {},
 });
@@ -77,6 +44,9 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     const resolvedMode: ResolvedThemeMode = useMemo(() => {
         return resolveThemeMode(mode, systemScheme);
     }, [mode, systemScheme]);
+
+    const colors = useMemo(() => getThemeColors(resolvedMode), [resolvedMode]);
+    const navigationTheme = useMemo(() => createNavigationTheme(resolvedMode), [resolvedMode]);
 
     useEffect(() => {
         setColorScheme(mode);
@@ -101,10 +71,8 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
         updateSettings({ theme: newMode });
     };
 
-    const colors = useMemo(() => (resolvedMode === 'dark' ? darkColors : lightColors), [resolvedMode]);
-
     return (
-        <ThemeContext.Provider value={{ mode, resolvedMode, colors, toggleTheme, setTheme }}>
+        <ThemeContext.Provider value={{ mode, resolvedMode, colors, navigationTheme, toggleTheme, setTheme }}>
             {children}
         </ThemeContext.Provider>
     );

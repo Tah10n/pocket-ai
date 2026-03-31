@@ -5,11 +5,15 @@ import { ConversationsScreen } from '../../src/ui/screens/ConversationsScreen';
 import { useChatSession } from '../../src/hooks/useChatSession';
 import { getSettings, updateSettings } from '../../src/services/SettingsStore';
 
+const mockRouterPush = jest.fn();
+const mockRouterReplace = jest.fn();
+const mockRouterBack = jest.fn();
+
 jest.mock('expo-router', () => ({
   useRouter: () => ({
-    push: jest.fn(),
-    replace: jest.fn(),
-    back: jest.fn(),
+    push: mockRouterPush,
+    replace: mockRouterReplace,
+    back: mockRouterBack,
     canGoBack: () => true,
   }),
 }));
@@ -85,6 +89,7 @@ jest.mock('@/components/ui/text', () => {
 
   return {
     Text: ({ children, ...props }: any) => mockReact.createElement(Text, props, children),
+    composeTextRole: (_role: string, className = '') => className,
   };
 });
 
@@ -114,6 +119,9 @@ const mockUpdateSettings = updateSettings as jest.MockedFunction<typeof updateSe
 describe('ConversationsScreen', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockRouterPush.mockReset();
+    mockRouterReplace.mockReset();
+    mockRouterBack.mockReset();
     mockPruneExpiredThreads.mockReset();
     mockPruneExpiredThreads.mockReturnValue(0);
     mockGetSettings.mockReturnValue({

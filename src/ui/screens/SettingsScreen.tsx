@@ -1,11 +1,22 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useBottomTabBarHeight } from '@react-navigation/bottom-tabs';
 import { useFocusEffect, useIsFocused } from '@react-navigation/native';
 import { useRouter } from 'expo-router';
 import { useTranslation } from 'react-i18next';
+import { Box } from '@/components/ui/box';
+import { Button, ButtonText } from '@/components/ui/button';
+import { HeaderBar } from '@/components/ui/HeaderBar';
 import { MaterialSymbols } from '@/components/ui/MaterialSymbols';
-import { ScreenHeaderShell } from '@/components/ui/ScreenShell';
+import {
+    ScreenCard,
+    ScreenContent,
+    ScreenPressableCard,
+    ScreenSectionLabel,
+    ScreenSegmentedControl,
+    ScreenStack,
+} from '@/components/ui/ScreenShell';
+import { ScrollView } from '@/components/ui/scroll-view';
+import { Text } from '@/components/ui/text';
 import { useDeviceMetrics } from '../../hooks/useDeviceMetrics';
 import { useLLMEngine } from '../../hooks/useLLMEngine';
 import { useTheme } from '../../providers/ThemeProvider';
@@ -13,297 +24,7 @@ import { huggingFaceTokenService } from '../../services/HuggingFaceTokenService'
 import { llmEngineService } from '../../services/LLMEngineService';
 import { getAppStorageMetrics, type AppStorageMetrics } from '../../services/StorageManagerService';
 import { getSettings, subscribeSettings, updateSettings } from '../../services/SettingsStore';
-
-const styles = StyleSheet.create({
-    screen: {
-        flex: 1,
-        width: '100%',
-        maxWidth: 768,
-        alignSelf: 'center',
-    },
-    scrollView: {
-        flex: 1,
-    },
-    header: {
-        borderBottomWidth: StyleSheet.hairlineWidth,
-    },
-    headerBar: {
-        minHeight: 56,
-        flexDirection: 'row',
-        alignItems: 'center',
-        gap: 12,
-        paddingHorizontal: 16,
-    },
-    backButton: {
-        height: 42,
-        width: 42,
-        borderRadius: 21,
-        alignItems: 'center',
-        justifyContent: 'center',
-    },
-    headerTextWrap: {
-        flex: 1,
-    },
-    headerTitleRow: {
-        flexDirection: 'row',
-        alignItems: 'center',
-    },
-    iconBubble: {
-        height: 36,
-        width: 36,
-        borderRadius: 18,
-        alignItems: 'center',
-        justifyContent: 'center',
-        marginRight: 10,
-    },
-    headerTitle: {
-        fontSize: 20,
-        fontWeight: '700',
-    },
-    scrollContent: {
-        flexGrow: 1,
-        paddingHorizontal: 16,
-        paddingTop: 18,
-    },
-    sectionTitle: {
-        marginLeft: 4,
-        marginBottom: 6,
-        fontSize: 11,
-        fontWeight: '700',
-        textTransform: 'uppercase',
-        letterSpacing: 1,
-    },
-    card: {
-        borderWidth: 1,
-        borderRadius: 20,
-        overflow: 'hidden',
-        marginBottom: 18,
-    },
-    row: {
-        paddingHorizontal: 16,
-        paddingVertical: 14,
-    },
-    rowBorder: {
-        borderBottomWidth: StyleSheet.hairlineWidth,
-    },
-    rowTop: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-    },
-    rowLeading: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        flex: 1,
-        marginRight: 12,
-    },
-    rowIcon: {
-        width: 36,
-        height: 36,
-        borderRadius: 12,
-        alignItems: 'center',
-        justifyContent: 'center',
-        marginRight: 10,
-    },
-    rowTextWrap: {
-        flex: 1,
-    },
-    rowTitle: {
-        fontSize: 15,
-        fontWeight: '600',
-    },
-    rowSubtitle: {
-        marginTop: 4,
-        fontSize: 12,
-        lineHeight: 17,
-    },
-    rowTrailing: {
-        flexDirection: 'row',
-        alignItems: 'center',
-    },
-    rowTrailingText: {
-        marginRight: 4,
-        fontSize: 14,
-        fontWeight: '600',
-    },
-    segmentedControl: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        width: '100%',
-        borderRadius: 14,
-        padding: 4,
-        marginTop: 12,
-    },
-    segmentButton: {
-        flex: 1,
-        minHeight: 40,
-        borderRadius: 12,
-        alignItems: 'center',
-        justifyContent: 'center',
-        paddingHorizontal: 8,
-    },
-    segmentText: {
-        fontSize: 13,
-        fontWeight: '700',
-    },
-    resourcesWrap: {
-        gap: 14,
-        marginBottom: 18,
-    },
-    resourceCard: {
-        borderRadius: 18,
-        borderWidth: 1,
-        padding: 16,
-        overflow: 'hidden',
-    },
-    resourceHeader: {
-        flexDirection: 'row',
-        alignItems: 'flex-start',
-        marginBottom: 16,
-    },
-    resourceTitleWrap: {
-        flexDirection: 'row',
-        alignItems: 'flex-start',
-        flex: 1,
-    },
-    resourceIcon: {
-        width: 40,
-        height: 40,
-        borderRadius: 14,
-        alignItems: 'center',
-        justifyContent: 'center',
-        marginRight: 12,
-    },
-    resourceTitle: {
-        fontSize: 17,
-        fontWeight: '700',
-    },
-    resourceSubtitle: {
-        marginTop: 3,
-        fontSize: 12,
-        lineHeight: 18,
-    },
-    primaryMetricRow: {
-        flexDirection: 'row',
-        alignItems: 'stretch',
-        justifyContent: 'space-between',
-        gap: 16,
-        marginBottom: 18,
-    },
-    primaryMetricCopy: {
-        flex: 1,
-    },
-    primaryMetricValue: {
-        fontSize: 28,
-        fontWeight: '800',
-        fontVariant: ['tabular-nums'],
-    },
-    primaryMetricLabel: {
-        marginTop: 4,
-        fontSize: 12,
-        fontWeight: '600',
-        lineHeight: 18,
-    },
-    metricAside: {
-        minWidth: 110,
-        borderRadius: 16,
-        borderWidth: 1,
-        paddingHorizontal: 12,
-        paddingVertical: 12,
-        alignSelf: 'flex-start',
-    },
-    metricAsideLabel: {
-        fontSize: 11,
-        fontWeight: '700',
-        letterSpacing: 0.6,
-        textTransform: 'uppercase',
-    },
-    metricAsideValue: {
-        marginTop: 6,
-        fontSize: 16,
-        fontWeight: '800',
-        fontVariant: ['tabular-nums'],
-    },
-    usageStack: {
-        gap: 14,
-    },
-    usageMeter: {
-        gap: 8,
-    },
-    usageLegendStack: {
-        gap: 8,
-    },
-    usageTrack: {
-        height: 10,
-        borderRadius: 999,
-        overflow: 'hidden',
-        position: 'relative',
-    },
-    usageFill: {
-        position: 'absolute',
-        top: 0,
-        left: 0,
-        bottom: 0,
-        borderRadius: 999,
-    },
-    usageDetailRow: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        gap: 12,
-    },
-    usageDetailLabel: {
-        flex: 1,
-        fontSize: 12,
-        fontWeight: '700',
-        lineHeight: 16,
-    },
-    usageLegendLabelWrap: {
-        flex: 1,
-        flexDirection: 'row',
-        alignItems: 'center',
-        gap: 8,
-    },
-    usageLegendDot: {
-        width: 8,
-        height: 8,
-        borderRadius: 999,
-        flexShrink: 0,
-    },
-    usageLegendLabel: {
-        flexShrink: 1,
-        fontSize: 12,
-        fontWeight: '700',
-        lineHeight: 16,
-    },
-    usageDetailValue: {
-        fontSize: 12,
-        fontWeight: '700',
-        lineHeight: 16,
-        textAlign: 'right',
-        fontVariant: ['tabular-nums'],
-    },
-    resourceFooter: {
-        marginTop: 18,
-        paddingTop: 14,
-        borderTopWidth: StyleSheet.hairlineWidth,
-    },
-    unloadButton: {
-        alignSelf: 'flex-start',
-        flexDirection: 'row',
-        alignItems: 'center',
-        justifyContent: 'center',
-        gap: 8,
-        borderRadius: 12,
-        borderWidth: 1,
-        paddingHorizontal: 14,
-        paddingVertical: 10,
-    },
-    unloadButtonText: {
-        fontSize: 13,
-        fontWeight: '700',
-    },
-});
+import { semanticColorTokens, withAlpha } from '../../utils/themeTokens';
 
 function clampPercentage(value: number) {
     if (!Number.isFinite(value)) {
@@ -353,6 +74,52 @@ function formatPercent(value: number) {
     return `${Math.round(clampPercentage(value))}%`;
 }
 
+function SettingsNavCard({
+    title,
+    description,
+    iconName,
+    iconWrapClassName,
+    iconClassName,
+    trailingText,
+    onPress,
+}: {
+    title: string;
+    description: string;
+    iconName: React.ComponentProps<typeof MaterialSymbols>['name'];
+    iconWrapClassName: string;
+    iconClassName: string;
+    trailingText?: string;
+    onPress: () => void;
+}) {
+    return (
+        <ScreenPressableCard onPress={onPress} variant="inset" padding="compact">
+            <Box className="flex-row items-center gap-3">
+                <Box className={`h-10 w-10 items-center justify-center rounded-2xl ${iconWrapClassName}`}>
+                    <MaterialSymbols name={iconName} size={20} className={iconClassName} />
+                </Box>
+
+                <Box className="min-w-0 flex-1">
+                    <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">
+                        {title}
+                    </Text>
+                    <Text className="mt-1 text-sm leading-5 text-typography-500 dark:text-typography-400">
+                        {description}
+                    </Text>
+                </Box>
+
+                <Box className="shrink-0 flex-row items-center gap-1">
+                    {trailingText ? (
+                        <Text className="text-sm font-semibold text-primary-500">
+                            {trailingText}
+                        </Text>
+                    ) : null}
+                    <MaterialSymbols name="chevron-right" size={20} className="text-typography-400 dark:text-typography-500" />
+                </Box>
+            </Box>
+        </ScreenPressableCard>
+    );
+}
+
 function UsageMeter({
     label,
     value,
@@ -373,24 +140,26 @@ function UsageMeter({
     testID: string;
 }) {
     return (
-        <View style={styles.usageMeter}>
-            <View style={styles.usageDetailRow}>
-                <Text style={[styles.usageDetailLabel, { color: labelColor }]}>{label}</Text>
-                <Text style={[styles.usageDetailValue, { color: valueColor }]}>{value}</Text>
-            </View>
-            <View style={[styles.usageTrack, { backgroundColor: trackBackground }]}>
-                <View
+        <Box className="gap-2">
+            <Box className="flex-row items-center justify-between gap-3">
+                <Text className="flex-1 text-xs font-semibold leading-4" style={{ color: labelColor }}>
+                    {label}
+                </Text>
+                <Text className="text-xs font-semibold leading-4 text-right" style={{ color: valueColor }}>
+                    {value}
+                </Text>
+            </Box>
+            <Box className="h-2.5 overflow-hidden rounded-full" style={{ backgroundColor: trackBackground }}>
+                <Box
                     testID={testID}
-                    style={[
-                        styles.usageFill,
-                        {
-                            width: `${clampPercentage(percentage)}%`,
-                            backgroundColor: fillColor,
-                        },
-                    ]}
+                    className="h-full rounded-full"
+                    style={{
+                        width: `${clampPercentage(percentage)}%`,
+                        backgroundColor: fillColor,
+                    }}
                 />
-            </View>
-        </View>
+            </Box>
+        </Box>
     );
 }
 
@@ -424,41 +193,41 @@ function LayeredUsageMeter({
     overlayTestID: string;
 }) {
     return (
-        <View style={styles.usageMeter}>
-            <View style={styles.usageLegendStack}>
+        <Box className="gap-2">
+            <ScreenStack gap="compact">
                 {rows.map((row) => (
-                    <View key={`${row.label}-${row.value}`} style={styles.usageDetailRow}>
-                        <View style={styles.usageLegendLabelWrap}>
-                            <View style={[styles.usageLegendDot, { backgroundColor: row.color }]} />
-                            <Text style={[styles.usageLegendLabel, { color: labelColor }]}>{row.label}</Text>
-                        </View>
-                        <Text style={[styles.usageDetailValue, { color: valueColor }]}>{row.value}</Text>
-                    </View>
+                    <Box key={`${row.label}-${row.value}`} className="flex-row items-center justify-between gap-3">
+                        <Box className="flex-1 flex-row items-center gap-2">
+                            <Box className="h-2 w-2 rounded-full" style={{ backgroundColor: row.color }} />
+                            <Text className="flex-1 text-xs font-semibold leading-4" style={{ color: labelColor }}>
+                                {row.label}
+                            </Text>
+                        </Box>
+                        <Text className="text-xs font-semibold leading-4 text-right" style={{ color: valueColor }}>
+                            {row.value}
+                        </Text>
+                    </Box>
                 ))}
-            </View>
-            <View testID={trackTestID} style={[styles.usageTrack, { backgroundColor: trackBackground }]}>
-                <View
+            </ScreenStack>
+            <Box testID={trackTestID} className="h-2.5 overflow-hidden rounded-full" style={{ backgroundColor: trackBackground }}>
+                <Box
                     testID={baseTestID}
-                    style={[
-                        styles.usageFill,
-                        {
-                            width: `${clampPercentage(basePercentage)}%`,
-                            backgroundColor: baseFillColor,
-                        },
-                    ]}
+                    className="absolute inset-y-0 left-0 rounded-full"
+                    style={{
+                        width: `${clampPercentage(basePercentage)}%`,
+                        backgroundColor: baseFillColor,
+                    }}
                 />
-                <View
+                <Box
                     testID={overlayTestID}
-                    style={[
-                        styles.usageFill,
-                        {
-                            width: `${clampPercentage(overlayPercentage)}%`,
-                            backgroundColor: overlayFillColor,
-                        },
-                    ]}
+                    className="absolute inset-y-0 left-0 rounded-full"
+                    style={{
+                        width: `${clampPercentage(overlayPercentage)}%`,
+                        backgroundColor: overlayFillColor,
+                    }}
                 />
-            </View>
-        </View>
+            </Box>
+        </Box>
     );
 }
 
@@ -475,19 +244,12 @@ export const SettingsScreen = () => {
     const [hasHuggingFaceToken, setHasHuggingFaceToken] = useState(() => huggingFaceTokenService.getCachedState().hasToken);
 
     const isDark = resolvedMode === 'dark';
-    const canGoBack = router.canGoBack();
-    const cardBackground = isDark ? 'rgba(15, 23, 42, 0.72)' : colors.surface;
-    const mutedBackground = isDark ? 'rgba(30, 41, 59, 0.85)' : '#eef2f7';
-    const selectedBackground = isDark ? '#111827' : '#ffffff';
-    const trackBackground = isDark ? 'rgba(51, 65, 85, 0.9)' : '#e2e8f0';
-    const resourceCardBackground = isDark ? 'rgba(15, 23, 42, 0.95)' : '#ffffff';
-    const resourceAsideBackground = isDark ? 'rgba(30, 41, 59, 0.82)' : '#f8fafc';
+    const trackBackground = isDark ? withAlpha(semanticColorTokens.outline[700], 0.9) : semanticColorTokens.outline[200];
+    const resourceAsideBackground = isDark ? withAlpha(semanticColorTokens.background[800], 0.82) : semanticColorTokens.background[50];
     const memoryAccent = colors.primary;
-    const memoryAccentSoft = isDark ? '#8b7cff' : '#6d5efc';
-    const storageAccent = isDark ? '#2dd4bf' : '#0f766e';
-    const storageAccentSoft = isDark ? '#5eead4' : '#14b8a6';
-    const destructiveBackground = isDark ? 'rgba(248, 113, 113, 0.14)' : 'rgba(239, 68, 68, 0.08)';
-    const destructiveBorder = isDark ? 'rgba(248, 113, 113, 0.3)' : 'rgba(239, 68, 68, 0.18)';
+    const memoryAccentSoft = isDark ? semanticColorTokens.primary[300] : semanticColorTokens.primary[400];
+    const storageAccent = colors.success;
+    const storageAccentSoft = isDark ? semanticColorTokens.success[300] : semanticColorTokens.success[400];
 
     useEffect(() => {
         return subscribeSettings((nextSettings) => {
@@ -553,33 +315,6 @@ export const SettingsScreen = () => {
         await refresh();
     };
 
-    const renderThemeButton = (themeMode: 'light' | 'dark' | 'system', label: string) => {
-        const isSelected = mode === themeMode;
-
-        return (
-            <Pressable
-                key={themeMode}
-                onPress={() => setTheme(themeMode)}
-                style={[
-                    styles.segmentButton,
-                    { backgroundColor: isSelected ? selectedBackground : 'transparent' },
-                    !isDark && isSelected ? shadowStyles.light : null,
-                ]}
-            >
-                <Text
-                    style={[
-                        styles.segmentText,
-                        {
-                            color: isSelected ? colors.primary : colors.textSecondary,
-                        },
-                    ]}
-                >
-                    {label}
-                </Text>
-            </Pressable>
-        );
-    };
-
     const ramTotalBytes = metrics?.ram.totalBytes ?? 0;
     const ramUsedBytes = metrics?.ram.usedBytes ?? 0;
     const ramAvailableBytes = metrics?.ram.availableBytes ?? 0;
@@ -610,379 +345,277 @@ export const SettingsScreen = () => {
     const storageUsedTrackPercentage = clampPercentage(storageUsedPercentage);
     const storageAppTrackPercentage = Math.min(clampPercentage(appStoragePercentage), storageUsedTrackPercentage);
 
+    const themeOptions = [
+        { key: 'light', label: t('settings.themeLight') },
+        { key: 'system', label: t('settings.themeSystem') },
+        { key: 'dark', label: t('settings.themeDark') },
+    ];
+
     return (
-        <View style={{ flex: 1, backgroundColor: colors.background }}>
-            <ScreenHeaderShell>
-                <View style={styles.headerBar}>
-                    <Pressable
-                        testID="settings-back-button"
-                        onPress={() => {
-                            if (canGoBack) {
-                                router.back();
-                                return;
-                            }
+        <Box className="flex-1 bg-background-0 dark:bg-background-950">
+            <HeaderBar
+                title={t('settings.title')}
+                onBack={undefined}
+                backAccessibilityLabel={t('chat.headerBackAccessibilityLabel')}
+                backButtonTestID="settings-back-button"
+                showBrand
+                brandIconName="settings"
+            />
 
-                            router.replace('/' as any);
-                        }}
-                        style={[styles.backButton, { backgroundColor: mutedBackground }]}
-                    >
-                        <MaterialSymbols name="arrow-back-ios-new" size={18} color={colors.primary} />
-                    </Pressable>
-                    <View style={styles.headerTextWrap}>
-                        <View style={styles.headerTitleRow}>
-                            <View style={[styles.iconBubble, { backgroundColor: 'rgba(50, 17, 212, 0.10)' }]}>
-                                <MaterialSymbols name="settings" size={22} color={colors.primary} />
-                            </View>
-                            <Text style={[styles.headerTitle, { color: colors.text }]}>
-                                {t('settings.title')}
-                            </Text>
-                        </View>
-                    </View>
-                </View>
-            </ScreenHeaderShell>
+            <ScrollView className="flex-1" showsVerticalScrollIndicator={false}>
+                <ScreenContent style={{ paddingTop: 18, paddingBottom: tabBarHeight + 24 }}>
+                    <ScreenStack gap="loose">
+                        <Box>
+                            <ScreenSectionLabel>{t('settings.appearance')}</ScreenSectionLabel>
+                            <ScreenStack className="mt-2">
+                                <ScreenCard>
+                                    <Box className="flex-row items-start gap-3">
+                                        <Box className="h-10 w-10 items-center justify-center rounded-2xl bg-info-500/10 dark:bg-info-500/20">
+                                            <MaterialSymbols name="palette" size={20} className="text-info-600 dark:text-info-300" />
+                                        </Box>
+                                        <Box className="min-w-0 flex-1">
+                                            <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">
+                                                {t('settings.themeMode')}
+                                            </Text>
+                                            <Text className="mt-1 text-sm leading-5 text-typography-500 dark:text-typography-400">
+                                                {t('settings.themeDescription')}
+                                            </Text>
+                                        </Box>
+                                    </Box>
 
-            <View style={styles.screen}>
-                <ScrollView
-                    style={styles.scrollView}
-                    showsVerticalScrollIndicator={false}
-                    contentContainerStyle={[styles.scrollContent, { paddingBottom: tabBarHeight + 24 }]}
-                >
-                    <Text style={[styles.sectionTitle, { color: colors.textSecondary }]}>
-                        {t('settings.appearance')}
-                    </Text>
+                                    <ScreenSegmentedControl
+                                        className="mt-4"
+                                        activeKey={mode}
+                                        onChange={(nextMode) => setTheme(nextMode as typeof mode)}
+                                        options={themeOptions}
+                                    />
+                                </ScreenCard>
 
-                    <View style={[styles.card, { backgroundColor: cardBackground, borderColor: colors.border }]}>
-                        <View style={[styles.row, styles.rowBorder, { borderBottomColor: colors.border }]}>
-                            <View style={styles.rowTop}>
-                                <View style={styles.rowLeading}>
-                                    <View style={[styles.rowIcon, { backgroundColor: 'rgba(59, 130, 246, 0.18)' }]}>
-                                        <MaterialSymbols name="palette" size={20} color={colors.primary} />
-                                    </View>
-                                    <View style={styles.rowTextWrap}>
-                                        <Text style={[styles.rowTitle, { color: colors.text }]}>
-                                            {t('settings.themeMode')}
-                                        </Text>
-                                        <Text style={[styles.rowSubtitle, { color: colors.textSecondary }]}>
-                                            {t('settings.themeDescription')}
-                                        </Text>
-                                    </View>
-                                </View>
-                            </View>
-                            <View style={[styles.segmentedControl, { backgroundColor: mutedBackground }]}>
-                                {renderThemeButton('light', t('settings.themeLight'))}
-                                {renderThemeButton('system', t('settings.themeSystem'))}
-                                {renderThemeButton('dark', t('settings.themeDark'))}
-                            </View>
-                        </View>
-                        <Pressable onPress={handleLanguagePress} style={styles.row}>
-                            <View style={styles.rowTop}>
-                                <View style={styles.rowLeading}>
-                                    <View style={[styles.rowIcon, { backgroundColor: 'rgba(50, 17, 212, 0.18)' }]}>
-                                        <MaterialSymbols name="language" size={20} color={colors.primary} />
-                                    </View>
-                                    <View style={styles.rowTextWrap}>
-                                        <Text style={[styles.rowTitle, { color: colors.text }]}>
-                                            {t('settings.language')}
-                                        </Text>
-                                        <Text style={[styles.rowSubtitle, { color: colors.textSecondary }]}>
-                                            {t('settings.languageDescription')}
-                                        </Text>
-                                    </View>
-                                </View>
-                                <View style={styles.rowTrailing}>
-                                    <Text style={[styles.rowTrailingText, { color: colors.primary }]}>
-                                        {settings.language === 'en' ? t('settings.languageEnglish') : t('settings.languageRussian')}
-                                    </Text>
-                                    <MaterialSymbols name="chevron-right" size={20} color={colors.textSecondary} />
-                                </View>
-                            </View>
-                        </Pressable>
-                    </View>
+                                <SettingsNavCard
+                                    title={t('settings.language')}
+                                    description={t('settings.languageDescription')}
+                                    iconName="language"
+                                    iconWrapClassName="bg-primary-500/10 dark:bg-primary-500/20"
+                                    iconClassName="text-primary-500"
+                                    trailingText={settings.language === 'en' ? t('settings.languageEnglish') : t('settings.languageRussian')}
+                                    onPress={handleLanguagePress}
+                                />
+                            </ScreenStack>
+                        </Box>
 
-                <Text style={[styles.sectionTitle, { color: colors.textSecondary }]}>
-                    {t('settings.systemConfiguration')}
-                </Text>
-
-                <View style={[styles.card, { backgroundColor: cardBackground, borderColor: colors.border }]}>
-                    <Pressable onPress={handlePresetsPress} style={[styles.row, styles.rowBorder, { borderBottomColor: colors.border }]}>
-                        <View style={styles.rowTop}>
-                            <View style={styles.rowLeading}>
-                                <View style={[styles.rowIcon, { backgroundColor: 'rgba(245, 158, 11, 0.18)' }]}>
-                                    <MaterialSymbols name="tune" size={20} color={colors.warning} />
-                                </View>
-                                <View style={styles.rowTextWrap}>
-                                    <Text style={[styles.rowTitle, { color: colors.text }]}>
-                                        {t('settings.presets')}
-                                    </Text>
-                                    <Text style={[styles.rowSubtitle, { color: colors.textSecondary }]}>
-                                        {t('settings.presetsDescription')}
-                                    </Text>
-                                </View>
-                            </View>
-
-                            <MaterialSymbols name="chevron-right" size={20} color={colors.textSecondary} />
-                        </View>
-                    </Pressable>
-
-                    <Pressable onPress={handleStorageManagerPress} style={[styles.row, styles.rowBorder, { borderBottomColor: colors.border }]}>
-                        <View style={styles.rowTop}>
-                            <View style={styles.rowLeading}>
-                                <View style={[styles.rowIcon, { backgroundColor: 'rgba(20, 184, 166, 0.18)' }]}>
-                                    <MaterialSymbols name="storage" size={20} color="#0f766e" />
-                                </View>
-                                <View style={styles.rowTextWrap}>
-                                    <Text style={[styles.rowTitle, { color: colors.text }]}>
-                                        {t('settings.storageManager')}
-                                    </Text>
-                                    <Text style={[styles.rowSubtitle, { color: colors.textSecondary }]}>
-                                        {t('settings.storageManagerDescription')}
-                                    </Text>
-                                </View>
-                            </View>
-
-                            <MaterialSymbols name="chevron-right" size={20} color={colors.textSecondary} />
-                        </View>
-                    </Pressable>
-
-                    <Pressable onPress={handleHuggingFaceTokenPress} style={[styles.row, styles.rowBorder, { borderBottomColor: colors.border }]}>
-                        <View style={styles.rowTop}>
-                            <View style={styles.rowLeading}>
-                                <View style={[styles.rowIcon, { backgroundColor: 'rgba(99, 102, 241, 0.16)' }]}>
-                                    <MaterialSymbols name="key" size={20} color={colors.primary} />
-                                </View>
-                                <View style={styles.rowTextWrap}>
-                                    <Text style={[styles.rowTitle, { color: colors.text }]}>
-                                        {t('settings.huggingFaceToken')}
-                                    </Text>
-                                    <Text style={[styles.rowSubtitle, { color: colors.textSecondary }]}>
-                                        {t('settings.huggingFaceTokenDescription')}
-                                    </Text>
-                                </View>
-                            </View>
-
-                            <View style={styles.rowTrailing}>
-                                <Text style={[styles.rowTrailingText, { color: colors.primary }]}>
-                                    {hasHuggingFaceToken
+                        <Box>
+                            <ScreenSectionLabel>{t('settings.systemConfiguration')}</ScreenSectionLabel>
+                            <ScreenStack className="mt-2">
+                                <SettingsNavCard
+                                    title={t('settings.presets')}
+                                    description={t('settings.presetsDescription')}
+                                    iconName="tune"
+                                    iconWrapClassName="bg-warning-500/15 dark:bg-warning-500/20"
+                                    iconClassName="text-warning-700 dark:text-warning-200"
+                                    onPress={handlePresetsPress}
+                                />
+                                <SettingsNavCard
+                                    title={t('settings.storageManager')}
+                                    description={t('settings.storageManagerDescription')}
+                                    iconName="storage"
+                                    iconWrapClassName="bg-success-500/10 dark:bg-success-500/20"
+                                    iconClassName="text-success-600 dark:text-success-300"
+                                    onPress={handleStorageManagerPress}
+                                />
+                                <SettingsNavCard
+                                    title={t('settings.huggingFaceToken')}
+                                    description={t('settings.huggingFaceTokenDescription')}
+                                    iconName="key"
+                                    iconWrapClassName="bg-primary-500/10 dark:bg-primary-500/20"
+                                    iconClassName="text-primary-500"
+                                    trailingText={hasHuggingFaceToken
                                         ? t('settings.huggingFaceTokenConfigured')
                                         : t('settings.huggingFaceTokenMissing')}
-                                </Text>
-                                <MaterialSymbols name="chevron-right" size={20} color={colors.textSecondary} />
-                            </View>
-                        </View>
-                    </Pressable>
-
-                    <Pressable onPress={handleLegalPress} style={styles.row}>
-                        <View style={styles.rowTop}>
-                            <View style={styles.rowLeading}>
-                                <View style={[styles.rowIcon, { backgroundColor: 'rgba(50, 17, 212, 0.18)' }]}>
-                                    <MaterialSymbols name="security" size={20} color={colors.primary} />
-                                </View>
-                                <View style={styles.rowTextWrap}>
-                                    <Text style={[styles.rowTitle, { color: colors.text }]}>
-                                        {t('settings.privacyDisclosures')}
-                                    </Text>
-                                    <Text style={[styles.rowSubtitle, { color: colors.textSecondary }]}>
-                                        {t('settings.privacyDisclosuresDescription')}
-                                    </Text>
-                                </View>
-                            </View>
-
-                            <MaterialSymbols name="chevron-right" size={20} color={colors.textSecondary} />
-                        </View>
-                    </Pressable>
-                </View>
-
-                <Text style={[styles.sectionTitle, { color: colors.textSecondary }]}>
-                    {t('settings.resources')}
-                </Text>
-
-                <View style={styles.resourcesWrap}>
-                    <View
-                        style={[
-                            styles.resourceCard,
-                            { backgroundColor: resourceCardBackground, borderColor: colors.border },
-                            !isDark ? shadowStyles.light : null,
-                        ]}
-                    >
-                        <View style={styles.resourceHeader}>
-                            <View style={styles.resourceTitleWrap}>
-                                <View style={[styles.resourceIcon, { backgroundColor: 'rgba(79, 70, 229, 0.12)' }]}>
-                                    <MaterialSymbols name="memory" size={20} color={memoryAccent} />
-                                </View>
-                                <View style={styles.rowTextWrap}>
-                                    <Text style={[styles.resourceTitle, { color: colors.text }]}>
-                                        {t('settings.memoryTitle')}
-                                    </Text>
-                                    <Text style={[styles.resourceSubtitle, { color: colors.textSecondary }]}>
-                                        {t(isSystemRamSource ? 'settings.memoryDescription' : 'settings.memoryDescriptionFallback')}
-                                    </Text>
-                                </View>
-                            </View>
-                        </View>
-
-                        <View style={styles.primaryMetricRow}>
-                            <View style={styles.primaryMetricCopy}>
-                                <Text style={[styles.primaryMetricValue, { color: colors.text }]}>
-                                    {ramPrimaryValue}
-                                </Text>
-                                <Text style={[styles.primaryMetricLabel, { color: colors.textSecondary }]}>
-                                    {ramPrimaryLabel}
-                                </Text>
-                            </View>
-                            <View style={[styles.metricAside, { backgroundColor: resourceAsideBackground, borderColor: colors.border }]}>
-                                <Text style={[styles.metricAsideLabel, { color: colors.textSecondary }]}>
-                                    {ramAsideLabel}
-                                </Text>
-                                <Text style={[styles.metricAsideValue, { color: memoryAccent }]}>
-                                    {ramAsideValue}
-                                </Text>
-                            </View>
-                        </View>
-
-                        <View style={styles.usageStack}>
-                            {isSystemRamSource ? (
-                                <LayeredUsageMeter
-                                    rows={[
-                                        {
-                                            label: t('settings.systemUsage'),
-                                            value: ramSystemUsageSummary,
-                                            color: memoryAccent,
-                                        },
-                                        {
-                                            label: t('settings.appMemory'),
-                                            value: ramAppUsageSummary,
-                                            color: memoryAccentSoft,
-                                        },
-                                    ]}
-                                    basePercentage={ramUsedTrackPercentage}
-                                    baseFillColor={memoryAccent}
-                                    overlayPercentage={ramAppTrackPercentage}
-                                    overlayFillColor={memoryAccentSoft}
-                                    trackBackground={trackBackground}
-                                    labelColor={colors.textSecondary}
-                                    valueColor={colors.text}
-                                    trackTestID="settings-memory-track"
-                                    baseTestID="settings-memory-used-fill"
-                                    overlayTestID="settings-memory-app-fill"
+                                    onPress={handleHuggingFaceTokenPress}
                                 />
-                            ) : null}
-                            {!isSystemRamSource ? (
-                                <UsageMeter
-                                    label={t('settings.appMemory')}
-                                    value={ramAppUsageSummary}
-                                    percentage={ramAppUsedPercentage}
-                                    fillColor={memoryAccentSoft}
-                                    trackBackground={trackBackground}
-                                    labelColor={colors.textSecondary}
-                                    valueColor={colors.text}
-                                    testID="settings-memory-app-fill"
+                                <SettingsNavCard
+                                    title={t('settings.privacyDisclosures')}
+                                    description={t('settings.privacyDisclosuresDescription')}
+                                    iconName="security"
+                                    iconWrapClassName="bg-primary-500/10 dark:bg-primary-500/20"
+                                    iconClassName="text-primary-500"
+                                    onPress={handleLegalPress}
                                 />
-                            ) : null}
-                        </View>
+                            </ScreenStack>
+                        </Box>
 
-                        {canForceUnloadModel ? (
-                            <View style={[styles.resourceFooter, { borderTopColor: colors.border }]}>
-                                <Pressable
-                                    onPress={unloadActiveModel}
-                                    style={[
-                                        styles.unloadButton,
-                                        {
-                                            backgroundColor: destructiveBackground,
-                                            borderColor: destructiveBorder,
-                                        },
-                                    ]}
-                                >
-                                    <MaterialSymbols name="close" size={18} color={colors.error} />
-                                    <Text style={[styles.unloadButtonText, { color: colors.error }]}>
-                                        {t('settings.forceUnloadModel')}
-                                    </Text>
-                                </Pressable>
-                            </View>
-                        ) : null}
-                    </View>
+                        <Box>
+                            <ScreenSectionLabel>{t('settings.resources')}</ScreenSectionLabel>
+                            <ScreenStack className="mt-2" gap="loose">
+                                <ScreenCard>
+                                    <Box className="flex-row items-start gap-3">
+                                        <Box className="h-11 w-11 items-center justify-center rounded-2xl bg-primary-500/10 dark:bg-primary-500/20">
+                                            <MaterialSymbols name="memory" size={20} className="text-primary-500" />
+                                        </Box>
+                                        <Box className="min-w-0 flex-1">
+                                            <Text className="text-lg font-semibold text-typography-900 dark:text-typography-100">
+                                                {t('settings.memoryTitle')}
+                                            </Text>
+                                            <Text className="mt-1 text-sm leading-5 text-typography-500 dark:text-typography-400">
+                                                {t(isSystemRamSource ? 'settings.memoryDescription' : 'settings.memoryDescriptionFallback')}
+                                            </Text>
+                                        </Box>
+                                    </Box>
 
-                    <View
-                        style={[
-                            styles.resourceCard,
-                            { backgroundColor: resourceCardBackground, borderColor: colors.border },
-                            !isDark ? shadowStyles.light : null,
-                        ]}
-                    >
-                        <View style={styles.resourceHeader}>
-                            <View style={styles.resourceTitleWrap}>
-                                <View style={[styles.resourceIcon, { backgroundColor: 'rgba(20, 184, 166, 0.12)' }]}>
-                                    <MaterialSymbols name="storage" size={20} color={storageAccent} />
-                                </View>
-                                <View style={styles.rowTextWrap}>
-                                    <Text style={[styles.resourceTitle, { color: colors.text }]}>
-                                        {t('settings.storageTitle')}
-                                    </Text>
-                                    <Text style={[styles.resourceSubtitle, { color: colors.textSecondary }]}>
-                                        {t('settings.storageDescription')}
-                                    </Text>
-                                </View>
-                            </View>
-                        </View>
+                                    <Box className="mt-5 flex-row items-start justify-between gap-4">
+                                        <Box className="min-w-0 flex-1">
+                                            <Text className="text-[28px] font-extrabold tracking-tight text-typography-900 dark:text-typography-100">
+                                                {ramPrimaryValue}
+                                            </Text>
+                                            <Text className="mt-1 text-sm leading-5 text-typography-500 dark:text-typography-400">
+                                                {ramPrimaryLabel}
+                                            </Text>
+                                        </Box>
 
-                        <View style={styles.primaryMetricRow}>
-                            <View style={styles.primaryMetricCopy}>
-                                <Text style={[styles.primaryMetricValue, { color: colors.text }]}>
-                                    {formatSystemCapacity(storageUsedBytes)}
-                                </Text>
-                                <Text style={[styles.primaryMetricLabel, { color: colors.textSecondary }]}>
-                                    {t('settings.storageUsedOf', { total: formatSystemCapacity(storageTotalBytes) })}
-                                </Text>
-                            </View>
-                            <View style={[styles.metricAside, { backgroundColor: resourceAsideBackground, borderColor: colors.border }]}>
-                                <Text style={[styles.metricAsideLabel, { color: colors.textSecondary }]}>
-                                    {t('settings.free')}
-                                </Text>
-                                <Text style={[styles.metricAsideValue, { color: storageAccent }]}>
-                                    {formatSystemCapacity(storageFreeBytes)}
-                                </Text>
-                            </View>
-                        </View>
+                                        <ScreenCard
+                                            variant="inset"
+                                            padding="compact"
+                                            className="min-w-[110px] self-start"
+                                            style={{ backgroundColor: resourceAsideBackground }}
+                                        >
+                                            <Text className="text-2xs font-semibold uppercase tracking-[0.18em] text-typography-500 dark:text-typography-400">
+                                                {ramAsideLabel}
+                                            </Text>
+                                            <Text className="mt-2 text-base font-extrabold text-primary-500">
+                                                {ramAsideValue}
+                                            </Text>
+                                        </ScreenCard>
+                                    </Box>
 
-                        <View style={styles.usageStack}>
-                            <LayeredUsageMeter
-                                rows={[
-                                    {
-                                        label: t('settings.systemUsage'),
-                                        value: storageSystemUsageSummary,
-                                        color: storageAccent,
-                                    },
-                                    {
-                                        label: t('settings.appFilesUsage'),
-                                        value: storageAppUsageSummary,
-                                        color: storageAccentSoft,
-                                    },
-                                ]}
-                                basePercentage={storageUsedTrackPercentage}
-                                baseFillColor={storageAccent}
-                                overlayPercentage={storageAppTrackPercentage}
-                                overlayFillColor={storageAccentSoft}
-                                trackBackground={trackBackground}
-                                labelColor={colors.textSecondary}
-                                valueColor={colors.text}
-                                trackTestID="settings-storage-track"
-                                baseTestID="settings-storage-used-fill"
-                                overlayTestID="settings-storage-app-fill"
-                            />
-                        </View>
-                    </View>
-                </View>
-                </ScrollView>
-            </View>
-        </View>
+                                    <ScreenStack className="mt-5" gap="default">
+                                        {isSystemRamSource ? (
+                                            <LayeredUsageMeter
+                                                rows={[
+                                                    {
+                                                        label: t('settings.systemUsage'),
+                                                        value: ramSystemUsageSummary,
+                                                        color: memoryAccent,
+                                                    },
+                                                    {
+                                                        label: t('settings.appMemory'),
+                                                        value: ramAppUsageSummary,
+                                                        color: memoryAccentSoft,
+                                                    },
+                                                ]}
+                                                basePercentage={ramUsedTrackPercentage}
+                                                baseFillColor={memoryAccent}
+                                                overlayPercentage={ramAppTrackPercentage}
+                                                overlayFillColor={memoryAccentSoft}
+                                                trackBackground={trackBackground}
+                                                labelColor={colors.textSecondary}
+                                                valueColor={colors.text}
+                                                trackTestID="settings-memory-track"
+                                                baseTestID="settings-memory-used-fill"
+                                                overlayTestID="settings-memory-app-fill"
+                                            />
+                                        ) : (
+                                            <UsageMeter
+                                                label={t('settings.appMemory')}
+                                                value={ramAppUsageSummary}
+                                                percentage={ramAppUsedPercentage}
+                                                fillColor={memoryAccentSoft}
+                                                trackBackground={trackBackground}
+                                                labelColor={colors.textSecondary}
+                                                valueColor={colors.text}
+                                                testID="settings-memory-app-fill"
+                                            />
+                                        )}
+                                    </ScreenStack>
+
+                                    {canForceUnloadModel ? (
+                                        <Box className="mt-5 border-t border-outline-200 pt-4 dark:border-outline-800">
+                                            <Button
+                                                onPress={unloadActiveModel}
+                                                accessibilityRole="button"
+                                                disabled={false}
+                                                action="softDestructive"
+                                                size="sm"
+                                                className="self-start"
+                                            >
+                                                <MaterialSymbols name="close" size={18} className="text-error-500" />
+                                                <ButtonText>{t('settings.forceUnloadModel')}</ButtonText>
+                                            </Button>
+                                        </Box>
+                                    ) : null}
+                                </ScreenCard>
+
+                                <ScreenCard>
+                                    <Box className="flex-row items-start gap-3">
+                                        <Box className="h-11 w-11 items-center justify-center rounded-2xl bg-success-500/10 dark:bg-success-500/20">
+                                            <MaterialSymbols name="storage" size={20} className="text-success-600 dark:text-success-300" />
+                                        </Box>
+                                        <Box className="min-w-0 flex-1">
+                                            <Text className="text-lg font-semibold text-typography-900 dark:text-typography-100">
+                                                {t('settings.storageTitle')}
+                                            </Text>
+                                            <Text className="mt-1 text-sm leading-5 text-typography-500 dark:text-typography-400">
+                                                {t('settings.storageDescription')}
+                                            </Text>
+                                        </Box>
+                                    </Box>
+
+                                    <Box className="mt-5 flex-row items-start justify-between gap-4">
+                                        <Box className="min-w-0 flex-1">
+                                            <Text className="text-[28px] font-extrabold tracking-tight text-typography-900 dark:text-typography-100">
+                                                {formatSystemCapacity(storageUsedBytes)}
+                                            </Text>
+                                            <Text className="mt-1 text-sm leading-5 text-typography-500 dark:text-typography-400">
+                                                {t('settings.storageUsedOf', { total: formatSystemCapacity(storageTotalBytes) })}
+                                            </Text>
+                                        </Box>
+
+                                        <ScreenCard
+                                            variant="inset"
+                                            padding="compact"
+                                            className="min-w-[110px] self-start"
+                                            style={{ backgroundColor: resourceAsideBackground }}
+                                        >
+                                            <Text className="text-2xs font-semibold uppercase tracking-[0.18em] text-typography-500 dark:text-typography-400">
+                                                {t('settings.free')}
+                                            </Text>
+                                            <Text className="mt-2 text-base font-extrabold text-success-600 dark:text-success-300">
+                                                {formatSystemCapacity(storageFreeBytes)}
+                                            </Text>
+                                        </ScreenCard>
+                                    </Box>
+
+                                    <Box className="mt-5">
+                                        <LayeredUsageMeter
+                                            rows={[
+                                                {
+                                                    label: t('settings.systemUsage'),
+                                                    value: storageSystemUsageSummary,
+                                                    color: storageAccent,
+                                                },
+                                                {
+                                                    label: t('settings.appFilesUsage'),
+                                                    value: storageAppUsageSummary,
+                                                    color: storageAccentSoft,
+                                                },
+                                            ]}
+                                            basePercentage={storageUsedTrackPercentage}
+                                            baseFillColor={storageAccent}
+                                            overlayPercentage={storageAppTrackPercentage}
+                                            overlayFillColor={storageAccentSoft}
+                                            trackBackground={trackBackground}
+                                            labelColor={colors.textSecondary}
+                                            valueColor={colors.text}
+                                            trackTestID="settings-storage-track"
+                                            baseTestID="settings-storage-used-fill"
+                                            overlayTestID="settings-storage-app-fill"
+                                        />
+                                    </Box>
+                                </ScreenCard>
+                            </ScreenStack>
+                        </Box>
+                    </ScreenStack>
+                </ScreenContent>
+            </ScrollView>
+        </Box>
     );
 };
-
-const shadowStyles = StyleSheet.create({
-    light: {
-        shadowColor: '#0f172a',
-        shadowOpacity: 0.08,
-        shadowRadius: 8,
-        shadowOffset: { width: 0, height: 2 },
-        elevation: 2,
-    },
-});

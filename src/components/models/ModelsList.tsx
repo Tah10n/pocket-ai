@@ -8,6 +8,7 @@ import { Box } from '@/components/ui/box';
 import { Button, ButtonText } from '@/components/ui/button';
 import { ModelCard } from '@/components/ui/ModelCard';
 import { ModelParametersSheet } from '@/components/ui/ModelParametersSheet';
+import { ScreenCard, ScreenStack } from '@/components/ui/ScreenShell';
 import { Spinner } from '@/components/ui/spinner';
 import { Text } from '@/components/ui/text';
 import { useLLMEngine } from '@/hooks/useLLMEngine';
@@ -49,6 +50,7 @@ import {
 } from '@/utils/contextWindow';
 import { hasPersistedLoadProfileChanges } from '@/utils/modelLoadProfile';
 import { ModelsFilter } from './ModelsFilter';
+import { type ModelsCatalogTab } from './modelTabs';
 import {
   shouldBootstrapCatalogSession,
   shouldResetCatalogForTokenEvent,
@@ -56,7 +58,7 @@ import {
 import { useTranslation } from 'react-i18next';
 
 interface ModelsListProps {
-  activeTab: 'All Models' | 'Downloaded';
+  activeTab: ModelsCatalogTab;
   searchQuery: string;
   searchSessionKey?: number | string;
 }
@@ -85,29 +87,13 @@ function getStatusWeight(status: LifecycleStatus): number {
   return 0;
 }
 
-function matchesStatus(model: ModelMetadata, filters: ModelFilterCriteria, activeTab: ModelsListProps['activeTab']) {
-  if (activeTab !== 'All Models' || filters.statuses.length === 0) {
-    return true;
+function matchesActiveTab(model: ModelMetadata, activeTab: ModelsListProps['activeTab']) {
+  // "Downloaded" tab should never show remote-only (available) entries.
+  if (activeTab === 'downloaded' && model.lifecycleStatus === LifecycleStatus.AVAILABLE) {
+    return false;
   }
 
-  return filters.statuses.some((status) => {
-    if (status === LifecycleStatus.DOWNLOADED) {
-      return (
-        model.lifecycleStatus === LifecycleStatus.DOWNLOADED ||
-        model.lifecycleStatus === LifecycleStatus.ACTIVE
-      );
-    }
-
-    if (status === LifecycleStatus.DOWNLOADING) {
-      return (
-        model.lifecycleStatus === LifecycleStatus.DOWNLOADING ||
-        model.lifecycleStatus === LifecycleStatus.QUEUED ||
-        model.lifecycleStatus === LifecycleStatus.VERIFYING
-      );
-    }
-
-    return model.lifecycleStatus === status;
-  });
+  return true;
 }
 
 function matchesSize(model: ModelMetadata, filters: ModelFilterCriteria): boolean {
@@ -230,17 +216,12 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
     showFullCatalog,
     setFitsInRamOnly,
     setNoTokenRequiredOnly,
-    toggleStatus,
     toggleSizeRange,
     setSort,
     clearFilters,
   } = useModelsStore();
   const serverSort = useMemo(() => resolveServerSort(sort), [sort]);
   const effectiveSearchSessionKey = searchSessionKey ?? searchQuery;
-  const statusesSessionKey = useMemo(
-    () => [...filters.statuses].sort().join('|'),
-    [filters.statuses],
-  );
   const sizeRangesSessionKey = useMemo(
     () => [...filters.sizeRanges].sort().join('|'),
     [filters.sizeRanges],
@@ -250,7 +231,6 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
     String(effectiveSearchSessionKey),
     filters.fitsInRamOnly ? 'fits' : 'any',
     filters.noTokenRequiredOnly ? 'public-only' : 'any-token',
-    statusesSessionKey,
     sizeRangesSessionKey,
     `${sort.field}:${sort.direction}`,
     `token:${tokenRevision}`,
@@ -264,12 +244,11 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
     sizeRangesSessionKey,
     sort.direction,
     sort.field,
-    statusesSessionKey,
     tokenRevision,
   ]);
 
   const refreshDownloadedModels = useCallback(() => {
-    if (activeTab === 'Downloaded') {
+    if (activeTab === 'downloaded') {
       modelCatalogService.getLocalModels().then(setModels);
     }
   }, [activeTab]);
@@ -398,7 +377,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
   }, []);
 
   useEffect(() => {
-    if (activeTab !== 'All Models' || !isTokenStateHydrated) {
+    if (activeTab !== 'all' || !isTokenStateHydrated) {
       return;
     }
 
@@ -427,13 +406,13 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
     lastAutoLoadCursorRef.current = null;
     hasUserScrolledCatalogRef.current = false;
     setModels([]);
-    setHasMore(activeTab === 'All Models');
+    setHasMore(activeTab === 'all');
     setNextCursor(null);
     setLoading(false);
     setIsFetchingMore(false);
     setFetchState({ warningMessage: null, loadMoreError: null });
 
-    if (activeTab === 'All Models') {
+    if (activeTab === 'all') {
       const cachedResult = modelCatalogService.getCachedSearchResult(searchQuery, {
         cursor: null,
         pageSize: MODELS_PAGE_SIZE,
@@ -535,7 +514,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
         return false;
       }
 
-      if (!matchesStatus(model, filters, activeTab)) {
+      if (!matchesActiveTab(model, activeTab)) {
         return false;
       }
 
@@ -748,7 +727,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
           onPress: async () => {
             try {
               await offloadModel(modelId, { preserveSettings: true });
-              if (activeTab === 'All Models') {
+              if (activeTab === 'all') {
                 setManualRefreshRevision((current) => current + 1);
               } else {
                 refreshDownloadedModels();
@@ -764,7 +743,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
           onPress: async () => {
             try {
               await offloadModel(modelId, { preserveSettings: false });
-              if (activeTab === 'All Models') {
+              if (activeTab === 'all') {
                 setManualRefreshRevision((current) => current + 1);
               } else {
                 refreshDownloadedModels();
@@ -971,7 +950,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
 
   const handleLoadMore = useCallback((source: 'auto' | 'manual' = 'manual') => {
     if (
-      activeTab !== 'All Models' ||
+      activeTab !== 'all' ||
       !hasMore ||
       !nextCursor ||
       loading ||
@@ -1006,7 +985,6 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
   const hasFilters =
     filters.fitsInRamOnly
     || filters.noTokenRequiredOnly
-    || filters.statuses.length > 0
     || filters.sizeRanges.length > 0;
 
   const emptyState = useMemo(() => (
@@ -1028,39 +1006,39 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
   ), [clearFilters, hasFilters, t]);
 
   const discoveryBanner = useMemo(() => {
-    if (activeTab !== 'All Models' || discoveryMode !== 'guided') {
+    if (activeTab !== 'all' || discoveryMode !== 'guided') {
       return null;
     }
 
     return (
-      <Box className="mb-3 rounded-2xl border border-primary-200 bg-primary-500/10 px-4 py-3 dark:border-primary-800">
+      <ScreenCard padding="compact" tone="accent">
         <Text className="text-sm font-semibold text-primary-700 dark:text-primary-300">
           {t('models.guidedDiscoveryTitle')}
         </Text>
-        <Text className="mt-1 text-sm text-primary-700/90 dark:text-primary-200">
+        <Text className="mt-1 text-sm leading-5 text-primary-700/90 dark:text-primary-200">
           {hasTokenConfigured
             ? t('models.guidedDiscoveryWithToken')
             : t('models.guidedDiscoveryWithoutToken')}
         </Text>
-        <Button action="secondary" size="sm" className="mt-3 self-start" onPress={showFullCatalog}>
+        <Button action="secondary" size="sm" className="mt-2 self-start" onPress={showFullCatalog}>
           <ButtonText className="text-typography-900 dark:text-typography-100">
             {t('models.showFullCatalog')}
           </ButtonText>
         </Button>
-      </Box>
+      </ScreenCard>
     );
   }, [activeTab, discoveryMode, hasTokenConfigured, showFullCatalog, t]);
 
-  const footer = useMemo(() => (activeTab === 'All Models' ? (
-    <Box className="pb-5 pt-1">
+  const footer = useMemo(() => (activeTab === 'all' ? (
+    <Box className="pb-4 pt-1">
       {loadMoreError ? (
-        <Box className="mb-3 rounded-xl border border-error-300 bg-background-error px-4 py-3 dark:border-error-800">
+        <Box className="mb-2.5 rounded-2xl border border-error-300 bg-background-error px-3 py-2.5 dark:border-error-800">
           <Text className="text-sm text-error-700 dark:text-error-300">{loadMoreError}</Text>
         </Box>
       ) : null}
 
       {hasMore && nextCursor ? (
-        <Button action="secondary" size="md" onPress={() => handleLoadMore('manual')} disabled={isFetchingMore}>
+        <Button action="secondary" size="sm" onPress={() => handleLoadMore('manual')} disabled={isFetchingMore}>
           <ButtonText className="text-typography-900 dark:text-typography-100">
             {isFetchingMore
               ? t('common.loading')
@@ -1094,9 +1072,10 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
     />
   ), [cancelDownload, engineState.activeModelId, handleDelete, handleDownload, handleLoad, handleOpenModelSettings, handleUnload, openModelDetails, openModelPage, openTokenSettings, router]);
 
+  const renderItemSeparator = useCallback(() => <Box className="h-2.5" />, []);
   const renderEmptyState = useCallback(() => emptyState, [emptyState]);
   const renderFooter = useCallback(() => footer, [footer]);
-  const isCatalogInitializing = activeTab === 'All Models' && !isTokenStateHydrated;
+  const isCatalogInitializing = activeTab === 'all' && !isTokenStateHydrated;
 
   return (
     <>
@@ -1105,41 +1084,41 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
         sort={sort}
         onFitsInRamToggle={setFitsInRamOnly}
         onNoTokenRequiredToggle={setNoTokenRequiredOnly}
-        onStatusToggle={toggleStatus}
         onSizeRangeToggle={toggleSizeRange}
         onSortChange={setSort}
         onClear={clearFilters}
-        showStatusFilters={activeTab === 'All Models'}
       />
 
-      <Box className="flex-1 px-4 pt-2">
+      <ScreenStack className="flex-1 pt-2" gap="compact">
         {discoveryBanner}
 
         {warningMessage ? (
-          <Box className="mb-3 rounded-xl border border-warning-300 bg-background-warning px-4 py-3 dark:border-warning-800">
+          <ScreenCard padding="compact" tone="warning">
             <Text className="text-sm text-warning-700 dark:text-warning-300">{warningMessage}</Text>
-          </Box>
+          </ScreenCard>
         ) : null}
 
         {(isCatalogInitializing || (loading && models.length === 0)) ? (
-          <Box className="flex-1 items-center justify-start pt-16">
+          <Box className="flex-1 items-center justify-start pt-10">
             <Spinner size="large" />
-            <Text className="mt-3 text-typography-500">{t('models.searching', 'Searching Hugging Face...')}</Text>
+            <Text className="mt-2 text-typography-500">{t('models.searching', 'Searching Hugging Face...')}</Text>
           </Box>
         ) : (
           <FlashList
             data={filteredModels}
             keyExtractor={(item) => item.id}
             renderItem={renderModelItem}
+            ItemSeparatorComponent={renderItemSeparator}
             ListEmptyComponent={renderEmptyState}
             ListFooterComponent={renderFooter}
-            contentContainerStyle={{ paddingBottom: tabBarHeight + 16 }}
+            contentContainerStyle={{ flexGrow: 1, paddingBottom: tabBarHeight + 12 }}
             onScroll={handleCatalogScroll}
             onEndReached={() => handleLoadMore('auto')}
             onEndReachedThreshold={0.6}
+            showsVerticalScrollIndicator={false}
           />
         )}
-      </Box>
+      </ScreenStack>
 
       {engineState.status === EngineStatus.INITIALIZING ? (
         <Box className="absolute bottom-0 left-0 right-0 flex-row items-center justify-center bg-primary-500 p-2">

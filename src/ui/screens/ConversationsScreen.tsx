@@ -5,10 +5,21 @@ import { FlashList, ListRenderItem } from '@shopify/flash-list';
 import { useTranslation } from 'react-i18next';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Box } from '@/components/ui/box';
-import { Input, InputField } from '@/components/ui/input';
+import { Button, ButtonText } from '@/components/ui/button';
+import { HeaderBar } from '@/components/ui/HeaderBar';
 import { MaterialSymbols } from '@/components/ui/MaterialSymbols';
 import { Pressable } from '@/components/ui/pressable';
-import { ScreenContent, ScreenHeaderShell } from '@/components/ui/ScreenShell';
+import {
+  ScreenActionPill,
+  ScreenBadge,
+  ScreenCard,
+  ScreenContent,
+  ScreenInlineInput,
+  ScreenIconButton,
+  ScreenPressableCard,
+  ScreenStack,
+  ScreenTextField,
+} from '@/components/ui/ScreenShell';
 import { Text } from '@/components/ui/text';
 import { useChatSession } from '../../hooks/useChatSession';
 import { ConversationIndexItem } from '../../types/chat';
@@ -18,9 +29,8 @@ import {
   matchesConversationSearch,
 } from '../../utils/conversations';
 import { getSettings, subscribeSettings, updateSettings } from '../../services/SettingsStore';
-import { useChatStore } from '../../store/chatStore';
-import { typographyColors } from '../../utils/themeTokens';
 import { getReportedErrorMessage } from '../../services/AppError';
+import { useChatStore } from '../../store/chatStore';
 
 const CHAT_RETENTION_OPTIONS = [
   {
@@ -76,6 +86,14 @@ export function ConversationsScreen() {
   const [editingTitle, setEditingTitle] = useState('');
   const [chatRetentionDays, setChatRetentionDays] = useState<number | null>(() => getSettings().chatRetentionDays);
   const [isRetentionExpanded, setRetentionExpanded] = useState(false);
+  const handleBack = useCallback(() => {
+    if (canGoBack) {
+      router.back();
+      return;
+    }
+
+    router.replace('/' as any);
+  }, [canGoBack, router]);
 
   const filteredConversations = useMemo(() => (
     conversationIndex.filter((conversation) =>
@@ -102,7 +120,7 @@ export function ConversationsScreen() {
   const handleOpenConversation = useCallback((threadId: string) => {
     try {
       openThread(threadId);
-      router.push('/(tabs)/chat' as any);
+      router.replace('/(tabs)/chat' as any);
     } catch (error: any) {
       Alert.alert(
         t('conversations.openErrorTitle'),
@@ -110,6 +128,18 @@ export function ConversationsScreen() {
       );
     }
   }, [openThread, router, t]);
+
+  const handleStartNewChat = useCallback(() => {
+    try {
+      startNewChat();
+      router.replace('/(tabs)/chat' as any);
+    } catch (error: any) {
+      Alert.alert(
+        t('conversations.startNewChatErrorTitle'),
+        getReportedErrorMessage('ConversationsScreen.startNewChat', error, t),
+      );
+    }
+  }, [router, startNewChat, t]);
 
   const handleDeleteConversation = useCallback((conversation: ConversationIndexItem) => {
     Alert.alert(
@@ -200,12 +230,14 @@ export function ConversationsScreen() {
   };
 
   const renderRetentionCard = () => (
-    <Box className="rounded-3xl border border-outline-200 bg-background-50 p-3.5 dark:border-outline-800 dark:bg-background-900/60">
+    <ScreenCard>
       <Pressable
         testID="retention-toggle"
         onPress={() => {
           setRetentionExpanded((current) => !current);
         }}
+        accessibilityRole="button"
+        accessibilityLabel={t('conversations.retention.title')}
         className="active:opacity-80"
       >
         <Box className="flex-row items-start gap-3">
@@ -220,11 +252,9 @@ export function ConversationsScreen() {
               </Text>
 
               <Box className="flex-row items-center gap-2">
-                <Box className="rounded-full bg-primary-500/10 px-2.5 py-1 dark:bg-primary-500/15">
-                  <Text className="text-2xs font-semibold uppercase tracking-wide text-primary-600 dark:text-primary-400">
-                    {formatRetentionLabel(chatRetentionDays, t)}
-                  </Text>
-                </Box>
+                <ScreenBadge tone="accent" size="micro">
+                  {formatRetentionLabel(chatRetentionDays, t)}
+                </ScreenBadge>
                 <MaterialSymbols
                   name={isRetentionExpanded ? 'keyboard-arrow-up' : 'keyboard-arrow-down'}
                   size={20}
@@ -250,15 +280,17 @@ export function ConversationsScreen() {
             const isActive = option.days === chatRetentionDays;
 
             return (
-              <Pressable
+              <ScreenPressableCard
                 key={option.labelKey}
                 testID={`retention-option-${option.days == null ? 'forever' : option.days}`}
                 onPress={() => {
                   handleChatRetentionPress(option.days);
                 }}
-                className={`rounded-2xl border px-3.5 py-2.5 active:opacity-80 ${isActive
-                  ? 'border-primary-500/30 bg-primary-500/10'
-                  : 'border-outline-200 bg-background-0 dark:border-outline-800 dark:bg-background-950/60'}`}
+                accessibilityLabel={t(option.labelKey)}
+                accessibilityState={{ selected: isActive }}
+                variant="inset"
+                padding="compact"
+                className={isActive ? 'border-primary-500/30 bg-primary-500/10' : ''}
               >
                 <Box className="flex-row items-start justify-between gap-3">
                   <Box className="min-w-0 flex-1">
@@ -272,20 +304,16 @@ export function ConversationsScreen() {
                     </Text>
                   </Box>
 
-                  <Box className={`rounded-full px-2 py-1 ${isActive ? 'bg-primary-500/15' : 'bg-background-100 dark:bg-background-900/60'}`}>
-                    <Text className={`text-2xs font-semibold uppercase tracking-wide ${isActive
-                      ? 'text-primary-600 dark:text-primary-400'
-                      : 'text-typography-500 dark:text-typography-400'}`}>
-                      {isActive ? t('common.active') : formatRetentionLabel(option.days, t)}
-                    </Text>
-                  </Box>
+                  <ScreenBadge tone={isActive ? 'accent' : 'neutral'} size="micro">
+                    {isActive ? t('common.active') : formatRetentionLabel(option.days, t)}
+                  </ScreenBadge>
                 </Box>
-              </Pressable>
+              </ScreenPressableCard>
             );
           })}
         </Box>
       ) : null}
-    </Box>
+    </ScreenCard>
   );
 
   const renderItem = useCallback<ListRenderItem<ConversationIndexItem>>(({ item }) => {
@@ -293,7 +321,7 @@ export function ConversationsScreen() {
     const isEditing = editingThreadId === item.id;
 
     return (
-      <Box className="rounded-3xl border border-outline-200 bg-background-50 p-3.5 dark:border-outline-800 dark:bg-background-900/60">
+      <ScreenCard>
         <Box className="flex-row items-start justify-between gap-3">
           <Pressable
             testID={`conversation-row-${item.id}`}
@@ -302,6 +330,8 @@ export function ConversationsScreen() {
                 handleOpenConversation(item.id);
               }
             }}
+            accessibilityRole="button"
+            accessibilityLabel={item.title}
             className="flex-1 active:opacity-80"
           >
             <Box className="flex-row items-center gap-2">
@@ -312,11 +342,9 @@ export function ConversationsScreen() {
                 {item.title}
               </Text>
               {isActive ? (
-                <Box className="rounded-full bg-primary-500/10 px-2 py-1">
-                  <Text className="text-2xs font-semibold uppercase tracking-wide text-primary-500">
-                    {t('common.active')}
-                  </Text>
-                </Box>
+                <ScreenBadge tone="accent" size="micro">
+                  {t('common.active')}
+                </ScreenBadge>
               ) : null}
             </Box>
 
@@ -337,181 +365,160 @@ export function ConversationsScreen() {
 
           {!isEditing ? (
             <Box className="flex-row items-center gap-2">
-              <Pressable
+              <ScreenIconButton
                 testID={`rename-conversation-${item.id}`}
                 onPress={() => {
                   setEditingThreadId(item.id);
                   setEditingTitle(item.title);
                 }}
-                className="h-10 w-10 items-center justify-center rounded-full bg-background-100 active:opacity-70 dark:bg-background-950/70"
-              >
-                <MaterialSymbols name="edit" size={18} className="text-typography-700 dark:text-typography-200" />
-              </Pressable>
+                accessibilityLabel={`${t('conversations.renameLabel')} ${item.title}`}
+                iconName="edit"
+              />
 
-              <Pressable
+              <ScreenIconButton
                 testID={`delete-conversation-${item.id}`}
                 onPress={() => {
                   handleDeleteConversation(item);
                 }}
-                className="h-10 w-10 items-center justify-center rounded-full bg-background-100 active:opacity-70 dark:bg-background-950/70"
-              >
-                <MaterialSymbols name="delete-outline" size={18} className="text-error-500" />
-              </Pressable>
+                accessibilityLabel={`${t('common.delete')} ${item.title}`}
+                iconName="delete-outline"
+                size="compact"
+                tone="danger"
+                className="shrink-0 border-0"
+              />
             </Box>
           ) : null}
         </Box>
 
         {isEditing ? (
-          <Box className="mt-3.5 rounded-2xl border border-primary-500/20 bg-primary-500/5 p-2.5">
+          <ScreenCard className="mt-3.5 border-primary-500/20 bg-primary-500/5 dark:border-primary-400/25" variant="inset" padding="compact">
             <Text className="text-xs font-semibold uppercase tracking-wide text-primary-500">
               {t('conversations.renameLabel')}
             </Text>
 
-            <Box className="mt-2.5 rounded-2xl border border-outline-200 bg-background-0 px-3 dark:border-outline-800 dark:bg-background-950">
-              <Input className="min-h-11 justify-center">
-                <InputField
-                  testID={`rename-input-${item.id}`}
-                  className="text-base text-typography-900 dark:text-typography-100"
-                  placeholder={t('conversations.renamePlaceholder')}
-                  placeholderTextColor={typographyColors[400]}
-                  value={editingTitle}
-                  onChangeText={setEditingTitle}
-                  autoFocus
-                  returnKeyType="done"
-                  onSubmitEditing={handleSaveRename}
-                />
-              </Input>
-            </Box>
+            <ScreenTextField
+              testID={`rename-input-${item.id}`}
+              size="compact"
+              containerClassName="mt-2.5"
+              placeholder={t('conversations.renamePlaceholder')}
+              value={editingTitle}
+              onChangeText={setEditingTitle}
+              autoFocus
+              returnKeyType="done"
+              onSubmitEditing={handleSaveRename}
+            />
 
             <Box className="mt-2.5 flex-row justify-end gap-3">
-              <Pressable
-                onPress={resetRenameState}
-                className="rounded-full border border-outline-200 bg-background-0 px-4 py-2 active:opacity-70 dark:border-outline-800 dark:bg-background-950"
-              >
-                <Text className="text-sm font-medium text-typography-700 dark:text-typography-200">
-                  {t('common.cancel')}
-                </Text>
-              </Pressable>
+              <Button action="secondary" size="sm" onPress={resetRenameState}>
+                <ButtonText>{t('common.cancel')}</ButtonText>
+              </Button>
 
-              <Pressable
-                testID={`save-rename-${item.id}`}
-                onPress={handleSaveRename}
-                className="rounded-full border border-primary-500/20 bg-primary-500 px-4 py-2 active:opacity-80"
-              >
-                <Text className="text-sm font-semibold text-typography-0">
-                  {t('common.save')}
-                </Text>
-              </Pressable>
+              <Button testID={`save-rename-${item.id}`} size="sm" onPress={handleSaveRename}>
+                <ButtonText>{t('common.save')}</ButtonText>
+              </Button>
             </Box>
-          </Box>
+          </ScreenCard>
         ) : null}
-      </Box>
+      </ScreenCard>
     );
   }, [activeThread?.id, editingThreadId, editingTitle, handleDeleteConversation, handleOpenConversation, handleSaveRename, resetRenameState, t]);
 
   return (
     <Box className="flex-1 bg-background-0 dark:bg-background-950">
-      <ScreenHeaderShell contentClassName="px-4 pb-3 pt-1">
-        <Box className="flex-row items-center gap-3">
-          <Pressable
-            testID="conversations-back"
-            onPress={() => {
-              if (canGoBack) {
-                router.back();
-                return;
-              }
-
-              router.replace('/' as any);
-            }}
-            className="h-11 w-11 items-center justify-center rounded-full bg-background-50 active:opacity-70 dark:bg-background-900/60"
-          >
-            <MaterialSymbols name="arrow-back-ios-new" size={20} className="text-primary-500" />
-          </Pressable>
-
-          <Box className="flex-1">
-            <Text className="text-xl font-bold text-typography-900 dark:text-typography-100">
-              {t('conversations.title')}
-            </Text>
-            <Text className="mt-1 text-sm text-typography-500 dark:text-typography-400">
-              {t('conversations.subtitle')}
-            </Text>
-          </Box>
-
-          <Pressable
+      <HeaderBar
+        title={t('conversations.title')}
+        subtitle={t('conversations.subtitle')}
+        onBack={handleBack}
+        backAccessibilityLabel={t('chat.headerBackAccessibilityLabel')}
+        rightAccessory={(
+          <ScreenActionPill
             testID="start-new-chat"
-            onPress={() => {
-              try {
-                startNewChat();
-                router.push('/(tabs)/chat' as any);
-              } catch (error: any) {
-                Alert.alert(
-                  t('conversations.startNewChatErrorTitle'),
-                  getReportedErrorMessage('ConversationsScreen.startNewChat', error, t),
-                );
-              }
-            }}
-            className="rounded-full border border-primary-500/20 bg-primary-500 px-4 py-3 active:opacity-80"
+            onPress={handleStartNewChat}
+            accessibilityLabel={t('conversations.newChat')}
+            tone="primary"
+            className="shrink-0"
           >
+            <MaterialSymbols name="edit-square" size={18} className="text-typography-0" />
             <Text className="text-sm font-semibold text-typography-0">
               {t('conversations.newChat')}
             </Text>
-          </Pressable>
-        </Box>
-
-        <Box className="mt-3 flex-row items-center rounded-2xl border border-outline-200 bg-background-50 px-3 dark:border-outline-800 dark:bg-background-900/60">
-          <MaterialSymbols name="search" size={20} className="text-typography-500 dark:text-typography-400" />
-          <Input className="ml-2 flex-1 min-h-11 justify-center">
-            <InputField
-              testID="conversation-search-input"
-              className="text-base text-typography-900 dark:text-typography-100"
-              placeholder={t('conversations.searchPlaceholder')}
-              placeholderTextColor={typographyColors[400]}
-              value={searchQuery}
-              onChangeText={setSearchQuery}
-            />
-          </Input>
-          {searchQuery.length > 0 ? (
-            <Pressable
-              testID="clear-conversation-search"
-              onPress={() => {
-                setSearchQuery('');
-              }}
-              className="h-9 w-9 items-center justify-center rounded-full active:opacity-70"
-            >
-              <MaterialSymbols name="close" size={18} className="text-typography-400" />
-            </Pressable>
-          ) : null}
-        </Box>
-      </ScreenHeaderShell>
-
-      <ScreenContent className="flex-1 px-4 pt-3">
-        {renderRetentionCard()}
-
-        {filteredConversations.length > 0 ? (
-          <Box className="flex-1 pt-3">
-            <FlashList
-              data={filteredConversations}
-              keyExtractor={(item) => item.id}
-              renderItem={renderItem}
-              keyboardShouldPersistTaps="handled"
-              contentContainerStyle={{ paddingBottom: insets.bottom + 20 }}
-              ItemSeparatorComponent={() => <Box className="h-3" />}
-            />
-          </Box>
-        ) : (
-          <Box className="flex-1 pb-5 pt-3">
-            <Box className="rounded-2xl border border-dashed border-outline-200 bg-background-50 px-4 py-5 dark:border-outline-800 dark:bg-background-900/60">
-              <Text className="text-base font-semibold text-typography-800 dark:text-typography-100">
-                {conversationIndex.length === 0 ? t('conversations.emptyTitle') : t('conversations.emptySearchTitle')}
-              </Text>
-              <Text className="mt-2 text-sm text-typography-500 dark:text-typography-400">
-                {conversationIndex.length === 0
-                  ? t('conversations.emptyDescription')
-                  : t('conversations.emptySearchDescription')}
-              </Text>
-            </Box>
-          </Box>
+          </ScreenActionPill>
         )}
+      />
+
+      <ScreenContent className="flex-1 pt-3">
+        <ScreenStack className="flex-1">
+          <ScreenInlineInput
+            variant="search"
+            testID="conversation-search-input"
+            accessibilityLabel={t('conversations.searchPlaceholder')}
+            placeholder={t('conversations.searchPlaceholder')}
+            value={searchQuery}
+            onChangeText={setSearchQuery}
+            leadingAccessory={<MaterialSymbols name="search" size={20} className="text-typography-500 dark:text-typography-400" />}
+            trailingAccessory={searchQuery.length > 0 ? (
+              <ScreenIconButton
+                testID="clear-conversation-search"
+                onPress={() => {
+                  setSearchQuery('');
+                }}
+                accessibilityLabel={t('common.clear')}
+                iconName="close"
+                size="compact"
+                className="border-0 bg-transparent dark:bg-transparent"
+                iconClassName="text-typography-400"
+              />
+            ) : null}
+          />
+
+          {renderRetentionCard()}
+
+          {filteredConversations.length > 0 ? (
+            <Box className="flex-1">
+              <FlashList
+                data={filteredConversations}
+                keyExtractor={(item) => item.id}
+                renderItem={renderItem}
+                keyboardShouldPersistTaps="handled"
+                contentContainerStyle={{ paddingBottom: insets.bottom + 20 }}
+                ItemSeparatorComponent={() => <Box className="h-3" />}
+              />
+            </Box>
+          ) : (
+            <Box className="flex-1 justify-center pb-10 pt-4">
+              <ScreenCard padding="large">
+                <Box className="h-12 w-12 items-center justify-center rounded-2xl bg-primary-500/10 dark:bg-primary-500/15">
+                  <MaterialSymbols
+                    name={conversationIndex.length === 0 ? 'history' : 'search'}
+                    size={22}
+                    className="text-primary-500"
+                  />
+                </Box>
+
+                <Text className="mt-4 text-lg font-semibold text-typography-900 dark:text-typography-100">
+                  {conversationIndex.length === 0 ? t('conversations.emptyTitle') : t('conversations.emptySearchTitle')}
+                </Text>
+
+                <Text className="mt-2 text-sm leading-6 text-typography-500 dark:text-typography-400">
+                  {conversationIndex.length === 0
+                    ? t('conversations.emptyDescription')
+                    : t('conversations.emptySearchDescription')}
+                </Text>
+
+                {conversationIndex.length === 0 ? (
+                  <Button size="sm" className="mt-5 self-start" onPress={handleStartNewChat}>
+                    <MaterialSymbols name="edit-square" size={16} className="text-typography-0" />
+                    <ButtonText>{t('conversations.newChat')}</ButtonText>
+                  </Button>
+                ) : (
+                  <Button action="secondary" size="sm" className="mt-5 self-start" onPress={() => setSearchQuery('')}>
+                    <ButtonText>{t('common.clear')}</ButtonText>
+                  </Button>
+                )}
+              </ScreenCard>
+            </Box>
+          )}
+        </ScreenStack>
       </ScreenContent>
     </Box>
   );

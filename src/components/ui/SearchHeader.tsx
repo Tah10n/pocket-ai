@@ -1,18 +1,25 @@
 import React from 'react';
 import { Box } from './box';
-import { Input, InputField } from './input';
-import { Text } from './text';
-import { Pressable } from './pressable';
+import { Text, composeTextRole } from './text';
 import { MaterialSymbols } from './MaterialSymbols';
-import { ScreenHeaderShell } from './ScreenShell';
+import {
+  HeaderActionButton,
+  HeaderActionPlaceholder,
+  HeaderBackButton,
+  ScreenInlineInput,
+  ScreenIconButton,
+  ScreenSegmentedControl,
+  ScreenHeaderShell,
+} from './ScreenShell';
 import { useTranslation } from 'react-i18next';
-import { typographyColors } from '../../utils/themeTokens';
+import { screenChromeTokens } from '../../utils/themeTokens';
+import { type ModelsCatalogTab } from '../models/modelTabs';
 
 interface SearchHeaderProps {
   searchQuery: string;
   onSearchChange: (query: string) => void;
-  activeTab: 'All Models' | 'Downloaded';
-  onTabChange: (tab: 'All Models' | 'Downloaded') => void;
+  activeTab: ModelsCatalogTab;
+  onTabChange: (tab: ModelsCatalogTab) => void;
   onBack?: () => void;
   onOpenStorage?: () => void;
 }
@@ -26,70 +33,72 @@ export const SearchHeader: React.FC<SearchHeaderProps> = ({
   onOpenStorage,
 }) => {
   const { t } = useTranslation();
+  const tabOptions = [
+    {
+      key: 'all',
+      label: t('models.tabAllModels'),
+      accessibilityLabel: t('models.tabAllModels'),
+      testID: 'models-tab-all',
+    },
+    {
+      key: 'downloaded',
+      label: t('models.tabDownloaded'),
+      accessibilityLabel: t('models.tabDownloaded'),
+      testID: 'models-tab-downloaded',
+    },
+  ] as const;
 
   return (
-    <ScreenHeaderShell contentClassName="px-4 pb-3 pt-1">
-      <Box className="flex-row items-center gap-3">
-        {onBack ? (
-          <Pressable
-            onPress={onBack}
-            className="h-11 w-11 items-center justify-center rounded-full bg-background-50 active:opacity-70 dark:bg-background-900/60"
+    <ScreenHeaderShell contentClassName={`${screenChromeTokens.headerHorizontalPaddingClassName} pb-2 pt-1`}>
+      <Box className={`flex-row items-center ${screenChromeTokens.headerContentGapClassName} py-0.5`}>
+        <HeaderBackButton onPress={onBack} accessibilityLabel={t('chat.headerBackAccessibilityLabel')} />
+        <Box className="min-w-0 flex-1">
+          <Text
+            numberOfLines={1}
+            className={composeTextRole('screenTitle', 'text-[20px] leading-6')}
           >
-            <MaterialSymbols name="arrow-back-ios-new" size={20} className="text-primary-500" />
-          </Pressable>
-        ) : (
-          <Box className="h-11 w-11" />
-        )}
-
-        <Box className="flex-1">
-          <Text className="text-xl font-bold text-typography-900 dark:text-typography-100">
             {t('models.catalogTitle')}
           </Text>
         </Box>
-
         {onOpenStorage ? (
-          <Pressable
+          <HeaderActionButton
+            iconName="storage"
+            accessibilityLabel={t('settings.storageManager')}
             onPress={onOpenStorage}
-            className="h-11 w-11 items-center justify-center rounded-full bg-background-50 active:opacity-70 dark:bg-background-900/60"
-          >
-            <MaterialSymbols name="storage" size={20} className="text-primary-500" />
-          </Pressable>
+            tone="neutral"
+          />
         ) : (
-          <Box className="h-11 w-11" />
+          <HeaderActionPlaceholder />
         )}
       </Box>
 
-      <Box className="mt-3 flex-row h-11 w-full items-center rounded-xl border border-outline-200 bg-background-50 px-3 dark:border-outline-800 dark:bg-background-900/60">
-        <MaterialSymbols name="search" size={20} className="text-typography-500 dark:text-typography-400" />
-        <Input className="ml-2 flex-1 h-full border-0 bg-transparent justify-center">
-          <InputField
-            className="text-sm text-typography-900 dark:text-typography-100"
-            placeholder={t('models.searchPlaceholder')}
-            placeholderTextColor={typographyColors[400]}
-            value={searchQuery}
-            onChangeText={onSearchChange}
+      <ScreenInlineInput
+        variant="search"
+        className="mt-2"
+        accessibilityLabel={t('models.searchPlaceholder')}
+        placeholder={t('models.searchPlaceholder')}
+        value={searchQuery}
+        onChangeText={onSearchChange}
+        leadingAccessory={<MaterialSymbols name="search" size={17} className="text-typography-500 dark:text-typography-400" />}
+        trailingAccessory={searchQuery.length > 0 ? (
+          <ScreenIconButton
+            onPress={() => onSearchChange('')}
+            accessibilityLabel={t('common.clear')}
+            iconName="close"
+            size="compact"
+            className="border-0 bg-transparent dark:bg-transparent"
+            iconClassName="text-typography-400"
           />
-        </Input>
-        {searchQuery.length > 0 ? (
-          <Pressable onPress={() => onSearchChange('')} className="h-9 w-9 items-center justify-center rounded-full active:opacity-70">
-            <MaterialSymbols name="close" size={18} className="text-typography-400" />
-          </Pressable>
         ) : null}
-      </Box>
+      />
 
-      <Box className="mt-3 flex-row gap-5 border-b border-outline-200 dark:border-primary-500/20">
-        {(['All Models', 'Downloaded'] as const).map((tab) => (
-          <Pressable
-            key={tab}
-            onPress={() => onTabChange(tab)}
-            className={`items-center border-b-2 pb-2.5 ${activeTab === tab ? 'border-primary-500' : 'border-transparent'}`}
-          >
-            <Text className={`text-sm ${activeTab === tab ? 'font-bold text-primary-500' : 'font-medium text-typography-500 dark:text-typography-400'}`}>
-              {tab === 'All Models' ? t('models.tabAllModels') : t('models.tabDownloaded')}
-            </Text>
-          </Pressable>
-        ))}
-      </Box>
+      <ScreenSegmentedControl
+        testID="models-tab-control"
+        className="mt-2"
+        activeKey={activeTab}
+        onChange={(tab) => onTabChange(tab as ModelsCatalogTab)}
+        options={[...tabOptions]}
+      />
     </ScreenHeaderShell>
   );
 };

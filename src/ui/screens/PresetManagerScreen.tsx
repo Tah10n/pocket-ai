@@ -4,16 +4,14 @@ import { FlashList } from '@shopify/flash-list';
 import { useRouter } from 'expo-router';
 import { Box } from '@/components/ui/box';
 import { Button, ButtonText } from '@/components/ui/button';
-import { Input, InputField } from '@/components/ui/input';
 import { MaterialSymbols } from '@/components/ui/MaterialSymbols';
-import { Pressable } from '@/components/ui/pressable';
-import { ScreenContent, ScreenHeaderShell } from '@/components/ui/ScreenShell';
+import { ScreenActionPill, ScreenBadge, ScreenContent, ScreenIconButton, ScreenPressableCard, ScreenTextField } from '@/components/ui/ScreenShell';
+import { HeaderBar } from '@/components/ui/HeaderBar';
 import { ScrollView } from '@/components/ui/scroll-view';
 import { Text } from '@/components/ui/text';
 import { useTranslation } from 'react-i18next';
 import { presetManager, SystemPromptPreset } from '../../services/PresetManager';
 import { getSettings, subscribeSettings, updateSettings } from '../../services/SettingsStore';
-import { typographyColors } from '../../utils/themeTokens';
 import { getReportedErrorMessage } from '../../services/AppError';
 
 interface EditorState {
@@ -69,6 +67,15 @@ export function PresetManagerScreen() {
         setDraftName('');
         setDraftPrompt('');
     }, []);
+
+    const handleBack = useCallback(() => {
+        if (router.canGoBack()) {
+            router.back();
+            return;
+        }
+
+        router.replace('/(tabs)/settings' as any);
+    }, [router]);
 
     const handleSaveAndActivate = () => {
         const trimmedName = draftName.trim();
@@ -131,12 +138,12 @@ export function PresetManagerScreen() {
         const isActive = item.id === activePresetId;
 
         return (
-            <Pressable
+            <ScreenPressableCard
                 onPress={() => openEditPreset(item)}
-                className={`mb-3 rounded-2xl border px-4 py-4 active:opacity-80 ${
+                className={`mb-3 active:opacity-80 ${
                     isActive
                         ? 'border-primary-500/40 bg-primary-500/10 dark:border-primary-400'
-                        : 'border-outline-200 bg-background-0 dark:border-outline-800 dark:bg-background-950'
+                        : 'bg-background-0 dark:bg-background-950'
                 }`}
             >
                 <Box className="flex-row items-start justify-between gap-3">
@@ -149,61 +156,38 @@ export function PresetManagerScreen() {
                         </Text>
                         <Box className="mt-3 flex-row items-center gap-2">
                             {isActive ? (
-                                <Box className="rounded-full bg-primary-500/15 px-2 py-1">
-                                    <Text className="text-xs font-semibold uppercase tracking-wide text-primary-600 dark:text-primary-400">
-                                        {t('common.active')}
-                                    </Text>
-                                </Box>
+                                <ScreenBadge tone="accent" size="micro">
+                                    {t('common.active')}
+                                </ScreenBadge>
                             ) : null}
                         </Box>
                     </Box>
 
                     <MaterialSymbols name="chevron-right" size={20} className="text-typography-400" />
                 </Box>
-            </Pressable>
+            </ScreenPressableCard>
         );
     }, [activePresetId, openEditPreset, t]);
 
     return (
         <Box className="flex-1 bg-background-0 dark:bg-background-950">
-            <ScreenHeaderShell contentClassName="px-4 pb-3 pt-1">
-                <Box className="flex-row items-center justify-between gap-3">
-                    <Box className="flex-row items-center gap-3 flex-1">
-                        <Pressable
-                            onPress={() => {
-                                if (router.canGoBack()) {
-                                    router.back();
-                                    return;
-                                }
-
-                                router.replace('/(tabs)/settings' as any);
-                            }}
-                            className="h-11 w-11 items-center justify-center rounded-full bg-background-50 active:opacity-70 dark:bg-background-900/60"
-                        >
-                            <MaterialSymbols name="arrow-back-ios-new" size={20} className="text-primary-500" />
-                        </Pressable>
-
-                        <Box className="flex-1">
-                            <Text className="text-xl font-bold text-typography-900 dark:text-typography-100">
-                                {t('settings.presets')}
-                            </Text>
-                            <Text className="mt-1 text-sm text-typography-500 dark:text-typography-400">
-                                {t('presets.activePreset', { name: activePresetName })}
-                            </Text>
-                        </Box>
-                    </Box>
-
-                    <Pressable
+            <HeaderBar
+                title={t('settings.presets')}
+                subtitle={t('presets.activePreset', { name: activePresetName })}
+                onBack={handleBack}
+                backAccessibilityLabel={t('chat.headerBackAccessibilityLabel')}
+                rightAccessory={(
+                    <ScreenActionPill
                         onPress={openCreatePreset}
-                        className="flex-row items-center gap-2 rounded-full bg-primary-500 px-4 py-3 active:opacity-80"
+                        tone="primary"
                     >
                         <MaterialSymbols name="add" size={18} className="text-typography-0" />
                         <Text className="text-sm font-semibold text-typography-0">{t('presets.addPreset')}</Text>
-                    </Pressable>
-                </Box>
-            </ScreenHeaderShell>
+                    </ScreenActionPill>
+                )}
+            />
 
-            <ScreenContent className="flex-1 px-4 pb-6 pt-3">
+            <ScreenContent className="flex-1 pt-3">
                 <FlashList
                     data={presets}
                     keyExtractor={(item) => item.id}
@@ -212,63 +196,59 @@ export function PresetManagerScreen() {
                 />
             </ScreenContent>
 
-            <Modal visible={editorState.visible} animationType="slide" transparent onRequestClose={closeEditor}>
-                <Box className="flex-1 justify-end bg-black/40">
-                    <Pressable className="flex-1" onPress={closeEditor} />
-                    <Box className="max-h-[88%] rounded-t-3xl bg-background-0 px-5 pb-6 pt-4 dark:bg-background-950">
-                        <Box className="mb-3 flex-row items-center justify-between gap-3">
-                            <Box className="flex-1">
-                                <Text className="text-lg font-semibold text-typography-900 dark:text-typography-100">
-                                    {editorTitle}
-                                </Text>
-                                <Text className="mt-1 text-sm text-typography-500 dark:text-typography-400">
-                                    {t('presets.editorDescription')}
-                                </Text>
-                            </Box>
+            <Modal
+                visible={editorState.visible}
+                animationType="slide"
+                presentationStyle="fullScreen"
+                onRequestClose={closeEditor}
+            >
+                <Box className="flex-1 bg-background-0 dark:bg-background-950">
+                    <HeaderBar
+                        title={editorTitle}
+                        subtitle={t('presets.editorDescription')}
+                        onBack={closeEditor}
+                        backAccessibilityLabel={t('common.cancel')}
+                        rightAccessory={!isCreatingPreset ? (
+                            <ScreenIconButton
+                                onPress={handleDelete}
+                                iconName="delete"
+                                tone="danger"
+                                accessibilityLabel={t('common.delete')}
+                            />
+                        ) : undefined}
+                    />
 
-                            {!isCreatingPreset ? (
-                                <Pressable
-                                    onPress={handleDelete}
-                                    className="h-10 w-10 items-center justify-center rounded-full bg-error-500/10 active:opacity-80"
-                                >
-                                    <MaterialSymbols name="delete" size={18} className="text-error-600" />
-                                </Pressable>
-                            ) : null}
-                        </Box>
+                    <ScreenContent className="flex-1 pt-3">
+                        <ScrollView
+                            className="flex-1"
+                            showsVerticalScrollIndicator={false}
+                            keyboardShouldPersistTaps="handled"
+                            contentContainerStyle={{ flexGrow: 1 }}
+                        >
+                            <Box className="flex-1 pb-2">
+                                <ScreenTextField
+                                    label={t('presets.nameLabel')}
+                                    size="prominent"
+                                    placeholder={t('presets.namePlaceholder')}
+                                    value={draftName}
+                                    onChangeText={setDraftName}
+                                />
 
-                        <ScrollView showsVerticalScrollIndicator={false}>
-                            <Box className="pb-2">
-                                <Text className="mb-2 text-xs font-semibold uppercase tracking-wide text-typography-500 dark:text-typography-400">
-                                    {t('presets.nameLabel')}
-                                </Text>
-                                <Input className="mb-4">
-                                    <InputField
-                                        placeholder={t('presets.namePlaceholder')}
-                                        placeholderTextColor={typographyColors[500]}
-                                        value={draftName}
-                                        onChangeText={setDraftName}
-                                        className="p-3 text-typography-900 dark:text-typography-100"
-                                    />
-                                </Input>
-
-                                <Text className="mb-2 text-xs font-semibold uppercase tracking-wide text-typography-500 dark:text-typography-400">
-                                    {t('presets.systemPromptLabel')}
-                                </Text>
-                                <Input className="min-h-40">
-                                    <InputField
-                                        placeholder={t('presets.systemPromptPlaceholder')}
-                                        placeholderTextColor={typographyColors[500]}
-                                        multiline
-                                        value={draftPrompt}
-                                        onChangeText={setDraftPrompt}
-                                        className="min-h-40 p-3 text-typography-900 dark:text-typography-100"
-                                        textAlignVertical="top"
-                                    />
-                                </Input>
+                                <ScreenTextField
+                                    label={t('presets.systemPromptLabel')}
+                                    containerClassName="mt-5 flex-1"
+                                    fieldClassName="flex-1"
+                                    size="prominentMultiline"
+                                    placeholder={t('presets.systemPromptPlaceholder')}
+                                    value={draftPrompt}
+                                    onChangeText={setDraftPrompt}
+                                />
                             </Box>
                         </ScrollView>
+                    </ScreenContent>
 
-                        <Box className="mt-4 flex-row gap-3">
+                    <ScreenContent className="pt-4">
+                        <Box className="flex-row gap-3">
                             <Button action="primary" className="flex-1" onPress={handleSaveAndActivate}>
                                 <ButtonText>{t('presets.saveAndActivate')}</ButtonText>
                             </Button>
@@ -276,7 +256,7 @@ export function PresetManagerScreen() {
                                 <ButtonText>{t('common.cancel')}</ButtonText>
                             </Button>
                         </Box>
-                    </Box>
+                    </ScreenContent>
                 </Box>
             </Modal>
         </Box>

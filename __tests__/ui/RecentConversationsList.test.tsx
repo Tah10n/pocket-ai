@@ -55,6 +55,7 @@ jest.mock('@/components/ui/text', () => {
 
   return {
     Text: ({ children, ...props }: any) => mockReact.createElement(Text, props, children),
+    composeTextRole: (_role: string, className = '') => className,
   };
 });
 

@@ -1,12 +1,18 @@
-import React from 'react';
-import { Modal } from 'react-native';
+import React, { useEffect } from 'react';
+import { Modal, View } from 'react-native';
 import { useTranslation } from 'react-i18next';
+import Animated, { Easing, useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated';
 import { Box } from '@/components/ui/box';
+import { Button, ButtonText } from '@/components/ui/button';
 import { Pressable } from '@/components/ui/pressable';
 import { ScrollView } from '@/components/ui/scroll-view';
+import { ScreenBadge, ScreenIconButton, ScreenPressableCard, ScreenSheet } from '@/components/ui/ScreenShell';
 import { Text } from '@/components/ui/text';
 import { MaterialSymbols } from './MaterialSymbols';
 import { ConversationIndexItem } from '../../types/chat';
+import { useMotionPreferences } from '../../hooks/useDeviceMetrics';
+
+const AnimatedView = Animated.createAnimatedComponent(View);
 
 interface ConversationSwitcherSheetProps {
   visible: boolean;
@@ -34,11 +40,36 @@ export function ConversationSwitcherSheet({
   onManageConversations,
 }: ConversationSwitcherSheetProps) {
   const { t } = useTranslation();
+  const motion = useMotionPreferences();
+  const overlayOpacity = useSharedValue(visible ? 1 : 0);
+  const sheetTranslateY = useSharedValue(visible ? 0 : 28);
+
+  useEffect(() => {
+    overlayOpacity.value = withTiming(visible ? 1 : 0, {
+      duration: motion.sheetDurationMs,
+      easing: Easing.out(Easing.ease),
+    });
+    sheetTranslateY.value = withTiming(visible ? 0 : motion.motionPreset === 'full' ? 28 : 0, {
+      duration: motion.sheetDurationMs,
+      easing: Easing.out(Easing.cubic),
+    });
+  }, [motion.motionPreset, motion.sheetDurationMs, overlayOpacity, sheetTranslateY, visible]);
+
+  const overlayStyle = useAnimatedStyle(() => ({
+    opacity: overlayOpacity.value,
+  }));
+
+  const sheetStyle = useAnimatedStyle(() => ({
+    transform: [{ translateY: sheetTranslateY.value }],
+  }));
+
   return (
-    <Modal visible={visible} animationType="fade" transparent onRequestClose={onClose}>
+    <Modal visible={visible} animationType="none" transparent onRequestClose={onClose}>
+      <AnimatedView style={[{ flex: 1 }, overlayStyle]}>
       <Box className="flex-1 justify-end bg-black/40">
         <Pressable className="flex-1" onPress={onClose} />
-        <Box className="max-h-[75%] rounded-t-3xl bg-background-0 px-5 pb-8 pt-5 dark:bg-background-950">
+        <AnimatedView style={sheetStyle}>
+        <ScreenSheet className="max-h-[75%] pb-8">
           <Box className="mb-4 flex-row items-center justify-between">
             <Box>
               <Text className="text-lg font-semibold text-typography-900 dark:text-typography-100">
@@ -48,55 +79,53 @@ export function ConversationSwitcherSheet({
                 {t('chat.conversationSwitcher.subtitle')}
               </Text>
             </Box>
-            <Pressable
+            <ScreenIconButton
               onPress={onClose}
-              className="h-10 w-10 items-center justify-center rounded-full bg-background-100 active:opacity-70 dark:bg-background-900/60"
-            >
-              <MaterialSymbols name="close" size={20} className="text-typography-600 dark:text-typography-300" />
-            </Pressable>
+              accessibilityLabel={t('common.cancel')}
+              iconName="close"
+            />
           </Box>
 
           <Box className="mb-3 flex-row gap-3">
-            <Pressable
+            <Button
+              action="softPrimary"
+              size="sm"
               onPress={() => {
                 onClose();
                 onStartNewChat();
               }}
-              className="flex-1 flex-row items-center justify-center gap-2 rounded-2xl border border-primary-500/20 bg-primary-500/10 px-4 py-3 active:opacity-80"
+              className="flex-1"
             >
               <MaterialSymbols name="edit-square" size={18} className="text-primary-500" />
-              <Text className="text-sm font-semibold text-primary-500">
-                {t('chat.conversationSwitcher.startNewChat')}
-              </Text>
-            </Pressable>
+              <ButtonText>{t('chat.conversationSwitcher.startNewChat')}</ButtonText>
+            </Button>
 
             {onManageConversations ? (
-              <Pressable
+              <Button
+                action="secondary"
+                size="sm"
                 onPress={() => {
                   onClose();
                   onManageConversations();
                 }}
-                className="flex-row items-center justify-center gap-2 rounded-2xl border border-outline-200 bg-background-50 px-4 py-3 active:opacity-80 dark:border-outline-800 dark:bg-background-900/60"
+                className="flex-1"
               >
                 <MaterialSymbols name="manage-search" size={18} className="text-typography-700 dark:text-typography-200" />
-                <Text className="text-sm font-semibold text-typography-700 dark:text-typography-200">
-                  {t('common.manage')}
-                </Text>
-              </Pressable>
+                <ButtonText>{t('common.manage')}</ButtonText>
+              </Button>
               ) : null}
           </Box>
 
           {onOpenPresetSelector ? (
             <Box className="mb-4">
-              <Pressable
+              <ScreenPressableCard
                 onPress={() => {
                   onClose();
                   onOpenPresetSelector();
                 }}
                 disabled={!canOpenPresetSelector}
-                className={`rounded-2xl border px-4 py-3 ${canOpenPresetSelector
-                  ? 'border-outline-200 bg-background-50 active:opacity-80 dark:border-outline-800 dark:bg-background-900/60'
-                  : 'border-outline-100 bg-background-100/80 dark:border-outline-900 dark:bg-background-900/40'}`}
+                padding="compact"
+                className={!canOpenPresetSelector ? 'border-outline-100 bg-background-100/80 dark:border-outline-900 dark:bg-background-900/40' : ''}
               >
                 <Box className="flex-row items-center justify-between gap-3">
                   <Box className="min-w-0 flex-1">
@@ -116,7 +145,7 @@ export function ConversationSwitcherSheet({
                     className={canOpenPresetSelector ? 'text-typography-500 dark:text-typography-300' : 'text-typography-300 dark:text-typography-600'}
                   />
                 </Box>
-              </Pressable>
+              </ScreenPressableCard>
             </Box>
           ) : null}
 
@@ -128,15 +157,14 @@ export function ConversationSwitcherSheet({
                   const modelLabel = conversation.modelId.split('/').pop() ?? conversation.modelId;
 
                   return (
-                    <Pressable
+                    <ScreenPressableCard
                       key={conversation.id}
                       onPress={() => {
                         onClose();
                         onSelectConversation(conversation.id);
                       }}
-                      className={`rounded-2xl border px-4 py-3 active:opacity-80 ${isActive
-                        ? 'border-primary-500/30 bg-primary-500/10'
-                        : 'border-outline-200 bg-background-50 dark:border-outline-800 dark:bg-background-900/60'}`}
+                      padding="compact"
+                      className={isActive ? 'border-primary-500/30 bg-primary-500/10' : ''}
                     >
                       <Box className="flex-row items-start justify-between gap-3">
                         <Box className="min-w-0 flex-1">
@@ -165,16 +193,14 @@ export function ConversationSwitcherSheet({
                         </Box>
 
                         {isActive ? (
-                          <Box className="rounded-full bg-primary-500/10 px-2 py-1">
-                            <Text className="text-2xs font-semibold uppercase tracking-wide text-primary-500">
-                              {t('common.active')}
-                            </Text>
-                          </Box>
+                          <ScreenBadge tone="accent" size="micro">
+                            {t('common.active')}
+                          </ScreenBadge>
                         ) : (
                           <MaterialSymbols name="chevron-right" size={18} className="text-typography-400" />
                         )}
                       </Box>
-                    </Pressable>
+                    </ScreenPressableCard>
                   );
                 })
               ) : (
@@ -189,8 +215,10 @@ export function ConversationSwitcherSheet({
               )}
             </Box>
           </ScrollView>
-        </Box>
+        </ScreenSheet>
+        </AnimatedView>
       </Box>
+      </AnimatedView>
     </Modal>
   );
 }

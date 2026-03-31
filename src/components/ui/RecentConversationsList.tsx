@@ -1,11 +1,12 @@
 import React, { ComponentProps, useCallback, useMemo } from 'react';
 import { Box } from '@/components/ui/box';
-import { Text } from '@/components/ui/text';
-import { Pressable } from '@/components/ui/pressable';
+import { Text, composeTextRole } from '@/components/ui/text';
 import { MaterialSymbols } from './MaterialSymbols';
 import { useTranslation } from 'react-i18next';
 import { useChatStore } from '../../store/chatStore';
 import { ConversationIndexItem, toConversationIndexItem } from '../../types/chat';
+import { Pressable } from '@/components/ui/pressable';
+import { ScreenActionPill, ScreenCard, ScreenIconButton, ScreenStack } from './ScreenShell';
 import {
   formatConversationUpdatedAt,
   getConversationModelLabel,
@@ -52,83 +53,96 @@ export const RecentConversationsList = ({
   const canManageConversations = Boolean(onViewAllConversations);
 
   const renderConversation = useCallback((conv: Conversation) => (
-    <Box className="flex-row items-center rounded-xl bg-background-50 dark:bg-primary-500/5 border border-outline-200 dark:border-primary-500/10">
+    <ScreenCard className="flex-row items-center" padding="none">
       <Pressable 
         testID={`recent-conversation-${conv.id}`}
         onPress={() => {
           onOpenConversation?.(conv);
         }}
-        className="flex-1 flex-row items-center p-3.5 active:opacity-70"
+        accessibilityRole="button"
+        accessibilityLabel={conv.title}
+        className="flex-1 flex-row items-center gap-3 p-4 active:opacity-70"
       >
-        <Box className="size-9 shrink-0 items-center justify-center rounded-lg bg-background-100 dark:bg-primary-500/20">
+        <Box className="size-11 shrink-0 items-center justify-center rounded-2xl bg-primary-500/10 dark:bg-primary-500/20">
           <MaterialSymbols name={conv.icon} size={18} className="text-primary-500" />
         </Box>
         
-        <Box className="ml-2.5 flex-1 overflow-hidden">
-          <Text className="text-typography-900 dark:text-typography-100 font-semibold truncate" numberOfLines={1}>{conv.title}</Text>
-          <Box className="flex-row items-center gap-2 mt-0.5">
-            <Text className="text-typography-500 dark:text-typography-400 text-xs">{conv.model}</Text>
+        <Box className="min-w-0 flex-1 overflow-hidden">
+          <Text className={composeTextRole('sectionTitle')} numberOfLines={1}>
+            {conv.title}
+          </Text>
+          <Box className="mt-1 flex-row items-center gap-2">
+            <Text className={composeTextRole('caption')}>
+              {conv.model}
+            </Text>
             <Box className="w-1 h-1 rounded-full bg-outline-400" />
-            <Text className="text-typography-500 dark:text-typography-400 text-xs">{conv.time}</Text>
+            <Text className={composeTextRole('caption')}>
+              {conv.time}
+            </Text>
           </Box>
         </Box>
       </Pressable>
 
-      <Box className="ml-2 flex-row items-center gap-1">
-        <Pressable
+      <Box className="mr-3 flex-row items-center gap-2">
+        <ScreenIconButton
           testID={`delete-conversation-${conv.id}`}
           onPress={() => {
             onDeleteConversation?.(conv);
           }}
-          className="h-9 w-9 items-center justify-center rounded-full bg-background-100 dark:bg-background-900/60 active:opacity-70"
-        >
-          <MaterialSymbols name="delete-outline" size={18} className="text-error-500" />
-        </Pressable>
-        <Box className="pr-4">
+          accessibilityLabel={`${t('common.delete')} ${conv.title}`}
+          iconName="delete-outline"
+          size="compact"
+          tone="danger"
+          className="shrink-0 border-0"
+        />
+        <Box>
           <MaterialSymbols name="chevron-right" size={20} className="text-typography-400" />
         </Box>
       </Box>
-    </Box>
-  ), [onDeleteConversation, onOpenConversation]);
+    </ScreenCard>
+  ), [onDeleteConversation, onOpenConversation, t]);
 
   return (
-    <Box className="mt-5 px-4 pb-3">
+    <ScreenStack gap="default">
       <Box className="mb-3 flex-row items-center justify-between gap-3">
-        <Text className="text-typography-900 dark:text-typography-100 text-lg font-bold leading-tight tracking-tight">{t('home.recentConversations')}</Text>
+        <Text className={composeTextRole('sectionTitle', 'text-lg tracking-tight')}>
+          {t('home.recentConversations')}
+        </Text>
         {canManageConversations ? (
-          <Pressable
+          <ScreenActionPill
             testID="manage-conversations-button"
             onPress={onViewAllConversations}
-            className="flex-row items-center gap-1.5 rounded-full border border-primary-500/20 bg-primary-500/10 px-3 py-2 active:opacity-70"
+            accessibilityLabel={t('common.manage')}
+            className="self-start"
           >
             <MaterialSymbols name="history" size={16} className="text-primary-500" />
             <Text className="text-xs font-semibold uppercase tracking-wide text-primary-500">
               {t('common.manage')}
             </Text>
-          </Pressable>
+          </ScreenActionPill>
         ) : null}
       </Box>
 
       <Box>
         {visibleConversations.length > 0 ? (
-          <Box className="gap-3">
+          <ScreenStack>
             {visibleConversations.map((conversation) => (
               <React.Fragment key={conversation.id}>
                 {renderConversation(conversation)}
               </React.Fragment>
             ))}
-          </Box>
+          </ScreenStack>
         ) : (
-          <Box className="rounded-xl border border-dashed border-outline-200 bg-background-50 px-4 py-5 dark:border-primary-500/10 dark:bg-primary-500/5">
-            <Text className="text-sm font-semibold text-typography-700 dark:text-typography-200">
+          <ScreenCard dashed className="dark:border-outline-700" padding="large">
+            <Text className={composeTextRole('sectionTitle', 'text-sm')}>
               {t('home.noConversationsTitle')}
             </Text>
-            <Text className="mt-2 text-sm text-typography-500 dark:text-typography-400">
+            <Text className={composeTextRole('bodyMuted', 'mt-2')}>
               {t('home.noConversationsDescription')}
             </Text>
-          </Box>
+          </ScreenCard>
         )}
       </Box>
-    </Box>
+    </ScreenStack>
   );
 };

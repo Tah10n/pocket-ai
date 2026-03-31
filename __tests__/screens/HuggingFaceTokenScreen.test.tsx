@@ -60,6 +60,40 @@ jest.mock('../../src/components/ui/pressable', () => {
 jest.mock('../../src/components/ui/ScreenShell', () => ({
   ScreenHeaderShell: ({ children }: any) => children,
   ScreenContent: ({ children }: any) => children,
+  ScreenStack: ({ children }: any) => children,
+  ScreenCard: ({ children }: any) => children,
+  ScreenSheet: ({ children }: any) => children,
+  ScreenTextField: ({ label, helperText, ...props }: any) => {
+    const mockReact = require('react');
+    const { TextInput, Text, View } = require('react-native');
+    return mockReact.createElement(
+      View,
+      null,
+      label ? mockReact.createElement(Text, null, label) : null,
+      mockReact.createElement(TextInput, props),
+      helperText ? mockReact.createElement(Text, null, helperText) : null,
+    );
+  },
+  HeaderBackButton: ({ children, ...props }: any) => {
+    const mockReact = require('react');
+    const { Pressable, Text } = require('react-native');
+    return mockReact.createElement(Pressable, props, children ?? mockReact.createElement(Text, null, 'back'));
+  },
+  HeaderActionPlaceholder: () => {
+    const mockReact = require('react');
+    const { View } = require('react-native');
+    return mockReact.createElement(View, null);
+  },
+  HeaderTitleBlock: ({ title, subtitle }: any) => {
+    const mockReact = require('react');
+    const { Text, View } = require('react-native');
+    return mockReact.createElement(
+      View,
+      null,
+      mockReact.createElement(Text, null, title),
+      subtitle ? mockReact.createElement(Text, null, subtitle) : null,
+    );
+  },
 }));
 
 jest.mock('../../src/components/ui/scroll-view', () => {
@@ -75,6 +109,7 @@ jest.mock('../../src/components/ui/text', () => {
   const { Text } = require('react-native');
   return {
     Text: ({ children, ...props }: any) => mockReact.createElement(Text, props, children),
+    composeTextRole: (...classNames: Array<string | undefined>) => classNames.filter(Boolean).join(' '),
   };
 });
 

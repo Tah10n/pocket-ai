@@ -111,14 +111,23 @@ jest.mock('react-native-css-interop', () => ({
     remapProps: jest.fn(),
 }));
 
-jest.mock('nativewind', () => ({
-    cssInterop: (Component) => Component,
-    styled: (Component) => Component,
-    useColorScheme: () => ({
-        colorScheme: 'light',
-        setColorScheme: jest.fn(),
-    }),
-}));
+jest.mock('nativewind', () => {
+    let colorScheme = 'light';
+
+    return {
+        cssInterop: (Component) => Component,
+        styled: (Component) => Component,
+        useColorScheme: () => ({
+            colorScheme,
+            setColorScheme: jest.fn((nextColorScheme) => {
+                colorScheme = nextColorScheme;
+            }),
+        }),
+        __setColorScheme: (nextColorScheme) => {
+            colorScheme = nextColorScheme;
+        },
+    };
+});
 
 // Mocking react-native-fs
 jest.mock('react-native-fs', () => ({
@@ -188,32 +197,97 @@ jest.mock('llama.rn', () => ({
 }));
 
 // Mocking react-i18next
-jest.mock('react-i18next', () => ({
-    useTranslation: () => ({
-        t: (key) => key,
-        i18n: {
-            changeLanguage: () => Promise.resolve(),
+jest.mock('react-i18next', () => {
+    const overrides = new Map();
+    let language = 'en';
+
+    const applyInterpolation = (template, options) => template.replace(/\{\{(.*?)\}\}/g, (_, key) => {
+        const trimmedKey = key.trim();
+        return options?.[trimmedKey] == null ? '' : String(options[trimmedKey]);
+    });
+
+    const t = (key, options) => {
+        const overrideKey = `${language}:${key}`;
+        const overrideValue = overrides.get(overrideKey) ?? overrides.get(key);
+        if (typeof overrideValue === 'string') {
+            return applyInterpolation(overrideValue, options);
+        }
+
+        return key;
+    };
+
+    return {
+        useTranslation: () => ({
+            t,
+            i18n: {
+                language,
+                changeLanguage: (nextLanguage) => {
+                    language = nextLanguage;
+                    return Promise.resolve();
+                },
+            },
+        }),
+        initReactI18next: {
+            type: '3rdParty',
+            init: () => { },
         },
-    }),
-    initReactI18next: {
-        type: '3rdParty',
-        init: () => { },
-    },
-}));
+        __setMockLanguage: (nextLanguage) => {
+            language = nextLanguage;
+        },
+        __setTranslationOverride: (key, value, nextLanguage) => {
+            const overrideKey = nextLanguage ? `${nextLanguage}:${key}` : key;
+            overrides.set(overrideKey, value);
+        },
+        __resetTranslations: () => {
+            overrides.clear();
+            language = 'en';
+        },
+    };
+});
 
 // More robust AccessibilityInfo mock
-jest.mock('react-native/Libraries/Components/AccessibilityInfo/AccessibilityInfo', () => ({
-    __esModule: true,
-    default: {
+jest.mock('react-native/Libraries/Components/AccessibilityInfo/AccessibilityInfo', () => {
+    let screenReaderEnabled = false;
+    let reduceMotionEnabled = false;
+    const listeners = {
+        screenReaderChanged: new Set(),
+        reduceMotionChanged: new Set(),
+    };
+
+    const addEventListener = jest.fn((eventName, listener) => {
+        listeners[eventName]?.add(listener);
+        return {
+            remove: () => {
+                listeners[eventName]?.delete(listener);
+            },
+        };
+    });
+
+    const api = {
         announceForAccessibility: jest.fn(),
-        isScreenReaderEnabled: jest.fn().mockResolvedValue(false),
-        isReduceMotionEnabled: jest.fn().mockResolvedValue(false),
-        addEventListener: jest.fn(),
+        isScreenReaderEnabled: jest.fn().mockImplementation(async () => screenReaderEnabled),
+        isReduceMotionEnabled: jest.fn().mockImplementation(async () => reduceMotionEnabled),
+        addEventListener,
         removeEventListener: jest.fn(),
-    },
-    announceForAccessibility: jest.fn(),
-    isScreenReaderEnabled: jest.fn().mockResolvedValue(false),
-    isReduceMotionEnabled: jest.fn().mockResolvedValue(false),
-    addEventListener: jest.fn(),
-    removeEventListener: jest.fn(),
-}));
+        __setReduceMotionEnabled: (nextValue) => {
+            reduceMotionEnabled = nextValue;
+            listeners.reduceMotionChanged.forEach((listener) => listener(nextValue));
+        },
+        __setScreenReaderEnabled: (nextValue) => {
+            screenReaderEnabled = nextValue;
+            listeners.screenReaderChanged.forEach((listener) => listener(nextValue));
+        },
+        __resetAccessibilityState: () => {
+            screenReaderEnabled = false;
+            reduceMotionEnabled = false;
+            listeners.screenReaderChanged.clear();
+            listeners.reduceMotionChanged.clear();
+        },
+    };
+
+    return {
+        __esModule: true,
+        default: api,
+        ...api,
+    };
+});

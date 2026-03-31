@@ -1,57 +1,61 @@
 import React from 'react';
+import { useTranslation } from 'react-i18next';
 import { Box } from '@/components/ui/box';
-import { Text } from '@/components/ui/text';
-import { Pressable } from '@/components/ui/pressable';
-import { Image } from '@/components/ui/image';
 import { MaterialSymbols } from './MaterialSymbols';
-import { ScreenHeaderShell } from './ScreenShell';
+import {
+  HeaderActionPlaceholder,
+  HeaderBackButton,
+  HeaderTitleBlock,
+  ScreenHeaderShell,
+} from './ScreenShell';
+import { screenChromeTokens } from '../../utils/themeTokens';
 
 interface HeaderBarProps {
   title: string;
+  subtitle?: string;
   onBack?: () => void;
-  showProfile?: boolean;
+  backAccessibilityLabel?: string;
+  backButtonTestID?: string;
+  rightAccessory?: React.ReactNode;
+  showBrand?: boolean;
+  brandIconName?: React.ComponentProps<typeof MaterialSymbols>['name'];
+  titleLines?: number;
 }
 
-export const HeaderBar = ({ title, onBack, showProfile = false }: HeaderBarProps) => {
-  const sideWidth = showProfile ? 96 : 40;
-
-  const content = (
-    <>
-      <Box style={{ width: sideWidth }} className="items-start justify-center">
-        {onBack ? (
-          <Pressable onPress={onBack} className="active:opacity-70">
-            <MaterialSymbols name="arrow-back-ios-new" size={24} className="text-primary-500" />
-          </Pressable>
-        ) : (
-          <Box className="flex h-10 w-10 items-center justify-center rounded-full bg-primary-500/10">
-            <MaterialSymbols name="terminal" size={24} className="text-primary-500" />
-          </Box>
-        )}
-      </Box>
-
-      <Box className="flex-1 items-center px-2">
-        <Text className="text-xl font-bold tracking-tight text-typography-900 dark:text-typography-100">
-          {title}
-        </Text>
-      </Box>
-
-      <Box style={{ width: sideWidth }} className="flex-row items-center justify-end gap-3">
-        {showProfile && (
-          <Box className="w-8 h-8 rounded-full bg-primary-500/20 items-center justify-center overflow-hidden border border-primary-500/30">
-            <Image
-              source={{ uri: "https://lh3.googleusercontent.com/aida-public/AB6AXuCqNWAZMZvtAQjBF9FQ-Ymu-tSmuLeRqqO16vZ41k3qnCZPlJZqKWaP1u4vCa4uM7MoFx4hwH84T6aSbztQ7kelrlnuqttZlqDr7ldshimP6SG0HqhlsHDhrB1WXbixUYFbs_8g3lEsddq3PrhcVEB5PYPEyFfAIuQJsHdTQZmquJwhGl1jtML0VjHph_H2ZOOawzZvR0J5lfOfs87hUpid8PY0Aa_fafpFYooVluOzKdEBNW1zox2_6HhqhHPt88ZG_kyV9wNzjIh-" }}
-              alt="Profile Picture"
-              className="w-full h-full object-cover"
-            />
-          </Box>
-        )}
-      </Box>
-    </>
-  );
-
+export const HeaderBar = ({
+  title,
+  subtitle,
+  onBack,
+  backAccessibilityLabel,
+  backButtonTestID,
+  rightAccessory,
+  showBrand = false,
+  brandIconName = 'terminal',
+  titleLines = 2,
+}: HeaderBarProps) => {
+  const { t } = useTranslation();
+  const resolvedBackAccessibilityLabel = backAccessibilityLabel ?? t('chat.headerBackAccessibilityLabel');
   return (
-    <ScreenHeaderShell contentClassName="px-4">
-      <Box className="h-14 flex-row items-center">{content}</Box>
+    <ScreenHeaderShell contentClassName={screenChromeTokens.headerHorizontalPaddingClassName}>
+      <Box className={`${screenChromeTokens.headerContentMinHeightClassName} flex-row items-center ${screenChromeTokens.headerContentGapClassName} ${screenChromeTokens.headerContentVerticalPaddingClassName}`}>
+        {onBack ? (
+          <HeaderBackButton
+            testID={backButtonTestID}
+            onPress={onBack}
+            accessibilityLabel={resolvedBackAccessibilityLabel}
+          />
+        ) : showBrand ? (
+          <Box className="h-11 w-11 items-center justify-center rounded-full border border-primary-500/15 bg-primary-500/10">
+            <MaterialSymbols name={brandIconName} size={21} className="text-primary-500" />
+          </Box>
+        ) : (
+          <HeaderActionPlaceholder />
+        )}
+
+        <HeaderTitleBlock title={title} subtitle={subtitle} titleLines={titleLines} />
+
+        {rightAccessory ?? <HeaderActionPlaceholder />}
+      </Box>
     </ScreenHeaderShell>
   );
 };

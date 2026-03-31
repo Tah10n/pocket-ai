@@ -9,28 +9,35 @@ import Animated, {
   withRepeat,
   withTiming,
 } from 'react-native-reanimated';
+import { useMotionPreferences } from '../../hooks/useDeviceMetrics';
 
 const AnimatedView = Animated.createAnimatedComponent(View);
 
 export function ThinkingPulse() {
+  const motion = useMotionPreferences();
   const progress = useSharedValue(0);
 
   useEffect(() => {
+    if (motion.motionPreset === 'minimal') {
+      progress.value = 0;
+      return;
+    }
+
     progress.value = withRepeat(
       withTiming(1, {
-        duration: 1200,
+        duration: motion.motionPreset === 'full' ? 1200 : 900,
         easing: Easing.inOut(Easing.ease),
       }),
       -1,
       false,
     );
-  }, [progress]);
+  }, [motion.motionPreset, progress]);
 
   const haloStyle = useAnimatedStyle(() => ({
-    opacity: interpolate(progress.value, [0, 0.5, 1], [0.28, 0.12, 0.28], Extrapolation.CLAMP),
+    opacity: interpolate(progress.value, [0, 0.5, 1], motion.motionPreset === 'full' ? [0.28, 0.12, 0.28] : [0.18, 0.12, 0.18], Extrapolation.CLAMP),
     transform: [
       {
-        scale: interpolate(progress.value, [0, 0.5, 1], [0.94, 1.1, 0.94], Extrapolation.CLAMP),
+        scale: interpolate(progress.value, [0, 0.5, 1], motion.motionPreset === 'full' ? [0.94, 1.1, 0.94] : [0.98, 1.03, 0.98], Extrapolation.CLAMP),
       },
     ],
   }));
@@ -42,10 +49,10 @@ export function ThinkingPulse() {
       opacity: interpolate(shifted, [0, 0.35, 0.7, 1], [0.35, 1, 0.45, 0.35], Extrapolation.CLAMP),
       transform: [
         {
-          scale: interpolate(shifted, [0, 0.35, 0.7, 1], [0.8, 1.18, 0.9, 0.8], Extrapolation.CLAMP),
+          scale: interpolate(shifted, [0, 0.35, 0.7, 1], motion.motionPreset === 'full' ? [0.8, 1.18, 0.9, 0.8] : [0.92, 1.05, 0.95, 0.92], Extrapolation.CLAMP),
         },
         {
-          translateY: interpolate(shifted, [0, 0.35, 0.7, 1], [1.5, -1.5, 0.5, 1.5], Extrapolation.CLAMP),
+          translateY: interpolate(shifted, [0, 0.35, 0.7, 1], motion.motionPreset === 'full' ? [1.5, -1.5, 0.5, 1.5] : [0.5, -0.75, 0.25, 0.5], Extrapolation.CLAMP),
         },
       ],
     };
@@ -58,10 +65,10 @@ export function ThinkingPulse() {
       opacity: interpolate(shifted, [0, 0.35, 0.7, 1], [0.35, 1, 0.45, 0.35], Extrapolation.CLAMP),
       transform: [
         {
-          scale: interpolate(shifted, [0, 0.35, 0.7, 1], [0.8, 1.18, 0.9, 0.8], Extrapolation.CLAMP),
+          scale: interpolate(shifted, [0, 0.35, 0.7, 1], motion.motionPreset === 'full' ? [0.8, 1.18, 0.9, 0.8] : [0.92, 1.05, 0.95, 0.92], Extrapolation.CLAMP),
         },
         {
-          translateY: interpolate(shifted, [0, 0.35, 0.7, 1], [1.5, -1.5, 0.5, 1.5], Extrapolation.CLAMP),
+          translateY: interpolate(shifted, [0, 0.35, 0.7, 1], motion.motionPreset === 'full' ? [1.5, -1.5, 0.5, 1.5] : [0.5, -0.75, 0.25, 0.5], Extrapolation.CLAMP),
         },
       ],
     };
@@ -74,14 +81,27 @@ export function ThinkingPulse() {
       opacity: interpolate(shifted, [0, 0.35, 0.7, 1], [0.35, 1, 0.45, 0.35], Extrapolation.CLAMP),
       transform: [
         {
-          scale: interpolate(shifted, [0, 0.35, 0.7, 1], [0.8, 1.18, 0.9, 0.8], Extrapolation.CLAMP),
+          scale: interpolate(shifted, [0, 0.35, 0.7, 1], motion.motionPreset === 'full' ? [0.8, 1.18, 0.9, 0.8] : [0.92, 1.05, 0.95, 0.92], Extrapolation.CLAMP),
         },
         {
-          translateY: interpolate(shifted, [0, 0.35, 0.7, 1], [1.5, -1.5, 0.5, 1.5], Extrapolation.CLAMP),
+          translateY: interpolate(shifted, [0, 0.35, 0.7, 1], motion.motionPreset === 'full' ? [1.5, -1.5, 0.5, 1.5] : [0.5, -0.75, 0.25, 0.5], Extrapolation.CLAMP),
         },
       ],
     };
   });
+
+  if (motion.motionPreset === 'minimal') {
+    return (
+      <View className="relative h-8 w-8 items-center justify-center">
+        <View className="absolute h-8 w-8 rounded-full bg-primary-500/10 dark:bg-primary-500/20" />
+        <View className="flex-row items-center justify-center gap-1">
+          <View className="h-1.5 w-1.5 rounded-full bg-primary-500" />
+          <View className="h-1.5 w-1.5 rounded-full bg-primary-500 opacity-80" />
+          <View className="h-1.5 w-1.5 rounded-full bg-primary-500 opacity-60" />
+        </View>
+      </View>
+    );
+  }
 
   return (
     <View className="relative h-8 w-8 items-center justify-center">

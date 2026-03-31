@@ -1,8 +1,8 @@
 import React from 'react';
 import { Box } from '@/components/ui/box';
 import { Text } from '@/components/ui/text';
-import { Pressable } from '@/components/ui/pressable';
 import { MaterialSymbols } from './MaterialSymbols';
+import { ScreenActionPill, ScreenCard, ScreenStack } from './ScreenShell';
 import { useLLMEngine } from '@/hooks/useLLMEngine';
 import { registry } from '@/services/LocalStorageRegistry';
 import { EngineStatus } from '@/types/models';
@@ -39,7 +39,7 @@ export const ActiveModelCard = ({ onSwapModel }: ActiveModelCardProps) => {
   const ctaLabel = hasActiveModel ? 'Swap Model' : hasDownloadedModels ? 'Choose Model' : 'Browse Models';
 
   return (
-    <Box className="mx-4 mt-3 rounded-xl border border-outline-200 bg-background-50 shadow-xl dark:border-primary-500/20 dark:bg-primary-500/10 overflow-hidden">
+    <ScreenCard className="overflow-hidden shadow-xl" tone={hasActiveModel ? 'accent' : 'default'} padding="none">
       <Box className="border-b border-outline-200 px-4 py-2.5 dark:border-outline-800">
         <Box className="flex-row items-center gap-2">
           <Box className={statusDotClassName} />
@@ -49,7 +49,7 @@ export const ActiveModelCard = ({ onSwapModel }: ActiveModelCardProps) => {
         </Box>
       </Box>
 
-      <Box className="px-4 py-3.5 gap-0.5">
+      <ScreenStack className="px-4 py-3.5" gap="compact">
         <Text className="text-typography-500 dark:text-typography-400 text-sm font-medium">Active Model</Text>
         <Box className="flex-row flex-wrap items-baseline gap-2">
             <Text className="text-typography-900 dark:text-typography-100 text-xl font-bold tracking-tight">{modelName}</Text>
@@ -69,15 +69,12 @@ export const ActiveModelCard = ({ onSwapModel }: ActiveModelCardProps) => {
               <Text className="text-typography-500 dark:text-typography-400 text-xs">{speedLabel}</Text>
             </Box>
           </Box>
-          
-          <Pressable 
-            onPress={onSwapModel} 
-            className="h-9 shrink-0 items-center justify-center rounded-lg bg-primary-500 px-3.5 active:opacity-80"
-          >
+
+          <ScreenActionPill onPress={onSwapModel} tone="primary" size="compact" className="shrink-0">
             <Text className="text-typography-0 text-sm font-semibold">{ctaLabel}</Text>
-          </Pressable>
+          </ScreenActionPill>
         </Box>
-      </Box>
-    </Box>
+      </ScreenStack>
+    </ScreenCard>
   );
 };

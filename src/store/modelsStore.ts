@@ -1,7 +1,6 @@
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
 import { mmkvStorage } from '../lib/mmkv';
-import { LifecycleStatus } from '../types/models';
 
 export type ModelSizeRange = 'small' | 'medium' | 'large';
 export type ModelSortField = 'name' | 'size' | 'downloaded' | 'downloads' | 'likes';
@@ -12,7 +11,6 @@ export const MODELS_PAGE_SIZE = 10;
 export interface ModelFilterCriteria {
   fitsInRamOnly: boolean;
   noTokenRequiredOnly: boolean;
-  statuses: LifecycleStatus[];
   sizeRanges: ModelSizeRange[];
 }
 
@@ -30,7 +28,6 @@ interface ModelsStoreState {
   showFullCatalog: () => void;
   setFitsInRamOnly: (enabled: boolean) => void;
   setNoTokenRequiredOnly: (enabled: boolean) => void;
-  toggleStatus: (status: LifecycleStatus) => void;
   toggleSizeRange: (sizeRange: ModelSizeRange) => void;
   setSort: (sort: ModelSortPreference) => void;
   clearFilters: () => void;
@@ -39,7 +36,6 @@ interface ModelsStoreState {
 export const DEFAULT_FILTERS: ModelFilterCriteria = {
   fitsInRamOnly: false,
   noTokenRequiredOnly: false,
-  statuses: [],
   sizeRanges: [],
 };
 
@@ -57,7 +53,6 @@ function createDefaultFilters(): ModelFilterCriteria {
   return {
     fitsInRamOnly: false,
     noTokenRequiredOnly: false,
-    statuses: [],
     sizeRanges: [],
   };
 }
@@ -66,7 +61,6 @@ function createDiscoveryFilters(hasToken: boolean): ModelFilterCriteria {
   return {
     fitsInRamOnly: true,
     noTokenRequiredOnly: !hasToken,
-    statuses: [],
     sizeRanges: [],
   };
 }
@@ -98,11 +92,6 @@ function normalizeFilters(filters: unknown): ModelFilterCriteria {
   return {
     fitsInRamOnly: source.fitsInRamOnly === true,
     noTokenRequiredOnly: source.noTokenRequiredOnly === true,
-    statuses: Array.isArray(source.statuses)
-      ? source.statuses.filter((status): status is LifecycleStatus => (
-          Object.values(LifecycleStatus).includes(status as LifecycleStatus)
-        ))
-      : [],
     sizeRanges: Array.isArray(source.sizeRanges)
       ? source.sizeRanges.filter(isModelSizeRange)
       : [],
@@ -133,7 +122,6 @@ function hasNonDefaultPreferences(
   return (
     filters.fitsInRamOnly
     || filters.noTokenRequiredOnly
-    || filters.statuses.length > 0
     || filters.sizeRanges.length > 0
     || sort.field !== DEFAULT_SORT.field
     || sort.direction !== DEFAULT_SORT.direction
@@ -164,7 +152,6 @@ export const useModelsStore = create<ModelsStoreState>()(
           const noFilterChange =
             state.filters.fitsInRamOnly === nextFilters.fitsInRamOnly
             && state.filters.noTokenRequiredOnly === nextFilters.noTokenRequiredOnly
-            && state.filters.statuses.length === 0
             && state.filters.sizeRanges.length === 0;
           const noSortChange =
             state.sort.field === DISCOVERY_SORT.field
@@ -199,15 +186,6 @@ export const useModelsStore = create<ModelsStoreState>()(
           discoveryMode: 'custom',
         })),
 
-      toggleStatus: (status) =>
-        set((state) => ({
-          filters: {
-            ...state.filters,
-            statuses: toggleValue(state.filters.statuses, status),
-          },
-          discoveryMode: 'custom',
-        })),
-
       toggleSizeRange: (sizeRange) =>
         set((state) => ({
           filters: {
@@ -232,19 +210,29 @@ export const useModelsStore = create<ModelsStoreState>()(
     }),
     {
       name: 'models-list-preferences',
-      version: 2,
+      version: 3,
       storage: createJSONStorage(() => mmkvStorage),
       partialize: (state) => ({
         filters: state.filters,
         sort: state.sort,
         discoveryMode: state.discoveryMode,
       }),
-      migrate: (persistedState) => {
+      migrate: (persistedState, version) => {
         const state = (persistedState ?? {}) as Partial<ModelsStoreState>;
         const filters = normalizeFilters(state.filters);
         const sort = normalizeSort(state.sort);
-        const discoveryMode = normalizeDiscoveryMode(state.discoveryMode)
-          ?? (hasNonDefaultPreferences(filters, sort) ? 'custom' : 'uninitialized');
+        const persistedDiscoveryMode = normalizeDiscoveryMode(state.discoveryMode);
+        const previousVersion = typeof version === 'number' ? version : 0;
+        const discoveryMode = previousVersion < 3
+          ? (
+            persistedDiscoveryMode === 'guided' || persistedDiscoveryMode === 'full'
+              ? persistedDiscoveryMode
+              : hasNonDefaultPreferences(filters, sort)
+                ? 'custom'
+                : 'uninitialized'
+          )
+          : persistedDiscoveryMode
+            ?? (hasNonDefaultPreferences(filters, sort) ? 'custom' : 'uninitialized');
 
         return {
           ...state,

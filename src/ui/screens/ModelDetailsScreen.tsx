@@ -4,9 +4,8 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useTranslation } from 'react-i18next';
 import { Box } from '@/components/ui/box';
 import { Button, ButtonText } from '@/components/ui/button';
-import { MaterialSymbols } from '@/components/ui/MaterialSymbols';
-import { Pressable } from '@/components/ui/pressable';
-import { ScreenContent, ScreenHeaderShell } from '@/components/ui/ScreenShell';
+import { HeaderBar } from '@/components/ui/HeaderBar';
+import { ScreenCard, ScreenContent, ScreenStack } from '@/components/ui/ScreenShell';
 import { ScrollView } from '@/components/ui/scroll-view';
 import { Spinner } from '@/components/ui/spinner';
 import { Text } from '@/components/ui/text';
@@ -36,14 +35,14 @@ function formatCount(value: number | null | undefined, fallback: string): string
 
 function MetricCard({ label, value }: { label: string; value: string }) {
   return (
-    <Box className="min-w-[120px] flex-1 rounded-2xl border border-outline-200 bg-background-50 p-3 dark:border-outline-800 dark:bg-background-900/60">
+    <ScreenCard className="min-w-[120px] flex-1" padding="compact">
       <Text className="text-[10px] font-semibold uppercase tracking-wide text-typography-500 dark:text-typography-400">
         {label}
       </Text>
       <Text className="mt-2 text-sm font-semibold text-typography-900 dark:text-typography-100">
         {value}
       </Text>
-    </Box>
+    </ScreenCard>
   );
 }
 
@@ -71,14 +70,14 @@ function InfoSection({
   children: React.ReactNode;
 }) {
   return (
-    <Box className="mt-4 rounded-2xl border border-outline-200 bg-background-50 p-4 dark:border-outline-800 dark:bg-background-900/60">
+    <ScreenCard>
       <Text className="text-sm font-semibold text-typography-900 dark:text-typography-100">
         {title}
       </Text>
       <Box className="mt-3">
         {children}
       </Box>
-    </Box>
+    </ScreenCard>
   );
 }
 
@@ -211,151 +210,142 @@ export function ModelDetailsScreen() {
     router.push('/huggingface-token' as any);
   }, [router]);
 
+  const handleBack = useCallback(() => {
+    if (router.canGoBack()) {
+      router.back();
+      return;
+    }
+
+    router.replace('/(tabs)/models' as any);
+  }, [router]);
+
   return (
     <Box className="flex-1 bg-background-0 dark:bg-background-950">
-      <ScreenHeaderShell contentClassName="px-4 pb-3 pt-1">
-        <Box className="flex-row items-center gap-3">
-          <Pressable
-            onPress={() => {
-              if (router.canGoBack()) {
-                router.back();
-                return;
-              }
-
-              router.replace('/(tabs)/models' as any);
-            }}
-            className="h-11 w-11 items-center justify-center rounded-full bg-background-50 active:opacity-70 dark:bg-background-900/60"
-          >
-            <MaterialSymbols name="arrow-back-ios-new" size={20} className="text-primary-500" />
-          </Pressable>
-
-          <Box className="flex-1">
-            <Text className="text-xl font-bold text-typography-900 dark:text-typography-100">
-              {t('models.detailTitle')}
-            </Text>
-            <Text className="mt-1 text-sm text-typography-500 dark:text-typography-400">
-              {model?.id ?? modelId}
-            </Text>
-          </Box>
-        </Box>
-      </ScreenHeaderShell>
+      <HeaderBar
+        title={t('models.detailTitle')}
+        subtitle={model?.id ?? modelId}
+        onBack={handleBack}
+        backAccessibilityLabel={t('chat.headerBackAccessibilityLabel')}
+      />
 
       <ScrollView className="flex-1">
-        <ScreenContent className="flex-1 px-4 pb-6 pt-3">
-          {loading && !model ? (
-            <Box className="items-center justify-center pt-16">
-              <Spinner size="large" />
-              <Text className="mt-3 text-typography-500">{t('common.loading')}</Text>
-            </Box>
-          ) : null}
+        <ScreenContent className="flex-1 pt-3">
+          <ScreenStack>
+            {loading && !model ? (
+              <Box className="items-center justify-center pt-16">
+                <Spinner size="large" />
+                <Text className="mt-3 text-typography-500">{t('common.loading')}</Text>
+              </Box>
+            ) : null}
 
-          {!loading && !model ? (
-            <Box className="rounded-2xl border border-outline-200 bg-background-50 p-4 dark:border-outline-800 dark:bg-background-900/60">
-              <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">
-                {t('models.detailUnavailable')}
-              </Text>
-              <Text className="mt-2 text-sm text-typography-500 dark:text-typography-400">
-                {errorMessage ?? t('models.detailMissingModel')}
-              </Text>
-              {modelId ? (
-                <Button action="secondary" className="mt-4 self-start" onPress={() => { void handleOpenModelPage(); }}>
-                  <ButtonText className="text-typography-900 dark:text-typography-100">
-                    {t('models.openOnHuggingFace')}
-                  </ButtonText>
-                </Button>
-              ) : null}
-            </Box>
-          ) : null}
-
-          {model ? (
-            <>
-              {errorMessage ? (
-                <Box className="mb-3 rounded-2xl border border-warning-300 bg-background-warning px-4 py-3 dark:border-warning-800">
-                  <Text className="text-sm text-warning-700 dark:text-warning-300">{errorMessage}</Text>
-                </Box>
-              ) : null}
-
-              <Box className="rounded-2xl border border-outline-200 bg-background-50 p-4 dark:border-outline-800 dark:bg-background-900/60">
-                <Text className="text-lg font-bold text-typography-900 dark:text-typography-100">
-                  {model.name}
+            {!loading && !model ? (
+              <ScreenCard>
+                <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">
+                  {t('models.detailUnavailable')}
                 </Text>
-                <Text className="mt-1 text-sm text-typography-500 dark:text-typography-400">
-                  {model.author}
+                <Text className="mt-2 text-sm text-typography-500 dark:text-typography-400">
+                  {errorMessage ?? t('models.detailMissingModel')}
                 </Text>
-
-                <Box className="mt-4 flex-row flex-wrap gap-2">
-                  <MetricCard
-                    label={t('models.sizeLabel')}
-                    value={formatBytes(model.size, t('models.sizeUnknown'))}
-                  />
-                  <MetricCard
-                    label={t('models.accessLabel')}
-                    value={accessStateLabel}
-                  />
-                  <MetricCard
-                    label={t('models.ramFitLabel')}
-                    value={ramStateLabel}
-                  />
-                  <MetricCard
-                    label={t('models.downloadsLabel')}
-                    value={formatCount(model.downloads, t('models.metricUnavailable'))}
-                  />
-                  <MetricCard
-                    label={t('models.likesLabel')}
-                    value={formatCount(model.likes, t('models.metricUnavailable'))}
-                  />
-                </Box>
-
-                <Box className="mt-4 flex-row flex-wrap gap-3">
-                  {model.accessState === ModelAccessState.AUTH_REQUIRED ? (
-                    <Button onPress={handleOpenTokenSettings}>
-                      <ButtonText>{t('models.setToken')}</ButtonText>
-                    </Button>
-                  ) : null}
-                  <Button action="secondary" onPress={() => { void handleOpenModelPage(); }}>
+                {modelId ? (
+                  <Button action="secondary" className="mt-4 self-start" onPress={() => { void handleOpenModelPage(); }}>
                     <ButtonText className="text-typography-900 dark:text-typography-100">
                       {t('models.openOnHuggingFace')}
                     </ButtonText>
                   </Button>
-                </Box>
-              </Box>
+                ) : null}
+              </ScreenCard>
+            ) : null}
 
-              <InfoSection title={t('models.descriptionLabel')}>
-                <Text className="text-sm leading-6 text-typography-700 dark:text-typography-300">
-                  {model.description ?? t('models.descriptionUnavailable')}
-                </Text>
-              </InfoSection>
+            {model ? (
+              <>
+                {errorMessage ? (
+                  <ScreenCard tone="warning">
+                    <Text className="text-sm text-warning-700 dark:text-warning-300">{errorMessage}</Text>
+                  </ScreenCard>
+                ) : null}
 
-              {metadataMetrics.length > 0 ? (
-                <InfoSection title={t('models.metadataLabel')}>
-                  <Box className="flex-row flex-wrap gap-3">
-                    {metadataMetrics.map((item) => (
-                      <MetricCard key={item.label} label={item.label} value={item.value} />
-                    ))}
-                  </Box>
-                </InfoSection>
-              ) : null}
-
-              <InfoSection title={t('models.tagsLabel')}>
-                {model.tags?.length ? (
-                  <Box className="flex-row flex-wrap gap-2">
-                    {model.tags.slice(0, 16).map((tag) => (
-                      <Box
-                        key={tag}
-                        className="rounded-full border border-outline-200 bg-background-0 px-3 py-1.5 dark:border-outline-700 dark:bg-background-950"
-                      >
-                        <Text className="text-xs text-typography-700 dark:text-typography-300">{tag}</Text>
-                      </Box>
-                    ))}
-                  </Box>
-                ) : (
-                  <Text className="text-sm text-typography-500 dark:text-typography-400">
-                    {t('models.tagsUnavailable')}
+                <ScreenCard>
+                  <Text className="text-lg font-bold text-typography-900 dark:text-typography-100">
+                    {model.name}
                   </Text>
-                )}
-              </InfoSection>
-            </>
-          ) : null}
+                  <Text className="mt-1 text-sm text-typography-500 dark:text-typography-400">
+                    {model.author}
+                  </Text>
+
+                  <Box className="mt-4 flex-row flex-wrap gap-2">
+                    <MetricCard
+                      label={t('models.sizeLabel')}
+                      value={formatBytes(model.size, t('models.sizeUnknown'))}
+                    />
+                    <MetricCard
+                      label={t('models.accessLabel')}
+                      value={accessStateLabel}
+                    />
+                    <MetricCard
+                      label={t('models.ramFitLabel')}
+                      value={ramStateLabel}
+                    />
+                    <MetricCard
+                      label={t('models.downloadsLabel')}
+                      value={formatCount(model.downloads, t('models.metricUnavailable'))}
+                    />
+                    <MetricCard
+                      label={t('models.likesLabel')}
+                      value={formatCount(model.likes, t('models.metricUnavailable'))}
+                    />
+                  </Box>
+
+                  <Box className="mt-4 flex-row flex-wrap gap-3">
+                    {model.accessState === ModelAccessState.AUTH_REQUIRED ? (
+                      <Button onPress={handleOpenTokenSettings}>
+                        <ButtonText>{t('models.setToken')}</ButtonText>
+                      </Button>
+                    ) : null}
+                    <Button action="secondary" onPress={() => { void handleOpenModelPage(); }}>
+                      <ButtonText className="text-typography-900 dark:text-typography-100">
+                        {t('models.openOnHuggingFace')}
+                      </ButtonText>
+                    </Button>
+                  </Box>
+                </ScreenCard>
+
+                <InfoSection title={t('models.descriptionLabel')}>
+                  <Text className="text-sm leading-6 text-typography-700 dark:text-typography-300">
+                    {model.description ?? t('models.descriptionUnavailable')}
+                  </Text>
+                </InfoSection>
+
+                {metadataMetrics.length > 0 ? (
+                  <InfoSection title={t('models.metadataLabel')}>
+                    <Box className="flex-row flex-wrap gap-3">
+                      {metadataMetrics.map((item) => (
+                        <MetricCard key={item.label} label={item.label} value={item.value} />
+                      ))}
+                    </Box>
+                  </InfoSection>
+                ) : null}
+
+                <InfoSection title={t('models.tagsLabel')}>
+                  {model.tags?.length ? (
+                    <Box className="flex-row flex-wrap gap-2">
+                      {model.tags.slice(0, 16).map((tag) => (
+                        <Box
+                          key={tag}
+                          className="rounded-full border border-outline-200 bg-background-0 px-3 py-1.5 dark:border-outline-700 dark:bg-background-950"
+                        >
+                          <Text className="text-xs text-typography-700 dark:text-typography-300">{tag}</Text>
+                        </Box>
+                      ))}
+                    </Box>
+                  ) : (
+                    <Text className="text-sm text-typography-500 dark:text-typography-400">
+                      {t('models.tagsUnavailable')}
+                    </Text>
+                  )}
+                </InfoSection>
+              </>
+            ) : null}
+          </ScreenStack>
         </ScreenContent>
       </ScrollView>
     </Box>

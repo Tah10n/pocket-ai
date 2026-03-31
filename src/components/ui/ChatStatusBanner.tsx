@@ -1,7 +1,7 @@
 import React from 'react';
 import { Box } from '@/components/ui/box';
+import { Button, ButtonText } from '@/components/ui/button';
 import { Text } from '@/components/ui/text';
-import { Pressable } from '@/components/ui/pressable';
 import { MaterialSymbols } from './MaterialSymbols';
 
 type ChatStatusBannerTone = 'warning' | 'info' | 'neutral';
@@ -86,12 +86,14 @@ export function ChatStatusBanner({
             <Text className={`mt-1 text-sm leading-5 ${styles.description}`}>{description}</Text>
           ) : null}
           {actionLabel && onAction ? (
-            <Pressable
+            <Button
               onPress={onAction}
-              className={`mt-3 self-start rounded-full border px-3.5 py-2 active:opacity-70 ${styles.action}`}
+              action="secondary"
+              size="sm"
+              className={`mt-3 self-start ${styles.action}`}
             >
-              <Text className={`text-sm font-medium ${styles.actionText}`}>{actionLabel}</Text>
-            </Pressable>
+              <ButtonText className={styles.actionText}>{actionLabel}</ButtonText>
+            </Button>
           ) : null}
         </Box>
       </Box>

@@ -1,9 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { AccessibilityInfo } from 'react-native';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as Device from 'expo-device';
 import DeviceInfo from 'react-native-device-info';
 import { registry } from '../services/LocalStorageRegistry';
 import { getSystemMemorySnapshot } from '../services/SystemMetricsService';
 import { LifecycleStatus } from '../types/models';
+import { motionTokens } from '../utils/themeTokens';
 
 export interface DeviceMetrics {
   storage: {
@@ -37,8 +39,38 @@ interface UseDeviceMetricsOptions {
   refreshIntervalMs?: number;
 }
 
+export interface MotionPreferences {
+  prefersReducedMotion: boolean;
+  isWeakDevice: boolean;
+  motionPreset: 'full' | 'reduced' | 'minimal';
+  routeDurationMs: number;
+  sheetDurationMs: number;
+  inlineRevealDurationMs: number;
+  feedbackDurationMs: number;
+}
+
 function bytesToGb(value: number) {
   return value / (1024 * 1024 * 1024);
+}
+
+function buildMotionPreferences(prefersReducedMotion: boolean, totalMemoryBytes: number): MotionPreferences {
+  const totalMemoryGb = bytesToGb(totalMemoryBytes);
+  const isWeakDevice = totalMemoryGb > 0 && totalMemoryGb <= motionTokens.weakDeviceMemoryGb;
+  const motionPreset = prefersReducedMotion
+    ? 'minimal'
+    : isWeakDevice
+      ? 'reduced'
+      : 'full';
+
+  return {
+    prefersReducedMotion,
+    isWeakDevice,
+    motionPreset,
+    routeDurationMs: motionPreset === 'full' ? motionTokens.routeTransitionMs : 0,
+    sheetDurationMs: motionPreset === 'full' ? motionTokens.sheetTransitionMs : motionPreset === 'reduced' ? 160 : 0,
+    inlineRevealDurationMs: motionPreset === 'full' ? motionTokens.inlineRevealMs : motionPreset === 'reduced' ? 120 : 0,
+    feedbackDurationMs: motionPreset === 'full' ? motionTokens.feedbackMs : motionPreset === 'reduced' ? 100 : 0,
+  };
 }
 
 export const useDeviceMetrics = (options: UseDeviceMetricsOptions = {}) => {
@@ -177,3 +209,44 @@ export const useDeviceMetrics = (options: UseDeviceMetricsOptions = {}) => {
 
   return { metrics, refresh: loadMetrics };
 };
+
+export function useMotionPreferences() {
+  const [prefersReducedMotion, setPrefersReducedMotion] = useState(false);
+  const [totalMemoryBytes, setTotalMemoryBytes] = useState(() => Device.totalMemory ?? 0);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    void AccessibilityInfo.isReduceMotionEnabled().then((enabled) => {
+      if (isMounted) {
+        setPrefersReducedMotion(enabled);
+      }
+    });
+
+    void DeviceInfo.getTotalMemory()
+      .then((value) => {
+        if (isMounted) {
+          setTotalMemoryBytes(value);
+        }
+      })
+      .catch(() => {
+        if (isMounted) {
+          setTotalMemoryBytes(Device.totalMemory ?? 0);
+        }
+      });
+
+    const subscription = AccessibilityInfo.addEventListener('reduceMotionChanged', (enabled) => {
+      setPrefersReducedMotion(enabled);
+    });
+
+    return () => {
+      isMounted = false;
+      subscription.remove();
+    };
+  }, []);
+
+  return useMemo(
+    () => buildMotionPreferences(prefersReducedMotion, totalMemoryBytes),
+    [prefersReducedMotion, totalMemoryBytes],
+  );
+}

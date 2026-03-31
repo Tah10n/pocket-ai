@@ -1,6 +1,6 @@
 # Release Checklist
 
-Last updated: 2026-03-29
+Last updated: 2026-03-31
 
 ## Purpose
 
@@ -37,6 +37,18 @@ If the release affects model loading, chat, downloads, storage, or navigation be
 npm run android:emulator
 ```
 
+If the release changes shared theme, tab chrome, routed headers, localization fit, or motion behavior, also run the UI hardening gate:
+
+```bash
+npm run verify:mobile-change
+node .\scripts\android-scenarios.js --emulator --skip-build --scenario home-smoke
+node .\scripts\android-scenarios.js --emulator --skip-build --scenario bottom-tabs
+node .\scripts\android-scenarios.js --emulator --skip-build --scenario hf-catalog-hardening
+node .\scripts\android-scenarios.js --emulator --skip-build --scenario hf-token-education
+node .\scripts\android-scenarios.js --emulator --skip-build --scenario conversations-management
+node .\scripts\android-screen-capture.js --emulator --skip-build --screen home,models,settings,conversations,huggingface-token,model-details --output-dir artifacts/android-scenarios/manual-sample
+```
+
 ## Build commands
 
 Use the committed EAS profiles:
@@ -59,9 +71,11 @@ npm run build:all:production
 
 - Open `Models`.
 - Search the Hugging Face catalog while online.
+- Confirm `All Models` and `Downloaded` render as one segmented control inside the same page, not as two separate standalone buttons.
 - On first catalog open with no Hugging Face token configured, confirm guided discovery defaults to RAM-friendly public models and offers `Show full catalog`.
 - Search for a public GGUF model whose list metadata does not expose a reliable size and confirm the card shows a resolved size or `Unknown`, never `0.00 GB`.
-- Open `Filter` and `Sort` and confirm both panels stay collapsed by default, open independently, and do not permanently steal list height.
+- Open `Filter` and `Sort` and confirm both panels stay collapsed by default, open independently, use the compact trigger style, and do not permanently steal list height.
+- In `Filter`, confirm the visible criteria are limited to RAM, token, and size choices; do not show separate lifecycle categories such as `Available`, `Downloading`, or `Downloaded`.
 - Apply `No token required` and confirm gated/private repositories are excluded.
 - Apply `Most downloaded` and `Most popular` and confirm the catalog order updates without breaking cursor pagination.
 - Scroll through at least three catalog pages and confirm autoload appends unique results without jumping back or duplicating model IDs.
@@ -74,6 +88,7 @@ npm run build:all:production
 - Open model details from a catalog card and confirm description, tags, popularity metrics, and the `Open on HF` action render without breaking list navigation.
 - Change the Hugging Face token state, then reopen a gated or private model from the catalog and confirm the card plus detail screen agree on `Locked`, `Access denied`, or authorized access instead of showing stale access labels.
 - Download a GGUF model and wait for verification to finish.
+- Confirm model cards stay compact and do not render a separate `Status` chip.
 - On a downloaded model card, confirm the secondary `Settings` action opens the model controls sheet without leaving the list.
 - In model controls, confirm the context-window ceiling reflects the verified model limit or estimated device RAM headroom instead of exposing an obviously unsafe maximum.
 - Change the context window or GPU layers and confirm the sheet shows the pending load-profile state plus `Save load profile` for an inactive model or `Apply & reload` for the active model.
@@ -85,7 +100,9 @@ npm run build:all:production
 
 - Open `Chat` and send a prompt with a loaded model.
 - Confirm streaming, stop, and regenerate behavior.
-- While sending, confirm the header stays stable and the composer does not visibly jump on Android.
+- While sending, confirm the header stays stable, does not add a redundant `Generating` label, and the composer does not visibly jump on Android.
+- With the Android keyboard open, confirm the composer keeps a small but visible gap above the keyboard instead of touching it or floating too high.
+- Confirm the preset and model chips stay aligned to the normal chat content inset and do not inherit extra left offset from the back-button slot.
 - On a device with a gesture area or home indicator, confirm the composer keeps safe bottom spacing and the send button never falls into the unsafe zone.
 - If the active model exposes reasoning, expand `Thinking` or `Thought` and confirm the main reply remains outside the inner reasoning bubble.
 - Copy an assistant reply and confirm the clipboard contains only the final assistant message, not the reasoning trace.
@@ -102,6 +119,13 @@ npm run build:all:production
 - Open `Privacy & Disclosures` from `Settings` and confirm the content renders correctly.
 - Open the Hugging Face token screen from `Settings`, verify save and clear both work, confirm the token field remains masked, and verify the education copy plus `Get token` external-link CTA.
 - Open `Presets` and confirm preset creation, editing, activation, and deletion still work.
+
+### Shared UI hardening follow-up
+
+- Review `Home`, `Chat`, `Models`, and `Settings` with the shared tab chrome and confirm tab labels, icon contrast, and header rhythm remain consistent.
+- Review `Conversations`, `Presets`, `Storage Manager`, `Privacy & Disclosures`, `Hugging Face Token`, `Model Details`, and the modal route and confirm routed back affordances stay in one visual zone.
+- Recheck the shipped routes in both English and Russian at the defined dynamic-type checkpoints.
+- Run one approved iOS smoke pass plus one weak-device or low-memory Android pass when shared motion or typography changes.
 
 ### Storage and cleanup
 

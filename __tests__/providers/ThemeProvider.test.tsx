@@ -21,12 +21,14 @@ jest.mock('../../src/services/SettingsStore', () => ({
 }));
 
 function ThemeProbe() {
-  const { mode, resolvedMode, setTheme } = useTheme();
+  const { mode, resolvedMode, colors, navigationTheme, setTheme } = useTheme();
 
   return (
     <>
       <Text testID="theme-mode">{mode}</Text>
       <Text testID="resolved-mode">{resolvedMode}</Text>
+      <Text testID="primary-color">{colors.primary}</Text>
+      <Text testID="navigation-card">{navigationTheme.colors.card}</Text>
       <Pressable testID="set-system" onPress={() => setTheme('system')}>
         <Text>System</Text>
       </Pressable>
@@ -67,6 +69,8 @@ describe('ThemeProvider', () => {
 
     expect(getByTestId('theme-mode').props.children).toBe('system');
     expect(getByTestId('resolved-mode').props.children).toBe('dark');
+    expect(getByTestId('primary-color').props.children).toBe('#1f7aff');
+    expect(getByTestId('navigation-card').props.children).toBe('rgba(17, 27, 42, 0.92)');
     expect(mockSetColorScheme).toHaveBeenCalledWith('system');
     expect(mockUpdateSettings).not.toHaveBeenCalled();
   });

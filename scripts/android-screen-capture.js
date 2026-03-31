@@ -14,12 +14,39 @@ const dumpPathOnDevice = "/sdcard/window_dump.xml";
 const homeLauncherLabel = "Pocket AI";
 const HOME_SECTION_LABELS = ["Recent Conversations", "Недавние разговоры"];
 const HOME_TAB_LABELS = ["Home", "Главная"];
+const CHAT_TAB_LABELS = ["Chat", "Чат"];
+const CHAT_EMPTY_LABELS = [
+  "Load a model to continue chatting",
+  "Загрузите модель, чтобы продолжить чат",
+];
+const MODELS_TAB_LABELS = ["Models", "Модели"];
+const MODEL_CATALOG_LABELS = ["Model Catalog", "Каталог моделей"];
+const ALL_MODELS_LABELS = ["All Models", "Все модели"];
 const SETTINGS_TAB_LABELS = ["Settings", "Настройки"];
 const SETTINGS_TITLE_LABELS = ["Settings", "Настройки"];
 const THEME_MODE_LABELS = ["Theme Mode", "Тема"];
 const LANGUAGE_ROW_LABELS = ["Language", "Язык"];
+const SETTINGS_HF_TOKEN_LABELS = ["Hugging Face Token", "Токен Hugging Face"];
+const MANAGE_CONVERSATIONS_LABELS = ["Manage", "Управлять"];
+const CONVERSATIONS_TITLE_LABELS = ["All Conversations", "Все разговоры"];
+const CONVERSATIONS_SEARCH_LABELS = ["Search conversations", "Поиск по разговорам"];
+const MODEL_DETAILS_TITLE_LABELS = ["Model details", "Детали модели"];
+const OPEN_ON_HF_LABELS = ["Open on HF", "Открыть на HF"];
 const ACTIVE_MODEL_CTA_LABELS = ["Swap Model", "Choose Model", "Browse Models"];
-const defaultScreenIds = ["home", "chat", "models", "settings", "presets", "storage", "legal"];
+const HOME_ROUTE_TIMEOUT_MS = 40_000;
+const SETTINGS_ROUTE_TIMEOUT_MS = 35_000;
+const defaultScreenIds = [
+  "home",
+  "chat",
+  "models",
+  "settings",
+  "conversations",
+  "presets",
+  "storage",
+  "legal",
+  "huggingface-token",
+  "model-details",
+];
 
 main().catch((error) => {
   console.error(`[android-screen-capture] ${error.message}`);
@@ -106,18 +133,24 @@ function buildScreens() {
       description: "Capture the Chat tab empty state.",
       run: async (ctx) => {
         await goToHome(ctx);
-        await ctx.tapText("Chat");
-        await ctx.expectText("Load a model to continue chatting");
+        await ctx.tapAnyText(CHAT_TAB_LABELS);
+        await ctx.expectAnyText(CHAT_EMPTY_LABELS);
       },
     },
     {
       id: "models",
       description: "Capture the Models catalog tab.",
       run: async (ctx) => {
-        await goToHome(ctx);
-        await ctx.tapText("Models");
-        await ctx.expectText("Model Catalog");
-        await ctx.expectText("All Models");
+        await goToModelsCatalog(ctx);
+      },
+    },
+    {
+      id: "conversations",
+      description: "Capture the conversation management screen.",
+      run: async (ctx) => {
+        await goToConversationManagement(ctx);
+        await ctx.expectAnyText(CONVERSATIONS_TITLE_LABELS);
+        await ctx.expectAnyText(CONVERSATIONS_SEARCH_LABELS);
       },
     },
     {
@@ -134,9 +167,9 @@ function buildScreens() {
       description: "Capture the System Prompt Presets screen.",
       run: async (ctx) => {
         await goToSettings(ctx);
-        await ctx.tapText("System Prompt Presets");
-        await ctx.expectText("System Prompt Presets");
-        await ctx.expectText("Add Preset");
+        await ctx.tapAnyText(["System Prompt Presets", "Пресеты системных промптов"]);
+        await ctx.expectAnyText(["System Prompt Presets", "Пресеты системных промптов"]);
+        await ctx.expectAnyText(["Add Preset", "Добавить пресет"]);
       },
     },
     {
@@ -144,9 +177,9 @@ function buildScreens() {
       description: "Capture the Storage Manager screen.",
       run: async (ctx) => {
         await goToSettings(ctx);
-        await ctx.tapText("Storage Manager");
-        await ctx.expectText("Storage Manager");
-        await ctx.expectText("Cleanup actions");
+        await ctx.tapAnyText(["Storage Manager", "Управление хранилищем"]);
+        await ctx.expectAnyText(["Storage Manager", "Управление хранилищем"]);
+        await ctx.expectAnyText(["Cleanup actions", "Действия очистки"]);
       },
     },
     {
@@ -154,9 +187,30 @@ function buildScreens() {
       description: "Capture the Privacy & Disclosures screen.",
       run: async (ctx) => {
         await goToSettings(ctx);
-        await ctx.tapText("Privacy & Disclosures");
-        await ctx.expectText("Privacy & Disclosures");
-        await ctx.expectText("Pocket AI is designed for local-first usage.");
+        await ctx.tapAnyText(["Privacy & Disclosures", "Приватность и раскрытие данных"]);
+        await ctx.expectAnyText(["Privacy & Disclosures", "Приватность и раскрытие данных"]);
+        await ctx.expectAnyText([
+          "Pocket AI is designed for local-first usage.",
+          "Pocket AI спроектирован как local-first приложение.",
+        ]);
+      },
+    },
+    {
+      id: "huggingface-token",
+      description: "Capture the Hugging Face token education screen.",
+      run: async (ctx) => {
+        await goToHuggingFaceToken(ctx);
+        await ctx.expectAnyText(SETTINGS_HF_TOKEN_LABELS);
+        await ctx.expectText("Access token");
+      },
+    },
+    {
+      id: "model-details",
+      description: "Capture the model details routed screen.",
+      run: async (ctx) => {
+        await goToModelDetails(ctx);
+        await ctx.expectAnyText(MODEL_DETAILS_TITLE_LABELS);
+        await ctx.expectAnyText(OPEN_ON_HF_LABELS);
       },
     },
   ];
@@ -166,37 +220,77 @@ async function goToHome(ctx) {
   await ctx.ensureAppVisible();
   await ctx.dismissDebuggerBanner();
 
-  const homeSectionNode = await ctx.findAnyNodeNow(HOME_SECTION_LABELS, { visibleOnly: true });
-  if (homeSectionNode) {
-    await ctx.expectText("Pocket AI");
-    return;
+  const reachedHome = await tryReachHome(ctx);
+
+  if (!reachedHome) {
+    throw new Error(`Timed out returning to Home from the current route.`);
   }
 
-  const launcherNode = await ctx.findNodeNow(homeLauncherLabel, { visibleOnly: true });
-  if (launcherNode) {
-    await ctx.tapText(homeLauncherLabel, {
-      afterTapDelayMs: 1_500,
-      timeoutMs: 5_000,
-    });
-    await ctx.expectText(homeSectionLabel, { timeoutMs: 25_000 });
-    await ctx.expectText("Pocket AI");
-    return;
-  }
-
-  const homeTabNode = await ctx.findAnyNodeNow(HOME_TAB_LABELS, { visibleOnly: true });
-  if (homeTabNode) {
-    await ctx.tapAnyText(HOME_TAB_LABELS, { afterTapDelayMs: 500 });
-  }
-
-  await ctx.expectAnyText(HOME_SECTION_LABELS, { timeoutMs: 25_000 });
+  await ctx.expectAnyText(HOME_SECTION_LABELS, { timeoutMs: HOME_ROUTE_TIMEOUT_MS });
   await ctx.expectText("Pocket AI");
+}
+
+async function tryReachHome(ctx, maxAttempts = 4) {
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const homeSectionNode = await ctx.findAnyNodeNow(HOME_SECTION_LABELS, { visibleOnly: true });
+    if (homeSectionNode) {
+      return true;
+    }
+
+    const launcherNode = await ctx.findNodeNow(homeLauncherLabel, { visibleOnly: true });
+    if (launcherNode) {
+      await ctx.tapText(homeLauncherLabel, {
+        afterTapDelayMs: 1_500,
+        timeoutMs: 5_000,
+      });
+      continue;
+    }
+
+    const homeTabNode = await ctx.findAnyNodeNow(HOME_TAB_LABELS, { visibleOnly: true });
+    if (homeTabNode) {
+      await ctx.tapAnyText(HOME_TAB_LABELS, { afterTapDelayMs: 500 });
+      continue;
+    }
+
+    if (attempt < maxAttempts - 1) {
+      await ctx.pressBack();
+      await ctx.dismissDebuggerBanner();
+    }
+  }
+
+  return false;
+}
+
+async function goToModelsCatalog(ctx) {
+  await goToHome(ctx);
+  await ctx.tapAnyText(MODELS_TAB_LABELS);
+  await ctx.expectAnyText(MODEL_CATALOG_LABELS);
+  await ctx.expectAnyText(ALL_MODELS_LABELS);
+}
+
+async function goToConversationManagement(ctx) {
+  await goToHome(ctx);
+  await ctx.tapAnyText(MANAGE_CONVERSATIONS_LABELS);
+  await ctx.expectAnyText(CONVERSATIONS_TITLE_LABELS);
 }
 
 async function goToSettings(ctx) {
   await goToHome(ctx);
   await ctx.tapAnyText(SETTINGS_TAB_LABELS);
   await ctx.expectAnyText(SETTINGS_TITLE_LABELS);
-  await ctx.expectAnyText(THEME_MODE_LABELS);
+  await ctx.expectAnyText(THEME_MODE_LABELS, { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
+}
+
+async function goToHuggingFaceToken(ctx) {
+  await goToSettings(ctx);
+  await ctx.tapAnyText(SETTINGS_HF_TOKEN_LABELS);
+  await ctx.expectAnyText(SETTINGS_HF_TOKEN_LABELS);
+}
+
+async function goToModelDetails(ctx) {
+  await goToModelsCatalog(ctx);
+  await ctx.tapText("Details", { timeoutMs: 15_000 });
+  await ctx.expectAnyText(MODEL_DETAILS_TITLE_LABELS);
 }
 
 async function ensureEnglishUi(ctx) {
@@ -297,6 +391,10 @@ function createCaptureContext(adbPath, serial) {
 
       await delay(options.afterTapDelayMs ?? 800);
       return label;
+    },
+    pressBack: async () => {
+      runChecked(adbPath, ["-s", serial, "shell", "input", "keyevent", "4"]);
+      await delay(700);
     },
     expectText: async (label, options = {}) => {
       await waitForNode(adbPath, serial, label, {

@@ -3,8 +3,8 @@ import { useTranslation } from 'react-i18next';
 import { Box } from '@/components/ui/box';
 import { MaterialSymbols } from '@/components/ui/MaterialSymbols';
 import { Pressable } from '@/components/ui/pressable';
+import { ScreenActionPill, ScreenBadge } from '@/components/ui/ScreenShell';
 import { Text } from '@/components/ui/text';
-import { LifecycleStatus } from '@/types/models';
 import { ModelFilterCriteria, ModelSizeRange, ModelSortField, ModelSortPreference } from '@/store/modelsStore';
 
 interface ModelsFilterProps {
@@ -12,11 +12,9 @@ interface ModelsFilterProps {
   sort: ModelSortPreference;
   onFitsInRamToggle: (enabled: boolean) => void;
   onNoTokenRequiredToggle: (enabled: boolean) => void;
-  onStatusToggle: (status: LifecycleStatus) => void;
   onSizeRangeToggle: (sizeRange: ModelSizeRange) => void;
   onSortChange: (sort: ModelSortPreference) => void;
   onClear: () => void;
-  showStatusFilters: boolean;
 }
 
 type OpenPanel = 'filter' | 'sort' | null;
@@ -38,12 +36,6 @@ type OptionRowProps = {
   onPress: () => void;
   trailingLabel?: string;
 };
-
-const STATUS_OPTIONS: { labelKey: string; value: LifecycleStatus }[] = [
-  { labelKey: 'models.filterAvailable', value: LifecycleStatus.AVAILABLE },
-  { labelKey: 'models.filterDownloading', value: LifecycleStatus.DOWNLOADING },
-  { labelKey: 'models.filterDownloaded', value: LifecycleStatus.DOWNLOADED },
-];
 
 const SIZE_OPTIONS: { label: string; value: ModelSizeRange }[] = [
   { label: '< 2 GB', value: 'small' },
@@ -72,7 +64,7 @@ function TriggerButton({
     <Pressable
       testID={testID}
       onPress={onPress}
-      className={`min-w-0 flex-1 flex-row items-center justify-between rounded-2xl border px-3 py-2.5 active:opacity-80 ${
+      className={`min-w-0 flex-1 flex-row items-center gap-1.5 rounded-[18px] border px-2.5 py-2 active:opacity-80 ${
         isOpen
           ? 'border-primary-500 bg-primary-500/10'
           : 'border-outline-200 bg-background-50 dark:border-outline-800 dark:bg-background-900/60'
@@ -81,31 +73,32 @@ function TriggerButton({
       <Box className="min-w-0 flex-1 flex-row items-center gap-2">
         <MaterialSymbols
           name={iconName}
-          size={18}
+          size={16}
           className={isOpen ? 'text-primary-500' : 'text-typography-500 dark:text-typography-400'}
         />
-        <Text className="shrink font-semibold text-sm text-typography-900 dark:text-typography-100">
+
+        <Text numberOfLines={1} className="min-w-0 flex-1 font-semibold text-sm text-typography-900 dark:text-typography-100">
           {label}
         </Text>
+      </Box>
+
+      <Box className="ml-1.5 flex-row items-center gap-1.5">
         {summary ? (
           <Text
             numberOfLines={1}
-            className="min-w-0 shrink text-2xs text-typography-500 dark:text-typography-400"
+            className="max-w-[84px] text-xs text-typography-500 dark:text-typography-400"
           >
             {summary}
           </Text>
         ) : null}
-      </Box>
-
-      <Box className="ml-2 flex-row items-center gap-1.5">
         {badge ? (
-          <Box className="rounded-full bg-primary-500 px-1.5 py-0.5">
-            <Text className="text-[10px] font-semibold text-typography-0">{badge}</Text>
-          </Box>
+          <ScreenBadge tone="accent" size="micro" className="border-0 bg-primary-500" textClassName="text-typography-0">
+            {badge}
+          </ScreenBadge>
         ) : null}
         <MaterialSymbols
           name={isOpen ? 'keyboard-arrow-up' : 'keyboard-arrow-down'}
-          size={18}
+          size={16}
           className={isOpen ? 'text-primary-500' : 'text-typography-500 dark:text-typography-400'}
         />
       </Box>
@@ -124,11 +117,11 @@ function OptionRow({
     <Pressable
       testID={testID}
       onPress={onPress}
-      className={`flex-row items-center justify-between rounded-xl px-3 py-2.5 active:opacity-80 ${
+      className={`flex-row items-center justify-between rounded-xl px-3 py-2 active:opacity-80 ${
         active ? 'bg-primary-500/10' : 'bg-background-50/60 dark:bg-background-900/40'
       }`}
     >
-      <Box className="min-w-0 flex-1 flex-row items-center gap-2.5">
+      <Box className="min-w-0 flex-1 flex-row items-center gap-2">
         <Box className={`h-5 w-5 items-center justify-center rounded-full border ${
           active
             ? 'border-primary-500 bg-primary-500'
@@ -155,7 +148,6 @@ function getActiveFilterCount(filters: ModelFilterCriteria) {
   return (
     (filters.fitsInRamOnly ? 1 : 0)
     + (filters.noTokenRequiredOnly ? 1 : 0)
-    + filters.statuses.length
     + filters.sizeRanges.length
   );
 }
@@ -178,11 +170,9 @@ export const ModelsFilter = ({
   sort,
   onFitsInRamToggle,
   onNoTokenRequiredToggle,
-  onStatusToggle,
   onSizeRangeToggle,
   onSortChange,
   onClear,
-  showStatusFilters,
 }: ModelsFilterProps) => {
   const { t } = useTranslation();
   const [openPanel, setOpenPanel] = useState<OpenPanel>(null);
@@ -191,8 +181,8 @@ export const ModelsFilter = ({
   const sortSummary = getSortSummary(t, sort);
 
   return (
-    <Box className="border-b border-outline-200 bg-background-0 px-4 py-2 dark:border-outline-800 dark:bg-background-950">
-      <Box className="flex-row gap-2">
+    <Box className="border-b border-outline-200 bg-background-0 py-1.5 dark:border-outline-800 dark:bg-background-950">
+      <Box className="flex-row gap-1.5">
         <TriggerButton
           testID="models-filter-toggle"
           iconName="filter-list"
@@ -218,21 +208,22 @@ export const ModelsFilter = ({
       {openPanel === 'filter' ? (
         <Box
           testID="models-filter-panel"
-          className="mt-2 rounded-2xl border border-outline-200 bg-background-50 p-2 dark:border-outline-800 dark:bg-background-900/70"
+          className="mt-1.5 rounded-[20px] border border-outline-200 bg-background-50 p-1.5 dark:border-outline-800 dark:bg-background-900/70"
         >
           {hasActiveFilters ? (
-            <Box className="mb-2 flex-row justify-end">
-              <Pressable
+            <Box className="mb-1.5 flex-row justify-end">
+              <ScreenActionPill
                 testID="models-filter-clear"
                 onPress={onClear}
-                className="rounded-full border border-primary-500/20 bg-primary-500/10 px-2.5 py-1.5 active:opacity-80"
+                tone="soft"
+                size="compact"
               >
-                <Text className="text-2xs font-semibold text-primary-500">{t('common.clear')}</Text>
-              </Pressable>
+                <Text className="text-xs font-semibold text-primary-500">{t('common.clear')}</Text>
+              </ScreenActionPill>
             </Box>
           ) : null}
 
-          <Box className="gap-1.5">
+          <Box className="gap-1">
             <OptionRow
               testID="filter-option-fits-in-ram"
               label={t('models.fitsInRam')}
@@ -246,22 +237,6 @@ export const ModelsFilter = ({
               active={filters.noTokenRequiredOnly}
               onPress={() => onNoTokenRequiredToggle(!filters.noTokenRequiredOnly)}
             />
-
-            {showStatusFilters ? (
-              <Box className="my-1 h-px bg-outline-200 dark:bg-outline-800" />
-            ) : null}
-
-            {showStatusFilters
-              ? STATUS_OPTIONS.map((option) => (
-                  <OptionRow
-                    key={option.value}
-                    testID={`filter-option-status-${option.value}`}
-                    label={t(option.labelKey)}
-                    active={filters.statuses.includes(option.value)}
-                    onPress={() => onStatusToggle(option.value)}
-                  />
-                ))
-              : null}
 
             <Box className="my-1 h-px bg-outline-200 dark:bg-outline-800" />
 
@@ -281,9 +256,9 @@ export const ModelsFilter = ({
       {openPanel === 'sort' ? (
         <Box
           testID="models-sort-panel"
-          className="mt-2 rounded-2xl border border-outline-200 bg-background-50 p-2 dark:border-outline-800 dark:bg-background-900/70"
+          className="mt-1.5 rounded-[20px] border border-outline-200 bg-background-50 p-1.5 dark:border-outline-800 dark:bg-background-900/70"
         >
-          <Box className="gap-1.5">
+          <Box className="gap-1">
             {SORT_OPTIONS.map((option) => {
               const isActive = sort.field === option.field;
               const nextDirection =

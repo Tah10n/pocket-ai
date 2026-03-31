@@ -1,11 +1,12 @@
 import type { CatalogDiscoveryMode } from '@/store/modelsStore';
 import type { HuggingFaceTokenStateChangeSource } from '@/services/HuggingFaceTokenService';
+import type { ModelsCatalogTab } from './modelTabs';
 
 export function shouldWaitForCatalogTokenHydration(
-  activeTab: 'All Models' | 'Downloaded',
+  activeTab: ModelsCatalogTab,
   isTokenStateHydrated: boolean,
 ): boolean {
-  return activeTab === 'All Models' && !isTokenStateHydrated;
+  return activeTab === 'all' && !isTokenStateHydrated;
 }
 
 export function shouldResetCatalogForTokenEvent(
@@ -15,7 +16,7 @@ export function shouldResetCatalogForTokenEvent(
 }
 
 export function shouldBootstrapCatalogSession(
-  activeTab: 'All Models' | 'Downloaded',
+  activeTab: ModelsCatalogTab,
   discoveryMode: CatalogDiscoveryMode,
   isTokenStateHydrated: boolean = true,
 ): boolean {
@@ -23,5 +24,5 @@ export function shouldBootstrapCatalogSession(
     return false;
   }
 
-  return activeTab !== 'All Models' || discoveryMode !== 'uninitialized';
+  return activeTab !== 'all' || discoveryMode !== 'uninitialized';
 }

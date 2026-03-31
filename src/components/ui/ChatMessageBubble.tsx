@@ -6,6 +6,7 @@ import { Box } from '@/components/ui/box';
 import { Pressable } from '@/components/ui/pressable';
 import { Text } from '@/components/ui/text';
 import { MaterialSymbols } from './MaterialSymbols';
+import { ScreenBadge, ScreenIconButton } from './ScreenShell';
 import { StreamingCursor } from './StreamingCursor';
 import { MarkdownRenderer } from './MarkdownRenderer';
 import { ThinkingPulse } from './ThinkingPulse';
@@ -33,28 +34,25 @@ function IconActionButton({
   isDestructive = false,
 }: {
   testID: string;
-  iconName: string;
+  iconName: React.ComponentProps<typeof MaterialSymbols>['name'];
   label: string;
   onPress: () => void;
   isDestructive?: boolean;
 }) {
   return (
-    <Pressable
+    <ScreenIconButton
       testID={testID}
       onPress={onPress}
-      accessibilityRole="button"
       accessibilityLabel={label}
-      hitSlop={6}
-      className={`h-7 w-7 items-center justify-center rounded-full active:opacity-70 ${isDestructive
+      iconName={iconName}
+      iconSize={15}
+      size="micro"
+      tone={isDestructive ? 'danger' : 'neutral'}
+      className={`border-0 ${isDestructive
         ? 'bg-error-500/10 dark:bg-error-500/15'
         : 'bg-background-100 dark:bg-background-800'}`}
-    >
-      <MaterialSymbols
-        name={iconName}
-        size={15}
-        className={isDestructive ? 'text-error-500' : 'text-typography-500 dark:text-typography-300'}
-      />
-    </Pressable>
+      iconClassName={isDestructive ? 'text-error-500' : 'text-typography-500 dark:text-typography-300'}
+    />
   );
 }
 
@@ -231,14 +229,14 @@ export const ChatMessageBubble = ({
           className={`mt-0.5 flex-row items-center gap-1.5 ${metadataRowClassName}`}
         >
           {showPerformanceLabel ? (
-            <Box
+            <ScreenBadge
               testID={`performance-label-${id}`}
-              className="rounded-full border border-outline-200 bg-background-100/90 px-2 py-0.5 dark:border-outline-700 dark:bg-background-800/90"
+              size="micro"
+              className="bg-background-100/90 dark:bg-background-800/90"
+              textClassName="text-typography-600 dark:text-typography-300"
             >
-              <Text className="text-[10px] font-semibold text-typography-600 dark:text-typography-300">
-                {tokensPerSec?.toFixed(1)} t/s
-              </Text>
-            </Box>
+              {tokensPerSec?.toFixed(1)} t/s
+            </ScreenBadge>
           ) : null}
           {hasCopyableContent ? (
             <IconActionButton

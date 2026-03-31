@@ -1,12 +1,15 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Alert } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { useRouter } from 'expo-router';
 import { useTranslation } from 'react-i18next';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { MaterialSymbols } from '@/components/ui/MaterialSymbols';
-import { ScreenHeaderShell } from '@/components/ui/ScreenShell';
-import { useTheme } from '../../providers/ThemeProvider';
+import { Box } from '@/components/ui/box';
+import { Button, ButtonText } from '@/components/ui/button';
+import { HeaderBar } from '@/components/ui/HeaderBar';
+import { ScreenBadge, ScreenCard, ScreenContent, ScreenSectionLabel, ScreenStack } from '@/components/ui/ScreenShell';
+import { ScrollView } from '@/components/ui/scroll-view';
+import { Text } from '@/components/ui/text';
 import { hardwareListenerService, type HardwareStatus } from '../../services/HardwareListenerService';
 import {
     clearActiveCache,
@@ -18,32 +21,7 @@ import {
 } from '../../services/StorageManagerService';
 import { getReportedErrorMessage } from '../../services/AppError';
 
-const styles = StyleSheet.create({
-    screen: { flex: 1, width: '100%', maxWidth: 768, alignSelf: 'center' },
-    header: { borderBottomWidth: StyleSheet.hairlineWidth },
-    headerBar: { minHeight: 56, flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 16 },
-    backButton: { height: 42, width: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center' },
-    headerTextWrap: { flex: 1 },
-    headerTitle: { fontSize: 20, fontWeight: '700' },
-    headerSubtitle: { marginTop: 2, fontSize: 12, lineHeight: 18 },
-    content: { paddingHorizontal: 16, paddingTop: 20, paddingBottom: 32, gap: 16 },
-    card: { borderWidth: 1, borderRadius: 22, padding: 16 },
-    sectionTitle: { fontSize: 16, fontWeight: '700' },
-    sectionSubtitle: { marginTop: 2, fontSize: 12, lineHeight: 18 },
-    item: { borderWidth: 1, borderRadius: 18, padding: 14 },
-    itemRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12 },
-    itemTitle: { fontSize: 15, fontWeight: '700' },
-    itemSubtitle: { marginTop: 4, fontSize: 12, lineHeight: 18 },
-    itemMeta: { marginTop: 8, fontSize: 12, fontWeight: '700' },
-    button: { borderRadius: 999, paddingHorizontal: 14, paddingVertical: 10 },
-    buttonText: { fontSize: 12, fontWeight: '800' },
-    activeBadge: { marginTop: 10, alignSelf: 'flex-start', borderRadius: 999, paddingHorizontal: 10, paddingVertical: 5 },
-    activeBadgeText: { fontSize: 11, fontWeight: '800' },
-    warningTitle: { fontSize: 15, fontWeight: '700' },
-    warningText: { marginTop: 6, fontSize: 13, lineHeight: 19 },
-});
-
-type BusyAction = 'cache' | 'chat' | 'settings' | `offload:${string}` | null;
+type BusyAction = 'cache' | 'chat' | 'settings' | `offload:${string}` | `offload:${string}:reset` | null;
 
 function formatBytes(value: number) {
     if (!Number.isFinite(value) || value <= 0) return '0 MB';
@@ -64,8 +42,6 @@ function ActionCard({
     busy,
     disabled,
     buttonLabel,
-    colors,
-    mutedBackground,
     onPress,
 }: {
     title: string;
@@ -74,27 +50,29 @@ function ActionCard({
     busy: boolean;
     disabled: boolean;
     buttonLabel: string;
-    colors: { text: string; textSecondary: string; border: string; error: string };
-    mutedBackground: string;
     onPress: () => void;
 }) {
     return (
-        <View style={[styles.item, { borderColor: colors.border, backgroundColor: mutedBackground, opacity: busy ? 0.7 : 1 }]}>
-            <View style={styles.itemRow}>
-                <View style={styles.headerTextWrap}>
-                    <Text style={[styles.itemTitle, { color: colors.text }]}>{title}</Text>
-                    <Text style={[styles.itemSubtitle, { color: colors.textSecondary }]}>{description}</Text>
-                    {meta ? <Text style={[styles.itemMeta, { color: colors.textSecondary }]}>{meta}</Text> : null}
-                </View>
-                <Pressable
-                    disabled={disabled}
-                    onPress={onPress}
-                    style={[styles.button, { backgroundColor: 'rgba(239, 68, 68, 0.12)' }]}
-                >
-                    <Text style={[styles.buttonText, { color: colors.error }]}>{buttonLabel}</Text>
-                </Pressable>
-            </View>
-        </View>
+        <ScreenCard variant="inset" className={busy ? 'opacity-70' : undefined}>
+            <Box className="flex-row items-start justify-between gap-3">
+                <Box className="min-w-0 flex-1">
+                    <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">
+                        {title}
+                    </Text>
+                    <Text className="mt-1 text-sm leading-5 text-typography-500 dark:text-typography-400">
+                        {description}
+                    </Text>
+                    {meta ? (
+                        <Text className="mt-2 text-xs font-semibold uppercase tracking-wide text-typography-500 dark:text-typography-400">
+                            {meta}
+                        </Text>
+                    ) : null}
+                </Box>
+                <Button action="softDestructive" size="sm" disabled={disabled} onPress={onPress} className="shrink-0">
+                    <ButtonText>{buttonLabel}</ButtonText>
+                </Button>
+            </Box>
+        </ScreenCard>
     );
 }
 
@@ -102,19 +80,19 @@ export function StorageManagerScreen() {
     const { t, i18n } = useTranslation();
     const insets = useSafeAreaInsets();
     const router = useRouter();
-    const { colors, resolvedMode } = useTheme();
     const [appMetrics, setAppMetrics] = useState<AppStorageMetrics | null>(null);
     const [hardwareStatus, setHardwareStatus] = useState<HardwareStatus>(hardwareListenerService.getCurrentStatus());
     const [busyAction, setBusyAction] = useState<BusyAction>(null);
     const mountedRef = useRef(true);
     const canGoBack = router.canGoBack();
+    const handleBack = useCallback(() => {
+        if (canGoBack) {
+            router.back();
+            return;
+        }
 
-    const isDark = resolvedMode === 'dark';
-    const cardBackground = isDark ? 'rgba(15, 23, 42, 0.72)' : colors.surface;
-    const mutedBackground = isDark ? 'rgba(30, 41, 59, 0.85)' : '#eef2f7';
-    const warningBackground = isDark ? 'rgba(127, 29, 29, 0.32)' : 'rgba(254, 226, 226, 0.9)';
-    const warningBorder = isDark ? 'rgba(248, 113, 113, 0.38)' : 'rgba(248, 113, 113, 0.42)';
-    const warningText = isDark ? '#fecaca' : '#991b1b';
+        router.replace('/(tabs)/models' as any);
+    }, [canGoBack, router]);
 
     const loadAppMetrics = useCallback(async () => {
         const next = await getAppStorageMetrics();
@@ -247,86 +225,118 @@ export function StorageManagerScreen() {
     const downloadedModels = appMetrics?.downloadedModels ?? [];
 
     return (
-        <View style={{ flex: 1, backgroundColor: colors.background }}>
-            <ScreenHeaderShell>
-                <View style={styles.headerBar}>
-                    <Pressable
-                        onPress={() => {
-                            if (canGoBack) {
-                                router.back();
-                                return;
-                            }
-                            router.replace('/(tabs)/models' as any);
-                        }}
-                        style={[styles.backButton, { backgroundColor: mutedBackground }]}
-                    >
-                        <MaterialSymbols name="arrow-back-ios-new" size={18} color={colors.primary} />
-                    </Pressable>
-                    <View style={styles.headerTextWrap}>
-                        <Text style={[styles.headerTitle, { color: colors.text }]}>{t('storageManager.title')}</Text>
-                        <Text style={[styles.headerSubtitle, { color: colors.textSecondary }]}>{t('storageManager.subtitle')}</Text>
-                    </View>
-                </View>
-            </ScreenHeaderShell>
+        <Box className="flex-1 bg-background-0 dark:bg-background-950">
+            <HeaderBar
+                title={t('storageManager.title')}
+                subtitle={t('storageManager.subtitle')}
+                onBack={handleBack}
+                backAccessibilityLabel={t('chat.headerBackAccessibilityLabel')}
+            />
 
-            <View style={styles.screen}>
-                <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={[styles.content, { paddingBottom: insets.bottom + 32 }]}>
-                    {hardwareStatus.isLowMemory ? (
-                        <View style={[styles.card, { backgroundColor: warningBackground, borderColor: warningBorder }]}>
-                            <Text style={[styles.warningTitle, { color: warningText }]}>{t('storageManager.lowMemoryTitle')}</Text>
-                            <Text style={[styles.warningText, { color: warningText }]}>{t('storageManager.lowMemoryDescription')}</Text>
-                        </View>
-                    ) : null}
+            <ScrollView className="flex-1" showsVerticalScrollIndicator={false}>
+                <ScreenContent className="pt-5" style={{ paddingBottom: insets.bottom + 32 }}>
+                    <ScreenStack gap="loose">
+                        {hardwareStatus.isLowMemory ? (
+                            <ScreenCard tone="warning">
+                                <Text className="text-base font-semibold text-warning-800 dark:text-warning-100">
+                                    {t('storageManager.lowMemoryTitle')}
+                                </Text>
+                                <Text className="mt-2 text-sm leading-6 text-warning-700 dark:text-warning-200">
+                                    {t('storageManager.lowMemoryDescription')}
+                                </Text>
+                            </ScreenCard>
+                        ) : null}
 
-                    <View style={[styles.card, { backgroundColor: cardBackground, borderColor: colors.border }]}>
-                        <Text style={[styles.sectionTitle, { color: colors.text }]}>{t('storageManager.actionsTitle')}</Text>
-                        <Text style={[styles.sectionSubtitle, { color: colors.textSecondary, marginTop: 4 }]}>{t('storageManager.actionsDescription')}</Text>
-                        <View style={{ gap: 12, marginTop: 16 }}>
-                            <ActionCard title={t('storageManager.clearCacheTitle')} description={t('storageManager.clearCacheDescription')} meta={formatBytes(appMetrics?.cacheBytes ?? 0)} busy={busyAction === 'cache'} disabled={busyAction !== null} buttonLabel={busyAction === 'cache' ? t('common.loading') : t('common.clear')} colors={{ text: colors.text, textSecondary: colors.textSecondary, border: colors.border, error: colors.error }} mutedBackground={mutedBackground} onPress={handleClearCache} />
-                            <ActionCard title={t('storageManager.clearChatHistoryTitle')} description={t('storageManager.clearChatHistoryDescription')} meta={formatBytes(appMetrics?.chatHistoryBytes ?? 0)} busy={busyAction === 'chat'} disabled={busyAction !== null} buttonLabel={busyAction === 'chat' ? t('common.loading') : t('common.clear')} colors={{ text: colors.text, textSecondary: colors.textSecondary, border: colors.border, error: colors.error }} mutedBackground={mutedBackground} onPress={handleClearChatHistory} />
-                            <ActionCard title={t('storageManager.resetSettingsTitle')} description={t('storageManager.resetSettingsDescription')} busy={busyAction === 'settings'} disabled={busyAction !== null} buttonLabel={busyAction === 'settings' ? t('common.loading') : t('common.reset')} colors={{ text: colors.text, textSecondary: colors.textSecondary, border: colors.border, error: colors.error }} mutedBackground={mutedBackground} onPress={handleResetSettings} />
-                        </View>
-                    </View>
+                        <ScreenCard>
+                            <ScreenSectionLabel>{t('storageManager.actionsTitle')}</ScreenSectionLabel>
+                            <Text className="mt-2 text-sm leading-6 text-typography-600 dark:text-typography-300">
+                                {t('storageManager.actionsDescription')}
+                            </Text>
+                            <ScreenStack className="mt-4">
+                                <ActionCard
+                                    title={t('storageManager.clearCacheTitle')}
+                                    description={t('storageManager.clearCacheDescription')}
+                                    meta={formatBytes(appMetrics?.cacheBytes ?? 0)}
+                                    busy={busyAction === 'cache'}
+                                    disabled={busyAction !== null}
+                                    buttonLabel={busyAction === 'cache' ? t('common.loading') : t('common.clear')}
+                                    onPress={handleClearCache}
+                                />
+                                <ActionCard
+                                    title={t('storageManager.clearChatHistoryTitle')}
+                                    description={t('storageManager.clearChatHistoryDescription')}
+                                    meta={formatBytes(appMetrics?.chatHistoryBytes ?? 0)}
+                                    busy={busyAction === 'chat'}
+                                    disabled={busyAction !== null}
+                                    buttonLabel={busyAction === 'chat' ? t('common.loading') : t('common.clear')}
+                                    onPress={handleClearChatHistory}
+                                />
+                                <ActionCard
+                                    title={t('storageManager.resetSettingsTitle')}
+                                    description={t('storageManager.resetSettingsDescription')}
+                                    busy={busyAction === 'settings'}
+                                    disabled={busyAction !== null}
+                                    buttonLabel={busyAction === 'settings' ? t('common.loading') : t('common.reset')}
+                                    onPress={handleResetSettings}
+                                />
+                            </ScreenStack>
+                        </ScreenCard>
 
-                    <View style={[styles.card, { backgroundColor: cardBackground, borderColor: colors.border }]}>
-                        <Text style={[styles.sectionTitle, { color: colors.text }]}>{t('storageManager.downloadedModelsTitle', { count: downloadedModels.length })}</Text>
-                        <Text style={[styles.sectionSubtitle, { color: colors.textSecondary, marginTop: 4 }]}>{t('storageManager.downloadedModelsDescription')}</Text>
-                        <View style={{ gap: 12, marginTop: 16 }}>
-                            {downloadedModels.length === 0 ? (
-                                <View style={[styles.item, { borderColor: colors.border, backgroundColor: mutedBackground }]}>
-                                    <Text style={[styles.itemTitle, { color: colors.text }]}>{t('storageManager.emptyModelsTitle')}</Text>
-                                    <Text style={[styles.itemSubtitle, { color: colors.textSecondary }]}>{t('storageManager.emptyModelsDescription')}</Text>
-                                </View>
-                            ) : downloadedModels.map((model) => {
-                                const actionKey: BusyAction = `offload:${model.id}`;
-                                const isActive = appMetrics?.activeModelId === model.id;
-                                return (
-                                    <View key={model.id} style={[styles.item, { borderColor: colors.border, backgroundColor: mutedBackground }]}>
-                                        <View style={styles.itemRow}>
-                                            <View style={styles.headerTextWrap}>
-                                                <Text style={[styles.itemTitle, { color: colors.text }]}>{model.name}</Text>
-                                                <Text style={[styles.itemSubtitle, { color: colors.textSecondary }]}>{model.author} • {model.size === null ? t('models.sizeUnknown') : formatBytes(model.size)}</Text>
-                                                {isActive ? (
-                                                    <View style={[styles.activeBadge, { backgroundColor: 'rgba(50, 17, 212, 0.12)' }]}>
-                                                        <Text style={[styles.activeBadgeText, { color: colors.primary }]}>{t('storageManager.activeModelBadge')}</Text>
-                                                    </View>
-                                                ) : null}
-                                            </View>
-                                            <Pressable
-                                                disabled={busyAction !== null}
-                                                onPress={() => handleDeleteModel(model.id, model.name)}
-                                                style={[styles.button, { backgroundColor: 'rgba(239, 68, 68, 0.12)' }]}
-                                            >
-                                                <Text style={[styles.buttonText, { color: colors.error }]}>{busyAction === actionKey ? t('common.loading') : t('common.delete')}</Text>
-                                            </Pressable>
-                                        </View>
-                                    </View>
-                                );
-                            })}
-                        </View>
-                    </View>
-                </ScrollView>
-            </View>
-        </View>
+                        <ScreenCard>
+                            <ScreenSectionLabel>
+                                {t('storageManager.downloadedModelsTitle', { count: downloadedModels.length })}
+                            </ScreenSectionLabel>
+                            <Text className="mt-2 text-sm leading-6 text-typography-600 dark:text-typography-300">
+                                {t('storageManager.downloadedModelsDescription')}
+                            </Text>
+
+                            <ScreenStack className="mt-4">
+                                {downloadedModels.length === 0 ? (
+                                    <ScreenCard variant="inset">
+                                        <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">
+                                            {t('storageManager.emptyModelsTitle')}
+                                        </Text>
+                                        <Text className="mt-2 text-sm leading-6 text-typography-500 dark:text-typography-400">
+                                            {t('storageManager.emptyModelsDescription')}
+                                        </Text>
+                                    </ScreenCard>
+                                ) : downloadedModels.map((model) => {
+                                    const actionKey: BusyAction = `offload:${model.id}`;
+                                    const isActive = appMetrics?.activeModelId === model.id;
+                                    return (
+                                        <ScreenCard key={model.id} variant="inset">
+                                            <Box className="flex-row items-start justify-between gap-3">
+                                                <Box className="min-w-0 flex-1">
+                                                    <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">
+                                                        {model.name}
+                                                    </Text>
+                                                    <Text className="mt-1 text-sm leading-5 text-typography-500 dark:text-typography-400">
+                                                        {model.author} • {model.size === null ? t('models.sizeUnknown') : formatBytes(model.size)}
+                                                    </Text>
+                                                    {isActive ? (
+                                                        <ScreenBadge tone="accent" size="micro" className="mt-3 self-start">
+                                                            {t('storageManager.activeModelBadge')}
+                                                        </ScreenBadge>
+                                                    ) : null}
+                                                </Box>
+                                                <Button
+                                                    action="softDestructive"
+                                                    size="sm"
+                                                    disabled={busyAction !== null}
+                                                    onPress={() => handleDeleteModel(model.id, model.name)}
+                                                    className="shrink-0"
+                                                >
+                                                    <ButtonText>{busyAction === actionKey ? t('common.loading') : t('common.delete')}</ButtonText>
+                                                </Button>
+                                            </Box>
+                                        </ScreenCard>
+                                    );
+                                })}
+                            </ScreenStack>
+                        </ScreenCard>
+                    </ScreenStack>
+                </ScreenContent>
+            </ScrollView>
+        </Box>
     );
 }

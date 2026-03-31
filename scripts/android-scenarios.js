@@ -8,8 +8,31 @@ const cliOptions = parseCliOptions(process.argv.slice(2));
 const projectRoot = path.resolve(__dirname, "..");
 const artifactsRoot = path.join(projectRoot, "artifacts", "android-scenarios");
 const dumpPathOnDevice = "/sdcard/window_dump.xml";
-const homeSectionLabel = "Recent Conversations";
-const activeModelCtaLabels = ["Swap Model", "Choose Model", "Browse Models"];
+const HOME_SECTION_LABELS = ["Recent Conversations", "Недавние разговоры"];
+const HOME_TAB_LABELS = ["Home", "Главная"];
+const CHAT_TAB_LABELS = ["Chat", "Чат"];
+const CHAT_EMPTY_LABELS = [
+  "Load a model to continue chatting",
+  "Загрузите модель, чтобы продолжить чат",
+];
+const MODELS_TAB_LABELS = ["Models", "Модели"];
+const MODEL_CATALOG_LABELS = ["Model Catalog", "Каталог моделей"];
+const ALL_MODELS_LABELS = ["All Models", "Все модели"];
+const DOWNLOADED_TAB_LABELS = ["Downloaded", "Загруженные"];
+const SETTINGS_TAB_LABELS = ["Settings", "Настройки"];
+const SETTINGS_TITLE_LABELS = ["Settings", "Настройки"];
+const THEME_MODE_LABELS = ["Theme Mode", "Тема"];
+const LANGUAGE_ROW_LABELS = ["Language", "Язык"];
+const STORAGE_MANAGER_LABELS = ["Storage Manager", "Управление хранилищем"];
+const HF_TOKEN_LABELS = ["Hugging Face Token", "Токен Hugging Face"];
+const ACTIVE_MODEL_CTA_LABELS = ["Swap Model", "Choose Model", "Browse Models"];
+const CONVERSATIONS_TITLE_LABELS = ["All Conversations", "Все разговоры"];
+const MANAGE_CONVERSATIONS_LABELS = ["Manage", "Управлять"];
+const CONVERSATIONS_SEARCH_LABELS = ["Search conversations", "Поиск по разговорам"];
+const MODEL_DETAILS_TITLE_LABELS = ["Model details", "Детали модели"];
+const OPEN_ON_HF_LABELS = ["Open on HF", "Открыть на HF"];
+const HOME_ROUTE_TIMEOUT_MS = 40_000;
+const SETTINGS_ROUTE_TIMEOUT_MS = 35_000;
 
 main().catch((error) => {
   console.error(`[android-scenarios] ${error.message}`);
@@ -46,6 +69,7 @@ async function main() {
   const results = [];
 
   await dismissDebuggerBannerIfPresent(adbPath, serial);
+  await ensureEnglishUi(context);
 
   for (const scenario of selectedScenarios) {
     const startedAt = Date.now();
@@ -200,8 +224,8 @@ function buildScenarios() {
         await goToHome(ctx);
         await ctx.expectText("Pocket AI");
         await ctx.expectText("New Chat");
-        await ctx.expectText(homeSectionLabel);
-        await ctx.expectAnyText(activeModelCtaLabels);
+        await ctx.expectAnyText(HOME_SECTION_LABELS);
+        await ctx.expectAnyText(ACTIVE_MODEL_CTA_LABELS);
       },
     },
     {
@@ -209,21 +233,21 @@ function buildScenarios() {
       description: "Verify bottom tab navigation across Home, Chat, Models, and Settings.",
       run: async (ctx) => {
         await goToHome(ctx);
-        await ctx.tapText("Chat");
-        await ctx.expectText("Load a model to continue chatting");
+        await ctx.tapAnyText(CHAT_TAB_LABELS);
+        await ctx.expectAnyText(CHAT_EMPTY_LABELS);
 
-        await ctx.tapText("Models");
-        await ctx.expectText("Model Catalog");
-        await ctx.expectText("All Models");
-        await ctx.expectText("Downloaded");
+        await ctx.tapAnyText(MODELS_TAB_LABELS);
+        await ctx.expectAnyText(MODEL_CATALOG_LABELS);
+        await ctx.expectAnyText(ALL_MODELS_LABELS);
+        await ctx.expectAnyText(DOWNLOADED_TAB_LABELS);
 
-        await ctx.tapText("Settings");
-        await ctx.expectText("Theme Mode");
-        await ctx.expectText("Language");
-        await ctx.expectText("Storage Manager");
+        await ctx.tapAnyText(SETTINGS_TAB_LABELS);
+        await ctx.expectAnyText(THEME_MODE_LABELS);
+        await ctx.expectAnyText(LANGUAGE_ROW_LABELS);
+        await ctx.expectAnyText(STORAGE_MANAGER_LABELS);
 
-        await ctx.tapText("Home");
-        await ctx.expectText(homeSectionLabel);
+        await ctx.tapAnyText(HOME_TAB_LABELS);
+        await ctx.expectAnyText(HOME_SECTION_LABELS);
       },
     },
     {
@@ -232,8 +256,8 @@ function buildScenarios() {
       run: async (ctx) => {
         await goToHome(ctx);
         await ctx.tapText("New Chat");
-        await ctx.expectText("Load a model to continue chatting");
-        await ctx.tapText("Home");
+        await ctx.expectAnyText(CHAT_EMPTY_LABELS);
+        await ctx.tapAnyText(HOME_TAB_LABELS);
         await ctx.expectText("New Chat");
       },
     },
@@ -242,12 +266,12 @@ function buildScenarios() {
       description: "Verify the Home screen active-model CTA opens the model catalog.",
       run: async (ctx) => {
         await goToHome(ctx);
-        await ctx.tapAnyText(activeModelCtaLabels);
-        await ctx.expectText("Model Catalog");
-        await ctx.expectText("All Models");
-        await ctx.expectText("Downloaded");
-        await ctx.tapText("Home");
-        await ctx.expectAnyText(activeModelCtaLabels);
+        await ctx.tapAnyText(ACTIVE_MODEL_CTA_LABELS);
+        await ctx.expectAnyText(MODEL_CATALOG_LABELS);
+        await ctx.expectAnyText(ALL_MODELS_LABELS);
+        await ctx.expectAnyText(DOWNLOADED_TAB_LABELS);
+        await ctx.tapAnyText(HOME_TAB_LABELS);
+        await ctx.expectAnyText(ACTIVE_MODEL_CTA_LABELS);
       },
     },
     {
@@ -255,8 +279,8 @@ function buildScenarios() {
       description: "Verify guided discovery, new HF catalog controls, and routed model details.",
       run: async (ctx) => {
         await goToHome(ctx);
-        await ctx.tapAnyText(activeModelCtaLabels);
-        await ctx.expectText("Model Catalog");
+        await ctx.tapAnyText(ACTIVE_MODEL_CTA_LABELS);
+        await ctx.expectAnyText(MODEL_CATALOG_LABELS);
         await ctx.expectText("Guided discovery is on", { timeoutMs: 15_000 });
         await ctx.expectText("Show full catalog");
 
@@ -269,22 +293,31 @@ function buildScenarios() {
         await ctx.tapText("Sort");
 
         await ctx.tapText("Details", { timeoutMs: 15_000 });
-        await ctx.expectText("Model details");
-        await ctx.expectText("Open on HF");
+        await ctx.expectAnyText(MODEL_DETAILS_TITLE_LABELS);
+        await ctx.expectAnyText(OPEN_ON_HF_LABELS);
       },
     },
     {
       id: "hf-token-education",
       description: "Verify the token education screen and external-token CTA are reachable from Settings.",
       run: async (ctx) => {
-        await goToHome(ctx);
-        await ctx.tapText("Settings");
-        await ctx.expectText("Hugging Face Token");
-        await ctx.tapText("Hugging Face Token");
+        await goToSettings(ctx);
+        await ctx.expectAnyText(HF_TOKEN_LABELS);
+        await ctx.tapAnyText(HF_TOKEN_LABELS);
         await ctx.expectText("Access token");
         await ctx.swipeUp();
         await ctx.expectText("What this token does");
         await ctx.expectText("Get token");
+      },
+    },
+    {
+      id: "conversations-management",
+      description: "Verify the conversation management route is reachable from Home.",
+      run: async (ctx) => {
+        await goToConversationManagement(ctx);
+        await ctx.expectAnyText(CONVERSATIONS_TITLE_LABELS);
+        await ctx.expectAnyText(CONVERSATIONS_SEARCH_LABELS);
+        await ctx.expectText("New Chat");
       },
     },
   ];
@@ -293,33 +326,85 @@ function buildScenarios() {
 async function goToHome(ctx) {
   await ctx.dismissDebuggerBanner();
 
-  const adbPath = resolveAdbPath();
-  const homeSectionNode = await findNodeNow(adbPath, ctx.serial, homeSectionLabel, {
-    visibleOnly: true,
-  });
-  if (homeSectionNode) {
-    await ctx.expectText("Pocket AI");
-    return;
+  const reachedHome = await tryReachHome(ctx);
+
+  if (!reachedHome) {
+    throw new Error(`Timed out returning to Home from the current route.`);
   }
 
-  const pocketAiLauncherNode = await findNodeNow(adbPath, ctx.serial, "Pocket AI", {
-    visibleOnly: true,
-  });
-
-  if (pocketAiLauncherNode) {
-    await ctx.tapText("Pocket AI", { afterTapDelayMs: 1_500, timeoutMs: 5_000 });
-    await ctx.expectText(homeSectionLabel, { timeoutMs: 25_000 });
-    await ctx.expectText("Pocket AI");
-    return;
-  }
-
-  const homeNode = await findNodeNow(adbPath, ctx.serial, "Home");
-  if (homeNode) {
-    await ctx.tapText("Home", { afterTapDelayMs: 500 });
-  }
-
-  await ctx.expectText(homeSectionLabel, { timeoutMs: 25_000 });
+  await ctx.expectAnyText(HOME_SECTION_LABELS, { timeoutMs: HOME_ROUTE_TIMEOUT_MS });
   await ctx.expectText("Pocket AI");
+}
+
+async function tryReachHome(ctx, maxAttempts = 4) {
+  const adbPath = resolveAdbPath();
+
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const homeSectionNode = await findAnyNodeNow(adbPath, ctx.serial, HOME_SECTION_LABELS, {
+      visibleOnly: true,
+    });
+    if (homeSectionNode) {
+      return true;
+    }
+
+    const pocketAiLauncherNode = await findNodeNow(adbPath, ctx.serial, "Pocket AI", {
+      visibleOnly: true,
+    });
+    if (pocketAiLauncherNode) {
+      await ctx.tapText("Pocket AI", { afterTapDelayMs: 1_500, timeoutMs: 5_000 });
+      continue;
+    }
+
+    const homeNode = await findAnyNodeNow(adbPath, ctx.serial, HOME_TAB_LABELS, {
+      visibleOnly: true,
+    });
+    if (homeNode) {
+      await ctx.tapAnyText(HOME_TAB_LABELS, { afterTapDelayMs: 500 });
+      continue;
+    }
+
+    if (attempt < maxAttempts - 1) {
+      await ctx.pressBack();
+      await ctx.dismissDebuggerBanner();
+    }
+  }
+
+  return false;
+}
+
+async function goToSettings(ctx) {
+  await goToHome(ctx);
+  await ctx.tapAnyText(SETTINGS_TAB_LABELS);
+  await ctx.expectAnyText(SETTINGS_TITLE_LABELS);
+  await ctx.expectAnyText(THEME_MODE_LABELS, { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
+}
+
+async function goToConversationManagement(ctx) {
+  await goToHome(ctx);
+  await ctx.tapAnyText(MANAGE_CONVERSATIONS_LABELS);
+  await ctx.expectAnyText(CONVERSATIONS_TITLE_LABELS);
+}
+
+async function ensureEnglishUi(ctx) {
+  await goToSettings(ctx);
+
+  const adbPath = resolveAdbPath();
+  const languageNode = await findAnyNodeNow(adbPath, ctx.serial, LANGUAGE_ROW_LABELS, {
+    visibleOnly: true,
+  });
+
+  if (!languageNode) {
+    throw new Error("Could not find the language row while preparing Android scenarios.");
+  }
+
+  if (languageNode.label === LANGUAGE_ROW_LABELS[0]) {
+    return;
+  }
+
+  await ctx.tapAnyText([LANGUAGE_ROW_LABELS[1]]);
+  await ctx.expectText(LANGUAGE_ROW_LABELS[0], { timeoutMs: 5_000 });
+  await ctx.expectText(THEME_MODE_LABELS[0], { timeoutMs: 5_000 });
+  await goToHome(ctx);
 }
 
 function launchApp() {
@@ -473,6 +558,17 @@ async function waitForAnyNode(adbPath, serial, labels, options = {}) {
   }
 
   throw new Error(`Timed out waiting for any of: ${labels.map((label) => `"${label}"`).join(", ")}.`);
+}
+
+async function findAnyNodeNow(adbPath, serial, labels, options = {}) {
+  for (const label of labels) {
+    const node = await findNodeNow(adbPath, serial, label, options);
+    if (node) {
+      return { label, node };
+    }
+  }
+
+  return null;
 }
 
 async function findNodeNow(adbPath, serial, label, options = {}) {

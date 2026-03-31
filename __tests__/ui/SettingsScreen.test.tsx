@@ -163,24 +163,22 @@ describe('SettingsScreen', () => {
     };
   });
 
-  it('renders a header back button and navigates back when history exists', () => {
-    const { getByTestId } = renderScreen();
+  it('uses the root-tab chrome without exposing a back button even when history exists', () => {
+    const { queryByTestId } = renderScreen();
 
-    fireEvent.press(getByTestId('settings-back-button'));
-
-    expect(mockBack).toHaveBeenCalledTimes(1);
+    expect(queryByTestId('settings-back-button')).toBeNull();
+    expect(mockBack).not.toHaveBeenCalled();
     expect(mockReplace).not.toHaveBeenCalled();
   });
 
-  it('falls back to the home route when there is no back history', () => {
+  it('keeps the root-tab chrome when there is no back history', () => {
     mockCanGoBack = false;
 
-    const { getByTestId } = renderScreen();
+    const { queryByTestId } = renderScreen();
 
-    fireEvent.press(getByTestId('settings-back-button'));
-
+    expect(queryByTestId('settings-back-button')).toBeNull();
     expect(mockBack).not.toHaveBeenCalled();
-    expect(mockReplace).toHaveBeenCalledWith('/');
+    expect(mockReplace).not.toHaveBeenCalled();
   });
 
   it('renders the Android system RAM variant with availability and app memory breakdown', () => {

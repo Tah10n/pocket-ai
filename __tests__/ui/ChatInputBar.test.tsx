@@ -1,9 +1,7 @@
 import React from 'react';
 import { fireEvent, render, waitFor } from '@testing-library/react-native';
-import {
-  ChatInputBar,
-  getComposerContainerPadding,
-} from '../../src/components/ui/ChatInputBar';
+import { ChatInputBar } from '../../src/components/ui/ChatInputBar';
+import { screenChromeTokens } from '../../src/utils/themeTokens';
 
 jest.mock('react-native-css-interop', () => {
   const mockReact = require('react');
@@ -11,15 +9,6 @@ jest.mock('react-native-css-interop', () => {
     createInteropElement: mockReact.createElement,
   };
 });
-
-jest.mock('react-native-safe-area-context', () => ({
-  useSafeAreaInsets: () => ({
-    top: 0,
-    right: 0,
-    bottom: 0,
-    left: 0,
-  }),
-}));
 
 jest.mock('../../src/components/ui/MaterialSymbols', () => {
   const mockReact = require('react');
@@ -93,28 +82,16 @@ describe('ChatInputBar', () => {
     });
   });
 
-  it('keeps composer bottom padding larger than top padding', () => {
+  it('uses standardized chrome padding tokens for the composer container', () => {
     const onSendMessage = jest.fn();
     const { getByTestId } = render(
       <ChatInputBar onSendMessage={onSendMessage} />,
     );
-    const expectedPadding = getComposerContainerPadding(0);
-    const style = flattenStyle(getByTestId('chat-input-bar-container').props.style);
+    const container = getByTestId('chat-input-bar-container');
 
-    expect(style).toEqual(
-      expect.objectContaining({
-        paddingBottom: expectedPadding.paddingBottom,
-        paddingTop: expectedPadding.paddingTop,
-      }),
-    );
-    expect((style.paddingBottom as number) > (style.paddingTop as number)).toBe(true);
-  });
-
-  it('preserves large bottom safe-area insets instead of capping them away', () => {
-    expect(getComposerContainerPadding(34)).toEqual({
-      paddingTop: 5,
-      paddingBottom: 49,
-    });
+    expect(container.props.className).toContain(screenChromeTokens.contentHorizontalPaddingClassName);
+    expect(container.props.className).toContain(screenChromeTokens.bottomBarVerticalPaddingClassName);
+    expect(flattenStyle(container.props.style)).toBeUndefined();
   });
 
   it('centers single-line composer text without extra vertical padding', () => {

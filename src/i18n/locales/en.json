@@ -49,6 +49,10 @@
     "deleteConversationMessage": "Delete \"{{title}}\" from your recent chats?",
     "deleteConversationErrorTitle": "Cannot delete conversation"
   },
+  "modal": {
+    "description": "Additional app actions and platform-specific flows.",
+    "body": "This route is reserved for compact modal interactions that should inherit the shared theme, typography, and navigation chrome."
+  },
   "chat": {
     "title": "Chat",
     "newChatTitle": "New chat",

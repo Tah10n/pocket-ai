@@ -3,13 +3,14 @@ import { Box } from '@/components/ui/box';
 import { SearchHeader } from '@/components/ui/SearchHeader';
 import { ScreenContent } from '@/components/ui/ScreenShell';
 import { ModelsList } from '@/components/models/ModelsList';
+import { resolveModelsCatalogTab, type ModelsCatalogTab } from '@/components/models/modelTabs';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 
 export const ModelsCatalogScreen = () => {
   const router = useRouter();
   const params = useLocalSearchParams<{ initialTab?: string }>();
-  const requestedTab = params.initialTab === 'downloaded' ? 'Downloaded' : 'All Models';
-  const [activeTab, setActiveTab] = useState<'All Models' | 'Downloaded'>(requestedTab);
+  const requestedTab = resolveModelsCatalogTab(params.initialTab);
+  const [activeTab, setActiveTab] = useState<ModelsCatalogTab>(requestedTab);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchSessionKey, setSearchSessionKey] = useState(0);
 
@@ -28,7 +29,7 @@ export const ModelsCatalogScreen = () => {
     });
   }, []);
 
-  const handleTabChange = useCallback((tab: 'All Models' | 'Downloaded') => {
+  const handleTabChange = useCallback((tab: ModelsCatalogTab) => {
     setActiveTab(tab);
   }, []);
 
@@ -39,7 +40,7 @@ export const ModelsCatalogScreen = () => {
         onSearchChange={handleSearchChange}
         activeTab={activeTab}
         onTabChange={handleTabChange}
-        onBack={() => router.back()}
+        onBack={undefined}
         onOpenStorage={() => router.push('/storage' as any)}
       />
       <ScreenContent className="flex-1">

@@ -2,6 +2,19 @@ import React from 'react';
 import { render } from '@testing-library/react-native';
 import { ChatHeader } from '../../src/components/ui/ChatHeader';
 
+const mockScreenChip = jest.fn(({ label, ...props }: any) => {
+  const mockReact = require('react');
+  const { Pressable, Text } = require('react-native');
+  return mockReact.createElement(
+    Pressable,
+    {
+      ...props,
+      testID: props.testID ?? `screen-chip-${label}`,
+    },
+    mockReact.createElement(Text, { numberOfLines: 1, className: props.textClassName }, label),
+  );
+});
+
 jest.mock('react-native-css-interop', () => {
   const mockReact = require('react');
   return {
@@ -14,6 +27,7 @@ jest.mock('../../src/components/ui/ScreenShell', () => {
   const { Pressable, Text, View } = require('react-native');
   return {
     ScreenHeaderShell: ({ children }: any) => mockReact.createElement(View, null, children),
+    ScreenChip: (props: any) => mockScreenChip(props),
     HeaderActionButton: ({ children, ...props }: any) => mockReact.createElement(Pressable, props, children),
     HeaderActionPlaceholder: () => mockReact.createElement(View, null),
     HeaderBackButton: ({ accessibilityLabel, ...props }: any) =>
@@ -55,6 +69,10 @@ jest.mock('@/components/ui/pressable', () => {
 });
 
 describe('ChatHeader', () => {
+  beforeEach(() => {
+    mockScreenChip.mockClear();
+  });
+
   it('truncates the model label to a single line to keep the header compact', () => {
     const modelLabel = 'Qwen3.5-4B-Claude-4.6-Opus-Reasoning-Distilled-v2-GGUF';
     const { getByText } = render(
@@ -67,5 +85,25 @@ describe('ChatHeader', () => {
     );
 
     expect(getByText(modelLabel).props.numberOfLines).toBe(1);
+  });
+
+  it('keeps preset and model pills on one row without stretching them evenly', () => {
+    const modelLabel = 'Qwen 3 4B';
+    const presetLabel = 'Helpful Assistant';
+    const { getByTestId } = render(
+      <ChatHeader
+        title="Hi"
+        presetLabel={presetLabel}
+        modelLabel={modelLabel}
+        onOpenPresetSelector={jest.fn()}
+      />,
+    );
+
+    expect(getByTestId('chat-header-pill-row').props.className).not.toContain('flex-wrap');
+    expect(getByTestId(`screen-chip-${presetLabel}`).props.className).not.toContain('flex-1');
+    expect(getByTestId(`screen-chip-${modelLabel}`).props.className).not.toContain('flex-1');
+    expect(getByTestId(`screen-chip-${presetLabel}`).props.textClassName).toBeUndefined();
+    expect(getByTestId(`screen-chip-${modelLabel}`).props.textClassName).not.toContain('flex-initial');
+    expect(getByTestId(`screen-chip-${modelLabel}`).props.textClassName).not.toContain('flex-1');
   });
 });

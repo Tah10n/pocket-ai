@@ -308,7 +308,7 @@ export function ConversationsScreen() {
                     </Text>
                   </Box>
 
-                  <ScreenBadge tone={isActive ? 'accent' : 'neutral'} size="micro">
+                  <ScreenBadge tone={isActive ? 'success' : 'neutral'} size="micro">
                     {isActive ? t('common.active') : formatRetentionLabel(option.days, t)}
                   </ScreenBadge>
                 </Box>
@@ -343,7 +343,7 @@ export function ConversationsScreen() {
                 {item.title}
               </Text>
               {isActive ? (
-                <ScreenBadge tone="accent" size="micro">
+                <ScreenBadge tone="success" size="micro">
                   {t('common.active')}
                 </ScreenBadge>
               ) : null}

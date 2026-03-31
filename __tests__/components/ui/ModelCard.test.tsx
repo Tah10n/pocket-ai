@@ -3,6 +3,8 @@ import { fireEvent, render } from '@testing-library/react-native';
 import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../../src/types/models';
 import { ModelCard } from '../../../src/components/ui/ModelCard';
 
+const mockScreenBadge = jest.fn();
+
 jest.mock('../../../src/components/ui/box', () => {
   const mockReact = require('react');
   const { View } = require('react-native');
@@ -31,13 +33,17 @@ jest.mock('../../../src/components/ui/button', () => {
 
 jest.mock('../../../src/components/ui/ScreenShell', () => {
   const mockReact = require('react');
-  const { Pressable, View } = require('react-native');
+  const { Pressable, Text, View } = require('react-native');
   return {
     ScreenCard: ({ children, ...props }: any) => mockReact.createElement(View, props, children),
     ScreenActionPill: ({ children, onPress, ...props }: any) =>
       mockReact.createElement(Pressable, { onPress, ...props }, children),
     ScreenIconButton: ({ onPress, ...props }: any) =>
       mockReact.createElement(Pressable, { onPress, ...props }),
+    ScreenBadge: (props: any) => {
+      mockScreenBadge(props);
+      return mockReact.createElement(Text, props, props.children);
+    },
   };
 });
 
@@ -74,6 +80,10 @@ function buildModel(accessState: ModelAccessState): ModelMetadata {
 }
 
 describe('ModelCard', () => {
+  beforeEach(() => {
+    mockScreenBadge.mockClear();
+  });
+
   it('renders a token CTA for auth-required models', () => {
     const onConfigureToken = jest.fn();
     const onOpenDetails = jest.fn();
@@ -223,5 +233,31 @@ describe('ModelCard', () => {
     fireEvent.press(screen.getByText('models.settings'));
 
     expect(onOpenSettings).toHaveBeenCalledWith('org/model');
+  });
+
+  it('renders the active badge with success tone', () => {
+    render(
+      <ModelCard
+        model={{
+          ...buildModel(ModelAccessState.PUBLIC),
+          lifecycleStatus: LifecycleStatus.ACTIVE,
+        }}
+        onOpenDetails={jest.fn()}
+        onDownload={jest.fn()}
+        onConfigureToken={jest.fn()}
+        onOpenModelPage={jest.fn()}
+        onLoad={jest.fn()}
+        onOpenSettings={jest.fn()}
+        onUnload={jest.fn()}
+        onDelete={jest.fn()}
+        onCancel={jest.fn()}
+        onChat={jest.fn()}
+        isActive
+      />,
+    );
+
+    expect(
+      mockScreenBadge.mock.calls.some(([props]) => props.tone === 'success' && props.children === 'common.active'),
+    ).toBe(true);
   });
 });

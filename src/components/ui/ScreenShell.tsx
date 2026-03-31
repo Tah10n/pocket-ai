@@ -594,7 +594,7 @@ export function ScreenChip({
       ) : null}
       <Text
         numberOfLines={1}
-        className={joinClassNames(composeTextRole('chip', 'min-w-0 flex-1'), toneTokens.contentClassName, textClassName)}
+        className={joinClassNames(composeTextRole('chip', 'min-w-0 shrink'), toneTokens.contentClassName, textClassName)}
       >
         {label}
       </Text>

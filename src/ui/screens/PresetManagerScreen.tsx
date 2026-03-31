@@ -156,7 +156,7 @@ export function PresetManagerScreen() {
                         </Text>
                         <Box className="mt-3 flex-row items-center gap-2">
                             {isActive ? (
-                                <ScreenBadge tone="accent" size="micro">
+                                <ScreenBadge tone="success" size="micro">
                                     {t('common.active')}
                                 </ScreenBadge>
                             ) : null}

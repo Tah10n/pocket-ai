@@ -63,7 +63,7 @@ export const RecentConversationsList = ({
         accessibilityLabel={conv.title}
         className="flex-1 flex-row items-center gap-3 p-4 active:opacity-70"
       >
-        <Box className="size-11 shrink-0 items-center justify-center rounded-2xl bg-primary-500/10 dark:bg-primary-500/20">
+        <Box className="size-11 shrink-0 items-center justify-center">
           <MaterialSymbols name={conv.icon} size={18} className="text-primary-500" />
         </Box>
         

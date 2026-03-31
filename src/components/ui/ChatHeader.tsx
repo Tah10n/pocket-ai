@@ -121,7 +121,7 @@ export const ChatHeader = ({
         {(shouldShowPills || statusLabel) ? (
           <Box className={`mt-1.5 gap-1.5 ${screenChromeTokens.headerHorizontalPaddingClassName}`}>
             {shouldShowPills ? (
-              <Box className="flex-row items-center gap-2">
+              <Box testID="chat-header-pill-row" className="min-w-0 flex-row items-center gap-2">
                 {presetLabel ? (
                   <ScreenChip
                     label={presetLabel}
@@ -130,7 +130,7 @@ export const ChatHeader = ({
                     disabled={!canOpenPresetSelector}
                     accessibilityLabel={t('chat.headerPresetAccessibilityLabel')}
                     trailingIconName="keyboard-arrow-down"
-                    className="flex-1 min-w-0"
+                    className="min-w-0"
                   />
                 ) : null}
 
@@ -139,8 +139,8 @@ export const ChatHeader = ({
                     label={modelLabel}
                     tone={isModelUnavailable ? 'warning' : 'neutral'}
                     leadingIconName={isModelUnavailable ? 'warning' : 'memory'}
-                    className="min-w-0 flex-1"
-                    textClassName={`${composeTextRole('chip', 'min-w-0 flex-1')} ${modelTextClassName}`}
+                    className="min-w-0"
+                    textClassName={modelTextClassName}
                   />
                 ) : null}
               </Box>

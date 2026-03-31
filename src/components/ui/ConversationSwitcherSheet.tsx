@@ -193,7 +193,7 @@ export function ConversationSwitcherSheet({
                         </Box>
 
                         {isActive ? (
-                          <ScreenBadge tone="accent" size="micro">
+                          <ScreenBadge tone="success" size="micro">
                             {t('common.active')}
                           </ScreenBadge>
                         ) : (

@@ -117,7 +117,7 @@ const ModelCardComponent = ({
               {model.name}
             </Text>
             {isActive ? (
-              <ScreenBadge tone="accent" size="micro">
+              <ScreenBadge tone="success" size="micro">
                 {t('common.active')}
               </ScreenBadge>
             ) : null}

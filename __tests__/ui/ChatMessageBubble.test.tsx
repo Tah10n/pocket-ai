@@ -59,6 +59,7 @@ jest.mock('@/components/ui/text', () => {
   const { Text } = require('react-native');
   return {
     Text: ({ children, ...props }: any) => mockReact.createElement(Text, props, children),
+    composeTextRole: (_role: string, className = '') => className,
   };
 });
 

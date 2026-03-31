@@ -38,7 +38,7 @@ export const ActiveModelHeroCard = ({
         <Box className="flex-1 justify-between p-4">
           <Box className="flex-row items-center gap-2">
             <Box className="w-2 h-2 rounded-full bg-success-500" />
-            <Text className="text-xs font-semibold uppercase tracking-wide text-typography-0">Active</Text>
+            <Text className="text-xs font-semibold uppercase tracking-wide text-success-400">Active</Text>
           </Box>
           <Box className="flex-row items-center gap-2">
             <MaterialSymbols name="memory" size={16} className="text-typography-0" />
@@ -54,8 +54,8 @@ export const ActiveModelHeroCard = ({
               {name}
             </Text>
             <Box className="mt-2 flex-row items-center gap-2">
-              <Box className="rounded-full bg-primary-500/15 px-2 py-0.5">
-                <Text className="text-xs font-semibold text-primary-500">Active</Text>
+              <Box className="rounded-full bg-success-500/15 px-2 py-0.5">
+                <Text className="text-xs font-semibold text-success-600 dark:text-success-300">Active</Text>
               </Box>
               <Box className={`rounded-full px-2 py-0.5 ${fitsInRam ? 'bg-success-500/15' : 'bg-warning-500/15'}`}>
                 <Text className={`text-xs font-semibold ${fitsInRam ? 'text-success-500' : 'text-warning-500'}`}>

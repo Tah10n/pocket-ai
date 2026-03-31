@@ -100,7 +100,7 @@ export function PresetSelectorSheet({
                     </Text>
                   </Box>
                   {activePresetId == null ? (
-                    <ScreenBadge tone="accent" size="micro">
+                    <ScreenBadge tone="success" size="micro">
                       {t('common.active')}
                     </ScreenBadge>
                   ) : (
@@ -140,7 +140,7 @@ export function PresetSelectorSheet({
                         </Text>
                       </Box>
                       {isActive ? (
-                        <ScreenBadge tone="accent" size="micro">
+                        <ScreenBadge tone="success" size="micro">
                           {t('common.active')}
                         </ScreenBadge>
                       ) : (

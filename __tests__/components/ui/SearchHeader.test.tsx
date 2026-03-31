@@ -11,7 +11,7 @@ jest.mock('react-native-css-interop', () => {
 
 jest.mock('../../../src/components/ui/ScreenShell', () => {
   const mockReact = require('react');
-  const { Pressable, Text, View } = require('react-native');
+  const { Pressable, Text, TextInput, View } = require('react-native');
 
   return {
     ScreenHeaderShell: ({ children }: any) => mockReact.createElement(View, null, children),
@@ -20,7 +20,20 @@ jest.mock('../../../src/components/ui/ScreenShell', () => {
     HeaderActionPlaceholder: () => mockReact.createElement(View, { testID: 'header-action-placeholder' }),
     HeaderBackButton: ({ accessibilityLabel, onPress }: any) =>
       mockReact.createElement(Pressable, { accessibilityLabel, onPress }, mockReact.createElement(Text, null, 'back')),
-    ScreenSearchField: ({ children, testID }: any) => mockReact.createElement(View, { testID }, children),
+    ScreenInlineInput: ({ leadingAccessory, trailingAccessory, testID, ...props }: any) =>
+      mockReact.createElement(
+        View,
+        { testID },
+        leadingAccessory,
+        mockReact.createElement(TextInput, props),
+        trailingAccessory,
+      ),
+    ScreenIconButton: ({ accessibilityLabel, onPress, testID }: any) =>
+      mockReact.createElement(
+        Pressable,
+        { accessibilityLabel, onPress, testID },
+        mockReact.createElement(Text, null, 'icon'),
+      ),
     ScreenSegmentedControl: ({ options, activeKey, onChange, testID }: any) =>
       mockReact.createElement(
         View,

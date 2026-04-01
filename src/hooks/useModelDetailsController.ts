@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Linking } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useTranslation } from 'react-i18next';
@@ -27,6 +27,7 @@ export function useModelDetailsController(modelId: string) {
   const router = useRouter();
   const { t } = useTranslation();
   const missingModelMessage = t('models.detailMissingModel');
+  const previousModelIdRef = useRef<string | null>(null);
   const [model, setModel] = useState<ModelMetadata | null>(
     () => (modelId
       ? modelCatalogService.getCachedModel(modelId) ?? createModelDetailsPlaceholder(modelId)
@@ -51,6 +52,11 @@ export function useModelDetailsController(modelId: string) {
 
     setLoading(true);
     setErrorMessage(null);
+    const previousModelId = previousModelIdRef.current;
+    if (previousModelId !== modelId) {
+      previousModelIdRef.current = modelId;
+      setModel(modelCatalogService.getCachedModel(modelId) ?? createModelDetailsPlaceholder(modelId));
+    }
 
     void modelCatalogService.getModelDetails(modelId)
       .then((resolvedModel) => {

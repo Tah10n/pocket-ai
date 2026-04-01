@@ -124,7 +124,7 @@ export function ConversationsScreen() {
   const handleOpenConversation = useCallback((threadId: string) => {
     try {
       openThread(threadId);
-      router.replace('/(tabs)/chat' as any);
+      router.push('/(tabs)/chat' as any);
     } catch (error: any) {
       Alert.alert(
         t('conversations.openErrorTitle'),
@@ -136,7 +136,7 @@ export function ConversationsScreen() {
   const handleStartNewChat = useCallback(() => {
     try {
       startNewChat();
-      router.replace('/(tabs)/chat' as any);
+      router.push('/(tabs)/chat' as any);
     } catch (error: any) {
       Alert.alert(
         t('conversations.startNewChatErrorTitle'),

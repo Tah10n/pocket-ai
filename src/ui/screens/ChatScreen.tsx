@@ -715,7 +715,7 @@ export const ChatScreen = () => {
                 }}
                 canOpenPresetSelector={!isGenerating}
                 canOpenModelControls={Boolean(configurableModelId) && !isGenerating}
-                onBack={undefined}
+                onBack={router.canGoBack() ? () => router.back() : undefined}
             />
 
             <Box className="flex-1">

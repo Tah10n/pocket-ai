@@ -24,8 +24,6 @@ import { huggingFaceTokenService } from '@/services/HuggingFaceTokenService';
 import { registry } from '@/services/LocalStorageRegistry';
 import { offloadModel } from '@/services/StorageManagerService';
 import {
-} from '@/services/SettingsStore';
-import {
   useModelsStore,
   MODELS_PAGE_SIZE,
   type ModelFilterCriteria,

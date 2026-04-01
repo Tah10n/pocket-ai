@@ -467,15 +467,12 @@ export function ScreenActionPill({
       ? screenLayoutTokens.primaryActionPillClassName
       : screenLayoutTokens.softActionPillClassName,
   );
-  const textToneClassName = tone === 'primary'
-    ? 'text-typography-0'
-    : 'text-primary-600 dark:text-primary-300';
 
   return (
     <Pressable
       accessibilityRole={accessibilityRole ?? 'button'}
       disabled={disabled}
-      className={joinClassNames(baseClassName, disabled ? 'opacity-55' : 'active:opacity-80', textToneClassName, className)}
+      className={joinClassNames(baseClassName, disabled ? 'opacity-55' : 'active:opacity-80', className)}
       {...props}
     >
       {children}

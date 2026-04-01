@@ -268,4 +268,57 @@ describe('ConversationsScreen', () => {
 
     expect(getByTestId('retention-option-forever')).toBeTruthy();
   });
+
+  it('pushes chat so the conversations screen stays in the navigation stack', () => {
+    const openThread = jest.fn();
+    const startNewChat = jest.fn();
+
+    mockUseChatSession.mockReturnValue({
+      activeThread: null,
+      conversationIndex: [
+        {
+          id: 'thread-1',
+          title: 'Shopping ideas',
+          updatedAt: 1_000_000,
+          modelId: 'author/model-a',
+          presetId: null,
+          messageCount: 3,
+          lastMessagePreview: 'Groceries and meal prep',
+        },
+      ],
+      messages: [],
+      isGenerating: false,
+      shouldOfferSummary: false,
+      truncatedMessageCount: 0,
+      appendUserMessage: jest.fn(),
+      deleteMessage: jest.fn(),
+      deleteThread: jest.fn(),
+      renameThread: jest.fn(),
+      openThread,
+      stopGeneration: jest.fn(),
+      regenerateFromUserMessage: jest.fn(),
+      regenerateLastResponse: jest.fn(),
+      createSummaryPlaceholder: jest.fn(),
+      startNewChat,
+    } as any);
+
+    const { getByTestId } = render(
+      <SafeAreaProvider
+        initialMetrics={{
+          frame: { x: 0, y: 0, width: 390, height: 844 },
+          insets: { top: 0, left: 0, right: 0, bottom: 0 },
+        }}
+      >
+        <ConversationsScreen />
+      </SafeAreaProvider>,
+    );
+
+    fireEvent.press(getByTestId('conversation-row-thread-1'));
+    fireEvent.press(getByTestId('start-new-chat'));
+
+    expect(openThread).toHaveBeenCalledWith('thread-1');
+    expect(startNewChat).toHaveBeenCalledTimes(1);
+    expect(mockRouterPush).toHaveBeenNthCalledWith(1, '/(tabs)/chat');
+    expect(mockRouterPush).toHaveBeenNthCalledWith(2, '/(tabs)/chat');
+  });
 });

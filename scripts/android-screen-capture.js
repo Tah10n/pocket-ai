@@ -74,38 +74,62 @@ async function main() {
   const results = [];
 
   await context.ensureAppVisible();
-  await ensureEnglishUi(context);
+  const languageState = {
+    originalLabel: await readCurrentLanguageLabel(context),
+    switchedToEnglish: false,
+  };
 
-  for (const screen of selectedScreens) {
-    const startedAt = Date.now();
-    log(`Capturing screen: ${screen.id}`);
+  let runError = null;
 
+  try {
+    await ensureEnglishUi(context, languageState);
+
+    for (const screen of selectedScreens) {
+      const startedAt = Date.now();
+      log(`Capturing screen: ${screen.id}`);
+
+      try {
+        await screen.run(context);
+        const screenshotPath = context.captureScreenshot(`${screen.id}.png`);
+        results.push({
+          id: screen.id,
+          status: "captured",
+          durationMs: Date.now() - startedAt,
+          screenshotPath,
+        });
+        log(`CAPTURED ${screen.id}`);
+      } catch (error) {
+        const screenshotPath = context.captureScreenshot(`${screen.id}-failed.png`);
+        results.push({
+          id: screen.id,
+          status: "failed",
+          durationMs: Date.now() - startedAt,
+          screenshotPath,
+          error: error.message,
+        });
+        writeReport(serial, results);
+        throw error;
+      }
+    }
+
+    writeReport(serial, results);
+    log(`Captured ${results.length} screen(s).`);
+  } catch (error) {
+    runError = error;
+  } finally {
     try {
-      await screen.run(context);
-      const screenshotPath = context.captureScreenshot(`${screen.id}.png`);
-      results.push({
-        id: screen.id,
-        status: "captured",
-        durationMs: Date.now() - startedAt,
-        screenshotPath,
-      });
-      log(`CAPTURED ${screen.id}`);
+      await restoreOriginalLanguage(context, languageState);
     } catch (error) {
-      const screenshotPath = context.captureScreenshot(`${screen.id}-failed.png`);
-      results.push({
-        id: screen.id,
-        status: "failed",
-        durationMs: Date.now() - startedAt,
-        screenshotPath,
-        error: error.message,
-      });
-      writeReport(serial, results);
-      throw error;
+      log(`Failed to restore the original Android language: ${error.message}`);
+      if (!runError) {
+        runError = error;
+      }
     }
   }
 
-  writeReport(serial, results);
-  log(`Captured ${results.length} screen(s).`);
+  if (runError) {
+    throw runError;
+  }
 }
 
 function buildScreens() {
@@ -293,7 +317,7 @@ async function goToModelDetails(ctx) {
   await ctx.expectAnyText(MODEL_DETAILS_TITLE_LABELS);
 }
 
-async function ensureEnglishUi(ctx) {
+async function readCurrentLanguageLabel(ctx) {
   await goToSettings(ctx);
 
   const languageNode = await ctx.findAnyNodeNow(LANGUAGE_ROW_LABELS, {
@@ -303,13 +327,30 @@ async function ensureEnglishUi(ctx) {
     throw new Error("Could not find the language row while preparing English screen captures.");
   }
 
-  if (languageNode.label === LANGUAGE_ROW_LABELS[0]) {
+  return languageNode.label;
+}
+
+async function ensureEnglishUi(ctx, languageState) {
+  if (languageState.originalLabel === LANGUAGE_ROW_LABELS[0]) {
     return;
   }
 
   await ctx.tapAnyText([LANGUAGE_ROW_LABELS[1]]);
+  languageState.switchedToEnglish = true;
   await ctx.expectText(LANGUAGE_ROW_LABELS[0], { timeoutMs: 5_000 });
   await ctx.expectText(THEME_MODE_LABELS[0], { timeoutMs: 5_000 });
+  await goToHome(ctx);
+}
+
+async function restoreOriginalLanguage(ctx, languageState) {
+  if (!languageState.switchedToEnglish) {
+    return;
+  }
+
+  await goToSettings(ctx);
+  await ctx.tapAnyText([LANGUAGE_ROW_LABELS[0]]);
+  await ctx.expectText(languageState.originalLabel, { timeoutMs: 5_000 });
+  await ctx.expectText(THEME_MODE_LABELS[1], { timeoutMs: 5_000 });
   await goToHome(ctx);
 }
 

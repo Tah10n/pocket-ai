@@ -69,38 +69,62 @@ async function main() {
   const results = [];
 
   await dismissDebuggerBannerIfPresent(adbPath, serial);
-  await ensureEnglishUi(context);
+  const languageState = {
+    originalLabel: await readCurrentLanguageLabel(context),
+    switchedToEnglish: false,
+  };
 
-  for (const scenario of selectedScenarios) {
-    const startedAt = Date.now();
-    log(`Running scenario: ${scenario.id}`);
+  let runError = null;
 
+  try {
+    await ensureEnglishUi(context, languageState);
+
+    for (const scenario of selectedScenarios) {
+      const startedAt = Date.now();
+      log(`Running scenario: ${scenario.id}`);
+
+      try {
+        await scenario.run(context);
+        const screenshotPath = context.captureScreenshot(`${scenario.id}.png`);
+        results.push({
+          id: scenario.id,
+          status: "passed",
+          durationMs: Date.now() - startedAt,
+          screenshotPath,
+        });
+        log(`PASS ${scenario.id}`);
+      } catch (error) {
+        const screenshotPath = context.captureScreenshot(`${scenario.id}-failed.png`);
+        results.push({
+          id: scenario.id,
+          status: "failed",
+          durationMs: Date.now() - startedAt,
+          screenshotPath,
+          error: error.message,
+        });
+        writeReport(results);
+        throw error;
+      }
+    }
+
+    writeReport(results);
+    log(`Completed ${results.length} basic scenario(s).`);
+  } catch (error) {
+    runError = error;
+  } finally {
     try {
-      await scenario.run(context);
-      const screenshotPath = context.captureScreenshot(`${scenario.id}.png`);
-      results.push({
-        id: scenario.id,
-        status: "passed",
-        durationMs: Date.now() - startedAt,
-        screenshotPath,
-      });
-      log(`PASS ${scenario.id}`);
+      await restoreOriginalLanguage(context, languageState);
     } catch (error) {
-      const screenshotPath = context.captureScreenshot(`${scenario.id}-failed.png`);
-      results.push({
-        id: scenario.id,
-        status: "failed",
-        durationMs: Date.now() - startedAt,
-        screenshotPath,
-        error: error.message,
-      });
-      writeReport(results);
-      throw error;
+      log(`Failed to restore the original Android language: ${error.message}`);
+      if (!runError) {
+        runError = error;
+      }
     }
   }
 
-  writeReport(results);
-  log(`Completed ${results.length} basic scenario(s).`);
+  if (runError) {
+    throw runError;
+  }
 }
 
 function createScenarioContext(adbPath, serial) {
@@ -385,7 +409,7 @@ async function goToConversationManagement(ctx) {
   await ctx.expectAnyText(CONVERSATIONS_TITLE_LABELS);
 }
 
-async function ensureEnglishUi(ctx) {
+async function readCurrentLanguageLabel(ctx) {
   await goToSettings(ctx);
 
   const adbPath = resolveAdbPath();
@@ -397,13 +421,30 @@ async function ensureEnglishUi(ctx) {
     throw new Error("Could not find the language row while preparing Android scenarios.");
   }
 
-  if (languageNode.label === LANGUAGE_ROW_LABELS[0]) {
+  return languageNode.label;
+}
+
+async function ensureEnglishUi(ctx, languageState) {
+  if (languageState.originalLabel === LANGUAGE_ROW_LABELS[0]) {
     return;
   }
 
   await ctx.tapAnyText([LANGUAGE_ROW_LABELS[1]]);
+  languageState.switchedToEnglish = true;
   await ctx.expectText(LANGUAGE_ROW_LABELS[0], { timeoutMs: 5_000 });
   await ctx.expectText(THEME_MODE_LABELS[0], { timeoutMs: 5_000 });
+  await goToHome(ctx);
+}
+
+async function restoreOriginalLanguage(ctx, languageState) {
+  if (!languageState.switchedToEnglish) {
+    return;
+  }
+
+  await goToSettings(ctx);
+  await ctx.tapAnyText([LANGUAGE_ROW_LABELS[0]]);
+  await ctx.expectText(languageState.originalLabel, { timeoutMs: 5_000 });
+  await ctx.expectText(THEME_MODE_LABELS[1], { timeoutMs: 5_000 });
   await goToHome(ctx);
 }
 

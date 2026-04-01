@@ -72,7 +72,10 @@ export function ModelDownloadProgress({
     return null;
   }
 
-  const progressPercent = Math.round(model.downloadProgress * 100);
+  const rawProgressPercent = Number.isFinite(model.downloadProgress)
+    ? Math.round(model.downloadProgress * 100)
+    : 0;
+  const progressPercent = Math.max(0, Math.min(100, rawProgressPercent));
 
   return (
     <Box className={className}>

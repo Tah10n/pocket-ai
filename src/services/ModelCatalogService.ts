@@ -818,14 +818,8 @@ export class ModelCatalogService {
         if (model.requiresTreeProbe && !treeResponse.isComplete) {
           return normalizePersistedModelMetadata({
             ...model,
-            size,
-            fitsInRam,
             accessState,
             requiresTreeProbe: true,
-            hfRevision: model.hfRevision,
-            resolvedFileName,
-            downloadUrl: buildHuggingFaceResolveUrl(model.id, resolvedFileName, model.hfRevision),
-            sha256: this.getFileSha(selectedEntry) ?? model.sha256,
           });
         }
 

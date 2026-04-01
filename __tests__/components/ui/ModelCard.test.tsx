@@ -6,16 +6,16 @@ import { ModelCard } from '../../../src/components/ui/ModelCard';
 const mockScreenBadge = jest.fn();
 
 jest.mock('../../../src/components/ui/box', () => {
-  const mockReact = require('react');
-  const { View } = require('react-native');
+  const mockReact = jest.requireActual('react');
+  const { View } = jest.requireActual('react-native');
   return {
     Box: ({ children, ...props }: any) => mockReact.createElement(View, props, children),
   };
 });
 
 jest.mock('../../../src/components/ui/text', () => {
-  const mockReact = require('react');
-  const { Text } = require('react-native');
+  const mockReact = jest.requireActual('react');
+  const { Text } = jest.requireActual('react-native');
   return {
     Text: ({ children, ...props }: any) => mockReact.createElement(Text, props, children),
     composeTextRole: (_role: string, className = '') => className,
@@ -23,8 +23,8 @@ jest.mock('../../../src/components/ui/text', () => {
 });
 
 jest.mock('../../../src/components/ui/button', () => {
-  const mockReact = require('react');
-  const { Pressable, Text } = require('react-native');
+  const mockReact = jest.requireActual('react');
+  const { Pressable, Text } = jest.requireActual('react-native');
   return {
     Button: ({ children, onPress, ...props }: any) => mockReact.createElement(Pressable, { onPress, ...props }, children),
     ButtonText: ({ children, ...props }: any) => mockReact.createElement(Text, props, children),
@@ -32,8 +32,8 @@ jest.mock('../../../src/components/ui/button', () => {
 });
 
 jest.mock('../../../src/components/ui/ScreenShell', () => {
-  const mockReact = require('react');
-  const { Pressable, Text, View } = require('react-native');
+  const mockReact = jest.requireActual('react');
+  const { Pressable, Text, View } = jest.requireActual('react-native');
   return {
     ScreenCard: ({ children, ...props }: any) => mockReact.createElement(View, props, children),
     ScreenActionPill: ({ children, onPress, ...props }: any) =>
@@ -48,16 +48,16 @@ jest.mock('../../../src/components/ui/ScreenShell', () => {
 });
 
 jest.mock('../../../src/components/ui/pressable', () => {
-  const mockReact = require('react');
-  const { Pressable } = require('react-native');
+  const mockReact = jest.requireActual('react');
+  const { Pressable } = jest.requireActual('react-native');
   return {
     Pressable: ({ children, ...props }: any) => mockReact.createElement(Pressable, props, children),
   };
 });
 
 jest.mock('../../../src/components/ui/MaterialSymbols', () => {
-  const mockReact = require('react');
-  const { Text } = require('react-native');
+  const mockReact = jest.requireActual('react');
+  const { Text } = jest.requireActual('react-native');
   return {
     MaterialSymbols: ({ name }: any) => mockReact.createElement(Text, null, name),
   };

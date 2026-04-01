@@ -36,6 +36,7 @@ type HuggingFaceModelSummary = {
     total?: number;
     context_length?: number;
     architecture?: string;
+    size_label?: string;
   };
 };
 
@@ -762,11 +763,11 @@ export class ModelCatalogService {
         model.isPrivate
       );
 
-      if (hasKnownSize && !requiresAuthValidation) {
+      if (hasKnownSize && !requiresAuthValidation && model.requiresTreeProbe !== true) {
         return model;
       }
 
-      if (hasKnownSize && requiresAuthValidation) {
+      if (hasKnownSize && requiresAuthValidation && model.requiresTreeProbe !== true) {
         const probedAccessState = await this.probeResolvedModelAccess(model, requestContext);
         if (probedAccessState) {
           return normalizePersistedModelMetadata({
@@ -813,6 +814,20 @@ export class ModelCatalogService {
         const resolvedFileName = this.getFileName(selectedEntry);
         const size = this.getFileSize(selectedEntry);
         const fitsInRam = size === null ? null : size < totalMemory * 0.8;
+
+        if (model.requiresTreeProbe && !treeResponse.isComplete) {
+          return normalizePersistedModelMetadata({
+            ...model,
+            size,
+            fitsInRam,
+            accessState,
+            requiresTreeProbe: true,
+            hfRevision: model.hfRevision,
+            resolvedFileName,
+            downloadUrl: buildHuggingFaceResolveUrl(model.id, resolvedFileName, model.hfRevision),
+            sha256: this.getFileSha(selectedEntry) ?? model.sha256,
+          });
+        }
 
         return normalizePersistedModelMetadata({
           ...model,
@@ -1063,12 +1078,14 @@ export class ModelCatalogService {
         continue;
       }
 
-      const size = this.getFileSize(ggufSibling) ?? item.gguf?.total ?? null;
+      const selectedEntrySize = this.getFileSize(ggufSibling);
+      const size = selectedEntrySize ?? item.gguf?.total ?? null;
       const fitsInRam = typeof size === 'number' ? size < totalMemory * 0.8 : null;
       const fileName = this.getFileName(ggufSibling) || 'model.gguf';
       const hfRevision = item.sha ?? undefined;
       const maxContextTokens = this.resolveSummaryMaxContextTokens(item);
       const requiresAuth = Boolean(item.gated) || item.private === true;
+      const requiresTreeProbe = this.shouldRevalidateCatalogSummarySelection(ggufSibling);
       const accessState = requiresAuth
         ? ModelAccessState.AUTH_REQUIRED
         : ModelAccessState.PUBLIC;
@@ -1085,10 +1102,12 @@ export class ModelCatalogService {
         accessState,
         isGated: Boolean(item.gated),
         isPrivate: item.private === true,
+        requiresTreeProbe,
         lifecycleStatus: LifecycleStatus.AVAILABLE,
         downloadProgress: 0,
         sha256: this.getFileSha(ggufSibling),
         maxContextTokens,
+        parameterSizeLabel: this.resolveStringMetadata(undefined, item.gguf?.size_label),
         modelType: item.config?.model_type ?? item.gguf?.architecture,
         architectures: item.config?.architectures,
         baseModels: this.resolveStringArrayMetadata(undefined, item.cardData?.base_model),
@@ -1137,6 +1156,7 @@ export class ModelCatalogService {
       requiresTreeProbe: true,
       hfRevision: item.sha ?? undefined,
       maxContextTokens: this.resolveSummaryMaxContextTokens(item),
+      parameterSizeLabel: this.resolveStringMetadata(undefined, item.gguf?.size_label),
       modelType: item.config?.model_type ?? item.gguf?.architecture,
       baseModels: this.resolveStringArrayMetadata(undefined, item.cardData?.base_model),
       license: this.resolveStringMetadata(undefined, item.cardData?.license),
@@ -1160,14 +1180,18 @@ export class ModelCatalogService {
     const repoId = payload.id || payload.modelId || fallbackModel.id;
     const hfRevision = payload.sha ?? fallbackModel.hfRevision;
     const selectedEntry = this.selectPreferredGgufEntry(payload.siblings ?? []);
+    const selectedEntrySize = this.getFileSize(selectedEntry);
     const resolvedFileName = selectedEntry
       ? this.getFileName(selectedEntry)
       : fallbackModel.resolvedFileName;
-    const size = this.getFileSize(selectedEntry) ?? payload.gguf?.total ?? fallbackModel.size;
+    const size = selectedEntrySize ?? payload.gguf?.total ?? fallbackModel.size;
     const fitsInRam = typeof size === 'number'
       ? size < totalMemory * 0.8
       : fallbackModel.fitsInRam;
     const requiresAuth = Boolean(payload.gated) || payload.private === true;
+    const requiresTreeProbe = selectedEntry
+      ? selectedEntrySize === null
+      : fallbackModel.requiresTreeProbe === true;
 
     return normalizePersistedModelMetadata({
       ...fallbackModel,
@@ -1184,6 +1208,8 @@ export class ModelCatalogService {
       accessState: this.resolveDetailAccessState(requiresAuth, authToken),
       isGated: Boolean(payload.gated),
       isPrivate: payload.private === true,
+      requiresTreeProbe,
+      parameterSizeLabel: this.resolveStringMetadata(fallbackModel.parameterSizeLabel, payload.gguf?.size_label),
       sha256: selectedEntry ? this.getFileSha(selectedEntry) ?? fallbackModel.sha256 : fallbackModel.sha256,
       maxContextTokens: payloadMaxContextTokens ?? fallbackModel.maxContextTokens,
       modelType: payload.config?.model_type ?? payload.cardData?.model_type ?? fallbackModel.modelType,
@@ -1306,6 +1332,7 @@ export class ModelCatalogService {
       resumeData: localModel.resumeData,
       maxContextTokens,
       hasVerifiedContextWindow,
+      parameterSizeLabel: remoteModel.parameterSizeLabel ?? localModel.parameterSizeLabel,
       modelType: remoteModel.modelType ?? localModel.modelType,
       architectures: remoteModel.architectures ?? localModel.architectures,
       baseModels: remoteModel.baseModels ?? localModel.baseModels,
@@ -1798,7 +1825,7 @@ export class ModelCatalogService {
     model: ModelMetadata,
     entries: HuggingFaceTreeEntry[],
   ): HuggingFaceTreeEntry | undefined {
-    if (model.resolvedFileName) {
+    if (model.requiresTreeProbe !== true && model.resolvedFileName) {
       const exactMatch = entries.find((entry) => this.getFileName(entry) === model.resolvedFileName);
       if (exactMatch) {
         return exactMatch;
@@ -1808,12 +1835,22 @@ export class ModelCatalogService {
     return this.selectPreferredGgufEntry(entries);
   }
 
+  private shouldRevalidateCatalogSummarySelection(
+    selectedEntry: HuggingFaceSibling,
+  ): boolean {
+    return this.getFileSize(selectedEntry) === null;
+  }
+
   private selectPreferredGgufEntry<T extends HuggingFaceSibling | HuggingFaceTreeEntry>(
     entries: T[],
   ): T | undefined {
     const ggufs = entries.filter((entry) => this.isEligibleGgufEntry(entry));
 
-    return ggufs.find((entry) => this.getFileName(entry).includes('Q4_K_M')) ?? ggufs[0];
+    return ggufs.find((entry) => this.isPreferredQuantFileName(this.getFileName(entry))) ?? ggufs[0];
+  }
+
+  private isPreferredQuantFileName(fileName: string): boolean {
+    return fileName.toUpperCase().includes('Q4_K_M');
   }
 
   private isEligibleGgufEntry(entry: HuggingFaceSibling | HuggingFaceTreeEntry): boolean {

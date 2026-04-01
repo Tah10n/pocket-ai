@@ -36,6 +36,7 @@ export interface ModelMetadata {
   resumeData?: string;
   maxContextTokens?: number;
   hasVerifiedContextWindow?: boolean;
+  parameterSizeLabel?: string;
   modelType?: string;
   architectures?: string[];
   baseModels?: string[];

@@ -576,6 +576,74 @@ describe('ModelCatalogService', () => {
     expect(result.models[0].downloadUrl).toContain('model.Q4_K_M.gguf');
   });
 
+  it('does not force a tree revalidation when the summary exposes a single known quant file', async () => {
+    global.fetch = jest.fn(() =>
+      Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve([
+          makeRepo('org/single-known-quant-model', 5 * 1024 * 1024 * 1024, 'model.Q8_0.gguf'),
+        ]),
+      }),
+    ) as jest.Mock;
+
+    const result = await modelCatalogService.searchModels('phi');
+
+    expect(result.models).toHaveLength(1);
+    expect(result.models[0].resolvedFileName).toBe('model.Q8_0.gguf');
+    expect(result.models[0].size).toBe(5 * 1024 * 1024 * 1024);
+    expect(result.models[0].requiresTreeProbe).toBe(false);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps discovered GGUF metadata when tree pagination stops before completion', async () => {
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.includes('cursor=tree-page-2')) {
+        return Promise.resolve({
+          ok: false,
+          status: 429,
+          json: () => Promise.resolve([]),
+        });
+      }
+
+      if (url.includes('/tree/main?recursive=true')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          headers: {
+            get: jest.fn((headerName: string) => (
+              headerName === 'link'
+                ? '<https://huggingface.co/api/models/org/incomplete-tree-probe/tree/main?recursive=true&cursor=tree-page-2>; rel="next"'
+                : null
+            )),
+          },
+          json: () => Promise.resolve([
+            {
+              path: 'model.Q8_0.gguf',
+              size: 5 * 1024 * 1024 * 1024,
+              lfs: { sha256: 'partial-tree-q8-sha' },
+            },
+          ]),
+        });
+      }
+
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve([makeIncompletePublicRepo('org/incomplete-tree-probe')]),
+      });
+    }) as jest.Mock;
+
+    const result = await modelCatalogService.searchModels('phi');
+
+    expect(result.models).toHaveLength(1);
+    expect(result.models[0].id).toBe('org/incomplete-tree-probe');
+    expect(result.models[0].resolvedFileName).toBe('model.Q8_0.gguf');
+    expect(result.models[0].size).toBe(5 * 1024 * 1024 * 1024);
+    expect(result.models[0].sha256).toBe('partial-tree-q8-sha');
+    expect(result.models[0].requiresTreeProbe).toBe(true);
+  });
+
   it('follows paginated tree cursors until it finds the GGUF entry metadata', async () => {
     global.fetch = jest.fn((input: RequestInfo | URL) => {
       const url = String(input);
@@ -1428,6 +1496,9 @@ describe('ModelCatalogService', () => {
         ok: true,
         json: () => Promise.resolve({
           ...makeRepo('org/rich-detail-model'),
+          gguf: {
+            size_label: '8B',
+          },
           cardData: {
             base_model: ['meta-llama/Llama-3.1-8B-Instruct'],
             language: ['en', 'de'],
@@ -1447,6 +1518,7 @@ describe('ModelCatalogService', () => {
 
     const result = await modelCatalogService.getModelDetails('org/rich-detail-model');
 
+    expect(result.parameterSizeLabel).toBe('8B');
     expect(result.modelType).toBe('llama');
     expect(result.architectures).toEqual(['LlamaForCausalLM']);
     expect(result.baseModels).toEqual(['meta-llama/Llama-3.1-8B-Instruct']);
@@ -1456,6 +1528,31 @@ describe('ModelCatalogService', () => {
     expect(result.quantizedBy).toBe('bartowski');
     expect(result.modelCreator).toBe('Meta');
     expect(result.maxContextTokens).toBe(65536);
+  });
+
+  it('hydrates parameter size labels from Hugging Face summary gguf metadata', async () => {
+    global.fetch = jest.fn(() =>
+      Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve([
+          {
+            ...makeRepo('org/summary-size-label-model'),
+            gguf: {
+              total: 1.5 * 1024 * 1024 * 1024,
+              architecture: 'llama',
+              size_label: '14B',
+            },
+          },
+        ]),
+      }),
+    ) as jest.Mock;
+
+    const result = await modelCatalogService.searchModels('summary-size-label-model');
+
+    expect(result.models[0]).toEqual(expect.objectContaining({
+      id: 'org/summary-size-label-model',
+      parameterSizeLabel: '14B',
+    }));
   });
 
   it('hydrates context ceilings from README front matter even when no summary or cardData is present', async () => {

@@ -58,11 +58,17 @@ function joinClassNames(...values: (string | undefined)[]) {
   return values.filter(Boolean).join(' ');
 }
 
-function getBadgeToneTokens(tone: 'neutral' | 'accent' | 'warning' | 'error' | 'success') {
+function getBadgeToneTokens(tone: 'neutral' | 'accent' | 'warning' | 'error' | 'success' | 'info') {
   if (tone === 'accent') {
     return {
       shellClassName: 'border-primary-500/20 bg-primary-500/10 dark:border-primary-400/25 dark:bg-primary-500/15',
       contentClassName: 'text-primary-700 dark:text-primary-200',
+    };
+  }
+  if (tone === 'info') {
+    return {
+      shellClassName: 'border-info-500/20 bg-info-500/10 dark:border-info-400/25 dark:bg-info-500/15',
+      contentClassName: 'text-info-700 dark:text-info-200',
     };
   }
   if (tone === 'warning') {
@@ -141,7 +147,7 @@ interface ScreenBadgeProps {
   children: React.ReactNode;
   className?: string;
   textClassName?: string;
-  tone?: 'neutral' | 'accent' | 'warning' | 'error' | 'success';
+  tone?: 'neutral' | 'accent' | 'warning' | 'error' | 'success' | 'info';
   size?: 'micro' | 'default';
   iconName?: MaterialSymbolsProps['name'];
   iconClassName?: string;
@@ -152,7 +158,7 @@ interface ScreenChipProps extends React.ComponentProps<typeof Pressable> {
   label: string;
   className?: string;
   textClassName?: string;
-  tone?: 'neutral' | 'accent' | 'warning' | 'error' | 'success';
+  tone?: 'neutral' | 'accent' | 'warning' | 'error' | 'success' | 'info';
   size?: 'micro' | 'default';
   leadingIconName?: MaterialSymbolsProps['name'];
   trailingIconName?: MaterialSymbolsProps['name'];

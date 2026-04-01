@@ -14,7 +14,6 @@ import {
     View,
 } from 'react-native';
 import { useBottomTabBarHeight } from '@react-navigation/bottom-tabs';
-import DeviceInfo from 'react-native-device-info';
 import { useFocusEffect } from '@react-navigation/native';
 import { Box } from '@/components/ui/box';
 import { Button, ButtonText } from '@/components/ui/button';
@@ -29,33 +28,22 @@ import { useTranslation } from 'react-i18next';
 import { PresetSelectorSheet } from '@/components/ui/PresetSelectorSheet';
 import { resolvePresetSnapshot, useChatSession } from '../../hooks/useChatSession';
 import { useLLMEngine } from '../../hooks/useLLMEngine';
+import { useModelParametersSheetController } from '@/hooks/useModelParametersSheetController';
 import { useRouter } from 'expo-router';
-import { llmEngineService } from '../../services/LLMEngineService';
 import { EngineStatus } from '../../types/models';
 import { ChatMessage } from '../../types/chat';
 import { getChatHardwareBannerInputs, hardwareListenerService } from '../../services/HardwareListenerService';
 import { registry } from '../../services/LocalStorageRegistry';
-import { modelCatalogService } from '../../services/ModelCatalogService';
 import { useChatStore } from '../../store/chatStore';
 import { getReportedErrorMessage } from '../../services/AppError';
 import {
-    DEFAULT_MODEL_LOAD_PARAMETERS,
     getGenerationParametersForModel,
-    getModelLoadParametersForModel,
     getSettings,
     resetGenerationParametersForModel,
-    resetModelLoadParametersForModel,
     subscribeSettings,
     updateSettings,
-    updateModelLoadParametersForModel,
     updateGenerationParametersForModel,
-    type ModelLoadParameters,
 } from '../../services/SettingsStore';
-import {
-    clampContextWindowTokens,
-    resolveContextWindowCeiling,
-} from '../../utils/contextWindow';
-import { hasPersistedLoadProfileChanges } from '../../utils/modelLoadProfile';
 import { screenLayoutMetrics } from '../../utils/themeTokens';
 
 const AUTO_SCROLL_BOTTOM_THRESHOLD = 96;
@@ -158,29 +146,13 @@ export const ChatScreen = () => {
     const [composerDraft, setComposerDraft] = useState('');
     const [androidKeyboardInset, setAndroidKeyboardInset] = useState(0);
     const [isPresetSelectorOpen, setPresetSelectorOpen] = useState(false);
-    const [isModelParametersOpen, setModelParametersOpen] = useState(false);
-    const [isApplyingModelReload, setApplyingModelReload] = useState(false);
     const [settings, setSettings] = useState(() => getSettings());
-    const [recommendedGpuLayers, setRecommendedGpuLayers] = useState(0);
-    const [measuredContextWindowCeiling, setMeasuredContextWindowCeiling] = useState<number | null>(null);
-    const [draftLoadParams, setDraftLoadParams] = useState<ModelLoadParameters>({
-        contextSize: DEFAULT_MODEL_LOAD_PARAMETERS.contextSize,
-        gpuLayers: 0,
-    });
     const [pendingRegenerateMessage, setPendingRegenerateMessage] = useState<{
         messageId: string;
         originalContent: string;
     } | null>(null);
     const updateThreadPresetSnapshot = useChatStore((state) => state.updateThreadPresetSnapshot);
     const updateThreadParamsSnapshot = useChatStore((state) => state.updateThreadParamsSnapshot);
-    const loadDraftSourceRef = useRef<{
-        contextSize: 'current' | 'default' | 'user';
-        gpuLayers: 'current' | 'default' | 'user';
-    }>({
-        contextSize: 'current',
-        gpuLayers: 'current',
-    });
-    const loadDraftSeedRef = useRef<string | null>(null);
     const listRef = useRef<FlatList<ChatMessage> | null>(null);
     const autoScrollFrameRef = useRef<number | null>(null);
     const keyboardMeasureFrameRef = useRef<number | null>(null);
@@ -222,7 +194,6 @@ export const ChatScreen = () => {
         repetitionPenalty: rawCurrentParams.repetitionPenalty ?? FALLBACK_REPETITION_PENALTY,
         reasoningEnabled: rawCurrentParams.reasoningEnabled === true,
     };
-    const currentLoadParams = getModelLoadParametersForModel(configurableModelId);
     const rawDefaultParams = getGenerationParametersForModel(null);
     const defaultParams = {
         ...rawDefaultParams,
@@ -231,7 +202,6 @@ export const ChatScreen = () => {
         repetitionPenalty: rawDefaultParams.repetitionPenalty ?? FALLBACK_REPETITION_PENALTY,
         reasoningEnabled: rawDefaultParams.reasoningEnabled === true,
     };
-    const defaultLoadParams = getModelLoadParametersForModel(null);
     const displayMessages = useMemo(() => [...messages].reverse(), [messages]);
     const hasMessages = displayMessages.length > 0;
     const lastMessage = messages[messages.length - 1];
@@ -251,41 +221,6 @@ export const ChatScreen = () => {
         repetitionPenalty: rawParamsSource.repetitionPenalty ?? FALLBACK_REPETITION_PENALTY,
         reasoningEnabled: rawParamsSource.reasoningEnabled === true,
     };
-    const configurableModel = configurableModelId ? registry.getModel(configurableModelId) : undefined;
-    const configurableModelAccessState = configurableModel?.accessState;
-    const configurableModelIsGated = configurableModel?.isGated === true;
-    const configurableModelIsPrivate = configurableModel?.isPrivate === true;
-    const configurableModelHasVerifiedContextWindow = configurableModel?.hasVerifiedContextWindow === true;
-    const configurableModelMaxContextTokens = configurableModel?.maxContextTokens;
-    const configurableModelSize = configurableModel?.size ?? null;
-    const baseContextWindowCeiling = useMemo(() => resolveContextWindowCeiling({
-        modelMaxContextTokens: configurableModelMaxContextTokens,
-        modelSizeBytes: configurableModelSize,
-    }), [configurableModelMaxContextTokens, configurableModelSize]);
-    const contextWindowCeiling = measuredContextWindowCeiling ?? baseContextWindowCeiling;
-    const effectiveCurrentLoadParams = {
-        contextSize: clampContextWindowTokens(currentLoadParams.contextSize, contextWindowCeiling),
-        gpuLayers: currentLoadParams.gpuLayers,
-    };
-    const effectiveDefaultLoadParams = {
-        contextSize: clampContextWindowTokens(defaultLoadParams.contextSize, contextWindowCeiling),
-        gpuLayers: defaultLoadParams.gpuLayers,
-    };
-    const draftPersistedGpuLayers = loadDraftSourceRef.current.gpuLayers === 'current'
-        ? (currentLoadParams.gpuLayers ?? null)
-        : loadDraftSourceRef.current.gpuLayers === 'default'
-            ? (effectiveDefaultLoadParams.gpuLayers ?? null)
-            : draftLoadParams.gpuLayers;
-    const applyButtonLabel = settings.activeModelId === configurableModelId ? t('models.applyAndReload') : t('models.saveLoadProfile');
-    const showApplyReload = Boolean(configurableModelId) && (
-        hasPersistedLoadProfileChanges({
-            draftContextSize: draftLoadParams.contextSize,
-            draftPersistedGpuLayers,
-            persistedLoadParams: currentLoadParams,
-        })
-        || isApplyingModelReload
-    );
-    const canApplyReload = Boolean(configurableModelId) && !isGenerating && !isApplyingModelReload;
     const thermalWarningMessage = hardwareBannerInputs.thermalState === 'critical'
         ? t('chat.thermalDescriptionCritical')
         : t('chat.thermalDescriptionElevated');
@@ -310,6 +245,65 @@ export const ChatScreen = () => {
     const showAlertForError = useCallback((titleKey: string, scope: string, error: unknown) => {
         Alert.alert(t(titleKey), getReportedErrorMessage(scope, error, t));
     }, [t]);
+
+    const getConfigurableModelById = useCallback((modelId: string | null) => {
+        if (!modelId) {
+            return undefined;
+        }
+
+        return registry.getModel(modelId);
+    }, []);
+
+    const {
+        openModelParameters,
+        closeModelParameters,
+        sheetProps: modelParametersSheetProps,
+    } = useModelParametersSheetController({
+        getModelById: getConfigurableModelById,
+        showError: (scope, error) => {
+            showAlertForError('chat.applyModelSettingsErrorTitle', scope, error);
+        },
+        applyReloadErrorScope: 'ChatScreen.handleApplyLoadParams',
+        activeModelId: settings.activeModelId,
+        canApplyReload: !isGenerating,
+        modelLabelOverride: modelLabel,
+        paramsOverride: paramsSource,
+        defaultParamsOverride: defaultParams,
+        onChangeParams: (modelId, partial) => {
+            const nextParams = {
+                ...getGenerationParametersForModel(modelId),
+                ...partial,
+            };
+
+            updateGenerationParametersForModel(modelId, partial);
+
+            if (activeThread && activeThread.modelId === modelId) {
+                updateThreadParamsSnapshot(activeThread.id, nextParams);
+            }
+        },
+        onResetParamField: (modelId, field) => {
+            const resetParams = getGenerationParametersForModel(null);
+            const partial = { [field]: resetParams[field] } as Partial<typeof resetParams>;
+            const nextParams = {
+                ...getGenerationParametersForModel(modelId),
+                ...partial,
+            };
+
+            updateGenerationParametersForModel(modelId, partial);
+
+            if (activeThread && activeThread.modelId === modelId) {
+                updateThreadParamsSnapshot(activeThread.id, nextParams);
+            }
+        },
+        onResetAllParams: (modelId) => {
+            resetGenerationParametersForModel(modelId);
+            const resetParams = getGenerationParametersForModel(modelId);
+
+            if (activeThread && activeThread.modelId === modelId) {
+                updateThreadParamsSnapshot(activeThread.id, resetParams);
+            }
+        },
+    });
 
     const scrollToLatestMessage = useCallback((animated: boolean, preferIndex = true) => {
         if (preferIndex) {
@@ -614,129 +608,6 @@ export const ChatScreen = () => {
     }, [updateAndroidKeyboardInsetFromLayout]);
 
     useEffect(() => {
-        if (!isModelParametersOpen) {
-            return;
-        }
-
-        let isCancelled = false;
-        const refreshTargetModel = configurableModelId ? registry.getModel(configurableModelId) : undefined;
-        const shouldRefreshModelMetadata = refreshTargetModel?.hasVerifiedContextWindow !== true;
-
-        setMeasuredContextWindowCeiling(null);
-
-        void llmEngineService.getRecommendedGpuLayers()
-            .then((nextGpuLayers: number) => {
-                if (!isCancelled) {
-                    setRecommendedGpuLayers(nextGpuLayers);
-                }
-            })
-            .catch(() => {
-                if (!isCancelled) {
-                    setRecommendedGpuLayers(0);
-                }
-            });
-
-        void Promise.all([
-            DeviceInfo.getTotalMemory().catch(() => null),
-            shouldRefreshModelMetadata && refreshTargetModel
-                ? modelCatalogService.refreshModelMetadata(refreshTargetModel).catch(() => refreshTargetModel)
-                : Promise.resolve(refreshTargetModel),
-        ])
-            .then(([totalMemoryBytes, resolvedModel]) => {
-                if (!isCancelled) {
-                    setMeasuredContextWindowCeiling(resolveContextWindowCeiling({
-                        modelMaxContextTokens: resolvedModel?.maxContextTokens,
-                        modelSizeBytes: resolvedModel?.size ?? null,
-                        totalMemoryBytes,
-                    }));
-                }
-            })
-            .catch(() => {
-                if (!isCancelled) {
-                    setMeasuredContextWindowCeiling(null);
-                }
-            });
-
-        return () => {
-            isCancelled = true;
-        };
-    }, [
-        configurableModelAccessState,
-        configurableModelHasVerifiedContextWindow,
-        configurableModelId,
-        configurableModelIsGated,
-        configurableModelIsPrivate,
-        configurableModelMaxContextTokens,
-        configurableModelSize,
-        isModelParametersOpen,
-    ]);
-
-    useEffect(() => {
-        if (!isModelParametersOpen) {
-            setMeasuredContextWindowCeiling(null);
-            loadDraftSourceRef.current = {
-                contextSize: 'current',
-                gpuLayers: 'current',
-            };
-            loadDraftSeedRef.current = null;
-            return;
-        }
-
-        const seedKey = configurableModelId ?? '__no-model__';
-        const shouldInitializeDraft = loadDraftSeedRef.current !== seedKey;
-
-        if (shouldInitializeDraft) {
-            loadDraftSourceRef.current = {
-                contextSize: 'current',
-                gpuLayers: 'current',
-            };
-            loadDraftSeedRef.current = seedKey;
-        }
-
-        setDraftLoadParams((current) => {
-            const nextContextSize = shouldInitializeDraft
-                ? effectiveCurrentLoadParams.contextSize
-                : (
-                    loadDraftSourceRef.current.contextSize === 'current'
-                        ? effectiveCurrentLoadParams.contextSize
-                        : loadDraftSourceRef.current.contextSize === 'default'
-                            ? effectiveDefaultLoadParams.contextSize
-                            : clampContextWindowTokens(current.contextSize, contextWindowCeiling)
-                );
-            const nextGpuLayers = shouldInitializeDraft
-                ? (currentLoadParams.gpuLayers ?? recommendedGpuLayers)
-                : (
-                    loadDraftSourceRef.current.gpuLayers === 'current'
-                        ? (currentLoadParams.gpuLayers ?? recommendedGpuLayers)
-                        : loadDraftSourceRef.current.gpuLayers === 'default'
-                            ? (effectiveDefaultLoadParams.gpuLayers ?? recommendedGpuLayers)
-                            : current.gpuLayers
-                );
-
-            if (
-                current.contextSize === nextContextSize
-                && current.gpuLayers === nextGpuLayers
-            ) {
-                return current;
-            }
-
-            return {
-                contextSize: nextContextSize,
-                gpuLayers: nextGpuLayers,
-            };
-        });
-    }, [
-        configurableModelId,
-        contextWindowCeiling,
-        currentLoadParams.gpuLayers,
-        effectiveDefaultLoadParams.contextSize,
-        effectiveDefaultLoadParams.gpuLayers,
-        effectiveCurrentLoadParams.contextSize,
-        isModelParametersOpen,
-        recommendedGpuLayers,
-    ]);
-
-    useEffect(() => {
         return () => {
             if (autoScrollFrameRef.current !== null) {
                 cancelAnimationFrame(autoScrollFrameRef.current);
@@ -760,65 +631,8 @@ export const ChatScreen = () => {
         setPendingRegenerateMessage(null);
         setComposerDraft('');
         setPresetSelectorOpen(false);
-        setModelParametersOpen(false);
-        setApplyingModelReload(false);
-    }, [activeThread?.id, clearForcedScrollTimeouts]);
-
-    const handleApplyLoadParams = async () => {
-        if (!configurableModelId) {
-            return;
-        }
-
-        if (isGenerating) {
-            Alert.alert(t('chat.reloadModelErrorTitle'), t('chat.reloadModelWhileGenerating'));
-            return;
-        }
-
-        setApplyingModelReload(true);
-
-        try {
-            const nextContextSize = clampContextWindowTokens(
-                draftLoadParams.contextSize,
-                contextWindowCeiling,
-            );
-            const nextGpuLayers = loadDraftSourceRef.current.gpuLayers === 'current'
-                ? (currentLoadParams.gpuLayers ?? null)
-                : loadDraftSourceRef.current.gpuLayers === 'default'
-                    ? (effectiveDefaultLoadParams.gpuLayers ?? null)
-                    : draftLoadParams.gpuLayers;
-            const defaultContextSize = clampContextWindowTokens(
-                DEFAULT_MODEL_LOAD_PARAMETERS.contextSize,
-                contextWindowCeiling,
-            );
-            const isResetToDefaultProfile =
-                nextContextSize === defaultContextSize
-                && (nextGpuLayers ?? recommendedGpuLayers) === recommendedGpuLayers;
-
-            if (nextContextSize !== draftLoadParams.contextSize) {
-                setDraftLoadParams((current) => ({
-                    ...current,
-                    contextSize: nextContextSize,
-                }));
-            }
-
-            if (isResetToDefaultProfile) {
-                resetModelLoadParametersForModel(configurableModelId);
-            } else {
-                updateModelLoadParametersForModel(configurableModelId, {
-                    contextSize: nextContextSize,
-                    gpuLayers: nextGpuLayers,
-                });
-            }
-
-            if (settings.activeModelId === configurableModelId) {
-                await llmEngineService.load(configurableModelId, { forceReload: true });
-            }
-        } catch (error: any) {
-            showAlertForError('chat.applyModelSettingsErrorTitle', 'ChatScreen.handleApplyLoadParams', error);
-        } finally {
-            setApplyingModelReload(false);
-        }
-    };
+        closeModelParameters();
+    }, [activeThread?.id, clearForcedScrollTimeouts, closeModelParameters]);
 
     useFocusEffect(
         useCallback(() => {
@@ -894,7 +708,7 @@ export const ChatScreen = () => {
                     }
                 }}
                 onOpenModelControls={() => {
-                    setModelParametersOpen(true);
+                    openModelParameters(configurableModelId);
                 }}
                 onOpenPresetSelector={() => {
                     setPresetSelectorOpen(true);
@@ -1138,96 +952,7 @@ export const ChatScreen = () => {
                 }}
             />
 
-            <ModelParametersSheet
-                visible={isModelParametersOpen}
-                modelId={configurableModelId}
-                modelLabel={modelLabel}
-                params={paramsSource}
-                defaultParams={defaultParams}
-                contextWindowCeiling={contextWindowCeiling}
-                loadParamsDraft={draftLoadParams}
-                defaultLoadParams={effectiveDefaultLoadParams}
-                recommendedGpuLayers={recommendedGpuLayers}
-                applyButtonLabel={applyButtonLabel}
-                canApplyReload={canApplyReload}
-                isApplyingReload={isApplyingModelReload}
-                showApplyReload={showApplyReload}
-                onClose={() => {
-                    setModelParametersOpen(false);
-                }}
-                onChangeParams={(partial) => {
-                    const nextParams = {
-                        ...getGenerationParametersForModel(configurableModelId),
-                        ...partial,
-                    };
-                    updateGenerationParametersForModel(configurableModelId, partial);
-
-                    if (activeThread && activeThread.modelId === configurableModelId) {
-                        updateThreadParamsSnapshot(activeThread.id, nextParams);
-                    }
-                }}
-                onChangeLoadParams={(partial) => {
-                    if (partial.contextSize !== undefined) {
-                        loadDraftSourceRef.current.contextSize = 'user';
-                    }
-                    if (partial.gpuLayers !== undefined) {
-                        loadDraftSourceRef.current.gpuLayers = 'user';
-                    }
-
-                    setDraftLoadParams((current) => ({
-                        ...current,
-                        ...partial,
-                        contextSize: partial.contextSize === undefined
-                            ? current.contextSize
-                            : clampContextWindowTokens(partial.contextSize, contextWindowCeiling),
-                    }));
-                }}
-                onResetParamField={(field) => {
-                    const resetParams = getGenerationParametersForModel(null);
-                    const partial = { [field]: resetParams[field] } as Partial<typeof resetParams>;
-                    const nextParams = {
-                        ...getGenerationParametersForModel(configurableModelId),
-                        ...partial,
-                    };
-
-                    updateGenerationParametersForModel(configurableModelId, partial);
-
-                    if (activeThread && activeThread.modelId === configurableModelId) {
-                        updateThreadParamsSnapshot(activeThread.id, nextParams);
-                    }
-                }}
-                onResetLoadField={(field) => {
-                    if (field === 'contextSize') {
-                        loadDraftSourceRef.current.contextSize = 'default';
-                    } else {
-                        loadDraftSourceRef.current.gpuLayers = 'default';
-                    }
-
-                    setDraftLoadParams((current) => ({
-                        ...current,
-                        [field]: field === 'gpuLayers'
-                            ? (effectiveDefaultLoadParams.gpuLayers ?? recommendedGpuLayers)
-                            : effectiveDefaultLoadParams.contextSize,
-                    }));
-                }}
-                onReset={() => {
-                    loadDraftSourceRef.current = {
-                        contextSize: 'default',
-                        gpuLayers: 'default',
-                    };
-                    resetGenerationParametersForModel(configurableModelId);
-                    const resetParams = getGenerationParametersForModel(configurableModelId);
-                    setDraftLoadParams({
-                        contextSize: effectiveDefaultLoadParams.contextSize,
-                        gpuLayers: effectiveDefaultLoadParams.gpuLayers ?? recommendedGpuLayers,
-                    });
-
-                    if (activeThread && activeThread.modelId === configurableModelId) {
-                        updateThreadParamsSnapshot(activeThread.id, resetParams);
-                    }
-                }}
-                onApplyReload={handleApplyLoadParams}
-            />
+            <ModelParametersSheet {...modelParametersSheetProps} />
         </Box>
     );
 };

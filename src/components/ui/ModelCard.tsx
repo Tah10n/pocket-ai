@@ -1,9 +1,11 @@
 import React, { memo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Box } from './box';
-import { ScreenActionPill, ScreenBadge, ScreenCard, ScreenIconButton } from './ScreenShell';
+import { ModelDownloadProgress, ModelLifecycleActionRow } from './ModelLifecycleControls';
+import { ScreenBadge, ScreenCard, ScreenIconButton } from './ScreenShell';
 import { Text, composeTextRole } from './text';
-import { ModelAccessState, ModelMetadata, LifecycleStatus } from '../../types/models';
+import { ModelAccessState, type ModelMetadata } from '../../types/models';
+import { formatModelFileSize } from '../../utils/modelSize';
 
 interface ModelCardProps {
   model: ModelMetadata;
@@ -18,37 +20,6 @@ interface ModelCardProps {
   onCancel: (id: string) => void;
   onChat: () => void;
   isActive: boolean;
-}
-
-function ModelActionPill({
-  label,
-  tone = 'soft',
-  onPress,
-  testID,
-}: {
-  label: string;
-  tone?: 'primary' | 'soft';
-  onPress: () => void;
-  testID?: string;
-}) {
-  return (
-    <ScreenActionPill
-      testID={testID}
-      onPress={onPress}
-      tone={tone}
-      size="compact"
-      className="min-w-0 basis-0 flex-1"
-    >
-      <Text
-        numberOfLines={1}
-        className={`text-center text-sm font-semibold ${tone === 'primary'
-          ? 'text-typography-0'
-          : 'text-primary-600 dark:text-primary-300'}`}
-      >
-        {label}
-      </Text>
-    </ScreenActionPill>
-  );
 }
 
 function ModelMetaPill({
@@ -85,14 +56,7 @@ const ModelCardComponent = ({
   isActive,
 }: ModelCardProps) => {
   const { t } = useTranslation();
-  const isDownloading = model.lifecycleStatus === LifecycleStatus.DOWNLOADING
-    || model.lifecycleStatus === LifecycleStatus.QUEUED
-    || model.lifecycleStatus === LifecycleStatus.VERIFYING;
-
-  const progressPercent = Math.round(model.downloadProgress * 100);
-  const sizeLabel = model.size === null
-    ? t('models.sizeUnknown')
-    : `${(model.size / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  const sizeLabel = formatModelFileSize(model.size, t('models.sizeUnknown'));
   const accessBadge = model.accessState === ModelAccessState.AUTH_REQUIRED
     ? {
         text: t('models.requiresToken'),
@@ -150,74 +114,22 @@ const ModelCardComponent = ({
         <ModelMetaPill label={t('models.sizeLabel')} value={sizeLabel} />
       </Box>
 
-      {isDownloading ? (
-        <Box className="mt-2.5">
-          <Box className="mb-1 flex-row justify-between">
-            <Text className="text-xs text-typography-500">
-              {model.lifecycleStatus === LifecycleStatus.VERIFYING ? t('models.verifying') : t('models.downloading')}
-            </Text>
-            <Text className="text-xs font-bold text-primary-500">{progressPercent}%</Text>
-          </Box>
-          <Box className="h-1.5 w-full overflow-hidden rounded-full bg-background-200 dark:bg-background-800">
-            <Box className="h-full bg-primary-500" style={{ width: `${progressPercent}%` }} />
-          </Box>
-        </Box>
-      ) : null}
+      <ModelDownloadProgress model={model} className="mt-2.5" />
 
-      <Box className="mt-3 flex-row items-center gap-2">
-        {model.lifecycleStatus === LifecycleStatus.AVAILABLE ? (
-          model.accessState === ModelAccessState.AUTH_REQUIRED ? (
-            <ModelActionPill label={t('models.setToken')} onPress={onConfigureToken} />
-          ) : model.accessState === ModelAccessState.ACCESS_DENIED ? (
-            <ModelActionPill label={t('models.openOnHuggingFace')} onPress={() => onOpenModelPage(model.id)} />
-          ) : (
-            <ModelActionPill label={t('models.download')} tone="primary" onPress={() => onDownload(model)} />
-          )
-        ) : null}
-
-        {isDownloading ? (
-          <ModelActionPill label={t('models.cancel')} onPress={() => onCancel(model.id)} />
-        ) : null}
-
-        {model.lifecycleStatus === LifecycleStatus.DOWNLOADED ? (
-          <>
-            <ModelActionPill label={t('models.load')} tone="primary" onPress={() => onLoad(model.id)} />
-            <ModelActionPill
-              testID={`settings-${model.id}`}
-              label={t('models.settings')}
-              onPress={() => onOpenSettings(model.id)}
-            />
-            <ScreenIconButton
-              onPress={() => onDelete(model.id)}
-              accessibilityLabel={t('common.delete')}
-              iconName="delete-outline"
-              size="compact"
-              tone="danger"
-              className="shrink-0 border-0"
-            />
-          </>
-        ) : null}
-
-        {model.lifecycleStatus === LifecycleStatus.ACTIVE ? (
-          <>
-            <ModelActionPill label={t('models.chat')} tone="primary" onPress={onChat} />
-            <ModelActionPill
-              testID={`settings-${model.id}`}
-              label={t('models.settings')}
-              onPress={() => onOpenSettings(model.id)}
-            />
-            <ModelActionPill label={t('models.unload')} onPress={onUnload} />
-            <ScreenIconButton
-              onPress={() => onDelete(model.id)}
-              accessibilityLabel={t('common.delete')}
-              iconName="delete-outline"
-              size="compact"
-              tone="danger"
-              className="shrink-0 border-0"
-            />
-          </>
-        ) : null}
-      </Box>
+      <ModelLifecycleActionRow
+        model={model}
+        onDownload={onDownload}
+        onConfigureToken={onConfigureToken}
+        onOpenModelPage={onOpenModelPage}
+        onLoad={onLoad}
+        onOpenSettings={onOpenSettings}
+        onUnload={onUnload}
+        onDelete={onDelete}
+        onCancel={onCancel}
+        onChat={onChat}
+        className="mt-3 flex-row items-center gap-2"
+        pillClassName="min-w-0 basis-0 flex-1"
+      />
     </ScreenCard>
   );
 };

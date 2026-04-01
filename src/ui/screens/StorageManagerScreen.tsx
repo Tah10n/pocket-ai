@@ -20,6 +20,7 @@ import {
     type AppStorageMetrics,
 } from '../../services/StorageManagerService';
 import { getReportedErrorMessage } from '../../services/AppError';
+import { formatModelFileSize } from '../../utils/modelSize';
 
 type BusyAction = 'cache' | 'chat' | 'settings' | `offload:${string}` | `offload:${string}:reset` | null;
 
@@ -311,7 +312,7 @@ export function StorageManagerScreen() {
                                                         {model.name}
                                                     </Text>
                                                     <Text className="mt-1 text-sm leading-5 text-typography-500 dark:text-typography-400">
-                                                        {model.author} • {model.size === null ? t('models.sizeUnknown') : formatBytes(model.size)}
+                                                        {model.author} • {formatModelFileSize(model.size, t('models.sizeUnknown'))}
                                                     </Text>
                                                     {isActive ? (
                                                         <ScreenBadge tone="accent" size="micro" className="mt-3 self-start">

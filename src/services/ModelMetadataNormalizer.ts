@@ -107,6 +107,7 @@ export function normalizePersistedModelMetadata(
       ? Math.round(model.maxContextTokens)
       : undefined,
     hasVerifiedContextWindow: model.hasVerifiedContextWindow === true,
+    parameterSizeLabel: normalizeNonEmptyString(model.parameterSizeLabel),
     modelType: normalizeNonEmptyString(model.modelType),
     architectures: normalizeStringArray(model.architectures),
     baseModels: normalizeStringArray(model.baseModels),

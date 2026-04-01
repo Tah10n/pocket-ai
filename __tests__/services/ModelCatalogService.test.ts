@@ -595,7 +595,7 @@ describe('ModelCatalogService', () => {
     expect(global.fetch).toHaveBeenCalledTimes(1);
   });
 
-  it('keeps tree-probe models unresolved when tree pagination stops before completion', async () => {
+  it('keeps discovered GGUF metadata while leaving tree-probe models unresolved when pagination stops early', async () => {
     global.fetch = jest.fn((input: RequestInfo | URL) => {
       const url = String(input);
 
@@ -638,9 +638,10 @@ describe('ModelCatalogService', () => {
 
     expect(result.models).toHaveLength(1);
     expect(result.models[0].id).toBe('org/incomplete-tree-probe');
-    expect(result.models[0].resolvedFileName).toBeUndefined();
-    expect(result.models[0].size).toBeNull();
-    expect(result.models[0].sha256).toBeUndefined();
+    expect(result.models[0].resolvedFileName).toBe('model.Q8_0.gguf');
+    expect(result.models[0].downloadUrl).toBe('https://huggingface.co/org/incomplete-tree-probe/resolve/main/model.Q8_0.gguf');
+    expect(result.models[0].size).toBe(5 * 1024 * 1024 * 1024);
+    expect(result.models[0].sha256).toBe('partial-tree-q8-sha');
     expect(result.models[0].requiresTreeProbe).toBe(true);
   });
 

@@ -286,7 +286,22 @@
     "load": "Load",
     "modelsUsage": "Models x{{count}}",
     "appFilesUsage": "App files",
-    "forceUnloadModel": "Force Unload Model"
+    "forceUnloadModel": "Force Unload Model",
+    "performance": "Performance",
+    "performanceDescription": "View and export recent performance traces."
+  },
+  "performance": {
+    "title": "Performance",
+    "subtitle": "Trace and export recent timings for debugging.",
+    "enabled": "Enabled",
+    "disabled": "Disabled",
+    "summary": "{{enabled}} · {{events}} events",
+    "copyTrace": "Copy trace",
+    "clearTrace": "Clear trace",
+    "counters": "Counters",
+    "events": "Events",
+    "emptyCounters": "No counters recorded yet.",
+    "emptyEvents": "No events recorded yet."
   },
   "legal": {
     "title": "Privacy & Disclosures",

@@ -11,6 +11,7 @@ import { ThemeProvider as CustomThemeProvider, useTheme } from '../src/providers
 import { useMotionPreferences } from '../src/hooks/useDeviceMetrics';
 import { hardwareListenerService } from '../src/services/HardwareListenerService';
 import { bootstrapApp } from '../src/services/AppBootstrap';
+import { performanceMonitor } from '../src/services/PerformanceMonitor';
 import '../src/i18n';
 import '../global.css';
 
@@ -146,13 +147,18 @@ export default function RootLayout() {
 
   useEffect(() => {
     async function prepare() {
+      const span = performanceMonitor.startSpan('root.prepare');
+      performanceMonitor.mark('root.prepare.start');
       try {
         await bootstrapApp();
       } catch (e) {
         console.warn('[RootLayout] Error during preparation:', e);
       } finally {
         setIsReady(true);
+        performanceMonitor.mark('root.ready');
         await SplashScreen.hideAsync().catch((e) => console.warn('[SplashScreen] hideAsync failed', e));
+        performanceMonitor.mark('root.splashHidden');
+        span.end({ outcome: 'complete' });
       }
     }
 
@@ -192,6 +198,7 @@ function RootNavigator() {
         <Stack.Screen name="legal" options={{ headerShown: false }} />
         <Stack.Screen name="huggingface-token" options={{ headerShown: false }} />
         <Stack.Screen name="model-details" options={{ headerShown: false }} />
+        <Stack.Screen name="performance" options={{ headerShown: false }} />
         <Stack.Screen
           name="modal"
           options={{

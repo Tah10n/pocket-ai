@@ -235,7 +235,7 @@ export const SettingsScreen = () => {
     const router = useRouter();
     const isFocused = useIsFocused();
     const { mode, resolvedMode, setTheme, colors } = useTheme();
-    const { metrics, refresh } = useDeviceMetrics({ enabled: isFocused, refreshIntervalMs: 1000 });
+    const { metrics, refresh } = useDeviceMetrics({ enabled: isFocused, refreshIntervalMs: 5000 });
     const { state: engineState, isReady: isEngineReady } = useLLMEngine();
     const [settings, setSettings] = useState(() => getSettings());
     const [appStorageMetrics, setAppStorageMetrics] = useState<AppStorageMetrics | null>(null);
@@ -305,6 +305,10 @@ export const SettingsScreen = () => {
 
     const handleHuggingFaceTokenPress = () => {
         router.push('/huggingface-token' as any);
+    };
+
+    const handlePerformancePress = () => {
+        router.push('/performance' as any);
     };
 
     const unloadActiveModel = async () => {
@@ -441,6 +445,16 @@ export const SettingsScreen = () => {
                                     iconClassName="text-primary-500"
                                     onPress={handleLegalPress}
                                 />
+                                {typeof __DEV__ !== 'undefined' && __DEV__ ? (
+                                    <SettingsNavCard
+                                        title={t('settings.performance')}
+                                        description={t('settings.performanceDescription')}
+                                        iconName="speed"
+                                        iconWrapClassName="bg-info-500/10 dark:bg-info-500/20"
+                                        iconClassName="text-info-600 dark:text-info-300"
+                                        onPress={handlePerformancePress}
+                                    />
+                                ) : null}
                             </ScreenStack>
                         </Box>
 

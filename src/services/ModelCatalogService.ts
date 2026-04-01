@@ -4,6 +4,7 @@ import { hardwareListenerService } from './HardwareListenerService';
 import { registry } from './LocalStorageRegistry';
 import { huggingFaceTokenService } from './HuggingFaceTokenService';
 import { normalizePersistedModelMetadata } from './ModelMetadataNormalizer';
+import { performanceMonitor } from './PerformanceMonitor';
 import {
   ModelCatalogCacheStore,
   type CatalogCacheAuthScope,
@@ -755,6 +756,12 @@ export class ModelCatalogService {
     totalMemory: number,
     requestContext: CatalogRequestContext,
   ): Promise<ModelMetadata[]> {
+    const span = performanceMonitor.startSpan('catalog.resolveMissingModelMetadata', {
+      count: models.length,
+      hasAuthToken: requestContext.hasAuthToken,
+    });
+    performanceMonitor.incrementCounter('catalog.resolveMissingModelMetadata.calls');
+
     const resolveModel = async (model: ModelMetadata): Promise<ModelMetadata | null> => {
       const hasKnownSize = typeof model.size === 'number' && model.size > 0;
       const requiresAuthValidation = requestContext.hasAuthToken && (
@@ -790,7 +797,7 @@ export class ModelCatalogService {
           requestContext.authToken,
           treeResponse.status,
           {
-          allowAuthorization: treeResponse.isComplete || selectedEntry !== undefined,
+            allowAuthorization: treeResponse.isComplete || selectedEntry !== undefined,
           },
         );
 
@@ -818,8 +825,14 @@ export class ModelCatalogService {
         if (model.requiresTreeProbe && !treeResponse.isComplete) {
           return normalizePersistedModelMetadata({
             ...model,
+            size,
+            fitsInRam,
             accessState,
             requiresTreeProbe: true,
+            hfRevision: model.hfRevision,
+            resolvedFileName,
+            downloadUrl: buildHuggingFaceResolveUrl(model.id, resolvedFileName, model.hfRevision),
+            sha256: this.getFileSha(selectedEntry) ?? model.sha256,
           });
         }
 
@@ -846,14 +859,23 @@ export class ModelCatalogService {
     };
 
     const batchSize = 5;
-    const results: ModelMetadata[] = [];
-    for (let index = 0; index < models.length; index += batchSize) {
-      const batch = models.slice(index, index + batchSize);
-      const batchResults = await Promise.all(batch.map(resolveModel));
-      results.push(...batchResults.filter((model): model is ModelMetadata => model !== null));
-    }
+    let results: ModelMetadata[] = [];
+    let outcome: 'success' | 'error' = 'success';
 
-    return results;
+    try {
+      for (let index = 0; index < models.length; index += batchSize) {
+        const batch = models.slice(index, index + batchSize);
+        const batchResults = await Promise.all(batch.map(resolveModel));
+        results.push(...batchResults.filter((model): model is ModelMetadata => model !== null));
+      }
+
+      return results;
+    } catch (error) {
+      outcome = 'error';
+      throw error;
+    } finally {
+      span.end({ outcome, resolved: results.length });
+    }
   }
 
   private async fetchCatalogBatch(
@@ -864,48 +886,71 @@ export class ModelCatalogService {
     initialCursor: string | null,
     sort: CatalogServerSort | null,
   ): Promise<CatalogBatchResult> {
+    const span = performanceMonitor.startSpan('catalog.fetchCatalogBatch', {
+      query: normalizedQuery,
+      minimumResults,
+      hasAuthToken: requestContext.hasAuthToken,
+      sort: sort ?? undefined,
+    });
+    performanceMonitor.incrementCounter('catalog.fetchCatalogBatch.calls');
+
     let models: ModelMetadata[] = [];
     let nextCursor = initialCursor;
     let exhausted = false;
     const visitedCursors = new Set<string>();
     const requestLimit = Math.max(1, minimumResults);
+    let pagesFetched = 0;
+    let outcome: 'success' | 'error' = 'success';
 
-    while (models.length < minimumResults && !exhausted) {
-      const requestedCursor = nextCursor;
-      if (requestedCursor !== null) {
-        visitedCursors.add(requestedCursor);
+    try {
+      while (models.length < minimumResults && !exhausted) {
+        pagesFetched += 1;
+        const requestedCursor = nextCursor;
+        if (requestedCursor !== null) {
+          visitedCursors.add(requestedCursor);
+        }
+
+        const page = await this.fetchHuggingFaceModels(
+          normalizedQuery,
+          requestLimit,
+          requestContext,
+          requestedCursor,
+          sort,
+        );
+        const baseModels = this.transformHFResponse(page.items, totalMemory, requestContext.authToken);
+        const hydratedModels = await this.resolveMissingModelMetadata(
+          baseModels,
+          totalMemory,
+          requestContext,
+        );
+        models = this.mergeUniqueModelsById([...models, ...hydratedModels]);
+        nextCursor = this.resolveNextCatalogCursor(requestedCursor, page.nextCursor, visitedCursors);
+        exhausted = nextCursor === null;
+
+        if (page.items.length === 0) {
+          exhausted = true;
+        }
       }
 
-      const page = await this.fetchHuggingFaceModels(
+      return this.createPaginatedCatalogBatchResult(
         normalizedQuery,
-        requestLimit,
-        requestContext,
-        requestedCursor,
+        models,
+        nextCursor,
+        minimumResults,
         sort,
+        requestContext.hasAuthToken,
       );
-      const baseModels = this.transformHFResponse(page.items, totalMemory, requestContext.authToken);
-      const hydratedModels = await this.resolveMissingModelMetadata(
-        baseModels,
-        totalMemory,
-        requestContext,
-      );
-      models = this.mergeUniqueModelsById([...models, ...hydratedModels]);
-      nextCursor = this.resolveNextCatalogCursor(requestedCursor, page.nextCursor, visitedCursors);
-      exhausted = nextCursor === null;
-
-      if (page.items.length === 0) {
-        exhausted = true;
-      }
+    } catch (error) {
+      outcome = 'error';
+      throw error;
+    } finally {
+      span.end({
+        outcome,
+        pagesFetched,
+        models: models.length,
+        hasMore: nextCursor !== null,
+      });
     }
-
-    return this.createPaginatedCatalogBatchResult(
-      normalizedQuery,
-      models,
-      nextCursor,
-      minimumResults,
-      sort,
-      requestContext.hasAuthToken,
-    );
   }
 
   private createPaginatedCatalogBatchResult(
@@ -985,31 +1030,54 @@ export class ModelCatalogService {
     nextCursor: string | null = null,
     sort: CatalogServerSort | null = null,
   ): Promise<HuggingFaceModelsPage> {
-    const url = nextCursor ?? this.buildSearchUrl(normalizedQuery, limit, sort);
-    const response = await fetch(url, {
-      headers: this.buildHeaders(requestContext.authToken),
+    const span = performanceMonitor.startSpan('catalog.fetchHuggingFaceModels', {
+      query: normalizedQuery,
+      limit,
+      hasAuthToken: requestContext.hasAuthToken,
+      cursor: nextCursor ? 'cursor' : 'initial',
+      sort: sort ?? undefined,
     });
-    this.assertRequestContextIsCurrent(requestContext);
+    performanceMonitor.incrementCounter('catalog.fetchHuggingFaceModels.calls');
 
-    if (!response.ok) {
-      if (response.status === 429) {
-        throw new ModelCatalogError('rate_limited', `HF Search rate limited: ${response.status}`);
+    let status = 0;
+    let itemsCount = 0;
+    let outcome: 'success' | 'error' = 'success';
+
+    const url = nextCursor ?? this.buildSearchUrl(normalizedQuery, limit, sort);
+
+    try {
+      const response = await fetch(url, {
+        headers: this.buildHeaders(requestContext.authToken),
+      });
+      status = response.status;
+      this.assertRequestContextIsCurrent(requestContext);
+
+      if (!response.ok) {
+        if (response.status === 429) {
+          throw new ModelCatalogError('rate_limited', `HF Search rate limited: ${response.status}`);
+        }
+
+        throw new ModelCatalogError('network', `HF Search failed: ${response.status}`);
       }
 
-      throw new ModelCatalogError('network', `HF Search failed: ${response.status}`);
+      const items = await response.json() as HuggingFaceModelSummary[];
+      itemsCount = items.length;
+      this.assertRequestContextIsCurrent(requestContext);
+
+      return {
+        items,
+        nextCursor: this.parseNextCursor(
+          typeof response.headers?.get === 'function'
+            ? response.headers.get('link')
+            : null,
+        ),
+      };
+    } catch (error) {
+      outcome = 'error';
+      throw error;
+    } finally {
+      span.end({ outcome, status, items: itemsCount });
     }
-
-    const items = await response.json() as HuggingFaceModelSummary[];
-    this.assertRequestContextIsCurrent(requestContext);
-
-    return {
-      items,
-      nextCursor: this.parseNextCursor(
-        typeof response.headers?.get === 'function'
-          ? response.headers.get('link')
-          : null,
-      ),
-    };
   }
 
   private buildSearchUrl(
@@ -1409,54 +1477,77 @@ export class ModelCatalogService {
       this.treeRequestCache,
       this.buildRequestCacheKey('tree', repoId, revision, requestContext),
       async () => {
+        const span = performanceMonitor.startSpan('catalog.fetchHuggingFaceModelTree', {
+          repoId,
+          revision: revision ?? 'main',
+          hasAuthToken: requestContext.hasAuthToken,
+        });
+        performanceMonitor.incrementCounter('catalog.fetchHuggingFaceModelTree.calls');
+
         let nextCursor: string | null = buildHuggingFaceTreeUrl(repoId, revision);
         const visitedCursors = new Set<string>();
         const entries: HuggingFaceTreeEntry[] = [];
         let status = 200;
         let isComplete = true;
+        let pageCount = 0;
+        let outcome: 'success' | 'error' = 'success';
 
-        while (nextCursor !== null) {
-          const requestedCursor = nextCursor;
-          visitedCursors.add(requestedCursor);
+        try {
+          while (nextCursor !== null) {
+            pageCount += 1;
+            const requestedCursor = nextCursor;
+            visitedCursors.add(requestedCursor);
 
-          const response = await fetch(requestedCursor, {
-            headers: this.buildHeaders(requestContext.authToken),
-          });
-          this.assertRequestContextIsCurrent(requestContext);
+            const response = await fetch(requestedCursor, {
+              headers: this.buildHeaders(requestContext.authToken),
+            });
+            status = response.status;
+            this.assertRequestContextIsCurrent(requestContext);
 
-          if (!response.ok) {
-            if (entries.length > 0) {
-              console.warn(`[ModelCatalogService] Tree pagination stopped early for ${repoId}: ${response.status}`);
-              isComplete = false;
-              break;
+            if (!response.ok) {
+              if (entries.length > 0) {
+                console.warn(`[ModelCatalogService] Tree pagination stopped early for ${repoId}: ${response.status}`);
+                isComplete = false;
+                break;
+              }
+
+              return {
+                entries: [],
+                status: response.status,
+                isComplete: false,
+              };
             }
 
-            return {
-              entries: [],
-              status: response.status,
-              isComplete: false,
-            };
+            entries.push(...await response.json() as HuggingFaceTreeEntry[]);
+            this.assertRequestContextIsCurrent(requestContext);
+            nextCursor = this.resolveNextCatalogCursor(
+              requestedCursor,
+              this.parseNextCursor(
+                typeof response.headers?.get === 'function'
+                  ? response.headers.get('link')
+                  : null,
+              ),
+              visitedCursors,
+            );
           }
 
-          status = response.status;
-          entries.push(...await response.json() as HuggingFaceTreeEntry[]);
-          this.assertRequestContextIsCurrent(requestContext);
-          nextCursor = this.resolveNextCatalogCursor(
-            requestedCursor,
-            this.parseNextCursor(
-              typeof response.headers?.get === 'function'
-                ? response.headers.get('link')
-                : null,
-            ),
-            visitedCursors,
-          );
+          return {
+            entries,
+            status,
+            isComplete,
+          };
+        } catch (error) {
+          outcome = 'error';
+          throw error;
+        } finally {
+          span.end({
+            outcome,
+            status,
+            pages: pageCount,
+            entries: entries.length,
+            isComplete,
+          });
         }
-
-        return {
-          entries,
-          status,
-          isComplete,
-        };
       },
     );
   }

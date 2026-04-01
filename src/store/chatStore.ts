@@ -19,11 +19,14 @@ import {
   toConversationIndexItem,
 } from '../types/chat';
 import { getVisibleMessageContent } from '../utils/chatPresentation';
+import { createInstrumentedStateStorage } from './persistStateStorage';
 
 const FALLBACK_TOP_K = 40;
 const FALLBACK_MIN_P = 0.05;
 const FALLBACK_REPETITION_PENALTY = 1;
 const CHAT_STORE_STORAGE_KEY = 'chat-store';
+
+const chatStoreStateStorage = createInstrumentedStateStorage(mmkvStorage, { scope: 'chatStore', dedupe: true });
 
 interface CreateThreadInput {
   modelId: string;
@@ -456,19 +459,25 @@ export const useChatStore = create<ChatStoreState>()(
                     ? 'idle'
                     : existingThread.status;
 
+          const shouldUpdateMetadata = Boolean(updates.state && updates.state !== 'streaming');
+          const nextThreadBase: ChatThread = {
+            ...existingThread,
+            messages: nextMessages,
+            status: nextStatus,
+            lastGeneratedAt:
+              updates.state && updates.state !== 'streaming'
+                ? Date.now()
+                : existingThread.lastGeneratedAt,
+          };
+          const nextThread = shouldUpdateMetadata
+            ? updateThreadMetadata(nextThreadBase)
+            : nextThreadBase;
+
           return {
             threads: {
               ...state.threads,
               [threadId]: {
-                ...updateThreadMetadata({
-                  ...existingThread,
-                  messages: nextMessages,
-                  status: nextStatus,
-                  lastGeneratedAt:
-                    updates.state && updates.state !== 'streaming'
-                      ? Date.now()
-                      : existingThread.lastGeneratedAt,
-                }),
+                ...nextThread,
               },
             },
           };
@@ -639,9 +648,36 @@ export const useChatStore = create<ChatStoreState>()(
     }),
     {
       name: 'chat-store',
-      storage: createJSONStorage(() => mmkvStorage),
+      storage: createJSONStorage(() => chatStoreStateStorage),
       partialize: (state) => ({
-        threads: state.threads,
+        threads: (() => {
+          const threads = state.threads;
+          const hasAnyGeneratingThread = Object.values(threads).some((thread) =>
+            thread.status === 'generating',
+          );
+
+          if (!hasAnyGeneratingThread) {
+            return threads;
+          }
+
+          return Object.fromEntries(
+            Object.entries(threads).map(([threadId, thread]) => {
+              if (thread.status !== 'generating') {
+                return [threadId, thread];
+              }
+
+              const stoppedStatus = 'stopped';
+              return [
+                threadId,
+                {
+                  ...thread,
+                  status: stoppedStatus,
+                  messages: thread.messages.filter((message) => message.state !== 'streaming'),
+                },
+              ];
+            }),
+          );
+        })(),
         activeThreadId: state.activeThreadId,
       }),
       onRehydrateStorage: () => (state) => {

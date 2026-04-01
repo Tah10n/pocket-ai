@@ -15,6 +15,7 @@ import { hardwareListenerService } from './HardwareListenerService';
 import { getQueuedDownloadFileNames } from '../store/downloadStore';
 import { llmEngineService } from './LLMEngineService';
 import { useChatStore } from '../store/chatStore';
+import { performanceMonitor } from './PerformanceMonitor';
 import {
   ChatMessage,
   ChatThread,
@@ -98,51 +99,71 @@ function migrateLegacyChatHistory(settings: AppSettings) {
 }
 
 export async function bootstrapApp() {
-  const settings = getSettings();
-
-  // Core Infrastructure
-  try {
-    await setupFileSystem();
-    await registry.validateRegistry(getQueuedDownloadFileNames());
-    hardwareListenerService.start();
-  } catch (e) {
-    console.error('[bootstrapApp] Infrastructure setup failed', e);
-  }
+  const bootstrapSpan = performanceMonitor.startSpan('bootstrap.app');
+  let outcome: 'success' | 'active_model_missing' | 'error' = 'success';
 
   try {
-    if (i18n.language !== settings.language) {
-      await i18n.changeLanguage(settings.language);
-    }
-  } catch (e) {
-    console.warn('[bootstrapApp] Failed to set language', e);
-  }
+    const settings = getSettings();
 
-  try {
-    presetManager.getPresets();
-  } catch (e) {
-    console.warn('[bootstrapApp] Failed to initialize presets', e);
-  }
-
-  try {
-    repairChatHistoryIndex();
-    migrateLegacyChatHistory(settings);
-    useChatStore.getState().pruneExpiredThreads(settings.chatRetentionDays);
-  } catch (e) {
-    console.warn('[bootstrapApp] Failed to repair or migrate chat history', e);
-  }
-
-  if (settings.activeModelId) {
-    const activeModel = registry.getModel(settings.activeModelId);
-    if (!activeModel?.localPath) {
-      updateSettings({ activeModelId: null });
-      return;
+    // Core Infrastructure
+    try {
+      await setupFileSystem();
+      await registry.validateRegistry(getQueuedDownloadFileNames());
+      hardwareListenerService.start();
+    } catch (e) {
+      console.error('[bootstrapApp] Infrastructure setup failed', e);
     }
 
     try {
-      await llmEngineService.load(settings.activeModelId);
+      if (i18n.language !== settings.language) {
+        await i18n.changeLanguage(settings.language);
+      }
     } catch (e) {
-      console.warn('[bootstrapApp] Failed to restore active model', e);
-      updateSettings({ activeModelId: null });
+      console.warn('[bootstrapApp] Failed to set language', e);
     }
+
+    try {
+      presetManager.getPresets();
+    } catch (e) {
+      console.warn('[bootstrapApp] Failed to initialize presets', e);
+    }
+
+    try {
+      repairChatHistoryIndex();
+      migrateLegacyChatHistory(settings);
+      useChatStore.getState().pruneExpiredThreads(settings.chatRetentionDays);
+    } catch (e) {
+      console.warn('[bootstrapApp] Failed to repair or migrate chat history', e);
+    }
+
+    if (settings.activeModelId) {
+      const activeModelId = settings.activeModelId;
+      const activeModel = registry.getModel(activeModelId);
+      if (!activeModel?.localPath) {
+        updateSettings({ activeModelId: null });
+        outcome = 'active_model_missing';
+        return;
+      }
+
+      const restoreSpan = performanceMonitor.startSpan('bootstrap.restoreActiveModel', {
+        modelId: activeModelId,
+      });
+
+      void Promise.resolve()
+        .then(() => llmEngineService.load(activeModelId))
+        .then(() => {
+          restoreSpan.end({ outcome: 'success' });
+        })
+        .catch((e) => {
+          console.warn('[bootstrapApp] Failed to restore active model', e);
+          updateSettings({ activeModelId: null });
+          restoreSpan.end({ outcome: 'error' });
+        });
+    }
+  } catch (error) {
+    outcome = 'error';
+    throw error;
+  } finally {
+    bootstrapSpan.end({ outcome });
   }
 }

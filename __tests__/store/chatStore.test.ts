@@ -111,6 +111,44 @@ describe('chatStore', () => {
     );
   });
 
+  it('ignores assistant patches when the target message does not exist', () => {
+    const threadId = useChatStore.getState().createThread({
+      modelId: 'author/model-q4',
+      presetId: null,
+      presetSnapshot: {
+        id: null,
+        name: 'Default',
+        systemPrompt: 'You are helpful.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 1024,
+      },
+    });
+
+    useChatStore.getState().appendMessage(threadId, {
+      id: 'user-1',
+      role: 'user',
+      content: 'Hello there',
+      createdAt: Date.now(),
+      state: 'complete',
+    });
+
+    const before = useChatStore.getState().getThread(threadId);
+
+    useChatStore.getState().patchAssistantMessage(threadId, 'missing-message-id', {
+      content: 'Should not apply',
+      state: 'complete',
+    });
+
+    const after = useChatStore.getState().getThread(threadId);
+
+    expect(after).toBe(before);
+    expect(after?.messages).toBe(before?.messages);
+    expect(after?.status).toBe(before?.status);
+  });
+
   it('stops an assistant message and marks the thread as stopped', () => {
     const threadId = useChatStore.getState().createThread({
       modelId: 'author/model-q4',

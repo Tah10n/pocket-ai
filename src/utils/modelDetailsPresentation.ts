@@ -38,8 +38,8 @@ export function getDetailToneTokens(tone: ModelDetailsTone) {
   if (tone === 'success') {
     return {
       shellClassName: 'border-success-500/20 bg-success-500/10 dark:border-success-400/25 dark:bg-success-500/12',
-      iconWrapClassName: 'bg-success-500/12 dark:bg-success-500/18',
-      iconClassName: 'text-success-700 dark:text-success-200',
+      iconWrapClassName: 'bg-success-500/10 dark:bg-success-500/20',
+      iconClassName: 'text-success-600 dark:text-success-300',
       labelClassName: 'text-success-700 dark:text-success-200',
       valueClassName: 'text-typography-900 dark:text-typography-50',
     };
@@ -48,7 +48,7 @@ export function getDetailToneTokens(tone: ModelDetailsTone) {
   if (tone === 'warning') {
     return {
       shellClassName: 'border-warning-300/80 bg-warning-50/95 dark:border-warning-800 dark:bg-warning-950/35',
-      iconWrapClassName: 'bg-warning-500/12 dark:bg-warning-500/18',
+      iconWrapClassName: 'bg-warning-100 dark:bg-warning-500/20',
       iconClassName: 'text-warning-700 dark:text-warning-200',
       labelClassName: 'text-warning-700 dark:text-warning-200',
       valueClassName: 'text-typography-900 dark:text-typography-50',
@@ -58,8 +58,8 @@ export function getDetailToneTokens(tone: ModelDetailsTone) {
   if (tone === 'error') {
     return {
       shellClassName: 'border-error-500/20 bg-error-500/10 dark:border-error-400/25 dark:bg-error-500/12',
-      iconWrapClassName: 'bg-error-500/12 dark:bg-error-500/18',
-      iconClassName: 'text-error-700 dark:text-error-200',
+      iconWrapClassName: 'bg-error-500/10 dark:bg-error-500/20',
+      iconClassName: 'text-error-600 dark:text-error-300',
       labelClassName: 'text-error-700 dark:text-error-200',
       valueClassName: 'text-typography-900 dark:text-typography-50',
     };
@@ -68,8 +68,8 @@ export function getDetailToneTokens(tone: ModelDetailsTone) {
   if (tone === 'info') {
     return {
       shellClassName: 'border-info-500/20 bg-info-500/10 dark:border-info-400/25 dark:bg-info-500/12',
-      iconWrapClassName: 'bg-info-500/12 dark:bg-info-500/18',
-      iconClassName: 'text-info-700 dark:text-info-200',
+      iconWrapClassName: 'bg-info-500/10 dark:bg-info-500/20',
+      iconClassName: 'text-info-600 dark:text-info-300',
       labelClassName: 'text-info-700 dark:text-info-200',
       valueClassName: 'text-typography-900 dark:text-typography-50',
     };
@@ -77,8 +77,8 @@ export function getDetailToneTokens(tone: ModelDetailsTone) {
 
   return {
     shellClassName: 'border-primary-500/20 bg-primary-500/10 dark:border-primary-400/25 dark:bg-primary-500/12',
-    iconWrapClassName: 'bg-primary-500/12 dark:bg-primary-500/18',
-    iconClassName: 'text-primary-700 dark:text-primary-200',
+    iconWrapClassName: 'bg-primary-500/10 dark:bg-primary-500/20',
+    iconClassName: 'text-primary-500',
     labelClassName: 'text-primary-700 dark:text-primary-200',
     valueClassName: 'text-typography-900 dark:text-typography-50',
   };

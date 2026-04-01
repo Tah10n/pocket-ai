@@ -11,7 +11,6 @@ import {
 } from './SettingsStore';
 import { setupFileSystem } from './FileSystemSetup';
 import { registry } from './LocalStorageRegistry';
-import { hardwareListenerService } from './HardwareListenerService';
 import { getQueuedDownloadFileNames } from '../store/downloadStore';
 import { llmEngineService } from './LLMEngineService';
 import { useChatStore } from '../store/chatStore';
@@ -98,21 +97,31 @@ function migrateLegacyChatHistory(settings: AppSettings) {
   return importedCount;
 }
 
-export async function bootstrapApp() {
-  const bootstrapSpan = performanceMonitor.startSpan('bootstrap.app');
-  let outcome: 'success' | 'active_model_missing' | 'error' = 'success';
+type BootstrapOutcome = 'success' | 'active_model_missing' | 'error';
+
+function scheduleActiveModelRestore(activeModelId: string): void {
+  const restoreSpan = performanceMonitor.startSpan('bootstrap.restoreActiveModel', {
+    modelId: activeModelId,
+  });
+
+  void Promise.resolve()
+    .then(() => llmEngineService.load(activeModelId))
+    .then(() => {
+      restoreSpan.end({ outcome: 'success' });
+    })
+    .catch((e) => {
+      console.warn('[bootstrapApp] Failed to restore active model', e);
+      updateSettings({ activeModelId: null });
+      restoreSpan.end({ outcome: 'error' });
+    });
+}
+
+export async function bootstrapAppCritical(): Promise<{ outcome: BootstrapOutcome }> {
+  const bootstrapSpan = performanceMonitor.startSpan('bootstrap.critical');
+  let outcome: BootstrapOutcome = 'success';
 
   try {
     const settings = getSettings();
-
-    // Core Infrastructure
-    try {
-      await setupFileSystem();
-      await registry.validateRegistry(getQueuedDownloadFileNames());
-      hardwareListenerService.start();
-    } catch (e) {
-      console.error('[bootstrapApp] Infrastructure setup failed', e);
-    }
 
     try {
       if (i18n.language !== settings.language) {
@@ -120,6 +129,41 @@ export async function bootstrapApp() {
       }
     } catch (e) {
       console.warn('[bootstrapApp] Failed to set language', e);
+    }
+
+    if (settings.activeModelId) {
+      const activeModelId = settings.activeModelId;
+      const activeModel = registry.getModel(activeModelId);
+      if (!activeModel?.localPath) {
+        updateSettings({ activeModelId: null });
+        outcome = 'active_model_missing';
+        return { outcome };
+      }
+
+      scheduleActiveModelRestore(activeModelId);
+    }
+
+    return { outcome };
+  } catch (error) {
+    outcome = 'error';
+    throw error;
+  } finally {
+    bootstrapSpan.end({ outcome });
+  }
+}
+
+export async function bootstrapAppBackground(): Promise<void> {
+  const bootstrapSpan = performanceMonitor.startSpan('bootstrap.background');
+  let outcome: 'success' | 'error' = 'success';
+
+  try {
+    const settings = getSettings();
+
+    try {
+      await setupFileSystem();
+      await registry.validateRegistry(getQueuedDownloadFileNames());
+    } catch (e) {
+      console.error('[bootstrapApp] Infrastructure setup failed', e);
     }
 
     try {
@@ -135,31 +179,23 @@ export async function bootstrapApp() {
     } catch (e) {
       console.warn('[bootstrapApp] Failed to repair or migrate chat history', e);
     }
+  } catch (error) {
+    outcome = 'error';
+    throw error;
+  } finally {
+    bootstrapSpan.end({ outcome });
+  }
+}
 
-    if (settings.activeModelId) {
-      const activeModelId = settings.activeModelId;
-      const activeModel = registry.getModel(activeModelId);
-      if (!activeModel?.localPath) {
-        updateSettings({ activeModelId: null });
-        outcome = 'active_model_missing';
-        return;
-      }
+export async function bootstrapApp() {
+  const bootstrapSpan = performanceMonitor.startSpan('bootstrap.app');
+  let outcome: BootstrapOutcome = 'success';
 
-      const restoreSpan = performanceMonitor.startSpan('bootstrap.restoreActiveModel', {
-        modelId: activeModelId,
-      });
+  try {
+    const critical = await bootstrapAppCritical();
+    outcome = critical.outcome;
 
-      void Promise.resolve()
-        .then(() => llmEngineService.load(activeModelId))
-        .then(() => {
-          restoreSpan.end({ outcome: 'success' });
-        })
-        .catch((e) => {
-          console.warn('[bootstrapApp] Failed to restore active model', e);
-          updateSettings({ activeModelId: null });
-          restoreSpan.end({ outcome: 'error' });
-        });
-    }
+    await bootstrapAppBackground();
   } catch (error) {
     outcome = 'error';
     throw error;

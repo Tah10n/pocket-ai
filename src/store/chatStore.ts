@@ -444,9 +444,23 @@ export const useChatStore = create<ChatStoreState>()(
             return state;
           }
 
-          const nextMessages = existingThread.messages.map((message) =>
-            message.id === messageId ? { ...message, ...updates } : message,
-          );
+          const messages = existingThread.messages;
+          if (messages.length === 0) {
+            return state;
+          }
+
+          const lastIndex = messages.length - 1;
+          const targetIndex =
+            messages[lastIndex]?.id === messageId
+              ? lastIndex
+              : messages.findIndex((message) => message.id === messageId);
+
+          if (targetIndex < 0) {
+            return state;
+          }
+
+          const nextMessages = messages.slice();
+          nextMessages[targetIndex] = { ...messages[targetIndex], ...updates };
 
           const nextStatus =
             updates.state === 'streaming'

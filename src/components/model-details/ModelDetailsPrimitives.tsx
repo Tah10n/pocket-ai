@@ -50,8 +50,8 @@ export function DetailValueCard({
           </Text>
         </Box>
         {iconName ? (
-          <Box className={`h-10 w-10 items-center justify-center rounded-[16px] ${toneTokens.iconWrapClassName}`}>
-            <MaterialSymbols name={iconName} size={18} className={toneTokens.iconClassName} />
+          <Box className={`h-10 w-10 items-center justify-center overflow-hidden rounded-2xl ${toneTokens.iconWrapClassName}`}>
+            <MaterialSymbols name={iconName} size={20} className={toneTokens.iconClassName} />
           </Box>
         ) : null}
       </Box>
@@ -68,7 +68,7 @@ export function SectionHeader({
 
   return (
     <Box className="mb-4 flex-row items-center gap-3">
-      <Box className={`h-11 w-11 items-center justify-center rounded-[18px] ${toneTokens.iconWrapClassName}`}>
+      <Box className={`h-11 w-11 items-center justify-center overflow-hidden rounded-2xl ${toneTokens.iconWrapClassName}`}>
         <MaterialSymbols name={iconName} size={20} className={toneTokens.iconClassName} />
       </Box>
       <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">

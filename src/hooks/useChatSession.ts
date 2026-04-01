@@ -1,6 +1,7 @@
 import { AppState, AppStateStatus } from 'react-native';
 import { useCallback, useEffect, useRef } from 'react';
 import { llmEngineService } from '../services/LLMEngineService';
+import { performanceMonitor } from '../services/PerformanceMonitor';
 import { GenerationParameters, getGenerationParametersForModel, getSettings } from '../services/SettingsStore';
 import { presetManager } from '../services/PresetManager';
 import { EngineStatus } from '../types/models';
@@ -26,7 +27,7 @@ export const SUMMARY_PLACEHOLDER_CONTENT =
   'Summary generation is not available yet. Older messages stay visible in the thread, but only the most recent context is sent to the model right now.';
 export const SUMMARY_AFFORDANCE_MIN_TRUNCATED_MESSAGES = 1;
 const DEFAULT_CONTEXT_SIZE = 4096;
-const STREAM_PATCH_INTERVAL_MS = 32;
+const STREAM_PATCH_INTERVAL_MS = 100;
 
 interface ActiveGenerationState {
   threadId: string;
@@ -159,6 +160,9 @@ export const useChatSession = () => {
       throw new Error('Thread not found');
     }
 
+    performanceMonitor.mark('chat.send.start', { modelId: thread.modelId });
+    const generationSpan = performanceMonitor.startSpan('chat.generation', { modelId: thread.modelId });
+
     sharedGenerationState.current = {
       threadId,
       messageId: assistantMessageId,
@@ -168,8 +172,26 @@ export const useChatSession = () => {
     let currentText = '';
     let currentThoughtText = '';
     let tokensCount = 0;
+    let hasMarkedFirstToken = false;
     const startTime = Date.now();
     let flushTimeout: ReturnType<typeof setTimeout> | null = null;
+
+    const recordCompletionStats = (outcome: 'success' | 'stopped' | 'error') => {
+      const elapsedSec = (Date.now() - startTime) / 1000;
+      const tokensPerSec = elapsedSec > 0 ? tokensCount / elapsedSec : 0;
+
+      const existingTokensPerSec = performanceMonitor.snapshot().counters['chat.tokensPerSec'] ?? 0;
+      performanceMonitor.incrementCounter('chat.tokensPerSec', tokensPerSec - existingTokensPerSec);
+
+      performanceMonitor.mark('chat.generation.outcome', {
+        outcome,
+        modelId: thread.modelId,
+        tokensCount,
+        tokensPerSec,
+      });
+
+      generationSpan.end({ outcome, tokensCount, tokensPerSec });
+    };
 
     const maxContextSize =
       typeof llmEngineService.getContextSize === 'function'
@@ -228,6 +250,11 @@ export const useChatSession = () => {
           reasoning_format: thread.paramsSnapshot.reasoningEnabled === true ? 'auto' : 'none',
         },
         onToken: (token) => {
+          if (!hasMarkedFirstToken) {
+            hasMarkedFirstToken = true;
+            performanceMonitor.mark('chat.firstToken', { modelId: thread.modelId });
+          }
+
           if (typeof token === 'string') {
             currentText += token;
           } else {
@@ -241,6 +268,7 @@ export const useChatSession = () => {
               currentThoughtText = token.reasoningContent;
             }
           }
+
           tokensCount += 1;
           scheduleAssistantPatch();
         },
@@ -250,6 +278,7 @@ export const useChatSession = () => {
         flushAssistantPatch();
         stopAssistantMessage(threadId, assistantMessageId);
         finalizeThreadStatus(threadId, 'stopped');
+        recordCompletionStats('stopped');
         return;
       }
 
@@ -261,11 +290,13 @@ export const useChatSession = () => {
         completion.reasoning_content || currentThoughtText || undefined,
       );
       finalizeThreadStatus(threadId, 'idle');
+      recordCompletionStats('success');
     } catch (error) {
       if (isMatchingGeneration(threadId, assistantMessageId) && sharedGenerationState.current?.stopRequested) {
         flushAssistantPatch();
         stopAssistantMessage(threadId, assistantMessageId);
         finalizeThreadStatus(threadId, 'stopped');
+        recordCompletionStats('stopped');
         return;
       }
 
@@ -281,6 +312,7 @@ export const useChatSession = () => {
         errorCode: 'generation_failed',
       });
       finalizeThreadStatus(threadId, 'error');
+      recordCompletionStats('error');
       throw error;
     } finally {
       if (flushTimeout) {

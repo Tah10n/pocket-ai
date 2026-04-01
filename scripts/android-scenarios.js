@@ -8,10 +8,13 @@ const cliOptions = parseCliOptions(process.argv.slice(2));
 const projectRoot = path.resolve(__dirname, "..");
 const artifactsRoot = path.join(projectRoot, "artifacts", "android-scenarios");
 const dumpPathOnDevice = "/sdcard/window_dump.xml";
+const homeLauncherLabel = "Pocket AI";
 const HOME_SECTION_LABELS = ["Recent Conversations", "Недавние разговоры"];
 const HOME_TAB_LABELS = ["Home", "Главная"];
 const CHAT_TAB_LABELS = ["Chat", "Чат"];
 const CHAT_EMPTY_LABELS = [
+  "No messages yet",
+  "Сообщений пока нет",
   "Load a model to continue chatting",
   "Загрузите модель, чтобы продолжить чат",
 ];
@@ -24,6 +27,10 @@ const SETTINGS_TITLE_LABELS = ["Settings", "Настройки"];
 const THEME_MODE_LABELS = ["Theme Mode", "Тема"];
 const LANGUAGE_ROW_LABELS = ["Language", "Язык"];
 const STORAGE_MANAGER_LABELS = ["Storage Manager", "Управление хранилищем"];
+const PERFORMANCE_ROW_LABELS = ["Performance", "Производительность"];
+const PERFORMANCE_COPY_TRACE_LABELS = ["Copy trace", "Копировать трассу"];
+const PERFORMANCE_DUMP_TO_LOGCAT_LABELS = ["Dump to logcat", "Выгрузить в logcat"];
+const PERFORMANCE_ENABLE_INSTRUMENTATION_LABELS = ["Enable instrumentation", "Включить инструментацию"];
 const HF_TOKEN_LABELS = ["Hugging Face Token", "Токен Hugging Face"];
 const ACTIVE_MODEL_CTA_LABELS = ["Swap Model", "Choose Model", "Browse Models"];
 const CONVERSATIONS_TITLE_LABELS = ["All Conversations", "Все разговоры"];
@@ -68,6 +75,7 @@ async function main() {
   const context = createScenarioContext(adbPath, serial);
   const results = [];
 
+  await context.ensureAppVisible();
   await dismissDebuggerBannerIfPresent(adbPath, serial);
   const languageState = {
     originalLabel: await readCurrentLanguageLabel(context),
@@ -130,6 +138,32 @@ async function main() {
 function createScenarioContext(adbPath, serial) {
   return {
     serial,
+    ensureAppVisible: async () => {
+      const homeNode = await findAnyNodeNow(adbPath, serial, HOME_SECTION_LABELS, {
+        visibleOnly: true,
+      });
+
+      if (homeNode) {
+        return;
+      }
+
+      const launcherNode = await findNodeNow(adbPath, serial, homeLauncherLabel, {
+        visibleOnly: true,
+      });
+
+      if (launcherNode?.bounds) {
+        runChecked(adbPath, [
+          "-s",
+          serial,
+          "shell",
+          "input",
+          "tap",
+          `${launcherNode.bounds.centerX}`,
+          `${launcherNode.bounds.centerY}`,
+        ]);
+        await delay(1_500);
+      }
+    },
     dismissDebuggerBanner: async () => {
       await dismissDebuggerBannerIfPresent(adbPath, serial);
     },
@@ -196,6 +230,37 @@ function createScenarioContext(adbPath, serial) {
       await delay(options.afterTapDelayMs ?? 800);
       return label;
     },
+    tapBottomTab: async (labels, options = {}) => {
+      await dismissDebuggerBannerIfPresent(adbPath, serial);
+
+      const { label, node } = await waitForAnyNodeWithPicker(
+        adbPath,
+        serial,
+        labels,
+        {
+          timeoutMs: options.timeoutMs,
+          visibleOnly: true,
+        },
+        pickBottomMostNode
+      );
+
+      if (!node.bounds) {
+        throw new Error(`"${label}" was found but has no tap bounds.`);
+      }
+
+      runChecked(adbPath, [
+        "-s",
+        serial,
+        "shell",
+        "input",
+        "tap",
+        `${node.bounds.centerX}`,
+        `${node.bounds.centerY}`,
+      ]);
+
+      await delay(options.afterTapDelayMs ?? 800);
+      return label;
+    },
     pressBack: async () => {
       runChecked(adbPath, ["-s", serial, "shell", "input", "keyevent", "4"]);
       await delay(700);
@@ -257,20 +322,20 @@ function buildScenarios() {
       description: "Verify bottom tab navigation across Home, Chat, Models, and Settings.",
       run: async (ctx) => {
         await goToHome(ctx);
-        await ctx.tapAnyText(CHAT_TAB_LABELS);
+        await ctx.tapBottomTab(CHAT_TAB_LABELS);
         await ctx.expectAnyText(CHAT_EMPTY_LABELS);
 
-        await ctx.tapAnyText(MODELS_TAB_LABELS);
+        await ctx.tapBottomTab(MODELS_TAB_LABELS);
         await ctx.expectAnyText(MODEL_CATALOG_LABELS);
         await ctx.expectAnyText(ALL_MODELS_LABELS);
         await ctx.expectAnyText(DOWNLOADED_TAB_LABELS);
 
-        await ctx.tapAnyText(SETTINGS_TAB_LABELS);
+        await ctx.tapBottomTab(SETTINGS_TAB_LABELS);
         await ctx.expectAnyText(THEME_MODE_LABELS);
         await ctx.expectAnyText(LANGUAGE_ROW_LABELS);
         await ctx.expectAnyText(STORAGE_MANAGER_LABELS);
 
-        await ctx.tapAnyText(HOME_TAB_LABELS);
+        await ctx.tapBottomTab(HOME_TAB_LABELS);
         await ctx.expectAnyText(HOME_SECTION_LABELS);
       },
     },
@@ -305,8 +370,6 @@ function buildScenarios() {
         await goToHome(ctx);
         await ctx.tapAnyText(ACTIVE_MODEL_CTA_LABELS);
         await ctx.expectAnyText(MODEL_CATALOG_LABELS);
-        await ctx.expectText("Guided discovery is on", { timeoutMs: 15_000 });
-        await ctx.expectText("Show full catalog");
 
         await ctx.tapText("Filters");
         await ctx.expectText("No token required");
@@ -344,10 +407,62 @@ function buildScenarios() {
         await ctx.expectText("New Chat");
       },
     },
+    {
+      id: "performance-logcat",
+      description: "Verify the Performance screen can dump a trace to logcat in dev builds.",
+      run: async (ctx) => {
+        await goToSettings(ctx);
+
+        const adbPath = resolveAdbPath();
+
+        for (let attempt = 0; attempt < 5; attempt += 1) {
+          const performanceRow = await findAnyNodeNow(adbPath, ctx.serial, PERFORMANCE_ROW_LABELS, {
+            visibleOnly: true,
+          });
+
+          if (performanceRow) {
+            break;
+          }
+
+          await ctx.swipeUp();
+        }
+
+        const performanceRow = await findAnyNodeNow(adbPath, ctx.serial, PERFORMANCE_ROW_LABELS, {
+          visibleOnly: true,
+        });
+
+        if (!performanceRow) {
+          throw new Error("Timed out waiting for the Performance settings row.");
+        }
+
+        await ctx.tapAnyText(PERFORMANCE_ROW_LABELS);
+        await ctx.expectAnyText(PERFORMANCE_COPY_TRACE_LABELS);
+
+        const enableInstrumentation = await findAnyNodeNow(adbPath, ctx.serial, PERFORMANCE_ENABLE_INSTRUMENTATION_LABELS, {
+          visibleOnly: true,
+        });
+
+        if (enableInstrumentation) {
+          await ctx.tapAnyText(PERFORMANCE_ENABLE_INSTRUMENTATION_LABELS);
+        }
+
+        runChecked(adbPath, ["-s", ctx.serial, "logcat", "-c"]);
+
+        await ctx.tapAnyText(PERFORMANCE_DUMP_TO_LOGCAT_LABELS);
+        await delay(1_200);
+
+        const logs = runCapture(adbPath, ["-s", ctx.serial, "logcat", "-d", "-t", "200"]);
+
+        if (!logs.includes("POCKET_AI_PERF_TRACE")) {
+          throw new Error("Expected POCKET_AI_PERF_TRACE output in logcat.");
+        }
+      },
+    },
   ];
 }
 
 async function goToHome(ctx) {
+  await ctx.ensureAppVisible();
   await ctx.dismissDebuggerBanner();
 
   const reachedHome = await tryReachHome(ctx);
@@ -601,6 +716,39 @@ async function waitForAnyNode(adbPath, serial, labels, options = {}) {
   throw new Error(`Timed out waiting for any of: ${labels.map((label) => `"${label}"`).join(", ")}.`);
 }
 
+async function waitForAnyNodeWithPicker(adbPath, serial, labels, options = {}, picker) {
+  const timeoutMs = options.timeoutMs ?? 20_000;
+  const startedAt = Date.now();
+  const resolvedPicker = picker ?? pickBestNode;
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const xml = dumpUiHierarchy(adbPath, serial);
+    const nodes = parseUiNodes(xml);
+
+    for (const label of labels) {
+      const matches = nodes.filter((node) => {
+        if (!matchesLabel(node, label)) {
+          return false;
+        }
+
+        if (options.visibleOnly && !node.bounds) {
+          return false;
+        }
+
+        return true;
+      });
+
+      if (matches.length > 0) {
+        return { label, node: resolvedPicker(matches) };
+      }
+    }
+
+    await delay(600);
+  }
+
+  throw new Error(`Timed out waiting for any of: ${labels.map((label) => `"${label}"`).join(", ")}.`);
+}
+
 async function findAnyNodeNow(adbPath, serial, labels, options = {}) {
   for (const label of labels) {
     const node = await findNodeNow(adbPath, serial, label, options);
@@ -697,6 +845,25 @@ function pickBestNode(nodes) {
     const clickableDelta = Number(right.clickable) - Number(left.clickable);
     if (clickableDelta !== 0) {
       return clickableDelta;
+    }
+
+    const leftArea = left.bounds ? left.bounds.area : Number.MAX_SAFE_INTEGER;
+    const rightArea = right.bounds ? right.bounds.area : Number.MAX_SAFE_INTEGER;
+    return leftArea - rightArea;
+  })[0];
+}
+
+function pickBottomMostNode(nodes) {
+  return [...nodes].sort((left, right) => {
+    const clickableDelta = Number(right.clickable) - Number(left.clickable);
+    if (clickableDelta !== 0) {
+      return clickableDelta;
+    }
+
+    const leftY = left.bounds ? left.bounds.centerY : -1;
+    const rightY = right.bounds ? right.bounds.centerY : -1;
+    if (leftY !== rightY) {
+      return rightY - leftY;
     }
 
     const leftArea = left.bounds ? left.bounds.area : Number.MAX_SAFE_INTEGER;

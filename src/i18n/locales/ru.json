@@ -39,6 +39,9 @@
     }
   },
   "home": {
+    "initializing": "Инициализация…",
+    "initializationFailedTitle": "Проблема инициализации",
+    "initializationFailedMessage": "Не удалось завершить фоновую инициализацию. Можно продолжать работу, но часть функций может быть недоступна.",
     "newChat": "Новый чат",
     "recentConversations": "Недавние разговоры",
     "seeAll": "Все",
@@ -302,10 +305,22 @@
     "summary": "{{enabled}} · {{events}} событий",
     "copyTrace": "Копировать трассу",
     "clearTrace": "Очистить трассу",
+    "instrumentationToggleLabel": "Инструментация",
+    "instrumentationToggleDescription": "Записывать perf-события и логи в этой сессии.",
+    "enableInstrumentation": "Включить инструментацию",
+    "disableInstrumentation": "Выключить инструментацию",
+    "shareTrace": "Поделиться трассой",
+    "saveTraceToFile": "Сохранить трассу в файл",
+    "dumpToLogcat": "Выгрузить в logcat",
     "counters": "Счетчики",
     "events": "События",
     "emptyCounters": "Счетчиков пока нет.",
-    "emptyEvents": "Событий пока нет."
+    "emptyEvents": "Событий пока нет.",
+    "exportFailedTitle": "Экспорт не удался",
+    "exportFailedMessage": "Не удалось экспортировать трассу производительности. Попробуйте еще раз.",
+    "shareFailedMessage": "Не удалось открыть меню «Поделиться». Вы всё равно можете скопировать трассу.",
+    "saveFailedMessage": "Не удалось сохранить трассу в файл. Вы всё равно можете скопировать трассу.",
+    "logcatDumpFailedMessage": "Не удалось записать трассу в logcat. Попробуйте еще раз."
   },
   "legal": {
     "title": "Приватность и раскрытие данных",

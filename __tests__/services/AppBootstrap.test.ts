@@ -38,12 +38,6 @@ jest.mock('../../src/services/LocalStorageRegistry', () => ({
   },
 }));
 
-jest.mock('../../src/services/HardwareListenerService', () => ({
-  hardwareListenerService: {
-    start: jest.fn(),
-  },
-}));
-
 jest.mock('../../src/store/downloadStore', () => ({
   getQueuedDownloadFileNames: jest.fn().mockReturnValue([]),
 }));
@@ -66,7 +60,8 @@ jest.mock('../../src/store/chatStore', () => ({
   },
 }));
 
-import { bootstrapApp } from '../../src/services/AppBootstrap';
+import { bootstrapApp, bootstrapAppBackground, bootstrapAppCritical } from '../../src/services/AppBootstrap';
+import { setupFileSystem } from '../../src/services/FileSystemSetup';
 import { llmEngineService } from '../../src/services/LLMEngineService';
 import { registry } from '../../src/services/LocalStorageRegistry';
 import { clearLegacyChatHistory, getChatHistoryEntries, getSettings, updateSettings } from '../../src/services/SettingsStore';
@@ -80,7 +75,7 @@ describe('AppBootstrap', () => {
     mockPruneExpiredThreads.mockReturnValue(0);
   });
 
-  it('restores the persisted active model when the file is still available', async () => {
+  it('restores the persisted active model during critical bootstrap when the file is still available', async () => {
     (getSettings as jest.Mock).mockReturnValue({
       language: 'en',
       activePresetId: null,
@@ -96,13 +91,14 @@ describe('AppBootstrap', () => {
       localPath: 'author_model-q4.gguf',
     });
 
-    await bootstrapApp();
+    await bootstrapAppCritical();
+    await Promise.resolve();
 
     expect(llmEngineService.load).toHaveBeenCalledWith('author/model-q4');
     expect(updateSettings).not.toHaveBeenCalledWith({ activeModelId: null });
   });
 
-  it('clears the persisted active model when the file is missing', async () => {
+  it('clears the persisted active model during critical bootstrap when the file is missing', async () => {
     (getSettings as jest.Mock).mockReturnValue({
       language: 'en',
       activePresetId: null,
@@ -115,13 +111,31 @@ describe('AppBootstrap', () => {
     });
     (registry.getModel as jest.Mock).mockReturnValue(undefined);
 
-    await bootstrapApp();
+    await bootstrapAppCritical();
 
     expect(llmEngineService.load).not.toHaveBeenCalled();
     expect(updateSettings).toHaveBeenCalledWith({ activeModelId: null });
   });
 
-  it('migrates legacy chat history entries into the thread store during bootstrap', async () => {
+  it('does not block critical bootstrap on infrastructure setup', async () => {
+    (getSettings as jest.Mock).mockReturnValue({
+      language: 'en',
+      activePresetId: null,
+      activeModelId: null,
+      temperature: 0.7,
+      topP: 0.9,
+      maxTokens: 2048,
+      theme: 'system',
+      chatRetentionDays: null,
+    });
+
+    await bootstrapAppCritical();
+
+    expect(setupFileSystem).not.toHaveBeenCalled();
+    expect(registry.validateRegistry).not.toHaveBeenCalled();
+  });
+
+  it('migrates legacy chat history entries into the thread store during background bootstrap', async () => {
     (getSettings as jest.Mock).mockReturnValue({
       language: 'en',
       activePresetId: null,
@@ -146,7 +160,7 @@ describe('AppBootstrap', () => {
       },
     ]);
 
-    await bootstrapApp();
+    await bootstrapAppBackground();
 
     expect(mockMergeImportedThreads).toHaveBeenCalledWith([
       expect.objectContaining({
@@ -161,5 +175,33 @@ describe('AppBootstrap', () => {
     ]);
     expect(clearLegacyChatHistory).toHaveBeenCalled();
     expect(mockPruneExpiredThreads).toHaveBeenCalledWith(90);
+  });
+
+  it('runs critical bootstrap before background bootstrap', async () => {
+    const callOrder: string[] = [];
+    (getSettings as jest.Mock).mockReturnValue({
+      language: 'en',
+      activePresetId: null,
+      activeModelId: 'author/model-q4',
+      temperature: 0.7,
+      topP: 0.9,
+      maxTokens: 2048,
+      theme: 'system',
+      chatRetentionDays: null,
+    });
+
+    (registry.getModel as jest.Mock).mockImplementation(() => {
+      callOrder.push('critical');
+      return { id: 'author/model-q4', localPath: 'author_model-q4.gguf' };
+    });
+
+    (setupFileSystem as jest.Mock).mockImplementation(async () => {
+      callOrder.push('background');
+    });
+
+    await bootstrapApp();
+
+    expect(callOrder[0]).toBe('critical');
+    expect(callOrder).toContain('background');
   });
 });

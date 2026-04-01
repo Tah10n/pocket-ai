@@ -9,11 +9,17 @@ import { useTranslation } from 'react-i18next';
 
 import { ThemeProvider as CustomThemeProvider, useTheme } from '../src/providers/ThemeProvider';
 import { useMotionPreferences } from '../src/hooks/useDeviceMetrics';
+import { usePerformanceNavigationTrace } from '../src/hooks/usePerformanceNavigationTrace';
 import { hardwareListenerService } from '../src/services/HardwareListenerService';
-import { bootstrapApp } from '../src/services/AppBootstrap';
+import { bootstrapAppBackground, bootstrapAppCritical } from '../src/services/AppBootstrap';
 import { performanceMonitor } from '../src/services/PerformanceMonitor';
+import { useBootstrapStore } from '../src/store/bootstrapStore';
 import '../src/i18n';
 import '../global.css';
+
+performanceMonitor.mark('startup.jsBundleLoaded');
+
+let hasMarkedFirstRootRender = false;
 
 function patchExpoKeepAwake() {
   if (!__DEV__) return;
@@ -140,6 +146,11 @@ export const unstable_settings = {
 export default function RootLayout() {
   const [isReady, setIsReady] = useState(false);
 
+  if (!hasMarkedFirstRootRender) {
+    hasMarkedFirstRootRender = true;
+    performanceMonitor.mark('startup.firstRootRender');
+  }
+
   useEffect(() => {
     hardwareListenerService.start();
     return () => hardwareListenerService.stop();
@@ -150,7 +161,7 @@ export default function RootLayout() {
       const span = performanceMonitor.startSpan('root.prepare');
       performanceMonitor.mark('root.prepare.start');
       try {
-        await bootstrapApp();
+        await bootstrapAppCritical();
       } catch (e) {
         console.warn('[RootLayout] Error during preparation:', e);
       } finally {
@@ -160,6 +171,19 @@ export default function RootLayout() {
         performanceMonitor.mark('root.splashHidden');
         span.end({ outcome: 'complete' });
       }
+
+      useBootstrapStore.getState().setBackgroundState('running');
+      useBootstrapStore.getState().setBackgroundError(null);
+
+      void bootstrapAppBackground()
+        .then(() => {
+          useBootstrapStore.getState().setBackgroundState('done');
+        })
+        .catch((error) => {
+          const message = error instanceof Error ? error.message : String(error);
+          useBootstrapStore.getState().setBackgroundError(message);
+          useBootstrapStore.getState().setBackgroundState('error');
+        });
     }
 
     prepare().catch((e) => console.warn('[RootLayout] prepare failed', e));
@@ -180,6 +204,8 @@ function RootNavigator() {
   const { colors, navigationTheme } = useTheme();
   const { t } = useTranslation();
   const motion = useMotionPreferences();
+
+  usePerformanceNavigationTrace();
 
   return (
     <ThemeProvider value={navigationTheme}>

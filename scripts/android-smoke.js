@@ -79,6 +79,7 @@ async function main() {
   }
 
   log(`Using Android target ${device.serial}${device.model ? ` (${device.model})` : ""}.`);
+  wakeAndUnlockDevice(tools.adb, device.serial);
 
   const metro = await ensureMetroServer();
 
@@ -98,6 +99,7 @@ async function main() {
 
   if (screenshotPath) {
     await delay(launchDelayMs);
+    wakeAndUnlockDevice(tools.adb, device.serial);
     saveScreenshot(tools.adb, device.serial, screenshotPath);
   }
 
@@ -236,42 +238,48 @@ function pickConnectedDevice(adbPath, options = {}) {
 }
 
 function listConnectedDevices(adbPath) {
+  return listAdbDevices(adbPath);
+}
+
+function listAdbDevices(adbPath, options = {}) {
+  const includeOffline = options.includeOffline === true;
   const output = runCapture(adbPath, ["devices", "-l"]);
+
   return output
     .split(/\r?\n/)
     .slice(1)
     .map((line) => line.trim())
     .filter(Boolean)
-    .map(parseAdbDeviceLine)
+    .map((line) => parseAdbDeviceLine(line, { includeOffline }))
     .filter(Boolean);
 }
 
-function parseAdbDeviceLine(line) {
+function parseAdbDeviceLine(line, options = {}) {
   const match = line.match(/^(\S+)\s+(\S+)(?:\s+(.*))?$/);
   if (!match) {
     return null;
   }
 
   const [, serial, state, details = ""] = match;
-  if (state !== "device") {
+  if (
+    state !== "device" &&
+    !(options.includeOffline === true && state === "offline")
+  ) {
     return null;
   }
 
   const modelMatch = details.match(/model:(\S+)/);
   return {
     serial,
+    state,
     model: modelMatch ? modelMatch[1] : null,
   };
 }
 
 async function startEmulatorAndWait(tools, options = {}) {
-  const existingEmulator = listConnectedDevices(tools.adb).find((device) =>
-    isEmulatorSerial(device.serial)
+  const existingEmulator = listAdbDevices(tools.adb, { includeOffline: true }).find(
+    (device) => isEmulatorSerial(device.serial)
   );
-
-  if (existingEmulator) {
-    return existingEmulator;
-  }
 
   if (!tools.emulator) {
     throw new Error(
@@ -279,22 +287,34 @@ async function startEmulatorAndWait(tools, options = {}) {
     );
   }
 
-  const avdName = resolveAvdName(tools.emulator, options.requestedAvd);
-  log(`No suitable emulator is running. Starting ${avdName}...`);
+  let serial = null;
+  let avdName = null;
 
-  const emulatorProcess = spawn(tools.emulator, ["-avd", avdName], {
-    detached: true,
-    stdio: "ignore",
-  });
-  emulatorProcess.unref();
+  if (existingEmulator) {
+    serial = existingEmulator.serial;
+    avdName = existingEmulator.model || "Android emulator";
+    log(
+      `Found existing emulator ${serial} (${existingEmulator.state}). Waiting for it to become ready...`
+    );
+  } else {
+    avdName = resolveAvdName(tools.emulator, options.requestedAvd);
+    log(`No suitable emulator is running. Starting ${avdName}...`);
 
-  const serial = await waitForAndroidDevice(
-    tools.adb,
-    deviceStartupTimeoutMs,
-    options.requestedSerial
-      ? (value) => value === options.requestedSerial
-      : isEmulatorSerial
-  );
+    const emulatorProcess = spawn(tools.emulator, ["-avd", avdName], {
+      detached: true,
+      stdio: "ignore",
+    });
+    emulatorProcess.unref();
+
+    serial = await waitForAndroidDevice(
+      tools.adb,
+      deviceStartupTimeoutMs,
+      options.requestedSerial
+        ? (value) => value === options.requestedSerial
+        : isEmulatorSerial,
+      { includeOffline: true }
+    );
+  }
 
   log(`Waiting for ${serial} to finish booting...`);
   await waitForBootCompletion(tools.adb, serial, deviceStartupTimeoutMs);
@@ -331,17 +351,30 @@ function resolveAvdName(emulatorPath, requestedAvd) {
   return avds[0];
 }
 
-async function waitForAndroidDevice(adbPath, timeoutMs, matcher) {
+async function waitForAndroidDevice(adbPath, timeoutMs, matcher, options = {}) {
   const start = Date.now();
+  const includeOffline = options.includeOffline === true;
 
   while (Date.now() - start < timeoutMs) {
-    const devices = listConnectedDevices(adbPath);
-    const device = matcher
-      ? devices.find((candidate) => matcher(candidate.serial))
-      : devices[0];
+    const devices = listAdbDevices(adbPath, { includeOffline });
+    const matchingDevices = matcher
+      ? devices.filter((candidate) => matcher(candidate.serial))
+      : devices;
 
-    if (device) {
-      return device.serial;
+    const readyDevice = matchingDevices.find(
+      (candidate) => candidate.state === "device"
+    );
+    if (readyDevice) {
+      return readyDevice.serial;
+    }
+
+    if (includeOffline) {
+      const offlineDevice = matchingDevices.find(
+        (candidate) => candidate.state === "offline"
+      );
+      if (offlineDevice) {
+        return offlineDevice.serial;
+      }
     }
 
     await delay(2_000);
@@ -718,4 +751,19 @@ function log(message) {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function wakeAndUnlockDevice(adbPath, serial) {
+  runChecked(adbPath, ["-s", serial, "shell", "input", "keyevent", "224"], {
+    stdio: "ignore",
+    allowFailure: true,
+  });
+  runChecked(adbPath, ["-s", serial, "shell", "wm", "dismiss-keyguard"], {
+    stdio: "ignore",
+    allowFailure: true,
+  });
+  runChecked(adbPath, ["-s", serial, "shell", "input", "keyevent", "82"], {
+    stdio: "ignore",
+    allowFailure: true,
+  });
 }

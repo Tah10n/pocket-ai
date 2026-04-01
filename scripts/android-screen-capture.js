@@ -16,6 +16,8 @@ const HOME_SECTION_LABELS = ["Recent Conversations", "Недавние разг�
 const HOME_TAB_LABELS = ["Home", "Главная"];
 const CHAT_TAB_LABELS = ["Chat", "Чат"];
 const CHAT_EMPTY_LABELS = [
+  "No messages yet",
+  "Сообщений пока нет",
   "Load a model to continue chatting",
   "Загрузите модель, чтобы продолжить чат",
 ];

@@ -39,6 +39,9 @@
     }
   },
   "home": {
+    "initializing": "Initializing…",
+    "initializationFailedTitle": "Initialization issue",
+    "initializationFailedMessage": "Some background setup failed. You can continue, but some features may be unavailable.",
     "newChat": "New Chat",
     "recentConversations": "Recent Conversations",
     "seeAll": "See All",
@@ -298,10 +301,22 @@
     "summary": "{{enabled}} · {{events}} events",
     "copyTrace": "Copy trace",
     "clearTrace": "Clear trace",
+    "instrumentationToggleLabel": "Instrumentation",
+    "instrumentationToggleDescription": "Record performance events and logs for this session.",
+    "enableInstrumentation": "Enable instrumentation",
+    "disableInstrumentation": "Disable instrumentation",
+    "shareTrace": "Share trace",
+    "saveTraceToFile": "Save trace to file",
+    "dumpToLogcat": "Dump to logcat",
     "counters": "Counters",
     "events": "Events",
     "emptyCounters": "No counters recorded yet.",
-    "emptyEvents": "No events recorded yet."
+    "emptyEvents": "No events recorded yet.",
+    "exportFailedTitle": "Export failed",
+    "exportFailedMessage": "Unable to export the performance trace. Please try again.",
+    "shareFailedMessage": "Unable to open the share sheet. You can still copy the trace.",
+    "saveFailedMessage": "Unable to save the trace to a file. You can still copy the trace.",
+    "logcatDumpFailedMessage": "Unable to write the trace to logcat. Please try again."
   },
   "legal": {
     "title": "Privacy & Disclosures",

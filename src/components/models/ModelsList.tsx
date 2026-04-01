@@ -23,6 +23,7 @@ import { hardwareListenerService } from '@/services/HardwareListenerService';
 import { huggingFaceTokenService } from '@/services/HuggingFaceTokenService';
 import { registry } from '@/services/LocalStorageRegistry';
 import { offloadModel } from '@/services/StorageManagerService';
+import { performanceMonitor } from '@/services/PerformanceMonitor';
 import {
   useModelsStore,
   MODELS_PAGE_SIZE,
@@ -168,6 +169,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
   const appendInFlightRef = useRef(false);
   const lastAutoLoadCursorRef = useRef<string | null>(null);
   const hasUserScrolledCatalogRef = useRef(false);
+  const catalogFirstResultsShownSessionRef = useRef<string | null>(null);
   const { startDownload, cancelDownload, queue } = useModelDownload();
   const { loadModel, unloadModel, state: engineState } = useLLMEngine();
   const {
@@ -225,6 +227,17 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
     ) => {
       const fetchId = latestFetchIdRef.current + 1;
       latestFetchIdRef.current = fetchId;
+      const fetchSpan = performanceMonitor.startSpan(
+        append ? 'catalog.fetch.more' : 'catalog.fetch.initial',
+        {
+          cursor: cursor ?? undefined,
+          pageSize: MODELS_PAGE_SIZE,
+          sort: serverSort ?? undefined,
+        },
+      );
+      let fetchOutcome: 'success' | 'error' | 'stale' = 'success';
+      let resultCount = 0;
+      let resultHasMore = false;
 
       if (append) {
         appendInFlightRef.current = true;
@@ -248,8 +261,11 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
           pageSize: MODELS_PAGE_SIZE,
           sort: serverSort,
         });
+        resultCount = result.models.length;
+        resultHasMore = result.hasMore;
 
         if (fetchId !== latestFetchIdRef.current) {
+          fetchOutcome = 'stale';
           return;
         }
 
@@ -266,9 +282,11 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
         });
       } catch (error) {
         if (fetchId !== latestFetchIdRef.current) {
+          fetchOutcome = 'stale';
           return;
         }
 
+        fetchOutcome = 'error';
         const message = getModelCatalogErrorMessage(error);
 
         if (append) {
@@ -292,6 +310,8 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
             setLoading(false);
           }
         }
+
+        fetchSpan.end({ outcome: fetchOutcome, count: resultCount, hasMore: resultHasMore });
       }
     },
     [serverSort],
@@ -441,6 +461,23 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
 
     return sortModels(filtered, sort);
   }, [activeTab, displayModels, filters, sort]);
+
+  useEffect(() => {
+    if (activeTab !== 'all') {
+      return;
+    }
+
+    if (filteredModels.length === 0) {
+      return;
+    }
+
+    if (catalogFirstResultsShownSessionRef.current === sessionIdentity) {
+      return;
+    }
+
+    catalogFirstResultsShownSessionRef.current = sessionIdentity;
+    performanceMonitor.mark('catalog.firstResultsShown');
+  }, [activeTab, filteredModels.length, sessionIdentity]);
 
   const showModelActionError = useCallback((scope: string, error: unknown) => {
     Alert.alert(t('models.actionFailedTitle'), getReportedErrorMessage(scope, error, t));

@@ -1,10 +1,11 @@
 import React, { ComponentProps, useCallback, useMemo } from 'react';
+import { useIsFocused } from '@react-navigation/native';
 import { Box } from '@/components/ui/box';
 import { Text, composeTextRole } from '@/components/ui/text';
 import { MaterialSymbols } from './MaterialSymbols';
 import { useTranslation } from 'react-i18next';
-import { useChatStore } from '../../store/chatStore';
-import { ConversationIndexItem, toConversationIndexItem } from '../../types/chat';
+import { useConversationIndex } from '../../hooks/useConversationIndex';
+import { ConversationIndexItem } from '../../types/chat';
 import { Pressable } from '@/components/ui/pressable';
 import { ScreenActionPill, ScreenCard, ScreenIconButton, ScreenStack } from './ScreenShell';
 import {
@@ -36,12 +37,8 @@ export const RecentConversationsList = ({
   maxVisible = DEFAULT_MAX_VISIBLE_CONVERSATIONS,
 }: RecentConversationsListProps) => {
   const { t } = useTranslation();
-  const threads = useChatStore((state) => state.threads);
-  const summaries = useMemo(() => (
-    Object.values(threads)
-      .map(toConversationIndexItem)
-      .sort((left, right) => right.updatedAt - left.updatedAt)
-  ), [threads]);
+  const isFocused = useIsFocused();
+  const summaries = useConversationIndex({ enabled: isFocused, limit: maxVisible });
 
   const conversations: Conversation[] = useMemo(() => summaries.map((summary) => ({
     ...summary,
@@ -49,7 +46,7 @@ export const RecentConversationsList = ({
     time: formatConversationUpdatedAt(summary.updatedAt),
     icon: 'chat-bubble',
   })), [summaries]);
-  const visibleConversations = useMemo(() => conversations.slice(0, maxVisible), [conversations, maxVisible]);
+  const visibleConversations = conversations;
   const canManageConversations = Boolean(onViewAllConversations);
 
   const renderConversation = useCallback((conv: Conversation) => (

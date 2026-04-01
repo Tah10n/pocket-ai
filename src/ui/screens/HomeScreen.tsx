@@ -11,7 +11,7 @@ import { ActiveModelCard } from '@/components/ui/ActiveModelCard';
 import { RecentConversationsList } from '@/components/ui/RecentConversationsList';
 import { MaterialSymbols } from '@/components/ui/MaterialSymbols';
 import { useTranslation } from 'react-i18next';
-import { useChatSession } from '../../hooks/useChatSession';
+import { useChatCommands } from '../../hooks/useChatCommands';
 import { ConversationIndexItem } from '../../types/chat';
 import { useLLMEngine } from '@/hooks/useLLMEngine';
 import { registry } from '@/services/LocalStorageRegistry';
@@ -25,7 +25,7 @@ let hasMarkedFirstUsableScreen = false;
 export const HomeScreen = () => {
   const { t } = useTranslation();
   const router = useRouter();
-  const { deleteThread, openThread, startNewChat } = useChatSession();
+  const { deleteThread, openThread, startNewChat } = useChatCommands();
   const { state: engineState } = useLLMEngine();
   const bootstrapBackgroundState = useBootstrapStore((state) => state.backgroundState);
   const bootstrapBackgroundError = useBootstrapStore((state) => state.backgroundError);

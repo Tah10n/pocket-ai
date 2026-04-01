@@ -119,9 +119,15 @@ export function normalizeConversationTitle(title: string) {
 }
 
 export function toConversationIndexItem(thread: ChatThread): ConversationIndexItem {
-  const lastMessage = [...thread.messages]
-    .reverse()
-    .find((message) => getVisibleMessageContent(message.role, message.content).trim().length > 0);
+  let lastMessage: ChatMessage | undefined;
+
+  for (let index = thread.messages.length - 1; index >= 0; index -= 1) {
+    const message = thread.messages[index];
+    if (getVisibleMessageContent(message.role, message.content).trim().length > 0) {
+      lastMessage = message;
+      break;
+    }
+  }
 
   const lastMessagePreview = lastMessage
     ? getVisibleMessageContent(lastMessage.role, lastMessage.content)

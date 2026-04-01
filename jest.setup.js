@@ -184,6 +184,7 @@ jest.mock('@react-navigation/native', () => {
 
     return {
         ...actual,
+        useIsFocused: () => true,
         useFocusEffect: (effect) => {
             React.useEffect(() => effect(), [effect]);
         },

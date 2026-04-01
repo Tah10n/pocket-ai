@@ -2,6 +2,7 @@ import React, { useCallback, useDeferredValue, useEffect, useMemo, useState } fr
 import { Alert, KeyboardAvoidingView, Modal } from 'react-native';
 import { useRouter } from 'expo-router';
 import { FlashList, ListRenderItem } from '@shopify/flash-list';
+import { useIsFocused } from '@react-navigation/native';
 import { useTranslation } from 'react-i18next';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Box } from '@/components/ui/box';
@@ -21,7 +22,8 @@ import {
   ScreenStack,
 } from '@/components/ui/ScreenShell';
 import { Text } from '@/components/ui/text';
-import { useChatSession } from '../../hooks/useChatSession';
+import { useChatCommands } from '../../hooks/useChatCommands';
+import { useConversationIndex } from '../../hooks/useConversationIndex';
 import { ConversationIndexItem } from '../../types/chat';
 import {
   formatConversationUpdatedAt,
@@ -70,16 +72,12 @@ function formatRetentionLabel(days: number | null, t: (key: string, options?: Re
 export function ConversationsScreen() {
   const { t } = useTranslation();
   const insets = useSafeAreaInsets();
+  const isFocused = useIsFocused();
   const router = useRouter();
   const canGoBack = router.canGoBack();
-  const {
-    activeThread,
-    conversationIndex,
-    deleteThread,
-    openThread,
-    renameThread,
-    startNewChat,
-  } = useChatSession();
+  const conversationIndex = useConversationIndex({ enabled: isFocused });
+  const activeThreadId = useChatStore((state) => state.activeThreadId);
+  const { deleteThread, openThread, renameThread, startNewChat } = useChatCommands();
   const [searchQuery, setSearchQuery] = useState('');
   const deferredSearchQuery = useDeferredValue(searchQuery);
   const [editingThreadId, setEditingThreadId] = useState<string | null>(null);
@@ -321,7 +319,7 @@ export function ConversationsScreen() {
   );
 
   const renderItem = useCallback<ListRenderItem<ConversationIndexItem>>(({ item }) => {
-    const isActive = activeThread?.id === item.id;
+    const isActive = activeThreadId === item.id;
 
     return (
       <ScreenCard>
@@ -390,7 +388,7 @@ export function ConversationsScreen() {
         </Box>
       </ScreenCard>
     );
-  }, [activeThread?.id, handleDeleteConversation, handleOpenConversation, t]);
+  }, [activeThreadId, handleDeleteConversation, handleOpenConversation, t]);
 
   return (
     <Box className="flex-1 bg-background-0 dark:bg-background-950">

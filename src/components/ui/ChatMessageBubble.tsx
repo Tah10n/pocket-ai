@@ -26,6 +26,22 @@ export interface ChatMessageBubbleProps {
   onLayout?: (event: LayoutChangeEvent) => void;
 }
 
+function areChatMessageBubblePropsEqual(prev: ChatMessageBubbleProps, next: ChatMessageBubbleProps) {
+  return (
+    prev.id === next.id
+    && prev.isUser === next.isUser
+    && prev.content === next.content
+    && prev.thoughtContent === next.thoughtContent
+    && prev.isStreaming === next.isStreaming
+    && prev.tokensPerSec === next.tokensPerSec
+    && prev.canDelete === next.canDelete
+    && prev.canRegenerate === next.canRegenerate
+    && prev.onDelete === next.onDelete
+    && prev.onRegenerate === next.onRegenerate
+    && prev.onLayout === next.onLayout
+  );
+}
+
 function IconActionButton({
   testID,
   iconName,
@@ -56,7 +72,7 @@ function IconActionButton({
   );
 }
 
-export const ChatMessageBubble = ({
+const ChatMessageBubbleComponent = ({
   id,
   isUser,
   content,
@@ -270,3 +286,8 @@ export const ChatMessageBubble = ({
     </Box>
   );
 };
+
+ChatMessageBubbleComponent.displayName = 'ChatMessageBubble';
+
+export const ChatMessageBubble = React.memo(ChatMessageBubbleComponent, areChatMessageBubblePropsEqual);
+ChatMessageBubble.displayName = 'ChatMessageBubble';

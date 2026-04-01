@@ -2,12 +2,15 @@ import React from 'react';
 import { fireEvent, render } from '@testing-library/react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { ConversationsScreen } from '../../src/ui/screens/ConversationsScreen';
-import { useChatSession } from '../../src/hooks/useChatSession';
+import { useChatCommands } from '../../src/hooks/useChatCommands';
+import { useConversationIndex } from '../../src/hooks/useConversationIndex';
 import { getSettings, updateSettings } from '../../src/services/SettingsStore';
+import { useChatStore } from '../../src/store/chatStore';
 
 const mockRouterPush = jest.fn();
 const mockRouterReplace = jest.fn();
 const mockRouterBack = jest.fn();
+let pruneExpiredThreadsSpy: jest.SpyInstance | null = null;
 
 jest.mock('expo-router', () => ({
   useRouter: () => ({
@@ -45,24 +48,18 @@ jest.mock('@shopify/flash-list', () => {
   };
 });
 
-jest.mock('../../src/hooks/useChatSession', () => ({
-  useChatSession: jest.fn(),
+jest.mock('../../src/hooks/useChatCommands', () => ({
+  useChatCommands: jest.fn(),
 }));
 
-const mockPruneExpiredThreads = jest.fn();
+jest.mock('../../src/hooks/useConversationIndex', () => ({
+  useConversationIndex: jest.fn(),
+}));
 
 jest.mock('../../src/services/SettingsStore', () => ({
   getSettings: jest.fn(),
   subscribeSettings: jest.fn(() => jest.fn()),
   updateSettings: jest.fn(),
-}));
-
-jest.mock('../../src/store/chatStore', () => ({
-  useChatStore: {
-    getState: () => ({
-      pruneExpiredThreads: mockPruneExpiredThreads,
-    }),
-  },
 }));
 
 jest.mock('../../src/components/ui/MaterialSymbols', () => {
@@ -112,9 +109,10 @@ jest.mock('@/components/ui/input', () => {
   };
 });
 
-const mockUseChatSession = useChatSession as jest.MockedFunction<typeof useChatSession>;
 const mockGetSettings = getSettings as jest.MockedFunction<typeof getSettings>;
 const mockUpdateSettings = updateSettings as jest.MockedFunction<typeof updateSettings>;
+const mockUseChatCommands = useChatCommands as jest.MockedFunction<typeof useChatCommands>;
+const mockUseConversationIndex = useConversationIndex as jest.MockedFunction<typeof useConversationIndex>;
 
 describe('ConversationsScreen', () => {
   beforeEach(() => {
@@ -122,19 +120,28 @@ describe('ConversationsScreen', () => {
     mockRouterPush.mockReset();
     mockRouterReplace.mockReset();
     mockRouterBack.mockReset();
-    mockPruneExpiredThreads.mockReset();
-    mockPruneExpiredThreads.mockReturnValue(0);
+
+    useChatStore.setState({ threads: {}, activeThreadId: null });
+    pruneExpiredThreadsSpy?.mockRestore();
+    pruneExpiredThreadsSpy = jest
+      .spyOn(useChatStore.getState(), 'pruneExpiredThreads')
+      .mockReturnValue(0);
     mockGetSettings.mockReturnValue({
       chatRetentionDays: 90,
     } as any);
+    mockUseConversationIndex.mockReturnValue([]);
+    mockUseChatCommands.mockReturnValue({
+      deleteThread: jest.fn(),
+      openThread: jest.fn(),
+      renameThread: jest.fn(),
+      startNewChat: jest.fn(),
+    });
   });
 
   it('filters conversations and saves a renamed title', () => {
     const renameThread = jest.fn();
 
-    mockUseChatSession.mockReturnValue({
-      activeThread: null,
-      conversationIndex: [
+    mockUseConversationIndex.mockReturnValue([
         {
           id: 'thread-1',
           title: 'Shopping ideas',
@@ -153,22 +160,13 @@ describe('ConversationsScreen', () => {
           messageCount: 5,
           lastMessagePreview: 'Action items for next week',
         },
-      ],
-      messages: [],
-      isGenerating: false,
-      shouldOfferSummary: false,
-      truncatedMessageCount: 0,
-      appendUserMessage: jest.fn(),
-      deleteMessage: jest.fn(),
+      ] as any);
+    mockUseChatCommands.mockReturnValue({
       deleteThread: jest.fn(),
-      renameThread,
       openThread: jest.fn(),
-      stopGeneration: jest.fn(),
-      regenerateFromUserMessage: jest.fn(),
-      regenerateLastResponse: jest.fn(),
-      createSummaryPlaceholder: jest.fn(),
+      renameThread,
       startNewChat: jest.fn(),
-    } as any);
+    });
 
     const { getByTestId, getByText, queryByText } = render(
       <SafeAreaProvider
@@ -194,25 +192,6 @@ describe('ConversationsScreen', () => {
   });
 
   it('updates chat retention from the conversations screen', () => {
-    mockUseChatSession.mockReturnValue({
-      activeThread: null,
-      conversationIndex: [],
-      messages: [],
-      isGenerating: false,
-      shouldOfferSummary: false,
-      truncatedMessageCount: 0,
-      appendUserMessage: jest.fn(),
-      deleteMessage: jest.fn(),
-      deleteThread: jest.fn(),
-      renameThread: jest.fn(),
-      openThread: jest.fn(),
-      stopGeneration: jest.fn(),
-      regenerateFromUserMessage: jest.fn(),
-      regenerateLastResponse: jest.fn(),
-      createSummaryPlaceholder: jest.fn(),
-      startNewChat: jest.fn(),
-    } as any);
-
     const { getByTestId } = render(
       <SafeAreaProvider
         initialMetrics={{
@@ -228,29 +207,10 @@ describe('ConversationsScreen', () => {
     fireEvent.press(getByTestId('retention-option-forever'));
 
     expect(mockUpdateSettings).toHaveBeenCalledWith({ chatRetentionDays: null });
-    expect(mockPruneExpiredThreads).toHaveBeenCalledWith(null);
+    expect(pruneExpiredThreadsSpy).toHaveBeenCalledWith(null);
   });
 
   it('keeps chat retention collapsed until the user expands it', () => {
-    mockUseChatSession.mockReturnValue({
-      activeThread: null,
-      conversationIndex: [],
-      messages: [],
-      isGenerating: false,
-      shouldOfferSummary: false,
-      truncatedMessageCount: 0,
-      appendUserMessage: jest.fn(),
-      deleteMessage: jest.fn(),
-      deleteThread: jest.fn(),
-      renameThread: jest.fn(),
-      openThread: jest.fn(),
-      stopGeneration: jest.fn(),
-      regenerateFromUserMessage: jest.fn(),
-      regenerateLastResponse: jest.fn(),
-      createSummaryPlaceholder: jest.fn(),
-      startNewChat: jest.fn(),
-    } as any);
-
     const { getByTestId, queryByTestId } = render(
       <SafeAreaProvider
         initialMetrics={{
@@ -273,9 +233,7 @@ describe('ConversationsScreen', () => {
     const openThread = jest.fn();
     const startNewChat = jest.fn();
 
-    mockUseChatSession.mockReturnValue({
-      activeThread: null,
-      conversationIndex: [
+    mockUseConversationIndex.mockReturnValue([
         {
           id: 'thread-1',
           title: 'Shopping ideas',
@@ -285,22 +243,13 @@ describe('ConversationsScreen', () => {
           messageCount: 3,
           lastMessagePreview: 'Groceries and meal prep',
         },
-      ],
-      messages: [],
-      isGenerating: false,
-      shouldOfferSummary: false,
-      truncatedMessageCount: 0,
-      appendUserMessage: jest.fn(),
-      deleteMessage: jest.fn(),
+      ] as any);
+    mockUseChatCommands.mockReturnValue({
       deleteThread: jest.fn(),
-      renameThread: jest.fn(),
       openThread,
-      stopGeneration: jest.fn(),
-      regenerateFromUserMessage: jest.fn(),
-      regenerateLastResponse: jest.fn(),
-      createSummaryPlaceholder: jest.fn(),
+      renameThread: jest.fn(),
       startNewChat,
-    } as any);
+    });
 
     const { getByTestId } = render(
       <SafeAreaProvider

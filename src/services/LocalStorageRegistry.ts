@@ -9,6 +9,17 @@ const REGISTRY_KEY = 'models-registry';
 const FITS_IN_RAM_HEADROOM_RATIO = 0.8;
 const DEFAULT_TOTAL_MEMORY_BYTES = 8 * 1024 * 1024 * 1024;
 
+function cloneModelMetadata(model: ModelMetadata): ModelMetadata {
+  return {
+    ...model,
+    architectures: model.architectures ? [...model.architectures] : undefined,
+    baseModels: model.baseModels ? [...model.baseModels] : undefined,
+    datasets: model.datasets ? [...model.datasets] : undefined,
+    languages: model.languages ? [...model.languages] : undefined,
+    tags: model.tags ? [...model.tags] : undefined,
+  };
+}
+
 export class LocalStorageRegistry {
   private static instance: LocalStorageRegistry;
   private storage = createStorage(REGISTRY_KEY);
@@ -28,7 +39,7 @@ export class LocalStorageRegistry {
    * Get all models from the registry.
    */
   public getModels(): ModelMetadata[] {
-    return this.getCachedModels().map((model) => normalizePersistedModelMetadata(model));
+    return this.getCachedModels().map((model) => cloneModelMetadata(model));
   }
 
   /**
@@ -163,7 +174,7 @@ export class LocalStorageRegistry {
    */
   public getModel(modelId: string): ModelMetadata | undefined {
     const model = this.getCachedModelsById().get(modelId);
-    return model ? normalizePersistedModelMetadata(model) : undefined;
+    return model ? cloneModelMetadata(model) : undefined;
   }
 
   private getCachedModels(): ModelMetadata[] {
@@ -183,7 +194,7 @@ export class LocalStorageRegistry {
   }
 
   private updateCache(models: ModelMetadata[]): void {
-    this.cachedModels = models.map((model) => normalizePersistedModelMetadata(model));
+    this.cachedModels = models.map((model) => cloneModelMetadata(model));
     this.cachedModelsById = new Map(this.cachedModels.map((model) => [model.id, model]));
   }
 

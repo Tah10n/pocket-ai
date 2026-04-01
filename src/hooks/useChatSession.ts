@@ -1,5 +1,5 @@
 import { AppState, AppStateStatus } from 'react-native';
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { llmEngineService } from '../services/LLMEngineService';
 import { performanceMonitor } from '../services/PerformanceMonitor';
 import { GenerationParameters, getGenerationParametersForModel, getSettings } from '../services/SettingsStore';
@@ -12,7 +12,6 @@ import {
   DEFAULT_SYSTEM_PROMPT,
   PresetSnapshot,
   createChatId,
-  toConversationIndexItem,
 } from '../types/chat';
 import {
   DEFAULT_INFERENCE_PROMPT_SAFETY_MARGIN_TOKENS,
@@ -21,6 +20,7 @@ import {
   type ThreadInferenceWindowOptions,
   useChatStore,
 } from '../store/chatStore';
+import { syncThreadParameters } from '../utils/chatThreadParameters';
 
 export const MAX_CONTEXT_MESSAGES = 24;
 export const SUMMARY_PLACEHOLDER_CONTENT =
@@ -104,12 +104,13 @@ export function getThreadTruncationState(thread: ChatThread, options?: Inference
   };
 }
 
+const EMPTY_TRUNCATION_STATE: ReturnType<typeof getThreadTruncationState> = {
+  truncatedMessageIds: [],
+  shouldOfferSummary: false,
+};
+
 export const useChatSession = () => {
   const activeThread = useChatStore((state) => state.getActiveThread());
-  const threads = useChatStore((state) => state.threads);
-  const conversationIndex = Object.values(threads)
-    .map(toConversationIndexItem)
-    .sort((left, right) => right.updatedAt - left.updatedAt);
   const createThread = useChatStore((state) => state.createThread);
   const appendMessage = useChatStore((state) => state.appendMessage);
   const createAssistantPlaceholder = useChatStore((state) => state.createAssistantPlaceholder);
@@ -125,6 +126,58 @@ export const useChatSession = () => {
   const setActiveThread = useChatStore((state) => state.setActiveThread);
   const setThreadSummary = useChatStore((state) => state.setThreadSummary);
   const updateThreadParamsSnapshot = useChatStore((state) => state.updateThreadParamsSnapshot);
+
+  const activeContextTokenBudget =
+    activeThread &&
+    llmEngineService.getState().status === EngineStatus.READY &&
+    llmEngineService.getState().activeModelId === activeThread.modelId
+      ? llmEngineService.getContextSize()
+      : undefined;
+
+  const activeThreadId = activeThread?.id ?? null;
+  const activeThreadStatus = activeThread?.status ?? null;
+
+  const truncationCacheRef = useRef<{ threadId: string | null; state: ReturnType<typeof getThreadTruncationState> }>({
+    threadId: null,
+    state: EMPTY_TRUNCATION_STATE,
+  });
+  const truncationState = useMemo(() => {
+    if (!activeThread) {
+      return EMPTY_TRUNCATION_STATE;
+    }
+
+    if (activeThread.status === 'generating') {
+      return truncationCacheRef.current.threadId === activeThread.id
+        ? truncationCacheRef.current.state
+        : EMPTY_TRUNCATION_STATE;
+    }
+
+    return getThreadTruncationState(activeThread, {
+      maxContextTokens: activeContextTokenBudget,
+      responseReserveTokens: activeThread.paramsSnapshot.maxTokens,
+    });
+  }, [
+    activeContextTokenBudget,
+    activeThread?.id,
+    activeThread?.paramsSnapshot.maxTokens,
+    activeThread?.status,
+    activeThread?.updatedAt,
+  ]);
+  useEffect(() => {
+    if (!activeThreadId) {
+      truncationCacheRef.current = { threadId: null, state: EMPTY_TRUNCATION_STATE };
+      return;
+    }
+
+    if (activeThreadStatus === 'generating') {
+      return;
+    }
+
+    truncationCacheRef.current = {
+      threadId: activeThreadId,
+      state: truncationState,
+    };
+  }, [activeThreadId, activeThreadStatus, truncationState]);
   const appStateRef = useRef<AppStateStatus>(AppState.currentState ?? 'active');
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (nextAppState) => {
@@ -260,6 +313,8 @@ export const useChatSession = () => {
           } else {
             if (token.content !== undefined) {
               currentText = token.content;
+            } else if (typeof token.accumulatedText === 'string' && token.accumulatedText.length >= currentText.length) {
+              currentText = token.accumulatedText;
             } else if (token.reasoningContent === undefined) {
               currentText += token.token;
             }
@@ -325,28 +380,14 @@ export const useChatSession = () => {
     }
   }, [finalizeAssistantMessage, finalizeThreadStatus, patchAssistantMessage, stopAssistantMessage]);
 
-  const syncThreadParameters = useCallback((thread: ChatThread, nextParams?: GenerationParameters) => {
-    const resolvedParams = nextParams ?? getGenerationParametersForModel(thread.modelId);
-    const paramsChanged =
-      thread.paramsSnapshot.temperature !== resolvedParams.temperature
-      || thread.paramsSnapshot.topP !== resolvedParams.topP
-      || thread.paramsSnapshot.topK !== resolvedParams.topK
-      || thread.paramsSnapshot.minP !== resolvedParams.minP
-      || thread.paramsSnapshot.repetitionPenalty !== resolvedParams.repetitionPenalty
-      || thread.paramsSnapshot.maxTokens !== resolvedParams.maxTokens
-      || (thread.paramsSnapshot.reasoningEnabled === true) !== (resolvedParams.reasoningEnabled === true);
-
-    if (paramsChanged) {
-      updateThreadParamsSnapshot(thread.id, resolvedParams);
-    }
-
-    return paramsChanged
-      ? {
-          ...thread,
-          paramsSnapshot: resolvedParams,
-        }
-      : thread;
-  }, [updateThreadParamsSnapshot]);
+  const syncThreadParametersCallback = useCallback(
+    (thread: ChatThread, nextParams?: GenerationParameters) => syncThreadParameters(
+      thread,
+      updateThreadParamsSnapshot,
+      nextParams,
+    ),
+    [updateThreadParamsSnapshot],
+  );
 
   const ensureThreadCanGenerate = useCallback((thread: ChatThread, actionLabel: string) => {
     if (thread.status === 'generating') {
@@ -404,7 +445,7 @@ export const useChatSession = () => {
     setActiveThread(threadId);
 
     if (activeThread && !shouldStartNewThreadForActiveModel) {
-      syncThreadParameters(activeThread, activeModelParams);
+      syncThreadParametersCallback(activeThread, activeModelParams);
     }
 
     const userMessage: ChatMessage = {
@@ -420,7 +461,7 @@ export const useChatSession = () => {
     const assistantMessageId = createAssistantPlaceholder(threadId);
 
     await runAssistantCompletion(threadId, assistantMessageId);
-  }, [activeThread, appendMessage, createAssistantPlaceholder, createThread, runAssistantCompletion, setActiveThread, syncThreadParameters]);
+  }, [activeThread, appendMessage, createAssistantPlaceholder, createThread, runAssistantCompletion, setActiveThread, syncThreadParametersCallback]);
 
   const stopGeneration = useCallback(async () => {
     if (!sharedGenerationState.current) {
@@ -441,7 +482,7 @@ export const useChatSession = () => {
       throw new Error('Message cannot be empty.');
     }
 
-    const syncedThread = syncThreadParameters(activeThread);
+    const syncedThread = syncThreadParametersCallback(activeThread);
     ensureThreadCanGenerate(syncedThread, 'regenerating this response');
 
     const assistantMessageId = replaceBranchFromUserMessage(
@@ -456,7 +497,7 @@ export const useChatSession = () => {
     await runAssistantCompletion(syncedThread.id, assistantMessageId);
 
     return true;
-  }, [activeThread, ensureThreadCanGenerate, replaceBranchFromUserMessage, runAssistantCompletion, syncThreadParameters]);
+  }, [activeThread, ensureThreadCanGenerate, replaceBranchFromUserMessage, runAssistantCompletion, syncThreadParametersCallback]);
 
   const regenerateLastResponse = useCallback(async () => {
     if (!activeThread) {
@@ -470,7 +511,7 @@ export const useChatSession = () => {
       return false;
     }
 
-    const syncedThread = syncThreadParameters(activeThread);
+    const syncedThread = syncThreadParametersCallback(activeThread);
     ensureThreadCanGenerate(syncedThread, 'regenerating this response');
 
     const assistantMessageId = replaceLastAssistantMessage(syncedThread.id);
@@ -487,7 +528,7 @@ export const useChatSession = () => {
     regenerateFromUserMessage,
     replaceLastAssistantMessage,
     runAssistantCompletion,
-    syncThreadParameters,
+    syncThreadParametersCallback,
   ]);
 
   const createSummaryPlaceholder = useCallback(() => {
@@ -495,20 +536,19 @@ export const useChatSession = () => {
       return false;
     }
 
-    const { truncatedMessageIds, shouldOfferSummary } = getThreadTruncationState(activeThread);
-    if (!shouldOfferSummary) {
+    if (!truncationState.shouldOfferSummary) {
       return false;
     }
 
     setThreadSummary(activeThread.id, {
       content: SUMMARY_PLACEHOLDER_CONTENT,
       createdAt: Date.now(),
-      sourceMessageIds: truncatedMessageIds,
+      sourceMessageIds: truncationState.truncatedMessageIds,
       isPlaceholder: true,
     });
 
     return true;
-  }, [activeThread, setThreadSummary]);
+  }, [activeThread, setThreadSummary, truncationState.shouldOfferSummary, truncationState.truncatedMessageIds]);
 
   const startNewChat = useCallback(() => {
     if (activeThread?.status === 'generating') {
@@ -528,12 +568,13 @@ export const useChatSession = () => {
       throw new Error('The selected conversation is no longer available.');
     }
 
-    syncThreadParameters(thread);
+    syncThreadParametersCallback(thread);
     setActiveThread(threadId);
-  }, [activeThread, setActiveThread, syncThreadParameters]);
+  }, [activeThread, setActiveThread, syncThreadParametersCallback]);
 
   const deleteThread = useCallback((threadId: string) => {
-    if (sharedGenerationState.current?.threadId === threadId) {
+    const thread = useChatStore.getState().getThread(threadId);
+    if (thread?.status === 'generating') {
       throw new Error('Stop the current response before deleting this conversation.');
     }
 
@@ -556,27 +597,12 @@ export const useChatSession = () => {
       throw new Error('Stop the current response before editing this conversation.');
     }
 
-    const deleted = deleteMessageBranch(activeThread.id, messageId);
-    return deleted;
+  const deleted = deleteMessageBranch(activeThread.id, messageId);
+  return deleted;
   }, [activeThread, deleteMessageBranch]);
-
-  const activeContextTokenBudget =
-    activeThread &&
-    llmEngineService.getState().status === EngineStatus.READY &&
-    llmEngineService.getState().activeModelId === activeThread.modelId
-      ? llmEngineService.getContextSize()
-      : undefined;
-
-  const truncationState = activeThread
-    ? getThreadTruncationState(activeThread, {
-        maxContextTokens: activeContextTokenBudget,
-        responseReserveTokens: activeThread.paramsSnapshot.maxTokens,
-      })
-    : { truncatedMessageIds: [], shouldOfferSummary: false };
 
   return {
     activeThread,
-    conversationIndex,
     messages: activeThread?.messages ?? [],
     isGenerating: activeThread?.status === 'generating',
     shouldOfferSummary: truncationState.shouldOfferSummary,

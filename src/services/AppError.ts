@@ -7,6 +7,7 @@ export type AppErrorCode =
   | 'engine_unloading'
   | 'model_not_found'
   | 'model_load_failed'
+  | 'model_memory_insufficient'
   | 'download_disk_space_low'
   | 'download_size_unknown'
   | 'download_metadata_unavailable'
@@ -21,6 +22,7 @@ const ERROR_MESSAGE_KEYS: Partial<Record<AppErrorCode, string>> = {
   engine_unloading: 'common.errors.engineUnloading',
   model_not_found: 'common.errors.modelNotFound',
   model_load_failed: 'common.errors.modelLoadFailed',
+  model_memory_insufficient: 'common.errors.modelMemoryInsufficient',
   download_disk_space_low: 'common.errors.downloadDiskSpaceLow',
   download_size_unknown: 'common.errors.downloadSizeUnknown',
   download_metadata_unavailable: 'common.errors.downloadMetadataUnavailable',
@@ -41,6 +43,7 @@ const ERROR_PATTERNS: { pattern: RegExp; code: AppErrorCode }[] = [
   { pattern: /already being generated|Stop the current response/i, code: 'engine_busy' },
   { pattern: /unloading/i, code: 'engine_unloading' },
   { pattern: /not found or not downloaded/i, code: 'model_not_found' },
+  { pattern: /out of memory|not enough memory|std::bad_alloc|ENOMEM/i, code: 'model_memory_insufficient' },
   { pattern: /Message cannot be empty/i, code: 'message_empty' },
 ];
 
@@ -113,7 +116,11 @@ export function reportError(
     return appError;
   }
 
-  console.error(`[${scope}]`, appError, context);
+  const extra = {
+    ...appError.details,
+    ...context,
+  };
+  console.error(`[${scope}]`, appError, Object.keys(extra).length > 0 ? extra : undefined);
   return appError;
 }
 

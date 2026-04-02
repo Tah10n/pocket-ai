@@ -6,6 +6,7 @@ import * as RNFS from 'react-native-fs';
 import DeviceInfo from 'react-native-device-info';
 import { huggingFaceTokenService } from '../../src/services/HuggingFaceTokenService';
 import { registry } from '../../src/services/LocalStorageRegistry';
+import { getSystemMemorySnapshot } from '../../src/services/SystemMetricsService';
 
 jest.mock('expo-file-system', () => ({
   Paths: {
@@ -39,6 +40,10 @@ jest.mock('react-native-device-info', () => ({
   getTotalMemory: jest.fn(),
 }));
 
+jest.mock('../../src/services/SystemMetricsService', () => ({
+  getSystemMemorySnapshot: jest.fn().mockResolvedValue(null),
+}));
+
 const mockModel: ModelMetadata = {
   id: 'test/model',
   name: 'model',
@@ -61,6 +66,7 @@ describe('ModelDownloadManager Basic', () => {
     (huggingFaceTokenService.getToken as jest.Mock).mockResolvedValue(null);
     (RNFS.hash as jest.Mock).mockResolvedValue('tree-sha');
     (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(8 * 1024 * 1024 * 1024);
+    (getSystemMemorySnapshot as jest.Mock).mockResolvedValue(null);
     useDownloadStore.setState({ queue: [], activeDownloadId: null });
     (modelDownloadManager as any).isProcessing = false;
     await new Promise(r => setTimeout(r, 10)); // Yield tick
@@ -193,6 +199,34 @@ describe('ModelDownloadManager Basic', () => {
         fitsInRam: true,
         allowUnknownSizeDownload: false,
         sha256: undefined,
+      }),
+    );
+  });
+
+  it('marks the downloaded model as not fitting when free memory is the tighter signal', async () => {
+    useDownloadStore.setState({ queue: [], activeDownloadId: null });
+    (getSystemMemorySnapshot as jest.Mock).mockResolvedValue({
+      totalBytes: 8 * 1024 * 1024 * 1024,
+      availableBytes: 1_500,
+      freeBytes: 900,
+      usedBytes: 0,
+      appUsedBytes: 0,
+      lowMemory: false,
+      thresholdBytes: 0,
+    });
+
+    await expect(
+      (modelDownloadManager as any).downloadModel({
+        ...mockModel,
+        size: 1_000,
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(mockedRegistry.updateModel).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'test/model',
+        size: 1_000,
+        fitsInRam: false,
       }),
     );
   });

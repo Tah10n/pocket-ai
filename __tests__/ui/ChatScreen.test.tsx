@@ -605,21 +605,26 @@ describe('ChatScreen', () => {
   });
 
   it('shows an alert instead of throwing when header new chat fails synchronously', () => {
-    mockStartNewChat.mockImplementationOnce(() => {
-      throw new Error('Stop the current response before starting a new chat.');
-    });
+    const consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      mockStartNewChat.mockImplementationOnce(() => {
+        throw new Error('Stop the current response before starting a new chat.');
+      });
 
-    const { getByTestId, getByText } = render(React.createElement(ChatScreen));
+      const { getByTestId, getByText } = render(React.createElement(ChatScreen));
 
-    expect(getByText('Saved user prompt')).toBeTruthy();
+      expect(getByText('Saved user prompt')).toBeTruthy();
 
-    fireEvent.press(getByTestId('new-chat-button'));
+      fireEvent.press(getByTestId('new-chat-button'));
 
-    expect(alertSpy).toHaveBeenCalledWith(
-      'conversations.startNewChatErrorTitle',
-      'common.errors.engineBusy',
-    );
-    expect(getByText('Saved user prompt')).toBeTruthy();
+      expect(alertSpy).toHaveBeenCalledWith(
+        'conversations.startNewChatErrorTitle',
+        'common.errors.engineBusy',
+      );
+      expect(getByText('Saved user prompt')).toBeTruthy();
+    } finally {
+      consoleErrorSpy.mockRestore();
+    }
   });
 
   it('hides regenerate control when the engine is not ready', () => {
@@ -678,7 +683,7 @@ describe('ChatScreen', () => {
     expect(mockStop).toHaveBeenCalledTimes(1);
   });
 
-  it('keeps header actions visible but disabled while a response is generating', () => {
+  it('keeps header actions visible but disabled while a response is generating', async () => {
     useChatStore.setState({
       threads: {
         'thread-1': {
@@ -704,8 +709,11 @@ describe('ChatScreen', () => {
     expect(getByTestId('new-chat-button')).toBeTruthy();
     expect(getByTestId('model-controls-button')).toBeTruthy();
 
-    fireEvent.press(getByTestId('new-chat-button'));
-    fireEvent.press(getByTestId('model-controls-button'));
+    await act(async () => {
+      fireEvent.press(getByTestId('new-chat-button'));
+      fireEvent.press(getByTestId('model-controls-button'));
+      await Promise.resolve();
+    });
 
     expect(mockStartNewChat).not.toHaveBeenCalled();
     expect(queryByTestId('model-parameters-sheet')).toBeNull();
@@ -918,31 +926,45 @@ describe('ChatScreen', () => {
     );
   });
 
-  it('resets a single generation parameter from the model controls sheet', () => {
+  it('resets a single generation parameter from the model controls sheet', async () => {
     const { getByTestId, rerender } = render(React.createElement(ChatScreen));
 
     expect(useChatStore.getState().getActiveThread()?.paramsSnapshot.topP).toBe(0.6);
 
-    fireEvent.press(getByTestId('model-controls-button'));
-    fireEvent.press(getByTestId('reset-top-p-button'));
+    await act(async () => {
+      fireEvent.press(getByTestId('model-controls-button'));
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      fireEvent.press(getByTestId('reset-top-p-button'));
+      await Promise.resolve();
+    });
     rerender(React.createElement(ChatScreen));
 
     expect(useChatStore.getState().getActiveThread()?.paramsSnapshot.topP).toBe(0.9);
   });
 
-  it('updates the active thread reasoning toggle from the model controls sheet', () => {
+  it('updates the active thread reasoning toggle from the model controls sheet', async () => {
     const { getByTestId, rerender } = render(React.createElement(ChatScreen));
 
     expect(useChatStore.getState().getActiveThread()?.paramsSnapshot.reasoningEnabled).not.toBe(true);
 
-    fireEvent.press(getByTestId('model-controls-button'));
-    fireEvent.press(getByTestId('enable-reasoning-button'));
+    await act(async () => {
+      fireEvent.press(getByTestId('model-controls-button'));
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      fireEvent.press(getByTestId('enable-reasoning-button'));
+      await Promise.resolve();
+    });
     rerender(React.createElement(ChatScreen));
 
     expect(useChatStore.getState().getActiveThread()?.paramsSnapshot.reasoningEnabled).toBe(true);
   });
 
-  it('keeps the reset context window draft instead of restoring the saved override', () => {
+  it('keeps the reset context window draft instead of restoring the saved override', async () => {
     updateSettings({
       modelLoadParamsByModelId: {
         'author/model-q4': {
@@ -954,10 +976,16 @@ describe('ChatScreen', () => {
 
     const { getByTestId } = render(React.createElement(ChatScreen));
 
-    fireEvent.press(getByTestId('model-controls-button'));
+    await act(async () => {
+      fireEvent.press(getByTestId('model-controls-button'));
+      await Promise.resolve();
+    });
     expect(lastModelParametersSheetProps?.loadParamsDraft.contextSize).toBe(8192);
 
-    fireEvent.press(getByTestId('reset-all-button'));
+    await act(async () => {
+      fireEvent.press(getByTestId('reset-all-button'));
+      await Promise.resolve();
+    });
 
     expect(lastModelParametersSheetProps?.loadParamsDraft.contextSize).toBe(4096);
     expect(getByTestId('context-size-value').props.children).toBe('4096');

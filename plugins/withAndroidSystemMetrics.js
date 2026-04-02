@@ -52,6 +52,17 @@ class ${SYSTEM_METRICS_MODULE_NAME}Module(
     }
   }
 
+  private fun readFreeMemoryBytes(memoryInfo: ActivityManager.MemoryInfo): Long? {
+    return try {
+      ActivityManager.MemoryInfo::class.java
+        .getField("freeMem")
+        .getLong(memoryInfo)
+        .coerceAtLeast(0L)
+    } catch (_: Exception) {
+      null
+    }
+  }
+
   @ReactMethod
   fun getMemorySnapshot(promise: Promise) {
     try {
@@ -76,11 +87,15 @@ class ${SYSTEM_METRICS_MODULE_NAME}Module(
         memoryInfo.totalMem.coerceAtLeast(0L)
       }
       val availableBytes = memoryInfo.availMem.coerceAtLeast(0L)
-      val usedBytes = (totalBytes - availableBytes).coerceAtLeast(0L)
+      val freeBytes = readFreeMemoryBytes(memoryInfo)
+      val usedBytes = (totalBytes - (freeBytes ?: availableBytes)).coerceAtLeast(0L)
 
       val result = Arguments.createMap().apply {
         putDouble("totalBytes", totalBytes.toDouble())
         putDouble("availableBytes", availableBytes.toDouble())
+        if (freeBytes != null) {
+          putDouble("freeBytes", freeBytes.toDouble())
+        }
         putDouble("usedBytes", usedBytes.toDouble())
         putDouble("appUsedBytes", appUsedBytes.toDouble())
         putDouble("appResidentBytes", appResidentBytes.toDouble())

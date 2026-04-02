@@ -26,6 +26,7 @@ export interface ModelMetadata {
   resolvedFileName?: string;
   localPath?: string;
   downloadedAt?: number;
+  lastModifiedAt?: number;
   sha256?: string;
   fitsInRam: boolean | null;
   accessState: ModelAccessState;

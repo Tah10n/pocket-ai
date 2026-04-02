@@ -5,6 +5,7 @@ import {
   ModelCatalogService,
   modelCatalogService,
 } from '../../src/services/ModelCatalogService';
+import { getSystemMemorySnapshot } from '../../src/services/SystemMetricsService';
 import { huggingFaceTokenService } from '../../src/services/HuggingFaceTokenService';
 import { hardwareListenerService } from '../../src/services/HardwareListenerService';
 import { registry } from '../../src/services/LocalStorageRegistry';
@@ -32,6 +33,10 @@ jest.mock('expo-file-system/legacy', () => ({
 jest.mock('react-native-device-info', () => ({
   getTotalMemory: jest.fn(),
   getFreeDiskStorage: jest.fn(),
+}));
+
+jest.mock('../../src/services/SystemMetricsService', () => ({
+  getSystemMemorySnapshot: jest.fn().mockResolvedValue(null),
 }));
 
 const mockedRegistry = registry as jest.Mocked<typeof registry>;
@@ -140,12 +145,12 @@ function createDeferred<T>() {
 }
 
 async function waitForMockCallCount(mockFn: jest.Mock, expectedCallCount: number): Promise<void> {
-  for (let attempt = 0; attempt < 10; attempt += 1) {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
     if (mockFn.mock.calls.length >= expectedCallCount) {
       return;
     }
 
-    await Promise.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 0));
   }
 
   expect(mockFn.mock.calls.length).toBeGreaterThanOrEqual(expectedCallCount);
@@ -154,15 +159,14 @@ async function waitForMockCallCount(mockFn: jest.Mock, expectedCallCount: number
 describe('ModelCatalogService', () => {
   beforeEach(async () => {
     jest.clearAllMocks();
-    (modelCatalogService as any).searchCache.clear();
-    (modelCatalogService as any).modelSnapshotCache.clear();
-    (modelCatalogService as any).persistentCache.clearAll();
+    modelCatalogService.clearCache('manual');
     await huggingFaceTokenService.clearToken();
     mockedRegistry.getModels.mockReturnValue([]);
     mockedRegistry.getModel.mockReturnValue(undefined);
     (hardwareListenerService.getCurrentStatus as jest.Mock).mockReturnValue({ isConnected: true });
     (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(8 * 1024 * 1024 * 1024);
     (DeviceInfo.getFreeDiskStorage as jest.Mock).mockResolvedValue(50 * 1024 * 1024 * 1024);
+    (getSystemMemorySnapshot as jest.Mock).mockResolvedValue(null);
   });
 
   it('filters models based on hardware constraints', async () => {
@@ -181,6 +185,36 @@ describe('ModelCatalogService', () => {
     expect(available.models[0].id).toBe('org/small-model');
     expect(available.models[0].fitsInRam).toBe(true);
     expect(available.hasMore).toBe(false);
+  });
+
+  it('uses the conservative live memory snapshot for catalog RAM badges and cached results', async () => {
+    (getSystemMemorySnapshot as jest.Mock).mockResolvedValue({
+      totalBytes: 8 * 1024 * 1024 * 1024,
+      availableBytes: 2_000_000_000,
+      freeBytes: 1_500_000_000,
+      usedBytes: 0,
+      appUsedBytes: 0,
+      lowMemory: false,
+      thresholdBytes: 200_000_000,
+    });
+
+    global.fetch = jest.fn(() =>
+      Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve([makeRepo('org/live-memory-model', 1.3 * 1024 * 1024 * 1024)]),
+      }),
+    ) as jest.Mock;
+
+    const result = await modelCatalogService.searchModels('phi');
+    const cachedResult = modelCatalogService.getCachedSearchResult('phi');
+    const coldStartService = new ModelCatalogService();
+    const coldStartCachedResult = coldStartService.getCachedSearchResult('phi');
+
+    expect(result.models[0].fitsInRam).toBe(false);
+    expect(cachedResult?.models[0].fitsInRam).toBe(false);
+    expect(coldStartCachedResult?.models[0].fitsInRam).toBe(false);
+
+    coldStartService.dispose();
   });
 
   it('appends gguf to search queries', async () => {

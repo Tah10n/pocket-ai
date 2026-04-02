@@ -3,7 +3,7 @@ import { createJSONStorage, persist } from 'zustand/middleware';
 import { mmkvStorage } from '../lib/mmkv';
 
 export type ModelSizeRange = 'small' | 'medium' | 'large';
-export type ModelSortField = 'name' | 'size' | 'downloaded' | 'downloads' | 'likes';
+export type ModelSortField = 'name' | 'lastModified' | 'downloaded' | 'downloads' | 'likes';
 export type ModelSortDirection = 'asc' | 'desc';
 export type CatalogDiscoveryMode = 'uninitialized' | 'guided' | 'full' | 'custom';
 export const MODELS_PAGE_SIZE = 20;
@@ -77,7 +77,7 @@ function isModelSizeRange(value: unknown): value is ModelSizeRange {
 
 function isModelSortField(value: unknown): value is ModelSortField {
   return value === 'name'
-    || value === 'size'
+    || value === 'lastModified'
     || value === 'downloaded'
     || value === 'downloads'
     || value === 'likes';
@@ -99,7 +99,15 @@ function normalizeFilters(filters: unknown): ModelFilterCriteria {
 }
 
 function normalizeSort(sort: unknown): ModelSortPreference {
-  const source = (sort ?? {}) as Partial<ModelSortPreference>;
+  const source = (sort ?? {}) as { field?: unknown; direction?: unknown };
+
+  if (source.field === 'size') {
+    return {
+      field: 'lastModified',
+      direction: 'desc',
+    };
+  }
+
   return {
     field: isModelSortField(source.field) ? source.field : DEFAULT_SORT.field,
     direction: isModelSortDirection(source.direction) ? source.direction : DEFAULT_SORT.direction,
@@ -210,7 +218,7 @@ export const useModelsStore = create<ModelsStoreState>()(
     }),
     {
       name: 'models-list-preferences',
-      version: 3,
+      version: 4,
       storage: createJSONStorage(() => mmkvStorage),
       partialize: (state) => ({
         filters: state.filters,

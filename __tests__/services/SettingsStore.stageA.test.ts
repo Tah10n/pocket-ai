@@ -61,8 +61,13 @@ describe('SettingsStore (Stage A)', () => {
   });
 
   it('resets corrupted settings payload', () => {
-    storage.set('app_settings', '{');
-    expect(getSettings().language).toBe('en');
+    const consoleWarnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      storage.set('app_settings', '{');
+      expect(getSettings().language).toBe('en');
+    } finally {
+      consoleWarnSpy.mockRestore();
+    }
   });
 
   it('repairs chat history index when entries are missing', () => {

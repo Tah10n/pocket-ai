@@ -91,6 +91,9 @@ export function normalizePersistedModelMetadata(
     downloadedAt: typeof model.downloadedAt === 'number' && Number.isFinite(model.downloadedAt)
       ? Math.round(model.downloadedAt)
       : undefined,
+    lastModifiedAt: typeof model.lastModifiedAt === 'number' && Number.isFinite(model.lastModifiedAt)
+      ? Math.round(model.lastModifiedAt)
+      : undefined,
     sha256: normalizeNonEmptyString(model.sha256),
     fitsInRam: size === null
       ? null

@@ -7,11 +7,10 @@ import { registry } from './LocalStorageRegistry';
 import { getModelsDir } from './FileSystemSetup';
 import { AppError, toAppError } from './AppError';
 import { huggingFaceTokenService } from './HuggingFaceTokenService';
+import { getSystemMemorySnapshot } from './SystemMetricsService';
 import { HF_BASE_URL } from '../utils/huggingFaceUrls';
 import { getCandidateModelDownloadFileNames } from '../utils/modelFiles';
-
-const FITS_IN_RAM_HEADROOM_RATIO = 0.8;
-const DEFAULT_TOTAL_MEMORY_BYTES = 8 * 1024 * 1024 * 1024;
+import { assessModelMemoryFit, DEFAULT_TOTAL_MEMORY_BYTES } from '../utils/memoryFit';
 
 export class ModelDownloadManager {
   private static instance: ModelDownloadManager;
@@ -400,12 +399,16 @@ export class ModelDownloadManager {
       return null;
     }
 
-    try {
-      const totalMemory = await DeviceInfo.getTotalMemory();
-      return size < totalMemory * FITS_IN_RAM_HEADROOM_RATIO;
-    } catch {
-      return size < DEFAULT_TOTAL_MEMORY_BYTES * FITS_IN_RAM_HEADROOM_RATIO;
-    }
+    const systemMemorySnapshot = await getSystemMemorySnapshot().catch(() => null);
+    const totalMemoryBytes = systemMemorySnapshot?.totalBytes
+      ?? await DeviceInfo.getTotalMemory().catch(() => DEFAULT_TOTAL_MEMORY_BYTES);
+    const assessment = assessModelMemoryFit({
+      modelSizeBytes: size,
+      totalMemoryBytes,
+      systemMemorySnapshot,
+    });
+
+    return assessment?.fitsInRam ?? null;
   }
 
   private async deleteCorruptedDownload(localUri: string, modelId: string): Promise<void> {

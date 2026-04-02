@@ -46,8 +46,8 @@ const SIZE_OPTIONS: { label: string; value: ModelSizeRange }[] = [
 const SORT_OPTIONS: { labelKey: string; field: ModelSortField }[] = [
   { labelKey: 'models.sortMostDownloaded', field: 'downloads' },
   { labelKey: 'models.sortMostPopular', field: 'likes' },
+  { labelKey: 'models.sortLastModified', field: 'lastModified' },
   { labelKey: 'models.sortName', field: 'name' },
-  { labelKey: 'models.sortSize', field: 'size' },
   { labelKey: 'models.sortDownloadedFirst', field: 'downloaded' },
 ];
 
@@ -162,6 +162,10 @@ function getSortSummary(t: (key: string) => string, sort: ModelSortPreference) {
     return t(activeOption.labelKey);
   }
 
+  if (sort.field === 'lastModified') {
+    return t(activeOption.labelKey);
+  }
+
   return `${t(activeOption.labelKey)} ${sort.direction === 'asc' ? '↑' : '↓'}`;
 }
 
@@ -262,13 +266,19 @@ export const ModelsFilter = ({
             {SORT_OPTIONS.map((option) => {
               const isActive = sort.field === option.field;
               const nextDirection =
-                option.field === 'downloaded' || option.field === 'downloads' || option.field === 'likes'
+                option.field === 'downloaded'
+                || option.field === 'downloads'
+                || option.field === 'likes'
+                || option.field === 'lastModified'
                   ? 'desc'
                   : isActive && sort.direction === 'asc'
                     ? 'desc'
                     : 'asc';
               const trailingLabel =
-                option.field === 'downloaded' || option.field === 'downloads' || option.field === 'likes'
+                option.field === 'downloaded'
+                || option.field === 'downloads'
+                || option.field === 'likes'
+                || option.field === 'lastModified'
                   ? undefined
                   : isActive
                     ? (sort.direction === 'asc' ? '↑' : '↓')

@@ -19,7 +19,6 @@ import {
   getHuggingFaceModelUrl,
 } from '@/services/ModelCatalogService';
 import { getReportedErrorMessage } from '@/services/AppError';
-import { hardwareListenerService } from '@/services/HardwareListenerService';
 import { huggingFaceTokenService } from '@/services/HuggingFaceTokenService';
 import { registry } from '@/services/LocalStorageRegistry';
 import { offloadModel } from '@/services/StorageManagerService';
@@ -32,6 +31,7 @@ import {
 } from '@/store/modelsStore';
 import { EngineStatus, LifecycleStatus, ModelAccessState, type ModelMetadata } from '@/types/models';
 import { mergeModelWithRuntimeState } from '@/utils/modelRuntimeState';
+import { startModelDownloadFlow } from '@/utils/modelDownloadFlow';
 import { DECIMAL_GIGABYTE } from '@/utils/modelSize';
 import { screenLayoutMetrics } from '@/utils/themeTokens';
 import { ModelsFilter } from './ModelsFilter';
@@ -60,6 +60,10 @@ function resolveServerSort(sort: ModelSortPreference): CatalogServerSort | null 
 
   if (sort.field === 'likes') {
     return 'likes';
+  }
+
+  if (sort.field === 'lastModified') {
+    return 'lastModified';
   }
 
   return null;
@@ -112,12 +116,6 @@ function matchesTokenRequirement(model: ModelMetadata, filters: ModelFilterCrite
 
 function sortModels(models: ModelMetadata[], sort: ModelSortPreference): ModelMetadata[] {
   return [...models].sort((left, right) => {
-    if (sort.field === 'size') {
-      const leftSize = left.size ?? Number.MAX_SAFE_INTEGER;
-      const rightSize = right.size ?? Number.MAX_SAFE_INTEGER;
-      return sort.direction === 'asc' ? leftSize - rightSize : rightSize - leftSize;
-    }
-
     if (sort.field === 'downloaded') {
       return getStatusWeight(right.lifecycleStatus) - getStatusWeight(left.lifecycleStatus);
     }
@@ -128,6 +126,12 @@ function sortModels(models: ModelMetadata[], sort: ModelSortPreference): ModelMe
 
     if (sort.field === 'likes') {
       return (right.likes ?? -1) - (left.likes ?? -1);
+    }
+
+    if (sort.field === 'lastModified') {
+      const leftModifiedAt = left.lastModifiedAt ?? left.downloadedAt ?? -1;
+      const rightModifiedAt = right.lastModifiedAt ?? right.downloadedAt ?? -1;
+      return rightModifiedAt - leftModifiedAt;
     }
 
     return sort.direction === 'asc'
@@ -174,7 +178,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
   const hasUserScrolledCatalogRef = useRef(false);
   const catalogFirstResultsShownSessionRef = useRef<string | null>(null);
   const { startDownload, cancelDownload, queue } = useModelDownload();
-  const { loadModel, unloadModel, state: engineState } = useLLMEngine();
+  const { loadModel, unloadModel, fitsInRam, state: engineState } = useLLMEngine();
   const {
     filters,
     sort,
@@ -189,6 +193,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
     clearFilters,
   } = useModelsStore();
   const serverSort = useMemo(() => resolveServerSort(sort), [sort]);
+  const shouldAutoLoadMore = serverSort !== null;
   const effectiveSearchSessionKey = searchSessionKey ?? searchQuery;
   const sizeRangesSessionKey = useMemo(
     () => [...filters.sizeRanges].sort().join('|'),
@@ -498,8 +503,12 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
       return true;
     });
 
+    if (activeTab === 'all' && serverSort) {
+      return filtered;
+    }
+
     return sortModels(filtered, sort);
-  }, [activeTab, displayModels, filters, sort]);
+  }, [activeTab, displayModels, filters, serverSort, sort]);
 
   useEffect(() => {
     autoFillAttemptsRef.current = 0;
@@ -565,80 +574,18 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
   }, [router]);
 
   const handleDownload = useCallback((model: ModelMetadata) => {
-    const startPreparedDownload = async () => {
-      try {
-        if (model.accessState === ModelAccessState.AUTH_REQUIRED) {
-          openTokenSettings();
-          return;
-        }
-
-        if (model.accessState === ModelAccessState.ACCESS_DENIED) {
-          await openModelPage(model.id);
-          return;
-        }
-
-        const resolvedModel = model.size === null
-          || model.requiresTreeProbe === true
-          || (model.isGated || model.isPrivate)
-          ? await modelCatalogService.refreshModelMetadata(model, { includeDetails: false })
-          : model;
-
-        if (resolvedModel.accessState === ModelAccessState.AUTH_REQUIRED) {
-          openTokenSettings();
-          return;
-        }
-
-        if (resolvedModel.accessState === ModelAccessState.ACCESS_DENIED) {
-          await openModelPage(resolvedModel.id);
-          return;
-        }
-
-        if (!resolvedModel.resolvedFileName) {
-          Alert.alert(t('models.actionFailedTitle'), t('common.errors.downloadMetadataUnavailable'));
-          return;
-        }
-
-        if (resolvedModel.size === null) {
-          Alert.alert(
-            t('models.unknownSizeWarningTitle'),
-            t('models.unknownSizeWarningMessage'),
-            [
-              { text: t('common.cancel'), style: 'cancel' },
-              {
-                text: t('models.downloadWithLimitedVerification'),
-                onPress: () => {
-                  startDownload({
-                    ...resolvedModel,
-                    allowUnknownSizeDownload: true,
-                  });
-                },
-              },
-            ],
-          );
-          return;
-        }
-
-        startDownload(resolvedModel);
-      } catch (error) {
+    startModelDownloadFlow({
+      model,
+      t,
+      fitsInRam,
+      startDownload,
+      openTokenSettings,
+      openModelPage,
+      onError: (error) => {
         showModelActionError('ModelsList.handleDownload', error);
-      }
-    };
-
-    const status = hardwareListenerService.getCurrentStatus();
-    if (status.networkType === 'cellular') {
-      Alert.alert(
-        t('models.cellularWarningTitle'),
-        t('models.cellularWarningMessage'),
-        [
-          { text: t('common.cancel'), style: 'cancel' },
-          { text: t('models.downloadAnyway'), onPress: () => { void startPreparedDownload(); } },
-        ],
-      );
-      return;
-    }
-
-    void startPreparedDownload();
-  }, [openModelPage, openTokenSettings, showModelActionError, startDownload, t]);
+      },
+    });
+  }, [fitsInRam, openModelPage, openTokenSettings, showModelActionError, startDownload, t]);
 
   const performLoad = useCallback(async (modelId: string) => {
     try {
@@ -651,25 +598,20 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
 
   const handleLoad = useCallback(async (modelId: string) => {
     const model = models.find((item) => item.id === modelId);
-    if (model && model.fitsInRam === false) {
-      Alert.alert(
-        t('models.memoryWarningTitle'),
-        t('models.memoryWarningMessage'),
-        [
-          { text: t('common.cancel'), style: 'cancel' },
-          {
-            text: t('models.loadAnyway'),
-            onPress: async () => {
-              await performLoad(modelId);
-            },
-          },
-        ],
-      );
-      return;
+    if (model && typeof model.size === 'number' && Number.isFinite(model.size) && model.size > 0) {
+      const liveFitsInRam = await fitsInRam(model.size);
+      if (!liveFitsInRam) {
+        Alert.alert(
+          t('models.memoryWarningTitle'),
+          t('common.errors.modelMemoryInsufficient'),
+          [{ text: t('common.close') }],
+        );
+        return;
+      }
     }
 
     await performLoad(modelId);
-  }, [models, performLoad, t]);
+  }, [fitsInRam, models, performLoad, t]);
 
   const handleUnload = useCallback(async () => {
     try {
@@ -793,6 +735,9 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
       }
 
       lastAutoLoadCursorRef.current = nextCursor;
+      // Prevent back-to-back auto loads caused by content reordering or list re-renders.
+      // Auto loading should require fresh user scroll input between pages.
+      hasUserScrolledCatalogRef.current = false;
     }
 
     void fetchModels(searchQuery, nextCursor, true);
@@ -908,6 +853,15 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
         </Box>
       ) : null}
 
+      {!shouldAutoLoadMore && hasMore && nextCursor ? (
+        <Text className="mb-2 text-xs text-typography-500 dark:text-typography-400">
+          {t(
+            'models.paginationLocalSortHint',
+            'This sort is applied on-device. Newly loaded models may appear earlier in the list.',
+          )}
+        </Text>
+      ) : null}
+
       {hasMore && nextCursor ? (
         <Button action="secondary" size="sm" onPress={() => handleLoadMore('manual')} disabled={isFetchingMore}>
           <ButtonText className="text-typography-900 dark:text-typography-100">
@@ -924,7 +878,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
         </Text>
       ) : null}
     </Box>
-  ) : null), [activeTab, filteredModels.length, handleLoadMore, hasMore, isFetchingMore, loadMoreError, nextCursor, t]);
+  ) : null), [activeTab, filteredModels.length, handleLoadMore, hasMore, isFetchingMore, loadMoreError, nextCursor, shouldAutoLoadMore, t]);
 
   const renderModelItem = useCallback<ListRenderItem<ModelMetadata>>(({ item }) => (
     <ModelCard

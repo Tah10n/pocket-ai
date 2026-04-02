@@ -5,7 +5,6 @@ import { useTranslation } from 'react-i18next';
 import { useLLMEngine } from '@/hooks/useLLMEngine';
 import { useModelParametersSheetController } from '@/hooks/useModelParametersSheetController';
 import { useModelDownload } from '@/hooks/useModelDownload';
-import { hardwareListenerService } from '@/services/HardwareListenerService';
 import { registry } from '@/services/LocalStorageRegistry';
 import {
   getHuggingFaceModelUrl,
@@ -13,7 +12,7 @@ import {
   modelCatalogService,
 } from '@/services/ModelCatalogService';
 import { offloadModel } from '@/services/StorageManagerService';
-import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '@/types/models';
+import { LifecycleStatus, type ModelMetadata } from '@/types/models';
 import { getReportedErrorMessage } from '../services/AppError';
 import {
   buildModelDetailsHeroMetrics,
@@ -21,6 +20,7 @@ import {
   createModelDetailsPlaceholder,
   getModelDetailsAccessBadge,
 } from '../utils/modelDetailsPresentation';
+import { startModelDownloadFlow } from '../utils/modelDownloadFlow';
 import { mergeModelWithRuntimeState } from '../utils/modelRuntimeState';
 
 export function useModelDetailsController(modelId: string) {
@@ -37,7 +37,7 @@ export function useModelDetailsController(modelId: string) {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [runtimeRevision, setRuntimeRevision] = useState(0);
   const { startDownload, cancelDownload, queue } = useModelDownload();
-  const { loadModel, unloadModel, state: engineState } = useLLMEngine();
+  const { loadModel, unloadModel, fitsInRam, state: engineState } = useLLMEngine();
 
   useEffect(() => {
     let cancelled = false;
@@ -165,82 +165,21 @@ export function useModelDetailsController(modelId: string) {
   }, [router]);
 
   const handleDownload = useCallback((targetModel: ModelMetadata) => {
-    const startPreparedDownload = async () => {
-      try {
-        if (targetModel.accessState === ModelAccessState.AUTH_REQUIRED) {
-          handleOpenTokenSettings();
-          return;
-        }
-
-        if (targetModel.accessState === ModelAccessState.ACCESS_DENIED) {
-          await handleOpenModelPage(targetModel.id);
-          return;
-        }
-
-        const resolvedModel = targetModel.size === null
-          || targetModel.requiresTreeProbe === true
-          || (targetModel.isGated || targetModel.isPrivate)
-          ? await modelCatalogService.refreshModelMetadata(targetModel, { includeDetails: false })
-          : targetModel;
-
+    startModelDownloadFlow({
+      model: targetModel,
+      t,
+      fitsInRam,
+      startDownload,
+      openTokenSettings: handleOpenTokenSettings,
+      openModelPage: handleOpenModelPage,
+      onResolvedModel: (resolvedModel) => {
         setModel((current) => (current ? { ...current, ...resolvedModel } : resolvedModel));
-
-        if (resolvedModel.accessState === ModelAccessState.AUTH_REQUIRED) {
-          handleOpenTokenSettings();
-          return;
-        }
-
-        if (resolvedModel.accessState === ModelAccessState.ACCESS_DENIED) {
-          await handleOpenModelPage(resolvedModel.id);
-          return;
-        }
-
-        if (!resolvedModel.resolvedFileName) {
-          Alert.alert(t('models.actionFailedTitle'), t('common.errors.downloadMetadataUnavailable'));
-          return;
-        }
-
-        if (resolvedModel.size === null) {
-          Alert.alert(
-            t('models.unknownSizeWarningTitle'),
-            t('models.unknownSizeWarningMessage'),
-            [
-              { text: t('common.cancel'), style: 'cancel' },
-              {
-                text: t('models.downloadWithLimitedVerification'),
-                onPress: () => {
-                  startDownload({
-                    ...resolvedModel,
-                    allowUnknownSizeDownload: true,
-                  });
-                },
-              },
-            ],
-          );
-          return;
-        }
-
-        startDownload(resolvedModel);
-      } catch (error) {
+      },
+      onError: (error) => {
         showModelActionError('ModelDetailsScreen.handleDownload', error);
-      }
-    };
-
-    const status = hardwareListenerService.getCurrentStatus();
-    if (status.networkType === 'cellular') {
-      Alert.alert(
-        t('models.cellularWarningTitle'),
-        t('models.cellularWarningMessage'),
-        [
-          { text: t('common.cancel'), style: 'cancel' },
-          { text: t('models.downloadAnyway'), onPress: () => { void startPreparedDownload(); } },
-        ],
-      );
-      return;
-    }
-
-    void startPreparedDownload();
-  }, [handleOpenModelPage, handleOpenTokenSettings, showModelActionError, startDownload, t]);
+      },
+    });
+  }, [fitsInRam, handleOpenModelPage, handleOpenTokenSettings, showModelActionError, startDownload, t]);
 
   const performLoad = useCallback(async (targetModelId: string) => {
     try {
@@ -256,25 +195,20 @@ export function useModelDetailsController(modelId: string) {
       return;
     }
 
-    if (displayModel.fitsInRam === false) {
-      Alert.alert(
-        t('models.memoryWarningTitle'),
-        t('models.memoryWarningMessage'),
-        [
-          { text: t('common.cancel'), style: 'cancel' },
-          {
-            text: t('models.loadAnyway'),
-            onPress: async () => {
-              await performLoad(displayModel.id);
-            },
-          },
-        ],
-      );
-      return;
+    if (typeof displayModel.size === 'number' && Number.isFinite(displayModel.size) && displayModel.size > 0) {
+      const liveFitsInRam = await fitsInRam(displayModel.size);
+      if (!liveFitsInRam) {
+        Alert.alert(
+          t('models.memoryWarningTitle'),
+          t('common.errors.modelMemoryInsufficient'),
+          [{ text: t('common.close') }],
+        );
+        return;
+      }
     }
 
     await performLoad(displayModel.id);
-  }, [displayModel, performLoad, t]);
+  }, [displayModel, fitsInRam, performLoad, t]);
 
   const handleUnload = useCallback(async () => {
     try {

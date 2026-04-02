@@ -3,6 +3,7 @@ import { LifecycleStatus, ModelAccessState, ModelMetadata } from '../../src/type
 import { normalizePersistedModelMetadata } from '../../src/services/ModelMetadataNormalizer';
 import * as FileSystem from 'expo-file-system/legacy';
 import DeviceInfo from 'react-native-device-info';
+import { getSystemMemorySnapshot } from '../../src/services/SystemMetricsService';
 
 const mockStorage = {
   getString: jest.fn(),
@@ -23,6 +24,10 @@ jest.mock('../../src/services/storage', () => ({
 
 jest.mock('react-native-device-info', () => ({
   getTotalMemory: jest.fn(),
+}));
+
+jest.mock('../../src/services/SystemMetricsService', () => ({
+  getSystemMemorySnapshot: jest.fn().mockResolvedValue(null),
 }));
 
 const originalGetModels = registry.getModels.bind(registry);
@@ -54,9 +59,20 @@ function createMockModel(overrides: Partial<ModelMetadata> = {}): ModelMetadata 
 }
 
 describe('LocalStorageRegistry', () => {
+  let consoleWarnSpy: jest.SpyInstance;
+
+  beforeAll(() => {
+    consoleWarnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+  });
+
+  afterAll(() => {
+    consoleWarnSpy.mockRestore();
+  });
+
   beforeEach(() => {
     jest.clearAllMocks();
     (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(8 * 1024 * 1024 * 1024);
+    (getSystemMemorySnapshot as jest.Mock).mockResolvedValue(null);
     (registry as any).getModels = originalGetModels;
     (registry as any).getModel = originalGetModel;
     (registry as any).saveModels = originalSaveModels;
@@ -130,6 +146,29 @@ describe('LocalStorageRegistry', () => {
 
     const updatedModels = (registry.saveModels as jest.Mock).mock.calls[0][0];
     expect(updatedModels[0].size).toBe(2048);
+    expect(updatedModels[0].fitsInRam).toBe(false);
+  });
+
+  it('uses the conservative live memory snapshot when recomputing fitsInRam', async () => {
+    (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(8 * 1024 * 1024 * 1024);
+    (getSystemMemorySnapshot as jest.Mock).mockResolvedValue({
+      totalBytes: 8 * 1024 * 1024 * 1024,
+      availableBytes: 2_500_000_000,
+      freeBytes: 1_500_000_000,
+      usedBytes: 0,
+      appUsedBytes: 0,
+      lowMemory: false,
+      thresholdBytes: 250_000_000,
+    });
+    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([
+      createMockModel({ size: 1_700_000_000, fitsInRam: true }),
+    ]);
+    (registry.saveModels as jest.Mock) = jest.fn();
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: true, size: 1_700_000_000 });
+
+    await registry.validateRegistry();
+
+    const updatedModels = (registry.saveModels as jest.Mock).mock.calls[0][0];
     expect(updatedModels[0].fitsInRam).toBe(false);
   });
 

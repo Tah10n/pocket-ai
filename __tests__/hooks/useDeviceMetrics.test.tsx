@@ -46,7 +46,8 @@ describe('useDeviceMetrics', () => {
     (getSystemMemorySnapshot as jest.Mock).mockResolvedValue({
       totalBytes: 12 * GB,
       availableBytes: 4 * GB,
-      usedBytes: 8 * GB,
+      freeBytes: 3 * GB,
+      usedBytes: 9 * GB,
       appUsedBytes: 3 * GB,
       appResidentBytes: 5 * GB,
       appPssBytes: 3 * GB,
@@ -57,18 +58,19 @@ describe('useDeviceMetrics', () => {
     const getMetrics = renderHookHarness();
 
     await waitFor(() => {
-    expect(getMetrics()?.metrics?.ram.source).toBe('system');
-  });
+      expect(getMetrics()?.metrics?.ram.source).toBe('system');
+    });
 
-  expect(getMetrics()?.metrics?.ram.totalGB).toBeCloseTo(12);
-  expect(getMetrics()?.metrics?.ram.usedGB).toBeCloseTo(8);
-    expect(getMetrics()?.metrics?.ram.freeGB).toBeCloseTo(4);
+    expect(getMetrics()?.metrics?.ram.totalGB).toBeCloseTo(12);
+    expect(getMetrics()?.metrics?.ram.usedGB).toBeCloseTo(9);
+    expect(getMetrics()?.metrics?.ram.freeGB).toBeCloseTo(3);
     expect(getMetrics()?.metrics?.ram.appUsedGB).toBeCloseTo(5);
     expect(getMetrics()?.metrics?.ram.totalBytes).toBe(12 * GB);
-    expect(getMetrics()?.metrics?.ram.usedBytes).toBe(8 * GB);
+    expect(getMetrics()?.metrics?.ram.usedBytes).toBe(9 * GB);
     expect(getMetrics()?.metrics?.ram.availableBytes).toBe(4 * GB);
+    expect(getMetrics()?.metrics?.ram.freeBytes).toBe(3 * GB);
     expect(getMetrics()?.metrics?.ram.appUsedBytes).toBe(5 * GB);
-    expect(getMetrics()?.metrics?.ram.usedPercentage).toBeCloseTo((8 / 12) * 100);
+    expect(getMetrics()?.metrics?.ram.usedPercentage).toBeCloseTo((9 / 12) * 100);
   });
 
   it('falls back to process memory when the Android system snapshot is unavailable', async () => {
@@ -76,24 +78,25 @@ describe('useDeviceMetrics', () => {
 
     const getMetrics = renderHookHarness();
 
-  await waitFor(() => {
-    expect(getMetrics()?.metrics?.ram.source).toBe('process');
-  });
+    await waitFor(() => {
+      expect(getMetrics()?.metrics?.ram.source).toBe('process');
+    });
 
-  expect(getMetrics()?.metrics?.ram.totalGB).toBeCloseTo(8);
-  expect(getMetrics()?.metrics?.ram.usedGB).toBeNull();
-  expect(getMetrics()?.metrics?.ram.freeGB).toBeNull();
-  expect(getMetrics()?.metrics?.ram.appUsedGB).toBeCloseTo(5);
-  expect(getMetrics()?.metrics?.ram.totalBytes).toBe(8 * GB);
-  expect(getMetrics()?.metrics?.ram.usedBytes).toBeNull();
-  expect(getMetrics()?.metrics?.ram.availableBytes).toBeNull();
-  expect(getMetrics()?.metrics?.ram.appUsedBytes).toBe(5 * GB);
-  expect(getMetrics()?.metrics?.ram.usedPercentage).toBeNull();
-  expect(getMetrics()?.metrics?.storage.usedGB).toBeCloseTo(75);
-  expect(getMetrics()?.metrics?.storage.totalBytes).toBe(100 * GB);
-  expect(getMetrics()?.metrics?.storage.usedBytes).toBe(75 * GB);
-  expect(getMetrics()?.metrics?.storage.freeBytes).toBe(25 * GB);
-});
+    expect(getMetrics()?.metrics?.ram.totalGB).toBeCloseTo(8);
+    expect(getMetrics()?.metrics?.ram.usedGB).toBeNull();
+    expect(getMetrics()?.metrics?.ram.freeGB).toBeNull();
+    expect(getMetrics()?.metrics?.ram.appUsedGB).toBeCloseTo(5);
+    expect(getMetrics()?.metrics?.ram.totalBytes).toBe(8 * GB);
+    expect(getMetrics()?.metrics?.ram.usedBytes).toBeNull();
+    expect(getMetrics()?.metrics?.ram.availableBytes).toBeNull();
+    expect(getMetrics()?.metrics?.ram.freeBytes).toBeNull();
+    expect(getMetrics()?.metrics?.ram.appUsedBytes).toBe(5 * GB);
+    expect(getMetrics()?.metrics?.ram.usedPercentage).toBeNull();
+    expect(getMetrics()?.metrics?.storage.usedGB).toBeCloseTo(75);
+    expect(getMetrics()?.metrics?.storage.totalBytes).toBe(100 * GB);
+    expect(getMetrics()?.metrics?.storage.usedBytes).toBe(75 * GB);
+    expect(getMetrics()?.metrics?.storage.freeBytes).toBe(25 * GB);
+  });
 
   it('downgrades motion when reduced motion is enabled at runtime', async () => {
     let currentValue: ReturnType<typeof useMotionPreferences> | null = null;

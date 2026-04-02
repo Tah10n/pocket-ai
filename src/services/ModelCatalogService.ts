@@ -5,11 +5,13 @@ import { registry } from './LocalStorageRegistry';
 import { huggingFaceTokenService } from './HuggingFaceTokenService';
 import { normalizePersistedModelMetadata } from './ModelMetadataNormalizer';
 import { performanceMonitor } from './PerformanceMonitor';
+import { getSystemMemorySnapshot, type SystemMemorySnapshot } from './SystemMetricsService';
 import {
   ModelCatalogCacheStore,
   type CatalogCacheAuthScope,
   type CatalogCacheScope,
 } from './ModelCatalogCacheStore';
+import { DEFAULT_TOTAL_MEMORY_BYTES, assessModelMemoryFit } from '../utils/memoryFit';
 import {
   buildHuggingFaceModelApiUrl,
   buildHuggingFaceRawUrl,
@@ -24,6 +26,7 @@ type HuggingFaceModelSummary = {
   modelId?: string;
   author?: string;
   sha?: string;
+  lastModified?: string;
   siblings?: HuggingFaceSibling[];
   config?: HuggingFaceModelConfig;
   gated?: boolean | string;
@@ -154,7 +157,7 @@ type CreateTreeProbeCandidateOptions = {
   allowPublic?: boolean;
 };
 
-export type CatalogServerSort = 'downloads' | 'likes';
+export type CatalogServerSort = 'downloads' | 'likes' | 'lastModified';
 export type ModelCatalogErrorCode = 'rate_limited' | 'timeout' | 'network' | 'unknown';
 export type ModelCatalogCacheInvalidationSource = 'replay' | 'manual' | 'token' | 'unknown';
 
@@ -166,6 +169,8 @@ const PERSISTENT_CACHE_MAX_AGE = 24 * 60 * 60 * 1000; // 24 hours
 const ACCESS_PROBE_CACHE_TTL = 2 * 60 * 1000; // 2 minutes
 const README_SUMMARY_MAX_LENGTH = 320;
 const HF_REQUEST_TIMEOUT_MS = 20_000;
+const DEFAULT_RATE_LIMIT_BACKOFF_MS = 60_000;
+const MAX_RATE_LIMIT_BACKOFF_MS = 15 * 60 * 1000;
 const SEARCH_CACHE_MAX_ENTRIES = 120;
 const BUFFERED_SEARCH_CACHE_MAX_AGE = 20 * 60 * 1000; // 20 minutes
 const MODEL_SNAPSHOT_CACHE_MAX_ENTRIES = 2000;
@@ -206,12 +211,18 @@ const EXCLUDED_CATALOG_SIGNAL_FRAGMENTS = [
 export const HUGGING_FACE_TOKEN_SETTINGS_URL = `${HF_BASE_URL}/settings/tokens`;
 export { getHuggingFaceModelUrl };
 
+type ModelCatalogErrorOptions = {
+  retryAfterMs?: number;
+};
+
 export class ModelCatalogError extends Error {
   public readonly code: ModelCatalogErrorCode;
+  public readonly retryAfterMs?: number;
 
-  constructor(code: ModelCatalogErrorCode, message: string) {
+  constructor(code: ModelCatalogErrorCode, message: string, options?: ModelCatalogErrorOptions) {
     super(message);
     this.code = code;
+    this.retryAfterMs = options?.retryAfterMs;
     this.name = 'ModelCatalogError';
   }
 }
@@ -226,6 +237,17 @@ class StaleCatalogAuthError extends Error {
 export function getModelCatalogErrorMessage(error: unknown): string {
   if (error instanceof ModelCatalogError) {
     if (error.code === 'rate_limited') {
+      const retryAfterMs = error.retryAfterMs;
+      if (typeof retryAfterMs === 'number' && Number.isFinite(retryAfterMs) && retryAfterMs > 0) {
+        const retryAfterSeconds = Math.max(1, Math.ceil(retryAfterMs / 1000));
+        if (retryAfterSeconds < 60) {
+          return `Hugging Face rate limit reached. Try again in ~${retryAfterSeconds}s.`;
+        }
+
+        const retryAfterMinutes = Math.ceil(retryAfterSeconds / 60);
+        return `Hugging Face rate limit reached. Try again in ~${retryAfterMinutes}m.`;
+      }
+
       return 'Hugging Face rate limit reached. Please wait a moment and try again.';
     }
 
@@ -252,18 +274,25 @@ type RefreshModelMetadataOptions = {
   includeDetails?: boolean;
 };
 
+type CatalogMemoryFitContext = {
+  totalMemoryBytes: number;
+  systemMemorySnapshot: SystemMemorySnapshot | null;
+};
+
 export class ModelCatalogService {
   private searchCache: Map<string, CatalogCacheEntry> = new Map();
   private modelSnapshotCache: Map<string, ModelMetadata> = new Map();
   private persistentCache = new ModelCatalogCacheStore();
   private authCacheVersion = 0;
   private bufferedCursorSequence = 0;
+  private rateLimitUntilByAuthScope: Record<CatalogCacheAuthScope, number> = { anon: 0, auth: 0 };
   private cacheInvalidationRevision = 0;
   private cacheInvalidationListeners: Set<CacheInvalidationListener> = new Set();
   private treeRequestCache: Map<string, Promise<HuggingFaceTreeResponse>> = new Map();
   private readmeRequestCache: Map<string, Promise<ReadmeModelData | undefined>> = new Map();
   private resolvedFileProbeCache: Map<string, Promise<ModelAccessState | null>> = new Map();
   private resolvedFileProbeStateCache: Map<string, ResolvedFileProbeCacheEntry> = new Map();
+  private lastMemoryFitContext: CatalogMemoryFitContext | null = null;
   private readonly unsubscribeFromTokenService: () => void;
 
   constructor() {
@@ -297,6 +326,7 @@ export class ModelCatalogService {
     this.bufferedCursorSequence = 0;
     this.searchCache.clear();
     this.modelSnapshotCache.clear();
+    this.rateLimitUntilByAuthScope = { anon: 0, auth: 0 };
     this.treeRequestCache.clear();
     this.readmeRequestCache.clear();
     this.resolvedFileProbeCache.clear();
@@ -416,6 +446,7 @@ export class ModelCatalogService {
     retryCount: number,
   ): Promise<ModelCatalogSearchResult> {
     const requestContext = await this.createRequestContext();
+    const memoryFitContextPromise = this.getCurrentMemoryFitContext();
     const cursor = options?.cursor ?? null;
     const pageSize = options?.pageSize ?? 20;
     const sort = options?.sort ?? null;
@@ -439,9 +470,14 @@ export class ModelCatalogService {
 
     if (!forceRefresh && cached && (isCacheFresh || isBufferedCursor)) {
       const filteredCachedModels = this.filterCatalogSearchModels(cached.result.models);
+      const memoryFitContext = await memoryFitContextPromise;
       return {
         ...cached.result,
-        models: this.mergeWithRegistry(filteredCachedModels, this.getAuthScope(hasAuthToken)),
+        models: this.mergeWithRegistry(
+          filteredCachedModels,
+          this.getAuthScope(hasAuthToken),
+          memoryFitContext,
+        ),
       };
     }
 
@@ -457,22 +493,59 @@ export class ModelCatalogService {
         throw new ModelCatalogError('network', 'Cannot load more models while offline');
       }
 
-      const cachedSearch = this.getCachedSearchResultForScope(query, options, hasAuthToken);
+      const memoryFitContext = await memoryFitContextPromise;
+      const cachedSearch = this.getCachedSearchResultForScope(
+        query,
+        options,
+        hasAuthToken,
+        memoryFitContext,
+      );
       if (cachedSearch) {
         console.log('[ModelCatalogService] Offline mode: using persisted catalog cache');
         return this.toNonPaginatedFallback(cachedSearch);
       }
 
       console.log('[ModelCatalogService] Offline mode: fetching from local registry');
-      return this.getLocalSearchResults(query);
+      return this.getLocalSearchResults(query, memoryFitContext);
+    }
+
+    const authScope = this.getAuthScope(hasAuthToken);
+    const now = Date.now();
+    const rateLimitUntil = this.rateLimitUntilByAuthScope[authScope] ?? 0;
+
+    if (rateLimitUntil > now) {
+      const retryAfterMs = rateLimitUntil - now;
+      const rateLimitError = new ModelCatalogError(
+        'rate_limited',
+        'Hugging Face rate limit reached.',
+        { retryAfterMs },
+      );
+
+      if (cursor === null) {
+        const memoryFitContext = await memoryFitContextPromise;
+        const fallback = this.getCachedSearchResultForScope(
+          query,
+          options,
+          hasAuthToken,
+          memoryFitContext,
+        );
+        return {
+          ...(fallback
+            ? this.toNonPaginatedFallback(fallback)
+            : this.getLocalSearchResults(query, memoryFitContext)),
+          warning: rateLimitError,
+        };
+      }
+
+      throw rateLimitError;
     }
 
     try {
-      const totalMemory = await this.getTotalMemory();
+      const memoryFitContext = await memoryFitContextPromise;
       const fetched = await this.fetchCatalogBatch(
         normalizedQuery,
         pageSize,
-        totalMemory,
+        memoryFitContext,
         requestContext,
         cursor,
         sort,
@@ -500,7 +573,7 @@ export class ModelCatalogService {
 
       return {
         ...result,
-        models: this.mergeWithRegistry(result.models, this.getAuthScope(hasAuthToken)),
+        models: this.mergeWithRegistry(result.models, this.getAuthScope(hasAuthToken), memoryFitContext),
       };
     } catch (e) {
       if (e instanceof StaleCatalogAuthError) {
@@ -511,13 +584,25 @@ export class ModelCatalogService {
         throw new ModelCatalogError('network', 'Catalog auth context changed during request');
       }
 
-      console.error('[ModelCatalogService] Search failed', e);
+      if (e instanceof ModelCatalogError && e.code === 'rate_limited') {
+        console.warn('[ModelCatalogService] Search rate limited', e);
+      } else {
+        console.error('[ModelCatalogService] Search failed', e);
+      }
 
       if (e instanceof ModelCatalogError) {
         if (cursor === null) {
-          const fallback = this.getCachedSearchResultForScope(query, options, hasAuthToken);
+          const memoryFitContext = await memoryFitContextPromise;
+          const fallback = this.getCachedSearchResultForScope(
+            query,
+            options,
+            hasAuthToken,
+            memoryFitContext,
+          );
           return {
-            ...(fallback ? this.toNonPaginatedFallback(fallback) : this.getLocalSearchResults(query)),
+            ...(fallback
+              ? this.toNonPaginatedFallback(fallback)
+              : this.getLocalSearchResults(query, memoryFitContext)),
             warning: e,
           };
         }
@@ -527,9 +612,17 @@ export class ModelCatalogService {
 
       const networkError = new ModelCatalogError('network', 'Model catalog request failed');
       if (cursor === null) {
-        const fallback = this.getCachedSearchResultForScope(query, options, hasAuthToken);
+        const memoryFitContext = await memoryFitContextPromise;
+        const fallback = this.getCachedSearchResultForScope(
+          query,
+          options,
+          hasAuthToken,
+          memoryFitContext,
+        );
         return {
-          ...(fallback ? this.toNonPaginatedFallback(fallback) : this.getLocalSearchResults(query)),
+          ...(fallback
+            ? this.toNonPaginatedFallback(fallback)
+            : this.getLocalSearchResults(query, memoryFitContext)),
           warning: networkError,
         };
       }
@@ -541,14 +634,15 @@ export class ModelCatalogService {
   public getCachedModel(modelId: string): ModelMetadata | null {
     const cachedSnapshot = this.getCachedModelSnapshot(modelId);
     if (cachedSnapshot) {
-      const merged = this.mergeModelWithRegistry(cachedSnapshot.model);
+      const merged = this.mergeModelWithRegistry(cachedSnapshot.model, this.getRememberedMemoryFitContext());
       if (merged) {
         this.cacheModelSnapshotsInMemory([merged], cachedSnapshot.authScope);
         return merged;
       }
     }
 
-    return registry.getModel(modelId) ?? null;
+    const localModel = registry.getModel(modelId);
+    return localModel ? this.withResolvedMemoryFit(localModel, this.getRememberedMemoryFitContext()) : null;
   }
 
   private getCachedModelSnapshot(
@@ -632,6 +726,7 @@ export class ModelCatalogService {
     query: string,
     options: { cursor?: string | null; pageSize?: number; sort?: CatalogServerSort | null } | undefined,
     hasToken: boolean,
+    memoryFitContext: CatalogMemoryFitContext | null = this.getRememberedMemoryFitContext(),
   ): Omit<ModelCatalogSearchResult, 'warning'> | null {
     const cursor = options?.cursor ?? null;
     if (cursor !== null) {
@@ -659,7 +754,7 @@ export class ModelCatalogService {
       const filteredMemoryModels = this.filterCatalogSearchModels(memoryEntry.result.models);
       return {
         ...memoryEntry.result,
-        models: this.mergeWithRegistry(filteredMemoryModels, this.getAuthScope(hasToken)),
+        models: this.mergeWithRegistry(filteredMemoryModels, this.getAuthScope(hasToken), memoryFitContext),
       };
     }
 
@@ -672,7 +767,11 @@ export class ModelCatalogService {
     }
 
     const filteredPersistedModels = this.filterCatalogSearchModels(persistentEntry.models);
-    const mergedModels = this.mergeWithRegistry(filteredPersistedModels, this.getAuthScope(hasToken));
+    const mergedModels = this.mergeWithRegistry(
+      filteredPersistedModels,
+      this.getAuthScope(hasToken),
+      memoryFitContext,
+    );
     return {
       ...persistentEntry,
       models: mergedModels,
@@ -702,7 +801,7 @@ export class ModelCatalogService {
 
   private async getModelDetailsInternal(modelId: string, retryCount: number): Promise<ModelMetadata> {
     const requestContext = await this.createRequestContext();
-    const totalMemory = await this.getTotalMemory();
+    const memoryFitContext = await this.getCurrentMemoryFitContext();
 
     try {
       const cachedModel = this.getCachedModel(modelId);
@@ -719,14 +818,14 @@ export class ModelCatalogService {
         const payloadMaxContextTokens = this.resolveSummaryMaxContextTokens(payload);
         detailedModel = this.buildModelMetadataFromPayload(
           payload,
-          totalMemory,
+          memoryFitContext,
           requestContext.authToken,
           fallbackModel,
           payloadMaxContextTokens,
         );
         const [resolvedModel] = await this.resolveMissingModelMetadata(
           [detailedModel],
-          totalMemory,
+          memoryFitContext,
           requestContext,
         );
         detailedModel = resolvedModel ?? detailedModel;
@@ -843,8 +942,8 @@ export class ModelCatalogService {
         return this.getModelDetailsInternal(model.id, retryCount);
       }
 
-      const totalMemory = await this.getTotalMemory();
-      const [resolved] = await this.resolveMissingModelMetadata([model], totalMemory, requestContext);
+      const memoryFitContext = await this.getCurrentMemoryFitContext();
+      const [resolved] = await this.resolveMissingModelMetadata([model], memoryFitContext, requestContext);
       this.assertRequestContextIsCurrent(requestContext);
       const refreshed = resolved ?? model;
       this.upsertModelSnapshots([refreshed], this.getAuthScope(requestContext.hasAuthToken));
@@ -859,6 +958,7 @@ export class ModelCatalogService {
   }
 
   public async getLocalModels(): Promise<ModelMetadata[]> {
+    await this.getCurrentMemoryFitContext();
     const localModels = registry.getModels().map((model) => (
       this.getCachedModel(model.id) ?? model
     ));
@@ -866,12 +966,15 @@ export class ModelCatalogService {
     return localModels;
   }
 
-  private getLocalSearchResults(query: string): ModelCatalogSearchResult {
+  private getLocalSearchResults(
+    query: string,
+    memoryFitContext: CatalogMemoryFitContext | null = this.getRememberedMemoryFitContext(),
+  ): ModelCatalogSearchResult {
     const filtered = registry.getModels().filter((model) =>
       model.name.toLowerCase().includes(query.toLowerCase()) ||
       model.id.toLowerCase().includes(query.toLowerCase()),
     );
-    const merged = filtered.map((model) => this.mergeModelWithRegistry(model) ?? model);
+    const merged = filtered.map((model) => this.mergeModelWithRegistry(model, memoryFitContext) ?? model);
     this.upsertModelSnapshots(merged, 'anon');
 
     return {
@@ -881,17 +984,76 @@ export class ModelCatalogService {
     };
   }
 
-  private async getTotalMemory(): Promise<number> {
+  private async getTotalMemory(): Promise<number | null> {
     try {
-      return await DeviceInfo.getTotalMemory();
+      const totalMemoryBytes = await DeviceInfo.getTotalMemory();
+      return typeof totalMemoryBytes === 'number' && Number.isFinite(totalMemoryBytes) && totalMemoryBytes > 0
+        ? totalMemoryBytes
+        : null;
     } catch {
-      return 8 * 1024 * 1024 * 1024; // Fallback 8GB
+      return null;
     }
+  }
+
+  private async getCurrentMemoryFitContext(): Promise<CatalogMemoryFitContext> {
+    const [deviceTotalMemoryBytes, systemMemorySnapshot] = await Promise.all([
+      this.getTotalMemory(),
+      getSystemMemorySnapshot().catch(() => null),
+    ]);
+    const snapshotTotalMemoryBytes = systemMemorySnapshot?.totalBytes;
+    const totalMemoryBytes = typeof snapshotTotalMemoryBytes === 'number'
+      && Number.isFinite(snapshotTotalMemoryBytes)
+      && snapshotTotalMemoryBytes > 0
+      ? snapshotTotalMemoryBytes
+      : deviceTotalMemoryBytes ?? DEFAULT_TOTAL_MEMORY_BYTES;
+    const memoryFitContext = {
+      totalMemoryBytes,
+      systemMemorySnapshot,
+    };
+    this.lastMemoryFitContext = memoryFitContext;
+    return memoryFitContext;
+  }
+
+  private getRememberedMemoryFitContext(): CatalogMemoryFitContext | null {
+    return this.lastMemoryFitContext;
+  }
+
+  private resolveFitsInRam(
+    size: number | null | undefined,
+    memoryFitContext: CatalogMemoryFitContext | null,
+    fallback: boolean | null = null,
+  ): boolean | null {
+    if (typeof size !== 'number' || !Number.isFinite(size) || size <= 0) {
+      return fallback;
+    }
+
+    if (!memoryFitContext) {
+      return fallback;
+    }
+
+    return assessModelMemoryFit({
+      modelSizeBytes: size,
+      totalMemoryBytes: memoryFitContext.totalMemoryBytes,
+      systemMemorySnapshot: memoryFitContext.systemMemorySnapshot,
+    })?.fitsInRam ?? fallback;
+  }
+
+  private withResolvedMemoryFit(
+    model: ModelMetadata,
+    memoryFitContext: CatalogMemoryFitContext | null = this.getRememberedMemoryFitContext(),
+  ): ModelMetadata {
+    const fitsInRam = this.resolveFitsInRam(model.size, memoryFitContext, model.fitsInRam);
+    return fitsInRam === model.fitsInRam
+      ? model
+      : normalizePersistedModelMetadata({
+        ...model,
+        fitsInRam,
+      });
   }
 
   private async resolveMissingModelMetadata(
     models: ModelMetadata[],
-    totalMemory: number,
+    memoryFitContext: CatalogMemoryFitContext,
     requestContext: CatalogRequestContext,
   ): Promise<ModelMetadata[]> {
     const batchSize = 5;
@@ -960,7 +1122,7 @@ export class ModelCatalogService {
 
         const resolvedFileName = this.getFileName(selectedEntry);
         const size = this.getFileSize(selectedEntry);
-        const fitsInRam = size === null ? null : size < totalMemory * 0.8;
+        const fitsInRam = this.resolveFitsInRam(size, memoryFitContext);
 
         if (model.requiresTreeProbe && !treeResponse.isComplete) {
           return normalizePersistedModelMetadata({
@@ -1020,7 +1182,7 @@ export class ModelCatalogService {
   private async fetchCatalogBatch(
     normalizedQuery: string,
     minimumResults: number,
-    totalMemory: number,
+    memoryFitContext: CatalogMemoryFitContext,
     requestContext: CatalogRequestContext,
     initialCursor: string | null,
     sort: CatalogServerSort | null,
@@ -1056,11 +1218,17 @@ export class ModelCatalogService {
           requestedCursor,
           sort,
         );
-        const baseModels = this.transformHFResponse(page.items, totalMemory, requestContext.authToken);
-        const hydratedModels = await this.resolveMissingModelMetadata(baseModels, totalMemory, requestContext);
+        const baseModels = this.transformHFResponse(page.items, memoryFitContext, requestContext.authToken);
+        const hydratedModels = await this.resolveMissingModelMetadata(
+          baseModels,
+          memoryFitContext,
+          requestContext,
+        );
         // Merge with the local registry so downloaded entries don't disappear just because the
         // remote payload omitted some metadata or a tree lookup failed.
-        const mergedHydratedModels = hydratedModels.map((model) => this.mergeModelWithRegistry(model) ?? model);
+        const mergedHydratedModels = hydratedModels.map((model) => (
+          this.mergeModelWithRegistry(model, memoryFitContext) ?? model
+        ));
         models = this.mergeUniqueModelsById([...models, ...mergedHydratedModels]);
         nextCursor = this.resolveNextCatalogCursor(requestedCursor, page.nextCursor, visitedCursors);
         exhausted = nextCursor === null;
@@ -1196,7 +1364,22 @@ export class ModelCatalogService {
 
       if (!response.ok) {
         if (response.status === 429) {
-          throw new ModelCatalogError('rate_limited', `HF Search rate limited: ${response.status}`);
+          const retryAfterMs = this.resolveRetryAfterMs(response) ?? DEFAULT_RATE_LIMIT_BACKOFF_MS;
+          const clampedRetryAfterMs = this.clampRetryAfterMs(retryAfterMs);
+          const authScope = this.getAuthScope(requestContext.hasAuthToken);
+          const now = Date.now();
+          const until = now + clampedRetryAfterMs;
+
+          this.rateLimitUntilByAuthScope[authScope] = Math.max(
+            this.rateLimitUntilByAuthScope[authScope] ?? 0,
+            until,
+          );
+
+          throw new ModelCatalogError(
+            'rate_limited',
+            `HF Search rate limited: ${response.status}`,
+            { retryAfterMs: this.rateLimitUntilByAuthScope[authScope] - now },
+          );
         }
 
         throw new ModelCatalogError('network', `HF Search failed: ${response.status}`);
@@ -1220,6 +1403,85 @@ export class ModelCatalogService {
     } finally {
       span.end({ outcome, status, items: itemsCount });
     }
+  }
+
+  private clampRetryAfterMs(value: number): number {
+    if (!Number.isFinite(value) || value <= 0) {
+      return DEFAULT_RATE_LIMIT_BACKOFF_MS;
+    }
+
+    return Math.min(
+      Math.max(1_000, Math.round(value)),
+      MAX_RATE_LIMIT_BACKOFF_MS,
+    );
+  }
+
+  private resolveRetryAfterMs(response: Response): number | null {
+    if (!response.headers || typeof response.headers.get !== 'function') {
+      return null;
+    }
+
+    const retryAfterHeader = response.headers.get('retry-after');
+    const retryAfterMs = this.parseRetryAfterMs(retryAfterHeader);
+    if (retryAfterMs !== null) {
+      return retryAfterMs;
+    }
+
+    const rateLimitResetHeader = response.headers.get('ratelimit-reset')
+      ?? response.headers.get('x-ratelimit-reset')
+      ?? response.headers.get('x-ratelimit-reset-requests');
+    return this.parseRateLimitResetMs(rateLimitResetHeader);
+  }
+
+  private parseRetryAfterMs(value: string | null): number | null {
+    if (!value) {
+      return null;
+    }
+
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return null;
+    }
+
+    const seconds = Number(trimmed);
+    if (Number.isFinite(seconds)) {
+      return seconds * 1000;
+    }
+
+    const dateMs = Date.parse(trimmed);
+    if (!Number.isNaN(dateMs)) {
+      return dateMs - Date.now();
+    }
+
+    return null;
+  }
+
+  private parseRateLimitResetMs(value: string | null): number | null {
+    if (!value) {
+      return null;
+    }
+
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return null;
+    }
+
+    const numericValue = Number(trimmed);
+    if (!Number.isFinite(numericValue) || numericValue < 0) {
+      return null;
+    }
+
+    // Heuristic: treat large values as epoch timestamps.
+    if (numericValue > 1e12) {
+      return numericValue - Date.now();
+    }
+
+    if (numericValue > 1e9) {
+      return numericValue * 1000 - Date.now();
+    }
+
+    // Otherwise assume seconds until reset.
+    return numericValue * 1000;
   }
 
   private hashForTrace(value: string): string {
@@ -1258,9 +1520,23 @@ export class ModelCatalogService {
     return trimmed.toLowerCase().includes('gguf') ? trimmed : `${trimmed} gguf`;
   }
 
+  private parseHuggingFaceLastModifiedAt(value: unknown): number | undefined {
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+      const ms = value > 1e12 ? value : value * 1000;
+      return Math.round(ms);
+    }
+
+    if (typeof value !== 'string') {
+      return undefined;
+    }
+
+    const parsed = Date.parse(value);
+    return Number.isNaN(parsed) ? undefined : Math.round(parsed);
+  }
+
   private transformHFResponse(
     data: HuggingFaceModelSummary[],
-    totalMemory: number,
+    memoryFitContext: CatalogMemoryFitContext,
     authToken: string | null,
   ): ModelMetadata[] {
     const results: ModelMetadata[] = [];
@@ -1273,7 +1549,7 @@ export class ModelCatalogService {
       }
 
       const hasSiblingMetadata = Array.isArray(item.siblings) && item.siblings.length > 0;
-      const probeCandidate = this.createTreeProbeCandidate(item, repoId, totalMemory, authToken, {
+      const probeCandidate = this.createTreeProbeCandidate(item, repoId, memoryFitContext, authToken, {
         allowPublic: !hasSiblingMetadata,
       });
       if (!hasSiblingMetadata) {
@@ -1294,9 +1570,10 @@ export class ModelCatalogService {
 
       const selectedEntrySize = this.getFileSize(ggufSibling);
       const size = selectedEntrySize ?? item.gguf?.total ?? null;
-      const fitsInRam = typeof size === 'number' ? size < totalMemory * 0.8 : null;
+      const fitsInRam = this.resolveFitsInRam(size, memoryFitContext);
       const fileName = this.getFileName(ggufSibling) || 'model.gguf';
       const hfRevision = item.sha ?? undefined;
+      const lastModifiedAt = this.parseHuggingFaceLastModifiedAt(item.lastModified);
       const requiresAuth = Boolean(item.gated) || item.private === true;
       const requiresTreeProbe = this.shouldRevalidateCatalogSummarySelection(ggufSibling);
       const accessState = this.resolveDetailAccessState(requiresAuth, authToken);
@@ -1309,6 +1586,7 @@ export class ModelCatalogService {
         downloadUrl: buildHuggingFaceResolveUrl(repoId, fileName, hfRevision),
         hfRevision,
         resolvedFileName: fileName,
+        lastModifiedAt,
         fitsInRam,
         accessState,
         isGated: Boolean(item.gated),
@@ -1328,7 +1606,7 @@ export class ModelCatalogService {
   private createTreeProbeCandidate(
     item: HuggingFaceModelSummary,
     repoId: string,
-    totalMemory: number,
+    memoryFitContext: CatalogMemoryFitContext,
     authToken: string | null,
     options?: CreateTreeProbeCandidateOptions,
   ): ModelMetadata | null {
@@ -1344,7 +1622,8 @@ export class ModelCatalogService {
     const size = typeof item.gguf?.total === 'number' && Number.isFinite(item.gguf.total) && item.gguf.total > 0
       ? Math.round(item.gguf.total)
       : null;
-    const fitsInRam = size === null ? null : size < totalMemory * 0.8;
+    const fitsInRam = this.resolveFitsInRam(size, memoryFitContext);
+    const lastModifiedAt = this.parseHuggingFaceLastModifiedAt(item.lastModified);
 
     return normalizePersistedModelMetadata({
       id: repoId,
@@ -1352,6 +1631,7 @@ export class ModelCatalogService {
       author: item.author || repoId.split('/')[0],
       size,
       downloadUrl: buildHuggingFaceResolveUrl(repoId, 'model.gguf', item.sha ?? undefined),
+      lastModifiedAt,
       fitsInRam,
       accessState: this.resolveDetailAccessState(requiresAuth, authToken),
       isGated: Boolean(item.gated),
@@ -1367,7 +1647,7 @@ export class ModelCatalogService {
 
   private buildModelMetadataFromPayload(
     payload: HuggingFaceModelSummary,
-    totalMemory: number,
+    memoryFitContext: CatalogMemoryFitContext,
     authToken: string | null,
     fallbackModel: ModelMetadata,
     payloadMaxContextTokens?: number,
@@ -1380,9 +1660,8 @@ export class ModelCatalogService {
       ? this.getFileName(selectedEntry)
       : fallbackModel.resolvedFileName;
     const size = selectedEntrySize ?? payload.gguf?.total ?? fallbackModel.size;
-    const fitsInRam = typeof size === 'number'
-      ? size < totalMemory * 0.8
-      : fallbackModel.fitsInRam;
+    const fitsInRam = this.resolveFitsInRam(size, memoryFitContext, fallbackModel.fitsInRam);
+    const lastModifiedAt = this.parseHuggingFaceLastModifiedAt(payload.lastModified) ?? fallbackModel.lastModifiedAt;
     const requiresAuth = Boolean(payload.gated) || payload.private === true;
     const requiresTreeProbe = selectedEntry
       ? selectedEntrySize === null
@@ -1399,6 +1678,7 @@ export class ModelCatalogService {
         : fallbackModel.downloadUrl,
       hfRevision,
       resolvedFileName,
+      lastModifiedAt,
       fitsInRam,
       accessState: this.resolveDetailAccessState(requiresAuth, authToken),
       isGated: Boolean(payload.gated),
@@ -1489,36 +1769,46 @@ export class ModelCatalogService {
   private mergeWithRegistry(
     remoteModels: ModelMetadata[],
     authScope: CatalogCacheAuthScope = 'anon',
+    memoryFitContext: CatalogMemoryFitContext | null = this.getRememberedMemoryFitContext(),
   ): ModelMetadata[] {
-    const merged = remoteModels.map((model) => this.mergeModelWithRegistry(model) ?? model);
+    const merged = remoteModels.map((model) => this.mergeModelWithRegistry(model, memoryFitContext) ?? model);
     this.upsertModelSnapshots(merged, authScope);
     return merged;
   }
 
-  private mergeModelWithRegistry(remoteModel?: ModelMetadata): ModelMetadata | undefined {
+  private mergeModelWithRegistry(
+    remoteModel?: ModelMetadata,
+    memoryFitContext: CatalogMemoryFitContext | null = this.getRememberedMemoryFitContext(),
+  ): ModelMetadata | undefined {
     if (!remoteModel) {
       return undefined;
     }
 
     const localModel = registry.getModel(remoteModel.id);
     if (!localModel) {
-      return remoteModel;
+      return this.withResolvedMemoryFit(remoteModel, memoryFitContext);
     }
 
     const {
       maxContextTokens,
       hasVerifiedContextWindow,
     } = this.resolveMergedContextWindowMetadata(remoteModel, localModel);
+    const resolvedSize = remoteModel.size ?? localModel.size;
 
     return normalizePersistedModelMetadata({
       ...remoteModel,
-      size: remoteModel.size ?? localModel.size,
+      size: resolvedSize,
       hfRevision: remoteModel.hfRevision ?? localModel.hfRevision,
       resolvedFileName: remoteModel.resolvedFileName ?? localModel.resolvedFileName,
       localPath: localModel.localPath,
       downloadedAt: localModel.downloadedAt,
+      lastModifiedAt: remoteModel.lastModifiedAt ?? localModel.lastModifiedAt,
       sha256: remoteModel.sha256 ?? localModel.sha256,
-      fitsInRam: remoteModel.fitsInRam ?? localModel.fitsInRam,
+      fitsInRam: this.resolveFitsInRam(
+        resolvedSize,
+        memoryFitContext,
+        remoteModel.fitsInRam ?? localModel.fitsInRam,
+      ),
       accessState: remoteModel.accessState,
       isGated: remoteModel.isGated,
       isPrivate: remoteModel.isPrivate,

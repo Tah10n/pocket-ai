@@ -14,8 +14,8 @@ interface ModelsSortProps {
 const SORT_OPTIONS: { labelKey: string; field: ModelSortField }[] = [
   { labelKey: 'models.sortMostDownloaded', field: 'downloads' },
   { labelKey: 'models.sortMostPopular', field: 'likes' },
+  { labelKey: 'models.sortLastModified', field: 'lastModified' },
   { labelKey: 'models.sortName', field: 'name' },
-  { labelKey: 'models.sortSize', field: 'size' },
   { labelKey: 'models.sortDownloadedFirst', field: 'downloaded' },
 ];
 
@@ -35,6 +35,7 @@ export const ModelsSort = ({ sort, onSortChange }: ModelsSortProps) => {
               option.field !== 'downloaded'
               && option.field !== 'downloads'
               && option.field !== 'likes'
+              && option.field !== 'lastModified'
               && isActive;
 
             return (
@@ -47,6 +48,7 @@ export const ModelsSort = ({ sort, onSortChange }: ModelsSortProps) => {
                       option.field === 'downloaded'
                       || option.field === 'downloads'
                       || option.field === 'likes'
+                      || option.field === 'lastModified'
                         ? 'desc'
                         : isActive && sort.direction === 'asc'
                           ? 'desc'

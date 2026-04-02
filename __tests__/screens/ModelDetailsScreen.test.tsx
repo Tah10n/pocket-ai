@@ -1,6 +1,6 @@
 import React from 'react';
 import { act, fireEvent, render } from '@testing-library/react-native';
-import { Linking } from 'react-native';
+import { Alert, Linking } from 'react-native';
 import { ModelDetailsScreen } from '../../src/ui/screens/ModelDetailsScreen';
 import { EngineStatus, LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../src/types/models';
 
@@ -16,6 +16,7 @@ const mockStartDownload = jest.fn();
 const mockCancelDownload = jest.fn();
 const mockLoadModel = jest.fn();
 const mockUnloadModel = jest.fn();
+const mockFitsInRam = jest.fn();
 const mockRegistryGetModel = jest.fn();
 const mockOffloadModel = jest.fn();
 const mockGetRecommendedGpuLayers = jest.fn();
@@ -220,6 +221,7 @@ jest.mock('../../src/hooks/useLLMEngine', () => ({
     state: mockEngineState,
     loadModel: mockLoadModel,
     unloadModel: mockUnloadModel,
+    fitsInRam: mockFitsInRam,
     isReady: mockEngineState.status === 'ready',
     isInitializing: mockEngineState.status === 'initializing',
   }),
@@ -291,9 +293,11 @@ jest.mock('react-native-device-info', () => ({
 
 describe('ModelDetailsScreen', () => {
   let openUrlSpy: jest.SpiedFunction<typeof Linking.openURL>;
+  let alertSpy: jest.SpiedFunction<typeof Alert.alert>;
 
   beforeEach(() => {
     jest.clearAllMocks();
+    mockFitsInRam.mockResolvedValue(true);
     mockQueue.length = 0;
     mockEngineState.status = EngineStatus.IDLE;
     mockEngineState.activeModelId = undefined;
@@ -312,10 +316,12 @@ describe('ModelDetailsScreen', () => {
     modelCatalogService.refreshModelMetadata.mockResolvedValue(createModel());
 
     openUrlSpy = jest.spyOn(Linking, 'openURL').mockResolvedValue(undefined as never);
+    alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(jest.fn());
   });
 
   afterEach(() => {
     openUrlSpy.mockRestore();
+    alertSpy.mockRestore();
   });
 
   it('opens the Hugging Face model page from the details flow', async () => {
@@ -382,11 +388,51 @@ describe('ModelDetailsScreen', () => {
       await Promise.resolve();
     });
 
-    fireEvent.press(screen.getByText('models.download'));
+    await act(async () => {
+      fireEvent.press(screen.getByText('models.download'));
+      await Promise.resolve();
+    });
 
     expect(mockStartDownload).toHaveBeenCalledWith(expect.objectContaining({
       id: 'org/model',
       lifecycleStatus: LifecycleStatus.AVAILABLE,
+    }));
+  });
+
+  it('warns before downloading a model that does not fit in current memory', async () => {
+    const { modelCatalogService } = jest.requireMock('../../src/services/ModelCatalogService');
+    modelCatalogService.getCachedModel.mockReturnValue(createModel({ fitsInRam: false }));
+    modelCatalogService.getModelDetails.mockResolvedValue(createModel({ fitsInRam: false }));
+
+    const screen = render(<ModelDetailsScreen />);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      fireEvent.press(screen.getByText('models.download'));
+      await Promise.resolve();
+    });
+
+    expect(alertSpy).toHaveBeenCalledWith(
+      'models.memoryWarningTitle',
+      'models.downloadMemoryWarningMessage',
+      expect.arrayContaining([
+        expect.objectContaining({ text: 'common.cancel', style: 'cancel' }),
+        expect.objectContaining({ text: 'models.downloadAnyway', onPress: expect.any(Function) }),
+      ]),
+    );
+    expect(mockStartDownload).not.toHaveBeenCalled();
+
+    const buttons = alertSpy.mock.calls[0]?.[2] as Array<{ onPress?: () => void }>;
+    await act(async () => {
+      buttons[1]?.onPress?.();
+      await Promise.resolve();
+    });
+
+    expect(mockStartDownload).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'org/model',
     }));
   });
 

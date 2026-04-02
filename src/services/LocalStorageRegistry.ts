@@ -4,10 +4,10 @@ import { createStorage } from './storage';
 import { ModelMetadata, LifecycleStatus } from '../types/models';
 import { getModelsDir } from './FileSystemSetup';
 import { normalizePersistedModelMetadata } from './ModelMetadataNormalizer';
+import { getSystemMemorySnapshot } from './SystemMetricsService';
+import { assessModelMemoryFit, DEFAULT_TOTAL_MEMORY_BYTES } from '../utils/memoryFit';
 
 const REGISTRY_KEY = 'models-registry';
-const FITS_IN_RAM_HEADROOM_RATIO = 0.8;
-const DEFAULT_TOTAL_MEMORY_BYTES = 8 * 1024 * 1024 * 1024;
 
 function cloneModelMetadata(model: ModelMetadata): ModelMetadata {
   return {
@@ -102,6 +102,7 @@ export class LocalStorageRegistry {
     const models = this.getModels();
     const modelsDir = getModelsDir();
     const totalMemory = await this.getTotalMemory();
+    const systemMemorySnapshot = await getSystemMemorySnapshot().catch(() => null);
     let changed = false;
 
     if (!modelsDir) {
@@ -156,7 +157,11 @@ export class LocalStorageRegistry {
           }
 
           if (resolvedSize !== null) {
-            const fitsInRam = resolvedSize < totalMemory * FITS_IN_RAM_HEADROOM_RATIO;
+            const fitsInRam = assessModelMemoryFit({
+              modelSizeBytes: resolvedSize,
+              totalMemoryBytes: systemMemorySnapshot?.totalBytes ?? totalMemory,
+              systemMemorySnapshot,
+            })?.fitsInRam ?? false;
             if (model.fitsInRam !== fitsInRam) {
               model.fitsInRam = fitsInRam;
               changed = true;

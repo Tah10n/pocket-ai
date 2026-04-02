@@ -11,7 +11,9 @@ import {
   updateSettings,
 } from './SettingsStore';
 import { AppError, toAppError } from './AppError';
+import { getSystemMemorySnapshot } from './SystemMetricsService';
 import { resolveContextWindowCeiling } from '../utils/contextWindow';
+import { assessModelMemoryFit, DEFAULT_TOTAL_MEMORY_BYTES } from '../utils/memoryFit';
 import { DECIMAL_GIGABYTE } from '../utils/modelSize';
 
 interface LoadModelOptions {
@@ -341,13 +343,20 @@ class LLMEngineService {
    * Helper to calculate if model fits in RAM.
    */
   public async fitsInRam(modelSize: number): Promise<boolean> {
-    try {
-      const totalMemory = await DeviceInfo.getTotalMemory();
-      // Heuristic: model size + 20% overhead should be less than 80% of total RAM
-      return (modelSize * 1.2) < (totalMemory * 0.8);
-    } catch {
-      return false;
+    const systemMemorySnapshot = await getSystemMemorySnapshot().catch(() => null);
+    let totalMemoryBytes = systemMemorySnapshot?.totalBytes ?? null;
+
+    if (totalMemoryBytes === null) {
+      totalMemoryBytes = await DeviceInfo.getTotalMemory().catch(() => DEFAULT_TOTAL_MEMORY_BYTES);
     }
+
+    const assessment = assessModelMemoryFit({
+      modelSizeBytes: modelSize,
+      totalMemoryBytes,
+      systemMemorySnapshot,
+    });
+
+    return assessment?.fitsInRam ?? false;
   }
 
   private async runExclusiveOperation<T>(operation: () => Promise<T>): Promise<T> {
@@ -398,6 +407,7 @@ class LLMEngineService {
       }
 
       const loadParams = getModelLoadParametersForModel(modelId);
+      const systemMemorySnapshot = await getSystemMemorySnapshot().catch(() => null);
       let totalMemoryBytes: number | null = null;
       try {
         totalMemoryBytes = await DeviceInfo.getTotalMemory();
@@ -405,15 +415,43 @@ class LLMEngineService {
         console.warn('[LLMEngine] Failed to resolve total device memory', error);
       }
 
+      const resolvedTotalMemoryBytes = systemMemorySnapshot?.totalBytes ?? totalMemoryBytes;
+      const resolvedModelSizeBytes = typeof fileInfo.size === 'number' ? fileInfo.size : modelSizeBytes ?? null;
+      if (typeof resolvedModelSizeBytes === 'number' && Number.isFinite(resolvedModelSizeBytes) && resolvedModelSizeBytes > 0 && typeof resolvedTotalMemoryBytes === 'number' && Number.isFinite(resolvedTotalMemoryBytes) && resolvedTotalMemoryBytes > 0) {
+        const memoryFit = assessModelMemoryFit({
+          modelSizeBytes: resolvedModelSizeBytes,
+          totalMemoryBytes: resolvedTotalMemoryBytes,
+          systemMemorySnapshot,
+        });
+
+        if (memoryFit && !memoryFit.fitsInRam) {
+          throw new AppError('model_memory_insufficient', 'Not enough memory to load this model.', {
+            details: {
+              modelId,
+              modelSizeBytes: resolvedModelSizeBytes,
+              estimatedRuntimeBytes: memoryFit.estimatedRuntimeBytes,
+              totalMemoryBytes: resolvedTotalMemoryBytes,
+              availableMemoryBytes: systemMemorySnapshot?.availableBytes,
+              freeMemoryBytes: systemMemorySnapshot?.freeBytes,
+              thresholdBytes: systemMemorySnapshot?.thresholdBytes,
+              totalBudgetBytes: memoryFit.totalBudgetBytes,
+              availableBudgetBytes: memoryFit.availableBudgetBytes,
+              effectiveAvailableBudgetBytes: memoryFit.effectiveBudgetBytes,
+              lowMemory: systemMemorySnapshot?.lowMemory ?? hardwareListenerService.getCurrentStatus().isLowMemory,
+            },
+          });
+        }
+      }
+
       const resolvedContextSize = resolveContextWindowCeiling({
         modelMaxContextTokens,
         modelSizeBytes: typeof fileInfo.size === 'number' ? fileInfo.size : modelSizeBytes ?? null,
-        totalMemoryBytes,
+        totalMemoryBytes: resolvedTotalMemoryBytes,
         appMaxContextTokens: loadParams.contextSize,
       });
       const gpuLayers = loadParams.gpuLayers ?? (
-        totalMemoryBytes != null
-          ? this.suggestGpuLayersForTotalMemory(totalMemoryBytes)
+        resolvedTotalMemoryBytes != null
+          ? this.suggestGpuLayersForTotalMemory(resolvedTotalMemoryBytes)
           : await this.calculateGpuLayers()
       );
       let resolvedGpuLayers = gpuLayers;
@@ -424,6 +462,8 @@ class LLMEngineService {
             model: modelPath,
             n_ctx: resolvedContextSize,
             n_gpu_layers: gpuLayers,
+            use_mmap: true,
+            use_mlock: false,
             flash_attn_type: 'auto',
           },
           (progress) => {
@@ -439,6 +479,8 @@ class LLMEngineService {
               model: modelPath,
               n_ctx: resolvedContextSize,
               n_gpu_layers: 0,
+              use_mmap: true,
+              use_mlock: false,
               flash_attn_type: 'auto',
             },
             (progress) => {

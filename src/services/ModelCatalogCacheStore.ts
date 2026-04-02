@@ -3,7 +3,7 @@ import { normalizePersistedModelMetadata } from './ModelMetadataNormalizer';
 import { createStorage } from './storage';
 
 export type CatalogCacheAuthScope = 'anon' | 'auth';
-export type CatalogCacheSort = 'downloads' | 'likes' | null;
+export type CatalogCacheSort = 'downloads' | 'likes' | 'lastModified' | null;
 
 export type CatalogCacheScope = {
   query: string;
@@ -60,7 +60,10 @@ function getTextByteLength(value: string | null | undefined) {
 }
 
 function isSort(value: unknown): value is CatalogCacheSort {
-  return value === null || value === 'downloads' || value === 'likes';
+  return value === null
+    || value === 'downloads'
+    || value === 'likes'
+    || value === 'lastModified';
 }
 
 function normalizeModels(models: unknown): ModelMetadata[] {

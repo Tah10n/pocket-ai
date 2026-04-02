@@ -4,7 +4,7 @@ import * as RNFS from 'react-native-fs';
 import { useDownloadStore } from '../store/downloadStore';
 import { ModelAccessState, ModelMetadata, LifecycleStatus } from '../types/models';
 import { registry } from './LocalStorageRegistry';
-import { MODELS_DIR } from './FileSystemSetup';
+import { getModelsDir } from './FileSystemSetup';
 import { AppError, toAppError } from './AppError';
 import { huggingFaceTokenService } from './HuggingFaceTokenService';
 import { HF_BASE_URL } from '../utils/huggingFaceUrls';
@@ -93,13 +93,26 @@ export class ModelDownloadManager {
       throw e;
     }
 
-    const fileName = await this.resolveDownloadFileName(model);
-    const localUri = MODELS_DIR + fileName;
+    const modelsDir = getModelsDir();
+    if (!modelsDir) {
+      throw new AppError('action_failed', 'Local file system is unavailable on this platform.', {
+        details: { modelId: model.id },
+      });
+    }
+
+    const fileName = await this.resolveDownloadFileName(model, modelsDir);
+    const localUri = modelsDir + fileName;
 
     const callback = (downloadProgress: any) => {
-      const progress = downloadProgress.totalBytesWritten / downloadProgress.totalBytesExpectedToWrite;
+      const writtenBytes = typeof downloadProgress?.totalBytesWritten === 'number'
+        ? downloadProgress.totalBytesWritten
+        : 0;
+      const expectedBytes = typeof downloadProgress?.totalBytesExpectedToWrite === 'number'
+        ? downloadProgress.totalBytesExpectedToWrite
+        : 0;
+      const progress = expectedBytes > 0 ? writtenBytes / expectedBytes : 0;
       updateModelInQueue(model.id, { 
-        downloadProgress: progress,
+        downloadProgress: Math.min(Math.max(progress, 0), 1),
         lifecycleStatus: LifecycleStatus.DOWNLOADING 
       });
     };
@@ -315,11 +328,12 @@ export class ModelDownloadManager {
 
   private async resolveDownloadFileName(
     model: Pick<ModelMetadata, 'id' | 'resolvedFileName' | 'hfRevision' | 'localPath'>,
+    modelsDir: string,
   ): Promise<string> {
     const candidates = this.getDownloadFileNameCandidates(model);
 
     for (const candidate of candidates) {
-      const info = await FileSystem.getInfoAsync(MODELS_DIR + candidate);
+      const info = await FileSystem.getInfoAsync(modelsDir + candidate);
       if (info.exists) {
         return candidate;
       }
@@ -329,10 +343,15 @@ export class ModelDownloadManager {
   }
 
   private async deleteDownloadFiles(fileNames: string[], modelId: string): Promise<void> {
+    const modelsDir = getModelsDir();
+    if (!modelsDir) {
+      return;
+    }
+
     let deletedAnyFile = false;
 
     for (const fileName of Array.from(new Set(fileNames))) {
-      const localUri = MODELS_DIR + fileName;
+      const localUri = modelsDir + fileName;
       const fileInfo = await FileSystem.getInfoAsync(localUri);
       if (!fileInfo.exists) {
         continue;

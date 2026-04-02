@@ -74,7 +74,7 @@ export function PresetManagerScreen() {
             return;
         }
 
-        router.replace('/(tabs)/settings' as any);
+        router.replace('/(tabs)/settings');
     }, [router]);
 
     const handleSaveAndActivate = () => {

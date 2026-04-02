@@ -125,10 +125,7 @@ describe('HomeScreen', () => {
 
         fireEvent.press(getByTestId('active-model-card'));
 
-        expect(mockNavigate).toHaveBeenCalledWith({
-            pathname: '/(tabs)/models',
-            params: undefined,
-        });
+        expect(mockNavigate).toHaveBeenCalledWith('/(tabs)/models');
     });
 
     it('starts a fresh chat before navigating to the chat tab', () => {

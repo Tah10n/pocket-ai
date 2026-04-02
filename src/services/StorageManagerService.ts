@@ -1,7 +1,7 @@
 import * as FileSystem from 'expo-file-system/legacy';
 import { useChatStore } from '../store/chatStore';
 import { storage as appStorage } from '../store/storage';
-import { CACHE_DIR, MODELS_DIR } from './FileSystemSetup';
+import { getCacheDir, getModelsDir } from './FileSystemSetup';
 import { llmEngineService } from './LLMEngineService';
 import { registry } from './LocalStorageRegistry';
 import { modelCatalogService } from './ModelCatalogService';
@@ -106,8 +106,13 @@ async function resolveStoredModelSize(model: ModelMetadata): Promise<number | nu
     return model.size ?? null;
   }
 
+  const modelsDir = getModelsDir();
+  if (!modelsDir) {
+    return model.size ?? null;
+  }
+
   try {
-    const info = await FileSystem.getInfoAsync(`${MODELS_DIR}${model.localPath}`);
+    const info = await FileSystem.getInfoAsync(`${modelsDir}${model.localPath}`);
     if (
       info.exists &&
       typeof info.size === 'number' &&
@@ -213,8 +218,9 @@ async function getActiveModelEstimateBytes(downloadedModels: ModelMetadata[]) {
 export async function getAppStorageMetrics(): Promise<AppStorageMetrics> {
   const downloadedModels = await getDownloadedModelsWithResolvedSizes();
   const modelsBytes = downloadedModels.reduce((sum, model) => sum + Math.max(model.size ?? 0, 0), 0);
+  const cacheDir = getCacheDir();
   const [cacheDirectoryBytes] = await Promise.all([
-    getDirectorySizeBytes(CACHE_DIR),
+    cacheDir ? getDirectorySizeBytes(cacheDir) : Promise.resolve(0),
   ]);
   const cacheBytes = cacheDirectoryBytes + modelCatalogService.getPersistentCacheBytes();
   const chatHistoryBytes = getPersistedChatStoreBytes() + getLegacyChatHistoryBytes();
@@ -250,16 +256,19 @@ export async function offloadModel(modelId: string, options?: OffloadModelOption
 export async function clearActiveCache() {
   let clearedEntries = 0;
   let firstError: unknown = null;
+  const cacheDir = getCacheDir();
 
   try {
-    const cacheInfo = await FileSystem.getInfoAsync(CACHE_DIR);
-    if (cacheInfo.exists) {
-      const entries = await FileSystem.readDirectoryAsync(CACHE_DIR);
-      await Promise.all(
-        entries.map((entryName) => FileSystem.deleteAsync(`${CACHE_DIR}${entryName}`, { idempotent: true })),
-      );
+    if (cacheDir) {
+      const cacheInfo = await FileSystem.getInfoAsync(cacheDir);
+      if (cacheInfo.exists) {
+        const entries = await FileSystem.readDirectoryAsync(cacheDir);
+        await Promise.all(
+          entries.map((entryName) => FileSystem.deleteAsync(`${cacheDir}${entryName}`, { idempotent: true })),
+        );
 
-      clearedEntries = entries.length;
+        clearedEntries = entries.length;
+      }
     }
   } catch (error) {
     console.warn('[StorageManagerService] Failed to clear cache directory', error);

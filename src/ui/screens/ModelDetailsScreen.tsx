@@ -53,7 +53,7 @@ export function ModelDetailsScreen() {
       return;
     }
 
-    router.replace('/(tabs)/models' as any);
+    router.replace('/(tabs)/models');
   }, [router]);
 
   const openOnHuggingFaceButton = modelId ? (

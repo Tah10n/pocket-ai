@@ -292,23 +292,23 @@ export const SettingsScreen = () => {
     };
 
     const handlePresetsPress = () => {
-        router.push('/presets' as any);
+        router.push('/presets');
     };
 
     const handleStorageManagerPress = () => {
-        router.push('/storage' as any);
+        router.push('/storage');
     };
 
     const handleLegalPress = () => {
-        router.push('/legal' as any);
+        router.push('/legal');
     };
 
     const handleHuggingFaceTokenPress = () => {
-        router.push('/huggingface-token' as any);
+        router.push('/huggingface-token');
     };
 
     const handlePerformancePress = () => {
-        router.push('/performance' as any);
+        router.push('/performance');
     };
 
     const unloadActiveModel = async () => {

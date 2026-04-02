@@ -5,7 +5,7 @@ import { hardwareListenerService } from './HardwareListenerService';
 import { EngineStatus, EngineState } from '../types/models';
 import { LlmChatCompletionOptions } from '../types/chat';
 import { registry } from './LocalStorageRegistry';
-import { MODELS_DIR } from './FileSystemSetup';
+import { getModelsDir } from './FileSystemSetup';
 import {
   getModelLoadParametersForModel,
   updateSettings,
@@ -264,7 +264,14 @@ class LLMEngineService {
         lastError: undefined,
       });
 
-      const modelPath = MODELS_DIR + localPath;
+      const modelsDir = getModelsDir();
+      if (!modelsDir) {
+        throw new AppError('action_failed', 'Local file system is unavailable on this platform.', {
+          details: { modelId },
+        });
+      }
+
+      const modelPath = modelsDir + localPath;
       const fileInfo = await FileSystem.getInfoAsync(modelPath);
       if (!fileInfo.exists) {
         throw new AppError('download_file_missing', `Model file not found at ${modelPath}`, {

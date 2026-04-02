@@ -231,7 +231,7 @@ export const ChatScreen = () => {
     const shouldShowRecoveryCard = isInputDisabled && !hasMessages;
     const hasDownloadedModels = registry.getModels().some((model) => Boolean(model.localPath));
     const modelRecoveryActionRoute = hasDownloadedModels
-        ? { pathname: '/(tabs)/models', params: { initialTab: 'downloaded' as const } }
+        ? ({ pathname: '/(tabs)/models', params: { initialTab: 'downloaded' } } as const)
         : '/(tabs)/models';
     const resolvedModelRecoveryActionLabel = hasActiveModel
         ? t('chat.openModels')
@@ -514,7 +514,13 @@ export const ChatScreen = () => {
         }
     };
 
-    const handleBeginRegenerateFromMessage = useCallback((message: ChatMessage) => {
+    const handleBeginRegenerateFromMessage = useCallback((messageId: string) => {
+        const activeThread = useChatStore.getState().getActiveThread();
+        const message = activeThread?.messages.find((entry) => entry.id === messageId);
+        if (!message) {
+            return;
+        }
+
         setPendingRegenerateMessage({
             messageId: message.id,
             originalContent: message.content,
@@ -527,7 +533,13 @@ export const ChatScreen = () => {
         setComposerDraft('');
     }, []);
 
-    const handleDeleteMessage = useCallback((message: ChatMessage) => {
+    const handleDeleteMessage = useCallback((messageId: string) => {
+        const activeThread = useChatStore.getState().getActiveThread();
+        const message = activeThread?.messages.find((entry) => entry.id === messageId);
+        if (!message) {
+            return;
+        }
+
         Alert.alert(
             t('chat.deleteMessageTitle'),
             message.role === 'user'
@@ -540,8 +552,8 @@ export const ChatScreen = () => {
                     style: 'destructive',
                     onPress: () => {
                         try {
-                            const deleted = deleteMessage(message.id);
-                            if (deleted && pendingRegenerateMessage?.messageId === message.id) {
+                            const deleted = deleteMessage(messageId);
+                            if (deleted && pendingRegenerateMessage?.messageId === messageId) {
                                 handleCancelComposerMode();
                             }
                         } catch (error: any) {
@@ -680,12 +692,8 @@ export const ChatScreen = () => {
                 && !isGenerating
                 && !isInputDisabled
             }
-            onDelete={() => {
-                handleDeleteMessage(msg);
-            }}
-            onRegenerate={() => {
-                handleBeginRegenerateFromMessage(msg);
-            }}
+            onDelete={handleDeleteMessage}
+            onRegenerate={handleBeginRegenerateFromMessage}
             onLayout={index === 0 ? handleLastMessageLayout : undefined}
         />
     ), [handleBeginRegenerateFromMessage, handleDeleteMessage, handleLastMessageLayout, isGenerating, isInputDisabled]);
@@ -727,7 +735,7 @@ export const ChatScreen = () => {
                                 description={recoveryDescription}
                                 actionLabel={resolvedModelRecoveryActionLabel}
                                 onAction={() => {
-                                    router.navigate(modelRecoveryActionRoute as any);
+                                    router.navigate(modelRecoveryActionRoute);
                                 }}
                                 tone="warning"
                                 iconName={hasActiveModel ? 'hourglass-empty' : 'download'}
@@ -852,7 +860,7 @@ export const ChatScreen = () => {
                                         size="md"
                                         className="mt-6 min-w-[220px] self-stretch"
                                         onPress={() => {
-                                            router.navigate(modelRecoveryActionRoute as any);
+                                            router.navigate(modelRecoveryActionRoute);
                                         }}
                                     >
                                         <MaterialSymbols
@@ -948,7 +956,7 @@ export const ChatScreen = () => {
                     }
                 }}
                 onManagePresets={() => {
-                    router.push('/presets' as any);
+                    router.push('/presets');
                 }}
             />
 

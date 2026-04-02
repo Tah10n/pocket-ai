@@ -2,7 +2,7 @@ import React from 'react';
 import { Box } from '@/components/ui/box';
 import { Button, ButtonText } from '@/components/ui/button';
 import { Text } from '@/components/ui/text';
-import { MaterialSymbols } from './MaterialSymbols';
+import { MaterialSymbols, type MaterialSymbolName } from './MaterialSymbols';
 
 type ChatStatusBannerTone = 'warning' | 'info' | 'neutral';
 
@@ -12,7 +12,7 @@ interface ChatStatusBannerProps {
   actionLabel?: string;
   onAction?: () => void;
   tone?: ChatStatusBannerTone;
-  iconName?: string;
+  iconName?: MaterialSymbolName;
   centered?: boolean;
   testID?: string;
 }

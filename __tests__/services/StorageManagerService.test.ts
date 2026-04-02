@@ -11,8 +11,8 @@ jest.mock('../../src/store/storage', () => ({
 }));
 
 jest.mock('../../src/services/FileSystemSetup', () => ({
-  CACHE_DIR: 'test-cache/',
-  MODELS_DIR: 'test-models/',
+  getCacheDir: () => 'test-cache/',
+  getModelsDir: () => 'test-models/',
 }));
 
 jest.mock('expo-file-system/legacy', () => ({

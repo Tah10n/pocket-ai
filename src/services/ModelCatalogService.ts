@@ -127,6 +127,7 @@ type ReadmeFrontMatterValue = string | string[];
 type CatalogCacheEntry = {
   result: Omit<ModelCatalogSearchResult, 'warning'>;
   timestamp: number;
+  isBufferedCursor: boolean;
 };
 
 type CatalogBatchResult = {
@@ -154,13 +155,18 @@ type CreateTreeProbeCandidateOptions = {
 };
 
 export type CatalogServerSort = 'downloads' | 'likes';
-export type ModelCatalogErrorCode = 'rate_limited' | 'network' | 'unknown';
+export type ModelCatalogErrorCode = 'rate_limited' | 'timeout' | 'network' | 'unknown';
 
 const MIN_GGUF_BYTES = 50 * 1024 * 1024;
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 const PERSISTENT_CACHE_MAX_AGE = 24 * 60 * 60 * 1000; // 24 hours
 const ACCESS_PROBE_CACHE_TTL = 2 * 60 * 1000; // 2 minutes
 const README_SUMMARY_MAX_LENGTH = 320;
+const HF_REQUEST_TIMEOUT_MS = 20_000;
+const SEARCH_CACHE_MAX_ENTRIES = 120;
+const BUFFERED_SEARCH_CACHE_MAX_AGE = 20 * 60 * 1000; // 20 minutes
+const MODEL_SNAPSHOT_CACHE_MAX_ENTRIES = 2000;
+const ACCESS_PROBE_CACHE_MAX_ENTRIES = 500;
 const EXCLUDED_CATALOG_PIPELINE_TAGS = new Set([
   'text-to-image',
   'image-to-image',
@@ -220,6 +226,10 @@ export function getModelCatalogErrorMessage(error: unknown): string {
       return 'Hugging Face rate limit reached. Please wait a moment and try again.';
     }
 
+    if (error.code === 'timeout') {
+      return 'Hugging Face request timed out. Please check your connection and try again.';
+    }
+
     if (error.code === 'network') {
       return 'Network error while loading models. Check your connection and try again.';
     }
@@ -277,6 +287,51 @@ export class ModelCatalogService {
     this.persistentCache.clearAll();
   }
 
+  private pruneSearchCache(): void {
+    const now = Date.now();
+
+    for (const [key, entry] of this.searchCache.entries()) {
+      if (!entry.isBufferedCursor && now - entry.timestamp > CACHE_TTL) {
+        this.searchCache.delete(key);
+      } else if (entry.isBufferedCursor && now - entry.timestamp > BUFFERED_SEARCH_CACHE_MAX_AGE) {
+        this.searchCache.delete(key);
+      }
+    }
+
+    if (this.searchCache.size <= SEARCH_CACHE_MAX_ENTRIES) {
+      return;
+    }
+
+    for (const [key, entry] of this.searchCache.entries()) {
+      if (this.searchCache.size <= SEARCH_CACHE_MAX_ENTRIES) {
+        break;
+      }
+
+      if (!entry.isBufferedCursor) {
+        this.searchCache.delete(key);
+      }
+    }
+
+    for (const key of this.searchCache.keys()) {
+      if (this.searchCache.size <= SEARCH_CACHE_MAX_ENTRIES) {
+        break;
+      }
+
+      this.searchCache.delete(key);
+    }
+  }
+
+  private pruneModelSnapshotCache(): void {
+    while (this.modelSnapshotCache.size > MODEL_SNAPSHOT_CACHE_MAX_ENTRIES) {
+      const oldestKey = this.modelSnapshotCache.keys().next().value;
+      if (!oldestKey) {
+        break;
+      }
+
+      this.modelSnapshotCache.delete(oldestKey);
+    }
+  }
+
   private async createRequestContext(): Promise<CatalogRequestContext> {
     while (true) {
       const authVersion = this.authCacheVersion;
@@ -331,6 +386,10 @@ export class ModelCatalogService {
     const isBufferedCursor = this.isBufferedCursor(cursor);
     const isCacheFresh = Boolean(cached) && Date.now() - (cached?.timestamp ?? 0) < CACHE_TTL;
 
+    if (cached && !isCacheFresh && !isBufferedCursor) {
+      this.searchCache.delete(cacheKey);
+    }
+
     if (cached && (isCacheFresh || isBufferedCursor)) {
       const filteredCachedModels = this.filterCatalogSearchModels(cached.result.models);
       return {
@@ -382,7 +441,9 @@ export class ModelCatalogService {
       this.searchCache.set(cacheKey, {
         result,
         timestamp: Date.now(),
+        isBufferedCursor,
       });
+      this.pruneSearchCache();
       if (cursor === null) {
         this.persistentCache.putSearch(
           this.buildPersistentSearchScope(normalizedQuery, pageSize, sort, hasAuthToken),
@@ -447,9 +508,8 @@ export class ModelCatalogService {
     modelId: string,
   ): { model: ModelMetadata; authScope: CatalogCacheAuthScope } | null {
     for (const authScope of this.getSnapshotReadScopes()) {
-      const inMemorySnapshot = this.modelSnapshotCache.get(
-        this.buildModelSnapshotCacheKey(modelId, authScope),
-      );
+      const cacheKey = this.buildModelSnapshotCacheKey(modelId, authScope);
+      const inMemorySnapshot = this.getModelSnapshotFromMemory(cacheKey);
       if (inMemorySnapshot) {
         return { model: inMemorySnapshot, authScope };
       }
@@ -481,6 +541,27 @@ export class ModelCatalogService {
     authScope: CatalogCacheAuthScope,
   ): string {
     return `${modelId}::${authScope}`;
+  }
+
+  private getModelSnapshotFromMemory(cacheKey: string): ModelMetadata | null {
+    const cached = this.modelSnapshotCache.get(cacheKey);
+    if (!cached) {
+      return null;
+    }
+
+    // Map#set does not change insertion order when updating an existing key, so we
+    // delete+set to keep the cache eviction order closer to LRU.
+    this.modelSnapshotCache.delete(cacheKey);
+    this.modelSnapshotCache.set(cacheKey, cached);
+    return cached;
+  }
+
+  private setModelSnapshotInMemory(cacheKey: string, model: ModelMetadata): void {
+    // Ensure insertion order reflects recency for eviction.
+    if (this.modelSnapshotCache.has(cacheKey)) {
+      this.modelSnapshotCache.delete(cacheKey);
+    }
+    this.modelSnapshotCache.set(cacheKey, model);
   }
 
   public getCachedSearchResult(
@@ -522,6 +603,10 @@ export class ModelCatalogService {
     );
     const memoryEntry = this.searchCache.get(memoryKey);
     const isMemoryEntryFresh = Boolean(memoryEntry) && Date.now() - (memoryEntry?.timestamp ?? 0) < CACHE_TTL;
+
+    if (memoryEntry && !isMemoryEntryFresh) {
+      this.searchCache.delete(memoryKey);
+    }
 
     if (isMemoryEntryFresh && memoryEntry) {
       const filteredMemoryModels = this.filterCatalogSearchModels(memoryEntry.result.models);
@@ -575,7 +660,7 @@ export class ModelCatalogService {
     try {
       const cachedModel = this.getCachedModel(modelId);
       const fallbackModel = cachedModel ?? this.createFallbackModel(modelId);
-      const response = await fetch(buildHuggingFaceModelApiUrl(modelId), {
+      const response = await this.fetchWithTimeout(buildHuggingFaceModelApiUrl(modelId), {
         headers: this.buildHeaders(requestContext.authToken),
       });
       let detailedModel = fallbackModel;
@@ -1010,11 +1095,13 @@ export class ModelCatalogService {
             nextCursor,
           },
           timestamp,
+          isBufferedCursor: true,
         },
       );
       nextCursor = bufferedCursor;
     }
 
+    this.pruneSearchCache();
     return nextCursor ?? this.createBufferedCursorToken();
   }
 
@@ -1046,7 +1133,7 @@ export class ModelCatalogService {
     const url = nextCursor ?? this.buildSearchUrl(normalizedQuery, limit, sort);
 
     try {
-      const response = await fetch(url, {
+      const response = await this.fetchWithTimeout(url, {
         headers: this.buildHeaders(requestContext.authToken),
       });
       status = response.status;
@@ -1455,8 +1542,9 @@ export class ModelCatalogService {
   ) {
     const normalizedModels = models.map((model) => normalizePersistedModelMetadata(model));
     normalizedModels.forEach((model) => {
-      this.modelSnapshotCache.set(this.buildModelSnapshotCacheKey(model.id, authScope), model);
+      this.setModelSnapshotInMemory(this.buildModelSnapshotCacheKey(model.id, authScope), model);
     });
+    this.pruneModelSnapshotCache();
   }
 
   private upsertModelSnapshots(
@@ -1498,7 +1586,7 @@ export class ModelCatalogService {
             const requestedCursor = nextCursor;
             visitedCursors.add(requestedCursor);
 
-            const response = await fetch(requestedCursor, {
+            const response = await this.fetchWithTimeout(requestedCursor, {
               headers: this.buildHeaders(requestContext.authToken),
             });
             status = response.status;
@@ -1561,7 +1649,7 @@ export class ModelCatalogService {
       this.readmeRequestCache,
       this.buildRequestCacheKey('readme', repoId, revision, requestContext),
       async () => {
-        const response = await fetch(buildHuggingFaceRawUrl(repoId, 'README.md', revision), {
+        const response = await this.fetchWithTimeout(buildHuggingFaceRawUrl(repoId, 'README.md', revision), {
           headers: this.buildHeaders(requestContext.authToken),
         });
         this.assertRequestContextIsCurrent(requestContext);
@@ -1620,7 +1708,7 @@ export class ModelCatalogService {
         };
 
         try {
-          const headResponse = await fetch(probeUrl, {
+          const headResponse = await this.fetchWithTimeout(probeUrl, {
             method: 'HEAD',
             headers: this.buildHeaders(requestContext.authToken),
           });
@@ -1641,7 +1729,7 @@ export class ModelCatalogService {
             return cacheResolvedProbeState(null);
           }
 
-          const getResponse = await fetch(probeUrl, {
+          const getResponse = await this.fetchWithTimeout(probeUrl, {
             method: 'GET',
             headers: {
               ...(this.buildHeaders(requestContext.authToken) ?? {}),
@@ -1980,6 +2068,25 @@ export class ModelCatalogService {
       state,
       timestamp: Date.now(),
     });
+
+    const now = Date.now();
+    for (const [entryKey, entry] of this.resolvedFileProbeStateCache.entries()) {
+      if (now - entry.timestamp > ACCESS_PROBE_CACHE_TTL) {
+        this.resolvedFileProbeStateCache.delete(entryKey);
+      }
+    }
+
+    if (this.resolvedFileProbeStateCache.size <= ACCESS_PROBE_CACHE_MAX_ENTRIES) {
+      return;
+    }
+
+    const entries = Array.from(this.resolvedFileProbeStateCache.entries())
+      .sort((a, b) => a[1].timestamp - b[1].timestamp);
+    const toRemove = entries.length - ACCESS_PROBE_CACHE_MAX_ENTRIES;
+    for (let index = 0; index < toRemove; index += 1) {
+      const [entryKey] = entries[index];
+      this.resolvedFileProbeStateCache.delete(entryKey);
+    }
   }
 
   private buildRequestCacheKey(
@@ -2370,6 +2477,52 @@ export class ModelCatalogService {
     return {
       Authorization: `Bearer ${authToken}`,
     };
+  }
+
+  private async fetchWithTimeout(
+    url: string,
+    init: RequestInit = {},
+    timeoutMs = HF_REQUEST_TIMEOUT_MS,
+  ): Promise<Response> {
+    const controller = typeof AbortController !== 'undefined'
+      ? new AbortController()
+      : null;
+    const signal = controller?.signal ?? init.signal;
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    const externalSignal = init.signal;
+    const abortListener = () => controller?.abort();
+
+    if (externalSignal && controller) {
+      if (externalSignal.aborted) {
+        controller.abort();
+      } else if (typeof externalSignal.addEventListener === 'function') {
+        externalSignal.addEventListener('abort', abortListener);
+      }
+    }
+
+    const timeoutPromise = new Promise<never>((_resolve, reject) => {
+      timeoutId = setTimeout(() => {
+        controller?.abort();
+        reject(new ModelCatalogError('timeout', `HF request timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+    });
+
+    try {
+      const fetchPromise = fetch(url, signal ? { ...init, signal } : init);
+      return await Promise.race([fetchPromise, timeoutPromise]);
+    } finally {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+
+      if (
+        externalSignal &&
+        controller &&
+        typeof externalSignal.removeEventListener === 'function'
+      ) {
+        externalSignal.removeEventListener('abort', abortListener);
+      }
+    }
   }
 
   private normalizeContextTokenValue(value: unknown): number | undefined {

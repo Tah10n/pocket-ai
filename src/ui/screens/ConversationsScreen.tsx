@@ -90,7 +90,7 @@ export function ConversationsScreen() {
       return;
     }
 
-    router.replace('/' as any);
+    router.replace('/');
   }, [canGoBack, router]);
 
   const filteredConversations = useMemo(() => (
@@ -122,7 +122,7 @@ export function ConversationsScreen() {
   const handleOpenConversation = useCallback((threadId: string) => {
     try {
       openThread(threadId);
-      router.push('/(tabs)/chat' as any);
+      router.push('/(tabs)/chat');
     } catch (error: any) {
       Alert.alert(
         t('conversations.openErrorTitle'),
@@ -134,7 +134,7 @@ export function ConversationsScreen() {
   const handleStartNewChat = useCallback(() => {
     try {
       startNewChat();
-      router.push('/(tabs)/chat' as any);
+      router.push('/(tabs)/chat');
     } catch (error: any) {
       Alert.alert(
         t('conversations.startNewChatErrorTitle'),

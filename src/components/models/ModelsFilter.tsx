@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Box } from '@/components/ui/box';
-import { MaterialSymbols } from '@/components/ui/MaterialSymbols';
+import { MaterialSymbols, type MaterialSymbolName } from '@/components/ui/MaterialSymbols';
 import { Pressable } from '@/components/ui/pressable';
 import { ScreenActionPill, ScreenBadge } from '@/components/ui/ScreenShell';
 import { Text } from '@/components/ui/text';
@@ -21,7 +21,7 @@ type OpenPanel = 'filter' | 'sort' | null;
 
 type TriggerButtonProps = {
   testID: string;
-  iconName: string;
+  iconName: MaterialSymbolName;
   label: string;
   summary?: string;
   badge?: string;

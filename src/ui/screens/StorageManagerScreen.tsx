@@ -92,7 +92,7 @@ export function StorageManagerScreen() {
             return;
         }
 
-        router.replace('/(tabs)/models' as any);
+        router.replace('/(tabs)/models');
     }, [canGoBack, router]);
 
     const loadAppMetrics = useCallback(async () => {

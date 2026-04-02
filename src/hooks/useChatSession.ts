@@ -156,13 +156,7 @@ export const useChatSession = () => {
       maxContextTokens: activeContextTokenBudget,
       responseReserveTokens: activeThread.paramsSnapshot.maxTokens,
     });
-  }, [
-    activeContextTokenBudget,
-    activeThread?.id,
-    activeThread?.paramsSnapshot.maxTokens,
-    activeThread?.status,
-    activeThread?.updatedAt,
-  ]);
+  }, [activeContextTokenBudget, activeThread]);
   useEffect(() => {
     if (!activeThreadId) {
       truncationCacheRef.current = { threadId: null, state: EMPTY_TRUNCATION_STATE };

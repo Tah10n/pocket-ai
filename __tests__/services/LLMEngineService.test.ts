@@ -19,10 +19,6 @@ jest.mock('llama.rn', () => {
   };
 });
 
-jest.mock('expo-file-system/legacy', () => ({
-  getInfoAsync: jest.fn().mockResolvedValue({ exists: true }),
-}));
-
 jest.mock('react-native-device-info', () => ({
   getTotalMemory: jest.fn().mockResolvedValue(8 * 1024 * 1024 * 1024),
 }));

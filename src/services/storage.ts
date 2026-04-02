@@ -6,6 +6,7 @@ type MmkvModule = typeof import('react-native-mmkv');
 const IS_WEB = typeof window !== 'undefined' && Platform.OS === 'web';
 const IS_TESTING = process.env.NODE_ENV === 'test';
 const fallbackStores = new Map<string, Map<string, string>>();
+const warnedFallbackStores = new Set<string>();
 
 function getFallbackStore(id?: string): Map<string, string> {
     const storeId = id ?? '__default__';
@@ -20,6 +21,7 @@ function getFallbackStore(id?: string): Map<string, string> {
 }
 
 export function createStorage(id?: string): MMKV {
+    const logId = id || 'default';
     try {
         if (IS_WEB || IS_TESTING) {
             throw new Error('MMKV is not supported on web or during testing');
@@ -32,16 +34,45 @@ export function createStorage(id?: string): MMKV {
 
         return id ? createMMKV({ id }) : createMMKV();
     } catch (e) {
-        console.warn(
-            `[MMKV Fallback] Failed to create MMKV instance (id: ${id || 'default'}). Using in-memory fallback. Error:`,
-            e,
-        );
+        if (!IS_TESTING && !warnedFallbackStores.has(logId)) {
+            warnedFallbackStores.add(logId);
+            console.warn(
+                `[MMKV Fallback] Failed to create MMKV instance (id: ${logId}). Using in-memory fallback. Error:`,
+                e,
+            );
+        }
+
         const map = getFallbackStore(id);
         return {
-            set: (key: string, value: string | number | boolean) => map.set(key, String(value)),
+            set: (key: string, value: string | number | boolean) => {
+                map.set(key, String(value));
+            },
             getString: (key: string) => map.get(key),
-            getNumber: (key: string) => Number(map.get(key)),
-            getBoolean: (key: string) => map.get(key) === 'true',
+            getNumber: (key: string) => {
+                const raw = map.get(key);
+                if (raw === undefined) {
+                    return undefined;
+                }
+
+                const parsed = Number(raw);
+                return Number.isFinite(parsed) ? parsed : undefined;
+            },
+            getBoolean: (key: string) => {
+                const raw = map.get(key);
+                if (raw === undefined) {
+                    return undefined;
+                }
+
+                if (raw === 'true') {
+                    return true;
+                }
+
+                if (raw === 'false') {
+                    return false;
+                }
+
+                return undefined;
+            },
             remove: (key: string) => map.delete(key),
             clearAll: () => map.clear(),
             contains: (key: string) => map.has(key),

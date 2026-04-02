@@ -29,7 +29,7 @@ export function LegalScreen() {
             return;
         }
 
-        router.replace('/(tabs)/settings' as any);
+        router.replace('/(tabs)/settings');
     }, [canGoBack, router]);
 
     const sections = useMemo<SectionConfig[]>(() => [

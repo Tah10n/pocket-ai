@@ -21,8 +21,8 @@ export interface ChatMessageBubbleProps {
   tokensPerSec?: number;
   canDelete?: boolean;
   canRegenerate?: boolean;
-  onDelete?: () => void;
-  onRegenerate?: () => void;
+  onDelete?: (messageId: string) => void;
+  onRegenerate?: (messageId: string) => void;
   onLayout?: (event: LayoutChangeEvent) => void;
 }
 
@@ -269,7 +269,7 @@ const ChatMessageBubbleComponent = ({
               testID={`regenerate-message-${id}`}
               iconName="refresh"
               label={t('chat.messageActionRegenerateAccessibilityLabel')}
-              onPress={onRegenerate}
+              onPress={() => onRegenerate(id)}
             />
           ) : null}
           {canDelete && onDelete ? (
@@ -277,7 +277,7 @@ const ChatMessageBubbleComponent = ({
               testID={`delete-message-${id}`}
               iconName="delete-outline"
               label={t('chat.messageActionDeleteAccessibilityLabel')}
-              onPress={onDelete}
+              onPress={() => onDelete(id)}
               isDestructive
             />
           ) : null}

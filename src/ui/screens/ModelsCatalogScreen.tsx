@@ -41,7 +41,7 @@ export const ModelsCatalogScreen = () => {
         activeTab={activeTab}
         onTabChange={handleTabChange}
         onBack={undefined}
-        onOpenStorage={() => router.push('/storage' as any)}
+        onOpenStorage={() => router.push('/storage')}
       />
       <ScreenContent testID="models-screen-content" className="flex-1" style={{ paddingBottom: 0 }}>
         <ModelsList

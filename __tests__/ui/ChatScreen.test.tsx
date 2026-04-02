@@ -193,14 +193,14 @@ jest.mock('../../src/components/ui/ChatMessageBubble', () => {
         canRegenerate && onRegenerate
           ? mockReact.createElement(
               Pressable,
-              { testID: `regenerate-message-${id}`, onPress: onRegenerate },
+              { testID: `regenerate-message-${id}`, onPress: () => onRegenerate(id) },
               mockReact.createElement(Text, null, 'Regenerate message'),
             )
           : null,
         onDelete
           ? mockReact.createElement(
               Pressable,
-              { testID: `delete-message-${id}`, onPress: onDelete },
+              { testID: `delete-message-${id}`, onPress: () => onDelete(id) },
               mockReact.createElement(Text, null, 'Delete message'),
             )
           : null,

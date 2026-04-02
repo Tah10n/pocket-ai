@@ -39,16 +39,18 @@ export const HomeScreen = () => {
 
   const handleOpenModelPicker = () => {
     const hasDownloadedModels = registry.getModels().some((model) => Boolean(model.localPath));
-    const params = engineState.activeModelId || !hasDownloadedModels
-      ? undefined
-      : { initialTab: 'downloaded' as const };
-    router.navigate({ pathname: '/(tabs)/models', params } as any);
+    if (!engineState.activeModelId && hasDownloadedModels) {
+      router.navigate({ pathname: '/(tabs)/models', params: { initialTab: 'downloaded' } });
+      return;
+    }
+
+    router.navigate('/(tabs)/models');
   };
 
   const handleOpenConversation = (conversation: ConversationIndexItem) => {
     try {
       openThread(conversation.id);
-      router.navigate('/(tabs)/chat' as any);
+      router.navigate('/(tabs)/chat');
     } catch (error: any) {
       Alert.alert(
         t('home.openConversationErrorTitle'),
@@ -84,7 +86,7 @@ export const HomeScreen = () => {
   const handleStartNewChat = () => {
     try {
       startNewChat();
-      router.navigate('/(tabs)/chat' as any);
+      router.navigate('/(tabs)/chat');
     } catch (error: any) {
       Alert.alert(
         t('conversations.startNewChatErrorTitle'),
@@ -145,7 +147,7 @@ export const HomeScreen = () => {
             <RecentConversationsList
               onOpenConversation={handleOpenConversation}
               onDeleteConversation={handleDeleteConversation}
-              onViewAllConversations={() => router.push('/conversations' as any)}
+              onViewAllConversations={() => router.push('/conversations')}
             />
           </ScreenStack>
         </ScrollView>

@@ -2,7 +2,7 @@ import DeviceInfo from 'react-native-device-info';
 import * as FileSystem from 'expo-file-system/legacy';
 import { createStorage } from './storage';
 import { ModelMetadata, LifecycleStatus } from '../types/models';
-import { MODELS_DIR } from './FileSystemSetup';
+import { getModelsDir } from './FileSystemSetup';
 import { normalizePersistedModelMetadata } from './ModelMetadataNormalizer';
 
 const REGISTRY_KEY = 'models-registry';
@@ -74,12 +74,15 @@ export class LocalStorageRegistry {
    */
   public async removeModel(modelId: string): Promise<void> {
     const model = this.getModel(modelId);
+    const modelsDir = getModelsDir();
     if (model && model.localPath) {
       try {
-        const fileUri = MODELS_DIR + model.localPath;
-        const info = await FileSystem.getInfoAsync(fileUri);
-        if (info.exists) {
-          await FileSystem.deleteAsync(fileUri);
+        if (modelsDir) {
+          const fileUri = modelsDir + model.localPath;
+          const info = await FileSystem.getInfoAsync(fileUri);
+          if (info.exists) {
+            await FileSystem.deleteAsync(fileUri);
+          }
         }
       } catch (e) {
         console.error(`[LocalStorageRegistry] Failed to delete file for ${modelId}`, e);
@@ -93,18 +96,40 @@ export class LocalStorageRegistry {
 
   /**
    * Validate the registry on startup: check if files exist and update status.
-   * Also performs Garbage Collection: deletes files in MODELS_DIR that are neither completed nor currently queued.
+   * Also performs Garbage Collection: deletes files in the models directory that are neither completed nor currently queued.
    */
   public async validateRegistry(queuedFileNames: string[] = []): Promise<void> {
     const models = this.getModels();
+    const modelsDir = getModelsDir();
     const totalMemory = await this.getTotalMemory();
     let changed = false;
+
+    if (!modelsDir) {
+      for (const model of models) {
+        if (model.localPath) {
+          model.localPath = undefined;
+          if (
+            model.lifecycleStatus === LifecycleStatus.DOWNLOADED ||
+            model.lifecycleStatus === LifecycleStatus.ACTIVE
+          ) {
+            model.lifecycleStatus = LifecycleStatus.AVAILABLE;
+          }
+          changed = true;
+        }
+      }
+
+      if (changed) {
+        this.saveModels(models);
+      }
+
+      return;
+    }
 
     // 1. Check if recorded files actually exist
     for (const model of models) {
       if (model.lifecycleStatus === LifecycleStatus.DOWNLOADED || model.lifecycleStatus === LifecycleStatus.ACTIVE) {
         if (model.localPath) {
-          const fileUri = MODELS_DIR + model.localPath;
+          const fileUri = modelsDir + model.localPath;
           const info = await FileSystem.getInfoAsync(fileUri);
           if (!info.exists) {
             console.warn(`[LocalStorageRegistry] File missing for ${model.id}, resetting to available`);
@@ -147,7 +172,7 @@ export class LocalStorageRegistry {
 
     // 2. Garbage Collection: clean up orphaned files
     try {
-      const dirInfo = await FileSystem.readDirectoryAsync(MODELS_DIR);
+      const dirInfo = await FileSystem.readDirectoryAsync(modelsDir);
       
       for (const filename of dirInfo) {
         // Find if this file belongs to a completed model
@@ -158,7 +183,7 @@ export class LocalStorageRegistry {
 
           if (!isQueued) {
             // It's neither completed nor queued -> it's a dead partial download. Delete it.
-            const fileUri = MODELS_DIR + filename;
+            const fileUri = modelsDir + filename;
             console.log(`[LocalStorageRegistry] Garbage collecting orphaned file: ${filename}`);
             await FileSystem.deleteAsync(fileUri, { idempotent: true });
           }

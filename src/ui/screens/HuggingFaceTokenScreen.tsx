@@ -83,7 +83,7 @@ export function HuggingFaceTokenScreen() {
       return;
     }
 
-    router.replace('/(tabs)/settings' as any);
+    router.replace('/(tabs)/settings');
   }, [router]);
 
   return (

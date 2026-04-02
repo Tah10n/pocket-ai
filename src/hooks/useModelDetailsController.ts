@@ -157,11 +157,11 @@ export function useModelDetailsController(modelId: string) {
   }, [modelId, showModelActionError]);
 
   const handleOpenTokenSettings = useCallback(() => {
-    router.push('/huggingface-token' as any);
+    router.push('/huggingface-token');
   }, [router]);
 
   const handleChat = useCallback(() => {
-    router.push('/chat' as any);
+    router.push('/chat');
   }, [router]);
 
   const handleDownload = useCallback((targetModel: ModelMetadata) => {

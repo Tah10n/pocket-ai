@@ -76,7 +76,7 @@ export function PerformanceScreen() {
       return;
     }
 
-    router.replace('/(tabs)/settings' as any);
+    router.replace('/(tabs)/settings');
   }, [router]);
 
   const handleCopy = useCallback(async () => {

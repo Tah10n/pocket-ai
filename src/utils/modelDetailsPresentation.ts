@@ -1,4 +1,5 @@
 import { getHuggingFaceModelUrl } from '@/services/ModelCatalogService';
+import type { MaterialSymbolName } from '@/components/ui/MaterialSymbols';
 import { ModelAccessState, LifecycleStatus, type ModelMetadata } from '@/types/models';
 import { formatModelFileSize } from '@/utils/modelSize';
 
@@ -7,14 +8,14 @@ export type ModelDetailsTone = 'neutral' | 'primary' | 'info' | 'success' | 'war
 export interface ModelDetailsBadge {
   label: string;
   tone: 'neutral' | 'accent' | 'error' | 'success';
-  iconName: string;
+  iconName: MaterialSymbolName;
 }
 
 export interface ModelDetailsMetricItem {
   label: string;
   value: string;
   tone: ModelDetailsTone;
-  iconName?: string;
+  iconName?: MaterialSymbolName;
 }
 
 export interface ModelDetailsMetadataItem {

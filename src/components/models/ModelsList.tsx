@@ -503,7 +503,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
   });
 
   const openTokenSettings = useCallback(() => {
-    router.push('/huggingface-token' as any);
+    router.push('/huggingface-token');
   }, [router]);
 
   const openModelPage = useCallback(async (modelId: string) => {
@@ -518,7 +518,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
     router.push({
       pathname: '/model-details',
       params: { modelId },
-    } as any);
+    });
   }, [router]);
 
   const handleDownload = useCallback((model: ModelMetadata) => {

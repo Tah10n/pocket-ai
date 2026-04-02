@@ -106,6 +106,55 @@ describe('LLMEngineService', () => {
     );
   });
 
+  it('retries strict alternation failures with normalized chat history', async () => {
+    const completionMock = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock;
+    completionMock
+      .mockRejectedValueOnce(new Error('Conversation roles must alternate user/assistant'))
+      .mockResolvedValueOnce({ text: 'Recovered reply' });
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    await expect(llmEngineService.chatCompletion({
+      messages: [
+        { role: 'system', content: 'Be concise.' },
+        { role: 'system', content: 'Conversation summary:\nEarlier context.' },
+        { role: 'assistant', content: 'Leading assistant draft.' },
+        { role: 'user', content: 'First user question.' },
+        { role: 'assistant', content: 'First assistant reply.' },
+        { role: 'assistant', content: 'Extra assistant details.' },
+        { role: 'user', content: 'Latest user question.' },
+      ],
+      params: {
+        temperature: 0.25,
+        n_predict: 64,
+      },
+    })).resolves.toEqual({ text: 'Recovered reply' });
+
+    expect(completionMock).toHaveBeenCalledTimes(2);
+    expect(completionMock).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        messages: [
+          {
+            role: 'user',
+            content: 'System:\nBe concise.\n\nConversation summary:\nEarlier context.\n\nFirst user question.',
+          },
+          {
+            role: 'assistant',
+            content: 'First assistant reply.\n\nExtra assistant details.',
+          },
+          {
+            role: 'user',
+            content: 'Latest user question.',
+          },
+        ],
+        temperature: 0.25,
+        n_predict: 64,
+      }),
+      expect.any(Function),
+    );
+  });
+
   it('loads the model with saved context and gpu preferences', async () => {
     (getModelLoadParametersForModel as jest.Mock).mockReturnValueOnce({
       contextSize: 4096,

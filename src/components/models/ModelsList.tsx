@@ -152,6 +152,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
   const router = useRouter();
   const [models, setModels] = useState<ModelMetadata[]>([]);
   const [loading, setLoading] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [isFetchingMore, setIsFetchingMore] = useState(false);
   const [hasMore, setHasMore] = useState(true);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
@@ -213,9 +214,20 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
   ]);
 
   const refreshDownloadedModels = useCallback(() => {
-    if (activeTab === 'downloaded') {
-      modelCatalogService.getLocalModels().then(setModels);
+    if (activeTab !== 'downloaded') {
+      return;
     }
+
+    void modelCatalogService.getLocalModels()
+      .then(setModels)
+      .catch((error) => {
+        console.warn('[ModelsList] Failed to refresh local models', error);
+        setFetchState((current) => ({
+          ...current,
+          warningMessage: getModelCatalogErrorMessage(error),
+          loadMoreError: null,
+        }));
+      });
   }, [activeTab]);
 
   const fetchModels = useCallback(
@@ -224,6 +236,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
       cursor: string | null,
       append: boolean,
       preserveExistingResults: boolean = false,
+      forceRefresh: boolean = false,
     ) => {
       const fetchId = latestFetchIdRef.current + 1;
       latestFetchIdRef.current = fetchId;
@@ -260,6 +273,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
           cursor,
           pageSize: MODELS_PAGE_SIZE,
           sort: serverSort,
+          forceRefresh,
         });
         resultCount = result.models.length;
         resultHasMore = result.hasMore;
@@ -331,6 +345,16 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
   }, []);
 
   useEffect(() => {
+    return modelCatalogService.subscribeCacheInvalidations((_revision, source) => {
+      if (source !== 'manual') {
+        return;
+      }
+
+      setManualRefreshRevision((current) => current + 1);
+    });
+  }, []);
+
+  useEffect(() => {
     let cancelled = false;
 
     void huggingFaceTokenService.refreshState()
@@ -388,6 +412,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
     setLoading(false);
     setIsFetchingMore(false);
     setFetchState({ warningMessage: null, loadMoreError: null });
+    setIsRefreshing(false);
 
     if (activeTab === 'all') {
       const cachedResult = modelCatalogService.getCachedSearchResult(searchQuery, {
@@ -410,14 +435,25 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
 
     const fetchId = latestFetchIdRef.current + 1;
     latestFetchIdRef.current = fetchId;
-    modelCatalogService.getLocalModels().then((localModels) => {
-      if (fetchId !== latestFetchIdRef.current) {
-        return;
-      }
+    void modelCatalogService.getLocalModels()
+      .then((localModels) => {
+        if (fetchId !== latestFetchIdRef.current) {
+          return;
+        }
 
-      setModels(localModels);
-      setHasMore(false);
-    });
+        setModels(localModels);
+        setHasMore(false);
+      })
+      .catch((error) => {
+        if (fetchId !== latestFetchIdRef.current) {
+          return;
+        }
+
+        console.warn('[ModelsList] Failed to load local models', error);
+        setFetchState({ warningMessage: getModelCatalogErrorMessage(error), loadMoreError: null });
+        setModels([]);
+        setHasMore(false);
+      });
   }, [activeTab, discoveryMode, fetchModels, isTokenStateHydrated, searchQuery, serverSort, sessionIdentity]);
 
   const displayModels = useMemo(() => {
@@ -698,6 +734,54 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
     void fetchModels(searchQuery, nextCursor, true);
   }, [activeTab, fetchModels, hasMore, isFetchingMore, loadMoreError, loading, nextCursor, searchQuery]);
 
+  const handlePullToRefresh = useCallback(() => {
+    if (loading || isRefreshing || isFetchingMore || appendInFlightRef.current) {
+      return;
+    }
+
+    setIsRefreshing(true);
+    appendInFlightRef.current = false;
+    lastAutoLoadCursorRef.current = null;
+    hasUserScrolledCatalogRef.current = false;
+    setFetchState((current) => ({ ...current, warningMessage: null, loadMoreError: null }));
+
+    if (activeTab === 'all') {
+      void fetchModels(searchQuery, null, false, true, true).finally(() => {
+        setIsRefreshing(false);
+      });
+      return;
+    }
+
+    const fetchId = latestFetchIdRef.current + 1;
+    latestFetchIdRef.current = fetchId;
+    setLoading(true);
+    setIsFetchingMore(false);
+    void modelCatalogService.getLocalModels()
+      .then((localModels) => {
+        if (fetchId !== latestFetchIdRef.current) {
+          return;
+        }
+
+        setModels(localModels);
+        setHasMore(false);
+        setNextCursor(null);
+      })
+      .catch((error) => {
+        if (fetchId !== latestFetchIdRef.current) {
+          return;
+        }
+
+        console.warn('[ModelsList] Pull-to-refresh failed to load local models', error);
+        setFetchState({ warningMessage: getModelCatalogErrorMessage(error), loadMoreError: null });
+      })
+      .finally(() => {
+        setIsRefreshing(false);
+        if (fetchId === latestFetchIdRef.current) {
+          setLoading(false);
+        }
+      });
+  }, [activeTab, fetchModels, isFetchingMore, isRefreshing, loading, searchQuery]);
+
   const handleCatalogScroll = useCallback((event: any) => {
     const offsetY = event?.nativeEvent?.contentOffset?.y;
     if (typeof offsetY === 'number' && offsetY > 0) {
@@ -835,6 +919,8 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
             ListEmptyComponent={renderEmptyState}
             ListFooterComponent={renderFooter}
             contentContainerStyle={{ flexGrow: 1, paddingBottom: screenLayoutMetrics.contentBottomInset }}
+            refreshing={isRefreshing}
+            onRefresh={handlePullToRefresh}
             onScroll={handleCatalogScroll}
             onEndReached={() => handleLoadMore('auto')}
             onEndReachedThreshold={0.6}

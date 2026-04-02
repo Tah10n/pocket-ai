@@ -3,7 +3,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 import DeviceInfo from 'react-native-device-info';
 import { hardwareListenerService } from './HardwareListenerService';
 import { EngineStatus, EngineState } from '../types/models';
-import { LlmChatCompletionOptions } from '../types/chat';
+import { LlmChatCompletionOptions, LlmChatMessage } from '../types/chat';
 import { registry } from './LocalStorageRegistry';
 import { getModelsDir } from './FileSystemSetup';
 import {
@@ -19,6 +19,90 @@ interface LoadModelOptions {
 
 type StateListener = (state: EngineState) => void;
 const DEFAULT_CONTEXT_SIZE = 4096;
+
+function getErrorMessageText(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  if (typeof error === 'string') {
+    return error;
+  }
+
+  if (error && typeof error === 'object' && 'message' in error && typeof (error as { message?: unknown }).message === 'string') {
+    return (error as { message: string }).message;
+  }
+
+  return '';
+}
+
+function isConversationAlternationError(error: unknown): boolean {
+  const message = getErrorMessageText(error);
+  return /Conversation roles must alternate user\/assistant/i.test(message);
+}
+
+function mergeConsecutiveMessages(messages: LlmChatMessage[]): LlmChatMessage[] {
+  const merged: LlmChatMessage[] = [];
+
+  for (const message of messages) {
+    if (merged.length === 0) {
+      merged.push({ ...message });
+      continue;
+    }
+
+    const lastMessage = merged[merged.length - 1];
+    if (lastMessage.role === message.role) {
+      merged[merged.length - 1] = {
+        role: lastMessage.role,
+        content: `${lastMessage.content}\n\n${message.content}`.trim(),
+      };
+      continue;
+    }
+
+    merged.push({ ...message });
+  }
+
+  return merged;
+}
+
+function normalizeMessagesForStrictRoleAlternation(messages: LlmChatMessage[]): LlmChatMessage[] {
+  const systemParts: string[] = [];
+  const nonSystemMessages: LlmChatMessage[] = [];
+
+  for (const message of messages) {
+    const content = message.content?.trim() ?? '';
+    if (!content) {
+      continue;
+    }
+
+    if (message.role === 'system') {
+      systemParts.push(content);
+      continue;
+    }
+
+    nonSystemMessages.push({ role: message.role, content });
+  }
+
+  let merged = mergeConsecutiveMessages(nonSystemMessages);
+
+  while (merged.length > 0 && merged[0].role === 'assistant') {
+    merged = merged.slice(1);
+  }
+
+  const systemContent = systemParts.join('\n\n').trim();
+  if (systemContent.length > 0) {
+    const systemPrefix = `System:\n${systemContent}`;
+    if (merged.length === 0) {
+      merged = [{ role: 'user', content: systemPrefix }];
+    } else if (merged[0].role === 'user') {
+      merged[0] = { role: 'user', content: `${systemPrefix}\n\n${merged[0].content}`.trim() };
+    } else {
+      merged.unshift({ role: 'user', content: systemPrefix });
+    }
+  }
+
+  return mergeConsecutiveMessages(merged);
+}
 
 class LLMEngineService {
   private context: LlamaContext | null = null;
@@ -129,39 +213,68 @@ class LLMEngineService {
       throw new AppError('engine_not_ready', 'Engine not ready');
     }
 
-    const completionPromise = this.context.completion(
-      {
-        messages,
-        n_predict: params?.n_predict ?? 512,
-        temperature: params?.temperature ?? 0.7,
-        top_p: params?.top_p ?? 0.9,
-        top_k: params?.top_k ?? 40,
-        min_p: params?.min_p ?? 0.05,
-        penalty_repeat: params?.penalty_repeat ?? 1,
-        enable_thinking: params?.enable_thinking ?? false,
-        reasoning_format: params?.reasoning_format ?? 'none',
-        stop: ['</s>', '<|im_end|>', '<|end|>'],
-      },
-      (data: TokenData) => {
-        if (onToken && (data.token || data.content !== undefined || data.reasoning_content !== undefined)) {
-          onToken({
-            token: data.token ?? '',
-            content: data.content,
-            reasoningContent: data.reasoning_content,
-            accumulatedText: data.accumulated_text,
-          });
-        }
-      },
-    );
+    let hasStreamedTokens = false;
+    const markTokensStreamed = () => {
+      hasStreamedTokens = true;
+    };
 
-    this.activeCompletionPromise = completionPromise;
+    const runCompletion = async (completionMessages: LlmChatMessage[], onTokensStreamed: () => void) => {
+      const completionPromise = this.context!.completion(
+        {
+          messages: completionMessages,
+          n_predict: params?.n_predict ?? 512,
+          temperature: params?.temperature ?? 0.7,
+          top_p: params?.top_p ?? 0.9,
+          top_k: params?.top_k ?? 40,
+          min_p: params?.min_p ?? 0.05,
+          penalty_repeat: params?.penalty_repeat ?? 1,
+          enable_thinking: params?.enable_thinking ?? false,
+          reasoning_format: params?.reasoning_format ?? 'none',
+          stop: ['</s>', '<|im_end|>', '<|end|>'],
+        },
+        (data: TokenData) => {
+          if (data.token || data.content !== undefined || data.reasoning_content !== undefined) {
+            onTokensStreamed();
+            onToken?.({
+              token: data.token ?? '',
+              content: data.content,
+              reasoningContent: data.reasoning_content,
+              accumulatedText: data.accumulated_text,
+            });
+          }
+        },
+      );
+
+      this.activeCompletionPromise = completionPromise;
+
+      try {
+        return await completionPromise;
+      } finally {
+        if (this.activeCompletionPromise === completionPromise) {
+          this.activeCompletionPromise = null;
+        }
+      }
+    };
 
     try {
-      return await completionPromise;
-    } finally {
-      if (this.activeCompletionPromise === completionPromise) {
-        this.activeCompletionPromise = null;
+      hasStreamedTokens = false;
+      return await runCompletion(messages, markTokensStreamed);
+    } catch (error) {
+      if (isConversationAlternationError(error)) {
+        if (hasStreamedTokens && onToken) {
+          console.warn(
+            '[LLMEngine] Conversation alternation error after streaming started; skipping retry to avoid duplicate output',
+          );
+          throw error;
+        }
+
+        console.warn('[LLMEngine] Retrying completion after normalizing chat roles for strict templates');
+        const normalizedMessages = normalizeMessagesForStrictRoleAlternation(messages);
+        hasStreamedTokens = false;
+        return await runCompletion(normalizedMessages, markTokensStreamed);
       }
+
+      throw error;
     }
   }
 

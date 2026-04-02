@@ -156,6 +156,9 @@ type CreateTreeProbeCandidateOptions = {
 
 export type CatalogServerSort = 'downloads' | 'likes';
 export type ModelCatalogErrorCode = 'rate_limited' | 'timeout' | 'network' | 'unknown';
+export type ModelCatalogCacheInvalidationSource = 'replay' | 'manual' | 'token' | 'unknown';
+
+type CacheInvalidationListener = (revision: number, source: ModelCatalogCacheInvalidationSource) => void;
 
 const MIN_GGUF_BYTES = 50 * 1024 * 1024;
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
@@ -251,6 +254,8 @@ export class ModelCatalogService {
   private persistentCache = new ModelCatalogCacheStore();
   private authCacheVersion = 0;
   private bufferedCursorSequence = 0;
+  private cacheInvalidationRevision = 0;
+  private cacheInvalidationListeners: Set<CacheInvalidationListener> = new Set();
   private treeRequestCache: Map<string, Promise<HuggingFaceTreeResponse>> = new Map();
   private readmeRequestCache: Map<string, Promise<ReadmeModelData | undefined>> = new Map();
   private resolvedFileProbeCache: Map<string, Promise<ModelAccessState | null>> = new Map();
@@ -264,7 +269,7 @@ export class ModelCatalogService {
       }
 
       this.authCacheVersion += 1;
-      this.clearCache();
+      this.clearCache('token');
     });
   }
 
@@ -276,7 +281,15 @@ export class ModelCatalogService {
     return this.persistentCache.getPersistedSizeBytes();
   }
 
-  public clearCache(): void {
+  public subscribeCacheInvalidations(listener: CacheInvalidationListener): () => void {
+    this.cacheInvalidationListeners.add(listener);
+    this.notifyCacheInvalidation(listener, this.cacheInvalidationRevision, 'replay');
+    return () => {
+      this.cacheInvalidationListeners.delete(listener);
+    };
+  }
+
+  public clearCache(source: Exclude<ModelCatalogCacheInvalidationSource, 'replay'> = 'unknown'): void {
     this.bufferedCursorSequence = 0;
     this.searchCache.clear();
     this.modelSnapshotCache.clear();
@@ -285,6 +298,25 @@ export class ModelCatalogService {
     this.resolvedFileProbeCache.clear();
     this.resolvedFileProbeStateCache.clear();
     this.persistentCache.clearAll();
+    this.emitCacheInvalidation(source);
+  }
+
+  private emitCacheInvalidation(source: Exclude<ModelCatalogCacheInvalidationSource, 'replay'>) {
+    this.cacheInvalidationRevision += 1;
+    const revision = this.cacheInvalidationRevision;
+    this.cacheInvalidationListeners.forEach((listener) => this.notifyCacheInvalidation(listener, revision, source));
+  }
+
+  private notifyCacheInvalidation(
+    listener: CacheInvalidationListener,
+    revision: number,
+    source: ModelCatalogCacheInvalidationSource,
+  ): void {
+    try {
+      listener(revision, source);
+    } catch (error) {
+      console.warn('[ModelCatalogService] Cache invalidation listener failed', error);
+    }
   }
 
   private pruneSearchCache(): void {
@@ -359,20 +391,31 @@ export class ModelCatalogService {
    */
   public async searchModels(
     query: string = 'gguf',
-    options?: { cursor?: string | null; pageSize?: number; sort?: CatalogServerSort | null },
+    options?: {
+      cursor?: string | null;
+      pageSize?: number;
+      sort?: CatalogServerSort | null;
+      forceRefresh?: boolean;
+    },
   ): Promise<ModelCatalogSearchResult> {
     return this.searchModelsInternal(query, options, 0);
   }
 
   private async searchModelsInternal(
     query: string,
-    options: { cursor?: string | null; pageSize?: number; sort?: CatalogServerSort | null } | undefined,
+    options: {
+      cursor?: string | null;
+      pageSize?: number;
+      sort?: CatalogServerSort | null;
+      forceRefresh?: boolean;
+    } | undefined,
     retryCount: number,
   ): Promise<ModelCatalogSearchResult> {
     const requestContext = await this.createRequestContext();
     const cursor = options?.cursor ?? null;
     const pageSize = options?.pageSize ?? 20;
     const sort = options?.sort ?? null;
+    const forceRefresh = options?.forceRefresh === true && cursor === null;
     const normalizedQuery = this.normalizeQuery(query);
     const hasAuthToken = requestContext.hasAuthToken;
     const cacheKey = this.buildMemorySearchCacheKey(
@@ -390,7 +433,7 @@ export class ModelCatalogService {
       this.searchCache.delete(cacheKey);
     }
 
-    if (cached && (isCacheFresh || isBufferedCursor)) {
+    if (!forceRefresh && cached && (isCacheFresh || isBufferedCursor)) {
       const filteredCachedModels = this.filterCatalogSearchModels(cached.result.models);
       return {
         ...cached.result,

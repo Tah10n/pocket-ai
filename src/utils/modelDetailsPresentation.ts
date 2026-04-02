@@ -28,11 +28,11 @@ type Translate = (key: string) => string;
 export function getDetailToneTokens(tone: ModelDetailsTone) {
   if (tone === 'neutral') {
     return {
-      shellClassName: 'border-outline-200 bg-background-0/80 dark:border-outline-700 dark:bg-background-950/55',
+      shellClassName: 'border-outline-200 bg-background-0 dark:border-outline-700 dark:bg-background-950/70',
       iconWrapClassName: 'bg-background-100 dark:bg-background-800',
       iconClassName: 'text-typography-700 dark:text-typography-200',
-      labelClassName: 'text-typography-600 dark:text-typography-300',
-      valueClassName: 'text-typography-900 dark:text-typography-50',
+      labelClassName: 'text-typography-600 dark:text-typography-400',
+      valueClassName: 'text-typography-900 dark:text-typography-100',
     };
   }
 

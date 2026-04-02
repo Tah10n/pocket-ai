@@ -6,7 +6,7 @@ export type ModelSizeRange = 'small' | 'medium' | 'large';
 export type ModelSortField = 'name' | 'size' | 'downloaded' | 'downloads' | 'likes';
 export type ModelSortDirection = 'asc' | 'desc';
 export type CatalogDiscoveryMode = 'uninitialized' | 'guided' | 'full' | 'custom';
-export const MODELS_PAGE_SIZE = 10;
+export const MODELS_PAGE_SIZE = 20;
 
 export interface ModelFilterCriteria {
   fitsInRamOnly: boolean;

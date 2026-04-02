@@ -3,6 +3,7 @@ import { requireOptionalNativeModule } from 'expo-modules-core';
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import * as SplashScreen from 'expo-splash-screen';
+import * as SystemUI from 'expo-system-ui';
 import { useEffect, useState } from 'react';
 import 'react-native-reanimated';
 import { useTranslation } from 'react-i18next';
@@ -206,6 +207,16 @@ function RootNavigator() {
   const motion = useMotionPreferences();
 
   usePerformanceNavigationTrace();
+
+  useEffect(() => {
+    // Keep native root view background in sync with the app theme.
+    // Prevents light flashes/stripes during native navigation transitions in dark mode.
+    void SystemUI.setBackgroundColorAsync(colors.background).catch((error) => {
+      if (__DEV__) {
+        console.warn('[RootNavigator] Failed to set root background color', error);
+      }
+    });
+  }, [colors.background]);
 
   return (
     <ThemeProvider value={navigationTheme}>

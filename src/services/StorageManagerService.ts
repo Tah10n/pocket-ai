@@ -276,7 +276,7 @@ export async function clearActiveCache() {
   }
 
   try {
-    modelCatalogService.clearCache();
+    modelCatalogService.clearCache('manual');
   } catch (error) {
     console.warn('[StorageManagerService] Failed to clear catalog cache', error);
     firstError ??= error;

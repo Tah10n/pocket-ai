@@ -801,17 +801,21 @@ export function getThreadInferenceWindow(
   const options = resolveInferenceWindowOptions(optionsOrMaxContextMessages);
   const systemMessages: LlmChatMessage[] = [];
 
-  if (thread.presetSnapshot.systemPrompt.trim().length > 0) {
-    systemMessages.push({
-      role: 'system',
-      content: thread.presetSnapshot.systemPrompt,
-    });
+  const systemContentParts: string[] = [];
+  const systemPrompt = thread.presetSnapshot.systemPrompt.trim();
+  if (systemPrompt.length > 0) {
+    systemContentParts.push(systemPrompt);
   }
 
   if (thread.summary && !thread.summary.isPlaceholder) {
+    systemContentParts.push(`Conversation summary:\n${thread.summary.content}`);
+  }
+
+  const systemContent = systemContentParts.join('\n\n').trim();
+  if (systemContent.length > 0) {
     systemMessages.push({
       role: 'system',
-      content: `Conversation summary:\n${thread.summary.content}`,
+      content: systemContent,
     });
   }
 

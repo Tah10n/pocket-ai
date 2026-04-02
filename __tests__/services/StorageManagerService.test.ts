@@ -213,6 +213,7 @@ describe('StorageManagerService', () => {
     await expect(clearActiveCache()).resolves.toBe(0);
 
     expect(mockedModelCatalogService.clearCache).toHaveBeenCalledTimes(1);
+    expect(mockedModelCatalogService.clearCache).toHaveBeenCalledWith('manual');
   });
 
   it('preserves persisted per-model settings by default when offloading a model', async () => {

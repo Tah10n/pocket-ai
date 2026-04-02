@@ -27,3 +27,34 @@ describe('HardwareListenerService chat banner inputs', () => {
     });
   });
 });
+
+describe('HardwareListenerService network status', () => {
+  it('does not treat unknown reachability as offline', () => {
+    jest.isolateModules(() => {
+      const { hardwareListenerService } = require('../../src/services/HardwareListenerService');
+      expect(hardwareListenerService.getCurrentStatus().isConnected).toBe(true);
+
+      (hardwareListenerService as any).handleNetworkChange({
+        type: 'unknown',
+        isConnected: null,
+        isInternetReachable: null,
+      });
+
+      expect(hardwareListenerService.getCurrentStatus().isConnected).toBe(true);
+    });
+  });
+
+  it('updates reachability when NetInfo provides a boolean', () => {
+    jest.isolateModules(() => {
+      const { hardwareListenerService } = require('../../src/services/HardwareListenerService');
+
+      (hardwareListenerService as any).handleNetworkChange({
+        type: 'none',
+        isConnected: false,
+        isInternetReachable: false,
+      });
+
+      expect(hardwareListenerService.getCurrentStatus().isConnected).toBe(false);
+    });
+  });
+});

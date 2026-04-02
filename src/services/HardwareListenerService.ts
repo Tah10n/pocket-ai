@@ -90,10 +90,24 @@ class HardwareListenerService {
     };
 
     private handleNetworkChange = (state: NetInfoState) => {
-        this.updateStatus({
+        // NetInfo can report `null` during the initial "unknown" phase (especially on startup).
+        // Treat that as "no new signal" instead of "offline", otherwise the app can get stuck in
+        // offline fallback mode (e.g. showing only local models) until a manual refresh.
+        const nextStatus: Partial<HardwareStatus> = {
             networkType: state.type,
-            isConnected: state.isConnected ?? false,
-        });
+        };
+
+        const reachability = typeof state.isInternetReachable === 'boolean'
+            ? state.isInternetReachable
+            : typeof state.isConnected === 'boolean'
+                ? state.isConnected
+                : undefined;
+
+        if (typeof reachability === 'boolean') {
+            nextStatus.isConnected = reachability;
+        }
+
+        this.updateStatus(nextStatus);
     };
 
     private updateStatus(partialStatus: Partial<HardwareStatus>) {

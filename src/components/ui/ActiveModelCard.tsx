@@ -6,6 +6,7 @@ import { ScreenActionPill, ScreenCard, ScreenStack } from './ScreenShell';
 import { useLLMEngine } from '@/hooks/useLLMEngine';
 import { registry } from '@/services/LocalStorageRegistry';
 import { EngineStatus } from '@/types/models';
+import { DECIMAL_GIGABYTE } from '@/utils/modelSize';
 
 interface ActiveModelCardProps {
   onSwapModel?: () => void;
@@ -25,7 +26,7 @@ export const ActiveModelCard = ({ onSwapModel }: ActiveModelCardProps) => {
   const memoryLabel = activeModel
     ? activeModel.size === null
       ? 'Unknown size'
-      : `${(activeModel.size / (1024 * 1024 * 1024)).toFixed(1)} GB on disk`
+      : `${(activeModel.size / DECIMAL_GIGABYTE).toFixed(1)} GB on disk`
     : hasDownloadedModels
       ? `${downloadedModels.length} downloaded ${downloadedModels.length === 1 ? 'model' : 'models'}`
       : 'Download and load a GGUF model';

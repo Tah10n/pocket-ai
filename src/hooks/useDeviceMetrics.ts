@@ -5,6 +5,7 @@ import DeviceInfo from 'react-native-device-info';
 import { registry } from '../services/LocalStorageRegistry';
 import { getSystemMemorySnapshot } from '../services/SystemMetricsService';
 import { LifecycleStatus } from '../types/models';
+import { DECIMAL_GIGABYTE } from '../utils/modelSize';
 import { motionTokens } from '../utils/themeTokens';
 
 export interface DeviceMetrics {
@@ -50,7 +51,7 @@ export interface MotionPreferences {
 }
 
 function bytesToGb(value: number) {
-  return value / (1024 * 1024 * 1024);
+  return value / DECIMAL_GIGABYTE;
 }
 
 function buildMotionPreferences(prefersReducedMotion: boolean, totalMemoryBytes: number): MotionPreferences {

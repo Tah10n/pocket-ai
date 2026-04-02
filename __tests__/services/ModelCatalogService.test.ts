@@ -198,11 +198,14 @@ describe('ModelCatalogService', () => {
   });
 
   it('keeps the largest context ceiling from summary config, cardData, and gguf metadata', async () => {
-    global.fetch = jest.fn(() =>
-      Promise.resolve({
-        ok: true,
-        json: () => Promise.resolve([
-          {
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.includes('/api/models/org/summary-long-context-model')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({
             ...makeRepo('org/summary-long-context-model'),
             config: {
               max_position_embeddings: 8192,
@@ -215,14 +218,19 @@ describe('ModelCatalogService', () => {
               context_length: 65536,
               architecture: 'llama',
             },
-          },
-        ]),
-      }),
-    ) as jest.Mock;
+          }),
+        });
+      }
 
-    const result = await modelCatalogService.searchModels('summary-long-context-model');
+      return Promise.resolve({
+        ok: false,
+        status: 404,
+      });
+    }) as jest.Mock;
 
-    expect(result.models[0]).toEqual(expect.objectContaining({
+    const result = await modelCatalogService.getModelDetails('org/summary-long-context-model');
+
+    expect(result).toEqual(expect.objectContaining({
       id: 'org/summary-long-context-model',
       maxContextTokens: 65536,
     }));
@@ -476,6 +484,10 @@ describe('ModelCatalogService', () => {
       if (typeof input === 'string' && input.includes('/tree/main?recursive=true')) {
         return Promise.resolve({
           ok: true,
+          status: 200,
+          headers: {
+            get: jest.fn(() => null),
+          },
           json: () => Promise.resolve([
             {
               path: 'model.Q4_K_M.gguf',
@@ -488,6 +500,10 @@ describe('ModelCatalogService', () => {
 
       return Promise.resolve({
         ok: true,
+        status: 200,
+        headers: {
+          get: jest.fn(() => null),
+        },
         json: () => Promise.resolve([makeRepoWithUnknownSize('org/unknown-size-model')]),
       });
     }) as jest.Mock;
@@ -498,6 +514,8 @@ describe('ModelCatalogService', () => {
     expect(result.models[0].id).toBe('org/unknown-size-model');
     expect(result.models[0].size).toBe(2 * 1024 * 1024 * 1024);
     expect(result.models[0].sha256).toBe('tree-sha');
+    expect(result.models[0].requiresTreeProbe).toBe(false);
+    expect(global.fetch).toHaveBeenCalledTimes(2);
     expect((global.fetch as jest.Mock).mock.calls[1][0]).toContain('/tree/main?recursive=true');
   });
 
@@ -521,6 +539,10 @@ describe('ModelCatalogService', () => {
 
       return Promise.resolve({
         ok: true,
+        status: 200,
+        headers: {
+          get: jest.fn(() => null),
+        },
         json: () => Promise.resolve([makeIncompletePublicRepo('org/public-probe-model')]),
       });
     }) as jest.Mock;
@@ -531,6 +553,8 @@ describe('ModelCatalogService', () => {
     expect(result.models[0].id).toBe('org/public-probe-model');
     expect(result.models[0].accessState).toBe(ModelAccessState.PUBLIC);
     expect(result.models[0].size).toBe(2 * 1024 * 1024 * 1024);
+    expect(result.models[0].requiresTreeProbe).toBe(false);
+    expect(global.fetch).toHaveBeenCalledTimes(2);
     expect((global.fetch as jest.Mock).mock.calls[1][0]).toContain('/tree/main?recursive=true');
   });
 
@@ -539,6 +563,10 @@ describe('ModelCatalogService', () => {
       if (typeof input === 'string' && input.includes('/tree/main?recursive=true')) {
         return Promise.resolve({
           ok: true,
+          status: 200,
+          headers: {
+            get: jest.fn(() => null),
+          },
           json: () => Promise.resolve([
             {
               path: 'model.Q4_K_M.gguf',
@@ -549,6 +577,10 @@ describe('ModelCatalogService', () => {
 
       return Promise.resolve({
         ok: true,
+        status: 200,
+        headers: {
+          get: jest.fn(() => null),
+        },
         json: () => Promise.resolve([makeRepoWithUnknownSize('org/still-unknown-size-model')]),
       });
     }) as jest.Mock;
@@ -558,6 +590,7 @@ describe('ModelCatalogService', () => {
     expect(result.models).toHaveLength(1);
     expect(result.models[0].size).toBeNull();
     expect(result.models[0].fitsInRam).toBeNull();
+    expect(global.fetch).toHaveBeenCalledTimes(2);
   });
 
   it('prefers the Q4_K_M quant even when Hugging Face only exposes filename metadata', async () => {
@@ -630,6 +663,10 @@ describe('ModelCatalogService', () => {
 
       return Promise.resolve({
         ok: true,
+        status: 200,
+        headers: {
+          get: jest.fn(() => null),
+        },
         json: () => Promise.resolve([makeIncompletePublicRepo('org/incomplete-tree-probe')]),
       });
     }) as jest.Mock;
@@ -638,11 +675,13 @@ describe('ModelCatalogService', () => {
 
     expect(result.models).toHaveLength(1);
     expect(result.models[0].id).toBe('org/incomplete-tree-probe');
+    expect(result.models[0].requiresTreeProbe).toBe(true);
     expect(result.models[0].resolvedFileName).toBe('model.Q8_0.gguf');
     expect(result.models[0].downloadUrl).toBe('https://huggingface.co/org/incomplete-tree-probe/resolve/main/model.Q8_0.gguf');
     expect(result.models[0].size).toBe(5 * 1024 * 1024 * 1024);
     expect(result.models[0].sha256).toBe('partial-tree-q8-sha');
-    expect(result.models[0].requiresTreeProbe).toBe(true);
+    expect(global.fetch).toHaveBeenCalledTimes(3);
+    expect((global.fetch as jest.Mock).mock.calls[2][0]).toContain('cursor=tree-page-2');
   });
 
   it('follows paginated tree cursors until it finds the GGUF entry metadata', async () => {
@@ -685,6 +724,10 @@ describe('ModelCatalogService', () => {
 
       return Promise.resolve({
         ok: true,
+        status: 200,
+        headers: {
+          get: jest.fn(() => null),
+        },
         json: () => Promise.resolve([makeRepoWithUnknownSize('org/paged-tree-model')]),
       });
     }) as jest.Mock;
@@ -694,6 +737,8 @@ describe('ModelCatalogService', () => {
     expect(result.models).toHaveLength(1);
     expect(result.models[0].size).toBe(3 * 1024 * 1024 * 1024);
     expect(result.models[0].sha256).toBe('paged-tree-sha');
+    expect(result.models[0].requiresTreeProbe).toBe(false);
+    expect(global.fetch).toHaveBeenCalledTimes(3);
     expect((global.fetch as jest.Mock).mock.calls[2][0]).toContain('cursor=tree-page-2');
   });
 
@@ -701,12 +746,18 @@ describe('ModelCatalogService', () => {
     global.fetch = jest.fn(() =>
       Promise.resolve({
         ok: true,
-        json: () => Promise.resolve([makeGatedRepo('org/gated-model')]),
+        json: () => Promise.resolve([
+          {
+            ...makeRepo('org/gated-model'),
+            gated: 'manual',
+          },
+        ]),
       }),
     ) as jest.Mock;
 
     const result = await modelCatalogService.searchModels('phi');
 
+    expect(result.models).toHaveLength(1);
     expect(result.models[0].accessState).toBe(ModelAccessState.AUTH_REQUIRED);
     expect(result.models[0].isGated).toBe(true);
   });
@@ -749,13 +800,26 @@ describe('ModelCatalogService', () => {
 
       return Promise.resolve({
         ok: true,
-        json: () => Promise.resolve([makeGatedRepo('org/denied-model')]),
+        status: 200,
+        headers: {
+          get: jest.fn(() => null),
+        },
+        json: () => Promise.resolve([
+          {
+            ...makeRepoWithUnknownSize('org/denied-model'),
+            gguf: { total: 2 * 1024 * 1024 * 1024 },
+            gated: 'manual',
+          },
+        ]),
       });
     }) as jest.Mock;
 
     const result = await modelCatalogService.searchModels('phi');
 
+    expect(result.models).toHaveLength(1);
     expect(result.models[0].accessState).toBe(ModelAccessState.ACCESS_DENIED);
+    expect(result.models[0].requiresTreeProbe).toBe(true);
+    expect(global.fetch).toHaveBeenCalledTimes(2);
   });
 
   it('revalidates size-known gated models with a lightweight file access probe before marking them authorized', async () => {
@@ -770,6 +834,10 @@ describe('ModelCatalogService', () => {
 
       return Promise.resolve({
         ok: true,
+        status: 200,
+        headers: {
+          get: jest.fn(() => null),
+        },
         json: () => Promise.resolve([
           {
             ...makeRepo('org/size-known-gated-model'),
@@ -781,6 +849,7 @@ describe('ModelCatalogService', () => {
 
     const result = await modelCatalogService.searchModels('phi');
 
+    expect(result.models).toHaveLength(1);
     expect(result.models[0].accessState).toBe(ModelAccessState.ACCESS_DENIED);
     expect((global.fetch as jest.Mock).mock.calls[1][0]).toContain('/resolve/main/model.Q4_K_M.gguf');
     expect((global.fetch as jest.Mock).mock.calls[1][1]).toMatchObject({ method: 'HEAD' });
@@ -805,6 +874,10 @@ describe('ModelCatalogService', () => {
 
       return Promise.resolve({
         ok: true,
+        status: 200,
+        headers: {
+          get: jest.fn(() => null),
+        },
         json: () => Promise.resolve([
           {
             ...makeRepo('org/head-unsupported-gated-model'),
@@ -817,6 +890,10 @@ describe('ModelCatalogService', () => {
     const result = await modelCatalogService.searchModels('phi');
 
     expect(result.models[0].accessState).toBe(ModelAccessState.AUTHORIZED);
+
+    const refreshed = await modelCatalogService.refreshModelMetadata(result.models[0], { includeDetails: false });
+
+    expect(refreshed.accessState).toBe(ModelAccessState.AUTHORIZED);
     expect((global.fetch as jest.Mock).mock.calls[1][1]).toMatchObject({ method: 'HEAD' });
     expect((global.fetch as jest.Mock).mock.calls[2][1]).toMatchObject({
       method: 'GET',
@@ -1262,7 +1339,7 @@ describe('ModelCatalogService', () => {
 
     expect(result.models[0].downloads).toBe(1234);
     expect(result.models[0].likes).toBe(56);
-    expect(result.models[0].tags).toEqual(['gguf', 'chat']);
+    expect(result.models[0].tags).toBeUndefined();
   });
 
   it('passes Hugging Face server-side sort parameters for most-downloaded ordering', async () => {
@@ -1552,7 +1629,7 @@ describe('ModelCatalogService', () => {
 
     expect(result.models[0]).toEqual(expect.objectContaining({
       id: 'org/summary-size-label-model',
-      parameterSizeLabel: '14B',
+      parameterSizeLabel: undefined,
     }));
   });
 

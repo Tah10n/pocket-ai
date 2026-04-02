@@ -177,8 +177,10 @@ export function useModelDetailsController(modelId: string) {
           return;
         }
 
-        const resolvedModel = targetModel.size === null || targetModel.requiresTreeProbe === true
-          ? await modelCatalogService.refreshModelMetadata(targetModel)
+        const resolvedModel = targetModel.size === null
+          || targetModel.requiresTreeProbe === true
+          || (targetModel.isGated || targetModel.isPrivate)
+          ? await modelCatalogService.refreshModelMetadata(targetModel, { includeDetails: false })
           : targetModel;
 
         setModel((current) => (current ? { ...current, ...resolvedModel } : resolvedModel));
@@ -190,6 +192,11 @@ export function useModelDetailsController(modelId: string) {
 
         if (resolvedModel.accessState === ModelAccessState.ACCESS_DENIED) {
           await handleOpenModelPage(resolvedModel.id);
+          return;
+        }
+
+        if (!resolvedModel.resolvedFileName) {
+          Alert.alert(t('models.actionFailedTitle'), t('common.errors.downloadMetadataUnavailable'));
           return;
         }
 

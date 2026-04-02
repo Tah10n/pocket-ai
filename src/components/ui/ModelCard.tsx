@@ -111,6 +111,11 @@ const ModelCardComponent = ({
             {t('models.ramWarning')}
           </ScreenBadge>
         ) : null}
+        {model.size === null ? (
+          <ScreenBadge tone="warning" size="micro" iconName="help">
+            {t('models.sizeUnknownBadge')}
+          </ScreenBadge>
+        ) : null}
         <ModelMetaPill label={t('models.sizeLabel')} value={sizeLabel} />
       </Box>
 

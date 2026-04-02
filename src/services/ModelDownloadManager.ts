@@ -71,6 +71,12 @@ export class ModelDownloadManager {
     const { updateModelInQueue, removeFromQueue, setActiveDownload } = useDownloadStore.getState();
 
     try {
+      if (model.requiresTreeProbe && !model.resolvedFileName) {
+        throw new AppError('download_metadata_unavailable', 'MODEL_METADATA_UNAVAILABLE', {
+          details: { modelId: model.id },
+        });
+      }
+
       if (model.size === null && !model.allowUnknownSizeDownload) {
         throw new AppError('download_size_unknown', 'MODEL_SIZE_UNKNOWN', {
           details: { modelId: model.id },

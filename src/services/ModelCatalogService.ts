@@ -248,6 +248,10 @@ export interface ModelCatalogSearchResult {
   warning?: ModelCatalogError;
 }
 
+type RefreshModelMetadataOptions = {
+  includeDetails?: boolean;
+};
+
 export class ModelCatalogService {
   private searchCache: Map<string, CatalogCacheEntry> = new Map();
   private modelSnapshotCache: Map<string, ModelMetadata> = new Map();
@@ -811,13 +815,19 @@ export class ModelCatalogService {
     }
   }
 
-  public async refreshModelMetadata(model: ModelMetadata): Promise<ModelMetadata> {
-    return this.refreshModelMetadataInternal(model, 0);
+  public async refreshModelMetadata(
+    model: ModelMetadata,
+    options?: RefreshModelMetadataOptions,
+  ): Promise<ModelMetadata> {
+    return this.refreshModelMetadataInternal(model, 0, {
+      includeDetails: options?.includeDetails !== false,
+    });
   }
 
   private async refreshModelMetadataInternal(
     model: ModelMetadata,
     retryCount: number,
+    options: { includeDetails: boolean },
   ): Promise<ModelMetadata> {
     const requestContext = await this.createRequestContext();
     try {
@@ -829,7 +839,7 @@ export class ModelCatalogService {
         )
       );
 
-      if (canRefreshDetailsForContextWindow) {
+      if (options.includeDetails && canRefreshDetailsForContextWindow) {
         return this.getModelDetailsInternal(model.id, retryCount);
       }
 
@@ -841,7 +851,7 @@ export class ModelCatalogService {
       return this.syncRegistryModelIfPresent(refreshed);
     } catch (error) {
       if (error instanceof StaleCatalogAuthError && retryCount < 1) {
-        return this.refreshModelMetadataInternal(model, retryCount + 1);
+        return this.refreshModelMetadataInternal(model, retryCount + 1, options);
       }
 
       throw error;
@@ -884,9 +894,11 @@ export class ModelCatalogService {
     totalMemory: number,
     requestContext: CatalogRequestContext,
   ): Promise<ModelMetadata[]> {
+    const batchSize = 5;
     const span = performanceMonitor.startSpan('catalog.resolveMissingModelMetadata', {
       count: models.length,
       hasAuthToken: requestContext.hasAuthToken,
+      batchSize,
     });
     performanceMonitor.incrementCounter('catalog.resolveMissingModelMetadata.calls');
 
@@ -986,7 +998,6 @@ export class ModelCatalogService {
       return model;
     };
 
-    const batchSize = 5;
     let results: ModelMetadata[] = [];
     let outcome: 'success' | 'error' = 'success';
 
@@ -1046,12 +1057,11 @@ export class ModelCatalogService {
           sort,
         );
         const baseModels = this.transformHFResponse(page.items, totalMemory, requestContext.authToken);
-        const hydratedModels = await this.resolveMissingModelMetadata(
-          baseModels,
-          totalMemory,
-          requestContext,
-        );
-        models = this.mergeUniqueModelsById([...models, ...hydratedModels]);
+        const hydratedModels = await this.resolveMissingModelMetadata(baseModels, totalMemory, requestContext);
+        // Merge with the local registry so downloaded entries don't disappear just because the
+        // remote payload omitted some metadata or a tree lookup failed.
+        const mergedHydratedModels = hydratedModels.map((model) => this.mergeModelWithRegistry(model) ?? model);
+        models = this.mergeUniqueModelsById([...models, ...mergedHydratedModels]);
         nextCursor = this.resolveNextCatalogCursor(requestedCursor, page.nextCursor, visitedCursors);
         exhausted = nextCursor === null;
 
@@ -1160,11 +1170,13 @@ export class ModelCatalogService {
     nextCursor: string | null = null,
     sort: CatalogServerSort | null = null,
   ): Promise<HuggingFaceModelsPage> {
+    const cursorType = nextCursor ? 'cursor' : 'initial';
     const span = performanceMonitor.startSpan('catalog.fetchHuggingFaceModels', {
       query: normalizedQuery,
       limit,
       hasAuthToken: requestContext.hasAuthToken,
-      cursor: nextCursor ? 'cursor' : 'initial',
+      cursorType,
+      cursorHash: nextCursor ? this.hashForTrace(nextCursor) : undefined,
       sort: sort ?? undefined,
     });
     performanceMonitor.incrementCounter('catalog.fetchHuggingFaceModels.calls');
@@ -1210,6 +1222,16 @@ export class ModelCatalogService {
     }
   }
 
+  private hashForTrace(value: string): string {
+    let hash = 2166136261;
+    for (let i = 0; i < value.length; i += 1) {
+      hash ^= value.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+
+    return (hash >>> 0).toString(16);
+  }
+
   private buildSearchUrl(
     normalizedQuery: string,
     limit: number,
@@ -1239,7 +1261,7 @@ export class ModelCatalogService {
   private transformHFResponse(
     data: HuggingFaceModelSummary[],
     totalMemory: number,
-    _authToken: string | null,
+    authToken: string | null,
   ): ModelMetadata[] {
     const results: ModelMetadata[] = [];
 
@@ -1251,7 +1273,7 @@ export class ModelCatalogService {
       }
 
       const hasSiblingMetadata = Array.isArray(item.siblings) && item.siblings.length > 0;
-      const probeCandidate = this.createTreeProbeCandidate(item, repoId, {
+      const probeCandidate = this.createTreeProbeCandidate(item, repoId, totalMemory, authToken, {
         allowPublic: !hasSiblingMetadata,
       });
       if (!hasSiblingMetadata) {
@@ -1275,12 +1297,9 @@ export class ModelCatalogService {
       const fitsInRam = typeof size === 'number' ? size < totalMemory * 0.8 : null;
       const fileName = this.getFileName(ggufSibling) || 'model.gguf';
       const hfRevision = item.sha ?? undefined;
-      const maxContextTokens = this.resolveSummaryMaxContextTokens(item);
       const requiresAuth = Boolean(item.gated) || item.private === true;
       const requiresTreeProbe = this.shouldRevalidateCatalogSummarySelection(ggufSibling);
-      const accessState = requiresAuth
-        ? ModelAccessState.AUTH_REQUIRED
-        : ModelAccessState.PUBLIC;
+      const accessState = this.resolveDetailAccessState(requiresAuth, authToken);
 
       results.push(normalizePersistedModelMetadata({
         id: repoId,
@@ -1298,19 +1317,8 @@ export class ModelCatalogService {
         lifecycleStatus: LifecycleStatus.AVAILABLE,
         downloadProgress: 0,
         sha256: this.getFileSha(ggufSibling),
-        maxContextTokens,
-        parameterSizeLabel: this.resolveStringMetadata(undefined, item.gguf?.size_label),
-        modelType: item.config?.model_type ?? item.gguf?.architecture,
-        architectures: item.config?.architectures,
-        baseModels: this.resolveStringArrayMetadata(undefined, item.cardData?.base_model),
-        license: this.resolveStringMetadata(undefined, item.cardData?.license),
-        languages: this.resolveStringArrayMetadata(undefined, item.cardData?.language),
-        datasets: this.resolveStringArrayMetadata(undefined, item.cardData?.datasets),
-        quantizedBy: this.resolveStringMetadata(undefined, item.cardData?.quantized_by),
-        modelCreator: this.resolveStringMetadata(undefined, item.cardData?.model_creator),
         downloads: item.downloads ?? null,
         likes: item.likes ?? null,
-        tags: item.tags,
       }));
     }
 
@@ -1320,6 +1328,8 @@ export class ModelCatalogService {
   private createTreeProbeCandidate(
     item: HuggingFaceModelSummary,
     repoId: string,
+    totalMemory: number,
+    authToken: string | null,
     options?: CreateTreeProbeCandidateOptions,
   ): ModelMetadata | null {
     const requiresAuth = Boolean(item.gated) || item.private === true;
@@ -1331,34 +1341,27 @@ export class ModelCatalogService {
       return null;
     }
 
+    const size = typeof item.gguf?.total === 'number' && Number.isFinite(item.gguf.total) && item.gguf.total > 0
+      ? Math.round(item.gguf.total)
+      : null;
+    const fitsInRam = size === null ? null : size < totalMemory * 0.8;
+
     return normalizePersistedModelMetadata({
       id: repoId,
       name: repoId.split('/').pop() || repoId,
       author: item.author || repoId.split('/')[0],
-      size: null,
+      size,
       downloadUrl: buildHuggingFaceResolveUrl(repoId, 'model.gguf', item.sha ?? undefined),
-      fitsInRam: null,
-      accessState: requiresAuth
-        ? ModelAccessState.AUTH_REQUIRED
-        : ModelAccessState.PUBLIC,
+      fitsInRam,
+      accessState: this.resolveDetailAccessState(requiresAuth, authToken),
       isGated: Boolean(item.gated),
       isPrivate: item.private === true,
       lifecycleStatus: LifecycleStatus.AVAILABLE,
       downloadProgress: 0,
       requiresTreeProbe: true,
       hfRevision: item.sha ?? undefined,
-      maxContextTokens: this.resolveSummaryMaxContextTokens(item),
-      parameterSizeLabel: this.resolveStringMetadata(undefined, item.gguf?.size_label),
-      modelType: item.config?.model_type ?? item.gguf?.architecture,
-      baseModels: this.resolveStringArrayMetadata(undefined, item.cardData?.base_model),
-      license: this.resolveStringMetadata(undefined, item.cardData?.license),
-      languages: this.resolveStringArrayMetadata(undefined, item.cardData?.language),
-      datasets: this.resolveStringArrayMetadata(undefined, item.cardData?.datasets),
-      quantizedBy: this.resolveStringMetadata(undefined, item.cardData?.quantized_by),
-      modelCreator: this.resolveStringMetadata(undefined, item.cardData?.model_creator),
       downloads: item.downloads ?? null,
       likes: item.likes ?? null,
-      tags: item.tags,
     });
   }
 

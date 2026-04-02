@@ -32,6 +32,7 @@ import {
 } from '@/store/modelsStore';
 import { EngineStatus, LifecycleStatus, ModelAccessState, type ModelMetadata } from '@/types/models';
 import { mergeModelWithRuntimeState } from '@/utils/modelRuntimeState';
+import { DECIMAL_GIGABYTE } from '@/utils/modelSize';
 import { screenLayoutMetrics } from '@/utils/themeTokens';
 import { ModelsFilter } from './ModelsFilter';
 import { type ModelsCatalogTab } from './modelTabs';
@@ -89,7 +90,7 @@ function matchesSize(model: ModelMetadata, filters: ModelFilterCriteria): boolea
     return false;
   }
 
-  const sizeInGb = model.size / (1024 * 1024 * 1024);
+  const sizeInGb = model.size / DECIMAL_GIGABYTE;
   return filters.sizeRanges.some((sizeRange) => {
     if (sizeRange === 'small') return sizeInGb < 2;
     if (sizeRange === 'medium') return sizeInGb >= 2 && sizeInGb <= 5;
@@ -169,6 +170,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
   const latestFetchIdRef = useRef(0);
   const appendInFlightRef = useRef(false);
   const lastAutoLoadCursorRef = useRef<string | null>(null);
+  const autoFillAttemptsRef = useRef(0);
   const hasUserScrolledCatalogRef = useRef(false);
   const catalogFirstResultsShownSessionRef = useRef<string | null>(null);
   const { startDownload, cancelDownload, queue } = useModelDownload();
@@ -243,7 +245,8 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
       const fetchSpan = performanceMonitor.startSpan(
         append ? 'catalog.fetch.more' : 'catalog.fetch.initial',
         {
-          cursor: cursor ?? undefined,
+          cursorType: cursor ? 'cursor' : 'initial',
+          cursorIsBuffered: cursor ? cursor.startsWith('catalog-buffer:') : undefined,
           pageSize: MODELS_PAGE_SIZE,
           sort: serverSort ?? undefined,
         },
@@ -476,7 +479,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
 
   const filteredModels = useMemo(() => {
     const filtered = displayModels.filter((model) => {
-      if (filters.fitsInRamOnly && !model.fitsInRam) {
+      if (filters.fitsInRamOnly && model.fitsInRam === false) {
         return false;
       }
 
@@ -497,6 +500,10 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
 
     return sortModels(filtered, sort);
   }, [activeTab, displayModels, filters, sort]);
+
+  useEffect(() => {
+    autoFillAttemptsRef.current = 0;
+  }, [sessionIdentity]);
 
   useEffect(() => {
     if (activeTab !== 'all') {
@@ -570,8 +577,10 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
           return;
         }
 
-        const resolvedModel = model.size === null || model.requiresTreeProbe === true
-          ? await modelCatalogService.refreshModelMetadata(model)
+        const resolvedModel = model.size === null
+          || model.requiresTreeProbe === true
+          || (model.isGated || model.isPrivate)
+          ? await modelCatalogService.refreshModelMetadata(model, { includeDetails: false })
           : model;
 
         if (resolvedModel.accessState === ModelAccessState.AUTH_REQUIRED) {
@@ -581,6 +590,11 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
 
         if (resolvedModel.accessState === ModelAccessState.ACCESS_DENIED) {
           await openModelPage(resolvedModel.id);
+          return;
+        }
+
+        if (!resolvedModel.resolvedFileName) {
+          Alert.alert(t('models.actionFailedTitle'), t('common.errors.downloadMetadataUnavailable'));
           return;
         }
 
@@ -706,6 +720,56 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
       ],
     );
   }, [activeTab, refreshDownloadedModels, showModelActionError, t]);
+
+  useEffect(() => {
+    if (activeTab !== 'all') {
+      return;
+    }
+
+    const needsAutoFill = filters.fitsInRamOnly || filters.noTokenRequiredOnly;
+    if (!needsAutoFill) {
+      return;
+    }
+
+    if (
+      !hasMore ||
+      !nextCursor ||
+      loading ||
+      isFetchingMore ||
+      appendInFlightRef.current ||
+      loadMoreError
+    ) {
+      return;
+    }
+
+    if (filteredModels.length >= MODELS_PAGE_SIZE) {
+      return;
+    }
+
+    if (autoFillAttemptsRef.current >= 4) {
+      return;
+    }
+
+    if (lastAutoLoadCursorRef.current === nextCursor) {
+      return;
+    }
+
+    autoFillAttemptsRef.current += 1;
+    lastAutoLoadCursorRef.current = nextCursor;
+    void fetchModels(searchQuery, nextCursor, true);
+  }, [
+    activeTab,
+    fetchModels,
+    filters.fitsInRamOnly,
+    filters.noTokenRequiredOnly,
+    filteredModels.length,
+    hasMore,
+    isFetchingMore,
+    loadMoreError,
+    loading,
+    nextCursor,
+    searchQuery,
+  ]);
 
   const handleLoadMore = useCallback((source: 'auto' | 'manual' = 'manual') => {
     if (

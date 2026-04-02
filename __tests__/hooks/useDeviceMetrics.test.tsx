@@ -15,7 +15,7 @@ jest.mock('../../src/services/LocalStorageRegistry', () => ({
   },
 }));
 
-const GB = 1024 * 1024 * 1024;
+const GB = 1000 * 1000 * 1000;
 
 describe('useDeviceMetrics', () => {
   function renderHookHarness() {

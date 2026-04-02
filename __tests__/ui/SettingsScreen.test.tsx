@@ -1,5 +1,5 @@
 import React from 'react';
-import { fireEvent, render } from '@testing-library/react-native';
+import { act, fireEvent, render } from '@testing-library/react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { SettingsScreen } from '../../src/ui/screens/SettingsScreen';
 import { getAppStorageMetrics } from '../../src/services/StorageManagerService';
@@ -59,8 +59,8 @@ function createProcessRamMetrics() {
   };
 }
 
-function renderScreen() {
-  return render(
+async function renderScreen() {
+  const result = render(
     <SafeAreaProvider
       initialMetrics={{
         frame: { x: 0, y: 0, width: 390, height: 844 },
@@ -70,6 +70,13 @@ function renderScreen() {
       <SettingsScreen />
     </SafeAreaProvider>,
   );
+
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+
+  return result;
 }
 
 function flattenStyle(style: any) {
@@ -84,10 +91,14 @@ jest.mock('@react-navigation/bottom-tabs', () => ({
   useBottomTabBarHeight: () => 0,
 }));
 
-jest.mock('@react-navigation/native', () => ({
-  useFocusEffect: () => undefined,
-  useIsFocused: () => true,
-}));
+jest.mock('@react-navigation/native', () => {
+  const mockReact = require('react');
+
+  return {
+    useFocusEffect: (effect: any) => mockReact.useEffect(() => effect(), [effect]),
+    useIsFocused: () => true,
+  };
+});
 
 jest.mock('expo-router', () => ({
   useRouter: () => ({
@@ -172,26 +183,26 @@ describe('SettingsScreen', () => {
     };
   });
 
-  it('uses the root-tab chrome without exposing a back button even when history exists', () => {
-    const { queryByTestId } = renderScreen();
+  it('uses the root-tab chrome without exposing a back button even when history exists', async () => {
+    const { queryByTestId } = await renderScreen();
 
     expect(queryByTestId('settings-back-button')).toBeNull();
     expect(mockBack).not.toHaveBeenCalled();
     expect(mockReplace).not.toHaveBeenCalled();
   });
 
-  it('keeps the root-tab chrome when there is no back history', () => {
+  it('keeps the root-tab chrome when there is no back history', async () => {
     mockCanGoBack = false;
 
-    const { queryByTestId } = renderScreen();
+    const { queryByTestId } = await renderScreen();
 
     expect(queryByTestId('settings-back-button')).toBeNull();
     expect(mockBack).not.toHaveBeenCalled();
     expect(mockReplace).not.toHaveBeenCalled();
   });
 
-  it('renders the Android system RAM variant with availability and app memory breakdown', () => {
-    const { getByText, getByTestId, queryByText } = renderScreen();
+  it('renders the Android system RAM variant with availability and app memory breakdown', async () => {
+    const { getByText, getByTestId, queryByText } = await renderScreen();
 
     expect(getByText('settings.memoryDescription')).toBeTruthy();
     expect(getByText('63%')).toBeTruthy();
@@ -214,7 +225,7 @@ describe('SettingsScreen', () => {
     expect(queryByText(/·/)).toBeNull();
   });
 
-  it('renders the process-only RAM fallback without fabricated free or busy system metrics', () => {
+  it('renders the process-only RAM fallback without fabricated free or busy system metrics', async () => {
     mockDeviceMetricsResult = {
       metrics: {
         ram: createProcessRamMetrics(),
@@ -223,7 +234,7 @@ describe('SettingsScreen', () => {
       refresh: jest.fn(),
     };
 
-    const { getByText, getByTestId, queryByText, queryByTestId } = renderScreen();
+    const { getByText, getByTestId, queryByText, queryByTestId } = await renderScreen();
 
     expect(getByText('settings.memoryDescriptionFallback')).toBeTruthy();
     expect(getByText('settings.memoryAppUsage')).toBeTruthy();
@@ -238,9 +249,10 @@ describe('SettingsScreen', () => {
   });
 
   it('renders the storage app-footprint bar instead of the old stat chips', async () => {
-    const { findByText, getByTestId, queryByText } = renderScreen();
+    const { findByText, getByTestId, queryByText } = await renderScreen();
 
     expect(await findByText('settings.appFilesUsage')).toBeTruthy();
+    expect(await findByText('12 GB')).toBeTruthy();
     expect(queryByText('settings.free')).toBeTruthy();
     expect(getByTestId('settings-storage-track')).toBeTruthy();
     expect(getByTestId('settings-storage-used-fill')).toBeTruthy();
@@ -250,8 +262,8 @@ describe('SettingsScreen', () => {
     expect(queryByText('settings.total')).toBeNull();
   });
 
-  it('uses the shared content inset instead of adding extra tab bar spacing', () => {
-    const { getByTestId } = renderScreen();
+  it('uses the shared content inset instead of adding extra tab bar spacing', async () => {
+    const { getByTestId } = await renderScreen();
 
     expect(flattenStyle(getByTestId('settings-screen-content').props.style).paddingBottom)
       .toBe(screenLayoutMetrics.contentBottomInset);

@@ -12,6 +12,7 @@ import {
 } from './SettingsStore';
 import { AppError, toAppError } from './AppError';
 import { resolveContextWindowCeiling } from '../utils/contextWindow';
+import { DECIMAL_GIGABYTE } from '../utils/modelSize';
 
 interface LoadModelOptions {
   forceReload?: boolean;
@@ -132,7 +133,7 @@ class LLMEngineService {
    * Determine the number of GPU layers based on device RAM.
    */
   private suggestGpuLayersForTotalMemory(totalMemory: number): number {
-    const totalGB = totalMemory / (1024 * 1024 * 1024);
+    const totalGB = totalMemory / DECIMAL_GIGABYTE;
 
     if (totalGB >= 12) return 35;
     if (totalGB >= 8) return 20;

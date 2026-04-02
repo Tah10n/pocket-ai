@@ -9,6 +9,7 @@ export type AppErrorCode =
   | 'model_load_failed'
   | 'download_disk_space_low'
   | 'download_size_unknown'
+  | 'download_metadata_unavailable'
   | 'download_http_error'
   | 'download_verification_failed'
   | 'download_file_missing'
@@ -22,6 +23,7 @@ const ERROR_MESSAGE_KEYS: Partial<Record<AppErrorCode, string>> = {
   model_load_failed: 'common.errors.modelLoadFailed',
   download_disk_space_low: 'common.errors.downloadDiskSpaceLow',
   download_size_unknown: 'common.errors.downloadSizeUnknown',
+  download_metadata_unavailable: 'common.errors.downloadMetadataUnavailable',
   download_http_error: 'common.errors.downloadHttpError',
   download_verification_failed: 'common.errors.downloadVerificationFailed',
   download_file_missing: 'common.errors.downloadFileMissing',
@@ -31,6 +33,7 @@ const ERROR_MESSAGE_KEYS: Partial<Record<AppErrorCode, string>> = {
 const ERROR_PATTERNS: { pattern: RegExp; code: AppErrorCode }[] = [
   { pattern: /DISK_SPACE_LOW/i, code: 'download_disk_space_low' },
   { pattern: /MODEL_SIZE_UNKNOWN/i, code: 'download_size_unknown' },
+  { pattern: /MODEL_METADATA_UNAVAILABLE/i, code: 'download_metadata_unavailable' },
   { pattern: /HTTP status/i, code: 'download_http_error' },
   { pattern: /Size mismatch|checksum/i, code: 'download_verification_failed' },
   { pattern: /File does not exist after download|Model file not found/i, code: 'download_file_missing' },

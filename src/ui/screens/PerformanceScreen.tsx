@@ -15,6 +15,11 @@ import { Text } from '@/components/ui/text';
 import { performanceMonitor, type PerformanceEvent } from '@/services/PerformanceMonitor';
 import { buildPerformanceExportJson, buildTraceFilename, dumpTraceToLogcat, getUtf8ByteLength } from '@/services/PerformanceExport';
 
+const TIMING_GOOD_THRESHOLD_MS = 250;
+const TIMING_WARN_THRESHOLD_MS = 1000;
+
+type TimingTone = 'neutral' | 'good' | 'warn' | 'bad';
+
 function formatDuration(durationMs: number | undefined) {
   if (typeof durationMs !== 'number' || !Number.isFinite(durationMs)) {
     return null;
@@ -27,19 +32,89 @@ function formatDuration(durationMs: number | undefined) {
   return `${(durationMs / 1000).toFixed(2)} s`;
 }
 
-function formatEvent(event: PerformanceEvent) {
-  const duration = formatDuration(event.durationMs);
+function formatTimingThreshold(durationMs: number) {
+  if (!Number.isFinite(durationMs)) {
+    return null;
+  }
+
+  if (durationMs < 1000) {
+    return `${Math.round(durationMs)} ms`;
+  }
+
+  if (durationMs % 1000 === 0) {
+    return `${Math.round(durationMs / 1000)} s`;
+  }
+
+  return `${(durationMs / 1000).toFixed(2)} s`;
+}
+
+function getTimingTone(durationMs: number | undefined): TimingTone {
+  if (typeof durationMs !== 'number' || !Number.isFinite(durationMs)) {
+    return 'neutral';
+  }
+
+  if (durationMs <= TIMING_GOOD_THRESHOLD_MS) {
+    return 'good';
+  }
+
+  if (durationMs <= TIMING_WARN_THRESHOLD_MS) {
+    return 'warn';
+  }
+
+  return 'bad';
+}
+
+function getTimingToneClassName(tone: TimingTone): string {
+  if (tone === 'good') {
+    return 'text-success-700 dark:text-success-300';
+  }
+
+  if (tone === 'warn') {
+    return 'text-warning-700 dark:text-warning-300';
+  }
+
+  if (tone === 'bad') {
+    return 'text-error-700 dark:text-error-300';
+  }
+
+  return 'text-typography-900 dark:text-typography-100';
+}
+
+function getEventDisplayValue(event: PerformanceEvent): { value: string | null; tone: TimingTone } {
   if (event.type === 'span') {
-    return duration ? `${event.name} · ${duration}` : event.name;
+    return {
+      value: formatDuration(event.durationMs),
+      tone: getTimingTone(event.durationMs),
+    };
   }
 
   if (event.type === 'counter') {
-    return typeof event.value === 'number'
-      ? `${event.name} · ${event.value}`
-      : event.name;
+    return {
+      value: typeof event.value === 'number' ? `${event.value}` : null,
+      tone: 'neutral',
+    };
   }
 
-  return event.name;
+  return { value: null, tone: 'neutral' };
+}
+
+type SpanAggregate = {
+  name: string;
+  count: number;
+  avgMs: number;
+  p95Ms: number;
+  maxMs: number;
+};
+
+function percentileNearestRank(sortedSamples: number[], percentile: number): number | null {
+  if (sortedSamples.length === 0) {
+    return null;
+  }
+
+  const clamped = Math.min(1, Math.max(0, percentile));
+  const rank = Math.ceil(clamped * sortedSamples.length);
+  const index = Math.min(sortedSamples.length - 1, Math.max(0, rank - 1));
+  return sortedSamples[index];
 }
 
 export function PerformanceScreen() {
@@ -183,7 +258,60 @@ export function PerformanceScreen() {
   }, []);
 
   const counters = useMemo(() => Object.entries(snapshot.counters), [snapshot.counters]);
+  const spanAggregates = useMemo<SpanAggregate[]>(() => {
+    const spansByName = new Map<string, { durationsMs: number[]; totalMs: number }>();
+
+    for (const event of snapshot.events) {
+      if (event.type !== 'span') {
+        continue;
+      }
+
+      const durationMs = event.durationMs;
+      if (typeof durationMs !== 'number' || !Number.isFinite(durationMs)) {
+        continue;
+      }
+
+      const aggregate = spansByName.get(event.name);
+      if (aggregate) {
+        aggregate.durationsMs.push(durationMs);
+        aggregate.totalMs += durationMs;
+      } else {
+        spansByName.set(event.name, { durationsMs: [durationMs], totalMs: durationMs });
+      }
+    }
+
+    const aggregates: SpanAggregate[] = [];
+
+    for (const [name, spanAggregate] of spansByName.entries()) {
+      spanAggregate.durationsMs.sort((left, right) => left - right);
+
+      const count = spanAggregate.durationsMs.length;
+      const maxMs = spanAggregate.durationsMs[count - 1] ?? 0;
+      const p95Ms = percentileNearestRank(spanAggregate.durationsMs, 0.95) ?? maxMs;
+      const avgMs = count > 0 ? spanAggregate.totalMs / count : 0;
+
+      aggregates.push({
+        name,
+        count,
+        avgMs,
+        p95Ms,
+        maxMs,
+      });
+    }
+
+    aggregates.sort((left, right) => (
+      right.p95Ms - left.p95Ms
+      || right.maxMs - left.maxMs
+      || right.count - left.count
+      || left.name.localeCompare(right.name)
+    ));
+
+    return aggregates;
+  }, [snapshot.events]);
   const events = useMemo(() => snapshot.events.slice().reverse().slice(0, 120), [snapshot.events]);
+
+  const goodThresholdLabel = formatTimingThreshold(TIMING_GOOD_THRESHOLD_MS) ?? `${TIMING_GOOD_THRESHOLD_MS} ms`;
+  const warnThresholdLabel = formatTimingThreshold(TIMING_WARN_THRESHOLD_MS) ?? `${TIMING_WARN_THRESHOLD_MS} ms`;
 
   return (
     <Box className="flex-1 bg-background-0 dark:bg-background-950">
@@ -275,6 +403,67 @@ export function PerformanceScreen() {
             </Box>
 
             <Box>
+              <ScreenSectionLabel>{t('performance.spans')}</ScreenSectionLabel>
+              <ScreenStack className="mt-2">
+                <ScreenCard padding="compact" variant="inset">
+                  <Text className="text-xs text-typography-500 dark:text-typography-400">
+                    {t('performance.timingLegendLabel')}
+                  </Text>
+                  <Box className="mt-2 flex-row flex-wrap gap-3">
+                    <Text className="text-xs font-semibold text-success-700 dark:text-success-300">
+                      {t('performance.timingLegendGood', { value: goodThresholdLabel })}
+                    </Text>
+                    <Text className="text-xs font-semibold text-warning-700 dark:text-warning-300">
+                      {t('performance.timingLegendWarn', { value: warnThresholdLabel })}
+                    </Text>
+                    <Text className="text-xs font-semibold text-error-700 dark:text-error-300">
+                      {t('performance.timingLegendBad', { value: warnThresholdLabel })}
+                    </Text>
+                  </Box>
+                </ScreenCard>
+
+                {spanAggregates.length === 0 ? (
+                  <ScreenCard padding="compact">
+                    <Text className="text-sm text-typography-500 dark:text-typography-400">
+                      {t('performance.emptySpans')}
+                    </Text>
+                  </ScreenCard>
+                ) : (
+                  spanAggregates.map((spanAggregate) => (
+                    <ScreenCard key={spanAggregate.name} padding="compact">
+                      <Box className="flex-row items-center justify-between gap-3">
+                        <Text className="flex-1 text-sm text-typography-700 dark:text-typography-200">
+                          {spanAggregate.name}
+                        </Text>
+                        <Box className="flex-row items-baseline gap-1">
+                          <Text className="text-xs text-typography-500 dark:text-typography-400">
+                            {t('performance.spanMetricP95')}
+                          </Text>
+                          <Text
+                            className={`text-sm font-semibold ${getTimingToneClassName(getTimingTone(spanAggregate.p95Ms))}`}
+                          >
+                            {formatDuration(spanAggregate.p95Ms) ?? '-'}
+                          </Text>
+                        </Box>
+                      </Box>
+                      <Box className="mt-1 flex-row flex-wrap gap-2">
+                        <Text className="text-xs text-typography-500 dark:text-typography-400">
+                          {t('performance.spanMetricCount', { count: spanAggregate.count })}
+                        </Text>
+                        <Text className="text-xs text-typography-500 dark:text-typography-400">
+                          {t('performance.spanMetricAvg', { value: formatDuration(spanAggregate.avgMs) ?? '-' })}
+                        </Text>
+                        <Text className="text-xs text-typography-500 dark:text-typography-400">
+                          {t('performance.spanMetricMax', { value: formatDuration(spanAggregate.maxMs) ?? '-' })}
+                        </Text>
+                      </Box>
+                    </ScreenCard>
+                  ))
+                )}
+              </ScreenStack>
+            </Box>
+
+            <Box>
               <ScreenSectionLabel>{t('performance.events')}</ScreenSectionLabel>
               <ScreenStack className="mt-2">
                 {events.length === 0 ? (
@@ -284,13 +473,28 @@ export function PerformanceScreen() {
                     </Text>
                   </ScreenCard>
                 ) : (
-                  events.map((event, index) => (
-                    <ScreenCard key={`${event.type}-${event.name}-${index}`} padding="compact">
-                      <Text className="text-sm text-typography-700 dark:text-typography-200">
-                        {formatEvent(event)}
-                      </Text>
-                    </ScreenCard>
-                  ))
+                  events.map((event, index) => {
+                    const { value, tone } = getEventDisplayValue(event);
+
+                    return (
+                      <ScreenCard key={`${event.type}-${event.name}-${index}`} padding="compact">
+                        <Box className="flex-row items-center justify-between gap-3">
+                          <Text className="flex-1 text-sm text-typography-700 dark:text-typography-200">
+                            {event.name}
+                          </Text>
+                          {value ? (
+                            <Text className={`text-sm font-semibold ${getTimingToneClassName(tone)}`}>
+                              {value}
+                            </Text>
+                          ) : (
+                            <Text className="text-xs text-typography-500 dark:text-typography-400">
+                              {event.type}
+                            </Text>
+                          )}
+                        </Box>
+                      </ScreenCard>
+                    );
+                  })
                 )}
               </ScreenStack>
             </Box>

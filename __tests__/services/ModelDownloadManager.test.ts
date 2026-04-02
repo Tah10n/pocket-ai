@@ -159,6 +159,20 @@ describe('ModelDownloadManager Basic', () => {
     expect(FileSystem.createDownloadResumable).not.toHaveBeenCalled();
   });
 
+  it('rejects downloads when the GGUF filename still needs a tree probe', async () => {
+    useDownloadStore.setState({ queue: [], activeDownloadId: null });
+
+    await expect(
+      (modelDownloadManager as any).downloadModel({
+        ...mockModel,
+        requiresTreeProbe: true,
+        resolvedFileName: undefined,
+      }),
+    ).rejects.toThrow('MODEL_METADATA_UNAVAILABLE');
+
+    expect(FileSystem.createDownloadResumable).not.toHaveBeenCalled();
+  });
+
   it('allows unknown-size downloads after an explicit warning confirmation', async () => {
     useDownloadStore.setState({ queue: [], activeDownloadId: null });
 

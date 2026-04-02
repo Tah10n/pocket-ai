@@ -118,7 +118,7 @@ describe('ModelCatalogService regressions', () => {
     service.dispose();
   });
 
-  it('keeps gated GGUF repos visible when the list response omits siblings and tree auth is required', async () => {
+  it('keeps gated GGUF repos visible when tree access is forbidden and size cannot be resolved', async () => {
     global.fetch = jest.fn((input: RequestInfo | URL) => {
       if (String(input).includes('/tree/main?recursive=true')) {
         return Promise.resolve({
@@ -196,15 +196,26 @@ describe('ModelCatalogService regressions', () => {
     expect(result.models).toHaveLength(0);
   });
 
-  it('does not upgrade auth-required probe candidates to authorized on non-auth tree failures', async () => {
+  it('marks gated probe candidates authorized when a token is configured', async () => {
     await huggingFaceTokenService.saveToken('hf_test_token');
 
     global.fetch = jest.fn((input: RequestInfo | URL) => {
-      if (String(input).includes('/tree/main?recursive=true')) {
+      const url = String(input);
+
+      if (url.includes('/tree/main?recursive=true')) {
         return Promise.resolve({
-          ok: false,
-          status: 429,
-          json: () => Promise.resolve([]),
+          ok: true,
+          status: 200,
+          headers: {
+            get: jest.fn(() => null),
+          },
+          json: () => Promise.resolve([
+            {
+              path: 'model.Q4_K_M.gguf',
+              size: 2 * 1024 * 1024 * 1024,
+              lfs: { sha256: 'tree-sha' },
+            },
+          ]),
         });
       }
 
@@ -217,17 +228,26 @@ describe('ModelCatalogService regressions', () => {
     const result = await service.searchModels('phi');
 
     expect(result.models).toHaveLength(1);
-    expect(result.models[0].accessState).toBe(ModelAccessState.AUTH_REQUIRED);
+    expect(result.models[0].accessState).toBe(ModelAccessState.AUTHORIZED);
+    expect(result.models[0].size).toBe(2 * 1024 * 1024 * 1024);
+    expect(result.models[0].sha256).toBe('tree-sha');
+    expect(result.models[0].requiresTreeProbe).toBe(false);
+    expect(global.fetch).toHaveBeenCalledTimes(2);
   });
 
-  it('drops probe candidates when tree access succeeds but no GGUF file exists', async () => {
+  it('drops probe candidates when tree validation completes without a GGUF entry', async () => {
     await huggingFaceTokenService.saveToken('hf_test_token');
 
     global.fetch = jest.fn((input: RequestInfo | URL) => {
-      if (String(input).includes('/tree/main?recursive=true')) {
+      const url = String(input);
+
+      if (url.includes('/tree/main?recursive=true')) {
         return Promise.resolve({
           ok: true,
           status: 200,
+          headers: {
+            get: jest.fn(() => null),
+          },
           json: () => Promise.resolve([
             { path: 'README.md', size: 1024 },
           ]),
@@ -243,6 +263,7 @@ describe('ModelCatalogService regressions', () => {
     const result = await service.searchModels('phi');
 
     expect(result.models).toHaveLength(0);
+    expect(global.fetch).toHaveBeenCalledTimes(2);
   });
 
   it('keeps probe candidates visible when a later tree page fails after partial success', async () => {
@@ -269,7 +290,11 @@ describe('ModelCatalogService regressions', () => {
             )),
           },
           json: () => Promise.resolve([
-            { path: 'README.md', size: 1024 },
+            {
+              path: 'model.Q4_K_M.gguf',
+              size: 2 * 1024 * 1024 * 1024,
+              lfs: { sha256: 'partial-tree-sha' },
+            },
           ]),
         });
       }
@@ -285,17 +310,27 @@ describe('ModelCatalogService regressions', () => {
     expect(result.models).toHaveLength(1);
     expect(result.models[0].id).toBe('org/paged-probe');
     expect(result.models[0].accessState).toBe(ModelAccessState.AUTH_REQUIRED);
+    expect(result.models[0].size).toBe(2 * 1024 * 1024 * 1024);
+    expect(result.models[0].sha256).toBe('partial-tree-sha');
     expect(result.models[0].requiresTreeProbe).toBe(true);
   });
 
-  it('keeps size-known gated repos locked when the lightweight access probe fails with a non-auth error', async () => {
+  it('keeps size-known gated repos authorized when access validation temporarily fails with a non-auth error', async () => {
     await huggingFaceTokenService.saveToken('hf_test_token');
 
-    global.fetch = jest.fn((input: RequestInfo | URL) => {
+    global.fetch = jest.fn((input: RequestInfo | URL, init?: RequestInit) => {
       if (String(input).includes('/resolve/main/model.Q4_K_M.gguf')) {
         return Promise.resolve({
           ok: false,
           status: 429,
+        });
+      }
+
+      if (String(input).includes('/tree/main?recursive=true')) {
+        return Promise.resolve({
+          ok: false,
+          status: 429,
+          json: () => Promise.resolve([]),
         });
       }
 
@@ -308,8 +343,11 @@ describe('ModelCatalogService regressions', () => {
     const result = await service.searchModels('phi');
 
     expect(result.models).toHaveLength(1);
-    expect(result.models[0].accessState).toBe(ModelAccessState.AUTH_REQUIRED);
+    expect(result.models[0].accessState).toBe(ModelAccessState.AUTHORIZED);
+    expect(global.fetch).toHaveBeenCalledTimes(3);
     expect((global.fetch as jest.Mock).mock.calls[1][0]).toContain('/resolve/main/model.Q4_K_M.gguf');
+    expect((global.fetch as jest.Mock).mock.calls[1][1]).toMatchObject({ method: 'HEAD' });
+    expect((global.fetch as jest.Mock).mock.calls[2][0]).toContain('/tree/main?recursive=true');
   });
 
   it('falls back to tree validation when the lightweight access probe is unsupported', async () => {
@@ -359,7 +397,11 @@ describe('ModelCatalogService regressions', () => {
     const result = await service.searchModels('phi');
 
     expect(result.models).toHaveLength(1);
-    expect(result.models[0].accessState).toBe(ModelAccessState.AUTH_REQUIRED);
+    expect(result.models[0].accessState).toBe(ModelAccessState.AUTHORIZED);
+
+    const refreshed = await service.refreshModelMetadata(result.models[0], { includeDetails: false });
+
+    expect(refreshed.accessState).toBe(ModelAccessState.AUTHORIZED);
     expect((global.fetch as jest.Mock).mock.calls[1][0]).toContain('/resolve/main/model.Q4_K_M.gguf');
     expect((global.fetch as jest.Mock).mock.calls[2][1]).toMatchObject({ method: 'GET' });
     expect((global.fetch as jest.Mock).mock.calls[3][0]).toContain('/tree/main?recursive=true');

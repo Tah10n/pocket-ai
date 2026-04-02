@@ -173,21 +173,23 @@ export class LocalStorageRegistry {
     // 2. Garbage Collection: clean up orphaned files
     try {
       const dirInfo = await FileSystem.readDirectoryAsync(modelsDir);
-      
-      for (const filename of dirInfo) {
-        // Find if this file belongs to a completed model
-        const isCompleted = models.some(m => m.localPath === filename);
-        
-        if (!isCompleted) {
-          const isQueued = queuedFileNames.includes(filename);
 
-          if (!isQueued) {
-            // It's neither completed nor queued -> it's a dead partial download. Delete it.
-            const fileUri = modelsDir + filename;
-            console.log(`[LocalStorageRegistry] Garbage collecting orphaned file: ${filename}`);
-            await FileSystem.deleteAsync(fileUri, { idempotent: true });
-          }
+      const completedLocalPaths = new Set(
+        models
+          .map((model) => model.localPath)
+          .filter((localPath): localPath is string => typeof localPath === 'string'),
+      );
+      const queuedFileNamesSet = new Set(queuedFileNames);
+
+      for (const filename of dirInfo) {
+        if (completedLocalPaths.has(filename) || queuedFileNamesSet.has(filename)) {
+          continue;
         }
+
+        // It's neither completed nor queued -> it's a dead partial download. Delete it.
+        const fileUri = modelsDir + filename;
+        console.log(`[LocalStorageRegistry] Garbage collecting orphaned file: ${filename}`);
+        await FileSystem.deleteAsync(fileUri, { idempotent: true });
       }
     } catch (e) {
       console.warn('[LocalStorageRegistry] Garbage collection failed', e);

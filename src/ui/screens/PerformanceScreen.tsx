@@ -1,6 +1,6 @@
 import React, { useCallback, useMemo, useState } from 'react';
 import { Alert, Platform, Share } from 'react-native';
-import { useFocusEffect, useIsFocused } from '@react-navigation/native';
+import { useFocusEffect } from '@react-navigation/native';
 import { useRouter } from 'expo-router';
 import { useTranslation } from 'react-i18next';
 import * as Clipboard from 'expo-clipboard';
@@ -120,21 +120,16 @@ function percentileNearestRank(sortedSamples: number[], percentile: number): num
 export function PerformanceScreen() {
   const router = useRouter();
   const { t } = useTranslation();
-  const isFocused = useIsFocused();
   const [, setRevision] = useState(0);
 
   useFocusEffect(
     useCallback(() => {
-      if (!isFocused) {
-        return () => undefined;
-      }
-
       const intervalId = setInterval(() => {
         setRevision((current) => current + 1);
       }, 1000);
 
       return () => clearInterval(intervalId);
-    }, [isFocused]),
+    }, []),
   );
 
   const snapshot = performanceMonitor.snapshot();

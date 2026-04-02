@@ -2,6 +2,7 @@ import {
   buildLogcatDumpLines,
   buildPerformanceExportPayloadFromSnapshot,
   buildTraceFilename,
+  getUtf8ByteLength,
   safeJsonStringify,
 } from '../../src/services/PerformanceExport';
 import type { PerformanceSnapshot, PerformanceTraceSession } from '../../src/services/PerformanceMonitor';
@@ -79,6 +80,37 @@ describe('PerformanceExport', () => {
     }
   });
 
+  it('keeps logcat dump lines under typical truncation limits', () => {
+    const snapshot: PerformanceSnapshot = {
+      enabled: true,
+      counters: {},
+      events: [
+        {
+          type: 'span',
+          name: 'very.large.meta',
+          t: 1,
+          wallTime: 1000,
+          durationMs: 42,
+          meta: { payload: 'x'.repeat(12_000) },
+        },
+      ],
+    };
+
+    const payload = buildPerformanceExportPayloadFromSnapshot(snapshot, buildSession());
+    const dump = buildLogcatDumpLines(payload);
+
+    const eventLine = dump.lines.find((line) => line.startsWith('POCKET_AI_PERF_EVENT '));
+    expect(eventLine).toBeDefined();
+
+    if (eventLine) {
+      expect(getUtf8ByteLength(eventLine)).toBeLessThan(4000);
+      const jsonPart = eventLine.slice('POCKET_AI_PERF_EVENT '.length);
+      const parsed = JSON.parse(jsonPart) as { meta?: Record<string, unknown> };
+      expect(parsed.meta?.__truncated).toBe(true);
+      expect(parsed.meta?.payload).toBeUndefined();
+    }
+  });
+
   it('builds a predictable filename prefix', () => {
     const fileName = buildTraceFilename('abc', 1_710_000_000_000);
 
@@ -86,4 +118,3 @@ describe('PerformanceExport', () => {
     expect(fileName.endsWith('.json')).toBe(true);
   });
 });
-

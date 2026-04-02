@@ -120,10 +120,70 @@ const LOGCAT_PREFIX_EVENT = 'POCKET_AI_PERF_EVENT ';
 const LOGCAT_PREFIX_COUNTER = 'POCKET_AI_PERF_COUNTER ';
 const LOGCAT_PREFIX_END = 'POCKET_AI_PERF_END ';
 
+// Android's logcat truncates very long messages (≈4KB), which can corrupt JSON dumps.
+// Keep a conservative safety margin so each emitted log line stays parseable.
+const LOGCAT_MAX_LINE_BYTES = 3000;
+
 export type LogcatDumpLines = {
   lines: string[];
   estimatedPayloadBytes: number;
 };
+
+function isLogcatLineWithinLimit(prefix: string, json: string): boolean {
+  return getUtf8ByteLength(`${prefix}${json}`) <= LOGCAT_MAX_LINE_BYTES;
+}
+
+function truncateText(value: string, maxLength: number): string {
+  if (value.length <= maxLength) {
+    return value;
+  }
+
+  if (maxLength <= 1) {
+    return '…';
+  }
+
+  return `${value.slice(0, Math.max(0, maxLength - 1))}…`;
+}
+
+function buildEventJsonForLogcat(event: PerformanceEvent): string {
+  const rawJson = safeJsonStringify(event);
+  if (isLogcatLineWithinLimit(LOGCAT_PREFIX_EVENT, rawJson)) {
+    return rawJson;
+  }
+
+  const minimalEvent: PerformanceEvent = {
+    type: event.type,
+    name: event.name,
+    t: event.t,
+    wallTime: event.wallTime,
+    durationMs: event.durationMs,
+    value: event.value,
+    meta: event.meta ? { __truncated: true } : undefined,
+  };
+
+  let candidateJson = safeJsonStringify(minimalEvent);
+  if (isLogcatLineWithinLimit(LOGCAT_PREFIX_EVENT, candidateJson)) {
+    return candidateJson;
+  }
+
+  const baseName = minimalEvent.name ?? '';
+  const targetLengths = [160, 120, 80, 40];
+
+  for (const maxLength of targetLengths) {
+    candidateJson = safeJsonStringify({ ...minimalEvent, name: truncateText(baseName, maxLength) });
+    if (isLogcatLineWithinLimit(LOGCAT_PREFIX_EVENT, candidateJson)) {
+      return candidateJson;
+    }
+  }
+
+  return safeJsonStringify({
+    type: event.type,
+    name: 'truncated',
+    t: event.t,
+    wallTime: event.wallTime,
+    meta: { __truncated: true },
+  });
+}
 
 export function buildLogcatDumpLines(payload: PerformanceExportPayload): LogcatDumpLines {
   const countersEntries = Object.entries(payload.counters);
@@ -142,7 +202,7 @@ export function buildLogcatDumpLines(payload: PerformanceExportPayload): LogcatD
   };
 
   const headerJsonCandidate = safeJsonStringify(headerWithCounters);
-  const includeCountersInHeader = headerJsonCandidate.length <= 3000;
+  const includeCountersInHeader = isLogcatLineWithinLimit(LOGCAT_PREFIX_TRACE, headerJsonCandidate);
 
   const headerJson = includeCountersInHeader ? headerJsonCandidate : safeJsonStringify(minimalHeader);
 
@@ -150,7 +210,7 @@ export function buildLogcatDumpLines(payload: PerformanceExportPayload): LogcatD
   lines.push(`${LOGCAT_PREFIX_TRACE}${headerJson}`);
 
   for (const event of payload.events) {
-    lines.push(`${LOGCAT_PREFIX_EVENT}${safeJsonStringify(event)}`);
+    lines.push(`${LOGCAT_PREFIX_EVENT}${buildEventJsonForLogcat(event)}`);
   }
 
   if (!includeCountersInHeader) {

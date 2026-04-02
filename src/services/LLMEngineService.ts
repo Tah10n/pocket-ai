@@ -55,7 +55,7 @@ function mergeConsecutiveMessages(messages: LlmChatMessage[]): LlmChatMessage[] 
     if (lastMessage.role === message.role) {
       merged[merged.length - 1] = {
         role: lastMessage.role,
-        content: `${lastMessage.content}\n\n${message.content}`.trim(),
+        content: `${lastMessage.content}\n\n${message.content}`,
       };
       continue;
     }
@@ -71,8 +71,8 @@ function normalizeMessagesForStrictRoleAlternation(messages: LlmChatMessage[]): 
   const nonSystemMessages: LlmChatMessage[] = [];
 
   for (const message of messages) {
-    const content = message.content?.trim() ?? '';
-    if (!content) {
+    const content = message.content ?? '';
+    if (content.trim().length === 0) {
       continue;
     }
 
@@ -90,15 +90,14 @@ function normalizeMessagesForStrictRoleAlternation(messages: LlmChatMessage[]): 
     merged = merged.slice(1);
   }
 
-  const systemContent = systemParts.join('\n\n').trim();
-  if (systemContent.length > 0) {
-    const systemPrefix = `System:\n${systemContent}`;
+  const systemContent = systemParts.join('\n\n');
+  if (systemContent.trim().length > 0) {
     if (merged.length === 0) {
-      merged = [{ role: 'user', content: systemPrefix }];
+      merged = [{ role: 'user', content: systemContent }];
     } else if (merged[0].role === 'user') {
-      merged[0] = { role: 'user', content: `${systemPrefix}\n\n${merged[0].content}`.trim() };
+      merged[0] = { role: 'user', content: `${systemContent}\n\n${merged[0].content}` };
     } else {
-      merged.unshift({ role: 'user', content: systemPrefix });
+      merged.unshift({ role: 'user', content: systemContent });
     }
   }
 

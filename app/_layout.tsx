@@ -161,16 +161,24 @@ export default function RootLayout() {
     async function prepare() {
       const span = performanceMonitor.startSpan('root.prepare');
       performanceMonitor.mark('root.prepare.start');
+      let criticalOutcome: 'success' | 'active_model_missing' | 'error' = 'success';
+      let criticalErrorMessage: string | null = null;
       try {
-        await bootstrapAppCritical();
+        const result = await bootstrapAppCritical();
+        criticalOutcome = result.outcome;
       } catch (e) {
+        criticalOutcome = 'error';
+        criticalErrorMessage = e instanceof Error ? e.message : String(e);
         console.warn('[RootLayout] Error during preparation:', e);
       } finally {
         setIsReady(true);
         performanceMonitor.mark('root.ready');
         await SplashScreen.hideAsync().catch((e) => console.warn('[SplashScreen] hideAsync failed', e));
         performanceMonitor.mark('root.splashHidden');
-        span.end({ outcome: 'complete' });
+        span.end({
+          outcome: criticalOutcome,
+          error: criticalErrorMessage ?? undefined,
+        });
       }
 
       useBootstrapStore.getState().setBackgroundState('running');

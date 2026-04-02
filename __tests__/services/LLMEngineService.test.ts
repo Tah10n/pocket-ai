@@ -137,7 +137,7 @@ describe('LLMEngineService', () => {
         messages: [
           {
             role: 'user',
-            content: 'System:\nBe concise.\n\nConversation summary:\nEarlier context.\n\nFirst user question.',
+            content: 'Be concise.\n\nConversation summary:\nEarlier context.\n\nFirst user question.',
           },
           {
             role: 'assistant',

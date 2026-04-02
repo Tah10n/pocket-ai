@@ -76,26 +76,32 @@ describe('AppBootstrap', () => {
   });
 
   it('restores the persisted active model during critical bootstrap when the file is still available', async () => {
-    (getSettings as jest.Mock).mockReturnValue({
-      language: 'en',
-      activePresetId: null,
-      activeModelId: 'author/model-q4',
-      temperature: 0.7,
-      topP: 0.9,
-      maxTokens: 2048,
-      theme: 'system',
-      chatRetentionDays: null,
-    });
-    (registry.getModel as jest.Mock).mockReturnValue({
-      id: 'author/model-q4',
-      localPath: 'author_model-q4.gguf',
-    });
+    jest.useFakeTimers();
+    try {
+      (getSettings as jest.Mock).mockReturnValue({
+        language: 'en',
+        activePresetId: null,
+        activeModelId: 'author/model-q4',
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 2048,
+        theme: 'system',
+        chatRetentionDays: null,
+      });
+      (registry.getModel as jest.Mock).mockReturnValue({
+        id: 'author/model-q4',
+        localPath: 'author_model-q4.gguf',
+      });
 
-    await bootstrapAppCritical();
-    await Promise.resolve();
+      await bootstrapAppCritical();
+      jest.runAllTimers();
+      await Promise.resolve();
 
-    expect(llmEngineService.load).toHaveBeenCalledWith('author/model-q4');
-    expect(updateSettings).not.toHaveBeenCalledWith({ activeModelId: null });
+      expect(llmEngineService.load).toHaveBeenCalledWith('author/model-q4');
+      expect(updateSettings).not.toHaveBeenCalledWith({ activeModelId: null });
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   it('clears the persisted active model during critical bootstrap when the file is missing', async () => {
@@ -203,5 +209,23 @@ describe('AppBootstrap', () => {
 
     expect(callOrder[0]).toBe('critical');
     expect(callOrder).toContain('background');
+  });
+
+  it('surfaces background bootstrap failures so the UI can display initialization errors', async () => {
+    (getSettings as jest.Mock).mockReturnValue({
+      language: 'en',
+      activePresetId: null,
+      activeModelId: null,
+      temperature: 0.7,
+      topP: 0.9,
+      maxTokens: 2048,
+      theme: 'system',
+      chatRetentionDays: null,
+    });
+
+    (setupFileSystem as jest.Mock).mockRejectedValueOnce(new Error('filesystem failed'));
+
+    await expect(bootstrapAppBackground()).rejects.toThrow('Background bootstrap encountered errors');
+    expect(registry.validateRegistry).toHaveBeenCalled();
   });
 });

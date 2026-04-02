@@ -1,3 +1,5 @@
+import { InteractionManager } from 'react-native';
+
 import i18n from '../i18n';
 import { presetManager } from './PresetManager';
 import {
@@ -99,21 +101,55 @@ function migrateLegacyChatHistory(settings: AppSettings) {
 
 type BootstrapOutcome = 'success' | 'active_model_missing' | 'error';
 
-function scheduleActiveModelRestore(activeModelId: string): void {
-  const restoreSpan = performanceMonitor.startSpan('bootstrap.restoreActiveModel', {
-    modelId: activeModelId,
-  });
+function scheduleAfterFirstFrame(task: () => void): void {
+  if (process.env.NODE_ENV === 'test') {
+    setTimeout(task, 0);
+    return;
+  }
 
-  void Promise.resolve()
-    .then(() => llmEngineService.load(activeModelId))
-    .then(() => {
-      restoreSpan.end({ outcome: 'success' });
-    })
-    .catch((e) => {
-      console.warn('[bootstrapApp] Failed to restore active model', e);
-      updateSettings({ activeModelId: null });
-      restoreSpan.end({ outcome: 'error' });
+  const runAfterPaint = () => {
+    try {
+      if (typeof globalThis.requestAnimationFrame === 'function') {
+        globalThis.requestAnimationFrame(() => {
+          setTimeout(task, 0);
+        });
+        return;
+      }
+    } catch {
+      // ignore
+    }
+
+    setTimeout(task, 0);
+  };
+
+  try {
+    if (typeof InteractionManager?.runAfterInteractions === 'function') {
+      InteractionManager.runAfterInteractions(runAfterPaint);
+      return;
+    }
+  } catch {
+    // ignore
+  }
+
+  runAfterPaint();
+}
+
+function scheduleActiveModelRestore(activeModelId: string): void {
+  scheduleAfterFirstFrame(() => {
+    const restoreSpan = performanceMonitor.startSpan('bootstrap.restoreActiveModel', {
+      modelId: activeModelId,
     });
+
+    void llmEngineService.load(activeModelId)
+      .then(() => {
+        restoreSpan.end({ outcome: 'success' });
+      })
+      .catch((e) => {
+        console.warn('[bootstrapApp] Failed to restore active model', e);
+        updateSettings({ activeModelId: null });
+        restoreSpan.end({ outcome: 'error' });
+      });
+  });
 }
 
 export async function bootstrapAppCritical(): Promise<{ outcome: BootstrapOutcome }> {
@@ -155,21 +191,32 @@ export async function bootstrapAppCritical(): Promise<{ outcome: BootstrapOutcom
 export async function bootstrapAppBackground(): Promise<void> {
   const bootstrapSpan = performanceMonitor.startSpan('bootstrap.background');
   let outcome: 'success' | 'error' = 'success';
+  const errors: { scope: string; error: unknown }[] = [];
+
+  const recordError = (scope: string, error: unknown) => {
+    errors.push({ scope, error });
+    console.warn(`[bootstrapApp] Background bootstrap failed: ${scope}`, error);
+  };
 
   try {
     const settings = getSettings();
 
     try {
       await setupFileSystem();
+    } catch (e) {
+      recordError('setupFileSystem', e);
+    }
+
+    try {
       await registry.validateRegistry(getQueuedDownloadFileNames());
     } catch (e) {
-      console.error('[bootstrapApp] Infrastructure setup failed', e);
+      recordError('validateRegistry', e);
     }
 
     try {
       presetManager.getPresets();
     } catch (e) {
-      console.warn('[bootstrapApp] Failed to initialize presets', e);
+      recordError('presetManager.getPresets', e);
     }
 
     try {
@@ -177,13 +224,23 @@ export async function bootstrapAppBackground(): Promise<void> {
       migrateLegacyChatHistory(settings);
       useChatStore.getState().pruneExpiredThreads(settings.chatRetentionDays);
     } catch (e) {
-      console.warn('[bootstrapApp] Failed to repair or migrate chat history', e);
+      recordError('chatHistory', e);
+    }
+
+    if (errors.length > 0) {
+      const firstError = errors[0];
+      const errorMessage = firstError?.error instanceof Error ? firstError.error.message : String(firstError?.error);
+      const aggregateError = new Error(
+        `[bootstrapApp] Background bootstrap encountered errors (${firstError?.scope ?? 'unknown'}): ${errorMessage}`,
+      );
+      (aggregateError as unknown as { cause?: unknown }).cause = firstError?.error;
+      throw aggregateError;
     }
   } catch (error) {
     outcome = 'error';
     throw error;
   } finally {
-    bootstrapSpan.end({ outcome });
+    bootstrapSpan.end({ outcome, errors: errors.length });
   }
 }
 

@@ -36,6 +36,7 @@ export interface ChatMessage {
   state: ChatMessageState;
   tokensPerSec?: number;
   errorCode?: string;
+  errorMessage?: string;
   regeneratesMessageId?: string;
 }
 

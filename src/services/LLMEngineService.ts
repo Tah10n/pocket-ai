@@ -92,12 +92,17 @@ function normalizeMessagesForStrictRoleAlternation(messages: LlmChatMessage[]): 
 
   const systemContent = systemParts.join('\n\n');
   if (systemContent.trim().length > 0) {
+    const hasSysMarkers = systemContent.includes('<<SYS>>') && systemContent.includes('<</SYS>>');
+    const wrappedSystemContent = hasSysMarkers
+      ? systemContent
+      : `<<SYS>>\n${systemContent.trim()}\n<</SYS>>`;
+
     if (merged.length === 0) {
-      merged = [{ role: 'user', content: systemContent }];
+      merged = [{ role: 'user', content: wrappedSystemContent }];
     } else if (merged[0].role === 'user') {
-      merged[0] = { role: 'user', content: `${systemContent}\n\n${merged[0].content}` };
+      merged[0] = { role: 'user', content: `${wrappedSystemContent}\n\n${merged[0].content}` };
     } else {
-      merged.unshift({ role: 'user', content: systemContent });
+      merged.unshift({ role: 'user', content: wrappedSystemContent });
     }
   }
 

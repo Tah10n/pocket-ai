@@ -4,6 +4,7 @@ import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import * as SplashScreen from 'expo-splash-screen';
 import * as SystemUI from 'expo-system-ui';
+import { Alert, Platform } from 'react-native';
 import { useEffect, useState } from 'react';
 import 'react-native-reanimated';
 import { useTranslation } from 'react-i18next';
@@ -14,6 +15,7 @@ import { usePerformanceNavigationTrace } from '../src/hooks/usePerformanceNaviga
 import { hardwareListenerService } from '../src/services/HardwareListenerService';
 import { bootstrapAppBackground, bootstrapAppCritical } from '../src/services/AppBootstrap';
 import { performanceMonitor } from '../src/services/PerformanceMonitor';
+import { getStorageFallbackReport } from '../src/services/storage';
 import { useBootstrapStore } from '../src/store/bootstrapStore';
 import '../src/i18n';
 import '../global.css';
@@ -215,6 +217,30 @@ function RootNavigator() {
   const motion = useMotionPreferences();
 
   usePerformanceNavigationTrace();
+
+  useEffect(() => {
+    if (typeof __DEV__ !== 'undefined' && __DEV__) {
+      return;
+    }
+
+    if (Platform.OS === 'web') {
+      return;
+    }
+
+    const fallbackReport = getStorageFallbackReport();
+    if (!fallbackReport) {
+      return;
+    }
+
+    const globalAny = globalThis as unknown as { __pocketAiStorageFallbackAlertShown?: boolean };
+    if (globalAny.__pocketAiStorageFallbackAlertShown) {
+      return;
+    }
+    globalAny.__pocketAiStorageFallbackAlertShown = true;
+
+    console.error('[Storage] Persistent storage is unavailable; using in-memory fallback.', fallbackReport);
+    Alert.alert(t('common.storageDegradedTitle'), t('common.storageDegradedMessage'));
+  }, [t]);
 
   useEffect(() => {
     // Keep native root view background in sync with the app theme.

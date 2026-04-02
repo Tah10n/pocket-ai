@@ -24,6 +24,8 @@
     "search": "Search",
     "default": "Default",
     "actionFailed": "Action failed",
+    "storageDegradedTitle": "Storage unavailable",
+    "storageDegradedMessage": "Persistent storage is unavailable. Pocket AI will run without saving your chats, settings, or model metadata.",
     "errors": {
       "engineNotReady": "Load a local model before continuing.",
       "engineBusy": "Finish or stop the current operation before starting another one.",

@@ -8,6 +8,47 @@ const IS_TESTING = process.env.NODE_ENV === 'test';
 const fallbackStores = new Map<string, Map<string, string>>();
 const warnedFallbackStores = new Set<string>();
 
+export type StorageImplementation = 'mmkv' | 'memory';
+export type StorageFallbackReason = 'unsupported_environment' | 'mmkv_init_failed';
+
+type StorageHealthEntry = {
+    implementation: StorageImplementation;
+    reason?: StorageFallbackReason;
+    errorMessage?: string;
+};
+
+const storageHealthById = new Map<string, StorageHealthEntry>();
+
+export type StorageFallbackReport = {
+    storeIds: string[];
+    reasons: Record<string, StorageFallbackReason>;
+};
+
+export function getStorageFallbackReport(): StorageFallbackReport | null {
+    const storeIds: string[] = [];
+    const reasons: Record<string, StorageFallbackReason> = {};
+
+    for (const [storeId, entry] of storageHealthById.entries()) {
+        if (entry.implementation !== 'memory') {
+            continue;
+        }
+
+        if (entry.reason === 'unsupported_environment') {
+            continue;
+        }
+
+        storeIds.push(storeId);
+        reasons[storeId] = entry.reason ?? 'mmkv_init_failed';
+    }
+
+    if (storeIds.length === 0) {
+        return null;
+    }
+
+    storeIds.sort((left, right) => left.localeCompare(right));
+    return { storeIds, reasons };
+}
+
 function getFallbackStore(id?: string): Map<string, string> {
     const storeId = id ?? '__default__';
     const existing = fallbackStores.get(storeId);
@@ -32,8 +73,15 @@ export function createStorage(id?: string): MMKV {
         const mmkvModule = require('react-native-mmkv') as MmkvModule;
         const createMMKV = mmkvModule.createMMKV;
 
+        storageHealthById.set(logId, { implementation: 'mmkv' });
         return id ? createMMKV({ id }) : createMMKV();
     } catch (e) {
+        storageHealthById.set(logId, {
+            implementation: 'memory',
+            reason: IS_WEB || IS_TESTING ? 'unsupported_environment' : 'mmkv_init_failed',
+            errorMessage: e instanceof Error ? e.message : String(e),
+        });
+
         if (!IS_TESTING && !warnedFallbackStores.has(logId)) {
             warnedFallbackStores.add(logId);
             console.warn(

@@ -56,7 +56,7 @@ interface ChatStoreState {
   patchAssistantMessage: (
     threadId: string,
     messageId: string,
-    updates: Partial<Pick<ChatMessage, 'content' | 'thoughtContent' | 'tokensPerSec' | 'state' | 'errorCode'>>,
+    updates: Partial<Pick<ChatMessage, 'content' | 'thoughtContent' | 'tokensPerSec' | 'state' | 'errorCode' | 'errorMessage'>>,
   ) => void;
   replaceLastAssistantMessage: (threadId: string) => string | null;
   replaceBranchFromUserMessage: (
@@ -341,6 +341,7 @@ export const useChatStore = create<ChatStoreState>()(
           thoughtContent,
           state: 'complete',
           errorCode: undefined,
+          errorMessage: undefined,
         });
       },
 
@@ -582,6 +583,7 @@ export const useChatStore = create<ChatStoreState>()(
               state: 'complete',
               tokensPerSec: undefined,
               errorCode: undefined,
+              errorMessage: undefined,
               regeneratesMessageId: undefined,
             },
             {

@@ -683,6 +683,7 @@ export const ChatScreen = () => {
             isUser={msg.role === 'user'}
             content={msg.content}
             thoughtContent={msg.thoughtContent}
+            errorMessage={msg.errorMessage}
             isStreaming={msg.state === 'streaming'}
             tokensPerSec={msg.tokensPerSec}
             canDelete={msg.state !== 'streaming'}

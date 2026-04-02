@@ -17,6 +17,7 @@ export interface ChatMessageBubbleProps {
   isUser: boolean;
   content: string;
   thoughtContent?: string;
+  errorMessage?: string;
   isStreaming?: boolean;
   tokensPerSec?: number;
   canDelete?: boolean;
@@ -32,6 +33,7 @@ function areChatMessageBubblePropsEqual(prev: ChatMessageBubbleProps, next: Chat
     && prev.isUser === next.isUser
     && prev.content === next.content
     && prev.thoughtContent === next.thoughtContent
+    && prev.errorMessage === next.errorMessage
     && prev.isStreaming === next.isStreaming
     && prev.tokensPerSec === next.tokensPerSec
     && prev.canDelete === next.canDelete
@@ -77,6 +79,7 @@ const ChatMessageBubbleComponent = ({
   isUser,
   content,
   thoughtContent: explicitThoughtContent,
+  errorMessage,
   isStreaming,
   tokensPerSec,
   canDelete = false,
@@ -149,6 +152,7 @@ const ChatMessageBubbleComponent = ({
     ? t('chat.thinkingDescription')
     : t('chat.thoughtDescription');
   const assistantBodyContent = isUser ? content : finalContent;
+  const hasErrorMessage = !isUser && typeof errorMessage === 'string' && errorMessage.trim().length > 0;
   const shouldShowStreamingPlaceholder = isAssistantStreaming && !shouldShowThoughtSection && !assistantBodyContent;
   const thoughtBubbleClassName = 'min-w-[220px] max-w-full rounded-[20px] border border-primary-500/15 bg-background-0/95 px-3 py-2 dark:border-primary-500/20 dark:bg-background-950/75';
 
@@ -235,6 +239,15 @@ const ChatMessageBubbleComponent = ({
             </Text>
           ) : assistantBodyContent ? (
             <MarkdownRenderer content={assistantBodyContent} selectable />
+          ) : null}
+
+          {hasErrorMessage ? (
+            <Box className="mt-2 flex-row items-start gap-2 rounded-2xl bg-error-500/10 px-2.5 py-2 dark:bg-error-500/15">
+              <MaterialSymbols name="error-outline" size={16} className="mt-0.5 text-error-600 dark:text-error-300" />
+              <Text selectable className="min-w-0 flex-1 text-sm leading-5 text-error-800 dark:text-error-200">
+                {errorMessage}
+              </Text>
+            </Box>
           ) : null}
         </Box>
       </Box>

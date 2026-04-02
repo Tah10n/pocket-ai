@@ -354,11 +354,11 @@ export const useChatSession = () => {
 
       flushAssistantPatch();
       patchAssistantMessage(threadId, assistantMessageId, {
-        content:
-          currentText + (currentText.length > 0 ? '\n\n' : '') + `[Error: ${message}]`,
+        content: currentText,
         thoughtContent: currentThoughtText || undefined,
         state: 'error',
         errorCode: 'generation_failed',
+        errorMessage: message,
       });
       finalizeThreadStatus(threadId, 'error');
       recordCompletionStats('error');

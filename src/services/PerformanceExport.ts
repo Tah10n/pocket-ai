@@ -50,6 +50,48 @@ export function safeJsonStringify(value: unknown, options?: SafeStringifyOptions
   }
 }
 
+function getUtf8ByteLengthFallback(text: string): number {
+  let bytes = 0;
+
+  for (let index = 0; index < text.length; index += 1) {
+    const codeUnit = text.charCodeAt(index);
+
+    if (codeUnit < 0x80) {
+      bytes += 1;
+      continue;
+    }
+
+    if (codeUnit < 0x800) {
+      bytes += 2;
+      continue;
+    }
+
+    // Surrogate pairs encode code points above U+FFFF as 4 bytes.
+    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+      const nextCodeUnit = text.charCodeAt(index + 1);
+      if (nextCodeUnit >= 0xdc00 && nextCodeUnit <= 0xdfff) {
+        bytes += 4;
+        index += 1;
+        continue;
+      }
+
+      // Malformed surrogate — treat as replacement character.
+      bytes += 3;
+      continue;
+    }
+
+    if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
+      // Unpaired low surrogate.
+      bytes += 3;
+      continue;
+    }
+
+    bytes += 3;
+  }
+
+  return bytes;
+}
+
 export function getUtf8ByteLength(text: string): number {
   try {
     // Hermes/JSC may not always expose TextEncoder; keep a cheap fallback.
@@ -61,7 +103,7 @@ export function getUtf8ByteLength(text: string): number {
     // ignore
   }
 
-  return text.length;
+  return getUtf8ByteLengthFallback(text);
 }
 
 export function buildPerformanceExportPayloadFromSnapshot(

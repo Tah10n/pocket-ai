@@ -475,12 +475,16 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
       queue.map((queuedItem) => [queuedItem.id, queuedItem] as const),
     );
 
-    return models.map((model) => mergeModelWithRuntimeState(model, {
+    const baseModels = activeTab === 'downloaded'
+      ? mergeUniqueModelsById([...models, ...queue])
+      : models;
+
+    return baseModels.map((model) => mergeModelWithRuntimeState(model, {
       activeModelId: engineState.activeModelId,
       localModel: localModelsById.get(model.id),
       queuedItem: queuedItemsById.get(model.id),
     }));
-  }, [engineState.activeModelId, models, queue]);
+  }, [activeTab, engineState.activeModelId, models, queue]);
 
   const filteredModels = useMemo(() => {
     const filtered = displayModels.filter((model) => {

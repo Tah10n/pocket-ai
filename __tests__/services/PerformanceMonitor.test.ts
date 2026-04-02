@@ -42,4 +42,3 @@ describe('PerformanceMonitor', () => {
     expect(snapshot.counters).toEqual({});
   });
 });
-

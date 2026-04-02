@@ -40,16 +40,46 @@ export const useDownloadStore = create<DownloadState>()(
         activeDownloadId: null,
 
         addToQueue: (model) => set((state) => {
-          if (state.queue.find(m => m.id === model.id)) return state;
-          return {
-            queue: [
-              ...state.queue,
-              normalizePersistedModelMetadata({
-                ...model,
-                lifecycleStatus: LifecycleStatus.QUEUED,
-              }),
-            ],
-          };
+          const existing = state.queue.find((queued) => queued.id === model.id);
+
+          if (!existing) {
+            return {
+              queue: [
+                ...state.queue,
+                normalizePersistedModelMetadata({
+                  ...model,
+                  lifecycleStatus: LifecycleStatus.QUEUED,
+                }),
+              ],
+            };
+          }
+
+          if (
+            existing.lifecycleStatus === LifecycleStatus.QUEUED
+            || existing.lifecycleStatus === LifecycleStatus.DOWNLOADING
+            || existing.lifecycleStatus === LifecycleStatus.VERIFYING
+          ) {
+            return state;
+          }
+
+          // If a previous download attempt failed, we keep it in the queue as "available"
+          // so it won't auto-retry. Re-queue it when the user taps Download again.
+          if (existing.lifecycleStatus === LifecycleStatus.AVAILABLE) {
+            const nextEntry = normalizePersistedModelMetadata({
+              ...existing,
+              ...model,
+              resumeData: existing.resumeData,
+              downloadProgress: existing.downloadProgress,
+              localPath: existing.localPath ?? model.localPath,
+              lifecycleStatus: LifecycleStatus.QUEUED,
+            });
+
+            return {
+              queue: state.queue.map((queued) => queued.id === model.id ? nextEntry : queued),
+            };
+          }
+
+          return state;
         }),
 
         removeFromQueue: (modelId) => set((state) => ({

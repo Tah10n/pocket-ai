@@ -462,13 +462,21 @@ export class ModelCatalogService {
     );
     const cached = this.searchCache.get(cacheKey);
     const isBufferedCursor = this.isBufferedCursor(cursor);
-    const isCacheFresh = Boolean(cached) && Date.now() - (cached?.timestamp ?? 0) < CACHE_TTL;
+    const cacheNow = Date.now();
+    const cachedTimestamp = cached?.timestamp ?? 0;
+    const isCacheFresh = Boolean(cached) && cacheNow - cachedTimestamp < CACHE_TTL;
+    const isBufferedCursorFresh =
+      Boolean(cached) && isBufferedCursor && cacheNow - cachedTimestamp < BUFFERED_SEARCH_CACHE_MAX_AGE;
 
-    if (cached && !isCacheFresh && !isBufferedCursor) {
+    if (cached && isBufferedCursor && !isBufferedCursorFresh) {
       this.searchCache.delete(cacheKey);
     }
 
-    if (!forceRefresh && cached && (isCacheFresh || isBufferedCursor)) {
+    if (cached && !isBufferedCursor && !isCacheFresh) {
+      this.searchCache.delete(cacheKey);
+    }
+
+    if (!forceRefresh && cached && (isCacheFresh || isBufferedCursorFresh)) {
       const filteredCachedModels = this.filterCatalogSearchModels(cached.result.models);
       const memoryFitContext = await memoryFitContextPromise;
       return {

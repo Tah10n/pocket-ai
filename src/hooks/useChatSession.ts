@@ -591,8 +591,8 @@ export const useChatSession = () => {
       throw new Error('Stop the current response before editing this conversation.');
     }
 
-  const deleted = deleteMessageBranch(activeThread.id, messageId);
-  return deleted;
+    const deleted = deleteMessageBranch(activeThread.id, messageId);
+    return deleted;
   }, [activeThread, deleteMessageBranch]);
 
   return {

@@ -32,4 +32,3 @@ export function useConversationIndex(options: { enabled?: boolean; limit?: numbe
     return items;
   }, [enabled, limit, threads]);
 }
-

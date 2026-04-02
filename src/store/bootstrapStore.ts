@@ -18,4 +18,3 @@ export const useBootstrapStore = create<BootstrapState>()(
     setBackgroundError: (backgroundError) => set({ backgroundError }),
   })),
 );
-

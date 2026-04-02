@@ -182,6 +182,7 @@ export class ModelDownloadManager {
         lifecycleStatus: LifecycleStatus.DOWNLOADED,
         downloadProgress: 1,
         allowUnknownSizeDownload: false,
+        resumeData: undefined,
         sha256: verificationHash ?? model.sha256,
       };
 
@@ -192,13 +193,13 @@ export class ModelDownloadManager {
     } catch (e: any) {
       console.error(`[ModelDownloadManager] Error during download: ${model.id}`, e);
 
-      // If it fails, save resume data if we can, but remove from queue to prevent infinite retry loops.
+      // If it fails, save resume data if we can and keep the entry in the queue as "available".
+      // This avoids infinite retry loops while still allowing the user to retry and resume later.
       const savable = this.resumable ? this.resumable.savable() : null;
-      updateModelInQueue(model.id, { 
+      updateModelInQueue(model.id, {
         resumeData: savable ? JSON.stringify(savable) : undefined,
-        lifecycleStatus: LifecycleStatus.AVAILABLE 
+        lifecycleStatus: LifecycleStatus.AVAILABLE,
       });
-      removeFromQueue(model.id);
       setActiveDownload(null);
 
       throw e;

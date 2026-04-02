@@ -27,6 +27,7 @@ jest.mock('expo-router', () => {
     Redirect: () => null,
     Link: ({ children }: any) => children ?? null,
     useRouter: () => mockExpoRouter,
+    usePathname: jest.fn(() => '/'),
     useLocalSearchParams: jest.fn(() => ({})),
     useSegments: jest.fn(() => []),
     router: mockExpoRouter,

@@ -9,6 +9,10 @@ function safeByteLength(value: string): number {
   }
 }
 
+function isPromiseLike(value: unknown): value is Promise<void> {
+  return Boolean(value) && typeof (value as Promise<void>).then === 'function';
+}
+
 export function createInstrumentedStateStorage(
   storage: StateStorage,
   options: {
@@ -22,40 +26,48 @@ export function createInstrumentedStateStorage(
 
   return {
     setItem: (name, value) => {
+      const instrumentationEnabled = performanceMonitor.isEnabled();
+
       if (lastValueByKey && lastValueByKey[name] === value) {
-        performanceMonitor.incrementCounter(`${scope}.persist.setItem_deduped`);
+        if (instrumentationEnabled) {
+          performanceMonitor.incrementCounter(`${scope}.persist.setItem_deduped`);
+        }
         return;
       }
 
-      const span = performanceMonitor.startSpan(`${scope}.persist.setItem`, {
-        key: name,
-        bytes: safeByteLength(value),
-      });
-      performanceMonitor.incrementCounter(`${scope}.persist.setItem_calls`);
+      const span = instrumentationEnabled
+        ? performanceMonitor.startSpan(`${scope}.persist.setItem`, {
+            key: name,
+            bytes: safeByteLength(value),
+          })
+        : null;
+      if (instrumentationEnabled) {
+        performanceMonitor.incrementCounter(`${scope}.persist.setItem_calls`);
+      }
 
       try {
         const result = storage.setItem(name, value);
-        if (result && typeof (result as Promise<void>).then === 'function') {
-          return (result as Promise<void>)
+        if (isPromiseLike(result)) {
+          return result
             .then(() => {
-              span.end({ ok: true });
+              span?.end({ ok: true });
               if (lastValueByKey) {
                 lastValueByKey[name] = value;
               }
             })
             .catch((error) => {
-              span.end({ ok: false });
+              span?.end({ ok: false });
               throw error;
             });
         }
 
-        span.end({ ok: true });
+        span?.end({ ok: true });
         if (lastValueByKey) {
           lastValueByKey[name] = value;
         }
         return result;
       } catch (error) {
-        span.end({ ok: false });
+        span?.end({ ok: false });
         throw error;
       }
     },

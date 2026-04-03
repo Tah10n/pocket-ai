@@ -2,9 +2,10 @@ import { useCallback } from 'react';
 import { useDownloadStore } from '../store/downloadStore';
 import { modelDownloadManager } from '../services/ModelDownloadManager';
 import { ModelMetadata } from '../types/models';
+import { useShallow } from 'zustand/react/shallow';
 
 export function useModelDownload() {
-  const queue = useDownloadStore((state) => state.queue);
+  const queueIds = useDownloadStore(useShallow((state) => state.queue.map((model) => model.id)));
   const activeDownloadId = useDownloadStore((state) => state.activeDownloadId);
   const addToQueue = useDownloadStore((state) => state.addToQueue);
 
@@ -21,11 +22,11 @@ export function useModelDownload() {
   }, []);
 
   const getModelFromQueue = useCallback((modelId: string) => {
-    return queue.find(m => m.id === modelId);
-  }, [queue]);
+    return useDownloadStore.getState().queue.find((model) => model.id === modelId);
+  }, []);
 
   return {
-    queue,
+    queueIds,
     activeDownloadId,
     startDownload,
     pauseDownload,

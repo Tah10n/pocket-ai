@@ -29,6 +29,7 @@ import {
   type ModelFilterCriteria,
   type ModelSortPreference,
 } from '@/store/modelsStore';
+import { useDownloadStore } from '@/store/downloadStore';
 import { EngineStatus, LifecycleStatus, ModelAccessState, type ModelMetadata } from '@/types/models';
 import { mergeModelWithRuntimeState } from '@/utils/modelRuntimeState';
 import { startModelDownloadFlow } from '@/utils/modelDownloadFlow';
@@ -52,6 +53,64 @@ type FetchState = {
   warningMessage: string | null;
   loadMoreError: string | null;
 };
+
+interface ModelCardWithRuntimeStateProps {
+  model: ModelMetadata;
+  activeModelId: string | null | undefined;
+  onOpenDetails: (modelId: string) => void;
+  onDownload: (model: ModelMetadata) => void;
+  onConfigureToken: () => void;
+  onOpenModelPage: (modelId: string) => void;
+  onLoad: (id: string) => void;
+  onOpenSettings: (id: string) => void;
+  onUnload: () => void;
+  onDelete: (id: string) => void;
+  onCancel: (id: string) => void;
+  onChat: () => void;
+}
+
+const ModelCardWithRuntimeState = React.memo(({
+  model,
+  activeModelId,
+  onOpenDetails,
+  onDownload,
+  onConfigureToken,
+  onOpenModelPage,
+  onLoad,
+  onOpenSettings,
+  onUnload,
+  onDelete,
+  onCancel,
+  onChat,
+}: ModelCardWithRuntimeStateProps) => {
+  const queuedItem = useDownloadStore((state) => state.queue.find((item) => item.id === model.id));
+  const localModel = registry.getModel(model.id);
+
+  const displayModel = mergeModelWithRuntimeState(model, {
+    activeModelId: activeModelId ?? undefined,
+    localModel,
+    queuedItem: queuedItem?.id === model.id ? queuedItem : undefined,
+  });
+
+  return (
+    <ModelCard
+      model={displayModel}
+      onOpenDetails={onOpenDetails}
+      onDownload={onDownload}
+      onConfigureToken={onConfigureToken}
+      onOpenModelPage={onOpenModelPage}
+      onLoad={onLoad}
+      onOpenSettings={onOpenSettings}
+      onUnload={onUnload}
+      onDelete={onDelete}
+      onCancel={onCancel}
+      onChat={onChat}
+      isActive={activeModelId === model.id}
+    />
+  );
+});
+
+ModelCardWithRuntimeState.displayName = 'ModelCardWithRuntimeState';
 
 function resolveServerSort(sort: ModelSortPreference): CatalogServerSort | null {
   if (sort.field === 'downloads') {
@@ -177,7 +236,10 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
   const autoFillAttemptsRef = useRef(0);
   const hasUserScrolledCatalogRef = useRef(false);
   const catalogFirstResultsShownSessionRef = useRef<string | null>(null);
-  const { startDownload, cancelDownload, queue } = useModelDownload();
+  const { startDownload, cancelDownload } = useModelDownload();
+  const queueLifecycleSignature = useDownloadStore((state) => state.queue
+    .map((model) => `${model.id}:${model.lifecycleStatus}`)
+    .join('|'));
   const { loadModel, unloadModel, fitsInRam, state: engineState } = useLLMEngine();
   const {
     filters,
@@ -471,12 +533,13 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
     const localModelsById = new Map(
       registryModels.map((localModel) => [localModel.id, localModel] as const),
     );
-    const queuedItemsById = new Map(
-      queue.map((queuedItem) => [queuedItem.id, queuedItem] as const),
-    );
+    const queuedItems = queueLifecycleSignature.length > 0
+      ? useDownloadStore.getState().queue
+      : [];
+    const queuedItemsById = new Map(queuedItems.map((queuedItem) => [queuedItem.id, queuedItem] as const));
 
     const baseModels = activeTab === 'downloaded'
-      ? mergeUniqueModelsById([...models, ...queue])
+      ? mergeUniqueModelsById([...models, ...queuedItems])
       : models;
 
     return baseModels.map((model) => mergeModelWithRuntimeState(model, {
@@ -484,7 +547,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
       localModel: localModelsById.get(model.id),
       queuedItem: queuedItemsById.get(model.id),
     }));
-  }, [activeTab, engineState.activeModelId, models, queue]);
+  }, [activeTab, engineState.activeModelId, models, queueLifecycleSignature]);
 
   const filteredModels = useMemo(() => {
     const filtered = displayModels.filter((model) => {
@@ -575,6 +638,10 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
       pathname: '/model-details',
       params: { modelId },
     });
+  }, [router]);
+
+  const openChat = useCallback(() => {
+    router.push('/chat');
   }, [router]);
 
   const handleDownload = useCallback((model: ModelMetadata) => {
@@ -885,8 +952,9 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
   ) : null), [activeTab, filteredModels.length, handleLoadMore, hasMore, isFetchingMore, loadMoreError, nextCursor, shouldAutoLoadMore, t]);
 
   const renderModelItem = useCallback<ListRenderItem<ModelMetadata>>(({ item }) => (
-    <ModelCard
+    <ModelCardWithRuntimeState
       model={item}
+      activeModelId={engineState.activeModelId}
       onOpenDetails={openModelDetails}
       onDownload={handleDownload}
       onConfigureToken={openTokenSettings}
@@ -896,10 +964,21 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
       onUnload={handleUnload}
       onDelete={handleDelete}
       onCancel={cancelDownload}
-      onChat={() => router.push('/chat')}
-      isActive={engineState.activeModelId === item.id}
+      onChat={openChat}
     />
-  ), [cancelDownload, engineState.activeModelId, handleDelete, handleDownload, handleLoad, handleUnload, openModelDetails, openModelPage, openModelParameters, openTokenSettings, router]);
+  ), [
+    cancelDownload,
+    engineState.activeModelId,
+    handleDelete,
+    handleDownload,
+    handleLoad,
+    handleUnload,
+    openChat,
+    openModelDetails,
+    openModelPage,
+    openModelParameters,
+    openTokenSettings,
+  ]);
 
   const renderItemSeparator = useCallback(() => <Box className="h-2.5" />, []);
   const renderEmptyState = useCallback(() => emptyState, [emptyState]);

@@ -2,6 +2,7 @@ import React from 'react';
 import { act, fireEvent, render } from '@testing-library/react-native';
 import { Alert, Linking } from 'react-native';
 import { ModelDetailsScreen } from '../../src/ui/screens/ModelDetailsScreen';
+import { useDownloadStore } from '../../src/store/downloadStore';
 import { EngineStatus, LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../src/types/models';
 
 const mockRouter = {
@@ -11,7 +12,6 @@ const mockRouter = {
   replace: jest.fn(),
 };
 
-const mockQueue: ModelMetadata[] = [];
 const mockStartDownload = jest.fn();
 const mockCancelDownload = jest.fn();
 const mockLoadModel = jest.fn();
@@ -208,7 +208,7 @@ jest.mock('../../src/services/ModelCatalogService', () => ({
 
 jest.mock('../../src/hooks/useModelDownload', () => ({
   useModelDownload: () => ({
-    queue: mockQueue,
+    queueIds: [],
     activeDownloadId: undefined,
     startDownload: mockStartDownload,
     cancelDownload: mockCancelDownload,
@@ -298,7 +298,7 @@ describe('ModelDetailsScreen', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockFitsInRam.mockResolvedValue(true);
-    mockQueue.length = 0;
+    useDownloadStore.setState({ queue: [], activeDownloadId: null });
     mockEngineState.status = EngineStatus.IDLE;
     mockEngineState.activeModelId = undefined;
     mockEngineState.loadProgress = 0;
@@ -509,7 +509,7 @@ describe('ModelDetailsScreen', () => {
     const { modelCatalogService } = jest.requireMock('../../src/services/ModelCatalogService');
     modelCatalogService.getCachedModel.mockReturnValue(downloadingModel);
     modelCatalogService.getModelDetails.mockResolvedValue(downloadingModel);
-    mockQueue.push(queueItem);
+    useDownloadStore.setState({ queue: [queueItem], activeDownloadId: queueItem.id });
 
     const screen = render(<ModelDetailsScreen />);
 

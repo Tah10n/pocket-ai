@@ -93,18 +93,32 @@ function normalizeMessagesForStrictRoleAlternation(messages: LlmChatMessage[]): 
   }
 
   const systemContent = systemParts.join('\n\n');
-  if (systemContent.trim().length > 0) {
-    const hasSysMarkers = systemContent.includes('<<SYS>>') && systemContent.includes('<</SYS>>');
-    const wrappedSystemContent = hasSysMarkers
-      ? systemContent
-      : `<<SYS>>\n${systemContent.trim()}\n<</SYS>>`;
+  const trimmedSystemContent = systemContent.trim();
+  if (trimmedSystemContent.length > 0) {
+    const sysWrappedRegex = /^\s*<<SYS>>[\s\S]*<<\/SYS>>\s*$/;
+    const isAlreadyWrapped = sysWrappedRegex.test(trimmedSystemContent);
+
+    const cleanedSystemContent = isAlreadyWrapped
+      ? trimmedSystemContent
+      : trimmedSystemContent
+          .replace(/<<SYS>>/g, '')
+          .replace(/<<\/SYS>>/g, '')
+          .trim();
+
+    if (cleanedSystemContent.length === 0) {
+      return mergeConsecutiveMessages(merged);
+    }
+
+    const normalizedSystemContent = isAlreadyWrapped
+      ? cleanedSystemContent
+      : `<<SYS>>\n${cleanedSystemContent}\n<</SYS>>`;
 
     if (merged.length === 0) {
-      merged = [{ role: 'user', content: wrappedSystemContent }];
+      merged = [{ role: 'user', content: normalizedSystemContent }];
     } else if (merged[0].role === 'user') {
-      merged[0] = { role: 'user', content: `${wrappedSystemContent}\n\n${merged[0].content}` };
+      merged[0] = { role: 'user', content: `${normalizedSystemContent}\n\n${merged[0].content}` };
     } else {
-      merged.unshift({ role: 'user', content: wrappedSystemContent });
+      merged.unshift({ role: 'user', content: normalizedSystemContent });
     }
   }
 

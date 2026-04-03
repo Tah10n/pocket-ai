@@ -8,6 +8,19 @@ import { huggingFaceTokenService } from '../../src/services/HuggingFaceTokenServ
 import { registry } from '../../src/services/LocalStorageRegistry';
 import { getSystemMemorySnapshot } from '../../src/services/SystemMetricsService';
 
+let logSpy: jest.SpyInstance;
+let errorSpy: jest.SpyInstance;
+
+beforeEach(() => {
+  logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+  errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+});
+
+afterEach(() => {
+  logSpy.mockRestore();
+  errorSpy.mockRestore();
+});
+
 jest.mock('expo-file-system', () => ({
   Paths: {
     availableDiskSpace: 10 * 1024 * 1024 * 1024,

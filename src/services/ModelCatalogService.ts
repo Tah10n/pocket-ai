@@ -113,10 +113,19 @@ type HuggingFaceModelsPage = {
   nextCursor: string | null;
 };
 
+type HuggingFaceTreeStopReason =
+  | 'complete'
+  | 'target_found'
+  | 'preferred_found'
+  | 'lookahead'
+  | 'max_pages'
+  | 'http_error';
+
 type HuggingFaceTreeResponse = {
   entries: HuggingFaceTreeEntry[];
   status: number;
   isComplete: boolean;
+  stopReason: HuggingFaceTreeStopReason;
 };
 
 type ReadmeModelData = {
@@ -171,6 +180,8 @@ const README_SUMMARY_MAX_LENGTH = 320;
 const HF_REQUEST_TIMEOUT_MS = 20_000;
 const DEFAULT_RATE_LIMIT_BACKOFF_MS = 60_000;
 const MAX_RATE_LIMIT_BACKOFF_MS = 15 * 60 * 1000;
+const HF_TREE_PAGINATION_MAX_PAGES = 20;
+const HF_TREE_PREFERRED_LOOKAHEAD_PAGES = 2;
 const SEARCH_CACHE_MAX_ENTRIES = 120;
 const BUFFERED_SEARCH_CACHE_MAX_AGE = 20 * 60 * 1000; // 20 minutes
 const MODEL_SNAPSHOT_CACHE_MAX_ENTRIES = 2000;
@@ -399,7 +410,9 @@ export class ModelCatalogService {
   }
 
   private async createRequestContext(): Promise<CatalogRequestContext> {
-    while (true) {
+    // Guard against a theoretical infinite loop if auth token mutations happen continuously.
+    // In practice, this settles quickly (token changes are rare), but keep a best-effort escape hatch.
+    for (let attempt = 0; attempt < 6; attempt += 1) {
       const authVersion = this.authCacheVersion;
       const authToken = await huggingFaceTokenService.getToken();
       if (authVersion !== this.authCacheVersion) {
@@ -412,6 +425,14 @@ export class ModelCatalogService {
         authVersion,
       };
     }
+
+    const authToken = await huggingFaceTokenService.getToken();
+
+    return {
+      authToken,
+      hasAuthToken: Boolean(authToken),
+      authVersion: this.authCacheVersion,
+    };
   }
 
   private assertRequestContextIsCurrent(requestContext: CatalogRequestContext): void {
@@ -1100,8 +1121,18 @@ export class ModelCatalogService {
           model.id,
           model.hfRevision,
           requestContext,
+          {
+            expectedFileName: model.requiresTreeProbe !== true ? model.resolvedFileName : undefined,
+          },
         );
         const selectedEntry = this.selectTreeEntryForModel(model, treeResponse.entries);
+        const treeProbeIsFinal = treeResponse.isComplete || (
+          model.requiresTreeProbe !== true && (
+            treeResponse.stopReason === 'target_found'
+            || treeResponse.stopReason === 'preferred_found'
+            || treeResponse.stopReason === 'lookahead'
+          )
+        );
         const accessState = this.resolveTreeAccessState(
           model,
           requestContext.authToken,
@@ -1114,7 +1145,7 @@ export class ModelCatalogService {
         if (!selectedEntry) {
           if (
             model.requiresTreeProbe &&
-            treeResponse.isComplete &&
+            treeProbeIsFinal &&
             treeResponse.status >= 200 &&
             treeResponse.status < 300
           ) {
@@ -1124,7 +1155,7 @@ export class ModelCatalogService {
           return normalizePersistedModelMetadata({
             ...model,
             accessState,
-            requiresTreeProbe: model.requiresTreeProbe && !treeResponse.isComplete,
+            requiresTreeProbe: model.requiresTreeProbe && !treeProbeIsFinal,
           });
         }
 
@@ -1132,7 +1163,7 @@ export class ModelCatalogService {
         const size = this.getFileSize(selectedEntry);
         const fitsInRam = this.resolveFitsInRam(size, memoryFitContext);
 
-        if (model.requiresTreeProbe && !treeResponse.isComplete) {
+        if (model.requiresTreeProbe && !treeProbeIsFinal) {
           return normalizePersistedModelMetadata({
             ...model,
             size,
@@ -1904,6 +1935,7 @@ export class ModelCatalogService {
     repoId: string,
     revision: string | undefined,
     requestContext: CatalogRequestContext,
+    options?: { expectedFileName?: string },
   ): Promise<HuggingFaceTreeResponse> {
     return this.withInFlightDedup(
       this.treeRequestCache,
@@ -1916,6 +1948,9 @@ export class ModelCatalogService {
         });
         performanceMonitor.incrementCounter('catalog.fetchHuggingFaceModelTree.calls');
 
+        const expectedFileName = typeof options?.expectedFileName === 'string'
+          ? options.expectedFileName.trim()
+          : '';
         let nextCursor: string | null = buildHuggingFaceTreeUrl(repoId, revision);
         const visitedCursors = new Set<string>();
         const entries: HuggingFaceTreeEntry[] = [];
@@ -1923,9 +1958,17 @@ export class ModelCatalogService {
         let isComplete = true;
         let pageCount = 0;
         let outcome: 'success' | 'error' = 'success';
+        let stopReason: HuggingFaceTreeStopReason = 'complete';
+        let firstEligibleGgufPage: number | null = null;
 
         try {
           while (nextCursor !== null) {
+            if (pageCount >= HF_TREE_PAGINATION_MAX_PAGES) {
+              isComplete = false;
+              stopReason = 'max_pages';
+              break;
+            }
+
             pageCount += 1;
             const requestedCursor = nextCursor;
             visitedCursors.add(requestedCursor);
@@ -1940,6 +1983,7 @@ export class ModelCatalogService {
               if (entries.length > 0) {
                 console.warn(`[ModelCatalogService] Tree pagination stopped early for ${repoId}: ${response.status}`);
                 isComplete = false;
+                stopReason = 'http_error';
                 break;
               }
 
@@ -1947,12 +1991,15 @@ export class ModelCatalogService {
                 entries: [],
                 status: response.status,
                 isComplete: false,
+                stopReason: 'http_error',
               };
             }
 
-            entries.push(...await response.json() as HuggingFaceTreeEntry[]);
+            const pageEntries = await response.json() as HuggingFaceTreeEntry[];
+            entries.push(...pageEntries);
             this.assertRequestContextIsCurrent(requestContext);
-            nextCursor = this.resolveNextCatalogCursor(
+
+            const resolvedNextCursor = this.resolveNextCatalogCursor(
               requestedCursor,
               this.parseNextCursor(
                 typeof response.headers?.get === 'function'
@@ -1961,12 +2008,49 @@ export class ModelCatalogService {
               ),
               visitedCursors,
             );
+
+            if (expectedFileName.length > 0) {
+              const targetMatch = pageEntries.find((entry) => this.getFileName(entry) === expectedFileName);
+              if (targetMatch) {
+                isComplete = resolvedNextCursor === null;
+                stopReason = 'target_found';
+                break;
+              }
+            } else {
+              if (firstEligibleGgufPage === null) {
+                const firstGguf = pageEntries.find((entry) => this.isEligibleGgufEntry(entry));
+                if (firstGguf) {
+                  firstEligibleGgufPage = pageCount;
+                }
+              }
+
+              const preferred = pageEntries.find((entry) => (
+                this.isEligibleGgufEntry(entry) && this.isPreferredQuantFileName(this.getFileName(entry))
+              ));
+              if (preferred) {
+                isComplete = resolvedNextCursor === null;
+                stopReason = 'preferred_found';
+                break;
+              }
+
+              if (
+                firstEligibleGgufPage !== null
+                && pageCount - firstEligibleGgufPage >= HF_TREE_PREFERRED_LOOKAHEAD_PAGES
+              ) {
+                isComplete = resolvedNextCursor === null;
+                stopReason = 'lookahead';
+                break;
+              }
+            }
+
+            nextCursor = resolvedNextCursor;
           }
 
           return {
             entries,
             status,
             isComplete,
+            stopReason,
           };
         } catch (error) {
           outcome = 'error';
@@ -1978,6 +2062,7 @@ export class ModelCatalogService {
             pages: pageCount,
             entries: entries.length,
             isComplete,
+            stopReason,
           });
         }
       },

@@ -13,6 +13,7 @@ import { useTranslation } from 'react-i18next';
 import { presetManager, SystemPromptPreset } from '../../services/PresetManager';
 import { getSettings, subscribeSettings, updateSettings } from '../../services/SettingsStore';
 import { getReportedErrorMessage } from '../../services/AppError';
+import { toTestIdSegment } from '../../utils/testIds';
 
 interface EditorState {
     preset: SystemPromptPreset | null;
@@ -139,6 +140,7 @@ export function PresetManagerScreen() {
 
         return (
             <ScreenPressableCard
+                testID={`preset-card-${toTestIdSegment(item.id)}`}
                 onPress={() => openEditPreset(item)}
                 className={`mb-3 active:opacity-80 ${
                     isActive
@@ -176,10 +178,12 @@ export function PresetManagerScreen() {
                 subtitle={t('presets.activePreset', { name: activePresetName })}
                 onBack={handleBack}
                 backAccessibilityLabel={t('chat.headerBackAccessibilityLabel')}
+                backButtonTestID="preset-manager-back-button"
                 rightAccessory={(
                     <ScreenActionPill
                         onPress={openCreatePreset}
                         tone="primary"
+                        testID="preset-manager-add-preset"
                     >
                         <MaterialSymbols name="add" size={18} className="text-typography-0" />
                         <Text className="text-sm font-semibold text-typography-0">{t('presets.addPreset')}</Text>
@@ -210,6 +214,7 @@ export function PresetManagerScreen() {
                         backAccessibilityLabel={t('common.cancel')}
                         rightAccessory={!isCreatingPreset ? (
                             <ScreenIconButton
+                                testID="preset-editor-delete"
                                 onPress={handleDelete}
                                 iconName="delete"
                                 tone="danger"
@@ -230,6 +235,7 @@ export function PresetManagerScreen() {
                                     label={t('presets.nameLabel')}
                                     size="prominent"
                                     placeholder={t('presets.namePlaceholder')}
+                                    testID="preset-editor-name"
                                     value={draftName}
                                     onChangeText={setDraftName}
                                 />
@@ -240,6 +246,7 @@ export function PresetManagerScreen() {
                                     fieldClassName="flex-1"
                                     size="prominentMultiline"
                                     placeholder={t('presets.systemPromptPlaceholder')}
+                                    testID="preset-editor-prompt"
                                     value={draftPrompt}
                                     onChangeText={setDraftPrompt}
                                 />
@@ -249,10 +256,10 @@ export function PresetManagerScreen() {
 
                     <ScreenContent className="pt-4">
                         <Box className="flex-row gap-3">
-                            <Button action="primary" className="flex-1" onPress={handleSaveAndActivate}>
+                            <Button action="primary" className="flex-1" testID="preset-editor-save" onPress={handleSaveAndActivate}>
                                 <ButtonText>{t('presets.saveAndActivate')}</ButtonText>
                             </Button>
-                            <Button action="secondary" className="flex-1" onPress={closeEditor}>
+                            <Button action="secondary" className="flex-1" testID="preset-editor-cancel" onPress={closeEditor}>
                                 <ButtonText>{t('common.cancel')}</ButtonText>
                             </Button>
                         </Box>

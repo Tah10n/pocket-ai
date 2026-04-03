@@ -315,6 +315,7 @@ export function PerformanceScreen() {
         subtitle={t('performance.subtitle')}
         onBack={handleBack}
         backAccessibilityLabel={t('chat.headerBackAccessibilityLabel')}
+        backButtonTestID="performance-back-button"
       />
 
       <ScrollView className="flex-1" showsVerticalScrollIndicator={false}>
@@ -341,6 +342,7 @@ export function PerformanceScreen() {
                 <Button
                   action={snapshot.enabled ? 'secondary' : 'positive'}
                   size="sm"
+                  testID="performance-toggle-instrumentation"
                   onPress={() => {
                     performanceMonitor.setEnabled(!performanceMonitor.isEnabled());
                     setRevision((current) => current + 1);
@@ -350,13 +352,13 @@ export function PerformanceScreen() {
                     {snapshot.enabled ? t('performance.disableInstrumentation') : t('performance.enableInstrumentation')}
                   </ButtonText>
                 </Button>
-                <Button action="secondary" size="sm" onPress={() => { void handleCopy(); }}>
+                <Button action="secondary" size="sm" testID="performance-copy-trace" onPress={() => { void handleCopy(); }}>
                   <ButtonText>{t('performance.copyTrace')}</ButtonText>
                 </Button>
-                <Button action="secondary" size="sm" onPress={() => { void handleShare(); }}>
+                <Button action="secondary" size="sm" testID="performance-share-trace" onPress={() => { void handleShare(); }}>
                   <ButtonText>{t('performance.shareTrace')}</ButtonText>
                 </Button>
-                <Button action="secondary" size="sm" onPress={() => { void handleSaveToFile(); }}>
+                <Button action="secondary" size="sm" testID="performance-save-trace" onPress={() => { void handleSaveToFile(); }}>
                   <ButtonText>{t('performance.saveTraceToFile')}</ButtonText>
                 </Button>
                 {Platform.OS === 'android' ? (
@@ -364,12 +366,13 @@ export function PerformanceScreen() {
                     action="secondary"
                     size="sm"
                     disabled={!snapshot.enabled}
+                    testID="performance-dump-logcat"
                     onPress={handleDumpToLogcat}
                   >
                     <ButtonText>{t('performance.dumpToLogcat')}</ButtonText>
                   </Button>
                 ) : null}
-                <Button action="secondary" size="sm" onPress={handleClear}>
+                <Button action="secondary" size="sm" testID="performance-clear-trace" onPress={handleClear}>
                   <ButtonText>{t('performance.clearTrace')}</ButtonText>
                 </Button>
               </Box>

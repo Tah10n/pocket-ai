@@ -20,10 +20,11 @@ export class ModelDownloadManager {
   private constructor() {
     // Subscribe to store changes to trigger queue processing
     useDownloadStore.subscribe(
-      () => this.processQueue()
+      (state) => `${state.activeDownloadId ?? ''}|${state.queue.map((model) => `${model.id}:${model.lifecycleStatus}`).join(',')}`,
+      () => { void this.processQueue(); },
     );
     // Initial check
-    this.processQueue();
+    void this.processQueue();
   }
 
   public static getInstance(): ModelDownloadManager {
@@ -108,6 +109,11 @@ export class ModelDownloadManager {
     const fileName = await this.resolveDownloadFileName(model, modelsDir);
     const localUri = modelsDir + fileName;
 
+    const PROGRESS_UPDATE_MIN_INTERVAL_MS = 500;
+    const PROGRESS_UPDATE_MIN_DELTA = 0.005;
+    let lastProgressUpdatedAt = 0;
+    let lastProgress = -1;
+
     const callback = (downloadProgress: any) => {
       const writtenBytes = typeof downloadProgress?.totalBytesWritten === 'number'
         ? downloadProgress.totalBytesWritten
@@ -116,10 +122,19 @@ export class ModelDownloadManager {
         ? downloadProgress.totalBytesExpectedToWrite
         : 0;
       const progress = expectedBytes > 0 ? writtenBytes / expectedBytes : 0;
-      updateModelInQueue(model.id, { 
-        downloadProgress: Math.min(Math.max(progress, 0), 1),
-        lifecycleStatus: LifecycleStatus.DOWNLOADING 
-      });
+      const clampedProgress = Math.min(Math.max(progress, 0), 1);
+      const now = Date.now();
+      const delta = Math.abs(clampedProgress - lastProgress);
+
+      if (
+        clampedProgress === 1 ||
+        now - lastProgressUpdatedAt >= PROGRESS_UPDATE_MIN_INTERVAL_MS ||
+        delta >= PROGRESS_UPDATE_MIN_DELTA
+      ) {
+        lastProgressUpdatedAt = now;
+        lastProgress = clampedProgress;
+        updateModelInQueue(model.id, { downloadProgress: clampedProgress });
+      }
     };
 
     // Extract actual resumeData string from saved state if it exists

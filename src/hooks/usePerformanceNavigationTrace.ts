@@ -59,6 +59,10 @@ export function usePerformanceNavigationTrace(): void {
   const pathname = usePathname();
 
   useEffect(() => {
+    if (!performanceMonitor.isEnabled()) {
+      return;
+    }
+
     const sanitized = sanitizePathname(pathname);
 
     performanceMonitor.mark('nav.routeChange', {

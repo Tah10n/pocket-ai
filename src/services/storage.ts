@@ -62,7 +62,8 @@ function getFallbackStore(id?: string): Map<string, string> {
 }
 
 export function createStorage(id?: string): MMKV {
-    const logId = id || 'default';
+    const normalizedId = id && id.trim().length > 0 ? id : undefined;
+    const logId = normalizedId ?? 'default';
     try {
         if (IS_WEB || IS_TESTING) {
             throw new Error('MMKV is not supported on web or during testing');
@@ -74,7 +75,7 @@ export function createStorage(id?: string): MMKV {
         const createMMKV = mmkvModule.createMMKV;
 
         storageHealthById.set(logId, { implementation: 'mmkv' });
-        return id ? createMMKV({ id }) : createMMKV();
+        return normalizedId ? createMMKV({ id: normalizedId }) : createMMKV();
     } catch (e) {
         storageHealthById.set(logId, {
             implementation: 'memory',
@@ -90,7 +91,7 @@ export function createStorage(id?: string): MMKV {
             );
         }
 
-        const map = getFallbackStore(id);
+        const map = getFallbackStore(normalizedId);
         return {
             set: (key: string, value: string | number | boolean) => {
                 map.set(key, String(value));

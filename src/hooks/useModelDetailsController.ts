@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next';
 import { useLLMEngine } from '@/hooks/useLLMEngine';
 import { useModelParametersSheetController } from '@/hooks/useModelParametersSheetController';
 import { useModelDownload } from '@/hooks/useModelDownload';
+import { useDownloadStore } from '@/store/downloadStore';
 import { registry } from '@/services/LocalStorageRegistry';
 import {
   getHuggingFaceModelUrl,
@@ -36,7 +37,8 @@ export function useModelDetailsController(modelId: string) {
   const [loading, setLoading] = useState(Boolean(modelId));
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [runtimeRevision, setRuntimeRevision] = useState(0);
-  const { startDownload, cancelDownload, queue } = useModelDownload();
+  const { startDownload, cancelDownload } = useModelDownload();
+  const queuedItem = useDownloadStore((state) => state.queue.find((item) => item.id === modelId));
   const { loadModel, unloadModel, fitsInRam, state: engineState } = useLLMEngine();
 
   useEffect(() => {
@@ -95,9 +97,9 @@ export function useModelDetailsController(modelId: string) {
     return mergeModelWithRuntimeState(model, {
       activeModelId: engineState.activeModelId,
       localModel: registry.getModel(model.id),
-      queuedItem: queue.find((item) => item.id === model.id),
+      queuedItem: queuedItem?.id === model.id ? queuedItem : undefined,
     });
-  }, [engineState.activeModelId, model, queue, runtimeRevision]);
+  }, [engineState.activeModelId, model, queuedItem, runtimeRevision]);
 
   const getConfigurableModelById = useCallback((targetModelId: string | null) => {
     if (!targetModelId) {

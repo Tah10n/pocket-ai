@@ -21,6 +21,7 @@ import {
 } from '../../services/StorageManagerService';
 import { getReportedErrorMessage } from '../../services/AppError';
 import { formatModelFileSize } from '../../utils/modelSize';
+import { toTestIdSegment } from '../../utils/testIds';
 
 type BusyAction = 'cache' | 'chat' | 'settings' | `offload:${string}` | `offload:${string}:reset` | null;
 
@@ -43,6 +44,7 @@ function ActionCard({
     busy,
     disabled,
     buttonLabel,
+    buttonTestID,
     onPress,
 }: {
     title: string;
@@ -51,6 +53,7 @@ function ActionCard({
     busy: boolean;
     disabled: boolean;
     buttonLabel: string;
+    buttonTestID?: string;
     onPress: () => void;
 }) {
     return (
@@ -69,7 +72,14 @@ function ActionCard({
                         </Text>
                     ) : null}
                 </Box>
-                <Button action="softDestructive" size="sm" disabled={disabled} onPress={onPress} className="shrink-0">
+                <Button
+                    action="softDestructive"
+                    size="sm"
+                    disabled={disabled}
+                    testID={buttonTestID}
+                    onPress={onPress}
+                    className="shrink-0"
+                >
                     <ButtonText>{buttonLabel}</ButtonText>
                 </Button>
             </Box>
@@ -232,6 +242,7 @@ export function StorageManagerScreen() {
                 subtitle={t('storageManager.subtitle')}
                 onBack={handleBack}
                 backAccessibilityLabel={t('chat.headerBackAccessibilityLabel')}
+                backButtonTestID="storage-manager-back-button"
             />
 
             <ScrollView className="flex-1" showsVerticalScrollIndicator={false}>
@@ -261,6 +272,7 @@ export function StorageManagerScreen() {
                                     busy={busyAction === 'cache'}
                                     disabled={busyAction !== null}
                                     buttonLabel={busyAction === 'cache' ? t('common.loading') : t('common.clear')}
+                                    buttonTestID="storage-manager-clear-cache"
                                     onPress={handleClearCache}
                                 />
                                 <ActionCard
@@ -270,6 +282,7 @@ export function StorageManagerScreen() {
                                     busy={busyAction === 'chat'}
                                     disabled={busyAction !== null}
                                     buttonLabel={busyAction === 'chat' ? t('common.loading') : t('common.clear')}
+                                    buttonTestID="storage-manager-clear-chat"
                                     onPress={handleClearChatHistory}
                                 />
                                 <ActionCard
@@ -278,6 +291,7 @@ export function StorageManagerScreen() {
                                     busy={busyAction === 'settings'}
                                     disabled={busyAction !== null}
                                     buttonLabel={busyAction === 'settings' ? t('common.loading') : t('common.reset')}
+                                    buttonTestID="storage-manager-reset-settings"
                                     onPress={handleResetSettings}
                                 />
                             </ScreenStack>
@@ -325,6 +339,7 @@ export function StorageManagerScreen() {
                                                     size="sm"
                                                     disabled={busyAction !== null}
                                                     onPress={() => handleDeleteModel(model.id, model.name)}
+                                                    testID={`storage-manager-delete-model-${toTestIdSegment(model.id)}`}
                                                     className="shrink-0"
                                                 >
                                                     <ButtonText>{busyAction === actionKey ? t('common.loading') : t('common.delete')}</ButtonText>

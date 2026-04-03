@@ -69,7 +69,9 @@ export function ConversationSwitcherSheet({
       <Box className="flex-1 justify-end bg-black/40">
         <Pressable className="flex-1" onPress={onClose} />
         <AnimatedView style={sheetStyle}>
-        <ScreenSheet className="max-h-[75%] pb-8">
+        <ScreenSheet
+          className={`max-h-[75%] pb-8 ${conversations.length === 0 ? 'min-h-[45%]' : ''}`}
+        >
           <Box className="mb-4 flex-row items-center justify-between">
             <Box>
               <Text className="text-lg font-semibold text-typography-900 dark:text-typography-100">

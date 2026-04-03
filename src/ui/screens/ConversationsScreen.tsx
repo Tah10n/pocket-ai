@@ -452,7 +452,11 @@ export function ConversationsScreen() {
               />
             </Box>
           ) : (
-            <Box className="flex-1 justify-center pb-10 pt-4">
+            <Box
+              className={conversationIndex.length === 0
+                ? 'flex-1 justify-start pb-10 pt-6'
+                : 'flex-1 justify-center pb-10 pt-4'}
+            >
               <ScreenCard padding="large">
                 <Box className="h-12 w-12 items-center justify-center rounded-2xl bg-primary-500/10 dark:bg-primary-500/15">
                   <MaterialSymbols

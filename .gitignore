@@ -46,3 +46,7 @@ app-example
 
 # local properties (SDK path etc.)
 local.properties
+
+# Android signing secrets
+keystore.properties
+keystores/

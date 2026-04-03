@@ -14,6 +14,7 @@
       "bundleIdentifier": "com.github.tah10n.pocketai"
     },
     "android": {
+      "versionCode": 4,
       "permissions": [
         "INTERNET",
         "VIBRATE"
@@ -47,6 +48,7 @@
         }
       ],
       "expo-font",
+      "./plugins/withAndroidGradlePluginManagement",
       "./plugins/withAndroidReleaseConfig",
       "./plugins/withAndroidSystemMetrics",
       "expo-secure-store"
@@ -54,6 +56,12 @@
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "b54b3315-90d6-4341-8a14-8e3d343b78f1"
+      }
     }
   }
 }

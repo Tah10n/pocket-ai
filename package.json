@@ -23,9 +23,11 @@
     "verify:mobile-change": "npm run typecheck && npm run lint && npm test",
     "verify:mobile-change:android": "npm run verify:mobile-change && npm run android:scenarios:emulator",
     "verify:release": "npm run typecheck && npm run lint && npm test",
-    "build:android:preview": "eas build --platform android --profile preview",
-    "build:android:production": "eas build --platform android --profile production",
-    "build:all:production": "eas build --platform all --profile production"
+    "build:android:production": "node ./scripts/build-android-release.js",
+    "build:android:production:clean": "node ./scripts/build-android-release.js --clean",
+    "build:android:eas:preview": "eas build --platform android --profile preview",
+    "build:android:eas:production": "eas build --platform android --profile production",
+    "build:all:eas:production": "eas build --platform all --profile production"
   },
   "dependencies": {
     "@expo-google-fonts/inter": "^0.4.2",
@@ -94,9 +96,6 @@
   },
   "overrides": {
     "@tootallnate/once": "3.0.1",
-    "@xmldom/xmldom@0.7.13": "0.8.12",
-    "ajv@8.11.0": "8.18.0",
-    "diff@7.0.0": "8.0.3",
     "minimatch@5.1.2": "5.1.9",
     "node-forge@1.3.1": "1.4.0",
     "tar": "7.5.13",

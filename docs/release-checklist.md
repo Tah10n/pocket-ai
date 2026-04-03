@@ -1,6 +1,6 @@
 # Release Checklist
 
-Last updated: 2026-03-31
+Last updated: 2026-04-03
 
 ## Purpose
 
@@ -10,10 +10,13 @@ Use this checklist before cutting a preview or production release. It is written
 
 - App display name: `Pocket AI`
 - Expo slug: `pocket-ai`
+- Store-visible version is read from `app.json -> expo.version`
+- The next Android Play upload code is stored in `app.json -> expo.android.versionCode`
 - Deep-link scheme: `pocketai`
 - Android application ID: `com.github.tah10n.pocketai`
 - iOS bundle identifier: `com.github.tah10n.pocketai`
-- EAS profiles in [`eas.json`](../eas.json): `development`, `preview`, `production`
+- Android release signing is loaded from local `keystore.properties` at the app root or `POCKET_AI_UPLOAD_*` environment variables
+- Local Android release builds write the signed AAB to `android/app/build/outputs/bundle/release/app-release.aab`
 
 ## Pre-flight checks
 
@@ -51,12 +54,53 @@ node .\scripts\android-screen-capture.js --emulator --skip-build --screen home,m
 
 ## Build commands
 
-Use the committed EAS profiles:
+If `android/` is not present in your local checkout, generate the native project first:
 
 ```bash
-npm run build:android:preview
+npx expo prebuild --platform android
+```
+
+If Gradle fails with "SDK location not found", make sure the Android SDK is installed and either:
+
+- set `ANDROID_HOME` / `ANDROID_SDK_ROOT`, or
+- create `android/local.properties` with `sdk.dir=...` (for example `sdk.dir=C:/Users/<you>/AppData/Local/Android/Sdk` on Windows)
+
+Create the Play Store Android App Bundle locally:
+
+```bash
 npm run build:android:production
-npm run build:all:production
+```
+
+This command uses `expo.version` as `versionName`, uses the current `expo.android.versionCode` as the upload code, and after a successful build reserves the next `versionCode` in `app.json`.
+
+Only override the version values when recovering from a failed or custom release flow:
+
+```bash
+npm run build:android:production -- --version-code 2 --version-name 1.0.1
+```
+
+The build script runs `bundleRelease` from `android/` with `NODE_ENV=production`.
+
+## Android signing setup
+
+Keep both signing files outside the generated `android/` tree:
+
+- `keystore.properties`
+- `keystores/pocket-ai-upload.jks`
+
+Generate an upload keystore once and keep it outside version control:
+
+```bash
+keytool -genkeypair -v -storetype PKCS12 -keystore keystores/pocket-ai-upload.jks -alias pocketai -keyalg RSA -keysize 2048 -validity 10000
+```
+
+Store the signing credentials in `keystore.properties` at the app root:
+
+```text
+storeFile=keystores/pocket-ai-upload.jks
+storePassword=your-store-password
+keyAlias=pocketai
+keyPassword=your-key-password
 ```
 
 ## Manual QA checklist
@@ -142,6 +186,8 @@ When release behavior or product messaging changes, check these files together:
 
 - [`README.md`](../README.md)
 - [`app.json`](../app.json)
+- [`plugins/withAndroidReleaseConfig.js`](../plugins/withAndroidReleaseConfig.js)
+- [`scripts/build-android-release.js`](../scripts/build-android-release.js)
 - [`eas.json`](../eas.json)
 - [`docs/privacy-disclosures.md`](./privacy-disclosures.md)
 

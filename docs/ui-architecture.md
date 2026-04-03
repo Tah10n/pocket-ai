@@ -1,6 +1,6 @@
 # UI Architecture & Component Guide
 
-Last updated: 2026-03-31
+Last updated: 2026-04-03
 
 ## Purpose
 
@@ -56,6 +56,16 @@ The alias is defined in [`tsconfig.json`](../tsconfig.json):
 - Use inline styles or `StyleSheet` when values are driven by runtime layout, safe-area math, or a documented framework workaround.
 - Use the shared `MaterialSymbols` wrapper instead of importing icon implementations ad hoc across screens.
 - Keep application logic in hooks, services, or stores rather than burying it inside presentational components.
+
+## Units and byte formatting
+
+Pocket AI displays storage, memory, and model sizes using decimal units (base-10):
+
+- 1 KB = 1,000 bytes
+- 1 MB = 1,000,000 bytes
+- 1 GB = 1,000,000,000 bytes
+
+Use `DECIMAL_GIGABYTE` from [`src/utils/modelSize.ts`](../src/utils/modelSize.ts) for UI-facing conversions, and keep labels consistent (`GB`, not `GiB`).
 
 ## NativeWind and interop notes
 

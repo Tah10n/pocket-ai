@@ -324,7 +324,7 @@ export const SettingsScreen = () => {
     const ramUsedPercentage = metrics?.ram.usedPercentage ?? 0;
     const ramAppUsedPercentage = ramTotalBytes > 0 ? (ramAppUsedBytes / ramTotalBytes) * 100 : 0;
     const isSystemRamSource = metrics?.ram.source === 'system';
-    const hasStrictSystemFreeBytes = isSystemRamSource && ramFreeBytes !== null;
+    const hasStrictSystemFreeBytes = isSystemRamSource && typeof ramFreeBytes === 'number';
 
     const storageTotalBytes = metrics?.storage.totalBytes ?? 0;
     const storageUsedBytes = metrics?.storage.usedBytes ?? 0;

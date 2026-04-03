@@ -74,6 +74,7 @@ npm run build:all:production
 - Confirm `All Models` and `Downloaded` render as one segmented control inside the same page, not as two separate standalone buttons.
 - On first catalog open with no Hugging Face token configured, confirm guided discovery defaults to RAM-friendly public models and offers `Show full catalog`.
 - Search for a public GGUF model whose list metadata does not expose a reliable size and confirm the card shows a resolved size or `Unknown`, never `0.00 GB`.
+- Confirm size labels use decimal units (1 GB = 1,000,000,000 bytes).
 - Open `Filter` and `Sort` and confirm both panels stay collapsed by default, open independently, use the compact trigger style, and do not permanently steal list height.
 - In `Filter`, confirm the visible criteria are limited to RAM, token, and size choices; do not show separate lifecycle categories such as `Available`, `Downloading`, or `Downloaded`.
 - Apply `No token required` and confirm gated/private repositories are excluded.

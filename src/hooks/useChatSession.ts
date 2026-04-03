@@ -476,8 +476,8 @@ export const useChatSession = () => {
       throw new Error('Message cannot be empty.');
     }
 
+    ensureThreadCanGenerate(activeThread, 'regenerating this response');
     const syncedThread = syncThreadParametersCallback(activeThread);
-    ensureThreadCanGenerate(syncedThread, 'regenerating this response');
 
     const assistantMessageId = replaceBranchFromUserMessage(
       syncedThread.id,
@@ -505,8 +505,8 @@ export const useChatSession = () => {
       return false;
     }
 
+    ensureThreadCanGenerate(activeThread, 'regenerating this response');
     const syncedThread = syncThreadParametersCallback(activeThread);
-    ensureThreadCanGenerate(syncedThread, 'regenerating this response');
 
     const assistantMessageId = replaceLastAssistantMessage(syncedThread.id);
     if (!assistantMessageId) {

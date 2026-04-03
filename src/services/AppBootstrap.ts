@@ -195,7 +195,9 @@ export async function bootstrapAppBackground(): Promise<void> {
 
   const recordError = (scope: string, error: unknown) => {
     errors.push({ scope, error });
-    console.warn(`[bootstrapApp] Background bootstrap failed: ${scope}`, error);
+    if (process.env.NODE_ENV !== 'test') {
+      console.warn(`[bootstrapApp] Background bootstrap failed: ${scope}`, error);
+    }
   };
 
   try {

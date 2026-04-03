@@ -530,11 +530,15 @@ export class ModelCatalogService {
         memoryFitContext,
       );
       if (cachedSearch) {
-        console.log('[ModelCatalogService] Offline mode: using persisted catalog cache');
+        if (process.env.NODE_ENV !== 'test') {
+          console.log('[ModelCatalogService] Offline mode: using persisted catalog cache');
+        }
         return this.toNonPaginatedFallback(cachedSearch);
       }
 
-      console.log('[ModelCatalogService] Offline mode: fetching from local registry');
+      if (process.env.NODE_ENV !== 'test') {
+        console.log('[ModelCatalogService] Offline mode: fetching from local registry');
+      }
       return this.getLocalSearchResults(query, memoryFitContext);
     }
 
@@ -614,7 +618,9 @@ export class ModelCatalogService {
       }
 
       if (e instanceof ModelCatalogError && e.code === 'rate_limited') {
-        console.warn('[ModelCatalogService] Search rate limited', e);
+        if (process.env.NODE_ENV !== 'test') {
+          console.warn('[ModelCatalogService] Search rate limited', e);
+        }
       } else {
         console.error('[ModelCatalogService] Search failed', e);
       }
@@ -1981,7 +1987,11 @@ export class ModelCatalogService {
 
             if (!response.ok) {
               if (entries.length > 0) {
-                console.warn(`[ModelCatalogService] Tree pagination stopped early for ${repoId}: ${response.status}`);
+                if (process.env.NODE_ENV !== 'test') {
+                  console.warn(
+                    `[ModelCatalogService] Tree pagination stopped early for ${repoId}: ${response.status}`,
+                  );
+                }
                 isComplete = false;
                 stopReason = 'http_error';
                 break;

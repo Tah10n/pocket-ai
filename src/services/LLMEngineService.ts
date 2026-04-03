@@ -143,7 +143,9 @@ class LLMEngineService {
   constructor() {
     this.hwUnsubscribe = hardwareListenerService.subscribe((status) => {
       if (status.isLowMemory && this.context) {
-        console.warn('[LLMEngine] Low memory warning — unloading model');
+        if (process.env.NODE_ENV !== 'test') {
+          console.warn('[LLMEngine] Low memory warning — unloading model');
+        }
         this.unload();
       }
     });
@@ -486,7 +488,9 @@ class LLMEngineService {
         );
       } catch (gpuError) {
         if (gpuLayers > 0) {
-          console.warn('[LLMEngine] GPU init failed, falling back to CPU', gpuError);
+          if (process.env.NODE_ENV !== 'test') {
+            console.warn('[LLMEngine] GPU init failed, falling back to CPU', gpuError);
+          }
           resolvedGpuLayers = 0;
           this.context = await initLlama(
             {

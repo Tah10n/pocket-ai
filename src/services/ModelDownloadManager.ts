@@ -11,6 +11,7 @@ import { getSystemMemorySnapshot } from './SystemMetricsService';
 import { HF_BASE_URL } from '../utils/huggingFaceUrls';
 import { getCandidateModelDownloadFileNames } from '../utils/modelFiles';
 import { assessModelMemoryFit, DEFAULT_TOTAL_MEMORY_BYTES } from '../utils/memoryFit';
+import { DECIMAL_GIGABYTE } from '../utils/modelSize';
 
 export class ModelDownloadManager {
   private static instance: ModelDownloadManager;
@@ -84,11 +85,11 @@ export class ModelDownloadManager {
       }
 
       const freeSpace = await FileSystem.getFreeDiskStorageAsync();
-      const REQUIRED_BUFFER = 1024 * 1024 * 1024; // 1 GB
+      const REQUIRED_BUFFER_BYTES = DECIMAL_GIGABYTE; // 1 GB
       const requiredModelBytes = model.size ?? 0;
-      if (model.size !== null && freeSpace !== undefined && freeSpace < requiredModelBytes + REQUIRED_BUFFER) {
+      if (model.size !== null && freeSpace !== undefined && freeSpace < requiredModelBytes + REQUIRED_BUFFER_BYTES) {
         throw new AppError('download_disk_space_low', 'DISK_SPACE_LOW', {
-          details: { modelId: model.id, freeSpace, requiredBytes: requiredModelBytes + REQUIRED_BUFFER },
+          details: { modelId: model.id, freeSpace, requiredBytes: requiredModelBytes + REQUIRED_BUFFER_BYTES },
         });
       }
     } catch (e: any) {

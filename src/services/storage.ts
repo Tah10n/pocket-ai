@@ -62,7 +62,8 @@ function getFallbackStore(id?: string): Map<string, string> {
 }
 
 export function createStorage(id?: string): MMKV {
-    const normalizedId = id && id.trim().length > 0 ? id : undefined;
+    const trimmedId = typeof id === 'string' ? id.trim() : '';
+    const normalizedId = trimmedId.length > 0 ? trimmedId : undefined;
     const logId = normalizedId ?? 'default';
     try {
         if (IS_WEB || IS_TESTING) {

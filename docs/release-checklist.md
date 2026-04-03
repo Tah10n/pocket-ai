@@ -18,6 +18,14 @@ Use this checklist before cutting a preview or production release. It is written
 - Android release signing is loaded from local `keystore.properties` at the app root or `POCKET_AI_UPLOAD_*` environment variables
 - Local Android release builds write the signed AAB to `android/app/build/outputs/bundle/release/app-release.aab`
 
+## Release metadata
+
+If you're cutting a user-facing store release:
+
+- Bump `app.json -> expo.version`.
+- Keep `package.json -> version` aligned (same value).
+- Update [`CHANGELOG.md`](../CHANGELOG.md).
+
 ## Pre-flight checks
 
 Run the local verification gate before cutting a build:
@@ -72,6 +80,8 @@ npm run build:android:production
 ```
 
 This command uses `expo.version` as `versionName`, uses the current `expo.android.versionCode` as the upload code, and after a successful build reserves the next `versionCode` in `app.json`.
+
+After a successful build, `app.json` is expected to change (the next `expo.android.versionCode` is reserved). Commit this change as part of the release PR so the next upload code is not lost.
 
 Only override the version values when recovering from a failed or custom release flow:
 
@@ -185,7 +195,9 @@ keyPassword=your-key-password
 When release behavior or product messaging changes, check these files together:
 
 - [`README.md`](../README.md)
+- [`CHANGELOG.md`](../CHANGELOG.md)
 - [`app.json`](../app.json)
+- [`package.json`](../package.json)
 - [`plugins/withAndroidReleaseConfig.js`](../plugins/withAndroidReleaseConfig.js)
 - [`scripts/build-android-release.js`](../scripts/build-android-release.js)
 - [`eas.json`](../eas.json)

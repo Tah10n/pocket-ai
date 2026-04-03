@@ -214,6 +214,8 @@ assets/      Icons, splash assets, and other static files
 - [Release Checklist](./docs/release-checklist.md)
 - [New Architecture Notes](./docs/new-architecture.md)
 - [UI Architecture Guidelines](./docs/ui-architecture.md)
+- [Changelog](./CHANGELOG.md)
+- [Contributing](./CONTRIBUTING.md)
 
 ## Current status
 

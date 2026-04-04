@@ -7,10 +7,10 @@ import { registry } from './LocalStorageRegistry';
 import { getModelsDir } from './FileSystemSetup';
 import { AppError, toAppError } from './AppError';
 import { huggingFaceTokenService } from './HuggingFaceTokenService';
-import { getSystemMemorySnapshot } from './SystemMetricsService';
 import { HF_BASE_URL } from '../utils/huggingFaceUrls';
 import { getCandidateModelDownloadFileNames } from '../utils/modelFiles';
-import { assessModelMemoryFit, DEFAULT_TOTAL_MEMORY_BYTES } from '../utils/memoryFit';
+import { DEFAULT_TOTAL_MEMORY_BYTES } from '../memory/budget';
+import { estimateFastMemoryFit } from '../memory/estimator';
 import { DECIMAL_GIGABYTE } from '../utils/modelSize';
 
 export class ModelDownloadManager {
@@ -186,13 +186,23 @@ export class ModelDownloadManager {
       )
         ? Math.round(downloadedFileInfo.size)
         : model.size;
-      const fitsInRam = await this.resolveFitsInRam(downloadedSize);
+      const metadataTrust = typeof downloadedSize === 'number' && Number.isFinite(downloadedSize) && downloadedSize > 0
+        ? 'verified_local' as const
+        : model.metadataTrust;
+      const fitsInRam = await this.resolveFitsInRam(downloadedSize, metadataTrust);
 
       // Success
       const completedModel: ModelMetadata = {
         ...model,
         size: downloadedSize ?? null,
         fitsInRam,
+        metadataTrust,
+        gguf: typeof downloadedSize === 'number' && Number.isFinite(downloadedSize) && downloadedSize > 0
+          ? {
+            ...(model.gguf ?? {}),
+            totalBytes: Math.round(downloadedSize),
+          }
+          : model.gguf,
         localPath: fileName,
         downloadedAt: Date.now(),
         lifecycleStatus: LifecycleStatus.DOWNLOADED,
@@ -411,21 +421,23 @@ export class ModelDownloadManager {
     return decodeURI(fileUri.replace(/^file:\/+/, '/'));
   }
 
-  private async resolveFitsInRam(size: number | null): Promise<boolean | null> {
+  private async resolveFitsInRam(size: number | null, metadataTrust: ModelMetadata['metadataTrust']): Promise<boolean | null> {
     if (typeof size !== 'number' || !Number.isFinite(size) || size <= 0) {
       return null;
     }
 
-    const systemMemorySnapshot = await getSystemMemorySnapshot().catch(() => null);
-    const totalMemoryBytes = systemMemorySnapshot?.totalBytes
-      ?? await DeviceInfo.getTotalMemory().catch(() => DEFAULT_TOTAL_MEMORY_BYTES);
-    const assessment = assessModelMemoryFit({
+    const totalMemoryBytes = await DeviceInfo.getTotalMemory().catch(() => DEFAULT_TOTAL_MEMORY_BYTES);
+    const fit = estimateFastMemoryFit({
       modelSizeBytes: size,
       totalMemoryBytes,
-      systemMemorySnapshot: null,
+      metadataTrust,
     });
 
-    return assessment?.fitsInRam ?? null;
+    if (fit.decision === 'unknown') {
+      return null;
+    }
+
+    return fit.decision === 'fits_high_confidence' || fit.decision === 'fits_low_confidence';
   }
 
   private async deleteCorruptedDownload(localUri: string, modelId: string): Promise<void> {

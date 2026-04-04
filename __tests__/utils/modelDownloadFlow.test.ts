@@ -1,6 +1,5 @@
 import { Alert } from 'react-native';
 import { startModelDownloadFlow } from '../../src/utils/modelDownloadFlow';
-import type { MemoryFitResult } from '../../src/memory/types';
 import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../src/types/models';
 
 const mockGetCurrentStatus = jest.fn();
@@ -36,36 +35,6 @@ function createModel(overrides: Partial<ModelMetadata> = {}): ModelMetadata {
   };
 }
 
-function createMemoryFitResult(overrides: Partial<MemoryFitResult> = {}): MemoryFitResult {
-  const baseBudget: MemoryFitResult['budget'] = {
-    totalMemoryBytes: 10,
-    effectiveBudgetBytes: 2,
-  };
-
-  const base: MemoryFitResult = {
-    decision: 'fits_high_confidence',
-    confidence: 'medium',
-    requiredBytes: 1,
-    effectiveBudgetBytes: 2,
-    breakdown: {
-      weightsBytes: 1,
-      kvCacheBytes: 0,
-      computeBytes: 0,
-      multimodalBytes: 0,
-      overheadBytes: 0,
-      safetyMarginBytes: 0,
-    },
-    budget: baseBudget,
-    recommendations: [],
-  };
-
-  return {
-    ...base,
-    ...overrides,
-    budget: { ...baseBudget, ...(overrides.budget ?? {}) },
-  };
-}
-
 describe('modelDownloadFlow', () => {
   let alertSpy: jest.SpiedFunction<typeof Alert.alert>;
 
@@ -86,7 +55,6 @@ describe('modelDownloadFlow', () => {
     startModelDownloadFlow({
       model: createModel({ fitsInRam: false }),
       t: (key) => key,
-      getMemoryFit: jest.fn().mockResolvedValue(createMemoryFitResult()),
       startDownload,
       openTokenSettings: jest.fn(),
       openModelPage: jest.fn().mockResolvedValue(undefined),
@@ -130,7 +98,6 @@ describe('modelDownloadFlow', () => {
         requiresTreeProbe: true,
       }),
       t: (key) => key,
-      getMemoryFit: jest.fn().mockResolvedValue(createMemoryFitResult()),
       startDownload,
       openTokenSettings: jest.fn(),
       openModelPage: jest.fn().mockResolvedValue(undefined),

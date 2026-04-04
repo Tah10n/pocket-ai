@@ -640,7 +640,116 @@ describe('ModelCatalogService', () => {
     expect(result.models).toHaveLength(1);
     expect(result.models[0].resolvedFileName).toBe('model.Q4_K_M.gguf');
     expect(result.models[0].size).toBe(3 * 1024 * 1024 * 1024);
+    expect(result.models[0].metadataTrust).toBe('trusted_remote');
+    expect(result.models[0].gguf).toEqual(expect.objectContaining({
+      totalBytes: 3 * 1024 * 1024 * 1024,
+    }));
     expect(result.models[0].downloadUrl).toContain('model.Q4_K_M.gguf');
+  });
+
+  it('infers metadata trust when model size comes from summary gguf totals', async () => {
+    global.fetch = jest.fn(() =>
+      Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve([
+          {
+            id: 'org/inferred-size-model',
+            gguf: {
+              total: 2 * 1024 * 1024 * 1024,
+              architecture: 'llama',
+              context_length: 2048,
+              size_label: '2B',
+            },
+            siblings: [
+              { rfilename: 'model.Q4_K_M.gguf' },
+            ],
+          },
+        ]),
+      }),
+    ) as jest.Mock;
+
+    const result = await modelCatalogService.searchModels('phi');
+
+    expect(result.models).toHaveLength(1);
+    expect(result.models[0].size).toBe(2 * 1024 * 1024 * 1024);
+    expect(result.models[0].metadataTrust).toBe('inferred');
+    expect(result.models[0].gguf).toEqual(expect.objectContaining({
+      totalBytes: 2 * 1024 * 1024 * 1024,
+      architecture: 'llama',
+      contextLengthTokens: 2048,
+      sizeLabel: '2B',
+    }));
+  });
+
+  it('prefers remote sizes over unverified local sizes when merging catalog results with the registry', async () => {
+    const localModel: ModelMetadata = {
+      ...makeLocalModel('org/unverified-local-size-model'),
+      accessState: ModelAccessState.PUBLIC,
+      size: 1 * 1024 * 1024 * 1024,
+      metadataTrust: 'unknown',
+      localPath: 'unverified-local-size-model.gguf',
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+    };
+    mockedRegistry.getModel.mockImplementation((modelId: string) => (
+      modelId === localModel.id ? localModel : undefined
+    ));
+
+    global.fetch = jest.fn(() =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: {
+          get: jest.fn(() => null),
+        },
+        json: () => Promise.resolve([makeRepo(localModel.id, 3 * 1024 * 1024 * 1024)]),
+      }),
+    ) as jest.Mock;
+
+    const result = await modelCatalogService.searchModels('phi');
+
+    expect(result.models).toHaveLength(1);
+    expect(result.models[0].id).toBe(localModel.id);
+    expect(result.models[0].localPath).toBe(localModel.localPath);
+    expect(result.models[0].lifecycleStatus).toBe(LifecycleStatus.DOWNLOADED);
+    expect(result.models[0].size).toBe(3 * 1024 * 1024 * 1024);
+  });
+
+  it('prefers verified local sizes over remote sizes when merging catalog results with the registry', async () => {
+    const localModel: ModelMetadata = {
+      ...makeLocalModel('org/verified-local-size-model'),
+      accessState: ModelAccessState.PUBLIC,
+      size: 4 * 1024 * 1024 * 1024,
+      metadataTrust: 'verified_local',
+      gguf: { totalBytes: 4 * 1024 * 1024 * 1024 },
+      localPath: 'verified-local-size-model.gguf',
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+    };
+    mockedRegistry.getModel.mockImplementation((modelId: string) => (
+      modelId === localModel.id ? localModel : undefined
+    ));
+
+    global.fetch = jest.fn(() =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: {
+          get: jest.fn(() => null),
+        },
+        json: () => Promise.resolve([makeRepo(localModel.id, 3 * 1024 * 1024 * 1024)]),
+      }),
+    ) as jest.Mock;
+
+    const result = await modelCatalogService.searchModels('phi');
+
+    expect(result.models).toHaveLength(1);
+    expect(result.models[0].id).toBe(localModel.id);
+    expect(result.models[0].localPath).toBe(localModel.localPath);
+    expect(result.models[0].lifecycleStatus).toBe(LifecycleStatus.DOWNLOADED);
+    expect(result.models[0].size).toBe(4 * 1024 * 1024 * 1024);
+    expect(result.models[0].metadataTrust).toBe('verified_local');
+    expect(result.models[0].gguf).toEqual(expect.objectContaining({ totalBytes: 4 * 1024 * 1024 * 1024 }));
   });
 
   it('skips mmproj projector files when selecting a GGUF download candidate', async () => {
@@ -663,6 +772,10 @@ describe('ModelCatalogService', () => {
 
     expect(result.models).toHaveLength(1);
     expect(result.models[0].resolvedFileName).toBe('model.Q8_0.gguf');
+    expect(result.models[0].metadataTrust).toBe('trusted_remote');
+    expect(result.models[0].gguf).toEqual(expect.objectContaining({
+      totalBytes: 5 * 1024 * 1024 * 1024,
+    }));
     expect(result.models[0].downloadUrl).toContain('model.Q8_0.gguf');
   });
 
@@ -703,6 +816,10 @@ describe('ModelCatalogService', () => {
     expect(result.models).toHaveLength(1);
     expect(result.models[0].resolvedFileName).toBe('model.Q8_0.gguf');
     expect(result.models[0].size).toBe(5 * 1024 * 1024 * 1024);
+    expect(result.models[0].metadataTrust).toBe('trusted_remote');
+    expect(result.models[0].gguf).toEqual(expect.objectContaining({
+      totalBytes: 5 * 1024 * 1024 * 1024,
+    }));
     expect(result.models[0].requiresTreeProbe).toBe(false);
     expect(global.fetch).toHaveBeenCalledTimes(1);
   });

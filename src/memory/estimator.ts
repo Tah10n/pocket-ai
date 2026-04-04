@@ -1,4 +1,4 @@
-import type { MemoryFitConfidence, MemoryFitDecision, MemoryFitResult, MemoryBreakdown } from './types';
+import type { MemoryFitConfidence, MemoryFitDecision, MemoryFitResult, MemoryBreakdown, MemoryMetadataTrust } from './types';
 import { createMemoryBudget, type MemoryBudgetSnapshot } from './budget';
 
 export const ESTIMATED_MODEL_RUNTIME_OVERHEAD_FACTOR = 0.2;
@@ -86,6 +86,14 @@ function recommendationsForDecision(decision: MemoryFitDecision): string[] {
   return [];
 }
 
+function confidenceForFastEstimate(metadataTrust: MemoryMetadataTrust | undefined): MemoryFitConfidence {
+  if (metadataTrust === 'verified_local' || metadataTrust === 'trusted_remote') {
+    return 'medium';
+  }
+
+  return 'low';
+}
+
 export function estimateModelRuntimeBytes(modelSizeBytes: number): number {
   return modelSizeBytes * (1 + ESTIMATED_MODEL_RUNTIME_OVERHEAD_FACTOR);
 }
@@ -138,6 +146,46 @@ export function estimateMemoryFitFromModelSize({
     effectiveBudgetBytes,
     breakdown,
     budget,
+    recommendations: recommendationsForDecision(decision),
+  };
+}
+
+export function estimateFastMemoryFit({
+  modelSizeBytes,
+  totalMemoryBytes,
+  metadataTrust,
+}: {
+  modelSizeBytes: number | null;
+  totalMemoryBytes: number | null;
+  metadataTrust?: MemoryMetadataTrust;
+}): MemoryFitResult {
+  if (!isFinitePositiveNumber(modelSizeBytes) || !isFinitePositiveNumber(totalMemoryBytes)) {
+    return estimateMemoryFitFromModelSize({
+      modelSizeBytes: 0,
+      totalMemoryBytes: isFinitePositiveNumber(totalMemoryBytes) ? totalMemoryBytes : 0,
+      systemMemorySnapshot: null,
+    });
+  }
+
+  const base = estimateMemoryFitFromModelSize({
+    modelSizeBytes,
+    totalMemoryBytes,
+    systemMemorySnapshot: null,
+  });
+
+  const confidence = confidenceForFastEstimate(metadataTrust);
+  const decision = confidence === 'low' && base.decision === 'fits_high_confidence'
+    ? 'fits_low_confidence'
+    : base.decision;
+
+  if (decision === base.decision && confidence === base.confidence) {
+    return base;
+  }
+
+  return {
+    ...base,
+    decision,
+    confidence,
     recommendations: recommendationsForDecision(decision),
   };
 }

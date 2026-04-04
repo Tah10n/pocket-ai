@@ -5,14 +5,15 @@ import { createStorage } from './storage';
 import { ModelMetadata, LifecycleStatus } from '../types/models';
 import { getModelsDir } from './FileSystemSetup';
 import { normalizePersistedModelMetadata } from './ModelMetadataNormalizer';
-import { getSystemMemorySnapshot } from './SystemMetricsService';
-import { assessModelMemoryFit, DEFAULT_TOTAL_MEMORY_BYTES } from '../utils/memoryFit';
+import { DEFAULT_TOTAL_MEMORY_BYTES } from '../memory/budget';
+import { estimateFastMemoryFit } from '../memory/estimator';
 
 const REGISTRY_KEY = 'models-registry';
 
 function cloneModelMetadata(model: ModelMetadata): ModelMetadata {
   return {
     ...model,
+    gguf: model.gguf ? { ...model.gguf } : undefined,
     architectures: model.architectures ? [...model.architectures] : undefined,
     baseModels: model.baseModels ? [...model.baseModels] : undefined,
     datasets: model.datasets ? [...model.datasets] : undefined,
@@ -111,7 +112,6 @@ export class LocalStorageRegistry {
     const models = this.getModels();
     const modelsDir = getModelsDir();
     const totalMemory = await this.getTotalMemory();
-    const systemMemorySnapshot = await getSystemMemorySnapshot().catch(() => null);
     let changed = false;
 
     if (!modelsDir) {
@@ -146,31 +146,66 @@ export class LocalStorageRegistry {
             model.lifecycleStatus = LifecycleStatus.AVAILABLE;
             model.localPath = undefined;
             changed = true;
+            continue;
           } else if (model.lifecycleStatus === LifecycleStatus.ACTIVE) {
             model.lifecycleStatus = LifecycleStatus.DOWNLOADED;
             changed = true;
           }
 
-          const resolvedSize = (
-            info.exists &&
-            typeof info.size === 'number' &&
-            Number.isFinite(info.size) &&
-            info.size > 0
+          const verifiedSizeBytes = (
+            typeof info.size === 'number'
+            && Number.isFinite(info.size)
+            && info.size > 0
           )
             ? Math.round(info.size)
             : null;
 
-          if (resolvedSize !== null && model.size !== resolvedSize) {
-            model.size = resolvedSize;
+          if (verifiedSizeBytes !== null && model.size !== verifiedSizeBytes) {
+            model.size = verifiedSizeBytes;
             changed = true;
           }
 
-          if (resolvedSize !== null) {
-            const fitsInRam = assessModelMemoryFit({
-              modelSizeBytes: resolvedSize,
-              totalMemoryBytes: systemMemorySnapshot?.totalBytes ?? totalMemory,
-              systemMemorySnapshot: null,
-            })?.fitsInRam ?? false;
+          const persistedSizeBytes = (
+            typeof model.size === 'number'
+            && Number.isFinite(model.size)
+            && model.size > 0
+          )
+            ? Math.round(model.size)
+            : null;
+          const sizeBytesForFit = verifiedSizeBytes ?? persistedSizeBytes;
+
+          if (sizeBytesForFit !== null) {
+            const metadataTrustForFit = verifiedSizeBytes !== null
+              ? 'verified_local' as const
+              : model.metadataTrust;
+            const fit = estimateFastMemoryFit({
+              modelSizeBytes: sizeBytesForFit,
+              totalMemoryBytes: totalMemory,
+              metadataTrust: metadataTrustForFit,
+            });
+            const fitsInRam = fit.decision === 'unknown'
+              ? null
+              : fit.decision === 'fits_high_confidence' || fit.decision === 'fits_low_confidence';
+
+            if (verifiedSizeBytes !== null) {
+              const metadataTrust = 'verified_local' as const;
+              if (model.metadataTrust !== metadataTrust) {
+                model.metadataTrust = metadataTrust;
+                changed = true;
+              }
+
+              const mergedGgufTotalBytes = model.gguf?.totalBytes === verifiedSizeBytes
+                ? model.gguf
+                : {
+                  ...(model.gguf ?? {}),
+                  totalBytes: verifiedSizeBytes,
+                };
+              if (mergedGgufTotalBytes !== model.gguf) {
+                model.gguf = mergedGgufTotalBytes;
+                changed = true;
+              }
+            }
+
             if (model.fitsInRam !== fitsInRam) {
               model.fitsInRam = fitsInRam;
               changed = true;

@@ -132,6 +132,8 @@ describe('LocalStorageRegistry', () => {
     const updatedModels = (registry.saveModels as jest.Mock).mock.calls[0][0];
     expect(updatedModels[0].size).toBe(2048);
     expect(updatedModels[0].fitsInRam).toBe(false);
+    expect(updatedModels[0].metadataTrust).toBe('verified_local');
+    expect(updatedModels[0].gguf).toEqual(expect.objectContaining({ totalBytes: 2048 }));
   });
 
   it('recomputes fitsInRam for downloaded models when legacy persisted metadata is missing the flag', async () => {
@@ -147,6 +149,30 @@ describe('LocalStorageRegistry', () => {
     const updatedModels = (registry.saveModels as jest.Mock).mock.calls[0][0];
     expect(updatedModels[0].size).toBe(2048);
     expect(updatedModels[0].fitsInRam).toBe(false);
+    expect(updatedModels[0].metadataTrust).toBe('verified_local');
+    expect(updatedModels[0].gguf).toEqual(expect.objectContaining({ totalBytes: 2048 }));
+  });
+
+  it('falls back to the persisted size for fitsInRam when file size metadata is unavailable, without marking size verified', async () => {
+    (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(1024);
+    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([
+      createMockModel({
+        size: 2048,
+        fitsInRam: null,
+        metadataTrust: undefined,
+        gguf: undefined,
+      }),
+    ]);
+    (registry.saveModels as jest.Mock) = jest.fn();
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: true });
+
+    await registry.validateRegistry();
+
+    const updatedModels = (registry.saveModels as jest.Mock).mock.calls[0][0];
+    expect(updatedModels[0].size).toBe(2048);
+    expect(updatedModels[0].fitsInRam).toBe(false);
+    expect(updatedModels[0].metadataTrust).toBeUndefined();
+    expect(updatedModels[0].gguf).toBeUndefined();
   });
 
   it('uses the device total-memory budget when recomputing fitsInRam (not the live snapshot)', async () => {
@@ -170,6 +196,8 @@ describe('LocalStorageRegistry', () => {
 
     const updatedModels = (registry.saveModels as jest.Mock).mock.calls[0][0];
     expect(updatedModels[0].fitsInRam).toBe(true);
+    expect(updatedModels[0].metadataTrust).toBe('verified_local');
+    expect(updatedModels[0].gguf).toEqual(expect.objectContaining({ totalBytes: 1_700_000_000 }));
   });
 
   it('normalizes legacy persisted metadata with missing access fields and zero size', () => {

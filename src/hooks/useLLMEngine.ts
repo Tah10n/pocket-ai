@@ -19,15 +19,10 @@ export function useLLMEngine() {
     await llmEngineService.unload();
   }, []);
 
-  const getMemoryFit = useCallback(async (modelSize: number) => {
-    return llmEngineService.fitsInRam(modelSize);
-  }, []);
-
   return {
     state,
     loadModel,
     unloadModel,
-    getMemoryFit,
     isReady: state.status === EngineStatus.READY,
     isInitializing: state.status === EngineStatus.INITIALIZING,
   };

@@ -1,5 +1,5 @@
 import { assessModelMemoryFit, estimateModelRuntimeBytes, resolveConservativeAvailableMemoryBudget } from '../../src/utils/memoryFit';
-import { estimateMemoryFitFromModelSize } from '../../src/memory/estimator';
+import { estimateFastMemoryFit, estimateMemoryFitFromModelSize } from '../../src/memory/estimator';
 
 describe('memoryFit', () => {
   it('estimates runtime bytes with overhead', () => {
@@ -70,6 +70,24 @@ describe('memoryFit', () => {
       confidence: 'medium',
     }));
 
+    expect(estimateFastMemoryFit({
+      modelSizeBytes: 100,
+      totalMemoryBytes: 200,
+      metadataTrust: 'trusted_remote',
+    })).toEqual(expect.objectContaining({
+      decision: 'fits_high_confidence',
+      confidence: 'medium',
+    }));
+
+    expect(estimateFastMemoryFit({
+      modelSizeBytes: 100,
+      totalMemoryBytes: 200,
+      metadataTrust: 'inferred',
+    })).toEqual(expect.objectContaining({
+      decision: 'fits_low_confidence',
+      confidence: 'low',
+    }));
+
     expect(estimateMemoryFitFromModelSize({
       modelSizeBytes: 100,
       totalMemoryBytes: 130,
@@ -90,6 +108,15 @@ describe('memoryFit', () => {
       modelSizeBytes: 0,
       totalMemoryBytes: 200,
       systemMemorySnapshot: null,
+    })).toEqual(expect.objectContaining({
+      decision: 'unknown',
+      confidence: 'low',
+    }));
+
+    expect(estimateFastMemoryFit({
+      modelSizeBytes: null,
+      totalMemoryBytes: 200,
+      metadataTrust: 'unknown',
     })).toEqual(expect.objectContaining({
       decision: 'unknown',
       confidence: 'low',

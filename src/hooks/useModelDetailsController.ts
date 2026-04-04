@@ -40,7 +40,7 @@ export function useModelDetailsController(modelId: string) {
   const [runtimeRevision, setRuntimeRevision] = useState(0);
   const { startDownload, cancelDownload } = useModelDownload();
   const queuedItem = useDownloadStore((state) => state.queue.find((item) => item.id === modelId));
-  const { loadModel, unloadModel, getMemoryFit, state: engineState } = useLLMEngine();
+  const { loadModel, unloadModel, state: engineState } = useLLMEngine();
 
   useEffect(() => {
     let cancelled = false;
@@ -171,7 +171,6 @@ export function useModelDetailsController(modelId: string) {
     startModelDownloadFlow({
       model: targetModel,
       t,
-      getMemoryFit,
       startDownload,
       openTokenSettings: handleOpenTokenSettings,
       openModelPage: handleOpenModelPage,
@@ -182,7 +181,7 @@ export function useModelDetailsController(modelId: string) {
         showModelActionError('ModelDetailsScreen.handleDownload', error);
       },
     });
-  }, [getMemoryFit, handleOpenModelPage, handleOpenTokenSettings, showModelActionError, startDownload, t]);
+  }, [handleOpenModelPage, handleOpenTokenSettings, showModelActionError, startDownload, t]);
 
   const performLoad = useCallback(async (targetModelId: string, options?: LoadModelOptions) => {
     try {
@@ -198,29 +197,20 @@ export function useModelDetailsController(modelId: string) {
       return;
     }
 
-    if (typeof displayModel.size === 'number' && Number.isFinite(displayModel.size) && displayModel.size > 0) {
-      const memoryFit = displayModel.fitsInRam === false
-        ? null
-        : await getMemoryFit(displayModel.size);
-      const shouldWarnOnMemoryFit = displayModel.fitsInRam === false
-        || memoryFit?.decision === 'borderline'
-        || memoryFit?.decision === 'likely_oom';
-
-      if (shouldWarnOnMemoryFit) {
-        Alert.alert(
-          t('models.memoryWarningTitle'),
-          t('models.loadMemoryWarningMessage'),
-          [
-            { text: t('common.cancel'), style: 'cancel' },
-            { text: t('models.loadAnyway'), onPress: () => { void performLoad(displayModel.id, { allowUnsafeMemoryLoad: true }); } },
-          ],
-        );
-        return;
-      }
+    if (displayModel.fitsInRam === false) {
+      Alert.alert(
+        t('models.memoryWarningTitle'),
+        t('models.loadMemoryWarningMessage'),
+        [
+          { text: t('common.cancel'), style: 'cancel' },
+          { text: t('models.loadAnyway'), onPress: () => { void performLoad(displayModel.id, { allowUnsafeMemoryLoad: true }); } },
+        ],
+      );
+      return;
     }
 
     await performLoad(displayModel.id);
-  }, [displayModel, getMemoryFit, performLoad, t]);
+  }, [displayModel, performLoad, t]);
 
   const handleUnload = useCallback(async () => {
     try {

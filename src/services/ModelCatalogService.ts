@@ -5,13 +5,14 @@ import { registry } from './LocalStorageRegistry';
 import { huggingFaceTokenService } from './HuggingFaceTokenService';
 import { normalizePersistedModelMetadata } from './ModelMetadataNormalizer';
 import { performanceMonitor } from './PerformanceMonitor';
-import { getSystemMemorySnapshot, type SystemMemorySnapshot } from './SystemMetricsService';
+import type { SystemMemorySnapshot } from './SystemMetricsService';
 import {
   ModelCatalogCacheStore,
   type CatalogCacheAuthScope,
   type CatalogCacheScope,
 } from './ModelCatalogCacheStore';
-import { DEFAULT_TOTAL_MEMORY_BYTES, assessModelMemoryFit } from '../utils/memoryFit';
+import { DEFAULT_TOTAL_MEMORY_BYTES } from '../memory/budget';
+import { estimateFastMemoryFit } from '../memory/estimator';
 import {
   buildHuggingFaceModelApiUrl,
   buildHuggingFaceRawUrl,
@@ -1154,19 +1155,11 @@ export class ModelCatalogService {
   }
 
   private async getCurrentMemoryFitContext(): Promise<CatalogMemoryFitContext> {
-    const [deviceTotalMemoryBytes, systemMemorySnapshot] = await Promise.all([
-      this.getTotalMemory(),
-      getSystemMemorySnapshot().catch(() => null),
-    ]);
-    const snapshotTotalMemoryBytes = systemMemorySnapshot?.totalBytes;
-    const totalMemoryBytes = typeof snapshotTotalMemoryBytes === 'number'
-      && Number.isFinite(snapshotTotalMemoryBytes)
-      && snapshotTotalMemoryBytes > 0
-      ? snapshotTotalMemoryBytes
-      : deviceTotalMemoryBytes ?? DEFAULT_TOTAL_MEMORY_BYTES;
+    const deviceTotalMemoryBytes = await this.getTotalMemory();
+    const totalMemoryBytes = deviceTotalMemoryBytes ?? DEFAULT_TOTAL_MEMORY_BYTES;
     const memoryFitContext = {
       totalMemoryBytes,
-      systemMemorySnapshot,
+      systemMemorySnapshot: null,
     };
     this.lastMemoryFitContext = memoryFitContext;
     return memoryFitContext;
@@ -1177,10 +1170,11 @@ export class ModelCatalogService {
   }
 
   private resolveFitsInRam(
-    size: number | null | undefined,
+    model: Pick<ModelMetadata, 'size' | 'metadataTrust'>,
     memoryFitContext: CatalogMemoryFitContext | null,
     fallback: boolean | null = null,
   ): boolean | null {
+    const size = model.size;
     if (typeof size !== 'number' || !Number.isFinite(size) || size <= 0) {
       return fallback;
     }
@@ -1189,18 +1183,24 @@ export class ModelCatalogService {
       return fallback;
     }
 
-    return assessModelMemoryFit({
+    const fit = estimateFastMemoryFit({
       modelSizeBytes: size,
       totalMemoryBytes: memoryFitContext.totalMemoryBytes,
-      systemMemorySnapshot: null,
-    })?.fitsInRam ?? fallback;
+      metadataTrust: model.metadataTrust,
+    });
+
+    if (fit.decision === 'unknown') {
+      return fallback;
+    }
+
+    return fit.decision === 'fits_high_confidence' || fit.decision === 'fits_low_confidence';
   }
 
   private withResolvedMemoryFit(
     model: ModelMetadata,
     memoryFitContext: CatalogMemoryFitContext | null = this.getRememberedMemoryFitContext(),
   ): ModelMetadata {
-    const fitsInRam = this.resolveFitsInRam(model.size, memoryFitContext, model.fitsInRam);
+    const fitsInRam = this.resolveFitsInRam(model, memoryFitContext, model.fitsInRam);
     return fitsInRam === model.fitsInRam
       ? model
       : normalizePersistedModelMetadata({
@@ -1298,7 +1298,7 @@ export class ModelCatalogService {
 
         const resolvedFileName = this.getFileName(selectedEntry);
         const size = this.getFileSize(selectedEntry);
-        const fitsInRam = this.resolveFitsInRam(size, memoryFitContext);
+        const fitsInRam = this.resolveFitsInRam({ size, metadataTrust: model.metadataTrust }, memoryFitContext);
 
         if (model.requiresTreeProbe && !treeProbeIsFinal) {
           return normalizePersistedModelMetadata({
@@ -1766,7 +1766,33 @@ export class ModelCatalogService {
 
       const selectedEntrySize = this.getFileSize(ggufSibling);
       const size = selectedEntrySize ?? item.gguf?.total ?? null;
-      const fitsInRam = this.resolveFitsInRam(size, memoryFitContext);
+      const metadataTrust = typeof selectedEntrySize === 'number' && Number.isFinite(selectedEntrySize) && selectedEntrySize > 0
+        ? 'trusted_remote' as const
+        : typeof item.gguf?.total === 'number' && Number.isFinite(item.gguf.total) && item.gguf.total > 0
+          ? 'inferred' as const
+          : undefined;
+      const maxContextTokens = this.resolveSummaryMaxContextTokens(item);
+      const slidingWindowTokens = this.resolveLargestContextTokenValue([
+        item.cardData?.sliding_window,
+        item.config?.sliding_window,
+        item.config?.text_config?.sliding_window,
+      ]);
+      const gguf = {
+        ...(typeof size === 'number' && Number.isFinite(size) && size > 0 ? { totalBytes: Math.round(size) } : {}),
+        ...(typeof item.gguf?.context_length === 'number' && Number.isFinite(item.gguf.context_length) && item.gguf.context_length > 0
+          ? { contextLengthTokens: Math.round(item.gguf.context_length) }
+          : {}),
+        ...(typeof item.gguf?.architecture === 'string' && item.gguf.architecture.trim().length > 0
+          ? { architecture: item.gguf.architecture.trim() }
+          : {}),
+        ...(typeof item.gguf?.size_label === 'string' && item.gguf.size_label.trim().length > 0
+          ? { sizeLabel: item.gguf.size_label.trim() }
+          : {}),
+        ...(typeof slidingWindowTokens === 'number' && Number.isFinite(slidingWindowTokens) && slidingWindowTokens > 0
+          ? { slidingWindowTokens }
+          : {}),
+      };
+      const fitsInRam = this.resolveFitsInRam({ size, metadataTrust }, memoryFitContext);
       const fileName = this.getFileName(ggufSibling) || 'model.gguf';
       const hfRevision = item.sha ?? undefined;
       const lastModifiedAt = this.parseHuggingFaceLastModifiedAt(item.lastModified);
@@ -1784,6 +1810,8 @@ export class ModelCatalogService {
         resolvedFileName: fileName,
         lastModifiedAt,
         fitsInRam,
+        metadataTrust,
+        gguf: Object.keys(gguf).length > 0 ? gguf : undefined,
         accessState,
         isGated: Boolean(item.gated),
         isPrivate: item.private === true,
@@ -1791,6 +1819,7 @@ export class ModelCatalogService {
         lifecycleStatus: LifecycleStatus.AVAILABLE,
         downloadProgress: 0,
         sha256: this.getFileSha(ggufSibling),
+        maxContextTokens,
         downloads: item.downloads ?? null,
         likes: item.likes ?? null,
       }));
@@ -1818,7 +1847,31 @@ export class ModelCatalogService {
     const size = typeof item.gguf?.total === 'number' && Number.isFinite(item.gguf.total) && item.gguf.total > 0
       ? Math.round(item.gguf.total)
       : null;
-    const fitsInRam = this.resolveFitsInRam(size, memoryFitContext);
+    const metadataTrust = typeof size === 'number' && Number.isFinite(size) && size > 0
+      ? 'inferred' as const
+      : undefined;
+    const maxContextTokens = this.resolveSummaryMaxContextTokens(item);
+    const slidingWindowTokens = this.resolveLargestContextTokenValue([
+      item.cardData?.sliding_window,
+      item.config?.sliding_window,
+      item.config?.text_config?.sliding_window,
+    ]);
+    const gguf = {
+      ...(typeof size === 'number' && Number.isFinite(size) && size > 0 ? { totalBytes: Math.round(size) } : {}),
+      ...(typeof item.gguf?.context_length === 'number' && Number.isFinite(item.gguf.context_length) && item.gguf.context_length > 0
+        ? { contextLengthTokens: Math.round(item.gguf.context_length) }
+        : {}),
+      ...(typeof item.gguf?.architecture === 'string' && item.gguf.architecture.trim().length > 0
+        ? { architecture: item.gguf.architecture.trim() }
+        : {}),
+      ...(typeof item.gguf?.size_label === 'string' && item.gguf.size_label.trim().length > 0
+        ? { sizeLabel: item.gguf.size_label.trim() }
+        : {}),
+      ...(typeof slidingWindowTokens === 'number' && Number.isFinite(slidingWindowTokens) && slidingWindowTokens > 0
+        ? { slidingWindowTokens }
+        : {}),
+    };
+    const fitsInRam = this.resolveFitsInRam({ size, metadataTrust }, memoryFitContext);
     const lastModifiedAt = this.parseHuggingFaceLastModifiedAt(item.lastModified);
 
     return normalizePersistedModelMetadata({
@@ -1829,6 +1882,8 @@ export class ModelCatalogService {
       downloadUrl: buildHuggingFaceResolveUrl(repoId, 'model.gguf', item.sha ?? undefined),
       lastModifiedAt,
       fitsInRam,
+      metadataTrust,
+      gguf: Object.keys(gguf).length > 0 ? gguf : undefined,
       accessState: this.resolveDetailAccessState(requiresAuth, authToken),
       isGated: Boolean(item.gated),
       isPrivate: item.private === true,
@@ -1836,6 +1891,7 @@ export class ModelCatalogService {
       downloadProgress: 0,
       requiresTreeProbe: true,
       hfRevision: item.sha ?? undefined,
+      maxContextTokens,
       downloads: item.downloads ?? null,
       likes: item.likes ?? null,
     });
@@ -1856,7 +1912,38 @@ export class ModelCatalogService {
       ? this.getFileName(selectedEntry)
       : fallbackModel.resolvedFileName;
     const size = selectedEntrySize ?? payload.gguf?.total ?? fallbackModel.size;
-    const fitsInRam = this.resolveFitsInRam(size, memoryFitContext, fallbackModel.fitsInRam);
+    const metadataTrustFromPayload = typeof selectedEntrySize === 'number' && Number.isFinite(selectedEntrySize) && selectedEntrySize > 0
+      ? 'trusted_remote' as const
+      : typeof payload.gguf?.total === 'number' && Number.isFinite(payload.gguf.total) && payload.gguf.total > 0
+        ? 'inferred' as const
+        : fallbackModel.metadataTrust;
+    const slidingWindowTokens = this.resolveLargestContextTokenValue([
+      payload.cardData?.sliding_window,
+      payload.config?.sliding_window,
+      payload.config?.text_config?.sliding_window,
+    ]);
+    const ggufFromPayload = {
+      ...(typeof size === 'number' && Number.isFinite(size) && size > 0 ? { totalBytes: Math.round(size) } : {}),
+      ...(typeof payload.gguf?.context_length === 'number' && Number.isFinite(payload.gguf.context_length) && payload.gguf.context_length > 0
+        ? { contextLengthTokens: Math.round(payload.gguf.context_length) }
+        : {}),
+      ...(typeof payload.gguf?.architecture === 'string' && payload.gguf.architecture.trim().length > 0
+        ? { architecture: payload.gguf.architecture.trim() }
+        : {}),
+      ...(typeof payload.gguf?.size_label === 'string' && payload.gguf.size_label.trim().length > 0
+        ? { sizeLabel: payload.gguf.size_label.trim() }
+        : {}),
+      ...(typeof slidingWindowTokens === 'number' && Number.isFinite(slidingWindowTokens) && slidingWindowTokens > 0
+        ? { slidingWindowTokens }
+        : {}),
+    };
+    const gguf = Object.keys(ggufFromPayload).length > 0
+      ? {
+        ...(fallbackModel.gguf ?? {}),
+        ...ggufFromPayload,
+      }
+      : fallbackModel.gguf;
+    const fitsInRam = this.resolveFitsInRam({ size, metadataTrust: metadataTrustFromPayload }, memoryFitContext, fallbackModel.fitsInRam);
     const lastModifiedAt = this.parseHuggingFaceLastModifiedAt(payload.lastModified) ?? fallbackModel.lastModifiedAt;
     const requiresAuth = Boolean(payload.gated) || payload.private === true;
     const requiresTreeProbe = selectedEntry
@@ -1876,6 +1963,8 @@ export class ModelCatalogService {
       resolvedFileName,
       lastModifiedAt,
       fitsInRam,
+      metadataTrust: metadataTrustFromPayload,
+      gguf,
       accessState: this.resolveDetailAccessState(requiresAuth, authToken),
       isGated: Boolean(payload.gated),
       isPrivate: payload.private === true,
@@ -1996,7 +2085,19 @@ export class ModelCatalogService {
       maxContextTokens,
       hasVerifiedContextWindow,
     } = this.resolveMergedContextWindowMetadata(remoteModel, localModel);
-    const resolvedSize = remoteModel.size ?? localModel.size;
+    const localHasVerifiedSize = localModel.metadataTrust === 'verified_local';
+    const resolvedSize = localHasVerifiedSize
+      ? localModel.size ?? remoteModel.size
+      : remoteModel.size ?? localModel.size;
+    const metadataTrust = localModel.metadataTrust === 'verified_local'
+      ? localModel.metadataTrust
+      : remoteModel.metadataTrust ?? localModel.metadataTrust;
+    const gguf = remoteModel.gguf || localModel.gguf
+      ? {
+        ...(localHasVerifiedSize ? (remoteModel.gguf ?? {}) : (localModel.gguf ?? {})),
+        ...(localHasVerifiedSize ? (localModel.gguf ?? {}) : (remoteModel.gguf ?? {})),
+      }
+      : undefined;
 
     return normalizePersistedModelMetadata({
       ...remoteModel,
@@ -2007,11 +2108,9 @@ export class ModelCatalogService {
       downloadedAt: localModel.downloadedAt,
       lastModifiedAt: remoteModel.lastModifiedAt ?? localModel.lastModifiedAt,
       sha256: remoteModel.sha256 ?? localModel.sha256,
-      fitsInRam: this.resolveFitsInRam(
-        resolvedSize,
-        memoryFitContext,
-        remoteModel.fitsInRam ?? localModel.fitsInRam,
-      ),
+      metadataTrust,
+      gguf,
+      fitsInRam: this.resolveFitsInRam({ size: resolvedSize, metadataTrust }, memoryFitContext, remoteModel.fitsInRam ?? localModel.fitsInRam),
       accessState: remoteModel.accessState,
       isGated: remoteModel.isGated,
       isPrivate: remoteModel.isPrivate,

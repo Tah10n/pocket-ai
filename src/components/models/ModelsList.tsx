@@ -241,7 +241,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
   const queueLifecycleSignature = useDownloadStore((state) => state.queue
     .map((model) => `${model.id}:${model.lifecycleStatus}`)
     .join('|'));
-  const { loadModel, unloadModel, getMemoryFit, state: engineState } = useLLMEngine();
+  const { loadModel, unloadModel, state: engineState } = useLLMEngine();
   const {
     filters,
     sort,
@@ -649,7 +649,6 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
     startModelDownloadFlow({
       model,
       t,
-      getMemoryFit,
       startDownload,
       openTokenSettings,
       openModelPage,
@@ -657,7 +656,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
         showModelActionError('ModelsList.handleDownload', error);
       },
     });
-  }, [getMemoryFit, openModelPage, openTokenSettings, showModelActionError, startDownload, t]);
+  }, [openModelPage, openTokenSettings, showModelActionError, startDownload, t]);
 
   const performLoad = useCallback(async (modelId: string, options?: LoadModelOptions) => {
     try {
@@ -670,29 +669,20 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
 
   const handleLoad = useCallback(async (modelId: string) => {
     const model = models.find((item) => item.id === modelId);
-    if (model && typeof model.size === 'number' && Number.isFinite(model.size) && model.size > 0) {
-      const memoryFit = model.fitsInRam === false
-        ? null
-        : await getMemoryFit(model.size);
-      const shouldWarnOnMemoryFit = model.fitsInRam === false
-        || memoryFit?.decision === 'borderline'
-        || memoryFit?.decision === 'likely_oom';
-
-      if (shouldWarnOnMemoryFit) {
-        Alert.alert(
-          t('models.memoryWarningTitle'),
-          t('models.loadMemoryWarningMessage'),
-          [
-            { text: t('common.cancel'), style: 'cancel' },
-            { text: t('models.loadAnyway'), onPress: () => { void performLoad(modelId, { allowUnsafeMemoryLoad: true }); } },
-          ],
-        );
-        return;
-      }
+    if (model?.fitsInRam === false) {
+      Alert.alert(
+        t('models.memoryWarningTitle'),
+        t('models.loadMemoryWarningMessage'),
+        [
+          { text: t('common.cancel'), style: 'cancel' },
+          { text: t('models.loadAnyway'), onPress: () => { void performLoad(modelId, { allowUnsafeMemoryLoad: true }); } },
+        ],
+      );
+      return;
     }
 
     await performLoad(modelId);
-  }, [getMemoryFit, models, performLoad, t]);
+  }, [models, performLoad, t]);
 
   const handleUnload = useCallback(async () => {
     try {

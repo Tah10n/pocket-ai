@@ -387,12 +387,7 @@ class LLMEngineService {
    * Helper to calculate if model fits in RAM.
    */
   public async fitsInRam(modelSize: number): Promise<MemoryFitResult> {
-    const systemMemorySnapshot = await getSystemMemorySnapshot().catch(() => null);
-    let totalMemoryBytes = systemMemorySnapshot?.totalBytes ?? null;
-
-    if (totalMemoryBytes === null) {
-      totalMemoryBytes = await DeviceInfo.getTotalMemory().catch(() => DEFAULT_TOTAL_MEMORY_BYTES);
-    }
+    const totalMemoryBytes = await DeviceInfo.getTotalMemory().catch(() => DEFAULT_TOTAL_MEMORY_BYTES);
 
     // This is a cheap UI-facing estimate: it must never depend on live "available memory" snapshots.
     return estimateMemoryFitFromModelSize({

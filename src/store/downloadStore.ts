@@ -4,6 +4,9 @@ import { mmkvStorage } from '../lib/mmkv';
 import { ModelMetadata, LifecycleStatus } from '../types/models';
 import { normalizePersistedModelMetadata } from '../services/ModelMetadataNormalizer';
 import { getCandidateModelDownloadFileNames } from '../utils/modelFiles';
+import { createInstrumentedStateStorage } from './persistStateStorage';
+
+const downloadStoreStateStorage = createInstrumentedStateStorage(mmkvStorage, { scope: 'downloadStore', dedupe: true });
 
 interface DownloadState {
   queue: ModelMetadata[];
@@ -99,10 +102,12 @@ export const useDownloadStore = create<DownloadState>()(
       }),
       {
         name: 'download-queue-storage',
-        storage: createJSONStorage(() => mmkvStorage),
+        skipHydration: true,
+        storage: createJSONStorage(() => downloadStoreStateStorage),
         // Do NOT persist activeDownloadId — after a restart, no real download is running.
         // Persisting it would leave the UI in a permanent "downloading" spinner state.
-        partialize: (state) => ({ queue: state.queue }),
+        // Avoid persisting volatile progress updates so downloads don't spam MMKV writes.
+        partialize: (state) => ({ queue: state.queue.map((model) => ({ ...model, downloadProgress: 0 })) }),
         onRehydrateStorage: () => (state) => {
           if (!state) {
             return;

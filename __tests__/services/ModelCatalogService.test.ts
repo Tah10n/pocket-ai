@@ -1246,11 +1246,7 @@ describe('ModelCatalogService', () => {
     await modelCatalogService.searchModels('phi', { pageSize: 1 });
 
     expect(global.fetch).toHaveBeenCalledTimes(2);
-    expect((global.fetch as jest.Mock).mock.calls[1][1]).toMatchObject({
-      headers: {
-        Authorization: 'Bearer hf_test_token',
-      },
-    });
+    expect((global.fetch as jest.Mock).mock.calls[1][1]?.headers).toBeUndefined();
   });
 
   it('persists model snapshots only once per fetched search page', async () => {
@@ -1351,7 +1347,8 @@ describe('ModelCatalogService', () => {
     const cachedModel = coldStartService.getCachedModel('org/external-token-model');
     coldStartService.dispose();
 
-    expect(cachedModel).toBeNull();
+    expect(cachedModel).not.toBeNull();
+    expect(cachedModel?.accessState).toBe(ModelAccessState.AUTH_REQUIRED);
   });
 
   it('includes popularity metadata from Hugging Face list responses', async () => {
@@ -1843,6 +1840,123 @@ describe('ModelCatalogService', () => {
     }));
 
     service.dispose();
+  });
+
+  it('does not send Authorization headers on the model details request when a token is configured', async () => {
+    await huggingFaceTokenService.saveToken('hf_test_token');
+
+    global.fetch = jest.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+
+      if (url.includes('/resolve/main/model.Q4_K_M.gguf')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+        });
+      }
+
+      if (url.endsWith('/raw/main/README.md')) {
+        return Promise.resolve({
+          ok: false,
+          status: 404,
+          text: () => Promise.resolve(''),
+        });
+      }
+
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({
+          id: 'org/detail-no-auth-header',
+          gated: 'manual',
+          siblings: [
+            {
+              rfilename: 'model.Q4_K_M.gguf',
+              size: 2 * 1024 * 1024 * 1024,
+            },
+          ],
+        }),
+      });
+    }) as jest.Mock;
+
+    await modelCatalogService.getModelDetails('org/detail-no-auth-header');
+
+    const calls = (global.fetch as jest.Mock).mock.calls;
+    const detailsCall = calls.find((call) => String(call[0]).includes('/api/models/org/detail-no-auth-header'));
+    expect(detailsCall?.[1]?.headers).toBeUndefined();
+
+    const probeCall = calls.find((call) => String(call[0]).includes('/resolve/main/model.Q4_K_M.gguf'));
+    expect(probeCall?.[1]).toMatchObject({
+      method: 'HEAD',
+      headers: {
+        Authorization: 'Bearer hf_test_token',
+      },
+    });
+  });
+
+  it('retries model details with Authorization when the anonymous request returns 404', async () => {
+    await huggingFaceTokenService.saveToken('hf_test_token');
+
+    global.fetch = jest.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+
+      if (url.endsWith('/raw/main/README.md')) {
+        return Promise.resolve({
+          ok: false,
+          status: 404,
+          text: () => Promise.resolve(''),
+        });
+      }
+
+      if (url.includes('/resolve/main/model.Q4_K_M.gguf')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+        });
+      }
+
+      if (url.includes('/api/models/org/detail-requires-auth')) {
+        if ((init?.headers as { Authorization?: string } | undefined)?.Authorization === 'Bearer hf_test_token') {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () => Promise.resolve({
+              id: 'org/detail-requires-auth',
+              gated: 'manual',
+              siblings: [
+                {
+                  rfilename: 'model.Q4_K_M.gguf',
+                  size: 2 * 1024 * 1024 * 1024,
+                },
+              ],
+            }),
+          });
+        }
+
+        return Promise.resolve({
+          ok: false,
+          status: 404,
+        });
+      }
+
+      return Promise.resolve({
+        ok: false,
+        status: 404,
+      });
+    }) as jest.Mock;
+
+    await modelCatalogService.getModelDetails('org/detail-requires-auth');
+
+    const detailsCalls = (global.fetch as jest.Mock).mock.calls.filter((call) => (
+      String(call[0]).includes('/api/models/org/detail-requires-auth')
+    ));
+
+    expect(detailsCalls).toHaveLength(2);
+    expect(detailsCalls[0]?.[1]?.headers).toBeUndefined();
+    expect(detailsCalls[1]?.[1]).toMatchObject({
+      headers: {
+        Authorization: 'Bearer hf_test_token',
+      },
+    });
   });
 
   it('keeps gated model details authorized when later access validation is temporarily unavailable', async () => {

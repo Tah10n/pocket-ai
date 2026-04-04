@@ -32,10 +32,10 @@ describe('storage (createStorage)', () => {
       storageB.set('key', 'value');
 
       expect(getStorageFallbackReport()).toEqual({
-        storeIds: ['store-a', 'store-b'],
+        storeIds: ['cache:store-a', 'cache:store-b'],
         reasons: {
-          'store-a': 'mmkv_init_failed',
-          'store-b': 'mmkv_init_failed',
+          'cache:store-a': 'mmkv_init_failed',
+          'cache:store-b': 'mmkv_init_failed',
         },
       });
     } finally {

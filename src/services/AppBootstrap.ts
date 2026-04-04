@@ -13,10 +13,12 @@ import {
 } from './SettingsStore';
 import { setupFileSystem } from './FileSystemSetup';
 import { registry } from './LocalStorageRegistry';
-import { getQueuedDownloadFileNames } from '../store/downloadStore';
+import { getQueuedDownloadFileNames, useDownloadStore } from '../store/downloadStore';
 import { llmEngineService } from './LLMEngineService';
 import { useChatStore } from '../store/chatStore';
+import { useModelsStore } from '../store/modelsStore';
 import { performanceMonitor } from './PerformanceMonitor';
+import { initializePrivateStorageEncryption } from './storage';
 import {
   ChatMessage,
   ChatThread,
@@ -101,6 +103,37 @@ function migrateLegacyChatHistory(settings: AppSettings) {
 
 type BootstrapOutcome = 'success' | 'active_model_missing' | 'error';
 
+async function hydratePersistedStores(): Promise<void> {
+  const span = performanceMonitor.startSpan('bootstrap.hydratePersistedStores');
+  let outcome: 'success' | 'error' = 'success';
+  const errors: { scope: string; error: unknown }[] = [];
+
+  const hydrate = async (scope: string, rehydrate: () => unknown) => {
+    const hydrateSpan = performanceMonitor.startSpan(`bootstrap.hydrate.${scope}`);
+    try {
+      await Promise.resolve(rehydrate());
+      hydrateSpan.end({ outcome: 'success' });
+    } catch (error) {
+      errors.push({ scope, error });
+      hydrateSpan.end({ outcome: 'error' });
+      if (process.env.NODE_ENV !== 'test') {
+        console.warn(`[bootstrapApp] Failed to hydrate persisted store: ${scope}`, error);
+      }
+    }
+  };
+
+  try {
+    await hydrate('chatStore', () => useChatStore.persist.rehydrate());
+    await hydrate('downloadStore', () => useDownloadStore.persist.rehydrate());
+    await hydrate('modelsStore', () => useModelsStore.persist.rehydrate());
+  } catch (error) {
+    outcome = 'error';
+    throw error;
+  } finally {
+    span.end({ outcome, errors: errors.length });
+  }
+}
+
 function scheduleAfterFirstFrame(task: () => void): void {
   if (process.env.NODE_ENV === 'test') {
     setTimeout(task, 0);
@@ -157,6 +190,17 @@ export async function bootstrapAppCritical(): Promise<{ outcome: BootstrapOutcom
   let outcome: BootstrapOutcome = 'success';
 
   try {
+    const encryptionSpan = performanceMonitor.startSpan('bootstrap.initializePrivateStorageEncryption');
+    try {
+      await initializePrivateStorageEncryption();
+      encryptionSpan.end({ outcome: 'success' });
+    } catch (error) {
+      encryptionSpan.end({ outcome: 'error' });
+      throw error;
+    }
+
+    await hydratePersistedStores();
+
     const settings = getSettings();
 
     try {

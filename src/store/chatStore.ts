@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
-import { mmkvStorage, storage } from '../store/storage';
+import { getAppStorage, mmkvStorage } from '../store/storage';
 import {
   ChatMessage,
   ChatMessageRole,
@@ -87,7 +87,7 @@ function updateThreadMetadata(thread: ChatThread): ChatThread {
 
 function clearPersistedChatStoreIfEmpty(threads: Record<string, ChatThread>) {
   if (Object.keys(threads).length === 0) {
-    storage.remove(CHAT_STORE_STORAGE_KEY);
+    getAppStorage().remove(CHAT_STORE_STORAGE_KEY);
   }
 }
 
@@ -229,7 +229,7 @@ export const useChatStore = create<ChatStoreState>()(
       clearAllThreads: () => {
         const threadCount = Object.keys(get().threads).length;
         if (threadCount === 0) {
-          storage.remove(CHAT_STORE_STORAGE_KEY);
+          getAppStorage().remove(CHAT_STORE_STORAGE_KEY);
           return 0;
         }
 
@@ -237,7 +237,7 @@ export const useChatStore = create<ChatStoreState>()(
           threads: {},
           activeThreadId: null,
         });
-        storage.remove(CHAT_STORE_STORAGE_KEY);
+        getAppStorage().remove(CHAT_STORE_STORAGE_KEY);
 
         return threadCount;
       },
@@ -664,6 +664,7 @@ export const useChatStore = create<ChatStoreState>()(
     }),
     {
       name: 'chat-store',
+      skipHydration: true,
       storage: createJSONStorage(() => chatStoreStateStorage),
       partialize: (state) => ({
         threads: (() => {

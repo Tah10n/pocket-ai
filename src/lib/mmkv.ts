@@ -1,3 +1,3 @@
-import { storage, mmkvStorage } from '../store/storage';
+import { getAppStorage, mmkvStorage } from '../store/storage';
 
-export { storage, mmkvStorage };
+export { getAppStorage, mmkvStorage };

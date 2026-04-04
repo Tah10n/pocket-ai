@@ -1,6 +1,6 @@
 # Privacy & Disclosures
 
-Last updated: 2026-03-28
+Last updated: 2026-04-04
 
 ## Summary
 
@@ -12,11 +12,11 @@ This document summarizes the current behavior of the app as configured in this r
 
 - Chat prompts and generated responses stay on the device during local inference.
 - Downloaded GGUF files are stored in app-managed local storage.
-- Conversation history is persisted locally on the device.
-- System prompt presets, generation settings, and model-specific load profiles are persisted locally on the device.
+- Conversation history is persisted locally on the device and encrypted at rest.
+- System prompt presets, generation settings, and model-specific load profiles are persisted locally on the device and encrypted at rest.
 - An optional Hugging Face access token can be stored locally in secure device storage for gated or private model downloads.
 - Catalog metadata such as resolved GGUF size, access state, and local download status is cached locally only for app behavior and is not synced to a hosted account service.
-- Recent first-page Hugging Face catalog results and recently opened model-detail snapshots are stored in a bounded on-device cache so the catalog can reopen quickly on this device.
+- Recent first-page Hugging Face catalog results and recently opened public model-detail snapshots are stored in a bounded on-device cache so the catalog can reopen quickly on this device.
 - Hugging Face popularity metadata, tag summaries, and routed model-detail state are cached locally only to improve catalog browsing on this device.
 - Storage cleanup controls are available in-app through `Storage Manager` and `All Conversations`, including model removal that can keep or reset saved per-model settings.
 
@@ -27,6 +27,7 @@ Pocket AI uses the network only for model-management flows:
 - Hugging Face model catalog search
 - Optional metadata, README summary, and config fetches used for model hints, popularity sorting, size recovery, context-window recovery, and gated-model access checks
 - Model file downloads from remote hosting endpoints
+- Public catalog browsing requests for public models do not send an `Authorization` header.
 - If a Hugging Face access token is configured, it is attached only to Hugging Face requests that require authenticated access to gated or private repositories
 - When a user taps through to Hugging Face from the token screen or a model detail view, the app opens the public Hugging Face site in the device browser
 

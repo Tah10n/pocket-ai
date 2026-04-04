@@ -1,6 +1,15 @@
+import type { MMKV } from 'react-native-mmkv';
 import { createStorage } from './storage';
 
-const storage = createStorage('pocket-ai-presets');
+let storageInstance: MMKV | null = null;
+
+function getPresetStorage(): MMKV {
+    if (!storageInstance) {
+        storageInstance = createStorage('pocket-ai-presets', { tier: 'private' });
+    }
+
+    return storageInstance;
+}
 
 export interface SystemPromptPreset {
     id: string;
@@ -91,7 +100,7 @@ function normalizeStoredPresets(storedPresets: SystemPromptPreset[]): SystemProm
 
 class PresetManager {
     getPresets(): SystemPromptPreset[] {
-        const raw = storage.getString(PRESETS_KEY);
+        const raw = getPresetStorage().getString(PRESETS_KEY);
         if (!raw) {
             // Initialize with defaults
             this.savePresets(DEFAULT_PRESETS);
@@ -144,7 +153,7 @@ class PresetManager {
     }
 
     private savePresets(presets: SystemPromptPreset[]) {
-        storage.set(PRESETS_KEY, JSON.stringify(presets));
+        getPresetStorage().set(PRESETS_KEY, JSON.stringify(presets));
     }
 }
 

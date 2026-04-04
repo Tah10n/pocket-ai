@@ -219,6 +219,7 @@ export const useModelsStore = create<ModelsStoreState>()(
     {
       name: 'models-list-preferences',
       version: 4,
+      skipHydration: true,
       storage: createJSONStorage(() => mmkvStorage),
       partialize: (state) => ({
         filters: state.filters,

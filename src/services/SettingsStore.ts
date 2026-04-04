@@ -1,7 +1,32 @@
+import type { MMKV } from 'react-native-mmkv';
 import { createStorage } from './storage';
 import { MAX_CONTEXT_WINDOW_TOKENS } from '../utils/contextWindow';
 
-export const storage = createStorage('pocket-ai-settings');
+let storageInstance: MMKV | null = null;
+
+export function getSettingsStorage(): MMKV {
+    if (!storageInstance) {
+        storageInstance = createStorage('pocket-ai-settings', { tier: 'private' });
+    }
+
+    return storageInstance;
+}
+
+export type SettingsStorageFacade = Pick<
+    MMKV,
+    'set' | 'getString' | 'getNumber' | 'getBoolean' | 'remove' | 'clearAll' | 'contains' | 'getAllKeys'
+>;
+
+export const storage: SettingsStorageFacade = {
+    set: (key: string, value: boolean | string | number | ArrayBuffer) => getSettingsStorage().set(key, value),
+    getString: (key: string) => getSettingsStorage().getString(key),
+    getNumber: (key: string) => getSettingsStorage().getNumber(key),
+    getBoolean: (key: string) => getSettingsStorage().getBoolean(key),
+    remove: (key: string) => getSettingsStorage().remove(key),
+    clearAll: () => getSettingsStorage().clearAll(),
+    contains: (key: string) => getSettingsStorage().contains(key),
+    getAllKeys: () => getSettingsStorage().getAllKeys(),
+};
 
 export interface GenerationParameters {
     temperature: number;
@@ -192,7 +217,7 @@ function sanitizeSettings(input: Partial<AppSettings>): AppSettings {
 }
 
 function readJsonValue<T>(key: string): T | null {
-    const raw = storage.getString(key);
+    const raw = getSettingsStorage().getString(key);
     if (!raw) {
         return null;
     }
@@ -201,13 +226,13 @@ function readJsonValue<T>(key: string): T | null {
         return JSON.parse(raw) as T;
     } catch (error) {
         console.warn(`[SettingsStore] Corrupted JSON payload (${key}), removing.`, error);
-        storage.remove(key);
+        getSettingsStorage().remove(key);
         return null;
     }
 }
 
 function writeJsonValue(key: string, value: unknown) {
-    storage.set(key, JSON.stringify(value));
+    getSettingsStorage().set(key, JSON.stringify(value));
 }
 
 export function getSettings(): AppSettings {
@@ -237,7 +262,7 @@ export function updateSettings(partial: Partial<AppSettings>) {
 }
 
 export function resetSettings() {
-    storage.remove(SETTINGS_KEY);
+    getSettingsStorage().remove(SETTINGS_KEY);
     const defaults = { ...DEFAULT_SETTINGS };
     settingsListeners.forEach((listener) => listener(defaults));
     return defaults;
@@ -451,7 +476,7 @@ function readChatHistoryIndex() {
 
 function writeChatHistoryIndex(index: string[]) {
     if (index.length === 0) {
-        storage.remove(CHAT_HISTORY_INDEX_KEY);
+        getSettingsStorage().remove(CHAT_HISTORY_INDEX_KEY);
         return;
     }
 
@@ -520,7 +545,7 @@ export function getChatHistoryIndex(): string[] {
 }
 
 export function deleteChatHistory(chatId: string) {
-    storage.remove(getChatHistoryStorageKey(chatId));
+    getSettingsStorage().remove(getChatHistoryStorageKey(chatId));
     const index = getChatHistoryIndex().filter(id => id !== chatId);
     writeChatHistoryIndex(index);
     notifyChatHistoryListeners();
@@ -528,14 +553,14 @@ export function deleteChatHistory(chatId: string) {
 
 export function clearLegacyChatHistory() {
     const indexedIds = getChatHistoryIndex();
-    const legacyKeys = storage
+    const legacyKeys = getSettingsStorage()
         .getAllKeys()
         .filter((key) => key !== CHAT_HISTORY_INDEX_KEY && key.startsWith(CHAT_HISTORY_PREFIX));
     const clearedConversationIds = new Set<string>(indexedIds);
 
     legacyKeys.forEach((key) => {
         clearedConversationIds.add(key.slice(CHAT_HISTORY_PREFIX.length));
-        storage.remove(key);
+        getSettingsStorage().remove(key);
     });
 
     writeChatHistoryIndex([]);

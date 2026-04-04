@@ -1,5 +1,6 @@
 import DeviceInfo from 'react-native-device-info';
 import * as FileSystem from 'expo-file-system/legacy';
+import type { MMKV } from 'react-native-mmkv';
 import { createStorage } from './storage';
 import { ModelMetadata, LifecycleStatus } from '../types/models';
 import { getModelsDir } from './FileSystemSetup';
@@ -22,7 +23,7 @@ function cloneModelMetadata(model: ModelMetadata): ModelMetadata {
 
 export class LocalStorageRegistry {
   private static instance: LocalStorageRegistry;
-  private storage = createStorage(REGISTRY_KEY);
+  private storage: MMKV | null = null;
   private cachedModels: ModelMetadata[] | null = null;
   private cachedModelsById: Map<string, ModelMetadata> | null = null;
 
@@ -33,6 +34,14 @@ export class LocalStorageRegistry {
       LocalStorageRegistry.instance = new LocalStorageRegistry();
     }
     return LocalStorageRegistry.instance;
+  }
+
+  private getStorage(): MMKV {
+    if (!this.storage) {
+      this.storage = createStorage(REGISTRY_KEY, { tier: 'private' });
+    }
+
+    return this.storage;
   }
 
   /**
@@ -47,7 +56,7 @@ export class LocalStorageRegistry {
    */
   public saveModels(models: ModelMetadata[]): void {
     const normalizedModels = models.map((model) => normalizePersistedModelMetadata(model));
-    this.storage.set(
+    this.getStorage().set(
       REGISTRY_KEY,
       JSON.stringify(normalizedModels),
     );
@@ -231,7 +240,7 @@ export class LocalStorageRegistry {
   }
 
   private readModelsFromStorage(): ModelMetadata[] {
-    const rawData = this.storage.getString(REGISTRY_KEY);
+    const rawData = this.getStorage().getString(REGISTRY_KEY);
     if (!rawData) {
       return [];
     }

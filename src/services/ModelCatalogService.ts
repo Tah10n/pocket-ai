@@ -166,6 +166,14 @@ type CreateTreeProbeCandidateOptions = {
   allowPublic?: boolean;
 };
 
+const REQUEST_AUTH_POLICY = {
+  ANONYMOUS: 'ANONYMOUS',
+  OPTIONAL_AUTH: 'OPTIONAL_AUTH',
+  REQUIRED_AUTH: 'REQUIRED_AUTH',
+} as const;
+
+type RequestAuthPolicy = typeof REQUEST_AUTH_POLICY[keyof typeof REQUEST_AUTH_POLICY];
+
 export type CatalogServerSort = 'downloads' | 'likes' | 'lastModified';
 export type ModelCatalogErrorCode = 'rate_limited' | 'timeout' | 'network' | 'unknown';
 export type ModelCatalogCacheInvalidationSource = 'replay' | 'manual' | 'token' | 'unknown';
@@ -342,7 +350,13 @@ export class ModelCatalogService {
     this.readmeRequestCache.clear();
     this.resolvedFileProbeCache.clear();
     this.resolvedFileProbeStateCache.clear();
-    this.persistentCache.clearAll();
+
+    if (source === 'token') {
+      this.persistentCache.clearSnapshots();
+    } else {
+      this.persistentCache.clearAll();
+    }
+
     this.emitCacheInvalidation(source);
   }
 
@@ -473,7 +487,11 @@ export class ModelCatalogService {
     const sort = options?.sort ?? null;
     const forceRefresh = options?.forceRefresh === true && cursor === null;
     const normalizedQuery = this.normalizeQuery(query);
-    const hasAuthToken = requestContext.hasAuthToken;
+    const catalogAuthToken = this.resolveRequestAuthToken(
+      REQUEST_AUTH_POLICY.ANONYMOUS,
+      requestContext.authToken,
+    );
+    const hasAuthToken = Boolean(catalogAuthToken);
     const cacheKey = this.buildMemorySearchCacheKey(
       normalizedQuery,
       cursor,
@@ -582,6 +600,7 @@ export class ModelCatalogService {
         requestContext,
         cursor,
         sort,
+        REQUEST_AUTH_POLICY.ANONYMOUS,
       );
       this.assertRequestContextIsCurrent(requestContext);
       const filteredModels = this.filterCatalogSearchModels(fetched.models);
@@ -598,9 +617,22 @@ export class ModelCatalogService {
       });
       this.pruneSearchCache();
       if (cursor === null) {
+        const persistableResult = this.toPersistableSearchResult(result);
         this.persistentCache.putSearch(
           this.buildPersistentSearchScope(normalizedQuery, pageSize, sort, hasAuthToken),
-          this.toPersistableSearchResult(result),
+          {
+            ...persistableResult,
+            models: persistableResult.models.map((model) => (
+              model.accessState === ModelAccessState.AUTHORIZED || model.accessState === ModelAccessState.ACCESS_DENIED
+                ? {
+                  ...model,
+                  accessState: model.isGated || model.isPrivate
+                    ? ModelAccessState.AUTH_REQUIRED
+                    : ModelAccessState.PUBLIC,
+                }
+                : model
+            )),
+          },
         );
       }
 
@@ -747,7 +779,7 @@ export class ModelCatalogService {
     const cached = this.getCachedSearchResultForScope(
       query,
       options,
-      huggingFaceTokenService.getCachedState().hasToken,
+      false,
     );
 
     if (!cached) {
@@ -841,9 +873,24 @@ export class ModelCatalogService {
     try {
       const cachedModel = this.getCachedModel(modelId);
       const fallbackModel = cachedModel ?? this.createFallbackModel(modelId);
-      const response = await this.fetchWithTimeout(buildHuggingFaceModelApiUrl(modelId), {
-        headers: this.buildHeaders(requestContext.authToken),
+      const detailsUrl = buildHuggingFaceModelApiUrl(modelId);
+      let detailsAuthToken: string | null = null;
+      let response = await this.fetchWithTimeout(detailsUrl, {
+        headers: this.buildHeaders(REQUEST_AUTH_POLICY.ANONYMOUS, requestContext.authToken),
       });
+      this.assertRequestContextIsCurrent(requestContext);
+
+      if (
+        !response.ok
+        && (response.status === 401 || response.status === 403 || response.status === 404)
+        && requestContext.hasAuthToken
+      ) {
+        detailsAuthToken = requestContext.authToken;
+        response = await this.fetchWithTimeout(detailsUrl, {
+          headers: this.buildHeaders(REQUEST_AUTH_POLICY.REQUIRED_AUTH, requestContext.authToken),
+        });
+        this.assertRequestContextIsCurrent(requestContext);
+      }
       let detailedModel = fallbackModel;
       let hasVerifiedContextWindow = fallbackModel.hasVerifiedContextWindow === true;
 
@@ -868,9 +915,14 @@ export class ModelCatalogService {
       } else if (response.status === 401 || response.status === 403) {
         detailedModel = normalizePersistedModelMetadata({
           ...fallbackModel,
-          accessState: requestContext.authToken
+          accessState: detailsAuthToken
             ? ModelAccessState.ACCESS_DENIED
             : ModelAccessState.AUTH_REQUIRED,
+        });
+      } else if (response.status === 404 && detailsAuthToken) {
+        detailedModel = normalizePersistedModelMetadata({
+          ...fallbackModel,
+          accessState: ModelAccessState.ACCESS_DENIED,
         });
       } else {
         throw new ModelCatalogError('network', `HF model details failed: ${response.status}`);
@@ -938,7 +990,17 @@ export class ModelCatalogService {
       });
 
       this.assertRequestContextIsCurrent(requestContext);
-      this.upsertModelSnapshots([detailedModel], this.getAuthScope(requestContext.hasAuthToken));
+      if (detailsAuthToken) {
+        this.upsertModelSnapshots([detailedModel], 'auth');
+      } else {
+        this.upsertModelSnapshots([detailedModel], 'anon');
+        if (
+          detailedModel.accessState === ModelAccessState.AUTHORIZED
+          || detailedModel.accessState === ModelAccessState.ACCESS_DENIED
+        ) {
+          this.upsertModelSnapshots([detailedModel], 'auth');
+        }
+      }
       return this.syncRegistryModelIfPresent(detailedModel);
     } catch (error) {
       if (error instanceof StaleCatalogAuthError && retryCount < 1) {
@@ -981,7 +1043,12 @@ export class ModelCatalogService {
       const [resolved] = await this.resolveMissingModelMetadata([model], memoryFitContext, requestContext);
       this.assertRequestContextIsCurrent(requestContext);
       const refreshed = resolved ?? model;
-      this.upsertModelSnapshots([refreshed], this.getAuthScope(requestContext.hasAuthToken));
+      const snapshotAuthScope = this.getAuthScope(requestContext.hasAuthToken && (
+        refreshed.accessState !== ModelAccessState.PUBLIC
+        || refreshed.isGated
+        || refreshed.isPrivate
+      ));
+      this.upsertModelSnapshots([refreshed], snapshotAuthScope);
       return this.syncRegistryModelIfPresent(refreshed);
     } catch (error) {
       if (error instanceof StaleCatalogAuthError && retryCount < 1) {
@@ -1123,10 +1190,18 @@ export class ModelCatalogService {
       }
 
       try {
+        const treeAuthPolicy = (
+          model.accessState !== ModelAccessState.PUBLIC
+          || model.isGated
+          || model.isPrivate
+        )
+          ? REQUEST_AUTH_POLICY.OPTIONAL_AUTH
+          : REQUEST_AUTH_POLICY.ANONYMOUS;
         const treeResponse = await this.fetchHuggingFaceModelTree(
           model.id,
           model.hfRevision,
           requestContext,
+          treeAuthPolicy,
           {
             expectedFileName: model.requiresTreeProbe !== true ? model.resolvedFileName : undefined,
           },
@@ -1231,11 +1306,14 @@ export class ModelCatalogService {
     requestContext: CatalogRequestContext,
     initialCursor: string | null,
     sort: CatalogServerSort | null,
+    catalogAuthPolicy: RequestAuthPolicy = REQUEST_AUTH_POLICY.ANONYMOUS,
   ): Promise<CatalogBatchResult> {
+    const catalogAuthToken = this.resolveRequestAuthToken(catalogAuthPolicy, requestContext.authToken);
+    const hasAuthToken = Boolean(catalogAuthToken);
     const span = performanceMonitor.startSpan('catalog.fetchCatalogBatch', {
       query: normalizedQuery,
       minimumResults,
-      hasAuthToken: requestContext.hasAuthToken,
+      hasAuthToken,
       sort: sort ?? undefined,
     });
     performanceMonitor.incrementCounter('catalog.fetchCatalogBatch.calls');
@@ -1260,6 +1338,7 @@ export class ModelCatalogService {
           normalizedQuery,
           requestLimit,
           requestContext,
+          catalogAuthPolicy,
           requestedCursor,
           sort,
         );
@@ -1289,7 +1368,7 @@ export class ModelCatalogService {
         nextCursor,
         minimumResults,
         sort,
-        requestContext.hasAuthToken,
+        hasAuthToken,
       );
     } catch (error) {
       outcome = 'error';
@@ -1380,14 +1459,17 @@ export class ModelCatalogService {
     normalizedQuery: string,
     limit: number,
     requestContext: CatalogRequestContext,
+    authPolicy: RequestAuthPolicy,
     nextCursor: string | null = null,
     sort: CatalogServerSort | null = null,
   ): Promise<HuggingFaceModelsPage> {
     const cursorType = nextCursor ? 'cursor' : 'initial';
+    const authToken = this.resolveRequestAuthToken(authPolicy, requestContext.authToken);
+    const hasAuthToken = Boolean(authToken);
     const span = performanceMonitor.startSpan('catalog.fetchHuggingFaceModels', {
       query: normalizedQuery,
       limit,
-      hasAuthToken: requestContext.hasAuthToken,
+      hasAuthToken,
       cursorType,
       cursorHash: nextCursor ? this.hashForTrace(nextCursor) : undefined,
       sort: sort ?? undefined,
@@ -1402,7 +1484,7 @@ export class ModelCatalogService {
 
     try {
       const response = await this.fetchWithTimeout(url, {
-        headers: this.buildHeaders(requestContext.authToken),
+        headers: this.buildHeaders(authPolicy, authToken),
       });
       status = response.status;
       this.assertRequestContextIsCurrent(requestContext);
@@ -1411,7 +1493,7 @@ export class ModelCatalogService {
         if (response.status === 429) {
           const retryAfterMs = this.resolveRetryAfterMs(response) ?? DEFAULT_RATE_LIMIT_BACKOFF_MS;
           const clampedRetryAfterMs = this.clampRetryAfterMs(retryAfterMs);
-          const authScope = this.getAuthScope(requestContext.hasAuthToken);
+          const authScope = this.getAuthScope(hasAuthToken);
           const now = Date.now();
           const until = now + clampedRetryAfterMs;
 
@@ -1818,6 +1900,13 @@ export class ModelCatalogService {
   ): ModelMetadata[] {
     const merged = remoteModels.map((model) => this.mergeModelWithRegistry(model, memoryFitContext) ?? model);
     this.upsertModelSnapshots(merged, authScope);
+    const authScoped = merged.filter((model) => (
+      model.accessState === ModelAccessState.AUTHORIZED
+      || model.accessState === ModelAccessState.ACCESS_DENIED
+    ));
+    if (authScoped.length > 0) {
+      this.upsertModelSnapshots(authScoped, 'auth');
+    }
     return merged;
   }
 
@@ -1932,7 +2021,19 @@ export class ModelCatalogService {
     models: ModelMetadata[],
     authScope: CatalogCacheAuthScope = 'anon',
   ) {
-    const normalizedModels = models.map((model) => normalizePersistedModelMetadata(model));
+    const sanitizedModels = authScope === 'anon'
+      ? models.map((model) => (
+        model.accessState === ModelAccessState.AUTHORIZED || model.accessState === ModelAccessState.ACCESS_DENIED
+          ? {
+            ...model,
+            accessState: model.isGated || model.isPrivate
+              ? ModelAccessState.AUTH_REQUIRED
+              : ModelAccessState.PUBLIC,
+          }
+          : model
+      ))
+      : models;
+    const normalizedModels = sanitizedModels.map((model) => normalizePersistedModelMetadata(model));
     this.cacheModelSnapshotsInMemory(normalizedModels, authScope);
     this.persistentCache.putModelSnapshots(normalizedModels, authScope);
   }
@@ -1941,16 +2042,17 @@ export class ModelCatalogService {
     repoId: string,
     revision: string | undefined,
     requestContext: CatalogRequestContext,
+    authPolicy: RequestAuthPolicy,
     options?: { expectedFileName?: string },
   ): Promise<HuggingFaceTreeResponse> {
     return this.withInFlightDedup(
       this.treeRequestCache,
-      this.buildRequestCacheKey('tree', repoId, revision, requestContext),
+      this.buildRequestCacheKey('tree', repoId, revision, requestContext, authPolicy),
       async () => {
         const span = performanceMonitor.startSpan('catalog.fetchHuggingFaceModelTree', {
           repoId,
           revision: revision ?? 'main',
-          hasAuthToken: requestContext.hasAuthToken,
+          hasAuthToken: this.resolveRequestAuthScope(authPolicy, requestContext.authToken) === 'auth',
         });
         performanceMonitor.incrementCounter('catalog.fetchHuggingFaceModelTree.calls');
 
@@ -1980,12 +2082,28 @@ export class ModelCatalogService {
             visitedCursors.add(requestedCursor);
 
             const response = await this.fetchWithTimeout(requestedCursor, {
-              headers: this.buildHeaders(requestContext.authToken),
+              headers: this.buildHeaders(authPolicy, requestContext.authToken),
             });
             status = response.status;
             this.assertRequestContextIsCurrent(requestContext);
 
             if (!response.ok) {
+              if (
+                entries.length === 0
+                && (response.status === 401 || response.status === 403)
+                && authPolicy === REQUEST_AUTH_POLICY.ANONYMOUS
+                && requestContext.hasAuthToken
+              ) {
+                // Retry once with an auth token only when the repo proves it needs it.
+                return this.fetchHuggingFaceModelTree(
+                  repoId,
+                  revision,
+                  requestContext,
+                  REQUEST_AUTH_POLICY.REQUIRED_AUTH,
+                  options,
+                );
+              }
+
               if (entries.length > 0) {
                 if (process.env.NODE_ENV !== 'test') {
                   console.warn(
@@ -2084,14 +2202,29 @@ export class ModelCatalogService {
     revision: string | undefined,
     requestContext: CatalogRequestContext,
   ): Promise<ReadmeModelData | undefined> {
+    const authPolicy = requestContext.hasAuthToken
+      ? REQUEST_AUTH_POLICY.OPTIONAL_AUTH
+      : REQUEST_AUTH_POLICY.ANONYMOUS;
     return this.withInFlightDedup(
       this.readmeRequestCache,
-      this.buildRequestCacheKey('readme', repoId, revision, requestContext),
+      this.buildRequestCacheKey('readme', repoId, revision, requestContext, authPolicy),
       async () => {
-        const response = await this.fetchWithTimeout(buildHuggingFaceRawUrl(repoId, 'README.md', revision), {
-          headers: this.buildHeaders(requestContext.authToken),
+        const readmeUrl = buildHuggingFaceRawUrl(repoId, 'README.md', revision);
+        let response = await this.fetchWithTimeout(readmeUrl, {
+          headers: this.buildHeaders(REQUEST_AUTH_POLICY.ANONYMOUS, requestContext.authToken),
         });
         this.assertRequestContextIsCurrent(requestContext);
+
+        if (
+          !response.ok
+          && (response.status === 401 || response.status === 403)
+          && requestContext.hasAuthToken
+        ) {
+          response = await this.fetchWithTimeout(readmeUrl, {
+            headers: this.buildHeaders(REQUEST_AUTH_POLICY.REQUIRED_AUTH, requestContext.authToken),
+          });
+          this.assertRequestContextIsCurrent(requestContext);
+        }
 
         if (!response.ok) {
           return undefined;
@@ -2125,6 +2258,7 @@ export class ModelCatalogService {
       model.id,
       model.hfRevision,
       requestContext,
+      REQUEST_AUTH_POLICY.REQUIRED_AUTH,
       model.resolvedFileName,
     );
     const cachedState = this.getCachedResolvedFileProbeState(cacheKey);
@@ -2149,7 +2283,7 @@ export class ModelCatalogService {
         try {
           const headResponse = await this.fetchWithTimeout(probeUrl, {
             method: 'HEAD',
-            headers: this.buildHeaders(requestContext.authToken),
+            headers: this.buildHeaders(REQUEST_AUTH_POLICY.REQUIRED_AUTH, requestContext.authToken),
           });
           this.assertRequestContextIsCurrent(requestContext);
           const headState = this.resolveResolvedFileProbeState(
@@ -2171,7 +2305,7 @@ export class ModelCatalogService {
           const getResponse = await this.fetchWithTimeout(probeUrl, {
             method: 'GET',
             headers: {
-              ...(this.buildHeaders(requestContext.authToken) ?? {}),
+              ...(this.buildHeaders(REQUEST_AUTH_POLICY.REQUIRED_AUTH, requestContext.authToken) ?? {}),
               Range: 'bytes=0-0',
             },
           });
@@ -2533,6 +2667,7 @@ export class ModelCatalogService {
     repoId: string,
     revision: string | undefined,
     requestContext: CatalogRequestContext,
+    authPolicy: RequestAuthPolicy,
     extraSegment?: string,
   ): string {
     return [
@@ -2540,7 +2675,7 @@ export class ModelCatalogService {
       repoId,
       revision ?? '__default__',
       extraSegment ?? '__none__',
-      requestContext.hasAuthToken ? 'auth' : 'anon',
+      this.resolveRequestAuthScope(authPolicy, requestContext.authToken),
       requestContext.authVersion,
     ].join('::');
   }
@@ -2784,9 +2919,9 @@ export class ModelCatalogService {
       return ModelAccessState.AUTH_REQUIRED;
     }
 
-    // A successful gated/private details fetch with a bearer token proves the
-    // current auth context can read the repo metadata. Later tree/probe checks
-    // may still downgrade this to access denied for the selected file.
+    // Treat gated/private repos as authorized when a token is configured. We
+    // avoid attaching Authorization to public catalog endpoints; later probe/tree
+    // checks can still downgrade this to access denied.
     return ModelAccessState.AUTHORIZED;
   }
 
@@ -2908,13 +3043,37 @@ export class ModelCatalogService {
     return hasAuthToken ? 'auth' : 'anon';
   }
 
-  private buildHeaders(authToken: string | null): HeadersInit | undefined {
+  private resolveRequestAuthToken(policy: RequestAuthPolicy, authToken: string | null): string | null {
+    if (policy === REQUEST_AUTH_POLICY.ANONYMOUS) {
+      return null;
+    }
+
     if (!authToken) {
+      if (policy === REQUEST_AUTH_POLICY.REQUIRED_AUTH) {
+        throw new ModelCatalogError('unknown', 'Hugging Face token is required for this request');
+      }
+
+      return null;
+    }
+
+    return authToken;
+  }
+
+  private resolveRequestAuthScope(
+    policy: RequestAuthPolicy,
+    authToken: string | null,
+  ): CatalogCacheAuthScope {
+    return policy !== REQUEST_AUTH_POLICY.ANONYMOUS && Boolean(authToken) ? 'auth' : 'anon';
+  }
+
+  private buildHeaders(policy: RequestAuthPolicy, authToken: string | null): HeadersInit | undefined {
+    const resolvedToken = this.resolveRequestAuthToken(policy, authToken);
+    if (!resolvedToken) {
       return undefined;
     }
 
     return {
-      Authorization: `Bearer ${authToken}`,
+      Authorization: `Bearer ${resolvedToken}`,
     };
   }
 

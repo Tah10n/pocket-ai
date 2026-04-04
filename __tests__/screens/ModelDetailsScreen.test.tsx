@@ -454,7 +454,7 @@ describe('ModelDetailsScreen', () => {
       fireEvent.press(screen.getByText('models.load'));
       await Promise.resolve();
     });
-    expect(mockLoadModel).toHaveBeenCalledWith('org/model');
+    expect(mockLoadModel).toHaveBeenCalledWith('org/model', undefined);
 
     await act(async () => {
       fireEvent.press(screen.getByText('models.settings'));

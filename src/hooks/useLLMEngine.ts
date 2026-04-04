@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { llmEngineService } from '../services/LLMEngineService';
+import { llmEngineService, type LoadModelOptions } from '../services/LLMEngineService';
 import { EngineState, EngineStatus } from '../types/models';
 
 export function useLLMEngine() {
@@ -11,8 +11,8 @@ export function useLLMEngine() {
     });
   }, []);
 
-  const loadModel = useCallback(async (modelId: string) => {
-    await llmEngineService.load(modelId);
+  const loadModel = useCallback(async (modelId: string, options?: LoadModelOptions) => {
+    await llmEngineService.load(modelId, options);
   }, []);
 
   const unloadModel = useCallback(async () => {

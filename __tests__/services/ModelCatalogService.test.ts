@@ -187,7 +187,7 @@ describe('ModelCatalogService', () => {
     expect(available.hasMore).toBe(false);
   });
 
-  it('uses the conservative live memory snapshot for catalog RAM badges and cached results', async () => {
+  it('uses the device total-memory budget for catalog RAM badges and cached results', async () => {
     (getSystemMemorySnapshot as jest.Mock).mockResolvedValue({
       totalBytes: 8 * 1024 * 1024 * 1024,
       availableBytes: 2_000_000_000,
@@ -210,9 +210,9 @@ describe('ModelCatalogService', () => {
     const coldStartService = new ModelCatalogService();
     const coldStartCachedResult = coldStartService.getCachedSearchResult('phi');
 
-    expect(result.models[0].fitsInRam).toBe(false);
-    expect(cachedResult?.models[0].fitsInRam).toBe(false);
-    expect(coldStartCachedResult?.models[0].fitsInRam).toBe(false);
+    expect(result.models[0].fitsInRam).toBe(true);
+    expect(cachedResult?.models[0].fitsInRam).toBe(true);
+    expect(coldStartCachedResult?.models[0].fitsInRam).toBe(true);
 
     coldStartService.dispose();
   });
@@ -446,7 +446,7 @@ describe('ModelCatalogService', () => {
     ) as jest.Mock;
 
     await expect(modelCatalogService.searchModels('phi', {
-      cursor: 'https://huggingface.co/api/models?search=phi%20gguf&limit=10&cursor=page-2',
+      cursor: 'https://huggingface.co/api/models?search=phi%20gguf&limit=30&cursor=page-2',
       pageSize: 10,
     })).rejects.toMatchObject({
       code: 'rate_limited',
@@ -460,7 +460,7 @@ describe('ModelCatalogService', () => {
         headers: {
           get: jest.fn((headerName: string) => (
             headerName === 'link'
-              ? '<https://huggingface.co/api/models?search=phi%20gguf&limit=10&cursor=page-2>; rel="next"'
+              ? '<https://huggingface.co/api/models?search=phi%20gguf&limit=30&cursor=page-2>; rel="next"'
               : null
           )),
         },
@@ -486,7 +486,7 @@ describe('ModelCatalogService', () => {
     expect(offlineResult.nextCursor).toBeNull();
 
     await expect(modelCatalogService.searchModels('phi', {
-      cursor: 'https://huggingface.co/api/models?search=phi%20gguf&limit=10&cursor=page-2',
+      cursor: 'https://huggingface.co/api/models?search=phi%20gguf&limit=30&cursor=page-2',
       pageSize: 10,
     })).rejects.toMatchObject({
       code: 'network',
@@ -641,6 +641,51 @@ describe('ModelCatalogService', () => {
     expect(result.models[0].resolvedFileName).toBe('model.Q4_K_M.gguf');
     expect(result.models[0].size).toBe(3 * 1024 * 1024 * 1024);
     expect(result.models[0].downloadUrl).toContain('model.Q4_K_M.gguf');
+  });
+
+  it('skips mmproj projector files when selecting a GGUF download candidate', async () => {
+    global.fetch = jest.fn(() =>
+      Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve([
+          {
+            id: 'org/mixed-mmproj-model',
+            siblings: [
+              { rfilename: 'model.mmproj.gguf', size: 512 * 1024 * 1024 },
+              { rfilename: 'model.Q8_0.gguf', size: 5 * 1024 * 1024 * 1024 },
+            ],
+          },
+        ]),
+      }),
+    ) as jest.Mock;
+
+    const result = await modelCatalogService.searchModels('phi');
+
+    expect(result.models).toHaveLength(1);
+    expect(result.models[0].resolvedFileName).toBe('model.Q8_0.gguf');
+    expect(result.models[0].downloadUrl).toContain('model.Q8_0.gguf');
+  });
+
+  it('does not reject text GGUFs that merely contain projector in the repo naming', async () => {
+    global.fetch = jest.fn(() =>
+      Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve([
+          {
+            id: 'org/projector-series-text-model',
+            siblings: [
+              { rfilename: 'projector-series.Q8_0.gguf', size: 5 * 1024 * 1024 * 1024 },
+            ],
+          },
+        ]),
+      }),
+    ) as jest.Mock;
+
+    const result = await modelCatalogService.searchModels('phi');
+
+    expect(result.models).toHaveLength(1);
+    expect(result.models[0].resolvedFileName).toBe('projector-series.Q8_0.gguf');
+    expect(result.models[0].downloadUrl).toContain('projector-series.Q8_0.gguf');
   });
 
   it('does not force a tree revalidation when the summary exposes a single known quant file', async () => {
@@ -942,7 +987,7 @@ describe('ModelCatalogService', () => {
     global.fetch = jest.fn((input: RequestInfo | URL) => {
       const url = String(input);
 
-      if (url.includes('limit=10')) {
+      if (url.includes('limit=30')) {
         const repos = Array.from({ length: 10 }, (_, index) => makeRepo(`org/model-${index}`));
 
         return Promise.resolve({
@@ -950,7 +995,7 @@ describe('ModelCatalogService', () => {
           headers: {
             get: jest.fn((headerName: string) => (
               headerName === 'link'
-                ? '<https://huggingface.co/api/models?search=phi%20gguf&limit=10&cursor=page-2>; rel="next"'
+                ? '<https://huggingface.co/api/models?search=phi%20gguf&limit=30&cursor=page-2>; rel="next"'
                 : null
             )),
           },
@@ -1102,7 +1147,7 @@ describe('ModelCatalogService', () => {
         headers: {
           get: jest.fn((headerName: string) => (
             headerName === 'link'
-              ? '<https://huggingface.co/api/models?search=phi%20gguf&limit=10&cursor=page-2>; rel="next"'
+              ? '<https://huggingface.co/api/models?search=phi%20gguf&limit=30&cursor=page-2>; rel="next"'
               : null
           )),
         },
@@ -1137,7 +1182,7 @@ describe('ModelCatalogService', () => {
       'org/model-10',
     ]);
     expect(firstPage.nextCursor).toMatch(/^catalog-buffer:/);
-    expect((global.fetch as jest.Mock).mock.calls[0][0]).toContain('limit=10');
+    expect((global.fetch as jest.Mock).mock.calls[0][0]).toContain('limit=30');
     expect(global.fetch).toHaveBeenCalledTimes(2);
 
     const secondPage = await modelCatalogService.searchModels('phi', {
@@ -1188,7 +1233,7 @@ describe('ModelCatalogService', () => {
         headers: {
           get: jest.fn((headerName: string) => (
             headerName === 'link'
-              ? '<https://huggingface.co/api/models?search=phi%20gguf&limit=10&cursor=page-2>; rel="next"'
+              ? '<https://huggingface.co/api/models?search=phi%20gguf&limit=30&cursor=page-2>; rel="next"'
               : null
           )),
         },
@@ -1246,7 +1291,11 @@ describe('ModelCatalogService', () => {
     await modelCatalogService.searchModels('phi', { pageSize: 1 });
 
     expect(global.fetch).toHaveBeenCalledTimes(2);
-    expect((global.fetch as jest.Mock).mock.calls[1][1]?.headers).toBeUndefined();
+    expect((global.fetch as jest.Mock).mock.calls[1][1]).toMatchObject({
+      headers: {
+        Authorization: 'Bearer hf_test_token',
+      },
+    });
   });
 
   it('persists model snapshots only once per fetched search page', async () => {

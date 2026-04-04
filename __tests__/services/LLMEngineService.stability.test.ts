@@ -20,6 +20,10 @@ jest.mock('react-native-device-info', () => ({
 jest.mock('llama.rn', () => ({
     initLlama: jest.fn(),
     releaseAllLlama: jest.fn().mockResolvedValue(undefined),
+    toggleNativeLog: jest.fn().mockResolvedValue(undefined),
+    addNativeLogListener: jest.fn().mockReturnValue({ remove: jest.fn() }),
+    loadLlamaModelInfo: jest.fn().mockResolvedValue({}),
+    BuildInfo: { number: 'test', commit: 'test' },
 }));
 
 jest.mock('expo-file-system/legacy', () => ({

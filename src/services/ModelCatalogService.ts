@@ -188,6 +188,8 @@ const README_SUMMARY_MAX_LENGTH = 320;
 const HF_REQUEST_TIMEOUT_MS = 20_000;
 const DEFAULT_RATE_LIMIT_BACKOFF_MS = 60_000;
 const MAX_RATE_LIMIT_BACKOFF_MS = 15 * 60 * 1000;
+const CATALOG_PREFETCH_PAGES = 3;
+const CATALOG_PREFETCH_MAX_LIMIT = 60;
 const HF_TREE_PAGINATION_MAX_PAGES = 20;
 const HF_TREE_PREFERRED_LOOKAHEAD_PAGES = 2;
 const SEARCH_CACHE_MAX_ENTRIES = 120;
@@ -300,11 +302,13 @@ type CatalogMemoryFitContext = {
 
 export class ModelCatalogService {
   private searchCache: Map<string, CatalogCacheEntry> = new Map();
+  private searchRequestCache: Map<string, Promise<ModelCatalogSearchResult>> = new Map();
   private modelSnapshotCache: Map<string, ModelMetadata> = new Map();
   private persistentCache = new ModelCatalogCacheStore();
   private authCacheVersion = 0;
   private bufferedCursorSequence = 0;
   private rateLimitUntilByAuthScope: Record<CatalogCacheAuthScope, number> = { anon: 0, auth: 0 };
+  private rateLimitBackoffMsByAuthScope: Record<CatalogCacheAuthScope, number> = { anon: 0, auth: 0 };
   private cacheInvalidationRevision = 0;
   private cacheInvalidationListeners: Set<CacheInvalidationListener> = new Set();
   private treeRequestCache: Map<string, Promise<HuggingFaceTreeResponse>> = new Map();
@@ -344,8 +348,10 @@ export class ModelCatalogService {
   public clearCache(source: Exclude<ModelCatalogCacheInvalidationSource, 'replay'> = 'unknown'): void {
     this.bufferedCursorSequence = 0;
     this.searchCache.clear();
+    this.searchRequestCache.clear();
     this.modelSnapshotCache.clear();
     this.rateLimitUntilByAuthScope = { anon: 0, auth: 0 };
+    this.rateLimitBackoffMsByAuthScope = { anon: 0, auth: 0 };
     this.treeRequestCache.clear();
     this.readmeRequestCache.clear();
     this.resolvedFileProbeCache.clear();
@@ -487,17 +493,19 @@ export class ModelCatalogService {
     const sort = options?.sort ?? null;
     const forceRefresh = options?.forceRefresh === true && cursor === null;
     const normalizedQuery = this.normalizeQuery(query);
-    const catalogAuthToken = this.resolveRequestAuthToken(
-      REQUEST_AUTH_POLICY.ANONYMOUS,
+    const catalogSearchAuthPolicy = requestContext.hasAuthToken
+      ? REQUEST_AUTH_POLICY.OPTIONAL_AUTH
+      : REQUEST_AUTH_POLICY.ANONYMOUS;
+    const catalogSearchHasAuthScope = this.resolveRequestAuthScope(
+      catalogSearchAuthPolicy,
       requestContext.authToken,
-    );
-    const hasAuthToken = Boolean(catalogAuthToken);
+    ) === 'auth';
     const cacheKey = this.buildMemorySearchCacheKey(
       normalizedQuery,
       cursor,
       pageSize,
       sort,
-      hasAuthToken,
+      catalogSearchHasAuthScope,
     );
     const cached = this.searchCache.get(cacheKey);
     const isBufferedCursor = this.isBufferedCursor(cursor);
@@ -522,7 +530,7 @@ export class ModelCatalogService {
         ...cached.result,
         models: this.mergeWithRegistry(
           filteredCachedModels,
-          this.getAuthScope(hasAuthToken),
+          this.getAuthScope(catalogSearchHasAuthScope),
           memoryFitContext,
         ),
       };
@@ -541,11 +549,11 @@ export class ModelCatalogService {
       }
 
       const memoryFitContext = await memoryFitContextPromise;
-      const cachedSearch = this.getCachedSearchResultForScope(
-        query,
-        options,
-        hasAuthToken,
-        memoryFitContext,
+      const cachedSearch = (
+        this.getCachedSearchResultForScope(query, options, catalogSearchHasAuthScope, memoryFitContext)
+        ?? (catalogSearchHasAuthScope
+          ? this.getCachedSearchResultForScope(query, options, false, memoryFitContext)
+          : null)
       );
       if (cachedSearch) {
         if (process.env.NODE_ENV !== 'test') {
@@ -560,7 +568,7 @@ export class ModelCatalogService {
       return this.getLocalSearchResults(query, memoryFitContext);
     }
 
-    const authScope = this.getAuthScope(hasAuthToken);
+    const authScope = this.getAuthScope(catalogSearchHasAuthScope);
     const now = Date.now();
     const rateLimitUntil = this.rateLimitUntilByAuthScope[authScope] ?? 0;
 
@@ -574,11 +582,11 @@ export class ModelCatalogService {
 
       if (cursor === null) {
         const memoryFitContext = await memoryFitContextPromise;
-        const fallback = this.getCachedSearchResultForScope(
-          query,
-          options,
-          hasAuthToken,
-          memoryFitContext,
+        const fallback = (
+          this.getCachedSearchResultForScope(query, options, catalogSearchHasAuthScope, memoryFitContext)
+          ?? (catalogSearchHasAuthScope
+            ? this.getCachedSearchResultForScope(query, options, false, memoryFitContext)
+            : null)
         );
         return {
           ...(fallback
@@ -591,57 +599,137 @@ export class ModelCatalogService {
       throw rateLimitError;
     }
 
-    try {
-      const memoryFitContext = await memoryFitContextPromise;
-      const fetched = await this.fetchCatalogBatch(
-        normalizedQuery,
-        pageSize,
-        memoryFitContext,
-        requestContext,
-        cursor,
-        sort,
-        REQUEST_AUTH_POLICY.ANONYMOUS,
-      );
-      this.assertRequestContextIsCurrent(requestContext);
-      const filteredModels = this.filterCatalogSearchModels(fetched.models);
-      const result = {
-        models: filteredModels,
-        hasMore: fetched.nextCursor !== null,
-        nextCursor: fetched.nextCursor,
-      };
-
-      this.searchCache.set(cacheKey, {
-        result,
-        timestamp: Date.now(),
-        isBufferedCursor,
-      });
-      this.pruneSearchCache();
-      if (cursor === null) {
-        const persistableResult = this.toPersistableSearchResult(result);
-        this.persistentCache.putSearch(
-          this.buildPersistentSearchScope(normalizedQuery, pageSize, sort, hasAuthToken),
-          {
-            ...persistableResult,
-            models: persistableResult.models.map((model) => (
-              model.accessState === ModelAccessState.AUTHORIZED || model.accessState === ModelAccessState.ACCESS_DENIED
-                ? {
-                  ...model,
-                  accessState: model.isGated || model.isPrivate
-                    ? ModelAccessState.AUTH_REQUIRED
-                    : ModelAccessState.PUBLIC,
-                }
-                : model
-            )),
-          },
+    const inFlight = this.searchRequestCache.get(cacheKey);
+    const requestPromise = inFlight ?? (async (): Promise<ModelCatalogSearchResult> => {
+      try {
+        const memoryFitContext = await memoryFitContextPromise;
+        const fetched = await this.fetchCatalogBatch(
+          normalizedQuery,
+          pageSize,
+          memoryFitContext,
+          requestContext,
+          cursor,
+          sort,
+          catalogSearchAuthPolicy,
         );
-      }
+        this.assertRequestContextIsCurrent(requestContext);
+        const filteredModels = this.filterCatalogSearchModels(fetched.models);
+        const result = {
+          models: filteredModels,
+          hasMore: fetched.nextCursor !== null,
+          nextCursor: fetched.nextCursor,
+        };
 
-      return {
-        ...result,
-        models: this.mergeWithRegistry(result.models, this.getAuthScope(hasAuthToken), memoryFitContext),
-      };
+        this.searchCache.set(cacheKey, {
+          result,
+          timestamp: Date.now(),
+          isBufferedCursor,
+        });
+        this.pruneSearchCache();
+        if (cursor === null) {
+          const persistableResult = this.toPersistableSearchResult(result);
+          const persistableModels = persistableResult.models.filter((model) => !model.isPrivate);
+          this.persistentCache.putSearch(
+            this.buildPersistentSearchScope(normalizedQuery, pageSize, sort, false),
+            {
+              ...persistableResult,
+              models: persistableModels.map((model) => (
+                model.accessState === ModelAccessState.AUTHORIZED || model.accessState === ModelAccessState.ACCESS_DENIED
+                  ? {
+                    ...model,
+                    accessState: model.isGated || model.isPrivate
+                      ? ModelAccessState.AUTH_REQUIRED
+                      : ModelAccessState.PUBLIC,
+                  }
+                  : model
+              )),
+            },
+          );
+        }
+
+        const mergedModels = this.mergeWithRegistry(
+          result.models,
+          this.getAuthScope(catalogSearchHasAuthScope),
+          memoryFitContext,
+        );
+
+        if (catalogSearchHasAuthScope) {
+          const publicSnapshots = mergedModels.filter((model) => !model.isPrivate);
+          if (publicSnapshots.length > 0) {
+            this.upsertModelSnapshots(publicSnapshots, 'anon');
+          }
+        }
+
+        return {
+          ...result,
+          models: mergedModels,
+        };
+      } catch (e) {
+        if (e instanceof StaleCatalogAuthError) {
+          throw e;
+        }
+
+        if (e instanceof ModelCatalogError && e.code === 'rate_limited') {
+          if (process.env.NODE_ENV !== 'test') {
+            console.warn('[ModelCatalogService] Search rate limited', e);
+          }
+        } else {
+          console.error('[ModelCatalogService] Search failed', e);
+        }
+
+        if (e instanceof ModelCatalogError) {
+          if (cursor === null) {
+            const memoryFitContext = await memoryFitContextPromise;
+            const fallback = (
+              this.getCachedSearchResultForScope(query, options, catalogSearchHasAuthScope, memoryFitContext)
+              ?? (catalogSearchHasAuthScope
+                ? this.getCachedSearchResultForScope(query, options, false, memoryFitContext)
+                : null)
+            );
+            return {
+              ...(fallback
+                ? this.toNonPaginatedFallback(fallback)
+                : this.getLocalSearchResults(query, memoryFitContext)),
+              warning: e,
+            };
+          }
+
+          throw e;
+        }
+
+        const networkError = new ModelCatalogError('network', 'Model catalog request failed');
+        if (cursor === null) {
+          const memoryFitContext = await memoryFitContextPromise;
+          const fallback = (
+            this.getCachedSearchResultForScope(query, options, catalogSearchHasAuthScope, memoryFitContext)
+            ?? (catalogSearchHasAuthScope
+              ? this.getCachedSearchResultForScope(query, options, false, memoryFitContext)
+              : null)
+          );
+          return {
+            ...(fallback
+              ? this.toNonPaginatedFallback(fallback)
+              : this.getLocalSearchResults(query, memoryFitContext)),
+            warning: networkError,
+          };
+        }
+
+        throw networkError;
+      }
+    })();
+
+    if (!inFlight) {
+      this.searchRequestCache.set(cacheKey, requestPromise);
+    }
+
+    try {
+      return await requestPromise;
     } catch (e) {
       if (e instanceof StaleCatalogAuthError) {
+        if (this.searchRequestCache.get(cacheKey) === requestPromise) {
+          this.searchRequestCache.delete(cacheKey);
+        }
+
         if (cursor === null && retryCount < 1) {
           return this.searchModelsInternal(query, options, retryCount + 1);
         }
@@ -649,52 +737,11 @@ export class ModelCatalogService {
         throw new ModelCatalogError('network', 'Catalog auth context changed during request');
       }
 
-      if (e instanceof ModelCatalogError && e.code === 'rate_limited') {
-        if (process.env.NODE_ENV !== 'test') {
-          console.warn('[ModelCatalogService] Search rate limited', e);
-        }
-      } else {
-        console.error('[ModelCatalogService] Search failed', e);
+      throw e;
+    } finally {
+      if (!inFlight && this.searchRequestCache.get(cacheKey) === requestPromise) {
+        this.searchRequestCache.delete(cacheKey);
       }
-
-      if (e instanceof ModelCatalogError) {
-        if (cursor === null) {
-          const memoryFitContext = await memoryFitContextPromise;
-          const fallback = this.getCachedSearchResultForScope(
-            query,
-            options,
-            hasAuthToken,
-            memoryFitContext,
-          );
-          return {
-            ...(fallback
-              ? this.toNonPaginatedFallback(fallback)
-              : this.getLocalSearchResults(query, memoryFitContext)),
-            warning: e,
-          };
-        }
-
-        throw e;
-      }
-
-      const networkError = new ModelCatalogError('network', 'Model catalog request failed');
-      if (cursor === null) {
-        const memoryFitContext = await memoryFitContextPromise;
-        const fallback = this.getCachedSearchResultForScope(
-          query,
-          options,
-          hasAuthToken,
-          memoryFitContext,
-        );
-        return {
-          ...(fallback
-            ? this.toNonPaginatedFallback(fallback)
-            : this.getLocalSearchResults(query, memoryFitContext)),
-          warning: networkError,
-        };
-      }
-
-      throw networkError;
     }
   }
 
@@ -1145,7 +1192,7 @@ export class ModelCatalogService {
     return assessModelMemoryFit({
       modelSizeBytes: size,
       totalMemoryBytes: memoryFitContext.totalMemoryBytes,
-      systemMemorySnapshot: memoryFitContext.systemMemorySnapshot,
+      systemMemorySnapshot: null,
     })?.fitsInRam ?? fallback;
   }
 
@@ -1331,12 +1378,13 @@ export class ModelCatalogService {
     let nextCursor = initialCursor;
     let exhausted = false;
     const visitedCursors = new Set<string>();
-    const requestLimit = Math.max(1, minimumResults);
+    const resolvedPageSize = Math.max(1, Math.round(minimumResults));
+    const requestLimit = this.resolveCatalogRequestLimit(resolvedPageSize);
     let pagesFetched = 0;
     let outcome: 'success' | 'error' = 'success';
 
     try {
-      while (models.length < minimumResults && !exhausted) {
+      while (models.length < resolvedPageSize && !exhausted) {
         pagesFetched += 1;
         const requestedCursor = nextCursor;
         if (requestedCursor !== null) {
@@ -1375,7 +1423,7 @@ export class ModelCatalogService {
         normalizedQuery,
         models,
         nextCursor,
-        minimumResults,
+        resolvedPageSize,
         sort,
         hasAuthToken,
       );
@@ -1390,6 +1438,14 @@ export class ModelCatalogService {
         hasMore: nextCursor !== null,
       });
     }
+  }
+
+  private resolveCatalogRequestLimit(pageSize: number): number {
+    const resolvedPageSize = Math.max(1, Math.round(pageSize));
+    const maxLimit = Math.max(CATALOG_PREFETCH_MAX_LIMIT, resolvedPageSize);
+    const maxPages = Math.max(1, Math.floor(maxLimit / resolvedPageSize));
+    const pagesToFetch = Math.min(CATALOG_PREFETCH_PAGES, maxPages);
+    return resolvedPageSize * pagesToFetch;
   }
 
   private createPaginatedCatalogBatchResult(
@@ -1500,12 +1556,15 @@ export class ModelCatalogService {
 
       if (!response.ok) {
         if (response.status === 429) {
-          const retryAfterMs = this.resolveRetryAfterMs(response) ?? DEFAULT_RATE_LIMIT_BACKOFF_MS;
-          const clampedRetryAfterMs = this.clampRetryAfterMs(retryAfterMs);
           const authScope = this.getAuthScope(hasAuthToken);
           const now = Date.now();
+          const resolvedRetryAfterMs = this.resolveRetryAfterMs(response);
+          const baseRetryAfterMs = resolvedRetryAfterMs ?? DEFAULT_RATE_LIMIT_BACKOFF_MS;
+          const previousBackoffMs = this.rateLimitBackoffMsByAuthScope[authScope] ?? 0;
+          const clampedRetryAfterMs = this.clampRetryAfterMs(Math.max(baseRetryAfterMs, previousBackoffMs));
           const until = now + clampedRetryAfterMs;
 
+          this.rateLimitBackoffMsByAuthScope[authScope] = this.clampRetryAfterMs(clampedRetryAfterMs * 2);
           this.rateLimitUntilByAuthScope[authScope] = Math.max(
             this.rateLimitUntilByAuthScope[authScope] ?? 0,
             until,
@@ -1521,6 +1580,7 @@ export class ModelCatalogService {
         throw new ModelCatalogError('network', `HF Search failed: ${response.status}`);
       }
 
+      this.rateLimitBackoffMsByAuthScope[this.getAuthScope(hasAuthToken)] = 0;
       const items = await response.json() as HuggingFaceModelSummary[];
       itemsCount = items.length;
       this.assertRequestContextIsCurrent(requestContext);
@@ -2608,10 +2668,22 @@ export class ModelCatalogService {
     return fileName.toUpperCase().includes('Q4_K_M');
   }
 
+  private isProjectorFileName(fileName: string): boolean {
+    const normalized = fileName.trim().toLowerCase();
+    return /(^|[._-])(mmproj|mm_projector|clip-projector|clip_projector)([._-]|$)/.test(normalized);
+  }
+
   private isEligibleGgufEntry(entry: HuggingFaceSibling | HuggingFaceTreeEntry): boolean {
     const name = this.getFileName(entry);
+    if (!name.toLowerCase().endsWith('.gguf')) {
+      return false;
+    }
+
+    if (this.isProjectorFileName(name)) {
+      return false;
+    }
     const size = this.getFileSize(entry);
-    return name.toLowerCase().endsWith('.gguf') && (size === null || size >= MIN_GGUF_BYTES);
+    return size === null || size >= MIN_GGUF_BYTES;
   }
 
   private getFileName(entry: HuggingFaceSibling | HuggingFaceTreeEntry): string {

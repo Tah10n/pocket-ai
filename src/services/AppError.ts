@@ -7,6 +7,7 @@ export type AppErrorCode =
   | 'engine_unloading'
   | 'model_not_found'
   | 'model_load_failed'
+  | 'model_incompatible'
   | 'model_memory_insufficient'
   | 'download_disk_space_low'
   | 'download_size_unknown'
@@ -22,6 +23,7 @@ const ERROR_MESSAGE_KEYS: Partial<Record<AppErrorCode, string>> = {
   engine_unloading: 'common.errors.engineUnloading',
   model_not_found: 'common.errors.modelNotFound',
   model_load_failed: 'common.errors.modelLoadFailed',
+  model_incompatible: 'common.errors.modelIncompatible',
   model_memory_insufficient: 'common.errors.modelMemoryInsufficient',
   download_disk_space_low: 'common.errors.downloadDiskSpaceLow',
   download_size_unknown: 'common.errors.downloadSizeUnknown',

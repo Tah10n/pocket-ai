@@ -149,7 +149,7 @@ describe('LocalStorageRegistry', () => {
     expect(updatedModels[0].fitsInRam).toBe(false);
   });
 
-  it('uses the conservative live memory snapshot when recomputing fitsInRam', async () => {
+  it('uses the device total-memory budget when recomputing fitsInRam (not the live snapshot)', async () => {
     (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(8 * 1024 * 1024 * 1024);
     (getSystemMemorySnapshot as jest.Mock).mockResolvedValue({
       totalBytes: 8 * 1024 * 1024 * 1024,
@@ -161,7 +161,7 @@ describe('LocalStorageRegistry', () => {
       thresholdBytes: 250_000_000,
     });
     (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([
-      createMockModel({ size: 1_700_000_000, fitsInRam: true }),
+      createMockModel({ size: 1_700_000_000, fitsInRam: false }),
     ]);
     (registry.saveModels as jest.Mock) = jest.fn();
     (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: true, size: 1_700_000_000 });
@@ -169,7 +169,7 @@ describe('LocalStorageRegistry', () => {
     await registry.validateRegistry();
 
     const updatedModels = (registry.saveModels as jest.Mock).mock.calls[0][0];
-    expect(updatedModels[0].fitsInRam).toBe(false);
+    expect(updatedModels[0].fitsInRam).toBe(true);
   });
 
   it('normalizes legacy persisted metadata with missing access fields and zero size', () => {

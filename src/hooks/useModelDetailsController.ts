@@ -6,6 +6,7 @@ import { useLLMEngine } from '@/hooks/useLLMEngine';
 import { useModelParametersSheetController } from '@/hooks/useModelParametersSheetController';
 import { useModelDownload } from '@/hooks/useModelDownload';
 import { useDownloadStore } from '@/store/downloadStore';
+import type { LoadModelOptions } from '@/services/LLMEngineService';
 import { registry } from '@/services/LocalStorageRegistry';
 import {
   getHuggingFaceModelUrl,
@@ -183,9 +184,9 @@ export function useModelDetailsController(modelId: string) {
     });
   }, [fitsInRam, handleOpenModelPage, handleOpenTokenSettings, showModelActionError, startDownload, t]);
 
-  const performLoad = useCallback(async (targetModelId: string) => {
+  const performLoad = useCallback(async (targetModelId: string, options?: LoadModelOptions) => {
     try {
-      await loadModel(targetModelId);
+      await loadModel(targetModelId, options);
       setRuntimeRevision((current) => current + 1);
     } catch (error) {
       showModelActionError('ModelDetailsScreen.performLoad', error);
@@ -198,12 +199,17 @@ export function useModelDetailsController(modelId: string) {
     }
 
     if (typeof displayModel.size === 'number' && Number.isFinite(displayModel.size) && displayModel.size > 0) {
-      const liveFitsInRam = await fitsInRam(displayModel.size);
+      const liveFitsInRam = displayModel.fitsInRam === false
+        ? false
+        : await fitsInRam(displayModel.size);
       if (!liveFitsInRam) {
         Alert.alert(
           t('models.memoryWarningTitle'),
-          t('common.errors.modelMemoryInsufficient'),
-          [{ text: t('common.close') }],
+          t('models.loadMemoryWarningMessage'),
+          [
+            { text: t('common.cancel'), style: 'cancel' },
+            { text: t('models.loadAnyway'), onPress: () => { void performLoad(displayModel.id, { allowUnsafeMemoryLoad: true }); } },
+          ],
         );
         return;
       }

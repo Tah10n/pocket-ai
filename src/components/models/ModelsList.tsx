@@ -10,6 +10,7 @@ import { ScreenCard, ScreenStack } from '@/components/ui/ScreenShell';
 import { Spinner } from '@/components/ui/spinner';
 import { Text } from '@/components/ui/text';
 import { useLLMEngine } from '@/hooks/useLLMEngine';
+import type { LoadModelOptions } from '@/services/LLMEngineService';
 import { useModelParametersSheetController } from '@/hooks/useModelParametersSheetController';
 import { useModelDownload } from '@/hooks/useModelDownload';
 import {
@@ -658,9 +659,9 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
     });
   }, [fitsInRam, openModelPage, openTokenSettings, showModelActionError, startDownload, t]);
 
-  const performLoad = useCallback(async (modelId: string) => {
+  const performLoad = useCallback(async (modelId: string, options?: LoadModelOptions) => {
     try {
-      await loadModel(modelId);
+      await loadModel(modelId, options);
       refreshDownloadedModels();
     } catch (error) {
       showModelActionError('ModelsList.performLoad', error);
@@ -670,12 +671,17 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
   const handleLoad = useCallback(async (modelId: string) => {
     const model = models.find((item) => item.id === modelId);
     if (model && typeof model.size === 'number' && Number.isFinite(model.size) && model.size > 0) {
-      const liveFitsInRam = await fitsInRam(model.size);
+      const liveFitsInRam = model.fitsInRam === false
+        ? false
+        : await fitsInRam(model.size);
       if (!liveFitsInRam) {
         Alert.alert(
           t('models.memoryWarningTitle'),
-          t('common.errors.modelMemoryInsufficient'),
-          [{ text: t('common.close') }],
+          t('models.loadMemoryWarningMessage'),
+          [
+            { text: t('common.cancel'), style: 'cancel' },
+            { text: t('models.loadAnyway'), onPress: () => { void performLoad(modelId, { allowUnsafeMemoryLoad: true }); } },
+          ],
         );
         return;
       }

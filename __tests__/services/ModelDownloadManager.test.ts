@@ -216,7 +216,7 @@ describe('ModelDownloadManager Basic', () => {
     );
   });
 
-  it('marks the downloaded model as not fitting when free memory is the tighter signal', async () => {
+  it('marks the downloaded model based on the device total-memory budget (not the live snapshot)', async () => {
     useDownloadStore.setState({ queue: [], activeDownloadId: null });
     (getSystemMemorySnapshot as jest.Mock).mockResolvedValue({
       totalBytes: 8 * 1024 * 1024 * 1024,
@@ -239,7 +239,7 @@ describe('ModelDownloadManager Basic', () => {
       expect.objectContaining({
         id: 'test/model',
         size: 1_000,
-        fitsInRam: false,
+        fitsInRam: true,
       }),
     );
   });

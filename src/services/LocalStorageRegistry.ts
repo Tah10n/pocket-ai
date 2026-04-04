@@ -169,7 +169,7 @@ export class LocalStorageRegistry {
             const fitsInRam = assessModelMemoryFit({
               modelSizeBytes: resolvedSize,
               totalMemoryBytes: systemMemorySnapshot?.totalBytes ?? totalMemory,
-              systemMemorySnapshot,
+              systemMemorySnapshot: null,
             })?.fitsInRam ?? false;
             if (model.fitsInRam !== fitsInRam) {
               model.fitsInRam = fitsInRam;

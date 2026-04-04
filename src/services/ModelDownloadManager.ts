@@ -422,7 +422,7 @@ export class ModelDownloadManager {
     const assessment = assessModelMemoryFit({
       modelSizeBytes: size,
       totalMemoryBytes,
-      systemMemorySnapshot,
+      systemMemorySnapshot: null,
     });
 
     return assessment?.fitsInRam ?? null;

@@ -1,4 +1,14 @@
-import { initLlama, releaseAllLlama, LlamaContext, TokenData, NativeCompletionResult } from 'llama.rn';
+import {
+  initLlama,
+  releaseAllLlama,
+  LlamaContext,
+  TokenData,
+  NativeCompletionResult,
+  toggleNativeLog,
+  addNativeLogListener,
+  loadLlamaModelInfo,
+  BuildInfo,
+} from 'llama.rn';
 import * as FileSystem from 'expo-file-system/legacy';
 import DeviceInfo from 'react-native-device-info';
 import { hardwareListenerService } from './HardwareListenerService';
@@ -12,16 +22,18 @@ import {
 } from './SettingsStore';
 import { AppError, toAppError } from './AppError';
 import { getSystemMemorySnapshot } from './SystemMetricsService';
-import { resolveContextWindowCeiling } from '../utils/contextWindow';
-import { assessModelMemoryFit, DEFAULT_TOTAL_MEMORY_BYTES } from '../utils/memoryFit';
+import { MIN_CONTEXT_WINDOW_TOKENS, resolveContextWindowCeiling } from '../utils/contextWindow';
+import { assessModelMemoryFit, DEFAULT_TOTAL_MEMORY_BYTES, type MemoryFitAssessment } from '../utils/memoryFit';
 import { DECIMAL_GIGABYTE } from '../utils/modelSize';
 
-interface LoadModelOptions {
+export interface LoadModelOptions {
   forceReload?: boolean;
+  allowUnsafeMemoryLoad?: boolean;
 }
 
 type StateListener = (state: EngineState) => void;
 const DEFAULT_CONTEXT_SIZE = 4096;
+const MAX_NATIVE_LOG_LINES = 120;
 
 function getErrorMessageText(error: unknown): string {
   if (error instanceof Error) {
@@ -42,6 +54,15 @@ function getErrorMessageText(error: unknown): string {
 function isConversationAlternationError(error: unknown): boolean {
   const message = getErrorMessageText(error);
   return /Conversation roles must alternate user\/assistant/i.test(message);
+}
+
+function getModelInfoString(modelInfo: unknown, key: string): string | null {
+  if (!modelInfo || typeof modelInfo !== 'object') {
+    return null;
+  }
+
+  const value = (modelInfo as Record<string, unknown>)[key];
+  return typeof value === 'string' ? value.trim() : null;
 }
 
 function mergeConsecutiveMessages(messages: LlmChatMessage[]): LlmChatMessage[] {
@@ -204,6 +225,7 @@ class LLMEngineService {
         model.localPath,
         model.maxContextTokens,
         model.size ?? null,
+        options?.allowUnsafeMemoryLoad === true,
       );
       await this.initPromise;
     });
@@ -369,7 +391,7 @@ class LLMEngineService {
     const assessment = assessModelMemoryFit({
       modelSizeBytes: modelSize,
       totalMemoryBytes,
-      systemMemorySnapshot,
+      systemMemorySnapshot: null,
     });
 
     return assessment?.fitsInRam ?? false;
@@ -397,7 +419,21 @@ class LLMEngineService {
     localPath: string,
     modelMaxContextTokens?: number,
     modelSizeBytes?: number | null,
+    allowUnsafeMemoryLoad = false,
   ): Promise<void> {
+    const isDev = typeof __DEV__ !== 'undefined' && __DEV__;
+    const nativeLogs: { level: string; text: string }[] = [];
+    let nativeLogListener: { remove: () => void } | null = null;
+    let didEnableNativeLogs = false;
+    let initDiagnostics: Record<string, unknown> | null = null;
+    let gpuInitError: unknown | null = null;
+    let cpuInitError: unknown | null = null;
+    const shouldBridgeNativeLogs = (
+      isDev
+      && process.env.NODE_ENV !== 'test'
+      && process.env.EXPO_PUBLIC_LLAMA_NATIVE_LOGS === '1'
+    );
+
     try {
       this.isUnloading = false;
       this.updateState({
@@ -433,29 +469,88 @@ class LLMEngineService {
 
       const resolvedTotalMemoryBytes = systemMemorySnapshot?.totalBytes ?? totalMemoryBytes;
       const resolvedModelSizeBytes = typeof fileInfo.size === 'number' ? fileInfo.size : modelSizeBytes ?? null;
+      let memoryFit: MemoryFitAssessment | null = null;
+
+      let modelInfo: Record<string, unknown> | null = null;
+      try {
+        modelInfo = await loadLlamaModelInfo(modelPath) as Record<string, unknown>;
+      } catch (error) {
+        if (process.env.NODE_ENV !== 'test') {
+          console.warn('[LLMEngine] Failed to read GGUF metadata', error);
+        }
+      }
+
+      const ggufArchitecture = getModelInfoString(modelInfo, 'general.architecture')?.toLowerCase() ?? null;
+      const ggufType = getModelInfoString(modelInfo, 'general.type')?.toLowerCase() ?? null;
+      if (ggufType === 'mmproj' || ggufArchitecture === 'clip') {
+        throw new AppError(
+          'model_incompatible',
+          'CLIP projector models (mmproj) cannot be used as the main model. Download the base language model GGUF instead.',
+          {
+            details: {
+              modelId,
+              ggufType,
+              ggufArchitecture,
+            },
+          },
+        );
+      }
+
+      initDiagnostics = {
+        modelId,
+        llamaRnBuild: BuildInfo,
+        fileSizeBytes: typeof fileInfo.size === 'number' ? fileInfo.size : null,
+        totalMemoryBytes: resolvedTotalMemoryBytes,
+        hasSystemMemorySnapshot: systemMemorySnapshot !== null,
+        lowMemorySignal: systemMemorySnapshot?.lowMemory ?? hardwareListenerService.getCurrentStatus().isLowMemory,
+        requestedModelSizeBytes: resolvedModelSizeBytes,
+        ggufInfo: {
+          architecture: ggufArchitecture,
+          type: ggufType,
+        },
+        loadParams,
+      };
       if (typeof resolvedModelSizeBytes === 'number' && Number.isFinite(resolvedModelSizeBytes) && resolvedModelSizeBytes > 0 && typeof resolvedTotalMemoryBytes === 'number' && Number.isFinite(resolvedTotalMemoryBytes) && resolvedTotalMemoryBytes > 0) {
-        const memoryFit = assessModelMemoryFit({
+        memoryFit = assessModelMemoryFit({
           modelSizeBytes: resolvedModelSizeBytes,
           totalMemoryBytes: resolvedTotalMemoryBytes,
           systemMemorySnapshot,
         });
 
-        if (memoryFit && !memoryFit.fitsInRam) {
-          throw new AppError('model_memory_insufficient', 'Not enough memory to load this model.', {
-            details: {
-              modelId,
-              modelSizeBytes: resolvedModelSizeBytes,
-              estimatedRuntimeBytes: memoryFit.estimatedRuntimeBytes,
-              totalMemoryBytes: resolvedTotalMemoryBytes,
-              availableMemoryBytes: systemMemorySnapshot?.availableBytes,
-              freeMemoryBytes: systemMemorySnapshot?.freeBytes,
-              thresholdBytes: systemMemorySnapshot?.thresholdBytes,
-              totalBudgetBytes: memoryFit.totalBudgetBytes,
-              availableBudgetBytes: memoryFit.availableBudgetBytes,
-              effectiveAvailableBudgetBytes: memoryFit.effectiveBudgetBytes,
-              lowMemory: systemMemorySnapshot?.lowMemory ?? hardwareListenerService.getCurrentStatus().isLowMemory,
-            },
-          });
+        if (memoryFit) {
+          if (initDiagnostics) {
+            initDiagnostics = {
+              ...initDiagnostics,
+              memoryFit,
+            };
+          }
+
+          if (!memoryFit.fitsInRam) {
+            const overBudgetRatio = memoryFit.effectiveBudgetBytes > 0
+              ? memoryFit.estimatedRuntimeBytes / memoryFit.effectiveBudgetBytes
+              : Number.POSITIVE_INFINITY;
+            const shouldBlockUnsafeLoad = overBudgetRatio > 1.25;
+
+            if (!allowUnsafeMemoryLoad || shouldBlockUnsafeLoad) {
+              throw new AppError('model_memory_insufficient', 'Not enough memory to load this model.', {
+                details: {
+                  modelId,
+                  modelSizeBytes: resolvedModelSizeBytes,
+                  estimatedRuntimeBytes: memoryFit.estimatedRuntimeBytes,
+                  totalMemoryBytes: resolvedTotalMemoryBytes,
+                  availableMemoryBytes: systemMemorySnapshot?.availableBytes,
+                  freeMemoryBytes: systemMemorySnapshot?.freeBytes,
+                  thresholdBytes: systemMemorySnapshot?.thresholdBytes,
+                  totalBudgetBytes: memoryFit.totalBudgetBytes,
+                  availableBudgetBytes: memoryFit.availableBudgetBytes,
+                  effectiveAvailableBudgetBytes: memoryFit.effectiveBudgetBytes,
+                  lowMemory: systemMemorySnapshot?.lowMemory ?? hardwareListenerService.getCurrentStatus().isLowMemory,
+                  allowUnsafeMemoryLoad,
+                  overBudgetRatio,
+                },
+              });
+            }
+          }
         }
       }
 
@@ -465,18 +560,46 @@ class LLMEngineService {
         totalMemoryBytes: resolvedTotalMemoryBytes,
         appMaxContextTokens: loadParams.contextSize,
       });
-      const gpuLayers = loadParams.gpuLayers ?? (
+      const shouldUseSafeLoadProfile = allowUnsafeMemoryLoad && memoryFit?.fitsInRam === false;
+      const finalContextSize = shouldUseSafeLoadProfile ? MIN_CONTEXT_WINDOW_TOKENS : resolvedContextSize;
+      const gpuLayers = shouldUseSafeLoadProfile
+        ? 0
+        : loadParams.gpuLayers ?? (
         resolvedTotalMemoryBytes != null
           ? this.suggestGpuLayersForTotalMemory(resolvedTotalMemoryBytes)
           : await this.calculateGpuLayers()
       );
       let resolvedGpuLayers = gpuLayers;
 
+      if (initDiagnostics) {
+        initDiagnostics = {
+          ...initDiagnostics,
+          resolvedContextSize: finalContextSize,
+          requestedGpuLayers: gpuLayers,
+          safeLoadProfile: shouldUseSafeLoadProfile,
+        };
+      }
+
+      if (shouldBridgeNativeLogs) {
+        try {
+          nativeLogListener = addNativeLogListener((level, text) => {
+            nativeLogs.push({ level, text });
+            if (nativeLogs.length > MAX_NATIVE_LOG_LINES) {
+              nativeLogs.splice(0, nativeLogs.length - MAX_NATIVE_LOG_LINES);
+            }
+          });
+          await toggleNativeLog(true);
+          didEnableNativeLogs = true;
+        } catch (error) {
+          console.warn('[LLMEngine] Failed to enable native llama logs', error);
+        }
+      }
+
       try {
         this.context = await initLlama(
           {
             model: modelPath,
-            n_ctx: resolvedContextSize,
+            n_ctx: finalContextSize,
             n_gpu_layers: gpuLayers,
             use_mmap: true,
             use_mlock: false,
@@ -487,36 +610,67 @@ class LLMEngineService {
           }
         );
       } catch (gpuError) {
+        gpuInitError = gpuError;
         if (gpuLayers > 0) {
           if (process.env.NODE_ENV !== 'test') {
             console.warn('[LLMEngine] GPU init failed, falling back to CPU', gpuError);
           }
           resolvedGpuLayers = 0;
-          this.context = await initLlama(
-            {
-              model: modelPath,
-              n_ctx: resolvedContextSize,
-              n_gpu_layers: 0,
-              use_mmap: true,
-              use_mlock: false,
-              flash_attn_type: 'auto',
-            },
-            (progress) => {
-              this.updateState({ ...this.state, loadProgress: progress });
-            }
-          );
+          try {
+            this.context = await initLlama(
+              {
+                model: modelPath,
+                n_ctx: resolvedContextSize,
+                n_gpu_layers: 0,
+                use_mmap: true,
+                use_mlock: false,
+                flash_attn_type: 'auto',
+              },
+              (progress) => {
+                this.updateState({ ...this.state, loadProgress: progress });
+              }
+            );
+          } catch (cpuError) {
+            cpuInitError = cpuError;
+            throw cpuError;
+          }
         } else {
           throw gpuError;
         }
       }
 
-      this.activeContextSize = resolvedContextSize;
+      this.activeContextSize = finalContextSize;
       this.activeGpuLayers = resolvedGpuLayers;
       this.updateState({ ...this.state, status: EngineStatus.READY, loadProgress: 1 });
       updateSettings({ activeModelId: modelId });
     } catch (error) {
-      const appError = toAppError(error, 'model_load_failed');
-      console.error('[LLMEngine] Failed to initialize', appError);
+      const baseError = toAppError(error, 'model_load_failed');
+      const extraDetails: Record<string, unknown> = {
+        ...(baseError.details ?? {}),
+        ...(initDiagnostics ?? {}),
+      };
+
+      if (gpuInitError) {
+        extraDetails.gpuInitError = getErrorMessageText(gpuInitError);
+      }
+
+      if (cpuInitError) {
+        extraDetails.cpuInitError = getErrorMessageText(cpuInitError);
+      }
+
+      if (isDev && nativeLogs.length > 0) {
+        extraDetails.nativeLogs = nativeLogs.map((line) => `${line.level}: ${line.text}`);
+      }
+
+      const errorCause = baseError.cause ?? (error instanceof AppError ? error.cause : error);
+      const appError = Object.keys(extraDetails).length > 0
+        ? new AppError(baseError.code, baseError.message, {
+            cause: errorCause,
+            details: extraDetails,
+          })
+        : baseError;
+
+      console.error('[LLMEngine] Failed to initialize', appError, Object.keys(extraDetails).length > 0 ? extraDetails : undefined);
       this.context = null;
       this.activeContextSize = DEFAULT_CONTEXT_SIZE;
       this.activeGpuLayers = null;
@@ -529,6 +683,14 @@ class LLMEngineService {
       });
       throw appError;
     } finally {
+      if (nativeLogListener) {
+        nativeLogListener.remove();
+      }
+
+      if (didEnableNativeLogs) {
+        await toggleNativeLog(false).catch(() => undefined);
+      }
+
       this.initPromise = null;
     }
   }

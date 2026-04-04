@@ -51,6 +51,7 @@
       "./plugins/withAndroidGradlePluginManagement",
       "./plugins/withAndroidReleaseConfig",
       "./plugins/withAndroidSystemMetrics",
+      "./plugins/withIosSystemMetrics",
       "expo-secure-store"
     ],
     "experiments": {

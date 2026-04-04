@@ -9,7 +9,6 @@ import { AppError, toAppError } from './AppError';
 import { huggingFaceTokenService } from './HuggingFaceTokenService';
 import { HF_BASE_URL } from '../utils/huggingFaceUrls';
 import { getCandidateModelDownloadFileNames } from '../utils/modelFiles';
-import { DEFAULT_TOTAL_MEMORY_BYTES } from '../memory/budget';
 import { estimateFastMemoryFit } from '../memory/estimator';
 import { DECIMAL_GIGABYTE } from '../utils/modelSize';
 
@@ -426,7 +425,12 @@ export class ModelDownloadManager {
       return null;
     }
 
-    const totalMemoryBytes = await DeviceInfo.getTotalMemory().catch(() => DEFAULT_TOTAL_MEMORY_BYTES);
+    let totalMemoryBytes: number | null = null;
+    try {
+      totalMemoryBytes = await DeviceInfo.getTotalMemory();
+    } catch {
+      totalMemoryBytes = null;
+    }
     const fit = estimateFastMemoryFit({
       modelSizeBytes: size,
       totalMemoryBytes,

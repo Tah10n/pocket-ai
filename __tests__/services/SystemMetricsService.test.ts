@@ -27,6 +27,8 @@ describe('SystemMetricsService', () => {
     });
 
     await expect(getSystemMemorySnapshot()).resolves.toEqual({
+      timestampMs: expect.any(Number),
+      platform: 'android',
       totalBytes: 12_000_000_000,
       availableBytes: 4_000_000_000,
       freeBytes: 3_000_000_000,
@@ -35,6 +37,7 @@ describe('SystemMetricsService', () => {
       appResidentBytes: 5_000_000_000,
       appPssBytes: 3_000_000_000,
       lowMemory: false,
+      pressureLevel: 'normal',
       thresholdBytes: 0,
     });
   });
@@ -61,6 +64,8 @@ describe('SystemMetricsService', () => {
       });
 
     await expect(getSystemMemorySnapshot()).resolves.toEqual({
+      timestampMs: expect.any(Number),
+      platform: 'android',
       totalBytes: 8_000_000_000,
       availableBytes: 2_000_000_000,
       freeBytes: 1_500_000_000,
@@ -69,10 +74,13 @@ describe('SystemMetricsService', () => {
       appResidentBytes: 1_500_000_000,
       appPssBytes: undefined,
       lowMemory: true,
+      pressureLevel: 'critical',
       thresholdBytes: 250_000_000,
     });
 
     await expect(getSystemMemorySnapshot()).resolves.toEqual({
+      timestampMs: expect.any(Number),
+      platform: 'android',
       totalBytes: 8_000_000_000,
       availableBytes: 2_000_000_000,
       freeBytes: undefined,
@@ -81,6 +89,7 @@ describe('SystemMetricsService', () => {
       appResidentBytes: undefined,
       appPssBytes: undefined,
       lowMemory: false,
+      pressureLevel: 'normal',
       thresholdBytes: 0,
     });
   });

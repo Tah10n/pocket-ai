@@ -1,14 +1,12 @@
 import type { SystemMemorySnapshot } from '../services/SystemMetricsService';
 import {
   createMemoryBudget,
-  DEFAULT_TOTAL_MEMORY_BYTES,
   FITS_IN_RAM_HEADROOM_RATIO,
   resolveConservativeAvailableMemoryBudget,
 } from '../memory/budget';
 import { estimateModelRuntimeBytes } from '../memory/estimator';
 
 export {
-  DEFAULT_TOTAL_MEMORY_BYTES,
   FITS_IN_RAM_HEADROOM_RATIO,
   resolveConservativeAvailableMemoryBudget,
 };

@@ -11,7 +11,6 @@ import {
   type CatalogCacheAuthScope,
   type CatalogCacheScope,
 } from './ModelCatalogCacheStore';
-import { DEFAULT_TOTAL_MEMORY_BYTES } from '../memory/budget';
 import { estimateFastMemoryFit } from '../memory/estimator';
 import {
   buildHuggingFaceModelApiUrl,
@@ -297,7 +296,7 @@ type RefreshModelMetadataOptions = {
 };
 
 type CatalogMemoryFitContext = {
-  totalMemoryBytes: number;
+  totalMemoryBytes: number | null;
   systemMemorySnapshot: SystemMemorySnapshot | null;
 };
 
@@ -1156,7 +1155,7 @@ export class ModelCatalogService {
 
   private async getCurrentMemoryFitContext(): Promise<CatalogMemoryFitContext> {
     const deviceTotalMemoryBytes = await this.getTotalMemory();
-    const totalMemoryBytes = deviceTotalMemoryBytes ?? DEFAULT_TOTAL_MEMORY_BYTES;
+    const totalMemoryBytes = deviceTotalMemoryBytes;
     const memoryFitContext = {
       totalMemoryBytes,
       systemMemorySnapshot: null,

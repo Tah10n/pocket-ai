@@ -79,6 +79,14 @@ describe('LLMEngineService Stability', () => {
         hardwareListenerService.resetLowMemoryFlag();
     });
 
+    it('loads a model even when total-memory resolution fails', async () => {
+        (DeviceInfo.getTotalMemory as jest.Mock).mockRejectedValueOnce(new Error('E_TOTAL_MEM'));
+        (initLlama as jest.Mock).mockResolvedValue({}); // Success
+
+        await expect(llmEngineService.load(mockModel.id)).resolves.toBeUndefined();
+        expect(initLlama).toHaveBeenCalled();
+    });
+
     it('uses 0 GPU layers on low-end devices (e.g. 4GB RAM)', async () => {
         // Mock 4GB RAM
         (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(4 * 1024 * 1024 * 1024);

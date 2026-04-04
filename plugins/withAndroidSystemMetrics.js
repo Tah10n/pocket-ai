@@ -89,8 +89,10 @@ class ${SYSTEM_METRICS_MODULE_NAME}Module(
       val availableBytes = memoryInfo.availMem.coerceAtLeast(0L)
       val freeBytes = readFreeMemoryBytes(memoryInfo)
       val usedBytes = (totalBytes - (freeBytes ?: availableBytes)).coerceAtLeast(0L)
+      val pressureLevel = if (memoryInfo.lowMemory) "critical" else "normal"
 
       val result = Arguments.createMap().apply {
+        putDouble("timestampMs", System.currentTimeMillis().toDouble())
         putDouble("totalBytes", totalBytes.toDouble())
         putDouble("availableBytes", availableBytes.toDouble())
         if (freeBytes != null) {
@@ -101,6 +103,7 @@ class ${SYSTEM_METRICS_MODULE_NAME}Module(
         putDouble("appResidentBytes", appResidentBytes.toDouble())
         putDouble("appPssBytes", appPssBytes.toDouble())
         putBoolean("lowMemory", memoryInfo.lowMemory)
+        putString("pressureLevel", pressureLevel)
         putDouble("thresholdBytes", memoryInfo.threshold.coerceAtLeast(0L).toDouble())
       }
 

@@ -4,9 +4,8 @@ import DeviceInfo from 'react-native-device-info';
 import { llmEngineService } from '../../src/services/LLMEngineService';
 import { registry } from '../../src/services/LocalStorageRegistry';
 import { getModelLoadParametersForModel, updateSettings } from '../../src/services/SettingsStore';
-import { getSystemMemorySnapshot } from '../../src/services/SystemMetricsService';
+import { getFreshMemorySnapshot } from '../../src/services/SystemMetricsService';
 import { EngineStatus, LifecycleStatus } from '../../src/types/models';
-import { ESTIMATED_CONTEXT_BYTES_PER_TOKEN } from '../../src/utils/contextWindow';
 
 jest.mock('llama.rn', () => {
   const completion = jest.fn();
@@ -38,7 +37,7 @@ jest.mock('../../src/services/SettingsStore', () => ({
 }));
 
 jest.mock('../../src/services/SystemMetricsService', () => ({
-  getSystemMemorySnapshot: jest.fn().mockResolvedValue(null),
+  getFreshMemorySnapshot: jest.fn().mockResolvedValue(null),
 }));
 
 describe('LLMEngineService', () => {
@@ -57,7 +56,7 @@ describe('LLMEngineService', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
-    (getSystemMemorySnapshot as jest.Mock).mockResolvedValue(null);
+    (getFreshMemorySnapshot as jest.Mock).mockResolvedValue(null);
     (registry.getModel as jest.Mock) = jest.fn().mockReturnValue({
       id: 'test/model',
       localPath: 'model.gguf',
@@ -222,12 +221,10 @@ describe('LLMEngineService', () => {
     expect(llmEngineService.getContextSize()).toBe(16384);
   });
 
-  it('clamps requested context size to the safe device ceiling before loading', async () => {
+  it('clamps requested context size to the model ceiling before loading', async () => {
     const totalMemoryBytes = 8 * 1024 * 1024 * 1024;
     const safeContextSize = 4096;
-    const modelSizeBytes = Math.floor(
-      ((totalMemoryBytes * 0.8) - safeContextSize * ESTIMATED_CONTEXT_BYTES_PER_TOKEN) / 1.2,
-    );
+    const modelSizeBytes = 2_000_000_000;
 
     (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(totalMemoryBytes);
     (FileSystem.getInfoAsync as jest.Mock).mockResolvedValueOnce({
@@ -239,7 +236,7 @@ describe('LLMEngineService', () => {
       localPath: 'model.gguf',
       lifecycleStatus: LifecycleStatus.DOWNLOADED,
       size: modelSizeBytes,
-      maxContextTokens: 8192,
+      maxContextTokens: safeContextSize,
     });
     (getModelLoadParametersForModel as jest.Mock).mockReturnValueOnce({
       contextSize: 8192,
@@ -321,13 +318,16 @@ describe('LLMEngineService', () => {
       exists: true,
       size: modelSizeBytes,
     });
-    (getSystemMemorySnapshot as jest.Mock).mockResolvedValue({
+    (getFreshMemorySnapshot as jest.Mock).mockResolvedValue({
+      timestampMs: Date.now(),
+      platform: 'android',
       totalBytes: totalMemoryBytes,
       availableBytes: 2_500_000_000,
       freeBytes: 1_500_000_000,
       usedBytes: totalMemoryBytes - 1_500_000_000,
       appUsedBytes: 500_000_000,
       lowMemory: false,
+      pressureLevel: 'normal',
       thresholdBytes: 250_000_000,
     });
 
@@ -339,6 +339,50 @@ describe('LLMEngineService', () => {
     expect(updateSettings).toHaveBeenCalledWith({ activeModelId: null });
   });
 
+  it('includes KV-cache bytes in model-load diagnostics when GGUF metadata is available', async () => {
+    const totalMemoryBytes = 8 * 1024 * 1024 * 1024;
+    const modelSizeBytes = 1_000_000_000;
+
+    (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(totalMemoryBytes);
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValueOnce({
+      exists: true,
+      size: modelSizeBytes,
+    });
+    (getFreshMemorySnapshot as jest.Mock).mockResolvedValue({
+      timestampMs: Date.now(),
+      platform: 'android',
+      totalBytes: totalMemoryBytes,
+      availableBytes: 100_000_000,
+      freeBytes: 100_000_000,
+      usedBytes: totalMemoryBytes - 100_000_000,
+      appUsedBytes: 250_000_000,
+      lowMemory: false,
+      pressureLevel: 'warning',
+      thresholdBytes: 0,
+    });
+    (llamaRn.loadLlamaModelInfo as jest.Mock).mockResolvedValueOnce({
+      n_layers: 2,
+      n_head_kv: 4,
+      n_embd_head_k: 8,
+      n_embd_head_v: 8,
+      sliding_window: 64,
+    });
+
+    const thrown = await llmEngineService.load('test/model', { forceReload: true }).catch((error) => error);
+
+    expect(thrown).toMatchObject({
+      code: 'model_memory_insufficient',
+      details: expect.objectContaining({
+        memoryFit: expect.objectContaining({
+          breakdown: expect.objectContaining({
+            kvCacheBytes: expect.any(Number),
+          }),
+        }),
+      }),
+    });
+    expect(thrown.details.memoryFit.breakdown.kvCacheBytes).toBeGreaterThan(0);
+  });
+
   it('keeps model-load diagnostics free of raw paths and full memory snapshots', async () => {
     const totalMemoryBytes = 8 * 1024 * 1024 * 1024;
     const modelSizeBytes = 1_700_000_000;
@@ -348,13 +392,16 @@ describe('LLMEngineService', () => {
       exists: true,
       size: modelSizeBytes,
     });
-    (getSystemMemorySnapshot as jest.Mock).mockResolvedValue({
+    (getFreshMemorySnapshot as jest.Mock).mockResolvedValue({
+      timestampMs: Date.now(),
+      platform: 'android',
       totalBytes: totalMemoryBytes,
       availableBytes: 2_500_000_000,
       freeBytes: 1_500_000_000,
       usedBytes: totalMemoryBytes - 1_500_000_000,
       appUsedBytes: 500_000_000,
       lowMemory: true,
+      pressureLevel: 'critical',
       thresholdBytes: 250_000_000,
     });
 
@@ -378,19 +425,22 @@ describe('LLMEngineService', () => {
   it('uses the device total-memory budget for fitsInRam checks (not the live snapshot)', async () => {
     const totalMemoryBytes = 8 * 1024 * 1024 * 1024;
     (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(totalMemoryBytes);
-    (getSystemMemorySnapshot as jest.Mock).mockResolvedValue({
+    (getFreshMemorySnapshot as jest.Mock).mockResolvedValue({
+      timestampMs: Date.now(),
+      platform: 'android',
       totalBytes: totalMemoryBytes,
       availableBytes: 2_500_000_000,
       freeBytes: 1_500_000_000,
       usedBytes: totalMemoryBytes - 1_500_000_000,
       appUsedBytes: 500_000_000,
       lowMemory: false,
+      pressureLevel: 'normal',
       thresholdBytes: 250_000_000,
     });
 
     await expect(llmEngineService.fitsInRam(1_700_000_000)).resolves.toMatchObject({
-      decision: 'fits_high_confidence',
-      confidence: 'medium',
+      decision: 'fits_low_confidence',
+      confidence: 'low',
       budget: expect.objectContaining({
         totalMemoryBytes,
         liveAvailableBytes: undefined,
@@ -398,7 +448,7 @@ describe('LLMEngineService', () => {
     });
     await expect(llmEngineService.fitsInRam(6_000_000_000)).resolves.toMatchObject({
       decision: 'borderline',
-      confidence: 'medium',
+      confidence: 'low',
       budget: expect.objectContaining({
         totalMemoryBytes,
         liveAvailableBytes: undefined,

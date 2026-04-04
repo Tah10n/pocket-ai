@@ -3,10 +3,10 @@ import { act, render, waitFor } from '@testing-library/react-native';
 import AccessibilityInfo from 'react-native/Libraries/Components/AccessibilityInfo/AccessibilityInfo';
 import DeviceInfo from 'react-native-device-info';
 import { useDeviceMetrics, useMotionPreferences } from '../../src/hooks/useDeviceMetrics';
-import { getSystemMemorySnapshot } from '../../src/services/SystemMetricsService';
+import { getFreshMemorySnapshot } from '../../src/services/SystemMetricsService';
 
 jest.mock('../../src/services/SystemMetricsService', () => ({
-  getSystemMemorySnapshot: jest.fn(),
+  getFreshMemorySnapshot: jest.fn(),
 }));
 
 jest.mock('../../src/services/LocalStorageRegistry', () => ({
@@ -43,7 +43,9 @@ describe('useDeviceMetrics', () => {
   });
 
   it('prefers system-wide Android RAM metrics when the native snapshot is available', async () => {
-    (getSystemMemorySnapshot as jest.Mock).mockResolvedValue({
+    (getFreshMemorySnapshot as jest.Mock).mockResolvedValue({
+      timestampMs: Date.now(),
+      platform: 'android',
       totalBytes: 12 * GB,
       availableBytes: 4 * GB,
       freeBytes: 3 * GB,
@@ -52,6 +54,7 @@ describe('useDeviceMetrics', () => {
       appResidentBytes: 5 * GB,
       appPssBytes: 3 * GB,
       lowMemory: false,
+      pressureLevel: 'normal',
       thresholdBytes: 0,
     });
 
@@ -74,7 +77,7 @@ describe('useDeviceMetrics', () => {
   });
 
   it('falls back to process memory when the Android system snapshot is unavailable', async () => {
-    (getSystemMemorySnapshot as jest.Mock).mockResolvedValue(null);
+    (getFreshMemorySnapshot as jest.Mock).mockResolvedValue(null);
 
     const getMetrics = renderHookHarness();
 

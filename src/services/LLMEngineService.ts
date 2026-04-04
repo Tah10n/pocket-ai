@@ -21,14 +21,13 @@ import {
   updateSettings,
 } from './SettingsStore';
 import { AppError, toAppError } from './AppError';
-import { getSystemMemorySnapshot } from './SystemMetricsService';
+import { getFreshMemorySnapshot } from './SystemMetricsService';
 import { MIN_CONTEXT_WINDOW_TOKENS, resolveContextWindowCeiling } from '../utils/contextWindow';
 import {
-  DEFAULT_TOTAL_MEMORY_BYTES,
   FITS_IN_RAM_HEADROOM_RATIO,
   resolveConservativeAvailableMemoryBudget,
 } from '../memory/budget';
-import { estimateMemoryFitFromModelSize } from '../memory/estimator';
+import { estimateAccurateMemoryFit } from '../memory/estimator';
 import type { MemoryFitResult } from '../memory/types';
 import { DECIMAL_GIGABYTE } from '../utils/modelSize';
 
@@ -387,13 +386,21 @@ class LLMEngineService {
    * Helper to calculate if model fits in RAM.
    */
   public async fitsInRam(modelSize: number): Promise<MemoryFitResult> {
-    const totalMemoryBytes = await DeviceInfo.getTotalMemory().catch(() => DEFAULT_TOTAL_MEMORY_BYTES);
+    let totalMemoryBytes: number | null = null;
+    try {
+      totalMemoryBytes = await DeviceInfo.getTotalMemory();
+    } catch (error) {
+      console.warn('[LLMEngine] Failed to resolve total device memory for fit estimate', error);
+    }
 
     // This is a cheap UI-facing estimate: it must never depend on live "available memory" snapshots.
-    return estimateMemoryFitFromModelSize({
-      modelSizeBytes: modelSize,
+    return estimateAccurateMemoryFit({
+      input: {
+        modelSizeBytes: modelSize,
+        metadataTrust: 'unknown',
+        runtimeParams: {},
+      },
       totalMemoryBytes,
-      systemMemorySnapshot: null,
     });
   }
 
@@ -459,7 +466,7 @@ class LLMEngineService {
       }
 
       const loadParams = getModelLoadParametersForModel(modelId);
-      const systemMemorySnapshot = await getSystemMemorySnapshot().catch(() => null);
+      const systemMemorySnapshot = await getFreshMemorySnapshot(1500).catch(() => null);
       let totalMemoryBytes: number | null = null;
       try {
         totalMemoryBytes = await DeviceInfo.getTotalMemory();
@@ -510,11 +517,42 @@ class LLMEngineService {
         },
         loadParams,
       };
-      if (typeof resolvedModelSizeBytes === 'number' && Number.isFinite(resolvedModelSizeBytes) && resolvedModelSizeBytes > 0 && typeof resolvedTotalMemoryBytes === 'number' && Number.isFinite(resolvedTotalMemoryBytes) && resolvedTotalMemoryBytes > 0) {
-        memoryFit = estimateMemoryFitFromModelSize({
-          modelSizeBytes: resolvedModelSizeBytes,
-          totalMemoryBytes: resolvedTotalMemoryBytes,
-          systemMemorySnapshot,
+      const resolvedContextSize = resolveContextWindowCeiling({
+        modelMaxContextTokens,
+        modelSizeBytes: typeof fileInfo.size === 'number' ? fileInfo.size : modelSizeBytes ?? null,
+        totalMemoryBytes: resolvedTotalMemoryBytes,
+        appMaxContextTokens: loadParams.contextSize,
+      });
+
+      const cachedModel = registry.getModel(modelId);
+      const estimatorInput = {
+        modelSizeBytes: resolvedModelSizeBytes,
+        verifiedFileSizeBytes: typeof fileInfo.size === 'number' ? fileInfo.size : undefined,
+        metadataTrust: modelInfo !== null
+          ? 'verified_local' as const
+          : cachedModel?.metadataTrust ?? 'unknown',
+        ggufMetadata: modelInfo !== null || cachedModel?.gguf
+          ? {
+            ...(cachedModel?.gguf ?? {}),
+            ...(modelInfo ?? {}),
+          }
+          : undefined,
+        runtimeParams: {
+          contextTokens: resolvedContextSize,
+          gpuLayers: loadParams.gpuLayers ?? 0,
+          cacheTypeK: 'f16',
+          cacheTypeV: 'f16',
+          useMmap: true,
+        },
+        snapshot: systemMemorySnapshot ?? undefined,
+      };
+
+      if (typeof resolvedModelSizeBytes === 'number' && Number.isFinite(resolvedModelSizeBytes) && resolvedModelSizeBytes > 0) {
+        memoryFit = estimateAccurateMemoryFit({
+          input: estimatorInput,
+          totalMemoryBytes: typeof resolvedTotalMemoryBytes === 'number' && Number.isFinite(resolvedTotalMemoryBytes) && resolvedTotalMemoryBytes > 0
+            ? resolvedTotalMemoryBytes
+            : null,
         });
 
         if (initDiagnostics) {
@@ -528,7 +566,8 @@ class LLMEngineService {
           ? memoryFit.requiredBytes / memoryFit.effectiveBudgetBytes
           : Number.POSITIVE_INFINITY;
         const shouldBlockUnsafeLoad = memoryFit.decision === 'likely_oom' || overBudgetRatio > 1.25;
-        const exceedsBudget = memoryFit.effectiveBudgetBytes > 0 && memoryFit.requiredBytes >= memoryFit.effectiveBudgetBytes;
+        const hasTrustedBudget = memoryFit.budget.totalMemoryBytes > 0;
+        const exceedsBudget = hasTrustedBudget && memoryFit.requiredBytes > 0 && memoryFit.requiredBytes >= memoryFit.effectiveBudgetBytes;
         const availableBudgetBytes = systemMemorySnapshot
           ? resolveConservativeAvailableMemoryBudget(systemMemorySnapshot)
           : null;
@@ -556,12 +595,6 @@ class LLMEngineService {
         }
       }
 
-      const resolvedContextSize = resolveContextWindowCeiling({
-        modelMaxContextTokens,
-        modelSizeBytes: typeof fileInfo.size === 'number' ? fileInfo.size : modelSizeBytes ?? null,
-        totalMemoryBytes: resolvedTotalMemoryBytes,
-        appMaxContextTokens: loadParams.contextSize,
-      });
       const shouldUseSafeLoadProfile = Boolean(
         allowUnsafeMemoryLoad
         && memoryFit

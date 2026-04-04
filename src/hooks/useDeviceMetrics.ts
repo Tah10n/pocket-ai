@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as Device from 'expo-device';
 import DeviceInfo from 'react-native-device-info';
 import { registry } from '../services/LocalStorageRegistry';
-import { getSystemMemorySnapshot } from '../services/SystemMetricsService';
+import { getFreshMemorySnapshot } from '../services/SystemMetricsService';
 import { LifecycleStatus } from '../types/models';
 import { DECIMAL_GIGABYTE } from '../utils/modelSize';
 import { motionTokens } from '../utils/themeTokens';
@@ -85,7 +85,7 @@ export const useDeviceMetrics = (options: UseDeviceMetricsOptions = {}) => {
 
   const loadMetrics = useCallback(async () => {
     try {
-      const systemMemorySnapshot = await getSystemMemorySnapshot().catch(() => null);
+      const systemMemorySnapshot = await getFreshMemorySnapshot(5000).catch(() => null);
       const [
         totalMemoryBytes,
         usedMemoryBytes,

@@ -1,5 +1,5 @@
 import { assessModelMemoryFit, estimateModelRuntimeBytes, resolveConservativeAvailableMemoryBudget } from '../../src/utils/memoryFit';
-import { estimateFastMemoryFit, estimateMemoryFitFromModelSize } from '../../src/memory/estimator';
+import { estimateAccurateMemoryFit, estimateFastMemoryFit, estimateMemoryFitFromModelSize } from '../../src/memory/estimator';
 
 describe('memoryFit', () => {
   it('estimates runtime bytes with overhead', () => {
@@ -27,22 +27,31 @@ describe('memoryFit', () => {
   });
 
   it('assesses fits-in-ram using total and available budgets', () => {
+    const totalMemoryBytes = 8 * 1024 * 1024 * 1024;
+    const availableBytes = 5 * 1024 * 1024 * 1024;
+    const modelSizeBytes = 6 * 1024 * 1024 * 1024;
     const assessment = assessModelMemoryFit({
-      modelSizeBytes: 100,
-      totalMemoryBytes: 200,
+      modelSizeBytes,
+      totalMemoryBytes,
       systemMemorySnapshot: {
-        availableBytes: 100,
-        freeBytes: 100,
+        availableBytes,
+        freeBytes: availableBytes,
         thresholdBytes: 0,
       },
     });
 
+    const softTotalBudgetBytes = Math.floor(totalMemoryBytes * 0.8);
+    const osReserveBytes = 512 * 1024 * 1024;
+    const fragmentationGuardBytes = Math.round(totalMemoryBytes * 0.05);
+    const reservedBytes = osReserveBytes + fragmentationGuardBytes;
+    const expectedEffectiveBudgetBytes = availableBytes - reservedBytes;
+
     expect(assessment).toEqual(
       expect.objectContaining({
-        estimatedRuntimeBytes: 120,
-        totalBudgetBytes: 160,
-        availableBudgetBytes: 100,
-        effectiveBudgetBytes: 100,
+        estimatedRuntimeBytes: expect.any(Number),
+        totalBudgetBytes: softTotalBudgetBytes,
+        availableBudgetBytes: availableBytes,
+        effectiveBudgetBytes: expectedEffectiveBudgetBytes,
         fitsInRam: false,
       }),
     );
@@ -120,6 +129,42 @@ describe('memoryFit', () => {
     })).toEqual(expect.objectContaining({
       decision: 'unknown',
       confidence: 'low',
+    }));
+  });
+
+  it('computes a component breakdown for accurate preflight estimates', () => {
+    const result = estimateAccurateMemoryFit({
+      input: {
+        modelSizeBytes: 1_000_000_000,
+        verifiedFileSizeBytes: 1_000_000_000,
+        multimodalSizeBytes: 100_000_000,
+        metadataTrust: 'verified_local',
+        ggufMetadata: {
+          n_layers: 2,
+          n_head_kv: 4,
+          n_embd_head_k: 8,
+          n_embd_head_v: 8,
+          sliding_window: 64,
+        },
+        runtimeParams: {
+          contextTokens: 128,
+          cacheTypeK: 'f16',
+          cacheTypeV: 'f16',
+          gpuLayers: 0,
+        },
+      },
+      totalMemoryBytes: 8 * 1024 * 1024 * 1024,
+    });
+
+    expect(result).toEqual(expect.objectContaining({
+      decision: 'fits_high_confidence',
+      confidence: 'medium',
+      requiredBytes: expect.any(Number),
+      breakdown: expect.objectContaining({
+        weightsBytes: 1_000_000_000,
+        kvCacheBytes: 16384, // 64 * 2 * 4 * (8*2 + 8*2)
+        multimodalBytes: 100_000_000,
+      }),
     }));
   });
 });

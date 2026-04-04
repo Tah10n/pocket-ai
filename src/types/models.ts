@@ -14,6 +14,20 @@ export enum ModelAccessState {
   ACCESS_DENIED = 'access_denied',
 }
 
+export type ModelMetadataTrust = 'verified_local' | 'trusted_remote' | 'inferred' | 'unknown';
+
+export interface ModelGgufMetadata {
+  totalBytes?: number;
+  contextLengthTokens?: number;
+  architecture?: string;
+  sizeLabel?: string;
+  nLayers?: number;
+  nHeadKv?: number;
+  nEmbdHeadK?: number;
+  nEmbdHeadV?: number;
+  slidingWindowTokens?: number;
+}
+
 export interface ModelMetadata {
   id: string;
   name: string;
@@ -29,6 +43,8 @@ export interface ModelMetadata {
   lastModifiedAt?: number;
   sha256?: string;
   fitsInRam: boolean | null;
+  metadataTrust?: ModelMetadataTrust;
+  gguf?: ModelGgufMetadata;
   accessState: ModelAccessState;
   isGated: boolean;
   isPrivate: boolean;

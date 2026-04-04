@@ -388,7 +388,21 @@ describe('LLMEngineService', () => {
       thresholdBytes: 250_000_000,
     });
 
-    await expect(llmEngineService.fitsInRam(1_700_000_000)).resolves.toBe(true);
-    await expect(llmEngineService.fitsInRam(6_000_000_000)).resolves.toBe(false);
+    await expect(llmEngineService.fitsInRam(1_700_000_000)).resolves.toMatchObject({
+      decision: 'fits_high_confidence',
+      confidence: 'medium',
+      budget: expect.objectContaining({
+        totalMemoryBytes,
+        liveAvailableBytes: undefined,
+      }),
+    });
+    await expect(llmEngineService.fitsInRam(6_000_000_000)).resolves.toMatchObject({
+      decision: 'borderline',
+      confidence: 'medium',
+      budget: expect.objectContaining({
+        totalMemoryBytes,
+        liveAvailableBytes: undefined,
+      }),
+    });
   });
 });

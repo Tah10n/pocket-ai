@@ -1,4 +1,5 @@
 import { assessModelMemoryFit, estimateModelRuntimeBytes, resolveConservativeAvailableMemoryBudget } from '../../src/utils/memoryFit';
+import { estimateMemoryFitFromModelSize } from '../../src/memory/estimator';
 
 describe('memoryFit', () => {
   it('estimates runtime bytes with overhead', () => {
@@ -57,5 +58,41 @@ describe('memoryFit', () => {
       modelSizeBytes: 10,
       totalMemoryBytes: 0,
     })).toBeNull();
+  });
+
+  it('returns a structured decision model for fast estimates', () => {
+    expect(estimateMemoryFitFromModelSize({
+      modelSizeBytes: 100,
+      totalMemoryBytes: 200,
+      systemMemorySnapshot: null,
+    })).toEqual(expect.objectContaining({
+      decision: 'fits_high_confidence',
+      confidence: 'medium',
+    }));
+
+    expect(estimateMemoryFitFromModelSize({
+      modelSizeBytes: 100,
+      totalMemoryBytes: 130,
+      systemMemorySnapshot: null,
+    })).toEqual(expect.objectContaining({
+      decision: 'borderline',
+    }));
+
+    expect(estimateMemoryFitFromModelSize({
+      modelSizeBytes: 100,
+      totalMemoryBytes: 100,
+      systemMemorySnapshot: null,
+    })).toEqual(expect.objectContaining({
+      decision: 'likely_oom',
+    }));
+
+    expect(estimateMemoryFitFromModelSize({
+      modelSizeBytes: 0,
+      totalMemoryBytes: 200,
+      systemMemorySnapshot: null,
+    })).toEqual(expect.objectContaining({
+      decision: 'unknown',
+      confidence: 'low',
+    }));
   });
 });

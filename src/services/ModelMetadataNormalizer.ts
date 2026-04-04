@@ -1,7 +1,9 @@
 import {
   LifecycleStatus,
   ModelAccessState,
+  type ModelGgufMetadata,
   type ModelMetadata,
+  type ModelMetadataTrust,
 } from '../types/models';
 import { buildHuggingFaceResolveUrl } from '../utils/huggingFaceUrls';
 
@@ -62,6 +64,54 @@ function normalizeStringArray(value: unknown): string[] | undefined {
   return normalized.length > 0 ? normalized : undefined;
 }
 
+function normalizeMetadataTrust(value: unknown): ModelMetadataTrust | undefined {
+  return value === 'verified_local'
+    || value === 'trusted_remote'
+    || value === 'inferred'
+    || value === 'unknown'
+    ? value
+    : undefined;
+}
+
+function normalizePositiveInteger(value: unknown): number | undefined {
+  const normalized = normalizeSize(value);
+  return normalized === null ? undefined : normalized;
+}
+
+function normalizeGgufMetadata(value: unknown): ModelGgufMetadata | undefined {
+  if (!value || typeof value !== 'object') {
+    return undefined;
+  }
+
+  const record = value as Record<string, unknown>;
+  const architecture = normalizeNonEmptyString(record.architecture);
+  const sizeLabel = normalizeNonEmptyString(record.sizeLabel ?? record.size_label);
+  const totalBytes = normalizePositiveInteger(record.totalBytes ?? record.total);
+  const contextLengthTokens = normalizePositiveInteger(record.contextLengthTokens ?? record.context_length);
+  const slidingWindowTokens = normalizePositiveInteger(
+    record.slidingWindowTokens
+    ?? record.sliding_window,
+  );
+  const nLayers = normalizePositiveInteger(record.nLayers ?? record.n_layers);
+  const nHeadKv = normalizePositiveInteger(record.nHeadKv ?? record.n_head_kv);
+  const nEmbdHeadK = normalizePositiveInteger(record.nEmbdHeadK ?? record.n_embd_head_k);
+  const nEmbdHeadV = normalizePositiveInteger(record.nEmbdHeadV ?? record.n_embd_head_v);
+
+  const normalized: ModelGgufMetadata = {
+    ...(architecture !== undefined ? { architecture } : {}),
+    ...(sizeLabel !== undefined ? { sizeLabel } : {}),
+    ...(totalBytes !== undefined ? { totalBytes } : {}),
+    ...(contextLengthTokens !== undefined ? { contextLengthTokens } : {}),
+    ...(slidingWindowTokens !== undefined ? { slidingWindowTokens } : {}),
+    ...(nLayers !== undefined ? { nLayers } : {}),
+    ...(nHeadKv !== undefined ? { nHeadKv } : {}),
+    ...(nEmbdHeadK !== undefined ? { nEmbdHeadK } : {}),
+    ...(nEmbdHeadV !== undefined ? { nEmbdHeadV } : {}),
+  };
+
+  return Object.keys(normalized).length > 0 ? normalized : undefined;
+}
+
 export function normalizePersistedModelMetadata(
   model: PersistedModelMetadata,
 ): ModelMetadata {
@@ -72,6 +122,8 @@ export function normalizePersistedModelMetadata(
   const normalizedName = normalizeNonEmptyString(model.name) ?? model.id.split('/').pop() ?? model.id;
   const normalizedAuthor = normalizeNonEmptyString(model.author) ?? model.id.split('/')[0] ?? 'unknown';
   const lifecycleStatus = normalizeLifecycleStatus(model.lifecycleStatus);
+  const metadataTrust = normalizeMetadataTrust(model.metadataTrust);
+  const gguf = normalizeGgufMetadata(model.gguf);
   const rawProgress = typeof model.downloadProgress === 'number' && Number.isFinite(model.downloadProgress)
     ? model.downloadProgress
     : 0;
@@ -100,6 +152,8 @@ export function normalizePersistedModelMetadata(
       : typeof model.fitsInRam === 'boolean'
         ? model.fitsInRam
         : null,
+    ...(metadataTrust !== undefined ? { metadataTrust } : {}),
+    ...(gguf !== undefined ? { gguf } : {}),
     accessState: normalizeAccessState(model.accessState),
     isGated: model.isGated === true,
     isPrivate: model.isPrivate === true,

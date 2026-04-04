@@ -241,7 +241,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
   const queueLifecycleSignature = useDownloadStore((state) => state.queue
     .map((model) => `${model.id}:${model.lifecycleStatus}`)
     .join('|'));
-  const { loadModel, unloadModel, fitsInRam, state: engineState } = useLLMEngine();
+  const { loadModel, unloadModel, getMemoryFit, state: engineState } = useLLMEngine();
   const {
     filters,
     sort,
@@ -649,7 +649,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
     startModelDownloadFlow({
       model,
       t,
-      fitsInRam,
+      getMemoryFit,
       startDownload,
       openTokenSettings,
       openModelPage,
@@ -657,7 +657,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
         showModelActionError('ModelsList.handleDownload', error);
       },
     });
-  }, [fitsInRam, openModelPage, openTokenSettings, showModelActionError, startDownload, t]);
+  }, [getMemoryFit, openModelPage, openTokenSettings, showModelActionError, startDownload, t]);
 
   const performLoad = useCallback(async (modelId: string, options?: LoadModelOptions) => {
     try {
@@ -671,10 +671,14 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
   const handleLoad = useCallback(async (modelId: string) => {
     const model = models.find((item) => item.id === modelId);
     if (model && typeof model.size === 'number' && Number.isFinite(model.size) && model.size > 0) {
-      const liveFitsInRam = model.fitsInRam === false
-        ? false
-        : await fitsInRam(model.size);
-      if (!liveFitsInRam) {
+      const memoryFit = model.fitsInRam === false
+        ? null
+        : await getMemoryFit(model.size);
+      const shouldWarnOnMemoryFit = model.fitsInRam === false
+        || memoryFit?.decision === 'borderline'
+        || memoryFit?.decision === 'likely_oom';
+
+      if (shouldWarnOnMemoryFit) {
         Alert.alert(
           t('models.memoryWarningTitle'),
           t('models.loadMemoryWarningMessage'),
@@ -688,7 +692,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
     }
 
     await performLoad(modelId);
-  }, [fitsInRam, models, performLoad, t]);
+  }, [getMemoryFit, models, performLoad, t]);
 
   const handleUnload = useCallback(async () => {
     try {

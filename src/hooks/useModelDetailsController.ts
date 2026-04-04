@@ -40,7 +40,7 @@ export function useModelDetailsController(modelId: string) {
   const [runtimeRevision, setRuntimeRevision] = useState(0);
   const { startDownload, cancelDownload } = useModelDownload();
   const queuedItem = useDownloadStore((state) => state.queue.find((item) => item.id === modelId));
-  const { loadModel, unloadModel, fitsInRam, state: engineState } = useLLMEngine();
+  const { loadModel, unloadModel, getMemoryFit, state: engineState } = useLLMEngine();
 
   useEffect(() => {
     let cancelled = false;
@@ -171,7 +171,7 @@ export function useModelDetailsController(modelId: string) {
     startModelDownloadFlow({
       model: targetModel,
       t,
-      fitsInRam,
+      getMemoryFit,
       startDownload,
       openTokenSettings: handleOpenTokenSettings,
       openModelPage: handleOpenModelPage,
@@ -182,7 +182,7 @@ export function useModelDetailsController(modelId: string) {
         showModelActionError('ModelDetailsScreen.handleDownload', error);
       },
     });
-  }, [fitsInRam, handleOpenModelPage, handleOpenTokenSettings, showModelActionError, startDownload, t]);
+  }, [getMemoryFit, handleOpenModelPage, handleOpenTokenSettings, showModelActionError, startDownload, t]);
 
   const performLoad = useCallback(async (targetModelId: string, options?: LoadModelOptions) => {
     try {
@@ -199,10 +199,14 @@ export function useModelDetailsController(modelId: string) {
     }
 
     if (typeof displayModel.size === 'number' && Number.isFinite(displayModel.size) && displayModel.size > 0) {
-      const liveFitsInRam = displayModel.fitsInRam === false
-        ? false
-        : await fitsInRam(displayModel.size);
-      if (!liveFitsInRam) {
+      const memoryFit = displayModel.fitsInRam === false
+        ? null
+        : await getMemoryFit(displayModel.size);
+      const shouldWarnOnMemoryFit = displayModel.fitsInRam === false
+        || memoryFit?.decision === 'borderline'
+        || memoryFit?.decision === 'likely_oom';
+
+      if (shouldWarnOnMemoryFit) {
         Alert.alert(
           t('models.memoryWarningTitle'),
           t('models.loadMemoryWarningMessage'),
@@ -216,7 +220,7 @@ export function useModelDetailsController(modelId: string) {
     }
 
     await performLoad(displayModel.id);
-  }, [displayModel, fitsInRam, performLoad, t]);
+  }, [displayModel, getMemoryFit, performLoad, t]);
 
   const handleUnload = useCallback(async () => {
     try {

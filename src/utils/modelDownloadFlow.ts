@@ -1,6 +1,7 @@
 import { Alert } from 'react-native';
 import { hardwareListenerService } from '../services/HardwareListenerService';
 import { modelCatalogService } from '../services/ModelCatalogService';
+import type { MemoryFitResult } from '../memory/types';
 import { ModelAccessState, type ModelMetadata } from '../types/models';
 
 type Translate = (key: string) => string;
@@ -8,7 +9,7 @@ type Translate = (key: string) => string;
 type StartModelDownloadFlowParams = {
   model: ModelMetadata;
   t: Translate;
-  fitsInRam: (size: number) => Promise<boolean>;
+  getMemoryFit: (size: number) => Promise<MemoryFitResult>;
   startDownload: (model: ModelMetadata) => void;
   openTokenSettings: () => void;
   openModelPage: (modelId: string) => Promise<void>;
@@ -28,7 +29,7 @@ function shouldRefreshDownloadMetadata(model: ModelMetadata): boolean {
 export function startModelDownloadFlow({
   model,
   t,
-  fitsInRam,
+  getMemoryFit,
   startDownload,
   openTokenSettings,
   openModelPage,
@@ -88,10 +89,14 @@ export function startModelDownloadFlow({
         return;
       }
 
-      const liveFitsInRam = resolvedModel.fitsInRam === false
-        ? false
-        : await fitsInRam(resolvedModel.size);
-      if (!liveFitsInRam) {
+      const memoryFit = resolvedModel.fitsInRam === false
+        ? null
+        : await getMemoryFit(resolvedModel.size);
+      const shouldWarnOnMemoryFit = resolvedModel.fitsInRam === false
+        || memoryFit?.decision === 'borderline'
+        || memoryFit?.decision === 'likely_oom';
+
+      if (shouldWarnOnMemoryFit) {
         Alert.alert(
           t('models.memoryWarningTitle'),
           t('models.downloadMemoryWarningMessage'),

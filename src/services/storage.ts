@@ -161,13 +161,15 @@ function base64UrlEncode(bytes: Uint8Array): string {
     return output;
 }
 
-const PRIVATE_STORAGE_ENCRYPTION_KEY_BYTES = 24;
-const PRIVATE_STORAGE_ENCRYPTION_KEY_LENGTH = 32;
+const PRIVATE_STORAGE_ENCRYPTION_KEY_BYTE_LENGTH = 32;
+// `react-native-mmkv` caps AES-256 encryption keys at 32 bytes. SecureStore stores the key as a string,
+// so we generate a fixed-length 32-byte ASCII key via base64url encoding of 24 random bytes.
+const PRIVATE_STORAGE_ENCRYPTION_KEY_RANDOM_BYTES = 24;
 
 async function generatePrivateStorageEncryptionKey(): Promise<string> {
-    const bytes = await getSecureRandomBytes(PRIVATE_STORAGE_ENCRYPTION_KEY_BYTES);
+    const bytes = await getSecureRandomBytes(PRIVATE_STORAGE_ENCRYPTION_KEY_RANDOM_BYTES);
     const key = base64UrlEncode(bytes);
-    if (key.length !== PRIVATE_STORAGE_ENCRYPTION_KEY_LENGTH) {
+    if (key.length !== PRIVATE_STORAGE_ENCRYPTION_KEY_BYTE_LENGTH) {
         throw new Error('Generated encryption key length mismatch');
     }
 
@@ -292,7 +294,7 @@ export async function initializePrivateStorageEncryption(): Promise<void> {
 
         let key = await SecureStore.getItemAsync(PRIVATE_STORAGE_ENCRYPTION_KEY_ID);
         key = typeof key === 'string' ? key.trim() : null;
-        if (!key || key.length !== PRIVATE_STORAGE_ENCRYPTION_KEY_LENGTH) {
+        if (!key || key.length !== PRIVATE_STORAGE_ENCRYPTION_KEY_BYTE_LENGTH) {
             try {
                 key = await generatePrivateStorageEncryptionKey();
                 await SecureStore.setItemAsync(PRIVATE_STORAGE_ENCRYPTION_KEY_ID, key);

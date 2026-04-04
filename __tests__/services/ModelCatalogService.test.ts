@@ -1959,6 +1959,109 @@ describe('ModelCatalogService', () => {
     });
   });
 
+  it('keeps gated model details auth-required when the anonymous request returns 404 without a token', async () => {
+    const cachedModel: ModelMetadata = {
+      id: 'org/detail-gated-no-token',
+      name: 'detail-gated-no-token',
+      author: 'org',
+      size: null,
+      downloadUrl: 'https://example.com/org/detail-gated-no-token/model.Q4_K_M.gguf',
+      fitsInRam: null,
+      accessState: ModelAccessState.AUTH_REQUIRED,
+      isGated: true,
+      isPrivate: false,
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+    };
+
+    const cachedModelSpy = jest.spyOn(modelCatalogService, 'getCachedModel').mockImplementation((modelId) => (
+      modelId === cachedModel.id ? cachedModel : null
+    ));
+
+    try {
+      global.fetch = jest.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+
+        if (url.endsWith('/raw/main/README.md')) {
+          return Promise.resolve({
+            ok: false,
+            status: 404,
+            text: () => Promise.resolve(''),
+          });
+        }
+
+        return Promise.resolve({
+          ok: false,
+          status: 404,
+        });
+      }) as jest.Mock;
+
+      const result = await modelCatalogService.getModelDetails(cachedModel.id);
+      expect(result.accessState).toBe(ModelAccessState.AUTH_REQUIRED);
+    } finally {
+      cachedModelSpy.mockRestore();
+    }
+  });
+
+  it('throws when a public model returns 404 even after an auth retry', async () => {
+    await huggingFaceTokenService.saveToken('hf_test_token');
+
+    const cachedModel: ModelMetadata = {
+      id: 'org/detail-missing-public',
+      name: 'detail-missing-public',
+      author: 'org',
+      size: null,
+      downloadUrl: 'https://example.com/org/detail-missing-public/model.Q4_K_M.gguf',
+      fitsInRam: null,
+      accessState: ModelAccessState.PUBLIC,
+      isGated: false,
+      isPrivate: false,
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+    };
+
+    const cachedModelSpy = jest.spyOn(modelCatalogService, 'getCachedModel').mockImplementation((modelId) => (
+      modelId === cachedModel.id ? cachedModel : null
+    ));
+
+    try {
+      global.fetch = jest.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+
+        if (url.includes('/api/models/org/detail-missing-public')) {
+          const authHeader = (init?.headers as { Authorization?: string } | undefined)?.Authorization;
+          return Promise.resolve({
+            ok: false,
+            status: 404,
+            headers: authHeader ? { Authorization: authHeader } : undefined,
+          });
+        }
+
+        return Promise.resolve({
+          ok: false,
+          status: 404,
+        });
+      }) as jest.Mock;
+
+      await expect(modelCatalogService.getModelDetails(cachedModel.id)).rejects.toMatchObject({
+        code: 'network',
+      });
+
+      const detailsCalls = (global.fetch as jest.Mock).mock.calls.filter((call) => (
+        String(call[0]).includes('/api/models/org/detail-missing-public')
+      ));
+      expect(detailsCalls).toHaveLength(2);
+      expect(detailsCalls[0]?.[1]?.headers).toBeUndefined();
+      expect(detailsCalls[1]?.[1]).toMatchObject({
+        headers: {
+          Authorization: 'Bearer hf_test_token',
+        },
+      });
+    } finally {
+      cachedModelSpy.mockRestore();
+    }
+  });
+
   it('keeps gated model details authorized when later access validation is temporarily unavailable', async () => {
     await huggingFaceTokenService.saveToken('hf_test_token');
 

@@ -873,6 +873,9 @@ export class ModelCatalogService {
     try {
       const cachedModel = this.getCachedModel(modelId);
       const fallbackModel = cachedModel ?? this.createFallbackModel(modelId);
+      const requiresAuthHint = fallbackModel.isGated
+        || fallbackModel.isPrivate
+        || fallbackModel.accessState !== ModelAccessState.PUBLIC;
       const detailsUrl = buildHuggingFaceModelApiUrl(modelId);
       let detailsAuthToken: string | null = null;
       let response = await this.fetchWithTimeout(detailsUrl, {
@@ -919,10 +922,16 @@ export class ModelCatalogService {
             ? ModelAccessState.ACCESS_DENIED
             : ModelAccessState.AUTH_REQUIRED,
         });
-      } else if (response.status === 404 && detailsAuthToken) {
+      } else if (response.status === 404) {
+        if (!requiresAuthHint) {
+          throw new ModelCatalogError('network', `HF model details failed: ${response.status}`);
+        }
+
         detailedModel = normalizePersistedModelMetadata({
           ...fallbackModel,
-          accessState: ModelAccessState.ACCESS_DENIED,
+          accessState: detailsAuthToken
+            ? ModelAccessState.ACCESS_DENIED
+            : ModelAccessState.AUTH_REQUIRED,
         });
       } else {
         throw new ModelCatalogError('network', `HF model details failed: ${response.status}`);

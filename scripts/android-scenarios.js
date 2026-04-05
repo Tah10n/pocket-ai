@@ -37,7 +37,40 @@ const CONVERSATIONS_TITLE_LABELS = ["All Conversations", "Все разгово�
 const MANAGE_CONVERSATIONS_LABELS = ["Manage", "Управлять"];
 const CONVERSATIONS_SEARCH_LABELS = ["Search conversations", "Поиск по разговорам"];
 const MODEL_DETAILS_TITLE_LABELS = ["Model details", "Детали модели"];
+const MODEL_DETAILS_CTA_LABELS = ["Details", "Детали"];
 const OPEN_ON_HF_LABELS = ["Open on HF", "Открыть на HF"];
+const RAM_FIT_BADGE_LABELS = [
+  "Fits in RAM",
+  "Likely OOM",
+  "Borderline RAM",
+  "RAM fit unknown",
+  "RAM Warning",
+  "Помещается в RAM",
+  "Вероятен OOM",
+  "На грани по RAM",
+  "Неизвестно по RAM",
+  "Риск по RAM",
+];
+const RAM_FIT_RISK_BADGE_LABELS = [
+  "Likely OOM",
+  "Borderline RAM",
+  "RAM fit unknown",
+  "RAM Warning",
+  "Вероятен OOM",
+  "На грани по RAM",
+  "Неизвестно по RAM",
+  "Риск по RAM",
+];
+const DOWNLOAD_CTA_LABELS = [
+  "Download",
+  "Скачать",
+];
+const DOWNLOAD_WARNING_TITLE_LABELS = [
+  "Memory Warning",
+  "Size could not be verified",
+  "Предупреждение о памяти",
+  "Размер не удалось подтвердить",
+];
 const HOME_ROUTE_TIMEOUT_MS = 90_000;
 const SETTINGS_ROUTE_TIMEOUT_MS = 60_000;
 
@@ -417,6 +450,56 @@ function buildScenarios() {
       },
     },
     {
+      id: "memory-fit-badges",
+      description: "Verify memory-fit badges show up in catalog and model details.",
+      run: async (ctx) => {
+        await goToHome(ctx);
+        await ctx.tapAnyText(ACTIVE_MODEL_CTA_LABELS);
+        await ctx.expectAnyText(MODEL_CATALOG_LABELS);
+        await ctx.tapAnyText(MODEL_DETAILS_CTA_LABELS, { timeoutMs: 45_000 });
+        await ctx.expectAnyText(MODEL_DETAILS_TITLE_LABELS);
+        await ctx.expectAnyText(RAM_FIT_BADGE_LABELS, { timeoutMs: 20_000 });
+      },
+    },
+    {
+      id: "memory-fit-download-warning",
+      description: "Verify download flows warn for RAM risk or limited verification.",
+      run: async (ctx) => {
+        await goToHome(ctx);
+        await ctx.tapAnyText(ACTIVE_MODEL_CTA_LABELS);
+        await ctx.expectAnyText(MODEL_CATALOG_LABELS);
+
+        const adbPath = resolveAdbPath();
+
+        for (let attempt = 0; attempt < 12; attempt += 1) {
+          await ctx.tapAnyText(MODEL_DETAILS_CTA_LABELS, { timeoutMs: 45_000 });
+          await ctx.expectAnyText(MODEL_DETAILS_TITLE_LABELS);
+
+          const riskBadge = await findAnyNodeNow(adbPath, ctx.serial, RAM_FIT_RISK_BADGE_LABELS, {
+            visibleOnly: true,
+          });
+
+          if (!riskBadge) {
+            await ctx.pressBack();
+            await ctx.expectAnyText(MODEL_CATALOG_LABELS, { timeoutMs: 20_000 });
+            await ctx.swipeUp();
+            continue;
+          }
+
+          await ctx.tapAnyText(DOWNLOAD_CTA_LABELS, { timeoutMs: 20_000 });
+          await waitForAnyNode(adbPath, ctx.serial, DOWNLOAD_WARNING_TITLE_LABELS, {
+            timeoutMs: 15_000,
+            visibleOnly: true,
+          });
+
+          await ctx.pressBack();
+          return;
+        }
+
+        log("SKIP memory-fit-download-warning: No RAM-risk model was found to validate download warnings.");
+      },
+    },
+    {
       id: "hf-token-education",
       description: "Verify the token education screen and external-token CTA are reachable from Settings.",
       run: async (ctx) => {
@@ -481,9 +564,15 @@ function buildScenarios() {
         runChecked(adbPath, ["-s", ctx.serial, "logcat", "-c"]);
 
         await ctx.tapAnyText(PERFORMANCE_DUMP_TO_LOGCAT_LABELS);
-        await delay(1_200);
 
-        const logs = runCapture(adbPath, ["-s", ctx.serial, "logcat", "-d", "-t", "200"]);
+        let logs = "";
+        for (let attempt = 0; attempt < 4; attempt += 1) {
+          await delay(1_500 + attempt * 1_000);
+          logs = runCapture(adbPath, ["-s", ctx.serial, "logcat", "-d", "-t", "800"]);
+          if (logs.includes("POCKET_AI_PERF_TRACE")) {
+            break;
+          }
+        }
 
         if (!logs.includes("POCKET_AI_PERF_TRACE")) {
           throw new Error("Expected POCKET_AI_PERF_TRACE output in logcat.");

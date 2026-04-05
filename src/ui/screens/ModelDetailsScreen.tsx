@@ -149,15 +149,6 @@ export function ModelDetailsScreen() {
                             {t('models.ramWarning')}
                           </ScreenBadge>
                         ) : null}
-                      {displayModel.memoryFitConfidence ? (
-                        <ScreenBadge tone="neutral" size="micro">
-                          {displayModel.memoryFitConfidence === 'high'
-                            ? t('models.ramFitConfidenceHigh')
-                            : displayModel.memoryFitConfidence === 'medium'
-                              ? t('models.ramFitConfidenceMedium')
-                              : t('models.ramFitConfidenceLow')}
-                        </ScreenBadge>
-                      ) : null}
                     </>
                   )}
                   title={displayModel.name}

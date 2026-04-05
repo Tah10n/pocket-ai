@@ -256,6 +256,7 @@ export class LocalStorageRegistry {
               modelSizeBytes: sizeBytesForFit,
               totalMemoryBytes,
               metadataTrust: metadataTrustForFit,
+              ggufMetadata: model.gguf as Record<string, unknown> | undefined,
             });
             const fitsInRam = fit.decision === 'unknown'
               ? null

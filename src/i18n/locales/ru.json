@@ -478,7 +478,7 @@
     "ramWarning": "Риск по RAM",
     "ramFitYes": "Помещается в RAM",
     "ramBorderline": "На грани по RAM",
-    "ramLikelyOom": "Вероятен OOM",
+    "ramLikelyOom": "Не влезет в RAM",
     "ramFitUnknown": "Неизвестно по RAM",
     "ramFitConfidenceHigh": "Высокая уверенность",
     "ramFitConfidenceMedium": "Средняя уверенность",

@@ -195,6 +195,7 @@ npm run android:scenarios:emulator
 - If a model still has no trustworthy size, Pocket AI asks for explicit confirmation before starting a download with limited storage estimates and size verification.
 - A downloaded model can be opened into a saved settings sheet where sampling changes apply immediately and load-profile changes are saved for the next load or an explicit reload.
 - Context window controls are bounded by verified model metadata and estimated device RAM headroom before the model is loaded.
+- If a model still cannot fit into memory after falling back to the safest load profile, Pocket AI blocks the load and shows a memory warning instead of attempting the native load anyway.
 - When a downloaded model is removed, Pocket AI can keep its saved per-model settings for a future download or reset them at the same time.
 - Large GGUF models may exceed the RAM or storage available on smaller devices.
 

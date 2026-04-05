@@ -2,6 +2,7 @@ import { AccessibilityInfo } from 'react-native';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as Device from 'expo-device';
 import DeviceInfo from 'react-native-device-info';
+import { resolveConservativeAvailableMemoryBudget } from '../memory/budget';
 import { registry } from '../services/LocalStorageRegistry';
 import { getFreshMemorySnapshot } from '../services/SystemMetricsService';
 import { LifecycleStatus } from '../types/models';
@@ -25,6 +26,7 @@ export interface DeviceMetrics {
     totalBytes: number;
     usedBytes: number | null;
     availableBytes: number | null;
+    availableBudgetBytes: number | null;
     freeBytes: number | null;
     appUsedBytes: number;
     totalGB: number;
@@ -102,6 +104,9 @@ export const useDeviceMetrics = (options: UseDeviceMetricsOptions = {}) => {
       const resolvedTotalMemoryBytes = systemMemorySnapshot?.totalBytes ?? totalMemoryBytes;
       const resolvedUsedMemoryBytes = systemMemorySnapshot?.usedBytes ?? null;
       const resolvedAvailableMemoryBytes = systemMemorySnapshot?.availableBytes ?? null;
+      const resolvedAvailableBudgetBytes = systemMemorySnapshot
+        ? resolveConservativeAvailableMemoryBudget(systemMemorySnapshot)
+        : null;
       const resolvedFreeMemoryBytes = systemMemorySnapshot?.freeBytes ?? null;
       // Prefer live resident bytes for the UI card because Android can throttle
       // PSS sampling and return stale values across rapid polls.
@@ -144,6 +149,7 @@ export const useDeviceMetrics = (options: UseDeviceMetricsOptions = {}) => {
           totalBytes: resolvedTotalMemoryBytes,
           usedBytes: resolvedUsedMemoryBytes,
           availableBytes: resolvedAvailableMemoryBytes,
+          availableBudgetBytes: resolvedAvailableBudgetBytes,
           freeBytes: resolvedFreeMemoryBytes,
           appUsedBytes: appUsedMemoryBytes,
           totalGB: totalMemoryGB,
@@ -180,6 +186,7 @@ export const useDeviceMetrics = (options: UseDeviceMetricsOptions = {}) => {
           totalBytes: 0,
           usedBytes: null,
           availableBytes: null,
+          availableBudgetBytes: null,
           freeBytes: null,
           appUsedBytes: 0,
           totalGB: 0,

@@ -294,11 +294,22 @@ describe('LLMEngineService', () => {
     expect(llamaRn.initLlama).not.toHaveBeenCalled();
   });
 
-  it('allows an unsafe model load attempt for borderline memory-fit failures', async () => {
+  it('clamps an aggressive saved load profile back under the memory ceiling before loading', async () => {
     const totalMemoryBytes = 8 * 1024 * 1024 * 1024;
-    const modelSizeBytes = 6_000_000_000;
+    const modelSizeBytes = 4_705_000_000;
 
     (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(totalMemoryBytes);
+    (getModelLoadParametersForModel as jest.Mock).mockReturnValueOnce({
+      contextSize: 8192,
+      gpuLayers: 35,
+    });
+    (llamaRn.loadLlamaModelInfo as jest.Mock).mockResolvedValueOnce({
+      n_layers: 32,
+      n_head_kv: 8,
+      n_embd_head_k: 128,
+      n_embd_head_v: 128,
+      sliding_window: 8192,
+    });
     (FileSystem.getInfoAsync as jest.Mock).mockResolvedValueOnce({
       exists: true,
       size: modelSizeBytes,
@@ -306,6 +317,87 @@ describe('LLMEngineService', () => {
 
     await expect(
       llmEngineService.load('test/model', { forceReload: true, allowUnsafeMemoryLoad: true }),
+    ).resolves.toBeUndefined();
+
+    expect(llamaRn.initLlama).toHaveBeenCalledTimes(1);
+    expect(llmEngineService.getContextSize()).toBeLessThan(8192);
+    expect(llmEngineService.getContextSize()).toBeGreaterThan(512);
+  });
+
+  it('blocks unsafe retries when the minimal safe load profile still does not fit in memory', async () => {
+    const totalMemoryBytes = 8_000_000_000;
+    const modelSizeBytes = 1_708_582_752;
+
+    (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(totalMemoryBytes);
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValueOnce({
+      exists: true,
+      size: modelSizeBytes,
+    });
+    (getFreshMemorySnapshot as jest.Mock).mockResolvedValue({
+      timestampMs: Date.now(),
+      platform: 'android',
+      totalBytes: totalMemoryBytes,
+      availableBytes: 2_600_000_000,
+      freeBytes: 2_400_000_000,
+      usedBytes: totalMemoryBytes - 2_600_000_000,
+      appUsedBytes: 480_309_248,
+      appResidentBytes: 480_309_248,
+      appPssBytes: 395_870_208,
+      lowMemory: false,
+      pressureLevel: 'normal',
+      thresholdBytes: 200_000_000,
+    });
+    (llamaRn.loadLlamaModelInfo as jest.Mock).mockResolvedValueOnce({
+      'general.architecture': 'gemma2',
+      'general.type': 'model',
+    });
+
+    await expect(
+      llmEngineService.load('test/model', { forceReload: true, allowUnsafeMemoryLoad: true }),
+    ).rejects.toMatchObject({
+      code: 'model_memory_insufficient',
+      details: expect.objectContaining({
+        attemptedLoadProfile: expect.objectContaining({
+          contextTokens: 512,
+          gpuLayers: 0,
+        }),
+      }),
+    });
+
+    expect(llamaRn.initLlama).not.toHaveBeenCalled();
+    expect(updateSettings).toHaveBeenCalledWith({ activeModelId: null });
+  });
+
+  it('auto-applies the safe fallback load without warning when low-confidence estimates still fit within conservative live availability', async () => {
+    const totalMemoryBytes = 8_000_000_000;
+    const modelSizeBytes = 1_708_582_752;
+
+    (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(totalMemoryBytes);
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValueOnce({
+      exists: true,
+      size: modelSizeBytes,
+    });
+    (getFreshMemorySnapshot as jest.Mock).mockResolvedValue({
+      timestampMs: Date.now(),
+      platform: 'android',
+      totalBytes: totalMemoryBytes,
+      availableBytes: 3_639_033_856,
+      freeBytes: undefined,
+      usedBytes: totalMemoryBytes - 3_639_033_856,
+      appUsedBytes: 480_309_248,
+      appResidentBytes: 480_309_248,
+      appPssBytes: 395_870_208,
+      lowMemory: false,
+      pressureLevel: 'normal',
+      thresholdBytes: 452_984_832,
+    });
+    (llamaRn.loadLlamaModelInfo as jest.Mock).mockResolvedValueOnce({
+      'general.architecture': 'gemma2',
+      'general.type': 'model',
+    });
+
+    await expect(
+      llmEngineService.load('test/model', { forceReload: true }),
     ).resolves.toBeUndefined();
 
     expect(llamaRn.initLlama).toHaveBeenCalledWith(

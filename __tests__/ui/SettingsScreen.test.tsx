@@ -34,6 +34,7 @@ function createSystemRamMetrics() {
     totalBytes: 8_000_000_000,
     usedBytes: 5_000_000_000,
     availableBytes: 3_000_000_000,
+    availableBudgetBytes: 2_200_000_000,
     freeBytes: 2_500_000_000,
     appUsedBytes: 2_000_000_000,
     totalGB: 0,
@@ -50,6 +51,7 @@ function createProcessRamMetrics() {
     totalBytes: 8_000_000_000,
     usedBytes: null,
     availableBytes: null,
+    availableBudgetBytes: null,
     freeBytes: null,
     appUsedBytes: 1_500_000_000,
     totalGB: 0,
@@ -203,16 +205,16 @@ describe('SettingsScreen', () => {
     expect(mockReplace).not.toHaveBeenCalled();
   });
 
-  it('renders the Android system RAM variant with free memory and app memory breakdown', async () => {
+  it('renders the Android system RAM variant with conservative available memory and app memory breakdown', async () => {
     const { getAllByText, getByText, getByTestId, queryByText } = await renderScreen();
 
     expect(getByText('settings.memoryDescription')).toBeTruthy();
     expect(getByText('63%')).toBeTruthy();
     expect(getByText('settings.appMemory')).toBeTruthy();
     expect(getByText('settings.appFilesUsage')).toBeTruthy();
-    expect(getAllByText('settings.free')).toHaveLength(2);
-    expect(getByText('2.5 GB')).toBeTruthy();
-    expect(queryByText('settings.available')).toBeNull();
+    expect(getAllByText('settings.free')).toHaveLength(1);
+    expect(getByText('settings.available')).toBeTruthy();
+    expect(getByText('2.2 GB')).toBeTruthy();
     expect(getByTestId('settings-memory-track')).toBeTruthy();
     expect(getByTestId('settings-memory-used-fill')).toBeTruthy();
     expect(getByTestId('settings-memory-app-fill')).toBeTruthy();
@@ -228,11 +230,12 @@ describe('SettingsScreen', () => {
     expect(queryByText(/·/)).toBeNull();
   });
 
-  it('keeps the older available label when strict free memory is unavailable', async () => {
+  it('falls back to raw available memory when the conservative budget is unavailable', async () => {
     mockDeviceMetricsResult = {
       metrics: {
         ram: {
           ...createSystemRamMetrics(),
+          availableBudgetBytes: null,
           freeBytes: null,
         },
         storage: createStorageMetrics(),
@@ -243,6 +246,7 @@ describe('SettingsScreen', () => {
     const { getByText } = await renderScreen();
 
     expect(getByText('settings.available')).toBeTruthy();
+    expect(getByText('3.0 GB')).toBeTruthy();
   });
 
   it('renders the process-only RAM fallback without fabricated free or busy system metrics', async () => {
@@ -273,7 +277,7 @@ describe('SettingsScreen', () => {
 
     expect(await findByText('settings.appFilesUsage')).toBeTruthy();
     expect(await findByText('12 GB')).toBeTruthy();
-    expect(getAllByText('settings.free')).toHaveLength(2);
+    expect(getAllByText('settings.free')).toHaveLength(1);
     expect(getByTestId('settings-storage-track')).toBeTruthy();
     expect(getByTestId('settings-storage-used-fill')).toBeTruthy();
     expect(getByTestId('settings-storage-app-fill')).toBeTruthy();

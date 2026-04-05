@@ -54,7 +54,7 @@ Local inference is constrained by the device:
 - sustained inference can increase thermal pressure and reduce responsiveness
 - the maximum context window exposed in model controls can be reduced by verified model limits and estimated RAM headroom on the current device
 
-The app includes warnings for risky operations such as low-disk downloads, cellular downloads, and models that may not fit into available memory. When required, the app can unload the active model to protect stability.
+The app includes warnings for risky operations such as low-disk downloads, cellular downloads, and models that may not fit into available memory. If the safest available load profile still exceeds the estimated RAM budget, the app blocks the load and shows a memory message instead of attempting the native model initialization. When required, the app can unload the active model to protect stability.
 
 ## Release configuration in this repository
 

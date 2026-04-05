@@ -469,7 +469,7 @@
     "deleteResetSettings": "Delete and reset settings",
     "ramWarning": "RAM Warning",
     "ramBorderline": "Borderline RAM",
-    "ramLikelyOom": "Likely OOM",
+    "ramLikelyOom": "Won't fit RAM",
     "ramFitUnknown": "RAM fit unknown",
     "ramFitYes": "Fits in RAM",
     "ramFitConfidenceHigh": "High confidence",

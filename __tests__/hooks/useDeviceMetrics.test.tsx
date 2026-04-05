@@ -71,6 +71,7 @@ describe('useDeviceMetrics', () => {
     expect(getMetrics()?.metrics?.ram.totalBytes).toBe(12 * GB);
     expect(getMetrics()?.metrics?.ram.usedBytes).toBe(9 * GB);
     expect(getMetrics()?.metrics?.ram.availableBytes).toBe(4 * GB);
+    expect(getMetrics()?.metrics?.ram.availableBudgetBytes).toBe(3 * GB);
     expect(getMetrics()?.metrics?.ram.freeBytes).toBe(3 * GB);
     expect(getMetrics()?.metrics?.ram.appUsedBytes).toBe(5 * GB);
     expect(getMetrics()?.metrics?.ram.usedPercentage).toBeCloseTo((9 / 12) * 100);
@@ -92,6 +93,7 @@ describe('useDeviceMetrics', () => {
     expect(getMetrics()?.metrics?.ram.totalBytes).toBe(8 * GB);
     expect(getMetrics()?.metrics?.ram.usedBytes).toBeNull();
     expect(getMetrics()?.metrics?.ram.availableBytes).toBeNull();
+    expect(getMetrics()?.metrics?.ram.availableBudgetBytes).toBeNull();
     expect(getMetrics()?.metrics?.ram.freeBytes).toBeNull();
     expect(getMetrics()?.metrics?.ram.appUsedBytes).toBe(5 * GB);
     expect(getMetrics()?.metrics?.ram.usedPercentage).toBeNull();

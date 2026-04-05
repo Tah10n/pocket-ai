@@ -201,6 +201,27 @@ describe('LocalStorageRegistry', () => {
     expect(updatedModels[0].gguf).toEqual(expect.objectContaining({ totalBytes: 1_700_000_000 }));
   });
 
+  it('recomputes a RAM warning decision for large verified downloaded models', async () => {
+    (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(8_000_000_000);
+    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([
+      createMockModel({
+        size: 3_784_824_896,
+        fitsInRam: true,
+        memoryFitDecision: undefined,
+        metadataTrust: 'verified_local',
+        gguf: { architecture: 'llama' },
+      }),
+    ]);
+    (registry.saveModels as jest.Mock) = jest.fn();
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: true, size: 3_784_824_896 });
+
+    await registry.validateRegistry();
+
+    const updatedModels = (registry.saveModels as jest.Mock).mock.calls[0][0];
+    expect(updatedModels[0].fitsInRam).toBe(false);
+    expect(['borderline', 'likely_oom']).toContain(updatedModels[0].memoryFitDecision);
+  });
+
   it('normalizes legacy persisted metadata with missing access fields and zero size', () => {
     const normalized = normalizePersistedModelMetadata({
       id: 'legacy/model',

@@ -194,7 +194,7 @@ export class ModelDownloadManager {
       const metadataTrust = typeof downloadedSize === 'number' && Number.isFinite(downloadedSize) && downloadedSize > 0
         ? 'verified_local' as const
         : model.metadataTrust;
-      const memoryFit = await this.resolveMemoryFit(downloadedSize, metadataTrust);
+      const memoryFit = await this.resolveMemoryFit(downloadedSize, metadataTrust, model.gguf);
 
       // Success
       const completedModel: ModelMetadata = {
@@ -428,7 +428,11 @@ export class ModelDownloadManager {
     return decodeURI(fileUri.replace(/^file:\/+/, '/'));
   }
 
-  private async resolveMemoryFit(size: number | null, metadataTrust: ModelMetadata['metadataTrust']): Promise<{
+  private async resolveMemoryFit(
+    size: number | null,
+    metadataTrust: ModelMetadata['metadataTrust'],
+    gguf?: ModelMetadata['gguf'],
+  ): Promise<{
     fitsInRam: boolean | null;
     decision: ModelMemoryFitDecision;
     confidence: ModelMemoryFitConfidence;
@@ -447,6 +451,7 @@ export class ModelDownloadManager {
       modelSizeBytes: size,
       totalMemoryBytes,
       metadataTrust,
+      ggufMetadata: gguf as Record<string, unknown> | undefined,
     });
 
     return {

@@ -260,4 +260,31 @@ describe('ModelCard', () => {
       mockScreenBadge.mock.calls.some(([props]) => props.tone === 'success' && props.children === 'common.active'),
     ).toBe(true);
   });
+
+  it('renders a RAM warning badge when the model fit decision is borderline', () => {
+    render(
+      <ModelCard
+        model={{
+          ...buildModel(ModelAccessState.PUBLIC),
+          fitsInRam: false,
+          memoryFitDecision: 'borderline',
+        }}
+        onOpenDetails={jest.fn()}
+        onDownload={jest.fn()}
+        onConfigureToken={jest.fn()}
+        onOpenModelPage={jest.fn()}
+        onLoad={jest.fn()}
+        onOpenSettings={jest.fn()}
+        onUnload={jest.fn()}
+        onDelete={jest.fn()}
+        onCancel={jest.fn()}
+        onChat={jest.fn()}
+        isActive={false}
+      />,
+    );
+
+    expect(
+      mockScreenBadge.mock.calls.some(([props]) => props.tone === 'warning' && props.children === 'models.ramBorderline'),
+    ).toBe(true);
+  });
 });

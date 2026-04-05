@@ -175,7 +175,7 @@ describe('ModelCatalogService', () => {
     global.fetch = jest.fn(() =>
       Promise.resolve({
         ok: true,
-        json: () => Promise.resolve([makeRepo('org/small-model')]),
+        json: () => Promise.resolve([makeRepo('org/small-model', 1_000_000_000)]),
       }),
     ) as jest.Mock;
 
@@ -215,6 +215,48 @@ describe('ModelCatalogService', () => {
     expect(coldStartCachedResult?.models[0].fitsInRam).toBe(true);
 
     coldStartService.dispose();
+  });
+
+  it('marks large 8B-style GGUF models with a RAM warning badge before loading', async () => {
+    (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(8_000_000_000);
+
+    global.fetch = jest.fn(() =>
+      Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve([{
+          ...makeRepo('org/large-llama-model', 3_784_824_896),
+          gguf: {
+            architecture: 'llama',
+          },
+        }]),
+      }),
+    ) as jest.Mock;
+
+    const result = await modelCatalogService.searchModels('llama');
+
+    expect(result.models[0].fitsInRam).toBe(false);
+    expect(['borderline', 'likely_oom']).toContain(result.models[0].memoryFitDecision);
+  });
+
+  it('marks 3.4 GB-class models with a RAM warning badge on 8 GB devices before loading', async () => {
+    (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(8_000_000_000);
+
+    global.fetch = jest.fn(() =>
+      Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve([{
+          ...makeRepo('org/firefly-class-model', 3_427_874_240),
+          gguf: {
+            architecture: 'gemma4',
+          },
+        }]),
+      }),
+    ) as jest.Mock;
+
+    const result = await modelCatalogService.searchModels('firefly');
+
+    expect(result.models[0].fitsInRam).toBe(false);
+    expect(['borderline', 'likely_oom']).toContain(result.models[0].memoryFitDecision);
   });
 
   it('appends gguf to search queries', async () => {

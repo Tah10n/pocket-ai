@@ -318,13 +318,13 @@ export const SettingsScreen = () => {
 
     const ramTotalBytes = metrics?.ram.totalBytes ?? 0;
     const ramUsedBytes = metrics?.ram.usedBytes ?? 0;
+    const ramAvailableBudgetBytes = metrics?.ram.availableBudgetBytes;
     const ramFreeBytes = metrics?.ram.freeBytes;
     const ramAvailableBytes = metrics?.ram.availableBytes ?? 0;
     const ramAppUsedBytes = metrics?.ram.appUsedBytes ?? 0;
     const ramUsedPercentage = metrics?.ram.usedPercentage ?? 0;
     const ramAppUsedPercentage = ramTotalBytes > 0 ? (ramAppUsedBytes / ramTotalBytes) * 100 : 0;
     const isSystemRamSource = metrics?.ram.source === 'system';
-    const hasStrictSystemFreeBytes = isSystemRamSource && typeof ramFreeBytes === 'number';
 
     const storageTotalBytes = metrics?.storage.totalBytes ?? 0;
     const storageUsedBytes = metrics?.storage.usedBytes ?? 0;
@@ -338,9 +338,13 @@ export const SettingsScreen = () => {
         ? t('settings.memoryInUseOf', { total: formatSystemCapacity(ramTotalBytes) })
         : t('settings.memoryAppUsage');
     const ramAsideLabel = isSystemRamSource
-        ? t(hasStrictSystemFreeBytes ? 'settings.free' : 'settings.available')
+        ? t('settings.available')
         : t('settings.deviceTotal');
-    const ramAsideValue = formatSystemCapacity(isSystemRamSource ? (ramFreeBytes ?? ramAvailableBytes) : ramTotalBytes);
+    const ramAsideValue = formatSystemCapacity(
+        isSystemRamSource
+            ? (ramAvailableBudgetBytes ?? ramAvailableBytes ?? ramFreeBytes ?? 0)
+            : ramTotalBytes,
+    );
     const ramSystemUsageSummary = formatPercent(ramUsedPercentage);
     const ramAppUsageSummary = formatSystemCapacity(ramAppUsedBytes);
     const ramUsedTrackPercentage = clampPercentage(ramUsedPercentage);

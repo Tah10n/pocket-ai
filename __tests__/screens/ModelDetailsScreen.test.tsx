@@ -542,6 +542,27 @@ describe('ModelDetailsScreen', () => {
     expect(screen.getByText('Meta')).toBeTruthy();
   });
 
+  it('does not expose memory-fit confidence badges in the details UI', async () => {
+    const confidenceModel = createModel({
+      memoryFitDecision: 'likely_oom',
+      memoryFitConfidence: 'high',
+    });
+    const { modelCatalogService } = jest.requireMock('../../src/services/ModelCatalogService');
+    modelCatalogService.getCachedModel.mockReturnValue(confidenceModel);
+    modelCatalogService.getModelDetails.mockResolvedValue(confidenceModel);
+
+    const screen = render(<ModelDetailsScreen />);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText('models.ramLikelyOom')).toBeTruthy();
+    expect(screen.queryByText('models.ramFitConfidenceHigh')).toBeNull();
+    expect(screen.queryByText('models.ramFitConfidenceMedium')).toBeNull();
+    expect(screen.queryByText('models.ramFitConfidenceLow')).toBeNull();
+  });
+
   it('hides the metadata section when no metadata fields are available', async () => {
     const metadataFreeModel: ModelMetadata = {
       ...mockDetailModel,

@@ -1181,7 +1181,7 @@ export class ModelCatalogService {
   }
 
   private resolveMemoryFitSummary(
-    model: Pick<ModelMetadata, 'size' | 'metadataTrust'>,
+    model: Pick<ModelMetadata, 'size' | 'metadataTrust' | 'gguf'>,
     memoryFitContext: CatalogMemoryFitContext | null,
   ): {
     fitsInRam: boolean | null;
@@ -1201,6 +1201,7 @@ export class ModelCatalogService {
       modelSizeBytes: size,
       totalMemoryBytes: memoryFitContext.totalMemoryBytes,
       metadataTrust: model.metadataTrust,
+      ggufMetadata: model.gguf as Record<string, unknown> | undefined,
     });
 
     return {

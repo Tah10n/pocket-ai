@@ -100,6 +100,74 @@ function isProbableMemoryFailure(error: unknown): boolean {
   );
 }
 
+function shouldHardBlockSafeLoad({
+  memoryFit,
+  availableBudgetBytes,
+  lowMemorySignal,
+}: {
+  memoryFit: MemoryFitResult | null | undefined;
+  availableBudgetBytes: number | null;
+  lowMemorySignal: boolean;
+}): boolean {
+  if (!memoryFit) {
+    return false;
+  }
+
+  if (!Number.isFinite(memoryFit.requiredBytes) || memoryFit.requiredBytes <= 0) {
+    return false;
+  }
+
+  if (!Number.isFinite(memoryFit.budget.totalMemoryBytes) || memoryFit.budget.totalMemoryBytes <= 0) {
+    return false;
+  }
+
+  if (memoryFit.decision !== 'likely_oom') {
+    return false;
+  }
+
+  if (memoryFit.confidence === 'high') {
+    return true;
+  }
+
+  if (lowMemorySignal) {
+    return true;
+  }
+
+  if (!Number.isFinite(availableBudgetBytes) || availableBudgetBytes === null || availableBudgetBytes <= 0) {
+    return false;
+  }
+
+  return memoryFit.requiredBytes >= availableBudgetBytes;
+}
+
+function canAutoUseSafeLoadProfile({
+  memoryFit,
+  availableBudgetBytes,
+  lowMemorySignal,
+}: {
+  memoryFit: MemoryFitResult | null | undefined;
+  availableBudgetBytes: number | null;
+  lowMemorySignal: boolean;
+}): boolean {
+  if (!memoryFit) {
+    return false;
+  }
+
+  if (lowMemorySignal) {
+    return false;
+  }
+
+  if (!Number.isFinite(memoryFit.requiredBytes) || memoryFit.requiredBytes <= 0) {
+    return false;
+  }
+
+  if (!Number.isFinite(availableBudgetBytes) || availableBudgetBytes === null || availableBudgetBytes <= 0) {
+    return false;
+  }
+
+  return memoryFit.requiredBytes <= availableBudgetBytes;
+}
+
 function getModelInfoString(modelInfo: unknown, key: string): string | null {
   if (!modelInfo || typeof modelInfo !== 'object') {
     return null;
@@ -697,6 +765,8 @@ class LLMEngineService {
       const resolvedModelSizeBytes = typeof fileInfo.size === 'number' ? fileInfo.size : modelSizeBytes ?? null;
       let memoryFit: MemoryFitResult | null = null;
       let exceedsEffectiveBudget = false;
+      let availableBudgetBytes: number | null = null;
+      let shouldAutoUseSafeLoadProfile = false;
 
       let modelInfo: Record<string, unknown> | null = null;
       try {
@@ -819,6 +889,7 @@ class LLMEngineService {
           ? memoryFit.requiredBytes / memoryFit.effectiveBudgetBytes
           : Number.POSITIVE_INFINITY;
         const hasTrustedBudget = memoryFit.budget.totalMemoryBytes > 0;
+        const lowMemorySignal = systemMemorySnapshot?.lowMemory ?? hardwareListenerService.getCurrentStatus().isLowMemory;
         exceedsEffectiveBudget = (
           memoryFit.requiredBytes > 0
           && memoryFit.effectiveBudgetBytes > 0
@@ -829,7 +900,7 @@ class LLMEngineService {
           && memoryFit.decision === 'likely_oom'
           && memoryFit.confidence === 'high'
         );
-        const availableBudgetBytes = systemMemorySnapshot
+        availableBudgetBytes = systemMemorySnapshot
           ? resolveConservativeAvailableMemoryBudget(systemMemorySnapshot)
           : null;
 
@@ -846,7 +917,7 @@ class LLMEngineService {
               totalBudgetBytes: memoryFit.budget.totalMemoryBytes * FITS_IN_RAM_HEADROOM_RATIO,
               availableBudgetBytes,
               effectiveAvailableBudgetBytes: memoryFit.effectiveBudgetBytes,
-              lowMemory: systemMemorySnapshot?.lowMemory ?? hardwareListenerService.getCurrentStatus().isLowMemory,
+              lowMemory: lowMemorySignal,
               allowUnsafeMemoryLoad,
               overBudgetRatio,
               decision: memoryFit.decision,
@@ -890,27 +961,43 @@ class LLMEngineService {
               ? resolvedTotalMemoryBytes
               : null,
           });
-
-          throw new AppError('model_memory_warning', 'Model may not fit in memory.', {
-            details: {
-              modelId,
-              decision: memoryFit.decision,
-              confidence: memoryFit.confidence,
-              overBudgetRatio,
-              memoryFit,
-              safeLoadProfile,
-              safeMemoryFit,
-              requestedLoadProfile: {
-                contextTokens: resolvedContextSize,
-                gpuLayers: requestedGpuLayers,
-              },
-            },
+          shouldAutoUseSafeLoadProfile = canAutoUseSafeLoadProfile({
+            memoryFit: safeMemoryFit,
+            availableBudgetBytes,
+            lowMemorySignal,
           });
+
+          if (shouldAutoUseSafeLoadProfile) {
+            if (initDiagnostics) {
+              initDiagnostics = {
+                ...initDiagnostics,
+                safeLoadProfile,
+                safeMemoryFit,
+                autoSafeLoadProfile: true,
+              };
+            }
+          } else {
+            throw new AppError('model_memory_warning', 'Model may not fit in memory.', {
+              details: {
+                modelId,
+                decision: memoryFit.decision,
+                confidence: memoryFit.confidence,
+                overBudgetRatio,
+                memoryFit,
+                safeLoadProfile,
+                safeMemoryFit,
+                requestedLoadProfile: {
+                  contextTokens: resolvedContextSize,
+                  gpuLayers: requestedGpuLayers,
+                },
+              },
+            });
+          }
         }
       }
 
       const shouldUseSafeLoadProfile = Boolean(
-        allowUnsafeMemoryLoad
+        (allowUnsafeMemoryLoad || shouldAutoUseSafeLoadProfile)
         && memoryFit
         && exceedsEffectiveBudget,
       );
@@ -959,6 +1046,46 @@ class LLMEngineService {
         })
         : memoryFit;
       let resolvedGpuLayers = gpuLayers;
+      const lowMemorySignal = systemMemorySnapshot?.lowMemory ?? hardwareListenerService.getCurrentStatus().isLowMemory;
+      const safeLoadStillExceedsBudget = (
+        shouldUseSafeLoadProfile
+        && shouldHardBlockSafeLoad({
+          memoryFit: predictedFitForLoad,
+          availableBudgetBytes,
+          lowMemorySignal,
+        })
+      );
+
+      if (safeLoadStillExceedsBudget && predictedFitForLoad) {
+        throw new AppError('model_memory_insufficient', 'Not enough memory to load this model.', {
+          details: {
+            modelId,
+            modelSizeBytes: resolvedModelSizeBytes,
+            estimatedRuntimeBytes: predictedFitForLoad.requiredBytes,
+            totalMemoryBytes: resolvedTotalMemoryBytes,
+            availableMemoryBytes: systemMemorySnapshot?.availableBytes,
+            freeMemoryBytes: systemMemorySnapshot?.freeBytes,
+            thresholdBytes: systemMemorySnapshot?.thresholdBytes,
+            totalBudgetBytes: predictedFitForLoad.budget.totalMemoryBytes * FITS_IN_RAM_HEADROOM_RATIO,
+            availableBudgetBytes,
+            effectiveAvailableBudgetBytes: predictedFitForLoad.effectiveBudgetBytes,
+            lowMemory: lowMemorySignal,
+            allowUnsafeMemoryLoad,
+            decision: predictedFitForLoad.decision,
+            confidence: predictedFitForLoad.confidence,
+            memoryFit: predictedFitForLoad,
+            requestedMemoryFit: memoryFit,
+            requestedLoadProfile: {
+              contextTokens: resolvedContextSize,
+              gpuLayers: requestedGpuLayers,
+            },
+            attemptedLoadProfile: {
+              contextTokens: finalContextSize,
+              gpuLayers,
+            },
+          },
+        });
+      }
 
       if (initDiagnostics) {
         initDiagnostics = {

@@ -6,13 +6,16 @@ import type {
   MemoryBreakdown,
   MemoryMetadataTrust,
 } from './types';
-import { createMemoryBudget, type MemoryBudgetSnapshot } from './budget';
+import { createMemoryBudget, FITS_IN_RAM_HEADROOM_RATIO, type MemoryBudgetSnapshot } from './budget';
 import { normalizeCalibrationRecordFactors } from './calibration';
 
 export const ESTIMATED_MODEL_RUNTIME_OVERHEAD_FACTOR = 0.2;
 const DEFAULT_KV_CACHE_BYTES_PER_ELEMENT = 2; // f16
 const DEFAULT_SAFETY_MARGIN_BYTES = 256 * 1024 * 1024;
 const MAX_SAFETY_MARGIN_BYTES = 1024 * 1024 * 1024;
+const FAST_ESTIMATE_DEFAULT_CONTEXT_TOKENS = 4096;
+const FAST_ESTIMATE_MIN_APP_BASELINE_BYTES = 256 * 1024 * 1024;
+const FAST_ESTIMATE_DEFAULT_THRESHOLD_BYTES = 432 * 1024 * 1024;
 const UNKNOWN_BREAKDOWN: MemoryBreakdown = {
   weightsBytes: 0,
   kvCacheBytes: 0,
@@ -414,6 +417,15 @@ function confidenceForFastEstimate(metadataTrust: MemoryMetadataTrust | undefine
   return 'low';
 }
 
+function suggestGpuLayersForFastEstimate(totalMemoryBytes: number): number {
+  const totalGB = totalMemoryBytes / 1_000_000_000;
+
+  if (totalGB >= 12) return 35;
+  if (totalGB >= 8) return 20;
+  if (totalGB >= 6) return 10;
+  return 0;
+}
+
 export function estimateModelRuntimeBytes(modelSizeBytes: number): number {
   return modelSizeBytes * (1 + ESTIMATED_MODEL_RUNTIME_OVERHEAD_FACTOR);
 }
@@ -556,10 +568,12 @@ export function estimateFastMemoryFit({
   modelSizeBytes,
   totalMemoryBytes,
   metadataTrust,
+  ggufMetadata,
 }: {
   modelSizeBytes: number | null;
   totalMemoryBytes: number | null;
   metadataTrust?: MemoryMetadataTrust;
+  ggufMetadata?: Record<string, unknown>;
 }): MemoryFitResult {
   if (!isFinitePositiveNumber(modelSizeBytes) || !isFinitePositiveNumber(totalMemoryBytes)) {
     return estimateMemoryFitFromModelSize({
@@ -569,25 +583,63 @@ export function estimateFastMemoryFit({
     });
   }
 
-  const base = estimateMemoryFitFromModelSize({
+  const previewAvailableBytes = Math.floor(totalMemoryBytes * FITS_IN_RAM_HEADROOM_RATIO);
+  const previewThresholdBytes = Math.min(
+    previewAvailableBytes,
+    FAST_ESTIMATE_DEFAULT_THRESHOLD_BYTES,
+  );
+  const previewAppBaselineBytes = Math.max(
+    FAST_ESTIMATE_MIN_APP_BASELINE_BYTES,
+    Math.floor(totalMemoryBytes * 0.05),
+  );
+  const { breakdown } = createComponentBreakdown({
     modelSizeBytes,
-    totalMemoryBytes,
-    systemMemorySnapshot: null,
+    metadataTrust: metadataTrust ?? 'unknown',
+    ggufMetadata,
+    runtimeParams: {
+      contextTokens: FAST_ESTIMATE_DEFAULT_CONTEXT_TOKENS,
+      gpuLayers: suggestGpuLayersForFastEstimate(totalMemoryBytes),
+      cacheTypeK: 'f16',
+      cacheTypeV: 'f16',
+      useMmap: true,
+    },
+    snapshot: {
+      totalBytes: totalMemoryBytes,
+      availableBytes: previewAvailableBytes,
+      usedBytes: Math.max(totalMemoryBytes - previewAvailableBytes, 0),
+      appUsedBytes: previewAppBaselineBytes,
+      lowMemory: false,
+      pressureLevel: 'normal',
+      thresholdBytes: previewThresholdBytes,
+      timestampMs: 0,
+      platform: 'android',
+    },
   });
+  const requiredBytes = sumBreakdown(breakdown);
+  const { effectiveBudgetBytes, budget } = createMemoryBudget({
+    totalMemoryBytes,
+    systemMemorySnapshot: {
+      availableBytes: previewAvailableBytes,
+      thresholdBytes: previewThresholdBytes,
+      appUsedBytes: previewAppBaselineBytes,
+      lowMemory: false,
+      pressureLevel: 'normal',
+    },
+  });
+  const baseDecision = decisionForBudgetFit({ requiredBytes, effectiveBudgetBytes });
 
   const confidence = confidenceForFastEstimate(metadataTrust);
-  const decision = confidence === 'low' && base.decision === 'fits_high_confidence'
+  const decision = confidence === 'low' && baseDecision === 'fits_high_confidence'
     ? 'fits_low_confidence'
-    : base.decision;
-
-  if (decision === base.decision && confidence === base.confidence) {
-    return base;
-  }
+    : baseDecision;
 
   return {
-    ...base,
     decision,
     confidence,
+    requiredBytes,
+    effectiveBudgetBytes,
+    breakdown,
+    budget,
     recommendations: recommendationsForDecision(decision),
   };
 }

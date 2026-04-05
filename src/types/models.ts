@@ -16,6 +16,15 @@ export enum ModelAccessState {
 
 export type ModelMetadataTrust = 'verified_local' | 'trusted_remote' | 'inferred' | 'unknown';
 
+export type ModelMemoryFitDecision =
+  | 'fits_high_confidence'
+  | 'fits_low_confidence'
+  | 'borderline'
+  | 'likely_oom'
+  | 'unknown';
+
+export type ModelMemoryFitConfidence = 'high' | 'medium' | 'low';
+
 export interface ModelGgufMetadata {
   totalBytes?: number;
   contextLengthTokens?: number;
@@ -43,6 +52,8 @@ export interface ModelMetadata {
   lastModifiedAt?: number;
   sha256?: string;
   fitsInRam: boolean | null;
+  memoryFitDecision?: ModelMemoryFitDecision;
+  memoryFitConfidence?: ModelMemoryFitConfidence;
   metadataTrust?: ModelMetadataTrust;
   gguf?: ModelGgufMetadata;
   accessState: ModelAccessState;

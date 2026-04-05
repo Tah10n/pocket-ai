@@ -1,5 +1,11 @@
 import DeviceInfo from 'react-native-device-info';
-import { ModelAccessState, ModelMetadata, LifecycleStatus } from '../types/models';
+import {
+  ModelAccessState,
+  type ModelMemoryFitConfidence,
+  type ModelMemoryFitDecision,
+  ModelMetadata,
+  LifecycleStatus,
+} from '../types/models';
 import { hardwareListenerService } from './HardwareListenerService';
 import { registry } from './LocalStorageRegistry';
 import { huggingFaceTokenService } from './HuggingFaceTokenService';
@@ -356,6 +362,7 @@ export class ModelCatalogService {
     this.readmeRequestCache.clear();
     this.resolvedFileProbeCache.clear();
     this.resolvedFileProbeStateCache.clear();
+    this.lastMemoryFitContext = null;
 
     if (source === 'token') {
       this.persistentCache.clearSnapshots();
@@ -1154,6 +1161,11 @@ export class ModelCatalogService {
   }
 
   private async getCurrentMemoryFitContext(): Promise<CatalogMemoryFitContext> {
+    const remembered = this.lastMemoryFitContext;
+    if (remembered && remembered.totalMemoryBytes !== null) {
+      return remembered;
+    }
+
     const deviceTotalMemoryBytes = await this.getTotalMemory();
     const totalMemoryBytes = deviceTotalMemoryBytes;
     const memoryFitContext = {
@@ -1168,18 +1180,21 @@ export class ModelCatalogService {
     return this.lastMemoryFitContext;
   }
 
-  private resolveFitsInRam(
+  private resolveMemoryFitSummary(
     model: Pick<ModelMetadata, 'size' | 'metadataTrust'>,
     memoryFitContext: CatalogMemoryFitContext | null,
-    fallback: boolean | null = null,
-  ): boolean | null {
+  ): {
+    fitsInRam: boolean | null;
+    decision: ModelMemoryFitDecision;
+    confidence: ModelMemoryFitConfidence;
+  } | null {
     const size = model.size;
     if (typeof size !== 'number' || !Number.isFinite(size) || size <= 0) {
-      return fallback;
+      return null;
     }
 
     if (!memoryFitContext) {
-      return fallback;
+      return null;
     }
 
     const fit = estimateFastMemoryFit({
@@ -1188,24 +1203,38 @@ export class ModelCatalogService {
       metadataTrust: model.metadataTrust,
     });
 
-    if (fit.decision === 'unknown') {
-      return fallback;
-    }
-
-    return fit.decision === 'fits_high_confidence' || fit.decision === 'fits_low_confidence';
+    return {
+      fitsInRam: fit.decision === 'unknown'
+        ? null
+        : fit.decision === 'fits_high_confidence' || fit.decision === 'fits_low_confidence',
+      decision: fit.decision,
+      confidence: fit.confidence,
+    };
   }
 
   private withResolvedMemoryFit(
     model: ModelMetadata,
     memoryFitContext: CatalogMemoryFitContext | null = this.getRememberedMemoryFitContext(),
   ): ModelMetadata {
-    const fitsInRam = this.resolveFitsInRam(model, memoryFitContext, model.fitsInRam);
-    return fitsInRam === model.fitsInRam
-      ? model
-      : normalizePersistedModelMetadata({
-        ...model,
-        fitsInRam,
-      });
+    const resolvedMemoryFit = this.resolveMemoryFitSummary(model, memoryFitContext);
+    const fitsInRam = resolvedMemoryFit?.fitsInRam ?? model.fitsInRam;
+    const memoryFitDecision = resolvedMemoryFit?.decision ?? model.memoryFitDecision;
+    const memoryFitConfidence = resolvedMemoryFit?.confidence ?? model.memoryFitConfidence;
+
+    if (
+      fitsInRam === model.fitsInRam
+      && memoryFitDecision === model.memoryFitDecision
+      && memoryFitConfidence === model.memoryFitConfidence
+    ) {
+      return model;
+    }
+
+    return normalizePersistedModelMetadata({
+      ...model,
+      fitsInRam,
+      memoryFitDecision,
+      memoryFitConfidence,
+    });
   }
 
   private async resolveMissingModelMetadata(
@@ -1297,13 +1326,31 @@ export class ModelCatalogService {
 
         const resolvedFileName = this.getFileName(selectedEntry);
         const size = this.getFileSize(selectedEntry);
-        const fitsInRam = this.resolveFitsInRam({ size, metadataTrust: model.metadataTrust }, memoryFitContext);
+        const resolvedMemoryFit = this.resolveMemoryFitSummary({ size, metadataTrust: model.metadataTrust }, memoryFitContext);
+        const didChangeSize = size !== model.size;
+        const fitsInRam = resolvedMemoryFit
+          ? resolvedMemoryFit.fitsInRam
+          : didChangeSize
+            ? null
+            : model.fitsInRam;
+        const memoryFitDecision = resolvedMemoryFit
+          ? resolvedMemoryFit.decision
+          : didChangeSize
+            ? undefined
+            : model.memoryFitDecision;
+        const memoryFitConfidence = resolvedMemoryFit
+          ? resolvedMemoryFit.confidence
+          : didChangeSize
+            ? undefined
+            : model.memoryFitConfidence;
 
         if (model.requiresTreeProbe && !treeProbeIsFinal) {
           return normalizePersistedModelMetadata({
             ...model,
             size,
             fitsInRam,
+            memoryFitDecision,
+            memoryFitConfidence,
             accessState,
             requiresTreeProbe: true,
             hfRevision: model.hfRevision,
@@ -1317,6 +1364,8 @@ export class ModelCatalogService {
           ...model,
           size,
           fitsInRam,
+          memoryFitDecision,
+          memoryFitConfidence,
           accessState,
           requiresTreeProbe: false,
           hfRevision: model.hfRevision,
@@ -1791,7 +1840,8 @@ export class ModelCatalogService {
           ? { slidingWindowTokens }
           : {}),
       };
-      const fitsInRam = this.resolveFitsInRam({ size, metadataTrust }, memoryFitContext);
+      const resolvedMemoryFit = this.resolveMemoryFitSummary({ size, metadataTrust }, memoryFitContext);
+      const fitsInRam = resolvedMemoryFit?.fitsInRam ?? null;
       const fileName = this.getFileName(ggufSibling) || 'model.gguf';
       const hfRevision = item.sha ?? undefined;
       const lastModifiedAt = this.parseHuggingFaceLastModifiedAt(item.lastModified);
@@ -1809,6 +1859,8 @@ export class ModelCatalogService {
         resolvedFileName: fileName,
         lastModifiedAt,
         fitsInRam,
+        memoryFitDecision: resolvedMemoryFit?.decision,
+        memoryFitConfidence: resolvedMemoryFit?.confidence,
         metadataTrust,
         gguf: Object.keys(gguf).length > 0 ? gguf : undefined,
         accessState,
@@ -1870,7 +1922,8 @@ export class ModelCatalogService {
         ? { slidingWindowTokens }
         : {}),
     };
-    const fitsInRam = this.resolveFitsInRam({ size, metadataTrust }, memoryFitContext);
+    const resolvedMemoryFit = this.resolveMemoryFitSummary({ size, metadataTrust }, memoryFitContext);
+    const fitsInRam = resolvedMemoryFit?.fitsInRam ?? null;
     const lastModifiedAt = this.parseHuggingFaceLastModifiedAt(item.lastModified);
 
     return normalizePersistedModelMetadata({
@@ -1881,6 +1934,8 @@ export class ModelCatalogService {
       downloadUrl: buildHuggingFaceResolveUrl(repoId, 'model.gguf', item.sha ?? undefined),
       lastModifiedAt,
       fitsInRam,
+      memoryFitDecision: resolvedMemoryFit?.decision,
+      memoryFitConfidence: resolvedMemoryFit?.confidence,
       metadataTrust,
       gguf: Object.keys(gguf).length > 0 ? gguf : undefined,
       accessState: this.resolveDetailAccessState(requiresAuth, authToken),
@@ -1942,7 +1997,10 @@ export class ModelCatalogService {
         ...ggufFromPayload,
       }
       : fallbackModel.gguf;
-    const fitsInRam = this.resolveFitsInRam({ size, metadataTrust: metadataTrustFromPayload }, memoryFitContext, fallbackModel.fitsInRam);
+    const resolvedMemoryFit = this.resolveMemoryFitSummary({ size, metadataTrust: metadataTrustFromPayload }, memoryFitContext);
+    const fitsInRam = resolvedMemoryFit?.fitsInRam ?? fallbackModel.fitsInRam;
+    const memoryFitDecision = resolvedMemoryFit?.decision ?? fallbackModel.memoryFitDecision;
+    const memoryFitConfidence = resolvedMemoryFit?.confidence ?? fallbackModel.memoryFitConfidence;
     const lastModifiedAt = this.parseHuggingFaceLastModifiedAt(payload.lastModified) ?? fallbackModel.lastModifiedAt;
     const requiresAuth = Boolean(payload.gated) || payload.private === true;
     const requiresTreeProbe = selectedEntry
@@ -1962,6 +2020,8 @@ export class ModelCatalogService {
       resolvedFileName,
       lastModifiedAt,
       fitsInRam,
+      memoryFitDecision,
+      memoryFitConfidence,
       metadataTrust: metadataTrustFromPayload,
       gguf,
       accessState: this.resolveDetailAccessState(requiresAuth, authToken),
@@ -2097,6 +2157,10 @@ export class ModelCatalogService {
         ...(localHasVerifiedSize ? (localModel.gguf ?? {}) : (remoteModel.gguf ?? {})),
       }
       : undefined;
+    const resolvedMemoryFit = this.resolveMemoryFitSummary({ size: resolvedSize, metadataTrust }, memoryFitContext);
+    const fitsInRam = resolvedMemoryFit?.fitsInRam ?? remoteModel.fitsInRam ?? localModel.fitsInRam;
+    const memoryFitDecision = resolvedMemoryFit?.decision ?? remoteModel.memoryFitDecision ?? localModel.memoryFitDecision;
+    const memoryFitConfidence = resolvedMemoryFit?.confidence ?? remoteModel.memoryFitConfidence ?? localModel.memoryFitConfidence;
 
     return normalizePersistedModelMetadata({
       ...remoteModel,
@@ -2109,7 +2173,9 @@ export class ModelCatalogService {
       sha256: remoteModel.sha256 ?? localModel.sha256,
       metadataTrust,
       gguf,
-      fitsInRam: this.resolveFitsInRam({ size: resolvedSize, metadataTrust }, memoryFitContext, remoteModel.fitsInRam ?? localModel.fitsInRam),
+      fitsInRam,
+      memoryFitDecision,
+      memoryFitConfidence,
       accessState: remoteModel.accessState,
       isGated: remoteModel.isGated,
       isPrivate: remoteModel.isPrivate,

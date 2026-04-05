@@ -38,8 +38,8 @@ const MANAGE_CONVERSATIONS_LABELS = ["Manage", "Управлять"];
 const CONVERSATIONS_SEARCH_LABELS = ["Search conversations", "Поиск по разговорам"];
 const MODEL_DETAILS_TITLE_LABELS = ["Model details", "Детали модели"];
 const OPEN_ON_HF_LABELS = ["Open on HF", "Открыть на HF"];
-const HOME_ROUTE_TIMEOUT_MS = 40_000;
-const SETTINGS_ROUTE_TIMEOUT_MS = 35_000;
+const HOME_ROUTE_TIMEOUT_MS = 90_000;
+const SETTINGS_ROUTE_TIMEOUT_MS = 60_000;
 
 main().catch((error) => {
   console.error(`[android-scenarios] ${error.message}`);
@@ -74,17 +74,17 @@ async function main() {
   const serial = resolveTargetSerial(adbPath, cliOptions);
   const context = createScenarioContext(adbPath, serial);
   const results = [];
-
-  await context.ensureAppVisible();
-  await dismissDebuggerBannerIfPresent(adbPath, serial);
   const languageState = {
-    originalLabel: await readCurrentLanguageLabel(context),
+    originalLabel: null,
     switchedToEnglish: false,
   };
 
   let runError = null;
 
   try {
+    await context.ensureAppVisible();
+    await dismissDebuggerBannerIfPresent(adbPath, serial);
+    languageState.originalLabel = await readCurrentLanguageLabel(context);
     await ensureEnglishUi(context, languageState);
 
     for (const scenario of selectedScenarios) {
@@ -119,6 +119,38 @@ async function main() {
     log(`Completed ${results.length} basic scenario(s).`);
   } catch (error) {
     runError = error;
+
+    try {
+      const screenshotPath = context.captureScreenshot("run-failed.png");
+      const uiDumpPath = path.join(artifactsRoot, "run-failed.xml");
+      fs.writeFileSync(uiDumpPath, dumpUiHierarchy(adbPath, serial));
+
+      const logcatPath = path.join(artifactsRoot, "run-failed-logcat.txt");
+      const logcat = runCapture(adbPath, ["-s", serial, "logcat", "-d", "-t", "400"], {
+        allowFailure: true,
+      });
+      fs.writeFileSync(logcatPath, logcat);
+
+      results.push({
+        id: "runner-failure",
+        status: "failed",
+        durationMs: 0,
+        screenshotPath,
+        uiDumpPath,
+        logcatPath,
+        error: error.message,
+      });
+      writeReport(results);
+    } catch (captureError) {
+      results.push({
+        id: "runner-failure",
+        status: "failed",
+        durationMs: 0,
+        error: error.message,
+        captureError: captureError instanceof Error ? captureError.message : String(captureError),
+      });
+      writeReport(results);
+    }
   } finally {
     try {
       await restoreOriginalLanguage(context, languageState);
@@ -465,13 +497,18 @@ async function goToHome(ctx) {
   await ctx.ensureAppVisible();
   await ctx.dismissDebuggerBanner();
 
-  const reachedHome = await tryReachHome(ctx);
+  try {
+    await ctx.expectAnyText(HOME_SECTION_LABELS, { timeoutMs: HOME_ROUTE_TIMEOUT_MS });
+  } catch {
+    const reachedHome = await tryReachHome(ctx);
 
-  if (!reachedHome) {
-    throw new Error(`Timed out returning to Home from the current route.`);
+    if (!reachedHome) {
+      throw new Error(`Timed out returning to Home from the current route.`);
+    }
+
+    await ctx.expectAnyText(HOME_SECTION_LABELS, { timeoutMs: HOME_ROUTE_TIMEOUT_MS });
   }
 
-  await ctx.expectAnyText(HOME_SECTION_LABELS, { timeoutMs: HOME_ROUTE_TIMEOUT_MS });
   await ctx.expectText("Pocket AI");
 }
 
@@ -564,7 +601,13 @@ async function restoreOriginalLanguage(ctx, languageState) {
 }
 
 function launchApp() {
-  const args = [path.join(__dirname, "android-smoke.js"), "--screenshot", path.join("artifacts", "android-scenarios", "bootstrap.png")];
+  const args = [
+    path.join(__dirname, "android-smoke.js"),
+    "--screenshot",
+    path.join("artifacts", "android-scenarios", "bootstrap.png"),
+    "--launch-delay-ms",
+    "20000",
+  ];
 
   if (cliOptions.emulator) {
     args.push("--emulator");

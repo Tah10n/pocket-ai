@@ -19,7 +19,7 @@ import {
   getModelCatalogErrorMessage,
   getHuggingFaceModelUrl,
 } from '@/services/ModelCatalogService';
-import { getReportedErrorMessage } from '@/services/AppError';
+import { getReportedErrorMessage, toAppError } from '@/services/AppError';
 import { huggingFaceTokenService } from '@/services/HuggingFaceTokenService';
 import { registry } from '@/services/LocalStorageRegistry';
 import { offloadModel } from '@/services/StorageManagerService';
@@ -552,8 +552,15 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
 
   const filteredModels = useMemo(() => {
     const filtered = displayModels.filter((model) => {
-      if (filters.fitsInRamOnly && model.fitsInRam === false) {
-        return false;
+      if (filters.fitsInRamOnly) {
+        const decision = model.memoryFitDecision;
+        if (decision) {
+          if (decision !== 'fits_high_confidence' && decision !== 'fits_low_confidence') {
+            return false;
+          }
+        } else if (model.fitsInRam !== true) {
+          return false;
+        }
       }
 
       if (!matchesActiveTab(model, activeTab)) {
@@ -663,13 +670,29 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
       await loadModel(modelId, options);
       refreshDownloadedModels();
     } catch (error) {
+      const appError = toAppError(error);
+      if (appError.code === 'model_memory_warning') {
+        Alert.alert(
+          t('models.memoryWarningTitle'),
+          t('models.loadMemoryWarningMessage'),
+          [
+            { text: t('common.cancel'), style: 'cancel' },
+            { text: t('models.loadAnyway'), onPress: () => { void performLoad(modelId, { ...options, allowUnsafeMemoryLoad: true }); } },
+          ],
+        );
+        return;
+      }
+
       showModelActionError('ModelsList.performLoad', error);
     }
-  }, [loadModel, refreshDownloadedModels, showModelActionError]);
+  }, [loadModel, refreshDownloadedModels, showModelActionError, t]);
 
   const handleLoad = useCallback(async (modelId: string) => {
     const model = models.find((item) => item.id === modelId);
-    if (model?.fitsInRam === false) {
+    const shouldWarnForMemory = model?.memoryFitDecision === 'borderline'
+      || model?.memoryFitDecision === 'likely_oom'
+      || (model?.memoryFitDecision === undefined && model?.fitsInRam === false);
+    if (shouldWarnForMemory) {
       Alert.alert(
         t('models.memoryWarningTitle'),
         t('models.loadMemoryWarningMessage'),

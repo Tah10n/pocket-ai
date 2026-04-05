@@ -255,7 +255,7 @@ describe('LLMEngineService', () => {
     expect(llmEngineService.getContextSize()).toBe(safeContextSize);
   });
 
-  it('blocks model loads when the estimated runtime exceeds the memory budget', async () => {
+  it('warns (does not hard-block) on borderline memory-fit results', async () => {
     const totalMemoryBytes = 4 * 1024 * 1024 * 1024;
     const modelSizeBytes = 3 * 1024 * 1024 * 1024;
 
@@ -267,10 +267,18 @@ describe('LLMEngineService', () => {
 
     await expect(
       llmEngineService.load('test/model', { forceReload: true }),
-    ).rejects.toMatchObject({ code: 'model_memory_insufficient' });
+    ).rejects.toMatchObject({
+      code: 'model_memory_warning',
+      details: expect.objectContaining({
+        safeLoadProfile: expect.objectContaining({
+          contextTokens: 512,
+          gpuLayers: 0,
+        }),
+      }),
+    });
 
     expect(llamaRn.initLlama).not.toHaveBeenCalled();
-    expect(updateSettings).toHaveBeenCalledWith({ activeModelId: null });
+    expect(llmEngineService.getState().status).toBe(EngineStatus.IDLE);
   });
 
   it('rejects mmproj / CLIP projector GGUF files before initializing the engine', async () => {
@@ -329,6 +337,13 @@ describe('LLMEngineService', () => {
       lowMemory: false,
       pressureLevel: 'normal',
       thresholdBytes: 250_000_000,
+    });
+    (llamaRn.loadLlamaModelInfo as jest.Mock).mockResolvedValueOnce({
+      n_layers: 2,
+      n_head_kv: 4,
+      n_embd_head_k: 8,
+      n_embd_head_v: 8,
+      sliding_window: 64,
     });
 
     await expect(
@@ -404,6 +419,13 @@ describe('LLMEngineService', () => {
       pressureLevel: 'critical',
       thresholdBytes: 250_000_000,
     });
+    (llamaRn.loadLlamaModelInfo as jest.Mock).mockResolvedValueOnce({
+      n_layers: 2,
+      n_head_kv: 4,
+      n_embd_head_k: 8,
+      n_embd_head_v: 8,
+      sliding_window: 64,
+    });
 
     const thrown = await llmEngineService.load('test/model', { forceReload: true }).catch((error) => error);
 
@@ -454,5 +476,23 @@ describe('LLMEngineService', () => {
         liveAvailableBytes: undefined,
       }),
     });
+  });
+
+  it('returns unknown for fitsInRam checks when total-memory resolution fails', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    (DeviceInfo.getTotalMemory as jest.Mock).mockRejectedValueOnce(new Error('E_TOTAL_MEM'));
+
+    try {
+      await expect(llmEngineService.fitsInRam(1_700_000_000)).resolves.toMatchObject({
+        decision: 'unknown',
+        confidence: 'low',
+        budget: expect.objectContaining({
+          totalMemoryBytes: 0,
+          liveAvailableBytes: undefined,
+        }),
+      });
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 });

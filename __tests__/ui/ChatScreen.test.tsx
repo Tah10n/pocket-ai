@@ -1117,12 +1117,9 @@ describe('ChatScreen', () => {
   });
 
   it('passes a RAM-aware context window ceiling into the model controls sheet', async () => {
-    const { ESTIMATED_CONTEXT_BYTES_PER_TOKEN, resolveContextWindowCeiling } = require('../../src/utils/contextWindow');
     const totalMemoryBytes = 8 * 1024 * 1024 * 1024;
-    const expectedCeiling = 4096;
-    const modelSizeBytes = Math.floor(
-      ((totalMemoryBytes * 0.8) - expectedCeiling * ESTIMATED_CONTEXT_BYTES_PER_TOKEN) / 1.2,
-    );
+    const { resolveContextWindowCeiling } = require('../../src/utils/contextWindow');
+    const modelSizeBytes = 4 * 1024 * 1024 * 1024;
 
     registry.saveModels([
       {
@@ -1130,6 +1127,15 @@ describe('ChatScreen', () => {
         name: 'Q4 model',
         author: 'Test',
         size: modelSizeBytes,
+        metadataTrust: 'verified_local',
+        gguf: {
+          totalBytes: modelSizeBytes,
+          architecture: 'llama',
+          nLayers: 32,
+          nHeadKv: 16,
+          nEmbdHeadK: 128,
+          nEmbdHeadV: 128,
+        },
         maxContextTokens: 8192,
         hasVerifiedContextWindow: true,
         localPath: 'author-model-q4.gguf',
@@ -1147,8 +1153,26 @@ describe('ChatScreen', () => {
     await waitFor(() => {
       expect(lastModelParametersSheetProps?.contextWindowCeiling).toBe(resolveContextWindowCeiling({
         modelMaxContextTokens: 8192,
-        modelSizeBytes,
         totalMemoryBytes,
+        input: {
+          modelSizeBytes,
+          verifiedFileSizeBytes: modelSizeBytes,
+          metadataTrust: 'verified_local',
+          ggufMetadata: {
+            totalBytes: modelSizeBytes,
+            architecture: 'llama',
+            nLayers: 32,
+            nHeadKv: 16,
+            nEmbdHeadK: 128,
+            nEmbdHeadV: 128,
+          },
+          runtimeParams: {
+            gpuLayers: 0,
+            cacheTypeK: 'f16',
+            cacheTypeV: 'f16',
+            useMmap: true,
+          },
+        },
       }));
     });
   });
@@ -1309,12 +1333,9 @@ describe('ChatScreen', () => {
   });
 
   it('re-clamps a user draft when async RAM checks lower the context window ceiling', async () => {
-    const { ESTIMATED_CONTEXT_BYTES_PER_TOKEN, resolveContextWindowCeiling } = require('../../src/utils/contextWindow');
     const totalMemoryBytes = 8 * 1024 * 1024 * 1024;
-    const loweredCeiling = 4096;
-    const modelSizeBytes = Math.floor(
-      ((totalMemoryBytes * 0.8) - loweredCeiling * ESTIMATED_CONTEXT_BYTES_PER_TOKEN) / 1.2,
-    );
+    const { resolveContextWindowCeiling } = require('../../src/utils/contextWindow');
+    const modelSizeBytes = 4 * 1024 * 1024 * 1024;
     const totalMemory = createDeferred<number>();
 
     mockGetTotalMemory.mockReturnValueOnce(totalMemory.promise);
@@ -1324,6 +1345,15 @@ describe('ChatScreen', () => {
         name: 'Q4 model',
         author: 'Test',
         size: modelSizeBytes,
+        metadataTrust: 'verified_local',
+        gguf: {
+          totalBytes: modelSizeBytes,
+          architecture: 'llama',
+          nLayers: 32,
+          nHeadKv: 16,
+          nEmbdHeadK: 128,
+          nEmbdHeadV: 128,
+        },
         maxContextTokens: 32768,
         hasVerifiedContextWindow: true,
         localPath: 'author-model-q4.gguf',
@@ -1356,10 +1386,52 @@ describe('ChatScreen', () => {
     });
 
     await waitFor(() => {
+      const loweredCeiling = resolveContextWindowCeiling({
+        modelMaxContextTokens: 32768,
+        totalMemoryBytes,
+        input: {
+          modelSizeBytes,
+          verifiedFileSizeBytes: modelSizeBytes,
+          metadataTrust: 'verified_local',
+          ggufMetadata: {
+            totalBytes: modelSizeBytes,
+            architecture: 'llama',
+            nLayers: 32,
+            nHeadKv: 16,
+            nEmbdHeadK: 128,
+            nEmbdHeadV: 128,
+          },
+          runtimeParams: {
+            gpuLayers: 0,
+            cacheTypeK: 'f16',
+            cacheTypeV: 'f16',
+            useMmap: true,
+          },
+        },
+      });
+
       expect(lastModelParametersSheetProps?.contextWindowCeiling).toBe(resolveContextWindowCeiling({
         modelMaxContextTokens: 32768,
-        modelSizeBytes,
         totalMemoryBytes,
+        input: {
+          modelSizeBytes,
+          verifiedFileSizeBytes: modelSizeBytes,
+          metadataTrust: 'verified_local',
+          ggufMetadata: {
+            totalBytes: modelSizeBytes,
+            architecture: 'llama',
+            nLayers: 32,
+            nHeadKv: 16,
+            nEmbdHeadK: 128,
+            nEmbdHeadV: 128,
+          },
+          runtimeParams: {
+            gpuLayers: 0,
+            cacheTypeK: 'f16',
+            cacheTypeV: 'f16',
+            useMmap: true,
+          },
+        },
       }));
       expect(lastModelParametersSheetProps?.loadParamsDraft.contextSize).toBe(loweredCeiling);
       expect(getByTestId('context-size-value').props.children).toBe(String(loweredCeiling));

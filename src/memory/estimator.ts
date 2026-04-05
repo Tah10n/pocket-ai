@@ -7,6 +7,7 @@ import type {
   MemoryMetadataTrust,
 } from './types';
 import { createMemoryBudget, type MemoryBudgetSnapshot } from './budget';
+import { normalizeCalibrationRecordFactors } from './calibration';
 
 export const ESTIMATED_MODEL_RUNTIME_OVERHEAD_FACTOR = 0.2;
 const DEFAULT_KV_CACHE_BYTES_PER_ELEMENT = 2; // f16
@@ -62,17 +63,6 @@ function readNumericRuntimeParam(runtimeParams: Record<string, unknown>, keys: s
   for (const key of keys) {
     const value = toFinitePositiveNumber(runtimeParams[key]);
     if (value !== null) {
-      return value;
-    }
-  }
-
-  return null;
-}
-
-function readBooleanRuntimeParam(runtimeParams: Record<string, unknown>, keys: string[]): boolean | null {
-  for (const key of keys) {
-    const value = runtimeParams[key];
-    if (typeof value === 'boolean') {
       return value;
     }
   }
@@ -183,20 +173,18 @@ function estimateKvCacheBytes({
   const nEmbdHeadK = readNumericMetadata(ggufMetadata, ['nEmbdHeadK', 'n_embd_head_k']);
   const nEmbdHeadV = readNumericMetadata(ggufMetadata, ['nEmbdHeadV', 'n_embd_head_v']) ?? nEmbdHeadK;
 
-  const hasKvMetadata = Boolean(
-    kvCacheTokens
-    && nLayers
-    && nHeadKv
-    && nEmbdHeadK
-    && nEmbdHeadV
-    && kvCacheTokens > 0
-    && nLayers > 0
-    && nHeadKv > 0
-    && nEmbdHeadK > 0
-    && nEmbdHeadV > 0,
-  );
-
-  if (!hasKvMetadata) {
+  if (
+    kvCacheTokens === null
+    || nLayers === null
+    || nHeadKv === null
+    || nEmbdHeadK === null
+    || nEmbdHeadV === null
+    || kvCacheTokens <= 0
+    || nLayers <= 0
+    || nHeadKv <= 0
+    || nEmbdHeadK <= 0
+    || nEmbdHeadV <= 0
+  ) {
     return { kvCacheBytes: 0, hasKvMetadata: false };
   }
 
@@ -296,14 +284,14 @@ function createComponentBreakdown(input: EstimatorInput): {
 } {
   const verifiedWeights = toFinitePositiveNumber(input.verifiedFileSizeBytes);
   const modelSize = toFinitePositiveNumber(input.modelSizeBytes);
-  const weightsBytes = verifiedWeights ?? modelSize ?? 0;
+  const weightsResidentBytes = verifiedWeights ?? modelSize ?? 0;
   const usedVerifiedWeights = verifiedWeights !== null;
 
-  if (weightsBytes <= 0) {
+  if (weightsResidentBytes <= 0) {
     return { breakdown: UNKNOWN_BREAKDOWN, hasKvMetadata: false, usedVerifiedWeights: false };
   }
 
-  const multimodalBytes = toFinitePositiveNumber(input.multimodalSizeBytes) ?? 0;
+  const multimodalProjectionBytes = toFinitePositiveNumber(input.multimodalSizeBytes) ?? 0;
   const ggufMetadata = input.ggufMetadata;
   const architecture = (
     typeof ggufMetadata?.architecture === 'string'
@@ -313,27 +301,49 @@ function createComponentBreakdown(input: EstimatorInput): {
         : null
   );
   const { kvCacheBytes, hasKvMetadata } = estimateKvCacheBytes({ ggufMetadata, runtimeParams: input.runtimeParams });
-  const computeBytes = estimateComputeBufferBytes({
+  const computeBufferBytes = estimateComputeBufferBytes({
     architecture,
-    weightsBytes,
+    weightsBytes: weightsResidentBytes,
     kvCacheBytes,
     runtimeParams: input.runtimeParams,
   });
-  const overheadBytes = estimateRuntimeOverheadBytes({ weightsBytes, multimodalBytes });
+  const runtimeOverheadBytes = estimateRuntimeOverheadBytes({
+    weightsBytes: weightsResidentBytes,
+    multimodalBytes: multimodalProjectionBytes,
+  });
 
-  const baseBytes = weightsBytes + kvCacheBytes + computeBytes + multimodalBytes + overheadBytes;
-  const safetyMarginBytes = estimateSafetyMarginBytes({
+  const calibration = input.calibrationRecord
+    ? normalizeCalibrationRecordFactors(input.calibrationRecord)
+    : null;
+  const weightsCorrectionFactor = calibration?.weightsCorrectionFactor ?? 1;
+  const computeCorrectionFactor = calibration?.computeCorrectionFactor ?? 1;
+  const overheadCorrectionFactor = calibration?.overheadCorrectionFactor ?? 1;
+  const failurePenaltyFactor = calibration?.failurePenaltyFactor ?? 1;
+
+  const calibratedWeightsResidentBytes = Math.round(Math.max(0, weightsResidentBytes * weightsCorrectionFactor));
+  const calibratedComputeBufferBytes = Math.round(Math.max(0, computeBufferBytes * computeCorrectionFactor));
+  const calibratedRuntimeOverheadBytes = Math.round(Math.max(0, runtimeOverheadBytes * overheadCorrectionFactor));
+
+  const baseBytes = (
+    calibratedWeightsResidentBytes
+    + kvCacheBytes
+    + calibratedComputeBufferBytes
+    + multimodalProjectionBytes
+    + calibratedRuntimeOverheadBytes
+  );
+  const rawSafetyMarginBytes = estimateSafetyMarginBytes({
     baseBytes,
     snapshotLowMemory: input.snapshot?.lowMemory === true,
   });
+  const safetyMarginBytes = Math.round(Math.max(0, rawSafetyMarginBytes * failurePenaltyFactor));
 
   return {
     breakdown: {
-      weightsBytes,
+      weightsBytes: calibratedWeightsResidentBytes,
       kvCacheBytes,
-      computeBytes,
-      multimodalBytes,
-      overheadBytes,
+      computeBytes: calibratedComputeBufferBytes,
+      multimodalBytes: multimodalProjectionBytes,
+      overheadBytes: calibratedRuntimeOverheadBytes,
       safetyMarginBytes,
     },
     hasKvMetadata,
@@ -453,18 +463,6 @@ export function estimateMemoryFitFromModelSize({
   };
 }
 
-function downgradeConfidence(confidence: MemoryFitConfidence): MemoryFitConfidence {
-  if (confidence === 'high') {
-    return 'medium';
-  }
-
-  if (confidence === 'medium') {
-    return 'low';
-  }
-
-  return 'low';
-}
-
 function confidenceForAccurateEstimate({
   hasLiveSnapshot,
   hasKvMetadata,
@@ -517,16 +515,20 @@ export function estimateAccurateMemoryFit({
   const { effectiveBudgetBytes, budget } = createMemoryBudget({
     totalMemoryBytes: resolvedTotalMemoryBytes,
     systemMemorySnapshot: input.snapshot ?? null,
+    learnedSafeBudgetBytes: input.calibrationRecord?.learnedSafeBudgetBytes,
   });
 
-  const decision = decisionForBudgetFit({ requiredBytes, effectiveBudgetBytes });
+  const hasTrustedBudget = budget.totalMemoryBytes > 0;
+  const decision = hasTrustedBudget
+    ? decisionForBudgetFit({ requiredBytes, effectiveBudgetBytes })
+    : 'unknown';
 
   let confidence = confidenceForAccurateEstimate({
     hasLiveSnapshot,
     hasKvMetadata,
     metadataTrust: input.metadataTrust,
     usedVerifiedWeights,
-    hasTrustedTotalMemory: Boolean(resolvedTotalMemoryBytes),
+    hasTrustedTotalMemory: hasTrustedBudget,
     needsKvMetadata,
   });
 

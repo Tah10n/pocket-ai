@@ -15,7 +15,7 @@ import {
 } from '@/services/ModelCatalogService';
 import { offloadModel } from '@/services/StorageManagerService';
 import { LifecycleStatus, type ModelMetadata } from '@/types/models';
-import { getReportedErrorMessage } from '../services/AppError';
+import { getReportedErrorMessage, toAppError } from '../services/AppError';
 import {
   buildModelDetailsHeroMetrics,
   buildModelDetailsMetadataMetrics,
@@ -188,16 +188,32 @@ export function useModelDetailsController(modelId: string) {
       await loadModel(targetModelId, options);
       setRuntimeRevision((current) => current + 1);
     } catch (error) {
+      const appError = toAppError(error);
+      if (appError.code === 'model_memory_warning') {
+        Alert.alert(
+          t('models.memoryWarningTitle'),
+          t('models.loadMemoryWarningMessage'),
+          [
+            { text: t('common.cancel'), style: 'cancel' },
+            { text: t('models.loadAnyway'), onPress: () => { void performLoad(targetModelId, { ...options, allowUnsafeMemoryLoad: true }); } },
+          ],
+        );
+        return;
+      }
+
       showModelActionError('ModelDetailsScreen.performLoad', error);
     }
-  }, [loadModel, showModelActionError]);
+  }, [loadModel, showModelActionError, t]);
 
   const handleLoad = useCallback(async () => {
     if (!displayModel) {
       return;
     }
 
-    if (displayModel.fitsInRam === false) {
+    const shouldWarnForMemory = displayModel.memoryFitDecision === 'borderline'
+      || displayModel.memoryFitDecision === 'likely_oom'
+      || (displayModel.memoryFitDecision === undefined && displayModel.fitsInRam === false);
+    if (shouldWarnForMemory) {
       Alert.alert(
         t('models.memoryWarningTitle'),
         t('models.loadMemoryWarningMessage'),

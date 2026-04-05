@@ -86,7 +86,10 @@ export function startModelDownloadFlow({
         return;
       }
 
-      if (resolvedModel.fitsInRam === false) {
+      const shouldWarnForMemory = resolvedModel.memoryFitDecision === 'borderline'
+        || resolvedModel.memoryFitDecision === 'likely_oom'
+        || (resolvedModel.memoryFitDecision === undefined && resolvedModel.fitsInRam === false);
+      if (shouldWarnForMemory) {
         Alert.alert(
           t('models.memoryWarningTitle'),
           t('models.downloadMemoryWarningMessage'),

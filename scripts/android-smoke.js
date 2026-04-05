@@ -8,6 +8,7 @@ const { spawn, spawnSync } = require("child_process");
 
 const cliOptions = parseCliOptions(process.argv.slice(2));
 const projectRoot = path.resolve(__dirname, "..");
+const artifactsRoot = path.join(projectRoot, "artifacts", "android-scenarios");
 const androidRoot = path.join(projectRoot, "android");
 const localPropertiesPath = path.join(androidRoot, "local.properties");
 const appConfigPath = path.join(projectRoot, "app.json");
@@ -93,14 +94,19 @@ async function main() {
     throw new Error(`Expected debug APK at ${apkPath}, but it was not found.`);
   }
 
-  installDebugApk(tools.adb, device.serial);
+  installDebugApk(tools.adb, device.serial, appPackage);
   reverseMetroPort(tools.adb, device.serial, metro.port);
+
+  runCapture(tools.adb, ["-s", device.serial, "logcat", "-c"], { allowFailure: true });
   launchDevClient(tools.adb, device.serial, appPackage, appScheme, metro.port);
 
   if (screenshotPath) {
     await delay(launchDelayMs);
     wakeAndUnlockDevice(tools.adb, device.serial);
     saveScreenshot(tools.adb, device.serial, screenshotPath);
+
+    const logcatPath = path.join(path.dirname(screenshotPath), "bootstrap-logcat.txt");
+    saveLogcat(tools.adb, device.serial, logcatPath);
   }
 
   log(
@@ -433,6 +439,10 @@ function startMetroProcess(port) {
     NODE_ENV: process.env.NODE_ENV || "development",
   };
 
+  fs.mkdirSync(artifactsRoot, { recursive: true });
+  const metroLogPath = path.join(artifactsRoot, `metro-${port}.log`);
+  const metroLogFd = fs.openSync(metroLogPath, "w");
+
   if (process.platform === "win32") {
     const command = `npm run start -- --dev-client --localhost --port ${port}`;
     return spawn(
@@ -441,7 +451,7 @@ function startMetroProcess(port) {
       {
         cwd: projectRoot,
         detached: true,
-        stdio: "ignore",
+        stdio: ["ignore", metroLogFd, metroLogFd],
         env,
         windowsHide: true,
       }
@@ -454,7 +464,7 @@ function startMetroProcess(port) {
     {
       cwd: projectRoot,
       detached: true,
-      stdio: "ignore",
+      stdio: ["ignore", metroLogFd, metroLogFd],
       env,
     }
   );
@@ -543,11 +553,55 @@ function buildDebugApk() {
   });
 }
 
-function installDebugApk(adbPath, serial) {
+function isPackageInstalled(adbPath, serial, appPackage) {
+  const output = runCapture(
+    adbPath,
+    ["-s", serial, "shell", "pm", "path", appPackage],
+    { allowFailure: true }
+  ).trim();
+
+  return output.startsWith("package:");
+}
+
+function installDebugApk(adbPath, serial, appPackage) {
   log("Installing debug APK...");
-  runChecked(adbPath, ["-s", serial, "install", "-r", apkPath], {
-    stdio: "inherit",
+
+  const result = spawnSync(adbPath, ["-s", serial, "install", "-r", apkPath], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
   });
+
+  if (result.error) {
+    throw result.error;
+  }
+
+  const output = `${result.stdout || ""}${result.stderr || ""}`;
+  if (output) {
+    process.stdout.write(output);
+  }
+
+  if (result.status === 0) {
+    return;
+  }
+
+  if (output.includes("INSTALL_FAILED_INSUFFICIENT_STORAGE")) {
+    log("APK install failed due to insufficient storage. Attempting to reuse the existing app installation...");
+
+    if (isPackageInstalled(adbPath, serial, appPackage)) {
+      log("Existing installation detected. Continuing without reinstalling the debug APK.");
+      return;
+    }
+
+    throw new Error(
+      "Android target storage is insufficient and the app is not currently installed. " +
+        "Free space on the device/emulator (or wipe the emulator) and retry."
+    );
+  }
+
+  const trimmed = output.trim();
+  throw new Error(
+    `Command failed: ${adbPath} -s ${serial} install -r ${apkPath}${trimmed ? `\n${trimmed}` : ""}`
+  );
 }
 
 function reverseMetroPort(adbPath, serial, port) {
@@ -573,6 +627,7 @@ function launchDevClient(adbPath, serial, appPackage, appScheme, port) {
       "am",
       "start",
       "-W",
+      "-S",
       "-a",
       "android.intent.action.VIEW",
       "-d",
@@ -605,6 +660,19 @@ function saveScreenshot(adbPath, serial, outputPath) {
   }
 
   fs.writeFileSync(outputPath, result.stdout);
+}
+
+function saveLogcat(adbPath, serial, outputPath) {
+  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+
+  const logs = runCapture(
+    adbPath,
+    ["-s", serial, "logcat", "-d", "-v", "time", "-t", "800"],
+    { allowFailure: true }
+  );
+
+  fs.writeFileSync(outputPath, logs);
+  log(`Saved logcat to ${outputPath}.`);
 }
 
 function runCapture(command, args, options = {}) {

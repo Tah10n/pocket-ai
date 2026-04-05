@@ -9,6 +9,7 @@ export type AppErrorCode =
   | 'model_load_failed'
   | 'model_incompatible'
   | 'model_memory_insufficient'
+  | 'model_memory_warning'
   | 'download_disk_space_low'
   | 'download_size_unknown'
   | 'download_metadata_unavailable'
@@ -25,6 +26,7 @@ const ERROR_MESSAGE_KEYS: Partial<Record<AppErrorCode, string>> = {
   model_load_failed: 'common.errors.modelLoadFailed',
   model_incompatible: 'common.errors.modelIncompatible',
   model_memory_insufficient: 'common.errors.modelMemoryInsufficient',
+  model_memory_warning: 'common.errors.modelMemoryWarning',
   download_disk_space_low: 'common.errors.downloadDiskSpaceLow',
   download_size_unknown: 'common.errors.downloadSizeUnknown',
   download_metadata_unavailable: 'common.errors.downloadMetadataUnavailable',

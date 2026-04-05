@@ -78,6 +78,7 @@ describe('LocalStorageRegistry', () => {
     (registry as any).saveModels = originalSaveModels;
     (registry as any).cachedModels = null;
     (registry as any).cachedModelsById = null;
+    (registry as any).cachedCalibrationRecordsByKey = null;
   });
 
   it('should remove model and delete file', async () => {
@@ -216,6 +217,71 @@ describe('LocalStorageRegistry', () => {
     expect(normalized.accessState).toBe(ModelAccessState.PUBLIC);
     expect(normalized.isGated).toBe(false);
     expect(normalized.isPrivate).toBe(false);
+  });
+
+  it('persists and returns calibration records keyed by configuration', () => {
+    const freshRegistry = new (LocalStorageRegistry as any)();
+    (freshRegistry as any).storage = mockStorage;
+    (freshRegistry as any).cachedCalibrationRecordsByKey = null;
+
+    mockStorage.getString.mockImplementation(() => null);
+
+    freshRegistry.saveCalibrationRecord({
+      key: ' test-key ',
+      sampleCount: 1,
+      successCount: 1,
+      failureCount: 0,
+      weightsCorrectionFactor: 1,
+      computeCorrectionFactor: 1,
+      overheadCorrectionFactor: 1,
+      failurePenaltyFactor: 1,
+      lastObservedAtMs: 123,
+    });
+
+    expect(mockStorage.set).toHaveBeenCalledWith(
+      'memory-fit-calibration-records-v1',
+      expect.stringContaining('"key":"test-key"'),
+    );
+
+    expect(freshRegistry.getCalibrationRecord('test-key')).toMatchObject({
+      key: 'test-key',
+      sampleCount: 1,
+      successCount: 1,
+      failureCount: 0,
+    });
+  });
+
+  it('hydrates calibration records stored as an object map', () => {
+    mockStorage.getString.mockImplementation((key: string) => {
+      if (key === 'memory-fit-calibration-records-v1') {
+        return JSON.stringify({
+          'legacy-key': {
+            key: 'legacy-key',
+            sampleCount: 2,
+            successCount: 2,
+            failureCount: 0,
+            weightsCorrectionFactor: 1,
+            computeCorrectionFactor: 1,
+            overheadCorrectionFactor: 1,
+            failurePenaltyFactor: 1,
+            lastObservedAtMs: 5,
+          },
+        });
+      }
+
+      return null;
+    });
+
+    const freshRegistry = new (LocalStorageRegistry as any)();
+    (freshRegistry as any).storage = mockStorage;
+    (freshRegistry as any).cachedCalibrationRecordsByKey = null;
+
+    expect(freshRegistry.getCalibrationRecord('legacy-key')).toMatchObject({
+      key: 'legacy-key',
+      sampleCount: 2,
+      successCount: 2,
+      failureCount: 0,
+    });
   });
 
   it('hydrates the registry from storage once and serves repeated lookups from cache', () => {

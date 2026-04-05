@@ -80,11 +80,32 @@ describe('LLMEngineService Stability', () => {
     });
 
     it('loads a model even when total-memory resolution fails', async () => {
+        const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+
         (DeviceInfo.getTotalMemory as jest.Mock).mockRejectedValueOnce(new Error('E_TOTAL_MEM'));
         (initLlama as jest.Mock).mockResolvedValue({}); // Success
 
-        await expect(llmEngineService.load(mockModel.id)).resolves.toBeUndefined();
-        expect(initLlama).toHaveBeenCalled();
+        try {
+            await expect(llmEngineService.load(mockModel.id)).resolves.toBeUndefined();
+            expect(initLlama).toHaveBeenCalled();
+        } finally {
+            warnSpy.mockRestore();
+        }
+    });
+
+    it('returns unknown for fitsInRam checks when total-memory resolution fails', async () => {
+        const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+        (DeviceInfo.getTotalMemory as jest.Mock).mockRejectedValueOnce(new Error('E_TOTAL_MEM'));
+
+        try {
+            await expect(llmEngineService.fitsInRam(1_700_000_000)).resolves.toMatchObject({
+                decision: 'unknown',
+                confidence: 'low',
+            });
+        } finally {
+            warnSpy.mockRestore();
+        }
     });
 
     it('uses 0 GPU layers on low-end devices (e.g. 4GB RAM)', async () => {

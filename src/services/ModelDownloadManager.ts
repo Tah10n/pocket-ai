@@ -2,7 +2,13 @@ import DeviceInfo from 'react-native-device-info';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as RNFS from 'react-native-fs';
 import { useDownloadStore } from '../store/downloadStore';
-import { ModelAccessState, ModelMetadata, LifecycleStatus } from '../types/models';
+import {
+  ModelAccessState,
+  type ModelMemoryFitConfidence,
+  type ModelMemoryFitDecision,
+  ModelMetadata,
+  LifecycleStatus,
+} from '../types/models';
 import { registry } from './LocalStorageRegistry';
 import { getModelsDir } from './FileSystemSetup';
 import { AppError, toAppError } from './AppError';
@@ -188,13 +194,15 @@ export class ModelDownloadManager {
       const metadataTrust = typeof downloadedSize === 'number' && Number.isFinite(downloadedSize) && downloadedSize > 0
         ? 'verified_local' as const
         : model.metadataTrust;
-      const fitsInRam = await this.resolveFitsInRam(downloadedSize, metadataTrust);
+      const memoryFit = await this.resolveMemoryFit(downloadedSize, metadataTrust);
 
       // Success
       const completedModel: ModelMetadata = {
         ...model,
         size: downloadedSize ?? null,
-        fitsInRam,
+        fitsInRam: memoryFit.fitsInRam,
+        memoryFitDecision: memoryFit.decision,
+        memoryFitConfidence: memoryFit.confidence,
         metadataTrust,
         gguf: typeof downloadedSize === 'number' && Number.isFinite(downloadedSize) && downloadedSize > 0
           ? {
@@ -420,9 +428,13 @@ export class ModelDownloadManager {
     return decodeURI(fileUri.replace(/^file:\/+/, '/'));
   }
 
-  private async resolveFitsInRam(size: number | null, metadataTrust: ModelMetadata['metadataTrust']): Promise<boolean | null> {
+  private async resolveMemoryFit(size: number | null, metadataTrust: ModelMetadata['metadataTrust']): Promise<{
+    fitsInRam: boolean | null;
+    decision: ModelMemoryFitDecision;
+    confidence: ModelMemoryFitConfidence;
+  }> {
     if (typeof size !== 'number' || !Number.isFinite(size) || size <= 0) {
-      return null;
+      return { fitsInRam: null, decision: 'unknown', confidence: 'low' };
     }
 
     let totalMemoryBytes: number | null = null;
@@ -437,11 +449,13 @@ export class ModelDownloadManager {
       metadataTrust,
     });
 
-    if (fit.decision === 'unknown') {
-      return null;
-    }
-
-    return fit.decision === 'fits_high_confidence' || fit.decision === 'fits_low_confidence';
+    return {
+      fitsInRam: fit.decision === 'unknown'
+        ? null
+        : fit.decision === 'fits_high_confidence' || fit.decision === 'fits_low_confidence',
+      decision: fit.decision,
+      confidence: fit.confidence,
+    };
   }
 
   private async deleteCorruptedDownload(localUri: string, modelId: string): Promise<void> {

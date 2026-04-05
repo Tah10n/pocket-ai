@@ -57,6 +57,7 @@ const ModelCardComponent = ({
 }: ModelCardProps) => {
   const { t } = useTranslation();
   const sizeLabel = formatModelFileSize(model.size, t('models.sizeUnknown'));
+  const memoryFitDecision = model.memoryFitDecision;
   const accessBadge = model.accessState === ModelAccessState.AUTH_REQUIRED
     ? {
         text: t('models.requiresToken'),
@@ -106,7 +107,19 @@ const ModelCardComponent = ({
             {accessBadge.text}
           </ScreenBadge>
         ) : null}
-        {model.fitsInRam === false ? (
+        {memoryFitDecision === 'likely_oom' ? (
+          <ScreenBadge tone="error" size="micro" iconName="warning">
+            {t('models.ramLikelyOom')}
+          </ScreenBadge>
+        ) : memoryFitDecision === 'borderline' ? (
+          <ScreenBadge tone="warning" size="micro" iconName="warning">
+            {t('models.ramBorderline')}
+          </ScreenBadge>
+        ) : memoryFitDecision === 'unknown' && model.size !== null ? (
+          <ScreenBadge tone="neutral" size="micro" iconName="help">
+            {t('models.ramFitUnknown')}
+          </ScreenBadge>
+        ) : memoryFitDecision === undefined && model.fitsInRam === false ? (
           <ScreenBadge tone="warning" size="micro" iconName="warning">
             {t('models.ramWarning')}
           </ScreenBadge>
@@ -150,6 +163,8 @@ export const ModelCard = memo(ModelCardComponent, (prevProps, nextProps) => {
          prevProps.model.lifecycleStatus === nextProps.model.lifecycleStatus &&
          prevProps.model.downloadProgress === nextProps.model.downloadProgress &&
          prevProps.model.fitsInRam === nextProps.model.fitsInRam &&
+         prevProps.model.memoryFitDecision === nextProps.model.memoryFitDecision &&
+         prevProps.model.memoryFitConfidence === nextProps.model.memoryFitConfidence &&
          prevProps.model.size === nextProps.model.size &&
          prevProps.model.accessState === nextProps.model.accessState;
 });

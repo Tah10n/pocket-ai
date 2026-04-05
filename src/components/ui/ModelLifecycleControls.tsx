@@ -1,6 +1,7 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { ModelAccessState, LifecycleStatus, type ModelMetadata } from '../../types/models';
+import { useDownloadStore } from '../../store/downloadStore';
 import { Box } from './box';
 import { ScreenActionPill, ScreenIconButton } from './ScreenShell';
 import { Text } from './text';
@@ -63,17 +64,42 @@ export function ModelDownloadProgress({
   model,
   className,
 }: {
-  model: Pick<ModelMetadata, 'downloadProgress' | 'lifecycleStatus'>;
+  model: Pick<ModelMetadata, 'id' | 'downloadProgress' | 'lifecycleStatus'>;
   className?: string;
 }) {
-  const { t } = useTranslation();
-
   if (!isModelDownloading(model)) {
     return null;
   }
 
-  const rawProgressPercent = Number.isFinite(model.downloadProgress)
-    ? Math.round(model.downloadProgress * 100)
+  return (
+    <ModelDownloadProgressInner
+      modelId={model.id}
+      lifecycleStatus={model.lifecycleStatus}
+      fallbackProgress={model.downloadProgress}
+      className={className}
+    />
+  );
+}
+
+function ModelDownloadProgressInner({
+  modelId,
+  lifecycleStatus,
+  fallbackProgress,
+  className,
+}: {
+  modelId: string;
+  lifecycleStatus: LifecycleStatus;
+  fallbackProgress: number;
+  className?: string;
+}) {
+  const { t } = useTranslation();
+  const downloadProgress = useDownloadStore((state) => {
+    const queuedModel = state.queue.find((queuedItem) => queuedItem.id === modelId);
+    return queuedModel?.downloadProgress ?? fallbackProgress;
+  });
+
+  const rawProgressPercent = Number.isFinite(downloadProgress)
+    ? Math.round(downloadProgress * 100)
     : 0;
   const progressPercent = Math.max(0, Math.min(100, rawProgressPercent));
 
@@ -81,7 +107,7 @@ export function ModelDownloadProgress({
     <Box className={className}>
       <Box className="mb-1 flex-row justify-between">
         <Text className="text-xs text-typography-500">
-          {model.lifecycleStatus === LifecycleStatus.VERIFYING
+          {lifecycleStatus === LifecycleStatus.VERIFYING
             ? t('models.verifying')
             : t('models.downloading')}
         </Text>

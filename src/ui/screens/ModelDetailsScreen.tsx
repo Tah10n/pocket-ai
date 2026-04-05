@@ -125,14 +125,37 @@ export function ModelDetailsScreen() {
                           {t('common.active')}
                         </ScreenBadge>
                       ) : null}
-                      {displayModel.fitsInRam === true ? (
+                      {displayModel.memoryFitDecision === 'fits_high_confidence'
+                      || displayModel.memoryFitDecision === 'fits_low_confidence'
+                      || (displayModel.memoryFitDecision === undefined && displayModel.fitsInRam === true) ? (
                         <ScreenBadge tone="success" size="micro" iconName="memory">
                           {t('models.ramFitYes')}
                         </ScreenBadge>
                       ) : null}
-                      {displayModel.fitsInRam === false ? (
-                        <ScreenBadge tone="warning" size="micro" iconName="warning">
-                          {t('models.ramWarning')}
+                      {displayModel.memoryFitDecision === 'likely_oom' ? (
+                        <ScreenBadge tone="error" size="micro" iconName="warning">
+                          {t('models.ramLikelyOom')}
+                        </ScreenBadge>
+                      ) : displayModel.memoryFitDecision === 'borderline' ? (
+                          <ScreenBadge tone="warning" size="micro" iconName="warning">
+                            {t('models.ramBorderline')}
+                          </ScreenBadge>
+                        ) : displayModel.memoryFitDecision === 'unknown' && displayModel.size !== null ? (
+                          <ScreenBadge tone="neutral" size="micro" iconName="help">
+                            {t('models.ramFitUnknown')}
+                          </ScreenBadge>
+                        ) : displayModel.memoryFitDecision === undefined && displayModel.fitsInRam === false ? (
+                          <ScreenBadge tone="warning" size="micro" iconName="warning">
+                            {t('models.ramWarning')}
+                          </ScreenBadge>
+                        ) : null}
+                      {displayModel.memoryFitConfidence ? (
+                        <ScreenBadge tone="neutral" size="micro">
+                          {displayModel.memoryFitConfidence === 'high'
+                            ? t('models.ramFitConfidenceHigh')
+                            : displayModel.memoryFitConfidence === 'medium'
+                              ? t('models.ramFitConfidenceMedium')
+                              : t('models.ramFitConfidenceLow')}
                         </ScreenBadge>
                       ) : null}
                     </>

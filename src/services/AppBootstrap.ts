@@ -19,6 +19,7 @@ import { useChatStore } from '../store/chatStore';
 import { useModelsStore } from '../store/modelsStore';
 import { performanceMonitor } from './PerformanceMonitor';
 import { initializePrivateStorageEncryption } from './storage';
+import { toAppError } from './AppError';
 import {
   ChatMessage,
   ChatThread,
@@ -173,15 +174,30 @@ function scheduleActiveModelRestore(activeModelId: string): void {
       modelId: activeModelId,
     });
 
-    void llmEngineService.load(activeModelId)
-      .then(() => {
+    const restore = async () => {
+      try {
+        await llmEngineService.load(activeModelId);
         restoreSpan.end({ outcome: 'success' });
-      })
-      .catch((e) => {
-        console.warn('[bootstrapApp] Failed to restore active model', e);
+      } catch (error) {
+        const appError = toAppError(error);
+        if (appError.code === 'model_memory_warning') {
+          try {
+            await llmEngineService.load(activeModelId, { forceReload: true, allowUnsafeMemoryLoad: true });
+            restoreSpan.end({ outcome: 'success_safe' });
+            return;
+          } catch (retryError) {
+            console.warn('[bootstrapApp] Failed to restore active model after safe-load retry', retryError);
+          }
+        } else {
+          console.warn('[bootstrapApp] Failed to restore active model', error);
+        }
+
         updateSettings({ activeModelId: null });
         restoreSpan.end({ outcome: 'error' });
-      });
+      }
+    };
+
+    void restore();
   });
 }
 

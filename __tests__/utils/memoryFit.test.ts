@@ -167,4 +167,23 @@ describe('memoryFit', () => {
       }),
     }));
   });
+
+  it('returns unknown for accurate estimates when total memory is missing', () => {
+    const result = estimateAccurateMemoryFit({
+      input: {
+        modelSizeBytes: 1_000_000_000,
+        metadataTrust: 'unknown',
+        runtimeParams: {},
+      },
+      totalMemoryBytes: null,
+    });
+
+    expect(result).toEqual(expect.objectContaining({
+      decision: 'unknown',
+      confidence: 'low',
+      budget: expect.objectContaining({
+        totalMemoryBytes: 0,
+      }),
+    }));
+  });
 });

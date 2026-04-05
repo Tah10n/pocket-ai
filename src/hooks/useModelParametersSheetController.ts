@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Alert } from 'react-native';
 import DeviceInfo from 'react-native-device-info';
 import { useTranslation } from 'react-i18next';
 import { llmEngineService } from '@/services/LLMEngineService';
+import { toAppError } from '@/services/AppError';
 import { registry } from '@/services/LocalStorageRegistry';
 import { modelCatalogService } from '@/services/ModelCatalogService';
 import {
@@ -94,8 +96,28 @@ export function useModelParametersSheetController({
   const defaultLoadParams = getModelLoadParametersForModel(null);
   const baseContextWindowCeiling = useMemo(() => resolveContextWindowCeiling({
     modelMaxContextTokens: configurableModel?.maxContextTokens,
-    modelSizeBytes: configurableModel?.size ?? null,
-  }), [configurableModel?.maxContextTokens, configurableModel?.size]);
+    input: {
+      modelSizeBytes: configurableModel?.size ?? null,
+      verifiedFileSizeBytes: configurableModel?.metadataTrust === 'verified_local'
+        ? configurableModel?.gguf?.totalBytes ?? configurableModel?.size ?? undefined
+        : undefined,
+      metadataTrust: configurableModel?.metadataTrust ?? 'unknown',
+      ggufMetadata: configurableModel?.gguf as unknown as Record<string, unknown> | undefined,
+      runtimeParams: {
+        gpuLayers: currentLoadParams.gpuLayers ?? recommendedGpuLayers,
+        cacheTypeK: 'f16',
+        cacheTypeV: 'f16',
+        useMmap: true,
+      },
+    },
+  }), [
+    configurableModel?.gguf,
+    configurableModel?.maxContextTokens,
+    configurableModel?.metadataTrust,
+    configurableModel?.size,
+    currentLoadParams.gpuLayers,
+    recommendedGpuLayers,
+  ]);
   const contextWindowCeiling = measuredContextWindowCeiling ?? baseContextWindowCeiling;
   const effectiveCurrentLoadParams = {
     contextSize: clampContextWindowTokens(currentLoadParams.contextSize, contextWindowCeiling),
@@ -174,8 +196,21 @@ export function useModelParametersSheetController({
         if (!isCancelled) {
           setMeasuredContextWindowCeiling(resolveContextWindowCeiling({
             modelMaxContextTokens: resolvedModel?.maxContextTokens,
-            modelSizeBytes: resolvedModel?.size ?? null,
             totalMemoryBytes,
+            input: {
+              modelSizeBytes: resolvedModel?.size ?? null,
+              verifiedFileSizeBytes: resolvedModel?.metadataTrust === 'verified_local'
+                ? resolvedModel?.gguf?.totalBytes ?? resolvedModel?.size ?? undefined
+                : undefined,
+              metadataTrust: resolvedModel?.metadataTrust ?? 'unknown',
+              ggufMetadata: resolvedModel?.gguf as unknown as Record<string, unknown> | undefined,
+              runtimeParams: {
+                gpuLayers: currentLoadParams.gpuLayers ?? recommendedGpuLayers,
+                cacheTypeK: 'f16',
+                cacheTypeV: 'f16',
+                useMmap: true,
+              },
+            },
           }));
         }
       })
@@ -188,7 +223,7 @@ export function useModelParametersSheetController({
     return () => {
       isCancelled = true;
     };
-  }, [configurableModelId, isOpen]);
+  }, [configurableModelId, currentLoadParams.gpuLayers, isOpen, recommendedGpuLayers]);
 
   useEffect(() => {
     if (!isOpen) {
@@ -295,6 +330,31 @@ export function useModelParametersSheetController({
         await Promise.resolve(onAfterActiveModelReload?.(configurableModelId));
       }
     } catch (error) {
+      const appError = toAppError(error);
+      if (appError.code === 'model_memory_warning') {
+        Alert.alert(
+          t('models.memoryWarningTitle'),
+          t('models.loadMemoryWarningMessage'),
+          [
+            { text: t('common.cancel'), style: 'cancel' },
+            {
+              text: t('models.loadAnyway'),
+              onPress: () => {
+                void (async () => {
+                  try {
+                    await llmEngineService.load(configurableModelId, { forceReload: true, allowUnsafeMemoryLoad: true });
+                    await Promise.resolve(onAfterActiveModelReload?.(configurableModelId));
+                  } catch (retryError) {
+                    showError(applyReloadErrorScope, retryError);
+                  }
+                })();
+              },
+            },
+          ],
+        );
+        return;
+      }
+
       showError(applyReloadErrorScope, error);
     } finally {
       setApplyingModelProfile(false);
@@ -311,6 +371,7 @@ export function useModelParametersSheetController({
     recommendedGpuLayers,
     resolvedActiveModelId,
     showError,
+    t,
   ]);
 
   const handleChangeParams = useCallback((partial: Partial<GenerationParameters>) => {

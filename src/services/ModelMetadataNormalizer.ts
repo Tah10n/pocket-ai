@@ -3,6 +3,8 @@ import {
   ModelAccessState,
   type ModelGgufMetadata,
   type ModelMetadata,
+  type ModelMemoryFitConfidence,
+  type ModelMemoryFitDecision,
   type ModelMetadataTrust,
 } from '../types/models';
 import { buildHuggingFaceResolveUrl } from '../utils/huggingFaceUrls';
@@ -73,6 +75,34 @@ function normalizeMetadataTrust(value: unknown): ModelMetadataTrust | undefined 
     : undefined;
 }
 
+function normalizeMemoryFitDecision(value: unknown): ModelMemoryFitDecision | undefined {
+  return value === 'fits_high_confidence'
+    || value === 'fits_low_confidence'
+    || value === 'borderline'
+    || value === 'likely_oom'
+    || value === 'unknown'
+    ? value
+    : undefined;
+}
+
+function normalizeMemoryFitConfidence(value: unknown): ModelMemoryFitConfidence | undefined {
+  return value === 'high' || value === 'medium' || value === 'low'
+    ? value
+    : undefined;
+}
+
+function fitsInRamForMemoryFitDecision(decision: ModelMemoryFitDecision): boolean | null {
+  if (decision === 'fits_high_confidence' || decision === 'fits_low_confidence') {
+    return true;
+  }
+
+  if (decision === 'borderline' || decision === 'likely_oom') {
+    return false;
+  }
+
+  return null;
+}
+
 function normalizePositiveInteger(value: unknown): number | undefined {
   const normalized = normalizeSize(value);
   return normalized === null ? undefined : normalized;
@@ -123,6 +153,8 @@ export function normalizePersistedModelMetadata(
   const normalizedAuthor = normalizeNonEmptyString(model.author) ?? model.id.split('/')[0] ?? 'unknown';
   const lifecycleStatus = normalizeLifecycleStatus(model.lifecycleStatus);
   const metadataTrust = normalizeMetadataTrust(model.metadataTrust);
+  const memoryFitDecision = size === null ? undefined : normalizeMemoryFitDecision(model.memoryFitDecision);
+  const memoryFitConfidence = size === null ? undefined : normalizeMemoryFitConfidence(model.memoryFitConfidence);
   const gguf = normalizeGgufMetadata(model.gguf);
   const rawProgress = typeof model.downloadProgress === 'number' && Number.isFinite(model.downloadProgress)
     ? model.downloadProgress
@@ -149,9 +181,13 @@ export function normalizePersistedModelMetadata(
     sha256: normalizeNonEmptyString(model.sha256),
     fitsInRam: size === null
       ? null
-      : typeof model.fitsInRam === 'boolean'
-        ? model.fitsInRam
-        : null,
+      : memoryFitDecision !== undefined
+        ? fitsInRamForMemoryFitDecision(memoryFitDecision)
+        : typeof model.fitsInRam === 'boolean'
+          ? model.fitsInRam
+          : null,
+    ...(memoryFitDecision !== undefined ? { memoryFitDecision } : {}),
+    ...(memoryFitConfidence !== undefined ? { memoryFitConfidence } : {}),
     ...(metadataTrust !== undefined ? { metadataTrust } : {}),
     ...(gguf !== undefined ? { gguf } : {}),
     accessState: normalizeAccessState(model.accessState),

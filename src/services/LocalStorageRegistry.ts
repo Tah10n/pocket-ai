@@ -5,10 +5,67 @@ import { createStorage } from './storage';
 import { ModelMetadata, LifecycleStatus } from '../types/models';
 import { getModelsDir } from './FileSystemSetup';
 import { normalizePersistedModelMetadata } from './ModelMetadataNormalizer';
-import { DEFAULT_TOTAL_MEMORY_BYTES } from '../memory/budget';
 import { estimateFastMemoryFit } from '../memory/estimator';
+import type { CalibrationRecord } from '../memory/types';
 
 const REGISTRY_KEY = 'models-registry';
+const CALIBRATION_RECORDS_KEY = 'memory-fit-calibration-records-v1';
+const MAX_CALIBRATION_RECORDS = 200;
+
+function cloneCalibrationRecord(record: CalibrationRecord): CalibrationRecord {
+  return { ...record };
+}
+
+function toFiniteNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function normalizeCalibrationRecord(value: unknown): CalibrationRecord | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const record = value as Partial<CalibrationRecord>;
+  if (typeof record.key !== 'string' || record.key.trim().length === 0) {
+    return null;
+  }
+
+  const sampleCount = toFiniteNumber(record.sampleCount);
+  const successCount = toFiniteNumber(record.successCount);
+  const failureCount = toFiniteNumber(record.failureCount);
+  const weightsCorrectionFactor = toFiniteNumber(record.weightsCorrectionFactor);
+  const computeCorrectionFactor = toFiniteNumber(record.computeCorrectionFactor);
+  const overheadCorrectionFactor = toFiniteNumber(record.overheadCorrectionFactor);
+  const failurePenaltyFactor = toFiniteNumber(record.failurePenaltyFactor);
+  const lastObservedAtMs = toFiniteNumber(record.lastObservedAtMs);
+  const learnedSafeBudgetBytes = toFiniteNumber(record.learnedSafeBudgetBytes);
+
+  if (
+    sampleCount === null
+    || successCount === null
+    || failureCount === null
+    || weightsCorrectionFactor === null
+    || computeCorrectionFactor === null
+    || overheadCorrectionFactor === null
+    || failurePenaltyFactor === null
+    || lastObservedAtMs === null
+  ) {
+    return null;
+  }
+
+  return {
+    key: record.key,
+    sampleCount: Math.max(0, Math.floor(sampleCount)),
+    successCount: Math.max(0, Math.floor(successCount)),
+    failureCount: Math.max(0, Math.floor(failureCount)),
+    weightsCorrectionFactor,
+    computeCorrectionFactor,
+    overheadCorrectionFactor,
+    failurePenaltyFactor,
+    learnedSafeBudgetBytes: learnedSafeBudgetBytes === null ? undefined : learnedSafeBudgetBytes,
+    lastObservedAtMs: Math.max(0, Math.floor(lastObservedAtMs)),
+  };
+}
 
 function cloneModelMetadata(model: ModelMetadata): ModelMetadata {
   return {
@@ -27,6 +84,7 @@ export class LocalStorageRegistry {
   private storage: MMKV | null = null;
   private cachedModels: ModelMetadata[] | null = null;
   private cachedModelsById: Map<string, ModelMetadata> | null = null;
+  private cachedCalibrationRecordsByKey: Map<string, CalibrationRecord> | null = null;
 
   private constructor() {}
 
@@ -50,6 +108,22 @@ export class LocalStorageRegistry {
    */
   public getModels(): ModelMetadata[] {
     return this.getCachedModels().map((model) => cloneModelMetadata(model));
+  }
+
+  public getCalibrationRecord(key: string): CalibrationRecord | undefined {
+    const record = this.getCachedCalibrationRecords().get(key);
+    return record ? cloneCalibrationRecord(record) : undefined;
+  }
+
+  public saveCalibrationRecord(record: CalibrationRecord): void {
+    const normalizedKey = typeof record.key === 'string' ? record.key.trim() : '';
+    if (normalizedKey.length === 0) {
+      return;
+    }
+
+    const records = this.getCachedCalibrationRecords();
+    records.set(normalizedKey, cloneCalibrationRecord({ ...record, key: normalizedKey }));
+    this.persistCalibrationRecords(records);
   }
 
   /**
@@ -111,7 +185,7 @@ export class LocalStorageRegistry {
   public async validateRegistry(queuedFileNames: string[] = []): Promise<void> {
     const models = this.getModels();
     const modelsDir = getModelsDir();
-    const totalMemory = await this.getTotalMemory();
+    const totalMemoryBytes = await this.getTotalMemory();
     let changed = false;
 
     if (!modelsDir) {
@@ -180,12 +254,14 @@ export class LocalStorageRegistry {
               : model.metadataTrust;
             const fit = estimateFastMemoryFit({
               modelSizeBytes: sizeBytesForFit,
-              totalMemoryBytes: totalMemory,
+              totalMemoryBytes,
               metadataTrust: metadataTrustForFit,
             });
             const fitsInRam = fit.decision === 'unknown'
               ? null
               : fit.decision === 'fits_high_confidence' || fit.decision === 'fits_low_confidence';
+            const memoryFitDecision = fit.decision;
+            const memoryFitConfidence = fit.confidence;
 
             if (verifiedSizeBytes !== null) {
               const metadataTrust = 'verified_local' as const;
@@ -208,6 +284,16 @@ export class LocalStorageRegistry {
 
             if (model.fitsInRam !== fitsInRam) {
               model.fitsInRam = fitsInRam;
+              changed = true;
+            }
+
+            if (model.memoryFitDecision !== memoryFitDecision) {
+              model.memoryFitDecision = memoryFitDecision;
+              changed = true;
+            }
+
+            if (model.memoryFitConfidence !== memoryFitConfidence) {
+              model.memoryFitConfidence = memoryFitConfidence;
               changed = true;
             }
           }
@@ -253,8 +339,16 @@ export class LocalStorageRegistry {
     return model ? cloneModelMetadata(model) : undefined;
   }
 
+  private getCachedCalibrationRecords(): Map<string, CalibrationRecord> {
+    if (this.cachedCalibrationRecordsByKey == null) {
+      this.cachedCalibrationRecordsByKey = this.readCalibrationRecordsFromStorage();
+    }
+
+    return this.cachedCalibrationRecordsByKey ?? new Map<string, CalibrationRecord>();
+  }
+
   private getCachedModels(): ModelMetadata[] {
-    if (this.cachedModels === null) {
+    if (this.cachedModels == null) {
       this.updateCache(this.readModelsFromStorage());
     }
 
@@ -262,7 +356,7 @@ export class LocalStorageRegistry {
   }
 
   private getCachedModelsById(): Map<string, ModelMetadata> {
-    if (this.cachedModelsById === null) {
+    if (this.cachedModelsById == null) {
       this.updateCache(this.readModelsFromStorage());
     }
 
@@ -272,6 +366,39 @@ export class LocalStorageRegistry {
   private updateCache(models: ModelMetadata[]): void {
     this.cachedModels = models.map((model) => cloneModelMetadata(model));
     this.cachedModelsById = new Map(this.cachedModels.map((model) => [model.id, model]));
+  }
+
+  private persistCalibrationRecords(records: Map<string, CalibrationRecord>): void {
+    const sorted = Array.from(records.values())
+      .sort((left, right) => right.lastObservedAtMs - left.lastObservedAtMs);
+    const trimmed = sorted.length > MAX_CALIBRATION_RECORDS
+      ? sorted.slice(0, MAX_CALIBRATION_RECORDS)
+      : sorted;
+    this.getStorage().set(CALIBRATION_RECORDS_KEY, JSON.stringify(trimmed));
+    this.cachedCalibrationRecordsByKey = new Map(trimmed.map((record) => [record.key, record]));
+  }
+
+  private readCalibrationRecordsFromStorage(): Map<string, CalibrationRecord> {
+    const rawData = this.getStorage().getString(CALIBRATION_RECORDS_KEY);
+    if (!rawData) {
+      return new Map();
+    }
+
+    try {
+      const parsed = JSON.parse(rawData) as unknown;
+      const records = Array.isArray(parsed)
+        ? parsed
+        : parsed && typeof parsed === 'object'
+          ? Object.values(parsed as Record<string, unknown>)
+          : [];
+      const normalized = records
+        .map((entry) => normalizeCalibrationRecord(entry))
+        .filter((record): record is CalibrationRecord => record !== null);
+      return new Map(normalized.map((record) => [record.key, record]));
+    } catch (e) {
+      console.error('[LocalStorageRegistry] Failed to parse calibration records', e);
+      return new Map();
+    }
   }
 
   private readModelsFromStorage(): ModelMetadata[] {
@@ -299,11 +426,14 @@ export class LocalStorageRegistry {
     }
   }
 
-  private async getTotalMemory(): Promise<number> {
+  private async getTotalMemory(): Promise<number | null> {
     try {
-      return await DeviceInfo.getTotalMemory();
+      const totalMemoryBytes = await DeviceInfo.getTotalMemory();
+      return typeof totalMemoryBytes === 'number' && Number.isFinite(totalMemoryBytes) && totalMemoryBytes > 0
+        ? totalMemoryBytes
+        : null;
     } catch {
-      return DEFAULT_TOTAL_MEMORY_BYTES;
+      return null;
     }
   }
 }

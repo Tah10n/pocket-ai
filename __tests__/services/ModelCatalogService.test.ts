@@ -316,7 +316,8 @@ describe('ModelCatalogService', () => {
 
     const result = await modelCatalogService.searchModels('offline');
 
-    expect(result.models).toEqual([localModel]);
+    expect(result.models).toHaveLength(1);
+    expect(result.models[0]).toMatchObject(localModel);
     expect(result.hasMore).toBe(false);
     expect(result.warning).toBeInstanceOf(ModelCatalogError);
     expect(result.warning?.code).toBe('rate_limited');

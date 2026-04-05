@@ -1,6 +1,6 @@
 # Privacy & Disclosures
 
-Last updated: 2026-04-04
+Last updated: 2026-04-05
 
 ## Summary
 
@@ -14,7 +14,7 @@ This document summarizes the current behavior of the app as configured in this r
 - Downloaded GGUF files are stored in app-managed local storage.
 - Conversation history is persisted locally on the device and encrypted at rest.
 - System prompt presets, generation settings, and model-specific load profiles are persisted locally on the device and encrypted at rest.
-- An optional Hugging Face access token can be stored locally in secure device storage for gated or private model downloads.
+- An optional Hugging Face access token can be stored locally in secure device storage for browsing and downloading gated or private models.
 - Catalog metadata such as resolved GGUF size, access state, and local download status is cached locally only for app behavior and is not synced to a hosted account service.
 - Recent first-page Hugging Face catalog results and recently opened public model-detail snapshots are stored in a bounded on-device cache so the catalog can reopen quickly on this device.
 - Hugging Face popularity metadata, tag summaries, and routed model-detail state are cached locally only to improve catalog browsing on this device.
@@ -27,11 +27,10 @@ Pocket AI uses the network only for model-management flows:
 - Hugging Face model catalog search
 - Optional metadata, README summary, and config fetches used for model hints, popularity sorting, size recovery, context-window recovery, and gated-model access checks
 - Model file downloads from remote hosting endpoints
-- Public catalog browsing requests for public models do not send an `Authorization` header.
-- If a Hugging Face access token is configured, it is attached only to Hugging Face requests that require authenticated access to gated or private repositories
+- If a Hugging Face access token is configured, the app attaches it to Hugging Face API requests as needed to surface gated or private repositories (including catalog browsing). Some endpoints are still probed anonymously first and retried with auth only when required.
 - When a user taps through to Hugging Face from the token screen or a model detail view, the app opens the public Hugging Face site in the device browser
 
-The app can display public, token-required, and access-denied Hugging Face repositories in the same catalog. Saving or clearing a token clears the local Hugging Face catalog cache so stale access labels are not reused. When the network is available, cached first-page catalog results are revalidated against Hugging Face on reopen.
+The app can display public, token-required, and access-denied Hugging Face repositories in the same catalog. When a token is configured, token-scoped catalog state is kept only in memory and is cleared when the token is updated or removed; the on-disk catalog cache stores only anonymous/public results. Saving or clearing a token clears the local Hugging Face catalog cache so stale access labels are not reused. When the network is available, cached first-page catalog results are revalidated against Hugging Face on reopen.
 
 The current release flow in this repository does not send chat prompts to a hosted chat-completion API.
 

@@ -62,6 +62,20 @@ jest.mock('expo-file-system/legacy', () => ({
   cacheDirectory: 'test-cache/',
 }));
 
+jest.mock('expo-file-system', () => ({
+  Paths: { cache: 'cache://', document: 'document://' },
+  File: class MockFile {
+    uri = 'file://mock';
+    create = jest.fn();
+    write = jest.fn();
+  },
+}));
+
+jest.mock('expo-sharing', () => ({
+  isAvailableAsync: jest.fn().mockResolvedValue(false),
+  shareAsync: jest.fn().mockResolvedValue(undefined),
+}));
+
 jest.mock('expo-clipboard', () => ({
   setStringAsync: jest.fn().mockResolvedValue(undefined),
 }));

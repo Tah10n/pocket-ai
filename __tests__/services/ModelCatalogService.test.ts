@@ -273,6 +273,38 @@ describe('ModelCatalogService', () => {
     expect(firstUrl).toContain('search=phi%20gguf');
   });
 
+  it('adds gated=false to Hugging Face search requests when requested', async () => {
+    global.fetch = jest.fn(() =>
+      Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve([makeRepo('org/phi-model')]),
+      }),
+    ) as jest.Mock;
+
+    await modelCatalogService.searchModels('phi', { gated: false });
+
+    const firstUrl = (global.fetch as jest.Mock).mock.calls[0][0] as string;
+    expect(firstUrl).toContain('gated=false');
+  });
+
+  it('does not reuse cache entries across gated and ungated catalog searches', async () => {
+    global.fetch = jest.fn(() =>
+      Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve([makeRepo('org/phi-model')]),
+      }),
+    ) as jest.Mock;
+
+    await modelCatalogService.searchModels('phi', { pageSize: 10 });
+    await modelCatalogService.searchModels('phi', { pageSize: 10, gated: false });
+
+    expect((global.fetch as jest.Mock).mock.calls).toHaveLength(2);
+    const firstUrl = (global.fetch as jest.Mock).mock.calls[0][0] as string;
+    const secondUrl = (global.fetch as jest.Mock).mock.calls[1][0] as string;
+    expect(firstUrl).not.toContain('gated=');
+    expect(secondUrl).toContain('gated=false');
+  });
+
   it('keeps the largest context ceiling from summary config, cardData, and gguf metadata', async () => {
     global.fetch = jest.fn((input: RequestInfo | URL) => {
       const url = String(input);

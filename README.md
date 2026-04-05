@@ -187,8 +187,7 @@ npm run android:scenarios:emulator
 - Chat history, presets, settings, downloaded model references, and per-model generation or load profiles are persisted on-device and encrypted at rest.
 - Network access is limited to model-management flows such as Hugging Face search, metadata fetches, and model downloads.
 - Storage, memory, and model size labels use decimal units (1 GB = 1,000,000,000 bytes).
-- If a Hugging Face access token is configured, it stays on-device and is attached only to gated or private Hugging Face requests that require it.
-- Token-scoped catalog state is kept in memory and cleared when the token is updated or removed.
+- If a Hugging Face access token is configured, it stays on-device and is attached to Hugging Face API requests as needed to surface gated or private repositories (including catalog browsing). Token-scoped catalog state is kept in memory and cleared when the token is updated or removed.
 - The model catalog can start in a guided discovery mode that favors RAM-friendly public models, then switch back to the full Hugging Face catalog on demand.
 - The model catalog can show public, locked, and access-denied Hugging Face repositories in the same search flow, with popularity sorting and routed model details.
 - Recent first-page catalog results and recently opened public model details are cached locally so the catalog can reopen quickly and still refresh from Hugging Face when the network is available.

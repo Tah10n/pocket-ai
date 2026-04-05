@@ -4,11 +4,13 @@ import { FlashList, ListRenderItem } from '@shopify/flash-list';
 import { useRouter } from 'expo-router';
 import { Box } from '@/components/ui/box';
 import { Button, ButtonText } from '@/components/ui/button';
+import { ErrorReportSheet } from '@/components/ui/ErrorReportSheet';
 import { ModelCard } from '@/components/ui/ModelCard';
 import { ModelParametersSheet } from '@/components/ui/ModelParametersSheet';
 import { ScreenCard, ScreenStack } from '@/components/ui/ScreenShell';
 import { Spinner } from '@/components/ui/spinner';
 import { Text } from '@/components/ui/text';
+import { useErrorReportSheetController, type ErrorReportContext } from '@/hooks/useErrorReportSheetController';
 import { useLLMEngine } from '@/hooks/useLLMEngine';
 import type { LoadModelOptions } from '@/services/LLMEngineService';
 import { useModelParametersSheetController } from '@/hooks/useModelParametersSheetController';
@@ -242,6 +244,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
     .map((model) => `${model.id}:${model.lifecycleStatus}`)
     .join('|'));
   const { loadModel, unloadModel, state: engineState } = useLLMEngine();
+  const { openErrorReport, sheetProps: errorReportSheetProps } = useErrorReportSheetController();
   const {
     filters,
     sort,
@@ -345,6 +348,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
           pageSize: MODELS_PAGE_SIZE,
           sort: serverSort,
           forceRefresh,
+          gated: filters.noTokenRequiredOnly ? false : undefined,
         });
         resultCount = result.models.length;
         resultHasMore = result.hasMore;
@@ -399,7 +403,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
         fetchSpan.end({ outcome: fetchOutcome, count: resultCount, hasMore: resultHasMore });
       }
     },
-    [serverSort],
+    [filters.noTokenRequiredOnly, serverSort],
   );
 
   useEffect(() => {
@@ -490,6 +494,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
         cursor: null,
         pageSize: MODELS_PAGE_SIZE,
         sort: serverSort,
+        gated: filters.noTokenRequiredOnly ? false : undefined,
       });
 
       if (cachedResult) {
@@ -525,7 +530,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
         setModels([]);
         setHasMore(false);
       });
-  }, [activeTab, discoveryMode, fetchModels, isTokenStateHydrated, searchQuery, serverSort, sessionIdentity]);
+  }, [activeTab, discoveryMode, fetchModels, filters.noTokenRequiredOnly, isTokenStateHydrated, searchQuery, serverSort, sessionIdentity]);
 
   const displayModels = useMemo(() => {
     const registryModels = typeof registry.getModels === 'function'
@@ -606,9 +611,38 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
     performanceMonitor.mark('catalog.firstResultsShown');
   }, [activeTab, filteredModels.length, sessionIdentity]);
 
-  const showModelActionError = useCallback((scope: string, error: unknown) => {
-    Alert.alert(t('models.actionFailedTitle'), getReportedErrorMessage(scope, error, t));
-  }, [t]);
+  const showModelActionError = useCallback((scope: string, error: unknown, reportContext?: ErrorReportContext) => {
+    const message = getReportedErrorMessage(scope, error, t);
+    const appError = toAppError(error);
+    const isReportable = (
+      appError.code === 'model_load_failed'
+      || appError.code === 'model_memory_insufficient'
+      || appError.code === 'model_incompatible'
+    );
+
+    if (!isReportable) {
+      Alert.alert(t('models.actionFailedTitle'), message);
+      return;
+    }
+
+    Alert.alert(
+      t('models.actionFailedTitle'),
+      message,
+      [
+        { text: t('common.close'), style: 'cancel' },
+        {
+          text: t('models.errorReport.reportButton'),
+          onPress: () => {
+            openErrorReport({
+              scope,
+              error,
+              context: reportContext,
+            });
+          },
+        },
+      ],
+    );
+  }, [openErrorReport, t]);
 
   const getConfigurableModelById = useCallback((targetModelId: string | null) => {
     if (!targetModelId) {
@@ -683,9 +717,36 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
         return;
       }
 
-      showModelActionError('ModelsList.performLoad', error);
+      const model = models.find((item) => item.id === modelId) ?? registry.getModel(modelId);
+      const reportContext: ErrorReportContext = {
+        model: model ? {
+          id: model.id,
+          name: model.name,
+          author: model.author,
+          size: model.size,
+          localPath: model.localPath,
+          downloadUrl: model.downloadUrl,
+          memoryFitDecision: model.memoryFitDecision,
+          memoryFitConfidence: model.memoryFitConfidence,
+          fitsInRam: model.fitsInRam,
+          lifecycleStatus: model.lifecycleStatus,
+          accessState: model.accessState,
+          gguf: model.gguf,
+        } : { id: modelId },
+        engine: {
+          status: engineState.status,
+          activeModelId: engineState.activeModelId,
+          loadProgress: engineState.loadProgress,
+        },
+        options: options ? {
+          allowUnsafeMemoryLoad: options.allowUnsafeMemoryLoad,
+          forceReload: options.forceReload,
+        } : undefined,
+      };
+
+      showModelActionError('ModelsList.performLoad', error, reportContext);
     }
-  }, [loadModel, refreshDownloadedModels, showModelActionError, t]);
+  }, [engineState.activeModelId, engineState.loadProgress, engineState.status, loadModel, models, refreshDownloadedModels, showModelActionError, t]);
 
   const handleLoad = useCallback(async (modelId: string) => {
     const model = models.find((item) => item.id === modelId);
@@ -1069,6 +1130,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
       ) : null}
 
       <ModelParametersSheet {...modelParametersSheetProps} />
+      <ErrorReportSheet {...errorReportSheetProps} />
     </>
   );
 };

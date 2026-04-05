@@ -14,6 +14,7 @@ import { Button, ButtonText } from '@/components/ui/button';
 import { HeaderBar } from '@/components/ui/HeaderBar';
 import { ModelDownloadProgress, ModelLifecycleActionRow } from '@/components/ui/ModelLifecycleControls';
 import { MaterialSymbols } from '@/components/ui/MaterialSymbols';
+import { ErrorReportSheet } from '@/components/ui/ErrorReportSheet';
 import { ModelParametersSheet } from '@/components/ui/ModelParametersSheet';
 import { ScreenBadge, ScreenContent, ScreenStack } from '@/components/ui/ScreenShell';
 import { ScrollView } from '@/components/ui/scroll-view';
@@ -32,6 +33,7 @@ export function ModelDetailsScreen() {
     accessBadge,
     cancelDownload,
     displayModel,
+    errorReportSheetProps,
     errorMessage,
     handleChat,
     handleDelete,
@@ -221,6 +223,7 @@ export function ModelDetailsScreen() {
       </ScrollView>
 
       <ModelParametersSheet {...modelParametersSheetProps} />
+      <ErrorReportSheet {...errorReportSheetProps} />
     </Box>
   );
 }

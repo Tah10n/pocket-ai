@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next';
 import { useLLMEngine } from '@/hooks/useLLMEngine';
 import { useModelParametersSheetController } from '@/hooks/useModelParametersSheetController';
 import { useModelDownload } from '@/hooks/useModelDownload';
+import { useErrorReportSheetController, type ErrorReportContext } from '@/hooks/useErrorReportSheetController';
 import { useDownloadStore } from '@/store/downloadStore';
 import type { LoadModelOptions } from '@/services/LLMEngineService';
 import { registry } from '@/services/LocalStorageRegistry';
@@ -41,6 +42,7 @@ export function useModelDetailsController(modelId: string) {
   const { startDownload, cancelDownload } = useModelDownload();
   const queuedItem = useDownloadStore((state) => state.queue.find((item) => item.id === modelId));
   const { loadModel, unloadModel, state: engineState } = useLLMEngine();
+  const { openErrorReport, sheetProps: errorReportSheetProps } = useErrorReportSheetController();
 
   useEffect(() => {
     let cancelled = false;
@@ -129,9 +131,38 @@ export function useModelDetailsController(modelId: string) {
     [displayModel, t],
   );
 
-  const showModelActionError = useCallback((scope: string, error: unknown) => {
-    Alert.alert(t('models.actionFailedTitle'), getReportedErrorMessage(scope, error, t));
-  }, [t]);
+  const showModelActionError = useCallback((scope: string, error: unknown, reportContext?: ErrorReportContext) => {
+    const message = getReportedErrorMessage(scope, error, t);
+    const appError = toAppError(error);
+    const isReportable = (
+      appError.code === 'model_load_failed'
+      || appError.code === 'model_memory_insufficient'
+      || appError.code === 'model_incompatible'
+    );
+
+    if (!isReportable) {
+      Alert.alert(t('models.actionFailedTitle'), message);
+      return;
+    }
+
+    Alert.alert(
+      t('models.actionFailedTitle'),
+      message,
+      [
+        { text: t('common.close'), style: 'cancel' },
+        {
+          text: t('models.errorReport.reportButton'),
+          onPress: () => {
+            openErrorReport({
+              scope,
+              error,
+              context: reportContext,
+            });
+          },
+        },
+      ],
+    );
+  }, [openErrorReport, t]);
 
   const {
     openModelParameters,
@@ -201,9 +232,38 @@ export function useModelDetailsController(modelId: string) {
         return;
       }
 
-      showModelActionError('ModelDetailsScreen.performLoad', error);
+      const model = targetModelId === displayModel?.id
+        ? displayModel
+        : registry.getModel(targetModelId);
+      const reportContext: ErrorReportContext = {
+        model: model ? {
+          id: model.id,
+          name: model.name,
+          author: model.author,
+          size: model.size,
+          localPath: model.localPath,
+          downloadUrl: model.downloadUrl,
+          memoryFitDecision: model.memoryFitDecision,
+          memoryFitConfidence: model.memoryFitConfidence,
+          fitsInRam: model.fitsInRam,
+          lifecycleStatus: model.lifecycleStatus,
+          accessState: model.accessState,
+          gguf: model.gguf,
+        } : { id: targetModelId },
+        engine: {
+          status: engineState.status,
+          activeModelId: engineState.activeModelId,
+          loadProgress: engineState.loadProgress,
+        },
+        options: options ? {
+          allowUnsafeMemoryLoad: options.allowUnsafeMemoryLoad,
+          forceReload: options.forceReload,
+        } : undefined,
+      };
+
+      showModelActionError('ModelDetailsScreen.performLoad', error, reportContext);
     }
-  }, [loadModel, showModelActionError, t]);
+  }, [displayModel, engineState.activeModelId, engineState.loadProgress, engineState.status, loadModel, showModelActionError, t]);
 
   const handleLoad = useCallback(async () => {
     if (!displayModel) {
@@ -302,6 +362,7 @@ export function useModelDetailsController(modelId: string) {
     heroMetrics,
     loading,
     metadataMetrics,
+    errorReportSheetProps,
     modelParametersSheetProps,
     openModelParameters,
   };

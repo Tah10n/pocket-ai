@@ -478,6 +478,7 @@ export class ModelCatalogService {
       pageSize?: number;
       sort?: CatalogServerSort | null;
       forceRefresh?: boolean;
+      gated?: boolean;
     },
   ): Promise<ModelCatalogSearchResult> {
     return this.searchModelsInternal(query, options, 0);
@@ -490,6 +491,7 @@ export class ModelCatalogService {
       pageSize?: number;
       sort?: CatalogServerSort | null;
       forceRefresh?: boolean;
+      gated?: boolean;
     } | undefined,
     retryCount: number,
   ): Promise<ModelCatalogSearchResult> {
@@ -499,6 +501,7 @@ export class ModelCatalogService {
     const pageSize = options?.pageSize ?? 20;
     const sort = options?.sort ?? null;
     const forceRefresh = options?.forceRefresh === true && cursor === null;
+    const gated = options?.gated;
     const normalizedQuery = this.normalizeQuery(query);
     const catalogSearchAuthPolicy = requestContext.hasAuthToken
       ? REQUEST_AUTH_POLICY.OPTIONAL_AUTH
@@ -513,6 +516,7 @@ export class ModelCatalogService {
       pageSize,
       sort,
       catalogSearchHasAuthScope,
+      gated,
     );
     const cached = this.searchCache.get(cacheKey);
     const isBufferedCursor = this.isBufferedCursor(cursor);
@@ -617,6 +621,7 @@ export class ModelCatalogService {
           requestContext,
           cursor,
           sort,
+          gated,
           catalogSearchAuthPolicy,
         );
         this.assertRequestContextIsCurrent(requestContext);
@@ -633,7 +638,7 @@ export class ModelCatalogService {
           isBufferedCursor,
         });
         this.pruneSearchCache();
-        if (cursor === null) {
+        if (cursor === null && typeof gated !== 'boolean') {
           const persistableResult = this.toPersistableSearchResult(result);
           const persistableModels = persistableResult.models.filter((model) => !model.isPrivate);
           this.persistentCache.putSearch(
@@ -828,7 +833,7 @@ export class ModelCatalogService {
 
   public getCachedSearchResult(
     query: string = 'gguf',
-    options?: { cursor?: string | null; pageSize?: number; sort?: CatalogServerSort | null },
+    options?: { cursor?: string | null; pageSize?: number; sort?: CatalogServerSort | null; gated?: boolean },
   ): Omit<ModelCatalogSearchResult, 'warning'> | null {
     const cached = this.getCachedSearchResultForScope(
       query,
@@ -845,7 +850,7 @@ export class ModelCatalogService {
 
   private getCachedSearchResultForScope(
     query: string,
-    options: { cursor?: string | null; pageSize?: number; sort?: CatalogServerSort | null } | undefined,
+    options: { cursor?: string | null; pageSize?: number; sort?: CatalogServerSort | null; gated?: boolean } | undefined,
     hasToken: boolean,
     memoryFitContext: CatalogMemoryFitContext | null = this.getRememberedMemoryFitContext(),
   ): Omit<ModelCatalogSearchResult, 'warning'> | null {
@@ -856,6 +861,7 @@ export class ModelCatalogService {
 
     const pageSize = options?.pageSize ?? 20;
     const sort = options?.sort ?? null;
+    const gated = options?.gated;
     const normalizedQuery = this.normalizeQuery(query);
     const memoryKey = this.buildMemorySearchCacheKey(
       normalizedQuery,
@@ -863,6 +869,7 @@ export class ModelCatalogService {
       pageSize,
       sort,
       hasToken,
+      gated,
     );
     const memoryEntry = this.searchCache.get(memoryKey);
     const isMemoryEntryFresh = Boolean(memoryEntry) && Date.now() - (memoryEntry?.timestamp ?? 0) < CACHE_TTL;
@@ -877,6 +884,10 @@ export class ModelCatalogService {
         ...memoryEntry.result,
         models: this.mergeWithRegistry(filteredMemoryModels, this.getAuthScope(hasToken), memoryFitContext),
       };
+    }
+
+    if (typeof gated === 'boolean') {
+      return null;
     }
 
     const persistentEntry = this.persistentCache.getSearch(
@@ -1411,6 +1422,7 @@ export class ModelCatalogService {
     requestContext: CatalogRequestContext,
     initialCursor: string | null,
     sort: CatalogServerSort | null,
+    gated: boolean | undefined,
     catalogAuthPolicy: RequestAuthPolicy = REQUEST_AUTH_POLICY.ANONYMOUS,
   ): Promise<CatalogBatchResult> {
     const catalogAuthToken = this.resolveRequestAuthToken(catalogAuthPolicy, requestContext.authToken);
@@ -1447,6 +1459,7 @@ export class ModelCatalogService {
           catalogAuthPolicy,
           requestedCursor,
           sort,
+          gated,
         );
         const baseModels = this.transformHFResponse(page.items, memoryFitContext, requestContext.authToken);
         const hydratedModels = await this.resolveMissingModelMetadata(
@@ -1475,6 +1488,7 @@ export class ModelCatalogService {
         resolvedPageSize,
         sort,
         hasAuthToken,
+        gated,
       );
     } catch (error) {
       outcome = 'error';
@@ -1504,6 +1518,7 @@ export class ModelCatalogService {
     pageSize: number,
     sort: CatalogServerSort | null,
     hasAuthToken: boolean,
+    gated: boolean | undefined,
   ): CatalogBatchResult {
     if (models.length <= pageSize) {
       return {
@@ -1521,6 +1536,7 @@ export class ModelCatalogService {
         pageSize,
         sort,
         hasAuthToken,
+        gated,
       ),
     };
   }
@@ -1532,6 +1548,7 @@ export class ModelCatalogService {
     pageSize: number,
     sort: CatalogServerSort | null,
     hasAuthToken: boolean,
+    gated: boolean | undefined,
   ): string {
     const timestamp = Date.now();
     let nextCursor = finalNextCursor;
@@ -1546,6 +1563,7 @@ export class ModelCatalogService {
           pageSize,
           sort,
           hasAuthToken,
+          gated,
         ),
         {
           result: {
@@ -1576,6 +1594,7 @@ export class ModelCatalogService {
     authPolicy: RequestAuthPolicy,
     nextCursor: string | null = null,
     sort: CatalogServerSort | null = null,
+    gated?: boolean,
   ): Promise<HuggingFaceModelsPage> {
     const cursorType = nextCursor ? 'cursor' : 'initial';
     const authToken = this.resolveRequestAuthToken(authPolicy, requestContext.authToken);
@@ -1594,7 +1613,7 @@ export class ModelCatalogService {
     let itemsCount = 0;
     let outcome: 'success' | 'error' = 'success';
 
-    const url = nextCursor ?? this.buildSearchUrl(normalizedQuery, limit, sort);
+    const url = nextCursor ?? this.buildSearchUrl(normalizedQuery, limit, sort, gated);
 
     try {
       const response = await this.fetchWithTimeout(url, {
@@ -1743,6 +1762,7 @@ export class ModelCatalogService {
     normalizedQuery: string,
     limit: number,
     sort: CatalogServerSort | null,
+    gated?: boolean,
   ): string {
     const params = [
       `search=${encodeURIComponent(normalizedQuery)}`,
@@ -1754,6 +1774,10 @@ export class ModelCatalogService {
     if (sort) {
       params.push(`sort=${sort}`);
       params.push('direction=-1');
+    }
+
+    if (typeof gated === 'boolean') {
+      params.push(`gated=${gated ? 'true' : 'false'}`);
     }
 
     return `${HF_BASE_URL}/api/models?${params.join('&')}`;
@@ -3246,10 +3270,12 @@ export class ModelCatalogService {
     pageSize: number,
     sort: CatalogServerSort | null,
     hasAuthToken: boolean,
+    gated: boolean | undefined,
   ): string {
     const cursorKey = cursor ?? '__initial__';
     const sortKey = sort ?? '__default__';
-    return `${normalizedQuery}::${cursorKey}::${pageSize}::${sortKey}::${this.getAuthScope(hasAuthToken)}::${this.authCacheVersion}`;
+    const gatedKey = typeof gated === 'boolean' ? String(gated) : '__any__';
+    return `${normalizedQuery}::${cursorKey}::${pageSize}::${sortKey}::${this.getAuthScope(hasAuthToken)}::gated:${gatedKey}::${this.authCacheVersion}`;
   }
 
   private isBufferedCursor(cursor: string | null): boolean {

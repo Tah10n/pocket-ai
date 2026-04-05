@@ -79,9 +79,12 @@ describe('memoryFit', () => {
       confidence: 'medium',
     }));
 
+    const fastEstimateTotalMemoryBytes = 8 * 1024 * 1024 * 1024;
+    const fastEstimateModelSizeBytes = 2 * 1024 * 1024 * 1024;
+
     expect(estimateFastMemoryFit({
-      modelSizeBytes: 100,
-      totalMemoryBytes: 200,
+      modelSizeBytes: fastEstimateModelSizeBytes,
+      totalMemoryBytes: fastEstimateTotalMemoryBytes,
       metadataTrust: 'trusted_remote',
     })).toEqual(expect.objectContaining({
       decision: 'fits_high_confidence',
@@ -89,8 +92,8 @@ describe('memoryFit', () => {
     }));
 
     expect(estimateFastMemoryFit({
-      modelSizeBytes: 100,
-      totalMemoryBytes: 200,
+      modelSizeBytes: fastEstimateModelSizeBytes,
+      totalMemoryBytes: fastEstimateTotalMemoryBytes,
       metadataTrust: 'inferred',
     })).toEqual(expect.objectContaining({
       decision: 'fits_low_confidence',

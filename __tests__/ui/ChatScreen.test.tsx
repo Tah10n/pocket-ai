@@ -10,6 +10,33 @@ jest.mock('react-native-css-interop', () => {
   };
 });
 
+jest.mock('@shopify/flash-list', () => {
+  const mockReact = require('react');
+  const { View } = require('react-native');
+
+  return {
+    FlashList: ({ data, renderItem, keyExtractor, ItemSeparatorComponent, ListEmptyComponent }: any) =>
+      data?.length > 0
+        ? mockReact.createElement(
+            View,
+            null,
+            data.map((item: any, index: number) =>
+              mockReact.createElement(
+                mockReact.Fragment,
+                { key: keyExtractor ? keyExtractor(item, index) : index },
+                renderItem({ item, index }),
+                index < data.length - 1 && ItemSeparatorComponent
+                  ? mockReact.createElement(ItemSeparatorComponent)
+                  : null,
+              ),
+            ),
+          )
+        : ListEmptyComponent
+          ? mockReact.createElement(ListEmptyComponent)
+          : null,
+  };
+});
+
 jest.mock('@react-navigation/bottom-tabs', () => ({
   useBottomTabBarHeight: () => 0,
 }));

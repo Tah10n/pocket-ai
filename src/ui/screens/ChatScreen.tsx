@@ -3,7 +3,6 @@ import {
     Alert,
     BackHandler,
     Dimensions,
-    FlatList,
     Keyboard,
     KeyboardAvoidingView,
     LayoutChangeEvent,
@@ -15,6 +14,7 @@ import {
 } from 'react-native';
 import { useBottomTabBarHeight } from '@react-navigation/bottom-tabs';
 import { useFocusEffect } from '@react-navigation/native';
+import { FlashList, FlashListRef } from '@shopify/flash-list';
 import { Box } from '@/components/ui/box';
 import { Button, ButtonText } from '@/components/ui/button';
 import { Text } from '@/components/ui/text';
@@ -153,7 +153,7 @@ export const ChatScreen = () => {
     } | null>(null);
     const updateThreadPresetSnapshot = useChatStore((state) => state.updateThreadPresetSnapshot);
     const updateThreadParamsSnapshot = useChatStore((state) => state.updateThreadParamsSnapshot);
-    const listRef = useRef<FlatList<ChatMessage> | null>(null);
+    const listRef = useRef<FlashListRef<ChatMessage> | null>(null);
     const autoScrollFrameRef = useRef<number | null>(null);
     const keyboardMeasureFrameRef = useRef<number | null>(null);
     const forcedScrollTimeoutsRef = useRef<ReturnType<typeof setTimeout>[]>([]);
@@ -305,14 +305,6 @@ export const ChatScreen = () => {
         },
     });
 
-    const scrollToLatestMessage = useCallback((animated: boolean, preferIndex = true) => {
-        if (preferIndex) {
-            listRef.current?.scrollToIndex?.({ animated, index: 0, viewPosition: 0 });
-        }
-
-        listRef.current?.scrollToOffset({ animated, offset: 0 });
-    }, []);
-
     const clearForcedScrollTimeouts = useCallback(() => {
         forcedScrollTimeoutsRef.current.forEach((timeoutId) => {
             clearTimeout(timeoutId);
@@ -325,12 +317,26 @@ export const ChatScreen = () => {
 
         [32, 96, 192].forEach((delayMs) => {
             const timeoutId = setTimeout(() => {
-                scrollToLatestMessage(false, false);
+                listRef.current?.scrollToOffset({ animated: false, offset: 0 });
             }, delayMs);
 
             forcedScrollTimeoutsRef.current.push(timeoutId);
         });
-    }, [clearForcedScrollTimeouts, scrollToLatestMessage]);
+    }, [clearForcedScrollTimeouts]);
+
+    const scrollToLatestMessage = useCallback((animated: boolean, preferIndex = true) => {
+        if (preferIndex && listRef.current) {
+            // FlashList v2 returns a Promise; swallow failures and fall back to offset-only bursts.
+            void listRef.current
+                .scrollToIndex({ animated, index: 0, viewPosition: 0 })
+                .catch(() => {
+                    listRef.current?.scrollToOffset({ animated: false, offset: 0 });
+                    scheduleForcedScrollBurst();
+                });
+        }
+
+        listRef.current?.scrollToOffset({ animated, offset: 0 });
+    }, [scheduleForcedScrollBurst]);
 
     const scheduleScrollToLatestMessage = useCallback((animated: boolean, force = false) => {
         if (
@@ -804,7 +810,7 @@ export const ChatScreen = () => {
 
                     <Box className="flex-1" onLayout={handleListViewportLayout}>
                         {hasMessages ? (
-                            <FlatList
+                            <FlashList
                                 key={activeThread?.id ?? 'no-thread'}
                                 ref={listRef}
                                 data={displayMessages}
@@ -815,18 +821,14 @@ export const ChatScreen = () => {
                                 keyboardShouldPersistTaps="handled"
                                 contentContainerStyle={{ paddingTop: listBottomPadding, paddingBottom: 4, flexGrow: 1 }}
                                 onContentSizeChange={handleListContentSizeChange}
+                                onLoad={handleListContentSizeChange}
                                 onScroll={handleListScroll}
                                 onScrollBeginDrag={handleListScrollBeginDrag}
                                 onScrollEndDrag={handleListScrollEndDrag}
                                 onMomentumScrollEnd={handleListMomentumScrollEnd}
-                                onScrollToIndexFailed={() => {
-                                    scrollToLatestMessage(false, false);
-                                    scheduleForcedScrollBurst();
-                                }}
                                 ItemSeparatorComponent={() => <Box className="h-2" />}
                                 keyExtractor={(item) => item.id}
                                 renderItem={renderChatMessage}
-                                initialNumToRender={12}
                             />
                         ) : shouldShowRecoveryCard ? (
                             <Box className="flex-1 justify-center px-3 pb-10">

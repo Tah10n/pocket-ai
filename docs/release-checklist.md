@@ -144,7 +144,7 @@ keyPassword=your-key-password
 - Change the Hugging Face token state, then reopen a gated or private model from the catalog and confirm the card plus detail screen agree on `Locked`, `Access denied`, or authorized access instead of showing stale access labels.
 - Download a GGUF model and wait for verification to finish.
 - Confirm model cards stay compact and do not render a separate `Status` chip.
-- Confirm RAM-fit badges on model cards and the model-details hero use short user-facing labels such as `Fits in RAM`, `Borderline RAM`, or `Won't fit RAM`, and do not expose internal terms like `OOM` or confidence levels.
+- Confirm RAM-fit badges on model cards and the model-details hero use short user-facing labels such as `Fits in RAM`, `Near RAM limit`, or `Won't fit RAM`, and do not expose internal terms like `OOM` or confidence levels.
 - On a downloaded model card, confirm the secondary `Settings` action opens the model controls sheet without leaving the list.
 - In model controls, confirm the context-window ceiling reflects the verified model limit or estimated device RAM headroom instead of exposing an obviously unsafe maximum.
 - Change the context window or GPU layers and confirm the sheet shows the pending load-profile state plus `Save load profile` for an inactive model or `Apply & reload` for the active model.

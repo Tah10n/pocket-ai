@@ -42,22 +42,22 @@ const OPEN_ON_HF_LABELS = ["Open on HF", "Открыть на HF"];
 const RAM_FIT_BADGE_LABELS = [
   "Fits in RAM",
   "Likely OOM",
-  "Borderline RAM",
+  "Near RAM limit",
   "RAM fit unknown",
   "RAM Warning",
   "Помещается в RAM",
   "Вероятен OOM",
-  "На грани по RAM",
+  "На пределе RAM",
   "Неизвестно по RAM",
   "Риск по RAM",
 ];
 const RAM_FIT_RISK_BADGE_LABELS = [
   "Likely OOM",
-  "Borderline RAM",
+  "Near RAM limit",
   "RAM fit unknown",
   "RAM Warning",
   "Вероятен OOM",
-  "На грани по RAM",
+  "На пределе RAM",
   "Неизвестно по RAM",
   "Риск по RAM",
 ];

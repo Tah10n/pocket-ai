@@ -511,7 +511,7 @@
     "deleteResetSettings": "Удалить и сбросить настройки",
     "ramWarning": "Риск по RAM",
     "ramFitYes": "Помещается в RAM",
-    "ramBorderline": "На грани по RAM",
+    "ramBorderline": "На пределе RAM",
     "ramLikelyOom": "Не влезет в RAM",
     "ramFitUnknown": "Неизвестно по RAM",
     "ramFitConfidenceHigh": "Высокая уверенность",

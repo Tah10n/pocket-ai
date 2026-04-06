@@ -12,18 +12,29 @@ interface MarkdownRendererProps {
 const CHAT_MESSAGE_FONT_SIZE = 16;
 const CHAT_MESSAGE_LINE_HEIGHT = 24;
 
+function isSafeUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:';
+  } catch {
+    return false;
+  }
+}
+
 function openMarkdownUrl(url: string, customCallback?: (url: string) => boolean) {
+  if (!url || !isSafeUrl(url)) {
+    return;
+  }
+
   if (customCallback) {
     const result = customCallback(url);
-    if (url && result && typeof result === 'boolean') {
+    if (result && typeof result === 'boolean') {
       void Linking.openURL(url);
     }
     return;
   }
 
-  if (url) {
-    void Linking.openURL(url);
-  }
+  void Linking.openURL(url);
 }
 
 export function MarkdownRenderer({ content, selectable = false }: MarkdownRendererProps) {

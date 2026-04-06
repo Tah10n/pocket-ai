@@ -6,6 +6,7 @@ import { ModelMetadata, LifecycleStatus } from '../types/models';
 import { getModelsDir } from './FileSystemSetup';
 import { normalizePersistedModelMetadata } from './ModelMetadataNormalizer';
 import { estimateFastMemoryFit } from '../memory/estimator';
+import { safeJoinModelPath } from '../utils/safeFilePath';
 import type { CalibrationRecord } from '../memory/types';
 
 const REGISTRY_KEY = 'models-registry';
@@ -162,10 +163,14 @@ export class LocalStorageRegistry {
     if (model && model.localPath) {
       try {
         if (modelsDir) {
-          const fileUri = modelsDir + model.localPath;
-          const info = await FileSystem.getInfoAsync(fileUri);
-          if (info.exists) {
-            await FileSystem.deleteAsync(fileUri);
+          const fileUri = safeJoinModelPath(modelsDir, model.localPath);
+          if (!fileUri) {
+            console.warn(`[LocalStorageRegistry] Invalid localPath for ${modelId}, skipping file deletion`);
+          } else {
+            const info = await FileSystem.getInfoAsync(fileUri);
+            if (info.exists) {
+              await FileSystem.deleteAsync(fileUri);
+            }
           }
         }
       } catch (e) {
@@ -213,7 +218,14 @@ export class LocalStorageRegistry {
     for (const model of models) {
       if (model.lifecycleStatus === LifecycleStatus.DOWNLOADED || model.lifecycleStatus === LifecycleStatus.ACTIVE) {
         if (model.localPath) {
-          const fileUri = modelsDir + model.localPath;
+          const fileUri = safeJoinModelPath(modelsDir, model.localPath);
+          if (!fileUri) {
+            console.warn(`[LocalStorageRegistry] Invalid localPath for ${model.id}, resetting to available`);
+            model.lifecycleStatus = LifecycleStatus.AVAILABLE;
+            model.localPath = undefined;
+            changed = true;
+            continue;
+          }
           const info = await FileSystem.getInfoAsync(fileUri);
           if (!info.exists) {
             console.warn(`[LocalStorageRegistry] File missing for ${model.id}, resetting to available`);
@@ -323,7 +335,10 @@ export class LocalStorageRegistry {
         }
 
         // It's neither completed nor queued -> it's a dead partial download. Delete it.
-        const fileUri = modelsDir + filename;
+        const fileUri = safeJoinModelPath(modelsDir, filename);
+        if (!fileUri) {
+          continue;
+        }
         console.log(`[LocalStorageRegistry] Garbage collecting orphaned file: ${filename}`);
         await FileSystem.deleteAsync(fileUri, { idempotent: true });
       }

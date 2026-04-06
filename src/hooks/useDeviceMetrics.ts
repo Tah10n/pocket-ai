@@ -84,8 +84,14 @@ export const useDeviceMetrics = (options: UseDeviceMetricsOptions = {}) => {
   } = options;
   const [metrics, setMetrics] = useState<DeviceMetrics | null>(null);
   const isMountedRef = useRef(true);
+  const isLoadingRef = useRef(false);
 
   const loadMetrics = useCallback(async () => {
+    if (isLoadingRef.current) {
+      return;
+    }
+
+    isLoadingRef.current = true;
     try {
       const systemMemorySnapshot = await getFreshMemorySnapshot(5000).catch(() => null);
       const [
@@ -197,6 +203,8 @@ export const useDeviceMetrics = (options: UseDeviceMetricsOptions = {}) => {
           source: 'process',
         },
       });
+    } finally {
+      isLoadingRef.current = false;
     }
   }, []);
 

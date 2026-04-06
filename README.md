@@ -217,6 +217,8 @@ assets/      Icons, splash assets, and other static files
 - [UI Architecture Guidelines](./docs/ui-architecture.md)
 - [Changelog](./CHANGELOG.md)
 - [Contributing](./CONTRIBUTING.md)
+- [Code of Conduct](./CODE_OF_CONDUCT.md)
+- [License](./LICENSE)
 
 ## Current status
 

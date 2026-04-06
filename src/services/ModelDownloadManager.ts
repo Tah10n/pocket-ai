@@ -13,9 +13,10 @@ import { registry } from './LocalStorageRegistry';
 import { getModelsDir } from './FileSystemSetup';
 import { AppError, toAppError } from './AppError';
 import { huggingFaceTokenService } from './HuggingFaceTokenService';
-import { HF_BASE_URL } from '../utils/huggingFaceUrls';
+import { isHuggingFaceUrl } from '../utils/huggingFaceUrls';
 import { getCandidateModelDownloadFileNames } from '../utils/modelFiles';
 import { estimateFastMemoryFit } from '../memory/estimator';
+import { safeJoinModelPath } from '../utils/safeFilePath';
 import { DECIMAL_GIGABYTE } from '../utils/modelSize';
 
 export class ModelDownloadManager {
@@ -68,7 +69,7 @@ export class ModelDownloadManager {
       } finally {
         this.isProcessing = false;
         // Trigger next check
-        this.processQueue();
+        void this.processQueue();
       }
     }
   }
@@ -113,7 +114,12 @@ export class ModelDownloadManager {
     }
 
     const fileName = await this.resolveDownloadFileName(model, modelsDir);
-    const localUri = modelsDir + fileName;
+    const localUri = safeJoinModelPath(modelsDir, fileName);
+    if (!localUri) {
+      throw new AppError('action_failed', `Invalid download file name: ${fileName}`, {
+        details: { modelId: model.id },
+      });
+    }
 
     const PROGRESS_UPDATE_MIN_INTERVAL_MS = 500;
     const PROGRESS_UPDATE_MIN_DELTA = 0.005;
@@ -294,7 +300,7 @@ export class ModelDownloadManager {
 
   private async buildDownloadOptions(model: ModelMetadata): Promise<{ headers?: Record<string, string> }> {
     const requiresAuth = model.accessState !== ModelAccessState.PUBLIC || model.isGated || model.isPrivate;
-    const isHuggingFaceDownload = model.downloadUrl.startsWith(HF_BASE_URL);
+    const isHuggingFaceDownload = isHuggingFaceUrl(model.downloadUrl);
 
     if (!requiresAuth || !isHuggingFaceDownload) {
       return {};
@@ -372,7 +378,11 @@ export class ModelDownloadManager {
     const candidates = this.getDownloadFileNameCandidates(model);
 
     for (const candidate of candidates) {
-      const info = await FileSystem.getInfoAsync(modelsDir + candidate);
+      const candidatePath = safeJoinModelPath(modelsDir, candidate);
+      if (!candidatePath) {
+        continue;
+      }
+      const info = await FileSystem.getInfoAsync(candidatePath);
       if (info.exists) {
         return candidate;
       }
@@ -390,7 +400,10 @@ export class ModelDownloadManager {
     let deletedAnyFile = false;
 
     for (const fileName of Array.from(new Set(fileNames))) {
-      const localUri = modelsDir + fileName;
+      const localUri = safeJoinModelPath(modelsDir, fileName);
+      if (!localUri) {
+        continue;
+      }
       const fileInfo = await FileSystem.getInfoAsync(localUri);
       if (!fileInfo.exists) {
         continue;

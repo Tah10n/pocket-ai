@@ -82,6 +82,7 @@ function resolveSystemMetricsModule(): NativeSystemMetricsModule | null {
 }
 
 let cachedSnapshot: SystemMemorySnapshot | null = null;
+let inflightSnapshotPromise: Promise<SystemMemorySnapshot | null> | null = null;
 
 async function readNativeSnapshot(): Promise<SystemMemorySnapshot | null> {
   const platform = normalizePlatform();
@@ -138,9 +139,21 @@ export async function getFreshMemorySnapshot(maxAgeMs: number): Promise<SystemMe
     return cachedSnapshot;
   }
 
-  const snapshot = await readNativeSnapshot();
-  cachedSnapshot = snapshot;
-  return snapshot;
+  // Coalesce concurrent requests into a single native call
+  if (inflightSnapshotPromise) {
+    return inflightSnapshotPromise;
+  }
+
+  inflightSnapshotPromise = readNativeSnapshot().then((snapshot) => {
+    cachedSnapshot = snapshot;
+    inflightSnapshotPromise = null;
+    return snapshot;
+  }).catch((error) => {
+    inflightSnapshotPromise = null;
+    throw error;
+  });
+
+  return inflightSnapshotPromise;
 }
 
 export async function getSystemMemorySnapshot(): Promise<SystemMemorySnapshot | null> {

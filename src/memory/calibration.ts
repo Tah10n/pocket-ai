@@ -22,8 +22,10 @@ const COMPUTE_CORRECTION_BOUNDS = { min: 0.8, max: 1.35 };
 const OVERHEAD_CORRECTION_BOUNDS = { min: 0.8, max: 1.5 };
 const FAILURE_PENALTY_BOUNDS = { min: 1, max: 1.6 };
 const SUCCESS_FACTOR_EMA_ALPHA = 0.25;
-const SUCCESS_PENALTY_DECAY = 0.95;
+const SUCCESS_PENALTY_DECAY = 0.9;
 const FAILURE_PENALTY_INFLATION = 1.12;
+const CALIBRATION_STALENESS_THRESHOLD_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+const STALENESS_FACTOR_DECAY = 0.5; // Halve the distance from default when stale
 
 function clamp(value: number, min: number, max: number): number {
   if (!Number.isFinite(value)) {
@@ -187,20 +189,40 @@ export function applyCalibrationToBreakdown(
   };
 }
 
-export function normalizeCalibrationRecordFactors(record: CalibrationRecord): CalibrationRecord {
+function decayStaleFactorTowardsDefault(factor: number, defaultValue: number): number {
+  return defaultValue + (factor - defaultValue) * STALENESS_FACTOR_DECAY;
+}
+
+export function normalizeCalibrationRecordFactors(record: CalibrationRecord, nowMs?: number): CalibrationRecord {
+  const lastObservedAtMs = Math.max(0, Math.floor(record.lastObservedAtMs));
+  const resolvedNowMs = nowMs ?? Date.now();
+  const isStale = lastObservedAtMs > 0 && (resolvedNowMs - lastObservedAtMs) > CALIBRATION_STALENESS_THRESHOLD_MS;
+
+  let weightsCorrectionFactor = resolveBoundedFactor(record.weightsCorrectionFactor, WEIGHTS_CORRECTION_BOUNDS, 1);
+  let computeCorrectionFactor = resolveBoundedFactor(record.computeCorrectionFactor, COMPUTE_CORRECTION_BOUNDS, 1);
+  let overheadCorrectionFactor = resolveBoundedFactor(record.overheadCorrectionFactor, OVERHEAD_CORRECTION_BOUNDS, 1);
+  let failurePenaltyFactor = resolveBoundedFactor(record.failurePenaltyFactor, FAILURE_PENALTY_BOUNDS, 1);
+
+  if (isStale) {
+    weightsCorrectionFactor = clamp(decayStaleFactorTowardsDefault(weightsCorrectionFactor, 1), WEIGHTS_CORRECTION_BOUNDS.min, WEIGHTS_CORRECTION_BOUNDS.max);
+    computeCorrectionFactor = clamp(decayStaleFactorTowardsDefault(computeCorrectionFactor, 1), COMPUTE_CORRECTION_BOUNDS.min, COMPUTE_CORRECTION_BOUNDS.max);
+    overheadCorrectionFactor = clamp(decayStaleFactorTowardsDefault(overheadCorrectionFactor, 1), OVERHEAD_CORRECTION_BOUNDS.min, OVERHEAD_CORRECTION_BOUNDS.max);
+    failurePenaltyFactor = clamp(decayStaleFactorTowardsDefault(failurePenaltyFactor, 1), FAILURE_PENALTY_BOUNDS.min, FAILURE_PENALTY_BOUNDS.max);
+  }
+
   return {
     ...record,
     sampleCount: Math.max(0, Math.floor(record.sampleCount)),
     successCount: Math.max(0, Math.floor(record.successCount)),
     failureCount: Math.max(0, Math.floor(record.failureCount)),
-    weightsCorrectionFactor: resolveBoundedFactor(record.weightsCorrectionFactor, WEIGHTS_CORRECTION_BOUNDS, 1),
-    computeCorrectionFactor: resolveBoundedFactor(record.computeCorrectionFactor, COMPUTE_CORRECTION_BOUNDS, 1),
-    overheadCorrectionFactor: resolveBoundedFactor(record.overheadCorrectionFactor, OVERHEAD_CORRECTION_BOUNDS, 1),
-    failurePenaltyFactor: resolveBoundedFactor(record.failurePenaltyFactor, FAILURE_PENALTY_BOUNDS, 1),
+    weightsCorrectionFactor,
+    computeCorrectionFactor,
+    overheadCorrectionFactor,
+    failurePenaltyFactor,
     learnedSafeBudgetBytes: typeof record.learnedSafeBudgetBytes === 'number' && Number.isFinite(record.learnedSafeBudgetBytes) && record.learnedSafeBudgetBytes > 0
       ? record.learnedSafeBudgetBytes
       : undefined,
-    lastObservedAtMs: Math.max(0, Math.floor(record.lastObservedAtMs)),
+    lastObservedAtMs,
   };
 }
 
@@ -246,7 +268,8 @@ export function applySuccessfulCalibrationObservation({
   observedRawBudgetBytes: number | null;
   nowMs?: number;
 }): CalibrationRecord {
-  const normalized = normalizeCalibrationRecordFactors(record);
+  const resolvedNowMs = nowMs ?? Date.now();
+  const normalized = normalizeCalibrationRecordFactors(record, resolvedNowMs);
   const predictedAdjustableBytes = sumPositiveByteCounts(
     predictedBreakdown.weightsBytes,
     predictedBreakdown.computeBytes,
@@ -261,7 +284,7 @@ export function applySuccessfulCalibrationObservation({
     ...normalized,
     sampleCount: normalized.sampleCount + 1,
     successCount: normalized.successCount + 1,
-    lastObservedAtMs: Math.max(0, Math.floor(nowMs)),
+    lastObservedAtMs: Math.max(0, Math.floor(resolvedNowMs)),
     failurePenaltyFactor: clamp(normalized.failurePenaltyFactor * SUCCESS_PENALTY_DECAY, FAILURE_PENALTY_BOUNDS.min, FAILURE_PENALTY_BOUNDS.max),
   };
 
@@ -278,17 +301,17 @@ export function applySuccessfulCalibrationObservation({
     !isFinitePositiveNumber(observedResidentDeltaBytes)
     || !isFinitePositiveNumber(predictedAdjustableBytes)
   ) {
-    return normalizeCalibrationRecordFactors(updated);
+    return normalizeCalibrationRecordFactors(updated, resolvedNowMs);
   }
 
   const observedAdjustableBytes = Math.max(0, observedResidentDeltaBytes - predictedOtherBytes);
   if (!Number.isFinite(observedAdjustableBytes) || observedAdjustableBytes <= 0) {
-    return normalizeCalibrationRecordFactors(updated);
+    return normalizeCalibrationRecordFactors(updated, resolvedNowMs);
   }
 
   const ratio = observedAdjustableBytes / predictedAdjustableBytes;
   if (!Number.isFinite(ratio) || ratio <= 0) {
-    return normalizeCalibrationRecordFactors(updated);
+    return normalizeCalibrationRecordFactors(updated, resolvedNowMs);
   }
 
   return normalizeCalibrationRecordFactors({
@@ -311,7 +334,7 @@ export function applySuccessfulCalibrationObservation({
       bounds: OVERHEAD_CORRECTION_BOUNDS,
       alpha: SUCCESS_FACTOR_EMA_ALPHA,
     }),
-  });
+  }, resolvedNowMs);
 }
 
 export function applyFailedCalibrationObservation({
@@ -323,12 +346,13 @@ export function applyFailedCalibrationObservation({
   observedRawBudgetBytes: number | null;
   nowMs?: number;
 }): CalibrationRecord {
-  const normalized = normalizeCalibrationRecordFactors(record);
+  const resolvedNowMs = nowMs ?? Date.now();
+  const normalized = normalizeCalibrationRecordFactors(record, resolvedNowMs);
   let updated: CalibrationRecord = {
     ...normalized,
     sampleCount: normalized.sampleCount + 1,
     failureCount: normalized.failureCount + 1,
-    lastObservedAtMs: Math.max(0, Math.floor(nowMs)),
+    lastObservedAtMs: Math.max(0, Math.floor(resolvedNowMs)),
     failurePenaltyFactor: clamp(
       normalized.failurePenaltyFactor * FAILURE_PENALTY_INFLATION,
       FAILURE_PENALTY_BOUNDS.min,
@@ -345,5 +369,5 @@ export function applyFailedCalibrationObservation({
     };
   }
 
-  return normalizeCalibrationRecordFactors(updated);
+  return normalizeCalibrationRecordFactors(updated, resolvedNowMs);
 }

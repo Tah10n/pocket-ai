@@ -194,7 +194,8 @@ export const useChatStore = create<ChatStoreState>()(
       },
 
       pruneExpiredThreads: (retentionDays, now = Date.now()) => {
-        const expiredThreadIds = getExpiredThreadIds(get().threads, retentionDays, now, get().activeThreadId);
+        const state = get();
+        const expiredThreadIds = getExpiredThreadIds(state.threads, retentionDays, now, state.activeThreadId);
         if (expiredThreadIds.length === 0) {
           return 0;
         }

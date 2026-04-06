@@ -90,7 +90,7 @@ describe('memory calibration', () => {
     expect(success.successCount).toBe(1);
     expect(success.failureCount).toBe(0);
     expect(success.learnedSafeBudgetBytes).toBe(4_000_000_000);
-    expect(success.failurePenaltyFactor).toBeCloseTo(1.14, 6);
+    expect(success.failurePenaltyFactor).toBeCloseTo(1.08, 6);
     expect(success.weightsCorrectionFactor).toBeCloseTo(1.0375, 6);
     expect(success.computeCorrectionFactor).toBeCloseTo(1.0375, 6);
     expect(success.overheadCorrectionFactor).toBeCloseTo(1.0375, 6);
@@ -104,7 +104,7 @@ describe('memory calibration', () => {
     expect(failure.sampleCount).toBe(2);
     expect(failure.failureCount).toBe(1);
     expect(failure.learnedSafeBudgetBytes).toBe(3_500_000_000);
-    expect(failure.failurePenaltyFactor).toBeCloseTo(1.2768, 6);
+    expect(failure.failurePenaltyFactor).toBeCloseTo(1.2096, 6);
   });
 
   it('normalizes invalid factors into safe bounds', () => {

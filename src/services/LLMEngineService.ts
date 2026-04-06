@@ -17,6 +17,7 @@ import { EngineStatus, EngineState, type ModelMemoryFitConfidence } from '../typ
 import { LlmChatCompletionOptions, LlmChatMessage } from '../types/chat';
 import { registry } from './LocalStorageRegistry';
 import { getModelsDir } from './FileSystemSetup';
+import { safeJoinModelPath } from '../utils/safeFilePath';
 import {
   getModelLoadParametersForModel,
   updateSettings,
@@ -1024,7 +1025,12 @@ class LLMEngineService {
         });
       }
 
-      const modelPath = modelsDir + localPath;
+      const modelPath = safeJoinModelPath(modelsDir, localPath);
+      if (!modelPath) {
+        throw new AppError('action_failed', `Invalid model file path for ${modelId}`, {
+          details: { modelId },
+        });
+      }
       const fileInfo = await FileSystem.getInfoAsync(modelPath);
       if (!fileInfo.exists) {
         throw new AppError('download_file_missing', `Model file not found at ${modelPath}`, {

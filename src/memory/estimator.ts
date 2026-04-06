@@ -6,6 +6,7 @@ import type {
   MemoryBreakdown,
   MemoryMetadataTrust,
 } from './types';
+import { Platform } from 'react-native';
 import { createMemoryBudget, FITS_IN_RAM_HEADROOM_RATIO, type MemoryBudgetSnapshot } from './budget';
 import { normalizeCalibrationRecordFactors } from './calibration';
 
@@ -631,7 +632,12 @@ function applyMmapBudgetAdjustment({
   }
 
   const nonWeightRequiredBytes = Math.max(0, requiredBytesTotal - breakdown.weightsBytes);
-  const remainingSoftBudgetBytesRaw = Math.max(0, softEffectiveBudgetBytes - breakdown.weightsBytes);
+  const remainingSoftBudgetBytesRaw = softEffectiveBudgetBytes - breakdown.weightsBytes;
+
+  // If weights alone exceed the soft budget, mmap adjustment cannot help — fall back to regular budget
+  if (remainingSoftBudgetBytesRaw < 0) {
+    return null;
+  }
   const mmapExtraHeadroomBytes = Math.min(
     128 * 1024 * 1024,
     Math.max(
@@ -832,11 +838,11 @@ export function estimateFastMemoryFit({
     });
   }
 
+  const isIOS = Platform.OS === 'ios';
   const previewAvailableBytes = Math.floor(totalMemoryBytes * FITS_IN_RAM_HEADROOM_RATIO);
-  const previewThresholdBytes = Math.min(
-    previewAvailableBytes,
-    FAST_ESTIMATE_DEFAULT_THRESHOLD_BYTES,
-  );
+  const previewThresholdBytes = isIOS
+    ? 0
+    : Math.min(previewAvailableBytes, FAST_ESTIMATE_DEFAULT_THRESHOLD_BYTES);
   const previewAppBaselineBytes = Math.max(
     FAST_ESTIMATE_MIN_APP_BASELINE_BYTES,
     Math.floor(totalMemoryBytes * 0.05),
@@ -861,7 +867,7 @@ export function estimateFastMemoryFit({
       pressureLevel: 'normal',
       thresholdBytes: previewThresholdBytes,
       timestampMs: 0,
-      platform: 'android',
+      platform: Platform.OS === 'ios' ? 'ios' : 'android',
     },
   });
   const requiredBytesTotal = sumBreakdown(breakdown);

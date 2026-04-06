@@ -14,7 +14,7 @@
       "bundleIdentifier": "com.github.tah10n.pocketai"
     },
     "android": {
-      "versionCode": 4,
+      "versionCode": 5,
       "permissions": [
         "INTERNET",
         "VIBRATE"

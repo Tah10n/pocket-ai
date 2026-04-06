@@ -82,36 +82,41 @@ RCT_REMAP_METHOD(getMemorySnapshot,
     uint64_t totalBytes = [NSProcessInfo processInfo].physicalMemory;
 
     vm_size_t pageSize = 0;
-    host_page_size(mach_host_self(), &pageSize);
+    kern_return_t pageSizeKr = host_page_size(mach_host_self(), &pageSize);
 
     vm_statistics64_data_t vmstat;
     mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
-    kern_return_t kr = host_statistics64(mach_host_self(), HOST_VM_INFO64, (host_info64_t)&vmstat, &count);
+    kern_return_t vmKr = host_statistics64(mach_host_self(), HOST_VM_INFO64, (host_info64_t)&vmstat, &count);
+    BOOL hasVmInfo = (pageSizeKr == KERN_SUCCESS && vmKr == KERN_SUCCESS && pageSize > 0);
 
     uint64_t freeBytes = 0;
     uint64_t inactiveBytes = 0;
     uint64_t speculativeBytes = 0;
-    if (kr == KERN_SUCCESS) {
+    if (hasVmInfo) {
       freeBytes = (uint64_t)vmstat.free_count * (uint64_t)pageSize;
       inactiveBytes = (uint64_t)vmstat.inactive_count * (uint64_t)pageSize;
       speculativeBytes = (uint64_t)vmstat.speculative_count * (uint64_t)pageSize;
     }
 
-    uint64_t availableBytes = freeBytes + inactiveBytes + speculativeBytes;
-    if (totalBytes > 0 && availableBytes > totalBytes) {
-      availableBytes = totalBytes;
+    uint64_t availableBytes = 0;
+    uint64_t usedBytes = 0;
+    if (hasVmInfo) {
+      availableBytes = freeBytes + inactiveBytes + speculativeBytes;
+      if (totalBytes > 0 && availableBytes > totalBytes) {
+        availableBytes = totalBytes;
+      }
+      usedBytes = totalBytes > availableBytes ? (totalBytes - availableBytes) : 0;
     }
-    uint64_t usedBytes = totalBytes > availableBytes ? (totalBytes - availableBytes) : 0;
 
     task_basic_info_data_t taskInfo;
     mach_msg_type_number_t taskCount = TASK_BASIC_INFO_COUNT;
-    kr = task_info(mach_task_self(), TASK_BASIC_INFO, (task_info_t)&taskInfo, &taskCount);
-    uint64_t appResidentBytes = kr == KERN_SUCCESS ? (uint64_t)taskInfo.resident_size : 0;
+    kern_return_t taskKr = task_info(mach_task_self(), TASK_BASIC_INFO, (task_info_t)&taskInfo, &taskCount);
+    uint64_t appResidentBytes = taskKr == KERN_SUCCESS ? (uint64_t)taskInfo.resident_size : 0;
 
-    double ratio = (totalBytes > 0) ? ((double)availableBytes / (double)totalBytes) : 0;
     NSString *pressureLevel = @"unknown";
     BOOL lowMemory = NO;
-    if (totalBytes > 0) {
+    if (hasVmInfo && totalBytes > 0) {
+      double ratio = (double)availableBytes / (double)totalBytes;
       if (ratio <= 0.08) {
         pressureLevel = @"critical";
         lowMemory = YES;

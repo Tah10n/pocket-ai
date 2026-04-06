@@ -296,10 +296,54 @@ export const useModelsStore = create<ModelsStoreState>()(
     }),
     {
       name: 'models-list-preferences',
-      version: 5,
+      version: 6,
       skipHydration: true,
       storage: createJSONStorage(() => mmkvStorage),
       partialize: (state) => ({ tabPreferences: state.tabPreferences }),
+      merge: (persistedState, currentState) => {
+        const state = (persistedState ?? {}) as Partial<ModelsStoreState> & {
+          tabPreferences?: unknown;
+        };
+        const persistedPreferences = (state.tabPreferences ?? {}) as Partial<Record<
+          ModelsCatalogTabId,
+          Partial<ModelsCatalogTabPreferences>
+        >>;
+
+        const allFilters = normalizeFilters(
+          persistedPreferences.all?.filters ?? currentState.tabPreferences.all.filters,
+        );
+        const allSort = normalizeSort(
+          persistedPreferences.all?.sort ?? currentState.tabPreferences.all.sort,
+        );
+        const allDiscoveryMode = normalizeDiscoveryMode(persistedPreferences.all?.discoveryMode)
+          ?? (hasNonDefaultPreferences(allFilters, allSort) ? 'custom' : currentState.tabPreferences.all.discoveryMode);
+
+        const downloadedFilters = normalizeFilters(
+          persistedPreferences.downloaded?.filters ?? currentState.tabPreferences.downloaded.filters,
+        );
+        const downloadedSort = normalizeSort(
+          persistedPreferences.downloaded?.sort ?? currentState.tabPreferences.downloaded.sort,
+        );
+        const downloadedDiscoveryMode = normalizeDiscoveryMode(persistedPreferences.downloaded?.discoveryMode)
+          ?? (hasNonDefaultPreferences(downloadedFilters, downloadedSort) ? 'custom' : currentState.tabPreferences.downloaded.discoveryMode);
+
+        return {
+          ...currentState,
+          ...state,
+          tabPreferences: {
+            all: {
+              filters: allFilters,
+              sort: allSort,
+              discoveryMode: allDiscoveryMode,
+            },
+            downloaded: {
+              filters: downloadedFilters,
+              sort: downloadedSort,
+              discoveryMode: downloadedDiscoveryMode,
+            },
+          },
+        };
+      },
       migrate: (persistedState, version) => {
         const previousVersion = typeof version === 'number' ? version : 0;
         const state = (persistedState ?? {}) as any;

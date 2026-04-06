@@ -5,9 +5,18 @@ describe('modelsStore', () => {
   beforeEach(async () => {
     storage.remove('models-list-preferences');
     useModelsStore.setState({
-      filters: { ...DEFAULT_FILTERS },
-      sort: { ...DEFAULT_SORT },
-      discoveryMode: 'uninitialized',
+      tabPreferences: {
+        all: {
+          filters: { ...DEFAULT_FILTERS },
+          sort: { ...DEFAULT_SORT },
+          discoveryMode: 'uninitialized',
+        },
+        downloaded: {
+          filters: { ...DEFAULT_FILTERS },
+          sort: { ...DEFAULT_SORT },
+          discoveryMode: 'full',
+        },
+      },
     } as any);
     await useModelsStore.persist.rehydrate();
   });
@@ -17,11 +26,19 @@ describe('modelsStore', () => {
 
     expect(useModelsStore.getState()).toEqual(
       expect.objectContaining({
-        discoveryMode: 'guided',
-        sort: DISCOVERY_SORT,
-        filters: expect.objectContaining({
-          fitsInRamOnly: true,
-          noTokenRequiredOnly: true,
+        tabPreferences: expect.objectContaining({
+          all: expect.objectContaining({
+            discoveryMode: 'guided',
+            sort: DISCOVERY_SORT,
+            filters: expect.objectContaining({
+              fitsInRamOnly: true,
+              noTokenRequiredOnly: true,
+            }),
+          }),
+          downloaded: expect.objectContaining({
+            filters: DEFAULT_FILTERS,
+            sort: DEFAULT_SORT,
+          }),
         }),
       }),
     );
@@ -30,11 +47,19 @@ describe('modelsStore', () => {
 
     expect(useModelsStore.getState()).toEqual(
       expect.objectContaining({
-        discoveryMode: 'guided',
-        sort: DISCOVERY_SORT,
-        filters: expect.objectContaining({
-          fitsInRamOnly: true,
-          noTokenRequiredOnly: false,
+        tabPreferences: expect.objectContaining({
+          all: expect.objectContaining({
+            discoveryMode: 'guided',
+            sort: DISCOVERY_SORT,
+            filters: expect.objectContaining({
+              fitsInRamOnly: true,
+              noTokenRequiredOnly: false,
+            }),
+          }),
+          downloaded: expect.objectContaining({
+            filters: DEFAULT_FILTERS,
+            sort: DEFAULT_SORT,
+          }),
         }),
       }),
     );
@@ -44,13 +69,13 @@ describe('modelsStore', () => {
     useModelsStore.getState().showFullCatalog();
     useModelsStore.getState().syncDiscoveryTokenState(false);
 
-    expect(useModelsStore.getState().filters).toEqual(DEFAULT_FILTERS);
+    expect(useModelsStore.getState().tabPreferences.all.filters).toEqual(DEFAULT_FILTERS);
 
     useModelsStore.getState().applyDiscoveryPreset({ hasToken: false });
     useModelsStore.getState().syncDiscoveryTokenState(true);
 
-    expect(useModelsStore.getState().filters.noTokenRequiredOnly).toBe(false);
-    expect(useModelsStore.getState().sort).toEqual(DISCOVERY_SORT);
+    expect(useModelsStore.getState().tabPreferences.all.filters.noTokenRequiredOnly).toBe(false);
+    expect(useModelsStore.getState().tabPreferences.all.sort).toEqual(DISCOVERY_SORT);
   });
 
   it('migrates legacy sort fields and discovery modes during rehydration', async () => {
@@ -71,11 +96,13 @@ describe('modelsStore', () => {
 
     await useModelsStore.persist.rehydrate();
 
-    expect(useModelsStore.getState().sort).toEqual({
+    expect(useModelsStore.getState().tabPreferences.all.sort).toEqual({
       field: 'lastModified',
       direction: 'desc',
     });
-    expect(useModelsStore.getState().discoveryMode).toBe('custom');
+    expect(useModelsStore.getState().tabPreferences.all.discoveryMode).toBe('custom');
+    expect(useModelsStore.getState().tabPreferences.downloaded.filters).toEqual(DEFAULT_FILTERS);
+    expect(useModelsStore.getState().tabPreferences.downloaded.sort).toEqual(DEFAULT_SORT);
   });
 
   it('infers custom discovery mode for pre-v3 installs with non-default preferences', async () => {
@@ -93,6 +120,19 @@ describe('modelsStore', () => {
 
     await useModelsStore.persist.rehydrate();
 
-    expect(useModelsStore.getState().discoveryMode).toBe('custom');
+    expect(useModelsStore.getState().tabPreferences.all.discoveryMode).toBe('custom');
+  });
+
+  it('stores downloaded tab preferences separately and defaults them to name + no filters', () => {
+    useModelsStore.getState().applyDiscoveryPreset({ hasToken: false });
+
+    expect(useModelsStore.getState().tabPreferences.downloaded.filters).toEqual(DEFAULT_FILTERS);
+    expect(useModelsStore.getState().tabPreferences.downloaded.sort).toEqual(DEFAULT_SORT);
+
+    useModelsStore.getState().setFitsInRamOnly('downloaded', true);
+
+    expect(useModelsStore.getState().tabPreferences.downloaded.filters.fitsInRamOnly).toBe(true);
+    expect(useModelsStore.getState().tabPreferences.downloaded.discoveryMode).toBe('custom');
+    expect(useModelsStore.getState().tabPreferences.all.discoveryMode).toBe('guided');
   });
 });

@@ -248,9 +248,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
   const { loadModel, unloadModel, state: engineState } = useLLMEngine();
   const { openErrorReport, sheetProps: errorReportSheetProps } = useErrorReportSheetController();
   const {
-    filters,
-    sort,
-    discoveryMode,
+    tabPreferences,
     applyDiscoveryPreset,
     syncDiscoveryTokenState,
     showFullCatalog,
@@ -260,6 +258,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
     setSort,
     clearFilters,
   } = useModelsStore();
+  const { filters, sort, discoveryMode } = tabPreferences[activeTab];
   const serverSort = useMemo(() => resolveServerSort(sort), [sort]);
   const shouldAutoLoadMore = serverSort !== null;
   const effectiveSearchSessionKey = searchSessionKey ?? searchQuery;
@@ -1051,12 +1050,12 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
           : t('models.emptySearchHint')}
       </Text>
       {hasFilters ? (
-        <Button size="sm" className="mt-4" onPress={clearFilters}>
+        <Button size="sm" className="mt-4" onPress={() => clearFilters(activeTab)}>
           <ButtonText>{t('models.clearFilters')}</ButtonText>
         </Button>
       ) : null}
     </Box>
-  ), [clearFilters, hasFilters, t]);
+  ), [activeTab, clearFilters, hasFilters, t]);
 
   const discoveryBanner = useMemo(() => {
     if (activeTab !== 'all' || discoveryMode !== 'guided') {
@@ -1156,11 +1155,11 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
       <ModelsFilter
         filters={filters}
         sort={sort}
-        onFitsInRamToggle={setFitsInRamOnly}
-        onNoTokenRequiredToggle={setNoTokenRequiredOnly}
-        onSizeRangeToggle={toggleSizeRange}
-        onSortChange={setSort}
-        onClear={clearFilters}
+        onFitsInRamToggle={(enabled) => setFitsInRamOnly(activeTab, enabled)}
+        onNoTokenRequiredToggle={(enabled) => setNoTokenRequiredOnly(activeTab, enabled)}
+        onSizeRangeToggle={(sizeRange) => toggleSizeRange(activeTab, sizeRange)}
+        onSortChange={(nextSort) => setSort(activeTab, nextSort)}
+        onClear={() => clearFilters(activeTab)}
       />
 
       <ScreenStack className="flex-1 pt-2" gap="compact">

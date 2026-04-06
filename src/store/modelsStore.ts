@@ -6,6 +6,7 @@ export type ModelSizeRange = 'small' | 'medium' | 'large';
 export type ModelSortField = 'name' | 'lastModified' | 'downloaded' | 'downloads' | 'likes';
 export type ModelSortDirection = 'asc' | 'desc';
 export type CatalogDiscoveryMode = 'uninitialized' | 'guided' | 'full' | 'custom';
+export type ModelsCatalogTabId = 'all' | 'downloaded';
 export const MODELS_PAGE_SIZE = 20;
 
 export interface ModelFilterCriteria {
@@ -19,18 +20,22 @@ export interface ModelSortPreference {
   direction: ModelSortDirection;
 }
 
-interface ModelsStoreState {
+export interface ModelsCatalogTabPreferences {
   filters: ModelFilterCriteria;
   sort: ModelSortPreference;
   discoveryMode: CatalogDiscoveryMode;
+}
+
+interface ModelsStoreState {
+  tabPreferences: Record<ModelsCatalogTabId, ModelsCatalogTabPreferences>;
   applyDiscoveryPreset: (options: { hasToken: boolean }) => void;
   syncDiscoveryTokenState: (hasToken: boolean) => void;
   showFullCatalog: () => void;
-  setFitsInRamOnly: (enabled: boolean) => void;
-  setNoTokenRequiredOnly: (enabled: boolean) => void;
-  toggleSizeRange: (sizeRange: ModelSizeRange) => void;
-  setSort: (sort: ModelSortPreference) => void;
-  clearFilters: () => void;
+  setFitsInRamOnly: (tab: ModelsCatalogTabId, enabled: boolean) => void;
+  setNoTokenRequiredOnly: (tab: ModelsCatalogTabId, enabled: boolean) => void;
+  toggleSizeRange: (tab: ModelsCatalogTabId, sizeRange: ModelSizeRange) => void;
+  setSort: (tab: ModelsCatalogTabId, sort: ModelSortPreference) => void;
+  clearFilters: (tab: ModelsCatalogTabId) => void;
 }
 
 export const DEFAULT_FILTERS: ModelFilterCriteria = {
@@ -136,118 +141,218 @@ function hasNonDefaultPreferences(
   );
 }
 
+function resolvePersistedDiscoveryMode(
+  previousVersion: number,
+  persistedDiscoveryMode: CatalogDiscoveryMode | undefined,
+  filters: ModelFilterCriteria,
+  sort: ModelSortPreference,
+): CatalogDiscoveryMode {
+  return previousVersion < 3
+    ? (
+      persistedDiscoveryMode === 'guided' || persistedDiscoveryMode === 'full'
+        ? persistedDiscoveryMode
+        : hasNonDefaultPreferences(filters, sort)
+          ? 'custom'
+          : 'uninitialized'
+    )
+    : persistedDiscoveryMode
+      ?? (hasNonDefaultPreferences(filters, sort) ? 'custom' : 'uninitialized');
+}
+
 export const useModelsStore = create<ModelsStoreState>()(
   persist(
     (set) => ({
-      filters: createDefaultFilters(),
-      sort: DEFAULT_SORT,
-      discoveryMode: 'uninitialized',
+      tabPreferences: {
+        all: {
+          filters: createDefaultFilters(),
+          sort: DEFAULT_SORT,
+          discoveryMode: 'uninitialized',
+        },
+        downloaded: {
+          filters: createDefaultFilters(),
+          sort: DEFAULT_SORT,
+          discoveryMode: 'full',
+        },
+      },
 
       applyDiscoveryPreset: ({ hasToken }) =>
-        set({
-          filters: createDiscoveryFilters(hasToken),
-          sort: DISCOVERY_SORT,
-          discoveryMode: 'guided',
-        }),
+        set((state) => ({
+          tabPreferences: {
+            ...state.tabPreferences,
+            all: {
+              filters: createDiscoveryFilters(hasToken),
+              sort: DISCOVERY_SORT,
+              discoveryMode: 'guided',
+            },
+          },
+        })),
 
       syncDiscoveryTokenState: (hasToken) =>
         set((state) => {
-          if (state.discoveryMode !== 'guided') {
+          const allPreferences = state.tabPreferences.all;
+          if (allPreferences.discoveryMode !== 'guided') {
             return state;
           }
 
           const nextFilters = createDiscoveryFilters(hasToken);
           const noFilterChange =
-            state.filters.fitsInRamOnly === nextFilters.fitsInRamOnly
-            && state.filters.noTokenRequiredOnly === nextFilters.noTokenRequiredOnly
-            && state.filters.sizeRanges.length === 0;
+            allPreferences.filters.fitsInRamOnly === nextFilters.fitsInRamOnly
+            && allPreferences.filters.noTokenRequiredOnly === nextFilters.noTokenRequiredOnly
+            && allPreferences.filters.sizeRanges.length === 0;
           const noSortChange =
-            state.sort.field === DISCOVERY_SORT.field
-            && state.sort.direction === DISCOVERY_SORT.direction;
+            allPreferences.sort.field === DISCOVERY_SORT.field
+            && allPreferences.sort.direction === DISCOVERY_SORT.direction;
 
           if (noFilterChange && noSortChange) {
             return state;
           }
 
           return {
-            filters: nextFilters,
-            sort: DISCOVERY_SORT,
+            tabPreferences: {
+              ...state.tabPreferences,
+              all: {
+                ...allPreferences,
+                filters: nextFilters,
+                sort: DISCOVERY_SORT,
+              },
+            },
           };
         }),
 
       showFullCatalog: () =>
         set((state) => ({
-          filters: createDefaultFilters(),
-          sort: state.sort,
-          discoveryMode: 'full',
-        })),
-
-      setFitsInRamOnly: (enabled) =>
-        set((state) => ({
-          filters: { ...state.filters, fitsInRamOnly: enabled },
-          discoveryMode: 'custom',
-        })),
-
-      setNoTokenRequiredOnly: (enabled) =>
-        set((state) => ({
-          filters: { ...state.filters, noTokenRequiredOnly: enabled },
-          discoveryMode: 'custom',
-        })),
-
-      toggleSizeRange: (sizeRange) =>
-        set((state) => ({
-          filters: {
-            ...state.filters,
-            sizeRanges: toggleValue(state.filters.sizeRanges, sizeRange),
+          tabPreferences: {
+            ...state.tabPreferences,
+            all: {
+              ...state.tabPreferences.all,
+              filters: createDefaultFilters(),
+              discoveryMode: 'full',
+            },
           },
-          discoveryMode: 'custom',
         })),
 
-      setSort: (sort) =>
-        set({
-          sort,
-          discoveryMode: 'custom',
-        }),
-
-      clearFilters: () =>
+      setFitsInRamOnly: (tab, enabled) =>
         set((state) => ({
-          filters: createDefaultFilters(),
-          sort: state.sort,
-          discoveryMode: 'full',
+          tabPreferences: {
+            ...state.tabPreferences,
+            [tab]: {
+              ...state.tabPreferences[tab],
+              filters: { ...state.tabPreferences[tab].filters, fitsInRamOnly: enabled },
+              discoveryMode: 'custom',
+            },
+          },
+        })),
+
+      setNoTokenRequiredOnly: (tab, enabled) =>
+        set((state) => ({
+          tabPreferences: {
+            ...state.tabPreferences,
+            [tab]: {
+              ...state.tabPreferences[tab],
+              filters: { ...state.tabPreferences[tab].filters, noTokenRequiredOnly: enabled },
+              discoveryMode: 'custom',
+            },
+          },
+        })),
+
+      toggleSizeRange: (tab, sizeRange) =>
+        set((state) => ({
+          tabPreferences: {
+            ...state.tabPreferences,
+            [tab]: {
+              ...state.tabPreferences[tab],
+              filters: {
+                ...state.tabPreferences[tab].filters,
+                sizeRanges: toggleValue(state.tabPreferences[tab].filters.sizeRanges, sizeRange),
+              },
+              discoveryMode: 'custom',
+            },
+          },
+        })),
+
+      setSort: (tab, sort) =>
+        set((state) => ({
+          tabPreferences: {
+            ...state.tabPreferences,
+            [tab]: {
+              ...state.tabPreferences[tab],
+              sort,
+              discoveryMode: 'custom',
+            },
+          },
+        })),
+
+      clearFilters: (tab) =>
+        set((state) => ({
+          tabPreferences: {
+            ...state.tabPreferences,
+            [tab]: {
+              ...state.tabPreferences[tab],
+              filters: createDefaultFilters(),
+              discoveryMode: 'full',
+            },
+          },
         })),
     }),
     {
       name: 'models-list-preferences',
-      version: 4,
+      version: 5,
       skipHydration: true,
       storage: createJSONStorage(() => mmkvStorage),
-      partialize: (state) => ({
-        filters: state.filters,
-        sort: state.sort,
-        discoveryMode: state.discoveryMode,
-      }),
+      partialize: (state) => ({ tabPreferences: state.tabPreferences }),
       migrate: (persistedState, version) => {
-        const state = (persistedState ?? {}) as Partial<ModelsStoreState>;
-        const filters = normalizeFilters(state.filters);
-        const sort = normalizeSort(state.sort);
-        const persistedDiscoveryMode = normalizeDiscoveryMode(state.discoveryMode);
         const previousVersion = typeof version === 'number' ? version : 0;
-        const discoveryMode = previousVersion < 3
+        const state = (persistedState ?? {}) as any;
+
+        const legacyFilters = normalizeFilters(state.filters);
+        const legacySort = normalizeSort(state.sort);
+        const legacyDiscoveryMode = resolvePersistedDiscoveryMode(
+          previousVersion,
+          normalizeDiscoveryMode(state.discoveryMode),
+          legacyFilters,
+          legacySort,
+        );
+
+        const persistedPreferences = state.tabPreferences as ModelsStoreState['tabPreferences'] | undefined;
+        const allSource = previousVersion >= 5 ? persistedPreferences?.all : undefined;
+        const downloadedSource = previousVersion >= 5 ? persistedPreferences?.downloaded : undefined;
+
+        const allFilters = normalizeFilters(allSource?.filters ?? legacyFilters);
+        const allSort = normalizeSort(allSource?.sort ?? legacySort);
+        const allPersistedDiscoveryMode = normalizeDiscoveryMode(allSource?.discoveryMode ?? legacyDiscoveryMode);
+        const allDiscoveryMode = resolvePersistedDiscoveryMode(
+          previousVersion,
+          allPersistedDiscoveryMode,
+          allFilters,
+          allSort,
+        );
+
+        const downloadedFilters = previousVersion >= 5
+          ? normalizeFilters(downloadedSource?.filters)
+          : createDefaultFilters();
+        const downloadedSort = previousVersion >= 5
+          ? normalizeSort(downloadedSource?.sort)
+          : DEFAULT_SORT;
+        const downloadedDiscoveryMode = previousVersion >= 5
           ? (
-            persistedDiscoveryMode === 'guided' || persistedDiscoveryMode === 'full'
-              ? persistedDiscoveryMode
-              : hasNonDefaultPreferences(filters, sort)
-                ? 'custom'
-                : 'uninitialized'
+            normalizeDiscoveryMode(downloadedSource?.discoveryMode)
+              ?? (hasNonDefaultPreferences(downloadedFilters, downloadedSort) ? 'custom' : 'full')
           )
-          : persistedDiscoveryMode
-            ?? (hasNonDefaultPreferences(filters, sort) ? 'custom' : 'uninitialized');
+          : 'full';
 
         return {
-          ...state,
-          filters,
-          sort,
-          discoveryMode,
+          tabPreferences: {
+            all: {
+              filters: allFilters,
+              sort: allSort,
+              discoveryMode: allDiscoveryMode,
+            },
+            downloaded: {
+              filters: downloadedFilters,
+              sort: downloadedSort,
+              discoveryMode: downloadedDiscoveryMode,
+            },
+          },
         };
       },
     },

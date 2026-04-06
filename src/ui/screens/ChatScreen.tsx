@@ -35,6 +35,7 @@ import { useRouter } from 'expo-router';
 import { EngineStatus } from '../../types/models';
 import { ChatMessage } from '../../types/chat';
 import { getChatHardwareBannerInputs, hardwareListenerService } from '../../services/HardwareListenerService';
+import { useTheme } from '../../providers/ThemeProvider';
 import { registry } from '../../services/LocalStorageRegistry';
 import { useChatStore } from '../../store/chatStore';
 import { getReportedErrorMessage } from '../../services/AppError';
@@ -46,7 +47,7 @@ import {
     updateSettings,
     updateGenerationParametersForModel,
 } from '../../services/SettingsStore';
-import { screenLayoutMetrics } from '../../utils/themeTokens';
+import { screenLayoutMetrics, withAlpha } from '../../utils/themeTokens';
 
 const AUTO_SCROLL_BOTTOM_THRESHOLD = 96;
 const FALLBACK_TOP_K = 40;
@@ -142,6 +143,7 @@ export const ChatScreen = () => {
     } = useChatSession();
     const { state: engineState } = useLLMEngine();
     const { t } = useTranslation();
+    const { colors, resolvedMode } = useTheme();
     const router = useRouter();
     const { openErrorReport, sheetProps: errorReportSheetProps } = useErrorReportSheetController();
     const tabBarHeight = useBottomTabBarHeight();
@@ -244,6 +246,13 @@ export const ChatScreen = () => {
     const headerModelLabel = shouldShowRecoveryCard && !hasActiveModel
         ? undefined
         : modelLabel;
+    const recoveryCardStyle = useMemo(() => ({
+        backgroundColor: colors.warningSurface,
+        borderColor: withAlpha(colors.warning, resolvedMode === 'dark' ? 0.34 : 0.28),
+    }), [colors.warning, colors.warningSurface, resolvedMode]);
+    const recoveryCardIconWrapStyle = useMemo(() => ({
+        backgroundColor: withAlpha(colors.warning, resolvedMode === 'dark' ? 0.18 : 0.1),
+    }), [colors.warning, resolvedMode]);
 
     const showAlertForError = useCallback((titleKey: string, scope: string, error: unknown) => {
         Alert.alert(t(titleKey), getReportedErrorMessage(scope, error, t));
@@ -882,13 +891,17 @@ export const ChatScreen = () => {
                             <Box className="flex-1 justify-center px-3 pb-10">
                                 <Box
                                     testID="chat-recovery-card"
-                                    className="items-center rounded-[20px] border border-warning-300/70 bg-warning-50/80 px-6 py-8 dark:border-warning-800 dark:bg-warning-950/35"
+                                    className="items-center rounded-[20px] border px-6 py-8"
+                                    style={recoveryCardStyle}
                                 >
-                                    <Box className="h-16 w-16 items-center justify-center rounded-full bg-warning-500/10 dark:bg-warning-500/15">
+                                    <Box
+                                        className="h-16 w-16 items-center justify-center rounded-full"
+                                        style={recoveryCardIconWrapStyle}
+                                    >
                                         <MaterialSymbols
                                             name={hasActiveModel ? 'hourglass-empty' : 'download'}
                                             size={28}
-                                            className="text-warning-700 dark:text-warning-200"
+                                            color={colors.warning}
                                         />
                                     </Box>
 
@@ -900,10 +913,16 @@ export const ChatScreen = () => {
                                         </Box>
                                     ) : null}
 
-                                    <Text className="mt-5 text-center text-[22px] font-semibold leading-7 text-typography-900 dark:text-typography-100">
+                                    <Text
+                                        className="mt-5 text-center text-[22px] font-semibold leading-7"
+                                        style={{ color: colors.text }}
+                                    >
                                         {recoveryTitle}
                                     </Text>
-                                    <Text className="mt-3 text-center text-sm leading-6 text-typography-600 dark:text-typography-300">
+                                    <Text
+                                        className="mt-3 text-center text-sm leading-6"
+                                        style={{ color: colors.textSecondary }}
+                                    >
                                         {recoveryDescription}
                                     </Text>
 
@@ -922,7 +941,10 @@ export const ChatScreen = () => {
                                         <ButtonText>{resolvedModelRecoveryActionLabel}</ButtonText>
                                     </Button>
 
-                                    <Text className="mt-4 text-center text-xs leading-5 text-typography-500 dark:text-typography-400">
+                                    <Text
+                                        className="mt-4 text-center text-xs leading-5"
+                                        style={{ color: resolvedMode === 'dark' ? colors.textSecondary : colors.textTertiary }}
+                                    >
                                         {activeThread
                                             ? t('chat.emptyExistingThread')
                                             : t('chat.emptyNewThread')}

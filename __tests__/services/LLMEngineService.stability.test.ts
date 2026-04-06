@@ -76,6 +76,7 @@ describe('LLMEngineService Stability', () => {
         (llmEngineService as any).isUnloading = false;
         (llmEngineService as any).activeContextSize = 2048;
         (llmEngineService as any).activeGpuLayers = null;
+        (llmEngineService as any).safeModeLoadLimits = null;
         hardwareListenerService.resetLowMemoryFlag();
     });
 

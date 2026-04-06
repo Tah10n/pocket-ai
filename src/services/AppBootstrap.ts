@@ -20,6 +20,7 @@ import { useModelsStore } from '../store/modelsStore';
 import { performanceMonitor } from './PerformanceMonitor';
 import { initializePrivateStorageEncryption } from './storage';
 import { toAppError } from './AppError';
+import { isHighConfidenceLikelyOomMemoryFit } from '../utils/modelMemoryFitState';
 import {
   ChatMessage,
   ChatThread,
@@ -236,7 +237,7 @@ export async function bootstrapAppCritical(): Promise<{ outcome: BootstrapOutcom
         return { outcome };
       }
 
-      if (activeModel.memoryFitDecision === 'likely_oom') {
+      if (isHighConfidenceLikelyOomMemoryFit(activeModel)) {
         updateSettings({ activeModelId: null });
         outcome = 'active_model_blocked';
         return { outcome };

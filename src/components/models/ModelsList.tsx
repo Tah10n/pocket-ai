@@ -39,6 +39,7 @@ import { EngineStatus, LifecycleStatus, ModelAccessState, type ModelMetadata } f
 import { mergeModelWithRuntimeState } from '@/utils/modelRuntimeState';
 import { startModelDownloadFlow } from '@/utils/modelDownloadFlow';
 import { DECIMAL_GIGABYTE } from '@/utils/modelSize';
+import { isHighConfidenceLikelyOomMemoryFit, shouldWarnForModelMemoryLoad } from '@/utils/modelMemoryFitState';
 import { screenLayoutMetrics } from '@/utils/themeTokens';
 import { ModelsFilter } from './ModelsFilter';
 import { type ModelsCatalogTab } from './modelTabs';
@@ -767,6 +768,17 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
       refreshDownloadedModels();
     } catch (error) {
       const appError = toAppError(error);
+      if (appError.code === 'model_load_blocked') {
+        refreshDownloadedModels();
+        Alert.alert(
+          t('models.ramLikelyOom'),
+          t('models.loadMemoryBlockedMessage'),
+          [
+            { text: t('common.close') },
+          ],
+        );
+        return;
+      }
       if (appError.code === 'model_memory_warning') {
         Alert.alert(
           t('models.memoryWarningTitle'),
@@ -820,8 +832,8 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
   }, [engineState.activeModelId, engineState.loadProgress, engineState.status, loadModel, models, refreshDownloadedModels, showModelActionError, t]);
 
   const handleLoad = useCallback(async (modelId: string) => {
-    const model = models.find((item) => item.id === modelId);
-    if (model?.memoryFitDecision === 'likely_oom') {
+    const model = displayModels.find((item) => item.id === modelId) ?? registry.getModel(modelId);
+    if (isHighConfidenceLikelyOomMemoryFit(model)) {
       Alert.alert(
         t('models.ramLikelyOom'),
         t('models.loadMemoryBlockedMessage'),
@@ -832,9 +844,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
       return;
     }
 
-    const shouldWarnForMemory = model?.memoryFitDecision === 'borderline'
-      || (model?.memoryFitDecision === undefined && model?.fitsInRam === false);
-    if (shouldWarnForMemory) {
+    if (shouldWarnForModelMemoryLoad(model)) {
       Alert.alert(
         t('models.memoryWarningTitle'),
         t('models.loadMemoryWarningMessage'),
@@ -847,7 +857,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
     }
 
     await performLoad(modelId);
-  }, [models, performLoad, t]);
+  }, [displayModels, performLoad, t]);
 
   const handleUnload = useCallback(async () => {
     try {

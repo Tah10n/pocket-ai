@@ -237,6 +237,9 @@ jest.mock('../../src/services/LLMEngineService', () => ({
   llmEngineService: {
     getRecommendedGpuLayers: (...args: any[]) => mockGetRecommendedGpuLayers(...args),
     load: (...args: any[]) => mockReloadModel(...args),
+    getSafeModeLoadLimits: jest.fn().mockReturnValue(null),
+    getContextSize: jest.fn().mockReturnValue(4096),
+    getLoadedGpuLayers: jest.fn().mockReturnValue(0),
   },
 }));
 
@@ -462,6 +465,44 @@ describe('ModelDetailsScreen', () => {
       await Promise.resolve();
     });
     expect(screen.getByText('model-parameters-sheet')).toBeTruthy();
+  });
+
+  it('warns instead of hard-blocking medium-confidence likely_oom models before load', async () => {
+    const riskyModel = createModel({
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      fitsInRam: false,
+      memoryFitDecision: 'likely_oom',
+      memoryFitConfidence: 'medium',
+    });
+    const { modelCatalogService } = jest.requireMock('../../src/services/ModelCatalogService');
+    modelCatalogService.getCachedModel.mockReturnValue(riskyModel);
+    modelCatalogService.getModelDetails.mockResolvedValue(riskyModel);
+
+    const screen = render(<ModelDetailsScreen />);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      fireEvent.press(screen.getByText('models.load'));
+      await Promise.resolve();
+    });
+
+    expect(alertSpy).toHaveBeenCalledWith(
+      'models.memoryWarningTitle',
+      'models.loadMemoryWarningMessage',
+      expect.any(Array),
+    );
+    expect(mockLoadModel).not.toHaveBeenCalled();
+
+    const buttons = alertSpy.mock.calls[0]?.[2] as Array<{ onPress?: () => void }>;
+    await act(async () => {
+      buttons[1]?.onPress?.();
+      await Promise.resolve();
+    });
+
+    expect(mockLoadModel).toHaveBeenCalledWith('org/model', { allowUnsafeMemoryLoad: true });
   });
 
   it('shows chat, settings, and unload actions for active models', async () => {

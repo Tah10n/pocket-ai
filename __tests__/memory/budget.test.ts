@@ -60,9 +60,8 @@ describe('memory/budget', () => {
     expect(budget.appResidentBytes).toBeUndefined();
     expect(budget.appPssBytes).toBeUndefined();
 
-    const osReserveBytes = 512 * 1024 * 1024;
     const fragmentationGuardBytes = Math.round(totalMemoryBytes * 0.05);
-    const reservedBytes = appUsedBytes + osReserveBytes + fragmentationGuardBytes;
+    const reservedBytes = fragmentationGuardBytes;
     const expectedRawBudgetBytes = Math.min(softTotalBudgetBytes, liveCurrentBudgetBytes);
     expect(effectiveBudgetBytes).toBe(expectedRawBudgetBytes - reservedBytes);
   });
@@ -88,10 +87,9 @@ describe('memory/budget', () => {
       },
     });
 
-    const osReserveBytes = 512 * 1024 * 1024;
     const fragmentationGuardBytes = Math.round(totalMemoryBytes * 0.05);
     const lowMemoryExtraReserveBytes = 256 * 1024 * 1024;
-    const reservedBytes = appUsedBytes + osReserveBytes + fragmentationGuardBytes + lowMemoryExtraReserveBytes;
+    const reservedBytes = fragmentationGuardBytes + lowMemoryExtraReserveBytes;
     const expectedRawBudgetBytes = Math.min(
       Math.floor(totalMemoryBytes * 0.8),
       freeBytes,

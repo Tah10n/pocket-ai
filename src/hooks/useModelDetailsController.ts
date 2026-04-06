@@ -23,6 +23,7 @@ import {
   createModelDetailsPlaceholder,
   getModelDetailsAccessBadge,
 } from '../utils/modelDetailsPresentation';
+import { isHighConfidenceLikelyOomMemoryFit, shouldWarnForModelMemoryLoad } from '../utils/modelMemoryFitState';
 import { startModelDownloadFlow } from '../utils/modelDownloadFlow';
 import { mergeModelWithRuntimeState } from '../utils/modelRuntimeState';
 
@@ -283,6 +284,17 @@ export function useModelDetailsController(modelId: string) {
       setRuntimeRevision((current) => current + 1);
     } catch (error) {
       const appError = toAppError(error);
+      if (appError.code === 'model_load_blocked') {
+        setRuntimeRevision((current) => current + 1);
+        Alert.alert(
+          t('models.ramLikelyOom'),
+          t('models.loadMemoryBlockedMessage'),
+          [
+            { text: t('common.close') },
+          ],
+        );
+        return;
+      }
       if (appError.code === 'model_memory_warning') {
         Alert.alert(
           t('models.memoryWarningTitle'),
@@ -341,7 +353,7 @@ export function useModelDetailsController(modelId: string) {
       return;
     }
 
-    if (displayModel.memoryFitDecision === 'likely_oom') {
+    if (isHighConfidenceLikelyOomMemoryFit(displayModel)) {
       Alert.alert(
         t('models.ramLikelyOom'),
         t('models.loadMemoryBlockedMessage'),
@@ -352,9 +364,7 @@ export function useModelDetailsController(modelId: string) {
       return;
     }
 
-    const shouldWarnForMemory = displayModel.memoryFitDecision === 'borderline'
-      || (displayModel.memoryFitDecision === undefined && displayModel.fitsInRam === false);
-    if (shouldWarnForMemory) {
+    if (shouldWarnForModelMemoryLoad(displayModel)) {
       Alert.alert(
         t('models.memoryWarningTitle'),
         t('models.loadMemoryWarningMessage'),

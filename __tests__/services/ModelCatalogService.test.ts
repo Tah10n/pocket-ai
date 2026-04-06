@@ -217,7 +217,7 @@ describe('ModelCatalogService', () => {
     coldStartService.dispose();
   });
 
-  it('marks large 8B-style GGUF models with a RAM warning badge before loading', async () => {
+  it('does not preemptively warn on borderline GGUF models when only summary metadata is available', async () => {
     (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(8_000_000_000);
 
     global.fetch = jest.fn(() =>
@@ -227,6 +227,10 @@ describe('ModelCatalogService', () => {
           ...makeRepo('org/large-llama-model', 3_784_824_896),
           gguf: {
             architecture: 'llama',
+            'llama.block_count': 32,
+            'llama.attention.head_count': 32,
+            'llama.attention.head_count_kv': 32,
+            'llama.embedding_length': 4096,
           },
         }]),
       }),
@@ -234,11 +238,11 @@ describe('ModelCatalogService', () => {
 
     const result = await modelCatalogService.searchModels('llama');
 
-    expect(result.models[0].fitsInRam).toBe(false);
-    expect(['borderline', 'likely_oom']).toContain(result.models[0].memoryFitDecision);
+    expect(result.models[0].fitsInRam).toBe(true);
+    expect(['fits_high_confidence', 'fits_low_confidence']).toContain(result.models[0].memoryFitDecision);
   });
 
-  it('marks 3.4 GB-class models with a RAM warning badge on 8 GB devices before loading', async () => {
+  it('treats ~3.4 GB GGUF models as loadable on 8 GB devices in summary estimates', async () => {
     (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(8_000_000_000);
 
     global.fetch = jest.fn(() =>
@@ -248,6 +252,10 @@ describe('ModelCatalogService', () => {
           ...makeRepo('org/firefly-class-model', 3_427_874_240),
           gguf: {
             architecture: 'gemma4',
+            'gemma4.block_count': 32,
+            'gemma4.attention.head_count': 32,
+            'gemma4.attention.head_count_kv': 32,
+            'gemma4.embedding_length': 4096,
           },
         }]),
       }),
@@ -255,8 +263,8 @@ describe('ModelCatalogService', () => {
 
     const result = await modelCatalogService.searchModels('firefly');
 
-    expect(result.models[0].fitsInRam).toBe(false);
-    expect(['borderline', 'likely_oom']).toContain(result.models[0].memoryFitDecision);
+    expect(result.models[0].fitsInRam).toBe(true);
+    expect(['fits_high_confidence', 'fits_low_confidence']).toContain(result.models[0].memoryFitDecision);
   });
 
   it('appends gguf to search queries', async () => {

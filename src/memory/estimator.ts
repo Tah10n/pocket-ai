@@ -30,7 +30,21 @@ function isFinitePositiveNumber(value: unknown): value is number {
 }
 
 function toFinitePositiveNumber(value: unknown): number | null {
-  return isFinitePositiveNumber(value) ? value : null;
+  if (isFinitePositiveNumber(value)) {
+    return value;
+  }
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (trimmed.length > 0) {
+      const parsed = Number(trimmed);
+      if (Number.isFinite(parsed) && parsed > 0) {
+        return parsed;
+      }
+    }
+  }
+
+  return null;
 }
 
 function readNumericMetadata(metadata: Record<string, unknown> | undefined, keys: string[]): number | null {
@@ -67,6 +81,26 @@ function readNumericRuntimeParam(runtimeParams: Record<string, unknown>, keys: s
     const value = toFinitePositiveNumber(runtimeParams[key]);
     if (value !== null) {
       return value;
+    }
+  }
+
+  return null;
+}
+
+function readBooleanRuntimeParam(runtimeParams: Record<string, unknown>, keys: string[]): boolean | null {
+  for (const key of keys) {
+    const value = runtimeParams[key];
+    if (typeof value === 'boolean') {
+      return value;
+    }
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      if (value === 1) return true;
+      if (value === 0) return false;
+    }
+    if (typeof value === 'string') {
+      const normalized = value.trim().toLowerCase();
+      if (normalized === 'true' || normalized === '1' || normalized === 'yes') return true;
+      if (normalized === 'false' || normalized === '0' || normalized === 'no') return false;
     }
   }
 
@@ -160,6 +194,92 @@ function resolveKvCacheTokens({
   return requestedContextTokens;
 }
 
+function normalizeArchitecturePrefix(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  return normalized.length > 0 ? normalized : null;
+}
+
+function resolveGgufArchitecturePrefixes(ggufMetadata?: Record<string, unknown>): string[] {
+  if (!ggufMetadata) {
+    return [];
+  }
+
+  const direct = normalizeArchitecturePrefix(ggufMetadata.architecture);
+  const general = normalizeArchitecturePrefix(ggufMetadata['general.architecture']);
+  const candidate = direct ?? general;
+  if (!candidate) {
+    return [];
+  }
+
+  const prefixes = new Set<string>();
+  prefixes.add(candidate);
+  const stripped = candidate.replace(/\d+$/u, '');
+  if (stripped.length > 0) {
+    prefixes.add(stripped);
+  }
+
+  return Array.from(prefixes);
+}
+
+function withPrefixes(prefixes: string[], suffixes: string[]): string[] {
+  if (prefixes.length === 0 || suffixes.length === 0) {
+    return [];
+  }
+
+  const keys: string[] = [];
+  for (const prefix of prefixes) {
+    for (const suffix of suffixes) {
+      keys.push(`${prefix}.${suffix}`);
+    }
+  }
+  return keys;
+}
+
+function resolveDerivedHeadDim({
+  ggufMetadata,
+  prefixes,
+  embeddingLengthKeys,
+  headCountKeys,
+}: {
+  ggufMetadata: Record<string, unknown> | undefined;
+  prefixes: string[];
+  embeddingLengthKeys: string[];
+  headCountKeys: string[];
+}): number | null {
+  const embeddingLength = readNumericMetadata(ggufMetadata, embeddingLengthKeys) ?? readNumericMetadata(
+    ggufMetadata,
+    withPrefixes(prefixes, ['embedding_length']),
+  );
+  const headCount = readNumericMetadata(ggufMetadata, headCountKeys) ?? readNumericMetadata(
+    ggufMetadata,
+    withPrefixes(prefixes, ['attention.head_count']),
+  );
+  if (!embeddingLength || !headCount || embeddingLength <= 0 || headCount <= 0) {
+    return null;
+  }
+
+  const raw = embeddingLength / headCount;
+  if (!Number.isFinite(raw) || raw <= 0) {
+    return null;
+  }
+
+  const rounded = Math.round(raw);
+  if (rounded <= 0) {
+    return null;
+  }
+
+  // Require near-integer to avoid wildly incorrect derivations.
+  if (Math.abs(rounded - raw) > 1e-3) {
+    return null;
+  }
+
+  return rounded;
+}
+
 function estimateKvCacheBytes({
   ggufMetadata,
   runtimeParams,
@@ -168,23 +288,80 @@ function estimateKvCacheBytes({
   runtimeParams: Record<string, unknown>;
 }): { kvCacheBytes: number; hasKvMetadata: boolean } {
   const requestedContextTokens = readNumericRuntimeParam(runtimeParams, ['contextTokens', 'contextSize', 'n_ctx', 'nCtx']);
-  const slidingWindowTokens = readNumericMetadata(ggufMetadata, ['slidingWindowTokens', 'sliding_window', 'slidingWindow']);
+  const prefixes = resolveGgufArchitecturePrefixes(ggufMetadata);
+  const slidingWindowTokens = readNumericMetadata(
+    ggufMetadata,
+    [
+      'slidingWindowTokens',
+      'sliding_window',
+      'slidingWindow',
+      'attention.sliding_window',
+      ...withPrefixes(prefixes, ['attention.sliding_window']),
+    ],
+  );
   const kvCacheTokens = resolveKvCacheTokens({ requestedContextTokens, slidingWindowTokens });
 
-  const nLayers = readNumericMetadata(ggufMetadata, ['nLayers', 'n_layers', 'n_layer']);
-  const nHeadKv = readNumericMetadata(ggufMetadata, ['nHeadKv', 'n_head_kv']);
-  const nEmbdHeadK = readNumericMetadata(ggufMetadata, ['nEmbdHeadK', 'n_embd_head_k']);
-  const nEmbdHeadV = readNumericMetadata(ggufMetadata, ['nEmbdHeadV', 'n_embd_head_v']) ?? nEmbdHeadK;
+  const nLayers = readNumericMetadata(
+    ggufMetadata,
+    [
+      'nLayers',
+      'n_layers',
+      'n_layer',
+      ...withPrefixes(prefixes, ['block_count']),
+    ],
+  );
+  const nHeadKv = readNumericMetadata(
+    ggufMetadata,
+    [
+      'nHeadKv',
+      'n_head_kv',
+      'attention.head_count_kv',
+      ...withPrefixes(prefixes, ['attention.head_count_kv']),
+    ],
+  );
+  const nHead = readNumericMetadata(
+    ggufMetadata,
+    [
+      'nHead',
+      'n_head',
+      'attention.head_count',
+      ...withPrefixes(prefixes, ['attention.head_count']),
+    ],
+  );
+  const nEmbdHeadK = readNumericMetadata(
+    ggufMetadata,
+    [
+      'nEmbdHeadK',
+      'n_embd_head_k',
+      'attention.key_length',
+      ...withPrefixes(prefixes, ['attention.key_length']),
+    ],
+  ) ?? resolveDerivedHeadDim({
+    ggufMetadata,
+    prefixes,
+    embeddingLengthKeys: ['nEmbd', 'n_embd', 'embedding_length'],
+    headCountKeys: ['nHead', 'n_head', 'attention.head_count'],
+  });
+  const nEmbdHeadV = readNumericMetadata(
+    ggufMetadata,
+    [
+      'nEmbdHeadV',
+      'n_embd_head_v',
+      'attention.value_length',
+      ...withPrefixes(prefixes, ['attention.value_length']),
+    ],
+  ) ?? nEmbdHeadK;
+  const resolvedHeadKv = nHeadKv ?? nHead;
 
   if (
     kvCacheTokens === null
     || nLayers === null
-    || nHeadKv === null
+    || resolvedHeadKv === null
     || nEmbdHeadK === null
     || nEmbdHeadV === null
     || kvCacheTokens <= 0
     || nLayers <= 0
-    || nHeadKv <= 0
+    || resolvedHeadKv <= 0
     || nEmbdHeadK <= 0
     || nEmbdHeadV <= 0
   ) {
@@ -196,7 +373,7 @@ function estimateKvCacheBytes({
   const bytesPerElementK = bytesPerKvElement(cacheTypeK);
   const bytesPerElementV = bytesPerKvElement(cacheTypeV);
   const bytesPerToken = (
-    nHeadKv
+    resolvedHeadKv
     * (nEmbdHeadK * bytesPerElementK + nEmbdHeadV * bytesPerElementV)
   );
 
@@ -430,6 +607,59 @@ export function estimateModelRuntimeBytes(modelSizeBytes: number): number {
   return modelSizeBytes * (1 + ESTIMATED_MODEL_RUNTIME_OVERHEAD_FACTOR);
 }
 
+function applyMmapBudgetAdjustment({
+  useMmap,
+  breakdown,
+  requiredBytesTotal,
+  softEffectiveBudgetBytes,
+  liveEffectiveBudgetBytes,
+  learnedEffectiveBudgetBytes,
+}: {
+  useMmap: boolean;
+  breakdown: MemoryBreakdown;
+  requiredBytesTotal: number;
+  softEffectiveBudgetBytes: number;
+  liveEffectiveBudgetBytes: number | null;
+  learnedEffectiveBudgetBytes: number | null;
+}): { requiredBytes: number; effectiveBudgetBytes: number } | null {
+  if (!useMmap) {
+    return null;
+  }
+
+  if (!Number.isFinite(breakdown.weightsBytes) || breakdown.weightsBytes <= 0) {
+    return null;
+  }
+
+  const nonWeightRequiredBytes = Math.max(0, requiredBytesTotal - breakdown.weightsBytes);
+  const remainingSoftBudgetBytesRaw = Math.max(0, softEffectiveBudgetBytes - breakdown.weightsBytes);
+  const mmapExtraHeadroomBytes = Math.min(
+    128 * 1024 * 1024,
+    Math.max(
+      16 * 1024 * 1024,
+      Math.round(remainingSoftBudgetBytesRaw * 0.015),
+    ),
+  );
+  const remainingSoftBudgetBytes = Math.max(0, remainingSoftBudgetBytesRaw - mmapExtraHeadroomBytes);
+
+  const candidates: number[] = [remainingSoftBudgetBytes];
+  if (liveEffectiveBudgetBytes !== null) {
+    candidates.push(liveEffectiveBudgetBytes);
+  }
+  if (learnedEffectiveBudgetBytes !== null) {
+    candidates.push(learnedEffectiveBudgetBytes);
+  }
+
+  const effectiveBudgetBytesCandidate = Math.min(...candidates);
+  const effectiveBudgetBytes = Number.isFinite(effectiveBudgetBytesCandidate) && effectiveBudgetBytesCandidate > 0
+    ? Math.round(effectiveBudgetBytesCandidate)
+    : 0;
+
+  return {
+    requiredBytes: Math.round(nonWeightRequiredBytes),
+    effectiveBudgetBytes,
+  };
+}
+
 export function estimateMemoryFitFromModelSize({
   modelSizeBytes,
   totalMemoryBytes,
@@ -519,16 +749,35 @@ export function estimateAccurateMemoryFit({
   const resolvedTotalMemoryBytes = toFinitePositiveNumber(input.snapshot?.totalBytes) ?? toFinitePositiveNumber(totalMemoryBytes);
   const hasLiveSnapshot = Boolean(input.snapshot);
   const { breakdown, hasKvMetadata, usedVerifiedWeights } = createComponentBreakdown(input);
-  const requiredBytes = sumBreakdown(breakdown);
+  const requiredBytesTotal = sumBreakdown(breakdown);
   const needsKvMetadata = Boolean(
     readNumericRuntimeParam(input.runtimeParams, ['contextTokens', 'contextSize', 'n_ctx', 'nCtx']),
   );
 
-  const { effectiveBudgetBytes, budget } = createMemoryBudget({
+  const {
+    effectiveBudgetBytes: baseEffectiveBudgetBytes,
+    budget,
+    softEffectiveBudgetBytes,
+    liveEffectiveBudgetBytes,
+    learnedEffectiveBudgetBytes,
+  } = createMemoryBudget({
     totalMemoryBytes: resolvedTotalMemoryBytes,
     systemMemorySnapshot: input.snapshot ?? null,
     learnedSafeBudgetBytes: input.calibrationRecord?.learnedSafeBudgetBytes,
   });
+
+  const useMmap = readBooleanRuntimeParam(input.runtimeParams, ['useMmap', 'use_mmap']) === true;
+  const mmapAdjustment = applyMmapBudgetAdjustment({
+    useMmap,
+    breakdown,
+    requiredBytesTotal,
+    softEffectiveBudgetBytes,
+    liveEffectiveBudgetBytes,
+    learnedEffectiveBudgetBytes,
+  });
+  const requiredBytes = mmapAdjustment ? mmapAdjustment.requiredBytes : requiredBytesTotal;
+  const effectiveBudgetBytes = mmapAdjustment ? mmapAdjustment.effectiveBudgetBytes : baseEffectiveBudgetBytes;
+  const normalizedBudget = mmapAdjustment ? { ...budget, effectiveBudgetBytes } : budget;
 
   const hasTrustedBudget = budget.totalMemoryBytes > 0;
   const decision = hasTrustedBudget
@@ -559,7 +808,7 @@ export function estimateAccurateMemoryFit({
     requiredBytes,
     effectiveBudgetBytes,
     breakdown,
-    budget,
+    budget: normalizedBudget,
     recommendations: recommendationsForDecision(normalizedDecision),
   };
 }
@@ -615,8 +864,14 @@ export function estimateFastMemoryFit({
       platform: 'android',
     },
   });
-  const requiredBytes = sumBreakdown(breakdown);
-  const { effectiveBudgetBytes, budget } = createMemoryBudget({
+  const requiredBytesTotal = sumBreakdown(breakdown);
+  const {
+    effectiveBudgetBytes: baseEffectiveBudgetBytes,
+    budget,
+    softEffectiveBudgetBytes,
+    liveEffectiveBudgetBytes,
+    learnedEffectiveBudgetBytes,
+  } = createMemoryBudget({
     totalMemoryBytes,
     systemMemorySnapshot: {
       availableBytes: previewAvailableBytes,
@@ -626,6 +881,18 @@ export function estimateFastMemoryFit({
       pressureLevel: 'normal',
     },
   });
+  const useMmap = true;
+  const mmapAdjustment = applyMmapBudgetAdjustment({
+    useMmap,
+    breakdown,
+    requiredBytesTotal,
+    softEffectiveBudgetBytes,
+    liveEffectiveBudgetBytes,
+    learnedEffectiveBudgetBytes,
+  });
+  const requiredBytes = mmapAdjustment ? mmapAdjustment.requiredBytes : requiredBytesTotal;
+  const effectiveBudgetBytes = mmapAdjustment ? mmapAdjustment.effectiveBudgetBytes : baseEffectiveBudgetBytes;
+  const normalizedBudget = mmapAdjustment ? { ...budget, effectiveBudgetBytes } : budget;
   const baseDecision = decisionForBudgetFit({ requiredBytes, effectiveBudgetBytes });
 
   const confidence = confidenceForFastEstimate(metadataTrust);
@@ -639,7 +906,7 @@ export function estimateFastMemoryFit({
     requiredBytes,
     effectiveBudgetBytes,
     breakdown,
-    budget,
+    budget: normalizedBudget,
     recommendations: recommendationsForDecision(decision),
   };
 }

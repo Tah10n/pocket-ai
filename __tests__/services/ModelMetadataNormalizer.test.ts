@@ -40,4 +40,29 @@ describe('ModelMetadataNormalizer', () => {
 
     expect(normalized.hasVerifiedContextWindow).toBe(true);
   });
+
+  it('preserves prefixed GGUF metadata keys needed by memory-fit estimation', () => {
+    const normalized = normalizePersistedModelMetadata({
+      id: 'llama/model',
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      gguf: {
+        architecture: 'llama',
+        'general.architecture': 'llama',
+        'llama.block_count': 32,
+        'llama.attention.head_count': 32,
+        'llama.attention.head_count_kv': 8,
+        'llama.embedding_length': 4096,
+      },
+    });
+
+    expect(normalized.gguf).toEqual(expect.objectContaining({
+      architecture: 'llama',
+      'general.architecture': 'llama',
+      'llama.block_count': 32,
+      'llama.attention.head_count': 32,
+      'llama.attention.head_count_kv': 8,
+      'llama.embedding_length': 4096,
+    }));
+  });
 });

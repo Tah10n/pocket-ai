@@ -4,12 +4,11 @@ import { useChatSession } from '../../src/hooks/useChatSession';
 import { llmEngineService } from '../../src/services/LLMEngineService';
 import { getGenerationParametersForModel, getSettings } from '../../src/services/SettingsStore';
 import { EngineStatus } from '../../src/types/models';
-import { useChatStore } from '../../src/store/chatStore';
+import { estimateLlmMessagesTokens, useChatStore } from '../../src/store/chatStore';
 import { AppState } from 'react-native';
 import {
   buildInferenceMessagesForThread,
   getThreadTruncationState,
-  MAX_CONTEXT_MESSAGES,
   resetSharedGenerationStateForTests,
   resolvePresetSnapshot,
   SUMMARY_PLACEHOLDER_CONTENT,
@@ -21,6 +20,7 @@ jest.mock('../../src/services/LLMEngineService', () => ({
     getState: jest.fn(),
     getContextSize: jest.fn(),
     chatCompletion: jest.fn(),
+    countPromptTokens: jest.fn(),
     stopCompletion: jest.fn(),
   },
 }));
@@ -84,6 +84,7 @@ describe('useChatSession', () => {
     }));
     (llmEngineService.getState as jest.Mock).mockReturnValue({
       status: EngineStatus.READY,
+      activeModelId: 'author/model-q4',
     });
     (llmEngineService.getContextSize as jest.Mock).mockReturnValue(2048);
     (llmEngineService.chatCompletion as jest.Mock).mockImplementation(
@@ -91,6 +92,9 @@ describe('useChatSession', () => {
         onToken?.('Hello back');
         return { text: 'Hello back' };
       },
+    );
+    (llmEngineService.countPromptTokens as jest.Mock).mockImplementation(
+      async ({ messages }: { messages: any[] }) => estimateLlmMessagesTokens(messages as any),
     );
     (llmEngineService.stopCompletion as jest.Mock).mockResolvedValue(undefined);
     jest.spyOn(AppState, 'addEventListener').mockImplementation((type: any, listener: any) => {
@@ -729,8 +733,9 @@ describe('useChatSession', () => {
     ]);
   });
 
-  it('truncates older history deterministically and exposes summarize affordance state', () => {
+  it('truncates history only when the token budget is tight', () => {
     const snapshot = resolvePresetSnapshot('preset-1');
+    const messageCount = 28;
     const thread = {
       id: 'thread-1',
       title: 'Long thread',
@@ -742,7 +747,7 @@ describe('useChatSession', () => {
         topP: 0.9,
         maxTokens: 1024,
       },
-      messages: Array.from({ length: MAX_CONTEXT_MESSAGES + 4 }, (_, index) => ({
+      messages: Array.from({ length: messageCount }, (_, index) => ({
         id: `message-${index + 1}`,
         role: index % 2 === 0 ? ('user' as const) : ('assistant' as const),
         content: `Message ${index + 1}`,
@@ -754,16 +759,24 @@ describe('useChatSession', () => {
       status: 'idle' as const,
     };
 
-    const messages = buildInferenceMessagesForThread(thread);
-    const truncationState = getThreadTruncationState(thread);
+    const roomyMessages = buildInferenceMessagesForThread(thread, { maxContextTokens: 2048 });
+    const roomyTruncationState = getThreadTruncationState(thread, { maxContextTokens: 2048 });
 
-    expect(messages).toHaveLength(MAX_CONTEXT_MESSAGES - 1);
-    expect(messages[0]).toEqual({ role: 'system', content: 'Be concise.' });
-    expect(messages[1]).toEqual({ role: 'user', content: 'Message 7' });
-    expect(truncationState).toEqual({
-      truncatedMessageIds: ['message-1', 'message-2', 'message-3', 'message-4', 'message-5', 'message-6'],
-      shouldOfferSummary: true,
+    expect(roomyMessages).toHaveLength(messageCount + 1);
+    expect(roomyTruncationState).toEqual({
+      truncatedMessageIds: [],
+      shouldOfferSummary: false,
     });
+    expect(roomyMessages[0]).toEqual({ role: 'system', content: 'Be concise.' });
+
+    const tightTruncationState = getThreadTruncationState(thread, {
+      maxContextTokens: 150,
+      responseReserveTokens: 0,
+      promptSafetyMarginTokens: 0,
+    });
+
+    expect(tightTruncationState.truncatedMessageIds.length).toBeGreaterThan(0);
+    expect(tightTruncationState.shouldOfferSummary).toBe(true);
   });
 
   it('shrinks the inference window further when the token budget is tight', () => {
@@ -818,7 +831,8 @@ describe('useChatSession', () => {
       },
     });
 
-    for (let index = 0; index < MAX_CONTEXT_MESSAGES + 4; index += 1) {
+    const messageCount = 28;
+    for (let index = 0; index < messageCount; index += 1) {
       useChatStore.getState().appendMessage(threadId, {
         id: `message-${index + 1}`,
         role: index % 2 === 0 ? 'user' : 'assistant',
@@ -828,8 +842,13 @@ describe('useChatSession', () => {
       });
     }
 
+    (llmEngineService.getContextSize as jest.Mock).mockReturnValue(150);
     useChatStore.getState().setActiveThread(threadId);
     const getSession = renderHookHarness();
+
+    await waitFor(() => {
+      expect(getSession()?.shouldOfferSummary).toBe(true);
+    });
 
     let created = false;
     await act(async () => {
@@ -841,7 +860,7 @@ describe('useChatSession', () => {
     expect(activeThread?.summary).toEqual(
       expect.objectContaining({
         content: SUMMARY_PLACEHOLDER_CONTENT,
-        sourceMessageIds: ['message-1', 'message-2', 'message-3', 'message-4', 'message-5', 'message-6'],
+        sourceMessageIds: Array.from({ length: messageCount - 2 }, (_, index) => `message-${index + 1}`),
         isPlaceholder: true,
       }),
     );
@@ -852,6 +871,68 @@ describe('useChatSession', () => {
           content: expect.stringContaining(SUMMARY_PLACEHOLDER_CONTENT),
         }),
       ]),
+    );
+  });
+
+  it('aligns the summary affordance with the accurate prompt window when tokenizer counts exceed heuristics', async () => {
+    const threadId = useChatStore.getState().createThread({
+      modelId: 'author/model-q4',
+      presetId: 'preset-1',
+      presetSnapshot: {
+        id: 'preset-1',
+        name: 'Helpful Assistant',
+        systemPrompt: 'Be concise.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 1024,
+      },
+    });
+
+    for (let index = 0; index < 6; index += 1) {
+      useChatStore.getState().appendMessage(threadId, {
+        id: `message-${index + 1}`,
+        role: index % 2 === 0 ? 'user' : 'assistant',
+        content: `m${index + 1}`,
+        createdAt: index + 1,
+        state: 'complete',
+      });
+    }
+
+    const activeThread = useChatStore.getState().getThread(threadId)!;
+    expect(getThreadTruncationState(activeThread, { maxContextTokens: 450 })).toEqual({
+      truncatedMessageIds: [],
+      shouldOfferSummary: false,
+    });
+
+    (llmEngineService.getContextSize as jest.Mock).mockReturnValue(450);
+    (llmEngineService.countPromptTokens as jest.Mock).mockImplementation(
+      async ({ messages }: { messages: Array<{ role: string }> }) => messages.reduce(
+        (total, message) => total + (message.role === 'system' ? 20 : 50),
+        0,
+      ),
+    );
+
+    useChatStore.getState().setActiveThread(threadId);
+    const getSession = renderHookHarness();
+
+    await waitFor(() => {
+      expect(getSession()?.shouldOfferSummary).toBe(true);
+      expect(getSession()?.truncatedMessageCount).toBe(4);
+    });
+
+    let created = false;
+    await act(async () => {
+      created = getSession()?.createSummaryPlaceholder() ?? false;
+    });
+
+    expect(created).toBe(true);
+    expect(useChatStore.getState().getActiveThread()?.summary).toEqual(
+      expect.objectContaining({
+        sourceMessageIds: ['message-1', 'message-2', 'message-3', 'message-4'],
+        isPlaceholder: true,
+      }),
     );
   });
 });

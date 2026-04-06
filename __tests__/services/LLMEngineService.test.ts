@@ -62,6 +62,7 @@ describe('LLMEngineService', () => {
       localPath: 'model.gguf',
       lifecycleStatus: LifecycleStatus.DOWNLOADED,
     });
+    (registry.updateModel as jest.Mock) = jest.fn();
     (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock.mockResolvedValue({ text: 'Hello back' });
   });
 
@@ -255,7 +256,7 @@ describe('LLMEngineService', () => {
     expect(llmEngineService.getContextSize()).toBe(safeContextSize);
   });
 
-  it('warns (does not hard-block) on borderline memory-fit results', async () => {
+  it('blocks models that only fit at the minimum context window', async () => {
     const totalMemoryBytes = 4 * 1024 * 1024 * 1024;
     const modelSizeBytes = 3 * 1024 * 1024 * 1024;
 
@@ -268,7 +269,7 @@ describe('LLMEngineService', () => {
     await expect(
       llmEngineService.load('test/model', { forceReload: true }),
     ).rejects.toMatchObject({
-      code: 'model_memory_warning',
+      code: 'model_load_blocked',
       details: expect.objectContaining({
         safeLoadProfile: expect.objectContaining({
           contextTokens: 512,
@@ -279,6 +280,72 @@ describe('LLMEngineService', () => {
 
     expect(llamaRn.initLlama).not.toHaveBeenCalled();
     expect(llmEngineService.getState().status).toBe(EngineStatus.IDLE);
+    expect(registry.updateModel).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'test/model',
+      fitsInRam: false,
+      memoryFitDecision: 'likely_oom',
+      memoryFitConfidence: 'high',
+    }));
+  });
+
+  it('keeps blocking registry-marked likely_oom models even when an unsafe retry is requested', async () => {
+    const totalMemoryBytes = 8 * 1024 * 1024 * 1024;
+    const modelSizeBytes = 1_000_000_000;
+
+    (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(totalMemoryBytes);
+    (registry.getModel as jest.Mock).mockReturnValue({
+      id: 'test/model',
+      localPath: 'model.gguf',
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      size: modelSizeBytes,
+      memoryFitDecision: 'likely_oom',
+      memoryFitConfidence: 'high',
+      fitsInRam: false,
+    });
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValueOnce({
+      exists: true,
+      size: modelSizeBytes,
+    });
+
+    await expect(
+      llmEngineService.load('test/model', { forceReload: true, allowUnsafeMemoryLoad: true }),
+    ).rejects.toMatchObject({
+      code: 'model_load_blocked',
+      details: expect.objectContaining({
+        modelId: 'test/model',
+        memoryFitDecision: 'likely_oom',
+      }),
+    });
+
+    expect(llamaRn.initLlama).not.toHaveBeenCalled();
+    expect(updateSettings).not.toHaveBeenCalledWith({ activeModelId: 'test/model' });
+  });
+
+  it('does not hard-block persisted likely_oom flags unless confidence is high', async () => {
+    const totalMemoryBytes = 8 * 1024 * 1024 * 1024;
+    const modelSizeBytes = 1_000_000_000;
+
+    (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(totalMemoryBytes);
+    (registry.getModel as jest.Mock).mockReturnValue({
+      id: 'test/model',
+      localPath: 'model.gguf',
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      size: modelSizeBytes,
+      memoryFitDecision: 'likely_oom',
+      memoryFitConfidence: 'medium',
+      fitsInRam: false,
+    });
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValueOnce({
+      exists: true,
+      size: modelSizeBytes,
+    });
+
+    await expect(
+      llmEngineService.load('test/model', { forceReload: true }),
+    ).resolves.toBeUndefined();
+
+    expect(llamaRn.initLlama).toHaveBeenCalled();
+    expect(updateSettings).toHaveBeenCalledWith({ activeModelId: 'test/model' });
   });
 
   it('rejects mmproj / CLIP projector GGUF files before initializing the engine', async () => {
@@ -324,7 +391,7 @@ describe('LLMEngineService', () => {
     expect(llmEngineService.getContextSize()).toBeGreaterThan(512);
   });
 
-  it('attempts forced model loads even when the minimal safe profile still exceeds conservative memory estimates', async () => {
+  it('does not attempt unsafe loads when the only safe profile hits the minimum context window', async () => {
     const totalMemoryBytes = 8_000_000_000;
     const modelSizeBytes = 1_708_582_752;
 
@@ -337,9 +404,9 @@ describe('LLMEngineService', () => {
       timestampMs: Date.now(),
       platform: 'android',
       totalBytes: totalMemoryBytes,
-      availableBytes: 2_600_000_000,
-      freeBytes: 2_400_000_000,
-      usedBytes: totalMemoryBytes - 2_600_000_000,
+      availableBytes: 900_000_000,
+      freeBytes: 800_000_000,
+      usedBytes: totalMemoryBytes - 900_000_000,
       appUsedBytes: 480_309_248,
       appResidentBytes: 480_309_248,
       appPssBytes: 395_870_208,
@@ -354,21 +421,24 @@ describe('LLMEngineService', () => {
 
     await expect(
       llmEngineService.load('test/model', { forceReload: true, allowUnsafeMemoryLoad: true }),
-    ).resolves.toBeUndefined();
-
-    expect(llamaRn.initLlama).toHaveBeenCalledWith(
-      expect.objectContaining({
-        n_ctx: 512,
-        n_gpu_layers: 0,
+    ).rejects.toMatchObject({
+      code: 'model_load_blocked',
+      details: expect.objectContaining({
+        safeLoadProfile: expect.objectContaining({
+          contextTokens: 512,
+          gpuLayers: 0,
+        }),
       }),
-      expect.any(Function),
-    );
-    expect(updateSettings).toHaveBeenCalledWith({ activeModelId: 'test/model' });
+    });
+
+    expect(llamaRn.initLlama).not.toHaveBeenCalled();
+    expect(updateSettings).not.toHaveBeenCalledWith({ activeModelId: 'test/model' });
   });
 
-  it('auto-applies the safe fallback load without warning when low-confidence estimates still fit within conservative live availability', async () => {
+  it('loads normally when low-confidence estimates still fit within conservative live availability', async () => {
     const totalMemoryBytes = 8_000_000_000;
     const modelSizeBytes = 1_708_582_752;
+    const getCalibrationRecordSpy = jest.spyOn(registry, 'getCalibrationRecord');
 
     (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(totalMemoryBytes);
     (FileSystem.getInfoAsync as jest.Mock).mockResolvedValueOnce({
@@ -400,14 +470,85 @@ describe('LLMEngineService', () => {
 
     expect(llamaRn.initLlama).toHaveBeenCalledWith(
       expect.objectContaining({
-        n_ctx: 512,
-        n_gpu_layers: 0,
+        n_ctx: 2048,
+        n_gpu_layers: 20,
       }),
       expect.any(Function),
     );
+
+    const lowMemoryCalibrationLookup = getCalibrationRecordSpy.mock.calls
+      .map(([key]) => key)
+      .find((key): key is string => {
+        if (typeof key !== 'string') {
+          return false;
+        }
+
+        try {
+          const parsed = JSON.parse(key) as { nBatch?: number; nUbatch?: number };
+          return parsed.nBatch === 256 && parsed.nUbatch === 128;
+        } catch {
+          return false;
+        }
+      });
+    expect(lowMemoryCalibrationLookup).toBeDefined();
+
+    getCalibrationRecordSpy.mockRestore();
   });
 
-  it('attempts forced model loads even when live memory snapshots suggest they may fail', async () => {
+  it('clamps context size to fit within current memory limits without forcing safe mode', async () => {
+    const totalMemoryBytes = 8_000_000_000;
+    const availableBytes = 1_600_000_000;
+    const modelSizeBytes = 2_000_000_000;
+
+    (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(totalMemoryBytes);
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValueOnce({
+      exists: true,
+      size: modelSizeBytes,
+    });
+    (getModelLoadParametersForModel as jest.Mock).mockReturnValueOnce({
+      contextSize: 4096,
+      gpuLayers: 12,
+    });
+    (getFreshMemorySnapshot as jest.Mock).mockResolvedValue({
+      timestampMs: Date.now(),
+      platform: 'android',
+      totalBytes: totalMemoryBytes,
+      availableBytes,
+      freeBytes: availableBytes,
+      usedBytes: totalMemoryBytes - availableBytes,
+      appUsedBytes: 500_000_000,
+      appResidentBytes: 500_000_000,
+      appPssBytes: 400_000_000,
+      lowMemory: false,
+      pressureLevel: 'normal',
+      thresholdBytes: 0,
+    });
+    (llamaRn.loadLlamaModelInfo as jest.Mock).mockResolvedValueOnce({
+      n_layers: 32,
+      n_head_kv: 8,
+      n_embd_head_k: 128,
+      n_embd_head_v: 128,
+    });
+
+    await expect(
+      llmEngineService.load('test/model', { forceReload: true }),
+    ).resolves.toBeUndefined();
+
+    const safeLimits = llmEngineService.getSafeModeLoadLimits();
+    expect(safeLimits).toBeNull();
+
+    expect(llamaRn.initLlama).toHaveBeenCalledWith(
+      expect.objectContaining({
+        n_ctx: expect.any(Number),
+        n_gpu_layers: 12,
+      }),
+      expect.any(Function),
+    );
+    expect(llmEngineService.getContextSize()).toBeLessThan(4096);
+    expect(llmEngineService.getContextSize()).toBeGreaterThan(512);
+  });
+
+  it('blocks unsafe loads when safe mode hits the minimum context window', async () => {
     const totalMemoryBytes = 8 * 1024 * 1024 * 1024;
     const modelSizeBytes = 1_700_000_000;
 
@@ -420,9 +561,9 @@ describe('LLMEngineService', () => {
       timestampMs: Date.now(),
       platform: 'android',
       totalBytes: totalMemoryBytes,
-      availableBytes: 2_500_000_000,
-      freeBytes: 1_500_000_000,
-      usedBytes: totalMemoryBytes - 1_500_000_000,
+      availableBytes: 900_000_000,
+      freeBytes: 700_000_000,
+      usedBytes: totalMemoryBytes - 900_000_000,
       appUsedBytes: 500_000_000,
       lowMemory: false,
       pressureLevel: 'normal',
@@ -438,16 +579,18 @@ describe('LLMEngineService', () => {
 
     await expect(
       llmEngineService.load('test/model', { forceReload: true, allowUnsafeMemoryLoad: true }),
-    ).resolves.toBeUndefined();
-
-    expect(llamaRn.initLlama).toHaveBeenCalledWith(
-      expect.objectContaining({
-        n_ctx: 512,
-        n_gpu_layers: 0,
+    ).rejects.toMatchObject({
+      code: 'model_load_blocked',
+      details: expect.objectContaining({
+        safeLoadProfile: expect.objectContaining({
+          contextTokens: 512,
+          gpuLayers: 0,
+        }),
       }),
-      expect.any(Function),
-    );
-    expect(updateSettings).toHaveBeenCalledWith({ activeModelId: 'test/model' });
+    });
+
+    expect(llamaRn.initLlama).not.toHaveBeenCalled();
+    expect(updateSettings).not.toHaveBeenCalledWith({ activeModelId: 'test/model' });
   });
 
   it('includes KV-cache bytes in model-load diagnostics when GGUF metadata is available', async () => {

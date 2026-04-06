@@ -1,5 +1,4 @@
 import type { ContextSolveResult, EstimatorInput } from './types';
-import { createMemoryBudget } from './budget';
 import { estimateAccurateMemoryFit } from './estimator';
 
 export const MIN_CONTEXT_WINDOW_TOKENS = 512;
@@ -71,11 +70,40 @@ export function solveMaxContextForBudget({
     };
   }
 
-  const { effectiveBudgetBytes } = createMemoryBudget({
+  const fitCache = new Map<number, number>();
+  const estimateRequiredBytes = (contextTokens: number): number => {
+    const normalized = normalizeContextWindowCeiling(contextTokens);
+    const cached = fitCache.get(normalized);
+    if (typeof cached === 'number') {
+      return cached;
+    }
+
+    const fit = estimateAccurateMemoryFit({
+      input: {
+        ...input,
+        runtimeParams: {
+          ...input.runtimeParams,
+          contextTokens: normalized,
+        },
+      },
+      totalMemoryBytes: resolvedTotalMemoryBytes,
+    });
+    const requiredBytes = fit.requiredBytes;
+    fitCache.set(normalized, requiredBytes);
+    return requiredBytes;
+  };
+
+  const minFit = estimateAccurateMemoryFit({
+    input: {
+      ...input,
+      runtimeParams: {
+        ...input.runtimeParams,
+        contextTokens: MIN_CONTEXT_WINDOW_TOKENS,
+      },
+    },
     totalMemoryBytes: resolvedTotalMemoryBytes,
-    systemMemorySnapshot: input.snapshot ?? null,
-    learnedSafeBudgetBytes: input.calibrationRecord?.learnedSafeBudgetBytes ?? null,
   });
+  const effectiveBudgetBytes = minFit.effectiveBudgetBytes;
 
   if (!Number.isFinite(effectiveBudgetBytes) || effectiveBudgetBytes <= 0) {
     return {
@@ -86,21 +114,7 @@ export function solveMaxContextForBudget({
     };
   }
 
-  const estimateRequiredBytes = (contextTokens: number): number => {
-    const fit = estimateAccurateMemoryFit({
-      input: {
-        ...input,
-        runtimeParams: {
-          ...input.runtimeParams,
-          contextTokens,
-        },
-      },
-      totalMemoryBytes: resolvedTotalMemoryBytes,
-    });
-    return fit.requiredBytes;
-  };
-
-  const minRequiredBytes = estimateRequiredBytes(MIN_CONTEXT_WINDOW_TOKENS);
+  const minRequiredBytes = minFit.requiredBytes;
   if (!Number.isFinite(minRequiredBytes) || minRequiredBytes <= 0) {
     return {
       maxContextTokens: normalizedMaxContextTokens,

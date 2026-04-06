@@ -108,13 +108,31 @@ function normalizePositiveInteger(value: unknown): number | undefined {
   return normalized === null ? undefined : normalized;
 }
 
+function normalizeScalarMetadataValue(value: unknown): string | number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+
+  return normalizeNonEmptyString(value);
+}
+
 function normalizeGgufMetadata(value: unknown): ModelGgufMetadata | undefined {
   if (!value || typeof value !== 'object') {
     return undefined;
   }
 
   const record = value as Record<string, unknown>;
-  const architecture = normalizeNonEmptyString(record.architecture);
+  const preservedPrefixedMetadata = Object.fromEntries(
+    Object.entries(record).flatMap(([key, rawValue]) => {
+      if (!key.includes('.')) {
+        return [];
+      }
+
+      const normalizedValue = normalizeScalarMetadataValue(rawValue);
+      return normalizedValue === undefined ? [] : [[key, normalizedValue]];
+    }),
+  ) as Record<string, string | number>;
+  const architecture = normalizeNonEmptyString(record.architecture ?? record['general.architecture']);
   const sizeLabel = normalizeNonEmptyString(record.sizeLabel ?? record.size_label);
   const totalBytes = normalizePositiveInteger(record.totalBytes ?? record.total);
   const contextLengthTokens = normalizePositiveInteger(record.contextLengthTokens ?? record.context_length);
@@ -128,6 +146,7 @@ function normalizeGgufMetadata(value: unknown): ModelGgufMetadata | undefined {
   const nEmbdHeadV = normalizePositiveInteger(record.nEmbdHeadV ?? record.n_embd_head_v);
 
   const normalized: ModelGgufMetadata = {
+    ...preservedPrefixedMetadata,
     ...(architecture !== undefined ? { architecture } : {}),
     ...(sizeLabel !== undefined ? { sizeLabel } : {}),
     ...(totalBytes !== undefined ? { totalBytes } : {}),

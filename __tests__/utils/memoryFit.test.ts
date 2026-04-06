@@ -41,10 +41,8 @@ describe('memoryFit', () => {
     });
 
     const softTotalBudgetBytes = Math.floor(totalMemoryBytes * 0.8);
-    const osReserveBytes = 512 * 1024 * 1024;
     const fragmentationGuardBytes = Math.round(totalMemoryBytes * 0.05);
-    const reservedBytes = osReserveBytes + fragmentationGuardBytes;
-    const expectedEffectiveBudgetBytes = availableBytes - reservedBytes;
+    const expectedEffectiveBudgetBytes = availableBytes - fragmentationGuardBytes;
 
     expect(assessment).toEqual(
       expect.objectContaining({

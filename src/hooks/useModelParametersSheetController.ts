@@ -6,6 +6,7 @@ import { llmEngineService } from '@/services/LLMEngineService';
 import { toAppError } from '@/services/AppError';
 import { registry } from '@/services/LocalStorageRegistry';
 import { modelCatalogService } from '@/services/ModelCatalogService';
+import { useLLMEngine } from '@/hooks/useLLMEngine';
 import {
   DEFAULT_MODEL_LOAD_PARAMETERS,
   getGenerationParametersForModel,
@@ -19,7 +20,7 @@ import {
   type GenerationParameters,
   type ModelLoadParameters,
 } from '@/services/SettingsStore';
-import type { ModelMetadata } from '@/types/models';
+import { EngineStatus, type ModelMetadata } from '@/types/models';
 import { clampContextWindowTokens, resolveContextWindowCeiling } from '@/utils/contextWindow';
 import { hasPersistedLoadProfileChanges } from '@/utils/modelLoadProfile';
 
@@ -38,6 +39,14 @@ interface UseModelParametersSheetControllerOptions {
   onAfterActiveModelReload?: (modelId: string) => void | Promise<void>;
 }
 
+function clampGpuLayers(gpuLayers: number | null | undefined, ceiling: number): number | null {
+  if (gpuLayers === null || gpuLayers === undefined || !Number.isFinite(gpuLayers)) {
+    return null;
+  }
+
+  return Math.min(Math.max(0, Math.round(gpuLayers)), ceiling);
+}
+
 export function useModelParametersSheetController({
   getModelById,
   showError,
@@ -53,6 +62,7 @@ export function useModelParametersSheetController({
   onAfterActiveModelReload,
 }: UseModelParametersSheetControllerOptions) {
   const { t } = useTranslation();
+  const { state: engineState } = useLLMEngine();
   const [isOpen, setOpen] = useState(false);
   const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
   const [recommendedGpuLayers, setRecommendedGpuLayers] = useState(0);
@@ -94,6 +104,15 @@ export function useModelParametersSheetController({
   const defaultParams = defaultParamsOverride ?? getGenerationParametersForModel(null);
   const currentLoadParams = getModelLoadParametersForModel(configurableModelId);
   const defaultLoadParams = getModelLoadParametersForModel(null);
+  const isLoadedProfileActive = Boolean(
+    configurableModelId
+    && engineState.status === EngineStatus.READY
+    && engineState.activeModelId === configurableModelId,
+  );
+  const loadedContextSize = isLoadedProfileActive ? llmEngineService.getContextSize() : null;
+  const loadedGpuLayers = isLoadedProfileActive ? llmEngineService.getLoadedGpuLayers() : null;
+  const safeModeLoadLimits = isLoadedProfileActive ? llmEngineService.getSafeModeLoadLimits() : null;
+  const gpuLayersCeiling = 80;
   const baseContextWindowCeiling = useMemo(() => resolveContextWindowCeiling({
     modelMaxContextTokens: configurableModel?.maxContextTokens,
     input: {
@@ -260,17 +279,18 @@ export function useModelParametersSheetController({
               ? (effectiveDefaultLoadParams.gpuLayers ?? recommendedGpuLayers)
               : current.gpuLayers
         );
+      const clampedNextGpuLayers = clampGpuLayers(nextGpuLayers, gpuLayersCeiling);
 
       if (
         current.contextSize === nextContextSize
-        && current.gpuLayers === nextGpuLayers
+        && current.gpuLayers === clampedNextGpuLayers
       ) {
         return current;
       }
 
       return {
         contextSize: nextContextSize,
-        gpuLayers: nextGpuLayers,
+        gpuLayers: clampedNextGpuLayers,
       };
     });
   }, [
@@ -281,6 +301,7 @@ export function useModelParametersSheetController({
     effectiveDefaultLoadParams.contextSize,
     effectiveDefaultLoadParams.gpuLayers,
     isOpen,
+    gpuLayersCeiling,
     recommendedGpuLayers,
   ]);
 
@@ -305,9 +326,10 @@ export function useModelParametersSheetController({
         DEFAULT_MODEL_LOAD_PARAMETERS.contextSize,
         contextWindowCeiling,
       );
+      const clampedNextGpuLayers = clampGpuLayers(nextGpuLayers, gpuLayersCeiling);
       const isResetToDefaultProfile =
         nextContextSize === defaultContextSize
-        && (nextGpuLayers ?? recommendedGpuLayers) === recommendedGpuLayers;
+        && (clampedNextGpuLayers ?? recommendedGpuLayers) === recommendedGpuLayers;
 
       if (nextContextSize !== draftLoadParams.contextSize) {
         setDraftLoadParams((current) => ({
@@ -321,16 +343,48 @@ export function useModelParametersSheetController({
       } else {
         updateModelLoadParametersForModel(configurableModelId, {
           contextSize: nextContextSize,
-          gpuLayers: nextGpuLayers,
+          gpuLayers: clampedNextGpuLayers,
         });
       }
 
       if (resolvedActiveModelId === configurableModelId) {
         await llmEngineService.load(configurableModelId, { forceReload: true });
+
+        const effectiveLoadedContextSize = llmEngineService.getContextSize();
+        if (
+          Number.isFinite(effectiveLoadedContextSize)
+          && effectiveLoadedContextSize > 0
+          && effectiveLoadedContextSize < nextContextSize
+        ) {
+          const didLoadInSafeMode = llmEngineService.getSafeModeLoadLimits() !== null;
+          Alert.alert(
+            t('chat.modelControls.runtimeMismatchTitle'),
+            didLoadInSafeMode
+              ? t('chat.modelControls.runtimeMismatchDescriptionSafe', {
+                  requested: nextContextSize,
+                  loaded: effectiveLoadedContextSize,
+                })
+              : t('chat.modelControls.runtimeMismatchDescription', {
+                  requested: nextContextSize,
+                  loaded: effectiveLoadedContextSize,
+                }),
+          );
+        }
+
         await Promise.resolve(onAfterActiveModelReload?.(configurableModelId));
       }
     } catch (error) {
       const appError = toAppError(error);
+      if (appError.code === 'model_load_blocked') {
+        Alert.alert(
+          t('models.ramLikelyOom'),
+          t('models.loadMemoryBlockedMessage'),
+          [
+            { text: t('common.close') },
+          ],
+        );
+        return;
+      }
       if (appError.code === 'model_memory_warning') {
         Alert.alert(
           t('models.memoryWarningTitle'),
@@ -368,6 +422,7 @@ export function useModelParametersSheetController({
     draftLoadParams.gpuLayers,
     effectiveDefaultLoadParams.gpuLayers,
     onAfterActiveModelReload,
+    gpuLayersCeiling,
     recommendedGpuLayers,
     resolvedActiveModelId,
     showError,
@@ -391,14 +446,21 @@ export function useModelParametersSheetController({
       loadDraftSourceRef.current.gpuLayers = 'user';
     }
 
-    setDraftLoadParams((current) => ({
-      ...current,
-      ...partial,
-      contextSize: partial.contextSize === undefined
-        ? current.contextSize
-        : clampContextWindowTokens(partial.contextSize, contextWindowCeiling),
-    }));
-  }, [contextWindowCeiling]);
+    setDraftLoadParams((current) => {
+      const nextGpuLayers = partial.gpuLayers === undefined
+        ? current.gpuLayers
+        : clampGpuLayers(partial.gpuLayers, gpuLayersCeiling);
+
+      return {
+        ...current,
+        ...partial,
+        gpuLayers: nextGpuLayers,
+        contextSize: partial.contextSize === undefined
+          ? current.contextSize
+          : clampContextWindowTokens(partial.contextSize, contextWindowCeiling),
+      };
+    });
+  }, [contextWindowCeiling, gpuLayersCeiling]);
 
   const handleResetParamField = useCallback((field: keyof GenerationParameters) => {
     if (onResetParamField) {
@@ -421,10 +483,13 @@ export function useModelParametersSheetController({
     setDraftLoadParams((current) => ({
       ...current,
       [field]: field === 'gpuLayers'
-        ? (effectiveDefaultLoadParams.gpuLayers ?? recommendedGpuLayers)
+        ? Math.min(
+            gpuLayersCeiling,
+            effectiveDefaultLoadParams.gpuLayers ?? recommendedGpuLayers,
+          )
         : effectiveDefaultLoadParams.contextSize,
     }));
-  }, [effectiveDefaultLoadParams.contextSize, effectiveDefaultLoadParams.gpuLayers, recommendedGpuLayers]);
+  }, [effectiveDefaultLoadParams.contextSize, effectiveDefaultLoadParams.gpuLayers, gpuLayersCeiling, recommendedGpuLayers]);
 
   const handleResetAll = useCallback(() => {
     loadDraftSourceRef.current = {
@@ -440,12 +505,16 @@ export function useModelParametersSheetController({
 
     setDraftLoadParams({
       contextSize: effectiveDefaultLoadParams.contextSize,
-      gpuLayers: effectiveDefaultLoadParams.gpuLayers ?? recommendedGpuLayers,
+      gpuLayers: Math.min(
+        gpuLayersCeiling,
+        effectiveDefaultLoadParams.gpuLayers ?? recommendedGpuLayers,
+      ),
     });
   }, [
     configurableModelId,
     effectiveDefaultLoadParams.contextSize,
     effectiveDefaultLoadParams.gpuLayers,
+    gpuLayersCeiling,
     onResetAllParams,
     recommendedGpuLayers,
   ]);
@@ -460,6 +529,8 @@ export function useModelParametersSheetController({
       params: currentParams,
       defaultParams,
       contextWindowCeiling,
+      gpuLayersCeiling,
+      isSafeModeActive: safeModeLoadLimits !== null,
       loadParamsDraft: draftLoadParams,
       defaultLoadParams: effectiveDefaultLoadParams,
       recommendedGpuLayers,
@@ -474,6 +545,8 @@ export function useModelParametersSheetController({
       onResetLoadField: handleResetLoadField,
       onReset: handleResetAll,
       onApplyReload: applyLoadParams,
+      loadedContextSize,
+      loadedGpuLayers,
     },
   };
 }

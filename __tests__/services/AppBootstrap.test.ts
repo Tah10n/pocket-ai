@@ -123,6 +123,63 @@ describe('AppBootstrap', () => {
     expect(updateSettings).toHaveBeenCalledWith({ activeModelId: null });
   });
 
+  it('restores medium-confidence likely_oom active models during critical bootstrap', async () => {
+    jest.useFakeTimers();
+    try {
+      (getSettings as jest.Mock).mockReturnValue({
+        language: 'en',
+        activePresetId: null,
+        activeModelId: 'author/model-q4',
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 2048,
+        theme: 'system',
+        chatRetentionDays: null,
+      });
+      (registry.getModel as jest.Mock).mockReturnValue({
+        id: 'author/model-q4',
+        localPath: 'author_model-q4.gguf',
+        memoryFitDecision: 'likely_oom',
+        memoryFitConfidence: 'medium',
+      });
+
+      await bootstrapAppCritical();
+      jest.runAllTimers();
+      await Promise.resolve();
+
+      expect(llmEngineService.load).toHaveBeenCalledWith('author/model-q4');
+      expect(updateSettings).not.toHaveBeenCalledWith({ activeModelId: null });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('clears high-confidence likely_oom active models during critical bootstrap', async () => {
+    (getSettings as jest.Mock).mockReturnValue({
+      language: 'en',
+      activePresetId: null,
+      activeModelId: 'author/model-q4',
+      temperature: 0.7,
+      topP: 0.9,
+      maxTokens: 2048,
+      theme: 'system',
+      chatRetentionDays: null,
+    });
+    (registry.getModel as jest.Mock).mockReturnValue({
+      id: 'author/model-q4',
+      localPath: 'author_model-q4.gguf',
+      fitsInRam: false,
+      memoryFitDecision: 'likely_oom',
+      memoryFitConfidence: 'high',
+    });
+
+    const result = await bootstrapAppCritical();
+
+    expect(result.outcome).toBe('active_model_blocked');
+    expect(llmEngineService.load).not.toHaveBeenCalled();
+    expect(updateSettings).toHaveBeenCalledWith({ activeModelId: null });
+  });
+
   it('does not block critical bootstrap on infrastructure setup', async () => {
     (getSettings as jest.Mock).mockReturnValue({
       language: 'en',

@@ -40,27 +40,32 @@ export function resolveConservativeAvailableMemoryBudget(snapshot: MemoryBudgetS
   return Math.min(thresholdAdjustedAvailableBytes, strictFreeBytes);
 }
 
-function resolveAppBaselineBytes(snapshot: MemoryBudgetSnapshot): number {
-  const pss = isFinitePositiveNumber(snapshot.appPssBytes) ? snapshot.appPssBytes : null;
-  const resident = isFinitePositiveNumber(snapshot.appResidentBytes) ? snapshot.appResidentBytes : null;
-  const used = isFinitePositiveNumber(snapshot.appUsedBytes) ? snapshot.appUsedBytes : null;
-
-  return Math.max(0, pss ?? resident ?? used ?? 0);
-}
-
-function resolveReservedBudgetBytes({
+function resolveReserveBudgets({
   totalMemoryBytes,
   systemMemorySnapshot,
 }: {
   totalMemoryBytes: number;
   systemMemorySnapshot?: MemoryBudgetSnapshot | null;
-}): number {
+}): { softReserveBytes: number; liveReserveBytes: number } {
   if (!systemMemorySnapshot) {
-    return 0;
+    return { softReserveBytes: 0, liveReserveBytes: 0 };
   }
 
-  const appBaselineBytes = resolveAppBaselineBytes(systemMemorySnapshot);
-  const osReserveBytes = Math.max(DEFAULT_OS_RESERVE_BYTES, totalMemoryBytes * 0.06);
+  // NOTE: The live "available budget" already represents memory available to allocate
+  // on top of current app + OS usage (and we also subtract system low-memory thresholds
+  // inside resolveConservativeAvailableMemoryBudget). Reserving app baseline or a
+  // fixed OS chunk again would double-count and collapse budgets on memory-constrained
+  // devices even when there is still allocatable RAM.
+  //
+  // We still reserve:
+  // - fragmentation guard (allocator / VA fragmentation)
+  // - extra headroom under memory pressure
+  //
+  // For the soft total-RAM budget (0.8 * total RAM) we also keep an OS reserve, but only
+  // when the platform does not report a low-memory threshold.
+  const thresholdBytes = isFinitePositiveNumber(systemMemorySnapshot.thresholdBytes) ? systemMemorySnapshot.thresholdBytes : 0;
+  const shouldReserveOsBytes = thresholdBytes <= 0;
+  const osReserveBytes = shouldReserveOsBytes ? Math.max(DEFAULT_OS_RESERVE_BYTES, totalMemoryBytes * 0.06) : 0;
   const fragmentationGuardBytes = Math.max(MIN_FRAGMENTATION_GUARD_BYTES, totalMemoryBytes * FRAGMENTATION_GUARD_RATIO);
   const pressureReserveBytes = (
     systemMemorySnapshot.lowMemory === true
@@ -70,12 +75,12 @@ function resolveReservedBudgetBytes({
     ? LOW_MEMORY_EXTRA_RESERVE_BYTES
     : 0;
 
-  const reserved = appBaselineBytes + osReserveBytes + fragmentationGuardBytes + pressureReserveBytes;
-  if (!Number.isFinite(reserved) || reserved <= 0) {
-    return 0;
-  }
+  const softReserveCandidate = osReserveBytes + fragmentationGuardBytes + pressureReserveBytes;
+  const liveReserveCandidate = fragmentationGuardBytes + pressureReserveBytes;
+  const softReserveBytes = Number.isFinite(softReserveCandidate) && softReserveCandidate > 0 ? Math.round(softReserveCandidate) : 0;
+  const liveReserveBytes = Number.isFinite(liveReserveCandidate) && liveReserveCandidate > 0 ? Math.round(liveReserveCandidate) : 0;
 
-  return Math.round(reserved);
+  return { softReserveBytes, liveReserveBytes };
 }
 
 export function createMemoryBudget({
@@ -90,6 +95,9 @@ export function createMemoryBudget({
   totalBudgetBytes: number;
   availableBudgetBytes: number | null;
   effectiveBudgetBytes: number;
+  softEffectiveBudgetBytes: number;
+  liveEffectiveBudgetBytes: number | null;
+  learnedEffectiveBudgetBytes: number | null;
   budget: MemoryBudget;
 } {
   const resolvedTotalMemoryBytes = isFinitePositiveNumber(totalMemoryBytes) ? totalMemoryBytes : 0;
@@ -98,25 +106,34 @@ export function createMemoryBudget({
     ? resolveConservativeAvailableMemoryBudget(systemMemorySnapshot)
     : null;
 
-  const reservedBytes = resolveReservedBudgetBytes({
+  const { softReserveBytes, liveReserveBytes } = resolveReserveBudgets({
     totalMemoryBytes: resolvedTotalMemoryBytes,
     systemMemorySnapshot,
   });
 
   const learnedSafeBudgetCandidate = isFinitePositiveNumber(learnedSafeBudgetBytes) ? learnedSafeBudgetBytes : null;
-  const rawBudgetBytes = Math.min(
+  const softEffectiveBudgetBytes = Math.max(0, softTotalBudgetBytes - softReserveBytes);
+  const liveEffectiveBudgetBytes = availableBudgetBytes === null
+    ? null
+    : Math.max(0, availableBudgetBytes - liveReserveBytes);
+  const learnedEffectiveBudgetBytes = learnedSafeBudgetCandidate === null
+    ? null
+    : Math.max(0, learnedSafeBudgetCandidate - liveReserveBytes);
+  const effectiveBudgetBytes = Math.min(
     ...([
-      softTotalBudgetBytes,
-      ...(availableBudgetBytes === null ? [] : [availableBudgetBytes]),
-      ...(learnedSafeBudgetCandidate === null ? [] : [learnedSafeBudgetCandidate]),
+      softEffectiveBudgetBytes,
+      ...(liveEffectiveBudgetBytes === null ? [] : [liveEffectiveBudgetBytes]),
+      ...(learnedEffectiveBudgetBytes === null ? [] : [learnedEffectiveBudgetBytes]),
     ]),
   );
-  const effectiveBudgetBytes = Math.max(0, rawBudgetBytes - reservedBytes);
 
   return {
     totalBudgetBytes: softTotalBudgetBytes,
     availableBudgetBytes,
     effectiveBudgetBytes,
+    softEffectiveBudgetBytes,
+    liveEffectiveBudgetBytes,
+    learnedEffectiveBudgetBytes,
     budget: {
       totalMemoryBytes: resolvedTotalMemoryBytes,
       liveAvailableBytes: systemMemorySnapshot?.availableBytes,

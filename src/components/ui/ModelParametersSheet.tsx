@@ -22,6 +22,8 @@ interface ModelParametersSheetProps {
   params: GenerationParameters;
   defaultParams: GenerationParameters;
   contextWindowCeiling?: number;
+  gpuLayersCeiling?: number;
+  isSafeModeActive?: boolean;
   loadParamsDraft: ModelLoadParameters;
   defaultLoadParams: ModelLoadParameters;
   recommendedGpuLayers: number;
@@ -29,6 +31,8 @@ interface ModelParametersSheetProps {
   canApplyReload: boolean;
   isApplyingReload: boolean;
   showApplyReload: boolean;
+  loadedContextSize?: number | null;
+  loadedGpuLayers?: number | null;
   onClose: () => void;
   onChangeParams: (partial: Partial<GenerationParameters>) => void;
   onChangeLoadParams: (partial: Partial<ModelLoadParameters>) => void;
@@ -221,6 +225,8 @@ export function ModelParametersSheet({
   params,
   defaultParams,
   contextWindowCeiling,
+  gpuLayersCeiling,
+  isSafeModeActive = false,
   loadParamsDraft,
   defaultLoadParams,
   recommendedGpuLayers,
@@ -228,6 +234,8 @@ export function ModelParametersSheet({
   canApplyReload,
   isApplyingReload,
   showApplyReload,
+  loadedContextSize,
+  loadedGpuLayers,
   onClose,
   onChangeParams,
   onChangeLoadParams,
@@ -240,10 +248,50 @@ export function ModelParametersSheet({
   const resolvedContextWindowCeiling = contextWindowCeiling
     ? Math.max(MIN_CONTEXT_WINDOW_TOKENS, Math.min(MAX_CONTEXT_WINDOW_TOKENS, contextWindowCeiling))
     : DEFAULT_CONTEXT_WINDOW_TOKENS;
-  const maxTokensFloor = Math.min(128, loadParamsDraft.contextSize);
+  const resolvedGpuLayersCeiling = typeof gpuLayersCeiling === 'number' && Number.isFinite(gpuLayersCeiling)
+    ? Math.max(0, Math.min(80, Math.round(gpuLayersCeiling)))
+    : 80;
+  const resolvedLoadedContextSize = typeof loadedContextSize === 'number'
+    && Number.isFinite(loadedContextSize)
+    && loadedContextSize > 0
+    ? Math.min(
+        resolvedContextWindowCeiling,
+        Math.max(MIN_CONTEXT_WINDOW_TOKENS, Math.round(loadedContextSize)),
+      )
+    : null;
+  const resolvedLoadedGpuLayers = typeof loadedGpuLayers === 'number'
+    && Number.isFinite(loadedGpuLayers)
+    && loadedGpuLayers >= 0
+    ? Math.min(
+        resolvedGpuLayersCeiling,
+        Math.max(0, Math.round(loadedGpuLayers)),
+      )
+    : null;
+  const showLoadedLoadProfile = !showApplyReload && resolvedLoadedContextSize !== null;
+  const displayedContextSize = showLoadedLoadProfile
+    ? resolvedLoadedContextSize
+    : Math.min(
+        resolvedContextWindowCeiling,
+        Math.max(MIN_CONTEXT_WINDOW_TOKENS, Math.round(loadParamsDraft.contextSize)),
+      );
+  const displayedGpuLayers = showLoadedLoadProfile && resolvedLoadedGpuLayers !== null
+    ? resolvedLoadedGpuLayers
+    : Math.min(
+        resolvedGpuLayersCeiling,
+        Math.max(0, Math.round(loadParamsDraft.gpuLayers ?? recommendedGpuLayers)),
+      );
+  const defaultContextSize = Math.min(
+    resolvedContextWindowCeiling,
+    Math.max(MIN_CONTEXT_WINDOW_TOKENS, Math.round(defaultLoadParams.contextSize)),
+  );
+  const defaultGpuLayers = Math.min(
+    resolvedGpuLayersCeiling,
+    Math.max(0, Math.round(defaultLoadParams.gpuLayers ?? recommendedGpuLayers)),
+  );
+  const maxTokensFloor = Math.min(128, displayedContextSize);
   const maxTokensCeiling = Math.max(
     maxTokensFloor,
-    Math.min(loadParamsDraft.contextSize, resolvedContextWindowCeiling),
+    Math.min(displayedContextSize, resolvedContextWindowCeiling),
   );
 
   return (
@@ -410,35 +458,71 @@ export function ModelParametersSheet({
                   {t('chat.modelControls.runtimeReloadDescription')}
                 </Text>
 
+                {typeof loadedContextSize === 'number' && Number.isFinite(loadedContextSize) ? (
+                  <ScreenCard className="mt-3" tone="default" variant="inset" padding="compact">
+                    <Text className="text-xs font-semibold uppercase tracking-wider text-primary-500">
+                      {t('chat.modelControls.runtimeLoadedTitle')}
+                    </Text>
+                    <Text className="mt-1 text-sm leading-5 text-typography-700 dark:text-typography-200">
+                      {t('chat.modelControls.runtimeLoadedValue', {
+                        contextSize: Math.round(loadedContextSize),
+                        gpuLayers: Math.round(loadedGpuLayers ?? 0),
+                      })}
+                    </Text>
+                  </ScreenCard>
+                ) : null}
+
+                {typeof loadedContextSize === 'number' &&
+                Number.isFinite(loadedContextSize) &&
+                !showApplyReload &&
+                loadedContextSize < loadParamsDraft.contextSize ? (
+                    <ScreenCard className="mt-3" tone="warning" variant="inset" padding="compact">
+                      <Text className="text-xs font-semibold uppercase tracking-wider text-warning-700 dark:text-warning-200">
+                        {t('chat.modelControls.runtimeMismatchTitle')}
+                      </Text>
+                      <Text className="mt-1 text-sm leading-5 text-typography-700 dark:text-typography-200">
+                        {isSafeModeActive
+                          ? t('chat.modelControls.runtimeMismatchDescriptionSafe', {
+                              requested: Math.round(loadParamsDraft.contextSize),
+                              loaded: Math.round(loadedContextSize),
+                            })
+                          : t('chat.modelControls.runtimeMismatchDescription', {
+                              requested: Math.round(loadParamsDraft.contextSize),
+                              loaded: Math.round(loadedContextSize),
+                            })}
+                      </Text>
+                    </ScreenCard>
+                  ) : null}
+
                 <SliderRow
                   label={t('chat.modelControls.contextWindow')}
                   description={t('chat.modelControls.contextWindowDescription')}
-                  valueLabel={`${Math.round(loadParamsDraft.contextSize)} tok`}
+                  valueLabel={`${Math.round(displayedContextSize)} tok`}
                   minLabel="512"
                   maxLabel={`${resolvedContextWindowCeiling}`}
                   minimumValue={MIN_CONTEXT_WINDOW_TOKENS}
                   maximumValue={resolvedContextWindowCeiling}
                   step={512}
-                  value={Math.min(loadParamsDraft.contextSize, resolvedContextWindowCeiling)}
+                  value={displayedContextSize}
                   onValueChange={(value) => onChangeLoadParams({ contextSize: Math.round(value) })}
                   onReset={() => onResetLoadField('contextSize')}
-                  isResetDisabled={loadParamsDraft.contextSize === Math.min(defaultLoadParams.contextSize, resolvedContextWindowCeiling)}
+                  isResetDisabled={displayedContextSize === defaultContextSize}
                   variant="embedded"
                 />
 
                 <SliderRow
                   label={t('chat.modelControls.gpuLayers')}
                   description={t('chat.modelControls.gpuLayersDescription', { count: recommendedGpuLayers })}
-                  valueLabel={t('chat.modelControls.gpuLayersValue', { count: Math.round(loadParamsDraft.gpuLayers ?? 0) })}
+                  valueLabel={t('chat.modelControls.gpuLayersValue', { count: Math.round(displayedGpuLayers) })}
                   minLabel="0"
-                  maxLabel="80"
+                  maxLabel={`${resolvedGpuLayersCeiling}`}
                   minimumValue={0}
-                  maximumValue={80}
+                  maximumValue={resolvedGpuLayersCeiling}
                   step={1}
-                  value={loadParamsDraft.gpuLayers ?? 0}
+                  value={displayedGpuLayers}
                   onValueChange={(value) => onChangeLoadParams({ gpuLayers: Math.round(value) })}
                   onReset={() => onResetLoadField('gpuLayers')}
-                  isResetDisabled={(loadParamsDraft.gpuLayers ?? recommendedGpuLayers) === (defaultLoadParams.gpuLayers ?? recommendedGpuLayers)}
+                  isResetDisabled={displayedGpuLayers === defaultGpuLayers}
                   variant="embedded"
                   showDivider
                 />

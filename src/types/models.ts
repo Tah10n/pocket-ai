@@ -26,6 +26,7 @@ export type ModelMemoryFitDecision =
 export type ModelMemoryFitConfidence = 'high' | 'medium' | 'low';
 
 export interface ModelGgufMetadata {
+  [key: string]: string | number | undefined;
   totalBytes?: number;
   contextLengthTokens?: number;
   architecture?: string;

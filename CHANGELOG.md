@@ -7,5 +7,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- _Add changes here during development._
-
+- Treat models that only fit at the minimum context window as `Won't fit RAM` and block loading to avoid unstable or unusably slow runs.

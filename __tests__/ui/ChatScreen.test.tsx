@@ -73,6 +73,13 @@ let lastModelParametersSheetProps: any = null;
 const mockStartNewChat = jest.fn(() => {
   require('../../src/store/chatStore').useChatStore.getState().setActiveThread(null);
 });
+  let mockSafeModeLoadLimits: {
+    maxContextTokens: number;
+    requestedGpuLayers: number;
+    loadedGpuLayers: number;
+  } | null = null;
+let mockLoadedContextSize: number | null = null;
+let mockLoadedGpuLayers: number | null = null;
 
 function createDeferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -108,6 +115,31 @@ jest.mock('../../src/services/LLMEngineService', () => ({
   llmEngineService: {
     getRecommendedGpuLayers: () => mockGetRecommendedGpuLayers(),
     load: (...args: any[]) => mockLoadModel(...args),
+    getSafeModeLoadLimits: () => mockSafeModeLoadLimits,
+    getContextSize: () => {
+      if (typeof mockLoadedContextSize === 'number') {
+        return mockLoadedContextSize;
+      }
+
+      const { getSettings } = require('../../src/services/SettingsStore');
+      if (!mockEngineState.activeModelId) {
+        return 4096;
+      }
+
+      return getSettings().modelLoadParamsByModelId?.[mockEngineState.activeModelId]?.contextSize ?? 4096;
+    },
+    getLoadedGpuLayers: () => {
+      if (typeof mockLoadedGpuLayers === 'number') {
+        return mockLoadedGpuLayers;
+      }
+
+      const { getSettings } = require('../../src/services/SettingsStore');
+      if (!mockEngineState.activeModelId) {
+        return null;
+      }
+
+      return getSettings().modelLoadParamsByModelId?.[mockEngineState.activeModelId]?.gpuLayers ?? null;
+    },
   },
 }));
 
@@ -462,6 +494,9 @@ describe('ChatScreen', () => {
     mockGetTotalMemory.mockResolvedValue(8 * 1024 * 1024 * 1024);
     mockRefreshModelMetadata.mockClear();
     mockRefreshModelMetadata.mockImplementation((model) => Promise.resolve(model));
+    mockSafeModeLoadLimits = null;
+    mockLoadedContextSize = null;
+    mockLoadedGpuLayers = null;
     updateSettings({
       activePresetId: 'preset-1',
       temperature: 0.7,
@@ -1050,6 +1085,66 @@ describe('ChatScreen', () => {
     await waitFor(() => {
       expect(lastModelParametersSheetProps?.loadParamsDraft.contextSize).toBe(8192);
       expect(lastModelParametersSheetProps?.showApplyReload).toBe(true);
+    });
+  });
+
+  it('keeps the saved load profile intact when the active model is running in safe mode', async () => {
+    updateSettings({
+      modelLoadParamsByModelId: {
+        'author/model-q4': {
+          contextSize: 8192,
+          gpuLayers: 12,
+        },
+      },
+    });
+    registry.saveModels([
+      {
+        id: 'author/model-q4',
+        name: 'Q4 model',
+        author: 'Test',
+        size: 512 * 1024 * 1024,
+        maxContextTokens: 8192,
+        hasVerifiedContextWindow: true,
+        localPath: 'author-model-q4.gguf',
+        lifecycleStatus: 'downloaded',
+      },
+    ]);
+    mockSafeModeLoadLimits = {
+      maxContextTokens: 4096,
+      requestedGpuLayers: 12,
+      loadedGpuLayers: 4,
+    };
+    mockLoadedContextSize = 4096;
+    mockLoadedGpuLayers = 4;
+
+    const { getByTestId } = render(React.createElement(ChatScreen));
+
+    await act(async () => {
+      fireEvent.press(getByTestId('model-controls-button'));
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(lastModelParametersSheetProps?.contextWindowCeiling).toBe(8192);
+      expect(lastModelParametersSheetProps?.loadParamsDraft).toEqual(
+        expect.objectContaining({
+          contextSize: 8192,
+          gpuLayers: 12,
+        }),
+      );
+      expect(lastModelParametersSheetProps?.loadedContextSize).toBe(4096);
+      expect(lastModelParametersSheetProps?.loadedGpuLayers).toBe(4);
+      expect(lastModelParametersSheetProps?.isSafeModeActive).toBe(true);
+      expect(lastModelParametersSheetProps?.showApplyReload).toBe(false);
+    });
+
+    await act(async () => {
+      await lastModelParametersSheetProps.onApplyReload();
+    });
+
+    expect(getSettings().modelLoadParamsByModelId['author/model-q4']).toEqual({
+      contextSize: 8192,
+      gpuLayers: 12,
     });
   });
 

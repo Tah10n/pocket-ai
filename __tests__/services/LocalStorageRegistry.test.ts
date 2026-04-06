@@ -209,7 +209,13 @@ describe('LocalStorageRegistry', () => {
         fitsInRam: true,
         memoryFitDecision: undefined,
         metadataTrust: 'verified_local',
-        gguf: { architecture: 'llama' },
+        gguf: {
+          architecture: 'llama',
+          'llama.block_count': 32,
+          'llama.attention.head_count': 32,
+          'llama.attention.head_count_kv': 32,
+          'llama.embedding_length': 4096,
+        },
       }),
     ]);
     (registry.saveModels as jest.Mock) = jest.fn();
@@ -220,6 +226,27 @@ describe('LocalStorageRegistry', () => {
     const updatedModels = (registry.saveModels as jest.Mock).mock.calls[0][0];
     expect(updatedModels[0].fitsInRam).toBe(false);
     expect(['borderline', 'likely_oom']).toContain(updatedModels[0].memoryFitDecision);
+  });
+
+  it('clears stale likely_oom decisions when validation recomputes a safer fit', async () => {
+    (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(8 * 1024 * 1024 * 1024);
+    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([
+      createMockModel({
+        size: 1_700_000_000,
+        fitsInRam: false,
+        memoryFitDecision: 'likely_oom',
+        memoryFitConfidence: 'high',
+        metadataTrust: 'verified_local',
+      }),
+    ]);
+    (registry.saveModels as jest.Mock) = jest.fn();
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: true, size: 1_700_000_000 });
+
+    await registry.validateRegistry();
+
+    const updatedModels = (registry.saveModels as jest.Mock).mock.calls[0][0];
+    expect(updatedModels[0].fitsInRam).toBe(true);
+    expect(['fits_high_confidence', 'fits_low_confidence']).toContain(updatedModels[0].memoryFitDecision);
   });
 
   it('normalizes legacy persisted metadata with missing access fields and zero size', () => {

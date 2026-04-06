@@ -102,7 +102,7 @@ function migrateLegacyChatHistory(settings: AppSettings) {
   return importedCount;
 }
 
-type BootstrapOutcome = 'success' | 'active_model_missing' | 'error';
+type BootstrapOutcome = 'success' | 'active_model_missing' | 'active_model_blocked' | 'error';
 
 async function hydratePersistedStores(): Promise<void> {
   const span = performanceMonitor.startSpan('bootstrap.hydratePersistedStores');
@@ -233,6 +233,12 @@ export async function bootstrapAppCritical(): Promise<{ outcome: BootstrapOutcom
       if (!activeModel?.localPath) {
         updateSettings({ activeModelId: null });
         outcome = 'active_model_missing';
+        return { outcome };
+      }
+
+      if (activeModel.memoryFitDecision === 'likely_oom') {
+        updateSettings({ activeModelId: null });
+        outcome = 'active_model_blocked';
         return { outcome };
       }
 

@@ -6,6 +6,7 @@ import { Box } from '@/components/ui/box';
 import { Button, ButtonText } from '@/components/ui/button';
 import { ErrorReportSheet } from '@/components/ui/ErrorReportSheet';
 import { ModelCard } from '@/components/ui/ModelCard';
+import { ModelWarmupBanner } from '@/components/ui/ModelWarmupBanner';
 import { ModelParametersSheet } from '@/components/ui/ModelParametersSheet';
 import { ScreenCard, ScreenStack } from '@/components/ui/ScreenShell';
 import { Spinner } from '@/components/ui/spinner';
@@ -24,6 +25,7 @@ import {
 import { getReportedErrorMessage, toAppError } from '@/services/AppError';
 import { huggingFaceTokenService } from '@/services/HuggingFaceTokenService';
 import { registry } from '@/services/LocalStorageRegistry';
+import { llmEngineService } from '@/services/LLMEngineService';
 import { offloadModel } from '@/services/StorageManagerService';
 import { performanceMonitor } from '@/services/PerformanceMonitor';
 import {
@@ -560,7 +562,10 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
       if (filters.fitsInRamOnly) {
         const decision = model.memoryFitDecision;
         if (decision) {
-          if (decision !== 'fits_high_confidence' && decision !== 'fits_low_confidence') {
+          const decisionFitsInRam =
+            decision === 'fits_high_confidence'
+            || decision === 'fits_low_confidence';
+          if (!decisionFitsInRam) {
             return false;
           }
         } else if (model.fitsInRam !== true) {
@@ -610,6 +615,64 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
     catalogFirstResultsShownSessionRef.current = sessionIdentity;
     performanceMonitor.mark('catalog.firstResultsShown');
   }, [activeTab, filteredModels.length, sessionIdentity]);
+
+  const handleReportEngineError = useCallback(() => {
+    const lastError = llmEngineService.getLastModelLoadError();
+    const lastErrorDetails = lastError?.error.details;
+    const modelIdFromError = typeof lastErrorDetails?.modelId === 'string'
+      ? lastErrorDetails.modelId
+      : engineState.activeModelId;
+    const model = modelIdFromError ? registry.getModel(modelIdFromError) : undefined;
+    const allowUnsafeMemoryLoad = typeof lastErrorDetails?.allowUnsafeMemoryLoad === 'boolean'
+      ? lastErrorDetails.allowUnsafeMemoryLoad
+      : undefined;
+    const forceReload = typeof lastErrorDetails?.forceReload === 'boolean'
+      ? lastErrorDetails.forceReload
+      : undefined;
+    openErrorReport({
+      scope: lastError?.scope ?? 'LLMEngineService.load',
+      error: lastError?.error ?? new Error(engineState.lastError ?? 'Model load failed'),
+      context: {
+        model: model ? {
+          id: model.id,
+          name: model.name,
+          author: model.author,
+          size: model.size,
+          localPath: model.localPath,
+          downloadUrl: model.downloadUrl,
+          memoryFitDecision: model.memoryFitDecision,
+          memoryFitConfidence: model.memoryFitConfidence,
+          fitsInRam: model.fitsInRam,
+          lifecycleStatus: model.lifecycleStatus,
+          accessState: model.accessState,
+          gguf: model.gguf,
+        } : modelIdFromError ? { id: modelIdFromError } : undefined,
+        engine: {
+          status: engineState.status,
+          activeModelId: engineState.activeModelId,
+          loadProgress: engineState.loadProgress,
+          lastError: engineState.lastError,
+        },
+        options: allowUnsafeMemoryLoad !== undefined || forceReload !== undefined
+          ? {
+              allowUnsafeMemoryLoad,
+              forceReload,
+            }
+          : undefined,
+      },
+    });
+  }, [
+    engineState.activeModelId,
+    engineState.lastError,
+    engineState.loadProgress,
+    engineState.status,
+    openErrorReport,
+  ]);
+
+  const handleDismissEngineError = useCallback(() => {
+    llmEngineService.clearLastModelLoadError();
+    void unloadModel().catch(() => undefined);
+  }, [unloadModel]);
 
   const showModelActionError = useCallback((scope: string, error: unknown, reportContext?: ErrorReportContext) => {
     const message = getReportedErrorMessage(scope, error, t);
@@ -711,9 +774,18 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
           t('models.loadMemoryWarningMessage'),
           [
             { text: t('common.cancel'), style: 'cancel' },
-            { text: t('models.loadAnyway'), onPress: () => { void performLoad(modelId, { ...options, allowUnsafeMemoryLoad: true }); } },
+            { text: t('models.loadAnyway'), onPress: () => { setTimeout(() => { void performLoad(modelId, { ...options, allowUnsafeMemoryLoad: true }); }, 0); } },
           ],
         );
+        return;
+      }
+
+      if (
+        appError.code === 'model_load_failed'
+        || appError.code === 'model_memory_insufficient'
+        || appError.code === 'model_incompatible'
+      ) {
+        // ModelsList renders a persistent engine error card (with report action) for these cases.
         return;
       }
 
@@ -750,8 +822,18 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
 
   const handleLoad = useCallback(async (modelId: string) => {
     const model = models.find((item) => item.id === modelId);
+    if (model?.memoryFitDecision === 'likely_oom') {
+      Alert.alert(
+        t('models.ramLikelyOom'),
+        t('models.loadMemoryBlockedMessage'),
+        [
+          { text: t('common.close') },
+        ],
+      );
+      return;
+    }
+
     const shouldWarnForMemory = model?.memoryFitDecision === 'borderline'
-      || model?.memoryFitDecision === 'likely_oom'
       || (model?.memoryFitDecision === undefined && model?.fitsInRam === false);
     if (shouldWarnForMemory) {
       Alert.alert(
@@ -1084,6 +1166,25 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
       <ScreenStack className="flex-1 pt-2" gap="compact">
         {discoveryBanner}
 
+        {engineState.status === EngineStatus.ERROR && engineState.lastError ? (
+          <ScreenCard padding="compact" tone="error">
+            <Text className="text-sm font-semibold text-error-700 dark:text-error-300">
+              {t('common.errors.modelLoadFailed')}
+            </Text>
+            <Text selectable className="mt-1 text-sm text-error-700 dark:text-error-300">
+              {engineState.lastError}
+            </Text>
+            <Box className="mt-3 flex-row gap-2">
+              <Button action="secondary" size="sm" onPress={handleDismissEngineError} className="flex-1">
+                <ButtonText>{t('common.close')}</ButtonText>
+              </Button>
+              <Button action="softPrimary" size="sm" onPress={handleReportEngineError} className="flex-1">
+                <ButtonText>{t('models.errorReport.reportButton')}</ButtonText>
+              </Button>
+            </Box>
+          </ScreenCard>
+        ) : null}
+
         {warningMessage ? (
           <ScreenCard padding="compact" tone="warning">
             <Text className="text-sm text-warning-700 dark:text-warning-300">{warningMessage}</Text>
@@ -1114,20 +1215,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
         )}
       </ScreenStack>
 
-      {engineState.status === EngineStatus.INITIALIZING ? (
-        <Box className="absolute bottom-0 left-0 right-0 flex-row items-center justify-center bg-primary-500 p-2">
-          <Spinner className="mr-2 text-white" />
-          <Text className="font-bold text-white">
-            {t('chat.warmingUp')}{' '}
-            {Math.round(
-              engineState.loadProgress > 1
-                ? engineState.loadProgress
-                : engineState.loadProgress * 100,
-            )}
-            %
-          </Text>
-        </Box>
-      ) : null}
+      <ModelWarmupBanner engineState={engineState} />
 
       <ModelParametersSheet {...modelParametersSheetProps} />
       <ErrorReportSheet {...errorReportSheetProps} />

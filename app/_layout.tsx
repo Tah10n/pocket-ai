@@ -163,7 +163,7 @@ export default function RootLayout() {
     async function prepare() {
       const span = performanceMonitor.startSpan('root.prepare');
       performanceMonitor.mark('root.prepare.start');
-      let criticalOutcome: 'success' | 'active_model_missing' | 'error' = 'success';
+      let criticalOutcome: 'success' | 'active_model_missing' | 'active_model_blocked' | 'error' = 'success';
       let criticalErrorMessage: string | null = null;
       try {
         const result = await bootstrapAppCritical();

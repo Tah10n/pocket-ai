@@ -266,6 +266,8 @@ class LLMEngineService {
     status: EngineStatus.IDLE,
     loadProgress: 0,
   };
+  private lastModelLoadError: AppError | null = null;
+  private lastModelLoadErrorScope: string | null = null;
   private listeners: Set<StateListener> = new Set();
   private hwUnsubscribe?: () => void;
   private initPromise: Promise<void> | null = null;
@@ -481,6 +483,7 @@ class LLMEngineService {
       }
 
       const forceReload = options?.forceReload === true;
+      const allowUnsafeMemoryLoad = options?.allowUnsafeMemoryLoad === true;
 
       if (
         this.state.status === EngineStatus.READY &&
@@ -488,6 +491,23 @@ class LLMEngineService {
         !forceReload
       ) {
         return;
+      }
+
+      if (model.memoryFitDecision === 'likely_oom') {
+        throw new AppError(
+          'model_load_blocked',
+          'Loading is disabled for this model because it is marked as "Won\'t fit RAM".',
+          {
+            details: {
+              modelId,
+              memoryFitDecision: model.memoryFitDecision,
+              memoryFitConfidence: model.memoryFitConfidence,
+              fitsInRam: model.fitsInRam,
+              allowUnsafeMemoryLoad,
+              forceReload,
+            },
+          },
+        );
       }
 
       if (this.state.activeModelId && (this.state.activeModelId !== modelId || forceReload)) {
@@ -499,7 +519,7 @@ class LLMEngineService {
         model.localPath,
         model.maxContextTokens,
         model.size ?? null,
-        options?.allowUnsafeMemoryLoad === true,
+        allowUnsafeMemoryLoad,
       );
       await this.initPromise;
     });
@@ -649,6 +669,19 @@ class LLMEngineService {
     };
   }
 
+  public getLastModelLoadError(): { scope: string; error: AppError } | null {
+    if (!this.lastModelLoadError || !this.lastModelLoadErrorScope) {
+      return null;
+    }
+
+    return { scope: this.lastModelLoadErrorScope, error: this.lastModelLoadError };
+  }
+
+  public clearLastModelLoadError(): void {
+    this.lastModelLoadError = null;
+    this.lastModelLoadErrorScope = null;
+  }
+
   private updateState(newState: EngineState) {
     this.state = newState;
     this.listeners.forEach((l) => l(this.state));
@@ -714,6 +747,8 @@ class LLMEngineService {
     );
 
     try {
+      this.lastModelLoadError = null;
+      this.lastModelLoadErrorScope = null;
       this.isUnloading = false;
       this.activeCalibrationSession = null;
       this.updateState({
@@ -904,7 +939,7 @@ class LLMEngineService {
           ? resolveConservativeAvailableMemoryBudget(systemMemorySnapshot)
           : null;
 
-        if (shouldHardBlock) {
+        if (shouldHardBlock && !allowUnsafeMemoryLoad) {
           throw new AppError('model_memory_insufficient', 'Not enough memory to load this model.', {
             details: {
               modelId,
@@ -1056,7 +1091,14 @@ class LLMEngineService {
         })
       );
 
-      if (safeLoadStillExceedsBudget && predictedFitForLoad) {
+      if (safeLoadStillExceedsBudget && predictedFitForLoad && allowUnsafeMemoryLoad) {
+        initDiagnostics = initDiagnostics ? {
+          ...initDiagnostics,
+          unsafeMemoryBypassedHardBlock: true,
+        } : initDiagnostics;
+      }
+
+      if (safeLoadStillExceedsBudget && predictedFitForLoad && !allowUnsafeMemoryLoad) {
         throw new AppError('model_memory_insufficient', 'Not enough memory to load this model.', {
           details: {
             modelId,
@@ -1281,6 +1323,8 @@ class LLMEngineService {
       }
 
       console.error('[LLMEngine] Failed to initialize', appError, Object.keys(extraDetails).length > 0 ? extraDetails : undefined);
+      this.lastModelLoadError = appError;
+      this.lastModelLoadErrorScope = 'LLMEngineService.load';
       this.context = null;
       this.activeContextSize = DEFAULT_CONTEXT_SIZE;
       this.activeGpuLayers = null;

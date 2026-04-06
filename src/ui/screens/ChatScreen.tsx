@@ -22,12 +22,14 @@ import { ChatHeader } from '@/components/ui/ChatHeader';
 import { ChatStatusBanner } from '@/components/ui/ChatStatusBanner';
 import { ChatMessageBubble } from '@/components/ui/ChatMessageBubble';
 import { ChatInputBar } from '@/components/ui/ChatInputBar';
+import { ErrorReportSheet } from '@/components/ui/ErrorReportSheet';
 import { ModelParametersSheet } from '@/components/ui/ModelParametersSheet';
 import { MaterialSymbols } from '@/components/ui/MaterialSymbols';
 import { useTranslation } from 'react-i18next';
 import { PresetSelectorSheet } from '@/components/ui/PresetSelectorSheet';
 import { resolvePresetSnapshot, useChatSession } from '../../hooks/useChatSession';
 import { useLLMEngine } from '../../hooks/useLLMEngine';
+import { useErrorReportSheetController, type ErrorReportContext } from '@/hooks/useErrorReportSheetController';
 import { useModelParametersSheetController } from '@/hooks/useModelParametersSheetController';
 import { useRouter } from 'expo-router';
 import { EngineStatus } from '../../types/models';
@@ -141,6 +143,7 @@ export const ChatScreen = () => {
     const { state: engineState } = useLLMEngine();
     const { t } = useTranslation();
     const router = useRouter();
+    const { openErrorReport, sheetProps: errorReportSheetProps } = useErrorReportSheetController();
     const tabBarHeight = useBottomTabBarHeight();
     const [hardwareStatus, setHardwareStatus] = useState(() => hardwareListenerService.getCurrentStatus());
     const [composerDraft, setComposerDraft] = useState('');
@@ -246,6 +249,51 @@ export const ChatScreen = () => {
         Alert.alert(t(titleKey), getReportedErrorMessage(scope, error, t));
     }, [t]);
 
+    const showAlertForModelLoadError = useCallback((titleKey: string, scope: string, error: unknown) => {
+        const message = getReportedErrorMessage(scope, error, t);
+        Alert.alert(
+            t(titleKey),
+            message,
+            [
+                { text: t('common.close'), style: 'cancel' },
+                {
+                    text: t('models.errorReport.reportButton'),
+                    onPress: () => {
+                        const model = configurableModelId ? registry.getModel(configurableModelId) : undefined;
+                        const reportContext: ErrorReportContext = {
+                            model: model ? {
+                                id: model.id,
+                                name: model.name,
+                                author: model.author,
+                                size: model.size,
+                                localPath: model.localPath,
+                                downloadUrl: model.downloadUrl,
+                                lifecycleStatus: model.lifecycleStatus,
+                                accessState: model.accessState,
+                            } : configurableModelId ? { id: configurableModelId } : undefined,
+                            engine: {
+                                status: engineState.status,
+                                activeModelId: engineState.activeModelId,
+                                loadProgress: engineState.loadProgress,
+                                lastError: engineState.lastError,
+                            },
+                        };
+
+                        openErrorReport({ scope, error, context: reportContext });
+                    },
+                },
+            ],
+        );
+    }, [
+        configurableModelId,
+        engineState.activeModelId,
+        engineState.lastError,
+        engineState.loadProgress,
+        engineState.status,
+        openErrorReport,
+        t,
+    ]);
+
     const getConfigurableModelById = useCallback((modelId: string | null) => {
         if (!modelId) {
             return undefined;
@@ -261,7 +309,7 @@ export const ChatScreen = () => {
     } = useModelParametersSheetController({
         getModelById: getConfigurableModelById,
         showError: (scope, error) => {
-            showAlertForError('chat.applyModelSettingsErrorTitle', scope, error);
+            showAlertForModelLoadError('chat.applyModelSettingsErrorTitle', scope, error);
         },
         applyReloadErrorScope: 'ChatScreen.handleApplyLoadParams',
         activeModelId: settings.activeModelId,
@@ -964,6 +1012,7 @@ export const ChatScreen = () => {
             />
 
             <ModelParametersSheet {...modelParametersSheetProps} />
+            <ErrorReportSheet {...errorReportSheetProps} />
         </Box>
     );
 };

@@ -463,6 +463,7 @@
     "downloadMemoryWarningMessage": "This model looks large for your device's RAM budget. It may download successfully but still fail to load. Download anyway?",
     "loadAnyway": "Load Anyway",
     "loadMemoryWarningMessage": "This model looks close to or above your device's RAM budget. Loading may fail. Try anyway?",
+    "loadMemoryBlockedMessage": "This model is marked as \"Won't fit RAM\" and loading is disabled to prevent crashes. Choose a smaller model.",
     "errorReport": {
       "reportButton": "Report",
       "title": "Model load report",

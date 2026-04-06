@@ -324,7 +324,7 @@ describe('LLMEngineService', () => {
     expect(llmEngineService.getContextSize()).toBeGreaterThan(512);
   });
 
-  it('blocks unsafe retries when the minimal safe load profile still does not fit in memory', async () => {
+  it('attempts forced model loads even when the minimal safe profile still exceeds conservative memory estimates', async () => {
     const totalMemoryBytes = 8_000_000_000;
     const modelSizeBytes = 1_708_582_752;
 
@@ -354,18 +354,16 @@ describe('LLMEngineService', () => {
 
     await expect(
       llmEngineService.load('test/model', { forceReload: true, allowUnsafeMemoryLoad: true }),
-    ).rejects.toMatchObject({
-      code: 'model_memory_insufficient',
-      details: expect.objectContaining({
-        attemptedLoadProfile: expect.objectContaining({
-          contextTokens: 512,
-          gpuLayers: 0,
-        }),
-      }),
-    });
+    ).resolves.toBeUndefined();
 
-    expect(llamaRn.initLlama).not.toHaveBeenCalled();
-    expect(updateSettings).toHaveBeenCalledWith({ activeModelId: null });
+    expect(llamaRn.initLlama).toHaveBeenCalledWith(
+      expect.objectContaining({
+        n_ctx: 512,
+        n_gpu_layers: 0,
+      }),
+      expect.any(Function),
+    );
+    expect(updateSettings).toHaveBeenCalledWith({ activeModelId: 'test/model' });
   });
 
   it('auto-applies the safe fallback load without warning when low-confidence estimates still fit within conservative live availability', async () => {
@@ -409,7 +407,7 @@ describe('LLMEngineService', () => {
     );
   });
 
-  it('blocks unsafe model load attempts when the live memory snapshot is far below the requirement', async () => {
+  it('attempts forced model loads even when live memory snapshots suggest they may fail', async () => {
     const totalMemoryBytes = 8 * 1024 * 1024 * 1024;
     const modelSizeBytes = 1_700_000_000;
 
@@ -440,10 +438,16 @@ describe('LLMEngineService', () => {
 
     await expect(
       llmEngineService.load('test/model', { forceReload: true, allowUnsafeMemoryLoad: true }),
-    ).rejects.toMatchObject({ code: 'model_memory_insufficient' });
+    ).resolves.toBeUndefined();
 
-    expect(llamaRn.initLlama).not.toHaveBeenCalled();
-    expect(updateSettings).toHaveBeenCalledWith({ activeModelId: null });
+    expect(llamaRn.initLlama).toHaveBeenCalledWith(
+      expect.objectContaining({
+        n_ctx: 512,
+        n_gpu_layers: 0,
+      }),
+      expect.any(Function),
+    );
+    expect(updateSettings).toHaveBeenCalledWith({ activeModelId: 'test/model' });
   });
 
   it('includes KV-cache bytes in model-load diagnostics when GGUF metadata is available', async () => {

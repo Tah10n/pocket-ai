@@ -6,6 +6,7 @@ export type AppErrorCode =
   | 'engine_busy'
   | 'engine_unloading'
   | 'model_not_found'
+  | 'model_load_blocked'
   | 'model_load_failed'
   | 'model_incompatible'
   | 'model_memory_insufficient'
@@ -23,6 +24,7 @@ const ERROR_MESSAGE_KEYS: Partial<Record<AppErrorCode, string>> = {
   engine_busy: 'common.errors.engineBusy',
   engine_unloading: 'common.errors.engineUnloading',
   model_not_found: 'common.errors.modelNotFound',
+  model_load_blocked: 'models.loadMemoryBlockedMessage',
   model_load_failed: 'common.errors.modelLoadFailed',
   model_incompatible: 'common.errors.modelIncompatible',
   model_memory_insufficient: 'common.errors.modelMemoryInsufficient',

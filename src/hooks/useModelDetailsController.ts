@@ -7,7 +7,7 @@ import { useModelParametersSheetController } from '@/hooks/useModelParametersShe
 import { useModelDownload } from '@/hooks/useModelDownload';
 import { useErrorReportSheetController, type ErrorReportContext } from '@/hooks/useErrorReportSheetController';
 import { useDownloadStore } from '@/store/downloadStore';
-import type { LoadModelOptions } from '@/services/LLMEngineService';
+import { llmEngineService, type LoadModelOptions } from '@/services/LLMEngineService';
 import { registry } from '@/services/LocalStorageRegistry';
 import {
   getHuggingFaceModelUrl,
@@ -198,6 +198,69 @@ export function useModelDetailsController(modelId: string) {
     router.push('/chat');
   }, [router]);
 
+  const reportEngineError = useCallback(() => {
+    const lastError = llmEngineService.getLastModelLoadError();
+    const lastErrorDetails = lastError?.error.details;
+    const modelIdFromError = typeof lastErrorDetails?.modelId === 'string'
+      ? lastErrorDetails.modelId
+      : engineState.activeModelId;
+    const model = modelIdFromError ? registry.getModel(modelIdFromError) : undefined;
+    const allowUnsafeMemoryLoad = typeof lastErrorDetails?.allowUnsafeMemoryLoad === 'boolean'
+      ? lastErrorDetails.allowUnsafeMemoryLoad
+      : undefined;
+    const forceReload = typeof lastErrorDetails?.forceReload === 'boolean'
+      ? lastErrorDetails.forceReload
+      : undefined;
+
+    openErrorReport({
+      scope: lastError?.scope ?? 'LLMEngineService.load',
+      error: lastError?.error ?? new Error(engineState.lastError ?? 'Model load failed'),
+      context: {
+        model: model ? {
+          id: model.id,
+          name: model.name,
+          author: model.author,
+          size: model.size,
+          localPath: model.localPath,
+          downloadUrl: model.downloadUrl,
+          memoryFitDecision: model.memoryFitDecision,
+          memoryFitConfidence: model.memoryFitConfidence,
+          fitsInRam: model.fitsInRam,
+          lifecycleStatus: model.lifecycleStatus,
+          accessState: model.accessState,
+          gguf: model.gguf,
+        } : modelIdFromError ? { id: modelIdFromError } : undefined,
+        engine: {
+          status: engineState.status,
+          activeModelId: engineState.activeModelId,
+          loadProgress: engineState.loadProgress,
+          lastError: engineState.lastError,
+        },
+        options: allowUnsafeMemoryLoad !== undefined || forceReload !== undefined
+          ? {
+              allowUnsafeMemoryLoad,
+              forceReload,
+            }
+          : undefined,
+      },
+    });
+  }, [
+    engineState.activeModelId,
+    engineState.lastError,
+    engineState.loadProgress,
+    engineState.status,
+    openErrorReport,
+  ]);
+
+  const dismissEngineError = useCallback(() => {
+    llmEngineService.clearLastModelLoadError();
+    void unloadModel()
+      .catch(() => undefined)
+      .finally(() => {
+        setRuntimeRevision((current) => current + 1);
+      });
+  }, [unloadModel]);
+
   const handleDownload = useCallback((targetModel: ModelMetadata) => {
     startModelDownloadFlow({
       model: targetModel,
@@ -226,9 +289,17 @@ export function useModelDetailsController(modelId: string) {
           t('models.loadMemoryWarningMessage'),
           [
             { text: t('common.cancel'), style: 'cancel' },
-            { text: t('models.loadAnyway'), onPress: () => { void performLoad(targetModelId, { ...options, allowUnsafeMemoryLoad: true }); } },
+            { text: t('models.loadAnyway'), onPress: () => { setTimeout(() => { void performLoad(targetModelId, { ...options, allowUnsafeMemoryLoad: true }); }, 0); } },
           ],
         );
+        return;
+      }
+
+      if (
+        appError.code === 'model_load_failed'
+        || appError.code === 'model_memory_insufficient'
+        || appError.code === 'model_incompatible'
+      ) {
         return;
       }
 
@@ -270,8 +341,18 @@ export function useModelDetailsController(modelId: string) {
       return;
     }
 
+    if (displayModel.memoryFitDecision === 'likely_oom') {
+      Alert.alert(
+        t('models.ramLikelyOom'),
+        t('models.loadMemoryBlockedMessage'),
+        [
+          { text: t('common.close') },
+        ],
+      );
+      return;
+    }
+
     const shouldWarnForMemory = displayModel.memoryFitDecision === 'borderline'
-      || displayModel.memoryFitDecision === 'likely_oom'
       || (displayModel.memoryFitDecision === undefined && displayModel.fitsInRam === false);
     if (shouldWarnForMemory) {
       Alert.alert(
@@ -351,6 +432,7 @@ export function useModelDetailsController(modelId: string) {
     accessBadge,
     cancelDownload,
     displayModel,
+    engineState,
     errorMessage,
     handleChat,
     handleDelete,
@@ -362,8 +444,10 @@ export function useModelDetailsController(modelId: string) {
     heroMetrics,
     loading,
     metadataMetrics,
+    dismissEngineError,
     errorReportSheetProps,
     modelParametersSheetProps,
     openModelParameters,
+    reportEngineError,
   };
 }

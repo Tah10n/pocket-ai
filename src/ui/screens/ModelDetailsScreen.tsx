@@ -15,13 +15,14 @@ import { HeaderBar } from '@/components/ui/HeaderBar';
 import { ModelDownloadProgress, ModelLifecycleActionRow } from '@/components/ui/ModelLifecycleControls';
 import { MaterialSymbols } from '@/components/ui/MaterialSymbols';
 import { ErrorReportSheet } from '@/components/ui/ErrorReportSheet';
+import { ModelWarmupBanner } from '@/components/ui/ModelWarmupBanner';
 import { ModelParametersSheet } from '@/components/ui/ModelParametersSheet';
-import { ScreenBadge, ScreenContent, ScreenStack } from '@/components/ui/ScreenShell';
+import { ScreenBadge, ScreenCard, ScreenContent, ScreenStack } from '@/components/ui/ScreenShell';
 import { ScrollView } from '@/components/ui/scroll-view';
 import { Spinner } from '@/components/ui/spinner';
 import { Text } from '@/components/ui/text';
 import { useModelDetailsController } from '@/hooks/useModelDetailsController';
-import { LifecycleStatus, ModelAccessState } from '@/types/models';
+import { EngineStatus, LifecycleStatus, ModelAccessState } from '@/types/models';
 import { getModelDetailsTagTone } from '@/utils/modelDetailsPresentation';
 
 export function ModelDetailsScreen() {
@@ -33,8 +34,10 @@ export function ModelDetailsScreen() {
     accessBadge,
     cancelDownload,
     displayModel,
+    engineState,
     errorReportSheetProps,
     errorMessage,
+    dismissEngineError,
     handleChat,
     handleDelete,
     handleDownload,
@@ -47,6 +50,7 @@ export function ModelDetailsScreen() {
     metadataMetrics,
     modelParametersSheetProps,
     openModelParameters,
+    reportEngineError,
   } = useModelDetailsController(modelId);
 
   const handleBack = useCallback(() => {
@@ -89,6 +93,27 @@ export function ModelDetailsScreen() {
         onBack={handleBack}
         backAccessibilityLabel={t('chat.headerBackAccessibilityLabel')}
       />
+
+      {engineState.status === EngineStatus.ERROR && engineState.lastError ? (
+        <ScreenContent className="pt-3 pb-0">
+          <ScreenCard padding="compact" tone="error">
+            <Text className="text-sm font-semibold text-error-700 dark:text-error-300">
+              {t('common.errors.modelLoadFailed')}
+            </Text>
+            <Text selectable className="mt-1 text-sm text-error-700 dark:text-error-300">
+              {engineState.lastError}
+            </Text>
+            <Box className="mt-3 flex-row gap-2">
+              <Button action="secondary" size="sm" onPress={dismissEngineError} className="flex-1">
+                <ButtonText>{t('common.close')}</ButtonText>
+              </Button>
+              <Button action="softPrimary" size="sm" onPress={reportEngineError} className="flex-1">
+                <ButtonText>{t('models.errorReport.reportButton')}</ButtonText>
+              </Button>
+            </Box>
+          </ScreenCard>
+        </ScreenContent>
+      ) : null}
 
       <ScrollView className="flex-1">
         <ScreenContent className="flex-1 pt-3">
@@ -222,6 +247,7 @@ export function ModelDetailsScreen() {
         </ScreenContent>
       </ScrollView>
 
+      <ModelWarmupBanner engineState={engineState} />
       <ModelParametersSheet {...modelParametersSheetProps} />
       <ErrorReportSheet {...errorReportSheetProps} />
     </Box>

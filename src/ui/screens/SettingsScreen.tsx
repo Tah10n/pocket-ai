@@ -378,6 +378,172 @@ export const SettingsScreen = () => {
                 >
                     <ScreenStack gap="loose">
                         <Box>
+                            <ScreenSectionLabel>{t('settings.resources')}</ScreenSectionLabel>
+                            <ScreenStack className="mt-2" gap="default">
+                                <ScreenCard padding="compact">
+                                    <Box className="flex-row items-start gap-3">
+                                        <Box className="h-10 w-10 items-center justify-center rounded-2xl bg-primary-500/10 dark:bg-primary-500/20">
+                                            <MaterialSymbols name="memory" size={20} className="text-primary-500" />
+                                        </Box>
+                                        <Box className="min-w-0 flex-1">
+                                            <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">
+                                                {t('settings.memoryTitle')}
+                                            </Text>
+                                            <Text className="mt-1 text-sm leading-5 text-typography-500 dark:text-typography-400">
+                                                {t(isSystemRamSource ? 'settings.memoryDescription' : 'settings.memoryDescriptionFallback')}
+                                            </Text>
+                                        </Box>
+                                    </Box>
+
+                                    <Box className="mt-4 flex-row items-start justify-between gap-3">
+                                        <Box className="min-w-0 flex-1">
+                                            <Text className="text-2xl font-extrabold tracking-tight text-typography-900 dark:text-typography-100">
+                                                {ramPrimaryValue}
+                                            </Text>
+                                            <Text className="mt-0.5 text-xs leading-4 text-typography-500 dark:text-typography-400">
+                                                {ramPrimaryLabel}
+                                            </Text>
+                                        </Box>
+
+                                        <ScreenCard
+                                            padding="none"
+                                            className="self-start shrink-0 px-3 py-2.5"
+                                        >
+                                            <Text className="text-2xs font-semibold uppercase tracking-wide text-typography-500 dark:text-typography-400">
+                                                {ramAsideLabel}
+                                            </Text>
+                                            <Text className="mt-1 text-sm font-extrabold text-primary-500">
+                                                {ramAsideValue}
+                                            </Text>
+                                        </ScreenCard>
+                                    </Box>
+
+                                    <ScreenStack className="mt-4" gap="compact">
+                                        {isSystemRamSource ? (
+                                            <LayeredUsageMeter
+                                                rows={[
+                                                    {
+                                                        label: t('settings.systemUsage'),
+                                                        value: ramSystemUsageSummary,
+                                                        color: memoryAccent,
+                                                    },
+                                                    {
+                                                        label: t('settings.appMemory'),
+                                                        value: ramAppUsageSummary,
+                                                        color: memoryAccentSoft,
+                                                    },
+                                                ]}
+                                                basePercentage={ramUsedTrackPercentage}
+                                                baseFillColor={memoryAccent}
+                                                overlayPercentage={ramAppTrackPercentage}
+                                                overlayFillColor={memoryAccentSoft}
+                                                trackBackground={trackBackground}
+                                                labelColor={colors.textSecondary}
+                                                valueColor={colors.text}
+                                                trackTestID="settings-memory-track"
+                                                baseTestID="settings-memory-used-fill"
+                                                overlayTestID="settings-memory-app-fill"
+                                            />
+                                        ) : (
+                                            <UsageMeter
+                                                label={t('settings.appMemory')}
+                                                value={ramAppUsageSummary}
+                                                percentage={ramAppUsedPercentage}
+                                                fillColor={memoryAccentSoft}
+                                                trackBackground={trackBackground}
+                                                labelColor={colors.textSecondary}
+                                                valueColor={colors.text}
+                                                testID="settings-memory-app-fill"
+                                            />
+                                        )}
+                                    </ScreenStack>
+
+                                    {canForceUnloadModel ? (
+                                        <Box className="mt-4 border-t border-outline-200 pt-3 dark:border-outline-800">
+                                            <Button
+                                                onPress={unloadActiveModel}
+                                                accessibilityRole="button"
+                                                disabled={false}
+                                                action="softDestructive"
+                                                size="sm"
+                                                className="self-start"
+                                            >
+                                                <MaterialSymbols name="close" size={18} className="text-error-500" />
+                                                <ButtonText>{t('settings.forceUnloadModel')}</ButtonText>
+                                            </Button>
+                                        </Box>
+                                    ) : null}
+                                </ScreenCard>
+
+                                <ScreenCard padding="compact">
+                                    <Box className="flex-row items-start gap-3">
+                                        <Box className="h-10 w-10 items-center justify-center rounded-2xl bg-success-500/10 dark:bg-success-500/20">
+                                            <MaterialSymbols name="storage" size={20} className="text-success-600 dark:text-success-300" />
+                                        </Box>
+                                        <Box className="min-w-0 flex-1">
+                                            <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">
+                                                {t('settings.storageTitle')}
+                                            </Text>
+                                            <Text className="mt-1 text-sm leading-5 text-typography-500 dark:text-typography-400">
+                                                {t('settings.storageDescription')}
+                                            </Text>
+                                        </Box>
+                                    </Box>
+
+                                    <Box className="mt-4 flex-row items-start justify-between gap-3">
+                                        <Box className="min-w-0 flex-1">
+                                            <Text className="text-2xl font-extrabold tracking-tight text-typography-900 dark:text-typography-100">
+                                                {formatSystemCapacity(storageUsedBytes)}
+                                            </Text>
+                                            <Text className="mt-0.5 text-xs leading-4 text-typography-500 dark:text-typography-400">
+                                                {t('settings.storageUsedOf', { total: formatSystemCapacity(storageTotalBytes) })}
+                                            </Text>
+                                        </Box>
+
+                                        <ScreenCard
+                                            padding="none"
+                                            className="self-start shrink-0 px-3 py-2.5"
+                                        >
+                                            <Text className="text-2xs font-semibold uppercase tracking-wide text-typography-500 dark:text-typography-400">
+                                                {t('settings.free')}
+                                            </Text>
+                                            <Text className="mt-1 text-sm font-extrabold text-success-600 dark:text-success-300">
+                                                {formatSystemCapacity(storageFreeBytes)}
+                                            </Text>
+                                        </ScreenCard>
+                                    </Box>
+
+                                    <Box className="mt-4">
+                                        <LayeredUsageMeter
+                                            rows={[
+                                                {
+                                                    label: t('settings.systemUsage'),
+                                                    value: storageSystemUsageSummary,
+                                                    color: storageAccent,
+                                                },
+                                                {
+                                                    label: t('settings.appFilesUsage'),
+                                                    value: storageAppUsageSummary,
+                                                    color: storageAccentSoft,
+                                                },
+                                            ]}
+                                            basePercentage={storageUsedTrackPercentage}
+                                            baseFillColor={storageAccent}
+                                            overlayPercentage={storageAppTrackPercentage}
+                                            overlayFillColor={storageAccentSoft}
+                                            trackBackground={trackBackground}
+                                            labelColor={colors.textSecondary}
+                                            valueColor={colors.text}
+                                            trackTestID="settings-storage-track"
+                                            baseTestID="settings-storage-used-fill"
+                                            overlayTestID="settings-storage-app-fill"
+                                        />
+                                    </Box>
+                                </ScreenCard>
+                            </ScreenStack>
+                        </Box>
+
+                        <Box>
                             <ScreenSectionLabel>{t('settings.appearance')}</ScreenSectionLabel>
                             <ScreenStack className="mt-2">
                                 <ScreenCard>
@@ -463,172 +629,6 @@ export const SettingsScreen = () => {
                                         onPress={handlePerformancePress}
                                     />
                                 ) : null}
-                            </ScreenStack>
-                        </Box>
-
-                        <Box>
-                            <ScreenSectionLabel>{t('settings.resources')}</ScreenSectionLabel>
-                            <ScreenStack className="mt-2" gap="loose">
-                                <ScreenCard>
-                                    <Box className="flex-row items-start gap-3">
-                                        <Box className="h-11 w-11 items-center justify-center rounded-2xl bg-primary-500/10 dark:bg-primary-500/20">
-                                            <MaterialSymbols name="memory" size={20} className="text-primary-500" />
-                                        </Box>
-                                        <Box className="min-w-0 flex-1">
-                                            <Text className="text-lg font-semibold text-typography-900 dark:text-typography-100">
-                                                {t('settings.memoryTitle')}
-                                            </Text>
-                                            <Text className="mt-1 text-sm leading-5 text-typography-500 dark:text-typography-400">
-                                                {t(isSystemRamSource ? 'settings.memoryDescription' : 'settings.memoryDescriptionFallback')}
-                                            </Text>
-                                        </Box>
-                                    </Box>
-
-                                    <Box className="mt-5 flex-row items-start justify-between gap-4">
-                                        <Box className="min-w-0 flex-1">
-                                            <Text className="text-[28px] font-extrabold tracking-tight text-typography-900 dark:text-typography-100">
-                                                {ramPrimaryValue}
-                                            </Text>
-                                            <Text className="mt-1 text-sm leading-5 text-typography-500 dark:text-typography-400">
-                                                {ramPrimaryLabel}
-                                            </Text>
-                                        </Box>
-
-                                        <ScreenCard
-                                            padding="compact"
-                                            className="min-w-[110px] self-start"
-                                        >
-                                            <Text className="text-2xs font-semibold uppercase tracking-wide text-typography-500 dark:text-typography-400">
-                                                {ramAsideLabel}
-                                            </Text>
-                                            <Text className="mt-2 text-base font-extrabold text-primary-500">
-                                                {ramAsideValue}
-                                            </Text>
-                                        </ScreenCard>
-                                    </Box>
-
-                                    <ScreenStack className="mt-5" gap="default">
-                                        {isSystemRamSource ? (
-                                            <LayeredUsageMeter
-                                                rows={[
-                                                    {
-                                                        label: t('settings.systemUsage'),
-                                                        value: ramSystemUsageSummary,
-                                                        color: memoryAccent,
-                                                    },
-                                                    {
-                                                        label: t('settings.appMemory'),
-                                                        value: ramAppUsageSummary,
-                                                        color: memoryAccentSoft,
-                                                    },
-                                                ]}
-                                                basePercentage={ramUsedTrackPercentage}
-                                                baseFillColor={memoryAccent}
-                                                overlayPercentage={ramAppTrackPercentage}
-                                                overlayFillColor={memoryAccentSoft}
-                                                trackBackground={trackBackground}
-                                                labelColor={colors.textSecondary}
-                                                valueColor={colors.text}
-                                                trackTestID="settings-memory-track"
-                                                baseTestID="settings-memory-used-fill"
-                                                overlayTestID="settings-memory-app-fill"
-                                            />
-                                        ) : (
-                                            <UsageMeter
-                                                label={t('settings.appMemory')}
-                                                value={ramAppUsageSummary}
-                                                percentage={ramAppUsedPercentage}
-                                                fillColor={memoryAccentSoft}
-                                                trackBackground={trackBackground}
-                                                labelColor={colors.textSecondary}
-                                                valueColor={colors.text}
-                                                testID="settings-memory-app-fill"
-                                            />
-                                        )}
-                                    </ScreenStack>
-
-                                    {canForceUnloadModel ? (
-                                        <Box className="mt-5 border-t border-outline-200 pt-4 dark:border-outline-800">
-                                            <Button
-                                                onPress={unloadActiveModel}
-                                                accessibilityRole="button"
-                                                disabled={false}
-                                                action="softDestructive"
-                                                size="sm"
-                                                className="self-start"
-                                            >
-                                                <MaterialSymbols name="close" size={18} className="text-error-500" />
-                                                <ButtonText>{t('settings.forceUnloadModel')}</ButtonText>
-                                            </Button>
-                                        </Box>
-                                    ) : null}
-                                </ScreenCard>
-
-                                <ScreenCard>
-                                    <Box className="flex-row items-start gap-3">
-                                        <Box className="h-11 w-11 items-center justify-center rounded-2xl bg-success-500/10 dark:bg-success-500/20">
-                                            <MaterialSymbols name="storage" size={20} className="text-success-600 dark:text-success-300" />
-                                        </Box>
-                                        <Box className="min-w-0 flex-1">
-                                            <Text className="text-lg font-semibold text-typography-900 dark:text-typography-100">
-                                                {t('settings.storageTitle')}
-                                            </Text>
-                                            <Text className="mt-1 text-sm leading-5 text-typography-500 dark:text-typography-400">
-                                                {t('settings.storageDescription')}
-                                            </Text>
-                                        </Box>
-                                    </Box>
-
-                                    <Box className="mt-5 flex-row items-start justify-between gap-4">
-                                        <Box className="min-w-0 flex-1">
-                                            <Text className="text-[28px] font-extrabold tracking-tight text-typography-900 dark:text-typography-100">
-                                                {formatSystemCapacity(storageUsedBytes)}
-                                            </Text>
-                                            <Text className="mt-1 text-sm leading-5 text-typography-500 dark:text-typography-400">
-                                                {t('settings.storageUsedOf', { total: formatSystemCapacity(storageTotalBytes) })}
-                                            </Text>
-                                        </Box>
-
-                                        <ScreenCard
-                                            padding="compact"
-                                            className="min-w-[110px] self-start"
-                                        >
-                                            <Text className="text-2xs font-semibold uppercase tracking-wide text-typography-500 dark:text-typography-400">
-                                                {t('settings.free')}
-                                            </Text>
-                                            <Text className="mt-2 text-base font-extrabold text-success-600 dark:text-success-300">
-                                                {formatSystemCapacity(storageFreeBytes)}
-                                            </Text>
-                                        </ScreenCard>
-                                    </Box>
-
-                                    <Box className="mt-5">
-                                        <LayeredUsageMeter
-                                            rows={[
-                                                {
-                                                    label: t('settings.systemUsage'),
-                                                    value: storageSystemUsageSummary,
-                                                    color: storageAccent,
-                                                },
-                                                {
-                                                    label: t('settings.appFilesUsage'),
-                                                    value: storageAppUsageSummary,
-                                                    color: storageAccentSoft,
-                                                },
-                                            ]}
-                                            basePercentage={storageUsedTrackPercentage}
-                                            baseFillColor={storageAccent}
-                                            overlayPercentage={storageAppTrackPercentage}
-                                            overlayFillColor={storageAccentSoft}
-                                            trackBackground={trackBackground}
-                                            labelColor={colors.textSecondary}
-                                            valueColor={colors.text}
-                                            trackTestID="settings-storage-track"
-                                            baseTestID="settings-storage-used-fill"
-                                            overlayTestID="settings-storage-app-fill"
-                                        />
-                                    </Box>
-                                </ScreenCard>
                             </ScreenStack>
                         </Box>
                     </ScreenStack>

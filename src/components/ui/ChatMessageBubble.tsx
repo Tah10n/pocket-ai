@@ -112,9 +112,8 @@ const ChatMessageBubbleComponent = ({
   const shouldAnimateThought = isAssistantStreaming && hasThought;
   const showPerformanceLabel =
     !isUser &&
-    tokensPerSec !== undefined &&
-    typeof __DEV__ !== 'undefined' &&
-    __DEV__;
+    typeof tokensPerSec === 'number' &&
+    Number.isFinite(tokensPerSec);
   const copyableContent = isUser || hasExplicitThoughtContent ? content : getCopyableAssistantContent(content);
   const hasCopyableContent = copyableContent.trim().length > 0;
   const shouldShowActionRow = !isStreaming && (

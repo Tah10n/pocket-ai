@@ -479,7 +479,7 @@ export const ChatScreen = () => {
             gap: screenLayoutMetrics.keyboardComposerGap,
         });
 
-        if (!composerContainer || typeof composerContainer.measureInWindow !== 'function') {
+        if (!composerContainer || typeof composerContainer.measure !== 'function') {
             setAndroidKeyboardInset(viewportCompensation);
             return;
         }
@@ -491,10 +491,10 @@ export const ChatScreen = () => {
         keyboardMeasureFrameRef.current = requestAnimationFrame(() => {
             keyboardMeasureFrameRef.current = null;
 
-            composerContainer.measureInWindow((_x, y, _width, height) => {
+            composerContainer.measure((_x, _y, _width, height, _pageX, pageY) => {
                 setAndroidKeyboardInset(getAndroidKeyboardSpacerHeight({
                     viewportCompensation,
-                    composerBottomY: y + height,
+                    composerBottomY: pageY + height,
                     keyboardTopY: keyboardMetrics.topY,
                     gap: screenLayoutMetrics.keyboardComposerGap,
                 }));
@@ -650,10 +650,20 @@ export const ChatScreen = () => {
         const dimensionsSubscription = Dimensions.addEventListener('change', ({ window }) => {
             if (!isKeyboardVisibleRef.current) {
                 baseWindowHeightRef.current = window.height;
+                return;
             }
+
+            const keyboardMetrics = androidKeyboardMetricsRef.current;
+
+            if (keyboardMetrics) {
+                const screenHeight = Dimensions.get('screen').height;
+                keyboardMetrics.topY = Math.max(0, screenHeight - keyboardMetrics.height);
+            }
+
+            updateAndroidKeyboardInsetFromLayout();
         });
 
-        const keyboardShowSubscription = Keyboard.addListener('keyboardDidShow', (event: KeyboardEvent) => {
+        const updateKeyboardMetrics = (event: KeyboardEvent) => {
             isKeyboardVisibleRef.current = true;
             androidKeyboardMetricsRef.current = {
                 height: event.endCoordinates.height,
@@ -661,6 +671,20 @@ export const ChatScreen = () => {
                     ? event.endCoordinates.screenY
                     : Math.max(0, Dimensions.get('screen').height - event.endCoordinates.height),
             };
+        };
+
+        const keyboardWillShowSubscription = Keyboard.addListener('keyboardWillShow', (event: KeyboardEvent) => {
+            updateKeyboardMetrics(event);
+            updateAndroidKeyboardInsetFromLayout();
+        });
+
+        const keyboardShowSubscription = Keyboard.addListener('keyboardDidShow', (event: KeyboardEvent) => {
+            updateKeyboardMetrics(event);
+            updateAndroidKeyboardInsetFromLayout();
+        });
+
+        const keyboardFrameSubscription = Keyboard.addListener('keyboardDidChangeFrame', (event: KeyboardEvent) => {
+            updateKeyboardMetrics(event);
             updateAndroidKeyboardInsetFromLayout();
         });
 
@@ -677,7 +701,9 @@ export const ChatScreen = () => {
                 keyboardMeasureFrameRef.current = null;
             }
             dimensionsSubscription.remove();
+            keyboardWillShowSubscription.remove();
             keyboardShowSubscription.remove();
+            keyboardFrameSubscription.remove();
             keyboardHideSubscription.remove();
         };
     }, [updateAndroidKeyboardInsetFromLayout]);

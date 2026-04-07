@@ -308,7 +308,7 @@ export function ScreenCard({
         ? screenLayoutTokens.cardPaddingLargeClassName
         : screenLayoutTokens.cardPaddingClassName;
   const toneClassName = tone === 'accent'
-    ? 'border-primary-500/20 bg-primary-500/10 dark:border-primary-400/25 dark:bg-primary-500/10'
+    ? 'border-primary-500/20 dark:border-primary-400/25'
     : tone === 'warning'
       ? 'border-warning-300 bg-background-warning dark:border-warning-800'
       : tone === 'error'
@@ -350,7 +350,7 @@ export function ScreenPressableCard({
         ? screenLayoutTokens.cardPaddingLargeClassName
         : screenLayoutTokens.cardPaddingClassName;
   const toneClassName = tone === 'accent'
-    ? 'border-primary-500/20 bg-primary-500/10 dark:border-primary-400/25 dark:bg-primary-500/10'
+    ? 'border-primary-500/20 dark:border-primary-400/25'
     : tone === 'warning'
       ? 'border-warning-300 bg-background-warning dark:border-warning-800'
       : tone === 'error'

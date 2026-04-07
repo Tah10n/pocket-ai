@@ -22,25 +22,6 @@ interface ModelCardProps {
   isActive: boolean;
 }
 
-function ModelMetaPill({
-  label,
-  value,
-}: {
-  label: string;
-  value: string;
-}) {
-  return (
-    <Box className="flex-row items-center gap-1.5 rounded-full border border-outline-200 bg-background-0 px-2.5 py-1 dark:border-outline-700 dark:bg-background-950/70">
-      <Text className="text-2xs font-medium uppercase tracking-wide text-typography-500 dark:text-typography-400">
-        {label}
-      </Text>
-      <Text className="text-xs font-semibold text-typography-800 dark:text-typography-100">
-        {value}
-      </Text>
-    </Box>
-  );
-}
-
 const ModelCardComponent = ({
   model,
   onOpenDetails,
@@ -129,7 +110,9 @@ const ModelCardComponent = ({
             {t('models.sizeUnknownBadge')}
           </ScreenBadge>
         ) : null}
-        <ModelMetaPill label={t('models.sizeLabel')} value={sizeLabel} />
+        <ScreenBadge tone="neutral" size="micro">
+          {t('models.sizeLabel')} {sizeLabel}
+        </ScreenBadge>
       </Box>
 
       <ModelDownloadProgress model={model} className="mt-2.5" />

@@ -9,6 +9,7 @@ import { ScrollView } from '@/components/ui/scroll-view';
 import { ScreenBadge, ScreenCard, ScreenIconButton, ScreenSheet } from '@/components/ui/ScreenShell';
 import { Text } from '@/components/ui/text';
 import { GenerationParameters, ModelLoadParameters } from '../../services/SettingsStore';
+import { useTheme } from '../../providers/ThemeProvider';
 import {
   DEFAULT_CONTEXT_WINDOW_TOKENS,
   MAX_CONTEXT_WINDOW_TOKENS,
@@ -76,6 +77,7 @@ function SliderRow({
   showDivider = false,
 }: SliderRowProps) {
   const { t } = useTranslation();
+  const { colors } = useTheme();
   return (
     <ScreenCard
       variant={variant === 'embedded' ? 'inset' : 'surface'}
@@ -119,9 +121,9 @@ function SliderRow({
         step={step}
         value={value}
         onValueChange={onValueChange}
-        minimumTrackTintColor="#4f46e5"
-        maximumTrackTintColor="#cbd5e1"
-        thumbTintColor="#4f46e5"
+        minimumTrackTintColor={colors.primary}
+        maximumTrackTintColor={colors.borderStrong}
+        thumbTintColor={colors.primary}
       />
 
       <Box className="flex-row items-center justify-between">

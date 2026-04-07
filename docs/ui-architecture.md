@@ -1,6 +1,6 @@
 # UI Architecture & Component Guide
 
-Last updated: 2026-04-03
+Last updated: 2026-04-07
 
 ## Purpose
 
@@ -56,6 +56,7 @@ The alias is defined in [`tsconfig.json`](../tsconfig.json):
 - Use inline styles or `StyleSheet` when values are driven by runtime layout, safe-area math, or a documented framework workaround.
 - Use the shared `MaterialSymbols` wrapper instead of importing icon implementations ad hoc across screens.
 - Keep application logic in hooks, services, or stores rather than burying it inside presentational components.
+- When adding model controls or load-profile settings, keep parameter sanitization in `src/services/SettingsStore.ts`, and keep any shared heuristics in a utility module so UI estimates and runtime behavior stay aligned (for example `src/utils/kvCache.ts`).
 
 ## Units and byte formatting
 

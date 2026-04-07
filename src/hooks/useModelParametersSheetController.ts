@@ -23,6 +23,7 @@ import {
 import { EngineStatus, type ModelMetadata } from '@/types/models';
 import { clampContextWindowTokens, resolveContextWindowCeiling } from '@/utils/contextWindow';
 import { hasPersistedLoadProfileChanges } from '@/utils/modelLoadProfile';
+import { resolveKvCacheTypes } from '@/utils/kvCache';
 
 interface UseModelParametersSheetControllerOptions {
   getModelById: (modelId: string | null) => ModelMetadata | undefined;
@@ -67,9 +68,11 @@ export function useModelParametersSheetController({
   const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
   const [recommendedGpuLayers, setRecommendedGpuLayers] = useState(0);
   const [measuredContextWindowCeiling, setMeasuredContextWindowCeiling] = useState<number | null>(null);
+  const [deviceTotalMemoryBytes, setDeviceTotalMemoryBytes] = useState<number | null>(null);
   const [draftLoadParams, setDraftLoadParams] = useState<ModelLoadParameters>({
     contextSize: DEFAULT_MODEL_LOAD_PARAMETERS.contextSize,
     gpuLayers: 0,
+    kvCacheType: DEFAULT_MODEL_LOAD_PARAMETERS.kvCacheType,
   });
   const [isApplyingModelProfile, setApplyingModelProfile] = useState(false);
   const [subscribedActiveModelId, setSubscribedActiveModelId] = useState<string | null>(
@@ -78,9 +81,11 @@ export function useModelParametersSheetController({
   const loadDraftSourceRef = useRef<{
     contextSize: 'current' | 'default' | 'user';
     gpuLayers: 'current' | 'default' | 'user';
+    kvCacheType: 'current' | 'default' | 'user';
   }>({
     contextSize: 'current',
     gpuLayers: 'current',
+    kvCacheType: 'current',
   });
   const loadDraftSeedRef = useRef<string | null>(null);
 
@@ -115,6 +120,7 @@ export function useModelParametersSheetController({
   const gpuLayersCeiling = 80;
   const baseContextWindowCeiling = useMemo(() => resolveContextWindowCeiling({
     modelMaxContextTokens: configurableModel?.maxContextTokens,
+    totalMemoryBytes: deviceTotalMemoryBytes,
     input: {
       modelSizeBytes: configurableModel?.size ?? null,
       verifiedFileSizeBytes: configurableModel?.metadataTrust === 'verified_local'
@@ -124,8 +130,11 @@ export function useModelParametersSheetController({
       ggufMetadata: configurableModel?.gguf as unknown as Record<string, unknown> | undefined,
       runtimeParams: {
         gpuLayers: currentLoadParams.gpuLayers ?? recommendedGpuLayers,
-        cacheTypeK: 'f16',
-        cacheTypeV: 'f16',
+        ...resolveKvCacheTypes({
+          kvCacheType: currentLoadParams.kvCacheType,
+          requestedContextTokens: currentLoadParams.contextSize,
+          totalMemoryBytes: deviceTotalMemoryBytes,
+        }),
         useMmap: true,
       },
     },
@@ -134,23 +143,33 @@ export function useModelParametersSheetController({
     configurableModel?.maxContextTokens,
     configurableModel?.metadataTrust,
     configurableModel?.size,
+    currentLoadParams.contextSize,
     currentLoadParams.gpuLayers,
+    currentLoadParams.kvCacheType,
+    deviceTotalMemoryBytes,
     recommendedGpuLayers,
   ]);
   const contextWindowCeiling = measuredContextWindowCeiling ?? baseContextWindowCeiling;
   const effectiveCurrentLoadParams = {
     contextSize: clampContextWindowTokens(currentLoadParams.contextSize, contextWindowCeiling),
     gpuLayers: currentLoadParams.gpuLayers,
+    kvCacheType: currentLoadParams.kvCacheType,
   };
   const effectiveDefaultLoadParams = {
     contextSize: clampContextWindowTokens(defaultLoadParams.contextSize, contextWindowCeiling),
     gpuLayers: defaultLoadParams.gpuLayers,
+    kvCacheType: defaultLoadParams.kvCacheType,
   };
   const draftPersistedGpuLayers = loadDraftSourceRef.current.gpuLayers === 'current'
     ? (currentLoadParams.gpuLayers ?? null)
     : loadDraftSourceRef.current.gpuLayers === 'default'
       ? (effectiveDefaultLoadParams.gpuLayers ?? null)
       : draftLoadParams.gpuLayers;
+  const draftPersistedKvCacheType = loadDraftSourceRef.current.kvCacheType === 'current'
+    ? currentLoadParams.kvCacheType
+    : loadDraftSourceRef.current.kvCacheType === 'default'
+      ? effectiveDefaultLoadParams.kvCacheType
+      : draftLoadParams.kvCacheType;
   const applyButtonLabel = resolvedActiveModelId === configurableModelId
     ? t('models.applyAndReload')
     : t('models.saveLoadProfile');
@@ -158,6 +177,7 @@ export function useModelParametersSheetController({
     hasPersistedLoadProfileChanges({
       draftContextSize: draftLoadParams.contextSize,
       draftPersistedGpuLayers,
+      draftKvCacheType: draftPersistedKvCacheType,
       persistedLoadParams: currentLoadParams,
     })
     || isApplyingModelProfile
@@ -182,6 +202,7 @@ export function useModelParametersSheetController({
       loadDraftSourceRef.current = {
         contextSize: 'current',
         gpuLayers: 'current',
+        kvCacheType: 'current',
       };
       loadDraftSeedRef.current = null;
       return;
@@ -213,6 +234,7 @@ export function useModelParametersSheetController({
     ])
       .then(([totalMemoryBytes, resolvedModel]) => {
         if (!isCancelled) {
+          setDeviceTotalMemoryBytes(totalMemoryBytes);
           setMeasuredContextWindowCeiling(resolveContextWindowCeiling({
             modelMaxContextTokens: resolvedModel?.maxContextTokens,
             totalMemoryBytes,
@@ -225,8 +247,11 @@ export function useModelParametersSheetController({
               ggufMetadata: resolvedModel?.gguf as unknown as Record<string, unknown> | undefined,
               runtimeParams: {
                 gpuLayers: currentLoadParams.gpuLayers ?? recommendedGpuLayers,
-                cacheTypeK: 'f16',
-                cacheTypeV: 'f16',
+                ...resolveKvCacheTypes({
+                  kvCacheType: currentLoadParams.kvCacheType,
+                  requestedContextTokens: currentLoadParams.contextSize,
+                  totalMemoryBytes,
+                }),
                 useMmap: true,
               },
             },
@@ -242,7 +267,14 @@ export function useModelParametersSheetController({
     return () => {
       isCancelled = true;
     };
-  }, [configurableModelId, currentLoadParams.gpuLayers, isOpen, recommendedGpuLayers]);
+  }, [
+    configurableModelId,
+    currentLoadParams.contextSize,
+    currentLoadParams.gpuLayers,
+    currentLoadParams.kvCacheType,
+    isOpen,
+    recommendedGpuLayers,
+  ]);
 
   useEffect(() => {
     if (!isOpen) {
@@ -256,6 +288,7 @@ export function useModelParametersSheetController({
       loadDraftSourceRef.current = {
         contextSize: 'current',
         gpuLayers: 'current',
+        kvCacheType: 'current',
       };
       loadDraftSeedRef.current = seedKey;
     }
@@ -279,11 +312,21 @@ export function useModelParametersSheetController({
               ? (effectiveDefaultLoadParams.gpuLayers ?? recommendedGpuLayers)
               : current.gpuLayers
         );
+      const nextKvCacheType = shouldInitializeDraft
+        ? effectiveCurrentLoadParams.kvCacheType
+        : (
+          loadDraftSourceRef.current.kvCacheType === 'current'
+            ? effectiveCurrentLoadParams.kvCacheType
+            : loadDraftSourceRef.current.kvCacheType === 'default'
+              ? effectiveDefaultLoadParams.kvCacheType
+              : current.kvCacheType
+        );
       const clampedNextGpuLayers = clampGpuLayers(nextGpuLayers, gpuLayersCeiling);
 
       if (
         current.contextSize === nextContextSize
         && current.gpuLayers === clampedNextGpuLayers
+        && current.kvCacheType === nextKvCacheType
       ) {
         return current;
       }
@@ -291,6 +334,7 @@ export function useModelParametersSheetController({
       return {
         contextSize: nextContextSize,
         gpuLayers: clampedNextGpuLayers,
+        kvCacheType: nextKvCacheType,
       };
     });
   }, [
@@ -298,8 +342,10 @@ export function useModelParametersSheetController({
     contextWindowCeiling,
     currentLoadParams.gpuLayers,
     effectiveCurrentLoadParams.contextSize,
+    effectiveCurrentLoadParams.kvCacheType,
     effectiveDefaultLoadParams.contextSize,
     effectiveDefaultLoadParams.gpuLayers,
+    effectiveDefaultLoadParams.kvCacheType,
     isOpen,
     gpuLayersCeiling,
     recommendedGpuLayers,
@@ -322,6 +368,11 @@ export function useModelParametersSheetController({
         : loadDraftSourceRef.current.gpuLayers === 'default'
           ? (effectiveDefaultLoadParams.gpuLayers ?? null)
           : draftLoadParams.gpuLayers;
+      const nextKvCacheType = loadDraftSourceRef.current.kvCacheType === 'current'
+        ? currentLoadParams.kvCacheType
+        : loadDraftSourceRef.current.kvCacheType === 'default'
+          ? effectiveDefaultLoadParams.kvCacheType
+          : draftLoadParams.kvCacheType;
       const defaultContextSize = clampContextWindowTokens(
         DEFAULT_MODEL_LOAD_PARAMETERS.contextSize,
         contextWindowCeiling,
@@ -329,7 +380,8 @@ export function useModelParametersSheetController({
       const clampedNextGpuLayers = clampGpuLayers(nextGpuLayers, gpuLayersCeiling);
       const isResetToDefaultProfile =
         nextContextSize === defaultContextSize
-        && (clampedNextGpuLayers ?? recommendedGpuLayers) === recommendedGpuLayers;
+        && (clampedNextGpuLayers ?? recommendedGpuLayers) === recommendedGpuLayers
+        && nextKvCacheType === DEFAULT_MODEL_LOAD_PARAMETERS.kvCacheType;
 
       if (nextContextSize !== draftLoadParams.contextSize) {
         setDraftLoadParams((current) => ({
@@ -344,6 +396,7 @@ export function useModelParametersSheetController({
         updateModelLoadParametersForModel(configurableModelId, {
           contextSize: nextContextSize,
           gpuLayers: clampedNextGpuLayers,
+          kvCacheType: nextKvCacheType,
         });
       }
 
@@ -418,9 +471,12 @@ export function useModelParametersSheetController({
     configurableModelId,
     contextWindowCeiling,
     currentLoadParams.gpuLayers,
+    currentLoadParams.kvCacheType,
     draftLoadParams.contextSize,
     draftLoadParams.gpuLayers,
+    draftLoadParams.kvCacheType,
     effectiveDefaultLoadParams.gpuLayers,
+    effectiveDefaultLoadParams.kvCacheType,
     onAfterActiveModelReload,
     gpuLayersCeiling,
     recommendedGpuLayers,
@@ -444,6 +500,9 @@ export function useModelParametersSheetController({
     }
     if (partial.gpuLayers !== undefined) {
       loadDraftSourceRef.current.gpuLayers = 'user';
+    }
+    if (partial.kvCacheType !== undefined) {
+      loadDraftSourceRef.current.kvCacheType = 'user';
     }
 
     setDraftLoadParams((current) => {
@@ -476,8 +535,10 @@ export function useModelParametersSheetController({
   const handleResetLoadField = useCallback((field: keyof ModelLoadParameters) => {
     if (field === 'contextSize') {
       loadDraftSourceRef.current.contextSize = 'default';
-    } else {
+    } else if (field === 'gpuLayers') {
       loadDraftSourceRef.current.gpuLayers = 'default';
+    } else {
+      loadDraftSourceRef.current.kvCacheType = 'default';
     }
 
     setDraftLoadParams((current) => ({
@@ -487,14 +548,23 @@ export function useModelParametersSheetController({
             gpuLayersCeiling,
             effectiveDefaultLoadParams.gpuLayers ?? recommendedGpuLayers,
           )
-        : effectiveDefaultLoadParams.contextSize,
+        : field === 'kvCacheType'
+          ? effectiveDefaultLoadParams.kvCacheType
+          : effectiveDefaultLoadParams.contextSize,
     }));
-  }, [effectiveDefaultLoadParams.contextSize, effectiveDefaultLoadParams.gpuLayers, gpuLayersCeiling, recommendedGpuLayers]);
+  }, [
+    effectiveDefaultLoadParams.contextSize,
+    effectiveDefaultLoadParams.gpuLayers,
+    effectiveDefaultLoadParams.kvCacheType,
+    gpuLayersCeiling,
+    recommendedGpuLayers,
+  ]);
 
   const handleResetAll = useCallback(() => {
     loadDraftSourceRef.current = {
       contextSize: 'default',
       gpuLayers: 'default',
+      kvCacheType: 'default',
     };
 
     if (onResetAllParams) {
@@ -509,11 +579,13 @@ export function useModelParametersSheetController({
         gpuLayersCeiling,
         effectiveDefaultLoadParams.gpuLayers ?? recommendedGpuLayers,
       ),
+      kvCacheType: effectiveDefaultLoadParams.kvCacheType,
     });
   }, [
     configurableModelId,
     effectiveDefaultLoadParams.contextSize,
     effectiveDefaultLoadParams.gpuLayers,
+    effectiveDefaultLoadParams.kvCacheType,
     gpuLayersCeiling,
     onResetAllParams,
     recommendedGpuLayers,

@@ -1145,6 +1145,7 @@ describe('ChatScreen', () => {
     expect(getSettings().modelLoadParamsByModelId['author/model-q4']).toEqual({
       contextSize: 8192,
       gpuLayers: 12,
+      kvCacheType: 'auto',
     });
   });
 
@@ -1171,6 +1172,7 @@ describe('ChatScreen', () => {
     expect(getSettings().modelLoadParamsByModelId['author/model-q4']).toEqual({
       contextSize: 8192,
       gpuLayers: null,
+      kvCacheType: 'auto',
     });
   });
 
@@ -1206,6 +1208,7 @@ describe('ChatScreen', () => {
     expect(getSettings().modelLoadParamsByModelId['author/model-q4']).toEqual({
       contextSize: 8192,
       gpuLayers: null,
+      kvCacheType: 'auto',
     });
   });
 

@@ -36,11 +36,13 @@ export interface GenerationParameters {
     repetitionPenalty: number;
     maxTokens: number;
     reasoningEnabled?: boolean;
+    seed: number | null;
 }
 
 export interface ModelLoadParameters {
     contextSize: number;
     gpuLayers: number | null;
+    kvCacheType: 'auto' | 'f16' | 'q8_0' | 'q4_0';
 }
 
 export interface AppSettings {
@@ -51,6 +53,7 @@ export interface AppSettings {
     repetitionPenalty: number;
     maxTokens: number;
     reasoningEnabled?: boolean;
+    seed: number | null;
     theme: 'light' | 'dark' | 'system';
     language: 'en' | 'ru';
     activePresetId: string | null;
@@ -68,11 +71,13 @@ export const DEFAULT_GENERATION_PARAMETERS: GenerationParameters = {
     repetitionPenalty: 1,
     maxTokens: 512,
     reasoningEnabled: false,
+    seed: null,
 };
 
 export const DEFAULT_MODEL_LOAD_PARAMETERS: ModelLoadParameters = {
     contextSize: 4096,
     gpuLayers: null,
+    kvCacheType: 'auto',
 };
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -83,6 +88,7 @@ const DEFAULT_SETTINGS: AppSettings = {
     repetitionPenalty: DEFAULT_GENERATION_PARAMETERS.repetitionPenalty,
     maxTokens: DEFAULT_GENERATION_PARAMETERS.maxTokens,
     reasoningEnabled: DEFAULT_GENERATION_PARAMETERS.reasoningEnabled,
+    seed: DEFAULT_GENERATION_PARAMETERS.seed,
     theme: 'system',
     language: 'en',
     activePresetId: null,
@@ -134,6 +140,24 @@ function normalizeChatRetentionDays(value: unknown): number | null {
 }
 
 function sanitizeGenerationParameters(input: Partial<GenerationParameters> | undefined): GenerationParameters {
+    const rawSeed: unknown = (input as { seed?: unknown } | undefined)?.seed;
+    const seedCandidate = rawSeed == null
+        ? null
+        : typeof rawSeed === 'number'
+          ? rawSeed
+          : typeof rawSeed === 'string' && rawSeed.trim().length === 0
+            ? null
+            : Number(rawSeed);
+    const normalizedSeed = seedCandidate === null || !Number.isFinite(seedCandidate)
+        ? null
+        : (() => {
+            const rounded = Math.round(seedCandidate);
+            if (rounded < 0) {
+                return null;
+            }
+            return Math.min(2_147_483_647, rounded);
+        })();
+
     return {
         temperature: clampNumber(input?.temperature, 0, 2, DEFAULT_GENERATION_PARAMETERS.temperature),
         topP: clampNumber(input?.topP, 0, 1, DEFAULT_GENERATION_PARAMETERS.topP),
@@ -142,6 +166,7 @@ function sanitizeGenerationParameters(input: Partial<GenerationParameters> | und
         repetitionPenalty: clampNumber(input?.repetitionPenalty, 0, 2, DEFAULT_GENERATION_PARAMETERS.repetitionPenalty),
         maxTokens: Math.round(clampNumber(input?.maxTokens, 1, 8192, DEFAULT_GENERATION_PARAMETERS.maxTokens)),
         reasoningEnabled: input?.reasoningEnabled === true,
+        seed: normalizedSeed,
     };
 }
 
@@ -168,6 +193,18 @@ function sanitizeModelLoadParameters(input: Partial<ModelLoadParameters> | undef
             ? null
             : Math.round(clampNumber(rawGpuLayers, 0, 80, DEFAULT_MODEL_LOAD_PARAMETERS.gpuLayers ?? 0));
 
+    const rawKvCacheType = typeof input?.kvCacheType === 'string' ? input.kvCacheType.trim().toLowerCase() : '';
+    const normalizedKvCacheType =
+        rawKvCacheType === 'auto'
+            ? 'auto'
+            : rawKvCacheType === 'f16' || rawKvCacheType === 'fp16'
+              ? 'f16'
+              : rawKvCacheType === 'q8_0' || rawKvCacheType === 'q8'
+                ? 'q8_0'
+                : rawKvCacheType === 'q4_0' || rawKvCacheType === 'q4'
+                  ? 'q4_0'
+                  : DEFAULT_MODEL_LOAD_PARAMETERS.kvCacheType;
+
     return {
         contextSize: Math.round(clampNumber(
             input?.contextSize,
@@ -176,6 +213,7 @@ function sanitizeModelLoadParameters(input: Partial<ModelLoadParameters> | undef
             DEFAULT_MODEL_LOAD_PARAMETERS.contextSize,
         )),
         gpuLayers: normalizedGpuLayers,
+        kvCacheType: normalizedKvCacheType,
     };
 }
 
@@ -206,6 +244,7 @@ function sanitizeSettings(input: Partial<AppSettings>): AppSettings {
         repetitionPenalty: generationDefaults.repetitionPenalty,
         maxTokens: generationDefaults.maxTokens,
         reasoningEnabled: generationDefaults.reasoningEnabled,
+        seed: generationDefaults.seed,
         theme: input.theme === 'light' || input.theme === 'dark' || input.theme === 'system' ? input.theme : DEFAULT_SETTINGS.theme,
         language: normalizeLanguage(input.language),
         activePresetId: typeof input.activePresetId === 'string' ? input.activePresetId : null,
@@ -277,6 +316,7 @@ export function resetParameters() {
         repetitionPenalty: DEFAULT_GENERATION_PARAMETERS.repetitionPenalty,
         maxTokens: DEFAULT_GENERATION_PARAMETERS.maxTokens,
         reasoningEnabled: DEFAULT_GENERATION_PARAMETERS.reasoningEnabled,
+        seed: DEFAULT_GENERATION_PARAMETERS.seed,
     });
 }
 

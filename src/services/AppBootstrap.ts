@@ -79,6 +79,7 @@ function buildThreadFromLegacyHistory(entry: ChatHistoryEntry, settings: AppSett
       repetitionPenalty: settings.repetitionPenalty ?? 1,
       maxTokens: settings.maxTokens,
       reasoningEnabled: settings.reasoningEnabled === true,
+      seed: settings.seed ?? null,
     },
     messages,
     createdAt: entry.createdAt,

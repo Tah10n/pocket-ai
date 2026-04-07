@@ -80,6 +80,7 @@ function createGenerationParamsSnapshot(
     minP: 0.05,
     repetitionPenalty: 1,
     maxTokens: 1024,
+    seed: null,
     ...overrides,
   };
 }

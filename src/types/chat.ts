@@ -12,6 +12,7 @@ export interface GenerationParamsSnapshot {
   repetitionPenalty?: number;
   maxTokens: number;
   reasoningEnabled?: boolean;
+  seed: number | null;
 }
 
 export interface PresetSnapshot {
@@ -86,6 +87,7 @@ export interface LlmChatCompletionOptions {
     min_p?: number;
     penalty_repeat?: number;
     n_predict?: number;
+    seed?: number;
     enable_thinking?: boolean;
     reasoning_format?: 'none' | 'auto' | 'deepseek';
   };
@@ -166,6 +168,7 @@ export function sanitizeHydratedThread(thread: ChatThread): ChatThread {
       repetitionPenalty: thread.paramsSnapshot.repetitionPenalty ?? 1,
       maxTokens: thread.paramsSnapshot.maxTokens,
       reasoningEnabled: thread.paramsSnapshot.reasoningEnabled === true,
+      seed: thread.paramsSnapshot.seed ?? null,
     },
     titleSource: thread.titleSource === 'manual' ? 'manual' : 'derived',
     messages: sanitizedMessages,

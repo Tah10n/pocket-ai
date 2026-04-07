@@ -24,7 +24,7 @@ The project is built around a simple local-first flow:
 - Bounded on-device catalog cache for recent first-page results and recent model details, with online revalidation on reopen
 - Persistent chat history stored on the device
 - System prompt presets for different assistant behaviors
-- Per-model generation controls such as temperature, top-p, top-k, min-p, repetition penalty, context window, and max tokens, plus saved load profiles for GPU layers
+- Per-model generation controls such as temperature, top-p, top-k, min-p, repetition penalty, seed, context window, and max tokens, plus saved load profiles for GPU layers and KV cache precision
 - Storage manager for unloading or offloading models, optionally keeping or resetting saved model settings, and clearing local data
 - Conversation retention controls
 - English and Russian localization
@@ -192,7 +192,7 @@ npm run android:scenarios:emulator
 - The model catalog can show public, locked, and access-denied Hugging Face repositories in the same search flow, with popularity sorting and routed model details.
 - Recent first-page catalog results and recently opened public model details are cached locally so the catalog can reopen quickly and still refresh from Hugging Face when the network is available.
 - If a model still has no trustworthy size, Pocket AI asks for explicit confirmation before starting a download with limited storage estimates and size verification.
-- A downloaded model can be opened into a saved settings sheet where sampling changes apply immediately and load-profile changes are saved for the next load or an explicit reload.
+- A downloaded model can be opened into a saved settings sheet where sampling changes apply immediately and load-profile changes (context window, GPU layers, KV cache) are saved for the next load or an explicit reload.
 - Context window controls are bounded by verified model metadata and estimated device RAM headroom before the model is loaded.
 - If a model cannot fit into memory even after falling back to the safest load profile (or it only fits at the minimum context window of 512 tokens), Pocket AI marks it as `Won't fit RAM` and blocks the load instead of attempting an unsafe native initialization.
 - When a downloaded model is removed, Pocket AI can keep its saved per-model settings for a future download or reset them at the same time.

@@ -183,6 +183,7 @@ describe('LLMEngineService', () => {
     (getModelLoadParametersForModel as jest.Mock).mockReturnValueOnce({
       contextSize: 4096,
       gpuLayers: 12,
+      kvCacheType: 'f16',
     });
 
     await llmEngineService.load('test/model', { forceReload: true });
@@ -508,6 +509,7 @@ describe('LLMEngineService', () => {
     (getModelLoadParametersForModel as jest.Mock).mockReturnValueOnce({
       contextSize: 4096,
       gpuLayers: 12,
+      kvCacheType: 'f16',
     });
     (getFreshMemorySnapshot as jest.Mock).mockResolvedValue({
       timestampMs: Date.now(),
@@ -523,7 +525,7 @@ describe('LLMEngineService', () => {
       pressureLevel: 'normal',
       thresholdBytes: 0,
     });
-    (llamaRn.loadLlamaModelInfo as jest.Mock).mockResolvedValueOnce({
+    (llamaRn.loadLlamaModelInfo as jest.Mock).mockResolvedValue({
       n_layers: 32,
       n_head_kv: 8,
       n_embd_head_k: 128,

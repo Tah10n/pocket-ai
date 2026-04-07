@@ -148,6 +148,8 @@ keyPassword=your-key-password
 - On a downloaded model card, confirm the secondary `Settings` action opens the model controls sheet without leaving the list.
 - In model controls, confirm the context-window ceiling reflects the verified model limit or estimated device RAM headroom instead of exposing an obviously unsafe maximum.
 - Change the context window or GPU layers and confirm the sheet shows the pending load-profile state plus `Save load profile` for an inactive model or `Apply & reload` for the active model.
+- Change the KV cache type and confirm the sheet treats it as a load-profile change (persisted per-model, reload-required for the active model).
+- Switch the seed between `Random` and `Fixed`, set a numeric seed value, and confirm it affects the next response without requiring a reload.
 - Try loading a model or load profile that exceeds the estimated RAM budget and confirm the app shows a memory warning or blocks the load instead of crashing during native initialization.
 - Try loading a model that only fits at the minimum context window (512 tokens) and confirm it is marked as `Won't fit RAM` and loading is disabled.
 - Load the model and confirm the app reports the engine as ready.

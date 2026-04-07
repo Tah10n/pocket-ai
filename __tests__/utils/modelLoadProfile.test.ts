@@ -5,9 +5,11 @@ describe('modelLoadProfile utilities', () => {
     expect(hasPersistedLoadProfileChanges({
       draftContextSize: 8192,
       draftPersistedGpuLayers: null,
+      draftKvCacheType: 'auto',
       persistedLoadParams: {
         contextSize: 32768,
         gpuLayers: null,
+        kvCacheType: 'auto',
       },
     })).toBe(true);
   });
@@ -16,9 +18,11 @@ describe('modelLoadProfile utilities', () => {
     expect(hasPersistedLoadProfileChanges({
       draftContextSize: 8192,
       draftPersistedGpuLayers: 12,
+      draftKvCacheType: 'auto',
       persistedLoadParams: {
         contextSize: 8192,
         gpuLayers: 12,
+        kvCacheType: 'auto',
       },
     })).toBe(false);
   });

@@ -1,4 +1,5 @@
 import React from 'react';
+import { useEffect, useState } from 'react';
 import { Modal } from 'react-native';
 import Slider from '@react-native-community/slider';
 import { useTranslation } from 'react-i18next';
@@ -6,7 +7,14 @@ import { Box } from '@/components/ui/box';
 import { Button, ButtonText } from '@/components/ui/button';
 import { Pressable } from '@/components/ui/pressable';
 import { ScrollView } from '@/components/ui/scroll-view';
-import { ScreenBadge, ScreenCard, ScreenIconButton, ScreenSheet } from '@/components/ui/ScreenShell';
+import {
+  ScreenBadge,
+  ScreenCard,
+  ScreenIconButton,
+  ScreenInlineInput,
+  ScreenSegmentedControl,
+  ScreenSheet,
+} from '@/components/ui/ScreenShell';
 import { Text } from '@/components/ui/text';
 import { GenerationParameters, ModelLoadParameters } from '../../services/SettingsStore';
 import { useTheme } from '../../providers/ThemeProvider';
@@ -216,6 +224,85 @@ function ToggleRow({
   );
 }
 
+interface SegmentedControlRowOption {
+  key: string;
+  label: string;
+  testID?: string;
+}
+
+interface SegmentedControlRowProps {
+  label: string;
+  description: string;
+  options: SegmentedControlRowOption[];
+  activeKey: string;
+  onChange: (key: string) => void;
+  onReset?: () => void;
+  isResetDisabled?: boolean;
+  variant?: 'standalone' | 'embedded';
+  showDivider?: boolean;
+}
+
+function SegmentedControlRow({
+  label,
+  description,
+  options,
+  activeKey,
+  onChange,
+  onReset,
+  isResetDisabled = false,
+  variant = 'standalone',
+  showDivider = false,
+}: SegmentedControlRowProps) {
+  const { t } = useTranslation();
+  const activeLabel = options.find((option) => option.key === activeKey)?.label ?? activeKey;
+
+  return (
+    <ScreenCard
+      variant={variant === 'embedded' ? 'inset' : 'surface'}
+      padding="default"
+      className={variant === 'embedded'
+        ? `${showDivider ? 'mt-4 border-t border-primary-500/12 pt-4 dark:border-primary-500/20' : ''} border-primary-500/10 bg-background-0/60 dark:border-primary-500/10 dark:bg-background-950/30`
+        : undefined}
+    >
+      <Box className="flex-row items-start justify-between gap-3">
+        <Box className="min-w-0 flex-1">
+          <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">
+            {label}
+          </Text>
+          <Text className="mt-1 text-sm leading-5 text-typography-500 dark:text-typography-400">
+            {description}
+          </Text>
+        </Box>
+
+        <ScreenBadge tone="accent" className="px-3 py-1.5">
+          {activeLabel}
+        </ScreenBadge>
+      </Box>
+
+      {onReset ? (
+        <Box className="mt-3 flex-row justify-end">
+          <Button
+            onPress={onReset}
+            action="softPrimary"
+            size="xs"
+            disabled={isResetDisabled}
+          >
+            <ButtonText>{t('common.reset')}</ButtonText>
+          </Button>
+        </Box>
+      ) : null}
+
+      <Box className="mt-4">
+        <ScreenSegmentedControl
+          options={options.map((option) => ({ key: option.key, label: option.label, testID: option.testID }))}
+          activeKey={activeKey}
+          onChange={onChange}
+        />
+      </Box>
+    </ScreenCard>
+  );
+}
+
 function formatDecimal(value: number) {
   return value.toFixed(2).replace(/\.?0+$/, '');
 }
@@ -247,6 +334,15 @@ export function ModelParametersSheet({
   onApplyReload,
 }: ModelParametersSheetProps) {
   const { t } = useTranslation();
+  const [seedInput, setSeedInput] = useState(() => (params.seed === null ? '' : String(params.seed)));
+
+  useEffect(() => {
+    if (!visible) {
+      return;
+    }
+
+    setSeedInput(params.seed === null ? '' : String(params.seed));
+  }, [modelId, params.seed, visible]);
   const resolvedContextWindowCeiling = contextWindowCeiling
     ? Math.max(MIN_CONTEXT_WINDOW_TOKENS, Math.min(MAX_CONTEXT_WINDOW_TOKENS, contextWindowCeiling))
     : DEFAULT_CONTEXT_WINDOW_TOKENS;
@@ -290,6 +386,8 @@ export function ModelParametersSheet({
     resolvedGpuLayersCeiling,
     Math.max(0, Math.round(defaultLoadParams.gpuLayers ?? recommendedGpuLayers)),
   );
+  const displayedKvCacheType = loadParamsDraft.kvCacheType;
+  const defaultKvCacheType = defaultLoadParams.kvCacheType;
   const maxTokensFloor = Math.min(128, displayedContextSize);
   const maxTokensCeiling = Math.max(
     maxTokensFloor,
@@ -361,6 +459,105 @@ export function ModelParametersSheet({
                 onReset={() => onResetParamField('reasoningEnabled')}
                 isResetDisabled={(params.reasoningEnabled === true) === (defaultParams.reasoningEnabled === true)}
               />
+
+              <ScreenCard>
+                <Box className="flex-row items-start justify-between gap-3">
+                  <Box className="min-w-0 flex-1">
+                    <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">
+                      {t('chat.modelControls.seed')}
+                    </Text>
+                    <Text className="mt-1 text-sm leading-5 text-typography-500 dark:text-typography-400">
+                      {t('chat.modelControls.seedDescription')}
+                    </Text>
+                  </Box>
+
+                  <ScreenBadge tone="accent" className="px-3 py-1.5">
+                    {params.seed === null
+                      ? t('chat.modelControls.seedRandom')
+                      : String(params.seed)}
+                  </ScreenBadge>
+                </Box>
+
+                <Box className="mt-3 flex-row justify-end">
+                  <Button
+                    onPress={() => onResetParamField('seed')}
+                    action="softPrimary"
+                    size="xs"
+                    disabled={params.seed === defaultParams.seed}
+                  >
+                    <ButtonText>{t('common.reset')}</ButtonText>
+                  </Button>
+                </Box>
+
+                <Box className="mt-4">
+                  <ScreenSegmentedControl
+                    options={[
+                      { key: 'random', label: t('chat.modelControls.seedRandom') },
+                      { key: 'fixed', label: t('chat.modelControls.seedFixed') },
+                    ]}
+                    activeKey={params.seed === null ? 'random' : 'fixed'}
+                    onChange={(key) => {
+                      if (key === 'random') {
+                        onChangeParams({ seed: null });
+                        return;
+                      }
+
+                      const nextSeed = params.seed ?? 42;
+                      setSeedInput(String(nextSeed));
+                      onChangeParams({ seed: nextSeed });
+                    }}
+                  />
+                </Box>
+
+                {params.seed !== null ? (
+                  <Box className="mt-4">
+                    <ScreenInlineInput
+                      variant="search"
+                      placeholder={t('chat.modelControls.seedValue')}
+                      keyboardType="number-pad"
+                      value={seedInput}
+                      className="mt-3"
+                      onChangeText={(text) => {
+                        setSeedInput(text);
+
+                        const normalized = text.trim();
+                        if (normalized.length === 0) {
+                          return;
+                        }
+
+                        const parsed = Number(normalized);
+                        if (!Number.isFinite(parsed)) {
+                          return;
+                        }
+
+                        const nextSeed = Math.min(2_147_483_647, Math.max(0, Math.round(parsed)));
+                        if (nextSeed !== params.seed) {
+                          onChangeParams({ seed: nextSeed });
+                        }
+                      }}
+                      onEndEditing={(event) => {
+                        const normalized = String(event.nativeEvent?.text ?? seedInput).trim();
+                        if (normalized.length === 0) {
+                          setSeedInput(String(params.seed ?? 42));
+                          return;
+                        }
+
+                        const parsed = Number(normalized);
+                        if (!Number.isFinite(parsed)) {
+                          setSeedInput(String(params.seed ?? 42));
+                          return;
+                        }
+
+                        const nextSeed = Math.min(2_147_483_647, Math.max(0, Math.round(parsed)));
+                        setSeedInput(String(nextSeed));
+                        if (nextSeed !== params.seed) {
+                          onChangeParams({ seed: nextSeed });
+                        }
+                      }}
+                    />
+                  </Box>
+                ) : null}
+              </ScreenCard>
 
               <SliderRow
                 label={t('chat.modelControls.temperature')}
@@ -525,6 +722,23 @@ export function ModelParametersSheet({
                   onValueChange={(value) => onChangeLoadParams({ gpuLayers: Math.round(value) })}
                   onReset={() => onResetLoadField('gpuLayers')}
                   isResetDisabled={displayedGpuLayers === defaultGpuLayers}
+                  variant="embedded"
+                  showDivider
+                />
+
+                <SegmentedControlRow
+                  label={t('chat.modelControls.kvCache')}
+                  description={t('chat.modelControls.kvCacheDescription')}
+                  options={[
+                    { key: 'auto', label: t('chat.modelControls.kvCacheAuto') },
+                    { key: 'f16', label: 'f16' },
+                    { key: 'q8_0', label: 'q8_0' },
+                    { key: 'q4_0', label: 'q4_0' },
+                  ]}
+                  activeKey={displayedKvCacheType}
+                  onChange={(key) => onChangeLoadParams({ kvCacheType: key as ModelLoadParameters['kvCacheType'] })}
+                  onReset={() => onResetLoadField('kvCacheType')}
+                  isResetDisabled={displayedKvCacheType === defaultKvCacheType}
                   variant="embedded"
                   showDivider
                 />

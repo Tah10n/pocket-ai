@@ -398,6 +398,7 @@ describe('useChatSession', () => {
             temperature: 0.7,
             topP: 0.9,
               maxTokens: 1024,
+            seed: null,
             },
             messages: [
               {
@@ -599,6 +600,7 @@ describe('useChatSession', () => {
         temperature: 0.7,
         topP: 0.9,
         maxTokens: 1024,
+        seed: null,
       },
     });
     const threadTwoId = useChatStore.getState().createThread({
@@ -613,6 +615,7 @@ describe('useChatSession', () => {
         temperature: 0.7,
         topP: 0.9,
         maxTokens: 1024,
+        seed: null,
       },
     });
 
@@ -704,6 +707,7 @@ describe('useChatSession', () => {
         temperature: 0.7,
         topP: 0.9,
         maxTokens: 1024,
+        seed: null,
       },
       messages: [
         {
@@ -746,6 +750,7 @@ describe('useChatSession', () => {
         temperature: 0.7,
         topP: 0.9,
         maxTokens: 1024,
+        seed: null,
       },
       messages: Array.from({ length: messageCount }, (_, index) => ({
         id: `message-${index + 1}`,
@@ -792,6 +797,7 @@ describe('useChatSession', () => {
         temperature: 0.7,
         topP: 0.9,
         maxTokens: 96,
+        seed: null,
       },
       messages: Array.from({ length: 8 }, (_, index) => ({
         id: `message-${index + 1}`,
@@ -828,6 +834,7 @@ describe('useChatSession', () => {
         temperature: 0.7,
         topP: 0.9,
         maxTokens: 1024,
+        seed: null,
       },
     });
 
@@ -887,6 +894,7 @@ describe('useChatSession', () => {
         temperature: 0.7,
         topP: 0.9,
         maxTokens: 1024,
+        seed: null,
       },
     });
 

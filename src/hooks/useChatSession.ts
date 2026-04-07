@@ -551,6 +551,7 @@ export const useChatSession = () => {
           min_p: thread.paramsSnapshot.minP,
           penalty_repeat: thread.paramsSnapshot.repetitionPenalty,
           n_predict: Math.min(thread.paramsSnapshot.maxTokens, maxPredictTokens),
+          seed: thread.paramsSnapshot.seed ?? undefined,
           enable_thinking: thread.paramsSnapshot.reasoningEnabled === true,
           reasoning_format: thread.paramsSnapshot.reasoningEnabled === true ? 'auto' : 'none',
         },

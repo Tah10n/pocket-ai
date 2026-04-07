@@ -128,28 +128,23 @@ describe('LLMEngineService Stability', () => {
         // Mock 12GB RAM -> should try 35 GPU layers first
         (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(12 * 1024 * 1024 * 1024);
         
-        // Fail first init, succeed second
-        (initLlama as jest.Mock)
-            .mockRejectedValueOnce(new Error('GPU OOM'))
-            .mockResolvedValueOnce({});
+        // Fail any GPU init attempt, succeed on CPU fallback.
+        (initLlama as jest.Mock).mockImplementation(async (options: { n_gpu_layers?: number }) => {
+            if ((options?.n_gpu_layers ?? 0) > 0) {
+                throw new Error('GPU OOM');
+            }
+            return {};
+        });
 
         await llmEngineService.load(mockModel.id);
 
-        expect(initLlama).toHaveBeenCalledTimes(2);
+        expect((initLlama as jest.Mock).mock.calls.length).toBeGreaterThanOrEqual(2);
         
-        // First attempt with GPU
-        expect(initLlama).toHaveBeenNthCalledWith(
-            1,
-            expect.objectContaining({ n_gpu_layers: 35 }),
-            expect.any(Function)
-        );
+        const firstInitOptions = (initLlama as jest.Mock).mock.calls[0]?.[0] as { n_gpu_layers?: number } | undefined;
+        expect(firstInitOptions?.n_gpu_layers ?? 0).toBeGreaterThan(0);
         
-        // Second attempt with CPU fallback
-        expect(initLlama).toHaveBeenNthCalledWith(
-            2,
-            expect.objectContaining({ n_gpu_layers: 0 }),
-            expect.any(Function)
-        );
+        const lastInitOptions = (initLlama as jest.Mock).mock.calls.at(-1)?.[0] as { n_gpu_layers?: number } | undefined;
+        expect(lastInitOptions?.n_gpu_layers ?? 0).toBe(0);
     });
 
     it('unloads model automatically when system issues memory warning', async () => {

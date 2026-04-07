@@ -17,6 +17,7 @@ function buildThread(id: string, updatedAt: number): ChatThread {
       temperature: 0.7,
       topP: 0.9,
       maxTokens: 1024,
+      seed: null,
     },
     messages: [
       {
@@ -52,6 +53,7 @@ describe('chatStore', () => {
         temperature: 0.7,
         topP: 0.9,
         maxTokens: 1024,
+        seed: null,
       },
     });
 
@@ -91,6 +93,7 @@ describe('chatStore', () => {
         temperature: 0.7,
         topP: 0.9,
         maxTokens: 1024,
+        seed: null,
       },
     });
 
@@ -124,6 +127,7 @@ describe('chatStore', () => {
         temperature: 0.7,
         topP: 0.9,
         maxTokens: 1024,
+        seed: null,
       },
     });
 
@@ -162,6 +166,7 @@ describe('chatStore', () => {
         temperature: 0.7,
         topP: 0.9,
         maxTokens: 1024,
+        seed: null,
       },
     });
 
@@ -197,6 +202,7 @@ describe('chatStore', () => {
         temperature: 0.7,
         topP: 0.9,
         maxTokens: 1024,
+        seed: null,
       },
     });
 
@@ -245,6 +251,7 @@ describe('chatStore', () => {
         temperature: 0.7,
         topP: 0.9,
         maxTokens: 1024,
+        seed: null,
       },
     });
 
@@ -312,6 +319,7 @@ describe('chatStore', () => {
         temperature: 0.7,
         topP: 0.9,
         maxTokens: 1024,
+        seed: null,
       },
     });
 
@@ -360,6 +368,7 @@ describe('chatStore', () => {
         temperature: 0.7,
         topP: 0.9,
         maxTokens: 1024,
+        seed: null,
       },
     });
     const secondThreadId = useChatStore.getState().createThread({
@@ -374,6 +383,7 @@ describe('chatStore', () => {
         temperature: 0.7,
         topP: 0.9,
         maxTokens: 1024,
+        seed: null,
       },
     });
 
@@ -396,6 +406,7 @@ describe('chatStore', () => {
         temperature: 0.7,
         topP: 0.9,
         maxTokens: 1024,
+        seed: null,
       },
     });
 
@@ -420,6 +431,7 @@ describe('chatStore', () => {
         temperature: 0.7,
         topP: 0.9,
         maxTokens: 1024,
+        seed: null,
       },
     });
 
@@ -433,6 +445,7 @@ describe('chatStore', () => {
       temperature: 0.7,
       topP: 0.9,
       maxTokens: 1024,
+      seed: null,
     };
     const presetSnapshot = {
       id: 'preset-1',
@@ -483,6 +496,7 @@ describe('chatStore', () => {
         temperature: 0.7,
         topP: 0.9,
         maxTokens: 1024,
+        seed: null,
       },
     });
 
@@ -517,6 +531,7 @@ describe('chatStore', () => {
         temperature: 0.7,
         topP: 0.9,
         maxTokens: 1024,
+        seed: null,
       },
     });
     const before = useChatStore.getState().getThread(threadId);
@@ -534,6 +549,7 @@ describe('chatStore', () => {
         repetitionPenalty: 1.2,
         maxTokens: 512,
         reasoningEnabled: true,
+        seed: null,
       });
     } finally {
       Date.now = originalDateNow;
@@ -550,6 +566,7 @@ describe('chatStore', () => {
           repetitionPenalty: 1.2,
           maxTokens: 512,
           reasoningEnabled: true,
+          seed: null,
         },
       }),
     );
@@ -568,6 +585,7 @@ describe('chatStore', () => {
         temperature: 0.7,
         topP: 0.9,
         maxTokens: 1024,
+        seed: null,
       },
     });
 
@@ -597,6 +615,7 @@ describe('chatStore', () => {
         temperature: 0.7,
         topP: 0.9,
         maxTokens: 1024,
+        seed: null,
       },
     });
 
@@ -662,6 +681,7 @@ describe('chatStore', () => {
         temperature: 0.7,
         topP: 0.9,
         maxTokens: 1024,
+        seed: null,
       },
     });
 
@@ -707,6 +727,7 @@ describe('chatStore', () => {
         temperature: 0.7,
         topP: 0.9,
         maxTokens: 1024,
+        seed: null,
       },
     });
 
@@ -741,6 +762,7 @@ describe('chatStore', () => {
         temperature: 0.7,
         topP: 0.9,
         maxTokens: 1024,
+        seed: null,
       },
     });
 
@@ -780,6 +802,7 @@ describe('chatStore', () => {
         minP: 0.05,
         repetitionPenalty: 1,
         maxTokens: 1024,
+        seed: null,
       },
       messages: [
         {
@@ -827,6 +850,7 @@ describe('chatStore', () => {
         minP: 0.05,
         repetitionPenalty: 1,
         maxTokens: 1024,
+        seed: null,
       },
       messages: [
         {
@@ -874,6 +898,7 @@ describe('chatStore', () => {
         minP: 0.05,
         repetitionPenalty: 1,
         maxTokens: 70,
+        seed: null,
       },
       messages: [
         {
@@ -943,6 +968,7 @@ describe('chatStore', () => {
         minP: 0.05,
         repetitionPenalty: 1,
         maxTokens: 2048,
+        seed: null,
       },
       messages: Array.from({ length: 12 }, (_, index) => ({
         id: `message-${index + 1}`,

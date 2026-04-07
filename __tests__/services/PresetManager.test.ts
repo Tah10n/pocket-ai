@@ -100,6 +100,7 @@ describe('SettingsStore', () => {
             repetitionPenalty: 1,
             maxTokens: 1536,
             reasoningEnabled: false,
+            seed: null,
         });
         expect(getGenerationParametersForModel('author/model-b')).toEqual({
             temperature: 0.6,
@@ -109,6 +110,7 @@ describe('SettingsStore', () => {
             repetitionPenalty: 1,
             maxTokens: 1024,
             reasoningEnabled: false,
+            seed: null,
         });
         expect(getSettings().modelParamsByModelId).toEqual({
             'author/model-a': {
@@ -119,6 +121,7 @@ describe('SettingsStore', () => {
                 repetitionPenalty: 1,
                 maxTokens: 1536,
                 reasoningEnabled: false,
+                seed: null,
             },
             'author/model-b': {
                 temperature: 0.6,
@@ -128,6 +131,7 @@ describe('SettingsStore', () => {
                 repetitionPenalty: 1,
                 maxTokens: 1024,
                 reasoningEnabled: false,
+                seed: null,
             },
         });
     });
@@ -153,6 +157,7 @@ describe('SettingsStore', () => {
             repetitionPenalty: 1,
             maxTokens: 2048,
             reasoningEnabled: false,
+            seed: null,
         });
         expect(getSettings().modelParamsByModelId).toEqual({});
     });
@@ -169,6 +174,7 @@ describe('SettingsStore', () => {
             repetitionPenalty: 1,
             maxTokens: 512,
             reasoningEnabled: true,
+            seed: null,
         });
         expect(getGenerationParametersForModel('author/model-b')).toEqual({
             temperature: 0.7,
@@ -178,6 +184,7 @@ describe('SettingsStore', () => {
             repetitionPenalty: 1,
             maxTokens: 512,
             reasoningEnabled: false,
+            seed: null,
         });
     });
 
@@ -189,10 +196,12 @@ describe('SettingsStore', () => {
         expect(getModelLoadParametersForModel('author/model-a')).toEqual({
             contextSize: 4096,
             gpuLayers: 18,
+            kvCacheType: 'auto',
         });
         expect(getModelLoadParametersForModel('author/model-b')).toEqual({
             contextSize: 4096,
             gpuLayers: 4,
+            kvCacheType: 'auto',
         });
     });
 
@@ -205,6 +214,7 @@ describe('SettingsStore', () => {
         expect(getModelLoadParametersForModel('author/model-a')).toEqual({
             contextSize: 4096,
             gpuLayers: null,
+            kvCacheType: 'auto',
         });
         expect(getSettings().modelLoadParamsByModelId).toEqual({});
     });
@@ -243,10 +253,12 @@ describe('SettingsStore', () => {
             repetitionPenalty: 1,
             maxTokens: 1024,
             reasoningEnabled: false,
+            seed: null,
         });
         expect(getModelLoadParametersForModel('author/model-a')).toEqual({
             contextSize: 4096,
             gpuLayers: null,
+            kvCacheType: 'auto',
         });
         expect(getSettings().modelParamsByModelId).toEqual({
             'author/model-b': {
@@ -257,12 +269,14 @@ describe('SettingsStore', () => {
                 repetitionPenalty: 1,
                 maxTokens: 1024,
                 reasoningEnabled: false,
+                seed: null,
             },
         });
         expect(getSettings().modelLoadParamsByModelId).toEqual({
             'author/model-b': {
                 contextSize: 6144,
                 gpuLayers: 4,
+                kvCacheType: 'auto',
             },
         });
     });

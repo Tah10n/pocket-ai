@@ -1,11 +1,22 @@
 export const HF_BASE_URL = 'https://huggingface.co';
 export const HF_HOSTNAME = 'huggingface.co';
+export const HF_SHORT_HOSTNAME = 'hf.co';
 export const DEFAULT_HF_REVISION = 'main';
 
 export function isHuggingFaceUrl(url: string): boolean {
   try {
     const parsed = new URL(url);
-    return parsed.hostname === HF_HOSTNAME && parsed.protocol === 'https:';
+    if (parsed.protocol !== 'https:') {
+      return false;
+    }
+
+    const hostname = parsed.hostname.toLowerCase();
+    return (
+      hostname === HF_HOSTNAME
+      || hostname.endsWith(`.${HF_HOSTNAME}`)
+      || hostname === HF_SHORT_HOSTNAME
+      || hostname.endsWith(`.${HF_SHORT_HOSTNAME}`)
+    );
   } catch {
     return false;
   }

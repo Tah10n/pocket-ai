@@ -1,5 +1,6 @@
 import React from 'react';
 import { render } from '@testing-library/react-native';
+import { Linking } from 'react-native';
 import { MarkdownRenderer } from '../../src/components/ui/MarkdownRenderer';
 
 jest.mock('react-native-markdown-display', () => {
@@ -81,5 +82,41 @@ describe('MarkdownRenderer theme styles', () => {
       { link: style.link },
     );
     expect(linkRuleElement.props.selectable).toBe(true);
+  });
+
+  it('allows consumers to handle non-http(s) link schemes via onLinkPress', () => {
+    const openUrlSpy = jest.spyOn(Linking, 'openURL').mockResolvedValue(true as any);
+
+    const { getByTestId } = render(
+      <MarkdownRenderer content={'[mail](mailto:help@example.com)'} selectable />,
+    );
+
+    const root = getByTestId('markdown-root');
+    const rules = root.props.markdownRules;
+    const style = root.props.markdownStyle;
+
+    const mailtoUrl = 'mailto:help@example.com';
+    const onLinkPress = jest.fn(() => true);
+    const linkRuleElement = rules.link(
+      { key: 'link-mailto', attributes: { href: mailtoUrl } },
+      ['mail'],
+      [],
+      { link: style.link },
+      onLinkPress,
+    );
+
+    linkRuleElement.props.onPress();
+    expect(onLinkPress).toHaveBeenCalledWith(mailtoUrl);
+    expect(openUrlSpy).toHaveBeenCalledWith(mailtoUrl);
+
+    openUrlSpy.mockClear();
+    const linkRuleNoCallback = rules.link(
+      { key: 'link-mailto-2', attributes: { href: mailtoUrl } },
+      ['mail'],
+      [],
+      { link: style.link },
+    );
+    linkRuleNoCallback.props.onPress();
+    expect(openUrlSpy).not.toHaveBeenCalled();
   });
 });

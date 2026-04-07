@@ -150,6 +150,22 @@ describe('StorageManagerService', () => {
     expect(metrics.modelsBytes).toBe(4096);
   });
 
+  it('falls back to persisted model size when the localPath is unsafe', async () => {
+    mockedRegistry.getModels.mockReturnValue([createDownloadedModel({
+      localPath: '../org_model.gguf',
+      size: 2048,
+    })]);
+
+    const metrics = await getAppStorageMetrics();
+
+    expect(metrics.downloadedModels).toHaveLength(1);
+    expect(metrics.downloadedModels[0].size).toBe(2048);
+    expect(metrics.modelsBytes).toBe(2048);
+
+    const invokedUris = (FileSystem.getInfoAsync as jest.Mock).mock.calls.map((call) => call[0]);
+    expect(invokedUris.some((uri) => typeof uri === 'string' && uri.includes('..'))).toBe(false);
+  });
+
   it('includes persisted catalog cache in app cache usage', async () => {
     mockedModelCatalogService.getPersistentCacheBytes.mockReturnValue(1024);
     (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {

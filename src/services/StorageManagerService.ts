@@ -5,6 +5,7 @@ import { getCacheDir, getModelsDir } from './FileSystemSetup';
 import { llmEngineService } from './LLMEngineService';
 import { registry } from './LocalStorageRegistry';
 import { modelCatalogService } from './ModelCatalogService';
+import { safeJoinModelPath } from '../utils/safeFilePath';
 import {
   CHAT_HISTORY_INDEX_KEY,
   CHAT_HISTORY_PREFIX,
@@ -112,7 +113,12 @@ async function resolveStoredModelSize(model: ModelMetadata): Promise<number | nu
   }
 
   try {
-    const info = await FileSystem.getInfoAsync(`${modelsDir}${model.localPath}`);
+    const localUri = safeJoinModelPath(modelsDir, model.localPath);
+    if (!localUri) {
+      return model.size ?? null;
+    }
+
+    const info = await FileSystem.getInfoAsync(localUri);
     if (
       info.exists &&
       typeof info.size === 'number' &&

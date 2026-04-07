@@ -21,16 +21,20 @@ function isSafeUrl(url: string): boolean {
   }
 }
 
-function openMarkdownUrl(url: string, customCallback?: (url: string) => boolean) {
-  if (!url || !isSafeUrl(url)) {
+function openMarkdownUrl(url: unknown, customCallback?: (url: string) => boolean) {
+  if (typeof url !== 'string' || url.length === 0) {
     return;
   }
 
   if (customCallback) {
     const result = customCallback(url);
-    if (result && typeof result === 'boolean') {
+    if (result === true) {
       void Linking.openURL(url);
     }
+    return;
+  }
+
+  if (!isSafeUrl(url)) {
     return;
   }
 

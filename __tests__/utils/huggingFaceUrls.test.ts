@@ -3,6 +3,7 @@ import {
   buildHuggingFaceResolveUrl,
   buildHuggingFaceTreeUrl,
   getHuggingFaceModelUrl,
+  isHuggingFaceUrl,
   normalizeHuggingFaceRevision,
   resolveHuggingFaceRevision,
 } from '../../src/utils/huggingFaceUrls';
@@ -33,6 +34,17 @@ describe('huggingFaceUrls', () => {
     expect(buildHuggingFaceTreeUrl('org/model', null)).toBe(
       'https://huggingface.co/api/models/org/model/tree/main?recursive=true',
     );
+  });
+
+  it('detects Hugging Face urls and rejects impostors', () => {
+    expect(isHuggingFaceUrl('https://huggingface.co/org/model')).toBe(true);
+    expect(isHuggingFaceUrl('https://cdn-lfs.huggingface.co/org/model/resolve/main/model.gguf')).toBe(true);
+    expect(isHuggingFaceUrl('https://hf.co/org/model')).toBe(true);
+    expect(isHuggingFaceUrl('https://HUGGINGFACE.CO/org/model')).toBe(true);
+
+    expect(isHuggingFaceUrl('http://huggingface.co/org/model')).toBe(false);
+    expect(isHuggingFaceUrl('https://huggingface.co.evil.com/org/model')).toBe(false);
+    expect(isHuggingFaceUrl('not-a-url')).toBe(false);
   });
 });
 

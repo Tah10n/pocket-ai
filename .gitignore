@@ -5,6 +5,9 @@ node_modules/
 
 # Expo
 .expo/
+.expo-home/
+.npm-cache/
+.gradle-user-home/
 dist/
 web-build/
 expo-env.d.ts

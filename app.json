@@ -24,7 +24,6 @@
         "backgroundColor": "#010100",
         "foregroundImage": "./assets/images/android-icon-foreground.png"
       },
-      "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
       "package": "com.github.tah10n.pocketai"
     },
@@ -50,9 +49,14 @@
       "expo-font",
       "./plugins/withAndroidGradlePluginManagement",
       "./plugins/withAndroidReleaseConfig",
+      "./plugins/withAndroidLocalProperties",
+      "./plugins/withAndroidMainActivityOrientation",
       "./plugins/withAndroidSystemMetrics",
       "./plugins/withIosSystemMetrics",
-      "expo-secure-store"
+      "expo-secure-store",
+      "expo-image",
+      "expo-sharing",
+      "expo-web-browser"
     ],
     "experiments": {
       "typedRoutes": true,

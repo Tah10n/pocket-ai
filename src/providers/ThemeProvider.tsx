@@ -28,7 +28,9 @@ const ThemeContext = createContext<ThemeContextValue>({
     setTheme: () => {},
 });
 
-function resolveThemeMode(mode: ThemeMode, systemScheme: 'light' | 'dark' | null | undefined): ResolvedThemeMode {
+type SystemColorScheme = ReturnType<typeof useSystemColorScheme>;
+
+function resolveThemeMode(mode: ThemeMode, systemScheme: SystemColorScheme): ResolvedThemeMode {
     if (mode === 'system') {
         return systemScheme === 'dark' ? 'dark' : 'light';
     }

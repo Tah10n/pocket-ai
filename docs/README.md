@@ -4,6 +4,7 @@ This folder contains the public maintainer-facing documentation for Pocket AI.
 
 ## Documents
 
+- [`workflow.md`](./workflow.md): branching model, PR title conventions, CI checks, and automated releases
 - [`background-tasks.md`](./background-tasks.md): background downloads/inference, Android foreground service constraints, and notification permission behavior
 - [`privacy-disclosures.md`](./privacy-disclosures.md): summary of what stays on-device, when the app uses the network, and which local-data controls are available
 - [`release-checklist.md`](./release-checklist.md): pre-release verification steps, manual QA flow, and release-facing files that must stay aligned

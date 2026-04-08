@@ -12,15 +12,14 @@
   <a href="https://github.com/Tah10n/pocket-ai/blob/main/LICENSE">
     <img src="https://img.shields.io/github/license/Tah10n/pocket-ai?style=flat-square" alt="License" />
   </a>
+  <a href="https://github.com/Tah10n/pocket-ai/actions/workflows/ci.yml">
+    <img src="https://img.shields.io/github/actions/workflow/status/Tah10n/pocket-ai/ci.yml?style=flat-square&label=CI" alt="CI" />
+  </a>
   <img src="https://img.shields.io/badge/platform-Android%20%7C%20iOS-blue?style=flat-square" alt="Platform" />
   <img src="https://img.shields.io/badge/Expo-SDK%2055-000020?style=flat-square&logo=expo" alt="Expo SDK 55" />
   <img src="https://img.shields.io/badge/TypeScript-5.9-3178C6?style=flat-square&logo=typescript&logoColor=white" alt="TypeScript" />
   <img src="https://img.shields.io/badge/inference-llama.rn-orange?style=flat-square" alt="llama.rn" />
 </p>
-
-<!-- CI badge: uncomment when the public repo has its own GitHub Actions workflow
-  <img src="https://img.shields.io/github/actions/workflow/status/Tah10n/pocket-ai/ci.yml?style=flat-square&label=CI" alt="CI" />
--->
 
 <p align="center">
   <img src="docs/screenshots/feature-graphic.png" width="700" alt="Pocket AI — offline-first local AI assistant" />
@@ -120,6 +119,8 @@ For release builds and signing setup, see the [Android Build Guide](docs/android
 ## Contributing
 
 Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines and the [Code of Conduct](CODE_OF_CONDUCT.md).
+
+This project uses Conventional Commit-style **PR titles** to drive automated versioning and changelog updates.
 
 ## Documentation
 

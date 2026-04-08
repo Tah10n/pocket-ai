@@ -20,11 +20,21 @@ Use this checklist before cutting a preview or production release. It is written
 
 ## Release metadata
 
+This repository uses **Release Please** to automate:
+
+- `app.json -> expo.version`
+- `package.json -> version`
+- [`CHANGELOG.md`](../CHANGELOG.md)
+
 If you're cutting a user-facing store release:
 
-- Bump `app.json -> expo.version`.
-- Keep `package.json -> version` aligned (same value).
-- Update [`CHANGELOG.md`](../CHANGELOG.md).
+- Merge the Release Please **Release PR** (it updates versions + changelog).
+- Avoid manual edits to the version/changelog files in the normal flow.
+
+Notes:
+
+- Release Please derives version bumps from merged PR titles (Conventional Commits).
+- If `main` requires status checks, configure a PAT secret (for example `RELEASE_PLEASE_TOKEN`) so CI runs on Release PRs.
 
 ## Pre-flight checks
 
@@ -81,7 +91,7 @@ npm run build:android:production
 
 This command uses `expo.version` as `versionName`, uses the current `expo.android.versionCode` as the upload code, and after a successful build reserves the next `versionCode` in `app.json`.
 
-After a successful build, `app.json` is expected to change (the next `expo.android.versionCode` is reserved). Commit this change as part of the release PR so the next upload code is not lost.
+After a successful build, `app.json` is expected to change (the next `expo.android.versionCode` is reserved). Commit this change as part of the Release PR so the next upload code is not lost.
 
 Only override the version values when recovering from a failed or custom release flow:
 

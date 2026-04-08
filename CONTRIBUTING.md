@@ -65,7 +65,8 @@ For most code changes, the expected workflow is:
 3. Make one logical change at a time.
 4. Run the relevant checks locally.
 5. Commit with a clear message.
-6. Open a pull request to `main` and complete the [pull request template](./.github/PULL_REQUEST_TEMPLATE.md).
+6. Open a pull request to `main` with a **Conventional Commit-style PR title** (required).
+7. Complete the [pull request template](./.github/PULL_REQUEST_TEMPLATE.md).
 
 ## Development setup
 
@@ -137,9 +138,11 @@ When a change adds or edits user-facing copy:
 
 Avoid landing mixed-language UI or English-only strings in translated screens.
 
-## Commit messages
+## PR titles (required)
 
-Prefer clear, imperative commit messages. Conventional Commit prefixes are recommended:
+This repository uses **squash merge** and **automated releases** (Release Please).
+
+That means the **PR title** must follow the [Conventional Commits](https://www.conventionalcommits.org/) format so versioning and changelog can be generated automatically:
 
 - `feat`: new user-facing behavior
 - `fix`: bug fixes or regressions
@@ -153,6 +156,11 @@ Examples:
 - `feat: add storage warning before large model download`
 - `fix: prevent duplicate conversation restore on app launch`
 - `docs: clarify Android release setup`
+
+Notes:
+
+- Scopes are optional (`feat(ui): ...` is fine, but not required).
+- Dependabot PRs are exempt from the title rule.
 
 ## Code and documentation expectations
 

@@ -31,6 +31,11 @@ PRs are expected to keep `main` green. Typical required checks include:
 - Dependency Review
 - PR title validation
 
+Bootstrap note:
+
+- If the repository is adding these workflows for the first time, do not require them on the same bootstrap PR.
+- Merge the workflow PR first, let the checks exist on `main`, then enable them as required branch protections.
+
 ## Releases (automated)
 
 Releases are automated with **Release Please**:
@@ -52,4 +57,3 @@ Canonical version locations:
 
 - `app.json -> expo.version`
 - `package.json -> version` (kept equal to `expo.version`)
-

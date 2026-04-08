@@ -1,5 +1,6 @@
 import type { SystemMemorySnapshot } from '../services/SystemMetricsService';
 import type { MemoryBudget } from './types';
+import { isFinitePositiveNumber } from './guards';
 
 export const DEFAULT_TOTAL_MEMORY_BYTES = 8 * 1024 * 1024 * 1024;
 export const FITS_IN_RAM_HEADROOM_RATIO = 0.8;
@@ -18,10 +19,6 @@ export interface MemoryBudgetSnapshot {
   appPssBytes?: number;
   lowMemory?: boolean;
   pressureLevel?: SystemMemorySnapshot['pressureLevel'];
-}
-
-function isFinitePositiveNumber(value: unknown): value is number {
-  return typeof value === 'number' && Number.isFinite(value) && value > 0;
 }
 
 export function resolveConservativeAvailableMemoryBudget(snapshot: MemoryBudgetSnapshot): number | null {

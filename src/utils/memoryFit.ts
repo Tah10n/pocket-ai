@@ -4,6 +4,7 @@ import {
   FITS_IN_RAM_HEADROOM_RATIO,
   resolveConservativeAvailableMemoryBudget,
 } from '../memory/budget';
+import { isFinitePositiveNumber } from '../memory/guards';
 import { estimateModelRuntimeBytes } from '../memory/estimator';
 
 export {
@@ -21,10 +22,6 @@ export interface MemoryFitAssessment {
   availableBudgetBytes: number | null;
   effectiveBudgetBytes: number;
   fitsInRam: boolean;
-}
-
-function isFinitePositiveNumber(value: unknown): value is number {
-  return typeof value === 'number' && Number.isFinite(value) && value > 0;
 }
 
 export function assessModelMemoryFit({

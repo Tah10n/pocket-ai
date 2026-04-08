@@ -22,7 +22,7 @@ import {
   ScreenStack,
 } from '@/components/ui/ScreenShell';
 import { Text } from '@/components/ui/text';
-import { useChatCommands } from '../../hooks/useChatCommands';
+import { useChatSession } from '../../hooks/useChatSession';
 import { useConversationIndex } from '../../hooks/useConversationIndex';
 import { ConversationIndexItem } from '../../types/chat';
 import {
@@ -77,7 +77,7 @@ export function ConversationsScreen() {
   const canGoBack = router.canGoBack();
   const conversationIndex = useConversationIndex({ enabled: isFocused });
   const activeThreadId = useChatStore((state) => state.activeThreadId);
-  const { deleteThread, openThread, renameThread, startNewChat } = useChatCommands();
+  const { deleteThread, openThread, renameThread, startNewChat } = useChatSession();
   const [searchQuery, setSearchQuery] = useState('');
   const deferredSearchQuery = useDeferredValue(searchQuery);
   const [editingThreadId, setEditingThreadId] = useState<string | null>(null);

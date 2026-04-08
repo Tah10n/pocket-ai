@@ -1,23 +1,45 @@
 import DeviceInfo from 'react-native-device-info';
-import {
-  ModelAccessState,
-  type ModelMemoryFitConfidence,
-  type ModelMemoryFitDecision,
-  ModelMetadata,
-  LifecycleStatus,
-} from '../types/models';
+import { ModelAccessState, ModelMetadata } from '../types/models';
 import { hardwareListenerService } from './HardwareListenerService';
 import { registry } from './LocalStorageRegistry';
 import { huggingFaceTokenService } from './HuggingFaceTokenService';
 import { normalizePersistedModelMetadata } from './ModelMetadataNormalizer';
 import { performanceMonitor } from './PerformanceMonitor';
 import type { SystemMemorySnapshot } from './SystemMetricsService';
+import { uniqueByKey } from '../utils/uniqueBy';
 import {
   ModelCatalogCacheStore,
   type CatalogCacheAuthScope,
   type CatalogCacheScope,
 } from './ModelCatalogCacheStore';
-import { estimateFastMemoryFit } from '../memory/estimator';
+import { extractReadmeData } from './ModelReadmeParser';
+import {
+  buildHeaders,
+  fetchWithTimeout,
+  ModelCatalogError,
+  parseNextCursor,
+  resolveRequestAuthToken,
+  resolveRetryAfterMs,
+} from './ModelCatalogHttpClient';
+import {
+  filterCatalogSearchModels,
+  getFileName,
+  getFileSha,
+  getFileSize,
+  isEligibleGgufEntry,
+  isPreferredQuantFileName,
+  selectTreeEntryForModel,
+} from './ModelCatalogFileSelector';
+import {
+  buildModelMetadataFromPayload,
+  createFallbackModel,
+  resolveMemoryFitSummary,
+  resolveMergedMaxContextTokens,
+  resolveStringArrayMetadata,
+  resolveStringMetadata,
+  resolveSummaryMaxContextTokens,
+  transformHFResponse,
+} from './ModelCatalogTransformer';
 import {
   buildHuggingFaceModelApiUrl,
   buildHuggingFaceRawUrl,
@@ -26,172 +48,31 @@ import {
   getHuggingFaceModelUrl,
   HF_BASE_URL,
 } from '../utils/huggingFaceUrls';
-
-type HuggingFaceModelSummary = {
-  id?: string;
-  modelId?: string;
-  author?: string;
-  sha?: string;
-  lastModified?: string;
-  siblings?: HuggingFaceSibling[];
-  config?: HuggingFaceModelConfig;
-  gated?: boolean | string;
-  private?: boolean;
-  downloads?: number;
-  likes?: number;
-  tags?: string[];
-  pipeline_tag?: string;
-  cardData?: HuggingFaceModelCardData;
-  gguf?: {
-    total?: number;
-    context_length?: number;
-    architecture?: string;
-    size_label?: string;
-  };
-};
-
-type HuggingFaceModelCardData = {
-  model_name?: string;
-  model_type?: string;
-  base_model?: string | string[];
-  license?: string;
-  language?: string | string[];
-  datasets?: string[];
-  model_creator?: string;
-  quantized_by?: string;
-  context_length?: number | string;
-  max_position_embeddings?: number | string;
-  n_positions?: number | string;
-  max_sequence_length?: number | string;
-  seq_length?: number | string;
-  sliding_window?: number | string;
-  model_max_length?: number | string;
-  n_ctx?: number | string;
-  n_ctx_train?: number | string;
-  num_ctx?: number | string;
-};
-
-type HuggingFaceModelConfig = {
-  max_position_embeddings?: number;
-  n_positions?: number;
-  max_sequence_length?: number;
-  seq_length?: number;
-  sliding_window?: number;
-  context_length?: number;
-  model_max_length?: number;
-  n_ctx?: number;
-  n_ctx_train?: number;
-  num_ctx?: number;
-  original_max_position_embeddings?: number;
-  text_config?: HuggingFaceModelConfig;
-  rope_scaling?: {
-    original_max_position_embeddings?: number;
-    max_position_embeddings?: number;
-  };
-  model_type?: string;
-  architectures?: string[];
-};
-
-type HuggingFaceSibling = {
-  rfilename?: string;
-  filename?: string;
-  size?: number;
-  lfs?: {
-    size?: number;
-    sha256?: string;
-  };
-};
-
-type HuggingFaceTreeEntry = {
-  path?: string;
-  rfilename?: string;
-  filename?: string;
-  size?: number;
-  lfs?: {
-    size?: number;
-    sha256?: string;
-    oid?: string;
-  };
-};
-
-type HuggingFaceModelsPage = {
-  items: HuggingFaceModelSummary[];
-  nextCursor: string | null;
-};
-
-type HuggingFaceTreeStopReason =
-  | 'complete'
-  | 'target_found'
-  | 'preferred_found'
-  | 'lookahead'
-  | 'max_pages'
-  | 'http_error';
-
-type HuggingFaceTreeResponse = {
-  entries: HuggingFaceTreeEntry[];
-  status: number;
-  isComplete: boolean;
-  stopReason: HuggingFaceTreeStopReason;
-};
-
-type ReadmeModelData = {
-  description?: string;
-  cardData?: Partial<HuggingFaceModelCardData>;
-  maxContextTokens?: number;
-};
-
-type ReadmeFrontMatterValue = string | string[];
-
-type CatalogCacheEntry = {
-  result: Omit<ModelCatalogSearchResult, 'warning'>;
-  timestamp: number;
-  isBufferedCursor: boolean;
-};
-
-type CatalogBatchResult = {
-  models: ModelMetadata[];
-  nextCursor: string | null;
-};
-
-type CatalogRequestContext = {
-  authToken: string | null;
-  hasAuthToken: boolean;
-  authVersion: number;
-};
-
-type ResolvedFileProbeCacheEntry = {
-  state: ModelAccessState | null;
-  timestamp: number;
-};
-
-type ResolveTreeAccessStateOptions = {
-  allowAuthorization?: boolean;
-};
-
-type CreateTreeProbeCandidateOptions = {
-  allowPublic?: boolean;
-};
-
-const REQUEST_AUTH_POLICY = {
-  ANONYMOUS: 'ANONYMOUS',
-  OPTIONAL_AUTH: 'OPTIONAL_AUTH',
-  REQUIRED_AUTH: 'REQUIRED_AUTH',
-} as const;
-
-type RequestAuthPolicy = typeof REQUEST_AUTH_POLICY[keyof typeof REQUEST_AUTH_POLICY];
+import {
+  REQUEST_AUTH_POLICY,
+  type CatalogBatchResult,
+  type CatalogCacheEntry,
+  type CatalogRequestContext,
+  type HuggingFaceModelSummary,
+  type HuggingFaceModelsPage,
+  type HuggingFaceTreeEntry,
+  type HuggingFaceTreeResponse,
+  type HuggingFaceTreeStopReason,
+  type ReadmeModelData,
+  type RequestAuthPolicy,
+  type ResolvedFileProbeCacheEntry,
+  type ResolveTreeAccessStateOptions,
+} from '../types/huggingFace';
 
 export type CatalogServerSort = 'downloads' | 'likes' | 'lastModified';
-export type ModelCatalogErrorCode = 'rate_limited' | 'timeout' | 'network' | 'unknown';
 export type ModelCatalogCacheInvalidationSource = 'replay' | 'manual' | 'token' | 'unknown';
+export { ModelCatalogError, getModelCatalogErrorMessage, type ModelCatalogErrorCode } from './ModelCatalogHttpClient';
 
 type CacheInvalidationListener = (revision: number, source: ModelCatalogCacheInvalidationSource) => void;
 
-const MIN_GGUF_BYTES = 50 * 1024 * 1024;
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 const PERSISTENT_CACHE_MAX_AGE = 24 * 60 * 60 * 1000; // 24 hours
 const ACCESS_PROBE_CACHE_TTL = 2 * 60 * 1000; // 2 minutes
-const README_SUMMARY_MAX_LENGTH = 320;
-const HF_REQUEST_TIMEOUT_MS = 20_000;
 const DEFAULT_RATE_LIMIT_BACKOFF_MS = 60_000;
 const MAX_RATE_LIMIT_BACKOFF_MS = 15 * 60 * 1000;
 const CATALOG_PREFETCH_PAGES = 3;
@@ -202,92 +83,15 @@ const SEARCH_CACHE_MAX_ENTRIES = 120;
 const BUFFERED_SEARCH_CACHE_MAX_AGE = 20 * 60 * 1000; // 20 minutes
 const MODEL_SNAPSHOT_CACHE_MAX_ENTRIES = 2000;
 const ACCESS_PROBE_CACHE_MAX_ENTRIES = 500;
-const EXCLUDED_CATALOG_PIPELINE_TAGS = new Set([
-  'text-to-image',
-  'image-to-image',
-  'image-text-to-text',
-  'image-classification',
-  'image-segmentation',
-  'zero-shot-image-classification',
-  'object-detection',
-  'depth-estimation',
-  'visual-question-answering',
-  'document-question-answering',
-  'video-classification',
-  'video-text-to-text',
-  'text-to-video',
-  'image-to-video',
-  'text-to-audio',
-  'audio-to-audio',
-  'audio-classification',
-  'automatic-speech-recognition',
-]);
-const EXCLUDED_CATALOG_SIGNAL_EXACT_MATCHES = new Set([
-  'diffusers',
-  'stable-diffusion',
-  'image-generation',
-  'clip-vision-model',
-]);
-const EXCLUDED_CATALOG_SIGNAL_FRAGMENTS = [
-  'stable-diffusion',
-  'sdxl',
-  'diffusion',
-  'flux',
-];
 
 export const HUGGING_FACE_TOKEN_SETTINGS_URL = `${HF_BASE_URL}/settings/tokens`;
 export { getHuggingFaceModelUrl };
-
-type ModelCatalogErrorOptions = {
-  retryAfterMs?: number;
-};
-
-export class ModelCatalogError extends Error {
-  public readonly code: ModelCatalogErrorCode;
-  public readonly retryAfterMs?: number;
-
-  constructor(code: ModelCatalogErrorCode, message: string, options?: ModelCatalogErrorOptions) {
-    super(message);
-    this.code = code;
-    this.retryAfterMs = options?.retryAfterMs;
-    this.name = 'ModelCatalogError';
-  }
-}
 
 class StaleCatalogAuthError extends Error {
   constructor() {
     super('Catalog auth context changed while the request was in flight');
     this.name = 'StaleCatalogAuthError';
   }
-}
-
-export function getModelCatalogErrorMessage(error: unknown): string {
-  if (error instanceof ModelCatalogError) {
-    if (error.code === 'rate_limited') {
-      const retryAfterMs = error.retryAfterMs;
-      if (typeof retryAfterMs === 'number' && Number.isFinite(retryAfterMs) && retryAfterMs > 0) {
-        const retryAfterSeconds = Math.max(1, Math.ceil(retryAfterMs / 1000));
-        if (retryAfterSeconds < 60) {
-          return `Hugging Face rate limit reached. Try again in ~${retryAfterSeconds}s.`;
-        }
-
-        const retryAfterMinutes = Math.ceil(retryAfterSeconds / 60);
-        return `Hugging Face rate limit reached. Try again in ~${retryAfterMinutes}m.`;
-      }
-
-      return 'Hugging Face rate limit reached. Please wait a moment and try again.';
-    }
-
-    if (error.code === 'timeout') {
-      return 'Hugging Face request timed out. Please check your connection and try again.';
-    }
-
-    if (error.code === 'network') {
-      return 'Network error while loading models. Check your connection and try again.';
-    }
-  }
-
-  return 'Could not load models right now. Please try again.';
 }
 
 export interface ModelCatalogSearchResult {
@@ -307,7 +111,7 @@ type CatalogMemoryFitContext = {
 };
 
 export class ModelCatalogService {
-  private searchCache: Map<string, CatalogCacheEntry> = new Map();
+  private searchCache: Map<string, CatalogCacheEntry<Omit<ModelCatalogSearchResult, 'warning'>>> = new Map();
   private searchRequestCache: Map<string, Promise<ModelCatalogSearchResult>> = new Map();
   private modelSnapshotCache: Map<string, ModelMetadata> = new Map();
   private persistentCache = new ModelCatalogCacheStore();
@@ -535,7 +339,7 @@ export class ModelCatalogService {
     }
 
     if (!forceRefresh && cached && (isCacheFresh || isBufferedCursorFresh)) {
-      const filteredCachedModels = this.filterCatalogSearchModels(cached.result.models);
+      const filteredCachedModels = filterCatalogSearchModels(cached.result.models);
       const memoryFitContext = await memoryFitContextPromise;
       return {
         ...cached.result,
@@ -625,7 +429,7 @@ export class ModelCatalogService {
           catalogSearchAuthPolicy,
         );
         this.assertRequestContextIsCurrent(requestContext);
-        const filteredModels = this.filterCatalogSearchModels(fetched.models);
+        const filteredModels = filterCatalogSearchModels(fetched.models);
         const result = {
           models: filteredModels,
           hasMore: fetched.nextCursor !== null,
@@ -879,7 +683,7 @@ export class ModelCatalogService {
     }
 
     if (isMemoryEntryFresh && memoryEntry) {
-      const filteredMemoryModels = this.filterCatalogSearchModels(memoryEntry.result.models);
+      const filteredMemoryModels = filterCatalogSearchModels(memoryEntry.result.models);
       return {
         ...memoryEntry.result,
         models: this.mergeWithRegistry(filteredMemoryModels, this.getAuthScope(hasToken), memoryFitContext),
@@ -898,7 +702,7 @@ export class ModelCatalogService {
       return null;
     }
 
-    const filteredPersistedModels = this.filterCatalogSearchModels(persistentEntry.models);
+    const filteredPersistedModels = filterCatalogSearchModels(persistentEntry.models);
     const mergedModels = this.mergeWithRegistry(
       filteredPersistedModels,
       this.getAuthScope(hasToken),
@@ -937,14 +741,14 @@ export class ModelCatalogService {
 
     try {
       const cachedModel = this.getCachedModel(modelId);
-      const fallbackModel = cachedModel ?? this.createFallbackModel(modelId);
+      const fallbackModel = cachedModel ?? createFallbackModel(modelId);
       const requiresAuthHint = fallbackModel.isGated
         || fallbackModel.isPrivate
         || fallbackModel.accessState !== ModelAccessState.PUBLIC;
       const detailsUrl = buildHuggingFaceModelApiUrl(modelId);
       let detailsAuthToken: string | null = null;
-      let response = await this.fetchWithTimeout(detailsUrl, {
-        headers: this.buildHeaders(REQUEST_AUTH_POLICY.ANONYMOUS, requestContext.authToken),
+      let response = await fetchWithTimeout(detailsUrl, {
+        headers: buildHeaders(REQUEST_AUTH_POLICY.ANONYMOUS, requestContext.authToken),
       });
       this.assertRequestContextIsCurrent(requestContext);
 
@@ -954,8 +758,8 @@ export class ModelCatalogService {
         && requestContext.hasAuthToken
       ) {
         detailsAuthToken = requestContext.authToken;
-        response = await this.fetchWithTimeout(detailsUrl, {
-          headers: this.buildHeaders(REQUEST_AUTH_POLICY.REQUIRED_AUTH, requestContext.authToken),
+        response = await fetchWithTimeout(detailsUrl, {
+          headers: buildHeaders(REQUEST_AUTH_POLICY.REQUIRED_AUTH, requestContext.authToken),
         });
         this.assertRequestContextIsCurrent(requestContext);
       }
@@ -965,8 +769,8 @@ export class ModelCatalogService {
       if (response.ok) {
         const payload = await response.json() as HuggingFaceModelSummary;
         this.assertRequestContextIsCurrent(requestContext);
-        const payloadMaxContextTokens = this.resolveSummaryMaxContextTokens(payload);
-        detailedModel = this.buildModelMetadataFromPayload(
+        const payloadMaxContextTokens = resolveSummaryMaxContextTokens(payload);
+        detailedModel = buildModelMetadataFromPayload(
           payload,
           memoryFitContext,
           requestContext.authToken,
@@ -1019,35 +823,35 @@ export class ModelCatalogService {
         detailedModel = normalizePersistedModelMetadata({
           ...detailedModel,
           description: readmeData.description ?? detailedModel.description,
-          maxContextTokens: this.resolveMergedMaxContextTokens(
+          maxContextTokens: resolveMergedMaxContextTokens(
             detailedModel.maxContextTokens,
             readmeData.maxContextTokens,
           ),
-          modelType: this.resolveStringMetadata(
+          modelType: resolveStringMetadata(
             detailedModel.modelType,
             readmeData.cardData?.model_type,
           ),
-          baseModels: this.resolveStringArrayMetadata(
+          baseModels: resolveStringArrayMetadata(
             detailedModel.baseModels,
             readmeData.cardData?.base_model,
           ),
-          license: this.resolveStringMetadata(
+          license: resolveStringMetadata(
             detailedModel.license,
             readmeData.cardData?.license,
           ),
-          languages: this.resolveStringArrayMetadata(
+          languages: resolveStringArrayMetadata(
             detailedModel.languages,
             readmeData.cardData?.language,
           ),
-          datasets: this.resolveStringArrayMetadata(
+          datasets: resolveStringArrayMetadata(
             detailedModel.datasets,
             readmeData.cardData?.datasets,
           ),
-          quantizedBy: this.resolveStringMetadata(
+          quantizedBy: resolveStringMetadata(
             detailedModel.quantizedBy,
             readmeData.cardData?.quantized_by,
           ),
-          modelCreator: this.resolveStringMetadata(
+          modelCreator: resolveStringMetadata(
             detailedModel.modelCreator,
             readmeData.cardData?.model_creator,
           ),
@@ -1191,44 +995,11 @@ export class ModelCatalogService {
     return this.lastMemoryFitContext;
   }
 
-  private resolveMemoryFitSummary(
-    model: Pick<ModelMetadata, 'size' | 'metadataTrust' | 'gguf'>,
-    memoryFitContext: CatalogMemoryFitContext | null,
-  ): {
-    fitsInRam: boolean | null;
-    decision: ModelMemoryFitDecision;
-    confidence: ModelMemoryFitConfidence;
-  } | null {
-    const size = model.size;
-    if (typeof size !== 'number' || !Number.isFinite(size) || size <= 0) {
-      return null;
-    }
-
-    if (!memoryFitContext) {
-      return null;
-    }
-
-    const fit = estimateFastMemoryFit({
-      modelSizeBytes: size,
-      totalMemoryBytes: memoryFitContext.totalMemoryBytes,
-      metadataTrust: model.metadataTrust,
-      ggufMetadata: model.gguf as Record<string, unknown> | undefined,
-    });
-
-    return {
-      fitsInRam: fit.decision === 'unknown'
-        ? null
-        : fit.decision === 'fits_high_confidence' || fit.decision === 'fits_low_confidence',
-      decision: fit.decision,
-      confidence: fit.confidence,
-    };
-  }
-
   private withResolvedMemoryFit(
     model: ModelMetadata,
     memoryFitContext: CatalogMemoryFitContext | null = this.getRememberedMemoryFitContext(),
   ): ModelMetadata {
-    const resolvedMemoryFit = this.resolveMemoryFitSummary(model, memoryFitContext);
+    const resolvedMemoryFit = resolveMemoryFitSummary(model, memoryFitContext);
     const fitsInRam = resolvedMemoryFit?.fitsInRam ?? model.fitsInRam;
     const memoryFitDecision = resolvedMemoryFit?.decision ?? model.memoryFitDecision;
     const memoryFitConfidence = resolvedMemoryFit?.confidence ?? model.memoryFitConfidence;
@@ -1302,7 +1073,7 @@ export class ModelCatalogService {
             expectedFileName: model.requiresTreeProbe !== true ? model.resolvedFileName : undefined,
           },
         );
-        const selectedEntry = this.selectTreeEntryForModel(model, treeResponse.entries);
+        const selectedEntry = selectTreeEntryForModel(model, treeResponse.entries);
         const treeProbeIsFinal = treeResponse.isComplete || (
           model.requiresTreeProbe !== true && (
             treeResponse.stopReason === 'target_found'
@@ -1336,9 +1107,9 @@ export class ModelCatalogService {
           });
         }
 
-        const resolvedFileName = this.getFileName(selectedEntry);
-        const size = this.getFileSize(selectedEntry);
-        const resolvedMemoryFit = this.resolveMemoryFitSummary({ size, metadataTrust: model.metadataTrust }, memoryFitContext);
+        const resolvedFileName = getFileName(selectedEntry);
+        const size = getFileSize(selectedEntry);
+        const resolvedMemoryFit = resolveMemoryFitSummary({ size, metadataTrust: model.metadataTrust }, memoryFitContext);
         const didChangeSize = size !== model.size;
         const fitsInRam = resolvedMemoryFit
           ? resolvedMemoryFit.fitsInRam
@@ -1368,7 +1139,7 @@ export class ModelCatalogService {
             hfRevision: model.hfRevision,
             resolvedFileName,
             downloadUrl: buildHuggingFaceResolveUrl(model.id, resolvedFileName, model.hfRevision),
-            sha256: this.getFileSha(selectedEntry) ?? model.sha256,
+            sha256: getFileSha(selectedEntry) ?? model.sha256,
           });
         }
 
@@ -1383,7 +1154,7 @@ export class ModelCatalogService {
           hfRevision: model.hfRevision,
           resolvedFileName,
           downloadUrl: buildHuggingFaceResolveUrl(model.id, resolvedFileName, model.hfRevision),
-          sha256: this.getFileSha(selectedEntry) ?? model.sha256,
+          sha256: getFileSha(selectedEntry) ?? model.sha256,
         });
       } catch (error) {
         if (error instanceof StaleCatalogAuthError) {
@@ -1425,7 +1196,7 @@ export class ModelCatalogService {
     gated: boolean | undefined,
     catalogAuthPolicy: RequestAuthPolicy = REQUEST_AUTH_POLICY.ANONYMOUS,
   ): Promise<CatalogBatchResult> {
-    const catalogAuthToken = this.resolveRequestAuthToken(catalogAuthPolicy, requestContext.authToken);
+    const catalogAuthToken = resolveRequestAuthToken(catalogAuthPolicy, requestContext.authToken);
     const hasAuthToken = Boolean(catalogAuthToken);
     const span = performanceMonitor.startSpan('catalog.fetchCatalogBatch', {
       query: normalizedQuery,
@@ -1461,7 +1232,7 @@ export class ModelCatalogService {
           sort,
           gated,
         );
-        const baseModels = this.transformHFResponse(page.items, memoryFitContext, requestContext.authToken);
+        const baseModels = transformHFResponse(page.items, memoryFitContext, requestContext.authToken);
         const hydratedModels = await this.resolveMissingModelMetadata(
           baseModels,
           memoryFitContext,
@@ -1597,7 +1368,7 @@ export class ModelCatalogService {
     gated?: boolean,
   ): Promise<HuggingFaceModelsPage> {
     const cursorType = nextCursor ? 'cursor' : 'initial';
-    const authToken = this.resolveRequestAuthToken(authPolicy, requestContext.authToken);
+    const authToken = resolveRequestAuthToken(authPolicy, requestContext.authToken);
     const hasAuthToken = Boolean(authToken);
     const span = performanceMonitor.startSpan('catalog.fetchHuggingFaceModels', {
       query: normalizedQuery,
@@ -1616,8 +1387,8 @@ export class ModelCatalogService {
     const url = nextCursor ?? this.buildSearchUrl(normalizedQuery, limit, sort, gated);
 
     try {
-      const response = await this.fetchWithTimeout(url, {
-        headers: this.buildHeaders(authPolicy, authToken),
+      const response = await fetchWithTimeout(url, {
+        headers: buildHeaders(authPolicy, authToken),
       });
       status = response.status;
       this.assertRequestContextIsCurrent(requestContext);
@@ -1626,7 +1397,7 @@ export class ModelCatalogService {
         if (response.status === 429) {
           const authScope = this.getAuthScope(hasAuthToken);
           const now = Date.now();
-          const resolvedRetryAfterMs = this.resolveRetryAfterMs(response);
+          const resolvedRetryAfterMs = resolveRetryAfterMs(response);
           const baseRetryAfterMs = resolvedRetryAfterMs ?? DEFAULT_RATE_LIMIT_BACKOFF_MS;
           const previousBackoffMs = this.rateLimitBackoffMsByAuthScope[authScope] ?? 0;
           const clampedRetryAfterMs = this.clampRetryAfterMs(Math.max(baseRetryAfterMs, previousBackoffMs));
@@ -1655,7 +1426,7 @@ export class ModelCatalogService {
 
       return {
         items,
-        nextCursor: this.parseNextCursor(
+        nextCursor: parseNextCursor(
           typeof response.headers?.get === 'function'
             ? response.headers.get('link')
             : null,
@@ -1678,74 +1449,6 @@ export class ModelCatalogService {
       Math.max(1_000, Math.round(value)),
       MAX_RATE_LIMIT_BACKOFF_MS,
     );
-  }
-
-  private resolveRetryAfterMs(response: Response): number | null {
-    if (!response.headers || typeof response.headers.get !== 'function') {
-      return null;
-    }
-
-    const retryAfterHeader = response.headers.get('retry-after');
-    const retryAfterMs = this.parseRetryAfterMs(retryAfterHeader);
-    if (retryAfterMs !== null) {
-      return retryAfterMs;
-    }
-
-    const rateLimitResetHeader = response.headers.get('ratelimit-reset')
-      ?? response.headers.get('x-ratelimit-reset')
-      ?? response.headers.get('x-ratelimit-reset-requests');
-    return this.parseRateLimitResetMs(rateLimitResetHeader);
-  }
-
-  private parseRetryAfterMs(value: string | null): number | null {
-    if (!value) {
-      return null;
-    }
-
-    const trimmed = value.trim();
-    if (!trimmed) {
-      return null;
-    }
-
-    const seconds = Number(trimmed);
-    if (Number.isFinite(seconds)) {
-      return seconds * 1000;
-    }
-
-    const dateMs = Date.parse(trimmed);
-    if (!Number.isNaN(dateMs)) {
-      return dateMs - Date.now();
-    }
-
-    return null;
-  }
-
-  private parseRateLimitResetMs(value: string | null): number | null {
-    if (!value) {
-      return null;
-    }
-
-    const trimmed = value.trim();
-    if (!trimmed) {
-      return null;
-    }
-
-    const numericValue = Number(trimmed);
-    if (!Number.isFinite(numericValue) || numericValue < 0) {
-      return null;
-    }
-
-    // Heuristic: treat large values as epoch timestamps.
-    if (numericValue > 1e12) {
-      return numericValue - Date.now();
-    }
-
-    if (numericValue > 1e9) {
-      return numericValue * 1000 - Date.now();
-    }
-
-    // Otherwise assume seconds until reset.
-    return numericValue * 1000;
   }
 
   private hashForTrace(value: string): string {
@@ -1787,352 +1490,6 @@ export class ModelCatalogService {
     const trimmed = query.trim();
     if (!trimmed) return 'gguf';
     return trimmed.toLowerCase().includes('gguf') ? trimmed : `${trimmed} gguf`;
-  }
-
-  private parseHuggingFaceLastModifiedAt(value: unknown): number | undefined {
-    if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
-      const ms = value > 1e12 ? value : value * 1000;
-      return Math.round(ms);
-    }
-
-    if (typeof value !== 'string') {
-      return undefined;
-    }
-
-    const parsed = Date.parse(value);
-    return Number.isNaN(parsed) ? undefined : Math.round(parsed);
-  }
-
-  private transformHFResponse(
-    data: HuggingFaceModelSummary[],
-    memoryFitContext: CatalogMemoryFitContext,
-    authToken: string | null,
-  ): ModelMetadata[] {
-    const results: ModelMetadata[] = [];
-
-    for (const item of data) {
-      const repoId = item.id || item.modelId;
-      if (!repoId) continue;
-      if (!this.isCatalogSummarySupported(item)) {
-        continue;
-      }
-
-      const hasSiblingMetadata = Array.isArray(item.siblings) && item.siblings.length > 0;
-      const probeCandidate = this.createTreeProbeCandidate(item, repoId, memoryFitContext, authToken, {
-        allowPublic: !hasSiblingMetadata,
-      });
-      if (!hasSiblingMetadata) {
-        if (probeCandidate) {
-          results.push(probeCandidate);
-        }
-        continue;
-      }
-
-      const siblings = item.siblings ?? [];
-      const ggufSibling = this.selectPreferredGgufEntry(siblings);
-      if (!ggufSibling) {
-        if (probeCandidate) {
-          results.push(probeCandidate);
-        }
-        continue;
-      }
-
-      const selectedEntrySize = this.getFileSize(ggufSibling);
-      const size = selectedEntrySize ?? item.gguf?.total ?? null;
-      const metadataTrust = typeof selectedEntrySize === 'number' && Number.isFinite(selectedEntrySize) && selectedEntrySize > 0
-        ? 'trusted_remote' as const
-        : typeof item.gguf?.total === 'number' && Number.isFinite(item.gguf.total) && item.gguf.total > 0
-          ? 'inferred' as const
-          : undefined;
-      const maxContextTokens = this.resolveSummaryMaxContextTokens(item);
-      const slidingWindowTokens = this.resolveLargestContextTokenValue([
-        item.cardData?.sliding_window,
-        item.config?.sliding_window,
-        item.config?.text_config?.sliding_window,
-      ]);
-      const gguf = {
-        ...(typeof size === 'number' && Number.isFinite(size) && size > 0 ? { totalBytes: Math.round(size) } : {}),
-        ...(typeof item.gguf?.context_length === 'number' && Number.isFinite(item.gguf.context_length) && item.gguf.context_length > 0
-          ? { contextLengthTokens: Math.round(item.gguf.context_length) }
-          : {}),
-        ...(typeof item.gguf?.architecture === 'string' && item.gguf.architecture.trim().length > 0
-          ? { architecture: item.gguf.architecture.trim() }
-          : {}),
-        ...(typeof item.gguf?.size_label === 'string' && item.gguf.size_label.trim().length > 0
-          ? { sizeLabel: item.gguf.size_label.trim() }
-          : {}),
-        ...(typeof slidingWindowTokens === 'number' && Number.isFinite(slidingWindowTokens) && slidingWindowTokens > 0
-          ? { slidingWindowTokens }
-          : {}),
-      };
-      const resolvedMemoryFit = this.resolveMemoryFitSummary({ size, metadataTrust }, memoryFitContext);
-      const fitsInRam = resolvedMemoryFit?.fitsInRam ?? null;
-      const fileName = this.getFileName(ggufSibling) || 'model.gguf';
-      const hfRevision = item.sha ?? undefined;
-      const lastModifiedAt = this.parseHuggingFaceLastModifiedAt(item.lastModified);
-      const requiresAuth = Boolean(item.gated) || item.private === true;
-      const requiresTreeProbe = this.shouldRevalidateCatalogSummarySelection(ggufSibling);
-      const accessState = this.resolveDetailAccessState(requiresAuth, authToken);
-
-      results.push(normalizePersistedModelMetadata({
-        id: repoId,
-        name: repoId.split('/').pop() || repoId,
-        author: item.author || repoId.split('/')[0],
-        size,
-        downloadUrl: buildHuggingFaceResolveUrl(repoId, fileName, hfRevision),
-        hfRevision,
-        resolvedFileName: fileName,
-        lastModifiedAt,
-        fitsInRam,
-        memoryFitDecision: resolvedMemoryFit?.decision,
-        memoryFitConfidence: resolvedMemoryFit?.confidence,
-        metadataTrust,
-        gguf: Object.keys(gguf).length > 0 ? gguf : undefined,
-        accessState,
-        isGated: Boolean(item.gated),
-        isPrivate: item.private === true,
-        requiresTreeProbe,
-        lifecycleStatus: LifecycleStatus.AVAILABLE,
-        downloadProgress: 0,
-        sha256: this.getFileSha(ggufSibling),
-        maxContextTokens,
-        downloads: item.downloads ?? null,
-        likes: item.likes ?? null,
-      }));
-    }
-
-    return results;
-  }
-
-  private createTreeProbeCandidate(
-    item: HuggingFaceModelSummary,
-    repoId: string,
-    memoryFitContext: CatalogMemoryFitContext,
-    authToken: string | null,
-    options?: CreateTreeProbeCandidateOptions,
-  ): ModelMetadata | null {
-    const requiresAuth = Boolean(item.gated) || item.private === true;
-    if (!this.hasGgufCatalogSignal(repoId, item.tags)) {
-      return null;
-    }
-
-    if (!requiresAuth && options?.allowPublic !== true) {
-      return null;
-    }
-
-    const size = typeof item.gguf?.total === 'number' && Number.isFinite(item.gguf.total) && item.gguf.total > 0
-      ? Math.round(item.gguf.total)
-      : null;
-    const metadataTrust = typeof size === 'number' && Number.isFinite(size) && size > 0
-      ? 'inferred' as const
-      : undefined;
-    const maxContextTokens = this.resolveSummaryMaxContextTokens(item);
-    const slidingWindowTokens = this.resolveLargestContextTokenValue([
-      item.cardData?.sliding_window,
-      item.config?.sliding_window,
-      item.config?.text_config?.sliding_window,
-    ]);
-    const gguf = {
-      ...(typeof size === 'number' && Number.isFinite(size) && size > 0 ? { totalBytes: Math.round(size) } : {}),
-      ...(typeof item.gguf?.context_length === 'number' && Number.isFinite(item.gguf.context_length) && item.gguf.context_length > 0
-        ? { contextLengthTokens: Math.round(item.gguf.context_length) }
-        : {}),
-      ...(typeof item.gguf?.architecture === 'string' && item.gguf.architecture.trim().length > 0
-        ? { architecture: item.gguf.architecture.trim() }
-        : {}),
-      ...(typeof item.gguf?.size_label === 'string' && item.gguf.size_label.trim().length > 0
-        ? { sizeLabel: item.gguf.size_label.trim() }
-        : {}),
-      ...(typeof slidingWindowTokens === 'number' && Number.isFinite(slidingWindowTokens) && slidingWindowTokens > 0
-        ? { slidingWindowTokens }
-        : {}),
-    };
-    const resolvedMemoryFit = this.resolveMemoryFitSummary({ size, metadataTrust }, memoryFitContext);
-    const fitsInRam = resolvedMemoryFit?.fitsInRam ?? null;
-    const lastModifiedAt = this.parseHuggingFaceLastModifiedAt(item.lastModified);
-
-    return normalizePersistedModelMetadata({
-      id: repoId,
-      name: repoId.split('/').pop() || repoId,
-      author: item.author || repoId.split('/')[0],
-      size,
-      downloadUrl: buildHuggingFaceResolveUrl(repoId, 'model.gguf', item.sha ?? undefined),
-      lastModifiedAt,
-      fitsInRam,
-      memoryFitDecision: resolvedMemoryFit?.decision,
-      memoryFitConfidence: resolvedMemoryFit?.confidence,
-      metadataTrust,
-      gguf: Object.keys(gguf).length > 0 ? gguf : undefined,
-      accessState: this.resolveDetailAccessState(requiresAuth, authToken),
-      isGated: Boolean(item.gated),
-      isPrivate: item.private === true,
-      lifecycleStatus: LifecycleStatus.AVAILABLE,
-      downloadProgress: 0,
-      requiresTreeProbe: true,
-      hfRevision: item.sha ?? undefined,
-      maxContextTokens,
-      downloads: item.downloads ?? null,
-      likes: item.likes ?? null,
-    });
-  }
-
-  private buildModelMetadataFromPayload(
-    payload: HuggingFaceModelSummary,
-    memoryFitContext: CatalogMemoryFitContext,
-    authToken: string | null,
-    fallbackModel: ModelMetadata,
-    payloadMaxContextTokens?: number,
-  ): ModelMetadata {
-    const repoId = payload.id || payload.modelId || fallbackModel.id;
-    const hfRevision = payload.sha ?? fallbackModel.hfRevision;
-    const selectedEntry = this.selectPreferredGgufEntry(payload.siblings ?? []);
-    const selectedEntrySize = this.getFileSize(selectedEntry);
-    const resolvedFileName = selectedEntry
-      ? this.getFileName(selectedEntry)
-      : fallbackModel.resolvedFileName;
-    const size = selectedEntrySize ?? payload.gguf?.total ?? fallbackModel.size;
-    const metadataTrustFromPayload = typeof selectedEntrySize === 'number' && Number.isFinite(selectedEntrySize) && selectedEntrySize > 0
-      ? 'trusted_remote' as const
-      : typeof payload.gguf?.total === 'number' && Number.isFinite(payload.gguf.total) && payload.gguf.total > 0
-        ? 'inferred' as const
-        : fallbackModel.metadataTrust;
-    const slidingWindowTokens = this.resolveLargestContextTokenValue([
-      payload.cardData?.sliding_window,
-      payload.config?.sliding_window,
-      payload.config?.text_config?.sliding_window,
-    ]);
-    const ggufFromPayload = {
-      ...(typeof size === 'number' && Number.isFinite(size) && size > 0 ? { totalBytes: Math.round(size) } : {}),
-      ...(typeof payload.gguf?.context_length === 'number' && Number.isFinite(payload.gguf.context_length) && payload.gguf.context_length > 0
-        ? { contextLengthTokens: Math.round(payload.gguf.context_length) }
-        : {}),
-      ...(typeof payload.gguf?.architecture === 'string' && payload.gguf.architecture.trim().length > 0
-        ? { architecture: payload.gguf.architecture.trim() }
-        : {}),
-      ...(typeof payload.gguf?.size_label === 'string' && payload.gguf.size_label.trim().length > 0
-        ? { sizeLabel: payload.gguf.size_label.trim() }
-        : {}),
-      ...(typeof slidingWindowTokens === 'number' && Number.isFinite(slidingWindowTokens) && slidingWindowTokens > 0
-        ? { slidingWindowTokens }
-        : {}),
-    };
-    const gguf = Object.keys(ggufFromPayload).length > 0
-      ? {
-        ...(fallbackModel.gguf ?? {}),
-        ...ggufFromPayload,
-      }
-      : fallbackModel.gguf;
-    const resolvedMemoryFit = this.resolveMemoryFitSummary({ size, metadataTrust: metadataTrustFromPayload }, memoryFitContext);
-    const fitsInRam = resolvedMemoryFit?.fitsInRam ?? fallbackModel.fitsInRam;
-    const memoryFitDecision = resolvedMemoryFit?.decision ?? fallbackModel.memoryFitDecision;
-    const memoryFitConfidence = resolvedMemoryFit?.confidence ?? fallbackModel.memoryFitConfidence;
-    const lastModifiedAt = this.parseHuggingFaceLastModifiedAt(payload.lastModified) ?? fallbackModel.lastModifiedAt;
-    const requiresAuth = Boolean(payload.gated) || payload.private === true;
-    const requiresTreeProbe = selectedEntry
-      ? selectedEntrySize === null
-      : fallbackModel.requiresTreeProbe === true;
-
-    return normalizePersistedModelMetadata({
-      ...fallbackModel,
-      id: repoId,
-      name: repoId.split('/').pop() || repoId,
-      author: payload.author || repoId.split('/')[0],
-      size,
-      downloadUrl: resolvedFileName
-        ? buildHuggingFaceResolveUrl(repoId, resolvedFileName, hfRevision)
-        : fallbackModel.downloadUrl,
-      hfRevision,
-      resolvedFileName,
-      lastModifiedAt,
-      fitsInRam,
-      memoryFitDecision,
-      memoryFitConfidence,
-      metadataTrust: metadataTrustFromPayload,
-      gguf,
-      accessState: this.resolveDetailAccessState(requiresAuth, authToken),
-      isGated: Boolean(payload.gated),
-      isPrivate: payload.private === true,
-      requiresTreeProbe,
-      parameterSizeLabel: this.resolveStringMetadata(fallbackModel.parameterSizeLabel, payload.gguf?.size_label),
-      sha256: selectedEntry ? this.getFileSha(selectedEntry) ?? fallbackModel.sha256 : fallbackModel.sha256,
-      maxContextTokens: payloadMaxContextTokens ?? fallbackModel.maxContextTokens,
-      modelType: payload.config?.model_type ?? payload.cardData?.model_type ?? fallbackModel.modelType,
-      architectures: payload.config?.architectures ?? fallbackModel.architectures,
-      baseModels: this.resolveStringArrayMetadata(fallbackModel.baseModels, payload.cardData?.base_model),
-      license: this.resolveStringMetadata(fallbackModel.license, payload.cardData?.license),
-      languages: this.resolveStringArrayMetadata(fallbackModel.languages, payload.cardData?.language),
-      datasets: this.resolveStringArrayMetadata(fallbackModel.datasets, payload.cardData?.datasets),
-      quantizedBy: this.resolveStringMetadata(fallbackModel.quantizedBy, payload.cardData?.quantized_by),
-      modelCreator: this.resolveStringMetadata(fallbackModel.modelCreator, payload.cardData?.model_creator),
-      downloads: payload.downloads ?? fallbackModel.downloads ?? null,
-      likes: payload.likes ?? fallbackModel.likes ?? null,
-      tags: payload.tags ?? fallbackModel.tags,
-    });
-  }
-
-  private createFallbackModel(modelId: string): ModelMetadata {
-    return normalizePersistedModelMetadata({
-      id: modelId,
-      name: modelId.split('/').pop() || modelId,
-      author: modelId.split('/')[0] || 'unknown',
-      size: null,
-      downloadUrl: buildHuggingFaceResolveUrl(modelId, 'model.gguf', undefined),
-      fitsInRam: null,
-      accessState: ModelAccessState.PUBLIC,
-      isGated: false,
-      isPrivate: false,
-      lifecycleStatus: LifecycleStatus.AVAILABLE,
-      downloadProgress: 0,
-    });
-  }
-
-  private filterCatalogSearchModels(models: ModelMetadata[]): ModelMetadata[] {
-    return models.filter((model) => this.isCatalogModelSupported(model));
-  }
-
-  private isCatalogSummarySupported(item: HuggingFaceModelSummary): boolean {
-    return !this.hasUnsupportedCatalogSignals({
-      pipelineTag: item.pipeline_tag,
-      tags: item.tags,
-      modelTypes: [
-        item.config?.model_type,
-        item.cardData?.model_type,
-        item.gguf?.architecture,
-      ],
-      architectures: item.config?.architectures,
-    });
-  }
-
-  private isCatalogModelSupported(model: ModelMetadata): boolean {
-    return !this.hasUnsupportedCatalogSignals({
-      tags: model.tags,
-      modelTypes: [model.modelType],
-      architectures: model.architectures,
-    });
-  }
-
-  private hasUnsupportedCatalogSignals(options: {
-    pipelineTag?: string;
-    tags?: string[];
-    modelTypes?: (string | undefined)[];
-    architectures?: string[];
-  }): boolean {
-    const pipelineTag = this.normalizeCatalogSignal(options.pipelineTag);
-    if (pipelineTag && EXCLUDED_CATALOG_PIPELINE_TAGS.has(pipelineTag)) {
-      return true;
-    }
-
-    const signals = [
-      ...this.normalizeCatalogSignals(options.tags),
-      ...this.normalizeCatalogSignals(options.modelTypes),
-      ...this.normalizeCatalogSignals(options.architectures),
-    ];
-
-    return signals.some((signal) => (
-      EXCLUDED_CATALOG_PIPELINE_TAGS.has(signal)
-      || EXCLUDED_CATALOG_SIGNAL_EXACT_MATCHES.has(signal)
-      || EXCLUDED_CATALOG_SIGNAL_FRAGMENTS.some((fragment) => signal.includes(fragment))
-    ));
   }
 
   private mergeWithRegistry(
@@ -2182,7 +1539,7 @@ export class ModelCatalogService {
         ...(localHasVerifiedSize ? (localModel.gguf ?? {}) : (remoteModel.gguf ?? {})),
       }
       : undefined;
-    const resolvedMemoryFit = this.resolveMemoryFitSummary({ size: resolvedSize, metadataTrust }, memoryFitContext);
+    const resolvedMemoryFit = resolveMemoryFitSummary({ size: resolvedSize, metadataTrust }, memoryFitContext);
     const fitsInRam = resolvedMemoryFit?.fitsInRam ?? remoteModel.fitsInRam ?? localModel.fitsInRam;
     const memoryFitDecision = resolvedMemoryFit?.decision ?? remoteModel.memoryFitDecision ?? localModel.memoryFitDecision;
     const memoryFitConfidence = resolvedMemoryFit?.confidence ?? remoteModel.memoryFitConfidence ?? localModel.memoryFitConfidence;
@@ -2247,7 +1604,7 @@ export class ModelCatalogService {
     }
 
     return {
-      maxContextTokens: this.resolveMergedMaxContextTokens(
+      maxContextTokens: resolveMergedMaxContextTokens(
         remoteModel.maxContextTokens,
         localModel.maxContextTokens,
       ),
@@ -2339,8 +1696,8 @@ export class ModelCatalogService {
             const requestedCursor = nextCursor;
             visitedCursors.add(requestedCursor);
 
-            const response = await this.fetchWithTimeout(requestedCursor, {
-              headers: this.buildHeaders(authPolicy, requestContext.authToken),
+            const response = await fetchWithTimeout(requestedCursor, {
+              headers: buildHeaders(authPolicy, requestContext.authToken),
             });
             status = response.status;
             this.assertRequestContextIsCurrent(requestContext);
@@ -2387,7 +1744,7 @@ export class ModelCatalogService {
 
             const resolvedNextCursor = this.resolveNextCatalogCursor(
               requestedCursor,
-              this.parseNextCursor(
+              parseNextCursor(
                 typeof response.headers?.get === 'function'
                   ? response.headers.get('link')
                   : null,
@@ -2396,7 +1753,7 @@ export class ModelCatalogService {
             );
 
             if (expectedFileName.length > 0) {
-              const targetMatch = pageEntries.find((entry) => this.getFileName(entry) === expectedFileName);
+              const targetMatch = pageEntries.find((entry) => getFileName(entry) === expectedFileName);
               if (targetMatch) {
                 isComplete = resolvedNextCursor === null;
                 stopReason = 'target_found';
@@ -2404,14 +1761,14 @@ export class ModelCatalogService {
               }
             } else {
               if (firstEligibleGgufPage === null) {
-                const firstGguf = pageEntries.find((entry) => this.isEligibleGgufEntry(entry));
+                const firstGguf = pageEntries.find((entry) => isEligibleGgufEntry(entry));
                 if (firstGguf) {
                   firstEligibleGgufPage = pageCount;
                 }
               }
 
               const preferred = pageEntries.find((entry) => (
-                this.isEligibleGgufEntry(entry) && this.isPreferredQuantFileName(this.getFileName(entry))
+                isEligibleGgufEntry(entry) && isPreferredQuantFileName(getFileName(entry))
               ));
               if (preferred) {
                 isComplete = resolvedNextCursor === null;
@@ -2468,8 +1825,8 @@ export class ModelCatalogService {
       this.buildRequestCacheKey('readme', repoId, revision, requestContext, authPolicy),
       async () => {
         const readmeUrl = buildHuggingFaceRawUrl(repoId, 'README.md', revision);
-        let response = await this.fetchWithTimeout(readmeUrl, {
-          headers: this.buildHeaders(REQUEST_AUTH_POLICY.ANONYMOUS, requestContext.authToken),
+        let response = await fetchWithTimeout(readmeUrl, {
+          headers: buildHeaders(REQUEST_AUTH_POLICY.ANONYMOUS, requestContext.authToken),
         });
         this.assertRequestContextIsCurrent(requestContext);
 
@@ -2478,8 +1835,8 @@ export class ModelCatalogService {
           && (response.status === 401 || response.status === 403)
           && requestContext.hasAuthToken
         ) {
-          response = await this.fetchWithTimeout(readmeUrl, {
-            headers: this.buildHeaders(REQUEST_AUTH_POLICY.REQUIRED_AUTH, requestContext.authToken),
+          response = await fetchWithTimeout(readmeUrl, {
+            headers: buildHeaders(REQUEST_AUTH_POLICY.REQUIRED_AUTH, requestContext.authToken),
           });
           this.assertRequestContextIsCurrent(requestContext);
         }
@@ -2490,7 +1847,7 @@ export class ModelCatalogService {
 
         const markdown = await response.text();
         this.assertRequestContextIsCurrent(requestContext);
-        const readmeData = this.extractReadmeData(markdown);
+        const readmeData = extractReadmeData(markdown);
         return (
           readmeData.description
           || readmeData.cardData
@@ -2539,9 +1896,9 @@ export class ModelCatalogService {
         };
 
         try {
-          const headResponse = await this.fetchWithTimeout(probeUrl, {
+          const headResponse = await fetchWithTimeout(probeUrl, {
             method: 'HEAD',
-            headers: this.buildHeaders(REQUEST_AUTH_POLICY.REQUIRED_AUTH, requestContext.authToken),
+            headers: buildHeaders(REQUEST_AUTH_POLICY.REQUIRED_AUTH, requestContext.authToken),
           });
           this.assertRequestContextIsCurrent(requestContext);
           const headState = this.resolveResolvedFileProbeState(
@@ -2560,10 +1917,10 @@ export class ModelCatalogService {
             return cacheResolvedProbeState(null);
           }
 
-          const getResponse = await this.fetchWithTimeout(probeUrl, {
+          const getResponse = await fetchWithTimeout(probeUrl, {
             method: 'GET',
             headers: {
-              ...(this.buildHeaders(REQUEST_AUTH_POLICY.REQUIRED_AUTH, requestContext.authToken) ?? {}),
+              ...(buildHeaders(REQUEST_AUTH_POLICY.REQUIRED_AUTH, requestContext.authToken) ?? {}),
               Range: 'bytes=0-0',
             },
           });
@@ -2586,307 +1943,6 @@ export class ModelCatalogService {
         }
       },
     );
-  }
-
-  private extractReadmeData(markdown: string): ReadmeModelData {
-    if (!markdown.trim()) {
-      return {};
-    }
-
-    let body = markdown.replace(/\r\n/g, '\n');
-    let frontMatter: Record<string, ReadmeFrontMatterValue> | undefined;
-    if (body.startsWith('---\n')) {
-      const frontMatterEnd = body.indexOf('\n---\n', 4);
-      if (frontMatterEnd >= 0) {
-        frontMatter = this.parseReadmeFrontMatter(body.slice(4, frontMatterEnd));
-        body = body.slice(frontMatterEnd + 5);
-      }
-    }
-
-    return {
-      description: this.extractReadmeSummaryFromBody(body),
-      cardData: frontMatter ? this.mapReadmeFrontMatterToCardData(frontMatter) : undefined,
-      maxContextTokens: frontMatter ? this.resolveFrontMatterMaxContextTokens(frontMatter) : undefined,
-    };
-  }
-
-  private extractReadmeSummaryFromBody(body: string): string | undefined {
-    if (!body.trim()) {
-      return undefined;
-    }
-
-    const paragraphs = body
-      .split(/\n\s*\n/)
-      .map((paragraph) => paragraph.trim())
-      .filter((paragraph) => this.isReadableReadmeParagraph(paragraph))
-      .map((paragraph) => this.stripMarkdown(paragraph))
-      .filter((paragraph) => paragraph.length >= 24);
-
-    const summary = paragraphs[0];
-    if (!summary) {
-      return undefined;
-    }
-
-    if (summary.length <= README_SUMMARY_MAX_LENGTH) {
-      return summary;
-    }
-
-    return `${summary.slice(0, README_SUMMARY_MAX_LENGTH).trimEnd()}...`;
-  }
-
-  private parseReadmeFrontMatter(frontMatter: string): Record<string, ReadmeFrontMatterValue> {
-    const parsed: Record<string, ReadmeFrontMatterValue> = {};
-    let activeListKey: string | null = null;
-
-    for (const rawLine of frontMatter.split('\n')) {
-      const trimmed = rawLine.trim();
-      if (!trimmed || trimmed.startsWith('#')) {
-        continue;
-      }
-
-      const listMatch = trimmed.match(/^-\s+(.+)$/);
-      if (listMatch && activeListKey) {
-        const normalizedItem = this.normalizeFrontMatterScalar(listMatch[1]);
-        if (!normalizedItem) {
-          continue;
-        }
-
-        const existing = parsed[activeListKey];
-        const nextList = Array.isArray(existing) ? existing : [];
-        nextList.push(normalizedItem);
-        parsed[activeListKey] = nextList;
-        continue;
-      }
-
-      const keyValueMatch = trimmed.match(/^([A-Za-z0-9_]+):\s*(.*)$/);
-      if (!keyValueMatch) {
-        activeListKey = null;
-        continue;
-      }
-
-      const [, key, rawValue] = keyValueMatch;
-      const value = rawValue.trim();
-
-      if (!value) {
-        parsed[key] = [];
-        activeListKey = key;
-        continue;
-      }
-
-      activeListKey = null;
-      if (value.startsWith('[') && value.endsWith(']')) {
-        const inlineList = value
-          .slice(1, -1)
-          .split(',')
-          .map((entry) => this.normalizeFrontMatterScalar(entry))
-          .filter((entry): entry is string => entry.length > 0);
-
-        if (inlineList.length > 0) {
-          parsed[key] = inlineList;
-        }
-        continue;
-      }
-
-      const normalizedValue = this.normalizeFrontMatterScalar(value);
-      if (normalizedValue) {
-        parsed[key] = normalizedValue;
-      }
-    }
-
-    return parsed;
-  }
-
-  private mapReadmeFrontMatterToCardData(
-    frontMatter: Record<string, ReadmeFrontMatterValue>,
-  ): Partial<HuggingFaceModelCardData> | undefined {
-    const baseModels = this.getFrontMatterArray(frontMatter, 'base_model');
-    const languages = this.getFrontMatterArray(frontMatter, 'language');
-    const datasets = this.getFrontMatterArray(frontMatter, 'datasets');
-    const license = this.getFrontMatterString(frontMatter, 'license');
-    const modelCreator = this.getFrontMatterString(frontMatter, 'model_creator');
-    const quantizedBy = this.getFrontMatterString(frontMatter, 'quantized_by');
-    const modelType = this.getFrontMatterString(frontMatter, 'model_type');
-
-    const cardData: Partial<HuggingFaceModelCardData> = {};
-    if (baseModels?.length) {
-      cardData.base_model = baseModels.length === 1 ? baseModels[0] : baseModels;
-    }
-    if (languages?.length) {
-      cardData.language = languages.length === 1 ? languages[0] : languages;
-    }
-    if (datasets?.length) {
-      cardData.datasets = datasets;
-    }
-    if (license) {
-      cardData.license = license;
-    }
-    if (modelCreator) {
-      cardData.model_creator = modelCreator;
-    }
-    if (quantizedBy) {
-      cardData.quantized_by = quantizedBy;
-    }
-    if (modelType) {
-      cardData.model_type = modelType;
-    }
-
-    return Object.keys(cardData).length > 0 ? cardData : undefined;
-  }
-
-  private resolveFrontMatterMaxContextTokens(
-    frontMatter: Record<string, ReadmeFrontMatterValue>,
-  ): number | undefined {
-    return this.resolveLargestContextTokenValue([
-      this.getFrontMatterString(frontMatter, 'context_length'),
-      this.getFrontMatterString(frontMatter, 'max_position_embeddings'),
-      this.getFrontMatterString(frontMatter, 'n_positions'),
-      this.getFrontMatterString(frontMatter, 'max_sequence_length'),
-      this.getFrontMatterString(frontMatter, 'seq_length'),
-      this.getFrontMatterString(frontMatter, 'sliding_window'),
-      this.getFrontMatterString(frontMatter, 'model_max_length'),
-      this.getFrontMatterString(frontMatter, 'n_ctx'),
-      this.getFrontMatterString(frontMatter, 'n_ctx_train'),
-      this.getFrontMatterString(frontMatter, 'num_ctx'),
-      this.getFrontMatterString(frontMatter, 'original_max_position_embeddings'),
-    ]);
-  }
-
-  private normalizeFrontMatterScalar(value: string): string {
-    const normalized = value
-      .trim()
-      .replace(/^['"]/, '')
-      .replace(/['"]$/, '')
-      .replace(/^"(.*)"$/, '$1')
-      .replace(/^'(.*)'$/, '$1')
-      .trim();
-
-    if (normalized === 'null' || normalized === '[]') {
-      return '';
-    }
-
-    return normalized;
-  }
-
-  private getFrontMatterString(
-    frontMatter: Record<string, ReadmeFrontMatterValue>,
-    key: string,
-  ): string | undefined {
-    const value = frontMatter[key];
-    if (typeof value === 'string' && value.length > 0) {
-      return value;
-    }
-
-    if (Array.isArray(value) && value.length > 0) {
-      return value[0];
-    }
-
-    return undefined;
-  }
-
-  private getFrontMatterArray(
-    frontMatter: Record<string, ReadmeFrontMatterValue>,
-    key: string,
-  ): string[] | undefined {
-    const value = frontMatter[key];
-    if (Array.isArray(value)) {
-      return value.length > 0 ? value : undefined;
-    }
-
-    if (typeof value === 'string' && value.length > 0) {
-      return [value];
-    }
-
-    return undefined;
-  }
-
-  private isReadableReadmeParagraph(paragraph: string): boolean {
-    if (!paragraph) {
-      return false;
-    }
-
-    return !(
-      paragraph.startsWith('#')
-      || paragraph.startsWith('![')
-      || paragraph.startsWith('[')
-      || paragraph.startsWith('<')
-      || paragraph.startsWith('|')
-      || paragraph.startsWith('```')
-      || paragraph.startsWith('---')
-    );
-  }
-
-  private stripMarkdown(text: string): string {
-    return text
-      .replace(/!\[[^\]]*]\([^)]*\)/g, ' ')
-      .replace(/\[([^\]]+)]\([^)]*\)/g, '$1')
-      .replace(/`([^`]+)`/g, '$1')
-      .replace(/[*_~>#-]/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
-  }
-
-  private selectTreeEntryForModel(
-    model: ModelMetadata,
-    entries: HuggingFaceTreeEntry[],
-  ): HuggingFaceTreeEntry | undefined {
-    if (model.requiresTreeProbe !== true && model.resolvedFileName) {
-      const exactMatch = entries.find((entry) => this.getFileName(entry) === model.resolvedFileName);
-      if (exactMatch) {
-        return exactMatch;
-      }
-    }
-
-    return this.selectPreferredGgufEntry(entries);
-  }
-
-  private shouldRevalidateCatalogSummarySelection(
-    selectedEntry: HuggingFaceSibling,
-  ): boolean {
-    return this.getFileSize(selectedEntry) === null;
-  }
-
-  private selectPreferredGgufEntry<T extends HuggingFaceSibling | HuggingFaceTreeEntry>(
-    entries: T[],
-  ): T | undefined {
-    const ggufs = entries.filter((entry) => this.isEligibleGgufEntry(entry));
-
-    return ggufs.find((entry) => this.isPreferredQuantFileName(this.getFileName(entry))) ?? ggufs[0];
-  }
-
-  private isPreferredQuantFileName(fileName: string): boolean {
-    return fileName.toUpperCase().includes('Q4_K_M');
-  }
-
-  private isProjectorFileName(fileName: string): boolean {
-    const normalized = fileName.trim().toLowerCase();
-    return /(^|[._-])(mmproj|mm_projector|clip-projector|clip_projector)([._-]|$)/.test(normalized);
-  }
-
-  private isEligibleGgufEntry(entry: HuggingFaceSibling | HuggingFaceTreeEntry): boolean {
-    const name = this.getFileName(entry);
-    if (!name.toLowerCase().endsWith('.gguf')) {
-      return false;
-    }
-
-    if (this.isProjectorFileName(name)) {
-      return false;
-    }
-    const size = this.getFileSize(entry);
-    return size === null || size >= MIN_GGUF_BYTES;
-  }
-
-  private getFileName(entry: HuggingFaceSibling | HuggingFaceTreeEntry): string {
-    return entry.rfilename || entry.filename || ('path' in entry ? entry.path : '') || '';
-  }
-
-  private getFileSize(entry: HuggingFaceSibling | HuggingFaceTreeEntry | undefined): number | null {
-    const size = entry?.size || entry?.lfs?.size;
-    return typeof size === 'number' && size > 0 ? size : null;
-  }
-
-  private getFileSha(entry: HuggingFaceSibling | HuggingFaceTreeEntry): string | undefined {
-    const lfs = entry.lfs as { sha256?: string; oid?: string } | undefined;
-    return lfs?.sha256 || lfs?.oid;
   }
 
   private getCachedResolvedFileProbeState(key: string): ModelAccessState | null | undefined {
@@ -2970,139 +2026,6 @@ export class ModelCatalogService {
     return requestPromise;
   }
 
-  private parseNextCursor(linkHeader: string | null): string | null {
-    if (!linkHeader) {
-      return null;
-    }
-
-    for (const linkValue of this.splitLinkHeader(linkHeader, ',')) {
-      const segments = this.splitLinkHeader(linkValue, ';');
-      if (segments.length === 0) {
-        continue;
-      }
-
-      const target = this.parseLinkTarget(segments[0]);
-      if (!target) {
-        continue;
-      }
-
-      const hasNextRelation = segments.slice(1).some((segment) => {
-        const parameter = this.parseLinkParameter(segment);
-        if (!parameter || parameter.name !== 'rel') {
-          return false;
-        }
-
-        return parameter.value
-          .toLowerCase()
-          .split(/\s+/)
-          .filter(Boolean)
-          .includes('next');
-      });
-
-      if (hasNextRelation) {
-        return target;
-      }
-    }
-
-    return null;
-  }
-
-  private splitLinkHeader(headerValue: string, delimiter: ',' | ';'): string[] {
-    const parts: string[] = [];
-    let currentPart = '';
-    let inQuotes = false;
-    let inAngleBrackets = false;
-    let escapeNextCharacter = false;
-
-    for (const character of headerValue) {
-      if (escapeNextCharacter) {
-        currentPart += character;
-        escapeNextCharacter = false;
-        continue;
-      }
-
-      if (character === '\\' && inQuotes) {
-        currentPart += character;
-        escapeNextCharacter = true;
-        continue;
-      }
-
-      if (character === '"') {
-        inQuotes = !inQuotes;
-        currentPart += character;
-        continue;
-      }
-
-      if (character === '<' && !inQuotes) {
-        inAngleBrackets = true;
-        currentPart += character;
-        continue;
-      }
-
-      if (character === '>' && !inQuotes) {
-        inAngleBrackets = false;
-        currentPart += character;
-        continue;
-      }
-
-      if (character === delimiter && !inQuotes && !inAngleBrackets) {
-        const trimmedPart = currentPart.trim();
-        if (trimmedPart) {
-          parts.push(trimmedPart);
-        }
-
-        currentPart = '';
-        continue;
-      }
-
-      currentPart += character;
-    }
-
-    const trailingPart = currentPart.trim();
-    if (trailingPart) {
-      parts.push(trailingPart);
-    }
-
-    return parts;
-  }
-
-  private parseLinkTarget(linkSegment: string): string | null {
-    const trimmedSegment = linkSegment.trim();
-    const start = trimmedSegment.indexOf('<');
-    const end = trimmedSegment.indexOf('>', start + 1);
-    if (start === -1 || end === -1 || end <= start + 1) {
-      return null;
-    }
-
-    return trimmedSegment.slice(start + 1, end);
-  }
-
-  private parseLinkParameter(segment: string): { name: string; value: string } | null {
-    const trimmedSegment = segment.trim();
-    if (!trimmedSegment) {
-      return null;
-    }
-
-    const separatorIndex = trimmedSegment.indexOf('=');
-    const rawName = separatorIndex === -1
-      ? trimmedSegment
-      : trimmedSegment.slice(0, separatorIndex);
-    const name = rawName.trim().toLowerCase();
-    if (!name) {
-      return null;
-    }
-
-    let value = separatorIndex === -1
-      ? ''
-      : trimmedSegment.slice(separatorIndex + 1).trim();
-
-    if (value.startsWith('"') && value.endsWith('"') && value.length >= 2) {
-      value = value.slice(1, -1).replace(/\\(.)/g, '$1');
-    }
-
-    return { name, value };
-  }
-
   private resolveNextCatalogCursor(
     requestedCursor: string | null,
     nextCursor: string | null,
@@ -3122,15 +2045,7 @@ export class ModelCatalogService {
   }
 
   private mergeUniqueModelsById(models: ModelMetadata[]): ModelMetadata[] {
-    const seen = new Set<string>();
-    return models.filter((model) => {
-      if (seen.has(model.id)) {
-        return false;
-      }
-
-      seen.add(model.id);
-      return true;
-    });
+    return uniqueByKey(models, (model) => model.id);
   }
 
   private resolveTreeAccessState(
@@ -3175,93 +2090,6 @@ export class ModelCatalogService {
     return authToken
       ? ModelAccessState.ACCESS_DENIED
       : ModelAccessState.AUTH_REQUIRED;
-  }
-
-  private resolveDetailAccessState(
-    requiresAuth: boolean,
-    authToken: string | null,
-  ): ModelAccessState {
-    if (!requiresAuth) {
-      return ModelAccessState.PUBLIC;
-    }
-
-    if (!authToken) {
-      return ModelAccessState.AUTH_REQUIRED;
-    }
-
-    // Treat gated/private repos as authorized when a token is configured. We
-    // avoid attaching Authorization to public catalog endpoints; later probe/tree
-    // checks can still downgrade this to access denied.
-    return ModelAccessState.AUTHORIZED;
-  }
-
-  private hasGgufCatalogSignal(repoId: string, tags?: string[]): boolean {
-    if (repoId.toLowerCase().includes('gguf')) {
-      return true;
-    }
-
-    return Array.isArray(tags)
-      && tags.some((tag) => typeof tag === 'string' && tag.toLowerCase().includes('gguf'));
-  }
-
-  private resolveStringMetadata(
-    primaryValue: string | undefined,
-    fallbackValue: string | undefined,
-  ): string | undefined {
-    return typeof primaryValue === 'string' && primaryValue.trim().length > 0
-      ? primaryValue.trim()
-      : typeof fallbackValue === 'string' && fallbackValue.trim().length > 0
-        ? fallbackValue.trim()
-        : undefined;
-  }
-
-  private normalizeCatalogSignal(value: string | null | undefined): string | null {
-    if (typeof value !== 'string') {
-      return null;
-    }
-
-    const normalized = value.trim().toLowerCase();
-    return normalized.length > 0 ? normalized : null;
-  }
-
-  private normalizeCatalogSignals(values: (string | undefined)[] | undefined): string[] {
-    if (!Array.isArray(values)) {
-      return [];
-    }
-
-    return values
-      .map((value) => this.normalizeCatalogSignal(value))
-      .filter((value): value is string => value !== null);
-  }
-
-  private resolveStringArrayMetadata(
-    primaryValue: string[] | undefined,
-    fallbackValue: string | string[] | undefined,
-  ): string[] | undefined {
-    const normalizedPrimary = this.normalizeStringArrayMetadata(primaryValue);
-    if (normalizedPrimary) {
-      return normalizedPrimary;
-    }
-
-    return this.normalizeStringArrayMetadata(fallbackValue);
-  }
-
-  private normalizeStringArrayMetadata(value: string | string[] | undefined): string[] | undefined {
-    const rawValues = Array.isArray(value)
-      ? value
-      : typeof value === 'string'
-        ? [value]
-        : [];
-
-    if (rawValues.length === 0) {
-      return undefined;
-    }
-
-    const normalized = rawValues
-      .map((entry) => entry.trim())
-      .filter((entry) => entry.length > 0);
-
-    return normalized.length > 0 ? normalized : undefined;
   }
 
   private buildMemorySearchCacheKey(
@@ -3315,193 +2143,11 @@ export class ModelCatalogService {
     return hasAuthToken ? 'auth' : 'anon';
   }
 
-  private resolveRequestAuthToken(policy: RequestAuthPolicy, authToken: string | null): string | null {
-    if (policy === REQUEST_AUTH_POLICY.ANONYMOUS) {
-      return null;
-    }
-
-    if (!authToken) {
-      if (policy === REQUEST_AUTH_POLICY.REQUIRED_AUTH) {
-        throw new ModelCatalogError('unknown', 'Hugging Face token is required for this request');
-      }
-
-      return null;
-    }
-
-    return authToken;
-  }
-
   private resolveRequestAuthScope(
     policy: RequestAuthPolicy,
     authToken: string | null,
   ): CatalogCacheAuthScope {
     return policy !== REQUEST_AUTH_POLICY.ANONYMOUS && Boolean(authToken) ? 'auth' : 'anon';
-  }
-
-  private buildHeaders(policy: RequestAuthPolicy, authToken: string | null): HeadersInit | undefined {
-    const resolvedToken = this.resolveRequestAuthToken(policy, authToken);
-    if (!resolvedToken) {
-      return undefined;
-    }
-
-    return {
-      Authorization: `Bearer ${resolvedToken}`,
-    };
-  }
-
-  private async fetchWithTimeout(
-    url: string,
-    init: RequestInit = {},
-    timeoutMs = HF_REQUEST_TIMEOUT_MS,
-  ): Promise<Response> {
-    const controller = typeof AbortController !== 'undefined'
-      ? new AbortController()
-      : null;
-    const signal = controller?.signal ?? init.signal;
-    let timeoutId: ReturnType<typeof setTimeout> | null = null;
-    const externalSignal = init.signal;
-    const abortListener = () => controller?.abort();
-
-    if (externalSignal && controller) {
-      if (externalSignal.aborted) {
-        controller.abort();
-      } else if (typeof externalSignal.addEventListener === 'function') {
-        externalSignal.addEventListener('abort', abortListener);
-      }
-    }
-
-    const timeoutPromise = new Promise<never>((_resolve, reject) => {
-      timeoutId = setTimeout(() => {
-        controller?.abort();
-        reject(new ModelCatalogError('timeout', `HF request timed out after ${timeoutMs}ms`));
-      }, timeoutMs);
-    });
-
-    try {
-      const fetchPromise = fetch(url, signal ? { ...init, signal } : init);
-      return await Promise.race([fetchPromise, timeoutPromise]);
-    } finally {
-      if (timeoutId) {
-        clearTimeout(timeoutId);
-      }
-
-      if (
-        externalSignal &&
-        controller &&
-        typeof externalSignal.removeEventListener === 'function'
-      ) {
-        externalSignal.removeEventListener('abort', abortListener);
-      }
-    }
-  }
-
-  private normalizeContextTokenValue(value: unknown): number | undefined {
-    if (typeof value === 'number' && Number.isFinite(value) && value >= 256) {
-      return Math.round(value);
-    }
-
-    if (typeof value === 'string') {
-      const normalizedValue = value.trim().toLowerCase().replace(/[_\s,]/g, '');
-      const shorthandMatch = normalizedValue.match(/^(\d+(?:\.\d+)?)([km])?(?:tokens?)?$/);
-      const multiplier = shorthandMatch?.[2] === 'm'
-        ? 1024 * 1024
-        : shorthandMatch?.[2] === 'k'
-          ? 1024
-          : 1;
-      const normalized = shorthandMatch
-        ? Number(shorthandMatch[1]) * multiplier
-        : Number(normalizedValue);
-      if (Number.isFinite(normalized) && normalized >= 256) {
-        return Math.round(normalized);
-      }
-    }
-
-    return undefined;
-  }
-
-  private resolveLargestContextTokenValue(values: unknown[]): number | undefined {
-    let resolved: number | undefined;
-
-    for (const value of values) {
-      const normalized = this.normalizeContextTokenValue(value);
-      if (normalized === undefined) {
-        continue;
-      }
-
-      resolved = resolved === undefined ? normalized : Math.max(resolved, normalized);
-    }
-
-    return resolved;
-  }
-
-  private resolveCardDataMaxContextTokens(
-    cardData?: Partial<HuggingFaceModelCardData>,
-  ): number | undefined {
-    if (!cardData) {
-      return undefined;
-    }
-
-    return this.resolveLargestContextTokenValue([
-      cardData.context_length,
-      cardData.max_position_embeddings,
-      cardData.n_positions,
-      cardData.max_sequence_length,
-      cardData.seq_length,
-      cardData.sliding_window,
-      cardData.model_max_length,
-      cardData.n_ctx,
-      cardData.n_ctx_train,
-      cardData.num_ctx,
-    ]);
-  }
-
-  private resolveSummaryMaxContextTokens(
-    summary?: Pick<HuggingFaceModelSummary, 'config' | 'cardData' | 'gguf'>,
-  ): number | undefined {
-    if (!summary) {
-      return undefined;
-    }
-
-    return this.resolveLargestContextTokenValue([
-      this.resolveMaxContextTokens(summary.config),
-      this.resolveCardDataMaxContextTokens(summary.cardData),
-      summary.gguf?.context_length,
-    ]);
-  }
-
-  private resolveMergedMaxContextTokens(...values: (number | undefined)[]): number | undefined {
-    return this.resolveLargestContextTokenValue(values);
-  }
-
-  private resolveMaxContextTokens(config?: HuggingFaceModelConfig): number | undefined {
-    return this.resolveLargestContextTokenValue([
-      config?.max_position_embeddings,
-      config?.n_positions,
-      config?.max_sequence_length,
-      config?.seq_length,
-      config?.sliding_window,
-      config?.context_length,
-      config?.model_max_length,
-      config?.n_ctx,
-      config?.n_ctx_train,
-      config?.num_ctx,
-      config?.original_max_position_embeddings,
-      config?.rope_scaling?.original_max_position_embeddings,
-      config?.rope_scaling?.max_position_embeddings,
-      config?.text_config?.max_position_embeddings,
-      config?.text_config?.n_positions,
-      config?.text_config?.max_sequence_length,
-      config?.text_config?.seq_length,
-      config?.text_config?.sliding_window,
-      config?.text_config?.context_length,
-      config?.text_config?.model_max_length,
-      config?.text_config?.n_ctx,
-      config?.text_config?.n_ctx_train,
-      config?.text_config?.num_ctx,
-      config?.text_config?.original_max_position_embeddings,
-      config?.text_config?.rope_scaling?.original_max_position_embeddings,
-      config?.text_config?.rope_scaling?.max_position_embeddings,
-    ]);
   }
 }
 

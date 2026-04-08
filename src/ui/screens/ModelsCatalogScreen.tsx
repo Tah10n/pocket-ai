@@ -3,7 +3,7 @@ import { Box } from '@/components/ui/box';
 import { SearchHeader } from '@/components/ui/SearchHeader';
 import { ScreenContent } from '@/components/ui/ScreenShell';
 import { ModelsList } from '@/components/models/ModelsList';
-import { resolveModelsCatalogTab, type ModelsCatalogTab } from '@/components/models/modelTabs';
+import { resolveModelsCatalogTab, type ModelsCatalogTab } from '@/store/modelsCatalogTabs';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 
 export const ModelsCatalogScreen = () => {

@@ -9,6 +9,7 @@ import type {
 import { Platform } from 'react-native';
 import { createMemoryBudget, FITS_IN_RAM_HEADROOM_RATIO, type MemoryBudgetSnapshot } from './budget';
 import { normalizeCalibrationRecordFactors } from './calibration';
+import { isFinitePositiveNumber } from './guards';
 
 export const ESTIMATED_MODEL_RUNTIME_OVERHEAD_FACTOR = 0.2;
 const DEFAULT_KV_CACHE_BYTES_PER_ELEMENT = 2; // f16
@@ -25,10 +26,6 @@ const UNKNOWN_BREAKDOWN: MemoryBreakdown = {
   overheadBytes: 0,
   safetyMarginBytes: 0,
 };
-
-function isFinitePositiveNumber(value: unknown): value is number {
-  return typeof value === 'number' && Number.isFinite(value) && value > 0;
-}
 
 function toFinitePositiveNumber(value: unknown): number | null {
   if (isFinitePositiveNumber(value)) {

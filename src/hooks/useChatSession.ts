@@ -1,5 +1,5 @@
 import { AppState, AppStateStatus } from 'react-native';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import { llmEngineService } from '../services/LLMEngineService';
 import { performanceMonitor } from '../services/PerformanceMonitor';
 import { GenerationParameters, getGenerationParametersForModel, getSettings } from '../services/SettingsStore';
@@ -10,25 +10,26 @@ import {
   ChatThread,
   DEFAULT_PRESET_SNAPSHOT,
   DEFAULT_SYSTEM_PROMPT,
-  LlmChatMessage,
   PresetSnapshot,
   createChatId,
 } from '../types/chat';
+import { useChatStore } from '../store/chatStore';
 import {
   DEFAULT_INFERENCE_PROMPT_SAFETY_MARGIN_TOKENS,
+  buildInferenceWindowWithAccurateTokenCounts,
+  createTruncationState,
   estimateLlmMessagesTokens,
   getThreadInferenceWindow,
-  type ThreadInferenceWindowOptions,
-  useChatStore,
-} from '../store/chatStore';
-import { getVisibleMessageContent } from '../utils/chatPresentation';
+  resolveThreadInferenceWindowOptions,
+  type InferenceBudgetOptions,
+} from '../utils/inferenceWindow';
 import { syncThreadParameters } from '../utils/chatThreadParameters';
+import { useTruncationTracking } from './useTruncationTracking';
 
 export const SUMMARY_PLACEHOLDER_CONTENT =
   'Summary generation is not available yet. Older messages stay visible in the thread, but only the most recent context is sent to the model right now.';
-export const SUMMARY_AFFORDANCE_MIN_TRUNCATED_MESSAGES = 1;
+export { SUMMARY_AFFORDANCE_MIN_TRUNCATED_MESSAGES } from '../utils/inferenceWindow';
 const DEFAULT_CONTEXT_SIZE = 4096;
-const DEFAULT_RESPONSE_RESERVE_TOKENS = 256;
 const STREAM_PATCH_INTERVAL_MS = 100;
 
 interface ActiveGenerationState {
@@ -73,216 +74,15 @@ export function resolvePresetSnapshot(presetId: string | null): PresetSnapshot {
   };
 }
 
-interface InferenceBudgetOptions {
-  maxContextMessages?: number;
-  maxContextTokens?: number;
-  responseReserveTokens?: number;
-  promptSafetyMarginTokens?: number;
-}
-
-function resolveInferenceOptions(
-  thread: ChatThread,
-  options?: InferenceBudgetOptions,
-): ThreadInferenceWindowOptions {
-  return {
-    maxContextMessages: options?.maxContextMessages ?? Number.MAX_SAFE_INTEGER,
-    maxContextTokens: options?.maxContextTokens,
-    responseReserveTokens: options?.responseReserveTokens
-      ?? Math.min(thread.paramsSnapshot.maxTokens, DEFAULT_RESPONSE_RESERVE_TOKENS),
-    promptSafetyMarginTokens: options?.promptSafetyMarginTokens,
-  };
-}
-
 export function buildInferenceMessagesForThread(thread: ChatThread, options?: InferenceBudgetOptions) {
-  return getThreadInferenceWindow(thread, resolveInferenceOptions(thread, options)).messages;
-}
-
-function getEligibleThreadMessages(thread: ChatThread): ChatMessage[] {
-  return thread.messages.filter(
-    (message) =>
-      message.state !== 'error'
-      && getVisibleMessageContent(message.role, message.content).trim().length > 0,
-  );
-}
-
-function createTruncationState(truncatedMessageIds: string[]) {
-  return {
-    truncatedMessageIds,
-    shouldOfferSummary:
-      truncatedMessageIds.length >= SUMMARY_AFFORDANCE_MIN_TRUNCATED_MESSAGES,
-  };
-}
-
-async function buildInferenceWindowWithAccurateTokenCounts(
-  thread: ChatThread,
-  options: ThreadInferenceWindowOptions,
-): Promise<{
-  messages: LlmChatMessage[];
-  promptTokens: number;
-  promptSafetyMarginTokens: number;
-  truncatedMessageIds: string[];
-}> {
-  const maxContextTokens =
-    typeof options.maxContextTokens === 'number' && options.maxContextTokens > 0
-      ? Math.round(options.maxContextTokens)
-      : null;
-  const promptSafetyMarginTokens = Math.max(
-    0,
-    Math.round(options.promptSafetyMarginTokens ?? DEFAULT_INFERENCE_PROMPT_SAFETY_MARGIN_TOKENS),
-  );
-  const responseReserveTokens = Math.max(
-    0,
-    Math.round(options.responseReserveTokens ?? thread.paramsSnapshot.maxTokens),
-  );
-
-  const tokenCountParams = {
-    enable_thinking: thread.paramsSnapshot.reasoningEnabled === true,
-    reasoning_format: thread.paramsSnapshot.reasoningEnabled === true ? ('auto' as const) : ('none' as const),
-  };
-
-  const countPromptTokens = async (messages: LlmChatMessage[]) =>
-    llmEngineService.countPromptTokens({
-      messages,
-      params: tokenCountParams,
-    });
-
-  const { messages: fullMessages, truncatedMessageIds: baseTruncatedMessageIds } = getThreadInferenceWindow(thread, {
-    maxContextMessages: options.maxContextMessages,
-  });
-  const eligibleMessages = getEligibleThreadMessages(thread);
-
-  if (maxContextTokens === null) {
-    return {
-      messages: fullMessages,
-      promptTokens: await countPromptTokens(fullMessages),
-      promptSafetyMarginTokens,
-      truncatedMessageIds: baseTruncatedMessageIds,
-    };
-  }
-
-  const systemMessages: LlmChatMessage[] = [];
-  let firstHistoryIndex = 0;
-  while (firstHistoryIndex < fullMessages.length && fullMessages[firstHistoryIndex]?.role === 'system') {
-    systemMessages.push(fullMessages[firstHistoryIndex]);
-    firstHistoryIndex += 1;
-  }
-
-  const historyMessages = fullMessages.slice(firstHistoryIndex);
-  const historyMessageIds = eligibleMessages
-    .slice(baseTruncatedMessageIds.length, baseTruncatedMessageIds.length + historyMessages.length)
-    .map((message) => message.id);
-  if (historyMessages.length === 0) {
-    return {
-      messages: fullMessages,
-      promptTokens: await countPromptTokens(fullMessages),
-      promptSafetyMarginTokens,
-      truncatedMessageIds: baseTruncatedMessageIds,
-    };
-  }
-
-  const promptTokenBudget = Math.max(
-    0,
-    maxContextTokens - promptSafetyMarginTokens - responseReserveTokens,
-  );
-
-  const tokenCountCache = new Map<number, number>();
-  const countTokensForHistoryStart = async (historyStartIndex: number) => {
-    if (tokenCountCache.has(historyStartIndex)) {
-      return tokenCountCache.get(historyStartIndex)!;
-    }
-
-    const tokens = await countPromptTokens([
-      ...systemMessages,
-      ...historyMessages.slice(historyStartIndex),
-    ]);
-    tokenCountCache.set(historyStartIndex, tokens);
-    return tokens;
-  };
-
-  const lastHistoryIndex = historyMessages.length - 1;
-  const fitsBudget = async (historyStartIndex: number) =>
-    (await countTokensForHistoryStart(historyStartIndex)) <= promptTokenBudget;
-
-  let effectiveHistoryStartIndex = 0;
-
-  if (await fitsBudget(0)) {
-    effectiveHistoryStartIndex = 0;
-  } else if (!(await fitsBudget(lastHistoryIndex))) {
-    effectiveHistoryStartIndex = lastHistoryIndex;
-  } else {
-    let low = 0;
-    let high = lastHistoryIndex;
-
-    while (low < high) {
-      const mid = Math.floor((low + high) / 2);
-      if (await fitsBudget(mid)) {
-        high = mid;
-      } else {
-        low = mid + 1;
-      }
-    }
-
-    effectiveHistoryStartIndex = low;
-  }
-
-  let normalizedHistoryMessages = historyMessages.slice(effectiveHistoryStartIndex);
-
-  const shouldBackfillLeadingUserMessage =
-    effectiveHistoryStartIndex > 0 &&
-    normalizedHistoryMessages.length > 0 &&
-    normalizedHistoryMessages[0]?.role === 'assistant' &&
-    historyMessages[effectiveHistoryStartIndex - 1]?.role === 'user';
-
-  if (shouldBackfillLeadingUserMessage) {
-    const leadingUserMessage = historyMessages[effectiveHistoryStartIndex - 1];
-    const canBackfillLeadingUserMessage =
-      (await countTokensForHistoryStart(effectiveHistoryStartIndex - 1)) <= promptTokenBudget;
-
-    if (canBackfillLeadingUserMessage) {
-      effectiveHistoryStartIndex -= 1;
-      normalizedHistoryMessages = historyMessages.slice(effectiveHistoryStartIndex);
-    } else if (normalizedHistoryMessages.length === 1) {
-      const userOnlyTokens = await countPromptTokens([...systemMessages, leadingUserMessage]);
-      if (userOnlyTokens <= promptTokenBudget) {
-        effectiveHistoryStartIndex -= 1;
-        normalizedHistoryMessages = [leadingUserMessage];
-      }
-    }
-  }
-
-  while (
-    effectiveHistoryStartIndex > 0 &&
-    normalizedHistoryMessages.length > 0 &&
-    normalizedHistoryMessages[0]?.role === 'assistant'
-  ) {
-    effectiveHistoryStartIndex += 1;
-    normalizedHistoryMessages = historyMessages.slice(effectiveHistoryStartIndex);
-  }
-
-  const windowMessages = [...systemMessages, ...normalizedHistoryMessages];
-  const truncatedMessageIds = [
-    ...baseTruncatedMessageIds,
-    ...historyMessageIds.slice(0, effectiveHistoryStartIndex),
-  ];
-
-  return {
-    messages: windowMessages,
-    promptTokens: await countTokensForHistoryStart(effectiveHistoryStartIndex),
-    promptSafetyMarginTokens,
-    truncatedMessageIds,
-  };
+  return getThreadInferenceWindow(thread, resolveThreadInferenceWindowOptions(thread, options)).messages;
 }
 
 export function getThreadTruncationState(thread: ChatThread, options?: InferenceBudgetOptions) {
-  const { truncatedMessageIds } = getThreadInferenceWindow(thread, resolveInferenceOptions(thread, options));
+  const { truncatedMessageIds } = getThreadInferenceWindow(thread, resolveThreadInferenceWindowOptions(thread, options));
 
   return createTruncationState(truncatedMessageIds);
 }
-
-const EMPTY_TRUNCATION_STATE: ReturnType<typeof getThreadTruncationState> = {
-  truncatedMessageIds: [],
-  shouldOfferSummary: false,
-};
 
 export const useChatSession = () => {
   const activeThread = useChatStore((state) => state.getActiveThread());
@@ -309,117 +109,7 @@ export const useChatSession = () => {
       ? llmEngineService.getContextSize()
       : undefined;
 
-  const activeThreadId = activeThread?.id ?? null;
-  const activeThreadStatus = activeThread?.status ?? null;
-  const [accurateTruncationState, setAccurateTruncationState] = useState<{
-    threadId: string;
-    state: ReturnType<typeof getThreadTruncationState>;
-  } | null>(null);
-  const accurateTruncationCacheRef = useRef<{ key: string | null; state: ReturnType<typeof getThreadTruncationState> }>({
-    key: null,
-    state: EMPTY_TRUNCATION_STATE,
-  });
-
-  const truncationCacheRef = useRef<{ threadId: string | null; state: ReturnType<typeof getThreadTruncationState> }>({
-    threadId: null,
-    state: EMPTY_TRUNCATION_STATE,
-  });
-  const heuristicTruncationState = useMemo(() => {
-    if (!activeThread) {
-      return EMPTY_TRUNCATION_STATE;
-    }
-
-    return getThreadTruncationState(activeThread, {
-      maxContextTokens: activeContextTokenBudget,
-    });
-  }, [activeContextTokenBudget, activeThread]);
-  useEffect(() => {
-    if (!activeThread || activeThread.status === 'generating') {
-      setAccurateTruncationState(null);
-      return;
-    }
-
-    if (activeContextTokenBudget === undefined) {
-      setAccurateTruncationState(null);
-      return;
-    }
-
-    let isCancelled = false;
-    const windowOptions = resolveInferenceOptions(activeThread, {
-      maxContextTokens: activeContextTokenBudget,
-    });
-    const cacheKey = [
-      activeThread.id,
-      activeThread.updatedAt,
-      activeContextTokenBudget,
-      windowOptions.responseReserveTokens ?? null,
-      windowOptions.promptSafetyMarginTokens ?? null,
-      activeThread.paramsSnapshot.reasoningEnabled === true ? 1 : 0,
-    ].join(':');
-
-    if (accurateTruncationCacheRef.current.key === cacheKey) {
-      setAccurateTruncationState({
-        threadId: activeThread.id,
-        state: accurateTruncationCacheRef.current.state,
-      });
-      return;
-    }
-
-    setAccurateTruncationState(null);
-
-    void buildInferenceWindowWithAccurateTokenCounts(activeThread, windowOptions)
-      .then(({ truncatedMessageIds }) => {
-        if (!isCancelled) {
-          const state = createTruncationState(truncatedMessageIds);
-          accurateTruncationCacheRef.current = { key: cacheKey, state };
-          setAccurateTruncationState({
-            threadId: activeThread.id,
-            state,
-          });
-        }
-      })
-      .catch((error) => {
-        if (!isCancelled) {
-          console.warn('[ChatSession] Failed to resolve truncation state accurately, falling back to heuristics', error);
-        }
-      });
-
-    return () => {
-      isCancelled = true;
-    };
-  }, [activeContextTokenBudget, activeThread]);
-  const truncationState = useMemo(() => {
-    if (!activeThread) {
-      return EMPTY_TRUNCATION_STATE;
-    }
-
-    if (activeThread.status === 'generating') {
-      return truncationCacheRef.current.threadId === activeThread.id
-        ? truncationCacheRef.current.state
-        : EMPTY_TRUNCATION_STATE;
-    }
-
-    if (accurateTruncationState?.threadId === activeThread.id) {
-      return accurateTruncationState.state;
-    }
-
-    return heuristicTruncationState;
-  }, [accurateTruncationState, activeThread, heuristicTruncationState]);
-  useEffect(() => {
-    if (!activeThreadId) {
-      truncationCacheRef.current = { threadId: null, state: EMPTY_TRUNCATION_STATE };
-      return;
-    }
-
-    if (activeThreadStatus === 'generating') {
-      return;
-    }
-
-    truncationCacheRef.current = {
-      threadId: activeThreadId,
-      state: truncationState,
-    };
-  }, [activeThreadId, activeThreadStatus, truncationState]);
+  const truncationState = useTruncationTracking(activeThread, activeContextTokenBudget);
   const appStateRef = useRef<AppStateStatus>(AppState.currentState ?? 'active');
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (nextAppState) => {
@@ -522,9 +212,17 @@ export const useChatSession = () => {
     };
 
     try {
-      const windowOptions = resolveInferenceOptions(thread, { maxContextTokens: maxContextSize });
+      const windowOptions = resolveThreadInferenceWindowOptions(thread, { maxContextTokens: maxContextSize });
+      const tokenCountParams = {
+        enable_thinking: thread.paramsSnapshot.reasoningEnabled === true,
+        reasoning_format: thread.paramsSnapshot.reasoningEnabled === true ? ('auto' as const) : ('none' as const),
+      };
       const { messages, promptTokens, promptSafetyMarginTokens } =
-        await buildInferenceWindowWithAccurateTokenCounts(thread, windowOptions)
+        await buildInferenceWindowWithAccurateTokenCounts(thread, windowOptions, async (messages) =>
+          llmEngineService.countPromptTokens({
+            messages,
+            params: tokenCountParams,
+          }))
           .catch((error) => {
             console.warn('[ChatSession] Failed to count prompt tokens accurately, falling back to heuristics', error);
             const messages = getThreadInferenceWindow(thread, windowOptions).messages;

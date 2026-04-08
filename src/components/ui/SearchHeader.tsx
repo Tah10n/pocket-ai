@@ -13,7 +13,7 @@ import {
 } from './ScreenShell';
 import { useTranslation } from 'react-i18next';
 import { screenChromeTokens } from '../../utils/themeTokens';
-import { type ModelsCatalogTab } from '../models/modelTabs';
+import { type ModelsCatalogTab } from '@/store/modelsCatalogTabs';
 
 interface SearchHeaderProps {
   searchQuery: string;

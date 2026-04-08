@@ -1,7 +1,6 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Linking } from 'react-native';
+import React, { useCallback, useEffect, useMemo, useRef } from 'react';
+import { Alert } from 'react-native';
 import { FlashList, ListRenderItem } from '@shopify/flash-list';
-import { useRouter } from 'expo-router';
 import { Box } from '@/components/ui/box';
 import { Button, ButtonText } from '@/components/ui/button';
 import { ErrorReportSheet } from '@/components/ui/ErrorReportSheet';
@@ -13,20 +12,12 @@ import { Spinner } from '@/components/ui/spinner';
 import { Text } from '@/components/ui/text';
 import { useErrorReportSheetController, type ErrorReportContext } from '@/hooks/useErrorReportSheetController';
 import { useLLMEngine } from '@/hooks/useLLMEngine';
-import type { LoadModelOptions } from '@/services/LLMEngineService';
 import { useModelParametersSheetController } from '@/hooks/useModelParametersSheetController';
 import { useModelDownload } from '@/hooks/useModelDownload';
-import {
-  type CatalogServerSort,
-  modelCatalogService,
-  getModelCatalogErrorMessage,
-  getHuggingFaceModelUrl,
-} from '@/services/ModelCatalogService';
+import type { CatalogServerSort } from '@/services/ModelCatalogService';
 import { getReportedErrorMessage, toAppError } from '@/services/AppError';
-import { huggingFaceTokenService } from '@/services/HuggingFaceTokenService';
 import { registry } from '@/services/LocalStorageRegistry';
 import { llmEngineService } from '@/services/LLMEngineService';
-import { offloadModel } from '@/services/StorageManagerService';
 import { performanceMonitor } from '@/services/PerformanceMonitor';
 import {
   useModelsStore,
@@ -37,28 +28,20 @@ import {
 import { useDownloadStore } from '@/store/downloadStore';
 import { EngineStatus, LifecycleStatus, ModelAccessState, type ModelMetadata } from '@/types/models';
 import { mergeModelWithRuntimeState } from '@/utils/modelRuntimeState';
-import { startModelDownloadFlow } from '@/utils/modelDownloadFlow';
 import { DECIMAL_GIGABYTE } from '@/utils/modelSize';
-import { isHighConfidenceLikelyOomMemoryFit, shouldWarnForModelMemoryLoad } from '@/utils/modelMemoryFitState';
 import { screenLayoutMetrics } from '@/utils/themeTokens';
+import { uniqueByKey } from '@/utils/uniqueBy';
 import { ModelsFilter } from './ModelsFilter';
-import { type ModelsCatalogTab } from './modelTabs';
-import {
-  shouldBootstrapCatalogSession,
-  shouldResetCatalogForTokenEvent,
-} from './modelsListSession';
+import { type ModelsCatalogTab } from '@/store/modelsCatalogTabs';
 import { useTranslation } from 'react-i18next';
+import { useModelsCatalogData } from '@/hooks/useModelsCatalogData';
+import { useModelActions } from '@/hooks/useModelActions';
 
 interface ModelsListProps {
   activeTab: ModelsCatalogTab;
   searchQuery: string;
   searchSessionKey?: number | string;
 }
-
-type FetchState = {
-  warningMessage: string | null;
-  loadMoreError: string | null;
-};
 
 interface ModelCardWithRuntimeStateProps {
   model: ModelMetadata;
@@ -205,43 +188,8 @@ function sortModels(models: ModelMetadata[], sort: ModelSortPreference): ModelMe
   });
 }
 
-function mergeUniqueModelsById(models: ModelMetadata[]): ModelMetadata[] {
-  const seen = new Set<string>();
-  return models.filter((model) => {
-    if (seen.has(model.id)) {
-      return false;
-    }
-
-    seen.add(model.id);
-    return true;
-  });
-}
-
 export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsListProps) => {
   const { t } = useTranslation();
-  const router = useRouter();
-  const [models, setModels] = useState<ModelMetadata[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [isRefreshing, setIsRefreshing] = useState(false);
-  const [isFetchingMore, setIsFetchingMore] = useState(false);
-  const [hasMore, setHasMore] = useState(true);
-  const [nextCursor, setNextCursor] = useState<string | null>(null);
-  const [tokenRevision, setTokenRevision] = useState(0);
-  const [isTokenStateHydrated, setIsTokenStateHydrated] = useState(false);
-  const [hasTokenConfigured, setHasTokenConfigured] = useState(
-    () => huggingFaceTokenService.getCachedState().hasToken,
-  );
-  const [manualRefreshRevision, setManualRefreshRevision] = useState(0);
-  const [{ warningMessage, loadMoreError }, setFetchState] = useState<FetchState>({
-    warningMessage: null,
-    loadMoreError: null,
-  });
-  const latestFetchIdRef = useRef(0);
-  const appendInFlightRef = useRef(false);
-  const lastAutoLoadCursorRef = useRef<string | null>(null);
-  const autoFillAttemptsRef = useRef(0);
-  const hasUserScrolledCatalogRef = useRef(false);
-  const catalogFirstResultsShownSessionRef = useRef<string | null>(null);
   const { startDownload, cancelDownload } = useModelDownload();
   const queueLifecycleSignature = useDownloadStore((state) => state.queue
     .map((model) => `${model.id}:${model.lifecycleStatus}`)
@@ -262,277 +210,38 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
   const { filters, sort, discoveryMode } = tabPreferences[activeTab];
   const serverSort = useMemo(() => resolveServerSort(sort), [sort]);
   const shouldAutoLoadMore = serverSort !== null;
-  const effectiveSearchSessionKey = searchSessionKey ?? searchQuery;
-  const sizeRangesSessionKey = useMemo(
-    () => [...filters.sizeRanges].sort().join('|'),
-    [filters.sizeRanges],
-  );
-  const sessionIdentity = useMemo(() => ([
-    activeTab,
-    String(effectiveSearchSessionKey),
-    filters.fitsInRamOnly ? 'fits' : 'any',
-    filters.noTokenRequiredOnly ? 'public-only' : 'any-token',
-    sizeRangesSessionKey,
-    `${sort.field}:${sort.direction}`,
-    `token:${tokenRevision}`,
-    `refresh:${manualRefreshRevision}`,
-  ].join('::')), [
-    activeTab,
-    effectiveSearchSessionKey,
-    filters.fitsInRamOnly,
-    filters.noTokenRequiredOnly,
-    manualRefreshRevision,
-    sizeRangesSessionKey,
-    sort.direction,
-    sort.field,
-    tokenRevision,
-  ]);
+  const autoFillAttemptsRef = useRef(0);
+  const lastAutoFillCursorRef = useRef<string | null>(null);
+  const catalogFirstResultsShownSessionRef = useRef<string | null>(null);
 
-  const refreshDownloadedModels = useCallback(() => {
-    if (activeTab !== 'downloaded') {
-      return;
-    }
-
-    void modelCatalogService.getLocalModels()
-      .then(setModels)
-      .catch((error) => {
-        console.warn('[ModelsList] Failed to refresh local models', error);
-        setFetchState((current) => ({
-          ...current,
-          warningMessage: getModelCatalogErrorMessage(error),
-          loadMoreError: null,
-        }));
-      });
-  }, [activeTab]);
-
-  const fetchModels = useCallback(
-    async (
-      query: string,
-      cursor: string | null,
-      append: boolean,
-      preserveExistingResults: boolean = false,
-      forceRefresh: boolean = false,
-    ) => {
-      const fetchId = latestFetchIdRef.current + 1;
-      latestFetchIdRef.current = fetchId;
-      const fetchSpan = performanceMonitor.startSpan(
-        append ? 'catalog.fetch.more' : 'catalog.fetch.initial',
-        {
-          cursorType: cursor ? 'cursor' : 'initial',
-          cursorIsBuffered: cursor ? cursor.startsWith('catalog-buffer:') : undefined,
-          pageSize: MODELS_PAGE_SIZE,
-          sort: serverSort ?? undefined,
-        },
-      );
-      let fetchOutcome: 'success' | 'error' | 'stale' = 'success';
-      let resultCount = 0;
-      let resultHasMore = false;
-
-      if (append) {
-        appendInFlightRef.current = true;
-        setIsFetchingMore(true);
-        setFetchState((current) => ({ ...current, loadMoreError: null }));
-      } else {
-        appendInFlightRef.current = false;
-        setLoading(true);
-        setIsFetchingMore(false);
-        setFetchState((current) => ({ ...current, warningMessage: null, loadMoreError: null }));
-        if (!preserveExistingResults) {
-          setHasMore(true);
-          setNextCursor(null);
-          setModels([]);
-        }
-      }
-
-      try {
-        const result = await modelCatalogService.searchModels(query, {
-          cursor,
-          pageSize: MODELS_PAGE_SIZE,
-          sort: serverSort,
-          forceRefresh,
-          gated: filters.noTokenRequiredOnly ? false : undefined,
-        });
-        resultCount = result.models.length;
-        resultHasMore = result.hasMore;
-
-        if (fetchId !== latestFetchIdRef.current) {
-          fetchOutcome = 'stale';
-          return;
-        }
-
-        setHasMore(result.hasMore);
-        setNextCursor(result.nextCursor);
-        setModels((current) => (
-          append
-            ? mergeUniqueModelsById([...current, ...result.models])
-            : result.models
-        ));
-        setFetchState({
-          warningMessage: result.warning ? getModelCatalogErrorMessage(result.warning) : null,
-          loadMoreError: null,
-        });
-      } catch (error) {
-        if (fetchId !== latestFetchIdRef.current) {
-          fetchOutcome = 'stale';
-          return;
-        }
-
-        fetchOutcome = 'error';
-        const message = getModelCatalogErrorMessage(error);
-
-        if (append) {
-          setFetchState((current) => ({ ...current, loadMoreError: message }));
-        } else {
-          if (!preserveExistingResults) {
-            setModels([]);
-            setHasMore(false);
-            setNextCursor(null);
-          }
-          setFetchState({ warningMessage: message, loadMoreError: null });
-        }
-      } finally {
-        if (append) {
-          appendInFlightRef.current = false;
-          if (fetchId === latestFetchIdRef.current) {
-            setIsFetchingMore(false);
-          }
-        } else {
-          if (fetchId === latestFetchIdRef.current) {
-            setLoading(false);
-          }
-        }
-
-        fetchSpan.end({ outcome: fetchOutcome, count: resultCount, hasMore: resultHasMore });
-      }
-    },
-    [filters.noTokenRequiredOnly, serverSort],
-  );
-
-  useEffect(() => {
-    return huggingFaceTokenService.subscribe((state, source) => {
-      setHasTokenConfigured(state.hasToken);
-      if (source === 'hydrate' || source === 'mutation') {
-        setIsTokenStateHydrated(true);
-      }
-
-      if (shouldResetCatalogForTokenEvent(source)) {
-        setTokenRevision((current) => current + 1);
-      }
-    });
-  }, []);
-
-  useEffect(() => {
-    return modelCatalogService.subscribeCacheInvalidations((_revision, source) => {
-      if (source !== 'manual') {
-        return;
-      }
-
-      setManualRefreshRevision((current) => current + 1);
-    });
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    void huggingFaceTokenService.refreshState()
-      .then((state) => {
-        if (cancelled) {
-          return;
-        }
-
-        setHasTokenConfigured(state.hasToken);
-        setIsTokenStateHydrated(true);
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setIsTokenStateHydrated(true);
-        }
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    if (activeTab !== 'all' || !isTokenStateHydrated) {
-      return;
-    }
-
-    if (discoveryMode === 'uninitialized') {
-      applyDiscoveryPreset({ hasToken: hasTokenConfigured });
-      return;
-    }
-
-    syncDiscoveryTokenState(hasTokenConfigured);
-  }, [
-    activeTab,
-    applyDiscoveryPreset,
-    discoveryMode,
+  const {
+    models,
+    loading,
+    isRefreshing,
+    isFetchingMore,
+    hasMore,
+    nextCursor,
+    warningMessage,
+    loadMoreError,
     hasTokenConfigured,
     isTokenStateHydrated,
+    sessionIdentity,
+    handleLoadMore,
+    handlePullToRefresh,
+    handleCatalogScroll,
+    refreshDownloadedModels,
+    requestCatalogRefresh,
+  } = useModelsCatalogData({
+    activeTab,
+    searchQuery,
+    searchSessionKey,
+    filters,
+    sort,
+    serverSort,
+    discoveryMode,
+    applyDiscoveryPreset,
     syncDiscoveryTokenState,
-  ]);
-
-  useEffect(() => {
-    if (!shouldBootstrapCatalogSession(activeTab, discoveryMode, isTokenStateHydrated)) {
-      return;
-    }
-
-    latestFetchIdRef.current += 1;
-    appendInFlightRef.current = false;
-    lastAutoLoadCursorRef.current = null;
-    hasUserScrolledCatalogRef.current = false;
-    setModels([]);
-    setHasMore(activeTab === 'all');
-    setNextCursor(null);
-    setLoading(false);
-    setIsFetchingMore(false);
-    setFetchState({ warningMessage: null, loadMoreError: null });
-    setIsRefreshing(false);
-
-    if (activeTab === 'all') {
-      const cachedResult = modelCatalogService.getCachedSearchResult(searchQuery, {
-        cursor: null,
-        pageSize: MODELS_PAGE_SIZE,
-        sort: serverSort,
-        gated: filters.noTokenRequiredOnly ? false : undefined,
-      });
-
-      if (cachedResult) {
-        setModels(cachedResult.models);
-        setHasMore(cachedResult.hasMore);
-        setNextCursor(cachedResult.nextCursor);
-      }
-
-      const timer = setTimeout(() => {
-        void fetchModels(searchQuery, null, false, Boolean(cachedResult));
-      }, cachedResult ? 0 : 400);
-      return () => clearTimeout(timer);
-    }
-
-    const fetchId = latestFetchIdRef.current + 1;
-    latestFetchIdRef.current = fetchId;
-    void modelCatalogService.getLocalModels()
-      .then((localModels) => {
-        if (fetchId !== latestFetchIdRef.current) {
-          return;
-        }
-
-        setModels(localModels);
-        setHasMore(false);
-      })
-      .catch((error) => {
-        if (fetchId !== latestFetchIdRef.current) {
-          return;
-        }
-
-        console.warn('[ModelsList] Failed to load local models', error);
-        setFetchState({ warningMessage: getModelCatalogErrorMessage(error), loadMoreError: null });
-        setModels([]);
-        setHasMore(false);
-      });
-  }, [activeTab, discoveryMode, fetchModels, filters.noTokenRequiredOnly, isTokenStateHydrated, searchQuery, serverSort, sessionIdentity]);
+  });
 
   const displayModels = useMemo(() => {
     const registryModels = typeof registry.getModels === 'function'
@@ -547,7 +256,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
     const queuedItemsById = new Map(queuedItems.map((queuedItem) => [queuedItem.id, queuedItem] as const));
 
     const baseModels = activeTab === 'downloaded'
-      ? mergeUniqueModelsById([...models, ...queuedItems])
+      ? uniqueByKey([...models, ...queuedItems], (model) => model.id)
       : models;
 
     return baseModels.map((model) => mergeModelWithRuntimeState(model, {
@@ -597,6 +306,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
 
   useEffect(() => {
     autoFillAttemptsRef.current = 0;
+    lastAutoFillCursorRef.current = null;
   }, [sessionIdentity]);
 
   useEffect(() => {
@@ -726,188 +436,30 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
     onAfterActiveModelReload: refreshDownloadedModels,
   });
 
-  const openTokenSettings = useCallback(() => {
-    router.push('/huggingface-token');
-  }, [router]);
-
-  const openModelPage = useCallback(async (modelId: string) => {
-    try {
-      await Linking.openURL(getHuggingFaceModelUrl(modelId));
-    } catch (error) {
-      showModelActionError('ModelsList.openModelPage', error);
-    }
-  }, [showModelActionError]);
-
-  const openModelDetails = useCallback((modelId: string) => {
-    router.push({
-      pathname: '/model-details',
-      params: { modelId },
-    });
-  }, [router]);
-
-  const openChat = useCallback(() => {
-    router.push('/chat');
-  }, [router]);
-
-  const handleDownload = useCallback((model: ModelMetadata) => {
-    startModelDownloadFlow({
-      model,
-      t,
-      startDownload,
-      openTokenSettings,
-      openModelPage,
-      onError: (error) => {
-        showModelActionError('ModelsList.handleDownload', error);
-      },
-    });
-  }, [openModelPage, openTokenSettings, showModelActionError, startDownload, t]);
-
-  const performLoad = useCallback(async (modelId: string, options?: LoadModelOptions) => {
-    try {
-      await loadModel(modelId, options);
-      refreshDownloadedModels();
-    } catch (error) {
-      const appError = toAppError(error);
-      if (appError.code === 'model_load_blocked') {
-        refreshDownloadedModels();
-        Alert.alert(
-          t('models.ramLikelyOom'),
-          t('models.loadMemoryBlockedMessage'),
-          [
-            { text: t('common.close') },
-          ],
-        );
-        return;
-      }
-      if (appError.code === 'model_memory_warning') {
-        Alert.alert(
-          t('models.memoryWarningTitle'),
-          t('models.loadMemoryWarningMessage'),
-          [
-            { text: t('common.cancel'), style: 'cancel' },
-            { text: t('models.loadAnyway'), onPress: () => { setTimeout(() => { void performLoad(modelId, { ...options, allowUnsafeMemoryLoad: true }); }, 0); } },
-          ],
-        );
-        return;
-      }
-
-      if (
-        appError.code === 'model_load_failed'
-        || appError.code === 'model_memory_insufficient'
-        || appError.code === 'model_incompatible'
-      ) {
-        // ModelsList renders a persistent engine error card (with report action) for these cases.
-        return;
-      }
-
-      const model = models.find((item) => item.id === modelId) ?? registry.getModel(modelId);
-      const reportContext: ErrorReportContext = {
-        model: model ? {
-          id: model.id,
-          name: model.name,
-          author: model.author,
-          size: model.size,
-          localPath: model.localPath,
-          downloadUrl: model.downloadUrl,
-          memoryFitDecision: model.memoryFitDecision,
-          memoryFitConfidence: model.memoryFitConfidence,
-          fitsInRam: model.fitsInRam,
-          lifecycleStatus: model.lifecycleStatus,
-          accessState: model.accessState,
-          gguf: model.gguf,
-        } : { id: modelId },
-        engine: {
-          status: engineState.status,
-          activeModelId: engineState.activeModelId,
-          loadProgress: engineState.loadProgress,
-        },
-        options: options ? {
-          allowUnsafeMemoryLoad: options.allowUnsafeMemoryLoad,
-          forceReload: options.forceReload,
-        } : undefined,
-      };
-
-      showModelActionError('ModelsList.performLoad', error, reportContext);
-    }
-  }, [engineState.activeModelId, engineState.loadProgress, engineState.status, loadModel, models, refreshDownloadedModels, showModelActionError, t]);
-
-  const handleLoad = useCallback(async (modelId: string) => {
-    const model = displayModels.find((item) => item.id === modelId) ?? registry.getModel(modelId);
-    if (isHighConfidenceLikelyOomMemoryFit(model)) {
-      Alert.alert(
-        t('models.ramLikelyOom'),
-        t('models.loadMemoryBlockedMessage'),
-        [
-          { text: t('common.close') },
-        ],
-      );
-      return;
-    }
-
-    if (shouldWarnForModelMemoryLoad(model)) {
-      Alert.alert(
-        t('models.memoryWarningTitle'),
-        t('models.loadMemoryWarningMessage'),
-        [
-          { text: t('common.cancel'), style: 'cancel' },
-          { text: t('models.loadAnyway'), onPress: () => { void performLoad(modelId, { allowUnsafeMemoryLoad: true }); } },
-        ],
-      );
-      return;
-    }
-
-    await performLoad(modelId);
-  }, [displayModels, performLoad, t]);
-
-  const handleUnload = useCallback(async () => {
-    try {
-      await unloadModel();
-      refreshDownloadedModels();
-    } catch (error) {
-      showModelActionError('ModelsList.handleUnload', error);
-    }
-  }, [refreshDownloadedModels, showModelActionError, unloadModel]);
-
-  const handleDelete = useCallback((modelId: string) => {
-    Alert.alert(
-      t('models.deleteTitle'),
-      t('models.deleteMessage'),
-      [
-        { text: t('common.cancel'), style: 'cancel' },
-        {
-          text: t('models.deleteKeepSettings'),
-          onPress: async () => {
-            try {
-              await offloadModel(modelId, { preserveSettings: true });
-              if (activeTab === 'all') {
-                setManualRefreshRevision((current) => current + 1);
-              } else {
-                refreshDownloadedModels();
-              }
-            } catch (error) {
-              showModelActionError('ModelsList.handleDelete.keepSettings', error);
-            }
-          },
-        },
-        {
-          text: t('models.deleteResetSettings'),
-          style: 'destructive',
-          onPress: async () => {
-            try {
-              await offloadModel(modelId, { preserveSettings: false });
-              if (activeTab === 'all') {
-                setManualRefreshRevision((current) => current + 1);
-              } else {
-                refreshDownloadedModels();
-              }
-            } catch (error) {
-              showModelActionError('ModelsList.handleDelete.resetSettings', error);
-            }
-          },
-        },
-      ],
-    );
-  }, [activeTab, refreshDownloadedModels, showModelActionError, t]);
+  const {
+    cancelDownload: cancelModelDownload,
+    openChat,
+    openModelDetails,
+    openModelPage,
+    openTokenSettings,
+    handleDelete,
+    handleDownload,
+    handleLoad,
+    handleUnload,
+  } = useModelActions({
+    activeTab,
+    models,
+    displayModels,
+    engineState,
+    loadModel,
+    unloadModel,
+    startDownload,
+    cancelDownload,
+    refreshDownloadedModels,
+    requestCatalogRefresh,
+    showError: showModelActionError,
+    t,
+  });
 
   useEffect(() => {
     if (activeTab !== 'all') {
@@ -924,7 +476,6 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
       !nextCursor ||
       loading ||
       isFetchingMore ||
-      appendInFlightRef.current ||
       loadMoreError
     ) {
       return;
@@ -938,111 +489,25 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
       return;
     }
 
-    if (lastAutoLoadCursorRef.current === nextCursor) {
+    if (lastAutoFillCursorRef.current === nextCursor) {
       return;
     }
 
     autoFillAttemptsRef.current += 1;
-    lastAutoLoadCursorRef.current = nextCursor;
-    void fetchModels(searchQuery, nextCursor, true);
+    lastAutoFillCursorRef.current = nextCursor;
+    handleLoadMore('manual');
   }, [
     activeTab,
-    fetchModels,
     filters.fitsInRamOnly,
     filters.noTokenRequiredOnly,
     filteredModels.length,
+    handleLoadMore,
     hasMore,
     isFetchingMore,
     loadMoreError,
     loading,
     nextCursor,
-    searchQuery,
   ]);
-
-  const handleLoadMore = useCallback((source: 'auto' | 'manual' = 'manual') => {
-    if (
-      activeTab !== 'all' ||
-      !hasMore ||
-      !nextCursor ||
-      loading ||
-      isFetchingMore ||
-      appendInFlightRef.current
-    ) {
-      return;
-    }
-
-    if (source === 'auto') {
-      if (
-        !hasUserScrolledCatalogRef.current ||
-        loadMoreError ||
-        lastAutoLoadCursorRef.current === nextCursor
-      ) {
-        return;
-      }
-
-      lastAutoLoadCursorRef.current = nextCursor;
-      // Prevent back-to-back auto loads caused by content reordering or list re-renders.
-      // Auto loading should require fresh user scroll input between pages.
-      hasUserScrolledCatalogRef.current = false;
-    }
-
-    void fetchModels(searchQuery, nextCursor, true);
-  }, [activeTab, fetchModels, hasMore, isFetchingMore, loadMoreError, loading, nextCursor, searchQuery]);
-
-  const handlePullToRefresh = useCallback(() => {
-    if (loading || isRefreshing || isFetchingMore || appendInFlightRef.current) {
-      return;
-    }
-
-    setIsRefreshing(true);
-    appendInFlightRef.current = false;
-    lastAutoLoadCursorRef.current = null;
-    hasUserScrolledCatalogRef.current = false;
-    setFetchState((current) => ({ ...current, warningMessage: null, loadMoreError: null }));
-
-    if (activeTab === 'all') {
-      void fetchModels(searchQuery, null, false, true, true).finally(() => {
-        setIsRefreshing(false);
-      });
-      return;
-    }
-
-    const fetchId = latestFetchIdRef.current + 1;
-    latestFetchIdRef.current = fetchId;
-    setLoading(true);
-    setIsFetchingMore(false);
-    void modelCatalogService.getLocalModels()
-      .then((localModels) => {
-        if (fetchId !== latestFetchIdRef.current) {
-          return;
-        }
-
-        setModels(localModels);
-        setHasMore(false);
-        setNextCursor(null);
-      })
-      .catch((error) => {
-        if (fetchId !== latestFetchIdRef.current) {
-          return;
-        }
-
-        console.warn('[ModelsList] Pull-to-refresh failed to load local models', error);
-        setFetchState({ warningMessage: getModelCatalogErrorMessage(error), loadMoreError: null });
-      })
-      .finally(() => {
-        setIsRefreshing(false);
-        if (fetchId === latestFetchIdRef.current) {
-          setLoading(false);
-        }
-      });
-  }, [activeTab, fetchModels, isFetchingMore, isRefreshing, loading, searchQuery]);
-
-  const handleCatalogScroll = useCallback((event: any) => {
-    const offsetY = event?.nativeEvent?.contentOffset?.y;
-    if (typeof offsetY === 'number' && offsetY > 0) {
-      hasUserScrolledCatalogRef.current = true;
-    }
-  }, []);
 
   const hasFilters =
     filters.fitsInRamOnly
@@ -1138,11 +603,11 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
       onOpenSettings={openModelParameters}
       onUnload={handleUnload}
       onDelete={handleDelete}
-      onCancel={cancelDownload}
+      onCancel={cancelModelDownload}
       onChat={openChat}
     />
   ), [
-    cancelDownload,
+    cancelModelDownload,
     engineState.activeModelId,
     handleDelete,
     handleDownload,

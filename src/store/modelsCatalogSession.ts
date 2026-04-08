@@ -1,6 +1,6 @@
-import type { CatalogDiscoveryMode } from '@/store/modelsStore';
-import type { HuggingFaceTokenStateChangeSource } from '@/services/HuggingFaceTokenService';
-import type { ModelsCatalogTab } from './modelTabs';
+import type { HuggingFaceTokenStateChangeSource } from '../services/HuggingFaceTokenService';
+import type { CatalogDiscoveryMode } from './modelsStore';
+import type { ModelsCatalogTab } from './modelsCatalogTabs';
 
 export function shouldWaitForCatalogTokenHydration(
   activeTab: ModelsCatalogTab,

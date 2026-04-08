@@ -43,8 +43,8 @@ jest.mock('@/components/ui/ActiveModelCard', () => {
     };
 });
 
-jest.mock('../src/hooks/useChatCommands', () => ({
-    useChatCommands: () => ({
+jest.mock('../src/hooks/useChatSession', () => ({
+    useChatSession: () => ({
         deleteThread: jest.fn(),
         openThread: jest.fn(),
         renameThread: jest.fn(),

@@ -1,14 +1,11 @@
 import type { ContextSolveResult, EstimatorInput } from './types';
 import { estimateAccurateMemoryFit } from './estimator';
+import { isFinitePositiveNumber } from './guards';
 
 export const MIN_CONTEXT_WINDOW_TOKENS = 512;
 export const DEFAULT_CONTEXT_WINDOW_TOKENS = 8192;
 export const MAX_CONTEXT_WINDOW_TOKENS = 131072;
 export const CONTEXT_WINDOW_STEP_TOKENS = 512;
-
-function isFinitePositiveNumber(value: unknown): value is number {
-  return typeof value === 'number' && Number.isFinite(value) && value > 0;
-}
 
 function floorToContextWindowStep(tokens: number): number {
   return Math.floor(tokens / CONTEXT_WINDOW_STEP_TOKENS) * CONTEXT_WINDOW_STEP_TOKENS;

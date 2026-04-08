@@ -1,4 +1,5 @@
 import type { CalibrationKey, CalibrationRecord, MemoryBreakdown } from './types';
+import { isFinitePositiveNumber } from './guards';
 
 function normalizeNonEmptyString(value: unknown): string | null {
   if (typeof value !== 'string') {
@@ -233,10 +234,6 @@ function sumPositiveByteCounts(...values: number[]): number {
     }
     return acc + value;
   }, 0);
-}
-
-function isFinitePositiveNumber(value: unknown): value is number {
-  return typeof value === 'number' && Number.isFinite(value) && value > 0;
 }
 
 function updateEmaFactor({

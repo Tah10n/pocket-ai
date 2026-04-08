@@ -1,12 +1,13 @@
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
 import { mmkvStorage } from '../lib/mmkv';
+import type { ModelsCatalogTab } from './modelsCatalogTabs';
 
 export type ModelSizeRange = 'small' | 'medium' | 'large';
 export type ModelSortField = 'name' | 'lastModified' | 'downloaded' | 'downloads' | 'likes';
 export type ModelSortDirection = 'asc' | 'desc';
 export type CatalogDiscoveryMode = 'uninitialized' | 'guided' | 'full' | 'custom';
-export type ModelsCatalogTabId = 'all' | 'downloaded';
+export type ModelsCatalogTabId = ModelsCatalogTab;
 export const MODELS_PAGE_SIZE = 20;
 
 export interface ModelFilterCriteria {

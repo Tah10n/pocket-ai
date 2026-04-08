@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next';
 import { useLLMEngine } from '@/hooks/useLLMEngine';
 import { useModelParametersSheetController } from '@/hooks/useModelParametersSheetController';
 import { useModelDownload } from '@/hooks/useModelDownload';
+import { useModelRegistryRevision } from '@/hooks/useModelRegistryRevision';
 import { useErrorReportSheetController, type ErrorReportContext } from '@/hooks/useErrorReportSheetController';
 import { useDownloadStore } from '@/store/downloadStore';
 import { llmEngineService, type LoadModelOptions } from '@/services/LLMEngineService';
@@ -40,6 +41,7 @@ export function useModelDetailsController(modelId: string) {
   const [loading, setLoading] = useState(Boolean(modelId));
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [runtimeRevision, setRuntimeRevision] = useState(0);
+  const modelsRegistryRevision = useModelRegistryRevision();
   const { startDownload, cancelDownload } = useModelDownload();
   const queuedItem = useDownloadStore((state) => state.queue.find((item) => item.id === modelId));
   const { loadModel, unloadModel, state: engineState } = useLLMEngine();
@@ -97,13 +99,14 @@ export function useModelDetailsController(modelId: string) {
     }
 
     void runtimeRevision;
+    void modelsRegistryRevision;
 
     return mergeModelWithRuntimeState(model, {
       activeModelId: engineState.activeModelId,
       localModel: registry.getModel(model.id),
       queuedItem: queuedItem?.id === model.id ? queuedItem : undefined,
     });
-  }, [engineState.activeModelId, model, queuedItem, runtimeRevision]);
+  }, [engineState.activeModelId, model, modelsRegistryRevision, queuedItem, runtimeRevision]);
 
   const getConfigurableModelById = useCallback((targetModelId: string | null) => {
     if (!targetModelId) {
@@ -111,11 +114,12 @@ export function useModelDetailsController(modelId: string) {
     }
 
     void runtimeRevision;
+    void modelsRegistryRevision;
 
     return targetModelId === displayModel?.id
       ? displayModel
       : registry.getModel(targetModelId);
-  }, [displayModel, runtimeRevision]);
+  }, [displayModel, modelsRegistryRevision, runtimeRevision]);
 
   const accessBadge = useMemo(
     () => getModelDetailsAccessBadge(displayModel?.accessState, t),

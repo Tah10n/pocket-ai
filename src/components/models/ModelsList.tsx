@@ -14,6 +14,7 @@ import { useErrorReportSheetController, type ErrorReportContext } from '@/hooks/
 import { useLLMEngine } from '@/hooks/useLLMEngine';
 import { useModelParametersSheetController } from '@/hooks/useModelParametersSheetController';
 import { useModelDownload } from '@/hooks/useModelDownload';
+import { useModelRegistryRevision } from '@/hooks/useModelRegistryRevision';
 import type { CatalogServerSort } from '@/services/ModelCatalogService';
 import { getReportedErrorMessage, toAppError } from '@/services/AppError';
 import { registry } from '@/services/LocalStorageRegistry';
@@ -191,6 +192,7 @@ function sortModels(models: ModelMetadata[], sort: ModelSortPreference): ModelMe
 export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsListProps) => {
   const { t } = useTranslation();
   const { startDownload, cancelDownload } = useModelDownload();
+  const modelsRegistryRevision = useModelRegistryRevision();
   const queueLifecycleSignature = useDownloadStore((state) => state.queue
     .map((model) => `${model.id}:${model.lifecycleStatus}`)
     .join('|'));
@@ -244,6 +246,8 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
   });
 
   const displayModels = useMemo(() => {
+    void modelsRegistryRevision;
+
     const registryModels = typeof registry.getModels === 'function'
       ? registry.getModels()
       : [];
@@ -266,7 +270,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
       localModel: localModelsById.get(model.id),
       queuedItem: queuedItemsById.get(model.id),
     }));
-  }, [activeTab, engineState.activeModelId, models, queueLifecycleSignature]);
+  }, [activeTab, engineState.activeModelId, models, modelsRegistryRevision, queueLifecycleSignature]);
 
   const filteredModels = useMemo(() => {
     const filtered = displayModels.filter((model) => {

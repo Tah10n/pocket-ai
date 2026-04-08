@@ -86,6 +86,8 @@ export class LocalStorageRegistry {
   private cachedModels: ModelMetadata[] | null = null;
   private cachedModelsById: Map<string, ModelMetadata> | null = null;
   private cachedCalibrationRecordsByKey: Map<string, CalibrationRecord> | null = null;
+  private modelsRevision = 0;
+  private modelsListeners: Set<() => void> = new Set();
 
   private constructor() {}
 
@@ -109,6 +111,18 @@ export class LocalStorageRegistry {
    */
   public getModels(): ModelMetadata[] {
     return this.getCachedModels().map((model) => cloneModelMetadata(model));
+  }
+
+  public getModelsRevision(): number {
+    return this.modelsRevision;
+  }
+
+  public subscribeModels(listener: () => void): () => void {
+    this.modelsListeners.add(listener);
+
+    return () => {
+      this.modelsListeners.delete(listener);
+    };
   }
 
   public getCalibrationRecord(key: string): CalibrationRecord | undefined {
@@ -137,6 +151,7 @@ export class LocalStorageRegistry {
       JSON.stringify(normalizedModels),
     );
     this.updateCache(normalizedModels);
+    this.emitModelsChanged();
   }
 
   /**
@@ -382,6 +397,17 @@ export class LocalStorageRegistry {
   private updateCache(models: ModelMetadata[]): void {
     this.cachedModels = models.map((model) => cloneModelMetadata(model));
     this.cachedModelsById = new Map(this.cachedModels.map((model) => [model.id, model]));
+  }
+
+  private emitModelsChanged(): void {
+    this.modelsRevision += 1;
+    this.modelsListeners.forEach((listener) => {
+      try {
+        listener();
+      } catch (error) {
+        console.warn('[LocalStorageRegistry] Model registry listener failed', error);
+      }
+    });
   }
 
   private persistCalibrationRecords(records: Map<string, CalibrationRecord>): void {

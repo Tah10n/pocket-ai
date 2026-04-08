@@ -59,6 +59,7 @@
 ### On-Device Inference
 
 - Fully local chat after download — no network needed for conversations
+- Background generation support with system notifications (Android foreground service, iOS time-limited)
 - Per-model generation controls: temperature, top-p/k, min-p, repetition penalty, seed
 - Load profiles for GPU layers, context window, and KV cache precision
 - RAM-aware safety checks that block loading models that won't fit
@@ -75,6 +76,7 @@
 - Storage manager for unloading, offloading, and clearing model data
 - Per-model settings survive model removal for easy re-download
 - Bounded local cache for catalog results with online revalidation
+- Background model downloads with a persistent progress notification on Android
 - Explicit confirmation before downloading models with unverified file sizes
 - Storage, memory, and model size labels use decimal units (1 GB = 1,000,000,000 bytes)
 

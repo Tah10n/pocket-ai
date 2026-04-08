@@ -1,6 +1,6 @@
 # Release Checklist
 
-Last updated: 2026-04-06
+Last updated: 2026-04-08
 
 ## Purpose
 
@@ -143,6 +143,9 @@ keyPassword=your-key-password
 - Open model details from a catalog card and confirm description, tags, popularity metrics, and the `Open on HF` action render without breaking list navigation.
 - Change the Hugging Face token state, then reopen a gated or private model from the catalog and confirm the card plus detail screen agree on `Locked`, `Access denied`, or authorized access instead of showing stale access labels.
 - Download a GGUF model and wait for verification to finish.
+- While a download is active, background the app and confirm the Android foreground-service notification stays visible and continues updating.
+- On Android 13+, confirm the app requests notification permission when starting a download and denying it does not crash the app.
+- After download completion, confirm the model remains visible in `Downloaded` without requiring a manual refresh.
 - Confirm model cards stay compact and do not render a separate `Status` chip.
 - Confirm RAM-fit badges on model cards and the model-details hero use short user-facing labels such as `Fits in RAM`, `Near RAM limit`, or `Won't fit RAM`, and do not expose internal terms like `OOM` or confidence levels.
 - On a downloaded model card, confirm the secondary `Settings` action opens the model controls sheet without leaving the list.
@@ -160,6 +163,7 @@ keyPassword=your-key-password
 
 - Open `Chat` and send a prompt with a loaded model.
 - Confirm streaming, stop, and regenerate behavior.
+- Start a longer generation, then background the app and confirm Android shows a persistent generation notification and a completion notification when finished. Tap the notification and confirm it returns you to the chat.
 - While sending, confirm the header stays stable, does not add a redundant `Generating` label, and the composer does not visibly jump on Android.
 - With the Android keyboard open, confirm the composer keeps a small but visible gap above the keyboard instead of touching it or floating too high.
 - Confirm the preset and model chips stay aligned to the normal chat content inset and do not inherit extra left offset from the back-button slot.

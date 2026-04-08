@@ -1,6 +1,6 @@
 # Privacy & Disclosures
 
-Last updated: 2026-04-06
+Last updated: 2026-04-08
 
 ## Summary
 
@@ -61,7 +61,11 @@ For the release configuration currently committed here:
 
 - Android package name: `com.github.tah10n.pocketai`
 - Android auto-backup is disabled to avoid backing up local chat and model state
-- Android permissions are limited to `INTERNET` and `VIBRATE`
+- Android permissions include:
+  - `INTERNET` (Hugging Face catalog and model downloads)
+  - `VIBRATE` (UI haptics)
+  - `POST_NOTIFICATIONS` (Android 13+ notifications for download/inference status)
+  - `FOREGROUND_SERVICE` and `FOREGROUND_SERVICE_DATA_SYNC` (keep long-running downloads/inference alive in the background via a foreground service)
 
 ## Scope note
 

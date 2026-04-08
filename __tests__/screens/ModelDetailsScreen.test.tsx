@@ -246,6 +246,8 @@ jest.mock('../../src/services/LLMEngineService', () => ({
 jest.mock('../../src/services/LocalStorageRegistry', () => ({
   registry: {
     getModel: (...args: any[]) => mockRegistryGetModel(...args),
+    getModelsRevision: jest.fn(() => 0),
+    subscribeModels: jest.fn(() => () => {}),
   },
 }));
 

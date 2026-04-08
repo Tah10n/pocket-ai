@@ -11,12 +11,18 @@
     "newArchEnabled": true,
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.github.tah10n.pocketai"
+      "bundleIdentifier": "com.github.tah10n.pocketai",
+      "infoPlist": {
+        "UIBackgroundModes": [
+          "processing"
+        ]
+      }
     },
     "android": {
       "versionCode": 5,
       "permissions": [
         "INTERNET",
+        "POST_NOTIFICATIONS",
         "VIBRATE"
       ],
       "softwareKeyboardLayoutMode": "resize",
@@ -47,6 +53,7 @@
         }
       ],
       "expo-font",
+      "expo-notifications",
       "./plugins/withAndroidGradlePluginManagement",
       "./plugins/withAndroidReleaseConfig",
       "./plugins/withAndroidLocalProperties",

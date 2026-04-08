@@ -16,6 +16,8 @@ export function mergeModelWithRuntimeState(
 ): ModelMetadata {
   let mergedModel = { ...model };
 
+  const isActiveModel = activeModelId === mergedModel.id;
+
   if (localModel) {
     mergedModel = {
       ...mergedModel,
@@ -51,7 +53,7 @@ export function mergeModelWithRuntimeState(
     };
   }
 
-  if (activeModelId === mergedModel.id) {
+  if (isActiveModel) {
     mergedModel.lifecycleStatus = LifecycleStatus.ACTIVE;
   } else if (mergedModel.lifecycleStatus === LifecycleStatus.ACTIVE) {
     mergedModel.lifecycleStatus = LifecycleStatus.DOWNLOADED;

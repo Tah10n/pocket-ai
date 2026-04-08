@@ -24,6 +24,7 @@ Add screenshots or recordings for visible UI changes.
 
 ## Checklist
 
+- [ ] PR title follows Conventional Commits (`feat:`, `fix:`, `docs:`, ...)
 - [ ] The change is focused on one logical improvement
 - [ ] Documentation was updated if public behavior or setup changed
 - [ ] Translation keys were updated in `src/i18n/locales/en.json` and `src/i18n/locales/ru.json` for new user-facing copy

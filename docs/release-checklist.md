@@ -1,6 +1,6 @@
 # Release Checklist
 
-Last updated: 2026-04-06
+Last updated: 2026-04-08
 
 ## Purpose
 
@@ -20,11 +20,21 @@ Use this checklist before cutting a preview or production release. It is written
 
 ## Release metadata
 
+This repository uses **Release Please** to automate:
+
+- `app.json -> expo.version`
+- `package.json -> version`
+- [`CHANGELOG.md`](../CHANGELOG.md)
+
 If you're cutting a user-facing store release:
 
-- Bump `app.json -> expo.version`.
-- Keep `package.json -> version` aligned (same value).
-- Update [`CHANGELOG.md`](../CHANGELOG.md).
+- Merge the Release Please **Release PR** (it updates versions + changelog).
+- Avoid manual edits to the version/changelog files in the normal flow.
+
+Notes:
+
+- Release Please derives version bumps from merged PR titles (Conventional Commits).
+- If `main` requires status checks, configure a PAT secret (for example `RELEASE_PLEASE_TOKEN`) so CI runs on Release PRs.
 
 ## Pre-flight checks
 
@@ -81,7 +91,7 @@ npm run build:android:production
 
 This command uses `expo.version` as `versionName`, uses the current `expo.android.versionCode` as the upload code, and after a successful build reserves the next `versionCode` in `app.json`.
 
-After a successful build, `app.json` is expected to change (the next `expo.android.versionCode` is reserved). Commit this change as part of the release PR so the next upload code is not lost.
+After a successful build, `app.json` is expected to change (the next `expo.android.versionCode` is reserved). Commit this change as part of the Release PR so the next upload code is not lost.
 
 Only override the version values when recovering from a failed or custom release flow:
 
@@ -143,6 +153,9 @@ keyPassword=your-key-password
 - Open model details from a catalog card and confirm description, tags, popularity metrics, and the `Open on HF` action render without breaking list navigation.
 - Change the Hugging Face token state, then reopen a gated or private model from the catalog and confirm the card plus detail screen agree on `Locked`, `Access denied`, or authorized access instead of showing stale access labels.
 - Download a GGUF model and wait for verification to finish.
+- While a download is active, background the app and confirm the Android foreground-service notification stays visible and continues updating.
+- On Android 13+, confirm the app requests notification permission when starting a download and denying it does not crash the app.
+- After download completion, confirm the model remains visible in `Downloaded` without requiring a manual refresh.
 - Confirm model cards stay compact and do not render a separate `Status` chip.
 - Confirm RAM-fit badges on model cards and the model-details hero use short user-facing labels such as `Fits in RAM`, `Near RAM limit`, or `Won't fit RAM`, and do not expose internal terms like `OOM` or confidence levels.
 - On a downloaded model card, confirm the secondary `Settings` action opens the model controls sheet without leaving the list.
@@ -160,6 +173,7 @@ keyPassword=your-key-password
 
 - Open `Chat` and send a prompt with a loaded model.
 - Confirm streaming, stop, and regenerate behavior.
+- Start a longer generation, then background the app and confirm Android shows a persistent generation notification and a completion notification when finished. Tap the notification and confirm it returns you to the chat.
 - While sending, confirm the header stays stable, does not add a redundant `Generating` label, and the composer does not visibly jump on Android.
 - With the Android keyboard open, confirm the composer keeps a small but visible gap above the keyboard instead of touching it or floating too high.
 - Confirm the preset and model chips stay aligned to the normal chat content inset and do not inherit extra left offset from the back-button slot.

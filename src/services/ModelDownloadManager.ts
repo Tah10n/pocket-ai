@@ -1,4 +1,5 @@
 import DeviceInfo from 'react-native-device-info';
+import { AppState } from 'react-native';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as RNFS from 'react-native-fs';
 import { useDownloadStore } from '../store/downloadStore';
@@ -18,11 +19,17 @@ import { getCandidateModelDownloadFileNames } from '../utils/modelFiles';
 import { estimateFastMemoryFit } from '../memory/estimator';
 import { safeJoinModelPath } from '../utils/safeFilePath';
 import { DECIMAL_GIGABYTE } from '../utils/modelSize';
+import { hardwareListenerService, type HardwareStatus } from './HardwareListenerService';
+import { getSettings, subscribeSettings } from './SettingsStore';
+import { backgroundTaskService } from './BackgroundTaskService';
+import { notificationService, type DownloadErrorReason } from './NotificationService';
 
 export class ModelDownloadManager {
   private static instance: ModelDownloadManager;
   private resumable: any = null;
   private isProcessing = false;
+  private hwUnsubscribe?: () => void;
+  private settingsUnsubscribe?: () => void;
 
   private constructor() {
     // Subscribe to store changes to trigger queue processing
@@ -30,6 +37,27 @@ export class ModelDownloadManager {
       (state) => `${state.activeDownloadId ?? ''}|${state.queue.map((model) => `${model.id}:${model.lifecycleStatus}`).join(',')}`,
       () => { void this.processQueue(); },
     );
+
+    let lastAllowCellularDownloads = getSettings().allowCellularDownloads;
+    this.settingsUnsubscribe = subscribeSettings((settings) => {
+      if (settings.allowCellularDownloads === lastAllowCellularDownloads) {
+        return;
+      }
+
+      lastAllowCellularDownloads = settings.allowCellularDownloads;
+      const status = hardwareListenerService.getCurrentStatus();
+
+      if (status.networkType === 'cellular' && settings.allowCellularDownloads === false) {
+        void this.handleHardwareStatusChange(status);
+        return;
+      }
+
+      void this.processQueue();
+    });
+
+    this.hwUnsubscribe = hardwareListenerService.subscribe((status) => {
+      void this.handleHardwareStatusChange(status);
+    });
     // Initial check
     void this.processQueue();
   }
@@ -47,7 +75,7 @@ export class ModelDownloadManager {
   private async processQueue() {
     if (this.isProcessing) return;
     
-    const { queue, activeDownloadId, setActiveDownload } = useDownloadStore.getState();
+    const { queue, activeDownloadId, setActiveDownload, updateModelInQueue } = useDownloadStore.getState();
     
     // If already downloading something, stay idle
     if (activeDownloadId) return;
@@ -58,21 +86,79 @@ export class ModelDownloadManager {
       m.lifecycleStatus === LifecycleStatus.DOWNLOADING ||
       m.lifecycleStatus === LifecycleStatus.VERIFYING
     ));
-    if (next) {
-      this.isProcessing = true;
-      setActiveDownload(next.id);
-      try {
-        await this.downloadModel(next);
-      } catch (e) {
-        console.error(`[ModelDownloadManager] Failed to download ${next.id}`, e);
-        setActiveDownload(null);
-      } finally {
-        this.isProcessing = false;
-        // Trigger next check
-        void this.processQueue();
+
+    if (!next) {
+      if (backgroundTaskService.isTaskActive('download')) {
+        await backgroundTaskService.stopBackgroundTask('download');
       }
+      return;
+    }
+
+    const settings = getSettings();
+    const hardwareStatus = hardwareListenerService.getCurrentStatus();
+    if (hardwareStatus.networkType === 'cellular' && settings.allowCellularDownloads === false) {
+      if (next.lifecycleStatus !== LifecycleStatus.QUEUED) {
+        updateModelInQueue(next.id, { lifecycleStatus: LifecycleStatus.QUEUED });
+      }
+
+      return;
+    }
+
+    this.isProcessing = true;
+    setActiveDownload(next.id);
+    try {
+      await backgroundTaskService.startBackgroundDownload({
+        type: 'downloadProgress',
+        modelName: next.name,
+        progressPercent: Math.round((next.downloadProgress ?? 0) * 100),
+      });
+      await this.downloadModel(next);
+    } catch (e) {
+      console.error(`[ModelDownloadManager] Failed to download ${next.id}`, e);
+      setActiveDownload(null);
+    } finally {
+      this.isProcessing = false;
+      // Trigger next check
+      void this.processQueue();
     }
   }
+
+  private handleHardwareStatusChange = async (status: HardwareStatus) => {
+    if (status.networkType === 'cellular') {
+      const settings = getSettings();
+      if (settings.allowCellularDownloads === true) {
+        return;
+      }
+
+      const { activeDownloadId, queue } = useDownloadStore.getState();
+      if (!activeDownloadId) {
+        return;
+      }
+
+      const activeModel = queue.find((model) => model.id === activeDownloadId);
+      if (!activeModel || activeModel.lifecycleStatus !== LifecycleStatus.DOWNLOADING) {
+        return;
+      }
+
+      try {
+        await this.pauseDownload(activeDownloadId);
+      } catch (error) {
+        console.warn('[ModelDownloadManager] Failed to pause download after cellular transition', error);
+      }
+
+      // Update the foreground-service notification (Android) / cached notification details (iOS)
+      // so the paused state is reflected even if the app is currently active.
+      await backgroundTaskService.startBackgroundDownload({ type: 'downloadPaused' });
+
+      if (AppState.currentState !== 'active') {
+        void notificationService.sendPausedNotification();
+      }
+
+      return;
+    }
+
+    void this.processQueue();
+  };
 
   private async downloadModel(model: ModelMetadata) {
     const { updateModelInQueue, removeFromQueue, setActiveDownload } = useDownloadStore.getState();
@@ -126,6 +212,15 @@ export class ModelDownloadManager {
     let lastProgressUpdatedAt = 0;
     let lastProgress = -1;
 
+    const NOTIFICATION_UPDATE_MIN_INTERVAL_MS = 2000;
+    const NOTIFICATION_UPDATE_MIN_DELTA_PERCENT = 1;
+    let lastNotificationUpdatedAt = 0;
+    let lastNotifiedPercent = -1;
+
+    let lastSpeedSampleWrittenBytes = 0;
+    let lastSpeedSampleAt = 0;
+    let lastSpeedBytesPerSec = 0;
+
     const callback = (downloadProgress: any) => {
       const writtenBytes = typeof downloadProgress?.totalBytesWritten === 'number'
         ? downloadProgress.totalBytesWritten
@@ -137,6 +232,20 @@ export class ModelDownloadManager {
       const clampedProgress = Math.min(Math.max(progress, 0), 1);
       const now = Date.now();
       const delta = Math.abs(clampedProgress - lastProgress);
+      const percent = Math.round(clampedProgress * 100);
+
+      if (lastSpeedSampleAt === 0) {
+        lastSpeedSampleAt = now;
+        lastSpeedSampleWrittenBytes = writtenBytes;
+      } else {
+        const sampleDeltaMs = now - lastSpeedSampleAt;
+        if (sampleDeltaMs >= 1000 && writtenBytes >= lastSpeedSampleWrittenBytes) {
+          const deltaBytes = writtenBytes - lastSpeedSampleWrittenBytes;
+          lastSpeedBytesPerSec = sampleDeltaMs > 0 ? (deltaBytes * 1000) / sampleDeltaMs : lastSpeedBytesPerSec;
+          lastSpeedSampleAt = now;
+          lastSpeedSampleWrittenBytes = writtenBytes;
+        }
+      }
 
       if (
         clampedProgress === 1 ||
@@ -146,6 +255,23 @@ export class ModelDownloadManager {
         lastProgressUpdatedAt = now;
         lastProgress = clampedProgress;
         updateModelInQueue(model.id, { downloadProgress: clampedProgress });
+      }
+
+      if (
+        (percent === 100 && lastNotifiedPercent !== 100) ||
+        (
+          now - lastNotificationUpdatedAt >= NOTIFICATION_UPDATE_MIN_INTERVAL_MS
+          && percent - lastNotifiedPercent >= NOTIFICATION_UPDATE_MIN_DELTA_PERCENT
+        )
+      ) {
+        lastNotificationUpdatedAt = now;
+        lastNotifiedPercent = percent;
+        void backgroundTaskService.startBackgroundDownload({
+          type: 'downloadProgress',
+          modelName: model.name,
+          progressPercent: percent,
+          speedBytesPerSec: lastSpeedBytesPerSec,
+        });
       }
     };
 
@@ -227,6 +353,10 @@ export class ModelDownloadManager {
 
       registry.updateModel(completedModel);
       removeFromQueue(model.id);
+
+      if (AppState.currentState !== 'active') {
+        void notificationService.sendCompletionNotification('download', { modelName: model.name });
+      }
       console.log(`[ModelDownloadManager] Downloaded and verified: ${model.id}`);
 
     } catch (e: any) {
@@ -240,6 +370,19 @@ export class ModelDownloadManager {
         lifecycleStatus: LifecycleStatus.AVAILABLE,
       });
       setActiveDownload(null);
+
+      if (AppState.currentState !== 'active') {
+        const appError = toAppError(e);
+        const reason: DownloadErrorReason = appError.code === 'download_disk_space_low'
+          ? 'storageFull'
+          : appError.code === 'download_verification_failed'
+            ? 'verificationFailed'
+            : appError.code === 'download_http_error'
+              ? 'connectionLost'
+              : 'unknown';
+
+        void notificationService.sendErrorNotification({ modelName: model.name, reason });
+      }
 
       throw e;
     } finally {

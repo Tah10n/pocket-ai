@@ -44,6 +44,55 @@
       "messageEmpty": "Type a message before sending."
     }
   },
+  "notifications": {
+    "download": {
+      "progress": {
+        "title": "Downloading {{modelName}}",
+        "body": "{{progress}}% - {{speed}}/s"
+      },
+      "complete": {
+        "title": "Download complete",
+        "body": "{{modelName}} is ready to use"
+      },
+      "paused": {
+        "title": "Download paused",
+        "body": "Waiting for Wi-Fi connection"
+      },
+      "error": {
+        "title": "Download failed",
+        "body": "{{modelName}}: {{errorReason}}"
+      }
+    },
+    "inference": {
+      "progress": {
+        "title": "Generating response...",
+        "body": "Using {{modelName}}"
+      },
+      "complete": {
+        "title": "Response ready",
+        "body": "Tap to view the response"
+      },
+      "interrupted": {
+        "title": "Generation interrupted",
+        "body": "Partial response saved"
+      },
+      "error": {
+        "title": "Generation failed",
+        "body": "Tap to view details"
+      }
+    },
+    "error": {
+      "storageFull": "Not enough storage space",
+      "connectionLost": "Connection lost",
+      "verificationFailed": "File verification failed"
+    },
+    "permissions": {
+      "title": "Notifications are disabled",
+      "body": "Enable notifications for Pocket AI to allow background downloads and progress notifications.",
+      "openSettings": "Open settings",
+      "continue": "Continue"
+    }
+  },
   "home": {
     "initializing": "Initializing…",
     "initializationFailedTitle": "Initialization issue",
@@ -253,6 +302,10 @@
     "maxTokens": "Max Tokens",
     "darkMode": "Dark Mode",
     "language": "Language",
+    "cellularDownloads": "Cellular downloads",
+    "cellularDownloadsDescription": "Choose whether Pocket AI can download models over cellular data.",
+    "cellularDownloadsWifiOnly": "Wi-Fi only",
+    "cellularDownloadsWifiAndCellular": "Wi-Fi + cellular",
     "presets": "System Prompt Presets",
     "appearance": "Appearance",
     "themeMode": "Theme Mode",
@@ -468,6 +521,8 @@
     "openOnHuggingFace": "Open on HF",
     "cellularWarningTitle": "Cellular Data Warning",
     "cellularWarningMessage": "You are on a cellular network. Large downloads may incur costs. Proceed?",
+    "cellularDownloadsDisabledTitle": "Wi-Fi required",
+    "cellularDownloadsDisabledMessage": "Cellular downloads are disabled. Turn them on in Settings to download models over mobile data.",
     "downloadAnyway": "Download Anyway",
     "unknownSizeWarningTitle": "Size could not be verified",
     "unknownSizeWarningMessage": "This model does not expose a reliable file size yet. Storage estimates and size-based verification will be limited. Continue anyway?",

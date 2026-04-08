@@ -19,6 +19,25 @@ function makeModel(overrides: Partial<ModelMetadata> = {}): ModelMetadata {
 }
 
 describe('modelRuntimeState', () => {
+  it('preserves incoming runtime fields when no local model is present', () => {
+    const merged = mergeModelWithRuntimeState(
+      makeModel({
+        lifecycleStatus: LifecycleStatus.DOWNLOADED,
+        downloadProgress: 1,
+        localPath: '/models/model.gguf',
+        downloadedAt: 123,
+        resumeData: JSON.stringify({ resumeData: 'opaque' }),
+      }),
+      {},
+    );
+
+    expect(merged.lifecycleStatus).toBe(LifecycleStatus.DOWNLOADED);
+    expect(merged.downloadProgress).toBe(1);
+    expect(merged.localPath).toBe('/models/model.gguf');
+    expect(merged.downloadedAt).toBe(123);
+    expect(merged.resumeData).toBe(JSON.stringify({ resumeData: 'opaque' }));
+  });
+
   it('preserves enriched registry metadata when the incoming model is sparse', () => {
     const merged = mergeModelWithRuntimeState(
       makeModel(),

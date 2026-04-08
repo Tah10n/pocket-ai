@@ -56,6 +56,7 @@ export interface AppSettings {
     seed: number | null;
     theme: 'light' | 'dark' | 'system';
     language: 'en' | 'ru';
+    allowCellularDownloads: boolean;
     activePresetId: string | null;
     activeModelId: string | null;
     chatRetentionDays: number | null;
@@ -91,6 +92,7 @@ const DEFAULT_SETTINGS: AppSettings = {
     seed: DEFAULT_GENERATION_PARAMETERS.seed,
     theme: 'system',
     language: 'en',
+    allowCellularDownloads: false,
     activePresetId: null,
     activeModelId: null,
     chatRetentionDays: 90,
@@ -247,6 +249,9 @@ function sanitizeSettings(input: Partial<AppSettings>): AppSettings {
         seed: generationDefaults.seed,
         theme: input.theme === 'light' || input.theme === 'dark' || input.theme === 'system' ? input.theme : DEFAULT_SETTINGS.theme,
         language: normalizeLanguage(input.language),
+        allowCellularDownloads: typeof input.allowCellularDownloads === 'boolean'
+            ? input.allowCellularDownloads
+            : DEFAULT_SETTINGS.allowCellularDownloads,
         activePresetId: typeof input.activePresetId === 'string' ? input.activePresetId : null,
         activeModelId: typeof input.activeModelId === 'string' ? input.activeModelId : null,
         chatRetentionDays: normalizeChatRetentionDays(input.chatRetentionDays),

@@ -44,6 +44,55 @@
       "messageEmpty": "Введите сообщение перед отправкой."
     }
   },
+  "notifications": {
+    "download": {
+      "progress": {
+        "title": "Загрузка {{modelName}}",
+        "body": "{{progress}}% - {{speed}}/с"
+      },
+      "complete": {
+        "title": "Загрузка завершена",
+        "body": "{{modelName}} готова к использованию"
+      },
+      "paused": {
+        "title": "Загрузка приостановлена",
+        "body": "Ожидание подключения Wi-Fi"
+      },
+      "error": {
+        "title": "Ошибка загрузки",
+        "body": "{{modelName}}: {{errorReason}}"
+      }
+    },
+    "inference": {
+      "progress": {
+        "title": "Генерация ответа...",
+        "body": "Используется {{modelName}}"
+      },
+      "complete": {
+        "title": "Ответ готов",
+        "body": "Нажмите, чтобы увидеть ответ"
+      },
+      "interrupted": {
+        "title": "Генерация прервана",
+        "body": "Частичный ответ сохранён"
+      },
+      "error": {
+        "title": "Генерация не удалась",
+        "body": "Нажмите, чтобы посмотреть подробности"
+      }
+    },
+    "error": {
+      "storageFull": "Недостаточно места",
+      "connectionLost": "Соединение потеряно",
+      "verificationFailed": "Ошибка проверки файла"
+    },
+    "permissions": {
+      "title": "Уведомления отключены",
+      "body": "Включите уведомления для Pocket AI, чтобы работали фоновые загрузки и уведомления о прогрессе.",
+      "openSettings": "Открыть настройки",
+      "continue": "Продолжить"
+    }
+  },
   "home": {
     "initializing": "Инициализация…",
     "initializationFailedTitle": "Проблема инициализации",
@@ -259,6 +308,10 @@
     "maxTokens": "Макс. токенов",
     "darkMode": "Тёмная тема",
     "language": "Язык",
+    "cellularDownloads": "Загрузка по мобильной сети",
+    "cellularDownloadsDescription": "Разрешить Pocket AI скачивать модели через мобильную сеть.",
+    "cellularDownloadsWifiOnly": "Только Wi-Fi",
+    "cellularDownloadsWifiAndCellular": "Wi-Fi и мобильная сеть",
     "presets": "Пресеты системных промптов",
     "appearance": "Оформление",
     "themeMode": "Тема",
@@ -476,6 +529,8 @@
     "openOnHuggingFace": "Открыть на HF",
     "cellularWarningTitle": "Предупреждение о мобильной сети",
     "cellularWarningMessage": "Вы используете мобильную сеть. Большие загрузки могут привести к расходам. Продолжить?",
+    "cellularDownloadsDisabledTitle": "Требуется Wi-Fi",
+    "cellularDownloadsDisabledMessage": "Загрузка по мобильной сети отключена. Включите её в настройках, чтобы скачивать модели через мобильный интернет.",
     "downloadAnyway": "Скачать все равно",
     "unknownSizeWarningTitle": "Размер не удалось подтвердить",
     "unknownSizeWarningMessage": "Для этой модели пока нет надежного размера файла. Оценка места на диске и проверка по размеру будут ограничены. Все равно продолжить?",

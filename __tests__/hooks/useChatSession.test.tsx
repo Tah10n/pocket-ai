@@ -14,6 +14,8 @@ import {
   SUMMARY_PLACEHOLDER_CONTENT,
 } from '../../src/hooks/useChatSession';
 import { presetManager } from '../../src/services/PresetManager';
+import { backgroundTaskService } from '../../src/services/BackgroundTaskService';
+import { notificationService } from '../../src/services/NotificationService';
 
 jest.mock('../../src/services/LLMEngineService', () => ({
   llmEngineService: {
@@ -22,6 +24,7 @@ jest.mock('../../src/services/LLMEngineService', () => ({
     chatCompletion: jest.fn(),
     countPromptTokens: jest.fn(),
     stopCompletion: jest.fn(),
+    hasActiveCompletion: jest.fn(),
   },
 }));
 
@@ -58,8 +61,13 @@ describe('useChatSession', () => {
     return () => session;
   }
 
-  beforeEach(() => {
+  beforeEach(async () => {
     jest.clearAllMocks();
+    Object.defineProperty(AppState, 'currentState', {
+      configurable: true,
+      value: 'active',
+    });
+    await backgroundTaskService.stopBackgroundTask();
     useChatStore.setState({ threads: {}, activeThreadId: null });
     resetSharedGenerationStateForTests();
     appStateListeners = [];
@@ -97,6 +105,7 @@ describe('useChatSession', () => {
       async ({ messages }: { messages: any[] }) => estimateLlmMessagesTokens(messages as any),
     );
     (llmEngineService.stopCompletion as jest.Mock).mockResolvedValue(undefined);
+    (llmEngineService.hasActiveCompletion as jest.Mock).mockReturnValue(false);
     jest.spyOn(AppState, 'addEventListener').mockImplementation((type: any, listener: any) => {
       if (type === 'change') {
         appStateListeners.push(listener);
@@ -464,6 +473,143 @@ describe('useChatSession', () => {
     await waitFor(() => {
       expect(useChatStore.getState().getActiveThread()?.status).toBe('idle');
     });
+  });
+
+  it('keeps a generating thread alive on foreground recovery while background inference tracking is still active', async () => {
+    renderHookHarness();
+
+    await act(async () => {
+      useChatStore.setState({
+        threads: {
+          'thread-1': {
+            id: 'thread-1',
+            title: 'Recovered thread',
+            modelId: 'author/model-q4',
+            presetId: 'preset-1',
+            presetSnapshot: {
+              id: 'preset-1',
+              name: 'Helpful Assistant',
+              systemPrompt: 'Be concise.',
+            },
+            paramsSnapshot: {
+              temperature: 0.7,
+              topP: 0.9,
+              maxTokens: 1024,
+              seed: null,
+            },
+            messages: [
+              {
+                id: 'assistant-1',
+                role: 'assistant',
+                content: 'Still streaming',
+                createdAt: 1,
+                state: 'stopped',
+              },
+            ],
+            createdAt: 1,
+            updatedAt: 1,
+            status: 'generating',
+          },
+        },
+        activeThreadId: 'thread-1',
+      });
+      await backgroundTaskService.startBackgroundInference('Recovered model');
+    });
+
+    await act(async () => {
+      emitAppState('background');
+      emitAppState('active');
+    });
+
+    expect(useChatStore.getState().getActiveThread()?.status).toBe('generating');
+  });
+
+  it('marks an orphaned generating thread as stopped when only a background download task is active', async () => {
+    renderHookHarness();
+
+    await act(async () => {
+      useChatStore.setState({
+        threads: {
+          'thread-1': {
+            id: 'thread-1',
+            title: 'Interrupted thread',
+            modelId: 'author/model-q4',
+            presetId: 'preset-1',
+            presetSnapshot: {
+              id: 'preset-1',
+              name: 'Helpful Assistant',
+              systemPrompt: 'Be concise.',
+            },
+            paramsSnapshot: {
+              temperature: 0.7,
+              topP: 0.9,
+              maxTokens: 1024,
+              seed: null,
+            },
+            messages: [
+              {
+                id: 'assistant-1',
+                role: 'assistant',
+                content: 'Interrupted output',
+                createdAt: 1,
+                state: 'stopped',
+              },
+            ],
+            createdAt: 1,
+            updatedAt: 1,
+            status: 'generating',
+          },
+        },
+        activeThreadId: 'thread-1',
+      });
+      await backgroundTaskService.startBackgroundDownload({ type: 'downloadPaused' });
+      await (backgroundTaskService as any).handleAppStateChange('background');
+    });
+
+    await act(async () => {
+      emitAppState('background');
+      emitAppState('active');
+    });
+
+    expect(useChatStore.getState().getActiveThread()?.status).toBe('stopped');
+  });
+
+  it('sends only one interrupted notification when iOS expiration stops generation', async () => {
+    let resolveCompletion: (() => void) | undefined;
+    const interruptedSpy = jest.spyOn(notificationService, 'sendInterruptedNotification').mockResolvedValue(undefined);
+
+    Object.defineProperty(AppState, 'currentState', {
+      configurable: true,
+      value: 'background',
+    });
+
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveCompletion = () => resolve({ text: 'Stopped after expiration' });
+        }),
+    );
+
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      void getSession()?.appendUserMessage('Expire this response');
+    });
+
+    await waitFor(() => {
+      expect(BackgroundTaskServiceOnExpirationHandler()).toEqual(expect.any(Function));
+    });
+
+    await act(async () => {
+      BackgroundTaskServiceOnExpirationHandler()?.();
+      resolveCompletion?.();
+    });
+
+    await waitFor(() => {
+      expect(useChatStore.getState().getActiveThread()?.status).toBe('stopped');
+    });
+
+    expect(interruptedSpy).toHaveBeenCalledTimes(1);
   });
 
   it('builds inference context from frozen preset snapshot, history, and params', async () => {
@@ -944,6 +1090,12 @@ describe('useChatSession', () => {
     );
   });
 });
+
+function BackgroundTaskServiceOnExpirationHandler() {
+  return ((require('react-native-background-actions') as { default: { on: jest.Mock } }).default.on as jest.Mock)
+    .mock.calls
+    .find((call) => call[0] === 'expiration')?.[1] as (() => void) | undefined;
+}
 
 
 

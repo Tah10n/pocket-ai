@@ -19,7 +19,7 @@
       }
     },
     "android": {
-      "versionCode": 5,
+      "versionCode": 7,
       "permissions": [
         "INTERNET",
         "POST_NOTIFICATIONS",

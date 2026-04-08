@@ -1062,6 +1062,10 @@ class LLMEngineService {
     }
   }
 
+  public hasActiveCompletion(): boolean {
+    return this.activeCompletionPromise != null;
+  }
+
   public getState(): EngineState {
     return this.state;
   }

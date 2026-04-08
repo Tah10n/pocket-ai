@@ -22,6 +22,7 @@ jest.mock('../../src/services/LLMEngineService', () => ({
     chatCompletion: jest.fn(),
     countPromptTokens: jest.fn(),
     stopCompletion: jest.fn(),
+    hasActiveCompletion: jest.fn(),
   },
 }));
 
@@ -97,6 +98,7 @@ describe('useChatSession', () => {
       async ({ messages }: { messages: any[] }) => estimateLlmMessagesTokens(messages as any),
     );
     (llmEngineService.stopCompletion as jest.Mock).mockResolvedValue(undefined);
+    (llmEngineService.hasActiveCompletion as jest.Mock).mockReturnValue(false);
     jest.spyOn(AppState, 'addEventListener').mockImplementation((type: any, listener: any) => {
       if (type === 'change') {
         appStateListeners.push(listener);

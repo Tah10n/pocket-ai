@@ -80,6 +80,25 @@ jest.mock('expo-clipboard', () => ({
   setStringAsync: jest.fn().mockResolvedValue(undefined),
 }));
 
+jest.mock('expo-linking', () => ({
+  createURL: jest.fn((path) => `pocketai://${path ?? ''}`),
+}));
+
+jest.mock('expo-notifications', () => ({
+  setNotificationHandler: jest.fn(),
+  setNotificationChannelAsync: jest.fn().mockResolvedValue(null),
+  AndroidImportance: {
+    DEFAULT: 5,
+    HIGH: 6,
+  },
+  getPermissionsAsync: jest.fn().mockResolvedValue({ status: 'granted' }),
+  requestPermissionsAsync: jest.fn().mockResolvedValue({ status: 'granted' }),
+  scheduleNotificationAsync: jest.fn().mockResolvedValue('mock-notification-id'),
+  dismissNotificationAsync: jest.fn().mockResolvedValue(undefined),
+  addNotificationResponseReceivedListener: jest.fn(() => ({ remove: jest.fn() })),
+  addNotificationReceivedListener: jest.fn(() => ({ remove: jest.fn() })),
+}));
+
 jest.mock('expo-secure-store', () => {
   let storage = {};
 
@@ -176,14 +195,50 @@ jest.mock('@react-native-community/netinfo', () => ({
 }));
 
 // Mocking MMKV
-jest.mock('react-native-mmkv', () => ({
-    MMKV: jest.fn().mockImplementation(() => ({
-        set: jest.fn(),
-        getString: jest.fn(),
-        delete: jest.fn(),
-        getAllKeys: jest.fn().mockReturnValue([]),
-    })),
-}));
+jest.mock('react-native-mmkv', () => {
+    class MockMMKV {
+        store = new Map();
+
+        set = jest.fn((key, value) => {
+            this.store.set(key, value);
+        });
+
+        getString = jest.fn((key) => {
+            const value = this.store.get(key);
+            return typeof value === 'string' ? value : undefined;
+        });
+
+        getNumber = jest.fn((key) => {
+            const value = this.store.get(key);
+            return typeof value === 'number' ? value : undefined;
+        });
+
+        getBoolean = jest.fn((key) => {
+            const value = this.store.get(key);
+            return typeof value === 'boolean' ? value : undefined;
+        });
+
+        remove = jest.fn((key) => {
+            this.store.delete(key);
+        });
+
+        delete = jest.fn((key) => {
+            this.store.delete(key);
+        });
+
+        clearAll = jest.fn(() => {
+            this.store.clear();
+        });
+
+        contains = jest.fn((key) => this.store.has(key));
+
+        getAllKeys = jest.fn(() => Array.from(this.store.keys()));
+    }
+
+    return {
+        MMKV: jest.fn().mockImplementation(() => new MockMMKV()),
+    };
+});
 
 // Mocking Clipboard
 jest.mock('react-native/Libraries/Components/Clipboard/Clipboard', () => ({
@@ -192,6 +247,24 @@ jest.mock('react-native/Libraries/Components/Clipboard/Clipboard', () => ({
 
 // Mocking Reanimated
 jest.mock('react-native-reanimated');
+
+jest.mock('react-native-background-actions', () => {
+  let running = false;
+
+  const api = {
+    start: jest.fn(async () => { running = true; }),
+    stop: jest.fn(async () => { running = false; }),
+    isRunning: jest.fn(() => running),
+    updateNotification: jest.fn(async () => undefined),
+    on: jest.fn(),
+    off: jest.fn(),
+  };
+
+  return {
+    __esModule: true,
+    default: api,
+  };
+});
 
 jest.mock('@react-navigation/native', () => {
     const React = require('react');

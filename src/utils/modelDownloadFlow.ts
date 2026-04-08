@@ -1,6 +1,7 @@
 import { Alert } from 'react-native';
 import { hardwareListenerService } from '../services/HardwareListenerService';
 import { modelCatalogService } from '../services/ModelCatalogService';
+import { getSettings } from '../services/SettingsStore';
 import { ModelAccessState, type ModelMetadata } from '../types/models';
 
 type Translate = (key: string) => string;
@@ -109,6 +110,11 @@ export function startModelDownloadFlow({
 
   const status = hardwareListenerService.getCurrentStatus();
   if (status.networkType === 'cellular') {
+    if (getSettings().allowCellularDownloads === false) {
+      Alert.alert(t('models.cellularDownloadsDisabledTitle'), t('models.cellularDownloadsDisabledMessage'));
+      return;
+    }
+
     Alert.alert(
       t('models.cellularWarningTitle'),
       t('models.cellularWarningMessage'),

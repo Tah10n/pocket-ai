@@ -5,6 +5,9 @@ import { performanceMonitor } from '../services/PerformanceMonitor';
 import { GenerationParameters, getGenerationParametersForModel, getSettings } from '../services/SettingsStore';
 import { presetManager } from '../services/PresetManager';
 import { EngineStatus } from '../types/models';
+import { backgroundTaskService } from '../services/BackgroundTaskService';
+import { notificationService } from '../services/NotificationService';
+import { registry } from '../services/LocalStorageRegistry';
 import {
   ChatMessage,
   ChatThread,
@@ -130,6 +133,10 @@ export const useChatSession = () => {
       // Recovery path: if the app returns with persisted "generating" state but
       // no live completion in flight, treat it as an interrupted session.
       if (activeThread?.status === 'generating' && !sharedGenerationState.current) {
+        if (llmEngineService.hasActiveCompletion()) {
+          return;
+        }
+
         state.finalizeThreadStatus(activeThread.id, 'stopped');
       }
     });
@@ -160,6 +167,7 @@ export const useChatSession = () => {
     let hasMarkedFirstToken = false;
     const startTime = Date.now();
     let flushTimeout: ReturnType<typeof setTimeout> | null = null;
+    let unsubscribeExpiration: (() => void) | null = null;
 
     const recordCompletionStats = (outcome: 'success' | 'stopped' | 'error') => {
       const elapsedSec = (Date.now() - startTime) / 1000;
@@ -212,6 +220,27 @@ export const useChatSession = () => {
     };
 
     try {
+      const modelName = registry.getModel(thread.modelId)?.name ?? thread.modelId;
+
+      await backgroundTaskService.startBackgroundInference();
+      void notificationService.updateNotification({ type: 'inferenceProgress', modelName });
+
+      unsubscribeExpiration = backgroundTaskService.subscribeToExpiration(() => {
+        if (!isMatchingGeneration(threadId, assistantMessageId)) {
+          return;
+        }
+
+        try {
+          flushAssistantPatch();
+          stopAssistantMessage(threadId, assistantMessageId);
+          finalizeThreadStatus(threadId, 'stopped');
+          sharedGenerationState.current!.stopRequested = true;
+          void notificationService.sendInterruptedNotification({ threadId });
+        } finally {
+          void llmEngineService.stopCompletion();
+        }
+      });
+
       const windowOptions = resolveThreadInferenceWindowOptions(thread, { maxContextTokens: maxContextSize });
       const tokenCountParams = {
         enable_thinking: thread.paramsSnapshot.reasoningEnabled === true,
@@ -285,6 +314,10 @@ export const useChatSession = () => {
         stopAssistantMessage(threadId, assistantMessageId);
         finalizeThreadStatus(threadId, 'stopped');
         recordCompletionStats('stopped');
+
+        if (AppState.currentState !== 'active') {
+          void notificationService.sendInterruptedNotification({ threadId });
+        }
         return;
       }
 
@@ -297,12 +330,20 @@ export const useChatSession = () => {
       );
       finalizeThreadStatus(threadId, 'idle');
       recordCompletionStats('success');
+
+      if (AppState.currentState !== 'active') {
+        void notificationService.sendCompletionNotification('inference', { threadId });
+      }
     } catch (error) {
       if (isMatchingGeneration(threadId, assistantMessageId) && sharedGenerationState.current?.stopRequested) {
         flushAssistantPatch();
         stopAssistantMessage(threadId, assistantMessageId);
         finalizeThreadStatus(threadId, 'stopped');
         recordCompletionStats('stopped');
+
+        if (AppState.currentState !== 'active') {
+          void notificationService.sendInterruptedNotification({ threadId });
+        }
         return;
       }
 
@@ -319,14 +360,25 @@ export const useChatSession = () => {
       });
       finalizeThreadStatus(threadId, 'error');
       recordCompletionStats('error');
+
+      if (AppState.currentState !== 'active') {
+        void notificationService.sendInterruptedNotification({ threadId });
+      }
       throw error;
     } finally {
       if (flushTimeout) {
         clearTimeout(flushTimeout);
       }
 
+      unsubscribeExpiration?.();
+      unsubscribeExpiration = null;
+
       if (isMatchingGeneration(threadId, assistantMessageId)) {
         sharedGenerationState.current = null;
+      }
+
+      if (backgroundTaskService.taskType === 'inference') {
+        await backgroundTaskService.stopBackgroundTask();
       }
     }
   }, [finalizeAssistantMessage, finalizeThreadStatus, patchAssistantMessage, stopAssistantMessage]);

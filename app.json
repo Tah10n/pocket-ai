@@ -17,6 +17,7 @@
       "versionCode": 5,
       "permissions": [
         "INTERNET",
+        "POST_NOTIFICATIONS",
         "VIBRATE"
       ],
       "softwareKeyboardLayoutMode": "resize",
@@ -47,11 +48,13 @@
         }
       ],
       "expo-font",
+      "expo-notifications",
       "./plugins/withAndroidGradlePluginManagement",
       "./plugins/withAndroidReleaseConfig",
       "./plugins/withAndroidLocalProperties",
       "./plugins/withAndroidMainActivityOrientation",
       "./plugins/withAndroidSystemMetrics",
+      "./plugins/withBackgroundModes",
       "./plugins/withIosSystemMetrics",
       "expo-secure-store",
       "expo-image",

@@ -16,6 +16,7 @@ import { hardwareListenerService } from '../src/services/HardwareListenerService
 import { bootstrapAppBackground, bootstrapAppCritical } from '../src/services/AppBootstrap';
 import { performanceMonitor } from '../src/services/PerformanceMonitor';
 import { getStorageFallbackReport } from '../src/services/storage';
+import { notificationService } from '../src/services/NotificationService';
 import { useBootstrapStore } from '../src/store/bootstrapStore';
 import '../src/i18n';
 import '../global.css';
@@ -217,6 +218,14 @@ function RootNavigator() {
   const motion = useMotionPreferences();
 
   usePerformanceNavigationTrace();
+
+  useEffect(() => {
+    if (Platform.OS === 'web') {
+      return;
+    }
+
+    void notificationService.initialize();
+  }, []);
 
   useEffect(() => {
     if (typeof __DEV__ !== 'undefined' && __DEV__) {

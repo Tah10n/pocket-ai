@@ -354,6 +354,15 @@ export const SettingsScreen = () => {
     const storageUsedTrackPercentage = clampPercentage(storageUsedPercentage);
     const storageAppTrackPercentage = Math.min(clampPercentage(appStoragePercentage), storageUsedTrackPercentage);
 
+    const handleCellularDownloadsChange = useCallback((nextMode: string) => {
+        updateSettings({ allowCellularDownloads: nextMode === 'cellular' });
+    }, []);
+
+    const cellularDownloadOptions = [
+        { key: 'wifi', label: t('settings.cellularDownloadsWifiOnly') },
+        { key: 'cellular', label: t('settings.cellularDownloadsWifiAndCellular') },
+    ];
+
     const themeOptions = [
         { key: 'light', label: t('settings.themeLight') },
         { key: 'system', label: t('settings.themeSystem') },
@@ -584,6 +593,28 @@ export const SettingsScreen = () => {
                         <Box>
                             <ScreenSectionLabel>{t('settings.systemConfiguration')}</ScreenSectionLabel>
                             <ScreenStack className="mt-2">
+                                <ScreenCard padding="compact">
+                                    <Box className="flex-row items-start gap-3">
+                                        <Box className="h-10 w-10 items-center justify-center rounded-2xl bg-info-500/10 dark:bg-info-500/20">
+                                            <MaterialSymbols name="network-cell" size={20} className="text-info-600 dark:text-info-300" />
+                                        </Box>
+                                        <Box className="min-w-0 flex-1">
+                                            <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">
+                                                {t('settings.cellularDownloads')}
+                                            </Text>
+                                            <Text className="mt-1 text-sm leading-5 text-typography-500 dark:text-typography-400">
+                                                {t('settings.cellularDownloadsDescription')}
+                                            </Text>
+                                        </Box>
+                                    </Box>
+
+                                    <ScreenSegmentedControl
+                                        className="mt-4"
+                                        activeKey={settings.allowCellularDownloads ? 'cellular' : 'wifi'}
+                                        onChange={handleCellularDownloadsChange}
+                                        options={cellularDownloadOptions}
+                                    />
+                                </ScreenCard>
                                 <SettingsNavCard
                                     title={t('settings.presets')}
                                     description={t('settings.presetsDescription')}

@@ -133,6 +133,10 @@ export const useChatSession = () => {
       // Recovery path: if the app returns with persisted "generating" state but
       // no live completion in flight, treat it as an interrupted session.
       if (activeThread?.status === 'generating' && !sharedGenerationState.current) {
+        if (backgroundTaskService.isTaskActive('inference')) {
+          return;
+        }
+
         if (llmEngineService.hasActiveCompletion()) {
           return;
         }
@@ -168,6 +172,7 @@ export const useChatSession = () => {
     const startTime = Date.now();
     let flushTimeout: ReturnType<typeof setTimeout> | null = null;
     let unsubscribeExpiration: (() => void) | null = null;
+    let hasSentInterruptedNotification = false;
 
     const recordCompletionStats = (outcome: 'success' | 'stopped' | 'error') => {
       const elapsedSec = (Date.now() - startTime) / 1000;
@@ -219,10 +224,19 @@ export const useChatSession = () => {
       }, STREAM_PATCH_INTERVAL_MS);
     };
 
+    const sendInterruptedNotificationOnce = () => {
+      if (AppState.currentState === 'active' || hasSentInterruptedNotification) {
+        return;
+      }
+
+      hasSentInterruptedNotification = true;
+      void notificationService.sendInterruptedNotification({ threadId });
+    };
+
     try {
       const modelName = registry.getModel(thread.modelId)?.name ?? thread.modelId;
 
-      await backgroundTaskService.startBackgroundInference();
+      await backgroundTaskService.startBackgroundInference(modelName);
       void notificationService.updateNotification({ type: 'inferenceProgress', modelName });
 
       unsubscribeExpiration = backgroundTaskService.subscribeToExpiration(() => {
@@ -235,7 +249,7 @@ export const useChatSession = () => {
           stopAssistantMessage(threadId, assistantMessageId);
           finalizeThreadStatus(threadId, 'stopped');
           sharedGenerationState.current!.stopRequested = true;
-          void notificationService.sendInterruptedNotification({ threadId });
+          sendInterruptedNotificationOnce();
         } finally {
           void llmEngineService.stopCompletion();
         }
@@ -315,9 +329,7 @@ export const useChatSession = () => {
         finalizeThreadStatus(threadId, 'stopped');
         recordCompletionStats('stopped');
 
-        if (AppState.currentState !== 'active') {
-          void notificationService.sendInterruptedNotification({ threadId });
-        }
+        sendInterruptedNotificationOnce();
         return;
       }
 
@@ -341,9 +353,7 @@ export const useChatSession = () => {
         finalizeThreadStatus(threadId, 'stopped');
         recordCompletionStats('stopped');
 
-        if (AppState.currentState !== 'active') {
-          void notificationService.sendInterruptedNotification({ threadId });
-        }
+        sendInterruptedNotificationOnce();
         return;
       }
 
@@ -361,9 +371,7 @@ export const useChatSession = () => {
       finalizeThreadStatus(threadId, 'error');
       recordCompletionStats('error');
 
-      if (AppState.currentState !== 'active') {
-        void notificationService.sendInterruptedNotification({ threadId });
-      }
+      sendInterruptedNotificationOnce();
       throw error;
     } finally {
       if (flushTimeout) {
@@ -377,8 +385,8 @@ export const useChatSession = () => {
         sharedGenerationState.current = null;
       }
 
-      if (backgroundTaskService.taskType === 'inference') {
-        await backgroundTaskService.stopBackgroundTask();
+      if (backgroundTaskService.isTaskActive('inference')) {
+        await backgroundTaskService.stopBackgroundTask('inference');
       }
     }
   }, [finalizeAssistantMessage, finalizeThreadStatus, patchAssistantMessage, stopAssistantMessage]);

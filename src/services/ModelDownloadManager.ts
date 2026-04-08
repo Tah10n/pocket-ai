@@ -70,8 +70,8 @@ export class ModelDownloadManager {
     ));
 
     if (!next) {
-      if (backgroundTaskService.taskType === 'download') {
-        await backgroundTaskService.stopBackgroundTask();
+      if (backgroundTaskService.isTaskActive('download')) {
+        await backgroundTaskService.stopBackgroundTask('download');
       }
       return;
     }
@@ -83,17 +83,17 @@ export class ModelDownloadManager {
         updateModelInQueue(next.id, { lifecycleStatus: LifecycleStatus.QUEUED });
       }
 
-      if (backgroundTaskService.taskType === 'download') {
-        await backgroundTaskService.stopBackgroundTask();
-      }
-
       return;
     }
 
     this.isProcessing = true;
     setActiveDownload(next.id);
     try {
-      await backgroundTaskService.startBackgroundDownload();
+      await backgroundTaskService.startBackgroundDownload({
+        type: 'downloadProgress',
+        modelName: next.name,
+        progressPercent: Math.round((next.downloadProgress ?? 0) * 100),
+      });
       await this.downloadModel(next);
     } catch (e) {
       console.error(`[ModelDownloadManager] Failed to download ${next.id}`, e);
@@ -128,12 +128,12 @@ export class ModelDownloadManager {
         console.warn('[ModelDownloadManager] Failed to pause download after cellular transition', error);
       }
 
+      // Update the foreground-service notification (Android) / cached notification details (iOS)
+      // so the paused state is reflected even if the app is currently active.
+      await backgroundTaskService.startBackgroundDownload({ type: 'downloadPaused' });
+
       if (AppState.currentState !== 'active') {
         void notificationService.sendPausedNotification();
-      }
-
-      if (backgroundTaskService.taskType === 'download') {
-        await backgroundTaskService.stopBackgroundTask();
       }
 
       return;

@@ -4,9 +4,13 @@ import { LifecycleStatus, ModelAccessState, ModelMetadata } from '../../src/type
 import * as FileSystem from 'expo-file-system/legacy';
 import * as RNFS from 'react-native-fs';
 import DeviceInfo from 'react-native-device-info';
+import { AppState } from 'react-native';
 import { huggingFaceTokenService } from '../../src/services/HuggingFaceTokenService';
 import { registry } from '../../src/services/LocalStorageRegistry';
 import { getSystemMemorySnapshot } from '../../src/services/SystemMetricsService';
+import { backgroundTaskService } from '../../src/services/BackgroundTaskService';
+import { hardwareListenerService } from '../../src/services/HardwareListenerService';
+import { updateSettings } from '../../src/services/SettingsStore';
 
 let logSpy: jest.SpyInstance;
 let errorSpy: jest.SpyInstance;
@@ -76,19 +80,32 @@ const mockedRegistry = registry as jest.Mocked<typeof registry>;
 describe('ModelDownloadManager Basic', () => {
   beforeEach(async () => {
     jest.clearAllMocks();
+    Object.defineProperty(AppState, 'currentState', {
+      configurable: true,
+      value: 'active',
+    });
     (huggingFaceTokenService.getToken as jest.Mock).mockResolvedValue(null);
     (RNFS.hash as jest.Mock).mockResolvedValue('tree-sha');
     (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(8 * 1024 * 1024 * 1024);
     (getSystemMemorySnapshot as jest.Mock).mockResolvedValue(null);
+    updateSettings({ allowCellularDownloads: false });
     useDownloadStore.setState({ queue: [], activeDownloadId: null });
     (modelDownloadManager as any).isProcessing = false;
-    await new Promise(r => setTimeout(r, 10)); // Yield tick
+    await backgroundTaskService.stopBackgroundTask();
+    await new Promise((r) => setTimeout(r, 10)); // Yield tick
   });
 
   it('should add model to queue and start download', async () => {
+    const startBackgroundDownloadSpy = jest.spyOn(backgroundTaskService, 'startBackgroundDownload');
+
     useDownloadStore.getState().addToQueue(mockModel);
     await new Promise(r => setTimeout(r, 0));
 
+    expect(startBackgroundDownloadSpy).toHaveBeenCalledWith({
+      type: 'downloadProgress',
+      modelName: 'model',
+      progressPercent: 0,
+    });
     expect(FileSystem.createDownloadResumable).toHaveBeenCalled();
   });
 
@@ -299,5 +316,55 @@ describe('ModelDownloadManager Basic', () => {
         localPath: 'test_model.gguf',
       }),
     );
+  });
+
+  it('keeps the background download task alive when Wi-Fi-only pauses a queued download in the background', async () => {
+    const activeModel = {
+      ...mockModel,
+      id: 'test/active',
+      name: 'Active model',
+      lifecycleStatus: LifecycleStatus.DOWNLOADING,
+    };
+    const queuedModel = {
+      ...mockModel,
+      id: 'test/queued',
+      name: 'Queued model',
+      lifecycleStatus: LifecycleStatus.QUEUED,
+    };
+    const pauseAsync = jest.fn().mockResolvedValue({ resumeData: 'resume-data' });
+    const startBackgroundDownloadSpy = jest.spyOn(backgroundTaskService, 'startBackgroundDownload').mockResolvedValue(undefined);
+    const stopBackgroundTaskSpy = jest.spyOn(backgroundTaskService, 'stopBackgroundTask');
+    jest.spyOn(hardwareListenerService, 'getCurrentStatus').mockReturnValue({
+      isLowMemory: false,
+      networkType: 'cellular',
+      isConnected: true,
+      thermalState: 'nominal',
+    });
+
+    Object.defineProperty(AppState, 'currentState', {
+      configurable: true,
+      value: 'background',
+    });
+
+    (modelDownloadManager as any).resumable = {
+      pauseAsync,
+    };
+    useDownloadStore.setState({
+      queue: [activeModel, queuedModel],
+      activeDownloadId: activeModel.id,
+    });
+
+    await (modelDownloadManager as any).handleHardwareStatusChange({
+      isLowMemory: false,
+      networkType: 'cellular',
+      isConnected: true,
+      thermalState: 'nominal',
+    });
+
+    expect(pauseAsync).toHaveBeenCalled();
+    expect(startBackgroundDownloadSpy).toHaveBeenCalledWith({ type: 'downloadPaused' });
+    expect(stopBackgroundTaskSpy).not.toHaveBeenCalled();
+    expect(useDownloadStore.getState().activeDownloadId).toBeNull();
+    expect(useDownloadStore.getState().queue.find((model) => model.id === activeModel.id)?.lifecycleStatus).toBe(LifecycleStatus.QUEUED);
   });
 });

@@ -81,6 +81,12 @@
       "storageFull": "Not enough storage space",
       "connectionLost": "Connection lost",
       "verificationFailed": "File verification failed"
+    },
+    "permissions": {
+      "title": "Notifications are disabled",
+      "body": "Enable notifications for Pocket AI to allow background downloads and progress notifications.",
+      "openSettings": "Open settings",
+      "continue": "Continue"
     }
   },
   "home": {

@@ -256,7 +256,9 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
     const queuedItemsById = new Map(queuedItems.map((queuedItem) => [queuedItem.id, queuedItem] as const));
 
     const baseModels = activeTab === 'downloaded'
-      ? uniqueByKey([...models, ...queuedItems], (model) => model.id)
+      // Downloaded tab: merge local models from the hook, the live registry, and in-flight downloads.
+      // This avoids a flicker where a model is removed from the download queue before the local list refreshes.
+      ? uniqueByKey([...models, ...registryModels, ...queuedItems], (model) => model.id)
       : models;
 
     return baseModels.map((model) => mergeModelWithRuntimeState(model, {

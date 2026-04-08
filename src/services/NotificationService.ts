@@ -1,4 +1,4 @@
-import { Platform } from 'react-native';
+import { Linking, Platform } from 'react-native';
 import BackgroundService, { type BackgroundTaskOptions } from 'react-native-background-actions';
 import * as Notifications from 'expo-notifications';
 import { createURL } from 'expo-linking';
@@ -11,7 +11,7 @@ export type NotificationTaskType = 'download' | 'inference';
 
 export type DownloadErrorReason = 'storageFull' | 'connectionLost' | 'verificationFailed' | 'unknown';
 
-type NotificationUpdate =
+export type NotificationUpdate =
     | {
         type: 'downloadProgress';
         modelName: string;
@@ -30,6 +30,8 @@ const CHANNEL_IDS = {
     downloads: 'downloads',
     inference: 'inference',
 } as const;
+
+const BACKGROUND_ACTIONS_CHANNEL_ID = 'RN_BACKGROUND_ACTIONS_CHANNEL';
 
 function sleep(ms: number) {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -145,14 +147,57 @@ class NotificationService {
             return true;
         }
 
-        if (current.status === 'denied') {
-            this.permissionState = 'denied';
-            return false;
-        }
-
         const requested = await Notifications.requestPermissionsAsync();
         this.permissionState = requested.status === 'granted' ? 'granted' : 'denied';
         return requested.status === 'granted';
+    }
+
+    async openSystemSettings(): Promise<void> {
+        try {
+            await Linking.openSettings();
+        } catch (error) {
+            console.warn('[NotificationService] Failed to open system settings', error);
+        }
+    }
+
+    async canStartForegroundServiceNotifications(): Promise<boolean> {
+        await this.ensureInitialized();
+
+        if (Platform.OS !== 'android') {
+            return true;
+        }
+
+        try {
+            const current = await Notifications.getPermissionsAsync();
+            const granted = current.status === 'granted';
+            if (granted) {
+                this.permissionState = 'granted';
+            } else if (current.status === 'denied') {
+                this.permissionState = 'denied';
+            }
+
+            // On Android 13+, a foreground service notification can crash if notification
+            // permission is not granted, so refuse to start it until the user opts in.
+            if (!granted) {
+                return false;
+            }
+        } catch (error) {
+            console.warn('[NotificationService] Failed to read notification permission', error);
+            return false;
+        }
+
+        // If the RN background-actions channel exists but is blocked, starting the FGS can crash.
+        try {
+            const channels = await Notifications.getNotificationChannelsAsync();
+            const fgsChannel = channels?.find((channel) => channel.id === BACKGROUND_ACTIONS_CHANNEL_ID) ?? null;
+            if (fgsChannel && fgsChannel.importance === Notifications.AndroidImportance.NONE) {
+                return false;
+            }
+        } catch {
+            // Ignore channel lookup failures, fall back to permission check.
+        }
+
+        return true;
     }
 
     private async canSendLocalNotifications(): Promise<boolean> {
@@ -175,9 +220,9 @@ class NotificationService {
             return false;
         }
 
-        const requested = await Notifications.requestPermissionsAsync();
-        this.permissionState = requested.status === 'granted' ? 'granted' : 'denied';
-        return requested.status === 'granted';
+        // Do not prompt from background or service code paths.
+        // Permissions should be requested explicitly via requestPermissions().
+        return false;
     }
 
     getBackgroundTaskOptions(taskType: NotificationTaskType): BackgroundTaskOptions {
@@ -190,14 +235,19 @@ class NotificationService {
                 : i18n.t('notifications.inference.progress.title'),
             taskDesc: isDownload
                 ? i18n.t('notifications.download.progress.body', { progress: 0, speed: '—' })
-                : i18n.t('notifications.inference.progress.body', { modelName: '' }).trim() || i18n.t('notifications.inference.progress.body'),
+                : i18n.t('notifications.inference.progress.body', { modelName: '' }).trim()
+                    || i18n.t('notifications.inference.progress.body'),
             taskIcon: {
                 name: 'ic_launcher',
                 type: 'mipmap',
             },
             color: '#010100',
             linkingURI: isDownload ? createURL('/(tabs)/models') : createURL('/(tabs)/chat'),
-            progressBar: isDownload ? { max: 100, value: 0, indeterminate: false } : { max: 100, value: 0, indeterminate: true },
+            progressBar: isDownload
+                ? { max: 100, value: 0, indeterminate: false }
+                : { max: 100, value: 0, indeterminate: true },
+            // Required when the Android manifest declares a foregroundServiceType.
+            // Omitting it can crash on newer Android versions.
             foregroundServiceType: ['dataSync'],
         };
     }

@@ -1,7 +1,11 @@
-import { AppState, type AppStateStatus, type NativeEventSubscription } from 'react-native';
+import { AppState, Platform, type AppStateStatus, type NativeEventSubscription } from 'react-native';
 import BackgroundService from 'react-native-background-actions';
 
-import { notificationService, type NotificationTaskType } from './NotificationService';
+import {
+    notificationService,
+    type NotificationTaskType,
+    type NotificationUpdate,
+} from './NotificationService';
 
 function normalizeAppState(state: string | null | undefined): AppStateStatus {
     if (state === 'active' || state === 'background' || state === 'inactive') {
@@ -12,8 +16,9 @@ function normalizeAppState(state: string | null | undefined): AppStateStatus {
 }
 
 class BackgroundTaskService {
-    private currentTaskType: NotificationTaskType | null = null;
-    private currentStartedAt: number | null = null;
+    private activeTaskTypes = new Set<NotificationTaskType>();
+    private startedAtByTask: Partial<Record<NotificationTaskType, number>> = {};
+    private latestNotificationUpdateByTask: Partial<Record<NotificationTaskType, NotificationUpdate>> = {};
     private appState: AppStateStatus = normalizeAppState(AppState.currentState);
 
     private appStateSub?: NativeEventSubscription;
@@ -56,30 +61,65 @@ class BackgroundTaskService {
     }
 
     get taskType() {
-        return this.currentTaskType;
+        return this.getPrimaryTaskType();
     }
 
     get startedAt() {
-        return this.currentStartedAt;
+        const primaryTaskType = this.getPrimaryTaskType();
+        if (!primaryTaskType) {
+            return null;
+        }
+
+        return this.startedAtByTask[primaryTaskType] ?? null;
     }
 
-    async startBackgroundDownload() {
+    isTaskActive(taskType: NotificationTaskType) {
+        return this.activeTaskTypes.has(taskType);
+    }
+
+    async startBackgroundDownload(notificationUpdate?: Extract<NotificationUpdate, { type: 'downloadProgress' | 'downloadPaused' }>) {
         this.start();
-        this.setTaskType('download');
+        this.setTaskActive('download');
+        if (notificationUpdate) {
+            this.latestNotificationUpdateByTask.download = notificationUpdate;
+        }
         await this.maybeStartForegroundService();
+        await this.applyCurrentNotificationUpdate();
     }
 
-    async startBackgroundInference() {
+    async startBackgroundInference(modelName?: string) {
         this.start();
-        this.setTaskType('inference');
+        this.setTaskActive('inference');
+        if (modelName) {
+            this.latestNotificationUpdateByTask.inference = { type: 'inferenceProgress', modelName };
+        }
         await this.maybeStartForegroundService();
+        await this.applyCurrentNotificationUpdate();
     }
 
-    async stopBackgroundTask() {
+    async stopBackgroundTask(taskType?: NotificationTaskType) {
         this.start();
-        this.currentTaskType = null;
-        this.currentStartedAt = null;
+        if (taskType) {
+            this.clearTask(taskType);
+            if (this.activeTaskTypes.size === 0) {
+                await this.stopAllTasksAndService();
+                return;
+            }
 
+            // If another task is still active, ensure the foreground-service notification
+            // reflects whichever task we keep as the primary.
+            await this.applyCurrentNotificationUpdate();
+            return;
+        }
+
+        this.activeTaskTypes.clear();
+        this.startedAtByTask = {};
+        this.latestNotificationUpdateByTask = {};
+
+        await this.stopAllTasksAndService();
+    }
+
+    private async stopAllTasksAndService() {
         if (BackgroundService.isRunning()) {
             try {
                 await BackgroundService.stop();
@@ -101,12 +141,33 @@ class BackgroundTaskService {
         };
     }
 
-    private setTaskType(nextTaskType: NotificationTaskType) {
-        const isChangingTask = this.currentTaskType != null && this.currentTaskType !== nextTaskType;
-        this.currentTaskType = nextTaskType;
-        if (!this.currentStartedAt || isChangingTask) {
-            this.currentStartedAt = Date.now();
+    private setTaskActive(taskType: NotificationTaskType) {
+        if (this.activeTaskTypes.has(taskType)) {
+            return;
         }
+
+        this.activeTaskTypes.add(taskType);
+        this.startedAtByTask[taskType] = Date.now();
+    }
+
+    private clearTask(taskType: NotificationTaskType) {
+        this.activeTaskTypes.delete(taskType);
+        delete this.startedAtByTask[taskType];
+        delete this.latestNotificationUpdateByTask[taskType];
+    }
+
+    private getPrimaryTaskType(): NotificationTaskType | null {
+        // Prefer downloads when both types are active, so the persistent notification
+        // stays relevant for long-running background work.
+        if (this.activeTaskTypes.has('download')) {
+            return 'download';
+        }
+
+        if (this.activeTaskTypes.has('inference')) {
+            return 'inference';
+        }
+
+        return null;
     }
 
     private handleAppStateChange = (nextState: AppStateStatus) => {
@@ -119,7 +180,17 @@ class BackgroundTaskService {
         }
 
         if (normalized === 'active') {
-            void this.stopForegroundServiceIfRunning();
+            // Keep the foreground service running while work is active.
+            // Starting it from a backgrounded Android app can crash on Android 12+.
+            if (this.activeTaskTypes.size === 0) {
+                void this.stopForegroundServiceIfRunning();
+            }
+            return;
+        }
+
+        // Avoid starting a foreground service from the background on Android.
+        // The service should be started while the app is still active (user-initiated).
+        if (Platform.OS === 'android') {
             return;
         }
 
@@ -127,7 +198,7 @@ class BackgroundTaskService {
     };
 
     private handleExpiration = () => {
-        if (this.currentTaskType !== 'inference') {
+        if (!this.activeTaskTypes.has('inference')) {
             return;
         }
 
@@ -153,11 +224,15 @@ class BackgroundTaskService {
     }
 
     private async maybeStartForegroundService(): Promise<void> {
-        if (this.appState === 'active') {
+        if (Platform.OS === 'android' && this.appState !== 'active') {
             return;
         }
 
-        const taskType = this.currentTaskType;
+        if (this.appState === 'active' && Platform.OS !== 'android') {
+            return;
+        }
+
+        const taskType = this.getPrimaryTaskType();
         if (!taskType) {
             return;
         }
@@ -166,11 +241,37 @@ class BackgroundTaskService {
             return;
         }
 
+        if (Platform.OS === 'android') {
+            const canStart = await notificationService.canStartForegroundServiceNotifications();
+            if (!canStart) {
+                return;
+            }
+        }
+
         const options = notificationService.getBackgroundTaskOptions(taskType);
         try {
             await BackgroundService.start(notificationService.keepJsAliveWhileRunning, options);
+            await this.applyCurrentNotificationUpdate();
         } catch (error) {
             console.warn('[BackgroundTaskService] Failed to start background task', error);
+        }
+    }
+
+    private async applyCurrentNotificationUpdate(): Promise<void> {
+        const taskType = this.getPrimaryTaskType();
+        if (!taskType) {
+            return;
+        }
+
+        const update = this.latestNotificationUpdateByTask[taskType] ?? null;
+        if (!update) {
+            return;
+        }
+
+        try {
+            await notificationService.updateNotification(update);
+        } catch (error) {
+            console.warn('[BackgroundTaskService] Failed to update task notification', error);
         }
     }
 }

@@ -127,8 +127,6 @@ class BackgroundTaskService {
                 // ignore
             }
         }
-
-        await notificationService.cancelNotification();
         this.stop();
     }
 

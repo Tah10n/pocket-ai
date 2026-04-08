@@ -20,7 +20,7 @@ import { estimateFastMemoryFit } from '../memory/estimator';
 import { safeJoinModelPath } from '../utils/safeFilePath';
 import { DECIMAL_GIGABYTE } from '../utils/modelSize';
 import { hardwareListenerService, type HardwareStatus } from './HardwareListenerService';
-import { getSettings } from './SettingsStore';
+import { getSettings, subscribeSettings } from './SettingsStore';
 import { backgroundTaskService } from './BackgroundTaskService';
 import { notificationService, type DownloadErrorReason } from './NotificationService';
 
@@ -29,6 +29,7 @@ export class ModelDownloadManager {
   private resumable: any = null;
   private isProcessing = false;
   private hwUnsubscribe?: () => void;
+  private settingsUnsubscribe?: () => void;
 
   private constructor() {
     // Subscribe to store changes to trigger queue processing
@@ -36,6 +37,23 @@ export class ModelDownloadManager {
       (state) => `${state.activeDownloadId ?? ''}|${state.queue.map((model) => `${model.id}:${model.lifecycleStatus}`).join(',')}`,
       () => { void this.processQueue(); },
     );
+
+    let lastAllowCellularDownloads = getSettings().allowCellularDownloads;
+    this.settingsUnsubscribe = subscribeSettings((settings) => {
+      if (settings.allowCellularDownloads === lastAllowCellularDownloads) {
+        return;
+      }
+
+      lastAllowCellularDownloads = settings.allowCellularDownloads;
+      const status = hardwareListenerService.getCurrentStatus();
+
+      if (status.networkType === 'cellular' && settings.allowCellularDownloads === false) {
+        void this.handleHardwareStatusChange(status);
+        return;
+      }
+
+      void this.processQueue();
+    });
 
     this.hwUnsubscribe = hardwareListenerService.subscribe((status) => {
       void this.handleHardwareStatusChange(status);
@@ -248,7 +266,7 @@ export class ModelDownloadManager {
       ) {
         lastNotificationUpdatedAt = now;
         lastNotifiedPercent = percent;
-        void notificationService.updateNotification({
+        void backgroundTaskService.startBackgroundDownload({
           type: 'downloadProgress',
           modelName: model.name,
           progressPercent: percent,

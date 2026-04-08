@@ -267,10 +267,6 @@ class NotificationService {
         return await Notifications.scheduleNotificationAsync({ content, trigger });
     }
 
-    async cancelNotification(): Promise<void> {
-        await this.ensureInitialized();
-    }
-
     async updateNotification(update: NotificationUpdate): Promise<void> {
         if (!BackgroundService.isRunning()) {
             return;
@@ -340,6 +336,17 @@ class NotificationService {
             {
                 title: i18n.t('notifications.inference.interrupted.title'),
                 body: i18n.t('notifications.inference.interrupted.body'),
+                data: { taskType: 'inference', threadId: params.threadId },
+            },
+            { channelId: CHANNEL_IDS.inference },
+        );
+    }
+
+    async sendInferenceErrorNotification(params: { threadId?: string } = {}) {
+        await this.sendLocalNotification(
+            {
+                title: i18n.t('notifications.inference.error.title'),
+                body: i18n.t('notifications.inference.error.body'),
                 data: { taskType: 'inference', threadId: params.threadId },
             },
             { channelId: CHANNEL_IDS.inference },

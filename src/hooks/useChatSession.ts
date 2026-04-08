@@ -172,7 +172,7 @@ export const useChatSession = () => {
     const startTime = Date.now();
     let flushTimeout: ReturnType<typeof setTimeout> | null = null;
     let unsubscribeExpiration: (() => void) | null = null;
-    let hasSentInterruptedNotification = false;
+    let sentBackgroundOutcomeNotification: 'interrupted' | 'error' | null = null;
 
     const recordCompletionStats = (outcome: 'success' | 'stopped' | 'error') => {
       const elapsedSec = (Date.now() - startTime) / 1000;
@@ -224,20 +224,33 @@ export const useChatSession = () => {
       }, STREAM_PATCH_INTERVAL_MS);
     };
 
-    const sendInterruptedNotificationOnce = () => {
-      if (AppState.currentState === 'active' || hasSentInterruptedNotification) {
+    const sendOutcomeNotificationOnce = (outcome: 'interrupted' | 'error') => {
+      if (AppState.currentState === 'active') {
         return;
       }
 
-      hasSentInterruptedNotification = true;
-      void notificationService.sendInterruptedNotification({ threadId });
+      if (sentBackgroundOutcomeNotification === 'error') {
+        return;
+      }
+
+      if (sentBackgroundOutcomeNotification === outcome) {
+        return;
+      }
+
+      sentBackgroundOutcomeNotification = outcome;
+
+      if (outcome === 'interrupted') {
+        void notificationService.sendInterruptedNotification({ threadId });
+        return;
+      }
+
+      void notificationService.sendInferenceErrorNotification({ threadId });
     };
 
     try {
       const modelName = registry.getModel(thread.modelId)?.name ?? thread.modelId;
 
       await backgroundTaskService.startBackgroundInference(modelName);
-      void notificationService.updateNotification({ type: 'inferenceProgress', modelName });
 
       unsubscribeExpiration = backgroundTaskService.subscribeToExpiration(() => {
         if (!isMatchingGeneration(threadId, assistantMessageId)) {
@@ -249,7 +262,7 @@ export const useChatSession = () => {
           stopAssistantMessage(threadId, assistantMessageId);
           finalizeThreadStatus(threadId, 'stopped');
           sharedGenerationState.current!.stopRequested = true;
-          sendInterruptedNotificationOnce();
+          sendOutcomeNotificationOnce('interrupted');
         } finally {
           void llmEngineService.stopCompletion();
         }
@@ -329,7 +342,7 @@ export const useChatSession = () => {
         finalizeThreadStatus(threadId, 'stopped');
         recordCompletionStats('stopped');
 
-        sendInterruptedNotificationOnce();
+        sendOutcomeNotificationOnce('interrupted');
         return;
       }
 
@@ -353,7 +366,7 @@ export const useChatSession = () => {
         finalizeThreadStatus(threadId, 'stopped');
         recordCompletionStats('stopped');
 
-        sendInterruptedNotificationOnce();
+        sendOutcomeNotificationOnce('interrupted');
         return;
       }
 
@@ -371,7 +384,7 @@ export const useChatSession = () => {
       finalizeThreadStatus(threadId, 'error');
       recordCompletionStats('error');
 
-      sendInterruptedNotificationOnce();
+      sendOutcomeNotificationOnce('error');
       throw error;
     } finally {
       if (flushTimeout) {

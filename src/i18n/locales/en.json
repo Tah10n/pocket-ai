@@ -75,6 +75,10 @@
       "interrupted": {
         "title": "Generation interrupted",
         "body": "Partial response saved"
+      },
+      "error": {
+        "title": "Generation failed",
+        "body": "Tap to view details"
       }
     },
     "error": {

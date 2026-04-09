@@ -1,0 +1,98 @@
+name: Bug report
+description: Report a reproducible product bug
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for actionable bugs only. For questions or brainstorming, use GitHub Discussions. For security issues, follow `SECURITY.md` and use private vulnerability reporting when available.
+  - type: input
+    id: version
+    attributes:
+      label: App version or commit
+      description: Include the app version, release tag, or commit SHA.
+      placeholder: e.g. v1.1.0 or 1a2b3c4
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      description: Select the platform where the bug occurs.
+      options:
+        - Android
+        - iOS
+        - Both Android and iOS
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: Device
+      description: Include the device model or emulator/simulator details.
+      placeholder: e.g. Pixel 8 or iPhone 15 Pro
+    validations:
+      required: true
+  - type: input
+    id: os-version
+    attributes:
+      label: OS version
+      description: Include the operating system version.
+      placeholder: e.g. Android 15 or iOS 18.1
+    validations:
+      required: true
+  - type: input
+    id: model-source
+    attributes:
+      label: Affected model or source
+      description: Name the model, repository, or source involved. If not model-specific, say `not model-specific`.
+      placeholder: e.g. bartowski/Llama-3.2-1B-Instruct-GGUF from Hugging Face
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Provide exact steps so someone else can reproduce the issue.
+      placeholder: |
+        1. Open ...
+        2. Tap ...
+        3. Wait ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+      placeholder: Describe what should have happened.
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual result
+      placeholder: Describe what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or screenshots
+      description: Paste logs, attach screenshots, or say `none` if you do not have them.
+      placeholder: Include crash traces, console logs, screenshots, or recordings here.
+    validations:
+      required: true
+  - type: dropdown
+    id: regression
+    attributes:
+      label: Regression confirmation
+      description: Did this work in an earlier version or commit?
+      options:
+        - Yes, this is a regression
+        - No, this has always happened
+        - Not sure
+    validations:
+      required: true

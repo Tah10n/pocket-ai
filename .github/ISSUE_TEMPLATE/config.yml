@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and brainstorming
+    url: https://github.com/Tah10n/pocket-ai/discussions
+    about: Use GitHub Discussions for troubleshooting help, Q&A, and early ideas before opening an actionable issue.
+  - name: Security vulnerability reporting
+    url: https://github.com/Tah10n/pocket-ai/security/policy
+    about: Read the security policy and use GitHub private vulnerability reporting for sensitive reports.

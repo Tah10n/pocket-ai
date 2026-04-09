@@ -141,15 +141,16 @@ Auto-generated from open GitHub issues labeled `roadmap:*`.
 <!-- ROADMAP:START -->
 ### Now
 
-- _No items_
+- [\[Feature\]: Allow multiple models per conversation + add “model switched” line](https://github.com/Tah10n/pocket-ai/issues/25) (#25)
 
 ### Next
 
-- _No items_
+- [\[Feature\]: Show capability icons on model cards (text / vision / reasoning)](https://github.com/Tah10n/pocket-ai/issues/28) (#28)
+- [\[Feature\]: Model card “Size” should open quantization/file picker (GGUF variants)](https://github.com/Tah10n/pocket-ai/issues/27) (#27)
 
 ### Later
 
-- _No items_
+- [\[Feature\]: Multimodal (vision) models — attach images in chat](https://github.com/Tah10n/pocket-ai/issues/29) (#29)
 <!-- ROADMAP:END -->
 
 ## Project structure

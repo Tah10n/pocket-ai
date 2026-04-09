@@ -1,0 +1,58 @@
+name: Roadmap
+
+on:
+  issues:
+    types:
+      - opened
+      - edited
+      - closed
+      - reopened
+      - labeled
+      - unlabeled
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: read
+
+concurrency:
+  group: roadmap
+  cancel-in-progress: true
+
+jobs:
+  update-roadmap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Generate README Roadmap
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/generate-roadmap.js
+
+      - name: Create PR
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || github.token }}
+          commit-message: "docs: update roadmap"
+          title: "docs: update roadmap"
+          body: |
+            Updates the auto-generated Roadmap section in `README.md`.
+
+            Source of truth: open issues labeled `roadmap:now`, `roadmap:next`, or `roadmap:later`.
+          branch: "automation/roadmap"
+          base: "main"
+          add-paths: |
+            README.md
+

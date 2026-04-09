@@ -43,6 +43,8 @@
     "typecheck": "tsc --noEmit",
     "verify:mobile-change": "npm run typecheck && npm run lint && npm test",
     "verify:mobile-change:android": "npm run verify:mobile-change && npm run android:scenarios:emulator",
+    "roadmap:update": "node ./scripts/generate-roadmap.js",
+    "roadmap:check": "node ./scripts/generate-roadmap.js --check",
     "verify:release": "npm run typecheck && npm run lint && npm test",
     "build:android:production": "node ./scripts/build-android-release.js",
     "build:android:production:clean": "node ./scripts/build-android-release.js --clean",

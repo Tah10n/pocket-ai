@@ -134,6 +134,24 @@ This project uses Conventional Commit-style **PR titles** to drive automated ver
 | [New Architecture](docs/new-architecture.md) | React Native new architecture notes |
 | [Release Checklist](docs/release-checklist.md) | Pre-release verification steps |
 
+## Roadmap
+
+Auto-generated from open GitHub issues labeled `roadmap:*`.
+
+<!-- ROADMAP:START -->
+### Now
+
+- _No items_
+
+### Next
+
+- _No items_
+
+### Later
+
+- _No items_
+<!-- ROADMAP:END -->
+
 ## Project structure
 
 ```text

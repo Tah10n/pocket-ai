@@ -3,6 +3,26 @@
   "main": "expo-router/entry",
   "version": "1.1.0",
   "license": "MIT",
+  "description": "Offline-first local AI assistant for discovering, downloading, and chatting with GGUF models on-device.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Tah10n/pocket-ai.git"
+  },
+  "homepage": "https://github.com/Tah10n/pocket-ai/tree/main/docs",
+  "bugs": {
+    "url": "https://github.com/Tah10n/pocket-ai/issues"
+  },
+  "keywords": [
+    "react-native",
+    "expo",
+    "llm",
+    "gguf",
+    "on-device-ai",
+    "llama",
+    "mobile",
+    "offline-first",
+    "open-source"
+  ],
   "scripts": {
     "start": "expo start",
     "reset-project": "node ./scripts/reset-project.js",

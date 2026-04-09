@@ -1,0 +1,62 @@
+name: Feature request
+description: Propose an actionable product improvement
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for scoped feature work. For questions, exploratory discussion, or early brainstorming, use GitHub Discussions instead of Issues.
+  - type: textarea
+    id: problem
+    attributes:
+      label: User problem
+      description: Explain the user-facing problem you want to solve.
+      placeholder: Describe the current pain point.
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Proposed outcome
+      description: Describe the behavior or result you want instead.
+      placeholder: Describe the desired outcome.
+    validations:
+      required: true
+  - type: textarea
+    id: use-case
+    attributes:
+      label: Use case
+      description: Explain who benefits and when they need this.
+      placeholder: Describe the real-world scenario for this request.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Describe any workarounds or alternatives you evaluated.
+      placeholder: List current workarounds or explain why they are insufficient.
+    validations:
+      required: true
+  - type: dropdown
+    id: platforms
+    attributes:
+      label: Affected platform(s)
+      description: Select the main platform scope for this request.
+      options:
+        - Android
+        - iOS
+        - Both Android and iOS
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: mockups
+    attributes:
+      label: Mockups or screenshots
+      description: Optional. Add sketches, screenshots, references, or links if they help explain the request.
+      placeholder: Attach images or add links here.
+    validations:
+      required: false

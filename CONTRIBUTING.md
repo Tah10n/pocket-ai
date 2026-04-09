@@ -30,6 +30,7 @@ Please:
 - Reproduce the problem on the latest code you can access
 - Keep one problem or proposal per issue when possible
 - Use a clear title that describes the user-facing problem
+- Use GitHub Discussions for troubleshooting questions, Q&A, and early brainstorming
 
 ## Reporting bugs
 
@@ -211,8 +212,11 @@ Do not post secrets, access tokens, private keys, or detailed exploit instructio
 
 If you believe you found a security vulnerability:
 
-- Prefer private reporting channels if GitHub private reporting is enabled
+- Follow the reporting policy in [SECURITY.md](./SECURITY.md)
+- Use GitHub private vulnerability reporting as the primary disclosure channel when it is available
 - Otherwise open a minimal issue without exploit details and ask for a private follow-up
+
+If you have a question, design idea, or early product discussion instead of a confirmed bug or scoped feature request, use [GitHub Discussions](https://github.com/Tah10n/pocket-ai/discussions) instead of Issues.
 
 ## Community expectations
 

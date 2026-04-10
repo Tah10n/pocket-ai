@@ -1,4 +1,4 @@
-import { InteractionManager } from 'react-native';
+import { Platform } from 'react-native';
 
 import i18n from '../i18n';
 import { presetManager } from './PresetManager';
@@ -143,11 +143,51 @@ function scheduleAfterFirstFrame(task: () => void): void {
     return;
   }
 
-  const runAfterPaint = () => {
+  const requestIdleCallback = (
+    globalThis as unknown as {
+      requestIdleCallback?: (callback: () => void, options?: { timeout?: number }) => void;
+    }
+  ).requestIdleCallback;
+
+  const nativeIdleDelayMs = 750;
+  let didRun = false;
+  let fallbackTimeout: ReturnType<typeof setTimeout> | null = null;
+
+  const runOnce = () => {
+    if (didRun) {
+      return;
+    }
+
+    didRun = true;
+    if (fallbackTimeout) {
+      clearTimeout(fallbackTimeout);
+      fallbackTimeout = null;
+    }
+
+    task();
+  };
+
+  const scheduleWhenIdle = () => {
+    try {
+      if (typeof requestIdleCallback === 'function') {
+        requestIdleCallback(runOnce, { timeout: 2000 });
+        return;
+      }
+    } catch {
+      // ignore
+    }
+
+    const delayMs = Platform.OS === 'web' ? 0 : nativeIdleDelayMs;
+    setTimeout(runOnce, delayMs);
+  };
+
+  const scheduleAfterPaint = () => {
     try {
       if (typeof globalThis.requestAnimationFrame === 'function') {
         globalThis.requestAnimationFrame(() => {
-          setTimeout(task, 0);
+          globalThis.requestAnimationFrame(() => {
+            setTimeout(scheduleWhenIdle, 0);
+          });
         });
         return;
       }
@@ -155,19 +195,11 @@ function scheduleAfterFirstFrame(task: () => void): void {
       // ignore
     }
 
-    setTimeout(task, 0);
+    scheduleWhenIdle();
   };
 
-  try {
-    if (typeof InteractionManager?.runAfterInteractions === 'function') {
-      InteractionManager.runAfterInteractions(runAfterPaint);
-      return;
-    }
-  } catch {
-    // ignore
-  }
-
-  runAfterPaint();
+  fallbackTimeout = setTimeout(runOnce, 3000);
+  scheduleAfterPaint();
 }
 
 function scheduleActiveModelRestore(activeModelId: string): void {
@@ -281,6 +313,20 @@ export async function bootstrapAppBackground(): Promise<void> {
       await registry.validateRegistry(getQueuedDownloadFileNames());
     } catch (e) {
       recordError('validateRegistry', e);
+    }
+
+    if (process.env.NODE_ENV !== 'test' && Platform.OS !== 'web') {
+      scheduleAfterFirstFrame(() => {
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const module = require('./ModelDownloadManager') as typeof import('./ModelDownloadManager');
+          module.getModelDownloadManager();
+        } catch (e) {
+          if (process.env.NODE_ENV !== 'test') {
+            console.warn('[bootstrapApp] Failed to warm modelDownloadManager', e);
+          }
+        }
+      });
     }
 
     try {

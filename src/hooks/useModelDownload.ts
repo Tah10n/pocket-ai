@@ -1,7 +1,7 @@
 import { useCallback } from 'react';
 import { Alert } from 'react-native';
 import { useDownloadStore } from '../store/downloadStore';
-import { modelDownloadManager } from '../services/ModelDownloadManager';
+import { getModelDownloadManager } from '../services/ModelDownloadManager';
 import { notificationService } from '../services/NotificationService';
 import { ModelMetadata } from '../types/models';
 import { useShallow } from 'zustand/react/shallow';
@@ -39,11 +39,11 @@ export function useModelDownload() {
   }, [addToQueue]);
 
   const pauseDownload = useCallback((modelId: string) => {
-    modelDownloadManager.pauseDownload(modelId);
+    getModelDownloadManager().pauseDownload(modelId);
   }, []);
 
   const cancelDownload = useCallback((modelId: string) => {
-    modelDownloadManager.cancelDownload(modelId);
+    getModelDownloadManager().cancelDownload(modelId);
   }, []);
 
   const getModelFromQueue = useCallback((modelId: string) => {

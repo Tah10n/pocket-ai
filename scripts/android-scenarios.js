@@ -22,6 +22,9 @@ const MODELS_TAB_LABELS = ["Models", "Модели"];
 const MODEL_CATALOG_LABELS = ["Model Catalog", "Каталог моделей"];
 const ALL_MODELS_LABELS = ["All Models", "Все модели"];
 const DOWNLOADED_TAB_LABELS = ["Downloaded", "Загруженные"];
+const MODELS_FILTER_TOGGLE_LABELS = ["Filters", "Фильтры"];
+const MODELS_FILTER_NO_TOKEN_REQUIRED_LABELS = ["No token required", "Без токена"];
+const MODELS_FILTER_CLEAR_LABELS = ["Clear", "Очистить"];
 const SETTINGS_TAB_LABELS = ["Settings", "Настройки"];
 const SETTINGS_TITLE_LABELS = ["Settings", "Настройки"];
 const THEME_MODE_LABELS = ["Theme Mode", "Тема"];
@@ -41,21 +44,25 @@ const MODEL_DETAILS_CTA_LABELS = ["Details", "Детали"];
 const OPEN_ON_HF_LABELS = ["Open on HF", "Открыть на HF"];
 const RAM_FIT_BADGE_LABELS = [
   "Fits in RAM",
+  "Won't fit RAM",
   "Likely OOM",
   "Near RAM limit",
   "RAM fit unknown",
   "RAM Warning",
   "Помещается в RAM",
+  "Не влезет в RAM",
   "Вероятен OOM",
   "На пределе RAM",
   "Неизвестно по RAM",
   "Риск по RAM",
 ];
 const RAM_FIT_RISK_BADGE_LABELS = [
+  "Won't fit RAM",
   "Likely OOM",
   "Near RAM limit",
   "RAM fit unknown",
   "RAM Warning",
+  "Не влезет в RAM",
   "Вероятен OOM",
   "На пределе RAM",
   "Неизвестно по RAM",
@@ -70,6 +77,12 @@ const DOWNLOAD_WARNING_TITLE_LABELS = [
   "Size could not be verified",
   "Предупреждение о памяти",
   "Размер не удалось подтвердить",
+];
+const DOWNLOAD_WARNING_CANCEL_LABELS = [
+  "Cancel",
+  "CANCEL",
+  "Отмена",
+  "ОТМЕНА",
 ];
 const HOME_ROUTE_TIMEOUT_MS = 90_000;
 const SETTINGS_ROUTE_TIMEOUT_MS = 60_000;
@@ -345,6 +358,21 @@ function createScenarioContext(adbPath, serial) {
       ]);
       await delay(900);
     },
+    swipeDown: async () => {
+      runChecked(adbPath, [
+        "-s",
+        serial,
+        "shell",
+        "input",
+        "swipe",
+        "540",
+        "700",
+        "540",
+        "1700",
+        "250",
+      ]);
+      await delay(900);
+    },
     captureScreenshot: (fileName) => {
       const screenshotPath = path.join(artifactsRoot, fileName);
       fs.mkdirSync(path.dirname(screenshotPath), { recursive: true });
@@ -396,9 +424,10 @@ function buildScenarios() {
         await ctx.expectAnyText(DOWNLOADED_TAB_LABELS);
 
         await ctx.tapBottomTab(SETTINGS_TAB_LABELS);
-        await ctx.expectAnyText(THEME_MODE_LABELS);
-        await ctx.expectAnyText(LANGUAGE_ROW_LABELS);
-        await ctx.expectAnyText(STORAGE_MANAGER_LABELS);
+        await ctx.expectAnyText(SETTINGS_TITLE_LABELS);
+        await scrollToAnyText(ctx, THEME_MODE_LABELS, { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
+        await scrollToAnyText(ctx, LANGUAGE_ROW_LABELS, { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
+        await scrollToAnyText(ctx, STORAGE_MANAGER_LABELS, { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
 
         await ctx.tapBottomTab(HOME_TAB_LABELS);
         await ctx.expectAnyText(HOME_SECTION_LABELS);
@@ -468,6 +497,7 @@ function buildScenarios() {
         await goToHome(ctx);
         await ctx.tapAnyText(ACTIVE_MODEL_CTA_LABELS);
         await ctx.expectAnyText(MODEL_CATALOG_LABELS);
+        await prepareCatalogForRamWarningScenario(ctx);
 
         const adbPath = resolveAdbPath();
 
@@ -492,7 +522,9 @@ function buildScenarios() {
             visibleOnly: true,
           });
 
+          await ctx.tapAnyText(DOWNLOAD_WARNING_CANCEL_LABELS, { timeoutMs: 5_000 });
           await ctx.pressBack();
+          await ctx.expectAnyText(MODEL_CATALOG_LABELS, { timeoutMs: 20_000 });
           return;
         }
 
@@ -504,7 +536,7 @@ function buildScenarios() {
       description: "Verify the token education screen and external-token CTA are reachable from Settings.",
       run: async (ctx) => {
         await goToSettings(ctx);
-        await ctx.expectAnyText(HF_TOKEN_LABELS);
+        await scrollToAnyText(ctx, HF_TOKEN_LABELS, { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
         await ctx.tapAnyText(HF_TOKEN_LABELS);
         await ctx.expectText("Access token");
         await ctx.swipeUp();
@@ -592,7 +624,8 @@ async function goToHome(ctx) {
     const reachedHome = await tryReachHome(ctx);
 
     if (!reachedHome) {
-      throw new Error(`Timed out returning to Home from the current route.`);
+      const adbPath = resolveAdbPath();
+      throw new Error(withUiSummary(adbPath, ctx.serial, `Timed out returning to Home from the current route.`));
     }
 
     await ctx.expectAnyText(HOME_SECTION_LABELS, { timeoutMs: HOME_ROUTE_TIMEOUT_MS });
@@ -605,6 +638,14 @@ async function tryReachHome(ctx, maxAttempts = 4) {
   const adbPath = resolveAdbPath();
 
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const downloadWarning = await findAnyNodeNow(adbPath, ctx.serial, DOWNLOAD_WARNING_TITLE_LABELS, {
+      visibleOnly: true,
+    });
+    if (downloadWarning) {
+      await ctx.tapAnyText(DOWNLOAD_WARNING_CANCEL_LABELS, { timeoutMs: 5_000 });
+      continue;
+    }
+
     const homeSectionNode = await findAnyNodeNow(adbPath, ctx.serial, HOME_SECTION_LABELS, {
       visibleOnly: true,
     });
@@ -639,9 +680,8 @@ async function tryReachHome(ctx, maxAttempts = 4) {
 
 async function goToSettings(ctx) {
   await goToHome(ctx);
-  await ctx.tapAnyText(SETTINGS_TAB_LABELS);
+  await ctx.tapBottomTab(SETTINGS_TAB_LABELS);
   await ctx.expectAnyText(SETTINGS_TITLE_LABELS);
-  await ctx.expectAnyText(THEME_MODE_LABELS, { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
 }
 
 async function goToConversationManagement(ctx) {
@@ -650,17 +690,40 @@ async function goToConversationManagement(ctx) {
   await ctx.expectAnyText(CONVERSATIONS_TITLE_LABELS);
 }
 
-async function readCurrentLanguageLabel(ctx) {
-  await goToSettings(ctx);
-
+async function prepareCatalogForRamWarningScenario(ctx) {
   const adbPath = resolveAdbPath();
-  const languageNode = await findAnyNodeNow(adbPath, ctx.serial, LANGUAGE_ROW_LABELS, {
+
+  const panelAlreadyOpen = await findAnyNodeNow(adbPath, ctx.serial, MODELS_FILTER_NO_TOKEN_REQUIRED_LABELS, {
     visibleOnly: true,
   });
 
-  if (!languageNode) {
-    throw new Error("Could not find the language row while preparing Android scenarios.");
+  if (!panelAlreadyOpen) {
+    await ctx.tapAnyText(MODELS_FILTER_TOGGLE_LABELS);
+    await ctx.expectAnyText(MODELS_FILTER_NO_TOKEN_REQUIRED_LABELS);
   }
+
+  const clearButton = await findAnyNodeNow(adbPath, ctx.serial, MODELS_FILTER_CLEAR_LABELS, {
+    visibleOnly: true,
+  });
+
+  if (clearButton) {
+    await ctx.tapAnyText(MODELS_FILTER_CLEAR_LABELS);
+  }
+
+  // Make the scenario deterministic: show RAM-risk models by clearing persisted filters
+  // (including "Fits in RAM"), then keep downloads unblocked by enabling "No token required".
+  await ctx.tapAnyText(MODELS_FILTER_NO_TOKEN_REQUIRED_LABELS);
+
+  await ctx.tapAnyText(MODELS_FILTER_TOGGLE_LABELS);
+  await ctx.expectAnyText(MODEL_CATALOG_LABELS);
+}
+
+async function readCurrentLanguageLabel(ctx) {
+  await goToSettings(ctx);
+
+  const languageNode = await scrollToAnyText(ctx, LANGUAGE_ROW_LABELS, {
+    timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS,
+  });
 
   return languageNode.label;
 }
@@ -670,10 +733,13 @@ async function ensureEnglishUi(ctx, languageState) {
     return;
   }
 
+  await scrollToAnyText(ctx, [LANGUAGE_ROW_LABELS[1]], {
+    timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS,
+  });
   await ctx.tapAnyText([LANGUAGE_ROW_LABELS[1]]);
   languageState.switchedToEnglish = true;
-  await ctx.expectText(LANGUAGE_ROW_LABELS[0], { timeoutMs: 5_000 });
-  await ctx.expectText(THEME_MODE_LABELS[0], { timeoutMs: 5_000 });
+  await scrollToAnyText(ctx, [LANGUAGE_ROW_LABELS[0]], { timeoutMs: 10_000 });
+  await scrollToAnyText(ctx, THEME_MODE_LABELS, { timeoutMs: 10_000 });
   await goToHome(ctx);
 }
 
@@ -683,10 +749,50 @@ async function restoreOriginalLanguage(ctx, languageState) {
   }
 
   await goToSettings(ctx);
+  await scrollToAnyText(ctx, [LANGUAGE_ROW_LABELS[0]], { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
   await ctx.tapAnyText([LANGUAGE_ROW_LABELS[0]]);
-  await ctx.expectText(languageState.originalLabel, { timeoutMs: 5_000 });
-  await ctx.expectText(THEME_MODE_LABELS[1], { timeoutMs: 5_000 });
+  await scrollToAnyText(ctx, [languageState.originalLabel], { timeoutMs: 10_000 });
+  await scrollToAnyText(ctx, THEME_MODE_LABELS, { timeoutMs: 10_000 });
   await goToHome(ctx);
+}
+
+async function scrollToAnyText(ctx, labels, options = {}) {
+  const timeoutMs = options.timeoutMs ?? 20_000;
+  const maxSwipesDown = options.maxSwipesDown ?? 3;
+  const maxSwipesUp = options.maxSwipesUp ?? 10;
+  const adbPath = resolveAdbPath();
+  const startedAt = Date.now();
+
+  const findNow = async () => findAnyNodeNow(adbPath, ctx.serial, labels, { visibleOnly: true });
+
+  let match = await findNow();
+  if (match) {
+    return match;
+  }
+
+  for (let attempt = 0; attempt < maxSwipesDown && Date.now() - startedAt < timeoutMs; attempt += 1) {
+    await ctx.swipeDown();
+    match = await findNow();
+    if (match) {
+      return match;
+    }
+  }
+
+  for (let attempt = 0; attempt < maxSwipesUp && Date.now() - startedAt < timeoutMs; attempt += 1) {
+    await ctx.swipeUp();
+    match = await findNow();
+    if (match) {
+      return match;
+    }
+  }
+
+  throw new Error(
+    withUiSummary(
+      adbPath,
+      ctx.serial,
+      `Timed out waiting for any of: ${labels.map((label) => `"${label}"`).join(", ")}.`
+    )
+  );
 }
 
 function launchApp() {
@@ -827,7 +933,7 @@ async function waitForNode(adbPath, serial, label, options = {}) {
     await delay(600);
   }
 
-  throw new Error(`Timed out waiting for text "${label}".`);
+  throw new Error(withUiSummary(adbPath, serial, `Timed out waiting for text "${label}".`));
 }
 
 async function waitForAnyNode(adbPath, serial, labels, options = {}) {
@@ -845,7 +951,13 @@ async function waitForAnyNode(adbPath, serial, labels, options = {}) {
     await delay(600);
   }
 
-  throw new Error(`Timed out waiting for any of: ${labels.map((label) => `"${label}"`).join(", ")}.`);
+  throw new Error(
+    withUiSummary(
+      adbPath,
+      serial,
+      `Timed out waiting for any of: ${labels.map((label) => `"${label}"`).join(", ")}.`
+    )
+  );
 }
 
 async function waitForAnyNodeWithPicker(adbPath, serial, labels, options = {}, picker) {
@@ -856,6 +968,7 @@ async function waitForAnyNodeWithPicker(adbPath, serial, labels, options = {}, p
   while (Date.now() - startedAt < timeoutMs) {
     const xml = dumpUiHierarchy(adbPath, serial);
     const nodes = parseUiNodes(xml);
+    const viewportBounds = options.visibleOnly ? resolveViewportBounds(nodes) : null;
 
     for (const label of labels) {
       const matches = nodes.filter((node) => {
@@ -863,8 +976,14 @@ async function waitForAnyNodeWithPicker(adbPath, serial, labels, options = {}, p
           return false;
         }
 
-        if (options.visibleOnly && !node.bounds) {
-          return false;
+        if (options.visibleOnly) {
+          if (!node.bounds) {
+            return false;
+          }
+
+          if (viewportBounds && !isBoundsInViewport(node.bounds, viewportBounds)) {
+            return false;
+          }
         }
 
         return true;
@@ -878,7 +997,13 @@ async function waitForAnyNodeWithPicker(adbPath, serial, labels, options = {}, p
     await delay(600);
   }
 
-  throw new Error(`Timed out waiting for any of: ${labels.map((label) => `"${label}"`).join(", ")}.`);
+  throw new Error(
+    withUiSummary(
+      adbPath,
+      serial,
+      `Timed out waiting for any of: ${labels.map((label) => `"${label}"`).join(", ")}.`
+    )
+  );
 }
 
 async function findAnyNodeNow(adbPath, serial, labels, options = {}) {
@@ -895,13 +1020,20 @@ async function findAnyNodeNow(adbPath, serial, labels, options = {}) {
 async function findNodeNow(adbPath, serial, label, options = {}) {
   const xml = dumpUiHierarchy(adbPath, serial);
   const nodes = parseUiNodes(xml);
+  const viewportBounds = options.visibleOnly ? resolveViewportBounds(nodes) : null;
   const matches = nodes.filter((node) => {
     if (!matchesLabel(node, label)) {
       return false;
     }
 
-    if (options.visibleOnly && !node.bounds) {
-      return false;
+    if (options.visibleOnly) {
+      if (!node.bounds) {
+        return false;
+      }
+
+      if (viewportBounds && !isBoundsInViewport(node.bounds, viewportBounds)) {
+        return false;
+      }
     }
 
     return true;
@@ -970,6 +1102,35 @@ function matchesLabel(node, label) {
 
 function normalizeUiLabel(value) {
   return (value || "").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function resolveViewportBounds(nodes) {
+  if (!nodes || nodes.length === 0) {
+    return null;
+  }
+
+  const candidates = nodes
+    .map((node) => node.bounds)
+    .filter(Boolean);
+
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  return candidates.reduce((best, next) => (next.area > best.area ? next : best));
+}
+
+function isBoundsInViewport(bounds, viewportBounds) {
+  if (!bounds || !viewportBounds) {
+    return false;
+  }
+
+  return (
+    bounds.centerX >= viewportBounds.left
+    && bounds.centerX <= viewportBounds.right
+    && bounds.centerY >= viewportBounds.top
+    && bounds.centerY <= viewportBounds.bottom
+  );
 }
 
 function pickBestNode(nodes) {
@@ -1079,6 +1240,81 @@ function decodeXmlEntities(value) {
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
     .replace(/&#10;/g, "\n");
+}
+
+function summarizeCurrentUi(adbPath, serial, options = {}) {
+  const maxItems = options.maxItems ?? 10;
+  const maxLabelLength = options.maxLabelLength ?? 80;
+
+  try {
+    const xml = dumpUiHierarchy(adbPath, serial);
+    const nodes = parseUiNodes(xml);
+    const viewportBounds = resolveViewportBounds(nodes);
+    const seen = new Set();
+
+    const visibleNodes = nodes
+      .filter((node) => {
+        if (!node.bounds) {
+          return false;
+        }
+
+        if (viewportBounds && !isBoundsInViewport(node.bounds, viewportBounds)) {
+          return false;
+        }
+
+        return Boolean((node.text || node.contentDesc || "").trim());
+      })
+      .sort((left, right) => {
+        if (left.bounds.top !== right.bounds.top) {
+          return left.bounds.top - right.bounds.top;
+        }
+
+        return left.bounds.left - right.bounds.left;
+      });
+
+    const items = [];
+
+    for (const node of visibleNodes) {
+      const raw = node.text || node.contentDesc;
+      if (!raw) {
+        continue;
+      }
+
+      let label = raw.replace(/\s+/g, " ").trim();
+      if (!label) {
+        continue;
+      }
+
+      if (label.length > maxLabelLength) {
+        label = `${label.slice(0, Math.max(0, maxLabelLength - 3))}...`;
+      }
+
+      const key = normalizeUiLabel(label);
+      if (seen.has(key)) {
+        continue;
+      }
+
+      seen.add(key);
+      items.push(label);
+
+      if (items.length >= maxItems) {
+        break;
+      }
+    }
+
+    if (items.length === 0) {
+      return "<no visible text>";
+    }
+
+    return items.join(" | ");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return `<ui dump unavailable: ${message}>`;
+  }
+}
+
+function withUiSummary(adbPath, serial, message) {
+  return `${message}\nVisible UI: ${summarizeCurrentUi(adbPath, serial)}`;
 }
 
 function writeReport(results) {

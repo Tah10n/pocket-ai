@@ -1,4 +1,4 @@
-import { modelDownloadManager } from '../../src/services/ModelDownloadManager';
+import { getModelDownloadManager } from '../../src/services/ModelDownloadManager';
 import { useDownloadStore } from '../../src/store/downloadStore';
 import { LifecycleStatus, ModelAccessState, ModelMetadata } from '../../src/types/models';
 import * as FileSystem from 'expo-file-system/legacy';
@@ -14,6 +14,7 @@ import { updateSettings } from '../../src/services/SettingsStore';
 
 let logSpy: jest.SpyInstance;
 let errorSpy: jest.SpyInstance;
+let modelDownloadManager: ReturnType<typeof getModelDownloadManager>;
 
 beforeEach(() => {
   logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
@@ -80,6 +81,7 @@ const mockedRegistry = registry as jest.Mocked<typeof registry>;
 describe('ModelDownloadManager Basic', () => {
   beforeEach(async () => {
     jest.clearAllMocks();
+    modelDownloadManager = getModelDownloadManager();
     Object.defineProperty(AppState, 'currentState', {
       configurable: true,
       value: 'active',

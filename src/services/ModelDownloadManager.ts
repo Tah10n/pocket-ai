@@ -628,4 +628,6 @@ export class ModelDownloadManager {
   }
 }
 
-export const modelDownloadManager = ModelDownloadManager.getInstance();
+export function getModelDownloadManager(): ModelDownloadManager {
+  return ModelDownloadManager.getInstance();
+}

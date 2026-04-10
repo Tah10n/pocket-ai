@@ -28,7 +28,8 @@ jest.mock('@/components/ui/text', () => {
   const mockReact = require('react');
   const { Text } = require('react-native');
   return {
-    Text: ({ children }: any) => mockReact.createElement(Text, null, children),
+    Text: ({ children, className: _className, textRole: _textRole, ...props }: any) =>
+      mockReact.createElement(Text, props, children),
   };
 });
 
@@ -59,5 +60,19 @@ describe('CodeBlock', () => {
 
     expect(queryByText('Copied')).toBeNull();
     expect(getByText('Copy Code')).toBeTruthy();
+  });
+
+  it('respects selectable for the rendered code text', () => {
+    const { getByText, rerender } = render(
+      <CodeBlock language="ts" code={'const x = 1;'} />,
+    );
+
+    expect(getByText('const x = 1;').props.selectable).toBe(false);
+
+    rerender(
+      <CodeBlock language="ts" code={'const x = 1;'} selectable />,
+    );
+
+    expect(getByText('const x = 1;').props.selectable).toBe(true);
   });
 });

@@ -56,6 +56,7 @@
       "expo-notifications",
       "./plugins/withAndroidGradlePluginManagement",
       "./plugins/withAndroidReleaseConfig",
+      "./plugins/withAndroidBackgroundActionsForegroundService",
       "./plugins/withAndroidLocalProperties",
       "./plugins/withAndroidMainActivityOrientation",
       "./plugins/withAndroidSystemMetrics",

@@ -7,9 +7,10 @@ import { Text } from '@/components/ui/text';
 interface CodeBlockProps {
   code: string;
   language?: string;
+  selectable?: boolean;
 }
 
-export function CodeBlock({ code, language }: CodeBlockProps) {
+export function CodeBlock({ code, language, selectable = false }: CodeBlockProps) {
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
@@ -41,7 +42,7 @@ export function CodeBlock({ code, language }: CodeBlockProps) {
           </Text>
         </ScreenActionPill>
       </Box>
-      <Text className="font-mono text-sm leading-6 text-typography-900 dark:text-typography-100">
+      <Text selectable={selectable} className="font-mono text-sm leading-6 text-typography-900 dark:text-typography-100">
         {code}
       </Text>
     </Box>

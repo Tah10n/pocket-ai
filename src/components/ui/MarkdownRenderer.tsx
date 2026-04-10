@@ -173,6 +173,11 @@ export function MarkdownRenderer({ content, selectable = false }: MarkdownRender
             {node.content}
           </RNText>
         ),
+        textgroup: (node: any, children: React.ReactNode[], _parent: any[], styles: any) => (
+          <RNText key={node.key} selectable={selectable} style={styles.textgroup}>
+            {children}
+          </RNText>
+        ),
         strong: (node: any, children: React.ReactNode[], _parent: any[], styles: any) => (
           <RNText key={node.key} selectable={selectable} style={styles.strong}>
             {children}
@@ -206,6 +211,7 @@ export function MarkdownRenderer({ content, selectable = false }: MarkdownRender
         fence: (node: any) => (
           <CodeBlock
             key={`fence-${node.key ?? node.content?.slice(0, 24) ?? 'block'}`}
+            selectable={selectable}
             code={node.content}
             language={typeof node.sourceInfo === 'string' ? node.sourceInfo : undefined}
           />

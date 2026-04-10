@@ -75,6 +75,14 @@ describe('MarkdownRenderer theme styles', () => {
     );
     expect(textRuleElement.props.selectable).toBe(true);
 
+    const textgroupRuleElement = rules.textgroup(
+      { key: 'textgroup-1' },
+      ['Body'],
+      [],
+      { textgroup: style.textgroup },
+    );
+    expect(textgroupRuleElement.props.selectable).toBe(true);
+
     const linkRuleElement = rules.link(
       { key: 'link-1', attributes: { href: 'https://example.com' } },
       ['Link'],
@@ -82,6 +90,25 @@ describe('MarkdownRenderer theme styles', () => {
       { link: style.link },
     );
     expect(linkRuleElement.props.selectable).toBe(true);
+  });
+
+  it('keeps markdown text selection disabled by default for grouped text', () => {
+    const { getByTestId } = render(
+      <MarkdownRenderer content={'Body'} />,
+    );
+
+    const root = getByTestId('markdown-root');
+    const rules = root.props.markdownRules;
+    const style = root.props.markdownStyle;
+
+    const textgroupRuleElement = rules.textgroup(
+      { key: 'textgroup-1' },
+      ['Body'],
+      [],
+      { textgroup: style.textgroup },
+    );
+
+    expect(textgroupRuleElement.props.selectable).toBe(false);
   });
 
   it('allows consumers to handle non-http(s) link schemes via onLinkPress', () => {

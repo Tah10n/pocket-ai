@@ -431,6 +431,26 @@ async function ensureMetroServer() {
   );
 }
 
+function withDnsResultOrderIpv4First(currentValue) {
+  const normalized = typeof currentValue === "string" ? currentValue.trim() : "";
+
+  if (normalized.includes("--dns-result-order=")) {
+    return normalized;
+  }
+
+  const flag = "--dns-result-order=ipv4first";
+
+  if (!normalized) {
+    return flag;
+  }
+
+  if (normalized.split(/\s+/).includes(flag)) {
+    return normalized;
+  }
+
+  return `${normalized} ${flag}`.trim();
+}
+
 function startMetroProcess(port) {
   const env = {
     ...process.env,
@@ -438,6 +458,11 @@ function startMetroProcess(port) {
     EXPO_NO_INTERACTIVE: "1",
     NODE_ENV: process.env.NODE_ENV || "development",
   };
+
+  // On Windows, `--localhost` can cause Expo/Metro to bind to ::1 only, while the
+  // smoke runner expects the /status endpoint on 127.0.0.1. Prefer IPv4 for
+  // deterministic local connectivity and adb reverse behavior.
+  env.NODE_OPTIONS = withDnsResultOrderIpv4First(env.NODE_OPTIONS);
 
   fs.mkdirSync(artifactsRoot, { recursive: true });
   const metroLogPath = path.join(artifactsRoot, `metro-${port}.log`);

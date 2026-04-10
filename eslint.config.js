@@ -7,4 +7,20 @@ module.exports = defineConfig([
   {
     ignores: ['dist/*', 'build/*', 'coverage/*', '.expo/*'],
   },
+  {
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          paths: [
+            {
+              name: 'react-native',
+              importNames: ['InteractionManager'],
+              message: 'InteractionManager is deprecated. Prefer requestAnimationFrame/requestIdleCallback scheduling (see scheduleAfterFirstFrame in AppBootstrap).',
+            },
+          ],
+        },
+      ],
+    },
+  },
 ]);

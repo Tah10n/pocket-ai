@@ -111,6 +111,23 @@ describe('MarkdownRenderer theme styles', () => {
     expect(textgroupRuleElement.props.selectable).toBe(false);
   });
 
+  it('passes selectable through to fenced code blocks', () => {
+    const { getByTestId } = render(
+      <MarkdownRenderer content={'```ts\nconst x = 1;\n```'} selectable />,
+    );
+
+    const root = getByTestId('markdown-root');
+    const rules = root.props.markdownRules;
+
+    const fenceRuleElement = rules.fence({
+      key: 'fence-1',
+      content: 'const x = 1;',
+      sourceInfo: 'ts',
+    });
+
+    expect(fenceRuleElement.props.selectable).toBe(true);
+  });
+
   it('allows consumers to handle non-http(s) link schemes via onLinkPress', () => {
     const openUrlSpy = jest.spyOn(Linking, 'openURL').mockResolvedValue(true as any);
 

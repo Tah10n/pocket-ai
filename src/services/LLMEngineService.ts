@@ -1172,6 +1172,7 @@ class LLMEngineService {
     let initDiagnostics: Record<string, unknown> | null = null;
     let gpuInitError: unknown | null = null;
     let cpuInitError: unknown | null = null;
+    let llamaModule: ReturnType<typeof requireLlamaModule> | null = null;
     const shouldBridgeNativeLogs = (
       isDev
       && process.env.NODE_ENV !== 'test'
@@ -1211,6 +1212,9 @@ class LLMEngineService {
         });
       }
 
+      const llama = requireLlamaModule();
+      llamaModule = llama;
+
       const loadParams = getModelLoadParametersForModel(modelId);
       const systemMemorySnapshot = await getFreshMemorySnapshot(1500).catch(() => null);
       const observedRawBudgetBytes = this.resolveObservedRawBudgetBytes(systemMemorySnapshot);
@@ -1241,7 +1245,7 @@ class LLMEngineService {
 
       let modelInfo: Record<string, unknown> | null = null;
       try {
-        modelInfo = await requireLlamaModule().loadLlamaModelInfo(modelPath) as Record<string, unknown>;
+        modelInfo = await llama.loadLlamaModelInfo(modelPath) as Record<string, unknown>;
       } catch (error) {
         if (process.env.NODE_ENV !== 'test') {
           console.warn('[LLMEngine] Failed to read GGUF metadata', error);
@@ -1266,7 +1270,7 @@ class LLMEngineService {
 
       initDiagnostics = {
         modelId,
-        llamaRnBuild: requireLlamaModule().BuildInfo,
+        llamaRnBuild: llama.BuildInfo,
         fileSizeBytes: typeof fileInfo.size === 'number' ? fileInfo.size : null,
         totalMemoryBytes: resolvedTotalMemoryBytes,
         hasSystemMemorySnapshot: systemMemorySnapshot !== null,
@@ -1689,13 +1693,13 @@ class LLMEngineService {
 
       if (shouldBridgeNativeLogs) {
         try {
-          nativeLogListener = requireLlamaModule().addNativeLogListener((level, text) => {
+          nativeLogListener = llama.addNativeLogListener((level, text) => {
             nativeLogs.push({ level, text });
             if (nativeLogs.length > MAX_NATIVE_LOG_LINES) {
               nativeLogs.splice(0, nativeLogs.length - MAX_NATIVE_LOG_LINES);
             }
           });
-          await requireLlamaModule().toggleNativeLog(true);
+          await llama.toggleNativeLog(true);
           didEnableNativeLogs = true;
         } catch (error) {
           console.warn('[LLMEngine] Failed to enable native llama logs', error);
@@ -1703,7 +1707,7 @@ class LLMEngineService {
       }
 
       try {
-        this.context = await requireLlamaModule().initLlama(
+        this.context = await llama.initLlama(
           {
             model: modelPath,
             n_ctx: finalContextSize,
@@ -1775,7 +1779,7 @@ class LLMEngineService {
               : null;
 
             try {
-              this.context = await requireLlamaModule().initLlama(
+              this.context = await llama.initLlama(
                 {
                   model: modelPath,
                   n_ctx: finalContextSize,
@@ -1884,7 +1888,7 @@ class LLMEngineService {
 
           if (!this.context) {
             try {
-              this.context = await requireLlamaModule().initLlama(
+              this.context = await llama.initLlama(
                 {
                   model: modelPath,
                   n_ctx: finalContextSize,
@@ -2026,8 +2030,8 @@ class LLMEngineService {
         nativeLogListener.remove();
       }
 
-      if (didEnableNativeLogs) {
-        await requireLlamaModule().toggleNativeLog(false).catch(() => undefined);
+      if (didEnableNativeLogs && llamaModule) {
+        await llamaModule.toggleNativeLog(false).catch(() => undefined);
       }
 
       this.initPromise = null;

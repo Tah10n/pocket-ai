@@ -48,6 +48,10 @@ jest.mock('../../src/services/LLMEngineService', () => ({
   },
 }));
 
+jest.mock('../../src/services/ModelDownloadManager', () => ({
+  getModelDownloadManager: jest.fn(),
+}));
+
 const mockMergeImportedThreads = jest.fn();
 const mockPruneExpiredThreads = jest.fn();
 
@@ -63,6 +67,7 @@ jest.mock('../../src/store/chatStore', () => ({
 import { bootstrapApp, bootstrapAppBackground, bootstrapAppCritical } from '../../src/services/AppBootstrap';
 import { setupFileSystem } from '../../src/services/FileSystemSetup';
 import { llmEngineService } from '../../src/services/LLMEngineService';
+import { getModelDownloadManager } from '../../src/services/ModelDownloadManager';
 import { registry } from '../../src/services/LocalStorageRegistry';
 import { clearLegacyChatHistory, getChatHistoryEntries, getSettings, updateSettings } from '../../src/services/SettingsStore';
 
@@ -284,5 +289,52 @@ describe('AppBootstrap', () => {
 
     await expect(bootstrapAppBackground()).rejects.toThrow('Background bootstrap encountered errors');
     expect(registry.validateRegistry).toHaveBeenCalled();
+  });
+
+  it('does not fail background bootstrap when warming ModelDownloadManager fails outside tests', async () => {
+    const originalNodeEnv = process.env.NODE_ENV;
+    const originalRequestAnimationFrame = globalThis.requestAnimationFrame;
+
+    jest.useFakeTimers();
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      (process.env as any).NODE_ENV = 'production';
+
+      const requestAnimationFrameMock = jest.fn((cb: any) => cb(0));
+      globalThis.requestAnimationFrame = requestAnimationFrameMock;
+
+      (getSettings as jest.Mock).mockReturnValue({
+        language: 'en',
+        activePresetId: null,
+        activeModelId: null,
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 2048,
+        theme: 'system',
+        chatRetentionDays: null,
+      });
+
+      (getModelDownloadManager as unknown as jest.Mock).mockImplementation(() => {
+        throw new Error('download manager init failed');
+      });
+
+      await expect(bootstrapAppBackground()).resolves.toBeUndefined();
+
+      expect(requestAnimationFrameMock).toHaveBeenCalledTimes(2);
+
+      jest.advanceTimersByTime(800);
+      await Promise.resolve();
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        '[bootstrapApp] Failed to warm modelDownloadManager',
+        expect.any(Error),
+      );
+    } finally {
+      (process.env as any).NODE_ENV = originalNodeEnv;
+      globalThis.requestAnimationFrame = originalRequestAnimationFrame;
+      warnSpy.mockRestore();
+      jest.useRealTimers();
+    }
   });
 });

@@ -149,6 +149,7 @@ function scheduleAfterFirstFrame(task: () => void): void {
     }
   ).requestIdleCallback;
 
+  const nativeIdleDelayMs = 750;
   let didRun = false;
   let fallbackTimeout: ReturnType<typeof setTimeout> | null = null;
 
@@ -176,7 +177,7 @@ function scheduleAfterFirstFrame(task: () => void): void {
       // ignore
     }
 
-    const delayMs = Platform.OS === 'web' ? 0 : 250;
+    const delayMs = Platform.OS === 'web' ? 0 : nativeIdleDelayMs;
     setTimeout(runOnce, delayMs);
   };
 
@@ -184,7 +185,9 @@ function scheduleAfterFirstFrame(task: () => void): void {
     try {
       if (typeof globalThis.requestAnimationFrame === 'function') {
         globalThis.requestAnimationFrame(() => {
-          setTimeout(scheduleWhenIdle, 0);
+          globalThis.requestAnimationFrame(() => {
+            setTimeout(scheduleWhenIdle, 0);
+          });
         });
         return;
       }
@@ -313,13 +316,17 @@ export async function bootstrapAppBackground(): Promise<void> {
     }
 
     if (process.env.NODE_ENV !== 'test' && Platform.OS !== 'web') {
-      try {
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const module = require('./ModelDownloadManager') as typeof import('./ModelDownloadManager');
-        module.getModelDownloadManager();
-      } catch (e) {
-        recordError('modelDownloadManager', e);
-      }
+      scheduleAfterFirstFrame(() => {
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const module = require('./ModelDownloadManager') as typeof import('./ModelDownloadManager');
+          module.getModelDownloadManager();
+        } catch (e) {
+          if (process.env.NODE_ENV !== 'test') {
+            console.warn('[bootstrapApp] Failed to warm modelDownloadManager', e);
+          }
+        }
+      });
     }
 
     try {

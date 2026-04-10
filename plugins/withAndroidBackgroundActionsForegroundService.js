@@ -61,8 +61,9 @@ function resolveFallbackServiceName(packageRoot, fallbackServiceName) {
     }
 
     const className = parts.pop();
-    const filePath = path.join(javaRoot, ...parts, `${className}.java`);
-    return fs.existsSync(filePath) ? fallbackServiceName : null;
+    const javaFilePath = path.join(javaRoot, ...parts, `${className}.java`);
+    const kotlinFilePath = path.join(javaRoot, ...parts, `${className}.kt`);
+    return fs.existsSync(javaFilePath) || fs.existsSync(kotlinFilePath) ? fallbackServiceName : null;
   } catch {
     return null;
   }

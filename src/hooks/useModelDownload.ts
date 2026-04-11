@@ -34,6 +34,7 @@ export function useModelDownload() {
         }
 
         hasShownNotificationsWarning = true;
+        queueDownload();
         Alert.alert(
           i18n.t('notifications.permissions.title'),
           i18n.t('notifications.permissions.body'),

@@ -89,6 +89,7 @@
     "permissions": {
       "title": "Notifications are disabled",
       "body": "Enable notifications to see background download progress and completion alerts. Downloads still work without notifications.",
+      "enable": "Enable notifications",
       "openSettings": "Open settings",
       "continue": "Continue"
     }

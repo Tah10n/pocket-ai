@@ -460,7 +460,6 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
   } = useModelActions({
     activeTab,
     models,
-    displayModels,
     engineState,
     loadModel,
     unloadModel,

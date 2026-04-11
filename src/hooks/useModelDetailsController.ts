@@ -24,7 +24,7 @@ import {
   createModelDetailsPlaceholder,
   getModelDetailsAccessBadge,
 } from '../utils/modelDetailsPresentation';
-import { isHighConfidenceLikelyOomMemoryFit, shouldWarnForModelMemoryLoad } from '../utils/modelMemoryFitState';
+import { handleModelLoadMemoryPolicyError, promptModelLoadMemoryPolicyIfNeeded } from '../utils/modelLoadMemoryPolicyPrompt';
 import { startModelDownloadFlow } from '../utils/modelDownloadFlow';
 import { mergeModelWithRuntimeState } from '../utils/modelRuntimeState';
 
@@ -288,37 +288,18 @@ export function useModelDetailsController(modelId: string) {
       setRuntimeRevision((current) => current + 1);
     } catch (error) {
       const appError = toAppError(error);
-      if (appError.code === 'model_load_blocked') {
-        setRuntimeRevision((current) => current + 1);
-        const alreadyUnsafe = options?.allowUnsafeMemoryLoad === true;
-        Alert.alert(
-          t('models.ramLikelyOom'),
-          t('models.loadMemoryBlockedMessage'),
-          alreadyUnsafe
-            ? [{ text: t('common.close') }]
-            : [
-                { text: t('common.cancel'), style: 'cancel' },
-                {
-                  text: t('models.loadAnyway'),
-                  onPress: () => {
-                    setTimeout(() => {
-                      void performLoad(targetModelId, { ...options, allowUnsafeMemoryLoad: true });
-                    }, 0);
-                  },
-                },
-              ],
-        );
-        return;
-      }
-      if (appError.code === 'model_memory_warning') {
-        Alert.alert(
-          t('models.memoryWarningTitle'),
-          t('models.loadMemoryWarningMessage'),
-          [
-            { text: t('common.cancel'), style: 'cancel' },
-            { text: t('models.loadAnyway'), onPress: () => { setTimeout(() => { void performLoad(targetModelId, { ...options, allowUnsafeMemoryLoad: true }); }, 0); } },
-          ],
-        );
+
+      if (handleModelLoadMemoryPolicyError({
+        t,
+        appError,
+        options,
+        onBlocked: () => {
+          setRuntimeRevision((current) => current + 1);
+        },
+        onRetry: (nextOptions) => {
+          void performLoad(targetModelId, nextOptions);
+        },
+      })) {
         return;
       }
 
@@ -368,27 +349,13 @@ export function useModelDetailsController(modelId: string) {
       return;
     }
 
-    if (isHighConfidenceLikelyOomMemoryFit(displayModel)) {
-      Alert.alert(
-        t('models.ramLikelyOom'),
-        t('models.loadMemoryBlockedMessage'),
-        [
-          { text: t('common.cancel'), style: 'cancel' },
-          { text: t('models.loadAnyway'), onPress: () => { void performLoad(displayModel.id, { allowUnsafeMemoryLoad: true }); } },
-        ],
-      );
-      return;
-    }
-
-    if (shouldWarnForModelMemoryLoad(displayModel)) {
-      Alert.alert(
-        t('models.memoryWarningTitle'),
-        t('models.loadMemoryWarningMessage'),
-        [
-          { text: t('common.cancel'), style: 'cancel' },
-          { text: t('models.loadAnyway'), onPress: () => { void performLoad(displayModel.id, { allowUnsafeMemoryLoad: true }); } },
-        ],
-      );
+    if (promptModelLoadMemoryPolicyIfNeeded({
+      t,
+      model: displayModel,
+      onProceed: (nextOptions) => {
+        void performLoad(displayModel.id, nextOptions);
+      },
+    })) {
       return;
     }
 

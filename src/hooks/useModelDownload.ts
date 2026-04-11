@@ -16,23 +16,62 @@ export function useModelDownload() {
 
   const startDownload = useCallback((model: ModelMetadata) => {
     void (async () => {
+      let didQueueDownload = false;
+      const queueDownload = () => {
+        if (didQueueDownload) {
+          return;
+        }
+
+        didQueueDownload = true;
+        addToQueue(model);
+      };
+
       try {
         const canStartForegroundNotifications = await notificationService.canStartForegroundServiceNotifications();
-        if (!canStartForegroundNotifications && !hasShownNotificationsWarning) {
-          hasShownNotificationsWarning = true;
-          Alert.alert(
-            i18n.t('notifications.permissions.title'),
-            i18n.t('notifications.permissions.body'),
-            [
-              { text: i18n.t('notifications.permissions.openSettings'), onPress: () => { void notificationService.openSystemSettings(); } },
-              { text: i18n.t('notifications.permissions.continue'), style: 'cancel' },
-            ],
-          );
+        if (canStartForegroundNotifications || hasShownNotificationsWarning) {
+          queueDownload();
+          return;
         }
+
+        hasShownNotificationsWarning = true;
+        Alert.alert(
+          i18n.t('notifications.permissions.title'),
+          i18n.t('notifications.permissions.body'),
+          [
+            {
+              text: i18n.t('notifications.permissions.enable'),
+              onPress: () => {
+                void notificationService.requestPermissions()
+                  .catch((error) => {
+                    console.warn('[useModelDownload] Failed to request notification permission', error);
+                  })
+                  .finally(queueDownload);
+              },
+            },
+            {
+              text: i18n.t('notifications.permissions.openSettings'),
+              onPress: () => {
+                void notificationService.openSystemSettings()
+                  .catch((error) => {
+                    console.warn('[useModelDownload] Failed to open system settings', error);
+                  })
+                  .finally(queueDownload);
+              },
+            },
+            {
+              text: i18n.t('notifications.permissions.continue'),
+              style: 'cancel',
+              onPress: queueDownload,
+            },
+          ],
+          {
+            cancelable: true,
+            onDismiss: queueDownload,
+          },
+        );
       } catch (error) {
         console.warn('[useModelDownload] Failed to check notification capability', error);
-      } finally {
-        addToQueue(model);
+        queueDownload();
       }
     })();
   }, [addToQueue]);

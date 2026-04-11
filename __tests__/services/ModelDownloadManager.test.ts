@@ -372,7 +372,7 @@ describe('ModelDownloadManager Basic', () => {
   });
 
   it('does not override PAUSED when a paused download later errors', async () => {
-    let rejectDownload: ((error: unknown) => void) | null = null;
+    let rejectDownload: (error: unknown) => void = () => {};
     const downloadAsync = jest.fn().mockImplementation(() => new Promise((_, reject) => {
       rejectDownload = reject;
     }));
@@ -400,7 +400,7 @@ describe('ModelDownloadManager Basic', () => {
 
     await modelDownloadManager.pauseDownload(mockModel.id);
 
-    rejectDownload?.(new Error('network error'));
+    rejectDownload(new Error('network error'));
 
     await expect(downloadPromise).resolves.toBeUndefined();
 
@@ -409,7 +409,7 @@ describe('ModelDownloadManager Basic', () => {
   });
 
   it('does not mark a cancelled download as AVAILABLE when it errors after cancellation', async () => {
-    let rejectDownload: ((error: unknown) => void) | null = null;
+    let rejectDownload: (error: unknown) => void = () => {};
     const downloadAsync = jest.fn().mockImplementation(() => new Promise((_, reject) => {
       rejectDownload = reject;
     }));
@@ -436,7 +436,7 @@ describe('ModelDownloadManager Basic', () => {
 
     await modelDownloadManager.cancelDownload(mockModel.id);
 
-    rejectDownload?.(new Error('network error'));
+    rejectDownload(new Error('network error'));
 
     await expect(downloadPromise).resolves.toBeUndefined();
 

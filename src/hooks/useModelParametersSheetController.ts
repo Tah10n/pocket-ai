@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Alert } from 'react-native';
 import DeviceInfo from 'react-native-device-info';
 import { useTranslation } from 'react-i18next';
-import { llmEngineService } from '@/services/LLMEngineService';
+import { llmEngineService, type LoadModelOptions } from '@/services/LLMEngineService';
 import { toAppError } from '@/services/AppError';
 import { registry } from '@/services/LocalStorageRegistry';
 import { modelCatalogService } from '@/services/ModelCatalogService';
@@ -23,6 +23,7 @@ import {
 import { EngineStatus, type ModelMetadata } from '@/types/models';
 import { clampContextWindowTokens, resolveContextWindowCeiling } from '@/utils/contextWindow';
 import { hasPersistedLoadProfileChanges } from '@/utils/modelLoadProfile';
+import { handleModelLoadMemoryPolicyError } from '@/utils/modelLoadMemoryPolicyPrompt';
 import { resolveKvCacheTypes } from '@/utils/kvCache';
 
 interface UseModelParametersSheetControllerOptions {
@@ -428,50 +429,34 @@ export function useModelParametersSheetController({
       }
     } catch (error) {
       const appError = toAppError(error);
-      if (appError.code === 'model_load_blocked') {
-        Alert.alert(
-          t('models.ramLikelyOom'),
-          t('models.loadMemoryBlockedMessage'),
-          [
-            { text: t('common.cancel'), style: 'cancel' },
-            {
-              text: t('models.loadAnyway'),
-              onPress: () => {
-                void (async () => {
-                  try {
-                    await llmEngineService.load(configurableModelId, { forceReload: true, allowUnsafeMemoryLoad: true });
-                    await Promise.resolve(onAfterActiveModelReload?.(configurableModelId));
-                  } catch (retryError) {
-                    showError(applyReloadErrorScope, retryError);
-                  }
-                })();
-              },
-            },
-          ],
-        );
-        return;
-      }
-      if (appError.code === 'model_memory_warning') {
-        Alert.alert(
-          t('models.memoryWarningTitle'),
-          t('models.loadMemoryWarningMessage'),
-          [
-            { text: t('common.cancel'), style: 'cancel' },
-            {
-              text: t('models.loadAnyway'),
-              onPress: () => {
-                void (async () => {
-                  try {
-                    await llmEngineService.load(configurableModelId, { forceReload: true, allowUnsafeMemoryLoad: true });
-                    await Promise.resolve(onAfterActiveModelReload?.(configurableModelId));
-                  } catch (retryError) {
-                    showError(applyReloadErrorScope, retryError);
-                  }
-                })();
-              },
-            },
-          ],
-        );
+
+      const baseLoadOptions: LoadModelOptions = { forceReload: true };
+      const retryLoad = (loadOptions: LoadModelOptions) => {
+        void (async () => {
+          try {
+            await llmEngineService.load(configurableModelId, loadOptions);
+            await Promise.resolve(onAfterActiveModelReload?.(configurableModelId));
+          } catch (retryError) {
+            const retryAppError = toAppError(retryError);
+            if (handleModelLoadMemoryPolicyError({
+              t,
+              appError: retryAppError,
+              options: loadOptions,
+              onRetry: retryLoad,
+            })) {
+              return;
+            }
+            showError(applyReloadErrorScope, retryError);
+          }
+        })();
+      };
+
+      if (handleModelLoadMemoryPolicyError({
+        t,
+        appError,
+        options: baseLoadOptions,
+        onRetry: retryLoad,
+      })) {
         return;
       }
 

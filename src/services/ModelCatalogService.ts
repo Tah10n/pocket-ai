@@ -954,7 +954,7 @@ export class ModelCatalogService {
       model.name.toLowerCase().includes(query.toLowerCase()) ||
       model.id.toLowerCase().includes(query.toLowerCase()),
     );
-    const merged = filtered.map((model) => this.mergeModelWithRegistry(model, memoryFitContext) ?? model);
+    const merged = filtered.map((model) => this.withResolvedMemoryFit(model, memoryFitContext));
     this.upsertModelSnapshots(merged, 'anon');
 
     return {

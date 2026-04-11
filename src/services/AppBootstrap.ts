@@ -275,13 +275,21 @@ export async function bootstrapAppCritical(): Promise<{ outcome: BootstrapOutcom
 
       const modelsDir = getModelsDir();
       const activeModelUri = modelsDir ? safeJoinModelPath(modelsDir, activeModel.localPath) : null;
-      const activeModelInfo = activeModelUri
-        ? await FileSystem.getInfoAsync(activeModelUri).catch(() => null)
-        : null;
-      if (!activeModelInfo?.exists) {
+      if (!activeModelUri) {
         updateSettings({ activeModelId: null });
         outcome = 'active_model_missing';
         return { outcome };
+      }
+
+      try {
+        const activeModelInfo = await FileSystem.getInfoAsync(activeModelUri);
+        if (activeModelInfo.exists === false) {
+          updateSettings({ activeModelId: null });
+          outcome = 'active_model_missing';
+          return { outcome };
+        }
+      } catch (e) {
+        console.warn('[bootstrapApp] Failed to validate active model file, skipping cleanup', e);
       }
 
       if (isHighConfidenceLikelyOomMemoryFit(activeModel)) {

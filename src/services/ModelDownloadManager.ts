@@ -403,7 +403,33 @@ export class ModelDownloadManager {
       }
       
       if (!result) {
-        console.warn(`[ModelDownloadManager] downloadAsync returned undefined. Task cancelled or paused.`);
+        console.warn(`[ModelDownloadManager] downloadAsync returned undefined. Marking ${model.id} as paused to avoid a stuck queue.`);
+
+        let resumeSnapshot: unknown | null = null;
+        try {
+          resumeSnapshot = typeof resumable.savable === 'function' ? resumable.savable() : null;
+        } catch (error) {
+          console.warn(`[ModelDownloadManager] Failed to snapshot resumable state for ${model.id}`, error);
+        }
+
+        const updates: Partial<ModelMetadata> = { lifecycleStatus: LifecycleStatus.PAUSED };
+        if (resumeSnapshot) {
+          try {
+            updates.resumeData = typeof resumeSnapshot === 'string'
+              ? resumeSnapshot
+              : JSON.stringify(resumeSnapshot);
+          } catch (error) {
+            console.warn(`[ModelDownloadManager] Failed to serialize resume snapshot for ${model.id}`, error);
+          }
+        }
+
+        updateModelInQueue(model.id, updates);
+        setActiveDownload(null);
+
+        void backgroundTaskService.startBackgroundDownload({ type: 'downloadPaused' }).catch((error) => {
+          console.warn('[ModelDownloadManager] Failed to update paused download notification', error);
+        });
+
         return;
       }
 

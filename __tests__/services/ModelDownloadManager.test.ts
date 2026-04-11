@@ -443,4 +443,23 @@ describe('ModelDownloadManager Basic', () => {
     expect(useDownloadStore.getState().activeDownloadId).toBeNull();
     expect(useDownloadStore.getState().queue.some((model) => model.id === mockModel.id)).toBe(false);
   });
+
+  it('marks downloads as PAUSED when downloadAsync resolves undefined without a stop reason', async () => {
+    (FileSystem.createDownloadResumable as jest.Mock).mockReturnValue({
+      downloadAsync: jest.fn().mockResolvedValue(undefined),
+      savable: () => ({ resumeData: 'resume-data' }),
+    });
+
+    useDownloadStore.setState({
+      queue: [{ ...mockModel, lifecycleStatus: LifecycleStatus.QUEUED }],
+      activeDownloadId: mockModel.id,
+    });
+
+    await expect(runDownloadModel({ lifecycleStatus: LifecycleStatus.QUEUED })).resolves.toBeUndefined();
+
+    expect(useDownloadStore.getState().activeDownloadId).toBeNull();
+    const entry = useDownloadStore.getState().queue.find((model) => model.id === mockModel.id);
+    expect(entry?.lifecycleStatus).toBe(LifecycleStatus.PAUSED);
+    expect(entry?.resumeData).toEqual(expect.stringContaining('resume-data'));
+  });
 });

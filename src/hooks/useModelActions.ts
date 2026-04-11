@@ -88,12 +88,23 @@ export function useModelActions({
       const appError = toAppError(error);
       if (appError.code === 'model_load_blocked') {
         refreshDownloadedModels();
+        const alreadyUnsafe = options?.allowUnsafeMemoryLoad === true;
         Alert.alert(
           t('models.ramLikelyOom'),
           t('models.loadMemoryBlockedMessage'),
-          [
-            { text: t('common.close') },
-          ],
+          alreadyUnsafe
+            ? [{ text: t('common.close') }]
+            : [
+                { text: t('common.cancel'), style: 'cancel' },
+                {
+                  text: t('models.loadAnyway'),
+                  onPress: () => {
+                    setTimeout(() => {
+                      void performLoad(modelId, { ...options, allowUnsafeMemoryLoad: true });
+                    }, 0);
+                  },
+                },
+              ],
         );
         return;
       }
@@ -165,7 +176,8 @@ export function useModelActions({
         t('models.ramLikelyOom'),
         t('models.loadMemoryBlockedMessage'),
         [
-          { text: t('common.close') },
+          { text: t('common.cancel'), style: 'cancel' },
+          { text: t('models.loadAnyway'), onPress: () => { void performLoad(modelId, { allowUnsafeMemoryLoad: true }); } },
         ],
       );
       return;

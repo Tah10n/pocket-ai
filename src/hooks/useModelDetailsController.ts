@@ -290,12 +290,23 @@ export function useModelDetailsController(modelId: string) {
       const appError = toAppError(error);
       if (appError.code === 'model_load_blocked') {
         setRuntimeRevision((current) => current + 1);
+        const alreadyUnsafe = options?.allowUnsafeMemoryLoad === true;
         Alert.alert(
           t('models.ramLikelyOom'),
           t('models.loadMemoryBlockedMessage'),
-          [
-            { text: t('common.close') },
-          ],
+          alreadyUnsafe
+            ? [{ text: t('common.close') }]
+            : [
+                { text: t('common.cancel'), style: 'cancel' },
+                {
+                  text: t('models.loadAnyway'),
+                  onPress: () => {
+                    setTimeout(() => {
+                      void performLoad(targetModelId, { ...options, allowUnsafeMemoryLoad: true });
+                    }, 0);
+                  },
+                },
+              ],
         );
         return;
       }
@@ -362,7 +373,8 @@ export function useModelDetailsController(modelId: string) {
         t('models.ramLikelyOom'),
         t('models.loadMemoryBlockedMessage'),
         [
-          { text: t('common.close') },
+          { text: t('common.cancel'), style: 'cancel' },
+          { text: t('models.loadAnyway'), onPress: () => { void performLoad(displayModel.id, { allowUnsafeMemoryLoad: true }); } },
         ],
       );
       return;

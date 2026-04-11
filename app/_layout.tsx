@@ -174,6 +174,7 @@ export default function RootLayout() {
         criticalErrorMessage = e instanceof Error ? e.message : String(e);
         console.warn('[RootLayout] Error during preparation:', e);
       } finally {
+        useBootstrapStore.getState().setCriticalOutcome(criticalOutcome);
         setIsReady(true);
         performanceMonitor.mark('root.ready');
         await SplashScreen.hideAsync().catch((e) => console.warn('[SplashScreen] hideAsync failed', e));

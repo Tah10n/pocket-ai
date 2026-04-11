@@ -7,6 +7,8 @@ import { ModelMetadata } from '../types/models';
 import { useShallow } from 'zustand/react/shallow';
 import i18n from '../i18n';
 
+let hasShownNotificationsWarning = false;
+
 export function useModelDownload() {
   const queueIds = useDownloadStore(useShallow((state) => state.queue.map((model) => model.id)));
   const activeDownloadId = useDownloadStore((state) => state.activeDownloadId);
@@ -15,12 +17,9 @@ export function useModelDownload() {
   const startDownload = useCallback((model: ModelMetadata) => {
     void (async () => {
       try {
-        const granted = await notificationService.requestPermissions();
-        const canStartForegroundNotifications = granted
-          ? await notificationService.canStartForegroundServiceNotifications()
-          : false;
-
-        if (!granted || !canStartForegroundNotifications) {
+        const canStartForegroundNotifications = await notificationService.canStartForegroundServiceNotifications();
+        if (!canStartForegroundNotifications && !hasShownNotificationsWarning) {
+          hasShownNotificationsWarning = true;
           Alert.alert(
             i18n.t('notifications.permissions.title'),
             i18n.t('notifications.permissions.body'),
@@ -31,7 +30,7 @@ export function useModelDownload() {
           );
         }
       } catch (error) {
-        console.warn('[useModelDownload] Failed to request notification permission', error);
+        console.warn('[useModelDownload] Failed to check notification capability', error);
       } finally {
         addToQueue(model);
       }
@@ -39,11 +38,15 @@ export function useModelDownload() {
   }, [addToQueue]);
 
   const pauseDownload = useCallback((modelId: string) => {
-    getModelDownloadManager().pauseDownload(modelId);
+    void getModelDownloadManager().pauseDownload(modelId).catch((error) => {
+      console.warn(`[useModelDownload] Failed to pause download for ${modelId}`, error);
+    });
   }, []);
 
   const cancelDownload = useCallback((modelId: string) => {
-    getModelDownloadManager().cancelDownload(modelId);
+    void getModelDownloadManager().cancelDownload(modelId).catch((error) => {
+      console.warn(`[useModelDownload] Failed to cancel download for ${modelId}`, error);
+    });
   }, []);
 
   const getModelFromQueue = useCallback((modelId: string) => {

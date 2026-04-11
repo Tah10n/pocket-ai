@@ -260,6 +260,23 @@ export async function offloadModel(modelId: string, options?: OffloadModelOption
 }
 
 export async function clearActiveCache() {
+  const deleteWithRetry = async (uri: string) => {
+    let lastError: unknown = null;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        await FileSystem.deleteAsync(uri, { idempotent: true });
+        return;
+      } catch (error) {
+        lastError = error;
+        if (attempt === 0) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+      }
+    }
+
+    throw lastError;
+  };
+
   let clearedEntries = 0;
   let firstError: unknown = null;
   const cacheDir = getCacheDir();
@@ -269,11 +286,15 @@ export async function clearActiveCache() {
       const cacheInfo = await FileSystem.getInfoAsync(cacheDir);
       if (cacheInfo.exists) {
         const entries = await FileSystem.readDirectoryAsync(cacheDir);
-        await Promise.all(
-          entries.map((entryName) => FileSystem.deleteAsync(`${cacheDir}${entryName}`, { idempotent: true })),
-        );
-
-        clearedEntries = entries.length;
+        for (const entryName of entries) {
+          try {
+            await deleteWithRetry(`${cacheDir}${entryName}`);
+            clearedEntries += 1;
+          } catch (error) {
+            console.warn('[StorageManagerService] Failed to delete cache entry', entryName, error);
+            firstError ??= error;
+          }
+        }
       }
     }
   } catch (error) {

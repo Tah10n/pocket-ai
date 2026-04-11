@@ -29,6 +29,7 @@ jest.mock('../../src/services/SettingsStore', () => ({
 
 jest.mock('../../src/services/FileSystemSetup', () => ({
   setupFileSystem: jest.fn().mockResolvedValue(undefined),
+  getModelsDir: jest.fn().mockReturnValue('test-dir/models/'),
 }));
 
 jest.mock('../../src/services/LocalStorageRegistry', () => ({
@@ -182,7 +183,7 @@ describe('AppBootstrap', () => {
 
     expect(result.outcome).toBe('active_model_blocked');
     expect(llmEngineService.load).not.toHaveBeenCalled();
-    expect(updateSettings).toHaveBeenCalledWith({ activeModelId: null });
+    expect(updateSettings).not.toHaveBeenCalledWith({ activeModelId: null });
   });
 
   it('does not block critical bootstrap on infrastructure setup', async () => {

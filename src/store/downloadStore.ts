@@ -57,6 +57,21 @@ export const useDownloadStore = create<DownloadState>()(
             };
           }
 
+          if (existing.lifecycleStatus === LifecycleStatus.PAUSED) {
+            const nextEntry = normalizePersistedModelMetadata({
+              ...existing,
+              ...model,
+              resumeData: existing.resumeData,
+              downloadProgress: existing.downloadProgress,
+              localPath: existing.localPath ?? model.localPath,
+              lifecycleStatus: LifecycleStatus.QUEUED,
+            });
+
+            return {
+              queue: state.queue.map((queued) => queued.id === model.id ? nextEntry : queued),
+            };
+          }
+
           if (
             existing.lifecycleStatus === LifecycleStatus.QUEUED
             || existing.lifecycleStatus === LifecycleStatus.DOWNLOADING
@@ -107,7 +122,17 @@ export const useDownloadStore = create<DownloadState>()(
         // Do NOT persist activeDownloadId — after a restart, no real download is running.
         // Persisting it would leave the UI in a permanent "downloading" spinner state.
         // Avoid persisting volatile progress updates so downloads don't spam MMKV writes.
-        partialize: (state) => ({ queue: state.queue.map((model) => ({ ...model, downloadProgress: 0 })) }),
+        partialize: (state) => ({
+          queue: state.queue.map((model) => {
+            const shouldZeroProgress = model.lifecycleStatus === LifecycleStatus.DOWNLOADING
+              || model.lifecycleStatus === LifecycleStatus.VERIFYING;
+
+            return {
+              ...model,
+              downloadProgress: shouldZeroProgress ? 0 : model.downloadProgress,
+            };
+          }),
+        }),
         onRehydrateStorage: () => (state) => {
           if (!state) {
             return;

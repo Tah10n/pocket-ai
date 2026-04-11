@@ -1,6 +1,7 @@
 export enum LifecycleStatus {
   AVAILABLE = 'available',
   DOWNLOADING = 'downloading',
+  PAUSED = 'paused',
   QUEUED = 'queued',
   VERIFYING = 'verifying',
   DOWNLOADED = 'downloaded',

@@ -433,7 +433,20 @@ export function useModelParametersSheetController({
           t('models.ramLikelyOom'),
           t('models.loadMemoryBlockedMessage'),
           [
-            { text: t('common.close') },
+            { text: t('common.cancel'), style: 'cancel' },
+            {
+              text: t('models.loadAnyway'),
+              onPress: () => {
+                void (async () => {
+                  try {
+                    await llmEngineService.load(configurableModelId, { forceReload: true, allowUnsafeMemoryLoad: true });
+                    await Promise.resolve(onAfterActiveModelReload?.(configurableModelId));
+                  } catch (retryError) {
+                    showError(applyReloadErrorScope, retryError);
+                  }
+                })();
+              },
+            },
           ],
         );
         return;

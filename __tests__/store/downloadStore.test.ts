@@ -35,12 +35,35 @@ describe('downloadStore', () => {
         buildQueuedModel('queued', LifecycleStatus.QUEUED),
         buildQueuedModel('downloading', LifecycleStatus.DOWNLOADING),
         buildQueuedModel('verifying', LifecycleStatus.VERIFYING),
+        buildQueuedModel('paused', LifecycleStatus.PAUSED),
       ]),
     ).toEqual([
       expect.objectContaining({ id: 'queued', lifecycleStatus: LifecycleStatus.QUEUED }),
       expect.objectContaining({ id: 'downloading', lifecycleStatus: LifecycleStatus.QUEUED }),
       expect.objectContaining({ id: 'verifying', lifecycleStatus: LifecycleStatus.QUEUED }),
+      expect.objectContaining({ id: 'paused', lifecycleStatus: LifecycleStatus.PAUSED }),
     ]);
+  });
+
+  it('re-queues paused downloads when the user taps download again', () => {
+    useDownloadStore.setState({
+      queue: [
+        {
+          ...buildQueuedModel('paused', LifecycleStatus.PAUSED),
+          resumeData: 'resume-data',
+          downloadProgress: 0.42,
+        },
+      ],
+      activeDownloadId: null,
+    });
+
+    useDownloadStore.getState().addToQueue(buildQueuedModel('paused', LifecycleStatus.AVAILABLE));
+
+    const entry = useDownloadStore.getState().queue.find((model) => model.id === 'paused');
+    expect(entry).toBeDefined();
+    expect(entry?.lifecycleStatus).toBe(LifecycleStatus.QUEUED);
+    expect(entry?.resumeData).toBe('resume-data');
+    expect(entry?.downloadProgress).toBe(0.42);
   });
 
   it('normalizes legacy queue entries with zero size to unknown size defaults', () => {

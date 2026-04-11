@@ -815,7 +815,7 @@ class LLMEngineService {
         return;
       }
 
-      if (isHighConfidenceLikelyOomMemoryFit(model)) {
+      if (isHighConfidenceLikelyOomMemoryFit(model) && !allowUnsafeMemoryLoad) {
         throw new AppError(
           'model_load_blocked',
           'Loading is disabled for this model because it is marked as "Won\'t fit RAM".',

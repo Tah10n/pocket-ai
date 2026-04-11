@@ -56,7 +56,7 @@
       },
       "paused": {
         "title": "Download paused",
-        "body": "Waiting for Wi-Fi connection"
+        "body": "Open Pocket AI to resume the download"
       },
       "error": {
         "title": "Download failed",
@@ -88,7 +88,7 @@
     },
     "permissions": {
       "title": "Notifications are disabled",
-      "body": "Enable notifications for Pocket AI to allow background downloads and progress notifications.",
+      "body": "Enable notifications to see background download progress and completion alerts. Downloads still work without notifications.",
       "openSettings": "Open settings",
       "continue": "Continue"
     }
@@ -485,6 +485,7 @@
     "sizeUnknownBadge": "Size unknown",
     "download": "Download",
     "cancel": "Cancel",
+    "resume": "Resume",
     "ready": "Ready to use",
     "storageManager": "Storage Manager",
     "offload": "Offload",
@@ -531,7 +532,7 @@
     "downloadMemoryWarningMessage": "This model looks large for your device's RAM budget. It may download successfully but still fail to load. Download anyway?",
     "loadAnyway": "Load Anyway",
     "loadMemoryWarningMessage": "This model looks close to or above your device's RAM budget. Loading may fail. Try anyway?",
-    "loadMemoryBlockedMessage": "This model is marked as \"Won't fit RAM\" and loading is disabled to prevent crashes. Choose a smaller model.",
+    "loadMemoryBlockedMessage": "This model is marked as \"Won't fit RAM\". Loading may fail or crash. Try anyway?",
     "errorReport": {
       "reportButton": "Report",
       "title": "Model load report",
@@ -614,6 +615,7 @@
     "statusActive": "Active",
     "verifying": "Verifying...",
     "downloading": "Downloading...",
+    "paused": "Paused",
     "load": "Load",
     "settings": "Settings",
     "unload": "Unload",

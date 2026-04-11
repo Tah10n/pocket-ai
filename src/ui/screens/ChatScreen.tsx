@@ -31,6 +31,7 @@ import { resolvePresetSnapshot, useChatSession } from '../../hooks/useChatSessio
 import { useLLMEngine } from '../../hooks/useLLMEngine';
 import { useErrorReportSheetController, type ErrorReportContext } from '@/hooks/useErrorReportSheetController';
 import { useModelParametersSheetController } from '@/hooks/useModelParametersSheetController';
+import { useModelRegistryRevision } from '@/hooks/useModelRegistryRevision';
 import { useRouter } from 'expo-router';
 import { EngineStatus } from '../../types/models';
 import { ChatMessage } from '../../types/chat';
@@ -144,6 +145,7 @@ export const ChatScreen = () => {
     const { state: engineState } = useLLMEngine();
     const { t } = useTranslation();
     const { colors, resolvedMode } = useTheme();
+    useModelRegistryRevision();
     const router = useRouter();
     const { openErrorReport, sheetProps: errorReportSheetProps } = useErrorReportSheetController();
     const tabBarHeight = useBottomTabBarHeight();
@@ -234,7 +236,7 @@ export const ChatScreen = () => {
     const activePresetLabel = activeThread?.presetSnapshot.name ?? (settings.activePresetId ? resolvePresetSnapshot(settings.activePresetId).name : t('common.default'));
     const shouldShowRecoveryBanner = isInputDisabled && hasMessages;
     const shouldShowRecoveryCard = isInputDisabled && !hasMessages;
-    const hasDownloadedModels = registry.getModels().some((model) => Boolean(model.localPath));
+    const hasDownloadedModels = registry.hasAnyDownloadedModels();
     const modelRecoveryActionRoute = hasDownloadedModels
         ? ({ pathname: '/(tabs)/models', params: { initialTab: 'downloaded' } } as const)
         : '/(tabs)/models';

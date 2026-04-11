@@ -16,6 +16,17 @@ let logSpy: jest.SpyInstance;
 let errorSpy: jest.SpyInstance;
 let modelDownloadManager: ReturnType<typeof getModelDownloadManager>;
 
+function runDownloadModel(overrides: Partial<ModelMetadata>) {
+  const jobToken = 1;
+  const model: ModelMetadata = {
+    ...mockModel,
+    ...overrides,
+  };
+
+  (modelDownloadManager as any).activeJob = { modelId: model.id, jobToken, resumable: null };
+  return (modelDownloadManager as any).downloadModel(model, jobToken);
+}
+
 beforeEach(() => {
   logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
   errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
@@ -93,6 +104,7 @@ describe('ModelDownloadManager Basic', () => {
     updateSettings({ allowCellularDownloads: false });
     useDownloadStore.setState({ queue: [], activeDownloadId: null });
     (modelDownloadManager as any).isProcessing = false;
+    (modelDownloadManager as any).activeJob = null;
     await backgroundTaskService.stopBackgroundTask();
     await new Promise((r) => setTimeout(r, 10)); // Yield tick
   });
@@ -191,7 +203,7 @@ describe('ModelDownloadManager Basic', () => {
     useDownloadStore.setState({ queue: [], activeDownloadId: null });
 
     await expect(
-      (modelDownloadManager as any).downloadModel({ ...mockModel, size: null }),
+      runDownloadModel({ size: null }),
     ).rejects.toThrow('MODEL_SIZE_UNKNOWN');
 
     expect(FileSystem.createDownloadResumable).not.toHaveBeenCalled();
@@ -201,11 +213,7 @@ describe('ModelDownloadManager Basic', () => {
     useDownloadStore.setState({ queue: [], activeDownloadId: null });
 
     await expect(
-      (modelDownloadManager as any).downloadModel({
-        ...mockModel,
-        requiresTreeProbe: true,
-        resolvedFileName: undefined,
-      }),
+      runDownloadModel({ requiresTreeProbe: true, resolvedFileName: undefined }),
     ).rejects.toThrow('MODEL_METADATA_UNAVAILABLE');
 
     expect(FileSystem.createDownloadResumable).not.toHaveBeenCalled();
@@ -215,11 +223,7 @@ describe('ModelDownloadManager Basic', () => {
     useDownloadStore.setState({ queue: [], activeDownloadId: null });
 
     await expect(
-      (modelDownloadManager as any).downloadModel({
-        ...mockModel,
-        size: null,
-        allowUnknownSizeDownload: true,
-      }),
+      runDownloadModel({ size: null, allowUnknownSizeDownload: true }),
     ).resolves.toBeUndefined();
 
     expect(FileSystem.getFreeDiskStorageAsync).toHaveBeenCalled();
@@ -248,10 +252,7 @@ describe('ModelDownloadManager Basic', () => {
     });
 
     await expect(
-      (modelDownloadManager as any).downloadModel({
-        ...mockModel,
-        size: 1_000,
-      }),
+      runDownloadModel({ size: 1_000 }),
     ).resolves.toBeUndefined();
 
     expect(mockedRegistry.updateModel).toHaveBeenCalledWith(
@@ -266,8 +267,7 @@ describe('ModelDownloadManager Basic', () => {
   it('attaches the bearer token when downloading gated Hugging Face models', async () => {
     (huggingFaceTokenService.getToken as jest.Mock).mockResolvedValue('hf_secret_token');
 
-    await (modelDownloadManager as any).downloadModel({
-      ...mockModel,
+    await runDownloadModel({
       downloadUrl: 'https://huggingface.co/org/model/resolve/main/model.gguf',
       accessState: ModelAccessState.AUTHORIZED,
       isGated: true,
@@ -300,10 +300,7 @@ describe('ModelDownloadManager Basic', () => {
     });
 
     await expect(
-      (modelDownloadManager as any).downloadModel({
-        ...mockModel,
-        resumeData: 'resume-data',
-      }),
+      runDownloadModel({ resumeData: 'resume-data' }),
     ).resolves.toBeUndefined();
 
     expect(FileSystem.createDownloadResumable).toHaveBeenCalledWith(
@@ -348,8 +345,12 @@ describe('ModelDownloadManager Basic', () => {
       value: 'background',
     });
 
-    (modelDownloadManager as any).resumable = {
-      pauseAsync,
+    (modelDownloadManager as any).activeJob = {
+      modelId: activeModel.id,
+      jobToken: 1,
+      resumable: {
+        pauseAsync,
+      },
     };
     useDownloadStore.setState({
       queue: [activeModel, queuedModel],
@@ -367,6 +368,79 @@ describe('ModelDownloadManager Basic', () => {
     expect(startBackgroundDownloadSpy).toHaveBeenCalledWith({ type: 'downloadPaused' });
     expect(stopBackgroundTaskSpy).not.toHaveBeenCalled();
     expect(useDownloadStore.getState().activeDownloadId).toBeNull();
-    expect(useDownloadStore.getState().queue.find((model) => model.id === activeModel.id)?.lifecycleStatus).toBe(LifecycleStatus.QUEUED);
+    expect(useDownloadStore.getState().queue.find((model) => model.id === activeModel.id)?.lifecycleStatus).toBe(LifecycleStatus.PAUSED);
+  });
+
+  it('does not override PAUSED when a paused download later errors', async () => {
+    let rejectDownload: ((error: unknown) => void) | null = null;
+    const downloadAsync = jest.fn().mockImplementation(() => new Promise((_, reject) => {
+      rejectDownload = reject;
+    }));
+    const pauseAsync = jest.fn().mockResolvedValue({ resumeData: 'resume-data' });
+    (FileSystem.createDownloadResumable as jest.Mock).mockReturnValue({
+      downloadAsync,
+      pauseAsync,
+      savable: () => ({ resumeData: 'resume-data' }),
+    });
+
+    useDownloadStore.setState({
+      queue: [{ ...mockModel, lifecycleStatus: LifecycleStatus.QUEUED }],
+      activeDownloadId: mockModel.id,
+    });
+
+    const downloadPromise = runDownloadModel({ lifecycleStatus: LifecycleStatus.QUEUED });
+
+    for (let i = 0; i < 10 && downloadAsync.mock.calls.length === 0; i++) {
+      // Let the async pipeline advance until it hits downloadAsync()
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((r) => setTimeout(r, 0));
+    }
+
+    expect(downloadAsync).toHaveBeenCalled();
+
+    await modelDownloadManager.pauseDownload(mockModel.id);
+
+    rejectDownload?.(new Error('network error'));
+
+    await expect(downloadPromise).resolves.toBeUndefined();
+
+    expect(useDownloadStore.getState().activeDownloadId).toBeNull();
+    expect(useDownloadStore.getState().queue.find((model) => model.id === mockModel.id)?.lifecycleStatus).toBe(LifecycleStatus.PAUSED);
+  });
+
+  it('does not mark a cancelled download as AVAILABLE when it errors after cancellation', async () => {
+    let rejectDownload: ((error: unknown) => void) | null = null;
+    const downloadAsync = jest.fn().mockImplementation(() => new Promise((_, reject) => {
+      rejectDownload = reject;
+    }));
+    const pauseAsync = jest.fn().mockResolvedValue({ resumeData: 'resume-data' });
+    (FileSystem.createDownloadResumable as jest.Mock).mockReturnValue({
+      downloadAsync,
+      pauseAsync,
+      savable: () => ({ resumeData: 'resume-data' }),
+    });
+
+    useDownloadStore.setState({
+      queue: [{ ...mockModel, lifecycleStatus: LifecycleStatus.QUEUED }],
+      activeDownloadId: mockModel.id,
+    });
+
+    const downloadPromise = runDownloadModel({ lifecycleStatus: LifecycleStatus.QUEUED });
+
+    for (let i = 0; i < 10 && downloadAsync.mock.calls.length === 0; i++) {
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((r) => setTimeout(r, 0));
+    }
+
+    expect(downloadAsync).toHaveBeenCalled();
+
+    await modelDownloadManager.cancelDownload(mockModel.id);
+
+    rejectDownload?.(new Error('network error'));
+
+    await expect(downloadPromise).resolves.toBeUndefined();
+
+    expect(useDownloadStore.getState().activeDownloadId).toBeNull();
+    expect(useDownloadStore.getState().queue.some((model) => model.id === mockModel.id)).toBe(false);
   });
 });

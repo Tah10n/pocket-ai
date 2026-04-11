@@ -85,6 +85,7 @@ export class LocalStorageRegistry {
   private storage: MMKV | null = null;
   private cachedModels: ModelMetadata[] | null = null;
   private cachedModelsById: Map<string, ModelMetadata> | null = null;
+  private cachedDownloadedModelsCount: number | null = null;
   private cachedCalibrationRecordsByKey: Map<string, CalibrationRecord> | null = null;
   private modelsRevision = 0;
   private modelsListeners: Set<() => void> = new Set();
@@ -111,6 +112,18 @@ export class LocalStorageRegistry {
    */
   public getModels(): ModelMetadata[] {
     return this.getCachedModels().map((model) => cloneModelMetadata(model));
+  }
+
+  public hasAnyDownloadedModels(): boolean {
+    return this.getDownloadedModelsCount() > 0;
+  }
+
+  public getDownloadedModelsCount(): number {
+    if (this.cachedDownloadedModelsCount == null) {
+      this.getCachedModels();
+    }
+
+    return this.cachedDownloadedModelsCount ?? 0;
   }
 
   public getModelsRevision(): number {
@@ -397,6 +410,10 @@ export class LocalStorageRegistry {
   private updateCache(models: ModelMetadata[]): void {
     this.cachedModels = models.map((model) => cloneModelMetadata(model));
     this.cachedModelsById = new Map(this.cachedModels.map((model) => [model.id, model]));
+    this.cachedDownloadedModelsCount = this.cachedModels.reduce(
+      (count, model) => count + (model.localPath ? 1 : 0),
+      0,
+    );
   }
 
   private emitModelsChanged(): void {

@@ -1,4 +1,5 @@
 import { Platform } from 'react-native';
+import * as FileSystem from 'expo-file-system/legacy';
 
 import i18n from '../i18n';
 import { presetManager } from './PresetManager';
@@ -11,7 +12,7 @@ import {
   repairChatHistoryIndex,
   updateSettings,
 } from './SettingsStore';
-import { setupFileSystem } from './FileSystemSetup';
+import { getModelsDir, setupFileSystem } from './FileSystemSetup';
 import { registry } from './LocalStorageRegistry';
 import { getQueuedDownloadFileNames, useDownloadStore } from '../store/downloadStore';
 import { llmEngineService } from './LLMEngineService';
@@ -21,6 +22,7 @@ import { performanceMonitor } from './PerformanceMonitor';
 import { initializePrivateStorageEncryption } from './storage';
 import { toAppError } from './AppError';
 import { isHighConfidenceLikelyOomMemoryFit } from '../utils/modelMemoryFitState';
+import { safeJoinModelPath } from '../utils/safeFilePath';
 import {
   ChatMessage,
   ChatThread,
@@ -214,20 +216,15 @@ function scheduleActiveModelRestore(activeModelId: string): void {
         restoreSpan.end({ outcome: 'success' });
       } catch (error) {
         const appError = toAppError(error);
-        if (appError.code === 'model_memory_warning') {
-          try {
-            await llmEngineService.load(activeModelId, { forceReload: true, allowUnsafeMemoryLoad: true });
-            restoreSpan.end({ outcome: 'success_safe' });
-            return;
-          } catch (retryError) {
-            console.warn('[bootstrapApp] Failed to restore active model after safe-load retry', retryError);
-          }
-        } else {
-          console.warn('[bootstrapApp] Failed to restore active model', error);
+        if (appError.code === 'model_memory_warning' || appError.code === 'model_load_blocked') {
+          // Do not auto-override memory policy during bootstrap. Preserve the user's selection
+          // and let the UI prompt if they explicitly want to load anyway.
+          restoreSpan.end({ outcome: 'skipped', reason: appError.code });
+          return;
         }
 
-        updateSettings({ activeModelId: null });
-        restoreSpan.end({ outcome: 'error' });
+        console.warn('[bootstrapApp] Failed to restore active model', error);
+        restoreSpan.end({ outcome: 'error', reason: appError.code });
       }
     };
 
@@ -270,8 +267,32 @@ export async function bootstrapAppCritical(): Promise<{ outcome: BootstrapOutcom
         return { outcome };
       }
 
-      if (isHighConfidenceLikelyOomMemoryFit(activeModel)) {
+      try {
+        await setupFileSystem();
+      } catch (e) {
+        console.warn('[bootstrapApp] Failed to setup filesystem for active model validation', e);
+      }
+
+      const modelsDir = getModelsDir();
+      const activeModelUri = modelsDir ? safeJoinModelPath(modelsDir, activeModel.localPath) : null;
+      if (!activeModelUri) {
         updateSettings({ activeModelId: null });
+        outcome = 'active_model_missing';
+        return { outcome };
+      }
+
+      try {
+        const activeModelInfo = await FileSystem.getInfoAsync(activeModelUri);
+        if (activeModelInfo.exists === false) {
+          updateSettings({ activeModelId: null });
+          outcome = 'active_model_missing';
+          return { outcome };
+        }
+      } catch (e) {
+        console.warn('[bootstrapApp] Failed to validate active model file, skipping cleanup', e);
+      }
+
+      if (isHighConfidenceLikelyOomMemoryFit(activeModel)) {
         outcome = 'active_model_blocked';
         return { outcome };
       }

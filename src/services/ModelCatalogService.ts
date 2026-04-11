@@ -1,5 +1,5 @@
 import DeviceInfo from 'react-native-device-info';
-import { ModelAccessState, ModelMetadata } from '../types/models';
+import { LifecycleStatus, ModelAccessState, ModelMetadata } from '../types/models';
 import { hardwareListenerService } from './HardwareListenerService';
 import { registry } from './LocalStorageRegistry';
 import { huggingFaceTokenService } from './HuggingFaceTokenService';
@@ -954,7 +954,7 @@ export class ModelCatalogService {
       model.name.toLowerCase().includes(query.toLowerCase()) ||
       model.id.toLowerCase().includes(query.toLowerCase()),
     );
-    const merged = filtered.map((model) => this.mergeModelWithRegistry(model, memoryFitContext) ?? model);
+    const merged = filtered.map((model) => this.withResolvedMemoryFit(model, memoryFitContext));
     this.upsertModelSnapshots(merged, 'anon');
 
     return {
@@ -1519,7 +1519,31 @@ export class ModelCatalogService {
 
     const localModel = registry.getModel(remoteModel.id);
     if (!localModel) {
-      return this.withResolvedMemoryFit(remoteModel, memoryFitContext);
+      // Search results and model snapshots are cached in memory (and persisted), but the local
+      // registry is not. When a user offloads/deletes a model, cached results can still contain
+      // stale "downloaded" runtime fields (localPath, lifecycleStatus, progress).
+      // Clear these fields when the registry entry is missing so UI reflects the deletion without
+      // requiring a forced network refresh.
+      const needsRuntimeReset = (
+        remoteModel.lifecycleStatus !== LifecycleStatus.AVAILABLE
+        || typeof remoteModel.localPath === 'string'
+        || typeof remoteModel.downloadedAt === 'number'
+        || remoteModel.downloadProgress > 0
+        || typeof remoteModel.resumeData === 'string'
+      );
+
+      const sanitized = needsRuntimeReset
+        ? normalizePersistedModelMetadata({
+            ...remoteModel,
+            localPath: undefined,
+            downloadedAt: undefined,
+            resumeData: undefined,
+            downloadProgress: 0,
+            lifecycleStatus: LifecycleStatus.AVAILABLE,
+          })
+        : remoteModel;
+
+      return this.withResolvedMemoryFit(sanitized, memoryFitContext);
     }
 
     const {

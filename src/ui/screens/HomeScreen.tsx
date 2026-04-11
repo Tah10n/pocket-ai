@@ -14,6 +14,7 @@ import { useTranslation } from 'react-i18next';
 import { useChatSession } from '../../hooks/useChatSession';
 import { ConversationIndexItem } from '../../types/chat';
 import { useLLMEngine } from '@/hooks/useLLMEngine';
+import { useModelRegistryRevision } from '@/hooks/useModelRegistryRevision';
 import { registry } from '@/services/LocalStorageRegistry';
 import { performanceMonitor } from '@/services/PerformanceMonitor';
 import { getReportedErrorMessage } from '../../services/AppError';
@@ -27,6 +28,7 @@ export const HomeScreen = () => {
   const router = useRouter();
   const { deleteThread, openThread, startNewChat } = useChatSession();
   const { state: engineState } = useLLMEngine();
+  useModelRegistryRevision();
   const bootstrapBackgroundState = useBootstrapStore((state) => state.backgroundState);
   const bootstrapBackgroundError = useBootstrapStore((state) => state.backgroundError);
 
@@ -38,7 +40,7 @@ export const HomeScreen = () => {
   }, []);
 
   const handleOpenModelPicker = () => {
-    const hasDownloadedModels = registry.getModels().some((model) => Boolean(model.localPath));
+    const hasDownloadedModels = registry.hasAnyDownloadedModels();
     if (!engineState.activeModelId && hasDownloadedModels) {
       router.navigate({ pathname: '/(tabs)/models', params: { initialTab: 'downloaded' } });
       return;

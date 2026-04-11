@@ -29,6 +29,11 @@ jest.mock('../../src/services/SettingsStore', () => ({
 
 jest.mock('../../src/services/FileSystemSetup', () => ({
   setupFileSystem: jest.fn().mockResolvedValue(undefined),
+  getModelsDir: jest.fn().mockReturnValue('test-dir/models/'),
+}));
+
+jest.mock('expo-file-system/legacy', () => ({
+  getInfoAsync: jest.fn().mockResolvedValue({ exists: true }),
 }));
 
 jest.mock('../../src/services/LocalStorageRegistry', () => ({
@@ -70,6 +75,7 @@ import { llmEngineService } from '../../src/services/LLMEngineService';
 import { getModelDownloadManager } from '../../src/services/ModelDownloadManager';
 import { registry } from '../../src/services/LocalStorageRegistry';
 import { clearLegacyChatHistory, getChatHistoryEntries, getSettings, updateSettings } from '../../src/services/SettingsStore';
+import * as FileSystem from 'expo-file-system/legacy';
 
 describe('AppBootstrap', () => {
   beforeEach(() => {
@@ -109,6 +115,36 @@ describe('AppBootstrap', () => {
     }
   });
 
+  it('does not clear the persisted active model during critical bootstrap when file validation fails', async () => {
+    jest.useFakeTimers();
+    try {
+      (getSettings as jest.Mock).mockReturnValue({
+        language: 'en',
+        activePresetId: null,
+        activeModelId: 'author/model-q4',
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 2048,
+        theme: 'system',
+        chatRetentionDays: null,
+      });
+      (registry.getModel as jest.Mock).mockReturnValue({
+        id: 'author/model-q4',
+        localPath: 'author_model-q4.gguf',
+      });
+      (FileSystem.getInfoAsync as jest.Mock).mockRejectedValueOnce(new Error('fs read failed'));
+
+      await bootstrapAppCritical();
+      jest.runAllTimers();
+      await Promise.resolve();
+
+      expect(llmEngineService.load).toHaveBeenCalledWith('author/model-q4');
+      expect(updateSettings).not.toHaveBeenCalledWith({ activeModelId: null });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it('clears the persisted active model during critical bootstrap when the file is missing', async () => {
     (getSettings as jest.Mock).mockReturnValue({
       language: 'en',
@@ -124,6 +160,30 @@ describe('AppBootstrap', () => {
 
     await bootstrapAppCritical();
 
+    expect(llmEngineService.load).not.toHaveBeenCalled();
+    expect(updateSettings).toHaveBeenCalledWith({ activeModelId: null });
+  });
+
+  it('clears the persisted active model during critical bootstrap when the active model file is missing on disk', async () => {
+    (getSettings as jest.Mock).mockReturnValue({
+      language: 'en',
+      activePresetId: null,
+      activeModelId: 'author/model-q4',
+      temperature: 0.7,
+      topP: 0.9,
+      maxTokens: 2048,
+      theme: 'system',
+      chatRetentionDays: null,
+    });
+    (registry.getModel as jest.Mock).mockReturnValue({
+      id: 'author/model-q4',
+      localPath: 'author_model-q4.gguf',
+    });
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValueOnce({ exists: false });
+
+    const result = await bootstrapAppCritical();
+
+    expect(result.outcome).toBe('active_model_missing');
     expect(llmEngineService.load).not.toHaveBeenCalled();
     expect(updateSettings).toHaveBeenCalledWith({ activeModelId: null });
   });
@@ -182,7 +242,7 @@ describe('AppBootstrap', () => {
 
     expect(result.outcome).toBe('active_model_blocked');
     expect(llmEngineService.load).not.toHaveBeenCalled();
-    expect(updateSettings).toHaveBeenCalledWith({ activeModelId: null });
+    expect(updateSettings).not.toHaveBeenCalledWith({ activeModelId: null });
   });
 
   it('does not block critical bootstrap on infrastructure setup', async () => {

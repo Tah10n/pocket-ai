@@ -4,6 +4,7 @@ import { Text } from '@/components/ui/text';
 import { MaterialSymbols } from './MaterialSymbols';
 import { ScreenActionPill, ScreenCard, ScreenStack } from './ScreenShell';
 import { useLLMEngine } from '@/hooks/useLLMEngine';
+import { useModelRegistryRevision } from '@/hooks/useModelRegistryRevision';
 import { registry } from '@/services/LocalStorageRegistry';
 import { EngineStatus } from '@/types/models';
 import { DECIMAL_GIGABYTE } from '@/utils/modelSize';
@@ -14,11 +15,12 @@ interface ActiveModelCardProps {
 
 export const ActiveModelCard = ({ onSwapModel }: ActiveModelCardProps) => {
   const { state } = useLLMEngine();
+  useModelRegistryRevision();
   const activeModel = state.activeModelId ? registry.getModel(state.activeModelId) : undefined;
-  const downloadedModels = registry.getModels().filter((model) => Boolean(model.localPath));
+  const downloadedModelsCount = registry.getDownloadedModelsCount();
   const isReady = state.status === EngineStatus.READY;
   const hasActiveModel = Boolean(activeModel);
-  const hasDownloadedModels = downloadedModels.length > 0;
+  const hasDownloadedModels = downloadedModelsCount > 0;
   const statusDotClassName = isReady ? 'w-2 h-2 rounded-full bg-success-500' : 'w-2 h-2 rounded-full bg-warning-400';
   const statusLabel = isReady ? 'Model Ready' : state.status === EngineStatus.INITIALIZING ? 'Warming Up' : 'No Model Loaded';
   const modelName = activeModel?.name ?? 'Choose a local model';
@@ -28,7 +30,7 @@ export const ActiveModelCard = ({ onSwapModel }: ActiveModelCardProps) => {
       ? 'Unknown size'
       : `${(activeModel.size / DECIMAL_GIGABYTE).toFixed(1)} GB on disk`
     : hasDownloadedModels
-      ? `${downloadedModels.length} downloaded ${downloadedModels.length === 1 ? 'model' : 'models'}`
+      ? `${downloadedModelsCount} downloaded ${downloadedModelsCount === 1 ? 'model' : 'models'}`
       : 'Download and load a GGUF model';
   const speedLabel = isReady
     ? 'Engine loaded'

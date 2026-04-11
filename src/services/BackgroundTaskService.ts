@@ -182,7 +182,20 @@ class BackgroundTaskService {
             // Starting it from a backgrounded Android app can crash on Android 12+.
             if (this.activeTaskTypes.size === 0) {
                 void this.stopForegroundServiceIfRunning();
+                return;
             }
+
+            const wasRunning = BackgroundService.isRunning();
+            void (async () => {
+                try {
+                    await this.maybeStartForegroundService();
+                    if (wasRunning) {
+                        await this.applyCurrentNotificationUpdate();
+                    }
+                } catch (error) {
+                    console.warn('[BackgroundTaskService] Failed to sync task notification', error);
+                }
+            })();
             return;
         }
 

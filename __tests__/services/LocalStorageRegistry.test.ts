@@ -9,6 +9,7 @@ const mockStorage = {
   getString: jest.fn(),
   set: jest.fn(),
   remove: jest.fn(),
+  getAllKeys: jest.fn().mockReturnValue([]),
 };
 
 jest.mock('expo-file-system/legacy', () => ({
@@ -71,27 +72,38 @@ describe('LocalStorageRegistry', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    mockStorage.getAllKeys.mockReturnValue([]);
     (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(8 * 1024 * 1024 * 1024);
     (getSystemMemorySnapshot as jest.Mock).mockResolvedValue(null);
     (registry as any).getModels = originalGetModels;
     (registry as any).getModel = originalGetModel;
     (registry as any).saveModels = originalSaveModels;
-    (registry as any).cachedModels = null;
+    (registry as any).storage = mockStorage;
+    (registry as any).cachedModelIds = null;
     (registry as any).cachedModelsById = null;
+    (registry as any).cachedDownloadedModelsCount = null;
     (registry as any).cachedCalibrationRecordsByKey = null;
   });
 
   it('should remove model and delete file', async () => {
     const model = createMockModel();
-    // Mock getModels to return our model
-    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([model]);
-    (registry.getModel as jest.Mock) = jest.fn().mockReturnValue(model);
-    (registry.saveModels as jest.Mock) = jest.fn();
+    mockStorage.getString.mockImplementation((key: string) => {
+      if (key === 'models-registry:index-v1') {
+        return JSON.stringify([model.id]);
+      }
+
+      if (key === 'models-registry:model-v1:test%2Fmodel') {
+        return JSON.stringify(model);
+      }
+
+      return null;
+    });
 
     await registry.removeModel(model.id);
 
     expect(FileSystem.deleteAsync).toHaveBeenCalled();
-    expect(registry.saveModels).toHaveBeenCalledWith([]);
+    expect(mockStorage.remove).toHaveBeenCalledWith('models-registry:model-v1:test%2Fmodel');
+    expect(mockStorage.remove).toHaveBeenCalledWith('models-registry:index-v1');
   });
 
   it('should validate registry and reset status if file is missing', async () => {
@@ -333,7 +345,17 @@ describe('LocalStorageRegistry', () => {
   });
 
   it('hydrates the registry from storage once and serves repeated lookups from cache', () => {
-    mockStorage.getString.mockReturnValue(JSON.stringify([mockModel]));
+    mockStorage.getString.mockImplementation((key: string) => {
+      if (key === 'models-registry:index-v1') {
+        return JSON.stringify([mockModel.id]);
+      }
+
+      if (key === 'models-registry:model-v1:test%2Fmodel') {
+        return JSON.stringify(mockModel);
+      }
+
+      return null;
+    });
     const freshRegistry = new (LocalStorageRegistry as any)();
     (freshRegistry as any).storage = mockStorage;
 
@@ -344,6 +366,90 @@ describe('LocalStorageRegistry', () => {
     expect(firstModel?.id).toBe(mockModel.id);
     expect(secondModel?.id).toBe(mockModel.id);
     expect(allModels).toHaveLength(1);
-    expect(mockStorage.getString).toHaveBeenCalledTimes(1);
+    expect(mockStorage.getString).toHaveBeenCalledWith('models-registry:index-v1');
+    expect(mockStorage.getString).toHaveBeenCalledWith('models-registry:model-v1:test%2Fmodel');
+
+    const callCountAfterFirstHydration = mockStorage.getString.mock.calls.length;
+    freshRegistry.getModel(mockModel.id);
+    freshRegistry.getModels();
+    expect(mockStorage.getString.mock.calls.length).toBe(callCountAfterFirstHydration);
+  });
+
+  it('updates a single model via per-model storage keys (no full-array rewrite)', () => {
+    mockStorage.getString.mockImplementation((key: string) => {
+      if (key === 'models-registry:index-v1') {
+        return JSON.stringify([mockModel.id]);
+      }
+
+      if (key === 'models-registry:model-v1:test%2Fmodel') {
+        return JSON.stringify(mockModel);
+      }
+
+      return null;
+    });
+
+    const freshRegistry = new (LocalStorageRegistry as any)();
+    (freshRegistry as any).storage = mockStorage;
+
+    freshRegistry.updateModel(createMockModel({ name: 'updated-name' }));
+
+    expect(mockStorage.set).toHaveBeenCalledWith(
+      'models-registry:model-v1:test%2Fmodel',
+      expect.stringContaining('"name":"updated-name"'),
+    );
+    expect(mockStorage.set).not.toHaveBeenCalledWith('models-registry', expect.anything());
+  });
+
+  it('migrates the legacy array registry into index + per-model keys', () => {
+    mockStorage.getAllKeys.mockReturnValue(['models-registry:model-v1:stale%2Fmodel']);
+    mockStorage.getString.mockImplementation((key: string) => {
+      if (key === 'models-registry:index-v1') {
+        return null;
+      }
+
+      if (key === 'models-registry') {
+        return JSON.stringify([mockModel]);
+      }
+
+      return null;
+    });
+
+    const freshRegistry = new (LocalStorageRegistry as any)();
+    (freshRegistry as any).storage = mockStorage;
+
+    const models = freshRegistry.getModels();
+
+    expect(models).toHaveLength(1);
+    expect(mockStorage.set).toHaveBeenCalledWith('models-registry:index-v1', JSON.stringify([mockModel.id]));
+    expect(mockStorage.set).toHaveBeenCalledWith(
+      'models-registry:model-v1:test%2Fmodel',
+      expect.stringContaining('"id":"test/model"'),
+    );
+    expect(mockStorage.remove).toHaveBeenCalledWith('models-registry');
+    expect(mockStorage.remove).toHaveBeenCalledWith('models-registry:model-v1:stale%2Fmodel');
+  });
+
+  it('rebuilds an invalid models index by discovering per-model keys', () => {
+    mockStorage.getAllKeys.mockReturnValue(['models-registry:model-v1:test%2Fmodel']);
+    mockStorage.getString.mockImplementation((key: string) => {
+      if (key === 'models-registry:index-v1') {
+        return JSON.stringify({ broken: true });
+      }
+
+      if (key === 'models-registry:model-v1:test%2Fmodel') {
+        return JSON.stringify(mockModel);
+      }
+
+      return null;
+    });
+
+    const freshRegistry = new (LocalStorageRegistry as any)();
+    (freshRegistry as any).storage = mockStorage;
+
+    const models = freshRegistry.getModels();
+
+    expect(models).toHaveLength(1);
+    expect(mockStorage.remove).toHaveBeenCalledWith('models-registry:index-v1');
+    expect(mockStorage.set).toHaveBeenCalledWith('models-registry:index-v1', JSON.stringify([mockModel.id]));
   });
 });

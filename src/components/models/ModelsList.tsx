@@ -121,7 +121,12 @@ function resolveServerSort(sort: ModelSortPreference): CatalogServerSort | null 
 function getStatusWeight(status: LifecycleStatus): number {
   if (status === LifecycleStatus.ACTIVE) return 3;
   if (status === LifecycleStatus.DOWNLOADED) return 2;
-  if (status === LifecycleStatus.DOWNLOADING || status === LifecycleStatus.QUEUED) return 1;
+  if (
+    status === LifecycleStatus.DOWNLOADING
+    || status === LifecycleStatus.QUEUED
+    || status === LifecycleStatus.VERIFYING
+    || status === LifecycleStatus.PAUSED
+  ) return 1;
   return 0;
 }
 
@@ -455,7 +460,6 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
   } = useModelActions({
     activeTab,
     models,
-    displayModels,
     engineState,
     loadModel,
     unloadModel,

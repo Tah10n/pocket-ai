@@ -67,7 +67,7 @@ export function ModelDownloadProgress({
   model: Pick<ModelMetadata, 'id' | 'downloadProgress' | 'lifecycleStatus'>;
   className?: string;
 }) {
-  if (!isModelDownloading(model)) {
+  if (!isModelDownloading(model) && model.lifecycleStatus !== LifecycleStatus.PAUSED) {
     return null;
   }
 
@@ -109,7 +109,9 @@ function ModelDownloadProgressInner({
         <Text className="text-xs text-typography-500">
           {lifecycleStatus === LifecycleStatus.VERIFYING
             ? t('models.verifying')
-            : t('models.downloading')}
+            : lifecycleStatus === LifecycleStatus.PAUSED
+              ? t('models.paused')
+              : t('models.downloading')}
         </Text>
         <Text className="text-xs font-bold text-primary-500">{progressPercent}%</Text>
       </Box>
@@ -157,7 +159,16 @@ export function ModelLifecycleActionRow({
         )
       ) : null}
 
-      {isModelDownloading(model) ? (
+      {model.lifecycleStatus === LifecycleStatus.PAUSED ? (
+        <ActionPill
+          label={t('models.resume')}
+          tone="primary"
+          onPress={() => onDownload(model)}
+          className={pillClassName}
+        />
+      ) : null}
+
+      {isModelDownloading(model) || model.lifecycleStatus === LifecycleStatus.PAUSED ? (
         <ActionPill
           label={t('models.cancel')}
           onPress={() => onCancel(model.id)}

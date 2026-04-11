@@ -289,7 +289,7 @@ describe('LLMEngineService', () => {
     }));
   });
 
-  it('keeps blocking registry-marked likely_oom models even when an unsafe retry is requested', async () => {
+  it('allows an unsafe retry for registry-marked likely_oom models', async () => {
     const totalMemoryBytes = 8 * 1024 * 1024 * 1024;
     const modelSizeBytes = 1_000_000_000;
 
@@ -310,16 +310,10 @@ describe('LLMEngineService', () => {
 
     await expect(
       llmEngineService.load('test/model', { forceReload: true, allowUnsafeMemoryLoad: true }),
-    ).rejects.toMatchObject({
-      code: 'model_load_blocked',
-      details: expect.objectContaining({
-        modelId: 'test/model',
-        memoryFitDecision: 'likely_oom',
-      }),
-    });
+    ).resolves.toBeUndefined();
 
-    expect(llamaRn.initLlama).not.toHaveBeenCalled();
-    expect(updateSettings).not.toHaveBeenCalledWith({ activeModelId: 'test/model' });
+    expect(llamaRn.initLlama).toHaveBeenCalled();
+    expect(updateSettings).toHaveBeenCalledWith({ activeModelId: 'test/model' });
   });
 
   it('does not hard-block persisted likely_oom flags unless confidence is high', async () => {

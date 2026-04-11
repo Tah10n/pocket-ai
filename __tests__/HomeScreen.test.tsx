@@ -61,6 +61,11 @@ jest.mock('@/hooks/useLLMEngine', () => ({
 jest.mock('@/services/LocalStorageRegistry', () => ({
     registry: {
         getModels: () => mockGetModels(),
+        hasAnyDownloadedModels: () => mockGetModels().some((model: any) => (
+            model?.lifecycleStatus === 'downloaded' || model?.lifecycleStatus === 'active'
+        )),
+        getModelsRevision: () => 0,
+        subscribeModels: () => () => {},
     },
 }));
 

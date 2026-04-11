@@ -9,14 +9,13 @@ import { offloadModel } from '@/services/StorageManagerService';
 import { toAppError } from '@/services/AppError';
 import type { EngineState, ModelMetadata } from '@/types/models';
 import { startModelDownloadFlow } from '@/utils/modelDownloadFlow';
-import { isHighConfidenceLikelyOomMemoryFit, shouldWarnForModelMemoryLoad } from '@/utils/modelMemoryFitState';
+import { handleModelLoadMemoryPolicyError, promptModelLoadMemoryPolicyIfNeeded } from '@/utils/modelLoadMemoryPolicyPrompt';
 import type { ErrorReportContext } from '@/hooks/useErrorReportSheetController';
 import type { ModelsCatalogTab } from '@/store/modelsCatalogTabs';
 
 type UseModelActionsInput = {
   activeTab: ModelsCatalogTab;
   models: ModelMetadata[];
-  displayModels: ModelMetadata[];
   engineState: EngineState;
   loadModel: (modelId: string, options?: LoadModelOptions) => Promise<void>;
   unloadModel: () => Promise<void>;
@@ -31,7 +30,6 @@ type UseModelActionsInput = {
 export function useModelActions({
   activeTab,
   models,
-  displayModels,
   engineState,
   loadModel,
   unloadModel,
@@ -86,26 +84,16 @@ export function useModelActions({
       refreshDownloadedModels();
     } catch (error) {
       const appError = toAppError(error);
-      if (appError.code === 'model_load_blocked') {
-        refreshDownloadedModels();
-        Alert.alert(
-          t('models.ramLikelyOom'),
-          t('models.loadMemoryBlockedMessage'),
-          [
-            { text: t('common.close') },
-          ],
-        );
-        return;
-      }
-      if (appError.code === 'model_memory_warning') {
-        Alert.alert(
-          t('models.memoryWarningTitle'),
-          t('models.loadMemoryWarningMessage'),
-          [
-            { text: t('common.cancel'), style: 'cancel' },
-            { text: t('models.loadAnyway'), onPress: () => { setTimeout(() => { void performLoad(modelId, { ...options, allowUnsafeMemoryLoad: true }); }, 0); } },
-          ],
-        );
+
+      if (handleModelLoadMemoryPolicyError({
+        t,
+        appError,
+        options,
+        onBlocked: refreshDownloadedModels,
+        onRetry: (nextOptions) => {
+          void performLoad(modelId, nextOptions);
+        },
+      })) {
         return;
       }
 
@@ -118,7 +106,7 @@ export function useModelActions({
         return;
       }
 
-      const model = models.find((item) => item.id === modelId) ?? registry.getModel(modelId);
+      const model = registry.getModel(modelId) ?? models.find((item) => item.id === modelId);
       const reportContext: ErrorReportContext = {
         model: model ? {
           id: model.id,
@@ -151,40 +139,27 @@ export function useModelActions({
     engineState.activeModelId,
     engineState.loadProgress,
     engineState.status,
+    refreshDownloadedModels,
     loadModel,
     models,
-    refreshDownloadedModels,
     showError,
     t,
   ]);
 
   const handleLoad = useCallback(async (modelId: string) => {
-    const model = displayModels.find((item) => item.id === modelId) ?? registry.getModel(modelId);
-    if (isHighConfidenceLikelyOomMemoryFit(model)) {
-      Alert.alert(
-        t('models.ramLikelyOom'),
-        t('models.loadMemoryBlockedMessage'),
-        [
-          { text: t('common.close') },
-        ],
-      );
-      return;
-    }
-
-    if (shouldWarnForModelMemoryLoad(model)) {
-      Alert.alert(
-        t('models.memoryWarningTitle'),
-        t('models.loadMemoryWarningMessage'),
-        [
-          { text: t('common.cancel'), style: 'cancel' },
-          { text: t('models.loadAnyway'), onPress: () => { void performLoad(modelId, { allowUnsafeMemoryLoad: true }); } },
-        ],
-      );
+    const model = registry.getModel(modelId) ?? models.find((item) => item.id === modelId);
+    if (promptModelLoadMemoryPolicyIfNeeded({
+      t,
+      model,
+      onProceed: (nextOptions) => {
+        void performLoad(modelId, nextOptions);
+      },
+    })) {
       return;
     }
 
     await performLoad(modelId);
-  }, [displayModels, performLoad, t]);
+  }, [models, performLoad, t]);
 
   const handleUnload = useCallback(async () => {
     try {

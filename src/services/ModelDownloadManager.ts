@@ -24,9 +24,17 @@ import { getSettings, subscribeSettings } from './SettingsStore';
 import { backgroundTaskService } from './BackgroundTaskService';
 import { notificationService, type DownloadErrorReason } from './NotificationService';
 
+type ActiveDownloadJob = {
+  modelId: string;
+  jobToken: number;
+  resumable: ReturnType<typeof FileSystem.createDownloadResumable> | null;
+  stopReason: 'pause' | 'cancel' | null;
+};
+
 export class ModelDownloadManager {
   private static instance: ModelDownloadManager;
-  private resumable: any = null;
+  private activeJob: ActiveDownloadJob | null = null;
+  private nextJobToken = 0;
   private isProcessing = false;
   private hwUnsubscribe?: () => void;
   private settingsUnsubscribe?: () => void;
@@ -80,14 +88,17 @@ export class ModelDownloadManager {
     // If already downloading something, stay idle
     if (activeDownloadId) return;
 
-    // Find next queued model
-    const next = queue.find((m) => (
-      m.lifecycleStatus === LifecycleStatus.QUEUED ||
-      m.lifecycleStatus === LifecycleStatus.DOWNLOADING ||
-      m.lifecycleStatus === LifecycleStatus.VERIFYING
-    ));
+    const next = queue.find((m) => m.lifecycleStatus === LifecycleStatus.QUEUED);
 
     if (!next) {
+      const hasPausedDownloads = queue.some((m) => m.lifecycleStatus === LifecycleStatus.PAUSED);
+
+      // Keep the foreground-service notification around when downloads are paused,
+      // so the user can understand why downloads aren't progressing.
+      if (hasPausedDownloads) {
+        return;
+      }
+
       if (backgroundTaskService.isTaskActive('download')) {
         await backgroundTaskService.stopBackgroundTask('download');
       }
@@ -104,20 +115,59 @@ export class ModelDownloadManager {
       return;
     }
 
+    const jobToken = ++this.nextJobToken;
+    this.activeJob = { modelId: next.id, jobToken, resumable: null, stopReason: null };
+
     this.isProcessing = true;
     setActiveDownload(next.id);
+    void this.runDownloadJob(next, jobToken);
+  }
+
+  private isCurrentJob(modelId: string, jobToken: number): boolean {
+    return this.activeJob?.modelId === modelId && this.activeJob.jobToken === jobToken;
+  }
+
+  private getStopReason(modelId: string, jobToken: number): ActiveDownloadJob['stopReason'] {
+    if (!this.isCurrentJob(modelId, jobToken)) {
+      return null;
+    }
+
+    return this.activeJob?.stopReason ?? null;
+  }
+
+  private async runDownloadJob(model: ModelMetadata, jobToken: number): Promise<void> {
+    const { setActiveDownload } = useDownloadStore.getState();
+
     try {
+      if (!this.isCurrentJob(model.id, jobToken)) {
+        return;
+      }
+
       await backgroundTaskService.startBackgroundDownload({
         type: 'downloadProgress',
-        modelName: next.name,
-        progressPercent: Math.round((next.downloadProgress ?? 0) * 100),
+        modelName: model.name,
+        progressPercent: Math.round((model.downloadProgress ?? 0) * 100),
       });
-      await this.downloadModel(next);
+
+      if (!this.isCurrentJob(model.id, jobToken)) {
+        return;
+      }
+
+      await this.downloadModel(model, jobToken);
     } catch (e) {
-      console.error(`[ModelDownloadManager] Failed to download ${next.id}`, e);
-      setActiveDownload(null);
+      console.error(`[ModelDownloadManager] Failed to download ${model.id}`, e);
+
+      if (this.isCurrentJob(model.id, jobToken)) {
+        setActiveDownload(null);
+      }
     } finally {
+      if (!this.isCurrentJob(model.id, jobToken)) {
+        return;
+      }
+
+      this.activeJob = null;
       this.isProcessing = false;
+
       // Trigger next check
       void this.processQueue();
     }
@@ -160,10 +210,19 @@ export class ModelDownloadManager {
     void this.processQueue();
   };
 
-  private async downloadModel(model: ModelMetadata) {
+  private async downloadModel(model: ModelMetadata, jobToken: number) {
     const { updateModelInQueue, removeFromQueue, setActiveDownload } = useDownloadStore.getState();
+    let resumable: ActiveDownloadJob['resumable'] = null;
 
     try {
+      if (!this.isCurrentJob(model.id, jobToken)) {
+        return;
+      }
+
+      if (this.getStopReason(model.id, jobToken)) {
+        return;
+      }
+
       if (model.requiresTreeProbe && !model.resolvedFileName) {
         throw new AppError('download_metadata_unavailable', 'MODEL_METADATA_UNAVAILABLE', {
           details: { modelId: model.id },
@@ -177,6 +236,9 @@ export class ModelDownloadManager {
       }
 
       const freeSpace = await FileSystem.getFreeDiskStorageAsync();
+      if (this.getStopReason(model.id, jobToken)) {
+        return;
+      }
       const REQUIRED_BUFFER_BYTES = DECIMAL_GIGABYTE; // 1 GB
       const requiredModelBytes = model.size ?? 0;
       if (model.size !== null && freeSpace !== undefined && freeSpace < requiredModelBytes + REQUIRED_BUFFER_BYTES) {
@@ -186,10 +248,22 @@ export class ModelDownloadManager {
       }
     } catch (e: any) {
       console.error(`[ModelDownloadManager] Pre-download check failed for ${model.id}:`, e.message);
-      updateModelInQueue(model.id, { lifecycleStatus: LifecycleStatus.AVAILABLE });
-      removeFromQueue(model.id);
-      setActiveDownload(null);
+
+      const stopReason = this.getStopReason(model.id, jobToken);
+      if (stopReason) {
+        return;
+      }
+
+      if (this.isCurrentJob(model.id, jobToken)) {
+        updateModelInQueue(model.id, { lifecycleStatus: LifecycleStatus.AVAILABLE });
+        removeFromQueue(model.id);
+        setActiveDownload(null);
+      }
       throw e;
+    }
+
+    if (this.getStopReason(model.id, jobToken)) {
+      return;
     }
 
     const modelsDir = getModelsDir();
@@ -200,6 +274,10 @@ export class ModelDownloadManager {
     }
 
     const fileName = await this.resolveDownloadFileName(model, modelsDir);
+    if (this.getStopReason(model.id, jobToken)) {
+      return;
+    }
+
     const localUri = safeJoinModelPath(modelsDir, fileName);
     if (!localUri) {
       throw new AppError('action_failed', `Invalid download file name: ${fileName}`, {
@@ -222,6 +300,10 @@ export class ModelDownloadManager {
     let lastSpeedBytesPerSec = 0;
 
     const callback = (downloadProgress: any) => {
+      if (!this.isCurrentJob(model.id, jobToken)) {
+        return;
+      }
+
       const writtenBytes = typeof downloadProgress?.totalBytesWritten === 'number'
         ? downloadProgress.totalBytesWritten
         : 0;
@@ -287,7 +369,7 @@ export class ModelDownloadManager {
     }
 
     // Prepare DownloadResumable
-    this.resumable = FileSystem.createDownloadResumable(
+    resumable = FileSystem.createDownloadResumable(
       model.downloadUrl,
       localUri,
       await this.buildDownloadOptions(model),
@@ -295,13 +377,59 @@ export class ModelDownloadManager {
       resumeString
     );
 
+    if (this.isCurrentJob(model.id, jobToken) && this.activeJob) {
+      this.activeJob.resumable = resumable;
+    }
+
     try {
+      if (!this.isCurrentJob(model.id, jobToken)) {
+        return;
+      }
+
+      if (this.getStopReason(model.id, jobToken)) {
+        return;
+      }
+
       updateModelInQueue(model.id, { lifecycleStatus: LifecycleStatus.DOWNLOADING });
       
-      const result = await this.resumable.downloadAsync();
+      const result = await resumable.downloadAsync();
+
+      if (!this.isCurrentJob(model.id, jobToken)) {
+        return;
+      }
+
+      if (this.getStopReason(model.id, jobToken)) {
+        return;
+      }
       
       if (!result) {
-        console.warn(`[ModelDownloadManager] downloadAsync returned undefined. Task cancelled or paused.`);
+        console.warn(`[ModelDownloadManager] downloadAsync returned undefined. Marking ${model.id} as paused to avoid a stuck queue.`);
+
+        let resumeSnapshot: unknown | null = null;
+        try {
+          resumeSnapshot = typeof resumable.savable === 'function' ? resumable.savable() : null;
+        } catch (error) {
+          console.warn(`[ModelDownloadManager] Failed to snapshot resumable state for ${model.id}`, error);
+        }
+
+        const updates: Partial<ModelMetadata> = { lifecycleStatus: LifecycleStatus.PAUSED };
+        if (resumeSnapshot) {
+          try {
+            updates.resumeData = typeof resumeSnapshot === 'string'
+              ? resumeSnapshot
+              : JSON.stringify(resumeSnapshot);
+          } catch (error) {
+            console.warn(`[ModelDownloadManager] Failed to serialize resume snapshot for ${model.id}`, error);
+          }
+        }
+
+        updateModelInQueue(model.id, updates);
+        setActiveDownload(null);
+
+        void backgroundTaskService.startBackgroundDownload({ type: 'downloadPaused' }).catch((error) => {
+          console.warn('[ModelDownloadManager] Failed to update paused download notification', error);
+        });
+
         return;
       }
 
@@ -313,8 +441,33 @@ export class ModelDownloadManager {
       }
 
       updateModelInQueue(model.id, { lifecycleStatus: LifecycleStatus.VERIFYING });
+
+      if (!this.isCurrentJob(model.id, jobToken)) {
+        return;
+      }
+
+      if (this.getStopReason(model.id, jobToken)) {
+        return;
+      }
+
       const verificationHash = await this.verifyChecksum(model, localUri);
+
+      if (!this.isCurrentJob(model.id, jobToken)) {
+        return;
+      }
+
+      if (this.getStopReason(model.id, jobToken)) {
+        return;
+      }
+
       const downloadedFileInfo = await FileSystem.getInfoAsync(localUri);
+
+      if (!this.isCurrentJob(model.id, jobToken)) {
+        return;
+      }
+      if (this.getStopReason(model.id, jobToken)) {
+        return;
+      }
       const downloadedSize = (
         downloadedFileInfo.exists &&
         typeof downloadedFileInfo.size === 'number' &&
@@ -327,6 +480,14 @@ export class ModelDownloadManager {
         ? 'verified_local' as const
         : model.metadataTrust;
       const memoryFit = await this.resolveMemoryFit(downloadedSize, metadataTrust, model.gguf);
+
+      if (!this.isCurrentJob(model.id, jobToken)) {
+        return;
+      }
+
+      if (this.getStopReason(model.id, jobToken)) {
+        return;
+      }
 
       // Success
       const completedModel: ModelMetadata = {
@@ -360,11 +521,20 @@ export class ModelDownloadManager {
       console.log(`[ModelDownloadManager] Downloaded and verified: ${model.id}`);
 
     } catch (e: any) {
+      if (!this.isCurrentJob(model.id, jobToken)) {
+        return;
+      }
+
+      const stopReason = this.getStopReason(model.id, jobToken);
+      if (stopReason) {
+        return;
+      }
+
       console.error(`[ModelDownloadManager] Error during download: ${model.id}`, e);
 
       // If it fails, save resume data if we can and keep the entry in the queue as "available".
       // This avoids infinite retry loops while still allowing the user to retry and resume later.
-      const savable = this.resumable ? this.resumable.savable() : null;
+      const savable = resumable ? resumable.savable() : null;
       updateModelInQueue(model.id, {
         resumeData: savable ? JSON.stringify(savable) : undefined,
         lifecycleStatus: LifecycleStatus.AVAILABLE,
@@ -386,7 +556,9 @@ export class ModelDownloadManager {
 
       throw e;
     } finally {
-      this.resumable = null;
+      if (this.isCurrentJob(model.id, jobToken) && this.activeJob) {
+        this.activeJob.resumable = null;
+      }
     }
     }
 
@@ -462,31 +634,81 @@ export class ModelDownloadManager {
   }
 
   public async pauseDownload(modelId: string) {
-    if (this.resumable && useDownloadStore.getState().activeDownloadId === modelId) {
-      const pauseResult = await this.resumable.pauseAsync();
-      useDownloadStore.getState().updateModelInQueue(modelId, { 
-        resumeData: JSON.stringify(pauseResult),
-        // No PAUSED status in enum, use QUEUED so it can be resumed
-        lifecycleStatus: LifecycleStatus.QUEUED 
-      });
-      useDownloadStore.getState().setActiveDownload(null);
-      // Reset processing flag so the queue can accept new downloads
-      this.isProcessing = false;
+    const { queue, updateModelInQueue, setActiveDownload } = useDownloadStore.getState();
+    const queuedModel = queue.find((model) => model.id === modelId) ?? null;
+    if (queuedModel?.lifecycleStatus === LifecycleStatus.VERIFYING) {
+      // Verifying is not a resumable operation. Use "Cancel" to stop and clean up.
+      console.warn(`[ModelDownloadManager] pauseDownload(${modelId}) ignored during VERIFYING`);
+      return;
+    }
+
+    const job = this.activeJob;
+    if (!job || job.modelId !== modelId) {
+      // Best-effort: allow pausing a queued download before it becomes active.
+      updateModelInQueue(modelId, { lifecycleStatus: LifecycleStatus.PAUSED });
+      return;
+    }
+
+    const jobToken = job.jobToken;
+    let resumeSnapshot: unknown | null = null;
+
+    try {
+      job.stopReason = 'pause';
+      if (job.resumable) {
+        try {
+          resumeSnapshot = await job.resumable.pauseAsync();
+        } catch (error) {
+          console.warn(`[ModelDownloadManager] pauseAsync failed for ${modelId}`, error);
+
+          try {
+            resumeSnapshot = job.resumable.savable?.() ?? null;
+          } catch {
+            resumeSnapshot = null;
+          }
+        }
+      }
+
+      // No resumable yet (pre-download checks). Mark as paused and drop the active state.
+    } finally {
+      if (this.isCurrentJob(modelId, jobToken)) {
+        const updates: Partial<ModelMetadata> = { lifecycleStatus: LifecycleStatus.PAUSED };
+        if (resumeSnapshot) {
+          updates.resumeData = JSON.stringify(resumeSnapshot);
+        }
+
+        updateModelInQueue(modelId, updates);
+        setActiveDownload(null);
+      }
     }
   }
 
   public async cancelDownload(modelId: string) {
     const { queue, removeFromQueue, activeDownloadId, setActiveDownload } = useDownloadStore.getState();
     const queuedModel = queue.find((model) => model.id === modelId);
+
+    const job = this.activeJob?.modelId === modelId
+      ? this.activeJob
+      : null;
+    if (job) {
+      job.stopReason = 'cancel';
+    }
+
     if (activeDownloadId === modelId) {
-      if (this.resumable) {
-        await this.resumable.pauseAsync(); // Stop active one
+      if (job?.resumable) {
+        try {
+          await job.resumable.pauseAsync(); // Stop active one
+        } catch (error) {
+          console.warn(`[ModelDownloadManager] Failed to pause active download during cancel for ${modelId}`, error);
+        }
       }
+
       setActiveDownload(null);
     }
     
     // Remove from queue first to stop UI
     removeFromQueue(modelId);
+
+    void this.processQueue();
 
     // Delete the partial file to free up disk space
     try {

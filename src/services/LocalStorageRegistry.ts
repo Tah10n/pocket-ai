@@ -9,12 +9,60 @@ import { estimateFastMemoryFit } from '../memory/estimator';
 import { safeJoinModelPath } from '../utils/safeFilePath';
 import type { CalibrationRecord } from '../memory/types';
 
-const REGISTRY_KEY = 'models-registry';
+const REGISTRY_STORAGE_ID = 'models-registry';
+
+// Legacy format: one JSON array stored under the same key as the MMKV instance id.
+const LEGACY_MODELS_KEY = REGISTRY_STORAGE_ID;
+
+// Normalized format: O(1) per-model storage + compact index for ordering.
+const MODELS_INDEX_KEY = 'models-registry:index-v1';
+const MODEL_KEY_PREFIX = 'models-registry:model-v1:';
+
 const CALIBRATION_RECORDS_KEY = 'memory-fit-calibration-records-v1';
 const MAX_CALIBRATION_RECORDS = 200;
 
 function cloneCalibrationRecord(record: CalibrationRecord): CalibrationRecord {
   return { ...record };
+}
+
+function normalizeModelId(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function sanitizeModelIndex(input: unknown): string[] {
+  if (!Array.isArray(input)) {
+    return [];
+  }
+
+  const uniqueIds = new Set<string>();
+  for (const value of input) {
+    const normalizedId = normalizeModelId(value);
+    if (!normalizedId) {
+      continue;
+    }
+
+    uniqueIds.add(normalizedId);
+  }
+
+  return [...uniqueIds];
+}
+
+function getModelStorageKey(modelId: string): string {
+  return `${MODEL_KEY_PREFIX}${encodeURIComponent(modelId)}`;
+}
+
+function areStringArraysEqual(left: string[], right: string[]): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] !== right[index]) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 function toFiniteNumber(value: unknown): number | null {
@@ -83,7 +131,7 @@ function cloneModelMetadata(model: ModelMetadata): ModelMetadata {
 export class LocalStorageRegistry {
   private static instance: LocalStorageRegistry;
   private storage: MMKV | null = null;
-  private cachedModels: ModelMetadata[] | null = null;
+  private cachedModelIds: string[] | null = null;
   private cachedModelsById: Map<string, ModelMetadata> | null = null;
   private cachedDownloadedModelsCount: number | null = null;
   private cachedCalibrationRecordsByKey: Map<string, CalibrationRecord> | null = null;
@@ -101,7 +149,7 @@ export class LocalStorageRegistry {
 
   private getStorage(): MMKV {
     if (!this.storage) {
-      this.storage = createStorage(REGISTRY_KEY, { tier: 'private' });
+      this.storage = createStorage(REGISTRY_STORAGE_ID, { tier: 'private' });
     }
 
     return this.storage;
@@ -111,7 +159,17 @@ export class LocalStorageRegistry {
    * Get all models from the registry.
    */
   public getModels(): ModelMetadata[] {
-    return this.getCachedModels().map((model) => cloneModelMetadata(model));
+    const { ids, modelsById } = this.getCachedModelsState();
+    const models: ModelMetadata[] = [];
+
+    for (const modelId of ids) {
+      const model = modelsById.get(modelId);
+      if (model) {
+        models.push(cloneModelMetadata(model));
+      }
+    }
+
+    return models;
   }
 
   public hasAnyDownloadedModels(): boolean {
@@ -120,7 +178,7 @@ export class LocalStorageRegistry {
 
   public getDownloadedModelsCount(): number {
     if (this.cachedDownloadedModelsCount == null) {
-      this.getCachedModels();
+      this.getCachedModelsState();
     }
 
     return this.cachedDownloadedModelsCount ?? 0;
@@ -158,12 +216,31 @@ export class LocalStorageRegistry {
    * Save the entire list of models.
    */
   public saveModels(models: ModelMetadata[]): void {
-    const normalizedModels = models.map((model) => normalizePersistedModelMetadata(model));
-    this.getStorage().set(
-      REGISTRY_KEY,
-      JSON.stringify(normalizedModels),
-    );
-    this.updateCache(normalizedModels);
+    const previousState = this.getCachedModelsState();
+    const nextState = this.normalizeModelsState(models);
+    const removedIds = previousState.ids.filter((id) => !nextState.modelsById.has(id));
+
+    nextState.ids.forEach((modelId) => {
+      const model = nextState.modelsById.get(modelId);
+      if (!model) {
+        return;
+      }
+
+      this.persistModel(modelId, model);
+    });
+
+    removedIds.forEach((modelId) => {
+      this.getStorage().remove(getModelStorageKey(modelId));
+    });
+
+    this.persistModelsIndex(nextState.ids);
+
+    // Ensure the new format is the single source of truth.
+    this.getStorage().remove(LEGACY_MODELS_KEY);
+
+    this.cachedModelIds = nextState.ids;
+    this.cachedModelsById = nextState.modelsById;
+    this.cachedDownloadedModelsCount = nextState.downloadedCount;
     this.emitModelsChanged();
   }
 
@@ -171,22 +248,51 @@ export class LocalStorageRegistry {
    * Update a single model's metadata.
    */
   public updateModel(model: ModelMetadata): void {
-    const models = this.getModels();
-    const index = models.findIndex((m) => m.id === model.id);
-    const normalized = normalizePersistedModelMetadata(model);
-    if (index !== -1) {
-      models[index] = normalized;
-    } else {
-      models.push(normalized);
+    const modelId = normalizeModelId(model.id);
+    if (!modelId) {
+      return;
     }
-    this.saveModels(models);
+
+    const { ids, modelsById } = this.getCachedModelsState();
+    const normalized = normalizePersistedModelMetadata({ ...model, id: modelId });
+    const existing = modelsById.get(modelId);
+    const hadLocalPath = typeof existing?.localPath === 'string';
+    const hasLocalPath = typeof normalized.localPath === 'string';
+
+    const isNew = !modelsById.has(modelId);
+    if (isNew) {
+      ids.push(modelId);
+    }
+
+    modelsById.set(modelId, normalized);
+    this.persistModel(modelId, normalized);
+
+    if (isNew) {
+      this.persistModelsIndex(ids);
+    }
+
+    // Ensure the new format is the single source of truth.
+    this.getStorage().remove(LEGACY_MODELS_KEY);
+
+    if (this.cachedDownloadedModelsCount == null) {
+      this.cachedDownloadedModelsCount = this.countDownloadedModels(modelsById);
+    } else if (hadLocalPath !== hasLocalPath) {
+      this.cachedDownloadedModelsCount += hasLocalPath ? 1 : -1;
+    }
+
+    this.emitModelsChanged();
   }
 
   /**
    * Remove a model from the registry and delete its local files.
    */
   public async removeModel(modelId: string): Promise<void> {
-    const model = this.getModel(modelId);
+    const normalizedId = normalizeModelId(modelId);
+    if (!normalizedId) {
+      return;
+    }
+
+    const model = this.getModel(normalizedId);
     const modelsDir = getModelsDir();
     if (model && model.localPath) {
       try {
@@ -206,9 +312,29 @@ export class LocalStorageRegistry {
       }
     }
 
-    const models = this.getModels();
-    const filtered = models.filter((m) => m.id !== modelId);
-    this.saveModels(filtered);
+    const state = this.getCachedModelsState();
+    const existing = state.modelsById.get(normalizedId);
+    const hadLocalPath = typeof existing?.localPath === 'string';
+
+    state.modelsById.delete(normalizedId);
+    const index = state.ids.indexOf(normalizedId);
+    if (index !== -1) {
+      state.ids.splice(index, 1);
+    }
+
+    this.getStorage().remove(getModelStorageKey(normalizedId));
+    this.persistModelsIndex(state.ids);
+
+    // Ensure the new format is the single source of truth.
+    this.getStorage().remove(LEGACY_MODELS_KEY);
+
+    if (this.cachedDownloadedModelsCount == null) {
+      this.cachedDownloadedModelsCount = this.countDownloadedModels(state.modelsById);
+    } else if (hadLocalPath) {
+      this.cachedDownloadedModelsCount = Math.max(0, this.cachedDownloadedModelsCount - 1);
+    }
+
+    this.emitModelsChanged();
   }
 
   /**
@@ -379,7 +505,12 @@ export class LocalStorageRegistry {
    * Get a specific model by ID.
    */
   public getModel(modelId: string): ModelMetadata | undefined {
-    const model = this.getCachedModelsById().get(modelId);
+    const normalizedId = normalizeModelId(modelId);
+    if (!normalizedId) {
+      return undefined;
+    }
+
+    const model = this.getCachedModelsState().modelsById.get(normalizedId);
     return model ? cloneModelMetadata(model) : undefined;
   }
 
@@ -391,29 +522,15 @@ export class LocalStorageRegistry {
     return this.cachedCalibrationRecordsByKey ?? new Map<string, CalibrationRecord>();
   }
 
-  private getCachedModels(): ModelMetadata[] {
-    if (this.cachedModels == null) {
-      this.updateCache(this.readModelsFromStorage());
+  private getCachedModelsState(): { ids: string[]; modelsById: Map<string, ModelMetadata> } {
+    if (this.cachedModelIds == null || this.cachedModelsById == null) {
+      this.hydrateModelsCache();
     }
 
-    return this.cachedModels ?? [];
-  }
-
-  private getCachedModelsById(): Map<string, ModelMetadata> {
-    if (this.cachedModelsById == null) {
-      this.updateCache(this.readModelsFromStorage());
-    }
-
-    return this.cachedModelsById ?? new Map<string, ModelMetadata>();
-  }
-
-  private updateCache(models: ModelMetadata[]): void {
-    this.cachedModels = models.map((model) => cloneModelMetadata(model));
-    this.cachedModelsById = new Map(this.cachedModels.map((model) => [model.id, model]));
-    this.cachedDownloadedModelsCount = this.cachedModels.reduce(
-      (count, model) => count + (model.localPath ? 1 : 0),
-      0,
-    );
+    return {
+      ids: this.cachedModelIds ?? [],
+      modelsById: this.cachedModelsById ?? new Map<string, ModelMetadata>(),
+    };
   }
 
   private emitModelsChanged(): void {
@@ -425,6 +542,233 @@ export class LocalStorageRegistry {
         console.warn('[LocalStorageRegistry] Model registry listener failed', error);
       }
     });
+  }
+
+  private normalizeModelsState(models: ModelMetadata[]): {
+    ids: string[];
+    modelsById: Map<string, ModelMetadata>;
+    downloadedCount: number;
+  } {
+    const ids: string[] = [];
+    const modelsById = new Map<string, ModelMetadata>();
+
+    for (const model of models) {
+      const modelId = normalizeModelId(model.id);
+      if (!modelId) {
+        continue;
+      }
+
+      const normalized = normalizePersistedModelMetadata({ ...model, id: modelId });
+      if (!modelsById.has(modelId)) {
+        ids.push(modelId);
+      }
+      modelsById.set(modelId, normalized);
+    }
+
+    return {
+      ids,
+      modelsById,
+      downloadedCount: this.countDownloadedModels(modelsById),
+    };
+  }
+
+  private countDownloadedModels(modelsById: Map<string, ModelMetadata>): number {
+    let count = 0;
+
+    for (const model of modelsById.values()) {
+      if (typeof model.localPath === 'string') {
+        count += 1;
+      }
+    }
+
+    return count;
+  }
+
+  private persistModelsIndex(ids: string[]): void {
+    if (ids.length === 0) {
+      this.getStorage().remove(MODELS_INDEX_KEY);
+      return;
+    }
+
+    this.getStorage().set(MODELS_INDEX_KEY, JSON.stringify(ids));
+  }
+
+  private persistModel(modelId: string, model: ModelMetadata): void {
+    this.getStorage().set(getModelStorageKey(modelId), JSON.stringify(model));
+  }
+
+  private mergeModelsIndexWithStorage(index: string[]): string[] {
+    const discoveredIds = this.discoverModelsIndexFromStorage();
+    if (discoveredIds.length === 0) {
+      return index;
+    }
+
+    const indexedIds = new Set(index);
+    const extras = discoveredIds.filter((id) => !indexedIds.has(id));
+    if (extras.length === 0) {
+      return index;
+    }
+
+    return [...index, ...extras];
+  }
+
+  private hydrateModelsCache(): void {
+    const storage = this.getStorage();
+
+    const storedIndex = this.readModelsIndexFromStorage();
+    if (storedIndex !== null) {
+      const mergedIndex = this.mergeModelsIndexWithStorage(storedIndex);
+      const hydrated = this.hydrateModelsFromIndex(mergedIndex);
+
+      if (!areStringArraysEqual(hydrated.ids, storedIndex)) {
+        this.persistModelsIndex(hydrated.ids);
+      }
+
+      this.cachedModelIds = hydrated.ids;
+      this.cachedModelsById = hydrated.modelsById;
+      this.cachedDownloadedModelsCount = hydrated.downloadedCount;
+      return;
+    }
+
+    const legacyModels = this.readLegacyModelsFromStorage();
+    if (legacyModels !== null) {
+      const normalized = this.normalizeModelsState(legacyModels);
+
+      // If we have legacy data, treat it as authoritative and clean up any partial migrations.
+      storage
+        .getAllKeys()
+        .filter((key) => key.startsWith(MODEL_KEY_PREFIX))
+        .forEach((key) => storage.remove(key));
+
+      normalized.ids.forEach((modelId) => {
+        const model = normalized.modelsById.get(modelId);
+        if (model) {
+          this.persistModel(modelId, model);
+        }
+      });
+
+      this.persistModelsIndex(normalized.ids);
+      storage.remove(LEGACY_MODELS_KEY);
+
+      this.cachedModelIds = normalized.ids;
+      this.cachedModelsById = normalized.modelsById;
+      this.cachedDownloadedModelsCount = normalized.downloadedCount;
+      return;
+    }
+
+    const discoveredIds = this.discoverModelsIndexFromStorage();
+    if (discoveredIds.length > 0) {
+      const hydrated = this.hydrateModelsFromIndex(discoveredIds);
+      this.persistModelsIndex(hydrated.ids);
+
+      this.cachedModelIds = hydrated.ids;
+      this.cachedModelsById = hydrated.modelsById;
+      this.cachedDownloadedModelsCount = hydrated.downloadedCount;
+      return;
+    }
+
+    this.cachedModelIds = [];
+    this.cachedModelsById = new Map();
+    this.cachedDownloadedModelsCount = 0;
+  }
+
+  private readModelsIndexFromStorage(): string[] | null {
+    const rawIndex = this.getStorage().getString(MODELS_INDEX_KEY);
+    if (!rawIndex) {
+      return null;
+    }
+
+    try {
+      const parsed = JSON.parse(rawIndex) as unknown;
+      if (!Array.isArray(parsed)) {
+        console.warn('[LocalStorageRegistry] Models index is not an array, rebuilding');
+        this.getStorage().remove(MODELS_INDEX_KEY);
+        return null;
+      }
+
+      const sanitized = sanitizeModelIndex(parsed);
+      if (parsed.length > 0 && sanitized.length === 0) {
+        console.warn('[LocalStorageRegistry] Models index contains no valid ids, rebuilding');
+        this.getStorage().remove(MODELS_INDEX_KEY);
+        return null;
+      }
+
+      const shouldRewrite =
+        sanitized.length !== parsed.length ||
+        sanitized.some((id, index) => id !== parsed[index]);
+
+      if (shouldRewrite) {
+        this.persistModelsIndex(sanitized);
+      }
+
+      return sanitized;
+    } catch (e) {
+      console.warn('[LocalStorageRegistry] Failed to parse models index, rebuilding', e);
+      this.getStorage().remove(MODELS_INDEX_KEY);
+      return null;
+    }
+  }
+
+  private discoverModelsIndexFromStorage(): string[] {
+    const keys = this.getStorage().getAllKeys();
+    const discovered: string[] = [];
+
+    for (const key of keys) {
+      if (!key.startsWith(MODEL_KEY_PREFIX)) {
+        continue;
+      }
+
+      const encodedId = key.slice(MODEL_KEY_PREFIX.length);
+      try {
+        const decoded = decodeURIComponent(encodedId);
+        const normalizedId = normalizeModelId(decoded);
+        if (normalizedId) {
+          discovered.push(normalizedId);
+        }
+      } catch {
+        // Ignore malformed ids.
+      }
+    }
+
+    discovered.sort((left, right) => left.localeCompare(right));
+    return sanitizeModelIndex(discovered);
+  }
+
+  private hydrateModelsFromIndex(index: string[]): {
+    ids: string[];
+    modelsById: Map<string, ModelMetadata>;
+    downloadedCount: number;
+  } {
+    const storage = this.getStorage();
+    const modelsById = new Map<string, ModelMetadata>();
+    const ids: string[] = [];
+
+    for (const modelId of index) {
+      const raw = storage.getString(getModelStorageKey(modelId));
+      if (!raw) {
+        continue;
+      }
+
+      try {
+        const parsed = JSON.parse(raw) as unknown;
+        if (!parsed || typeof parsed !== 'object') {
+          continue;
+        }
+
+        const normalized = normalizePersistedModelMetadata({ ...(parsed as Partial<ModelMetadata>), id: modelId });
+        modelsById.set(modelId, normalized);
+        ids.push(modelId);
+      } catch (e) {
+        console.warn('[LocalStorageRegistry] Failed to parse model metadata, dropping entry', modelId, e);
+        storage.remove(getModelStorageKey(modelId));
+      }
+    }
+
+    return {
+      ids,
+      modelsById,
+      downloadedCount: this.countDownloadedModels(modelsById),
+    };
   }
 
   private persistCalibrationRecords(records: Map<string, CalibrationRecord>): void {
@@ -460,16 +804,16 @@ export class LocalStorageRegistry {
     }
   }
 
-  private readModelsFromStorage(): ModelMetadata[] {
-    const rawData = this.getStorage().getString(REGISTRY_KEY);
+  private readLegacyModelsFromStorage(): ModelMetadata[] | null {
+    const rawData = this.getStorage().getString(LEGACY_MODELS_KEY);
     if (!rawData) {
-      return [];
+      return null;
     }
 
     try {
       const parsed = JSON.parse(rawData) as unknown;
       if (!Array.isArray(parsed)) {
-        return [];
+        return null;
       }
 
       return parsed
@@ -480,8 +824,8 @@ export class LocalStorageRegistry {
         ))
         .map((entry) => normalizePersistedModelMetadata(entry));
     } catch (e) {
-      console.error('[LocalStorageRegistry] Failed to parse registry data', e);
-      return [];
+      console.error('[LocalStorageRegistry] Failed to parse legacy registry data', e);
+      return null;
     }
   }
 

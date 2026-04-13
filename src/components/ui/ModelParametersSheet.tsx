@@ -15,7 +15,8 @@ import {
   ScreenSheet,
 } from '@/components/ui/ScreenShell';
 import { Text } from '@/components/ui/text';
-import { GenerationParameters, ModelLoadParameters } from '../../services/SettingsStore';
+import type { EngineDiagnostics } from '@/types/models';
+import { GenerationParameters, ModelLoadParameters, UNKNOWN_MODEL_GPU_LAYERS_CEILING } from '../../services/SettingsStore';
 import { useTheme } from '../../providers/ThemeProvider';
 import {
   DEFAULT_CONTEXT_WINDOW_TOKENS,
@@ -41,6 +42,7 @@ interface ModelParametersSheetProps {
   showApplyReload: boolean;
   loadedContextSize?: number | null;
   loadedGpuLayers?: number | null;
+  engineDiagnostics?: EngineDiagnostics | null;
   onClose: () => void;
   onChangeParams: (partial: Partial<GenerationParameters>) => void;
   onChangeLoadParams: (partial: Partial<ModelLoadParameters>) => void;
@@ -324,6 +326,7 @@ export function ModelParametersSheet({
   showApplyReload,
   loadedContextSize,
   loadedGpuLayers,
+  engineDiagnostics,
   onClose,
   onChangeParams,
   onChangeLoadParams,
@@ -346,8 +349,8 @@ export function ModelParametersSheet({
     ? Math.max(MIN_CONTEXT_WINDOW_TOKENS, Math.min(MAX_CONTEXT_WINDOW_TOKENS, contextWindowCeiling))
     : DEFAULT_CONTEXT_WINDOW_TOKENS;
   const resolvedGpuLayersCeiling = typeof gpuLayersCeiling === 'number' && Number.isFinite(gpuLayersCeiling)
-    ? Math.max(0, Math.min(80, Math.round(gpuLayersCeiling)))
-    : 80;
+    ? Math.max(0, Math.round(gpuLayersCeiling))
+    : UNKNOWN_MODEL_GPU_LAYERS_CEILING;
   const resolvedLoadedContextSize = typeof loadedContextSize === 'number'
     && Number.isFinite(loadedContextSize)
     && loadedContextSize > 0
@@ -364,6 +367,15 @@ export function ModelParametersSheet({
         Math.max(0, Math.round(loadedGpuLayers)),
       )
     : null;
+  const resolvedDiagnosticLoadedGpuLayers = typeof engineDiagnostics?.loadedGpuLayers === 'number'
+    && Number.isFinite(engineDiagnostics.loadedGpuLayers)
+    && engineDiagnostics.loadedGpuLayers >= 0
+    ? Math.min(
+        resolvedGpuLayersCeiling,
+        Math.max(0, Math.round(engineDiagnostics.loadedGpuLayers)),
+      )
+    : null;
+  const reportedLoadedGpuLayers = resolvedDiagnosticLoadedGpuLayers ?? resolvedLoadedGpuLayers;
   const showLoadedLoadProfile = !showApplyReload && resolvedLoadedContextSize !== null;
   const displayedContextSize = showLoadedLoadProfile
     ? resolvedLoadedContextSize
@@ -371,8 +383,8 @@ export function ModelParametersSheet({
         resolvedContextWindowCeiling,
         Math.max(MIN_CONTEXT_WINDOW_TOKENS, Math.round(loadParamsDraft.contextSize)),
       );
-  const displayedGpuLayers = showLoadedLoadProfile && resolvedLoadedGpuLayers !== null
-    ? resolvedLoadedGpuLayers
+  const displayedGpuLayers = showLoadedLoadProfile && reportedLoadedGpuLayers !== null
+    ? reportedLoadedGpuLayers
     : Math.min(
         resolvedGpuLayersCeiling,
         Math.max(0, Math.round(loadParamsDraft.gpuLayers ?? recommendedGpuLayers)),
@@ -391,6 +403,23 @@ export function ModelParametersSheet({
   const maxTokensCeiling = Math.max(
     maxTokensFloor,
     Math.min(displayedContextSize, resolvedContextWindowCeiling),
+  );
+  const backendLabel = engineDiagnostics?.backendMode === 'cpu'
+    ? t('chat.modelControls.backendModeCpu')
+    : engineDiagnostics?.backendMode === 'gpu'
+      ? t('chat.modelControls.backendModeGpu')
+      : engineDiagnostics?.backendMode === 'npu'
+        ? t('chat.modelControls.backendModeNpu')
+        : t('chat.modelControls.backendModeUnknown');
+  const runtimeRequestedGpuLayers = typeof engineDiagnostics?.requestedGpuLayers === 'number'
+    && Number.isFinite(engineDiagnostics.requestedGpuLayers)
+    ? Math.max(0, Math.round(engineDiagnostics.requestedGpuLayers))
+    : null;
+  const runtimeLoadedGpuLayers = reportedLoadedGpuLayers;
+  const shouldHighlightNoGpu = Boolean(
+    runtimeRequestedGpuLayers !== null
+      && runtimeRequestedGpuLayers > 0
+      && (engineDiagnostics?.actualGpuAccelerated === false || engineDiagnostics?.backendMode === 'cpu'),
   );
 
   return (
@@ -664,9 +693,63 @@ export function ModelParametersSheet({
                     <Text className="mt-1 text-sm leading-5 text-typography-700 dark:text-typography-200">
                       {t('chat.modelControls.runtimeLoadedValue', {
                         contextSize: Math.round(loadedContextSize),
-                        gpuLayers: Math.round(loadedGpuLayers ?? 0),
+                        gpuLayers: Math.round(reportedLoadedGpuLayers ?? 0),
                       })}
                     </Text>
+                  </ScreenCard>
+                ) : null}
+
+                {engineDiagnostics && typeof loadedContextSize === 'number' && Number.isFinite(loadedContextSize) ? (
+                  <ScreenCard className="mt-3" tone={shouldHighlightNoGpu ? 'warning' : 'default'} variant="inset" padding="compact">
+                    <Text
+                      className={`text-xs font-semibold uppercase tracking-wider ${shouldHighlightNoGpu ? 'text-warning-700 dark:text-warning-200' : 'text-primary-500'}`}
+                    >
+                      {t('chat.modelControls.runtimeBackendTitle')}
+                    </Text>
+                    <Box className="mt-1 gap-1">
+                      <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                        {t('chat.modelControls.runtimeBackendBackend', { backend: backendLabel })}
+                      </Text>
+
+                      {runtimeRequestedGpuLayers !== null ? (
+                        <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                          {t('chat.modelControls.runtimeBackendRequestedLayers', { count: runtimeRequestedGpuLayers })}
+                        </Text>
+                      ) : null}
+
+                      {runtimeLoadedGpuLayers !== null ? (
+                        <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                          {t('chat.modelControls.runtimeBackendLoadedLayers', { count: runtimeLoadedGpuLayers })}
+                        </Text>
+                      ) : null}
+
+                      {engineDiagnostics.backendDevices.length > 0 ? (
+                        <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                          {t('chat.modelControls.runtimeBackendDevices', { devices: engineDiagnostics.backendDevices.join(', ') })}
+                        </Text>
+                      ) : null}
+
+                      {engineDiagnostics.androidLib ? (
+                        <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                          {t('chat.modelControls.runtimeBackendLibrary', { library: engineDiagnostics.androidLib })}
+                        </Text>
+                      ) : null}
+
+                      {engineDiagnostics.reasonNoGPU ? (
+                        <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                          {t('chat.modelControls.runtimeBackendReason', { reason: engineDiagnostics.reasonNoGPU })}
+                        </Text>
+                      ) : null}
+
+                      {engineDiagnostics.systemInfo ? (
+                        <Text
+                          numberOfLines={3}
+                          className="text-sm leading-5 text-typography-700 dark:text-typography-200"
+                        >
+                          {t('chat.modelControls.runtimeBackendSystemInfo', { info: engineDiagnostics.systemInfo })}
+                        </Text>
+                      ) : null}
+                    </Box>
                   </ScreenCard>
                 ) : null}
 

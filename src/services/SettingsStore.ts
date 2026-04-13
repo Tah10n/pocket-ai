@@ -43,6 +43,8 @@ export interface ModelLoadParameters {
     contextSize: number;
     gpuLayers: number | null;
     kvCacheType: 'auto' | 'f16' | 'q8_0' | 'q4_0';
+    backendPolicy?: 'auto' | 'cpu' | 'gpu' | 'npu' | 'custom';
+    selectedBackendDevices?: string[] | null;
 }
 
 export interface AppSettings {
@@ -57,6 +59,7 @@ export interface AppSettings {
     theme: 'light' | 'dark' | 'system';
     language: 'en' | 'ru';
     allowCellularDownloads: boolean;
+    showAdvancedInferenceControls?: boolean;
     activePresetId: string | null;
     activeModelId: string | null;
     chatRetentionDays: number | null;
@@ -81,6 +84,10 @@ export const DEFAULT_MODEL_LOAD_PARAMETERS: ModelLoadParameters = {
     kvCacheType: 'auto',
 };
 
+// Used only when GGUF metadata is unavailable. Real models clamp `n_gpu_layers` to their layer count.
+// Keep this generous so we don't arbitrarily block GPU offload on larger architectures.
+export const UNKNOWN_MODEL_GPU_LAYERS_CEILING = 512;
+
 const DEFAULT_SETTINGS: AppSettings = {
     temperature: DEFAULT_GENERATION_PARAMETERS.temperature,
     topP: DEFAULT_GENERATION_PARAMETERS.topP,
@@ -93,6 +100,7 @@ const DEFAULT_SETTINGS: AppSettings = {
     theme: 'system',
     language: 'en',
     allowCellularDownloads: false,
+    showAdvancedInferenceControls: false,
     activePresetId: null,
     activeModelId: null,
     chatRetentionDays: 90,
@@ -193,7 +201,7 @@ function sanitizeModelLoadParameters(input: Partial<ModelLoadParameters> | undef
     const normalizedGpuLayers =
         rawGpuLayers == null
             ? null
-            : Math.round(clampNumber(rawGpuLayers, 0, 80, DEFAULT_MODEL_LOAD_PARAMETERS.gpuLayers ?? 0));
+            : Math.round(clampNumber(rawGpuLayers, 0, UNKNOWN_MODEL_GPU_LAYERS_CEILING, DEFAULT_MODEL_LOAD_PARAMETERS.gpuLayers ?? 0));
 
     const rawKvCacheType = typeof input?.kvCacheType === 'string' ? input.kvCacheType.trim().toLowerCase() : '';
     const normalizedKvCacheType =
@@ -207,6 +215,33 @@ function sanitizeModelLoadParameters(input: Partial<ModelLoadParameters> | undef
                   ? 'q4_0'
                   : DEFAULT_MODEL_LOAD_PARAMETERS.kvCacheType;
 
+    const rawBackendPolicy = typeof input?.backendPolicy === 'string' ? input.backendPolicy.trim().toLowerCase() : '';
+    const normalizedBackendPolicy =
+        rawBackendPolicy === 'auto'
+            ? 'auto'
+            : rawBackendPolicy === 'cpu'
+              ? 'cpu'
+              : rawBackendPolicy === 'gpu'
+                ? 'gpu'
+                : rawBackendPolicy === 'npu'
+                  ? 'npu'
+                  : rawBackendPolicy === 'custom'
+                    ? 'custom'
+                    : undefined;
+
+    let normalizedSelectedBackendDevices: string[] | null | undefined;
+    if (input?.selectedBackendDevices === null) {
+        normalizedSelectedBackendDevices = null;
+    } else if (Array.isArray(input?.selectedBackendDevices)) {
+        const sanitized = input.selectedBackendDevices
+            .filter((device): device is string => typeof device === 'string')
+            .map((device) => device.trim())
+            .filter((device) => device.length > 0);
+        normalizedSelectedBackendDevices = sanitized.length > 0 ? Array.from(new Set(sanitized)) : null;
+    } else {
+        normalizedSelectedBackendDevices = undefined;
+    }
+
     return {
         contextSize: Math.round(clampNumber(
             input?.contextSize,
@@ -216,6 +251,8 @@ function sanitizeModelLoadParameters(input: Partial<ModelLoadParameters> | undef
         )),
         gpuLayers: normalizedGpuLayers,
         kvCacheType: normalizedKvCacheType,
+        backendPolicy: normalizedBackendPolicy,
+        selectedBackendDevices: normalizedSelectedBackendDevices,
     };
 }
 
@@ -252,6 +289,9 @@ function sanitizeSettings(input: Partial<AppSettings>): AppSettings {
         allowCellularDownloads: typeof input.allowCellularDownloads === 'boolean'
             ? input.allowCellularDownloads
             : DEFAULT_SETTINGS.allowCellularDownloads,
+        showAdvancedInferenceControls: typeof input.showAdvancedInferenceControls === 'boolean'
+            ? input.showAdvancedInferenceControls
+            : DEFAULT_SETTINGS.showAdvancedInferenceControls,
         activePresetId: typeof input.activePresetId === 'string' ? input.activePresetId : null,
         activeModelId: typeof input.activeModelId === 'string' ? input.activeModelId : null,
         chatRetentionDays: normalizeChatRetentionDays(input.chatRetentionDays),

@@ -65,6 +65,12 @@ const mockCreateSummaryPlaceholder = jest.fn();
 const mockRouterNavigate = jest.fn();
 const mockRouterPush = jest.fn();
 const mockGetRecommendedGpuLayers = jest.fn(() => new Promise<number>(() => {}));
+const mockGetRecommendedLoadProfile = jest.fn<Promise<{ recommendedGpuLayers: number; gpuLayersCeiling: number }>, [string | null]>(() =>
+  mockGetRecommendedGpuLayers().then((recommendedGpuLayers) => ({
+    recommendedGpuLayers,
+    gpuLayersCeiling: 512,
+  })),
+);
 const mockLoadModel = jest.fn().mockResolvedValue(undefined);
 const mockGetTotalMemory = jest.fn().mockResolvedValue(8 * 1024 * 1024 * 1024);
 const mockRefreshModelMetadata = jest.fn((model) => Promise.resolve(model));
@@ -100,6 +106,16 @@ let mockHardwareBannerInputs = {
 let mockEngineState: {
   activeModelId: string | null;
   status: string;
+  diagnostics?: {
+    backendMode: 'cpu' | 'gpu' | 'npu' | 'unknown';
+    backendDevices: string[];
+    reasonNoGPU?: string;
+    systemInfo?: string;
+    androidLib?: string;
+    requestedGpuLayers?: number;
+    loadedGpuLayers?: number;
+    actualGpuAccelerated?: boolean;
+  };
 } = {
   activeModelId: 'author/model-q4',
   status: 'ready',
@@ -113,6 +129,7 @@ jest.mock('../../src/hooks/useLLMEngine', () => ({
 
 jest.mock('../../src/services/LLMEngineService', () => ({
   llmEngineService: {
+    getRecommendedLoadProfile: (modelId: string | null) => mockGetRecommendedLoadProfile(modelId),
     getRecommendedGpuLayers: () => mockGetRecommendedGpuLayers(),
     load: (...args: any[]) => mockLoadModel(...args),
     getSafeModeLoadLimits: () => mockSafeModeLoadLimits,
@@ -452,6 +469,7 @@ const {
 const { useChatStore } = require('../../src/store/chatStore');
 const {
   getSettings,
+  UNKNOWN_MODEL_GPU_LAYERS_CEILING,
   updateSettings,
 } = require('../../src/services/SettingsStore');
 const { registry } = require('../../src/services/LocalStorageRegistry');
@@ -489,6 +507,15 @@ describe('ChatScreen', () => {
       activeModelId: 'author/model-q4',
       status: 'ready',
     };
+    mockGetRecommendedGpuLayers.mockReset();
+    mockGetRecommendedGpuLayers.mockImplementation(() => new Promise<number>(() => {}));
+    mockGetRecommendedLoadProfile.mockReset();
+    mockGetRecommendedLoadProfile.mockImplementation(() =>
+      mockGetRecommendedGpuLayers().then((recommendedGpuLayers) => ({
+        recommendedGpuLayers,
+        gpuLayersCeiling: 512,
+      })),
+    );
     registry.saveModels([]);
     mockGetTotalMemory.mockClear();
     mockGetTotalMemory.mockResolvedValue(8 * 1024 * 1024 * 1024);
@@ -1145,6 +1172,168 @@ describe('ChatScreen', () => {
     expect(getSettings().modelLoadParamsByModelId['author/model-q4']).toEqual({
       contextSize: 8192,
       gpuLayers: 12,
+      kvCacheType: 'auto',
+    });
+  });
+
+  it('passes runtime backend diagnostics separately from the saved load profile', async () => {
+    updateSettings({
+      modelLoadParamsByModelId: {
+        'author/model-q4': {
+          contextSize: 4096,
+          gpuLayers: 12,
+        },
+      },
+    });
+    registry.saveModels([
+      {
+        id: 'author/model-q4',
+        name: 'Q4 model',
+        author: 'Test',
+        size: 512 * 1024 * 1024,
+        maxContextTokens: 8192,
+        hasVerifiedContextWindow: true,
+        localPath: 'author-model-q4.gguf',
+        lifecycleStatus: 'downloaded',
+      },
+    ]);
+    mockLoadedContextSize = 4096;
+    mockLoadedGpuLayers = 0;
+    mockEngineState = {
+      activeModelId: 'author/model-q4',
+      status: 'ready',
+      diagnostics: {
+        backendMode: 'cpu',
+        backendDevices: [],
+        reasonNoGPU: 'OpenCL backend unavailable',
+        requestedGpuLayers: 12,
+        loadedGpuLayers: 0,
+        actualGpuAccelerated: false,
+      },
+    };
+
+    const { getByTestId, rerender } = render(React.createElement(ChatScreen));
+
+    await act(async () => {
+      fireEvent.press(getByTestId('model-controls-button'));
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(lastModelParametersSheetProps?.loadParamsDraft).toEqual(expect.objectContaining({
+        contextSize: 4096,
+        gpuLayers: 12,
+      }));
+      expect(lastModelParametersSheetProps?.loadedGpuLayers).toBe(0);
+      expect(lastModelParametersSheetProps?.engineDiagnostics).toEqual(expect.objectContaining({
+        backendMode: 'cpu',
+        requestedGpuLayers: 12,
+        loadedGpuLayers: 0,
+        actualGpuAccelerated: false,
+        reasonNoGPU: 'OpenCL backend unavailable',
+      }));
+    });
+  });
+
+  it('resets the GPU ceiling when reopening model controls for a different model before recommendations resolve', async () => {
+    const highModelRecommendation = createDeferred<{ recommendedGpuLayers: number; gpuLayersCeiling: number }>();
+
+    mockGetRecommendedLoadProfile.mockImplementation((modelId: string | null) => {
+      if (modelId === 'author/model-q4') {
+        return Promise.resolve({
+          recommendedGpuLayers: 4,
+          gpuLayersCeiling: 4,
+        });
+      }
+
+      if (modelId === 'author/model-q8') {
+        return highModelRecommendation.promise;
+      }
+
+      return Promise.resolve({
+        recommendedGpuLayers: 0,
+        gpuLayersCeiling: UNKNOWN_MODEL_GPU_LAYERS_CEILING,
+      });
+    });
+
+    registry.saveModels([
+      {
+        id: 'author/model-q4',
+        name: 'Q4 model',
+        author: 'Test',
+        size: 512 * 1024 * 1024,
+        maxContextTokens: 8192,
+        hasVerifiedContextWindow: true,
+        localPath: 'author-model-q4.gguf',
+        lifecycleStatus: 'downloaded',
+      },
+      {
+        id: 'author/model-q8',
+        name: 'Q8 model',
+        author: 'Test',
+        size: 768 * 1024 * 1024,
+        maxContextTokens: 8192,
+        hasVerifiedContextWindow: true,
+        localPath: 'author-model-q8.gguf',
+        lifecycleStatus: 'downloaded',
+      },
+    ]);
+
+    const { getByTestId, rerender } = render(React.createElement(ChatScreen));
+
+    await act(async () => {
+      fireEvent.press(getByTestId('model-controls-button'));
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(lastModelParametersSheetProps?.modelId).toBe('author/model-q4');
+      expect(lastModelParametersSheetProps?.gpuLayersCeiling).toBe(4);
+    });
+
+    await act(async () => {
+      lastModelParametersSheetProps.onClose();
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      useChatStore.setState({
+        threads: {
+          'thread-1': {
+            ...useChatStore.getState().threads['thread-1'],
+            modelId: 'author/model-q8',
+          },
+        },
+        activeThreadId: 'thread-1',
+      });
+      await Promise.resolve();
+    });
+
+    rerender(React.createElement(ChatScreen));
+
+    await act(async () => {
+      fireEvent.press(getByTestId('model-controls-button'));
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(lastModelParametersSheetProps?.modelId).toBe('author/model-q8');
+      expect(lastModelParametersSheetProps?.gpuLayersCeiling).toBe(UNKNOWN_MODEL_GPU_LAYERS_CEILING);
+    });
+
+    await act(async () => {
+      lastModelParametersSheetProps.onChangeLoadParams({
+        gpuLayers: 100,
+      });
+    });
+
+    await act(async () => {
+      await lastModelParametersSheetProps.onApplyReload();
+    });
+
+    expect(getSettings().modelLoadParamsByModelId['author/model-q8']).toEqual({
+      contextSize: 4096,
+      gpuLayers: 100,
       kvCacheType: 'auto',
     });
   });

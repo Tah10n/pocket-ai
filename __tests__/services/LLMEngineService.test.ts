@@ -11,10 +11,15 @@ jest.mock('llama.rn', () => {
   const completion = jest.fn();
   const removeNativeLogListener = jest.fn();
   return {
-    initLlama: jest.fn().mockResolvedValue({
+    initLlama: jest.fn().mockImplementation(async (options?: { n_gpu_layers?: number }) => ({
       completion,
       stopCompletion: jest.fn().mockResolvedValue(undefined),
-    }),
+      gpu: (options?.n_gpu_layers ?? 0) > 0,
+      devices: (options?.n_gpu_layers ?? 0) > 0 ? ['Adreno GPU'] : [],
+      reasonNoGPU: (options?.n_gpu_layers ?? 0) > 0 ? '' : 'GPU disabled',
+      systemInfo: 'Android test device',
+      androidLib: (options?.n_gpu_layers ?? 0) > 0 ? 'libOpenCL.so' : null,
+    })),
     releaseAllLlama: jest.fn().mockResolvedValue(undefined),
     toggleNativeLog: jest.fn().mockResolvedValue(undefined),
     addNativeLogListener: jest.fn().mockReturnValue({ remove: removeNativeLogListener }),
@@ -57,6 +62,15 @@ describe('LLMEngineService', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     (getFreshMemorySnapshot as jest.Mock).mockResolvedValue(null);
+    (llamaRn.initLlama as jest.Mock).mockImplementation(async (options?: { n_gpu_layers?: number }) => ({
+      completion: (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock,
+      stopCompletion: jest.fn().mockResolvedValue(undefined),
+      gpu: (options?.n_gpu_layers ?? 0) > 0,
+      devices: (options?.n_gpu_layers ?? 0) > 0 ? ['Adreno GPU'] : [],
+      reasonNoGPU: (options?.n_gpu_layers ?? 0) > 0 ? '' : 'GPU disabled',
+      systemInfo: 'Android test device',
+      androidLib: (options?.n_gpu_layers ?? 0) > 0 ? 'libOpenCL.so' : null,
+    }));
     (registry.getModel as jest.Mock) = jest.fn().mockReturnValue({
       id: 'test/model',
       localPath: 'model.gguf',
@@ -197,6 +211,68 @@ describe('LLMEngineService', () => {
     );
     expect(llmEngineService.getContextSize()).toBe(4096);
     expect(llmEngineService.getLoadedGpuLayers()).toBe(12);
+  });
+
+  it('reports requested and loaded GPU layers separately after retrying with fewer layers', async () => {
+    (getModelLoadParametersForModel as jest.Mock).mockReturnValueOnce({
+      contextSize: 4096,
+      gpuLayers: 12,
+      kvCacheType: 'f16',
+    });
+    (llamaRn.initLlama as jest.Mock).mockImplementation(async (options?: { n_gpu_layers?: number }) => {
+      if ((options?.n_gpu_layers ?? 0) >= 12) {
+        throw new Error('GPU OOM');
+      }
+
+      return {
+        completion: (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock,
+        stopCompletion: jest.fn().mockResolvedValue(undefined),
+        gpu: (options?.n_gpu_layers ?? 0) > 0,
+        devices: ['Adreno GPU'],
+        reasonNoGPU: '',
+        systemInfo: 'Android test device',
+        androidLib: 'libOpenCL.so',
+      };
+    });
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    expect(llmEngineService.getLoadedGpuLayers()).toBe(9);
+    expect(llmEngineService.getState().diagnostics).toEqual(expect.objectContaining({
+      backendMode: 'gpu',
+      requestedGpuLayers: 12,
+      loadedGpuLayers: 9,
+      actualGpuAccelerated: true,
+      backendDevices: ['Adreno GPU'],
+    }));
+  });
+
+  it('reports CPU runtime honestly when upstream does not enable GPU acceleration', async () => {
+    (getModelLoadParametersForModel as jest.Mock).mockReturnValueOnce({
+      contextSize: 4096,
+      gpuLayers: 12,
+      kvCacheType: 'f16',
+    });
+    (llamaRn.initLlama as jest.Mock).mockResolvedValueOnce({
+      completion: (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock,
+      stopCompletion: jest.fn().mockResolvedValue(undefined),
+      gpu: false,
+      devices: [],
+      reasonNoGPU: 'OpenCL backend unavailable',
+      systemInfo: 'Android test device',
+      androidLib: null,
+    });
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    expect(llmEngineService.getLoadedGpuLayers()).toBe(0);
+    expect(llmEngineService.getState().diagnostics).toEqual(expect.objectContaining({
+      backendMode: 'cpu',
+      requestedGpuLayers: 12,
+      loadedGpuLayers: 0,
+      actualGpuAccelerated: false,
+      reasonNoGPU: 'OpenCL backend unavailable',
+    }));
   });
 
   it('loads contexts larger than 8192 when the model supports them', async () => {

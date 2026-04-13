@@ -7,7 +7,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 import DeviceInfo from 'react-native-device-info';
 import { Platform } from 'react-native';
 import { hardwareListenerService } from './HardwareListenerService';
-import { EngineStatus, EngineState, type ModelMemoryFitConfidence } from '../types/models';
+import { EngineBackendMode, EngineStatus, EngineState, type ModelMemoryFitConfidence } from '../types/models';
 import { LlmChatCompletionOptions, LlmChatMessage } from '../types/chat';
 import { registry } from './LocalStorageRegistry';
 import { getModelsDir } from './FileSystemSetup';
@@ -50,6 +50,7 @@ export interface LoadModelOptions {
 type StateListener = (state: EngineState) => void;
 const DEFAULT_CONTEXT_SIZE = 4096;
 const MAX_NATIVE_LOG_LINES = 120;
+const UNKNOWN_MODEL_GPU_LAYERS_CEILING_FALLBACK = 512;
 
 type CalibrationSession = {
   modelId: string;
@@ -270,9 +271,20 @@ class LLMEngineService {
     requestedGpuLayers: number;
     loadedGpuLayers: number;
   } | null = null;
+  private activeBackendMode: EngineBackendMode = 'unknown';
+  private activeBackendDevices: string[] = [];
+  private activeBackendReasonNoGpu: string | null = null;
+  private activeBackendSystemInfo: string | null = null;
+  private activeBackendAndroidLib: string | null = null;
+  private requestedGpuLayers: number | null = null;
+  private actualGpuAccelerated: boolean | null = null;
   private state: EngineState = {
     status: EngineStatus.IDLE,
     loadProgress: 0,
+    diagnostics: {
+      backendMode: 'unknown',
+      backendDevices: [],
+    },
   };
   private lastModelLoadError: AppError | null = null;
   private lastModelLoadErrorScope: string | null = null;
@@ -406,29 +418,41 @@ class LLMEngineService {
     }
 
     const maxLayersByBudget = Math.floor(offloadBudgetBytes / bytesPerLayer);
-    const suggested = Math.max(0, Math.min(Math.round(maxLayersByBudget), nLayers, 80));
+    const suggested = Math.max(0, Math.min(Math.round(maxLayersByBudget), nLayers));
 
     return suggested;
   }
 
-  private async calculateGpuLayers(): Promise<number> {
-    try {
-      const totalMemoryBytes = await DeviceInfo.getTotalMemory();
-      const suggested = this.suggestGpuLayersFromTotalMemory(totalMemoryBytes);
+  private resolveRecommendedLoadProfile({
+    totalMemoryBytes,
+    systemMemorySnapshot,
+    modelSizeBytes,
+    ggufMetadata,
+  }: {
+    totalMemoryBytes: number | null;
+    systemMemorySnapshot: SystemMemorySnapshot | null;
+    modelSizeBytes: number | null;
+    ggufMetadata?: Record<string, unknown>;
+  }): { recommendedGpuLayers: number; gpuLayersCeiling: number; modelLayerCount: number | null } {
+    const modelLayerCount = this.resolveModelLayerCount(ggufMetadata);
+    const suggestedGpuLayers = this.suggestGpuLayersForModel({
+      totalMemoryBytes,
+      systemMemorySnapshot,
+      modelSizeBytes,
+      ggufMetadata,
+    });
 
-      // If we can observe that the system is already under memory pressure, be conservative
-      // to avoid triggering GPU init failures or OOM kills.
-      const snapshot = await getFreshMemorySnapshot(350).catch(() => null);
-      const availableBudgetBytes = snapshot ? resolveConservativeAvailableMemoryBudget(snapshot) : null;
-      if (availableBudgetBytes !== null && availableBudgetBytes < 1.5 * 1024 * 1024 * 1024) {
-        return Math.min(suggested, 10);
-      }
+    const availableBudgetBytes = systemMemorySnapshot ? resolveConservativeAvailableMemoryBudget(systemMemorySnapshot) : null;
+    const lowMemoryRecommended = availableBudgetBytes !== null && availableBudgetBytes < 1.5 * 1024 * 1024 * 1024
+      ? Math.min(suggestedGpuLayers, 10)
+      : suggestedGpuLayers;
 
-      return suggested;
-    } catch (e) {
-      console.error('[LLMEngine] Failed to calculate GPU layers', e);
-      return 0;
-    }
+    const gpuLayersCeiling = modelLayerCount ?? UNKNOWN_MODEL_GPU_LAYERS_CEILING_FALLBACK;
+    return {
+      recommendedGpuLayers: Math.max(0, Math.min(Math.round(lowMemoryRecommended), gpuLayersCeiling)),
+      gpuLayersCeiling,
+      modelLayerCount,
+    };
   }
 
   private resolveCalibrationDeviceModel(): string {
@@ -589,7 +613,7 @@ class LLMEngineService {
       contextCeilingTokens,
       contextCeilingTokens,
     );
-    const normalizedGpuCeiling = Math.max(0, Math.min(80, Math.round(gpuLayersCeiling)));
+    const normalizedGpuCeiling = Math.max(0, Math.round(gpuLayersCeiling));
 
     const fitCache = new Map<string, MemoryFitResult>();
     const estimateFit = (contextTokens: number, gpuLayers: number): MemoryFitResult => {
@@ -895,38 +919,8 @@ class LLMEngineService {
         '<|endoftext|>',
       ];
 
-      let stopWords = baseStopWords;
-      try {
-        const formatted = await this.context!.getFormattedChat(
-          completionMessages as any,
-          null,
-          {
-            enable_thinking: params?.enable_thinking ?? false,
-            reasoning_format: params?.reasoning_format ?? 'none',
-            add_generation_prompt: true,
-          },
-        );
-        const additionalStops = (
-          formatted
-          && typeof formatted === 'object'
-          && 'additional_stops' in formatted
-          && Array.isArray((formatted as any).additional_stops)
-        )
-          ? ((formatted as any).additional_stops as unknown[])
-          : [];
-
-        stopWords = [
-          ...baseStopWords,
-          ...additionalStops.filter((stop) => typeof stop === 'string') as string[],
-        ];
-      } catch (error) {
-        if (process.env.NODE_ENV !== 'test') {
-          console.warn('[LLMEngine] Failed to resolve template stop tokens', error);
-        }
-      }
-
       const resolvedStops = Array.from(
-        new Set(stopWords.map((stop) => stop.trim()).filter((stop) => stop.length > 0)),
+        new Set(baseStopWords.map((stop) => stop.trim()).filter((stop) => stop.length > 0)),
       );
 
       const completionPromise = this.context!.completion(
@@ -1089,8 +1083,42 @@ class LLMEngineService {
     return this.safeModeLoadLimits ? { ...this.safeModeLoadLimits } : null;
   }
 
+  public async getRecommendedLoadProfile(modelId: string | null): Promise<{
+    recommendedGpuLayers: number;
+    gpuLayersCeiling: number;
+    modelLayerCount: number | null;
+  }> {
+    let totalMemoryBytes: number | null = null;
+
+    try {
+      totalMemoryBytes = await DeviceInfo.getTotalMemory();
+    } catch (error) {
+      console.warn('[LLMEngine] Failed to resolve total device memory for GPU layer recommendation', error);
+    }
+
+    const snapshot = await getFreshMemorySnapshot(350).catch(() => null);
+    const model = modelId ? registry.getModel(modelId) : undefined;
+    const rawModelSizeBytes = typeof model?.size === 'number' && Number.isFinite(model.size) && model.size > 0
+      ? model.size
+      : null;
+    const verifiedFileSizeBytes = model?.metadataTrust === 'verified_local'
+      ? typeof model?.gguf?.totalBytes === 'number' && Number.isFinite(model.gguf.totalBytes) && model.gguf.totalBytes > 0
+        ? model.gguf.totalBytes
+        : rawModelSizeBytes
+      : null;
+    const modelSizeBytes = verifiedFileSizeBytes ?? rawModelSizeBytes;
+
+    return this.resolveRecommendedLoadProfile({
+      totalMemoryBytes,
+      systemMemorySnapshot: snapshot,
+      modelSizeBytes,
+      ggufMetadata: model?.gguf as unknown as Record<string, unknown> | undefined,
+    });
+  }
+
   public async getRecommendedGpuLayers(): Promise<number> {
-    return this.calculateGpuLayers();
+    const { recommendedGpuLayers } = await this.getRecommendedLoadProfile(null);
+    return recommendedGpuLayers;
   }
 
   public subscribe(listener: StateListener): () => void {
@@ -1114,9 +1142,91 @@ class LLMEngineService {
     this.lastModelLoadErrorScope = null;
   }
 
+  private buildDiagnosticsSnapshot(): NonNullable<EngineState['diagnostics']> {
+    return {
+      backendMode: this.activeBackendMode,
+      backendDevices: [...this.activeBackendDevices],
+      reasonNoGPU: this.activeBackendReasonNoGpu ?? undefined,
+      systemInfo: this.activeBackendSystemInfo ?? undefined,
+      androidLib: this.activeBackendAndroidLib ?? undefined,
+      requestedGpuLayers: this.requestedGpuLayers ?? undefined,
+      loadedGpuLayers: this.activeGpuLayers ?? undefined,
+      actualGpuAccelerated: this.actualGpuAccelerated ?? undefined,
+    };
+  }
+
   private updateState(newState: EngineState) {
-    this.state = newState;
+    this.state = {
+      ...newState,
+      diagnostics: this.buildDiagnosticsSnapshot(),
+    };
     this.listeners.forEach((l) => l(this.state));
+  }
+
+  private resetBackendTelemetry(): void {
+    this.activeBackendMode = 'unknown';
+    this.activeBackendDevices = [];
+    this.activeBackendReasonNoGpu = null;
+    this.activeBackendSystemInfo = null;
+    this.activeBackendAndroidLib = null;
+    this.actualGpuAccelerated = null;
+  }
+
+  private resetRuntimeTelemetry(): void {
+    this.resetBackendTelemetry();
+    this.requestedGpuLayers = null;
+  }
+
+  private resolveReportedLoadedGpuLayers(resolvedGpuLayers: number | null): number {
+    const normalizedResolvedGpuLayers = typeof resolvedGpuLayers === 'number' && Number.isFinite(resolvedGpuLayers)
+      ? Math.max(0, Math.round(resolvedGpuLayers))
+      : 0;
+
+    return this.actualGpuAccelerated === true ? normalizedResolvedGpuLayers : 0;
+  }
+
+  private resolveBackendMode(context: LlamaContext): EngineBackendMode {
+    if (!context.gpu) {
+      return 'cpu';
+    }
+
+    const devices = Array.isArray(context.devices) ? context.devices : [];
+    const deviceText = devices.join(' ').toLowerCase();
+    const androidLib = typeof context.androidLib === 'string' ? context.androidLib.toLowerCase() : '';
+    const systemInfo = typeof context.systemInfo === 'string' ? context.systemInfo.toLowerCase() : '';
+
+    if (
+      devices.some((device) => device.startsWith('HTP'))
+      || deviceText.includes('hexagon')
+      || deviceText.includes('htp')
+      || androidLib.includes('hexagon')
+      || androidLib.includes('qnn')
+      || systemInfo.includes('hexagon')
+      || systemInfo.includes('qnn')
+    ) {
+      return 'npu';
+    }
+
+    return 'gpu';
+  }
+
+  private captureBackendTelemetry(context: LlamaContext): void {
+    const devices = Array.isArray(context.devices)
+      ? context.devices
+          .filter((device): device is string => typeof device === 'string')
+          .map((device) => device.trim())
+          .filter((device) => device.length > 0)
+      : [];
+    const reasonNoGPU = typeof context.reasonNoGPU === 'string' ? context.reasonNoGPU.trim() : '';
+    const systemInfo = typeof context.systemInfo === 'string' ? context.systemInfo.trim() : '';
+    const androidLib = typeof context.androidLib === 'string' ? context.androidLib.trim() : '';
+
+    this.activeBackendDevices = devices;
+    this.activeBackendReasonNoGpu = reasonNoGPU.length > 0 ? reasonNoGPU : null;
+    this.activeBackendSystemInfo = systemInfo.length > 0 ? systemInfo : null;
+    this.activeBackendAndroidLib = androidLib.length > 0 ? androidLib : null;
+    this.actualGpuAccelerated = Boolean(context.gpu);
+    this.activeBackendMode = this.resolveBackendMode(context);
   }
 
   /**
@@ -1185,6 +1295,7 @@ class LLMEngineService {
       this.isUnloading = false;
       this.activeCalibrationSession = null;
       this.safeModeLoadLimits = null;
+      this.resetRuntimeTelemetry();
       this.updateState({
         status: EngineStatus.INITIALIZING,
         activeModelId: modelId,
@@ -1293,28 +1404,24 @@ class LLMEngineService {
       const verifiedFileSizeBytes = typeof fileInfo.size === 'number' && Number.isFinite(fileInfo.size) && fileInfo.size > 0
         ? Math.round(fileInfo.size)
         : null;
-      const modelLayerCount = this.resolveModelLayerCount(ggufMetadata);
+      const { recommendedGpuLayers, gpuLayersCeiling } = this.resolveRecommendedLoadProfile({
+        totalMemoryBytes: typeof resolvedTotalMemoryBytes === 'number' && Number.isFinite(resolvedTotalMemoryBytes) && resolvedTotalMemoryBytes > 0
+          ? resolvedTotalMemoryBytes
+          : null,
+        systemMemorySnapshot,
+        modelSizeBytes: verifiedFileSizeBytes ?? resolvedModelSizeBytes,
+        ggufMetadata,
+      });
       const requestedGpuLayersCandidate = (
         typeof loadParams.gpuLayers === 'number'
         && Number.isFinite(loadParams.gpuLayers)
         && loadParams.gpuLayers >= 0
       )
         ? Math.round(loadParams.gpuLayers)
-        : this.suggestGpuLayersForModel({
-            totalMemoryBytes: typeof resolvedTotalMemoryBytes === 'number' && Number.isFinite(resolvedTotalMemoryBytes) && resolvedTotalMemoryBytes > 0
-              ? resolvedTotalMemoryBytes
-              : null,
-            systemMemorySnapshot,
-            modelSizeBytes: verifiedFileSizeBytes ?? resolvedModelSizeBytes,
-            ggufMetadata,
-          });
+        : recommendedGpuLayers;
       const requestedGpuLayers = Math.max(
         0,
-        Math.min(
-          80,
-          Math.round(requestedGpuLayersCandidate),
-          modelLayerCount ?? 80,
-        ),
+        Math.min(gpuLayersCeiling, Math.round(requestedGpuLayersCandidate)),
       );
       const metadataTrustForEstimator = modelInfo !== null
         ? 'verified_local' as const
@@ -1528,6 +1635,7 @@ class LLMEngineService {
       const resolvedSafeLoadProfile = safeLoadProfile ?? { contextTokens: MIN_CONTEXT_WINDOW_TOKENS, gpuLayers: 0 };
       const finalContextSize = shouldUseSafeLoadProfile ? resolvedSafeLoadProfile.contextTokens : resolvedContextSize;
       const gpuLayers = shouldUseSafeLoadProfile ? resolvedSafeLoadProfile.gpuLayers : requestedGpuLayers;
+      this.requestedGpuLayers = requestedGpuLayers;
       const shouldUseLowMemoryContextParams = Boolean(
         memoryFit
         && (
@@ -1958,10 +2066,17 @@ class LLMEngineService {
         this.activeCalibrationSession = null;
       }
 
+      if (this.context) {
+        this.captureBackendTelemetry(this.context);
+      } else {
+        this.resetBackendTelemetry();
+      }
+
+      const reportedLoadedGpuLayers = this.resolveReportedLoadedGpuLayers(resolvedGpuLayers);
       this.activeContextSize = finalContextSize;
-      this.activeGpuLayers = resolvedGpuLayers;
+      this.activeGpuLayers = reportedLoadedGpuLayers;
       this.safeModeLoadLimits = shouldUseSafeLoadProfile
-        ? { maxContextTokens: finalContextSize, requestedGpuLayers: gpuLayers, loadedGpuLayers: resolvedGpuLayers }
+        ? { maxContextTokens: finalContextSize, requestedGpuLayers, loadedGpuLayers: reportedLoadedGpuLayers }
         : null;
       this.updateState({ ...this.state, status: EngineStatus.READY, loadProgress: 1 });
       updateSettings({ activeModelId: modelId });
@@ -2001,6 +2116,7 @@ class LLMEngineService {
         this.activeContextSize = DEFAULT_CONTEXT_SIZE;
         this.activeGpuLayers = null;
         this.safeModeLoadLimits = null;
+        this.resetRuntimeTelemetry();
         this.updateState({
           status: EngineStatus.IDLE,
           activeModelId: undefined,
@@ -2017,6 +2133,7 @@ class LLMEngineService {
       this.activeContextSize = DEFAULT_CONTEXT_SIZE;
       this.activeGpuLayers = null;
       this.safeModeLoadLimits = null;
+      this.resetRuntimeTelemetry();
       updateSettings({ activeModelId: null });
       this.updateState({
         status: EngineStatus.ERROR,
@@ -2040,6 +2157,7 @@ class LLMEngineService {
 
   private async unloadInternal(): Promise<void> {
     this.isUnloading = true;
+    this.resetRuntimeTelemetry();
     this.updateState({
       status: EngineStatus.IDLE,
       activeModelId: undefined,
@@ -2088,6 +2206,7 @@ class LLMEngineService {
       this.activeContextSize = DEFAULT_CONTEXT_SIZE;
       this.activeGpuLayers = null;
       this.safeModeLoadLimits = null;
+      this.resetRuntimeTelemetry();
       this.initPromise = null;
       this.activeCompletionPromise = null;
       this.isUnloading = false;

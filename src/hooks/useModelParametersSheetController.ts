@@ -9,6 +9,7 @@ import { modelCatalogService } from '@/services/ModelCatalogService';
 import { useLLMEngine } from '@/hooks/useLLMEngine';
 import {
   DEFAULT_MODEL_LOAD_PARAMETERS,
+  UNKNOWN_MODEL_GPU_LAYERS_CEILING,
   getGenerationParametersForModel,
   getModelLoadParametersForModel,
   getSettings,
@@ -68,6 +69,7 @@ export function useModelParametersSheetController({
   const [isOpen, setOpen] = useState(false);
   const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
   const [recommendedGpuLayers, setRecommendedGpuLayers] = useState(0);
+  const [gpuLayersCeiling, setGpuLayersCeiling] = useState(UNKNOWN_MODEL_GPU_LAYERS_CEILING);
   const [measuredContextWindowCeiling, setMeasuredContextWindowCeiling] = useState<number | null>(null);
   const [deviceTotalMemoryBytes, setDeviceTotalMemoryBytes] = useState<number | null>(null);
   const [draftLoadParams, setDraftLoadParams] = useState<ModelLoadParameters>({
@@ -118,7 +120,7 @@ export function useModelParametersSheetController({
   const loadedContextSize = isLoadedProfileActive ? llmEngineService.getContextSize() : null;
   const loadedGpuLayers = isLoadedProfileActive ? llmEngineService.getLoadedGpuLayers() : null;
   const safeModeLoadLimits = isLoadedProfileActive ? llmEngineService.getSafeModeLoadLimits() : null;
-  const gpuLayersCeiling = 80;
+  const engineDiagnostics = isLoadedProfileActive ? engineState.diagnostics ?? null : null;
   const baseContextWindowCeiling = useMemo(() => resolveContextWindowCeiling({
     modelMaxContextTokens: configurableModel?.maxContextTokens,
     totalMemoryBytes: deviceTotalMemoryBytes,
@@ -200,6 +202,7 @@ export function useModelParametersSheetController({
   useEffect(() => {
     if (!isOpen) {
       setMeasuredContextWindowCeiling(null);
+      setGpuLayersCeiling(UNKNOWN_MODEL_GPU_LAYERS_CEILING);
       loadDraftSourceRef.current = {
         contextSize: 'current',
         gpuLayers: 'current',
@@ -214,18 +217,29 @@ export function useModelParametersSheetController({
     const shouldRefreshModelMetadata = refreshTargetModel?.hasVerifiedContextWindow !== true;
 
     setMeasuredContextWindowCeiling(null);
+    setGpuLayersCeiling(UNKNOWN_MODEL_GPU_LAYERS_CEILING);
 
-    void llmEngineService.getRecommendedGpuLayers()
-      .then((nextGpuLayers: number) => {
-        if (!isCancelled) {
-          setRecommendedGpuLayers(nextGpuLayers);
-        }
-      })
-      .catch(() => {
-        if (!isCancelled) {
-          setRecommendedGpuLayers(0);
-        }
+    const serviceAny = llmEngineService as unknown as {
+      getRecommendedLoadProfile?: (modelId: string | null) => Promise<{ recommendedGpuLayers: number; gpuLayersCeiling: number }>;
+      getRecommendedGpuLayers?: () => Promise<number>;
+    };
+    const loadRecommendation = (modelId: string | null) => {
+      if (typeof serviceAny.getRecommendedLoadProfile === 'function') {
+        return serviceAny.getRecommendedLoadProfile(modelId);
+      }
+
+      if (typeof serviceAny.getRecommendedGpuLayers === 'function') {
+        return serviceAny.getRecommendedGpuLayers().then((nextGpuLayers) => ({
+          recommendedGpuLayers: nextGpuLayers,
+          gpuLayersCeiling: UNKNOWN_MODEL_GPU_LAYERS_CEILING,
+        }));
+      }
+
+      return Promise.resolve({
+        recommendedGpuLayers: 0,
+        gpuLayersCeiling: UNKNOWN_MODEL_GPU_LAYERS_CEILING,
       });
+    };
 
     void Promise.all([
       DeviceInfo.getTotalMemory().catch(() => null),
@@ -258,6 +272,21 @@ export function useModelParametersSheetController({
             },
           }));
         }
+
+        const resolvedModelId = resolvedModel?.id ?? configurableModelId ?? null;
+        void loadRecommendation(resolvedModelId)
+          .then((recommendation) => {
+            if (!isCancelled) {
+              setRecommendedGpuLayers(recommendation.recommendedGpuLayers);
+              setGpuLayersCeiling(recommendation.gpuLayersCeiling);
+            }
+          })
+          .catch(() => {
+            if (!isCancelled) {
+              setRecommendedGpuLayers(0);
+              setGpuLayersCeiling(UNKNOWN_MODEL_GPU_LAYERS_CEILING);
+            }
+          });
       })
       .catch(() => {
         if (!isCancelled) {
@@ -617,6 +646,7 @@ export function useModelParametersSheetController({
       onApplyReload: applyLoadParams,
       loadedContextSize,
       loadedGpuLayers,
+      engineDiagnostics,
     },
   };
 }

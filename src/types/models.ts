@@ -88,9 +88,23 @@ export enum EngineStatus {
   ERROR = 'error',
 }
 
+export type EngineBackendMode = 'cpu' | 'gpu' | 'npu' | 'unknown';
+
+export interface EngineDiagnostics {
+  backendMode: EngineBackendMode;
+  backendDevices: string[];
+  reasonNoGPU?: string;
+  systemInfo?: string;
+  androidLib?: string;
+  requestedGpuLayers?: number;
+  loadedGpuLayers?: number;
+  actualGpuAccelerated?: boolean;
+}
+
 export interface EngineState {
   status: EngineStatus;
   activeModelId?: string;
   loadProgress: number;
   lastError?: string;
+  diagnostics?: EngineDiagnostics;
 }

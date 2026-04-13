@@ -49,6 +49,7 @@ jest.mock('../../src/store/downloadStore', () => ({
 
 jest.mock('../../src/services/LLMEngineService', () => ({
   llmEngineService: {
+    ensurePersistedCapabilitySnapshot: jest.fn().mockReturnValue(null),
     load: jest.fn().mockResolvedValue(undefined),
   },
 }));

@@ -23,6 +23,7 @@ jest.mock('expo-file-system/legacy', () => ({
 
 jest.mock('../../src/services/LLMEngineService', () => ({
   llmEngineService: {
+    ensurePersistedCapabilitySnapshot: jest.fn().mockReturnValue(null),
     getState: jest.fn().mockReturnValue({ activeModelId: null }),
     getContextSize: jest.fn().mockReturnValue(2048),
     interruptActiveCompletion: jest.fn().mockResolvedValue(undefined),

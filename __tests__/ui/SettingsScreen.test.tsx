@@ -146,6 +146,7 @@ jest.mock('../../src/hooks/useLLMEngine', () => ({
 
 jest.mock('../../src/services/LLMEngineService', () => ({
   llmEngineService: {
+    ensurePersistedCapabilitySnapshot: jest.fn().mockReturnValue(null),
     unload: jest.fn(),
   },
 }));

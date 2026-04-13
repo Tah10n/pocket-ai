@@ -129,6 +129,23 @@ jest.mock('../../src/hooks/useLLMEngine', () => ({
 
 jest.mock('../../src/services/LLMEngineService', () => ({
   llmEngineService: {
+    ensurePersistedCapabilitySnapshot: (model: any) => {
+      if (!model) {
+        return null;
+      }
+
+      const snapshotLayerCount = typeof model?.capabilitySnapshot?.modelLayerCount === 'number'
+        ? model.capabilitySnapshot.modelLayerCount
+        : null;
+      const ggufLayerCount = typeof model?.gguf?.nLayers === 'number' ? model.gguf.nLayers : null;
+      const modelLayerCount = snapshotLayerCount ?? ggufLayerCount;
+      const snapshotCeiling = typeof model?.capabilitySnapshot?.gpuLayersCeiling === 'number'
+        ? model.capabilitySnapshot.gpuLayersCeiling
+        : null;
+      const gpuLayersCeiling = snapshotCeiling ?? modelLayerCount ?? 512;
+
+      return { modelLayerCount, gpuLayersCeiling };
+    },
     getRecommendedLoadProfile: (modelId: string | null) => mockGetRecommendedLoadProfile(modelId),
     getRecommendedGpuLayers: () => mockGetRecommendedGpuLayers(),
     load: (...args: any[]) => mockLoadModel(...args),

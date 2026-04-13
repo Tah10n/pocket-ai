@@ -4,9 +4,9 @@ import type {
   ModelMetadata,
   ModelMetadataTrust,
 } from '../types/models';
+import { UNKNOWN_MODEL_GPU_LAYERS_CEILING } from './modelLimits';
 
 export const MODEL_CAPABILITY_HEURISTIC_VERSION = 1;
-const UNKNOWN_MODEL_GPU_LAYERS_CEILING_FALLBACK = 512;
 
 type ModelCapabilityInput = Pick<
   ModelMetadata,
@@ -176,7 +176,7 @@ export function buildModelCapabilitySnapshot(
   input: Omit<ModelCapabilityInput, 'capabilitySnapshot'>,
 ): ModelCapabilitySnapshot {
   const modelLayerCount = resolveModelLayerCountFromGgufMetadata(input.gguf);
-  const gpuLayersCeiling = modelLayerCount ?? UNKNOWN_MODEL_GPU_LAYERS_CEILING_FALLBACK;
+  const gpuLayersCeiling = modelLayerCount ?? UNKNOWN_MODEL_GPU_LAYERS_CEILING;
   const metadataTrust = normalizeMetadataTrust(input.metadataTrust);
   const sizeBytes = resolveSizeBytes(input);
   const verifiedFileSizeBytes = resolveVerifiedFileSizeBytes(input);

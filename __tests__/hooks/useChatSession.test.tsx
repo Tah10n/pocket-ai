@@ -19,6 +19,7 @@ import { notificationService } from '../../src/services/NotificationService';
 
 jest.mock('../../src/services/LLMEngineService', () => ({
   llmEngineService: {
+    ensurePersistedCapabilitySnapshot: jest.fn().mockReturnValue(null),
     getState: jest.fn(),
     getContextSize: jest.fn(),
     chatCompletion: jest.fn(),

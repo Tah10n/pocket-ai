@@ -1060,7 +1060,7 @@ class LLMEngineService {
     return this.safeModeLoadLimits ? { ...this.safeModeLoadLimits } : null;
   }
 
-  private ensurePersistedCapabilitySnapshot(model: ModelMetadata | undefined): {
+  public ensurePersistedCapabilitySnapshot(model: ModelMetadata | undefined): {
     modelLayerCount: number | null;
     gpuLayersCeiling: number;
   } | null {
@@ -1424,13 +1424,25 @@ class LLMEngineService {
         modelLayerCount: stableCapability?.modelLayerCount,
         gpuLayersCeilingOverride: stableCapability?.gpuLayersCeiling,
       });
-      const requestedGpuLayersCandidate = (
-        typeof loadParams.gpuLayers === 'number'
-        && Number.isFinite(loadParams.gpuLayers)
-        && loadParams.gpuLayers >= 0
-      )
-        ? Math.round(loadParams.gpuLayers)
-        : recommendedGpuLayers;
+      const selectedBackendDevices = Array.isArray(loadParams.selectedBackendDevices) && loadParams.selectedBackendDevices.length > 0
+        ? loadParams.selectedBackendDevices
+        : null;
+      const requestedBackendDevices = loadParams.backendPolicy === 'custom'
+        ? selectedBackendDevices ?? undefined
+        : loadParams.backendPolicy === 'npu'
+          ? selectedBackendDevices ?? ['HTP*']
+          : loadParams.backendPolicy === 'gpu'
+            ? selectedBackendDevices ?? undefined
+            : undefined;
+      const requestedGpuLayersCandidate = loadParams.backendPolicy === 'cpu'
+        ? 0
+        : (
+          typeof loadParams.gpuLayers === 'number'
+          && Number.isFinite(loadParams.gpuLayers)
+          && loadParams.gpuLayers >= 0
+        )
+          ? Math.round(loadParams.gpuLayers)
+          : recommendedGpuLayers;
       const requestedGpuLayers = Math.max(
         0,
         Math.min(gpuLayersCeiling, Math.round(requestedGpuLayersCandidate)),
@@ -1838,6 +1850,7 @@ class LLMEngineService {
             cache_type_k: cacheTypeK,
             cache_type_v: cacheTypeV,
             flash_attn_type: gpuLayers > 0 ? 'auto' : 'off',
+            ...(requestedBackendDevices ? { devices: requestedBackendDevices } : null),
             ...(shouldUseLowMemoryContextParams && lowMemoryBatchSize !== null && lowMemoryMicroBatchSize !== null
               ? {
                   no_extra_bufts: true,
@@ -1910,6 +1923,7 @@ class LLMEngineService {
                   cache_type_k: cacheTypeK,
                   cache_type_v: cacheTypeV,
                   flash_attn_type: 'auto',
+                  ...(requestedBackendDevices ? { devices: requestedBackendDevices } : null),
                   ...(shouldUseLowMemoryContextParams && lowMemoryBatchSize !== null && lowMemoryMicroBatchSize !== null
                     ? {
                         no_extra_bufts: true,

@@ -1,6 +1,9 @@
 import type { MMKV } from 'react-native-mmkv';
 import { createStorage } from './storage';
 import { MAX_CONTEXT_WINDOW_TOKENS } from '../utils/contextWindow';
+import { UNKNOWN_MODEL_GPU_LAYERS_CEILING } from '../utils/modelLimits';
+
+export { UNKNOWN_MODEL_GPU_LAYERS_CEILING };
 
 let storageInstance: MMKV | null = null;
 
@@ -83,10 +86,6 @@ export const DEFAULT_MODEL_LOAD_PARAMETERS: ModelLoadParameters = {
     gpuLayers: null,
     kvCacheType: 'auto',
 };
-
-// Used only when GGUF metadata is unavailable. Real models clamp `n_gpu_layers` to their layer count.
-// Keep this generous so we don't arbitrarily block GPU offload on larger architectures.
-export const UNKNOWN_MODEL_GPU_LAYERS_CEILING = 512;
 
 const DEFAULT_SETTINGS: AppSettings = {
     temperature: DEFAULT_GENERATION_PARAMETERS.temperature,

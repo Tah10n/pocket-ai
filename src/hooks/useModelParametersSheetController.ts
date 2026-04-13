@@ -21,7 +21,7 @@ import {
   type GenerationParameters,
   type ModelLoadParameters,
 } from '@/services/SettingsStore';
-import { EngineStatus, type ModelMetadata } from '@/types/models';
+import { EngineStatus, type ModelMetadata, type ModelMetadataTrust } from '@/types/models';
 import { clampContextWindowTokens, resolveContextWindowCeiling } from '@/utils/contextWindow';
 import { resolveModelCapabilitySnapshot } from '@/utils/modelCapabilities';
 import { hasPersistedLoadProfileChanges } from '@/utils/modelLoadProfile';
@@ -51,6 +51,21 @@ function clampGpuLayers(gpuLayers: number | null | undefined, ceiling: number): 
   return Math.min(Math.max(0, Math.round(gpuLayers)), ceiling);
 }
 
+function metadataTrustRank(trust: ModelMetadataTrust | undefined): number {
+  switch (trust) {
+    case 'verified_local':
+      return 3;
+    case 'trusted_remote':
+      return 2;
+    case 'inferred':
+      return 1;
+    case 'unknown':
+      return 0;
+    default:
+      return -1;
+  }
+}
+
 function resolveHeuristicModel(
   model: ModelMetadata | undefined,
   persistedModel: ModelMetadata | undefined,
@@ -63,21 +78,44 @@ function resolveHeuristicModel(
     return model;
   }
 
+  const modelTrustRank = metadataTrustRank(model.metadataTrust);
+  const persistedTrustRank = metadataTrustRank(persistedModel.metadataTrust);
+  const preferPersisted = persistedTrustRank > modelTrustRank;
+  const resolvedMetadataTrust = preferPersisted
+    ? persistedModel.metadataTrust ?? model.metadataTrust
+    : modelTrustRank > persistedTrustRank
+      ? model.metadataTrust ?? persistedModel.metadataTrust
+      : model.metadataTrust ?? persistedModel.metadataTrust;
+  const resolvedHasVerifiedContextWindow = model.hasVerifiedContextWindow === true || persistedModel.hasVerifiedContextWindow === true
+    ? true
+    : model.hasVerifiedContextWindow ?? persistedModel.hasVerifiedContextWindow;
+  const resolvedMaxContextTokens = persistedModel.hasVerifiedContextWindow === true && typeof persistedModel.maxContextTokens === 'number'
+    ? persistedModel.maxContextTokens
+    : model.maxContextTokens ?? persistedModel.maxContextTokens;
+  const resolvedGguf = model.gguf || persistedModel.gguf
+    ? preferPersisted
+      ? {
+          ...(model.gguf ?? {}),
+          ...(persistedModel.gguf ?? {}),
+        }
+      : {
+          ...(persistedModel.gguf ?? {}),
+          ...(model.gguf ?? {}),
+        }
+    : undefined;
+
   return {
     ...model,
-    size: model.size ?? persistedModel.size,
-    lastModifiedAt: model.lastModifiedAt ?? persistedModel.lastModifiedAt,
-    sha256: model.sha256 ?? persistedModel.sha256,
-    metadataTrust: model.metadataTrust ?? persistedModel.metadataTrust,
-    gguf: model.gguf || persistedModel.gguf
-      ? {
-        ...(persistedModel.gguf ?? {}),
-        ...(model.gguf ?? {}),
-      }
-      : undefined,
-    maxContextTokens: model.maxContextTokens ?? persistedModel.maxContextTokens,
-    hasVerifiedContextWindow: model.hasVerifiedContextWindow ?? persistedModel.hasVerifiedContextWindow,
-    capabilitySnapshot: model.capabilitySnapshot ?? persistedModel.capabilitySnapshot,
+    size: preferPersisted ? persistedModel.size ?? model.size : model.size ?? persistedModel.size,
+    lastModifiedAt: preferPersisted ? persistedModel.lastModifiedAt ?? model.lastModifiedAt : model.lastModifiedAt ?? persistedModel.lastModifiedAt,
+    sha256: preferPersisted ? persistedModel.sha256 ?? model.sha256 : model.sha256 ?? persistedModel.sha256,
+    metadataTrust: resolvedMetadataTrust,
+    gguf: resolvedGguf,
+    maxContextTokens: resolvedMaxContextTokens,
+    hasVerifiedContextWindow: resolvedHasVerifiedContextWindow,
+    capabilitySnapshot: preferPersisted
+      ? persistedModel.capabilitySnapshot ?? model.capabilitySnapshot
+      : model.capabilitySnapshot ?? persistedModel.capabilitySnapshot,
   };
 }
 
@@ -300,26 +338,11 @@ export function useModelParametersSheetController({
     let isCancelled = false;
     const refreshTargetModel = configurableModelId ? registry.getModel(configurableModelId) : undefined;
     const shouldRefreshModelMetadata = refreshTargetModel?.hasVerifiedContextWindow !== true;
-    const persistCapabilitySnapshotIfNeeded = (model: ModelMetadata | undefined) => {
-      if (!model || !registry.getModel(model.id)) {
-        return;
-      }
-
-      const resolvedCapability = resolveModelCapabilitySnapshot(model);
-      if (resolvedCapability.isCurrentPersisted) {
-        return;
-      }
-
-      registry.updateModel({
-        ...model,
-        capabilitySnapshot: resolvedCapability.snapshot,
-      });
-    };
 
     setMeasuredContextWindowCeiling(null);
     setRecommendedGpuLayers(0);
     setGpuLayersCeiling(stableGpuLayersCeiling);
-    persistCapabilitySnapshotIfNeeded(refreshTargetModel);
+    llmEngineService.ensurePersistedCapabilitySnapshot(refreshTargetModel);
 
     const serviceAny = llmEngineService as unknown as {
       getRecommendedLoadProfile?: (modelId: string | null) => Promise<{ recommendedGpuLayers: number; gpuLayersCeiling: number }>;
@@ -350,11 +373,8 @@ export function useModelParametersSheetController({
         : Promise.resolve(refreshTargetModel),
     ])
       .then(([totalMemoryBytes, resolvedModel]) => {
-        const resolvedCapability = resolvedModel
-          ? resolveModelCapabilitySnapshot(resolvedModel)
-          : null;
-        const resolvedGpuLayersCeiling = resolvedCapability?.snapshot.gpuLayersCeiling ?? stableGpuLayersCeiling;
-        persistCapabilitySnapshotIfNeeded(resolvedModel);
+        const resolvedGpuLayersCeiling = llmEngineService.ensurePersistedCapabilitySnapshot(resolvedModel)?.gpuLayersCeiling
+          ?? stableGpuLayersCeiling;
 
         if (!isCancelled) {
           setDeviceTotalMemoryBytes(totalMemoryBytes);

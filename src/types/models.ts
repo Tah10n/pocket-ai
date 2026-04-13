@@ -39,6 +39,19 @@ export interface ModelGgufMetadata {
   slidingWindowTokens?: number;
 }
 
+export interface ModelCapabilitySnapshot {
+  heuristicVersion: number;
+  modelLayerCount: number | null;
+  gpuLayersCeiling: number;
+  metadataTrust: ModelMetadataTrust;
+  sizeBytes?: number;
+  verifiedFileSizeBytes?: number;
+  verifiedMaxContextTokens?: number;
+  ggufCapabilityDigest?: string;
+  sha256?: string;
+  lastModifiedAt?: number;
+}
+
 export interface ModelMetadata {
   id: string;
   name: string;
@@ -66,6 +79,7 @@ export interface ModelMetadata {
   resumeData?: string;
   maxContextTokens?: number;
   hasVerifiedContextWindow?: boolean;
+  capabilitySnapshot?: ModelCapabilitySnapshot;
   parameterSizeLabel?: string;
   modelType?: string;
   architectures?: string[];

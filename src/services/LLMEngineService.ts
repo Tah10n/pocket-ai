@@ -7,13 +7,20 @@ import * as FileSystem from 'expo-file-system/legacy';
 import DeviceInfo from 'react-native-device-info';
 import { Platform } from 'react-native';
 import { hardwareListenerService } from './HardwareListenerService';
-import { EngineBackendMode, EngineStatus, EngineState, type ModelMemoryFitConfidence } from '../types/models';
+import {
+  EngineBackendMode,
+  EngineStatus,
+  EngineState,
+  type ModelMemoryFitConfidence,
+  type ModelMetadata,
+} from '../types/models';
 import { LlmChatCompletionOptions, LlmChatMessage } from '../types/chat';
 import { registry } from './LocalStorageRegistry';
 import { getModelsDir } from './FileSystemSetup';
 import { safeJoinModelPath } from '../utils/safeFilePath';
 import {
   getModelLoadParametersForModel,
+  UNKNOWN_MODEL_GPU_LAYERS_CEILING,
   updateSettings,
 } from './SettingsStore';
 import { AppError, toAppError } from './AppError';
@@ -39,6 +46,10 @@ import {
 } from '../memory/calibration';
 import { DECIMAL_GIGABYTE } from '../utils/modelSize';
 import { isHighConfidenceLikelyOomMemoryFit } from '../utils/modelMemoryFitState';
+import {
+  resolveModelCapabilitySnapshot,
+  resolveModelLayerCountFromGgufMetadata,
+} from '../utils/modelCapabilities';
 import { resolveKvCacheTypes } from '../utils/kvCache';
 import { requireLlamaModule } from './llamaRnModule';
 
@@ -50,7 +61,6 @@ export interface LoadModelOptions {
 type StateListener = (state: EngineState) => void;
 const DEFAULT_CONTEXT_SIZE = 4096;
 const MAX_NATIVE_LOG_LINES = 120;
-const UNKNOWN_MODEL_GPU_LAYERS_CEILING_FALLBACK = 512;
 
 type CalibrationSession = {
   modelId: string;
@@ -322,51 +332,6 @@ class LLMEngineService {
     return 0;
   }
 
-  private resolveModelLayerCount(ggufMetadata?: Record<string, unknown>): number | null {
-    if (!ggufMetadata) {
-      return null;
-    }
-
-    const normalizeArchitecturePrefix = (value: unknown): string | null => {
-      if (typeof value !== 'string') {
-        return null;
-      }
-
-      const normalized = value.trim().toLowerCase();
-      return normalized.length > 0 ? normalized : null;
-    };
-
-    const directArchitecture = normalizeArchitecturePrefix(ggufMetadata.architecture);
-    const generalArchitecture = normalizeArchitecturePrefix(ggufMetadata['general.architecture']);
-    const architecture = directArchitecture ?? generalArchitecture;
-    const prefixes = architecture
-      ? Array.from(new Set([architecture, architecture.replace(/\d+$/u, '')].filter((value) => value.length > 0)))
-      : [];
-
-    const candidates = [
-      'nLayers',
-      'n_layers',
-      'n_layer',
-      'block_count',
-      ...prefixes.map((prefix) => `${prefix}.block_count`),
-    ];
-
-    for (const key of candidates) {
-      const raw = ggufMetadata[key];
-      const numeric = typeof raw === 'number' ? raw : typeof raw === 'string' ? Number(raw) : NaN;
-      if (!Number.isFinite(numeric) || numeric <= 0) {
-        continue;
-      }
-
-      const rounded = Math.round(numeric);
-      if (rounded > 0) {
-        return rounded;
-      }
-    }
-
-    return null;
-  }
-
   private suggestGpuLayersForModel({
     totalMemoryBytes,
     systemMemorySnapshot,
@@ -381,7 +346,7 @@ class LLMEngineService {
     const fallback = typeof totalMemoryBytes === 'number' && Number.isFinite(totalMemoryBytes) && totalMemoryBytes > 0
       ? this.suggestGpuLayersFromTotalMemory(totalMemoryBytes)
       : 0;
-    const nLayers = this.resolveModelLayerCount(ggufMetadata);
+    const nLayers = resolveModelLayerCountFromGgufMetadata(ggufMetadata);
     const normalizedFallback = nLayers ? Math.min(fallback, nLayers) : fallback;
 
     if (!nLayers) {
@@ -428,13 +393,21 @@ class LLMEngineService {
     systemMemorySnapshot,
     modelSizeBytes,
     ggufMetadata,
+    modelLayerCount,
+    gpuLayersCeilingOverride,
   }: {
     totalMemoryBytes: number | null;
     systemMemorySnapshot: SystemMemorySnapshot | null;
     modelSizeBytes: number | null;
     ggufMetadata?: Record<string, unknown>;
+    modelLayerCount?: number | null;
+    gpuLayersCeilingOverride?: number | null;
   }): { recommendedGpuLayers: number; gpuLayersCeiling: number; modelLayerCount: number | null } {
-    const modelLayerCount = this.resolveModelLayerCount(ggufMetadata);
+    const resolvedModelLayerCount = typeof modelLayerCount === 'number'
+      && Number.isFinite(modelLayerCount)
+      && modelLayerCount > 0
+      ? Math.round(modelLayerCount)
+      : resolveModelLayerCountFromGgufMetadata(ggufMetadata);
     const suggestedGpuLayers = this.suggestGpuLayersForModel({
       totalMemoryBytes,
       systemMemorySnapshot,
@@ -447,11 +420,15 @@ class LLMEngineService {
       ? Math.min(suggestedGpuLayers, 10)
       : suggestedGpuLayers;
 
-    const gpuLayersCeiling = modelLayerCount ?? UNKNOWN_MODEL_GPU_LAYERS_CEILING_FALLBACK;
+    const gpuLayersCeiling = typeof gpuLayersCeilingOverride === 'number'
+      && Number.isFinite(gpuLayersCeilingOverride)
+      && gpuLayersCeilingOverride >= 0
+      ? Math.max(0, Math.round(gpuLayersCeilingOverride))
+      : resolvedModelLayerCount ?? UNKNOWN_MODEL_GPU_LAYERS_CEILING;
     return {
       recommendedGpuLayers: Math.max(0, Math.min(Math.round(lowMemoryRecommended), gpuLayersCeiling)),
       gpuLayersCeiling,
-      modelLayerCount,
+      modelLayerCount: resolvedModelLayerCount,
     };
   }
 
@@ -1083,6 +1060,28 @@ class LLMEngineService {
     return this.safeModeLoadLimits ? { ...this.safeModeLoadLimits } : null;
   }
 
+  private ensurePersistedCapabilitySnapshot(model: ModelMetadata | undefined): {
+    modelLayerCount: number | null;
+    gpuLayersCeiling: number;
+  } | null {
+    if (!model) {
+      return null;
+    }
+
+    const resolvedCapability = resolveModelCapabilitySnapshot(model);
+    if (!resolvedCapability.isCurrentPersisted && registry.getModel(model.id)) {
+      registry.updateModel({
+        ...model,
+        capabilitySnapshot: resolvedCapability.snapshot,
+      });
+    }
+
+    return {
+      modelLayerCount: resolvedCapability.snapshot.modelLayerCount,
+      gpuLayersCeiling: resolvedCapability.snapshot.gpuLayersCeiling,
+    };
+  }
+
   public async getRecommendedLoadProfile(modelId: string | null): Promise<{
     recommendedGpuLayers: number;
     gpuLayersCeiling: number;
@@ -1098,6 +1097,7 @@ class LLMEngineService {
 
     const snapshot = await getFreshMemorySnapshot(350).catch(() => null);
     const model = modelId ? registry.getModel(modelId) : undefined;
+    const stableCapability = this.ensurePersistedCapabilitySnapshot(model);
     const rawModelSizeBytes = typeof model?.size === 'number' && Number.isFinite(model.size) && model.size > 0
       ? model.size
       : null;
@@ -1113,6 +1113,8 @@ class LLMEngineService {
       systemMemorySnapshot: snapshot,
       modelSizeBytes,
       ggufMetadata: model?.gguf as unknown as Record<string, unknown> | undefined,
+      modelLayerCount: stableCapability?.modelLayerCount,
+      gpuLayersCeilingOverride: stableCapability?.gpuLayersCeiling,
     });
   }
 
@@ -1404,6 +1406,14 @@ class LLMEngineService {
       const verifiedFileSizeBytes = typeof fileInfo.size === 'number' && Number.isFinite(fileInfo.size) && fileInfo.size > 0
         ? Math.round(fileInfo.size)
         : null;
+      const stableCapability = cachedModel
+        ? this.ensurePersistedCapabilitySnapshot({
+          ...cachedModel,
+          gguf: ggufMetadata as ModelMetadata['gguf'],
+          metadataTrust: modelInfo !== null ? 'verified_local' : cachedModel.metadataTrust,
+          size: verifiedFileSizeBytes ?? cachedModel.size,
+        })
+        : null;
       const { recommendedGpuLayers, gpuLayersCeiling } = this.resolveRecommendedLoadProfile({
         totalMemoryBytes: typeof resolvedTotalMemoryBytes === 'number' && Number.isFinite(resolvedTotalMemoryBytes) && resolvedTotalMemoryBytes > 0
           ? resolvedTotalMemoryBytes
@@ -1411,6 +1421,8 @@ class LLMEngineService {
         systemMemorySnapshot,
         modelSizeBytes: verifiedFileSizeBytes ?? resolvedModelSizeBytes,
         ggufMetadata,
+        modelLayerCount: stableCapability?.modelLayerCount,
+        gpuLayersCeilingOverride: stableCapability?.gpuLayersCeiling,
       });
       const requestedGpuLayersCandidate = (
         typeof loadParams.gpuLayers === 'number'

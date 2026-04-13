@@ -473,6 +473,7 @@ const {
   updateSettings,
 } = require('../../src/services/SettingsStore');
 const { registry } = require('../../src/services/LocalStorageRegistry');
+const { buildModelCapabilitySnapshot } = require('../../src/utils/modelCapabilities');
 
 describe('ChatScreen', () => {
   let alertSpy: jest.SpyInstance;
@@ -1335,6 +1336,54 @@ describe('ChatScreen', () => {
       contextSize: 4096,
       gpuLayers: 100,
       kvCacheType: 'auto',
+    });
+  });
+
+  it('shows the cached stable GPU ceiling before async recommendations resolve', async () => {
+    mockGetRecommendedLoadProfile.mockImplementation(() => new Promise(() => {}));
+
+    const modelSizeBytes = 512 * 1024 * 1024;
+    registry.saveModels([
+      {
+        id: 'author/model-q4',
+        name: 'Q4 model',
+        author: 'Test',
+        size: modelSizeBytes,
+        metadataTrust: 'verified_local',
+        gguf: {
+          totalBytes: modelSizeBytes,
+          architecture: 'llama',
+          nLayers: 28,
+        },
+        hasVerifiedContextWindow: true,
+        maxContextTokens: 8192,
+        localPath: 'author-model-q4.gguf',
+        lifecycleStatus: 'downloaded',
+        capabilitySnapshot: buildModelCapabilitySnapshot({
+          size: modelSizeBytes,
+          metadataTrust: 'verified_local',
+          gguf: {
+            totalBytes: modelSizeBytes,
+            architecture: 'llama',
+            nLayers: 28,
+          },
+          hasVerifiedContextWindow: true,
+          maxContextTokens: 8192,
+          lastModifiedAt: undefined,
+          sha256: undefined,
+        }),
+      },
+    ]);
+
+    const { getByTestId } = render(React.createElement(ChatScreen));
+
+    await act(async () => {
+      fireEvent.press(getByTestId('model-controls-button'));
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(lastModelParametersSheetProps?.gpuLayersCeiling).toBe(28);
     });
   });
 

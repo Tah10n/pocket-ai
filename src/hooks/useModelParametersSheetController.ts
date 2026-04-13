@@ -23,6 +23,7 @@ import {
 } from '@/services/SettingsStore';
 import { EngineStatus, type ModelMetadata } from '@/types/models';
 import { clampContextWindowTokens, resolveContextWindowCeiling } from '@/utils/contextWindow';
+import { resolveModelCapabilitySnapshot } from '@/utils/modelCapabilities';
 import { hasPersistedLoadProfileChanges } from '@/utils/modelLoadProfile';
 import { handleModelLoadMemoryPolicyError } from '@/utils/modelLoadMemoryPolicyPrompt';
 import { resolveKvCacheTypes } from '@/utils/kvCache';
@@ -48,6 +49,80 @@ function clampGpuLayers(gpuLayers: number | null | undefined, ceiling: number): 
   }
 
   return Math.min(Math.max(0, Math.round(gpuLayers)), ceiling);
+}
+
+function resolveHeuristicModel(
+  model: ModelMetadata | undefined,
+  persistedModel: ModelMetadata | undefined,
+): ModelMetadata | undefined {
+  if (!model) {
+    return persistedModel;
+  }
+
+  if (!persistedModel) {
+    return model;
+  }
+
+  return {
+    ...model,
+    size: model.size ?? persistedModel.size,
+    lastModifiedAt: model.lastModifiedAt ?? persistedModel.lastModifiedAt,
+    sha256: model.sha256 ?? persistedModel.sha256,
+    metadataTrust: model.metadataTrust ?? persistedModel.metadataTrust,
+    gguf: model.gguf || persistedModel.gguf
+      ? {
+        ...(persistedModel.gguf ?? {}),
+        ...(model.gguf ?? {}),
+      }
+      : undefined,
+    maxContextTokens: model.maxContextTokens ?? persistedModel.maxContextTokens,
+    hasVerifiedContextWindow: model.hasVerifiedContextWindow ?? persistedModel.hasVerifiedContextWindow,
+    capabilitySnapshot: model.capabilitySnapshot ?? persistedModel.capabilitySnapshot,
+  };
+}
+
+function resolveModelContextWindowCeiling({
+  modelSizeBytes,
+  modelMaxContextTokens,
+  modelMetadataTrust,
+  modelGgufMetadata,
+  totalMemoryBytes,
+  contextSize,
+  gpuLayers,
+  kvCacheType,
+  fallbackGpuLayers,
+}: {
+  modelSizeBytes: number | null | undefined;
+  modelMaxContextTokens: number | undefined;
+  modelMetadataTrust: ModelMetadata['metadataTrust'];
+  modelGgufMetadata: ModelMetadata['gguf'];
+  totalMemoryBytes: number | null;
+  contextSize: ModelLoadParameters['contextSize'];
+  gpuLayers: ModelLoadParameters['gpuLayers'];
+  kvCacheType: ModelLoadParameters['kvCacheType'];
+  fallbackGpuLayers: number;
+}): number {
+  return resolveContextWindowCeiling({
+    modelMaxContextTokens,
+    totalMemoryBytes,
+    input: {
+      modelSizeBytes: modelSizeBytes ?? null,
+      verifiedFileSizeBytes: modelMetadataTrust === 'verified_local'
+        ? modelGgufMetadata?.totalBytes ?? modelSizeBytes ?? undefined
+        : undefined,
+      metadataTrust: modelMetadataTrust ?? 'unknown',
+      ggufMetadata: modelGgufMetadata as unknown as Record<string, unknown> | undefined,
+      runtimeParams: {
+        gpuLayers: gpuLayers ?? fallbackGpuLayers,
+        ...resolveKvCacheTypes({
+          kvCacheType,
+          requestedContextTokens: contextSize,
+          totalMemoryBytes,
+        }),
+        useMmap: true,
+      },
+    },
+  });
 }
 
 export function useModelParametersSheetController({
@@ -105,6 +180,14 @@ export function useModelParametersSheetController({
   const resolvedActiveModelId = activeModelId ?? subscribedActiveModelId;
   const configurableModel = getModelById(selectedModelId);
   const configurableModelId = configurableModel?.id ?? selectedModelId;
+  const persistedConfigurableModel = configurableModelId ? registry.getModel(configurableModelId) : undefined;
+  const heuristicModel = useMemo(
+    () => resolveHeuristicModel(configurableModel, persistedConfigurableModel),
+    [
+      configurableModel,
+      persistedConfigurableModel,
+    ],
+  );
   const modelLabel = modelLabelOverride
     ?? configurableModel?.name
     ?? (configurableModelId?.split('/').pop() ?? configurableModelId ?? '');
@@ -112,6 +195,17 @@ export function useModelParametersSheetController({
   const defaultParams = defaultParamsOverride ?? getGenerationParametersForModel(null);
   const currentLoadParams = getModelLoadParametersForModel(configurableModelId);
   const defaultLoadParams = getModelLoadParametersForModel(null);
+  const currentContextSize = currentLoadParams.contextSize;
+  const currentGpuLayers = currentLoadParams.gpuLayers;
+  const currentKvCacheType = currentLoadParams.kvCacheType;
+  const heuristicModelSize = heuristicModel?.size;
+  const heuristicModelMaxContextTokens = heuristicModel?.maxContextTokens;
+  const heuristicModelMetadataTrust = heuristicModel?.metadataTrust;
+  const heuristicModelGgufMetadata = heuristicModel?.gguf;
+  const stableCapability = heuristicModel
+    ? resolveModelCapabilitySnapshot(heuristicModel)
+    : null;
+  const stableGpuLayersCeiling = stableCapability?.snapshot.gpuLayersCeiling ?? UNKNOWN_MODEL_GPU_LAYERS_CEILING;
   const isLoadedProfileActive = Boolean(
     configurableModelId
     && engineState.status === EngineStatus.READY
@@ -121,34 +215,24 @@ export function useModelParametersSheetController({
   const loadedGpuLayers = isLoadedProfileActive ? llmEngineService.getLoadedGpuLayers() : null;
   const safeModeLoadLimits = isLoadedProfileActive ? llmEngineService.getSafeModeLoadLimits() : null;
   const engineDiagnostics = isLoadedProfileActive ? engineState.diagnostics ?? null : null;
-  const baseContextWindowCeiling = useMemo(() => resolveContextWindowCeiling({
-    modelMaxContextTokens: configurableModel?.maxContextTokens,
+  const baseContextWindowCeiling = useMemo(() => resolveModelContextWindowCeiling({
+    modelSizeBytes: heuristicModelSize,
+    modelMaxContextTokens: heuristicModelMaxContextTokens,
+    modelMetadataTrust: heuristicModelMetadataTrust,
+    modelGgufMetadata: heuristicModelGgufMetadata,
     totalMemoryBytes: deviceTotalMemoryBytes,
-    input: {
-      modelSizeBytes: configurableModel?.size ?? null,
-      verifiedFileSizeBytes: configurableModel?.metadataTrust === 'verified_local'
-        ? configurableModel?.gguf?.totalBytes ?? configurableModel?.size ?? undefined
-        : undefined,
-      metadataTrust: configurableModel?.metadataTrust ?? 'unknown',
-      ggufMetadata: configurableModel?.gguf as unknown as Record<string, unknown> | undefined,
-      runtimeParams: {
-        gpuLayers: currentLoadParams.gpuLayers ?? recommendedGpuLayers,
-        ...resolveKvCacheTypes({
-          kvCacheType: currentLoadParams.kvCacheType,
-          requestedContextTokens: currentLoadParams.contextSize,
-          totalMemoryBytes: deviceTotalMemoryBytes,
-        }),
-        useMmap: true,
-      },
-    },
+    contextSize: currentContextSize,
+    gpuLayers: currentGpuLayers,
+    kvCacheType: currentKvCacheType,
+    fallbackGpuLayers: recommendedGpuLayers,
   }), [
-    configurableModel?.gguf,
-    configurableModel?.maxContextTokens,
-    configurableModel?.metadataTrust,
-    configurableModel?.size,
-    currentLoadParams.contextSize,
-    currentLoadParams.gpuLayers,
-    currentLoadParams.kvCacheType,
+    heuristicModelGgufMetadata,
+    heuristicModelMaxContextTokens,
+    heuristicModelMetadataTrust,
+    heuristicModelSize,
+    currentContextSize,
+    currentGpuLayers,
+    currentKvCacheType,
     deviceTotalMemoryBytes,
     recommendedGpuLayers,
   ]);
@@ -202,6 +286,7 @@ export function useModelParametersSheetController({
   useEffect(() => {
     if (!isOpen) {
       setMeasuredContextWindowCeiling(null);
+      setRecommendedGpuLayers(0);
       setGpuLayersCeiling(UNKNOWN_MODEL_GPU_LAYERS_CEILING);
       loadDraftSourceRef.current = {
         contextSize: 'current',
@@ -215,9 +300,26 @@ export function useModelParametersSheetController({
     let isCancelled = false;
     const refreshTargetModel = configurableModelId ? registry.getModel(configurableModelId) : undefined;
     const shouldRefreshModelMetadata = refreshTargetModel?.hasVerifiedContextWindow !== true;
+    const persistCapabilitySnapshotIfNeeded = (model: ModelMetadata | undefined) => {
+      if (!model || !registry.getModel(model.id)) {
+        return;
+      }
+
+      const resolvedCapability = resolveModelCapabilitySnapshot(model);
+      if (resolvedCapability.isCurrentPersisted) {
+        return;
+      }
+
+      registry.updateModel({
+        ...model,
+        capabilitySnapshot: resolvedCapability.snapshot,
+      });
+    };
 
     setMeasuredContextWindowCeiling(null);
-    setGpuLayersCeiling(UNKNOWN_MODEL_GPU_LAYERS_CEILING);
+    setRecommendedGpuLayers(0);
+    setGpuLayersCeiling(stableGpuLayersCeiling);
+    persistCapabilitySnapshotIfNeeded(refreshTargetModel);
 
     const serviceAny = llmEngineService as unknown as {
       getRecommendedLoadProfile?: (modelId: string | null) => Promise<{ recommendedGpuLayers: number; gpuLayersCeiling: number }>;
@@ -248,28 +350,25 @@ export function useModelParametersSheetController({
         : Promise.resolve(refreshTargetModel),
     ])
       .then(([totalMemoryBytes, resolvedModel]) => {
+        const resolvedCapability = resolvedModel
+          ? resolveModelCapabilitySnapshot(resolvedModel)
+          : null;
+        const resolvedGpuLayersCeiling = resolvedCapability?.snapshot.gpuLayersCeiling ?? stableGpuLayersCeiling;
+        persistCapabilitySnapshotIfNeeded(resolvedModel);
+
         if (!isCancelled) {
           setDeviceTotalMemoryBytes(totalMemoryBytes);
-          setMeasuredContextWindowCeiling(resolveContextWindowCeiling({
+          setGpuLayersCeiling(resolvedGpuLayersCeiling);
+          setMeasuredContextWindowCeiling(resolveModelContextWindowCeiling({
+            modelSizeBytes: resolvedModel?.size,
             modelMaxContextTokens: resolvedModel?.maxContextTokens,
+            modelMetadataTrust: resolvedModel?.metadataTrust,
+            modelGgufMetadata: resolvedModel?.gguf,
             totalMemoryBytes,
-            input: {
-              modelSizeBytes: resolvedModel?.size ?? null,
-              verifiedFileSizeBytes: resolvedModel?.metadataTrust === 'verified_local'
-                ? resolvedModel?.gguf?.totalBytes ?? resolvedModel?.size ?? undefined
-                : undefined,
-              metadataTrust: resolvedModel?.metadataTrust ?? 'unknown',
-              ggufMetadata: resolvedModel?.gguf as unknown as Record<string, unknown> | undefined,
-              runtimeParams: {
-                gpuLayers: currentLoadParams.gpuLayers ?? recommendedGpuLayers,
-                ...resolveKvCacheTypes({
-                  kvCacheType: currentLoadParams.kvCacheType,
-                  requestedContextTokens: currentLoadParams.contextSize,
-                  totalMemoryBytes,
-                }),
-                useMmap: true,
-              },
-            },
+            contextSize: currentContextSize,
+            gpuLayers: currentGpuLayers,
+            kvCacheType: currentKvCacheType,
+            fallbackGpuLayers: 0,
           }));
         }
 
@@ -279,12 +378,23 @@ export function useModelParametersSheetController({
             if (!isCancelled) {
               setRecommendedGpuLayers(recommendation.recommendedGpuLayers);
               setGpuLayersCeiling(recommendation.gpuLayersCeiling);
+              setMeasuredContextWindowCeiling(resolveModelContextWindowCeiling({
+                modelSizeBytes: resolvedModel?.size,
+                modelMaxContextTokens: resolvedModel?.maxContextTokens,
+                modelMetadataTrust: resolvedModel?.metadataTrust,
+                modelGgufMetadata: resolvedModel?.gguf,
+                totalMemoryBytes,
+                contextSize: currentContextSize,
+                gpuLayers: currentGpuLayers,
+                kvCacheType: currentKvCacheType,
+                fallbackGpuLayers: recommendation.recommendedGpuLayers,
+              }));
             }
           })
           .catch(() => {
             if (!isCancelled) {
               setRecommendedGpuLayers(0);
-              setGpuLayersCeiling(UNKNOWN_MODEL_GPU_LAYERS_CEILING);
+              setGpuLayersCeiling(resolvedGpuLayersCeiling);
             }
           });
       })
@@ -299,11 +409,11 @@ export function useModelParametersSheetController({
     };
   }, [
     configurableModelId,
-    currentLoadParams.contextSize,
-    currentLoadParams.gpuLayers,
-    currentLoadParams.kvCacheType,
+    currentContextSize,
+    currentGpuLayers,
+    currentKvCacheType,
     isOpen,
-    recommendedGpuLayers,
+    stableGpuLayersCeiling,
   ]);
 
   useEffect(() => {

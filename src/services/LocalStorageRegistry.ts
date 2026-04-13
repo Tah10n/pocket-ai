@@ -119,6 +119,7 @@ function normalizeCalibrationRecord(value: unknown): CalibrationRecord | null {
 function cloneModelMetadata(model: ModelMetadata): ModelMetadata {
   return {
     ...model,
+    capabilitySnapshot: model.capabilitySnapshot ? { ...model.capabilitySnapshot } : undefined,
     gguf: model.gguf ? { ...model.gguf } : undefined,
     architectures: model.architectures ? [...model.architectures] : undefined,
     baseModels: model.baseModels ? [...model.baseModels] : undefined,

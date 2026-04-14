@@ -16,7 +16,12 @@ import {
 } from '@/components/ui/ScreenShell';
 import { Text } from '@/components/ui/text';
 import type { EngineDiagnostics } from '@/types/models';
-import { GenerationParameters, ModelLoadParameters, UNKNOWN_MODEL_GPU_LAYERS_CEILING } from '../../services/SettingsStore';
+import {
+  GenerationParameters,
+  ModelLoadParameters,
+  ModelLoadProfileField,
+  UNKNOWN_MODEL_GPU_LAYERS_CEILING,
+} from '../../services/SettingsStore';
 import { useTheme } from '../../providers/ThemeProvider';
 import {
   DEFAULT_CONTEXT_WINDOW_TOKENS,
@@ -36,6 +41,10 @@ interface ModelParametersSheetProps {
   loadParamsDraft: ModelLoadParameters;
   defaultLoadParams: ModelLoadParameters;
   recommendedGpuLayers: number;
+  isGpuBackendAvailable?: boolean | null;
+  isNpuBackendAvailable?: boolean | null;
+  didSaveLoadProfile?: boolean;
+  applyAction: 'reload' | 'save';
   applyButtonLabel: string;
   canApplyReload: boolean;
   isApplyingReload: boolean;
@@ -47,7 +56,7 @@ interface ModelParametersSheetProps {
   onChangeParams: (partial: Partial<GenerationParameters>) => void;
   onChangeLoadParams: (partial: Partial<ModelLoadParameters>) => void;
   onResetParamField: (field: keyof GenerationParameters) => void;
-  onResetLoadField: (field: keyof ModelLoadParameters) => void;
+  onResetLoadField: (field: ModelLoadProfileField) => void;
   onReset: () => void;
   onApplyReload: () => void;
 }
@@ -67,6 +76,7 @@ interface SliderRowProps {
   isResetDisabled?: boolean;
   variant?: 'standalone' | 'embedded';
   showDivider?: boolean;
+  disabled?: boolean;
 }
 
 function SliderRow({
@@ -84,6 +94,7 @@ function SliderRow({
   isResetDisabled = false,
   variant = 'standalone',
   showDivider = false,
+  disabled = false,
 }: SliderRowProps) {
   const { t } = useTranslation();
   const { colors } = useTheme();
@@ -92,8 +103,8 @@ function SliderRow({
       variant={variant === 'embedded' ? 'inset' : 'surface'}
       padding="default"
       className={variant === 'embedded'
-        ? `${showDivider ? 'mt-4 border-t border-primary-500/12 pt-4 dark:border-primary-500/20' : ''} border-primary-500/10 bg-background-0/60 dark:border-primary-500/10 dark:bg-background-950/30`
-        : undefined}
+        ? `${showDivider ? 'mt-4 border-t border-primary-500/12 pt-4 dark:border-primary-500/20' : ''} border-primary-500/10 bg-background-0/60 dark:border-primary-500/10 dark:bg-background-950/30${disabled ? ' opacity-60' : ''}`
+        : disabled ? 'opacity-60' : undefined}
     >
       <Box className="flex-row items-start justify-between gap-3">
         <Box className="min-w-0 flex-1">
@@ -116,7 +127,7 @@ function SliderRow({
             onPress={onReset}
             action="softPrimary"
             size="xs"
-            disabled={isResetDisabled}
+            disabled={disabled || isResetDisabled}
           >
             <ButtonText>{t('common.reset')}</ButtonText>
           </Button>
@@ -130,6 +141,7 @@ function SliderRow({
         step={step}
         value={value}
         onValueChange={onValueChange}
+        disabled={disabled}
         minimumTrackTintColor={colors.primary}
         maximumTrackTintColor={colors.borderStrong}
         thumbTintColor={colors.primary}
@@ -320,6 +332,10 @@ export function ModelParametersSheet({
   loadParamsDraft,
   defaultLoadParams,
   recommendedGpuLayers,
+  isGpuBackendAvailable,
+  isNpuBackendAvailable,
+  didSaveLoadProfile = false,
+  applyAction,
   applyButtonLabel,
   canApplyReload,
   isApplyingReload,
@@ -399,6 +415,39 @@ export function ModelParametersSheet({
   );
   const displayedKvCacheType = loadParamsDraft.kvCacheType;
   const defaultKvCacheType = defaultLoadParams.kvCacheType;
+  const resolvedGpuBackendAvailable = typeof isGpuBackendAvailable === 'boolean'
+    ? isGpuBackendAvailable
+    : null;
+  const showGpuControls = resolvedGpuBackendAvailable !== false;
+  const resolvedNpuBackendAvailable = isNpuBackendAvailable === true;
+  const normalizedBackendPolicy = loadParamsDraft.backendPolicy && loadParamsDraft.backendPolicy !== 'auto'
+    ? loadParamsDraft.backendPolicy
+    : undefined;
+  const normalizedDefaultBackendPolicy = defaultLoadParams.backendPolicy && defaultLoadParams.backendPolicy !== 'auto'
+    ? defaultLoadParams.backendPolicy
+    : undefined;
+  const showOffloadLayerControls = showGpuControls
+    || resolvedNpuBackendAvailable
+    || normalizedBackendPolicy === 'npu'
+    || normalizedDefaultBackendPolicy === 'npu';
+  const shouldShowBackendPolicyControls = resolvedNpuBackendAvailable
+    || normalizedBackendPolicy !== undefined
+    || normalizedDefaultBackendPolicy !== undefined;
+  const displayedBackendPolicy = normalizedBackendPolicy ?? 'auto';
+  const backendPolicyOptions = [
+    { key: 'auto', label: t('chat.modelControls.backendPolicyAuto') },
+    ...((resolvedNpuBackendAvailable || normalizedBackendPolicy === 'npu' || normalizedDefaultBackendPolicy === 'npu')
+      ? [{ key: 'npu', label: t('chat.modelControls.backendPolicyNpu') }]
+      : []),
+    { key: 'cpu', label: t('chat.modelControls.backendPolicyCpu') },
+    ...((showGpuControls || normalizedBackendPolicy === 'gpu' || normalizedDefaultBackendPolicy === 'gpu')
+      ? [{ key: 'gpu', label: t('chat.modelControls.backendPolicyGpu') }]
+      : []),
+  ];
+  const isGpuLayersDisabled = normalizedBackendPolicy === 'cpu';
+  const gpuLayersRowDescription = isGpuLayersDisabled
+    ? t('chat.modelControls.gpuLayersDisabledDescription')
+    : t('chat.modelControls.gpuLayersDescription', { count: recommendedGpuLayers });
   const maxTokensFloor = Math.min(128, displayedContextSize);
   const maxTokensCeiling = Math.max(
     maxTokensFloor,
@@ -421,6 +470,11 @@ export function ModelParametersSheet({
       && runtimeRequestedGpuLayers > 0
       && (engineDiagnostics?.actualGpuAccelerated === false || engineDiagnostics?.backendMode === 'cpu'),
   );
+  const applyProgressLabel = isApplyingReload
+    ? applyAction === 'save'
+      ? t('chat.modelControls.saving')
+      : t('chat.modelControls.reloading')
+    : applyButtonLabel;
 
   return (
     <Modal visible={visible} animationType="fade" transparent onRequestClose={onClose}>
@@ -791,22 +845,41 @@ export function ModelParametersSheet({
                   variant="embedded"
                 />
 
-                <SliderRow
-                  label={t('chat.modelControls.gpuLayers')}
-                  description={t('chat.modelControls.gpuLayersDescription', { count: recommendedGpuLayers })}
-                  valueLabel={t('chat.modelControls.gpuLayersValue', { count: Math.round(displayedGpuLayers) })}
-                  minLabel="0"
-                  maxLabel={`${resolvedGpuLayersCeiling}`}
-                  minimumValue={0}
-                  maximumValue={resolvedGpuLayersCeiling}
-                  step={1}
-                  value={displayedGpuLayers}
-                  onValueChange={(value) => onChangeLoadParams({ gpuLayers: Math.round(value) })}
-                  onReset={() => onResetLoadField('gpuLayers')}
-                  isResetDisabled={displayedGpuLayers === defaultGpuLayers}
-                  variant="embedded"
-                  showDivider
-                />
+                {showOffloadLayerControls ? (
+                  <SliderRow
+                    label={t('chat.modelControls.gpuLayers')}
+                    description={gpuLayersRowDescription}
+                    valueLabel={t('chat.modelControls.gpuLayersValue', { count: Math.round(displayedGpuLayers) })}
+                    minLabel="0"
+                    maxLabel={`${resolvedGpuLayersCeiling}`}
+                    minimumValue={0}
+                    maximumValue={resolvedGpuLayersCeiling}
+                    step={1}
+                    value={displayedGpuLayers}
+                    onValueChange={(value) => onChangeLoadParams({ gpuLayers: Math.round(value) })}
+                    onReset={() => onResetLoadField('gpuLayers')}
+                    isResetDisabled={displayedGpuLayers === defaultGpuLayers}
+                    disabled={isGpuLayersDisabled}
+                    variant="embedded"
+                    showDivider
+                  />
+                ) : null}
+
+                {shouldShowBackendPolicyControls ? (
+                  <SegmentedControlRow
+                    label={t('chat.modelControls.backendPolicy')}
+                    description={t('chat.modelControls.backendPolicyDescription')}
+                    options={backendPolicyOptions}
+                    activeKey={displayedBackendPolicy}
+                    onChange={(key) => onChangeLoadParams({
+                      backendPolicy: key === 'auto' ? undefined : (key as ModelLoadParameters['backendPolicy']),
+                    })}
+                    onReset={() => onResetLoadField('backendPolicy')}
+                    isResetDisabled={normalizedBackendPolicy === normalizedDefaultBackendPolicy}
+                    variant="embedded"
+                    showDivider
+                  />
+                ) : null}
 
                 <SegmentedControlRow
                   label={t('chat.modelControls.kvCache')}
@@ -847,8 +920,21 @@ export function ModelParametersSheet({
                 disabled={!canApplyReload || isApplyingReload || !modelId}
                 className="w-full rounded-2xl"
               >
-                <ButtonText>{isApplyingReload ? t('chat.modelControls.reloading') : applyButtonLabel}</ButtonText>
+                <ButtonText>{applyProgressLabel}</ButtonText>
               </Button>
+            </Box>
+          ) : null}
+
+          {!showApplyReload && didSaveLoadProfile ? (
+            <Box testID="model-save-confirmation-footer" className="mt-4 border-t border-outline-200 pt-4 dark:border-outline-800">
+              <ScreenCard className="mb-3" tone="accent" variant="inset" padding="compact">
+                <Text className="text-xs font-semibold uppercase tracking-wider text-success-600 dark:text-success-400">
+                  {t('chat.modelControls.savedLoadProfileTitle')}
+                </Text>
+                <Text className="mt-1 text-sm leading-5 text-typography-700 dark:text-typography-200">
+                  {t('chat.modelControls.savedLoadProfileDescription')}
+                </Text>
+              </ScreenCard>
             </Box>
           ) : null}
         </ScreenSheet>

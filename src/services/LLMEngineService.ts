@@ -1,5 +1,6 @@
 import type {
   LlamaContext,
+  NativeBackendDeviceInfo,
   NativeCompletionResult,
   TokenData,
 } from 'llama.rn';
@@ -58,6 +59,12 @@ export interface LoadModelOptions {
   allowUnsafeMemoryLoad?: boolean;
 }
 
+export type BackendAvailability = {
+  gpuBackendAvailable: boolean | null;
+  npuBackendAvailable: boolean | null;
+  devices: NativeBackendDeviceInfo[];
+};
+
 type StateListener = (state: EngineState) => void;
 const DEFAULT_CONTEXT_SIZE = 4096;
 const MAX_NATIVE_LOG_LINES = 120;
@@ -88,6 +95,64 @@ function getErrorMessageText(error: unknown): string {
   }
 
   return '';
+}
+
+function normalizeBackendDeviceText(value: unknown): string {
+  return typeof value === 'string' ? value.trim().toLowerCase() : '';
+}
+
+function isNpuBackendDevice(device: NativeBackendDeviceInfo): boolean {
+  const type = normalizeBackendDeviceText(device.type);
+  if (type.includes('npu')) {
+    return true;
+  }
+
+  const backend = normalizeBackendDeviceText(device.backend);
+  const deviceName = normalizeBackendDeviceText(device.deviceName);
+
+  return (
+    backend.includes('qnn')
+    || backend.includes('htp')
+    || backend.includes('hexagon')
+    || backend.includes('npu')
+    || deviceName.includes('qnn')
+    || deviceName.includes('htp')
+    || deviceName.includes('hexagon')
+    || deviceName.includes('npu')
+  );
+}
+
+function isGpuBackendDevice(device: NativeBackendDeviceInfo): boolean {
+  const type = normalizeBackendDeviceText(device.type);
+  const backend = normalizeBackendDeviceText(device.backend);
+  const deviceName = normalizeBackendDeviceText(device.deviceName);
+
+  if (isNpuBackendDevice(device)) {
+    return false;
+  }
+
+  if (type.includes('gpu')) {
+    return true;
+  }
+
+  const backendLooksGpu =
+    backend.includes('metal')
+    || backend.includes('vulkan')
+    || backend.includes('cuda')
+    || backend.includes('opencl')
+    || backend.includes('directml')
+    || backend.includes('dml')
+    || backend.includes('rocm');
+  if (backendLooksGpu) {
+    return true;
+  }
+
+  return (
+    deviceName.includes('gpu')
+    || deviceName.includes('adreno')
+    || deviceName.includes('mali')
+    || deviceName.includes('powervr')
+  );
 }
 
 function isConversationAlternationError(error: unknown): boolean {
@@ -276,6 +341,8 @@ class LLMEngineService {
   private context: LlamaContext | null = null;
   private activeContextSize = DEFAULT_CONTEXT_SIZE;
   private activeGpuLayers: number | null = null;
+  private backendAvailability: BackendAvailability | null = null;
+  private backendAvailabilityPromise: Promise<BackendAvailability> | null = null;
   private safeModeLoadLimits: {
     maxContextTokens: number;
     requestedGpuLayers: number;
@@ -315,6 +382,78 @@ class LLMEngineService {
         this.unload();
       }
     });
+  }
+
+  public async getBackendAvailability(): Promise<BackendAvailability> {
+    if (this.backendAvailability) {
+      return this.backendAvailability;
+    }
+
+    if (this.backendAvailabilityPromise) {
+      return this.backendAvailabilityPromise;
+    }
+
+    this.backendAvailabilityPromise = (async () => {
+      try {
+        const llama = requireLlamaModule() as unknown as { getBackendDevicesInfo?: () => Promise<NativeBackendDeviceInfo[]> };
+        if (typeof llama.getBackendDevicesInfo !== 'function') {
+          return {
+            gpuBackendAvailable: null,
+            npuBackendAvailable: null,
+            devices: [],
+          };
+        }
+
+        let devices: NativeBackendDeviceInfo[] | null = null;
+        try {
+          const result = await llama.getBackendDevicesInfo();
+          devices = Array.isArray(result) ? result : [];
+        } catch (error) {
+          if (process.env.NODE_ENV !== 'test') {
+            console.warn('[LLMEngine] Failed to read backend devices info', error);
+          }
+          devices = null;
+        }
+
+        if (devices === null) {
+          return {
+            gpuBackendAvailable: null,
+            npuBackendAvailable: null,
+            devices: [],
+          };
+        }
+
+        if (devices.length === 0) {
+          return {
+            gpuBackendAvailable: null,
+            npuBackendAvailable: null,
+            devices,
+          };
+        }
+
+        const gpuBackendAvailable = devices.some(isGpuBackendDevice);
+        const npuBackendAvailable = devices.some(isNpuBackendDevice);
+
+        const availability: BackendAvailability = {
+          gpuBackendAvailable,
+          npuBackendAvailable,
+          devices,
+        };
+
+        this.backendAvailability = availability;
+        return availability;
+      } catch {
+        return {
+          gpuBackendAvailable: null,
+          npuBackendAvailable: null,
+          devices: [],
+        };
+      } finally {
+        this.backendAvailabilityPromise = null;
+      }
+    })();
+
+    return this.backendAvailabilityPromise;
   }
 
   /**
@@ -1427,14 +1566,22 @@ class LLMEngineService {
       const selectedBackendDevices = Array.isArray(loadParams.selectedBackendDevices) && loadParams.selectedBackendDevices.length > 0
         ? loadParams.selectedBackendDevices
         : null;
-      const requestedBackendDevices = loadParams.backendPolicy === 'custom'
-        ? selectedBackendDevices ?? undefined
-        : loadParams.backendPolicy === 'npu'
+
+      const requestedBackendPolicy = loadParams.backendPolicy;
+      const backendAvailability = requestedBackendPolicy === 'npu'
+        ? await this.getBackendAvailability()
+        : null;
+      const effectiveBackendPolicy = requestedBackendPolicy === 'npu' && backendAvailability?.npuBackendAvailable !== true
+        ? undefined
+        : requestedBackendPolicy;
+
+      const requestedBackendDevices = effectiveBackendPolicy === 'npu'
           ? selectedBackendDevices ?? ['HTP*']
-          : loadParams.backendPolicy === 'gpu'
+          : effectiveBackendPolicy === 'gpu'
             ? selectedBackendDevices ?? undefined
             : undefined;
-      const requestedGpuLayersCandidate = loadParams.backendPolicy === 'cpu'
+
+      const requestedGpuLayersCandidate = effectiveBackendPolicy === 'cpu'
         ? 0
         : (
           typeof loadParams.gpuLayers === 'number'
@@ -2057,13 +2204,57 @@ class LLMEngineService {
             }
           }
         } else {
-          if (calibrationKeyForLoad && isProbableMemoryFailure(gpuError)) {
-            this.persistCalibrationFailure({
-              calibrationKey: calibrationKeyForLoad,
-              observedRawBudgetBytes,
-            });
+          if (requestedBackendDevices) {
+            if (process.env.NODE_ENV !== 'test') {
+              console.warn(
+                '[LLMEngine] Backend init failed with requested devices, retrying without devices (n_gpu_layers=0 => CPU fallback)',
+                gpuError,
+              );
+            }
+
+            try {
+              this.context = await llama.initLlama(
+                {
+                  model: modelPath,
+                  n_ctx: finalContextSize,
+                  n_gpu_layers: 0,
+                  n_parallel: resolvedParallelSlots,
+                  use_mmap: true,
+                  use_mlock: false,
+                  cache_type_k: cacheTypeK,
+                  cache_type_v: cacheTypeV,
+                  flash_attn_type: 'off',
+                  ...(shouldUseLowMemoryContextParams && lowMemoryBatchSize !== null && lowMemoryMicroBatchSize !== null
+                    ? {
+                        no_extra_bufts: true,
+                        n_batch: lowMemoryBatchSize,
+                        n_ubatch: lowMemoryMicroBatchSize,
+                      }
+                    : null),
+                },
+                (progress) => {
+                  this.updateState({ ...this.state, loadProgress: progress });
+                }
+              );
+
+              gpuInitError = null;
+            } catch (retryError) {
+              gpuInitError = retryError;
+            }
           }
-          throw gpuError;
+
+          if (!this.context) {
+            const backendInitError = gpuInitError ?? gpuError;
+
+            if (calibrationKeyForLoad && isProbableMemoryFailure(backendInitError)) {
+              this.persistCalibrationFailure({
+                calibrationKey: calibrationKeyForLoad,
+                observedRawBudgetBytes,
+              });
+            }
+
+            throw backendInitError;
+          }
         }
       }
 

@@ -45,10 +45,17 @@ describe('SettingsStore', () => {
       selectedBackendDevices: [' ', 42 as any, 'Adreno'],
     });
 
-    expect(getModelLoadParametersForModel('author/model-q4')).toEqual(expect.objectContaining({
-      backendPolicy: undefined,
-      selectedBackendDevices: ['Adreno'],
-    }));
+    const params = getModelLoadParametersForModel('author/model-q4');
+    expect(params.backendPolicy).toBeUndefined();
+    expect(params.selectedBackendDevices).toEqual(['Adreno']);
+  });
+
+  it('normalizes auto backend policy to undefined', () => {
+    updateModelLoadParametersForModel('author/model-q4', {
+      backendPolicy: 'auto',
+    });
+
+    expect(getModelLoadParametersForModel('author/model-q4').backendPolicy).toBeUndefined();
   });
 });
 

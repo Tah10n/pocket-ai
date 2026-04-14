@@ -46,9 +46,11 @@ export interface ModelLoadParameters {
     contextSize: number;
     gpuLayers: number | null;
     kvCacheType: 'auto' | 'f16' | 'q8_0' | 'q4_0';
-    backendPolicy?: 'auto' | 'cpu' | 'gpu' | 'npu' | 'custom';
+    backendPolicy?: 'auto' | 'cpu' | 'gpu' | 'npu';
     selectedBackendDevices?: string[] | null;
 }
+
+export type ModelLoadProfileField = 'contextSize' | 'gpuLayers' | 'kvCacheType' | 'backendPolicy';
 
 export interface AppSettings {
     temperature: number;
@@ -216,16 +218,12 @@ function sanitizeModelLoadParameters(input: Partial<ModelLoadParameters> | undef
 
     const rawBackendPolicy = typeof input?.backendPolicy === 'string' ? input.backendPolicy.trim().toLowerCase() : '';
     const normalizedBackendPolicy =
-        rawBackendPolicy === 'auto'
-            ? 'auto'
-            : rawBackendPolicy === 'cpu'
-              ? 'cpu'
-              : rawBackendPolicy === 'gpu'
+        rawBackendPolicy === 'cpu'
+            ? 'cpu'
+            : rawBackendPolicy === 'gpu'
                 ? 'gpu'
                 : rawBackendPolicy === 'npu'
                   ? 'npu'
-                  : rawBackendPolicy === 'custom'
-                    ? 'custom'
                     : undefined;
 
     let normalizedSelectedBackendDevices: string[] | null | undefined;
@@ -241,7 +239,7 @@ function sanitizeModelLoadParameters(input: Partial<ModelLoadParameters> | undef
         normalizedSelectedBackendDevices = undefined;
     }
 
-    return {
+    const sanitized: ModelLoadParameters = {
         contextSize: Math.round(clampNumber(
             input?.contextSize,
             512,
@@ -250,9 +248,17 @@ function sanitizeModelLoadParameters(input: Partial<ModelLoadParameters> | undef
         )),
         gpuLayers: normalizedGpuLayers,
         kvCacheType: normalizedKvCacheType,
-        backendPolicy: normalizedBackendPolicy,
-        selectedBackendDevices: normalizedSelectedBackendDevices,
     };
+
+    if (normalizedBackendPolicy) {
+        sanitized.backendPolicy = normalizedBackendPolicy;
+    }
+
+    if (normalizedSelectedBackendDevices !== undefined) {
+        sanitized.selectedBackendDevices = normalizedSelectedBackendDevices;
+    }
+
+    return sanitized;
 }
 
 function sanitizeModelLoadParamsByModelId(input: unknown): Record<string, ModelLoadParameters> {

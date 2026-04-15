@@ -42,12 +42,28 @@ export interface GenerationParameters {
     seed: number | null;
 }
 
+export type BackendPolicy = 'auto' | 'cpu' | 'gpu' | 'npu';
+export type FlashAttentionPolicy = 'auto' | 'on' | 'off';
+
 export interface ModelLoadParameters {
     contextSize: number;
     gpuLayers: number | null;
     kvCacheType: 'auto' | 'f16' | 'q8_0' | 'q4_0';
-    backendPolicy?: 'auto' | 'cpu' | 'gpu' | 'npu';
+    backendPolicy?: BackendPolicy;
     selectedBackendDevices?: string[] | null;
+
+    cpuThreads?: number | null;
+    cpuMask?: string | null;
+    cpuStrict?: boolean;
+
+    flashAttention?: FlashAttentionPolicy;
+    useMmap?: boolean;
+    useMlock?: boolean;
+
+    parallelSlots?: number;
+    nBatch?: number | null;
+    nUbatch?: number | null;
+    kvUnified?: boolean | null;
 }
 
 export type ModelLoadProfileField = 'contextSize' | 'gpuLayers' | 'kvCacheType' | 'backendPolicy';
@@ -233,11 +249,87 @@ function sanitizeModelLoadParameters(input: Partial<ModelLoadParameters> | undef
         const sanitized = input.selectedBackendDevices
             .filter((device): device is string => typeof device === 'string')
             .map((device) => device.trim())
-            .filter((device) => device.length > 0);
+            .filter((device) => device.length > 0 && !/\s/.test(device));
         normalizedSelectedBackendDevices = sanitized.length > 0 ? Array.from(new Set(sanitized)) : null;
     } else {
         normalizedSelectedBackendDevices = undefined;
     }
+
+    const rawCpuThreads = input?.cpuThreads;
+    const normalizedCpuThreads =
+        rawCpuThreads === null
+            ? null
+            : typeof rawCpuThreads === 'number' || typeof rawCpuThreads === 'string'
+              ? Math.round(clampNumber(rawCpuThreads, 1, 64, 0)) || null
+              : rawCpuThreads === undefined
+                ? undefined
+                : null;
+
+    const rawCpuMask = input?.cpuMask;
+    const normalizedCpuMask =
+        rawCpuMask === null
+            ? null
+            : typeof rawCpuMask === 'string'
+              ? (rawCpuMask.trim().length > 0 ? rawCpuMask.trim() : null)
+              : rawCpuMask === undefined
+                ? undefined
+                : null;
+
+    const rawCpuStrict = input?.cpuStrict;
+    const normalizedCpuStrict = typeof rawCpuStrict === 'boolean' ? rawCpuStrict : undefined;
+
+    const rawFlashAttention = typeof input?.flashAttention === 'string' ? input.flashAttention.trim().toLowerCase() : '';
+    const normalizedFlashAttention =
+        rawFlashAttention === 'auto'
+            ? 'auto'
+            : rawFlashAttention === 'on'
+              ? 'on'
+              : rawFlashAttention === 'off'
+                ? 'off'
+                : undefined;
+
+    const rawUseMmap = input?.useMmap;
+    const normalizedUseMmap = typeof rawUseMmap === 'boolean' ? rawUseMmap : undefined;
+    const rawUseMlock = input?.useMlock;
+    const normalizedUseMlock = typeof rawUseMlock === 'boolean' ? rawUseMlock : undefined;
+
+    const rawParallelSlots = input?.parallelSlots;
+    const normalizedParallelSlots =
+        typeof rawParallelSlots === 'number' || typeof rawParallelSlots === 'string'
+            ? Math.round(clampNumber(rawParallelSlots, 1, 4, 1))
+            : rawParallelSlots === undefined
+              ? undefined
+              : 1;
+
+    const rawNBatch = input?.nBatch;
+    const normalizedNBatch =
+        rawNBatch === null
+            ? null
+            : typeof rawNBatch === 'number' || typeof rawNBatch === 'string'
+              ? Math.round(clampNumber(rawNBatch, 1, 4096, 0)) || null
+              : rawNBatch === undefined
+                ? undefined
+                : null;
+
+    const rawNUbatch = input?.nUbatch;
+    const normalizedNUbatch =
+        rawNUbatch === null
+            ? null
+            : typeof rawNUbatch === 'number' || typeof rawNUbatch === 'string'
+              ? Math.round(clampNumber(rawNUbatch, 1, 4096, 0)) || null
+              : rawNUbatch === undefined
+                ? undefined
+                : null;
+
+    const rawKvUnified = input?.kvUnified;
+    const normalizedKvUnified =
+        rawKvUnified === null
+            ? null
+            : typeof rawKvUnified === 'boolean'
+              ? rawKvUnified
+              : rawKvUnified === undefined
+                ? undefined
+                : null;
 
     const sanitized: ModelLoadParameters = {
         contextSize: Math.round(clampNumber(
@@ -256,6 +348,46 @@ function sanitizeModelLoadParameters(input: Partial<ModelLoadParameters> | undef
 
     if (normalizedSelectedBackendDevices !== undefined) {
         sanitized.selectedBackendDevices = normalizedSelectedBackendDevices;
+    }
+
+    if (normalizedCpuThreads !== undefined) {
+        sanitized.cpuThreads = normalizedCpuThreads;
+    }
+
+    if (normalizedCpuMask !== undefined) {
+        sanitized.cpuMask = normalizedCpuMask;
+    }
+
+    if (normalizedCpuStrict !== undefined) {
+        sanitized.cpuStrict = normalizedCpuStrict;
+    }
+
+    if (normalizedFlashAttention) {
+        sanitized.flashAttention = normalizedFlashAttention;
+    }
+
+    if (normalizedUseMmap !== undefined) {
+        sanitized.useMmap = normalizedUseMmap;
+    }
+
+    if (normalizedUseMlock !== undefined) {
+        sanitized.useMlock = normalizedUseMlock;
+    }
+
+    if (normalizedParallelSlots !== undefined) {
+        sanitized.parallelSlots = normalizedParallelSlots;
+    }
+
+    if (normalizedNBatch !== undefined) {
+        sanitized.nBatch = normalizedNBatch;
+    }
+
+    if (normalizedNUbatch !== undefined) {
+        sanitized.nUbatch = normalizedNUbatch;
+    }
+
+    if (normalizedKvUnified !== undefined) {
+        sanitized.kvUnified = normalizedKvUnified;
     }
 
     return sanitized;

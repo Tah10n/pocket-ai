@@ -1,6 +1,7 @@
 import { llmEngineService } from '../../src/services/LLMEngineService';
 import { hardwareListenerService } from '../../src/services/HardwareListenerService';
 import { registry } from '../../src/services/LocalStorageRegistry';
+import { inferenceBackendService } from '../../src/services/InferenceBackendService';
 import DeviceInfo from 'react-native-device-info';
 import { initLlama, releaseAllLlama } from 'llama.rn';
 
@@ -23,6 +24,14 @@ jest.mock('llama.rn', () => ({
     toggleNativeLog: jest.fn().mockResolvedValue(undefined),
     addNativeLogListener: jest.fn().mockReturnValue({ remove: jest.fn() }),
     loadLlamaModelInfo: jest.fn().mockResolvedValue({}),
+    getBackendDevicesInfo: jest.fn().mockResolvedValue([
+        {
+            type: 'gpu',
+            backend: 'OpenCL',
+            deviceName: 'QUALCOMM Adreno(TM) 740',
+            maxMemorySize: 0,
+        },
+    ]),
     BuildInfo: { number: 'test', commit: 'test' },
 }));
 
@@ -64,6 +73,7 @@ describe('LLMEngineService Stability', () => {
             lifecycleStatus: 'downloaded'
         });
         (registry.getModels as jest.Mock).mockReturnValue([]);
+        inferenceBackendService.clearCache();
         // Reset singleton state
         (llmEngineService as any).state = {
             status: 'idle',

@@ -104,6 +104,18 @@ export enum EngineStatus {
 
 export type EngineBackendMode = 'cpu' | 'gpu' | 'npu' | 'unknown';
 
+export type EngineBackendPolicy = 'auto' | 'cpu' | 'gpu' | 'npu';
+
+export type EngineBackendInitAttempt = {
+  candidate: 'npu' | 'gpu' | 'cpu';
+  nGpuLayers: number;
+  devices?: string[];
+  outcome: 'success' | 'error' | 'skipped';
+  actualGpu?: boolean;
+  reasonNoGPU?: string;
+  error?: string;
+};
+
 export interface EngineDiagnostics {
   backendMode: EngineBackendMode;
   backendDevices: string[];
@@ -113,6 +125,24 @@ export interface EngineDiagnostics {
   requestedGpuLayers?: number;
   loadedGpuLayers?: number;
   actualGpuAccelerated?: boolean;
+  requestedBackendPolicy?: EngineBackendPolicy;
+  effectiveBackendPolicy?: EngineBackendPolicy;
+  backendPolicyReasons?: string[];
+  backendInitAttempts?: EngineBackendInitAttempt[];
+  initGpuLayers?: number;
+  initDevices?: string[];
+  initCacheTypeK?: string;
+  initCacheTypeV?: string;
+  initFlashAttnType?: 'auto' | 'on' | 'off';
+  initUseMmap?: boolean;
+  initUseMlock?: boolean;
+  initNParallel?: number;
+  initNThreads?: number;
+  initCpuMask?: string;
+  initCpuStrict?: boolean;
+  initNBatch?: number;
+  initNUbatch?: number;
+  initKvUnified?: boolean;
 }
 
 export interface EngineState {

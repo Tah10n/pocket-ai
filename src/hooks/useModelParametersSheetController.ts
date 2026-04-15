@@ -4,6 +4,8 @@ import DeviceInfo from 'react-native-device-info';
 import { useTranslation } from 'react-i18next';
 import { llmEngineService, type LoadModelOptions } from '@/services/LLMEngineService';
 import { toAppError } from '@/services/AppError';
+import { inferenceAutotuneService } from '@/services/InferenceAutotuneService';
+import { readAutotuneResult, type AutotuneResult } from '@/services/InferenceAutotuneStore';
 import { registry } from '@/services/LocalStorageRegistry';
 import { modelCatalogService } from '@/services/ModelCatalogService';
 import { useLLMEngine } from '@/hooks/useLLMEngine';
@@ -22,7 +24,7 @@ import {
   type ModelLoadParameters,
   type ModelLoadProfileField,
 } from '@/services/SettingsStore';
-import { EngineStatus, type ModelMetadata, type ModelMetadataTrust } from '@/types/models';
+import { EngineStatus, LifecycleStatus, type ModelMetadata, type ModelMetadataTrust } from '@/types/models';
 import { clampContextWindowTokens, resolveContextWindowCeiling } from '@/utils/contextWindow';
 import { resolveModelCapabilitySnapshot } from '@/utils/modelCapabilities';
 import { hasPersistedLoadProfileChanges } from '@/utils/modelLoadProfile';
@@ -190,9 +192,11 @@ export function useModelParametersSheetController({
   const [backendAvailability, setBackendAvailability] = useState<{
     gpuBackendAvailable: boolean | null;
     npuBackendAvailable: boolean | null;
+    discoveryUnavailable: boolean | null;
   }>({
     gpuBackendAvailable: null,
     npuBackendAvailable: null,
+    discoveryUnavailable: null,
   });
   const [draftLoadParams, setDraftLoadParams] = useState<ModelLoadParameters>({
     contextSize: DEFAULT_MODEL_LOAD_PARAMETERS.contextSize,
@@ -205,6 +209,9 @@ export function useModelParametersSheetController({
   const [subscribedActiveModelId, setSubscribedActiveModelId] = useState<string | null>(
     () => getSettings().activeModelId,
   );
+  const showAdvancedInferenceControls = getSettings().showAdvancedInferenceControls === true;
+  const [isRunningAutotune, setRunningAutotune] = useState(false);
+  const [autotuneResult, setAutotuneResult] = useState<AutotuneResult | null>(null);
   const loadDraftSourceRef = useRef<{
     contextSize: 'current' | 'default' | 'user';
     gpuLayers: 'current' | 'default' | 'user';
@@ -372,6 +379,16 @@ export function useModelParametersSheetController({
     })
     || isApplyingModelProfile
   );
+  const canRunAutotune = Boolean(configurableModelId)
+    && Boolean(persistedConfigurableModel?.localPath)
+    && (
+      persistedConfigurableModel?.lifecycleStatus === LifecycleStatus.DOWNLOADED
+      || persistedConfigurableModel?.lifecycleStatus === LifecycleStatus.ACTIVE
+    )
+    && engineState.status !== EngineStatus.INITIALIZING
+    && !isApplyingModelProfile
+    && !isRunningAutotune
+    && !showApplyReload;
 
   const openModelParameters = useCallback((modelId: string | null | undefined) => {
     if (!modelId) {
@@ -394,8 +411,11 @@ export function useModelParametersSheetController({
       setBackendAvailability({
         gpuBackendAvailable: null,
         npuBackendAvailable: null,
+        discoveryUnavailable: null,
       });
       setDidSaveLoadProfile(false);
+      setRunningAutotune(false);
+      setAutotuneResult(null);
       loadDraftSourceRef.current = {
         contextSize: 'current',
         gpuLayers: 'current',
@@ -413,6 +433,32 @@ export function useModelParametersSheetController({
     setMeasuredContextWindowCeiling(null);
     setRecommendedGpuLayers(0);
     setGpuLayersCeiling(stableGpuLayersCeiling);
+
+    const autotuneModelFileSizeBytes = (
+      typeof refreshTargetModel?.gguf?.totalBytes === 'number'
+      && Number.isFinite(refreshTargetModel.gguf.totalBytes)
+      && refreshTargetModel.gguf.totalBytes > 0
+    )
+      ? Math.round(refreshTargetModel.gguf.totalBytes)
+      : (
+        refreshTargetModel?.metadataTrust === 'verified_local'
+        && typeof refreshTargetModel?.size === 'number'
+        && Number.isFinite(refreshTargetModel.size)
+        && refreshTargetModel.size > 0
+      )
+        ? Math.round(refreshTargetModel.size)
+        : null;
+    const autotuneModelSha256 = typeof refreshTargetModel?.sha256 === 'string' ? refreshTargetModel.sha256 : null;
+
+    setAutotuneResult(configurableModelId
+      ? readAutotuneResult({
+          modelId: configurableModelId,
+          contextSize: currentContextSize,
+          kvCacheType: currentKvCacheType,
+          modelFileSizeBytes: autotuneModelFileSizeBytes,
+          modelSha256: autotuneModelSha256,
+        })
+      : null);
     llmEngineService.ensurePersistedCapabilitySnapshot(refreshTargetModel);
 
     const serviceAny = llmEngineService as unknown as {
@@ -438,7 +484,7 @@ export function useModelParametersSheetController({
     };
 
     const backendServiceAny = llmEngineService as unknown as {
-      getBackendAvailability?: () => Promise<{ gpuBackendAvailable: boolean | null; npuBackendAvailable: boolean | null }>;
+      getBackendAvailability?: () => Promise<{ gpuBackendAvailable: boolean | null; npuBackendAvailable: boolean | null; discoveryUnavailable?: boolean }>;
     };
     if (typeof backendServiceAny.getBackendAvailability === 'function') {
       void backendServiceAny.getBackendAvailability()
@@ -447,6 +493,7 @@ export function useModelParametersSheetController({
             setBackendAvailability({
               gpuBackendAvailable: availability.gpuBackendAvailable,
               npuBackendAvailable: availability.npuBackendAvailable,
+              discoveryUnavailable: availability.discoveryUnavailable === true,
             });
           }
         })
@@ -455,6 +502,7 @@ export function useModelParametersSheetController({
             setBackendAvailability({
               gpuBackendAvailable: null,
               npuBackendAvailable: null,
+              discoveryUnavailable: true,
             });
           }
         });
@@ -765,6 +813,30 @@ export function useModelParametersSheetController({
     normalizeBackendPolicy,
   ]);
 
+  const handleRunAutotune = useCallback(async () => {
+    if (!configurableModelId || !canRunAutotune) {
+      return;
+    }
+
+    setRunningAutotune(true);
+
+    try {
+      const result = await inferenceAutotuneService.runBackendAutotune({
+        modelId: configurableModelId,
+      });
+      setAutotuneResult(result);
+    } catch (error) {
+      showError(applyReloadErrorScope, error);
+    } finally {
+      setRunningAutotune(false);
+    }
+  }, [
+    applyReloadErrorScope,
+    canRunAutotune,
+    configurableModelId,
+    showError,
+  ]);
+
   const handleChangeParams = useCallback((partial: Partial<GenerationParameters>) => {
     if (onChangeParams) {
       onChangeParams(configurableModelId, partial);
@@ -922,12 +994,18 @@ export function useModelParametersSheetController({
       recommendedGpuLayers,
       isGpuBackendAvailable: backendAvailability.gpuBackendAvailable,
       isNpuBackendAvailable: backendAvailability.npuBackendAvailable,
+      isBackendDiscoveryUnavailable: backendAvailability.discoveryUnavailable,
       didSaveLoadProfile,
       applyAction,
       applyButtonLabel,
-      canApplyReload: Boolean(configurableModelId) && canApplyReload && !isApplyingModelProfile,
+      canApplyReload: Boolean(configurableModelId) && canApplyReload && !isApplyingModelProfile && !isRunningAutotune,
       isApplyingReload: isApplyingModelProfile,
       showApplyReload,
+      showAdvancedInferenceControls,
+      canRunAutotune,
+      isAutotuneRunning: isRunningAutotune,
+      autotuneResult,
+      onRunAutotune: handleRunAutotune,
       onClose: closeModelParameters,
       onChangeParams: handleChangeParams,
       onChangeLoadParams: handleChangeLoadParams,

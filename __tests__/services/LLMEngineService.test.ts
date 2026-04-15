@@ -2,7 +2,10 @@ import * as llamaRn from 'llama.rn';
 import * as FileSystem from 'expo-file-system/legacy';
 import DeviceInfo from 'react-native-device-info';
 import { llmEngineService } from '../../src/services/LLMEngineService';
+import { inferenceBackendService } from '../../src/services/InferenceBackendService';
 import { registry } from '../../src/services/LocalStorageRegistry';
+import { writeAutotuneResult } from '../../src/services/InferenceAutotuneStore';
+import { createStorage } from '../../src/services/storage';
 import { getModelLoadParametersForModel, updateSettings } from '../../src/services/SettingsStore';
 import { getFreshMemorySnapshot } from '../../src/services/SystemMetricsService';
 import { EngineStatus, LifecycleStatus } from '../../src/types/models';
@@ -66,14 +69,17 @@ describe('LLMEngineService', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
-    getBackendDevicesInfoMock().mockResolvedValue([]);
+    createStorage('pocket-ai-autotune', { tier: 'private' }).clearAll();
+    inferenceBackendService.clearCache();
+    getBackendDevicesInfoMock().mockResolvedValue([
+      {
+        type: 'gpu',
+        backend: 'OpenCL',
+        deviceName: 'QUALCOMM Adreno(TM) 740',
+        maxMemorySize: 0,
+      },
+    ]);
     (getFreshMemorySnapshot as jest.Mock).mockResolvedValue(null);
-    const engineInternals = llmEngineService as unknown as {
-      backendAvailability: unknown;
-      backendAvailabilityPromise: unknown;
-    };
-    engineInternals.backendAvailability = null;
-    engineInternals.backendAvailabilityPromise = null;
     (llamaRn.initLlama as jest.Mock).mockImplementation(async (options?: { n_gpu_layers?: number }) => ({
       completion: (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock,
       stopCompletion: jest.fn().mockResolvedValue(undefined),
@@ -287,12 +293,35 @@ describe('LLMEngineService', () => {
     }));
   });
 
+  it('does not attempt GPU init when no accelerator devices exist', async () => {
+    getBackendDevicesInfoMock().mockResolvedValueOnce([]);
+    (getModelLoadParametersForModel as jest.Mock).mockReturnValueOnce({
+      contextSize: 4096,
+      gpuLayers: 12,
+      kvCacheType: 'f16',
+    });
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    const calls = (llamaRn.initLlama as jest.Mock).mock.calls;
+    const attemptedGpu = calls.some((call) => (call[0]?.n_gpu_layers ?? 0) > 0);
+    expect(attemptedGpu).toBe(false);
+    expect(llmEngineService.getState().diagnostics).toEqual(expect.objectContaining({
+      backendMode: 'cpu',
+      requestedGpuLayers: 12,
+      loadedGpuLayers: 0,
+    }));
+  });
+
   it('classifies HTP as NPU-only and uses offload layers for NPU loads', async () => {
     getBackendDevicesInfoMock().mockResolvedValueOnce([
       {
         type: 'gpu',
         backend: 'HTP',
         deviceName: 'HTP0',
+        metadata: {
+          socModel: 'SM8550',
+        },
       },
     ]);
     (getModelLoadParametersForModel as jest.Mock).mockReturnValueOnce({
@@ -305,7 +334,7 @@ describe('LLMEngineService', () => {
       completion: (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock,
       stopCompletion: jest.fn().mockResolvedValue(undefined),
       gpu: (options?.n_gpu_layers ?? 0) > 0,
-      devices: options?.devices?.includes('HTP*') ? ['HTP0'] : [],
+      devices: options?.devices?.includes('HTP0') ? ['HTP0'] : [],
       reasonNoGPU: '',
       systemInfo: 'Android Hexagon test device',
       androidLib: 'libQnnHtp.so',
@@ -323,7 +352,7 @@ describe('LLMEngineService', () => {
       expect.objectContaining({
         n_ctx: 4096,
         n_gpu_layers: 12,
-        devices: ['HTP*'],
+        devices: ['HTP0'],
       }),
       expect.any(Function),
     );
@@ -334,6 +363,516 @@ describe('LLMEngineService', () => {
       loadedGpuLayers: 12,
       actualGpuAccelerated: true,
       backendDevices: ['HTP0'],
+    }));
+  });
+
+  it('reports both GPU and NPU availability when upstream lists both device types', async () => {
+    getBackendDevicesInfoMock().mockResolvedValueOnce([
+      {
+        type: 'gpu',
+        backend: 'HTP',
+        deviceName: 'HTP0',
+      },
+      {
+        type: 'gpu',
+        backend: 'OpenCL',
+        deviceName: 'QUALCOMM Adreno(TM) 740',
+      },
+    ]);
+
+    await expect(llmEngineService.getBackendAvailability()).resolves.toEqual(expect.objectContaining({
+      gpuBackendAvailable: true,
+      npuBackendAvailable: true,
+    }));
+  });
+
+  it('auto falls back from NPU to GPU when NPU init returns CPU runtime', async () => {
+    getBackendDevicesInfoMock().mockResolvedValueOnce([
+      {
+        type: 'gpu',
+        backend: 'HTP',
+        deviceName: 'HTP0',
+        metadata: {
+          socModel: 'SM8550',
+        },
+      },
+      {
+        type: 'gpu',
+        backend: 'OpenCL',
+        deviceName: 'QUALCOMM Adreno(TM) 740',
+        maxMemorySize: 0,
+      },
+    ]);
+    (getModelLoadParametersForModel as jest.Mock).mockReturnValueOnce({
+      contextSize: 4096,
+      gpuLayers: 12,
+      kvCacheType: 'f16',
+    });
+    (llamaRn.initLlama as jest.Mock).mockImplementation(async (options?: { n_gpu_layers?: number; devices?: string[] }) => {
+      const isNpuCandidate = Array.isArray(options?.devices) && options.devices.some((device) => device.toUpperCase().startsWith('HTP'));
+      return {
+        completion: (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock,
+        stopCompletion: jest.fn().mockResolvedValue(undefined),
+        gpu: !isNpuCandidate && (options?.n_gpu_layers ?? 0) > 0,
+        devices: isNpuCandidate ? ['HTP0'] : ['Adreno GPU'],
+        reasonNoGPU: isNpuCandidate ? 'HTP acceleration disabled' : '',
+        systemInfo: isNpuCandidate ? 'Android Hexagon test device' : 'Android test device',
+        androidLib: isNpuCandidate ? 'libQnnHtp.so' : 'libOpenCL.so',
+      };
+    });
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    const calls = (llamaRn.initLlama as jest.Mock).mock.calls;
+    expect(calls[0][0].devices).toEqual(['HTP0']);
+    expect(calls[1][0].devices).toBeUndefined();
+
+    expect(llmEngineService.getLoadedGpuLayers()).toBe(12);
+    expect(llmEngineService.getState().diagnostics).toEqual(expect.objectContaining({
+      backendMode: 'gpu',
+      backendInitAttempts: expect.arrayContaining([
+        expect.objectContaining({ candidate: 'npu', outcome: 'success', actualGpu: false }),
+        expect.objectContaining({ candidate: 'gpu', outcome: 'success', actualGpu: true }),
+      ]),
+    }));
+  });
+
+  it('does not fall back from NPU to GPU when GPU is unavailable', async () => {
+    getBackendDevicesInfoMock().mockResolvedValueOnce([
+      {
+        type: 'gpu',
+        backend: 'HTP',
+        deviceName: 'HTP0',
+        metadata: {
+          socModel: 'SM8550',
+        },
+      },
+    ]);
+    (getModelLoadParametersForModel as jest.Mock).mockReturnValueOnce({
+      contextSize: 4096,
+      gpuLayers: 12,
+      kvCacheType: 'f16',
+    });
+    (llamaRn.initLlama as jest.Mock).mockImplementation(async (options?: { n_gpu_layers?: number; devices?: string[] }) => {
+      const isNpuCandidate = Array.isArray(options?.devices) && options.devices.some((device) => device.toUpperCase().startsWith('HTP'));
+      return {
+        completion: (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock,
+        stopCompletion: jest.fn().mockResolvedValue(undefined),
+        gpu: !isNpuCandidate && (options?.n_gpu_layers ?? 0) > 0,
+        devices: isNpuCandidate ? ['HTP0'] : ['Adreno GPU'],
+        reasonNoGPU: isNpuCandidate ? 'HTP acceleration disabled' : '',
+        systemInfo: isNpuCandidate ? 'Android Hexagon test device' : 'Android test device',
+        androidLib: isNpuCandidate ? 'libQnnHtp.so' : 'libOpenCL.so',
+      };
+    });
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    expect((llamaRn.initLlama as jest.Mock).mock.calls).toHaveLength(1);
+    expect(llmEngineService.getLoadedGpuLayers()).toBe(0);
+    expect(llmEngineService.getState().diagnostics).toEqual(expect.objectContaining({
+      backendMode: 'cpu',
+      backendInitAttempts: [
+        expect.objectContaining({ candidate: 'npu', outcome: 'success', actualGpu: false }),
+      ],
+    }));
+  });
+
+  it('auto falls back from NPU to GPU when NPU init throws', async () => {
+    getBackendDevicesInfoMock().mockResolvedValueOnce([
+      {
+        type: 'gpu',
+        backend: 'HTP',
+        deviceName: 'HTP0',
+        metadata: {
+          socModel: 'SM8550',
+        },
+      },
+      {
+        type: 'gpu',
+        backend: 'OpenCL',
+        deviceName: 'QUALCOMM Adreno(TM) 740',
+        maxMemorySize: 0,
+      },
+    ]);
+    (getModelLoadParametersForModel as jest.Mock).mockReturnValueOnce({
+      contextSize: 4096,
+      gpuLayers: 12,
+      kvCacheType: 'f16',
+    });
+    (llamaRn.initLlama as jest.Mock).mockImplementation(async (options?: { n_gpu_layers?: number; devices?: string[] }) => {
+      if (Array.isArray(options?.devices) && options.devices.some((device) => device.toUpperCase().startsWith('HTP'))) {
+        throw new Error('NPU init failed');
+      }
+
+      return {
+        completion: (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock,
+        stopCompletion: jest.fn().mockResolvedValue(undefined),
+        gpu: (options?.n_gpu_layers ?? 0) > 0,
+        devices: ['Adreno GPU'],
+        reasonNoGPU: '',
+        systemInfo: 'Android test device',
+        androidLib: 'libOpenCL.so',
+      };
+    });
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    const calls = (llamaRn.initLlama as jest.Mock).mock.calls;
+    expect(calls[0][0].devices).toEqual(['HTP0']);
+    expect(calls[1][0].devices).toBeUndefined();
+
+    expect(llmEngineService.getState().diagnostics).toEqual(expect.objectContaining({
+      backendMode: 'gpu',
+      backendInitAttempts: expect.arrayContaining([
+        expect.objectContaining({ candidate: 'npu', outcome: 'error' }),
+        expect.objectContaining({ candidate: 'gpu', outcome: 'success', actualGpu: true }),
+      ]),
+    }));
+  });
+
+  it('explicit NPU policy does not fall back to GPU when NPU init returns CPU runtime', async () => {
+    getBackendDevicesInfoMock().mockResolvedValueOnce([
+      {
+        type: 'gpu',
+        backend: 'HTP',
+        deviceName: 'HTP0',
+        metadata: {
+          socModel: 'SM8550',
+        },
+      },
+    ]);
+    (getModelLoadParametersForModel as jest.Mock).mockReturnValueOnce({
+      contextSize: 4096,
+      gpuLayers: 12,
+      kvCacheType: 'f16',
+      backendPolicy: 'npu',
+    });
+    (llamaRn.initLlama as jest.Mock).mockImplementation(async (options?: { n_gpu_layers?: number; devices?: string[] }) => ({
+      completion: (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock,
+      stopCompletion: jest.fn().mockResolvedValue(undefined),
+      gpu: false,
+      devices: options?.devices?.includes('HTP0') ? ['HTP0'] : [],
+      reasonNoGPU: 'HTP acceleration disabled',
+      systemInfo: 'Android Hexagon test device',
+      androidLib: 'libQnnHtp.so',
+    }));
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    expect((llamaRn.initLlama as jest.Mock).mock.calls).toHaveLength(1);
+    expect((llamaRn.initLlama as jest.Mock).mock.calls[0][0].devices).toEqual(['HTP0']);
+    expect(llmEngineService.getLoadedGpuLayers()).toBe(0);
+    expect(llmEngineService.getState().diagnostics).toEqual(expect.objectContaining({
+      backendMode: 'cpu',
+      requestedBackendPolicy: 'npu',
+      effectiveBackendPolicy: 'npu',
+      reasonNoGPU: 'HTP acceleration disabled',
+      backendInitAttempts: [
+        expect.objectContaining({ candidate: 'npu', outcome: 'success', actualGpu: false }),
+      ],
+    }));
+  });
+
+  it('records a skipped NPU attempt and falls back to GPU when NPU policy is requested but no HTP devices exist', async () => {
+    getBackendDevicesInfoMock().mockResolvedValueOnce([
+      {
+        type: 'gpu',
+        backend: 'OpenCL',
+        deviceName: 'QUALCOMM Adreno(TM) 740',
+      },
+    ]);
+    (getModelLoadParametersForModel as jest.Mock).mockReturnValueOnce({
+      contextSize: 4096,
+      gpuLayers: 12,
+      kvCacheType: 'f16',
+      backendPolicy: 'npu',
+    });
+    (llamaRn.initLlama as jest.Mock).mockImplementation(async (options?: { n_gpu_layers?: number; devices?: string[] }) => ({
+      completion: (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock,
+      stopCompletion: jest.fn().mockResolvedValue(undefined),
+      gpu: (options?.n_gpu_layers ?? 0) > 0,
+      devices: ['Adreno GPU'],
+      reasonNoGPU: '',
+      systemInfo: 'Android test device',
+      androidLib: 'libOpenCL.so',
+    }));
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    expect(llmEngineService.getState().diagnostics).toEqual(expect.objectContaining({
+      backendMode: 'gpu',
+      requestedBackendPolicy: 'npu',
+      effectiveBackendPolicy: 'auto',
+      backendPolicyReasons: expect.arrayContaining([
+        'inference.backendPolicyReason.npuRequestedNoDevicesDiscovered',
+      ]),
+      backendInitAttempts: expect.arrayContaining([
+        expect.objectContaining({ candidate: 'npu', outcome: 'skipped' }),
+        expect.objectContaining({ candidate: 'gpu', outcome: 'success', actualGpu: true }),
+      ]),
+    }));
+  });
+
+  it('records a skipped GPU attempt when GPU policy is requested but no non-HTP devices exist', async () => {
+    getBackendDevicesInfoMock().mockResolvedValueOnce([
+      {
+        type: 'gpu',
+        backend: 'HTP',
+        deviceName: 'HTP0',
+      },
+    ]);
+    (getModelLoadParametersForModel as jest.Mock).mockReturnValueOnce({
+      contextSize: 4096,
+      gpuLayers: 12,
+      kvCacheType: 'f16',
+      backendPolicy: 'gpu',
+    });
+    (llamaRn.initLlama as jest.Mock).mockImplementation(async (options?: { n_gpu_layers?: number; devices?: string[] }) => ({
+      completion: (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock,
+      stopCompletion: jest.fn().mockResolvedValue(undefined),
+      gpu: false,
+      devices: options?.devices?.includes('HTP*') ? ['HTP0'] : [],
+      reasonNoGPU: 'OpenCL backend unavailable',
+      systemInfo: 'Android Hexagon test device',
+      androidLib: 'libQnnHtp.so',
+    }));
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    expect(llmEngineService.getState().diagnostics).toEqual(expect.objectContaining({
+      backendMode: 'cpu',
+      requestedBackendPolicy: 'gpu',
+      effectiveBackendPolicy: 'gpu',
+      backendPolicyReasons: expect.arrayContaining([
+        'inference.backendPolicyReason.gpuRequestedNoDevicesDiscovered',
+      ]),
+      backendInitAttempts: expect.arrayContaining([
+        expect.objectContaining({ candidate: 'gpu', outcome: 'skipped' }),
+      ]),
+    }));
+  });
+
+  it('prefers the saved best-stable autotune profile when auto policy is enabled', async () => {
+    getBackendDevicesInfoMock().mockResolvedValueOnce([
+      {
+        type: 'gpu',
+        backend: 'HTP',
+        deviceName: 'HTP0',
+        metadata: {
+          socModel: 'SM8550',
+        },
+      },
+      {
+        type: 'gpu',
+        backend: 'OpenCL',
+        deviceName: 'QUALCOMM Adreno(TM) 740',
+      },
+    ]);
+    (getModelLoadParametersForModel as jest.Mock).mockReturnValueOnce({
+      contextSize: 4096,
+      gpuLayers: 12,
+      kvCacheType: 'f16',
+    });
+
+    writeAutotuneResult({
+      createdAtMs: 123,
+      modelId: 'test/model',
+      contextSize: 4096,
+      kvCacheType: 'f16',
+      modelFileSizeBytes: 1024,
+      bestStable: {
+        backendMode: 'gpu',
+        nGpuLayers: 12,
+      },
+      candidates: [],
+    });
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    expect((llamaRn.initLlama as jest.Mock).mock.calls).toHaveLength(1);
+    expect((llamaRn.initLlama as jest.Mock).mock.calls[0][0].devices).toBeUndefined();
+    expect(llmEngineService.getState().diagnostics).toEqual(expect.objectContaining({
+      backendMode: 'gpu',
+      backendPolicyReasons: expect.arrayContaining([
+        'inference.backendPolicyReason.autotunePreferringGpu',
+      ]),
+    }));
+  });
+
+  it('ignores a saved autotune profile when the model sha no longer matches', async () => {
+    getBackendDevicesInfoMock().mockResolvedValueOnce([
+      {
+        type: 'gpu',
+        backend: 'HTP',
+        deviceName: 'HTP0',
+        metadata: {
+          socModel: 'SM8550',
+        },
+      },
+      {
+        type: 'gpu',
+        backend: 'OpenCL',
+        deviceName: 'QUALCOMM Adreno(TM) 740',
+      },
+    ]);
+    (registry.getModel as jest.Mock).mockReturnValue({
+      id: 'test/model',
+      localPath: 'model.gguf',
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      sha256: 'live-sha',
+    });
+    (getModelLoadParametersForModel as jest.Mock).mockReturnValueOnce({
+      contextSize: 4096,
+      gpuLayers: 12,
+      kvCacheType: 'f16',
+    });
+
+    writeAutotuneResult({
+      createdAtMs: 123,
+      modelId: 'test/model',
+      contextSize: 4096,
+      kvCacheType: 'f16',
+      modelFileSizeBytes: 1024,
+      modelSha256: 'stale-sha',
+      bestStable: {
+        backendMode: 'gpu',
+        nGpuLayers: 12,
+      },
+      candidates: [],
+    });
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    expect((llamaRn.initLlama as jest.Mock).mock.calls).toHaveLength(1);
+    expect((llamaRn.initLlama as jest.Mock).mock.calls[0][0].devices).toEqual(['HTP0']);
+    expect(llmEngineService.getState().diagnostics?.backendPolicyReasons ?? []).not.toContain(
+      'inference.backendPolicyReason.autotunePreferringGpu',
+    );
+  });
+
+  it('applies advanced load parameters to init options and diagnostics', async () => {
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValueOnce({
+      exists: true,
+    });
+    (registry.getModel as jest.Mock).mockReturnValue({
+      id: 'test/model',
+      localPath: 'model.gguf',
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+    });
+    (getModelLoadParametersForModel as jest.Mock).mockReturnValueOnce({
+      contextSize: 4096,
+      gpuLayers: 12,
+      kvCacheType: 'f16',
+      cpuThreads: 6,
+      cpuMask: '4,5',
+      cpuStrict: true,
+      flashAttention: 'on',
+      useMmap: false,
+      useMlock: true,
+      parallelSlots: 2,
+      nBatch: 96,
+      nUbatch: 48,
+      kvUnified: true,
+    });
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    expect(llamaRn.initLlama).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        n_ctx: 4096,
+        n_gpu_layers: 12,
+        n_threads: 6,
+        cpu_mask: '4,5',
+        cpu_strict: true,
+        n_parallel: 2,
+        flash_attn_type: 'on',
+        use_mmap: false,
+        use_mlock: true,
+        n_batch: 96,
+        n_ubatch: 48,
+        kv_unified: true,
+      }),
+      expect.any(Function),
+    );
+
+    expect(llmEngineService.getState().diagnostics).toEqual(expect.objectContaining({
+      initFlashAttnType: 'on',
+      initUseMmap: false,
+      initUseMlock: true,
+      initNParallel: 2,
+      initNThreads: 6,
+      initCpuMask: '4,5',
+      initCpuStrict: true,
+      initNBatch: 96,
+      initNUbatch: 48,
+      initKvUnified: true,
+    }));
+  });
+
+  it('retries with discovered NPU devices when a saved autotune selector is stale and records actual runtime devices', async () => {
+    getBackendDevicesInfoMock().mockResolvedValueOnce([
+      {
+        type: 'gpu',
+        backend: 'HTP',
+        deviceName: 'HTP0',
+        metadata: {
+          socModel: 'SM8550',
+        },
+      },
+    ]);
+    (registry.getModel as jest.Mock).mockReturnValue({
+      id: 'test/model',
+      localPath: 'model.gguf',
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      sha256: 'live-sha',
+    });
+    (getModelLoadParametersForModel as jest.Mock).mockReturnValueOnce({
+      contextSize: 4096,
+      gpuLayers: 12,
+      kvCacheType: 'f16',
+    });
+
+    writeAutotuneResult({
+      createdAtMs: 123,
+      modelId: 'test/model',
+      contextSize: 4096,
+      kvCacheType: 'f16',
+      modelFileSizeBytes: 1024,
+      modelSha256: 'live-sha',
+      bestStable: {
+        backendMode: 'npu',
+        nGpuLayers: 12,
+        devices: ['HTP9'],
+      },
+      candidates: [],
+    });
+
+    (llamaRn.initLlama as jest.Mock).mockImplementation(async (options?: { n_gpu_layers?: number; devices?: string[] }) => {
+      if (options?.devices?.includes('HTP9')) {
+        throw new Error('stale NPU selector');
+      }
+
+      const isNpuCandidate = options?.devices?.includes('HTP0');
+      return {
+        completion: (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock,
+        stopCompletion: jest.fn().mockResolvedValue(undefined),
+        gpu: (options?.n_gpu_layers ?? 0) > 0,
+        devices: isNpuCandidate ? ['HTP0'] : ['Adreno GPU'],
+        reasonNoGPU: '',
+        systemInfo: isNpuCandidate ? 'Android Hexagon test device' : 'Android test device',
+        androidLib: isNpuCandidate ? 'libQnnHtp.so' : 'libOpenCL.so',
+      };
+    });
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    const calls = (llamaRn.initLlama as jest.Mock).mock.calls;
+    expect(calls[0][0].devices).toEqual(['HTP9']);
+    expect(calls[1][0].devices).toEqual(['HTP0']);
+    expect(llmEngineService.getState().diagnostics).toEqual(expect.objectContaining({
+      backendMode: 'npu',
+      initDevices: ['HTP0'],
     }));
   });
 

@@ -22,6 +22,7 @@ import {
   ModelLoadProfileField,
   UNKNOWN_MODEL_GPU_LAYERS_CEILING,
 } from '../../services/SettingsStore';
+import type { AutotuneResult } from '../../services/InferenceAutotuneStore';
 import { useTheme } from '../../providers/ThemeProvider';
 import {
   DEFAULT_CONTEXT_WINDOW_TOKENS,
@@ -43,6 +44,7 @@ interface ModelParametersSheetProps {
   recommendedGpuLayers: number;
   isGpuBackendAvailable?: boolean | null;
   isNpuBackendAvailable?: boolean | null;
+  isBackendDiscoveryUnavailable?: boolean | null;
   didSaveLoadProfile?: boolean;
   applyAction: 'reload' | 'save';
   applyButtonLabel: string;
@@ -52,6 +54,11 @@ interface ModelParametersSheetProps {
   loadedContextSize?: number | null;
   loadedGpuLayers?: number | null;
   engineDiagnostics?: EngineDiagnostics | null;
+  showAdvancedInferenceControls?: boolean;
+  canRunAutotune?: boolean;
+  isAutotuneRunning?: boolean;
+  autotuneResult?: AutotuneResult | null;
+  onRunAutotune?: () => void;
   onClose: () => void;
   onChangeParams: (partial: Partial<GenerationParameters>) => void;
   onChangeLoadParams: (partial: Partial<ModelLoadParameters>) => void;
@@ -334,6 +341,7 @@ export function ModelParametersSheet({
   recommendedGpuLayers,
   isGpuBackendAvailable,
   isNpuBackendAvailable,
+  isBackendDiscoveryUnavailable,
   didSaveLoadProfile = false,
   applyAction,
   applyButtonLabel,
@@ -343,6 +351,11 @@ export function ModelParametersSheet({
   loadedContextSize,
   loadedGpuLayers,
   engineDiagnostics,
+  showAdvancedInferenceControls = false,
+  canRunAutotune = false,
+  isAutotuneRunning = false,
+  autotuneResult,
+  onRunAutotune,
   onClose,
   onChangeParams,
   onChangeLoadParams,
@@ -353,6 +366,7 @@ export function ModelParametersSheet({
 }: ModelParametersSheetProps) {
   const { t } = useTranslation();
   const [seedInput, setSeedInput] = useState(() => (params.seed === null ? '' : String(params.seed)));
+  const backendDiscoveryUnavailable = isBackendDiscoveryUnavailable === true;
 
   useEffect(() => {
     if (!visible) {
@@ -418,18 +432,20 @@ export function ModelParametersSheet({
   const resolvedGpuBackendAvailable = typeof isGpuBackendAvailable === 'boolean'
     ? isGpuBackendAvailable
     : null;
-  const showGpuControls = resolvedGpuBackendAvailable !== false;
-  const resolvedNpuBackendAvailable = isNpuBackendAvailable === true;
+  const showGpuControls = !backendDiscoveryUnavailable && resolvedGpuBackendAvailable !== false;
+  const resolvedNpuBackendAvailable = !backendDiscoveryUnavailable && isNpuBackendAvailable === true;
   const normalizedBackendPolicy = loadParamsDraft.backendPolicy && loadParamsDraft.backendPolicy !== 'auto'
     ? loadParamsDraft.backendPolicy
     : undefined;
   const normalizedDefaultBackendPolicy = defaultLoadParams.backendPolicy && defaultLoadParams.backendPolicy !== 'auto'
     ? defaultLoadParams.backendPolicy
     : undefined;
-  const showOffloadLayerControls = showGpuControls
+  const showOffloadLayerControls = !backendDiscoveryUnavailable && (
+    showGpuControls
     || resolvedNpuBackendAvailable
     || normalizedBackendPolicy === 'npu'
-    || normalizedDefaultBackendPolicy === 'npu';
+    || normalizedDefaultBackendPolicy === 'npu'
+  );
   const shouldShowBackendPolicyControls = resolvedNpuBackendAvailable
     || normalizedBackendPolicy !== undefined
     || normalizedDefaultBackendPolicy !== undefined;
@@ -460,6 +476,62 @@ export function ModelParametersSheet({
       : engineDiagnostics?.backendMode === 'npu'
         ? t('chat.modelControls.backendModeNpu')
         : t('chat.modelControls.backendModeUnknown');
+  const autotuneBestStable = autotuneResult?.bestStable ?? null;
+  const autotuneBestStableBackendLabel = autotuneBestStable?.backendMode === 'cpu'
+    ? t('chat.modelControls.backendModeCpu')
+    : autotuneBestStable?.backendMode === 'gpu'
+      ? t('chat.modelControls.backendModeGpu')
+      : autotuneBestStable?.backendMode === 'npu'
+        ? t('chat.modelControls.backendModeNpu')
+        : t('chat.modelControls.backendModeUnknown');
+  const requestedBackendPolicyLabel = engineDiagnostics?.requestedBackendPolicy === 'cpu'
+    ? t('chat.modelControls.backendPolicyCpu')
+    : engineDiagnostics?.requestedBackendPolicy === 'gpu'
+      ? t('chat.modelControls.backendPolicyGpu')
+      : engineDiagnostics?.requestedBackendPolicy === 'npu'
+        ? t('chat.modelControls.backendPolicyNpu')
+        : t('chat.modelControls.backendPolicyAuto');
+  const effectiveBackendPolicyLabel = engineDiagnostics?.effectiveBackendPolicy === 'cpu'
+    ? t('chat.modelControls.backendPolicyCpu')
+    : engineDiagnostics?.effectiveBackendPolicy === 'gpu'
+      ? t('chat.modelControls.backendPolicyGpu')
+      : engineDiagnostics?.effectiveBackendPolicy === 'npu'
+        ? t('chat.modelControls.backendPolicyNpu')
+          : t('chat.modelControls.backendPolicyAuto');
+  const backendPolicyReasons = Array.isArray(engineDiagnostics?.backendPolicyReasons)
+    ? engineDiagnostics.backendPolicyReasons.filter((reason) => typeof reason === 'string' && reason.trim().length > 0)
+    : [];
+  const initGpuLayers = typeof engineDiagnostics?.initGpuLayers === 'number' && Number.isFinite(engineDiagnostics.initGpuLayers)
+    ? Math.max(0, Math.round(engineDiagnostics.initGpuLayers))
+    : null;
+  const initDevicesText = Array.isArray(engineDiagnostics?.initDevices) && engineDiagnostics.initDevices.length > 0
+    ? engineDiagnostics.initDevices.join(', ')
+    : null;
+  const initCacheTypeK = typeof engineDiagnostics?.initCacheTypeK === 'string' ? engineDiagnostics.initCacheTypeK.trim() : '';
+  const initCacheTypeV = typeof engineDiagnostics?.initCacheTypeV === 'string' ? engineDiagnostics.initCacheTypeV.trim() : '';
+  const initFlashAttnType = typeof engineDiagnostics?.initFlashAttnType === 'string'
+    ? engineDiagnostics.initFlashAttnType.trim()
+    : '';
+  const initUseMmap = typeof engineDiagnostics?.initUseMmap === 'boolean' ? engineDiagnostics.initUseMmap : null;
+  const initUseMlock = typeof engineDiagnostics?.initUseMlock === 'boolean' ? engineDiagnostics.initUseMlock : null;
+  const initNParallel = typeof engineDiagnostics?.initNParallel === 'number' && Number.isFinite(engineDiagnostics.initNParallel)
+    ? Math.max(1, Math.round(engineDiagnostics.initNParallel))
+    : null;
+  const initNThreads = typeof engineDiagnostics?.initNThreads === 'number' && Number.isFinite(engineDiagnostics.initNThreads)
+    ? Math.max(1, Math.round(engineDiagnostics.initNThreads))
+    : null;
+  const initCpuMask = typeof engineDiagnostics?.initCpuMask === 'string' ? engineDiagnostics.initCpuMask.trim() : '';
+  const initCpuStrict = typeof engineDiagnostics?.initCpuStrict === 'boolean' ? engineDiagnostics.initCpuStrict : null;
+  const initNBatch = typeof engineDiagnostics?.initNBatch === 'number' && Number.isFinite(engineDiagnostics.initNBatch)
+    ? Math.max(1, Math.round(engineDiagnostics.initNBatch))
+    : null;
+  const initNUbatch = typeof engineDiagnostics?.initNUbatch === 'number' && Number.isFinite(engineDiagnostics.initNUbatch)
+    ? Math.max(1, Math.round(engineDiagnostics.initNUbatch))
+    : null;
+  const initKvUnified = typeof engineDiagnostics?.initKvUnified === 'boolean' ? engineDiagnostics.initKvUnified : null;
+  const backendInitAttempts = Array.isArray(engineDiagnostics?.backendInitAttempts)
+    ? engineDiagnostics.backendInitAttempts
+    : [];
   const runtimeRequestedGpuLayers = typeof engineDiagnostics?.requestedGpuLayers === 'number'
     && Number.isFinite(engineDiagnostics.requestedGpuLayers)
     ? Math.max(0, Math.round(engineDiagnostics.requestedGpuLayers))
@@ -753,7 +825,51 @@ export function ModelParametersSheet({
                   </ScreenCard>
                 ) : null}
 
-                {engineDiagnostics && typeof loadedContextSize === 'number' && Number.isFinite(loadedContextSize) ? (
+                {showAdvancedInferenceControls ? (
+                  <ScreenCard className="mt-3" tone="default" variant="inset" padding="compact">
+                    <Text className="text-xs font-semibold uppercase tracking-wider text-primary-500">
+                      {t('chat.modelControls.backendBenchmarkTitle')}
+                    </Text>
+                    <Text className="mt-1 text-sm leading-5 text-typography-600 dark:text-typography-300">
+                      {t('chat.modelControls.backendBenchmarkDescription')}
+                    </Text>
+
+                    {autotuneBestStable ? (
+                      <Text className="mt-2 text-sm leading-5 text-typography-700 dark:text-typography-200">
+                        {t('chat.modelControls.backendBenchmarkBestStable', {
+                          backend: autotuneBestStableBackendLabel,
+                          layers: Math.max(0, Math.round(autotuneBestStable.nGpuLayers)),
+                        })}
+                      </Text>
+                    ) : (
+                      <Text className="mt-2 text-sm leading-5 text-typography-700 dark:text-typography-200">
+                        {t('chat.modelControls.backendBenchmarkNoResult')}
+                      </Text>
+                    )}
+
+                    {showApplyReload ? (
+                      <Text className="mt-2 text-xs leading-5 text-typography-500 dark:text-typography-400">
+                        {t('chat.modelControls.backendBenchmarkPendingChangesHint')}
+                      </Text>
+                    ) : null}
+
+                    <Box className="mt-3 flex-row justify-end">
+                      <Button
+                        onPress={() => onRunAutotune?.()}
+                        action="softPrimary"
+                        size="sm"
+                        disabled={!canRunAutotune || isAutotuneRunning || !onRunAutotune}
+                      >
+                        <ButtonText>{isAutotuneRunning
+                          ? t('chat.modelControls.backendBenchmarkRunning')
+                          : t('chat.modelControls.backendBenchmarkRun')}
+                        </ButtonText>
+                      </Button>
+                    </Box>
+                  </ScreenCard>
+                ) : null}
+
+                {showAdvancedInferenceControls && engineDiagnostics && typeof loadedContextSize === 'number' && Number.isFinite(loadedContextSize) ? (
                   <ScreenCard className="mt-3" tone={shouldHighlightNoGpu ? 'warning' : 'default'} variant="inset" padding="compact">
                     <Text
                       className={`text-xs font-semibold uppercase tracking-wider ${shouldHighlightNoGpu ? 'text-warning-700 dark:text-warning-200' : 'text-primary-500'}`}
@@ -764,6 +880,19 @@ export function ModelParametersSheet({
                       <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
                         {t('chat.modelControls.runtimeBackendBackend', { backend: backendLabel })}
                       </Text>
+
+                      {engineDiagnostics.requestedBackendPolicy ? (
+                        <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                          {t('chat.modelControls.runtimeBackendRequestedPolicy', { policy: requestedBackendPolicyLabel })}
+                        </Text>
+                      ) : null}
+
+                      {engineDiagnostics.effectiveBackendPolicy &&
+                      engineDiagnostics.effectiveBackendPolicy !== engineDiagnostics.requestedBackendPolicy ? (
+                        <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                          {t('chat.modelControls.runtimeBackendEffectivePolicy', { policy: effectiveBackendPolicyLabel })}
+                        </Text>
+                      ) : null}
 
                       {runtimeRequestedGpuLayers !== null ? (
                         <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
@@ -777,11 +906,92 @@ export function ModelParametersSheet({
                         </Text>
                       ) : null}
 
+                      {initGpuLayers !== null ? (
+                        <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                          {t('chat.modelControls.runtimeBackendInitLayers', { count: initGpuLayers })}
+                        </Text>
+                      ) : null}
+
+                      {initDevicesText ? (
+                        <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                          {t('chat.modelControls.runtimeBackendInitDevices', { devices: initDevicesText })}
+                        </Text>
+                      ) : null}
+
                       {engineDiagnostics.backendDevices.length > 0 ? (
                         <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
                           {t('chat.modelControls.runtimeBackendDevices', { devices: engineDiagnostics.backendDevices.join(', ') })}
                         </Text>
                       ) : null}
+
+                      {initCacheTypeK && initCacheTypeV ? (
+                        <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                          {t('chat.modelControls.runtimeBackendKvCacheTypes', { k: initCacheTypeK, v: initCacheTypeV })}
+                        </Text>
+                      ) : null}
+
+                      {initFlashAttnType ? (
+                        <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                          {t('chat.modelControls.runtimeBackendFlashAttn', { value: initFlashAttnType })}
+                        </Text>
+                      ) : null}
+
+                      {initUseMmap !== null ? (
+                        <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                          {t('chat.modelControls.runtimeBackendMmap', { value: initUseMmap ? t('chat.modelControls.runtimeBackendEnabled') : t('chat.modelControls.runtimeBackendDisabled') })}
+                        </Text>
+                      ) : null}
+
+                      {initUseMlock !== null ? (
+                        <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                          {t('chat.modelControls.runtimeBackendMlock', { value: initUseMlock ? t('chat.modelControls.runtimeBackendEnabled') : t('chat.modelControls.runtimeBackendDisabled') })}
+                        </Text>
+                      ) : null}
+
+                      {initNParallel !== null ? (
+                        <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                          {t('chat.modelControls.runtimeBackendParallelSlots', { count: initNParallel })}
+                        </Text>
+                      ) : null}
+
+                      {initNThreads !== null ? (
+                        <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                          {t('chat.modelControls.runtimeBackendThreads', { count: initNThreads })}
+                        </Text>
+                      ) : null}
+
+                      {initCpuMask ? (
+                        <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                          {t('chat.modelControls.runtimeBackendCpuMask', { mask: initCpuMask })}
+                        </Text>
+                      ) : null}
+
+                      {initCpuStrict !== null ? (
+                        <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                          {t('chat.modelControls.runtimeBackendCpuStrict', { value: initCpuStrict ? t('chat.modelControls.runtimeBackendEnabled') : t('chat.modelControls.runtimeBackendDisabled') })}
+                        </Text>
+                      ) : null}
+
+                      {initNBatch !== null && initNUbatch !== null ? (
+                        <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                          {t('chat.modelControls.runtimeBackendBatch', { batch: initNBatch, ubatch: initNUbatch })}
+                        </Text>
+                      ) : null}
+
+                      {initKvUnified !== null ? (
+                        <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                          {t('chat.modelControls.runtimeBackendKvUnified', { value: initKvUnified ? t('chat.modelControls.runtimeBackendEnabled') : t('chat.modelControls.runtimeBackendDisabled') })}
+                        </Text>
+                      ) : null}
+
+                      {backendPolicyReasons.length > 0 ? backendPolicyReasons.map((reason, index) => {
+                        const localizedReason = t(reason, { defaultValue: reason });
+                        return (
+                          <Text key={`backend-policy-reason-${index}`} className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                            {t('chat.modelControls.runtimeBackendPolicyReason', { reason: localizedReason })}
+                          </Text>
+                        );
+                      }) : null}
 
                       {engineDiagnostics.androidLib ? (
                         <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
@@ -793,6 +1003,39 @@ export function ModelParametersSheet({
                         <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
                           {t('chat.modelControls.runtimeBackendReason', { reason: engineDiagnostics.reasonNoGPU })}
                         </Text>
+                      ) : null}
+
+                      {backendInitAttempts.length > 0 ? (
+                        <Box className="mt-2 gap-1">
+                          <Text className="text-xs font-semibold uppercase tracking-wider text-primary-500">
+                            {t('chat.modelControls.runtimeBackendAttemptsTitle')}
+                          </Text>
+                          {backendInitAttempts.map((attempt, index) => {
+                            const attemptBackend = attempt.candidate === 'cpu'
+                              ? t('chat.modelControls.backendModeCpu')
+                              : attempt.candidate === 'gpu'
+                                ? t('chat.modelControls.backendModeGpu')
+                                : t('chat.modelControls.backendModeNpu');
+                            const attemptOutcome = attempt.outcome === 'success'
+                              ? t('chat.modelControls.runtimeBackendAttemptOutcomeSuccess')
+                              : attempt.outcome === 'error'
+                                ? t('chat.modelControls.runtimeBackendAttemptOutcomeError')
+                                : t('chat.modelControls.runtimeBackendAttemptOutcomeSkipped');
+                            const attemptDetails = [
+                              `layers=${attempt.nGpuLayers}`,
+                              Array.isArray(attempt.devices) && attempt.devices.length > 0 ? `devices=${attempt.devices.join(', ')}` : null,
+                              typeof attempt.actualGpu === 'boolean' ? `gpu=${attempt.actualGpu ? 'yes' : 'no'}` : null,
+                              attempt.reasonNoGPU ? `reason=${attempt.reasonNoGPU}` : null,
+                              attempt.error ? `error=${attempt.error}` : null,
+                            ].filter((part): part is string => typeof part === 'string' && part.length > 0).join(' | ');
+
+                            return (
+                              <Text key={`backend-init-attempt-${index}`} className="text-xs leading-5 text-typography-500 dark:text-typography-400">
+                                {`${index + 1}) ${attemptBackend} - ${attemptOutcome}${attemptDetails ? ` | ${attemptDetails}` : ''}`}
+                              </Text>
+                            );
+                          })}
+                        </Box>
                       ) : null}
 
                       {engineDiagnostics.systemInfo ? (

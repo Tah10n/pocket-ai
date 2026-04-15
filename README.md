@@ -61,6 +61,7 @@
 - Background generation support with system notifications (Android foreground service, iOS time-limited)
 - Per-model generation controls: temperature, top-p/k, min-p, repetition penalty, seed
 - Load profiles for GPU layers, context window, and KV cache precision
+- Hardware acceleration when available (Android OpenCL GPU on Adreno 7xx+, Android Hexagon/HTP NPU on SM8450+). Unsupported backends are automatically disabled for stability.
 - RAM-aware safety checks that block loading models that won't fit
 - Context window bounded by model metadata and estimated device RAM headroom
 

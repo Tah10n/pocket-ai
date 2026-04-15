@@ -163,6 +163,8 @@ keyPassword=your-key-password
 - Change the context window or GPU layers and confirm the sheet shows the pending load-profile state plus `Save load profile` for an inactive model or `Apply & reload` for the active model.
 - Change the KV cache type and confirm the sheet treats it as a load-profile change (persisted per-model, reload-required for the active model).
 - Switch the seed between `Random` and `Fixed`, set a numeric seed value, and confirm it affects the next response without requiring a reload.
+- On an Android device without compatible acceleration backends (for example Snapdragon 888 / SM8350), confirm NPU is not offered (or is disabled), loading uses a safe fallback, and model load does not crash.
+- On an Android device with compatible acceleration backends (SM8450+ / Snapdragon 8 Gen 1+), confirm NPU is offered and can load a model without crashing.
 - Try loading a model or load profile that exceeds the estimated RAM budget and confirm the app shows a memory warning or blocks the load instead of crashing during native initialization.
 - Try loading a model that only fits at the minimum context window (512 tokens) and confirm it is marked as `Won't fit RAM` and loading is disabled.
 - Load the model and confirm the app reports the engine as ready.

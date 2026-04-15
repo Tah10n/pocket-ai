@@ -2376,12 +2376,21 @@ class LLMEngineService {
             ...(reasonNoGPU ? { reasonNoGPU } : null),
           });
 
-          if (candidate === 'npu' && !actualGpu && hasAcceleratorCandidateAfter) {
+          // If an accelerator candidate initializes but the runtime reports CPU mode,
+          // treat this as a degraded init and continue to the next candidate.
+          // This ensures we eventually land on a true CPU profile (n_gpu_layers=0, flash_attn=off)
+          // and also allows switching to the next accelerator candidate when AUTO prefers one.
+          if (candidate !== 'cpu' && !actualGpu) {
             if (process.env.NODE_ENV !== 'test') {
-              console.warn('[LLMEngine] NPU init returned CPU runtime, retrying next accelerator candidate');
+              const fallbackLabel = hasAcceleratorCandidateAfter
+                ? 'retrying next accelerator candidate'
+                : 'falling back to CPU profile';
+              console.warn(`[LLMEngine] ${candidate.toUpperCase()} init returned CPU runtime, ${fallbackLabel}`);
             }
             await llama.releaseAllLlama().catch(() => undefined);
-            lastBackendInitError = new Error(reasonNoGPU || 'NPU acceleration was not enabled.');
+            lastBackendInitError = new Error(
+              reasonNoGPU || `${candidate.toUpperCase()} acceleration was not enabled.`,
+            );
             continue;
           }
 
@@ -2428,6 +2437,15 @@ class LLMEngineService {
       }
 
       this.backendInitAttemptsSnapshot = backendInitAttempts;
+
+      // If the user explicitly requested an accelerator but we ended up initializing a CPU profile,
+      // reflect that in the effective backend policy so diagnostics/UI make the fallback obvious.
+      if (
+        resolvedInitProfile?.backendMode === 'cpu'
+        && (normalizedBackendPolicy === 'gpu' || normalizedBackendPolicy === 'npu')
+      ) {
+        this.effectiveBackendPolicy = 'cpu';
+      }
 
       if (resolvedInitProfile) {
         this.initGpuLayers = resolvedInitGpuLayers;

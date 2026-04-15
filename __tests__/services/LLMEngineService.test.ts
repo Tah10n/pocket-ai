@@ -271,25 +271,36 @@ describe('LLMEngineService', () => {
       gpuLayers: 12,
       kvCacheType: 'f16',
     });
-    (llamaRn.initLlama as jest.Mock).mockResolvedValueOnce({
-      completion: (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock,
-      stopCompletion: jest.fn().mockResolvedValue(undefined),
-      gpu: false,
-      devices: [],
-      reasonNoGPU: 'OpenCL backend unavailable',
-      systemInfo: 'Android test device',
-      androidLib: null,
+    (llamaRn.initLlama as jest.Mock).mockImplementation(async (options?: { n_gpu_layers?: number }) => {
+      const layers = options?.n_gpu_layers ?? 0;
+      return {
+        completion: (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock,
+        stopCompletion: jest.fn().mockResolvedValue(undefined),
+        gpu: false,
+        devices: [],
+        reasonNoGPU: layers > 0 ? 'OpenCL backend unavailable' : 'CPU fallback',
+        systemInfo: 'Android test device',
+        androidLib: null,
+      };
     });
 
     await llmEngineService.load('test/model', { forceReload: true });
 
+    const calls = (llamaRn.initLlama as jest.Mock).mock.calls;
+    expect(calls).toHaveLength(2);
+    expect((calls[0][0]?.n_gpu_layers ?? 0)).toBeGreaterThan(0);
+    expect(calls[1][0]?.n_gpu_layers ?? 0).toBe(0);
     expect(llmEngineService.getLoadedGpuLayers()).toBe(0);
     expect(llmEngineService.getState().diagnostics).toEqual(expect.objectContaining({
       backendMode: 'cpu',
       requestedGpuLayers: 12,
       loadedGpuLayers: 0,
       actualGpuAccelerated: false,
-      reasonNoGPU: 'OpenCL backend unavailable',
+      reasonNoGPU: 'CPU fallback',
+      backendInitAttempts: expect.arrayContaining([
+        expect.objectContaining({ candidate: 'gpu', outcome: 'success', actualGpu: false, reasonNoGPU: 'OpenCL backend unavailable' }),
+        expect.objectContaining({ candidate: 'cpu', outcome: 'success', actualGpu: false }),
+      ]),
     }));
   });
 
@@ -468,13 +479,17 @@ describe('LLMEngineService', () => {
 
     await llmEngineService.load('test/model', { forceReload: true });
 
-    expect((llamaRn.initLlama as jest.Mock).mock.calls).toHaveLength(1);
+    const calls = (llamaRn.initLlama as jest.Mock).mock.calls;
+    expect(calls).toHaveLength(2);
+    expect(calls[0][0].devices).toEqual(['HTP0']);
+    expect(calls[1][0].devices).toBeUndefined();
     expect(llmEngineService.getLoadedGpuLayers()).toBe(0);
     expect(llmEngineService.getState().diagnostics).toEqual(expect.objectContaining({
       backendMode: 'cpu',
-      backendInitAttempts: [
+      backendInitAttempts: expect.arrayContaining([
         expect.objectContaining({ candidate: 'npu', outcome: 'success', actualGpu: false }),
-      ],
+        expect.objectContaining({ candidate: 'cpu', outcome: 'success', actualGpu: false }),
+      ]),
     }));
   });
 
@@ -560,17 +575,20 @@ describe('LLMEngineService', () => {
 
     await llmEngineService.load('test/model', { forceReload: true });
 
-    expect((llamaRn.initLlama as jest.Mock).mock.calls).toHaveLength(1);
-    expect((llamaRn.initLlama as jest.Mock).mock.calls[0][0].devices).toEqual(['HTP0']);
+    const calls = (llamaRn.initLlama as jest.Mock).mock.calls;
+    expect(calls).toHaveLength(2);
+    expect(calls[0][0].devices).toEqual(['HTP0']);
+    expect(calls[1][0].devices).toBeUndefined();
     expect(llmEngineService.getLoadedGpuLayers()).toBe(0);
     expect(llmEngineService.getState().diagnostics).toEqual(expect.objectContaining({
       backendMode: 'cpu',
       requestedBackendPolicy: 'npu',
-      effectiveBackendPolicy: 'npu',
+      effectiveBackendPolicy: 'cpu',
       reasonNoGPU: 'HTP acceleration disabled',
-      backendInitAttempts: [
+      backendInitAttempts: expect.arrayContaining([
         expect.objectContaining({ candidate: 'npu', outcome: 'success', actualGpu: false }),
-      ],
+        expect.objectContaining({ candidate: 'cpu', outcome: 'success', actualGpu: false }),
+      ]),
     }));
   });
 
@@ -643,7 +661,7 @@ describe('LLMEngineService', () => {
     expect(llmEngineService.getState().diagnostics).toEqual(expect.objectContaining({
       backendMode: 'cpu',
       requestedBackendPolicy: 'gpu',
-      effectiveBackendPolicy: 'gpu',
+      effectiveBackendPolicy: 'cpu',
       backendPolicyReasons: expect.arrayContaining([
         'inference.backendPolicyReason.gpuRequestedNoDevicesDiscovered',
       ]),

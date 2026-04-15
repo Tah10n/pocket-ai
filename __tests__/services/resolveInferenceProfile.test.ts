@@ -103,7 +103,7 @@ describe('resolveInferenceProfileCandidates', () => {
       baseProfile,
     });
 
-    expect(result.effectiveBackendPolicy).toBe('gpu');
+    expect(result.effectiveBackendPolicy).toBe('cpu');
     expect(result.reasons).toEqual(expect.arrayContaining([
       'inference.backendPolicyReason.gpuRequestedNoDevicesDiscovered',
     ]));

@@ -53,6 +53,21 @@ jest.mock('react-native-fs', () => ({
     exists: jest.fn().mockResolvedValue(true),
 }));
 
+function createMockContext(options?: { n_gpu_layers?: number }) {
+    const layers = options?.n_gpu_layers ?? 0;
+    const accelerated = layers > 0;
+
+    return {
+        completion: jest.fn().mockResolvedValue({ text: '' }),
+        stopCompletion: jest.fn().mockResolvedValue(undefined),
+        gpu: accelerated,
+        devices: accelerated ? ['Adreno GPU'] : [],
+        reasonNoGPU: accelerated ? '' : 'GPU disabled',
+        systemInfo: 'Android test device',
+        androidLib: accelerated ? 'libOpenCL.so' : null,
+    };
+}
+
 describe('LLMEngineService Stability', () => {
     const mockModel = {
         id: 'repo/model',
@@ -66,6 +81,7 @@ describe('LLMEngineService Stability', () => {
     beforeEach(() => {
         jest.clearAllMocks();
         (initLlama as jest.Mock).mockReset();
+        (initLlama as jest.Mock).mockImplementation(async (options?: { n_gpu_layers?: number }) => createMockContext(options));
         (releaseAllLlama as jest.Mock).mockResolvedValue(undefined);
         (registry.getModel as jest.Mock).mockReturnValue({
             id: mockModel.id,
@@ -94,7 +110,7 @@ describe('LLMEngineService Stability', () => {
         const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
 
         (DeviceInfo.getTotalMemory as jest.Mock).mockRejectedValueOnce(new Error('E_TOTAL_MEM'));
-        (initLlama as jest.Mock).mockResolvedValue({}); // Success
+        (initLlama as jest.Mock).mockImplementation(async (options?: { n_gpu_layers?: number }) => createMockContext(options));
 
         try {
             await expect(llmEngineService.load(mockModel.id)).resolves.toBeUndefined();
@@ -122,7 +138,7 @@ describe('LLMEngineService Stability', () => {
     it('uses 0 GPU layers on low-end devices (e.g. 4GB RAM)', async () => {
         // Mock 4GB RAM
         (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(4 * 1024 * 1024 * 1024);
-        (initLlama as jest.Mock).mockResolvedValue({}); // Success
+        (initLlama as jest.Mock).mockImplementation(async (options?: { n_gpu_layers?: number }) => createMockContext(options));
 
         await llmEngineService.load(mockModel.id);
 
@@ -143,7 +159,7 @@ describe('LLMEngineService Stability', () => {
             if ((options?.n_gpu_layers ?? 0) > 0) {
                 throw new Error('GPU OOM');
             }
-            return {};
+            return createMockContext(options);
         });
 
         await llmEngineService.load(mockModel.id);
@@ -159,7 +175,7 @@ describe('LLMEngineService Stability', () => {
 
     it('unloads model automatically when system issues memory warning', async () => {
         (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(8 * 1024 * 1024 * 1024);
-        (initLlama as jest.Mock).mockResolvedValue({});
+        (initLlama as jest.Mock).mockImplementation(async (options?: { n_gpu_layers?: number }) => createMockContext(options));
 
         await llmEngineService.load(mockModel.id);
         expect(llmEngineService.getState().status).toBe('ready');
@@ -187,10 +203,10 @@ describe('LLMEngineService Stability', () => {
 
         let resolveFirstLoad: (() => void) | undefined;
         (initLlama as jest.Mock)
-            .mockImplementationOnce(() => new Promise((resolve) => {
-                resolveFirstLoad = () => resolve({});
+            .mockImplementationOnce((options?: { n_gpu_layers?: number }) => new Promise((resolve) => {
+                resolveFirstLoad = () => resolve(createMockContext(options));
             }))
-            .mockResolvedValueOnce({});
+            .mockImplementationOnce(async (options?: { n_gpu_layers?: number }) => createMockContext(options));
 
         const firstLoad = llmEngineService.load('repo/model-a');
         const secondLoad = llmEngineService.load('repo/model-b');
@@ -217,12 +233,13 @@ describe('LLMEngineService Stability', () => {
             resolveCompletion?.({ text: 'Stopped during unload' });
         });
 
-        (initLlama as jest.Mock).mockResolvedValue({
+        (initLlama as jest.Mock).mockImplementation(async (options?: { n_gpu_layers?: number }) => ({
+            ...createMockContext(options),
             completion: jest.fn(() => new Promise((resolve) => {
                 resolveCompletion = resolve;
             })),
             stopCompletion,
-        });
+        }));
 
         await llmEngineService.load(mockModel.id);
         const completionPromise = llmEngineService.chatCompletion({

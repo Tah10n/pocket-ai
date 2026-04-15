@@ -703,7 +703,9 @@ export function useModelParametersSheetController({
       const clampedNextGpuLayers = clampGpuLayers(nextGpuLayers, gpuLayersCeiling);
       const isResetToDefaultProfile =
         nextContextSize === defaultContextSize
-        && (clampedNextGpuLayers ?? recommendedGpuLayers) === recommendedGpuLayers
+        // Treat GPU layers as "default" only when we stay on Auto (null), to avoid
+        // racing async recommendations and accidentally clearing explicit values.
+        && clampedNextGpuLayers === null
         && nextKvCacheType === DEFAULT_MODEL_LOAD_PARAMETERS.kvCacheType
         && normalizedNextBackendPolicy === undefined;
 
@@ -806,7 +808,6 @@ export function useModelParametersSheetController({
     effectiveDefaultLoadParams.backendPolicy,
     onAfterActiveModelReload,
     gpuLayersCeiling,
-    recommendedGpuLayers,
     isActiveModel,
     showError,
     t,

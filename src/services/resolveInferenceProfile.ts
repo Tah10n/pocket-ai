@@ -206,7 +206,8 @@ export function resolveInferenceProfileCandidates({
           : 'inference.backendPolicyReason.gpuRequestedNoDevicesDiscovered');
       }
       return {
-        effectiveBackendPolicy,
+        // GPU policy cannot be satisfied on this device, so reflect the CPU fallback.
+        effectiveBackendPolicy: 'cpu',
         candidates: [
           {
             ...baseProfile,

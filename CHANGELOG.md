@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > Note: This file is maintained automatically by Release Please based on Conventional Commits (PR titles).
 > Avoid editing it manually unless you are bootstrapping or fixing the release history.
 
+## [1.1.1](https://github.com/Tah10n/pocket-ai/compare/v1.1.0...v1.1.1) (2026-04-16)
+
+
+### Bug Fixes
+
+* harden model orchestration ([#38](https://github.com/Tah10n/pocket-ai/issues/38)) ([52613ab](https://github.com/Tah10n/pocket-ai/commit/52613ab053940f4054444b3bf06cd9d82bc86110))
+* stabilize llama.rn integration and backend inference policy ([#42](https://github.com/Tah10n/pocket-ai/issues/42)) ([d5faec9](https://github.com/Tah10n/pocket-ai/commit/d5faec9763b157277c545e4df78395aa1e25e724))
+* **ui:** make chat messages text-selectable ([#36](https://github.com/Tah10n/pocket-ai/issues/36)) ([049ceaa](https://github.com/Tah10n/pocket-ai/commit/049ceaafd857631a5ec744ced450bbc3ce629caf))
+
 ## [1.1.0](https://github.com/Tah10n/pocket-ai/compare/v1.0.0...v1.1.0) (2026-04-08)
 
 

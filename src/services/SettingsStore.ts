@@ -1,5 +1,6 @@
 import type { MMKV } from 'react-native-mmkv';
 import { createStorage } from './storage';
+import { DEFAULT_REASONING_EFFORT, normalizeReasoningEffort, type ReasoningEffort } from '../types/reasoning';
 import { MAX_CONTEXT_WINDOW_TOKENS } from '../utils/contextWindow';
 import { UNKNOWN_MODEL_GPU_LAYERS_CEILING } from '../utils/modelLimits';
 
@@ -38,7 +39,7 @@ export interface GenerationParameters {
     minP: number;
     repetitionPenalty: number;
     maxTokens: number;
-    reasoningEnabled?: boolean;
+    reasoningEffort?: ReasoningEffort;
     seed: number | null;
 }
 
@@ -75,7 +76,7 @@ export interface AppSettings {
     minP: number;
     repetitionPenalty: number;
     maxTokens: number;
-    reasoningEnabled?: boolean;
+    reasoningEffort?: ReasoningEffort;
     seed: number | null;
     theme: 'light' | 'dark' | 'system';
     language: 'en' | 'ru';
@@ -95,7 +96,7 @@ export const DEFAULT_GENERATION_PARAMETERS: GenerationParameters = {
     minP: 0.05,
     repetitionPenalty: 1,
     maxTokens: 512,
-    reasoningEnabled: false,
+    reasoningEffort: DEFAULT_REASONING_EFFORT,
     seed: null,
 };
 
@@ -112,7 +113,7 @@ const DEFAULT_SETTINGS: AppSettings = {
     minP: DEFAULT_GENERATION_PARAMETERS.minP,
     repetitionPenalty: DEFAULT_GENERATION_PARAMETERS.repetitionPenalty,
     maxTokens: DEFAULT_GENERATION_PARAMETERS.maxTokens,
-    reasoningEnabled: DEFAULT_GENERATION_PARAMETERS.reasoningEnabled,
+    reasoningEffort: DEFAULT_GENERATION_PARAMETERS.reasoningEffort,
     seed: DEFAULT_GENERATION_PARAMETERS.seed,
     theme: 'system',
     language: 'en',
@@ -168,6 +169,7 @@ function normalizeChatRetentionDays(value: unknown): number | null {
 
 function sanitizeGenerationParameters(input: Partial<GenerationParameters> | undefined): GenerationParameters {
     const rawSeed: unknown = (input as { seed?: unknown } | undefined)?.seed;
+    const legacyReasoningEnabled = (input as { reasoningEnabled?: unknown } | undefined)?.reasoningEnabled;
     const seedCandidate = rawSeed == null
         ? null
         : typeof rawSeed === 'number'
@@ -192,7 +194,7 @@ function sanitizeGenerationParameters(input: Partial<GenerationParameters> | und
         minP: clampNumber(input?.minP, 0, 1, DEFAULT_GENERATION_PARAMETERS.minP),
         repetitionPenalty: clampNumber(input?.repetitionPenalty, 0, 2, DEFAULT_GENERATION_PARAMETERS.repetitionPenalty),
         maxTokens: Math.round(clampNumber(input?.maxTokens, 1, 8192, DEFAULT_GENERATION_PARAMETERS.maxTokens)),
-        reasoningEnabled: input?.reasoningEnabled === true,
+        reasoningEffort: normalizeReasoningEffort(input?.reasoningEffort, legacyReasoningEnabled),
         seed: normalizedSeed,
     };
 }
@@ -419,7 +421,7 @@ function sanitizeSettings(input: Partial<AppSettings>): AppSettings {
         minP: generationDefaults.minP,
         repetitionPenalty: generationDefaults.repetitionPenalty,
         maxTokens: generationDefaults.maxTokens,
-        reasoningEnabled: generationDefaults.reasoningEnabled,
+        reasoningEffort: generationDefaults.reasoningEffort,
         seed: generationDefaults.seed,
         theme: input.theme === 'light' || input.theme === 'dark' || input.theme === 'system' ? input.theme : DEFAULT_SETTINGS.theme,
         language: normalizeLanguage(input.language),
@@ -466,10 +468,15 @@ export function getSettings(): AppSettings {
         typeof parsed === 'object' &&
         parsed !== null &&
         Object.prototype.hasOwnProperty.call(parsed, 'chatRetentionDays');
+    const hasExplicitReasoningEffort =
+        typeof parsed === 'object' &&
+        parsed !== null &&
+        Object.prototype.hasOwnProperty.call(parsed, 'reasoningEffort');
 
     return sanitizeSettings({
         ...DEFAULT_SETTINGS,
         ...parsed,
+        reasoningEffort: hasExplicitReasoningEffort ? parsed.reasoningEffort : undefined,
         chatRetentionDays: hasExplicitChatRetention ? parsed.chatRetentionDays : null,
     });
 }
@@ -497,7 +504,7 @@ export function resetParameters() {
         minP: DEFAULT_GENERATION_PARAMETERS.minP,
         repetitionPenalty: DEFAULT_GENERATION_PARAMETERS.repetitionPenalty,
         maxTokens: DEFAULT_GENERATION_PARAMETERS.maxTokens,
-        reasoningEnabled: DEFAULT_GENERATION_PARAMETERS.reasoningEnabled,
+        reasoningEffort: DEFAULT_GENERATION_PARAMETERS.reasoningEffort,
         seed: DEFAULT_GENERATION_PARAMETERS.seed,
     });
 }

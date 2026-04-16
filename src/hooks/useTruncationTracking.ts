@@ -9,7 +9,7 @@ import {
   getThreadInferenceWindow,
   resolveThreadInferenceWindowOptions,
 } from '../utils/inferenceWindow';
-import { clampReasoningEnabled, resolveModelReasoningCapability } from '../utils/modelReasoningCapabilities';
+import { resolveModelReasoningCapability, resolveReasoningRuntimeConfig } from '../utils/modelReasoningCapabilities';
 
 type TruncationState = ReturnType<typeof createTruncationState>;
 
@@ -38,6 +38,22 @@ export function useTruncationTracking(
     state: EMPTY_TRUNCATION_STATE,
   });
 
+  let activeThreadReasoningEnabled = false;
+  let activeThreadReasoningFormat: 'none' | 'auto' | 'deepseek' = 'none';
+  let activeThreadResponseReserveTokens: number | undefined;
+  if (activeThread) {
+    const model = registry.getModel(activeThread.modelId);
+    const capability = resolveModelReasoningCapability(model, activeThread.modelId, model?.name);
+    const runtimeConfig = resolveReasoningRuntimeConfig({
+      reasoningEffort: activeThread.paramsSnapshot.reasoningEffort,
+      capability,
+      maxTokens: activeThread.paramsSnapshot.maxTokens,
+    });
+    activeThreadReasoningEnabled = runtimeConfig.enableThinking;
+    activeThreadReasoningFormat = runtimeConfig.reasoningFormat;
+    activeThreadResponseReserveTokens = runtimeConfig.responseReserveTokens;
+  }
+
   const heuristicTruncationState = useMemo(() => {
     if (!activeThread) {
       return EMPTY_TRUNCATION_STATE;
@@ -45,17 +61,11 @@ export function useTruncationTracking(
 
     const windowOptions = resolveThreadInferenceWindowOptions(activeThread, {
       maxContextTokens: activeContextTokenBudget,
+      responseReserveTokens: activeThreadResponseReserveTokens,
     });
     const { truncatedMessageIds } = getThreadInferenceWindow(activeThread, windowOptions);
     return createTruncationState(truncatedMessageIds);
-  }, [activeContextTokenBudget, activeThread]);
-
-  let activeThreadReasoningEnabled = false;
-  if (activeThread) {
-    const model = registry.getModel(activeThread.modelId);
-    const capability = resolveModelReasoningCapability(model, activeThread.modelId, model?.name);
-    activeThreadReasoningEnabled = clampReasoningEnabled(activeThread.paramsSnapshot.reasoningEnabled, capability);
-  }
+  }, [activeContextTokenBudget, activeThread, activeThreadResponseReserveTokens]);
 
   useEffect(() => {
     if (!activeThread || activeThread.status === 'generating') {
@@ -71,6 +81,7 @@ export function useTruncationTracking(
     let isCancelled = false;
     const windowOptions = resolveThreadInferenceWindowOptions(activeThread, {
       maxContextTokens: activeContextTokenBudget,
+      responseReserveTokens: activeThreadResponseReserveTokens,
     });
     const cacheKey = [
       activeThread.id,
@@ -79,6 +90,7 @@ export function useTruncationTracking(
       windowOptions.responseReserveTokens ?? null,
       windowOptions.promptSafetyMarginTokens ?? null,
       activeThreadReasoningEnabled ? 1 : 0,
+      activeThreadReasoningFormat,
       modelRegistryRevision,
     ].join(':');
 
@@ -94,7 +106,7 @@ export function useTruncationTracking(
 
     const tokenCountParams = {
       enable_thinking: activeThreadReasoningEnabled,
-      reasoning_format: activeThreadReasoningEnabled ? ('auto' as const) : ('none' as const),
+      reasoning_format: activeThreadReasoningFormat,
     };
 
     const countPromptTokens = async (messages: LlmChatMessage[]) =>
@@ -120,8 +132,13 @@ export function useTruncationTracking(
             ? String((error as { code?: unknown }).code)
             : null;
 
-          // Expected transient failures: fall back to heuristics without warning spam.
-          if (errorCode === 'engine_busy' || errorCode === 'engine_not_ready' || errorCode === 'engine_unloading') {
+          // Expected transient failures (and oversized messages): fall back to heuristics without warning spam.
+          if (
+            errorCode === 'engine_busy'
+            || errorCode === 'engine_not_ready'
+            || errorCode === 'engine_unloading'
+            || errorCode === 'message_too_long'
+          ) {
             return;
           }
 
@@ -132,7 +149,7 @@ export function useTruncationTracking(
     return () => {
       isCancelled = true;
     };
-  }, [activeContextTokenBudget, activeThread, activeThreadReasoningEnabled, modelRegistryRevision]);
+  }, [activeContextTokenBudget, activeThread, activeThreadReasoningEnabled, activeThreadReasoningFormat, activeThreadResponseReserveTokens, modelRegistryRevision]);
 
   const truncationState = useMemo(() => {
     if (!activeThread) {

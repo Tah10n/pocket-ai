@@ -30,7 +30,7 @@ import { resolveModelCapabilitySnapshot } from '@/utils/modelCapabilities';
 import { hasPersistedLoadProfileChanges } from '@/utils/modelLoadProfile';
 import { handleModelLoadMemoryPolicyError } from '@/utils/modelLoadMemoryPolicyPrompt';
 import {
-  clampReasoningEnabled,
+  clampReasoningEffort,
   normalizeReasoningPreference,
   resolveModelReasoningCapability,
 } from '@/utils/modelReasoningCapabilities';
@@ -857,18 +857,18 @@ export function useModelParametersSheetController({
   ]);
 
   const normalizeGenerationPartial = useCallback((partial: Partial<GenerationParameters>) => {
-    if (!Object.prototype.hasOwnProperty.call(partial, 'reasoningEnabled')) {
+    if (!Object.prototype.hasOwnProperty.call(partial, 'reasoningEffort')) {
       return partial;
     }
 
-    if (partial.reasoningEnabled === undefined) {
-      const { reasoningEnabled: _ignored, ...rest } = partial;
+    if (partial.reasoningEffort === undefined) {
+      const { reasoningEffort: _ignored, ...rest } = partial;
       return rest;
     }
 
     return {
       ...partial,
-      reasoningEnabled: clampReasoningEnabled(partial.reasoningEnabled, reasoningCapability),
+      reasoningEffort: clampReasoningEffort(partial.reasoningEffort, reasoningCapability),
     };
   }, [reasoningCapability]);
 
@@ -919,7 +919,7 @@ export function useModelParametersSheetController({
   }, [contextWindowCeiling, gpuLayersCeiling]);
 
   const handleResetParamField = useCallback((field: keyof GenerationParameters) => {
-    if (onResetParamField && field !== 'reasoningEnabled') {
+    if (onResetParamField) {
       onResetParamField(configurableModelId, field);
       return;
     }

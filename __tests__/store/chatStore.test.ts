@@ -548,7 +548,7 @@ describe('chatStore', () => {
         minP: 0.1,
         repetitionPenalty: 1.2,
         maxTokens: 512,
-        reasoningEnabled: true,
+        reasoningEffort: 'high',
         seed: null,
       });
     } finally {
@@ -565,7 +565,7 @@ describe('chatStore', () => {
           minP: 0.1,
           repetitionPenalty: 1.2,
           maxTokens: 512,
-          reasoningEnabled: true,
+          reasoningEffort: 'high',
           seed: null,
         },
       }),
@@ -948,6 +948,62 @@ describe('chatStore', () => {
       { role: 'assistant', content: `${longMessage}-4` },
     ]);
     expect(truncatedMessageIds).toEqual(['message-1', 'message-2']);
+  });
+
+  it('does not drop the last assistant message when the leading user message cannot fit the prompt budget', () => {
+    const longUserMessage = 'A'.repeat(220);
+    const thread: ChatThread = {
+      id: 'thread-assistant-only-budget',
+      title: 'Assistant-only budget thread',
+      modelId: 'author/model-q4',
+      presetId: 'preset-1',
+      presetSnapshot: {
+        id: 'preset-1',
+        name: 'Helpful Assistant',
+        systemPrompt: 'Be concise.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        topK: 40,
+        minP: 0.05,
+        repetitionPenalty: 1,
+        maxTokens: 70,
+        seed: null,
+      },
+      messages: [
+        {
+          id: 'message-1',
+          role: 'user',
+          content: longUserMessage,
+          createdAt: 1,
+          state: 'complete',
+        },
+        {
+          id: 'message-2',
+          role: 'assistant',
+          content: 'ok',
+          createdAt: 2,
+          state: 'complete',
+        },
+      ],
+      createdAt: 1,
+      updatedAt: 2,
+      status: 'idle',
+    };
+
+    const { messages, truncatedMessageIds } = getThreadInferenceWindow(thread, {
+      maxContextMessages: 24,
+      maxContextTokens: 19,
+      responseReserveTokens: 0,
+      promptSafetyMarginTokens: 0,
+    });
+
+    expect(messages).toEqual([
+      { role: 'system', content: 'Be concise.' },
+      { role: 'assistant', content: 'ok' },
+    ]);
+    expect(truncatedMessageIds).toEqual(['message-1']);
   });
 
   it('does not let a large response reserve evict short history from a roomy context window', () => {

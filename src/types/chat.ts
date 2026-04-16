@@ -1,4 +1,5 @@
 import { getVisibleMessageContent } from '../utils/chatPresentation';
+import { normalizeReasoningEffort, type ReasoningEffort } from './reasoning';
 
 export type ChatMessageRole = 'system' | 'user' | 'assistant';
 export type ChatMessageState = 'complete' | 'streaming' | 'stopped' | 'error';
@@ -11,7 +12,7 @@ export interface GenerationParamsSnapshot {
   minP?: number;
   repetitionPenalty?: number;
   maxTokens: number;
-  reasoningEnabled?: boolean;
+  reasoningEffort?: ReasoningEffort;
   seed: number | null;
 }
 
@@ -89,6 +90,7 @@ export interface LlmChatCompletionOptions {
     n_predict?: number;
     seed?: number;
     enable_thinking?: boolean;
+    thinking_budget_tokens?: number;
     reasoning_format?: 'none' | 'auto' | 'deepseek';
   };
 }
@@ -153,6 +155,7 @@ export function sanitizeHydratedThread(thread: ChatThread): ChatThread {
   );
 
   const removedStreamingMessages = sanitizedMessages.length !== thread.messages.length;
+  const legacyReasoningEnabled = (thread.paramsSnapshot as { reasoningEnabled?: unknown }).reasoningEnabled;
 
   return {
     ...thread,
@@ -167,7 +170,7 @@ export function sanitizeHydratedThread(thread: ChatThread): ChatThread {
       minP: thread.paramsSnapshot.minP ?? 0.05,
       repetitionPenalty: thread.paramsSnapshot.repetitionPenalty ?? 1,
       maxTokens: thread.paramsSnapshot.maxTokens,
-      reasoningEnabled: thread.paramsSnapshot.reasoningEnabled === true,
+      reasoningEffort: normalizeReasoningEffort(thread.paramsSnapshot.reasoningEffort, legacyReasoningEnabled),
       seed: thread.paramsSnapshot.seed ?? null,
     },
     titleSource: thread.titleSource === 'manual' ? 'manual' : 'derived',

@@ -351,10 +351,10 @@ jest.mock('@/components/ui/ModelParametersSheet', () => {
             mockReact.createElement(
               Pressable,
               {
-                testID: 'enable-reasoning-button',
-                onPress: () => onChangeParams({ reasoningEnabled: true }),
+                testID: 'set-medium-reasoning-effort-button',
+                onPress: () => onChangeParams({ reasoningEffort: 'medium' }),
               },
-              mockReact.createElement(Text, null, 'Enable reasoning'),
+              mockReact.createElement(Text, null, 'Set medium reasoning effort'),
             ),
             mockReact.createElement(
               Pressable,
@@ -552,7 +552,7 @@ describe('ChatScreen', () => {
           temperature: 0.7,
           topP: 0.6,
           maxTokens: 1024,
-          reasoningEnabled: false,
+          reasoningEffort: 'auto',
         },
       },
       modelLoadParamsByModelId: {},
@@ -573,7 +573,7 @@ describe('ChatScreen', () => {
             temperature: 0.7,
             topP: 0.6,
             maxTokens: 1024,
-            reasoningEnabled: false,
+            reasoningEffort: 'auto',
           },
           messages: [
             {
@@ -1052,7 +1052,7 @@ describe('ChatScreen', () => {
     expect(useChatStore.getState().getActiveThread()?.paramsSnapshot.topP).toBe(0.9);
   });
 
-  it('updates the active thread reasoning toggle from the model controls sheet', async () => {
+  it('updates the active thread reasoning effort from the model controls sheet', async () => {
     registry.saveModels([
       {
         id: 'author/model-q4',
@@ -1067,7 +1067,7 @@ describe('ChatScreen', () => {
     ]);
     const { getByTestId, rerender } = render(React.createElement(ChatScreen));
 
-    expect(useChatStore.getState().getActiveThread()?.paramsSnapshot.reasoningEnabled).not.toBe(true);
+    expect(useChatStore.getState().getActiveThread()?.paramsSnapshot.reasoningEffort).toBe('auto');
 
     await act(async () => {
       fireEvent.press(getByTestId('model-controls-button'));
@@ -1075,12 +1075,12 @@ describe('ChatScreen', () => {
     });
 
     await act(async () => {
-      fireEvent.press(getByTestId('enable-reasoning-button'));
+      fireEvent.press(getByTestId('set-medium-reasoning-effort-button'));
       await Promise.resolve();
     });
     rerender(React.createElement(ChatScreen));
 
-    expect(useChatStore.getState().getActiveThread()?.paramsSnapshot.reasoningEnabled).toBe(true);
+    expect(useChatStore.getState().getActiveThread()?.paramsSnapshot.reasoningEffort).toBe('medium');
   });
 
   it('keeps reasoning disabled for models without reasoning support', async () => {
@@ -1090,7 +1090,7 @@ describe('ChatScreen', () => {
           temperature: 0.7,
           topP: 0.6,
           maxTokens: 1024,
-          reasoningEnabled: true,
+          reasoningEffort: 'high',
         },
       },
     });
@@ -1100,7 +1100,7 @@ describe('ChatScreen', () => {
           ...useChatStore.getState().threads['thread-1'],
           paramsSnapshot: {
             ...useChatStore.getState().threads['thread-1'].paramsSnapshot,
-            reasoningEnabled: true,
+            reasoningEffort: 'high',
           },
         },
       },
@@ -1128,20 +1128,20 @@ describe('ChatScreen', () => {
 
     await waitFor(() => {
       expect(lastModelParametersSheetProps?.supportsReasoning).toBe(false);
-      expect(lastModelParametersSheetProps?.params.reasoningEnabled).toBe(false);
+      expect(lastModelParametersSheetProps?.params.reasoningEffort).toBe('auto');
       // Opening the sheet should not mutate persisted/thread params.
-      expect(useChatStore.getState().getActiveThread()?.paramsSnapshot.reasoningEnabled).toBe(true);
+      expect(useChatStore.getState().getActiveThread()?.paramsSnapshot.reasoningEffort).toBe('high');
     });
 
     await act(async () => {
-      lastModelParametersSheetProps?.onChangeParams({ reasoningEnabled: true });
+      lastModelParametersSheetProps?.onChangeParams({ reasoningEffort: 'high' });
       await Promise.resolve();
     });
 
-    expect(useChatStore.getState().getActiveThread()?.paramsSnapshot.reasoningEnabled).toBe(false);
+    expect(useChatStore.getState().getActiveThread()?.paramsSnapshot.reasoningEffort).toBe('auto');
   });
 
-  it('keeps reasoning forced on for reasoning-first models', async () => {
+  it('keeps auto reasoning effort enabled for reasoning-first models', async () => {
     updateSettings({
       activeModelId: 'author/model-r1',
       modelParamsByModelId: {
@@ -1149,7 +1149,7 @@ describe('ChatScreen', () => {
           temperature: 0.7,
           topP: 0.6,
           maxTokens: 1024,
-          reasoningEnabled: false,
+          reasoningEffort: 'auto',
         },
       },
     });
@@ -1160,7 +1160,7 @@ describe('ChatScreen', () => {
           modelId: 'author/model-r1',
           paramsSnapshot: {
             ...useChatStore.getState().threads['thread-1'].paramsSnapshot,
-            reasoningEnabled: false,
+            reasoningEffort: 'auto',
           },
         },
       },
@@ -1190,17 +1190,17 @@ describe('ChatScreen', () => {
 
     await waitFor(() => {
       expect(lastModelParametersSheetProps?.requiresReasoning).toBe(true);
-      expect(lastModelParametersSheetProps?.params.reasoningEnabled).toBe(true);
+      expect(lastModelParametersSheetProps?.params.reasoningEffort).toBe('auto');
       // Opening the sheet should not mutate persisted/thread params.
-      expect(useChatStore.getState().getActiveThread()?.paramsSnapshot.reasoningEnabled).toBe(false);
+      expect(useChatStore.getState().getActiveThread()?.paramsSnapshot.reasoningEffort).toBe('auto');
     });
 
     await act(async () => {
-      lastModelParametersSheetProps?.onChangeParams({ reasoningEnabled: false });
+      lastModelParametersSheetProps?.onChangeParams({ reasoningEffort: 'low' });
       await Promise.resolve();
     });
 
-    expect(useChatStore.getState().getActiveThread()?.paramsSnapshot.reasoningEnabled).toBe(true);
+    expect(useChatStore.getState().getActiveThread()?.paramsSnapshot.reasoningEffort).toBe('low');
   });
 
   it('keeps the reset context window draft instead of restoring the saved override', async () => {

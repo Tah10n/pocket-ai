@@ -57,5 +57,31 @@ describe('SettingsStore', () => {
 
     expect(getModelLoadParametersForModel('author/model-q4').backendPolicy).toBeUndefined();
   });
+
+  it('migrates legacy reasoningEnabled settings to reasoningEffort', () => {
+    getSettingsStorage().set('app_settings', JSON.stringify({
+      temperature: 0.7,
+      topP: 0.9,
+      maxTokens: 512,
+      reasoningEnabled: true,
+      modelParamsByModelId: {
+        'author/model-q4': {
+          temperature: 0.7,
+          topP: 0.9,
+          maxTokens: 1024,
+          reasoningEnabled: false,
+        },
+      },
+    }));
+
+    expect(getSettings()).toEqual(expect.objectContaining({
+      reasoningEffort: 'medium',
+      modelParamsByModelId: {
+        'author/model-q4': expect.objectContaining({
+          reasoningEffort: 'off',
+        }),
+      },
+    }));
+  });
 });
 

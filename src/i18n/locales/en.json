@@ -41,7 +41,8 @@
       "downloadHttpError": "The download failed because the remote server returned an error.",
       "downloadVerificationFailed": "The downloaded file could not be verified. Try downloading it again.",
       "downloadFileMissing": "The downloaded file could not be found on disk.",
-      "messageEmpty": "Type a message before sending."
+      "messageEmpty": "Type a message before sending.",
+      "messageTooLong": "This message is too long for the current context window. Shorten it or increase the context size in Model Controls."
     }
   },
   "notifications": {
@@ -284,12 +285,15 @@
       "saving": "Saving...",
       "liveSampling": "Live sampling",
       "liveSamplingDescription": "These controls affect the next response immediately and do not require reloading the model.",
-      "reasoning": "Reasoning",
-      "reasoningDescription": "Stores a separate reasoning trace for supported models without mixing it into the visible reply.",
-      "reasoningOff": "Off",
-      "reasoningOn": "On",
+      "reasoning": "Reasoning effort",
+      "reasoningDescription": "Controls how much thinking budget the model gets. Auto follows the model family when possible.",
+      "reasoningEffortOff": "Off",
+      "reasoningEffortAuto": "Auto",
+      "reasoningEffortLow": "Low",
+      "reasoningEffortMedium": "Medium",
+      "reasoningEffortHigh": "High",
       "reasoningUnsupported": "This model does not expose a separate reasoning stream.",
-      "reasoningRequired": "This model is reasoning-first, so the trace must stay enabled.",
+      "reasoningRequired": "This model is reasoning-first, so Off is not available and Auto keeps reasoning enabled by default. You can still change the level.",
       "seed": "Seed",
       "seedDescription": "Random seeds vary outputs. Fixed seeds help reproduce responses.",
       "seedRandom": "Random",

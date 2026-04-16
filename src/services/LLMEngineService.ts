@@ -1095,20 +1095,29 @@ class LLMEngineService {
         new Set(baseStopWords.map((stop) => stop.trim()).filter((stop) => stop.length > 0)),
       );
 
+      const completionParams: Record<string, unknown> = {
+        messages: completionMessages,
+        n_predict: params?.n_predict ?? 512,
+        temperature: params?.temperature ?? 0.7,
+        top_p: params?.top_p ?? 0.9,
+        top_k: params?.top_k ?? 40,
+        min_p: params?.min_p ?? 0.05,
+        penalty_repeat: params?.penalty_repeat ?? 1,
+        enable_thinking: params?.enable_thinking ?? false,
+        reasoning_format: params?.reasoning_format ?? 'none',
+        stop: resolvedStops,
+      };
+
+      if (typeof params?.seed === 'number' && Number.isFinite(params.seed)) {
+        completionParams.seed = Math.round(params.seed);
+      }
+
+      if (typeof params?.thinking_budget_tokens === 'number' && Number.isFinite(params.thinking_budget_tokens)) {
+        completionParams.thinking_budget_tokens = Math.max(0, Math.round(params.thinking_budget_tokens));
+      }
+
       const completionPromise = this.context!.completion(
-        {
-          messages: completionMessages,
-          n_predict: params?.n_predict ?? 512,
-          temperature: params?.temperature ?? 0.7,
-          top_p: params?.top_p ?? 0.9,
-          top_k: params?.top_k ?? 40,
-          min_p: params?.min_p ?? 0.05,
-          penalty_repeat: params?.penalty_repeat ?? 1,
-          seed: params?.seed ?? undefined,
-          enable_thinking: params?.enable_thinking ?? false,
-          reasoning_format: params?.reasoning_format ?? 'none',
-          stop: resolvedStops,
-        },
+        completionParams as any,
         (data: TokenData) => {
           if (data.token || data.content !== undefined || data.reasoning_content !== undefined) {
             onTokensStreamed();

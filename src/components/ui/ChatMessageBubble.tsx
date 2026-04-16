@@ -10,7 +10,7 @@ import { ScreenBadge, ScreenIconButton } from './ScreenShell';
 import { StreamingCursor } from './StreamingCursor';
 import { MarkdownRenderer } from './MarkdownRenderer';
 import { ThinkingPulse } from './ThinkingPulse';
-import { getAssistantPresentation, getCopyableAssistantContent } from '../../utils/chatPresentation';
+import { getAssistantPresentation } from '../../utils/chatPresentation';
 
 export interface ChatMessageBubbleProps {
   id: string;
@@ -106,15 +106,22 @@ const ChatMessageBubbleComponent = ({
   const hasThought = hasExplicitThoughtContent
     ? thoughtContent.trim().length > 0
     : Boolean(assistantPresentation?.hasThought);
+  const sanitizedExplicitAssistantContent = hasExplicitThoughtContent
+    ? getAssistantPresentation(content).finalContent
+    : content;
   const finalContent = hasExplicitThoughtContent
-    ? content
+    ? sanitizedExplicitAssistantContent
     : assistantPresentation?.finalContent ?? content;
   const shouldAnimateThought = isAssistantStreaming && hasThought;
   const showPerformanceLabel =
     !isUser &&
     typeof tokensPerSec === 'number' &&
     Number.isFinite(tokensPerSec);
-  const copyableContent = isUser || hasExplicitThoughtContent ? content : getCopyableAssistantContent(content);
+  const copyableContent = isUser
+    ? content
+    : hasExplicitThoughtContent
+      ? sanitizedExplicitAssistantContent
+      : (assistantPresentation?.hasThought ? assistantPresentation.finalContent : content);
   const hasCopyableContent = copyableContent.trim().length > 0;
   const shouldShowActionRow = !isStreaming && (
     hasCopyableContent
@@ -153,7 +160,7 @@ const ChatMessageBubbleComponent = ({
   const assistantBodyContent = isUser ? content : finalContent;
   const hasErrorMessage = !isUser && typeof errorMessage === 'string' && errorMessage.trim().length > 0;
   const shouldShowStreamingPlaceholder = isAssistantStreaming && !shouldShowThoughtSection && !assistantBodyContent;
-  const thoughtBubbleClassName = 'min-w-[220px] max-w-full rounded-[20px] border border-primary-500/15 bg-background-0/95 px-3 py-2 dark:border-primary-500/20 dark:bg-background-950/75';
+  const thoughtBubbleClassName = 'min-w-[220px] max-w-full rounded-[20px] border border-outline-200/80 bg-background-0/80 px-3 py-2 dark:border-outline-700/70 dark:bg-background-950/40';
 
   return (
     <Box className={`w-full flex-col gap-0.5 ${isUser ? 'items-end' : 'items-start'}`} onLayout={onLayout}>
@@ -204,7 +211,7 @@ const ChatMessageBubbleComponent = ({
               {isThoughtExpanded ? (
                 <Box
                   testID={`thought-panel-${id}`}
-                  className="mt-1.5 border-t border-primary-500/12 pt-1.5 dark:border-primary-500/20"
+                  className="mt-1.5 border-t border-outline-200/70 pt-1.5 dark:border-outline-700/60"
                 >
                   {thoughtContent ? (
                     isAssistantStreaming && (hasExplicitThoughtContent || assistantPresentation?.isThoughtStreaming) ? (

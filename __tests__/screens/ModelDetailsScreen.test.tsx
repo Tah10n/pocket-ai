@@ -310,7 +310,7 @@ jest.mock('../../src/services/SettingsStore', () => ({
     minP: 0.05,
     repetitionPenalty: 1,
     maxTokens: 512,
-    reasoningEnabled: false,
+    reasoningEffort: 'auto',
   })),
   getModelLoadParametersForModel: jest.fn(() => ({
     contextSize: 4096,

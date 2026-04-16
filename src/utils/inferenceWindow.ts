@@ -1,4 +1,5 @@
 import type { ChatMessage, ChatThread, LlmChatMessage } from '../types/chat';
+import { AppError } from '../services/AppError';
 import { getVisibleMessageContent } from './chatPresentation';
 
 export interface ThreadInferenceWindow {
@@ -219,7 +220,7 @@ export function getThreadInferenceWindow(
 
   while (
     effectiveHistoryStartIndex > 0 &&
-    normalizedHistoryMessages.length > 0 &&
+    normalizedHistoryMessages.length > 1 &&
     normalizedHistoryMessages[0]?.role === 'assistant'
   ) {
     effectiveHistoryStartIndex += 1;
@@ -302,7 +303,7 @@ export async function buildInferenceWindowWithAccurateTokenCounts(
     0,
     Math.round(options.promptSafetyMarginTokens ?? DEFAULT_INFERENCE_PROMPT_SAFETY_MARGIN_TOKENS),
   );
-  const responseReserveTokens = Math.max(
+  const requestedResponseReserveTokens = Math.max(
     0,
     Math.round(options.responseReserveTokens ?? thread.paramsSnapshot.maxTokens),
   );
@@ -341,9 +342,13 @@ export async function buildInferenceWindowWithAccurateTokenCounts(
     };
   }
 
-  const promptTokenBudget = Math.max(
+  const totalPromptBudget = Math.max(
     0,
-    maxContextTokens - promptSafetyMarginTokens - responseReserveTokens,
+    maxContextTokens - promptSafetyMarginTokens,
+  );
+  const balancedResponseReserveTokens = resolveBalancedResponseReserveTokens(
+    requestedResponseReserveTokens,
+    totalPromptBudget,
   );
 
   const tokenCountCache = new Map<number, number>();
@@ -361,6 +366,46 @@ export async function buildInferenceWindowWithAccurateTokenCounts(
   };
 
   const lastHistoryIndex = historyMessages.length - 1;
+
+  // Hard stop: if even the newest single message (plus system prompt) cannot fit inside the
+  // context window (after safety margin), we cannot build a valid inference prompt.
+  const lastMessageOnlyPromptTokens = await countTokensForHistoryStart(lastHistoryIndex);
+  if (lastMessageOnlyPromptTokens > totalPromptBudget) {
+    throw new AppError(
+      'message_too_long',
+      'This message is too long for the current context window. Shorten it or increase the context size in Model Controls.',
+      {
+        details: {
+          maxContextTokens,
+          promptSafetyMarginTokens,
+          totalPromptBudget,
+          lastMessageOnlyPromptTokens,
+        },
+      },
+    );
+  }
+
+  // If the prompt is too large to fit the requested reserve, shrink the reserve
+  // so we can at least include the minimum required tail messages.
+  const minimumRequiredHistoryStartIndex =
+    historyMessages[lastHistoryIndex]?.role === 'assistant'
+    && lastHistoryIndex > 0
+    && historyMessages[lastHistoryIndex - 1]?.role === 'user'
+      ? lastHistoryIndex - 1
+      : lastHistoryIndex;
+  const minimumRequiredPromptTokens = await countTokensForHistoryStart(minimumRequiredHistoryStartIndex);
+  const canFitMinimumRequiredPrompt = minimumRequiredPromptTokens <= totalPromptBudget;
+  const responseReserveTokens = canFitMinimumRequiredPrompt
+    ? Math.min(
+        balancedResponseReserveTokens,
+        Math.max(totalPromptBudget - minimumRequiredPromptTokens, 0),
+      )
+    : 0;
+  const promptTokenBudget = Math.max(
+    0,
+    maxContextTokens - promptSafetyMarginTokens - responseReserveTokens,
+  );
+
   const fitsBudget = async (historyStartIndex: number) =>
     (await countTokensForHistoryStart(historyStartIndex)) <= promptTokenBudget;
 
@@ -413,7 +458,7 @@ export async function buildInferenceWindowWithAccurateTokenCounts(
 
   while (
     effectiveHistoryStartIndex > 0 &&
-    normalizedHistoryMessages.length > 0 &&
+    normalizedHistoryMessages.length > 1 &&
     normalizedHistoryMessages[0]?.role === 'assistant'
   ) {
     effectiveHistoryStartIndex += 1;

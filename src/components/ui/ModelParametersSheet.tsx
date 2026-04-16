@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Modal, Switch } from 'react-native';
+import { Modal } from 'react-native';
 import Slider from '@react-native-community/slider';
 import { useTranslation } from 'react-i18next';
 import { Box } from '@/components/ui/box';
@@ -96,6 +96,7 @@ interface ParameterControlCardProps {
   children: React.ReactNode;
   variant?: 'standalone' | 'embedded';
   disabled?: boolean;
+  helperText?: string;
 }
 
 const accentEyebrowClassName = 'text-xs font-semibold uppercase tracking-wider text-primary-600 dark:text-primary-300';
@@ -126,6 +127,7 @@ function ParameterControlCard({
   children,
   variant = 'standalone',
   disabled = false,
+  helperText,
 }: ParameterControlCardProps) {
   return (
     <ScreenCard
@@ -142,6 +144,11 @@ function ParameterControlCard({
             <Text className={`mt-1 ${cardDescriptionClassName}`}>
               {description}
             </Text>
+            {helperText ? (
+              <Text className="mt-2 text-xs leading-5 text-typography-500 dark:text-typography-400">
+                {helperText}
+              </Text>
+            ) : null}
           </Box>
 
           <ScreenBadge tone={disabled ? 'neutral' : 'accent'} className="self-start shrink-0 px-3 py-1.5">
@@ -217,91 +224,11 @@ function SliderRow({
   );
 }
 
-interface ToggleRowProps {
-  label: string;
-  description: string;
-  testID?: string;
-  value: boolean;
-  enabledLabel: string;
-  disabledLabel: string;
-  onValueChange: (value: boolean) => void;
-  onReset?: () => void;
-  isResetDisabled?: boolean;
-  variant?: 'standalone' | 'embedded';
-  disabled?: boolean;
-  helperText?: string;
-}
-
-function ToggleRow({
-  label,
-  description,
-  testID,
-  value,
-  enabledLabel,
-  disabledLabel,
-  onValueChange,
-  onReset,
-  isResetDisabled = false,
-  variant = 'standalone',
-  disabled = false,
-  helperText,
-}: ToggleRowProps) {
-  const { colors, resolvedMode } = useTheme();
-
-  return (
-    <ScreenCard
-      variant={variant === 'embedded' ? 'inset' : 'surface'}
-      className={disabled ? 'opacity-60' : undefined}
-    >
-      <ScreenStack gap="default">
-        <Box className="flex-row items-start justify-between gap-4">
-          <Box className="min-w-0 flex-1">
-            <Text className={cardTitleClassName}>
-              {label}
-            </Text>
-            <Text className={`mt-1 ${cardDescriptionClassName}`}>
-              {description}
-            </Text>
-            {helperText ? (
-              <Text className="mt-2 text-xs leading-5 text-typography-500 dark:text-typography-400">
-                {helperText}
-              </Text>
-            ) : null}
-          </Box>
-
-          <Box className="items-end gap-3">
-            <ScreenBadge tone={disabled ? 'neutral' : 'accent'} className="self-start shrink-0 px-3 py-1.5">
-              {value ? enabledLabel : disabledLabel}
-            </ScreenBadge>
-            <Switch
-              testID={testID}
-              value={value}
-              onValueChange={onValueChange}
-              disabled={disabled}
-              trackColor={{
-                false: resolvedMode === 'dark' ? colors.borderStrong : colors.border,
-                true: colors.primarySoft,
-              }}
-              thumbColor={value ? colors.primaryStrong : colors.surfaceElevated}
-              ios_backgroundColor={resolvedMode === 'dark' ? colors.borderStrong : colors.border}
-            />
-          </Box>
-        </Box>
-
-        {onReset ? (
-          <Box className="flex-row justify-end">
-            <ResetAction onPress={onReset} disabled={disabled || isResetDisabled} />
-          </Box>
-        ) : null}
-      </ScreenStack>
-    </ScreenCard>
-  );
-}
-
 interface SegmentedControlRowOption {
   key: string;
   label: string;
   testID?: string;
+  accessibilityLabel?: string;
 }
 
 interface SegmentedControlRowProps {
@@ -313,6 +240,8 @@ interface SegmentedControlRowProps {
   onReset?: () => void;
   isResetDisabled?: boolean;
   variant?: 'standalone' | 'embedded';
+  disabled?: boolean;
+  helperText?: string;
 }
 
 function SegmentedControlRow({
@@ -324,6 +253,8 @@ function SegmentedControlRow({
   onReset,
   isResetDisabled = false,
   variant = 'standalone',
+  disabled = false,
+  helperText,
 }: SegmentedControlRowProps) {
   const activeLabel = options.find((option) => option.key === activeKey)?.label ?? activeKey;
 
@@ -333,14 +264,22 @@ function SegmentedControlRow({
       description={description}
       badge={activeLabel}
       resetAction={onReset ? (
-        <ResetAction onPress={onReset} disabled={isResetDisabled} />
+        <ResetAction onPress={onReset} disabled={disabled || isResetDisabled} />
       ) : undefined}
       variant={variant}
+      disabled={disabled}
+      helperText={helperText}
     >
       <ScreenSegmentedControl
-        options={options.map((option) => ({ key: option.key, label: option.label, testID: option.testID }))}
+        options={options.map((option) => ({
+          key: option.key,
+          label: option.label,
+          testID: option.testID,
+          accessibilityLabel: option.accessibilityLabel,
+        }))}
         activeKey={activeKey}
         onChange={onChange}
+        disabled={disabled}
       />
     </ParameterControlCard>
   );
@@ -392,7 +331,7 @@ export function ModelParametersSheet({
   const { t } = useTranslation();
   const [seedInput, setSeedInput] = useState(() => (params.seed === null ? '' : String(params.seed)));
   const backendDiscoveryUnavailable = isBackendDiscoveryUnavailable === true;
-  const isReasoningToggleDisabled = !supportsReasoning || requiresReasoning;
+  const isReasoningEffortDisabled = !supportsReasoning;
   const reasoningHelperText = !supportsReasoning
     ? t('chat.modelControls.reasoningUnsupported')
     : requiresReasoning
@@ -636,18 +575,44 @@ export function ModelParametersSheet({
                     </Text>
                   </Box>
 
-                  <ToggleRow
+                  <SegmentedControlRow
                     label={t('chat.modelControls.reasoning')}
                     description={t('chat.modelControls.reasoningDescription')}
-                    testID="reasoning-toggle"
-                    value={params.reasoningEnabled === true}
-                    enabledLabel={t('chat.modelControls.reasoningOn')}
-                    disabledLabel={t('chat.modelControls.reasoningOff')}
-                    onValueChange={(value) => onChangeParams({ reasoningEnabled: value })}
-                    onReset={() => onResetParamField('reasoningEnabled')}
-                    isResetDisabled={(params.reasoningEnabled === true) === (defaultParams.reasoningEnabled === true)}
+                    options={[
+                      ...(requiresReasoning ? [] : [
+                        {
+                          key: 'off',
+                          label: t('chat.modelControls.reasoningEffortOff'),
+                          testID: 'reasoning-effort-off',
+                        },
+                      ]),
+                      {
+                        key: 'auto',
+                        label: t('chat.modelControls.reasoningEffortAuto'),
+                        testID: 'reasoning-effort-auto',
+                      },
+                      {
+                        key: 'low',
+                        label: t('chat.modelControls.reasoningEffortLow'),
+                        testID: 'reasoning-effort-low',
+                      },
+                      {
+                        key: 'medium',
+                        label: t('chat.modelControls.reasoningEffortMedium'),
+                        testID: 'reasoning-effort-medium',
+                      },
+                      {
+                        key: 'high',
+                        label: t('chat.modelControls.reasoningEffortHigh'),
+                        testID: 'reasoning-effort-high',
+                      },
+                    ]}
+                    activeKey={params.reasoningEffort ?? 'auto'}
+                    onChange={(value) => onChangeParams({ reasoningEffort: value as GenerationParameters['reasoningEffort'] })}
+                    onReset={() => onResetParamField('reasoningEffort')}
+                    isResetDisabled={(params.reasoningEffort ?? 'auto') === (defaultParams.reasoningEffort ?? 'auto')}
                     variant="embedded"
-                    disabled={isReasoningToggleDisabled}
+                    disabled={isReasoningEffortDisabled}
                     helperText={reasoningHelperText}
                   />
 

@@ -1,6 +1,11 @@
 import { llmEngineService } from './LLMEngineService';
 import { inferenceBackendService } from './InferenceBackendService';
-import { getModelLoadParametersForModel, type ModelLoadParameters } from './SettingsStore';
+import {
+  getModelLoadParametersForModel,
+  isSafeBackendDeviceSelector,
+  MAX_BACKEND_DEVICE_SELECTORS,
+  type ModelLoadParameters,
+} from './SettingsStore';
 import { EngineStatus, type EngineDiagnostics } from '../types/models';
 import * as FileSystem from 'expo-file-system/legacy';
 import { registry } from './LocalStorageRegistry';
@@ -20,15 +25,6 @@ function uniqueInts(values: number[]): number[] {
     .filter((value) => Number.isFinite(value))
     .map((value) => Math.max(0, Math.round(value)));
   return Array.from(new Set(normalized));
-}
-
-function isSafeBackendDeviceSelector(value: string): boolean {
-  const normalized = value.trim();
-  if (!normalized) {
-    return false;
-  }
-
-  return !/\s/.test(normalized);
 }
 
 function resolveAutotuneCandidates({
@@ -72,15 +68,15 @@ function resolveAutotuneCandidates({
   if (npuAvailable) {
     const resolvedSelectors = Array.isArray(npuDeviceSelectors)
       ? npuDeviceSelectors
-          .filter((device): device is string => typeof device === 'string')
-          .map((device) => device.trim())
-          .filter((device) => device.length > 0)
+          .map((device) => (typeof device === 'string' ? device.trim() : ''))
+          .filter(isSafeBackendDeviceSelector)
       : [];
 
+    const dedupedSelectors = Array.from(new Set(resolvedSelectors)).slice(0, MAX_BACKEND_DEVICE_SELECTORS);
     candidates.push({
       backendMode: 'npu',
       nGpuLayers: recommended,
-      devices: resolvedSelectors.length > 0 ? Array.from(new Set(resolvedSelectors)) : ['HTP*'],
+      devices: dedupedSelectors.length > 0 ? dedupedSelectors : ['HTP*'],
     });
   }
 
@@ -114,16 +110,15 @@ function resolveRestoreLoadParamsOverride(diagnostics: EngineDiagnostics | undef
   if (backendMode === 'npu' && actualGpu) {
     const initDevices = Array.isArray(diagnostics?.initDevices)
       ? diagnostics.initDevices
-          .filter((device): device is string => typeof device === 'string')
-          .map((device) => device.trim())
-          .filter((device) => device.length > 0)
-          .filter((device) => isSafeBackendDeviceSelector(device))
+          .map((device) => (typeof device === 'string' ? device.trim() : ''))
+          .filter(isSafeBackendDeviceSelector)
       : [];
 
+    const dedupedInitDevices = Array.from(new Set(initDevices)).slice(0, MAX_BACKEND_DEVICE_SELECTORS);
     return {
       backendPolicy: 'npu',
       gpuLayers: loadedGpuLayers > 0 ? loadedGpuLayers : 0,
-      selectedBackendDevices: initDevices.length > 0 ? Array.from(new Set(initDevices)) : null,
+      selectedBackendDevices: dedupedInitDevices.length > 0 ? dedupedInitDevices : null,
     };
   }
 
@@ -339,6 +334,8 @@ class InferenceAutotuneService {
       return result;
     }
 
+    let result: AutotuneResult | null = null;
+
     try {
       // Unload only once we're ready to start benchmarking so early failures don't leave the
       // user without their previously loaded model.
@@ -474,22 +471,23 @@ class InferenceAutotuneService {
               ? bestCandidate.profile.devices.filter((device): device is string => typeof device === 'string')
               : [];
 
+            const capDevices = (values: string[]): string[] =>
+              Array.from(new Set(values)).slice(0, MAX_BACKEND_DEVICE_SELECTORS);
+
             const resolveDevicesForBestStable = (): string[] | undefined => {
               if (backendMode === 'npu') {
                 const initSelectors = initDevices
                   .map((device) => device.trim())
-                  .filter((device) => device.length > 0)
                   .filter(isSafeBackendDeviceSelector);
                 if (initSelectors.length > 0) {
-                  return Array.from(new Set(initSelectors));
+                  return capDevices(initSelectors);
                 }
 
                 const profileSelectors = profileDevices
                   .map((device) => device.trim())
-                  .filter((device) => device.length > 0)
                   .filter(isSafeBackendDeviceSelector);
                 if (profileSelectors.length > 0) {
-                  return Array.from(new Set(profileSelectors));
+                  return capDevices(profileSelectors);
                 }
 
                 return undefined;
@@ -497,11 +495,11 @@ class InferenceAutotuneService {
 
               const initResolved = initDevices.map((device) => device.trim()).filter((device) => device.length > 0);
               if (initResolved.length > 0) {
-                return Array.from(new Set(initResolved));
+                return capDevices(initResolved);
               }
 
               const profileResolved = profileDevices.map((device) => device.trim()).filter((device) => device.length > 0);
-              return profileResolved.length > 0 ? Array.from(new Set(profileResolved)) : undefined;
+              return profileResolved.length > 0 ? capDevices(profileResolved) : undefined;
             };
 
             const devices = resolveDevicesForBestStable();
@@ -513,7 +511,7 @@ class InferenceAutotuneService {
           })()
         : previousAutotuneResult?.bestStable;
 
-      const result: AutotuneResult = {
+      result = {
         createdAtMs: Date.now(),
         modelId: normalizedModelId,
         contextSize: baseLoadParams.contextSize,
@@ -528,10 +526,18 @@ class InferenceAutotuneService {
       return result;
     } finally {
       if (shouldRestorePreviousModel && previousActiveModelId && didUnloadPreviousModel) {
-        await llmEngineService.load(previousActiveModelId, {
-          forceReload: true,
-          ...(restoreLoadParamsOverride ? { loadParamsOverride: restoreLoadParamsOverride } : null),
-        }).catch(() => undefined);
+        try {
+          await llmEngineService.load(previousActiveModelId, {
+            forceReload: true,
+            ...(restoreLoadParamsOverride ? { loadParamsOverride: restoreLoadParamsOverride } : null),
+          });
+        } catch (restoreError) {
+          const message = formatErrorMessage(restoreError);
+          console.warn('[InferenceAutotune] Failed to restore previously loaded model', restoreError);
+          if (result) {
+            result.restorationError = message;
+          }
+        }
       }
     }
   }

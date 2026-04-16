@@ -1,5 +1,7 @@
 import { createStorage } from '../../src/services/storage';
 import {
+  DEFAULT_AUTOTUNE_MAX_AGE_MS,
+  getCurrentNativeModuleVersion,
   readAutotuneResult,
   readBestStableAutotuneProfile,
   writeAutotuneResult,
@@ -10,8 +12,17 @@ function clearAutotuneStorage() {
 }
 
 describe('InferenceAutotuneStore', () => {
+  const nativeVersion = getCurrentNativeModuleVersion();
+  let dateNowSpy: jest.SpyInstance | null = null;
+
   beforeEach(() => {
     clearAutotuneStorage();
+    dateNowSpy = jest.spyOn(Date, 'now').mockReturnValue(1_700_000_000_000);
+  });
+
+  afterEach(() => {
+    dateNowSpy?.mockRestore();
+    dateNowSpy = null;
   });
 
   it('returns null when no autotune result exists', () => {
@@ -22,9 +33,9 @@ describe('InferenceAutotuneStore', () => {
     })).toBeNull();
   });
 
-  it('round-trips autotune results', () => {
+  it('round-trips autotune results and stamps native version', () => {
     const payload = {
-      createdAtMs: 123,
+      createdAtMs: 1_700_000_000_000,
       modelId: 'test/model',
       contextSize: 4096,
       kvCacheType: 'f16',
@@ -38,12 +49,15 @@ describe('InferenceAutotuneStore', () => {
       modelId: 'test/model',
       contextSize: 4096,
       kvCacheType: 'f16',
-    })).toEqual(payload);
+    })).toEqual({
+      ...payload,
+      nativeModuleVersion: nativeVersion,
+    });
   });
 
   it('rejects results when the model signature does not match', () => {
     writeAutotuneResult({
-      createdAtMs: 123,
+      createdAtMs: 1_700_000_000_000,
       modelId: 'test/model',
       contextSize: 4096,
       kvCacheType: 'f16',
@@ -79,9 +93,46 @@ describe('InferenceAutotuneStore', () => {
     }));
   });
 
+  it('rejects stale results past maxAgeMs', () => {
+    writeAutotuneResult({
+      createdAtMs: 1_700_000_000_000,
+      modelId: 'test/model',
+      contextSize: 4096,
+      kvCacheType: 'f16',
+      bestStable: { backendMode: 'cpu', nGpuLayers: 0 },
+      candidates: [],
+    });
+
+    dateNowSpy?.mockReturnValue(1_700_000_000_000 + DEFAULT_AUTOTUNE_MAX_AGE_MS + 1);
+    expect(readAutotuneResult({
+      modelId: 'test/model',
+      contextSize: 4096,
+      kvCacheType: 'f16',
+    })).toBeNull();
+  });
+
+  it('rejects results when native module version does not match', () => {
+    writeAutotuneResult({
+      createdAtMs: 1_700_000_000_000,
+      modelId: 'test/model',
+      contextSize: 4096,
+      kvCacheType: 'f16',
+      nativeModuleVersion: '0.1.0-old',
+      bestStable: { backendMode: 'cpu', nGpuLayers: 0 },
+      candidates: [],
+    });
+
+    expect(readAutotuneResult({
+      modelId: 'test/model',
+      contextSize: 4096,
+      kvCacheType: 'f16',
+      expectedNativeModuleVersion: '0.2.0-new',
+    })).toBeNull();
+  });
+
   it('sanitizes the best stable profile', () => {
     writeAutotuneResult({
-      createdAtMs: 123,
+      createdAtMs: 1_700_000_000_000,
       modelId: 'test/model',
       contextSize: 4096,
       kvCacheType: 'f16',
@@ -102,6 +153,24 @@ describe('InferenceAutotuneStore', () => {
       nGpuLayers: 13,
       devices: ['Adreno GPU', 'HTP0'],
     });
+  });
+
+  it('does not persist restorationError to storage', () => {
+    writeAutotuneResult({
+      createdAtMs: 1_700_000_000_000,
+      modelId: 'test/model',
+      contextSize: 4096,
+      kvCacheType: 'f16',
+      bestStable: { backendMode: 'cpu', nGpuLayers: 0 },
+      candidates: [],
+      restorationError: 'native reload crashed',
+    });
+
+    expect(readAutotuneResult({
+      modelId: 'test/model',
+      contextSize: 4096,
+      kvCacheType: 'f16',
+    })?.restorationError).toBeUndefined();
   });
 
   it('does not throw when kvCacheType is missing', () => {

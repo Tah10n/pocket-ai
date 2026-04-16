@@ -58,6 +58,35 @@ describe('SettingsStore', () => {
     expect(getModelLoadParametersForModel('author/model-q4').backendPolicy).toBeUndefined();
   });
 
+  it('rejects backend device selectors with control chars, path traversal, or over-length', () => {
+    updateModelLoadParametersForModel('author/model-q4', {
+      selectedBackendDevices: [
+        'Adreno\x00',
+        '../../etc/passwd',
+        'A'.repeat(64),
+        'HTP$',
+        'cpu:0',
+        'HTP0',
+        'HTP_1',
+        'HTP*',
+      ],
+    });
+
+    expect(getModelLoadParametersForModel('author/model-q4').selectedBackendDevices)
+      .toEqual(['HTP0', 'HTP_1', 'HTP*']);
+  });
+
+  it('caps selectedBackendDevices at MAX_BACKEND_DEVICE_SELECTORS entries', () => {
+    const manyDevices = Array.from({ length: 20 }, (_, i) => `HTP${i}`);
+    updateModelLoadParametersForModel('author/model-q4', {
+      selectedBackendDevices: manyDevices,
+    });
+
+    const stored = getModelLoadParametersForModel('author/model-q4').selectedBackendDevices ?? [];
+    expect(stored).toHaveLength(10);
+    expect(stored).toEqual(manyDevices.slice(0, 10));
+  });
+
   it('migrates legacy reasoningEnabled settings to reasoningEffort', () => {
     getSettingsStorage().set('app_settings', JSON.stringify({
       temperature: 0.7,

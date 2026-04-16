@@ -731,7 +731,7 @@ describe('LLMEngineService', () => {
     });
 
     writeAutotuneResult({
-      createdAtMs: 123,
+      createdAtMs: Date.now(),
       modelId: 'test/model',
       contextSize: 4096,
       kvCacheType: 'f16',
@@ -784,7 +784,7 @@ describe('LLMEngineService', () => {
     });
 
     writeAutotuneResult({
-      createdAtMs: 123,
+      createdAtMs: Date.now(),
       modelId: 'test/model',
       contextSize: 4096,
       kvCacheType: 'f16',
@@ -954,7 +954,7 @@ describe('LLMEngineService', () => {
     });
 
     writeAutotuneResult({
-      createdAtMs: 123,
+      createdAtMs: Date.now(),
       modelId: 'test/model',
       contextSize: 4096,
       kvCacheType: 'f16',

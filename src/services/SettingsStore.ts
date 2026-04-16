@@ -144,6 +144,16 @@ function normalizeLanguage(language: unknown): 'en' | 'ru' {
     return DEFAULT_SETTINGS.language;
 }
 
+const BACKEND_DEVICE_SELECTOR_REGEX = /^[A-Za-z0-9_*.-]{1,32}$/;
+export const MAX_BACKEND_DEVICE_SELECTORS = 10;
+
+export function isSafeBackendDeviceSelector(value: unknown): value is string {
+    if (typeof value !== 'string') {
+        return false;
+    }
+    return BACKEND_DEVICE_SELECTOR_REGEX.test(value);
+}
+
 function clampNumber(value: unknown, min: number, max: number, fallback: number) {
     const n = typeof value === 'number' ? value : Number(value);
     if (!Number.isFinite(n)) return fallback;
@@ -249,10 +259,10 @@ function sanitizeModelLoadParameters(input: Partial<ModelLoadParameters> | undef
         normalizedSelectedBackendDevices = null;
     } else if (Array.isArray(input?.selectedBackendDevices)) {
         const sanitized = input.selectedBackendDevices
-            .filter((device): device is string => typeof device === 'string')
-            .map((device) => device.trim())
-            .filter((device) => device.length > 0 && !/\s/.test(device));
-        normalizedSelectedBackendDevices = sanitized.length > 0 ? Array.from(new Set(sanitized)) : null;
+            .map((device) => (typeof device === 'string' ? device.trim() : ''))
+            .filter(isSafeBackendDeviceSelector);
+        const deduped = Array.from(new Set(sanitized)).slice(0, MAX_BACKEND_DEVICE_SELECTORS);
+        normalizedSelectedBackendDevices = deduped.length > 0 ? deduped : null;
     } else {
         normalizedSelectedBackendDevices = undefined;
     }

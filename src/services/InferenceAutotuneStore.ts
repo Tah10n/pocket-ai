@@ -1,5 +1,14 @@
 import type { MMKV } from 'react-native-mmkv';
+import llamaPackageJson from 'llama.rn/package.json';
 import { createStorage } from './storage';
+
+const LLAMA_RN_VERSION: string = typeof llamaPackageJson?.version === 'string' ? llamaPackageJson.version : 'unknown';
+
+export const DEFAULT_AUTOTUNE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+
+export function getCurrentNativeModuleVersion(): string {
+  return LLAMA_RN_VERSION;
+}
 
 export type AutotuneBackendMode = 'cpu' | 'gpu' | 'npu';
 
@@ -31,8 +40,10 @@ export type AutotuneResult = {
   kvCacheType: string;
   modelFileSizeBytes?: number | null;
   modelSha256?: string | null;
+  nativeModuleVersion?: string;
   bestStable?: AutotuneBestStableProfile;
   candidates: AutotuneCandidateReport[];
+  restorationError?: string;
 };
 
 let autotuneStorageInstance: MMKV | null = null;
@@ -66,12 +77,16 @@ export function readAutotuneResult({
   kvCacheType,
   modelFileSizeBytes,
   modelSha256,
+  expectedNativeModuleVersion = getCurrentNativeModuleVersion(),
+  maxAgeMs = DEFAULT_AUTOTUNE_MAX_AGE_MS,
 }: {
   modelId: string;
   contextSize: number;
   kvCacheType: string;
   modelFileSizeBytes?: number | null;
   modelSha256?: string | null;
+  expectedNativeModuleVersion?: string;
+  maxAgeMs?: number;
 }): AutotuneResult | null {
   const key = buildAutotuneKey({ modelId, contextSize, kvCacheType });
   const raw = getAutotuneStorage().getString(key);
@@ -111,6 +126,22 @@ export function readAutotuneResult({
       }
     }
 
+    if (typeof expectedNativeModuleVersion === 'string' && expectedNativeModuleVersion.length > 0) {
+      const storedVersion = typeof parsed.nativeModuleVersion === 'string' ? parsed.nativeModuleVersion : '';
+      if (storedVersion !== expectedNativeModuleVersion) {
+        return null;
+      }
+    }
+
+    if (typeof maxAgeMs === 'number' && Number.isFinite(maxAgeMs) && maxAgeMs > 0) {
+      const createdAtMs = typeof parsed.createdAtMs === 'number' && Number.isFinite(parsed.createdAtMs)
+        ? parsed.createdAtMs
+        : null;
+      if (createdAtMs === null || Date.now() - createdAtMs > maxAgeMs) {
+        return null;
+      }
+    }
+
     return parsed;
   } catch (error) {
     console.warn('[InferenceAutotuneStore] Corrupted autotune payload, clearing.', error);
@@ -125,7 +156,13 @@ export function writeAutotuneResult(result: AutotuneResult): void {
     contextSize: result.contextSize,
     kvCacheType: result.kvCacheType,
   });
-  getAutotuneStorage().set(key, JSON.stringify(result));
+  // restorationError is a transient runtime signal, never persisted.
+  const { restorationError: _restorationError, ...rest } = result;
+  const persistable: AutotuneResult = {
+    ...rest,
+    nativeModuleVersion: result.nativeModuleVersion ?? getCurrentNativeModuleVersion(),
+  };
+  getAutotuneStorage().set(key, JSON.stringify(persistable));
 }
 
 export function readBestStableAutotuneProfile({
@@ -134,14 +171,26 @@ export function readBestStableAutotuneProfile({
   kvCacheType,
   modelFileSizeBytes,
   modelSha256,
+  expectedNativeModuleVersion,
+  maxAgeMs,
 }: {
   modelId: string;
   contextSize: number;
   kvCacheType: string;
   modelFileSizeBytes?: number | null;
   modelSha256?: string | null;
+  expectedNativeModuleVersion?: string;
+  maxAgeMs?: number;
 }): AutotuneBestStableProfile | null {
-  const result = readAutotuneResult({ modelId, contextSize, kvCacheType, modelFileSizeBytes, modelSha256 });
+  const result = readAutotuneResult({
+    modelId,
+    contextSize,
+    kvCacheType,
+    modelFileSizeBytes,
+    modelSha256,
+    ...(expectedNativeModuleVersion !== undefined ? { expectedNativeModuleVersion } : {}),
+    ...(maxAgeMs !== undefined ? { maxAgeMs } : {}),
+  });
   const best = result?.bestStable;
   if (!best) {
     return null;

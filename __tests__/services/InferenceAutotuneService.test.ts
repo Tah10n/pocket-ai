@@ -32,9 +32,13 @@ jest.mock('../../src/services/InferenceBackendService', () => ({
   },
 }));
 
-jest.mock('../../src/services/SettingsStore', () => ({
-  getModelLoadParametersForModel: jest.fn(),
-}));
+jest.mock('../../src/services/SettingsStore', () => {
+  const actual = jest.requireActual('../../src/services/SettingsStore');
+  return {
+    ...actual,
+    getModelLoadParametersForModel: jest.fn(),
+  };
+});
 
 function clearAutotuneStorage() {
   createStorage('pocket-ai-autotune', { tier: 'private' }).clearAll();
@@ -345,7 +349,7 @@ describe('InferenceAutotuneService', () => {
 
   it('preserves the previous best-stable profile when a rerun finds no eligible candidates', async () => {
     autotuneStore.writeAutotuneResult({
-      createdAtMs: 123,
+      createdAtMs: Date.now(),
       modelId: 'test/model',
       contextSize: 4096,
       kvCacheType: 'f16',
@@ -424,5 +428,49 @@ describe('InferenceAutotuneService', () => {
     for (const override of cpuGpuCalls) {
       expect(override.selectedBackendDevices).toBeNull();
     }
+  });
+
+  it('reports restorationError when previous-model reload fails after autotune', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    (llmEngineService.load as jest.Mock).mockImplementation(async (modelId: string, options?: any) => {
+      if (modelId === 'prev/model') {
+        throw new Error('native reload crashed');
+      }
+      const policy = options?.loadParamsOverride?.backendPolicy;
+      const activeMode: 'cpu' | 'gpu' | 'npu' = policy === 'gpu' ? 'gpu' : policy === 'npu' ? 'npu' : 'cpu';
+      const initGpuLayers = options?.loadParamsOverride?.gpuLayers ?? 0;
+      state = {
+        status: EngineStatus.READY,
+        activeModelId: modelId,
+        diagnostics: {
+          backendMode: activeMode,
+          backendDevices: activeMode === 'npu' ? ['HTP0'] : activeMode === 'gpu' ? ['Adreno GPU'] : [],
+          actualGpuAccelerated: activeMode !== 'cpu',
+          initGpuLayers,
+          initDevices: activeMode === 'npu' ? ['HTP0'] : activeMode === 'gpu' ? ['Adreno GPU'] : [],
+          loadedGpuLayers: activeMode !== 'cpu' ? initGpuLayers : 0,
+          reasonNoGPU: activeMode === 'cpu' ? 'CPU only' : undefined,
+        },
+      };
+    });
+
+    const result = await inferenceAutotuneService.runBackendAutotune({ modelId: 'test/model' });
+
+    expect(result.restorationError).toBe('native reload crashed');
+    expect(warnSpy).toHaveBeenCalledWith(
+      '[InferenceAutotune] Failed to restore previously loaded model',
+      expect.any(Error),
+    );
+
+    const persisted = readAutotuneResult({
+      modelId: 'test/model',
+      contextSize: 4096,
+      kvCacheType: 'f16',
+    });
+    expect(persisted).not.toBeNull();
+    expect(persisted?.restorationError).toBeUndefined();
+
+    warnSpy.mockRestore();
   });
 });

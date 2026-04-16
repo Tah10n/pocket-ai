@@ -1066,7 +1066,8 @@ class LLMEngineService {
       throw new AppError('engine_busy', 'A response is already being generated.');
     }
 
-    if (!this.context || this.state.status !== EngineStatus.READY) {
+    const context = this.context;
+    if (!context || this.state.status !== EngineStatus.READY) {
       throw new AppError('engine_not_ready', 'Engine not ready');
     }
 
@@ -1116,7 +1117,7 @@ class LLMEngineService {
         completionParams.thinking_budget_tokens = Math.max(0, Math.round(params.thinking_budget_tokens));
       }
 
-      const completionPromise = this.context!.completion(
+      const completionPromise = context.completion(
         completionParams as any,
         (data: TokenData) => {
           if (data.token || data.content !== undefined || data.reasoning_content !== undefined) {
@@ -1187,18 +1188,19 @@ class LLMEngineService {
       throw new AppError('engine_busy', 'A response is already being generated.');
     }
 
-    if (!this.context || this.state.status !== EngineStatus.READY) {
+    const context = this.context;
+    if (!context || this.state.status !== EngineStatus.READY) {
       throw new AppError('engine_not_ready', 'Engine not ready');
     }
 
     const countTokens = async (promptMessages: LlmChatMessage[]) => {
-      const formatted = await this.context!.getFormattedChat(promptMessages as any, null, {
+      const formatted = await context.getFormattedChat(promptMessages as any, null, {
         enable_thinking: params?.enable_thinking ?? false,
         reasoning_format: params?.reasoning_format ?? 'none',
         add_generation_prompt: params?.add_generation_prompt,
       });
 
-      const tokenized = await this.context!.tokenize(
+      const tokenized = await context.tokenize(
         formatted.prompt,
         formatted.media_paths ? { media_paths: formatted.media_paths } : undefined,
       );

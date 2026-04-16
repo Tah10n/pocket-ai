@@ -227,6 +227,7 @@ interface ToggleRowProps {
   onValueChange: (value: boolean) => void;
   onReset?: () => void;
   isResetDisabled?: boolean;
+  variant?: 'standalone' | 'embedded';
   disabled?: boolean;
   helperText?: string;
 }
@@ -241,13 +242,17 @@ function ToggleRow({
   onValueChange,
   onReset,
   isResetDisabled = false,
+  variant = 'standalone',
   disabled = false,
   helperText,
 }: ToggleRowProps) {
   const { colors, resolvedMode } = useTheme();
 
   return (
-    <ScreenCard className={disabled ? 'opacity-60' : undefined}>
+    <ScreenCard
+      variant={variant === 'embedded' ? 'inset' : 'surface'}
+      className={disabled ? 'opacity-60' : undefined}
+    >
       <ScreenStack gap="default">
         <Box className="flex-row items-start justify-between gap-4">
           <Box className="min-w-0 flex-1">
@@ -620,198 +625,210 @@ export function ModelParametersSheet({
 
           <ScrollView showsVerticalScrollIndicator={false}>
             <ScreenStack gap="default" className="pb-2">
-              <ScreenCard>
-                <Text className={accentEyebrowClassName}>
-                  {t('chat.modelControls.liveSampling')}
-                </Text>
-                <Text className="mt-2 text-sm leading-5 text-typography-600 dark:text-typography-300">
-                  {t('chat.modelControls.liveSamplingDescription')}
-                </Text>
-              </ScreenCard>
-
-              <ToggleRow
-                label={t('chat.modelControls.reasoning')}
-                description={t('chat.modelControls.reasoningDescription')}
-                testID="reasoning-toggle"
-                value={params.reasoningEnabled === true}
-                enabledLabel={t('chat.modelControls.reasoningOn')}
-                disabledLabel={t('chat.modelControls.reasoningOff')}
-                onValueChange={(value) => onChangeParams({ reasoningEnabled: value })}
-                onReset={() => onResetParamField('reasoningEnabled')}
-                isResetDisabled={(params.reasoningEnabled === true) === (defaultParams.reasoningEnabled === true)}
-                disabled={isReasoningToggleDisabled}
-                helperText={reasoningHelperText}
-              />
-
-              <ParameterControlCard
-                label={t('chat.modelControls.seed')}
-                description={t('chat.modelControls.seedDescription')}
-                badge={params.seed === null
-                  ? t('chat.modelControls.seedRandom')
-                  : String(params.seed)}
-                resetAction={(
-                  <ResetAction
-                    onPress={() => onResetParamField('seed')}
-                    disabled={params.seed === defaultParams.seed}
-                  />
-                )}
-              >
+              <ScreenCard tone="accent">
                 <ScreenStack gap="default">
-                  <ScreenSegmentedControl
-                    options={[
-                      { key: 'random', label: t('chat.modelControls.seedRandom') },
-                      { key: 'fixed', label: t('chat.modelControls.seedFixed') },
-                    ]}
-                    activeKey={params.seed === null ? 'random' : 'fixed'}
-                    onChange={(key) => {
-                      if (key === 'random') {
-                        onChangeParams({ seed: null });
-                        return;
-                      }
+                  <Box>
+                    <Text className={accentEyebrowClassName}>
+                      {t('chat.modelControls.liveSampling')}
+                    </Text>
+                    <Text className="mt-2 text-sm leading-5 text-typography-600 dark:text-typography-300">
+                      {t('chat.modelControls.liveSamplingDescription')}
+                    </Text>
+                  </Box>
 
-                      const nextSeed = params.seed ?? 42;
-                      setSeedInput(String(nextSeed));
-                      onChangeParams({ seed: nextSeed });
-                    }}
+                  <ToggleRow
+                    label={t('chat.modelControls.reasoning')}
+                    description={t('chat.modelControls.reasoningDescription')}
+                    testID="reasoning-toggle"
+                    value={params.reasoningEnabled === true}
+                    enabledLabel={t('chat.modelControls.reasoningOn')}
+                    disabledLabel={t('chat.modelControls.reasoningOff')}
+                    onValueChange={(value) => onChangeParams({ reasoningEnabled: value })}
+                    onReset={() => onResetParamField('reasoningEnabled')}
+                    isResetDisabled={(params.reasoningEnabled === true) === (defaultParams.reasoningEnabled === true)}
+                    variant="embedded"
+                    disabled={isReasoningToggleDisabled}
+                    helperText={reasoningHelperText}
                   />
 
-                  {params.seed !== null ? (
-                    <ScreenInlineInput
-                      variant="search"
-                      placeholder={t('chat.modelControls.seedValue')}
-                      keyboardType="number-pad"
-                      value={seedInput}
-                      onChangeText={(text) => {
-                        setSeedInput(text);
+                  <ParameterControlCard
+                    label={t('chat.modelControls.seed')}
+                    description={t('chat.modelControls.seedDescription')}
+                    badge={params.seed === null
+                      ? t('chat.modelControls.seedRandom')
+                      : String(params.seed)}
+                    resetAction={(
+                      <ResetAction
+                        onPress={() => onResetParamField('seed')}
+                        disabled={params.seed === defaultParams.seed}
+                      />
+                    )}
+                    variant="embedded"
+                  >
+                    <ScreenStack gap="default">
+                      <ScreenSegmentedControl
+                        options={[
+                          { key: 'random', label: t('chat.modelControls.seedRandom') },
+                          { key: 'fixed', label: t('chat.modelControls.seedFixed') },
+                        ]}
+                        activeKey={params.seed === null ? 'random' : 'fixed'}
+                        onChange={(key) => {
+                          if (key === 'random') {
+                            onChangeParams({ seed: null });
+                            return;
+                          }
 
-                        const normalized = text.trim();
-                        if (normalized.length === 0) {
-                          return;
-                        }
-
-                        const parsed = Number(normalized);
-                        if (!Number.isFinite(parsed)) {
-                          return;
-                        }
-
-                        const nextSeed = Math.min(2_147_483_647, Math.max(0, Math.round(parsed)));
-                        if (nextSeed !== params.seed) {
+                          const nextSeed = params.seed ?? 42;
+                          setSeedInput(String(nextSeed));
                           onChangeParams({ seed: nextSeed });
-                        }
-                      }}
-                      onEndEditing={(event) => {
-                        const normalized = String(event.nativeEvent?.text ?? seedInput).trim();
-                        if (normalized.length === 0) {
-                          setSeedInput(String(params.seed ?? 42));
-                          return;
-                        }
+                        }}
+                      />
 
-                        const parsed = Number(normalized);
-                        if (!Number.isFinite(parsed)) {
-                          setSeedInput(String(params.seed ?? 42));
-                          return;
-                        }
+                      {params.seed !== null ? (
+                        <ScreenInlineInput
+                          variant="search"
+                          placeholder={t('chat.modelControls.seedValue')}
+                          keyboardType="number-pad"
+                          value={seedInput}
+                          onChangeText={(text) => {
+                            setSeedInput(text);
 
-                        const nextSeed = Math.min(2_147_483_647, Math.max(0, Math.round(parsed)));
-                        setSeedInput(String(nextSeed));
-                        if (nextSeed !== params.seed) {
-                          onChangeParams({ seed: nextSeed });
-                        }
-                      }}
-                    />
-                  ) : null}
+                            const normalized = text.trim();
+                            if (normalized.length === 0) {
+                              return;
+                            }
+
+                            const parsed = Number(normalized);
+                            if (!Number.isFinite(parsed)) {
+                              return;
+                            }
+
+                            const nextSeed = Math.min(2_147_483_647, Math.max(0, Math.round(parsed)));
+                            if (nextSeed !== params.seed) {
+                              onChangeParams({ seed: nextSeed });
+                            }
+                          }}
+                          onEndEditing={(event) => {
+                            const normalized = String(event.nativeEvent?.text ?? seedInput).trim();
+                            if (normalized.length === 0) {
+                              setSeedInput(String(params.seed ?? 42));
+                              return;
+                            }
+
+                            const parsed = Number(normalized);
+                            if (!Number.isFinite(parsed)) {
+                              setSeedInput(String(params.seed ?? 42));
+                              return;
+                            }
+
+                            const nextSeed = Math.min(2_147_483_647, Math.max(0, Math.round(parsed)));
+                            setSeedInput(String(nextSeed));
+                            if (nextSeed !== params.seed) {
+                              onChangeParams({ seed: nextSeed });
+                            }
+                          }}
+                        />
+                      ) : null}
+                    </ScreenStack>
+                  </ParameterControlCard>
+
+                  <SliderRow
+                    label={t('chat.modelControls.temperature')}
+                    description={t('chat.modelControls.temperatureDescription')}
+                    valueLabel={formatDecimal(params.temperature)}
+                    minLabel={t('chat.modelControls.temperatureMin')}
+                    maxLabel={t('chat.modelControls.temperatureMax')}
+                    minimumValue={0}
+                    maximumValue={2}
+                    step={0.05}
+                    value={params.temperature}
+                    onValueChange={(value) => onChangeParams({ temperature: Number(value.toFixed(2)) })}
+                    onReset={() => onResetParamField('temperature')}
+                    isResetDisabled={params.temperature === defaultParams.temperature}
+                    variant="embedded"
+                  />
+
+                  <SliderRow
+                    label={t('chat.modelControls.topP')}
+                    description={t('chat.modelControls.topPDescription')}
+                    valueLabel={formatDecimal(params.topP)}
+                    minLabel={t('chat.modelControls.topPMin')}
+                    maxLabel={t('chat.modelControls.topPMax')}
+                    minimumValue={0}
+                    maximumValue={1}
+                    step={0.05}
+                    value={params.topP}
+                    onValueChange={(value) => onChangeParams({ topP: Number(value.toFixed(2)) })}
+                    onReset={() => onResetParamField('topP')}
+                    isResetDisabled={params.topP === defaultParams.topP}
+                    variant="embedded"
+                  />
+
+                  <SliderRow
+                    label={t('chat.modelControls.topK')}
+                    description={t('chat.modelControls.topKDescription')}
+                    valueLabel={`${Math.round(params.topK)}`}
+                    minLabel={t('chat.modelControls.topKMin')}
+                    maxLabel={t('chat.modelControls.topKMax')}
+                    minimumValue={0}
+                    maximumValue={200}
+                    step={1}
+                    value={params.topK}
+                    onValueChange={(value) => onChangeParams({ topK: Math.round(value) })}
+                    onReset={() => onResetParamField('topK')}
+                    isResetDisabled={params.topK === defaultParams.topK}
+                    variant="embedded"
+                  />
+
+                  <SliderRow
+                    label={t('chat.modelControls.minP')}
+                    description={t('chat.modelControls.minPDescription')}
+                    valueLabel={formatDecimal(params.minP)}
+                    minLabel={t('chat.modelControls.minPMin')}
+                    maxLabel={t('chat.modelControls.minPMax')}
+                    minimumValue={0}
+                    maximumValue={1}
+                    step={0.01}
+                    value={params.minP}
+                    onValueChange={(value) => onChangeParams({ minP: Number(value.toFixed(2)) })}
+                    onReset={() => onResetParamField('minP')}
+                    isResetDisabled={params.minP === defaultParams.minP}
+                    variant="embedded"
+                  />
+
+                  <SliderRow
+                    label={t('chat.modelControls.repetitionPenalty')}
+                    description={t('chat.modelControls.repetitionPenaltyDescription')}
+                    valueLabel={formatDecimal(params.repetitionPenalty)}
+                    minLabel={t('chat.modelControls.repetitionPenaltyMin')}
+                    maxLabel={t('chat.modelControls.repetitionPenaltyMax')}
+                    minimumValue={0}
+                    maximumValue={2}
+                    step={0.05}
+                    value={params.repetitionPenalty}
+                    onValueChange={(value) => onChangeParams({ repetitionPenalty: Number(value.toFixed(2)) })}
+                    onReset={() => onResetParamField('repetitionPenalty')}
+                    isResetDisabled={params.repetitionPenalty === defaultParams.repetitionPenalty}
+                    variant="embedded"
+                  />
+
+                  <SliderRow
+                    label={t('chat.modelControls.maxTokens')}
+                    description={t('chat.modelControls.maxTokensDescription')}
+                    valueLabel={`${Math.round(params.maxTokens)} tok`}
+                    minLabel={`${maxTokensFloor}`}
+                    maxLabel={`${maxTokensCeiling}`}
+                    minimumValue={maxTokensFloor}
+                    maximumValue={maxTokensCeiling}
+                    step={128}
+                    value={Math.min(Math.max(params.maxTokens, maxTokensFloor), maxTokensCeiling)}
+                    onValueChange={(value) => onChangeParams({ maxTokens: Math.round(value) })}
+                    onReset={() => onResetParamField('maxTokens')}
+                    isResetDisabled={params.maxTokens === defaultParams.maxTokens}
+                    variant="embedded"
+                  />
                 </ScreenStack>
-              </ParameterControlCard>
-
-              <SliderRow
-                label={t('chat.modelControls.temperature')}
-                description={t('chat.modelControls.temperatureDescription')}
-                valueLabel={formatDecimal(params.temperature)}
-                minLabel={t('chat.modelControls.temperatureMin')}
-                maxLabel={t('chat.modelControls.temperatureMax')}
-                minimumValue={0}
-                maximumValue={2}
-                step={0.05}
-                value={params.temperature}
-                onValueChange={(value) => onChangeParams({ temperature: Number(value.toFixed(2)) })}
-                onReset={() => onResetParamField('temperature')}
-                isResetDisabled={params.temperature === defaultParams.temperature}
-              />
-
-              <SliderRow
-                label={t('chat.modelControls.topP')}
-                description={t('chat.modelControls.topPDescription')}
-                valueLabel={formatDecimal(params.topP)}
-                minLabel={t('chat.modelControls.topPMin')}
-                maxLabel={t('chat.modelControls.topPMax')}
-                minimumValue={0}
-                maximumValue={1}
-                step={0.05}
-                value={params.topP}
-                onValueChange={(value) => onChangeParams({ topP: Number(value.toFixed(2)) })}
-                onReset={() => onResetParamField('topP')}
-                isResetDisabled={params.topP === defaultParams.topP}
-              />
-
-              <SliderRow
-                label={t('chat.modelControls.topK')}
-                description={t('chat.modelControls.topKDescription')}
-                valueLabel={`${Math.round(params.topK)}`}
-                minLabel={t('chat.modelControls.topKMin')}
-                maxLabel={t('chat.modelControls.topKMax')}
-                minimumValue={0}
-                maximumValue={200}
-                step={1}
-                value={params.topK}
-                onValueChange={(value) => onChangeParams({ topK: Math.round(value) })}
-                onReset={() => onResetParamField('topK')}
-                isResetDisabled={params.topK === defaultParams.topK}
-              />
-
-              <SliderRow
-                label={t('chat.modelControls.minP')}
-                description={t('chat.modelControls.minPDescription')}
-                valueLabel={formatDecimal(params.minP)}
-                minLabel={t('chat.modelControls.minPMin')}
-                maxLabel={t('chat.modelControls.minPMax')}
-                minimumValue={0}
-                maximumValue={1}
-                step={0.01}
-                value={params.minP}
-                onValueChange={(value) => onChangeParams({ minP: Number(value.toFixed(2)) })}
-                onReset={() => onResetParamField('minP')}
-                isResetDisabled={params.minP === defaultParams.minP}
-              />
-
-              <SliderRow
-                label={t('chat.modelControls.repetitionPenalty')}
-                description={t('chat.modelControls.repetitionPenaltyDescription')}
-                valueLabel={formatDecimal(params.repetitionPenalty)}
-                minLabel={t('chat.modelControls.repetitionPenaltyMin')}
-                maxLabel={t('chat.modelControls.repetitionPenaltyMax')}
-                minimumValue={0}
-                maximumValue={2}
-                step={0.05}
-                value={params.repetitionPenalty}
-                onValueChange={(value) => onChangeParams({ repetitionPenalty: Number(value.toFixed(2)) })}
-                onReset={() => onResetParamField('repetitionPenalty')}
-                isResetDisabled={params.repetitionPenalty === defaultParams.repetitionPenalty}
-              />
-
-              <SliderRow
-                label={t('chat.modelControls.maxTokens')}
-                description={t('chat.modelControls.maxTokensDescription')}
-                valueLabel={`${Math.round(params.maxTokens)} tok`}
-                minLabel={`${maxTokensFloor}`}
-                maxLabel={`${maxTokensCeiling}`}
-                minimumValue={maxTokensFloor}
-                maximumValue={maxTokensCeiling}
-                step={128}
-                value={Math.min(Math.max(params.maxTokens, maxTokensFloor), maxTokensCeiling)}
-                onValueChange={(value) => onChangeParams({ maxTokens: Math.round(value) })}
-                onReset={() => onResetParamField('maxTokens')}
-                isResetDisabled={params.maxTokens === defaultParams.maxTokens}
-              />
+              </ScreenCard>
 
               <ScreenCard tone="accent">
                 <ScreenStack gap="default">

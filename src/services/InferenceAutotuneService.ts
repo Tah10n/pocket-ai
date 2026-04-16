@@ -209,6 +209,7 @@ class InferenceAutotuneService {
     });
     const { recommendedGpuLayers, gpuLayersCeiling } = await llmEngineService.getRecommendedLoadProfile(normalizedModelId);
     const capabilities = await inferenceBackendService.getCapabilitiesSummary().catch(() => null);
+    const capabilitiesKnown = Boolean(capabilities && capabilities.discoveryUnavailable !== true);
     const gpuAvailable = capabilities?.gpu?.available === true;
     const npuAvailable = capabilities?.npu?.available === true;
     const npuDeviceSelectors = Array.isArray(capabilities?.npu.deviceNames) && capabilities.npu.deviceNames.length > 0
@@ -315,8 +316,12 @@ class InferenceAutotuneService {
         return currentSpeed > bestSpeed ? current : best;
       }, null);
 
+      // A CPU-only run during transient backend discovery failures should not overwrite the
+      // stored Auto preference for later loads on accelerator-capable devices.
       const bestStable: AutotuneBestStableProfile | undefined = bestCandidate
-        ? { backendMode: 'cpu', nGpuLayers: 0 }
+        ? capabilitiesKnown
+          ? { backendMode: 'cpu', nGpuLayers: 0 }
+          : previousAutotuneResult?.bestStable
         : previousAutotuneResult?.bestStable;
 
       const result: AutotuneResult = {
@@ -326,6 +331,7 @@ class InferenceAutotuneService {
         kvCacheType: baseLoadParams.kvCacheType,
         modelFileSizeBytes,
         modelSha256,
+        backendDiscoveryKnown: capabilitiesKnown,
         ...(bestStable ? { bestStable } : null),
         candidates,
       };
@@ -457,18 +463,23 @@ class InferenceAutotuneService {
         return currentSpeed > bestSpeed ? current : best;
       }, null);
 
-      const bestStable: AutotuneBestStableProfile | undefined = bestCandidate
+      const promotedBestCandidate = bestCandidate !== null && (
+        bestCandidate.profile.backendMode !== 'cpu' || capabilitiesKnown
+      )
+        ? bestCandidate
+        : null;
+      const bestStable: AutotuneBestStableProfile | undefined = promotedBestCandidate
         ? (() => {
-            const backendMode = bestCandidate.profile.backendMode;
-            const resolvedGpuLayers = typeof bestCandidate.initGpuLayers === 'number' && Number.isFinite(bestCandidate.initGpuLayers)
-              ? Math.max(0, Math.round(bestCandidate.initGpuLayers))
-              : Math.max(0, Math.round(bestCandidate.profile.nGpuLayers));
+            const backendMode = promotedBestCandidate.profile.backendMode;
+            const resolvedGpuLayers = typeof promotedBestCandidate.initGpuLayers === 'number' && Number.isFinite(promotedBestCandidate.initGpuLayers)
+              ? Math.max(0, Math.round(promotedBestCandidate.initGpuLayers))
+              : Math.max(0, Math.round(promotedBestCandidate.profile.nGpuLayers));
 
-            const initDevices = Array.isArray(bestCandidate.initDevices)
-              ? bestCandidate.initDevices.filter((device): device is string => typeof device === 'string')
+            const initDevices = Array.isArray(promotedBestCandidate.initDevices)
+              ? promotedBestCandidate.initDevices.filter((device): device is string => typeof device === 'string')
               : [];
-            const profileDevices = Array.isArray(bestCandidate.profile.devices)
-              ? bestCandidate.profile.devices.filter((device): device is string => typeof device === 'string')
+            const profileDevices = Array.isArray(promotedBestCandidate.profile.devices)
+              ? promotedBestCandidate.profile.devices.filter((device): device is string => typeof device === 'string')
               : [];
 
             const capDevices = (values: string[]): string[] =>
@@ -518,6 +529,7 @@ class InferenceAutotuneService {
         kvCacheType: baseLoadParams.kvCacheType,
         modelFileSizeBytes,
         modelSha256,
+        backendDiscoveryKnown: capabilitiesKnown,
         ...(bestStable ? { bestStable } : null),
         candidates,
       };

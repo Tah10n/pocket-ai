@@ -12,10 +12,14 @@ import { EngineStatus, LifecycleStatus } from '../../src/types/models';
 
 jest.mock('llama.rn', () => {
   const completion = jest.fn();
+  const getFormattedChat = jest.fn().mockResolvedValue({ prompt: 'Formatted prompt', additional_stops: [] });
+  const tokenize = jest.fn().mockResolvedValue({ tokens: [] });
   const removeNativeLogListener = jest.fn();
   return {
     initLlama: jest.fn().mockImplementation(async (options?: { n_gpu_layers?: number }) => ({
       completion,
+      getFormattedChat,
+      tokenize,
       stopCompletion: jest.fn().mockResolvedValue(undefined),
       gpu: (options?.n_gpu_layers ?? 0) > 0,
       devices: (options?.n_gpu_layers ?? 0) > 0 ? ['Adreno GPU'] : [],
@@ -36,6 +40,8 @@ jest.mock('llama.rn', () => {
     getBackendDevicesInfo: jest.fn().mockResolvedValue([]),
     BuildInfo: { number: 'test', commit: 'test' },
     __completionMock: completion,
+    __getFormattedChatMock: getFormattedChat,
+    __tokenizeMock: tokenize,
   };
 });
 
@@ -57,6 +63,10 @@ jest.mock('../../src/services/SystemMetricsService', () => ({
 
 function getBackendDevicesInfoMock(): jest.Mock {
   return (llamaRn as unknown as { getBackendDevicesInfo: jest.Mock }).getBackendDevicesInfo;
+}
+
+function getFormattedChatMock(): jest.Mock {
+  return (llamaRn as unknown as { __getFormattedChatMock: jest.Mock }).__getFormattedChatMock;
 }
 
 describe('LLMEngineService', () => {
@@ -88,6 +98,8 @@ describe('LLMEngineService', () => {
     (getFreshMemorySnapshot as jest.Mock).mockResolvedValue(null);
     (llamaRn.initLlama as jest.Mock).mockImplementation(async (options?: { n_gpu_layers?: number }) => ({
       completion: (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock,
+      getFormattedChat: getFormattedChatMock(),
+      tokenize: (llamaRn as unknown as { __tokenizeMock: jest.Mock }).__tokenizeMock,
       stopCompletion: jest.fn().mockResolvedValue(undefined),
       gpu: (options?.n_gpu_layers ?? 0) > 0,
       devices: (options?.n_gpu_layers ?? 0) > 0 ? ['Adreno GPU'] : [],
@@ -102,6 +114,7 @@ describe('LLMEngineService', () => {
     });
     (registry.updateModel as jest.Mock) = jest.fn();
     (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock.mockResolvedValue({ text: 'Hello back' });
+    getFormattedChatMock().mockResolvedValue({ prompt: 'Formatted prompt', additional_stops: [] });
 
     // Ensure each test starts with a realistic, non-empty GGUF metadata payload.
     (llamaRn.loadLlamaModelInfo as jest.Mock).mockResolvedValue({
@@ -146,25 +159,58 @@ describe('LLMEngineService', () => {
     );
   });
 
+  it('forwards template-specific additional stop tokens to llama.rn completion', async () => {
+    getFormattedChatMock().mockResolvedValueOnce({
+      prompt: 'Formatted prompt',
+      additional_stops: ['  <|custom_stop|>  ', '</s>', 42],
+    });
+
+    await llmEngineService.load('test/model');
+
+    await llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Hello' }],
+      params: { n_predict: 32 },
+    });
+
+    expect(getFormattedChatMock()).toHaveBeenCalledWith(
+      [{ role: 'user', content: 'Hello' }],
+      null,
+      expect.objectContaining({
+        enable_thinking: false,
+        reasoning_format: 'none',
+        add_generation_prompt: true,
+      }),
+    );
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        stop: expect.arrayContaining(['</s>', '<|custom_stop|>']),
+      }),
+      expect.any(Function),
+    );
+  });
+
   it('blocks prompt token counting while a completion is in flight', async () => {
     await llmEngineService.load('test/model');
 
     const completionMock = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock;
-    completionMock.mockImplementationOnce(async () => {
-      // Keep the completion promise in-flight for at least one tick.
-      await Promise.resolve();
-      return { text: 'Done' };
-    });
+    let releaseCompletion!: () => void;
+    completionMock.mockImplementationOnce(() => new Promise((resolve) => {
+      releaseCompletion = () => resolve({ text: 'Done' });
+    }));
 
     const completionPromise = llmEngineService.chatCompletion({
       messages: [{ role: 'user', content: 'Hello' }],
       params: { n_predict: 1 },
     });
 
+    await Promise.resolve();
+    await Promise.resolve();
+
     await expect(
       llmEngineService.countPromptTokens({ messages: [{ role: 'user', content: 'Hello' }] }),
     ).rejects.toMatchObject({ code: 'engine_busy' });
 
+    releaseCompletion();
     await completionPromise;
   });
 
@@ -751,6 +797,112 @@ describe('LLMEngineService', () => {
       backendMode: 'gpu',
       backendPolicyReasons: expect.arrayContaining([
         'inference.backendPolicyReason.autotunePreferringGpu',
+      ]),
+    }));
+  });
+
+  it('ignores a saved CPU autotune fallback when backend discovery was unavailable during autotune', async () => {
+    getBackendDevicesInfoMock().mockResolvedValueOnce([
+      {
+        type: 'gpu',
+        backend: 'OpenCL',
+        deviceName: 'QUALCOMM Adreno(TM) 740',
+      },
+    ]);
+    (registry.getModel as jest.Mock).mockReturnValue({
+      id: 'test/model',
+      localPath: 'model.gguf',
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      sha256: 'live-sha',
+    });
+    (getModelLoadParametersForModel as jest.Mock).mockReturnValueOnce({
+      contextSize: 4096,
+      gpuLayers: 12,
+      kvCacheType: 'f16',
+    });
+
+    writeAutotuneResult({
+      createdAtMs: Date.now(),
+      modelId: 'test/model',
+      contextSize: 4096,
+      kvCacheType: 'f16',
+      modelFileSizeBytes: 1024,
+      modelSha256: 'live-sha',
+      backendDiscoveryKnown: false,
+      bestStable: {
+        backendMode: 'cpu',
+        nGpuLayers: 0,
+      },
+      candidates: [
+        {
+          profile: { backendMode: 'cpu', nGpuLayers: 0 },
+          success: true,
+          tokensPerSec: 10,
+          actualBackendMode: 'cpu',
+          actualGpuAccelerated: false,
+        },
+      ],
+    });
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    expect(llmEngineService.getState().diagnostics).toEqual(expect.objectContaining({
+      backendMode: 'gpu',
+    }));
+    expect(llmEngineService.getState().diagnostics?.backendPolicyReasons ?? []).not.toContain(
+      'inference.backendPolicyReason.autotunePreferringCpu',
+    );
+  });
+
+  it('keeps a saved CPU autotune preference when backend discovery was known during autotune', async () => {
+    getBackendDevicesInfoMock().mockResolvedValueOnce([
+      {
+        type: 'gpu',
+        backend: 'OpenCL',
+        deviceName: 'QUALCOMM Adreno(TM) 740',
+      },
+    ]);
+    (registry.getModel as jest.Mock).mockReturnValue({
+      id: 'test/model',
+      localPath: 'model.gguf',
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      sha256: 'live-sha',
+    });
+    (getModelLoadParametersForModel as jest.Mock).mockReturnValueOnce({
+      contextSize: 4096,
+      gpuLayers: 12,
+      kvCacheType: 'f16',
+    });
+
+    writeAutotuneResult({
+      createdAtMs: Date.now(),
+      modelId: 'test/model',
+      contextSize: 4096,
+      kvCacheType: 'f16',
+      modelFileSizeBytes: 1024,
+      modelSha256: 'live-sha',
+      backendDiscoveryKnown: true,
+      bestStable: {
+        backendMode: 'cpu',
+        nGpuLayers: 0,
+      },
+      candidates: [
+        {
+          profile: { backendMode: 'cpu', nGpuLayers: 0 },
+          success: true,
+          tokensPerSec: 10,
+          actualBackendMode: 'cpu',
+          actualGpuAccelerated: false,
+        },
+      ],
+    });
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    expect(llmEngineService.getState().diagnostics).toEqual(expect.objectContaining({
+      backendMode: 'cpu',
+      backendPolicyReasons: expect.arrayContaining([
+        'inference.backendPolicyReason.autotunePreferringCpu',
       ]),
     }));
   });

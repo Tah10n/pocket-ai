@@ -216,7 +216,7 @@
     },
     "modelControls": {
       "title": "Параметры модели",
-      "descriptionForModel": "Сохраняются отдельно для {{modelLabel}}. Параметры сэмплинга применяются сразу, а настройки загрузки используют «Применить и перезагрузить».",
+      "descriptionForModel": "Сохраняются отдельно для {{modelLabel}}. Параметры сэмплинга применяются сразу, а настройки загрузки используют «{{loadAction}}».",
       "descriptionNoModel": "Загрузите модель или откройте чат, привязанный к модели, чтобы настроить генерацию.",
       "activeProfile": "Активный профиль",
       "runtimeReload": "Перезагрузка рантайма",
@@ -266,6 +266,8 @@
       "backendBenchmarkBestStable": "Лучший стабильный: {{backend}} ({{layers}} слоёв)",
       "backendBenchmarkNoResult": "Результатов автотюнинга пока нет.",
       "backendBenchmarkPendingChangesHint": "Сначала примените или сохраните текущий профиль загрузки, затем запускайте автотюнинг.",
+      "backendBenchmarkRestoreWarningTitle": "Предыдущая модель не была восстановлена",
+      "backendBenchmarkRestoreWarningDescription": "Автотюнинг завершился, но ранее загруженную модель не удалось восстановить: {{error}}",
       "pendingLoadProfileTitle": "Есть изменения профиля загрузки",
       "pendingLoadProfileDescription": "Сохраните профиль загрузки, чтобы при следующей загрузке модели применились новые параметры контекста и GPU layers.",
       "savedLoadProfileTitle": "Профиль загрузки сохранен",

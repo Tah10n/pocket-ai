@@ -416,18 +416,27 @@ export function ModelParametersSheet({
     || normalizedBackendPolicy === 'npu'
     || normalizedDefaultBackendPolicy === 'npu'
   );
-  const shouldShowBackendPolicyControls = resolvedNpuBackendAvailable
+  const shouldShowBackendPolicyControls = showGpuControls
+    || resolvedNpuBackendAvailable
     || normalizedBackendPolicy !== undefined
     || normalizedDefaultBackendPolicy !== undefined;
   const displayedBackendPolicy = normalizedBackendPolicy ?? 'auto';
   const backendPolicyOptions = [
-    { key: 'auto', label: t('chat.modelControls.backendPolicyAuto') },
+    {
+      key: 'auto',
+      label: t('chat.modelControls.backendPolicyAuto'),
+      testID: 'backend-policy-auto',
+    },
     ...((resolvedNpuBackendAvailable || normalizedBackendPolicy === 'npu' || normalizedDefaultBackendPolicy === 'npu')
-      ? [{ key: 'npu', label: t('chat.modelControls.backendPolicyNpu') }]
+      ? [{ key: 'npu', label: t('chat.modelControls.backendPolicyNpu'), testID: 'backend-policy-npu' }]
       : []),
-    { key: 'cpu', label: t('chat.modelControls.backendPolicyCpu') },
+    {
+      key: 'cpu',
+      label: t('chat.modelControls.backendPolicyCpu'),
+      testID: 'backend-policy-cpu',
+    },
     ...((showGpuControls || normalizedBackendPolicy === 'gpu' || normalizedDefaultBackendPolicy === 'gpu')
-      ? [{ key: 'gpu', label: t('chat.modelControls.backendPolicyGpu') }]
+      ? [{ key: 'gpu', label: t('chat.modelControls.backendPolicyGpu'), testID: 'backend-policy-gpu' }]
       : []),
   ];
   const isGpuLayersDisabled = normalizedBackendPolicy === 'cpu';
@@ -530,7 +539,7 @@ export function ModelParametersSheet({
               </Text>
               <Text className="mt-1 text-sm leading-5 text-typography-500 dark:text-typography-400">
                 {modelId
-                  ? t('chat.modelControls.descriptionForModel', { modelLabel })
+                  ? t('chat.modelControls.descriptionForModel', { modelLabel, loadAction: applyButtonLabel })
                   : t('chat.modelControls.descriptionNoModel')}
               </Text>
             </Box>

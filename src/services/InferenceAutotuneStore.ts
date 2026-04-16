@@ -41,6 +41,7 @@ export type AutotuneResult = {
   modelFileSizeBytes?: number | null;
   modelSha256?: string | null;
   nativeModuleVersion?: string;
+  backendDiscoveryKnown?: boolean;
   bestStable?: AutotuneBestStableProfile;
   candidates: AutotuneCandidateReport[];
   restorationError?: string;

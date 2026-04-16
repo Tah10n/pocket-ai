@@ -64,6 +64,7 @@ const mockStop = jest.fn();
 const mockCreateSummaryPlaceholder = jest.fn();
 const mockRouterNavigate = jest.fn();
 const mockRouterPush = jest.fn();
+const mockRunBackendAutotune = jest.fn();
 const mockGetRecommendedGpuLayers = jest.fn(() => new Promise<number>(() => {}));
 const mockGetRecommendedLoadProfile = jest.fn<Promise<{ recommendedGpuLayers: number; gpuLayersCeiling: number }>, [string | null]>(() =>
   mockGetRecommendedGpuLayers().then((recommendedGpuLayers) => ({
@@ -184,6 +185,12 @@ jest.mock('react-native-device-info', () => ({
 jest.mock('../../src/services/ModelCatalogService', () => ({
   modelCatalogService: {
     refreshModelMetadata: (model: any) => mockRefreshModelMetadata(model),
+  },
+}));
+
+jest.mock('@/services/InferenceAutotuneService', () => ({
+  inferenceAutotuneService: {
+    runBackendAutotune: (...args: any[]) => mockRunBackendAutotune(...args),
   },
 }));
 
@@ -510,6 +517,14 @@ describe('ChatScreen', () => {
     mockCreateSummaryPlaceholder.mockClear();
     mockRouterNavigate.mockClear();
     mockRouterPush.mockClear();
+    mockRunBackendAutotune.mockReset();
+    mockRunBackendAutotune.mockResolvedValue({
+      createdAtMs: 1,
+      modelId: 'author/model-q4',
+      contextSize: 4096,
+      kvCacheType: 'f16',
+      candidates: [],
+    });
     mockStartNewChat.mockClear();
     alertSpy.mockClear();
     lastPresetSelectorProps = null;
@@ -1081,6 +1096,46 @@ describe('ChatScreen', () => {
     rerender(React.createElement(ChatScreen));
 
     expect(useChatStore.getState().getActiveThread()?.paramsSnapshot.reasoningEffort).toBe('medium');
+  });
+
+  it('alerts when autotune cannot restore the previously loaded model', async () => {
+    registry.saveModels([
+      {
+        id: 'author/model-q4',
+        name: 'Qwen3-4B-Instruct-GGUF',
+        author: 'Test',
+        size: 512 * 1024 * 1024,
+        localPath: 'author-model-q4.gguf',
+        lifecycleStatus: 'downloaded',
+        modelType: 'qwen3',
+        tags: ['gguf', 'chat'],
+      },
+    ]);
+    mockRunBackendAutotune.mockResolvedValueOnce({
+      createdAtMs: 1,
+      modelId: 'author/model-q4',
+      contextSize: 4096,
+      kvCacheType: 'f16',
+      candidates: [],
+      restorationError: 'native reload crashed',
+    });
+
+    const { getByTestId } = render(React.createElement(ChatScreen));
+
+    await act(async () => {
+      fireEvent.press(getByTestId('model-controls-button'));
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      await lastModelParametersSheetProps?.onRunAutotune();
+    });
+
+    expect(mockRunBackendAutotune).toHaveBeenCalledWith({ modelId: 'author/model-q4' });
+    expect(alertSpy).toHaveBeenCalledWith(
+      'chat.modelControls.backendBenchmarkRestoreWarningTitle',
+      'chat.modelControls.backendBenchmarkRestoreWarningDescription',
+    );
   });
 
   it('keeps reasoning disabled for models without reasoning support', async () => {

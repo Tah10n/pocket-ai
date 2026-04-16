@@ -473,4 +473,28 @@ describe('InferenceAutotuneService', () => {
 
     warnSpy.mockRestore();
   });
+
+  it('does not persist a new CPU best-stable result when backend discovery is unavailable', async () => {
+    (inferenceBackendService.getCapabilitiesSummary as jest.Mock).mockResolvedValue({
+      discoveryUnavailable: true,
+      cpu: { available: true },
+      gpu: { available: false },
+      npu: { available: false },
+      rawDevices: [],
+    });
+
+    const result = await inferenceAutotuneService.runBackendAutotune({ modelId: 'test/model' });
+
+    expect(result.backendDiscoveryKnown).toBe(false);
+    expect(result.bestStable).toBeUndefined();
+
+    const persisted = readAutotuneResult({
+      modelId: 'test/model',
+      contextSize: 4096,
+      kvCacheType: 'f16',
+    });
+    expect(persisted).not.toBeNull();
+    expect(persisted?.backendDiscoveryKnown).toBe(false);
+    expect(persisted?.bestStable).toBeUndefined();
+  });
 });

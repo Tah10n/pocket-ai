@@ -212,7 +212,7 @@
     },
     "modelControls": {
       "title": "Model controls",
-      "descriptionForModel": "Saved separately for {{modelLabel}}. Sampling changes apply immediately, while load settings use Apply & reload.",
+      "descriptionForModel": "Saved separately for {{modelLabel}}. Sampling changes apply immediately, while load settings use {{loadAction}}.",
       "descriptionNoModel": "Load or open a model-linked chat to adjust generation controls.",
       "activeProfile": "Active profile",
       "runtimeReload": "Runtime reload",
@@ -262,6 +262,8 @@
       "backendBenchmarkBestStable": "Best stable: {{backend}} ({{layers}} layers)",
       "backendBenchmarkNoResult": "No autotune result yet.",
       "backendBenchmarkPendingChangesHint": "Apply or save the current load profile before running autotune.",
+      "backendBenchmarkRestoreWarningTitle": "Previous model was not restored",
+      "backendBenchmarkRestoreWarningDescription": "Autotune completed, but the previously loaded model could not be restored: {{error}}",
       "pendingLoadProfileTitle": "Pending load changes",
       "pendingLoadProfileDescription": "Save this load profile so the next model load uses the updated context window and GPU layers.",
       "savedLoadProfileTitle": "Load profile saved",

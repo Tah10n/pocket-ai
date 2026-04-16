@@ -844,6 +844,14 @@ export function useModelParametersSheetController({
         modelId: configurableModelId,
       });
       setAutotuneResult(result);
+      if (typeof result.restorationError === 'string' && result.restorationError.trim().length > 0) {
+        Alert.alert(
+          t('chat.modelControls.backendBenchmarkRestoreWarningTitle'),
+          t('chat.modelControls.backendBenchmarkRestoreWarningDescription', {
+            error: result.restorationError,
+          }),
+        );
+      }
     } catch (error) {
       showError(applyReloadErrorScope, error);
     } finally {
@@ -854,6 +862,7 @@ export function useModelParametersSheetController({
     canRunAutotune,
     configurableModelId,
     showError,
+    t,
   ]);
 
   const normalizeGenerationPartial = useCallback((partial: Partial<GenerationParameters>) => {

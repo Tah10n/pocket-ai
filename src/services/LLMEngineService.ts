@@ -58,7 +58,7 @@ import { resolveKvCacheTypes } from '../utils/kvCache';
 import { requireLlamaModule } from './llamaRnModule';
 import { inferenceBackendService } from './InferenceBackendService';
 import { resolveInferenceProfileCandidates, type ResolvedInferenceProfile } from './resolveInferenceProfile';
-import { readBestStableAutotuneProfile } from './InferenceAutotuneStore';
+import { readAutotuneResult } from './InferenceAutotuneStore';
 
 export interface LoadModelOptions {
   forceReload?: boolean;
@@ -1092,8 +1092,38 @@ class LLMEngineService {
         '<|endoftext|>',
       ];
 
+      let stopWords = baseStopWords;
+      try {
+        const formatted = await context.getFormattedChat(
+          completionMessages as any,
+          null,
+          {
+            enable_thinking: params?.enable_thinking ?? false,
+            reasoning_format: params?.reasoning_format ?? 'none',
+            add_generation_prompt: true,
+          },
+        );
+        const additionalStops = (
+          formatted
+          && typeof formatted === 'object'
+          && 'additional_stops' in formatted
+          && Array.isArray((formatted as any).additional_stops)
+        )
+          ? ((formatted as any).additional_stops as unknown[])
+          : [];
+
+        stopWords = [
+          ...baseStopWords,
+          ...additionalStops.filter((stop): stop is string => typeof stop === 'string'),
+        ];
+      } catch (error) {
+        if (process.env.NODE_ENV !== 'test') {
+          console.warn('[LLMEngine] Failed to resolve template stop tokens', error);
+        }
+      }
+
       const resolvedStops = Array.from(
-        new Set(baseStopWords.map((stop) => stop.trim()).filter((stop) => stop.length > 0)),
+        new Set(stopWords.map((stop) => stop.trim()).filter((stop) => stop.length > 0)),
       );
 
       const completionParams: Record<string, unknown> = {
@@ -2432,8 +2462,8 @@ class LLMEngineService {
           : null),
       };
 
-      const autotuneBestStableProfile = normalizedBackendPolicy === 'auto'
-        ? readBestStableAutotuneProfile({
+      const autotuneResult = normalizedBackendPolicy === 'auto'
+        ? readAutotuneResult({
             modelId,
             contextSize: loadParams.contextSize,
             kvCacheType: loadParams.kvCacheType,
@@ -2441,6 +2471,36 @@ class LLMEngineService {
             modelSha256: cachedModel?.sha256,
           })
         : null;
+      const autotuneBestStableProfile = (() => {
+        const best = autotuneResult?.bestStable;
+        if (!best) {
+          return null;
+        }
+        if (best.backendMode !== 'cpu' && best.backendMode !== 'gpu' && best.backendMode !== 'npu') {
+          return null;
+        }
+        if (!Number.isFinite(best.nGpuLayers) || best.nGpuLayers < 0) {
+          return null;
+        }
+
+        const devices = Array.isArray(best.devices)
+          ? best.devices
+              .filter((device): device is string => typeof device === 'string')
+              .map((device) => device.trim())
+              .filter((device) => device.length > 0)
+          : undefined;
+
+        return {
+          backendMode: best.backendMode,
+          nGpuLayers: Math.max(0, Math.round(best.nGpuLayers)),
+          ...(devices && devices.length > 0 ? { devices } : null),
+        };
+      })();
+      const autotuneBenchmarkedAccelerators = Array.isArray(autotuneResult?.candidates)
+        && autotuneResult.candidates.some((candidate) => {
+          const mode = candidate?.profile?.backendMode;
+          return mode === 'gpu' || mode === 'npu';
+        });
 
       const {
         effectiveBackendPolicy,
@@ -2465,9 +2525,18 @@ class LLMEngineService {
         const preferredBackendMode = autotuneBestStableProfile.backendMode;
         const preferredGpuLayers = Math.max(0, Math.round(autotuneBestStableProfile.nGpuLayers));
         const clampedGpuLayers = preferredBackendMode === 'cpu' ? 0 : Math.min(gpuLayers, preferredGpuLayers);
+        const acceleratorsCurrentlyAvailable = backendCapabilities?.gpu.available === true
+          || backendCapabilities?.npu.available === true;
+        const savedCpuProfileLooksFallbackOnly = preferredBackendMode === 'cpu'
+          && acceleratorsCurrentlyAvailable
+          && (
+            autotuneResult?.backendDiscoveryKnown === false
+            || (autotuneResult?.backendDiscoveryKnown === undefined && !autotuneBenchmarkedAccelerators)
+          );
 
         const canApplyPreferred = preferredBackendMode === 'cpu'
-          || (
+          ? !savedCpuProfileLooksFallbackOnly
+          : (
             clampedGpuLayers > 0
             && (
               (preferredBackendMode === 'gpu' && backendCapabilities?.gpu.available === true)

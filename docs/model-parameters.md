@@ -62,10 +62,23 @@ They affect native initialization and memory-fit estimation:
 - `contextSize`
 - `gpuLayers`
 - `kvCacheType` (`auto | f16 | q8_0 | q4_0`)
+- `backendPolicy` (`auto | cpu | gpu | npu`)
+  - `auto` may reuse a saved stable backend profile from autotune when one exists
+  - explicit `cpu` / `gpu` / `npu` bypass Auto selection heuristics
+
+Optional accelerator selectors may also be persisted alongside a load profile:
+
+- `selectedBackendDevices`
+  - used when a backend profile targets specific GPU/NPU devices discovered on the current device
 
 KV cache auto-selection is shared logic:
 
 - `src/utils/kvCache.ts`
+
+Backend policy resolution lives in:
+
+- `src/services/resolveInferenceProfile.ts`
+- `src/services/LLMEngineService.ts`
 
 Keep UI estimates aligned with runtime:
 

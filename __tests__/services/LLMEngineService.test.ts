@@ -26,7 +26,13 @@ jest.mock('llama.rn', () => {
     releaseAllLlama: jest.fn().mockResolvedValue(undefined),
     toggleNativeLog: jest.fn().mockResolvedValue(undefined),
     addNativeLogListener: jest.fn().mockReturnValue({ remove: removeNativeLogListener }),
-    loadLlamaModelInfo: jest.fn().mockResolvedValue({}),
+    loadLlamaModelInfo: jest.fn().mockResolvedValue({
+      'general.architecture': 'llama',
+      'general.type': 'model',
+      'llama.block_count': 32,
+      'llama.attention.head_count': 32,
+      'llama.embedding_length': 4096,
+    }),
     getBackendDevicesInfo: jest.fn().mockResolvedValue([]),
     BuildInfo: { number: 'test', commit: 'test' },
     __completionMock: completion,
@@ -96,6 +102,15 @@ describe('LLMEngineService', () => {
     });
     (registry.updateModel as jest.Mock) = jest.fn();
     (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock.mockResolvedValue({ text: 'Hello back' });
+
+    // Ensure each test starts with a realistic, non-empty GGUF metadata payload.
+    (llamaRn.loadLlamaModelInfo as jest.Mock).mockResolvedValue({
+      'general.architecture': 'llama',
+      'general.type': 'model',
+      'llama.block_count': 32,
+      'llama.attention.head_count': 32,
+      'llama.embedding_length': 4096,
+    });
   });
 
   it('forwards structured messages to llama.rn completion', async () => {
@@ -129,6 +144,28 @@ describe('LLMEngineService', () => {
       }),
       expect.any(Function),
     );
+  });
+
+  it('blocks prompt token counting while a completion is in flight', async () => {
+    await llmEngineService.load('test/model');
+
+    const completionMock = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock;
+    completionMock.mockImplementationOnce(async () => {
+      // Keep the completion promise in-flight for at least one tick.
+      await Promise.resolve();
+      return { text: 'Done' };
+    });
+
+    const completionPromise = llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Hello' }],
+      params: { n_predict: 1 },
+    });
+
+    await expect(
+      llmEngineService.countPromptTokens({ messages: [{ role: 'user', content: 'Hello' }] }),
+    ).rejects.toMatchObject({ code: 'engine_busy' });
+
+    await completionPromise;
   });
 
   it('passes frozen thread params through to completion even when they differ from defaults', async () => {
@@ -825,6 +862,71 @@ describe('LLMEngineService', () => {
       initNBatch: 96,
       initNUbatch: 48,
       initKvUnified: true,
+    }));
+  });
+
+  it('forces flash attention auto when V cache is quantized', async () => {
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValueOnce({
+      exists: true,
+    });
+    (registry.getModel as jest.Mock).mockReturnValue({
+      id: 'test/model',
+      localPath: 'model.gguf',
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+    });
+    (getModelLoadParametersForModel as jest.Mock).mockReturnValueOnce({
+      contextSize: 4096,
+      gpuLayers: 0,
+      backendPolicy: 'cpu',
+      kvCacheType: 'q8_0',
+      flashAttention: 'off',
+    });
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    expect(llamaRn.initLlama).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        n_gpu_layers: 0,
+        cache_type_v: 'q8_0',
+        flash_attn_type: 'auto',
+      }),
+      expect.any(Function),
+    );
+
+    expect(llmEngineService.getState().diagnostics).toEqual(expect.objectContaining({
+      initFlashAttnType: 'auto',
+    }));
+  });
+
+  it('falls back to f16 KV cache when quantized head dims are incompatible', async () => {
+    (llamaRn.loadLlamaModelInfo as jest.Mock).mockResolvedValueOnce({
+      n_embd_head_k: 48,
+      n_embd_head_v: 48,
+    });
+
+    (getModelLoadParametersForModel as jest.Mock).mockReturnValueOnce({
+      contextSize: 4096,
+      gpuLayers: 0,
+      backendPolicy: 'cpu',
+      kvCacheType: 'q8_0',
+      flashAttention: 'off',
+    });
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    expect(llamaRn.initLlama).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        n_gpu_layers: 0,
+        cache_type_k: 'f16',
+        cache_type_v: 'f16',
+        flash_attn_type: 'off',
+      }),
+      expect.any(Function),
+    );
+
+    expect(llmEngineService.getState().diagnostics).toEqual(expect.objectContaining({
+      initCacheTypeK: 'f16',
+      initCacheTypeV: 'f16',
     }));
   });
 

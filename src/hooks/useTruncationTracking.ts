@@ -1,12 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ChatThread, LlmChatMessage } from '../types/chat';
 import { llmEngineService } from '../services/LLMEngineService';
+import { registry } from '../services/LocalStorageRegistry';
+import { useModelRegistryRevision } from './useModelRegistryRevision';
 import {
   buildInferenceWindowWithAccurateTokenCounts,
   createTruncationState,
   getThreadInferenceWindow,
   resolveThreadInferenceWindowOptions,
 } from '../utils/inferenceWindow';
+import { clampReasoningEnabled, resolveModelReasoningCapability } from '../utils/modelReasoningCapabilities';
 
 type TruncationState = ReturnType<typeof createTruncationState>;
 
@@ -19,6 +22,7 @@ export function useTruncationTracking(
   activeThread: ChatThread | null,
   activeContextTokenBudget: number | undefined,
 ): TruncationState {
+  const modelRegistryRevision = useModelRegistryRevision();
   const activeThreadId = activeThread?.id ?? null;
   const activeThreadStatus = activeThread?.status ?? null;
   const [accurateTruncationState, setAccurateTruncationState] = useState<{
@@ -46,6 +50,13 @@ export function useTruncationTracking(
     return createTruncationState(truncatedMessageIds);
   }, [activeContextTokenBudget, activeThread]);
 
+  let activeThreadReasoningEnabled = false;
+  if (activeThread) {
+    const model = registry.getModel(activeThread.modelId);
+    const capability = resolveModelReasoningCapability(model, activeThread.modelId, model?.name);
+    activeThreadReasoningEnabled = clampReasoningEnabled(activeThread.paramsSnapshot.reasoningEnabled, capability);
+  }
+
   useEffect(() => {
     if (!activeThread || activeThread.status === 'generating') {
       setAccurateTruncationState(null);
@@ -67,7 +78,8 @@ export function useTruncationTracking(
       activeContextTokenBudget,
       windowOptions.responseReserveTokens ?? null,
       windowOptions.promptSafetyMarginTokens ?? null,
-      activeThread.paramsSnapshot.reasoningEnabled === true ? 1 : 0,
+      activeThreadReasoningEnabled ? 1 : 0,
+      modelRegistryRevision,
     ].join(':');
 
     if (accurateTruncationCacheRef.current.key === cacheKey) {
@@ -81,8 +93,8 @@ export function useTruncationTracking(
     setAccurateTruncationState(null);
 
     const tokenCountParams = {
-      enable_thinking: activeThread.paramsSnapshot.reasoningEnabled === true,
-      reasoning_format: activeThread.paramsSnapshot.reasoningEnabled === true ? ('auto' as const) : ('none' as const),
+      enable_thinking: activeThreadReasoningEnabled,
+      reasoning_format: activeThreadReasoningEnabled ? ('auto' as const) : ('none' as const),
     };
 
     const countPromptTokens = async (messages: LlmChatMessage[]) =>
@@ -104,6 +116,15 @@ export function useTruncationTracking(
       })
       .catch((error) => {
         if (!isCancelled) {
+          const errorCode = error && typeof error === 'object' && 'code' in error
+            ? String((error as { code?: unknown }).code)
+            : null;
+
+          // Expected transient failures: fall back to heuristics without warning spam.
+          if (errorCode === 'engine_busy' || errorCode === 'engine_not_ready' || errorCode === 'engine_unloading') {
+            return;
+          }
+
           console.warn('[ChatSession] Failed to resolve truncation state accurately, falling back to heuristics', error);
         }
       });
@@ -111,7 +132,7 @@ export function useTruncationTracking(
     return () => {
       isCancelled = true;
     };
-  }, [activeContextTokenBudget, activeThread]);
+  }, [activeContextTokenBudget, activeThread, activeThreadReasoningEnabled, modelRegistryRevision]);
 
   const truncationState = useMemo(() => {
     if (!activeThread) {

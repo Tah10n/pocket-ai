@@ -1053,6 +1053,18 @@ describe('ChatScreen', () => {
   });
 
   it('updates the active thread reasoning toggle from the model controls sheet', async () => {
+    registry.saveModels([
+      {
+        id: 'author/model-q4',
+        name: 'Qwen3-4B-Instruct-GGUF',
+        author: 'Test',
+        size: 512 * 1024 * 1024,
+        localPath: 'author-model-q4.gguf',
+        lifecycleStatus: 'downloaded',
+        modelType: 'qwen3',
+        tags: ['gguf', 'chat'],
+      },
+    ]);
     const { getByTestId, rerender } = render(React.createElement(ChatScreen));
 
     expect(useChatStore.getState().getActiveThread()?.paramsSnapshot.reasoningEnabled).not.toBe(true);
@@ -1067,6 +1079,126 @@ describe('ChatScreen', () => {
       await Promise.resolve();
     });
     rerender(React.createElement(ChatScreen));
+
+    expect(useChatStore.getState().getActiveThread()?.paramsSnapshot.reasoningEnabled).toBe(true);
+  });
+
+  it('keeps reasoning disabled for models without reasoning support', async () => {
+    updateSettings({
+      modelParamsByModelId: {
+        'author/model-q4': {
+          temperature: 0.7,
+          topP: 0.6,
+          maxTokens: 1024,
+          reasoningEnabled: true,
+        },
+      },
+    });
+    useChatStore.setState({
+      threads: {
+        'thread-1': {
+          ...useChatStore.getState().threads['thread-1'],
+          paramsSnapshot: {
+            ...useChatStore.getState().threads['thread-1'].paramsSnapshot,
+            reasoningEnabled: true,
+          },
+        },
+      },
+      activeThreadId: 'thread-1',
+    });
+    registry.saveModels([
+      {
+        id: 'author/model-q4',
+        name: 'gemma-2-2b-it-GGUF',
+        author: 'Test',
+        size: 512 * 1024 * 1024,
+        localPath: 'author-model-q4.gguf',
+        lifecycleStatus: 'downloaded',
+        modelType: 'gemma2',
+        tags: ['gguf', 'chat'],
+      },
+    ]);
+
+    const { getByTestId } = render(React.createElement(ChatScreen));
+
+    await act(async () => {
+      fireEvent.press(getByTestId('model-controls-button'));
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(lastModelParametersSheetProps?.supportsReasoning).toBe(false);
+      expect(lastModelParametersSheetProps?.params.reasoningEnabled).toBe(false);
+      // Opening the sheet should not mutate persisted/thread params.
+      expect(useChatStore.getState().getActiveThread()?.paramsSnapshot.reasoningEnabled).toBe(true);
+    });
+
+    await act(async () => {
+      lastModelParametersSheetProps?.onChangeParams({ reasoningEnabled: true });
+      await Promise.resolve();
+    });
+
+    expect(useChatStore.getState().getActiveThread()?.paramsSnapshot.reasoningEnabled).toBe(false);
+  });
+
+  it('keeps reasoning forced on for reasoning-first models', async () => {
+    updateSettings({
+      activeModelId: 'author/model-r1',
+      modelParamsByModelId: {
+        'author/model-r1': {
+          temperature: 0.7,
+          topP: 0.6,
+          maxTokens: 1024,
+          reasoningEnabled: false,
+        },
+      },
+    });
+    useChatStore.setState({
+      threads: {
+        'thread-1': {
+          ...useChatStore.getState().threads['thread-1'],
+          modelId: 'author/model-r1',
+          paramsSnapshot: {
+            ...useChatStore.getState().threads['thread-1'].paramsSnapshot,
+            reasoningEnabled: false,
+          },
+        },
+      },
+      activeThreadId: 'thread-1',
+    });
+    mockEngineState.activeModelId = 'author/model-r1';
+    registry.saveModels([
+      {
+        id: 'author/model-r1',
+        name: 'DeepSeek-R1-Distill-Qwen-7B-GGUF',
+        author: 'Test',
+        size: 512 * 1024 * 1024,
+        localPath: 'author-model-r1.gguf',
+        lifecycleStatus: 'downloaded',
+        modelType: 'deepseek-r1',
+        baseModels: ['deepseek-ai/DeepSeek-R1'],
+        tags: ['gguf', 'reasoning'],
+      },
+    ]);
+
+    const { getByTestId } = render(React.createElement(ChatScreen));
+
+    await act(async () => {
+      fireEvent.press(getByTestId('model-controls-button'));
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(lastModelParametersSheetProps?.requiresReasoning).toBe(true);
+      expect(lastModelParametersSheetProps?.params.reasoningEnabled).toBe(true);
+      // Opening the sheet should not mutate persisted/thread params.
+      expect(useChatStore.getState().getActiveThread()?.paramsSnapshot.reasoningEnabled).toBe(false);
+    });
+
+    await act(async () => {
+      lastModelParametersSheetProps?.onChangeParams({ reasoningEnabled: false });
+      await Promise.resolve();
+    });
 
     expect(useChatStore.getState().getActiveThread()?.paramsSnapshot.reasoningEnabled).toBe(true);
   });

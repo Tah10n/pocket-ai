@@ -206,6 +206,151 @@ function getModelInfoString(modelInfo: unknown, key: string): string | null {
   return typeof value === 'string' ? value.trim() : null;
 }
 
+function toFinitePositiveNumber(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    return value;
+  }
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (trimmed.length > 0) {
+      const parsed = Number(trimmed);
+      if (Number.isFinite(parsed) && parsed > 0) {
+        return parsed;
+      }
+    }
+  }
+
+  return null;
+}
+
+function readNumericMetadata(metadata: Record<string, unknown> | undefined, keys: string[]): number | null {
+  if (!metadata) {
+    return null;
+  }
+
+  for (const key of keys) {
+    const value = toFinitePositiveNumber(metadata[key]);
+    if (value !== null) {
+      return value;
+    }
+  }
+
+  return null;
+}
+
+function normalizeArchitecturePrefix(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  return normalized.length > 0 ? normalized : null;
+}
+
+function resolveGgufArchitecturePrefixes(ggufMetadata?: Record<string, unknown>): string[] {
+  if (!ggufMetadata) {
+    return [];
+  }
+
+  const direct = normalizeArchitecturePrefix(ggufMetadata.architecture);
+  const general = normalizeArchitecturePrefix(ggufMetadata['general.architecture']);
+  const candidate = direct ?? general;
+  if (!candidate) {
+    return [];
+  }
+
+  const prefixes = new Set<string>();
+  prefixes.add(candidate);
+  const stripped = candidate.replace(/\d+$/u, '');
+  if (stripped.length > 0) {
+    prefixes.add(stripped);
+  }
+
+  return Array.from(prefixes);
+}
+
+function withPrefixes(prefixes: string[], suffixes: string[]): string[] {
+  if (prefixes.length === 0 || suffixes.length === 0) {
+    return [];
+  }
+
+  const keys: string[] = [];
+  for (const prefix of prefixes) {
+    for (const suffix of suffixes) {
+      keys.push(`${prefix}.${suffix}`);
+    }
+  }
+  return keys;
+}
+
+function resolveDerivedHeadDim({
+  ggufMetadata,
+  prefixes,
+}: {
+  ggufMetadata: Record<string, unknown> | undefined;
+  prefixes: string[];
+}): number | null {
+  const embeddingLength = readNumericMetadata(
+    ggufMetadata,
+    ['nEmbd', 'n_embd', 'embedding_length', ...withPrefixes(prefixes, ['embedding_length'])],
+  );
+  const headCount = readNumericMetadata(
+    ggufMetadata,
+    ['nHead', 'n_head', 'attention.head_count', ...withPrefixes(prefixes, ['attention.head_count'])],
+  );
+
+  if (!embeddingLength || !headCount || embeddingLength <= 0 || headCount <= 0) {
+    return null;
+  }
+
+  const raw = embeddingLength / headCount;
+  if (!Number.isFinite(raw) || raw <= 0) {
+    return null;
+  }
+
+  const rounded = Math.round(raw);
+  if (rounded <= 0) {
+    return null;
+  }
+
+  // Require near-integer to avoid wildly incorrect derivations.
+  if (Math.abs(rounded - raw) > 1e-3) {
+    return null;
+  }
+
+  return rounded;
+}
+
+function resolveKvCacheHeadDims(ggufMetadata?: Record<string, unknown>): { headDimK: number | null; headDimV: number | null } {
+  const prefixes = resolveGgufArchitecturePrefixes(ggufMetadata);
+
+  const headDimK = readNumericMetadata(
+    ggufMetadata,
+    [
+      'nEmbdHeadK',
+      'n_embd_head_k',
+      'attention.key_length',
+      ...withPrefixes(prefixes, ['attention.key_length']),
+    ],
+  ) ?? resolveDerivedHeadDim({ ggufMetadata, prefixes });
+
+  const headDimV = readNumericMetadata(
+    ggufMetadata,
+    [
+      'nEmbdHeadV',
+      'n_embd_head_v',
+      'attention.value_length',
+      ...withPrefixes(prefixes, ['attention.value_length']),
+    ],
+  ) ?? headDimK;
+
+  return {
+    headDimK: headDimK && headDimK > 0 ? Math.round(headDimK) : null,
+    headDimV: headDimV && headDimV > 0 ? Math.round(headDimV) : null,
+  };
+}
+
 function mergeConsecutiveMessages(messages: LlmChatMessage[]): LlmChatMessage[] {
   const merged: LlmChatMessage[] = [];
 
@@ -1029,6 +1174,10 @@ class LLMEngineService {
       throw new AppError('engine_unloading', 'The model engine is unloading. Please wait a moment.');
     }
 
+    if (this.activeCompletionPromise) {
+      throw new AppError('engine_busy', 'A response is already being generated.');
+    }
+
     if (!this.context || this.state.status !== EngineStatus.READY) {
       throw new AppError('engine_not_ready', 'Engine not ready');
     }
@@ -1436,7 +1585,7 @@ class LLMEngineService {
       const resolvedTotalMemoryBytes = systemMemorySnapshot?.totalBytes ?? totalMemoryBytes;
       const resolvedModelSizeBytes = typeof fileInfo.size === 'number' ? fileInfo.size : modelSizeBytes ?? null;
       const kvCacheAvailableBudgetBytes = systemMemorySnapshot ? resolveConservativeAvailableMemoryBudget(systemMemorySnapshot) : null;
-      const { cacheTypeK, cacheTypeV } = resolveKvCacheTypes({
+      let { cacheTypeK, cacheTypeV } = resolveKvCacheTypes({
         kvCacheType: loadParams.kvCacheType,
         requestedContextTokens: loadParams.contextSize,
         totalMemoryBytes: typeof resolvedTotalMemoryBytes === 'number' && Number.isFinite(resolvedTotalMemoryBytes) && resolvedTotalMemoryBytes > 0
@@ -1444,6 +1593,13 @@ class LLMEngineService {
           : null,
         availableBudgetBytes: kvCacheAvailableBudgetBytes,
       });
+
+      const resolveEffectiveFlashAttnType = (value: 'auto' | 'on' | 'off', layers: number): 'auto' | 'on' | 'off' => {
+        const base = layers > 0 ? value : 'off';
+        return cacheTypeV !== 'f16' && base === 'off'
+          ? 'auto'
+          : base;
+      };
       let memoryFit: MemoryFitResult | null = null;
       let safeLoadProfile: { contextTokens: number; gpuLayers: number } | null = null;
       let safeMemoryFit: MemoryFitResult | null = null;
@@ -1498,6 +1654,60 @@ class LLMEngineService {
           ...(modelInfo ?? {}),
         }
         : undefined;
+
+      // KV cache quantization is experimental in llama.cpp and can crash llama.rn when the native
+      // context fails to initialize (llama.rn currently checks for a loaded model but may
+      // dereference a null context pointer). Guard against known init-time incompatibilities.
+      //
+      // In particular, quantized KV cache types require the per-head key/value dimensions to be
+      // divisible by the quantization block size.
+      if (cacheTypeK !== 'f16' || cacheTypeV !== 'f16') {
+        const { headDimK, headDimV } = resolveKvCacheHeadDims(ggufMetadata as unknown as Record<string, unknown> | undefined);
+        const quantBlockSize = 32;
+        const missingK = cacheTypeK !== 'f16' && headDimK === null;
+        const missingV = cacheTypeV !== 'f16' && headDimV === null;
+        const incompatibleK = cacheTypeK !== 'f16' && headDimK !== null && headDimK % quantBlockSize !== 0;
+        const incompatibleV = cacheTypeV !== 'f16' && headDimV !== null && headDimV % quantBlockSize !== 0;
+        const shouldFallback = missingK || missingV || incompatibleK || incompatibleV;
+
+        if (shouldFallback) {
+          const previous = { cacheTypeK, cacheTypeV };
+          cacheTypeK = 'f16';
+          cacheTypeV = 'f16';
+
+          if (initDiagnostics) {
+            initDiagnostics = {
+              ...initDiagnostics,
+              kvCacheCompatibilityFallback: {
+                previous,
+                resolved: { cacheTypeK, cacheTypeV },
+                headDimK,
+                headDimV,
+                quantBlockSize,
+                missingK,
+                missingV,
+                incompatibleK,
+                incompatibleV,
+              },
+            };
+          }
+
+           if (process.env.NODE_ENV !== 'test') {
+             console.warn('[LLMEngine] KV cache quantization is incompatible with this model; falling back to f16', {
+               modelId,
+               previous,
+               resolved: { cacheTypeK, cacheTypeV },
+               headDimK,
+               headDimV,
+               quantBlockSize,
+               missingK,
+               missingV,
+               incompatibleK,
+               incompatibleV,
+             });
+           }
+         }
+       }
       const verifiedFileSizeBytes = typeof fileInfo.size === 'number' && Number.isFinite(fileInfo.size) && fileInfo.size > 0
         ? Math.round(fileInfo.size)
         : null;
@@ -1846,7 +2056,9 @@ class LLMEngineService {
                     n_ubatch: effectiveBatchParams.nUbatch,
                   }
                 : null),
-              flash_attn_type: gpuLayers > 0 ? requestedFlashAttention : 'off',
+              flash_attn_type: (
+                resolveEffectiveFlashAttnType(requestedFlashAttention, gpuLayers)
+              ),
               use_mmap: requestedUseMmap,
               use_mlock: requestedUseMlock,
               ...(typeof requestedCpuThreads === 'number' ? { n_threads: requestedCpuThreads } : null),
@@ -2070,36 +2282,44 @@ class LLMEngineService {
           nParallel,
         } = profile;
 
-        const buildOptions = (layers: number) => ({
-          model: modelPath,
-          n_ctx: finalContextSize,
-          n_gpu_layers: layers,
-          n_parallel: nParallel,
-          ...(typeof nThreads === 'number' && Number.isFinite(nThreads) && nThreads > 0
-            ? { n_threads: Math.max(1, Math.round(nThreads)) }
-            : null),
-          ...(typeof cpuMask === 'string' && cpuMask.trim().length > 0
-            ? { cpu_mask: cpuMask.trim() }
-            : null),
-          ...(typeof cpuStrict === 'boolean' ? { cpu_strict: cpuStrict } : null),
-          use_mmap: useMmap,
-          use_mlock: useMlock,
-          cache_type_k: cacheTypeK,
-          cache_type_v: cacheTypeV,
-          flash_attn_type: layers > 0 ? flashAttnType : 'off',
-          ...(typeof kvUnified === 'boolean' ? { kv_unified: kvUnified } : null),
-          ...(devices ? { devices } : null),
-          ...(typeof nBatch === 'number'
-          && Number.isFinite(nBatch)
-          && typeof nUbatch === 'number'
-          && Number.isFinite(nUbatch)
-            ? {
-                ...(shouldUseLowMemoryContextParams ? { no_extra_bufts: true } : null),
-                n_batch: Math.round(nBatch),
-                n_ubatch: Math.round(nUbatch),
-              }
-            : null),
-        });
+        const buildOptions = (layers: number) => {
+          // llama.cpp requires Flash Attention when using quantized V cache.
+          // Some candidate profiles force flashAttnType='off' (e.g., CPU fallback). When
+          // combined with cache_type_v=q8_0/q4_0, llama.cpp returns a null context and
+          // llama.rn can crash before surfacing the error.
+          const resolvedFlashAttnType = resolveEffectiveFlashAttnType(flashAttnType, layers);
+
+          return {
+            model: modelPath,
+            n_ctx: finalContextSize,
+            n_gpu_layers: layers,
+            n_parallel: nParallel,
+            ...(typeof nThreads === 'number' && Number.isFinite(nThreads) && nThreads > 0
+              ? { n_threads: Math.max(1, Math.round(nThreads)) }
+              : null),
+            ...(typeof cpuMask === 'string' && cpuMask.trim().length > 0
+              ? { cpu_mask: cpuMask.trim() }
+              : null),
+            ...(typeof cpuStrict === 'boolean' ? { cpu_strict: cpuStrict } : null),
+            use_mmap: useMmap,
+            use_mlock: useMlock,
+            cache_type_k: cacheTypeK,
+            cache_type_v: cacheTypeV,
+            flash_attn_type: resolvedFlashAttnType,
+            ...(typeof kvUnified === 'boolean' ? { kv_unified: kvUnified } : null),
+            ...(devices ? { devices } : null),
+            ...(typeof nBatch === 'number'
+            && Number.isFinite(nBatch)
+            && typeof nUbatch === 'number'
+            && Number.isFinite(nUbatch)
+              ? {
+                  ...(shouldUseLowMemoryContextParams ? { no_extra_bufts: true } : null),
+                  n_batch: Math.round(nBatch),
+                  n_ubatch: Math.round(nUbatch),
+                }
+              : null),
+          };
+        };
 
         const initOnce = async (layers: number) => llama.initLlama(
           buildOptions(layers),
@@ -2378,7 +2598,8 @@ class LLMEngineService {
 
           // If an accelerator candidate initializes but the runtime reports CPU mode,
           // treat this as a degraded init and continue to the next candidate.
-          // This ensures we eventually land on a true CPU profile (n_gpu_layers=0, flash_attn=off)
+          // This ensures we eventually land on a true CPU profile (n_gpu_layers=0) with a
+          // crash-safe flash attention setting (e.g., V-cache quantization requires flash_attn != off).
           // and also allows switching to the next accelerator candidate when AUTO prefers one.
           if (candidate !== 'cpu' && !actualGpu) {
             if (process.env.NODE_ENV !== 'test') {
@@ -2454,7 +2675,10 @@ class LLMEngineService {
           : Array.isArray(resolvedInitProfile.devices)
             ? [...resolvedInitProfile.devices]
             : null;
-        this.initFlashAttnType = resolvedInitProfile.flashAttnType;
+        this.initFlashAttnType = resolveEffectiveFlashAttnType(
+          resolvedInitProfile.flashAttnType,
+          resolvedInitGpuLayers ?? resolvedInitProfile.nGpuLayers,
+        );
         this.initUseMmap = resolvedInitProfile.useMmap;
         this.initUseMlock = resolvedInitProfile.useMlock;
         this.initNParallel = resolvedInitProfile.nParallel;

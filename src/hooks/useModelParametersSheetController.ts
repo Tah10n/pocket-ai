@@ -29,6 +29,11 @@ import { clampContextWindowTokens, resolveContextWindowCeiling } from '@/utils/c
 import { resolveModelCapabilitySnapshot } from '@/utils/modelCapabilities';
 import { hasPersistedLoadProfileChanges } from '@/utils/modelLoadProfile';
 import { handleModelLoadMemoryPolicyError } from '@/utils/modelLoadMemoryPolicyPrompt';
+import {
+  clampReasoningEnabled,
+  normalizeReasoningPreference,
+  resolveModelReasoningCapability,
+} from '@/utils/modelReasoningCapabilities';
 import { resolveKvCacheTypes } from '@/utils/kvCache';
 
 interface UseModelParametersSheetControllerOptions {
@@ -273,6 +278,19 @@ export function useModelParametersSheetController({
     ?? (configurableModelId?.split('/').pop() ?? configurableModelId ?? '');
   const currentParams = paramsOverride ?? getGenerationParametersForModel(configurableModelId);
   const defaultParams = defaultParamsOverride ?? getGenerationParametersForModel(null);
+  const reasoningCapability = useMemo(() => resolveModelReasoningCapability(
+    heuristicModel,
+    configurableModelId,
+    modelLabel,
+  ), [configurableModelId, heuristicModel, modelLabel]);
+  const effectiveCurrentParams = useMemo(
+    () => normalizeReasoningPreference(currentParams, reasoningCapability),
+    [currentParams, reasoningCapability],
+  );
+  const effectiveDefaultParams = useMemo(
+    () => normalizeReasoningPreference(defaultParams, reasoningCapability),
+    [defaultParams, reasoningCapability],
+  );
   const currentLoadParams = getModelLoadParametersForModel(configurableModelId);
   const defaultLoadParams = getModelLoadParametersForModel(null);
   const currentContextSize = currentLoadParams.contextSize;
@@ -838,14 +856,32 @@ export function useModelParametersSheetController({
     showError,
   ]);
 
+  const normalizeGenerationPartial = useCallback((partial: Partial<GenerationParameters>) => {
+    if (!Object.prototype.hasOwnProperty.call(partial, 'reasoningEnabled')) {
+      return partial;
+    }
+
+    if (partial.reasoningEnabled === undefined) {
+      const { reasoningEnabled: _ignored, ...rest } = partial;
+      return rest;
+    }
+
+    return {
+      ...partial,
+      reasoningEnabled: clampReasoningEnabled(partial.reasoningEnabled, reasoningCapability),
+    };
+  }, [reasoningCapability]);
+
   const handleChangeParams = useCallback((partial: Partial<GenerationParameters>) => {
+    const normalizedPartial = normalizeGenerationPartial(partial);
+
     if (onChangeParams) {
-      onChangeParams(configurableModelId, partial);
+      onChangeParams(configurableModelId, normalizedPartial);
       return;
     }
 
-    updateGenerationParametersForModel(configurableModelId, partial);
-  }, [configurableModelId, onChangeParams]);
+    updateGenerationParametersForModel(configurableModelId, normalizedPartial);
+  }, [configurableModelId, normalizeGenerationPartial, onChangeParams]);
 
   const handleChangeLoadParams = useCallback((partial: Partial<ModelLoadParameters>) => {
     setDidSaveLoadProfile(false);
@@ -883,15 +919,21 @@ export function useModelParametersSheetController({
   }, [contextWindowCeiling, gpuLayersCeiling]);
 
   const handleResetParamField = useCallback((field: keyof GenerationParameters) => {
-    if (onResetParamField) {
+    if (onResetParamField && field !== 'reasoningEnabled') {
       onResetParamField(configurableModelId, field);
       return;
     }
 
     const resetParams = getGenerationParametersForModel(null);
-    const partial = { [field]: resetParams[field] } as Partial<typeof resetParams>;
+    const partial = normalizeGenerationPartial({ [field]: resetParams[field] } as Partial<typeof resetParams>);
+
+    if (onChangeParams) {
+      onChangeParams(configurableModelId, partial);
+      return;
+    }
+
     updateGenerationParametersForModel(configurableModelId, partial);
-  }, [configurableModelId, onResetParamField]);
+  }, [configurableModelId, normalizeGenerationPartial, onChangeParams, onResetParamField]);
 
   const handleResetLoadField = useCallback((field: ModelLoadProfileField) => {
     setDidSaveLoadProfile(false);
@@ -985,8 +1027,10 @@ export function useModelParametersSheetController({
       visible: isOpen,
       modelId: configurableModelId,
       modelLabel,
-      params: currentParams,
-      defaultParams,
+      params: effectiveCurrentParams,
+      defaultParams: effectiveDefaultParams,
+      supportsReasoning: reasoningCapability.supportsReasoning,
+      requiresReasoning: reasoningCapability.requiresReasoning,
       contextWindowCeiling,
       gpuLayersCeiling,
       isSafeModeActive: safeModeLoadLimits !== null,

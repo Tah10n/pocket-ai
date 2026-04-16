@@ -288,6 +288,8 @@
       "reasoningDescription": "Stores a separate reasoning trace for supported models without mixing it into the visible reply.",
       "reasoningOff": "Off",
       "reasoningOn": "On",
+      "reasoningUnsupported": "This model does not expose a separate reasoning stream.",
+      "reasoningRequired": "This model is reasoning-first, so the trace must stay enabled.",
       "seed": "Seed",
       "seedDescription": "Random seeds vary outputs. Fixed seeds help reproduce responses.",
       "seedRandom": "Random",

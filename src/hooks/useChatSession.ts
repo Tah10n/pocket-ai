@@ -26,6 +26,7 @@ import {
   resolveThreadInferenceWindowOptions,
   type InferenceBudgetOptions,
 } from '../utils/inferenceWindow';
+import { clampReasoningEnabled, resolveModelReasoningCapability } from '../utils/modelReasoningCapabilities';
 import { syncThreadParameters } from '../utils/chatThreadParameters';
 import { useTruncationTracking } from './useTruncationTracking';
 
@@ -248,7 +249,10 @@ export const useChatSession = () => {
     };
 
     try {
-      const modelName = registry.getModel(thread.modelId)?.name ?? thread.modelId;
+      const model = registry.getModel(thread.modelId);
+      const modelName = model?.name ?? thread.modelId;
+      const reasoningCapability = resolveModelReasoningCapability(model, thread.modelId, modelName);
+      const isReasoningEnabled = clampReasoningEnabled(thread.paramsSnapshot.reasoningEnabled, reasoningCapability);
 
       await backgroundTaskService.startBackgroundInference(modelName);
 
@@ -270,8 +274,8 @@ export const useChatSession = () => {
 
       const windowOptions = resolveThreadInferenceWindowOptions(thread, { maxContextTokens: maxContextSize });
       const tokenCountParams = {
-        enable_thinking: thread.paramsSnapshot.reasoningEnabled === true,
-        reasoning_format: thread.paramsSnapshot.reasoningEnabled === true ? ('auto' as const) : ('none' as const),
+        enable_thinking: isReasoningEnabled,
+        reasoning_format: isReasoningEnabled ? ('auto' as const) : ('none' as const),
       };
       const { messages, promptTokens, promptSafetyMarginTokens } =
         await buildInferenceWindowWithAccurateTokenCounts(thread, windowOptions, async (messages) =>
@@ -306,8 +310,8 @@ export const useChatSession = () => {
           penalty_repeat: thread.paramsSnapshot.repetitionPenalty,
           n_predict: Math.min(thread.paramsSnapshot.maxTokens, maxPredictTokens),
           seed: thread.paramsSnapshot.seed ?? undefined,
-          enable_thinking: thread.paramsSnapshot.reasoningEnabled === true,
-          reasoning_format: thread.paramsSnapshot.reasoningEnabled === true ? 'auto' : 'none',
+          enable_thinking: isReasoningEnabled,
+          reasoning_format: isReasoningEnabled ? 'auto' : 'none',
         },
         onToken: (token) => {
           if (!hasMarkedFirstToken) {
@@ -327,7 +331,13 @@ export const useChatSession = () => {
             }
 
             if (token.reasoningContent !== undefined) {
-              currentThoughtText = token.reasoningContent;
+              const nextReasoning = token.reasoningContent;
+
+              // `reasoningContent` may be streamed either as an accumulated buffer or as deltas.
+              // Prefer treating it as accumulated when it prefixes the existing buffer.
+              currentThoughtText = nextReasoning.startsWith(currentThoughtText)
+                ? nextReasoning
+                : (currentThoughtText + nextReasoning);
             }
           }
 

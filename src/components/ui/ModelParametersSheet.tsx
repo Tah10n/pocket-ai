@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Modal } from 'react-native';
+import { Modal, Switch } from 'react-native';
 import Slider from '@react-native-community/slider';
 import { useTranslation } from 'react-i18next';
 import { Box } from '@/components/ui/box';
@@ -13,6 +13,7 @@ import {
   ScreenInlineInput,
   ScreenSegmentedControl,
   ScreenSheet,
+  ScreenStack,
 } from '@/components/ui/ScreenShell';
 import { Text } from '@/components/ui/text';
 import type { EngineDiagnostics } from '@/types/models';
@@ -36,6 +37,8 @@ interface ModelParametersSheetProps {
   modelLabel: string;
   params: GenerationParameters;
   defaultParams: GenerationParameters;
+  supportsReasoning?: boolean;
+  requiresReasoning?: boolean;
   contextWindowCeiling?: number;
   gpuLayersCeiling?: number;
   isSafeModeActive?: boolean;
@@ -82,8 +85,80 @@ interface SliderRowProps {
   onReset?: () => void;
   isResetDisabled?: boolean;
   variant?: 'standalone' | 'embedded';
-  showDivider?: boolean;
   disabled?: boolean;
+}
+
+interface ParameterControlCardProps {
+  label: string;
+  description: string;
+  badge: React.ReactNode;
+  resetAction?: React.ReactNode;
+  children: React.ReactNode;
+  variant?: 'standalone' | 'embedded';
+  disabled?: boolean;
+}
+
+const accentEyebrowClassName = 'text-xs font-semibold uppercase tracking-wider text-primary-600 dark:text-primary-300';
+const cardTitleClassName = 'text-base font-semibold text-typography-900 dark:text-typography-100';
+const cardDescriptionClassName = 'text-sm leading-5 text-typography-500 dark:text-typography-400';
+
+function ResetAction({
+  onPress,
+  disabled = false,
+}: {
+  onPress: () => void;
+  disabled?: boolean;
+}) {
+  const { t } = useTranslation();
+
+  return (
+    <Button onPress={onPress} action="softPrimary" size="xs" disabled={disabled}>
+      <ButtonText>{t('common.reset')}</ButtonText>
+    </Button>
+  );
+}
+
+function ParameterControlCard({
+  label,
+  description,
+  badge,
+  resetAction,
+  children,
+  variant = 'standalone',
+  disabled = false,
+}: ParameterControlCardProps) {
+  return (
+    <ScreenCard
+      variant={variant === 'embedded' ? 'inset' : 'surface'}
+      padding="default"
+      className={disabled ? 'opacity-60' : undefined}
+    >
+      <ScreenStack gap="default">
+        <Box className="flex-row items-start justify-between gap-3">
+          <Box className="min-w-0 flex-1">
+            <Text className={cardTitleClassName}>
+              {label}
+            </Text>
+            <Text className={`mt-1 ${cardDescriptionClassName}`}>
+              {description}
+            </Text>
+          </Box>
+
+          <ScreenBadge tone={disabled ? 'neutral' : 'accent'} className="self-start shrink-0 px-3 py-1.5">
+            {badge}
+          </ScreenBadge>
+        </Box>
+
+        {resetAction ? (
+          <Box className="flex-row justify-end">
+            {resetAction}
+          </Box>
+        ) : null}
+
+        {children}
+      </ScreenStack>
+    </ScreenCard>
+  );
 }
 
 function SliderRow({
@@ -100,146 +175,120 @@ function SliderRow({
   onReset,
   isResetDisabled = false,
   variant = 'standalone',
-  showDivider = false,
   disabled = false,
 }: SliderRowProps) {
-  const { t } = useTranslation();
   const { colors } = useTheme();
+
   return (
-    <ScreenCard
-      variant={variant === 'embedded' ? 'inset' : 'surface'}
-      padding="default"
-      className={variant === 'embedded'
-        ? `${showDivider ? 'mt-4 border-t border-primary-500/12 pt-4 dark:border-primary-500/20' : ''} border-primary-500/10 bg-background-0/60 dark:border-primary-500/10 dark:bg-background-950/30${disabled ? ' opacity-60' : ''}`
-        : disabled ? 'opacity-60' : undefined}
+    <ParameterControlCard
+      label={label}
+      description={description}
+      badge={valueLabel}
+      resetAction={onReset ? (
+        <ResetAction onPress={onReset} disabled={disabled || isResetDisabled} />
+      ) : undefined}
+      variant={variant}
+      disabled={disabled}
     >
-      <Box className="flex-row items-start justify-between gap-3">
-        <Box className="min-w-0 flex-1">
-          <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">
-            {label}
+      <Box className="gap-2.5">
+        <Slider
+          style={{ width: '100%', height: 40 }}
+          minimumValue={minimumValue}
+          maximumValue={maximumValue}
+          step={step}
+          value={value}
+          onValueChange={onValueChange}
+          disabled={disabled}
+          minimumTrackTintColor={colors.primaryStrong}
+          maximumTrackTintColor={colors.borderStrong}
+          thumbTintColor={colors.primaryStrong}
+        />
+
+        <Box className="flex-row items-center justify-between">
+          <Text className="text-xs font-medium text-typography-400 dark:text-typography-500">
+            {minLabel}
           </Text>
-          <Text className="mt-1 text-sm leading-5 text-typography-500 dark:text-typography-400">
-            {description}
+          <Text className="text-xs font-medium text-typography-400 dark:text-typography-500">
+            {maxLabel}
           </Text>
         </Box>
-
-        <ScreenBadge tone="accent" className="px-3 py-1.5">
-          {valueLabel}
-        </ScreenBadge>
       </Box>
-
-      {onReset ? (
-        <Box className="mt-3 flex-row justify-end">
-          <Button
-            onPress={onReset}
-            action="softPrimary"
-            size="xs"
-            disabled={disabled || isResetDisabled}
-          >
-            <ButtonText>{t('common.reset')}</ButtonText>
-          </Button>
-        </Box>
-      ) : null}
-
-      <Slider
-        style={{ width: '100%', height: 40, marginTop: onReset ? 10 : 16 }}
-        minimumValue={minimumValue}
-        maximumValue={maximumValue}
-        step={step}
-        value={value}
-        onValueChange={onValueChange}
-        disabled={disabled}
-        minimumTrackTintColor={colors.primary}
-        maximumTrackTintColor={colors.borderStrong}
-        thumbTintColor={colors.primary}
-      />
-
-      <Box className="flex-row items-center justify-between">
-        <Text className="text-xs font-medium text-typography-400 dark:text-typography-500">
-          {minLabel}
-        </Text>
-        <Text className="text-xs font-medium text-typography-400 dark:text-typography-500">
-          {maxLabel}
-        </Text>
-      </Box>
-    </ScreenCard>
+    </ParameterControlCard>
   );
 }
 
 interface ToggleRowProps {
   label: string;
   description: string;
+  testID?: string;
   value: boolean;
   enabledLabel: string;
   disabledLabel: string;
   onValueChange: (value: boolean) => void;
   onReset?: () => void;
   isResetDisabled?: boolean;
+  disabled?: boolean;
+  helperText?: string;
 }
 
 function ToggleRow({
   label,
   description,
+  testID,
   value,
   enabledLabel,
   disabledLabel,
   onValueChange,
   onReset,
   isResetDisabled = false,
+  disabled = false,
+  helperText,
 }: ToggleRowProps) {
-  const { t } = useTranslation();
+  const { colors, resolvedMode } = useTheme();
 
   return (
-    <ScreenCard>
-      <Box className="flex-row items-start justify-between gap-3">
-        <Box className="min-w-0 flex-1">
-          <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">
-            {label}
-          </Text>
-          <Text className="mt-1 text-sm leading-5 text-typography-500 dark:text-typography-400">
-            {description}
-          </Text>
+    <ScreenCard className={disabled ? 'opacity-60' : undefined}>
+      <ScreenStack gap="default">
+        <Box className="flex-row items-start justify-between gap-4">
+          <Box className="min-w-0 flex-1">
+            <Text className={cardTitleClassName}>
+              {label}
+            </Text>
+            <Text className={`mt-1 ${cardDescriptionClassName}`}>
+              {description}
+            </Text>
+            {helperText ? (
+              <Text className="mt-2 text-xs leading-5 text-typography-500 dark:text-typography-400">
+                {helperText}
+              </Text>
+            ) : null}
+          </Box>
+
+          <Box className="items-end gap-3">
+            <ScreenBadge tone={disabled ? 'neutral' : 'accent'} className="self-start shrink-0 px-3 py-1.5">
+              {value ? enabledLabel : disabledLabel}
+            </ScreenBadge>
+            <Switch
+              testID={testID}
+              value={value}
+              onValueChange={onValueChange}
+              disabled={disabled}
+              trackColor={{
+                false: resolvedMode === 'dark' ? colors.borderStrong : colors.border,
+                true: colors.primarySoft,
+              }}
+              thumbColor={value ? colors.primaryStrong : colors.surfaceElevated}
+              ios_backgroundColor={resolvedMode === 'dark' ? colors.borderStrong : colors.border}
+            />
+          </Box>
         </Box>
 
-        <ScreenBadge tone="accent" className="px-3 py-1.5">
-          {value ? enabledLabel : disabledLabel}
-        </ScreenBadge>
-      </Box>
-
-      {onReset ? (
-        <Box className="mt-3 flex-row justify-end">
-          <Button
-            onPress={onReset}
-            action="softPrimary"
-            size="xs"
-            disabled={isResetDisabled}
-          >
-            <ButtonText>{t('common.reset')}</ButtonText>
-          </Button>
-        </Box>
-      ) : null}
-
-      <Box className="mt-4 flex-row gap-2">
-        <Button
-          testID="reasoning-option-off"
-          onPress={() => onValueChange(false)}
-          action={!value ? 'softPrimary' : 'secondary'}
-          size="sm"
-          className="flex-1 rounded-2xl"
-        >
-          <ButtonText>{disabledLabel}</ButtonText>
-        </Button>
-
-        <Button
-          testID="reasoning-option-on"
-          onPress={() => onValueChange(true)}
-          action={value ? 'softPrimary' : 'secondary'}
-          size="sm"
-          className="flex-1 rounded-2xl"
-        >
-          <ButtonText>{enabledLabel}</ButtonText>
-        </Button>
-      </Box>
+        {onReset ? (
+          <Box className="flex-row justify-end">
+            <ResetAction onPress={onReset} disabled={disabled || isResetDisabled} />
+          </Box>
+        ) : null}
+      </ScreenStack>
     </ScreenCard>
   );
 }
@@ -259,7 +308,6 @@ interface SegmentedControlRowProps {
   onReset?: () => void;
   isResetDisabled?: boolean;
   variant?: 'standalone' | 'embedded';
-  showDivider?: boolean;
 }
 
 function SegmentedControlRow({
@@ -271,55 +319,25 @@ function SegmentedControlRow({
   onReset,
   isResetDisabled = false,
   variant = 'standalone',
-  showDivider = false,
 }: SegmentedControlRowProps) {
-  const { t } = useTranslation();
   const activeLabel = options.find((option) => option.key === activeKey)?.label ?? activeKey;
 
   return (
-    <ScreenCard
-      variant={variant === 'embedded' ? 'inset' : 'surface'}
-      padding="default"
-      className={variant === 'embedded'
-        ? `${showDivider ? 'mt-4 border-t border-primary-500/12 pt-4 dark:border-primary-500/20' : ''} border-primary-500/10 bg-background-0/60 dark:border-primary-500/10 dark:bg-background-950/30`
-        : undefined}
+    <ParameterControlCard
+      label={label}
+      description={description}
+      badge={activeLabel}
+      resetAction={onReset ? (
+        <ResetAction onPress={onReset} disabled={isResetDisabled} />
+      ) : undefined}
+      variant={variant}
     >
-      <Box className="flex-row items-start justify-between gap-3">
-        <Box className="min-w-0 flex-1">
-          <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">
-            {label}
-          </Text>
-          <Text className="mt-1 text-sm leading-5 text-typography-500 dark:text-typography-400">
-            {description}
-          </Text>
-        </Box>
-
-        <ScreenBadge tone="accent" className="px-3 py-1.5">
-          {activeLabel}
-        </ScreenBadge>
-      </Box>
-
-      {onReset ? (
-        <Box className="mt-3 flex-row justify-end">
-          <Button
-            onPress={onReset}
-            action="softPrimary"
-            size="xs"
-            disabled={isResetDisabled}
-          >
-            <ButtonText>{t('common.reset')}</ButtonText>
-          </Button>
-        </Box>
-      ) : null}
-
-      <Box className="mt-4">
-        <ScreenSegmentedControl
-          options={options.map((option) => ({ key: option.key, label: option.label, testID: option.testID }))}
-          activeKey={activeKey}
-          onChange={onChange}
-        />
-      </Box>
-    </ScreenCard>
+      <ScreenSegmentedControl
+        options={options.map((option) => ({ key: option.key, label: option.label, testID: option.testID }))}
+        activeKey={activeKey}
+        onChange={onChange}
+      />
+    </ParameterControlCard>
   );
 }
 
@@ -333,6 +351,8 @@ export function ModelParametersSheet({
   modelLabel,
   params,
   defaultParams,
+  supportsReasoning = true,
+  requiresReasoning = false,
   contextWindowCeiling,
   gpuLayersCeiling,
   isSafeModeActive = false,
@@ -367,6 +387,12 @@ export function ModelParametersSheet({
   const { t } = useTranslation();
   const [seedInput, setSeedInput] = useState(() => (params.seed === null ? '' : String(params.seed)));
   const backendDiscoveryUnavailable = isBackendDiscoveryUnavailable === true;
+  const isReasoningToggleDisabled = !supportsReasoning || requiresReasoning;
+  const reasoningHelperText = !supportsReasoning
+    ? t('chat.modelControls.reasoningUnsupported')
+    : requiresReasoning
+      ? t('chat.modelControls.reasoningRequired')
+      : undefined;
 
   useEffect(() => {
     if (!visible) {
@@ -553,7 +579,7 @@ export function ModelParametersSheet({
       <Box className="flex-1 justify-end bg-black/45">
         <Pressable className="flex-1" onPress={onClose} />
         <ScreenSheet className="max-h-[82%] pb-8">
-          <Box className="mb-5 flex-row items-start justify-between gap-4">
+          <Box className="mb-4 flex-row items-start justify-between gap-4">
             <Box className="min-w-0 flex-1">
               <Text className="text-lg font-semibold text-typography-900 dark:text-typography-100">
                 {t('chat.modelControls.title')}
@@ -572,9 +598,9 @@ export function ModelParametersSheet({
             />
           </Box>
 
-          <ScreenCard className="mb-4 flex-row items-center justify-between" tone="accent" variant="inset" padding="compact">
+          <ScreenCard className="mb-3 flex-row items-center justify-between" tone="accent" variant="inset" padding="compact">
             <Box className="min-w-0 flex-1 pr-3">
-              <Text className="text-xs font-semibold uppercase tracking-wider text-primary-500">
+              <Text className={accentEyebrowClassName}>
                 {t('chat.modelControls.activeProfile')}
               </Text>
               <Text numberOfLines={1} className="mt-1 text-sm font-semibold text-typography-900 dark:text-typography-100">
@@ -593,9 +619,9 @@ export function ModelParametersSheet({
           </ScreenCard>
 
           <ScrollView showsVerticalScrollIndicator={false}>
-            <Box className="gap-4 pb-2">
+            <ScreenStack gap="default" className="pb-2">
               <ScreenCard>
-                <Text className="text-xs font-semibold uppercase tracking-wider text-primary-500">
+                <Text className={accentEyebrowClassName}>
                   {t('chat.modelControls.liveSampling')}
                 </Text>
                 <Text className="mt-2 text-sm leading-5 text-typography-600 dark:text-typography-300">
@@ -606,44 +632,31 @@ export function ModelParametersSheet({
               <ToggleRow
                 label={t('chat.modelControls.reasoning')}
                 description={t('chat.modelControls.reasoningDescription')}
+                testID="reasoning-toggle"
                 value={params.reasoningEnabled === true}
                 enabledLabel={t('chat.modelControls.reasoningOn')}
                 disabledLabel={t('chat.modelControls.reasoningOff')}
                 onValueChange={(value) => onChangeParams({ reasoningEnabled: value })}
                 onReset={() => onResetParamField('reasoningEnabled')}
                 isResetDisabled={(params.reasoningEnabled === true) === (defaultParams.reasoningEnabled === true)}
+                disabled={isReasoningToggleDisabled}
+                helperText={reasoningHelperText}
               />
 
-              <ScreenCard>
-                <Box className="flex-row items-start justify-between gap-3">
-                  <Box className="min-w-0 flex-1">
-                    <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">
-                      {t('chat.modelControls.seed')}
-                    </Text>
-                    <Text className="mt-1 text-sm leading-5 text-typography-500 dark:text-typography-400">
-                      {t('chat.modelControls.seedDescription')}
-                    </Text>
-                  </Box>
-
-                  <ScreenBadge tone="accent" className="px-3 py-1.5">
-                    {params.seed === null
-                      ? t('chat.modelControls.seedRandom')
-                      : String(params.seed)}
-                  </ScreenBadge>
-                </Box>
-
-                <Box className="mt-3 flex-row justify-end">
-                  <Button
+              <ParameterControlCard
+                label={t('chat.modelControls.seed')}
+                description={t('chat.modelControls.seedDescription')}
+                badge={params.seed === null
+                  ? t('chat.modelControls.seedRandom')
+                  : String(params.seed)}
+                resetAction={(
+                  <ResetAction
                     onPress={() => onResetParamField('seed')}
-                    action="softPrimary"
-                    size="xs"
                     disabled={params.seed === defaultParams.seed}
-                  >
-                    <ButtonText>{t('common.reset')}</ButtonText>
-                  </Button>
-                </Box>
-
-                <Box className="mt-4">
+                  />
+                )}
+              >
+                <ScreenStack gap="default">
                   <ScreenSegmentedControl
                     options={[
                       { key: 'random', label: t('chat.modelControls.seedRandom') },
@@ -661,16 +674,13 @@ export function ModelParametersSheet({
                       onChangeParams({ seed: nextSeed });
                     }}
                   />
-                </Box>
 
-                {params.seed !== null ? (
-                  <Box className="mt-4">
+                  {params.seed !== null ? (
                     <ScreenInlineInput
                       variant="search"
                       placeholder={t('chat.modelControls.seedValue')}
                       keyboardType="number-pad"
                       value={seedInput}
-                      className="mt-3"
                       onChangeText={(text) => {
                         setSeedInput(text);
 
@@ -709,9 +719,9 @@ export function ModelParametersSheet({
                         }
                       }}
                     />
-                  </Box>
-                ) : null}
-              </ScreenCard>
+                  ) : null}
+                </ScreenStack>
+              </ParameterControlCard>
 
               <SliderRow
                 label={t('chat.modelControls.temperature')}
@@ -804,79 +814,82 @@ export function ModelParametersSheet({
               />
 
               <ScreenCard tone="accent">
-                <Text className="text-xs font-semibold uppercase tracking-wider text-primary-500">
-                  {t('chat.modelControls.runtimeReload')}
-                </Text>
-                <Text className="mt-2 text-sm leading-5 text-typography-600 dark:text-typography-300">
-                  {t('chat.modelControls.runtimeReloadDescription')}
-                </Text>
+                <ScreenStack gap="default">
+                  <Box>
+                    <Text className={accentEyebrowClassName}>
+                      {t('chat.modelControls.runtimeReload')}
+                    </Text>
+                    <Text className="mt-2 text-sm leading-5 text-typography-600 dark:text-typography-300">
+                      {t('chat.modelControls.runtimeReloadDescription')}
+                    </Text>
+                  </Box>
 
-                {typeof loadedContextSize === 'number' && Number.isFinite(loadedContextSize) ? (
-                  <ScreenCard className="mt-3" tone="default" variant="inset" padding="compact">
-                    <Text className="text-xs font-semibold uppercase tracking-wider text-primary-500">
-                      {t('chat.modelControls.runtimeLoadedTitle')}
-                    </Text>
-                    <Text className="mt-1 text-sm leading-5 text-typography-700 dark:text-typography-200">
-                      {t('chat.modelControls.runtimeLoadedValue', {
-                        contextSize: Math.round(loadedContextSize),
-                        gpuLayers: Math.round(reportedLoadedGpuLayers ?? 0),
-                      })}
-                    </Text>
-                  </ScreenCard>
-                ) : null}
-
-                {showAdvancedInferenceControls ? (
-                  <ScreenCard className="mt-3" tone="default" variant="inset" padding="compact">
-                    <Text className="text-xs font-semibold uppercase tracking-wider text-primary-500">
-                      {t('chat.modelControls.backendBenchmarkTitle')}
-                    </Text>
-                    <Text className="mt-1 text-sm leading-5 text-typography-600 dark:text-typography-300">
-                      {t('chat.modelControls.backendBenchmarkDescription')}
-                    </Text>
-
-                    {autotuneBestStable ? (
-                      <Text className="mt-2 text-sm leading-5 text-typography-700 dark:text-typography-200">
-                        {t('chat.modelControls.backendBenchmarkBestStable', {
-                          backend: autotuneBestStableBackendLabel,
-                          layers: Math.max(0, Math.round(autotuneBestStable.nGpuLayers)),
+                  {typeof loadedContextSize === 'number' && Number.isFinite(loadedContextSize) ? (
+                    <ScreenCard tone="default" variant="inset" padding="compact">
+                      <Text className={accentEyebrowClassName}>
+                        {t('chat.modelControls.runtimeLoadedTitle')}
+                      </Text>
+                      <Text className="mt-1 text-sm leading-5 text-typography-700 dark:text-typography-200">
+                        {t('chat.modelControls.runtimeLoadedValue', {
+                          contextSize: Math.round(loadedContextSize),
+                          gpuLayers: Math.round(reportedLoadedGpuLayers ?? 0),
                         })}
                       </Text>
-                    ) : (
-                      <Text className="mt-2 text-sm leading-5 text-typography-700 dark:text-typography-200">
-                        {t('chat.modelControls.backendBenchmarkNoResult')}
-                      </Text>
-                    )}
+                    </ScreenCard>
+                  ) : null}
 
-                    {showApplyReload ? (
-                      <Text className="mt-2 text-xs leading-5 text-typography-500 dark:text-typography-400">
-                        {t('chat.modelControls.backendBenchmarkPendingChangesHint')}
+                  {showAdvancedInferenceControls ? (
+                    <ScreenCard tone="default" variant="inset" padding="compact">
+                      <Text className={accentEyebrowClassName}>
+                        {t('chat.modelControls.backendBenchmarkTitle')}
                       </Text>
-                    ) : null}
+                      <Text className="mt-1 text-sm leading-5 text-typography-600 dark:text-typography-300">
+                        {t('chat.modelControls.backendBenchmarkDescription')}
+                      </Text>
 
-                    <Box className="mt-3 flex-row justify-end">
-                      <Button
-                        onPress={() => onRunAutotune?.()}
-                        action="softPrimary"
-                        size="sm"
-                        disabled={!canRunAutotune || isAutotuneRunning || !onRunAutotune}
+                      {autotuneBestStable ? (
+                        <Text className="mt-2 text-sm leading-5 text-typography-700 dark:text-typography-200">
+                          {t('chat.modelControls.backendBenchmarkBestStable', {
+                            backend: autotuneBestStableBackendLabel,
+                            layers: Math.max(0, Math.round(autotuneBestStable.nGpuLayers)),
+                          })}
+                        </Text>
+                      ) : (
+                        <Text className="mt-2 text-sm leading-5 text-typography-700 dark:text-typography-200">
+                          {t('chat.modelControls.backendBenchmarkNoResult')}
+                        </Text>
+                      )}
+
+                      {showApplyReload ? (
+                        <Text className="mt-2 text-xs leading-5 text-typography-500 dark:text-typography-400">
+                          {t('chat.modelControls.backendBenchmarkPendingChangesHint')}
+                        </Text>
+                      ) : null}
+
+                      <Box className="mt-3 flex-row justify-end">
+                        <Button
+                          onPress={() => onRunAutotune?.()}
+                          action="softPrimary"
+                          size="sm"
+                          disabled={!canRunAutotune || isAutotuneRunning || !onRunAutotune}
+                        >
+                          <ButtonText>{isAutotuneRunning
+                            ? t('chat.modelControls.backendBenchmarkRunning')
+                            : t('chat.modelControls.backendBenchmarkRun')}
+                          </ButtonText>
+                        </Button>
+                      </Box>
+                    </ScreenCard>
+                  ) : null}
+
+                  {showAdvancedInferenceControls && engineDiagnostics && typeof loadedContextSize === 'number' && Number.isFinite(loadedContextSize) ? (
+                    <ScreenCard tone={shouldHighlightNoGpu ? 'warning' : 'default'} variant="inset" padding="compact">
+                      <Text
+                        className={`text-xs font-semibold uppercase tracking-wider ${shouldHighlightNoGpu ? 'text-warning-700 dark:text-warning-200' : 'text-primary-600 dark:text-primary-300'}`}
                       >
-                        <ButtonText>{isAutotuneRunning
-                          ? t('chat.modelControls.backendBenchmarkRunning')
-                          : t('chat.modelControls.backendBenchmarkRun')}
-                        </ButtonText>
-                      </Button>
-                    </Box>
-                  </ScreenCard>
-                ) : null}
-
-                {showAdvancedInferenceControls && engineDiagnostics && typeof loadedContextSize === 'number' && Number.isFinite(loadedContextSize) ? (
-                  <ScreenCard className="mt-3" tone={shouldHighlightNoGpu ? 'warning' : 'default'} variant="inset" padding="compact">
-                    <Text
-                      className={`text-xs font-semibold uppercase tracking-wider ${shouldHighlightNoGpu ? 'text-warning-700 dark:text-warning-200' : 'text-primary-500'}`}
-                    >
-                      {t('chat.modelControls.runtimeBackendTitle')}
-                    </Text>
-                    <Box className="mt-1 gap-1">
+                        {t('chat.modelControls.runtimeBackendTitle')}
+                      </Text>
+                      <Box className="mt-1 gap-1">
                       <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
                         {t('chat.modelControls.runtimeBackendBackend', { backend: backendLabel })}
                       </Text>
@@ -1007,7 +1020,7 @@ export function ModelParametersSheet({
 
                       {backendInitAttempts.length > 0 ? (
                         <Box className="mt-2 gap-1">
-                          <Text className="text-xs font-semibold uppercase tracking-wider text-primary-500">
+                          <Text className={accentEyebrowClassName}>
                             {t('chat.modelControls.runtimeBackendAttemptsTitle')}
                           </Text>
                           {backendInitAttempts.map((attempt, index) => {
@@ -1046,15 +1059,15 @@ export function ModelParametersSheet({
                           {t('chat.modelControls.runtimeBackendSystemInfo', { info: engineDiagnostics.systemInfo })}
                         </Text>
                       ) : null}
-                    </Box>
-                  </ScreenCard>
-                ) : null}
+                      </Box>
+                    </ScreenCard>
+                  ) : null}
 
-                {typeof loadedContextSize === 'number' &&
-                Number.isFinite(loadedContextSize) &&
-                !showApplyReload &&
-                loadedContextSize < loadParamsDraft.contextSize ? (
-                    <ScreenCard className="mt-3" tone="warning" variant="inset" padding="compact">
+                  {typeof loadedContextSize === 'number' &&
+                  Number.isFinite(loadedContextSize) &&
+                  !showApplyReload &&
+                  loadedContextSize < loadParamsDraft.contextSize ? (
+                    <ScreenCard tone="warning" variant="inset" padding="compact">
                       <Text className="text-xs font-semibold uppercase tracking-wider text-warning-700 dark:text-warning-200">
                         {t('chat.modelControls.runtimeMismatchTitle')}
                       </Text>
@@ -1072,82 +1085,82 @@ export function ModelParametersSheet({
                     </ScreenCard>
                   ) : null}
 
-                <SliderRow
-                  label={t('chat.modelControls.contextWindow')}
-                  description={t('chat.modelControls.contextWindowDescription')}
-                  valueLabel={`${Math.round(displayedContextSize)} tok`}
-                  minLabel="512"
-                  maxLabel={`${resolvedContextWindowCeiling}`}
-                  minimumValue={MIN_CONTEXT_WINDOW_TOKENS}
-                  maximumValue={resolvedContextWindowCeiling}
-                  step={512}
-                  value={displayedContextSize}
-                  onValueChange={(value) => onChangeLoadParams({ contextSize: Math.round(value) })}
-                  onReset={() => onResetLoadField('contextSize')}
-                  isResetDisabled={displayedContextSize === defaultContextSize}
-                  variant="embedded"
-                />
+                  <ScreenStack gap="default">
+                    <SliderRow
+                      label={t('chat.modelControls.contextWindow')}
+                      description={t('chat.modelControls.contextWindowDescription')}
+                      valueLabel={`${Math.round(displayedContextSize)} tok`}
+                      minLabel="512"
+                      maxLabel={`${resolvedContextWindowCeiling}`}
+                      minimumValue={MIN_CONTEXT_WINDOW_TOKENS}
+                      maximumValue={resolvedContextWindowCeiling}
+                      step={512}
+                      value={displayedContextSize}
+                      onValueChange={(value) => onChangeLoadParams({ contextSize: Math.round(value) })}
+                      onReset={() => onResetLoadField('contextSize')}
+                      isResetDisabled={displayedContextSize === defaultContextSize}
+                      variant="embedded"
+                    />
 
-                {showOffloadLayerControls ? (
-                  <SliderRow
-                    label={t('chat.modelControls.gpuLayers')}
-                    description={gpuLayersRowDescription}
-                    valueLabel={t('chat.modelControls.gpuLayersValue', { count: Math.round(displayedGpuLayers) })}
-                    minLabel="0"
-                    maxLabel={`${resolvedGpuLayersCeiling}`}
-                    minimumValue={0}
-                    maximumValue={resolvedGpuLayersCeiling}
-                    step={1}
-                    value={displayedGpuLayers}
-                    onValueChange={(value) => onChangeLoadParams({ gpuLayers: Math.round(value) })}
-                    onReset={() => onResetLoadField('gpuLayers')}
-                    isResetDisabled={displayedGpuLayers === defaultGpuLayers}
-                    disabled={isGpuLayersDisabled}
-                    variant="embedded"
-                    showDivider
-                  />
-                ) : null}
+                    {showOffloadLayerControls ? (
+                      <SliderRow
+                        label={t('chat.modelControls.gpuLayers')}
+                        description={gpuLayersRowDescription}
+                        valueLabel={t('chat.modelControls.gpuLayersValue', { count: Math.round(displayedGpuLayers) })}
+                        minLabel="0"
+                        maxLabel={`${resolvedGpuLayersCeiling}`}
+                        minimumValue={0}
+                        maximumValue={resolvedGpuLayersCeiling}
+                        step={1}
+                        value={displayedGpuLayers}
+                        onValueChange={(value) => onChangeLoadParams({ gpuLayers: Math.round(value) })}
+                        onReset={() => onResetLoadField('gpuLayers')}
+                        isResetDisabled={displayedGpuLayers === defaultGpuLayers}
+                        disabled={isGpuLayersDisabled}
+                        variant="embedded"
+                      />
+                    ) : null}
 
-                {shouldShowBackendPolicyControls ? (
-                  <SegmentedControlRow
-                    label={t('chat.modelControls.backendPolicy')}
-                    description={t('chat.modelControls.backendPolicyDescription')}
-                    options={backendPolicyOptions}
-                    activeKey={displayedBackendPolicy}
-                    onChange={(key) => onChangeLoadParams({
-                      backendPolicy: key === 'auto' ? undefined : (key as ModelLoadParameters['backendPolicy']),
-                    })}
-                    onReset={() => onResetLoadField('backendPolicy')}
-                    isResetDisabled={normalizedBackendPolicy === normalizedDefaultBackendPolicy}
-                    variant="embedded"
-                    showDivider
-                  />
-                ) : null}
+                    {shouldShowBackendPolicyControls ? (
+                      <SegmentedControlRow
+                        label={t('chat.modelControls.backendPolicy')}
+                        description={t('chat.modelControls.backendPolicyDescription')}
+                        options={backendPolicyOptions}
+                        activeKey={displayedBackendPolicy}
+                        onChange={(key) => onChangeLoadParams({
+                          backendPolicy: key === 'auto' ? undefined : (key as ModelLoadParameters['backendPolicy']),
+                        })}
+                        onReset={() => onResetLoadField('backendPolicy')}
+                        isResetDisabled={normalizedBackendPolicy === normalizedDefaultBackendPolicy}
+                        variant="embedded"
+                      />
+                    ) : null}
 
-                <SegmentedControlRow
-                  label={t('chat.modelControls.kvCache')}
-                  description={t('chat.modelControls.kvCacheDescription')}
-                  options={[
-                    { key: 'auto', label: t('chat.modelControls.kvCacheAuto') },
-                    { key: 'f16', label: 'f16' },
-                    { key: 'q8_0', label: 'q8_0' },
-                    { key: 'q4_0', label: 'q4_0' },
-                  ]}
-                  activeKey={displayedKvCacheType}
-                  onChange={(key) => onChangeLoadParams({ kvCacheType: key as ModelLoadParameters['kvCacheType'] })}
-                  onReset={() => onResetLoadField('kvCacheType')}
-                  isResetDisabled={displayedKvCacheType === defaultKvCacheType}
-                  variant="embedded"
-                  showDivider
-                />
+                    <SegmentedControlRow
+                      label={t('chat.modelControls.kvCache')}
+                      description={t('chat.modelControls.kvCacheDescription')}
+                      options={[
+                        { key: 'auto', label: t('chat.modelControls.kvCacheAuto') },
+                        { key: 'f16', label: 'f16' },
+                        { key: 'q8_0', label: 'q8_0' },
+                        { key: 'q4_0', label: 'q4_0' },
+                      ]}
+                      activeKey={displayedKvCacheType}
+                      onChange={(key) => onChangeLoadParams({ kvCacheType: key as ModelLoadParameters['kvCacheType'] })}
+                      onReset={() => onResetLoadField('kvCacheType')}
+                      isResetDisabled={displayedKvCacheType === defaultKvCacheType}
+                      variant="embedded"
+                    />
+                  </ScreenStack>
+                </ScreenStack>
               </ScreenCard>
-            </Box>
+            </ScreenStack>
           </ScrollView>
 
           {showApplyReload ? (
             <Box testID="model-apply-footer" className="mt-4 border-t border-outline-200 pt-4 dark:border-outline-800">
               <ScreenCard className="mb-3" tone="accent" variant="inset" padding="compact">
-                <Text className="text-xs font-semibold uppercase tracking-wider text-primary-500">
+                <Text className={accentEyebrowClassName}>
                   {t('chat.modelControls.pendingLoadProfileTitle')}
                 </Text>
                 <Text className="mt-1 text-sm leading-5 text-typography-700 dark:text-typography-200">

@@ -1,12 +1,14 @@
 import {
   LifecycleStatus,
   ModelAccessState,
+  type ModelCapabilitySnapshot,
   type ModelGgufMetadata,
   type ModelMetadata,
   type ModelMemoryFitConfidence,
   type ModelMemoryFitDecision,
   type ModelMetadataTrust,
 } from '../types/models';
+import { normalizePersistedModelCapabilitySnapshot } from '../utils/modelCapabilities';
 import { buildHuggingFaceResolveUrl } from '../utils/huggingFaceUrls';
 
 type PersistedModelMetadata = Partial<ModelMetadata> & {
@@ -179,6 +181,19 @@ export function normalizePersistedModelMetadata(
     ? model.downloadProgress
     : 0;
   const downloadProgress = Math.max(0, Math.min(rawProgress, 1));
+  const capabilitySnapshot = normalizePersistedModelCapabilitySnapshot({
+    gguf,
+    hasVerifiedContextWindow: model.hasVerifiedContextWindow === true,
+    lastModifiedAt: typeof model.lastModifiedAt === 'number' && Number.isFinite(model.lastModifiedAt)
+      ? Math.round(model.lastModifiedAt)
+      : undefined,
+    maxContextTokens: typeof model.maxContextTokens === 'number' && Number.isFinite(model.maxContextTokens)
+      ? Math.round(model.maxContextTokens)
+      : undefined,
+    metadataTrust,
+    sha256: normalizeNonEmptyString(model.sha256),
+    size,
+  }, (model as PersistedModelMetadata & { capabilitySnapshot?: ModelCapabilitySnapshot }).capabilitySnapshot);
 
   return {
     id: model.id,
@@ -219,6 +234,7 @@ export function normalizePersistedModelMetadata(
       ? Math.round(model.maxContextTokens)
       : undefined,
     hasVerifiedContextWindow: model.hasVerifiedContextWindow === true,
+    capabilitySnapshot,
     parameterSizeLabel: normalizeNonEmptyString(model.parameterSizeLabel),
     modelType: normalizeNonEmptyString(model.modelType),
     architectures: normalizeStringArray(model.architectures),

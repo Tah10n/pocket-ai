@@ -17,7 +17,8 @@ export type AppErrorCode =
   | 'download_http_error'
   | 'download_verification_failed'
   | 'download_file_missing'
-  | 'message_empty';
+  | 'message_empty'
+  | 'message_too_long';
 
 const ERROR_MESSAGE_KEYS: Partial<Record<AppErrorCode, string>> = {
   engine_not_ready: 'common.errors.engineNotReady',
@@ -36,6 +37,7 @@ const ERROR_MESSAGE_KEYS: Partial<Record<AppErrorCode, string>> = {
   download_verification_failed: 'common.errors.downloadVerificationFailed',
   download_file_missing: 'common.errors.downloadFileMissing',
   message_empty: 'common.errors.messageEmpty',
+  message_too_long: 'common.errors.messageTooLong',
 };
 
 const ERROR_PATTERNS: { pattern: RegExp; code: AppErrorCode }[] = [
@@ -51,6 +53,7 @@ const ERROR_PATTERNS: { pattern: RegExp; code: AppErrorCode }[] = [
   { pattern: /not found or not downloaded/i, code: 'model_not_found' },
   { pattern: /out of memory|not enough memory|std::bad_alloc|ENOMEM/i, code: 'model_memory_insufficient' },
   { pattern: /Message cannot be empty/i, code: 'message_empty' },
+  { pattern: /message is too long|too long to fit|context window/i, code: 'message_too_long' },
 ];
 
 export class AppError extends Error {

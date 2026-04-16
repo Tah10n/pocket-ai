@@ -78,7 +78,7 @@ describe('SettingsStore', () => {
         expect(settings.temperature).toBe(0.7);
         expect(settings.topP).toBe(0.9);
         expect(settings.maxTokens).toBe(512);
-        expect(settings.reasoningEnabled).toBe(false);
+        expect(settings.reasoningEffort).toBe('auto');
     });
 
     it('updates settings partially', () => {
@@ -99,7 +99,7 @@ describe('SettingsStore', () => {
             minP: 0.05,
             repetitionPenalty: 1,
             maxTokens: 1536,
-            reasoningEnabled: false,
+            reasoningEffort: 'auto',
             seed: null,
         });
         expect(getGenerationParametersForModel('author/model-b')).toEqual({
@@ -109,7 +109,7 @@ describe('SettingsStore', () => {
             minP: 0.05,
             repetitionPenalty: 1,
             maxTokens: 1024,
-            reasoningEnabled: false,
+            reasoningEffort: 'auto',
             seed: null,
         });
         expect(getSettings().modelParamsByModelId).toEqual({
@@ -120,7 +120,7 @@ describe('SettingsStore', () => {
                 minP: 0.05,
                 repetitionPenalty: 1,
                 maxTokens: 1536,
-                reasoningEnabled: false,
+                reasoningEffort: 'auto',
                 seed: null,
             },
             'author/model-b': {
@@ -130,7 +130,7 @@ describe('SettingsStore', () => {
                 minP: 0.05,
                 repetitionPenalty: 1,
                 maxTokens: 1024,
-                reasoningEnabled: false,
+                reasoningEffort: 'auto',
                 seed: null,
             },
         });
@@ -156,15 +156,15 @@ describe('SettingsStore', () => {
             minP: 0.05,
             repetitionPenalty: 1,
             maxTokens: 2048,
-            reasoningEnabled: false,
+            reasoningEffort: 'auto',
             seed: null,
         });
         expect(getSettings().modelParamsByModelId).toEqual({});
     });
 
-    it('stores reasoning preference independently per model', () => {
-        updateSettings({ reasoningEnabled: false, maxTokens: 512, modelParamsByModelId: {} });
-        updateGenerationParametersForModel('author/model-a', { reasoningEnabled: true });
+    it('stores reasoning effort independently per model', () => {
+        updateSettings({ reasoningEffort: 'auto', maxTokens: 512, modelParamsByModelId: {} });
+        updateGenerationParametersForModel('author/model-a', { reasoningEffort: 'medium' });
 
         expect(getGenerationParametersForModel('author/model-a')).toEqual({
             temperature: 0.7,
@@ -173,7 +173,7 @@ describe('SettingsStore', () => {
             minP: 0.05,
             repetitionPenalty: 1,
             maxTokens: 512,
-            reasoningEnabled: true,
+            reasoningEffort: 'medium',
             seed: null,
         });
         expect(getGenerationParametersForModel('author/model-b')).toEqual({
@@ -183,7 +183,7 @@ describe('SettingsStore', () => {
             minP: 0.05,
             repetitionPenalty: 1,
             maxTokens: 512,
-            reasoningEnabled: false,
+            reasoningEffort: 'auto',
             seed: null,
         });
     });
@@ -252,7 +252,7 @@ describe('SettingsStore', () => {
             minP: 0.05,
             repetitionPenalty: 1,
             maxTokens: 1024,
-            reasoningEnabled: false,
+            reasoningEffort: 'auto',
             seed: null,
         });
         expect(getModelLoadParametersForModel('author/model-a')).toEqual({
@@ -268,7 +268,7 @@ describe('SettingsStore', () => {
                 minP: 0.05,
                 repetitionPenalty: 1,
                 maxTokens: 1024,
-                reasoningEnabled: false,
+                reasoningEffort: 'auto',
                 seed: null,
             },
         });

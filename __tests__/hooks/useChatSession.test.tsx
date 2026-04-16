@@ -3,7 +3,7 @@ import { act, render, waitFor } from '@testing-library/react-native';
 import { useChatSession } from '../../src/hooks/useChatSession';
 import { llmEngineService } from '../../src/services/LLMEngineService';
 import { getGenerationParametersForModel, getSettings } from '../../src/services/SettingsStore';
-import { EngineStatus } from '../../src/types/models';
+import { EngineStatus, LifecycleStatus, ModelAccessState } from '../../src/types/models';
 import { estimateLlmMessagesTokens, useChatStore } from '../../src/store/chatStore';
 import { AppState } from 'react-native';
 import {
@@ -16,9 +16,11 @@ import {
 import { presetManager } from '../../src/services/PresetManager';
 import { backgroundTaskService } from '../../src/services/BackgroundTaskService';
 import { notificationService } from '../../src/services/NotificationService';
+import { registry } from '../../src/services/LocalStorageRegistry';
 
 jest.mock('../../src/services/LLMEngineService', () => ({
   llmEngineService: {
+    ensurePersistedCapabilitySnapshot: jest.fn().mockReturnValue(null),
     getState: jest.fn(),
     getContextSize: jest.fn(),
     chatCompletion: jest.fn(),
@@ -88,8 +90,9 @@ describe('useChatSession', () => {
       temperature: 0.7,
       topP: 0.9,
       maxTokens: modelId ? 1024 : 512,
-      reasoningEnabled: false,
+      reasoningEffort: 'auto',
     }));
+    registry.saveModels([]);
     (llmEngineService.getState as jest.Mock).mockReturnValue({
       status: EngineStatus.READY,
       activeModelId: 'author/model-q4',
@@ -185,6 +188,128 @@ describe('useChatSession', () => {
     );
   });
 
+  it('keeps raw think tags out of the visible answer when accumulatedText still includes reasoning', async () => {
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      async ({ onToken }: { onToken?: (token: any) => void }) => {
+        onToken?.({
+          token: 'reason-1',
+          reasoningContent: 'Thinking through the answer',
+          accumulatedText: '<think>Thinking through the answer',
+        });
+        onToken?.({
+          token: 'answer-1',
+          reasoningContent: 'Thinking through the answer',
+          accumulatedText: '<think>Thinking through the answer</think>Visible answer',
+        });
+
+        return {
+          text: '<think>Thinking through the answer</think>Visible answer',
+          content: '',
+          reasoning_content: 'Thinking through the answer',
+        };
+      },
+    );
+    (getGenerationParametersForModel as jest.Mock).mockImplementation((modelId: string | null | undefined) => ({
+      temperature: 0.7,
+      topP: 0.9,
+      maxTokens: modelId ? 1024 : 512,
+      reasoningEffort: 'medium',
+    }));
+    registry.saveModels([
+      {
+        id: 'author/model-q4',
+        name: 'ReD-Qwen3-4B-Thinking-Search-GGUF',
+        author: 'Test',
+        size: 512 * 1024 * 1024,
+        downloadUrl: 'https://example.com/author/model-q4.gguf',
+        localPath: 'author-model-q4.gguf',
+        fitsInRam: true,
+        accessState: ModelAccessState.PUBLIC,
+        isGated: false,
+        isPrivate: false,
+        lifecycleStatus: LifecycleStatus.DOWNLOADED,
+        downloadProgress: 1,
+        modelType: 'qwen3',
+        tags: ['gguf', 'thinking'],
+      },
+    ]);
+
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Explain this');
+    });
+
+    expect(useChatStore.getState().getActiveThread()?.messages.at(-1)).toEqual(
+      expect.objectContaining({
+        role: 'assistant',
+        content: 'Visible answer',
+        thoughtContent: 'Thinking through the answer',
+      }),
+    );
+  });
+
+  it('keeps raw [THINK] blocks out of the visible answer when accumulatedText still includes reasoning', async () => {
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      async ({ onToken }: { onToken?: (token: any) => void }) => {
+        onToken?.({
+          token: 'reason-1',
+          reasoningContent: 'Thinking through the answer',
+          accumulatedText: '[THINK]Thinking through the answer',
+        });
+        onToken?.({
+          token: 'answer-1',
+          reasoningContent: 'Thinking through the answer',
+          accumulatedText: '[THINK]Thinking through the answer[/THINK]Visible answer',
+        });
+
+        return {
+          text: '[THINK]Thinking through the answer[/THINK]Visible answer',
+          content: '',
+          reasoning_content: 'Thinking through the answer',
+        };
+      },
+    );
+    (getGenerationParametersForModel as jest.Mock).mockImplementation((modelId: string | null | undefined) => ({
+      temperature: 0.7,
+      topP: 0.9,
+      maxTokens: modelId ? 1024 : 512,
+      reasoningEffort: 'medium',
+    }));
+    registry.saveModels([
+      {
+        id: 'author/model-q4',
+        name: 'Ministral-3-14B-Reasoning-GGUF',
+        author: 'Test',
+        size: 512 * 1024 * 1024,
+        downloadUrl: 'https://example.com/author/model-q4.gguf',
+        localPath: 'author-model-q4.gguf',
+        fitsInRam: true,
+        accessState: ModelAccessState.PUBLIC,
+        isGated: false,
+        isPrivate: false,
+        lifecycleStatus: LifecycleStatus.DOWNLOADED,
+        downloadProgress: 1,
+        modelType: 'mistral',
+        tags: ['gguf', 'reasoning'],
+      },
+    ]);
+
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Explain this');
+    });
+
+    expect(useChatStore.getState().getActiveThread()?.messages.at(-1)).toEqual(
+      expect.objectContaining({
+        role: 'assistant',
+        content: 'Visible answer',
+        thoughtContent: 'Thinking through the answer',
+      }),
+    );
+  });
+
   it('does not force reasoning flags when the model profile leaves reasoning disabled', async () => {
     const getSession = renderHookHarness();
 
@@ -203,11 +328,29 @@ describe('useChatSession', () => {
   });
 
   it('enables reasoning flags when the model profile opts in', async () => {
+    registry.saveModels([
+      {
+        id: 'author/model-q4',
+        name: 'Qwen3-4B-Instruct-GGUF',
+        author: 'Test',
+        size: 512 * 1024 * 1024,
+        downloadUrl: 'https://example.com/author/model-q4.gguf',
+        localPath: 'author-model-q4.gguf',
+        fitsInRam: true,
+        accessState: ModelAccessState.PUBLIC,
+        isGated: false,
+        isPrivate: false,
+        lifecycleStatus: LifecycleStatus.DOWNLOADED,
+        downloadProgress: 1,
+        modelType: 'qwen3',
+        tags: ['gguf', 'chat'],
+      },
+    ]);
     (getGenerationParametersForModel as jest.Mock).mockImplementation((modelId: string | null | undefined) => ({
       temperature: 0.7,
       topP: 0.9,
       maxTokens: modelId ? 1024 : 512,
-      reasoningEnabled: true,
+      reasoningEffort: 'medium',
     }));
     const getSession = renderHookHarness();
 
@@ -219,7 +362,129 @@ describe('useChatSession', () => {
       expect.objectContaining({
         params: expect.objectContaining({
           enable_thinking: true,
+          thinking_budget_tokens: 384,
           reasoning_format: 'auto',
+        }),
+      }),
+    );
+  });
+
+  it('disables thinking when the context window cannot fit additional thinking budget tokens', async () => {
+    registry.saveModels([
+      {
+        id: 'author/model-q4',
+        name: 'Qwen3-4B-Instruct-GGUF',
+        author: 'Test',
+        size: 512 * 1024 * 1024,
+        downloadUrl: 'https://example.com/author/model-q4.gguf',
+        localPath: 'author-model-q4.gguf',
+        fitsInRam: true,
+        accessState: ModelAccessState.PUBLIC,
+        isGated: false,
+        isPrivate: false,
+        lifecycleStatus: LifecycleStatus.DOWNLOADED,
+        downloadProgress: 1,
+        modelType: 'qwen3',
+        tags: ['gguf', 'chat'],
+      },
+    ]);
+    (getGenerationParametersForModel as jest.Mock).mockImplementation((modelId: string | null | undefined) => ({
+      temperature: 0.7,
+      topP: 0.9,
+      maxTokens: modelId ? 1024 : 512,
+      reasoningEffort: 'medium',
+    }));
+    (llmEngineService.getContextSize as jest.Mock).mockReturnValue(128);
+
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Explain this with reasoning');
+    });
+
+    const call = (llmEngineService.chatCompletion as jest.Mock).mock.calls.at(-1)?.[0];
+    expect(call?.params.enable_thinking).toBe(false);
+    expect(call?.params.reasoning_format).toBe('none');
+    expect(call?.params.thinking_budget_tokens).toBeUndefined();
+  });
+
+  it('accumulates streamed reasoning deltas when reasoning_content is not returned', async () => {
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      async ({ onToken }: { onToken?: (token: any) => void }) => {
+        onToken?.({
+          token: 'reason-1',
+          reasoningContent: 'Think ',
+        });
+        onToken?.({
+          token: 'reason-2',
+          reasoningContent: 'through',
+        });
+        onToken?.({
+          token: 'answer-1',
+          content: 'Visible answer',
+        });
+
+        return {
+          text: '<think>Think through</think>Visible answer',
+          content: 'Visible answer',
+        };
+      },
+    );
+
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Explain this');
+    });
+
+    const assistantMessage = useChatStore.getState().getActiveThread()?.messages.at(-1);
+
+    expect(assistantMessage).toEqual(
+      expect.objectContaining({
+        role: 'assistant',
+        content: 'Visible answer',
+        thoughtContent: 'Think through',
+        state: 'complete',
+      }),
+    );
+  });
+
+  it('does not enable reasoning flags for models without reasoning support', async () => {
+    registry.saveModels([
+      {
+        id: 'author/model-q4',
+        name: 'gemma-2-2b-it-GGUF',
+        author: 'Test',
+        size: 512 * 1024 * 1024,
+        downloadUrl: 'https://example.com/author/model-q4.gguf',
+        localPath: 'author-model-q4.gguf',
+        fitsInRam: true,
+        accessState: ModelAccessState.PUBLIC,
+        isGated: false,
+        isPrivate: false,
+        lifecycleStatus: LifecycleStatus.DOWNLOADED,
+        downloadProgress: 1,
+        modelType: 'gemma2',
+        tags: ['gguf', 'chat'],
+      },
+    ]);
+    (getGenerationParametersForModel as jest.Mock).mockImplementation((modelId: string | null | undefined) => ({
+      temperature: 0.7,
+      topP: 0.9,
+      maxTokens: modelId ? 1024 : 512,
+      reasoningEffort: 'medium',
+    }));
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Explain this with reasoning');
+    });
+
+    expect(llmEngineService.chatCompletion).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        params: expect.objectContaining({
+          enable_thinking: false,
+          reasoning_format: 'none',
         }),
       }),
     );

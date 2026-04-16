@@ -358,9 +358,18 @@ export const SettingsScreen = () => {
         updateSettings({ allowCellularDownloads: nextMode === 'cellular' });
     }, []);
 
+    const handleAdvancedInferenceControlsChange = useCallback((nextMode: string) => {
+        updateSettings({ showAdvancedInferenceControls: nextMode === 'on' });
+    }, []);
+
     const cellularDownloadOptions = [
         { key: 'wifi', label: t('settings.cellularDownloadsWifiOnly') },
         { key: 'cellular', label: t('settings.cellularDownloadsWifiAndCellular') },
+    ];
+
+    const advancedInferenceControlOptions = [
+        { key: 'off', label: t('settings.advancedInferenceControlsOff') },
+        { key: 'on', label: t('settings.advancedInferenceControlsOn') },
     ];
 
     const themeOptions = [
@@ -613,6 +622,28 @@ export const SettingsScreen = () => {
                                         activeKey={settings.allowCellularDownloads ? 'cellular' : 'wifi'}
                                         onChange={handleCellularDownloadsChange}
                                         options={cellularDownloadOptions}
+                                    />
+                                </ScreenCard>
+                                <ScreenCard padding="compact">
+                                    <Box className="flex-row items-start gap-3">
+                                        <Box className="h-10 w-10 items-center justify-center rounded-2xl bg-primary-500/10 dark:bg-primary-500/20">
+                                            <MaterialSymbols name="tune" size={20} className="text-primary-500" />
+                                        </Box>
+                                        <Box className="min-w-0 flex-1">
+                                            <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">
+                                                {t('settings.advancedInferenceControls')}
+                                            </Text>
+                                            <Text className="mt-1 text-sm leading-5 text-typography-500 dark:text-typography-400">
+                                                {t('settings.advancedInferenceControlsDescription')}
+                                            </Text>
+                                        </Box>
+                                    </Box>
+
+                                    <ScreenSegmentedControl
+                                        className="mt-4"
+                                        activeKey={settings.showAdvancedInferenceControls ? 'on' : 'off'}
+                                        onChange={handleAdvancedInferenceControlsChange}
+                                        options={advancedInferenceControlOptions}
                                     />
                                 </ScreenCard>
                                 <SettingsNavCard

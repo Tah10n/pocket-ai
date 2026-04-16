@@ -31,6 +31,32 @@ describe('chatPresentation', () => {
     });
   });
 
+  it('extracts a leading [THINK] block from the final assistant content', () => {
+    const presentation = getAssistantPresentation(
+      '[THINK]Plan the answer[/THINK]\n\n## Final\n\n- item',
+    );
+
+    expect(presentation).toEqual({
+      finalContent: '## Final\n\n- item',
+      thoughtContent: 'Plan the answer',
+      hasThought: true,
+      isThoughtStreaming: false,
+    });
+  });
+
+  it('extracts a leading <|channel>thought block from the final assistant content', () => {
+    const presentation = getAssistantPresentation(
+      '<|channel>thought\nPlan the answer<channel|>\n\n## Final\n\n- item',
+    );
+
+    expect(presentation).toEqual({
+      finalContent: '## Final\n\n- item',
+      thoughtContent: 'Plan the answer',
+      hasThought: true,
+      isThoughtStreaming: false,
+    });
+  });
+
   it('combines multiple leading thought blocks before the final answer', () => {
     const presentation = getAssistantPresentation(
       '<think>First pass</think>\n<think>Second pass</think>\n\nVisible answer',
@@ -68,6 +94,88 @@ describe('chatPresentation', () => {
     expect(getVisibleAssistantContent('<thinking>Still reasoning')).toBe('');
   });
 
+  it('treats an unclosed leading [THINK] block as streaming reasoning', () => {
+    const presentation = getAssistantPresentation('[THINK]Still reasoning', {
+      isStreaming: true,
+    });
+
+    expect(presentation).toEqual({
+      finalContent: '',
+      thoughtContent: 'Still reasoning',
+      hasThought: true,
+      isThoughtStreaming: true,
+    });
+    expect(getVisibleAssistantContent('[THINK]Still reasoning')).toBe('');
+  });
+
+  it('treats an unclosed leading <|channel>thought block as streaming reasoning', () => {
+    const presentation = getAssistantPresentation('<|channel>thought\nStill reasoning', {
+      isStreaming: true,
+    });
+
+    expect(presentation).toEqual({
+      finalContent: '',
+      thoughtContent: 'Still reasoning',
+      hasThought: true,
+      isThoughtStreaming: true,
+    });
+    expect(getVisibleAssistantContent('<|channel>thought\nStill reasoning')).toBe('');
+  });
+
+  it('hides partial leading think tag prefixes while streaming', () => {
+    expect(getAssistantPresentation('<thi', { isStreaming: true })).toEqual({
+      finalContent: '',
+      thoughtContent: '',
+      hasThought: true,
+      isThoughtStreaming: true,
+    });
+  });
+
+  it('hides partial leading [THINK] prefixes while streaming', () => {
+    expect(getAssistantPresentation('[THI', { isStreaming: true })).toEqual({
+      finalContent: '',
+      thoughtContent: '',
+      hasThought: true,
+      isThoughtStreaming: true,
+    });
+  });
+
+  it('hides partial leading <|channel>thought prefixes while streaming', () => {
+    expect(getAssistantPresentation('<|channel>th', { isStreaming: true })).toEqual({
+      finalContent: '',
+      thoughtContent: '',
+      hasThought: true,
+      isThoughtStreaming: true,
+    });
+  });
+
+  it('extracts a leading <|start_thinking|> block from the final assistant content', () => {
+    const presentation = getAssistantPresentation(
+      '<|start_thinking|>Plan the answer<|end_thinking|>\n\n## Final\n\n- item',
+    );
+
+    expect(presentation).toEqual({
+      finalContent: '## Final\n\n- item',
+      thoughtContent: 'Plan the answer',
+      hasThought: true,
+      isThoughtStreaming: false,
+    });
+  });
+
+  it('treats an unclosed leading <|start_thinking|> block as streaming reasoning', () => {
+    const presentation = getAssistantPresentation('<|start_thinking|>Still reasoning', {
+      isStreaming: true,
+    });
+
+    expect(presentation).toEqual({
+      finalContent: '',
+      thoughtContent: 'Still reasoning',
+      hasThought: true,
+      isThoughtStreaming: true,
+    });
+    expect(getVisibleAssistantContent('<|start_thinking|>Still reasoning')).toBe('');
+  });
+
   it('keeps literal think tags inside a normal answer untouched', () => {
     const content = 'Use the literal string `<think>...</think>` in your parser.';
 
@@ -94,12 +202,37 @@ describe('chatPresentation', () => {
     expect(getVisibleAssistantContent(content)).toBe(content);
   });
 
+  it('keeps literal [THINK] tags inside a normal answer untouched', () => {
+    const content = 'Use the literal string `[THINK]...[/THINK]` in your parser.';
+
+    expect(getAssistantPresentation(content)).toEqual({
+      finalContent: content,
+      thoughtContent: '',
+      hasThought: false,
+      isThoughtStreaming: false,
+    });
+    expect(getCopyableAssistantContent(content)).toBe(content);
+    expect(getVisibleAssistantContent(content)).toBe(content);
+  });
+
   it('returns only the visible reply content when thoughts are present', () => {
     expect(getVisibleAssistantContent('<think>Hidden reasoning</think>\n\nVisible answer')).toBe('Visible answer');
   });
 
   it('returns only the visible reply content when thinking tags are present', () => {
     expect(getVisibleAssistantContent('<thinking>Hidden reasoning</thinking>\n\nVisible answer')).toBe('Visible answer');
+  });
+
+  it('returns only the visible reply content when [THINK] tags are present', () => {
+    expect(getVisibleAssistantContent('[THINK]Hidden reasoning[/THINK]\n\nVisible answer')).toBe('Visible answer');
+  });
+
+  it('returns only the visible reply content when <|channel>thought markers are present', () => {
+    expect(getVisibleAssistantContent('<|channel>thought\nHidden reasoning<channel|>\n\nVisible answer')).toBe('Visible answer');
+  });
+
+  it('returns only the visible reply content when <|start_thinking|> markers are present', () => {
+    expect(getVisibleAssistantContent('<|start_thinking|>Hidden reasoning<|end_thinking|>\n\nVisible answer')).toBe('Visible answer');
   });
 
   it('trims boundary blank lines from visible assistant content during normal replies', () => {

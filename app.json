@@ -54,6 +54,26 @@
       ],
       "expo-font",
       "expo-notifications",
+      [
+        "expo-build-properties",
+        {
+          "ios": {
+            "useFrameworks": "static"
+          }
+        }
+      ],
+      [
+        "llama.rn",
+        {
+          "enableEntitlements": true,
+          "entitlementsProfile": [
+            "preview",
+            "production"
+          ],
+          "forceCxx20": true,
+          "enableOpenCLAndHexagon": true
+        }
+      ],
       "./plugins/withAndroidGradlePluginManagement",
       "./plugins/withAndroidReleaseConfig",
       "./plugins/withAndroidBackgroundActionsForegroundService",

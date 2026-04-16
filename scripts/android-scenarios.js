@@ -1195,6 +1195,18 @@ function parseBounds(rawBounds) {
 async function dismissDebuggerBannerIfPresent(adbPath, serial) {
   const xml = dumpUiHierarchy(adbPath, serial);
   const nodes = parseUiNodes(xml);
+  const hasDevMenu = nodes.some(
+    (node) =>
+      node.text === "React Native Dev Menu"
+      || node.contentDesc.includes("React Native Dev Menu")
+  );
+
+  if (hasDevMenu) {
+    runChecked(adbPath, ["-s", serial, "shell", "input", "keyevent", "4"]);
+    await delay(600);
+    return;
+  }
+
   const hasDebuggerBanner = nodes.some(
     (node) =>
       node.text === "Open debugger to view warnings."

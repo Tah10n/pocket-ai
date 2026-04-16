@@ -4,6 +4,7 @@ import { llmEngineService } from '../services/LLMEngineService';
 import { performanceMonitor } from '../services/PerformanceMonitor';
 import { GenerationParameters, getGenerationParametersForModel, getSettings } from '../services/SettingsStore';
 import { presetManager } from '../services/PresetManager';
+import { AppError, toAppError } from '../services/AppError';
 import { EngineStatus } from '../types/models';
 import { backgroundTaskService } from '../services/BackgroundTaskService';
 import { notificationService } from '../services/NotificationService';
@@ -11,6 +12,7 @@ import { registry } from '../services/LocalStorageRegistry';
 import {
   ChatMessage,
   ChatThread,
+  LlmChatMessage,
   DEFAULT_PRESET_SNAPSHOT,
   DEFAULT_SYSTEM_PROMPT,
   PresetSnapshot,
@@ -26,6 +28,8 @@ import {
   resolveThreadInferenceWindowOptions,
   type InferenceBudgetOptions,
 } from '../utils/inferenceWindow';
+import { getVisibleAssistantContent } from '../utils/chatPresentation';
+import { resolveModelReasoningCapability, resolveReasoningRuntimeConfig } from '../utils/modelReasoningCapabilities';
 import { syncThreadParameters } from '../utils/chatThreadParameters';
 import { useTruncationTracking } from './useTruncationTracking';
 
@@ -77,12 +81,57 @@ export function resolvePresetSnapshot(presetId: string | null): PresetSnapshot {
   };
 }
 
+function resolveThreadReasoningRuntimeConfig(thread: Pick<ChatThread, 'modelId' | 'paramsSnapshot'>) {
+  const model = registry.getModel(thread.modelId);
+  const modelName = model?.name ?? thread.modelId;
+  const capability = resolveModelReasoningCapability(model, thread.modelId, modelName);
+  const runtimeConfig = resolveReasoningRuntimeConfig({
+    reasoningEffort: thread.paramsSnapshot.reasoningEffort,
+    capability,
+    maxTokens: thread.paramsSnapshot.maxTokens,
+  });
+
+  return {
+    model,
+    modelName,
+    capability,
+    runtimeConfig,
+  };
+}
+
+function resolveVisibleAssistantContentFromCandidates(
+  fallback: string,
+  ...candidates: (string | undefined)[]
+) {
+  for (const candidate of candidates) {
+    if (typeof candidate !== 'string') {
+      continue;
+    }
+
+    const visibleContent = getVisibleAssistantContent(candidate);
+    if (visibleContent.length > 0) {
+      return visibleContent;
+    }
+  }
+
+  return fallback;
+}
+
 export function buildInferenceMessagesForThread(thread: ChatThread, options?: InferenceBudgetOptions) {
-  return getThreadInferenceWindow(thread, resolveThreadInferenceWindowOptions(thread, options)).messages;
+  const { runtimeConfig } = resolveThreadReasoningRuntimeConfig(thread);
+
+  return getThreadInferenceWindow(thread, resolveThreadInferenceWindowOptions(thread, {
+    ...options,
+    responseReserveTokens: options?.responseReserveTokens ?? runtimeConfig.responseReserveTokens,
+  })).messages;
 }
 
 export function getThreadTruncationState(thread: ChatThread, options?: InferenceBudgetOptions) {
-  const { truncatedMessageIds } = getThreadInferenceWindow(thread, resolveThreadInferenceWindowOptions(thread, options));
+  const { runtimeConfig } = resolveThreadReasoningRuntimeConfig(thread);
+  const { truncatedMessageIds } = getThreadInferenceWindow(thread, resolveThreadInferenceWindowOptions(thread, {
+    ...options,
+    responseReserveTokens: options?.responseReserveTokens ?? runtimeConfig.responseReserveTokens,
+  }));
 
   return createTruncationState(truncatedMessageIds);
 }
@@ -166,6 +215,7 @@ export const useChatSession = () => {
     };
 
     let currentText = '';
+    let currentRawText = '';
     let currentThoughtText = '';
     let tokensCount = 0;
     let hasMarkedFirstToken = false;
@@ -173,6 +223,22 @@ export const useChatSession = () => {
     let flushTimeout: ReturnType<typeof setTimeout> | null = null;
     let unsubscribeExpiration: (() => void) | null = null;
     let sentBackgroundOutcomeNotification: 'interrupted' | 'error' | null = null;
+
+    let needsVisibleRefresh = false;
+
+    const refreshVisibleAssistantContent = () => {
+      if (!needsVisibleRefresh) {
+        return;
+      }
+
+      if (currentRawText.length === 0) {
+        needsVisibleRefresh = false;
+        return;
+      }
+
+      currentText = getVisibleAssistantContent(currentRawText, { isStreaming: true });
+      needsVisibleRefresh = false;
+    };
 
     const recordCompletionStats = (outcome: 'success' | 'stopped' | 'error') => {
       const elapsedSec = (Date.now() - startTime) / 1000;
@@ -201,6 +267,8 @@ export const useChatSession = () => {
         clearTimeout(flushTimeout);
         flushTimeout = null;
       }
+
+      refreshVisibleAssistantContent();
 
       const elapsedSec = (Date.now() - startTime) / 1000;
       const tokensPerSec = elapsedSec > 0 ? tokensCount / elapsedSec : 0;
@@ -248,7 +316,10 @@ export const useChatSession = () => {
     };
 
     try {
-      const modelName = registry.getModel(thread.modelId)?.name ?? thread.modelId;
+      const {
+        modelName,
+        runtimeConfig: reasoningRuntimeConfig,
+      } = resolveThreadReasoningRuntimeConfig(thread);
 
       await backgroundTaskService.startBackgroundInference(modelName);
 
@@ -268,33 +339,109 @@ export const useChatSession = () => {
         }
       });
 
-      const windowOptions = resolveThreadInferenceWindowOptions(thread, { maxContextTokens: maxContextSize });
-      const tokenCountParams = {
-        enable_thinking: thread.paramsSnapshot.reasoningEnabled === true,
-        reasoning_format: thread.paramsSnapshot.reasoningEnabled === true ? ('auto' as const) : ('none' as const),
-      };
-      const { messages, promptTokens, promptSafetyMarginTokens } =
-        await buildInferenceWindowWithAccurateTokenCounts(thread, windowOptions, async (messages) =>
-          llmEngineService.countPromptTokens({
-            messages,
-            params: tokenCountParams,
-          }))
-          .catch((error) => {
-            console.warn('[ChatSession] Failed to count prompt tokens accurately, falling back to heuristics', error);
-            const messages = getThreadInferenceWindow(thread, windowOptions).messages;
-            return {
-              messages,
-              promptTokens: estimateLlmMessagesTokens(messages),
-              promptSafetyMarginTokens: Math.max(
-                0,
-                Math.round(windowOptions.promptSafetyMarginTokens ?? DEFAULT_INFERENCE_PROMPT_SAFETY_MARGIN_TOKENS),
-              ),
-            };
+      const windowOptions = resolveThreadInferenceWindowOptions(thread, {
+        maxContextTokens: maxContextSize,
+        responseReserveTokens: reasoningRuntimeConfig.responseReserveTokens,
+      });
+
+      const MESSAGE_TOO_LONG_ERROR_MESSAGE =
+        'This message is too long for the current context window. Shorten it or increase the context size in Model Controls.';
+
+      let forcedDisableThinking = false;
+      let messages: LlmChatMessage[] = [];
+      let promptTokens = 0;
+      let promptSafetyMarginTokens = 0;
+
+      const countPromptTokens = async (
+        windowMessages: LlmChatMessage[],
+        params: { enable_thinking: boolean; reasoning_format: 'none' | 'auto' | 'deepseek' },
+      ) => llmEngineService.countPromptTokens({
+        messages: windowMessages,
+        params,
+      });
+
+      try {
+        const tokenCountParams = {
+          enable_thinking: reasoningRuntimeConfig.enableThinking,
+          reasoning_format: reasoningRuntimeConfig.reasoningFormat,
+        };
+
+        const result = await buildInferenceWindowWithAccurateTokenCounts(
+          thread,
+          windowOptions,
+          async (windowMessages) => countPromptTokens(windowMessages, tokenCountParams),
+        );
+        messages = result.messages;
+        promptTokens = result.promptTokens;
+        promptSafetyMarginTokens = result.promptSafetyMarginTokens;
+      } catch (error) {
+        const appError = toAppError(error);
+
+        if (appError.code === 'message_too_long' && reasoningRuntimeConfig.enableThinking) {
+          forcedDisableThinking = true;
+
+          const noThinkingWindowOptions = resolveThreadInferenceWindowOptions(thread, {
+            maxContextTokens: maxContextSize,
+            responseReserveTokens: Math.max(1, Math.round(thread.paramsSnapshot.maxTokens)),
           });
+          const tokenCountParams = {
+            enable_thinking: false,
+            reasoning_format: 'none' as const,
+          };
+
+          const result = await buildInferenceWindowWithAccurateTokenCounts(
+            thread,
+            noThinkingWindowOptions,
+            async (windowMessages) => countPromptTokens(windowMessages, tokenCountParams),
+          );
+          messages = result.messages;
+          promptTokens = result.promptTokens;
+          promptSafetyMarginTokens = result.promptSafetyMarginTokens;
+        } else if (appError.code === 'message_too_long') {
+          throw appError;
+        } else {
+          console.warn('[ChatSession] Failed to count prompt tokens accurately, falling back to heuristics', error);
+          messages = getThreadInferenceWindow(thread, windowOptions).messages;
+          promptTokens = estimateLlmMessagesTokens(messages);
+          promptSafetyMarginTokens = Math.max(
+            0,
+            Math.round(windowOptions.promptSafetyMarginTokens ?? DEFAULT_INFERENCE_PROMPT_SAFETY_MARGIN_TOKENS),
+          );
+        }
+      }
+
+      const nonSystemMessages = messages.filter((message) => message.role !== 'system');
+      const lastNonSystemRole = nonSystemMessages.length > 0
+        ? nonSystemMessages[nonSystemMessages.length - 1]?.role
+        : null;
+      if (lastNonSystemRole !== 'user') {
+        throw new AppError('message_too_long', MESSAGE_TOO_LONG_ERROR_MESSAGE);
+      }
+
+      const availablePredictTokens = maxContextSize - promptTokens - promptSafetyMarginTokens;
+      if (availablePredictTokens <= 0) {
+        throw new AppError('message_too_long', MESSAGE_TOO_LONG_ERROR_MESSAGE, {
+          details: {
+            maxContextSize,
+            promptTokens,
+            promptSafetyMarginTokens,
+          },
+        });
+      }
+
       const maxPredictTokens = Math.max(
         1,
         maxContextSize - promptTokens - promptSafetyMarginTokens,
       );
+      const visiblePredictTokens = Math.max(1, Math.round(thread.paramsSnapshot.maxTokens));
+      const guaranteedVisibleTokens = Math.min(visiblePredictTokens, maxPredictTokens);
+      const effectiveThinkingBudgetTokens = reasoningRuntimeConfig.enableThinking
+        ? Math.max(0, Math.min(reasoningRuntimeConfig.thinkingBudgetTokens, maxPredictTokens - guaranteedVisibleTokens))
+        : 0;
+      const enableThinkingForRequest = !forcedDisableThinking && reasoningRuntimeConfig.enableThinking && effectiveThinkingBudgetTokens > 0;
+      const reasoningFormatForRequest = enableThinkingForRequest
+        ? reasoningRuntimeConfig.reasoningFormat
+        : 'none';
 
       const completion = await llmEngineService.chatCompletion({
         messages,
@@ -304,10 +451,16 @@ export const useChatSession = () => {
           top_k: thread.paramsSnapshot.topK,
           min_p: thread.paramsSnapshot.minP,
           penalty_repeat: thread.paramsSnapshot.repetitionPenalty,
-          n_predict: Math.min(thread.paramsSnapshot.maxTokens, maxPredictTokens),
+          n_predict: Math.max(
+            1,
+            guaranteedVisibleTokens + (enableThinkingForRequest ? effectiveThinkingBudgetTokens : 0),
+          ),
           seed: thread.paramsSnapshot.seed ?? undefined,
-          enable_thinking: thread.paramsSnapshot.reasoningEnabled === true,
-          reasoning_format: thread.paramsSnapshot.reasoningEnabled === true ? 'auto' : 'none',
+          enable_thinking: enableThinkingForRequest,
+          thinking_budget_tokens: enableThinkingForRequest
+            ? effectiveThinkingBudgetTokens
+            : undefined,
+          reasoning_format: reasoningFormatForRequest,
         },
         onToken: (token) => {
           if (!hasMarkedFirstToken) {
@@ -316,18 +469,49 @@ export const useChatSession = () => {
           }
 
           if (typeof token === 'string') {
-            currentText += token;
+            if (currentRawText.length === 0 && currentText.length > 0) {
+              currentRawText = currentText;
+            }
+            currentRawText += token;
+            needsVisibleRefresh = true;
           } else {
+            const hasReasoningUpdate = token.reasoningContent !== undefined;
+
             if (token.content !== undefined) {
-              currentText = token.content;
-            } else if (typeof token.accumulatedText === 'string' && token.accumulatedText.length >= currentText.length) {
-              currentText = token.accumulatedText;
-            } else if (token.reasoningContent === undefined) {
-              currentText += token.token;
+              currentText = getVisibleAssistantContent(token.content);
+              needsVisibleRefresh = false;
+              if (typeof token.accumulatedText === 'string' && token.accumulatedText.length >= currentRawText.length) {
+                currentRawText = token.accumulatedText;
+              } else {
+                currentRawText = token.content;
+              }
+            } else if (hasReasoningUpdate) {
+              // When the engine is still producing reasoning (no parsed `content` yet), never derive
+              // the visible assistant message from raw accumulated text. Some templates use non-<think>
+              // markers (e.g. [THINK] or <|channel>thought) which would otherwise leak into the main bubble.
+              if (typeof token.accumulatedText === 'string' && token.accumulatedText.length >= currentRawText.length) {
+                currentRawText = token.accumulatedText;
+              }
+              needsVisibleRefresh = false;
+            } else if (typeof token.accumulatedText === 'string' && token.accumulatedText.length >= currentRawText.length) {
+              currentRawText = token.accumulatedText;
+              needsVisibleRefresh = true;
+            } else {
+              if (currentRawText.length === 0 && currentText.length > 0) {
+                currentRawText = currentText;
+              }
+              currentRawText += token.token;
+              needsVisibleRefresh = true;
             }
 
             if (token.reasoningContent !== undefined) {
-              currentThoughtText = token.reasoningContent;
+              const nextReasoning = token.reasoningContent;
+
+              // `reasoningContent` may be streamed either as an accumulated buffer or as deltas.
+              // Prefer treating it as accumulated when it prefixes the existing buffer.
+              currentThoughtText = nextReasoning.startsWith(currentThoughtText)
+                ? nextReasoning
+                : (currentThoughtText + nextReasoning);
             }
           }
 
@@ -347,11 +531,18 @@ export const useChatSession = () => {
       }
 
       flushAssistantPatch();
+      const finalThoughtContent = completion.reasoning_content || currentThoughtText || undefined;
       finalizeAssistantMessage(
         threadId,
         assistantMessageId,
-        completion.content || currentText,
-        completion.reasoning_content || currentThoughtText || undefined,
+        resolveVisibleAssistantContentFromCandidates(
+          '',
+          completion.content,
+          currentText,
+          completion.text,
+          currentRawText,
+        ),
+        finalThoughtContent,
       );
       finalizeThreadStatus(threadId, 'idle');
       recordCompletionStats('success');

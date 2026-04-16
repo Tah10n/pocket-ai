@@ -150,7 +150,7 @@ describe('ChatMessageBubble', () => {
       <ChatMessageBubble
         id="assistant-explicit"
         isUser={false}
-        content="Visible answer"
+        content="<think>Hidden reasoning</think>Visible answer"
         thoughtContent="Hidden reasoning"
       />,
     );

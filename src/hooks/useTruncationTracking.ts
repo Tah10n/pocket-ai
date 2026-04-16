@@ -1,12 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ChatThread, LlmChatMessage } from '../types/chat';
 import { llmEngineService } from '../services/LLMEngineService';
+import { registry } from '../services/LocalStorageRegistry';
+import { useModelRegistryRevision } from './useModelRegistryRevision';
 import {
   buildInferenceWindowWithAccurateTokenCounts,
   createTruncationState,
   getThreadInferenceWindow,
   resolveThreadInferenceWindowOptions,
 } from '../utils/inferenceWindow';
+import { resolveModelReasoningCapability, resolveReasoningRuntimeConfig } from '../utils/modelReasoningCapabilities';
 
 type TruncationState = ReturnType<typeof createTruncationState>;
 
@@ -19,6 +22,7 @@ export function useTruncationTracking(
   activeThread: ChatThread | null,
   activeContextTokenBudget: number | undefined,
 ): TruncationState {
+  const modelRegistryRevision = useModelRegistryRevision();
   const activeThreadId = activeThread?.id ?? null;
   const activeThreadStatus = activeThread?.status ?? null;
   const [accurateTruncationState, setAccurateTruncationState] = useState<{
@@ -34,6 +38,22 @@ export function useTruncationTracking(
     state: EMPTY_TRUNCATION_STATE,
   });
 
+  let activeThreadReasoningEnabled = false;
+  let activeThreadReasoningFormat: 'none' | 'auto' | 'deepseek' = 'none';
+  let activeThreadResponseReserveTokens: number | undefined;
+  if (activeThread) {
+    const model = registry.getModel(activeThread.modelId);
+    const capability = resolveModelReasoningCapability(model, activeThread.modelId, model?.name);
+    const runtimeConfig = resolveReasoningRuntimeConfig({
+      reasoningEffort: activeThread.paramsSnapshot.reasoningEffort,
+      capability,
+      maxTokens: activeThread.paramsSnapshot.maxTokens,
+    });
+    activeThreadReasoningEnabled = runtimeConfig.enableThinking;
+    activeThreadReasoningFormat = runtimeConfig.reasoningFormat;
+    activeThreadResponseReserveTokens = runtimeConfig.responseReserveTokens;
+  }
+
   const heuristicTruncationState = useMemo(() => {
     if (!activeThread) {
       return EMPTY_TRUNCATION_STATE;
@@ -41,10 +61,11 @@ export function useTruncationTracking(
 
     const windowOptions = resolveThreadInferenceWindowOptions(activeThread, {
       maxContextTokens: activeContextTokenBudget,
+      responseReserveTokens: activeThreadResponseReserveTokens,
     });
     const { truncatedMessageIds } = getThreadInferenceWindow(activeThread, windowOptions);
     return createTruncationState(truncatedMessageIds);
-  }, [activeContextTokenBudget, activeThread]);
+  }, [activeContextTokenBudget, activeThread, activeThreadResponseReserveTokens]);
 
   useEffect(() => {
     if (!activeThread || activeThread.status === 'generating') {
@@ -60,6 +81,7 @@ export function useTruncationTracking(
     let isCancelled = false;
     const windowOptions = resolveThreadInferenceWindowOptions(activeThread, {
       maxContextTokens: activeContextTokenBudget,
+      responseReserveTokens: activeThreadResponseReserveTokens,
     });
     const cacheKey = [
       activeThread.id,
@@ -67,7 +89,9 @@ export function useTruncationTracking(
       activeContextTokenBudget,
       windowOptions.responseReserveTokens ?? null,
       windowOptions.promptSafetyMarginTokens ?? null,
-      activeThread.paramsSnapshot.reasoningEnabled === true ? 1 : 0,
+      activeThreadReasoningEnabled ? 1 : 0,
+      activeThreadReasoningFormat,
+      modelRegistryRevision,
     ].join(':');
 
     if (accurateTruncationCacheRef.current.key === cacheKey) {
@@ -81,8 +105,8 @@ export function useTruncationTracking(
     setAccurateTruncationState(null);
 
     const tokenCountParams = {
-      enable_thinking: activeThread.paramsSnapshot.reasoningEnabled === true,
-      reasoning_format: activeThread.paramsSnapshot.reasoningEnabled === true ? ('auto' as const) : ('none' as const),
+      enable_thinking: activeThreadReasoningEnabled,
+      reasoning_format: activeThreadReasoningFormat,
     };
 
     const countPromptTokens = async (messages: LlmChatMessage[]) =>
@@ -104,6 +128,20 @@ export function useTruncationTracking(
       })
       .catch((error) => {
         if (!isCancelled) {
+          const errorCode = error && typeof error === 'object' && 'code' in error
+            ? String((error as { code?: unknown }).code)
+            : null;
+
+          // Expected transient failures (and oversized messages): fall back to heuristics without warning spam.
+          if (
+            errorCode === 'engine_busy'
+            || errorCode === 'engine_not_ready'
+            || errorCode === 'engine_unloading'
+            || errorCode === 'message_too_long'
+          ) {
+            return;
+          }
+
           console.warn('[ChatSession] Failed to resolve truncation state accurately, falling back to heuristics', error);
         }
       });
@@ -111,7 +149,7 @@ export function useTruncationTracking(
     return () => {
       isCancelled = true;
     };
-  }, [activeContextTokenBudget, activeThread]);
+  }, [activeContextTokenBudget, activeThread, activeThreadReasoningEnabled, activeThreadReasoningFormat, activeThreadResponseReserveTokens, modelRegistryRevision]);
 
   const truncationState = useMemo(() => {
     if (!activeThread) {

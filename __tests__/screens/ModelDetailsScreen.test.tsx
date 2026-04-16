@@ -4,6 +4,7 @@ import { Alert, Linking } from 'react-native';
 import { ModelDetailsScreen } from '../../src/ui/screens/ModelDetailsScreen';
 import { useDownloadStore } from '../../src/store/downloadStore';
 import { EngineStatus, LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../src/types/models';
+import { buildModelCapabilitySnapshot } from '../../src/utils/modelCapabilities';
 
 const mockRouter = {
   back: jest.fn(),
@@ -20,8 +21,16 @@ const mockFitsInRam = jest.fn();
 const mockRegistryGetModel = jest.fn();
 const mockOffloadModel = jest.fn();
 const mockGetRecommendedGpuLayers = jest.fn();
+const mockGetRecommendedLoadProfile = jest.fn<
+  Promise<{ recommendedGpuLayers: number; gpuLayersCeiling: number }>,
+  [string | null]
+>(() => Promise.resolve({
+  recommendedGpuLayers: 0,
+  gpuLayersCeiling: 512,
+}));
 const mockReloadModel = jest.fn();
 const mockHardwareStatus = jest.fn();
+let lastModelParametersSheetProps: any = null;
 const mockEngineState = {
   status: EngineStatus.IDLE,
   activeModelId: undefined as string | undefined,
@@ -181,9 +190,12 @@ jest.mock('../../src/components/ui/ModelParametersSheet', () => {
   const mockReact = jest.requireActual('react');
   const { View, Text } = jest.requireActual('react-native');
   return {
-    ModelParametersSheet: ({ visible }: any) => (visible
-      ? mockReact.createElement(View, null, mockReact.createElement(Text, null, 'model-parameters-sheet'))
-      : null),
+    ModelParametersSheet: (props: any) => {
+      lastModelParametersSheetProps = props;
+      return props.visible
+        ? mockReact.createElement(View, null, mockReact.createElement(Text, null, 'model-parameters-sheet'))
+        : null;
+    },
   };
 });
 
@@ -235,8 +247,26 @@ jest.mock('../../src/services/HardwareListenerService', () => ({
 
 jest.mock('../../src/services/LLMEngineService', () => ({
   llmEngineService: {
-    getRecommendedGpuLayers: (...args: any[]) => mockGetRecommendedGpuLayers(...args),
-    load: (...args: any[]) => mockReloadModel(...args),
+    ensurePersistedCapabilitySnapshot: (model: any) => {
+      if (!model) {
+        return null;
+      }
+
+      const snapshotLayerCount = typeof model?.capabilitySnapshot?.modelLayerCount === 'number'
+        ? model.capabilitySnapshot.modelLayerCount
+        : null;
+      const ggufLayerCount = typeof model?.gguf?.nLayers === 'number' ? model.gguf.nLayers : null;
+      const modelLayerCount = snapshotLayerCount ?? ggufLayerCount;
+      const snapshotCeiling = typeof model?.capabilitySnapshot?.gpuLayersCeiling === 'number'
+        ? model.capabilitySnapshot.gpuLayersCeiling
+        : null;
+      const gpuLayersCeiling = snapshotCeiling ?? modelLayerCount ?? 512;
+
+      return { modelLayerCount, gpuLayersCeiling };
+    },
+    getRecommendedLoadProfile: (modelId: string | null) => mockGetRecommendedLoadProfile(modelId),
+    getRecommendedGpuLayers: () => mockGetRecommendedGpuLayers(),
+    load: (modelId: string, options?: unknown) => mockReloadModel(modelId, options),
     getSafeModeLoadLimits: jest.fn().mockReturnValue(null),
     getContextSize: jest.fn().mockReturnValue(4096),
     getLoadedGpuLayers: jest.fn().mockReturnValue(0),
@@ -280,7 +310,7 @@ jest.mock('../../src/services/SettingsStore', () => ({
     minP: 0.05,
     repetitionPenalty: 1,
     maxTokens: 512,
-    reasoningEnabled: false,
+    reasoningEffort: 'auto',
   })),
   getModelLoadParametersForModel: jest.fn(() => ({
     contextSize: 4096,
@@ -302,6 +332,7 @@ describe('ModelDetailsScreen', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    lastModelParametersSheetProps = null;
     mockFitsInRam.mockResolvedValue(true);
     useDownloadStore.setState({ queue: [], activeDownloadId: null });
     mockEngineState.status = EngineStatus.IDLE;
@@ -312,6 +343,10 @@ describe('ModelDetailsScreen', () => {
     mockOffloadModel.mockResolvedValue(undefined);
     mockRegistryGetModel.mockReturnValue(undefined);
     mockGetRecommendedGpuLayers.mockResolvedValue(0);
+    mockGetRecommendedLoadProfile.mockResolvedValue({
+      recommendedGpuLayers: 0,
+      gpuLayersCeiling: 512,
+    });
     mockReloadModel.mockResolvedValue(undefined);
     mockHardwareStatus.mockReturnValue({ networkType: 'wifi' });
 
@@ -467,6 +502,58 @@ describe('ModelDetailsScreen', () => {
       await Promise.resolve();
     });
     expect(screen.getByText('model-parameters-sheet')).toBeTruthy();
+  });
+
+  it('uses the cached capability snapshot ceiling before async recommendations resolve in the details flow', async () => {
+    const downloadedModel = createModel({
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+    });
+    const persistedModel = createModel({
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      metadataTrust: 'verified_local',
+      size: 512 * 1024 * 1024,
+      maxContextTokens: 8192,
+      hasVerifiedContextWindow: true,
+      gguf: {
+        totalBytes: 512 * 1024 * 1024,
+        architecture: 'llama',
+        nLayers: 28,
+      },
+      capabilitySnapshot: buildModelCapabilitySnapshot({
+        size: 512 * 1024 * 1024,
+        metadataTrust: 'verified_local',
+        gguf: {
+          totalBytes: 512 * 1024 * 1024,
+          architecture: 'llama',
+          nLayers: 28,
+        },
+        maxContextTokens: 8192,
+        hasVerifiedContextWindow: true,
+        lastModifiedAt: undefined,
+        sha256: undefined,
+      }),
+    });
+    const { modelCatalogService } = jest.requireMock('../../src/services/ModelCatalogService');
+    modelCatalogService.getCachedModel.mockReturnValue(downloadedModel);
+    modelCatalogService.getModelDetails.mockResolvedValue(downloadedModel);
+    mockRegistryGetModel.mockImplementation((modelId: string) => (
+      modelId === 'org/model' ? persistedModel : undefined
+    ));
+    mockGetRecommendedLoadProfile.mockImplementation(() => new Promise(() => {}));
+
+    const screen = render(<ModelDetailsScreen />);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      fireEvent.press(screen.getByText('models.settings'));
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText('model-parameters-sheet')).toBeTruthy();
+    expect(lastModelParametersSheetProps?.gpuLayersCeiling).toBe(28);
   });
 
   it('warns instead of hard-blocking medium-confidence likely_oom models before load', async () => {

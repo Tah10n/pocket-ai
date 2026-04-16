@@ -15,7 +15,7 @@ export function syncThreadParameters(
     || thread.paramsSnapshot.repetitionPenalty !== resolvedParams.repetitionPenalty
     || thread.paramsSnapshot.maxTokens !== resolvedParams.maxTokens
     || (thread.paramsSnapshot.seed ?? null) !== (resolvedParams.seed ?? null)
-    || (thread.paramsSnapshot.reasoningEnabled === true) !== (resolvedParams.reasoningEnabled === true);
+    || (thread.paramsSnapshot.reasoningEffort ?? 'auto') !== (resolvedParams.reasoningEffort ?? 'auto');
 
   if (paramsChanged) {
     updateThreadParamsSnapshot(thread.id, resolvedParams);

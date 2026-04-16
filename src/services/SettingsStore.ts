@@ -1,6 +1,10 @@
 import type { MMKV } from 'react-native-mmkv';
 import { createStorage } from './storage';
+import { DEFAULT_REASONING_EFFORT, normalizeReasoningEffort, type ReasoningEffort } from '../types/reasoning';
 import { MAX_CONTEXT_WINDOW_TOKENS } from '../utils/contextWindow';
+import { UNKNOWN_MODEL_GPU_LAYERS_CEILING } from '../utils/modelLimits';
+
+export { UNKNOWN_MODEL_GPU_LAYERS_CEILING };
 
 let storageInstance: MMKV | null = null;
 
@@ -35,15 +39,35 @@ export interface GenerationParameters {
     minP: number;
     repetitionPenalty: number;
     maxTokens: number;
-    reasoningEnabled?: boolean;
+    reasoningEffort?: ReasoningEffort;
     seed: number | null;
 }
+
+export type BackendPolicy = 'auto' | 'cpu' | 'gpu' | 'npu';
+export type FlashAttentionPolicy = 'auto' | 'on' | 'off';
 
 export interface ModelLoadParameters {
     contextSize: number;
     gpuLayers: number | null;
     kvCacheType: 'auto' | 'f16' | 'q8_0' | 'q4_0';
+    backendPolicy?: BackendPolicy;
+    selectedBackendDevices?: string[] | null;
+
+    cpuThreads?: number | null;
+    cpuMask?: string | null;
+    cpuStrict?: boolean;
+
+    flashAttention?: FlashAttentionPolicy;
+    useMmap?: boolean;
+    useMlock?: boolean;
+
+    parallelSlots?: number;
+    nBatch?: number | null;
+    nUbatch?: number | null;
+    kvUnified?: boolean | null;
 }
+
+export type ModelLoadProfileField = 'contextSize' | 'gpuLayers' | 'kvCacheType' | 'backendPolicy';
 
 export interface AppSettings {
     temperature: number;
@@ -52,11 +76,12 @@ export interface AppSettings {
     minP: number;
     repetitionPenalty: number;
     maxTokens: number;
-    reasoningEnabled?: boolean;
+    reasoningEffort?: ReasoningEffort;
     seed: number | null;
     theme: 'light' | 'dark' | 'system';
     language: 'en' | 'ru';
     allowCellularDownloads: boolean;
+    showAdvancedInferenceControls?: boolean;
     activePresetId: string | null;
     activeModelId: string | null;
     chatRetentionDays: number | null;
@@ -71,7 +96,7 @@ export const DEFAULT_GENERATION_PARAMETERS: GenerationParameters = {
     minP: 0.05,
     repetitionPenalty: 1,
     maxTokens: 512,
-    reasoningEnabled: false,
+    reasoningEffort: DEFAULT_REASONING_EFFORT,
     seed: null,
 };
 
@@ -88,11 +113,12 @@ const DEFAULT_SETTINGS: AppSettings = {
     minP: DEFAULT_GENERATION_PARAMETERS.minP,
     repetitionPenalty: DEFAULT_GENERATION_PARAMETERS.repetitionPenalty,
     maxTokens: DEFAULT_GENERATION_PARAMETERS.maxTokens,
-    reasoningEnabled: DEFAULT_GENERATION_PARAMETERS.reasoningEnabled,
+    reasoningEffort: DEFAULT_GENERATION_PARAMETERS.reasoningEffort,
     seed: DEFAULT_GENERATION_PARAMETERS.seed,
     theme: 'system',
     language: 'en',
     allowCellularDownloads: false,
+    showAdvancedInferenceControls: false,
     activePresetId: null,
     activeModelId: null,
     chatRetentionDays: 90,
@@ -116,6 +142,16 @@ function normalizeLanguage(language: unknown): 'en' | 'ru' {
     if (lowered === 'en' || lowered.startsWith('en-') || lowered.includes('english')) return 'en';
     if (lowered === 'ru' || lowered.startsWith('ru-') || lowered.includes('рус')) return 'ru';
     return DEFAULT_SETTINGS.language;
+}
+
+const BACKEND_DEVICE_SELECTOR_REGEX = /^[A-Za-z0-9_*.-]{1,32}$/;
+export const MAX_BACKEND_DEVICE_SELECTORS = 10;
+
+export function isSafeBackendDeviceSelector(value: unknown): value is string {
+    if (typeof value !== 'string') {
+        return false;
+    }
+    return BACKEND_DEVICE_SELECTOR_REGEX.test(value);
 }
 
 function clampNumber(value: unknown, min: number, max: number, fallback: number) {
@@ -143,6 +179,7 @@ function normalizeChatRetentionDays(value: unknown): number | null {
 
 function sanitizeGenerationParameters(input: Partial<GenerationParameters> | undefined): GenerationParameters {
     const rawSeed: unknown = (input as { seed?: unknown } | undefined)?.seed;
+    const legacyReasoningEnabled = (input as { reasoningEnabled?: unknown } | undefined)?.reasoningEnabled;
     const seedCandidate = rawSeed == null
         ? null
         : typeof rawSeed === 'number'
@@ -167,7 +204,7 @@ function sanitizeGenerationParameters(input: Partial<GenerationParameters> | und
         minP: clampNumber(input?.minP, 0, 1, DEFAULT_GENERATION_PARAMETERS.minP),
         repetitionPenalty: clampNumber(input?.repetitionPenalty, 0, 2, DEFAULT_GENERATION_PARAMETERS.repetitionPenalty),
         maxTokens: Math.round(clampNumber(input?.maxTokens, 1, 8192, DEFAULT_GENERATION_PARAMETERS.maxTokens)),
-        reasoningEnabled: input?.reasoningEnabled === true,
+        reasoningEffort: normalizeReasoningEffort(input?.reasoningEffort, legacyReasoningEnabled),
         seed: normalizedSeed,
     };
 }
@@ -193,7 +230,7 @@ function sanitizeModelLoadParameters(input: Partial<ModelLoadParameters> | undef
     const normalizedGpuLayers =
         rawGpuLayers == null
             ? null
-            : Math.round(clampNumber(rawGpuLayers, 0, 80, DEFAULT_MODEL_LOAD_PARAMETERS.gpuLayers ?? 0));
+            : Math.round(clampNumber(rawGpuLayers, 0, UNKNOWN_MODEL_GPU_LAYERS_CEILING, DEFAULT_MODEL_LOAD_PARAMETERS.gpuLayers ?? 0));
 
     const rawKvCacheType = typeof input?.kvCacheType === 'string' ? input.kvCacheType.trim().toLowerCase() : '';
     const normalizedKvCacheType =
@@ -207,7 +244,106 @@ function sanitizeModelLoadParameters(input: Partial<ModelLoadParameters> | undef
                   ? 'q4_0'
                   : DEFAULT_MODEL_LOAD_PARAMETERS.kvCacheType;
 
-    return {
+    const rawBackendPolicy = typeof input?.backendPolicy === 'string' ? input.backendPolicy.trim().toLowerCase() : '';
+    const normalizedBackendPolicy =
+        rawBackendPolicy === 'cpu'
+            ? 'cpu'
+            : rawBackendPolicy === 'gpu'
+                ? 'gpu'
+                : rawBackendPolicy === 'npu'
+                  ? 'npu'
+                    : undefined;
+
+    let normalizedSelectedBackendDevices: string[] | null | undefined;
+    if (input?.selectedBackendDevices === null) {
+        normalizedSelectedBackendDevices = null;
+    } else if (Array.isArray(input?.selectedBackendDevices)) {
+        const sanitized = input.selectedBackendDevices
+            .map((device) => (typeof device === 'string' ? device.trim() : ''))
+            .filter(isSafeBackendDeviceSelector);
+        const deduped = Array.from(new Set(sanitized)).slice(0, MAX_BACKEND_DEVICE_SELECTORS);
+        normalizedSelectedBackendDevices = deduped.length > 0 ? deduped : null;
+    } else {
+        normalizedSelectedBackendDevices = undefined;
+    }
+
+    const rawCpuThreads = input?.cpuThreads;
+    const normalizedCpuThreads =
+        rawCpuThreads === null
+            ? null
+            : typeof rawCpuThreads === 'number' || typeof rawCpuThreads === 'string'
+              ? Math.round(clampNumber(rawCpuThreads, 1, 64, 0)) || null
+              : rawCpuThreads === undefined
+                ? undefined
+                : null;
+
+    const rawCpuMask = input?.cpuMask;
+    const normalizedCpuMask =
+        rawCpuMask === null
+            ? null
+            : typeof rawCpuMask === 'string'
+              ? (rawCpuMask.trim().length > 0 ? rawCpuMask.trim() : null)
+              : rawCpuMask === undefined
+                ? undefined
+                : null;
+
+    const rawCpuStrict = input?.cpuStrict;
+    const normalizedCpuStrict = typeof rawCpuStrict === 'boolean' ? rawCpuStrict : undefined;
+
+    const rawFlashAttention = typeof input?.flashAttention === 'string' ? input.flashAttention.trim().toLowerCase() : '';
+    const normalizedFlashAttention =
+        rawFlashAttention === 'auto'
+            ? 'auto'
+            : rawFlashAttention === 'on'
+              ? 'on'
+              : rawFlashAttention === 'off'
+                ? 'off'
+                : undefined;
+
+    const rawUseMmap = input?.useMmap;
+    const normalizedUseMmap = typeof rawUseMmap === 'boolean' ? rawUseMmap : undefined;
+    const rawUseMlock = input?.useMlock;
+    const normalizedUseMlock = typeof rawUseMlock === 'boolean' ? rawUseMlock : undefined;
+
+    const rawParallelSlots = input?.parallelSlots;
+    const normalizedParallelSlots =
+        typeof rawParallelSlots === 'number' || typeof rawParallelSlots === 'string'
+            ? Math.round(clampNumber(rawParallelSlots, 1, 4, 1))
+            : rawParallelSlots === undefined
+              ? undefined
+              : 1;
+
+    const rawNBatch = input?.nBatch;
+    const normalizedNBatch =
+        rawNBatch === null
+            ? null
+            : typeof rawNBatch === 'number' || typeof rawNBatch === 'string'
+              ? Math.round(clampNumber(rawNBatch, 1, 4096, 0)) || null
+              : rawNBatch === undefined
+                ? undefined
+                : null;
+
+    const rawNUbatch = input?.nUbatch;
+    const normalizedNUbatch =
+        rawNUbatch === null
+            ? null
+            : typeof rawNUbatch === 'number' || typeof rawNUbatch === 'string'
+              ? Math.round(clampNumber(rawNUbatch, 1, 4096, 0)) || null
+              : rawNUbatch === undefined
+                ? undefined
+                : null;
+
+    const rawKvUnified = input?.kvUnified;
+    const normalizedKvUnified =
+        rawKvUnified === null
+            ? null
+            : typeof rawKvUnified === 'boolean'
+              ? rawKvUnified
+              : rawKvUnified === undefined
+                ? undefined
+                : null;
+
+    const sanitized: ModelLoadParameters = {
         contextSize: Math.round(clampNumber(
             input?.contextSize,
             512,
@@ -217,6 +353,56 @@ function sanitizeModelLoadParameters(input: Partial<ModelLoadParameters> | undef
         gpuLayers: normalizedGpuLayers,
         kvCacheType: normalizedKvCacheType,
     };
+
+    if (normalizedBackendPolicy) {
+        sanitized.backendPolicy = normalizedBackendPolicy;
+    }
+
+    if (normalizedSelectedBackendDevices !== undefined) {
+        sanitized.selectedBackendDevices = normalizedSelectedBackendDevices;
+    }
+
+    if (normalizedCpuThreads !== undefined) {
+        sanitized.cpuThreads = normalizedCpuThreads;
+    }
+
+    if (normalizedCpuMask !== undefined) {
+        sanitized.cpuMask = normalizedCpuMask;
+    }
+
+    if (normalizedCpuStrict !== undefined) {
+        sanitized.cpuStrict = normalizedCpuStrict;
+    }
+
+    if (normalizedFlashAttention) {
+        sanitized.flashAttention = normalizedFlashAttention;
+    }
+
+    if (normalizedUseMmap !== undefined) {
+        sanitized.useMmap = normalizedUseMmap;
+    }
+
+    if (normalizedUseMlock !== undefined) {
+        sanitized.useMlock = normalizedUseMlock;
+    }
+
+    if (normalizedParallelSlots !== undefined) {
+        sanitized.parallelSlots = normalizedParallelSlots;
+    }
+
+    if (normalizedNBatch !== undefined) {
+        sanitized.nBatch = normalizedNBatch;
+    }
+
+    if (normalizedNUbatch !== undefined) {
+        sanitized.nUbatch = normalizedNUbatch;
+    }
+
+    if (normalizedKvUnified !== undefined) {
+        sanitized.kvUnified = normalizedKvUnified;
+    }
+
+    return sanitized;
 }
 
 function sanitizeModelLoadParamsByModelId(input: unknown): Record<string, ModelLoadParameters> {
@@ -245,13 +431,16 @@ function sanitizeSettings(input: Partial<AppSettings>): AppSettings {
         minP: generationDefaults.minP,
         repetitionPenalty: generationDefaults.repetitionPenalty,
         maxTokens: generationDefaults.maxTokens,
-        reasoningEnabled: generationDefaults.reasoningEnabled,
+        reasoningEffort: generationDefaults.reasoningEffort,
         seed: generationDefaults.seed,
         theme: input.theme === 'light' || input.theme === 'dark' || input.theme === 'system' ? input.theme : DEFAULT_SETTINGS.theme,
         language: normalizeLanguage(input.language),
         allowCellularDownloads: typeof input.allowCellularDownloads === 'boolean'
             ? input.allowCellularDownloads
             : DEFAULT_SETTINGS.allowCellularDownloads,
+        showAdvancedInferenceControls: typeof input.showAdvancedInferenceControls === 'boolean'
+            ? input.showAdvancedInferenceControls
+            : DEFAULT_SETTINGS.showAdvancedInferenceControls,
         activePresetId: typeof input.activePresetId === 'string' ? input.activePresetId : null,
         activeModelId: typeof input.activeModelId === 'string' ? input.activeModelId : null,
         chatRetentionDays: normalizeChatRetentionDays(input.chatRetentionDays),
@@ -289,10 +478,15 @@ export function getSettings(): AppSettings {
         typeof parsed === 'object' &&
         parsed !== null &&
         Object.prototype.hasOwnProperty.call(parsed, 'chatRetentionDays');
+    const hasExplicitReasoningEffort =
+        typeof parsed === 'object' &&
+        parsed !== null &&
+        Object.prototype.hasOwnProperty.call(parsed, 'reasoningEffort');
 
     return sanitizeSettings({
         ...DEFAULT_SETTINGS,
         ...parsed,
+        reasoningEffort: hasExplicitReasoningEffort ? parsed.reasoningEffort : undefined,
         chatRetentionDays: hasExplicitChatRetention ? parsed.chatRetentionDays : null,
     });
 }
@@ -320,7 +514,7 @@ export function resetParameters() {
         minP: DEFAULT_GENERATION_PARAMETERS.minP,
         repetitionPenalty: DEFAULT_GENERATION_PARAMETERS.repetitionPenalty,
         maxTokens: DEFAULT_GENERATION_PARAMETERS.maxTokens,
-        reasoningEnabled: DEFAULT_GENERATION_PARAMETERS.reasoningEnabled,
+        reasoningEffort: DEFAULT_GENERATION_PARAMETERS.reasoningEffort,
         seed: DEFAULT_GENERATION_PARAMETERS.seed,
     });
 }

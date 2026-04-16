@@ -17,6 +17,7 @@ import {
   sanitizeHydratedThread,
   toConversationIndexItem,
 } from '../types/chat';
+import { normalizeReasoningEffort } from '../types/reasoning';
 import { createInstrumentedStateStorage } from './persistStateStorage';
 
 const FALLBACK_TOP_K = 40;
@@ -135,7 +136,10 @@ export const useChatStore = create<ChatStoreState>()(
             minP: paramsSnapshot.minP ?? FALLBACK_MIN_P,
             repetitionPenalty: paramsSnapshot.repetitionPenalty ?? FALLBACK_REPETITION_PENALTY,
             maxTokens: paramsSnapshot.maxTokens,
-            reasoningEnabled: paramsSnapshot.reasoningEnabled === true,
+            reasoningEffort: normalizeReasoningEffort(
+              paramsSnapshot.reasoningEffort,
+              (paramsSnapshot as { reasoningEnabled?: unknown }).reasoningEnabled,
+            ),
             seed: paramsSnapshot.seed ?? null,
           },
           messages: [],
@@ -286,7 +290,10 @@ export const useChatStore = create<ChatStoreState>()(
                   minP: paramsSnapshot.minP ?? FALLBACK_MIN_P,
                   repetitionPenalty: paramsSnapshot.repetitionPenalty ?? FALLBACK_REPETITION_PENALTY,
                   maxTokens: paramsSnapshot.maxTokens,
-                  reasoningEnabled: paramsSnapshot.reasoningEnabled === true,
+                  reasoningEffort: normalizeReasoningEffort(
+                    paramsSnapshot.reasoningEffort,
+                    (paramsSnapshot as { reasoningEnabled?: unknown }).reasoningEnabled,
+                  ),
                   seed: paramsSnapshot.seed ?? null,
                 },
               }),

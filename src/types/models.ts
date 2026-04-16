@@ -39,6 +39,19 @@ export interface ModelGgufMetadata {
   slidingWindowTokens?: number;
 }
 
+export interface ModelCapabilitySnapshot {
+  heuristicVersion: number;
+  modelLayerCount: number | null;
+  gpuLayersCeiling: number;
+  metadataTrust: ModelMetadataTrust;
+  sizeBytes?: number;
+  verifiedFileSizeBytes?: number;
+  verifiedMaxContextTokens?: number;
+  ggufCapabilityDigest?: string;
+  sha256?: string;
+  lastModifiedAt?: number;
+}
+
 export interface ModelMetadata {
   id: string;
   name: string;
@@ -66,6 +79,7 @@ export interface ModelMetadata {
   resumeData?: string;
   maxContextTokens?: number;
   hasVerifiedContextWindow?: boolean;
+  capabilitySnapshot?: ModelCapabilitySnapshot;
   parameterSizeLabel?: string;
   modelType?: string;
   architectures?: string[];
@@ -88,9 +102,53 @@ export enum EngineStatus {
   ERROR = 'error',
 }
 
+export type EngineBackendMode = 'cpu' | 'gpu' | 'npu' | 'unknown';
+
+export type EngineBackendPolicy = 'auto' | 'cpu' | 'gpu' | 'npu';
+
+export type EngineBackendInitAttempt = {
+  candidate: 'npu' | 'gpu' | 'cpu';
+  nGpuLayers: number;
+  devices?: string[];
+  outcome: 'success' | 'error' | 'skipped';
+  actualGpu?: boolean;
+  reasonNoGPU?: string;
+  error?: string;
+};
+
+export interface EngineDiagnostics {
+  backendMode: EngineBackendMode;
+  backendDevices: string[];
+  reasonNoGPU?: string;
+  systemInfo?: string;
+  androidLib?: string;
+  requestedGpuLayers?: number;
+  loadedGpuLayers?: number;
+  actualGpuAccelerated?: boolean;
+  requestedBackendPolicy?: EngineBackendPolicy;
+  effectiveBackendPolicy?: EngineBackendPolicy;
+  backendPolicyReasons?: string[];
+  backendInitAttempts?: EngineBackendInitAttempt[];
+  initGpuLayers?: number;
+  initDevices?: string[];
+  initCacheTypeK?: string;
+  initCacheTypeV?: string;
+  initFlashAttnType?: 'auto' | 'on' | 'off';
+  initUseMmap?: boolean;
+  initUseMlock?: boolean;
+  initNParallel?: number;
+  initNThreads?: number;
+  initCpuMask?: string;
+  initCpuStrict?: boolean;
+  initNBatch?: number;
+  initNUbatch?: number;
+  initKvUnified?: boolean;
+}
+
 export interface EngineState {
   status: EngineStatus;
   activeModelId?: string;
   loadProgress: number;
   lastError?: string;
+  diagnostics?: EngineDiagnostics;
 }

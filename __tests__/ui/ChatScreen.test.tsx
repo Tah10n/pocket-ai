@@ -64,7 +64,14 @@ const mockStop = jest.fn();
 const mockCreateSummaryPlaceholder = jest.fn();
 const mockRouterNavigate = jest.fn();
 const mockRouterPush = jest.fn();
+const mockRunBackendAutotune = jest.fn();
 const mockGetRecommendedGpuLayers = jest.fn(() => new Promise<number>(() => {}));
+const mockGetRecommendedLoadProfile = jest.fn<Promise<{ recommendedGpuLayers: number; gpuLayersCeiling: number }>, [string | null]>(() =>
+  mockGetRecommendedGpuLayers().then((recommendedGpuLayers) => ({
+    recommendedGpuLayers,
+    gpuLayersCeiling: 512,
+  })),
+);
 const mockLoadModel = jest.fn().mockResolvedValue(undefined);
 const mockGetTotalMemory = jest.fn().mockResolvedValue(8 * 1024 * 1024 * 1024);
 const mockRefreshModelMetadata = jest.fn((model) => Promise.resolve(model));
@@ -100,6 +107,16 @@ let mockHardwareBannerInputs = {
 let mockEngineState: {
   activeModelId: string | null;
   status: string;
+  diagnostics?: {
+    backendMode: 'cpu' | 'gpu' | 'npu' | 'unknown';
+    backendDevices: string[];
+    reasonNoGPU?: string;
+    systemInfo?: string;
+    androidLib?: string;
+    requestedGpuLayers?: number;
+    loadedGpuLayers?: number;
+    actualGpuAccelerated?: boolean;
+  };
 } = {
   activeModelId: 'author/model-q4',
   status: 'ready',
@@ -113,6 +130,24 @@ jest.mock('../../src/hooks/useLLMEngine', () => ({
 
 jest.mock('../../src/services/LLMEngineService', () => ({
   llmEngineService: {
+    ensurePersistedCapabilitySnapshot: (model: any) => {
+      if (!model) {
+        return null;
+      }
+
+      const snapshotLayerCount = typeof model?.capabilitySnapshot?.modelLayerCount === 'number'
+        ? model.capabilitySnapshot.modelLayerCount
+        : null;
+      const ggufLayerCount = typeof model?.gguf?.nLayers === 'number' ? model.gguf.nLayers : null;
+      const modelLayerCount = snapshotLayerCount ?? ggufLayerCount;
+      const snapshotCeiling = typeof model?.capabilitySnapshot?.gpuLayersCeiling === 'number'
+        ? model.capabilitySnapshot.gpuLayersCeiling
+        : null;
+      const gpuLayersCeiling = snapshotCeiling ?? modelLayerCount ?? 512;
+
+      return { modelLayerCount, gpuLayersCeiling };
+    },
+    getRecommendedLoadProfile: (modelId: string | null) => mockGetRecommendedLoadProfile(modelId),
     getRecommendedGpuLayers: () => mockGetRecommendedGpuLayers(),
     load: (...args: any[]) => mockLoadModel(...args),
     getSafeModeLoadLimits: () => mockSafeModeLoadLimits,
@@ -150,6 +185,12 @@ jest.mock('react-native-device-info', () => ({
 jest.mock('../../src/services/ModelCatalogService', () => ({
   modelCatalogService: {
     refreshModelMetadata: (model: any) => mockRefreshModelMetadata(model),
+  },
+}));
+
+jest.mock('@/services/InferenceAutotuneService', () => ({
+  inferenceAutotuneService: {
+    runBackendAutotune: (...args: any[]) => mockRunBackendAutotune(...args),
   },
 }));
 
@@ -317,10 +358,10 @@ jest.mock('@/components/ui/ModelParametersSheet', () => {
             mockReact.createElement(
               Pressable,
               {
-                testID: 'enable-reasoning-button',
-                onPress: () => onChangeParams({ reasoningEnabled: true }),
+                testID: 'set-medium-reasoning-effort-button',
+                onPress: () => onChangeParams({ reasoningEffort: 'medium' }),
               },
-              mockReact.createElement(Text, null, 'Enable reasoning'),
+              mockReact.createElement(Text, null, 'Set medium reasoning effort'),
             ),
             mockReact.createElement(
               Pressable,
@@ -452,9 +493,11 @@ const {
 const { useChatStore } = require('../../src/store/chatStore');
 const {
   getSettings,
+  UNKNOWN_MODEL_GPU_LAYERS_CEILING,
   updateSettings,
 } = require('../../src/services/SettingsStore');
 const { registry } = require('../../src/services/LocalStorageRegistry');
+const { buildModelCapabilitySnapshot } = require('../../src/utils/modelCapabilities');
 
 describe('ChatScreen', () => {
   let alertSpy: jest.SpyInstance;
@@ -474,6 +517,14 @@ describe('ChatScreen', () => {
     mockCreateSummaryPlaceholder.mockClear();
     mockRouterNavigate.mockClear();
     mockRouterPush.mockClear();
+    mockRunBackendAutotune.mockReset();
+    mockRunBackendAutotune.mockResolvedValue({
+      createdAtMs: 1,
+      modelId: 'author/model-q4',
+      contextSize: 4096,
+      kvCacheType: 'f16',
+      candidates: [],
+    });
     mockStartNewChat.mockClear();
     alertSpy.mockClear();
     lastPresetSelectorProps = null;
@@ -489,6 +540,15 @@ describe('ChatScreen', () => {
       activeModelId: 'author/model-q4',
       status: 'ready',
     };
+    mockGetRecommendedGpuLayers.mockReset();
+    mockGetRecommendedGpuLayers.mockImplementation(() => new Promise<number>(() => {}));
+    mockGetRecommendedLoadProfile.mockReset();
+    mockGetRecommendedLoadProfile.mockImplementation(() =>
+      mockGetRecommendedGpuLayers().then((recommendedGpuLayers) => ({
+        recommendedGpuLayers,
+        gpuLayersCeiling: 512,
+      })),
+    );
     registry.saveModels([]);
     mockGetTotalMemory.mockClear();
     mockGetTotalMemory.mockResolvedValue(8 * 1024 * 1024 * 1024);
@@ -507,7 +567,7 @@ describe('ChatScreen', () => {
           temperature: 0.7,
           topP: 0.6,
           maxTokens: 1024,
-          reasoningEnabled: false,
+          reasoningEffort: 'auto',
         },
       },
       modelLoadParamsByModelId: {},
@@ -528,7 +588,7 @@ describe('ChatScreen', () => {
             temperature: 0.7,
             topP: 0.6,
             maxTokens: 1024,
-            reasoningEnabled: false,
+            reasoningEffort: 'auto',
           },
           messages: [
             {
@@ -1007,10 +1067,22 @@ describe('ChatScreen', () => {
     expect(useChatStore.getState().getActiveThread()?.paramsSnapshot.topP).toBe(0.9);
   });
 
-  it('updates the active thread reasoning toggle from the model controls sheet', async () => {
+  it('updates the active thread reasoning effort from the model controls sheet', async () => {
+    registry.saveModels([
+      {
+        id: 'author/model-q4',
+        name: 'Qwen3-4B-Instruct-GGUF',
+        author: 'Test',
+        size: 512 * 1024 * 1024,
+        localPath: 'author-model-q4.gguf',
+        lifecycleStatus: 'downloaded',
+        modelType: 'qwen3',
+        tags: ['gguf', 'chat'],
+      },
+    ]);
     const { getByTestId, rerender } = render(React.createElement(ChatScreen));
 
-    expect(useChatStore.getState().getActiveThread()?.paramsSnapshot.reasoningEnabled).not.toBe(true);
+    expect(useChatStore.getState().getActiveThread()?.paramsSnapshot.reasoningEffort).toBe('auto');
 
     await act(async () => {
       fireEvent.press(getByTestId('model-controls-button'));
@@ -1018,12 +1090,172 @@ describe('ChatScreen', () => {
     });
 
     await act(async () => {
-      fireEvent.press(getByTestId('enable-reasoning-button'));
+      fireEvent.press(getByTestId('set-medium-reasoning-effort-button'));
       await Promise.resolve();
     });
     rerender(React.createElement(ChatScreen));
 
-    expect(useChatStore.getState().getActiveThread()?.paramsSnapshot.reasoningEnabled).toBe(true);
+    expect(useChatStore.getState().getActiveThread()?.paramsSnapshot.reasoningEffort).toBe('medium');
+  });
+
+  it('alerts when autotune cannot restore the previously loaded model', async () => {
+    registry.saveModels([
+      {
+        id: 'author/model-q4',
+        name: 'Qwen3-4B-Instruct-GGUF',
+        author: 'Test',
+        size: 512 * 1024 * 1024,
+        localPath: 'author-model-q4.gguf',
+        lifecycleStatus: 'downloaded',
+        modelType: 'qwen3',
+        tags: ['gguf', 'chat'],
+      },
+    ]);
+    mockRunBackendAutotune.mockResolvedValueOnce({
+      createdAtMs: 1,
+      modelId: 'author/model-q4',
+      contextSize: 4096,
+      kvCacheType: 'f16',
+      candidates: [],
+      restorationError: 'native reload crashed',
+    });
+
+    const { getByTestId } = render(React.createElement(ChatScreen));
+
+    await act(async () => {
+      fireEvent.press(getByTestId('model-controls-button'));
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      await lastModelParametersSheetProps?.onRunAutotune();
+    });
+
+    expect(mockRunBackendAutotune).toHaveBeenCalledWith({ modelId: 'author/model-q4' });
+    expect(alertSpy).toHaveBeenCalledWith(
+      'chat.modelControls.backendBenchmarkRestoreWarningTitle',
+      'chat.modelControls.backendBenchmarkRestoreWarningDescription',
+    );
+  });
+
+  it('keeps reasoning disabled for models without reasoning support', async () => {
+    updateSettings({
+      modelParamsByModelId: {
+        'author/model-q4': {
+          temperature: 0.7,
+          topP: 0.6,
+          maxTokens: 1024,
+          reasoningEffort: 'high',
+        },
+      },
+    });
+    useChatStore.setState({
+      threads: {
+        'thread-1': {
+          ...useChatStore.getState().threads['thread-1'],
+          paramsSnapshot: {
+            ...useChatStore.getState().threads['thread-1'].paramsSnapshot,
+            reasoningEffort: 'high',
+          },
+        },
+      },
+      activeThreadId: 'thread-1',
+    });
+    registry.saveModels([
+      {
+        id: 'author/model-q4',
+        name: 'gemma-2-2b-it-GGUF',
+        author: 'Test',
+        size: 512 * 1024 * 1024,
+        localPath: 'author-model-q4.gguf',
+        lifecycleStatus: 'downloaded',
+        modelType: 'gemma2',
+        tags: ['gguf', 'chat'],
+      },
+    ]);
+
+    const { getByTestId } = render(React.createElement(ChatScreen));
+
+    await act(async () => {
+      fireEvent.press(getByTestId('model-controls-button'));
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(lastModelParametersSheetProps?.supportsReasoning).toBe(false);
+      expect(lastModelParametersSheetProps?.params.reasoningEffort).toBe('auto');
+      // Opening the sheet should not mutate persisted/thread params.
+      expect(useChatStore.getState().getActiveThread()?.paramsSnapshot.reasoningEffort).toBe('high');
+    });
+
+    await act(async () => {
+      lastModelParametersSheetProps?.onChangeParams({ reasoningEffort: 'high' });
+      await Promise.resolve();
+    });
+
+    expect(useChatStore.getState().getActiveThread()?.paramsSnapshot.reasoningEffort).toBe('auto');
+  });
+
+  it('keeps auto reasoning effort enabled for reasoning-first models', async () => {
+    updateSettings({
+      activeModelId: 'author/model-r1',
+      modelParamsByModelId: {
+        'author/model-r1': {
+          temperature: 0.7,
+          topP: 0.6,
+          maxTokens: 1024,
+          reasoningEffort: 'auto',
+        },
+      },
+    });
+    useChatStore.setState({
+      threads: {
+        'thread-1': {
+          ...useChatStore.getState().threads['thread-1'],
+          modelId: 'author/model-r1',
+          paramsSnapshot: {
+            ...useChatStore.getState().threads['thread-1'].paramsSnapshot,
+            reasoningEffort: 'auto',
+          },
+        },
+      },
+      activeThreadId: 'thread-1',
+    });
+    mockEngineState.activeModelId = 'author/model-r1';
+    registry.saveModels([
+      {
+        id: 'author/model-r1',
+        name: 'DeepSeek-R1-Distill-Qwen-7B-GGUF',
+        author: 'Test',
+        size: 512 * 1024 * 1024,
+        localPath: 'author-model-r1.gguf',
+        lifecycleStatus: 'downloaded',
+        modelType: 'deepseek-r1',
+        baseModels: ['deepseek-ai/DeepSeek-R1'],
+        tags: ['gguf', 'reasoning'],
+      },
+    ]);
+
+    const { getByTestId } = render(React.createElement(ChatScreen));
+
+    await act(async () => {
+      fireEvent.press(getByTestId('model-controls-button'));
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(lastModelParametersSheetProps?.requiresReasoning).toBe(true);
+      expect(lastModelParametersSheetProps?.params.reasoningEffort).toBe('auto');
+      // Opening the sheet should not mutate persisted/thread params.
+      expect(useChatStore.getState().getActiveThread()?.paramsSnapshot.reasoningEffort).toBe('auto');
+    });
+
+    await act(async () => {
+      lastModelParametersSheetProps?.onChangeParams({ reasoningEffort: 'low' });
+      await Promise.resolve();
+    });
+
+    expect(useChatStore.getState().getActiveThread()?.paramsSnapshot.reasoningEffort).toBe('low');
   });
 
   it('keeps the reset context window draft instead of restoring the saved override', async () => {
@@ -1146,6 +1378,216 @@ describe('ChatScreen', () => {
       contextSize: 8192,
       gpuLayers: 12,
       kvCacheType: 'auto',
+    });
+  });
+
+  it('passes runtime backend diagnostics separately from the saved load profile', async () => {
+    updateSettings({
+      modelLoadParamsByModelId: {
+        'author/model-q4': {
+          contextSize: 4096,
+          gpuLayers: 12,
+        },
+      },
+    });
+    registry.saveModels([
+      {
+        id: 'author/model-q4',
+        name: 'Q4 model',
+        author: 'Test',
+        size: 512 * 1024 * 1024,
+        maxContextTokens: 8192,
+        hasVerifiedContextWindow: true,
+        localPath: 'author-model-q4.gguf',
+        lifecycleStatus: 'downloaded',
+      },
+    ]);
+    mockLoadedContextSize = 4096;
+    mockLoadedGpuLayers = 0;
+    mockEngineState = {
+      activeModelId: 'author/model-q4',
+      status: 'ready',
+      diagnostics: {
+        backendMode: 'cpu',
+        backendDevices: [],
+        reasonNoGPU: 'OpenCL backend unavailable',
+        requestedGpuLayers: 12,
+        loadedGpuLayers: 0,
+        actualGpuAccelerated: false,
+      },
+    };
+
+    const { getByTestId, rerender } = render(React.createElement(ChatScreen));
+
+    await act(async () => {
+      fireEvent.press(getByTestId('model-controls-button'));
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(lastModelParametersSheetProps?.loadParamsDraft).toEqual(expect.objectContaining({
+        contextSize: 4096,
+        gpuLayers: 12,
+      }));
+      expect(lastModelParametersSheetProps?.loadedGpuLayers).toBe(0);
+      expect(lastModelParametersSheetProps?.engineDiagnostics).toEqual(expect.objectContaining({
+        backendMode: 'cpu',
+        requestedGpuLayers: 12,
+        loadedGpuLayers: 0,
+        actualGpuAccelerated: false,
+        reasonNoGPU: 'OpenCL backend unavailable',
+      }));
+    });
+  });
+
+  it('resets the GPU ceiling when reopening model controls for a different model before recommendations resolve', async () => {
+    const highModelRecommendation = createDeferred<{ recommendedGpuLayers: number; gpuLayersCeiling: number }>();
+
+    mockGetRecommendedLoadProfile.mockImplementation((modelId: string | null) => {
+      if (modelId === 'author/model-q4') {
+        return Promise.resolve({
+          recommendedGpuLayers: 4,
+          gpuLayersCeiling: 4,
+        });
+      }
+
+      if (modelId === 'author/model-q8') {
+        return highModelRecommendation.promise;
+      }
+
+      return Promise.resolve({
+        recommendedGpuLayers: 0,
+        gpuLayersCeiling: UNKNOWN_MODEL_GPU_LAYERS_CEILING,
+      });
+    });
+
+    registry.saveModels([
+      {
+        id: 'author/model-q4',
+        name: 'Q4 model',
+        author: 'Test',
+        size: 512 * 1024 * 1024,
+        maxContextTokens: 8192,
+        hasVerifiedContextWindow: true,
+        localPath: 'author-model-q4.gguf',
+        lifecycleStatus: 'downloaded',
+      },
+      {
+        id: 'author/model-q8',
+        name: 'Q8 model',
+        author: 'Test',
+        size: 768 * 1024 * 1024,
+        maxContextTokens: 8192,
+        hasVerifiedContextWindow: true,
+        localPath: 'author-model-q8.gguf',
+        lifecycleStatus: 'downloaded',
+      },
+    ]);
+
+    const { getByTestId, rerender } = render(React.createElement(ChatScreen));
+
+    await act(async () => {
+      fireEvent.press(getByTestId('model-controls-button'));
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(lastModelParametersSheetProps?.modelId).toBe('author/model-q4');
+      expect(lastModelParametersSheetProps?.gpuLayersCeiling).toBe(4);
+    });
+
+    await act(async () => {
+      lastModelParametersSheetProps.onClose();
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      useChatStore.setState({
+        threads: {
+          'thread-1': {
+            ...useChatStore.getState().threads['thread-1'],
+            modelId: 'author/model-q8',
+          },
+        },
+        activeThreadId: 'thread-1',
+      });
+      await Promise.resolve();
+    });
+
+    rerender(React.createElement(ChatScreen));
+
+    await act(async () => {
+      fireEvent.press(getByTestId('model-controls-button'));
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(lastModelParametersSheetProps?.modelId).toBe('author/model-q8');
+      expect(lastModelParametersSheetProps?.gpuLayersCeiling).toBe(UNKNOWN_MODEL_GPU_LAYERS_CEILING);
+    });
+
+    await act(async () => {
+      lastModelParametersSheetProps.onChangeLoadParams({
+        gpuLayers: 100,
+      });
+    });
+
+    await act(async () => {
+      await lastModelParametersSheetProps.onApplyReload();
+    });
+
+    expect(getSettings().modelLoadParamsByModelId['author/model-q8']).toEqual({
+      contextSize: 4096,
+      gpuLayers: 100,
+      kvCacheType: 'auto',
+    });
+  });
+
+  it('shows the cached stable GPU ceiling before async recommendations resolve', async () => {
+    mockGetRecommendedLoadProfile.mockImplementation(() => new Promise(() => {}));
+
+    const modelSizeBytes = 512 * 1024 * 1024;
+    registry.saveModels([
+      {
+        id: 'author/model-q4',
+        name: 'Q4 model',
+        author: 'Test',
+        size: modelSizeBytes,
+        metadataTrust: 'verified_local',
+        gguf: {
+          totalBytes: modelSizeBytes,
+          architecture: 'llama',
+          nLayers: 28,
+        },
+        hasVerifiedContextWindow: true,
+        maxContextTokens: 8192,
+        localPath: 'author-model-q4.gguf',
+        lifecycleStatus: 'downloaded',
+        capabilitySnapshot: buildModelCapabilitySnapshot({
+          size: modelSizeBytes,
+          metadataTrust: 'verified_local',
+          gguf: {
+            totalBytes: modelSizeBytes,
+            architecture: 'llama',
+            nLayers: 28,
+          },
+          hasVerifiedContextWindow: true,
+          maxContextTokens: 8192,
+          lastModifiedAt: undefined,
+          sha256: undefined,
+        }),
+      },
+    ]);
+
+    const { getByTestId } = render(React.createElement(ChatScreen));
+
+    await act(async () => {
+      fireEvent.press(getByTestId('model-controls-button'));
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(lastModelParametersSheetProps?.gpuLayersCeiling).toBe(28);
     });
   });
 

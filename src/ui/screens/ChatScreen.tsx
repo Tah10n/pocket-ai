@@ -170,6 +170,7 @@ export const ChatScreen = () => {
     const androidKeyboardMetricsRef = useRef<{ height: number; topY: number } | null>(null);
     const composerContainerRef = useRef<View | null>(null);
     const isUserInteractingRef = useRef(false);
+    const isListTouchingRef = useRef(false);
     const shouldStickToBottomRef = useRef(true);
     const hasActiveModel = Boolean(engineState.activeModelId);
     const isEngineReady = engineState.status === EngineStatus.READY;
@@ -199,7 +200,7 @@ export const ChatScreen = () => {
         topK: rawCurrentParams.topK ?? FALLBACK_TOP_K,
         minP: rawCurrentParams.minP ?? FALLBACK_MIN_P,
         repetitionPenalty: rawCurrentParams.repetitionPenalty ?? FALLBACK_REPETITION_PENALTY,
-        reasoningEnabled: rawCurrentParams.reasoningEnabled === true,
+        reasoningEffort: rawCurrentParams.reasoningEffort ?? 'auto',
     };
     const rawDefaultParams = getGenerationParametersForModel(null);
     const defaultParams = {
@@ -207,7 +208,7 @@ export const ChatScreen = () => {
         topK: rawDefaultParams.topK ?? FALLBACK_TOP_K,
         minP: rawDefaultParams.minP ?? FALLBACK_MIN_P,
         repetitionPenalty: rawDefaultParams.repetitionPenalty ?? FALLBACK_REPETITION_PENALTY,
-        reasoningEnabled: rawDefaultParams.reasoningEnabled === true,
+        reasoningEffort: rawDefaultParams.reasoningEffort ?? 'auto',
     };
     const displayMessages = useMemo(() => [...messages].reverse(), [messages]);
     const hasMessages = displayMessages.length > 0;
@@ -226,7 +227,7 @@ export const ChatScreen = () => {
         topK: rawParamsSource.topK ?? FALLBACK_TOP_K,
         minP: rawParamsSource.minP ?? FALLBACK_MIN_P,
         repetitionPenalty: rawParamsSource.repetitionPenalty ?? FALLBACK_REPETITION_PENALTY,
-        reasoningEnabled: rawParamsSource.reasoningEnabled === true,
+        reasoningEffort: rawParamsSource.reasoningEffort ?? 'auto',
     };
     const thermalWarningMessage = hardwareBannerInputs.thermalState === 'critical'
         ? t('chat.thermalDescriptionCritical')
@@ -401,6 +402,8 @@ export const ChatScreen = () => {
         if (
             !messages.length
             || autoScrollFrameRef.current !== null
+            || isUserInteractingRef.current
+            || isListTouchingRef.current
             || (!force && !shouldStickToBottomRef.current)
         ) {
             return;
@@ -420,6 +423,27 @@ export const ChatScreen = () => {
             }
         });
     }, [messages.length, scrollToLatestMessage]);
+
+    const handleListTouchStart = useCallback(() => {
+        // While streaming, we auto-follow new tokens. Programmatic scroll calls can cancel taps
+        // inside the list, which makes the thinking disclosure feel "unclickable".
+        isListTouchingRef.current = true;
+        forcedFollowPassesRef.current = 0;
+        clearForcedScrollTimeouts();
+
+        if (autoScrollFrameRef.current !== null) {
+            cancelAnimationFrame(autoScrollFrameRef.current);
+            autoScrollFrameRef.current = null;
+        }
+    }, [clearForcedScrollTimeouts]);
+
+    const handleListTouchEnd = useCallback(() => {
+        isListTouchingRef.current = false;
+    }, []);
+
+    const handleListTouchCancel = useCallback(() => {
+        isListTouchingRef.current = false;
+    }, []);
 
     const updateStickinessFromScrollEvent = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
         shouldStickToBottomRef.current = getNextShouldStickToBottom(
@@ -904,6 +928,9 @@ export const ChatScreen = () => {
                                 showsVerticalScrollIndicator={false}
                                 scrollEventThrottle={16}
                                 keyboardShouldPersistTaps="handled"
+                                onTouchStart={handleListTouchStart}
+                                onTouchEnd={handleListTouchEnd}
+                                onTouchCancel={handleListTouchCancel}
                                 contentContainerStyle={{ paddingTop: listBottomPadding, paddingBottom: 4, flexGrow: 1 }}
                                 onContentSizeChange={handleListContentSizeChange}
                                 onLoad={handleListContentSizeChange}

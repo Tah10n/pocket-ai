@@ -1,5 +1,6 @@
 import type {
   LlamaContext,
+  NativeBackendDeviceInfo,
   NativeCompletionResult,
   TokenData,
 } from 'llama.rn';
@@ -7,13 +8,23 @@ import * as FileSystem from 'expo-file-system/legacy';
 import DeviceInfo from 'react-native-device-info';
 import { Platform } from 'react-native';
 import { hardwareListenerService } from './HardwareListenerService';
-import { EngineStatus, EngineState, type ModelMemoryFitConfidence } from '../types/models';
+import {
+  EngineBackendMode,
+  type EngineBackendInitAttempt,
+  type EngineBackendPolicy,
+  EngineStatus,
+  EngineState,
+  type ModelMemoryFitConfidence,
+  type ModelMetadata,
+} from '../types/models';
 import { LlmChatCompletionOptions, LlmChatMessage } from '../types/chat';
 import { registry } from './LocalStorageRegistry';
 import { getModelsDir } from './FileSystemSetup';
 import { safeJoinModelPath } from '../utils/safeFilePath';
 import {
   getModelLoadParametersForModel,
+  type ModelLoadParameters,
+  UNKNOWN_MODEL_GPU_LAYERS_CEILING,
   updateSettings,
 } from './SettingsStore';
 import { AppError, toAppError } from './AppError';
@@ -39,13 +50,28 @@ import {
 } from '../memory/calibration';
 import { DECIMAL_GIGABYTE } from '../utils/modelSize';
 import { isHighConfidenceLikelyOomMemoryFit } from '../utils/modelMemoryFitState';
+import {
+  resolveModelCapabilitySnapshot,
+  resolveModelLayerCountFromGgufMetadata,
+} from '../utils/modelCapabilities';
 import { resolveKvCacheTypes } from '../utils/kvCache';
 import { requireLlamaModule } from './llamaRnModule';
+import { inferenceBackendService } from './InferenceBackendService';
+import { resolveInferenceProfileCandidates, type ResolvedInferenceProfile } from './resolveInferenceProfile';
+import { readAutotuneResult } from './InferenceAutotuneStore';
 
 export interface LoadModelOptions {
   forceReload?: boolean;
   allowUnsafeMemoryLoad?: boolean;
+  loadParamsOverride?: Partial<ModelLoadParameters>;
 }
+
+export type BackendAvailability = {
+  gpuBackendAvailable: boolean | null;
+  npuBackendAvailable: boolean | null;
+  discoveryUnavailable: boolean;
+  devices: NativeBackendDeviceInfo[];
+};
 
 type StateListener = (state: EngineState) => void;
 const DEFAULT_CONTEXT_SIZE = 4096;
@@ -180,6 +206,151 @@ function getModelInfoString(modelInfo: unknown, key: string): string | null {
   return typeof value === 'string' ? value.trim() : null;
 }
 
+function toFinitePositiveNumber(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    return value;
+  }
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (trimmed.length > 0) {
+      const parsed = Number(trimmed);
+      if (Number.isFinite(parsed) && parsed > 0) {
+        return parsed;
+      }
+    }
+  }
+
+  return null;
+}
+
+function readNumericMetadata(metadata: Record<string, unknown> | undefined, keys: string[]): number | null {
+  if (!metadata) {
+    return null;
+  }
+
+  for (const key of keys) {
+    const value = toFinitePositiveNumber(metadata[key]);
+    if (value !== null) {
+      return value;
+    }
+  }
+
+  return null;
+}
+
+function normalizeArchitecturePrefix(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  return normalized.length > 0 ? normalized : null;
+}
+
+function resolveGgufArchitecturePrefixes(ggufMetadata?: Record<string, unknown>): string[] {
+  if (!ggufMetadata) {
+    return [];
+  }
+
+  const direct = normalizeArchitecturePrefix(ggufMetadata.architecture);
+  const general = normalizeArchitecturePrefix(ggufMetadata['general.architecture']);
+  const candidate = direct ?? general;
+  if (!candidate) {
+    return [];
+  }
+
+  const prefixes = new Set<string>();
+  prefixes.add(candidate);
+  const stripped = candidate.replace(/\d+$/u, '');
+  if (stripped.length > 0) {
+    prefixes.add(stripped);
+  }
+
+  return Array.from(prefixes);
+}
+
+function withPrefixes(prefixes: string[], suffixes: string[]): string[] {
+  if (prefixes.length === 0 || suffixes.length === 0) {
+    return [];
+  }
+
+  const keys: string[] = [];
+  for (const prefix of prefixes) {
+    for (const suffix of suffixes) {
+      keys.push(`${prefix}.${suffix}`);
+    }
+  }
+  return keys;
+}
+
+function resolveDerivedHeadDim({
+  ggufMetadata,
+  prefixes,
+}: {
+  ggufMetadata: Record<string, unknown> | undefined;
+  prefixes: string[];
+}): number | null {
+  const embeddingLength = readNumericMetadata(
+    ggufMetadata,
+    ['nEmbd', 'n_embd', 'embedding_length', ...withPrefixes(prefixes, ['embedding_length'])],
+  );
+  const headCount = readNumericMetadata(
+    ggufMetadata,
+    ['nHead', 'n_head', 'attention.head_count', ...withPrefixes(prefixes, ['attention.head_count'])],
+  );
+
+  if (!embeddingLength || !headCount || embeddingLength <= 0 || headCount <= 0) {
+    return null;
+  }
+
+  const raw = embeddingLength / headCount;
+  if (!Number.isFinite(raw) || raw <= 0) {
+    return null;
+  }
+
+  const rounded = Math.round(raw);
+  if (rounded <= 0) {
+    return null;
+  }
+
+  // Require near-integer to avoid wildly incorrect derivations.
+  if (Math.abs(rounded - raw) > 1e-3) {
+    return null;
+  }
+
+  return rounded;
+}
+
+function resolveKvCacheHeadDims(ggufMetadata?: Record<string, unknown>): { headDimK: number | null; headDimV: number | null } {
+  const prefixes = resolveGgufArchitecturePrefixes(ggufMetadata);
+
+  const headDimK = readNumericMetadata(
+    ggufMetadata,
+    [
+      'nEmbdHeadK',
+      'n_embd_head_k',
+      'attention.key_length',
+      ...withPrefixes(prefixes, ['attention.key_length']),
+    ],
+  ) ?? resolveDerivedHeadDim({ ggufMetadata, prefixes });
+
+  const headDimV = readNumericMetadata(
+    ggufMetadata,
+    [
+      'nEmbdHeadV',
+      'n_embd_head_v',
+      'attention.value_length',
+      ...withPrefixes(prefixes, ['attention.value_length']),
+    ],
+  ) ?? headDimK;
+
+  return {
+    headDimK: headDimK && headDimK > 0 ? Math.round(headDimK) : null,
+    headDimV: headDimV && headDimV > 0 ? Math.round(headDimV) : null,
+  };
+}
+
 function mergeConsecutiveMessages(messages: LlmChatMessage[]): LlmChatMessage[] {
   const merged: LlmChatMessage[] = [];
 
@@ -270,9 +441,38 @@ class LLMEngineService {
     requestedGpuLayers: number;
     loadedGpuLayers: number;
   } | null = null;
+  private activeBackendMode: EngineBackendMode = 'unknown';
+  private activeBackendDevices: string[] = [];
+  private activeBackendReasonNoGpu: string | null = null;
+  private activeBackendSystemInfo: string | null = null;
+  private activeBackendAndroidLib: string | null = null;
+  private requestedGpuLayers: number | null = null;
+  private actualGpuAccelerated: boolean | null = null;
+  private requestedBackendPolicy: EngineBackendPolicy | null = null;
+  private effectiveBackendPolicy: EngineBackendPolicy | null = null;
+  private backendPolicyReasons: string[] = [];
+  private backendInitAttemptsSnapshot: EngineBackendInitAttempt[] = [];
+  private initGpuLayers: number | null = null;
+  private initDevices: string[] | null = null;
+  private initCacheTypeK: string | null = null;
+  private initCacheTypeV: string | null = null;
+  private initFlashAttnType: 'auto' | 'on' | 'off' | null = null;
+  private initUseMmap: boolean | null = null;
+  private initUseMlock: boolean | null = null;
+  private initNParallel: number | null = null;
+  private initNThreads: number | null = null;
+  private initCpuMask: string | null = null;
+  private initCpuStrict: boolean | null = null;
+  private initNBatch: number | null = null;
+  private initNUbatch: number | null = null;
+  private initKvUnified: boolean | null = null;
   private state: EngineState = {
     status: EngineStatus.IDLE,
     loadProgress: 0,
+    diagnostics: {
+      backendMode: 'unknown',
+      backendDevices: [],
+    },
   };
   private lastModelLoadError: AppError | null = null;
   private lastModelLoadErrorScope: string | null = null;
@@ -295,6 +495,20 @@ class LLMEngineService {
     });
   }
 
+  public async getBackendAvailability(): Promise<BackendAvailability> {
+    try {
+      // Delegate discovery + caching to InferenceBackendService.
+      return await inferenceBackendService.getBackendAvailability();
+    } catch {
+      return {
+        gpuBackendAvailable: null,
+        npuBackendAvailable: null,
+        discoveryUnavailable: true,
+        devices: [],
+      };
+    }
+  }
+
   /**
    * Determine the number of GPU layers based on device RAM only.
    *
@@ -308,51 +522,6 @@ class LLMEngineService {
     if (totalGB >= 8) return 20;
     if (totalGB >= 6) return 10;
     return 0;
-  }
-
-  private resolveModelLayerCount(ggufMetadata?: Record<string, unknown>): number | null {
-    if (!ggufMetadata) {
-      return null;
-    }
-
-    const normalizeArchitecturePrefix = (value: unknown): string | null => {
-      if (typeof value !== 'string') {
-        return null;
-      }
-
-      const normalized = value.trim().toLowerCase();
-      return normalized.length > 0 ? normalized : null;
-    };
-
-    const directArchitecture = normalizeArchitecturePrefix(ggufMetadata.architecture);
-    const generalArchitecture = normalizeArchitecturePrefix(ggufMetadata['general.architecture']);
-    const architecture = directArchitecture ?? generalArchitecture;
-    const prefixes = architecture
-      ? Array.from(new Set([architecture, architecture.replace(/\d+$/u, '')].filter((value) => value.length > 0)))
-      : [];
-
-    const candidates = [
-      'nLayers',
-      'n_layers',
-      'n_layer',
-      'block_count',
-      ...prefixes.map((prefix) => `${prefix}.block_count`),
-    ];
-
-    for (const key of candidates) {
-      const raw = ggufMetadata[key];
-      const numeric = typeof raw === 'number' ? raw : typeof raw === 'string' ? Number(raw) : NaN;
-      if (!Number.isFinite(numeric) || numeric <= 0) {
-        continue;
-      }
-
-      const rounded = Math.round(numeric);
-      if (rounded > 0) {
-        return rounded;
-      }
-    }
-
-    return null;
   }
 
   private suggestGpuLayersForModel({
@@ -369,7 +538,7 @@ class LLMEngineService {
     const fallback = typeof totalMemoryBytes === 'number' && Number.isFinite(totalMemoryBytes) && totalMemoryBytes > 0
       ? this.suggestGpuLayersFromTotalMemory(totalMemoryBytes)
       : 0;
-    const nLayers = this.resolveModelLayerCount(ggufMetadata);
+    const nLayers = resolveModelLayerCountFromGgufMetadata(ggufMetadata);
     const normalizedFallback = nLayers ? Math.min(fallback, nLayers) : fallback;
 
     if (!nLayers) {
@@ -406,29 +575,53 @@ class LLMEngineService {
     }
 
     const maxLayersByBudget = Math.floor(offloadBudgetBytes / bytesPerLayer);
-    const suggested = Math.max(0, Math.min(Math.round(maxLayersByBudget), nLayers, 80));
+    const suggested = Math.max(0, Math.min(Math.round(maxLayersByBudget), nLayers));
 
     return suggested;
   }
 
-  private async calculateGpuLayers(): Promise<number> {
-    try {
-      const totalMemoryBytes = await DeviceInfo.getTotalMemory();
-      const suggested = this.suggestGpuLayersFromTotalMemory(totalMemoryBytes);
+  private resolveRecommendedLoadProfile({
+    totalMemoryBytes,
+    systemMemorySnapshot,
+    modelSizeBytes,
+    ggufMetadata,
+    modelLayerCount,
+    gpuLayersCeilingOverride,
+  }: {
+    totalMemoryBytes: number | null;
+    systemMemorySnapshot: SystemMemorySnapshot | null;
+    modelSizeBytes: number | null;
+    ggufMetadata?: Record<string, unknown>;
+    modelLayerCount?: number | null;
+    gpuLayersCeilingOverride?: number | null;
+  }): { recommendedGpuLayers: number; gpuLayersCeiling: number; modelLayerCount: number | null } {
+    const resolvedModelLayerCount = typeof modelLayerCount === 'number'
+      && Number.isFinite(modelLayerCount)
+      && modelLayerCount > 0
+      ? Math.round(modelLayerCount)
+      : resolveModelLayerCountFromGgufMetadata(ggufMetadata);
+    const suggestedGpuLayers = this.suggestGpuLayersForModel({
+      totalMemoryBytes,
+      systemMemorySnapshot,
+      modelSizeBytes,
+      ggufMetadata,
+    });
 
-      // If we can observe that the system is already under memory pressure, be conservative
-      // to avoid triggering GPU init failures or OOM kills.
-      const snapshot = await getFreshMemorySnapshot(350).catch(() => null);
-      const availableBudgetBytes = snapshot ? resolveConservativeAvailableMemoryBudget(snapshot) : null;
-      if (availableBudgetBytes !== null && availableBudgetBytes < 1.5 * 1024 * 1024 * 1024) {
-        return Math.min(suggested, 10);
-      }
+    const availableBudgetBytes = systemMemorySnapshot ? resolveConservativeAvailableMemoryBudget(systemMemorySnapshot) : null;
+    const lowMemoryRecommended = availableBudgetBytes !== null && availableBudgetBytes < 1.5 * 1024 * 1024 * 1024
+      ? Math.min(suggestedGpuLayers, 10)
+      : suggestedGpuLayers;
 
-      return suggested;
-    } catch (e) {
-      console.error('[LLMEngine] Failed to calculate GPU layers', e);
-      return 0;
-    }
+    const gpuLayersCeiling = typeof gpuLayersCeilingOverride === 'number'
+      && Number.isFinite(gpuLayersCeilingOverride)
+      && gpuLayersCeilingOverride >= 0
+      ? Math.max(0, Math.round(gpuLayersCeilingOverride))
+      : resolvedModelLayerCount ?? UNKNOWN_MODEL_GPU_LAYERS_CEILING;
+    return {
+      recommendedGpuLayers: Math.max(0, Math.min(Math.round(lowMemoryRecommended), gpuLayersCeiling)),
+      gpuLayersCeiling,
+      modelLayerCount: resolvedModelLayerCount,
+    };
   }
 
   private resolveCalibrationDeviceModel(): string {
@@ -573,6 +766,7 @@ class LLMEngineService {
     gpuLayersCeiling,
     cacheTypeK,
     cacheTypeV,
+    useMmap,
   }: {
     ggufMetadata?: Record<string, unknown>;
     resolvedModelSizeBytes: number;
@@ -584,18 +778,19 @@ class LLMEngineService {
     gpuLayersCeiling: number;
     cacheTypeK: string;
     cacheTypeV: string;
+    useMmap: boolean;
   }): { safeLoadProfile: { contextTokens: number; gpuLayers: number }; safeMemoryFit: MemoryFitResult } {
     const normalizedContextCeiling = clampContextWindowTokens(
       contextCeilingTokens,
       contextCeilingTokens,
     );
-    const normalizedGpuCeiling = Math.max(0, Math.min(80, Math.round(gpuLayersCeiling)));
+    const normalizedGpuCeiling = Math.max(0, Math.round(gpuLayersCeiling));
 
     const fitCache = new Map<string, MemoryFitResult>();
     const estimateFit = (contextTokens: number, gpuLayers: number): MemoryFitResult => {
       const normalizedContext = clampContextWindowTokens(contextTokens, normalizedContextCeiling);
       const normalizedGpuLayers = Math.max(0, Math.min(normalizedGpuCeiling, Math.round(gpuLayers)));
-      const cacheKey = `${normalizedContext}:${normalizedGpuLayers}:${cacheTypeK}:${cacheTypeV}`;
+      const cacheKey = `${normalizedContext}:${normalizedGpuLayers}:${cacheTypeK}:${cacheTypeV}:${useMmap ? 'mmap' : 'nommap'}`;
       const cached = fitCache.get(cacheKey);
       if (cached) {
         return cached;
@@ -613,7 +808,7 @@ class LLMEngineService {
             gpuLayers: normalizedGpuLayers,
             cacheTypeK,
             cacheTypeV,
-            useMmap: true,
+            useMmap,
             hasMmproj: false,
             nBatch: lowMemoryBatchParams?.nBatch,
             nUbatch: lowMemoryBatchParams?.nUbatch,
@@ -632,7 +827,7 @@ class LLMEngineService {
             gpuLayers: normalizedGpuLayers,
             cacheTypeK,
             cacheTypeV,
-            useMmap: true,
+            useMmap,
           },
           snapshot: systemMemorySnapshot ?? undefined,
           calibrationRecord,
@@ -842,6 +1037,7 @@ class LLMEngineService {
         model.maxContextTokens,
         model.size ?? null,
         allowUnsafeMemoryLoad,
+        options?.loadParamsOverride,
       );
       await this.initPromise;
     });
@@ -870,7 +1066,8 @@ class LLMEngineService {
       throw new AppError('engine_busy', 'A response is already being generated.');
     }
 
-    if (!this.context || this.state.status !== EngineStatus.READY) {
+    const context = this.context;
+    if (!context || this.state.status !== EngineStatus.READY) {
       throw new AppError('engine_not_ready', 'Engine not ready');
     }
 
@@ -897,7 +1094,7 @@ class LLMEngineService {
 
       let stopWords = baseStopWords;
       try {
-        const formatted = await this.context!.getFormattedChat(
+        const formatted = await context.getFormattedChat(
           completionMessages as any,
           null,
           {
@@ -917,7 +1114,7 @@ class LLMEngineService {
 
         stopWords = [
           ...baseStopWords,
-          ...additionalStops.filter((stop) => typeof stop === 'string') as string[],
+          ...additionalStops.filter((stop): stop is string => typeof stop === 'string'),
         ];
       } catch (error) {
         if (process.env.NODE_ENV !== 'test') {
@@ -929,20 +1126,29 @@ class LLMEngineService {
         new Set(stopWords.map((stop) => stop.trim()).filter((stop) => stop.length > 0)),
       );
 
-      const completionPromise = this.context!.completion(
-        {
-          messages: completionMessages,
-          n_predict: params?.n_predict ?? 512,
-          temperature: params?.temperature ?? 0.7,
-          top_p: params?.top_p ?? 0.9,
-          top_k: params?.top_k ?? 40,
-          min_p: params?.min_p ?? 0.05,
-          penalty_repeat: params?.penalty_repeat ?? 1,
-          seed: params?.seed ?? undefined,
-          enable_thinking: params?.enable_thinking ?? false,
-          reasoning_format: params?.reasoning_format ?? 'none',
-          stop: resolvedStops,
-        },
+      const completionParams: Record<string, unknown> = {
+        messages: completionMessages,
+        n_predict: params?.n_predict ?? 512,
+        temperature: params?.temperature ?? 0.7,
+        top_p: params?.top_p ?? 0.9,
+        top_k: params?.top_k ?? 40,
+        min_p: params?.min_p ?? 0.05,
+        penalty_repeat: params?.penalty_repeat ?? 1,
+        enable_thinking: params?.enable_thinking ?? false,
+        reasoning_format: params?.reasoning_format ?? 'none',
+        stop: resolvedStops,
+      };
+
+      if (typeof params?.seed === 'number' && Number.isFinite(params.seed)) {
+        completionParams.seed = Math.round(params.seed);
+      }
+
+      if (typeof params?.thinking_budget_tokens === 'number' && Number.isFinite(params.thinking_budget_tokens)) {
+        completionParams.thinking_budget_tokens = Math.max(0, Math.round(params.thinking_budget_tokens));
+      }
+
+      const completionPromise = context.completion(
+        completionParams as any,
         (data: TokenData) => {
           if (data.token || data.content !== undefined || data.reasoning_content !== undefined) {
             onTokensStreamed();
@@ -1008,18 +1214,23 @@ class LLMEngineService {
       throw new AppError('engine_unloading', 'The model engine is unloading. Please wait a moment.');
     }
 
-    if (!this.context || this.state.status !== EngineStatus.READY) {
+    if (this.activeCompletionPromise) {
+      throw new AppError('engine_busy', 'A response is already being generated.');
+    }
+
+    const context = this.context;
+    if (!context || this.state.status !== EngineStatus.READY) {
       throw new AppError('engine_not_ready', 'Engine not ready');
     }
 
     const countTokens = async (promptMessages: LlmChatMessage[]) => {
-      const formatted = await this.context!.getFormattedChat(promptMessages as any, null, {
+      const formatted = await context.getFormattedChat(promptMessages as any, null, {
         enable_thinking: params?.enable_thinking ?? false,
         reasoning_format: params?.reasoning_format ?? 'none',
         add_generation_prompt: params?.add_generation_prompt,
       });
 
-      const tokenized = await this.context!.tokenize(
+      const tokenized = await context.tokenize(
         formatted.prompt,
         formatted.media_paths ? { media_paths: formatted.media_paths } : undefined,
       );
@@ -1089,8 +1300,67 @@ class LLMEngineService {
     return this.safeModeLoadLimits ? { ...this.safeModeLoadLimits } : null;
   }
 
+  public ensurePersistedCapabilitySnapshot(model: ModelMetadata | undefined): {
+    modelLayerCount: number | null;
+    gpuLayersCeiling: number;
+  } | null {
+    if (!model) {
+      return null;
+    }
+
+    const resolvedCapability = resolveModelCapabilitySnapshot(model);
+    if (!resolvedCapability.isCurrentPersisted && registry.getModel(model.id)) {
+      registry.updateModel({
+        ...model,
+        capabilitySnapshot: resolvedCapability.snapshot,
+      });
+    }
+
+    return {
+      modelLayerCount: resolvedCapability.snapshot.modelLayerCount,
+      gpuLayersCeiling: resolvedCapability.snapshot.gpuLayersCeiling,
+    };
+  }
+
+  public async getRecommendedLoadProfile(modelId: string | null): Promise<{
+    recommendedGpuLayers: number;
+    gpuLayersCeiling: number;
+    modelLayerCount: number | null;
+  }> {
+    let totalMemoryBytes: number | null = null;
+
+    try {
+      totalMemoryBytes = await DeviceInfo.getTotalMemory();
+    } catch (error) {
+      console.warn('[LLMEngine] Failed to resolve total device memory for GPU layer recommendation', error);
+    }
+
+    const snapshot = await getFreshMemorySnapshot(350).catch(() => null);
+    const model = modelId ? registry.getModel(modelId) : undefined;
+    const stableCapability = this.ensurePersistedCapabilitySnapshot(model);
+    const rawModelSizeBytes = typeof model?.size === 'number' && Number.isFinite(model.size) && model.size > 0
+      ? model.size
+      : null;
+    const verifiedFileSizeBytes = model?.metadataTrust === 'verified_local'
+      ? typeof model?.gguf?.totalBytes === 'number' && Number.isFinite(model.gguf.totalBytes) && model.gguf.totalBytes > 0
+        ? model.gguf.totalBytes
+        : rawModelSizeBytes
+      : null;
+    const modelSizeBytes = verifiedFileSizeBytes ?? rawModelSizeBytes;
+
+    return this.resolveRecommendedLoadProfile({
+      totalMemoryBytes,
+      systemMemorySnapshot: snapshot,
+      modelSizeBytes,
+      ggufMetadata: model?.gguf as unknown as Record<string, unknown> | undefined,
+      modelLayerCount: stableCapability?.modelLayerCount,
+      gpuLayersCeilingOverride: stableCapability?.gpuLayersCeiling,
+    });
+  }
+
   public async getRecommendedGpuLayers(): Promise<number> {
-    return this.calculateGpuLayers();
+    const { recommendedGpuLayers } = await this.getRecommendedLoadProfile(null);
+    return recommendedGpuLayers;
   }
 
   public subscribe(listener: StateListener): () => void {
@@ -1114,9 +1384,132 @@ class LLMEngineService {
     this.lastModelLoadErrorScope = null;
   }
 
+  private buildDiagnosticsSnapshot(): NonNullable<EngineState['diagnostics']> {
+    return {
+      backendMode: this.activeBackendMode,
+      backendDevices: [...this.activeBackendDevices],
+      reasonNoGPU: this.activeBackendReasonNoGpu ?? undefined,
+      systemInfo: this.activeBackendSystemInfo ?? undefined,
+      androidLib: this.activeBackendAndroidLib ?? undefined,
+      requestedGpuLayers: this.requestedGpuLayers ?? undefined,
+      loadedGpuLayers: this.activeGpuLayers ?? undefined,
+      actualGpuAccelerated: this.actualGpuAccelerated ?? undefined,
+      requestedBackendPolicy: this.requestedBackendPolicy ?? undefined,
+      effectiveBackendPolicy: this.effectiveBackendPolicy ?? undefined,
+      backendPolicyReasons: this.backendPolicyReasons.length > 0 ? [...this.backendPolicyReasons] : undefined,
+      backendInitAttempts: this.backendInitAttemptsSnapshot.length > 0
+        ? this.backendInitAttemptsSnapshot.map((attempt) => ({
+            ...attempt,
+            devices: Array.isArray(attempt.devices) ? [...attempt.devices] : undefined,
+          }))
+        : undefined,
+      initGpuLayers: this.initGpuLayers ?? undefined,
+      initDevices: Array.isArray(this.initDevices) ? [...this.initDevices] : undefined,
+      initCacheTypeK: this.initCacheTypeK ?? undefined,
+      initCacheTypeV: this.initCacheTypeV ?? undefined,
+      initFlashAttnType: this.initFlashAttnType ?? undefined,
+      initUseMmap: this.initUseMmap ?? undefined,
+      initUseMlock: this.initUseMlock ?? undefined,
+      initNParallel: this.initNParallel ?? undefined,
+      initNThreads: this.initNThreads ?? undefined,
+      initCpuMask: this.initCpuMask ?? undefined,
+      initCpuStrict: this.initCpuStrict ?? undefined,
+      initNBatch: this.initNBatch ?? undefined,
+      initNUbatch: this.initNUbatch ?? undefined,
+      initKvUnified: this.initKvUnified ?? undefined,
+    };
+  }
+
   private updateState(newState: EngineState) {
-    this.state = newState;
+    this.state = {
+      ...newState,
+      diagnostics: this.buildDiagnosticsSnapshot(),
+    };
     this.listeners.forEach((l) => l(this.state));
+  }
+
+  private resetBackendTelemetry(): void {
+    this.activeBackendMode = 'unknown';
+    this.activeBackendDevices = [];
+    this.activeBackendReasonNoGpu = null;
+    this.activeBackendSystemInfo = null;
+    this.activeBackendAndroidLib = null;
+    this.actualGpuAccelerated = null;
+  }
+
+  private resetRuntimeTelemetry(): void {
+    this.resetBackendTelemetry();
+    this.requestedGpuLayers = null;
+    this.requestedBackendPolicy = null;
+    this.effectiveBackendPolicy = null;
+    this.backendPolicyReasons = [];
+    this.backendInitAttemptsSnapshot = [];
+    this.initGpuLayers = null;
+    this.initDevices = null;
+    this.initCacheTypeK = null;
+    this.initCacheTypeV = null;
+    this.initFlashAttnType = null;
+    this.initUseMmap = null;
+    this.initUseMlock = null;
+    this.initNParallel = null;
+    this.initNThreads = null;
+    this.initCpuMask = null;
+    this.initCpuStrict = null;
+    this.initNBatch = null;
+    this.initNUbatch = null;
+    this.initKvUnified = null;
+  }
+
+  private resolveReportedLoadedGpuLayers(resolvedGpuLayers: number | null): number {
+    const normalizedResolvedGpuLayers = typeof resolvedGpuLayers === 'number' && Number.isFinite(resolvedGpuLayers)
+      ? Math.max(0, Math.round(resolvedGpuLayers))
+      : 0;
+
+    return this.actualGpuAccelerated === true ? normalizedResolvedGpuLayers : 0;
+  }
+
+  private resolveBackendMode(context: LlamaContext): EngineBackendMode {
+    if (!context.gpu) {
+      return 'cpu';
+    }
+
+    const devices = Array.isArray(context.devices) ? context.devices : [];
+    const deviceText = devices.join(' ').toLowerCase();
+    const androidLib = typeof context.androidLib === 'string' ? context.androidLib.toLowerCase() : '';
+    const systemInfo = typeof context.systemInfo === 'string' ? context.systemInfo.toLowerCase() : '';
+
+    if (
+      devices.some((device) => device.startsWith('HTP'))
+      || deviceText.includes('hexagon')
+      || deviceText.includes('htp')
+      || androidLib.includes('hexagon')
+      || androidLib.includes('qnn')
+      || systemInfo.includes('hexagon')
+      || systemInfo.includes('qnn')
+    ) {
+      return 'npu';
+    }
+
+    return 'gpu';
+  }
+
+  private captureBackendTelemetry(context: LlamaContext): void {
+    const devices = Array.isArray(context.devices)
+      ? context.devices
+          .filter((device): device is string => typeof device === 'string')
+          .map((device) => device.trim())
+          .filter((device) => device.length > 0)
+      : [];
+    const reasonNoGPU = typeof context.reasonNoGPU === 'string' ? context.reasonNoGPU.trim() : '';
+    const systemInfo = typeof context.systemInfo === 'string' ? context.systemInfo.trim() : '';
+    const androidLib = typeof context.androidLib === 'string' ? context.androidLib.trim() : '';
+
+    this.activeBackendDevices = devices;
+    this.activeBackendReasonNoGpu = reasonNoGPU.length > 0 ? reasonNoGPU : null;
+    this.activeBackendSystemInfo = systemInfo.length > 0 ? systemInfo : null;
+    this.activeBackendAndroidLib = androidLib.length > 0 ? androidLib : null;
+    this.actualGpuAccelerated = Boolean(context.gpu);
+    this.activeBackendMode = this.resolveBackendMode(context);
   }
 
   /**
@@ -1164,6 +1557,7 @@ class LLMEngineService {
     modelMaxContextTokens?: number,
     modelSizeBytes?: number | null,
     allowUnsafeMemoryLoad = false,
+    loadParamsOverride?: Partial<ModelLoadParameters>,
   ): Promise<void> {
     const isDev = typeof __DEV__ !== 'undefined' && __DEV__;
     const nativeLogs: { level: string; text: string }[] = [];
@@ -1185,6 +1579,7 @@ class LLMEngineService {
       this.isUnloading = false;
       this.activeCalibrationSession = null;
       this.safeModeLoadLimits = null;
+      this.resetRuntimeTelemetry();
       this.updateState({
         status: EngineStatus.INITIALIZING,
         activeModelId: modelId,
@@ -1215,7 +1610,10 @@ class LLMEngineService {
       const llama = requireLlamaModule();
       llamaModule = llama;
 
-      const loadParams = getModelLoadParametersForModel(modelId);
+      const persistedLoadParams = getModelLoadParametersForModel(modelId);
+      const loadParams = loadParamsOverride
+        ? { ...persistedLoadParams, ...loadParamsOverride }
+        : persistedLoadParams;
       const systemMemorySnapshot = await getFreshMemorySnapshot(1500).catch(() => null);
       const observedRawBudgetBytes = this.resolveObservedRawBudgetBytes(systemMemorySnapshot);
       let totalMemoryBytes: number | null = null;
@@ -1228,7 +1626,7 @@ class LLMEngineService {
       const resolvedTotalMemoryBytes = systemMemorySnapshot?.totalBytes ?? totalMemoryBytes;
       const resolvedModelSizeBytes = typeof fileInfo.size === 'number' ? fileInfo.size : modelSizeBytes ?? null;
       const kvCacheAvailableBudgetBytes = systemMemorySnapshot ? resolveConservativeAvailableMemoryBudget(systemMemorySnapshot) : null;
-      const { cacheTypeK, cacheTypeV } = resolveKvCacheTypes({
+      let { cacheTypeK, cacheTypeV } = resolveKvCacheTypes({
         kvCacheType: loadParams.kvCacheType,
         requestedContextTokens: loadParams.contextSize,
         totalMemoryBytes: typeof resolvedTotalMemoryBytes === 'number' && Number.isFinite(resolvedTotalMemoryBytes) && resolvedTotalMemoryBytes > 0
@@ -1236,6 +1634,13 @@ class LLMEngineService {
           : null,
         availableBudgetBytes: kvCacheAvailableBudgetBytes,
       });
+
+      const resolveEffectiveFlashAttnType = (value: 'auto' | 'on' | 'off', layers: number): 'auto' | 'on' | 'off' => {
+        const base = layers > 0 ? value : 'off';
+        return cacheTypeV !== 'f16' && base === 'off'
+          ? 'auto'
+          : base;
+      };
       let memoryFit: MemoryFitResult | null = null;
       let safeLoadProfile: { contextTokens: number; gpuLayers: number } | null = null;
       let safeMemoryFit: MemoryFitResult | null = null;
@@ -1290,31 +1695,126 @@ class LLMEngineService {
           ...(modelInfo ?? {}),
         }
         : undefined;
+
+      // KV cache quantization is experimental in llama.cpp and can crash llama.rn when the native
+      // context fails to initialize (llama.rn currently checks for a loaded model but may
+      // dereference a null context pointer). Guard against known init-time incompatibilities.
+      //
+      // In particular, quantized KV cache types require the per-head key/value dimensions to be
+      // divisible by the quantization block size.
+      if (cacheTypeK !== 'f16' || cacheTypeV !== 'f16') {
+        const { headDimK, headDimV } = resolveKvCacheHeadDims(ggufMetadata as unknown as Record<string, unknown> | undefined);
+        const quantBlockSize = 32;
+        const missingK = cacheTypeK !== 'f16' && headDimK === null;
+        const missingV = cacheTypeV !== 'f16' && headDimV === null;
+        const incompatibleK = cacheTypeK !== 'f16' && headDimK !== null && headDimK % quantBlockSize !== 0;
+        const incompatibleV = cacheTypeV !== 'f16' && headDimV !== null && headDimV % quantBlockSize !== 0;
+        const shouldFallback = missingK || missingV || incompatibleK || incompatibleV;
+
+        if (shouldFallback) {
+          const previous = { cacheTypeK, cacheTypeV };
+          cacheTypeK = 'f16';
+          cacheTypeV = 'f16';
+
+          if (initDiagnostics) {
+            initDiagnostics = {
+              ...initDiagnostics,
+              kvCacheCompatibilityFallback: {
+                previous,
+                resolved: { cacheTypeK, cacheTypeV },
+                headDimK,
+                headDimV,
+                quantBlockSize,
+                missingK,
+                missingV,
+                incompatibleK,
+                incompatibleV,
+              },
+            };
+          }
+
+           if (process.env.NODE_ENV !== 'test') {
+             console.warn('[LLMEngine] KV cache quantization is incompatible with this model; falling back to f16', {
+               modelId,
+               previous,
+               resolved: { cacheTypeK, cacheTypeV },
+               headDimK,
+               headDimV,
+               quantBlockSize,
+               missingK,
+               missingV,
+               incompatibleK,
+               incompatibleV,
+             });
+           }
+         }
+       }
       const verifiedFileSizeBytes = typeof fileInfo.size === 'number' && Number.isFinite(fileInfo.size) && fileInfo.size > 0
         ? Math.round(fileInfo.size)
         : null;
-      const modelLayerCount = this.resolveModelLayerCount(ggufMetadata);
-      const requestedGpuLayersCandidate = (
-        typeof loadParams.gpuLayers === 'number'
-        && Number.isFinite(loadParams.gpuLayers)
-        && loadParams.gpuLayers >= 0
-      )
-        ? Math.round(loadParams.gpuLayers)
-        : this.suggestGpuLayersForModel({
-            totalMemoryBytes: typeof resolvedTotalMemoryBytes === 'number' && Number.isFinite(resolvedTotalMemoryBytes) && resolvedTotalMemoryBytes > 0
-              ? resolvedTotalMemoryBytes
-              : null,
-            systemMemorySnapshot,
-            modelSizeBytes: verifiedFileSizeBytes ?? resolvedModelSizeBytes,
-            ggufMetadata,
-          });
+      const stableCapability = cachedModel
+        ? this.ensurePersistedCapabilitySnapshot({
+          ...cachedModel,
+          gguf: ggufMetadata as ModelMetadata['gguf'],
+          metadataTrust: modelInfo !== null ? 'verified_local' : cachedModel.metadataTrust,
+          size: verifiedFileSizeBytes ?? cachedModel.size,
+        })
+        : null;
+      const { recommendedGpuLayers, gpuLayersCeiling } = this.resolveRecommendedLoadProfile({
+        totalMemoryBytes: typeof resolvedTotalMemoryBytes === 'number' && Number.isFinite(resolvedTotalMemoryBytes) && resolvedTotalMemoryBytes > 0
+          ? resolvedTotalMemoryBytes
+          : null,
+        systemMemorySnapshot,
+        modelSizeBytes: verifiedFileSizeBytes ?? resolvedModelSizeBytes,
+        ggufMetadata,
+        modelLayerCount: stableCapability?.modelLayerCount,
+        gpuLayersCeilingOverride: stableCapability?.gpuLayersCeiling,
+      });
+      const selectedBackendDevices = Array.isArray(loadParams.selectedBackendDevices) && loadParams.selectedBackendDevices.length > 0
+        ? loadParams.selectedBackendDevices
+        : null;
+      const requestedUseMmap = typeof loadParams.useMmap === 'boolean' ? loadParams.useMmap : true;
+      const requestedUseMlock = typeof loadParams.useMlock === 'boolean' ? loadParams.useMlock : false;
+      const requestedFlashAttention = loadParams.flashAttention === 'on' || loadParams.flashAttention === 'off'
+        ? loadParams.flashAttention
+        : 'auto';
+      const requestedCpuThreads = typeof loadParams.cpuThreads === 'number' && Number.isFinite(loadParams.cpuThreads) && loadParams.cpuThreads > 0
+        ? Math.max(1, Math.round(loadParams.cpuThreads))
+        : undefined;
+      const requestedCpuMask = typeof loadParams.cpuMask === 'string' && loadParams.cpuMask.trim().length > 0
+        ? loadParams.cpuMask.trim()
+        : undefined;
+      const requestedCpuStrict = typeof loadParams.cpuStrict === 'boolean' ? loadParams.cpuStrict : undefined;
+      const requestedParallelSlots = typeof loadParams.parallelSlots === 'number' && Number.isFinite(loadParams.parallelSlots) && loadParams.parallelSlots > 0
+        ? Math.max(1, Math.round(loadParams.parallelSlots))
+        : undefined;
+      const requestedKvUnified = typeof loadParams.kvUnified === 'boolean' ? loadParams.kvUnified : undefined;
+      const configuredBatchParams = typeof loadParams.nBatch === 'number'
+        && Number.isFinite(loadParams.nBatch)
+        && loadParams.nBatch > 0
+        && typeof loadParams.nUbatch === 'number'
+        && Number.isFinite(loadParams.nUbatch)
+        && loadParams.nUbatch > 0
+        ? {
+            nBatch: Math.max(1, Math.round(loadParams.nBatch)),
+            nUbatch: Math.max(1, Math.round(loadParams.nUbatch)),
+          }
+        : null;
+
+      const requestedBackendPolicy = loadParams.backendPolicy;
+
+      const requestedGpuLayersCandidate = requestedBackendPolicy === 'cpu'
+        ? 0
+        : (
+          typeof loadParams.gpuLayers === 'number'
+          && Number.isFinite(loadParams.gpuLayers)
+          && loadParams.gpuLayers >= 0
+        )
+          ? Math.round(loadParams.gpuLayers)
+          : recommendedGpuLayers;
       const requestedGpuLayers = Math.max(
         0,
-        Math.min(
-          80,
-          Math.round(requestedGpuLayersCandidate),
-          modelLayerCount ?? 80,
-        ),
+        Math.min(gpuLayersCeiling, Math.round(requestedGpuLayersCandidate)),
       );
       const metadataTrustForEstimator = modelInfo !== null
         ? 'verified_local' as const
@@ -1332,7 +1832,7 @@ class LLMEngineService {
             gpuLayers: requestedGpuLayers,
             cacheTypeK,
             cacheTypeV,
-            useMmap: true,
+            useMmap: requestedUseMmap,
           },
           snapshot: systemMemorySnapshot ?? undefined,
         },
@@ -1345,8 +1845,10 @@ class LLMEngineService {
           gpuLayers: requestedGpuLayers,
           cacheTypeK,
           cacheTypeV,
-          useMmap: true,
+          useMmap: requestedUseMmap,
           hasMmproj: false,
+          nBatch: configuredBatchParams?.nBatch,
+          nUbatch: configuredBatchParams?.nUbatch,
         })
         : null;
       const requestedCalibrationRecord = requestedCalibrationKey
@@ -1362,7 +1864,13 @@ class LLMEngineService {
           gpuLayers: requestedGpuLayers,
           cacheTypeK,
           cacheTypeV,
-          useMmap: true,
+          useMmap: requestedUseMmap,
+          ...(configuredBatchParams
+            ? {
+                nBatch: configuredBatchParams.nBatch,
+                nUbatch: configuredBatchParams.nUbatch,
+              }
+            : null),
         },
         snapshot: systemMemorySnapshot ?? undefined,
         calibrationRecord: requestedCalibrationRecord,
@@ -1440,6 +1948,7 @@ class LLMEngineService {
             gpuLayersCeiling: requestedGpuLayers,
             cacheTypeK,
             cacheTypeV,
+            useMmap: requestedUseMmap,
           }));
 
           const configuredContextCeilingTokens = (
@@ -1528,6 +2037,7 @@ class LLMEngineService {
       const resolvedSafeLoadProfile = safeLoadProfile ?? { contextTokens: MIN_CONTEXT_WINDOW_TOKENS, gpuLayers: 0 };
       const finalContextSize = shouldUseSafeLoadProfile ? resolvedSafeLoadProfile.contextTokens : resolvedContextSize;
       const gpuLayers = shouldUseSafeLoadProfile ? resolvedSafeLoadProfile.gpuLayers : requestedGpuLayers;
+      this.requestedGpuLayers = requestedGpuLayers;
       const shouldUseLowMemoryContextParams = Boolean(
         memoryFit
         && (
@@ -1537,13 +2047,19 @@ class LLMEngineService {
           || memoryFit.decision === 'likely_oom'
         ),
       );
-      const resolvedParallelSlots = 1;
+      const resolvedParallelSlots = requestedParallelSlots ?? 1;
       const lowMemoryBatchParams = this.resolveLowMemoryBatchParams(
         finalContextSize,
         shouldUseLowMemoryContextParams,
       );
       const lowMemoryBatchSize = lowMemoryBatchParams?.nBatch ?? null;
       const lowMemoryMicroBatchSize = lowMemoryBatchParams?.nUbatch ?? null;
+      const effectiveBatchParams = shouldUseLowMemoryContextParams && lowMemoryBatchSize !== null && lowMemoryMicroBatchSize !== null
+        ? {
+            nBatch: lowMemoryBatchSize,
+            nUbatch: lowMemoryMicroBatchSize,
+          }
+        : configuredBatchParams;
 
       if (process.env.NODE_ENV !== 'test' && memoryFit) {
         const shouldWarnNearLimit = (
@@ -1574,15 +2090,22 @@ class LLMEngineService {
             },
             effectiveContextParams: {
               n_parallel: resolvedParallelSlots,
-              ...(shouldUseLowMemoryContextParams && lowMemoryBatchSize !== null && lowMemoryMicroBatchSize !== null
+              ...(effectiveBatchParams
                 ? {
-                    no_extra_bufts: true,
-                    n_batch: lowMemoryBatchSize,
-                    n_ubatch: lowMemoryMicroBatchSize,
+                    ...(shouldUseLowMemoryContextParams ? { no_extra_bufts: true } : null),
+                    n_batch: effectiveBatchParams.nBatch,
+                    n_ubatch: effectiveBatchParams.nUbatch,
                   }
                 : null),
-              flash_attn_type: gpuLayers > 0 ? 'auto' : 'off',
-              use_mmap: true,
+              flash_attn_type: (
+                resolveEffectiveFlashAttnType(requestedFlashAttention, gpuLayers)
+              ),
+              use_mmap: requestedUseMmap,
+              use_mlock: requestedUseMlock,
+              ...(typeof requestedCpuThreads === 'number' ? { n_threads: requestedCpuThreads } : null),
+              ...(requestedCpuMask ? { cpu_mask: requestedCpuMask } : null),
+              ...(typeof requestedCpuStrict === 'boolean' ? { cpu_strict: requestedCpuStrict } : null),
+              ...(typeof requestedKvUnified === 'boolean' ? { kv_unified: requestedKvUnified } : null),
             },
             memoryFit,
             safeLoadProfile: safeLoadProfile ?? undefined,
@@ -1598,10 +2121,10 @@ class LLMEngineService {
           gpuLayers,
           cacheTypeK,
           cacheTypeV,
-          useMmap: true,
+          useMmap: requestedUseMmap,
           hasMmproj: false,
-          nBatch: lowMemoryBatchParams?.nBatch,
-          nUbatch: lowMemoryBatchParams?.nUbatch,
+          nBatch: effectiveBatchParams?.nBatch,
+          nUbatch: effectiveBatchParams?.nUbatch,
         })
         : null;
       let calibrationRecordForLoad = calibrationKeyForLoad
@@ -1624,6 +2147,13 @@ class LLMEngineService {
               ...requestedEstimatorInput.runtimeParams,
               contextTokens: finalContextSize,
               gpuLayers,
+              useMmap: requestedUseMmap,
+              ...(effectiveBatchParams
+                ? {
+                    nBatch: effectiveBatchParams.nBatch,
+                    nUbatch: effectiveBatchParams.nUbatch,
+                  }
+                : null),
             },
             calibrationRecord: calibrationRecordForLoad,
           },
@@ -1650,9 +2180,9 @@ class LLMEngineService {
         } : initDiagnostics;
       }
 
-      if (safeLoadStillExceedsBudget && predictedFitForLoad && !allowUnsafeMemoryLoad) {
-        throw new AppError('model_memory_insufficient', 'Not enough memory to load this model.', {
-          details: {
+       if (safeLoadStillExceedsBudget && predictedFitForLoad && !allowUnsafeMemoryLoad) {
+         throw new AppError('model_memory_insufficient', 'Not enough memory to load this model.', {
+           details: {
             modelId,
             modelSizeBytes: resolvedModelSizeBytes,
             estimatedRuntimeBytes: predictedFitForLoad.requiredBytes,
@@ -1678,22 +2208,22 @@ class LLMEngineService {
               gpuLayers,
             },
           },
-        });
-      }
+         });
+       }
 
-      if (initDiagnostics) {
-        initDiagnostics = {
-          ...initDiagnostics,
-          resolvedContextSize: finalContextSize,
-          requestedGpuLayers,
-          resolvedGpuLayers: gpuLayers,
-          safeLoadProfile: shouldUseSafeLoadProfile,
-        };
-      }
+       if (initDiagnostics) {
+         initDiagnostics = {
+           ...initDiagnostics,
+           resolvedContextSize: finalContextSize,
+           requestedGpuLayers,
+           resolvedGpuLayers: gpuLayers,
+           didUseSafeLoadProfile: shouldUseSafeLoadProfile,
+         };
+       }
 
-      if (shouldBridgeNativeLogs) {
-        try {
-          nativeLogListener = llama.addNativeLogListener((level, text) => {
+       if (shouldBridgeNativeLogs) {
+         try {
+           nativeLogListener = llama.addNativeLogListener((level, text) => {
             nativeLogs.push({ level, text });
             if (nativeLogs.length > MAX_NATIVE_LOG_LINES) {
               nativeLogs.splice(0, nativeLogs.length - MAX_NATIVE_LOG_LINES);
@@ -1706,132 +2236,202 @@ class LLMEngineService {
         }
       }
 
-      try {
-        this.context = await llama.initLlama(
-          {
+      const normalizedBackendPolicy = requestedBackendPolicy && requestedBackendPolicy !== 'auto'
+        ? requestedBackendPolicy
+        : 'auto';
+      const shouldDiscoverBackendCapabilities = gpuLayers > 0 && (
+        normalizedBackendPolicy === 'auto'
+        || normalizedBackendPolicy === 'npu'
+        || normalizedBackendPolicy === 'gpu'
+      );
+      const backendCapabilities = shouldDiscoverBackendCapabilities
+        ? await inferenceBackendService.getCapabilitiesSummary().catch(() => null)
+        : null;
+
+      const backendInitAttempts: EngineBackendInitAttempt[] = [];
+
+      const applyCalibrationForGpuLayers = (nextGpuLayers: number) => {
+        const normalized = Math.max(0, Math.round(nextGpuLayers));
+        resolvedGpuLayers = normalized;
+        calibrationKeyForLoad = verifiedFileSizeBytes !== null
+          ? this.buildCalibrationKeyString({
+              ggufMetadata,
+              verifiedFileSizeBytes,
+              contextTokens: finalContextSize,
+              gpuLayers: normalized,
+              cacheTypeK,
+              cacheTypeV,
+              useMmap: requestedUseMmap,
+              hasMmproj: false,
+              nBatch: effectiveBatchParams?.nBatch,
+              nUbatch: effectiveBatchParams?.nUbatch,
+            })
+          : null;
+        calibrationRecordForLoad = calibrationKeyForLoad
+          ? registry.getCalibrationRecord(calibrationKeyForLoad)
+          : undefined;
+
+        if (
+          typeof resolvedModelSizeBytes === 'number'
+          && Number.isFinite(resolvedModelSizeBytes)
+          && resolvedModelSizeBytes > 0
+          && calibrationKeyForLoad
+        ) {
+          predictedFitForLoad = estimateAccurateMemoryFit({
+            input: {
+              ...requestedEstimatorInput,
+              runtimeParams: {
+                ...requestedEstimatorInput.runtimeParams,
+                contextTokens: finalContextSize,
+                gpuLayers: normalized,
+                useMmap: requestedUseMmap,
+                ...(effectiveBatchParams
+                  ? {
+                      nBatch: effectiveBatchParams.nBatch,
+                      nUbatch: effectiveBatchParams.nUbatch,
+                    }
+                  : null),
+              },
+              calibrationRecord: calibrationRecordForLoad,
+            },
+            totalMemoryBytes: typeof resolvedTotalMemoryBytes === 'number' && Number.isFinite(resolvedTotalMemoryBytes) && resolvedTotalMemoryBytes > 0
+              ? resolvedTotalMemoryBytes
+              : null,
+          });
+        } else {
+          predictedFitForLoad = memoryFit;
+        }
+      };
+
+      const initLlamaWithRetry = async (profile: ResolvedInferenceProfile): Promise<{
+        context: LlamaContext;
+        resolvedGpuLayers: number;
+      }> => {
+        const {
+          backendMode: candidate,
+          devices,
+          nGpuLayers,
+          nThreads,
+          cpuMask,
+          cpuStrict,
+          flashAttnType,
+          useMmap,
+          useMlock,
+          nBatch,
+          nUbatch,
+          kvUnified,
+          nParallel,
+        } = profile;
+
+        const buildOptions = (layers: number) => {
+          // llama.cpp requires Flash Attention when using quantized V cache.
+          // Some candidate profiles force flashAttnType='off' (e.g., CPU fallback). When
+          // combined with cache_type_v=q8_0/q4_0, llama.cpp returns a null context and
+          // llama.rn can crash before surfacing the error.
+          const resolvedFlashAttnType = resolveEffectiveFlashAttnType(flashAttnType, layers);
+
+          return {
             model: modelPath,
             n_ctx: finalContextSize,
-            n_gpu_layers: gpuLayers,
-            n_parallel: resolvedParallelSlots,
-            use_mmap: true,
-            use_mlock: false,
+            n_gpu_layers: layers,
+            n_parallel: nParallel,
+            ...(typeof nThreads === 'number' && Number.isFinite(nThreads) && nThreads > 0
+              ? { n_threads: Math.max(1, Math.round(nThreads)) }
+              : null),
+            ...(typeof cpuMask === 'string' && cpuMask.trim().length > 0
+              ? { cpu_mask: cpuMask.trim() }
+              : null),
+            ...(typeof cpuStrict === 'boolean' ? { cpu_strict: cpuStrict } : null),
+            use_mmap: useMmap,
+            use_mlock: useMlock,
             cache_type_k: cacheTypeK,
             cache_type_v: cacheTypeV,
-            flash_attn_type: gpuLayers > 0 ? 'auto' : 'off',
-            ...(shouldUseLowMemoryContextParams && lowMemoryBatchSize !== null && lowMemoryMicroBatchSize !== null
+            flash_attn_type: resolvedFlashAttnType,
+            ...(typeof kvUnified === 'boolean' ? { kv_unified: kvUnified } : null),
+            ...(devices ? { devices } : null),
+            ...(typeof nBatch === 'number'
+            && Number.isFinite(nBatch)
+            && typeof nUbatch === 'number'
+            && Number.isFinite(nUbatch)
               ? {
-                  no_extra_bufts: true,
-                  n_batch: lowMemoryBatchSize,
-                  n_ubatch: lowMemoryMicroBatchSize,
+                  ...(shouldUseLowMemoryContextParams ? { no_extra_bufts: true } : null),
+                  n_batch: Math.round(nBatch),
+                  n_ubatch: Math.round(nUbatch),
                 }
               : null),
-          },
+          };
+        };
+
+        const initOnce = async (layers: number) => llama.initLlama(
+          buildOptions(layers),
           (progress) => {
             this.updateState({ ...this.state, loadProgress: progress });
-          }
+          },
         );
-      } catch (gpuError) {
-        gpuInitError = gpuError;
-        if (gpuLayers > 0) {
-          const isGpuOomLikely = isProbableMemoryFailure(gpuError);
 
-          if (calibrationKeyForLoad && isGpuOomLikely) {
+        const normalizedLayers = Math.max(0, Math.round(nGpuLayers));
+        if (normalizedLayers <= 0) {
+          const context = await initOnce(0);
+          applyCalibrationForGpuLayers(0);
+          return { context, resolvedGpuLayers: 0 };
+        }
+
+        try {
+          const context = await initOnce(normalizedLayers);
+          applyCalibrationForGpuLayers(normalizedLayers);
+          return { context, resolvedGpuLayers: normalizedLayers };
+        } catch (error) {
+          const isOomLikely = isProbableMemoryFailure(error);
+          if (calibrationKeyForLoad && isOomLikely) {
             this.persistCalibrationFailure({
               calibrationKey: calibrationKeyForLoad,
               observedRawBudgetBytes,
             });
           }
 
-          const retryCandidates = isGpuOomLikely
+          const retryCandidates = isOomLikely
             ? Array.from(
                 new Set([
-                  Math.floor(gpuLayers * 0.75),
-                  Math.floor(gpuLayers / 2),
-                  Math.floor(gpuLayers / 4),
+                  Math.floor(normalizedLayers * 0.75),
+                  Math.floor(normalizedLayers / 2),
+                  Math.floor(normalizedLayers / 4),
                   1,
                 ]),
               )
-                .filter((candidate) => candidate > 0 && candidate < gpuLayers)
+                .filter((candidateLayers) => candidateLayers > 0 && candidateLayers < normalizedLayers)
                 .sort((a, b) => b - a)
             : [];
 
           if (process.env.NODE_ENV !== 'test') {
             const logLabel = retryCandidates.length > 0
-              ? '[LLMEngine] GPU init failed, retrying with fewer layers'
-              : '[LLMEngine] GPU init failed, falling back to CPU';
-            console.warn(logLabel, gpuError);
+              ? `[LLMEngine] ${candidate.toUpperCase()} init failed, retrying with fewer layers`
+              : `[LLMEngine] ${candidate.toUpperCase()} init failed`;
+            console.warn(logLabel, error);
           }
 
-          for (const candidateGpuLayers of retryCandidates) {
+          let lastError: unknown = error;
+          for (const candidateLayers of retryCandidates) {
             const candidateCalibrationKey = verifiedFileSizeBytes !== null
               ? this.buildCalibrationKeyString({
                   ggufMetadata,
                   verifiedFileSizeBytes,
                   contextTokens: finalContextSize,
-                  gpuLayers: candidateGpuLayers,
+                  gpuLayers: candidateLayers,
                   cacheTypeK,
                   cacheTypeV,
-                  useMmap: true,
+                  useMmap: requestedUseMmap,
                   hasMmproj: false,
-                  nBatch: lowMemoryBatchParams?.nBatch,
-                  nUbatch: lowMemoryBatchParams?.nUbatch,
+                  nBatch: effectiveBatchParams?.nBatch,
+                  nUbatch: effectiveBatchParams?.nUbatch,
                 })
               : null;
 
             try {
-              this.context = await llama.initLlama(
-                {
-                  model: modelPath,
-                  n_ctx: finalContextSize,
-                  n_gpu_layers: candidateGpuLayers,
-                  n_parallel: resolvedParallelSlots,
-                  use_mmap: true,
-                  use_mlock: false,
-                  cache_type_k: cacheTypeK,
-                  cache_type_v: cacheTypeV,
-                  flash_attn_type: 'auto',
-                  ...(shouldUseLowMemoryContextParams && lowMemoryBatchSize !== null && lowMemoryMicroBatchSize !== null
-                    ? {
-                        no_extra_bufts: true,
-                        n_batch: lowMemoryBatchSize,
-                        n_ubatch: lowMemoryMicroBatchSize,
-                      }
-                    : null),
-                },
-                (progress) => {
-                  this.updateState({ ...this.state, loadProgress: progress });
-                },
-              );
-
-              resolvedGpuLayers = candidateGpuLayers;
-              calibrationKeyForLoad = candidateCalibrationKey;
-              calibrationRecordForLoad = calibrationKeyForLoad
-                ? registry.getCalibrationRecord(calibrationKeyForLoad)
-                : undefined;
-              if (
-                typeof resolvedModelSizeBytes === 'number'
-                && Number.isFinite(resolvedModelSizeBytes)
-                && resolvedModelSizeBytes > 0
-                && calibrationKeyForLoad
-              ) {
-                predictedFitForLoad = estimateAccurateMemoryFit({
-                  input: {
-                    ...requestedEstimatorInput,
-                    runtimeParams: {
-                      ...requestedEstimatorInput.runtimeParams,
-                      contextTokens: finalContextSize,
-                      gpuLayers: candidateGpuLayers,
-                    },
-                    calibrationRecord: calibrationRecordForLoad,
-                  },
-                  totalMemoryBytes: typeof resolvedTotalMemoryBytes === 'number' && Number.isFinite(resolvedTotalMemoryBytes) && resolvedTotalMemoryBytes > 0
-                    ? resolvedTotalMemoryBytes
-                    : null,
-                });
-              }
-              break;
+              const context = await initOnce(candidateLayers);
+              applyCalibrationForGpuLayers(candidateLayers);
+              return { context, resolvedGpuLayers: candidateLayers };
             } catch (retryError) {
-              gpuInitError = retryError;
+              lastError = retryError;
               if (candidateCalibrationKey && isProbableMemoryFailure(retryError)) {
                 this.persistCalibrationFailure({
                   calibrationKey: candidateCalibrationKey,
@@ -1841,96 +2441,348 @@ class LLMEngineService {
             }
           }
 
-          if (this.context) {
-            // recovered by retry loop
-            gpuInitError = null;
-          } else {
-            resolvedGpuLayers = 0;
-            calibrationKeyForLoad = verifiedFileSizeBytes !== null
-              ? this.buildCalibrationKeyString({
-                  ggufMetadata,
-                  verifiedFileSizeBytes,
-                  contextTokens: finalContextSize,
-                  gpuLayers: 0,
-                  cacheTypeK,
-                  cacheTypeV,
-                  useMmap: true,
-                  hasMmproj: false,
-                  nBatch: lowMemoryBatchParams?.nBatch,
-                  nUbatch: lowMemoryBatchParams?.nUbatch,
-                })
-              : null;
-            calibrationRecordForLoad = calibrationKeyForLoad
-              ? registry.getCalibrationRecord(calibrationKeyForLoad)
-              : undefined;
-            if (
-              typeof resolvedModelSizeBytes === 'number'
-              && Number.isFinite(resolvedModelSizeBytes)
-              && resolvedModelSizeBytes > 0
-              && calibrationKeyForLoad
-            ) {
-              predictedFitForLoad = estimateAccurateMemoryFit({
-                input: {
-                  ...requestedEstimatorInput,
-                  runtimeParams: {
-                    ...requestedEstimatorInput.runtimeParams,
-                    contextTokens: finalContextSize,
-                    gpuLayers: 0,
-                  },
-                  calibrationRecord: calibrationRecordForLoad,
-                },
-                totalMemoryBytes: typeof resolvedTotalMemoryBytes === 'number' && Number.isFinite(resolvedTotalMemoryBytes) && resolvedTotalMemoryBytes > 0
-                  ? resolvedTotalMemoryBytes
-                  : null,
-              });
+          throw lastError;
+        }
+      };
+
+      const baseInferenceProfile: Omit<ResolvedInferenceProfile, 'backendMode' | 'devices' | 'nGpuLayers'> = {
+        flashAttnType: requestedFlashAttention,
+        useMmap: requestedUseMmap,
+        useMlock: requestedUseMlock,
+        nParallel: resolvedParallelSlots,
+        ...(typeof requestedCpuThreads === 'number' ? { nThreads: requestedCpuThreads } : null),
+        ...(requestedCpuMask ? { cpuMask: requestedCpuMask } : null),
+        ...(typeof requestedCpuStrict === 'boolean' ? { cpuStrict: requestedCpuStrict } : null),
+        ...(typeof requestedKvUnified === 'boolean' ? { kvUnified: requestedKvUnified } : null),
+        ...(effectiveBatchParams
+          ? {
+              nBatch: effectiveBatchParams.nBatch,
+              nUbatch: effectiveBatchParams.nUbatch,
             }
+          : null),
+      };
+
+      const autotuneResult = normalizedBackendPolicy === 'auto'
+        ? readAutotuneResult({
+            modelId,
+            contextSize: loadParams.contextSize,
+            kvCacheType: loadParams.kvCacheType,
+            modelFileSizeBytes: verifiedFileSizeBytes,
+            modelSha256: cachedModel?.sha256,
+          })
+        : null;
+      const autotuneBestStableProfile = (() => {
+        const best = autotuneResult?.bestStable;
+        if (!best) {
+          return null;
+        }
+        if (best.backendMode !== 'cpu' && best.backendMode !== 'gpu' && best.backendMode !== 'npu') {
+          return null;
+        }
+        if (!Number.isFinite(best.nGpuLayers) || best.nGpuLayers < 0) {
+          return null;
+        }
+
+        const devices = Array.isArray(best.devices)
+          ? best.devices
+              .filter((device): device is string => typeof device === 'string')
+              .map((device) => device.trim())
+              .filter((device) => device.length > 0)
+          : undefined;
+
+        return {
+          backendMode: best.backendMode,
+          nGpuLayers: Math.max(0, Math.round(best.nGpuLayers)),
+          ...(devices && devices.length > 0 ? { devices } : null),
+        };
+      })();
+      const autotuneBenchmarkedAccelerators = Array.isArray(autotuneResult?.candidates)
+        && autotuneResult.candidates.some((candidate) => {
+          const mode = candidate?.profile?.backendMode;
+          return mode === 'gpu' || mode === 'npu';
+        });
+
+      const {
+        effectiveBackendPolicy,
+        candidates: resolvedInferenceCandidates,
+        reasons: backendPolicyReasons,
+      } = resolveInferenceProfileCandidates({
+        capabilities: backendCapabilities,
+        loadParams: {
+          backendPolicy: requestedBackendPolicy,
+          selectedBackendDevices: loadParams.selectedBackendDevices,
+        },
+        gpuLayers,
+        baseProfile: baseInferenceProfile,
+      });
+
+      let inferenceCandidatesForInit = resolvedInferenceCandidates;
+      let resolvedBackendPolicyReasons = backendPolicyReasons;
+
+      const capabilitiesKnown = Boolean(backendCapabilities && backendCapabilities.discoveryUnavailable !== true);
+
+      if (normalizedBackendPolicy === 'auto' && autotuneBestStableProfile) {
+        const preferredBackendMode = autotuneBestStableProfile.backendMode;
+        const preferredGpuLayers = Math.max(0, Math.round(autotuneBestStableProfile.nGpuLayers));
+        const clampedGpuLayers = preferredBackendMode === 'cpu' ? 0 : Math.min(gpuLayers, preferredGpuLayers);
+        const acceleratorsCurrentlyAvailable = backendCapabilities?.gpu.available === true
+          || backendCapabilities?.npu.available === true;
+        const savedCpuProfileLooksFallbackOnly = preferredBackendMode === 'cpu'
+          && acceleratorsCurrentlyAvailable
+          && (
+            autotuneResult?.backendDiscoveryKnown === false
+            || (autotuneResult?.backendDiscoveryKnown === undefined && !autotuneBenchmarkedAccelerators)
+          );
+
+        const canApplyPreferred = preferredBackendMode === 'cpu'
+          ? !savedCpuProfileLooksFallbackOnly
+          : (
+            clampedGpuLayers > 0
+            && (
+              (preferredBackendMode === 'gpu' && backendCapabilities?.gpu.available === true)
+              || (preferredBackendMode === 'npu' && backendCapabilities?.npu.available === true)
+            )
+          );
+
+        if (canApplyPreferred) {
+          const fallbackNpuDevices = preferredBackendMode === 'npu'
+            ? (() => {
+                const discovered = Array.isArray(backendCapabilities?.npu.deviceNames)
+                  ? backendCapabilities.npu.deviceNames
+                      .filter((device): device is string => typeof device === 'string')
+                      .map((device) => device.trim())
+                      .filter((device) => device.length > 0 && !/\s/.test(device))
+                  : [];
+                const unique = Array.from(new Set(discovered));
+                return unique.length > 0 ? unique : ['HTP*'];
+              })()
+            : null;
+
+          const savedNpuDevices = preferredBackendMode === 'npu' && Array.isArray(autotuneBestStableProfile.devices)
+            ? autotuneBestStableProfile.devices
+                .filter((device): device is string => typeof device === 'string')
+                .map((device) => device.trim())
+                .filter((device) => device.length > 0 && !/\s/.test(device))
+            : [];
+          const uniqueSavedNpuDevices = Array.from(new Set(savedNpuDevices));
+          const didUseSavedNpuDevices = preferredBackendMode === 'npu' && uniqueSavedNpuDevices.length > 0;
+          const preferredNpuDevices = preferredBackendMode === 'npu'
+            ? (didUseSavedNpuDevices ? uniqueSavedNpuDevices : (fallbackNpuDevices ?? ['HTP*']))
+            : null;
+
+          // Only honor stored device selectors for NPU. GPU device strings can be human-readable
+          // labels (with whitespace) and may not be safe to feed back into init.
+          const preferredCandidate: ResolvedInferenceProfile = {
+            ...baseInferenceProfile,
+            backendMode: preferredBackendMode,
+            nGpuLayers: clampedGpuLayers,
+            ...(preferredBackendMode === 'npu'
+              ? { devices: preferredNpuDevices ?? ['HTP*'] }
+              : null),
+          };
+
+          const seenCandidateKeys = new Set<string>();
+          inferenceCandidatesForInit = [
+            preferredCandidate,
+            ...(didUseSavedNpuDevices && fallbackNpuDevices
+              ? [
+                  {
+                    ...baseInferenceProfile,
+                    backendMode: 'npu',
+                    nGpuLayers: clampedGpuLayers,
+                    devices: fallbackNpuDevices,
+                  } satisfies ResolvedInferenceProfile,
+                ]
+              : []),
+            ...resolvedInferenceCandidates,
+          ].filter((profile) => {
+            const candidateKey = `${profile.backendMode}:${Array.isArray(profile.devices) ? profile.devices.join('|') : '*'}`;
+            if (seenCandidateKeys.has(candidateKey)) {
+              return false;
+            }
+            seenCandidateKeys.add(candidateKey);
+            return true;
+          });
+
+          if (inferenceCandidatesForInit[0]?.backendMode !== resolvedInferenceCandidates[0]?.backendMode) {
+            resolvedBackendPolicyReasons = [
+              ...backendPolicyReasons,
+              preferredBackendMode === 'cpu'
+                ? 'inference.backendPolicyReason.autotunePreferringCpu'
+                : preferredBackendMode === 'npu'
+                  ? 'inference.backendPolicyReason.autotunePreferringNpu'
+                  : 'inference.backendPolicyReason.autotunePreferringGpu',
+            ];
+          }
+        }
+      }
+
+      this.requestedBackendPolicy = normalizedBackendPolicy;
+      this.effectiveBackendPolicy = effectiveBackendPolicy as EngineBackendPolicy;
+      this.backendPolicyReasons = resolvedBackendPolicyReasons;
+      this.initCacheTypeK = cacheTypeK;
+      this.initCacheTypeV = cacheTypeV;
+      const candidateModes = new Set(inferenceCandidatesForInit.map((candidate) => candidate.backendMode));
+
+      // Record a skipped init attempt when the requested policy could not be attempted due to a
+      // known device discovery result.
+      if (capabilitiesKnown && gpuLayers > 0) {
+        if (requestedBackendPolicy === 'npu' && !candidateModes.has('npu')) {
+          backendInitAttempts.push({
+            candidate: 'npu',
+            nGpuLayers: gpuLayers,
+            devices: selectedBackendDevices ?? ['HTP*'],
+            outcome: 'skipped',
+          });
+        }
+
+        if (requestedBackendPolicy === 'gpu' && !candidateModes.has('gpu')) {
+          backendInitAttempts.push({
+            candidate: 'gpu',
+            nGpuLayers: gpuLayers,
+            outcome: 'skipped',
+          });
+        }
+      }
+
+      if (initDiagnostics) {
+        initDiagnostics = {
+          ...initDiagnostics,
+          effectiveBackendPolicy,
+          backendPolicyReasons: resolvedBackendPolicyReasons,
+        };
+      }
+
+      let resolvedInitProfile: ResolvedInferenceProfile | null = null;
+      let resolvedInitGpuLayers: number | null = null;
+      let resolvedRuntimeDevices: string[] | null = null;
+      let lastBackendInitError: unknown | null = null;
+      for (let i = 0; i < inferenceCandidatesForInit.length; i += 1) {
+        const profile = inferenceCandidatesForInit[i];
+        const { backendMode: candidate, nGpuLayers, devices } = profile;
+        const hasAcceleratorCandidateAfter = inferenceCandidatesForInit.slice(i + 1).some((next) => next.backendMode !== 'cpu');
+
+        try {
+          const { context, resolvedGpuLayers: candidateGpuLayers } = await initLlamaWithRetry(profile);
+          const actualGpu = Boolean(context.gpu);
+          const reasonNoGPU = typeof context.reasonNoGPU === 'string' ? context.reasonNoGPU.trim() : '';
+
+          backendInitAttempts.push({
+            candidate,
+            nGpuLayers: Math.max(0, Math.round(nGpuLayers)),
+            devices,
+            outcome: 'success',
+            actualGpu,
+            ...(reasonNoGPU ? { reasonNoGPU } : null),
+          });
+
+          // If an accelerator candidate initializes but the runtime reports CPU mode,
+          // treat this as a degraded init and continue to the next candidate.
+          // This ensures we eventually land on a true CPU profile (n_gpu_layers=0) with a
+          // crash-safe flash attention setting (e.g., V-cache quantization requires flash_attn != off).
+          // and also allows switching to the next accelerator candidate when AUTO prefers one.
+          if (candidate !== 'cpu' && !actualGpu) {
+            if (process.env.NODE_ENV !== 'test') {
+              const fallbackLabel = hasAcceleratorCandidateAfter
+                ? 'retrying next accelerator candidate'
+                : 'falling back to CPU profile';
+              console.warn(`[LLMEngine] ${candidate.toUpperCase()} init returned CPU runtime, ${fallbackLabel}`);
+            }
+            await llama.releaseAllLlama().catch(() => undefined);
+            lastBackendInitError = new Error(
+              reasonNoGPU || `${candidate.toUpperCase()} acceleration was not enabled.`,
+            );
+            continue;
           }
 
-          if (!this.context) {
-            try {
-              this.context = await llama.initLlama(
-                {
-                  model: modelPath,
-                  n_ctx: finalContextSize,
-                  n_gpu_layers: 0,
-                  n_parallel: resolvedParallelSlots,
-                  use_mmap: true,
-                  use_mlock: false,
-                  cache_type_k: cacheTypeK,
-                  cache_type_v: cacheTypeV,
-                  flash_attn_type: 'off',
-                  ...(shouldUseLowMemoryContextParams && lowMemoryBatchSize !== null && lowMemoryMicroBatchSize !== null
-                    ? {
-                        no_extra_bufts: true,
-                        n_batch: lowMemoryBatchSize,
-                        n_ubatch: lowMemoryMicroBatchSize,
-                      }
-                    : null),
-                },
-                (progress) => {
-                  this.updateState({ ...this.state, loadProgress: progress });
-                }
-              );
-            } catch (cpuError) {
-              cpuInitError = cpuError;
-              if (calibrationKeyForLoad && isProbableMemoryFailure(cpuError)) {
-                this.persistCalibrationFailure({
-                  calibrationKey: calibrationKeyForLoad,
-                  observedRawBudgetBytes,
-                });
-              }
-              throw cpuError;
-            }
+          resolvedInitProfile = profile;
+          resolvedInitGpuLayers = candidateGpuLayers;
+          resolvedRuntimeDevices = Array.isArray(context.devices)
+            ? context.devices
+                .filter((device): device is string => typeof device === 'string')
+                .map((device) => device.trim())
+                .filter((device) => device.length > 0)
+            : null;
+
+          if (!actualGpu) {
+            applyCalibrationForGpuLayers(0);
+          } else if (candidateGpuLayers !== resolvedGpuLayers) {
+            applyCalibrationForGpuLayers(candidateGpuLayers);
           }
-        } else {
-          if (calibrationKeyForLoad && isProbableMemoryFailure(gpuError)) {
-            this.persistCalibrationFailure({
-              calibrationKey: calibrationKeyForLoad,
-              observedRawBudgetBytes,
-            });
+
+          this.context = context;
+          gpuInitError = null;
+          break;
+        } catch (error) {
+          lastBackendInitError = error;
+          backendInitAttempts.push({
+            candidate,
+            nGpuLayers: Math.max(0, Math.round(nGpuLayers)),
+            devices,
+            outcome: 'error',
+            error: getErrorMessageText(error),
+          });
+
+          if (candidate === 'cpu') {
+            cpuInitError = error;
+          } else {
+            gpuInitError = error;
           }
-          throw gpuError;
+
+          await llama.releaseAllLlama().catch(() => undefined);
         }
+      }
+
+      if (!this.context) {
+        throw lastBackendInitError ?? new Error('Failed to initialize inference backend');
+      }
+
+      this.backendInitAttemptsSnapshot = backendInitAttempts;
+
+      // If the user explicitly requested an accelerator but we ended up initializing a CPU profile,
+      // reflect that in the effective backend policy so diagnostics/UI make the fallback obvious.
+      if (
+        resolvedInitProfile?.backendMode === 'cpu'
+        && (normalizedBackendPolicy === 'gpu' || normalizedBackendPolicy === 'npu')
+      ) {
+        this.effectiveBackendPolicy = 'cpu';
+      }
+
+      if (resolvedInitProfile) {
+        this.initGpuLayers = resolvedInitGpuLayers;
+        this.initDevices = Array.isArray(resolvedRuntimeDevices) && resolvedRuntimeDevices.length > 0
+          ? [...resolvedRuntimeDevices]
+          : Array.isArray(resolvedInitProfile.devices)
+            ? [...resolvedInitProfile.devices]
+            : null;
+        this.initFlashAttnType = resolveEffectiveFlashAttnType(
+          resolvedInitProfile.flashAttnType,
+          resolvedInitGpuLayers ?? resolvedInitProfile.nGpuLayers,
+        );
+        this.initUseMmap = resolvedInitProfile.useMmap;
+        this.initUseMlock = resolvedInitProfile.useMlock;
+        this.initNParallel = resolvedInitProfile.nParallel;
+        this.initNThreads = typeof resolvedInitProfile.nThreads === 'number' && Number.isFinite(resolvedInitProfile.nThreads)
+          ? Math.round(resolvedInitProfile.nThreads)
+          : null;
+        this.initCpuMask = typeof resolvedInitProfile.cpuMask === 'string' && resolvedInitProfile.cpuMask.trim().length > 0
+          ? resolvedInitProfile.cpuMask.trim()
+          : null;
+        this.initCpuStrict = typeof resolvedInitProfile.cpuStrict === 'boolean' ? resolvedInitProfile.cpuStrict : null;
+        this.initNBatch = typeof resolvedInitProfile.nBatch === 'number' && Number.isFinite(resolvedInitProfile.nBatch)
+          ? Math.round(resolvedInitProfile.nBatch)
+          : null;
+        this.initNUbatch = typeof resolvedInitProfile.nUbatch === 'number' && Number.isFinite(resolvedInitProfile.nUbatch)
+          ? Math.round(resolvedInitProfile.nUbatch)
+          : null;
+        this.initKvUnified = typeof resolvedInitProfile.kvUnified === 'boolean' ? resolvedInitProfile.kvUnified : null;
+      }
+
+      if (initDiagnostics) {
+        initDiagnostics = {
+          ...initDiagnostics,
+          backendInitAttempts,
+        };
       }
 
       if (initDiagnostics) {
@@ -1958,10 +2810,17 @@ class LLMEngineService {
         this.activeCalibrationSession = null;
       }
 
+      if (this.context) {
+        this.captureBackendTelemetry(this.context);
+      } else {
+        this.resetBackendTelemetry();
+      }
+
+      const reportedLoadedGpuLayers = this.resolveReportedLoadedGpuLayers(resolvedGpuLayers);
       this.activeContextSize = finalContextSize;
-      this.activeGpuLayers = resolvedGpuLayers;
+      this.activeGpuLayers = reportedLoadedGpuLayers;
       this.safeModeLoadLimits = shouldUseSafeLoadProfile
-        ? { maxContextTokens: finalContextSize, requestedGpuLayers: gpuLayers, loadedGpuLayers: resolvedGpuLayers }
+        ? { maxContextTokens: finalContextSize, requestedGpuLayers, loadedGpuLayers: reportedLoadedGpuLayers }
         : null;
       this.updateState({ ...this.state, status: EngineStatus.READY, loadProgress: 1 });
       updateSettings({ activeModelId: modelId });
@@ -2001,6 +2860,7 @@ class LLMEngineService {
         this.activeContextSize = DEFAULT_CONTEXT_SIZE;
         this.activeGpuLayers = null;
         this.safeModeLoadLimits = null;
+        this.resetRuntimeTelemetry();
         this.updateState({
           status: EngineStatus.IDLE,
           activeModelId: undefined,
@@ -2017,6 +2877,7 @@ class LLMEngineService {
       this.activeContextSize = DEFAULT_CONTEXT_SIZE;
       this.activeGpuLayers = null;
       this.safeModeLoadLimits = null;
+      this.resetRuntimeTelemetry();
       updateSettings({ activeModelId: null });
       this.updateState({
         status: EngineStatus.ERROR,
@@ -2040,6 +2901,7 @@ class LLMEngineService {
 
   private async unloadInternal(): Promise<void> {
     this.isUnloading = true;
+    this.resetRuntimeTelemetry();
     this.updateState({
       status: EngineStatus.IDLE,
       activeModelId: undefined,
@@ -2088,6 +2950,7 @@ class LLMEngineService {
       this.activeContextSize = DEFAULT_CONTEXT_SIZE;
       this.activeGpuLayers = null;
       this.safeModeLoadLimits = null;
+      this.resetRuntimeTelemetry();
       this.initPromise = null;
       this.activeCompletionPromise = null;
       this.isUnloading = false;

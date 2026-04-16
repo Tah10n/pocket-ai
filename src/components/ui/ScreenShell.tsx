@@ -200,6 +200,7 @@ interface ScreenSegmentedControlProps {
   className?: string;
   itemClassName?: string;
   testID?: string;
+  disabled?: boolean;
 }
 
 interface ScreenSheetProps {
@@ -747,12 +748,13 @@ export function ScreenSegmentedControl({
   className,
   itemClassName,
   testID,
+  disabled = false,
 }: ScreenSegmentedControlProps) {
   return (
     <Box
       testID={testID}
       accessibilityRole="tablist"
-      className={joinClassNames(screenLayoutTokens.segmentedControlClassName, className)}
+      className={joinClassNames(screenLayoutTokens.segmentedControlClassName, disabled ? 'opacity-60' : undefined, className)}
     >
       {options.map((option) => {
         const isActive = activeKey === option.key;
@@ -761,10 +763,15 @@ export function ScreenSegmentedControl({
           <Pressable
             key={option.key}
             testID={option.testID}
-            onPress={() => onChange(option.key)}
+            onPress={() => {
+              if (!disabled) {
+                onChange(option.key);
+              }
+            }}
+            disabled={disabled}
             accessibilityRole="tab"
             accessibilityLabel={option.accessibilityLabel || option.label}
-            accessibilityState={{ selected: isActive }}
+            accessibilityState={{ selected: isActive, disabled }}
             className={joinClassNames(
               screenLayoutTokens.segmentedControlItemClassName,
               isActive

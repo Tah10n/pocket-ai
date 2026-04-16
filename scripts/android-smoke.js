@@ -21,6 +21,7 @@ const apkPath = path.join(
   "debug",
   "app-debug.apk"
 );
+const requiredNativeLibraries = ["libreactnative.so"];
 const metroStartupTimeoutMs = 90_000;
 const deviceStartupTimeoutMs = 180_000;
 const launchDelayMs = parsePositiveInteger(
@@ -84,17 +85,38 @@ async function main() {
 
   const metro = await ensureMetroServer();
 
-  if ((cliOptions.skipBuild || process.env.ANDROID_SKIP_BUILD === "1") && fs.existsSync(apkPath)) {
-    log("Skipping Gradle build and reusing the existing debug APK.");
+  const wantsSkipBuild = cliOptions.skipBuild || process.env.ANDROID_SKIP_BUILD === "1";
+  let didBuildDebugApk = false;
+  if (wantsSkipBuild && fs.existsSync(apkPath)) {
+    const reuseDecision = resolveDebugApkReuseDecision(tools.adb, device.serial, apkPath);
+    if (reuseDecision.canReuse) {
+      const abiLabel = reuseDecision.matchedAbi ? ` for ABI ${reuseDecision.matchedAbi}` : "";
+      log(`Skipping Gradle build and reusing the existing debug APK${abiLabel}.`);
+    } else {
+      const abiLabel = reuseDecision.supportedAbis.length > 0
+        ? reuseDecision.supportedAbis.join(", ")
+        : "unknown target ABI";
+      const missingLabel = reuseDecision.missingEntries.length > 0
+        ? ` Missing entries: ${reuseDecision.missingEntries.join(", ")}.`
+        : "";
+      log(
+        `Requested --skip-build, but the existing debug APK is incompatible with ${abiLabel}.${missingLabel} Rebuilding instead.`
+      );
+      buildDebugApk();
+      didBuildDebugApk = true;
+    }
   } else {
     buildDebugApk();
+    didBuildDebugApk = true;
   }
 
   if (!fs.existsSync(apkPath)) {
     throw new Error(`Expected debug APK at ${apkPath}, but it was not found.`);
   }
 
-  installDebugApk(tools.adb, device.serial, appPackage);
+  installDebugApk(tools.adb, device.serial, appPackage, {
+    allowReuseExistingInstallOnLowStorage: !didBuildDebugApk,
+  });
   reverseMetroPort(tools.adb, device.serial, metro.port);
 
   runCapture(tools.adb, ["-s", device.serial, "logcat", "-c"], { allowFailure: true });
@@ -208,6 +230,125 @@ function readExpoConfig() {
     scheme: expo.scheme,
     packageName: expo.android && expo.android.package,
   };
+}
+
+function resolveDebugApkReuseDecision(adbPath, serial, apkFilePath) {
+  try {
+    const primaryAbi = resolvePrimaryDeviceAbi(adbPath, serial);
+    const supportedAbis = resolveDeviceSupportedAbis(adbPath, serial, primaryAbi);
+    if (!primaryAbi) {
+      return {
+        canReuse: false,
+        matchedAbi: null,
+        supportedAbis,
+        missingEntries: [],
+      };
+    }
+
+    const zipEntries = new Set(listZipEntries(apkFilePath));
+    const missingEntries = requiredNativeLibraries
+      .map((library) => `lib/${primaryAbi}/${library}`)
+      .filter((entryName) => !zipEntries.has(entryName));
+
+    if (missingEntries.length === 0) {
+      return {
+        canReuse: true,
+        matchedAbi: primaryAbi,
+        supportedAbis,
+        missingEntries: [],
+      };
+    }
+
+    return {
+      canReuse: false,
+      matchedAbi: null,
+      supportedAbis,
+      missingEntries,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    log(`Failed to inspect the existing debug APK for ABI compatibility (${message}). Rebuilding instead.`);
+    return {
+      canReuse: false,
+      matchedAbi: null,
+      supportedAbis: [],
+      missingEntries: [],
+    };
+  }
+}
+
+function resolvePrimaryDeviceAbi(adbPath, serial) {
+  const primaryAbi = runCapture(
+    adbPath,
+    ["-s", serial, "shell", "getprop", "ro.product.cpu.abi"],
+    { allowFailure: true }
+  ).trim();
+
+  return primaryAbi || null;
+}
+
+function resolveDeviceSupportedAbis(adbPath, serial, primaryAbi = null) {
+  const abilist = runCapture(
+    adbPath,
+    ["-s", serial, "shell", "getprop", "ro.product.cpu.abilist"],
+    { allowFailure: true }
+  )
+    .split(",")
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
+
+  if (abilist.length > 0) {
+    if (primaryAbi && !abilist.includes(primaryAbi)) {
+      return [primaryAbi, ...abilist];
+    }
+    return abilist;
+  }
+
+  return primaryAbi ? [primaryAbi] : [];
+}
+
+function listZipEntries(zipFilePath) {
+  const zipBuffer = fs.readFileSync(zipFilePath);
+  const eocdSignature = 0x06054b50;
+  const centralDirectoryHeaderSignature = 0x02014b50;
+  const minimumEocdSize = 22;
+  const maxCommentLength = 0xffff;
+  const searchStart = Math.max(0, zipBuffer.length - minimumEocdSize - maxCommentLength);
+
+  let eocdOffset = -1;
+  for (let offset = zipBuffer.length - minimumEocdSize; offset >= searchStart; offset -= 1) {
+    if (zipBuffer.readUInt32LE(offset) === eocdSignature) {
+      eocdOffset = offset;
+      break;
+    }
+  }
+
+  if (eocdOffset < 0) {
+    throw new Error(`Could not find the ZIP central directory in ${zipFilePath}.`);
+  }
+
+  const centralDirectorySize = zipBuffer.readUInt32LE(eocdOffset + 12);
+  const centralDirectoryOffset = zipBuffer.readUInt32LE(eocdOffset + 16);
+  const entries = [];
+  let offset = centralDirectoryOffset;
+  const directoryEnd = centralDirectoryOffset + centralDirectorySize;
+
+  while (offset < directoryEnd) {
+    if (zipBuffer.readUInt32LE(offset) !== centralDirectoryHeaderSignature) {
+      throw new Error(`Unexpected ZIP central directory header at offset ${offset}.`);
+    }
+
+    const fileNameLength = zipBuffer.readUInt16LE(offset + 28);
+    const extraFieldLength = zipBuffer.readUInt16LE(offset + 30);
+    const fileCommentLength = zipBuffer.readUInt16LE(offset + 32);
+    const fileNameOffset = offset + 46;
+    const fileNameEnd = fileNameOffset + fileNameLength;
+
+    entries.push(zipBuffer.toString("utf8", fileNameOffset, fileNameEnd));
+    offset = fileNameEnd + extraFieldLength + fileCommentLength;
+  }
+
+  return entries;
 }
 
 function pickConnectedDevice(adbPath, options = {}) {
@@ -588,8 +729,10 @@ function isPackageInstalled(adbPath, serial, appPackage) {
   return output.startsWith("package:");
 }
 
-function installDebugApk(adbPath, serial, appPackage) {
+function installDebugApk(adbPath, serial, appPackage, options = {}) {
   log("Installing debug APK...");
+  const allowReuseExistingInstallOnLowStorage =
+    options.allowReuseExistingInstallOnLowStorage !== false;
 
   const result = spawnSync(adbPath, ["-s", serial, "install", "-r", apkPath], {
     encoding: "utf8",
@@ -610,6 +753,13 @@ function installDebugApk(adbPath, serial, appPackage) {
   }
 
   if (output.includes("INSTALL_FAILED_INSUFFICIENT_STORAGE")) {
+    if (!allowReuseExistingInstallOnLowStorage) {
+      throw new Error(
+        "Android target storage is insufficient and the freshly built debug APK could not be installed. " +
+          "Free space on the device/emulator (or uninstall the existing app) and retry."
+      );
+    }
+
     log("APK install failed due to insufficient storage. Attempting to reuse the existing app installation...");
 
     if (isPackageInstalled(adbPath, serial, appPackage)) {

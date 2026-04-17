@@ -151,6 +151,7 @@ Auto-generated from open GitHub issues labeled `roadmap:*`.
 
 ### Later
 
+- [\[Feature\]: Chat UI — document attachments (picker, preview, remove)](https://github.com/Tah10n/pocket-ai/issues/43) (#43)
 - [\[Feature\]: Multimodal (vision) models — attach images in chat](https://github.com/Tah10n/pocket-ai/issues/29) (#29)
 <!-- ROADMAP:END -->
 

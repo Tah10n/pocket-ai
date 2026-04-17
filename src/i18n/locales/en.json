@@ -653,6 +653,7 @@
     "ramFitConfidenceHigh": "High confidence",
     "ramFitConfidenceMedium": "Medium confidence",
     "ramFitConfidenceLow": "Low confidence",
+    "quantizationLabel": "Quantization",
     "sizeLabel": "Size",
     "fileSizeLabel": "File size",
     "accessLabel": "Access",

@@ -820,6 +820,7 @@ export const ChatScreen = () => {
                 title={headerTitle}
                 presetLabel={activePresetLabel}
                 modelLabel={headerModelLabel}
+                modelSelectable={false}
                 statusLabel={statusLabel}
                 statusTone={statusTone}
                 canStartNewChat={!isGenerating}
@@ -838,6 +839,8 @@ export const ChatScreen = () => {
                     setPresetSelectorOpen(true);
                 }}
                 canOpenPresetSelector={!isGenerating}
+                onOpenModelSelector={undefined}
+                canOpenModelSelector={false}
                 canOpenModelControls={Boolean(configurableModelId) && !isGenerating}
                 onBack={router.canGoBack() ? () => router.back() : undefined}
             />
@@ -1034,6 +1037,8 @@ export const ChatScreen = () => {
                             onStopGeneration={stopGeneration}
                             disabled={isInputDisabled}
                             isSending={isGenerating}
+                            leadingActions={undefined}
+                            attachmentsTray={undefined}
                             modeLabel={pendingRegenerateMessage ? t('chat.editEarlierMessage') : undefined}
                             modeDescription={pendingRegenerateMessage
                                 ? t('chat.editEarlierMessageDescription')
@@ -1058,6 +1063,8 @@ export const ChatScreen = () => {
                             onStopGeneration={stopGeneration}
                             disabled={isInputDisabled}
                             isSending={isGenerating}
+                            leadingActions={undefined}
+                            attachmentsTray={undefined}
                             modeLabel={pendingRegenerateMessage ? t('chat.editEarlierMessage') : undefined}
                             modeDescription={pendingRegenerateMessage
                                 ? t('chat.editEarlierMessageDescription')

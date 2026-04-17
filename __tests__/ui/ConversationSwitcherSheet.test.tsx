@@ -9,12 +9,31 @@ jest.mock('react-native-css-interop', () => {
   };
 });
 
+jest.mock('react-native-reanimated', () => {
+  const { View } = require('react-native');
+
+  return {
+    __esModule: true,
+    default: {
+      createAnimatedComponent: () => View,
+    },
+    Easing: {
+      out: (value: unknown) => value,
+      ease: 'ease',
+      cubic: 'cubic',
+    },
+    useSharedValue: (value: unknown) => ({ value }),
+    useAnimatedStyle: (updater: () => unknown) => updater(),
+    withTiming: (value: unknown) => value,
+  };
+});
+
 jest.mock('@/components/ui/box', () => {
   const mockReact = require('react');
   const { View } = require('react-native');
 
   return {
-    Box: ({ children }: any) => mockReact.createElement(View, null, children),
+    Box: ({ children, ...props }: any) => mockReact.createElement(View, props, children),
   };
 });
 
@@ -50,44 +69,34 @@ jest.mock('../../src/components/ui/MaterialSymbols', () => ({
   MaterialSymbols: () => null,
 }));
 
-jest.mock('../../src/services/PresetManager', () => ({
-  presetManager: {
-    getPresets: jest.fn(() => [
-      {
-        id: 'preset-1',
-        name: 'Helpful Assistant',
-        systemPrompt: 'Be concise.',
-        isBuiltIn: false,
-      },
-      {
-        id: 'preset-2',
-        name: 'Research Analyst',
-        systemPrompt: 'Organize findings clearly.',
-        isBuiltIn: false,
-      },
-    ]),
-  },
+jest.mock('../../src/hooks/useDeviceMetrics', () => ({
+  useMotionPreferences: () => ({
+    motionPreset: 'full',
+    sheetDurationMs: 0,
+  }),
 }));
 
-const { PresetSelectorSheet } = require('../../src/components/ui/PresetSelectorSheet');
+const { ConversationSwitcherSheet } = require('../../src/components/ui/ConversationSwitcherSheet');
 
-describe('PresetSelectorSheet', () => {
-  it('renders an explicit default option and clears the preset when selected', () => {
+describe('ConversationSwitcherSheet', () => {
+  it('starts a new chat from the shared action area', () => {
     const onClose = jest.fn();
-    const onSelectPreset = jest.fn();
+    const onStartNewChat = jest.fn();
 
-    const { getByTestId } = render(
-      React.createElement(PresetSelectorSheet, {
+    const { getByText } = render(
+      React.createElement(ConversationSwitcherSheet, {
         visible: true,
-        activePresetId: 'preset-1',
+        activeThreadId: null,
+        conversations: [],
         onClose,
-        onSelectPreset,
+        onSelectConversation: jest.fn(),
+        onStartNewChat,
       }),
     );
 
-    fireEvent.press(getByTestId('preset-option-default'));
+    fireEvent.press(getByText('chat.conversationSwitcher.startNewChat'));
 
     expect(onClose).toHaveBeenCalledTimes(1);
-    expect(onSelectPreset).toHaveBeenCalledWith(null);
+    expect(onStartNewChat).toHaveBeenCalledTimes(1);
   });
 });

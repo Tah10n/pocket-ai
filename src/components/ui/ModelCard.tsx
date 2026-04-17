@@ -4,6 +4,7 @@ import { Box } from './box';
 import { ModelDownloadProgress, ModelLifecycleActionRow } from './ModelLifecycleControls';
 import { ScreenBadge, ScreenCard, ScreenIconButton } from './ScreenShell';
 import { Text, composeTextRole } from './text';
+import { ValueSelectorRow } from './ValueSelectorRow';
 import { ModelAccessState, type ModelMetadata } from '../../types/models';
 import { formatModelFileSize } from '../../utils/modelSize';
 
@@ -12,6 +13,7 @@ interface ModelCardProps {
   onOpenDetails: (modelId: string) => void;
   onDownload: (model: ModelMetadata) => void;
   onConfigureToken: () => void;
+  onOpenVariantSelector?: (modelId: string) => void;
   onOpenModelPage: (modelId: string) => void;
   onLoad: (id: string) => void;
   onOpenSettings: (id: string) => void;
@@ -27,6 +29,7 @@ const ModelCardComponent = ({
   onOpenDetails,
   onDownload,
   onConfigureToken,
+  onOpenVariantSelector,
   onOpenModelPage,
   onLoad,
   onOpenSettings,
@@ -39,6 +42,12 @@ const ModelCardComponent = ({
   const { t } = useTranslation();
   const sizeLabel = formatModelFileSize(model.size, t('models.sizeUnknown'));
   const memoryFitDecision = model.memoryFitDecision;
+  const quantizationLabel = model.gguf?.sizeLabel?.trim();
+  const hasKnownFileSize = typeof model.size === 'number' && Number.isFinite(model.size) && model.size > 0;
+  const quantizationAndSize = quantizationLabel && hasKnownFileSize
+    ? `${quantizationLabel} + ${sizeLabel}`
+    : null;
+  const canOpenVariantSelector = typeof onOpenVariantSelector === 'function' && (model.variants?.length ?? 0) > 1;
   const accessBadge = model.accessState === ModelAccessState.AUTH_REQUIRED
     ? {
         text: t('models.requiresToken'),
@@ -109,11 +118,22 @@ const ModelCardComponent = ({
           <ScreenBadge tone="warning" size="micro" iconName="help">
             {t('models.sizeUnknownBadge')}
           </ScreenBadge>
+        ) : !quantizationLabel && hasKnownFileSize ? (
+          <ScreenBadge tone="neutral" size="micro">
+            {t('models.sizeLabel')} {sizeLabel}
+          </ScreenBadge>
         ) : null}
-        <ScreenBadge tone="neutral" size="micro">
-          {t('models.sizeLabel')} {sizeLabel}
-        </ScreenBadge>
       </Box>
+
+      {quantizationAndSize ? (
+        <ValueSelectorRow
+          label={t('models.quantizationLabel')}
+          value={quantizationAndSize}
+          onPress={canOpenVariantSelector ? () => onOpenVariantSelector(model.id) : undefined}
+          showChevron={canOpenVariantSelector}
+          className="mt-2.5"
+        />
+      ) : null}
 
       <ModelDownloadProgress model={model} className="mt-2.5" />
 
@@ -140,6 +160,7 @@ ModelCardComponent.displayName = 'ModelCard';
 export const ModelCard = memo(ModelCardComponent, (prevProps, nextProps) => {
   // Custom comparison to ensure fast check since model is an object
   return prevProps.isActive === nextProps.isActive &&
+         prevProps.onOpenVariantSelector === nextProps.onOpenVariantSelector &&
          prevProps.model.id === nextProps.model.id &&
          prevProps.model.name === nextProps.model.name &&
          prevProps.model.author === nextProps.model.author &&
@@ -148,7 +169,10 @@ export const ModelCard = memo(ModelCardComponent, (prevProps, nextProps) => {
          prevProps.model.fitsInRam === nextProps.model.fitsInRam &&
          prevProps.model.memoryFitDecision === nextProps.model.memoryFitDecision &&
          prevProps.model.memoryFitConfidence === nextProps.model.memoryFitConfidence &&
+         prevProps.model.gguf?.sizeLabel === nextProps.model.gguf?.sizeLabel &&
          prevProps.model.size === nextProps.model.size &&
+         (prevProps.model.variants?.length ?? 0) === (nextProps.model.variants?.length ?? 0) &&
+         prevProps.model.activeVariantId === nextProps.model.activeVariantId &&
          prevProps.model.accessState === nextProps.model.accessState;
 });
 

@@ -287,4 +287,95 @@ describe('ModelCard', () => {
       mockScreenBadge.mock.calls.some(([props]) => props.tone === 'warning' && props.children === 'models.ramBorderline'),
     ).toBe(true);
   });
+
+  it('renders a quantization and size row when GGUF metadata is complete', () => {
+    const screen = render(
+      <ModelCard
+        model={{
+          ...buildModel(ModelAccessState.PUBLIC),
+          size: 3_800_000_000,
+          gguf: {
+            sizeLabel: 'Q4_K_M',
+          },
+        }}
+        onOpenDetails={jest.fn()}
+        onDownload={jest.fn()}
+        onConfigureToken={jest.fn()}
+        onOpenModelPage={jest.fn()}
+        onLoad={jest.fn()}
+        onOpenSettings={jest.fn()}
+        onUnload={jest.fn()}
+        onDelete={jest.fn()}
+        onCancel={jest.fn()}
+        onChat={jest.fn()}
+        isActive={false}
+      />,
+    );
+
+    expect(screen.getByText('models.quantizationLabel')).toBeTruthy();
+    expect(screen.getByText('Q4_K_M + 3.80 GB')).toBeTruthy();
+    expect(screen.queryByText('chevron-right')).toBeNull();
+  });
+
+  it('hides the quantization row when GGUF size metadata is missing', () => {
+    const screen = render(
+      <ModelCard
+        model={{
+          ...buildModel(ModelAccessState.PUBLIC),
+          size: 3_800_000_000,
+        }}
+        onOpenDetails={jest.fn()}
+        onDownload={jest.fn()}
+        onConfigureToken={jest.fn()}
+        onOpenModelPage={jest.fn()}
+        onLoad={jest.fn()}
+        onOpenSettings={jest.fn()}
+        onUnload={jest.fn()}
+        onDelete={jest.fn()}
+        onCancel={jest.fn()}
+        onChat={jest.fn()}
+        isActive={false}
+      />,
+    );
+
+    expect(screen.queryByText('models.quantizationLabel')).toBeNull();
+    expect(screen.queryByText('Q4_K_M + 3.80 GB')).toBeNull();
+    expect(
+      mockScreenBadge.mock.calls.some(([props]) => {
+        const children = Array.isArray(props.children) ? props.children.join('') : String(props.children);
+        return children.includes('models.sizeLabel') && children.includes('3.80 GB');
+      }),
+    ).toBe(true);
+  });
+
+  it('does not show a chevron when variants exist but no selector handler is wired', () => {
+    const screen = render(
+      <ModelCard
+        model={{
+          ...buildModel(ModelAccessState.PUBLIC),
+          size: 3_800_000_000,
+          gguf: {
+            sizeLabel: 'Q4_K_M',
+          },
+          variants: [
+            { variantId: 'q4', quantizationLabel: 'Q4_K_M', size: 3_800_000_000 },
+            { variantId: 'q6', quantizationLabel: 'Q6_K', size: 4_100_000_000 },
+          ],
+        }}
+        onOpenDetails={jest.fn()}
+        onDownload={jest.fn()}
+        onConfigureToken={jest.fn()}
+        onOpenModelPage={jest.fn()}
+        onLoad={jest.fn()}
+        onOpenSettings={jest.fn()}
+        onUnload={jest.fn()}
+        onDelete={jest.fn()}
+        onCancel={jest.fn()}
+        onChat={jest.fn()}
+        isActive={false}
+      />,
+    );
+
+    expect(screen.queryByText('chevron-right')).toBeNull();
+  });
 });

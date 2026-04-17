@@ -18,6 +18,9 @@ interface ChatInputBarProps {
     modeLabel?: string;
     modeDescription?: string;
     onCancelMode?: () => void;
+    leadingActions?: React.ReactNode;
+    trailingActions?: React.ReactNode;
+    attachmentsTray?: React.ReactNode;
 }
 
 export const ChatInputBar = ({
@@ -30,6 +33,9 @@ export const ChatInputBar = ({
     modeLabel,
     modeDescription,
     onCancelMode,
+    leadingActions,
+    trailingActions,
+    attachmentsTray,
 }: ChatInputBarProps) => {
     const [internalMessage, setInternalMessage] = useState('');
     const { t } = useTranslation();
@@ -77,17 +83,30 @@ export const ChatInputBar = ({
         }
     };
 
+    const resolvedTrailingActions = trailingActions ?? (
+        <ScreenIconButton
+            onPress={handlePrimaryAction}
+            disabled={!isSending && !canSend}
+            accessibilityLabel={isSending ? t('chat.stopAccessibilityLabel') : t('chat.sendAccessibilityLabel')}
+            iconName={isSending ? 'stop' : 'arrow-upward'}
+            className={`border-0 ${isSending || canSend
+                ? 'bg-primary-500'
+                : 'bg-background-200 dark:bg-background-800'}`}
+            iconClassName={isSending || canSend ? 'text-typography-0' : 'text-typography-500'}
+        />
+    );
+
     return (
         <Box
             testID="chat-input-bar-container"
             className={`border-t border-outline-200 bg-background-0/95 ${screenChromeTokens.contentHorizontalPaddingClassName} ${screenChromeTokens.bottomBarVerticalPaddingClassName} dark:border-outline-800 dark:bg-background-950/95`}
         >
             {modeLabel ? (
-                <Box className="mb-1.5 rounded-[20px] border border-primary-500/15 bg-primary-500/5 px-3 py-2">
+                <Box className="mb-1.5 rounded-2xl border border-primary-500/15 bg-primary-500/5 px-3 py-2">
                     <Box className="flex-row items-start justify-between gap-3">
                         <Box className="min-w-0 flex-1 flex-row items-start gap-3">
                             <Box className="mt-0.5 h-6 w-6 items-center justify-center rounded-full bg-primary-500/10 dark:bg-primary-500/20">
-                                <MaterialSymbols name="edit" size={14} className="text-primary-500" />
+                                <MaterialSymbols name="edit" size="xs" className="text-primary-500" />
                             </Box>
                             <Box className="min-w-0 flex-1">
                                 <Text numberOfLines={1} className="text-sm font-semibold text-primary-700 dark:text-primary-300">
@@ -106,7 +125,7 @@ export const ChatInputBar = ({
                                 onPress={onCancelMode}
                                 accessibilityLabel={t('common.cancel')}
                                 iconName="close"
-                                iconSize={14}
+                                iconSize="xs"
                                 size="micro"
                                 className="border-0 bg-primary-500/10 dark:bg-primary-500/20"
                                 iconClassName="text-primary-500"
@@ -116,7 +135,19 @@ export const ChatInputBar = ({
                 </Box>
             ) : null}
 
-            <Box className="flex-row items-center gap-2">
+            {attachmentsTray ? (
+                <Box testID="chat-input-bar-attachments-tray" className="mb-2">
+                    {attachmentsTray}
+                </Box>
+            ) : null}
+
+            <Box testID="chat-input-bar-row" className="flex-row items-center gap-2">
+                {leadingActions ? (
+                    <Box testID="chat-input-bar-leading-actions" className="flex-row items-center gap-2">
+                        {leadingActions}
+                    </Box>
+                ) : null}
+
                 <ScreenInlineInput
                     variant="composer"
                     className={disabled ? 'flex-1 dark:border-outline-800 dark:bg-background-900/70' : 'flex-1'}
@@ -135,16 +166,9 @@ export const ChatInputBar = ({
                     editable={!disabled && !isSending}
                 />
 
-                <ScreenIconButton
-                    onPress={handlePrimaryAction}
-                    disabled={!isSending && !canSend}
-                    accessibilityLabel={isSending ? t('chat.stopAccessibilityLabel') : t('chat.sendAccessibilityLabel')}
-                    iconName={isSending ? 'stop' : 'arrow-upward'}
-                    className={`border-0 ${isSending || canSend
-                        ? 'bg-primary-500'
-                        : 'bg-background-200 dark:bg-background-800'}`}
-                    iconClassName={isSending || canSend ? 'text-typography-0' : 'text-typography-500'}
-                />
+                <Box testID="chat-input-bar-trailing-actions" className="flex-row items-center gap-2">
+                    {resolvedTrailingActions}
+                </Box>
             </Box>
         </Box>
     );

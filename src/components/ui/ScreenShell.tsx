@@ -129,7 +129,7 @@ interface ScreenActionPillProps extends React.ComponentProps<typeof Pressable> {
 
 interface ScreenIconButtonProps extends React.ComponentProps<typeof Pressable> {
   iconName: MaterialSymbolsProps['name'];
-  iconSize?: number;
+  iconSize?: MaterialSymbolsProps['size'];
   size?: 'micro' | 'compact' | 'default';
   iconClassName?: string;
   className?: string;
@@ -381,7 +381,7 @@ export function HeaderTitleBlock({
 }: HeaderTitleBlockProps) {
   return (
     <Box className={joinClassNames('min-w-0 flex-1', className)}>
-      <Text numberOfLines={titleLines} className={composeTextRole('screenTitle', 'text-[22px] leading-7')}>
+      <Text numberOfLines={titleLines} className={composeTextRole('screenTitle', 'leading-7')}>
         {title}
       </Text>
       {subtitle ? (
@@ -483,7 +483,7 @@ export function ScreenActionPill({
 
 export function ScreenIconButton({
   iconName,
-  iconSize = 18,
+  iconSize = 'md',
   size = 'default',
   iconClassName,
   className,
@@ -543,7 +543,7 @@ export function ScreenBadge({
   iconClassName,
   testID,
 }: ScreenBadgeProps) {
-  const iconSize = size === 'micro' ? 12 : 14;
+  const iconSize = size === 'micro' ? 'xs' : 'sm';
   const toneTokens = getBadgeToneTokens(tone);
 
   return (
@@ -589,7 +589,7 @@ export function ScreenChip({
   onPress,
   ...props
 }: ScreenChipProps) {
-  const iconSize = size === 'micro' ? 12 : 14;
+  const iconSize = size === 'micro' ? 'xs' : 'sm';
   const toneTokens = getBadgeToneTokens(tone);
   const content = (
     <>

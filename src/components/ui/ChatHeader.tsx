@@ -15,15 +15,49 @@ interface ChatHeaderProps {
   title: string;
   presetLabel?: string;
   modelLabel?: string;
+  modelSelectable?: boolean;
   statusLabel?: string;
   statusTone?: 'neutral' | 'accent' | 'warning';
   canStartNewChat?: boolean;
   onStartNewChat?: () => void;
   onOpenPresetSelector?: () => void;
   canOpenPresetSelector?: boolean;
+  onOpenModelSelector?: () => void;
+  canOpenModelSelector?: boolean;
   onOpenModelControls?: () => void;
   canOpenModelControls?: boolean;
   onBack?: () => void;
+}
+
+function SelectableHeaderChip({
+  label,
+  selectable = false,
+  onPress,
+  disabled = false,
+  tone = 'neutral',
+  leadingIconName,
+  textClassName,
+}: {
+  label: string;
+  selectable?: boolean;
+  onPress?: () => void;
+  disabled?: boolean;
+  tone?: 'neutral' | 'accent' | 'warning';
+  leadingIconName?: 'memory' | 'warning';
+  textClassName?: string;
+}) {
+  return (
+    <ScreenChip
+      label={label}
+      tone={tone}
+      onPress={onPress}
+      disabled={disabled}
+      leadingIconName={leadingIconName}
+      trailingIconName={selectable ? 'keyboard-arrow-down' : undefined}
+      className="min-w-0"
+      textClassName={textClassName}
+    />
+  );
 }
 
 function HeaderStatus({
@@ -58,12 +92,15 @@ export const ChatHeader = ({
   title,
   presetLabel,
   modelLabel,
+  modelSelectable = false,
   statusLabel,
   statusTone = 'neutral',
   canStartNewChat = true,
   onStartNewChat,
   onOpenPresetSelector,
   canOpenPresetSelector = true,
+  onOpenModelSelector,
+  canOpenModelSelector = true,
   onOpenModelControls,
   canOpenModelControls = true,
   onBack,
@@ -87,7 +124,7 @@ export const ChatHeader = ({
           <Box className="min-w-0 flex-1">
             <Text
               numberOfLines={2}
-              className={composeTextRole('screenTitle', 'text-[20px] leading-6')}
+              className={composeTextRole('screenTitle')}
             >
               {title}
             </Text>
@@ -135,11 +172,13 @@ export const ChatHeader = ({
                 ) : null}
 
                 {modelLabel ? (
-                  <ScreenChip
+                  <SelectableHeaderChip
                     label={modelLabel}
                     tone={isModelUnavailable ? 'warning' : 'neutral'}
                     leadingIconName={isModelUnavailable ? 'warning' : 'memory'}
-                    className="min-w-0"
+                    selectable={modelSelectable || Boolean(onOpenModelSelector)}
+                    onPress={onOpenModelSelector}
+                    disabled={!canOpenModelSelector}
                     textClassName={modelTextClassName}
                   />
                 ) : null}

@@ -77,6 +77,8 @@ const mockGetTotalMemory = jest.fn().mockResolvedValue(8 * 1024 * 1024 * 1024);
 const mockRefreshModelMetadata = jest.fn((model) => Promise.resolve(model));
 let lastPresetSelectorProps: any = null;
 let lastModelParametersSheetProps: any = null;
+let lastChatHeaderProps: any = null;
+let lastChatInputBarProps: any = null;
 const mockStartNewChat = jest.fn(() => {
   require('../../src/store/chatStore').useChatStore.getState().setActiveThread(null);
 });
@@ -208,10 +210,29 @@ jest.mock('../../src/components/ui/ChatHeader', () => {
       modelLabel,
       onOpenPresetSelector,
       canOpenPresetSelector,
+      modelSelectable,
+      onOpenModelSelector,
+      canOpenModelSelector,
       onOpenModelControls,
       canOpenModelControls,
-    }: any) =>
-      mockReact.createElement(
+    }: any) => {
+      lastChatHeaderProps = {
+        title,
+        canStartNewChat,
+        onStartNewChat,
+        statusLabel,
+        presetLabel,
+        modelLabel,
+        onOpenPresetSelector,
+        canOpenPresetSelector,
+        modelSelectable,
+        onOpenModelSelector,
+        canOpenModelSelector,
+        onOpenModelControls,
+        canOpenModelControls,
+      };
+
+      return mockReact.createElement(
         View,
         null,
         mockReact.createElement(Text, null, title),
@@ -250,7 +271,8 @@ jest.mock('../../src/components/ui/ChatHeader', () => {
               mockReact.createElement(Text, null, 'Model controls'),
             )
           : null,
-      ),
+      );
+    },
   };
 });
 
@@ -259,8 +281,17 @@ jest.mock('../../src/components/ui/ChatInputBar', () => {
   const { Pressable, Text, View } = require('react-native');
 
   return {
-    ChatInputBar: ({ isSending, onStopGeneration, onSendMessage, modeLabel }: any) =>
-      mockReact.createElement(
+    ChatInputBar: ({ isSending, onStopGeneration, onSendMessage, modeLabel, leadingActions, attachmentsTray }: any) => {
+      lastChatInputBarProps = {
+        isSending,
+        onStopGeneration,
+        onSendMessage,
+        modeLabel,
+        leadingActions,
+        attachmentsTray,
+      };
+
+      return mockReact.createElement(
         View,
         { testID: 'chat-input-bar' },
         modeLabel ? mockReact.createElement(Text, null, modeLabel) : null,
@@ -276,7 +307,8 @@ jest.mock('../../src/components/ui/ChatInputBar', () => {
               mockReact.createElement(Text, null, 'Stop'),
             )
           : null,
-      ),
+      );
+    },
   };
 });
 
@@ -529,6 +561,8 @@ describe('ChatScreen', () => {
     alertSpy.mockClear();
     lastPresetSelectorProps = null;
     lastModelParametersSheetProps = null;
+    lastChatHeaderProps = null;
+    lastChatInputBarProps = null;
     mockLoadModel.mockClear();
     hardwareStatusListener = null;
     mockHardwareBannerInputs = {
@@ -699,6 +733,16 @@ describe('ChatScreen', () => {
     expect(getByText('Saved user prompt')).toBeTruthy();
     expect(getByText('Saved assistant reply')).toBeTruthy();
     expect(queryByText('T0.7 • P0.6 • K40 • 1024 tok')).toBeNull();
+  });
+
+  it('threads future-ready header and composer contracts as no-op production props', () => {
+    render(React.createElement(ChatScreen));
+
+    expect(lastChatHeaderProps.modelSelectable).toBe(false);
+    expect(lastChatHeaderProps.onOpenModelSelector).toBeUndefined();
+    expect(lastChatHeaderProps.canOpenModelSelector).toBe(false);
+    expect(lastChatInputBarProps.leadingActions).toBeUndefined();
+    expect(lastChatInputBarProps.attachmentsTray).toBeUndefined();
   });
 
   it('starts message-scoped regenerate flow from a user bubble', async () => {

@@ -2,6 +2,7 @@
 
 # dependencies
 node_modules/
+build/
 
 # Expo
 .expo/
@@ -28,6 +29,7 @@ expo-env.d.ts
 npm-debug.*
 yarn-debug.*
 yarn-error.*
+*.log
 artifacts/
 
 # macOS
@@ -35,6 +37,7 @@ artifacts/
 *.pem
 
 # local env files
+.env*
 .env*.local
 .local/
 
@@ -53,3 +56,9 @@ local.properties
 # Android signing secrets
 keystore.properties
 keystores/
+
+# editors and OS files
+.idea/
+.vscode/
+Thumbs.db
+*.tmp

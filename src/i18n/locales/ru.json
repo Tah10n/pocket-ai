@@ -661,6 +661,7 @@
     "ramFitConfidenceHigh": "Высокая уверенность",
     "ramFitConfidenceMedium": "Средняя уверенность",
     "ramFitConfidenceLow": "Низкая уверенность",
+    "quantizationLabel": "Квантизация",
     "sizeLabel": "Размер",
     "fileSizeLabel": "Размер файла",
     "accessLabel": "Доступ",

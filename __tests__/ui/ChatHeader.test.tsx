@@ -106,4 +106,18 @@ describe('ChatHeader', () => {
     expect(getByTestId(`screen-chip-${modelLabel}`).props.textClassName).not.toContain('flex-initial');
     expect(getByTestId(`screen-chip-${modelLabel}`).props.textClassName).not.toContain('flex-1');
   });
+
+  it('supports a selectable preview state for the model chip without forcing a tap handler', () => {
+    const modelLabel = 'Qwen 3 4B';
+    const { getByTestId } = render(
+      <ChatHeader
+        title="Hi"
+        modelLabel={modelLabel}
+        modelSelectable
+      />,
+    );
+
+    expect(getByTestId(`screen-chip-${modelLabel}`).props.trailingIconName).toBe('keyboard-arrow-down');
+    expect(getByTestId(`screen-chip-${modelLabel}`).props.onPress).toBeUndefined();
+  });
 });

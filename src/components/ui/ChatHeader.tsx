@@ -29,37 +29,6 @@ interface ChatHeaderProps {
   onBack?: () => void;
 }
 
-function SelectableHeaderChip({
-  label,
-  selectable = false,
-  onPress,
-  disabled = false,
-  tone = 'neutral',
-  leadingIconName,
-  textClassName,
-}: {
-  label: string;
-  selectable?: boolean;
-  onPress?: () => void;
-  disabled?: boolean;
-  tone?: 'neutral' | 'accent' | 'warning';
-  leadingIconName?: 'memory' | 'warning';
-  textClassName?: string;
-}) {
-  return (
-    <ScreenChip
-      label={label}
-      tone={tone}
-      onPress={onPress}
-      disabled={disabled}
-      leadingIconName={leadingIconName}
-      trailingIconName={selectable ? 'keyboard-arrow-down' : undefined}
-      className="min-w-0"
-      textClassName={textClassName}
-    />
-  );
-}
-
 function HeaderStatus({
   label,
   tone = 'neutral',
@@ -172,13 +141,14 @@ export const ChatHeader = ({
                 ) : null}
 
                 {modelLabel ? (
-                  <SelectableHeaderChip
+                  <ScreenChip
                     label={modelLabel}
                     tone={isModelUnavailable ? 'warning' : 'neutral'}
                     leadingIconName={isModelUnavailable ? 'warning' : 'memory'}
-                    selectable={modelSelectable || Boolean(onOpenModelSelector)}
                     onPress={onOpenModelSelector}
                     disabled={!canOpenModelSelector}
+                    trailingIconName={modelSelectable || Boolean(onOpenModelSelector) ? 'keyboard-arrow-down' : undefined}
+                    className="min-w-0"
                     textClassName={modelTextClassName}
                   />
                 ) : null}

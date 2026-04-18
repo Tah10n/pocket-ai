@@ -735,14 +735,11 @@ describe('ChatScreen', () => {
     expect(queryByText('T0.7 • P0.6 • K40 • 1024 tok')).toBeNull();
   });
 
-  it('threads future-ready header and composer contracts as no-op production props', () => {
+  it('disables the model selector contract on the chat header by default', () => {
     render(React.createElement(ChatScreen));
 
     expect(lastChatHeaderProps.modelSelectable).toBe(false);
-    expect(lastChatHeaderProps.onOpenModelSelector).toBeUndefined();
     expect(lastChatHeaderProps.canOpenModelSelector).toBe(false);
-    expect(lastChatInputBarProps.leadingActions).toBeUndefined();
-    expect(lastChatInputBarProps.attachmentsTray).toBeUndefined();
   });
 
   it('starts message-scoped regenerate flow from a user bubble', async () => {
@@ -1277,6 +1274,11 @@ describe('ChatScreen', () => {
         modelType: 'deepseek-r1',
         baseModels: ['deepseek-ai/DeepSeek-R1'],
         tags: ['gguf', 'reasoning'],
+        thinkingCapability: {
+          detectedAt: Date.now(),
+          supportsThinking: true,
+          canDisableThinking: false,
+        },
       },
     ]);
 

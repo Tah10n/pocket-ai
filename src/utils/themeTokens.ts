@@ -119,6 +119,7 @@ export type SemanticIconSize = keyof typeof iconSizePx;
 export const radiusTokens = {
   sm: 'rounded-xl',
   md: 'rounded-2xl',
+  // FR-002: Keep the exact (non-scale) radii from the design contract behind semantic tokens.
   lg: 'rounded-[20px]',
   xl: 'rounded-[28px]',
   sheet: 'rounded-t-[32px]',
@@ -142,6 +143,8 @@ export const textFieldBySize = {
   md: 'min-h-12 rounded-2xl px-3.5',
   lg: 'min-h-14 rounded-[28px] px-4',
 } as const;
+
+export const listRowSelectedClassName = 'border-primary-500/30 bg-primary-500/10';
 
 export const screenChromeTokens = {
   maxWidthClassName: 'max-w-3xl',
@@ -188,9 +191,9 @@ export const buttonLayoutTokens = {
     lg: 'text-base',
   },
   screenActionPillClassNameBySize: {
-    compact: 'min-h-8 rounded-2xl px-3 py-1',
-    default: 'min-h-9 rounded-full px-3 py-1.5',
-    prominent: 'min-h-12 rounded-full px-4 py-3',
+    sm: 'min-h-8 rounded-2xl px-3 py-1',
+    md: 'min-h-9 rounded-full px-3 py-1.5',
+    lg: 'min-h-12 rounded-full px-4 py-3',
   },
   screenIconButtonClassNameBySize: {
     micro: 'h-6 w-6 rounded-full',
@@ -214,11 +217,11 @@ export const screenLayoutTokens = {
   softActionPillClassName: 'flex-row items-center justify-center gap-1.5 border border-primary-500/20 bg-primary-500/10',
   iconButtonClassName: 'items-center justify-center',
   iconTileClassName: `h-10 w-10 items-center justify-center ${radiusTokens.md}`,
-  searchInlineFieldClassName: `flex-row ${textFieldBySize.sm} items-center border border-outline-200 bg-background-50 dark:border-outline-700 dark:bg-background-900/60`,
+  searchInlineFieldClassName: 'flex-row h-10 rounded-2xl items-center border border-outline-200 bg-background-50 px-3 dark:border-outline-700 dark:bg-background-900/60',
   composerInlineFieldClassName: 'flex-row h-10 items-center rounded-full border border-outline-200 bg-background-50 px-3.5 dark:border-outline-700 dark:bg-background-900/80',
-  inlineInputShellClassName: 'flex-1 min-h-0 h-full justify-center border-0 bg-transparent px-0',
-  searchInlineInputClassName: 'min-h-0 px-0 py-0 text-[15px] text-typography-900 dark:text-typography-100',
-  composerInlineInputClassName: 'min-h-0 h-full px-0 py-0 text-[15px] text-typography-900 dark:text-typography-0',
+  inlineInputShellClassName: 'min-w-0 flex-1 min-h-0 h-full justify-center border-0 bg-transparent px-0',
+  searchInlineInputClassName: 'min-h-0 px-0 py-0 text-sm leading-5 text-typography-900 dark:text-typography-100',
+  composerInlineInputClassName: 'min-h-0 h-full px-0 py-0 text-sm text-typography-900 dark:text-typography-0',
   segmentedControlClassName: 'flex-row rounded-full border border-outline-200 bg-background-50 p-1 dark:border-outline-700 dark:bg-background-900/70',
   segmentedControlItemClassName: 'min-h-9 flex-1 items-center justify-center rounded-full px-3 py-1.5',
   sheetClassName: `max-h-[88%] ${radiusTokens.sheet} bg-background-0 px-4 pb-6 pt-5 dark:bg-background-950`,

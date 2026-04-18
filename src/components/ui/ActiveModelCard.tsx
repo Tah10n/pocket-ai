@@ -1,19 +1,21 @@
 import React from 'react';
 import { Box } from '@/components/ui/box';
-import { Text } from '@/components/ui/text';
+import { Text, composeTextRole } from '@/components/ui/text';
 import { MaterialSymbols } from './MaterialSymbols';
-import { ScreenActionPill, ScreenCard, ScreenStack } from './ScreenShell';
+import { ScreenActionPill, ScreenBadge, ScreenCard, ScreenStack } from './ScreenShell';
 import { useLLMEngine } from '@/hooks/useLLMEngine';
 import { useModelRegistryRevision } from '@/hooks/useModelRegistryRevision';
 import { registry } from '@/services/LocalStorageRegistry';
 import { EngineStatus } from '@/types/models';
 import { DECIMAL_GIGABYTE } from '@/utils/modelSize';
+import { useTranslation } from 'react-i18next';
 
 interface ActiveModelCardProps {
   onSwapModel?: () => void;
 }
 
 export const ActiveModelCard = ({ onSwapModel }: ActiveModelCardProps) => {
+  const { t } = useTranslation();
   const { state } = useLLMEngine();
   useModelRegistryRevision();
   const activeModel = state.activeModelId ? registry.getModel(state.activeModelId) : undefined;
@@ -22,59 +24,75 @@ export const ActiveModelCard = ({ onSwapModel }: ActiveModelCardProps) => {
   const hasActiveModel = Boolean(activeModel);
   const hasDownloadedModels = downloadedModelsCount > 0;
   const statusDotClassName = isReady ? 'w-2 h-2 rounded-full bg-success-500' : 'w-2 h-2 rounded-full bg-warning-400';
-  const statusLabel = isReady ? 'Model Ready' : state.status === EngineStatus.INITIALIZING ? 'Warming Up' : 'No Model Loaded';
-  const modelName = activeModel?.name ?? 'Choose a local model';
-  const modelTag = activeModel ? activeModel.author : 'Offline';
+  const statusLabel = isReady
+    ? t('home.activeModelStatusReady')
+    : state.status === EngineStatus.INITIALIZING
+      ? t('chat.warmingUp')
+      : t('home.activeModelStatusIdle');
+  const modelName = activeModel?.name ?? t('home.activeModelEmptyTitle');
+  const modelId = activeModel?.id;
+  const inferredAuthor = modelId && modelId.includes('/') ? modelId.split('/')[0] : null;
+  const modelTag = activeModel
+    ? activeModel.author || inferredAuthor || t('common.unknown')
+    : t('home.activeModelOfflineTag');
   const memoryLabel = activeModel
     ? activeModel.size === null
-      ? 'Unknown size'
-      : `${(activeModel.size / DECIMAL_GIGABYTE).toFixed(1)} GB on disk`
+      ? t('models.sizeUnknown')
+      : t('home.activeModelDiskFootprint', { size: (activeModel.size / DECIMAL_GIGABYTE).toFixed(1) })
     : hasDownloadedModels
-      ? `${downloadedModelsCount} downloaded ${downloadedModelsCount === 1 ? 'model' : 'models'}`
-      : 'Download and load a GGUF model';
+      ? t('home.activeModelDownloadedCount', { count: downloadedModelsCount })
+      : t('home.activeModelEmptyDescription');
   const speedLabel = isReady
-    ? 'Engine loaded'
+    ? t('home.activeModelEngineLoaded')
     : hasActiveModel
-      ? 'Ready to load'
+      ? t('home.activeModelReadyToLoad')
       : hasDownloadedModels
-        ? 'Choose from downloaded models'
-        : 'Chat is unavailable';
-  const ctaLabel = hasActiveModel ? 'Swap Model' : hasDownloadedModels ? 'Choose Model' : 'Browse Models';
+        ? t('home.activeModelChooseDownloaded')
+        : t('home.activeModelUnavailable');
+  const ctaLabel = hasActiveModel
+    ? t('home.swapModel')
+    : hasDownloadedModels
+      ? t('home.chooseModel')
+      : t('home.browseModels');
 
   return (
-    <ScreenCard className="overflow-hidden shadow-xl" tone={hasActiveModel ? 'accent' : 'default'} padding="none">
-      <Box className="border-b border-outline-200 px-4 py-2.5 dark:border-outline-800">
+    <ScreenCard className="overflow-hidden" tone={hasActiveModel ? 'accent' : 'default'} padding="none">
+      <Box className="border-b border-outline-200 px-4 py-2 dark:border-outline-800">
         <Box className="flex-row items-center gap-2">
           <Box className={statusDotClassName} />
-          <Text className="text-xs font-medium text-typography-500 dark:text-typography-400 uppercase tracking-wide">
+          <Text className={composeTextRole('eyebrow')}>
             {statusLabel}
           </Text>
         </Box>
       </Box>
 
-      <ScreenStack className="px-4 py-3.5" gap="compact">
-        <Text className="text-typography-500 dark:text-typography-400 text-sm font-medium">Active Model</Text>
-        <Box className="flex-row flex-wrap items-baseline gap-2">
-            <Text className="text-typography-900 dark:text-typography-100 text-xl font-bold tracking-tight">{modelName}</Text>
-            <Box className="px-2 py-0.5 bg-primary-500/20 rounded-full">
-                <Text className="text-xs font-normal text-primary-500">{modelTag}</Text>
-            </Box>
+      <ScreenStack className="px-4 py-3" gap="compact">
+        <Text className={composeTextRole('caption')}>
+          {t('home.activeModelTitle')}
+        </Text>
+        <Box className="flex-row flex-wrap items-center gap-2">
+          <Text className={composeTextRole('screenTitle', 'flex-1 tracking-tight')}>
+            {modelName}
+          </Text>
+          <ScreenBadge tone={hasActiveModel ? 'accent' : 'neutral'} size="micro">
+            {modelTag}
+          </ScreenBadge>
         </Box>
 
-        <Box className="mt-1.5 flex-row items-start justify-between gap-4">
-          <Box className="gap-1">
+        <Box className="mt-1 flex-row items-start justify-between gap-4">
+          <Box className="flex-1 gap-1.5">
             <Box className="flex-row items-center gap-1">
-              <MaterialSymbols name="memory" size={16} className="text-typography-500 dark:text-typography-400" />
-              <Text className="text-typography-500 dark:text-typography-400 text-xs">{memoryLabel}</Text>
+              <MaterialSymbols name="memory" size="sm" className="text-typography-500 dark:text-typography-400" />
+              <Text className={composeTextRole('caption')}>{memoryLabel}</Text>
             </Box>
             <Box className="flex-row items-center gap-1">
-              <MaterialSymbols name="speed" size={16} className="text-typography-500 dark:text-typography-400" />
-              <Text className="text-typography-500 dark:text-typography-400 text-xs">{speedLabel}</Text>
+              <MaterialSymbols name="speed" size="sm" className="text-typography-500 dark:text-typography-400" />
+              <Text className={composeTextRole('caption')}>{speedLabel}</Text>
             </Box>
           </Box>
 
-          <ScreenActionPill onPress={onSwapModel} tone="primary" size="compact" className="shrink-0">
-            <Text className="text-typography-0 text-sm font-semibold">{ctaLabel}</Text>
+          <ScreenActionPill onPress={onSwapModel} tone="primary" size="sm" className="shrink-0">
+            <Text className={composeTextRole('action', 'text-typography-0')}>{ctaLabel}</Text>
           </ScreenActionPill>
         </Box>
       </ScreenStack>

@@ -57,7 +57,7 @@ function ActionCard({
     onPress: () => void;
 }) {
     return (
-        <ScreenCard variant="inset" className={busy ? 'opacity-70' : undefined}>
+        <ScreenCard variant="inset" padding="compact" className={busy ? 'opacity-70' : undefined}>
             <Box className="flex-row items-start justify-between gap-3">
                 <Box className="min-w-0 flex-1">
                     <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">
@@ -246,25 +246,25 @@ export function StorageManagerScreen() {
             />
 
             <ScrollView className="flex-1" showsVerticalScrollIndicator={false}>
-                <ScreenContent className="pt-5" style={{ paddingBottom: insets.bottom + 32 }}>
-                    <ScreenStack gap="loose">
+                <ScreenContent className="pt-3" style={{ paddingBottom: insets.bottom + 32 }}>
+                    <ScreenStack gap="default">
                         {hardwareStatus.isLowMemory ? (
-                            <ScreenCard tone="warning">
+                            <ScreenCard tone="warning" padding="compact">
                                 <Text className="text-base font-semibold text-warning-800 dark:text-warning-100">
                                     {t('storageManager.lowMemoryTitle')}
                                 </Text>
-                                <Text className="mt-2 text-sm leading-6 text-warning-700 dark:text-warning-200">
+                                <Text className="mt-2 text-sm leading-5 text-warning-700 dark:text-warning-200">
                                     {t('storageManager.lowMemoryDescription')}
                                 </Text>
                             </ScreenCard>
                         ) : null}
 
-                        <ScreenCard>
+                        <ScreenCard padding="compact">
                             <ScreenSectionLabel>{t('storageManager.actionsTitle')}</ScreenSectionLabel>
-                            <Text className="mt-2 text-sm leading-6 text-typography-600 dark:text-typography-300">
+                            <Text className="mt-2 text-sm leading-5 text-typography-600 dark:text-typography-300">
                                 {t('storageManager.actionsDescription')}
                             </Text>
-                            <ScreenStack className="mt-4">
+                            <ScreenStack className="mt-3" gap="compact">
                                 <ActionCard
                                     title={t('storageManager.clearCacheTitle')}
                                     description={t('storageManager.clearCacheDescription')}
@@ -297,21 +297,21 @@ export function StorageManagerScreen() {
                             </ScreenStack>
                         </ScreenCard>
 
-                        <ScreenCard>
+                        <ScreenCard padding="compact">
                             <ScreenSectionLabel>
                                 {t('storageManager.downloadedModelsTitle', { count: downloadedModels.length })}
                             </ScreenSectionLabel>
-                            <Text className="mt-2 text-sm leading-6 text-typography-600 dark:text-typography-300">
+                            <Text className="mt-2 text-sm leading-5 text-typography-600 dark:text-typography-300">
                                 {t('storageManager.downloadedModelsDescription')}
                             </Text>
 
-                            <ScreenStack className="mt-4">
+                            <ScreenStack className="mt-3" gap="compact">
                                 {downloadedModels.length === 0 ? (
-                                    <ScreenCard variant="inset">
-                                        <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">
+                                    <ScreenCard variant="inset" padding="compact" className="items-center">
+                                        <Text className="text-center text-base font-semibold text-typography-900 dark:text-typography-100">
                                             {t('storageManager.emptyModelsTitle')}
                                         </Text>
-                                        <Text className="mt-2 text-sm leading-6 text-typography-500 dark:text-typography-400">
+                                        <Text className="mt-2 text-center text-sm leading-5 text-typography-500 dark:text-typography-400">
                                             {t('storageManager.emptyModelsDescription')}
                                         </Text>
                                     </ScreenCard>
@@ -319,7 +319,7 @@ export function StorageManagerScreen() {
                                     const actionKey: BusyAction = `offload:${model.id}`;
                                     const isActive = appMetrics?.activeModelId === model.id;
                                     return (
-                                        <ScreenCard key={model.id} variant="inset">
+                                        <ScreenCard key={model.id} variant="inset" padding="compact">
                                             <Box className="flex-row items-start justify-between gap-3">
                                                 <Box className="min-w-0 flex-1">
                                                     <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">

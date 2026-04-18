@@ -71,7 +71,7 @@ jest.mock('expo-blur', () => {
   };
 });
 
-const { ScreenIconButton, ScreenSheet } = require('../../src/components/ui/ScreenShell');
+const { ScreenIconButton, ScreenInlineInput, ScreenSheet } = require('../../src/components/ui/ScreenShell');
 
 describe('ScreenShell', () => {
   beforeEach(() => {
@@ -95,5 +95,32 @@ describe('ScreenShell', () => {
     expect(getByTestId('screen-sheet').props.className).toContain('px-4');
     expect(getByTestId('screen-sheet').props.className).toContain('pt-5');
     expect(getByTestId('screen-sheet').props.className).toContain('pb-6');
+  });
+
+  it('keeps inline inputs inside the shared input shell', () => {
+    const { UNSAFE_getAllByType } = render(
+      <ScreenInlineInput
+        containerTestID="inline-input-shell"
+        testID="inline-input-field"
+        variant="search"
+        value=""
+        onChangeText={jest.fn()}
+      />,
+    );
+
+    const { View } = require('react-native');
+    const requiredClasses = [
+      'min-w-0',
+      'flex-1',
+      'border-0',
+      'bg-transparent',
+      'px-0',
+    ];
+    const shell = UNSAFE_getAllByType(View).find((node: any) =>
+      typeof node.props.className === 'string'
+      && requiredClasses.every((token) => node.props.className.split(/\s+/).includes(token)),
+    );
+
+    expect(shell).toBeTruthy();
   });
 });

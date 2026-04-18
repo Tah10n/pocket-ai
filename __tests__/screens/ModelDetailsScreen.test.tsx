@@ -112,6 +112,7 @@ jest.mock('../../src/components/ui/pressable', () => {
 });
 
 jest.mock('../../src/components/ui/ScreenShell', () => ({
+  joinClassNames: (...values: Array<string | undefined | false>) => values.filter(Boolean).join(' '),
   ScreenHeaderShell: ({ children }: any) => children,
   ScreenContent: ({ children }: any) => children,
   ScreenStack: ({ children }: any) => children,

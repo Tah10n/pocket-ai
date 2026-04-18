@@ -21,7 +21,7 @@ import {
   ScreenSheet,
   ScreenStack,
 } from '@/components/ui/ScreenShell';
-import { Text } from '@/components/ui/text';
+import { Text, composeTextRole } from '@/components/ui/text';
 import { useChatSession } from '../../hooks/useChatSession';
 import { useConversationIndex } from '../../hooks/useConversationIndex';
 import { ConversationIndexItem } from '../../types/chat';
@@ -232,7 +232,7 @@ export function ConversationsScreen() {
   };
 
   const renderRetentionCard = () => (
-    <ScreenCard>
+    <ScreenCard padding="compact">
       <Pressable
         testID="retention-toggle"
         onPress={() => {
@@ -243,13 +243,13 @@ export function ConversationsScreen() {
         className="active:opacity-80"
       >
         <Box className="flex-row items-start gap-3">
-          <Box className="mt-0.5 h-10 w-10 items-center justify-center rounded-2xl bg-primary-500/10 dark:bg-primary-500/15">
-            <MaterialSymbols name="history" size={18} className="text-primary-500" />
+          <Box className="mt-0.5 h-9 w-9 items-center justify-center rounded-xl bg-primary-500/10 dark:bg-primary-500/15">
+            <MaterialSymbols name="history" size="lg" className="text-primary-500" />
           </Box>
 
           <Box className="min-w-0 flex-1">
             <Box className="flex-row items-center justify-between gap-3">
-              <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">
+              <Text className={composeTextRole('sectionTitle')}>
                 {t('conversations.retention.title')}
               </Text>
 
@@ -259,7 +259,7 @@ export function ConversationsScreen() {
                 </ScreenBadge>
                 <MaterialSymbols
                   name={isRetentionExpanded ? 'keyboard-arrow-up' : 'keyboard-arrow-down'}
-                  size={20}
+                  size="lg"
                   className="text-typography-500 dark:text-typography-400"
                 />
               </Box>
@@ -273,7 +273,7 @@ export function ConversationsScreen() {
       </Pressable>
 
       {isRetentionExpanded ? (
-        <Box className="mt-3 gap-2.5 border-t border-outline-200 pt-3 dark:border-outline-800">
+        <Box className="mt-3 gap-2 border-t border-outline-200 pt-3 dark:border-outline-800">
           <Text className="text-sm text-typography-500 dark:text-typography-400">
             {t('conversations.retention.description')}
           </Text>
@@ -322,7 +322,7 @@ export function ConversationsScreen() {
     const isActive = activeThreadId === item.id;
 
     return (
-      <ScreenCard>
+      <ScreenCard padding="compact">
         <Box className="flex-row items-start justify-between gap-3">
           <Pressable
             testID={`conversation-row-${item.id}`}
@@ -336,7 +336,7 @@ export function ConversationsScreen() {
             <Box className="flex-row items-center gap-2">
               <Text
                 numberOfLines={1}
-                className="flex-1 text-base font-semibold text-typography-900 dark:text-typography-100"
+                className={composeTextRole('sectionTitle', 'flex-1')}
               >
                 {item.title}
               </Text>
@@ -347,16 +347,16 @@ export function ConversationsScreen() {
               ) : null}
             </Box>
 
-            <Text className="mt-2 text-sm text-typography-500 dark:text-typography-400">
+            <Text className={composeTextRole('caption', 'mt-1.5')}>
               {getConversationModelLabel(item.modelId)} • {t('chat.messageCount', { count: item.messageCount })} • {formatConversationUpdatedAt(item.updatedAt)}
             </Text>
 
             {item.lastMessagePreview ? (
-              <Text numberOfLines={2} className="mt-2.5 text-sm text-typography-700 dark:text-typography-300">
+              <Text numberOfLines={2} className={composeTextRole('body', 'mt-2')}>
                 {item.lastMessagePreview}
               </Text>
             ) : (
-              <Text className="mt-2.5 text-sm text-typography-500 dark:text-typography-400">
+              <Text className={composeTextRole('bodyMuted', 'mt-2')}>
                 {t('conversations.noMessagesYet')}
               </Text>
             )}
@@ -403,9 +403,10 @@ export function ConversationsScreen() {
             onPress={handleStartNewChat}
             accessibilityLabel={t('conversations.newChat')}
             tone="primary"
+            size="sm"
             className="shrink-0"
           >
-            <MaterialSymbols name="edit-square" size={18} className="text-typography-0" />
+            <MaterialSymbols name="edit-square" size="sm" className="text-typography-0" />
             <Text className="text-sm font-semibold text-typography-0">
               {t('conversations.newChat')}
             </Text>
@@ -413,8 +414,8 @@ export function ConversationsScreen() {
         )}
       />
 
-      <ScreenContent className="flex-1 pt-3">
-        <ScreenStack className="flex-1">
+      <ScreenContent className="flex-1 pt-2">
+        <ScreenStack className="flex-1" gap="compact">
           <ScreenInlineInput
             variant="search"
             testID="conversation-search-input"
@@ -422,7 +423,7 @@ export function ConversationsScreen() {
             placeholder={t('conversations.searchPlaceholder')}
             value={searchQuery}
             onChangeText={setSearchQuery}
-            leadingAccessory={<MaterialSymbols name="search" size={20} className="text-typography-500 dark:text-typography-400" />}
+            leadingAccessory={<MaterialSymbols name="search" size="sm" className="text-typography-500 dark:text-typography-400" />}
             trailingAccessory={searchQuery.length > 0 ? (
               <ScreenIconButton
                 testID="clear-conversation-search"
@@ -448,40 +449,31 @@ export function ConversationsScreen() {
                 renderItem={renderItem}
                 keyboardShouldPersistTaps="handled"
                 contentContainerStyle={{ paddingBottom: insets.bottom + 20 }}
-                ItemSeparatorComponent={() => <Box className="h-3" />}
+                ItemSeparatorComponent={() => <Box className="h-2" />}
               />
             </Box>
           ) : (
-            <Box
-              className={conversationIndex.length === 0
-                ? 'flex-1 justify-start pb-10 pt-6'
-                : 'flex-1 justify-center pb-10 pt-4'}
-            >
-              <ScreenCard padding="large">
-                <Box className="h-12 w-12 items-center justify-center rounded-2xl bg-primary-500/10 dark:bg-primary-500/15">
+            <Box className="flex-1 pt-4">
+              <ScreenCard padding="compact">
+                <Box className="h-10 w-10 items-center justify-center rounded-xl bg-primary-500/10 dark:bg-primary-500/15">
                   <MaterialSymbols
-                    name={conversationIndex.length === 0 ? 'history' : 'search'}
-                    size={22}
+                    name={conversationIndex.length === 0 ? 'forum' : 'search'}
+                    size="xl"
                     className="text-primary-500"
                   />
                 </Box>
 
-                <Text className="mt-4 text-lg font-semibold text-typography-900 dark:text-typography-100">
+                <Text className={composeTextRole('screenTitle', 'mt-3')}>
                   {conversationIndex.length === 0 ? t('conversations.emptyTitle') : t('conversations.emptySearchTitle')}
                 </Text>
 
-                <Text className="mt-2 text-sm leading-6 text-typography-500 dark:text-typography-400">
+                <Text className={composeTextRole('bodyMuted', 'mt-2')}>
                   {conversationIndex.length === 0
                     ? t('conversations.emptyDescription')
                     : t('conversations.emptySearchDescription')}
                 </Text>
 
-                {conversationIndex.length === 0 ? (
-                  <Button size="sm" className="mt-5 self-start" onPress={handleStartNewChat}>
-                    <MaterialSymbols name="edit-square" size={16} className="text-typography-0" />
-                    <ButtonText>{t('conversations.newChat')}</ButtonText>
-                  </Button>
-                ) : (
+                {conversationIndex.length === 0 ? null : (
                   <Button action="secondary" size="sm" className="mt-5 self-start" onPress={() => setSearchQuery('')}>
                     <ButtonText>{t('common.clear')}</ButtonText>
                   </Button>

@@ -139,10 +139,10 @@ export const HomeScreen = () => {
               accessibilityRole="button"
               accessibilityLabel={t('home.newChat')}
               tone="primary"
-              size="prominent"
+              size="lg"
               className="w-full gap-3 shadow-xl"
             >
-              <MaterialSymbols name="add-comment" size={22} className="text-typography-0" />
+              <MaterialSymbols name="add-comment" size="xl" className="text-typography-0" />
               <Text className="text-typography-0 text-base font-bold">{t('home.newChat')}</Text>
             </ScreenActionPill>
 

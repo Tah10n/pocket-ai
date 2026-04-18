@@ -37,10 +37,10 @@ type OptionRowProps = {
   trailingLabel?: string;
 };
 
-const SIZE_OPTIONS: { label: string; value: ModelSizeRange }[] = [
-  { label: '< 2 GB', value: 'small' },
-  { label: '2-5 GB', value: 'medium' },
-  { label: '> 5 GB', value: 'large' },
+const SIZE_OPTIONS: { labelKey: string; value: ModelSizeRange }[] = [
+  { labelKey: 'models.sizeRangeSmall', value: 'small' },
+  { labelKey: 'models.sizeRangeMedium', value: 'medium' },
+  { labelKey: 'models.sizeRangeLarge', value: 'large' },
 ];
 
 const SORT_OPTIONS: { labelKey: string; field: ModelSortField }[] = [
@@ -64,7 +64,7 @@ function TriggerButton({
     <Pressable
       testID={testID}
       onPress={onPress}
-      className={`min-w-0 flex-1 flex-row items-center gap-1.5 rounded-[18px] border px-2.5 py-2 active:opacity-80 ${
+      className={`min-w-0 flex-1 flex-row items-center gap-1.5 rounded-2xl border px-2.5 py-2 active:opacity-80 ${
         isOpen
           ? 'border-primary-500 bg-primary-500/10'
           : 'border-outline-200 bg-background-50 dark:border-outline-800 dark:bg-background-900/60'
@@ -73,7 +73,7 @@ function TriggerButton({
       <Box className="min-w-0 flex-1 flex-row items-center gap-2">
         <MaterialSymbols
           name={iconName}
-          size={16}
+          size="sm"
           className={isOpen ? 'text-primary-500' : 'text-typography-500 dark:text-typography-400'}
         />
 
@@ -98,7 +98,7 @@ function TriggerButton({
         ) : null}
         <MaterialSymbols
           name={isOpen ? 'keyboard-arrow-up' : 'keyboard-arrow-down'}
-          size={16}
+          size="sm"
           className={isOpen ? 'text-primary-500' : 'text-typography-500 dark:text-typography-400'}
         />
       </Box>
@@ -220,7 +220,7 @@ export const ModelsFilter = ({
                 testID="models-filter-clear"
                 onPress={onClear}
                 tone="soft"
-                size="compact"
+                size="sm"
               >
                 <Text className="text-xs font-semibold text-primary-500">{t('common.clear')}</Text>
               </ScreenActionPill>
@@ -248,7 +248,7 @@ export const ModelsFilter = ({
               <OptionRow
                 key={option.value}
                 testID={`filter-option-size-${option.value}`}
-                label={option.label}
+                label={t(option.labelKey)}
                 active={filters.sizeRanges.includes(option.value)}
                 onPress={() => onSizeRangeToggle(option.value)}
               />

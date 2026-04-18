@@ -15,7 +15,7 @@ export interface MaterialSymbolsProps {
    * Icon name from @expo/vector-icons MaterialIcons set.
    * Use the exact name as-is (e.g. 'arrow-back', 'chevron-right', 'add-comment').
    * NOTE: MaterialIcons uses dashes, NOT underscores ('arrow-back', not 'arrow_back').
-  */
+   */
   name: MaterialSymbolName;
   size?: number | SemanticIconSize;
   className?: string;

@@ -4,9 +4,10 @@ import { useTranslation } from 'react-i18next';
 import { Box } from '@/components/ui/box';
 import { Pressable } from '@/components/ui/pressable';
 import { ScrollView } from '@/components/ui/scroll-view';
-import { ScreenBadge, ScreenCard, ScreenIconButton, ScreenPressableCard, ScreenSheet } from '@/components/ui/ScreenShell';
+import { joinClassNames, ScreenBadge, ScreenCard, ScreenIconButton, ScreenPressableCard, ScreenSheet } from '@/components/ui/ScreenShell';
 import { Text } from '@/components/ui/text';
 import { MaterialSymbols, type MaterialSymbolsProps } from './MaterialSymbols';
+import { listRowSelectedClassName } from '../../utils/themeTokens';
 
 export interface ListPickerSheetItem {
   key: string;
@@ -44,10 +45,6 @@ interface ListPickerSheetProps extends ListPickerSheetContentProps {
   modalAnimationType?: 'none' | 'slide' | 'fade';
 }
 
-function joinClassNames(...values: (string | undefined | false)[]) {
-  return values.filter(Boolean).join(' ');
-}
-
 function ListPickerRow({
   item,
   activeLabel,
@@ -57,7 +54,7 @@ function ListPickerRow({
 }) {
   const isInteractive = typeof item.onPress === 'function' && !item.disabled;
   const cardClassName = joinClassNames(
-    item.selected && 'border-primary-500/30 bg-primary-500/10',
+    item.selected && listRowSelectedClassName,
     item.disabled && 'border-outline-100 bg-background-100/80 dark:border-outline-900 dark:bg-background-900/40',
   );
   const content = (

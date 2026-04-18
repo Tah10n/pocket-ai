@@ -2,6 +2,7 @@ import React from 'react';
 import { Box } from './box';
 import { MaterialSymbols } from './MaterialSymbols';
 import { Pressable } from './pressable';
+import { joinClassNames } from './ScreenShell';
 import { Text, composeTextRole } from './text';
 
 export interface ValueSelectorRowProps {
@@ -24,11 +25,11 @@ export function ValueSelectorRow({
   testID,
 }: ValueSelectorRowProps) {
   const isInteractive = typeof onPress === 'function' && !disabled;
-  const containerClassName = [
+  const containerClassName = joinClassNames(
     'min-h-11 flex-row items-center gap-3 rounded-2xl border border-outline-200 bg-background-50 px-3 py-2.5 dark:border-outline-700 dark:bg-background-900',
-    disabled ? 'opacity-60' : '',
-    className ?? '',
-  ].filter(Boolean).join(' ');
+    disabled ? 'opacity-60' : undefined,
+    className,
+  );
 
   const content = (
     <>

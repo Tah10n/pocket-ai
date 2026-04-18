@@ -1,6 +1,6 @@
 import React from 'react';
 import { Box } from '../ui/box';
-import { Text } from '../ui/text';
+import { Text, composeTextRole } from '../ui/text';
 import { SectionCard } from './ModelDetailsPrimitives';
 
 export interface ModelDetailsHeroCardProps {
@@ -30,12 +30,12 @@ export function ModelDetailsHeroCard({
         </Box>
       ) : null}
 
-      <Text className="mt-3 text-[18px] font-bold leading-6 tracking-tight text-typography-900 dark:text-typography-50">
+      <Text className={composeTextRole('screenTitle', 'mt-3 tracking-tight dark:text-typography-50')}>
         {title}
       </Text>
 
       <Box className="mt-2 self-start rounded-full border border-outline-200/80 bg-background-0/80 px-3 py-1.5 dark:border-outline-700 dark:bg-background-950/70">
-        <Text className="text-xs font-medium text-typography-600 dark:text-typography-300">
+        <Text className={composeTextRole('chip', 'font-medium text-typography-600 dark:text-typography-300')}>
           {modelId}
         </Text>
       </Box>

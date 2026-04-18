@@ -16,6 +16,7 @@ import {
   EngineState,
   type ModelMemoryFitConfidence,
   type ModelMetadata,
+  type ModelThinkingCapabilitySnapshot,
 } from '../types/models';
 import { LlmChatCompletionOptions, LlmChatMessage } from '../types/chat';
 import { registry } from './LocalStorageRegistry';
@@ -237,6 +238,22 @@ function readNumericMetadata(metadata: Record<string, unknown> | undefined, keys
   }
 
   return null;
+}
+
+function areThinkingCapabilitySnapshotsEqual(
+  left: ModelThinkingCapabilitySnapshot | undefined,
+  right: ModelThinkingCapabilitySnapshot,
+): boolean {
+  if (!left) {
+    return false;
+  }
+
+  return (
+    left.supportsThinking === right.supportsThinking
+    && left.canDisableThinking === right.canDisableThinking
+    && left.thinkingStartTag === right.thinkingStartTag
+    && left.thinkingEndTag === right.thinkingEndTag
+  );
 }
 
 function normalizeArchitecturePrefix(value: unknown): string | null {
@@ -1080,6 +1097,8 @@ class LLMEngineService {
     };
 
     const runCompletion = async (completionMessages: LlmChatMessage[], onTokensStreamed: () => void) => {
+      const enableThinking = params?.enable_thinking ?? false;
+      const reasoningFormat = params?.reasoning_format ?? 'none';
       const baseStopWords = [
         '</s>',
         '<|end|>',
@@ -1098,8 +1117,8 @@ class LLMEngineService {
           completionMessages as any,
           null,
           {
-            enable_thinking: params?.enable_thinking ?? false,
-            reasoning_format: params?.reasoning_format ?? 'none',
+            enable_thinking: enableThinking,
+            reasoning_format: reasoningFormat,
             add_generation_prompt: true,
           },
         );
@@ -1134,8 +1153,8 @@ class LLMEngineService {
         top_k: params?.top_k ?? 40,
         min_p: params?.min_p ?? 0.05,
         penalty_repeat: params?.penalty_repeat ?? 1,
-        enable_thinking: params?.enable_thinking ?? false,
-        reasoning_format: params?.reasoning_format ?? 'none',
+        enable_thinking: enableThinking,
+        reasoning_format: reasoningFormat,
         stop: resolvedStops,
       };
 
@@ -1143,8 +1162,14 @@ class LLMEngineService {
         completionParams.seed = Math.round(params.seed);
       }
 
-      if (typeof params?.thinking_budget_tokens === 'number' && Number.isFinite(params.thinking_budget_tokens)) {
+      // Explicitly clear the thinking budget whenever it is not set for this request so llama.rn never
+      // reuses a previously-supplied value across completions. (`llama.rn` treats -1 as unset.)
+      if (!enableThinking) {
+        completionParams.thinking_budget_tokens = -1;
+      } else if (typeof params?.thinking_budget_tokens === 'number' && Number.isFinite(params.thinking_budget_tokens)) {
         completionParams.thinking_budget_tokens = Math.max(0, Math.round(params.thinking_budget_tokens));
+      } else {
+        completionParams.thinking_budget_tokens = -1;
       }
 
       const completionPromise = context.completion(
@@ -1193,6 +1218,153 @@ class LLMEngineService {
 
       throw error;
     }
+  }
+
+  private async probeThinkingCapability(context: LlamaContext): Promise<ModelThinkingCapabilitySnapshot | null> {
+    const sampleMessages = [{ role: 'user', content: 'ping' }];
+    const shouldAbort = () => this.isUnloading || this.context !== context;
+
+    const safeFormat = async ({
+      enableThinking,
+      reasoningFormat,
+    }: {
+      enableThinking: boolean;
+      reasoningFormat: 'none' | 'auto';
+    }) => {
+      if (shouldAbort()) {
+        return null;
+      }
+
+      try {
+        const formatted = await context.getFormattedChat(sampleMessages as any, null, {
+          jinja: true,
+          enable_thinking: enableThinking,
+          reasoning_format: reasoningFormat,
+          add_generation_prompt: true,
+        });
+
+        if (shouldAbort()) {
+          return null;
+        }
+
+        return formatted;
+      } catch (error) {
+        if (!shouldAbort() && process.env.NODE_ENV !== 'test') {
+          console.warn('[LLMEngine] Failed to probe chat template thinking capability', error);
+        }
+        return null;
+      }
+    };
+
+    const formattedOn = await safeFormat({ enableThinking: true, reasoningFormat: 'auto' });
+    const formattedOff = await safeFormat({ enableThinking: false, reasoningFormat: 'none' });
+
+    if (!formattedOn && !formattedOff) {
+      return null;
+    }
+
+    const isJinjaResult = (value: unknown): boolean => {
+      if (!value || typeof value !== 'object') {
+        return false;
+      }
+
+      const record = value as Record<string, unknown>;
+      return record.type === 'jinja'
+        || typeof record.thinking_start_tag === 'string'
+        || typeof record.thinking_end_tag === 'string'
+        || typeof record.thinking_forced_open === 'boolean';
+    };
+
+    const detectThinkingTagsFromPrompt = (prompt: string) => {
+      const candidates = [
+        { start: '<think>', end: '</think>' },
+        { start: '[THINK]', end: '[/THINK]' },
+        { start: '<|start_thinking|>', end: '<|end_thinking|>' },
+        { start: '<|channel>thought', end: '<channel|>' },
+        { start: '<|channel|>thought', end: '<|end|>' },
+      ] as const;
+
+      for (const candidate of candidates) {
+        if (prompt.includes(candidate.start)) {
+          return candidate;
+        }
+      }
+
+      return null;
+    };
+
+    const readPrompt = (value: unknown): string | null => {
+      if (!value || typeof value !== 'object') {
+        return null;
+      }
+
+      if (!('prompt' in value)) {
+        return null;
+      }
+
+      const prompt = (value as any).prompt;
+      return typeof prompt === 'string' ? prompt : null;
+    };
+
+    const promptOn = readPrompt(formattedOn);
+    const promptOff = readPrompt(formattedOff);
+
+    if (promptOn && promptOff) {
+      const jinjaOn = isJinjaResult(formattedOn) ? formattedOn as any : null;
+      const jinjaOff = isJinjaResult(formattedOff) ? formattedOff as any : null;
+
+      if (jinjaOn && jinjaOff) {
+        let thinkingStartTag = typeof jinjaOn?.thinking_start_tag === 'string' && jinjaOn.thinking_start_tag.trim().length > 0
+          ? jinjaOn.thinking_start_tag
+          : undefined;
+        let thinkingEndTag = typeof jinjaOn?.thinking_end_tag === 'string' && jinjaOn.thinking_end_tag.trim().length > 0
+          ? jinjaOn.thinking_end_tag
+          : undefined;
+
+        if (!thinkingStartTag && !thinkingEndTag) {
+          const tagsFromPrompt = detectThinkingTagsFromPrompt(promptOn) ?? detectThinkingTagsFromPrompt(promptOff);
+          if (tagsFromPrompt) {
+            thinkingStartTag = tagsFromPrompt.start;
+            thinkingEndTag = tagsFromPrompt.end;
+          }
+        }
+
+        const supportsThinking = Boolean(thinkingStartTag) || Boolean(thinkingEndTag);
+        if (!supportsThinking) {
+          return null;
+        }
+
+        const canDisableThinking = typeof jinjaOff?.thinking_forced_open === 'boolean'
+          ? !jinjaOff.thinking_forced_open
+          : detectThinkingTagsFromPrompt(promptOff) === null;
+
+        return {
+          detectedAt: Date.now(),
+          supportsThinking,
+          canDisableThinking,
+          ...(thinkingStartTag ? { thinkingStartTag } : {}),
+          ...(thinkingEndTag ? { thinkingEndTag } : {}),
+        };
+      }
+
+      const thinkingTagOn = detectThinkingTagsFromPrompt(promptOn);
+      const thinkingTagOff = detectThinkingTagsFromPrompt(promptOff);
+
+      if (thinkingTagOn || thinkingTagOff) {
+        const resolvedThinkingTag = thinkingTagOn ?? thinkingTagOff!;
+
+        return {
+          detectedAt: Date.now(),
+          supportsThinking: true,
+          // For non-jinja formatting, infer whether thinking can be disabled by comparing the prompts.
+          canDisableThinking: thinkingTagOff === null,
+          thinkingStartTag: resolvedThinkingTag.start,
+          thinkingEndTag: resolvedThinkingTag.end,
+        };
+      }
+    }
+
+    return null;
   }
 
   public async countPromptTokens({
@@ -2814,6 +2986,26 @@ class LLMEngineService {
         this.captureBackendTelemetry(this.context);
       } else {
         this.resetBackendTelemetry();
+      }
+
+      const contextAtProbeStart = this.context;
+      if (contextAtProbeStart && process.env.NODE_ENV !== 'test') {
+        try {
+          const thinkingCapability = await this.probeThinkingCapability(contextAtProbeStart);
+          if (thinkingCapability && this.context === contextAtProbeStart && !this.isUnloading) {
+            const model = registry.getModel(modelId);
+            if (model && !areThinkingCapabilitySnapshotsEqual(model.thinkingCapability, thinkingCapability)) {
+              registry.updateModel({
+                ...model,
+                thinkingCapability,
+              });
+            }
+          }
+        } catch (error) {
+          if (this.context === contextAtProbeStart && !this.isUnloading) {
+            console.warn('[LLMEngine] Failed to persist chat template thinking capability', error);
+          }
+        }
       }
 
       const reportedLoadedGpuLayers = this.resolveReportedLoadedGpuLayers(resolvedGpuLayers);

@@ -60,6 +60,14 @@ export interface ModelVariant {
   isLocal?: boolean;
 }
 
+export interface ModelThinkingCapabilitySnapshot {
+  detectedAt: number;
+  supportsThinking: boolean;
+  canDisableThinking: boolean;
+  thinkingStartTag?: string;
+  thinkingEndTag?: string;
+}
+
 export interface ModelMetadata {
   id: string;
   name: string;
@@ -103,6 +111,7 @@ export interface ModelMetadata {
   description?: string;
   variants?: ModelVariant[];
   activeVariantId?: string;
+  thinkingCapability?: ModelThinkingCapabilitySnapshot;
 }
 
 export enum EngineStatus {

@@ -111,6 +111,9 @@ function resolveHeuristicModel(
           ...(model.gguf ?? {}),
         }
     : undefined;
+  const resolvedThinkingCapability = preferPersisted
+    ? persistedModel.thinkingCapability ?? model.thinkingCapability
+    : model.thinkingCapability ?? persistedModel.thinkingCapability;
 
   return {
     ...model,
@@ -119,6 +122,7 @@ function resolveHeuristicModel(
     sha256: preferPersisted ? persistedModel.sha256 ?? model.sha256 : model.sha256 ?? persistedModel.sha256,
     metadataTrust: resolvedMetadataTrust,
     gguf: resolvedGguf,
+    thinkingCapability: resolvedThinkingCapability,
     maxContextTokens: resolvedMaxContextTokens,
     hasVerifiedContextWindow: resolvedHasVerifiedContextWindow,
     capabilitySnapshot: preferPersisted

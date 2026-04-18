@@ -54,7 +54,23 @@ describe('modelReasoningCapabilities', () => {
     });
   });
 
-  it('treats R1-family models as requiring reasoning', () => {
+  it('treats explicit reasoning models as supporting optional reasoning', () => {
+    expect(resolveModelReasoningCapability({
+      id: 'mistralai/Ministral-3B-Reasoning-GGUF',
+      name: 'Ministral-3B-Reasoning-GGUF',
+      modelType: 'mistral',
+      architectures: ['MistralForCausalLM'],
+      baseModels: ['mistralai/Ministral-3B-Instruct'],
+      tags: ['gguf', 'reasoning'],
+    })).toEqual({
+      supportsReasoning: true,
+      requiresReasoning: false,
+      autoEffort: 'medium',
+      preferredReasoningFormat: 'auto',
+    });
+  });
+
+  it('treats R1-family models as requiring reasoning by default', () => {
     expect(resolveModelReasoningCapability({
       id: 'deepseek-ai/DeepSeek-R1-Distill-Qwen-7B-GGUF',
       name: 'DeepSeek-R1-Distill-Qwen-7B-GGUF',
@@ -79,12 +95,45 @@ describe('modelReasoningCapabilities', () => {
     });
   });
 
-  it('infers reasoning requirement from fallback labels when metadata is missing', () => {
+  it('infers reasoning support from fallback labels when metadata is missing', () => {
     expect(resolveModelReasoningCapability(undefined, 'deepseek-ai/DeepSeek-R1', 'DeepSeek-R1')).toEqual({
       supportsReasoning: true,
       requiresReasoning: true,
       autoEffort: 'medium',
       preferredReasoningFormat: 'deepseek',
+    });
+  });
+
+  it('treats QwQ-family models as requiring reasoning by default', () => {
+    expect(resolveModelReasoningCapability({
+      id: 'Qwen/QwQ-32B-GGUF',
+      name: 'QwQ-32B-GGUF',
+      tags: ['gguf', 'reasoning'],
+    })).toEqual({
+      supportsReasoning: true,
+      requiresReasoning: true,
+      autoEffort: 'medium',
+      preferredReasoningFormat: 'auto',
+    });
+  });
+
+  it('honors persisted thinking capability when it disallows disabling thinking', () => {
+    expect(resolveModelReasoningCapability({
+      id: 'author/thinking-model',
+      name: 'thinking-model',
+      tags: ['gguf', 'chat'],
+      thinkingCapability: {
+        detectedAt: Date.now(),
+        supportsThinking: true,
+        canDisableThinking: false,
+        thinkingStartTag: '<think>',
+        thinkingEndTag: '</think>',
+      },
+    })).toEqual({
+      supportsReasoning: true,
+      requiresReasoning: true,
+      autoEffort: 'medium',
+      preferredReasoningFormat: 'auto',
     });
   });
 
@@ -229,7 +278,16 @@ describe('modelReasoningCapabilities', () => {
   });
 
   it('prevents turning reasoning off for required reasoning models', () => {
-    const capability = resolveModelReasoningCapability(undefined, 'deepseek-ai/DeepSeek-R1', 'DeepSeek-R1');
+    const capability = resolveModelReasoningCapability({
+      id: 'author/thinking-model',
+      name: 'thinking-model',
+      tags: ['gguf', 'chat'],
+      thinkingCapability: {
+        detectedAt: Date.now(),
+        supportsThinking: true,
+        canDisableThinking: false,
+      },
+    });
     expect(clampReasoningEffort('off', capability)).toBe('auto');
   });
 });

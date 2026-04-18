@@ -3,7 +3,7 @@ import type { ReasoningEffort, ResolvedReasoningEffort } from '@/types/reasoning
 
 type ReasoningModelMetadata = Pick<
   ModelMetadata,
-  'id' | 'name' | 'modelType' | 'architectures' | 'baseModels' | 'tags'
+  'id' | 'name' | 'modelType' | 'architectures' | 'baseModels' | 'tags' | 'thinkingCapability'
 >;
 
 export interface ModelReasoningCapability {
@@ -22,15 +22,6 @@ export interface ReasoningRuntimeConfig {
   responseReserveTokens: number;
 }
 
-const REQUIRED_REASONING_PATTERNS = [
-  /deepseek[\s/_-]?r1/i,
-  /(^|[\s/_-])qwq($|[\s/_-])/i,
-  /(^|[\s/_-])r1($|[\s/_-])/i,
-  /\breasoner\b/i,
-  /\breasoning[-\s]?model\b/i,
-  /\bthinking[-\s]?model\b/i,
-];
-
 const DEEPSEEK_REASONING_FORMAT_PATTERNS = [
   /deepseek[\s/_-]?r1/i,
 ];
@@ -43,6 +34,11 @@ const SUPPORTED_REASONING_PATTERNS = [
   /deepseek[\s/_-]?r1/i,
   /(^|[\s/_-])qwq($|[\s/_-])/i,
   /(^|[\s/_-])r1($|[\s/_-])/i,
+];
+
+const REQUIRED_REASONING_PATTERNS = [
+  /deepseek[\s/_-]?r1/i,
+  /(^|[\s/_-])qwq($|[\s/_-])/i,
 ];
 
 const AUTO_ENABLED_REASONING_PATTERNS = [
@@ -150,6 +146,9 @@ export function resolveModelReasoningCapability(
   ...fallbackLabels: (string | null | undefined)[]
 ): ModelReasoningCapability {
   const sources = collectReasoningSources(model, fallbackLabels);
+  const persistedThinkingCapability = model?.thinkingCapability && typeof model.thinkingCapability === 'object'
+    ? model.thinkingCapability
+    : null;
 
   const preferredReasoningFormat = matchesAnyPattern(sources, DEEPSEEK_REASONING_FORMAT_PATTERNS)
     ? 'deepseek' as const
@@ -164,10 +163,16 @@ export function resolveModelReasoningCapability(
     };
   }
 
-  const requiresReasoning = matchesAnyPattern(sources, REQUIRED_REASONING_PATTERNS);
   const supportsFromPatterns = matchesAnyPattern(sources, SUPPORTED_REASONING_PATTERNS);
+  const requiresFromPatterns = matchesAnyPattern(sources, REQUIRED_REASONING_PATTERNS);
+  const supportsReasoningFromProbe = typeof persistedThinkingCapability?.supportsThinking === 'boolean'
+    ? persistedThinkingCapability.supportsThinking
+    : null;
+  const supportsReasoning = supportsReasoningFromProbe ?? (supportsFromPatterns || requiresFromPatterns);
+  const requiresReasoning = supportsReasoningFromProbe === null
+    ? requiresFromPatterns
+    : supportsReasoningFromProbe && persistedThinkingCapability?.canDisableThinking === false;
   const autoEnabledFromPatterns = requiresReasoning || matchesAnyPattern(sources, AUTO_ENABLED_REASONING_PATTERNS);
-  const supportsReasoning = requiresReasoning || supportsFromPatterns;
 
   if (!supportsReasoning && !hasStructuredReasoningMetadata(model)) {
     return {

@@ -7,6 +7,7 @@ import {
   type ModelMemoryFitConfidence,
   type ModelMemoryFitDecision,
   type ModelMetadataTrust,
+  type ModelThinkingCapabilitySnapshot,
 } from '../types/models';
 import { normalizePersistedModelCapabilitySnapshot } from '../utils/modelCapabilities';
 import { buildHuggingFaceResolveUrl } from '../utils/huggingFaceUrls';
@@ -163,6 +164,44 @@ function normalizeGgufMetadata(value: unknown): ModelGgufMetadata | undefined {
   return Object.keys(normalized).length > 0 ? normalized : undefined;
 }
 
+function normalizeThinkingCapabilitySnapshot(value: unknown): ModelThinkingCapabilitySnapshot | undefined {
+  if (!value || typeof value !== 'object') {
+    return undefined;
+  }
+
+  const record = value as Record<string, unknown>;
+  const detectedAt = typeof record.detectedAt === 'number' && Number.isFinite(record.detectedAt)
+    ? Math.max(0, Math.round(record.detectedAt))
+    : null;
+  const supportsThinking = typeof record.supportsThinking === 'boolean' ? record.supportsThinking : null;
+  const canDisableThinking = typeof record.canDisableThinking === 'boolean' ? record.canDisableThinking : null;
+  const thinkingStartTag = normalizeNonEmptyString(record.thinkingStartTag);
+  const thinkingEndTag = normalizeNonEmptyString(record.thinkingEndTag);
+
+  if (detectedAt === null || supportsThinking === null || canDisableThinking === null) {
+    if (process.env.NODE_ENV !== 'test' && Object.keys(record).length > 0) {
+      const missing: string[] = [];
+      if (detectedAt === null) missing.push('detectedAt');
+      if (supportsThinking === null) missing.push('supportsThinking');
+      if (canDisableThinking === null) missing.push('canDisableThinking');
+
+      console.warn(
+        `[ModelMetadataNormalizer] Dropping invalid thinkingCapability snapshot (missing: ${missing.join(', ')})`,
+        { keys: Object.keys(record) },
+      );
+    }
+    return undefined;
+  }
+
+  return {
+    detectedAt,
+    supportsThinking,
+    canDisableThinking,
+    ...(thinkingStartTag ? { thinkingStartTag } : {}),
+    ...(thinkingEndTag ? { thinkingEndTag } : {}),
+  };
+}
+
 export function normalizePersistedModelMetadata(
   model: PersistedModelMetadata,
 ): ModelMetadata {
@@ -177,6 +216,9 @@ export function normalizePersistedModelMetadata(
   const memoryFitDecision = size === null ? undefined : normalizeMemoryFitDecision(model.memoryFitDecision);
   const memoryFitConfidence = size === null ? undefined : normalizeMemoryFitConfidence(model.memoryFitConfidence);
   const gguf = normalizeGgufMetadata(model.gguf);
+  const thinkingCapability = normalizeThinkingCapabilitySnapshot(
+    (model as PersistedModelMetadata & { thinkingCapability?: unknown }).thinkingCapability,
+  );
   const rawProgress = typeof model.downloadProgress === 'number' && Number.isFinite(model.downloadProgress)
     ? model.downloadProgress
     : 0;
@@ -224,6 +266,7 @@ export function normalizePersistedModelMetadata(
     ...(memoryFitConfidence !== undefined ? { memoryFitConfidence } : {}),
     ...(metadataTrust !== undefined ? { metadataTrust } : {}),
     ...(gguf !== undefined ? { gguf } : {}),
+    ...(thinkingCapability !== undefined ? { thinkingCapability } : {}),
     accessState: normalizeAccessState(model.accessState),
     isGated: model.isGated === true,
     isPrivate: model.isPrivate === true,

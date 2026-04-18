@@ -15,12 +15,40 @@ jest.mock('@shopify/flash-list', () => {
   const { View } = require('react-native');
 
   return {
-    FlashList: ({ data, renderItem, keyExtractor, ItemSeparatorComponent, ListEmptyComponent }: any) =>
-      data?.length > 0
-        ? mockReact.createElement(
-            View,
-            null,
-            data.map((item: any, index: number) =>
+    FlashList: ({
+      data,
+      renderItem,
+      keyExtractor,
+      ItemSeparatorComponent,
+      ListEmptyComponent,
+      maintainVisibleContentPosition,
+      onContentSizeChange,
+      onScroll,
+      onScrollBeginDrag,
+      onScrollEndDrag,
+      onMomentumScrollBegin,
+      onMomentumScrollEnd,
+      onTouchStart,
+      onTouchEnd,
+      onTouchCancel,
+    }: any) =>
+      mockReact.createElement(
+        View,
+        {
+          testID: 'chat-flash-list',
+          maintainVisibleContentPosition,
+          onContentSizeChange,
+          onScroll,
+          onScrollBeginDrag,
+          onScrollEndDrag,
+          onMomentumScrollBegin,
+          onMomentumScrollEnd,
+          onTouchStart,
+          onTouchEnd,
+          onTouchCancel,
+        },
+        data?.length > 0
+          ? data.map((item: any, index: number) =>
               mockReact.createElement(
                 mockReact.Fragment,
                 { key: keyExtractor ? keyExtractor(item, index) : index },
@@ -29,11 +57,11 @@ jest.mock('@shopify/flash-list', () => {
                   ? mockReact.createElement(ItemSeparatorComponent)
                   : null,
               ),
-            ),
-          )
-        : ListEmptyComponent
-          ? mockReact.createElement(ListEmptyComponent)
-          : null,
+            )
+          : ListEmptyComponent
+            ? mockReact.createElement(ListEmptyComponent)
+            : null,
+      ),
   };
 });
 
@@ -422,7 +450,7 @@ jest.mock('@/components/ui/box', () => {
   const { View } = require('react-native');
 
   return {
-    Box: ({ children }: any) => mockReact.createElement(View, null, children),
+    Box: ({ children, className: _className, ...props }: any) => mockReact.createElement(View, props, children),
   };
 });
 
@@ -517,6 +545,7 @@ jest.mock('../../src/services/HardwareListenerService', () => ({
 
 const {
   ChatScreen,
+  getFlashListAutoScrollBottomThreshold,
   getNextShouldStickToBottom,
   getAndroidKeyboardOverlapCompensation,
   getAndroidKeyboardSpacerHeight,
@@ -677,6 +706,116 @@ describe('ChatScreen', () => {
     ).toBe(false);
   });
 
+  it('keeps auto-scroll armed after a small scroll near the bottom', () => {
+    expect(
+      getNextShouldStickToBottom(
+        true,
+        {
+          contentOffset: { x: 0, y: 548 },
+          contentSize: { width: 320, height: 1200 },
+          layoutMeasurement: { width: 320, height: 640 },
+        },
+        true,
+      ),
+    ).toBe(true);
+  });
+
+  it('keeps auto-scroll stable inside the hysteresis band', () => {
+    const scrollEvent = {
+      contentOffset: { x: 0, y: 520 },
+      contentSize: { width: 320, height: 1200 },
+      layoutMeasurement: { width: 320, height: 640 },
+    };
+
+    expect(getNextShouldStickToBottom(true, scrollEvent, true)).toBe(true);
+    expect(getNextShouldStickToBottom(false, scrollEvent, true)).toBe(false);
+  });
+
+  it('re-arms auto-scroll only when the user scrolls back to the bottom', () => {
+    expect(
+      getNextShouldStickToBottom(
+        false,
+        {
+          contentOffset: { x: 0, y: 556 },
+          contentSize: { width: 320, height: 1200 },
+          layoutMeasurement: { width: 320, height: 640 },
+        },
+        true,
+      ),
+    ).toBe(true);
+  });
+
+  it('converts the FlashList bottom threshold from pixels into a viewport ratio', () => {
+    expect(getFlashListAutoScrollBottomThreshold(640)).toBeCloseTo(32 / 640);
+    expect(getFlashListAutoScrollBottomThreshold(1)).toBe(1);
+    expect(getFlashListAutoScrollBottomThreshold(0)).toBe(0.02);
+  });
+
+  it('uses the measured list viewport height to compute the FlashList bottom threshold', () => {
+    const { getByTestId } = render(React.createElement(ChatScreen));
+
+    expect(getByTestId('chat-flash-list').props.maintainVisibleContentPosition.autoscrollToBottomThreshold).toBe(0.02);
+
+    act(() => {
+      fireEvent(getByTestId('chat-list-viewport'), 'layout', {
+        nativeEvent: {
+          layout: {
+            x: 0,
+            y: 0,
+            width: 320,
+            height: 640,
+          },
+        },
+      });
+    });
+
+    expect(getByTestId('chat-flash-list').props.maintainVisibleContentPosition.autoscrollToBottomThreshold)
+      .toBeCloseTo(32 / 640);
+  });
+
+  it('clears the list-touch guard after drag end so auto-follow can resume without touchEnd', () => {
+    jest.useFakeTimers();
+    const originalRequestAnimationFrame = global.requestAnimationFrame;
+    const rafSpy = jest.fn((callback: FrameRequestCallback) => originalRequestAnimationFrame(callback));
+    global.requestAnimationFrame = rafSpy as typeof global.requestAnimationFrame;
+
+    try {
+      const { getByTestId } = render(React.createElement(ChatScreen));
+
+      // Ignore any initial auto-follow scheduling from mount effects.
+      rafSpy.mockClear();
+
+      fireEvent(getByTestId('chat-flash-list'), 'scrollBeginDrag', {
+        nativeEvent: {
+          contentOffset: { x: 0, y: 556 },
+          contentSize: { width: 320, height: 1200 },
+          layoutMeasurement: { width: 320, height: 640 },
+        },
+      });
+
+      // Drag ends near the bottom and should re-arm auto-follow.
+      fireEvent(getByTestId('chat-flash-list'), 'scrollEndDrag', {
+        nativeEvent: {
+          contentOffset: { x: 0, y: 556 },
+          contentSize: { width: 320, height: 1200 },
+          layoutMeasurement: { width: 320, height: 640 },
+        },
+      });
+
+      act(() => {
+        jest.runOnlyPendingTimers();
+      });
+
+      rafSpy.mockClear();
+      fireEvent(getByTestId('chat-flash-list'), 'contentSizeChange', 320, 1400);
+
+      expect(rafSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      global.requestAnimationFrame = originalRequestAnimationFrame;
+      jest.useRealTimers();
+    }
+  });
+
   it('compensates only the portion of the Android keyboard that still overlaps the resized viewport', () => {
     expect(getAndroidKeyboardOverlapCompensation({
       baseWindowHeight: 2400,
@@ -733,6 +872,221 @@ describe('ChatScreen', () => {
     expect(getByText('Saved user prompt')).toBeTruthy();
     expect(getByText('Saved assistant reply')).toBeTruthy();
     expect(queryByText('T0.7 • P0.6 • K40 • 1024 tok')).toBeNull();
+  });
+
+  it('pauses auto-scroll on tap during generation and re-arms only after drag ends near the bottom', () => {
+    jest.useFakeTimers();
+    try {
+    useChatStore.setState({
+      threads: {
+        ...useChatStore.getState().threads,
+        'thread-1': {
+          ...useChatStore.getState().threads['thread-1'],
+          status: 'generating',
+        },
+      },
+      activeThreadId: 'thread-1',
+    });
+
+    const { getByTestId } = render(React.createElement(ChatScreen));
+
+    expect(getByTestId('chat-flash-list').props.maintainVisibleContentPosition.autoscrollToBottomThreshold).toBe(0.02);
+
+    fireEvent(getByTestId('chat-flash-list'), 'touchStart');
+
+    expect(getByTestId('chat-flash-list').props.maintainVisibleContentPosition.autoscrollToBottomThreshold).toBe(-1);
+
+    fireEvent(getByTestId('chat-flash-list'), 'touchEnd');
+
+    expect(getByTestId('chat-flash-list').props.maintainVisibleContentPosition.autoscrollToBottomThreshold).toBe(-1);
+
+    fireEvent(getByTestId('chat-flash-list'), 'scrollBeginDrag', {
+      nativeEvent: {
+        contentOffset: { x: 0, y: 556 },
+        contentSize: { width: 320, height: 1200 },
+        layoutMeasurement: { width: 320, height: 640 },
+      },
+    });
+
+    fireEvent.scroll(getByTestId('chat-flash-list'), {
+      nativeEvent: {
+        contentOffset: { x: 0, y: 556 },
+        contentSize: { width: 320, height: 1200 },
+        layoutMeasurement: { width: 320, height: 640 },
+      },
+    });
+
+    expect(getByTestId('chat-flash-list').props.maintainVisibleContentPosition.autoscrollToBottomThreshold).toBe(-1);
+
+    fireEvent(getByTestId('chat-flash-list'), 'scrollEndDrag', {
+      nativeEvent: {
+        contentOffset: { x: 0, y: 556 },
+        contentSize: { width: 320, height: 1200 },
+        layoutMeasurement: { width: 320, height: 640 },
+      },
+    });
+
+    act(() => {
+      jest.runOnlyPendingTimers();
+    });
+
+    expect(getByTestId('chat-flash-list').props.maintainVisibleContentPosition.autoscrollToBottomThreshold).toBe(0.02);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('keeps auto-scroll paused after an upward swipe even if the list is still near the bottom', () => {
+    jest.useFakeTimers();
+    try {
+    useChatStore.setState({
+      threads: {
+        ...useChatStore.getState().threads,
+        'thread-1': {
+          ...useChatStore.getState().threads['thread-1'],
+          status: 'generating',
+        },
+      },
+      activeThreadId: 'thread-1',
+    });
+
+    const { getByTestId } = render(React.createElement(ChatScreen));
+
+    fireEvent(getByTestId('chat-flash-list'), 'touchStart');
+    expect(getByTestId('chat-flash-list').props.maintainVisibleContentPosition.autoscrollToBottomThreshold).toBe(-1);
+
+    fireEvent(getByTestId('chat-flash-list'), 'scrollBeginDrag', {
+      nativeEvent: {
+        contentOffset: { x: 0, y: 560 },
+        contentSize: { width: 320, height: 1200 },
+        layoutMeasurement: { width: 320, height: 640 },
+      },
+    });
+
+    // User swipes upward but remains within the bottom re-arm threshold.
+    fireEvent(getByTestId('chat-flash-list'), 'scrollEndDrag', {
+      nativeEvent: {
+        contentOffset: { x: 0, y: 540 },
+        contentSize: { width: 320, height: 1200 },
+        layoutMeasurement: { width: 320, height: 640 },
+      },
+    });
+
+    act(() => {
+      jest.runOnlyPendingTimers();
+    });
+
+    expect(getByTestId('chat-flash-list').props.maintainVisibleContentPosition.autoscrollToBottomThreshold).toBe(-1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('re-arms auto-scroll only after momentum ends when the user flings to the bottom', () => {
+    useChatStore.setState({
+      threads: {
+        ...useChatStore.getState().threads,
+        'thread-1': {
+          ...useChatStore.getState().threads['thread-1'],
+          status: 'generating',
+        },
+      },
+      activeThreadId: 'thread-1',
+    });
+
+    const { getByTestId } = render(React.createElement(ChatScreen));
+
+    fireEvent(getByTestId('chat-flash-list'), 'scrollBeginDrag', {
+      nativeEvent: {
+        contentOffset: { x: 0, y: 240 },
+        contentSize: { width: 320, height: 1200 },
+        layoutMeasurement: { width: 320, height: 640 },
+      },
+    });
+    fireEvent(getByTestId('chat-flash-list'), 'scrollEndDrag', {
+      nativeEvent: {
+        contentOffset: { x: 0, y: 240 },
+        contentSize: { width: 320, height: 1200 },
+        layoutMeasurement: { width: 320, height: 640 },
+      },
+    });
+
+    expect(getByTestId('chat-flash-list').props.maintainVisibleContentPosition.autoscrollToBottomThreshold).toBe(-1);
+
+    fireEvent(getByTestId('chat-flash-list'), 'momentumScrollBegin', {
+      nativeEvent: {
+        contentOffset: { x: 0, y: 240 },
+        contentSize: { width: 320, height: 1200 },
+        layoutMeasurement: { width: 320, height: 640 },
+      },
+    });
+    fireEvent(getByTestId('chat-flash-list'), 'momentumScrollEnd', {
+      nativeEvent: {
+        contentOffset: { x: 0, y: 560 },
+        contentSize: { width: 320, height: 1200 },
+        layoutMeasurement: { width: 320, height: 640 },
+      },
+    });
+
+    expect(getByTestId('chat-flash-list').props.maintainVisibleContentPosition.autoscrollToBottomThreshold).toBe(0.02);
+  });
+
+  it('keeps auto-scroll paused after a tap during generation', () => {
+    useChatStore.setState({
+      threads: {
+        ...useChatStore.getState().threads,
+        'thread-1': {
+          ...useChatStore.getState().threads['thread-1'],
+          status: 'generating',
+        },
+      },
+      activeThreadId: 'thread-1',
+    });
+
+    const { getByTestId } = render(React.createElement(ChatScreen));
+
+    expect(getByTestId('chat-flash-list').props.maintainVisibleContentPosition.autoscrollToBottomThreshold).toBe(0.02);
+
+    fireEvent(getByTestId('chat-flash-list'), 'touchStart');
+
+    expect(getByTestId('chat-flash-list').props.maintainVisibleContentPosition.autoscrollToBottomThreshold).toBe(-1);
+
+    fireEvent(getByTestId('chat-flash-list'), 'touchEnd');
+
+    expect(getByTestId('chat-flash-list').props.maintainVisibleContentPosition.autoscrollToBottomThreshold).toBe(-1);
+  });
+
+  it('does not restore bottom anchoring after a drag when touchEnd fires last', () => {
+    const { getByTestId } = render(React.createElement(ChatScreen));
+
+    fireEvent(getByTestId('chat-flash-list'), 'touchStart');
+
+    fireEvent(getByTestId('chat-flash-list'), 'scrollBeginDrag', {
+      nativeEvent: {
+        contentOffset: { x: 0, y: 240 },
+        contentSize: { width: 320, height: 1200 },
+        layoutMeasurement: { width: 320, height: 640 },
+      },
+    });
+
+    fireEvent.scroll(getByTestId('chat-flash-list'), {
+      nativeEvent: {
+        contentOffset: { x: 0, y: 240 },
+        contentSize: { width: 320, height: 1200 },
+        layoutMeasurement: { width: 320, height: 640 },
+      },
+    });
+
+    fireEvent(getByTestId('chat-flash-list'), 'scrollEndDrag', {
+      nativeEvent: {
+        contentOffset: { x: 0, y: 240 },
+        contentSize: { width: 320, height: 1200 },
+        layoutMeasurement: { width: 320, height: 640 },
+      },
+    });
+    fireEvent(getByTestId('chat-flash-list'), 'touchEnd');
+
+    expect(getByTestId('chat-flash-list').props.maintainVisibleContentPosition.autoscrollToBottomThreshold).toBe(-1);
   });
 
   it('disables the model selector contract on the chat header by default', () => {

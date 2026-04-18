@@ -52,22 +52,22 @@ npm run lint
 npm test
 ```
 
-If the release affects model loading, chat, downloads, storage, or navigation behavior, also run an Android emulator smoke pass:
+If the release affects model loading, chat, downloads, storage, or navigation behavior, also run an Android phone smoke pass with a connected device:
 
 ```bash
-npm run android:emulator
+npm run android:smoke
 ```
 
 If the release changes shared theme, tab chrome, routed headers, localization fit, or motion behavior, also run the UI hardening gate:
 
 ```bash
 npm run verify:mobile-change
-node .\scripts\android-scenarios.js --emulator --skip-build --scenario home-smoke
-node .\scripts\android-scenarios.js --emulator --skip-build --scenario bottom-tabs
-node .\scripts\android-scenarios.js --emulator --skip-build --scenario hf-catalog-hardening
-node .\scripts\android-scenarios.js --emulator --skip-build --scenario hf-token-education
-node .\scripts\android-scenarios.js --emulator --skip-build --scenario conversations-management
-node .\scripts\android-screen-capture.js --emulator --skip-build --screen home,models,settings,conversations,huggingface-token,model-details --output-dir artifacts/android-scenarios/manual-sample
+node .\scripts\android-scenarios.js --skip-build --scenario home-smoke
+node .\scripts\android-scenarios.js --skip-build --scenario bottom-tabs
+node .\scripts\android-scenarios.js --skip-build --scenario hf-catalog-hardening
+node .\scripts\android-scenarios.js --skip-build --scenario hf-token-education
+node .\scripts\android-scenarios.js --skip-build --scenario conversations-management
+node .\scripts\android-screen-capture.js --skip-build --screen home,models,settings,conversations,huggingface-token,model-details --output-dir artifacts/android-scenarios/manual-sample
 ```
 
 ## Build commands

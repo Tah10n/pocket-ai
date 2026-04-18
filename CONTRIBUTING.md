@@ -128,6 +128,8 @@ If your change affects Android behavior or visible UI flows, also run:
 npm run verify:mobile-change:android
 ```
 
+This command expects a connected Android phone by default. Use the explicit `:emulator` scripts only when you intentionally want emulator coverage.
+
 ## Localization
 
 When a change adds or edits user-facing copy:

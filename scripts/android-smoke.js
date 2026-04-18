@@ -24,6 +24,7 @@ const apkPath = path.join(
 const requiredNativeLibraries = ["libreactnative.so"];
 const metroStartupTimeoutMs = 90_000;
 const deviceStartupTimeoutMs = 180_000;
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const launchDelayMs = parsePositiveInteger(
   cliOptions.launchDelayMs ?? process.env.ANDROID_SMOKE_LAUNCH_DELAY_MS ?? "4000",
   "launch delay"
@@ -74,10 +75,14 @@ async function main() {
   });
 
   if (!device) {
-    device = await startEmulatorAndWait(tools, {
-      requestedSerial,
-      requestedAvd,
-    });
+    if (forceEmulator) {
+      device = await startEmulatorAndWait(tools, {
+        requestedSerial,
+        requestedAvd,
+      });
+    } else {
+      throw new Error("Connect a phone and try again. No physical Android device is connected.");
+    }
   }
 
   log(`Using Android target ${device.serial}${device.model ? ` (${device.model})` : ""}.`);
@@ -371,17 +376,21 @@ function pickConnectedDevice(adbPath, options = {}) {
     return devices.find((device) => isEmulatorSerial(device.serial)) || null;
   }
 
-  if (devices.length === 0) {
+  const physicalDevices = devices.filter(
+    (device) => !isEmulatorSerial(device.serial)
+  );
+
+  if (physicalDevices.length === 0) {
     return null;
   }
 
-  if (devices.length > 1) {
+  if (physicalDevices.length > 1) {
     log(
-      `Multiple Android targets are connected; defaulting to ${devices[0].serial}. Set ANDROID_SERIAL to override.`
+      `Multiple Android phones are connected; defaulting to ${physicalDevices[0].serial}. Set ANDROID_SERIAL to override.`
     );
   }
 
-  return devices[0];
+  return physicalDevices[0];
 }
 
 function listConnectedDevices(adbPath) {
@@ -816,25 +825,7 @@ function launchDevClient(adbPath, serial, appPackage, appScheme, port) {
 }
 
 function saveScreenshot(adbPath, serial, outputPath) {
-  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
-
-  const result = spawnSync(
-    adbPath,
-    ["-s", serial, "exec-out", "screencap", "-p"],
-    {
-      maxBuffer: 20 * 1024 * 1024,
-    }
-  );
-
-  if (result.error) {
-    throw result.error;
-  }
-
-  if (result.status !== 0) {
-    throw new Error("Failed to capture an Android screenshot.");
-  }
-
-  fs.writeFileSync(outputPath, result.stdout);
+  captureAndroidScreenshot(adbPath, serial, outputPath);
 }
 
 function saveLogcat(adbPath, serial, outputPath) {
@@ -848,6 +839,83 @@ function saveLogcat(adbPath, serial, outputPath) {
 
   fs.writeFileSync(outputPath, logs);
   log(`Saved logcat to ${outputPath}.`);
+}
+
+function captureAndroidScreenshot(adbPath, serial, outputPath) {
+  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+
+  const directCapture = spawnSync(
+    adbPath,
+    ["-s", serial, "exec-out", "screencap", "-p"],
+    {
+      maxBuffer: 20 * 1024 * 1024,
+    }
+  );
+
+  if (directCapture.error) {
+    throw directCapture.error;
+  }
+
+  if (directCapture.status === 0 && isPngBuffer(directCapture.stdout)) {
+    fs.writeFileSync(outputPath, directCapture.stdout);
+    return;
+  }
+
+  log("Direct screencap failed; retrying screenshot capture via a temporary device file.");
+
+  const remotePath = `/data/local/tmp/pocket-ai-qa-${process.pid}-${Date.now()}.png`;
+  const remoteCapture = spawnSync(
+    adbPath,
+    ["-s", serial, "shell", "screencap", "-p", remotePath],
+    {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }
+  );
+
+  if (remoteCapture.error) {
+    throw remoteCapture.error;
+  }
+
+  try {
+    if (remoteCapture.status !== 0) {
+      throw new Error("Failed to capture an Android screenshot.");
+    }
+
+    const pullResult = spawnSync(
+      adbPath,
+      ["-s", serial, "pull", remotePath, outputPath],
+      {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      }
+    );
+
+    if (pullResult.error) {
+      throw pullResult.error;
+    }
+
+    if (pullResult.status !== 0) {
+      throw new Error("Failed to capture an Android screenshot.");
+    }
+
+    const screenshotBuffer = fs.readFileSync(outputPath);
+    if (!isPngBuffer(screenshotBuffer)) {
+      throw new Error("Failed to capture an Android screenshot.");
+    }
+  } finally {
+    runChecked(
+      adbPath,
+      ["-s", serial, "shell", "rm", "-f", remotePath],
+      { stdio: "ignore", allowFailure: true }
+    );
+  }
+}
+
+function isPngBuffer(value) {
+  return Buffer.isBuffer(value)
+    && value.length >= PNG_SIGNATURE.length
+    && value.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE);
 }
 
 function runCapture(command, args, options = {}) {
@@ -966,7 +1034,7 @@ function printHelp() {
   console.log("Usage: node ./scripts/android-smoke.js [options]");
   console.log("");
   console.log("Options:");
-  console.log("  --emulator                 Prefer an Android emulator over physical devices");
+  console.log("  --emulator                 Use an Android emulator instead of a connected phone");
   console.log("  --avd <name>               Use a specific AVD when launching an emulator");
   console.log("  --serial <serial>          Target a specific connected device");
   console.log("  --port <number>            First Metro port to probe");

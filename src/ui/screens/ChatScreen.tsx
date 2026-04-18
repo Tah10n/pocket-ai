@@ -193,6 +193,7 @@ export const ChatScreen = () => {
     const [composerDraft, setComposerDraft] = useState('');
     const [androidKeyboardInset, setAndroidKeyboardInset] = useState(0);
     const [isAutoScrollPaused, setIsAutoScrollPaused] = useState(false);
+    const [isListTouching, setIsListTouching] = useState(false);
     const [listViewportHeight, setListViewportHeight] = useState(0);
     const [isPresetSelectorOpen, setPresetSelectorOpen] = useState(false);
     const [settings, setSettings] = useState(() => getSettings());
@@ -207,6 +208,8 @@ export const ChatScreen = () => {
     const keyboardMeasureFrameRef = useRef<number | null>(null);
     const endDragFinalizeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const endDragMetricsRef = useRef<ScrollMetrics | null>(null);
+    const touchEndFinalizeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const didDeferAutoScrollWhileTouchingRef = useRef(false);
     const forcedScrollTimeoutsRef = useRef<ReturnType<typeof setTimeout>[]>([]);
     const forcedFollowPassesRef = useRef(0);
     const baseWindowHeightRef = useRef(Dimensions.get('window').height);
@@ -304,11 +307,14 @@ export const ChatScreen = () => {
         backgroundColor: withAlpha(colors.warning, resolvedMode === 'dark' ? 0.18 : 0.1),
     }), [colors.warning, resolvedMode]);
     const listMaintainVisibleContentPosition = useMemo(() => {
-        // NOTE: FlashList@2.0.2 internal auto-scroll uses autoscrollToBottomThreshold even when
-        // `disabled: true`, so we must set the threshold negative to truly disable auto-follow.
+        // NOTE: FlashList auto-scroll uses autoscrollToBottomThreshold. Some versions ignore the
+        // `disabled` flag, so we set the threshold negative to truly disable auto-follow.
         // NOTE: `maintainVisibleContentPosition` is most reliable on RN New Architecture.
         // We keep manual scroll scheduling (scrollToEnd bursts) as a fallback.
-        const autoscrollToBottomThreshold = isAutoScrollPaused
+        // While the user is pressing the list during streaming, temporarily suspend auto-follow
+        // without changing the underlying stickiness state.
+        const shouldDisableAutoScroll = isAutoScrollPaused || (isGenerating && isListTouching);
+        const autoscrollToBottomThreshold = shouldDisableAutoScroll
             ? -1
             : getFlashListAutoScrollBottomThreshold(listViewportHeight);
 
@@ -317,7 +323,7 @@ export const ChatScreen = () => {
             animateAutoScrollToBottom: false,
             startRenderingFromBottom: true,
         };
-    }, [isAutoScrollPaused, listViewportHeight]);
+    }, [isAutoScrollPaused, isGenerating, isListTouching, listViewportHeight]);
 
     const setShouldFollowLatestMessage = useCallback((shouldFollow: boolean) => {
         shouldStickToBottomRef.current = shouldFollow;
@@ -451,6 +457,15 @@ export const ChatScreen = () => {
         endDragFinalizeTimeoutRef.current = null;
     }, []);
 
+    const clearTouchEndFinalizeTimeout = useCallback(() => {
+        if (touchEndFinalizeTimeoutRef.current === null) {
+            return;
+        }
+
+        clearTimeout(touchEndFinalizeTimeoutRef.current);
+        touchEndFinalizeTimeoutRef.current = null;
+    }, []);
+
     const scheduleForcedScrollBurst = useCallback(() => {
         clearForcedScrollTimeouts();
 
@@ -468,13 +483,19 @@ export const ChatScreen = () => {
     }, []);
 
     const scheduleScrollToLatestMessage = useCallback((animated: boolean, force = false) => {
-        if (
-            !messages.length
-            || autoScrollFrameRef.current !== null
-            || isUserInteractingRef.current
-            || isListTouchingRef.current
-            || (!force && !shouldStickToBottomRef.current)
-        ) {
+        if (!messages.length || autoScrollFrameRef.current !== null || isUserInteractingRef.current) {
+            return;
+        }
+
+        if (isListTouchingRef.current) {
+            if (force || shouldStickToBottomRef.current) {
+                didDeferAutoScrollWhileTouchingRef.current = true;
+            }
+
+            return;
+        }
+
+        if (!force && !shouldStickToBottomRef.current) {
             return;
         }
 
@@ -494,9 +515,9 @@ export const ChatScreen = () => {
     }, [messages.length, scrollToLatestMessage]);
 
     const handleListTouchStart = useCallback(() => {
-        // While streaming, we auto-follow new tokens. Programmatic scroll calls can cancel taps
-        // inside the list, which makes the thinking disclosure feel "unclickable".
         isListTouchingRef.current = true;
+        setIsListTouching(true);
+        clearTouchEndFinalizeTimeout();
         forcedFollowPassesRef.current = 0;
         clearForcedScrollTimeouts();
 
@@ -505,18 +526,62 @@ export const ChatScreen = () => {
             autoScrollFrameRef.current = null;
         }
 
-        if (isGenerating) {
-            setShouldFollowLatestMessage(false);
-        }
-    }, [clearForcedScrollTimeouts, isGenerating, setShouldFollowLatestMessage]);
+        // Do not change stickiness here: a tap should not permanently disable auto-follow.
+        // Auto-scroll is temporarily suspended via maintainVisibleContentPosition while the
+        // list is touched.
+    }, [clearForcedScrollTimeouts, clearTouchEndFinalizeTimeout]);
 
     const handleListTouchEnd = useCallback(() => {
         isListTouchingRef.current = false;
-    }, []);
+        setIsListTouching(false);
+
+        if (!didDeferAutoScrollWhileTouchingRef.current) {
+            return;
+        }
+
+        clearTouchEndFinalizeTimeout();
+        touchEndFinalizeTimeoutRef.current = setTimeout(() => {
+            touchEndFinalizeTimeoutRef.current = null;
+
+            if (!didDeferAutoScrollWhileTouchingRef.current) {
+                return;
+            }
+
+            didDeferAutoScrollWhileTouchingRef.current = false;
+
+            if (!shouldStickToBottomRef.current) {
+                return;
+            }
+
+            scheduleScrollToLatestMessage(false, true);
+        }, 0);
+    }, [clearTouchEndFinalizeTimeout, scheduleScrollToLatestMessage]);
 
     const handleListTouchCancel = useCallback(() => {
         isListTouchingRef.current = false;
-    }, []);
+        setIsListTouching(false);
+
+        if (!didDeferAutoScrollWhileTouchingRef.current) {
+            return;
+        }
+
+        clearTouchEndFinalizeTimeout();
+        touchEndFinalizeTimeoutRef.current = setTimeout(() => {
+            touchEndFinalizeTimeoutRef.current = null;
+
+            if (!didDeferAutoScrollWhileTouchingRef.current) {
+                return;
+            }
+
+            didDeferAutoScrollWhileTouchingRef.current = false;
+
+            if (!shouldStickToBottomRef.current) {
+                return;
+            }
+
+            scheduleScrollToLatestMessage(false, true);
+        }, 0);
+    }, [clearTouchEndFinalizeTimeout, scheduleScrollToLatestMessage]);
 
     const updateStickinessFromNativeEvent = (
         nativeEvent: ScrollMetrics,
@@ -546,10 +611,12 @@ export const ChatScreen = () => {
 
     const handleListScrollBeginDrag = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
         clearEndDragFinalizeTimeout();
+        clearTouchEndFinalizeTimeout();
         isMomentumScrollingRef.current = false;
         dragStartOffsetYRef.current = event.nativeEvent.contentOffset.y;
         momentumStartOffsetYRef.current = null;
         isListTouchingRef.current = true;
+        setIsListTouching(true);
         isUserInteractingRef.current = true;
         setShouldFollowLatestMessage(false);
         forcedFollowPassesRef.current = 0;
@@ -568,6 +635,7 @@ export const ChatScreen = () => {
     const handleListScrollEndDrag = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
         // Drag end implies the user's touch has ended.
         isListTouchingRef.current = false;
+        setIsListTouching(false);
 
         // Snapshot the scroll metrics we need because we reference them asynchronously.
         endDragMetricsRef.current = snapshotScrollMetrics(event.nativeEvent);
@@ -606,10 +674,12 @@ export const ChatScreen = () => {
 
     const handleListMomentumScrollBegin = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
         clearEndDragFinalizeTimeout();
+        clearTouchEndFinalizeTimeout();
         isMomentumScrollingRef.current = true;
         isUserInteractingRef.current = true;
         // Momentum implies the user's touch has ended.
         isListTouchingRef.current = false;
+        setIsListTouching(false);
         dragStartOffsetYRef.current = null;
         momentumStartOffsetYRef.current = event.nativeEvent?.contentOffset?.y
             ?? endDragMetricsRef.current?.contentOffset?.y
@@ -626,8 +696,10 @@ export const ChatScreen = () => {
 
     const handleListMomentumScrollEnd = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
         clearEndDragFinalizeTimeout();
+        clearTouchEndFinalizeTimeout();
         isMomentumScrollingRef.current = false;
         isListTouchingRef.current = false;
+        setIsListTouching(false);
         const startOffsetY = momentumStartOffsetYRef.current;
         const endOffsetY = event.nativeEvent.contentOffset.y;
 
@@ -920,9 +992,10 @@ export const ChatScreen = () => {
             }
 
             clearEndDragFinalizeTimeout();
+            clearTouchEndFinalizeTimeout();
             clearForcedScrollTimeouts();
         };
-    }, [clearEndDragFinalizeTimeout, clearForcedScrollTimeouts]);
+    }, [clearEndDragFinalizeTimeout, clearForcedScrollTimeouts, clearTouchEndFinalizeTimeout]);
 
     useEffect(() => {
         setShouldFollowLatestMessage(true);

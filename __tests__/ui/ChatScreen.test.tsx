@@ -874,7 +874,7 @@ describe('ChatScreen', () => {
     expect(queryByText('T0.7 • P0.6 • K40 • 1024 tok')).toBeNull();
   });
 
-  it('pauses auto-scroll on tap during generation and re-arms only after drag ends near the bottom', () => {
+  it('does not disable auto-follow after a tap during generation', () => {
     jest.useFakeTimers();
     try {
     useChatStore.setState({
@@ -897,38 +897,6 @@ describe('ChatScreen', () => {
     expect(getByTestId('chat-flash-list').props.maintainVisibleContentPosition.autoscrollToBottomThreshold).toBe(-1);
 
     fireEvent(getByTestId('chat-flash-list'), 'touchEnd');
-
-    expect(getByTestId('chat-flash-list').props.maintainVisibleContentPosition.autoscrollToBottomThreshold).toBe(-1);
-
-    fireEvent(getByTestId('chat-flash-list'), 'scrollBeginDrag', {
-      nativeEvent: {
-        contentOffset: { x: 0, y: 556 },
-        contentSize: { width: 320, height: 1200 },
-        layoutMeasurement: { width: 320, height: 640 },
-      },
-    });
-
-    fireEvent.scroll(getByTestId('chat-flash-list'), {
-      nativeEvent: {
-        contentOffset: { x: 0, y: 556 },
-        contentSize: { width: 320, height: 1200 },
-        layoutMeasurement: { width: 320, height: 640 },
-      },
-    });
-
-    expect(getByTestId('chat-flash-list').props.maintainVisibleContentPosition.autoscrollToBottomThreshold).toBe(-1);
-
-    fireEvent(getByTestId('chat-flash-list'), 'scrollEndDrag', {
-      nativeEvent: {
-        contentOffset: { x: 0, y: 556 },
-        contentSize: { width: 320, height: 1200 },
-        layoutMeasurement: { width: 320, height: 640 },
-      },
-    });
-
-    act(() => {
-      jest.runOnlyPendingTimers();
-    });
 
     expect(getByTestId('chat-flash-list').props.maintainVisibleContentPosition.autoscrollToBottomThreshold).toBe(0.02);
     } finally {
@@ -1031,29 +999,45 @@ describe('ChatScreen', () => {
     expect(getByTestId('chat-flash-list').props.maintainVisibleContentPosition.autoscrollToBottomThreshold).toBe(0.02);
   });
 
-  it('keeps auto-scroll paused after a tap during generation', () => {
-    useChatStore.setState({
-      threads: {
-        ...useChatStore.getState().threads,
-        'thread-1': {
-          ...useChatStore.getState().threads['thread-1'],
-          status: 'generating',
+  it('defers auto-follow scheduling while the list is touched and flushes it after touch ends', () => {
+    jest.useFakeTimers();
+    const originalRequestAnimationFrame = global.requestAnimationFrame;
+    const rafSpy = jest.fn((callback: FrameRequestCallback) => originalRequestAnimationFrame(callback));
+    global.requestAnimationFrame = rafSpy as typeof global.requestAnimationFrame;
+
+    try {
+      useChatStore.setState({
+        threads: {
+          ...useChatStore.getState().threads,
+          'thread-1': {
+            ...useChatStore.getState().threads['thread-1'],
+            status: 'generating',
+          },
         },
-      },
-      activeThreadId: 'thread-1',
-    });
+        activeThreadId: 'thread-1',
+      });
 
-    const { getByTestId } = render(React.createElement(ChatScreen));
+      const { getByTestId } = render(React.createElement(ChatScreen));
 
-    expect(getByTestId('chat-flash-list').props.maintainVisibleContentPosition.autoscrollToBottomThreshold).toBe(0.02);
+      // Ignore any initial auto-follow scheduling from mount effects.
+      rafSpy.mockClear();
 
-    fireEvent(getByTestId('chat-flash-list'), 'touchStart');
+      fireEvent(getByTestId('chat-flash-list'), 'touchStart');
+      fireEvent(getByTestId('chat-flash-list'), 'contentSizeChange', 320, 1400);
 
-    expect(getByTestId('chat-flash-list').props.maintainVisibleContentPosition.autoscrollToBottomThreshold).toBe(-1);
+      expect(rafSpy).not.toHaveBeenCalled();
 
-    fireEvent(getByTestId('chat-flash-list'), 'touchEnd');
+      fireEvent(getByTestId('chat-flash-list'), 'touchEnd');
 
-    expect(getByTestId('chat-flash-list').props.maintainVisibleContentPosition.autoscrollToBottomThreshold).toBe(-1);
+      act(() => {
+        jest.runOnlyPendingTimers();
+      });
+
+      expect(rafSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      global.requestAnimationFrame = originalRequestAnimationFrame;
+      jest.useRealTimers();
+    }
   });
 
   it('does not restore bottom anchoring after a drag when touchEnd fires last', () => {

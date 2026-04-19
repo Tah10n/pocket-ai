@@ -76,6 +76,8 @@ class InferenceBackendService {
   private backendDevicesInfoPromise: Promise<NativeBackendDeviceInfo[] | null> | null = null;
   private backendDiscoveryUnsupported = false;
 
+  private static readonly BACKEND_DISCOVERY_TIMEOUT_MS = 8000;
+
   public async getBackendDevicesInfo(): Promise<NativeBackendDeviceInfo[] | null> {
     if (this.backendDiscoveryUnsupported) {
       return null;
@@ -101,7 +103,28 @@ class InferenceBackendService {
           return null;
         }
 
-        const result = await llama.getBackendDevicesInfo();
+        const timeoutMs = InferenceBackendService.BACKEND_DISCOVERY_TIMEOUT_MS;
+        let timeoutId: ReturnType<typeof setTimeout> | null = null;
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          timeoutId = setTimeout(() => {
+            reject(new Error(`Timed out after ${timeoutMs}ms`));
+          }, timeoutMs);
+        });
+
+        // Ensure sync throws become Promise rejections, and always clear the timeout.
+        const backendPromise = Promise.resolve().then(() => llama.getBackendDevicesInfo!());
+
+        let result: unknown;
+        try {
+          result = await Promise.race([
+            backendPromise,
+            timeoutPromise,
+          ]);
+        } finally {
+          if (timeoutId !== null) {
+            clearTimeout(timeoutId);
+          }
+        }
         const devices = Array.isArray(result) ? result : [];
         this.backendDevicesInfo = devices;
         return devices;

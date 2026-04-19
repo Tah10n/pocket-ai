@@ -21,6 +21,10 @@ describe('InferenceBackendService', () => {
     getBackendDevicesInfoMock().mockResolvedValue([]);
   });
 
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
   it('treats missing backend discovery API as unavailable for safety', async () => {
     const llamaAny = jest.requireMock('llama.rn') as unknown as Record<string, unknown>;
     const previous = llamaAny.getBackendDevicesInfo;
@@ -224,5 +228,38 @@ describe('InferenceBackendService', () => {
     await inferenceBackendService.getCapabilitiesSummary();
 
     expect(getBackendDevicesInfoMock()).toHaveBeenCalledTimes(2);
+  });
+
+  it('times out backend discovery and allows subsequent retries', async () => {
+    jest.useFakeTimers();
+
+    getBackendDevicesInfoMock().mockImplementation(() => new Promise(() => { /* never resolves */ }));
+
+    const first = inferenceBackendService.getBackendDevicesInfo();
+    jest.advanceTimersByTime(9000);
+    await expect(first).resolves.toBeNull();
+
+    getBackendDevicesInfoMock().mockResolvedValueOnce([]);
+    await expect(inferenceBackendService.getBackendDevicesInfo()).resolves.toEqual([]);
+    expect(getBackendDevicesInfoMock()).toHaveBeenCalledTimes(2);
+  });
+
+  it('handles synchronous backend discovery errors without leaking the timeout and allows retries', async () => {
+    jest.useFakeTimers();
+
+    getBackendDevicesInfoMock().mockImplementationOnce(() => {
+      throw new Error('boom');
+    });
+
+    await expect(inferenceBackendService.getBackendDevicesInfo()).resolves.toBeNull();
+
+    // If the timeout wasn't cleared, a pending timer would remain under fake timers.
+    const anyJest = jest as unknown as { getTimerCount?: () => number };
+    if (typeof anyJest.getTimerCount === 'function') {
+      expect(anyJest.getTimerCount()).toBe(0);
+    }
+
+    getBackendDevicesInfoMock().mockResolvedValueOnce([]);
+    await expect(inferenceBackendService.getBackendDevicesInfo()).resolves.toEqual([]);
   });
 });

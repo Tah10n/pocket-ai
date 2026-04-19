@@ -5,7 +5,9 @@ const { mergeContents } = require('@expo/config-plugins/build/utils/generateCode
 
 const GPU_INFO_MODULE_NAME = 'GpuInfo';
 const GPU_INFO_PACKAGE_CLASS = 'GpuInfoPackage';
-const GPU_INFO_REGISTRATION = `              add(${GPU_INFO_PACKAGE_CLASS}())`;
+const GPU_INFO_REGISTRATION_APPLY = `              add(${GPU_INFO_PACKAGE_CLASS}())`;
+const GPU_INFO_REGISTRATION_PACKAGES = `      packages.add(${GPU_INFO_PACKAGE_CLASS}())`;
+const GPU_INFO_MERGE_TAG = 'pocket-ai-gpu-info-package';
 
 function getPackageName(config) {
   return config.android?.package ?? 'com.github.tah10n.pocketai';
@@ -220,21 +222,57 @@ function withAndroidGpuInfoMainApplication(config) {
       throw new Error('withAndroidGpuInfo currently supports Kotlin MainApplication files only.');
     }
 
-    if (nextConfig.modResults.contents.includes(GPU_INFO_REGISTRATION)) {
+    // Prefer tag-based idempotency: inserted source may be formatted differently.
+    if (nextConfig.modResults.contents.includes(GPU_INFO_MERGE_TAG)) {
       return nextConfig;
     }
 
-    const mergeResult = mergeContents({
-      src: nextConfig.modResults.contents,
-      newSrc: GPU_INFO_REGISTRATION,
-      tag: 'pocket-ai-gpu-info-package',
-      anchor: /PackageList\(this\)\.packages\.apply \{/,
-      offset: 1,
-      comment: '//',
-    });
+    const attempts = [
+      {
+        label: 'packages.apply',
+        anchor: /PackageList\(this\)\.packages\.apply\s*\{/, // RN/Expo Kotlin template
+        newSrc: GPU_INFO_REGISTRATION_APPLY,
+        offset: 1,
+      },
+      {
+        label: 'val packages = PackageList(this).packages',
+        anchor: /val\s+packages\s*=\s*PackageList\(this\)\.packages\b/, // Alternative template
+        newSrc: GPU_INFO_REGISTRATION_PACKAGES,
+        offset: 1,
+      },
+    ];
 
-    if (!mergeResult.didMerge) {
-      throw new Error('withAndroidGpuInfo failed to register GpuInfoPackage (anchor not found).');
+    let mergeResult = null;
+    for (const attempt of attempts) {
+      mergeResult = mergeContents({
+        src: nextConfig.modResults.contents,
+        newSrc: attempt.newSrc,
+        tag: GPU_INFO_MERGE_TAG,
+        anchor: attempt.anchor,
+        offset: attempt.offset,
+        comment: '//',
+      });
+
+      if (mergeResult.didMerge) {
+        break;
+      }
+    }
+
+    if (!mergeResult || !mergeResult.didMerge) {
+      const packageListLines = nextConfig.modResults.contents
+        .split(/\r?\n/)
+        .map((line, index) => ({ line, index: index + 1 }))
+        .filter(({ line }) => line.includes('PackageList') || line.includes('getPackages') || line.includes('.packages'))
+        .slice(0, 12)
+        .map(({ line, index }) => `${index}: ${line}`)
+        .join('\n');
+
+      console.warn('[withAndroidGpuInfo] Failed to register GpuInfoPackage (anchor not found).');
+      console.warn('[withAndroidGpuInfo] Attempted anchors: ' + attempts.map((a) => a.label).join(', '));
+      if (packageListLines) {
+        console.warn('[withAndroidGpuInfo] MainApplication.kt relevant lines:\n' + packageListLines);
+      }
+      throw new Error('withAndroidGpuInfo failed to register GpuInfoPackage (anchor not found). See logs for context.');
     }
 
     nextConfig.modResults.contents = mergeResult.contents;

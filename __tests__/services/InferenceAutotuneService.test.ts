@@ -23,6 +23,7 @@ jest.mock('../../src/services/LLMEngineService', () => ({
     load: jest.fn(),
     getRecommendedLoadProfile: jest.fn(),
     chatCompletion: jest.fn(),
+    interruptActiveCompletion: jest.fn(),
   },
 }));
 
@@ -76,6 +77,8 @@ describe('InferenceAutotuneService', () => {
         diagnostics: undefined,
       };
     });
+
+    (llmEngineService.interruptActiveCompletion as jest.Mock).mockImplementation(() => undefined);
 
     (getModelLoadParametersForModel as jest.Mock).mockReturnValue({
       contextSize: 4096,
@@ -496,5 +499,129 @@ describe('InferenceAutotuneService', () => {
     expect(persisted).not.toBeNull();
     expect(persisted?.backendDiscoveryKnown).toBe(false);
     expect(persisted?.bestStable).toBeUndefined();
+  });
+
+  it('supports abort during candidate load (does not persist and restores previous)', async () => {
+    const baseLoadImpl = (llmEngineService.load as jest.Mock).getMockImplementation();
+
+    let enterLoad: (() => void) | null = null;
+    const enteredLoad = new Promise<void>((resolve) => {
+      enterLoad = resolve;
+    });
+    let resolveCandidateLoad!: () => void;
+    const candidateLoadGate = new Promise<void>((resolve) => {
+      resolveCandidateLoad = resolve;
+    });
+
+    (llmEngineService.load as jest.Mock).mockImplementationOnce(async (...args: any[]) => {
+      enterLoad?.();
+      await candidateLoadGate;
+      return baseLoadImpl?.(...args);
+    });
+
+    const listeners = new Set<() => void>();
+    const addEventListener = jest.fn((_event: string, cb: () => void) => listeners.add(cb));
+    const removeEventListener = jest.fn((_event: string, cb: () => void) => listeners.delete(cb));
+    let aborted = false;
+    const controller = {
+      signal: {
+        get aborted() {
+          return aborted;
+        },
+        addEventListener,
+        removeEventListener,
+      } as unknown as AbortSignal,
+      abort: () => {
+        aborted = true;
+        for (const cb of listeners) {
+          cb();
+        }
+      },
+    };
+
+    const run = inferenceAutotuneService.runBackendAutotune({
+      modelId: 'test/model',
+      signal: controller.signal,
+    });
+
+    await enteredLoad;
+    controller.abort();
+    resolveCandidateLoad();
+
+    const result = await run;
+    expect(result.cancelled).toBe(true);
+    expect((autotuneStore.writeAutotuneResult as jest.Mock)).not.toHaveBeenCalled();
+    expect(llmEngineService.interruptActiveCompletion).toHaveBeenCalled();
+    expect(removeEventListener).toHaveBeenCalled();
+
+    expect(llmEngineService.load).toHaveBeenLastCalledWith('prev/model', {
+      forceReload: true,
+      loadParamsOverride: {
+        backendPolicy: 'cpu',
+        gpuLayers: 0,
+        selectedBackendDevices: null,
+      },
+    });
+  });
+
+  it('supports abort during benchmarking (interrupts completion, does not persist, restores previous)', async () => {
+    let rejectCompletion: ((error: unknown) => void) | null = null;
+    let startedCompletion: (() => void) | null = null;
+    const completionStarted = new Promise<void>((resolve) => {
+      startedCompletion = resolve;
+    });
+
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(() => {
+      startedCompletion?.();
+      return new Promise<void>((_resolve, reject) => {
+        rejectCompletion = reject;
+      });
+    });
+
+    (llmEngineService.interruptActiveCompletion as jest.Mock).mockImplementationOnce(() => {
+      rejectCompletion?.(new Error('interrupted'));
+    });
+
+    const listeners = new Set<() => void>();
+    const addEventListener = jest.fn((_event: string, cb: () => void) => listeners.add(cb));
+    const removeEventListener = jest.fn((_event: string, cb: () => void) => listeners.delete(cb));
+    let aborted = false;
+    const controller = {
+      signal: {
+        get aborted() {
+          return aborted;
+        },
+        addEventListener,
+        removeEventListener,
+      } as unknown as AbortSignal,
+      abort: () => {
+        aborted = true;
+        for (const cb of listeners) {
+          cb();
+        }
+      },
+    };
+
+    const run = inferenceAutotuneService.runBackendAutotune({
+      modelId: 'test/model',
+      signal: controller.signal,
+    });
+
+    await completionStarted;
+    controller.abort();
+
+    const result = await run;
+    expect(result.cancelled).toBe(true);
+    expect((autotuneStore.writeAutotuneResult as jest.Mock)).not.toHaveBeenCalled();
+    expect(removeEventListener).toHaveBeenCalled();
+
+    expect(llmEngineService.load).toHaveBeenLastCalledWith('prev/model', {
+      forceReload: true,
+      loadParamsOverride: {
+        backendPolicy: 'cpu',
+        gpuLayers: 0,
+        selectedBackendDevices: null,
+      },
+    });
   });
 });

@@ -208,7 +208,16 @@ class InferenceAutotuneService {
         progressTotalSteps = 1;
       }
       emitProgress({ stage: 'cancelling' });
-      void llmEngineService.interruptActiveCompletion();
+
+      // Abort can be delivered at any time; never allow a synchronous throw to crash the caller.
+      try {
+        void Promise
+          .resolve()
+          .then(() => llmEngineService.interruptActiveCompletion())
+          .catch(() => undefined);
+      } catch {
+        // ignore
+      }
     };
 
     let removeAbortListener: (() => void) | null = null;
@@ -763,6 +772,20 @@ class InferenceAutotuneService {
         } catch (restoreError) {
           const message = formatErrorMessage(restoreError);
           console.warn('[InferenceAutotune] Failed to restore previously loaded model', restoreError);
+
+          // Best-effort safety: avoid leaving the app in a broken state.
+          // Prefer keeping a working model loaded when possible, but if we're cancelled
+          // or the engine isn't READY, attempt to unload any candidate that may be active.
+          const stateAfterRestoreFailure = llmEngineService.getState();
+          const activeModelId = stateAfterRestoreFailure.activeModelId ?? null;
+          const shouldAttemptUnload = cancelled || stateAfterRestoreFailure.status !== EngineStatus.READY;
+          if (shouldAttemptUnload && activeModelId && activeModelId !== previousActiveModelId) {
+            try {
+              await llmEngineService.unload().catch(() => undefined);
+            } catch {
+              // ignore
+            }
+          }
           if (result) {
             result.restorationError = message;
           }

@@ -4,6 +4,7 @@ import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../src
 
 const mockGetCurrentStatus = jest.fn();
 const mockRefreshModelMetadata = jest.fn();
+const mockGetSettings = jest.fn();
 
 jest.mock('../../src/services/HardwareListenerService', () => ({
   hardwareListenerService: {
@@ -15,6 +16,10 @@ jest.mock('../../src/services/ModelCatalogService', () => ({
   modelCatalogService: {
     refreshModelMetadata: (...args: any[]) => mockRefreshModelMetadata(...args),
   },
+}));
+
+jest.mock('../../src/services/SettingsStore', () => ({
+  getSettings: () => mockGetSettings(),
 }));
 
 function createModel(overrides: Partial<ModelMetadata> = {}): ModelMetadata {
@@ -42,6 +47,7 @@ describe('modelDownloadFlow', () => {
     jest.clearAllMocks();
     mockGetCurrentStatus.mockReturnValue({ networkType: 'wifi' });
     mockRefreshModelMetadata.mockImplementation(async (model: ModelMetadata) => model);
+    mockGetSettings.mockReturnValue({ allowCellularDownloads: true });
     alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(jest.fn());
   });
 
@@ -113,5 +119,116 @@ describe('modelDownloadFlow', () => {
     }), { includeDetails: false });
     expect(onResolvedModel).toHaveBeenCalledWith(resolvedModel);
     expect(startDownload).toHaveBeenCalledWith(resolvedModel);
+  });
+
+  it('blocks cellular downloads when disabled in settings', async () => {
+    mockGetCurrentStatus.mockReturnValue({ networkType: 'cellular' });
+    mockGetSettings.mockReturnValue({ allowCellularDownloads: false });
+    const startDownload = jest.fn();
+
+    startModelDownloadFlow({
+      model: createModel(),
+      t: (key) => key,
+      startDownload,
+      openTokenSettings: jest.fn(),
+      openModelPage: jest.fn().mockResolvedValue(undefined),
+      onError: jest.fn(),
+    });
+
+    expect(alertSpy).toHaveBeenCalledWith('models.cellularDownloadsDisabledTitle', 'models.cellularDownloadsDisabledMessage');
+    expect(startDownload).not.toHaveBeenCalled();
+  });
+
+  it('warns before starting a download on cellular when enabled', async () => {
+    mockGetCurrentStatus.mockReturnValue({ networkType: 'cellular' });
+    mockGetSettings.mockReturnValue({ allowCellularDownloads: true });
+    const startDownload = jest.fn();
+
+    startModelDownloadFlow({
+      model: createModel(),
+      t: (key) => key,
+      startDownload,
+      openTokenSettings: jest.fn(),
+      openModelPage: jest.fn().mockResolvedValue(undefined),
+      onError: jest.fn(),
+    });
+
+    const buttons = alertSpy.mock.calls[0]?.[2] as Array<{ onPress?: () => void }>;
+    expect(buttons?.[1]?.onPress).toEqual(expect.any(Function));
+    buttons[1]?.onPress?.();
+    await Promise.resolve();
+
+    expect(startDownload).toHaveBeenCalled();
+  });
+
+  it('opens token settings when auth is required', async () => {
+    const openTokenSettings = jest.fn();
+
+    startModelDownloadFlow({
+      model: createModel({ accessState: ModelAccessState.AUTH_REQUIRED }),
+      t: (key) => key,
+      startDownload: jest.fn(),
+      openTokenSettings,
+      openModelPage: jest.fn().mockResolvedValue(undefined),
+      onError: jest.fn(),
+    });
+
+    await Promise.resolve();
+    expect(openTokenSettings).toHaveBeenCalledTimes(1);
+  });
+
+  it('opens model page when access is denied', async () => {
+    const openModelPage = jest.fn().mockResolvedValue(undefined);
+
+    startModelDownloadFlow({
+      model: createModel({ accessState: ModelAccessState.ACCESS_DENIED }),
+      t: (key) => key,
+      startDownload: jest.fn(),
+      openTokenSettings: jest.fn(),
+      openModelPage,
+      onError: jest.fn(),
+    });
+
+    await Promise.resolve();
+    expect(openModelPage).toHaveBeenCalledWith('org/model');
+  });
+
+  it('prompts when size is unknown and allows limited verification downloads', async () => {
+    const startDownload = jest.fn();
+    const model = createModel({ size: null });
+
+    startModelDownloadFlow({
+      model,
+      t: (key) => key,
+      startDownload,
+      openTokenSettings: jest.fn(),
+      openModelPage: jest.fn().mockResolvedValue(undefined),
+      onError: jest.fn(),
+    });
+
+    await Promise.resolve();
+
+    const buttons = alertSpy.mock.calls[0]?.[2] as Array<{ onPress?: () => void }>;
+    buttons[1]?.onPress?.();
+    expect(startDownload).toHaveBeenCalledWith(expect.objectContaining({ allowUnknownSizeDownload: true }));
+  });
+
+  it('surfaces an error when metadata cannot be resolved', async () => {
+    const onError = jest.fn();
+    mockRefreshModelMetadata.mockRejectedValueOnce(new Error('refresh failed'));
+
+    startModelDownloadFlow({
+      model: createModel({ size: null, requiresTreeProbe: true }),
+      t: (key) => key,
+      startDownload: jest.fn(),
+      openTokenSettings: jest.fn(),
+      openModelPage: jest.fn().mockResolvedValue(undefined),
+      onError,
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(onError).toHaveBeenCalledWith(expect.any(Error));
   });
 });

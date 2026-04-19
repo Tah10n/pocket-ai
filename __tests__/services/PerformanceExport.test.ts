@@ -1,10 +1,14 @@
 import {
   buildLogcatDumpLines,
+  buildPerformanceExportJson,
+  buildPerformanceExportPayload,
   buildPerformanceExportPayloadFromSnapshot,
   buildTraceFilename,
+  dumpTraceToLogcat,
   getUtf8ByteLength,
   safeJsonStringify,
 } from '../../src/services/PerformanceExport';
+import { performanceMonitor } from '../../src/services/PerformanceMonitor';
 import type { PerformanceSnapshot, PerformanceTraceSession } from '../../src/services/PerformanceMonitor';
 
 function buildSession(overrides?: Partial<PerformanceTraceSession>): PerformanceTraceSession {
@@ -41,6 +45,61 @@ describe('PerformanceExport', () => {
 
     expect(typeof json).toBe('string');
     expect(() => JSON.parse(json)).not.toThrow();
+  });
+
+  it('safeJsonStringify drops functions and symbols', () => {
+    const value = {
+      ok: true,
+      fn: () => 123,
+      sym: Symbol('x'),
+    };
+
+    const json = safeJsonStringify(value);
+    const parsed = JSON.parse(json) as any;
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.fn).toBeUndefined();
+    expect(parsed.sym).toBeUndefined();
+  });
+
+  it('getUtf8ByteLength uses a fallback without TextEncoder', () => {
+    const original = (globalThis as any).TextEncoder;
+    try {
+      (globalThis as any).TextEncoder = undefined;
+
+      expect(getUtf8ByteLength('a')).toBe(1);
+      expect(getUtf8ByteLength('€')).toBe(3);
+      expect(getUtf8ByteLength('😀')).toBe(4);
+    } finally {
+      (globalThis as any).TextEncoder = original;
+    }
+  });
+
+  it('buildPerformanceExportPayload falls back when snapshot throws', () => {
+    const snapshotSpy = jest.spyOn(performanceMonitor, 'snapshot').mockImplementation(() => {
+      throw new Error('snapshot failed');
+    });
+    performanceMonitor.setEnabled(false);
+
+    const payload = buildPerformanceExportPayload();
+    expect(payload.enabled).toBe(false);
+    expect(payload.events).toEqual([]);
+    expect(payload.counters).toEqual({});
+
+    snapshotSpy.mockRestore();
+  });
+
+  it('buildPerformanceExportJson respects pretty option', () => {
+    performanceMonitor.clear();
+    performanceMonitor.setEnabled(true);
+
+    const pretty = buildPerformanceExportJson({ pretty: true });
+    const compact = buildPerformanceExportJson({ pretty: false });
+
+    expect(pretty).toContain('\n');
+    expect(compact).not.toContain('\n  ');
+    expect(() => JSON.parse(pretty)).not.toThrow();
+    expect(() => JSON.parse(compact)).not.toThrow();
   });
 
   it('builds parseable logcat dump lines with stable prefixes', () => {
@@ -109,6 +168,42 @@ describe('PerformanceExport', () => {
       expect(parsed.meta?.__truncated).toBe(true);
       expect(parsed.meta?.payload).toBeUndefined();
     }
+  });
+
+  it('emits counters as separate logcat lines when header is too large', () => {
+    const manyCounters: Record<string, number> = {};
+    for (let i = 0; i < 200; i += 1) {
+      manyCounters[`counter.${String(i).padStart(3, '0')}.${'x'.repeat(20)}`] = i;
+    }
+
+    const snapshot: PerformanceSnapshot = {
+      enabled: true,
+      counters: manyCounters,
+      events: [],
+    };
+
+    const payload = buildPerformanceExportPayloadFromSnapshot(snapshot, buildSession());
+    const dump = buildLogcatDumpLines(payload);
+
+    expect(dump.lines.some((line) => line.startsWith('POCKET_AI_PERF_COUNTER '))).toBe(true);
+  });
+
+  it('dumpTraceToLogcat refuses when instrumentation is disabled', () => {
+    performanceMonitor.setEnabled(false);
+    const result = dumpTraceToLogcat();
+    expect(result).toEqual({ ok: false, reason: 'instrumentation_disabled' });
+  });
+
+  it('dumpTraceToLogcat logs lines when enabled', () => {
+    performanceMonitor.clear();
+    performanceMonitor.setEnabled(true);
+    performanceMonitor.mark('mark.test');
+
+    const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+    const result = dumpTraceToLogcat();
+    expect(result.ok).toBe(true);
+    expect(logSpy).toHaveBeenCalled();
+    logSpy.mockRestore();
   });
 
   it('builds a predictable filename prefix', () => {

@@ -1,7 +1,9 @@
 import React from 'react';
 import { act, fireEvent, render } from '@testing-library/react-native';
+import { Alert, Share } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import * as Clipboard from 'expo-clipboard';
+import * as Sharing from 'expo-sharing';
 import { performanceMonitor } from '../../src/services/PerformanceMonitor';
 import { PerformanceScreen } from '../../src/ui/screens/PerformanceScreen';
 
@@ -88,13 +90,17 @@ describe('PerformanceScreen', () => {
   beforeEach(() => {
     jest.useFakeTimers();
     jest.clearAllMocks();
+    jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    jest.spyOn(Share, 'share').mockResolvedValue({ action: 'sharedAction' } as any);
     mockCanGoBack = true;
     performanceMonitor.clear();
     performanceMonitor.setEnabled(true);
   });
 
   afterEach(() => {
-    jest.runOnlyPendingTimers();
+    act(() => {
+      jest.runOnlyPendingTimers();
+    });
     jest.useRealTimers();
   });
 
@@ -139,6 +145,98 @@ describe('PerformanceScreen', () => {
     fireEvent.press(getByTestId('performance-toggle-instrumentation'));
 
     expect(performanceMonitor.isEnabled()).toBe(false);
+    unmount();
+  });
+
+  it('shares trace via expo-sharing when available', async () => {
+    (Sharing.isAvailableAsync as jest.Mock).mockResolvedValueOnce(true);
+
+    const { getByTestId, unmount } = await renderScreen();
+
+    await act(async () => {
+      fireEvent.press(getByTestId('performance-share-trace'));
+      await Promise.resolve();
+    });
+
+    expect(Sharing.shareAsync).toHaveBeenCalledWith('file://mock', { mimeType: 'application/json' });
+    expect(Share.share).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('falls back to Share API when expo-sharing is unavailable', async () => {
+    (Sharing.isAvailableAsync as jest.Mock).mockResolvedValueOnce(false);
+
+    const { getByTestId, unmount } = await renderScreen();
+
+    await act(async () => {
+      fireEvent.press(getByTestId('performance-share-trace'));
+      await Promise.resolve();
+    });
+
+    expect(Share.share).toHaveBeenCalledWith(expect.objectContaining({ message: expect.any(String) }));
+    unmount();
+  });
+
+  it('shows an alert when saving to file is not supported', async () => {
+    (Sharing.isAvailableAsync as jest.Mock).mockResolvedValueOnce(false);
+
+    const { getByTestId, unmount } = await renderScreen();
+
+    await act(async () => {
+      fireEvent.press(getByTestId('performance-save-trace'));
+      await Promise.resolve();
+    });
+
+    expect(Alert.alert).toHaveBeenCalledWith('performance.exportFailedTitle', 'performance.saveFailedMessage');
+    unmount();
+  });
+
+  it('clears the trace data', async () => {
+    const clearSpy = jest.spyOn(performanceMonitor, 'clear');
+    performanceMonitor.incrementCounter('perf.export.bytes', 123);
+
+    const { getByTestId, unmount } = await renderScreen();
+
+    fireEvent.press(getByTestId('performance-clear-trace'));
+
+    expect(clearSpy).toHaveBeenCalledTimes(1);
+    unmount();
+  });
+
+  it('renders span aggregates and event values', async () => {
+    const perfNowSpy = jest.spyOn(globalThis.performance, 'now');
+    perfNowSpy
+      .mockReturnValueOnce(0) // span short start
+      .mockReturnValueOnce(100) // span short end => 100ms
+      .mockReturnValueOnce(200) // span long start
+      .mockReturnValueOnce(1700) // span long end => 1500ms
+      .mockReturnValue(2000);
+
+    performanceMonitor.setEnabled(true);
+    const spanShort = performanceMonitor.startSpan('load');
+    spanShort.end();
+    const spanLong = performanceMonitor.startSpan('load');
+    spanLong.end();
+    performanceMonitor.mark('mark-x');
+    performanceMonitor.incrementCounter('counter-x', 5, { source: 'test' });
+
+    const { queryAllByText, unmount } = await renderScreen();
+
+    // Span aggregate p95 should show seconds formatting.
+    expect(queryAllByText('load').length).toBeGreaterThan(0);
+    expect(queryAllByText('1.50 s').length).toBeGreaterThan(0);
+
+    // Event list should include both ms and s durations.
+    expect(queryAllByText('100 ms').length).toBeGreaterThan(0);
+    expect(queryAllByText('1.50 s').length).toBeGreaterThan(0);
+
+    // Counter and mark events.
+    expect(queryAllByText('counter-x').length).toBeGreaterThan(0);
+    expect(queryAllByText('5').length).toBeGreaterThan(0);
+    expect(queryAllByText('mark-x').length).toBeGreaterThan(0);
+    expect(queryAllByText('mark').length).toBeGreaterThan(0);
+
+    perfNowSpy.mockRestore();
     unmount();
   });
 });

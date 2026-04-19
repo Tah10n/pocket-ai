@@ -74,9 +74,12 @@ function mapRawDevice(device: NativeBackendDeviceInfo): BackendCapabilitiesSumma
 class InferenceBackendService {
   private backendDevicesInfo: NativeBackendDeviceInfo[] | null | undefined = undefined;
   private backendDevicesInfoPromise: Promise<NativeBackendDeviceInfo[] | null> | null = null;
+  private backendDevicesInfoNativePromise: Promise<NativeBackendDeviceInfo[] | null> | null = null;
   private backendDiscoveryUnsupported = false;
+  private backendDiscoveryCooldownUntilMs = 0;
 
   private static readonly BACKEND_DISCOVERY_TIMEOUT_MS = 8000;
+  private static readonly BACKEND_DISCOVERY_COOLDOWN_MS = 60_000;
 
   public async getBackendDevicesInfo(): Promise<NativeBackendDeviceInfo[] | null> {
     if (this.backendDiscoveryUnsupported) {
@@ -87,54 +90,77 @@ class InferenceBackendService {
       return this.backendDevicesInfo;
     }
 
+    // If discovery previously timed out, avoid hammering the native module with repeated calls.
+    if (process.env.NODE_ENV !== 'test' && Date.now() < this.backendDiscoveryCooldownUntilMs) {
+      return null;
+    }
+
     if (this.backendDevicesInfoPromise) {
       return this.backendDevicesInfoPromise;
     }
 
+    const timeoutMs = InferenceBackendService.BACKEND_DISCOVERY_TIMEOUT_MS;
     this.backendDevicesInfoPromise = (async () => {
-      try {
-        const llama = requireLlamaModule() as unknown as {
-          getBackendDevicesInfo?: () => Promise<NativeBackendDeviceInfo[]>;
-        };
+      let timeoutId: ReturnType<typeof setTimeout> | null = null;
 
-        if (typeof llama.getBackendDevicesInfo !== 'function') {
-          this.backendDiscoveryUnsupported = true;
-          this.backendDevicesInfo = null;
-          return null;
+      try {
+        if (!this.backendDevicesInfoNativePromise) {
+          this.backendDevicesInfoNativePromise = (async (): Promise<NativeBackendDeviceInfo[] | null> => {
+            try {
+              const llama = requireLlamaModule() as unknown as {
+                getBackendDevicesInfo?: () => Promise<NativeBackendDeviceInfo[]>;
+              };
+
+              if (typeof llama.getBackendDevicesInfo !== 'function') {
+                this.backendDiscoveryUnsupported = true;
+                this.backendDevicesInfo = null;
+                return null;
+              }
+
+              // Ensure sync throws become Promise rejections.
+              const result = await Promise.resolve().then(() => llama.getBackendDevicesInfo!());
+              const devices = Array.isArray(result) ? result : [];
+              this.backendDevicesInfo = devices;
+              this.backendDiscoveryCooldownUntilMs = 0;
+              return devices;
+            } catch (error) {
+              // Do not permanently cache transient discovery failures.
+              if (process.env.NODE_ENV !== 'test') {
+                console.warn('[InferenceBackend] Failed to read backend devices info', error);
+              }
+              return null;
+            } finally {
+              this.backendDevicesInfoNativePromise = null;
+            }
+          })();
         }
 
-        const timeoutMs = InferenceBackendService.BACKEND_DISCOVERY_TIMEOUT_MS;
-        let timeoutId: ReturnType<typeof setTimeout> | null = null;
         const timeoutPromise = new Promise<never>((_, reject) => {
           timeoutId = setTimeout(() => {
             reject(new Error(`Timed out after ${timeoutMs}ms`));
           }, timeoutMs);
         });
 
-        // Ensure sync throws become Promise rejections, and always clear the timeout.
-        const backendPromise = Promise.resolve().then(() => llama.getBackendDevicesInfo!());
-
-        let result: unknown;
-        try {
-          result = await Promise.race([
-            backendPromise,
-            timeoutPromise,
-          ]);
-        } finally {
-          if (timeoutId !== null) {
-            clearTimeout(timeoutId);
-          }
-        }
-        const devices = Array.isArray(result) ? result : [];
-        this.backendDevicesInfo = devices;
-        return devices;
+        return await Promise.race([
+          this.backendDevicesInfoNativePromise,
+          timeoutPromise,
+        ]);
       } catch (error) {
-        // Do not permanently cache transient discovery failures.
-        if (process.env.NODE_ENV !== 'test') {
-          console.warn('[InferenceBackend] Failed to read backend devices info', error);
+        if (error instanceof Error && error.message.startsWith('Timed out after')) {
+          if (process.env.NODE_ENV !== 'test') {
+            this.backendDiscoveryCooldownUntilMs = Date.now() + InferenceBackendService.BACKEND_DISCOVERY_COOLDOWN_MS;
+          }
+
+          // The native call cannot be cancelled; drop our reference so callers can retry later.
+          this.backendDevicesInfoNativePromise = null;
+          return null;
         }
+
         return null;
       } finally {
+        if (timeoutId !== null) {
+          clearTimeout(timeoutId);
+        }
         this.backendDevicesInfoPromise = null;
       }
     })();
@@ -145,7 +171,9 @@ class InferenceBackendService {
   public clearCache(): void {
     this.backendDevicesInfo = undefined;
     this.backendDevicesInfoPromise = null;
+    this.backendDevicesInfoNativePromise = null;
     this.backendDiscoveryUnsupported = false;
+    this.backendDiscoveryCooldownUntilMs = 0;
   }
 
   public async getBackendAvailability(): Promise<BackendAvailabilitySnapshot> {

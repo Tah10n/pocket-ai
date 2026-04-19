@@ -1661,29 +1661,34 @@ class LLMEngineService {
     return this.actualGpuAccelerated === true ? normalizedResolvedGpuLayers : 0;
   }
 
-  private resolveBackendMode(context: LlamaContext): EngineBackendMode {
-    if (!context.gpu) {
-      return 'cpu';
-    }
-
+  private hasNpuRuntimeSignal(context: LlamaContext): boolean {
     const devices = Array.isArray(context.devices) ? context.devices : [];
     const deviceText = devices.join(' ').toLowerCase();
     const androidLib = typeof context.androidLib === 'string' ? context.androidLib.toLowerCase() : '';
     const systemInfo = typeof context.systemInfo === 'string' ? context.systemInfo.toLowerCase() : '';
 
-    if (
-      devices.some((device) => device.startsWith('HTP'))
+    return (
+      devices.some((device) => typeof device === 'string' && device.startsWith('HTP'))
       || deviceText.includes('hexagon')
       || deviceText.includes('htp')
+      || deviceText.includes('qnn')
       || androidLib.includes('hexagon')
       || androidLib.includes('qnn')
       || systemInfo.includes('hexagon')
       || systemInfo.includes('qnn')
-    ) {
+    );
+  }
+
+  private resolveBackendMode(context: LlamaContext): EngineBackendMode {
+    if (this.hasNpuRuntimeSignal(context)) {
       return 'npu';
     }
 
-    return 'gpu';
+    if (context.gpu) {
+      return 'gpu';
+    }
+
+    return 'cpu';
   }
 
   private captureBackendTelemetry(
@@ -1719,11 +1724,21 @@ class LLMEngineService {
         : initProfile?.backendMode === 'npu'
           ? 'npu'
           : null;
-    const runtimeGpuEnabled = Boolean(context.gpu);
+    const hasNpuSignal = this.hasNpuRuntimeSignal(context);
+    let runtimeBackendMode = (resolvedProfileBackendMode ?? this.resolveBackendMode(context));
 
-    this.activeBackendMode = (resolvedProfileBackendMode ?? this.resolveBackendMode(context));
-    this.actualGpuAccelerated = runtimeGpuEnabled
-      && this.activeBackendMode !== 'cpu'
+    // If we requested NPU but the runtime is clearly using a GPU, reflect that in diagnostics.
+    if (runtimeBackendMode === 'npu' && !hasNpuSignal && context.gpu) {
+      runtimeBackendMode = 'gpu';
+    }
+
+    const runtimeAccelerationEnabled = runtimeBackendMode === 'npu'
+      ? (Boolean(context.gpu) || (hasNpuSignal && reasonNoGPU.length === 0))
+      : Boolean(context.gpu);
+
+    this.activeBackendMode = runtimeBackendMode;
+    this.actualGpuAccelerated = runtimeBackendMode !== 'cpu'
+      && runtimeAccelerationEnabled
       && (resolvedInitGpuLayers ?? resolvedProfileLayers) > 0;
   }
 
@@ -2969,8 +2984,11 @@ class LLMEngineService {
 
         try {
           const { context, resolvedGpuLayers: candidateGpuLayers } = await initLlamaWithRetry(profile);
-          const actualGpu = candidateGpuLayers > 0 && Boolean(context.gpu);
           const reasonNoGPU = typeof context.reasonNoGPU === 'string' ? context.reasonNoGPU.trim() : '';
+          const runtimeAccelerationEnabled = candidate === 'npu'
+            ? (Boolean(context.gpu) || (this.hasNpuRuntimeSignal(context) && reasonNoGPU.length === 0))
+            : Boolean(context.gpu);
+          const actualGpu = candidateGpuLayers > 0 && runtimeAccelerationEnabled;
 
           backendInitAttempts.push({
             candidate,

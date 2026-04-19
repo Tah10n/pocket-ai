@@ -517,9 +517,17 @@ export const ChatScreen = () => {
     const handleListTouchStart = useCallback(() => {
         isListTouchingRef.current = true;
         setIsListTouching(true);
+        clearEndDragFinalizeTimeout();
         clearTouchEndFinalizeTimeout();
         forcedFollowPassesRef.current = 0;
         clearForcedScrollTimeouts();
+
+        // Clear any stale drag/momentum bookkeeping so a simple tap cannot inherit a previous gesture.
+        dragStartOffsetYRef.current = null;
+        momentumStartOffsetYRef.current = null;
+        endDragMetricsRef.current = null;
+        isMomentumScrollingRef.current = false;
+        isUserInteractingRef.current = false;
 
         if (autoScrollFrameRef.current !== null) {
             cancelAnimationFrame(autoScrollFrameRef.current);
@@ -529,7 +537,7 @@ export const ChatScreen = () => {
         // Do not change stickiness here: a tap should not permanently disable auto-follow.
         // Auto-scroll is temporarily suspended via maintainVisibleContentPosition while the
         // list is touched.
-    }, [clearForcedScrollTimeouts, clearTouchEndFinalizeTimeout]);
+    }, [clearEndDragFinalizeTimeout, clearForcedScrollTimeouts, clearTouchEndFinalizeTimeout]);
 
     const handleListTouchEnd = useCallback(() => {
         isListTouchingRef.current = false;

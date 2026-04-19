@@ -69,7 +69,8 @@ They affect native initialization and memory-fit estimation:
 Optional accelerator selectors may also be persisted alongside a load profile:
 
 - `selectedBackendDevices`
-  - used when a backend profile targets specific GPU/NPU devices discovered on the current device
+  - used when a backend profile targets specific NPU devices discovered on the current device (Hexagon/HTP)
+  - device selectors are llama.rn tokens like `HTP0` / `HTP1` / `HTP*` (avoid human-readable GPU labels)
 
 KV cache auto-selection is shared logic:
 
@@ -79,6 +80,37 @@ Backend policy resolution lives in:
 
 - `src/services/resolveInferenceProfile.ts`
 - `src/services/LLMEngineService.ts`
+
+### Backend discovery (llama.rn)
+
+Pocket AI uses llama.rn backend discovery to decide whether it is safe to attempt GPU/NPU initialization:
+
+- `llama.rn.getBackendDevicesInfo()` provides the discovered devices.
+- `devices: string[]` can be passed to llama.rn init to target specific backends.
+  - NPU selection is exposed via `HTP*` selectors (for example: `['HTP0']` or `['HTP*']`).
+
+Safety rule:
+
+- If backend discovery is unavailable, Pocket AI forces CPU-only candidates to avoid native crashes on unsupported accelerator paths.
+
+### Backend autotune (benchmark)
+
+Advanced Model Controls can run a backend benchmark (autotune) to measure tokens/sec for a small set of candidates.
+
+- Implementation: `src/services/InferenceAutotuneService.ts`
+- Persistence: `src/services/InferenceAutotuneStore.ts`
+  - keyed by `modelId`, `contextSize`, `kvCacheType` (and model signature fields when available)
+  - cancelled runs are **not** persisted
+  - `restorationError` is runtime-only (not persisted)
+
+### Last-good backend profiles (crash recovery / warmup)
+
+Pocket AI also tracks a separate "last known working" backend profile used to make bootstrap recovery more reliable:
+
+- Store: `src/services/InferenceLastGoodProfileStore.ts`
+- Used by: `src/services/LLMEngineService.ts` when `LoadModelOptions.preferLastWorkingProfile === true`
+
+This mechanism only reorders already-safe init candidates (it does not override user settings).
 
 Keep UI estimates aligned with runtime:
 

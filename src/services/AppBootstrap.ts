@@ -212,7 +212,7 @@ function scheduleActiveModelRestore(activeModelId: string): void {
 
     const restore = async () => {
       try {
-        await llmEngineService.load(activeModelId);
+        await llmEngineService.load(activeModelId, { preferLastWorkingProfile: true });
         restoreSpan.end({ outcome: 'success' });
       } catch (error) {
         const appError = toAppError(error);

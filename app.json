@@ -80,6 +80,7 @@
       "./plugins/withAndroidLocalProperties",
       "./plugins/withAndroidMainActivityOrientation",
       "./plugins/withAndroidSystemMetrics",
+      "./plugins/withAndroidGpuInfo",
       "./plugins/withIosSystemMetrics",
       "expo-secure-store",
       "expo-image",

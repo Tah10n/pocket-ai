@@ -20,24 +20,38 @@ import {
   writeAutotuneResult,
 } from './InferenceAutotuneStore';
 
-function uniqueInts(values: number[]): number[] {
-  const normalized = values
-    .filter((value) => Number.isFinite(value))
-    .map((value) => Math.max(0, Math.round(value)));
-  return Array.from(new Set(normalized));
+export type AutotuneProgressStage =
+  | 'preparing'
+  | 'cancelling'
+  | 'unloadingPrevious'
+  | 'loadingCandidate'
+  | 'benchmarkingCandidate'
+  | 'unloadingCandidate'
+  | 'saving'
+  | 'restoringPrevious'
+  | 'cancelled'
+  | 'done';
+
+export interface AutotuneProgressSnapshot {
+  stage: AutotuneProgressStage;
+  step: number;
+  totalSteps: number;
+  candidate?: AutotuneBestStableProfile;
+  candidateIndex?: number;
+  candidateCount?: number;
 }
 
 function resolveAutotuneCandidates({
   recommendedGpuLayers,
   gpuLayersCeiling,
-  gpuAvailable,
-  npuAvailable,
+  gpuAttemptable,
+  npuAttemptable,
   npuDeviceSelectors,
 }: {
   recommendedGpuLayers: number;
   gpuLayersCeiling: number;
-  gpuAvailable: boolean;
-  npuAvailable: boolean;
+  gpuAttemptable: boolean;
+  npuAttemptable: boolean;
   npuDeviceSelectors?: string[] | null;
 }): AutotuneBestStableProfile[] {
   const ceiling = Math.max(0, Math.round(gpuLayersCeiling));
@@ -50,22 +64,11 @@ function resolveAutotuneCandidates({
   }
 
   // Avoid attempting GPU profiles unless backend discovery has confirmed the GPU path is available.
-  // Some older devices crash natively when initializing unsupported GPU backends.
-  if (gpuAvailable) {
-    const layerTargets = uniqueInts([
-      Math.floor(recommended / 2),
-      recommended,
-      Math.min(ceiling, Math.floor(recommended * 1.5)),
-    ])
-      .filter((value) => value > 0)
-      .sort((a, b) => a - b);
-
-    for (const nGpuLayers of layerTargets) {
-      candidates.push({ backendMode: 'gpu', nGpuLayers });
-    }
+  if (gpuAttemptable) {
+    candidates.push({ backendMode: 'gpu', nGpuLayers: recommended });
   }
 
-  if (npuAvailable) {
+  if (npuAttemptable) {
     const resolvedSelectors = Array.isArray(npuDeviceSelectors)
       ? npuDeviceSelectors
           .map((device) => (typeof device === 'string' ? device.trim() : ''))
@@ -142,10 +145,14 @@ class InferenceAutotuneService {
     modelId,
     prompt = 'Write the numbers from 1 to 200, separated by spaces.',
     nPredict = 256,
+    onProgress,
+    signal,
   }: {
     modelId: string;
     prompt?: string;
     nPredict?: number;
+    onProgress?: (snapshot: AutotuneProgressSnapshot) => void;
+    signal?: AbortSignal;
   }): Promise<AutotuneResult> {
     const normalizedModelId = typeof modelId === 'string' ? modelId.trim() : '';
     if (!normalizedModelId) {
@@ -161,76 +168,180 @@ class InferenceAutotuneService {
       throw new Error('Engine is initializing. Try again in a moment.');
     }
 
-    const previousActiveModelId = engineState.activeModelId ?? null;
-    const shouldRestorePreviousModel = engineState.status === EngineStatus.READY && Boolean(previousActiveModelId);
-    const restoreLoadParamsOverride = shouldRestorePreviousModel
-      ? resolveRestoreLoadParamsOverride(engineState.diagnostics)
-      : null;
+    let cancelled = signal?.aborted === true;
+    let progressStep = 0;
+    let progressTotalSteps = 0;
+    const emitProgress = (snapshot: Omit<AutotuneProgressSnapshot, 'step' | 'totalSteps'>) => {
+      if (!onProgress) {
+        return;
+      }
 
-    let didUnloadPreviousModel = false;
+      onProgress({
+        ...snapshot,
+        step: progressStep,
+        totalSteps: progressTotalSteps,
+      });
+    };
+    const advanceProgress = () => {
+      progressStep = Math.min(progressTotalSteps, progressStep + 1);
+    };
 
-    const persistedModel = registry.getModel(normalizedModelId);
-    const modelsDir = getModelsDir();
-    const modelFilePath = (modelsDir && typeof persistedModel?.localPath === 'string')
-      ? safeJoinModelPath(modelsDir, persistedModel.localPath)
-      : null;
-    const modelSha256 = typeof persistedModel?.sha256 === 'string' ? persistedModel.sha256 : null;
-    let modelFileSizeBytes: number | null = null;
-    if (modelFilePath) {
+    const advanceAndEmit = (snapshot: Omit<AutotuneProgressSnapshot, 'step' | 'totalSteps'>) => {
+      advanceProgress();
+      emitProgress(snapshot);
+    };
+
+    const finishAndEmit = (snapshot: Omit<AutotuneProgressSnapshot, 'step' | 'totalSteps'>) => {
+      if (progressTotalSteps > 0) {
+        progressStep = progressTotalSteps;
+      }
+      emitProgress(snapshot);
+    };
+
+    const handleAbort = () => {
+      if (cancelled) {
+        return;
+      }
+
+      cancelled = true;
+      if (progressTotalSteps <= 0) {
+        progressTotalSteps = 1;
+      }
+      emitProgress({ stage: 'cancelling' });
+      void llmEngineService.interruptActiveCompletion();
+    };
+
+    let removeAbortListener: (() => void) | null = null;
+    if (signal && typeof signal.addEventListener === 'function' && typeof signal.removeEventListener === 'function') {
       try {
-        const info = await FileSystem.getInfoAsync(modelFilePath);
-        if (info.exists && typeof info.size === 'number' && Number.isFinite(info.size) && info.size > 0) {
-          modelFileSizeBytes = Math.round(info.size);
-        }
+        signal.addEventListener('abort', handleAbort);
+        removeAbortListener = () => {
+          try {
+            signal.removeEventListener('abort', handleAbort);
+          } catch {
+            // ignore
+          }
+        };
       } catch {
-        // Ignore: autotune can proceed without an exact model signature.
+        // ignore
       }
     }
 
-    if (modelFileSizeBytes === null) {
-      const fallbackGgufTotalBytes = typeof persistedModel?.gguf?.totalBytes === 'number'
-        && Number.isFinite(persistedModel.gguf.totalBytes)
-        && persistedModel.gguf.totalBytes > 0
-        ? Math.round(persistedModel.gguf.totalBytes)
+    try {
+      const previousActiveModelId = engineState.activeModelId ?? null;
+      const shouldRestorePreviousModel = engineState.status === EngineStatus.READY && Boolean(previousActiveModelId);
+      const restoreLoadParamsOverride = shouldRestorePreviousModel
+        ? resolveRestoreLoadParamsOverride(engineState.diagnostics)
         : null;
 
-      if (fallbackGgufTotalBytes !== null) {
-        modelFileSizeBytes = fallbackGgufTotalBytes;
+      let didUnloadPreviousModel = false;
+
+      const persistedModel = registry.getModel(normalizedModelId);
+      const modelsDir = getModelsDir();
+      const modelFilePath = (modelsDir && typeof persistedModel?.localPath === 'string')
+        ? safeJoinModelPath(modelsDir, persistedModel.localPath)
+        : null;
+      const modelSha256 = typeof persistedModel?.sha256 === 'string' ? persistedModel.sha256 : null;
+      let modelFileSizeBytes: number | null = null;
+      if (modelFilePath) {
+        try {
+          const info = await FileSystem.getInfoAsync(modelFilePath);
+          if (info.exists && typeof info.size === 'number' && Number.isFinite(info.size) && info.size > 0) {
+            modelFileSizeBytes = Math.round(info.size);
+          }
+        } catch {
+          // Ignore: autotune can proceed without an exact model signature.
+        }
       }
-    }
 
-    const baseLoadParams = getModelLoadParametersForModel(normalizedModelId);
-    const previousAutotuneResult = readAutotuneResult({
-      modelId: normalizedModelId,
-      contextSize: baseLoadParams.contextSize,
-      kvCacheType: baseLoadParams.kvCacheType,
-      modelFileSizeBytes,
-      modelSha256,
-    });
-    const { recommendedGpuLayers, gpuLayersCeiling } = await llmEngineService.getRecommendedLoadProfile(normalizedModelId);
-    const capabilities = await inferenceBackendService.getCapabilitiesSummary().catch(() => null);
-    const capabilitiesKnown = Boolean(capabilities && capabilities.discoveryUnavailable !== true);
-    const gpuAvailable = capabilities?.gpu?.available === true;
-    const npuAvailable = capabilities?.npu?.available === true;
-    const npuDeviceSelectors = Array.isArray(capabilities?.npu.deviceNames) && capabilities.npu.deviceNames.length > 0
-      ? capabilities.npu.deviceNames.filter((device) => isSafeBackendDeviceSelector(device))
-      : null;
+      if (modelFileSizeBytes === null) {
+        const fallbackGgufTotalBytes = typeof persistedModel?.gguf?.totalBytes === 'number'
+          && Number.isFinite(persistedModel.gguf.totalBytes)
+          && persistedModel.gguf.totalBytes > 0
+          ? Math.round(persistedModel.gguf.totalBytes)
+          : null;
 
-    const candidateProfiles = resolveAutotuneCandidates({
-      recommendedGpuLayers,
-      gpuLayersCeiling,
-      gpuAvailable,
-      npuAvailable,
-      npuDeviceSelectors,
-    });
+        if (fallbackGgufTotalBytes !== null) {
+          modelFileSizeBytes = fallbackGgufTotalBytes;
+        }
+      }
+
+      const baseLoadParams = getModelLoadParametersForModel(normalizedModelId);
+      const previousAutotuneResult = readAutotuneResult({
+        modelId: normalizedModelId,
+        contextSize: baseLoadParams.contextSize,
+        kvCacheType: baseLoadParams.kvCacheType,
+        modelFileSizeBytes,
+        modelSha256,
+      });
+      const { recommendedGpuLayers, gpuLayersCeiling } = await llmEngineService.getRecommendedLoadProfile(normalizedModelId);
+      const capabilities = await inferenceBackendService.getCapabilitiesSummary().catch(() => null);
+      const capabilitiesKnown = Boolean(capabilities && capabilities.discoveryUnavailable !== true);
+      const gpuAvailable = capabilities?.gpu?.available === true;
+      const npuAvailable = capabilities?.npu?.available === true;
+      // Compatibility rule: only attempt accelerators when discovery marks them available.
+      // Do not attempt based on model/SOC heuristics here.
+      const gpuAttemptable = gpuAvailable;
+      const npuAttemptable = npuAvailable;
+      const npuDeviceSelectors = Array.isArray(capabilities?.npu.deviceNames) && capabilities.npu.deviceNames.length > 0
+        ? capabilities.npu.deviceNames.filter((device) => isSafeBackendDeviceSelector(device))
+        : null;
+
+      const candidateProfiles = resolveAutotuneCandidates({
+        recommendedGpuLayers,
+        gpuLayersCeiling,
+        gpuAttemptable,
+        npuAttemptable,
+        npuDeviceSelectors,
+      });
 
     const targetAlreadyLoaded = engineState.status === EngineStatus.READY
       && engineState.activeModelId === normalizedModelId;
     const hasAcceleratorCandidates = candidateProfiles.some((candidate) => candidate.backendMode !== 'cpu');
+    const candidateCount = candidateProfiles.length;
+    const willRestorePreviousModel = shouldRestorePreviousModel && Boolean(previousActiveModelId);
+    const willBenchmarkInPlace = targetAlreadyLoaded && !hasAcceleratorCandidates;
+
+    // step counts completed stages (1..totalSteps). Terminal stages set step=totalSteps.
+    progressTotalSteps = willBenchmarkInPlace
+      ? 3 // preparing + benchmark + saving
+      : (
+        // preparing + unload previous + (load/bench/unload per candidate) + save + optional restore.
+        1
+        + 1
+        + (candidateCount * 3)
+        + 1
+        + (willRestorePreviousModel ? 1 : 0)
+      );
+    advanceAndEmit({ stage: 'preparing' });
+
+    if (cancelled) {
+      const result: AutotuneResult = {
+        createdAtMs: Date.now(),
+        modelId: normalizedModelId,
+        contextSize: baseLoadParams.contextSize,
+        kvCacheType: baseLoadParams.kvCacheType,
+        modelFileSizeBytes,
+        modelSha256,
+        backendDiscoveryKnown: capabilitiesKnown,
+        ...(previousAutotuneResult?.bestStable ? { bestStable: previousAutotuneResult.bestStable } : null),
+        candidates: [],
+        cancelled: true,
+      };
+
+      finishAndEmit({ stage: 'cancelled' });
+      return result;
+    }
 
     // If only CPU is available and the target model is already loaded, avoid unloading/reloading.
     // Some devices crash natively on reload, even for CPU-only models.
     if (targetAlreadyLoaded && !hasAcceleratorCandidates) {
+      advanceAndEmit({
+        stage: 'benchmarkingCandidate',
+        candidate: { backendMode: 'cpu', nGpuLayers: 0 },
+        candidateIndex: 1,
+        candidateCount: 1,
+      });
       const cpuProfile: AutotuneBestStableProfile = { backendMode: 'cpu', nGpuLayers: 0 };
       const candidates: AutotuneCandidateReport[] = [];
 
@@ -295,7 +406,7 @@ class InferenceAutotuneService {
           actualGpuAccelerated: diagnostics?.actualGpuAccelerated,
           loadedGpuLayers: diagnostics?.loadedGpuLayers,
           reasonNoGPU: diagnostics?.reasonNoGPU,
-          error: formatErrorMessage(error),
+          error: cancelled ? 'Cancelled' : formatErrorMessage(error),
         });
       }
 
@@ -316,13 +427,46 @@ class InferenceAutotuneService {
         return currentSpeed > bestSpeed ? current : best;
       }, null);
 
+      const acceleratorCandidate = candidates.find((candidate) => {
+        if (!candidate.success || typeof candidate.tokensPerSec !== 'number' || !Number.isFinite(candidate.tokensPerSec)) {
+          return false;
+        }
+        const actualMode = candidate.actualBackendMode;
+        const actualGpu = candidate.actualGpuAccelerated === true;
+        return actualGpu && (actualMode === 'gpu' || actualMode === 'npu');
+      }) ?? null;
+
       // A CPU-only run during transient backend discovery failures should not overwrite the
       // stored Auto preference for later loads on accelerator-capable devices.
       const bestStable: AutotuneBestStableProfile | undefined = bestCandidate
         ? capabilitiesKnown
           ? { backendMode: 'cpu', nGpuLayers: 0 }
           : previousAutotuneResult?.bestStable
-        : previousAutotuneResult?.bestStable;
+        : acceleratorCandidate
+          ? (() => {
+              const backendMode = acceleratorCandidate.actualBackendMode === 'npu' ? 'npu' : 'gpu';
+              const resolvedGpuLayers = typeof acceleratorCandidate.initGpuLayers === 'number' && Number.isFinite(acceleratorCandidate.initGpuLayers)
+                ? Math.max(0, Math.round(acceleratorCandidate.initGpuLayers))
+                : 0;
+
+              if (backendMode !== 'npu') {
+                return { backendMode, nGpuLayers: resolvedGpuLayers };
+              }
+
+              const initDevices = Array.isArray(acceleratorCandidate.initDevices)
+                ? acceleratorCandidate.initDevices
+                    .map((device) => (typeof device === 'string' ? device.trim() : ''))
+                    .filter(isSafeBackendDeviceSelector)
+                : [];
+              const dedupedInitDevices = Array.from(new Set(initDevices)).slice(0, MAX_BACKEND_DEVICE_SELECTORS);
+
+              return {
+                backendMode: 'npu',
+                nGpuLayers: resolvedGpuLayers,
+                ...(dedupedInitDevices.length > 0 ? { devices: dedupedInitDevices } : null),
+              };
+            })()
+          : previousAutotuneResult?.bestStable;
 
       const result: AutotuneResult = {
         createdAtMs: Date.now(),
@@ -336,13 +480,24 @@ class InferenceAutotuneService {
         candidates,
       };
 
-      writeAutotuneResult(result);
+      if (cancelled) {
+        result.cancelled = true;
+      }
+
+      if (!cancelled) {
+        advanceAndEmit({ stage: 'saving' });
+        writeAutotuneResult(result);
+        finishAndEmit({ stage: 'done' });
+      } else {
+        finishAndEmit({ stage: 'cancelled' });
+      }
       return result;
     }
 
     let result: AutotuneResult | null = null;
 
     try {
+      advanceAndEmit({ stage: 'unloadingPrevious' });
       // Unload only once we're ready to start benchmarking so early failures don't leave the
       // user without their previously loaded model.
       await llmEngineService.unload().catch(() => undefined);
@@ -351,6 +506,16 @@ class InferenceAutotuneService {
       const candidates: AutotuneCandidateReport[] = [];
 
       for (const candidate of candidateProfiles) {
+        if (cancelled) {
+          break;
+        }
+
+        advanceAndEmit({
+          stage: 'loadingCandidate',
+          candidate,
+          candidateIndex: candidates.length + 1,
+          candidateCount,
+        });
         const loadParamsOverride: Partial<ModelLoadParameters> = {
           backendPolicy: mapBackendModeToPolicy(candidate.backendMode),
           gpuLayers: candidate.backendMode === 'cpu' ? 0 : candidate.nGpuLayers,
@@ -363,6 +528,36 @@ class InferenceAutotuneService {
             forceReload: true,
             allowUnsafeMemoryLoad: false,
             loadParamsOverride,
+          });
+
+          if (cancelled) {
+            const diagnostics = llmEngineService.getState().diagnostics;
+            const initGpuLayers = typeof diagnostics?.initGpuLayers === 'number' && Number.isFinite(diagnostics.initGpuLayers)
+              ? Math.max(0, Math.round(diagnostics.initGpuLayers))
+              : undefined;
+            const initDevices = Array.isArray(diagnostics?.initDevices) && diagnostics.initDevices.length > 0
+              ? diagnostics.initDevices
+              : undefined;
+
+            candidates.push({
+              profile: candidate,
+              success: false,
+              initGpuLayers,
+              initDevices,
+              actualBackendMode: diagnostics?.backendMode,
+              actualGpuAccelerated: diagnostics?.actualGpuAccelerated,
+              loadedGpuLayers: diagnostics?.loadedGpuLayers,
+              reasonNoGPU: diagnostics?.reasonNoGPU,
+              error: 'Cancelled',
+            });
+            break;
+          }
+
+          advanceAndEmit({
+            stage: 'benchmarkingCandidate',
+            candidate,
+            candidateIndex: candidates.length + 1,
+            candidateCount,
           });
 
           let tokenCount = 0;
@@ -425,10 +620,20 @@ class InferenceAutotuneService {
             actualGpuAccelerated: diagnostics?.actualGpuAccelerated,
             loadedGpuLayers: diagnostics?.loadedGpuLayers,
             reasonNoGPU: diagnostics?.reasonNoGPU,
-            error: formatErrorMessage(error),
+            error: cancelled ? 'Cancelled' : formatErrorMessage(error),
           });
         } finally {
+          advanceAndEmit({
+            stage: 'unloadingCandidate',
+            candidate,
+            candidateIndex: candidates.length,
+            candidateCount,
+          });
           await llmEngineService.unload().catch(() => undefined);
+        }
+
+        if (cancelled) {
+          break;
         }
       }
 
@@ -534,10 +739,22 @@ class InferenceAutotuneService {
         candidates,
       };
 
-      writeAutotuneResult(result);
+      if (cancelled) {
+        result.cancelled = true;
+      }
+
+      if (!cancelled) {
+        advanceAndEmit({ stage: 'saving' });
+        writeAutotuneResult(result);
+      }
+
+      if (!willRestorePreviousModel) {
+        finishAndEmit({ stage: cancelled ? 'cancelled' : 'done' });
+      }
       return result;
     } finally {
       if (shouldRestorePreviousModel && previousActiveModelId && didUnloadPreviousModel) {
+        advanceAndEmit({ stage: 'restoringPrevious' });
         try {
           await llmEngineService.load(previousActiveModelId, {
             forceReload: true,
@@ -549,8 +766,13 @@ class InferenceAutotuneService {
           if (result) {
             result.restorationError = message;
           }
+        } finally {
+          finishAndEmit({ stage: cancelled ? 'cancelled' : 'done' });
         }
       }
+    }
+    } finally {
+      removeAbortListener?.();
     }
   }
 }

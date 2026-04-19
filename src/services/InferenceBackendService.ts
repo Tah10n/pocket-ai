@@ -38,106 +38,22 @@ function normalizeDeviceName(deviceName: string): string {
   return deviceName.trim();
 }
 
-function normalizeSearchToken(value: unknown): string {
-  if (typeof value === 'string') {
-    return value.trim();
-  }
-  if (typeof value === 'number' || typeof value === 'boolean') {
-    return String(value);
-  }
-  return '';
-}
-
-function buildDeviceSearchText(device: NativeBackendDeviceInfo): string {
-  const metadata = device.metadata as Record<string, unknown> | undefined;
-  const metadataTokens = metadata
-    ? Object.values(metadata).map(normalizeSearchToken).filter((token) => token.length > 0)
-    : [];
-
-  return [
-    normalizeSearchToken(device.backend),
-    normalizeSearchToken(device.type),
-    normalizeSearchToken(device.deviceName),
-    ...metadataTokens,
-  ]
-    .map((token) => token.trim())
-    .filter((token) => token.length > 0)
-    .join(' ')
-    .toLowerCase();
-}
-
-function parseAdrenoModelNumber(text: string): number | null {
-  const match = text.match(/adreno(?:\s*\(tm\))?\s*(\d{3,4})/i);
-  if (!match) {
-    return null;
-  }
-  const parsed = Number(match[1]);
-  if (!Number.isFinite(parsed)) {
-    return null;
-  }
-  return Math.round(parsed);
-}
-
-function parseQualcommSocModelNumber(text: string): number | null {
-  const regex = /\bsm(\d{4})\b/gi;
-  let match: RegExpExecArray | null = null;
-  let best: number | null = null;
-  while ((match = regex.exec(text)) !== null) {
-    const parsed = Number(match[1]);
-    if (!Number.isFinite(parsed)) {
-      continue;
-    }
-    const normalized = Math.round(parsed);
-    if (best === null || normalized > best) {
-      best = normalized;
-    }
-  }
-  return best;
-}
-
-function isCompatibleAndroidOpenClGpuDevice(device: NativeBackendDeviceInfo): boolean {
-  const text = buildDeviceSearchText(device);
-  if (!text.includes('opencl')) {
-    return false;
-  }
-
-  const adreno = parseAdrenoModelNumber(text);
-  if (adreno === null) {
-    return false;
-  }
-
-  // OpenCL acceleration is supported & tested on Adreno 700+.
-  return adreno >= 700;
-}
-
-function isCompatibleAndroidHexagonNpuEnvironment({
-  devices,
-  hasCompatibleOpenClGpu,
-}: {
-  devices: NativeBackendDeviceInfo[];
-  hasCompatibleOpenClGpu: boolean;
-}): boolean {
-  if (hasCompatibleOpenClGpu) {
+function isNpuDevice(device: NativeBackendDeviceInfo): boolean {
+  // Align with llama.rn docs: Hexagon devices are exposed as HTP* selectors.
+  // Prefer matching the concrete deviceName tokens (HTP0 / HTP1 / ...).
+  const name = typeof device.deviceName === 'string' ? device.deviceName.trim() : '';
+  if (name.startsWith('HTP')) {
     return true;
   }
 
-  const combinedText = devices.map(buildDeviceSearchText).join(' ');
-  const socModel = parseQualcommSocModelNumber(combinedText);
-  if (socModel !== null) {
-    // Hexagon HTP support is supported & tested on SM8450+.
-    return socModel >= 8450;
-  }
-
-  // Fallback: Qualcomm board codenames for newer SoCs.
-  return combinedText.includes('taro') || combinedText.includes('kalama') || combinedText.includes('pineapple');
+  // Fallback: some builds may label the backend as HTP/Hexagon/QNN.
+  const backend = typeof device.backend === 'string' ? device.backend.trim().toLowerCase() : '';
+  return backend.includes('htp') || backend.includes('hexagon') || backend.includes('qnn');
 }
 
-function isNpuDevice(device: NativeBackendDeviceInfo): boolean {
-  const text = buildDeviceSearchText(device);
-
-  // Keep in sync (conceptually) with the runtime backend detector in
-  // LLMEngineService.resolveBackendMode, but only using fields we have here.
-  return text.includes('htp') || text.includes('hexagon') || text.includes('qnn');
+function isOpenClDevice(device: NativeBackendDeviceInfo): boolean {
+  const backend = typeof device.backend === 'string' ? device.backend.trim().toLowerCase() : '';
+  return backend.includes('opencl');
 }
 
 function uniqueStrings(values: string[]): string[] {
@@ -228,11 +144,8 @@ class InferenceBackendService {
     const gpuDevices = devices.filter((device) => !isNpuDevice(device));
 
     if (Platform.OS === 'android') {
-      const hasCompatibleOpenClGpu = gpuDevices.some((device) => isCompatibleAndroidOpenClGpuDevice(device));
-      const hasCompatibleHexagon = npuDevices.length > 0 && isCompatibleAndroidHexagonNpuEnvironment({
-        devices,
-        hasCompatibleOpenClGpu,
-      });
+      const hasCompatibleOpenClGpu = gpuDevices.some((device) => isOpenClDevice(device));
+      const hasCompatibleHexagon = npuDevices.length > 0;
 
       return {
         gpuBackendAvailable: hasCompatibleOpenClGpu,
@@ -263,10 +176,10 @@ class InferenceBackendService {
     const gpuDevices = devices.filter((device) => !isNpuDevice(device));
 
     const androidHasCompatibleOpenClGpu = Platform.OS === 'android'
-      ? gpuDevices.some((device) => isCompatibleAndroidOpenClGpuDevice(device))
+      ? gpuDevices.some((device) => isOpenClDevice(device))
       : gpuDevices.length > 0;
     const androidHasCompatibleHexagonNpu = Platform.OS === 'android'
-      ? (npuDevices.length > 0 && isCompatibleAndroidHexagonNpuEnvironment({ devices, hasCompatibleOpenClGpu: androidHasCompatibleOpenClGpu }))
+      ? npuDevices.length > 0
       : npuDevices.length > 0;
 
     const cpu: BackendCapability = {

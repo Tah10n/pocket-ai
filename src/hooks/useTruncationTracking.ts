@@ -131,6 +131,11 @@ export function useTruncationTracking(
           const errorCode = error && typeof error === 'object' && 'code' in error
             ? String((error as { code?: unknown }).code)
             : null;
+          const errorMessage = error instanceof Error
+            ? error.message
+            : error && typeof error === 'object' && 'message' in error
+              ? String((error as { message?: unknown }).message)
+              : String(error);
 
           // Expected transient failures (and oversized messages): fall back to heuristics without warning spam.
           if (
@@ -139,6 +144,12 @@ export function useTruncationTracking(
             || errorCode === 'engine_unloading'
             || errorCode === 'message_too_long'
           ) {
+            return;
+          }
+
+          // Some chat templates (Jinja tool templates) reject prompts without an explicit user query.
+          // Accurate token counting may briefly probe such windows; treat this as expected and fall back.
+          if (errorMessage.includes('Jinja Exception') && errorMessage.includes('No user query found in messages')) {
             return;
           }
 

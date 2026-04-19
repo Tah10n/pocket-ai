@@ -3,6 +3,7 @@ import { inferenceBackendService } from '../../src/services/InferenceBackendServ
 
 jest.mock('react-native', () => ({
   Platform: { OS: 'android' },
+  NativeModules: {},
 }));
 
 jest.mock('llama.rn', () => ({
@@ -104,7 +105,7 @@ describe('InferenceBackendService', () => {
     }));
   });
 
-  it('disables OpenCL GPU availability on Adreno below 700 for stability', async () => {
+  it('reports OpenCL GPU availability even on older Adreno models', async () => {
     getBackendDevicesInfoMock().mockResolvedValueOnce([
       {
         type: 'gpu',
@@ -115,11 +116,41 @@ describe('InferenceBackendService', () => {
     ]);
 
     await expect(inferenceBackendService.getBackendAvailability()).resolves.toEqual(expect.objectContaining({
-      gpuBackendAvailable: false,
+      gpuBackendAvailable: true,
     }));
   });
 
-  it('disables Hexagon/HTP NPU availability on pre-SM8450 devices for stability', async () => {
+  it('reports OpenCL GPU availability when backend is OpenCL', async () => {
+    getBackendDevicesInfoMock().mockResolvedValueOnce([
+      {
+        type: 'gpu',
+        backend: 'OpenCL',
+        deviceName: 'GPUOpenCL',
+        maxMemorySize: 0,
+      },
+    ]);
+
+    await expect(inferenceBackendService.getBackendAvailability()).resolves.toEqual(expect.objectContaining({
+      gpuBackendAvailable: true,
+    }));
+  });
+
+  it('does not require device-name heuristics for OpenCL availability', async () => {
+    getBackendDevicesInfoMock().mockResolvedValueOnce([
+      {
+        type: 'gpu',
+        backend: 'OpenCL',
+        deviceName: 'GPUOpenCL',
+        maxMemorySize: 0,
+      },
+    ]);
+
+    await expect(inferenceBackendService.getBackendAvailability()).resolves.toEqual(expect.objectContaining({
+      gpuBackendAvailable: true,
+    }));
+  });
+
+  it('reports Hexagon/HTP NPU availability even on older SoCs', async () => {
     getBackendDevicesInfoMock().mockResolvedValueOnce([
       {
         type: 'gpu',
@@ -133,7 +164,22 @@ describe('InferenceBackendService', () => {
     ]);
 
     await expect(inferenceBackendService.getBackendAvailability()).resolves.toEqual(expect.objectContaining({
-      npuBackendAvailable: false,
+      npuBackendAvailable: true,
+    }));
+  });
+
+  it('reports Hexagon/HTP NPU availability when backend is HTP', async () => {
+    getBackendDevicesInfoMock().mockResolvedValueOnce([
+      {
+        type: 'gpu',
+        backend: 'HTP',
+        deviceName: 'HTP0',
+        maxMemorySize: 0,
+      },
+    ]);
+
+    await expect(inferenceBackendService.getBackendAvailability()).resolves.toEqual(expect.objectContaining({
+      npuBackendAvailable: true,
     }));
   });
 

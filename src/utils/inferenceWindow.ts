@@ -330,6 +330,14 @@ export async function buildInferenceWindowWithAccurateTokenCounts(
   }
 
   const historyMessages = fullMessages.slice(firstHistoryIndex);
+  const lastUserHistoryIndex = (() => {
+    for (let i = historyMessages.length - 1; i >= 0; i -= 1) {
+      if (historyMessages[i]?.role === 'user') {
+        return i;
+      }
+    }
+    return -1;
+  })();
   const historyMessageIds = eligibleMessages
     .slice(baseTruncatedMessageIds.length, baseTruncatedMessageIds.length + historyMessages.length)
     .map((message) => message.id);
@@ -357,12 +365,39 @@ export async function buildInferenceWindowWithAccurateTokenCounts(
       return tokenCountCache.get(historyStartIndex)!;
     }
 
-    const tokens = await countPromptTokens([
-      ...systemMessages,
-      ...historyMessages.slice(historyStartIndex),
-    ]);
-    tokenCountCache.set(historyStartIndex, tokens);
-    return tokens;
+    const tryCount = async (startIndex: number) => {
+      const tokens = await countPromptTokens([
+        ...systemMessages,
+        ...historyMessages.slice(startIndex),
+      ]);
+      tokenCountCache.set(startIndex, tokens);
+      return tokens;
+    };
+
+    try {
+      return await tryCount(historyStartIndex);
+    } catch (error) {
+      // Some Jinja chat templates (tool-enabled) require at least one user message in the window.
+      // When the thread currently ends with an assistant/tool turn, token-count probes that start
+      // after the last user message can throw and break truncation tracking. Retry by including
+      // the most recent user message.
+      const message = error instanceof Error ? error.message : String(error);
+      const normalizedHistoryStartIndex = lastUserHistoryIndex >= 0 && historyStartIndex > lastUserHistoryIndex
+        ? lastUserHistoryIndex
+        : historyStartIndex;
+
+      if (
+        normalizedHistoryStartIndex !== historyStartIndex
+        && message.includes('Jinja Exception')
+        && message.includes('No user query found in messages')
+      ) {
+        const tokens = await tryCount(normalizedHistoryStartIndex);
+        tokenCountCache.set(historyStartIndex, tokens);
+        return tokens;
+      }
+
+      throw error;
+    }
   };
 
   const lastHistoryIndex = historyMessages.length - 1;

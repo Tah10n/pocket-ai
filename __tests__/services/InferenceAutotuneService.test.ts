@@ -145,7 +145,7 @@ describe('InferenceAutotuneService', () => {
 
     expect(result.bestStable).toEqual(expect.objectContaining({
       backendMode: 'gpu',
-      nGpuLayers: 18,
+      nGpuLayers: 12,
       devices: ['Adreno GPU'],
     }));
 
@@ -155,7 +155,7 @@ describe('InferenceAutotuneService', () => {
       kvCacheType: 'f16',
     })?.bestStable).toEqual(expect.objectContaining({
       backendMode: 'gpu',
-      nGpuLayers: 18,
+      nGpuLayers: 12,
     }));
 
     expect(llmEngineService.load).toHaveBeenLastCalledWith('prev/model', {

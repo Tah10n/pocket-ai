@@ -56,4 +56,68 @@ describe('buildInferenceWindowWithAccurateTokenCounts', () => {
       code: 'message_too_long',
     });
   });
+
+  it('does not probe token counts with an assistant-only window when the thread ends with assistant output', async () => {
+    const thread: ChatThread = {
+      id: 'thread-2',
+      title: 'Test',
+      modelId: 'author/model-q4',
+      presetId: null,
+      presetSnapshot: {
+        id: null,
+        name: 'Default',
+        systemPrompt: 'You are helpful.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        topK: 40,
+        minP: 0.05,
+        repetitionPenalty: 1,
+        maxTokens: 128,
+        seed: null,
+      },
+      messages: [
+        {
+          id: 'message-1',
+          role: 'user',
+          content: 'Hi!',
+          createdAt: 1,
+          state: 'complete',
+        },
+        {
+          id: 'message-2',
+          role: 'assistant',
+          content: 'Hello.',
+          createdAt: 2,
+          state: 'complete',
+        },
+      ],
+      createdAt: 1,
+      updatedAt: 2,
+      status: 'idle',
+    };
+
+    const countPromptTokens = async (messages: LlmChatMessage[]) => {
+      if (!messages.some((message) => message.role === 'user')) {
+        throw new Error('Jinja Exception: No user query found in messages.');
+      }
+      return messages.length;
+    };
+
+    await expect(
+      buildInferenceWindowWithAccurateTokenCounts(
+        thread,
+        {
+          maxContextMessages: 24,
+          maxContextTokens: 2048,
+          responseReserveTokens: 0,
+          promptSafetyMarginTokens: 0,
+        },
+        countPromptTokens,
+      ),
+    ).resolves.toEqual(expect.objectContaining({
+      truncatedMessageIds: [],
+    }));
+  });
 });

@@ -274,6 +274,9 @@ describe('LLMEngineService', () => {
       });
 
       await llmEngineService.load('test/model', { forceReload: true });
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
 
       expect(getFormattedChatMock()).toHaveBeenCalledWith(
         expect.anything(),
@@ -329,6 +332,9 @@ describe('LLMEngineService', () => {
       });
 
       await llmEngineService.load('test/model', { forceReload: true });
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
 
       expect(registry.updateModel).toHaveBeenCalledWith(expect.objectContaining({
         id: 'test/model',

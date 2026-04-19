@@ -109,7 +109,7 @@ describe('AppBootstrap', () => {
       jest.runAllTimers();
       await Promise.resolve();
 
-      expect(llmEngineService.load).toHaveBeenCalledWith('author/model-q4');
+      expect(llmEngineService.load).toHaveBeenCalledWith('author/model-q4', { preferLastWorkingProfile: true });
       expect(updateSettings).not.toHaveBeenCalledWith({ activeModelId: null });
     } finally {
       jest.useRealTimers();
@@ -139,7 +139,7 @@ describe('AppBootstrap', () => {
       jest.runAllTimers();
       await Promise.resolve();
 
-      expect(llmEngineService.load).toHaveBeenCalledWith('author/model-q4');
+      expect(llmEngineService.load).toHaveBeenCalledWith('author/model-q4', { preferLastWorkingProfile: true });
       expect(updateSettings).not.toHaveBeenCalledWith({ activeModelId: null });
     } finally {
       jest.useRealTimers();
@@ -213,7 +213,7 @@ describe('AppBootstrap', () => {
       jest.runAllTimers();
       await Promise.resolve();
 
-      expect(llmEngineService.load).toHaveBeenCalledWith('author/model-q4');
+      expect(llmEngineService.load).toHaveBeenCalledWith('author/model-q4', { preferLastWorkingProfile: true });
       expect(updateSettings).not.toHaveBeenCalledWith({ activeModelId: null });
     } finally {
       jest.useRealTimers();

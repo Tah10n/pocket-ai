@@ -1510,7 +1510,9 @@ describe('ChatScreen', () => {
       await lastModelParametersSheetProps?.onRunAutotune();
     });
 
-    expect(mockRunBackendAutotune).toHaveBeenCalledWith({ modelId: 'author/model-q4' });
+    expect(mockRunBackendAutotune).toHaveBeenCalledWith(
+      expect.objectContaining({ modelId: 'author/model-q4', onProgress: expect.any(Function) }),
+    );
     expect(alertSpy).toHaveBeenCalledWith(
       'chat.modelControls.backendBenchmarkRestoreWarningTitle',
       'chat.modelControls.backendBenchmarkRestoreWarningDescription',

@@ -1842,3 +1842,60 @@ describe('LLMEngineService', () => {
     }
   });
 });
+
+describe('LLMEngineService backend telemetry helpers', () => {
+  it('detects NPU runtime signals from devices/lib/system info', () => {
+    const service: any = llmEngineService;
+
+    expect(service.hasNpuRuntimeSignal({ devices: ['HTP 0'], gpu: false })).toBe(true);
+    expect(service.hasNpuRuntimeSignal({ devices: ['something'], androidLib: 'libQNN.so', gpu: false })).toBe(true);
+    expect(service.hasNpuRuntimeSignal({ devices: [], systemInfo: 'Hexagon DSP', gpu: false })).toBe(true);
+    expect(service.hasNpuRuntimeSignal({ devices: ['Adreno GPU'], gpu: true, androidLib: 'libOpenCL.so' })).toBe(false);
+  });
+
+  it('resolves backend mode preferring NPU over GPU', () => {
+    const service: any = llmEngineService;
+
+    expect(service.resolveBackendMode({ devices: ['HTP 0'], gpu: true })).toBe('npu');
+    expect(service.resolveBackendMode({ devices: [], gpu: true })).toBe('gpu');
+    expect(service.resolveBackendMode({ devices: [], gpu: false })).toBe('cpu');
+  });
+
+  it('captures telemetry and marks requested NPU as GPU when runtime is GPU-only', () => {
+    const service: any = llmEngineService;
+
+    service.captureBackendTelemetry(
+      {
+        devices: ['Adreno GPU'],
+        gpu: true,
+        reasonNoGPU: '',
+        systemInfo: 'Android',
+        androidLib: 'libOpenCL.so',
+      },
+      { backendMode: 'npu', nGpuLayers: 12 },
+      12,
+    );
+
+    expect(service.activeBackendMode).toBe('gpu');
+    expect(service.actualGpuAccelerated).toBe(true);
+  });
+
+  it('does not mark NPU accelerated when reasonNoGPU is present and gpu is false', () => {
+    const service: any = llmEngineService;
+
+    service.captureBackendTelemetry(
+      {
+        devices: ['HTP 0'],
+        gpu: false,
+        reasonNoGPU: 'GPU disabled',
+        systemInfo: 'QNN',
+        androidLib: 'libQNN.so',
+      },
+      { backendMode: 'npu', nGpuLayers: 10 },
+      10,
+    );
+
+    expect(service.activeBackendMode).toBe('npu');
+    expect(service.actualGpuAccelerated).toBe(false);
+  });
+});

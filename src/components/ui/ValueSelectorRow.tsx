@@ -4,6 +4,7 @@ import { MaterialSymbols } from './MaterialSymbols';
 import { Pressable } from './pressable';
 import { joinClassNames } from './ScreenShell';
 import { Text, composeTextRole } from './text';
+import { cardPaddingByDensity, radiusTokens } from '../../utils/themeTokens';
 
 export interface ValueSelectorRowProps {
   label: string;
@@ -26,7 +27,10 @@ export function ValueSelectorRow({
 }: ValueSelectorRowProps) {
   const isInteractive = typeof onPress === 'function' && !disabled;
   const containerClassName = joinClassNames(
-    'min-h-11 flex-row items-center gap-3 rounded-2xl border border-outline-200 bg-background-50 px-3 py-2.5 dark:border-outline-700 dark:bg-background-900',
+    // DS-EXCEPTION: keep an explicit 44px min touch target for list rows.
+    'min-h-[44px] flex-row items-center gap-3 border border-outline-200 bg-background-50 dark:border-outline-700 dark:bg-background-900',
+    radiusTokens.md,
+    cardPaddingByDensity.compact,
     disabled ? 'opacity-60' : undefined,
     className,
   );

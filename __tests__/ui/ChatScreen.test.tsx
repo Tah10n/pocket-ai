@@ -706,6 +706,62 @@ describe('ChatScreen', () => {
     ).toBe(false);
   });
 
+  describe('exported helper functions', () => {
+    it('getNextShouldStickToBottom returns current value when not interacting or metrics are invalid', () => {
+      expect(getNextShouldStickToBottom(false, {
+        contentOffset: { x: 0, y: 0 },
+        contentSize: { width: 0, height: 1000 },
+        layoutMeasurement: { width: 0, height: 500 },
+      }, false)).toBe(false);
+
+      expect(getNextShouldStickToBottom(true, {
+        contentOffset: { x: 0, y: Number.NaN },
+        contentSize: { width: 0, height: 1000 },
+        layoutMeasurement: { width: 0, height: 500 },
+      }, true)).toBe(true);
+    });
+
+    it('getNextShouldStickToBottom arms/disarms based on distance from bottom with hysteresis', () => {
+      // at bottom (distance=0) => arm
+      expect(getNextShouldStickToBottom(false, {
+        contentOffset: { x: 0, y: 500 },
+        contentSize: { width: 0, height: 1000 },
+        layoutMeasurement: { width: 0, height: 500 },
+      }, true)).toBe(true);
+
+      // far from bottom (distance=500) => disarm
+      expect(getNextShouldStickToBottom(true, {
+        contentOffset: { x: 0, y: 0 },
+        contentSize: { width: 0, height: 1000 },
+        layoutMeasurement: { width: 0, height: 500 },
+      }, true)).toBe(false);
+
+      // within hysteresis band (distance=50) => keep current
+      expect(getNextShouldStickToBottom(true, {
+        contentOffset: { x: 0, y: 450 },
+        contentSize: { width: 0, height: 1000 },
+        layoutMeasurement: { width: 0, height: 500 },
+      }, true)).toBe(true);
+      expect(getNextShouldStickToBottom(false, {
+        contentOffset: { x: 0, y: 450 },
+        contentSize: { width: 0, height: 1000 },
+        layoutMeasurement: { width: 0, height: 500 },
+      }, true)).toBe(false);
+    });
+
+    it('getFlashListAutoScrollBottomThreshold and handleAndroidBackNavigation cover edge cases', () => {
+      expect(getFlashListAutoScrollBottomThreshold(0)).toBe(0.02);
+      expect(getFlashListAutoScrollBottomThreshold(-10)).toBe(0.02);
+      expect(getFlashListAutoScrollBottomThreshold(20)).toBe(1);
+      expect(getFlashListAutoScrollBottomThreshold(1600)).toBe(0.02);
+
+      const onGoBack = jest.fn();
+      expect(handleAndroidBackNavigation({ canGoBack: false, onGoBack })).toBe(false);
+      expect(handleAndroidBackNavigation({ canGoBack: true, onGoBack })).toBe(true);
+      expect(onGoBack).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it('keeps auto-scroll armed after a small scroll near the bottom', () => {
     expect(
       getNextShouldStickToBottom(

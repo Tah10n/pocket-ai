@@ -66,6 +66,94 @@ describe('downloadStore', () => {
     expect(entry?.downloadProgress).toBe(0.42);
   });
 
+  it('adds new models to the queue as QUEUED', () => {
+    useDownloadStore.getState().addToQueue(buildQueuedModel('new', LifecycleStatus.AVAILABLE));
+    const entry = useDownloadStore.getState().queue.find((model) => model.id === 'new');
+    expect(entry?.lifecycleStatus).toBe(LifecycleStatus.QUEUED);
+  });
+
+  it('ignores addToQueue when the model is already queued or in-flight', () => {
+    useDownloadStore.setState({
+      queue: [
+        buildQueuedModel('q', LifecycleStatus.QUEUED),
+        buildQueuedModel('d', LifecycleStatus.DOWNLOADING),
+        buildQueuedModel('v', LifecycleStatus.VERIFYING),
+      ],
+      activeDownloadId: null,
+    });
+
+    const before = useDownloadStore.getState().queue;
+    useDownloadStore.getState().addToQueue(buildQueuedModel('q', LifecycleStatus.AVAILABLE));
+    useDownloadStore.getState().addToQueue(buildQueuedModel('d', LifecycleStatus.AVAILABLE));
+    useDownloadStore.getState().addToQueue(buildQueuedModel('v', LifecycleStatus.AVAILABLE));
+    expect(useDownloadStore.getState().queue).toBe(before);
+  });
+
+  it('re-queues available entries (previous failures) when tapped again', () => {
+    useDownloadStore.setState({
+      queue: [
+        {
+          ...buildQueuedModel('avail', LifecycleStatus.AVAILABLE),
+          resumeData: 'resume-data',
+          downloadProgress: 0.12,
+        },
+      ],
+      activeDownloadId: null,
+    });
+
+    useDownloadStore.getState().addToQueue(buildQueuedModel('avail', LifecycleStatus.AVAILABLE));
+    const entry = useDownloadStore.getState().queue.find((model) => model.id === 'avail');
+    expect(entry?.lifecycleStatus).toBe(LifecycleStatus.QUEUED);
+    expect(entry?.resumeData).toBe('resume-data');
+    expect(entry?.downloadProgress).toBe(0.12);
+  });
+
+  it('removeFromQueue clears activeDownloadId when removing the active entry', () => {
+    useDownloadStore.setState({
+      queue: [buildQueuedModel('active', LifecycleStatus.QUEUED)],
+      activeDownloadId: 'active',
+    });
+
+    useDownloadStore.getState().removeFromQueue('active');
+    expect(useDownloadStore.getState().activeDownloadId).toBeNull();
+    expect(useDownloadStore.getState().queue).toEqual([]);
+  });
+
+  it('partialize zeroes progress for DOWNLOADING/VERIFYING entries only', () => {
+    const options = (useDownloadStore as any).persist?.getOptions?.();
+    expect(options?.partialize).toEqual(expect.any(Function));
+
+    const state = {
+      queue: [
+        { ...buildQueuedModel('a', LifecycleStatus.DOWNLOADING), downloadProgress: 0.9 },
+        { ...buildQueuedModel('b', LifecycleStatus.VERIFYING), downloadProgress: 0.8 },
+        { ...buildQueuedModel('c', LifecycleStatus.PAUSED), downloadProgress: 0.7 },
+      ],
+      activeDownloadId: 'a',
+    };
+
+    const partial = options.partialize(state);
+    expect(partial.queue.find((m: any) => m.id === 'a')?.downloadProgress).toBe(0);
+    expect(partial.queue.find((m: any) => m.id === 'b')?.downloadProgress).toBe(0);
+    expect(partial.queue.find((m: any) => m.id === 'c')?.downloadProgress).toBe(0.7);
+  });
+
+  it('onRehydrateStorage resets activeDownloadId and normalizes persisted in-flight entries', () => {
+    const options = (useDownloadStore as any).persist?.getOptions?.();
+    expect(options?.onRehydrateStorage).toEqual(expect.any(Function));
+
+    const persisted = {
+      queue: [buildQueuedModel('d', LifecycleStatus.DOWNLOADING)],
+      activeDownloadId: 'd',
+    };
+
+    const handler = options.onRehydrateStorage();
+    handler(persisted);
+
+    expect(persisted.activeDownloadId).toBeNull();
+    expect(persisted.queue[0].lifecycleStatus).toBe(LifecycleStatus.QUEUED);
+  });
+
   it('normalizes legacy queue entries with zero size to unknown size defaults', () => {
     const [normalized] = normalizePersistedDownloadQueue([
       {

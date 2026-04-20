@@ -12,6 +12,11 @@ const artifactsRoot = path.join(projectRoot, "artifacts", "android-scenarios");
 const androidRoot = path.join(projectRoot, "android");
 const localPropertiesPath = path.join(androidRoot, "local.properties");
 const appConfigPath = path.join(projectRoot, "app.json");
+const packageJsonPath = path.join(projectRoot, "package.json");
+const gradleWrapperPath = path.join(
+  androidRoot,
+  process.platform === "win32" ? "gradlew.bat" : "gradlew"
+);
 const apkPath = path.join(
   androidRoot,
   "app",
@@ -88,8 +93,6 @@ async function main() {
   log(`Using Android target ${device.serial}${device.model ? ` (${device.model})` : ""}.`);
   wakeAndUnlockDevice(tools.adb, device.serial);
 
-  const metro = await ensureMetroServer();
-
   const wantsSkipBuild = cliOptions.skipBuild || process.env.ANDROID_SKIP_BUILD === "1";
   let didBuildDebugApk = false;
   if (wantsSkipBuild && fs.existsSync(apkPath)) {
@@ -118,6 +121,8 @@ async function main() {
   if (!fs.existsSync(apkPath)) {
     throw new Error(`Expected debug APK at ${apkPath}, but it was not found.`);
   }
+
+  const metro = await ensureMetroServer();
 
   installDebugApk(tools.adb, device.serial, appPackage, {
     allowReuseExistingInstallOnLowStorage: !didBuildDebugApk,
@@ -452,6 +457,14 @@ async function startEmulatorAndWait(tools, options = {}) {
     log(
       `Found existing emulator ${serial} (${existingEmulator.state}). Waiting for it to become ready...`
     );
+    if (existingEmulator.state !== "device") {
+      serial = await waitForAndroidDevice(
+        tools.adb,
+        deviceStartupTimeoutMs,
+        (value) => value === existingEmulator.serial,
+        { includeOffline: true }
+      );
+    }
   } else {
     avdName = resolveAvdName(tools.emulator, options.requestedAvd);
     log(`No suitable emulator is running. Starting ${avdName}...`);
@@ -522,15 +535,6 @@ async function waitForAndroidDevice(adbPath, timeoutMs, matcher, options = {}) {
     );
     if (readyDevice) {
       return readyDevice.serial;
-    }
-
-    if (includeOffline) {
-      const offlineDevice = matchingDevices.find(
-        (candidate) => candidate.state === "offline"
-      );
-      if (offlineDevice) {
-        return offlineDevice.serial;
-      }
     }
 
     await delay(2_000);
@@ -708,6 +712,8 @@ async function isPortFree(port) {
 }
 
 function buildDebugApk() {
+  ensureAndroidNativeProject();
+  ensureGradleWrapperExecutable();
   log("Building Android debug APK...");
 
   if (process.platform === "win32") {
@@ -722,10 +728,44 @@ function buildDebugApk() {
     return;
   }
 
-  runChecked(path.join(androidRoot, "gradlew"), ["app:assembleDebug"], {
+  runChecked(gradleWrapperPath, ["app:assembleDebug"], {
     cwd: androidRoot,
     stdio: "inherit",
   });
+}
+
+function ensureAndroidNativeProject() {
+  if (fs.existsSync(gradleWrapperPath)) {
+    return;
+  }
+
+  log("Android native project not found. Generating it with Expo prebuild...");
+  runChecked(
+    resolveNpxCommand(),
+    ["expo", "prebuild", "--platform", "android", "--no-install"],
+    {
+      cwd: projectRoot,
+      stdio: "inherit",
+    }
+  );
+
+  if (!fs.existsSync(gradleWrapperPath)) {
+    throw new Error(
+      `Expected Gradle wrapper at ${gradleWrapperPath} after Expo prebuild, but it was not found.`
+    );
+  }
+}
+
+function ensureGradleWrapperExecutable() {
+  if (process.platform === "win32") {
+    return;
+  }
+
+  fs.chmodSync(gradleWrapperPath, 0o755);
+}
+
+function resolveNpxCommand() {
+  return process.platform === "win32" ? "npx.cmd" : "npx";
 }
 
 function isPackageInstalled(adbPath, serial, appPackage) {
@@ -796,6 +836,31 @@ function reverseMetroPort(adbPath, serial, port) {
 }
 
 function launchDevClient(adbPath, serial, appPackage, appScheme, port) {
+  if (!hasExpoDevClientDependency()) {
+    log("Launching the Android debug app...");
+    runCapture(adbPath, ["-s", serial, "shell", "am", "force-stop", appPackage], {
+      allowFailure: true,
+    });
+    runChecked(
+      adbPath,
+      [
+        "-s",
+        serial,
+        "shell",
+        "monkey",
+        "-p",
+        appPackage,
+        "-c",
+        "android.intent.category.LAUNCHER",
+        "1",
+      ],
+      {
+        stdio: "inherit",
+      }
+    );
+    return;
+  }
+
   const bundleUrl = `http://127.0.0.1:${port}`;
   const deepLink = `${appScheme}://expo-development-client/?url=${encodeURIComponent(
     bundleUrl
@@ -821,6 +886,14 @@ function launchDevClient(adbPath, serial, appPackage, appScheme, port) {
     {
       stdio: "inherit",
     }
+  );
+}
+
+function hasExpoDevClientDependency() {
+  const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
+  return Boolean(
+    (packageJson.dependencies && packageJson.dependencies["expo-dev-client"]) ||
+      (packageJson.devDependencies && packageJson.devDependencies["expo-dev-client"])
   );
 }
 

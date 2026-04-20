@@ -52,6 +52,22 @@ export interface ModelCapabilitySnapshot {
   lastModifiedAt?: number;
 }
 
+export interface ModelVariant {
+  variantId: string;
+  quantizationLabel: string;
+  size: number | null;
+  ramFit?: ModelMemoryFitDecision;
+  isLocal?: boolean;
+}
+
+export interface ModelThinkingCapabilitySnapshot {
+  detectedAt: number;
+  supportsThinking: boolean;
+  canDisableThinking: boolean;
+  thinkingStartTag?: string;
+  thinkingEndTag?: string;
+}
+
 export interface ModelMetadata {
   id: string;
   name: string;
@@ -93,6 +109,9 @@ export interface ModelMetadata {
   likes?: number | null;
   tags?: string[];
   description?: string;
+  variants?: ModelVariant[];
+  activeVariantId?: string;
+  thinkingCapability?: ModelThinkingCapabilitySnapshot;
 }
 
 export enum EngineStatus {

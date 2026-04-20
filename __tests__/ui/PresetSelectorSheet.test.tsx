@@ -76,7 +76,7 @@ describe('PresetSelectorSheet', () => {
     const onClose = jest.fn();
     const onSelectPreset = jest.fn();
 
-    const { getByText } = render(
+    const { getByTestId } = render(
       React.createElement(PresetSelectorSheet, {
         visible: true,
         activePresetId: 'preset-1',
@@ -85,7 +85,7 @@ describe('PresetSelectorSheet', () => {
       }),
     );
 
-    fireEvent.press(getByText('common.default'));
+    fireEvent.press(getByTestId('preset-option-default'));
 
     expect(onClose).toHaveBeenCalledTimes(1);
     expect(onSelectPreset).toHaveBeenCalledWith(null);

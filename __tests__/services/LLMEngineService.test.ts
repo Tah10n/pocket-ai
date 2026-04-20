@@ -189,6 +189,168 @@ describe('LLMEngineService', () => {
     );
   });
 
+  it('clears thinking_budget_tokens when thinking is disabled', async () => {
+    await llmEngineService.load('test/model');
+
+    await llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Hello' }],
+      params: {
+        enable_thinking: true,
+        reasoning_format: 'auto',
+        thinking_budget_tokens: 128,
+        n_predict: 32,
+      },
+    });
+
+    await llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Hello again' }],
+      params: {
+        enable_thinking: false,
+        reasoning_format: 'none',
+        n_predict: 32,
+      },
+    });
+
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        enable_thinking: false,
+        reasoning_format: 'none',
+        thinking_budget_tokens: -1,
+      }),
+      expect.any(Function),
+    );
+  });
+
+  it('clears thinking_budget_tokens when thinking is enabled but no budget is provided', async () => {
+    await llmEngineService.load('test/model');
+
+    await llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Hello' }],
+      params: {
+        enable_thinking: true,
+        reasoning_format: 'auto',
+        thinking_budget_tokens: 128,
+        n_predict: 32,
+      },
+    });
+
+    await llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Hello again' }],
+      params: {
+        enable_thinking: true,
+        reasoning_format: 'auto',
+        n_predict: 32,
+      },
+    });
+
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        enable_thinking: true,
+        reasoning_format: 'auto',
+        thinking_budget_tokens: -1,
+      }),
+      expect.any(Function),
+    );
+  });
+
+  it('persists thinking capability snapshot during load when probe succeeds', async () => {
+    const previousEnv = process.env.NODE_ENV;
+    (process.env as any).NODE_ENV = 'development';
+
+    try {
+      getFormattedChatMock().mockImplementation(async (_messages, _tools, formattingOptions) => {
+        const enableThinking = formattingOptions?.enable_thinking === true;
+
+        return enableThinking
+          ? {
+            prompt: 'Formatted prompt',
+            thinking_start_tag: '<|channel>thought',
+            thinking_end_tag: '<channel|>',
+          }
+          : {
+            prompt: 'Formatted prompt',
+            thinking_forced_open: true,
+          };
+      });
+
+      await llmEngineService.load('test/model', { forceReload: true });
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(getFormattedChatMock()).toHaveBeenCalledWith(
+        expect.anything(),
+        null,
+        expect.objectContaining({
+          jinja: true,
+          enable_thinking: true,
+          reasoning_format: 'auto',
+        }),
+      );
+      expect(getFormattedChatMock()).toHaveBeenCalledWith(
+        expect.anything(),
+        null,
+        expect.objectContaining({
+          jinja: true,
+          enable_thinking: false,
+          reasoning_format: 'none',
+        }),
+      );
+
+      expect(registry.updateModel).toHaveBeenCalledWith(expect.objectContaining({
+        id: 'test/model',
+        thinkingCapability: expect.objectContaining({
+          detectedAt: expect.any(Number),
+          supportsThinking: true,
+          canDisableThinking: false,
+          thinkingStartTag: '<|channel>thought',
+          thinkingEndTag: '<channel|>',
+        }),
+      }));
+    } finally {
+      (process.env as any).NODE_ENV = previousEnv;
+    }
+  });
+
+  it('persists thinking capability snapshot when thinking tags are only present in the formatted prompt', async () => {
+    const previousEnv = process.env.NODE_ENV;
+    (process.env as any).NODE_ENV = 'development';
+
+    try {
+      getFormattedChatMock().mockImplementation(async (_messages, _tools, formattingOptions) => {
+        const enableThinking = formattingOptions?.enable_thinking === true;
+
+        return enableThinking
+          ? {
+            type: 'jinja',
+            prompt: 'Formatted prompt\n<think>\nReasoning...\n</think>\nAnswer:',
+          }
+          : {
+            type: 'jinja',
+            prompt: 'Formatted prompt\nAnswer:',
+          };
+      });
+
+      await llmEngineService.load('test/model', { forceReload: true });
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(registry.updateModel).toHaveBeenCalledWith(expect.objectContaining({
+        id: 'test/model',
+        thinkingCapability: expect.objectContaining({
+          detectedAt: expect.any(Number),
+          supportsThinking: true,
+          canDisableThinking: true,
+          thinkingStartTag: '<think>',
+          thinkingEndTag: '</think>',
+        }),
+      }));
+    } finally {
+      (process.env as any).NODE_ENV = previousEnv;
+    }
+  });
+
   it('blocks prompt token counting while a completion is in flight', async () => {
     await llmEngineService.load('test/model');
 
@@ -1678,5 +1840,62 @@ describe('LLMEngineService', () => {
     } finally {
       warnSpy.mockRestore();
     }
+  });
+});
+
+describe('LLMEngineService backend telemetry helpers', () => {
+  it('detects NPU runtime signals from devices/lib/system info', () => {
+    const service: any = llmEngineService;
+
+    expect(service.hasNpuRuntimeSignal({ devices: ['HTP 0'], gpu: false })).toBe(true);
+    expect(service.hasNpuRuntimeSignal({ devices: ['something'], androidLib: 'libQNN.so', gpu: false })).toBe(true);
+    expect(service.hasNpuRuntimeSignal({ devices: [], systemInfo: 'Hexagon DSP', gpu: false })).toBe(true);
+    expect(service.hasNpuRuntimeSignal({ devices: ['Adreno GPU'], gpu: true, androidLib: 'libOpenCL.so' })).toBe(false);
+  });
+
+  it('resolves backend mode preferring NPU over GPU', () => {
+    const service: any = llmEngineService;
+
+    expect(service.resolveBackendMode({ devices: ['HTP 0'], gpu: true })).toBe('npu');
+    expect(service.resolveBackendMode({ devices: [], gpu: true })).toBe('gpu');
+    expect(service.resolveBackendMode({ devices: [], gpu: false })).toBe('cpu');
+  });
+
+  it('captures telemetry and marks requested NPU as GPU when runtime is GPU-only', () => {
+    const service: any = llmEngineService;
+
+    service.captureBackendTelemetry(
+      {
+        devices: ['Adreno GPU'],
+        gpu: true,
+        reasonNoGPU: '',
+        systemInfo: 'Android',
+        androidLib: 'libOpenCL.so',
+      },
+      { backendMode: 'npu', nGpuLayers: 12 },
+      12,
+    );
+
+    expect(service.activeBackendMode).toBe('gpu');
+    expect(service.actualGpuAccelerated).toBe(true);
+  });
+
+  it('does not mark NPU accelerated when reasonNoGPU is present and gpu is false', () => {
+    const service: any = llmEngineService;
+
+    service.captureBackendTelemetry(
+      {
+        devices: ['HTP 0'],
+        gpu: false,
+        reasonNoGPU: 'GPU disabled',
+        systemInfo: 'QNN',
+        androidLib: 'libQNN.so',
+      },
+      { backendMode: 'npu', nGpuLayers: 10 },
+      10,
+    );
+
+    expect(service.activeBackendMode).toBe('npu');
+    expect(service.actualGpuAccelerated).toBe(false);
   });
 });

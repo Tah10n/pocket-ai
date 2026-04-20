@@ -50,11 +50,23 @@ import {
 } from '../../services/SettingsStore';
 import { screenLayoutMetrics, withAlpha } from '../../utils/themeTokens';
 
-const AUTO_SCROLL_BOTTOM_THRESHOLD = 96;
+const AUTO_SCROLL_REARM_THRESHOLD_PX = 32;
+const AUTO_SCROLL_DISARM_THRESHOLD_PX = 64;
+const FALLBACK_FLASH_LIST_AUTO_SCROLL_BOTTOM_THRESHOLD_RATIO = 0.02;
 const FALLBACK_TOP_K = 40;
 const FALLBACK_MIN_P = 0.05;
 const FALLBACK_REPETITION_PENALTY = 1;
 const SHOULD_USE_KEYBOARD_AVOIDING_VIEW = Platform.OS === 'ios';
+
+type ScrollMetrics = Pick<NativeScrollEvent, 'contentOffset' | 'contentSize' | 'layoutMeasurement'>;
+
+function snapshotScrollMetrics(metrics: ScrollMetrics): ScrollMetrics {
+    return {
+        contentOffset: { x: metrics.contentOffset.x, y: metrics.contentOffset.y },
+        contentSize: { width: metrics.contentSize.width, height: metrics.contentSize.height },
+        layoutMeasurement: { width: metrics.layoutMeasurement.width, height: metrics.layoutMeasurement.height },
+    };
+}
 
 export function getAndroidKeyboardOverlapCompensation({
     baseWindowHeight,
@@ -101,16 +113,44 @@ export function getAndroidKeyboardSpacerHeight({
 
 export function getNextShouldStickToBottom(
     currentValue: boolean,
-    nativeEvent: NativeScrollEvent,
+    metrics: ScrollMetrics,
     isUserInteracting: boolean,
 ) {
     if (!isUserInteracting) {
         return currentValue;
     }
 
-    const distanceFromBottom = Math.max(nativeEvent.contentOffset.y, 0);
+    const contentHeight = metrics.contentSize.height;
+    const viewportHeight = metrics.layoutMeasurement.height;
+    const offsetY = metrics.contentOffset.y;
 
-    return distanceFromBottom < AUTO_SCROLL_BOTTOM_THRESHOLD;
+    if (!Number.isFinite(contentHeight) || !Number.isFinite(viewportHeight) || !Number.isFinite(offsetY)) {
+        return currentValue;
+    }
+
+    const distanceFromBottom = Math.max(
+        contentHeight - viewportHeight - offsetY,
+        0,
+    );
+
+    if (distanceFromBottom <= AUTO_SCROLL_REARM_THRESHOLD_PX) {
+        return true;
+    }
+
+    if (distanceFromBottom >= AUTO_SCROLL_DISARM_THRESHOLD_PX) {
+        return false;
+    }
+
+    // Hysteresis band: keep the previous value to avoid jitter.
+    return currentValue;
+}
+
+export function getFlashListAutoScrollBottomThreshold(viewportHeight: number) {
+    if (viewportHeight <= 0) {
+        return FALLBACK_FLASH_LIST_AUTO_SCROLL_BOTTOM_THRESHOLD_RATIO;
+    }
+
+    return Math.min(1, AUTO_SCROLL_REARM_THRESHOLD_PX / viewportHeight);
 }
 
 export function handleAndroidBackNavigation({
@@ -152,6 +192,9 @@ export const ChatScreen = () => {
     const [hardwareStatus, setHardwareStatus] = useState(() => hardwareListenerService.getCurrentStatus());
     const [composerDraft, setComposerDraft] = useState('');
     const [androidKeyboardInset, setAndroidKeyboardInset] = useState(0);
+    const [isAutoScrollPaused, setIsAutoScrollPaused] = useState(false);
+    const [isListTouching, setIsListTouching] = useState(false);
+    const [listViewportHeight, setListViewportHeight] = useState(0);
     const [isPresetSelectorOpen, setPresetSelectorOpen] = useState(false);
     const [settings, setSettings] = useState(() => getSettings());
     const [pendingRegenerateMessage, setPendingRegenerateMessage] = useState<{
@@ -163,6 +206,10 @@ export const ChatScreen = () => {
     const listRef = useRef<FlashListRef<ChatMessage> | null>(null);
     const autoScrollFrameRef = useRef<number | null>(null);
     const keyboardMeasureFrameRef = useRef<number | null>(null);
+    const endDragFinalizeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const endDragMetricsRef = useRef<ScrollMetrics | null>(null);
+    const touchEndFinalizeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const didDeferAutoScrollWhileTouchingRef = useRef(false);
     const forcedScrollTimeoutsRef = useRef<ReturnType<typeof setTimeout>[]>([]);
     const forcedFollowPassesRef = useRef(0);
     const baseWindowHeightRef = useRef(Dimensions.get('window').height);
@@ -171,6 +218,9 @@ export const ChatScreen = () => {
     const composerContainerRef = useRef<View | null>(null);
     const isUserInteractingRef = useRef(false);
     const isListTouchingRef = useRef(false);
+    const isMomentumScrollingRef = useRef(false);
+    const dragStartOffsetYRef = useRef<number | null>(null);
+    const momentumStartOffsetYRef = useRef<number | null>(null);
     const shouldStickToBottomRef = useRef(true);
     const hasActiveModel = Boolean(engineState.activeModelId);
     const isEngineReady = engineState.status === EngineStatus.READY;
@@ -210,7 +260,7 @@ export const ChatScreen = () => {
         repetitionPenalty: rawDefaultParams.repetitionPenalty ?? FALLBACK_REPETITION_PENALTY,
         reasoningEffort: rawDefaultParams.reasoningEffort ?? 'auto',
     };
-    const displayMessages = useMemo(() => [...messages].reverse(), [messages]);
+    const displayMessages = messages;
     const hasMessages = displayMessages.length > 0;
     const lastMessage = messages[messages.length - 1];
     const lastMessageSignature = lastMessage
@@ -256,6 +306,32 @@ export const ChatScreen = () => {
     const recoveryCardIconWrapStyle = useMemo(() => ({
         backgroundColor: withAlpha(colors.warning, resolvedMode === 'dark' ? 0.18 : 0.1),
     }), [colors.warning, resolvedMode]);
+    const listMaintainVisibleContentPosition = useMemo(() => {
+        // NOTE: FlashList auto-scroll uses autoscrollToBottomThreshold. Some versions ignore the
+        // `disabled` flag, so we set the threshold negative to truly disable auto-follow.
+        // NOTE: `maintainVisibleContentPosition` is most reliable on RN New Architecture.
+        // We keep manual scroll scheduling (scrollToEnd bursts) as a fallback.
+        // While the user is pressing the list during streaming, temporarily suspend auto-follow
+        // without changing the underlying stickiness state.
+        const shouldDisableAutoScroll = isAutoScrollPaused || (isGenerating && isListTouching);
+        const autoscrollToBottomThreshold = shouldDisableAutoScroll
+            ? -1
+            : getFlashListAutoScrollBottomThreshold(listViewportHeight);
+
+        return {
+            autoscrollToBottomThreshold,
+            animateAutoScrollToBottom: false,
+            startRenderingFromBottom: true,
+        };
+    }, [isAutoScrollPaused, isGenerating, isListTouching, listViewportHeight]);
+
+    const setShouldFollowLatestMessage = useCallback((shouldFollow: boolean) => {
+        shouldStickToBottomRef.current = shouldFollow;
+        setIsAutoScrollPaused((currentValue) => {
+            const nextValue = !shouldFollow;
+            return currentValue === nextValue ? currentValue : nextValue;
+        });
+    }, []);
 
     const showAlertForError = useCallback((titleKey: string, scope: string, error: unknown) => {
         Alert.alert(t(titleKey), getReportedErrorMessage(scope, error, t));
@@ -372,40 +448,54 @@ export const ChatScreen = () => {
         forcedScrollTimeoutsRef.current = [];
     }, []);
 
+    const clearEndDragFinalizeTimeout = useCallback(() => {
+        if (endDragFinalizeTimeoutRef.current === null) {
+            return;
+        }
+
+        clearTimeout(endDragFinalizeTimeoutRef.current);
+        endDragFinalizeTimeoutRef.current = null;
+    }, []);
+
+    const clearTouchEndFinalizeTimeout = useCallback(() => {
+        if (touchEndFinalizeTimeoutRef.current === null) {
+            return;
+        }
+
+        clearTimeout(touchEndFinalizeTimeoutRef.current);
+        touchEndFinalizeTimeoutRef.current = null;
+    }, []);
+
     const scheduleForcedScrollBurst = useCallback(() => {
         clearForcedScrollTimeouts();
 
         [32, 96, 192].forEach((delayMs) => {
             const timeoutId = setTimeout(() => {
-                listRef.current?.scrollToOffset({ animated: false, offset: 0 });
+                listRef.current?.scrollToEnd({ animated: false });
             }, delayMs);
 
             forcedScrollTimeoutsRef.current.push(timeoutId);
         });
     }, [clearForcedScrollTimeouts]);
 
-    const scrollToLatestMessage = useCallback((animated: boolean, preferIndex = true) => {
-        if (preferIndex && listRef.current) {
-            // FlashList v2 returns a Promise; swallow failures and fall back to offset-only bursts.
-            void listRef.current
-                .scrollToIndex({ animated, index: 0, viewPosition: 0 })
-                .catch(() => {
-                    listRef.current?.scrollToOffset({ animated: false, offset: 0 });
-                    scheduleForcedScrollBurst();
-                });
-        }
-
-        listRef.current?.scrollToOffset({ animated, offset: 0 });
-    }, [scheduleForcedScrollBurst]);
+    const scrollToLatestMessage = useCallback((animated: boolean) => {
+        listRef.current?.scrollToEnd({ animated });
+    }, []);
 
     const scheduleScrollToLatestMessage = useCallback((animated: boolean, force = false) => {
-        if (
-            !messages.length
-            || autoScrollFrameRef.current !== null
-            || isUserInteractingRef.current
-            || isListTouchingRef.current
-            || (!force && !shouldStickToBottomRef.current)
-        ) {
+        if (!messages.length || autoScrollFrameRef.current !== null || isUserInteractingRef.current) {
+            return;
+        }
+
+        if (isListTouchingRef.current) {
+            if (force || shouldStickToBottomRef.current) {
+                didDeferAutoScrollWhileTouchingRef.current = true;
+            }
+
+            return;
+        }
+
+        if (!force && !shouldStickToBottomRef.current) {
             return;
         }
 
@@ -425,9 +515,118 @@ export const ChatScreen = () => {
     }, [messages.length, scrollToLatestMessage]);
 
     const handleListTouchStart = useCallback(() => {
-        // While streaming, we auto-follow new tokens. Programmatic scroll calls can cancel taps
-        // inside the list, which makes the thinking disclosure feel "unclickable".
         isListTouchingRef.current = true;
+        setIsListTouching(true);
+        clearEndDragFinalizeTimeout();
+        clearTouchEndFinalizeTimeout();
+        forcedFollowPassesRef.current = 0;
+        clearForcedScrollTimeouts();
+
+        // Clear any stale drag/momentum bookkeeping so a simple tap cannot inherit a previous gesture.
+        dragStartOffsetYRef.current = null;
+        momentumStartOffsetYRef.current = null;
+        endDragMetricsRef.current = null;
+        isMomentumScrollingRef.current = false;
+        isUserInteractingRef.current = false;
+
+        if (autoScrollFrameRef.current !== null) {
+            cancelAnimationFrame(autoScrollFrameRef.current);
+            autoScrollFrameRef.current = null;
+        }
+
+        // Do not change stickiness here: a tap should not permanently disable auto-follow.
+        // Auto-scroll is temporarily suspended via maintainVisibleContentPosition while the
+        // list is touched.
+    }, [clearEndDragFinalizeTimeout, clearForcedScrollTimeouts, clearTouchEndFinalizeTimeout]);
+
+    const handleListTouchEnd = useCallback(() => {
+        isListTouchingRef.current = false;
+        setIsListTouching(false);
+
+        if (!didDeferAutoScrollWhileTouchingRef.current) {
+            return;
+        }
+
+        clearTouchEndFinalizeTimeout();
+        touchEndFinalizeTimeoutRef.current = setTimeout(() => {
+            touchEndFinalizeTimeoutRef.current = null;
+
+            if (!didDeferAutoScrollWhileTouchingRef.current) {
+                return;
+            }
+
+            didDeferAutoScrollWhileTouchingRef.current = false;
+
+            if (!shouldStickToBottomRef.current) {
+                return;
+            }
+
+            scheduleScrollToLatestMessage(false, true);
+        }, 0);
+    }, [clearTouchEndFinalizeTimeout, scheduleScrollToLatestMessage]);
+
+    const handleListTouchCancel = useCallback(() => {
+        isListTouchingRef.current = false;
+        setIsListTouching(false);
+
+        if (!didDeferAutoScrollWhileTouchingRef.current) {
+            return;
+        }
+
+        clearTouchEndFinalizeTimeout();
+        touchEndFinalizeTimeoutRef.current = setTimeout(() => {
+            touchEndFinalizeTimeoutRef.current = null;
+
+            if (!didDeferAutoScrollWhileTouchingRef.current) {
+                return;
+            }
+
+            didDeferAutoScrollWhileTouchingRef.current = false;
+
+            if (!shouldStickToBottomRef.current) {
+                return;
+            }
+
+            scheduleScrollToLatestMessage(false, true);
+        }, 0);
+    }, [clearTouchEndFinalizeTimeout, scheduleScrollToLatestMessage]);
+
+    const updateStickinessFromNativeEvent = (
+        nativeEvent: ScrollMetrics,
+        options: { allowRearmToBottom?: boolean } = {},
+    ) => {
+        const allowRearmToBottom = options.allowRearmToBottom ?? true;
+        const currentValue = shouldStickToBottomRef.current;
+        const nextValue = getNextShouldStickToBottom(
+            currentValue,
+            nativeEvent,
+            isUserInteractingRef.current,
+        );
+
+        if (!allowRearmToBottom && !currentValue && nextValue) {
+            return;
+        }
+
+        setShouldFollowLatestMessage(nextValue);
+    };
+
+    const updateStickinessFromScrollEvent = (
+        event: NativeSyntheticEvent<NativeScrollEvent>,
+        options: { allowRearmToBottom?: boolean } = {},
+    ) => {
+        updateStickinessFromNativeEvent(event.nativeEvent, options);
+    };
+
+    const handleListScrollBeginDrag = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+        clearEndDragFinalizeTimeout();
+        clearTouchEndFinalizeTimeout();
+        isMomentumScrollingRef.current = false;
+        dragStartOffsetYRef.current = event.nativeEvent.contentOffset.y;
+        momentumStartOffsetYRef.current = null;
+        isListTouchingRef.current = true;
+        setIsListTouching(true);
+        isUserInteractingRef.current = true;
+        setShouldFollowLatestMessage(false);
         forcedFollowPassesRef.current = 0;
         clearForcedScrollTimeouts();
 
@@ -435,46 +634,99 @@ export const ChatScreen = () => {
             cancelAnimationFrame(autoScrollFrameRef.current);
             autoScrollFrameRef.current = null;
         }
-    }, [clearForcedScrollTimeouts]);
-
-    const handleListTouchEnd = useCallback(() => {
-        isListTouchingRef.current = false;
-    }, []);
-
-    const handleListTouchCancel = useCallback(() => {
-        isListTouchingRef.current = false;
-    }, []);
-
-    const updateStickinessFromScrollEvent = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
-        shouldStickToBottomRef.current = getNextShouldStickToBottom(
-            shouldStickToBottomRef.current,
-            event.nativeEvent,
-            isUserInteractingRef.current,
-        );
-    };
-
-    const handleListScrollBeginDrag = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
-        isUserInteractingRef.current = true;
-        forcedFollowPassesRef.current = 0;
-        clearForcedScrollTimeouts();
-        updateStickinessFromScrollEvent(event);
     };
 
     const handleListScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
-        updateStickinessFromScrollEvent(event);
+        updateStickinessFromScrollEvent(event, { allowRearmToBottom: false });
     };
 
     const handleListScrollEndDrag = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
-        updateStickinessFromScrollEvent(event);
-        isUserInteractingRef.current = false;
+        // Drag end implies the user's touch has ended.
+        isListTouchingRef.current = false;
+        setIsListTouching(false);
+
+        // Snapshot the scroll metrics we need because we reference them asynchronously.
+        endDragMetricsRef.current = snapshotScrollMetrics(event.nativeEvent);
+
+        // If momentum scrolling begins, we must keep auto-follow disabled until momentum ends.
+        // We delay deciding whether to re-arm until after the JS loop yields so that
+        // `onMomentumScrollBegin` (if any) can flip the momentum flag.
+        isUserInteractingRef.current = true;
+        clearEndDragFinalizeTimeout();
+
+        endDragFinalizeTimeoutRef.current = setTimeout(() => {
+            endDragFinalizeTimeoutRef.current = null;
+
+            if (isMomentumScrollingRef.current) {
+                return;
+            }
+
+            const nativeEvent = endDragMetricsRef.current;
+            if (nativeEvent) {
+                const startOffsetY = dragStartOffsetYRef.current ?? nativeEvent.contentOffset.y;
+                const endOffsetY = nativeEvent.contentOffset.y;
+
+                // If the user's swipe moved away from the bottom (opposite of auto-follow direction),
+                // keep auto-follow disabled even when still near the bottom.
+                if (endOffsetY >= startOffsetY) {
+                    updateStickinessFromNativeEvent(nativeEvent);
+                }
+            }
+
+            dragStartOffsetYRef.current = null;
+            endDragMetricsRef.current = null;
+
+            isUserInteractingRef.current = false;
+        }, 0);
+    };
+
+    const handleListMomentumScrollBegin = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+        clearEndDragFinalizeTimeout();
+        clearTouchEndFinalizeTimeout();
+        isMomentumScrollingRef.current = true;
+        isUserInteractingRef.current = true;
+        // Momentum implies the user's touch has ended.
+        isListTouchingRef.current = false;
+        setIsListTouching(false);
+        dragStartOffsetYRef.current = null;
+        momentumStartOffsetYRef.current = event.nativeEvent?.contentOffset?.y
+            ?? endDragMetricsRef.current?.contentOffset?.y
+            ?? null;
+        setShouldFollowLatestMessage(false);
+        forcedFollowPassesRef.current = 0;
+        clearForcedScrollTimeouts();
+
+        if (autoScrollFrameRef.current !== null) {
+            cancelAnimationFrame(autoScrollFrameRef.current);
+            autoScrollFrameRef.current = null;
+        }
     };
 
     const handleListMomentumScrollEnd = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
-        updateStickinessFromScrollEvent(event);
+        clearEndDragFinalizeTimeout();
+        clearTouchEndFinalizeTimeout();
+        isMomentumScrollingRef.current = false;
+        isListTouchingRef.current = false;
+        setIsListTouching(false);
+        const startOffsetY = momentumStartOffsetYRef.current;
+        const endOffsetY = event.nativeEvent.contentOffset.y;
+
+        // If the inertial scroll moved away from the bottom overall, keep auto-follow disabled.
+        if (startOffsetY === null || endOffsetY >= startOffsetY) {
+            updateStickinessFromScrollEvent(event);
+        }
+
+        momentumStartOffsetYRef.current = null;
+        endDragMetricsRef.current = null;
         isUserInteractingRef.current = false;
     };
 
-    const handleListViewportLayout = (_event: LayoutChangeEvent) => {
+    const handleListViewportLayout = (event: LayoutChangeEvent) => {
+        const nextViewportHeight = event.nativeEvent.layout.height;
+        setListViewportHeight((currentValue) => (
+            Math.abs(currentValue - nextViewportHeight) < 1 ? currentValue : nextViewportHeight
+        ));
+
         const hasForcedFollowPass = forcedFollowPassesRef.current > 0;
 
         if (!messages.length || (!shouldStickToBottomRef.current && !hasForcedFollowPass)) {
@@ -549,7 +801,7 @@ export const ChatScreen = () => {
     }, [messages.length, scheduleScrollToLatestMessage]);
 
     const armFollowLatestMessage = useCallback((burst = false) => {
-        shouldStickToBottomRef.current = true;
+        setShouldFollowLatestMessage(true);
         isUserInteractingRef.current = false;
         forcedFollowPassesRef.current = burst ? 6 : 1;
         clearForcedScrollTimeouts();
@@ -560,7 +812,7 @@ export const ChatScreen = () => {
         }
 
         if (messages.length || activeThread) {
-            scrollToLatestMessage(false, false);
+            scrollToLatestMessage(false);
             scheduleScrollToLatestMessage(false, true);
 
             if (burst) {
@@ -574,6 +826,7 @@ export const ChatScreen = () => {
         scheduleForcedScrollBurst,
         scheduleScrollToLatestMessage,
         scrollToLatestMessage,
+        setShouldFollowLatestMessage,
     ]);
 
     const handleSendMessage = async (content: string) => {
@@ -746,12 +999,14 @@ export const ChatScreen = () => {
                 keyboardMeasureFrameRef.current = null;
             }
 
+            clearEndDragFinalizeTimeout();
+            clearTouchEndFinalizeTimeout();
             clearForcedScrollTimeouts();
         };
-    }, [clearForcedScrollTimeouts]);
+    }, [clearEndDragFinalizeTimeout, clearForcedScrollTimeouts, clearTouchEndFinalizeTimeout]);
 
     useEffect(() => {
-        shouldStickToBottomRef.current = true;
+        setShouldFollowLatestMessage(true);
         isUserInteractingRef.current = false;
         forcedFollowPassesRef.current = 0;
         clearForcedScrollTimeouts();
@@ -759,7 +1014,7 @@ export const ChatScreen = () => {
         setComposerDraft('');
         setPresetSelectorOpen(false);
         closeModelParameters();
-    }, [activeThread?.id, clearForcedScrollTimeouts, closeModelParameters]);
+    }, [activeThread?.id, clearForcedScrollTimeouts, closeModelParameters, setShouldFollowLatestMessage]);
 
     useFocusEffect(
         useCallback(() => {
@@ -810,9 +1065,16 @@ export const ChatScreen = () => {
             }
             onDelete={handleDeleteMessage}
             onRegenerate={handleBeginRegenerateFromMessage}
-            onLayout={index === 0 ? handleLastMessageLayout : undefined}
+            onLayout={index === messages.length - 1 ? handleLastMessageLayout : undefined}
         />
-    ), [handleBeginRegenerateFromMessage, handleDeleteMessage, handleLastMessageLayout, isGenerating, isInputDisabled]);
+    ), [
+        handleBeginRegenerateFromMessage,
+        handleDeleteMessage,
+        handleLastMessageLayout,
+        isGenerating,
+        isInputDisabled,
+        messages.length,
+    ]);
 
     return (
         <Box className="flex-1 w-full max-w-2xl mx-auto bg-background-0 dark:bg-background-950">
@@ -820,6 +1082,7 @@ export const ChatScreen = () => {
                 title={headerTitle}
                 presetLabel={activePresetLabel}
                 modelLabel={headerModelLabel}
+                modelSelectable={false}
                 statusLabel={statusLabel}
                 statusTone={statusTone}
                 canStartNewChat={!isGenerating}
@@ -838,6 +1101,7 @@ export const ChatScreen = () => {
                     setPresetSelectorOpen(true);
                 }}
                 canOpenPresetSelector={!isGenerating}
+                canOpenModelSelector={false}
                 canOpenModelControls={Boolean(configurableModelId) && !isGenerating}
                 onBack={router.canGoBack() ? () => router.back() : undefined}
             />
@@ -917,26 +1181,27 @@ export const ChatScreen = () => {
                         </Box>
                     ) : null}
 
-                    <Box className="flex-1" onLayout={handleListViewportLayout}>
+                    <Box testID="chat-list-viewport" className="flex-1" onLayout={handleListViewportLayout}>
                         {hasMessages ? (
                             <FlashList
                                 key={activeThread?.id ?? 'no-thread'}
                                 ref={listRef}
                                 data={displayMessages}
                                 extraData={`${lastMessageSignature}:${pendingRegenerateMessage?.messageId ?? 'none'}:${isInputDisabled ? 'disabled' : 'enabled'}`}
-                                inverted
                                 showsVerticalScrollIndicator={false}
                                 scrollEventThrottle={16}
                                 keyboardShouldPersistTaps="handled"
                                 onTouchStart={handleListTouchStart}
                                 onTouchEnd={handleListTouchEnd}
                                 onTouchCancel={handleListTouchCancel}
-                                contentContainerStyle={{ paddingTop: listBottomPadding, paddingBottom: 4, flexGrow: 1 }}
+                                contentContainerStyle={{ paddingTop: 4, paddingBottom: listBottomPadding, flexGrow: 1 }}
+                                maintainVisibleContentPosition={listMaintainVisibleContentPosition}
                                 onContentSizeChange={handleListContentSizeChange}
                                 onLoad={handleListContentSizeChange}
                                 onScroll={handleListScroll}
                                 onScrollBeginDrag={handleListScrollBeginDrag}
                                 onScrollEndDrag={handleListScrollEndDrag}
+                                onMomentumScrollBegin={handleListMomentumScrollBegin}
                                 onMomentumScrollEnd={handleListMomentumScrollEnd}
                                 ItemSeparatorComponent={() => <Box className="h-2" />}
                                 keyExtractor={(item) => item.id}

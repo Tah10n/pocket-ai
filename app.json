@@ -19,7 +19,7 @@
       }
     },
     "android": {
-      "versionCode": 8,
+      "versionCode": 10,
       "permissions": [
         "INTERNET",
         "POST_NOTIFICATIONS",
@@ -80,6 +80,7 @@
       "./plugins/withAndroidLocalProperties",
       "./plugins/withAndroidMainActivityOrientation",
       "./plugins/withAndroidSystemMetrics",
+      "./plugins/withAndroidGpuInfo",
       "./plugins/withIosSystemMetrics",
       "expo-secure-store",
       "expo-image",

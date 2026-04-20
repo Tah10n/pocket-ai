@@ -45,8 +45,8 @@ export const HeaderBar = ({
             accessibilityLabel={resolvedBackAccessibilityLabel}
           />
         ) : showBrand ? (
-          <Box className="h-11 w-11 items-center justify-center rounded-full bg-primary-500/10 dark:bg-primary-500/15">
-            <MaterialSymbols name={brandIconName} size={21} className="text-primary-500" />
+          <Box className={`${screenChromeTokens.headerActionClassName} items-center justify-center rounded-full bg-primary-500/10 dark:bg-primary-500/15`}>
+            <MaterialSymbols name={brandIconName} size="xl" className="text-primary-500" />
           </Box>
         ) : (
           <HeaderActionPlaceholder />

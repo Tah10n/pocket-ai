@@ -1,6 +1,7 @@
 import React from 'react';
 import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import { cssInterop } from 'nativewind';
+import { iconSizePx, type SemanticIconSize } from '../../utils/themeTokens';
 
 export type MaterialSymbolName = React.ComponentProps<typeof MaterialIcons>['name'];
 
@@ -16,7 +17,7 @@ export interface MaterialSymbolsProps {
    * NOTE: MaterialIcons uses dashes, NOT underscores ('arrow-back', not 'arrow_back').
    */
   name: MaterialSymbolName;
-  size?: number;
+  size?: number | SemanticIconSize;
   className?: string;
   color?: string;
 }
@@ -25,11 +26,15 @@ export interface MaterialSymbolsProps {
  * Thin wrapper around @expo/vector-icons MaterialIcons that accepts
  * NativeWind className for colour (e.g. "text-primary-500").
  */
-export function MaterialSymbols({ name, size = 24, className, color }: MaterialSymbolsProps) {
+export function MaterialSymbols({ name, size = 'md', className, color }: MaterialSymbolsProps) {
+  const resolvedSize = typeof size === 'number'
+    ? size
+    : iconSizePx[size];
+
   return (
     <MaterialIcons
       name={name}
-      size={size}
+      size={resolvedSize}
       className={className}
       color={color}
     />

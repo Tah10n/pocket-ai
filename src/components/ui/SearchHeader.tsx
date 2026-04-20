@@ -55,7 +55,7 @@ export const SearchHeader: React.FC<SearchHeaderProps> = ({
         <Box className="min-w-0 flex-1">
           <Text
             numberOfLines={1}
-            className={composeTextRole('screenTitle', 'text-[20px] leading-6')}
+            className={composeTextRole('screenTitle')}
           >
             {t('models.catalogTitle')}
           </Text>
@@ -79,7 +79,7 @@ export const SearchHeader: React.FC<SearchHeaderProps> = ({
         placeholder={t('models.searchPlaceholder')}
         value={searchQuery}
         onChangeText={onSearchChange}
-        leadingAccessory={<MaterialSymbols name="search" size={17} className="text-typography-500 dark:text-typography-400" />}
+        leadingAccessory={<MaterialSymbols name="search" size="sm" className="text-typography-500 dark:text-typography-400" />}
         trailingAccessory={searchQuery.length > 0 ? (
           <ScreenIconButton
             onPress={() => onSearchChange('')}

@@ -39,7 +39,7 @@ function ActionPill({
       testID={testID}
       onPress={onPress}
       tone={tone}
-      size="compact"
+      size="sm"
       className={className ?? 'min-w-0 basis-0 flex-1'}
     >
       <Text

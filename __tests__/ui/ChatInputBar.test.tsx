@@ -1,5 +1,6 @@
 import React from 'react';
 import { fireEvent, render, waitFor } from '@testing-library/react-native';
+import { Text as RNText } from 'react-native';
 import { ChatInputBar } from '../../src/components/ui/ChatInputBar';
 import { screenChromeTokens } from '../../src/utils/themeTokens';
 
@@ -105,5 +106,23 @@ describe('ChatInputBar', () => {
     expect(input.props.textAlignVertical).toBe('center');
     expect(input.props.className).toContain('py-0');
     expect(input.props.className).not.toContain('leading-5');
+  });
+
+  it('renders optional leading, trailing, and attachments slots for structural preview states', () => {
+    const onSendMessage = jest.fn();
+    const { getByTestId, queryByText } = render(
+      <ChatInputBar
+        onSendMessage={onSendMessage}
+        leadingActions={<RNText testID="leading-action">leading</RNText>}
+        trailingActions={<RNText testID="custom-trailing">custom</RNText>}
+        attachmentsTray={<RNText testID="attachments-tray">attachments</RNText>}
+      />,
+    );
+
+    expect(getByTestId('chat-input-bar-leading-actions')).toBeTruthy();
+    expect(getByTestId('chat-input-bar-trailing-actions')).toBeTruthy();
+    expect(getByTestId('chat-input-bar-attachments-tray')).toBeTruthy();
+    expect(getByTestId('chat-input-bar-row').props.className).toContain('flex-row');
+    expect(queryByText('arrow-upward')).toBeNull();
   });
 });

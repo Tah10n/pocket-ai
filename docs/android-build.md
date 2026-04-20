@@ -12,6 +12,8 @@ If the `android/` project is missing, generate it once first:
 npx expo prebuild --platform android
 ```
 
+Pocket AI relies on native modules and Expo config plugins (for example: `llama.rn`, background actions, and a small Android GPU-info module used for diagnostics in Model Controls). If you change any plugin configuration in `app.json`, re-run prebuild.
+
 If Gradle fails with "SDK location not found", make sure the Android SDK is installed and either:
 
 - set `ANDROID_HOME` / `ANDROID_SDK_ROOT`, or

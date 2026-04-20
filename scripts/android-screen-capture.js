@@ -37,6 +37,7 @@ const OPEN_ON_HF_LABELS = ["Open on HF", "Открыть на HF"];
 const ACTIVE_MODEL_CTA_LABELS = ["Swap Model", "Choose Model", "Browse Models"];
 const HOME_ROUTE_TIMEOUT_MS = 40_000;
 const SETTINGS_ROUTE_TIMEOUT_MS = 35_000;
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const defaultScreenIds = [
   "home",
   "chat",
@@ -65,12 +66,16 @@ async function main() {
 
   const selectedScreens = selectScreens(screens, cliOptions.screens);
   fs.mkdirSync(artifactsRoot, { recursive: true });
+  const adbPath = resolveAdbPath();
+
+  if (!cliOptions.skipLaunch && !cliOptions.emulator) {
+    resolveTargetSerial(adbPath, cliOptions);
+  }
 
   if (!cliOptions.skipLaunch) {
     launchApp();
   }
 
-  const adbPath = resolveAdbPath();
   const serial = resolveTargetSerial(adbPath, cliOptions);
   const context = createCaptureContext(adbPath, serial);
   const results = [];
@@ -453,24 +458,7 @@ function createCaptureContext(adbPath, serial) {
     },
     captureScreenshot: (fileName) => {
       const screenshotPath = path.join(artifactsRoot, fileName);
-      fs.mkdirSync(path.dirname(screenshotPath), { recursive: true });
-
-      const result = spawnSync(
-        adbPath,
-        ["-s", serial, "exec-out", "screencap", "-p"],
-        { maxBuffer: 20 * 1024 * 1024 }
-      );
-
-      if (result.error) {
-        throw result.error;
-      }
-
-      if (result.status !== 0) {
-        throw new Error("Failed to capture an Android screenshot.");
-      }
-
-      fs.writeFileSync(screenshotPath, result.stdout);
-      return screenshotPath;
+      return captureAndroidScreenshot(adbPath, serial, screenshotPath);
     },
   };
 }
@@ -624,11 +612,21 @@ function resolveTargetSerial(adbPath, options) {
     return emulator.serial;
   }
 
-  if (devices.length === 0) {
-    throw new Error("No Android device is connected.");
+  const physicalDevices = devices.filter(
+    (device) => !isEmulatorSerial(device.serial)
+  );
+
+  if (physicalDevices.length === 0) {
+    throw new Error("Connect a phone and try again. No physical Android device is connected.");
   }
 
-  return devices[0].serial;
+  if (physicalDevices.length > 1) {
+    log(
+      `Multiple Android phones are connected; defaulting to ${physicalDevices[0].serial}. Use --serial to override.`
+    );
+  }
+
+  return physicalDevices[0].serial;
 }
 
 function listConnectedDevices(adbPath) {
@@ -984,7 +982,7 @@ function printHelp() {
   console.log("Usage: node ./scripts/android-screen-capture.js [options]");
   console.log("");
   console.log("Options:");
-  console.log("  --emulator                 Run against an Android emulator");
+  console.log("  --emulator                 Run against an Android emulator instead of a connected phone");
   console.log("  --avd <name>               Use a specific AVD when launching an emulator");
   console.log("  --serial <serial>          Target a specific connected device");
   console.log("  --screen <id[,id...]>      Capture one or more named screens");
@@ -1014,6 +1012,87 @@ function runCapture(command, args) {
   }
 
   return result.stdout || "";
+}
+
+function captureAndroidScreenshot(adbPath, serial, screenshotPath) {
+  fs.mkdirSync(path.dirname(screenshotPath), { recursive: true });
+
+  const directCapture = spawnSync(
+    adbPath,
+    ["-s", serial, "exec-out", "screencap", "-p"],
+    { maxBuffer: 20 * 1024 * 1024 }
+  );
+
+  if (directCapture.error) {
+    throw directCapture.error;
+  }
+
+  if (directCapture.status === 0 && isPngBuffer(directCapture.stdout)) {
+    fs.writeFileSync(screenshotPath, directCapture.stdout);
+    return screenshotPath;
+  }
+
+  log("Direct screencap failed; retrying screenshot capture via a temporary device file.");
+
+  const remotePath = `/data/local/tmp/pocket-ai-qa-${process.pid}-${Date.now()}.png`;
+  const remoteCapture = spawnSync(
+    adbPath,
+    ["-s", serial, "shell", "screencap", "-p", remotePath],
+    {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }
+  );
+
+  if (remoteCapture.error) {
+    throw remoteCapture.error;
+  }
+
+  try {
+    if (remoteCapture.status !== 0) {
+      throw new Error("Failed to capture an Android screenshot.");
+    }
+
+    const pullResult = spawnSync(
+      adbPath,
+      ["-s", serial, "pull", remotePath, screenshotPath],
+      {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      }
+    );
+
+    if (pullResult.error) {
+      throw pullResult.error;
+    }
+
+    if (pullResult.status !== 0) {
+      throw new Error("Failed to capture an Android screenshot.");
+    }
+
+    const screenshotBuffer = fs.readFileSync(screenshotPath);
+    if (!isPngBuffer(screenshotBuffer)) {
+      throw new Error("Failed to capture an Android screenshot.");
+    }
+
+    return screenshotPath;
+  } finally {
+    spawnSync(
+      adbPath,
+      ["-s", serial, "shell", "rm", "-f", remotePath],
+      { stdio: "ignore" }
+    );
+  }
+}
+
+function isPngBuffer(value) {
+  return Buffer.isBuffer(value)
+    && value.length >= PNG_SIGNATURE.length
+    && value.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE);
+}
+
+function isEmulatorSerial(serial) {
+  return serial.startsWith("emulator-");
 }
 
 function runChecked(command, args, options = {}) {

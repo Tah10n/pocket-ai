@@ -51,19 +51,19 @@ export const RecentConversationsList = ({
 
   const renderConversation = useCallback((conv: Conversation) => (
     <ScreenCard className="flex-row items-center" padding="none">
-      <Pressable 
+      <Pressable
         testID={`recent-conversation-${conv.id}`}
         onPress={() => {
           onOpenConversation?.(conv);
         }}
         accessibilityRole="button"
         accessibilityLabel={conv.title}
-        className="flex-1 flex-row items-center gap-3 p-4 active:opacity-70"
+        className="flex-1 flex-row items-center gap-3 p-3 active:opacity-70"
       >
-        <Box className="size-11 shrink-0 items-center justify-center">
-          <MaterialSymbols name={conv.icon} size={18} className="text-primary-500" />
+        <Box className="h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-primary-500/10 dark:bg-primary-500/15">
+          <MaterialSymbols name={conv.icon} size="sm" className="text-primary-500" />
         </Box>
-        
+
         <Box className="min-w-0 flex-1 overflow-hidden">
           <Text className={composeTextRole('sectionTitle')} numberOfLines={1}>
             {conv.title}
@@ -80,7 +80,7 @@ export const RecentConversationsList = ({
         </Box>
       </Pressable>
 
-      <Box className="mr-3 flex-row items-center gap-2">
+      <Box className="mr-2.5 flex-row items-center gap-1.5">
         <ScreenIconButton
           testID={`delete-conversation-${conv.id}`}
           onPress={() => {
@@ -93,16 +93,16 @@ export const RecentConversationsList = ({
           className="shrink-0 border-0"
         />
         <Box>
-          <MaterialSymbols name="chevron-right" size={20} className="text-typography-400" />
+          <MaterialSymbols name="chevron-right" size="lg" className="text-typography-400" />
         </Box>
       </Box>
     </ScreenCard>
   ), [onDeleteConversation, onOpenConversation, t]);
 
   return (
-    <ScreenStack gap="default">
-      <Box className="mb-3 flex-row items-center justify-between gap-3">
-        <Text className={composeTextRole('sectionTitle', 'text-lg tracking-tight')}>
+    <ScreenStack gap="compact">
+      <Box className="mb-2 flex-row items-center justify-between gap-3">
+        <Text className={composeTextRole('sectionTitle')}>
           {t('home.recentConversations')}
         </Text>
         {canManageConversations ? (
@@ -110,9 +110,10 @@ export const RecentConversationsList = ({
             testID="manage-conversations-button"
             onPress={onViewAllConversations}
             accessibilityLabel={t('common.manage')}
+            size="sm"
             className="self-start"
           >
-            <MaterialSymbols name="history" size={16} className="text-primary-500" />
+            <MaterialSymbols name="history" size="sm" className="text-primary-500" />
             <Text className="text-xs font-semibold uppercase tracking-wide text-primary-500">
               {t('common.manage')}
             </Text>
@@ -122,7 +123,7 @@ export const RecentConversationsList = ({
 
       <Box>
         {visibleConversations.length > 0 ? (
-          <ScreenStack>
+          <ScreenStack gap="compact">
             {visibleConversations.map((conversation) => (
               <React.Fragment key={conversation.id}>
                 {renderConversation(conversation)}
@@ -130,7 +131,7 @@ export const RecentConversationsList = ({
             ))}
           </ScreenStack>
         ) : (
-          <ScreenCard dashed className="dark:border-outline-700" padding="large">
+          <ScreenCard dashed className="dark:border-outline-700" padding="compact">
             <Text className={composeTextRole('sectionTitle', 'text-sm')}>
               {t('home.noConversationsTitle')}
             </Text>

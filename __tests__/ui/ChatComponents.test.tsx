@@ -3,6 +3,13 @@ import { render } from '@testing-library/react-native';
 import { ChatMessageBubble } from '../../src/components/ui/ChatMessageBubble';
 import { MarkdownRenderer } from '../../src/components/ui/MarkdownRenderer';
 
+const en = require('../../src/i18n/locales/en.json');
+
+const reactI18nextMock = jest.requireMock('react-i18next') as {
+    __setTranslationOverride: (key: string, value: string, nextLanguage?: string) => void;
+    __resetTranslations: () => void;
+};
+
 jest.mock('react-native-css-interop', () => {
     const mockReact = require('react');
     return {
@@ -71,6 +78,11 @@ describe('ChatMessageBubble', () => {
 });
 
 describe('MarkdownRenderer', () => {
+    beforeEach(() => {
+        reactI18nextMock.__resetTranslations();
+        reactI18nextMock.__setTranslationOverride('common.copy', en.common.copy);
+    });
+
     it('renders plain text', () => {
         const { getByText } = render(<MarkdownRenderer content="Simple text" />);
         expect(getByText('Simple text')).toBeTruthy();
@@ -79,6 +91,6 @@ describe('MarkdownRenderer', () => {
     it('renders code blocks with Copy Code button', () => {
         const content = 'Before code\n```js\nconsole.log("hi")\n```\nAfter code';
         const { getByText } = render(<MarkdownRenderer content={content} />);
-        expect(getByText('Copy Code')).toBeTruthy();
+        expect(getByText(en.common.copy)).toBeTruthy();
     });
 });

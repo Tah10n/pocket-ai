@@ -5,9 +5,9 @@ import Animated, { Easing, useAnimatedStyle, useSharedValue, withTiming } from '
 import { Box } from '@/components/ui/box';
 import { Button, ButtonText } from '@/components/ui/button';
 import { Pressable } from '@/components/ui/pressable';
-import { ScrollView } from '@/components/ui/scroll-view';
-import { ScreenBadge, ScreenIconButton, ScreenPressableCard, ScreenSheet } from '@/components/ui/ScreenShell';
+import { ScreenPressableCard } from '@/components/ui/ScreenShell';
 import { Text } from '@/components/ui/text';
+import { ListPickerSheetContent, type ListPickerSheetItem } from './ListPickerSheet';
 import { MaterialSymbols } from './MaterialSymbols';
 import { ConversationIndexItem } from '../../types/chat';
 import { useMotionPreferences } from '../../hooks/useDeviceMetrics';
@@ -63,161 +63,107 @@ export function ConversationSwitcherSheet({
     transform: [{ translateY: sheetTranslateY.value }],
   }));
 
+  const items: ListPickerSheetItem[] = conversations.map((conversation) => {
+    const modelLabel = conversation.modelId.split('/').pop() ?? conversation.modelId;
+
+    return {
+      key: conversation.id,
+      title: conversation.title,
+      description: `${modelLabel} • ${t('chat.messageCount', { count: conversation.messageCount })}`,
+      supportingText: conversation.lastMessagePreview,
+      selected: conversation.id === activeThreadId,
+      testID: `conversation-option-${conversation.id}`,
+      onPress: () => {
+        onClose();
+        onSelectConversation(conversation.id);
+      },
+    };
+  });
+
   return (
     <Modal visible={visible} animationType="none" transparent onRequestClose={onClose}>
       <AnimatedView style={[{ flex: 1 }, overlayStyle]}>
       <Box className="flex-1 justify-end bg-black/40">
         <Pressable className="flex-1" onPress={onClose} />
         <AnimatedView style={sheetStyle}>
-        <ScreenSheet
-          className={`max-h-[75%] pb-8 ${conversations.length === 0 ? 'min-h-[45%]' : ''}`}
-        >
-          <Box className="mb-4 flex-row items-center justify-between">
-            <Box>
-              <Text className="text-lg font-semibold text-typography-900 dark:text-typography-100">
-                {t('chat.conversationSwitcher.title')}
-              </Text>
-              <Text className="mt-1 text-sm text-typography-500 dark:text-typography-400">
-                {t('chat.conversationSwitcher.subtitle')}
-              </Text>
-            </Box>
-            <ScreenIconButton
-              onPress={onClose}
-              accessibilityLabel={t('common.cancel')}
-              iconName="close"
-            />
-          </Box>
+        <ListPickerSheetContent
+          title={t('chat.conversationSwitcher.title')}
+          subtitle={t('chat.conversationSwitcher.subtitle')}
+          onClose={onClose}
+          items={items}
+          sheetClassName={conversations.length === 0 ? 'min-h-[45%]' : undefined}
+          actions={(
+            <>
+              <Box className="flex-row gap-3">
+                <Button
+                  action="softPrimary"
+                  size="sm"
+                  onPress={() => {
+                    onClose();
+                    onStartNewChat();
+                  }}
+                  className="flex-1"
+                >
+                  <MaterialSymbols name="edit-square" size="md" className="text-primary-500" />
+                  <ButtonText>{t('chat.conversationSwitcher.startNewChat')}</ButtonText>
+                </Button>
 
-          <Box className="mb-3 flex-row gap-3">
-            <Button
-              action="softPrimary"
-              size="sm"
-              onPress={() => {
-                onClose();
-                onStartNewChat();
-              }}
-              className="flex-1"
-            >
-              <MaterialSymbols name="edit-square" size={18} className="text-primary-500" />
-              <ButtonText>{t('chat.conversationSwitcher.startNewChat')}</ButtonText>
-            </Button>
+                {onManageConversations ? (
+                  <Button
+                    action="secondary"
+                    size="sm"
+                    onPress={() => {
+                      onClose();
+                      onManageConversations();
+                    }}
+                    className="flex-1"
+                  >
+                    <MaterialSymbols name="manage-search" size="md" className="text-typography-700 dark:text-typography-200" />
+                    <ButtonText>{t('common.manage')}</ButtonText>
+                  </Button>
+                ) : null}
+              </Box>
 
-            {onManageConversations ? (
-              <Button
-                action="secondary"
-                size="sm"
-                onPress={() => {
-                  onClose();
-                  onManageConversations();
-                }}
-                className="flex-1"
-              >
-                <MaterialSymbols name="manage-search" size={18} className="text-typography-700 dark:text-typography-200" />
-                <ButtonText>{t('common.manage')}</ButtonText>
-              </Button>
-              ) : null}
-          </Box>
+              {onOpenPresetSelector ? (
+                <ScreenPressableCard
+                  testID="conversation-switcher-preset-card"
+                  onPress={() => {
+                    onClose();
+                    onOpenPresetSelector();
+                  }}
+                  disabled={!canOpenPresetSelector}
+                  padding="compact"
+                  className={!canOpenPresetSelector ? 'border-outline-100 bg-background-100/80 dark:border-outline-900 dark:bg-background-900/40' : ''}
+                >
+                  <Box className="flex-row items-center justify-between gap-3">
+                    <Box className="min-w-0 flex-1">
+                      <Text className="text-sm font-semibold text-typography-900 dark:text-typography-100">
+                        {t('chat.conversationSwitcher.presetTitle')}
+                      </Text>
+                      <Text className="mt-1 text-sm text-typography-500 dark:text-typography-400" numberOfLines={1}>
+                        {canOpenPresetSelector
+                          ? t('chat.conversationSwitcher.presetCurrent', { name: activePresetName ?? t('common.default') })
+                          : t('chat.conversationSwitcher.presetBlocked')}
+                      </Text>
+                    </Box>
 
-          {onOpenPresetSelector ? (
-            <Box className="mb-4">
-              <ScreenPressableCard
-                onPress={() => {
-                  onClose();
-                  onOpenPresetSelector();
-                }}
-                disabled={!canOpenPresetSelector}
-                padding="compact"
-                className={!canOpenPresetSelector ? 'border-outline-100 bg-background-100/80 dark:border-outline-900 dark:bg-background-900/40' : ''}
-              >
-                <Box className="flex-row items-center justify-between gap-3">
-                  <Box className="min-w-0 flex-1">
-                    <Text className="text-sm font-semibold text-typography-900 dark:text-typography-100">
-                      {t('chat.conversationSwitcher.presetTitle')}
-                    </Text>
-                    <Text className="mt-1 text-sm text-typography-500 dark:text-typography-400" numberOfLines={1}>
-                      {canOpenPresetSelector
-                        ? t('chat.conversationSwitcher.presetCurrent', { name: activePresetName ?? t('common.default') })
-                        : t('chat.conversationSwitcher.presetBlocked')}
-                    </Text>
+                    <MaterialSymbols
+                      name="tune"
+                      size="md"
+                      className={canOpenPresetSelector ? 'text-typography-500 dark:text-typography-300' : 'text-typography-300 dark:text-typography-600'}
+                    />
                   </Box>
-
-                  <MaterialSymbols
-                    name="tune"
-                    size={18}
-                    className={canOpenPresetSelector ? 'text-typography-500 dark:text-typography-300' : 'text-typography-300 dark:text-typography-600'}
-                  />
-                </Box>
-              </ScreenPressableCard>
-            </Box>
-          ) : null}
-
-          <ScrollView showsVerticalScrollIndicator={false}>
-            <Box className="gap-3 pb-2">
-              {conversations.length > 0 ? (
-                conversations.map((conversation) => {
-                  const isActive = conversation.id === activeThreadId;
-                  const modelLabel = conversation.modelId.split('/').pop() ?? conversation.modelId;
-
-                  return (
-                    <ScreenPressableCard
-                      key={conversation.id}
-                      onPress={() => {
-                        onClose();
-                        onSelectConversation(conversation.id);
-                      }}
-                      padding="compact"
-                      className={isActive ? 'border-primary-500/30 bg-primary-500/10' : ''}
-                    >
-                      <Box className="flex-row items-start justify-between gap-3">
-                        <Box className="min-w-0 flex-1">
-                          <Text
-                            numberOfLines={1}
-                            className={`text-sm font-semibold ${isActive
-                              ? 'text-primary-600 dark:text-primary-400'
-                              : 'text-typography-900 dark:text-typography-100'}`}
-                          >
-                            {conversation.title}
-                          </Text>
-                          <Text
-                            numberOfLines={1}
-                            className="mt-1 text-xs text-typography-500 dark:text-typography-400"
-                          >
-                            {modelLabel} • {t('chat.messageCount', { count: conversation.messageCount })}
-                          </Text>
-                          {conversation.lastMessagePreview ? (
-                            <Text
-                              numberOfLines={2}
-                              className="mt-2 text-sm text-typography-600 dark:text-typography-300"
-                            >
-                              {conversation.lastMessagePreview}
-                            </Text>
-                          ) : null}
-                        </Box>
-
-                        {isActive ? (
-                          <ScreenBadge tone="success" size="micro">
-                            {t('common.active')}
-                          </ScreenBadge>
-                        ) : (
-                          <MaterialSymbols name="chevron-right" size={18} className="text-typography-400" />
-                        )}
-                      </Box>
-                    </ScreenPressableCard>
-                  );
-                })
-              ) : (
-                <Box className="rounded-2xl border border-dashed border-outline-200 px-4 py-6 dark:border-outline-800">
-                  <Text className="text-sm font-semibold text-typography-700 dark:text-typography-200">
-                    {t('chat.conversationSwitcher.emptyTitle')}
-                  </Text>
-                  <Text className="mt-2 text-sm text-typography-500 dark:text-typography-400">
-                    {t('chat.conversationSwitcher.emptyDescription')}
-                  </Text>
-                </Box>
-              )}
-            </Box>
-          </ScrollView>
-        </ScreenSheet>
+                </ScreenPressableCard>
+              ) : null}
+            </>
+          )}
+          emptyState={{
+            iconName: 'forum',
+            title: t('chat.conversationSwitcher.emptyTitle'),
+            description: t('chat.conversationSwitcher.emptyDescription'),
+            testID: 'conversation-switcher-empty-state',
+          }}
+        />
         </AnimatedView>
       </Box>
       </AnimatedView>

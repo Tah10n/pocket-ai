@@ -163,16 +163,16 @@ Use the shared header families instead of route-local chrome:
 
 ## QA Handoff
 
-If you change shared theme, header, localization, motion, or routed-screen chrome, rerun this handoff set before closing the work:
+If you change shared theme, header, localization, motion, or routed-screen chrome, rerun this handoff set on a connected Android phone before closing the work:
 
 ```bash
 npm run verify:mobile-change
-node .\scripts\android-scenarios.js --emulator --skip-build --scenario home-smoke
-node .\scripts\android-scenarios.js --emulator --skip-build --scenario bottom-tabs
-node .\scripts\android-scenarios.js --emulator --skip-build --scenario hf-catalog-hardening
-node .\scripts\android-scenarios.js --emulator --skip-build --scenario hf-token-education
-node .\scripts\android-scenarios.js --emulator --skip-build --scenario conversations-management
-node .\scripts\android-screen-capture.js --emulator --skip-build --screen home,models,settings,conversations,huggingface-token,model-details --output-dir artifacts/android-scenarios/manual-sample
+node .\scripts\android-scenarios.js --skip-build --scenario home-smoke
+node .\scripts\android-scenarios.js --skip-build --scenario bottom-tabs
+node .\scripts\android-scenarios.js --skip-build --scenario hf-catalog-hardening
+node .\scripts\android-scenarios.js --skip-build --scenario hf-token-education
+node .\scripts\android-scenarios.js --skip-build --scenario conversations-management
+node .\scripts\android-screen-capture.js --skip-build --screen home,models,settings,conversations,huggingface-token,model-details --output-dir artifacts/android-scenarios/manual-sample
 ```
 
 Manual follow-up is still required for:

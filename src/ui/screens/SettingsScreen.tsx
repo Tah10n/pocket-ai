@@ -93,8 +93,8 @@ function SettingsNavCard({
     return (
         <ScreenPressableCard onPress={onPress} padding="compact">
             <Box className="flex-row items-center gap-3">
-                <Box className={`h-10 w-10 items-center justify-center overflow-hidden rounded-2xl ${iconWrapClassName}`}>
-                    <MaterialSymbols name={iconName} size={20} className={iconClassName} />
+                <Box className={`h-9 w-9 items-center justify-center overflow-hidden rounded-xl ${iconWrapClassName}`}>
+                    <MaterialSymbols name={iconName} size="lg" className={iconClassName} />
                 </Box>
 
                 <Box className="min-w-0 flex-1">
@@ -112,7 +112,7 @@ function SettingsNavCard({
                             {trailingText}
                         </Text>
                     ) : null}
-                    <MaterialSymbols name="chevron-right" size={20} className="text-typography-400 dark:text-typography-500" />
+                    <MaterialSymbols name="chevron-right" size="lg" className="text-typography-400 dark:text-typography-500" />
                 </Box>
             </Box>
         </ScreenPressableCard>
@@ -392,16 +392,17 @@ export const SettingsScreen = () => {
             <ScrollView className="flex-1" showsVerticalScrollIndicator={false}>
                 <ScreenContent
                     testID="settings-screen-content"
-                    style={{ paddingTop: 18, paddingBottom: screenLayoutMetrics.contentBottomInset }}
+                    className="pt-3"
+                    style={{ paddingBottom: screenLayoutMetrics.contentBottomInset }}
                 >
-                    <ScreenStack gap="loose">
+                    <ScreenStack gap="default">
                         <Box>
                             <ScreenSectionLabel>{t('settings.resources')}</ScreenSectionLabel>
-                            <ScreenStack className="mt-2" gap="default">
+                            <ScreenStack className="mt-2" gap="compact">
                                 <ScreenCard padding="compact">
                                     <Box className="flex-row items-start gap-3">
-                                        <Box className="h-10 w-10 items-center justify-center rounded-2xl bg-primary-500/10 dark:bg-primary-500/20">
-                                            <MaterialSymbols name="memory" size={20} className="text-primary-500" />
+                                        <Box className="h-9 w-9 items-center justify-center rounded-xl bg-primary-500/10 dark:bg-primary-500/20">
+                                            <MaterialSymbols name="memory" size="lg" className="text-primary-500" />
                                         </Box>
                                         <Box className="min-w-0 flex-1">
                                             <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">
@@ -486,7 +487,7 @@ export const SettingsScreen = () => {
                                                 size="sm"
                                                 className="self-start"
                                             >
-                                                <MaterialSymbols name="close" size={18} className="text-error-500" />
+                                                <MaterialSymbols name="close" size="lg" className="text-error-500" />
                                                 <ButtonText>{t('settings.forceUnloadModel')}</ButtonText>
                                             </Button>
                                         </Box>
@@ -495,8 +496,8 @@ export const SettingsScreen = () => {
 
                                 <ScreenCard padding="compact">
                                     <Box className="flex-row items-start gap-3">
-                                        <Box className="h-10 w-10 items-center justify-center rounded-2xl bg-success-500/10 dark:bg-success-500/20">
-                                            <MaterialSymbols name="storage" size={20} className="text-success-600 dark:text-success-300" />
+                                        <Box className="h-9 w-9 items-center justify-center rounded-xl bg-success-500/10 dark:bg-success-500/20">
+                                            <MaterialSymbols name="storage" size="lg" className="text-success-600 dark:text-success-300" />
                                         </Box>
                                         <Box className="min-w-0 flex-1">
                                             <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">
@@ -563,11 +564,11 @@ export const SettingsScreen = () => {
 
                         <Box>
                             <ScreenSectionLabel>{t('settings.appearance')}</ScreenSectionLabel>
-                            <ScreenStack className="mt-2">
-                                <ScreenCard>
+                            <ScreenStack className="mt-2" gap="compact">
+                                <ScreenCard padding="compact">
                                     <Box className="flex-row items-start gap-3">
-                                        <Box className="h-10 w-10 items-center justify-center rounded-2xl bg-info-500/10 dark:bg-info-500/20">
-                                            <MaterialSymbols name="palette" size={20} className="text-info-600 dark:text-info-300" />
+                                        <Box className="h-9 w-9 items-center justify-center rounded-xl bg-info-500/10 dark:bg-info-500/20">
+                                            <MaterialSymbols name="palette" size="lg" className="text-info-600 dark:text-info-300" />
                                         </Box>
                                         <Box className="min-w-0 flex-1">
                                             <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">
@@ -601,11 +602,11 @@ export const SettingsScreen = () => {
 
                         <Box>
                             <ScreenSectionLabel>{t('settings.systemConfiguration')}</ScreenSectionLabel>
-                            <ScreenStack className="mt-2">
+                            <ScreenStack className="mt-2" gap="compact">
                                 <ScreenCard padding="compact">
                                     <Box className="flex-row items-start gap-3">
-                                        <Box className="h-10 w-10 items-center justify-center rounded-2xl bg-info-500/10 dark:bg-info-500/20">
-                                            <MaterialSymbols name="network-cell" size={20} className="text-info-600 dark:text-info-300" />
+                                        <Box className="h-9 w-9 items-center justify-center rounded-xl bg-info-500/10 dark:bg-info-500/20">
+                                            <MaterialSymbols name="cell-tower" size="lg" className="text-info-600 dark:text-info-300" />
                                         </Box>
                                         <Box className="min-w-0 flex-1">
                                             <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">
@@ -626,8 +627,8 @@ export const SettingsScreen = () => {
                                 </ScreenCard>
                                 <ScreenCard padding="compact">
                                     <Box className="flex-row items-start gap-3">
-                                        <Box className="h-10 w-10 items-center justify-center rounded-2xl bg-primary-500/10 dark:bg-primary-500/20">
-                                            <MaterialSymbols name="tune" size={20} className="text-primary-500" />
+                                        <Box className="h-9 w-9 items-center justify-center rounded-xl bg-primary-500/10 dark:bg-primary-500/20">
+                                            <MaterialSymbols name="model-training" size="lg" className="text-primary-500" />
                                         </Box>
                                         <Box className="min-w-0 flex-1">
                                             <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">

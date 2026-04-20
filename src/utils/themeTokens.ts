@@ -105,6 +105,47 @@ export const typographyColors = {
   500: getScaleColor(semanticColorTokens.typography, '500'),
 } as const;
 
+export const iconSizePx = {
+  xs: 14,
+  sm: 16,
+  md: 18,
+  lg: 20,
+  xl: 22,
+  '2xl': 24,
+} as const;
+
+export type SemanticIconSize = keyof typeof iconSizePx;
+
+export const radiusTokens = {
+  sm: 'rounded-xl',
+  md: 'rounded-2xl',
+  // FR-002: Keep the exact (non-scale) radii from the design contract behind semantic tokens.
+  lg: 'rounded-[20px]',
+  xl: 'rounded-[28px]',
+  sheet: 'rounded-t-[32px]',
+  full: 'rounded-full',
+} as const;
+
+export const cardPaddingByDensity = {
+  compact: 'px-3 py-2.5',
+  cozy: 'px-4 py-3',
+  comfortable: 'px-4 py-4',
+} as const;
+
+export const stackGapByDensity = {
+  compact: 'gap-2',
+  cozy: 'gap-2.5',
+  comfortable: 'gap-3',
+} as const;
+
+export const textFieldBySize = {
+  sm: 'min-h-10 rounded-2xl px-3',
+  md: 'min-h-12 rounded-2xl px-3.5',
+  lg: 'min-h-14 rounded-[28px] px-4',
+} as const;
+
+export const listRowSelectedClassName = 'border-primary-500/30 bg-primary-500/10';
+
 export const screenChromeTokens = {
   maxWidthClassName: 'max-w-3xl',
   contentHorizontalPaddingClassName: 'px-4',
@@ -115,7 +156,7 @@ export const screenChromeTokens = {
   headerContentVerticalPaddingClassName: 'py-2',
   headerContentVerticalPaddingCompactClassName: 'py-1.5',
   headerActionClassName: 'h-11 w-11',
-  headerActionIconSizePx: 22,
+  headerActionIconSizePx: iconSizePx.xl,
   bottomBarVerticalPaddingClassName: 'py-2',
 } as const;
 
@@ -141,7 +182,7 @@ export const buttonLayoutTokens = {
     xs: 'min-h-8 rounded-xl px-3 py-1.5',
     sm: 'min-h-9 rounded-2xl px-3 py-2',
     md: 'min-h-10 rounded-2xl px-4 py-2.5',
-    lg: 'min-h-11 rounded-3xl px-5 py-3',
+    lg: 'min-h-11 rounded-[28px] px-5 py-3',
   },
   textSizeClassNameBySize: {
     xs: 'text-xs',
@@ -150,51 +191,51 @@ export const buttonLayoutTokens = {
     lg: 'text-base',
   },
   screenActionPillClassNameBySize: {
-    compact: 'min-h-8 rounded-2xl px-3 py-1',
-    default: 'min-h-9 rounded-full px-3 py-1.5',
-    prominent: 'min-h-12 rounded-full px-4 py-3',
+    sm: 'min-h-8 rounded-2xl px-3 py-1',
+    md: 'min-h-9 rounded-full px-3 py-1.5',
+    lg: 'min-h-12 rounded-full px-4 py-3',
   },
   screenIconButtonClassNameBySize: {
     micro: 'h-6 w-6 rounded-full',
-    compact: 'h-8 w-10 rounded-2xl',
+    compact: 'h-8 w-8 rounded-full',
     default: 'h-10 w-10 rounded-full',
   },
 } as const;
 
 export const screenLayoutTokens = {
   contentTopPaddingClassName: 'pt-3',
-  stackGapClassName: 'gap-3',
+  stackGapClassName: stackGapByDensity.comfortable,
   stackGapLooseClassName: 'gap-4',
-  stackGapCompactClassName: 'gap-2.5',
-  cardClassName: 'rounded-[20px] border border-outline-200 bg-background-50 dark:border-outline-800 dark:bg-background-900/60',
-  cardPaddingClassName: 'px-4 py-3.5',
-  cardPaddingCompactClassName: 'p-3',
-  cardPaddingLargeClassName: 'px-5 py-4',
-  insetCardClassName: 'rounded-2xl border border-outline-200 bg-background-0 dark:border-outline-700 dark:bg-background-950/70',
-  insetCardPaddingClassName: 'p-3',
+  stackGapCompactClassName: stackGapByDensity.cozy,
+  cardClassName: `${radiusTokens.lg} border border-outline-200 bg-background-50 dark:border-outline-800 dark:bg-background-900/60`,
+  cardPaddingClassName: cardPaddingByDensity.cozy,
+  cardPaddingCompactClassName: cardPaddingByDensity.compact,
+  cardPaddingLargeClassName: cardPaddingByDensity.comfortable,
+  insetCardClassName: `${radiusTokens.md} border border-outline-200 bg-background-0 dark:border-outline-700 dark:bg-background-950/70`,
+  insetCardPaddingClassName: cardPaddingByDensity.compact,
   primaryActionPillClassName: 'flex-row items-center justify-center gap-2 border border-primary-500/20 bg-primary-500',
   softActionPillClassName: 'flex-row items-center justify-center gap-1.5 border border-primary-500/20 bg-primary-500/10',
   iconButtonClassName: 'items-center justify-center',
-  iconTileClassName: 'h-10 w-10 items-center justify-center rounded-2xl',
-  searchInlineFieldClassName: 'flex-row h-10 items-center rounded-[18px] border border-outline-200 bg-background-50 px-3 dark:border-outline-700 dark:bg-background-900/60',
+  iconTileClassName: `h-10 w-10 items-center justify-center ${radiusTokens.md}`,
+  searchInlineFieldClassName: 'flex-row h-10 rounded-2xl items-center border border-outline-200 bg-background-50 px-3 dark:border-outline-700 dark:bg-background-900/60',
   composerInlineFieldClassName: 'flex-row h-10 items-center rounded-full border border-outline-200 bg-background-50 px-3.5 dark:border-outline-700 dark:bg-background-900/80',
-  inlineInputShellClassName: 'flex-1 min-h-0 h-full justify-center border-0 bg-transparent px-0',
-  searchInlineInputClassName: 'min-h-0 px-0 py-0 text-[15px] text-typography-900 dark:text-typography-100',
-  composerInlineInputClassName: 'min-h-0 h-full px-0 py-0 text-[15px] text-typography-900 dark:text-typography-0',
+  inlineInputShellClassName: 'min-w-0 flex-1 min-h-0 h-full justify-center border-0 bg-transparent px-0',
+  searchInlineInputClassName: 'min-h-0 px-0 py-0 text-sm leading-5 text-typography-900 dark:text-typography-100',
+  composerInlineInputClassName: 'min-h-0 h-full px-0 py-0 text-sm text-typography-900 dark:text-typography-0',
   segmentedControlClassName: 'flex-row rounded-full border border-outline-200 bg-background-50 p-1 dark:border-outline-700 dark:bg-background-900/70',
   segmentedControlItemClassName: 'min-h-9 flex-1 items-center justify-center rounded-full px-3 py-1.5',
-  sheetClassName: 'max-h-[88%] rounded-t-[32px] bg-background-0 px-5 pb-6 pt-4 dark:bg-background-950',
+  sheetClassName: `max-h-[88%] ${radiusTokens.sheet} bg-background-0 px-4 pb-6 pt-5 dark:bg-background-950`,
   sheetHeaderClassName: 'mb-3 flex-row items-center justify-between gap-3',
-  bannerPrimaryClassName: 'rounded-2xl border border-primary-200 bg-primary-500/10 px-4 py-3 dark:border-primary-800',
-  bannerWarningClassName: 'rounded-2xl border border-warning-300 bg-background-warning px-4 py-3 dark:border-warning-800',
-  bannerErrorClassName: 'rounded-2xl border border-error-300 bg-background-error px-4 py-3 dark:border-error-800',
+  bannerPrimaryClassName: `${radiusTokens.md} border border-primary-200 bg-primary-500/10 px-4 py-3 dark:border-primary-800`,
+  bannerWarningClassName: `${radiusTokens.md} border border-warning-300 bg-background-warning px-4 py-3 dark:border-warning-800`,
+  bannerErrorClassName: `${radiusTokens.md} border border-error-300 bg-background-error px-4 py-3 dark:border-error-800`,
   fieldLabelClassName: 'text-xs font-semibold uppercase tracking-wide text-typography-500 dark:text-typography-400',
   sectionLabelClassName: 'px-1 text-xs font-semibold uppercase tracking-wide text-typography-500 dark:text-typography-400',
-  textFieldClassName: 'min-h-12 rounded-2xl border border-outline-200 bg-background-0 px-3 dark:border-outline-700 dark:bg-background-950/70',
-  compactTextFieldClassName: 'min-h-11 rounded-2xl border border-outline-200 bg-background-0 px-3 dark:border-outline-700 dark:bg-background-950/70',
-  prominentTextFieldClassName: 'min-h-14 justify-center rounded-[28px] border border-outline-200 bg-background-0 px-4 dark:border-outline-700 dark:bg-background-950/70',
-  multilineTextFieldClassName: 'min-h-40 rounded-3xl border border-outline-200 bg-background-0 dark:border-outline-700 dark:bg-background-950/70',
-  prominentMultilineTextFieldClassName: 'min-h-[320px] rounded-[28px] border border-outline-200 bg-background-0 dark:border-outline-700 dark:bg-background-950/70',
+  textFieldClassName: `${textFieldBySize.md} border border-outline-200 bg-background-0 dark:border-outline-700 dark:bg-background-950/70`,
+  compactTextFieldClassName: `min-h-11 ${radiusTokens.md} border border-outline-200 bg-background-0 px-3 dark:border-outline-700 dark:bg-background-950/70`,
+  prominentTextFieldClassName: `${textFieldBySize.lg} justify-center border border-outline-200 bg-background-0 dark:border-outline-700 dark:bg-background-950/70`,
+  multilineTextFieldClassName: `min-h-40 ${radiusTokens.xl} border border-outline-200 bg-background-0 dark:border-outline-700 dark:bg-background-950/70`,
+  prominentMultilineTextFieldClassName: `min-h-[320px] ${radiusTokens.xl} border border-outline-200 bg-background-0 dark:border-outline-700 dark:bg-background-950/70`,
   badgeClassName: 'rounded-full px-2.5 py-1',
   microBadgeClassName: 'rounded-full px-2 py-1',
 } as const;

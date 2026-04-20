@@ -38,106 +38,22 @@ function normalizeDeviceName(deviceName: string): string {
   return deviceName.trim();
 }
 
-function normalizeSearchToken(value: unknown): string {
-  if (typeof value === 'string') {
-    return value.trim();
-  }
-  if (typeof value === 'number' || typeof value === 'boolean') {
-    return String(value);
-  }
-  return '';
-}
-
-function buildDeviceSearchText(device: NativeBackendDeviceInfo): string {
-  const metadata = device.metadata as Record<string, unknown> | undefined;
-  const metadataTokens = metadata
-    ? Object.values(metadata).map(normalizeSearchToken).filter((token) => token.length > 0)
-    : [];
-
-  return [
-    normalizeSearchToken(device.backend),
-    normalizeSearchToken(device.type),
-    normalizeSearchToken(device.deviceName),
-    ...metadataTokens,
-  ]
-    .map((token) => token.trim())
-    .filter((token) => token.length > 0)
-    .join(' ')
-    .toLowerCase();
-}
-
-function parseAdrenoModelNumber(text: string): number | null {
-  const match = text.match(/adreno(?:\s*\(tm\))?\s*(\d{3,4})/i);
-  if (!match) {
-    return null;
-  }
-  const parsed = Number(match[1]);
-  if (!Number.isFinite(parsed)) {
-    return null;
-  }
-  return Math.round(parsed);
-}
-
-function parseQualcommSocModelNumber(text: string): number | null {
-  const regex = /\bsm(\d{4})\b/gi;
-  let match: RegExpExecArray | null = null;
-  let best: number | null = null;
-  while ((match = regex.exec(text)) !== null) {
-    const parsed = Number(match[1]);
-    if (!Number.isFinite(parsed)) {
-      continue;
-    }
-    const normalized = Math.round(parsed);
-    if (best === null || normalized > best) {
-      best = normalized;
-    }
-  }
-  return best;
-}
-
-function isCompatibleAndroidOpenClGpuDevice(device: NativeBackendDeviceInfo): boolean {
-  const text = buildDeviceSearchText(device);
-  if (!text.includes('opencl')) {
-    return false;
-  }
-
-  const adreno = parseAdrenoModelNumber(text);
-  if (adreno === null) {
-    return false;
-  }
-
-  // OpenCL acceleration is supported & tested on Adreno 700+.
-  return adreno >= 700;
-}
-
-function isCompatibleAndroidHexagonNpuEnvironment({
-  devices,
-  hasCompatibleOpenClGpu,
-}: {
-  devices: NativeBackendDeviceInfo[];
-  hasCompatibleOpenClGpu: boolean;
-}): boolean {
-  if (hasCompatibleOpenClGpu) {
+function isNpuDevice(device: NativeBackendDeviceInfo): boolean {
+  // Align with llama.rn docs: Hexagon devices are exposed as HTP* selectors.
+  // Prefer matching the concrete deviceName tokens (HTP0 / HTP1 / ...).
+  const name = typeof device.deviceName === 'string' ? device.deviceName.trim() : '';
+  if (name.startsWith('HTP')) {
     return true;
   }
 
-  const combinedText = devices.map(buildDeviceSearchText).join(' ');
-  const socModel = parseQualcommSocModelNumber(combinedText);
-  if (socModel !== null) {
-    // Hexagon HTP support is supported & tested on SM8450+.
-    return socModel >= 8450;
-  }
-
-  // Fallback: Qualcomm board codenames for newer SoCs.
-  return combinedText.includes('taro') || combinedText.includes('kalama') || combinedText.includes('pineapple');
+  // Fallback: some builds may label the backend as HTP/Hexagon/QNN.
+  const backend = typeof device.backend === 'string' ? device.backend.trim().toLowerCase() : '';
+  return backend.includes('htp') || backend.includes('hexagon') || backend.includes('qnn');
 }
 
-function isNpuDevice(device: NativeBackendDeviceInfo): boolean {
-  const text = buildDeviceSearchText(device);
-
-  // Keep in sync (conceptually) with the runtime backend detector in
-  // LLMEngineService.resolveBackendMode, but only using fields we have here.
-  return text.includes('htp') || text.includes('hexagon') || text.includes('qnn');
+function isOpenClDevice(device: NativeBackendDeviceInfo): boolean {
+  const backend = typeof device.backend === 'string' ? device.backend.trim().toLowerCase() : '';
+  return backend.includes('opencl');
 }
 
 function uniqueStrings(values: string[]): string[] {
@@ -158,7 +74,12 @@ function mapRawDevice(device: NativeBackendDeviceInfo): BackendCapabilitiesSumma
 class InferenceBackendService {
   private backendDevicesInfo: NativeBackendDeviceInfo[] | null | undefined = undefined;
   private backendDevicesInfoPromise: Promise<NativeBackendDeviceInfo[] | null> | null = null;
+  private backendDevicesInfoNativePromise: Promise<NativeBackendDeviceInfo[] | null> | null = null;
   private backendDiscoveryUnsupported = false;
+  private backendDiscoveryCooldownUntilMs = 0;
+
+  private static readonly BACKEND_DISCOVERY_TIMEOUT_MS = 8000;
+  private static readonly BACKEND_DISCOVERY_COOLDOWN_MS = 60_000;
 
   public async getBackendDevicesInfo(): Promise<NativeBackendDeviceInfo[] | null> {
     if (this.backendDiscoveryUnsupported) {
@@ -169,33 +90,77 @@ class InferenceBackendService {
       return this.backendDevicesInfo;
     }
 
+    // If discovery previously timed out, avoid hammering the native module with repeated calls.
+    if (process.env.NODE_ENV !== 'test' && Date.now() < this.backendDiscoveryCooldownUntilMs) {
+      return null;
+    }
+
     if (this.backendDevicesInfoPromise) {
       return this.backendDevicesInfoPromise;
     }
 
+    const timeoutMs = InferenceBackendService.BACKEND_DISCOVERY_TIMEOUT_MS;
     this.backendDevicesInfoPromise = (async () => {
-      try {
-        const llama = requireLlamaModule() as unknown as {
-          getBackendDevicesInfo?: () => Promise<NativeBackendDeviceInfo[]>;
-        };
+      let timeoutId: ReturnType<typeof setTimeout> | null = null;
 
-        if (typeof llama.getBackendDevicesInfo !== 'function') {
-          this.backendDiscoveryUnsupported = true;
-          this.backendDevicesInfo = null;
+      try {
+        if (!this.backendDevicesInfoNativePromise) {
+          this.backendDevicesInfoNativePromise = (async (): Promise<NativeBackendDeviceInfo[] | null> => {
+            try {
+              const llama = requireLlamaModule() as unknown as {
+                getBackendDevicesInfo?: () => Promise<NativeBackendDeviceInfo[]>;
+              };
+
+              if (typeof llama.getBackendDevicesInfo !== 'function') {
+                this.backendDiscoveryUnsupported = true;
+                this.backendDevicesInfo = null;
+                return null;
+              }
+
+              // Ensure sync throws become Promise rejections.
+              const result = await Promise.resolve().then(() => llama.getBackendDevicesInfo!());
+              const devices = Array.isArray(result) ? result : [];
+              this.backendDevicesInfo = devices;
+              this.backendDiscoveryCooldownUntilMs = 0;
+              return devices;
+            } catch (error) {
+              // Do not permanently cache transient discovery failures.
+              if (process.env.NODE_ENV !== 'test') {
+                console.warn('[InferenceBackend] Failed to read backend devices info', error);
+              }
+              return null;
+            } finally {
+              this.backendDevicesInfoNativePromise = null;
+            }
+          })();
+        }
+
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          timeoutId = setTimeout(() => {
+            reject(new Error(`Timed out after ${timeoutMs}ms`));
+          }, timeoutMs);
+        });
+
+        return await Promise.race([
+          this.backendDevicesInfoNativePromise,
+          timeoutPromise,
+        ]);
+      } catch (error) {
+        if (error instanceof Error && error.message.startsWith('Timed out after')) {
+          if (process.env.NODE_ENV !== 'test') {
+            this.backendDiscoveryCooldownUntilMs = Date.now() + InferenceBackendService.BACKEND_DISCOVERY_COOLDOWN_MS;
+          }
+
+          // The native call cannot be cancelled; drop our reference so callers can retry later.
+          this.backendDevicesInfoNativePromise = null;
           return null;
         }
 
-        const result = await llama.getBackendDevicesInfo();
-        const devices = Array.isArray(result) ? result : [];
-        this.backendDevicesInfo = devices;
-        return devices;
-      } catch (error) {
-        // Do not permanently cache transient discovery failures.
-        if (process.env.NODE_ENV !== 'test') {
-          console.warn('[InferenceBackend] Failed to read backend devices info', error);
-        }
         return null;
       } finally {
+        if (timeoutId !== null) {
+          clearTimeout(timeoutId);
+        }
         this.backendDevicesInfoPromise = null;
       }
     })();
@@ -206,7 +171,9 @@ class InferenceBackendService {
   public clearCache(): void {
     this.backendDevicesInfo = undefined;
     this.backendDevicesInfoPromise = null;
+    this.backendDevicesInfoNativePromise = null;
     this.backendDiscoveryUnsupported = false;
+    this.backendDiscoveryCooldownUntilMs = 0;
   }
 
   public async getBackendAvailability(): Promise<BackendAvailabilitySnapshot> {
@@ -228,11 +195,8 @@ class InferenceBackendService {
     const gpuDevices = devices.filter((device) => !isNpuDevice(device));
 
     if (Platform.OS === 'android') {
-      const hasCompatibleOpenClGpu = gpuDevices.some((device) => isCompatibleAndroidOpenClGpuDevice(device));
-      const hasCompatibleHexagon = npuDevices.length > 0 && isCompatibleAndroidHexagonNpuEnvironment({
-        devices,
-        hasCompatibleOpenClGpu,
-      });
+      const hasCompatibleOpenClGpu = gpuDevices.some((device) => isOpenClDevice(device));
+      const hasCompatibleHexagon = npuDevices.length > 0;
 
       return {
         gpuBackendAvailable: hasCompatibleOpenClGpu,
@@ -263,10 +227,10 @@ class InferenceBackendService {
     const gpuDevices = devices.filter((device) => !isNpuDevice(device));
 
     const androidHasCompatibleOpenClGpu = Platform.OS === 'android'
-      ? gpuDevices.some((device) => isCompatibleAndroidOpenClGpuDevice(device))
+      ? gpuDevices.some((device) => isOpenClDevice(device))
       : gpuDevices.length > 0;
     const androidHasCompatibleHexagonNpu = Platform.OS === 'android'
-      ? (npuDevices.length > 0 && isCompatibleAndroidHexagonNpuEnvironment({ devices, hasCompatibleOpenClGpu: androidHasCompatibleOpenClGpu }))
+      ? npuDevices.length > 0
       : npuDevices.length > 0;
 
     const cpu: BackendCapability = {

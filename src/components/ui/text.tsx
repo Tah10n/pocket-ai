@@ -5,8 +5,8 @@ import { cssInterop } from 'nativewind';
 const BaseText = cssInterop(RNText, { className: 'style' });
 
 export const textRoleClassNames = {
-  display: 'text-[28px] font-bold leading-8 tracking-tight text-typography-900 dark:text-typography-50',
-  screenTitle: 'text-2xl font-bold leading-tight text-typography-900 dark:text-typography-100',
+  display: 'text-[26px] font-bold leading-8 tracking-tight text-typography-900 dark:text-typography-50',
+  screenTitle: 'text-[20px] font-bold leading-6 text-typography-900 dark:text-typography-100',
   sectionTitle: 'text-base font-semibold leading-6 text-typography-900 dark:text-typography-100',
   body: 'text-sm leading-6 text-typography-800 dark:text-typography-100',
   bodyMuted: 'text-sm leading-5 text-typography-500 dark:text-typography-300',

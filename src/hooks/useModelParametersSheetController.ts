@@ -3,8 +3,10 @@ import { Alert } from 'react-native';
 import DeviceInfo from 'react-native-device-info';
 import { useTranslation } from 'react-i18next';
 import { llmEngineService, type LoadModelOptions } from '@/services/LLMEngineService';
+import { backgroundTaskService } from '@/services/BackgroundTaskService';
+import { notificationService } from '@/services/NotificationService';
 import { toAppError } from '@/services/AppError';
-import { inferenceAutotuneService } from '@/services/InferenceAutotuneService';
+import { inferenceAutotuneService, type AutotuneProgressSnapshot } from '@/services/InferenceAutotuneService';
 import { readAutotuneResult, type AutotuneResult } from '@/services/InferenceAutotuneStore';
 import { registry } from '@/services/LocalStorageRegistry';
 import { modelCatalogService } from '@/services/ModelCatalogService';
@@ -111,6 +113,9 @@ function resolveHeuristicModel(
           ...(model.gguf ?? {}),
         }
     : undefined;
+  const resolvedThinkingCapability = preferPersisted
+    ? persistedModel.thinkingCapability ?? model.thinkingCapability
+    : model.thinkingCapability ?? persistedModel.thinkingCapability;
 
   return {
     ...model,
@@ -119,6 +124,7 @@ function resolveHeuristicModel(
     sha256: preferPersisted ? persistedModel.sha256 ?? model.sha256 : model.sha256 ?? persistedModel.sha256,
     metadataTrust: resolvedMetadataTrust,
     gguf: resolvedGguf,
+    thinkingCapability: resolvedThinkingCapability,
     maxContextTokens: resolvedMaxContextTokens,
     hasVerifiedContextWindow: resolvedHasVerifiedContextWindow,
     capabilitySnapshot: preferPersisted
@@ -171,6 +177,8 @@ function resolveModelContextWindowCeiling({
   });
 }
 
+let hasShownAutotuneNotificationWarning = false;
+
 export function useModelParametersSheetController({
   getModelById,
   showError,
@@ -217,6 +225,8 @@ export function useModelParametersSheetController({
   const showAdvancedInferenceControls = getSettings().showAdvancedInferenceControls === true;
   const [isRunningAutotune, setRunningAutotune] = useState(false);
   const [autotuneResult, setAutotuneResult] = useState<AutotuneResult | null>(null);
+  const [autotuneProgress, setAutotuneProgress] = useState<AutotuneProgressSnapshot | null>(null);
+  const autotuneAbortControllerRef = useRef<AbortController | null>(null);
   const loadDraftSourceRef = useRef<{
     contextSize: 'current' | 'default' | 'user';
     gpuLayers: 'current' | 'default' | 'user';
@@ -418,11 +428,26 @@ export function useModelParametersSheetController({
   }, []);
 
   const closeModelParameters = useCallback(() => {
+    // If an autotune run is active, closing the sheet should cancel it.
+    const controller = autotuneAbortControllerRef.current;
+    if (controller && !controller.signal.aborted) {
+      setAutotuneProgress((current) => (current
+        ? { ...current, stage: 'cancelling' }
+        : { stage: 'cancelling', step: 0, totalSteps: 0 }));
+      controller.abort();
+    }
     setOpen(false);
   }, []);
 
   useEffect(() => {
     if (!isOpen) {
+      // Ensure any in-flight autotune is cancelled when the sheet closes.
+      const controller = autotuneAbortControllerRef.current;
+      if (controller && !controller.signal.aborted) {
+        controller.abort();
+      }
+      autotuneAbortControllerRef.current = null;
+
       setMeasuredContextWindowCeiling(null);
       setRecommendedGpuLayers(0);
       setGpuLayersCeiling(UNKNOWN_MODEL_GPU_LAYERS_CEILING);
@@ -434,6 +459,7 @@ export function useModelParametersSheetController({
       setDidSaveLoadProfile(false);
       setRunningAutotune(false);
       setAutotuneResult(null);
+      setAutotuneProgress(null);
       loadDraftSourceRef.current = {
         contextSize: 'current',
         gpuLayers: 'current',
@@ -838,10 +864,89 @@ export function useModelParametersSheetController({
     }
 
     setRunningAutotune(true);
+    setAutotuneProgress({ stage: 'preparing', step: 0, totalSteps: 0 });
+    const abortController = new AbortController();
+    autotuneAbortControllerRef.current = abortController;
+    let unsubscribeExpiration: (() => void) | null = null;
+
+    const isSameRunActive = () => (
+      autotuneAbortControllerRef.current === abortController
+      && abortController.signal.aborted !== true
+    );
+
+    let didStartBackgroundInference = false;
+    const ensureBackgroundInferenceStarted = async () => {
+      if (didStartBackgroundInference) {
+        return;
+      }
+      await backgroundTaskService.startBackgroundInference(modelLabel);
+      didStartBackgroundInference = true;
+    };
 
     try {
+      try {
+        const canStartForegroundNotifications = await notificationService.canStartForegroundServiceNotifications();
+        await ensureBackgroundInferenceStarted();
+
+        if (!canStartForegroundNotifications && !hasShownAutotuneNotificationWarning) {
+          hasShownAutotuneNotificationWarning = true;
+          Alert.alert(
+            t('chat.modelControls.backendBenchmarkBackgroundWarningTitle'),
+            t('chat.modelControls.backendBenchmarkBackgroundWarningDescription'),
+            [
+              {
+                text: t('notifications.permissions.enable'),
+                onPress: () => {
+                  void notificationService.requestPermissions()
+                    .catch((error) => {
+                      console.warn('[ModelParametersSheet] Failed to request notification permission', error);
+                    })
+                    .finally(() => {
+                      if (isSameRunActive()) {
+                        void ensureBackgroundInferenceStarted();
+                      }
+                    });
+                },
+              },
+              {
+                text: t('notifications.permissions.openSettings'),
+                onPress: () => {
+                  void notificationService.openSystemSettings()
+                    .catch((error) => {
+                      console.warn('[ModelParametersSheet] Failed to open notification settings', error);
+                    })
+                    .finally(() => {
+                      if (isSameRunActive()) {
+                        void ensureBackgroundInferenceStarted();
+                      }
+                    });
+                },
+              },
+              {
+                text: t('notifications.permissions.continue'),
+                style: 'cancel',
+              },
+            ],
+            { cancelable: true },
+          );
+        }
+
+        unsubscribeExpiration = backgroundTaskService.subscribeToExpiration(() => {
+          if (autotuneAbortControllerRef.current !== abortController) {
+            return;
+          }
+
+          setAutotuneProgress((current) => (current ? { ...current, stage: 'cancelling' } : current));
+          abortController.abort();
+        });
+      } catch (error) {
+        console.warn('[ModelParametersSheet] Failed to start background inference task', error);
+      }
+
       const result = await inferenceAutotuneService.runBackendAutotune({
         modelId: configurableModelId,
+        onProgress: (snapshot) => setAutotuneProgress(snapshot),
+        signal: abortController.signal,
       });
       setAutotuneResult(result);
       if (typeof result.restorationError === 'string' && result.restorationError.trim().length > 0) {
@@ -855,15 +960,53 @@ export function useModelParametersSheetController({
     } catch (error) {
       showError(applyReloadErrorScope, error);
     } finally {
+      unsubscribeExpiration?.();
+      unsubscribeExpiration = null;
+
+      if (didStartBackgroundInference && backgroundTaskService.isTaskActive('inference')) {
+        await backgroundTaskService.stopBackgroundTask('inference');
+      }
+
+      if (autotuneAbortControllerRef.current === abortController) {
+        autotuneAbortControllerRef.current = null;
+      }
       setRunningAutotune(false);
+      // Keep the last progress snapshot visible (done/cancelled) until the sheet closes
+      // or the next run starts.
+      setAutotuneProgress((current) => {
+        if (!current) {
+          return current;
+        }
+        if (current.stage === 'done' || current.stage === 'cancelled') {
+          return current;
+        }
+        return {
+          ...current,
+          stage: abortController.signal.aborted ? 'cancelled' : 'done',
+          step: current.totalSteps > 0 ? current.totalSteps : current.step,
+        };
+      });
     }
   }, [
     applyReloadErrorScope,
     canRunAutotune,
     configurableModelId,
+    modelLabel,
     showError,
     t,
   ]);
+
+  const handleCancelAutotune = useCallback(() => {
+    const controller = autotuneAbortControllerRef.current;
+    if (!controller || controller.signal.aborted) {
+      return;
+    }
+
+    setAutotuneProgress((current) => (current
+      ? { ...current, stage: 'cancelling' }
+      : { stage: 'cancelling', step: 0, totalSteps: 0 }));
+    controller.abort();
+  }, []);
 
   const normalizeGenerationPartial = useCallback((partial: Partial<GenerationParameters>) => {
     if (!Object.prototype.hasOwnProperty.call(partial, 'reasoningEffort')) {
@@ -1059,7 +1202,9 @@ export function useModelParametersSheetController({
       canRunAutotune,
       isAutotuneRunning: isRunningAutotune,
       autotuneResult,
+      autotuneProgress,
       onRunAutotune: handleRunAutotune,
+      onCancelAutotune: handleCancelAutotune,
       onClose: closeModelParameters,
       onChangeParams: handleChangeParams,
       onChangeLoadParams: handleChangeLoadParams,

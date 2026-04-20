@@ -61,13 +61,16 @@ function createMockModel(overrides: Partial<ModelMetadata> = {}): ModelMetadata 
 
 describe('LocalStorageRegistry', () => {
   let consoleWarnSpy: jest.SpyInstance;
+  let consoleLogSpy: jest.SpyInstance;
 
   beforeAll(() => {
     consoleWarnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    consoleLogSpy = jest.spyOn(console, 'log').mockImplementation(() => undefined);
   });
 
   afterAll(() => {
     consoleWarnSpy.mockRestore();
+    consoleLogSpy.mockRestore();
   });
 
   beforeEach(() => {
@@ -451,5 +454,56 @@ describe('LocalStorageRegistry', () => {
     expect(models).toHaveLength(1);
     expect(mockStorage.remove).toHaveBeenCalledWith('models-registry:index-v1');
     expect(mockStorage.set).toHaveBeenCalledWith('models-registry:index-v1', JSON.stringify([mockModel.id]));
+  });
+
+  it('resets downloaded models when the models directory is unavailable', async () => {
+    let promise: Promise<unknown> | null = null;
+
+    jest.isolateModules(() => {
+      jest.doMock('../../src/services/FileSystemSetup', () => ({
+        getModelsDir: () => null,
+      }));
+
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { registry: isolatedRegistry } = require('../../src/services/LocalStorageRegistry') as typeof import('../../src/services/LocalStorageRegistry');
+
+      (isolatedRegistry.getModels as jest.Mock) = jest.fn().mockReturnValue([
+        createMockModel({ lifecycleStatus: LifecycleStatus.DOWNLOADED, localPath: 'model.gguf' }),
+        createMockModel({ id: 'test/active', lifecycleStatus: LifecycleStatus.ACTIVE, localPath: 'active.gguf' }),
+      ]);
+      (isolatedRegistry.saveModels as jest.Mock) = jest.fn();
+
+      promise = (async () => {
+        await isolatedRegistry.validateRegistry();
+
+        expect(isolatedRegistry.saveModels).toHaveBeenCalled();
+        const updatedModels = (isolatedRegistry.saveModels as jest.Mock).mock.calls[0][0] as ModelMetadata[];
+        expect(updatedModels[0].localPath).toBeUndefined();
+        expect(updatedModels[0].lifecycleStatus).toBe(LifecycleStatus.AVAILABLE);
+        expect(updatedModels[1].localPath).toBeUndefined();
+        expect(updatedModels[1].lifecycleStatus).toBe(LifecycleStatus.AVAILABLE);
+      })();
+    });
+
+    await promise;
+  });
+
+  it('garbage collects orphaned files while preserving completed and queued ones', async () => {
+    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([
+      createMockModel({ localPath: 'keep.gguf', lifecycleStatus: LifecycleStatus.DOWNLOADED }),
+    ]);
+
+    (FileSystem.readDirectoryAsync as jest.Mock).mockResolvedValueOnce([
+      'keep.gguf',
+      'queued.gguf',
+      'orphan.gguf',
+      '../bad',
+    ]);
+
+    await registry.validateRegistry(['queued.gguf']);
+
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/models/orphan.gguf', { idempotent: true });
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/models/keep.gguf', expect.anything());
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/models/queued.gguf', expect.anything());
   });
 });

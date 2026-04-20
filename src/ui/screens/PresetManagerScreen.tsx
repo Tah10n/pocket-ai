@@ -5,7 +5,7 @@ import { useRouter } from 'expo-router';
 import { Box } from '@/components/ui/box';
 import { Button, ButtonText } from '@/components/ui/button';
 import { MaterialSymbols } from '@/components/ui/MaterialSymbols';
-import { ScreenActionPill, ScreenBadge, ScreenContent, ScreenIconButton, ScreenPressableCard, ScreenTextField } from '@/components/ui/ScreenShell';
+import { ScreenActionPill, ScreenBadge, ScreenCard, ScreenContent, ScreenIconButton, ScreenPressableCard, ScreenTextField } from '@/components/ui/ScreenShell';
 import { HeaderBar } from '@/components/ui/HeaderBar';
 import { ScrollView } from '@/components/ui/scroll-view';
 import { Text } from '@/components/ui/text';
@@ -142,7 +142,8 @@ export function PresetManagerScreen() {
             <ScreenPressableCard
                 testID={`preset-card-${toTestIdSegment(item.id)}`}
                 onPress={() => openEditPreset(item)}
-                className={`mb-3 active:opacity-80 ${
+                padding="compact"
+                className={`active:opacity-80 ${
                     isActive
                         ? 'border-primary-500/40 bg-primary-500/10 dark:border-primary-400'
                         : 'bg-background-0 dark:bg-background-950'
@@ -165,11 +166,24 @@ export function PresetManagerScreen() {
                         </Box>
                     </Box>
 
-                    <MaterialSymbols name="chevron-right" size={20} className="text-typography-400" />
+                    <MaterialSymbols name="chevron-right" size="lg" className="text-typography-400" />
                 </Box>
             </ScreenPressableCard>
         );
     }, [activePresetId, openEditPreset, t]);
+
+    const renderEmptyState = useCallback(() => (
+        <Box className="flex-1 justify-center py-6">
+            <ScreenCard dashed padding="compact" className="items-center dark:border-outline-700">
+                <Text className="text-center text-base font-semibold text-typography-900 dark:text-typography-100">
+                    {t('presets.emptyTitle')}
+                </Text>
+                <Text className="mt-2 text-center text-sm leading-5 text-typography-500 dark:text-typography-400">
+                    {t('presets.emptyDescription')}
+                </Text>
+            </ScreenCard>
+        </Box>
+    ), [t]);
 
     return (
         <Box className="flex-1 bg-background-0 dark:bg-background-950">
@@ -183,20 +197,23 @@ export function PresetManagerScreen() {
                     <ScreenActionPill
                         onPress={openCreatePreset}
                         tone="primary"
+                        size="sm"
                         testID="preset-manager-add-preset"
                     >
-                        <MaterialSymbols name="add" size={18} className="text-typography-0" />
+                        <MaterialSymbols name="add" size="sm" className="text-typography-0" />
                         <Text className="text-sm font-semibold text-typography-0">{t('presets.addPreset')}</Text>
                     </ScreenActionPill>
                 )}
             />
 
-            <ScreenContent className="flex-1 pt-3">
+            <ScreenContent className="flex-1 pt-2">
                 <FlashList
                     data={presets}
                     keyExtractor={(item) => item.id}
                     renderItem={renderItem}
-                    contentContainerStyle={{ paddingBottom: 24 }}
+                    ListEmptyComponent={renderEmptyState}
+                    ItemSeparatorComponent={() => <Box className="h-2" />}
+                    contentContainerStyle={{ flexGrow: 1, paddingBottom: 24 }}
                 />
             </ScreenContent>
 
@@ -223,7 +240,7 @@ export function PresetManagerScreen() {
                         ) : undefined}
                     />
 
-                    <ScreenContent className="flex-1 pt-3">
+                    <ScreenContent className="flex-1 pt-2">
                         <ScrollView
                             className="flex-1"
                             showsVerticalScrollIndicator={false}

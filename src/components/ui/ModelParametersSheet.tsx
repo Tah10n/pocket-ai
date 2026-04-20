@@ -24,6 +24,9 @@ import {
   UNKNOWN_MODEL_GPU_LAYERS_CEILING,
 } from '../../services/SettingsStore';
 import type { AutotuneResult } from '../../services/InferenceAutotuneStore';
+import type { AutotuneProgressSnapshot } from '../../services/InferenceAutotuneService';
+import type { AndroidGpuInfoSnapshot } from '../../services/GpuInfoService';
+import { getAndroidGpuInfo } from '../../services/GpuInfoService';
 import { useTheme } from '../../providers/ThemeProvider';
 import {
   DEFAULT_CONTEXT_WINDOW_TOKENS,
@@ -61,7 +64,9 @@ interface ModelParametersSheetProps {
   canRunAutotune?: boolean;
   isAutotuneRunning?: boolean;
   autotuneResult?: AutotuneResult | null;
+  autotuneProgress?: AutotuneProgressSnapshot | null;
   onRunAutotune?: () => void;
+  onCancelAutotune?: () => void;
   onClose: () => void;
   onChangeParams: (partial: Partial<GenerationParameters>) => void;
   onChangeLoadParams: (partial: Partial<ModelLoadParameters>) => void;
@@ -319,7 +324,9 @@ export function ModelParametersSheet({
   canRunAutotune = false,
   isAutotuneRunning = false,
   autotuneResult,
+  autotuneProgress,
   onRunAutotune,
+  onCancelAutotune,
   onClose,
   onChangeParams,
   onChangeLoadParams,
@@ -330,7 +337,23 @@ export function ModelParametersSheet({
 }: ModelParametersSheetProps) {
   const { t } = useTranslation();
   const [seedInput, setSeedInput] = useState(() => (params.seed === null ? '' : String(params.seed)));
-  const backendDiscoveryUnavailable = isBackendDiscoveryUnavailable === true;
+  const [androidGpuInfo, setAndroidGpuInfo] = useState<AndroidGpuInfoSnapshot | null>(null);
+  const runtimeBackendDevicesText = (
+    Array.isArray(engineDiagnostics?.backendDevices) && engineDiagnostics.backendDevices.length > 0
+      ? engineDiagnostics.backendDevices.join(' ')
+      : Array.isArray(engineDiagnostics?.initDevices) && engineDiagnostics.initDevices.length > 0
+        ? engineDiagnostics.initDevices.join(' ')
+        : ''
+  ).toLowerCase();
+  const runtimeReportsNpuBackend = engineDiagnostics?.backendMode === 'npu'
+    || runtimeBackendDevicesText.includes('htp')
+    || runtimeBackendDevicesText.includes('hexagon')
+    || runtimeBackendDevicesText.includes('qnn');
+  const runtimeReportsGpuBackend = engineDiagnostics?.backendMode === 'gpu'
+    || runtimeBackendDevicesText.includes('opencl')
+    || runtimeBackendDevicesText.includes('metal');
+  const runtimeReportsAnyBackend = runtimeReportsNpuBackend || runtimeReportsGpuBackend;
+  const backendDiscoveryUnavailable = isBackendDiscoveryUnavailable === true && !runtimeReportsAnyBackend;
   const isReasoningEffortDisabled = !supportsReasoning;
   const reasoningHelperText = !supportsReasoning
     ? t('chat.modelControls.reasoningUnsupported')
@@ -345,6 +368,33 @@ export function ModelParametersSheet({
 
     setSeedInput(params.seed === null ? '' : String(params.seed));
   }, [modelId, params.seed, visible]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    if (!visible) {
+      setAndroidGpuInfo(null);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    getAndroidGpuInfo()
+      .then((snapshot) => {
+        if (!cancelled) {
+          setAndroidGpuInfo(snapshot);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setAndroidGpuInfo(null);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [visible]);
   const resolvedContextWindowCeiling = contextWindowCeiling
     ? Math.max(MIN_CONTEXT_WINDOW_TOKENS, Math.min(MAX_CONTEXT_WINDOW_TOKENS, contextWindowCeiling))
     : DEFAULT_CONTEXT_WINDOW_TOKENS;
@@ -402,8 +452,8 @@ export function ModelParametersSheet({
   const resolvedGpuBackendAvailable = typeof isGpuBackendAvailable === 'boolean'
     ? isGpuBackendAvailable
     : null;
-  const showGpuControls = !backendDiscoveryUnavailable && resolvedGpuBackendAvailable !== false;
-  const resolvedNpuBackendAvailable = !backendDiscoveryUnavailable && isNpuBackendAvailable === true;
+  const showGpuControls = !backendDiscoveryUnavailable && (resolvedGpuBackendAvailable !== false || runtimeReportsGpuBackend);
+  const resolvedNpuBackendAvailable = !backendDiscoveryUnavailable && (isNpuBackendAvailable === true || runtimeReportsNpuBackend);
   const normalizedBackendPolicy = loadParamsDraft.backendPolicy && loadParamsDraft.backendPolicy !== 'auto'
     ? loadParamsDraft.backendPolicy
     : undefined;
@@ -456,6 +506,39 @@ export function ModelParametersSheet({
         ? t('chat.modelControls.backendModeNpu')
         : t('chat.modelControls.backendModeUnknown');
   const autotuneBestStable = autotuneResult?.bestStable ?? null;
+  const autotuneCandidates = Array.isArray(autotuneResult?.candidates)
+    ? autotuneResult!.candidates
+    : [];
+  const formatAutotuneCandidateSpeed = (tokensPerSec: number | undefined) => {
+    if (typeof tokensPerSec !== 'number' || !Number.isFinite(tokensPerSec) || tokensPerSec <= 0) {
+      return '—';
+    }
+
+    const rounded = tokensPerSec >= 10 ? tokensPerSec.toFixed(0) : tokensPerSec.toFixed(1);
+    return `${rounded} tok/s`;
+  };
+  const formatAutotuneCandidateMs = (value: number | undefined) => {
+    if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+      return '—';
+    }
+
+    return `${Math.round(value)} ms`;
+  };
+  const formatAutotuneCandidateBackendLabel = (mode: string | undefined) => {
+    if (mode === 'cpu') {
+      return t('chat.modelControls.backendModeCpu');
+    }
+
+    if (mode === 'gpu') {
+      return t('chat.modelControls.backendModeGpu');
+    }
+
+    if (mode === 'npu') {
+      return t('chat.modelControls.backendModeNpu');
+    }
+
+    return t('chat.modelControls.backendModeUnknown');
+  };
   const autotuneBestStableBackendLabel = autotuneBestStable?.backendMode === 'cpu'
     ? t('chat.modelControls.backendModeCpu')
     : autotuneBestStable?.backendMode === 'gpu'
@@ -463,6 +546,71 @@ export function ModelParametersSheet({
       : autotuneBestStable?.backendMode === 'npu'
         ? t('chat.modelControls.backendModeNpu')
         : t('chat.modelControls.backendModeUnknown');
+  const autotuneProgressPercent = (() => {
+    if (!autotuneProgress || autotuneProgress.totalSteps <= 0) {
+      return null;
+    }
+
+    const ratio = autotuneProgress.totalSteps > 0 ? autotuneProgress.step / autotuneProgress.totalSteps : 0;
+    const normalized = Number.isFinite(ratio) ? ratio : 0;
+    return Math.max(0, Math.min(100, Math.round(normalized * 100)));
+  })();
+  const autotuneProgressBackendLabel = autotuneProgress?.candidate?.backendMode === 'cpu'
+    ? t('chat.modelControls.backendModeCpu')
+    : autotuneProgress?.candidate?.backendMode === 'gpu'
+      ? t('chat.modelControls.backendModeGpu')
+      : autotuneProgress?.candidate?.backendMode === 'npu'
+        ? t('chat.modelControls.backendModeNpu')
+        : t('chat.modelControls.backendModeUnknown');
+  const autotuneProgressStageLabel = (() => {
+    if (!autotuneProgress) {
+      return null;
+    }
+
+    const index = typeof autotuneProgress.candidateIndex === 'number' && Number.isFinite(autotuneProgress.candidateIndex)
+      ? autotuneProgress.candidateIndex
+      : 0;
+    const total = typeof autotuneProgress.candidateCount === 'number' && Number.isFinite(autotuneProgress.candidateCount)
+      ? autotuneProgress.candidateCount
+      : 0;
+
+    switch (autotuneProgress.stage) {
+      case 'preparing':
+        return t('chat.modelControls.backendBenchmarkProgressPreparing');
+      case 'cancelling':
+        return t('chat.modelControls.backendBenchmarkProgressCancelling');
+      case 'unloadingPrevious':
+        return t('chat.modelControls.backendBenchmarkProgressUnloadingPrevious');
+      case 'loadingCandidate':
+        return t('chat.modelControls.backendBenchmarkProgressLoading', {
+          backend: autotuneProgressBackendLabel,
+          index,
+          total,
+        });
+      case 'benchmarkingCandidate':
+        return t('chat.modelControls.backendBenchmarkProgressBenchmarking', {
+          backend: autotuneProgressBackendLabel,
+          index,
+          total,
+        });
+      case 'unloadingCandidate':
+        return t('chat.modelControls.backendBenchmarkProgressUnloadingCandidate', {
+          backend: autotuneProgressBackendLabel,
+          index,
+          total,
+        });
+      case 'saving':
+        return t('chat.modelControls.backendBenchmarkProgressSaving');
+      case 'restoringPrevious':
+        return t('chat.modelControls.backendBenchmarkProgressRestoring');
+      case 'cancelled':
+        return t('chat.modelControls.backendBenchmarkProgressCancelled');
+      case 'done':
+        return t('chat.modelControls.backendBenchmarkProgressDone');
+      default:
+        return t('chat.modelControls.backendBenchmarkRunning');
+    }
+  })();
   const requestedBackendPolicyLabel = engineDiagnostics?.requestedBackendPolicy === 'cpu'
     ? t('chat.modelControls.backendPolicyCpu')
     : engineDiagnostics?.requestedBackendPolicy === 'gpu'
@@ -857,23 +1005,116 @@ export function ModelParametersSheet({
                         </Text>
                       ) : null}
 
-                      <Box className="mt-3 flex-row justify-end">
-                        <Button
-                          onPress={() => onRunAutotune?.()}
-                          action="softPrimary"
-                          size="sm"
-                          disabled={!canRunAutotune || isAutotuneRunning || !onRunAutotune}
-                        >
-                          <ButtonText>{isAutotuneRunning
-                            ? t('chat.modelControls.backendBenchmarkRunning')
-                            : t('chat.modelControls.backendBenchmarkRun')}
-                          </ButtonText>
-                        </Button>
+                      {!isAutotuneRunning && autotuneResult?.cancelled ? (
+                        <Text className="mt-2 text-xs leading-5 text-typography-500 dark:text-typography-400">
+                          {t('chat.modelControls.backendBenchmarkCancelledNote')}
+                        </Text>
+                      ) : null}
+
+                      {!isAutotuneRunning && autotuneCandidates.length > 0 ? (
+                        <Box className="mt-3 gap-2">
+                          <Text className="text-xs font-semibold uppercase tracking-wider text-typography-500 dark:text-typography-400">
+                            {t('chat.modelControls.backendBenchmarkResultsTitle')}
+                          </Text>
+
+                          {autotuneCandidates.map((candidate, index) => {
+                            const candidateKey = `${candidate.profile?.backendMode ?? candidate.actualBackendMode ?? 'unknown'}-${index}`;
+                            const requestedBackend = formatAutotuneCandidateBackendLabel(candidate.profile?.backendMode);
+                            const requestedLayers = Math.max(0, Math.round(candidate.profile?.nGpuLayers ?? 0));
+                            const actualBackend = formatAutotuneCandidateBackendLabel(candidate.actualBackendMode);
+                            const loadedLayers = typeof candidate.loadedGpuLayers === 'number' && Number.isFinite(candidate.loadedGpuLayers)
+                              ? Math.max(0, Math.round(candidate.loadedGpuLayers))
+                              : null;
+                            const initLayers = typeof candidate.initGpuLayers === 'number' && Number.isFinite(candidate.initGpuLayers)
+                              ? Math.max(0, Math.round(candidate.initGpuLayers))
+                              : null;
+                            const devicesText = Array.isArray(candidate.initDevices) && candidate.initDevices.length > 0
+                              ? candidate.initDevices.join(', ')
+                              : Array.isArray(candidate.profile?.devices) && candidate.profile.devices.length > 0
+                                ? candidate.profile.devices.join(', ')
+                                : null;
+
+                            const primaryLine = candidate.success
+                              ? `✓ ${requestedBackend} (${requestedLayers}): ${formatAutotuneCandidateSpeed(candidate.tokensPerSec)} • TTFT ${formatAutotuneCandidateMs(candidate.ttftMs)} • ${formatAutotuneCandidateMs(candidate.durationMs)}`
+                              : `✗ ${requestedBackend} (${requestedLayers}): ${candidate.error ?? 'Failed'}`;
+
+                            const details = [
+                              candidate.actualBackendMode ? `actual: ${actualBackend}` : null,
+                              loadedLayers !== null ? `loaded: ${loadedLayers}` : null,
+                              initLayers !== null ? `init: ${initLayers}` : null,
+                              devicesText ? `devices: ${devicesText}` : null,
+                            ].filter((value): value is string => typeof value === 'string' && value.length > 0);
+
+                            return (
+                              <Box key={candidateKey} className="gap-0.5">
+                                <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                                  {primaryLine}
+                                </Text>
+
+                                {details.length > 0 ? (
+                                  <Text className="text-xs leading-5 text-typography-500 dark:text-typography-400">
+                                    {details.join(' • ')}
+                                  </Text>
+                                ) : null}
+
+                                {candidate.reasonNoGPU ? (
+                                  <Text className="text-xs leading-5 text-typography-500 dark:text-typography-400">
+                                    {candidate.reasonNoGPU}
+                                  </Text>
+                                ) : null}
+                              </Box>
+                            );
+                          })}
+                        </Box>
+                      ) : null}
+
+                      {isAutotuneRunning ? (
+                        <Box className="mt-3 gap-2">
+                          {autotuneProgressStageLabel ? (
+                            <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                              {autotuneProgressPercent !== null
+                                ? `${autotuneProgressStageLabel} ${autotuneProgressPercent}%`
+                                : autotuneProgressStageLabel}
+                            </Text>
+                          ) : (
+                            <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                              {t('chat.modelControls.backendBenchmarkRunning')}
+                            </Text>
+                          )}
+
+                          {autotuneProgressPercent !== null ? (
+                            <Box className="h-2 overflow-hidden rounded-full bg-primary-200 dark:bg-typography-800">
+                              <Box className="h-full bg-primary-500" style={{ width: `${autotuneProgressPercent}%` }} />
+                            </Box>
+                          ) : null}
+                        </Box>
+                      ) : null}
+
+                      <Box className="mt-3 flex-row justify-end gap-2">
+                        {isAutotuneRunning ? (
+                          <Button
+                            onPress={() => onCancelAutotune?.()}
+                            action="secondary"
+                            size="sm"
+                            disabled={!onCancelAutotune}
+                          >
+                            <ButtonText>{t('chat.modelControls.backendBenchmarkCancel')}</ButtonText>
+                          </Button>
+                        ) : (
+                          <Button
+                            onPress={() => onRunAutotune?.()}
+                            action="softPrimary"
+                            size="sm"
+                            disabled={!canRunAutotune || isAutotuneRunning || !onRunAutotune}
+                          >
+                            <ButtonText>{t('chat.modelControls.backendBenchmarkRun')}</ButtonText>
+                          </Button>
+                        )}
                       </Box>
                     </ScreenCard>
                   ) : null}
 
-                  {showAdvancedInferenceControls && engineDiagnostics && typeof loadedContextSize === 'number' && Number.isFinite(loadedContextSize) ? (
+                  {showAdvancedInferenceControls && engineDiagnostics ? (
                     <ScreenCard tone={shouldHighlightNoGpu ? 'warning' : 'default'} variant="inset" padding="compact">
                       <Text
                         className={`text-xs font-semibold uppercase tracking-wider ${shouldHighlightNoGpu ? 'text-warning-700 dark:text-warning-200' : 'text-primary-600 dark:text-primary-300'}`}
@@ -884,6 +1125,12 @@ export function ModelParametersSheet({
                       <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
                         {t('chat.modelControls.runtimeBackendBackend', { backend: backendLabel })}
                       </Text>
+
+                      {resolvedLoadedContextSize === null ? (
+                        <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                          {t('chat.modelControls.runtimeBackendNotLoaded')}
+                        </Text>
+                      ) : null}
 
                       {engineDiagnostics.requestedBackendPolicy ? (
                         <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
@@ -1003,6 +1250,24 @@ export function ModelParametersSheet({
                         </Text>
                       ) : null}
 
+                      {androidGpuInfo?.glRenderer ? (
+                        <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                          {t('chat.modelControls.runtimeBackendGlRenderer', { value: androidGpuInfo.glRenderer })}
+                        </Text>
+                      ) : null}
+
+                      {androidGpuInfo?.glVendor ? (
+                        <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                          {t('chat.modelControls.runtimeBackendGlVendor', { value: androidGpuInfo.glVendor })}
+                        </Text>
+                      ) : null}
+
+                      {androidGpuInfo?.socModel ? (
+                        <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                          {t('chat.modelControls.runtimeBackendSocModel', { value: androidGpuInfo.socModel })}
+                        </Text>
+                      ) : null}
+
                       {engineDiagnostics.reasonNoGPU ? (
                         <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
                           {t('chat.modelControls.runtimeBackendReason', { reason: engineDiagnostics.reasonNoGPU })}
@@ -1071,6 +1336,29 @@ export function ModelParametersSheet({
                           : t('chat.modelControls.runtimeMismatchDescription', {
                               requested: Math.round(loadParamsDraft.contextSize),
                               loaded: Math.round(loadedContextSize),
+                            })}
+                      </Text>
+                    </ScreenCard>
+                  ) : null}
+
+                  {runtimeRequestedGpuLayers !== null &&
+                  runtimeRequestedGpuLayers > 0 &&
+                  runtimeLoadedGpuLayers !== null &&
+                  runtimeLoadedGpuLayers < runtimeRequestedGpuLayers &&
+                  !showApplyReload ? (
+                    <ScreenCard tone="warning" variant="inset" padding="compact">
+                      <Text className="text-xs font-semibold uppercase tracking-wider text-warning-700 dark:text-warning-200">
+                        {t('chat.modelControls.runtimeGpuMismatchTitle')}
+                      </Text>
+                      <Text className="mt-1 text-sm leading-5 text-typography-700 dark:text-typography-200">
+                        {isSafeModeActive
+                          ? t('chat.modelControls.runtimeGpuMismatchDescriptionSafe', {
+                              requested: Math.round(runtimeRequestedGpuLayers),
+                              loaded: Math.round(runtimeLoadedGpuLayers),
+                            })
+                          : t('chat.modelControls.runtimeGpuMismatchDescription', {
+                              requested: Math.round(runtimeRequestedGpuLayers),
+                              loaded: Math.round(runtimeLoadedGpuLayers),
                             })}
                       </Text>
                     </ScreenCard>

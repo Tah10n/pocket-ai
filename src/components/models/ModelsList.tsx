@@ -525,20 +525,22 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
     || filters.sizeRanges.length > 0;
 
   const emptyState = useMemo(() => (
-    <Box className="flex-1 items-center px-6 pb-8 pt-12">
-      <Text className="text-center text-base font-semibold text-typography-700 dark:text-typography-200">
-        {t('models.noResults', 'No models found')}
-      </Text>
-      <Text className="mt-2 text-center text-sm text-typography-500 dark:text-typography-400">
-        {hasFilters
-          ? t('models.emptyFiltered')
-          : t('models.emptySearchHint')}
-      </Text>
-      {hasFilters ? (
-        <Button size="sm" className="mt-4" onPress={() => clearFilters(activeTab)}>
-          <ButtonText>{t('models.clearFilters')}</ButtonText>
-        </Button>
-      ) : null}
+    <Box className="flex-1 justify-center py-6">
+      <ScreenCard dashed padding="compact" className="items-center dark:border-outline-700">
+        <Text className="text-center text-base font-semibold text-typography-700 dark:text-typography-200">
+          {t('models.noResults', 'No models found')}
+        </Text>
+        <Text className="mt-2 text-center text-sm text-typography-500 dark:text-typography-400">
+          {hasFilters
+            ? t('models.emptyFiltered')
+            : t('models.emptySearchHint')}
+        </Text>
+        {hasFilters ? (
+          <Button size="sm" className="mt-4" onPress={() => clearFilters(activeTab)}>
+            <ButtonText>{t('models.clearFilters')}</ButtonText>
+          </Button>
+        ) : null}
+      </ScreenCard>
     </Box>
   ), [activeTab, clearFilters, hasFilters, t]);
 
@@ -630,7 +632,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
     openTokenSettings,
   ]);
 
-  const renderItemSeparator = useCallback(() => <Box className="h-2.5" />, []);
+  const renderItemSeparator = useCallback(() => <Box className="h-2" />, []);
   const renderEmptyState = useCallback(() => emptyState, [emptyState]);
   const renderFooter = useCallback(() => footer, [footer]);
   const isCatalogInitializing = activeTab === 'all' && !isTokenStateHydrated;
@@ -676,7 +678,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
         ) : null}
 
         {(isCatalogInitializing || (loading && models.length === 0)) ? (
-          <Box className="flex-1 items-center justify-start pt-10">
+          <Box className="flex-1 items-center justify-center pb-8 pt-6">
             <Spinner size="large" />
             <Text className="mt-2 text-typography-500">{t('models.searching', 'Searching Hugging Face...')}</Text>
           </Box>

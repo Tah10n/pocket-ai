@@ -54,6 +54,31 @@ describe('resolveInferenceProfileCandidates', () => {
     }));
   });
 
+  it('falls back to CPU for explicit NPU policy when NPU is unavailable (even if devices are discovered)', () => {
+    const capabilitiesUntestedNpu: BackendCapabilitiesSummary = {
+      discoveryUnavailable: false,
+      cpu: { kind: 'cpu', label: 'CPU', available: true, deviceNames: [], backendNames: [], notes: [] },
+      gpu: { kind: 'gpu', label: 'GPU', available: false, deviceNames: [], backendNames: [], notes: [] },
+      npu: { kind: 'npu', label: 'NPU', available: false, deviceNames: ['HTP0'], backendNames: ['HTP'], notes: [] },
+      rawDevices: [
+        { backend: 'HTP', type: 'gpu', deviceName: 'HTP0 SM8350', maxMemorySize: 0 },
+      ],
+    };
+
+    const result = resolveInferenceProfileCandidates({
+      capabilities: capabilitiesUntestedNpu,
+      loadParams: { backendPolicy: 'npu', selectedBackendDevices: null },
+      gpuLayers: 12,
+      baseProfile,
+    });
+
+    expect(result.effectiveBackendPolicy).toBe('auto');
+    expect(result.reasons).toEqual(expect.arrayContaining([
+      'inference.backendPolicyReason.npuNotSupportedOnDevice',
+    ]));
+    expect(result.candidates.map((candidate) => candidate.backendMode)).toEqual(['cpu']);
+  });
+
   it('uses explicit selected devices for explicit NPU policy', () => {
     const result = resolveInferenceProfileCandidates({
       capabilities: capabilitiesBoth,
@@ -83,6 +108,31 @@ describe('resolveInferenceProfileCandidates', () => {
       backendMode: 'gpu',
       nGpuLayers: 12,
     }));
+  });
+
+  it('falls back to CPU for explicit GPU policy when GPU is unavailable (even if devices are discovered)', () => {
+    const capabilitiesUntestedGpu: BackendCapabilitiesSummary = {
+      discoveryUnavailable: false,
+      cpu: { kind: 'cpu', label: 'CPU', available: true, deviceNames: [], backendNames: [], notes: [] },
+      gpu: { kind: 'gpu', label: 'GPU', available: false, deviceNames: ['GPUOpenCL'], backendNames: ['OpenCL'], notes: [] },
+      npu: { kind: 'npu', label: 'NPU', available: false, deviceNames: [], backendNames: [], notes: [] },
+      rawDevices: [
+        { backend: 'OpenCL', type: 'gpu', deviceName: 'Adreno 660', maxMemorySize: 0 },
+      ],
+    };
+
+    const result = resolveInferenceProfileCandidates({
+      capabilities: capabilitiesUntestedGpu,
+      loadParams: { backendPolicy: 'gpu', selectedBackendDevices: null },
+      gpuLayers: 12,
+      baseProfile,
+    });
+
+    expect(result.effectiveBackendPolicy).toBe('cpu');
+    expect(result.reasons).toEqual(expect.arrayContaining([
+      'inference.backendPolicyReason.gpuNotSupportedOnDevice',
+    ]));
+    expect(result.candidates.map((candidate) => candidate.backendMode)).toEqual(['cpu']);
   });
 
   it('returns CPU-only candidates for explicit GPU policy when GPU is known unavailable', () => {

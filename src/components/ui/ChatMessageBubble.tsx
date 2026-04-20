@@ -63,7 +63,7 @@ function IconActionButton({
       onPress={onPress}
       accessibilityLabel={label}
       iconName={iconName}
-      iconSize={15}
+      iconSize="sm"
       size="micro"
       tone={isDestructive ? 'danger' : 'neutral'}
       className={`border-0 ${isDestructive
@@ -149,6 +149,7 @@ const ChatMessageBubbleComponent = ({
 
   const metadataRowClassName = isUser ? 'self-end mr-1' : 'self-start ml-1';
   const bubbleAlignmentClassName = isUser ? 'self-end' : 'self-start';
+  // Chat bubbles keep asymmetric radii as a deliberate visual affordance between user and assistant turns.
   const bubbleClassName = isUser
     ? 'rounded-[24px] rounded-br-lg bg-primary-500 px-3.5 py-2'
     : 'rounded-[22px] rounded-bl-lg border border-outline-200 bg-background-50 px-3 py-1.5 dark:border-outline-800 dark:bg-background-900/70';
@@ -160,6 +161,7 @@ const ChatMessageBubbleComponent = ({
   const assistantBodyContent = isUser ? content : finalContent;
   const hasErrorMessage = !isUser && typeof errorMessage === 'string' && errorMessage.trim().length > 0;
   const shouldShowStreamingPlaceholder = isAssistantStreaming && !shouldShowThoughtSection && !assistantBodyContent;
+  // Thought containers keep a minimum width so the collapsible panel does not jitter while content streams in.
   const thoughtBubbleClassName = 'min-w-[220px] max-w-full rounded-[20px] border border-outline-200/80 bg-background-0/80 px-3 py-2 dark:border-outline-700/70 dark:bg-background-950/40';
 
   return (
@@ -187,7 +189,7 @@ const ChatMessageBubbleComponent = ({
                     {shouldAnimateThought ? (
                       <ThinkingPulse />
                     ) : (
-                      <MaterialSymbols name="psychology-alt" size={15} className="text-primary-500" />
+                      <MaterialSymbols name="psychology-alt" size="sm" className="text-primary-500" />
                     )}
                   </Box>
 
@@ -195,14 +197,14 @@ const ChatMessageBubbleComponent = ({
                     <Text className="text-xs font-semibold text-typography-900 dark:text-typography-100">
                       {thoughtLabel}
                     </Text>
-                    <Text className="mt-0.5 text-[11px] leading-4 text-typography-500 dark:text-typography-400">
+                    <Text className="mt-0.5 text-xs leading-4 text-typography-500 dark:text-typography-400">
                       {thoughtDescription}
                     </Text>
                   </Box>
 
                   <MaterialSymbols
                     name={isThoughtExpanded ? 'keyboard-arrow-up' : 'keyboard-arrow-down'}
-                    size={17}
+                    size="sm"
                     className="text-typography-500 dark:text-typography-400"
                   />
                 </Box>
@@ -249,7 +251,7 @@ const ChatMessageBubbleComponent = ({
 
           {hasErrorMessage ? (
             <Box className="mt-2 flex-row items-start gap-2 rounded-2xl bg-error-500/10 px-2.5 py-2 dark:bg-error-500/15">
-              <MaterialSymbols name="error-outline" size={16} className="mt-0.5 text-error-600 dark:text-error-300" />
+              <MaterialSymbols name="error-outline" size="sm" className="mt-0.5 text-error-600 dark:text-error-300" />
               <Text selectable className="min-w-0 flex-1 text-sm leading-5 text-error-800 dark:text-error-200">
                 {errorMessage}
               </Text>

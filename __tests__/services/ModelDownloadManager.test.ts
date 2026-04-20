@@ -11,6 +11,8 @@ import { getSystemMemorySnapshot } from '../../src/services/SystemMetricsService
 import { backgroundTaskService } from '../../src/services/BackgroundTaskService';
 import { hardwareListenerService } from '../../src/services/HardwareListenerService';
 import { updateSettings } from '../../src/services/SettingsStore';
+import { notificationService } from '../../src/services/NotificationService';
+import { AppError } from '../../src/services/AppError';
 
 let logSpy: jest.SpyInstance;
 let errorSpy: jest.SpyInstance;
@@ -461,5 +463,133 @@ describe('ModelDownloadManager Basic', () => {
     const entry = useDownloadStore.getState().queue.find((model) => model.id === mockModel.id);
     expect(entry?.lifecycleStatus).toBe(LifecycleStatus.PAUSED);
     expect(entry?.resumeData).toEqual(expect.stringContaining('resume-data'));
+  });
+
+  it('extracts nested resumeData from persisted pause snapshots', async () => {
+    (FileSystem.createDownloadResumable as jest.Mock).mockReturnValue({
+      downloadAsync: jest.fn().mockResolvedValue({ status: 200 }),
+    });
+
+    useDownloadStore.setState({
+      queue: [{ ...mockModel, lifecycleStatus: LifecycleStatus.QUEUED }],
+      activeDownloadId: mockModel.id,
+    });
+
+    await expect(runDownloadModel({ resumeData: JSON.stringify({ resumeData: 'inner-resume' }) })).resolves.toBeUndefined();
+
+    expect(FileSystem.createDownloadResumable).toHaveBeenCalledWith(
+      'http://example.com/model.gguf',
+      expect.any(String),
+      {},
+      expect.any(Function),
+      'inner-resume',
+    );
+  });
+
+  it('omits Hugging Face auth headers when token is missing', async () => {
+    (huggingFaceTokenService.getToken as jest.Mock).mockResolvedValueOnce(null);
+
+    useDownloadStore.setState({
+      queue: [{ ...mockModel, lifecycleStatus: LifecycleStatus.QUEUED }],
+      activeDownloadId: mockModel.id,
+    });
+
+    await expect(runDownloadModel({
+      downloadUrl: 'https://huggingface.co/org/model/resolve/main/model.gguf',
+      accessState: ModelAccessState.AUTHORIZED,
+      isGated: true,
+    })).resolves.toBeUndefined();
+
+    expect(FileSystem.createDownloadResumable).toHaveBeenCalledWith(
+      'https://huggingface.co/org/model/resolve/main/model.gguf',
+      expect.any(String),
+      {},
+      expect.any(Function),
+      undefined,
+    );
+  });
+
+  it('sends storageFull error notification in background when download reports disk space low', async () => {
+    Object.defineProperty(AppState, 'currentState', {
+      configurable: true,
+      value: 'background',
+    });
+
+    const sendErrorSpy = jest.spyOn(notificationService, 'sendErrorNotification').mockResolvedValue(undefined as any);
+
+    (FileSystem.createDownloadResumable as jest.Mock).mockReturnValue({
+      downloadAsync: jest.fn().mockRejectedValue(new AppError('download_disk_space_low', 'DISK_SPACE_LOW')),
+      savable: () => ({ resumeData: 'resume-data' }),
+    });
+
+    useDownloadStore.setState({
+      queue: [{ ...mockModel, lifecycleStatus: LifecycleStatus.QUEUED }],
+      activeDownloadId: mockModel.id,
+    });
+
+    await expect(runDownloadModel({ lifecycleStatus: LifecycleStatus.QUEUED })).rejects.toMatchObject({
+      name: 'AppError',
+      code: 'download_disk_space_low',
+    });
+
+    expect(sendErrorSpy).toHaveBeenCalledWith({ modelName: 'model', reason: 'storageFull' });
+    sendErrorSpy.mockRestore();
+  });
+
+  it('sends verificationFailed error notification in background when checksum fails', async () => {
+    Object.defineProperty(AppState, 'currentState', {
+      configurable: true,
+      value: 'background',
+    });
+
+    const sendErrorSpy = jest.spyOn(notificationService, 'sendErrorNotification').mockResolvedValue(undefined as any);
+    const verifySpy = jest.spyOn(modelDownloadManager, 'verifyChecksum').mockRejectedValue(
+      new AppError('download_verification_failed', 'Checksum mismatch'),
+    );
+
+    (FileSystem.createDownloadResumable as jest.Mock).mockReturnValue({
+      downloadAsync: jest.fn().mockResolvedValue({ status: 200 }),
+      savable: () => ({ resumeData: 'resume-data' }),
+    });
+
+    useDownloadStore.setState({
+      queue: [{ ...mockModel, lifecycleStatus: LifecycleStatus.QUEUED }],
+      activeDownloadId: mockModel.id,
+    });
+
+    await expect(runDownloadModel({ lifecycleStatus: LifecycleStatus.QUEUED })).rejects.toMatchObject({
+      name: 'AppError',
+      code: 'download_verification_failed',
+    });
+
+    expect(sendErrorSpy).toHaveBeenCalledWith({ modelName: 'model', reason: 'verificationFailed' });
+    sendErrorSpy.mockRestore();
+    verifySpy.mockRestore();
+  });
+
+  it('sends connectionLost error notification in background on HTTP failures', async () => {
+    Object.defineProperty(AppState, 'currentState', {
+      configurable: true,
+      value: 'background',
+    });
+
+    const sendErrorSpy = jest.spyOn(notificationService, 'sendErrorNotification').mockResolvedValue(undefined as any);
+
+    (FileSystem.createDownloadResumable as jest.Mock).mockReturnValue({
+      downloadAsync: jest.fn().mockResolvedValue({ status: 500 }),
+      savable: () => ({ resumeData: 'resume-data' }),
+    });
+
+    useDownloadStore.setState({
+      queue: [{ ...mockModel, lifecycleStatus: LifecycleStatus.QUEUED }],
+      activeDownloadId: mockModel.id,
+    });
+
+    await expect(runDownloadModel({ lifecycleStatus: LifecycleStatus.QUEUED })).rejects.toMatchObject({
+      name: 'AppError',
+      code: 'download_http_error',
+    });
+    expect(sendErrorSpy).toHaveBeenCalledWith({ modelName: 'model', reason: 'connectionLost' });
+    sendErrorSpy.mockRestore();
   });
 });

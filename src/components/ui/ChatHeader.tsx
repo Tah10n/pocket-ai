@@ -15,12 +15,15 @@ interface ChatHeaderProps {
   title: string;
   presetLabel?: string;
   modelLabel?: string;
+  modelSelectable?: boolean;
   statusLabel?: string;
   statusTone?: 'neutral' | 'accent' | 'warning';
   canStartNewChat?: boolean;
   onStartNewChat?: () => void;
   onOpenPresetSelector?: () => void;
   canOpenPresetSelector?: boolean;
+  onOpenModelSelector?: () => void;
+  canOpenModelSelector?: boolean;
   onOpenModelControls?: () => void;
   canOpenModelControls?: boolean;
   onBack?: () => void;
@@ -58,12 +61,15 @@ export const ChatHeader = ({
   title,
   presetLabel,
   modelLabel,
+  modelSelectable = false,
   statusLabel,
   statusTone = 'neutral',
   canStartNewChat = true,
   onStartNewChat,
   onOpenPresetSelector,
   canOpenPresetSelector = true,
+  onOpenModelSelector,
+  canOpenModelSelector = true,
   onOpenModelControls,
   canOpenModelControls = true,
   onBack,
@@ -87,7 +93,7 @@ export const ChatHeader = ({
           <Box className="min-w-0 flex-1">
             <Text
               numberOfLines={2}
-              className={composeTextRole('screenTitle', 'text-[20px] leading-6')}
+              className={composeTextRole('screenTitle')}
             >
               {title}
             </Text>
@@ -139,6 +145,9 @@ export const ChatHeader = ({
                     label={modelLabel}
                     tone={isModelUnavailable ? 'warning' : 'neutral'}
                     leadingIconName={isModelUnavailable ? 'warning' : 'memory'}
+                    onPress={onOpenModelSelector}
+                    disabled={!canOpenModelSelector}
+                    trailingIconName={modelSelectable || Boolean(onOpenModelSelector) ? 'keyboard-arrow-down' : undefined}
                     className="min-w-0"
                     textClassName={modelTextClassName}
                   />

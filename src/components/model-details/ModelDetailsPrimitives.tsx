@@ -2,7 +2,7 @@ import React from 'react';
 import { Box } from '../ui/box';
 import { MaterialSymbols, type MaterialSymbolsProps } from '../ui/MaterialSymbols';
 import { ScreenCard } from '../ui/ScreenShell';
-import { Text } from '../ui/text';
+import { Text, composeTextRole } from '../ui/text';
 import { getDetailToneTokens, type ModelDetailsTone } from '@/utils/modelDetailsPresentation';
 
 export interface DetailValueCardProps {
@@ -38,20 +38,20 @@ export function DetailValueCard({
 
   return (
     <Box
-      className={`rounded-[18px] border px-4 ${compact ? 'py-3.5' : 'min-w-[148px] flex-1 py-4'} ${toneTokens.shellClassName}`}
+      className={`rounded-2xl border px-4 ${compact ? 'py-3' : 'min-w-[148px] flex-1 py-3.5'} ${toneTokens.shellClassName}`}
     >
       <Box className="flex-row items-start justify-between gap-3">
         <Box className="min-w-0 flex-1">
-          <Text className={`text-[10px] font-semibold uppercase tracking-wide ${toneTokens.labelClassName}`}>
+          <Text className={composeTextRole('eyebrow', toneTokens.labelClassName)}>
             {label}
           </Text>
-          <Text className={`mt-2 ${compact ? 'text-sm leading-6' : 'text-base'} font-bold ${toneTokens.valueClassName}`}>
+          <Text className={composeTextRole(compact ? 'body' : 'sectionTitle', `mt-2 ${toneTokens.valueClassName}`)}>
             {value}
           </Text>
         </Box>
         {iconName ? (
           <Box className={`h-10 w-10 items-center justify-center overflow-hidden rounded-2xl ${toneTokens.iconWrapClassName}`}>
-            <MaterialSymbols name={iconName} size={20} className={toneTokens.iconClassName} />
+            <MaterialSymbols name={iconName} size="lg" className={toneTokens.iconClassName} />
           </Box>
         ) : null}
       </Box>
@@ -69,9 +69,9 @@ export function SectionHeader({
   return (
     <Box className="mb-4 flex-row items-center gap-3">
       <Box className={`h-11 w-11 items-center justify-center overflow-hidden rounded-2xl ${toneTokens.iconWrapClassName}`}>
-        <MaterialSymbols name={iconName} size={20} className={toneTokens.iconClassName} />
+        <MaterialSymbols name={iconName} size="lg" className={toneTokens.iconClassName} />
       </Box>
-      <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">
+      <Text className={composeTextRole('sectionTitle')}>
         {title}
       </Text>
     </Box>

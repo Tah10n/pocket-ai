@@ -54,7 +54,7 @@ interface ScreenPressableCardProps extends React.ComponentProps<typeof Pressable
   dashed?: boolean;
 }
 
-function joinClassNames(...values: (string | undefined)[]) {
+export function joinClassNames(...values: (string | undefined | false)[]) {
   return values.filter(Boolean).join(' ');
 }
 
@@ -123,13 +123,13 @@ interface HeaderActionButtonProps {
 interface ScreenActionPillProps extends React.ComponentProps<typeof Pressable> {
   className?: string;
   tone?: 'primary' | 'soft';
-  size?: 'compact' | 'default' | 'prominent';
+  size?: 'sm' | 'md' | 'lg';
   children: React.ReactNode;
 }
 
 interface ScreenIconButtonProps extends React.ComponentProps<typeof Pressable> {
   iconName: MaterialSymbolsProps['name'];
-  iconSize?: number;
+  iconSize?: MaterialSymbolsProps['size'];
   size?: 'micro' | 'compact' | 'default';
   iconClassName?: string;
   className?: string;
@@ -381,7 +381,7 @@ export function HeaderTitleBlock({
 }: HeaderTitleBlockProps) {
   return (
     <Box className={joinClassNames('min-w-0 flex-1', className)}>
-      <Text numberOfLines={titleLines} className={composeTextRole('screenTitle', 'text-[22px] leading-7')}>
+      <Text numberOfLines={titleLines} className={composeTextRole('screenTitle', 'leading-7')}>
         {title}
       </Text>
       {subtitle ? (
@@ -456,7 +456,7 @@ export function HeaderBackButton({
 export function ScreenActionPill({
   className,
   tone = 'soft',
-  size = 'default',
+  size = 'md',
   children,
   disabled,
   accessibilityRole,
@@ -483,7 +483,7 @@ export function ScreenActionPill({
 
 export function ScreenIconButton({
   iconName,
-  iconSize = 18,
+  iconSize = 'md',
   size = 'default',
   iconClassName,
   className,
@@ -543,7 +543,7 @@ export function ScreenBadge({
   iconClassName,
   testID,
 }: ScreenBadgeProps) {
-  const iconSize = size === 'micro' ? 12 : 14;
+  const iconSize = size === 'micro' ? 'xs' : 'sm';
   const toneTokens = getBadgeToneTokens(tone);
 
   return (
@@ -589,7 +589,7 @@ export function ScreenChip({
   onPress,
   ...props
 }: ScreenChipProps) {
-  const iconSize = size === 'micro' ? 12 : 14;
+  const iconSize = size === 'micro' ? 'xs' : 'sm';
   const toneTokens = getBadgeToneTokens(tone);
   const content = (
     <>
@@ -670,10 +670,10 @@ export function ScreenTextField({
       : screenLayoutTokens.textFieldClassName;
   const inputBaseClassName = isMultiline
     ? isProminent
-      ? 'min-h-[320px] flex-1 px-4 py-4 text-[16px] leading-7 text-typography-900 dark:text-typography-100'
+      ? 'min-h-80 flex-1 px-4 py-4 text-base leading-7 text-typography-900 dark:text-typography-100'
       : 'min-h-40 px-3 py-3 text-base leading-6 text-typography-900 dark:text-typography-100'
     : isProminent
-      ? 'w-full min-h-6 px-0 py-3 text-[16px] leading-6 text-typography-900 dark:text-typography-100'
+      ? 'w-full min-h-6 px-0 py-3 text-base leading-6 text-typography-900 dark:text-typography-100'
       : 'min-h-0 h-full px-0 py-0 text-base text-typography-900 dark:text-typography-100';
 
   return (
@@ -727,8 +727,8 @@ export function ScreenInlineInput({
       className={joinClassNames(fieldShellClassName, className)}
       style={style}
     >
-      {leadingAccessory}
-      <Input className={joinClassNames(leadingAccessory ? 'ml-2' : undefined, screenLayoutTokens.inlineInputShellClassName)}>
+      {leadingAccessory ? <Box className="shrink-0">{leadingAccessory}</Box> : null}
+      <Input className={joinClassNames(screenLayoutTokens.inlineInputShellClassName, leadingAccessory ? 'ml-2' : undefined)}>
         <InputField
           {...props}
           testID={testID}
@@ -736,7 +736,7 @@ export function ScreenInlineInput({
           className={joinClassNames(inputBaseClassName, inputClassName)}
         />
       </Input>
-      {trailingAccessory}
+      {trailingAccessory ? <Box className="ml-2 shrink-0">{trailingAccessory}</Box> : null}
     </Box>
   );
 }

@@ -45,6 +45,7 @@ export type AutotuneResult = {
   bestStable?: AutotuneBestStableProfile;
   candidates: AutotuneCandidateReport[];
   restorationError?: string;
+  cancelled?: boolean;
 };
 
 let autotuneStorageInstance: MMKV | null = null;
@@ -152,13 +153,17 @@ export function readAutotuneResult({
 }
 
 export function writeAutotuneResult(result: AutotuneResult): void {
+  if (result.cancelled === true) {
+    // Cancelled runs should never be persisted.
+    return;
+  }
   const key = buildAutotuneKey({
     modelId: result.modelId,
     contextSize: result.contextSize,
     kvCacheType: result.kvCacheType,
   });
-  // restorationError is a transient runtime signal, never persisted.
-  const { restorationError: _restorationError, ...rest } = result;
+  // restorationError/cancelled are transient runtime signals, never persisted.
+  const { restorationError: _restorationError, cancelled: _cancelled, ...rest } = result;
   const persistable: AutotuneResult = {
     ...rest,
     nativeModuleVersion: result.nativeModuleVersion ?? getCurrentNativeModuleVersion(),

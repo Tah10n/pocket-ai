@@ -12,6 +12,17 @@
   "bugs": {
     "url": "https://github.com/Tah10n/pocket-ai/issues"
   },
+  "expo": {
+    "doctor": {
+      "reactNativeDirectoryCheck": {
+        "exclude": [
+          "react-native-background-actions",
+          "react-native-fs",
+          "react-native-vector-icons"
+        ]
+      }
+    }
+  },
   "keywords": [
     "react-native",
     "expo",
@@ -60,7 +71,7 @@
     "@react-native-community/slider": "5.1.2",
     "@react-navigation/bottom-tabs": "^7.0.0",
     "@react-navigation/native": "^7.0.0",
-    "@shopify/flash-list": "2.3.1",
+    "@shopify/flash-list": "2.0.2",
     "expo": "~55.0.15",
     "expo-blur": "~55.0.14",
     "expo-build-properties": "~55.0.12",
@@ -74,7 +85,6 @@
     "expo-image": "~55.0.8",
     "expo-keep-awake": "~55.0.6",
     "expo-linking": "~55.0.13",
-    "expo-modules-core": "~55.0.22",
     "expo-notifications": "~55.0.19",
     "expo-router": "~55.0.12",
     "expo-secure-store": "~55.0.13",
@@ -104,7 +114,7 @@
     "react-native-screens": "~4.23.0",
     "react-native-vector-icons": "^10.3.0",
     "react-native-web": "~0.21.0",
-    "react-native-worklets": "0.7.4",
+    "react-native-worklets": "0.7.2",
     "react-native-worklets-core": "^1.6.3",
     "tailwindcss": "~3.3.2",
     "zustand": "^5.0.11"

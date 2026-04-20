@@ -1,6 +1,6 @@
 import { useCallback, useMemo } from 'react';
 
-import { type ConversationIndexItem, toConversationIndexItem } from '../types/chat';
+import { buildConversationIndex, type ConversationIndexItem } from '../types/chat';
 import { useChatStore } from '../store/chatStore';
 
 const EMPTY_INDEX: ConversationIndexItem[] = [];
@@ -20,35 +20,7 @@ export function useConversationIndex(options: { enabled?: boolean; limit?: numbe
     if (!enabled || !threads) {
       return EMPTY_INDEX;
     }
-
-     const normalizedLimit = typeof limit === 'number' && Number.isFinite(limit)
-       ? Math.max(0, Math.round(limit))
-       : null;
-
-     if (normalizedLimit === 0) {
-       return EMPTY_INDEX;
-     }
-
-     if (normalizedLimit === 1) {
-       let mostRecent: ConversationIndexItem | null = null;
-       for (const thread of Object.values(threads)) {
-         const item = toConversationIndexItem(thread);
-         if (!mostRecent || item.updatedAt > mostRecent.updatedAt) {
-           mostRecent = item;
-         }
-       }
-
-       return mostRecent ? [mostRecent] : EMPTY_INDEX;
-     }
-
-    const items = Object.values(threads)
-      .map(toConversationIndexItem)
-      .sort((left, right) => right.updatedAt - left.updatedAt);
-
-    if (typeof normalizedLimit === 'number') {
-      return items.slice(0, normalizedLimit);
-    }
-
-    return items;
+    const index = buildConversationIndex(threads, { limit });
+    return index.length > 0 ? index : EMPTY_INDEX;
   }, [enabled, limit, threads]);
 }

@@ -15,7 +15,7 @@ import {
   deriveThreadTitle,
   normalizeConversationTitle,
   sanitizeHydratedThread,
-  toConversationIndexItem,
+  buildConversationIndex,
 } from '../types/chat';
 import { normalizeReasoningEffort } from '../types/reasoning';
 import { createInstrumentedStateStorage } from './persistStateStorage';
@@ -680,9 +680,7 @@ export const useChatStore = create<ChatStoreState>()(
         return activeThreadId ? threads[activeThreadId] ?? null : null;
       },
       getConversationIndex: () =>
-        Object.values(get().threads)
-          .map(toConversationIndexItem)
-          .sort((left, right) => right.updatedAt - left.updatedAt),
+        buildConversationIndex(get().threads),
     }),
     {
       name: 'chat-store',

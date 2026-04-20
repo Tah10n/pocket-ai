@@ -149,6 +149,41 @@ export function toConversationIndexItem(thread: ChatThread): ConversationIndexIt
   };
 }
 
+export function buildConversationIndex(
+  threads: Record<string, ChatThread>,
+  options: { limit?: number } = {},
+): ConversationIndexItem[] {
+  const limit = options.limit;
+  const normalizedLimit = typeof limit === 'number' && Number.isFinite(limit)
+    ? Math.max(0, Math.round(limit))
+    : null;
+
+  if (normalizedLimit === 0) {
+    return [];
+  }
+
+  if (normalizedLimit === 1) {
+    let mostRecent: ChatThread | null = null;
+    for (const thread of Object.values(threads)) {
+      if (!mostRecent || thread.updatedAt > mostRecent.updatedAt) {
+        mostRecent = thread;
+      }
+    }
+
+    return mostRecent ? [toConversationIndexItem(mostRecent)] : [];
+  }
+
+  const items = Object.values(threads)
+    .map(toConversationIndexItem)
+    .sort((left, right) => right.updatedAt - left.updatedAt);
+
+  if (typeof normalizedLimit === 'number') {
+    return items.slice(0, normalizedLimit);
+  }
+
+  return items;
+}
+
 export function sanitizeHydratedThread(thread: ChatThread): ChatThread {
   const sanitizedMessages = thread.messages.filter(
     (message) => message.state !== 'streaming',

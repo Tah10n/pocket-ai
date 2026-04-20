@@ -24,6 +24,57 @@ import { getSettings, subscribeSettings } from './SettingsStore';
 import { backgroundTaskService } from './BackgroundTaskService';
 import { notificationService, type DownloadErrorReason } from './NotificationService';
 
+function safeSerializeResumeSnapshotValue(
+  snapshot: unknown,
+  {
+    modelId,
+    scope,
+  }: {
+    modelId: string;
+    scope: string;
+  },
+): string | undefined {
+  if (!snapshot) {
+    return undefined;
+  }
+
+  if (typeof snapshot === 'string') {
+    return snapshot;
+  }
+
+  try {
+    return JSON.stringify(snapshot);
+  } catch (error) {
+    console.warn(`[ModelDownloadManager] Failed to serialize resume snapshot for ${modelId} (${scope})`, error);
+    return undefined;
+  }
+}
+
+function safeSerializeResumeSnapshot(
+  resumable: { savable?: () => unknown } | null | undefined,
+  {
+    modelId,
+    scope,
+  }: {
+    modelId: string;
+    scope: string;
+  },
+): string | undefined {
+  if (!resumable || typeof resumable.savable !== 'function') {
+    return undefined;
+  }
+
+  let snapshot: unknown;
+  try {
+    snapshot = resumable.savable();
+  } catch (error) {
+    console.warn(`[ModelDownloadManager] Failed to snapshot resumable state for ${modelId} (${scope})`, error);
+    return undefined;
+  }
+
+  return safeSerializeResumeSnapshotValue(snapshot, { modelId, scope });
+}
+
 type ActiveDownloadJob = {
   modelId: string;
   jobToken: number;
@@ -405,22 +456,10 @@ export class ModelDownloadManager {
       if (!result) {
         console.warn(`[ModelDownloadManager] downloadAsync returned undefined. Marking ${model.id} as paused to avoid a stuck queue.`);
 
-        let resumeSnapshot: unknown | null = null;
-        try {
-          resumeSnapshot = typeof resumable.savable === 'function' ? resumable.savable() : null;
-        } catch (error) {
-          console.warn(`[ModelDownloadManager] Failed to snapshot resumable state for ${model.id}`, error);
-        }
-
         const updates: Partial<ModelMetadata> = { lifecycleStatus: LifecycleStatus.PAUSED };
-        if (resumeSnapshot) {
-          try {
-            updates.resumeData = typeof resumeSnapshot === 'string'
-              ? resumeSnapshot
-              : JSON.stringify(resumeSnapshot);
-          } catch (error) {
-            console.warn(`[ModelDownloadManager] Failed to serialize resume snapshot for ${model.id}`, error);
-          }
+        const resumeData = safeSerializeResumeSnapshot(resumable as any, { modelId: model.id, scope: 'downloadAsync(undefined)' });
+        if (resumeData) {
+          updates.resumeData = resumeData;
         }
 
         updateModelInQueue(model.id, updates);
@@ -534,9 +573,9 @@ export class ModelDownloadManager {
 
       // If it fails, save resume data if we can and keep the entry in the queue as "available".
       // This avoids infinite retry loops while still allowing the user to retry and resume later.
-      const savable = resumable ? resumable.savable() : null;
+      const resumeData = safeSerializeResumeSnapshot(resumable as any, { modelId: model.id, scope: 'downloadError' });
       updateModelInQueue(model.id, {
-        resumeData: savable ? JSON.stringify(savable) : undefined,
+        resumeData,
         lifecycleStatus: LifecycleStatus.AVAILABLE,
       });
       setActiveDownload(null);
@@ -672,8 +711,9 @@ export class ModelDownloadManager {
     } finally {
       if (this.isCurrentJob(modelId, jobToken)) {
         const updates: Partial<ModelMetadata> = { lifecycleStatus: LifecycleStatus.PAUSED };
-        if (resumeSnapshot) {
-          updates.resumeData = JSON.stringify(resumeSnapshot);
+        const resumeData = safeSerializeResumeSnapshotValue(resumeSnapshot, { modelId, scope: 'pauseDownload' });
+        if (resumeData) {
+          updates.resumeData = resumeData;
         }
 
         updateModelInQueue(modelId, updates);

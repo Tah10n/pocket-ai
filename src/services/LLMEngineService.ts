@@ -20,8 +20,6 @@ import {
 } from '../types/models';
 import { LlmChatCompletionOptions, LlmChatMessage } from '../types/chat';
 import { registry } from './LocalStorageRegistry';
-import { getModelsDir } from './FileSystemSetup';
-import { safeJoinModelPath } from '../utils/safeFilePath';
 import {
   getModelLoadParametersForModel,
   type ModelLoadParameters,
@@ -61,6 +59,27 @@ import { inferenceBackendService } from './InferenceBackendService';
 import { resolveInferenceProfileCandidates, type ResolvedInferenceProfile } from './resolveInferenceProfile';
 import { readAutotuneResult } from './InferenceAutotuneStore';
 import { readLastGoodInferenceProfile, writeLastGoodInferenceProfile } from './InferenceLastGoodProfileStore';
+import {
+  areThinkingCapabilitySnapshotsEqual,
+  canAutoUseSafeLoadProfile,
+  getErrorMessageText,
+  getModelInfoString,
+  isConversationAlternationError,
+  isProbableMemoryFailure,
+  readNumericMetadata,
+  shouldHardBlockSafeLoad,
+} from './LLMEngineService.helpers';
+import { buildEngineDiagnosticsSnapshot } from './LLMEngineService.diagnostics';
+import {
+  hasNpuRuntimeSignal as hasNpuRuntimeSignalHelper,
+  resolveBackendMode as resolveBackendModeHelper,
+  resolveBackendTelemetry,
+} from './LLMEngineService.backend';
+import { resolveModelFilePathOrThrow } from './LLMEngineService.modelFile';
+import {
+  resolveAutoSafeLoadProfileOrThrowWarning,
+  throwIfSafeLoadOnlyFitsAtMinimumContext,
+} from './LLMEngineService.safeLoad';
 
 export interface LoadModelOptions {
   forceReload?: boolean;
@@ -91,172 +110,6 @@ type CalibrationSession = {
   afterUnloadSnapshot: SystemMemorySnapshot | null;
   didRecordSuccess: boolean;
 };
-
-function getErrorMessageText(error: unknown): string {
-  if (error instanceof Error) {
-    return error.message;
-  }
-
-  if (typeof error === 'string') {
-    return error;
-  }
-
-  if (error && typeof error === 'object' && 'message' in error && typeof (error as { message?: unknown }).message === 'string') {
-    return (error as { message: string }).message;
-  }
-
-  return '';
-}
-
-function isConversationAlternationError(error: unknown): boolean {
-  const message = getErrorMessageText(error);
-  return /Conversation roles must alternate user\/assistant/i.test(message);
-}
-
-function isProbableMemoryFailure(error: unknown): boolean {
-  const message = getErrorMessageText(error).toLowerCase();
-  if (message.length === 0) {
-    return false;
-  }
-
-  return (
-    message.includes('out of memory')
-    || message.includes('oom')
-    || message.includes('not enough memory')
-    || message.includes('insufficient memory')
-    || message.includes('bad alloc')
-    || message.includes('cannot allocate memory')
-    || message.includes('malloc')
-    || message.includes('std::bad_alloc')
-    || message.includes('failed to allocate')
-  );
-}
-
-function shouldHardBlockSafeLoad({
-  memoryFit,
-  availableBudgetBytes,
-  lowMemorySignal,
-}: {
-  memoryFit: MemoryFitResult | null | undefined;
-  availableBudgetBytes: number | null;
-  lowMemorySignal: boolean;
-}): boolean {
-  if (!memoryFit) {
-    return false;
-  }
-
-  if (!Number.isFinite(memoryFit.requiredBytes) || memoryFit.requiredBytes <= 0) {
-    return false;
-  }
-
-  if (!Number.isFinite(memoryFit.budget.totalMemoryBytes) || memoryFit.budget.totalMemoryBytes <= 0) {
-    return false;
-  }
-
-  if (memoryFit.decision !== 'likely_oom') {
-    return false;
-  }
-
-  if (memoryFit.confidence === 'high') {
-    return true;
-  }
-
-  if (lowMemorySignal) {
-    return true;
-  }
-
-  if (!Number.isFinite(availableBudgetBytes) || availableBudgetBytes === null || availableBudgetBytes <= 0) {
-    return false;
-  }
-
-  return memoryFit.requiredBytes >= availableBudgetBytes;
-}
-
-function canAutoUseSafeLoadProfile({
-  memoryFit,
-  availableBudgetBytes,
-  lowMemorySignal,
-}: {
-  memoryFit: MemoryFitResult | null | undefined;
-  availableBudgetBytes: number | null;
-  lowMemorySignal: boolean;
-}): boolean {
-  if (!memoryFit) {
-    return false;
-  }
-
-  if (lowMemorySignal) {
-    return false;
-  }
-
-  if (!Number.isFinite(memoryFit.requiredBytes) || memoryFit.requiredBytes <= 0) {
-    return false;
-  }
-
-  if (!Number.isFinite(availableBudgetBytes) || availableBudgetBytes === null || availableBudgetBytes <= 0) {
-    return false;
-  }
-
-  return memoryFit.requiredBytes <= availableBudgetBytes;
-}
-
-function getModelInfoString(modelInfo: unknown, key: string): string | null {
-  if (!modelInfo || typeof modelInfo !== 'object') {
-    return null;
-  }
-
-  const value = (modelInfo as Record<string, unknown>)[key];
-  return typeof value === 'string' ? value.trim() : null;
-}
-
-function toFinitePositiveNumber(value: unknown): number | null {
-  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
-    return value;
-  }
-
-  if (typeof value === 'string') {
-    const trimmed = value.trim();
-    if (trimmed.length > 0) {
-      const parsed = Number(trimmed);
-      if (Number.isFinite(parsed) && parsed > 0) {
-        return parsed;
-      }
-    }
-  }
-
-  return null;
-}
-
-function readNumericMetadata(metadata: Record<string, unknown> | undefined, keys: string[]): number | null {
-  if (!metadata) {
-    return null;
-  }
-
-  for (const key of keys) {
-    const value = toFinitePositiveNumber(metadata[key]);
-    if (value !== null) {
-      return value;
-    }
-  }
-
-  return null;
-}
-
-function areThinkingCapabilitySnapshotsEqual(
-  left: ModelThinkingCapabilitySnapshot | undefined,
-  right: ModelThinkingCapabilitySnapshot,
-): boolean {
-  if (!left) {
-    return false;
-  }
-
-  return (
-    left.supportsThinking === right.supportsThinking
-    && left.canDisableThinking === right.canDisableThinking
-    && left.thinkingStartTag === right.thinkingStartTag
-    && left.thinkingEndTag === right.thinkingEndTag
-  );
-}
 
 function normalizeArchitecturePrefix(value: unknown): string | null {
   if (typeof value !== 'string') {
@@ -1578,39 +1431,34 @@ class LLMEngineService {
   }
 
   private buildDiagnosticsSnapshot(): NonNullable<EngineState['diagnostics']> {
-    return {
-      backendMode: this.activeBackendMode,
-      backendDevices: [...this.activeBackendDevices],
-      reasonNoGPU: this.activeBackendReasonNoGpu ?? undefined,
-      systemInfo: this.activeBackendSystemInfo ?? undefined,
-      androidLib: this.activeBackendAndroidLib ?? undefined,
-      requestedGpuLayers: this.requestedGpuLayers ?? undefined,
-      loadedGpuLayers: this.activeGpuLayers ?? undefined,
-      actualGpuAccelerated: this.actualGpuAccelerated ?? undefined,
-      requestedBackendPolicy: this.requestedBackendPolicy ?? undefined,
-      effectiveBackendPolicy: this.effectiveBackendPolicy ?? undefined,
-      backendPolicyReasons: this.backendPolicyReasons.length > 0 ? [...this.backendPolicyReasons] : undefined,
-      backendInitAttempts: this.backendInitAttemptsSnapshot.length > 0
-        ? this.backendInitAttemptsSnapshot.map((attempt) => ({
-            ...attempt,
-            devices: Array.isArray(attempt.devices) ? [...attempt.devices] : undefined,
-          }))
-        : undefined,
-      initGpuLayers: this.initGpuLayers ?? undefined,
-      initDevices: Array.isArray(this.initDevices) ? [...this.initDevices] : undefined,
-      initCacheTypeK: this.initCacheTypeK ?? undefined,
-      initCacheTypeV: this.initCacheTypeV ?? undefined,
-      initFlashAttnType: this.initFlashAttnType ?? undefined,
-      initUseMmap: this.initUseMmap ?? undefined,
-      initUseMlock: this.initUseMlock ?? undefined,
-      initNParallel: this.initNParallel ?? undefined,
-      initNThreads: this.initNThreads ?? undefined,
-      initCpuMask: this.initCpuMask ?? undefined,
-      initCpuStrict: this.initCpuStrict ?? undefined,
-      initNBatch: this.initNBatch ?? undefined,
-      initNUbatch: this.initNUbatch ?? undefined,
-      initKvUnified: this.initKvUnified ?? undefined,
-    };
+    return buildEngineDiagnosticsSnapshot({
+      activeBackendMode: this.activeBackendMode,
+      activeBackendDevices: this.activeBackendDevices,
+      activeBackendReasonNoGpu: this.activeBackendReasonNoGpu,
+      activeBackendSystemInfo: this.activeBackendSystemInfo,
+      activeBackendAndroidLib: this.activeBackendAndroidLib,
+      requestedGpuLayers: this.requestedGpuLayers,
+      activeGpuLayers: this.activeGpuLayers,
+      actualGpuAccelerated: this.actualGpuAccelerated,
+      requestedBackendPolicy: this.requestedBackendPolicy,
+      effectiveBackendPolicy: this.effectiveBackendPolicy,
+      backendPolicyReasons: this.backendPolicyReasons,
+      backendInitAttemptsSnapshot: this.backendInitAttemptsSnapshot,
+      initGpuLayers: this.initGpuLayers,
+      initDevices: this.initDevices,
+      initCacheTypeK: this.initCacheTypeK,
+      initCacheTypeV: this.initCacheTypeV,
+      initFlashAttnType: this.initFlashAttnType,
+      initUseMmap: this.initUseMmap,
+      initUseMlock: this.initUseMlock,
+      initNParallel: this.initNParallel,
+      initNThreads: this.initNThreads,
+      initCpuMask: this.initCpuMask,
+      initCpuStrict: this.initCpuStrict,
+      initNBatch: this.initNBatch,
+      initNUbatch: this.initNUbatch,
+      initKvUnified: this.initKvUnified,
+    });
   }
 
   private updateState(newState: EngineState) {
@@ -1662,33 +1510,11 @@ class LLMEngineService {
   }
 
   private hasNpuRuntimeSignal(context: LlamaContext): boolean {
-    const devices = Array.isArray(context.devices) ? context.devices : [];
-    const deviceText = devices.join(' ').toLowerCase();
-    const androidLib = typeof context.androidLib === 'string' ? context.androidLib.toLowerCase() : '';
-    const systemInfo = typeof context.systemInfo === 'string' ? context.systemInfo.toLowerCase() : '';
-
-    return (
-      devices.some((device) => typeof device === 'string' && device.startsWith('HTP'))
-      || deviceText.includes('hexagon')
-      || deviceText.includes('htp')
-      || deviceText.includes('qnn')
-      || androidLib.includes('hexagon')
-      || androidLib.includes('qnn')
-      || systemInfo.includes('hexagon')
-      || systemInfo.includes('qnn')
-    );
+    return hasNpuRuntimeSignalHelper(context);
   }
 
   private resolveBackendMode(context: LlamaContext): EngineBackendMode {
-    if (this.hasNpuRuntimeSignal(context)) {
-      return 'npu';
-    }
-
-    if (context.gpu) {
-      return 'gpu';
-    }
-
-    return 'cpu';
+    return resolveBackendModeHelper(context);
   }
 
   private captureBackendTelemetry(
@@ -1724,22 +1550,15 @@ class LLMEngineService {
         : initProfile?.backendMode === 'npu'
           ? 'npu'
           : null;
-    const hasNpuSignal = this.hasNpuRuntimeSignal(context);
-    let runtimeBackendMode = (resolvedProfileBackendMode ?? this.resolveBackendMode(context));
+    const telemetry = resolveBackendTelemetry({
+      context,
+      initProfileBackendMode: resolvedProfileBackendMode,
+      resolvedInitGpuLayers,
+      resolvedProfileLayers,
+    });
 
-    // If we requested NPU but the runtime is clearly using a GPU, reflect that in diagnostics.
-    if (runtimeBackendMode === 'npu' && !hasNpuSignal && context.gpu) {
-      runtimeBackendMode = 'gpu';
-    }
-
-    const runtimeAccelerationEnabled = runtimeBackendMode === 'npu'
-      ? (Boolean(context.gpu) || (hasNpuSignal && reasonNoGPU.length === 0))
-      : Boolean(context.gpu);
-
-    this.activeBackendMode = runtimeBackendMode;
-    this.actualGpuAccelerated = runtimeBackendMode !== 'cpu'
-      && runtimeAccelerationEnabled
-      && (resolvedInitGpuLayers ?? resolvedProfileLayers) > 0;
+    this.activeBackendMode = telemetry.activeBackendMode;
+    this.actualGpuAccelerated = telemetry.actualGpuAccelerated;
   }
 
   /**
@@ -1818,25 +1637,7 @@ class LLMEngineService {
         lastError: undefined,
       });
 
-      const modelsDir = getModelsDir();
-      if (!modelsDir) {
-        throw new AppError('action_failed', 'Local file system is unavailable on this platform.', {
-          details: { modelId },
-        });
-      }
-
-      const modelPath = safeJoinModelPath(modelsDir, localPath);
-      if (!modelPath) {
-        throw new AppError('action_failed', `Invalid model file path for ${modelId}`, {
-          details: { modelId },
-        });
-      }
-      const fileInfo = await FileSystem.getInfoAsync(modelPath);
-      if (!fileInfo.exists) {
-        throw new AppError('download_file_missing', `Model file not found at ${modelPath}`, {
-          details: { modelId, modelPath },
-        });
-      }
+      const { modelPath, fileInfo } = await resolveModelFilePathOrThrow({ modelId, localPath });
 
       const llama = requireLlamaModule();
       llamaModule = llama;
@@ -2210,67 +2011,41 @@ class LLMEngineService {
           )
             ? Math.round(modelMaxContextTokens)
             : null;
-          const effectiveContextCeilingTokens = modelContextCeilingTokens === null
-            ? configuredContextCeilingTokens
-            : Math.min(configuredContextCeilingTokens, modelContextCeilingTokens);
 
-          if (
-            safeLoadProfile.contextTokens === MIN_CONTEXT_WINDOW_TOKENS
-            && effectiveContextCeilingTokens > MIN_CONTEXT_WINDOW_TOKENS
-          ) {
-            this.persistHardBlockedMemoryFit(modelId, 'high');
-            throw new AppError(
-              'model_load_blocked',
-              'Loading is disabled for this model because it only fits at the minimum context window.',
-              {
-                details: {
-                  modelId,
-                  requestedLoadProfile: {
-                    contextTokens: resolvedContextSize,
-                    gpuLayers: requestedGpuLayers,
-                  },
-                  safeLoadProfile,
-                  safeMemoryFit,
-                  memoryFit,
-                },
-              },
-            );
-          }
+          throwIfSafeLoadOnlyFitsAtMinimumContext({
+            modelId,
+            resolvedContextSize,
+            requestedGpuLayers,
+            safeLoadProfile,
+            safeMemoryFit,
+            memoryFit,
+            configuredContextCeilingTokens,
+            modelContextCeilingTokens,
+            onHardBlock: () => this.persistHardBlockedMemoryFit(modelId, 'high'),
+          });
         }
 
-        if (!allowUnsafeMemoryLoad && exceedsEffectiveBudget) {
-          shouldAutoUseSafeLoadProfile = canAutoUseSafeLoadProfile({
-            memoryFit: safeMemoryFit ?? undefined,
-            availableBudgetBytes,
-            lowMemorySignal,
-          });
+        shouldAutoUseSafeLoadProfile = resolveAutoSafeLoadProfileOrThrowWarning({
+          modelId,
+          resolvedContextSize,
+          requestedGpuLayers,
+          allowUnsafeMemoryLoad,
+          exceedsEffectiveBudget,
+          memoryFit,
+          safeLoadProfile,
+          safeMemoryFit,
+          availableBudgetBytes,
+          lowMemorySignal,
+          overBudgetRatio,
+        });
 
-          if (shouldAutoUseSafeLoadProfile) {
-            if (initDiagnostics) {
-              initDiagnostics = {
-                ...initDiagnostics,
-                safeLoadProfile,
-                safeMemoryFit: safeMemoryFit ?? undefined,
-                autoSafeLoadProfile: true,
-              };
-            }
-          } else {
-            throw new AppError('model_memory_warning', 'Model may not fit in memory.', {
-              details: {
-                modelId,
-                decision: memoryFit.decision,
-                confidence: memoryFit.confidence,
-                overBudgetRatio,
-                memoryFit,
-                safeLoadProfile,
-                safeMemoryFit: safeMemoryFit ?? undefined,
-                requestedLoadProfile: {
-                  contextTokens: resolvedContextSize,
-                  gpuLayers: requestedGpuLayers,
-                },
-              },
-            });
-          }
+        if (shouldAutoUseSafeLoadProfile && initDiagnostics) {
+          initDiagnostics = {
+            ...initDiagnostics,
+            safeLoadProfile,
+            safeMemoryFit: safeMemoryFit ?? undefined,
+            autoSafeLoadProfile: true,
+          };
         }
       }
 

@@ -50,6 +50,7 @@ jest.mock('../../src/store/downloadStore', () => ({
 jest.mock('../../src/services/LLMEngineService', () => ({
   llmEngineService: {
     ensurePersistedCapabilitySnapshot: jest.fn().mockReturnValue(null),
+    getState: jest.fn(),
     load: jest.fn().mockResolvedValue(undefined),
   },
 }));
@@ -77,6 +78,7 @@ import { getModelDownloadManager } from '../../src/services/ModelDownloadManager
 import { registry } from '../../src/services/LocalStorageRegistry';
 import { clearLegacyChatHistory, getChatHistoryEntries, getSettings, updateSettings } from '../../src/services/SettingsStore';
 import * as FileSystem from 'expo-file-system/legacy';
+import { EngineStatus } from '../../src/types/models';
 
 describe('AppBootstrap', () => {
   beforeEach(() => {
@@ -85,6 +87,13 @@ describe('AppBootstrap', () => {
     mockMergeImportedThreads.mockReturnValue(0);
     mockPruneExpiredThreads.mockReset();
     mockPruneExpiredThreads.mockReturnValue(0);
+
+    (llmEngineService.getState as jest.Mock).mockReturnValue({
+      status: EngineStatus.IDLE,
+      activeModelId: undefined,
+      loadProgress: 0,
+      lastError: undefined,
+    });
   });
 
   it('restores the persisted active model during critical bootstrap when the file is still available', async () => {
@@ -111,6 +120,113 @@ describe('AppBootstrap', () => {
 
       expect(llmEngineService.load).toHaveBeenCalledWith('author/model-q4', { preferLastWorkingProfile: true });
       expect(updateSettings).not.toHaveBeenCalledWith({ activeModelId: null });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('does not override a newer user-selected model when deferred bootstrap restore fires', async () => {
+    jest.useFakeTimers();
+    try {
+      (getSettings as jest.Mock).mockReturnValue({
+        language: 'en',
+        activePresetId: null,
+        activeModelId: 'author/model-a',
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 2048,
+        theme: 'system',
+        chatRetentionDays: null,
+      });
+      (registry.getModel as jest.Mock).mockReturnValue({
+        id: 'author/model-a',
+        localPath: 'author_model-a.gguf',
+      });
+
+      (llmEngineService.getState as jest.Mock).mockReturnValue({
+        status: EngineStatus.INITIALIZING,
+        activeModelId: 'author/model-b',
+        loadProgress: 0.2,
+      });
+
+      await bootstrapAppCritical();
+      jest.runAllTimers();
+      await Promise.resolve();
+
+      expect(llmEngineService.load).not.toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('skips deferred bootstrap restore when engine is already ready with a different model', async () => {
+    jest.useFakeTimers();
+    try {
+      (getSettings as jest.Mock).mockReturnValue({
+        language: 'en',
+        activePresetId: null,
+        activeModelId: 'author/model-a',
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 2048,
+        theme: 'system',
+        chatRetentionDays: null,
+      });
+      (registry.getModel as jest.Mock).mockReturnValue({
+        id: 'author/model-a',
+        localPath: 'author_model-a.gguf',
+      });
+
+      (llmEngineService.getState as jest.Mock).mockReturnValue({
+        status: EngineStatus.READY,
+        activeModelId: 'author/model-b',
+        loadProgress: 1,
+      });
+
+      await bootstrapAppCritical();
+      jest.runAllTimers();
+      await Promise.resolve();
+
+      expect(llmEngineService.load).not.toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('skips deferred bootstrap restore when settings activeModelId changed after scheduling', async () => {
+    jest.useFakeTimers();
+    try {
+      (getSettings as jest.Mock)
+        .mockReturnValueOnce({
+          language: 'en',
+          activePresetId: null,
+          activeModelId: 'author/model-a',
+          temperature: 0.7,
+          topP: 0.9,
+          maxTokens: 2048,
+          theme: 'system',
+          chatRetentionDays: null,
+        })
+        .mockReturnValueOnce({
+          language: 'en',
+          activePresetId: null,
+          activeModelId: 'author/model-b',
+          temperature: 0.7,
+          topP: 0.9,
+          maxTokens: 2048,
+          theme: 'system',
+          chatRetentionDays: null,
+        });
+      (registry.getModel as jest.Mock).mockReturnValue({
+        id: 'author/model-a',
+        localPath: 'author_model-a.gguf',
+      });
+
+      await bootstrapAppCritical();
+      jest.runAllTimers();
+      await Promise.resolve();
+
+      expect(llmEngineService.load).not.toHaveBeenCalled();
     } finally {
       jest.useRealTimers();
     }

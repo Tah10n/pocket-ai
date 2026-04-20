@@ -1,5 +1,5 @@
 import { ChatThread } from '../../src/types/chat';
-import { getThreadInferenceWindow, useChatStore } from '../../src/store/chatStore';
+import { findMostRecentThreadId, getThreadInferenceWindow, useChatStore } from '../../src/store/chatStore';
 import { storage } from '../../src/store/storage';
 
 function buildThread(id: string, updatedAt: number): ChatThread {
@@ -38,6 +38,16 @@ describe('chatStore', () => {
   beforeEach(() => {
     useChatStore.setState({ threads: {}, activeThreadId: null });
     storage.remove('chat-store');
+  });
+
+  it('findMostRecentThreadId returns the newest thread id without sorting', () => {
+    const threads = {
+      a: buildThread('a', 10),
+      b: buildThread('b', 20),
+      c: buildThread('c', 5),
+    };
+
+    expect(findMostRecentThreadId(threads)).toBe('b');
   });
 
   it('creates a thread and conversation index entry', () => {
@@ -666,6 +676,59 @@ describe('chatStore', () => {
     expect(useChatStore.getState().getThread(staleThread.id)).toBeNull();
     expect(useChatStore.getState().getThread(activeOldThread.id)).toEqual(activeOldThread);
     expect(useChatStore.getState().getThread(recentThread.id)).toEqual(recentThread);
+  });
+
+  it('moves activeThreadId to the most recent remaining thread when pruning runs with a missing activeThreadId', () => {
+    const now = 100 * 24 * 60 * 60 * 1000;
+    const staleThread = buildThread('thread-stale', now - 95 * 24 * 60 * 60 * 1000);
+    const recentThread = buildThread('thread-recent', now - 10 * 24 * 60 * 60 * 1000);
+
+    useChatStore.setState({
+      threads: {
+        [staleThread.id]: staleThread,
+        [recentThread.id]: recentThread,
+      },
+      activeThreadId: 'missing-thread',
+    });
+
+    const deletedCount = useChatStore.getState().pruneExpiredThreads(90, now);
+
+    expect(deletedCount).toBe(1);
+    expect(useChatStore.getState().activeThreadId).toBe(recentThread.id);
+  });
+
+  it('selects the most recent imported thread when merging into an empty store', () => {
+    const importedA = buildThread('import-a', 10);
+    const importedB = buildThread('import-b', 20);
+
+    const importedCount = useChatStore.getState().mergeImportedThreads([importedA, importedB]);
+
+    expect(importedCount).toBe(2);
+    expect(useChatStore.getState().activeThreadId).toBe(importedB.id);
+  });
+
+  it('rehydrates to the most recent thread when persisted activeThreadId is missing', async () => {
+    const older = buildThread('thread-older', 10);
+    const newer = buildThread('thread-newer', 20);
+
+    storage.set(
+      'chat-store',
+      JSON.stringify({
+        state: {
+          threads: {
+            [older.id]: older,
+            [newer.id]: newer,
+          },
+          activeThreadId: 'missing-thread',
+        },
+        version: 0,
+      }),
+    );
+
+    useChatStore.setState({ threads: {}, activeThreadId: null });
+    await useChatStore.persist.rehydrate();
+
+    expect(useChatStore.getState().activeThreadId).toBe(newer.id);
   });
 
   it('persists and rehydrates a saved thread', async () => {

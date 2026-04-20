@@ -109,6 +109,20 @@ export function getExpiredThreadIds(
     .map((thread) => thread.id);
 }
 
+export function findMostRecentThreadId(threads: Record<string, ChatThread>): string | null {
+  let bestId: string | null = null;
+  let bestUpdatedAt = -Infinity;
+
+  for (const thread of Object.values(threads)) {
+    if (!bestId || thread.updatedAt > bestUpdatedAt) {
+      bestId = thread.id;
+      bestUpdatedAt = thread.updatedAt;
+    }
+  }
+
+  return bestId;
+}
+
 export const useChatStore = create<ChatStoreState>()(
   persist(
     (set, get) => ({
@@ -185,7 +199,7 @@ export const useChatStore = create<ChatStoreState>()(
           const nextActiveThreadId =
             state.activeThreadId && nextThreads[state.activeThreadId]
               ? state.activeThreadId
-              : Object.values(nextThreads).sort((left, right) => right.updatedAt - left.updatedAt)[0]?.id ?? null;
+              : findMostRecentThreadId(nextThreads);
 
           return {
             threads: nextThreads,
@@ -215,7 +229,7 @@ export const useChatStore = create<ChatStoreState>()(
           const nextActiveThreadId =
             state.activeThreadId && nextThreads[state.activeThreadId]
               ? state.activeThreadId
-              : Object.values(nextThreads).sort((left, right) => right.updatedAt - left.updatedAt)[0]?.id ?? null;
+              : findMostRecentThreadId(nextThreads);
 
           return {
             threads: nextThreads,
@@ -368,7 +382,7 @@ export const useChatStore = create<ChatStoreState>()(
           const nextActiveThreadId =
             state.activeThreadId !== threadId
               ? state.activeThreadId
-              : Object.values(nextThreads).sort((left, right) => right.updatedAt - left.updatedAt)[0]?.id ?? null;
+              : findMostRecentThreadId(nextThreads);
 
           return {
             threads: nextThreads,
@@ -720,10 +734,7 @@ export const useChatStore = create<ChatStoreState>()(
         state.threads = sanitizedThreads;
 
         if (state.activeThreadId && !sanitizedThreads[state.activeThreadId]) {
-          const latestThread = Object.values(sanitizedThreads).sort(
-            (left, right) => right.updatedAt - left.updatedAt,
-          )[0];
-          state.activeThreadId = latestThread?.id ?? null;
+          state.activeThreadId = findMostRecentThreadId(sanitizedThreads);
         }
       },
     },

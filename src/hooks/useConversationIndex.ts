@@ -21,12 +21,32 @@ export function useConversationIndex(options: { enabled?: boolean; limit?: numbe
       return EMPTY_INDEX;
     }
 
+     const normalizedLimit = typeof limit === 'number' && Number.isFinite(limit)
+       ? Math.max(0, Math.round(limit))
+       : null;
+
+     if (normalizedLimit === 0) {
+       return EMPTY_INDEX;
+     }
+
+     if (normalizedLimit === 1) {
+       let mostRecent: ConversationIndexItem | null = null;
+       for (const thread of Object.values(threads)) {
+         const item = toConversationIndexItem(thread);
+         if (!mostRecent || item.updatedAt > mostRecent.updatedAt) {
+           mostRecent = item;
+         }
+       }
+
+       return mostRecent ? [mostRecent] : EMPTY_INDEX;
+     }
+
     const items = Object.values(threads)
       .map(toConversationIndexItem)
       .sort((left, right) => right.updatedAt - left.updatedAt);
 
-    if (typeof limit === 'number' && Number.isFinite(limit)) {
-      return items.slice(0, Math.max(0, Math.round(limit)));
+    if (typeof normalizedLimit === 'number') {
+      return items.slice(0, normalizedLimit);
     }
 
     return items;

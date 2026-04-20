@@ -72,7 +72,8 @@ jobs:
           chmod +x android/gradlew
 
       - name: Build Android debug APK
-        run: ./android/gradlew app:assembleDebug
+        working-directory: android
+        run: ./gradlew app:assembleDebug
 
       - name: Run Android smoke check
         uses: reactivecircus/android-emulator-runner@v2
@@ -138,7 +139,8 @@ jobs:
           chmod +x android/gradlew
 
       - name: Build Android debug APK
-        run: ./android/gradlew app:assembleDebug
+        working-directory: android
+        run: ./gradlew app:assembleDebug
 
       - name: Run Android scenarios
         uses: reactivecircus/android-emulator-runner@v2

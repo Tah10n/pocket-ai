@@ -71,6 +71,9 @@ jobs:
           npx expo prebuild --platform android --no-install
           chmod +x android/gradlew
 
+      - name: Build Android debug APK
+        run: ./android/gradlew app:assembleDebug
+
       - name: Run Android smoke check
         uses: reactivecircus/android-emulator-runner@v2
         with:
@@ -81,7 +84,7 @@ jobs:
           disable-animations: true
           emulator-boot-timeout: 900
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none
-          script: npm run android:emulator
+          script: node ./scripts/android-smoke.js --emulator --skip-build --screenshot artifacts/android-emulator-smoke.png
 
       - name: Upload Android smoke artifacts
         if: always()
@@ -134,6 +137,9 @@ jobs:
           npx expo prebuild --platform android --no-install
           chmod +x android/gradlew
 
+      - name: Build Android debug APK
+        run: ./android/gradlew app:assembleDebug
+
       - name: Run Android scenarios
         uses: reactivecircus/android-emulator-runner@v2
         with:
@@ -144,7 +150,7 @@ jobs:
           disable-animations: true
           emulator-boot-timeout: 900
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none
-          script: npm run android:scenarios -- --emulator
+          script: npm run android:scenarios -- --emulator --skip-build
 
       - name: Upload Android scenario artifacts
         if: always()

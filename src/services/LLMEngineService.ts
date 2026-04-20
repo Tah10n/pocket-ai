@@ -4,7 +4,6 @@ import type {
   NativeCompletionResult,
   TokenData,
 } from 'llama.rn';
-import * as FileSystem from 'expo-file-system/legacy';
 import DeviceInfo from 'react-native-device-info';
 import { Platform } from 'react-native';
 import { hardwareListenerService } from './HardwareListenerService';
@@ -61,13 +60,11 @@ import { readAutotuneResult } from './InferenceAutotuneStore';
 import { readLastGoodInferenceProfile, writeLastGoodInferenceProfile } from './InferenceLastGoodProfileStore';
 import {
   areThinkingCapabilitySnapshotsEqual,
-  canAutoUseSafeLoadProfile,
   getErrorMessageText,
   getModelInfoString,
   isConversationAlternationError,
   isProbableMemoryFailure,
   readNumericMetadata,
-  shouldHardBlockSafeLoad,
 } from './LLMEngineService.helpers';
 import { buildEngineDiagnosticsSnapshot } from './LLMEngineService.diagnostics';
 import {
@@ -77,9 +74,8 @@ import {
 } from './LLMEngineService.backend';
 import { resolveModelFilePathOrThrow } from './LLMEngineService.modelFile';
 import {
-  resolveAutoSafeLoadProfileOrThrowWarning,
-  throwIfSafeLoadOnlyFitsAtMinimumContext,
-} from './LLMEngineService.safeLoad';
+  resolveSafeLoadPolicyOrThrow,
+} from './LLMEngineService.safeLoadPolicy';
 
 export interface LoadModelOptions {
   forceReload?: boolean;
@@ -1676,9 +1672,15 @@ class LLMEngineService {
       let memoryFit: MemoryFitResult | null = null;
       let safeLoadProfile: { contextTokens: number; gpuLayers: number } | null = null;
       let safeMemoryFit: MemoryFitResult | null = null;
-      let exceedsEffectiveBudget = false;
-      let availableBudgetBytes: number | null = null;
       let shouldAutoUseSafeLoadProfile = false;
+      let shouldUseSafeLoadProfile = false;
+      let finalContextSize = DEFAULT_CONTEXT_SIZE;
+      let gpuLayers = 0;
+      let shouldUseLowMemoryContextParams = false;
+      let validateSafeLoadBudgetOrThrow: ((input: {
+        predictedFitForLoad: MemoryFitResult | null;
+        requestedMemoryFit: MemoryFitResult | null;
+      }) => { unsafeMemoryBypassedHardBlock: boolean }) | null = null;
 
       let modelInfo: Record<string, unknown> | null = null;
       try {
@@ -1882,6 +1884,11 @@ class LLMEngineService {
           snapshot: systemMemorySnapshot ?? undefined,
         },
       });
+
+      // Default to the requested load profile. The safe-load policy (if it runs)
+      // may override these values.
+      finalContextSize = resolvedContextSize;
+      gpuLayers = requestedGpuLayers;
       const requestedCalibrationKey = verifiedFileSizeBytes !== null
         ? this.buildCalibrationKeyString({
           ggufMetadata,
@@ -1936,51 +1943,37 @@ class LLMEngineService {
           };
         }
 
-        const overBudgetRatio = memoryFit.effectiveBudgetBytes > 0
-          ? memoryFit.requiredBytes / memoryFit.effectiveBudgetBytes
-          : Number.POSITIVE_INFINITY;
-        const hasTrustedBudget = memoryFit.budget.totalMemoryBytes > 0;
         const lowMemorySignal = systemMemorySnapshot?.lowMemory ?? hardwareListenerService.getCurrentStatus().isLowMemory;
-        exceedsEffectiveBudget = (
-          memoryFit.requiredBytes > 0
-          && memoryFit.effectiveBudgetBytes > 0
-          && memoryFit.requiredBytes >= memoryFit.effectiveBudgetBytes
-        );
-        const shouldHardBlock = (
-          hasTrustedBudget
-          && memoryFit.decision === 'likely_oom'
-          && memoryFit.confidence === 'high'
-        );
-        availableBudgetBytes = systemMemorySnapshot
-          ? resolveConservativeAvailableMemoryBudget(systemMemorySnapshot)
+        const configuredContextCeilingTokens = (
+          typeof loadParams.contextSize === 'number'
+          && Number.isFinite(loadParams.contextSize)
+          && loadParams.contextSize > 0
+        )
+          ? Math.round(loadParams.contextSize)
+          : DEFAULT_CONTEXT_SIZE;
+        const modelContextCeilingTokens = (
+          typeof modelMaxContextTokens === 'number'
+          && Number.isFinite(modelMaxContextTokens)
+          && modelMaxContextTokens > 0
+        )
+          ? Math.round(modelMaxContextTokens)
           : null;
 
-        if (shouldHardBlock && !allowUnsafeMemoryLoad) {
-          this.persistHardBlockedMemoryFit(modelId, 'high');
-          throw new AppError('model_memory_insufficient', 'Not enough memory to load this model.', {
-            details: {
-              modelId,
-              modelSizeBytes: resolvedModelSizeBytes,
-              estimatedRuntimeBytes: memoryFit.requiredBytes,
-              totalMemoryBytes: resolvedTotalMemoryBytes,
-              availableMemoryBytes: systemMemorySnapshot?.availableBytes,
-              freeMemoryBytes: systemMemorySnapshot?.freeBytes,
-              thresholdBytes: systemMemorySnapshot?.thresholdBytes,
-              totalBudgetBytes: memoryFit.budget.totalMemoryBytes * FITS_IN_RAM_HEADROOM_RATIO,
-              availableBudgetBytes,
-              effectiveAvailableBudgetBytes: memoryFit.effectiveBudgetBytes,
-              lowMemory: lowMemorySignal,
-              allowUnsafeMemoryLoad,
-              overBudgetRatio,
-              decision: memoryFit.decision,
-              confidence: memoryFit.confidence,
-              memoryFit,
-            },
-          });
-        }
-
-        if (exceedsEffectiveBudget) {
-          ({ safeLoadProfile, safeMemoryFit } = this.resolveMaxSafeLoadProfile({
+        const safeLoadDecision = resolveSafeLoadPolicyOrThrow({
+          modelId,
+          allowUnsafeMemoryLoad,
+          memoryFit,
+          resolvedModelSizeBytes,
+          resolvedTotalMemoryBytes: typeof resolvedTotalMemoryBytes === 'number' && Number.isFinite(resolvedTotalMemoryBytes) && resolvedTotalMemoryBytes > 0
+            ? resolvedTotalMemoryBytes
+            : null,
+          systemMemorySnapshot,
+          lowMemorySignal,
+          resolvedContextSize,
+          requestedGpuLayers,
+          configuredContextCeilingTokens,
+          modelContextCeilingTokens,
+          computeSafeProfile: () => this.resolveMaxSafeLoadProfile({
             ggufMetadata,
             resolvedModelSizeBytes,
             verifiedFileSizeBytes,
@@ -1995,49 +1988,18 @@ class LLMEngineService {
             cacheTypeV,
             useMmap: requestedUseMmap,
             preferGpuLayers: requestedBackendPolicy === 'gpu' || requestedBackendPolicy === 'npu',
-          }));
-
-          const configuredContextCeilingTokens = (
-            typeof loadParams.contextSize === 'number'
-            && Number.isFinite(loadParams.contextSize)
-            && loadParams.contextSize > 0
-          )
-            ? Math.round(loadParams.contextSize)
-            : DEFAULT_CONTEXT_SIZE;
-          const modelContextCeilingTokens = (
-            typeof modelMaxContextTokens === 'number'
-            && Number.isFinite(modelMaxContextTokens)
-            && modelMaxContextTokens > 0
-          )
-            ? Math.round(modelMaxContextTokens)
-            : null;
-
-          throwIfSafeLoadOnlyFitsAtMinimumContext({
-            modelId,
-            resolvedContextSize,
-            requestedGpuLayers,
-            safeLoadProfile,
-            safeMemoryFit,
-            memoryFit,
-            configuredContextCeilingTokens,
-            modelContextCeilingTokens,
-            onHardBlock: () => this.persistHardBlockedMemoryFit(modelId, 'high'),
-          });
-        }
-
-        shouldAutoUseSafeLoadProfile = resolveAutoSafeLoadProfileOrThrowWarning({
-          modelId,
-          resolvedContextSize,
-          requestedGpuLayers,
-          allowUnsafeMemoryLoad,
-          exceedsEffectiveBudget,
-          memoryFit,
-          safeLoadProfile,
-          safeMemoryFit,
-          availableBudgetBytes,
-          lowMemorySignal,
-          overBudgetRatio,
+          }),
+          onHardBlock: (confidence) => this.persistHardBlockedMemoryFit(modelId, confidence),
         });
+
+        safeLoadProfile = safeLoadDecision.safeLoadProfile;
+        safeMemoryFit = safeLoadDecision.safeMemoryFit;
+        shouldAutoUseSafeLoadProfile = safeLoadDecision.shouldAutoUseSafeLoadProfile;
+        shouldUseSafeLoadProfile = safeLoadDecision.shouldUseSafeLoadProfile;
+        finalContextSize = safeLoadDecision.finalContextSize;
+        gpuLayers = safeLoadDecision.gpuLayers;
+        shouldUseLowMemoryContextParams = safeLoadDecision.shouldUseLowMemoryContextParams;
+        validateSafeLoadBudgetOrThrow = safeLoadDecision.validateBudgetOrThrow;
 
         if (shouldAutoUseSafeLoadProfile && initDiagnostics) {
           initDiagnostics = {
@@ -2049,24 +2011,8 @@ class LLMEngineService {
         }
       }
 
-      const shouldUseSafeLoadProfile = Boolean(
-        (allowUnsafeMemoryLoad || shouldAutoUseSafeLoadProfile)
-        && memoryFit
-        && exceedsEffectiveBudget,
-      );
-      const resolvedSafeLoadProfile = safeLoadProfile ?? { contextTokens: MIN_CONTEXT_WINDOW_TOKENS, gpuLayers: 0 };
-      const finalContextSize = shouldUseSafeLoadProfile ? resolvedSafeLoadProfile.contextTokens : resolvedContextSize;
-      const gpuLayers = shouldUseSafeLoadProfile ? resolvedSafeLoadProfile.gpuLayers : requestedGpuLayers;
       this.requestedGpuLayers = requestedGpuLayers;
-      const shouldUseLowMemoryContextParams = Boolean(
-        memoryFit
-        && (
-          shouldUseSafeLoadProfile
-          || memoryFit.decision === 'fits_low_confidence'
-          || memoryFit.decision === 'borderline'
-          || memoryFit.decision === 'likely_oom'
-        ),
-      );
+      // shouldUseLowMemoryContextParams is decided by the safe-load policy.
       const resolvedParallelSlots = requestedParallelSlots ?? 1;
       const lowMemoryBatchParams = this.resolveLowMemoryBatchParams(
         finalContextSize,
@@ -2183,53 +2129,19 @@ class LLMEngineService {
         })
         : memoryFit;
       let resolvedGpuLayers = gpuLayers;
-      const lowMemorySignal = systemMemorySnapshot?.lowMemory ?? hardwareListenerService.getCurrentStatus().isLowMemory;
-      const safeLoadStillExceedsBudget = (
-        shouldUseSafeLoadProfile
-        && shouldHardBlockSafeLoad({
-          memoryFit: predictedFitForLoad,
-          availableBudgetBytes,
-          lowMemorySignal,
-        })
-      );
+      const safeLoadValidation = validateSafeLoadBudgetOrThrow
+        ? validateSafeLoadBudgetOrThrow({
+            predictedFitForLoad: predictedFitForLoad ?? memoryFit,
+            requestedMemoryFit: memoryFit,
+          })
+        : { unsafeMemoryBypassedHardBlock: false };
 
-      if (safeLoadStillExceedsBudget && predictedFitForLoad && allowUnsafeMemoryLoad) {
-        initDiagnostics = initDiagnostics ? {
+      if (safeLoadValidation.unsafeMemoryBypassedHardBlock && initDiagnostics) {
+        initDiagnostics = {
           ...initDiagnostics,
           unsafeMemoryBypassedHardBlock: true,
-        } : initDiagnostics;
+        };
       }
-
-       if (safeLoadStillExceedsBudget && predictedFitForLoad && !allowUnsafeMemoryLoad) {
-         throw new AppError('model_memory_insufficient', 'Not enough memory to load this model.', {
-           details: {
-            modelId,
-            modelSizeBytes: resolvedModelSizeBytes,
-            estimatedRuntimeBytes: predictedFitForLoad.requiredBytes,
-            totalMemoryBytes: resolvedTotalMemoryBytes,
-            availableMemoryBytes: systemMemorySnapshot?.availableBytes,
-            freeMemoryBytes: systemMemorySnapshot?.freeBytes,
-            thresholdBytes: systemMemorySnapshot?.thresholdBytes,
-            totalBudgetBytes: predictedFitForLoad.budget.totalMemoryBytes * FITS_IN_RAM_HEADROOM_RATIO,
-            availableBudgetBytes,
-            effectiveAvailableBudgetBytes: predictedFitForLoad.effectiveBudgetBytes,
-            lowMemory: lowMemorySignal,
-            allowUnsafeMemoryLoad,
-            decision: predictedFitForLoad.decision,
-            confidence: predictedFitForLoad.confidence,
-            memoryFit: predictedFitForLoad,
-            requestedMemoryFit: memoryFit,
-            requestedLoadProfile: {
-              contextTokens: resolvedContextSize,
-              gpuLayers: requestedGpuLayers,
-            },
-            attemptedLoadProfile: {
-              contextTokens: finalContextSize,
-              gpuLayers,
-            },
-          },
-         });
-       }
 
        if (initDiagnostics) {
          initDiagnostics = {

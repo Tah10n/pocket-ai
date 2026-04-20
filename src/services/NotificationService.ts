@@ -40,11 +40,37 @@ function sleep(ms: number) {
 function resolvePermissionState(
     result: unknown,
 ): 'granted' | 'denied' | 'undetermined' {
-    const anyResult = result as { status?: unknown; granted?: unknown; canAskAgain?: unknown } | null;
+    const anyResult = result as {
+        status?: unknown;
+        granted?: unknown;
+        canAskAgain?: unknown;
+        ios?: { status?: unknown; authorizationStatus?: unknown };
+    } | null;
 
-    const status = typeof anyResult?.status === 'string' ? anyResult.status : null;
+    const statusCandidate = anyResult?.ios?.status ?? anyResult?.status;
+    const status = typeof statusCandidate === 'string' ? statusCandidate : null;
     if (status === 'granted' || status === 'denied' || status === 'undetermined') {
         return status;
+    }
+
+    // iOS can also report a numeric authorization status.
+    const iosAuthorizationStatus = typeof anyResult?.ios?.authorizationStatus === 'number'
+        ? anyResult.ios.authorizationStatus
+        : null;
+    const iosStatusNumber = typeof statusCandidate === 'number' ? statusCandidate : null;
+    const numericStatus = iosAuthorizationStatus ?? iosStatusNumber;
+    if (typeof numericStatus === 'number') {
+        // Map common iOS UNAuthorizationStatus values:
+        // 0: notDetermined, 1: denied, 2: authorized, 3: provisional, 4: ephemeral
+        if (numericStatus === 0) {
+            return 'undetermined';
+        }
+        if (numericStatus === 1) {
+            return 'denied';
+        }
+        if (numericStatus === 2 || numericStatus === 3 || numericStatus === 4) {
+            return 'granted';
+        }
     }
 
     const granted = typeof anyResult?.granted === 'boolean' ? anyResult.granted : null;
@@ -172,7 +198,11 @@ class NotificationService {
 
         const requested = await Notifications.requestPermissionsAsync();
         const requestedState = resolvePermissionState(requested);
-        this.permissionState = requestedState === 'granted' ? 'granted' : 'denied';
+        if (requestedState === 'undetermined') {
+            this.permissionState = 'unknown';
+        } else {
+            this.permissionState = requestedState === 'granted' ? 'granted' : 'denied';
+        }
         return requestedState === 'granted';
     }
 

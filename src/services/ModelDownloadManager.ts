@@ -34,7 +34,7 @@ function safeSerializeResumeSnapshotValue(
     scope: string;
   },
 ): string | undefined {
-  if (!snapshot) {
+  if (snapshot == null) {
     return undefined;
   }
 
@@ -45,7 +45,11 @@ function safeSerializeResumeSnapshotValue(
   try {
     return JSON.stringify(snapshot);
   } catch (error) {
-    console.warn(`[ModelDownloadManager] Failed to serialize resume snapshot for ${modelId} (${scope})`, error);
+    try {
+      console.warn(`[ModelDownloadManager] Failed to serialize resume snapshot for ${modelId} (${scope})`, error);
+    } catch {
+      // ignore secondary logging errors
+    }
     return undefined;
   }
 }
@@ -68,7 +72,11 @@ function safeSerializeResumeSnapshot(
   try {
     snapshot = resumable.savable();
   } catch (error) {
-    console.warn(`[ModelDownloadManager] Failed to snapshot resumable state for ${modelId} (${scope})`, error);
+    try {
+      console.warn(`[ModelDownloadManager] Failed to snapshot resumable state for ${modelId} (${scope})`, error);
+    } catch {
+      // ignore secondary logging errors
+    }
     return undefined;
   }
 

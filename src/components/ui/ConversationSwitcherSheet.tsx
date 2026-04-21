@@ -7,6 +7,7 @@ import { Button, ButtonText } from '@/components/ui/button';
 import { Pressable } from '@/components/ui/pressable';
 import { ScreenPressableCard } from '@/components/ui/ScreenShell';
 import { Text } from '@/components/ui/text';
+import { getShortModelLabel } from '@/utils/modelLabel';
 import { ListPickerSheetContent, type ListPickerSheetItem } from './ListPickerSheet';
 import { MaterialSymbols } from './MaterialSymbols';
 import { ConversationIndexItem } from '../../types/chat';
@@ -64,7 +65,7 @@ export function ConversationSwitcherSheet({
   }));
 
   const items: ListPickerSheetItem[] = conversations.map((conversation) => {
-    const modelLabel = conversation.modelId.split('/').pop() ?? conversation.modelId;
+    const modelLabel = getShortModelLabel(conversation.modelId) || conversation.modelId;
 
     return {
       key: conversation.id,

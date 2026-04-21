@@ -1077,6 +1077,89 @@ describe('chatStore', () => {
     );
   });
 
+  it('persists activeModelId, model switches, and per-message model metadata across rehydration', async () => {
+    const legacyThread: ChatThread = buildThread('thread-persist-switches', 10);
+
+    storage.set(
+      'chat-store',
+      JSON.stringify({
+        state: {
+          threads: {
+            [legacyThread.id]: legacyThread,
+          },
+          activeThreadId: legacyThread.id,
+        },
+        version: 0,
+      }),
+    );
+
+    useChatStore.setState({ threads: {}, activeThreadId: null });
+    await useChatStore.persist.rehydrate();
+
+    const migratedBeforeSwitch = useChatStore.getState().getThread(legacyThread.id);
+    expect(migratedBeforeSwitch?.activeModelId).toBe('author/model-q4');
+    expect(migratedBeforeSwitch?.messages.at(0)).toEqual(
+      expect.objectContaining({
+        kind: 'message',
+        modelId: 'author/model-q4',
+      }),
+    );
+
+    useChatStore.getState().switchThreadModel(legacyThread.id, 'author/model-q8', 20);
+    useChatStore.getState().switchThreadModel(legacyThread.id, 'author/model-q6', 30);
+    useChatStore.getState().appendMessage(legacyThread.id, {
+      id: 'user-after-switches',
+      role: 'user',
+      content: 'After switches',
+      createdAt: 31,
+      state: 'complete',
+    });
+
+    const afterSwitches = useChatStore.getState().getThread(legacyThread.id);
+    expect(afterSwitches?.activeModelId).toBe('author/model-q6');
+    expect(afterSwitches?.messages.filter((message) => message.kind === 'model_switch')).toHaveLength(2);
+    expect(afterSwitches?.messages.find((message) => message.id === 'user-after-switches')).toEqual(
+      expect.objectContaining({
+        kind: 'message',
+        modelId: 'author/model-q6',
+      }),
+    );
+    expect(useChatStore.getState().getConversationIndex()[0]).toEqual(
+      expect.objectContaining({
+        id: legacyThread.id,
+        modelId: 'author/model-q6',
+        messageCount: 2,
+        lastMessagePreview: 'After switches',
+      }),
+    );
+
+    const persistedSnapshot = storage.getString('chat-store');
+    expect(persistedSnapshot).toContain('model_switch');
+    expect(persistedSnapshot).toContain('author/model-q6');
+
+    useChatStore.setState({ threads: {}, activeThreadId: null });
+    storage.set('chat-store', persistedSnapshot ?? '');
+    await useChatStore.persist.rehydrate();
+
+    const rehydrated = useChatStore.getState().getThread(legacyThread.id);
+    expect(rehydrated?.activeModelId).toBe('author/model-q6');
+    expect(rehydrated?.messages.filter((message) => message.kind === 'model_switch')).toHaveLength(2);
+    expect(rehydrated?.messages.find((message) => message.id === 'user-after-switches')).toEqual(
+      expect.objectContaining({
+        kind: 'message',
+        modelId: 'author/model-q6',
+      }),
+    );
+    expect(useChatStore.getState().getConversationIndex()[0]).toEqual(
+      expect.objectContaining({
+        id: legacyThread.id,
+        modelId: 'author/model-q6',
+        messageCount: 2,
+        lastMessagePreview: 'After switches',
+      }),
+    );
+  });
+
   it('uses the visible assistant answer for conversation previews when thoughts are present', () => {
     const threadId = useChatStore.getState().createThread({
       modelId: 'author/model-q4',

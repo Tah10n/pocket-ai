@@ -247,14 +247,17 @@ export const ChatScreen = () => {
     const listBottomPadding =
         hardwareBannerInputs.showLowMemoryWarning || hardwareBannerInputs.showThermalWarning ? 22 : 14;
 
-    const downloadedModels = useMemo(() => (
-        registry.getModels()
+    const downloadedModels = useMemo(() => {
+        // Force recompute on registry revision changes.
+        void modelRegistryRevision;
+
+        return registry.getModels()
             .filter((model) => (
                 model.lifecycleStatus === LifecycleStatus.DOWNLOADED
                 || model.lifecycleStatus === LifecycleStatus.ACTIVE
             ))
-            .sort((left, right) => (left.name ?? left.id).localeCompare(right.name ?? right.id))
-    ), [modelRegistryRevision]);
+            .sort((left, right) => (left.name ?? left.id).localeCompare(right.name ?? right.id));
+    }, [modelRegistryRevision]);
 
     const currentChatActiveModelId = activeThread
         ? getThreadActiveModelId(activeThread)

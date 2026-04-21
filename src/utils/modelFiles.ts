@@ -1,4 +1,5 @@
 import type { ModelMetadata } from '../types/models';
+import { getShortModelLabel } from './modelLabel';
 
 function sanitizeFileSegment(value: string, fallback: string): string {
   const sanitized = value
@@ -25,7 +26,7 @@ export function getModelDownloadFileName(
 ): string {
   const extensionMatch = model.resolvedFileName?.match(/(\.[A-Za-z0-9]+)$/);
   const extension = extensionMatch?.[1]?.toLowerCase() ?? '.gguf';
-  const repoName = sanitizeFileSegment(model.id.split('/').pop() ?? model.id, 'model');
+  const repoName = sanitizeFileSegment(getShortModelLabel(model.id) || model.id, 'model');
   const revision = sanitizeFileSegment(model.hfRevision ?? 'main', 'main').slice(0, 16);
   const fingerprint = hashString([
     model.id,

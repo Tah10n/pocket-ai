@@ -200,6 +200,10 @@ export const ChatScreen = () => {
     const [listViewportHeight, setListViewportHeight] = useState(0);
     const [isPresetSelectorOpen, setPresetSelectorOpen] = useState(false);
     const [isModelSelectorOpen, setModelSelectorOpen] = useState(false);
+    const [pendingModelSelection, setPendingModelSelection] = useState<{
+        threadId: string | null;
+        modelId: string;
+    } | null>(null);
     const [settings, setSettings] = useState(() => getSettings());
     const [pendingRegenerateMessage, setPendingRegenerateMessage] = useState<{
         messageId: string;
@@ -259,9 +263,16 @@ export const ChatScreen = () => {
             .sort((left, right) => (left.name ?? left.id).localeCompare(right.name ?? right.id));
     }, [modelRegistryRevision]);
 
+    const activeThreadId = activeThread?.id ?? null;
     const currentChatActiveModelId = activeThread
         ? getThreadActiveModelId(activeThread)
         : settings.activeModelId ?? engineState.activeModelId ?? null;
+    const isModelSelectionPending = pendingModelSelection != null;
+    const isPendingModelSelectionForCurrentThread = pendingModelSelection != null
+        && pendingModelSelection.threadId === activeThreadId;
+    const displayedChatActiveModelId = isPendingModelSelectionForCurrentThread
+        ? pendingModelSelection.modelId
+        : currentChatActiveModelId;
 
     const headerTitle = activeThread?.title ?? t('chat.newChatTitle');
     const configurableModelId = currentChatActiveModelId;
@@ -287,8 +298,8 @@ export const ChatScreen = () => {
     const lastMessageSignature = lastMessage
         ? `${lastMessage.id}:${lastMessage.state}:${lastMessage.content.length}:${lastMessage.tokensPerSec ?? -1}`
         : 'empty';
-    const modelLabel = currentChatActiveModelId
-        ? (getShortModelLabel(currentChatActiveModelId) || currentChatActiveModelId)
+    const modelLabel = displayedChatActiveModelId
+        ? (getShortModelLabel(displayedChatActiveModelId) || displayedChatActiveModelId)
         : t('chat.modelUnavailable');
     const rawParamsSource = activeThread?.paramsSnapshot ?? currentParams;
     const paramsSource = {
@@ -406,26 +417,42 @@ export const ChatScreen = () => {
             return;
         }
 
+        const selectionThreadId = activeThread?.id ?? null;
+
         if (nextModelId === currentChatActiveModelId) {
+            setPendingModelSelection((currentValue) => (
+                currentValue?.threadId === selectionThreadId ? null : currentValue
+            ));
             setModelSelectorOpen(false);
             return;
         }
 
+        setPendingModelSelection({ threadId: selectionThreadId, modelId: nextModelId });
+        setModelSelectorOpen(false);
+
         try {
             await loadModel(nextModelId);
         } catch (error) {
+            setPendingModelSelection((currentValue) => (
+                currentValue?.threadId === selectionThreadId && currentValue.modelId === nextModelId
+                    ? null
+                    : currentValue
+            ));
             showAlertForError('common.actionFailed', 'ChatScreen.loadModel', error);
             return;
         }
 
         if (!activeThread) {
-            setModelSelectorOpen(false);
             return;
         }
 
         switchThreadModel(activeThread.id, nextModelId);
         updateThreadParamsSnapshot(activeThread.id, getGenerationParametersForModel(nextModelId));
-        setModelSelectorOpen(false);
+        setPendingModelSelection((currentValue) => (
+            currentValue?.threadId === selectionThreadId && currentValue.modelId === nextModelId
+                ? null
+                : currentValue
+        ));
     }, [
         activeThread,
         currentChatActiveModelId,
@@ -974,6 +1001,20 @@ export const ChatScreen = () => {
     }, []);
 
     useEffect(() => {
+        if (!pendingModelSelection) {
+            return;
+        }
+
+        if (pendingModelSelection.threadId !== activeThreadId) {
+            return;
+        }
+
+        if (currentChatActiveModelId === pendingModelSelection.modelId) {
+            setPendingModelSelection(null);
+        }
+    }, [activeThreadId, currentChatActiveModelId, pendingModelSelection]);
+
+    useEffect(() => {
         if (Platform.OS !== 'android') {
             return;
         }
@@ -1174,8 +1215,8 @@ export const ChatScreen = () => {
                         setModelSelectorOpen(true);
                     }
                     : undefined}
-                canOpenModelSelector={hasDownloadedModels && !isGenerating}
-                canOpenModelControls={Boolean(configurableModelId) && !isGenerating}
+                canOpenModelSelector={hasDownloadedModels && !isGenerating && !isModelSelectionPending}
+                canOpenModelControls={Boolean(configurableModelId) && !isGenerating && !isModelSelectionPending}
                 onBack={router.canGoBack() ? () => router.back() : undefined}
             />
 
@@ -1412,8 +1453,8 @@ export const ChatScreen = () => {
             <ChatModelSelectorSheet
                 visible={isModelSelectorOpen}
                 models={downloadedModels}
-                currentModelId={currentChatActiveModelId}
-                canSelect={!isGenerating}
+                currentModelId={displayedChatActiveModelId}
+                canSelect={!isGenerating && !isModelSelectionPending}
                 onClose={() => setModelSelectorOpen(false)}
                 onSelectModel={(modelId) => {
                     void handleSelectModelFromHeader(modelId);

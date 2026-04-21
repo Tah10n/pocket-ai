@@ -235,6 +235,12 @@
       "defaultDescription": "Use the standard assistant behavior without a saved preset.",
       "manage": "Manage Presets"
     },
+    "modelSelector": {
+      "title": "Models",
+      "subtitle": "Choose a downloaded model for this chat.",
+      "emptyTitle": "No downloaded models",
+      "emptyDescription": "Download a model to switch models inside the chat."
+    },
     "modelControls": {
       "title": "Model controls",
       "descriptionForModel": "Saved separately for {{modelLabel}}. Sampling changes apply immediately, while load settings use {{loadAction}}.",

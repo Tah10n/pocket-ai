@@ -3,6 +3,7 @@ import { normalizeReasoningEffort, type ReasoningEffort } from './reasoning';
 
 export type ChatMessageRole = 'system' | 'user' | 'assistant';
 export type ChatMessageState = 'complete' | 'streaming' | 'stopped' | 'error';
+export type ChatMessageKind = 'message' | 'model_switch';
 export type ChatThreadStatus = 'idle' | 'generating' | 'stopped' | 'error';
 
 export interface GenerationParamsSnapshot {
@@ -40,6 +41,10 @@ export interface ChatMessage {
   errorCode?: string;
   errorMessage?: string;
   regeneratesMessageId?: string;
+  kind?: ChatMessageKind;
+  modelId?: string | null;
+  switchFromModelId?: string | null;
+  switchToModelId?: string | null;
 }
 
 export interface ChatThread {
@@ -47,6 +52,7 @@ export interface ChatThread {
   title: string;
   titleSource?: 'derived' | 'manual';
   modelId: string;
+  activeModelId?: string;
   presetId: string | null;
   presetSnapshot: PresetSnapshot;
   paramsSnapshot: GenerationParamsSnapshot;
@@ -123,11 +129,24 @@ export function normalizeConversationTitle(title: string) {
   return title.replace(/\s+/g, ' ').trim();
 }
 
+export function getThreadActiveModelId(
+  thread: Pick<ChatThread, 'modelId' | 'activeModelId'>,
+): string {
+  return thread.activeModelId ?? thread.modelId;
+}
+
+export function isModelSwitchMessage(message: Pick<ChatMessage, 'kind'>): boolean {
+  return message.kind === 'model_switch';
+}
+
 export function toConversationIndexItem(thread: ChatThread): ConversationIndexItem {
   let lastMessage: ChatMessage | undefined;
 
   for (let index = thread.messages.length - 1; index >= 0; index -= 1) {
     const message = thread.messages[index];
+    if (isModelSwitchMessage(message)) {
+      continue;
+    }
     if (getVisibleMessageContent(message.role, message.content).trim().length > 0) {
       lastMessage = message;
       break;
@@ -142,9 +161,12 @@ export function toConversationIndexItem(thread: ChatThread): ConversationIndexIt
     id: thread.id,
     title: thread.title,
     updatedAt: thread.updatedAt,
-    modelId: thread.modelId,
+    modelId: getThreadActiveModelId(thread),
     presetId: thread.presetId,
-    messageCount: thread.messages.length,
+    messageCount: thread.messages.reduce(
+      (count, message) => (isModelSwitchMessage(message) ? count : count + 1),
+      0,
+    ),
     lastMessagePreview: lastMessagePreview?.slice(0, 80),
   };
 }
@@ -189,11 +211,44 @@ export function sanitizeHydratedThread(thread: ChatThread): ChatThread {
     (message) => message.state !== 'streaming',
   );
 
+  const hasModelSwitchMessages = sanitizedMessages.some(
+    (message) => (message.kind ?? 'message') === 'model_switch',
+  );
+  let currentModelId = hasModelSwitchMessages
+    ? thread.modelId
+    : getThreadActiveModelId(thread);
+  const migratedMessages = sanitizedMessages.map((message): ChatMessage => {
+    const kind = message.kind ?? 'message';
+
+    if (kind === 'model_switch') {
+      const resolvedSwitchFromModelId = message.switchFromModelId ?? currentModelId;
+      const resolvedSwitchToModelId = message.switchToModelId ?? message.modelId ?? currentModelId;
+      currentModelId = resolvedSwitchToModelId;
+
+      return {
+        ...message,
+        kind,
+        modelId: resolvedSwitchToModelId,
+        switchFromModelId: resolvedSwitchFromModelId,
+        switchToModelId: resolvedSwitchToModelId,
+      };
+    }
+
+    return {
+      ...message,
+      kind,
+      modelId: message.modelId ?? currentModelId,
+    };
+  });
+
+  const activeModelId = thread.activeModelId ?? currentModelId;
+
   const removedStreamingMessages = sanitizedMessages.length !== thread.messages.length;
   const legacyReasoningEnabled = (thread.paramsSnapshot as { reasoningEnabled?: unknown }).reasoningEnabled;
 
   return {
     ...thread,
+    activeModelId,
     presetSnapshot: thread.presetSnapshot ?? {
       ...DEFAULT_PRESET_SNAPSHOT,
       id: thread.presetId ?? null,
@@ -209,7 +264,7 @@ export function sanitizeHydratedThread(thread: ChatThread): ChatThread {
       seed: thread.paramsSnapshot.seed ?? null,
     },
     titleSource: thread.titleSource === 'manual' ? 'manual' : 'derived',
-    messages: sanitizedMessages,
+    messages: migratedMessages,
     status: removedStreamingMessages && thread.status === 'generating' ? 'stopped' : thread.status,
     updatedAt: removedStreamingMessages ? Date.now() : thread.updatedAt,
   };

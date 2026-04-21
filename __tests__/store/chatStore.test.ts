@@ -90,6 +90,175 @@ describe('chatStore', () => {
     );
   });
 
+  it('defaults kind and modelId when appending messages without metadata', () => {
+    const threadId = useChatStore.getState().createThread({
+      modelId: 'author/model-q4',
+      presetId: null,
+      presetSnapshot: {
+        id: null,
+        name: 'Default',
+        systemPrompt: 'You are helpful.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 1024,
+        seed: null,
+      },
+    });
+
+    useChatStore.getState().appendMessage(threadId, {
+      id: 'user-1',
+      role: 'user',
+      content: 'Hello there from the user',
+      createdAt: 1,
+      state: 'complete',
+    });
+
+    expect(useChatStore.getState().getThread(threadId)?.messages.at(-1)).toEqual(
+      expect.objectContaining({
+        id: 'user-1',
+        kind: 'message',
+        modelId: 'author/model-q4',
+      }),
+    );
+  });
+
+  it('uses activeModelId for the conversation index model id when available', () => {
+    const thread = {
+      ...buildThread('thread-active-model', 10),
+      modelId: 'author/model-q4',
+      activeModelId: 'author/model-q8',
+    };
+
+    useChatStore.setState({
+      threads: {
+        [thread.id]: thread,
+      },
+      activeThreadId: thread.id,
+    });
+
+    expect(useChatStore.getState().getConversationIndex()[0]?.modelId).toBe('author/model-q8');
+  });
+
+  it('switchThreadModel updates activeModelId and appends a model_switch system message', () => {
+    const threadId = useChatStore.getState().createThread({
+      modelId: 'author/model-q4',
+      presetId: null,
+      presetSnapshot: {
+        id: null,
+        name: 'Default',
+        systemPrompt: 'You are helpful.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 1024,
+        seed: null,
+      },
+    });
+
+    useChatStore.getState().appendMessage(threadId, {
+      id: 'user-1',
+      role: 'user',
+      content: 'Hello there',
+      createdAt: 1,
+      state: 'complete',
+    });
+
+    const switchMessageId = useChatStore.getState().switchThreadModel(threadId, 'author/model-q8', 123);
+    const thread = useChatStore.getState().getThread(threadId);
+
+    expect(switchMessageId).toBeTruthy();
+    expect(thread?.activeModelId).toBe('author/model-q8');
+    expect(thread?.messages.filter((message) => message.kind === 'model_switch')).toHaveLength(1);
+    expect(thread?.messages.at(-1)).toEqual(
+      expect.objectContaining({
+        id: switchMessageId,
+        role: 'system',
+        kind: 'model_switch',
+        content: '',
+        modelId: 'author/model-q8',
+        switchFromModelId: 'author/model-q4',
+        switchToModelId: 'author/model-q8',
+        createdAt: 123,
+        state: 'complete',
+      }),
+    );
+  });
+
+  it('switchThreadModel is a no-op when switching to the current active model', () => {
+    const threadId = useChatStore.getState().createThread({
+      modelId: 'author/model-q4',
+      presetId: null,
+      presetSnapshot: {
+        id: null,
+        name: 'Default',
+        systemPrompt: 'You are helpful.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 1024,
+        seed: null,
+      },
+    });
+
+    useChatStore.getState().appendMessage(threadId, {
+      id: 'user-1',
+      role: 'user',
+      content: 'Hello there',
+      createdAt: 1,
+      state: 'complete',
+    });
+
+    const before = useChatStore.getState().getThread(threadId);
+    const result = useChatStore.getState().switchThreadModel(threadId, 'author/model-q4', 123);
+    const after = useChatStore.getState().getThread(threadId);
+
+    expect(result).toBeNull();
+    expect(after).toBe(before);
+    expect(after?.activeModelId).toBe('author/model-q4');
+    expect(after?.messages).toHaveLength(1);
+  });
+
+  it('excludes model_switch messages from conversation previews and message counts', () => {
+    const threadId = useChatStore.getState().createThread({
+      modelId: 'author/model-q4',
+      presetId: null,
+      presetSnapshot: {
+        id: null,
+        name: 'Default',
+        systemPrompt: 'You are helpful.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 1024,
+        seed: null,
+      },
+    });
+
+    useChatStore.getState().appendMessage(threadId, {
+      id: 'user-1',
+      role: 'user',
+      content: 'Hello there',
+      createdAt: 1,
+      state: 'complete',
+    });
+    useChatStore.getState().switchThreadModel(threadId, 'author/model-q8', 2);
+
+    const indexItem = useChatStore.getState().getConversationIndex()[0];
+    expect(indexItem).toEqual(
+      expect.objectContaining({
+        id: threadId,
+        modelId: 'author/model-q8',
+        messageCount: 1,
+        lastMessagePreview: 'Hello there',
+      }),
+    );
+  });
+
   it('creates and patches an assistant placeholder', () => {
     const threadId = useChatStore.getState().createThread({
       modelId: 'author/model-q4',
@@ -244,6 +413,8 @@ describe('chatStore', () => {
         content: '',
         state: 'streaming',
         regeneratesMessageId: 'assistant-1',
+        kind: 'message',
+        modelId: 'author/model-q4',
       }),
     );
   });
@@ -306,12 +477,16 @@ describe('chatStore', () => {
         id: 'user-1',
         role: 'user',
         content: 'Edited first prompt',
+        kind: 'message',
+        modelId: 'author/model-q4',
       }),
       expect.objectContaining({
         id: replacementAssistantId,
         role: 'assistant',
         content: '',
         state: 'streaming',
+        kind: 'message',
+        modelId: 'author/model-q4',
       }),
     ]);
   });
@@ -729,6 +904,131 @@ describe('chatStore', () => {
     await useChatStore.persist.rehydrate();
 
     expect(useChatStore.getState().activeThreadId).toBe(newer.id);
+  });
+
+  it('migrates legacy hydrated threads by adding activeModelId and per-message model metadata', async () => {
+    const legacyThread: ChatThread = {
+      ...buildThread('thread-legacy', 10),
+      messages: [
+        {
+          id: 'legacy-user-1',
+          role: 'user',
+          content: 'Legacy prompt',
+          createdAt: 10,
+          state: 'complete',
+        },
+        {
+          id: 'legacy-assistant-1',
+          role: 'assistant',
+          content: 'Legacy reply',
+          createdAt: 11,
+          state: 'complete',
+        },
+      ],
+    };
+
+    storage.set(
+      'chat-store',
+      JSON.stringify({
+        state: {
+          threads: {
+            [legacyThread.id]: legacyThread,
+          },
+          activeThreadId: legacyThread.id,
+        },
+        version: 0,
+      }),
+    );
+
+    useChatStore.setState({ threads: {}, activeThreadId: null });
+    await useChatStore.persist.rehydrate();
+
+    const hydrated = useChatStore.getState().getThread(legacyThread.id);
+
+    expect(hydrated?.activeModelId).toBe(legacyThread.modelId);
+    expect(hydrated?.messages).toEqual([
+      expect.objectContaining({
+        id: 'legacy-user-1',
+        kind: 'message',
+        modelId: legacyThread.modelId,
+      }),
+      expect.objectContaining({
+        id: 'legacy-assistant-1',
+        kind: 'message',
+        modelId: legacyThread.modelId,
+      }),
+    ]);
+  });
+
+  it('reconstructs missing message modelId values using model_switch events during rehydration', async () => {
+    const thread: ChatThread = {
+      ...buildThread('thread-model-switch-migration', 10),
+      messages: [
+        {
+          id: 'user-1',
+          role: 'user',
+          content: 'Before switch',
+          createdAt: 1,
+          state: 'complete',
+        },
+        {
+          id: 'switch-1',
+          role: 'system',
+          kind: 'model_switch',
+          content: '',
+          createdAt: 2,
+          state: 'complete',
+          switchFromModelId: 'author/model-q4',
+          switchToModelId: 'author/model-q8',
+        },
+        {
+          id: 'assistant-1',
+          role: 'assistant',
+          content: 'After switch',
+          createdAt: 3,
+          state: 'complete',
+        },
+      ],
+    };
+
+    storage.set(
+      'chat-store',
+      JSON.stringify({
+        state: {
+          threads: {
+            [thread.id]: thread,
+          },
+          activeThreadId: thread.id,
+        },
+        version: 0,
+      }),
+    );
+
+    useChatStore.setState({ threads: {}, activeThreadId: null });
+    await useChatStore.persist.rehydrate();
+
+    const hydrated = useChatStore.getState().getThread(thread.id);
+
+    expect(hydrated?.activeModelId).toBe('author/model-q8');
+    expect(hydrated?.messages).toEqual([
+      expect.objectContaining({
+        id: 'user-1',
+        kind: 'message',
+        modelId: 'author/model-q4',
+      }),
+      expect.objectContaining({
+        id: 'switch-1',
+        kind: 'model_switch',
+        modelId: 'author/model-q8',
+        switchFromModelId: 'author/model-q4',
+        switchToModelId: 'author/model-q8',
+      }),
+      expect.objectContaining({
+        id: 'assistant-1',
+        kind: 'message',
+        modelId: 'author/model-q8',
+      }),
+    ]);
   });
 
   it('persists and rehydrates a saved thread', async () => {

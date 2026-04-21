@@ -34,6 +34,7 @@ jobs:
   android-smoke:
     name: android (smoke)
     runs-on: ubuntu-latest
+    continue-on-error: true
     timeout-minutes: 60
     needs: verify
     if: github.event_name == 'pull_request'

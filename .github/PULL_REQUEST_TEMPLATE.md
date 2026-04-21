@@ -18,6 +18,11 @@ Link the issue this pull request addresses, if one exists.
 - [ ] `npm run verify:mobile-change`
 - [ ] `npm run verify:mobile-change:android` if Android behavior or visible UI changed
 
+## Optional checks
+
+- [ ] Run Android checks
+- [ ] Run Android scenarios
+
 ## UI evidence
 
 Add screenshots or recordings for visible UI changes.

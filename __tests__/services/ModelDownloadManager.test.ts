@@ -465,6 +465,81 @@ describe('ModelDownloadManager Basic', () => {
     expect(entry?.resumeData).toEqual(expect.stringContaining('resume-data'));
   });
 
+  it('does not let resumable.savable() errors break cleanup on download failure', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      (FileSystem.createDownloadResumable as jest.Mock).mockReturnValue({
+        downloadAsync: jest.fn().mockRejectedValue(new Error('network error')),
+        savable: () => {
+          throw new Error('savable failed');
+        },
+      });
+
+      useDownloadStore.setState({
+        queue: [{ ...mockModel, lifecycleStatus: LifecycleStatus.QUEUED }],
+        activeDownloadId: mockModel.id,
+      });
+
+      await expect(runDownloadModel({ lifecycleStatus: LifecycleStatus.QUEUED })).rejects.toThrow('network error');
+
+      expect(useDownloadStore.getState().activeDownloadId).toBeNull();
+      const entry = useDownloadStore.getState().queue.find((model) => model.id === mockModel.id);
+      expect(entry?.lifecycleStatus).toBe(LifecycleStatus.AVAILABLE);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('does not let JSON.stringify errors break cleanup on download failure', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const circular: any = { resumeData: 'resume-data' };
+      circular.self = circular;
+
+      (FileSystem.createDownloadResumable as jest.Mock).mockReturnValue({
+        downloadAsync: jest.fn().mockRejectedValue(new Error('network error')),
+        savable: () => circular,
+      });
+
+      useDownloadStore.setState({
+        queue: [{ ...mockModel, lifecycleStatus: LifecycleStatus.QUEUED }],
+        activeDownloadId: mockModel.id,
+      });
+
+      await expect(runDownloadModel({ lifecycleStatus: LifecycleStatus.QUEUED })).rejects.toThrow('network error');
+
+      expect(useDownloadStore.getState().activeDownloadId).toBeNull();
+      const entry = useDownloadStore.getState().queue.find((model) => model.id === mockModel.id);
+      expect(entry?.lifecycleStatus).toBe(LifecycleStatus.AVAILABLE);
+      expect(entry?.resumeData).toBeUndefined();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('persists resumeData when download fails and a resumable snapshot is available', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      (FileSystem.createDownloadResumable as jest.Mock).mockReturnValue({
+        downloadAsync: jest.fn().mockRejectedValue(new Error('network error')),
+        savable: () => ({ resumeData: 'resume-data' }),
+      });
+
+      useDownloadStore.setState({
+        queue: [{ ...mockModel, lifecycleStatus: LifecycleStatus.QUEUED }],
+        activeDownloadId: mockModel.id,
+      });
+
+      await expect(runDownloadModel({ lifecycleStatus: LifecycleStatus.QUEUED })).rejects.toThrow('network error');
+
+      const entry = useDownloadStore.getState().queue.find((model) => model.id === mockModel.id);
+      expect(entry?.lifecycleStatus).toBe(LifecycleStatus.AVAILABLE);
+      expect(entry?.resumeData).toEqual(expect.stringContaining('resume-data'));
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
   it('extracts nested resumeData from persisted pause snapshots', async () => {
     (FileSystem.createDownloadResumable as jest.Mock).mockReturnValue({
       downloadAsync: jest.fn().mockResolvedValue({ status: 200 }),

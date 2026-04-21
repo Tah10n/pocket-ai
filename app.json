@@ -2,13 +2,12 @@
   "expo": {
     "name": "Pocket AI",
     "slug": "pocket-ai",
-    "version": "1.1.1",
+    "version": "1.1.2",
     "description": "Offline-first local AI assistant with GGUF model downloads, on-device inference, and persisted chat history.",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "pocketai",
     "userInterfaceStyle": "automatic",
-    "newArchEnabled": true,
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.github.tah10n.pocketai",
@@ -19,7 +18,7 @@
       }
     },
     "android": {
-      "versionCode": 10,
+      "versionCode": 11,
       "permissions": [
         "INTERNET",
         "POST_NOTIFICATIONS",

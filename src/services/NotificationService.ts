@@ -37,6 +37,55 @@ function sleep(ms: number) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function resolvePermissionState(
+    result: unknown,
+): 'granted' | 'denied' | 'undetermined' {
+    const anyResult = result as {
+        status?: unknown;
+        granted?: unknown;
+        canAskAgain?: unknown;
+        ios?: { status?: unknown; authorizationStatus?: unknown };
+    } | null;
+
+    const statusCandidate = anyResult?.ios?.status ?? anyResult?.status;
+    const status = typeof statusCandidate === 'string' ? statusCandidate : null;
+    if (status === 'granted' || status === 'denied' || status === 'undetermined') {
+        return status;
+    }
+
+    // iOS can also report a numeric authorization status.
+    const iosAuthorizationStatus = typeof anyResult?.ios?.authorizationStatus === 'number'
+        ? anyResult.ios.authorizationStatus
+        : null;
+    const iosStatusNumber = typeof statusCandidate === 'number' ? statusCandidate : null;
+    const numericStatus = iosAuthorizationStatus ?? iosStatusNumber;
+    if (typeof numericStatus === 'number') {
+        // Map common iOS UNAuthorizationStatus values:
+        // 0: notDetermined, 1: denied, 2: authorized, 3: provisional, 4: ephemeral
+        if (numericStatus === 0) {
+            return 'undetermined';
+        }
+        if (numericStatus === 1) {
+            return 'denied';
+        }
+        if (numericStatus === 2 || numericStatus === 3 || numericStatus === 4) {
+            return 'granted';
+        }
+    }
+
+    const granted = typeof anyResult?.granted === 'boolean' ? anyResult.granted : null;
+    if (granted === true) {
+        return 'granted';
+    }
+
+    const canAskAgain = typeof anyResult?.canAskAgain === 'boolean' ? anyResult.canAskAgain : null;
+    if (granted === false && canAskAgain === false) {
+        return 'denied';
+    }
+
+    return 'undetermined';
+}
+
 function formatBytesPerSecond(bytesPerSecond: number | undefined) {
     if (typeof bytesPerSecond !== 'number' || !Number.isFinite(bytesPerSecond) || bytesPerSecond <= 0) {
         return '—';
@@ -142,14 +191,19 @@ class NotificationService {
         await this.ensureInitialized();
 
         const current = await Notifications.getPermissionsAsync();
-        if (current.status === 'granted') {
+        if (resolvePermissionState(current) === 'granted') {
             this.permissionState = 'granted';
             return true;
         }
 
         const requested = await Notifications.requestPermissionsAsync();
-        this.permissionState = requested.status === 'granted' ? 'granted' : 'denied';
-        return requested.status === 'granted';
+        const requestedState = resolvePermissionState(requested);
+        if (requestedState === 'undetermined') {
+            this.permissionState = 'unknown';
+        } else {
+            this.permissionState = requestedState === 'granted' ? 'granted' : 'denied';
+        }
+        return requestedState === 'granted';
     }
 
     async openSystemSettings(): Promise<void> {
@@ -169,10 +223,11 @@ class NotificationService {
 
         try {
             const current = await Notifications.getPermissionsAsync();
-            const granted = current.status === 'granted';
+            const permissionState = resolvePermissionState(current);
+            const granted = permissionState === 'granted';
             if (granted) {
                 this.permissionState = 'granted';
-            } else if (current.status === 'denied') {
+            } else if (permissionState === 'denied') {
                 this.permissionState = 'denied';
             }
 
@@ -210,12 +265,13 @@ class NotificationService {
         }
 
         const current = await Notifications.getPermissionsAsync();
-        if (current.status === 'granted') {
+        const permissionState = resolvePermissionState(current);
+        if (permissionState === 'granted') {
             this.permissionState = 'granted';
             return true;
         }
 
-        if (current.status === 'denied') {
+        if (permissionState === 'denied') {
             this.permissionState = 'denied';
             return false;
         }

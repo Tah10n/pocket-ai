@@ -947,7 +947,7 @@ describe('useChatSession', () => {
     );
   });
 
-  it('starts a new thread when another model is currently loaded', async () => {
+  it('auto-switches the active thread model when the global active model changes', async () => {
     const getSession = renderHookHarness();
 
     await act(async () => {
@@ -956,12 +956,19 @@ describe('useChatSession', () => {
 
     const originalThread = useChatStore.getState().getActiveThread();
 
+    expect(originalThread?.modelId).toBe('author/model-q4');
+    expect(originalThread?.activeModelId).toBe('author/model-q4');
+
     (getSettings as jest.Mock).mockReturnValue({
       activeModelId: 'author/model-q8',
       activePresetId: 'preset-1',
       temperature: 0.7,
       topP: 0.9,
       maxTokens: 1024,
+    });
+    (llmEngineService.getState as jest.Mock).mockReturnValue({
+      status: EngineStatus.READY,
+      activeModelId: 'author/model-q8',
     });
 
     await act(async () => {
@@ -971,14 +978,45 @@ describe('useChatSession', () => {
     const state = useChatStore.getState();
     const activeThread = state.getActiveThread();
 
-    expect(activeThread?.id).not.toBe(originalThread?.id);
-    expect(activeThread?.modelId).toBe('author/model-q8');
-    expect(activeThread?.messages.map((message) => message.role)).toEqual(['user', 'assistant']);
+    expect(activeThread?.id).toBe(originalThread?.id);
+    expect(activeThread?.modelId).toBe('author/model-q4');
+    expect(activeThread?.activeModelId).toBe('author/model-q8');
+
+    const roles = activeThread?.messages.map((message) => message.role);
+    expect(roles).toEqual(['user', 'assistant', 'system', 'user', 'assistant']);
+
+    const switchMessage = activeThread?.messages.find((message) => message.kind === 'model_switch');
+    expect(switchMessage).toEqual(
+      expect.objectContaining({
+        role: 'system',
+        kind: 'model_switch',
+        modelId: 'author/model-q8',
+        switchFromModelId: 'author/model-q4',
+        switchToModelId: 'author/model-q8',
+      }),
+    );
+
+    const lastUserMessage = [...(activeThread?.messages ?? [])].reverse().find((message) => message.role === 'user');
+    const lastAssistantMessage = activeThread?.messages.at(-1);
+    expect(lastUserMessage).toEqual(
+      expect.objectContaining({
+        kind: 'message',
+        modelId: 'author/model-q8',
+      }),
+    );
+    expect(lastAssistantMessage).toEqual(
+      expect.objectContaining({
+        role: 'assistant',
+        kind: 'message',
+        modelId: 'author/model-q8',
+      }),
+    );
+
     expect(originalThread?.modelId).toBe('author/model-q4');
-    expect(state.getConversationIndex()).toHaveLength(2);
+    expect(state.getConversationIndex()).toHaveLength(1);
   });
 
-  it('blocks regenerating a thread when another model is currently loaded', async () => {
+  it('does not block regenerating when the global active model differs from the thread model', async () => {
     const getSession = renderHookHarness();
 
     await act(async () => {
@@ -993,9 +1031,8 @@ describe('useChatSession', () => {
       maxTokens: 1024,
     });
 
-    await expect(getSession()?.regenerateLastResponse()).rejects.toThrow(
-      'This conversation is pinned to author/model-q4. Load that model before regenerating this response.',
-    );
+    await expect(getSession()?.regenerateLastResponse()).resolves.toBe(true);
+    expect(useChatStore.getState().getActiveThread()?.messages.some((message) => message.kind === 'model_switch')).toBe(false);
   });
 
   it('switches to another saved thread when opening a conversation explicitly', async () => {

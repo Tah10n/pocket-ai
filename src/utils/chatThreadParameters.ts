@@ -1,12 +1,12 @@
 import { GenerationParameters, getGenerationParametersForModel } from '../services/SettingsStore';
-import { type ChatThread } from '../types/chat';
+import { getThreadActiveModelId, type ChatThread } from '../types/chat';
 
 export function syncThreadParameters(
   thread: ChatThread,
   updateThreadParamsSnapshot: (threadId: string, paramsSnapshot: GenerationParameters) => void,
   nextParams?: GenerationParameters,
 ): ChatThread {
-  const resolvedParams = nextParams ?? getGenerationParametersForModel(thread.modelId);
+  const resolvedParams = nextParams ?? getGenerationParametersForModel(getThreadActiveModelId(thread));
   const paramsChanged =
     thread.paramsSnapshot.temperature !== resolvedParams.temperature
     || thread.paramsSnapshot.topP !== resolvedParams.topP

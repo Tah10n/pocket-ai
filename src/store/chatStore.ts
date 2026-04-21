@@ -48,7 +48,7 @@ interface ChatStoreState {
   updateThreadParamsSnapshot: (threadId: string, paramsSnapshot: GenerationParamsSnapshot) => void;
   switchThreadModel: (threadId: string, nextModelId: string, at?: number) => string | null;
   appendMessage: (threadId: string, message: ChatMessage) => void;
-  createAssistantPlaceholder: (threadId: string) => string;
+  createAssistantPlaceholder: (threadId: string, modelId?: string) => string;
   stopAssistantMessage: (threadId: string, messageId: string) => void;
   finalizeAssistantMessage: (threadId: string, messageId: string, content: string, thoughtContent?: string) => void;
   deleteThread: (threadId: string) => void;
@@ -404,8 +404,10 @@ export const useChatStore = create<ChatStoreState>()(
           };
         }),
 
-      createAssistantPlaceholder: (threadId) => {
+      createAssistantPlaceholder: (threadId, modelId) => {
         const messageId = createChatId('message');
+        const thread = get().threads[threadId];
+        const resolvedModelId = modelId ?? (thread ? getThreadActiveModelId(thread) : undefined);
         get().appendMessage(threadId, {
           id: messageId,
           role: 'assistant',
@@ -413,6 +415,8 @@ export const useChatStore = create<ChatStoreState>()(
           thoughtContent: undefined,
           createdAt: Date.now(),
           state: 'streaming',
+          kind: 'message',
+          modelId: resolvedModelId,
         });
         return messageId;
       },

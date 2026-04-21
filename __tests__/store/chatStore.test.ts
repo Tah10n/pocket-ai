@@ -1242,6 +1242,65 @@ describe('chatStore', () => {
     ]);
   });
 
+  it('excludes model_switch system events from the inference window even when they have content', () => {
+    const thread: ChatThread = {
+      id: 'thread-model-switch-window',
+      title: 'Switch thread',
+      modelId: 'author/model-q4',
+      presetId: null,
+      presetSnapshot: {
+        id: null,
+        name: 'Default',
+        systemPrompt: 'You are helpful.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        topK: 40,
+        minP: 0.05,
+        repetitionPenalty: 1,
+        maxTokens: 1024,
+        seed: null,
+      },
+      messages: [
+        {
+          id: 'user-1',
+          role: 'user',
+          content: 'Before',
+          createdAt: 1,
+          state: 'complete',
+        },
+        {
+          id: 'switch-1',
+          role: 'system',
+          kind: 'model_switch',
+          content: 'Model switched: q4 -> q8',
+          modelId: 'author/model-q8',
+          switchFromModelId: 'author/model-q4',
+          switchToModelId: 'author/model-q8',
+          createdAt: 2,
+          state: 'complete',
+        },
+        {
+          id: 'assistant-1',
+          role: 'assistant',
+          content: 'After',
+          createdAt: 3,
+          state: 'complete',
+        },
+      ],
+      createdAt: 1,
+      updatedAt: 3,
+      status: 'idle',
+    };
+
+    expect(getThreadInferenceWindow(thread, 24).messages).toEqual([
+      { role: 'system', content: 'You are helpful.' },
+      { role: 'user', content: 'Before' },
+      { role: 'assistant', content: 'After' },
+    ]);
+  });
+
   it('keeps only the newest coherent turn when the response reserve squeezes prompt history', () => {
     const longMessage = 'A'.repeat(120);
     const thread: ChatThread = {

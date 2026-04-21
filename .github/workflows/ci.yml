@@ -108,7 +108,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     needs: verify
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'pull_request' && (contains(github.event.pull_request.body, '- [x] Run Android scenarios') || contains(github.event.pull_request.body, '- [X] Run Android scenarios'))
 
     steps:
       - name: Checkout

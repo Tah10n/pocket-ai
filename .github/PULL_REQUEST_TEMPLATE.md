@@ -21,6 +21,7 @@ Link the issue this pull request addresses, if one exists.
 ## Optional checks
 
 - [ ] Run Android checks
+- [ ] Run Android scenarios
 
 ## UI evidence
 

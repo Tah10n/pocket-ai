@@ -2,6 +2,11 @@ name: CI
 
 on:
   pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - edited
   push:
     branches:
       - main
@@ -34,10 +39,9 @@ jobs:
   android-smoke:
     name: android (smoke)
     runs-on: ubuntu-latest
-    continue-on-error: true
     timeout-minutes: 60
     needs: verify
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' && (contains(github.event.pull_request.body, '- [x] Run Android checks') || contains(github.event.pull_request.body, '- [X] Run Android checks'))
 
     steps:
       - name: Checkout

@@ -1,7 +1,7 @@
 {
   "name": "pocket-ai",
   "main": "expo-router/entry",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "license": "MIT",
   "description": "Offline-first local AI assistant for discovering, downloading, and chatting with GGUF models on-device.",
   "repository": {

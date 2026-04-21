@@ -21,6 +21,7 @@ import { Text } from '@/components/ui/text';
 import { ChatHeader } from '@/components/ui/ChatHeader';
 import { ChatStatusBanner } from '@/components/ui/ChatStatusBanner';
 import { ChatMessageBubble } from '@/components/ui/ChatMessageBubble';
+import { ChatSystemEventRow } from '@/components/ui/ChatSystemEventRow';
 import { ChatInputBar } from '@/components/ui/ChatInputBar';
 import { ErrorReportSheet } from '@/components/ui/ErrorReportSheet';
 import { ModelParametersSheet } from '@/components/ui/ModelParametersSheet';
@@ -1047,27 +1048,40 @@ export const ChatScreen = () => {
         scheduleScrollToLatestMessage(false, hasForcedFollowPass);
     }, [lastMessageSignature, messages.length, scheduleScrollToLatestMessage]);
 
-    const renderChatMessage = useCallback(({ item: msg, index }: { item: ChatMessage; index: number }) => (
-        <ChatMessageBubble
-            id={msg.id}
-            isUser={msg.role === 'user'}
-            content={msg.content}
-            thoughtContent={msg.thoughtContent}
-            errorMessage={msg.errorMessage}
-            isStreaming={msg.state === 'streaming'}
-            tokensPerSec={msg.tokensPerSec}
-            canDelete={msg.state !== 'streaming'}
-            canRegenerate={
-                msg.role === 'user'
-                && msg.state === 'complete'
-                && !isGenerating
-                && !isInputDisabled
-            }
-            onDelete={handleDeleteMessage}
-            onRegenerate={handleBeginRegenerateFromMessage}
-            onLayout={index === messages.length - 1 ? handleLastMessageLayout : undefined}
-        />
-    ), [
+    const renderChatMessage = useCallback(({ item: msg, index }: { item: ChatMessage; index: number }) => {
+        if (msg.kind === 'model_switch') {
+            return (
+                <ChatSystemEventRow
+                    id={msg.id}
+                    fromModelId={msg.switchFromModelId ?? ''}
+                    toModelId={msg.switchToModelId ?? msg.modelId ?? ''}
+                    onLayout={index === messages.length - 1 ? handleLastMessageLayout : undefined}
+                />
+            );
+        }
+
+        return (
+            <ChatMessageBubble
+                id={msg.id}
+                isUser={msg.role === 'user'}
+                content={msg.content}
+                thoughtContent={msg.thoughtContent}
+                errorMessage={msg.errorMessage}
+                isStreaming={msg.state === 'streaming'}
+                tokensPerSec={msg.tokensPerSec}
+                canDelete={msg.state !== 'streaming'}
+                canRegenerate={
+                    msg.role === 'user'
+                    && msg.state === 'complete'
+                    && !isGenerating
+                    && !isInputDisabled
+                }
+                onDelete={handleDeleteMessage}
+                onRegenerate={handleBeginRegenerateFromMessage}
+                onLayout={index === messages.length - 1 ? handleLastMessageLayout : undefined}
+            />
+        );
+    }, [
         handleBeginRegenerateFromMessage,
         handleDeleteMessage,
         handleLastMessageLayout,

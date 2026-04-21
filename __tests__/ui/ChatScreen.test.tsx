@@ -118,6 +118,11 @@ const mockStartNewChat = jest.fn(() => {
 let mockLoadedContextSize: number | null = null;
 let mockLoadedGpuLayers: number | null = null;
 
+const reactI18nextMock = jest.requireMock('react-i18next') as {
+  __setTranslationOverride: (key: string, value: string, nextLanguage?: string) => void;
+  __resetTranslations: () => void;
+};
+
 function createDeferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
   let reject!: (reason?: unknown) => void;
@@ -572,6 +577,7 @@ describe('ChatScreen', () => {
   });
 
   beforeEach(() => {
+    reactI18nextMock.__resetTranslations();
     mockRegenerateFromUserMessage.mockClear();
     mockDeleteMessage.mockClear();
     mockStop.mockClear();
@@ -1146,6 +1152,39 @@ describe('ChatScreen', () => {
     });
     expect(mockRegenerateFromUserMessage).toHaveBeenCalledWith('message-1', 'Edited from test');
     expect(queryByText('chat.editEarlierMessage')).toBeNull();
+  });
+
+  it('renders model switch system events as a dedicated row', () => {
+    reactI18nextMock.__setTranslationOverride('chat.modelSwitchedLine', 'Model switched: {{from}} → {{to}}');
+
+    useChatStore.setState({
+      threads: {
+        'thread-1': {
+          ...useChatStore.getState().threads['thread-1'],
+          messages: [
+            ...useChatStore.getState().threads['thread-1'].messages,
+            {
+              id: 'switch-1',
+              role: 'system',
+              kind: 'model_switch',
+              content: 'should-not-render-as-bubble',
+              modelId: 'author/model-q8',
+              switchFromModelId: 'author/model-q4',
+              switchToModelId: 'author/model-q8',
+              createdAt: 3,
+              state: 'complete',
+            },
+          ],
+        },
+      },
+      activeThreadId: 'thread-1',
+    });
+
+    const { getByTestId, getByText, queryByText } = render(React.createElement(ChatScreen));
+
+    expect(getByTestId('chat-flash-list')).toBeTruthy();
+    expect(getByText('Model switched: model-q4 → model-q8')).toBeTruthy();
+    expect(queryByText('should-not-render-as-bubble')).toBeNull();
   });
 
   it('starts a new chat and clears the current thread from the screen', () => {

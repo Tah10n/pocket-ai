@@ -171,6 +171,7 @@
     "loadModel": "Load Model",
     "downloadModel": "Download Model",
     "modelUnavailable": "Model unavailable",
+    "modelSwitchedLine": "Model switched: {{from}} → {{to}}",
     "generationStopped": "Generation stopped. You can continue the thread or regenerate from any user message.",
     "summaryTrimmedTitle": "Older messages are being trimmed from the model context",
     "summaryTrimmedDescription_one": "{{count}} earlier message stays visible in the thread, but only recent context is sent during generation.",

@@ -761,7 +761,6 @@ describe('ChatScreen', () => {
       expect(onGoBack).toHaveBeenCalledTimes(1);
     });
   });
-
   it('keeps auto-scroll armed after a small scroll near the bottom', () => {
     expect(
       getNextShouldStickToBottom(

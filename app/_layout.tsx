@@ -1,5 +1,4 @@
 import { ThemeProvider } from '@react-navigation/native';
-import { requireOptionalNativeModule } from 'expo-modules-core';
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import * as SplashScreen from 'expo-splash-screen';
@@ -33,12 +32,19 @@ function patchExpoKeepAwake() {
   globalAny.__pocketAiExpoKeepAwakePatched = true;
 
   try {
-    const expoKeepAwake = requireOptionalNativeModule<any>('ExpoKeepAwake');
-    if (!expoKeepAwake) return;
+    // expo-doctor discourages depending on expo-modules-core directly.
+    // Patch the public JS API instead.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const expoKeepAwake = require('expo-keep-awake') as {
+      activateKeepAwake?: (...args: any[]) => Promise<void> | void;
+      deactivateKeepAwake?: (...args: any[]) => Promise<void> | void;
+    };
 
-    const wrap = (method: 'activate' | 'deactivate') => {
+    const wrap = (method: 'activateKeepAwake' | 'deactivateKeepAwake') => {
       const original = expoKeepAwake?.[method];
-      if (typeof original !== 'function') return;
+      if (typeof original !== 'function') {
+        return;
+      }
 
       expoKeepAwake[method] = async (...args: any[]) => {
         try {
@@ -53,8 +59,8 @@ function patchExpoKeepAwake() {
       };
     };
 
-    wrap('activate');
-    wrap('deactivate');
+    wrap('activateKeepAwake');
+    wrap('deactivateKeepAwake');
   } catch (e) {
     console.warn('[RootLayout] Failed to patch ExpoKeepAwake', e);
   }

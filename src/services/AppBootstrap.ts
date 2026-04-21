@@ -21,6 +21,7 @@ import { useModelsStore } from '../store/modelsStore';
 import { performanceMonitor } from './PerformanceMonitor';
 import { initializePrivateStorageEncryption } from './storage';
 import { toAppError } from './AppError';
+import { EngineStatus } from '../types/models';
 import { isHighConfidenceLikelyOomMemoryFit } from '../utils/modelMemoryFitState';
 import { safeJoinModelPath } from '../utils/safeFilePath';
 import {
@@ -204,6 +205,45 @@ function scheduleAfterFirstFrame(task: () => void): void {
   scheduleAfterPaint();
 }
 
+type BootRestoreSkipReason =
+  | 'settings_changed'
+  | 'engine_ready_other'
+  | 'engine_initializing_other'
+  | 'engine_already_target'
+  | 'engine_unknown';
+
+function resolveBootRestoreTarget(requestedModelId: string): { modelId: string | null; reason?: BootRestoreSkipReason } {
+  const settingsModelId = getSettings().activeModelId;
+  if (settingsModelId !== requestedModelId) {
+    return { modelId: null, reason: 'settings_changed' };
+  }
+
+  try {
+    const engineState = llmEngineService.getState();
+    if (
+      (engineState.status === EngineStatus.READY || engineState.status === EngineStatus.INITIALIZING)
+      && engineState.activeModelId
+      && engineState.activeModelId !== requestedModelId
+    ) {
+      return {
+        modelId: null,
+        reason: engineState.status === EngineStatus.READY ? 'engine_ready_other' : 'engine_initializing_other',
+      };
+    }
+
+    if (
+      (engineState.status === EngineStatus.READY || engineState.status === EngineStatus.INITIALIZING)
+      && engineState.activeModelId === requestedModelId
+    ) {
+      return { modelId: null, reason: 'engine_already_target' };
+    }
+  } catch {
+    return { modelId: null, reason: 'engine_unknown' };
+  }
+
+  return { modelId: requestedModelId };
+}
+
 function scheduleActiveModelRestore(activeModelId: string): void {
   scheduleAfterFirstFrame(() => {
     const restoreSpan = performanceMonitor.startSpan('bootstrap.restoreActiveModel', {
@@ -212,7 +252,13 @@ function scheduleActiveModelRestore(activeModelId: string): void {
 
     const restore = async () => {
       try {
-        await llmEngineService.load(activeModelId, { preferLastWorkingProfile: true });
+        const decision = resolveBootRestoreTarget(activeModelId);
+        if (!decision.modelId) {
+          restoreSpan.end({ outcome: 'skipped', reason: `skipped_stale_restore:${decision.reason ?? 'unknown'}` });
+          return;
+        }
+
+        await llmEngineService.load(decision.modelId, { preferLastWorkingProfile: true });
         restoreSpan.end({ outcome: 'success' });
       } catch (error) {
         const appError = toAppError(error);

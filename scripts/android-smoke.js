@@ -801,7 +801,7 @@ function installDebugApk(adbPath, serial, appPackage, options = {}) {
     return;
   }
 
-  if (output.includes("INSTALL_FAILED_INSUFFICIENT_STORAGE")) {
+  if (isInsufficientStorageInstallFailure(output)) {
     if (!allowReuseExistingInstallOnLowStorage) {
       throw new Error(
         "Android target storage is insufficient and the freshly built debug APK could not be installed. " +
@@ -826,6 +826,13 @@ function installDebugApk(adbPath, serial, appPackage, options = {}) {
   throw new Error(
     `Command failed: ${adbPath} -s ${serial} install -r ${apkPath}${trimmed ? `\n${trimmed}` : ""}`
   );
+}
+
+function isInsufficientStorageInstallFailure(output) {
+  const normalizedOutput = (output || "").toLowerCase();
+  return normalizedOutput.includes("install_failed_insufficient_storage")
+    || normalizedOutput.includes("insufficient storage")
+    || normalizedOutput.includes("not enough space");
 }
 
 function reverseMetroPort(adbPath, serial, port) {

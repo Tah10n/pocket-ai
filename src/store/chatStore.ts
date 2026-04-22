@@ -684,7 +684,7 @@ export const useChatStore = create<ChatStoreState>()(
               errorMessage: undefined,
               regeneratesMessageId: undefined,
               kind: 'message',
-              modelId: existingTargetMessage.modelId ?? modelId,
+              modelId,
             },
             {
               id: nextAssistantMessageId,

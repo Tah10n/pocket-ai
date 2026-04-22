@@ -491,6 +491,80 @@ describe('chatStore', () => {
     ]);
   });
 
+  it('replaces an older user branch with the active switched model metadata', () => {
+    const threadId = useChatStore.getState().createThread({
+      modelId: 'author/model-q4',
+      presetId: null,
+      presetSnapshot: {
+        id: null,
+        name: 'Default',
+        systemPrompt: 'You are helpful.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 1024,
+        seed: null,
+      },
+    });
+
+    useChatStore.getState().appendMessage(threadId, {
+      id: 'user-1',
+      role: 'user',
+      content: 'First prompt',
+      createdAt: 1,
+      state: 'complete',
+    });
+    useChatStore.getState().appendMessage(threadId, {
+      id: 'assistant-1',
+      role: 'assistant',
+      content: 'First reply',
+      createdAt: 2,
+      state: 'complete',
+    });
+    useChatStore.getState().appendMessage(threadId, {
+      id: 'user-2',
+      role: 'user',
+      content: 'Second prompt',
+      createdAt: 3,
+      state: 'complete',
+    });
+    useChatStore.getState().appendMessage(threadId, {
+      id: 'assistant-2',
+      role: 'assistant',
+      content: 'Second reply',
+      createdAt: 4,
+      state: 'complete',
+    });
+
+    useChatStore.getState().switchThreadModel(threadId, 'author/model-q8', 5);
+
+    const replacementAssistantId = useChatStore.getState().replaceBranchFromUserMessage(
+      threadId,
+      'user-1',
+      'Edited first prompt',
+    );
+
+    expect(replacementAssistantId).toBeTruthy();
+    expect(useChatStore.getState().getThread(threadId)?.messages).toEqual([
+      expect.objectContaining({
+        id: 'user-1',
+        role: 'user',
+        content: 'Edited first prompt',
+        kind: 'message',
+        modelId: 'author/model-q8',
+      }),
+      expect.objectContaining({
+        id: replacementAssistantId,
+        role: 'assistant',
+        content: '',
+        state: 'streaming',
+        kind: 'message',
+        modelId: 'author/model-q8',
+      }),
+    ]);
+  });
+
   it('deletes a message branch and resets the thread to earlier messages', () => {
     const threadId = useChatStore.getState().createThread({
       modelId: 'author/model-q4',

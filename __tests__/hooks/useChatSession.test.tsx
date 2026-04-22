@@ -1031,8 +1031,68 @@ describe('useChatSession', () => {
       maxTokens: 1024,
     });
 
-    await expect(getSession()?.regenerateLastResponse()).resolves.toBe(true);
+    let didRegenerate = false;
+    await act(async () => {
+      didRegenerate = await getSession()?.regenerateLastResponse() ?? false;
+    });
+
+    expect(didRegenerate).toBe(true);
     expect(useChatStore.getState().getActiveThread()?.messages.some((message) => message.kind === 'model_switch')).toBe(false);
+  });
+
+  it('rebuilds the last turn instead of leaving a trailing model switch after regenerate', async () => {
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('First prompt');
+    });
+
+    const originalThread = useChatStore.getState().getActiveThread();
+    expect(originalThread).toBeTruthy();
+    const originalAssistantId = originalThread?.messages.at(-1)?.id;
+
+    await act(async () => {
+      useChatStore.getState().switchThreadModel(originalThread!.id, 'author/model-q8', 2);
+    });
+
+    (llmEngineService.getState as jest.Mock).mockReturnValue({
+      status: EngineStatus.READY,
+      activeModelId: 'author/model-q8',
+    });
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      async ({ onToken }: { onToken?: (token: string) => void }) => {
+        onToken?.('Fresh q8 reply');
+        return { text: 'Fresh q8 reply' };
+      },
+    );
+
+    await act(async () => {
+      await getSession()?.regenerateLastResponse();
+    });
+
+    const thread = useChatStore.getState().getActiveThread();
+
+    expect(thread?.activeModelId).toBe('author/model-q8');
+    expect(thread?.messages).toHaveLength(2);
+    expect(thread?.messages.some((message) => message.kind === 'model_switch')).toBe(false);
+    expect(thread?.messages[0]).toEqual(
+      expect.objectContaining({
+        role: 'user',
+        content: 'First prompt',
+        kind: 'message',
+        modelId: 'author/model-q8',
+      }),
+    );
+    expect(thread?.messages[1]).toEqual(
+      expect.objectContaining({
+        role: 'assistant',
+        content: 'Fresh q8 reply',
+        state: 'complete',
+        kind: 'message',
+        modelId: 'author/model-q8',
+      }),
+    );
+    expect(thread?.messages[1]?.id).not.toBe(originalAssistantId);
   });
 
   it('switches to another saved thread when opening a conversation explicitly', async () => {

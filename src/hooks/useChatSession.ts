@@ -754,6 +754,14 @@ export const useChatSession = () => {
       return false;
     }
 
+    // If the thread currently ends with a model-switch marker, regenerating the last
+    // assistant in place would leave that marker trailing after the new assistant
+    // response (`user -> assistant -> model_switch`). Rebuild the tail from the last
+    // user message instead so the regenerated branch stays chronologically coherent.
+    if (activeThread.messages.at(-1)?.kind === 'model_switch') {
+      return regenerateFromUserMessage(lastUserMessage.id, lastUserMessage.content);
+    }
+
     ensureThreadCanGenerate(activeThread, 'regenerating this response');
     const syncedThread = syncThreadParametersCallback(activeThread);
 

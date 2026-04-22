@@ -51,6 +51,7 @@
     "web": "expo start --web",
     "lint": "expo lint --max-warnings 0",
     "test": "node ./node_modules/jest/bin/jest.js --runInBand",
+    "coverage": "node ./node_modules/jest/bin/jest.js --runInBand --coverage",
     "typecheck": "tsc --noEmit",
     "verify:mobile-change": "npm run typecheck && npm run lint && npm test",
     "verify:mobile-change:android": "npm run verify:mobile-change && npm run android:scenarios",

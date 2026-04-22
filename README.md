@@ -119,6 +119,20 @@ npm run ios        # Run on iOS
 
 For release builds and signing setup, see the [Android Build Guide](docs/android-build.md) and [iOS Build Guide](docs/ios-build.md).
 
+## Tests and coverage
+
+```bash
+npm test
+```
+
+Generate a Jest coverage report locally:
+
+```bash
+npm run coverage
+```
+
+Coverage output is written to `coverage/`.
+
 ## Contributing
 
 Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines and the [Code of Conduct](CODE_OF_CONDUCT.md).

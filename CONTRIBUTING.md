@@ -116,6 +116,14 @@ npm run lint
 npm test
 ```
 
+If you need a local Jest coverage report, run:
+
+```bash
+npm run coverage
+```
+
+Coverage output is written to `coverage/`.
+
 For most app changes, the default verification gate is:
 
 ```bash

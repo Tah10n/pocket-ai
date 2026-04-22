@@ -62,13 +62,13 @@ If the release changes shared theme, tab chrome, routed headers, localization fi
 
 ```bash
 npm run verify:mobile-change
-node .\scripts\android-scenarios.js --skip-build --scenario home-smoke
-node .\scripts\android-scenarios.js --skip-build --scenario bottom-tabs
+npm run android:scenarios -- --skip-build
 node .\scripts\android-scenarios.js --skip-build --scenario hf-catalog-hardening
-node .\scripts\android-scenarios.js --skip-build --scenario hf-token-education
-node .\scripts\android-scenarios.js --skip-build --scenario conversations-management
 node .\scripts\android-screen-capture.js --skip-build --screen home,models,settings,conversations,huggingface-token,model-details --output-dir artifacts/android-scenarios/manual-sample
 ```
+
+The raw runner defaults to the small core pack (`home-smoke`, `bottom-tabs`, `new-chat-cta`).
+`npm run android:scenarios` uses the extended stable pack, while noisy catalog/perf checks should stay targeted via `--scenario <id>`.
 
 ## Build commands
 

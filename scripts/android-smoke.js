@@ -4,6 +4,7 @@ const fs = require("fs");
 const http = require("http");
 const net = require("net");
 const path = require("path");
+const crypto = require("crypto");
 const { spawn, spawnSync } = require("child_process");
 
 const cliOptions = require.main === module ? parseCliOptions(process.argv.slice(2)) : {};
@@ -13,6 +14,11 @@ const androidRoot = path.join(projectRoot, "android");
 const localPropertiesPath = path.join(androidRoot, "local.properties");
 const appConfigPath = path.join(projectRoot, "app.json");
 const packageJsonPath = path.join(projectRoot, "package.json");
+const packageLockPath = path.join(projectRoot, "package-lock.json");
+const npmShrinkwrapPath = path.join(projectRoot, "npm-shrinkwrap.json");
+const patchesRoot = path.join(projectRoot, "patches");
+const appConfigJsPath = path.join(projectRoot, "app.config.js");
+const appConfigTsPath = path.join(projectRoot, "app.config.ts");
 const gradleWrapperPath = path.join(
   androidRoot,
   process.platform === "win32" ? "gradlew.bat" : "gradlew"
@@ -26,6 +32,8 @@ const apkPath = path.join(
   "debug",
   "app-debug.apk"
 );
+const cacheRoot = path.join(artifactsRoot, ".cache");
+const buildStampPath = path.join(cacheRoot, "android-debug-build.json");
 const requiredNativeLibraries = ["libreactnative.so"];
 const metroStartupTimeoutMs = 90_000;
 const deviceStartupTimeoutMs = 180_000;
@@ -97,27 +105,23 @@ async function main() {
 
   const wantsSkipBuild = cliOptions.skipBuild || process.env.ANDROID_SKIP_BUILD === "1";
   let didBuildDebugApk = false;
-  if (wantsSkipBuild && fs.existsSync(apkPath)) {
-    const reuseDecision = resolveDebugApkReuseDecision(tools.adb, device.serial, apkPath);
-    if (reuseDecision.canReuse) {
-      const abiLabel = reuseDecision.matchedAbi ? ` for ABI ${reuseDecision.matchedAbi}` : "";
-      log(`Skipping Gradle build and reusing the existing debug APK${abiLabel}.`);
-    } else {
-      const abiLabel = reuseDecision.supportedAbis.length > 0
-        ? reuseDecision.supportedAbis.join(", ")
-        : "unknown target ABI";
-      const missingLabel = reuseDecision.missingEntries.length > 0
-        ? ` Missing entries: ${reuseDecision.missingEntries.join(", ")}.`
-        : "";
-      log(
-        `Requested --skip-build, but the existing debug APK is incompatible with ${abiLabel}.${missingLabel} Rebuilding instead.`
-      );
-      buildDebugApk();
-      didBuildDebugApk = true;
-    }
+  const buildInputState = collectNativeBuildInputState();
+  const buildReuse = resolveBuildReuseState(tools.adb, device.serial, buildInputState);
+  if (buildReuse.canReuse) {
+    const abiLabel = buildReuse.reuseDecision.matchedAbi
+      ? ` for ABI ${buildReuse.reuseDecision.matchedAbi}`
+      : "";
+    const prefix = wantsSkipBuild ? "Skipping Gradle build" : "Reusing the existing debug APK";
+    log(`${prefix}${abiLabel} (${buildReuse.reason}).`);
+    writeBuildStamp(buildInputState, buildReuse.apkFingerprint);
   } else {
+    const prefix = wantsSkipBuild
+      ? "Requested --skip-build, but the existing debug APK cannot be reused"
+      : "Building a fresh Android debug APK";
+    log(`${prefix} (${buildReuse.reason}).`);
     buildDebugApk();
     didBuildDebugApk = true;
+    writeBuildStamp(collectNativeBuildInputState(), createFileFingerprint(apkPath));
   }
 
   if (!fs.existsSync(apkPath)) {
@@ -128,6 +132,7 @@ async function main() {
 
   installDebugApk(tools.adb, device.serial, appPackage, {
     allowReuseExistingInstallOnLowStorage: !didBuildDebugApk,
+    didBuildDebugApk,
   });
   reverseMetroPort(tools.adb, device.serial, metro.port);
 
@@ -242,6 +247,219 @@ function readExpoConfig() {
     scheme: expo.scheme,
     packageName: expo.android && expo.android.package,
   };
+}
+
+function collectNativeBuildInputState() {
+  const entries = [];
+  const addFile = (filePath) => {
+    if (!fs.existsSync(filePath)) {
+      return;
+    }
+
+    const stats = fs.statSync(filePath);
+    if (!stats.isFile()) {
+      return;
+    }
+
+    entries.push({
+      path: toProjectRelativePath(filePath),
+      size: stats.size,
+      mtimeMs: Math.round(stats.mtimeMs),
+    });
+  };
+
+  const addTree = (rootPath) => {
+    if (!fs.existsSync(rootPath)) {
+      return;
+    }
+
+    const stats = fs.statSync(rootPath);
+    if (stats.isFile()) {
+      addFile(rootPath);
+      return;
+    }
+
+    const entriesInDirectory = fs.readdirSync(rootPath, { withFileTypes: true })
+      .sort((left, right) => left.name.localeCompare(right.name));
+
+    for (const entry of entriesInDirectory) {
+      const fullPath = path.join(rootPath, entry.name);
+      const relativePath = toProjectRelativePath(fullPath);
+      if (isExcludedNativeBuildInput(relativePath)) {
+        continue;
+      }
+
+      if (entry.isDirectory()) {
+        addTree(fullPath);
+        continue;
+      }
+
+      if (entry.isFile()) {
+        addFile(fullPath);
+      }
+    }
+  };
+
+  addFile(appConfigPath);
+  addFile(appConfigJsPath);
+  addFile(appConfigTsPath);
+  addFile(packageJsonPath);
+  addFile(packageLockPath);
+  addFile(npmShrinkwrapPath);
+  addTree(patchesRoot);
+  addTree(androidRoot);
+
+  const latestInputMtimeMs = entries.reduce(
+    (latest, entry) => Math.max(latest, entry.mtimeMs),
+    0
+  );
+
+  return {
+    entries,
+    fingerprint: hashMetadataEntries(entries),
+    latestInputMtimeMs,
+  };
+}
+
+function isExcludedNativeBuildInput(relativePath) {
+  const normalized = normalizePath(relativePath);
+
+  return normalized === "android/local.properties"
+    || normalized === "android/build"
+    || normalized === "android/.gradle"
+    || normalized === "android/.cxx"
+    || normalized === "android/app/build"
+    || normalized.startsWith("android/build/")
+    || normalized.startsWith("android/.gradle/")
+    || normalized.startsWith("android/.cxx/")
+    || normalized.startsWith("android/app/build/");
+}
+
+function resolveBuildReuseState(adbPath, serial, buildInputState) {
+  const apkExists = fs.existsSync(apkPath);
+  const apkFingerprint = apkExists ? createFileFingerprint(apkPath) : null;
+  const reuseDecision = apkExists
+    ? resolveDebugApkReuseDecision(adbPath, serial, apkPath)
+    : {
+      canReuse: false,
+      matchedAbi: null,
+      supportedAbis: [],
+      missingEntries: [],
+    };
+  const buildStamp = readJsonFile(buildStampPath);
+  const fingerprintMatches = Boolean(
+    buildStamp
+      && apkFingerprint
+      && buildStamp.nativeFingerprint === buildInputState.fingerprint
+      && buildStamp.apkFingerprint === apkFingerprint.fingerprint
+  );
+  const apkIsFreshByTime = Boolean(
+    apkFingerprint && buildInputState.latestInputMtimeMs <= apkFingerprint.mtimeMs
+  );
+
+  return {
+    ...evaluateApkReuse({
+      apkExists,
+      abiCompatible: reuseDecision.canReuse,
+      fingerprintMatches,
+      apkIsFreshByTime,
+    }),
+    apkFingerprint,
+    reuseDecision,
+  };
+}
+
+function evaluateApkReuse({ apkExists, abiCompatible, fingerprintMatches, apkIsFreshByTime }) {
+  if (!apkExists) {
+    return {
+      canReuse: false,
+      reason: "debug APK is missing",
+    };
+  }
+
+  if (!abiCompatible) {
+    return {
+      canReuse: false,
+      reason: "the existing debug APK is incompatible with the target device ABI",
+    };
+  }
+
+  if (fingerprintMatches) {
+    return {
+      canReuse: true,
+      reason: "native build fingerprint matches the current APK",
+    };
+  }
+
+  if (apkIsFreshByTime) {
+    return {
+      canReuse: true,
+      reason: "the current APK is newer than all tracked native build inputs",
+    };
+  }
+
+  return {
+    canReuse: false,
+    reason: "tracked native build inputs are newer than the current APK",
+  };
+}
+
+function createFileFingerprint(filePath) {
+  const stats = fs.statSync(filePath);
+  const metadata = {
+    path: toProjectRelativePath(filePath),
+    size: stats.size,
+    mtimeMs: Math.round(stats.mtimeMs),
+  };
+
+  return {
+    ...metadata,
+    fingerprint: hashMetadataEntries([metadata]),
+  };
+}
+
+function hashMetadataEntries(entries) {
+  return crypto.createHash("sha1").update(JSON.stringify(entries)).digest("hex");
+}
+
+function writeBuildStamp(buildInputState, apkFingerprint) {
+  writeJsonFile(buildStampPath, {
+    updatedAt: new Date().toISOString(),
+    nativeFingerprint: buildInputState.fingerprint,
+    latestInputMtimeMs: buildInputState.latestInputMtimeMs,
+    trackedInputCount: buildInputState.entries.length,
+    apkFingerprint: apkFingerprint.fingerprint,
+    apkPath: apkFingerprint.path,
+    apkSize: apkFingerprint.size,
+    apkMtimeMs: apkFingerprint.mtimeMs,
+  });
+}
+
+function readJsonFile(filePath) {
+  if (!fs.existsSync(filePath)) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    log(`Ignoring unreadable JSON file at ${filePath} (${message}).`);
+    return null;
+  }
+}
+
+function writeJsonFile(filePath, value) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, JSON.stringify(value, null, 2));
+}
+
+function toProjectRelativePath(filePath) {
+  return normalizePath(path.relative(projectRoot, filePath));
+}
+
+function normalizePath(value) {
+  return `${value}`.replace(/\\/g, "/");
 }
 
 function resolveDebugApkReuseDecision(adbPath, serial, apkFilePath) {
@@ -770,20 +988,28 @@ function resolveNpxCommand() {
   return process.platform === "win32" ? "npx.cmd" : "npx";
 }
 
-function isPackageInstalled(adbPath, serial, appPackage) {
-  const output = runCapture(
-    adbPath,
-    ["-s", serial, "shell", "pm", "path", appPackage],
-    { allowFailure: true }
-  ).trim();
-
-  return output.startsWith("package:");
-}
-
 function installDebugApk(adbPath, serial, appPackage, options = {}) {
-  log("Installing debug APK...");
   const allowReuseExistingInstallOnLowStorage =
     options.allowReuseExistingInstallOnLowStorage !== false;
+  const didBuildDebugApk = options.didBuildDebugApk === true;
+  const apkFingerprint = createFileFingerprint(apkPath);
+  const installedPackageInfo = readInstalledPackageInfo(adbPath, serial, appPackage);
+  const installStampPath = resolveInstallStampPath(serial, appPackage);
+  const installStamp = readJsonFile(installStampPath);
+  const installReuse = evaluateInstallReuse({
+    packageInstalled: installedPackageInfo.installed,
+    didBuildDebugApk,
+    installStamp,
+    apkFingerprint,
+    devicePackageInfo: installedPackageInfo,
+  });
+
+  if (installReuse.canReuse) {
+    log(`Reusing the existing app installation (${installReuse.reason}).`);
+    return;
+  }
+
+  log("Installing debug APK...");
 
   const result = spawnSync(adbPath, ["-s", serial, "install", "-r", apkPath], {
     encoding: "utf8",
@@ -800,6 +1026,7 @@ function installDebugApk(adbPath, serial, appPackage, options = {}) {
   }
 
   if (result.status === 0) {
+    writeInstallStamp(serial, appPackage, apkFingerprint, readInstalledPackageInfo(adbPath, serial, appPackage));
     return;
   }
 
@@ -811,15 +1038,8 @@ function installDebugApk(adbPath, serial, appPackage, options = {}) {
       );
     }
 
-    log("APK install failed due to insufficient storage. Attempting to reuse the existing app installation...");
-
-    if (isPackageInstalled(adbPath, serial, appPackage)) {
-      log("Existing installation detected. Continuing without reinstalling the debug APK.");
-      return;
-    }
-
     throw new Error(
-      "Android target storage is insufficient and the app is not currently installed. " +
+      "Android target storage is insufficient and the current app installation could not be verified against the requested debug APK. " +
         "Free space on the device/emulator (or wipe the emulator) and retry."
     );
   }
@@ -830,16 +1050,164 @@ function installDebugApk(adbPath, serial, appPackage, options = {}) {
   );
 }
 
+function evaluateInstallReuse({
+  packageInstalled,
+  didBuildDebugApk,
+  installStamp,
+  apkFingerprint,
+  devicePackageInfo,
+}) {
+  if (!packageInstalled) {
+    return {
+      canReuse: false,
+      reason: "the app is not installed on the target device yet",
+    };
+  }
+
+  if (didBuildDebugApk) {
+    return {
+      canReuse: false,
+      reason: "a fresh debug APK was built for this run",
+    };
+  }
+
+  if (!installStamp) {
+    return {
+      canReuse: false,
+      reason: "no install stamp exists for this device yet",
+    };
+  }
+
+  if (installStamp.apkFingerprint !== apkFingerprint.fingerprint) {
+    return {
+      canReuse: false,
+      reason: "the installed-app stamp points to a different debug APK",
+    };
+  }
+
+  if (!devicePackageInfo || !devicePackageInfo.installed || !devicePackageInfo.packagePath) {
+    return {
+      canReuse: false,
+      reason: "current installed-app metadata is unavailable",
+    };
+  }
+
+  if (installStamp.packagePath && installStamp.packagePath !== devicePackageInfo.packagePath) {
+    return {
+      canReuse: false,
+      reason: "the installed app path changed on the device",
+    };
+  }
+
+  if (
+    installStamp.lastUpdateTime
+    && devicePackageInfo.lastUpdateTime
+    && installStamp.lastUpdateTime !== devicePackageInfo.lastUpdateTime
+  ) {
+    return {
+      canReuse: false,
+      reason: "the installed app update time changed on the device",
+    };
+  }
+
+  if (
+    installStamp.versionCode
+    && devicePackageInfo.versionCode
+    && installStamp.versionCode !== devicePackageInfo.versionCode
+  ) {
+    return {
+      canReuse: false,
+      reason: "the installed app version code changed on the device",
+    };
+  }
+
+  return {
+    canReuse: true,
+    reason: "the installed app still matches the current debug APK",
+  };
+}
+
+function readInstalledPackageInfo(adbPath, serial, appPackage) {
+  const packagePathOutput = runCapture(
+    adbPath,
+    ["-s", serial, "shell", "pm", "path", appPackage],
+    { allowFailure: true }
+  );
+  const packagePath = parsePackagePathOutput(packagePathOutput);
+  if (!packagePath) {
+    return {
+      installed: false,
+      packagePath: null,
+      lastUpdateTime: null,
+      versionCode: null,
+    };
+  }
+
+  const dumpsysOutput = runCapture(
+    adbPath,
+    ["-s", serial, "shell", "dumpsys", "package", appPackage],
+    { allowFailure: true }
+  );
+  const packageMetadata = parseDumpsysPackageOutput(dumpsysOutput);
+
+  return {
+    installed: true,
+    packagePath,
+    lastUpdateTime: packageMetadata.lastUpdateTime,
+    versionCode: packageMetadata.versionCode,
+  };
+}
+
+function parsePackagePathOutput(output) {
+  return `${output}`
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line.startsWith("package:"))
+    ?.slice("package:".length) || null;
+}
+
+function parseDumpsysPackageOutput(output) {
+  const normalized = `${output}`;
+  const lastUpdateTimeMatch = normalized.match(/lastUpdateTime=(.+)/);
+  const versionCodeMatch = normalized.match(/versionCode=(\d+)/);
+
+  return {
+    lastUpdateTime: lastUpdateTimeMatch ? lastUpdateTimeMatch[1].trim() : null,
+    versionCode: versionCodeMatch ? versionCodeMatch[1] : null,
+  };
+}
+
+function resolveInstallStampPath(serial, appPackage) {
+  const safeSerial = sanitizeForFileName(serial);
+  const safePackage = sanitizeForFileName(appPackage);
+  return path.join(cacheRoot, `install-${safeSerial}-${safePackage}.json`);
+}
+
+function writeInstallStamp(serial, appPackage, apkFingerprint, installedPackageInfo) {
+  writeJsonFile(resolveInstallStampPath(serial, appPackage), {
+    updatedAt: new Date().toISOString(),
+    serial,
+    packageName: appPackage,
+    apkFingerprint: apkFingerprint.fingerprint,
+    apkPath: apkFingerprint.path,
+    apkSize: apkFingerprint.size,
+    apkMtimeMs: apkFingerprint.mtimeMs,
+    packagePath: installedPackageInfo.packagePath || null,
+    lastUpdateTime: installedPackageInfo.lastUpdateTime || null,
+    versionCode: installedPackageInfo.versionCode || null,
+  });
+}
+
+function sanitizeForFileName(value) {
+  return `${value}`.replace(/[^a-zA-Z0-9._-]+/g, "_");
+}
+
 function isInsufficientStorageInstallFailure(output) {
   const normalizedOutput = (output || "").toLowerCase();
   return normalizedOutput.includes("install_failed_insufficient_storage")
     || normalizedOutput.includes("insufficient storage")
     || normalizedOutput.includes("not enough space");
 }
-
-module.exports = {
-  isInsufficientStorageInstallFailure,
-};
 
 function reverseMetroPort(adbPath, serial, port) {
   log(`Reversing device port ${port} to localhost:${port}...`);
@@ -1164,3 +1532,12 @@ function wakeAndUnlockDevice(adbPath, serial) {
     allowFailure: true,
   });
 }
+
+module.exports = {
+  evaluateApkReuse,
+  evaluateInstallReuse,
+  isInsufficientStorageInstallFailure,
+  parseDumpsysPackageOutput,
+  parsePackagePathOutput,
+  sanitizeForFileName,
+};

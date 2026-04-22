@@ -166,5 +166,52 @@ describe('RecentConversationsList', () => {
 
     expect(onViewAllConversations).toHaveBeenCalledTimes(1);
   });
+
+  it('renders the empty state when there is nothing to show and no manage handler is provided', () => {
+    mockUseChatStore.mockImplementation((selector: any) =>
+      selector({
+        threads: {},
+      }),
+    );
+
+    const { getByText, queryByTestId } = render(<RecentConversationsList />);
+
+    expect(getByText('home.noConversationsTitle')).toBeTruthy();
+    expect(getByText('home.noConversationsDescription')).toBeTruthy();
+    expect(queryByTestId('manage-conversations-button')).toBeNull();
+  });
+
+  it('opens and deletes conversations through the row action callbacks', () => {
+    const thread = createThread(1, 1_000_000);
+    const onOpenConversation = jest.fn();
+    const onDeleteConversation = jest.fn();
+
+    mockUseChatStore.mockImplementation((selector: any) =>
+      selector({
+        threads: {
+          [thread.id]: thread,
+        },
+      }),
+    );
+
+    const { getByTestId } = render(
+      <RecentConversationsList
+        onOpenConversation={onOpenConversation}
+        onDeleteConversation={onDeleteConversation}
+      />,
+    );
+
+    fireEvent.press(getByTestId('recent-conversation-thread-1'));
+    fireEvent.press(getByTestId('delete-conversation-thread-1'));
+
+    expect(onOpenConversation).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'thread-1',
+      title: 'Conversation 1',
+    }));
+    expect(onDeleteConversation).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'thread-1',
+      title: 'Conversation 1',
+    }));
+  });
 });
 

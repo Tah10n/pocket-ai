@@ -35,6 +35,10 @@ describe('conversations utils', () => {
     expect(getConversationModelLabel('author/model-q4')).toBe('model-q4');
   });
 
+  it('falls back to the raw model id when there is no short model label', () => {
+    expect(getConversationModelLabel('')).toBe('');
+  });
+
   it('matches conversations by title, preview, or model identifiers', () => {
     const conversation = {
       id: 'thread-1',

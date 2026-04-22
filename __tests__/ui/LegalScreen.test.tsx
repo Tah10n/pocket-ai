@@ -5,12 +5,13 @@ import { LegalScreen } from '../../src/ui/screens/LegalScreen';
 
 const mockBack = jest.fn();
 const mockReplace = jest.fn();
+let mockCanGoBack = true;
 
 jest.mock('expo-router', () => ({
   useRouter: () => ({
     back: mockBack,
     replace: mockReplace,
-    canGoBack: () => true,
+    canGoBack: () => mockCanGoBack,
   }),
 }));
 
@@ -45,6 +46,7 @@ describe('LegalScreen', () => {
   beforeEach(() => {
     mockBack.mockReset();
     mockReplace.mockReset();
+    mockCanGoBack = true;
   });
 
   it('renders all disclosure sections', () => {
@@ -85,5 +87,25 @@ describe('LegalScreen', () => {
 
     expect(mockBack).toHaveBeenCalledTimes(1);
     expect(mockReplace).not.toHaveBeenCalled();
+  });
+
+  it('falls back to settings when there is no back stack', () => {
+    mockCanGoBack = false;
+
+    const { getByTestId } = render(
+      <SafeAreaProvider
+        initialMetrics={{
+          frame: { x: 0, y: 0, width: 390, height: 844 },
+          insets: { top: 0, left: 0, right: 0, bottom: 0 },
+        }}
+      >
+        <LegalScreen />
+      </SafeAreaProvider>,
+    );
+
+    fireEvent.press(getByTestId('legal-back-button'));
+
+    expect(mockBack).not.toHaveBeenCalled();
+    expect(mockReplace).toHaveBeenCalledWith('/(tabs)/settings');
   });
 });

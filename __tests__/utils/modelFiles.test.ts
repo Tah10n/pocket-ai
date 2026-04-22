@@ -33,4 +33,14 @@ describe('modelFiles', () => {
     ]));
     expect(candidates[0]).toBe(fileName);
   });
+
+  it('falls back to sanitized default segments and gguf extension when metadata is unusable', () => {
+    const fileName = getModelDownloadFileName({
+      id: '///',
+      resolvedFileName: undefined,
+      hfRevision: '   ',
+    });
+
+    expect(fileName).toMatch(/^model-main-[a-z0-9]+\.gguf$/);
+  });
 });

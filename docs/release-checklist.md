@@ -175,6 +175,9 @@ keyPassword=your-key-password
 
 - Open `Chat` and send a prompt with a loaded model.
 - Confirm streaming, stop, and regenerate behavior.
+- Switch to a different downloaded model from the chat header and confirm the current conversation stays open, the header updates to the selected model, and a `Model switched` system row appears in the transcript.
+- After switching models in chat, open Model Controls and confirm the active chat model shows `Apply & reload` instead of `Save load profile`.
+- Switch models more than once in the same conversation, then edit or regenerate an older user turn and confirm the rebuilt branch stays aligned with the intended active model.
 - Start a longer generation, then background the app and confirm Android shows a persistent generation notification and a completion notification when finished. Tap the notification and confirm it returns you to the chat.
 - While sending, confirm the header stays stable, does not add a redundant `Generating` label, and the composer does not visibly jump on Android.
 - With the Android keyboard open, confirm the composer keeps a small but visible gap above the keyboard instead of touching it or floating too high.

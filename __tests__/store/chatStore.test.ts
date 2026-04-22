@@ -565,6 +565,122 @@ describe('chatStore', () => {
     ]);
   });
 
+  it('inserts a replacement model switch when regenerating an older branch after multiple switches', () => {
+    const threadId = useChatStore.getState().createThread({
+      modelId: 'author/model-q4',
+      presetId: null,
+      presetSnapshot: {
+        id: null,
+        name: 'Default',
+        systemPrompt: 'You are helpful.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 1024,
+        seed: null,
+      },
+    });
+
+    useChatStore.getState().appendMessage(threadId, {
+      id: 'user-1',
+      role: 'user',
+      content: 'First prompt',
+      createdAt: 1,
+      state: 'complete',
+    });
+    useChatStore.getState().appendMessage(threadId, {
+      id: 'assistant-1',
+      role: 'assistant',
+      content: 'First reply',
+      createdAt: 2,
+      state: 'complete',
+    });
+
+    const firstSwitchId = useChatStore.getState().switchThreadModel(threadId, 'author/model-q8', 3);
+
+    useChatStore.getState().appendMessage(threadId, {
+      id: 'user-2',
+      role: 'user',
+      content: 'Second prompt',
+      createdAt: 4,
+      state: 'complete',
+    });
+    useChatStore.getState().appendMessage(threadId, {
+      id: 'assistant-2',
+      role: 'assistant',
+      content: 'Second reply',
+      createdAt: 5,
+      state: 'complete',
+    });
+
+    useChatStore.getState().switchThreadModel(threadId, 'author/model-q6', 6);
+
+    const replacementAssistantId = useChatStore.getState().replaceBranchFromUserMessage(
+      threadId,
+      'user-2',
+      'Edited second prompt',
+    );
+
+    const thread = useChatStore.getState().getThread(threadId);
+    const modelSwitchMessages = thread?.messages.filter((message) => message.kind === 'model_switch') ?? [];
+
+    expect(firstSwitchId).toBeTruthy();
+    expect(replacementAssistantId).toBeTruthy();
+    expect(thread?.activeModelId).toBe('author/model-q6');
+    expect(modelSwitchMessages).toHaveLength(2);
+    expect(modelSwitchMessages).toEqual([
+      expect.objectContaining({
+        id: firstSwitchId,
+        switchFromModelId: 'author/model-q4',
+        switchToModelId: 'author/model-q8',
+      }),
+      expect.objectContaining({
+        switchFromModelId: 'author/model-q8',
+        switchToModelId: 'author/model-q6',
+      }),
+    ]);
+    expect(thread?.messages).toEqual([
+      expect.objectContaining({
+        id: 'user-1',
+        role: 'user',
+        content: 'First prompt',
+        modelId: 'author/model-q4',
+      }),
+      expect.objectContaining({
+        id: 'assistant-1',
+        role: 'assistant',
+        content: 'First reply',
+        modelId: 'author/model-q4',
+      }),
+      expect.objectContaining({
+        id: firstSwitchId,
+        kind: 'model_switch',
+        switchToModelId: 'author/model-q8',
+      }),
+      expect.objectContaining({
+        kind: 'model_switch',
+        switchFromModelId: 'author/model-q8',
+        switchToModelId: 'author/model-q6',
+      }),
+      expect.objectContaining({
+        id: 'user-2',
+        role: 'user',
+        content: 'Edited second prompt',
+        kind: 'message',
+        modelId: 'author/model-q6',
+      }),
+      expect.objectContaining({
+        id: replacementAssistantId,
+        role: 'assistant',
+        content: '',
+        state: 'streaming',
+        kind: 'message',
+        modelId: 'author/model-q6',
+      }),
+    ]);
+  });
+
   it('deletes a message branch and resets the thread to earlier messages', () => {
     const threadId = useChatStore.getState().createThread({
       modelId: 'author/model-q4',
@@ -610,6 +726,83 @@ describe('chatStore', () => {
         id: 'user-1',
         role: 'user',
         content: 'First prompt',
+      }),
+    ]);
+  });
+
+  it('recomputes activeModelId from the surviving history when deleting an older branch after multiple switches', () => {
+    const threadId = useChatStore.getState().createThread({
+      modelId: 'author/model-q4',
+      presetId: null,
+      presetSnapshot: {
+        id: null,
+        name: 'Default',
+        systemPrompt: 'You are helpful.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 1024,
+        seed: null,
+      },
+    });
+
+    useChatStore.getState().appendMessage(threadId, {
+      id: 'user-1',
+      role: 'user',
+      content: 'First prompt',
+      createdAt: 1,
+      state: 'complete',
+    });
+    useChatStore.getState().appendMessage(threadId, {
+      id: 'assistant-1',
+      role: 'assistant',
+      content: 'First reply',
+      createdAt: 2,
+      state: 'complete',
+    });
+    useChatStore.getState().switchThreadModel(threadId, 'author/model-q8', 3);
+    useChatStore.getState().appendMessage(threadId, {
+      id: 'user-2',
+      role: 'user',
+      content: 'Second prompt',
+      createdAt: 4,
+      state: 'complete',
+    });
+    useChatStore.getState().appendMessage(threadId, {
+      id: 'assistant-2',
+      role: 'assistant',
+      content: 'Second reply',
+      createdAt: 5,
+      state: 'complete',
+    });
+    useChatStore.getState().switchThreadModel(threadId, 'author/model-q6', 6);
+
+    expect(useChatStore.getState().deleteMessageBranch(threadId, 'assistant-2')).toBe(true);
+
+    const thread = useChatStore.getState().getThread(threadId);
+
+    expect(thread?.activeModelId).toBe('author/model-q8');
+    expect(thread?.messages).toEqual([
+      expect.objectContaining({
+        id: 'user-1',
+        role: 'user',
+        modelId: 'author/model-q4',
+      }),
+      expect.objectContaining({
+        id: 'assistant-1',
+        role: 'assistant',
+        modelId: 'author/model-q4',
+      }),
+      expect.objectContaining({
+        kind: 'model_switch',
+        switchFromModelId: 'author/model-q4',
+        switchToModelId: 'author/model-q8',
+      }),
+      expect.objectContaining({
+        id: 'user-2',
+        role: 'user',
+        modelId: 'author/model-q8',
       }),
     ]);
   });

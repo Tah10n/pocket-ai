@@ -12,6 +12,7 @@ import {
   GenerationParamsSnapshot,
   PresetSnapshot,
   createChatId,
+  deriveThreadActiveModelIdFromMessages,
   deriveThreadTitle,
   normalizeConversationTitle,
   sanitizeHydratedThread,
@@ -83,6 +84,28 @@ function updateThreadMetadata(thread: ChatThread): ChatThread {
     ...thread,
     title,
     updatedAt: Date.now(),
+  };
+}
+
+function createModelSwitchMessage({
+  fromModelId,
+  toModelId,
+  createdAt,
+}: {
+  fromModelId: string;
+  toModelId: string;
+  createdAt: number;
+}): ChatMessage {
+  return {
+    id: createChatId('message'),
+    role: 'system',
+    kind: 'model_switch',
+    content: '',
+    modelId: toModelId,
+    switchFromModelId: fromModelId,
+    switchToModelId: toModelId,
+    createdAt,
+    state: 'complete',
   };
 }
 
@@ -338,20 +361,12 @@ export const useChatStore = create<ChatStoreState>()(
             ? Math.max(requestedCreatedAt, lastMessageCreatedAt)
             : requestedCreatedAt;
           const updatedAt = Math.max(Date.now(), existingThread.updatedAt, createdAt);
-          const messageId = createChatId('message');
-          createdMessageId = messageId;
-
-          const switchMessage: ChatMessage = {
-            id: messageId,
-            role: 'system',
-            kind: 'model_switch',
-            content: '',
-            modelId: nextModelId,
-            switchFromModelId: prevModelId,
-            switchToModelId: nextModelId,
+          const switchMessage = createModelSwitchMessage({
+            fromModelId: prevModelId,
+            toModelId: nextModelId,
             createdAt,
-            state: 'complete',
-          };
+          });
+          createdMessageId = switchMessage.id;
 
           const nextThread: ChatThread = {
             ...existingThread,
@@ -513,12 +528,17 @@ export const useChatStore = create<ChatStoreState>()(
           }
 
           const nextMessages = existingThread.messages.slice(0, targetIndex);
+          const nextActiveModelId = deriveThreadActiveModelIdFromMessages({
+            modelId: existingThread.modelId,
+            messages: nextMessages,
+          });
 
           return {
             threads: {
               ...state.threads,
               [threadId]: updateThreadMetadata({
                 ...existingThread,
+                activeModelId: nextActiveModelId,
                 messages: nextMessages,
                 summary: undefined,
                 status: 'idle',
@@ -673,8 +693,22 @@ export const useChatStore = create<ChatStoreState>()(
             return state;
           }
 
+          const baseMessages = existingThread.messages.slice(0, targetIndex);
+          const branchActiveModelId = deriveThreadActiveModelIdFromMessages({
+            modelId: existingThread.modelId,
+            messages: baseMessages,
+          });
+          const insertedSwitchMessage = baseMessages.length > 0 && branchActiveModelId !== modelId
+            ? createModelSwitchMessage({
+                fromModelId: branchActiveModelId,
+                toModelId: modelId,
+                createdAt: existingTargetMessage.createdAt,
+              })
+            : null;
+
           const nextMessages: ChatMessage[] = [
-            ...existingThread.messages.slice(0, targetIndex),
+            ...baseMessages,
+            ...(insertedSwitchMessage ? [insertedSwitchMessage] : []),
             {
               ...existingTargetMessage,
               content: nextUserContent,
@@ -703,6 +737,7 @@ export const useChatStore = create<ChatStoreState>()(
               ...state.threads,
               [threadId]: updateThreadMetadata({
                 ...existingThread,
+                activeModelId: modelId,
                 messages: nextMessages,
                 summary: undefined,
                 status: 'generating',

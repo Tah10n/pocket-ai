@@ -135,6 +135,27 @@ export function getThreadActiveModelId(
   return thread.activeModelId ?? thread.modelId;
 }
 
+export function deriveThreadActiveModelIdFromMessages(
+  thread: Pick<ChatThread, 'modelId' | 'messages'>,
+): string {
+  let currentModelId = thread.modelId;
+
+  for (const message of thread.messages) {
+    const kind = message.kind ?? 'message';
+
+    if (kind === 'model_switch') {
+      currentModelId = message.switchToModelId ?? message.modelId ?? currentModelId;
+      continue;
+    }
+
+    if (typeof message.modelId === 'string' && message.modelId.length > 0) {
+      currentModelId = message.modelId;
+    }
+  }
+
+  return currentModelId;
+}
+
 export function isModelSwitchMessage(message: Pick<ChatMessage, 'kind'>): boolean {
   return message.kind === 'model_switch';
 }
@@ -241,7 +262,10 @@ export function sanitizeHydratedThread(thread: ChatThread): ChatThread {
     };
   });
 
-  const activeModelId = thread.activeModelId ?? currentModelId;
+  const activeModelId = deriveThreadActiveModelIdFromMessages({
+    modelId: thread.modelId,
+    messages: migratedMessages,
+  });
 
   const removedStreamingMessages = sanitizedMessages.length !== thread.messages.length;
   const legacyReasoningEnabled = (thread.paramsSnapshot as { reasoningEnabled?: unknown }).reasoningEnabled;

@@ -640,6 +640,7 @@ describe('ChatScreen', () => {
     mockLoadedContextSize = null;
     mockLoadedGpuLayers = null;
     updateSettings({
+      activeModelId: 'author/model-q4',
       activePresetId: 'preset-1',
       temperature: 0.7,
       topP: 0.9,
@@ -1235,6 +1236,49 @@ describe('ChatScreen', () => {
     expect(lastChatHeaderProps.modelLabel).toBe('model-q8');
   });
 
+  it('treats the current thread model as active in model controls after an in-chat switch', async () => {
+    registry.saveModels([
+      {
+        id: 'author/model-q4',
+        name: 'Model Q4',
+        author: 'Test',
+        size: 1024,
+        localPath: 'model-q4.gguf',
+        lifecycleStatus: 'downloaded',
+      },
+      {
+        id: 'author/model-q8',
+        name: 'Model Q8',
+        author: 'Test',
+        size: 1024,
+        localPath: 'model-q8.gguf',
+        lifecycleStatus: 'downloaded',
+      },
+    ]);
+    updateSettings({ activeModelId: 'author/model-q4' });
+
+    const { getByTestId } = render(React.createElement(ChatScreen));
+
+    await act(async () => {
+      fireEvent.press(getByTestId('model-selector-button'));
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      fireEvent.press(getByTestId('model-option-author/model-q8'));
+    });
+
+    expect(useChatStore.getState().getActiveThread()?.activeModelId).toBe('author/model-q8');
+
+    await act(async () => {
+      fireEvent.press(getByTestId('model-controls-button'));
+      await Promise.resolve();
+    });
+
+    expect(lastModelParametersSheetProps?.modelId).toBe('author/model-q8');
+    expect(lastModelParametersSheetProps?.applyAction).toBe('reload');
+  });
+
   it('closes the selector and updates the header immediately while the model is still loading', async () => {
     registry.saveModels([
       {
@@ -1409,6 +1453,69 @@ describe('ChatScreen', () => {
     });
   });
 
+  it('clears pending model selection after leaving a new chat before the model load finishes', async () => {
+    registry.saveModels([
+      {
+        id: 'author/model-q4',
+        name: 'Model Q4',
+        author: 'Test',
+        size: 1024,
+        localPath: 'model-q4.gguf',
+        lifecycleStatus: 'downloaded',
+      },
+      {
+        id: 'author/model-q8',
+        name: 'Model Q8',
+        author: 'Test',
+        size: 1024,
+        localPath: 'model-q8.gguf',
+        lifecycleStatus: 'downloaded',
+      },
+    ]);
+
+    useChatStore.setState({ activeThreadId: null });
+
+    const deferredLoad = createDeferred<void>();
+    mockLoadModel.mockImplementationOnce(() => deferredLoad.promise);
+
+    const { getByTestId, rerender } = render(React.createElement(ChatScreen));
+
+    fireEvent.press(getByTestId('model-selector-button'));
+    await act(async () => {
+      fireEvent.press(getByTestId('model-option-author/model-q8'));
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(lastChatHeaderProps.modelLabel).toBe('model-q8');
+      expect(lastChatHeaderProps.canOpenModelSelector).toBe(false);
+      expect(lastChatHeaderProps.canOpenModelControls).toBe(false);
+    });
+
+    act(() => {
+      useChatStore.setState({ activeThreadId: 'thread-1' });
+    });
+    rerender(React.createElement(ChatScreen));
+
+    await waitFor(() => {
+      expect(lastChatHeaderProps.title).toBe('Restored conversation');
+      expect(lastChatHeaderProps.modelLabel).toBe('model-q4');
+      expect(lastChatHeaderProps.canOpenModelSelector).toBe(false);
+      expect(lastChatHeaderProps.canOpenModelControls).toBe(false);
+    });
+
+    await act(async () => {
+      deferredLoad.resolve(undefined);
+      await deferredLoad.promise;
+    });
+
+    await waitFor(() => {
+      expect(lastChatHeaderProps.modelLabel).toBe('model-q4');
+      expect(lastChatHeaderProps.canOpenModelSelector).toBe(true);
+      expect(lastChatHeaderProps.canOpenModelControls).toBe(true);
+    });
+  });
+
   it('does not create a switch event when selecting the current model', async () => {
     registry.saveModels([
       {
@@ -1484,7 +1591,9 @@ describe('ChatScreen', () => {
 
     expect(afterThread).toBe(beforeThread);
     expect(afterThread?.messages.some((message: any) => message.kind === 'model_switch')).toBe(false);
-    expect(alertSpy).toHaveBeenCalledWith('common.actionFailed', expect.any(String));
+    await waitFor(() => {
+      expect(alertSpy).toHaveBeenCalledWith('common.actionFailed', expect.any(String));
+    });
     expect(queryByTestId('chat-model-selector-sheet')).toBeNull();
     expect(lastChatHeaderProps.modelLabel).toBe('model-q4');
     } finally {

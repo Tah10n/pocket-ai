@@ -21,6 +21,8 @@ They are snapshotted into chat threads so history remains reproducible and stabl
 - `src/store/chatStore.ts`
 - `src/utils/chatThreadParameters.ts`
 
+For multi-model conversations, Pocket AI resolves these snapshots from the thread's **active chat model**, not only the original thread model. Switching models inside a conversation appends a `model_switch` system event while preserving the per-message `modelId` for user and assistant turns.
+
 Current generation parameters include:
 
 - `temperature`, `topP`, `topK`, `minP`, `repetitionPenalty`, `maxTokens`
@@ -50,6 +52,8 @@ Visible assistant content strips *leading* reasoning blocks from assistant messa
 - `src/utils/chatPresentation.ts` (`getVisibleAssistantContent`)
 - `src/components/ui/ChatMessageBubble.tsx`
 - `src/utils/inferenceWindow.ts` (inference window uses visible content)
+
+`model_switch` system events are kept in the transcript for history and UI context, but they are excluded from the inference window so model-change markers never become part of the prompt.
 
 ## Load parameters (load profiles)
 
@@ -123,6 +127,8 @@ The primary UI for changing these settings lives in:
 
 - `src/components/ui/ModelParametersSheet.tsx`
 - `src/hooks/useModelParametersSheetController.ts`
+
+When a conversation has switched models in-chat, Model Controls target the thread's current active model so the sheet can correctly choose between `Save load profile` for inactive models and `Apply & reload` for the active chat model.
 
 Guideline:
 

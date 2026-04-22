@@ -6,7 +6,7 @@ const net = require("net");
 const path = require("path");
 const { spawn, spawnSync } = require("child_process");
 
-const cliOptions = parseCliOptions(process.argv.slice(2));
+const cliOptions = require.main === module ? parseCliOptions(process.argv.slice(2)) : {};
 const projectRoot = path.resolve(__dirname, "..");
 const artifactsRoot = path.join(projectRoot, "artifacts", "android-scenarios");
 const androidRoot = path.join(projectRoot, "android");
@@ -45,10 +45,12 @@ const screenshotPath = screenshotTarget
   ? path.resolve(projectRoot, screenshotTarget)
   : null;
 
-main().catch((error) => {
-  console.error(`[android-smoke] ${error.message}`);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(`[android-smoke] ${error.message}`);
+    process.exit(1);
+  });
+}
 
 async function main() {
   const requestedSerial = cliOptions.serial || process.env.ANDROID_SERIAL || null;
@@ -834,6 +836,10 @@ function isInsufficientStorageInstallFailure(output) {
     || normalizedOutput.includes("insufficient storage")
     || normalizedOutput.includes("not enough space");
 }
+
+module.exports = {
+  isInsufficientStorageInstallFailure,
+};
 
 function reverseMetroPort(adbPath, serial, port) {
   log(`Reversing device port ${port} to localhost:${port}...`);

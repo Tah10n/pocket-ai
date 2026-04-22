@@ -77,8 +77,17 @@ jest.mock('../../src/hooks/useDeviceMetrics', () => ({
 }));
 
 const { ConversationSwitcherSheet } = require('../../src/components/ui/ConversationSwitcherSheet');
+const reactI18nextMock = jest.requireMock('react-i18next') as {
+  __setTranslationOverride: (key: string, value: string, nextLanguage?: string) => void;
+  __resetTranslations: () => void;
+};
 
 describe('ConversationSwitcherSheet', () => {
+  beforeEach(() => {
+    reactI18nextMock.__resetTranslations();
+    reactI18nextMock.__setTranslationOverride('chat.messageCount', '{{count}} messages');
+  });
+
   it('starts a new chat from the shared action area', () => {
     const onClose = jest.fn();
     const onStartNewChat = jest.fn();
@@ -98,5 +107,32 @@ describe('ConversationSwitcherSheet', () => {
 
     expect(onClose).toHaveBeenCalledTimes(1);
     expect(onStartNewChat).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders shortened model labels in conversation descriptions', () => {
+    const { getByText } = render(
+      React.createElement(ConversationSwitcherSheet, {
+        visible: true,
+        activeThreadId: 'thread-1',
+        conversations: [
+          {
+            id: 'thread-1',
+            title: 'Thread one',
+            updatedAt: 1,
+            modelId: 'author/model-q4',
+            presetId: null,
+            messageCount: 3,
+            lastMessagePreview: 'Latest reply',
+          },
+        ],
+        onClose: jest.fn(),
+        onSelectConversation: jest.fn(),
+        onStartNewChat: jest.fn(),
+      }),
+    );
+
+    expect(getByText('Thread one')).toBeTruthy();
+    expect(getByText('model-q4 • 3 messages')).toBeTruthy();
+    expect(getByText('Latest reply')).toBeTruthy();
   });
 });

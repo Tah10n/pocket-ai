@@ -442,17 +442,18 @@ export const ChatScreen = () => {
             return;
         }
 
+        setPendingModelSelection((currentValue) => (
+            currentValue?.threadId === selectionThreadId && currentValue.modelId === nextModelId
+                ? null
+                : currentValue
+        ));
+
         if (!activeThread) {
             return;
         }
 
         switchThreadModel(activeThread.id, nextModelId);
         updateThreadParamsSnapshot(activeThread.id, getGenerationParametersForModel(nextModelId));
-        setPendingModelSelection((currentValue) => (
-            currentValue?.threadId === selectionThreadId && currentValue.modelId === nextModelId
-                ? null
-                : currentValue
-        ));
     }, [
         activeThread,
         currentChatActiveModelId,
@@ -481,7 +482,7 @@ export const ChatScreen = () => {
             showAlertForModelLoadError('chat.applyModelSettingsErrorTitle', scope, error);
         },
         applyReloadErrorScope: 'ChatScreen.handleApplyLoadParams',
-        activeModelId: settings.activeModelId,
+        activeModelId: currentChatActiveModelId,
         canApplyReload: !isGenerating,
         modelLabelOverride: modelLabel,
         paramsOverride: paramsSource,

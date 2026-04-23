@@ -76,11 +76,20 @@ Optional accelerator selectors may also be persisted alongside a load profile:
   - used when a backend profile targets specific NPU devices discovered on the current device (Hexagon/HTP)
   - device selectors are llama.rn tokens like `HTP0` / `HTP1` / `HTP*` (avoid human-readable GPU labels)
 
+When Advanced Model Controls are enabled, Pocket AI can also persist extra runtime load fields alongside the core profile:
+
+- `cpuThreads`, `cpuMask`, `cpuStrict`
+- `flashAttention` (`auto | on | off`)
+- `useMmap`, `useMlock`
+- `parallelSlots`
+- `nBatch`, `nUbatch`
+- `kvUnified`
+
 KV cache auto-selection is shared logic:
 
 - `src/utils/kvCache.ts`
 
-Backend policy resolution lives in:
+Resolved runtime inference profile selection lives in:
 
 - `src/services/resolveInferenceProfile.ts`
 - `src/services/LLMEngineService.ts`
@@ -127,6 +136,8 @@ The primary UI for changing these settings lives in:
 
 - `src/components/ui/ModelParametersSheet.tsx`
 - `src/hooks/useModelParametersSheetController.ts`
+
+Advanced runtime controls, backend autotune, and runtime diagnostics are shown only when `showAdvancedInferenceControls` is enabled in settings.
 
 When a conversation has switched models in-chat, Model Controls target the thread's current active model so the sheet can correctly choose between `Save load profile` for inactive models and `Apply & reload` for the active chat model.
 

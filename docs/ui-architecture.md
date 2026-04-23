@@ -1,6 +1,6 @@
 # UI Architecture & Component Guide
 
-Last updated: 2026-04-07
+Last updated: 2026-04-23
 
 ## Purpose
 
@@ -27,13 +27,21 @@ The goal is one clear source of truth for reusable UI.
 
 ## Imports and aliases
 
-Use the `@/...` alias for application imports whenever possible:
+Prefer the `@/...` alias for imports that target code under `src/`, especially in new files and larger refactors:
 
 ```tsx
 import { Box } from '@/components/ui/box';
 import { ActiveModelCard } from '@/components/ui/ActiveModelCard';
 import { MaterialSymbols } from '@/components/ui/MaterialSymbols';
 ```
+
+The current codebase still contains a mix of alias and relative imports. Do not churn otherwise-stable files just to rewrite imports, but avoid introducing new deep relative chains when an alias import would be clearer.
+
+Relative imports are still acceptable for:
+
+- local siblings in the same folder
+- route-local files under `app/`
+- lightly touched files that already follow one style consistently
 
 Avoid fragile deep relative imports such as:
 

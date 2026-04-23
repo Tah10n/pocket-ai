@@ -86,6 +86,18 @@ Pocket AI is a native Expo / React Native project. A native development environm
 npm install
 ```
 
+### Dependency and security updates
+
+If your contribution updates packages:
+
+- Start with `npm audit`, `npm outdated`, or `npm ls <package>` to confirm whether the issue is direct or transitive.
+- For Expo-managed packages, prefer supported versions and run `npx expo install --fix` after changing them.
+- Treat `expo` and `react-native` upgrades as dedicated, higher-risk PRs.
+- Avoid `npm audit fix --force` unless maintainers explicitly ask for that trade-off.
+- Avoid force-pinning unsupported transitive Expo toolchain dependencies just to silence audit output.
+- Run `npm run verify:mobile-change`; also run `npm run verify:mobile-change:android` when native or visible UI behavior may be affected.
+- If an advisory remains in Expo-managed transitive dependencies, mention that explicitly in the PR instead of forcing a risky workaround.
+
 ### Run locally
 
 ```bash

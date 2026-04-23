@@ -101,6 +101,61 @@ describe('NotificationService', () => {
     });
   });
 
+  it.each([
+    [0, false, 'unknown'],
+    [1, false, 'denied'],
+    [2, true, 'granted'],
+    [3, true, 'granted'],
+    [4, true, 'granted'],
+  ])(
+    'maps iOS numeric notification permission status %s correctly',
+    async (status, expectedResult, expectedState) => {
+      (Notifications.getPermissionsAsync as jest.Mock).mockResolvedValueOnce({ status: 0 });
+      (Notifications.requestPermissionsAsync as jest.Mock).mockResolvedValueOnce({
+        ios: { authorizationStatus: status },
+      });
+
+      await expect(notificationService.requestPermissions()).resolves.toBe(expectedResult);
+      expect((notificationService as any).permissionState).toBe(expectedState);
+    },
+  );
+
+  it.each([
+    [{ granted: true }, true, 'granted'],
+    [{ granted: false, canAskAgain: false }, false, 'denied'],
+  ])(
+    'maps fallback permission payload %j correctly',
+    async (payload, expectedResult, expectedState) => {
+      (Notifications.getPermissionsAsync as jest.Mock).mockResolvedValueOnce({ status: 'undetermined' });
+      (Notifications.requestPermissionsAsync as jest.Mock).mockResolvedValueOnce(payload);
+
+      await expect(notificationService.requestPermissions()).resolves.toBe(expectedResult);
+      expect((notificationService as any).permissionState).toBe(expectedState);
+    },
+  );
+
+  it('sendLocalNotification caches granted permission discovered from an unknown state', async () => {
+    (notificationService as any).permissionState = 'unknown';
+    (Notifications.getPermissionsAsync as jest.Mock).mockResolvedValueOnce({ granted: true });
+
+    await expect(notificationService.sendLocalNotification({ title: 'x' })).resolves.toBe('mock-notification-id');
+
+    expect((notificationService as any).permissionState).toBe('granted');
+    expect(Notifications.scheduleNotificationAsync).toHaveBeenCalledWith({
+      content: { title: 'x' },
+      trigger: null,
+    });
+  });
+
+  it('sendLocalNotification refuses malformed permission payloads', async () => {
+    (notificationService as any).permissionState = 'unknown';
+    (Notifications.getPermissionsAsync as jest.Mock).mockResolvedValueOnce({ foo: 'bar' });
+
+    await expect(notificationService.sendLocalNotification({ title: 'x' })).resolves.toBeNull();
+
+    expect(Notifications.scheduleNotificationAsync).not.toHaveBeenCalled();
+  });
+
   it('updateNotification clamps progress percent and formats speed', async () => {
     await BackgroundService.start(async () => undefined, {
       taskName: 'download',
@@ -153,6 +208,36 @@ describe('NotificationService', () => {
 
     await notificationService.sendErrorNotification({ modelName: 'M' });
     expect((i18n as any).t).toHaveBeenCalledWith('common.actionFailed');
+  });
+
+  it('sends inference completion, interrupted, and error notifications on the inference channel', async () => {
+    (notificationService as any).permissionState = 'granted';
+
+    await notificationService.sendCompletionNotification('inference', { threadId: 'thread-1' });
+    await notificationService.sendInterruptedNotification({ threadId: 'thread-2' });
+    await notificationService.sendInferenceErrorNotification({ threadId: 'thread-3' });
+
+    expect(Notifications.scheduleNotificationAsync).toHaveBeenNthCalledWith(1, {
+      content: expect.objectContaining({
+        title: 'notifications.inference.complete.title',
+        data: { taskType: 'inference', threadId: 'thread-1' },
+      }),
+      trigger: { channelId: 'inference' },
+    });
+    expect(Notifications.scheduleNotificationAsync).toHaveBeenNthCalledWith(2, {
+      content: expect.objectContaining({
+        title: 'notifications.inference.interrupted.title',
+        data: { taskType: 'inference', threadId: 'thread-2' },
+      }),
+      trigger: { channelId: 'inference' },
+    });
+    expect(Notifications.scheduleNotificationAsync).toHaveBeenNthCalledWith(3, {
+      content: expect.objectContaining({
+        title: 'notifications.inference.error.title',
+        data: { taskType: 'inference', threadId: 'thread-3' },
+      }),
+      trigger: { channelId: 'inference' },
+    });
   });
 
   it('refuses to start foreground-service notifications on Android when notifications are denied', async () => {

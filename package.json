@@ -130,7 +130,7 @@
     "eslint": "^9.25.0",
     "eslint-config-expo": "~55.0.0",
     "jest-expo": "~55.0.16",
-    "react-test-renderer": "19.2.0",
+    "react-test-renderer": "19.2.5",
     "typescript": "~5.9.2"
   },
   "overrides": {

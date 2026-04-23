@@ -63,12 +63,14 @@ import { clearChatHistory } from '../../src/services/StorageManagerService';
 import { clearActiveCache } from '../../src/services/StorageManagerService';
 import { getAppStorageMetrics } from '../../src/services/StorageManagerService';
 import { offloadModel } from '../../src/services/StorageManagerService';
+import { resetAppSettings } from '../../src/services/StorageManagerService';
 import { llmEngineService } from '../../src/services/LLMEngineService';
 import { registry } from '../../src/services/LocalStorageRegistry';
 import { modelCatalogService } from '../../src/services/ModelCatalogService';
 import {
   clearLegacyChatHistory,
   resetAllParametersForModel,
+  resetSettings,
   storage as settingsStorage,
 } from '../../src/services/SettingsStore';
 import { useChatStore } from '../../src/store/chatStore';
@@ -115,6 +117,7 @@ describe('StorageManagerService', () => {
     mockedAppStorage.getString.mockReturnValue(undefined);
     mockedSettingsStorage.getAllKeys.mockReturnValue([]);
     mockedSettingsStorage.getString.mockReturnValue(undefined);
+    (FileSystem.deleteAsync as jest.Mock).mockReset().mockResolvedValue(undefined);
     (llmEngineService.getState as jest.Mock).mockReturnValue({ activeModelId: null });
     (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
       if (uri === 'test-cache/') {
@@ -202,6 +205,16 @@ describe('StorageManagerService', () => {
     expect(metrics.chatHistoryBytes).toBe(0);
   });
 
+  it('counts corrupted persisted chat-store payload bytes instead of dropping them', async () => {
+    mockedAppStorage.getString.mockImplementation((key: string) => (
+      key === 'chat-store' ? '{corrupted-json' : undefined
+    ));
+
+    const metrics = await getAppStorageMetrics();
+
+    expect(metrics.chatHistoryBytes).toBeGreaterThan(0);
+  });
+
   it('treats an empty legacy chat history index as zero chat history bytes', async () => {
     mockedSettingsStorage.getAllKeys.mockReturnValue(['chat_history_index']);
     mockedSettingsStorage.getString.mockImplementation((key: string) => (
@@ -211,6 +224,62 @@ describe('StorageManagerService', () => {
     const metrics = await getAppStorageMetrics();
 
     expect(metrics.chatHistoryBytes).toBe(0);
+  });
+
+  it('counts corrupted legacy chat history index bytes instead of dropping them', async () => {
+    mockedSettingsStorage.getAllKeys.mockReturnValue(['chat_history_index']);
+    mockedSettingsStorage.getString.mockImplementation((key: string) => (
+      key === 'chat_history_index' ? '{corrupted-index' : undefined
+    ));
+
+    const metrics = await getAppStorageMetrics();
+
+    expect(metrics.chatHistoryBytes).toBeGreaterThan(0);
+  });
+
+  it('recursively sums nested cache directory sizes', async () => {
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (uri === 'test-cache/') {
+        return { exists: true };
+      }
+
+      if (uri === 'test-cache/root.bin') {
+        return { exists: true, size: 128 };
+      }
+
+      if (uri === 'test-cache/nested') {
+        return { exists: true, isDirectory: true };
+      }
+
+      if (uri === 'test-cache/nested/') {
+        return { exists: true };
+      }
+
+      if (uri === 'test-cache/nested/child.bin') {
+        return { exists: true, size: 256 };
+      }
+
+      if (uri === 'test-cache/nested/missing.bin') {
+        return { exists: false };
+      }
+
+      return { exists: false };
+    });
+    (FileSystem.readDirectoryAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (uri === 'test-cache/') {
+        return ['root.bin', 'nested'];
+      }
+
+      if (uri === 'test-cache/nested/') {
+        return ['child.bin', 'missing.bin'];
+      }
+
+      return [];
+    });
+
+    const metrics = await getAppStorageMetrics();
+
+    expect(metrics.cacheBytes).toBe(384);
   });
 
   it('uses the actual downloaded file size when estimating active model memory usage', async () => {
@@ -231,6 +300,49 @@ describe('StorageManagerService', () => {
 
     expect(mockedModelCatalogService.clearCache).toHaveBeenCalledTimes(1);
     expect(mockedModelCatalogService.clearCache).toHaveBeenCalledWith('manual');
+  });
+
+  it('retries cache entry deletion once before succeeding', async () => {
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (uri === 'test-cache/') {
+        return { exists: true };
+      }
+
+      return { exists: false };
+    });
+    (FileSystem.readDirectoryAsync as jest.Mock).mockResolvedValue(['stale.bin']);
+    (FileSystem.deleteAsync as jest.Mock)
+      .mockReset()
+      .mockRejectedValueOnce(new Error('busy'))
+      .mockResolvedValueOnce(undefined);
+
+    await expect(clearActiveCache()).resolves.toBe(1);
+    expect(FileSystem.deleteAsync).toHaveBeenCalledTimes(2);
+  });
+
+  it('throws the first cache deletion error after attempting cleanup', async () => {
+    const deleteError = new Error('delete failed');
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (uri === 'test-cache/') {
+        return { exists: true };
+      }
+
+      return { exists: false };
+    });
+    (FileSystem.readDirectoryAsync as jest.Mock).mockResolvedValue(['broken.bin']);
+    (FileSystem.deleteAsync as jest.Mock).mockReset().mockRejectedValue(deleteError);
+
+    await expect(clearActiveCache()).rejects.toBe(deleteError);
+
+    expect(mockedModelCatalogService.clearCache).toHaveBeenCalledWith('manual');
+    expect(warnSpy).toHaveBeenCalledWith(
+      '[StorageManagerService] Failed to delete cache entry',
+      'broken.bin',
+      deleteError,
+    );
+
+    warnSpy.mockRestore();
   });
 
   it('preserves persisted per-model settings by default when offloading a model', async () => {
@@ -258,6 +370,19 @@ describe('StorageManagerService', () => {
     expect(resetAllParametersForModel).toHaveBeenCalledWith('org/model');
     expect((llmEngineService.unload as jest.Mock).mock.invocationCallOrder[0]).toBeLessThan(
       mockedRegistry.removeModel.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('unloads the active model before resetting app settings', async () => {
+    (llmEngineService.getState as jest.Mock).mockReturnValue({ activeModelId: 'org/model' });
+    (resetSettings as jest.Mock).mockReturnValue('reset-result');
+
+    await expect(resetAppSettings()).resolves.toBe('reset-result');
+
+    expect(llmEngineService.unload).toHaveBeenCalledTimes(1);
+    expect(resetSettings).toHaveBeenCalledTimes(1);
+    expect((llmEngineService.unload as jest.Mock).mock.invocationCallOrder[0]).toBeLessThan(
+      (resetSettings as jest.Mock).mock.invocationCallOrder[0],
     );
   });
 });

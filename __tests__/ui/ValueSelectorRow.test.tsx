@@ -1,5 +1,6 @@
 import React from 'react';
 import { fireEvent, render } from '@testing-library/react-native';
+import { Pressable } from 'react-native';
 import { ValueSelectorRow } from '../../src/components/ui/ValueSelectorRow';
 
 jest.mock('../../src/components/ui/box', () => {
@@ -68,5 +69,25 @@ describe('ValueSelectorRow', () => {
     expect(screen.getByText('chevron-right')).toBeTruthy();
     fireEvent.press(screen.getByTestId('value-selector-row'));
     expect(onPress).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders disabled rows with muted opacity and no press handling', () => {
+    const onPress = jest.fn();
+    const screen = render(
+      <ValueSelectorRow
+        label="models.quantizationLabel"
+        value="Q4_K_M + 3.80 GB"
+        onPress={onPress}
+        disabled
+        testID="value-selector-row"
+      />,
+    );
+
+    const row = screen.getByTestId('value-selector-row');
+    expect(row.props.className).toContain('opacity-60');
+    expect(row.props.onPress).toBeUndefined();
+    expect(row.props.accessibilityRole).toBeUndefined();
+    expect(() => screen.UNSAFE_getByType(Pressable)).toThrow();
+    expect(onPress).not.toHaveBeenCalled();
   });
 });

@@ -167,13 +167,12 @@ If you change shared theme, header, localization, motion, or routed-screen chrom
 
 ```bash
 npm run verify:mobile-change
-node .\scripts\android-scenarios.js --skip-build --scenario home-smoke
-node .\scripts\android-scenarios.js --skip-build --scenario bottom-tabs
+npm run android:scenarios -- --skip-build
 node .\scripts\android-scenarios.js --skip-build --scenario hf-catalog-hardening
-node .\scripts\android-scenarios.js --skip-build --scenario hf-token-education
-node .\scripts\android-scenarios.js --skip-build --scenario conversations-management
 node .\scripts\android-screen-capture.js --skip-build --screen home,models,settings,conversations,huggingface-token,model-details --output-dir artifacts/android-scenarios/manual-sample
 ```
+
+The raw runner defaults to a small core smoke pack. `npm run android:scenarios` expands that to the stable extended pack; keep catalog/perf scenarios as targeted checks.
 
 Manual follow-up is still required for:
 

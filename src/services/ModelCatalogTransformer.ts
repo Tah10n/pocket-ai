@@ -2,6 +2,7 @@ import { estimateFastMemoryFit } from '../memory/estimator';
 import { LifecycleStatus, ModelAccessState, type ModelMemoryFitConfidence, type ModelMemoryFitDecision, type ModelMetadata } from '../types/models';
 import type { CreateTreeProbeCandidateOptions, HuggingFaceModelCardData, HuggingFaceModelConfig, HuggingFaceModelSummary } from '../types/huggingFace';
 import { buildHuggingFaceResolveUrl } from '../utils/huggingFaceUrls';
+import { getShortModelLabel } from '../utils/modelLabel';
 import { getFileName, getFileSha, getFileSize, isCatalogSummarySupported, selectPreferredGgufEntry, shouldRevalidateCatalogSummarySelection } from './ModelCatalogFileSelector';
 import { normalizePersistedModelMetadata } from './ModelMetadataNormalizer';
 
@@ -225,7 +226,7 @@ function normalizeStringArrayMetadata(value: string | string[] | undefined): str
 export function createFallbackModel(modelId: string): ModelMetadata {
   return normalizePersistedModelMetadata({
     id: modelId,
-    name: modelId.split('/').pop() || modelId,
+    name: getShortModelLabel(modelId) || modelId,
     author: modelId.split('/')[0] || 'unknown',
     size: null,
     downloadUrl: buildHuggingFaceResolveUrl(modelId, 'model.gguf', undefined),
@@ -287,7 +288,7 @@ function createTreeProbeCandidate(
 
   return normalizePersistedModelMetadata({
     id: repoId,
-    name: repoId.split('/').pop() || repoId,
+    name: getShortModelLabel(repoId) || repoId,
     author: item.author || repoId.split('/')[0],
     size,
     downloadUrl: buildHuggingFaceResolveUrl(repoId, 'model.gguf', item.sha ?? undefined),
@@ -383,7 +384,7 @@ export function transformHFResponse(
 
     results.push(normalizePersistedModelMetadata({
       id: repoId,
-      name: repoId.split('/').pop() || repoId,
+      name: getShortModelLabel(repoId) || repoId,
       author: item.author || repoId.split('/')[0],
       size,
       downloadUrl: buildHuggingFaceResolveUrl(repoId, fileName, hfRevision),
@@ -470,7 +471,7 @@ export function buildModelMetadataFromPayload(
   return normalizePersistedModelMetadata({
     ...fallbackModel,
     id: repoId,
-    name: repoId.split('/').pop() || repoId,
+    name: getShortModelLabel(repoId) || repoId,
     author: payload.author || repoId.split('/')[0],
     size,
     downloadUrl: resolvedFileName

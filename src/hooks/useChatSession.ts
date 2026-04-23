@@ -17,6 +17,7 @@ import {
   DEFAULT_SYSTEM_PROMPT,
   PresetSnapshot,
   createChatId,
+  getThreadActiveModelId,
 } from '../types/chat';
 import { useChatStore } from '../store/chatStore';
 import {
@@ -81,10 +82,11 @@ export function resolvePresetSnapshot(presetId: string | null): PresetSnapshot {
   };
 }
 
-function resolveThreadReasoningRuntimeConfig(thread: Pick<ChatThread, 'modelId' | 'paramsSnapshot'>) {
-  const model = registry.getModel(thread.modelId);
-  const modelName = model?.name ?? thread.modelId;
-  const capability = resolveModelReasoningCapability(model, thread.modelId, modelName);
+function resolveThreadReasoningRuntimeConfig(thread: Pick<ChatThread, 'modelId' | 'activeModelId' | 'paramsSnapshot'>) {
+  const activeModelId = getThreadActiveModelId(thread);
+  const model = registry.getModel(activeModelId);
+  const modelName = model?.name ?? activeModelId;
+  const capability = resolveModelReasoningCapability(model, activeModelId, modelName);
   const runtimeConfig = resolveReasoningRuntimeConfig({
     reasoningEffort: thread.paramsSnapshot.reasoningEffort,
     capability,
@@ -141,6 +143,7 @@ export const useChatSession = () => {
   const createThread = useChatStore((state) => state.createThread);
   const appendMessage = useChatStore((state) => state.appendMessage);
   const createAssistantPlaceholder = useChatStore((state) => state.createAssistantPlaceholder);
+  const switchThreadModel = useChatStore((state) => state.switchThreadModel);
   const deleteMessageBranch = useChatStore((state) => state.deleteMessageBranch);
   const deleteThreadState = useChatStore((state) => state.deleteThread);
   const stopAssistantMessage = useChatStore((state) => state.stopAssistantMessage);
@@ -154,12 +157,20 @@ export const useChatSession = () => {
   const setThreadSummary = useChatStore((state) => state.setThreadSummary);
   const updateThreadParamsSnapshot = useChatStore((state) => state.updateThreadParamsSnapshot);
 
-  const activeContextTokenBudget =
-    activeThread &&
-    llmEngineService.getState().status === EngineStatus.READY &&
-    llmEngineService.getState().activeModelId === activeThread.modelId
+  const activeContextTokenBudget = (() => {
+    if (!activeThread) {
+      return undefined;
+    }
+
+    const engineState = llmEngineService.getState();
+    if (engineState.status !== EngineStatus.READY) {
+      return undefined;
+    }
+
+    return engineState.activeModelId === getThreadActiveModelId(activeThread)
       ? llmEngineService.getContextSize()
       : undefined;
+  })();
 
   const truncationState = useTruncationTracking(activeThread, activeContextTokenBudget);
   const appStateRef = useRef<AppStateStatus>(AppState.currentState ?? 'active');
@@ -205,8 +216,10 @@ export const useChatSession = () => {
       throw new Error('Thread not found');
     }
 
-    performanceMonitor.mark('chat.send.start', { modelId: thread.modelId });
-    const generationSpan = performanceMonitor.startSpan('chat.generation', { modelId: thread.modelId });
+    const modelId = getThreadActiveModelId(thread);
+
+    performanceMonitor.mark('chat.send.start', { modelId });
+    const generationSpan = performanceMonitor.startSpan('chat.generation', { modelId });
 
     sharedGenerationState.current = {
       threadId,
@@ -249,7 +262,7 @@ export const useChatSession = () => {
 
       performanceMonitor.mark('chat.generation.outcome', {
         outcome,
-        modelId: thread.modelId,
+        modelId,
         tokensCount,
         tokensPerSec,
       });
@@ -465,7 +478,7 @@ export const useChatSession = () => {
         onToken: (token) => {
           if (!hasMarkedFirstToken) {
             hasMarkedFirstToken = true;
-            performanceMonitor.mark('chat.firstToken', { modelId: thread.modelId });
+            performanceMonitor.mark('chat.firstToken', { modelId });
           }
 
           if (typeof token === 'string') {
@@ -609,17 +622,26 @@ export const useChatSession = () => {
       throw new Error('A response is already being generated for this thread.');
     }
 
-    if (llmEngineService.getState().status !== EngineStatus.READY) {
+    const engineState = llmEngineService.getState();
+    if (engineState.status !== EngineStatus.READY) {
       throw new Error('Model is not loaded or engine is not ready. Please select and load a model in the Models tab.');
     }
 
-    const settings = getSettings();
-    if (settings.activeModelId !== thread.modelId) {
-      throw new Error(
-        `This conversation is pinned to ${thread.modelId}. Load that model before ${actionLabel}.`,
-      );
+    const threadModelId = getThreadActiveModelId(thread);
+    if (engineState.activeModelId !== threadModelId) {
+      throw new Error(`Load ${threadModelId} before ${actionLabel}.`);
     }
   }, []);
+
+  const ensureThreadUsesModelForSend = useCallback((thread: ChatThread, nextModelId: string) => {
+    const currentModelId = getThreadActiveModelId(thread);
+    if (nextModelId === currentModelId) {
+      return;
+    }
+
+    switchThreadModel(thread.id, nextModelId);
+    updateThreadParamsSnapshot(thread.id, getGenerationParametersForModel(nextModelId));
+  }, [switchThreadModel, updateThreadParamsSnapshot]);
 
   const appendUserMessage = useCallback(async (text: string) => {
     const settings = getSettings();
@@ -630,7 +652,12 @@ export const useChatSession = () => {
       throw new Error('Model is not loaded or engine is not ready. Please select and load a model in the Models tab.');
     }
 
-    if (llmEngineService.getState().status !== EngineStatus.READY) {
+    const engineState = llmEngineService.getState();
+    if (engineState.status !== EngineStatus.READY) {
+      throw new Error('Model is not loaded or engine is not ready. Please select and load a model in the Models tab.');
+    }
+
+    if (engineState.activeModelId !== activeModelId) {
       throw new Error('Model is not loaded or engine is not ready. Please select and load a model in the Models tab.');
     }
 
@@ -638,19 +665,8 @@ export const useChatSession = () => {
       throw new Error('A response is already being generated for this thread.');
     }
 
-    const shouldStartNewThreadForActiveModel =
-      activeThread != null && activeThread.modelId !== activeModelId;
-
-    const threadId =
-      shouldStartNewThreadForActiveModel
-        ? createThread({
-            modelId: activeModelId,
-            presetId: settings.activePresetId,
-            presetSnapshot: resolvePresetSnapshot(settings.activePresetId),
-            paramsSnapshot: activeModelParams,
-          })
-        : activeThread?.id ??
-      createThread({
+    const threadId = activeThread?.id
+      ?? createThread({
         modelId: activeModelId,
         presetId: settings.activePresetId,
         presetSnapshot: resolvePresetSnapshot(settings.activePresetId),
@@ -659,9 +675,19 @@ export const useChatSession = () => {
 
     setActiveThread(threadId);
 
-    if (activeThread && !shouldStartNewThreadForActiveModel) {
-      syncThreadParametersCallback(activeThread, activeModelParams);
+    const existingThread = activeThread;
+    if (existingThread) {
+      ensureThreadUsesModelForSend(existingThread, activeModelId);
+      const nextThread = useChatStore.getState().getThread(threadId);
+      if (nextThread) {
+        syncThreadParametersCallback(nextThread, activeModelParams);
+      }
     }
+
+    const threadAfterPossibleSwitch = useChatStore.getState().getThread(threadId);
+    const threadModelId = threadAfterPossibleSwitch
+      ? getThreadActiveModelId(threadAfterPossibleSwitch)
+      : activeModelId;
 
     const userMessage: ChatMessage = {
       id: createChatId('message'),
@@ -669,14 +695,16 @@ export const useChatSession = () => {
       content: text,
       createdAt: Date.now(),
       state: 'complete',
+      kind: 'message',
+      modelId: threadModelId,
     };
 
     appendMessage(threadId, userMessage);
 
-    const assistantMessageId = createAssistantPlaceholder(threadId);
+    const assistantMessageId = createAssistantPlaceholder(threadId, threadModelId);
 
     await runAssistantCompletion(threadId, assistantMessageId);
-  }, [activeThread, appendMessage, createAssistantPlaceholder, createThread, runAssistantCompletion, setActiveThread, syncThreadParametersCallback]);
+  }, [activeThread, appendMessage, createAssistantPlaceholder, createThread, ensureThreadUsesModelForSend, runAssistantCompletion, setActiveThread, syncThreadParametersCallback]);
 
   const stopGeneration = useCallback(async () => {
     if (!sharedGenerationState.current) {
@@ -724,6 +752,14 @@ export const useChatSession = () => {
       .find((message) => message.role === 'user' && message.content.trim().length > 0);
     if (!lastUserMessage) {
       return false;
+    }
+
+    // If the thread currently ends with a model-switch marker, regenerating the last
+    // assistant in place would leave that marker trailing after the new assistant
+    // response (`user -> assistant -> model_switch`). Rebuild the tail from the last
+    // user message instead so the regenerated branch stays chronologically coherent.
+    if (activeThread.messages.at(-1)?.kind === 'model_switch') {
+      return regenerateFromUserMessage(lastUserMessage.id, lastUserMessage.content);
     }
 
     ensureThreadCanGenerate(activeThread, 'regenerating this response');

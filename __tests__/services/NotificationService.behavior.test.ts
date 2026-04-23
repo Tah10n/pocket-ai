@@ -77,6 +77,50 @@ describe('NotificationService (behavior)', () => {
     expect(router.push).toHaveBeenCalledWith('/(tabs)/chat');
   });
 
+  it('navigates to chat from an initial inference notification response without changing thread when none is provided', async () => {
+    (Notifications.getLastNotificationResponseAsync as jest.Mock).mockResolvedValueOnce({
+      notification: {
+        request: {
+          content: {
+            data: { taskType: 'inference' },
+          },
+        },
+      },
+    });
+
+    await notificationService.initialize();
+
+    expect(router.push).toHaveBeenCalledWith('/(tabs)/chat');
+    expect(mockSetActiveThread).not.toHaveBeenCalled();
+  });
+
+  it('ignores notification taps with missing or unknown task types', async () => {
+    await notificationService.initialize();
+
+    const listener = (Notifications.addNotificationResponseReceivedListener as jest.Mock).mock.calls[0][0];
+    listener({
+      notification: {
+        request: {
+          content: {
+            data: { taskType: 'other' },
+          },
+        },
+      },
+    });
+    listener({
+      notification: {
+        request: {
+          content: {
+            data: {},
+          },
+        },
+      },
+    });
+
+    expect(router.push).not.toHaveBeenCalled();
+    expect(mockSetActiveThread).not.toHaveBeenCalled();
+  });
+
   it('requests permissions only when needed', async () => {
     (Notifications.getPermissionsAsync as jest.Mock).mockResolvedValueOnce({ status: 'granted' });
     await expect(notificationService.requestPermissions()).resolves.toBe(true);
@@ -148,6 +192,18 @@ describe('NotificationService (behavior)', () => {
     await notificationService.openSystemSettings();
     expect(warnSpy).toHaveBeenCalled();
 
+    warnSpy.mockRestore();
+  });
+
+  it('initialize swallows setup failures', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    (Notifications.addNotificationResponseReceivedListener as jest.Mock).mockImplementationOnce(() => {
+      throw new Error('listener failed');
+    });
+
+    await expect(notificationService.initialize()).resolves.toBeUndefined();
+
+    expect(warnSpy).toHaveBeenCalledWith('[NotificationService] Failed to initialize', expect.any(Error));
     warnSpy.mockRestore();
   });
 });

@@ -1,4 +1,5 @@
 import { ConversationIndexItem } from '../types/chat';
+import { getShortModelLabel } from './modelLabel';
 
 export function formatConversationUpdatedAt(timestamp: number) {
   const diffMs = Date.now() - timestamp;
@@ -22,7 +23,7 @@ export function formatConversationUpdatedAt(timestamp: number) {
 }
 
 export function getConversationModelLabel(modelId: string) {
-  return modelId.split('/').pop() ?? modelId;
+  return getShortModelLabel(modelId) || modelId;
 }
 
 export function matchesConversationSearch(

@@ -62,6 +62,33 @@ describe('PerformanceExport', () => {
     expect(parsed.sym).toBeUndefined();
   });
 
+  it('safeJsonStringify falls back to an error payload when the first stringify attempt fails', () => {
+    const stringifySpy = jest.spyOn(JSON, 'stringify');
+    stringifySpy
+      .mockImplementationOnce(() => {
+        throw new Error('boom');
+      })
+      .mockImplementationOnce(() => '{"error":"safeJsonStringify_failed"}');
+
+    try {
+      expect(safeJsonStringify({ ok: true })).toBe('{"error":"safeJsonStringify_failed"}');
+    } finally {
+      stringifySpy.mockRestore();
+    }
+  });
+
+  it('safeJsonStringify returns an empty object when every stringify attempt fails', () => {
+    const stringifySpy = jest.spyOn(JSON, 'stringify').mockImplementation(() => {
+      throw new Error('always fails');
+    });
+
+    try {
+      expect(safeJsonStringify({ ok: true })).toBe('{}');
+    } finally {
+      stringifySpy.mockRestore();
+    }
+  });
+
   it('getUtf8ByteLength uses a fallback without TextEncoder', () => {
     const original = (globalThis as any).TextEncoder;
     try {
@@ -70,6 +97,22 @@ describe('PerformanceExport', () => {
       expect(getUtf8ByteLength('a')).toBe(1);
       expect(getUtf8ByteLength('€')).toBe(3);
       expect(getUtf8ByteLength('😀')).toBe(4);
+    } finally {
+      (globalThis as any).TextEncoder = original;
+    }
+  });
+
+  it('getUtf8ByteLength falls back when TextEncoder.encode throws', () => {
+    const original = (globalThis as any).TextEncoder;
+    try {
+      (globalThis as any).TextEncoder = class {
+        encode() {
+          throw new Error('encode failed');
+        }
+      };
+
+      expect(getUtf8ByteLength('\ud800')).toBe(3);
+      expect(getUtf8ByteLength('\udc00')).toBe(3);
     } finally {
       (globalThis as any).TextEncoder = original;
     }
@@ -170,6 +213,34 @@ describe('PerformanceExport', () => {
     }
   });
 
+  it('truncates oversized event names until the logcat line fits', () => {
+    const snapshot: PerformanceSnapshot = {
+      enabled: true,
+      counters: {},
+      events: [
+        {
+          type: 'mark',
+          name: '😀'.repeat(2000),
+          t: 1,
+          wallTime: 1000,
+        },
+      ],
+    };
+
+    const payload = buildPerformanceExportPayloadFromSnapshot(snapshot, buildSession());
+    const dump = buildLogcatDumpLines(payload);
+    const eventLine = dump.lines.find((line) => line.startsWith('POCKET_AI_PERF_EVENT '));
+
+    expect(eventLine).toBeDefined();
+
+    if (eventLine) {
+      const parsed = JSON.parse(eventLine.slice('POCKET_AI_PERF_EVENT '.length)) as { name: string };
+      expect(parsed.name.length).toBeLessThan(snapshot.events[0].name.length);
+      expect(parsed.name.endsWith('…')).toBe(true);
+      expect(getUtf8ByteLength(eventLine)).toBeLessThan(3000);
+    }
+  });
+
   it('emits counters as separate logcat lines when header is too large', () => {
     const manyCounters: Record<string, number> = {};
     for (let i = 0; i < 200; i += 1) {
@@ -204,6 +275,20 @@ describe('PerformanceExport', () => {
     expect(result.ok).toBe(true);
     expect(logSpy).toHaveBeenCalled();
     logSpy.mockRestore();
+  });
+
+  it('dumpTraceToLogcat reports an unknown error when session info cannot be read', () => {
+    const enabledSpy = jest.spyOn(performanceMonitor, 'isEnabled').mockReturnValue(true);
+    const sessionSpy = jest.spyOn(performanceMonitor, 'getSessionInfo').mockImplementation(() => {
+      throw new Error('session failed');
+    });
+
+    try {
+      expect(dumpTraceToLogcat()).toEqual({ ok: false, reason: 'unknown_error' });
+    } finally {
+      enabledSpy.mockRestore();
+      sessionSpy.mockRestore();
+    }
   });
 
   it('builds a predictable filename prefix', () => {

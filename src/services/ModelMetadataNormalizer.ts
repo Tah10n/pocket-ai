@@ -10,6 +10,7 @@ import {
   type ModelThinkingCapabilitySnapshot,
 } from '../types/models';
 import { normalizePersistedModelCapabilitySnapshot } from '../utils/modelCapabilities';
+import { getShortModelLabel } from '../utils/modelLabel';
 import { buildHuggingFaceResolveUrl } from '../utils/huggingFaceUrls';
 
 type PersistedModelMetadata = Partial<ModelMetadata> & {
@@ -209,7 +210,7 @@ export function normalizePersistedModelMetadata(
   const normalizedRevision = normalizeNonEmptyString(model.hfRevision);
   const downloadUrl = normalizeNonEmptyString(model.downloadUrl)
     ?? buildHuggingFaceResolveUrl(model.id, 'model.gguf', normalizedRevision);
-  const normalizedName = normalizeNonEmptyString(model.name) ?? model.id.split('/').pop() ?? model.id;
+  const normalizedName = normalizeNonEmptyString(model.name) ?? (getShortModelLabel(model.id) || model.id);
   const normalizedAuthor = normalizeNonEmptyString(model.author) ?? model.id.split('/')[0] ?? 'unknown';
   const lifecycleStatus = normalizeLifecycleStatus(model.lifecycleStatus);
   const metadataTrust = normalizeMetadataTrust(model.metadataTrust);

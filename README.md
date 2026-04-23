@@ -43,7 +43,7 @@
 1. **Search** — browse GGUF models from Hugging Face right on your phone.
 2. **Download** — pick a model and download it to local storage.
 3. **Load** — the model runs through [`llama.rn`](https://github.com/mybigday/llama.rn) entirely on-device.
-4. **Chat** — have private conversations with zero network dependency.
+4. **Chat** — have private conversations with zero network dependency, including switching models inside an existing conversation.
 
 ## Features
 
@@ -68,6 +68,8 @@
 ### Chat & History
 
 - Persistent on-device chat history, encrypted at rest
+- In-chat model switching keeps one conversation thread while recording when the active model changes
+- Per-message model metadata keeps edits, regeneration, and history restoration aligned with the model that produced each turn
 - System prompt presets for different assistant behaviors
 - Conversation search, rename, retention controls, and bulk cleanup
 
@@ -117,6 +119,20 @@ npm run ios        # Run on iOS
 
 For release builds and signing setup, see the [Android Build Guide](docs/android-build.md) and [iOS Build Guide](docs/ios-build.md).
 
+## Tests and coverage
+
+```bash
+npm test
+```
+
+Generate a Jest coverage report locally:
+
+```bash
+npm run coverage
+```
+
+Coverage output is written to `coverage/`.
+
 ## Contributing
 
 Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines and the [Code of Conduct](CODE_OF_CONDUCT.md).
@@ -129,6 +145,7 @@ This project uses Conventional Commit-style **PR titles** to drive automated ver
 |----------|-------------|
 | [Changelog](CHANGELOG.md) | Release history |
 | [Privacy & Disclosures](docs/privacy-disclosures.md) | Data handling and privacy policies |
+| [Model Parameters](docs/model-parameters.md) | Generation settings, load profiles, and chat snapshot behavior |
 | [Android Build Guide](docs/android-build.md) | Android release signing and bundling |
 | [iOS Build Guide](docs/ios-build.md) | iOS archive, distribution, and signing |
 | [UI Architecture](docs/ui-architecture.md) | Component and layout guidelines |
@@ -142,12 +159,11 @@ Auto-generated from open GitHub issues labeled `roadmap:*`.
 <!-- ROADMAP:START -->
 ### Now
 
-- [\[Feature\]: Allow multiple models per conversation + add “model switched” line](https://github.com/Tah10n/pocket-ai/issues/25) (#25)
+- [\[Feature\]: Model card “Size” should open quantization/file picker (GGUF variants)](https://github.com/Tah10n/pocket-ai/issues/27) (#27)
 
 ### Next
 
 - [\[Feature\]: Show capability icons on model cards (text / vision / reasoning)](https://github.com/Tah10n/pocket-ai/issues/28) (#28)
-- [\[Feature\]: Model card “Size” should open quantization/file picker (GGUF variants)](https://github.com/Tah10n/pocket-ai/issues/27) (#27)
 
 ### Later
 

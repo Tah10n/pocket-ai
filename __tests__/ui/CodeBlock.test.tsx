@@ -51,8 +51,17 @@ jest.mock('@/components/ui/pressable', () => {
 describe('CodeBlock', () => {
   beforeEach(() => {
     reactI18nextMock.__resetTranslations();
+    reactI18nextMock.__setTranslationOverride('common.code', en.common.code);
     reactI18nextMock.__setTranslationOverride('common.copy', en.common.copy);
     reactI18nextMock.__setTranslationOverride('common.copied', en.common.copied);
+  });
+
+  it('falls back to the generic translated code label when language is omitted', () => {
+    const { getByText } = render(
+      <CodeBlock code={'const x = 1;'} />,
+    );
+
+    expect(getByText(en.common.code)).toBeTruthy();
   });
 
   it('copies the code and shows temporary feedback', async () => {

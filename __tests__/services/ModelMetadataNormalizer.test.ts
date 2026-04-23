@@ -65,4 +65,15 @@ describe('ModelMetadataNormalizer', () => {
       'llama.embedding_length': 4096,
     }));
   });
+
+  it('falls back to the short repo label when persisted metadata has no name', () => {
+    const normalized = normalizePersistedModelMetadata({
+      id: 'author/model-q4',
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+    });
+
+    expect(normalized.name).toBe('model-q4');
+    expect(normalized.author).toBe('author');
+  });
 });

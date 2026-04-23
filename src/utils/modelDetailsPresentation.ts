@@ -1,6 +1,7 @@
 import { getHuggingFaceModelUrl } from '@/services/ModelCatalogService';
 import type { MaterialSymbolName } from '@/components/ui/MaterialSymbols';
 import { ModelAccessState, LifecycleStatus, type ModelMetadata } from '@/types/models';
+import { getShortModelLabel } from '@/utils/modelLabel';
 import { formatModelFileSize } from '@/utils/modelSize';
 
 export type ModelDetailsTone = 'neutral' | 'primary' | 'info' | 'success' | 'warning' | 'error';
@@ -168,7 +169,7 @@ function getQuantFileLabel(model: ModelMetadata): string | undefined {
 export function createModelDetailsPlaceholder(modelId: string): ModelMetadata {
   return {
     id: modelId,
-    name: modelId.split('/').pop() || modelId,
+    name: getShortModelLabel(modelId) || modelId,
     author: modelId.split('/')[0] || 'unknown',
     size: null,
     downloadUrl: getHuggingFaceModelUrl(modelId),

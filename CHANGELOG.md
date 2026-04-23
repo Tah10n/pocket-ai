@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > Note: This file is maintained automatically by Release Please based on Conventional Commits (PR titles).
 > Avoid editing it manually unless you are bootstrapping or fixing the release history.
 
+## [1.2.0](https://github.com/Tah10n/pocket-ai/compare/v1.1.2...v1.2.0) (2026-04-23)
+
+
+### Features
+
+* allow model switching within a conversation ([#55](https://github.com/Tah10n/pocket-ai/issues/55)) ([0b55f65](https://github.com/Tah10n/pocket-ai/commit/0b55f65b7a8ffea7eba0d5eacb59f855ecd9a483))
+
 ## [1.1.2](https://github.com/Tah10n/pocket-ai/compare/v1.1.1...v1.1.2) (2026-04-21)
 
 

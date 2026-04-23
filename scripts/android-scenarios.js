@@ -3,15 +3,26 @@
 const fs = require("fs");
 const path = require("path");
 const { spawnSync } = require("child_process");
+const DEFAULT_SCENARIO_PACK = "core";
+const SCENARIO_PACKS = new Set([DEFAULT_SCENARIO_PACK, "extended", "all"]);
 
-const cliOptions = parseCliOptions(process.argv.slice(2));
+const cliOptions = require.main === module
+  ? parseCliOptions(process.argv.slice(2))
+  : parseCliOptions([]);
 const projectRoot = path.resolve(__dirname, "..");
+const appConfigPath = path.join(projectRoot, "app.json");
 const artifactsRoot = path.join(projectRoot, "artifacts", "android-scenarios");
 const dumpPathOnDevice = "/sdcard/window_dump.xml";
+const appPackageName = readExpoConfig().packageName;
 const homeLauncherLabel = "Pocket AI";
+const APP_TITLE_LABELS = ["Pocket AI"];
 const HOME_SECTION_LABELS = ["Recent Conversations", "Недавние разговоры"];
 const HOME_TAB_LABELS = ["Home", "Главная"];
 const CHAT_TAB_LABELS = ["Chat", "Чат"];
+const CLOSE_APP_LABELS = ["Close app", "Закрыть приложение"];
+const WAIT_LABELS = ["Wait", "Подождать"];
+const APP_NOT_RESPONDING_LABEL_FRAGMENTS = ["isn't responding", "не отвечает"];
+const NEW_CHAT_LABELS = ["New Chat", "Новый чат"];
 const CHAT_EMPTY_LABELS = [
   "No messages yet",
   "Сообщений пока нет",
@@ -21,10 +32,15 @@ const CHAT_EMPTY_LABELS = [
 const CHAT_ROUTE_LABELS = [
   ...CHAT_EMPTY_LABELS,
   "Start a new chat",
+  "Начать новый чат",
   "Open model controls",
+  "Открыть параметры модели",
   "Open the preset picker for this chat",
+  "Открыть выбор пресета для этого чата",
   "Ask local AI...",
+  "Спросите локальный ИИ...",
   "Chat message input",
+  "Поле ввода сообщения",
 ];
 const MODELS_TAB_LABELS = ["Models", "Модели"];
 const MODEL_CATALOG_LABELS = ["Model Catalog", "Каталог моделей"];
@@ -33,6 +49,9 @@ const DOWNLOADED_TAB_LABELS = ["Downloaded", "Загруженные"];
 const MODELS_FILTER_TOGGLE_LABELS = ["Filters", "Фильтры"];
 const MODELS_FILTER_NO_TOKEN_REQUIRED_LABELS = ["No token required", "Без токена"];
 const MODELS_FILTER_CLEAR_LABELS = ["Clear", "Очистить"];
+const SORT_LABELS = ["Sort", "Сортировка"];
+const MOST_DOWNLOADED_LABELS = ["Most downloaded", "Самые скачиваемые"];
+const MOST_POPULAR_LABELS = ["Most popular", "Самые популярные"];
 const SETTINGS_TAB_LABELS = ["Settings", "Настройки"];
 const SETTINGS_TITLE_LABELS = ["Settings", "Настройки"];
 const THEME_MODE_LABELS = ["Theme Mode", "Тема"];
@@ -43,7 +62,17 @@ const PERFORMANCE_COPY_TRACE_LABELS = ["Copy trace", "Копировать тр�
 const PERFORMANCE_DUMP_TO_LOGCAT_LABELS = ["Dump to logcat", "Выгрузить в logcat"];
 const PERFORMANCE_ENABLE_INSTRUMENTATION_LABELS = ["Enable instrumentation", "Включить инструментацию"];
 const HF_TOKEN_LABELS = ["Hugging Face Token", "Токен Hugging Face"];
-const ACTIVE_MODEL_CTA_LABELS = ["Swap Model", "Choose Model", "Browse Models"];
+const ACCESS_TOKEN_LABELS = ["Access token", "Токен доступа"];
+const TOKEN_PURPOSE_LABELS = ["What this token does", "Что делает этот токен"];
+const GET_TOKEN_LABELS = ["Get token", "Получить токен"];
+const ACTIVE_MODEL_CTA_LABELS = [
+  "Swap Model",
+  "Choose Model",
+  "Browse Models",
+  "Сменить модель",
+  "Выбрать модель",
+  "Открыть каталог",
+];
 const CONVERSATIONS_TITLE_LABELS = ["All Conversations", "Все разговоры"];
 const MANAGE_CONVERSATIONS_LABELS = ["Manage", "Управлять"];
 const CONVERSATIONS_SEARCH_LABELS = ["Search conversations", "Поиск по разговорам"];
@@ -92,14 +121,17 @@ const DOWNLOAD_WARNING_CANCEL_LABELS = [
   "Отмена",
   "ОТМЕНА",
 ];
+const INITIAL_APP_VISIBLE_TIMEOUT_MS = 20_000;
 const HOME_ROUTE_TIMEOUT_MS = 90_000;
 const SETTINGS_ROUTE_TIMEOUT_MS = 60_000;
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
-main().catch((error) => {
-  console.error(`[android-scenarios] ${error.message}`);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(`[android-scenarios] ${error.message}`);
+    process.exit(1);
+  });
+}
 
 async function main() {
   const scenarios = buildScenarios();
@@ -109,9 +141,7 @@ async function main() {
     return;
   }
 
-  const selectedScenarios = cliOptions.scenario
-    ? scenarios.filter((scenario) => scenario.id === cliOptions.scenario)
-    : scenarios;
+  const selectedScenarios = selectScenarios(scenarios, cliOptions);
 
   if (selectedScenarios.length === 0) {
     throw new Error(
@@ -133,37 +163,56 @@ async function main() {
   const serial = serialBeforeLaunch || resolveTargetSerial(adbPath, cliOptions);
   const context = createScenarioContext(adbPath, serial);
   const results = [];
-  const languageState = {
-    originalLabel: null,
-    switchedToEnglish: false,
-  };
-
-  let runError = null;
 
   try {
     await context.ensureAppVisible();
     await dismissDebuggerBannerIfPresent(adbPath, serial);
-    languageState.originalLabel = await readCurrentLanguageLabel(context);
-    await ensureEnglishUi(context, languageState);
 
     for (const scenario of selectedScenarios) {
       const startedAt = Date.now();
-      log(`Running scenario: ${scenario.id}`);
+      log(`Running scenario: ${scenario.id} [${scenario.tier}]`);
 
       try {
-        await scenario.run(context);
+        const outcome = await scenario.run(context);
+
+        if (outcome && outcome.status === "skipped") {
+          results.push({
+            id: scenario.id,
+            tier: scenario.tier,
+            status: "skipped",
+            durationMs: Date.now() - startedAt,
+            reason: outcome.reason,
+          });
+          log(`SKIP ${scenario.id}: ${outcome.reason}`);
+          continue;
+        }
+
         const screenshotPath = context.captureScreenshot(`${scenario.id}.png`);
         results.push({
           id: scenario.id,
+          tier: scenario.tier,
           status: "passed",
           durationMs: Date.now() - startedAt,
           screenshotPath,
         });
         log(`PASS ${scenario.id}`);
       } catch (error) {
+        if (error instanceof ScenarioSkipError) {
+          results.push({
+            id: scenario.id,
+            tier: scenario.tier,
+            status: "skipped",
+            durationMs: Date.now() - startedAt,
+            reason: error.message,
+          });
+          log(`SKIP ${scenario.id}: ${error.message}`);
+          continue;
+        }
+
         const screenshotPath = context.captureScreenshot(`${scenario.id}-failed.png`);
         results.push({
           id: scenario.id,
+          tier: scenario.tier,
           status: "failed",
           durationMs: Date.now() - startedAt,
           screenshotPath,
@@ -177,8 +226,6 @@ async function main() {
     writeReport(results);
     log(`Completed ${results.length} basic scenario(s).`);
   } catch (error) {
-    runError = error;
-
     try {
       const screenshotPath = context.captureScreenshot("run-failed.png");
       const uiDumpPath = path.join(artifactsRoot, "run-failed.xml");
@@ -210,19 +257,8 @@ async function main() {
       });
       writeReport(results);
     }
-  } finally {
-    try {
-      await restoreOriginalLanguage(context, languageState);
-    } catch (error) {
-      log(`Failed to restore the original Android language: ${error.message}`);
-      if (!runError) {
-        runError = error;
-      }
-    }
-  }
 
-  if (runError) {
-    throw runError;
+    throw error;
   }
 }
 
@@ -230,30 +266,46 @@ function createScenarioContext(adbPath, serial) {
   return {
     serial,
     ensureAppVisible: async () => {
-      const homeNode = await findAnyNodeNow(adbPath, serial, HOME_SECTION_LABELS, {
-        visibleOnly: true,
-      });
+      const startedAt = Date.now();
 
-      if (homeNode) {
-        return;
+      while (Date.now() - startedAt < INITIAL_APP_VISIBLE_TIMEOUT_MS) {
+        const dismissedBlockingDialog = await dismissBlockingSystemDialogIfPresent(adbPath, serial);
+        if (dismissedBlockingDialog) {
+          continue;
+        }
+
+        const snapshot = createUiSnapshot(adbPath, serial);
+
+        if (isAppForegroundSnapshot(snapshot)) {
+          return;
+        }
+
+        const homeNode = findAnyNodeInSnapshot(snapshot, HOME_SECTION_LABELS, {
+          visibleOnly: true,
+        });
+
+        if (homeNode) {
+          return;
+        }
+
+        const launcherNode = findNodeInSnapshot(snapshot, homeLauncherLabel, {
+          visibleOnly: true,
+        });
+
+        if (launcherNode?.bounds) {
+          tapBounds(adbPath, serial, launcherNode.bounds);
+          await delay(1_500);
+          continue;
+        }
+
+        await delay(1_000);
       }
 
-      const launcherNode = await findNodeNow(adbPath, serial, homeLauncherLabel, {
-        visibleOnly: true,
-      });
-
-      if (launcherNode?.bounds) {
-        runChecked(adbPath, [
-          "-s",
-          serial,
-          "shell",
-          "input",
-          "tap",
-          `${launcherNode.bounds.centerX}`,
-          `${launcherNode.bounds.centerY}`,
-        ]);
-        await delay(1_500);
-      }
+      throw new Error(withUiSummary(adbPath, serial, "Timed out waiting for the app to become visible after launch."));
+    },
+    pressHome: async () => {
+      runChecked(adbPath, ["-s", serial, "shell", "input", "keyevent", "3"]);
+      await delay(900);
     },
     dismissDebuggerBanner: async () => {
       await dismissDebuggerBannerIfPresent(adbPath, serial);
@@ -393,21 +445,98 @@ function createScenarioContext(adbPath, serial) {
   };
 }
 
+function readExpoConfig() {
+  const raw = fs.readFileSync(appConfigPath, "utf8");
+  const config = JSON.parse(raw);
+  const expo = config.expo || {};
+
+  return {
+    packageName: expo.android && expo.android.package,
+  };
+}
+
+async function dismissBlockingSystemDialogIfPresent(adbPath, serial) {
+  const snapshot = createUiSnapshot(adbPath, serial);
+  const hasAppNotRespondingDialog = snapshot.nodes.some((node) =>
+    APP_NOT_RESPONDING_LABEL_FRAGMENTS.some((fragment) => matchesUiFragment(node, fragment))
+  );
+
+  if (!hasAppNotRespondingDialog) {
+    return null;
+  }
+
+  const closeAppAction = findAnyNodeInSnapshot(snapshot, CLOSE_APP_LABELS, { visibleOnly: true });
+  if (closeAppAction?.node?.bounds) {
+    tapBounds(adbPath, serial, closeAppAction.node.bounds);
+    await delay(1_200);
+    return "close-app";
+  }
+
+  const waitAction = findAnyNodeInSnapshot(snapshot, WAIT_LABELS, { visibleOnly: true });
+  if (waitAction?.node?.bounds) {
+    tapBounds(adbPath, serial, waitAction.node.bounds);
+    await delay(2_000);
+    return "wait";
+  }
+
+  return "detected";
+}
+
+function tapBounds(adbPath, serial, bounds) {
+  runChecked(adbPath, [
+    "-s",
+    serial,
+    "shell",
+    "input",
+    "tap",
+    `${bounds.centerX}`,
+    `${bounds.centerY}`,
+  ]);
+}
+
+function findCatalogRiskModelCard(adbPath, serial, snapshot = null) {
+  const resolvedSnapshot = snapshot || createUiSnapshot(adbPath, serial);
+  const riskBadges = findNodesForLabelsInSnapshot(resolvedSnapshot, RAM_FIT_RISK_BADGE_LABELS, {
+    visibleOnly: true,
+  });
+  const detailNodes = findNodesForLabelsInSnapshot(resolvedSnapshot, MODEL_DETAILS_CTA_LABELS, {
+    visibleOnly: true,
+  }).filter((node) => node.bounds);
+
+  if (riskBadges.length === 0 || detailNodes.length === 0) {
+    return null;
+  }
+
+  const pair = pickClosestNodePair(riskBadges, detailNodes);
+  if (!pair) {
+    return null;
+  }
+
+  return {
+    riskBadgeNode: pair.sourceNode,
+    detailsNode: pair.targetNode,
+  };
+}
+
+class ScenarioSkipError extends Error {}
+
 function buildScenarios() {
   return [
     {
       id: "home-smoke",
+      tier: "core",
       description: "Verify the home screen loads and key call-to-actions are visible.",
       run: async (ctx) => {
         await goToHome(ctx);
-        await ctx.expectText("Pocket AI");
-        await ctx.expectText("New Chat");
+        await ctx.expectAnyText(APP_TITLE_LABELS);
+        await ctx.expectAnyText(NEW_CHAT_LABELS);
         await ctx.expectAnyText(HOME_SECTION_LABELS);
         await ctx.expectAnyText(ACTIVE_MODEL_CTA_LABELS);
       },
     },
     {
       id: "bottom-tabs",
+      tier: "core",
       description: "Verify bottom tab navigation across Home, Chat, Models, and Settings.",
       run: async (ctx) => {
         await goToHome(ctx);
@@ -431,17 +560,19 @@ function buildScenarios() {
     },
     {
       id: "new-chat-cta",
+      tier: "core",
       description: "Verify the Home screen New Chat button opens the chat screen empty state.",
       run: async (ctx) => {
         await goToHome(ctx);
-        await ctx.tapText("New Chat");
+        await ctx.tapAnyText(NEW_CHAT_LABELS);
         await ctx.expectAnyText(CHAT_EMPTY_LABELS);
         await ctx.tapAnyText(HOME_TAB_LABELS);
-        await ctx.expectText("New Chat");
+        await ctx.expectAnyText(NEW_CHAT_LABELS);
       },
     },
     {
       id: "swap-model-cta",
+      tier: "secondary",
       description: "Verify the Home screen active-model CTA opens the model catalog.",
       run: async (ctx) => {
         await goToHome(ctx);
@@ -455,39 +586,49 @@ function buildScenarios() {
     },
     {
       id: "hf-catalog-hardening",
+      tier: "optional",
       description: "Verify guided discovery, new HF catalog controls, and routed model details.",
       run: async (ctx) => {
         await goToHome(ctx);
         await ctx.tapAnyText(ACTIVE_MODEL_CTA_LABELS);
         await ctx.expectAnyText(MODEL_CATALOG_LABELS);
 
-        await ctx.tapText("Filters");
-        await ctx.expectText("No token required");
+        await ctx.tapAnyText(MODELS_FILTER_TOGGLE_LABELS);
+        await ctx.expectAnyText(MODELS_FILTER_NO_TOKEN_REQUIRED_LABELS);
 
-        await ctx.tapText("Sort");
-        await ctx.expectText("Most downloaded");
-        await ctx.expectText("Most popular");
-        await ctx.tapText("Sort");
+        await ctx.tapAnyText(SORT_LABELS);
+        await ctx.expectAnyText(MOST_DOWNLOADED_LABELS);
+        await ctx.expectAnyText(MOST_POPULAR_LABELS);
+        await ctx.tapAnyText(SORT_LABELS);
 
-        await ctx.tapText("Details", { timeoutMs: 15_000 });
+        await ctx.tapAnyText(MODEL_DETAILS_CTA_LABELS, { timeoutMs: 15_000 });
         await ctx.expectAnyText(MODEL_DETAILS_TITLE_LABELS);
         await ctx.expectAnyText(OPEN_ON_HF_LABELS);
       },
     },
     {
       id: "memory-fit-badges",
+      tier: "optional",
       description: "Verify memory-fit badges show up in catalog and model details.",
       run: async (ctx) => {
         await goToHome(ctx);
         await ctx.tapAnyText(ACTIVE_MODEL_CTA_LABELS);
         await ctx.expectAnyText(MODEL_CATALOG_LABELS);
-        await ctx.tapAnyText(MODEL_DETAILS_CTA_LABELS, { timeoutMs: 45_000 });
-        await ctx.expectAnyText(MODEL_DETAILS_TITLE_LABELS);
-        await ctx.expectAnyText(RAM_FIT_BADGE_LABELS, { timeoutMs: 20_000 });
+
+        const adbPath = resolveAdbPath();
+        await waitForAnyNode(adbPath, ctx.serial, RAM_FIT_BADGE_LABELS, {
+          timeoutMs: 12_000,
+          visibleOnly: true,
+        });
+
+        await ctx.tapAnyText(MODEL_DETAILS_CTA_LABELS, { timeoutMs: 15_000 });
+        await ctx.expectAnyText(MODEL_DETAILS_TITLE_LABELS, { timeoutMs: 10_000 });
+        await ctx.expectAnyText(RAM_FIT_BADGE_LABELS, { timeoutMs: 10_000 });
       },
     },
     {
       id: "memory-fit-download-warning",
+      tier: "optional",
       description: "Verify download flows warn for RAM risk or limited verification.",
       run: async (ctx) => {
         await goToHome(ctx);
@@ -497,61 +638,63 @@ function buildScenarios() {
 
         const adbPath = resolveAdbPath();
 
-        for (let attempt = 0; attempt < 12; attempt += 1) {
-          await ctx.tapAnyText(MODEL_DETAILS_CTA_LABELS, { timeoutMs: 45_000 });
-          await ctx.expectAnyText(MODEL_DETAILS_TITLE_LABELS);
+        for (let attempt = 0; attempt < 6; attempt += 1) {
+          const riskModelCard = findCatalogRiskModelCard(adbPath, ctx.serial);
 
-          const riskBadge = await findAnyNodeNow(adbPath, ctx.serial, RAM_FIT_RISK_BADGE_LABELS, {
-            visibleOnly: true,
-          });
-
-          if (!riskBadge) {
-            await ctx.pressBack();
-            await ctx.expectAnyText(MODEL_CATALOG_LABELS, { timeoutMs: 20_000 });
+          if (!riskModelCard) {
             await ctx.swipeUp();
             continue;
           }
 
-          await ctx.tapAnyText(DOWNLOAD_CTA_LABELS, { timeoutMs: 20_000 });
+          tapBounds(adbPath, ctx.serial, riskModelCard.detailsNode.bounds);
+          await delay(800);
+          await ctx.expectAnyText(MODEL_DETAILS_TITLE_LABELS, { timeoutMs: 10_000 });
+
+          await ctx.tapAnyText(DOWNLOAD_CTA_LABELS, { timeoutMs: 12_000 });
           await waitForAnyNode(adbPath, ctx.serial, DOWNLOAD_WARNING_TITLE_LABELS, {
-            timeoutMs: 15_000,
+            timeoutMs: 8_000,
             visibleOnly: true,
           });
 
           await ctx.tapAnyText(DOWNLOAD_WARNING_CANCEL_LABELS, { timeoutMs: 5_000 });
           await ctx.pressBack();
-          await ctx.expectAnyText(MODEL_CATALOG_LABELS, { timeoutMs: 20_000 });
+          await ctx.expectAnyText(MODEL_CATALOG_LABELS, { timeoutMs: 8_000 });
           return;
         }
 
-        log("SKIP memory-fit-download-warning: No RAM-risk model was found to validate download warnings.");
+        throw new ScenarioSkipError(
+          "No RAM-risk model was found to validate the download warning flow."
+        );
       },
     },
     {
       id: "hf-token-education",
+      tier: "secondary",
       description: "Verify the token education screen and external-token CTA are reachable from Settings.",
       run: async (ctx) => {
         await goToSettings(ctx);
         await scrollToAnyText(ctx, HF_TOKEN_LABELS, { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
         await ctx.tapAnyText(HF_TOKEN_LABELS);
-        await ctx.expectText("Access token");
+        await ctx.expectAnyText(ACCESS_TOKEN_LABELS);
         await ctx.swipeUp();
-        await ctx.expectText("What this token does");
-        await ctx.expectText("Get token");
+        await ctx.expectAnyText(TOKEN_PURPOSE_LABELS);
+        await ctx.expectAnyText(GET_TOKEN_LABELS);
       },
     },
     {
       id: "conversations-management",
+      tier: "secondary",
       description: "Verify the conversation management route is reachable from Home.",
       run: async (ctx) => {
         await goToConversationManagement(ctx);
         await ctx.expectAnyText(CONVERSATIONS_TITLE_LABELS);
         await ctx.expectAnyText(CONVERSATIONS_SEARCH_LABELS);
-        await ctx.expectText("New Chat");
+        await ctx.expectAnyText(NEW_CHAT_LABELS);
       },
     },
     {
       id: "performance-logcat",
+      tier: "optional",
       description: "Verify the Performance screen can dump a trace to logcat in dev builds.",
       run: async (ctx) => {
         await goToSettings(ctx);
@@ -610,30 +753,69 @@ function buildScenarios() {
   ];
 }
 
+function selectScenarios(scenarios, options) {
+  if (options.scenario) {
+    return scenarios.filter((scenario) => scenario.id === options.scenario);
+  }
+
+  const requestedPack = options.pack || DEFAULT_SCENARIO_PACK;
+  return scenarios.filter((scenario) => isScenarioIncludedInPack(scenario, requestedPack));
+}
+
+function isScenarioIncludedInPack(scenario, pack) {
+  if (pack === "all") {
+    return true;
+  }
+
+  if (pack === "extended") {
+    return scenario.tier === "core" || scenario.tier === "secondary";
+  }
+
+  return scenario.tier === "core";
+}
+
 async function goToHome(ctx) {
   await ctx.ensureAppVisible();
   await ctx.dismissDebuggerBanner();
 
+  const adbPath = resolveAdbPath();
+  const homeVisibleNow = await findAnyNodeNow(adbPath, ctx.serial, HOME_SECTION_LABELS, {
+    visibleOnly: true,
+  });
+
+  if (homeVisibleNow) {
+    await ctx.expectAnyText(APP_TITLE_LABELS, { timeoutMs: 5_000 });
+    return;
+  }
+
   try {
-    await ctx.expectAnyText(HOME_SECTION_LABELS, { timeoutMs: HOME_ROUTE_TIMEOUT_MS });
+    await ctx.expectAnyText(HOME_SECTION_LABELS, { timeoutMs: 8_000 });
   } catch {
     const reachedHome = await tryReachHome(ctx);
 
     if (!reachedHome) {
-      const adbPath = resolveAdbPath();
       throw new Error(withUiSummary(adbPath, ctx.serial, `Timed out returning to Home from the current route.`));
     }
 
-    await ctx.expectAnyText(HOME_SECTION_LABELS, { timeoutMs: HOME_ROUTE_TIMEOUT_MS });
+    await ctx.expectAnyText(HOME_SECTION_LABELS, { timeoutMs: 15_000 });
   }
 
-  await ctx.expectText("Pocket AI");
+  await ctx.expectAnyText(APP_TITLE_LABELS);
 }
 
 async function tryReachHome(ctx, maxAttempts = 4) {
   const adbPath = resolveAdbPath();
 
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const blockingDialogAction = await dismissBlockingSystemDialogIfPresent(adbPath, ctx.serial);
+    if (blockingDialogAction) {
+      if (blockingDialogAction === "close-app") {
+        await ctx.pressHome();
+        await ctx.ensureAppVisible();
+      }
+      continue;
+    }
+
     const downloadWarning = await findAnyNodeNow(adbPath, ctx.serial, DOWNLOAD_WARNING_TITLE_LABELS, {
       visibleOnly: true,
     });
@@ -653,7 +835,7 @@ async function tryReachHome(ctx, maxAttempts = 4) {
       visibleOnly: true,
     });
     if (pocketAiLauncherNode) {
-      await ctx.tapText("Pocket AI", { afterTapDelayMs: 1_500, timeoutMs: 5_000 });
+      await ctx.tapAnyText(APP_TITLE_LABELS, { afterTapDelayMs: 1_500, timeoutMs: 5_000 });
       continue;
     }
 
@@ -714,44 +896,6 @@ async function prepareCatalogForRamWarningScenario(ctx) {
   await ctx.expectAnyText(MODEL_CATALOG_LABELS);
 }
 
-async function readCurrentLanguageLabel(ctx) {
-  await goToSettings(ctx);
-
-  const languageNode = await scrollToAnyText(ctx, LANGUAGE_ROW_LABELS, {
-    timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS,
-  });
-
-  return languageNode.label;
-}
-
-async function ensureEnglishUi(ctx, languageState) {
-  if (languageState.originalLabel === LANGUAGE_ROW_LABELS[0]) {
-    return;
-  }
-
-  await scrollToAnyText(ctx, [LANGUAGE_ROW_LABELS[1]], {
-    timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS,
-  });
-  await ctx.tapAnyText([LANGUAGE_ROW_LABELS[1]]);
-  languageState.switchedToEnglish = true;
-  await scrollToAnyText(ctx, [LANGUAGE_ROW_LABELS[0]], { timeoutMs: 10_000 });
-  await scrollToAnyText(ctx, THEME_MODE_LABELS, { timeoutMs: 10_000 });
-  await goToHome(ctx);
-}
-
-async function restoreOriginalLanguage(ctx, languageState) {
-  if (!languageState.switchedToEnglish) {
-    return;
-  }
-
-  await goToSettings(ctx);
-  await scrollToAnyText(ctx, [LANGUAGE_ROW_LABELS[0]], { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
-  await ctx.tapAnyText([LANGUAGE_ROW_LABELS[0]]);
-  await scrollToAnyText(ctx, [languageState.originalLabel], { timeoutMs: 10_000 });
-  await scrollToAnyText(ctx, THEME_MODE_LABELS, { timeoutMs: 10_000 });
-  await goToHome(ctx);
-}
-
 async function scrollToAnyText(ctx, labels, options = {}) {
   const timeoutMs = options.timeoutMs ?? 20_000;
   const maxSwipesDown = options.maxSwipesDown ?? 3;
@@ -792,34 +936,7 @@ async function scrollToAnyText(ctx, labels, options = {}) {
 }
 
 function launchApp(resolvedSerial) {
-  const args = [
-    path.join(__dirname, "android-smoke.js"),
-    "--screenshot",
-    path.join("artifacts", "android-scenarios", "bootstrap.png"),
-    "--launch-delay-ms",
-    "20000",
-  ];
-
-  if (cliOptions.emulator) {
-    args.push("--emulator");
-  }
-
-  if (cliOptions.avd) {
-    args.push("--avd", cliOptions.avd);
-  }
-
-  const serial = cliOptions.serial || resolvedSerial;
-  if (serial) {
-    args.push("--serial", serial);
-  }
-
-  if (cliOptions.skipBuild) {
-    args.push("--skip-build");
-  }
-
-  if (cliOptions.port) {
-    args.push("--port", cliOptions.port);
-  }
+  const args = buildSmokeLaunchArgs(cliOptions, resolvedSerial);
 
   const result = spawnSync(process.execPath, args, {
     cwd: projectRoot,
@@ -834,6 +951,40 @@ function launchApp(resolvedSerial) {
   if (result.status !== 0) {
     throw new Error("Failed to launch the Android app before running scenarios.");
   }
+}
+
+function buildSmokeLaunchArgs(options, resolvedSerial) {
+  const args = [path.join(__dirname, "android-smoke.js")];
+
+  if (options.bootstrapScreenshot) {
+    args.push(
+      "--screenshot",
+      path.join("artifacts", "android-scenarios", "bootstrap.png")
+    );
+  }
+
+  if (options.emulator) {
+    args.push("--emulator");
+  }
+
+  if (options.avd) {
+    args.push("--avd", options.avd);
+  }
+
+  const serial = options.serial || resolvedSerial;
+  if (serial) {
+    args.push("--serial", serial);
+  }
+
+  if (options.skipBuild) {
+    args.push("--skip-build");
+  }
+
+  if (options.port) {
+    args.push("--port", options.port);
+  }
+
+  return args;
 }
 
 function resolveAdbPath() {
@@ -932,7 +1083,8 @@ async function waitForNode(adbPath, serial, label, options = {}) {
   const startedAt = Date.now();
 
   while (Date.now() - startedAt < timeoutMs) {
-    const node = await findNodeNow(adbPath, serial, label, options);
+    const snapshot = createUiSnapshot(adbPath, serial);
+    const node = findNodeInSnapshot(snapshot, label, options);
     if (node) {
       return node;
     }
@@ -948,11 +1100,10 @@ async function waitForAnyNode(adbPath, serial, labels, options = {}) {
   const startedAt = Date.now();
 
   while (Date.now() - startedAt < timeoutMs) {
-    for (const label of labels) {
-      const node = await findNodeNow(adbPath, serial, label, options);
-      if (node) {
-        return { label, node };
-      }
+    const snapshot = createUiSnapshot(adbPath, serial);
+    const match = findAnyNodeInSnapshot(snapshot, labels, options);
+    if (match) {
+      return match;
     }
 
     await delay(600);
@@ -973,32 +1124,10 @@ async function waitForAnyNodeWithPicker(adbPath, serial, labels, options = {}, p
   const resolvedPicker = picker ?? pickBestNode;
 
   while (Date.now() - startedAt < timeoutMs) {
-    const xml = dumpUiHierarchy(adbPath, serial);
-    const nodes = parseUiNodes(xml);
-    const viewportBounds = options.visibleOnly ? resolveViewportBounds(nodes) : null;
-
-    for (const label of labels) {
-      const matches = nodes.filter((node) => {
-        if (!matchesLabel(node, label)) {
-          return false;
-        }
-
-        if (options.visibleOnly) {
-          if (!node.bounds) {
-            return false;
-          }
-
-          if (viewportBounds && !isBoundsInViewport(node.bounds, viewportBounds)) {
-            return false;
-          }
-        }
-
-        return true;
-      });
-
-      if (matches.length > 0) {
-        return { label, node: resolvedPicker(matches) };
-      }
+    const snapshot = createUiSnapshot(adbPath, serial);
+    const match = findAnyNodeInSnapshot(snapshot, labels, options, resolvedPicker);
+    if (match) {
+      return match;
     }
 
     await delay(600);
@@ -1014,43 +1143,11 @@ async function waitForAnyNodeWithPicker(adbPath, serial, labels, options = {}, p
 }
 
 async function findAnyNodeNow(adbPath, serial, labels, options = {}) {
-  for (const label of labels) {
-    const node = await findNodeNow(adbPath, serial, label, options);
-    if (node) {
-      return { label, node };
-    }
-  }
-
-  return null;
+  return findAnyNodeInSnapshot(createUiSnapshot(adbPath, serial), labels, options);
 }
 
 async function findNodeNow(adbPath, serial, label, options = {}) {
-  const xml = dumpUiHierarchy(adbPath, serial);
-  const nodes = parseUiNodes(xml);
-  const viewportBounds = options.visibleOnly ? resolveViewportBounds(nodes) : null;
-  const matches = nodes.filter((node) => {
-    if (!matchesLabel(node, label)) {
-      return false;
-    }
-
-    if (options.visibleOnly) {
-      if (!node.bounds) {
-        return false;
-      }
-
-      if (viewportBounds && !isBoundsInViewport(node.bounds, viewportBounds)) {
-        return false;
-      }
-    }
-
-    return true;
-  });
-
-  if (matches.length === 0) {
-    return null;
-  }
-
-  return pickBestNode(matches);
+  return findNodeInSnapshot(createUiSnapshot(adbPath, serial), label, options);
 }
 
 function dumpUiHierarchy(adbPath, serial) {
@@ -1059,6 +1156,19 @@ function dumpUiHierarchy(adbPath, serial) {
   });
 
   return runCapture(adbPath, ["-s", serial, "exec-out", "cat", dumpPathOnDevice]);
+}
+
+function createUiSnapshot(adbPath, serial) {
+  return parseUiSnapshot(dumpUiHierarchy(adbPath, serial));
+}
+
+function parseUiSnapshot(xml) {
+  const nodes = parseUiNodes(xml);
+  return {
+    xml,
+    nodes,
+    viewportBounds: resolveViewportBounds(nodes),
+  };
 }
 
 function parseUiNodes(xml) {
@@ -1080,6 +1190,7 @@ function parseUiNodes(xml) {
     nodes.push({
       text: attributes.text || "",
       contentDesc: attributes["content-desc"] || "",
+      packageName: attributes.package || "",
       clickable: attributes.clickable === "true",
       bounds: parseBounds(attributes.bounds),
     });
@@ -1105,6 +1216,125 @@ function matchesLabel(node, label) {
     || normalizedContentDesc.endsWith(`, ${normalizedLabel}`)
     || normalizedContentDesc.includes(`, ${normalizedLabel},`)
   );
+}
+
+function matchesUiFragment(node, fragment) {
+  const normalizedFragment = normalizeUiLabel(fragment);
+  const normalizedText = normalizeUiLabel(node.text);
+  const normalizedContentDesc = normalizeUiLabel(node.contentDesc);
+
+  return normalizedText.includes(normalizedFragment)
+    || normalizedContentDesc.includes(normalizedFragment);
+}
+
+function findAnyNodeInSnapshot(snapshot, labels, options = {}, picker = pickBestNode) {
+  for (const label of labels) {
+    const matches = findMatchingNodes(snapshot, label, options);
+    if (matches.length > 0) {
+      return { label, node: picker(matches) };
+    }
+  }
+
+  return null;
+}
+
+function findNodeInSnapshot(snapshot, label, options = {}) {
+  const matches = findMatchingNodes(snapshot, label, options);
+  if (matches.length === 0) {
+    return null;
+  }
+
+  return pickBestNode(matches);
+}
+
+function isAppForegroundSnapshot(snapshot) {
+  if (!appPackageName) {
+    return false;
+  }
+
+  return snapshot.nodes.some((node) => node.packageName === appPackageName);
+}
+
+function findNodesForLabelsInSnapshot(snapshot, labels, options = {}) {
+  const results = [];
+
+  for (const label of labels) {
+    results.push(...findMatchingNodes(snapshot, label, options));
+  }
+
+  return dedupeNodes(results);
+}
+
+function findMatchingNodes(snapshot, label, options = {}) {
+  const viewportBounds = options.visibleOnly ? snapshot.viewportBounds : null;
+
+  return snapshot.nodes.filter((node) => {
+    if (!matchesLabel(node, label)) {
+      return false;
+    }
+
+    if (options.visibleOnly) {
+      if (!node.bounds) {
+        return false;
+      }
+
+      if (viewportBounds && !isBoundsInViewport(node.bounds, viewportBounds)) {
+        return false;
+      }
+    }
+
+    return true;
+  });
+}
+
+function dedupeNodes(nodes) {
+  const seen = new Set();
+  const results = [];
+
+  for (const node of nodes) {
+    const bounds = node.bounds
+      ? `${node.bounds.left}:${node.bounds.top}:${node.bounds.right}:${node.bounds.bottom}`
+      : "no-bounds";
+    const key = `${normalizeUiLabel(node.text)}|${normalizeUiLabel(node.contentDesc)}|${bounds}`;
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    results.push(node);
+  }
+
+  return results;
+}
+
+function pickClosestNodePair(sourceNodes, targetNodes) {
+  let bestPair = null;
+
+  for (const sourceNode of sourceNodes) {
+    if (!sourceNode.bounds) {
+      continue;
+    }
+
+    for (const targetNode of targetNodes) {
+      if (!targetNode.bounds) {
+        continue;
+      }
+
+      const verticalDistance = Math.abs(sourceNode.bounds.centerY - targetNode.bounds.centerY);
+      const horizontalDistance = Math.abs(sourceNode.bounds.centerX - targetNode.bounds.centerX);
+      const score = verticalDistance * 10 + horizontalDistance;
+
+      if (!bestPair || score < bestPair.score) {
+        bestPair = {
+          sourceNode,
+          targetNode,
+          score,
+        };
+      }
+    }
+  }
+
+  return bestPair;
 }
 
 function normalizeUiLabel(value) {
@@ -1200,8 +1430,7 @@ function parseBounds(rawBounds) {
 }
 
 async function dismissDebuggerBannerIfPresent(adbPath, serial) {
-  const xml = dumpUiHierarchy(adbPath, serial);
-  const nodes = parseUiNodes(xml);
+  const { nodes } = createUiSnapshot(adbPath, serial);
   const hasDevMenu = nodes.some(
     (node) =>
       node.text === "React Native Dev Menu"
@@ -1266,9 +1495,7 @@ function summarizeCurrentUi(adbPath, serial, options = {}) {
   const maxLabelLength = options.maxLabelLength ?? 80;
 
   try {
-    const xml = dumpUiHierarchy(adbPath, serial);
-    const nodes = parseUiNodes(xml);
-    const viewportBounds = resolveViewportBounds(nodes);
+    const { nodes, viewportBounds } = createUiSnapshot(adbPath, serial);
     const seen = new Set();
 
     const visibleNodes = nodes
@@ -1338,12 +1565,17 @@ function withUiSummary(adbPath, serial, message) {
 
 function writeReport(results) {
   const reportPath = path.join(artifactsRoot, "latest-report.json");
+  const summary = results.reduce((accumulator, result) => {
+    accumulator[result.status] = (accumulator[result.status] || 0) + 1;
+    return accumulator;
+  }, {});
   fs.writeFileSync(
     reportPath,
     JSON.stringify(
       {
         generatedAt: new Date().toISOString(),
         scenarioCount: results.length,
+        summary,
         results,
       },
       null,
@@ -1356,7 +1588,7 @@ function writeReport(results) {
 function printScenarioList(scenarios) {
   console.log("Available Android scenarios:");
   for (const scenario of scenarios) {
-    console.log(`- ${scenario.id}: ${scenario.description}`);
+    console.log(`- ${scenario.id} [${scenario.tier}]: ${scenario.description}`);
   }
 }
 
@@ -1364,7 +1596,9 @@ function parseCliOptions(argv) {
   const options = {
     emulator: false,
     skipBuild: false,
+    bootstrapScreenshot: false,
     list: false,
+    pack: DEFAULT_SCENARIO_PACK,
     avd: null,
     serial: null,
     scenario: null,
@@ -1384,6 +1618,11 @@ function parseCliOptions(argv) {
       continue;
     }
 
+    if (arg === "--bootstrap-screenshot") {
+      options.bootstrapScreenshot = true;
+      continue;
+    }
+
     if (arg === "--list") {
       options.list = true;
       continue;
@@ -1396,6 +1635,17 @@ function parseCliOptions(argv) {
 
     if (arg === "--serial") {
       options.serial = readCliValue(argv, ++index, "--serial");
+      continue;
+    }
+
+    if (arg === "--pack") {
+      const pack = readCliValue(argv, ++index, "--pack");
+      if (!SCENARIO_PACKS.has(pack)) {
+        throw new Error(
+          `Unknown scenario pack "${pack}". Expected one of: ${[...SCENARIO_PACKS].join(", ")}.`
+        );
+      }
+      options.pack = pack;
       continue;
     }
 
@@ -1436,8 +1686,10 @@ function printHelp() {
   console.log("  --emulator                 Run scenarios on an Android emulator instead of a connected phone");
   console.log("  --avd <name>               Use a specific AVD when starting an emulator");
   console.log("  --serial <serial>          Target a specific connected device");
+  console.log(`  --pack <core|extended|all> Run a scenario pack (default: ${DEFAULT_SCENARIO_PACK})`);
   console.log("  --scenario <id>            Run only one scenario");
   console.log("  --skip-build               Reuse the existing debug APK");
+  console.log("  --bootstrap-screenshot     Save a smoke bootstrap screenshot before scenarios");
   console.log("  --port <number>            Forward a specific Metro port to android-smoke");
   console.log("  --list                     Print available scenarios");
 }
@@ -1567,3 +1819,17 @@ function log(message) {
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+module.exports = {
+  buildScenarios,
+  buildSmokeLaunchArgs,
+  findCatalogRiskModelCard,
+  findAnyNodeInSnapshot,
+  findNodeInSnapshot,
+  isAppForegroundSnapshot,
+  pickClosestNodePair,
+  selectScenarios,
+  parseCliOptions,
+  parseUiSnapshot,
+  ScenarioSkipError,
+};

@@ -105,6 +105,7 @@ export function getThreadInferenceWindow(
   const eligibleMessages = thread.messages.filter(
     (message) =>
       message.state !== 'error'
+      && (message.kind ?? 'message') !== 'model_switch'
       && getVisibleMessageContent(message.role, message.content).trim().length > 0,
   );
   const historyMessages = eligibleMessages.map<LlmChatMessage>((message) => ({
@@ -273,6 +274,7 @@ export function getEligibleThreadMessages(thread: ChatThread): ChatMessage[] {
   return thread.messages.filter(
     (message) =>
       message.state !== 'error'
+      && (message.kind ?? 'message') !== 'model_switch'
       && getVisibleMessageContent(message.role, message.content).trim().length > 0,
   );
 }

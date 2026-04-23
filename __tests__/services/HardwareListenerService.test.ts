@@ -57,6 +57,23 @@ describe('HardwareListenerService network status', () => {
       expect(hardwareListenerService.getCurrentStatus().isConnected).toBe(false);
     });
   });
+
+  it('falls back to isConnected when reachability is still null', () => {
+    jest.isolateModules(() => {
+      const { hardwareListenerService } = require('../../src/services/HardwareListenerService');
+
+      (hardwareListenerService as any).handleNetworkChange({
+        type: 'wifi',
+        isConnected: false,
+        isInternetReachable: null,
+      });
+
+      expect(hardwareListenerService.getCurrentStatus()).toEqual(expect.objectContaining({
+        networkType: 'wifi',
+        isConnected: false,
+      }));
+    });
+  });
 });
 
 describe('HardwareListenerService lifecycle and subscriptions', () => {

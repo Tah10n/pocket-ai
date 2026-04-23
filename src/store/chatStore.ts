@@ -12,10 +12,12 @@ import {
   GenerationParamsSnapshot,
   PresetSnapshot,
   createChatId,
+  deriveThreadActiveModelIdFromMessages,
   deriveThreadTitle,
   normalizeConversationTitle,
   sanitizeHydratedThread,
   buildConversationIndex,
+  getThreadActiveModelId,
 } from '../types/chat';
 import { normalizeReasoningEffort } from '../types/reasoning';
 import { createInstrumentedStateStorage } from './persistStateStorage';
@@ -45,8 +47,9 @@ interface ChatStoreState {
   setActiveThread: (threadId: string | null) => void;
   updateThreadPresetSnapshot: (threadId: string, presetId: string | null, presetSnapshot: PresetSnapshot) => void;
   updateThreadParamsSnapshot: (threadId: string, paramsSnapshot: GenerationParamsSnapshot) => void;
+  switchThreadModel: (threadId: string, nextModelId: string, at?: number) => string | null;
   appendMessage: (threadId: string, message: ChatMessage) => void;
-  createAssistantPlaceholder: (threadId: string) => string;
+  createAssistantPlaceholder: (threadId: string, modelId?: string) => string;
   stopAssistantMessage: (threadId: string, messageId: string) => void;
   finalizeAssistantMessage: (threadId: string, messageId: string, content: string, thoughtContent?: string) => void;
   deleteThread: (threadId: string) => void;
@@ -81,6 +84,28 @@ function updateThreadMetadata(thread: ChatThread): ChatThread {
     ...thread,
     title,
     updatedAt: Date.now(),
+  };
+}
+
+function createModelSwitchMessage({
+  fromModelId,
+  toModelId,
+  createdAt,
+}: {
+  fromModelId: string;
+  toModelId: string;
+  createdAt: number;
+}): ChatMessage {
+  return {
+    id: createChatId('message'),
+    role: 'system',
+    kind: 'model_switch',
+    content: '',
+    modelId: toModelId,
+    switchFromModelId: fromModelId,
+    switchToModelId: toModelId,
+    createdAt,
+    state: 'complete',
   };
 }
 
@@ -137,6 +162,7 @@ export const useChatStore = create<ChatStoreState>()(
           title: title ?? 'New Conversation',
           titleSource: title ? 'manual' : 'derived',
           modelId,
+          activeModelId: modelId,
           presetId,
           presetSnapshot: {
             id: presetSnapshot.id,
@@ -315,6 +341,51 @@ export const useChatStore = create<ChatStoreState>()(
           };
         }),
 
+      switchThreadModel: (threadId, nextModelId, at) => {
+        let createdMessageId: string | null = null;
+
+        set((state) => {
+          const existingThread = state.threads[threadId];
+          if (!existingThread) {
+            return state;
+          }
+
+          const prevModelId = getThreadActiveModelId(existingThread);
+          if (nextModelId === prevModelId) {
+            return state;
+          }
+
+          const requestedCreatedAt = at ?? Date.now();
+          const lastMessageCreatedAt = existingThread.messages[existingThread.messages.length - 1]?.createdAt;
+          const createdAt = typeof lastMessageCreatedAt === 'number'
+            ? Math.max(requestedCreatedAt, lastMessageCreatedAt)
+            : requestedCreatedAt;
+          const updatedAt = Math.max(Date.now(), existingThread.updatedAt, createdAt);
+          const switchMessage = createModelSwitchMessage({
+            fromModelId: prevModelId,
+            toModelId: nextModelId,
+            createdAt,
+          });
+          createdMessageId = switchMessage.id;
+
+          const nextThread: ChatThread = {
+            ...existingThread,
+            activeModelId: nextModelId,
+            messages: [...existingThread.messages, switchMessage],
+            updatedAt,
+          };
+
+          return {
+            threads: {
+              ...state.threads,
+              [threadId]: nextThread,
+            },
+          };
+        });
+
+        return createdMessageId;
+      },
+
       appendMessage: (threadId, message) =>
         set((state) => {
           const existingThread = state.threads[threadId];
@@ -322,10 +393,20 @@ export const useChatStore = create<ChatStoreState>()(
             return state;
           }
 
+          const kind = message.kind ?? 'message';
+          const fallbackModelId = kind === 'model_switch'
+            ? message.switchToModelId ?? getThreadActiveModelId(existingThread)
+            : getThreadActiveModelId(existingThread);
+          const normalizedMessage: ChatMessage = {
+            ...message,
+            kind,
+            modelId: message.modelId ?? fallbackModelId,
+          };
+
           const nextThread = updateThreadMetadata({
             ...existingThread,
-            messages: [...existingThread.messages, message],
-            status: message.role === 'assistant' && message.state === 'streaming'
+            messages: [...existingThread.messages, normalizedMessage],
+            status: normalizedMessage.role === 'assistant' && normalizedMessage.state === 'streaming'
               ? 'generating'
               : existingThread.status,
           });
@@ -338,8 +419,10 @@ export const useChatStore = create<ChatStoreState>()(
           };
         }),
 
-      createAssistantPlaceholder: (threadId) => {
+      createAssistantPlaceholder: (threadId, modelId) => {
         const messageId = createChatId('message');
+        const thread = get().threads[threadId];
+        const resolvedModelId = modelId ?? (thread ? getThreadActiveModelId(thread) : undefined);
         get().appendMessage(threadId, {
           id: messageId,
           role: 'assistant',
@@ -347,6 +430,8 @@ export const useChatStore = create<ChatStoreState>()(
           thoughtContent: undefined,
           createdAt: Date.now(),
           state: 'streaming',
+          kind: 'message',
+          modelId: resolvedModelId,
         });
         return messageId;
       },
@@ -443,12 +528,17 @@ export const useChatStore = create<ChatStoreState>()(
           }
 
           const nextMessages = existingThread.messages.slice(0, targetIndex);
+          const nextActiveModelId = deriveThreadActiveModelIdFromMessages({
+            modelId: existingThread.modelId,
+            messages: nextMessages,
+          });
 
           return {
             threads: {
               ...state.threads,
               [threadId]: updateThreadMetadata({
                 ...existingThread,
+                activeModelId: nextActiveModelId,
                 messages: nextMessages,
                 summary: undefined,
                 status: 'idle',
@@ -539,6 +629,8 @@ export const useChatStore = create<ChatStoreState>()(
             return state;
           }
 
+          const modelId = getThreadActiveModelId(existingThread);
+
           const nextMessages = existingThread.messages.map((message): ChatMessage =>
             message.id === target.id
               ? {
@@ -549,6 +641,8 @@ export const useChatStore = create<ChatStoreState>()(
                   createdAt: Date.now(),
                   state: 'streaming' as ChatMessageState,
                   regeneratesMessageId: target.id,
+                  kind: 'message',
+                  modelId,
                 }
               : message,
           );
@@ -592,13 +686,29 @@ export const useChatStore = create<ChatStoreState>()(
             return state;
           }
 
+          const modelId = getThreadActiveModelId(existingThread);
+
           const existingTargetMessage = existingThread.messages[targetIndex];
           if (!existingTargetMessage || existingTargetMessage.role !== 'user') {
             return state;
           }
 
+          const baseMessages = existingThread.messages.slice(0, targetIndex);
+          const branchActiveModelId = deriveThreadActiveModelIdFromMessages({
+            modelId: existingThread.modelId,
+            messages: baseMessages,
+          });
+          const insertedSwitchMessage = baseMessages.length > 0 && branchActiveModelId !== modelId
+            ? createModelSwitchMessage({
+                fromModelId: branchActiveModelId,
+                toModelId: modelId,
+                createdAt: existingTargetMessage.createdAt,
+              })
+            : null;
+
           const nextMessages: ChatMessage[] = [
-            ...existingThread.messages.slice(0, targetIndex),
+            ...baseMessages,
+            ...(insertedSwitchMessage ? [insertedSwitchMessage] : []),
             {
               ...existingTargetMessage,
               content: nextUserContent,
@@ -607,6 +717,8 @@ export const useChatStore = create<ChatStoreState>()(
               errorCode: undefined,
               errorMessage: undefined,
               regeneratesMessageId: undefined,
+              kind: 'message',
+              modelId,
             },
             {
               id: nextAssistantMessageId,
@@ -615,6 +727,8 @@ export const useChatStore = create<ChatStoreState>()(
               thoughtContent: undefined,
               createdAt: Date.now(),
               state: 'streaming',
+              kind: 'message',
+              modelId,
             },
           ];
 
@@ -623,6 +737,7 @@ export const useChatStore = create<ChatStoreState>()(
               ...state.threads,
               [threadId]: updateThreadMetadata({
                 ...existingThread,
+                activeModelId: modelId,
                 messages: nextMessages,
                 summary: undefined,
                 status: 'generating',
@@ -684,6 +799,7 @@ export const useChatStore = create<ChatStoreState>()(
     }),
     {
       name: 'chat-store',
+      version: 1,
       skipHydration: true,
       storage: createJSONStorage(() => chatStoreStateStorage),
       partialize: (state) => ({
@@ -717,6 +833,25 @@ export const useChatStore = create<ChatStoreState>()(
         })(),
         activeThreadId: state.activeThreadId,
       }),
+      migrate: (persistedState, version) => {
+        const state = (persistedState ?? {}) as Partial<Pick<ChatStoreState, 'threads' | 'activeThreadId'>>;
+        const threads = (state.threads ?? {}) as Record<string, ChatThread>;
+
+        const sanitizedThreads = Object.fromEntries(
+          Object.entries(threads).map(([threadId, thread]) => [threadId, sanitizeHydratedThread(thread)]),
+        );
+
+        const resolvedActiveThreadId = state.activeThreadId && sanitizedThreads[state.activeThreadId]
+          ? state.activeThreadId
+          : findMostRecentThreadId(sanitizedThreads);
+
+        void version;
+
+        return {
+          threads: sanitizedThreads,
+          activeThreadId: resolvedActiveThreadId,
+        };
+      },
       onRehydrateStorage: () => (state) => {
         if (!state) {
           return;

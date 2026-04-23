@@ -37,6 +37,7 @@ import {
   resolveModelReasoningCapability,
 } from '@/utils/modelReasoningCapabilities';
 import { resolveKvCacheTypes } from '@/utils/kvCache';
+import { getShortModelLabel } from '@/utils/modelLabel';
 
 interface UseModelParametersSheetControllerOptions {
   getModelById: (modelId: string | null) => ModelMetadata | undefined;
@@ -285,7 +286,7 @@ export function useModelParametersSheetController({
   );
   const modelLabel = modelLabelOverride
     ?? configurableModel?.name
-    ?? (configurableModelId?.split('/').pop() ?? configurableModelId ?? '');
+    ?? (configurableModelId ? (getShortModelLabel(configurableModelId) || configurableModelId) : '');
   const currentParams = paramsOverride ?? getGenerationParametersForModel(configurableModelId);
   const defaultParams = defaultParamsOverride ?? getGenerationParametersForModel(null);
   const reasoningCapability = useMemo(() => resolveModelReasoningCapability(

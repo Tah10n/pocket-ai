@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { ChatThread, LlmChatMessage } from '../types/chat';
+import { getThreadActiveModelId, type ChatThread, type LlmChatMessage } from '../types/chat';
 import { llmEngineService } from '../services/LLMEngineService';
 import { registry } from '../services/LocalStorageRegistry';
 import { useModelRegistryRevision } from './useModelRegistryRevision';
@@ -42,8 +42,9 @@ export function useTruncationTracking(
   let activeThreadReasoningFormat: 'none' | 'auto' | 'deepseek' = 'none';
   let activeThreadResponseReserveTokens: number | undefined;
   if (activeThread) {
-    const model = registry.getModel(activeThread.modelId);
-    const capability = resolveModelReasoningCapability(model, activeThread.modelId, model?.name);
+    const modelId = getThreadActiveModelId(activeThread);
+    const model = registry.getModel(modelId);
+    const capability = resolveModelReasoningCapability(model, modelId, model?.name);
     const runtimeConfig = resolveReasoningRuntimeConfig({
       reasoningEffort: activeThread.paramsSnapshot.reasoningEffort,
       capability,

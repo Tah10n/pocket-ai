@@ -62,13 +62,13 @@ If the release changes shared theme, tab chrome, routed headers, localization fi
 
 ```bash
 npm run verify:mobile-change
-node .\scripts\android-scenarios.js --skip-build --scenario home-smoke
-node .\scripts\android-scenarios.js --skip-build --scenario bottom-tabs
+npm run android:scenarios -- --skip-build
 node .\scripts\android-scenarios.js --skip-build --scenario hf-catalog-hardening
-node .\scripts\android-scenarios.js --skip-build --scenario hf-token-education
-node .\scripts\android-scenarios.js --skip-build --scenario conversations-management
 node .\scripts\android-screen-capture.js --skip-build --screen home,models,settings,conversations,huggingface-token,model-details --output-dir artifacts/android-scenarios/manual-sample
 ```
+
+The raw runner defaults to the small core pack (`home-smoke`, `bottom-tabs`, `new-chat-cta`).
+`npm run android:scenarios` uses the extended stable pack, while noisy catalog/perf checks should stay targeted via `--scenario <id>`.
 
 ## Build commands
 
@@ -175,6 +175,9 @@ keyPassword=your-key-password
 
 - Open `Chat` and send a prompt with a loaded model.
 - Confirm streaming, stop, and regenerate behavior.
+- Switch to a different downloaded model from the chat header and confirm the current conversation stays open, the header updates to the selected model, and a `Model switched` system row appears in the transcript.
+- After switching models in chat, open Model Controls and confirm the active chat model shows `Apply & reload` instead of `Save load profile`.
+- Switch models more than once in the same conversation, then edit or regenerate an older user turn and confirm the rebuilt branch stays aligned with the intended active model.
 - Start a longer generation, then background the app and confirm Android shows a persistent generation notification and a completion notification when finished. Tap the notification and confirm it returns you to the chat.
 - While sending, confirm the header stays stable, does not add a redundant `Generating` label, and the composer does not visibly jump on Android.
 - With the Android keyboard open, confirm the composer keeps a small but visible gap above the keyboard instead of touching it or floating too high.

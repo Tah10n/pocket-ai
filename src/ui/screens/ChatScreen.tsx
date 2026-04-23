@@ -21,6 +21,8 @@ import { Text } from '@/components/ui/text';
 import { ChatHeader } from '@/components/ui/ChatHeader';
 import { ChatStatusBanner } from '@/components/ui/ChatStatusBanner';
 import { ChatMessageBubble } from '@/components/ui/ChatMessageBubble';
+import { ChatSystemEventRow } from '@/components/ui/ChatSystemEventRow';
+import { ChatModelSelectorSheet } from '@/components/ui/ChatModelSelectorSheet';
 import { ChatInputBar } from '@/components/ui/ChatInputBar';
 import { ErrorReportSheet } from '@/components/ui/ErrorReportSheet';
 import { ModelParametersSheet } from '@/components/ui/ModelParametersSheet';
@@ -33,12 +35,13 @@ import { useErrorReportSheetController, type ErrorReportContext } from '@/hooks/
 import { useModelParametersSheetController } from '@/hooks/useModelParametersSheetController';
 import { useModelRegistryRevision } from '@/hooks/useModelRegistryRevision';
 import { useRouter } from 'expo-router';
-import { EngineStatus } from '../../types/models';
-import { ChatMessage } from '../../types/chat';
+import { EngineStatus, LifecycleStatus } from '../../types/models';
+import { ChatMessage, getThreadActiveModelId } from '../../types/chat';
 import { getChatHardwareBannerInputs, hardwareListenerService } from '../../services/HardwareListenerService';
 import { useTheme } from '../../providers/ThemeProvider';
 import { registry } from '../../services/LocalStorageRegistry';
 import { useChatStore } from '../../store/chatStore';
+import { getShortModelLabel } from '@/utils/modelLabel';
 import { getReportedErrorMessage } from '../../services/AppError';
 import {
     getGenerationParametersForModel,
@@ -182,10 +185,10 @@ export const ChatScreen = () => {
         createSummaryPlaceholder,
         startNewChat,
     } = useChatSession();
-    const { state: engineState } = useLLMEngine();
+    const { state: engineState, loadModel } = useLLMEngine();
     const { t } = useTranslation();
     const { colors, resolvedMode } = useTheme();
-    useModelRegistryRevision();
+    const modelRegistryRevision = useModelRegistryRevision();
     const router = useRouter();
     const { openErrorReport, sheetProps: errorReportSheetProps } = useErrorReportSheetController();
     const tabBarHeight = useBottomTabBarHeight();
@@ -196,6 +199,11 @@ export const ChatScreen = () => {
     const [isListTouching, setIsListTouching] = useState(false);
     const [listViewportHeight, setListViewportHeight] = useState(0);
     const [isPresetSelectorOpen, setPresetSelectorOpen] = useState(false);
+    const [isModelSelectorOpen, setModelSelectorOpen] = useState(false);
+    const [pendingModelSelection, setPendingModelSelection] = useState<{
+        threadId: string | null;
+        modelId: string;
+    } | null>(null);
     const [settings, setSettings] = useState(() => getSettings());
     const [pendingRegenerateMessage, setPendingRegenerateMessage] = useState<{
         messageId: string;
@@ -203,6 +211,7 @@ export const ChatScreen = () => {
     } | null>(null);
     const updateThreadPresetSnapshot = useChatStore((state) => state.updateThreadPresetSnapshot);
     const updateThreadParamsSnapshot = useChatStore((state) => state.updateThreadParamsSnapshot);
+    const switchThreadModel = useChatStore((state) => state.switchThreadModel);
     const listRef = useRef<FlashListRef<ChatMessage> | null>(null);
     const autoScrollFrameRef = useRef<number | null>(null);
     const keyboardMeasureFrameRef = useRef<number | null>(null);
@@ -242,8 +251,31 @@ export const ChatScreen = () => {
     const listBottomPadding =
         hardwareBannerInputs.showLowMemoryWarning || hardwareBannerInputs.showThermalWarning ? 22 : 14;
 
+    const downloadedModels = useMemo(() => {
+        // Force recompute on registry revision changes.
+        void modelRegistryRevision;
+
+        return registry.getModels()
+            .filter((model) => (
+                model.lifecycleStatus === LifecycleStatus.DOWNLOADED
+                || model.lifecycleStatus === LifecycleStatus.ACTIVE
+            ))
+            .sort((left, right) => (left.name ?? left.id).localeCompare(right.name ?? right.id));
+    }, [modelRegistryRevision]);
+
+    const activeThreadId = activeThread?.id ?? null;
+    const currentChatActiveModelId = activeThread
+        ? getThreadActiveModelId(activeThread)
+        : settings.activeModelId ?? engineState.activeModelId ?? null;
+    const isModelSelectionPending = pendingModelSelection != null;
+    const isPendingModelSelectionForCurrentThread = pendingModelSelection != null
+        && pendingModelSelection.threadId === activeThreadId;
+    const displayedChatActiveModelId = isPendingModelSelectionForCurrentThread
+        ? pendingModelSelection.modelId
+        : currentChatActiveModelId;
+
     const headerTitle = activeThread?.title ?? t('chat.newChatTitle');
-    const configurableModelId = activeThread?.modelId ?? settings.activeModelId ?? null;
+    const configurableModelId = currentChatActiveModelId;
     const rawCurrentParams = getGenerationParametersForModel(configurableModelId);
     const currentParams = {
         ...rawCurrentParams,
@@ -266,11 +298,9 @@ export const ChatScreen = () => {
     const lastMessageSignature = lastMessage
         ? `${lastMessage.id}:${lastMessage.state}:${lastMessage.content.length}:${lastMessage.tokensPerSec ?? -1}`
         : 'empty';
-    const modelLabel = activeThread?.modelId
-        ? (activeThread.modelId.split('/').pop() ?? activeThread.modelId)
-        : (engineState.activeModelId
-            ? (engineState.activeModelId.split('/').pop() ?? engineState.activeModelId)
-            : t('chat.modelUnavailable'));
+    const modelLabel = displayedChatActiveModelId
+        ? (getShortModelLabel(displayedChatActiveModelId) || displayedChatActiveModelId)
+        : t('chat.modelUnavailable');
     const rawParamsSource = activeThread?.paramsSnapshot ?? currentParams;
     const paramsSource = {
         ...rawParamsSource,
@@ -287,7 +317,7 @@ export const ChatScreen = () => {
     const activePresetLabel = activeThread?.presetSnapshot.name ?? (settings.activePresetId ? resolvePresetSnapshot(settings.activePresetId).name : t('common.default'));
     const shouldShowRecoveryBanner = isInputDisabled && hasMessages;
     const shouldShowRecoveryCard = isInputDisabled && !hasMessages;
-    const hasDownloadedModels = registry.hasAnyDownloadedModels();
+    const hasDownloadedModels = downloadedModels.length > 0;
     const modelRecoveryActionRoute = hasDownloadedModels
         ? ({ pathname: '/(tabs)/models', params: { initialTab: 'downloaded' } } as const)
         : '/(tabs)/models';
@@ -382,6 +412,58 @@ export const ChatScreen = () => {
         t,
     ]);
 
+    const handleSelectModelFromHeader = useCallback(async (nextModelId: string) => {
+        if (isGenerating) {
+            return;
+        }
+
+        const selectionThreadId = activeThread?.id ?? null;
+
+        if (nextModelId === currentChatActiveModelId) {
+            setPendingModelSelection((currentValue) => (
+                currentValue?.threadId === selectionThreadId ? null : currentValue
+            ));
+            setModelSelectorOpen(false);
+            return;
+        }
+
+        setPendingModelSelection({ threadId: selectionThreadId, modelId: nextModelId });
+        setModelSelectorOpen(false);
+
+        try {
+            await loadModel(nextModelId);
+        } catch (error) {
+            setPendingModelSelection((currentValue) => (
+                currentValue?.threadId === selectionThreadId && currentValue.modelId === nextModelId
+                    ? null
+                    : currentValue
+            ));
+            showAlertForError('common.actionFailed', 'ChatScreen.loadModel', error);
+            return;
+        }
+
+        setPendingModelSelection((currentValue) => (
+            currentValue?.threadId === selectionThreadId && currentValue.modelId === nextModelId
+                ? null
+                : currentValue
+        ));
+
+        if (!activeThread) {
+            return;
+        }
+
+        switchThreadModel(activeThread.id, nextModelId);
+        updateThreadParamsSnapshot(activeThread.id, getGenerationParametersForModel(nextModelId));
+    }, [
+        activeThread,
+        currentChatActiveModelId,
+        isGenerating,
+        loadModel,
+        showAlertForError,
+        switchThreadModel,
+        updateThreadParamsSnapshot,
+    ]);
+
     const getConfigurableModelById = useCallback((modelId: string | null) => {
         if (!modelId) {
             return undefined;
@@ -400,7 +482,7 @@ export const ChatScreen = () => {
             showAlertForModelLoadError('chat.applyModelSettingsErrorTitle', scope, error);
         },
         applyReloadErrorScope: 'ChatScreen.handleApplyLoadParams',
-        activeModelId: settings.activeModelId,
+        activeModelId: currentChatActiveModelId,
         canApplyReload: !isGenerating,
         modelLabelOverride: modelLabel,
         paramsOverride: paramsSource,
@@ -413,7 +495,7 @@ export const ChatScreen = () => {
 
             updateGenerationParametersForModel(modelId, partial);
 
-            if (activeThread && activeThread.modelId === modelId) {
+            if (activeThread && getThreadActiveModelId(activeThread) === modelId) {
                 updateThreadParamsSnapshot(activeThread.id, nextParams);
             }
         },
@@ -427,7 +509,7 @@ export const ChatScreen = () => {
 
             updateGenerationParametersForModel(modelId, partial);
 
-            if (activeThread && activeThread.modelId === modelId) {
+            if (activeThread && getThreadActiveModelId(activeThread) === modelId) {
                 updateThreadParamsSnapshot(activeThread.id, nextParams);
             }
         },
@@ -435,7 +517,7 @@ export const ChatScreen = () => {
             resetGenerationParametersForModel(modelId);
             const resetParams = getGenerationParametersForModel(modelId);
 
-            if (activeThread && activeThread.modelId === modelId) {
+            if (activeThread && getThreadActiveModelId(activeThread) === modelId) {
                 updateThreadParamsSnapshot(activeThread.id, resetParams);
             }
         },
@@ -920,6 +1002,20 @@ export const ChatScreen = () => {
     }, []);
 
     useEffect(() => {
+        if (!pendingModelSelection) {
+            return;
+        }
+
+        if (pendingModelSelection.threadId !== activeThreadId) {
+            return;
+        }
+
+        if (currentChatActiveModelId === pendingModelSelection.modelId) {
+            setPendingModelSelection(null);
+        }
+    }, [activeThreadId, currentChatActiveModelId, pendingModelSelection]);
+
+    useEffect(() => {
         if (Platform.OS !== 'android') {
             return;
         }
@@ -1013,6 +1109,7 @@ export const ChatScreen = () => {
         setPendingRegenerateMessage(null);
         setComposerDraft('');
         setPresetSelectorOpen(false);
+        setModelSelectorOpen(false);
         closeModelParameters();
     }, [activeThread?.id, clearForcedScrollTimeouts, closeModelParameters, setShouldFollowLatestMessage]);
 
@@ -1047,27 +1144,40 @@ export const ChatScreen = () => {
         scheduleScrollToLatestMessage(false, hasForcedFollowPass);
     }, [lastMessageSignature, messages.length, scheduleScrollToLatestMessage]);
 
-    const renderChatMessage = useCallback(({ item: msg, index }: { item: ChatMessage; index: number }) => (
-        <ChatMessageBubble
-            id={msg.id}
-            isUser={msg.role === 'user'}
-            content={msg.content}
-            thoughtContent={msg.thoughtContent}
-            errorMessage={msg.errorMessage}
-            isStreaming={msg.state === 'streaming'}
-            tokensPerSec={msg.tokensPerSec}
-            canDelete={msg.state !== 'streaming'}
-            canRegenerate={
-                msg.role === 'user'
-                && msg.state === 'complete'
-                && !isGenerating
-                && !isInputDisabled
-            }
-            onDelete={handleDeleteMessage}
-            onRegenerate={handleBeginRegenerateFromMessage}
-            onLayout={index === messages.length - 1 ? handleLastMessageLayout : undefined}
-        />
-    ), [
+    const renderChatMessage = useCallback(({ item: msg, index }: { item: ChatMessage; index: number }) => {
+        if (msg.kind === 'model_switch') {
+            return (
+                <ChatSystemEventRow
+                    id={msg.id}
+                    fromModelId={msg.switchFromModelId ?? ''}
+                    toModelId={msg.switchToModelId ?? msg.modelId ?? ''}
+                    onLayout={index === messages.length - 1 ? handleLastMessageLayout : undefined}
+                />
+            );
+        }
+
+        return (
+            <ChatMessageBubble
+                id={msg.id}
+                isUser={msg.role === 'user'}
+                content={msg.content}
+                thoughtContent={msg.thoughtContent}
+                errorMessage={msg.errorMessage}
+                isStreaming={msg.state === 'streaming'}
+                tokensPerSec={msg.tokensPerSec}
+                canDelete={msg.state !== 'streaming'}
+                canRegenerate={
+                    msg.role === 'user'
+                    && msg.state === 'complete'
+                    && !isGenerating
+                    && !isInputDisabled
+                }
+                onDelete={handleDeleteMessage}
+                onRegenerate={handleBeginRegenerateFromMessage}
+                onLayout={index === messages.length - 1 ? handleLastMessageLayout : undefined}
+            />
+        );
+    }, [
         handleBeginRegenerateFromMessage,
         handleDeleteMessage,
         handleLastMessageLayout,
@@ -1082,7 +1192,7 @@ export const ChatScreen = () => {
                 title={headerTitle}
                 presetLabel={activePresetLabel}
                 modelLabel={headerModelLabel}
-                modelSelectable={false}
+                modelSelectable={hasDownloadedModels}
                 statusLabel={statusLabel}
                 statusTone={statusTone}
                 canStartNewChat={!isGenerating}
@@ -1101,8 +1211,13 @@ export const ChatScreen = () => {
                     setPresetSelectorOpen(true);
                 }}
                 canOpenPresetSelector={!isGenerating}
-                canOpenModelSelector={false}
-                canOpenModelControls={Boolean(configurableModelId) && !isGenerating}
+                onOpenModelSelector={hasDownloadedModels
+                    ? () => {
+                        setModelSelectorOpen(true);
+                    }
+                    : undefined}
+                canOpenModelSelector={hasDownloadedModels && !isGenerating && !isModelSelectionPending}
+                canOpenModelControls={Boolean(configurableModelId) && !isGenerating && !isModelSelectionPending}
                 onBack={router.canGoBack() ? () => router.back() : undefined}
             />
 
@@ -1335,6 +1450,17 @@ export const ChatScreen = () => {
                     </View>
                 )}
             </Box>
+
+            <ChatModelSelectorSheet
+                visible={isModelSelectorOpen}
+                models={downloadedModels}
+                currentModelId={displayedChatActiveModelId}
+                canSelect={!isGenerating && !isModelSelectionPending}
+                onClose={() => setModelSelectorOpen(false)}
+                onSelectModel={(modelId) => {
+                    void handleSelectModelFromHeader(modelId);
+                }}
+            />
 
             <PresetSelectorSheet
                 visible={isPresetSelectorOpen}

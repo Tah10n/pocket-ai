@@ -1,6 +1,6 @@
 import React from 'react';
 import { fireEvent, render, waitFor } from '@testing-library/react-native';
-import { Linking } from 'react-native';
+import { Alert, Linking } from 'react-native';
 import { HuggingFaceTokenScreen } from '../../src/ui/screens/HuggingFaceTokenScreen';
 import { HUGGING_FACE_TOKEN_SETTINGS_URL } from '../../src/services/ModelCatalogService';
 
@@ -119,8 +119,8 @@ jest.mock('../../src/services/HuggingFaceTokenService', () => ({
     getCachedState: jest.fn(() => ({ hasToken: false, updatedAt: 0 })),
     subscribe: jest.fn(() => jest.fn()),
     refreshState: jest.fn().mockResolvedValue({ hasToken: false, updatedAt: 0 }),
-    saveToken: jest.fn(),
-    clearToken: jest.fn(),
+    saveToken: jest.fn().mockResolvedValue(undefined),
+    clearToken: jest.fn().mockResolvedValue(undefined),
   },
 }));
 
@@ -128,12 +128,20 @@ jest.mock('../../src/services/ModelCatalogService', () => ({
   HUGGING_FACE_TOKEN_SETTINGS_URL: 'https://huggingface.co/settings/tokens',
 }));
 
+const { huggingFaceTokenService: mockTokenService } = require('../../src/services/HuggingFaceTokenService');
+
 describe('HuggingFaceTokenScreen', () => {
   let openUrlSpy: jest.SpiedFunction<typeof Linking.openURL>;
 
   beforeEach(() => {
     jest.clearAllMocks();
-    openUrlSpy = jest.spyOn(Linking, 'openURL').mockResolvedValueOnce(undefined as never);
+    mockRouter.canGoBack.mockReturnValue(true);
+    mockTokenService.getCachedState.mockReturnValue({ hasToken: false, updatedAt: 0 });
+    mockTokenService.refreshState.mockResolvedValue({ hasToken: false, updatedAt: 0 });
+    mockTokenService.subscribe.mockReturnValue(jest.fn());
+    mockTokenService.saveToken.mockResolvedValue(undefined);
+    mockTokenService.clearToken.mockResolvedValue(undefined);
+    openUrlSpy = jest.spyOn(Linking, 'openURL').mockResolvedValue(undefined as never);
   });
 
   afterEach(() => {
@@ -150,5 +158,97 @@ describe('HuggingFaceTokenScreen', () => {
     await waitFor(() => {
       expect(Linking.openURL).toHaveBeenCalledWith(HUGGING_FACE_TOKEN_SETTINGS_URL);
     });
+  });
+
+  it('trims and saves the token input, then clears the draft', async () => {
+    const screen = render(<HuggingFaceTokenScreen />);
+
+    fireEvent.changeText(
+      screen.getByPlaceholderText('settings.huggingFaceTokenInputPlaceholder'),
+      '  hf_secret_token  ',
+    );
+    fireEvent.press(screen.getByText('common.save'));
+
+    await waitFor(() => {
+      expect(mockTokenService.saveToken).toHaveBeenCalledWith('hf_secret_token');
+    });
+
+    expect(screen.getByPlaceholderText('settings.huggingFaceTokenInputPlaceholder').props.value).toBe('');
+  });
+
+  it('shows an alert when saving the token fails', async () => {
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    const consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    mockTokenService.saveToken.mockRejectedValueOnce(new Error('save failed'));
+
+    try {
+      const screen = render(<HuggingFaceTokenScreen />);
+
+      fireEvent.changeText(
+        screen.getByPlaceholderText('settings.huggingFaceTokenInputPlaceholder'),
+        'hf_error_token',
+      );
+      fireEvent.press(screen.getByText('common.save'));
+
+      await waitFor(() => {
+        expect(alertSpy).toHaveBeenCalledWith('models.actionFailedTitle', expect.any(String));
+      });
+    } finally {
+      consoleErrorSpy.mockRestore();
+      alertSpy.mockRestore();
+    }
+  });
+
+  it('clears a saved token and resets the draft', async () => {
+    mockTokenService.getCachedState.mockReturnValue({ hasToken: true, updatedAt: 1 });
+    mockTokenService.refreshState.mockResolvedValue({ hasToken: true, updatedAt: 1 });
+
+    const screen = render(<HuggingFaceTokenScreen />);
+
+    fireEvent.changeText(
+      screen.getByPlaceholderText('settings.huggingFaceTokenInputPlaceholder'),
+      'hf_token_to_clear',
+    );
+    fireEvent.press(screen.getByText('common.clear'));
+
+    await waitFor(() => {
+      expect(mockTokenService.clearToken).toHaveBeenCalledTimes(1);
+    });
+
+    expect(screen.getByPlaceholderText('settings.huggingFaceTokenInputPlaceholder').props.value).toBe('');
+  });
+
+  it('navigates back when possible and falls back to settings when there is no back stack', () => {
+    const firstScreen = render(<HuggingFaceTokenScreen />);
+
+    fireEvent.press(firstScreen.getByLabelText('chat.headerBackAccessibilityLabel'));
+    expect(mockRouter.back).toHaveBeenCalledTimes(1);
+
+    firstScreen.unmount();
+    mockRouter.canGoBack.mockReturnValue(false);
+
+    const secondScreen = render(<HuggingFaceTokenScreen />);
+    fireEvent.press(secondScreen.getByLabelText('chat.headerBackAccessibilityLabel'));
+
+    expect(mockRouter.replace).toHaveBeenCalledWith('/(tabs)/settings');
+  });
+
+  it('shows an alert when opening token settings fails', async () => {
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    const consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    openUrlSpy.mockRejectedValueOnce(new Error('browser unavailable'));
+
+    try {
+      const screen = render(<HuggingFaceTokenScreen />);
+
+      fireEvent.press(screen.getByText('settings.huggingFaceTokenGetToken'));
+
+      await waitFor(() => {
+        expect(alertSpy).toHaveBeenCalledWith('models.actionFailedTitle', expect.any(String));
+      });
+    } finally {
+      consoleErrorSpy.mockRestore();
+      alertSpy.mockRestore();
+    }
   });
 });

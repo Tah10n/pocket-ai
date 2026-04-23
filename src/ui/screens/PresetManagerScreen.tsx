@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Alert, Modal } from 'react-native';
 import { FlashList } from '@shopify/flash-list';
 import { useRouter } from 'expo-router';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Box } from '@/components/ui/box';
 import { Button, ButtonText } from '@/components/ui/button';
 import { MaterialSymbols } from '@/components/ui/MaterialSymbols';
@@ -29,6 +30,7 @@ export function PresetManagerScreen() {
     const [draftPrompt, setDraftPrompt] = useState('');
 
     const { t } = useTranslation();
+    const insets = useSafeAreaInsets();
 
     useEffect(() => {
         loadPresets();
@@ -213,7 +215,7 @@ export function PresetManagerScreen() {
                     renderItem={renderItem}
                     ListEmptyComponent={renderEmptyState}
                     ItemSeparatorComponent={() => <Box className="h-2" />}
-                    contentContainerStyle={{ flexGrow: 1, paddingBottom: 24 }}
+                    contentContainerStyle={{ flexGrow: 1, paddingBottom: insets.bottom + 24 }}
                 />
             </ScreenContent>
 
@@ -271,7 +273,7 @@ export function PresetManagerScreen() {
                         </ScrollView>
                     </ScreenContent>
 
-                    <ScreenContent className="pt-4">
+                    <ScreenContent className="pt-4" includeBottomSafeArea>
                         <Box className="flex-row gap-3">
                             <Button action="primary" className="flex-1" testID="preset-editor-save" onPress={handleSaveAndActivate}>
                                 <ButtonText>{t('presets.saveAndActivate')}</ButtonText>

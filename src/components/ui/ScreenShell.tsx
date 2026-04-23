@@ -7,7 +7,8 @@ import { Input, InputField, type InputFieldProps } from '@/components/ui/input';
 import { Pressable } from '@/components/ui/pressable';
 import { MaterialSymbols, type MaterialSymbolsProps } from './MaterialSymbols';
 import { Text, composeTextRole } from './text';
-import { buttonLayoutTokens, screenChromeTokens, screenLayoutTokens, typographyColors } from '../../utils/themeTokens';
+import { getNativeBottomSafeAreaInset } from '../../utils/safeArea';
+import { buttonLayoutTokens, screenChromeTokens, screenLayoutMetrics, screenLayoutTokens, typographyColors } from '../../utils/themeTokens';
 import { useTheme } from '../../providers/ThemeProvider';
 
 interface ScreenHeaderShellProps {
@@ -21,6 +22,7 @@ interface ScreenHeaderShellProps {
 interface ScreenContentProps {
   children: React.ReactNode;
   className?: string;
+  includeBottomSafeArea?: boolean;
   style?: StyleProp<ViewStyle>;
   testID?: string;
 }
@@ -255,14 +257,23 @@ export function ScreenHeaderShell({
 export function ScreenContent({
   children,
   className,
+  includeBottomSafeArea = false,
   style,
   testID,
 }: ScreenContentProps) {
+  const insets = useSafeAreaInsets();
+  const nativeBottomInset = includeBottomSafeArea
+    ? getNativeBottomSafeAreaInset(insets.bottom)
+    : 0;
+  const nativeBottomInsetStyle = nativeBottomInset > 0
+    ? { paddingBottom: screenLayoutMetrics.contentBottomInset + nativeBottomInset }
+    : undefined;
+
   return (
     <Box
       testID={testID}
       className={joinClassNames(`mx-auto w-full ${screenChromeTokens.maxWidthClassName} ${screenChromeTokens.contentHorizontalPaddingClassName} ${screenChromeTokens.contentBottomPaddingClassName}`, className)}
-      style={style}
+      style={nativeBottomInsetStyle ? [nativeBottomInsetStyle, style] : style}
     >
       {children}
     </Box>

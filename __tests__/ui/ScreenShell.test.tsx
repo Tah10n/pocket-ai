@@ -7,6 +7,8 @@ const mockMaterialSymbols = jest.fn(({ name }: any) => {
   return mockReact.createElement(Text, null, name);
 });
 
+let mockSafeAreaInsets = { top: 0, right: 0, bottom: 0, left: 0 };
+
 jest.mock('react-native-css-interop', () => {
   const mockReact = require('react');
   return {
@@ -60,7 +62,7 @@ jest.mock('../../src/providers/ThemeProvider', () => ({
 }));
 
 jest.mock('react-native-safe-area-context', () => ({
-  useSafeAreaInsets: () => ({ top: 0, right: 0, bottom: 0, left: 0 }),
+  useSafeAreaInsets: () => mockSafeAreaInsets,
 }));
 
 jest.mock('expo-blur', () => {
@@ -71,11 +73,12 @@ jest.mock('expo-blur', () => {
   };
 });
 
-const { ScreenIconButton, ScreenInlineInput, ScreenSheet } = require('../../src/components/ui/ScreenShell');
+const { ScreenContent, ScreenIconButton, ScreenInlineInput, ScreenSheet } = require('../../src/components/ui/ScreenShell');
 
 describe('ScreenShell', () => {
   beforeEach(() => {
     mockMaterialSymbols.mockClear();
+    mockSafeAreaInsets = { top: 0, right: 0, bottom: 0, left: 0 };
   });
 
   it('uses the normalized compact icon-button shape', () => {
@@ -122,5 +125,41 @@ describe('ScreenShell', () => {
     );
 
     expect(shell).toBeTruthy();
+  });
+
+  it('does not inject native bottom safe area padding by default', () => {
+    const { Platform, StyleSheet } = require('react-native');
+    const originalPlatform = Platform.OS;
+    Object.defineProperty(Platform, 'OS', { configurable: true, get: () => 'ios' });
+    mockSafeAreaInsets = { top: 0, right: 0, bottom: 32, left: 0 };
+
+    try {
+      const { getByTestId } = render(
+        <ScreenContent testID="screen-content" className="pb-0">content</ScreenContent>,
+      );
+
+      expect(StyleSheet.flatten(getByTestId('screen-content').props.style)?.paddingBottom).toBeUndefined();
+    } finally {
+      Object.defineProperty(Platform, 'OS', { configurable: true, get: () => originalPlatform });
+    }
+  });
+
+  it('adds native bottom safe area space to opted-in screen content padding', () => {
+    const { Platform, StyleSheet } = require('react-native');
+    const { screenLayoutMetrics } = require('../../src/utils/themeTokens');
+    const originalPlatform = Platform.OS;
+    Object.defineProperty(Platform, 'OS', { configurable: true, get: () => 'ios' });
+    mockSafeAreaInsets = { top: 0, right: 0, bottom: 32, left: 0 };
+
+    try {
+      const { getByTestId } = render(
+        <ScreenContent testID="safe-screen-content" includeBottomSafeArea>content</ScreenContent>,
+      );
+
+      expect(StyleSheet.flatten(getByTestId('safe-screen-content').props.style).paddingBottom)
+        .toBe(screenLayoutMetrics.contentBottomInset + 32);
+    } finally {
+      Object.defineProperty(Platform, 'OS', { configurable: true, get: () => originalPlatform });
+    }
   });
 });

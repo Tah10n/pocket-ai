@@ -1,6 +1,6 @@
 # Release Checklist
 
-Last updated: 2026-04-08
+Last updated: 2026-04-23
 
 ## Purpose
 
@@ -30,6 +30,7 @@ If you're cutting a user-facing store release:
 
 - Merge the Release Please **Release PR** (it updates versions + changelog).
 - Avoid manual edits to the version/changelog files in the normal flow.
+- After the local production build, if `app.json` reserves the next Android `versionCode`, carry that change in a small follow-up commit/PR. Do not expect to add it to the already-merged Release PR.
 
 Notes:
 
@@ -91,7 +92,7 @@ npm run build:android:production
 
 This command uses `expo.version` as `versionName`, uses the current `expo.android.versionCode` as the upload code, and after a successful build reserves the next `versionCode` in `app.json`.
 
-After a successful build, `app.json` is expected to change (the next `expo.android.versionCode` is reserved). Commit this change as part of the Release PR so the next upload code is not lost.
+After a successful build, `app.json` is expected to change (the next `expo.android.versionCode` is reserved). Commit this change in a small follow-up commit/PR so the next upload code is not lost.
 
 Only override the version values when recovering from a failed or custom release flow:
 

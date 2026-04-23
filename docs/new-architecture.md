@@ -1,15 +1,16 @@
 # React Native New Architecture
 
-Last updated: 2026-03-27
+Last updated: 2026-04-23
 
 ## Overview
 
 Pocket AI targets React Native's New Architecture by default. The app depends on native modules that benefit from Fabric, TurboModules, JSI, and Hermes-backed execution.
 
-In this repository, New Architecture is enabled in two places:
+In this repository, New Architecture is enabled explicitly in the committed Android native project:
 
-- [`app.json`](../app.json) via `expo.newArchEnabled`
 - [`android/gradle.properties`](../android/gradle.properties) via `newArchEnabled=true`
+
+The current [`app.json`](../app.json) does **not** set `expo.newArchEnabled` explicitly, so do not treat app config as the source of truth for this checkout.
 
 ## Why it matters here
 
@@ -88,6 +89,6 @@ When debugging iOS-specific native issues after generating the project, verify:
 ## Practical troubleshooting
 
 - Clean and rebuild native artifacts after major dependency changes.
-- Verify New Architecture is enabled consistently in app config and native config.
+- Verify New Architecture remains enabled in the generated native config; do not assume the current app config declares it explicitly.
 - Confirm native dependencies are compatible with the current React Native version.
 - Check whether the issue reproduces on a fresh install instead of only on a reused debug build.

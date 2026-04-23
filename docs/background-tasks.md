@@ -10,6 +10,7 @@ On Android, Pocket AI relies on a foreground service (via `react-native-backgrou
 
 - large model downloads (often multiple GB)
 - longer on-device inference runs
+- backend benchmark/autotune runs that temporarily reuse the inference background task
 
 The service shows a persistent notification while work is active.
 
@@ -19,9 +20,11 @@ On Android 13+, starting a foreground-service notification requires the user to 
 
 Current behavior:
 
-- Permission is requested explicitly from a user action (starting a download).
-- Background/service code paths never prompt for permissions.
-- If notifications are not allowed, downloads and inference can still run in the foreground, but background execution is best-effort and may pause/stop when the app backgrounds.
+- Permission requests are always initiated from visible user-facing UI.
+- Starting a download can request notification permission before Pocket AI relies on the download foreground service.
+- Backend benchmark/autotune can also show a warning dialog that lets the user enable notifications or open system settings before continuing background inference.
+- Background-task startup does not silently request permissions on its own.
+- If notifications are not allowed, downloads, inference, and autotune can still run in the foreground, but background execution is best-effort and may pause/stop when the app backgrounds.
 
 ### Background-actions notification channel
 
@@ -47,4 +50,5 @@ Expected behavior:
 - `src/services/NotificationService.ts`: permission gating, local notifications, and navigation on tap
 - `src/services/ModelDownloadManager.ts`: download lifecycle, network-aware pausing, and progress updates
 - `src/hooks/useChatSession.ts`: inference lifecycle and interruption handling
+- `src/hooks/useModelParametersSheetController.ts`: backend autotune flow, notification warning, and recovery actions
 

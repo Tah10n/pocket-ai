@@ -15,7 +15,7 @@ import { HeaderBar } from '@/components/ui/HeaderBar';
 import { ModelDownloadProgress, ModelLifecycleActionRow } from '@/components/ui/ModelLifecycleControls';
 import { MaterialSymbols } from '@/components/ui/MaterialSymbols';
 import { ErrorReportSheet } from '@/components/ui/ErrorReportSheet';
-import { ModelWarmupBanner } from '@/components/ui/ModelWarmupBanner';
+import { MODEL_WARMUP_BANNER_RESERVED_HEIGHT, ModelWarmupBanner } from '@/components/ui/ModelWarmupBanner';
 import { ModelParametersSheet } from '@/components/ui/ModelParametersSheet';
 import { ScreenBadge, ScreenCard, ScreenContent, ScreenStack } from '@/components/ui/ScreenShell';
 import { ScrollView } from '@/components/ui/scroll-view';
@@ -116,7 +116,11 @@ export function ModelDetailsScreen() {
       ) : null}
 
       <ScrollView className="flex-1">
-        <ScreenContent className="flex-1 pt-3" includeBottomSafeArea>
+        <ScreenContent
+          className="flex-1 pt-3"
+          extraBottomInset={engineState.status === EngineStatus.INITIALIZING ? MODEL_WARMUP_BANNER_RESERVED_HEIGHT : 0}
+          includeBottomSafeArea
+        >
           <ScreenStack gap="loose">
             {loading && !displayModel ? (
               <Box className="items-center justify-center pt-16">

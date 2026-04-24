@@ -33,7 +33,16 @@ jest.mock('../../../src/components/ui/text', () => {
   };
 });
 
-const { ModelWarmupBanner } = require('../../../src/components/ui/ModelWarmupBanner');
+let mockSafeAreaInsets = { top: 0, right: 0, bottom: 0, left: 0 };
+
+jest.mock('react-native-safe-area-context', () => ({
+  useSafeAreaInsets: () => mockSafeAreaInsets,
+}));
+
+const {
+  MODEL_WARMUP_BANNER_BOTTOM_GAP,
+  ModelWarmupBanner,
+} = require('../../../src/components/ui/ModelWarmupBanner');
 
 function createEngineState(overrides: Partial<EngineState> = {}): EngineState {
   return {
@@ -44,6 +53,10 @@ function createEngineState(overrides: Partial<EngineState> = {}): EngineState {
 }
 
 describe('ModelWarmupBanner', () => {
+  beforeEach(() => {
+    mockSafeAreaInsets = { top: 0, right: 0, bottom: 0, left: 0 };
+  });
+
   it('does not render when the engine is not initializing', () => {
     const screen = render(
       <ModelWarmupBanner engineState={createEngineState({ status: EngineStatus.READY })} />,
@@ -58,6 +71,8 @@ describe('ModelWarmupBanner', () => {
     );
 
     expect(screen.getByText('chat.warmingUp 42%')).toBeTruthy();
+    expect(screen.getByTestId('model-warmup-progress-track').props.className).toContain('h-4');
+    expect(screen.getByTestId('model-warmup-progress-fill').props.style).toEqual({ width: '42%' });
   });
 
   it('clamps direct percentages and falls back to zero for non-finite progress', () => {
@@ -70,5 +85,28 @@ describe('ModelWarmupBanner', () => {
       <ModelWarmupBanner engineState={createEngineState({ loadProgress: Number.POSITIVE_INFINITY })} />,
     );
     expect(nonFinite.getByText('chat.warmingUp 0%')).toBeTruthy();
+  });
+
+  it('positions above the native bottom inset or provided tab bar offset', () => {
+    const { Platform, StyleSheet } = require('react-native');
+    const originalPlatform = Platform.OS;
+    Object.defineProperty(Platform, 'OS', { configurable: true, get: () => 'android' });
+    mockSafeAreaInsets = { top: 0, right: 0, bottom: 18, left: 0 };
+
+    try {
+      const nativeInset = render(
+        <ModelWarmupBanner engineState={createEngineState()} />,
+      );
+      expect(StyleSheet.flatten(nativeInset.toJSON()?.props.style).bottom)
+        .toBe(18 + MODEL_WARMUP_BANNER_BOTTOM_GAP);
+
+      const tabOffset = render(
+        <ModelWarmupBanner engineState={createEngineState()} bottomOffset={74} />,
+      );
+      expect(StyleSheet.flatten(tabOffset.toJSON()?.props.style).bottom)
+        .toBe(74 + MODEL_WARMUP_BANNER_BOTTOM_GAP);
+    } finally {
+      Object.defineProperty(Platform, 'OS', { configurable: true, get: () => originalPlatform });
+    }
   });
 });

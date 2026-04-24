@@ -22,6 +22,7 @@ interface ScreenHeaderShellProps {
 interface ScreenContentProps {
   children: React.ReactNode;
   className?: string;
+  extraBottomInset?: number;
   includeBottomSafeArea?: boolean;
   style?: StyleProp<ViewStyle>;
   testID?: string;
@@ -212,6 +213,12 @@ interface ScreenSheetProps {
   testID?: string;
 }
 
+interface ScreenModalOverlayProps {
+  children: React.ReactNode;
+  className?: string;
+  testID?: string;
+}
+
 export function ScreenHeaderShell({
   children,
   contentClassName,
@@ -257,6 +264,7 @@ export function ScreenHeaderShell({
 export function ScreenContent({
   children,
   className,
+  extraBottomInset = 0,
   includeBottomSafeArea = false,
   style,
   testID,
@@ -265,8 +273,9 @@ export function ScreenContent({
   const nativeBottomInset = includeBottomSafeArea
     ? getNativeBottomSafeAreaInset(insets.bottom)
     : 0;
-  const nativeBottomInsetStyle = nativeBottomInset > 0
-    ? { paddingBottom: screenLayoutMetrics.contentBottomInset + nativeBottomInset }
+  const resolvedExtraBottomInset = Math.max(0, extraBottomInset);
+  const nativeBottomInsetStyle = nativeBottomInset > 0 || resolvedExtraBottomInset > 0
+    ? { paddingBottom: screenLayoutMetrics.contentBottomInset + nativeBottomInset + resolvedExtraBottomInset }
     : undefined;
 
   return (
@@ -815,11 +824,32 @@ export function ScreenSheet({
   style,
   testID,
 }: ScreenSheetProps) {
+  const insets = useSafeAreaInsets();
+  const nativeBottomInset = getNativeBottomSafeAreaInset(insets.bottom);
+  const bottomInsetStyle = {
+    paddingBottom: screenLayoutMetrics.sheetBottomInset + nativeBottomInset,
+  };
+
   return (
     <Box
       testID={testID}
       className={joinClassNames(screenLayoutTokens.sheetClassName, className)}
-      style={style}
+      style={[bottomInsetStyle, style]}
+    >
+      {children}
+    </Box>
+  );
+}
+
+export function ScreenModalOverlay({
+  children,
+  className,
+  testID,
+}: ScreenModalOverlayProps) {
+  return (
+    <Box
+      testID={testID}
+      className={joinClassNames(screenLayoutTokens.modalOverlayClassName, className)}
     >
       {children}
     </Box>

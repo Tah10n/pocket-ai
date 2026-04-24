@@ -3,7 +3,9 @@ import { useTranslation } from 'react-i18next';
 import { ModelAccessState, LifecycleStatus, type ModelMetadata } from '../../types/models';
 import { useDownloadStore } from '../../store/downloadStore';
 import { Box } from './box';
-import { ScreenActionPill, ScreenIconButton } from './ScreenShell';
+import { ProgressBar } from './ProgressBar';
+import { joinClassNames, ScreenActionPill, ScreenIconButton } from './ScreenShell';
+import { MaterialSymbols, type MaterialSymbolName } from './MaterialSymbols';
 import { Text } from './text';
 
 interface ModelLifecycleActionRowProps {
@@ -61,9 +63,11 @@ export function isModelDownloading(model: Pick<ModelMetadata, 'lifecycleStatus'>
 }
 
 export function ModelDownloadProgress({
+  density = 'comfortable',
   model,
   className,
 }: {
+  density?: 'compact' | 'comfortable';
   model: Pick<ModelMetadata, 'id' | 'downloadProgress' | 'lifecycleStatus'>;
   className?: string;
 }) {
@@ -76,6 +80,7 @@ export function ModelDownloadProgress({
       modelId={model.id}
       lifecycleStatus={model.lifecycleStatus}
       fallbackProgress={model.downloadProgress}
+      density={density}
       className={className}
     />
   );
@@ -85,11 +90,13 @@ function ModelDownloadProgressInner({
   modelId,
   lifecycleStatus,
   fallbackProgress,
+  density,
   className,
 }: {
   modelId: string;
   lifecycleStatus: LifecycleStatus;
   fallbackProgress: number;
+  density: 'compact' | 'comfortable';
   className?: string;
 }) {
   const { t } = useTranslation();
@@ -102,24 +109,109 @@ function ModelDownloadProgressInner({
     ? Math.round(downloadProgress * 100)
     : 0;
   const progressPercent = Math.max(0, Math.min(100, rawProgressPercent));
+  const progressPresentation = getDownloadProgressPresentation(lifecycleStatus, t);
+  const isCompact = density === 'compact';
 
   return (
-    <Box className={className}>
-      <Box className="mb-1 flex-row justify-between">
-        <Text className="text-xs text-typography-500">
-          {lifecycleStatus === LifecycleStatus.VERIFYING
-            ? t('models.verifying')
-            : lifecycleStatus === LifecycleStatus.PAUSED
-              ? t('models.paused')
-              : t('models.downloading')}
-        </Text>
-        <Text className="text-xs font-bold text-primary-500">{progressPercent}%</Text>
+    <Box
+      testID={`model-download-progress-${modelId}`}
+      className={joinClassNames(
+        'rounded-2xl border',
+        isCompact ? 'px-2.5 py-2' : 'px-3 py-2.5',
+        progressPresentation.shellClassName,
+        className,
+      )}
+    >
+      <Box className={joinClassNames('flex-row items-center justify-between gap-3', isCompact ? 'mb-1.5' : 'mb-2')}>
+        <Box className={joinClassNames('min-w-0 flex-1 flex-row items-center', isCompact ? 'gap-1.5' : 'gap-2')}>
+          <Box className={joinClassNames(isCompact ? 'h-7 w-7' : 'h-8 w-8', 'items-center justify-center rounded-full', progressPresentation.iconShellClassName)}>
+            <MaterialSymbols name={progressPresentation.iconName} size="sm" className={progressPresentation.iconClassName} />
+          </Box>
+          <Text numberOfLines={1} className={joinClassNames('min-w-0 flex-1 text-xs font-semibold uppercase tracking-wide', progressPresentation.labelClassName)}>
+            {progressPresentation.label}
+          </Text>
+        </Box>
+
+        <Box className={joinClassNames('rounded-full', isCompact ? 'px-2 py-0.5' : 'px-2.5 py-1', progressPresentation.percentShellClassName)}>
+          <Text className={joinClassNames('text-xs font-bold', progressPresentation.percentClassName)}>{progressPercent}%</Text>
+        </Box>
       </Box>
-      <Box className="h-1.5 w-full overflow-hidden rounded-full bg-background-200 dark:bg-background-800">
-        <Box className="h-full bg-primary-500" style={{ width: `${progressPercent}%` }} />
-      </Box>
+      <ProgressBar
+        testID={`model-download-progress-track-${modelId}`}
+        fillTestID={`model-download-progress-fill-${modelId}`}
+        valuePercent={progressPercent}
+        size={isCompact ? 'md' : 'lg'}
+        tone={progressPresentation.progressTone}
+        variant="framed"
+      />
     </Box>
   );
+}
+
+function getDownloadProgressPresentation(lifecycleStatus: LifecycleStatus, t: (key: string) => string): {
+  iconName: MaterialSymbolName;
+  iconClassName: string;
+  iconShellClassName: string;
+  label: string;
+  labelClassName: string;
+  percentClassName: string;
+  percentShellClassName: string;
+  progressTone: 'neutral' | 'primary' | 'success' | 'warning';
+  shellClassName: string;
+} {
+  if (lifecycleStatus === LifecycleStatus.VERIFYING) {
+    return {
+      iconName: 'check-circle',
+      iconClassName: 'text-success-600 dark:text-success-300',
+      iconShellClassName: 'bg-success-500/10 dark:bg-success-500/15',
+      label: t('models.verifying'),
+      labelClassName: 'text-success-700 dark:text-success-300',
+      percentClassName: 'text-success-700 dark:text-success-200',
+      percentShellClassName: 'bg-success-500/10 dark:bg-success-500/15',
+      progressTone: 'success',
+      shellClassName: 'border-success-500/25 bg-success-500/10 dark:border-success-400/25 dark:bg-success-500/10',
+    };
+  }
+
+  if (lifecycleStatus === LifecycleStatus.PAUSED) {
+    return {
+      iconName: 'pause-circle-outline',
+      iconClassName: 'text-warning-700 dark:text-warning-300',
+      iconShellClassName: 'bg-warning-500/10 dark:bg-warning-500/15',
+      label: t('models.paused'),
+      labelClassName: 'text-warning-800 dark:text-warning-200',
+      percentClassName: 'text-warning-800 dark:text-warning-200',
+      percentShellClassName: 'bg-warning-500/10 dark:bg-warning-500/15',
+      progressTone: 'warning',
+      shellClassName: 'border-warning-300 bg-background-warning dark:border-warning-800',
+    };
+  }
+
+  if (lifecycleStatus === LifecycleStatus.QUEUED) {
+    return {
+      iconName: 'schedule',
+      iconClassName: 'text-primary-600 dark:text-primary-300',
+      iconShellClassName: 'bg-primary-500/10 dark:bg-primary-500/15',
+      label: t('models.statusQueued'),
+      labelClassName: 'text-primary-700 dark:text-primary-300',
+      percentClassName: 'text-primary-700 dark:text-primary-200',
+      percentShellClassName: 'bg-primary-500/10 dark:bg-primary-500/15',
+      progressTone: 'primary',
+      shellClassName: 'border-primary-500/20 bg-primary-500/10 dark:border-primary-400/25 dark:bg-primary-500/10',
+    };
+  }
+
+  return {
+    iconName: 'download',
+    iconClassName: 'text-primary-600 dark:text-primary-300',
+    iconShellClassName: 'bg-primary-500/10 dark:bg-primary-500/15',
+    label: t('models.downloading'),
+    labelClassName: 'text-primary-700 dark:text-primary-300',
+    percentClassName: 'text-primary-700 dark:text-primary-200',
+    percentShellClassName: 'bg-primary-500/10 dark:bg-primary-500/15',
+    progressTone: 'primary',
+    shellClassName: 'border-primary-500/20 bg-primary-500/10 dark:border-primary-400/25 dark:bg-primary-500/10',
+  };
 }
 
 export function ModelLifecycleActionRow({

@@ -5,7 +5,7 @@ import Animated, { Easing, useAnimatedStyle, useSharedValue, withTiming } from '
 import { Box } from '@/components/ui/box';
 import { Button, ButtonText } from '@/components/ui/button';
 import { Pressable } from '@/components/ui/pressable';
-import { ScreenPressableCard } from '@/components/ui/ScreenShell';
+import { ScreenModalOverlay, ScreenPressableCard } from '@/components/ui/ScreenShell';
 import { Text } from '@/components/ui/text';
 import { getShortModelLabel } from '@/utils/modelLabel';
 import { ListPickerSheetContent, type ListPickerSheetItem } from './ListPickerSheet';
@@ -84,7 +84,7 @@ export function ConversationSwitcherSheet({
   return (
     <Modal visible={visible} animationType="none" transparent onRequestClose={onClose}>
       <AnimatedView style={[{ flex: 1 }, overlayStyle]}>
-      <Box className="flex-1 justify-end bg-black/40">
+      <ScreenModalOverlay>
         <Pressable className="flex-1" onPress={onClose} />
         <AnimatedView style={sheetStyle}>
         <ListPickerSheetContent
@@ -166,7 +166,7 @@ export function ConversationSwitcherSheet({
           }}
         />
         </AnimatedView>
-      </Box>
+      </ScreenModalOverlay>
       </AnimatedView>
     </Modal>
   );

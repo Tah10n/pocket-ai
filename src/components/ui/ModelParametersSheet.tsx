@@ -5,18 +5,21 @@ import { useTranslation } from 'react-i18next';
 import { Box } from '@/components/ui/box';
 import { Button, ButtonText } from '@/components/ui/button';
 import { Pressable } from '@/components/ui/pressable';
+import { ProgressBar } from '@/components/ui/ProgressBar';
 import { ScrollView } from '@/components/ui/scroll-view';
 import {
   ScreenBadge,
   ScreenCard,
   ScreenIconButton,
   ScreenInlineInput,
+  ScreenModalOverlay,
   ScreenSegmentedControl,
   ScreenSheet,
   ScreenStack,
 } from '@/components/ui/ScreenShell';
 import { Text } from '@/components/ui/text';
 import type { EngineDiagnostics } from '@/types/models';
+import { screenLayoutTokens } from '@/utils/themeTokens';
 import {
   GenerationParameters,
   ModelLoadParameters,
@@ -677,9 +680,9 @@ export function ModelParametersSheet({
 
   return (
     <Modal visible={visible} animationType="fade" transparent onRequestClose={onClose}>
-      <Box className="flex-1 justify-end bg-black/45">
+      <ScreenModalOverlay>
         <Pressable className="flex-1" onPress={onClose} />
-        <ScreenSheet className="max-h-[82%] pb-8">
+        <ScreenSheet className={screenLayoutTokens.sheetMaxHeightDefaultClassName}>
           <Box className="mb-4 flex-row items-start justify-between gap-4">
             <Box className="min-w-0 flex-1">
               <Text className="text-lg font-semibold text-typography-900 dark:text-typography-100">
@@ -1083,9 +1086,7 @@ export function ModelParametersSheet({
                           )}
 
                           {autotuneProgressPercent !== null ? (
-                            <Box className="h-2 overflow-hidden rounded-full bg-primary-200 dark:bg-typography-800">
-                              <Box className="h-full bg-primary-500" style={{ width: `${autotuneProgressPercent}%` }} />
-                            </Box>
+                            <ProgressBar valuePercent={autotuneProgressPercent} tone="primary" />
                           ) : null}
                         </Box>
                       ) : null}
@@ -1473,7 +1474,7 @@ export function ModelParametersSheet({
             </Box>
           ) : null}
         </ScreenSheet>
-      </Box>
+      </ScreenModalOverlay>
     </Modal>
   );
 }

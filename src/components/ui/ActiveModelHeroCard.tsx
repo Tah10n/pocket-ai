@@ -4,6 +4,7 @@ import { ImageBackground } from 'react-native';
 import { Box } from '@/components/ui/box';
 import { Text, composeTextRole } from '@/components/ui/text';
 import { MaterialSymbols } from './MaterialSymbols';
+import { ProgressBar } from './ProgressBar';
 import { ScreenActionPill, ScreenBadge, ScreenCard } from './ScreenShell';
 
 interface ActiveModelHeroCardProps {
@@ -72,9 +73,7 @@ export const ActiveModelHeroCard = ({
           </Box>
         </Box>
 
-        <Box className="h-2 rounded-full bg-background-200 dark:bg-background-800 overflow-hidden">
-          <Box className="h-full bg-primary-500" style={{ width: `${usedPercent}%` }} />
-        </Box>
+        <ProgressBar valuePercent={usedPercent} />
 
         <Box className="flex-row gap-3">
           <ScreenActionPill

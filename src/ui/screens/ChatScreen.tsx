@@ -25,8 +25,15 @@ import { ChatSystemEventRow } from '@/components/ui/ChatSystemEventRow';
 import { ChatModelSelectorSheet } from '@/components/ui/ChatModelSelectorSheet';
 import { ChatInputBar } from '@/components/ui/ChatInputBar';
 import { ErrorReportSheet } from '@/components/ui/ErrorReportSheet';
+import {
+    MODEL_WARMUP_BANNER_RESERVED_HEIGHT,
+    ModelWarmupBanner,
+    resolveModelWarmupProgressPercent,
+} from '@/components/ui/ModelWarmupBanner';
 import { ModelParametersSheet } from '@/components/ui/ModelParametersSheet';
 import { MaterialSymbols } from '@/components/ui/MaterialSymbols';
+import { ProgressBar } from '@/components/ui/ProgressBar';
+import { ScreenCard } from '@/components/ui/ScreenShell';
 import { useTranslation } from 'react-i18next';
 import { PresetSelectorSheet } from '@/components/ui/PresetSelectorSheet';
 import { resolvePresetSnapshot, useChatSession } from '../../hooks/useChatSession';
@@ -38,7 +45,6 @@ import { useRouter } from 'expo-router';
 import { EngineStatus, LifecycleStatus } from '../../types/models';
 import { ChatMessage, getThreadActiveModelId } from '../../types/chat';
 import { getChatHardwareBannerInputs, hardwareListenerService } from '../../services/HardwareListenerService';
-import { useTheme } from '../../providers/ThemeProvider';
 import { registry } from '../../services/LocalStorageRegistry';
 import { useChatStore } from '../../store/chatStore';
 import { getShortModelLabel } from '@/utils/modelLabel';
@@ -51,7 +57,7 @@ import {
     updateSettings,
     updateGenerationParametersForModel,
 } from '../../services/SettingsStore';
-import { screenLayoutMetrics, withAlpha } from '../../utils/themeTokens';
+import { screenLayoutMetrics } from '../../utils/themeTokens';
 
 const AUTO_SCROLL_REARM_THRESHOLD_PX = 32;
 const AUTO_SCROLL_DISARM_THRESHOLD_PX = 64;
@@ -187,7 +193,6 @@ export const ChatScreen = () => {
     } = useChatSession();
     const { state: engineState, loadModel } = useLLMEngine();
     const { t } = useTranslation();
-    const { colors, resolvedMode } = useTheme();
     const modelRegistryRevision = useModelRegistryRevision();
     const router = useRouter();
     const { openErrorReport, sheetProps: errorReportSheetProps } = useErrorReportSheetController();
@@ -195,6 +200,7 @@ export const ChatScreen = () => {
     const [hardwareStatus, setHardwareStatus] = useState(() => hardwareListenerService.getCurrentStatus());
     const [composerDraft, setComposerDraft] = useState('');
     const [androidKeyboardInset, setAndroidKeyboardInset] = useState(0);
+    const [composerContainerHeight, setComposerContainerHeight] = useState(0);
     const [isAutoScrollPaused, setIsAutoScrollPaused] = useState(false);
     const [isListTouching, setIsListTouching] = useState(false);
     const [listViewportHeight, setListViewportHeight] = useState(0);
@@ -233,6 +239,11 @@ export const ChatScreen = () => {
     const shouldStickToBottomRef = useRef(true);
     const hasActiveModel = Boolean(engineState.activeModelId);
     const isEngineReady = engineState.status === EngineStatus.READY;
+    const isModelInitializing = engineState.status === EngineStatus.INITIALIZING;
+    const warmupProgressPercent = useMemo(
+        () => resolveModelWarmupProgressPercent(engineState.loadProgress),
+        [engineState.loadProgress],
+    );
     const isInputDisabled = !hasActiveModel || !isEngineReady;
     const statusLabel = activeThread?.status === 'stopped'
         ? t('chat.statusStopped')
@@ -249,7 +260,8 @@ export const ChatScreen = () => {
         hardwareStatus,
     );
     const listBottomPadding =
-        hardwareBannerInputs.showLowMemoryWarning || hardwareBannerInputs.showThermalWarning ? 22 : 14;
+        (hardwareBannerInputs.showLowMemoryWarning || hardwareBannerInputs.showThermalWarning ? 22 : 14)
+        + (isModelInitializing ? MODEL_WARMUP_BANNER_RESERVED_HEIGHT : 0);
 
     const downloadedModels = useMemo(() => {
         // Force recompute on registry revision changes.
@@ -317,6 +329,7 @@ export const ChatScreen = () => {
     const activePresetLabel = activeThread?.presetSnapshot.name ?? (settings.activePresetId ? resolvePresetSnapshot(settings.activePresetId).name : t('common.default'));
     const shouldShowRecoveryBanner = isInputDisabled && hasMessages;
     const shouldShowRecoveryCard = isInputDisabled && !hasMessages;
+    const shouldShowFloatingWarmupBanner = isModelInitializing && !shouldShowRecoveryCard;
     const hasDownloadedModels = downloadedModels.length > 0;
     const modelRecoveryActionRoute = hasDownloadedModels
         ? ({ pathname: '/(tabs)/models', params: { initialTab: 'downloaded' } } as const)
@@ -329,13 +342,6 @@ export const ChatScreen = () => {
     const headerModelLabel = shouldShowRecoveryCard && !hasActiveModel
         ? undefined
         : modelLabel;
-    const recoveryCardStyle = useMemo(() => ({
-        backgroundColor: colors.warningSurface,
-        borderColor: withAlpha(colors.warning, resolvedMode === 'dark' ? 0.34 : 0.28),
-    }), [colors.warning, colors.warningSurface, resolvedMode]);
-    const recoveryCardIconWrapStyle = useMemo(() => ({
-        backgroundColor: withAlpha(colors.warning, resolvedMode === 'dark' ? 0.18 : 0.1),
-    }), [colors.warning, resolvedMode]);
     const listMaintainVisibleContentPosition = useMemo(() => {
         // NOTE: FlashList auto-scroll uses autoscrollToBottomThreshold. Some versions ignore the
         // `disabled` flag, so we set the threshold negative to truly disable auto-follow.
@@ -862,6 +868,17 @@ export const ChatScreen = () => {
         });
     }, [tabBarHeight]);
 
+    const handleComposerContainerLayout = useCallback((event: LayoutChangeEvent) => {
+        const nextHeight = event.nativeEvent.layout.height;
+        setComposerContainerHeight((currentValue) => (
+            Math.abs(currentValue - nextHeight) < 1 ? currentValue : nextHeight
+        ));
+
+        if (isKeyboardVisibleRef.current) {
+            updateAndroidKeyboardInsetFromLayout();
+        }
+    }, [updateAndroidKeyboardInsetFromLayout]);
+
     const handleListContentSizeChange = () => {
         const hasForcedFollowPass = forcedFollowPassesRef.current > 0;
 
@@ -1324,19 +1341,17 @@ export const ChatScreen = () => {
                             />
                         ) : shouldShowRecoveryCard ? (
                             <Box className="flex-1 justify-center px-3 pb-10">
-                                <Box
-                                    testID="chat-recovery-card"
-                                    className="items-center rounded-[20px] border px-6 py-8"
-                                    style={recoveryCardStyle}
-                                >
-                                    <Box
-                                        className="h-16 w-16 items-center justify-center rounded-full"
-                                        style={recoveryCardIconWrapStyle}
-                                    >
+                                <ScreenCard
+                                     testID="chat-recovery-card"
+                                    tone="warning"
+                                    padding="none"
+                                    className="items-center px-6 py-8"
+                                 >
+                                    <Box className="h-16 w-16 items-center justify-center rounded-full bg-warning-500/10 dark:bg-warning-500/20">
                                         <MaterialSymbols
                                             name={hasActiveModel ? 'hourglass-empty' : 'download'}
-                                            size={28}
-                                            color={colors.warning}
+                                            size="xl"
+                                            className="text-warning-600 dark:text-warning-400"
                                         />
                                     </Box>
 
@@ -1349,21 +1364,40 @@ export const ChatScreen = () => {
                                     ) : null}
 
                                     <Text
-                                        className="mt-5 text-center text-[22px] font-semibold leading-7"
-                                        style={{ color: colors.text }}
+                                        className="mt-5 text-center text-xl font-semibold leading-7 text-typography-900 dark:text-typography-100"
                                     >
                                         {recoveryTitle}
                                     </Text>
+
+                                    {isModelInitializing ? (
+                                        <Box className="mt-4 w-full rounded-2xl border border-primary-500/20 bg-primary-500/10 px-3 py-2.5 dark:border-primary-400/25 dark:bg-primary-500/10">
+                                            <Box className="mb-2 flex-row items-center justify-end">
+                                                <Box className="rounded-full bg-primary-500/10 px-2.5 py-1 dark:bg-primary-500/15">
+                                                    <Text className="text-xs font-bold text-primary-700 dark:text-primary-200">
+                                                        {warmupProgressPercent}%
+                                                    </Text>
+                                                </Box>
+                                            </Box>
+                                            <ProgressBar
+                                                testID="chat-recovery-warmup-progress-track"
+                                                fillTestID="chat-recovery-warmup-progress-fill"
+                                                valuePercent={warmupProgressPercent}
+                                                size="lg"
+                                                tone="primary"
+                                                variant="framed"
+                                            />
+                                        </Box>
+                                    ) : null}
+
                                     <Text
-                                        className="mt-3 text-center text-sm leading-6"
-                                        style={{ color: colors.textSecondary }}
+                                        className="mt-3 text-center text-sm leading-6 text-typography-600 dark:text-typography-300"
                                     >
                                         {recoveryDescription}
                                     </Text>
 
                                     <Button
                                         size="md"
-                                        className="mt-6 min-w-[220px] self-stretch"
+                                        className="mt-6 self-stretch"
                                         onPress={() => {
                                             router.navigate(modelRecoveryActionRoute);
                                         }}
@@ -1377,14 +1411,13 @@ export const ChatScreen = () => {
                                     </Button>
 
                                     <Text
-                                        className="mt-4 text-center text-xs leading-5"
-                                        style={{ color: resolvedMode === 'dark' ? colors.textSecondary : colors.textTertiary }}
+                                        className="mt-4 text-center text-xs leading-5 text-typography-500 dark:text-typography-300"
                                     >
                                         {activeThread
                                             ? t('chat.emptyExistingThread')
                                             : t('chat.emptyNewThread')}
                                     </Text>
-                                </Box>
+                                </ScreenCard>
                             </Box>
                         ) : (
                             <Box className="flex-1 items-center px-6 pt-14 pb-8">
@@ -1406,6 +1439,7 @@ export const ChatScreen = () => {
                         testID="chat-keyboard-avoiding-view"
                         behavior="padding"
                         keyboardVerticalOffset={tabBarHeight}
+                        onLayout={handleComposerContainerLayout}
                     >
                         <ChatInputBar
                             draft={composerDraft}
@@ -1425,11 +1459,7 @@ export const ChatScreen = () => {
                     <View
                         ref={composerContainerRef}
                         testID="chat-keyboard-avoiding-view"
-                        onLayout={() => {
-                            if (isKeyboardVisibleRef.current) {
-                                updateAndroidKeyboardInsetFromLayout();
-                            }
-                        }}
+                        onLayout={handleComposerContainerLayout}
                     >
                         <ChatInputBar
                             draft={composerDraft}
@@ -1450,6 +1480,13 @@ export const ChatScreen = () => {
                     </View>
                 )}
             </Box>
+
+            {shouldShowFloatingWarmupBanner ? (
+                <ModelWarmupBanner
+                    engineState={engineState}
+                    bottomOffset={composerContainerHeight}
+                />
+            ) : null}
 
             <ChatModelSelectorSheet
                 visible={isModelSelectorOpen}

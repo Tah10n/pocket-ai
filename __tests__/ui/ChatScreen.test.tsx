@@ -69,6 +69,10 @@ jest.mock('@react-navigation/bottom-tabs', () => ({
   useBottomTabBarHeight: () => 0,
 }));
 
+jest.mock('react-native-safe-area-context', () => ({
+  useSafeAreaInsets: () => ({ top: 0, right: 0, bottom: 0, left: 0 }),
+}));
+
 jest.mock('expo-router', () => ({
   useRouter: () => ({
     canGoBack: () => false,
@@ -141,6 +145,7 @@ let mockHardwareBannerInputs = {
 };
 let mockEngineState: {
   activeModelId: string | null;
+  loadProgress?: number;
   status: string;
   diagnostics?: {
     backendMode: 'cpu' | 'gpu' | 'npu' | 'unknown';
@@ -618,10 +623,11 @@ describe('ChatScreen', () => {
       showThermalWarning: false,
       thermalState: 'nominal',
     };
-    mockEngineState = {
-      activeModelId: 'author/model-q4',
-      status: 'ready',
-    };
+  mockEngineState = {
+    activeModelId: 'author/model-q4',
+    loadProgress: 0,
+    status: 'ready',
+  };
     mockGetRecommendedGpuLayers.mockReset();
     mockGetRecommendedGpuLayers.mockImplementation(() => new Promise<number>(() => {}));
     mockGetRecommendedLoadProfile.mockReset();
@@ -1738,6 +1744,25 @@ describe('ChatScreen', () => {
     expect(queryByText('chat.noMessages')).toBeNull();
   });
 
+  it('shows inline warmup progress in the empty chat recovery card', () => {
+    mockEngineState = {
+      activeModelId: 'author/model-q4',
+      loadProgress: 0.42,
+      status: 'initializing',
+    };
+    useChatStore.setState({
+      threads: {},
+      activeThreadId: null,
+    });
+
+    const { getByTestId, getByText, queryByTestId } = render(React.createElement(ChatScreen));
+
+    expect(getByText('chat.warmingUp')).toBeTruthy();
+    expect(getByText('42%')).toBeTruthy();
+    expect(getByTestId('chat-recovery-warmup-progress-fill').props.style).toEqual({ width: '42%' });
+    expect(queryByTestId('model-warmup-progress-fill')).toBeNull();
+  });
+
   it('shows stop control while a response is generating', () => {
     useChatStore.setState({
       threads: {
@@ -2583,6 +2608,52 @@ describe('ChatScreen', () => {
       contextSize: 8192,
       gpuLayers: null,
       kvCacheType: 'auto',
+    });
+  });
+
+  it('shows warmup progress while the active model reloads after applying load settings', async () => {
+    const reloadDeferred = createDeferred<void>();
+    mockLoadModel.mockImplementationOnce(() => reloadDeferred.promise);
+
+    const { getByTestId, getByText, rerender } = render(React.createElement(ChatScreen));
+
+    await act(async () => {
+      fireEvent.press(getByTestId('model-controls-button'));
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(lastModelParametersSheetProps?.modelId).toBe('author/model-q4');
+    });
+
+    await act(async () => {
+      lastModelParametersSheetProps.onChangeLoadParams({
+        contextSize: 8192,
+      });
+    });
+
+    let applyPromise: Promise<void> | undefined;
+    await act(async () => {
+      applyPromise = lastModelParametersSheetProps.onApplyReload();
+      await Promise.resolve();
+    });
+
+    expect(mockLoadModel).toHaveBeenCalledWith('author/model-q4', { forceReload: true });
+
+    mockEngineState = {
+      ...mockEngineState,
+      activeModelId: 'author/model-q4',
+      loadProgress: 0.42,
+      status: 'initializing',
+    };
+    rerender(React.createElement(ChatScreen));
+
+    expect(getByText('chat.warmingUp 42%')).toBeTruthy();
+    expect(getByTestId('model-warmup-progress-fill').props.style).toEqual({ width: '42%' });
+
+    await act(async () => {
+      reloadDeferred.resolve();
+      await applyPromise;
     });
   });
 

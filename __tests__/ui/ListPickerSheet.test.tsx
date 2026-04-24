@@ -50,6 +50,10 @@ jest.mock('../../src/components/ui/MaterialSymbols', () => ({
   MaterialSymbols: () => null,
 }));
 
+jest.mock('react-native-safe-area-context', () => ({
+  useSafeAreaInsets: () => ({ top: 0, right: 0, bottom: 0, left: 0 }),
+}));
+
 const { ListPickerSheetContent } = require('../../src/components/ui/ListPickerSheet');
 
 describe('ListPickerSheet', () => {

@@ -97,7 +97,25 @@ describe('ScreenShell', () => {
 
     expect(getByTestId('screen-sheet').props.className).toContain('px-4');
     expect(getByTestId('screen-sheet').props.className).toContain('pt-5');
-    expect(getByTestId('screen-sheet').props.className).toContain('pb-6');
+  });
+
+  it('adds native bottom safe area space to sheet padding', () => {
+    const { Platform, StyleSheet } = require('react-native');
+    const { screenLayoutMetrics } = require('../../src/utils/themeTokens');
+    const originalPlatform = Platform.OS;
+    Object.defineProperty(Platform, 'OS', { configurable: true, get: () => 'android' });
+    mockSafeAreaInsets = { top: 0, right: 0, bottom: 18, left: 0 };
+
+    try {
+      const { getByTestId } = render(
+        <ScreenSheet testID="safe-screen-sheet">content</ScreenSheet>,
+      );
+
+      expect(StyleSheet.flatten(getByTestId('safe-screen-sheet').props.style).paddingBottom)
+        .toBe(screenLayoutMetrics.sheetBottomInset + 18);
+    } finally {
+      Object.defineProperty(Platform, 'OS', { configurable: true, get: () => originalPlatform });
+    }
   });
 
   it('keeps inline inputs inside the shared input shell', () => {
@@ -161,5 +179,17 @@ describe('ScreenShell', () => {
     } finally {
       Object.defineProperty(Platform, 'OS', { configurable: true, get: () => originalPlatform });
     }
+  });
+
+  it('adds extra bottom inset for floating screen overlays', () => {
+    const { StyleSheet } = require('react-native');
+    const { screenLayoutMetrics } = require('../../src/utils/themeTokens');
+
+    const { getByTestId } = render(
+      <ScreenContent testID="extra-screen-content" extraBottomInset={96}>content</ScreenContent>,
+    );
+
+    expect(StyleSheet.flatten(getByTestId('extra-screen-content').props.style).paddingBottom)
+      .toBe(screenLayoutMetrics.contentBottomInset + 96);
   });
 });

@@ -4,10 +4,10 @@ import { useTranslation } from 'react-i18next';
 import { Box } from '@/components/ui/box';
 import { Pressable } from '@/components/ui/pressable';
 import { ScrollView } from '@/components/ui/scroll-view';
-import { joinClassNames, ScreenBadge, ScreenCard, ScreenIconButton, ScreenPressableCard, ScreenSheet } from '@/components/ui/ScreenShell';
+import { joinClassNames, ScreenBadge, ScreenCard, ScreenIconButton, ScreenModalOverlay, ScreenPressableCard, ScreenSheet } from '@/components/ui/ScreenShell';
 import { Text } from '@/components/ui/text';
 import { MaterialSymbols, type MaterialSymbolsProps } from './MaterialSymbols';
-import { listRowSelectedClassName } from '../../utils/themeTokens';
+import { listRowSelectedClassName, screenLayoutTokens } from '../../utils/themeTokens';
 
 export interface ListPickerSheetItem {
   key: string;
@@ -141,7 +141,7 @@ export function ListPickerSheetContent({
   const activeLabel = t('common.active');
 
   return (
-    <ScreenSheet testID={testID} className={joinClassNames('max-h-[75%] pb-8', sheetClassName)}>
+    <ScreenSheet testID={testID} className={joinClassNames(screenLayoutTokens.sheetMaxHeightCompactClassName, sheetClassName)}>
       <Box className="mb-4 flex-row items-center justify-between gap-3">
         <Box className="min-w-0 flex-1">
           <Text className="text-lg font-semibold text-typography-900 dark:text-typography-100">
@@ -202,10 +202,10 @@ export function ListPickerSheet({
 }: ListPickerSheetProps) {
   return (
     <Modal visible={visible} animationType={modalAnimationType} transparent onRequestClose={contentProps.onClose}>
-      <Box className="flex-1 justify-end bg-black/40">
+      <ScreenModalOverlay>
         <Pressable className="flex-1" onPress={contentProps.onClose} />
         <ListPickerSheetContent {...contentProps} />
-      </Box>
+      </ScreenModalOverlay>
     </Modal>
   );
 }

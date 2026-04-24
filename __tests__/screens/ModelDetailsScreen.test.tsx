@@ -6,6 +6,12 @@ import { useDownloadStore } from '../../src/store/downloadStore';
 import { EngineStatus, LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../src/types/models';
 import { buildModelCapabilitySnapshot } from '../../src/utils/modelCapabilities';
 
+jest.mock('react-native-safe-area-context', () => ({
+  SafeAreaProvider: ({ children }: any) => children,
+  SafeAreaView: ({ children }: any) => children,
+  useSafeAreaInsets: () => ({ top: 0, right: 0, bottom: 0, left: 0 }),
+}));
+
 const mockRouter = {
   back: jest.fn(),
   canGoBack: jest.fn(() => true),
@@ -132,6 +138,7 @@ jest.mock('../../src/components/ui/ScreenShell', () => ({
     const { View, Text } = jest.requireActual('react-native');
     return mockReact.createElement(View, null, mockReact.createElement(Text, null, label ?? children));
   },
+  ScreenModalOverlay: ({ children }: any) => children,
   ScreenSheet: ({ children }: any) => children,
   HeaderBackButton: ({ children, ...props }: any) => {
     const mockReact = jest.requireActual('react');

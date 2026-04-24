@@ -199,7 +199,7 @@ export function PresetManagerScreen() {
                     <ScreenActionPill
                         onPress={openCreatePreset}
                         tone="primary"
-                        size="sm"
+                        size="lg"
                         testID="preset-manager-add-preset"
                     >
                         <MaterialSymbols name="add" size="sm" className="text-typography-0" />

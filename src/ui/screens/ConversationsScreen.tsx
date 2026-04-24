@@ -17,6 +17,7 @@ import {
   ScreenContent,
   ScreenInlineInput,
   ScreenIconButton,
+  ScreenModalOverlay,
   ScreenPressableCard,
   ScreenSheet,
   ScreenStack,
@@ -403,7 +404,7 @@ export function ConversationsScreen() {
             onPress={handleStartNewChat}
             accessibilityLabel={t('conversations.newChat')}
             tone="primary"
-            size="sm"
+            size="lg"
             className="shrink-0"
           >
             <MaterialSymbols name="edit-square" size="sm" className="text-typography-0" />
@@ -486,9 +487,9 @@ export function ConversationsScreen() {
 
       <Modal visible={editingThreadId !== null} animationType="fade" transparent onRequestClose={resetRenameState}>
         <KeyboardAvoidingView behavior="padding" style={{ flex: 1 }} keyboardVerticalOffset={0}>
-          <Box className="flex-1 justify-end bg-black/45">
+          <ScreenModalOverlay>
             <Pressable className="flex-1" onPress={resetRenameState} />
-            <ScreenSheet className="pb-8">
+            <ScreenSheet>
               <Box className="mb-5 flex-row items-start justify-between gap-4">
                 <Box className="min-w-0 flex-1">
                   <Text className="text-lg font-semibold text-typography-900 dark:text-typography-100">
@@ -531,7 +532,7 @@ export function ConversationsScreen() {
                 </Button>
               </Box>
             </ScreenSheet>
-          </Box>
+          </ScreenModalOverlay>
         </KeyboardAvoidingView>
       </Modal>
     </Box>

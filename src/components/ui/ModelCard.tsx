@@ -135,7 +135,7 @@ const ModelCardComponent = ({
         />
       ) : null}
 
-      <ModelDownloadProgress model={model} className="mt-2.5" />
+      <ModelDownloadProgress model={model} density="compact" className="mt-2.5" />
 
       <ModelLifecycleActionRow
         model={model}

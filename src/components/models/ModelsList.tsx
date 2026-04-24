@@ -5,7 +5,7 @@ import { Box } from '@/components/ui/box';
 import { Button, ButtonText } from '@/components/ui/button';
 import { ErrorReportSheet } from '@/components/ui/ErrorReportSheet';
 import { ModelCard } from '@/components/ui/ModelCard';
-import { ModelWarmupBanner } from '@/components/ui/ModelWarmupBanner';
+import { MODEL_WARMUP_BANNER_RESERVED_HEIGHT, ModelWarmupBanner } from '@/components/ui/ModelWarmupBanner';
 import { ModelParametersSheet } from '@/components/ui/ModelParametersSheet';
 import { ScreenCard, ScreenStack } from '@/components/ui/ScreenShell';
 import { Spinner } from '@/components/ui/spinner';
@@ -636,6 +636,9 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
   const renderEmptyState = useCallback(() => emptyState, [emptyState]);
   const renderFooter = useCallback(() => footer, [footer]);
   const isCatalogInitializing = activeTab === 'all' && !isTokenStateHydrated;
+  const isModelWarmingUp = engineState.status === EngineStatus.INITIALIZING;
+  const listBottomInset = screenLayoutMetrics.contentBottomInset
+    + (isModelWarmingUp ? MODEL_WARMUP_BANNER_RESERVED_HEIGHT : 0);
 
   return (
     <>
@@ -690,7 +693,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
             ItemSeparatorComponent={renderItemSeparator}
             ListEmptyComponent={renderEmptyState}
             ListFooterComponent={renderFooter}
-            contentContainerStyle={{ flexGrow: 1, paddingBottom: screenLayoutMetrics.contentBottomInset }}
+            contentContainerStyle={{ flexGrow: 1, paddingBottom: listBottomInset }}
             refreshing={isRefreshing}
             onRefresh={handlePullToRefresh}
             onScroll={handleCatalogScroll}
@@ -701,7 +704,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
         )}
       </ScreenStack>
 
-      <ModelWarmupBanner engineState={engineState} />
+      <ModelWarmupBanner engineState={engineState} bottomOffset={0} />
 
       <ModelParametersSheet {...modelParametersSheetProps} />
       <ErrorReportSheet {...errorReportSheetProps} />

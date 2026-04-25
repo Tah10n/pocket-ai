@@ -152,10 +152,41 @@ Normal exceptions are developer-only logs, diagnostics, and intentional test-onl
 The shared visual system resolves from one semantic source of truth:
 
 - `src/utils/theme-contract.json` defines the semantic palette and motion bands.
-- `src/utils/themeTokens.ts` maps that contract into runtime theme colors and React Navigation colors.
-- `src/providers/ThemeProvider.tsx`, `app/_layout.tsx`, and `app/(tabs)/_layout.tsx` consume the same palette decisions so tab chrome, status bars, and NativeWind surfaces stay aligned.
+- `src/utils/themeTokens.ts` maps that contract into runtime theme colors, visual-theme appearance tokens, and React Navigation colors.
+- `src/providers/ThemeProvider.tsx`, `app/_layout.tsx`, and `app/(tabs)/_layout.tsx` consume the same palette and `themeId` decisions so tab chrome, status bars, and NativeWind surfaces stay aligned.
 
 When you need a tinted surface or accent treatment, prefer semantic theme colors plus `withAlpha(...)` instead of introducing a new raw hex or `rgba(...)` value.
+
+### Theme ID Architecture
+
+Color mode and visual style are intentionally separate:
+
+- `theme` remains the persisted light/dark/system mode and is the only value passed to NativeWind color-scheme resolution.
+- `themeId` is the persisted visual-theme identity. It selects the app-level appearance family, currently `default` or `glass`.
+- `ThemeProvider` resolves `{ theme, themeId, resolvedMode }` into `colors`, `appearance`, and `navigationTheme`.
+- `appearance` owns non-palette visual decisions such as shared surface classes, tone-aware icon tiles/badges/banners/progress, dividers, header/surface blur intensity, sheet/card/input translucency, segmented controls, message bubbles, glass highlight chrome, and tab-bar shadow/elevation.
+- Routed screens should start from `ScreenRoot` so the resolved runtime palette owns the page background instead of duplicating route-local `bg-background-*` classes.
+- Reusable tinted UI should use `ScreenCard`, `ScreenPressableCard`, `ScreenIconTile`, `ScreenBanner`, `ScreenBadge`, `ScreenActionPill`, `ProgressBar`, and `ValueSelectorRow` before adding route-local surface classes.
+
+Migration plan for new visual themes:
+
+1. Add the theme id to `themeIds` and define its color overrides and `ThemeAppearance` branch in `src/utils/themeTokens.ts`.
+2. Persist and sanitize the id through `src/services/SettingsStore.ts` before exposing it in Settings.
+3. Route new shared chrome through `appearance.classNames` or `appearance.effects` instead of hard-coded `bg-background-*`, translucent accent surfaces, opacity, blur, shadow, or elevation values.
+4. Keep visual themes layout-compatible with `default`: do not change shared spacing, size, or radius tokens unless the feature explicitly calls for a layout variant.
+5. For glass-like themes, combine translucency with real `BlurView` backdrops, the shared `ScreenRoot` `BlurTargetView`, subtle borders, shadows, non-interactive background accents, and specular highlight chrome instead of only lowering surface opacity.
+6. Keep one-off route styles as documented exceptions only when a primitive cannot express the layout safely; status dots and solid active fills may stay route-local when they are not surfaces.
+7. Add tests for settings migration, provider resolution, layout-token parity, and any newly themed primitive before expanding the theme to more surfaces.
+
+### Glass Surface Architecture
+
+Glass themes distinguish chrome from inline content:
+
+- Chrome surfaces that float over other content may use `BlurView`: `ScreenHeaderShell`, `ScreenSheet`, floating `ScreenBanner`, `ScreenChromeBar`/chat composer, bottom tab chrome, and header/icon actions.
+- Inline surfaces such as `ScreenCard`, `ScreenPressableCard`, `ScreenIconTile`, badges, chips, text fields, segmented controls, and chat bubbles use denser tinted fills plus rim borders. They should not stack nested blur layers inside scroll content.
+- In `ScreenRoot`, decorative glass accents render behind the scene while the `BlurTargetView` wraps the real routed content in normal flow. A dim duplicate accent layer lives inside that target so Android's target-based blur has colored pixels to sample.
+- Android SDK 31 and newer uses `dimezisBlurViewSdk31Plus` with `blurReductionFactor`; older Android versions render dense translucent fallback panels and do not mount `BlurView`.
+- The bottom tab bar owns a separate `BlurTargetView`/`tabBarBackground` because React Navigation renders tab chrome outside individual screen roots.
 
 ## Screen Chrome Contract
 

@@ -33,7 +33,7 @@ import {
 import { ModelParametersSheet } from '@/components/ui/ModelParametersSheet';
 import { MaterialSymbols } from '@/components/ui/MaterialSymbols';
 import { ProgressBar } from '@/components/ui/ProgressBar';
-import { ScreenCard } from '@/components/ui/ScreenShell';
+import { ScreenCard, ScreenIconTile, ScreenRoot, useScreenAppearance } from '@/components/ui/ScreenShell';
 import { useTranslation } from 'react-i18next';
 import { PresetSelectorSheet } from '@/components/ui/PresetSelectorSheet';
 import { resolvePresetSnapshot, useChatSession } from '../../hooks/useChatSession';
@@ -193,6 +193,7 @@ export const ChatScreen = () => {
     } = useChatSession();
     const { state: engineState, loadModel } = useLLMEngine();
     const { t } = useTranslation();
+    const appearance = useScreenAppearance();
     const modelRegistryRevision = useModelRegistryRevision();
     const router = useRouter();
     const { openErrorReport, sheetProps: errorReportSheetProps } = useErrorReportSheetController();
@@ -1204,7 +1205,7 @@ export const ChatScreen = () => {
     ]);
 
     return (
-        <Box className="flex-1 w-full max-w-2xl mx-auto bg-background-0 dark:bg-background-950">
+        <ScreenRoot className="w-full max-w-2xl mx-auto">
             <ChatHeader
                 title={headerTitle}
                 presetLabel={activePresetLabel}
@@ -1347,16 +1348,16 @@ export const ChatScreen = () => {
                                     padding="none"
                                     className="items-center px-6 py-8"
                                  >
-                                    <Box className="h-16 w-16 items-center justify-center rounded-full bg-warning-500/10 dark:bg-warning-500/20">
-                                        <MaterialSymbols
-                                            name={hasActiveModel ? 'hourglass-empty' : 'download'}
-                                            size="xl"
-                                            className="text-warning-600 dark:text-warning-400"
-                                        />
-                                    </Box>
+                                    <ScreenIconTile
+                                        iconName={hasActiveModel ? 'hourglass-empty' : 'download'}
+                                        tone="warning"
+                                        size="lg"
+                                        iconSize="xl"
+                                        className="h-16 w-16 rounded-full"
+                                    />
 
                                     {hasActiveModel ? (
-                                        <Box className="mt-4 rounded-full border border-outline-200 bg-background-0 px-3 py-1.5 dark:border-outline-700 dark:bg-background-950/70">
+                                        <Box className={`mt-4 ${appearance.classNames.inlinePillClassName}`}>
                                             <Text className="text-xs font-semibold uppercase tracking-wide text-typography-600 dark:text-typography-300">
                                                 {modelLabel}
                                             </Text>
@@ -1370,9 +1371,9 @@ export const ChatScreen = () => {
                                     </Text>
 
                                     {isModelInitializing ? (
-                                        <Box className="mt-4 w-full rounded-2xl border border-primary-500/20 bg-primary-500/10 px-3 py-2.5 dark:border-primary-400/25 dark:bg-primary-500/10">
+                                        <Box className={`mt-4 w-full rounded-2xl border px-3 py-2.5 ${appearance.classNames.toneClassNameByTone.accent.surfaceClassName}`}>
                                             <Box className="mb-2 flex-row items-center justify-end">
-                                                <Box className="rounded-full bg-primary-500/10 px-2.5 py-1 dark:bg-primary-500/15">
+                                                <Box className={`rounded-full px-2.5 py-1 ${appearance.classNames.toneClassNameByTone.accent.percentPillClassName}`}>
                                                     <Text className="text-xs font-bold text-primary-700 dark:text-primary-200">
                                                         {warmupProgressPercent}%
                                                     </Text>
@@ -1518,6 +1519,6 @@ export const ChatScreen = () => {
 
             <ModelParametersSheet {...modelParametersSheetProps} />
             <ErrorReportSheet {...errorReportSheetProps} />
-        </Box>
+        </ScreenRoot>
     );
 };

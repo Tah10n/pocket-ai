@@ -4,10 +4,10 @@ import { useTranslation } from 'react-i18next';
 import { Box } from '@/components/ui/box';
 import { Pressable } from '@/components/ui/pressable';
 import { ScrollView } from '@/components/ui/scroll-view';
-import { joinClassNames, ScreenBadge, ScreenCard, ScreenIconButton, ScreenModalOverlay, ScreenPressableCard, ScreenSheet } from '@/components/ui/ScreenShell';
+import { joinClassNames, ScreenBadge, ScreenCard, ScreenIconButton, ScreenModalOverlay, ScreenPressableCard, ScreenSheet, useScreenAppearance } from '@/components/ui/ScreenShell';
 import { Text } from '@/components/ui/text';
 import { MaterialSymbols, type MaterialSymbolsProps } from './MaterialSymbols';
-import { listRowSelectedClassName, screenLayoutTokens } from '../../utils/themeTokens';
+import { screenLayoutTokens } from '../../utils/themeTokens';
 
 export interface ListPickerSheetItem {
   key: string;
@@ -52,10 +52,11 @@ function ListPickerRow({
   item: ListPickerSheetItem;
   activeLabel: string;
 }) {
+  const appearance = useScreenAppearance();
   const isInteractive = typeof item.onPress === 'function' && !item.disabled;
   const cardClassName = joinClassNames(
-    item.selected && listRowSelectedClassName,
-    item.disabled && 'border-outline-100 bg-background-100/80 dark:border-outline-900 dark:bg-background-900/40',
+    item.selected && appearance.classNames.selectedInsetCardClassName,
+    item.disabled && 'opacity-60',
   );
   const content = (
       <Box className="flex-row items-start justify-between gap-3">
@@ -171,9 +172,11 @@ export function ListPickerSheetContent({
           </Box>
         </ScrollView>
       ) : emptyState ? (
-        <Box
+        <ScreenCard
           testID={emptyState.testID}
-          className="min-h-[220px] flex-1 items-center justify-center rounded-2xl border border-dashed border-outline-200 px-5 py-8 dark:border-outline-800"
+          dashed
+          padding="none"
+          className="min-h-[220px] flex-1 items-center justify-center px-5 py-8"
         >
           {emptyState.iconName ? (
             <MaterialSymbols
@@ -189,7 +192,7 @@ export function ListPickerSheetContent({
             {emptyState.description}
           </Text>
           {emptyState.action ? <Box className="mt-4 w-full">{emptyState.action}</Box> : null}
-        </Box>
+        </ScreenCard>
       ) : null}
     </ScreenSheet>
   );

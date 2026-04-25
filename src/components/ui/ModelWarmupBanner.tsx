@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Box } from '@/components/ui/box';
 import { ProgressBar } from '@/components/ui/ProgressBar';
+import { ScreenBanner, ScreenIconTile } from '@/components/ui/ScreenShell';
 import { Spinner } from '@/components/ui/spinner';
 import { Text } from '@/components/ui/text';
 import { EngineStatus, type EngineState } from '@/types/models';
@@ -38,14 +39,16 @@ export function ModelWarmupBanner({
   }
 
   return (
-    <Box
-      className="absolute left-3 right-3 rounded-2xl border border-primary-500/20 bg-background-0/95 px-3 py-2.5 dark:border-primary-400/25 dark:bg-background-950/95"
+    <ScreenBanner
+      floating
+      tone="accent"
+      className="absolute left-3 right-3"
       style={{ bottom: (bottomOffset ?? safeBottomOffset) + MODEL_WARMUP_BANNER_BOTTOM_GAP }}
     >
       <Box className="mb-2 flex-row items-center gap-2">
-        <Box className="h-8 w-8 items-center justify-center rounded-full bg-primary-500/10 dark:bg-primary-500/15">
+        <ScreenIconTile iconName="sync" tone="accent" size="sm" className="h-8 w-8">
           <Spinner className="text-primary-600 dark:text-primary-300" />
-        </Box>
+        </ScreenIconTile>
         <Text numberOfLines={1} className="min-w-0 flex-1 text-sm font-semibold text-primary-700 dark:text-primary-200">
           {t('chat.warmingUp')}{' '}{progressPercent}%
         </Text>
@@ -58,6 +61,6 @@ export function ModelWarmupBanner({
         tone="primary"
         variant="framed"
       />
-    </Box>
+    </ScreenBanner>
   );
 }

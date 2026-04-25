@@ -35,4 +35,73 @@ describe('tabBarLayout', () => {
       paddingBottom: bottomTabBarMetrics.paddingBottom,
     });
   });
+
+  it('merges theme appearance effects into the tab bar style', () => {
+    const style = createBottomTabBarStyle(colors, 0, 'android', {
+      id: 'glass',
+      surfaceKind: 'glass',
+      effects: {
+        headerBlurIntensity: 96,
+        surfaceBlurIntensity: 60,
+        blurReductionFactor: 3,
+        tabBarStyle: {
+          elevation: 8,
+          shadowOpacity: 0.2,
+          shadowRadius: 18,
+        },
+      },
+    });
+
+    expect(style).toMatchObject({
+      elevation: 8,
+      shadowOpacity: 0.2,
+      shadowRadius: 18,
+    });
+  });
+
+  it('lets the glass tabBarBackground own the fill when Android blur is supported', () => {
+    const style = createBottomTabBarStyle(colors, 0, 'android', {
+      id: 'glass',
+      surfaceKind: 'glass',
+      effects: {
+        headerBlurIntensity: 60,
+        surfaceBlurIntensity: 55,
+        blurReductionFactor: 3,
+        tabBarStyle: {},
+      },
+    }, 34);
+
+    expect(style.backgroundColor).toBe('transparent');
+  });
+
+  it('keeps a dense native fallback fill for legacy Android', () => {
+    const style = createBottomTabBarStyle(colors, 0, 'android', {
+      id: 'glass',
+      surfaceKind: 'glass',
+      effects: {
+        headerBlurIntensity: 60,
+        surfaceBlurIntensity: 55,
+        blurReductionFactor: 3,
+        tabBarStyle: {},
+      },
+    }, 30);
+
+    expect(style.backgroundColor).toBe(colors.tabBarBackground);
+  });
+
+  it('lets the glass tabBarBackground own the fill off Android', () => {
+    const style = createBottomTabBarStyle(colors, 0, 'ios', {
+      id: 'glass',
+      surfaceKind: 'glass',
+      effects: {
+        headerBlurIntensity: 60,
+        surfaceBlurIntensity: 55,
+        blurReductionFactor: 3,
+        tabBarStyle: {},
+      },
+    });
+
+    expect(style.backgroundColor).toBe('transparent');
+  });
+
 });

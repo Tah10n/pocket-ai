@@ -6,7 +6,7 @@ import { Box } from '@/components/ui/box';
 import { Pressable } from '@/components/ui/pressable';
 import { Text } from '@/components/ui/text';
 import { MaterialSymbols } from './MaterialSymbols';
-import { ScreenBadge, ScreenIconButton } from './ScreenShell';
+import { ScreenBadge, ScreenIconButton, useScreenAppearance } from './ScreenShell';
 import { StreamingCursor } from './StreamingCursor';
 import { MarkdownRenderer } from './MarkdownRenderer';
 import { ThinkingPulse } from './ThinkingPulse';
@@ -66,9 +66,7 @@ function IconActionButton({
       iconSize="sm"
       size="micro"
       tone={isDestructive ? 'danger' : 'neutral'}
-      className={`border-0 ${isDestructive
-        ? 'bg-error-500/10 dark:bg-error-500/15'
-        : 'bg-primary-500/10 dark:bg-primary-500/15'}`}
+      className="border-0"
       iconClassName={isDestructive ? 'text-error-500' : 'text-typography-500 dark:text-typography-300'}
     />
   );
@@ -91,6 +89,7 @@ const ChatMessageBubbleComponent = ({
   const [copied, setCopied] = useState(false);
   const [isThoughtExpanded, setThoughtExpanded] = useState(false);
   const { t } = useTranslation();
+  const appearance = useScreenAppearance();
   const hasExplicitThoughtContent = explicitThoughtContent !== undefined;
   const assistantPresentation = isUser
     ? null
@@ -151,8 +150,8 @@ const ChatMessageBubbleComponent = ({
   const bubbleAlignmentClassName = isUser ? 'self-end' : 'self-start';
   // Chat bubbles keep asymmetric radii as a deliberate visual affordance between user and assistant turns.
   const bubbleClassName = isUser
-    ? 'rounded-[24px] rounded-br-lg bg-primary-500 px-3.5 py-2'
-    : 'rounded-[22px] rounded-bl-lg border border-outline-200 bg-background-50 px-3 py-1.5 dark:border-outline-800 dark:bg-background-900/70';
+    ? appearance.classNames.chatUserBubbleClassName
+    : appearance.classNames.chatAssistantBubbleClassName;
   const shouldShowThoughtSection = !isUser && hasThought;
   const thoughtLabel = shouldAnimateThought ? t('chat.thinkingTitle') : t('chat.thoughtTitle');
   const thoughtDescription = shouldAnimateThought
@@ -162,7 +161,7 @@ const ChatMessageBubbleComponent = ({
   const hasErrorMessage = !isUser && typeof errorMessage === 'string' && errorMessage.trim().length > 0;
   const shouldShowStreamingPlaceholder = isAssistantStreaming && !shouldShowThoughtSection && !assistantBodyContent;
   // Thought containers keep a minimum width so the collapsible panel does not jitter while content streams in.
-  const thoughtBubbleClassName = 'min-w-[220px] max-w-full rounded-[20px] border border-outline-200/80 bg-background-0/80 px-3 py-2 dark:border-outline-700/70 dark:bg-background-950/40';
+  const thoughtBubbleClassName = appearance.classNames.chatThoughtBubbleClassName;
 
   return (
     <Box className={`w-full flex-col gap-0.5 ${isUser ? 'items-end' : 'items-start'}`} onLayout={onLayout}>
@@ -185,7 +184,7 @@ const ChatMessageBubbleComponent = ({
                 className="active:opacity-80"
               >
                 <Box className="flex-row items-center gap-2.5">
-                  <Box className="h-7 w-7 items-center justify-center rounded-full bg-primary-500/10 dark:bg-primary-500/20">
+                  <Box className={`h-7 w-7 items-center justify-center rounded-full ${appearance.classNames.toneClassNameByTone.accent.iconTileClassName}`}>
                     {shouldAnimateThought ? (
                       <ThinkingPulse />
                     ) : (
@@ -213,7 +212,7 @@ const ChatMessageBubbleComponent = ({
               {isThoughtExpanded ? (
                 <Box
                   testID={`thought-panel-${id}`}
-                  className="mt-1.5 border-t border-outline-200/70 pt-1.5 dark:border-outline-700/60"
+                  className={`mt-1.5 border-t pt-1.5 ${appearance.classNames.dividerClassName}`}
                 >
                   {thoughtContent ? (
                     isAssistantStreaming && (hasExplicitThoughtContent || assistantPresentation?.isThoughtStreaming) ? (
@@ -250,7 +249,7 @@ const ChatMessageBubbleComponent = ({
           ) : null}
 
           {hasErrorMessage ? (
-            <Box className="mt-2 flex-row items-start gap-2 rounded-2xl bg-error-500/10 px-2.5 py-2 dark:bg-error-500/15">
+            <Box className={`mt-2 flex-row items-start gap-2 px-2.5 py-2 ${appearance.classNames.chatInlineErrorClassName}`}>
               <MaterialSymbols name="error-outline" size="sm" className="mt-0.5 text-error-600 dark:text-error-300" />
               <Text selectable className="min-w-0 flex-1 text-sm leading-5 text-error-800 dark:text-error-200">
                 {errorMessage}
@@ -269,7 +268,7 @@ const ChatMessageBubbleComponent = ({
             <ScreenBadge
               testID={`performance-label-${id}`}
               size="micro"
-              className="bg-background-100/90 dark:bg-background-800/90"
+              className={appearance.classNames.chatMetadataBadgeClassName}
               textClassName="text-typography-600 dark:text-typography-300"
             >
               {tokensPerSec?.toFixed(1)} t/s

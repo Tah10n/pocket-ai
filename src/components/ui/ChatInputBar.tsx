@@ -2,8 +2,7 @@ import React, { useState } from 'react';
 import { Alert } from 'react-native';
 import { Box } from '@/components/ui/box';
 import { Text } from '@/components/ui/text';
-import { MaterialSymbols } from './MaterialSymbols';
-import { ScreenIconButton, ScreenInlineInput } from './ScreenShell';
+import { ScreenChromeBar, ScreenIconButton, ScreenIconTile, ScreenInlineInput, useScreenAppearance } from './ScreenShell';
 import { screenChromeTokens } from '../../utils/themeTokens';
 import { useTranslation } from 'react-i18next';
 import { getReportedErrorMessage } from '../../services/AppError';
@@ -39,6 +38,7 @@ export const ChatInputBar = ({
 }: ChatInputBarProps) => {
     const [internalMessage, setInternalMessage] = useState('');
     const { t } = useTranslation();
+    const appearance = useScreenAppearance();
     const isControlled = typeof draft === 'string';
     const message = isControlled ? draft : internalMessage;
     const canSend = !disabled && !isSending && message.trim().length > 0;
@@ -91,23 +91,21 @@ export const ChatInputBar = ({
             iconName={isSending ? 'stop' : 'arrow-upward'}
             className={`border-0 ${isSending || canSend
                 ? 'bg-primary-500'
-                : 'bg-background-200 dark:bg-background-800'}`}
+                : appearance.classNames.toneClassNameByTone.neutral.iconTileClassName}`}
             iconClassName={isSending || canSend ? 'text-typography-0' : 'text-typography-500'}
         />
     );
 
     return (
-        <Box
+        <ScreenChromeBar
             testID="chat-input-bar-container"
-            className={`border-t border-outline-200 bg-background-0/95 ${screenChromeTokens.contentHorizontalPaddingClassName} ${screenChromeTokens.bottomBarVerticalPaddingClassName} dark:border-outline-800 dark:bg-background-950/95`}
+            className={`${screenChromeTokens.contentHorizontalPaddingClassName} ${screenChromeTokens.bottomBarVerticalPaddingClassName}`}
         >
             {modeLabel ? (
-                <Box className="mb-1.5 rounded-2xl border border-primary-500/15 bg-primary-500/5 px-3 py-2">
+                <Box className={`mb-1.5 ${appearance.classNames.modeBannerClassName}`}>
                     <Box className="flex-row items-start justify-between gap-3">
                         <Box className="min-w-0 flex-1 flex-row items-start gap-3">
-                            <Box className="mt-0.5 h-6 w-6 items-center justify-center rounded-full bg-primary-500/10 dark:bg-primary-500/20">
-                                <MaterialSymbols name="edit" size="xs" className="text-primary-500" />
-                            </Box>
+                            <ScreenIconTile iconName="edit" tone="accent" size="sm" iconSize="xs" className="mt-0.5 h-6 w-6" iconClassName="text-primary-500" />
                             <Box className="min-w-0 flex-1">
                                 <Text numberOfLines={1} className="text-sm font-semibold text-primary-700 dark:text-primary-300">
                                     {modeLabel}
@@ -127,7 +125,7 @@ export const ChatInputBar = ({
                                 iconName="close"
                                 iconSize="xs"
                                 size="micro"
-                                className="border-0 bg-primary-500/10 dark:bg-primary-500/20"
+                                className="border-0"
                                 iconClassName="text-primary-500"
                             />
                         ) : null}
@@ -150,7 +148,7 @@ export const ChatInputBar = ({
 
                 <ScreenInlineInput
                     variant="composer"
-                    className={disabled ? 'flex-1 dark:border-outline-800 dark:bg-background-900/70' : 'flex-1'}
+                    className={disabled ? 'flex-1 opacity-60' : 'flex-1'}
                     accessibilityLabel={t('chat.inputAccessibilityLabel')}
                     placeholder={placeholder}
                     keyboardType="default"
@@ -170,6 +168,6 @@ export const ChatInputBar = ({
                     {resolvedTrailingActions}
                 </Box>
             </Box>
-        </Box>
+        </ScreenChromeBar>
     );
 };

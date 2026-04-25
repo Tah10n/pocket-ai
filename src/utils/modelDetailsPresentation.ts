@@ -26,66 +26,6 @@ export interface ModelDetailsMetadataItem {
 
 type Translate = (key: string) => string;
 
-export function getDetailToneTokens(tone: ModelDetailsTone) {
-  if (tone === 'neutral') {
-    return {
-      shellClassName: 'border-outline-200 bg-background-0 dark:border-outline-700 dark:bg-background-950/70',
-      iconWrapClassName: 'bg-background-100 dark:bg-background-800',
-      iconClassName: 'text-typography-700 dark:text-typography-200',
-      labelClassName: 'text-typography-600 dark:text-typography-400',
-      valueClassName: 'text-typography-900 dark:text-typography-100',
-    };
-  }
-
-  if (tone === 'success') {
-    return {
-      shellClassName: 'border-success-500/20 bg-success-500/10 dark:border-success-400/25 dark:bg-success-500/12',
-      iconWrapClassName: 'bg-success-500/10 dark:bg-success-500/20',
-      iconClassName: 'text-success-600 dark:text-success-300',
-      labelClassName: 'text-success-700 dark:text-success-200',
-      valueClassName: 'text-typography-900 dark:text-typography-50',
-    };
-  }
-
-  if (tone === 'warning') {
-    return {
-      shellClassName: 'border-warning-300/80 bg-warning-50/95 dark:border-warning-800 dark:bg-warning-950/35',
-      iconWrapClassName: 'bg-warning-100 dark:bg-warning-500/20',
-      iconClassName: 'text-warning-700 dark:text-warning-200',
-      labelClassName: 'text-warning-700 dark:text-warning-200',
-      valueClassName: 'text-typography-900 dark:text-typography-50',
-    };
-  }
-
-  if (tone === 'error') {
-    return {
-      shellClassName: 'border-error-500/20 bg-error-500/10 dark:border-error-400/25 dark:bg-error-500/12',
-      iconWrapClassName: 'bg-error-500/10 dark:bg-error-500/20',
-      iconClassName: 'text-error-600 dark:text-error-300',
-      labelClassName: 'text-error-700 dark:text-error-200',
-      valueClassName: 'text-typography-900 dark:text-typography-50',
-    };
-  }
-
-  if (tone === 'info') {
-    return {
-      shellClassName: 'border-info-500/20 bg-info-500/10 dark:border-info-400/25 dark:bg-info-500/12',
-      iconWrapClassName: 'bg-info-500/10 dark:bg-info-500/20',
-      iconClassName: 'text-info-600 dark:text-info-300',
-      labelClassName: 'text-info-700 dark:text-info-200',
-      valueClassName: 'text-typography-900 dark:text-typography-50',
-    };
-  }
-
-  return {
-    shellClassName: 'border-primary-500/20 bg-primary-500/10 dark:border-primary-400/25 dark:bg-primary-500/12',
-    iconWrapClassName: 'bg-primary-500/10 dark:bg-primary-500/20',
-    iconClassName: 'text-primary-500',
-    labelClassName: 'text-primary-700 dark:text-primary-200',
-    valueClassName: 'text-typography-900 dark:text-typography-50',
-  };
-}
-
 function formatCount(value: number | null | undefined, fallback: string): string {
   if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
     return fallback;

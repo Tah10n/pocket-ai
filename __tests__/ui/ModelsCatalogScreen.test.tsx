@@ -28,11 +28,12 @@ jest.mock('../../src/components/ui/box', () => {
 jest.mock('../../src/components/ui/ScreenShell', () => {
   const mockReact = require('react');
   const { View } = require('react-native');
-  return {
-    joinClassNames: (...values: Array<string | undefined | false>) => values.filter(Boolean).join(' '),
-    ScreenContent: ({ children, ...props }: any) => mockReact.createElement(View, props, children),
-  };
-});
+    return {
+      joinClassNames: (...values: Array<string | undefined | false>) => values.filter(Boolean).join(' '),
+      ScreenRoot: ({ children, ...props }: any) => mockReact.createElement(View, props, children),
+      ScreenContent: ({ children, ...props }: any) => mockReact.createElement(View, props, children),
+    };
+  });
 
 jest.mock('../../src/components/ui/SearchHeader', () => {
   const mockReact = require('react');

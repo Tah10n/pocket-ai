@@ -1,14 +1,15 @@
 import React from 'react';
-import { Platform, type StyleProp, type ViewStyle } from 'react-native';
-import { BlurView } from 'expo-blur';
+import { Platform, StyleSheet, type StyleProp, type View, type ViewStyle } from 'react-native';
+import { BlurTargetView, BlurView } from 'expo-blur';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Box } from '@/components/ui/box';
 import { Input, InputField, type InputFieldProps } from '@/components/ui/input';
 import { Pressable } from '@/components/ui/pressable';
+import { GlassSpecular } from './GlassSpecular';
 import { MaterialSymbols, type MaterialSymbolsProps } from './MaterialSymbols';
 import { Text, composeTextRole } from './text';
 import { getNativeBottomSafeAreaInset } from '../../utils/safeArea';
-import { buttonLayoutTokens, screenChromeTokens, screenLayoutMetrics, screenLayoutTokens, typographyColors } from '../../utils/themeTokens';
+import { DEFAULT_THEME_ID, buttonLayoutTokens, getThemeAppearance, getThemeToneIconColor, radiusTokens, screenChromeTokens, screenLayoutMetrics, screenLayoutTokens, typographyColors, type ThemeAppearance, type ThemeTone } from '../../utils/themeTokens';
 import { useTheme } from '../../providers/ThemeProvider';
 
 interface ScreenHeaderShellProps {
@@ -24,6 +25,13 @@ interface ScreenContentProps {
   className?: string;
   extraBottomInset?: number;
   includeBottomSafeArea?: boolean;
+  style?: StyleProp<ViewStyle>;
+  testID?: string;
+}
+
+interface ScreenRootProps {
+  children: React.ReactNode;
+  className?: string;
   style?: StyleProp<ViewStyle>;
   testID?: string;
 }
@@ -61,42 +69,102 @@ export function joinClassNames(...values: (string | undefined | false)[]) {
   return values.filter(Boolean).join(' ');
 }
 
-function getBadgeToneTokens(tone: 'neutral' | 'accent' | 'warning' | 'error' | 'success' | 'info') {
-  if (tone === 'accent') {
-    return {
-      shellClassName: 'border-primary-500/20 bg-primary-500/10 dark:border-primary-400/25 dark:bg-primary-500/15',
-      contentClassName: 'text-primary-700 dark:text-primary-200',
-    };
+const GlassBlurTargetContext = React.createContext<React.RefObject<View | null> | null>(null);
+
+function getAndroidSdkVersion() {
+  if (Platform.OS !== 'android') {
+    return undefined;
   }
-  if (tone === 'info') {
-    return {
-      shellClassName: 'border-info-500/20 bg-info-500/10 dark:border-info-400/25 dark:bg-info-500/15',
-      contentClassName: 'text-info-700 dark:text-info-200',
-    };
-  }
-  if (tone === 'warning') {
-    return {
-      shellClassName: 'border-warning-400/30 bg-warning-50 dark:border-warning-600/40 dark:bg-warning-950/60',
-      contentClassName: 'text-warning-800 dark:text-warning-100',
-    };
-  }
-  if (tone === 'error') {
-    return {
-      shellClassName: 'border-error-500/20 bg-error-500/10 dark:border-error-400/25 dark:bg-error-500/15',
-      contentClassName: 'text-error-700 dark:text-error-200',
-    };
-  }
-  if (tone === 'success') {
-    return {
-      shellClassName: 'border-success-500/20 bg-success-500/10 dark:border-success-400/25 dark:bg-success-500/15',
-      contentClassName: 'text-success-700 dark:text-success-200',
-    };
+
+  const version = Platform.Version;
+  const parsedVersion = typeof version === 'string'
+    ? Number.parseInt(version, 10)
+    : version;
+
+  return Number.isFinite(parsedVersion) ? parsedVersion : undefined;
+}
+
+function isAndroidBlurFallbackRequired() {
+  const sdkVersion = getAndroidSdkVersion();
+
+  return Platform.OS === 'android' && (sdkVersion === undefined || sdkVersion < 31);
+}
+
+function getAndroidBlurProps(
+  appearance: ThemeAppearance,
+  blurTarget: React.RefObject<View | null> | null,
+) {
+  if (Platform.OS !== 'android' || appearance.surfaceKind !== 'glass' || isAndroidBlurFallbackRequired() || !blurTarget) {
+    return {};
   }
 
   return {
-    shellClassName: 'border-outline-200 bg-background-50 dark:border-outline-700 dark:bg-background-900/70',
-    contentClassName: 'text-typography-700 dark:text-typography-200',
+    blurMethod: 'dimezisBlurViewSdk31Plus' as const,
+    blurReductionFactor: appearance.effects.blurReductionFactor,
+    blurTarget,
   };
+}
+
+function useResolvedThemeAppearance() {
+  const theme = useTheme();
+  const appearance = theme.appearance ?? getThemeAppearance(theme.themeId ?? DEFAULT_THEME_ID, theme.resolvedMode ?? 'light');
+
+  return { appearance, theme };
+}
+
+export function useScreenAppearance() {
+  return useResolvedThemeAppearance().appearance;
+}
+
+function GlassSurfaceBackdrop({ appearance, tint }: { appearance: ThemeAppearance; tint: 'light' | 'dark' }) {
+  const blurTarget = React.useContext(GlassBlurTargetContext);
+
+  if (appearance.surfaceKind !== 'glass') {
+    return null;
+  }
+
+  if (Platform.OS === 'android' && (isAndroidBlurFallbackRequired() || !blurTarget)) {
+    return (
+      <>
+        <Box pointerEvents="none" className="absolute inset-0 bg-background-0/82 dark:bg-background-950/72" />
+        <Box pointerEvents="none" className="absolute inset-x-0 top-0 h-px bg-typography-0/90 dark:bg-typography-0/24" />
+        <GlassSpecular tint={tint} />
+      </>
+    );
+  }
+
+  return (
+    <>
+      <BlurView
+        pointerEvents="none"
+        intensity={appearance.effects.surfaceBlurIntensity}
+        tint={tint}
+        {...getAndroidBlurProps(appearance, blurTarget)}
+        style={StyleSheet.absoluteFill}
+      />
+      <Box pointerEvents="none" className="absolute inset-0 bg-background-0/10 dark:bg-background-950/10" />
+      <GlassSpecular tint={tint} />
+    </>
+  );
+}
+
+function GlassBackgroundAccents({ appearance, dim = false }: { appearance: ThemeAppearance; dim?: boolean }) {
+  if (appearance.surfaceKind !== 'glass') {
+    return null;
+  }
+
+  return (
+    <Box pointerEvents="none" className="absolute inset-0">
+      <Box className={dim ? 'absolute -right-28 -top-28 h-96 w-96 rounded-full bg-primary-500/26 dark:bg-primary-400/18' : 'absolute -right-28 -top-28 h-96 w-96 rounded-full bg-primary-500/40 dark:bg-primary-400/30'} />
+      <Box className={dim ? 'absolute -left-28 top-20 h-80 w-80 rounded-full bg-info-500/22 dark:bg-info-400/16' : 'absolute -left-28 top-20 h-80 w-80 rounded-full bg-info-500/34 dark:bg-info-400/24'} />
+      <Box className={dim ? 'absolute -bottom-36 -left-20 h-[420px] w-[420px] rounded-full bg-info-500/26 dark:bg-info-400/18' : 'absolute -bottom-36 -left-20 h-[420px] w-[420px] rounded-full bg-info-500/40 dark:bg-info-400/28'} />
+      <Box className={dim ? 'absolute -bottom-20 right-0 h-80 w-80 rounded-full bg-success-500/20 dark:bg-success-400/14' : 'absolute -bottom-20 right-0 h-80 w-80 rounded-full bg-success-500/32 dark:bg-success-400/22'} />
+      <Box className={dim ? 'absolute right-8 top-1/2 h-48 w-48 rounded-full bg-warning-500/18 dark:bg-warning-400/12' : 'absolute right-8 top-1/2 h-48 w-48 rounded-full bg-warning-500/28 dark:bg-warning-400/18'} />
+      <Box className={dim ? 'absolute left-8 right-8 top-24 h-px bg-typography-0/25 dark:bg-typography-0/8' : 'absolute left-8 right-8 top-24 h-px bg-typography-0/40 dark:bg-typography-0/12'} />
+      <Box className={dim ? 'absolute bottom-32 left-12 right-16 h-px bg-primary-500/14 dark:bg-primary-300/8' : 'absolute bottom-32 left-12 right-16 h-px bg-primary-500/24 dark:bg-primary-300/12'} />
+      <Box className={dim ? 'absolute inset-x-0 bottom-0 h-48 bg-background-0/8 dark:bg-background-950/10' : 'absolute inset-x-0 bottom-0 h-48 bg-background-0/12 dark:bg-background-950/14'} />
+    </Box>
+  );
 }
 
 function getBadgeSizeClassName(size: 'micro' | 'default') {
@@ -138,6 +206,27 @@ interface ScreenIconButtonProps extends React.ComponentProps<typeof Pressable> {
   className?: string;
   tone?: 'neutral' | 'primary' | 'danger';
   accessibilityLabel: string;
+}
+
+interface ScreenIconTileProps {
+  iconName: MaterialSymbolsProps['name'];
+  children?: React.ReactNode;
+  tone?: ThemeTone;
+  size?: 'sm' | 'md' | 'lg';
+  iconSize?: MaterialSymbolsProps['size'];
+  className?: string;
+  iconClassName?: string;
+  iconColor?: string;
+  testID?: string;
+}
+
+interface ScreenBannerProps {
+  children: React.ReactNode;
+  tone?: ThemeTone;
+  floating?: boolean;
+  className?: string;
+  style?: StyleProp<ViewStyle>;
+  testID?: string;
 }
 
 interface ScreenSectionLabelProps {
@@ -219,6 +308,13 @@ interface ScreenModalOverlayProps {
   testID?: string;
 }
 
+interface ScreenChromeBarProps {
+  children: React.ReactNode;
+  className?: string;
+  style?: StyleProp<ViewStyle>;
+  testID?: string;
+}
+
 export function ScreenHeaderShell({
   children,
   contentClassName,
@@ -227,10 +323,15 @@ export function ScreenHeaderShell({
   testID,
 }: ScreenHeaderShellProps) {
   const insets = useSafeAreaInsets();
-  const { colors, resolvedMode } = useTheme();
-  const shellClassName = resolvedMode === 'dark'
-    ? 'bg-background-950/90'
-    : 'bg-background-0/94';
+  const { appearance, theme } = useResolvedThemeAppearance();
+  const blurTarget = React.useContext(GlassBlurTargetContext);
+  const { colors } = theme;
+  const isGlass = appearance.surfaceKind === 'glass';
+  const shouldBlurHeader = Platform.OS !== 'android' || (isGlass && !isAndroidBlurFallbackRequired() && Boolean(blurTarget));
+  const headerClassName = joinClassNames(
+    appearance.classNames.headerShellClassName,
+    isGlass && isAndroidBlurFallbackRequired() ? 'bg-background-0/82 dark:bg-background-950/72' : undefined,
+  );
   const content = (
     <Box
       testID={testID}
@@ -242,21 +343,61 @@ export function ScreenHeaderShell({
   );
 
   return (
-    <Box className="z-10 w-full overflow-hidden border-b border-outline-200 dark:border-outline-800">
-      {Platform.OS === 'android' ? (
-        <Box className={shellClassName} style={{ paddingTop: insets.top }}>
-          {content}
-        </Box>
-      ) : (
+    <Box className={joinClassNames('z-10 w-full overflow-hidden border-b', appearance.classNames.headerBorderClassName)}>
+      {shouldBlurHeader ? (
         <BlurView
-          intensity={resolvedMode === 'dark' ? 72 : 82}
+          intensity={appearance.effects.headerBlurIntensity}
           tint={colors.headerBlurTint}
-          className={shellClassName}
+          blurReductionFactor={isGlass ? undefined : 2}
+          {...getAndroidBlurProps(appearance, blurTarget)}
+          className={headerClassName}
           style={{ paddingTop: insets.top }}
         >
+          {isGlass ? <GlassSpecular tint={colors.headerBlurTint} /> : null}
           {content}
         </BlurView>
+      ) : (
+        <Box className={headerClassName} style={{ paddingTop: insets.top }}>
+          {isGlass ? <GlassSpecular tint={colors.headerBlurTint} /> : null}
+          {content}
+        </Box>
       )}
+    </Box>
+  );
+}
+
+export function ScreenRoot({
+  children,
+  className,
+  style,
+  testID,
+}: ScreenRootProps) {
+  const { appearance, theme } = useResolvedThemeAppearance();
+  const glassBlurTargetRef = React.useRef<View | null>(null);
+  const { colors } = theme;
+  const isGlass = appearance.surfaceKind === 'glass';
+  const shouldUseAndroidBlurTarget = isGlass && Platform.OS === 'android' && !isAndroidBlurFallbackRequired();
+
+  return (
+    <Box
+      testID={testID}
+      className={joinClassNames('flex-1', isGlass ? 'overflow-hidden' : undefined, className)}
+      style={[{ backgroundColor: colors.background }, style]}
+    >
+      {isGlass ? <GlassBackgroundAccents appearance={appearance} /> : null}
+      {shouldUseAndroidBlurTarget ? (
+        <BlurTargetView
+          testID="screen-glass-blur-target"
+          ref={glassBlurTargetRef}
+          pointerEvents="none"
+          style={StyleSheet.absoluteFill}
+        >
+          <GlassBackgroundAccents appearance={appearance} dim />
+        </BlurTargetView>
+      ) : isGlass ? <GlassBackgroundAccents appearance={appearance} dim /> : null}
+      <GlassBlurTargetContext.Provider value={shouldUseAndroidBlurTarget ? glassBlurTargetRef : null}>
+        {children}
+      </GlassBlurTargetContext.Provider>
     </Box>
   );
 }
@@ -318,9 +459,10 @@ export function ScreenCard({
   tone = 'default',
   dashed = false,
 }: ScreenCardProps) {
+  const { appearance } = useResolvedThemeAppearance();
   const baseClassName = variant === 'inset'
-    ? screenLayoutTokens.insetCardClassName
-    : screenLayoutTokens.cardClassName;
+    ? appearance.classNames.insetCardClassName
+    : appearance.classNames.cardClassName;
   const paddingClassName = padding === 'none'
     ? undefined
     : padding === 'compact'
@@ -329,11 +471,11 @@ export function ScreenCard({
         ? screenLayoutTokens.cardPaddingLargeClassName
         : screenLayoutTokens.cardPaddingClassName;
   const toneClassName = tone === 'accent'
-    ? 'border-primary-500/20 dark:border-primary-400/25'
+    ? appearance.classNames.toneClassNameByTone.accent.surfaceClassName
     : tone === 'warning'
-      ? 'border-warning-300 bg-background-warning dark:border-warning-800'
+      ? appearance.classNames.toneClassNameByTone.warning.surfaceClassName
       : tone === 'error'
-        ? 'border-error-300 bg-background-error dark:border-error-800'
+        ? appearance.classNames.toneClassNameByTone.error.surfaceClassName
         : undefined;
 
   return (
@@ -360,9 +502,10 @@ export function ScreenPressableCard({
   accessibilityRole,
   ...props
 }: ScreenPressableCardProps) {
+  const { appearance } = useResolvedThemeAppearance();
   const baseClassName = variant === 'inset'
-    ? screenLayoutTokens.insetCardClassName
-    : screenLayoutTokens.cardClassName;
+    ? appearance.classNames.insetCardClassName
+    : appearance.classNames.cardClassName;
   const paddingClassName = padding === 'none'
     ? undefined
     : padding === 'compact'
@@ -371,11 +514,11 @@ export function ScreenPressableCard({
         ? screenLayoutTokens.cardPaddingLargeClassName
         : screenLayoutTokens.cardPaddingClassName;
   const toneClassName = tone === 'accent'
-    ? 'border-primary-500/20 dark:border-primary-400/25'
+    ? appearance.classNames.toneClassNameByTone.accent.surfaceClassName
     : tone === 'warning'
-      ? 'border-warning-300 bg-background-warning dark:border-warning-800'
+      ? appearance.classNames.toneClassNameByTone.warning.surfaceClassName
       : tone === 'error'
-        ? 'border-error-300 bg-background-error dark:border-error-800'
+        ? appearance.classNames.toneClassNameByTone.error.surfaceClassName
         : undefined;
 
   return (
@@ -426,8 +569,9 @@ export function HeaderActionButton({
   className,
   testID,
 }: HeaderActionButtonProps) {
+  const { appearance, theme } = useResolvedThemeAppearance();
   const isDisabled = disabled || !onPress;
-  const containerClassName = 'bg-primary-500/10 dark:bg-primary-500/15';
+  const containerClassName = appearance.classNames.headerActionClassName;
   const iconClassName = tone === 'accent'
     ? 'text-primary-600 dark:text-primary-300'
     : tone === 'destructive'
@@ -442,8 +586,9 @@ export function HeaderActionButton({
       accessibilityRole="button"
       accessibilityLabel={accessibilityLabel}
       hitSlop={8}
-      className={joinClassNames(`${screenChromeTokens.headerActionClassName} shrink-0 items-center justify-center rounded-full ${containerClassName} ${isDisabled ? 'opacity-55' : 'active:opacity-80'}`, className)}
+      className={joinClassNames(`${screenChromeTokens.headerActionClassName} shrink-0 items-center justify-center rounded-full ${containerClassName} ${appearance.surfaceKind === 'glass' ? 'relative overflow-hidden' : ''} ${isDisabled ? 'opacity-55' : 'active:opacity-80'}`, className)}
     >
+      <GlassSurfaceBackdrop appearance={appearance} tint={theme.colors.headerBlurTint} />
       <MaterialSymbols name={iconName} size={screenChromeTokens.headerActionIconSizePx} className={iconClassName} />
     </Pressable>
   );
@@ -482,11 +627,12 @@ export function ScreenActionPill({
   accessibilityRole,
   ...props
 }: ScreenActionPillProps) {
+  const { appearance } = useResolvedThemeAppearance();
   const baseClassName = joinClassNames(
     buttonLayoutTokens.screenActionPillClassNameBySize[size],
     tone === 'primary'
-      ? screenLayoutTokens.primaryActionPillClassName
-      : screenLayoutTokens.softActionPillClassName,
+      ? appearance.classNames.primaryActionPillClassName
+      : appearance.classNames.softActionPillClassName,
   );
 
   return (
@@ -512,13 +658,14 @@ export function ScreenIconButton({
   disabled,
   ...props
 }: ScreenIconButtonProps) {
+  const { appearance, theme } = useResolvedThemeAppearance();
   const toneClassName = tone === 'danger'
-    ? 'bg-error-500/10 dark:bg-error-500/15'
-    : 'bg-primary-500/10 dark:bg-primary-500/15';
+    ? appearance.classNames.toneClassNameByTone.error.iconTileClassName
+    : appearance.classNames.iconButtonClassName;
   const resolvedIconClassName = tone === 'primary'
     ? 'text-primary-500'
     : tone === 'danger'
-      ? 'text-error-500'
+      ? appearance.classNames.toneClassNameByTone.error.iconClassName
       : 'text-typography-700 dark:text-typography-200';
 
   return (
@@ -531,13 +678,80 @@ export function ScreenIconButton({
         buttonLayoutTokens.screenIconButtonClassNameBySize[size],
         screenLayoutTokens.iconButtonClassName,
         toneClassName,
+        appearance.surfaceKind === 'glass' ? 'relative overflow-hidden' : undefined,
         disabled ? 'opacity-55' : 'active:opacity-70',
         className,
       )}
       {...props}
     >
+      <GlassSurfaceBackdrop appearance={appearance} tint={theme.colors.headerBlurTint} />
       <MaterialSymbols name={iconName} size={iconSize} className={joinClassNames(resolvedIconClassName, iconClassName)} />
     </Pressable>
+  );
+}
+
+export function ScreenIconTile({
+  iconName,
+  children,
+  tone = 'accent',
+  size = 'md',
+  iconSize = 'lg',
+  className,
+  iconClassName,
+  iconColor,
+  testID,
+}: ScreenIconTileProps) {
+  const theme = useTheme();
+  const appearance = theme.appearance ?? getThemeAppearance(theme.themeId ?? DEFAULT_THEME_ID, theme.resolvedMode ?? 'light');
+  const toneClassNames = appearance.classNames.toneClassNameByTone[tone];
+  const resolvedIconColor = iconColor ?? getThemeToneIconColor(tone, theme.resolvedMode ?? 'light');
+  const sizeClassName = size === 'sm'
+    ? 'h-8 w-8 rounded-full'
+    : size === 'lg'
+      ? 'h-11 w-11 rounded-2xl'
+      : 'h-9 w-9 rounded-xl';
+
+  return (
+    <Box
+      testID={testID}
+      className={joinClassNames(
+        sizeClassName,
+        'items-center justify-center overflow-hidden',
+        toneClassNames.iconTileClassName,
+        className,
+      )}
+    >
+      {children ?? (
+        <MaterialSymbols
+          name={iconName}
+          size={iconSize}
+          className={joinClassNames(toneClassNames.iconClassName, iconClassName)}
+          color={resolvedIconColor}
+        />
+      )}
+    </Box>
+  );
+}
+
+export function ScreenBanner({
+  children,
+  tone = 'neutral',
+  floating = false,
+  className,
+  style,
+  testID,
+}: ScreenBannerProps) {
+  const { appearance, theme } = useResolvedThemeAppearance();
+  const shouldUseGlassBackdrop = floating && appearance.surfaceKind === 'glass';
+  const baseClassName = floating
+    ? appearance.classNames.floatingBannerClassName
+    : `${radiusTokens.md} border px-3 py-2.5 ${appearance.classNames.toneClassNameByTone[tone].surfaceClassName}`;
+
+  return (
+    <Box testID={testID} className={joinClassNames(baseClassName, shouldUseGlassBackdrop ? 'relative overflow-hidden' : undefined, className)} style={style}>
+      {shouldUseGlassBackdrop ? <GlassSurfaceBackdrop appearance={appearance} tint={theme.colors.headerBlurTint} /> : null}
+      {children}
+    </Box>
   );
 }
 
@@ -564,7 +778,8 @@ export function ScreenBadge({
   testID,
 }: ScreenBadgeProps) {
   const iconSize = size === 'micro' ? 'xs' : 'sm';
-  const toneTokens = getBadgeToneTokens(tone);
+  const { appearance } = useResolvedThemeAppearance();
+  const toneTokens = appearance.classNames.toneClassNameByTone[tone];
 
   return (
     <Box
@@ -572,7 +787,7 @@ export function ScreenBadge({
       className={joinClassNames(
         'flex-row items-center border',
         getBadgeSizeClassName(size),
-        toneTokens.shellClassName,
+        toneTokens.badgeClassName,
         className,
       )}
     >
@@ -580,13 +795,13 @@ export function ScreenBadge({
         <MaterialSymbols
           name={iconName}
           size={iconSize}
-          className={joinClassNames(toneTokens.contentClassName, iconClassName)}
+          className={joinClassNames(toneTokens.textClassName, iconClassName)}
         />
       ) : null}
       <Text
         className={joinClassNames(
           composeTextRole(size === 'micro' ? 'eyebrow' : 'chip'),
-          toneTokens.contentClassName,
+          toneTokens.textClassName,
           textClassName,
         )}
       >
@@ -610,20 +825,21 @@ export function ScreenChip({
   ...props
 }: ScreenChipProps) {
   const iconSize = size === 'micro' ? 'xs' : 'sm';
-  const toneTokens = getBadgeToneTokens(tone);
+  const { appearance } = useResolvedThemeAppearance();
+  const toneTokens = appearance.classNames.toneClassNameByTone[tone];
   const content = (
     <>
       {leadingIconName ? (
-        <MaterialSymbols name={leadingIconName} size={iconSize} className={toneTokens.contentClassName} />
+        <MaterialSymbols name={leadingIconName} size={iconSize} className={toneTokens.textClassName} />
       ) : null}
       <Text
         numberOfLines={1}
-        className={joinClassNames(composeTextRole('chip', 'min-w-0 shrink'), toneTokens.contentClassName, textClassName)}
+        className={joinClassNames(composeTextRole('chip', 'min-w-0 shrink'), toneTokens.textClassName, textClassName)}
       >
         {label}
       </Text>
       {trailingIconName ? (
-        <MaterialSymbols name={trailingIconName} size={iconSize} className={toneTokens.contentClassName} />
+        <MaterialSymbols name={trailingIconName} size={iconSize} className={toneTokens.textClassName} />
       ) : null}
     </>
   );
@@ -634,7 +850,7 @@ export function ScreenChip({
         className={joinClassNames(
           'max-w-full shrink flex-row items-center border',
           getBadgeSizeClassName(size),
-          toneTokens.shellClassName,
+          toneTokens.badgeClassName,
           className,
         )}
       >
@@ -652,7 +868,7 @@ export function ScreenChip({
       className={joinClassNames(
         'max-w-full shrink flex-row items-center border',
         getBadgeSizeClassName(size),
-        toneTokens.shellClassName,
+        toneTokens.badgeClassName,
         disabled ? 'opacity-60' : 'active:opacity-70',
         className,
       )}
@@ -677,17 +893,18 @@ export function ScreenTextField({
   testID,
   ...props
 }: ScreenTextFieldProps) {
+  const { appearance } = useResolvedThemeAppearance();
   const isProminent = size === 'prominent' || size === 'prominentMultiline';
   const isMultiline = size === 'multiline' || size === 'prominentMultiline' || multiline === true;
   const fieldShellClassName = size === 'compact'
-    ? screenLayoutTokens.compactTextFieldClassName
+    ? appearance.classNames.compactTextFieldClassName
     : size === 'prominent'
-      ? screenLayoutTokens.prominentTextFieldClassName
+      ? appearance.classNames.prominentTextFieldClassName
     : isMultiline
       ? isProminent
-        ? screenLayoutTokens.prominentMultilineTextFieldClassName
-        : screenLayoutTokens.multilineTextFieldClassName
-      : screenLayoutTokens.textFieldClassName;
+        ? appearance.classNames.prominentMultilineTextFieldClassName
+        : appearance.classNames.multilineTextFieldClassName
+      : appearance.classNames.textFieldClassName;
   const inputBaseClassName = isMultiline
     ? isProminent
       ? 'min-h-80 flex-1 px-4 py-4 text-base leading-7 text-typography-900 dark:text-typography-100'
@@ -734,9 +951,10 @@ export function ScreenInlineInput({
   testID,
   ...props
 }: ScreenInlineInputProps) {
+  const { appearance } = useResolvedThemeAppearance();
   const fieldShellClassName = variant === 'composer'
-    ? screenLayoutTokens.composerInlineFieldClassName
-    : screenLayoutTokens.searchInlineFieldClassName;
+    ? appearance.classNames.composerInlineFieldClassName
+    : appearance.classNames.searchInlineFieldClassName;
   const inputBaseClassName = variant === 'composer'
     ? screenLayoutTokens.composerInlineInputClassName
     : screenLayoutTokens.searchInlineInputClassName;
@@ -770,11 +988,12 @@ export function ScreenSegmentedControl({
   testID,
   disabled = false,
 }: ScreenSegmentedControlProps) {
+  const { appearance } = useResolvedThemeAppearance();
   return (
     <Box
       testID={testID}
       accessibilityRole="tablist"
-      className={joinClassNames(screenLayoutTokens.segmentedControlClassName, disabled ? 'opacity-60' : undefined, className)}
+      className={joinClassNames(appearance.classNames.segmentedControlClassName, disabled ? 'opacity-60' : undefined, className)}
     >
       {options.map((option) => {
         const isActive = activeKey === option.key;
@@ -795,7 +1014,7 @@ export function ScreenSegmentedControl({
             className={joinClassNames(
               screenLayoutTokens.segmentedControlItemClassName,
               isActive
-                ? 'bg-primary-500'
+                ? appearance.classNames.segmentedControlActiveItemClassName
                 : 'bg-transparent',
               itemClassName,
             )}
@@ -818,12 +1037,37 @@ export function ScreenSegmentedControl({
   );
 }
 
+export function ScreenChromeBar({
+  children,
+  className,
+  style,
+  testID,
+}: ScreenChromeBarProps) {
+  const { appearance, theme } = useResolvedThemeAppearance();
+
+  return (
+    <Box
+      testID={testID}
+      className={joinClassNames(
+        appearance.classNames.bottomBarClassName,
+        appearance.surfaceKind === 'glass' ? 'relative overflow-hidden' : undefined,
+        className,
+      )}
+      style={style}
+    >
+      <GlassSurfaceBackdrop appearance={appearance} tint={theme.colors.headerBlurTint} />
+      {children}
+    </Box>
+  );
+}
+
 export function ScreenSheet({
   children,
   className,
   style,
   testID,
 }: ScreenSheetProps) {
+  const { appearance, theme } = useResolvedThemeAppearance();
   const insets = useSafeAreaInsets();
   const nativeBottomInset = getNativeBottomSafeAreaInset(insets.bottom);
   const bottomInsetStyle = {
@@ -833,9 +1077,10 @@ export function ScreenSheet({
   return (
     <Box
       testID={testID}
-      className={joinClassNames(screenLayoutTokens.sheetClassName, className)}
+      className={joinClassNames(appearance.classNames.sheetClassName, appearance.surfaceKind === 'glass' ? 'relative overflow-hidden' : undefined, className)}
       style={[bottomInsetStyle, style]}
     >
+      <GlassSurfaceBackdrop appearance={appearance} tint={theme.colors.headerBlurTint} />
       {children}
     </Box>
   );
@@ -846,10 +1091,11 @@ export function ScreenModalOverlay({
   className,
   testID,
 }: ScreenModalOverlayProps) {
+  const appearance = useScreenAppearance();
   return (
     <Box
       testID={testID}
-      className={joinClassNames(screenLayoutTokens.modalOverlayClassName, className)}
+      className={joinClassNames(appearance.classNames.modalOverlayClassName, className)}
     >
       {children}
     </Box>

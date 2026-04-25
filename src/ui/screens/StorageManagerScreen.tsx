@@ -7,7 +7,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Box } from '@/components/ui/box';
 import { Button, ButtonText } from '@/components/ui/button';
 import { HeaderBar } from '@/components/ui/HeaderBar';
-import { ScreenBadge, ScreenCard, ScreenContent, ScreenSectionLabel, ScreenStack } from '@/components/ui/ScreenShell';
+import { ScreenBadge, ScreenCard, ScreenContent, ScreenRoot, ScreenSectionLabel, ScreenStack } from '@/components/ui/ScreenShell';
 import { ScrollView } from '@/components/ui/scroll-view';
 import { Text } from '@/components/ui/text';
 import { hardwareListenerService, type HardwareStatus } from '../../services/HardwareListenerService';
@@ -236,7 +236,7 @@ export function StorageManagerScreen() {
     const downloadedModels = appMetrics?.downloadedModels ?? [];
 
     return (
-        <Box className="flex-1 bg-background-0 dark:bg-background-950">
+        <ScreenRoot>
             <HeaderBar
                 title={t('storageManager.title')}
                 subtitle={t('storageManager.subtitle')}
@@ -353,6 +353,6 @@ export function StorageManagerScreen() {
                     </ScreenStack>
                 </ScreenContent>
             </ScrollView>
-        </Box>
+        </ScreenRoot>
     );
 }

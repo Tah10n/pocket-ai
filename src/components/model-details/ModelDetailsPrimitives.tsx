@@ -1,9 +1,9 @@
 import React from 'react';
 import { Box } from '../ui/box';
-import { MaterialSymbols, type MaterialSymbolsProps } from '../ui/MaterialSymbols';
-import { ScreenCard } from '../ui/ScreenShell';
+import { type MaterialSymbolsProps } from '../ui/MaterialSymbols';
+import { ScreenCard, ScreenIconTile, useScreenAppearance } from '../ui/ScreenShell';
 import { Text, composeTextRole } from '../ui/text';
-import { getDetailToneTokens, type ModelDetailsTone } from '@/utils/modelDetailsPresentation';
+import { type ModelDetailsTone } from '@/utils/modelDetailsPresentation';
 
 export interface DetailValueCardProps {
   label: string;
@@ -34,11 +34,12 @@ export function DetailValueCard({
   iconName,
   compact = false,
 }: DetailValueCardProps) {
-  const toneTokens = getDetailToneTokens(tone);
+  const appearance = useScreenAppearance();
+  const toneTokens = appearance.classNames.toneClassNameByTone[tone];
 
   return (
     <Box
-      className={`rounded-2xl border px-4 ${compact ? 'py-3' : 'min-w-[148px] flex-1 py-3.5'} ${toneTokens.shellClassName}`}
+      className={`rounded-2xl border px-4 ${compact ? 'py-3' : 'min-w-[148px] flex-1 py-3.5'} ${toneTokens.surfaceClassName}`}
     >
       <Box className="flex-row items-start justify-between gap-3">
         <Box className="min-w-0 flex-1">
@@ -50,9 +51,7 @@ export function DetailValueCard({
           </Text>
         </Box>
         {iconName ? (
-          <Box className={`h-10 w-10 items-center justify-center overflow-hidden rounded-2xl ${toneTokens.iconWrapClassName}`}>
-            <MaterialSymbols name={iconName} size="lg" className={toneTokens.iconClassName} />
-          </Box>
+          <ScreenIconTile iconName={iconName} tone={tone} className="h-10 w-10 rounded-2xl" />
         ) : null}
       </Box>
     </Box>
@@ -64,13 +63,9 @@ export function SectionHeader({
   iconName,
   tone,
 }: SectionHeaderProps) {
-  const toneTokens = getDetailToneTokens(tone);
-
   return (
     <Box className="mb-4 flex-row items-center gap-3">
-      <Box className={`h-11 w-11 items-center justify-center overflow-hidden rounded-2xl ${toneTokens.iconWrapClassName}`}>
-        <MaterialSymbols name={iconName} size="lg" className={toneTokens.iconClassName} />
-      </Box>
+      <ScreenIconTile iconName={iconName} tone={tone} size="lg" />
       <Text className={composeTextRole('sectionTitle')}>
         {title}
       </Text>
@@ -85,8 +80,16 @@ export function SectionCard({
   tone = 'neutral',
   className,
 }: SectionCardProps) {
+  const cardTone = tone === 'warning'
+    ? 'warning'
+    : tone === 'error'
+      ? 'error'
+      : tone === 'primary'
+        ? 'accent'
+        : 'default';
+
   return (
-    <ScreenCard className={`overflow-hidden bg-background-50/95 dark:bg-background-900/75 ${className ?? ''}`.trim()}>
+    <ScreenCard tone={cardTone} className={`overflow-hidden ${className ?? ''}`.trim()}>
       {title && iconName ? (
         <SectionHeader title={title} iconName={iconName} tone={tone} />
       ) : null}

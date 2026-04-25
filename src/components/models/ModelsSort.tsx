@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { Box } from '@/components/ui/box';
 import { Pressable } from '@/components/ui/pressable';
 import { ScrollView } from '@/components/ui/scroll-view';
+import { joinClassNames, useScreenAppearance } from '@/components/ui/ScreenShell';
 import { Text } from '@/components/ui/text';
 import { ModelSortField, ModelSortPreference } from '@/store/modelsStore';
 
@@ -21,8 +22,10 @@ const SORT_OPTIONS: { labelKey: string; field: ModelSortField }[] = [
 
 export const ModelsSort = ({ sort, onSortChange }: ModelsSortProps) => {
   const { t } = useTranslation();
+  const appearance = useScreenAppearance();
+
   return (
-    <Box className="gap-2 border-b border-outline-200 bg-background-0 px-4 py-3 dark:border-outline-800 dark:bg-background-950">
+    <Box className={`${appearance.classNames.surfaceBarClassName} gap-2 px-4 py-3`}>
       <Text className="text-sm font-semibold text-typography-700 dark:text-typography-200">
         {t('models.sortTitle')}
       </Text>
@@ -55,11 +58,12 @@ export const ModelsSort = ({ sort, onSortChange }: ModelsSortProps) => {
                           : 'asc',
                   })
                 }
-                className={`rounded-full border px-3 py-2 ${
+                className={joinClassNames(
+                  'rounded-full border px-3 py-2',
                   isActive
                     ? 'border-primary-500 bg-primary-500'
-                    : 'border-outline-200 bg-background-50 dark:border-outline-800 dark:bg-background-900'
-                }`}
+                    : appearance.classNames.toneClassNameByTone.neutral.badgeClassName,
+                )}
               >
                 <Text
                   className={`text-xs font-semibold ${

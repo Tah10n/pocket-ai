@@ -1,6 +1,8 @@
 import React from 'react';
 import { Box } from '../ui/box';
 import { Text, composeTextRole } from '../ui/text';
+import { useTheme } from '@/providers/ThemeProvider';
+import { DEFAULT_THEME_ID, getThemeAppearance } from '@/utils/themeTokens';
 import { SectionCard } from './ModelDetailsPrimitives';
 
 export interface ModelDetailsHeroCardProps {
@@ -22,8 +24,11 @@ export function ModelDetailsHeroCard({
   openOnHuggingFaceButton,
   className,
 }: ModelDetailsHeroCardProps) {
+  const theme = useTheme();
+  const appearance = theme.appearance ?? getThemeAppearance(theme.themeId ?? DEFAULT_THEME_ID, theme.resolvedMode ?? 'light');
+
   return (
-    <SectionCard className={`border-primary-500/15 ${className ?? ''}`.trim()}>
+    <SectionCard className={className}>
       {badges ? (
         <Box className="flex-row flex-wrap gap-2">
           {badges}
@@ -34,7 +39,7 @@ export function ModelDetailsHeroCard({
         {title}
       </Text>
 
-      <Box className="mt-2 self-start rounded-full border border-outline-200/80 bg-background-0/80 px-3 py-1.5 dark:border-outline-700 dark:bg-background-950/70">
+      <Box className={`mt-2 self-start ${appearance.classNames.inlinePillClassName}`}>
         <Text className={composeTextRole('chip', 'font-medium text-typography-600 dark:text-typography-300')}>
           {modelId}
         </Text>

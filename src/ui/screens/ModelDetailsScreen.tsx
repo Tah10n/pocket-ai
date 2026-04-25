@@ -17,7 +17,7 @@ import { MaterialSymbols } from '@/components/ui/MaterialSymbols';
 import { ErrorReportSheet } from '@/components/ui/ErrorReportSheet';
 import { MODEL_WARMUP_BANNER_RESERVED_HEIGHT, ModelWarmupBanner } from '@/components/ui/ModelWarmupBanner';
 import { ModelParametersSheet } from '@/components/ui/ModelParametersSheet';
-import { ScreenBadge, ScreenCard, ScreenContent, ScreenStack } from '@/components/ui/ScreenShell';
+import { ScreenBadge, ScreenCard, ScreenContent, ScreenRoot, ScreenStack } from '@/components/ui/ScreenShell';
 import { ScrollView } from '@/components/ui/scroll-view';
 import { Spinner } from '@/components/ui/spinner';
 import { Text } from '@/components/ui/text';
@@ -86,7 +86,7 @@ export function ModelDetailsScreen() {
   })) ?? [];
 
   return (
-    <Box className="flex-1 bg-background-0 dark:bg-background-950">
+    <ScreenRoot>
       <HeaderBar
         title={t('models.detailTitle')}
         subtitle={displayModel?.id ?? modelId}
@@ -140,7 +140,7 @@ export function ModelDetailsScreen() {
             {displayModel ? (
               <>
                 {errorMessage ? (
-                  <SectionCard className="border-warning-300/70 bg-warning-50/90 dark:border-warning-800 dark:bg-warning-950/35">
+                  <SectionCard tone="warning">
                     <Text className="text-sm leading-6 text-warning-700 dark:text-warning-300">{errorMessage}</Text>
                   </SectionCard>
                 ) : null}
@@ -254,6 +254,6 @@ export function ModelDetailsScreen() {
       <ModelWarmupBanner engineState={engineState} />
       <ModelParametersSheet {...modelParametersSheetProps} />
       <ErrorReportSheet {...errorReportSheetProps} />
-    </Box>
+    </ScreenRoot>
   );
 }

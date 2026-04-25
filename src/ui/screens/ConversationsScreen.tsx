@@ -15,12 +15,15 @@ import {
   ScreenBadge,
   ScreenCard,
   ScreenContent,
-  ScreenInlineInput,
   ScreenIconButton,
+  ScreenIconTile,
+  ScreenInlineInput,
   ScreenModalOverlay,
   ScreenPressableCard,
+  ScreenRoot,
   ScreenSheet,
   ScreenStack,
+  useScreenAppearance,
 } from '@/components/ui/ScreenShell';
 import { Text, composeTextRole } from '@/components/ui/text';
 import { useChatSession } from '../../hooks/useChatSession';
@@ -72,6 +75,7 @@ function formatRetentionLabel(days: number | null, t: (key: string, options?: Re
 
 export function ConversationsScreen() {
   const { t } = useTranslation();
+  const appearance = useScreenAppearance();
   const insets = useSafeAreaInsets();
   const isFocused = useIsFocused();
   const router = useRouter();
@@ -244,9 +248,7 @@ export function ConversationsScreen() {
         className="active:opacity-80"
       >
         <Box className="flex-row items-start gap-3">
-          <Box className="mt-0.5 h-9 w-9 items-center justify-center rounded-xl bg-primary-500/10 dark:bg-primary-500/15">
-            <MaterialSymbols name="history" size="lg" className="text-primary-500" />
-          </Box>
+          <ScreenIconTile iconName="history" tone="accent" className="mt-0.5" iconClassName="text-primary-500" />
 
           <Box className="min-w-0 flex-1">
             <Box className="flex-row items-center justify-between gap-3">
@@ -274,7 +276,7 @@ export function ConversationsScreen() {
       </Pressable>
 
       {isRetentionExpanded ? (
-        <Box className="mt-3 gap-2 border-t border-outline-200 pt-3 dark:border-outline-800">
+        <Box className={`mt-3 gap-2 border-t pt-3 ${appearance.classNames.dividerClassName}`}>
           <Text className="text-sm text-typography-500 dark:text-typography-400">
             {t('conversations.retention.description')}
           </Text>
@@ -293,7 +295,7 @@ export function ConversationsScreen() {
                 accessibilityState={{ selected: isActive }}
                 variant="inset"
                 padding="compact"
-                className={isActive ? 'border-primary-500/30 bg-primary-500/10' : ''}
+                className={isActive ? appearance.classNames.selectedInsetCardClassName : ''}
               >
                 <Box className="flex-row items-start justify-between gap-3">
                   <Box className="min-w-0 flex-1">
@@ -392,7 +394,7 @@ export function ConversationsScreen() {
   }, [activeThreadId, handleDeleteConversation, handleOpenConversation, t]);
 
   return (
-    <Box className="flex-1 bg-background-0 dark:bg-background-950">
+    <ScreenRoot>
       <HeaderBar
         title={t('conversations.title')}
         subtitle={t('conversations.subtitle')}
@@ -456,13 +458,14 @@ export function ConversationsScreen() {
           ) : (
             <Box className="flex-1 pt-4">
               <ScreenCard padding="compact">
-                <Box className="h-10 w-10 items-center justify-center rounded-xl bg-primary-500/10 dark:bg-primary-500/15">
-                  <MaterialSymbols
-                    name={conversationIndex.length === 0 ? 'forum' : 'search'}
-                    size="xl"
-                    className="text-primary-500"
-                  />
-                </Box>
+                <ScreenIconTile
+                  iconName={conversationIndex.length === 0 ? 'forum' : 'search'}
+                  tone="accent"
+                  size="lg"
+                  iconSize="xl"
+                  className="h-10 w-10 rounded-xl"
+                  iconClassName="text-primary-500"
+                />
 
                 <Text className={composeTextRole('screenTitle', 'mt-3')}>
                   {conversationIndex.length === 0 ? t('conversations.emptyTitle') : t('conversations.emptySearchTitle')}
@@ -535,6 +538,6 @@ export function ConversationsScreen() {
           </ScreenModalOverlay>
         </KeyboardAvoidingView>
       </Modal>
-    </Box>
+    </ScreenRoot>
   );
 }

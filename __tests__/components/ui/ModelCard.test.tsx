@@ -36,6 +36,7 @@ jest.mock('../../../src/components/ui/ScreenShell', () => {
   const { Pressable, Text, View } = jest.requireActual('react-native');
   return {
     joinClassNames: (...values: Array<string | undefined | false>) => values.filter(Boolean).join(' '),
+    useScreenAppearance: () => require('../../../src/utils/themeTokens').getThemeAppearance('default', 'light'),
     ScreenCard: ({ children, ...props }: any) => mockReact.createElement(View, props, children),
     ScreenActionPill: ({ children, onPress, ...props }: any) =>
       mockReact.createElement(Pressable, { onPress, ...props }, children),

@@ -4,14 +4,15 @@ import { useTranslation } from 'react-i18next';
 import { Platform } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MaterialSymbols } from '../../src/components/ui/MaterialSymbols';
+import { TabBarGlassBackground } from '../../src/components/ui/TabBarGlassBackground';
 import { useTheme } from '../../src/providers/ThemeProvider';
 import { createBottomTabBarStyle } from '../../src/utils/tabBarLayout';
 
 export default function TabLayout() {
   const { t } = useTranslation();
-  const { colors } = useTheme();
+  const { colors, appearance } = useTheme();
   const insets = useSafeAreaInsets();
-  const tabBarStyle = createBottomTabBarStyle(colors, insets.bottom, Platform.OS);
+  const tabBarStyle = createBottomTabBarStyle(colors, insets.bottom, Platform.OS, appearance, Platform.Version);
 
   return (
     <Tabs
@@ -21,6 +22,7 @@ export default function TabLayout() {
         tabBarInactiveTintColor: colors.tabBarInactive,
         headerShown: false,
         tabBarHideOnKeyboard: false,
+        tabBarBackground: () => <TabBarGlassBackground />,
         tabBarStyle,
         tabBarItemStyle: {
           paddingVertical: 4,

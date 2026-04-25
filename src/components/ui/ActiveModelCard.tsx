@@ -2,7 +2,7 @@ import React from 'react';
 import { Box } from '@/components/ui/box';
 import { Text, composeTextRole } from '@/components/ui/text';
 import { MaterialSymbols } from './MaterialSymbols';
-import { ScreenActionPill, ScreenBadge, ScreenCard, ScreenStack } from './ScreenShell';
+import { ScreenActionPill, ScreenBadge, ScreenCard, ScreenStack, useScreenAppearance } from './ScreenShell';
 import { useLLMEngine } from '@/hooks/useLLMEngine';
 import { useModelRegistryRevision } from '@/hooks/useModelRegistryRevision';
 import { registry } from '@/services/LocalStorageRegistry';
@@ -16,6 +16,7 @@ interface ActiveModelCardProps {
 
 export const ActiveModelCard = ({ onSwapModel }: ActiveModelCardProps) => {
   const { t } = useTranslation();
+  const appearance = useScreenAppearance();
   const { state } = useLLMEngine();
   useModelRegistryRevision();
   const activeModel = state.activeModelId ? registry.getModel(state.activeModelId) : undefined;
@@ -57,7 +58,7 @@ export const ActiveModelCard = ({ onSwapModel }: ActiveModelCardProps) => {
 
   return (
     <ScreenCard className="overflow-hidden" tone={hasActiveModel ? 'accent' : 'default'} padding="none">
-      <Box className="border-b border-outline-200 px-4 py-2 dark:border-outline-800">
+      <Box className={`border-b px-4 py-2 ${appearance.classNames.dividerClassName}`}>
         <Box className="flex-row items-center gap-2">
           <Box className={statusDotClassName} />
           <Text className={composeTextRole('eyebrow')}>

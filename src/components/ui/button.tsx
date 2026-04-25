@@ -2,7 +2,8 @@ import React from 'react';
 import { Pressable } from './pressable';
 import { Text, composeTextRole } from './text';
 import { PressableProps, TextProps } from 'react-native';
-import { buttonLayoutTokens } from '../../utils/themeTokens';
+import { useTheme } from '../../providers/ThemeProvider';
+import { DEFAULT_THEME_ID, buttonLayoutTokens, getThemeAppearance } from '../../utils/themeTokens';
 
 interface ButtonProps extends PressableProps {
   action?: 'primary' | 'secondary' | 'positive' | 'negative' | 'default' | 'softPrimary' | 'softDestructive';
@@ -18,16 +19,6 @@ const ButtonContext = React.createContext<{ action: ButtonAction; size: ButtonSi
   action: 'primary',
   size: 'md',
 });
-
-const actionStyles = {
-  primary: 'border border-primary-600/10 bg-primary-500',
-  secondary: 'border border-outline-200 bg-background-50 dark:border-outline-700 dark:bg-background-900/80',
-  positive: 'border border-success-600/10 bg-success-500',
-  negative: 'border border-error-600/10 bg-error-500',
-  default: 'border border-outline-200 bg-background-100 dark:border-outline-700 dark:bg-background-900/70',
-  softPrimary: 'border border-primary-500/20 bg-primary-500/10',
-  softDestructive: 'border border-error-500/20 bg-error-500/10',
-};
 
 const textActionStyles: Record<ButtonAction, string> = {
   primary: 'text-typography-0',
@@ -46,6 +37,17 @@ export const Button = ({
   children, 
   ...props 
 }: ButtonProps) => {
+  const theme = useTheme();
+  const appearance = theme.appearance ?? getThemeAppearance(theme.themeId ?? DEFAULT_THEME_ID, theme.resolvedMode ?? 'light');
+  const actionStyles: Record<ButtonAction, string> = {
+    primary: 'border border-primary-600/10 bg-primary-500',
+    secondary: `border ${appearance.classNames.toneClassNameByTone.neutral.surfaceClassName}`,
+    positive: 'border border-success-600/10 bg-success-500',
+    negative: 'border border-error-600/10 bg-error-500',
+    default: `border ${appearance.classNames.toneClassNameByTone.neutral.surfaceClassName}`,
+    softPrimary: `border ${appearance.classNames.toneClassNameByTone.accent.surfaceClassName}`,
+    softDestructive: `border ${appearance.classNames.toneClassNameByTone.error.surfaceClassName}`,
+  };
   const isDisabled = props.disabled === true;
   const combinedClass = `${actionStyles[action]} ${buttonLayoutTokens.sizeClassNameBySize[size]} flex-row items-center justify-center gap-2 active:opacity-85 ${isDisabled ? 'opacity-55' : ''} ${className}`.trim();
   

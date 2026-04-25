@@ -7,7 +7,7 @@ import { ErrorReportSheet } from '@/components/ui/ErrorReportSheet';
 import { ModelCard } from '@/components/ui/ModelCard';
 import { MODEL_WARMUP_BANNER_RESERVED_HEIGHT, ModelWarmupBanner } from '@/components/ui/ModelWarmupBanner';
 import { ModelParametersSheet } from '@/components/ui/ModelParametersSheet';
-import { ScreenCard, ScreenStack } from '@/components/ui/ScreenShell';
+import { ScreenBanner, ScreenCard, ScreenStack } from '@/components/ui/ScreenShell';
 import { Spinner } from '@/components/ui/spinner';
 import { Text } from '@/components/ui/text';
 import { useErrorReportSheetController, type ErrorReportContext } from '@/hooks/useErrorReportSheetController';
@@ -526,7 +526,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
 
   const emptyState = useMemo(() => (
     <Box className="flex-1 justify-center py-6">
-      <ScreenCard dashed padding="compact" className="items-center dark:border-outline-700">
+      <ScreenCard dashed padding="compact" className="items-center">
         <Text className="text-center text-base font-semibold text-typography-700 dark:text-typography-200">
           {t('models.noResults', 'No models found')}
         </Text>
@@ -571,9 +571,9 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
   const footer = useMemo(() => (activeTab === 'all' ? (
     <Box className="pt-1">
       {loadMoreError ? (
-        <Box className="mb-2.5 rounded-2xl border border-error-300 bg-background-error px-3 py-2.5 dark:border-error-800">
+        <ScreenBanner tone="error" className="mb-2.5">
           <Text className="text-sm text-error-700 dark:text-error-300">{loadMoreError}</Text>
-        </Box>
+        </ScreenBanner>
       ) : null}
 
       {!shouldAutoLoadMore && hasMore && nextCursor ? (

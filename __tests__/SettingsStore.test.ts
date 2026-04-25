@@ -23,6 +23,47 @@ describe('SettingsStore', () => {
     expect(getSettings().allowCellularDownloads).toBe(true);
   });
 
+  it('defaults to the standard visual theme', () => {
+    expect(getSettings().themeId).toBe('default');
+  });
+
+  it('persists valid visual theme ids', () => {
+    updateSettings({ themeId: 'glass' });
+    expect(getSettings().themeId).toBe('glass');
+  });
+
+  it('sanitizes invalid visual theme ids back to the default', () => {
+    updateSettings({ themeId: 'neon' as any });
+    expect(getSettings().themeId).toBe('default');
+  });
+
+  it('writes a default visual theme id back into legacy settings payloads', () => {
+    getSettingsStorage().set('app_settings', JSON.stringify({
+      theme: 'dark',
+      allowCellularDownloads: true,
+    }));
+
+    expect(getSettings().themeId).toBe('default');
+
+    const rawSettings = JSON.parse(getSettingsStorage().getString('app_settings') ?? '{}');
+    expect(rawSettings).toEqual(expect.objectContaining({
+      theme: 'dark',
+      themeId: 'default',
+      allowCellularDownloads: true,
+    }));
+  });
+
+  it('writes sanitized visual theme ids back over invalid persisted values', () => {
+    getSettingsStorage().set('app_settings', JSON.stringify({
+      themeId: 'neon',
+    }));
+
+    expect(getSettings().themeId).toBe('default');
+
+    const rawSettings = JSON.parse(getSettingsStorage().getString('app_settings') ?? '{}');
+    expect(rawSettings.themeId).toBe('default');
+  });
+
   it('persists advanced inference settings scaffolding without corrupting load params', () => {
     updateSettings({ showAdvancedInferenceControls: true });
     updateModelLoadParametersForModel('author/model-q4', {

@@ -26,6 +26,10 @@ jest.mock('../../../src/components/ui/ScreenShell', () => {
   return {
     ScreenHeaderShell: ({ children, ...props }: any) => mockReact.createElement(View, props, children),
     HeaderActionPlaceholder: (props: any) => mockReact.createElement(View, { testID: 'header-action-placeholder', ...props }),
+    ScreenIconTile: ({ iconName, iconSize }: any) => {
+      mockMaterialSymbols({ name: iconName, size: iconSize });
+      return mockReact.createElement(Text, null, iconName);
+    },
     HeaderBackButton: ({ onPress, accessibilityLabel, testID }: any) => mockReact.createElement(
       Pressable,
       { onPress, accessibilityLabel, testID: testID ?? 'header-back-button' },

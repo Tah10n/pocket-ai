@@ -492,7 +492,7 @@ export function ErrorReportSheet({
                 </Input>
               </ScreenCard>
 
-              <ScreenCard variant="inset" className="bg-background-50/70 dark:bg-background-950/40">
+              <ScreenCard variant="inset">
                 <Text className="text-xs font-semibold uppercase tracking-wider text-primary-500">
                   {t('models.errorReport.previewTitle')}
                 </Text>

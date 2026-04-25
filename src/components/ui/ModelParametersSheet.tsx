@@ -339,6 +339,7 @@ export function ModelParametersSheet({
   onApplyReload,
 }: ModelParametersSheetProps) {
   const { t } = useTranslation();
+  const { appearance } = useTheme();
   const [seedInput, setSeedInput] = useState(() => (params.seed === null ? '' : String(params.seed)));
   const [androidGpuInfo, setAndroidGpuInfo] = useState<AndroidGpuInfoSnapshot | null>(null);
   const runtimeBackendDevicesText = (
@@ -1438,7 +1439,7 @@ export function ModelParametersSheet({
           </ScrollView>
 
           {showApplyReload ? (
-            <Box testID="model-apply-footer" className="mt-4 border-t border-outline-200 pt-4 dark:border-outline-800">
+            <Box testID="model-apply-footer" className={`mt-4 border-t pt-4 ${appearance.classNames.dividerClassName}`}>
               <ScreenCard className="mb-3" tone="accent" variant="inset" padding="compact">
                 <Text className={accentEyebrowClassName}>
                   {t('chat.modelControls.pendingLoadProfileTitle')}
@@ -1462,7 +1463,7 @@ export function ModelParametersSheet({
           ) : null}
 
           {!showApplyReload && didSaveLoadProfile ? (
-            <Box testID="model-save-confirmation-footer" className="mt-4 border-t border-outline-200 pt-4 dark:border-outline-800">
+            <Box testID="model-save-confirmation-footer" className={`mt-4 border-t pt-4 ${appearance.classNames.dividerClassName}`}>
               <ScreenCard className="mb-3" tone="accent" variant="inset" padding="compact">
                 <Text className="text-xs font-semibold uppercase tracking-wider text-success-600 dark:text-success-400">
                   {t('chat.modelControls.savedLoadProfileTitle')}

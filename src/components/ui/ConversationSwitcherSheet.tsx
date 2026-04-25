@@ -134,7 +134,7 @@ export function ConversationSwitcherSheet({
                   }}
                   disabled={!canOpenPresetSelector}
                   padding="compact"
-                  className={!canOpenPresetSelector ? 'border-outline-100 bg-background-100/80 dark:border-outline-900 dark:bg-background-900/40' : ''}
+                  className={!canOpenPresetSelector ? 'opacity-60' : ''}
                 >
                   <Box className="flex-row items-center justify-between gap-3">
                     <Box className="min-w-0 flex-1">

@@ -1,5 +1,7 @@
 import React from 'react';
 import { Box } from '@/components/ui/box';
+import { useTheme } from '@/providers/ThemeProvider';
+import { DEFAULT_THEME_ID, getThemeAppearance } from '@/utils/themeTokens';
 
 type ProgressBarSize = 'sm' | 'md' | 'lg';
 type ProgressBarTone = 'neutral' | 'primary' | 'success' | 'warning';
@@ -28,27 +30,6 @@ const framedTrackHeightClassNameBySize: Record<ProgressBarSize, string> = {
   lg: 'h-4',
 };
 
-const trackToneClassNameByTone: Record<ProgressBarTone, string> = {
-  neutral: 'bg-background-200 dark:bg-background-800',
-  primary: 'bg-primary-200 dark:bg-typography-800',
-  success: 'bg-success-200 dark:bg-success-900/50',
-  warning: 'bg-warning-200 dark:bg-warning-900/50',
-};
-
-const framedTrackToneClassNameByTone: Record<ProgressBarTone, string> = {
-  neutral: 'border-outline-200 bg-background-100 dark:border-outline-700 dark:bg-background-900/70',
-  primary: 'border-primary-500/20 bg-primary-500/10 dark:border-primary-400/25 dark:bg-primary-500/10',
-  success: 'border-success-500/25 bg-success-500/10 dark:border-success-400/25 dark:bg-success-500/10',
-  warning: 'border-warning-500/30 bg-background-warning dark:border-warning-700 dark:bg-warning-500/10',
-};
-
-const fillToneClassNameByTone: Record<ProgressBarTone, string> = {
-  neutral: 'bg-typography-500 dark:bg-typography-300',
-  primary: 'bg-primary-500',
-  success: 'bg-success-500',
-  warning: 'bg-warning-500',
-};
-
 function joinClassNames(...values: (string | undefined | false)[]) {
   return values.filter(Boolean).join(' ');
 }
@@ -71,8 +52,11 @@ export function ProgressBar({
   testID,
   fillTestID,
 }: ProgressBarProps) {
+  const theme = useTheme();
+  const appearance = theme.appearance ?? getThemeAppearance(theme.themeId ?? DEFAULT_THEME_ID, theme.resolvedMode ?? 'light');
   const clampedPercent = clampProgressPercent(valuePercent);
   const isFramed = variant === 'framed';
+  const toneClassNames = appearance.classNames.toneClassNameByTone[tone];
 
   return (
     <Box
@@ -83,7 +67,7 @@ export function ProgressBar({
         'relative w-full overflow-hidden rounded-full',
         isFramed ? 'border p-0.5' : undefined,
         isFramed ? framedTrackHeightClassNameBySize[size] : trackHeightClassNameBySize[size],
-        isFramed ? framedTrackToneClassNameByTone[tone] : trackToneClassNameByTone[tone],
+        isFramed ? toneClassNames.framedProgressTrackClassName : toneClassNames.progressTrackClassName,
         className,
       )}
     >
@@ -91,12 +75,12 @@ export function ProgressBar({
         testID={fillTestID}
         className={joinClassNames(
           'relative h-full overflow-hidden rounded-full',
-          fillToneClassNameByTone[tone],
+          toneClassNames.progressFillClassName,
           fillClassName,
         )}
         style={{ width: `${clampedPercent}%` }}
       >
-        {isFramed ? <Box className="absolute inset-y-0 right-0 w-5 bg-typography-0/25" /> : null}
+        {isFramed ? <Box className={joinClassNames('absolute inset-y-0 right-0 w-5', appearance.classNames.progressShineClassName)} /> : null}
       </Box>
     </Box>
   );

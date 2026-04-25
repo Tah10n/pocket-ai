@@ -61,7 +61,6 @@ const ModelCardComponent = ({
       : null;
   return (
     <ScreenCard
-      className={isActive ? 'bg-primary-500/5 dark:bg-primary-500/10' : ''}
       padding="compact"
       tone={isActive ? 'accent' : 'default'}
     >

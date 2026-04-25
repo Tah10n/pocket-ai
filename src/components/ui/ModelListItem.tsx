@@ -5,7 +5,7 @@ import { Box } from '@/components/ui/box';
 import { Text, composeTextRole } from '@/components/ui/text';
 import { Pressable } from '@/components/ui/pressable';
 import { MaterialSymbols } from './MaterialSymbols';
-import { ScreenBadge, ScreenCard } from './ScreenShell';
+import { ScreenBadge, ScreenCard, useScreenAppearance } from './ScreenShell';
 
 export interface ModelListItemProps {
   id: string;
@@ -21,12 +21,13 @@ export interface ModelListItemProps {
 
 export const ModelListItem = ({ name, sizeMB, status, fitsInRam, onAction, imageUrl, isDownloading, downloadProgress }: ModelListItemProps) => {
   const { t } = useTranslation();
+  const appearance = useScreenAppearance();
 
   return (
     <ScreenCard className="flex-row overflow-hidden gap-3" padding="compact">
       <ImageBackground 
         source={{ uri: imageUrl || "https://lh3.googleusercontent.com/aida-public/AB6AXuClqJ0QsvXxhk32IfvK9KR5KtKAebI2v0rQoKXNy9mkHBiAObgp7YdhdUq5xwpkxuyWoQbIyMn0P30tRnXdEOKSYVGsploFFf1XtDHSwMsIPhjvSRFrDjPWgzhAljeVNZ3cZ6ym66vftvisNupauWLox5PJrkTbqhbloaqXDgiZj1qT0SsAuStE6i4Soe2hjJoI3nTW3JUsoxZIl4tHTOw3EuP3iOrvvHMD5CoSzAe7n2qDV2814t7j2xZ5BAeRiwiWaqLJHxzmwUzz" }}
-        className="h-16 w-16 shrink-0 rounded-2xl bg-background-200 overflow-hidden dark:bg-background-800"
+        className={`h-16 w-16 shrink-0 ${appearance.classNames.thumbnailSurfaceClassName}`}
       />
       
       <Box className="flex-1 min-w-0">
@@ -43,7 +44,7 @@ export const ModelListItem = ({ name, sizeMB, status, fitsInRam, onAction, image
         
         <Box className="mt-2.5 flex-row gap-2">
           {isDownloading ? (
-            <Box className="relative flex-1 overflow-hidden rounded-2xl border border-outline-200 bg-background-100 py-1.5 dark:border-outline-700 dark:bg-background-800">
+            <Box className={`relative flex-1 overflow-hidden rounded-2xl border py-1.5 ${appearance.classNames.toneClassNameByTone.neutral.surfaceClassName}`}>
               <Box className="absolute left-0 top-0 bottom-0 bg-primary-500/20" style={{ width: `${(downloadProgress || 0) * 100}%` }} />
               <Pressable 
                 onPress={() => onAction?.('cancel')} 
@@ -55,7 +56,7 @@ export const ModelListItem = ({ name, sizeMB, status, fitsInRam, onAction, image
           ) : status === 'available' && (
             <Pressable 
               onPress={() => onAction?.('download')} 
-              className="flex-1 items-center justify-center rounded-2xl border border-outline-200 bg-background-100 py-1.5 active:opacity-70 dark:border-outline-700 dark:bg-background-800"
+              className={`flex-1 items-center justify-center rounded-2xl border py-1.5 active:opacity-70 ${appearance.classNames.toneClassNameByTone.neutral.surfaceClassName}`}
             >
                 <Text className="text-xs font-bold text-typography-900 dark:text-typography-100">{t('models.download')}</Text>
             </Pressable>
@@ -64,7 +65,7 @@ export const ModelListItem = ({ name, sizeMB, status, fitsInRam, onAction, image
           {status === 'downloaded' && (
             <Pressable 
               onPress={() => onAction?.('load')} 
-              className="flex-1 items-center justify-center rounded-2xl bg-primary-500 py-1.5 active:opacity-80"
+              className={`flex-1 rounded-2xl py-1.5 active:opacity-80 ${appearance.classNames.primaryActionPillClassName}`}
             >
               <Text className="text-xs font-bold text-typography-0">{t('models.load')}</Text>
             </Pressable>
@@ -73,13 +74,13 @@ export const ModelListItem = ({ name, sizeMB, status, fitsInRam, onAction, image
           {status === 'active' && (
             <Pressable 
               onPress={() => onAction?.('unload')} 
-              className="flex-1 items-center justify-center rounded-2xl bg-background-200 py-1.5 active:opacity-70 dark:bg-background-0/10"
+              className={`flex-1 items-center justify-center rounded-2xl py-1.5 active:opacity-70 ${appearance.classNames.toneClassNameByTone.neutral.iconTileClassName}`}
             >
               <Text className="text-xs font-bold text-typography-900 dark:text-typography-0">{t('models.unload')}</Text>
             </Pressable>
           )}
           
-          <Box className="items-center justify-center rounded-2xl border border-outline-200 bg-background-100 px-3 dark:border-outline-700 dark:bg-background-800">
+          <Box className={`items-center justify-center rounded-2xl px-3 ${appearance.classNames.toneClassNameByTone.neutral.iconTileClassName}`}>
             <MaterialSymbols name="more-horiz" size="sm" className="text-typography-500" />
           </Box>
         </Box>

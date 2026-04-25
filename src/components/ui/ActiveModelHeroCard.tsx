@@ -5,7 +5,7 @@ import { Box } from '@/components/ui/box';
 import { Text, composeTextRole } from '@/components/ui/text';
 import { MaterialSymbols } from './MaterialSymbols';
 import { ProgressBar } from './ProgressBar';
-import { ScreenActionPill, ScreenBadge, ScreenCard } from './ScreenShell';
+import { ScreenActionPill, ScreenBadge, ScreenCard, useScreenAppearance } from './ScreenShell';
 
 interface ActiveModelHeroCardProps {
   name: string;
@@ -25,6 +25,7 @@ export const ActiveModelHeroCard = ({
   onUnload,
 }: ActiveModelHeroCardProps) => {
   const { t } = useTranslation();
+  const appearance = useScreenAppearance();
   const usedPercent = useMemo(() => {
     if (memoryTotalGB <= 0) return 0;
     return Math.min(100, Math.max(0, (memoryUsedGB / memoryTotalGB) * 100));
@@ -36,8 +37,8 @@ export const ActiveModelHeroCard = ({
         source={{ uri: "https://lh3.googleusercontent.com/aida-public/AB6AXuBgeacQzvDee5FRz4IolAFCYeRdjSi5o964zo1nH9_1RSd9jOXPsbeN7v2xGEizVFs5ap4YlxkkTvYwU7gAsmGYx5fdjy-EXVSDSplqL6g442DP_jqpWlBitLu19YImIfHJbZYQpZv3VcFmqTpeZ_4PyHInFynYgjtublbwQyS1CMUs9W381FQ7AEcDpX-74bUZcI2DZBNIMXsm5MVuPa4uPRBjhiiHrtM3aM-1xahPOz-5J7NEKxdVQg4hCDW573lexS2Kb4VbxWDV" }}
         className="h-36 w-full"
       >
-        <Box className="absolute inset-0 bg-primary-500/15" />
-        <Box className="absolute inset-0 bg-background-50/60 dark:bg-background-900/70" />
+        <Box className={`absolute inset-0 ${appearance.classNames.heroImageOverlayClassName}`} />
+        <Box className={`absolute inset-0 ${appearance.classNames.heroImageScrimClassName}`} />
         <Box className="flex-1 justify-between p-4">
           <Box className="flex-row items-center gap-2">
             <Box className="w-2 h-2 rounded-full bg-success-500" />

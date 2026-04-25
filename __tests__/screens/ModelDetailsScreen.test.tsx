@@ -119,7 +119,9 @@ jest.mock('../../src/components/ui/pressable', () => {
 
 jest.mock('../../src/components/ui/ScreenShell', () => ({
   joinClassNames: (...values: Array<string | undefined | false>) => values.filter(Boolean).join(' '),
+  useScreenAppearance: () => require('../../src/utils/themeTokens').getThemeAppearance('default', 'light'),
   ScreenHeaderShell: ({ children }: any) => children,
+  ScreenRoot: ({ children }: any) => children,
   ScreenContent: ({ children }: any) => children,
   ScreenStack: ({ children }: any) => children,
   ScreenCard: ({ children }: any) => children,
@@ -137,6 +139,11 @@ jest.mock('../../src/components/ui/ScreenShell', () => ({
     const mockReact = jest.requireActual('react');
     const { View, Text } = jest.requireActual('react-native');
     return mockReact.createElement(View, null, mockReact.createElement(Text, null, label ?? children));
+  },
+  ScreenIconTile: ({ iconName }: any) => {
+    const mockReact = jest.requireActual('react');
+    const { Text } = jest.requireActual('react-native');
+    return mockReact.createElement(Text, null, iconName);
   },
   ScreenModalOverlay: ({ children }: any) => children,
   ScreenSheet: ({ children }: any) => children,

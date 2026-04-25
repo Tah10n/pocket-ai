@@ -3,6 +3,7 @@ import { createStorage } from './storage';
 import { DEFAULT_REASONING_EFFORT, normalizeReasoningEffort, type ReasoningEffort } from '../types/reasoning';
 import { MAX_CONTEXT_WINDOW_TOKENS } from '../utils/contextWindow';
 import { UNKNOWN_MODEL_GPU_LAYERS_CEILING } from '../utils/modelLimits';
+import { DEFAULT_THEME_ID, isThemeId, type ThemeId } from '../utils/themeTokens';
 
 export { UNKNOWN_MODEL_GPU_LAYERS_CEILING };
 
@@ -79,6 +80,7 @@ export interface AppSettings {
     reasoningEffort?: ReasoningEffort;
     seed: number | null;
     theme: 'light' | 'dark' | 'system';
+    themeId: ThemeId;
     language: 'en' | 'ru';
     allowCellularDownloads: boolean;
     showAdvancedInferenceControls?: boolean;
@@ -116,6 +118,7 @@ const DEFAULT_SETTINGS: AppSettings = {
     reasoningEffort: DEFAULT_GENERATION_PARAMETERS.reasoningEffort,
     seed: DEFAULT_GENERATION_PARAMETERS.seed,
     theme: 'system',
+    themeId: DEFAULT_THEME_ID,
     language: 'en',
     allowCellularDownloads: false,
     showAdvancedInferenceControls: false,
@@ -434,6 +437,7 @@ function sanitizeSettings(input: Partial<AppSettings>): AppSettings {
         reasoningEffort: generationDefaults.reasoningEffort,
         seed: generationDefaults.seed,
         theme: input.theme === 'light' || input.theme === 'dark' || input.theme === 'system' ? input.theme : DEFAULT_SETTINGS.theme,
+        themeId: isThemeId(input.themeId) ? input.themeId : DEFAULT_SETTINGS.themeId,
         language: normalizeLanguage(input.language),
         allowCellularDownloads: typeof input.allowCellularDownloads === 'boolean'
             ? input.allowCellularDownloads
@@ -482,13 +486,24 @@ export function getSettings(): AppSettings {
         typeof parsed === 'object' &&
         parsed !== null &&
         Object.prototype.hasOwnProperty.call(parsed, 'reasoningEffort');
+    const hasValidPersistedThemeId =
+        typeof parsed === 'object' &&
+        parsed !== null &&
+        Object.prototype.hasOwnProperty.call(parsed, 'themeId') &&
+        isThemeId(parsed.themeId);
 
-    return sanitizeSettings({
+    const sanitized = sanitizeSettings({
         ...DEFAULT_SETTINGS,
         ...parsed,
         reasoningEffort: hasExplicitReasoningEffort ? parsed.reasoningEffort : undefined,
         chatRetentionDays: hasExplicitChatRetention ? parsed.chatRetentionDays : null,
     });
+
+    if (!hasValidPersistedThemeId) {
+        writeJsonValue(SETTINGS_KEY, sanitized);
+    }
+
+    return sanitized;
 }
 
 export function updateSettings(partial: Partial<AppSettings>) {

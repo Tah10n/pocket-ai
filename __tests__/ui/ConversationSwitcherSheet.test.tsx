@@ -226,7 +226,7 @@ describe('ConversationSwitcherSheet', () => {
     );
 
     expect(screen.getByText('chat.conversationSwitcher.presetBlocked')).toBeTruthy();
-    expect(screen.getByTestId('conversation-switcher-preset-card').props.className).toContain('border-outline-100');
+    expect(screen.getByTestId('conversation-switcher-preset-card').props.className).toContain('opacity-60');
 
     fireEvent.press(screen.getByTestId('conversation-switcher-preset-card'));
 

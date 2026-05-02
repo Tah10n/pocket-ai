@@ -70,10 +70,10 @@ function TabBarMatteBackdrop({ fallback = false, tint }: { fallback?: boolean; t
   const isDark = tint === 'dark';
   const backgroundColor = fallback
     ? isDark
-      ? 'rgba(244,247,251,0.16)'
+      ? 'rgba(244,247,251,0.22)'
       : 'rgba(248,250,252,0.24)'
     : isDark
-      ? 'rgba(244,247,251,0.018)'
+      ? 'rgba(244,247,251,0.075)'
       : 'rgba(248,250,252,0.01)';
 
   return (
@@ -101,8 +101,8 @@ function TabBarContrastBackdrop({ fallback = false, tint }: { fallback?: boolean
         StyleSheet.absoluteFill,
         {
           backgroundColor: fallback
-            ? 'rgba(6,11,20,0.3)'
-            : 'rgba(6,11,20,0.42)',
+            ? 'rgba(6,11,20,0.24)'
+            : 'rgba(6,11,20,0.18)',
         },
       ]}
     />

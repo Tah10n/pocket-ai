@@ -135,8 +135,8 @@ describe('TabBarGlassBackground', () => {
       const { View } = require('react-native');
       const views = UNSAFE_getAllByType(View);
 
-      expect(hasBackdropColor(views, 'rgba(6,11,20,0.3)')).toBe(true);
-      expect(hasBackdropColor(views, 'rgba(244,247,251,0.16)')).toBe(true);
+      expect(hasBackdropColor(views, 'rgba(6,11,20,0.24)')).toBe(true);
+      expect(hasBackdropColor(views, 'rgba(244,247,251,0.22)')).toBe(true);
       expect(hasBackdropColor(views, 'rgba(15,23,42,0.24)')).toBe(false);
       expect(hasBackdropColor(views, 'rgba(255,255,255,0.16)')).toBe(false);
     } finally {
@@ -357,10 +357,10 @@ describe('TabBarGlassBackground', () => {
       expect(blurBackdrop?.props.blurTarget).toBe(activeTarget);
       expect(blurBackdrop?.props.blurMethod).toBe('dimezisBlurViewSdk31Plus');
       expect(blurBackdrop?.props.tint).toBe('dark');
-      expect(hasBackdropColor(views, 'rgba(6,11,20,0.3)')).toBe(false);
-      expect(hasBackdropColor(views, 'rgba(6,11,20,0.42)')).toBe(true);
-      expect(hasBackdropColor(views, 'rgba(244,247,251,0.16)')).toBe(false);
-      expect(hasBackdropColor(views, 'rgba(244,247,251,0.018)')).toBe(true);
+      expect(hasBackdropColor(views, 'rgba(6,11,20,0.24)')).toBe(false);
+      expect(hasBackdropColor(views, 'rgba(6,11,20,0.18)')).toBe(true);
+      expect(hasBackdropColor(views, 'rgba(244,247,251,0.22)')).toBe(false);
+      expect(hasBackdropColor(views, 'rgba(244,247,251,0.075)')).toBe(true);
     } finally {
       act(() => {
         clearActiveTarget?.();

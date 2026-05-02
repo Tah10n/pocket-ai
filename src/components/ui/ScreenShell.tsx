@@ -1,6 +1,8 @@
 import React from 'react';
-import { Platform, StyleSheet, type StyleProp, type View, type ViewStyle } from 'react-native';
+import { Platform, StyleSheet, type LayoutChangeEvent, type StyleProp, type View, type ViewStyle } from 'react-native';
 import { BlurTargetView, BlurView } from 'expo-blur';
+import { LinearGradient } from 'expo-linear-gradient';
+import { useIsFocused } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Box } from '@/components/ui/box';
 import { Input, InputField, type InputFieldProps } from '@/components/ui/input';
@@ -8,14 +10,16 @@ import { Pressable } from '@/components/ui/pressable';
 import { GlassSpecular } from './GlassSpecular';
 import { MaterialSymbols, type MaterialSymbolsProps } from './MaterialSymbols';
 import { Text, composeTextRole } from './text';
+import { getAndroidBlurProps, getGlassBlurTint, isAndroidBlurFallbackRequired, setActiveAndroidBlurTarget } from '../../utils/androidBlur';
 import { getNativeBottomSafeAreaInset } from '../../utils/safeArea';
-import { DEFAULT_THEME_ID, buttonLayoutTokens, getThemeAppearance, getThemeToneIconColor, radiusTokens, screenChromeTokens, screenLayoutMetrics, screenLayoutTokens, typographyColors, type ThemeAppearance, type ThemeTone } from '../../utils/themeTokens';
+import { DEFAULT_THEME_ID, buttonLayoutTokens, getThemeActionContentClassName, getThemeAppearance, getThemeToneIconColor, radiusTokens, screenChromeTokens, screenLayoutMetrics, screenLayoutTokens, tailwindRadiusPxByToken, typographyColors, withAlpha, type ResolvedThemeMode, type ThemeAppearance, type ThemeColors, type ThemeTone } from '../../utils/themeTokens';
 import { useTheme } from '../../providers/ThemeProvider';
 
 interface ScreenHeaderShellProps {
   children: React.ReactNode;
   contentClassName?: string;
   contentStyle?: StyleProp<ViewStyle>;
+  floating?: boolean;
   maxWidthClassName?: string;
   testID?: string;
 }
@@ -25,6 +29,7 @@ interface ScreenContentProps {
   className?: string;
   extraBottomInset?: number;
   includeBottomSafeArea?: boolean;
+  respectFloatingHeader?: boolean;
   style?: StyleProp<ViewStyle>;
   testID?: string;
 }
@@ -46,6 +51,7 @@ interface ScreenStackProps {
 interface ScreenCardProps {
   children: React.ReactNode;
   className?: string;
+  decorative?: GlassSurfaceDecorative;
   style?: StyleProp<ViewStyle>;
   testID?: string;
   variant?: 'surface' | 'inset';
@@ -57,6 +63,7 @@ interface ScreenCardProps {
 interface ScreenPressableCardProps extends React.ComponentProps<typeof Pressable> {
   children: React.ReactNode;
   className?: string;
+  decorative?: GlassSurfaceDecorative;
   style?: StyleProp<ViewStyle>;
   testID?: string;
   variant?: 'surface' | 'inset';
@@ -71,37 +78,267 @@ export function joinClassNames(...values: (string | undefined | false)[]) {
 
 const GlassBlurTargetContext = React.createContext<React.RefObject<View | null> | null>(null);
 
-function getAndroidSdkVersion() {
-  if (Platform.OS !== 'android') {
+type GlassSurfaceDecorative = 'standard' | 'matte' | 'tint';
+type GlassCornerRadiusStyle = Pick<ViewStyle,
+  | 'borderRadius'
+  | 'borderTopLeftRadius'
+  | 'borderTopRightRadius'
+  | 'borderBottomRightRadius'
+  | 'borderBottomLeftRadius'
+>;
+
+const roundedSideTokens = new Set(['t', 'r', 'b', 'l', 'tl', 'tr', 'br', 'bl']);
+const defaultGlassCornerRadiusStyle: GlassCornerRadiusStyle = { borderRadius: 28 };
+
+interface ScreenHeaderInset {
+  height: number;
+  isFloating: boolean;
+}
+
+const ScreenHeaderInsetContext = React.createContext<ScreenHeaderInset>({ height: 0, isFloating: false });
+const ScreenHeaderInsetSetterContext = React.createContext<((inset: ScreenHeaderInset) => void) | null>(null);
+
+export function useScreenHeaderInset() {
+  return React.useContext(ScreenHeaderInsetContext);
+}
+
+export function useFloatingHeaderInset() {
+  const inset = useScreenHeaderInset();
+  return inset.isFloating ? inset.height : 0;
+}
+
+function getNextScreenHeaderInset(current: ScreenHeaderInset, next: ScreenHeaderInset) {
+  return current.height === next.height && current.isFloating === next.isFloating
+    ? current
+    : next;
+}
+
+function getGlassBackdropContainerClassName(appearance: ThemeAppearance) {
+  return appearance.surfaceKind === 'glass'
+    ? 'relative overflow-hidden bg-transparent'
+    : undefined;
+}
+
+function getRoundedTokenParts(token: string) {
+  if (token === 'rounded') {
+    return { valueToken: 'DEFAULT' };
+  }
+
+  if (!token.startsWith('rounded-')) {
     return undefined;
   }
 
-  const version = Platform.Version;
-  const parsedVersion = typeof version === 'string'
-    ? Number.parseInt(version, 10)
-    : version;
+  const value = token.slice('rounded-'.length);
+  const [maybeSide, ...rest] = value.split('-');
 
-  return Number.isFinite(parsedVersion) ? parsedVersion : undefined;
+  if (roundedSideTokens.has(maybeSide)) {
+    return {
+      side: maybeSide,
+      valueToken: rest.length > 0 ? rest.join('-') : 'DEFAULT',
+    };
+  }
+
+  return { valueToken: value };
 }
 
-function isAndroidBlurFallbackRequired() {
-  const sdkVersion = getAndroidSdkVersion();
+function getRadiusFromToken(valueToken: string) {
+  const arbitraryMatch = /^\[(\d+(?:\.\d+)?)px\]$/.exec(valueToken);
 
-  return Platform.OS === 'android' && (sdkVersion === undefined || sdkVersion < 31);
+  if (arbitraryMatch) {
+    return Number(arbitraryMatch[1]);
+  }
+
+  return tailwindRadiusPxByToken[valueToken];
 }
 
-function getAndroidBlurProps(
-  appearance: ThemeAppearance,
-  blurTarget: React.RefObject<View | null> | null,
+function applyCornerRadius(
+  radiusStyle: GlassCornerRadiusStyle,
+  side: string | undefined,
+  radius: number,
 ) {
-  if (Platform.OS !== 'android' || appearance.surfaceKind !== 'glass' || isAndroidBlurFallbackRequired() || !blurTarget) {
-    return {};
+  if (!side) {
+    radiusStyle.borderRadius = radius;
+    delete radiusStyle.borderTopLeftRadius;
+    delete radiusStyle.borderTopRightRadius;
+    delete radiusStyle.borderBottomRightRadius;
+    delete radiusStyle.borderBottomLeftRadius;
+    return;
+  }
+
+  if (side === 't' || side === 'l' || side === 'tl') {
+    radiusStyle.borderTopLeftRadius = radius;
+  }
+
+  if (side === 't' || side === 'r' || side === 'tr') {
+    radiusStyle.borderTopRightRadius = radius;
+  }
+
+  if (side === 'b' || side === 'r' || side === 'br') {
+    radiusStyle.borderBottomRightRadius = radius;
+  }
+
+  if (side === 'b' || side === 'l' || side === 'bl') {
+    radiusStyle.borderBottomLeftRadius = radius;
+  }
+}
+
+export function getGlassCornerRadiusStyle(...classNames: (string | undefined | false)[]): GlassCornerRadiusStyle | undefined {
+  const radiusStyle: GlassCornerRadiusStyle = {};
+
+  for (const className of classNames) {
+    if (!className) {
+      continue;
+    }
+
+    for (const rawToken of className.split(/\s+/)) {
+      const token = rawToken.split(':').pop();
+
+      if (!token) {
+        continue;
+      }
+
+      const roundedParts = getRoundedTokenParts(token);
+
+      if (!roundedParts) {
+        continue;
+      }
+
+      const radius = getRadiusFromToken(roundedParts.valueToken);
+
+      if (radius === undefined) {
+        continue;
+      }
+
+      applyCornerRadius(radiusStyle, roundedParts.side, radius);
+    }
+  }
+
+  return Object.keys(radiusStyle).length > 0 ? radiusStyle : undefined;
+}
+
+export function getGlassSurfaceFrameStyle(
+  appearance: ThemeAppearance,
+  mode: ResolvedThemeMode,
+  colors: ThemeColors,
+  tone: 'default' | ThemeTone | 'danger' = 'default',
+  _softened = false,
+  cornerRadiusStyle?: GlassCornerRadiusStyle,
+): ViewStyle | undefined {
+  if (appearance.surfaceKind !== 'glass') {
+    return undefined;
+  }
+
+  const isDark = mode === 'dark';
+  const toneColor = tone === 'warning'
+    ? colors.warning
+    : tone === 'success'
+      ? colors.success
+      : tone === 'info'
+        ? colors.info
+    : tone === 'error' || tone === 'danger'
+      ? colors.error
+      : tone === 'accent' || tone === 'primary'
+        ? colors.primaryStrong
+        : undefined;
+
+  return {
+    ...(cornerRadiusStyle ?? {}),
+    backgroundColor: toneColor
+      ? withAlpha(toneColor, isDark ? 0.07 : 0.08)
+      : isDark
+        ? 'rgba(244, 247, 251, 0.045)'
+        : 'rgba(255, 255, 255, 0.08)',
+    borderWidth: 0,
+    elevation: 0,
+    shadowOpacity: 0,
+  };
+}
+
+function getGlassActionPillStyle(
+  appearance: ThemeAppearance,
+  mode: ResolvedThemeMode,
+  colors: ThemeColors,
+  tone: 'primary' | 'soft',
+  cornerRadiusStyle?: GlassCornerRadiusStyle,
+): ViewStyle | undefined {
+  if (appearance.surfaceKind !== 'glass') {
+    return undefined;
+  }
+
+  const primaryFill = mode === 'dark' ? colors.primary : colors.primaryStrong;
+
+  return {
+    ...(cornerRadiusStyle ?? {}),
+    backgroundColor: tone === 'primary'
+      ? withAlpha(primaryFill, mode === 'dark' ? 0.2 : 0.16)
+      : mode === 'dark'
+        ? 'rgba(244, 247, 251, 0.05)'
+        : 'rgba(255, 255, 255, 0.08)',
+    borderWidth: 0,
+    elevation: 0,
+    shadowOpacity: 0,
+  };
+}
+
+function getExplicitIconColorFromClassName(iconClassName: string | undefined, colors: ThemeColors) {
+  if (!iconClassName) {
+    return undefined;
+  }
+
+  const tokens = iconClassName
+    .split(/\s+/)
+    .map((token) => token.split(':').pop())
+    .filter((token): token is string => Boolean(token));
+
+  for (const token of [...tokens].reverse()) {
+    if (token === 'text-typography-0') {
+      return colors.textInverse;
+    }
+
+    if (token === 'text-typography-500') {
+      return colors.textTertiary;
+    }
+
+    if (/^text-typography-\d+(?:\/\d+)?$/.test(token)) {
+      return colors.icon;
+    }
+
+    if (/^text-primary-\d+(?:\/\d+)?$/.test(token)) {
+      return colors.primaryStrong;
+    }
+
+    if (/^text-error-\d+(?:\/\d+)?$/.test(token)) {
+      return colors.error;
+    }
+
+    if (/^text-warning-\d+(?:\/\d+)?$/.test(token)) {
+      return colors.warning;
+    }
+
+    if (/^text-success-\d+(?:\/\d+)?$/.test(token)) {
+      return colors.success;
+    }
+
+    if (/^text-info-\d+(?:\/\d+)?$/.test(token)) {
+      return colors.info;
+    }
+  }
+
+  return undefined;
+}
+
+function getGlassHeaderFrameStyle(
+  appearance: ThemeAppearance,
+  _mode: ResolvedThemeMode,
+): ViewStyle | undefined {
+  if (appearance.surfaceKind !== 'glass') {
+    return undefined;
   }
 
   return {
-    blurMethod: 'dimezisBlurViewSdk31Plus' as const,
-    blurReductionFactor: appearance.effects.blurReductionFactor,
-    blurTarget,
+    borderBottomWidth: 0,
+    elevation: 0,
+    shadowOpacity: 0,
   };
 }
 
@@ -116,19 +353,171 @@ export function useScreenAppearance() {
   return useResolvedThemeAppearance().appearance;
 }
 
-function GlassSurfaceBackdrop({ appearance, tint }: { appearance: ThemeAppearance; tint: 'light' | 'dark' }) {
+type LiquidGlassTintVariant = 'standard' | 'matte' | 'control' | 'fallback';
+type LiquidGlassGradientColors = readonly [string, string, ...string[]];
+
+function getLiquidGlassTintColor(tint: 'light' | 'dark', variant: LiquidGlassTintVariant) {
+  const isDark = tint === 'dark';
+
+  if (variant === 'control') {
+    return isDark ? 'rgba(244,247,251,0.085)' : 'rgba(255,255,255,0.16)';
+  }
+
+  if (variant === 'fallback') {
+    return isDark ? 'rgba(244,247,251,0.13)' : 'rgba(255,255,255,0.42)';
+  }
+
+  if (variant === 'matte') {
+    return isDark ? 'rgba(244,247,251,0.11)' : 'rgba(255,255,255,0.34)';
+  }
+
+  return isDark ? 'rgba(244,247,251,0.075)' : 'rgba(255,255,255,0.3)';
+}
+
+function getLiquidGlassContrastColor(tint: 'light' | 'dark', variant: LiquidGlassTintVariant) {
+  if (tint !== 'dark') {
+    return undefined;
+  }
+
+  if (variant === 'control') {
+    return 'rgba(6,11,20,0.28)';
+  }
+
+  if (variant === 'fallback') {
+    return 'rgba(6,11,20,0.46)';
+  }
+
+  if (variant === 'matte') {
+    return 'rgba(6,11,20,0.38)';
+  }
+
+  return 'rgba(6,11,20,0.48)';
+}
+
+function shouldSkipGlassSheen(tint: 'light' | 'dark', variant: LiquidGlassTintVariant = 'standard') {
+  return Platform.OS === 'android' || (tint === 'dark' && variant === 'control');
+}
+
+function getLiquidGlassSheenColors(tint: 'light' | 'dark', variant: LiquidGlassTintVariant = 'standard'): LiquidGlassGradientColors {
+  if (tint === 'dark') {
+    if (variant === 'matte') {
+      return ['rgba(96,165,250,0)', 'rgba(125,211,252,0.08)', 'rgba(96,165,250,0.035)', 'rgba(52,211,153,0)'];
+    }
+
+    return ['rgba(96,165,250,0)', 'rgba(125,211,252,0.1)', 'rgba(96,165,250,0.05)', 'rgba(52,211,153,0)'];
+  }
+
+  if (variant === 'control') {
+    return ['rgba(255,255,255,0)', 'rgba(255,255,255,0.22)', 'rgba(255,255,255,0.08)', 'rgba(255,255,255,0)'];
+  }
+
+  return ['rgba(255,255,255,0)', 'rgba(255,255,255,0.2)', 'rgba(255,255,255,0.075)', 'rgba(255,255,255,0)'];
+}
+
+function shouldUseAndroidGlassMatteFallback() {
+  return Platform.OS === 'android';
+}
+
+function LiquidGlassContrastLayer({
+  cornerRadiusStyle,
+  tint,
+  variant = 'standard',
+}: {
+  cornerRadiusStyle?: GlassCornerRadiusStyle;
+  tint: 'light' | 'dark';
+  variant?: LiquidGlassTintVariant;
+}) {
+  const backgroundColor = getLiquidGlassContrastColor(tint, variant);
+
+  if (!backgroundColor) {
+    return null;
+  }
+
+  return (
+    <Box
+      pointerEvents="none"
+      style={[
+        StyleSheet.absoluteFill,
+        cornerRadiusStyle,
+        { backgroundColor },
+      ]}
+    />
+  );
+}
+
+function LiquidGlassTintLayer({
+  cornerRadiusStyle,
+  tint,
+  variant = 'standard',
+}: {
+  cornerRadiusStyle?: GlassCornerRadiusStyle;
+  tint: 'light' | 'dark';
+  variant?: LiquidGlassTintVariant;
+}) {
+  return (
+    <Box
+      pointerEvents="none"
+      style={[
+        StyleSheet.absoluteFill,
+        cornerRadiusStyle,
+        { backgroundColor: getLiquidGlassTintColor(tint, variant) },
+      ]}
+    />
+  );
+}
+
+export function GlassSurfaceBackdrop({
+  appearance,
+  tint,
+  cornerRadiusStyle,
+  decorative = 'standard',
+}: {
+  appearance: ThemeAppearance;
+  tint: 'light' | 'dark';
+  cornerRadiusStyle?: GlassCornerRadiusStyle;
+  decorative?: GlassSurfaceDecorative;
+}) {
   const blurTarget = React.useContext(GlassBlurTargetContext);
+  const isMatte = decorative === 'matte';
+  const isTintOnly = decorative === 'tint';
 
   if (appearance.surfaceKind !== 'glass') {
     return null;
   }
 
-  if (Platform.OS === 'android' && (isAndroidBlurFallbackRequired() || !blurTarget)) {
+  if (isTintOnly) {
     return (
       <>
-        <Box pointerEvents="none" className="absolute inset-0 bg-background-0/82 dark:bg-background-950/72" />
-        <Box pointerEvents="none" className="absolute inset-x-0 top-0 h-px bg-typography-0/90 dark:bg-typography-0/24" />
-        <GlassSpecular tint={tint} />
+        <LiquidGlassContrastLayer tint={tint} variant="control" cornerRadiusStyle={cornerRadiusStyle} />
+        <LiquidGlassTintLayer tint={tint} variant="control" cornerRadiusStyle={cornerRadiusStyle} />
+        {shouldSkipGlassSheen(tint, 'control') ? null : (
+          <LinearGradient
+            pointerEvents="none"
+            colors={getLiquidGlassSheenColors(tint, 'control')}
+            locations={[0, 0.18, 0.58, 1]}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
+            style={[StyleSheet.absoluteFill, cornerRadiusStyle]}
+          />
+        )}
+      </>
+    );
+  }
+
+  if (
+    Platform.OS === 'android'
+    && (isAndroidBlurFallbackRequired() || shouldUseAndroidGlassMatteFallback() || !blurTarget)
+  ) {
+    return (
+      <>
+        <LiquidGlassContrastLayer tint={tint} variant="fallback" cornerRadiusStyle={cornerRadiusStyle} />
+        <LiquidGlassTintLayer tint={tint} variant="fallback" cornerRadiusStyle={cornerRadiusStyle} />
+        {isMatte ? null : (
+          <>
+            <GlassSpecular tint={tint} />
+            <LiquidGlassOptics tint={tint} cornerRadiusStyle={cornerRadiusStyle} />
+          </>
+        )}
       </>
     );
   }
@@ -138,31 +527,334 @@ function GlassSurfaceBackdrop({ appearance, tint }: { appearance: ThemeAppearanc
       <BlurView
         pointerEvents="none"
         intensity={appearance.effects.surfaceBlurIntensity}
-        tint={tint}
+        tint={getGlassBlurTint(tint)}
         {...getAndroidBlurProps(appearance, blurTarget)}
         style={StyleSheet.absoluteFill}
       />
-      <Box pointerEvents="none" className="absolute inset-0 bg-background-0/10 dark:bg-background-950/10" />
-      <GlassSpecular tint={tint} />
+      <LiquidGlassContrastLayer tint={tint} variant={isMatte ? 'matte' : 'standard'} cornerRadiusStyle={cornerRadiusStyle} />
+      <LiquidGlassTintLayer tint={tint} variant={isMatte ? 'matte' : 'standard'} cornerRadiusStyle={cornerRadiusStyle} />
+      {shouldSkipGlassSheen(tint, isMatte ? 'matte' : 'standard') ? null : (
+        <LinearGradient
+          pointerEvents="none"
+          colors={getLiquidGlassSheenColors(tint, isMatte ? 'matte' : 'standard')}
+          locations={[0, 0.2, 0.58, 1]}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={StyleSheet.absoluteFill}
+        />
+      )}
+      {isMatte ? null : (
+        <>
+          <GlassSpecular tint={tint} />
+          <LinearGradient
+            pointerEvents="none"
+            colors={tint === 'dark'
+              ? ['rgba(96,165,250,0)', 'rgba(96,165,250,0.06)', 'rgba(125,211,252,0.03)', 'rgba(96,165,250,0)']
+              : ['rgba(37,99,235,0)', 'rgba(37,99,235,0.16)', 'rgba(14,165,233,0.08)', 'rgba(37,99,235,0)']}
+            locations={[0, 0.24, 0.62, 1]}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
+            style={StyleSheet.absoluteFill}
+          />
+          <LiquidGlassOptics tint={tint} cornerRadiusStyle={cornerRadiusStyle} />
+        </>
+      )}
     </>
   );
 }
 
-function GlassBackgroundAccents({ appearance, dim = false }: { appearance: ThemeAppearance; dim?: boolean }) {
+export function GlassControlTint({
+  appearance,
+  colors,
+  mode,
+  tone,
+}: {
+  appearance: ThemeAppearance;
+  colors: ThemeColors;
+  mode: ResolvedThemeMode;
+  tone: ThemeTone | 'danger' | 'default';
+}) {
   if (appearance.surfaceKind !== 'glass') {
     return null;
   }
 
+  const color = tone === 'success'
+    ? colors.success
+    : tone === 'warning'
+      ? colors.warning
+      : tone === 'info'
+        ? colors.info
+        : tone === 'error' || tone === 'danger'
+          ? colors.error
+          : tone === 'primary' || tone === 'accent'
+            ? colors.primaryStrong
+            : undefined;
+
+  if (!color) {
+    return null;
+  }
+
+  return (
+    <LinearGradient
+      pointerEvents="none"
+      colors={[
+        withAlpha(color, 0.24),
+        withAlpha(color, 0.14),
+        withAlpha(color, 0.055),
+      ]}
+      locations={[0, 0.52, 1]}
+      start={{ x: 0, y: 0 }}
+      end={{ x: 1, y: 0.8 }}
+      style={StyleSheet.absoluteFill}
+    />
+  );
+}
+
+function LiquidGlassOptics({
+  tint,
+  cornerRadiusStyle,
+}: {
+  tint: 'light' | 'dark';
+  cornerRadiusStyle?: GlassCornerRadiusStyle;
+}) {
+  const isDark = tint === 'dark';
+  const rimRadiusStyle = cornerRadiusStyle ?? defaultGlassCornerRadiusStyle;
+  const rimBorderColor = isDark ? 'rgba(125,211,252,0.22)' : 'rgba(255,255,255,0.58)';
+
+  if (Platform.OS === 'android') {
+    return (
+      <Box pointerEvents="none" style={StyleSheet.absoluteFill}>
+        <Box pointerEvents="none" style={[styles.liquidInnerRim, rimRadiusStyle, { borderColor: rimBorderColor }]} />
+      </Box>
+    );
+  }
+
+  if (isDark) {
+    return (
+      <Box pointerEvents="none" style={StyleSheet.absoluteFill}>
+        <LinearGradient
+          pointerEvents="none"
+          colors={['rgba(125,211,252,0)', 'rgba(125,211,252,0.12)', 'rgba(96,165,250,0.05)', 'rgba(6,11,20,0)']}
+          locations={[0, 0.2, 0.62, 1]}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={styles.liquidTopSheen}
+        />
+        <LinearGradient
+          pointerEvents="none"
+          colors={['rgba(96,165,250,0)', 'rgba(56,189,248,0.1)', 'rgba(37,99,235,0.04)', 'rgba(6,11,20,0)']}
+          locations={[0, 0.28, 0.66, 1]}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 0.6 }}
+          style={styles.liquidRefractionBand}
+        />
+        <LinearGradient
+          pointerEvents="none"
+          colors={['rgba(6,11,20,0)', 'rgba(96,165,250,0.045)', 'rgba(6,11,20,0)']}
+          locations={[0, 0.58, 1]}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={styles.liquidLowerLens}
+        />
+        <Box pointerEvents="none" style={[styles.liquidInnerRim, rimRadiusStyle, { borderColor: rimBorderColor }]} />
+      </Box>
+    );
+  }
+
+  return (
+    <Box pointerEvents="none" style={StyleSheet.absoluteFill}>
+      <LinearGradient
+        pointerEvents="none"
+        colors={['rgba(255,255,255,0)', 'rgba(255,255,255,0.28)', 'rgba(255,255,255,0.11)', 'rgba(255,255,255,0)']}
+        locations={[0, 0.2, 0.62, 1]}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 1, y: 1 }}
+        style={styles.liquidTopSheen}
+      />
+      <LinearGradient
+        pointerEvents="none"
+        colors={['rgba(56,189,248,0)', 'rgba(56,189,248,0.16)', 'rgba(37,99,235,0.075)', 'rgba(255,255,255,0)']}
+        locations={[0, 0.28, 0.66, 1]}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 1, y: 0.6 }}
+        style={styles.liquidRefractionBand}
+      />
+      <LinearGradient
+        pointerEvents="none"
+        colors={['rgba(255,255,255,0)', 'rgba(37,99,235,0.08)', 'rgba(37,99,235,0)']}
+        locations={[0, 0.58, 1]}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 1, y: 1 }}
+        style={styles.liquidLowerLens}
+      />
+      <Box pointerEvents="none" style={[styles.liquidInnerRim, rimRadiusStyle, { borderColor: rimBorderColor }]} />
+    </Box>
+  );
+}
+
+function HeaderFadeBackdrop({ tint }: { tint: 'light' | 'dark' }) {
+  if (Platform.OS === 'android') {
+    return null;
+  }
+
+  const colors: LiquidGlassGradientColors = tint === 'dark'
+    ? ['rgba(125,211,252,0.1)', 'rgba(96,165,250,0.035)', 'rgba(6,11,20,0)']
+    : ['rgba(255,255,255,0.38)', 'rgba(255,255,255,0)'];
+
+  return (
+    <LinearGradient
+      pointerEvents="none"
+      colors={colors}
+      locations={tint === 'dark' ? [0, 0.46, 1] : undefined}
+      start={{ x: 0, y: 0 }}
+      end={{ x: 0, y: 1 }}
+      style={StyleSheet.absoluteFill}
+    />
+  );
+}
+
+const styles = StyleSheet.create({
+  screenSceneBlurTarget: {
+    flex: 1,
+  },
+  liquidTopSheen: {
+    position: 'absolute',
+    left: -20,
+    right: -20,
+    top: 0,
+    bottom: 0,
+    opacity: 0.6,
+  },
+  liquidRefractionBand: {
+    position: 'absolute',
+    left: -32,
+    right: -32,
+    top: -10,
+    bottom: -10,
+    opacity: 0.48,
+    transform: [{ rotate: '-1.5deg' }],
+  },
+  liquidLowerLens: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    top: 0,
+    bottom: 0,
+    opacity: 0.44,
+  },
+  liquidInnerRim: {
+    ...StyleSheet.absoluteFillObject,
+    borderWidth: StyleSheet.hairlineWidth,
+    opacity: 0.9,
+  },
+});
+
+type GlassAccentColors = readonly [string, string, ...string[]];
+
+function getGlassAccentColors(mode: ResolvedThemeMode, dim: boolean) {
+  const alphaScale = dim ? 0.62 : 1;
+  const alpha = (value: number) => Math.round(value * alphaScale * 1000) / 1000;
+
+  if (mode === 'dark') {
+    return {
+      top: [
+        `rgba(96, 165, 250, ${alpha(0.16)})`,
+        `rgba(125, 211, 252, ${alpha(0.09)})`,
+        'rgba(244, 247, 251, 0)',
+      ] as GlassAccentColors,
+      cross: [
+        'rgba(244, 247, 251, 0)',
+        `rgba(125, 211, 252, ${alpha(0.11)})`,
+        `rgba(96, 165, 250, ${alpha(0.07)})`,
+        'rgba(244, 247, 251, 0)',
+      ] as GlassAccentColors,
+      bottom: [
+        'rgba(244, 247, 251, 0)',
+        `rgba(96, 165, 250, ${alpha(0.12)})`,
+        `rgba(52, 211, 153, ${alpha(0.055)})`,
+      ] as GlassAccentColors,
+      warmth: [
+        'rgba(244, 247, 251, 0)',
+        `rgba(251, 146, 60, ${alpha(0.045)})`,
+        'rgba(244, 247, 251, 0)',
+      ] as GlassAccentColors,
+    };
+  }
+
+  return {
+    top: [
+      `rgba(37, 99, 235, ${alpha(0.24)})`,
+      `rgba(96, 165, 250, ${alpha(0.16)})`,
+      'rgba(248, 250, 252, 0)',
+    ] as GlassAccentColors,
+    cross: [
+      'rgba(248, 250, 252, 0)',
+      `rgba(59, 130, 246, ${alpha(0.18)})`,
+      `rgba(14, 165, 233, ${alpha(0.12)})`,
+      'rgba(248, 250, 252, 0)',
+    ] as GlassAccentColors,
+    bottom: [
+      'rgba(248, 250, 252, 0)',
+      `rgba(96, 165, 250, ${alpha(0.22)})`,
+      `rgba(34, 197, 94, ${alpha(0.1)})`,
+    ] as GlassAccentColors,
+    warmth: [
+      'rgba(248, 250, 252, 0)',
+      `rgba(251, 146, 60, ${alpha(0.08)})`,
+      'rgba(248, 250, 252, 0)',
+    ] as GlassAccentColors,
+  };
+}
+
+function GlassBackgroundAccents({
+  appearance,
+  dim = false,
+  mode,
+}: {
+  appearance: ThemeAppearance;
+  dim?: boolean;
+  mode: ResolvedThemeMode;
+}) {
+  if (appearance.surfaceKind !== 'glass') {
+    return null;
+  }
+
+  const accentColors = getGlassAccentColors(mode, dim);
+
   return (
     <Box pointerEvents="none" className="absolute inset-0">
-      <Box className={dim ? 'absolute -right-28 -top-28 h-96 w-96 rounded-full bg-primary-500/26 dark:bg-primary-400/18' : 'absolute -right-28 -top-28 h-96 w-96 rounded-full bg-primary-500/40 dark:bg-primary-400/30'} />
-      <Box className={dim ? 'absolute -left-28 top-20 h-80 w-80 rounded-full bg-info-500/22 dark:bg-info-400/16' : 'absolute -left-28 top-20 h-80 w-80 rounded-full bg-info-500/34 dark:bg-info-400/24'} />
-      <Box className={dim ? 'absolute -bottom-36 -left-20 h-[420px] w-[420px] rounded-full bg-info-500/26 dark:bg-info-400/18' : 'absolute -bottom-36 -left-20 h-[420px] w-[420px] rounded-full bg-info-500/40 dark:bg-info-400/28'} />
-      <Box className={dim ? 'absolute -bottom-20 right-0 h-80 w-80 rounded-full bg-success-500/20 dark:bg-success-400/14' : 'absolute -bottom-20 right-0 h-80 w-80 rounded-full bg-success-500/32 dark:bg-success-400/22'} />
-      <Box className={dim ? 'absolute right-8 top-1/2 h-48 w-48 rounded-full bg-warning-500/18 dark:bg-warning-400/12' : 'absolute right-8 top-1/2 h-48 w-48 rounded-full bg-warning-500/28 dark:bg-warning-400/18'} />
-      <Box className={dim ? 'absolute left-8 right-8 top-24 h-px bg-typography-0/25 dark:bg-typography-0/8' : 'absolute left-8 right-8 top-24 h-px bg-typography-0/40 dark:bg-typography-0/12'} />
-      <Box className={dim ? 'absolute bottom-32 left-12 right-16 h-px bg-primary-500/14 dark:bg-primary-300/8' : 'absolute bottom-32 left-12 right-16 h-px bg-primary-500/24 dark:bg-primary-300/12'} />
-      <Box className={dim ? 'absolute inset-x-0 bottom-0 h-48 bg-background-0/8 dark:bg-background-950/10' : 'absolute inset-x-0 bottom-0 h-48 bg-background-0/12 dark:bg-background-950/14'} />
+      <LinearGradient
+        pointerEvents="none"
+        colors={accentColors.top}
+        locations={[0, 0.46, 1]}
+        start={{ x: 0.72, y: 0 }}
+        end={{ x: 0.2, y: 0.9 }}
+        style={StyleSheet.absoluteFill}
+      />
+      <LinearGradient
+        pointerEvents="none"
+        colors={accentColors.cross}
+        locations={[0, 0.42, 0.72, 1]}
+        start={{ x: 0, y: 0.12 }}
+        end={{ x: 1, y: 0.86 }}
+        style={StyleSheet.absoluteFill}
+      />
+      <LinearGradient
+        pointerEvents="none"
+        colors={accentColors.bottom}
+        locations={[0, 0.54, 1]}
+        start={{ x: 0.3, y: 0.36 }}
+        end={{ x: 0.7, y: 1 }}
+        style={StyleSheet.absoluteFill}
+      />
+      <LinearGradient
+        pointerEvents="none"
+        colors={accentColors.warmth}
+        locations={[0, 0.48, 1]}
+        start={{ x: 0.98, y: 0.32 }}
+        end={{ x: 0.54, y: 0.68 }}
+        style={StyleSheet.absoluteFill}
+      />
     </Box>
   );
 }
@@ -193,6 +885,7 @@ interface HeaderActionButtonProps {
 
 interface ScreenActionPillProps extends React.ComponentProps<typeof Pressable> {
   className?: string;
+  style?: StyleProp<ViewStyle>;
   tone?: 'primary' | 'soft';
   size?: 'sm' | 'md' | 'lg';
   children: React.ReactNode;
@@ -204,6 +897,7 @@ interface ScreenIconButtonProps extends React.ComponentProps<typeof Pressable> {
   size?: 'micro' | 'compact' | 'default';
   iconClassName?: string;
   className?: string;
+  style?: StyleProp<ViewStyle>;
   tone?: 'neutral' | 'primary' | 'danger';
   accessibilityLabel: string;
 }
@@ -217,6 +911,7 @@ interface ScreenIconTileProps {
   className?: string;
   iconClassName?: string;
   iconColor?: string;
+  style?: StyleProp<ViewStyle>;
   testID?: string;
 }
 
@@ -229,6 +924,29 @@ interface ScreenBannerProps {
   testID?: string;
 }
 
+type ScreenSurfaceTone = ThemeTone | 'danger' | 'default';
+
+interface ScreenSurfaceProps {
+  applyGlassFrame?: boolean;
+  children: React.ReactNode;
+  className?: string;
+  decorative?: GlassSurfaceDecorative;
+  style?: StyleProp<ViewStyle>;
+  testID?: string;
+  tone?: ScreenSurfaceTone;
+  withControlTint?: boolean;
+}
+
+interface ScreenPressableSurfaceProps extends React.ComponentProps<typeof Pressable> {
+  applyGlassFrame?: boolean;
+  children: React.ReactNode;
+  className?: string;
+  decorative?: GlassSurfaceDecorative;
+  style?: React.ComponentProps<typeof Pressable>['style'];
+  tone?: ScreenSurfaceTone;
+  withControlTint?: boolean;
+}
+
 interface ScreenSectionLabelProps {
   children: React.ReactNode;
   className?: string;
@@ -239,6 +957,7 @@ interface ScreenBadgeProps {
   children: React.ReactNode;
   className?: string;
   textClassName?: string;
+  style?: StyleProp<ViewStyle>;
   tone?: 'neutral' | 'accent' | 'warning' | 'error' | 'success' | 'info';
   size?: 'micro' | 'default';
   iconName?: MaterialSymbolsProps['name'];
@@ -249,6 +968,7 @@ interface ScreenBadgeProps {
 interface ScreenChipProps extends React.ComponentProps<typeof Pressable> {
   label: string;
   className?: string;
+  style?: StyleProp<ViewStyle>;
   textClassName?: string;
   tone?: 'neutral' | 'accent' | 'warning' | 'error' | 'success' | 'info';
   size?: 'micro' | 'default';
@@ -269,6 +989,7 @@ interface ScreenTextFieldProps extends Omit<InputFieldProps, 'className'> {
 }
 
 interface ScreenInlineInputProps extends Omit<InputFieldProps, 'className' | 'style'> {
+  applyGlassFrame?: boolean;
   className?: string;
   style?: StyleProp<ViewStyle>;
   inputClassName?: string;
@@ -319,19 +1040,54 @@ export function ScreenHeaderShell({
   children,
   contentClassName,
   contentStyle,
+  floating,
   maxWidthClassName = screenChromeTokens.maxWidthClassName,
   testID,
 }: ScreenHeaderShellProps) {
   const insets = useSafeAreaInsets();
   const { appearance, theme } = useResolvedThemeAppearance();
   const blurTarget = React.useContext(GlassBlurTargetContext);
+  const setHeaderInset = React.useContext(ScreenHeaderInsetSetterContext);
   const { colors } = theme;
   const isGlass = appearance.surfaceKind === 'glass';
-  const shouldBlurHeader = Platform.OS !== 'android' || (isGlass && !isAndroidBlurFallbackRequired() && Boolean(blurTarget));
+  const isFloating = floating ?? false;
+  const shouldUseAndroidMatteHeader = isGlass && shouldUseAndroidGlassMatteFallback();
+  const shouldBlurHeader = !shouldUseAndroidMatteHeader
+    && (Platform.OS !== 'android' || (isGlass && !isAndroidBlurFallbackRequired() && Boolean(blurTarget)));
   const headerClassName = joinClassNames(
     appearance.classNames.headerShellClassName,
-    isGlass && isAndroidBlurFallbackRequired() ? 'bg-background-0/82 dark:bg-background-950/72' : undefined,
+    isGlass && (isAndroidBlurFallbackRequired() || shouldUseAndroidMatteHeader)
+      ? theme.resolvedMode === 'dark'
+        ? 'bg-background-0/14 dark:bg-background-0/14'
+        : 'bg-background-0/82 dark:bg-background-0/82'
+      : undefined,
   );
+  const handleLayout = React.useCallback((event: LayoutChangeEvent) => {
+    if (!isFloating || !setHeaderInset) {
+      return;
+    }
+
+    setHeaderInset({
+      height: event.nativeEvent.layout.height,
+      isFloating: true,
+    });
+  }, [isFloating, setHeaderInset]);
+
+  React.useEffect(() => {
+    if (!setHeaderInset) {
+      return undefined;
+    }
+
+    if (!isFloating) {
+      setHeaderInset({ height: 0, isFloating: false });
+      return undefined;
+    }
+
+    return () => {
+      setHeaderInset({ height: 0, isFloating: false });
+    };
+  }, [isFloating, setHeaderInset]);
+
   const content = (
     <Box
       testID={testID}
@@ -343,22 +1099,41 @@ export function ScreenHeaderShell({
   );
 
   return (
-    <Box className={joinClassNames('z-10 w-full overflow-hidden border-b', appearance.classNames.headerBorderClassName)}>
+    <Box
+      onLayout={isFloating ? handleLayout : undefined}
+      className={joinClassNames(
+        'z-10 w-full overflow-hidden',
+        isGlass ? undefined : 'border-b',
+        isFloating ? 'absolute left-0 right-0 top-0' : undefined,
+        appearance.classNames.headerBorderClassName,
+      )}
+      style={getGlassHeaderFrameStyle(appearance, theme.resolvedMode)}
+    >
       {shouldBlurHeader ? (
         <BlurView
           intensity={appearance.effects.headerBlurIntensity}
-          tint={colors.headerBlurTint}
+          tint={getGlassBlurTint(colors.headerBlurTint)}
           blurReductionFactor={isGlass ? undefined : 2}
           {...getAndroidBlurProps(appearance, blurTarget)}
           className={headerClassName}
           style={{ paddingTop: insets.top }}
         >
-          {isGlass ? <GlassSpecular tint={colors.headerBlurTint} /> : null}
+          {isGlass ? (
+            <>
+              <HeaderFadeBackdrop tint={colors.headerBlurTint} />
+              <GlassSpecular tint={colors.headerBlurTint} />
+            </>
+          ) : null}
           {content}
         </BlurView>
       ) : (
         <Box className={headerClassName} style={{ paddingTop: insets.top }}>
-          {isGlass ? <GlassSpecular tint={colors.headerBlurTint} /> : null}
+          {isGlass ? (
+            <>
+              <HeaderFadeBackdrop tint={colors.headerBlurTint} />
+              <GlassSpecular tint={colors.headerBlurTint} />
+            </>
+          ) : null}
           {content}
         </Box>
       )}
@@ -373,10 +1148,35 @@ export function ScreenRoot({
   testID,
 }: ScreenRootProps) {
   const { appearance, theme } = useResolvedThemeAppearance();
-  const glassBlurTargetRef = React.useRef<View | null>(null);
+  const glassBackgroundBlurTargetRef = React.useRef<View | null>(null);
+  const glassSceneBlurTargetRef = React.useRef<View | null>(null);
+  const [headerInset, setHeaderInsetState] = React.useState<ScreenHeaderInset>({ height: 0, isFloating: false });
   const { colors } = theme;
   const isGlass = appearance.surfaceKind === 'glass';
+  const isFocused = useIsFocused();
   const shouldUseAndroidBlurTarget = isGlass && Platform.OS === 'android' && !isAndroidBlurFallbackRequired();
+  const shouldRegisterAndroidBlurTarget = shouldUseAndroidBlurTarget && isFocused;
+  const androidGlassBlurTarget = shouldUseAndroidBlurTarget ? glassBackgroundBlurTargetRef : null;
+  const setHeaderInset = React.useCallback((nextInset: ScreenHeaderInset) => {
+    setHeaderInsetState((currentInset) => getNextScreenHeaderInset(currentInset, nextInset));
+  }, []);
+  const screenContent = (
+    <ScreenHeaderInsetSetterContext.Provider value={setHeaderInset}>
+      <ScreenHeaderInsetContext.Provider value={headerInset}>
+        <GlassBlurTargetContext.Provider value={androidGlassBlurTarget}>
+          {children}
+        </GlassBlurTargetContext.Provider>
+      </ScreenHeaderInsetContext.Provider>
+    </ScreenHeaderInsetSetterContext.Provider>
+  );
+
+  React.useEffect(() => {
+    if (!shouldRegisterAndroidBlurTarget) {
+      return undefined;
+    }
+
+    return setActiveAndroidBlurTarget(glassSceneBlurTargetRef);
+  }, [shouldRegisterAndroidBlurTarget]);
 
   return (
     <Box
@@ -384,20 +1184,34 @@ export function ScreenRoot({
       className={joinClassNames('flex-1', isGlass ? 'overflow-hidden' : undefined, className)}
       style={[{ backgroundColor: colors.background }, style]}
     >
-      {isGlass ? <GlassBackgroundAccents appearance={appearance} /> : null}
+      {isGlass ? <GlassBackgroundAccents appearance={appearance} mode={theme.resolvedMode} /> : null}
       {shouldUseAndroidBlurTarget ? (
-        <BlurTargetView
-          testID="screen-glass-blur-target"
-          ref={glassBlurTargetRef}
-          pointerEvents="none"
-          style={StyleSheet.absoluteFill}
-        >
-          <GlassBackgroundAccents appearance={appearance} dim />
-        </BlurTargetView>
-      ) : isGlass ? <GlassBackgroundAccents appearance={appearance} dim /> : null}
-      <GlassBlurTargetContext.Provider value={shouldUseAndroidBlurTarget ? glassBlurTargetRef : null}>
-        {children}
-      </GlassBlurTargetContext.Provider>
+        <>
+          <BlurTargetView
+            testID="screen-glass-blur-target"
+            ref={glassBackgroundBlurTargetRef}
+            pointerEvents="none"
+            style={StyleSheet.absoluteFill}
+          >
+            <GlassBackgroundAccents appearance={appearance} dim mode={theme.resolvedMode} />
+          </BlurTargetView>
+          <BlurTargetView
+            testID="screen-glass-scene-blur-target"
+            ref={glassSceneBlurTargetRef}
+            pointerEvents="box-none"
+            style={styles.screenSceneBlurTarget}
+          >
+            {screenContent}
+          </BlurTargetView>
+        </>
+      ) : isGlass ? (
+        <>
+          <GlassBackgroundAccents appearance={appearance} dim mode={theme.resolvedMode} />
+          {screenContent}
+        </>
+      ) : (
+        screenContent
+      )}
     </Box>
   );
 }
@@ -407,23 +1221,31 @@ export function ScreenContent({
   className,
   extraBottomInset = 0,
   includeBottomSafeArea = false,
+  respectFloatingHeader = true,
   style,
   testID,
 }: ScreenContentProps) {
   const insets = useSafeAreaInsets();
+  const floatingHeaderInset = useFloatingHeaderInset();
   const nativeBottomInset = includeBottomSafeArea
     ? getNativeBottomSafeAreaInset(insets.bottom)
     : 0;
   const resolvedExtraBottomInset = Math.max(0, extraBottomInset);
-  const nativeBottomInsetStyle = nativeBottomInset > 0 || resolvedExtraBottomInset > 0
+  const floatingHeaderInsetStyle = respectFloatingHeader && floatingHeaderInset > 0
+    ? { paddingTop: floatingHeaderInset }
+    : undefined;
+  const bottomInsetStyle = nativeBottomInset > 0 || resolvedExtraBottomInset > 0
     ? { paddingBottom: screenLayoutMetrics.contentBottomInset + nativeBottomInset + resolvedExtraBottomInset }
+    : undefined;
+  const insetStyle = floatingHeaderInsetStyle || bottomInsetStyle
+    ? [floatingHeaderInsetStyle, bottomInsetStyle]
     : undefined;
 
   return (
     <Box
       testID={testID}
       className={joinClassNames(`mx-auto w-full ${screenChromeTokens.maxWidthClassName} ${screenChromeTokens.contentHorizontalPaddingClassName} ${screenChromeTokens.contentBottomPaddingClassName}`, className)}
-      style={nativeBottomInsetStyle ? [nativeBottomInsetStyle, style] : style}
+      style={insetStyle ? [...insetStyle, style] : style}
     >
       {children}
     </Box>
@@ -452,6 +1274,7 @@ export function ScreenStack({
 export function ScreenCard({
   children,
   className,
+  decorative = 'standard',
   style,
   testID,
   variant = 'surface',
@@ -459,10 +1282,11 @@ export function ScreenCard({
   tone = 'default',
   dashed = false,
 }: ScreenCardProps) {
-  const { appearance } = useResolvedThemeAppearance();
+  const { appearance, theme } = useResolvedThemeAppearance();
   const baseClassName = variant === 'inset'
     ? appearance.classNames.insetCardClassName
     : appearance.classNames.cardClassName;
+  const glassBackdropClassName = getGlassBackdropContainerClassName(appearance);
   const paddingClassName = padding === 'none'
     ? undefined
     : padding === 'compact'
@@ -477,13 +1301,16 @@ export function ScreenCard({
       : tone === 'error'
         ? appearance.classNames.toneClassNameByTone.error.surfaceClassName
         : undefined;
+  const glassCornerRadiusStyle = getGlassCornerRadiusStyle(baseClassName, className);
+  const glassFrameStyle = getGlassSurfaceFrameStyle(appearance, theme.resolvedMode, theme.colors, tone, dashed, glassCornerRadiusStyle);
 
   return (
     <Box
       testID={testID}
-      className={joinClassNames(baseClassName, paddingClassName, dashed ? 'border-dashed' : undefined, toneClassName, className)}
-      style={style}
+      className={joinClassNames(baseClassName, glassBackdropClassName, paddingClassName, dashed && appearance.surfaceKind !== 'glass' ? 'border-dashed' : undefined, toneClassName, className)}
+      style={glassFrameStyle ? [glassFrameStyle, style] : style}
     >
+      <GlassSurfaceBackdrop appearance={appearance} tint={theme.colors.headerBlurTint} decorative={decorative} cornerRadiusStyle={glassCornerRadiusStyle} />
       {children}
     </Box>
   );
@@ -492,6 +1319,7 @@ export function ScreenCard({
 export function ScreenPressableCard({
   children,
   className,
+  decorative = 'standard',
   style,
   testID,
   variant = 'surface',
@@ -502,10 +1330,11 @@ export function ScreenPressableCard({
   accessibilityRole,
   ...props
 }: ScreenPressableCardProps) {
-  const { appearance } = useResolvedThemeAppearance();
+  const { appearance, theme } = useResolvedThemeAppearance();
   const baseClassName = variant === 'inset'
     ? appearance.classNames.insetCardClassName
     : appearance.classNames.cardClassName;
+  const glassBackdropClassName = getGlassBackdropContainerClassName(appearance);
   const paddingClassName = padding === 'none'
     ? undefined
     : padding === 'compact'
@@ -520,16 +1349,20 @@ export function ScreenPressableCard({
       : tone === 'error'
         ? appearance.classNames.toneClassNameByTone.error.surfaceClassName
         : undefined;
+  const glassCornerRadiusStyle = getGlassCornerRadiusStyle(baseClassName, className);
+  const glassFrameStyle = getGlassSurfaceFrameStyle(appearance, theme.resolvedMode, theme.colors, tone, dashed, glassCornerRadiusStyle);
 
   return (
     <Pressable
       testID={testID}
       accessibilityRole={accessibilityRole ?? 'button'}
       disabled={disabled}
-      className={joinClassNames(baseClassName, paddingClassName, dashed ? 'border-dashed' : undefined, toneClassName, disabled ? 'opacity-55' : 'active:opacity-80', className)}
-      style={style}
+      className={joinClassNames(baseClassName, glassBackdropClassName, paddingClassName, dashed && appearance.surfaceKind !== 'glass' ? 'border-dashed' : undefined, toneClassName, disabled ? 'opacity-55' : 'active:opacity-80', className)}
+      style={glassFrameStyle ? [glassFrameStyle, style] : style}
       {...props}
     >
+      <GlassSurfaceBackdrop appearance={appearance} tint={theme.colors.headerBlurTint} decorative={decorative} cornerRadiusStyle={glassCornerRadiusStyle} />
+      <GlassControlTint appearance={appearance} colors={theme.colors} mode={theme.resolvedMode} tone={tone} />
       {children}
     </Pressable>
   );
@@ -577,6 +1410,17 @@ export function HeaderActionButton({
     : tone === 'destructive'
       ? 'text-error-600 dark:text-error-300'
       : 'text-typography-700 dark:text-typography-200';
+  const iconColor = tone === 'accent'
+    ? getThemeToneIconColor('primary', theme.resolvedMode)
+    : tone === 'destructive'
+      ? getThemeToneIconColor('error', theme.resolvedMode)
+      : getThemeToneIconColor('neutral', theme.resolvedMode);
+  const glassTone = tone === 'accent'
+    ? 'primary'
+    : tone === 'destructive'
+      ? 'danger'
+      : 'default';
+  const glassCornerRadiusStyle = getGlassCornerRadiusStyle('rounded-full', className);
 
   return (
     <Pressable
@@ -587,9 +1431,13 @@ export function HeaderActionButton({
       accessibilityLabel={accessibilityLabel}
       hitSlop={8}
       className={joinClassNames(`${screenChromeTokens.headerActionClassName} shrink-0 items-center justify-center rounded-full ${containerClassName} ${appearance.surfaceKind === 'glass' ? 'relative overflow-hidden' : ''} ${isDisabled ? 'opacity-55' : 'active:opacity-80'}`, className)}
+      style={appearance.surfaceKind === 'glass'
+        ? getGlassSurfaceFrameStyle(appearance, theme.resolvedMode, theme.colors, glassTone, false, glassCornerRadiusStyle)
+        : undefined}
     >
-      <GlassSurfaceBackdrop appearance={appearance} tint={theme.colors.headerBlurTint} />
-      <MaterialSymbols name={iconName} size={screenChromeTokens.headerActionIconSizePx} className={iconClassName} />
+      <GlassSurfaceBackdrop appearance={appearance} tint={theme.colors.headerBlurTint} decorative="tint" cornerRadiusStyle={glassCornerRadiusStyle} />
+      <GlassControlTint appearance={appearance} colors={theme.colors} mode={theme.resolvedMode} tone={glassTone} />
+      <MaterialSymbols name={iconName} size={screenChromeTokens.headerActionIconSizePx} className={iconClassName} color={iconColor} />
     </Pressable>
   );
 }
@@ -625,23 +1473,34 @@ export function ScreenActionPill({
   children,
   disabled,
   accessibilityRole,
+  style,
   ...props
 }: ScreenActionPillProps) {
-  const { appearance } = useResolvedThemeAppearance();
+  const { appearance, theme } = useResolvedThemeAppearance();
   const baseClassName = joinClassNames(
     buttonLayoutTokens.screenActionPillClassNameBySize[size],
     tone === 'primary'
       ? appearance.classNames.primaryActionPillClassName
       : appearance.classNames.softActionPillClassName,
   );
+  const glassCornerRadiusStyle = getGlassCornerRadiusStyle(baseClassName, className);
+  const glassFrameStyle = getGlassActionPillStyle(appearance, theme.resolvedMode, theme.colors, tone, glassCornerRadiusStyle);
 
   return (
     <Pressable
       accessibilityRole={accessibilityRole ?? 'button'}
       disabled={disabled}
-      className={joinClassNames(baseClassName, disabled ? 'opacity-55' : 'active:opacity-80', className)}
+      className={joinClassNames(
+        baseClassName,
+        appearance.surfaceKind === 'glass' ? 'relative overflow-hidden' : undefined,
+        disabled ? 'opacity-55' : 'active:opacity-80',
+        className,
+      )}
+      style={glassFrameStyle ? [glassFrameStyle, style] : style}
       {...props}
     >
+      <GlassSurfaceBackdrop appearance={appearance} tint={theme.colors.headerBlurTint} decorative="tint" cornerRadiusStyle={glassCornerRadiusStyle} />
+      <GlassControlTint appearance={appearance} colors={theme.colors} mode={theme.resolvedMode} tone={tone === 'primary' ? 'primary' : 'default'} />
       {children}
     </Pressable>
   );
@@ -656,6 +1515,7 @@ export function ScreenIconButton({
   tone = 'neutral',
   accessibilityLabel,
   disabled,
+  style,
   ...props
 }: ScreenIconButtonProps) {
   const { appearance, theme } = useResolvedThemeAppearance();
@@ -667,6 +1527,14 @@ export function ScreenIconButton({
     : tone === 'danger'
       ? appearance.classNames.toneClassNameByTone.error.iconClassName
       : 'text-typography-700 dark:text-typography-200';
+  const mergedIconClassName = joinClassNames(resolvedIconClassName, iconClassName);
+  const resolvedIconColor = getThemeToneIconColor(
+    tone === 'danger' ? 'error' : tone === 'primary' ? 'primary' : 'neutral',
+    theme.resolvedMode,
+  );
+  const explicitIconColor = getExplicitIconColorFromClassName(mergedIconClassName, theme.colors);
+  const sizeClassName = buttonLayoutTokens.screenIconButtonClassNameBySize[size];
+  const glassCornerRadiusStyle = getGlassCornerRadiusStyle(sizeClassName, screenLayoutTokens.iconButtonClassName, toneClassName, className);
 
   return (
     <Pressable
@@ -675,17 +1543,26 @@ export function ScreenIconButton({
       disabled={disabled}
       hitSlop={8}
       className={joinClassNames(
-        buttonLayoutTokens.screenIconButtonClassNameBySize[size],
+        sizeClassName,
         screenLayoutTokens.iconButtonClassName,
         toneClassName,
         appearance.surfaceKind === 'glass' ? 'relative overflow-hidden' : undefined,
         disabled ? 'opacity-55' : 'active:opacity-70',
         className,
       )}
+      style={appearance.surfaceKind === 'glass'
+        ? [getGlassSurfaceFrameStyle(appearance, theme.resolvedMode, theme.colors, tone, false, glassCornerRadiusStyle), style]
+        : style}
       {...props}
     >
-      <GlassSurfaceBackdrop appearance={appearance} tint={theme.colors.headerBlurTint} />
-      <MaterialSymbols name={iconName} size={iconSize} className={joinClassNames(resolvedIconClassName, iconClassName)} />
+      <GlassSurfaceBackdrop appearance={appearance} tint={theme.colors.headerBlurTint} decorative="tint" cornerRadiusStyle={glassCornerRadiusStyle} />
+      <GlassControlTint appearance={appearance} colors={theme.colors} mode={theme.resolvedMode} tone={tone} />
+      <MaterialSymbols
+        name={iconName}
+        size={iconSize}
+        className={mergedIconClassName}
+        color={explicitIconColor ?? resolvedIconColor}
+      />
     </Pressable>
   );
 }
@@ -699,6 +1576,7 @@ export function ScreenIconTile({
   className,
   iconClassName,
   iconColor,
+  style,
   testID,
 }: ScreenIconTileProps) {
   const theme = useTheme();
@@ -710,6 +1588,7 @@ export function ScreenIconTile({
     : size === 'lg'
       ? 'h-11 w-11 rounded-2xl'
       : 'h-9 w-9 rounded-xl';
+  const glassCornerRadiusStyle = getGlassCornerRadiusStyle(sizeClassName, toneClassNames.iconTileClassName, className);
 
   return (
     <Box
@@ -717,10 +1596,16 @@ export function ScreenIconTile({
       className={joinClassNames(
         sizeClassName,
         'items-center justify-center overflow-hidden',
+        appearance.surfaceKind === 'glass' ? 'relative' : undefined,
         toneClassNames.iconTileClassName,
         className,
       )}
+      style={appearance.surfaceKind === 'glass'
+        ? [getGlassSurfaceFrameStyle(appearance, theme.resolvedMode ?? 'light', theme.colors, tone, false, glassCornerRadiusStyle), style]
+        : style}
     >
+      <GlassSurfaceBackdrop appearance={appearance} tint={theme.colors.headerBlurTint} decorative="tint" cornerRadiusStyle={glassCornerRadiusStyle} />
+      <GlassControlTint appearance={appearance} colors={theme.colors} mode={theme.resolvedMode ?? 'light'} tone={tone} />
       {children ?? (
         <MaterialSymbols
           name={iconName}
@@ -742,16 +1627,97 @@ export function ScreenBanner({
   testID,
 }: ScreenBannerProps) {
   const { appearance, theme } = useResolvedThemeAppearance();
-  const shouldUseGlassBackdrop = floating && appearance.surfaceKind === 'glass';
   const baseClassName = floating
     ? appearance.classNames.floatingBannerClassName
     : `${radiusTokens.md} border px-3 py-2.5 ${appearance.classNames.toneClassNameByTone[tone].surfaceClassName}`;
+  const glassCornerRadiusStyle = getGlassCornerRadiusStyle(baseClassName, className);
+  const glassFrameStyle = getGlassSurfaceFrameStyle(appearance, theme.resolvedMode, theme.colors, tone, false, glassCornerRadiusStyle);
 
   return (
-    <Box testID={testID} className={joinClassNames(baseClassName, shouldUseGlassBackdrop ? 'relative overflow-hidden' : undefined, className)} style={style}>
-      {shouldUseGlassBackdrop ? <GlassSurfaceBackdrop appearance={appearance} tint={theme.colors.headerBlurTint} /> : null}
+    <Box
+      testID={testID}
+      className={joinClassNames(baseClassName, appearance.surfaceKind === 'glass' ? 'relative overflow-hidden' : undefined, className)}
+      style={glassFrameStyle ? [glassFrameStyle, style] : style}
+    >
+      {appearance.surfaceKind === 'glass' ? (
+        <>
+          <GlassSurfaceBackdrop appearance={appearance} tint={theme.colors.headerBlurTint} cornerRadiusStyle={glassCornerRadiusStyle} />
+          <GlassControlTint appearance={appearance} colors={theme.colors} mode={theme.resolvedMode} tone={tone} />
+        </>
+      ) : null}
       {children}
     </Box>
+  );
+}
+
+export function ScreenSurface({
+  applyGlassFrame = true,
+  children,
+  className,
+  decorative = 'tint',
+  style,
+  testID,
+  tone = 'default',
+  withControlTint = false,
+}: ScreenSurfaceProps) {
+  const { appearance, theme } = useResolvedThemeAppearance();
+  const shouldUseGlassChrome = applyGlassFrame && appearance.surfaceKind === 'glass';
+  const glassCornerRadiusStyle = getGlassCornerRadiusStyle(className);
+  const glassFrameStyle = shouldUseGlassChrome
+    ? getGlassSurfaceFrameStyle(appearance, theme.resolvedMode, theme.colors, tone, false, glassCornerRadiusStyle)
+    : undefined;
+
+  return (
+    <Box
+      testID={testID}
+      className={joinClassNames(
+        shouldUseGlassChrome ? 'relative overflow-hidden' : undefined,
+        className,
+      )}
+      style={glassFrameStyle ? [glassFrameStyle, style] : style}
+    >
+      {shouldUseGlassChrome ? <GlassSurfaceBackdrop appearance={appearance} tint={theme.colors.headerBlurTint} decorative={decorative} cornerRadiusStyle={glassCornerRadiusStyle} /> : null}
+      {shouldUseGlassChrome && withControlTint ? <GlassControlTint appearance={appearance} colors={theme.colors} mode={theme.resolvedMode} tone={tone} /> : null}
+      {children}
+    </Box>
+  );
+}
+
+export function ScreenPressableSurface({
+  applyGlassFrame = true,
+  children,
+  className,
+  decorative = 'tint',
+  style,
+  tone = 'default',
+  withControlTint = false,
+  ...props
+}: ScreenPressableSurfaceProps) {
+  const { appearance, theme } = useResolvedThemeAppearance();
+  const shouldUseGlassChrome = applyGlassFrame && appearance.surfaceKind === 'glass';
+  const glassCornerRadiusStyle = getGlassCornerRadiusStyle(className);
+  const glassFrameStyle = shouldUseGlassChrome
+    ? getGlassSurfaceFrameStyle(appearance, theme.resolvedMode, theme.colors, tone, false, glassCornerRadiusStyle)
+    : undefined;
+  const combinedStyle = glassFrameStyle
+    ? typeof style === 'function'
+      ? (state: Parameters<NonNullable<typeof style>>[0]) => [glassFrameStyle, style(state)]
+      : [glassFrameStyle, style]
+    : style;
+
+  return (
+    <Pressable
+      className={joinClassNames(
+        shouldUseGlassChrome ? 'relative overflow-hidden' : undefined,
+        className,
+      )}
+      style={combinedStyle}
+      {...props}
+    >
+      {shouldUseGlassChrome ? <GlassSurfaceBackdrop appearance={appearance} tint={theme.colors.headerBlurTint} decorative={decorative} cornerRadiusStyle={glassCornerRadiusStyle} /> : null}
+      {shouldUseGlassChrome && withControlTint ? <GlassControlTint appearance={appearance} colors={theme.colors} mode={theme.resolvedMode} tone={tone} /> : null}
+      {children}
+    </Pressable>
   );
 }
 
@@ -771,6 +1737,7 @@ export function ScreenBadge({
   children,
   className,
   textClassName,
+  style,
   tone = 'neutral',
   size = 'default',
   iconName,
@@ -778,19 +1745,28 @@ export function ScreenBadge({
   testID,
 }: ScreenBadgeProps) {
   const iconSize = size === 'micro' ? 'xs' : 'sm';
-  const { appearance } = useResolvedThemeAppearance();
+  const { appearance, theme } = useResolvedThemeAppearance();
   const toneTokens = appearance.classNames.toneClassNameByTone[tone];
+  const badgeSizeClassName = getBadgeSizeClassName(size);
+  const glassCornerRadiusStyle = getGlassCornerRadiusStyle(badgeSizeClassName, toneTokens.badgeClassName, className);
 
   return (
     <Box
       testID={testID}
       className={joinClassNames(
-        'flex-row items-center border',
-        getBadgeSizeClassName(size),
+        'flex-row items-center',
+        appearance.surfaceKind === 'glass' ? undefined : 'border',
+        appearance.surfaceKind === 'glass' ? 'relative overflow-hidden' : undefined,
+        badgeSizeClassName,
         toneTokens.badgeClassName,
         className,
       )}
+      style={appearance.surfaceKind === 'glass'
+        ? [getGlassSurfaceFrameStyle(appearance, theme.resolvedMode, theme.colors, tone, false, glassCornerRadiusStyle), style]
+        : style}
     >
+      <GlassSurfaceBackdrop appearance={appearance} tint={theme.colors.headerBlurTint} decorative="tint" cornerRadiusStyle={glassCornerRadiusStyle} />
+      <GlassControlTint appearance={appearance} colors={theme.colors} mode={theme.resolvedMode} tone={tone} />
       {iconName ? (
         <MaterialSymbols
           name={iconName}
@@ -815,6 +1791,7 @@ export function ScreenChip({
   label,
   className,
   textClassName,
+  style,
   tone = 'neutral',
   size = 'default',
   leadingIconName,
@@ -825,8 +1802,11 @@ export function ScreenChip({
   ...props
 }: ScreenChipProps) {
   const iconSize = size === 'micro' ? 'xs' : 'sm';
-  const { appearance } = useResolvedThemeAppearance();
+  const { appearance, theme } = useResolvedThemeAppearance();
   const toneTokens = appearance.classNames.toneClassNameByTone[tone];
+  const badgeSizeClassName = getBadgeSizeClassName(size);
+  const glassCornerRadiusStyle = getGlassCornerRadiusStyle(badgeSizeClassName, toneTokens.badgeClassName, className);
+  const glassFrameStyle = getGlassSurfaceFrameStyle(appearance, theme.resolvedMode, theme.colors, tone, false, glassCornerRadiusStyle);
   const content = (
     <>
       {leadingIconName ? (
@@ -848,12 +1828,17 @@ export function ScreenChip({
     return (
       <Box
         className={joinClassNames(
-          'max-w-full shrink flex-row items-center border',
-          getBadgeSizeClassName(size),
+          'max-w-full shrink flex-row items-center',
+          appearance.surfaceKind === 'glass' ? undefined : 'border',
+          appearance.surfaceKind === 'glass' ? 'relative overflow-hidden' : undefined,
+          badgeSizeClassName,
           toneTokens.badgeClassName,
           className,
         )}
+        style={glassFrameStyle ? [glassFrameStyle, style] : style}
       >
+        <GlassSurfaceBackdrop appearance={appearance} tint={theme.colors.headerBlurTint} decorative="tint" cornerRadiusStyle={glassCornerRadiusStyle} />
+        <GlassControlTint appearance={appearance} colors={theme.colors} mode={theme.resolvedMode} tone={tone} />
         {content}
       </Box>
     );
@@ -866,14 +1851,19 @@ export function ScreenChip({
       disabled={disabled}
       hitSlop={8}
       className={joinClassNames(
-        'max-w-full shrink flex-row items-center border',
-        getBadgeSizeClassName(size),
+        'max-w-full shrink flex-row items-center',
+        appearance.surfaceKind === 'glass' ? undefined : 'border',
+        appearance.surfaceKind === 'glass' ? 'relative overflow-hidden' : undefined,
+        badgeSizeClassName,
         toneTokens.badgeClassName,
         disabled ? 'opacity-60' : 'active:opacity-70',
         className,
       )}
+      style={glassFrameStyle ? [glassFrameStyle, style] : style}
       {...props}
     >
+      <GlassSurfaceBackdrop appearance={appearance} tint={theme.colors.headerBlurTint} decorative="tint" cornerRadiusStyle={glassCornerRadiusStyle} />
+      <GlassControlTint appearance={appearance} colors={theme.colors} mode={theme.resolvedMode} tone={tone} />
       {content}
     </Pressable>
   );
@@ -893,7 +1883,7 @@ export function ScreenTextField({
   testID,
   ...props
 }: ScreenTextFieldProps) {
-  const { appearance } = useResolvedThemeAppearance();
+  const { appearance, theme } = useResolvedThemeAppearance();
   const isProminent = size === 'prominent' || size === 'prominentMultiline';
   const isMultiline = size === 'multiline' || size === 'prominentMultiline' || multiline === true;
   const fieldShellClassName = size === 'compact'
@@ -912,6 +1902,7 @@ export function ScreenTextField({
     : isProminent
       ? 'w-full min-h-6 px-0 py-3 text-base leading-6 text-typography-900 dark:text-typography-100'
       : 'min-h-0 h-full px-0 py-0 text-base text-typography-900 dark:text-typography-100';
+  const glassCornerRadiusStyle = getGlassCornerRadiusStyle(fieldShellClassName, fieldClassName);
 
   return (
     <Box className={containerClassName}>
@@ -920,7 +1911,15 @@ export function ScreenTextField({
           {label}
         </Text>
       ) : null}
-      <Input className={joinClassNames(fieldShellClassName, fieldClassName)}>
+      <Input
+        className={joinClassNames(
+          fieldShellClassName,
+          appearance.surfaceKind === 'glass' ? 'relative overflow-hidden' : undefined,
+          fieldClassName,
+        )}
+        style={getGlassSurfaceFrameStyle(appearance, theme.resolvedMode, theme.colors, 'default', false, glassCornerRadiusStyle)}
+      >
+        <GlassSurfaceBackdrop appearance={appearance} tint={theme.colors.headerBlurTint} cornerRadiusStyle={glassCornerRadiusStyle} />
         <InputField
           {...props}
           testID={testID}
@@ -940,6 +1939,7 @@ export function ScreenTextField({
 }
 
 export function ScreenInlineInput({
+  applyGlassFrame = true,
   className,
   style,
   inputClassName,
@@ -951,20 +1951,29 @@ export function ScreenInlineInput({
   testID,
   ...props
 }: ScreenInlineInputProps) {
-  const { appearance } = useResolvedThemeAppearance();
+  const { appearance, theme } = useResolvedThemeAppearance();
   const fieldShellClassName = variant === 'composer'
     ? appearance.classNames.composerInlineFieldClassName
     : appearance.classNames.searchInlineFieldClassName;
   const inputBaseClassName = variant === 'composer'
     ? screenLayoutTokens.composerInlineInputClassName
     : screenLayoutTokens.searchInlineInputClassName;
+  const shouldUseGlassFrame = appearance.surfaceKind === 'glass' && applyGlassFrame;
+  const glassCornerRadiusStyle = getGlassCornerRadiusStyle(fieldShellClassName, className);
 
   return (
     <Box
       testID={containerTestID}
-      className={joinClassNames(fieldShellClassName, className)}
-      style={style}
+      className={joinClassNames(
+        fieldShellClassName,
+        shouldUseGlassFrame ? 'relative overflow-hidden' : undefined,
+        className,
+      )}
+      style={shouldUseGlassFrame
+        ? [getGlassSurfaceFrameStyle(appearance, theme.resolvedMode, theme.colors, 'default', false, glassCornerRadiusStyle), style]
+        : style}
     >
+      {shouldUseGlassFrame ? <GlassSurfaceBackdrop appearance={appearance} tint={theme.colors.headerBlurTint} decorative="tint" cornerRadiusStyle={glassCornerRadiusStyle} /> : null}
       {leadingAccessory ? <Box className="shrink-0">{leadingAccessory}</Box> : null}
       <Input className={joinClassNames(screenLayoutTokens.inlineInputShellClassName, leadingAccessory ? 'ml-2' : undefined)}>
         <InputField
@@ -988,15 +1997,28 @@ export function ScreenSegmentedControl({
   testID,
   disabled = false,
 }: ScreenSegmentedControlProps) {
-  const { appearance } = useResolvedThemeAppearance();
+  const { appearance, theme } = useResolvedThemeAppearance();
+  const glassCornerRadiusStyle = getGlassCornerRadiusStyle(appearance.classNames.segmentedControlClassName, className);
   return (
     <Box
       testID={testID}
       accessibilityRole="tablist"
-      className={joinClassNames(appearance.classNames.segmentedControlClassName, disabled ? 'opacity-60' : undefined, className)}
+      className={joinClassNames(
+        appearance.classNames.segmentedControlClassName,
+        appearance.surfaceKind === 'glass' ? 'relative overflow-hidden' : undefined,
+        disabled ? 'opacity-60' : undefined,
+        className,
+      )}
+      style={getGlassSurfaceFrameStyle(appearance, theme.resolvedMode, theme.colors, 'default', false, glassCornerRadiusStyle)}
     >
+      <GlassSurfaceBackdrop appearance={appearance} tint={theme.colors.headerBlurTint} decorative="tint" cornerRadiusStyle={glassCornerRadiusStyle} />
       {options.map((option) => {
         const isActive = activeKey === option.key;
+        const activeCornerRadiusStyle = getGlassCornerRadiusStyle(
+          screenLayoutTokens.segmentedControlItemClassName,
+          isActive ? appearance.classNames.segmentedControlActiveItemClassName : 'bg-transparent',
+          itemClassName,
+        );
 
         return (
           <Pressable
@@ -1013,18 +2035,28 @@ export function ScreenSegmentedControl({
             accessibilityState={{ selected: isActive, disabled }}
             className={joinClassNames(
               screenLayoutTokens.segmentedControlItemClassName,
+              appearance.surfaceKind === 'glass' ? 'relative overflow-hidden' : undefined,
               isActive
                 ? appearance.classNames.segmentedControlActiveItemClassName
                 : 'bg-transparent',
               itemClassName,
             )}
+            style={appearance.surfaceKind === 'glass' && isActive
+              ? getGlassSurfaceFrameStyle(appearance, theme.resolvedMode, theme.colors, 'primary', true, activeCornerRadiusStyle)
+              : undefined}
           >
+            {isActive ? (
+              <>
+                <GlassSurfaceBackdrop appearance={appearance} tint={theme.colors.headerBlurTint} decorative="tint" cornerRadiusStyle={activeCornerRadiusStyle} />
+                <GlassControlTint appearance={appearance} colors={theme.colors} mode={theme.resolvedMode} tone="primary" />
+              </>
+            ) : null}
             <Text
               numberOfLines={1}
               className={composeTextRole(
                 'action',
                 `text-center ${isActive
-                  ? 'text-typography-0'
+                  ? getThemeActionContentClassName(appearance, 'primary')
                   : 'text-typography-600 dark:text-typography-300'}`,
               )}
             >
@@ -1044,6 +2076,7 @@ export function ScreenChromeBar({
   testID,
 }: ScreenChromeBarProps) {
   const { appearance, theme } = useResolvedThemeAppearance();
+  const glassCornerRadiusStyle = getGlassCornerRadiusStyle(appearance.classNames.bottomBarClassName, className);
 
   return (
     <Box
@@ -1053,9 +2086,11 @@ export function ScreenChromeBar({
         appearance.surfaceKind === 'glass' ? 'relative overflow-hidden' : undefined,
         className,
       )}
-      style={style}
+      style={appearance.surfaceKind === 'glass'
+        ? [getGlassSurfaceFrameStyle(appearance, theme.resolvedMode, theme.colors, 'default', false, glassCornerRadiusStyle), style]
+        : style}
     >
-      <GlassSurfaceBackdrop appearance={appearance} tint={theme.colors.headerBlurTint} />
+      <GlassSurfaceBackdrop appearance={appearance} tint={theme.colors.headerBlurTint} cornerRadiusStyle={glassCornerRadiusStyle} />
       {children}
     </Box>
   );
@@ -1073,14 +2108,21 @@ export function ScreenSheet({
   const bottomInsetStyle = {
     paddingBottom: screenLayoutMetrics.sheetBottomInset + nativeBottomInset,
   };
+  const glassCornerRadiusStyle = getGlassCornerRadiusStyle(appearance.classNames.sheetClassName, className);
 
   return (
     <Box
       testID={testID}
       className={joinClassNames(appearance.classNames.sheetClassName, appearance.surfaceKind === 'glass' ? 'relative overflow-hidden' : undefined, className)}
-      style={[bottomInsetStyle, style]}
+      style={[
+        bottomInsetStyle,
+        appearance.surfaceKind === 'glass'
+          ? getGlassSurfaceFrameStyle(appearance, theme.resolvedMode, theme.colors, 'default', false, glassCornerRadiusStyle)
+          : undefined,
+        style,
+      ]}
     >
-      <GlassSurfaceBackdrop appearance={appearance} tint={theme.colors.headerBlurTint} />
+      <GlassSurfaceBackdrop appearance={appearance} tint={theme.colors.headerBlurTint} cornerRadiusStyle={glassCornerRadiusStyle} />
       {children}
     </Box>
   );

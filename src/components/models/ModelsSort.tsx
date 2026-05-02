@@ -6,6 +6,7 @@ import { ScrollView } from '@/components/ui/scroll-view';
 import { joinClassNames, useScreenAppearance } from '@/components/ui/ScreenShell';
 import { Text } from '@/components/ui/text';
 import { ModelSortField, ModelSortPreference } from '@/store/modelsStore';
+import { getThemeActionContentClassName } from '@/utils/themeTokens';
 
 interface ModelsSortProps {
   sort: ModelSortPreference;
@@ -23,6 +24,7 @@ const SORT_OPTIONS: { labelKey: string; field: ModelSortField }[] = [
 export const ModelsSort = ({ sort, onSortChange }: ModelsSortProps) => {
   const { t } = useTranslation();
   const appearance = useScreenAppearance();
+  const activeTextClassName = getThemeActionContentClassName(appearance, 'primary');
 
   return (
     <Box className={`${appearance.classNames.surfaceBarClassName} gap-2 px-4 py-3`}>
@@ -61,13 +63,13 @@ export const ModelsSort = ({ sort, onSortChange }: ModelsSortProps) => {
                 className={joinClassNames(
                   'rounded-full border px-3 py-2',
                   isActive
-                    ? 'border-primary-500 bg-primary-500'
+                    ? appearance.classNames.primaryActionPillClassName
                     : appearance.classNames.toneClassNameByTone.neutral.badgeClassName,
                 )}
               >
                 <Text
                   className={`text-xs font-semibold ${
-                    isActive ? 'text-typography-0' : 'text-typography-700 dark:text-typography-200'
+                    isActive ? activeTextClassName : 'text-typography-700 dark:text-typography-200'
                   }`}
                 >
                   {t(option.labelKey)}

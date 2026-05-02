@@ -21,7 +21,7 @@ export function Input({ className = '', ...props }: InputProps) {
 
   return (
     <BaseInput
-      className={`${appearance.classNames.textFieldClassName} ${className}`.trim()}
+      className={`${appearance.classNames.textFieldClassName} ${appearance.surfaceKind === 'glass' ? 'relative overflow-hidden' : ''} ${className}`.trim()}
       {...props}
     />
   );
@@ -37,6 +37,7 @@ export function InputField({
     <BaseInputField
       allowFontScaling={allowFontScaling}
       placeholderTextColor={placeholderTextColor ?? typographyColors[400]}
+      underlineColorAndroid="transparent"
       className={`min-h-11 py-0 text-base text-typography-900 dark:text-typography-100 ${className}`.trim()}
       {...props}
     />

@@ -4,29 +4,20 @@ import { getNativeBottomSafeAreaInset, type AppPlatform } from './safeArea';
 
 export const bottomTabBarMetrics = {
   height: 74,
+  glassHeight: 76,
+  floatingHorizontalInset: 14,
+  floatingBottomGap: 10,
+  glassRadius: 34,
   paddingTop: 8,
+  glassPaddingTop: 6,
   paddingBottom: 12,
+  glassPaddingBottom: 10,
 } as const;
 
 type TabBarColors = Pick<ThemeColors, 'tabBarBackground' | 'tabBarBorder'>;
-type PlatformVersion = number | string | undefined;
 
-function getAndroidSdkVersion(platform: AppPlatform, platformVersion?: PlatformVersion) {
-  if (platform !== 'android') {
-    return undefined;
-  }
-
-  const parsedVersion = typeof platformVersion === 'string'
-    ? Number.parseInt(platformVersion, 10)
-    : platformVersion;
-
-  return Number.isFinite(parsedVersion) ? parsedVersion : undefined;
-}
-
-function isAndroidBlurFallbackRequired(platform: AppPlatform, platformVersion?: PlatformVersion) {
-  const sdkVersion = getAndroidSdkVersion(platform, platformVersion);
-
-  return platform === 'android' && (sdkVersion === undefined || sdkVersion < 31);
+export function isFloatingTabBar(appearance?: Pick<ThemeAppearance, 'surfaceKind'>) {
+  return appearance?.surfaceKind === 'glass';
 }
 
 export function createBottomTabBarStyle(
@@ -34,19 +25,28 @@ export function createBottomTabBarStyle(
   bottomSafeAreaInset: number,
   platform: AppPlatform,
   appearance?: Pick<ThemeAppearance, 'id' | 'surfaceKind' | 'effects'>,
-  platformVersion?: PlatformVersion,
 ): ViewStyle {
   const nativeBottomInset = getNativeBottomSafeAreaInset(bottomSafeAreaInset, platform);
-  const isGlass = appearance?.surfaceKind === 'glass';
-  const shouldUseTransparentGlassBackground = isGlass && !isAndroidBlurFallbackRequired(platform, platformVersion);
+  const isGlass = isFloatingTabBar(appearance);
+  const tabBarHeight = isGlass ? bottomTabBarMetrics.glassHeight : bottomTabBarMetrics.height;
+  const tabBarPaddingTop = isGlass ? bottomTabBarMetrics.glassPaddingTop : bottomTabBarMetrics.paddingTop;
+  const tabBarPaddingBottom = isGlass ? bottomTabBarMetrics.glassPaddingBottom : bottomTabBarMetrics.paddingBottom;
 
   return {
-    height: bottomTabBarMetrics.height + nativeBottomInset,
-    paddingTop: bottomTabBarMetrics.paddingTop,
-    paddingBottom: bottomTabBarMetrics.paddingBottom + nativeBottomInset,
-    backgroundColor: shouldUseTransparentGlassBackground ? 'transparent' : colors.tabBarBackground,
+    ...(isGlass ? {
+      position: 'absolute',
+      left: bottomTabBarMetrics.floatingHorizontalInset,
+      right: bottomTabBarMetrics.floatingHorizontalInset,
+      bottom: nativeBottomInset + bottomTabBarMetrics.floatingBottomGap,
+      borderRadius: bottomTabBarMetrics.glassRadius,
+      overflow: 'hidden',
+    } : {}),
+    height: isGlass ? tabBarHeight : tabBarHeight + nativeBottomInset,
+    paddingTop: tabBarPaddingTop,
+    paddingBottom: isGlass ? tabBarPaddingBottom : tabBarPaddingBottom + nativeBottomInset,
+    backgroundColor: isGlass ? 'transparent' : colors.tabBarBackground,
     borderTopColor: colors.tabBarBorder,
-    borderTopWidth: 1,
+    borderTopWidth: isGlass ? 0 : 1,
     elevation: 0,
     shadowOpacity: 0,
     ...appearance?.effects.tabBarStyle,

@@ -8,6 +8,7 @@ import { useModelRegistryRevision } from '@/hooks/useModelRegistryRevision';
 import { registry } from '@/services/LocalStorageRegistry';
 import { EngineStatus } from '@/types/models';
 import { DECIMAL_GIGABYTE } from '@/utils/modelSize';
+import { getThemeActionContentClassName } from '@/utils/themeTokens';
 import { useTranslation } from 'react-i18next';
 
 interface ActiveModelCardProps {
@@ -17,6 +18,8 @@ interface ActiveModelCardProps {
 export const ActiveModelCard = ({ onSwapModel }: ActiveModelCardProps) => {
   const { t } = useTranslation();
   const appearance = useScreenAppearance();
+  const neutralToneClassNames = appearance.classNames.toneClassNameByTone.neutral;
+  const primaryActionContentClassName = getThemeActionContentClassName(appearance, 'primary');
   const { state } = useLLMEngine();
   useModelRegistryRevision();
   const activeModel = state.activeModelId ? registry.getModel(state.activeModelId) : undefined;
@@ -24,12 +27,16 @@ export const ActiveModelCard = ({ onSwapModel }: ActiveModelCardProps) => {
   const isReady = state.status === EngineStatus.READY;
   const hasActiveModel = Boolean(activeModel);
   const hasDownloadedModels = downloadedModelsCount > 0;
-  const statusDotClassName = isReady ? 'w-2 h-2 rounded-full bg-success-500' : 'w-2 h-2 rounded-full bg-warning-400';
   const statusLabel = isReady
     ? t('home.activeModelStatusReady')
     : state.status === EngineStatus.INITIALIZING
       ? t('chat.warmingUp')
       : t('home.activeModelStatusIdle');
+  const statusTone = isReady
+    ? 'success'
+    : state.status === EngineStatus.INITIALIZING
+      ? 'warning'
+      : 'neutral';
   const modelName = activeModel?.name ?? t('home.activeModelEmptyTitle');
   const modelId = activeModel?.id;
   const inferredAuthor = modelId && modelId.includes('/') ? modelId.split('/')[0] : null;
@@ -59,12 +66,9 @@ export const ActiveModelCard = ({ onSwapModel }: ActiveModelCardProps) => {
   return (
     <ScreenCard className="overflow-hidden" tone={hasActiveModel ? 'accent' : 'default'} padding="none">
       <Box className={`border-b px-4 py-2 ${appearance.classNames.dividerClassName}`}>
-        <Box className="flex-row items-center gap-2">
-          <Box className={statusDotClassName} />
-          <Text className={composeTextRole('eyebrow')}>
-            {statusLabel}
-          </Text>
-        </Box>
+        <ScreenBadge tone={statusTone} size="micro" className="self-start">
+          {statusLabel}
+        </ScreenBadge>
       </Box>
 
       <ScreenStack className="px-4 py-3" gap="compact">
@@ -83,17 +87,17 @@ export const ActiveModelCard = ({ onSwapModel }: ActiveModelCardProps) => {
         <Box className="mt-1 flex-row items-start justify-between gap-4">
           <Box className="flex-1 gap-1.5">
             <Box className="flex-row items-center gap-1">
-              <MaterialSymbols name="memory" size="sm" className="text-typography-500 dark:text-typography-400" />
+              <MaterialSymbols name="memory" size="sm" className={neutralToneClassNames.iconClassName} />
               <Text className={composeTextRole('caption')}>{memoryLabel}</Text>
             </Box>
             <Box className="flex-row items-center gap-1">
-              <MaterialSymbols name="speed" size="sm" className="text-typography-500 dark:text-typography-400" />
+              <MaterialSymbols name="speed" size="sm" className={neutralToneClassNames.iconClassName} />
               <Text className={composeTextRole('caption')}>{speedLabel}</Text>
             </Box>
           </Box>
 
           <ScreenActionPill onPress={onSwapModel} tone="primary" size="sm" className="shrink-0">
-            <Text className={composeTextRole('action', 'text-typography-0')}>{ctaLabel}</Text>
+            <Text className={composeTextRole('action', primaryActionContentClassName)}>{ctaLabel}</Text>
           </ScreenActionPill>
         </Box>
       </ScreenStack>

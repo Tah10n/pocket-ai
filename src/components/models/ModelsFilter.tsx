@@ -3,9 +3,10 @@ import { useTranslation } from 'react-i18next';
 import { Box } from '@/components/ui/box';
 import { MaterialSymbols, type MaterialSymbolName } from '@/components/ui/MaterialSymbols';
 import { Pressable } from '@/components/ui/pressable';
-import { joinClassNames, ScreenActionPill, ScreenBadge, useScreenAppearance } from '@/components/ui/ScreenShell';
+import { joinClassNames, ScreenActionPill, ScreenBadge, ScreenPressableSurface, ScreenSurface, useScreenAppearance } from '@/components/ui/ScreenShell';
 import { Text } from '@/components/ui/text';
 import { ModelFilterCriteria, ModelSizeRange, ModelSortField, ModelSortPreference } from '@/store/modelsStore';
+import { getThemeActionContentClassName } from '@/utils/themeTokens';
 
 interface ModelsFilterProps {
   filters: ModelFilterCriteria;
@@ -63,9 +64,11 @@ function TriggerButton({
   const appearance = useScreenAppearance();
 
   return (
-    <Pressable
+    <ScreenPressableSurface
       testID={testID}
       onPress={onPress}
+      tone={isOpen ? 'accent' : 'neutral'}
+      withControlTint={isOpen}
       className={joinClassNames(
         'min-w-0 flex-1 flex-row items-center gap-1.5 rounded-2xl border px-2.5 py-2 active:opacity-80',
         isOpen
@@ -105,7 +108,7 @@ function TriggerButton({
           className={isOpen ? 'text-primary-500' : 'text-typography-500 dark:text-typography-400'}
         />
       </Box>
-    </Pressable>
+    </ScreenPressableSurface>
   );
 }
 
@@ -117,6 +120,10 @@ function OptionRow({
   trailingLabel,
 }: OptionRowProps) {
   const appearance = useScreenAppearance();
+  const activeControlClassName = appearance.surfaceKind === 'glass'
+    ? 'border-primary-500/18 bg-primary-500/8'
+    : 'border-primary-500 bg-primary-500';
+  const activeIconClassName = getThemeActionContentClassName(appearance, 'primary');
 
   return (
     <Pressable
@@ -128,16 +135,19 @@ function OptionRow({
       )}
     >
       <Box className="min-w-0 flex-1 flex-row items-center gap-2">
-        <Box className={`h-5 w-5 items-center justify-center rounded-full border ${
+        <ScreenSurface
+          tone={active ? 'accent' : 'neutral'}
+          withControlTint={active}
+          className={`h-5 w-5 items-center justify-center rounded-full border ${
           active
-            ? 'border-primary-500 bg-primary-500'
+            ? activeControlClassName
             : appearance.classNames.toneClassNameByTone.neutral.iconTileClassName
         }`}
         >
           {active ? (
-            <MaterialSymbols name="check" size={12} className="text-typography-0" />
+            <MaterialSymbols name="check" size={12} className={activeIconClassName} />
           ) : null}
-        </Box>
+        </ScreenSurface>
         <Text className="shrink text-sm text-typography-800 dark:text-typography-100">{label}</Text>
       </Box>
 
@@ -217,8 +227,9 @@ export const ModelsFilter = ({
       </Box>
 
       {openPanel === 'filter' ? (
-        <Box
+        <ScreenSurface
           testID="models-filter-panel"
+          tone="neutral"
           className={`mt-1.5 p-1.5 ${appearance.classNames.insetCardClassName}`}
         >
           {hasActiveFilters ? (
@@ -261,12 +272,13 @@ export const ModelsFilter = ({
               />
             ))}
           </Box>
-        </Box>
+        </ScreenSurface>
       ) : null}
 
       {openPanel === 'sort' ? (
-        <Box
+        <ScreenSurface
           testID="models-sort-panel"
+          tone="neutral"
           className={`mt-1.5 p-1.5 ${appearance.classNames.insetCardClassName}`}
         >
           <Box className="gap-1">
@@ -309,7 +321,7 @@ export const ModelsFilter = ({
               );
             })}
           </Box>
-        </Box>
+        </ScreenSurface>
       ) : null}
     </Box>
   );

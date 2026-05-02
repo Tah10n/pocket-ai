@@ -18,7 +18,9 @@ export function ThinkingPulse() {
   const motion = useMotionPreferences();
   const appearance = useScreenAppearance();
   const progress = useSharedValue(0);
-  const haloClassName = `absolute h-8 w-8 rounded-full ${appearance.classNames.toneClassNameByTone.accent.iconTileClassName}`;
+  const haloClassName = appearance.surfaceKind === 'glass'
+    ? 'absolute h-8 w-8 rounded-full bg-primary-500/10 dark:bg-primary-500/12'
+    : `absolute h-8 w-8 rounded-full ${appearance.classNames.toneClassNameByTone.accent.iconTileClassName}`;
 
   useEffect(() => {
     if (motion.motionPreset === 'minimal') {

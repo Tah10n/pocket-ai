@@ -15,6 +15,7 @@ import { presetManager, SystemPromptPreset } from '../../services/PresetManager'
 import { getSettings, subscribeSettings, updateSettings } from '../../services/SettingsStore';
 import { getReportedErrorMessage } from '../../services/AppError';
 import { toTestIdSegment } from '../../utils/testIds';
+import { getThemeActionContentClassName } from '../../utils/themeTokens';
 
 interface EditorState {
     preset: SystemPromptPreset | null;
@@ -31,6 +32,7 @@ export function PresetManagerScreen() {
 
     const { t } = useTranslation();
     const appearance = useScreenAppearance();
+    const primaryActionContentClassName = getThemeActionContentClassName(appearance, 'primary');
     const insets = useSafeAreaInsets();
 
     useEffect(() => {
@@ -203,8 +205,8 @@ export function PresetManagerScreen() {
                         size="lg"
                         testID="preset-manager-add-preset"
                     >
-                        <MaterialSymbols name="add" size="sm" className="text-typography-0" />
-                        <Text className="text-sm font-semibold text-typography-0">{t('presets.addPreset')}</Text>
+                        <MaterialSymbols name="add" size="sm" className={primaryActionContentClassName} />
+                        <Text className={`text-sm font-semibold ${primaryActionContentClassName}`}>{t('presets.addPreset')}</Text>
                     </ScreenActionPill>
                 )}
             />

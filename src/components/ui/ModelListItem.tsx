@@ -5,7 +5,8 @@ import { Box } from '@/components/ui/box';
 import { Text, composeTextRole } from '@/components/ui/text';
 import { Pressable } from '@/components/ui/pressable';
 import { MaterialSymbols } from './MaterialSymbols';
-import { ScreenBadge, ScreenCard, useScreenAppearance } from './ScreenShell';
+import { ScreenActionPill, ScreenBadge, ScreenCard, ScreenSurface, useScreenAppearance } from './ScreenShell';
+import { getThemeActionContentClassName } from '@/utils/themeTokens';
 
 export interface ModelListItemProps {
   id: string;
@@ -22,9 +23,14 @@ export interface ModelListItemProps {
 export const ModelListItem = ({ name, sizeMB, status, fitsInRam, onAction, imageUrl, isDownloading, downloadProgress }: ModelListItemProps) => {
   const { t } = useTranslation();
   const appearance = useScreenAppearance();
+  const accentToneClassNames = appearance.classNames.toneClassNameByTone.accent;
+  const neutralToneClassNames = appearance.classNames.toneClassNameByTone.neutral;
+  const primaryActionContentClassName = getThemeActionContentClassName(appearance, 'primary');
+  const softActionContentClassName = getThemeActionContentClassName(appearance, 'soft');
+  const progressPercent = Math.max(0, Math.min(100, (downloadProgress || 0) * 100));
 
   return (
-    <ScreenCard className="flex-row overflow-hidden gap-3" padding="compact">
+    <ScreenCard className="flex-row overflow-hidden gap-3" decorative="tint" padding="compact">
       <ImageBackground 
         source={{ uri: imageUrl || "https://lh3.googleusercontent.com/aida-public/AB6AXuClqJ0QsvXxhk32IfvK9KR5KtKAebI2v0rQoKXNy9mkHBiAObgp7YdhdUq5xwpkxuyWoQbIyMn0P30tRnXdEOKSYVGsploFFf1XtDHSwMsIPhjvSRFrDjPWgzhAljeVNZ3cZ6ym66vftvisNupauWLox5PJrkTbqhbloaqXDgiZj1qT0SsAuStE6i4Soe2hjJoI3nTW3JUsoxZIl4tHTOw3EuP3iOrvvHMD5CoSzAe7n2qDV2814t7j2xZ5BAeRiwiWaqLJHxzmwUzz" }}
         className={`h-16 w-16 shrink-0 ${appearance.classNames.thumbnailSurfaceClassName}`}
@@ -44,45 +50,51 @@ export const ModelListItem = ({ name, sizeMB, status, fitsInRam, onAction, image
         
         <Box className="mt-2.5 flex-row gap-2">
           {isDownloading ? (
-            <Box className={`relative flex-1 overflow-hidden rounded-2xl border py-1.5 ${appearance.classNames.toneClassNameByTone.neutral.surfaceClassName}`}>
-              <Box className="absolute left-0 top-0 bottom-0 bg-primary-500/20" style={{ width: `${(downloadProgress || 0) * 100}%` }} />
+            <ScreenSurface tone="accent" withControlTint className={`relative flex-1 overflow-hidden rounded-2xl border ${accentToneClassNames.surfaceClassName}`}>
+              <Box className={`absolute left-0 top-0 bottom-0 ${accentToneClassNames.percentPillClassName}`} style={{ width: `${progressPercent}%` }} />
               <Pressable 
                 onPress={() => onAction?.('cancel')} 
-                className="flex-1 w-full items-center justify-center active:opacity-70"
+                className="flex-1 w-full items-center justify-center py-1.5 active:opacity-70"
               >
-                <Text className="text-xs font-bold text-primary-500">{t('models.cancel')} ({((downloadProgress || 0) * 100).toFixed(0)}%)</Text>
+                <Text className={composeTextRole('chip', `${accentToneClassNames.textClassName} text-center`)}>{t('models.cancel')} ({progressPercent.toFixed(0)}%)</Text>
               </Pressable>
-            </Box>
+            </ScreenSurface>
           ) : status === 'available' && (
-            <Pressable 
+            <ScreenActionPill
               onPress={() => onAction?.('download')} 
-              className={`flex-1 items-center justify-center rounded-2xl border py-1.5 active:opacity-70 ${appearance.classNames.toneClassNameByTone.neutral.surfaceClassName}`}
+              tone="soft"
+              size="sm"
+              className="flex-1"
             >
-                <Text className="text-xs font-bold text-typography-900 dark:text-typography-100">{t('models.download')}</Text>
-            </Pressable>
+                <Text className={composeTextRole('chip', softActionContentClassName)}>{t('models.download')}</Text>
+            </ScreenActionPill>
           )}
           
           {status === 'downloaded' && (
-            <Pressable 
+            <ScreenActionPill
               onPress={() => onAction?.('load')} 
-              className={`flex-1 rounded-2xl py-1.5 active:opacity-80 ${appearance.classNames.primaryActionPillClassName}`}
+              tone="primary"
+              size="sm"
+              className="flex-1"
             >
-              <Text className="text-xs font-bold text-typography-0">{t('models.load')}</Text>
-            </Pressable>
+              <Text className={composeTextRole('chip', primaryActionContentClassName)}>{t('models.load')}</Text>
+            </ScreenActionPill>
           )}
 
           {status === 'active' && (
-            <Pressable 
+            <ScreenActionPill
               onPress={() => onAction?.('unload')} 
-              className={`flex-1 items-center justify-center rounded-2xl py-1.5 active:opacity-70 ${appearance.classNames.toneClassNameByTone.neutral.iconTileClassName}`}
+              tone="soft"
+              size="sm"
+              className="flex-1"
             >
-              <Text className="text-xs font-bold text-typography-900 dark:text-typography-0">{t('models.unload')}</Text>
-            </Pressable>
+              <Text className={composeTextRole('chip', softActionContentClassName)}>{t('models.unload')}</Text>
+            </ScreenActionPill>
           )}
           
-          <Box className={`items-center justify-center rounded-2xl px-3 ${appearance.classNames.toneClassNameByTone.neutral.iconTileClassName}`}>
-            <MaterialSymbols name="more-horiz" size="sm" className="text-typography-500" />
-          </Box>
+          <ScreenSurface tone="neutral" withControlTint className={`items-center justify-center rounded-2xl px-3 ${neutralToneClassNames.iconTileClassName}`}>
+            <MaterialSymbols name="more-horiz" size="sm" className={neutralToneClassNames.iconClassName} />
+          </ScreenSurface>
         </Box>
       </Box>
     </ScreenCard>

@@ -61,6 +61,7 @@ const ModelCardComponent = ({
       : null;
   return (
     <ScreenCard
+      decorative="tint"
       padding="compact"
       tone={isActive ? 'accent' : 'default'}
     >

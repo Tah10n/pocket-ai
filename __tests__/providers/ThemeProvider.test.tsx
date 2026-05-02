@@ -125,7 +125,7 @@ describe('ThemeProvider', () => {
     expect(getByTestId('theme-id').props.children).toBe('glass');
     expect(getByTestId('resolved-mode').props.children).toBe('light');
     expect(getByTestId('surface-kind').props.children).toBe('glass');
-    expect(getByTestId('card-surface').props.children).toBe('rgba(255, 255, 255, 0.42)');
+    expect(getByTestId('card-surface').props.children).toBe('rgba(255, 255, 255, 0.3)');
   });
 
   it('persists visual theme id separately from color mode', () => {

@@ -4,7 +4,8 @@ import { ModelAccessState, LifecycleStatus, type ModelMetadata } from '../../typ
 import { useDownloadStore } from '../../store/downloadStore';
 import { Box } from './box';
 import { ProgressBar } from './ProgressBar';
-import { joinClassNames, ScreenActionPill, ScreenIconButton, useScreenAppearance } from './ScreenShell';
+import { joinClassNames, ScreenActionPill, ScreenIconButton, ScreenIconTile, ScreenSurface, useScreenAppearance } from './ScreenShell';
+import { getThemeActionContentClassName } from '../../utils/themeTokens';
 import { MaterialSymbols, type MaterialSymbolName } from './MaterialSymbols';
 import { Text } from './text';
 
@@ -36,6 +37,8 @@ function ActionPill({
   testID?: string;
   className?: string;
 }) {
+  const appearance = useScreenAppearance();
+
   return (
     <ScreenActionPill
       testID={testID}
@@ -46,9 +49,7 @@ function ActionPill({
     >
       <Text
         numberOfLines={1}
-        className={`text-center text-sm font-semibold ${tone === 'primary'
-          ? 'text-typography-0'
-          : 'text-primary-600 dark:text-primary-300'}`}
+        className={`text-center text-sm font-semibold ${getThemeActionContentClassName(appearance, tone)}`}
       >
         {label}
       </Text>
@@ -116,8 +117,10 @@ function ModelDownloadProgressInner({
   const isCompact = density === 'compact';
 
   return (
-    <Box
+    <ScreenSurface
       testID={`model-download-progress-${modelId}`}
+      tone={progressTone}
+      withControlTint
       className={joinClassNames(
         'rounded-2xl border',
         isCompact ? 'px-2.5 py-2' : 'px-3 py-2.5',
@@ -127,17 +130,23 @@ function ModelDownloadProgressInner({
     >
       <Box className={joinClassNames('flex-row items-center justify-between gap-3', isCompact ? 'mb-1.5' : 'mb-2')}>
         <Box className={joinClassNames('min-w-0 flex-1 flex-row items-center', isCompact ? 'gap-1.5' : 'gap-2')}>
-          <Box className={joinClassNames(isCompact ? 'h-7 w-7' : 'h-8 w-8', 'items-center justify-center rounded-full', progressToneClassNames.iconTileClassName)}>
+          <ScreenIconTile
+            iconName={progressPresentation.iconName}
+            tone={progressTone}
+            iconSize="sm"
+            size="sm"
+            className={isCompact ? 'h-7 w-7 rounded-full' : 'h-8 w-8 rounded-full'}
+          >
             <MaterialSymbols name={progressPresentation.iconName} size="sm" className={progressToneClassNames.iconClassName} />
-          </Box>
+          </ScreenIconTile>
           <Text numberOfLines={1} className={joinClassNames('min-w-0 flex-1 text-xs font-semibold uppercase tracking-wide', progressToneClassNames.textClassName)}>
             {progressPresentation.label}
           </Text>
         </Box>
 
-        <Box className={joinClassNames('rounded-full', isCompact ? 'px-2 py-0.5' : 'px-2.5 py-1', progressToneClassNames.percentPillClassName)}>
+        <ScreenSurface tone={progressTone} withControlTint className={joinClassNames('rounded-full', isCompact ? 'px-2 py-0.5' : 'px-2.5 py-1', progressToneClassNames.percentPillClassName)}>
           <Text className={joinClassNames('text-xs font-bold', progressToneClassNames.textClassName)}>{progressPercent}%</Text>
-        </Box>
+        </ScreenSurface>
       </Box>
       <ProgressBar
         testID={`model-download-progress-track-${modelId}`}
@@ -147,7 +156,7 @@ function ModelDownloadProgressInner({
         tone={progressPresentation.progressTone}
         variant="framed"
       />
-    </Box>
+    </ScreenSurface>
   );
 }
 

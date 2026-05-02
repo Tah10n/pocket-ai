@@ -1,6 +1,6 @@
 # UI Architecture & Component Guide
 
-Last updated: 2026-04-23
+Last updated: 2026-04-29
 
 ## Purpose
 
@@ -183,10 +183,12 @@ Migration plan for new visual themes:
 Glass themes distinguish chrome from inline content:
 
 - Chrome surfaces that float over other content may use `BlurView`: `ScreenHeaderShell`, `ScreenSheet`, floating `ScreenBanner`, `ScreenChromeBar`/chat composer, bottom tab chrome, and header/icon actions.
-- Inline surfaces such as `ScreenCard`, `ScreenPressableCard`, `ScreenIconTile`, badges, chips, text fields, segmented controls, and chat bubbles use denser tinted fills plus rim borders. They should not stack nested blur layers inside scroll content.
-- In `ScreenRoot`, decorative glass accents render behind the scene while the `BlurTargetView` wraps the real routed content in normal flow. A dim duplicate accent layer lives inside that target so Android's target-based blur has colored pixels to sample.
-- Android SDK 31 and newer uses `dimezisBlurViewSdk31Plus` with `blurReductionFactor`; older Android versions render dense translucent fallback panels and do not mount `BlurView`.
-- The bottom tab bar owns a separate `BlurTargetView`/`tabBarBackground` because React Navigation renders tab chrome outside individual screen roots.
+- Large inline surfaces such as `ScreenCard` and `ScreenPressableCard` use the shared frosted backdrop plus a light tint and rim border. Smaller inline controls such as `ScreenIconTile`, badges, chips, text fields, segmented controls, and chat bubbles keep denser tinted fills to avoid excessive nested blur in dense lists.
+- Dark glass surfaces should read as liquid glass, not opaque slate: use clean `background-0` translucency, color-safe cyan/blue specular and refraction layers, and a dark contrast film; avoid white feathered stripes or hard dark fills for shared chrome.
+- The native implementation approximates CSS/SVG liquid-glass distortion with layered `BlurView`, translucent tint/contrast films, directional specular gradients, refraction bands, and a real inner rim; Expo/React Native does not provide CSS `backdrop-filter` or SVG `feDisplacementMap` for native views.
+- In `ScreenRoot`, decorative glass accents render as smooth gradient layers behind the scene. Android uses two `BlurTargetView`s: a background-only target for in-screen glass surfaces, and a scene target wrapping the real screen content for external chrome such as the floating tab-bar island. This lets the tab bar sample the screen behind it without making card-level blurs target an ancestor that contains themselves.
+- Android currently renders dense translucent fallback panels for shared glass surfaces; keep `ScreenRoot` blur-target wrappers isolated from inline surfaces unless native blur is explicitly re-enabled.
+- The bottom tab bar renders through `tabBarBackground`. On Android SDK 31+, the floating tab-bar island samples the active screen scene target with `BlurView`, so light and dark glass tab chrome blur the content behind them. While the target is pending or unavailable, it falls back to the dense matte island.
 
 ## Screen Chrome Contract
 

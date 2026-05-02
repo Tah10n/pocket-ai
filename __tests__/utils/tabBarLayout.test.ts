@@ -1,4 +1,4 @@
-import { bottomTabBarMetrics, createBottomTabBarStyle } from '../../src/utils/tabBarLayout';
+import { bottomTabBarMetrics, createBottomTabBarStyle, isFloatingTabBar } from '../../src/utils/tabBarLayout';
 
 const colors = {
   tabBarBackground: '#101828',
@@ -34,6 +34,7 @@ describe('tabBarLayout', () => {
       height: bottomTabBarMetrics.height,
       paddingBottom: bottomTabBarMetrics.paddingBottom,
     });
+    expect(style.position).toBeUndefined();
   });
 
   it('merges theme appearance effects into the tab bar style', () => {
@@ -69,12 +70,20 @@ describe('tabBarLayout', () => {
         blurReductionFactor: 3,
         tabBarStyle: {},
       },
-    }, 34);
+    });
 
     expect(style.backgroundColor).toBe('transparent');
+    expect(style).toMatchObject({
+      position: 'absolute',
+      left: bottomTabBarMetrics.floatingHorizontalInset,
+      right: bottomTabBarMetrics.floatingHorizontalInset,
+      bottom: bottomTabBarMetrics.floatingBottomGap,
+      borderRadius: bottomTabBarMetrics.glassRadius,
+      height: bottomTabBarMetrics.glassHeight,
+    });
   });
 
-  it('keeps a dense native fallback fill for legacy Android', () => {
+  it('lets the glass tabBarBackground own the fill for legacy Android too', () => {
     const style = createBottomTabBarStyle(colors, 0, 'android', {
       id: 'glass',
       surfaceKind: 'glass',
@@ -84,9 +93,17 @@ describe('tabBarLayout', () => {
         blurReductionFactor: 3,
         tabBarStyle: {},
       },
-    }, 30);
+    });
 
-    expect(style.backgroundColor).toBe(colors.tabBarBackground);
+    expect(style.backgroundColor).toBe('transparent');
+    expect(style.borderTopWidth).toBe(0);
+    expect(style).toMatchObject({
+      position: 'absolute',
+      left: bottomTabBarMetrics.floatingHorizontalInset,
+      right: bottomTabBarMetrics.floatingHorizontalInset,
+      bottom: bottomTabBarMetrics.floatingBottomGap,
+      height: bottomTabBarMetrics.glassHeight,
+    });
   });
 
   it('lets the glass tabBarBackground own the fill off Android', () => {
@@ -102,6 +119,12 @@ describe('tabBarLayout', () => {
     });
 
     expect(style.backgroundColor).toBe('transparent');
+  });
+
+  it('detects only glass tab bars as floating', () => {
+    expect(isFloatingTabBar({ surfaceKind: 'glass' })).toBe(true);
+    expect(isFloatingTabBar({ surfaceKind: 'solid' })).toBe(false);
+    expect(isFloatingTabBar()).toBe(false);
   });
 
 });

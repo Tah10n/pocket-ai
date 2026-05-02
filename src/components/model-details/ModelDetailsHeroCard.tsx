@@ -3,6 +3,7 @@ import { Box } from '../ui/box';
 import { Text, composeTextRole } from '../ui/text';
 import { useTheme } from '@/providers/ThemeProvider';
 import { DEFAULT_THEME_ID, getThemeAppearance } from '@/utils/themeTokens';
+import { ScreenSurface } from '../ui/ScreenShell';
 import { SectionCard } from './ModelDetailsPrimitives';
 
 export interface ModelDetailsHeroCardProps {
@@ -39,11 +40,11 @@ export function ModelDetailsHeroCard({
         {title}
       </Text>
 
-      <Box className={`mt-2 self-start ${appearance.classNames.inlinePillClassName}`}>
+      <ScreenSurface className={`mt-2 self-start ${appearance.classNames.inlinePillClassName}`}>
         <Text className={composeTextRole('chip', 'font-medium text-typography-600 dark:text-typography-300')}>
           {modelId}
         </Text>
-      </Box>
+      </ScreenSurface>
 
       {actions ? (
         <Box className="mt-4">

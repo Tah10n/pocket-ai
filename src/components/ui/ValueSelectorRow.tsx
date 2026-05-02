@@ -1,8 +1,7 @@
 import React from 'react';
 import { Box } from './box';
 import { MaterialSymbols } from './MaterialSymbols';
-import { Pressable } from './pressable';
-import { joinClassNames, useScreenAppearance } from './ScreenShell';
+import { joinClassNames, ScreenPressableSurface, ScreenSurface, useScreenAppearance } from './ScreenShell';
 import { Text, composeTextRole } from './text';
 import { cardPaddingByDensity, radiusTokens } from '../../utils/themeTokens';
 
@@ -59,21 +58,22 @@ export function ValueSelectorRow({
 
   if (isInteractive) {
     return (
-      <Pressable
+      <ScreenPressableSurface
         testID={testID}
         onPress={onPress}
         disabled={disabled}
         accessibilityRole="button"
+        tone="neutral"
         className={containerClassName}
       >
         {content}
-      </Pressable>
+      </ScreenPressableSurface>
     );
   }
 
   return (
-    <Box testID={testID} className={containerClassName}>
+    <ScreenSurface testID={testID} tone="neutral" className={containerClassName}>
       {content}
-    </Box>
+    </ScreenSurface>
   );
 }

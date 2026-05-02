@@ -1,7 +1,7 @@
 import React from 'react';
 import { Box } from '../ui/box';
 import { type MaterialSymbolsProps } from '../ui/MaterialSymbols';
-import { ScreenCard, ScreenIconTile, useScreenAppearance } from '../ui/ScreenShell';
+import { ScreenCard, ScreenIconTile, ScreenSurface, useScreenAppearance } from '../ui/ScreenShell';
 import { Text, composeTextRole } from '../ui/text';
 import { type ModelDetailsTone } from '@/utils/modelDetailsPresentation';
 
@@ -38,7 +38,9 @@ export function DetailValueCard({
   const toneTokens = appearance.classNames.toneClassNameByTone[tone];
 
   return (
-    <Box
+    <ScreenSurface
+      tone={tone}
+      withControlTint
       className={`rounded-2xl border px-4 ${compact ? 'py-3' : 'min-w-[148px] flex-1 py-3.5'} ${toneTokens.surfaceClassName}`}
     >
       <Box className="flex-row items-start justify-between gap-3">
@@ -54,7 +56,7 @@ export function DetailValueCard({
           <ScreenIconTile iconName={iconName} tone={tone} className="h-10 w-10 rounded-2xl" />
         ) : null}
       </Box>
-    </Box>
+    </ScreenSurface>
   );
 }
 

@@ -6,7 +6,7 @@ import { Box } from '@/components/ui/box';
 import { Pressable } from '@/components/ui/pressable';
 import { Text } from '@/components/ui/text';
 import { MaterialSymbols } from './MaterialSymbols';
-import { ScreenBadge, ScreenIconButton, useScreenAppearance } from './ScreenShell';
+import { ScreenBadge, ScreenIconButton, ScreenIconTile, ScreenSurface, useScreenAppearance } from './ScreenShell';
 import { StreamingCursor } from './StreamingCursor';
 import { MarkdownRenderer } from './MarkdownRenderer';
 import { ThinkingPulse } from './ThinkingPulse';
@@ -162,16 +162,25 @@ const ChatMessageBubbleComponent = ({
   const shouldShowStreamingPlaceholder = isAssistantStreaming && !shouldShowThoughtSection && !assistantBodyContent;
   // Thought containers keep a minimum width so the collapsible panel does not jitter while content streams in.
   const thoughtBubbleClassName = appearance.classNames.chatThoughtBubbleClassName;
+  const shouldUseAssistantGlass = appearance.surfaceKind === 'glass' && !isUser;
 
   return (
     <Box className={`w-full flex-col gap-0.5 ${isUser ? 'items-end' : 'items-start'}`} onLayout={onLayout}>
       <Box className={`w-full flex-row ${isUser ? 'items-end justify-end pl-8' : 'items-start justify-start pr-8'}`}>
-        <Box
+        <ScreenSurface
           testID={`message-bubble-shell-${id}`}
+          tone={isUser ? 'primary' : 'default'}
+          decorative="matte"
+          applyGlassFrame={!isUser}
           className={`max-w-full min-w-0 flex-shrink ${bubbleAlignmentClassName} ${bubbleClassName}`}
         >
           {shouldShowThoughtSection ? (
-            <Box className={`${assistantBodyContent ? 'mb-1.5 ' : ''}${thoughtBubbleClassName}`}>
+            <ScreenSurface
+              tone="accent"
+              decorative="matte"
+              withControlTint={shouldUseAssistantGlass}
+              className={`${assistantBodyContent ? 'mb-1.5 ' : ''}${thoughtBubbleClassName}`}
+            >
               <Pressable
                 testID={`thought-toggle-${id}`}
                 onPress={() => {
@@ -184,13 +193,13 @@ const ChatMessageBubbleComponent = ({
                 className="active:opacity-80"
               >
                 <Box className="flex-row items-center gap-2.5">
-                  <Box className={`h-7 w-7 items-center justify-center rounded-full ${appearance.classNames.toneClassNameByTone.accent.iconTileClassName}`}>
+                  <ScreenIconTile iconName="psychology-alt" tone="accent" size="sm" iconSize="sm" className="h-7 w-7 rounded-full">
                     {shouldAnimateThought ? (
                       <ThinkingPulse />
                     ) : (
                       <MaterialSymbols name="psychology-alt" size="sm" className="text-primary-500" />
                     )}
-                  </Box>
+                  </ScreenIconTile>
 
                   <Box className="min-w-0 flex-1">
                     <Text className="text-xs font-semibold text-typography-900 dark:text-typography-100">
@@ -230,7 +239,7 @@ const ChatMessageBubbleComponent = ({
                   )}
                 </Box>
               ) : null}
-            </Box>
+            </ScreenSurface>
           ) : null}
 
           {isUser ? (
@@ -249,14 +258,14 @@ const ChatMessageBubbleComponent = ({
           ) : null}
 
           {hasErrorMessage ? (
-            <Box className={`mt-2 flex-row items-start gap-2 px-2.5 py-2 ${appearance.classNames.chatInlineErrorClassName}`}>
+            <ScreenSurface tone="error" withControlTint className={`mt-2 flex-row items-start gap-2 px-2.5 py-2 ${appearance.classNames.chatInlineErrorClassName}`}>
               <MaterialSymbols name="error-outline" size="sm" className="mt-0.5 text-error-600 dark:text-error-300" />
               <Text selectable className="min-w-0 flex-1 text-sm leading-5 text-error-800 dark:text-error-200">
                 {errorMessage}
               </Text>
-            </Box>
+            </ScreenSurface>
           ) : null}
-        </Box>
+        </ScreenSurface>
       </Box>
 
       {shouldShowMetadataRow ? (

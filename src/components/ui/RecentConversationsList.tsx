@@ -129,7 +129,7 @@ export const RecentConversationsList = ({
             ))}
           </ScreenStack>
         ) : (
-          <ScreenCard dashed padding="compact">
+          <ScreenCard dashed padding="compact" decorative="matte">
             <Text className={composeTextRole('sectionTitle', 'text-sm')}>
               {t('home.noConversationsTitle')}
             </Text>

@@ -19,6 +19,7 @@ import {
 import { ScrollView } from '@/components/ui/scroll-view';
 import { Text } from '@/components/ui/text';
 import { useDeviceMetrics } from '../../hooks/useDeviceMetrics';
+import { useFloatingScrollInsets } from '../../hooks/useTabBarContentInset';
 import { useLLMEngine } from '../../hooks/useLLMEngine';
 import { useTheme } from '../../providers/ThemeProvider';
 import { huggingFaceTokenService } from '../../services/HuggingFaceTokenService';
@@ -235,6 +236,7 @@ export const SettingsScreen = () => {
     const router = useRouter();
     const isFocused = useIsFocused();
     const { mode, themeId, resolvedMode, setTheme, setThemeId, colors, appearance } = useTheme();
+    const { paddingTop: headerInset, paddingBottom: tabBarInset } = useFloatingScrollInsets();
     const { metrics, refresh } = useDeviceMetrics({ enabled: isFocused, refreshIntervalMs: 5000 });
     const { state: engineState, isReady: isEngineReady } = useLLMEngine();
     const [settings, setSettings] = useState(() => getSettings());
@@ -386,7 +388,7 @@ export const SettingsScreen = () => {
     return (
         <ScreenRoot>
             <HeaderBar
-                title={t('settings.title')}
+                title={`${t('settings.title')}`}
                 onBack={undefined}
                 backAccessibilityLabel={t('chat.headerBackAccessibilityLabel')}
                 backButtonTestID="settings-back-button"
@@ -394,9 +396,17 @@ export const SettingsScreen = () => {
                 brandIconName="settings"
             />
 
-            <ScrollView className="flex-1" showsVerticalScrollIndicator={false}>
+            <ScrollView
+                className="flex-1"
+                showsVerticalScrollIndicator={false}
+                contentContainerStyle={{
+                    paddingTop: headerInset,
+                    paddingBottom: tabBarInset,
+                }}
+            >
                 <ScreenContent
                     testID="settings-screen-content"
+                    respectFloatingHeader={false}
                     className="pt-3"
                     style={{ paddingBottom: screenLayoutMetrics.contentBottomInset }}
                 >

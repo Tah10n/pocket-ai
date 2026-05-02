@@ -11,6 +11,7 @@ import { ScreenBanner, ScreenCard, ScreenStack } from '@/components/ui/ScreenShe
 import { Spinner } from '@/components/ui/spinner';
 import { Text } from '@/components/ui/text';
 import { useErrorReportSheetController, type ErrorReportContext } from '@/hooks/useErrorReportSheetController';
+import { useFloatingScrollInsets } from '@/hooks/useTabBarContentInset';
 import { useLLMEngine } from '@/hooks/useLLMEngine';
 import { useModelParametersSheetController } from '@/hooks/useModelParametersSheetController';
 import { useModelDownload } from '@/hooks/useModelDownload';
@@ -197,6 +198,7 @@ function sortModels(models: ModelMetadata[], sort: ModelSortPreference): ModelMe
 export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsListProps) => {
   const { t } = useTranslation();
   const { startDownload, cancelDownload } = useModelDownload();
+  const { paddingTop: headerInset, paddingBottom: tabBarInset } = useFloatingScrollInsets();
   const modelsRegistryRevision = useModelRegistryRevision();
   const queueLifecycleSignature = useDownloadStore((state) => state.queue
     .map((model) => `${model.id}:${model.lifecycleStatus}`)
@@ -638,19 +640,22 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
   const isCatalogInitializing = activeTab === 'all' && !isTokenStateHydrated;
   const isModelWarmingUp = engineState.status === EngineStatus.INITIALIZING;
   const listBottomInset = screenLayoutMetrics.contentBottomInset
-    + (isModelWarmingUp ? MODEL_WARMUP_BANNER_RESERVED_HEIGHT : 0);
+    + (isModelWarmingUp ? MODEL_WARMUP_BANNER_RESERVED_HEIGHT : 0)
+    + tabBarInset;
 
   return (
     <>
-      <ModelsFilter
-        filters={filters}
-        sort={sort}
-        onFitsInRamToggle={(enabled) => setFitsInRamOnly(activeTab, enabled)}
-        onNoTokenRequiredToggle={(enabled) => setNoTokenRequiredOnly(activeTab, enabled)}
-        onSizeRangeToggle={(sizeRange) => toggleSizeRange(activeTab, sizeRange)}
-        onSortChange={(nextSort) => setSort(activeTab, nextSort)}
-        onClear={() => clearFilters(activeTab)}
-      />
+      <Box style={headerInset > 0 ? { paddingTop: headerInset } : undefined}>
+        <ModelsFilter
+          filters={filters}
+          sort={sort}
+          onFitsInRamToggle={(enabled) => setFitsInRamOnly(activeTab, enabled)}
+          onNoTokenRequiredToggle={(enabled) => setNoTokenRequiredOnly(activeTab, enabled)}
+          onSizeRangeToggle={(sizeRange) => toggleSizeRange(activeTab, sizeRange)}
+          onSortChange={(nextSort) => setSort(activeTab, nextSort)}
+          onClear={() => clearFilters(activeTab)}
+        />
+      </Box>
 
       <ScreenStack className="flex-1 pt-2" gap="compact">
         {discoveryBanner}
@@ -704,7 +709,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
         )}
       </ScreenStack>
 
-      <ModelWarmupBanner engineState={engineState} bottomOffset={0} />
+      <ModelWarmupBanner engineState={engineState} bottomOffset={tabBarInset} />
 
       <ModelParametersSheet {...modelParametersSheetProps} />
       <ErrorReportSheet {...errorReportSheetProps} />

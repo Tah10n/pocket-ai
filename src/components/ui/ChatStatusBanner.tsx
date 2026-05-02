@@ -1,7 +1,7 @@
 import React from 'react';
 import { Box } from '@/components/ui/box';
 import { Button, ButtonText } from '@/components/ui/button';
-import { ScreenIconTile, useScreenAppearance } from '@/components/ui/ScreenShell';
+import { ScreenIconTile, ScreenSurface, useScreenAppearance } from '@/components/ui/ScreenShell';
 import { Text } from '@/components/ui/text';
 import { type MaterialSymbolName } from './MaterialSymbols';
 
@@ -33,8 +33,10 @@ export function ChatStatusBanner({
   const toneClassNames = appearance.classNames.toneClassNameByTone[themeTone];
 
   return (
-    <Box
+    <ScreenSurface
       testID={testID}
+      tone={themeTone}
+      withControlTint
       className={`rounded-3xl border px-4 py-4 ${toneClassNames.surfaceClassName} ${centered ? 'w-full max-w-md self-center' : ''}`}
     >
       <Box className={`flex-row gap-3 ${centered ? 'items-start' : 'items-start'}`}>
@@ -57,6 +59,6 @@ export function ChatStatusBanner({
           ) : null}
         </Box>
       </Box>
-    </Box>
+    </ScreenSurface>
   );
 }

@@ -5,7 +5,7 @@ import { Spinner } from '@/components/ui/spinner';
 import { Text } from '@/components/ui/text';
 import { useRouter } from 'expo-router';
 import { HeaderBar } from '@/components/ui/HeaderBar';
-import { ScreenActionPill, ScreenBanner, ScreenContent, ScreenRoot, ScreenStack } from '@/components/ui/ScreenShell';
+import { ScreenActionPill, ScreenBanner, ScreenContent, ScreenRoot, ScreenStack, useScreenAppearance } from '@/components/ui/ScreenShell';
 import { ActiveModelCard } from '@/components/ui/ActiveModelCard';
 import { RecentConversationsList } from '@/components/ui/RecentConversationsList';
 import { MaterialSymbols } from '@/components/ui/MaterialSymbols';
@@ -18,7 +18,8 @@ import { registry } from '@/services/LocalStorageRegistry';
 import { performanceMonitor } from '@/services/PerformanceMonitor';
 import { getReportedErrorMessage } from '../../services/AppError';
 import { useBootstrapStore } from '@/store/bootstrapStore';
-import { screenLayoutMetrics } from '../../utils/themeTokens';
+import { useFloatingScrollInsets } from '../../hooks/useTabBarContentInset';
+import { getThemeActionContentClassName, screenLayoutMetrics } from '../../utils/themeTokens';
 
 let hasMarkedFirstUsableScreen = false;
 
@@ -27,6 +28,10 @@ export const HomeScreen = () => {
   const router = useRouter();
   const { deleteThread, openThread, startNewChat } = useChatSession();
   const { state: engineState } = useLLMEngine();
+  const appearance = useScreenAppearance();
+  const { paddingTop: headerInset, paddingBottom: tabBarInset } = useFloatingScrollInsets();
+  const primaryActionContentClassName = getThemeActionContentClassName(appearance, 'primary');
+  const floatingBannerTopStyle = headerInset > 0 ? { marginTop: headerInset + 8 } : undefined;
   useModelRegistryRevision();
   const bootstrapBackgroundState = useBootstrapStore((state) => state.backgroundState);
   const bootstrapBackgroundError = useBootstrapStore((state) => state.backgroundError);
@@ -101,7 +106,7 @@ export const HomeScreen = () => {
       <HeaderBar title="Pocket AI" showBrand />
 
       {bootstrapBackgroundState === 'running' ? (
-        <ScreenBanner className="mx-4 mt-2 flex-row items-center gap-2 py-2" tone="neutral">
+        <ScreenBanner className="mx-4 mt-2 flex-row items-center gap-2 py-2" tone="neutral" style={floatingBannerTopStyle}>
           <Spinner size="small" />
           <Text className="text-sm text-typography-600 dark:text-typography-300">
             {t('home.initializing')}
@@ -110,7 +115,7 @@ export const HomeScreen = () => {
       ) : null}
 
       {bootstrapBackgroundState === 'error' ? (
-        <ScreenBanner className="mx-4 mt-2" tone="error">
+        <ScreenBanner className="mx-4 mt-2" tone="error" style={floatingBannerTopStyle}>
           <Text className="text-sm font-semibold text-error-700 dark:text-error-200">
             {t('home.initializationFailedTitle')}
           </Text>
@@ -123,11 +128,14 @@ export const HomeScreen = () => {
         </ScreenBanner>
       ) : null}
 
-      <ScreenContent testID="home-screen-content" className="flex-1" style={{ paddingBottom: 0 }}>
+      <ScreenContent testID="home-screen-content" className="flex-1" respectFloatingHeader={false} style={{ paddingBottom: 0 }}>
         <ScrollView
           testID="home-scroll-view"
           className="flex-1"
-          contentContainerStyle={{ paddingBottom: screenLayoutMetrics.contentBottomInset }}
+          contentContainerStyle={{
+            paddingTop: headerInset,
+            paddingBottom: screenLayoutMetrics.contentBottomInset + tabBarInset,
+          }}
           showsVerticalScrollIndicator={false}
         >
           <ScreenStack className="pt-3" gap="loose">
@@ -141,8 +149,8 @@ export const HomeScreen = () => {
               size="lg"
               className="w-full gap-3"
             >
-              <MaterialSymbols name="add-comment" size="xl" className="text-typography-0" />
-              <Text className="text-typography-0 text-base font-bold">{t('home.newChat')}</Text>
+              <MaterialSymbols name="add-comment" size="xl" className={primaryActionContentClassName} />
+              <Text className={`${primaryActionContentClassName} text-base font-bold`}>{t('home.newChat')}</Text>
             </ScreenActionPill>
 
             <RecentConversationsList

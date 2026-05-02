@@ -2,6 +2,7 @@ import React from 'react';
 import { Box } from '@/components/ui/box';
 import { useTheme } from '@/providers/ThemeProvider';
 import { DEFAULT_THEME_ID, getThemeAppearance } from '@/utils/themeTokens';
+import { getGlassCornerRadiusStyle, getGlassSurfaceFrameStyle } from './ScreenShell';
 
 type ProgressBarSize = 'sm' | 'md' | 'lg';
 type ProgressBarTone = 'neutral' | 'primary' | 'success' | 'warning';
@@ -57,6 +58,15 @@ export function ProgressBar({
   const clampedPercent = clampProgressPercent(valuePercent);
   const isFramed = variant === 'framed';
   const toneClassNames = appearance.classNames.toneClassNameByTone[tone];
+  const containerRadiusClassName = 'relative w-full overflow-hidden rounded-full';
+  const glassCornerRadiusStyle = getGlassCornerRadiusStyle(
+    containerRadiusClassName,
+    isFramed ? toneClassNames.framedProgressTrackClassName : toneClassNames.progressTrackClassName,
+    className,
+  );
+  const glassFrameStyle = isFramed
+    ? getGlassSurfaceFrameStyle(appearance, theme.resolvedMode, theme.colors, tone, false, glassCornerRadiusStyle)
+    : undefined;
 
   return (
     <Box
@@ -64,12 +74,13 @@ export function ProgressBar({
       accessibilityRole="progressbar"
       accessibilityValue={{ min: 0, max: 100, now: clampedPercent }}
       className={joinClassNames(
-        'relative w-full overflow-hidden rounded-full',
+        containerRadiusClassName,
         isFramed ? 'border p-0.5' : undefined,
         isFramed ? framedTrackHeightClassNameBySize[size] : trackHeightClassNameBySize[size],
         isFramed ? toneClassNames.framedProgressTrackClassName : toneClassNames.progressTrackClassName,
         className,
       )}
+      style={glassFrameStyle}
     >
       <Box
         testID={fillTestID}

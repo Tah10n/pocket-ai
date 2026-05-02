@@ -10,6 +10,7 @@ import {
     NativeScrollEvent,
     NativeSyntheticEvent,
     Platform,
+    StyleSheet,
     View,
 } from 'react-native';
 import { useBottomTabBarHeight } from '@react-navigation/bottom-tabs';
@@ -33,12 +34,13 @@ import {
 import { ModelParametersSheet } from '@/components/ui/ModelParametersSheet';
 import { MaterialSymbols } from '@/components/ui/MaterialSymbols';
 import { ProgressBar } from '@/components/ui/ProgressBar';
-import { ScreenCard, ScreenIconTile, ScreenRoot, useScreenAppearance } from '@/components/ui/ScreenShell';
+import { ScreenCard, ScreenIconTile, ScreenRoot, ScreenSurface, useScreenAppearance } from '@/components/ui/ScreenShell';
 import { useTranslation } from 'react-i18next';
 import { PresetSelectorSheet } from '@/components/ui/PresetSelectorSheet';
 import { resolvePresetSnapshot, useChatSession } from '../../hooks/useChatSession';
 import { useLLMEngine } from '../../hooks/useLLMEngine';
 import { useErrorReportSheetController, type ErrorReportContext } from '@/hooks/useErrorReportSheetController';
+import { useFloatingScrollInsets } from '../../hooks/useTabBarContentInset';
 import { useModelParametersSheetController } from '@/hooks/useModelParametersSheetController';
 import { useModelRegistryRevision } from '@/hooks/useModelRegistryRevision';
 import { useRouter } from 'expo-router';
@@ -57,7 +59,7 @@ import {
     updateSettings,
     updateGenerationParametersForModel,
 } from '../../services/SettingsStore';
-import { screenLayoutMetrics } from '../../utils/themeTokens';
+import { getThemeActionContentClassName, screenLayoutMetrics } from '../../utils/themeTokens';
 
 const AUTO_SCROLL_REARM_THRESHOLD_PX = 32;
 const AUTO_SCROLL_DISARM_THRESHOLD_PX = 64;
@@ -66,6 +68,7 @@ const FALLBACK_TOP_K = 40;
 const FALLBACK_MIN_P = 0.05;
 const FALLBACK_REPETITION_PENALTY = 1;
 const SHOULD_USE_KEYBOARD_AVOIDING_VIEW = Platform.OS === 'ios';
+const KEYBOARD_SPACER_SETTLE_EPSILON = 0.5;
 
 type ScrollMetrics = Pick<NativeScrollEvent, 'contentOffset' | 'contentSize' | 'layoutMeasurement'>;
 
@@ -103,21 +106,54 @@ export function getAndroidKeyboardOverlapCompensation({
 
 export function getAndroidKeyboardSpacerHeight({
     viewportCompensation,
+    currentSpacerHeight = 0,
     composerBottomY,
     keyboardTopY,
     gap = 8,
 }: {
     viewportCompensation: number;
+    currentSpacerHeight?: number;
     composerBottomY?: number | null;
     keyboardTopY?: number | null;
     gap?: number;
 }) {
-    const measuredOverlap =
-        typeof composerBottomY === 'number' && typeof keyboardTopY === 'number'
-            ? Math.max(0, composerBottomY + gap - keyboardTopY)
-            : 0;
+    if (typeof composerBottomY === 'number' && typeof keyboardTopY === 'number') {
+        const measuredDelta = composerBottomY + gap - keyboardTopY;
 
-    return Math.max(viewportCompensation, measuredOverlap);
+        if (Math.abs(measuredDelta) < KEYBOARD_SPACER_SETTLE_EPSILON) {
+            return Math.max(0, currentSpacerHeight);
+        }
+
+        return Math.max(0, currentSpacerHeight + measuredDelta);
+    }
+
+    return Math.max(viewportCompensation, currentSpacerHeight);
+}
+
+export function shouldFloatAndroidComposerOverContent({
+    platform,
+    surfaceKind,
+    isKeyboardVisible,
+}: {
+    platform: typeof Platform.OS;
+    surfaceKind: 'solid' | 'glass';
+    isKeyboardVisible: boolean;
+}) {
+    return platform === 'android' && surfaceKind === 'glass' && !isKeyboardVisible;
+}
+
+export function getChatWarmupBannerBottomOffset({
+    composerContainerHeight,
+    tabBarInset,
+    androidKeyboardInset,
+    shouldFloatComposerOverContent,
+}: {
+    composerContainerHeight: number;
+    tabBarInset: number;
+    androidKeyboardInset: number;
+    shouldFloatComposerOverContent: boolean;
+}) {
+    return composerContainerHeight + (shouldFloatComposerOverContent ? tabBarInset : androidKeyboardInset);
 }
 
 export function getNextShouldStickToBottom(
@@ -194,13 +230,16 @@ export const ChatScreen = () => {
     const { state: engineState, loadModel } = useLLMEngine();
     const { t } = useTranslation();
     const appearance = useScreenAppearance();
+    const primaryActionContentClassName = getThemeActionContentClassName(appearance, 'primary');
     const modelRegistryRevision = useModelRegistryRevision();
     const router = useRouter();
     const { openErrorReport, sheetProps: errorReportSheetProps } = useErrorReportSheetController();
+    const { paddingTop: headerInset, paddingBottom: tabBarInset } = useFloatingScrollInsets();
     const tabBarHeight = useBottomTabBarHeight();
     const [hardwareStatus, setHardwareStatus] = useState(() => hardwareListenerService.getCurrentStatus());
     const [composerDraft, setComposerDraft] = useState('');
     const [androidKeyboardInset, setAndroidKeyboardInset] = useState(0);
+    const [isAndroidKeyboardVisible, setIsAndroidKeyboardVisible] = useState(false);
     const [composerContainerHeight, setComposerContainerHeight] = useState(0);
     const [isAutoScrollPaused, setIsAutoScrollPaused] = useState(false);
     const [isListTouching, setIsListTouching] = useState(false);
@@ -231,6 +270,7 @@ export const ChatScreen = () => {
     const baseWindowHeightRef = useRef(Dimensions.get('window').height);
     const isKeyboardVisibleRef = useRef(false);
     const androidKeyboardMetricsRef = useRef<{ height: number; topY: number } | null>(null);
+    const androidKeyboardInsetRef = useRef(0);
     const composerContainerRef = useRef<View | null>(null);
     const isUserInteractingRef = useRef(false);
     const isListTouchingRef = useRef(false);
@@ -260,9 +300,18 @@ export const ChatScreen = () => {
         // coupling the screen to unrelated HardwareStatus fields.
         hardwareStatus,
     );
+    const shouldFloatComposerOverContent = shouldFloatAndroidComposerOverContent({
+        platform: Platform.OS,
+        surfaceKind: appearance.surfaceKind,
+        isKeyboardVisible: isAndroidKeyboardVisible,
+    });
+    const bottomChromeInset = shouldFloatComposerOverContent
+        ? composerContainerHeight + tabBarInset + screenLayoutMetrics.keyboardComposerGap
+        : tabBarInset;
     const listBottomPadding =
         (hardwareBannerInputs.showLowMemoryWarning || hardwareBannerInputs.showThermalWarning ? 22 : 14)
-        + (isModelInitializing ? MODEL_WARMUP_BANNER_RESERVED_HEIGHT : 0);
+        + (isModelInitializing ? MODEL_WARMUP_BANNER_RESERVED_HEIGHT : 0)
+        + bottomChromeInset;
 
     const downloadedModels = useMemo(() => {
         // Force recompute on registry revision changes.
@@ -331,6 +380,20 @@ export const ChatScreen = () => {
     const shouldShowRecoveryBanner = isInputDisabled && hasMessages;
     const shouldShowRecoveryCard = isInputDisabled && !hasMessages;
     const shouldShowFloatingWarmupBanner = isModelInitializing && !shouldShowRecoveryCard;
+    const isAndroidKeyboardOpen = Platform.OS === 'android' && isAndroidKeyboardVisible;
+    const shouldReserveComposerTabBarInset = !shouldFloatComposerOverContent && !isAndroidKeyboardOpen;
+    const composerBottomInsetStyle = shouldReserveComposerTabBarInset && tabBarInset > 0
+        ? { paddingBottom: tabBarInset }
+        : undefined;
+    const androidComposerContainerStyle = shouldFloatComposerOverContent
+        ? [styles.androidFloatingComposer, { bottom: tabBarInset }]
+        : composerBottomInsetStyle;
+    const warmupBannerBottomOffset = getChatWarmupBannerBottomOffset({
+        composerContainerHeight,
+        tabBarInset,
+        androidKeyboardInset,
+        shouldFloatComposerOverContent,
+    });
     const hasDownloadedModels = downloadedModels.length > 0;
     const modelRecoveryActionRoute = hasDownloadedModels
         ? ({ pathname: '/(tabs)/models', params: { initialTab: 'downloaded' } } as const)
@@ -825,6 +888,17 @@ export const ChatScreen = () => {
         scheduleScrollToLatestMessage(false, hasForcedFollowPass);
     };
 
+    const setAndroidKeyboardInsetValue = useCallback((nextInset: number) => {
+        const normalizedInset = Math.max(0, nextInset);
+        setAndroidKeyboardInset((currentValue) => (
+            Math.abs(currentValue - normalizedInset) < 1 ? currentValue : normalizedInset
+        ));
+    }, []);
+
+    useEffect(() => {
+        androidKeyboardInsetRef.current = androidKeyboardInset;
+    }, [androidKeyboardInset]);
+
     const updateAndroidKeyboardInsetFromLayout = useCallback(() => {
         if (Platform.OS !== 'android') {
             return;
@@ -834,7 +908,7 @@ export const ChatScreen = () => {
         const composerContainer = composerContainerRef.current;
 
         if (!keyboardMetrics) {
-            setAndroidKeyboardInset(0);
+            setAndroidKeyboardInsetValue(0);
             return;
         }
 
@@ -847,7 +921,7 @@ export const ChatScreen = () => {
         });
 
         if (!composerContainer || typeof composerContainer.measure !== 'function') {
-            setAndroidKeyboardInset(viewportCompensation);
+            setAndroidKeyboardInsetValue(viewportCompensation);
             return;
         }
 
@@ -859,15 +933,16 @@ export const ChatScreen = () => {
             keyboardMeasureFrameRef.current = null;
 
             composerContainer.measure((_x, _y, _width, height, _pageX, pageY) => {
-                setAndroidKeyboardInset(getAndroidKeyboardSpacerHeight({
+                setAndroidKeyboardInsetValue(getAndroidKeyboardSpacerHeight({
                     viewportCompensation,
+                    currentSpacerHeight: androidKeyboardInsetRef.current,
                     composerBottomY: pageY + height,
                     keyboardTopY: keyboardMetrics.topY,
                     gap: screenLayoutMetrics.keyboardComposerGap,
                 }));
             });
         });
-    }, [tabBarHeight]);
+    }, [setAndroidKeyboardInsetValue, tabBarHeight]);
 
     const handleComposerContainerLayout = useCallback((event: LayoutChangeEvent) => {
         const nextHeight = event.nativeEvent.layout.height;
@@ -1058,6 +1133,7 @@ export const ChatScreen = () => {
 
         const updateKeyboardMetrics = (event: KeyboardEvent) => {
             isKeyboardVisibleRef.current = true;
+            setIsAndroidKeyboardVisible(true);
             androidKeyboardMetricsRef.current = {
                 height: event.endCoordinates.height,
                 topY: event.endCoordinates.screenY > 0
@@ -1083,8 +1159,9 @@ export const ChatScreen = () => {
 
         const keyboardHideSubscription = Keyboard.addListener('keyboardDidHide', () => {
             isKeyboardVisibleRef.current = false;
+            setIsAndroidKeyboardVisible(false);
             androidKeyboardMetricsRef.current = null;
-            setAndroidKeyboardInset(0);
+            setAndroidKeyboardInsetValue(0);
             baseWindowHeightRef.current = Dimensions.get('window').height;
         });
 
@@ -1099,7 +1176,7 @@ export const ChatScreen = () => {
             keyboardFrameSubscription.remove();
             keyboardHideSubscription.remove();
         };
-    }, [updateAndroidKeyboardInsetFromLayout]);
+    }, [setAndroidKeyboardInsetValue, updateAndroidKeyboardInsetFromLayout]);
 
     useEffect(() => {
         return () => {
@@ -1327,7 +1404,7 @@ export const ChatScreen = () => {
                                 onTouchStart={handleListTouchStart}
                                 onTouchEnd={handleListTouchEnd}
                                 onTouchCancel={handleListTouchCancel}
-                                contentContainerStyle={{ paddingTop: 4, paddingBottom: listBottomPadding, flexGrow: 1 }}
+                                contentContainerStyle={{ paddingTop: 4 + headerInset, paddingBottom: listBottomPadding, flexGrow: 1 }}
                                 maintainVisibleContentPosition={listMaintainVisibleContentPosition}
                                 onContentSizeChange={handleListContentSizeChange}
                                 onLoad={handleListContentSizeChange}
@@ -1341,13 +1418,20 @@ export const ChatScreen = () => {
                                 renderItem={renderChatMessage}
                             />
                         ) : shouldShowRecoveryCard ? (
-                            <Box className="flex-1 justify-center px-3 pb-10">
+                            <Box
+                                className="flex-1 justify-center px-3 pb-10"
+                                style={{
+                                    paddingTop: headerInset,
+                                    paddingBottom: 40 + tabBarInset,
+                                }}
+                            >
                                 <ScreenCard
-                                     testID="chat-recovery-card"
+                                    testID="chat-recovery-card"
                                     tone="warning"
                                     padding="none"
+                                    decorative="matte"
                                     className="items-center px-6 py-8"
-                                 >
+                                >
                                     <ScreenIconTile
                                         iconName={hasActiveModel ? 'hourglass-empty' : 'download'}
                                         tone="warning"
@@ -1357,11 +1441,11 @@ export const ChatScreen = () => {
                                     />
 
                                     {hasActiveModel ? (
-                                        <Box className={`mt-4 ${appearance.classNames.inlinePillClassName}`}>
+                                        <ScreenSurface className={`mt-4 ${appearance.classNames.inlinePillClassName}`}>
                                             <Text className="text-xs font-semibold uppercase tracking-wide text-typography-600 dark:text-typography-300">
                                                 {modelLabel}
                                             </Text>
-                                        </Box>
+                                        </ScreenSurface>
                                     ) : null}
 
                                     <Text
@@ -1371,13 +1455,13 @@ export const ChatScreen = () => {
                                     </Text>
 
                                     {isModelInitializing ? (
-                                        <Box className={`mt-4 w-full rounded-2xl border px-3 py-2.5 ${appearance.classNames.toneClassNameByTone.accent.surfaceClassName}`}>
+                                        <ScreenSurface tone="accent" withControlTint className={`mt-4 w-full rounded-2xl border px-3 py-2.5 ${appearance.classNames.toneClassNameByTone.accent.surfaceClassName}`}>
                                             <Box className="mb-2 flex-row items-center justify-end">
-                                                <Box className={`rounded-full px-2.5 py-1 ${appearance.classNames.toneClassNameByTone.accent.percentPillClassName}`}>
+                                                <ScreenSurface tone="accent" withControlTint className={`rounded-full px-2.5 py-1 ${appearance.classNames.toneClassNameByTone.accent.percentPillClassName}`}>
                                                     <Text className="text-xs font-bold text-primary-700 dark:text-primary-200">
                                                         {warmupProgressPercent}%
                                                     </Text>
-                                                </Box>
+                                                </ScreenSurface>
                                             </Box>
                                             <ProgressBar
                                                 testID="chat-recovery-warmup-progress-track"
@@ -1387,7 +1471,7 @@ export const ChatScreen = () => {
                                                 tone="primary"
                                                 variant="framed"
                                             />
-                                        </Box>
+                                        </ScreenSurface>
                                     ) : null}
 
                                     <Text
@@ -1406,7 +1490,7 @@ export const ChatScreen = () => {
                                         <MaterialSymbols
                                             name={hasActiveModel ? 'tune' : 'download'}
                                             size={18}
-                                            className="text-typography-0"
+                                            className={primaryActionContentClassName}
                                         />
                                         <ButtonText>{resolvedModelRecoveryActionLabel}</ButtonText>
                                     </Button>
@@ -1436,45 +1520,53 @@ export const ChatScreen = () => {
                 </Box>
 
                 {SHOULD_USE_KEYBOARD_AVOIDING_VIEW ? (
-                    <KeyboardAvoidingView
+                    <View
                         testID="chat-keyboard-avoiding-view"
-                        behavior="padding"
-                        keyboardVerticalOffset={tabBarHeight}
                         onLayout={handleComposerContainerLayout}
+                        style={composerBottomInsetStyle}
                     >
-                        <ChatInputBar
-                            draft={composerDraft}
-                            onDraftChange={setComposerDraft}
-                            onSendMessage={handleSendMessage}
-                            onStopGeneration={stopGeneration}
-                            disabled={isInputDisabled}
-                            isSending={isGenerating}
-                            modeLabel={pendingRegenerateMessage ? t('chat.editEarlierMessage') : undefined}
-                            modeDescription={pendingRegenerateMessage
-                                ? t('chat.editEarlierMessageDescription')
-                                : undefined}
-                            onCancelMode={pendingRegenerateMessage ? handleCancelComposerMode : undefined}
-                        />
-                    </KeyboardAvoidingView>
+                        <KeyboardAvoidingView
+                            behavior="padding"
+                            keyboardVerticalOffset={tabBarHeight}
+                        >
+                            <ChatInputBar
+                                draft={composerDraft}
+                                onDraftChange={setComposerDraft}
+                                onSendMessage={handleSendMessage}
+                                onStopGeneration={stopGeneration}
+                                disabled={isInputDisabled}
+                                isSending={isGenerating}
+                                modeLabel={pendingRegenerateMessage ? t('chat.editEarlierMessage') : undefined}
+                                modeDescription={pendingRegenerateMessage
+                                    ? t('chat.editEarlierMessageDescription')
+                                    : undefined}
+                                onCancelMode={pendingRegenerateMessage ? handleCancelComposerMode : undefined}
+                            />
+                        </KeyboardAvoidingView>
+                    </View>
                 ) : (
                     <View
-                        ref={composerContainerRef}
                         testID="chat-keyboard-avoiding-view"
-                        onLayout={handleComposerContainerLayout}
+                        style={androidComposerContainerStyle}
                     >
-                        <ChatInputBar
-                            draft={composerDraft}
-                            onDraftChange={setComposerDraft}
-                            onSendMessage={handleSendMessage}
-                            onStopGeneration={stopGeneration}
-                            disabled={isInputDisabled}
-                            isSending={isGenerating}
-                            modeLabel={pendingRegenerateMessage ? t('chat.editEarlierMessage') : undefined}
-                            modeDescription={pendingRegenerateMessage
-                                ? t('chat.editEarlierMessageDescription')
-                                : undefined}
-                            onCancelMode={pendingRegenerateMessage ? handleCancelComposerMode : undefined}
-                        />
+                        <View
+                            ref={composerContainerRef}
+                            onLayout={handleComposerContainerLayout}
+                        >
+                            <ChatInputBar
+                                draft={composerDraft}
+                                onDraftChange={setComposerDraft}
+                                onSendMessage={handleSendMessage}
+                                onStopGeneration={stopGeneration}
+                                disabled={isInputDisabled}
+                                isSending={isGenerating}
+                                modeLabel={pendingRegenerateMessage ? t('chat.editEarlierMessage') : undefined}
+                                modeDescription={pendingRegenerateMessage
+                                    ? t('chat.editEarlierMessageDescription')
+                                    : undefined}
+                                onCancelMode={pendingRegenerateMessage ? handleCancelComposerMode : undefined}
+                            />
+                        </View>
                         {androidKeyboardInset > 0 ? (
                             <Box testID="chat-android-keyboard-spacer" style={{ height: androidKeyboardInset }} />
                         ) : null}
@@ -1485,7 +1577,7 @@ export const ChatScreen = () => {
             {shouldShowFloatingWarmupBanner ? (
                 <ModelWarmupBanner
                     engineState={engineState}
-                    bottomOffset={composerContainerHeight}
+                    bottomOffset={warmupBannerBottomOffset}
                 />
             ) : null}
 
@@ -1522,3 +1614,11 @@ export const ChatScreen = () => {
         </ScreenRoot>
     );
 };
+
+const styles = StyleSheet.create({
+    androidFloatingComposer: {
+        position: 'absolute',
+        left: 0,
+        right: 0,
+    },
+});

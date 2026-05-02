@@ -23,6 +23,7 @@ import {
   ScreenRoot,
   ScreenSheet,
   ScreenStack,
+  useFloatingHeaderInset,
   useScreenAppearance,
 } from '@/components/ui/ScreenShell';
 import { Text, composeTextRole } from '@/components/ui/text';
@@ -37,6 +38,7 @@ import {
 import { getSettings, subscribeSettings, updateSettings } from '../../services/SettingsStore';
 import { getReportedErrorMessage } from '../../services/AppError';
 import { useChatStore } from '../../store/chatStore';
+import { getThemeActionContentClassName } from '../../utils/themeTokens';
 
 const CHAT_RETENTION_OPTIONS = [
   {
@@ -76,6 +78,8 @@ function formatRetentionLabel(days: number | null, t: (key: string, options?: Re
 export function ConversationsScreen() {
   const { t } = useTranslation();
   const appearance = useScreenAppearance();
+  const headerInset = useFloatingHeaderInset();
+  const primaryActionContentClassName = getThemeActionContentClassName(appearance, 'primary');
   const insets = useSafeAreaInsets();
   const isFocused = useIsFocused();
   const router = useRouter();
@@ -325,7 +329,7 @@ export function ConversationsScreen() {
     const isActive = activeThreadId === item.id;
 
     return (
-      <ScreenCard padding="compact">
+      <ScreenCard decorative="tint" padding="compact">
         <Box className="flex-row items-start justify-between gap-3">
           <Pressable
             testID={`conversation-row-${item.id}`}
@@ -409,15 +413,19 @@ export function ConversationsScreen() {
             size="lg"
             className="shrink-0"
           >
-            <MaterialSymbols name="edit-square" size="sm" className="text-typography-0" />
-            <Text className="text-sm font-semibold text-typography-0">
+            <MaterialSymbols name="edit-square" size="sm" className={primaryActionContentClassName} />
+            <Text className={`text-sm font-semibold ${primaryActionContentClassName}`}>
               {t('conversations.newChat')}
             </Text>
           </ScreenActionPill>
         )}
       />
 
-      <ScreenContent className="flex-1 pt-2">
+      <ScreenContent
+        className="flex-1"
+        respectFloatingHeader={false}
+        style={{ paddingTop: headerInset + 8 }}
+      >
         <ScreenStack className="flex-1" gap="compact">
           <ScreenInlineInput
             variant="search"
@@ -457,7 +465,7 @@ export function ConversationsScreen() {
             </Box>
           ) : (
             <Box className="flex-1 pt-4">
-              <ScreenCard padding="compact">
+              <ScreenCard padding="compact" decorative="matte">
                 <ScreenIconTile
                   iconName={conversationIndex.length === 0 ? 'forum' : 'search'}
                   tone="accent"

@@ -116,7 +116,7 @@ export function ModelDetailsScreen() {
       ) : null}
 
       <ScrollView className="flex-1">
-        <ScreenContent className="flex-1 pt-3">
+        <ScreenContent className="flex-1 pt-3" includeBottomSafeArea>
           <ScreenStack gap="loose">
             {loading && !displayModel ? (
               <Box className="items-center justify-center pt-16">

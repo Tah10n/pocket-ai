@@ -147,7 +147,7 @@ export function HuggingFaceTokenScreen() {
         </ScrollView>
       </ScreenContent>
 
-      <ScreenContent className="pt-4">
+      <ScreenContent className="pt-4" includeBottomSafeArea>
         <Box className="flex-row gap-3">
           <Button className="flex-1" onPress={() => { void handleSave(); }} disabled={busy !== null || tokenDraft.trim().length === 0}>
             <ButtonText>{busy === 'save' ? t('common.loading') : t('common.save')}</ButtonText>

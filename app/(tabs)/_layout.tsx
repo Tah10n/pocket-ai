@@ -1,22 +1,17 @@
 import { Tabs } from 'expo-router';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
+import { Platform } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MaterialSymbols } from '../../src/components/ui/MaterialSymbols';
 import { useTheme } from '../../src/providers/ThemeProvider';
+import { createBottomTabBarStyle } from '../../src/utils/tabBarLayout';
 
 export default function TabLayout() {
   const { t } = useTranslation();
   const { colors } = useTheme();
-  const tabBarStyle = {
-    height: 74,
-    paddingTop: 8,
-    paddingBottom: 12,
-    backgroundColor: colors.tabBarBackground,
-    borderTopColor: colors.tabBarBorder,
-    borderTopWidth: 1,
-    elevation: 0,
-    shadowOpacity: 0,
-  } as const;
+  const insets = useSafeAreaInsets();
+  const tabBarStyle = createBottomTabBarStyle(colors, insets.bottom, Platform.OS);
 
   return (
     <Tabs

@@ -87,6 +87,7 @@ describe('LLMEngineService', () => {
     jest.clearAllMocks();
     createStorage('pocket-ai-autotune', { tier: 'private' }).clearAll();
     inferenceBackendService.clearCache();
+    (llmEngineService as any).additionalStopWordsCache?.clear?.();
     getBackendDevicesInfoMock().mockResolvedValue([
       {
         type: 'gpu',
@@ -184,6 +185,96 @@ describe('LLMEngineService', () => {
     expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).toHaveBeenLastCalledWith(
       expect.objectContaining({
         stop: expect.arrayContaining(['</s>', '<|custom_stop|>']),
+      }),
+      expect.any(Function),
+    );
+  });
+
+  it('reuses cached template additional stop tokens for the same loaded context, messages, and options', async () => {
+    getFormattedChatMock().mockResolvedValue({
+      prompt: 'Formatted prompt',
+      additional_stops: ['<|cached_stop|>'],
+    });
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    await llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Hello' }],
+      params: { n_predict: 32 },
+    });
+    await llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Hello' }],
+      params: { n_predict: 32 },
+    });
+
+    expect(getFormattedChatMock()).toHaveBeenCalledTimes(1);
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        stop: expect.arrayContaining(['<|cached_stop|>']),
+      }),
+      expect.any(Function),
+    );
+  });
+
+  it('resolves template additional stops again for a different message payload', async () => {
+    getFormattedChatMock()
+      .mockResolvedValueOnce({
+        prompt: 'Formatted prompt',
+        additional_stops: ['<|first_payload_stop|>'],
+      })
+      .mockResolvedValueOnce({
+        prompt: 'Formatted prompt',
+        additional_stops: ['<|second_payload_stop|>'],
+      });
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    await llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Hello' }],
+      params: { n_predict: 32 },
+    });
+    await llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Hello again' }],
+      params: { n_predict: 32 },
+    });
+
+    expect(getFormattedChatMock()).toHaveBeenCalledTimes(2);
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        stop: expect.arrayContaining(['<|second_payload_stop|>']),
+      }),
+      expect.any(Function),
+    );
+  });
+
+  it('invalidates cached template additional stops after unload and reload', async () => {
+    getFormattedChatMock()
+      .mockResolvedValueOnce({
+        prompt: 'Formatted prompt',
+        additional_stops: ['<|first_stop|>'],
+      })
+      .mockResolvedValueOnce({
+        prompt: 'Formatted prompt',
+        additional_stops: ['<|second_stop|>'],
+      });
+
+    await llmEngineService.load('test/model', { forceReload: true });
+    await llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Hello' }],
+      params: { n_predict: 32 },
+    });
+
+    await llmEngineService.unload();
+    await llmEngineService.load('test/model', { forceReload: true });
+    await llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Hello again' }],
+      params: { n_predict: 32 },
+    });
+
+    expect(getFormattedChatMock()).toHaveBeenCalledTimes(2);
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        stop: expect.arrayContaining(['<|second_stop|>']),
       }),
       expect.any(Function),
     );

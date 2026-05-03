@@ -100,6 +100,7 @@ describe('LLMEngineService Stability', () => {
         (llmEngineService as any).initPromise = null;
         (llmEngineService as any).operationQueue = Promise.resolve();
         (llmEngineService as any).activeCompletionPromise = null;
+        (llmEngineService as any).additionalStopWordsCache?.clear?.();
         (llmEngineService as any).isUnloading = false;
         (llmEngineService as any).activeContextSize = 2048;
         (llmEngineService as any).activeGpuLayers = null;

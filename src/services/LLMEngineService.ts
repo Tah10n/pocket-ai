@@ -92,8 +92,10 @@ export type BackendAvailability = {
 };
 
 type StateListener = (state: EngineState) => void;
+type ChatCompletionReasoningFormat = NonNullable<NonNullable<LlmChatCompletionOptions['params']>['reasoning_format']>;
 const DEFAULT_CONTEXT_SIZE = 4096;
 const MAX_NATIVE_LOG_LINES = 120;
+const MAX_ADDITIONAL_STOP_WORDS_CACHE_ENTRIES = 8;
 
 type CalibrationSession = {
   modelId: string;
@@ -335,6 +337,7 @@ class LLMEngineService {
   private initNBatch: number | null = null;
   private initNUbatch: number | null = null;
   private initKvUnified: boolean | null = null;
+  private additionalStopWordsCache: Map<string, string[]> = new Map();
   private state: EngineState = {
     status: EngineStatus.IDLE,
     loadProgress: 0,
@@ -367,6 +370,7 @@ class LLMEngineService {
   private setContext(context: LlamaContext | null): void {
     this.context = context;
     this.contextGeneration += 1;
+    this.additionalStopWordsCache.clear();
   }
 
   private getReadyContextOrThrow(): { context: LlamaContext; generation: number } {
@@ -389,6 +393,125 @@ class LLMEngineService {
 
     if (this.context !== context || this.contextGeneration !== generation || this.state.status !== EngineStatus.READY) {
       throw new AppError('engine_not_ready', 'Engine context changed during operation');
+    }
+  }
+
+  private buildAdditionalStopWordsCacheKey({
+    generation,
+    messages,
+    enableThinking,
+    reasoningFormat,
+  }: {
+    generation: number;
+    messages: LlmChatMessage[];
+    enableThinking: boolean;
+    reasoningFormat: ChatCompletionReasoningFormat;
+  }): string {
+    return [
+      this.state.activeModelId ?? 'unknown-model',
+      generation,
+      enableThinking ? 'thinking:on' : 'thinking:off',
+      `reasoning:${reasoningFormat}`,
+      'generation-prompt:on',
+      `messages:${this.buildChatMessagesCacheSignature(messages)}`,
+    ].join('|');
+  }
+
+  private buildChatMessagesCacheSignature(messages: LlmChatMessage[]): string {
+    let hash = 2166136261;
+    for (const message of messages) {
+      hash = this.updateCacheHash(hash, message.role);
+      hash = this.updateCacheHash(hash, '\u0000');
+      hash = this.updateCacheHash(hash, String(message.content.length));
+      hash = this.updateCacheHash(hash, '\u0000');
+      hash = this.updateCacheHash(hash, message.content);
+      hash = this.updateCacheHash(hash, '\u0001');
+    }
+
+    return `${messages.length}:${hash.toString(36)}`;
+  }
+
+  private updateCacheHash(hash: number, value: string): number {
+    let nextHash = hash >>> 0;
+    for (let i = 0; i < value.length; i += 1) {
+      nextHash ^= value.charCodeAt(i);
+      nextHash = Math.imul(nextHash, 16777619) >>> 0;
+    }
+    return nextHash;
+  }
+
+  private normalizeAdditionalStopWords(stops: unknown[]): string[] {
+    return Array.from(
+      new Set(
+        stops
+          .filter((stop): stop is string => typeof stop === 'string')
+          .map((stop) => stop.trim())
+          .filter((stop) => stop.length > 0),
+      ),
+    );
+  }
+
+  private async resolveTemplateAdditionalStopWords({
+    context,
+    generation,
+    messages,
+    enableThinking,
+    reasoningFormat,
+  }: {
+    context: LlamaContext;
+    generation: number;
+    messages: LlmChatMessage[];
+    enableThinking: boolean;
+    reasoningFormat: ChatCompletionReasoningFormat;
+  }): Promise<string[]> {
+    const cacheKey = this.buildAdditionalStopWordsCacheKey({
+      generation,
+      messages,
+      enableThinking,
+      reasoningFormat,
+    });
+    const cached = this.additionalStopWordsCache.get(cacheKey);
+    if (cached) {
+      this.assertContextStillCurrent(context, generation);
+      return [...cached];
+    }
+
+    try {
+      this.assertContextStillCurrent(context, generation);
+      const formatted = await context.getFormattedChat(
+        messages as any,
+        null,
+        {
+          enable_thinking: enableThinking,
+          reasoning_format: reasoningFormat,
+          add_generation_prompt: true,
+        },
+      );
+      this.assertContextStillCurrent(context, generation);
+
+      const additionalStops = (
+        formatted
+        && typeof formatted === 'object'
+        && 'additional_stops' in formatted
+        && Array.isArray((formatted as any).additional_stops)
+      )
+        ? ((formatted as any).additional_stops as unknown[])
+        : [];
+      const normalizedStops = this.normalizeAdditionalStopWords(additionalStops);
+      this.additionalStopWordsCache.set(cacheKey, normalizedStops);
+      if (this.additionalStopWordsCache.size > MAX_ADDITIONAL_STOP_WORDS_CACHE_ENTRIES) {
+        const oldestCacheKey = this.additionalStopWordsCache.keys().next().value;
+        if (oldestCacheKey) {
+          this.additionalStopWordsCache.delete(oldestCacheKey);
+        }
+      }
+      return [...normalizedStops];
+    } catch (error) {
+      this.assertContextStillCurrent(context, generation);
+      if (process.env.NODE_ENV !== 'test') {
+        console.warn('[LLMEngine] Failed to resolve template stop tokens', error);
+      }
+      return [];
     }
   }
 
@@ -1005,7 +1128,7 @@ class LLMEngineService {
 
         const runCompletion = async (completionMessages: LlmChatMessage[], onTokensStreamed: () => void) => {
           const enableThinking = params?.enable_thinking ?? false;
-          const reasoningFormat = params?.reasoning_format ?? 'none';
+          const reasoningFormat: ChatCompletionReasoningFormat = params?.reasoning_format ?? 'none';
           const baseStopWords = [
             '</s>',
             '<|end|>',
@@ -1018,41 +1141,20 @@ class LLMEngineService {
             '<|endoftext|>',
           ];
 
-          let stopWords = baseStopWords;
-          try {
-            this.assertContextStillCurrent(context, contextGeneration);
-            const formatted = await context.getFormattedChat(
-              completionMessages as any,
-              null,
-              {
-                enable_thinking: enableThinking,
-                reasoning_format: reasoningFormat,
-                add_generation_prompt: true,
-              },
-            );
-            const additionalStops = (
-              formatted
-              && typeof formatted === 'object'
-              && 'additional_stops' in formatted
-              && Array.isArray((formatted as any).additional_stops)
-            )
-              ? ((formatted as any).additional_stops as unknown[])
-              : [];
-
-            stopWords = [
-              ...baseStopWords,
-              ...additionalStops.filter((stop): stop is string => typeof stop === 'string'),
-            ];
-          } catch (error) {
-            if (process.env.NODE_ENV !== 'test') {
-              console.warn('[LLMEngine] Failed to resolve template stop tokens', error);
-            }
-          }
-
-          this.assertContextStillCurrent(context, contextGeneration);
+          const additionalStopWords = await this.resolveTemplateAdditionalStopWords({
+            context,
+            generation: contextGeneration,
+            messages: completionMessages,
+            enableThinking,
+            reasoningFormat,
+          });
 
           const resolvedStops = Array.from(
-            new Set(stopWords.map((stop) => stop.trim()).filter((stop) => stop.length > 0)),
+            new Set(
+              [...baseStopWords, ...additionalStopWords]
+                .map((stop) => stop.trim())
+                .filter((stop) => stop.length > 0),
+            ),
           );
 
           const completionParams: Record<string, unknown> = {

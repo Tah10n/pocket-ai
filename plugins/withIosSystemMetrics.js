@@ -66,6 +66,7 @@ function createIosSystemMetricsSource() {
 #import <React/RCTBridgeModule.h>
 #import <mach/mach.h>
 #import <mach/mach_host.h>
+#import <os/proc.h>
 
 @interface ${SYSTEM_METRICS_MODULE_NAME} : NSObject <RCTBridgeModule>
 @end
@@ -113,6 +114,13 @@ RCT_REMAP_METHOD(getMemorySnapshot,
     kern_return_t taskKr = task_info(mach_task_self(), TASK_BASIC_INFO, (task_info_t)&taskInfo, &taskCount);
     uint64_t appResidentBytes = taskKr == KERN_SUCCESS ? (uint64_t)taskInfo.resident_size : 0;
 
+    BOOL hasProcessAvailableBytes = NO;
+    uint64_t processAvailableBytes = 0;
+    if (@available(iOS 13.0, *)) {
+      processAvailableBytes = os_proc_available_memory();
+      hasProcessAvailableBytes = YES;
+    }
+
     NSString *pressureLevel = @"unknown";
     BOOL lowMemory = NO;
     if (hasVmInfo && totalBytes > 0) {
@@ -130,7 +138,7 @@ RCT_REMAP_METHOD(getMemorySnapshot,
     NSTimeInterval nowSeconds = [[NSDate date] timeIntervalSince1970];
     NSNumber *timestampMs = @((long long)(nowSeconds * 1000.0));
 
-    resolve(@{
+    NSMutableDictionary *result = [@{
       @"timestampMs": timestampMs,
       @"totalBytes": @(totalBytes),
       @"availableBytes": @(availableBytes),
@@ -141,7 +149,13 @@ RCT_REMAP_METHOD(getMemorySnapshot,
       @"lowMemory": @(lowMemory),
       @"pressureLevel": pressureLevel,
       @"thresholdBytes": @(0)
-    });
+    } mutableCopy];
+
+    if (hasProcessAvailableBytes) {
+      result[@"processAvailableBytes"] = @(processAvailableBytes);
+    }
+
+    resolve(result);
   }
   @catch (NSException *exception) {
     reject(@"E_SYSTEM_METRICS", @"Failed to read iOS system memory metrics", nil);
@@ -207,8 +221,14 @@ function withIosSystemMetricsXcodeProject(config) {
   });
 }
 
-module.exports = function withIosSystemMetrics(config) {
+function withIosSystemMetrics(config) {
   config = withIosSystemMetricsSourceFiles(config);
   config = withIosSystemMetricsXcodeProject(config);
   return config;
+}
+
+withIosSystemMetrics._internal = {
+  createIosSystemMetricsSource,
 };
+
+module.exports = withIosSystemMetrics;

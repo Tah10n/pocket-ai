@@ -100,6 +100,7 @@ describe('LLMEngineService Stability', () => {
         (llmEngineService as any).initPromise = null;
         (llmEngineService as any).operationQueue = Promise.resolve();
         (llmEngineService as any).activeCompletionPromise = null;
+        (llmEngineService as any).completionInterruptGeneration = 0;
         (llmEngineService as any).additionalStopWordsCache?.clear?.();
         (llmEngineService as any).isUnloading = false;
         (llmEngineService as any).activeContextSize = 2048;
@@ -296,5 +297,43 @@ describe('LLMEngineService Stability', () => {
 
         expect(releaseAllLlama).toHaveBeenCalled();
         expect(llmEngineService.getState().status).toBe('idle');
+    });
+
+    it('does not start native completion after stop is requested during template formatting', async () => {
+        let resolveFormatted: (() => void) | undefined;
+        const getFormattedChat = jest.fn(() => new Promise((resolve) => {
+            resolveFormatted = () => resolve({ prompt: 'Formatted prompt', additional_stops: [] });
+        }));
+        const completion = jest.fn().mockResolvedValue({ text: 'Should not run after interrupt' });
+        const stopCompletion = jest.fn().mockResolvedValue(undefined);
+
+        (initLlama as jest.Mock).mockImplementation(async (options?: { n_gpu_layers?: number }) => ({
+            ...createMockContext(options),
+            completion,
+            getFormattedChat,
+            stopCompletion,
+        }));
+
+        await llmEngineService.load(mockModel.id);
+        const completionPromise = llmEngineService.chatCompletion({
+            messages: [{ role: 'user', content: 'Hello' }],
+            params: { n_predict: 16 },
+        });
+
+        await Promise.resolve();
+        expect(getFormattedChat).toHaveBeenCalled();
+
+        const stopPromise = llmEngineService.stopCompletion();
+        for (let i = 0; i < 5 && stopCompletion.mock.calls.length === 0; i += 1) {
+            await Promise.resolve();
+        }
+
+        expect(stopCompletion).toHaveBeenCalled();
+        await expect(stopPromise).resolves.toBeUndefined();
+
+        resolveFormatted?.();
+        await expect(completionPromise).rejects.toMatchObject({ code: 'engine_not_ready' });
+
+        expect(completion).not.toHaveBeenCalled();
     });
 });

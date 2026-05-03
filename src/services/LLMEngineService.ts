@@ -353,6 +353,7 @@ class LLMEngineService {
   private initPromise: Promise<void> | null = null;
   private operationQueue: Promise<void> = Promise.resolve();
   private activeCompletionPromise: Promise<NativeCompletionResult> | null = null;
+  private completionInterruptGeneration = 0;
   private isUnloading = false;
   private activeCalibrationSession: CalibrationSession | null = null;
 
@@ -393,6 +394,12 @@ class LLMEngineService {
 
     if (this.context !== context || this.contextGeneration !== generation || this.state.status !== EngineStatus.READY) {
       throw new AppError('engine_not_ready', 'Engine context changed during operation');
+    }
+  }
+
+  private assertCompletionNotInterrupted(generation: number): void {
+    if (this.completionInterruptGeneration !== generation) {
+      throw new AppError('engine_not_ready', 'Completion was interrupted before generation started');
     }
   }
 
@@ -1109,6 +1116,7 @@ class LLMEngineService {
     });
 
     this.activeCompletionPromise = completionTask;
+    const interruptGeneration = this.completionInterruptGeneration;
 
     void (async () => {
       try {
@@ -1127,6 +1135,7 @@ class LLMEngineService {
         };
 
         const runCompletion = async (completionMessages: LlmChatMessage[], onTokensStreamed: () => void) => {
+          this.assertCompletionNotInterrupted(interruptGeneration);
           const enableThinking = params?.enable_thinking ?? false;
           const reasoningFormat: ChatCompletionReasoningFormat = params?.reasoning_format ?? 'none';
           const baseStopWords = [
@@ -1148,6 +1157,7 @@ class LLMEngineService {
             enableThinking,
             reasoningFormat,
           });
+          this.assertCompletionNotInterrupted(interruptGeneration);
 
           const resolvedStops = Array.from(
             new Set(
@@ -1185,6 +1195,7 @@ class LLMEngineService {
           }
 
           this.assertContextStillCurrent(context, contextGeneration);
+          this.assertCompletionNotInterrupted(interruptGeneration);
 
           return await context.completion(
             completionParams as any,
@@ -1439,6 +1450,10 @@ class LLMEngineService {
   }
 
   public async stopCompletion(): Promise<void> {
+    if (this.activeCompletionPromise) {
+      this.completionInterruptGeneration += 1;
+    }
+
     if (this.context) {
       await this.context.stopCompletion();
     }

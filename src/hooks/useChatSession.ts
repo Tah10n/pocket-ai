@@ -456,6 +456,16 @@ export const useChatSession = () => {
         ? reasoningRuntimeConfig.reasoningFormat
         : 'none';
 
+      if (isMatchingGeneration(threadId, assistantMessageId) && sharedGenerationState.current?.stopRequested) {
+        flushAssistantPatch();
+        stopAssistantMessage(threadId, assistantMessageId);
+        finalizeThreadStatus(threadId, 'stopped');
+        recordCompletionStats('stopped');
+
+        sendOutcomeNotificationOnce('interrupted');
+        return;
+      }
+
       const completion = await llmEngineService.chatCompletion({
         messages,
         params: {

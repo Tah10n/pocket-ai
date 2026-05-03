@@ -535,6 +535,44 @@ describe('useChatSession', () => {
     );
   });
 
+  it('does not start engine completion when stop is requested during prompt preparation', async () => {
+    let resolvePromptCount: (() => void) | undefined;
+    (llmEngineService.countPromptTokens as jest.Mock).mockImplementationOnce(
+      () => new Promise((resolve) => {
+        resolvePromptCount = () => resolve(16);
+      }),
+    );
+
+    const getSession = renderHookHarness();
+    let sendPromise: Promise<void> | undefined;
+
+    await act(async () => {
+      sendPromise = getSession()?.appendUserMessage('Stop before native generation');
+    });
+
+    await waitFor(() => {
+      expect(llmEngineService.countPromptTokens).toHaveBeenCalled();
+    });
+
+    await act(async () => {
+      await getSession()?.stopGeneration();
+    });
+
+    await act(async () => {
+      resolvePromptCount?.();
+      await sendPromise;
+    });
+
+    const thread = useChatStore.getState().getActiveThread();
+    expect(llmEngineService.stopCompletion).toHaveBeenCalled();
+    expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
+    expect(thread?.status).toBe('stopped');
+    expect(thread?.messages.at(-1)).toEqual(expect.objectContaining({
+      role: 'assistant',
+      state: 'stopped',
+    }));
+  });
+
   it('regenerates the last assistant response in-place', async () => {
     const getSession = renderHookHarness();
 

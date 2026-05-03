@@ -1839,6 +1839,8 @@ class LLMEngineService {
       const ggufArchitecture = getModelInfoString(modelInfo, 'general.architecture')?.toLowerCase() ?? null;
       const ggufType = getModelInfoString(modelInfo, 'general.type')?.toLowerCase() ?? null;
       if (ggufType === 'mmproj' || ggufArchitecture === 'clip') {
+        // mmproj/CLIP projector GGUFs need a separate multimodal lifecycle. Never load them as
+        // the primary language model context.
         throw new AppError(
           'model_incompatible',
           'CLIP projector models (mmproj) cannot be used as the main model. Download the base language model GGUF instead.',

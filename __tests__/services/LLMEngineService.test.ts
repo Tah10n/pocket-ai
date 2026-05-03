@@ -1608,6 +1608,19 @@ describe('LLMEngineService', () => {
     expect(llamaRn.initLlama).not.toHaveBeenCalled();
   });
 
+  it('rejects CLIP architecture GGUF files even when the GGUF type is not mmproj', async () => {
+    (llamaRn.loadLlamaModelInfo as jest.Mock).mockResolvedValueOnce({
+      'general.type': 'model',
+      'general.architecture': 'clip',
+    });
+
+    await expect(
+      llmEngineService.load('test/model', { forceReload: true }),
+    ).rejects.toMatchObject({ code: 'model_incompatible' });
+
+    expect(llamaRn.initLlama).not.toHaveBeenCalled();
+  });
+
   it('clamps an aggressive saved load profile back under the memory ceiling before loading', async () => {
     const totalMemoryBytes = 8 * 1024 * 1024 * 1024;
     const modelSizeBytes = 4_705_000_000;

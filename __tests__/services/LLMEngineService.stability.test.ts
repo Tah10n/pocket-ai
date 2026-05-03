@@ -103,6 +103,7 @@ describe('LLMEngineService Stability', () => {
         (llmEngineService as any).contextOperationQueue = Promise.resolve();
         (llmEngineService as any).activeCompletionPromise = null;
         (llmEngineService as any).activeContextOperationPromises?.clear?.();
+        (llmEngineService as any).activeContextReleaseOperationPromises?.clear?.();
         (llmEngineService as any).completionInterruptGeneration = 0;
         (llmEngineService as any).additionalStopWordsCache?.clear?.();
         (llmEngineService as any).isUnloading = false;

@@ -44,6 +44,7 @@ interface ActiveGenerationState {
   threadId: string;
   messageId: string;
   stopRequested: boolean;
+  flushPendingAssistantPatch?: () => void;
 }
 
 const sharedGenerationState: { current: ActiveGenerationState | null } = {
@@ -281,7 +282,7 @@ export const useChatSession = () => {
       && (options?.allowStopped === true || !generationState.stopRequested)
     );
 
-    const flushAssistantPatch = (options?: { allowStopped?: boolean }) => {
+    const flushAssistantPatch = (options?: { allowStopped?: boolean; includeStreamingState?: boolean }) => {
       if (flushTimeout) {
         clearTimeout(flushTimeout);
         flushTimeout = null;
@@ -296,12 +297,17 @@ export const useChatSession = () => {
       const elapsedSec = (Date.now() - startTime) / 1000;
       const tokensPerSec = elapsedSec > 0 ? tokensCount / elapsedSec : 0;
 
-      patchAssistantMessage(threadId, assistantMessageId, {
+      const updates: Partial<ChatMessage> = {
         content: currentText,
         thoughtContent: currentThoughtText || undefined,
         tokensPerSec,
-        state: 'streaming',
-      });
+      };
+
+      if (options?.includeStreamingState !== false) {
+        updates.state = 'streaming';
+      }
+
+      patchAssistantMessage(threadId, assistantMessageId, updates);
     };
 
     const scheduleAssistantPatch = () => {
@@ -313,6 +319,12 @@ export const useChatSession = () => {
         flushTimeout = null;
         flushAssistantPatch();
       }, STREAM_PATCH_INTERVAL_MS);
+    };
+
+    generationState.flushPendingAssistantPatch = () => {
+      flushAssistantPatch(generationState.stopRequested
+        ? { allowStopped: true, includeStreamingState: false }
+        : undefined);
     };
 
     const sendOutcomeNotificationOnce = (outcome: 'interrupted' | 'error') => {
@@ -468,7 +480,7 @@ export const useChatSession = () => {
 
       if (generationState.stopRequested) {
         if (isMatchingGeneration(threadId, assistantMessageId)) {
-      flushAssistantPatch();
+          flushAssistantPatch();
           stopAssistantMessage(threadId, assistantMessageId);
           finalizeThreadStatus(threadId, 'stopped');
           recordCompletionStats('stopped');
@@ -561,7 +573,7 @@ export const useChatSession = () => {
 
       if (generationState.stopRequested) {
         if (isMatchingGeneration(threadId, assistantMessageId)) {
-          flushAssistantPatch({ allowStopped: true });
+          flushAssistantPatch({ allowStopped: true, includeStreamingState: false });
           stopAssistantMessage(threadId, assistantMessageId);
           finalizeThreadStatus(threadId, 'stopped');
           recordCompletionStats('stopped');
@@ -594,7 +606,7 @@ export const useChatSession = () => {
     } catch (error) {
       if (generationState.stopRequested) {
         if (isMatchingGeneration(threadId, assistantMessageId)) {
-          flushAssistantPatch({ allowStopped: true });
+          flushAssistantPatch({ allowStopped: true, includeStreamingState: false });
           stopAssistantMessage(threadId, assistantMessageId);
           finalizeThreadStatus(threadId, 'stopped');
           recordCompletionStats('stopped');
@@ -743,6 +755,7 @@ export const useChatSession = () => {
       return;
     }
 
+    generation.flushPendingAssistantPatch?.();
     generation.stopRequested = true;
     stopAssistantMessage(generation.threadId, generation.messageId);
     finalizeThreadStatus(generation.threadId, 'stopped');

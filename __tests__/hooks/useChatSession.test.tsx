@@ -536,6 +536,92 @@ describe('useChatSession', () => {
     );
   });
 
+  it('flushes throttled assistant content before marking a pending stop as stopped', async () => {
+    let onToken: ((token: any) => void) | undefined;
+    let resolveCompletion: (() => void) | undefined;
+    let resolveStopCompletion: (() => void) | undefined;
+
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementation(
+      ({ onToken: tokenHandler }: { onToken?: (token: any) => void }) =>
+        new Promise((resolve) => {
+          onToken = tokenHandler;
+          resolveCompletion = () => resolve({ text: 'Native completion resolved later' });
+        }),
+    );
+    (llmEngineService.stopCompletion as jest.Mock).mockImplementationOnce(
+      () => new Promise((resolve) => {
+        resolveStopCompletion = () => resolve(undefined);
+      }),
+    );
+
+    const getSession = renderHookHarness();
+    let sendPromise: Promise<void> | undefined;
+    await act(async () => {
+      sendPromise = getSession()?.appendUserMessage('Stream, then stop');
+    });
+
+    await waitFor(() => {
+      expect(useChatStore.getState().getActiveThread()?.status).toBe('generating');
+    });
+
+    jest.useFakeTimers();
+    try {
+      await act(async () => {
+        onToken?.({
+          token: 'answer-1',
+          content: 'Buffered answer',
+          reasoningContent: 'Buffered thought',
+        });
+      });
+
+      let thread = useChatStore.getState().getActiveThread();
+      expect(thread?.messages.at(-1)).toEqual(expect.objectContaining({
+        content: '',
+        state: 'streaming',
+      }));
+
+      let stopPromise: Promise<void> | undefined;
+      await act(async () => {
+        stopPromise = getSession()?.stopGeneration();
+        await Promise.resolve();
+      });
+
+      thread = useChatStore.getState().getActiveThread();
+      expect(llmEngineService.stopCompletion).toHaveBeenCalled();
+      expect(thread?.status).toBe('stopped');
+      expect(thread?.messages.at(-1)).toEqual(expect.objectContaining({
+        role: 'assistant',
+        content: 'Buffered answer',
+        thoughtContent: 'Buffered thought',
+        state: 'stopped',
+      }));
+
+      await act(async () => {
+        onToken?.({
+          token: 'late-answer',
+          content: 'Late answer',
+          reasoningContent: 'Late thought',
+        });
+        await Promise.resolve();
+      });
+
+      expect(useChatStore.getState().getActiveThread()?.messages.at(-1)).toEqual(expect.objectContaining({
+        content: 'Buffered answer',
+        thoughtContent: 'Buffered thought',
+        state: 'stopped',
+      }));
+
+      await act(async () => {
+        resolveStopCompletion?.();
+        resolveCompletion?.();
+        await stopPromise;
+        await sendPromise;
+      });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it('does not start engine completion when stop is requested during prompt preparation', async () => {
     let resolvePromptCount: (() => void) | undefined;
     (llmEngineService.countPromptTokens as jest.Mock).mockImplementationOnce(

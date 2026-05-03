@@ -355,6 +355,7 @@ class LLMEngineService {
   private contextOperationQueue: Promise<void> = Promise.resolve();
   private activeCompletionPromise: Promise<NativeCompletionResult> | null = null;
   private activeContextOperationPromises: Set<Promise<unknown>> = new Set();
+  private activeContextReleaseOperationPromises: Set<Promise<unknown>> = new Set();
   private completionInterruptGeneration = 0;
   private isUnloading = false;
   private activeCalibrationSession: CalibrationSession | null = null;
@@ -424,13 +425,32 @@ class LLMEngineService {
       }
     })();
     this.activeContextOperationPromises.add(operationPromise);
+    this.activeContextReleaseOperationPromises.add(operationPromise);
 
     void operationPromise.then(
       () => {
         this.activeContextOperationPromises.delete(operationPromise);
+        this.activeContextReleaseOperationPromises.delete(operationPromise);
       },
       () => {
         this.activeContextOperationPromises.delete(operationPromise);
+        this.activeContextReleaseOperationPromises.delete(operationPromise);
+      },
+    );
+
+    return operationPromise;
+  }
+
+  private trackContextReleaseOperation<T>(operation: () => Promise<T>): Promise<T> {
+    const operationPromise = (async () => operation())();
+    this.activeContextReleaseOperationPromises.add(operationPromise);
+
+    void operationPromise.then(
+      () => {
+        this.activeContextReleaseOperationPromises.delete(operationPromise);
+      },
+      () => {
+        this.activeContextReleaseOperationPromises.delete(operationPromise);
       },
     );
 
@@ -441,6 +461,13 @@ class LLMEngineService {
     const activeContextOperations = Array.from(this.activeContextOperationPromises);
     if (activeContextOperations.length > 0) {
       await Promise.allSettled(activeContextOperations);
+    }
+  }
+
+  private async waitForActiveContextReleaseOperations(): Promise<void> {
+    const activeContextReleaseOperations = Array.from(this.activeContextReleaseOperationPromises);
+    if (activeContextReleaseOperations.length > 0) {
+      await Promise.allSettled(activeContextReleaseOperations);
     }
   }
 
@@ -1291,7 +1318,7 @@ class LLMEngineService {
 
   private async probeThinkingCapability(context: LlamaContext): Promise<ModelThinkingCapabilitySnapshot | null> {
     const sampleMessages = [{ role: 'user', content: 'ping' }];
-    const shouldAbort = () => this.isUnloading || this.context !== context;
+    const shouldAbort = () => this.isUnloading || this.context !== context || this.activeCompletionPromise !== null;
 
     const safeFormat = async ({
       enableThinking,
@@ -3094,7 +3121,7 @@ class LLMEngineService {
       })();
 
       if (contextAtProbeStart && shouldProbeThinkingCapability && process.env.NODE_ENV !== 'test') {
-        void this.trackContextOperation(async () => {
+        void this.trackContextReleaseOperation(async () => {
           try {
             const thinkingCapability = await this.probeThinkingCapability(contextAtProbeStart);
             if (thinkingCapability && this.context === contextAtProbeStart && !this.isUnloading) {
@@ -3214,7 +3241,7 @@ class LLMEngineService {
         }
       }
 
-      await this.waitForActiveContextOperations();
+      await this.waitForActiveContextReleaseOperations();
 
       if (this.context) {
         await requireLlamaModule().releaseAllLlama();

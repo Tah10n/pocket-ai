@@ -11,6 +11,7 @@ describe('ModelCatalogFileSelector', () => {
   it.each([
     'model.mmproj.gguf',
     'model-mm_projector.gguf',
+    'subdir/mmproj-model.gguf',
     'clip-projector.Q4_K_M.gguf',
     'clip_projector.fp16.gguf',
   ])('treats %s as a projector file', (fileName) => {
@@ -47,7 +48,7 @@ describe('ModelCatalogFileSelector', () => {
   });
 
   it('does not reject text GGUF names that only contain projector as a normal word', () => {
-    const textModel = { rfilename: 'projector-series.Q4_K_M.gguf', size: largeFileSize };
+    const textModel = { rfilename: 'subdir/projector-series.Q4_K_M.gguf', size: largeFileSize };
 
     expect(isProjectorFileName(textModel.rfilename)).toBe(false);
     expect(isEligibleGgufEntry(textModel)).toBe(true);

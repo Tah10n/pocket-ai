@@ -28,6 +28,7 @@ import {
   getFileSize,
   isEligibleGgufEntry,
   isPreferredQuantFileName,
+  isProjectorFileName,
   selectTreeEntryForModel,
 } from './ModelCatalogFileSelector';
 import {
@@ -1698,6 +1699,7 @@ export class ModelCatalogService {
         const expectedFileName = typeof options?.expectedFileName === 'string'
           ? options.expectedFileName.trim()
           : '';
+        let expectedTargetKnownIneligible = expectedFileName.length > 0 && isProjectorFileName(expectedFileName);
         let nextCursor: string | null = buildHuggingFaceTreeUrl(repoId, revision);
         const visitedCursors = new Set<string>();
         const entries: HuggingFaceTreeEntry[] = [];
@@ -1776,21 +1778,29 @@ export class ModelCatalogService {
               visitedCursors,
             );
 
-            if (expectedFileName.length > 0) {
-              const targetMatch = pageEntries.find((entry) => getFileName(entry) === expectedFileName);
-              if (targetMatch && isEligibleGgufEntry(targetMatch)) {
+            const targetMatch = expectedFileName.length > 0 && !expectedTargetKnownIneligible
+              ? pageEntries.find((entry) => getFileName(entry) === expectedFileName)
+              : undefined;
+            if (targetMatch) {
+              if (isEligibleGgufEntry(targetMatch)) {
                 isComplete = resolvedNextCursor === null;
                 stopReason = 'target_found';
                 break;
               }
-            } else {
-              if (firstEligibleGgufPage === null) {
-                const firstGguf = pageEntries.find((entry) => isEligibleGgufEntry(entry));
-                if (firstGguf) {
-                  firstEligibleGgufPage = pageCount;
-                }
-              }
 
+              expectedTargetKnownIneligible = true;
+            }
+
+            const canUseFallbackStop = expectedFileName.length === 0 || expectedTargetKnownIneligible;
+
+            if (canUseFallbackStop && firstEligibleGgufPage === null) {
+              const firstGguf = pageEntries.find((entry) => isEligibleGgufEntry(entry));
+              if (firstGguf) {
+                firstEligibleGgufPage = pageCount;
+              }
+            }
+
+            if (canUseFallbackStop) {
               const preferred = pageEntries.find((entry) => (
                 isEligibleGgufEntry(entry) && isPreferredQuantFileName(getFileName(entry))
               ));

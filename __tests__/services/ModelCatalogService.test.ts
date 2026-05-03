@@ -1022,16 +1022,33 @@ describe('ModelCatalogService', () => {
     expect((global.fetch as jest.Mock).mock.calls[2][0]).toContain('cursor=tree-page-2');
   });
 
-  it('does not stop paginated tree revalidation on an exact projector filename', async () => {
+  it('falls back to preferred pagination stop when the expected tree filename is a projector', async () => {
     global.fetch = jest.fn((input: RequestInfo | URL) => {
       const url = String(input);
+
+      if (url.includes('cursor=tree-page-3')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          headers: {
+            get: jest.fn(() => null),
+          },
+          json: () => Promise.resolve([
+            { path: 'unnecessary.Q8_0.gguf', size: 4 * 1024 * 1024 * 1024 },
+          ]),
+        });
+      }
 
       if (url.includes('cursor=tree-page-2')) {
         return Promise.resolve({
           ok: true,
           status: 200,
           headers: {
-            get: jest.fn(() => null),
+            get: jest.fn((headerName: string) => (
+              headerName === 'link'
+                ? '<https://huggingface.co/api/models/org/paged-projector-model/tree/main?recursive=true&cursor=tree-page-3>; rel="next"'
+                : null
+            )),
           },
           json: () => Promise.resolve([
             {
@@ -1072,7 +1089,59 @@ describe('ModelCatalogService', () => {
       'model.mmproj.gguf',
       'model.Q4_K_M.gguf',
     ]);
-    expect(treeResponse.stopReason).toBe('complete');
+    expect(treeResponse.isComplete).toBe(false);
+    expect(treeResponse.stopReason).toBe('preferred_found');
+  });
+
+  it('keeps searching when an eligible expected tree filename appears after a preferred candidate', async () => {
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.includes('cursor=tree-page-2')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          headers: {
+            get: jest.fn(() => null),
+          },
+          json: () => Promise.resolve([
+            { path: 'exact.Q8_0.gguf', size: 4 * 1024 * 1024 * 1024 },
+          ]),
+        });
+      }
+
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: {
+          get: jest.fn((headerName: string) => (
+            headerName === 'link'
+              ? '<https://huggingface.co/api/models/org/paged-exact-model/tree/main?recursive=true&cursor=tree-page-2>; rel="next"'
+              : null
+          )),
+        },
+        json: () => Promise.resolve([
+          { path: 'earlier.Q4_K_M.gguf', size: 3 * 1024 * 1024 * 1024 },
+        ]),
+      });
+    }) as jest.Mock;
+
+    const requestContext = await (modelCatalogService as any).createRequestContext();
+    const treeResponse = await (modelCatalogService as any).fetchHuggingFaceModelTree(
+      'org/paged-exact-model',
+      undefined,
+      requestContext,
+      REQUEST_AUTH_POLICY.ANONYMOUS,
+      { expectedFileName: 'exact.Q8_0.gguf' },
+    );
+
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    expect(treeResponse.entries.map((entry: { path?: string }) => entry.path)).toEqual([
+      'earlier.Q4_K_M.gguf',
+      'exact.Q8_0.gguf',
+    ]);
+    expect(treeResponse.isComplete).toBe(true);
+    expect(treeResponse.stopReason).toBe('target_found');
   });
 
   it('marks gated models as auth_required when no token is configured', async () => {

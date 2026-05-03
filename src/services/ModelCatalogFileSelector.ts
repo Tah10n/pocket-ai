@@ -132,7 +132,8 @@ export function isPreferredQuantFileName(fileName: string): boolean {
 }
 
 export function isProjectorFileName(fileName: string): boolean {
-  const normalized = fileName.trim().toLowerCase();
+  const normalizedPath = fileName.trim().toLowerCase();
+  const normalized = normalizedPath.split(/[\\/]/).pop() ?? normalizedPath;
   return /(^|[._-])(mmproj|mm_projector|clip-projector|clip_projector)([._-]|$)/.test(normalized);
 }
 

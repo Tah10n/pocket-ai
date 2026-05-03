@@ -1,7 +1,12 @@
 import React from 'react';
 import { fireEvent, render, waitFor } from '@testing-library/react-native';
 import { Text as RNText } from 'react-native';
-import { ChatInputBar } from '../../src/components/ui/ChatInputBar';
+import {
+  ChatInputBar,
+  getGlassComposerCapsuleStyle,
+  getModeBannerGlassStyle,
+  getPrimaryActionGlassStyle,
+} from '../../src/components/ui/ChatInputBar';
 import { screenChromeTokens } from '../../src/utils/themeTokens';
 
 jest.mock('react-native-css-interop', () => {
@@ -95,6 +100,17 @@ describe('ChatInputBar', () => {
     expect(flattenStyle(container.props.style)).toBeUndefined();
   });
 
+  it('does not render a full-width shaded chrome strip behind the composer', () => {
+    const onSendMessage = jest.fn();
+    const { getByTestId } = render(
+      <ChatInputBar onSendMessage={onSendMessage} />,
+    );
+    const container = getByTestId('chat-input-bar-container');
+
+    expect(container.props.className).not.toContain('bg-background');
+    expect(container.props.className).not.toContain('border-t');
+  });
+
   it('centers single-line composer text without extra vertical padding', () => {
     const onSendMessage = jest.fn();
     const { getByPlaceholderText } = render(
@@ -124,5 +140,34 @@ describe('ChatInputBar', () => {
     expect(getByTestId('chat-input-bar-attachments-tray')).toBeTruthy();
     expect(getByTestId('chat-input-bar-row').props.className).toContain('flex-row');
     expect(queryByText('arrow-upward')).toBeNull();
+  });
+
+  it('derives glass primary action colors from the active primary token', () => {
+    expect(getPrimaryActionGlassStyle('#2563eb', 'light')).toEqual({
+      backgroundColor: 'rgba(37, 99, 235, 0.1)',
+      borderWidth: 0,
+    });
+    expect(getPrimaryActionGlassStyle('#38bdf8', 'dark')).toEqual({
+      backgroundColor: 'rgba(56, 189, 248, 0.22)',
+      borderWidth: 0,
+    });
+  });
+
+  it('softens dark glass composer and mode banner shells without changing light-mode fallbacks', () => {
+    expect(getGlassComposerCapsuleStyle('#020617', '#475569', 'light')).toEqual({
+      borderRadius: 999,
+    });
+    expect(getGlassComposerCapsuleStyle('#f7fbff', '#475569', 'dark')).toEqual({
+      backgroundColor: 'rgba(247, 251, 255, 0.1)',
+      borderColor: 'rgba(71, 85, 105, 0.28)',
+      borderRadius: 999,
+      borderWidth: 1,
+    });
+    expect(getModeBannerGlassStyle('#020617', '#60a5fa', 'light')).toBeUndefined();
+    expect(getModeBannerGlassStyle('#f7fbff', '#60a5fa', 'dark')).toEqual({
+      backgroundColor: 'rgba(247, 251, 255, 0.09)',
+      borderColor: 'rgba(96, 165, 250, 0.26)',
+      borderWidth: 1,
+    });
   });
 });

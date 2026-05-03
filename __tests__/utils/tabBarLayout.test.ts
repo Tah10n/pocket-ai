@@ -1,4 +1,4 @@
-import { bottomTabBarMetrics, createBottomTabBarStyle } from '../../src/utils/tabBarLayout';
+import { bottomTabBarMetrics, createBottomTabBarStyle, isFloatingTabBar } from '../../src/utils/tabBarLayout';
 
 const colors = {
   tabBarBackground: '#101828',
@@ -34,5 +34,97 @@ describe('tabBarLayout', () => {
       height: bottomTabBarMetrics.height,
       paddingBottom: bottomTabBarMetrics.paddingBottom,
     });
+    expect(style.position).toBeUndefined();
   });
+
+  it('merges theme appearance effects into the tab bar style', () => {
+    const style = createBottomTabBarStyle(colors, 0, 'android', {
+      id: 'glass',
+      surfaceKind: 'glass',
+      effects: {
+        headerBlurIntensity: 96,
+        surfaceBlurIntensity: 60,
+        blurReductionFactor: 3,
+        tabBarStyle: {
+          elevation: 8,
+          shadowOpacity: 0.2,
+          shadowRadius: 18,
+        },
+      },
+    });
+
+    expect(style).toMatchObject({
+      elevation: 8,
+      shadowOpacity: 0.2,
+      shadowRadius: 18,
+    });
+  });
+
+  it('lets the glass tabBarBackground own the fill when Android blur is supported', () => {
+    const style = createBottomTabBarStyle(colors, 0, 'android', {
+      id: 'glass',
+      surfaceKind: 'glass',
+      effects: {
+        headerBlurIntensity: 60,
+        surfaceBlurIntensity: 55,
+        blurReductionFactor: 3,
+        tabBarStyle: {},
+      },
+    });
+
+    expect(style.backgroundColor).toBe('transparent');
+    expect(style).toMatchObject({
+      position: 'absolute',
+      left: bottomTabBarMetrics.floatingHorizontalInset,
+      right: bottomTabBarMetrics.floatingHorizontalInset,
+      bottom: bottomTabBarMetrics.floatingBottomGap,
+      borderRadius: bottomTabBarMetrics.glassRadius,
+      height: bottomTabBarMetrics.glassHeight,
+    });
+  });
+
+  it('lets the glass tabBarBackground own the fill for legacy Android too', () => {
+    const style = createBottomTabBarStyle(colors, 0, 'android', {
+      id: 'glass',
+      surfaceKind: 'glass',
+      effects: {
+        headerBlurIntensity: 60,
+        surfaceBlurIntensity: 55,
+        blurReductionFactor: 3,
+        tabBarStyle: {},
+      },
+    });
+
+    expect(style.backgroundColor).toBe('transparent');
+    expect(style.borderTopWidth).toBe(0);
+    expect(style).toMatchObject({
+      position: 'absolute',
+      left: bottomTabBarMetrics.floatingHorizontalInset,
+      right: bottomTabBarMetrics.floatingHorizontalInset,
+      bottom: bottomTabBarMetrics.floatingBottomGap,
+      height: bottomTabBarMetrics.glassHeight,
+    });
+  });
+
+  it('lets the glass tabBarBackground own the fill off Android', () => {
+    const style = createBottomTabBarStyle(colors, 0, 'ios', {
+      id: 'glass',
+      surfaceKind: 'glass',
+      effects: {
+        headerBlurIntensity: 60,
+        surfaceBlurIntensity: 55,
+        blurReductionFactor: 3,
+        tabBarStyle: {},
+      },
+    });
+
+    expect(style.backgroundColor).toBe('transparent');
+  });
+
+  it('detects only glass tab bars as floating', () => {
+    expect(isFloatingTabBar({ surfaceKind: 'glass' })).toBe(true);
+    expect(isFloatingTabBar({ surfaceKind: 'solid' })).toBe(false);
+    expect(isFloatingTabBar()).toBe(false);
+  });
+
 });

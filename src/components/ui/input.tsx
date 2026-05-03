@@ -1,7 +1,8 @@
 import React from 'react';
 import { View, TextInput, type TextInputProps, type ViewProps } from 'react-native';
 import { cssInterop } from 'nativewind';
-import { typographyColors } from '../../utils/themeTokens';
+import { useTheme } from '../../providers/ThemeProvider';
+import { DEFAULT_THEME_ID, getThemeAppearance, typographyColors } from '../../utils/themeTokens';
 
 const BaseInput = cssInterop(View, { className: 'style' });
 const BaseInputField = cssInterop(TextInput, { className: 'style' });
@@ -15,9 +16,12 @@ export interface InputFieldProps extends TextInputProps {
 }
 
 export function Input({ className = '', ...props }: InputProps) {
+  const theme = useTheme();
+  const appearance = theme.appearance ?? getThemeAppearance(theme.themeId ?? DEFAULT_THEME_ID, theme.resolvedMode ?? 'light');
+
   return (
     <BaseInput
-      className={`min-h-12 rounded-2xl border border-outline-200 bg-background-50 px-3 dark:border-outline-700 dark:bg-background-900/70 ${className}`.trim()}
+      className={`${appearance.classNames.textFieldClassName} ${appearance.surfaceKind === 'glass' ? 'relative overflow-hidden' : ''} ${className}`.trim()}
       {...props}
     />
   );
@@ -33,6 +37,7 @@ export function InputField({
     <BaseInputField
       allowFontScaling={allowFontScaling}
       placeholderTextColor={placeholderTextColor ?? typographyColors[400]}
+      underlineColorAndroid="transparent"
       className={`min-h-11 py-0 text-base text-typography-900 dark:text-typography-100 ${className}`.trim()}
       {...props}
     />

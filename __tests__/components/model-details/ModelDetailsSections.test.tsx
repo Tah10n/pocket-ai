@@ -47,6 +47,7 @@ jest.mock('../../../src/components/ui/ScreenShell', () => {
   const { View } = require('react-native');
   return {
     ScreenChip: (props: any) => mockScreenChip(props),
+    ScreenSurface: ({ children, ...props }: any) => mockReact.createElement(View, props, children),
     ScreenStack: ({ children, ...props }: any) => mockReact.createElement(View, props, children),
   };
 });

@@ -9,7 +9,7 @@ import * as Sharing from 'expo-sharing';
 import { Box } from '@/components/ui/box';
 import { Button, ButtonText } from '@/components/ui/button';
 import { HeaderBar } from '@/components/ui/HeaderBar';
-import { ScreenCard, ScreenContent, ScreenSectionLabel, ScreenStack } from '@/components/ui/ScreenShell';
+import { ScreenCard, ScreenContent, ScreenRoot, ScreenSectionLabel, ScreenStack } from '@/components/ui/ScreenShell';
 import { ScrollView } from '@/components/ui/scroll-view';
 import { Text } from '@/components/ui/text';
 import { performanceMonitor, type PerformanceEvent } from '@/services/PerformanceMonitor';
@@ -309,7 +309,7 @@ export function PerformanceScreen() {
   const warnThresholdLabel = formatTimingThreshold(TIMING_WARN_THRESHOLD_MS) ?? `${TIMING_WARN_THRESHOLD_MS} ms`;
 
   return (
-    <Box className="flex-1 bg-background-0 dark:bg-background-950">
+    <ScreenRoot>
       <HeaderBar
         title={t('performance.title')}
         subtitle={t('performance.subtitle')}
@@ -499,6 +499,6 @@ export function PerformanceScreen() {
           </ScreenStack>
         </ScreenContent>
       </ScrollView>
-    </Box>
+    </ScreenRoot>
   );
 }

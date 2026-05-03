@@ -1,6 +1,6 @@
 # UI Architecture & Component Guide
 
-Last updated: 2026-04-23
+Last updated: 2026-04-29
 
 ## Purpose
 
@@ -152,10 +152,43 @@ Normal exceptions are developer-only logs, diagnostics, and intentional test-onl
 The shared visual system resolves from one semantic source of truth:
 
 - `src/utils/theme-contract.json` defines the semantic palette and motion bands.
-- `src/utils/themeTokens.ts` maps that contract into runtime theme colors and React Navigation colors.
-- `src/providers/ThemeProvider.tsx`, `app/_layout.tsx`, and `app/(tabs)/_layout.tsx` consume the same palette decisions so tab chrome, status bars, and NativeWind surfaces stay aligned.
+- `src/utils/themeTokens.ts` maps that contract into runtime theme colors, visual-theme appearance tokens, and React Navigation colors.
+- `src/providers/ThemeProvider.tsx`, `app/_layout.tsx`, and `app/(tabs)/_layout.tsx` consume the same palette and `themeId` decisions so tab chrome, status bars, and NativeWind surfaces stay aligned.
 
 When you need a tinted surface or accent treatment, prefer semantic theme colors plus `withAlpha(...)` instead of introducing a new raw hex or `rgba(...)` value.
+
+### Theme ID Architecture
+
+Color mode and visual style are intentionally separate:
+
+- `theme` remains the persisted light/dark/system mode and is the only value passed to NativeWind color-scheme resolution.
+- `themeId` is the persisted visual-theme identity. It selects the app-level appearance family, currently `default` or `glass`.
+- `ThemeProvider` resolves `{ theme, themeId, resolvedMode }` into `colors`, `appearance`, and `navigationTheme`.
+- `appearance` owns non-palette visual decisions such as shared surface classes, tone-aware icon tiles/badges/banners/progress, dividers, header/surface blur intensity, sheet/card/input translucency, segmented controls, message bubbles, glass highlight chrome, and tab-bar shadow/elevation.
+- Routed screens should start from `ScreenRoot` so the resolved runtime palette owns the page background instead of duplicating route-local `bg-background-*` classes.
+- Reusable tinted UI should use `ScreenCard`, `ScreenPressableCard`, `ScreenIconTile`, `ScreenBanner`, `ScreenBadge`, `ScreenActionPill`, `ProgressBar`, and `ValueSelectorRow` before adding route-local surface classes.
+
+Migration plan for new visual themes:
+
+1. Add the theme id to `themeIds` and define its color overrides and `ThemeAppearance` branch in `src/utils/themeTokens.ts`.
+2. Persist and sanitize the id through `src/services/SettingsStore.ts` before exposing it in Settings.
+3. Route new shared chrome through `appearance.classNames` or `appearance.effects` instead of hard-coded `bg-background-*`, translucent accent surfaces, opacity, blur, shadow, or elevation values.
+4. Keep visual themes layout-compatible with `default`: do not change shared spacing, size, or radius tokens unless the feature explicitly calls for a layout variant.
+5. For glass-like themes, combine translucency with real `BlurView` backdrops, the shared `ScreenRoot` `BlurTargetView`, subtle borders, shadows, non-interactive background accents, and specular highlight chrome instead of only lowering surface opacity.
+6. Keep one-off route styles as documented exceptions only when a primitive cannot express the layout safely; status dots and solid active fills may stay route-local when they are not surfaces.
+7. Add tests for settings migration, provider resolution, layout-token parity, and any newly themed primitive before expanding the theme to more surfaces.
+
+### Glass Surface Architecture
+
+Glass themes distinguish chrome from inline content:
+
+- Chrome surfaces that float over other content may use `BlurView`: `ScreenHeaderShell`, `ScreenSheet`, floating `ScreenBanner`, `ScreenChromeBar`/chat composer, bottom tab chrome, and header/icon actions.
+- Large inline surfaces such as `ScreenCard` and `ScreenPressableCard` use the shared frosted backdrop plus a light tint and rim border. Smaller inline controls such as `ScreenIconTile`, badges, chips, text fields, segmented controls, and chat bubbles keep denser tinted fills to avoid excessive nested blur in dense lists.
+- Dark glass surfaces should read as liquid glass, not opaque slate: use clean `background-0` translucency, color-safe cyan/blue specular and refraction layers, and a dark contrast film; avoid white feathered stripes or hard dark fills for shared chrome.
+- The native implementation approximates CSS/SVG liquid-glass distortion with layered `BlurView`, translucent tint/contrast films, directional specular gradients, refraction bands, and a real inner rim; Expo/React Native does not provide CSS `backdrop-filter` or SVG `feDisplacementMap` for native views.
+- In `ScreenRoot`, decorative glass accents render as smooth gradient layers behind the scene. Android uses two `BlurTargetView`s: a background-only target for in-screen glass surfaces, and a scene target wrapping the real screen content for external chrome such as the floating tab-bar island. This lets the tab bar sample the screen behind it without making card-level blurs target an ancestor that contains themselves.
+- Android currently renders dense translucent fallback panels for shared glass surfaces; keep `ScreenRoot` blur-target wrappers isolated from inline surfaces unless native blur is explicitly re-enabled.
+- The bottom tab bar renders through `tabBarBackground`. On Android SDK 31+, the floating tab-bar island samples the active screen scene target with `BlurView`, so light and dark glass tab chrome blur the content behind them. While the target is pending or unavailable, it falls back to the dense matte island.
 
 ## Screen Chrome Contract
 

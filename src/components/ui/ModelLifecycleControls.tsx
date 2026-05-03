@@ -3,7 +3,10 @@ import { useTranslation } from 'react-i18next';
 import { ModelAccessState, LifecycleStatus, type ModelMetadata } from '../../types/models';
 import { useDownloadStore } from '../../store/downloadStore';
 import { Box } from './box';
-import { ScreenActionPill, ScreenIconButton } from './ScreenShell';
+import { ProgressBar } from './ProgressBar';
+import { joinClassNames, ScreenActionPill, ScreenIconButton, ScreenIconTile, ScreenSurface, useScreenAppearance } from './ScreenShell';
+import { getThemeActionContentClassName } from '../../utils/themeTokens';
+import { MaterialSymbols, type MaterialSymbolName } from './MaterialSymbols';
 import { Text } from './text';
 
 interface ModelLifecycleActionRowProps {
@@ -34,6 +37,8 @@ function ActionPill({
   testID?: string;
   className?: string;
 }) {
+  const appearance = useScreenAppearance();
+
   return (
     <ScreenActionPill
       testID={testID}
@@ -44,9 +49,7 @@ function ActionPill({
     >
       <Text
         numberOfLines={1}
-        className={`text-center text-sm font-semibold ${tone === 'primary'
-          ? 'text-typography-0'
-          : 'text-primary-600 dark:text-primary-300'}`}
+        className={`text-center text-sm font-semibold ${getThemeActionContentClassName(appearance, tone)}`}
       >
         {label}
       </Text>
@@ -61,9 +64,11 @@ export function isModelDownloading(model: Pick<ModelMetadata, 'lifecycleStatus'>
 }
 
 export function ModelDownloadProgress({
+  density = 'comfortable',
   model,
   className,
 }: {
+  density?: 'compact' | 'comfortable';
   model: Pick<ModelMetadata, 'id' | 'downloadProgress' | 'lifecycleStatus'>;
   className?: string;
 }) {
@@ -76,6 +81,7 @@ export function ModelDownloadProgress({
       modelId={model.id}
       lifecycleStatus={model.lifecycleStatus}
       fallbackProgress={model.downloadProgress}
+      density={density}
       className={className}
     />
   );
@@ -85,14 +91,17 @@ function ModelDownloadProgressInner({
   modelId,
   lifecycleStatus,
   fallbackProgress,
+  density,
   className,
 }: {
   modelId: string;
   lifecycleStatus: LifecycleStatus;
   fallbackProgress: number;
+  density: 'compact' | 'comfortable';
   className?: string;
 }) {
   const { t } = useTranslation();
+  const appearance = useScreenAppearance();
   const downloadProgress = useDownloadStore((state) => {
     const queuedModel = state.queue.find((queuedItem) => queuedItem.id === modelId);
     return queuedModel?.downloadProgress ?? fallbackProgress;
@@ -102,24 +111,91 @@ function ModelDownloadProgressInner({
     ? Math.round(downloadProgress * 100)
     : 0;
   const progressPercent = Math.max(0, Math.min(100, rawProgressPercent));
+  const progressPresentation = getDownloadProgressPresentation(lifecycleStatus, t);
+  const progressTone = progressPresentation.progressTone === 'primary' ? 'accent' : progressPresentation.progressTone;
+  const progressToneClassNames = appearance.classNames.toneClassNameByTone[progressTone];
+  const activeProgressFillClassName = appearance.classNames.toneClassNameByTone.primary.progressFillClassName;
+  const isCompact = density === 'compact';
 
   return (
-    <Box className={className}>
-      <Box className="mb-1 flex-row justify-between">
-        <Text className="text-xs text-typography-500">
-          {lifecycleStatus === LifecycleStatus.VERIFYING
-            ? t('models.verifying')
-            : lifecycleStatus === LifecycleStatus.PAUSED
-              ? t('models.paused')
-              : t('models.downloading')}
-        </Text>
-        <Text className="text-xs font-bold text-primary-500">{progressPercent}%</Text>
+    <ScreenSurface
+      testID={`model-download-progress-${modelId}`}
+      tone={progressTone}
+      withControlTint
+      className={joinClassNames(
+        'rounded-2xl border',
+        isCompact ? 'px-2.5 py-2' : 'px-3 py-2.5',
+        progressToneClassNames.surfaceClassName,
+        className,
+      )}
+    >
+      <Box className={joinClassNames('flex-row items-center justify-between gap-3', isCompact ? 'mb-1.5' : 'mb-2')}>
+        <Box className={joinClassNames('min-w-0 flex-1 flex-row items-center', isCompact ? 'gap-1.5' : 'gap-2')}>
+          <ScreenIconTile
+            iconName={progressPresentation.iconName}
+            tone={progressTone}
+            iconSize="sm"
+            size="sm"
+            className={isCompact ? 'h-7 w-7 rounded-full' : 'h-8 w-8 rounded-full'}
+          >
+            <MaterialSymbols name={progressPresentation.iconName} size="sm" className={progressToneClassNames.iconClassName} />
+          </ScreenIconTile>
+          <Text numberOfLines={1} className={joinClassNames('min-w-0 flex-1 text-xs font-semibold uppercase tracking-wide', progressToneClassNames.textClassName)}>
+            {progressPresentation.label}
+          </Text>
+        </Box>
+
+        <ScreenSurface tone={progressTone} withControlTint className={joinClassNames('rounded-full', isCompact ? 'px-2 py-0.5' : 'px-2.5 py-1', progressToneClassNames.percentPillClassName)}>
+          <Text className={joinClassNames('text-xs font-bold', progressToneClassNames.textClassName)}>{progressPercent}%</Text>
+        </ScreenSurface>
       </Box>
-      <Box className="h-1.5 w-full overflow-hidden rounded-full bg-background-200 dark:bg-background-800">
-        <Box className="h-full bg-primary-500" style={{ width: `${progressPercent}%` }} />
-      </Box>
-    </Box>
+      <ProgressBar
+        testID={`model-download-progress-track-${modelId}`}
+        fillTestID={`model-download-progress-fill-${modelId}`}
+        valuePercent={progressPercent}
+        size={isCompact ? 'md' : 'lg'}
+        tone={progressPresentation.progressTone}
+        variant="framed"
+        fillClassName={activeProgressFillClassName}
+      />
+    </ScreenSurface>
   );
+}
+
+function getDownloadProgressPresentation(lifecycleStatus: LifecycleStatus, t: (key: string) => string): {
+  iconName: MaterialSymbolName;
+  label: string;
+  progressTone: 'neutral' | 'primary' | 'success' | 'warning';
+} {
+  if (lifecycleStatus === LifecycleStatus.VERIFYING) {
+    return {
+      iconName: 'check-circle',
+      label: t('models.verifying'),
+      progressTone: 'success',
+    };
+  }
+
+  if (lifecycleStatus === LifecycleStatus.PAUSED) {
+    return {
+      iconName: 'pause-circle-outline',
+      label: t('models.paused'),
+      progressTone: 'warning',
+    };
+  }
+
+  if (lifecycleStatus === LifecycleStatus.QUEUED) {
+    return {
+      iconName: 'schedule',
+      label: t('models.statusQueued'),
+      progressTone: 'primary',
+    };
+  }
+
+  return {
+    iconName: 'download',
+    label: t('models.downloading'),
+    progressTone: 'primary',
+  };
 }
 
 export function ModelLifecycleActionRow({

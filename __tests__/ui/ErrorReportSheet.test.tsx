@@ -24,6 +24,10 @@ jest.mock('react-native-device-info', () => ({
   getVersion: jest.fn(() => '1.2.3'),
 }));
 
+jest.mock('react-native-safe-area-context', () => ({
+  useSafeAreaInsets: () => ({ top: 0, right: 0, bottom: 0, left: 0 }),
+}));
+
 import { ErrorReportSheet } from '@/components/ui/ErrorReportSheet';
 
 function parseLastClipboardJson(): any {

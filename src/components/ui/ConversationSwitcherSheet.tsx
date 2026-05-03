@@ -5,9 +5,10 @@ import Animated, { Easing, useAnimatedStyle, useSharedValue, withTiming } from '
 import { Box } from '@/components/ui/box';
 import { Button, ButtonText } from '@/components/ui/button';
 import { Pressable } from '@/components/ui/pressable';
-import { ScreenPressableCard } from '@/components/ui/ScreenShell';
+import { ScreenModalOverlay, ScreenPressableCard } from '@/components/ui/ScreenShell';
 import { Text } from '@/components/ui/text';
 import { getShortModelLabel } from '@/utils/modelLabel';
+import type { AndroidBlurTargetRef } from '@/utils/androidBlur';
 import { ListPickerSheetContent, type ListPickerSheetItem } from './ListPickerSheet';
 import { MaterialSymbols } from './MaterialSymbols';
 import { ConversationIndexItem } from '../../types/chat';
@@ -20,6 +21,7 @@ interface ConversationSwitcherSheetProps {
   activeThreadId: string | null;
   conversations: ConversationIndexItem[];
   activePresetName?: string;
+  androidContentBlurTargetRef?: AndroidBlurTargetRef | null;
   canOpenPresetSelector?: boolean;
   onClose: () => void;
   onSelectConversation: (threadId: string) => void;
@@ -33,6 +35,7 @@ export function ConversationSwitcherSheet({
   activeThreadId,
   conversations,
   activePresetName,
+  androidContentBlurTargetRef,
   canOpenPresetSelector = true,
   onClose,
   onSelectConversation,
@@ -84,13 +87,14 @@ export function ConversationSwitcherSheet({
   return (
     <Modal visible={visible} animationType="none" transparent onRequestClose={onClose}>
       <AnimatedView style={[{ flex: 1 }, overlayStyle]}>
-      <Box className="flex-1 justify-end bg-black/40">
+      <ScreenModalOverlay>
         <Pressable className="flex-1" onPress={onClose} />
         <AnimatedView style={sheetStyle}>
         <ListPickerSheetContent
           title={t('chat.conversationSwitcher.title')}
           subtitle={t('chat.conversationSwitcher.subtitle')}
           onClose={onClose}
+          androidContentBlurTargetRef={androidContentBlurTargetRef}
           items={items}
           sheetClassName={conversations.length === 0 ? 'min-h-[45%]' : undefined}
           actions={(
@@ -134,7 +138,7 @@ export function ConversationSwitcherSheet({
                   }}
                   disabled={!canOpenPresetSelector}
                   padding="compact"
-                  className={!canOpenPresetSelector ? 'border-outline-100 bg-background-100/80 dark:border-outline-900 dark:bg-background-900/40' : ''}
+                  className={!canOpenPresetSelector ? 'opacity-60' : ''}
                 >
                   <Box className="flex-row items-center justify-between gap-3">
                     <Box className="min-w-0 flex-1">
@@ -166,7 +170,7 @@ export function ConversationSwitcherSheet({
           }}
         />
         </AnimatedView>
-      </Box>
+      </ScreenModalOverlay>
       </AnimatedView>
     </Modal>
   );

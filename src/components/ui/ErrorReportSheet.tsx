@@ -10,10 +10,12 @@ import { Button, ButtonText } from '@/components/ui/button';
 import { Input, InputField } from '@/components/ui/input';
 import { Pressable } from '@/components/ui/pressable';
 import { ScrollView } from '@/components/ui/scroll-view';
-import { ScreenCard, ScreenIconButton, ScreenSheet, ScreenStack } from '@/components/ui/ScreenShell';
+import { ScreenCard, ScreenIconButton, ScreenModalOverlay, ScreenSheet, ScreenStack } from '@/components/ui/ScreenShell';
 import { Text } from '@/components/ui/text';
 import { toAppError } from '@/services/AppError';
 import type { ErrorReportContext } from '@/hooks/useErrorReportSheetController';
+import type { AndroidBlurTargetRef } from '@/utils/androidBlur';
+import { screenLayoutTokens } from '@/utils/themeTokens';
 
 type DeviceReportData = {
   deviceModel: string;
@@ -29,6 +31,7 @@ export interface ErrorReportSheetProps {
   scope: string;
   error: unknown;
   context?: ErrorReportContext;
+  androidContentBlurTargetRef?: AndroidBlurTargetRef | null;
   onClose: () => void;
 }
 
@@ -85,6 +88,7 @@ export function ErrorReportSheet({
   scope,
   error,
   context,
+  androidContentBlurTargetRef,
   onClose,
 }: ErrorReportSheetProps) {
   const { t } = useTranslation();
@@ -367,9 +371,12 @@ export function ErrorReportSheet({
 
   return (
     <Modal visible={visible} animationType="fade" transparent onRequestClose={handleClose}>
-      <Box className="flex-1 justify-end bg-black/45">
+      <ScreenModalOverlay>
         <Pressable className="flex-1" onPress={handleClose} />
-        <ScreenSheet className="max-h-[82%] pb-8">
+        <ScreenSheet
+          className={screenLayoutTokens.sheetMaxHeightDefaultClassName}
+          androidBlurTargetRef={androidContentBlurTargetRef}
+        >
           <Box className="mb-5 flex-row items-start justify-between gap-4">
             <Box className="min-w-0 flex-1">
               <Text className="text-lg font-semibold text-typography-900 dark:text-typography-100">
@@ -491,7 +498,7 @@ export function ErrorReportSheet({
                 </Input>
               </ScreenCard>
 
-              <ScreenCard variant="inset" className="bg-background-50/70 dark:bg-background-950/40">
+              <ScreenCard variant="inset">
                 <Text className="text-xs font-semibold uppercase tracking-wider text-primary-500">
                   {t('models.errorReport.previewTitle')}
                 </Text>
@@ -517,7 +524,7 @@ export function ErrorReportSheet({
             </Button>
           </Box>
         </ScreenSheet>
-      </Box>
+      </ScreenModalOverlay>
     </Modal>
   );
 }

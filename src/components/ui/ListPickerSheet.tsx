@@ -4,10 +4,11 @@ import { useTranslation } from 'react-i18next';
 import { Box } from '@/components/ui/box';
 import { Pressable } from '@/components/ui/pressable';
 import { ScrollView } from '@/components/ui/scroll-view';
-import { joinClassNames, ScreenBadge, ScreenCard, ScreenIconButton, ScreenPressableCard, ScreenSheet } from '@/components/ui/ScreenShell';
+import { joinClassNames, ScreenBadge, ScreenCard, ScreenIconButton, ScreenModalOverlay, ScreenPressableCard, ScreenSheet, useScreenAppearance } from '@/components/ui/ScreenShell';
 import { Text } from '@/components/ui/text';
 import { MaterialSymbols, type MaterialSymbolsProps } from './MaterialSymbols';
-import { listRowSelectedClassName } from '../../utils/themeTokens';
+import type { AndroidBlurTargetRef } from '../../utils/androidBlur';
+import { screenLayoutTokens } from '../../utils/themeTokens';
 
 export interface ListPickerSheetItem {
   key: string;
@@ -33,6 +34,7 @@ interface ListPickerSheetContentProps {
   title: string;
   subtitle?: string;
   onClose: () => void;
+  androidContentBlurTargetRef?: AndroidBlurTargetRef | null;
   actions?: React.ReactNode;
   items: ListPickerSheetItem[];
   emptyState?: ListPickerSheetEmptyState;
@@ -52,10 +54,11 @@ function ListPickerRow({
   item: ListPickerSheetItem;
   activeLabel: string;
 }) {
+  const appearance = useScreenAppearance();
   const isInteractive = typeof item.onPress === 'function' && !item.disabled;
   const cardClassName = joinClassNames(
-    item.selected && listRowSelectedClassName,
-    item.disabled && 'border-outline-100 bg-background-100/80 dark:border-outline-900 dark:bg-background-900/40',
+    item.selected && appearance.classNames.selectedInsetCardClassName,
+    item.disabled && 'opacity-60',
   );
   const content = (
       <Box className="flex-row items-start justify-between gap-3">
@@ -131,6 +134,7 @@ export function ListPickerSheetContent({
   title,
   subtitle,
   onClose,
+  androidContentBlurTargetRef,
   actions,
   items,
   emptyState,
@@ -141,7 +145,11 @@ export function ListPickerSheetContent({
   const activeLabel = t('common.active');
 
   return (
-    <ScreenSheet testID={testID} className={joinClassNames('max-h-[75%] pb-8', sheetClassName)}>
+    <ScreenSheet
+      testID={testID}
+      className={joinClassNames(screenLayoutTokens.sheetMaxHeightCompactClassName, sheetClassName)}
+      androidBlurTargetRef={androidContentBlurTargetRef}
+    >
       <Box className="mb-4 flex-row items-center justify-between gap-3">
         <Box className="min-w-0 flex-1">
           <Text className="text-lg font-semibold text-typography-900 dark:text-typography-100">
@@ -171,9 +179,11 @@ export function ListPickerSheetContent({
           </Box>
         </ScrollView>
       ) : emptyState ? (
-        <Box
+        <ScreenCard
           testID={emptyState.testID}
-          className="min-h-[220px] flex-1 items-center justify-center rounded-2xl border border-dashed border-outline-200 px-5 py-8 dark:border-outline-800"
+          dashed
+          padding="none"
+          className="min-h-[220px] flex-1 items-center justify-center px-5 py-8"
         >
           {emptyState.iconName ? (
             <MaterialSymbols
@@ -189,7 +199,7 @@ export function ListPickerSheetContent({
             {emptyState.description}
           </Text>
           {emptyState.action ? <Box className="mt-4 w-full">{emptyState.action}</Box> : null}
-        </Box>
+        </ScreenCard>
       ) : null}
     </ScreenSheet>
   );
@@ -202,10 +212,10 @@ export function ListPickerSheet({
 }: ListPickerSheetProps) {
   return (
     <Modal visible={visible} animationType={modalAnimationType} transparent onRequestClose={contentProps.onClose}>
-      <Box className="flex-1 justify-end bg-black/40">
+      <ScreenModalOverlay>
         <Pressable className="flex-1" onPress={contentProps.onClose} />
         <ListPickerSheetContent {...contentProps} />
-      </Box>
+      </ScreenModalOverlay>
     </Modal>
   );
 }

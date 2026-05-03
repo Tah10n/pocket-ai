@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Box } from '@/components/ui/box';
 import { SearchHeader } from '@/components/ui/SearchHeader';
-import { ScreenContent } from '@/components/ui/ScreenShell';
+import { ScreenContent, ScreenRoot } from '@/components/ui/ScreenShell';
 import { ModelsList } from '@/components/models/ModelsList';
 import { resolveModelsCatalogTab, type ModelsCatalogTab } from '@/store/modelsCatalogTabs';
 import { useLocalSearchParams, useRouter } from 'expo-router';
@@ -34,7 +33,7 @@ export const ModelsCatalogScreen = () => {
   }, []);
 
   return (
-    <Box className="flex-1 bg-background-0 dark:bg-background-950">
+    <ScreenRoot>
       <SearchHeader
         searchQuery={searchQuery}
         onSearchChange={handleSearchChange}
@@ -43,13 +42,18 @@ export const ModelsCatalogScreen = () => {
         onBack={undefined}
         onOpenStorage={() => router.push('/storage')}
       />
-      <ScreenContent testID="models-screen-content" className="flex-1" style={{ paddingBottom: 0 }}>
+      <ScreenContent
+        testID="models-screen-content"
+        className="flex-1"
+        respectFloatingHeader={false}
+        style={{ paddingBottom: 0 }}
+      >
         <ModelsList
           activeTab={activeTab}
           searchQuery={searchQuery}
           searchSessionKey={searchSessionKey}
         />
       </ScreenContent>
-    </Box>
+    </ScreenRoot>
   );
 };

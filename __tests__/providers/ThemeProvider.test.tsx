@@ -21,16 +21,22 @@ jest.mock('../../src/services/SettingsStore', () => ({
 }));
 
 function ThemeProbe() {
-  const { mode, resolvedMode, colors, navigationTheme, setTheme } = useTheme();
+  const { mode, themeId, resolvedMode, colors, appearance, navigationTheme, setTheme, setThemeId } = useTheme();
 
   return (
     <>
       <Text testID="theme-mode">{mode}</Text>
+      <Text testID="theme-id">{themeId}</Text>
       <Text testID="resolved-mode">{resolvedMode}</Text>
       <Text testID="primary-color">{colors.primary}</Text>
+      <Text testID="card-surface">{colors.cardBackground}</Text>
+      <Text testID="surface-kind">{appearance.surfaceKind}</Text>
       <Text testID="navigation-card">{navigationTheme.colors.card}</Text>
       <Pressable testID="set-system" onPress={() => setTheme('system')}>
         <Text>System</Text>
+      </Pressable>
+      <Pressable testID="set-glass" onPress={() => setThemeId('glass')}>
+        <Text>Glass</Text>
       </Pressable>
     </>
   );
@@ -58,6 +64,7 @@ describe('ThemeProvider', () => {
   it('keeps system theme as a persisted mode while resolving from the device theme', () => {
     mockGetSettings.mockReturnValue({
       theme: 'system',
+      themeId: 'default',
     } as any);
     jest.spyOn(ReactNative, 'useColorScheme').mockReturnValue('dark');
 
@@ -68,6 +75,7 @@ describe('ThemeProvider', () => {
     );
 
     expect(getByTestId('theme-mode').props.children).toBe('system');
+    expect(getByTestId('theme-id').props.children).toBe('default');
     expect(getByTestId('resolved-mode').props.children).toBe('dark');
     expect(getByTestId('primary-color').props.children).toBe('#1f7aff');
     expect(getByTestId('navigation-card').props.children).toBe('rgba(21, 33, 52, 0.94)');
@@ -78,6 +86,7 @@ describe('ThemeProvider', () => {
   it('allows switching back to system mode from an explicit theme', () => {
     mockGetSettings.mockReturnValue({
       theme: 'light',
+      themeId: 'default',
     } as any);
     jest.spyOn(ReactNative, 'useColorScheme').mockReturnValue('dark');
 
@@ -95,6 +104,7 @@ describe('ThemeProvider', () => {
   it('reacts to settings updates that happen outside the provider', () => {
     mockGetSettings.mockReturnValue({
       theme: 'dark',
+      themeId: 'default',
     } as any);
     jest.spyOn(ReactNative, 'useColorScheme').mockReturnValue('light');
 
@@ -107,10 +117,34 @@ describe('ThemeProvider', () => {
     act(() => {
       settingsListener?.({
         theme: 'system',
+        themeId: 'glass',
       });
     });
 
     expect(getByTestId('theme-mode').props.children).toBe('system');
+    expect(getByTestId('theme-id').props.children).toBe('glass');
     expect(getByTestId('resolved-mode').props.children).toBe('light');
+    expect(getByTestId('surface-kind').props.children).toBe('glass');
+    expect(getByTestId('card-surface').props.children).toBe('rgba(255, 255, 255, 0.3)');
+  });
+
+  it('persists visual theme id separately from color mode', () => {
+    mockGetSettings.mockReturnValue({
+      theme: 'dark',
+      themeId: 'default',
+    } as any);
+    jest.spyOn(ReactNative, 'useColorScheme').mockReturnValue('light');
+
+    const { getByTestId } = render(
+      <ThemeProvider>
+        <ThemeProbe />
+      </ThemeProvider>,
+    );
+
+    fireEvent.press(getByTestId('set-glass'));
+
+    expect(mockUpdateSettings).toHaveBeenCalledWith({ themeId: 'glass' });
+    expect(getByTestId('theme-id').props.children).toBe('glass');
+    expect(getByTestId('surface-kind').props.children).toBe('glass');
   });
 });

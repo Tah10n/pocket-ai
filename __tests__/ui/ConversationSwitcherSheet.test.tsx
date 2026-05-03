@@ -79,6 +79,10 @@ jest.mock('../../src/hooks/useDeviceMetrics', () => ({
   useMotionPreferences: () => mockMotionPreferences,
 }));
 
+jest.mock('react-native-safe-area-context', () => ({
+  useSafeAreaInsets: () => ({ top: 0, right: 0, bottom: 0, left: 0 }),
+}));
+
 const { ConversationSwitcherSheet } = require('../../src/components/ui/ConversationSwitcherSheet');
 const reactI18nextMock = jest.requireMock('react-i18next') as {
   __setTranslationOverride: (key: string, value: string, nextLanguage?: string) => void;
@@ -222,7 +226,7 @@ describe('ConversationSwitcherSheet', () => {
     );
 
     expect(screen.getByText('chat.conversationSwitcher.presetBlocked')).toBeTruthy();
-    expect(screen.getByTestId('conversation-switcher-preset-card').props.className).toContain('border-outline-100');
+    expect(screen.getByTestId('conversation-switcher-preset-card').props.className).toContain('opacity-60');
 
     fireEvent.press(screen.getByTestId('conversation-switcher-preset-card'));
 

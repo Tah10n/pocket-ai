@@ -43,7 +43,12 @@ jest.mock('expo-constants', () => ({
 }));
 
 jest.mock('expo-blur', () => ({
+  BlurTargetView: ({ children }: any) => children ?? null,
   BlurView: ({ children }: any) => children ?? null,
+}));
+
+jest.mock('expo-linear-gradient', () => ({
+  LinearGradient: ({ children }: any) => children ?? null,
 }));
 
 jest.mock('expo-file-system/legacy', () => ({

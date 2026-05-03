@@ -10,12 +10,17 @@ import Animated, {
   withTiming,
 } from 'react-native-reanimated';
 import { useMotionPreferences } from '../../hooks/useDeviceMetrics';
+import { useScreenAppearance } from './ScreenShell';
 
 const AnimatedView = Animated.createAnimatedComponent(View);
 
 export function ThinkingPulse() {
   const motion = useMotionPreferences();
+  const appearance = useScreenAppearance();
   const progress = useSharedValue(0);
+  const haloClassName = appearance.surfaceKind === 'glass'
+    ? 'absolute h-8 w-8 rounded-full bg-primary-500/10 dark:bg-primary-500/12'
+    : `absolute h-8 w-8 rounded-full ${appearance.classNames.toneClassNameByTone.accent.iconTileClassName}`;
 
   useEffect(() => {
     if (motion.motionPreset === 'minimal') {
@@ -93,7 +98,7 @@ export function ThinkingPulse() {
   if (motion.motionPreset === 'minimal') {
     return (
       <View className="relative h-8 w-8 items-center justify-center">
-        <View className="absolute h-8 w-8 rounded-full bg-primary-500/10 dark:bg-primary-500/20" />
+        <View className={haloClassName} />
         <View className="flex-row items-center justify-center gap-1">
           <View className="h-1.5 w-1.5 rounded-full bg-primary-500" />
           <View className="h-1.5 w-1.5 rounded-full bg-primary-500 opacity-80" />
@@ -106,7 +111,7 @@ export function ThinkingPulse() {
   return (
     <View className="relative h-8 w-8 items-center justify-center">
       <AnimatedView
-        className="absolute h-8 w-8 rounded-full bg-primary-500/10 dark:bg-primary-500/20"
+        className={haloClassName}
         style={haloStyle}
       />
 

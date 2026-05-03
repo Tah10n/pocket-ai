@@ -1083,8 +1083,9 @@ export function ScreenHeaderShell({
   const isGlass = appearance.surfaceKind === 'glass';
   const isFloating = floating ?? false;
   const shouldUseAndroidMatteHeader = isGlass && shouldUseAndroidGlassMatteFallback();
-  const shouldBlurHeader = !shouldUseAndroidMatteHeader
-    && (Platform.OS !== 'android' || (isGlass && !isAndroidBlurFallbackRequired() && Boolean(blurTarget)));
+  const shouldBlurHeader = isGlass
+    && !shouldUseAndroidMatteHeader
+    && (Platform.OS !== 'android' || (!isAndroidBlurFallbackRequired() && Boolean(blurTarget)));
   const headerClassName = joinClassNames(
     appearance.classNames.headerShellClassName,
     isGlass && (isAndroidBlurFallbackRequired() || shouldUseAndroidMatteHeader)

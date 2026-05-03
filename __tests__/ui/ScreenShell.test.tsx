@@ -573,6 +573,31 @@ describe('ScreenShell', () => {
     expect(headerFade?.props.locations).toBeUndefined();
   });
 
+  it('does not mount native header blur outside the glass theme', () => {
+    const { Platform, View } = require('react-native');
+    const { getThemeAppearance } = require('../../src/utils/themeTokens');
+    const originalPlatform = Platform.OS;
+    mockThemeContext = {
+      colors: { background: '#fff', headerBlurTint: 'light' },
+      resolvedMode: 'light',
+      themeId: 'default',
+      appearance: getThemeAppearance('default', 'light'),
+    };
+    Object.defineProperty(Platform, 'OS', { configurable: true, get: () => 'ios' });
+
+    try {
+      const { UNSAFE_getAllByType } = render(
+        <ScreenHeaderShell>Header</ScreenHeaderShell>,
+      );
+
+      expect(UNSAFE_getAllByType(View).some((node: any) => (
+        Object.prototype.hasOwnProperty.call(node.props, 'intensity')
+      ))).toBe(false);
+    } finally {
+      Object.defineProperty(Platform, 'OS', { configurable: true, get: () => originalPlatform });
+    }
+  });
+
   it('keeps non-floating headers in normal flow', () => {
     const { getThemeAppearance } = require('../../src/utils/themeTokens');
     mockThemeContext = {

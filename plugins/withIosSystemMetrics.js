@@ -117,8 +117,11 @@ RCT_REMAP_METHOD(getMemorySnapshot,
     BOOL hasProcessAvailableBytes = NO;
     uint64_t processAvailableBytes = 0;
     if (@available(iOS 13.0, *)) {
-      processAvailableBytes = os_proc_available_memory();
-      hasProcessAvailableBytes = YES;
+      uint64_t processAvailableBytesCandidate = os_proc_available_memory();
+      if (processAvailableBytesCandidate > 0) {
+        processAvailableBytes = processAvailableBytesCandidate;
+        hasProcessAvailableBytes = YES;
+      }
     }
 
     NSString *pressureLevel = @"unknown";

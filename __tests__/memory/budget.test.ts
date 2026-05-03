@@ -71,7 +71,7 @@ describe('memory/budget', () => {
       thresholdBytes: 10,
       lowMemory: false,
       pressureLevel: 'normal',
-    })).toBe(0);
+    })).toBe(90);
   });
 
   it('uses the soft total-RAM budget when no live snapshot is available', () => {

@@ -117,4 +117,31 @@ describe('resolveSafeLoadPolicyOrThrow', () => {
       }),
     })).toThrow('Model may not fit in memory.');
   });
+
+  it('ignores a zero process availability value instead of treating it as a hard cap', () => {
+    const result = resolveSafeLoadPolicyOrThrow({
+      ...baseInput,
+      memoryFit: createMemoryFit(),
+      systemMemorySnapshot: {
+        totalBytes: 8_000_000_000,
+        availableBytes: 2_000_000_000,
+        processAvailableBytes: 0,
+        freeBytes: 2_000_000_000,
+        thresholdBytes: 0,
+        lowMemory: false,
+        pressureLevel: 'normal',
+      },
+      computeSafeProfile: () => ({
+        safeLoadProfile: { contextTokens: 1024, gpuLayers: 0 },
+        safeMemoryFit: createMemoryFit({
+          decision: 'fits_low_confidence',
+          requiredBytes: 1_000_000_000,
+          effectiveBudgetBytes: 1_500_000_000,
+        }),
+      }),
+    });
+
+    expect(result.availableBudgetBytes).toBe(2_000_000_000);
+    expect(result.shouldAutoUseSafeLoadProfile).toBe(true);
+  });
 });

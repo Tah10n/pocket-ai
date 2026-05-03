@@ -16,7 +16,8 @@ describe('SystemMetrics config plugins', () => {
     const source = withIosSystemMetrics._internal.createIosSystemMetricsSource();
 
     expect(source).toContain('#import <os/proc.h>');
-    expect(source).toContain('processAvailableBytes = os_proc_available_memory();');
+    expect(source).toContain('uint64_t processAvailableBytesCandidate = os_proc_available_memory();');
+    expect(source).toContain('if (processAvailableBytesCandidate > 0)');
     expect(source).toContain('result[@"processAvailableBytes"] = @(processAvailableBytes);');
   });
 });

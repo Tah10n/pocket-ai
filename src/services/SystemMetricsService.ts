@@ -114,7 +114,7 @@ async function readNativeSnapshot(): Promise<SystemMemorySnapshot | null> {
   const appPssBytes = appPssBytesRaw > 0 ? appPssBytesRaw : undefined;
   const appUsedBytes = appPssBytes || appResidentBytes || toSafeByteCount(snapshot.appUsedBytes);
   const advertisedMemoryBytes = toOptionalPositiveByteCount(snapshot.advertisedMemoryBytes);
-  const processAvailableBytes = toOptionalByteCount(snapshot.processAvailableBytes);
+  const processAvailableBytes = toOptionalPositiveByteCount(snapshot.processAvailableBytes);
   const lowMemory = snapshot.lowMemory === true;
   const timestampMs = typeof snapshot.timestampMs === 'number' && Number.isFinite(snapshot.timestampMs) && snapshot.timestampMs > 0
     ? Math.round(snapshot.timestampMs)

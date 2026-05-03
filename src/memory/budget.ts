@@ -42,7 +42,7 @@ export function resolveConservativeAvailableMemoryBudget(
   const thresholdBytes = isFinitePositiveNumber(snapshot.thresholdBytes) ? snapshot.thresholdBytes : 0;
   let budgetBytes = Math.max(snapshot.availableBytes - thresholdBytes, 0);
 
-  if (isFiniteNonNegativeNumber(snapshot.processAvailableBytes)) {
+  if (isFinitePositiveNumber(snapshot.processAvailableBytes)) {
     budgetBytes = Math.min(budgetBytes, snapshot.processAvailableBytes);
   }
 

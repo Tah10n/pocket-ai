@@ -177,7 +177,7 @@ describe('SystemMetricsService', () => {
     }));
   });
 
-  it('preserves a zero iOS process availability cap when native reports one', async () => {
+  it('ignores a zero iOS process availability value when native reports one', async () => {
     Object.defineProperty(Platform, 'OS', {
       configurable: true,
       value: 'ios',
@@ -194,7 +194,7 @@ describe('SystemMetricsService', () => {
 
     await expect(getSystemMemorySnapshot()).resolves.toEqual(expect.objectContaining({
       platform: 'ios',
-      processAvailableBytes: 0,
+      processAvailableBytes: undefined,
     }));
   });
 

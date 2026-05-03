@@ -1,7 +1,7 @@
 import { createMemoryBudget, resolveConservativeAvailableMemoryBudget } from '../../src/memory/budget';
 
 describe('memory/budget', () => {
-  it('derives conservative available budgets using threshold and free memory', () => {
+  it('derives normal available budgets from reclaimable availability instead of free memory', () => {
     expect(resolveConservativeAvailableMemoryBudget({
       availableBytes: 100,
       freeBytes: undefined,
@@ -12,7 +12,66 @@ describe('memory/budget', () => {
       availableBytes: 100,
       freeBytes: 60,
       thresholdBytes: 20,
+    })).toBe(80);
+  });
+
+  it('uses free memory as a strict cap only for explicit or emergency budgets', () => {
+    expect(resolveConservativeAvailableMemoryBudget({
+      availableBytes: 100,
+      freeBytes: 60,
+      thresholdBytes: 20,
+    }, { strictFreeCap: true })).toBe(60);
+
+    expect(resolveConservativeAvailableMemoryBudget({
+      availableBytes: 100,
+      freeBytes: 0,
+      thresholdBytes: 20,
+    }, { strictFreeCap: true })).toBe(0);
+
+    expect(resolveConservativeAvailableMemoryBudget({
+      availableBytes: 100,
+      freeBytes: 60,
+      thresholdBytes: 20,
+      lowMemory: true,
+      pressureLevel: 'normal',
     })).toBe(60);
+
+    expect(resolveConservativeAvailableMemoryBudget({
+      availableBytes: 100,
+      freeBytes: 60,
+      thresholdBytes: 20,
+      lowMemory: false,
+      pressureLevel: 'critical',
+    })).toBe(60);
+  });
+
+  it('caps normal live budgets by process-specific availability when present', () => {
+    expect(resolveConservativeAvailableMemoryBudget({
+      availableBytes: 100,
+      processAvailableBytes: 70,
+      freeBytes: 20,
+      thresholdBytes: 10,
+      lowMemory: false,
+      pressureLevel: 'normal',
+    })).toBe(70);
+
+    expect(resolveConservativeAvailableMemoryBudget({
+      availableBytes: 100,
+      processAvailableBytes: 120,
+      freeBytes: 20,
+      thresholdBytes: 10,
+      lowMemory: false,
+      pressureLevel: 'normal',
+    })).toBe(90);
+
+    expect(resolveConservativeAvailableMemoryBudget({
+      availableBytes: 100,
+      processAvailableBytes: 0,
+      freeBytes: 20,
+      thresholdBytes: 10,
+      lowMemory: false,
+      pressureLevel: 'normal',
+    })).toBe(90);
   });
 
   it('uses the soft total-RAM budget when no live snapshot is available', () => {
@@ -54,7 +113,7 @@ describe('memory/budget', () => {
       thresholdBytes,
       appUsedBytes,
     })!;
-    expect(liveCurrentBudgetBytes).toBe(freeBytes);
+    expect(liveCurrentBudgetBytes).toBe(availableBytes - thresholdBytes);
     expect(budget.totalMemoryBytes).toBe(totalMemoryBytes);
     expect(budget.liveAvailableBytes).toBe(availableBytes);
     expect(budget.appResidentBytes).toBeUndefined();
@@ -98,5 +157,32 @@ describe('memory/budget', () => {
 
     expect(budget.learnedSafeBudgetBytes).toBe(learnedSafeBudgetBytes);
     expect(effectiveBudgetBytes).toBe(expectedRawBudgetBytes - reservedBytes);
+  });
+
+  it('inflates warning-pressure reserve without hard-capping by free memory', () => {
+    const totalMemoryBytes = 8 * 1024 * 1024 * 1024;
+    const availableBytes = 6 * 1024 * 1024 * 1024;
+    const freeBytes = 512 * 1024 * 1024;
+    const thresholdBytes = 256 * 1024 * 1024;
+
+    const { availableBudgetBytes, effectiveBudgetBytes } = createMemoryBudget({
+      totalMemoryBytes,
+      systemMemorySnapshot: {
+        availableBytes,
+        freeBytes,
+        thresholdBytes,
+        lowMemory: false,
+        pressureLevel: 'warning',
+      },
+    });
+
+    const liveCurrentBudgetBytes = availableBytes - thresholdBytes;
+    const fragmentationGuardBytes = Math.round(totalMemoryBytes * 0.05);
+    const lowMemoryExtraReserveBytes = 256 * 1024 * 1024;
+
+    expect(availableBudgetBytes).toBe(liveCurrentBudgetBytes);
+    expect(effectiveBudgetBytes).toBe(
+      liveCurrentBudgetBytes - fragmentationGuardBytes - lowMemoryExtraReserveBytes,
+    );
   });
 });

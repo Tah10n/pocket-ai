@@ -4,7 +4,7 @@ export type MemoryPressureLevel = 'normal' | 'warning' | 'critical' | 'unknown';
 
 export interface SystemMemorySnapshot {
   timestampMs: number;
-  platform: 'android' | 'ios';
+  platform: 'android' | 'ios' | 'unknown';
   totalBytes: number;
   availableBytes: number;
   freeBytes?: number;
@@ -15,6 +15,8 @@ export interface SystemMemorySnapshot {
   lowMemory: boolean;
   pressureLevel: MemoryPressureLevel;
   thresholdBytes: number;
+  advertisedMemoryBytes?: number;
+  processAvailableBytes?: number;
 }
 
 interface NativeSystemMetricsModule {
@@ -27,6 +29,10 @@ function toSafeByteCount(value: unknown) {
 
 function toOptionalByteCount(value: unknown) {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+function toOptionalPositiveByteCount(value: unknown) {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined;
 }
 
 function normalizePressureLevel(value: unknown): MemoryPressureLevel {
@@ -68,8 +74,12 @@ function derivePressureLevel({
   return 'normal';
 }
 
-function normalizePlatform(): 'android' | 'ios' {
-  return Platform.OS === 'android' ? 'android' : 'ios';
+function normalizePlatform(): SystemMemorySnapshot['platform'] {
+  if (Platform.OS === 'android' || Platform.OS === 'ios') {
+    return Platform.OS;
+  }
+
+  return 'unknown';
 }
 
 function resolveSystemMetricsModule(): NativeSystemMetricsModule | null {
@@ -103,6 +113,8 @@ async function readNativeSnapshot(): Promise<SystemMemorySnapshot | null> {
   const appResidentBytes = appResidentBytesRaw > 0 ? appResidentBytesRaw : undefined;
   const appPssBytes = appPssBytesRaw > 0 ? appPssBytesRaw : undefined;
   const appUsedBytes = appPssBytes || appResidentBytes || toSafeByteCount(snapshot.appUsedBytes);
+  const advertisedMemoryBytes = toOptionalPositiveByteCount(snapshot.advertisedMemoryBytes);
+  const processAvailableBytes = toOptionalPositiveByteCount(snapshot.processAvailableBytes);
   const lowMemory = snapshot.lowMemory === true;
   const timestampMs = typeof snapshot.timestampMs === 'number' && Number.isFinite(snapshot.timestampMs) && snapshot.timestampMs > 0
     ? Math.round(snapshot.timestampMs)
@@ -129,6 +141,8 @@ async function readNativeSnapshot(): Promise<SystemMemorySnapshot | null> {
       ? derivePressureLevel({ lowMemory, totalBytes, availableBytes })
       : pressureLevel,
     thresholdBytes,
+    advertisedMemoryBytes,
+    processAvailableBytes,
   };
 }
 

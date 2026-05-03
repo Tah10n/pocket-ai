@@ -5,7 +5,7 @@ import { useTranslation } from 'react-i18next';
 import { Box } from '@/components/ui/box';
 import { Button, ButtonText } from '@/components/ui/button';
 import { HeaderBar } from '@/components/ui/HeaderBar';
-import { ScreenCard, ScreenContent, ScreenStack, ScreenTextField } from '@/components/ui/ScreenShell';
+import { ScreenCard, ScreenContent, ScreenRoot, ScreenStack, ScreenTextField } from '@/components/ui/ScreenShell';
 import { ScrollView } from '@/components/ui/scroll-view';
 import { Text } from '@/components/ui/text';
 import { huggingFaceTokenService } from '../../services/HuggingFaceTokenService';
@@ -87,7 +87,7 @@ export function HuggingFaceTokenScreen() {
   }, [router]);
 
   return (
-    <Box className="flex-1 bg-background-0 dark:bg-background-950">
+    <ScreenRoot>
       <HeaderBar
         title={t('settings.huggingFaceToken')}
         subtitle={t('settings.huggingFaceTokenScreenDescription')}
@@ -157,6 +157,6 @@ export function HuggingFaceTokenScreen() {
           </Button>
         </Box>
       </ScreenContent>
-    </Box>
+    </ScreenRoot>
   );
 }

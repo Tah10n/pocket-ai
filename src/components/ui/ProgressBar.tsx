@@ -1,0 +1,119 @@
+import React from 'react';
+import { Box } from '@/components/ui/box';
+import { useTheme } from '@/providers/ThemeProvider';
+import { DEFAULT_THEME_ID, getThemeAppearance } from '@/utils/themeTokens';
+import { GlassSurfaceBackdrop, getGlassCornerRadiusStyle, getGlassSurfaceFrameStyle } from './ScreenShell';
+import type { AndroidBlurTargetRef } from '@/utils/androidBlur';
+
+type ProgressBarSize = 'sm' | 'md' | 'lg';
+type ProgressBarTone = 'neutral' | 'primary' | 'success' | 'warning';
+type ProgressBarVariant = 'plain' | 'framed';
+
+interface ProgressBarProps {
+  valuePercent: number;
+  size?: ProgressBarSize;
+  tone?: ProgressBarTone;
+  variant?: ProgressBarVariant;
+  className?: string;
+  fillClassName?: string;
+  forceNativeAndroidBlur?: boolean;
+  androidBlurTargetRef?: AndroidBlurTargetRef | null;
+  testID?: string;
+  fillTestID?: string;
+}
+
+const trackHeightClassNameBySize: Record<ProgressBarSize, string> = {
+  sm: 'h-1.5',
+  md: 'h-2',
+  lg: 'h-2.5',
+};
+
+const framedTrackHeightClassNameBySize: Record<ProgressBarSize, string> = {
+  sm: 'h-3',
+  md: 'h-3.5',
+  lg: 'h-4',
+};
+
+const framedFillHeightClassNameBySize: Record<ProgressBarSize, string> = {
+  sm: 'h-2',
+  md: 'h-2.5',
+  lg: 'h-3',
+};
+
+function joinClassNames(...values: (string | undefined | false)[]) {
+  return values.filter(Boolean).join(' ');
+}
+
+function clampProgressPercent(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+
+  return Math.max(0, Math.min(100, value));
+}
+
+export function ProgressBar({
+  valuePercent,
+  size = 'md',
+  tone = 'neutral',
+  variant = 'plain',
+  className,
+  fillClassName,
+  forceNativeAndroidBlur = false,
+  androidBlurTargetRef,
+  testID,
+  fillTestID,
+}: ProgressBarProps) {
+  const theme = useTheme();
+  const appearance = theme.appearance ?? getThemeAppearance(theme.themeId ?? DEFAULT_THEME_ID, theme.resolvedMode ?? 'light');
+  const clampedPercent = clampProgressPercent(valuePercent);
+  const isFramed = variant === 'framed';
+  const toneClassNames = appearance.classNames.toneClassNameByTone[tone];
+  const resolvedFillClassName = fillClassName ?? toneClassNames.progressFillClassName;
+  const containerRadiusClassName = 'relative w-full overflow-hidden rounded-full';
+  const glassCornerRadiusStyle = getGlassCornerRadiusStyle(
+    containerRadiusClassName,
+    isFramed ? toneClassNames.framedProgressTrackClassName : toneClassNames.progressTrackClassName,
+    className,
+  );
+  const glassFrameStyle = isFramed
+    ? getGlassSurfaceFrameStyle(appearance, theme.resolvedMode, theme.colors, tone, false, glassCornerRadiusStyle)
+    : undefined;
+  const shouldUseGlassTrackBackdrop = isFramed && appearance.surfaceKind === 'glass';
+
+  return (
+    <Box
+      testID={testID}
+      accessibilityRole="progressbar"
+      accessibilityValue={{ min: 0, max: 100, now: clampedPercent }}
+      className={joinClassNames(
+        containerRadiusClassName,
+        isFramed ? 'border justify-center p-0.5' : undefined,
+        isFramed ? framedTrackHeightClassNameBySize[size] : trackHeightClassNameBySize[size],
+        isFramed ? toneClassNames.framedProgressTrackClassName : toneClassNames.progressTrackClassName,
+        className,
+      )}
+      style={glassFrameStyle}
+    >
+      {shouldUseGlassTrackBackdrop ? (
+        <GlassSurfaceBackdrop
+          appearance={appearance}
+          tint={theme.colors.headerBlurTint}
+          decorative="matte"
+          cornerRadiusStyle={glassCornerRadiusStyle}
+          forceNativeAndroidBlur={forceNativeAndroidBlur}
+          androidBlurTargetRef={androidBlurTargetRef}
+        />
+      ) : null}
+      <Box
+        testID={fillTestID}
+        className={joinClassNames(
+          'relative overflow-hidden rounded-full',
+          isFramed ? framedFillHeightClassNameBySize[size] : 'h-full',
+          resolvedFillClassName,
+        )}
+        style={{ width: `${clampedPercent}%` }}
+      />
+    </Box>
+  );
+}

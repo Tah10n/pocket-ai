@@ -61,7 +61,7 @@ const ModelCardComponent = ({
       : null;
   return (
     <ScreenCard
-      className={isActive ? 'bg-primary-500/5 dark:bg-primary-500/10' : ''}
+      decorative="tint"
       padding="compact"
       tone={isActive ? 'accent' : 'default'}
     >
@@ -135,7 +135,7 @@ const ModelCardComponent = ({
         />
       ) : null}
 
-      <ModelDownloadProgress model={model} className="mt-2.5" />
+      <ModelDownloadProgress model={model} density="compact" className="mt-2.5" />
 
       <ModelLifecycleActionRow
         model={model}

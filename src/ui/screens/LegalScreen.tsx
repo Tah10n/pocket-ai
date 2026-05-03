@@ -5,15 +5,16 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Box } from '@/components/ui/box';
 import { HeaderBar } from '@/components/ui/HeaderBar';
 import { MaterialSymbols } from '@/components/ui/MaterialSymbols';
-import { ScreenCard, ScreenContent, ScreenStack } from '@/components/ui/ScreenShell';
+import { ScreenCard, ScreenContent, ScreenIconTile, ScreenRoot, ScreenStack } from '@/components/ui/ScreenShell';
 import { ScrollView } from '@/components/ui/scroll-view';
 import { Text } from '@/components/ui/text';
+import { type ThemeTone } from '@/utils/themeTokens';
 
 type SectionConfig = {
     id: string;
     icon: React.ComponentProps<typeof MaterialSymbols>['name'];
-    iconWrapClassName: string;
-    iconClassName: string;
+    tone: ThemeTone;
+    iconClassName?: string;
     titleKey: string;
     bodyKey: string;
 };
@@ -36,7 +37,7 @@ export function LegalScreen() {
         {
             id: 'on-device',
             icon: 'computer',
-            iconWrapClassName: 'bg-primary-500/10 dark:bg-primary-500/20',
+            tone: 'accent',
             iconClassName: 'text-primary-500',
             titleKey: 'legal.onDeviceTitle',
             bodyKey: 'legal.onDeviceDescription',
@@ -44,47 +45,42 @@ export function LegalScreen() {
         {
             id: 'network',
             icon: 'cloud-download',
-            iconWrapClassName: 'bg-info-500/10 dark:bg-info-500/20',
-            iconClassName: 'text-info-600 dark:text-info-300',
+            tone: 'info',
             titleKey: 'legal.networkTitle',
             bodyKey: 'legal.networkDescription',
         },
         {
             id: 'storage',
             icon: 'storage',
-            iconWrapClassName: 'bg-success-500/10 dark:bg-success-500/20',
-            iconClassName: 'text-success-600 dark:text-success-300',
+            tone: 'success',
             titleKey: 'legal.storageTitle',
             bodyKey: 'legal.storageDescription',
         },
         {
             id: 'downloads',
             icon: 'file-download',
-            iconWrapClassName: 'bg-warning-500/15 dark:bg-warning-500/25',
-            iconClassName: 'text-warning-700 dark:text-warning-200',
+            tone: 'warning',
             titleKey: 'legal.downloadsTitle',
             bodyKey: 'legal.downloadsDescription',
         },
         {
             id: 'resources',
             icon: 'memory',
-            iconWrapClassName: 'bg-primary-500/10 dark:bg-primary-500/15',
-            iconClassName: 'text-primary-600 dark:text-primary-300',
+            tone: 'accent',
             titleKey: 'legal.resourcesTitle',
             bodyKey: 'legal.resourcesDescription',
         },
         {
             id: 'controls',
             icon: 'tune',
-            iconWrapClassName: 'bg-success-500/10 dark:bg-success-500/20',
-            iconClassName: 'text-success-700 dark:text-success-300',
+            tone: 'success',
             titleKey: 'legal.controlsTitle',
             bodyKey: 'legal.controlsDescription',
         },
     ], []);
 
     return (
-        <Box className="flex-1 bg-background-0 dark:bg-background-950">
+        <ScreenRoot>
             <HeaderBar
                 title={t('legal.title')}
                 subtitle={t('legal.subtitle')}
@@ -112,9 +108,7 @@ export function LegalScreen() {
                             {sections.map((section) => (
                                 <ScreenCard key={section.id} testID={`legal-section-${section.id}`}>
                                     <Box className="flex-row items-start gap-3">
-                                        <Box className={`h-11 w-11 items-center justify-center rounded-2xl ${section.iconWrapClassName}`}>
-                                            <MaterialSymbols name={section.icon} size={20} className={section.iconClassName} />
-                                        </Box>
+                                        <ScreenIconTile iconName={section.icon} tone={section.tone} iconSize={20} size="lg" iconClassName={section.iconClassName} />
                                         <Box className="min-w-0 flex-1">
                                             <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">
                                                 {t(section.titleKey)}
@@ -130,6 +124,6 @@ export function LegalScreen() {
                     </ScreenStack>
                 </ScreenContent>
             </ScrollView>
-        </Box>
+        </ScreenRoot>
     );
 }

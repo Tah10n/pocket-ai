@@ -7,7 +7,7 @@ import { useTranslation } from 'react-i18next';
 import { useConversationIndex } from '../../hooks/useConversationIndex';
 import { ConversationIndexItem } from '../../types/chat';
 import { Pressable } from '@/components/ui/pressable';
-import { ScreenActionPill, ScreenCard, ScreenIconButton, ScreenStack } from './ScreenShell';
+import { ScreenActionPill, ScreenCard, ScreenIconButton, ScreenIconTile, ScreenStack } from './ScreenShell';
 import {
   formatConversationUpdatedAt,
   getConversationModelLabel,
@@ -60,9 +60,7 @@ export const RecentConversationsList = ({
         accessibilityLabel={conv.title}
         className="flex-1 flex-row items-center gap-3 p-3 active:opacity-70"
       >
-        <Box className="h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-primary-500/10 dark:bg-primary-500/15">
-          <MaterialSymbols name={conv.icon} size="sm" className="text-primary-500" />
-        </Box>
+        <ScreenIconTile iconName={conv.icon} tone="accent" iconSize="sm" className="shrink-0" iconClassName="text-primary-500" />
 
         <Box className="min-w-0 flex-1 overflow-hidden">
           <Text className={composeTextRole('sectionTitle')} numberOfLines={1}>
@@ -131,7 +129,7 @@ export const RecentConversationsList = ({
             ))}
           </ScreenStack>
         ) : (
-          <ScreenCard dashed className="dark:border-outline-700" padding="compact">
+          <ScreenCard dashed padding="compact" decorative="matte">
             <Text className={composeTextRole('sectionTitle', 'text-sm')}>
               {t('home.noConversationsTitle')}
             </Text>

@@ -1,4 +1,5 @@
-import React, { useCallback } from 'react';
+import React, { useCallback, useRef } from 'react';
+import type { View } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useTranslation } from 'react-i18next';
 import {
@@ -15,9 +16,9 @@ import { HeaderBar } from '@/components/ui/HeaderBar';
 import { ModelDownloadProgress, ModelLifecycleActionRow } from '@/components/ui/ModelLifecycleControls';
 import { MaterialSymbols } from '@/components/ui/MaterialSymbols';
 import { ErrorReportSheet } from '@/components/ui/ErrorReportSheet';
-import { ModelWarmupBanner } from '@/components/ui/ModelWarmupBanner';
+import { MODEL_WARMUP_BANNER_RESERVED_HEIGHT, ModelWarmupBanner } from '@/components/ui/ModelWarmupBanner';
 import { ModelParametersSheet } from '@/components/ui/ModelParametersSheet';
-import { ScreenBadge, ScreenCard, ScreenContent, ScreenStack } from '@/components/ui/ScreenShell';
+import { ScreenAndroidContentBlurTarget, ScreenBadge, ScreenCard, ScreenContent, ScreenRoot, ScreenStack } from '@/components/ui/ScreenShell';
 import { ScrollView } from '@/components/ui/scroll-view';
 import { Spinner } from '@/components/ui/spinner';
 import { Text } from '@/components/ui/text';
@@ -52,6 +53,7 @@ export function ModelDetailsScreen() {
     openModelParameters,
     reportEngineError,
   } = useModelDetailsController(modelId);
+  const warmupContentBlurTargetRef = useRef<View | null>(null);
 
   const handleBack = useCallback(() => {
     if (router.canGoBack()) {
@@ -86,38 +88,47 @@ export function ModelDetailsScreen() {
   })) ?? [];
 
   return (
-    <Box className="flex-1 bg-background-0 dark:bg-background-950">
-      <HeaderBar
-        title={t('models.detailTitle')}
-        subtitle={displayModel?.id ?? modelId}
-        onBack={handleBack}
-        backAccessibilityLabel={t('chat.headerBackAccessibilityLabel')}
-      />
+    <ScreenRoot>
+      <ScreenAndroidContentBlurTarget
+        blurTargetRef={warmupContentBlurTargetRef}
+        style={{ flex: 1 }}
+        testID="model-details-warmup-content-blur-target"
+      >
+        <HeaderBar
+          title={t('models.detailTitle')}
+          subtitle={displayModel?.id ?? modelId}
+          onBack={handleBack}
+          backAccessibilityLabel={t('chat.headerBackAccessibilityLabel')}
+        />
 
-      {engineState.status === EngineStatus.ERROR && engineState.lastError ? (
-        <ScreenContent className="pt-3 pb-0">
-          <ScreenCard padding="compact" tone="error">
-            <Text className="text-sm font-semibold text-error-700 dark:text-error-300">
-              {t('common.errors.modelLoadFailed')}
-            </Text>
-            <Text selectable className="mt-1 text-sm text-error-700 dark:text-error-300">
-              {engineState.lastError}
-            </Text>
-            <Box className="mt-3 flex-row gap-2">
-              <Button action="secondary" size="sm" onPress={dismissEngineError} className="flex-1">
-                <ButtonText>{t('common.close')}</ButtonText>
-              </Button>
-              <Button action="softPrimary" size="sm" onPress={reportEngineError} className="flex-1">
-                <ButtonText>{t('models.errorReport.reportButton')}</ButtonText>
-              </Button>
-            </Box>
-          </ScreenCard>
-        </ScreenContent>
-      ) : null}
+        {engineState.status === EngineStatus.ERROR && engineState.lastError ? (
+          <ScreenContent className="pt-3 pb-0">
+            <ScreenCard padding="compact" tone="error">
+              <Text className="text-sm font-semibold text-error-700 dark:text-error-300">
+                {t('common.errors.modelLoadFailed')}
+              </Text>
+              <Text selectable className="mt-1 text-sm text-error-700 dark:text-error-300">
+                {engineState.lastError}
+              </Text>
+              <Box className="mt-3 flex-row gap-2">
+                <Button action="secondary" size="sm" onPress={dismissEngineError} className="flex-1">
+                  <ButtonText>{t('common.close')}</ButtonText>
+                </Button>
+                <Button action="softPrimary" size="sm" onPress={reportEngineError} className="flex-1">
+                  <ButtonText>{t('models.errorReport.reportButton')}</ButtonText>
+                </Button>
+              </Box>
+            </ScreenCard>
+          </ScreenContent>
+        ) : null}
 
-      <ScrollView className="flex-1">
-        <ScreenContent className="flex-1 pt-3" includeBottomSafeArea>
-          <ScreenStack gap="loose">
+        <ScrollView className="flex-1">
+          <ScreenContent
+            className="flex-1 pt-3"
+            extraBottomInset={engineState.status === EngineStatus.INITIALIZING ? MODEL_WARMUP_BANNER_RESERVED_HEIGHT : 0}
+            includeBottomSafeArea
+          >
+            <ScreenStack gap="loose">
             {loading && !displayModel ? (
               <Box className="items-center justify-center pt-16">
                 <Spinner size="large" />
@@ -136,7 +147,7 @@ export function ModelDetailsScreen() {
             {displayModel ? (
               <>
                 {errorMessage ? (
-                  <SectionCard className="border-warning-300/70 bg-warning-50/90 dark:border-warning-800 dark:bg-warning-950/35">
+                  <SectionCard tone="warning">
                     <Text className="text-sm leading-6 text-warning-700 dark:text-warning-300">{errorMessage}</Text>
                   </SectionCard>
                 ) : null}
@@ -243,13 +254,20 @@ export function ModelDetailsScreen() {
                 />
               </>
             ) : null}
-          </ScreenStack>
-        </ScreenContent>
-      </ScrollView>
+            </ScreenStack>
+          </ScreenContent>
+        </ScrollView>
+      </ScreenAndroidContentBlurTarget>
 
-      <ModelWarmupBanner engineState={engineState} />
-      <ModelParametersSheet {...modelParametersSheetProps} />
-      <ErrorReportSheet {...errorReportSheetProps} />
-    </Box>
+      <ModelWarmupBanner androidContentBlurTargetRef={warmupContentBlurTargetRef} engineState={engineState} />
+      <ModelParametersSheet
+        {...modelParametersSheetProps}
+        androidContentBlurTargetRef={warmupContentBlurTargetRef}
+      />
+      <ErrorReportSheet
+        {...errorReportSheetProps}
+        androidContentBlurTargetRef={warmupContentBlurTargetRef}
+      />
+    </ScreenRoot>
   );
 }

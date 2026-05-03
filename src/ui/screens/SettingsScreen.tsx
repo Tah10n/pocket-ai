@@ -9,7 +9,9 @@ import { MaterialSymbols } from '@/components/ui/MaterialSymbols';
 import {
     ScreenCard,
     ScreenContent,
+    ScreenIconTile,
     ScreenPressableCard,
+    ScreenRoot,
     ScreenSectionLabel,
     ScreenSegmentedControl,
     ScreenStack,
@@ -17,13 +19,14 @@ import {
 import { ScrollView } from '@/components/ui/scroll-view';
 import { Text } from '@/components/ui/text';
 import { useDeviceMetrics } from '../../hooks/useDeviceMetrics';
+import { useFloatingScrollInsets } from '../../hooks/useTabBarContentInset';
 import { useLLMEngine } from '../../hooks/useLLMEngine';
 import { useTheme } from '../../providers/ThemeProvider';
 import { huggingFaceTokenService } from '../../services/HuggingFaceTokenService';
 import { llmEngineService } from '../../services/LLMEngineService';
 import { getAppStorageMetrics, type AppStorageMetrics } from '../../services/StorageManagerService';
 import { getSettings, subscribeSettings, updateSettings } from '../../services/SettingsStore';
-import { screenLayoutMetrics, semanticColorTokens, withAlpha } from '../../utils/themeTokens';
+import { screenLayoutMetrics, semanticColorTokens, withAlpha, type ThemeId, type ThemeTone } from '../../utils/themeTokens';
 
 function clampPercentage(value: number) {
     if (!Number.isFinite(value)) {
@@ -77,7 +80,7 @@ function SettingsNavCard({
     title,
     description,
     iconName,
-    iconWrapClassName,
+    iconTone = 'accent',
     iconClassName,
     trailingText,
     onPress,
@@ -85,17 +88,15 @@ function SettingsNavCard({
     title: string;
     description: string;
     iconName: React.ComponentProps<typeof MaterialSymbols>['name'];
-    iconWrapClassName: string;
-    iconClassName: string;
+    iconTone?: ThemeTone;
+    iconClassName?: string;
     trailingText?: string;
     onPress: () => void;
 }) {
     return (
         <ScreenPressableCard onPress={onPress} padding="compact">
             <Box className="flex-row items-center gap-3">
-                <Box className={`h-9 w-9 items-center justify-center overflow-hidden rounded-xl ${iconWrapClassName}`}>
-                    <MaterialSymbols name={iconName} size="lg" className={iconClassName} />
-                </Box>
+                <ScreenIconTile iconName={iconName} tone={iconTone} iconClassName={iconClassName} />
 
                 <Box className="min-w-0 flex-1">
                     <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">
@@ -234,7 +235,8 @@ export const SettingsScreen = () => {
     const { t, i18n } = useTranslation();
     const router = useRouter();
     const isFocused = useIsFocused();
-    const { mode, resolvedMode, setTheme, colors } = useTheme();
+    const { mode, themeId, resolvedMode, setTheme, setThemeId, colors, appearance } = useTheme();
+    const { paddingTop: headerInset, paddingBottom: tabBarInset } = useFloatingScrollInsets();
     const { metrics, refresh } = useDeviceMetrics({ enabled: isFocused, refreshIntervalMs: 5000 });
     const { state: engineState, isReady: isEngineReady } = useLLMEngine();
     const [settings, setSettings] = useState(() => getSettings());
@@ -373,15 +375,20 @@ export const SettingsScreen = () => {
     ];
 
     const themeOptions = [
-        { key: 'light', label: t('settings.themeLight') },
-        { key: 'system', label: t('settings.themeSystem') },
-        { key: 'dark', label: t('settings.themeDark') },
+        { key: 'light', label: t('settings.themeLight'), testID: 'settings-theme-mode-light' },
+        { key: 'system', label: t('settings.themeSystem'), testID: 'settings-theme-mode-system' },
+        { key: 'dark', label: t('settings.themeDark'), testID: 'settings-theme-mode-dark' },
+    ];
+
+    const visualThemeOptions = [
+        { key: 'default', label: t('settings.themeStyleDefault'), testID: 'settings-theme-style-default' },
+        { key: 'glass', label: t('settings.themeStyleGlass'), testID: 'settings-theme-style-glass' },
     ];
 
     return (
-        <Box className="flex-1 bg-background-0 dark:bg-background-950">
+        <ScreenRoot>
             <HeaderBar
-                title={t('settings.title')}
+                title={`${t('settings.title')}`}
                 onBack={undefined}
                 backAccessibilityLabel={t('chat.headerBackAccessibilityLabel')}
                 backButtonTestID="settings-back-button"
@@ -389,9 +396,17 @@ export const SettingsScreen = () => {
                 brandIconName="settings"
             />
 
-            <ScrollView className="flex-1" showsVerticalScrollIndicator={false}>
+            <ScrollView
+                className="flex-1"
+                showsVerticalScrollIndicator={false}
+                contentContainerStyle={{
+                    paddingTop: headerInset,
+                    paddingBottom: tabBarInset,
+                }}
+            >
                 <ScreenContent
                     testID="settings-screen-content"
+                    respectFloatingHeader={false}
                     className="pt-3"
                     style={{ paddingBottom: screenLayoutMetrics.contentBottomInset }}
                 >
@@ -401,9 +416,7 @@ export const SettingsScreen = () => {
                             <ScreenStack className="mt-2" gap="compact">
                                 <ScreenCard padding="compact">
                                     <Box className="flex-row items-start gap-3">
-                                        <Box className="h-9 w-9 items-center justify-center rounded-xl bg-primary-500/10 dark:bg-primary-500/20">
-                                            <MaterialSymbols name="memory" size="lg" className="text-primary-500" />
-                                        </Box>
+                                        <ScreenIconTile iconName="memory" tone="accent" iconClassName="text-primary-500" />
                                         <Box className="min-w-0 flex-1">
                                             <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">
                                                 {t('settings.memoryTitle')}
@@ -478,7 +491,7 @@ export const SettingsScreen = () => {
                                     </ScreenStack>
 
                                     {canForceUnloadModel ? (
-                                        <Box className="mt-4 border-t border-outline-200 pt-3 dark:border-outline-800">
+                                        <Box className={`mt-4 border-t pt-3 ${appearance.classNames.dividerClassName}`}>
                                             <Button
                                                 onPress={unloadActiveModel}
                                                 accessibilityRole="button"
@@ -496,9 +509,7 @@ export const SettingsScreen = () => {
 
                                 <ScreenCard padding="compact">
                                     <Box className="flex-row items-start gap-3">
-                                        <Box className="h-9 w-9 items-center justify-center rounded-xl bg-success-500/10 dark:bg-success-500/20">
-                                            <MaterialSymbols name="storage" size="lg" className="text-success-600 dark:text-success-300" />
-                                        </Box>
+                                        <ScreenIconTile iconName="storage" tone="success" />
                                         <Box className="min-w-0 flex-1">
                                             <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">
                                                 {t('settings.storageTitle')}
@@ -567,9 +578,7 @@ export const SettingsScreen = () => {
                             <ScreenStack className="mt-2" gap="compact">
                                 <ScreenCard padding="compact">
                                     <Box className="flex-row items-start gap-3">
-                                        <Box className="h-9 w-9 items-center justify-center rounded-xl bg-info-500/10 dark:bg-info-500/20">
-                                            <MaterialSymbols name="palette" size="lg" className="text-info-600 dark:text-info-300" />
-                                        </Box>
+                                        <ScreenIconTile iconName="palette" tone="info" />
                                         <Box className="min-w-0 flex-1">
                                             <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">
                                                 {t('settings.themeMode')}
@@ -582,9 +591,32 @@ export const SettingsScreen = () => {
 
                                     <ScreenSegmentedControl
                                         className="mt-4"
+                                        testID="settings-theme-mode-control"
                                         activeKey={mode}
                                         onChange={(nextMode) => setTheme(nextMode as typeof mode)}
                                         options={themeOptions}
+                                    />
+                                </ScreenCard>
+
+                                <ScreenCard padding="compact">
+                                    <Box className="flex-row items-start gap-3">
+                                        <ScreenIconTile iconName="auto-awesome" tone="accent" />
+                                        <Box className="min-w-0 flex-1">
+                                            <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">
+                                                {t('settings.themeStyle')}
+                                            </Text>
+                                            <Text className="mt-1 text-sm leading-5 text-typography-500 dark:text-typography-400">
+                                                {t('settings.themeStyleDescription')}
+                                            </Text>
+                                        </Box>
+                                    </Box>
+
+                                    <ScreenSegmentedControl
+                                        className="mt-4"
+                                        testID="settings-theme-style-control"
+                                        activeKey={themeId}
+                                        onChange={(nextThemeId) => setThemeId(nextThemeId as ThemeId)}
+                                        options={visualThemeOptions}
                                     />
                                 </ScreenCard>
 
@@ -592,7 +624,7 @@ export const SettingsScreen = () => {
                                     title={t('settings.language')}
                                     description={t('settings.languageDescription')}
                                     iconName="language"
-                                    iconWrapClassName="bg-primary-500/10 dark:bg-primary-500/20"
+                                    iconTone="accent"
                                     iconClassName="text-primary-500"
                                     trailingText={settings.language === 'en' ? t('settings.languageEnglish') : t('settings.languageRussian')}
                                     onPress={handleLanguagePress}
@@ -605,9 +637,7 @@ export const SettingsScreen = () => {
                             <ScreenStack className="mt-2" gap="compact">
                                 <ScreenCard padding="compact">
                                     <Box className="flex-row items-start gap-3">
-                                        <Box className="h-9 w-9 items-center justify-center rounded-xl bg-info-500/10 dark:bg-info-500/20">
-                                            <MaterialSymbols name="cell-tower" size="lg" className="text-info-600 dark:text-info-300" />
-                                        </Box>
+                                        <ScreenIconTile iconName="cell-tower" tone="info" />
                                         <Box className="min-w-0 flex-1">
                                             <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">
                                                 {t('settings.cellularDownloads')}
@@ -627,9 +657,7 @@ export const SettingsScreen = () => {
                                 </ScreenCard>
                                 <ScreenCard padding="compact">
                                     <Box className="flex-row items-start gap-3">
-                                        <Box className="h-9 w-9 items-center justify-center rounded-xl bg-primary-500/10 dark:bg-primary-500/20">
-                                            <MaterialSymbols name="model-training" size="lg" className="text-primary-500" />
-                                        </Box>
+                                        <ScreenIconTile iconName="model-training" tone="accent" iconClassName="text-primary-500" />
                                         <Box className="min-w-0 flex-1">
                                             <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">
                                                 {t('settings.advancedInferenceControls')}
@@ -651,23 +679,21 @@ export const SettingsScreen = () => {
                                     title={t('settings.presets')}
                                     description={t('settings.presetsDescription')}
                                     iconName="tune"
-                                    iconWrapClassName="rounded-2xl bg-warning-100 dark:bg-warning-500/20"
-                                    iconClassName="text-warning-700 dark:text-warning-200"
+                                    iconTone="warning"
                                     onPress={handlePresetsPress}
                                 />
                                 <SettingsNavCard
                                     title={t('settings.storageManager')}
                                     description={t('settings.storageManagerDescription')}
                                     iconName="storage"
-                                    iconWrapClassName="bg-success-500/10 dark:bg-success-500/20"
-                                    iconClassName="text-success-600 dark:text-success-300"
+                                    iconTone="success"
                                     onPress={handleStorageManagerPress}
                                 />
                                 <SettingsNavCard
                                     title={t('settings.huggingFaceToken')}
                                     description={t('settings.huggingFaceTokenDescription')}
                                     iconName="key"
-                                    iconWrapClassName="bg-primary-500/10 dark:bg-primary-500/20"
+                                    iconTone="accent"
                                     iconClassName="text-primary-500"
                                     trailingText={hasHuggingFaceToken
                                         ? t('settings.huggingFaceTokenConfigured')
@@ -678,7 +704,7 @@ export const SettingsScreen = () => {
                                     title={t('settings.privacyDisclosures')}
                                     description={t('settings.privacyDisclosuresDescription')}
                                     iconName="security"
-                                    iconWrapClassName="bg-primary-500/10 dark:bg-primary-500/20"
+                                    iconTone="accent"
                                     iconClassName="text-primary-500"
                                     onPress={handleLegalPress}
                                 />
@@ -687,8 +713,7 @@ export const SettingsScreen = () => {
                                         title={t('settings.performance')}
                                         description={t('settings.performanceDescription')}
                                         iconName="speed"
-                                        iconWrapClassName="bg-info-500/10 dark:bg-info-500/20"
-                                        iconClassName="text-info-600 dark:text-info-300"
+                                        iconTone="info"
                                         onPress={handlePerformancePress}
                                     />
                                 ) : null}
@@ -697,6 +722,6 @@ export const SettingsScreen = () => {
                     </ScreenStack>
                 </ScreenContent>
             </ScrollView>
-        </Box>
+        </ScreenRoot>
     );
 };

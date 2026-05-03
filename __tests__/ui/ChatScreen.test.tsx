@@ -69,6 +69,10 @@ jest.mock('@react-navigation/bottom-tabs', () => ({
   useBottomTabBarHeight: () => 0,
 }));
 
+jest.mock('react-native-safe-area-context', () => ({
+  useSafeAreaInsets: () => ({ top: 0, right: 0, bottom: 0, left: 0 }),
+}));
+
 jest.mock('expo-router', () => ({
   useRouter: () => ({
     canGoBack: () => false,
@@ -105,6 +109,7 @@ const mockGetTotalMemory = jest.fn().mockResolvedValue(8 * 1024 * 1024 * 1024);
 const mockRefreshModelMetadata = jest.fn((model) => Promise.resolve(model));
 let lastPresetSelectorProps: any = null;
 let lastModelParametersSheetProps: any = null;
+let lastErrorReportSheetProps: any = null;
 let lastChatHeaderProps: any = null;
 let lastChatInputBarProps: any = null;
 const mockStartNewChat = jest.fn(() => {
@@ -141,6 +146,7 @@ let mockHardwareBannerInputs = {
 };
 let mockEngineState: {
   activeModelId: string | null;
+  loadProgress?: number;
   status: string;
   diagnostics?: {
     backendMode: 'cpu' | 'gpu' | 'npu' | 'unknown';
@@ -327,11 +333,12 @@ jest.mock('../../src/components/ui/ChatInputBar', () => {
   const { Pressable, Text, View } = require('react-native');
 
   return {
-    ChatInputBar: ({ isSending, onStopGeneration, onSendMessage, modeLabel, leadingActions, attachmentsTray }: any) => {
+    ChatInputBar: ({ isSending, onStopGeneration, onSendMessage, androidContentBlurTargetRef, modeLabel, leadingActions, attachmentsTray }: any) => {
       lastChatInputBarProps = {
         isSending,
         onStopGeneration,
         onSendMessage,
+        androidContentBlurTargetRef,
         modeLabel,
         leadingActions,
         attachmentsTray,
@@ -463,6 +470,20 @@ jest.mock('@/components/ui/ModelParametersSheet', () => {
   };
 });
 
+jest.mock('@/components/ui/ErrorReportSheet', () => {
+  const mockReact = require('react');
+  const { Text, View } = require('react-native');
+
+  return {
+    ErrorReportSheet: (props: any) => {
+      lastErrorReportSheetProps = props;
+      return props.visible
+        ? mockReact.createElement(View, { testID: 'error-report-sheet' }, mockReact.createElement(Text, null, 'Error report'))
+        : null;
+    },
+  };
+});
+
 jest.mock('@/components/ui/box', () => {
   const mockReact = require('react');
   const { View } = require('react-native');
@@ -567,7 +588,9 @@ const {
   getNextShouldStickToBottom,
   getAndroidKeyboardOverlapCompensation,
   getAndroidKeyboardSpacerHeight,
+  getChatWarmupBannerBottomOffset,
   handleAndroidBackNavigation,
+  shouldFloatAndroidComposerOverContent,
 } = require('../../src/ui/screens/ChatScreen');
 const { useChatStore } = require('../../src/store/chatStore');
 const {
@@ -609,6 +632,7 @@ describe('ChatScreen', () => {
     alertSpy.mockClear();
     lastPresetSelectorProps = null;
     lastModelParametersSheetProps = null;
+    lastErrorReportSheetProps = null;
     lastChatHeaderProps = null;
     lastChatInputBarProps = null;
     mockLoadModel.mockClear();
@@ -618,10 +642,11 @@ describe('ChatScreen', () => {
       showThermalWarning: false,
       thermalState: 'nominal',
     };
-    mockEngineState = {
-      activeModelId: 'author/model-q4',
-      status: 'ready',
-    };
+  mockEngineState = {
+    activeModelId: 'author/model-q4',
+    loadProgress: 0,
+    status: 'ready',
+  };
     mockGetRecommendedGpuLayers.mockReset();
     mockGetRecommendedGpuLayers.mockImplementation(() => new Promise<number>(() => {}));
     mockGetRecommendedLoadProfile.mockReset();
@@ -848,6 +873,20 @@ describe('ChatScreen', () => {
       .toBeCloseTo(32 / 640);
   });
 
+  it('passes the chat content blur target to floating chrome and modal sheets', () => {
+    const { getByTestId } = render(React.createElement(ChatScreen));
+
+    const blurTarget = lastPresetSelectorProps?.androidContentBlurTargetRef;
+    const contentBlurTarget = getByTestId('chat-warmup-content-blur-target');
+
+    expect(contentBlurTarget).toBeTruthy();
+    expect(blurTarget).toBeTruthy();
+    expect(lastChatInputBarProps?.androidContentBlurTargetRef).toBe(blurTarget);
+    expect(lastModelParametersSheetProps?.androidContentBlurTargetRef).toBe(blurTarget);
+    expect(lastErrorReportSheetProps?.androidContentBlurTargetRef).toBe(blurTarget);
+    expect(() => contentBlurTarget.findByProps({ testID: 'chat-input-bar' })).toThrow();
+  });
+
   it('clears the list-touch guard after drag end so auto-follow can resume without touchEnd', () => {
     jest.useFakeTimers();
     const originalRequestAnimationFrame = global.requestAnimationFrame;
@@ -915,6 +954,77 @@ describe('ChatScreen', () => {
       composerBottomY: 2190,
       keyboardTopY: 2140,
     })).toBe(58);
+  });
+
+  it('reduces an overestimated Android keyboard spacer after measuring the composer gap', () => {
+    expect(getAndroidKeyboardSpacerHeight({
+      viewportCompensation: 240,
+      currentSpacerHeight: 240,
+      composerBottomY: 1900,
+      keyboardTopY: 2140,
+      gap: 12,
+    })).toBe(12);
+  });
+
+  it('keeps the current Android keyboard spacer while composer coordinates are missing', () => {
+    expect(getAndroidKeyboardSpacerHeight({
+      viewportCompensation: 20,
+      currentSpacerHeight: 72,
+      composerBottomY: null,
+      keyboardTopY: null,
+      gap: 12,
+    })).toBe(72);
+  });
+
+  it('ignores sub-pixel Android keyboard spacer deltas to avoid measurement jitter', () => {
+    expect(getAndroidKeyboardSpacerHeight({
+      viewportCompensation: 20,
+      currentSpacerHeight: 48,
+      composerBottomY: 2128.25,
+      keyboardTopY: 2140,
+      gap: 12,
+    })).toBe(48);
+  });
+
+  it('floats the Android composer only for glass chrome while the keyboard is hidden', () => {
+    expect(shouldFloatAndroidComposerOverContent({
+      platform: 'android',
+      surfaceKind: 'glass',
+      isKeyboardVisible: false,
+    })).toBe(true);
+    expect(shouldFloatAndroidComposerOverContent({
+      platform: 'android',
+      surfaceKind: 'solid',
+      isKeyboardVisible: false,
+    })).toBe(false);
+    expect(shouldFloatAndroidComposerOverContent({
+      platform: 'android',
+      surfaceKind: 'glass',
+      isKeyboardVisible: true,
+    })).toBe(false);
+    expect(shouldFloatAndroidComposerOverContent({
+      platform: 'ios',
+      surfaceKind: 'glass',
+      isKeyboardVisible: false,
+    })).toBe(false);
+  });
+
+  it('keeps the warmup banner above the floating Android composer and tab bar', () => {
+    expect(getChatWarmupBannerBottomOffset({
+      composerContainerHeight: 64,
+      tabBarInset: 92,
+      androidKeyboardInset: 0,
+      shouldFloatComposerOverContent: true,
+    })).toBe(156);
+  });
+
+  it('keeps the warmup banner above the Android keyboard spacer when the composer is not floating', () => {
+    expect(getChatWarmupBannerBottomOffset({
+      composerContainerHeight: 64,
+      tabBarInset: 92,
+      androidKeyboardInset: 220,
+      shouldFloatComposerOverContent: false,
+    })).toBe(284);
   });
 
   it('uses stack history first for Android back when chat was pushed from another screen', () => {
@@ -1736,6 +1846,25 @@ describe('ChatScreen', () => {
 
     expect(getByText('chat.loadModelWarning')).toBeTruthy();
     expect(queryByText('chat.noMessages')).toBeNull();
+  });
+
+  it('shows inline warmup progress in the empty chat recovery card', () => {
+    mockEngineState = {
+      activeModelId: 'author/model-q4',
+      loadProgress: 0.42,
+      status: 'initializing',
+    };
+    useChatStore.setState({
+      threads: {},
+      activeThreadId: null,
+    });
+
+    const { getByTestId, getByText, queryByTestId } = render(React.createElement(ChatScreen));
+
+    expect(getByText('chat.warmingUp')).toBeTruthy();
+    expect(getByText('42%')).toBeTruthy();
+    expect(getByTestId('chat-recovery-warmup-progress-fill').props.style).toEqual({ width: '42%' });
+    expect(queryByTestId('model-warmup-progress-fill')).toBeNull();
   });
 
   it('shows stop control while a response is generating', () => {
@@ -2583,6 +2712,52 @@ describe('ChatScreen', () => {
       contextSize: 8192,
       gpuLayers: null,
       kvCacheType: 'auto',
+    });
+  });
+
+  it('shows warmup progress while the active model reloads after applying load settings', async () => {
+    const reloadDeferred = createDeferred<void>();
+    mockLoadModel.mockImplementationOnce(() => reloadDeferred.promise);
+
+    const { getByTestId, getByText, rerender } = render(React.createElement(ChatScreen));
+
+    await act(async () => {
+      fireEvent.press(getByTestId('model-controls-button'));
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(lastModelParametersSheetProps?.modelId).toBe('author/model-q4');
+    });
+
+    await act(async () => {
+      lastModelParametersSheetProps.onChangeLoadParams({
+        contextSize: 8192,
+      });
+    });
+
+    let applyPromise: Promise<void> | undefined;
+    await act(async () => {
+      applyPromise = lastModelParametersSheetProps.onApplyReload();
+      await Promise.resolve();
+    });
+
+    expect(mockLoadModel).toHaveBeenCalledWith('author/model-q4', { forceReload: true });
+
+    mockEngineState = {
+      ...mockEngineState,
+      activeModelId: 'author/model-q4',
+      loadProgress: 0.42,
+      status: 'initializing',
+    };
+    rerender(React.createElement(ChatScreen));
+
+    expect(getByText('chat.warmingUp 42%')).toBeTruthy();
+    expect(getByTestId('model-warmup-progress-fill').props.style).toEqual({ width: '42%' });
+
+    await act(async () => {
+      reloadDeferred.resolve();
+      await applyPromise;
     });
   });
 

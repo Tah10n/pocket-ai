@@ -1,12 +1,11 @@
 import React, { useEffect } from 'react';
 import { Alert } from 'react-native';
-import { Box } from '@/components/ui/box';
 import { ScrollView } from '@/components/ui/scroll-view';
 import { Spinner } from '@/components/ui/spinner';
 import { Text } from '@/components/ui/text';
 import { useRouter } from 'expo-router';
 import { HeaderBar } from '@/components/ui/HeaderBar';
-import { ScreenActionPill, ScreenContent, ScreenStack } from '@/components/ui/ScreenShell';
+import { ScreenActionPill, ScreenBanner, ScreenContent, ScreenRoot, ScreenStack, useScreenAppearance } from '@/components/ui/ScreenShell';
 import { ActiveModelCard } from '@/components/ui/ActiveModelCard';
 import { RecentConversationsList } from '@/components/ui/RecentConversationsList';
 import { MaterialSymbols } from '@/components/ui/MaterialSymbols';
@@ -19,7 +18,8 @@ import { registry } from '@/services/LocalStorageRegistry';
 import { performanceMonitor } from '@/services/PerformanceMonitor';
 import { getReportedErrorMessage } from '../../services/AppError';
 import { useBootstrapStore } from '@/store/bootstrapStore';
-import { screenLayoutMetrics } from '../../utils/themeTokens';
+import { useFloatingScrollInsets } from '../../hooks/useTabBarContentInset';
+import { getThemeActionContentClassName, screenLayoutMetrics } from '../../utils/themeTokens';
 
 let hasMarkedFirstUsableScreen = false;
 
@@ -28,6 +28,10 @@ export const HomeScreen = () => {
   const router = useRouter();
   const { deleteThread, openThread, startNewChat } = useChatSession();
   const { state: engineState } = useLLMEngine();
+  const appearance = useScreenAppearance();
+  const { paddingTop: headerInset, paddingBottom: tabBarInset } = useFloatingScrollInsets();
+  const primaryActionContentClassName = getThemeActionContentClassName(appearance, 'primary');
+  const floatingBannerTopStyle = headerInset > 0 ? { marginTop: headerInset + 8 } : undefined;
   useModelRegistryRevision();
   const bootstrapBackgroundState = useBootstrapStore((state) => state.backgroundState);
   const bootstrapBackgroundError = useBootstrapStore((state) => state.backgroundError);
@@ -98,20 +102,20 @@ export const HomeScreen = () => {
   };
 
   return (
-    <Box className="flex-1 bg-background-0 dark:bg-background-950">
+    <ScreenRoot>
       <HeaderBar title="Pocket AI" showBrand />
 
       {bootstrapBackgroundState === 'running' ? (
-        <Box className="mx-4 mt-2 flex-row items-center gap-2 rounded-xl border border-outline-200 bg-background-50 px-3 py-2 dark:border-outline-700 dark:bg-background-900/80">
+        <ScreenBanner className="mx-4 mt-2 flex-row items-center gap-2 py-2" tone="neutral" style={floatingBannerTopStyle}>
           <Spinner size="small" />
           <Text className="text-sm text-typography-600 dark:text-typography-300">
             {t('home.initializing')}
           </Text>
-        </Box>
+        </ScreenBanner>
       ) : null}
 
       {bootstrapBackgroundState === 'error' ? (
-        <Box className="mx-4 mt-2 rounded-2xl border border-error-300 bg-background-error px-3 py-2.5 dark:border-error-800">
+        <ScreenBanner className="mx-4 mt-2" tone="error" style={floatingBannerTopStyle}>
           <Text className="text-sm font-semibold text-error-700 dark:text-error-200">
             {t('home.initializationFailedTitle')}
           </Text>
@@ -121,14 +125,17 @@ export const HomeScreen = () => {
           {__DEV__ && bootstrapBackgroundError ? (
             <Text className="mt-2 text-xs text-error-700 dark:text-error-300">{bootstrapBackgroundError}</Text>
           ) : null}
-        </Box>
+        </ScreenBanner>
       ) : null}
 
-      <ScreenContent testID="home-screen-content" className="flex-1" style={{ paddingBottom: 0 }}>
+      <ScreenContent testID="home-screen-content" className="flex-1" respectFloatingHeader={false} style={{ paddingBottom: 0 }}>
         <ScrollView
           testID="home-scroll-view"
           className="flex-1"
-          contentContainerStyle={{ paddingBottom: screenLayoutMetrics.contentBottomInset }}
+          contentContainerStyle={{
+            paddingTop: headerInset,
+            paddingBottom: screenLayoutMetrics.contentBottomInset + tabBarInset,
+          }}
           showsVerticalScrollIndicator={false}
         >
           <ScreenStack className="pt-3" gap="loose">
@@ -140,10 +147,10 @@ export const HomeScreen = () => {
               accessibilityLabel={t('home.newChat')}
               tone="primary"
               size="lg"
-              className="w-full gap-3 shadow-xl"
+              className="w-full gap-3"
             >
-              <MaterialSymbols name="add-comment" size="xl" className="text-typography-0" />
-              <Text className="text-typography-0 text-base font-bold">{t('home.newChat')}</Text>
+              <MaterialSymbols name="add-comment" size="xl" className={primaryActionContentClassName} />
+              <Text className={`${primaryActionContentClassName} text-base font-bold`}>{t('home.newChat')}</Text>
             </ScreenActionPill>
 
             <RecentConversationsList
@@ -154,6 +161,6 @@ export const HomeScreen = () => {
           </ScreenStack>
         </ScrollView>
       </ScreenContent>
-    </Box>
+    </ScreenRoot>
   );
 };

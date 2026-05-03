@@ -6,6 +6,7 @@ import { router } from 'expo-router';
 
 import i18n from '../i18n';
 import { useChatStore } from '../store/chatStore';
+import { semanticColorTokens } from '../utils/themeTokens';
 
 export type NotificationTaskType = 'download' | 'inference';
 
@@ -32,6 +33,7 @@ const CHANNEL_IDS = {
 } as const;
 
 const BACKGROUND_ACTIONS_CHANNEL_ID = 'RN_BACKGROUND_ACTIONS_CHANNEL';
+const FOREGROUND_SERVICE_NOTIFICATION_COLOR = semanticColorTokens.primary[500];
 
 function sleep(ms: number) {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -297,7 +299,7 @@ class NotificationService {
                 name: 'ic_launcher',
                 type: 'mipmap',
             },
-            color: '#010100',
+            color: FOREGROUND_SERVICE_NOTIFICATION_COLOR,
             linkingURI: isDownload ? createURL('/(tabs)/models') : createURL('/(tabs)/chat'),
             progressBar: isDownload
                 ? { max: 100, value: 0, indeterminate: false }

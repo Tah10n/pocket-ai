@@ -156,6 +156,21 @@ describe('ConversationsScreen', () => {
     mockUseChatSession.mockReturnValue(createMockChatSession());
   });
 
+  it('wraps conversations content in a blur target for modal sheets', () => {
+    const { getByTestId } = render(
+      <SafeAreaProvider
+        initialMetrics={{
+          frame: { x: 0, y: 0, width: 390, height: 844 },
+          insets: { top: 0, left: 0, right: 0, bottom: 0 },
+        }}
+      >
+        <ConversationsScreen />
+      </SafeAreaProvider>,
+    );
+
+    expect(getByTestId('conversations-content-blur-target')).toBeTruthy();
+  });
+
   it('filters conversations and saves a renamed title', () => {
     const renameThread = jest.fn();
 

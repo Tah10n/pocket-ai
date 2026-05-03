@@ -3,9 +3,10 @@ import { useTranslation } from 'react-i18next';
 import { Box } from '@/components/ui/box';
 import { MaterialSymbols, type MaterialSymbolName } from '@/components/ui/MaterialSymbols';
 import { Pressable } from '@/components/ui/pressable';
-import { ScreenActionPill, ScreenBadge } from '@/components/ui/ScreenShell';
+import { joinClassNames, ScreenActionPill, ScreenBadge, ScreenPressableSurface, ScreenSurface, useScreenAppearance } from '@/components/ui/ScreenShell';
 import { Text } from '@/components/ui/text';
 import { ModelFilterCriteria, ModelSizeRange, ModelSortField, ModelSortPreference } from '@/store/modelsStore';
+import { getThemeActionContentClassName } from '@/utils/themeTokens';
 
 interface ModelsFilterProps {
   filters: ModelFilterCriteria;
@@ -60,15 +61,20 @@ function TriggerButton({
   isOpen,
   onPress,
 }: TriggerButtonProps) {
+  const appearance = useScreenAppearance();
+
   return (
-    <Pressable
+    <ScreenPressableSurface
       testID={testID}
       onPress={onPress}
-      className={`min-w-0 flex-1 flex-row items-center gap-1.5 rounded-2xl border px-2.5 py-2 active:opacity-80 ${
+      tone={isOpen ? 'accent' : 'neutral'}
+      withControlTint={isOpen}
+      className={joinClassNames(
+        'min-w-0 flex-1 flex-row items-center gap-1.5 rounded-2xl border px-2.5 py-2 active:opacity-80',
         isOpen
-          ? 'border-primary-500 bg-primary-500/10'
-          : 'border-outline-200 bg-background-50 dark:border-outline-800 dark:bg-background-900/60'
-      }`}
+          ? appearance.classNames.toneClassNameByTone.accent.surfaceClassName
+          : appearance.classNames.toneClassNameByTone.neutral.surfaceClassName,
+      )}
     >
       <Box className="min-w-0 flex-1 flex-row items-center gap-2">
         <MaterialSymbols
@@ -92,7 +98,7 @@ function TriggerButton({
           </Text>
         ) : null}
         {badge ? (
-          <ScreenBadge tone="accent" size="micro" className="border-0 bg-primary-500" textClassName="text-typography-0">
+          <ScreenBadge tone="accent" size="micro">
             {badge}
           </ScreenBadge>
         ) : null}
@@ -102,7 +108,7 @@ function TriggerButton({
           className={isOpen ? 'text-primary-500' : 'text-typography-500 dark:text-typography-400'}
         />
       </Box>
-    </Pressable>
+    </ScreenPressableSurface>
   );
 }
 
@@ -113,25 +119,35 @@ function OptionRow({
   onPress,
   trailingLabel,
 }: OptionRowProps) {
+  const appearance = useScreenAppearance();
+  const activeControlClassName = appearance.surfaceKind === 'glass'
+    ? 'border-primary-500/18 bg-primary-500/8'
+    : 'border-primary-500 bg-primary-500';
+  const activeIconClassName = getThemeActionContentClassName(appearance, 'primary');
+
   return (
     <Pressable
       testID={testID}
       onPress={onPress}
-      className={`flex-row items-center justify-between rounded-xl px-3 py-2 active:opacity-80 ${
-        active ? 'bg-primary-500/10' : 'bg-background-50/60 dark:bg-background-900/40'
-      }`}
+      className={joinClassNames(
+        'flex-row items-center justify-between rounded-xl px-3 py-2 active:opacity-80',
+        active ? appearance.classNames.selectedInsetCardClassName : undefined,
+      )}
     >
       <Box className="min-w-0 flex-1 flex-row items-center gap-2">
-        <Box className={`h-5 w-5 items-center justify-center rounded-full border ${
+        <ScreenSurface
+          tone={active ? 'accent' : 'neutral'}
+          withControlTint={active}
+          className={`h-5 w-5 items-center justify-center rounded-full border ${
           active
-            ? 'border-primary-500 bg-primary-500'
-            : 'border-outline-300 bg-background-0 dark:border-outline-700 dark:bg-background-950'
+            ? activeControlClassName
+            : appearance.classNames.toneClassNameByTone.neutral.iconTileClassName
         }`}
         >
           {active ? (
-            <MaterialSymbols name="check" size={12} className="text-typography-0" />
+            <MaterialSymbols name="check" size={12} className={activeIconClassName} />
           ) : null}
-        </Box>
+        </ScreenSurface>
         <Text className="shrink text-sm text-typography-800 dark:text-typography-100">{label}</Text>
       </Box>
 
@@ -179,13 +195,17 @@ export const ModelsFilter = ({
   onClear,
 }: ModelsFilterProps) => {
   const { t } = useTranslation();
+  const appearance = useScreenAppearance();
   const [openPanel, setOpenPanel] = useState<OpenPanel>(null);
   const activeFilterCount = getActiveFilterCount(filters);
   const hasActiveFilters = activeFilterCount > 0;
   const sortSummary = getSortSummary(t, sort);
+  const rootClassName = appearance.surfaceKind === 'glass'
+    ? 'py-1.5'
+    : `${appearance.classNames.surfaceBarClassName} py-1.5`;
 
   return (
-    <Box className="border-b border-outline-200 bg-background-0 py-1.5 dark:border-outline-800 dark:bg-background-950">
+    <Box className={rootClassName}>
       <Box className="flex-row gap-1.5">
         <TriggerButton
           testID="models-filter-toggle"
@@ -210,9 +230,10 @@ export const ModelsFilter = ({
       </Box>
 
       {openPanel === 'filter' ? (
-        <Box
+        <ScreenSurface
           testID="models-filter-panel"
-          className="mt-1.5 rounded-[20px] border border-outline-200 bg-background-50 p-1.5 dark:border-outline-800 dark:bg-background-900/70"
+          tone="neutral"
+          className={`mt-1.5 p-1.5 ${appearance.classNames.insetCardClassName}`}
         >
           {hasActiveFilters ? (
             <Box className="mb-1.5 flex-row justify-end">
@@ -242,7 +263,7 @@ export const ModelsFilter = ({
               onPress={() => onNoTokenRequiredToggle(!filters.noTokenRequiredOnly)}
             />
 
-            <Box className="my-1 h-px bg-outline-200 dark:bg-outline-800" />
+            <Box className={`my-1 h-px border-t ${appearance.classNames.dividerClassName}`} />
 
             {SIZE_OPTIONS.map((option) => (
               <OptionRow
@@ -254,13 +275,14 @@ export const ModelsFilter = ({
               />
             ))}
           </Box>
-        </Box>
+        </ScreenSurface>
       ) : null}
 
       {openPanel === 'sort' ? (
-        <Box
+        <ScreenSurface
           testID="models-sort-panel"
-          className="mt-1.5 rounded-[20px] border border-outline-200 bg-background-50 p-1.5 dark:border-outline-800 dark:bg-background-900/70"
+          tone="neutral"
+          className={`mt-1.5 p-1.5 ${appearance.classNames.insetCardClassName}`}
         >
           <Box className="gap-1">
             {SORT_OPTIONS.map((option) => {
@@ -302,7 +324,7 @@ export const ModelsFilter = ({
               );
             })}
           </Box>
-        </Box>
+        </ScreenSurface>
       ) : null}
     </Box>
   );

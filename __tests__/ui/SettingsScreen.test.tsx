@@ -8,6 +8,8 @@ import { screenLayoutMetrics } from '../../src/utils/themeTokens';
 const mockBack = jest.fn();
 const mockReplace = jest.fn();
 const mockPush = jest.fn();
+const mockSetTheme = jest.fn();
+const mockSetThemeId = jest.fn();
 let mockCanGoBack = true;
 let mockDeviceMetricsResult: {
   metrics: Record<string, any>;
@@ -116,8 +118,11 @@ jest.mock('expo-router', () => ({
 jest.mock('../../src/providers/ThemeProvider', () => ({
   useTheme: () => ({
     mode: 'system',
+    themeId: 'default',
     resolvedMode: 'light',
-    setTheme: jest.fn(),
+    appearance: require('../../src/utils/themeTokens').getThemeAppearance('default', 'light'),
+    setTheme: mockSetTheme,
+    setThemeId: mockSetThemeId,
     colors: {
       background: '#f6f6f8',
       surface: '#ffffff',
@@ -177,6 +182,8 @@ describe('SettingsScreen', () => {
     mockBack.mockReset();
     mockReplace.mockReset();
     mockPush.mockReset();
+    mockSetTheme.mockReset();
+    mockSetThemeId.mockReset();
     mockCanGoBack = true;
     (getAppStorageMetrics as jest.Mock).mockResolvedValue({ appFilesBytes: 12_000_000_000 });
     mockDeviceMetricsResult = {
@@ -292,5 +299,20 @@ describe('SettingsScreen', () => {
 
     expect(flattenStyle(getByTestId('settings-screen-content').props.style).paddingBottom)
       .toBe(screenLayoutMetrics.contentBottomInset);
+  });
+
+  it('renders separate color mode and visual theme controls', async () => {
+    const { getByTestId, getByText } = await renderScreen();
+
+    expect(getByText('settings.themeMode')).toBeTruthy();
+    expect(getByText('settings.themeStyle')).toBeTruthy();
+    expect(getByTestId('settings-theme-mode-control')).toBeTruthy();
+    expect(getByTestId('settings-theme-style-control')).toBeTruthy();
+
+    fireEvent.press(getByTestId('settings-theme-mode-dark'));
+    fireEvent.press(getByTestId('settings-theme-style-glass'));
+
+    expect(mockSetTheme).toHaveBeenCalledWith('dark');
+    expect(mockSetThemeId).toHaveBeenCalledWith('glass');
   });
 });

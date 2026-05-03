@@ -6,6 +6,12 @@ import { useDownloadStore } from '../../src/store/downloadStore';
 import { EngineStatus, LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../src/types/models';
 import { buildModelCapabilitySnapshot } from '../../src/utils/modelCapabilities';
 
+jest.mock('react-native-safe-area-context', () => ({
+  SafeAreaProvider: ({ children }: any) => children,
+  SafeAreaView: ({ children }: any) => children,
+  useSafeAreaInsets: () => ({ top: 0, right: 0, bottom: 0, left: 0 }),
+}));
+
 const mockRouter = {
   back: jest.fn(),
   canGoBack: jest.fn(() => true),
@@ -31,6 +37,8 @@ const mockGetRecommendedLoadProfile = jest.fn<
 const mockReloadModel = jest.fn();
 const mockHardwareStatus = jest.fn();
 let lastModelParametersSheetProps: any = null;
+let lastErrorReportSheetProps: any = null;
+let lastContentBlurTargetProps: any = null;
 const mockEngineState = {
   status: EngineStatus.IDLE,
   activeModelId: undefined as string | undefined,
@@ -112,11 +120,25 @@ jest.mock('../../src/components/ui/pressable', () => {
 });
 
 jest.mock('../../src/components/ui/ScreenShell', () => ({
+  getGlassCornerRadiusStyle: () => undefined,
+  getGlassSurfaceFrameStyle: () => undefined,
   joinClassNames: (...values: Array<string | undefined | false>) => values.filter(Boolean).join(' '),
+  useScreenAppearance: () => require('../../src/utils/themeTokens').getThemeAppearance('default', 'light'),
   ScreenHeaderShell: ({ children }: any) => children,
+  ScreenAndroidContentBlurTarget: (props: any) => {
+    lastContentBlurTargetProps = props;
+    return props.children;
+  },
+  ScreenRoot: ({ children }: any) => children,
   ScreenContent: ({ children }: any) => children,
   ScreenStack: ({ children }: any) => children,
   ScreenCard: ({ children }: any) => children,
+  ScreenSurface: ({ children }: any) => children,
+  ScreenPressableSurface: ({ children, onPress, ...props }: any) => {
+    const mockReact = jest.requireActual('react');
+    const { Pressable } = jest.requireActual('react-native');
+    return mockReact.createElement(Pressable, { onPress, ...props }, children);
+  },
   ScreenActionPill: ({ children, onPress, ...props }: any) => {
     const mockReact = jest.requireActual('react');
     const { Pressable } = jest.requireActual('react-native');
@@ -132,6 +154,12 @@ jest.mock('../../src/components/ui/ScreenShell', () => ({
     const { View, Text } = jest.requireActual('react-native');
     return mockReact.createElement(View, null, mockReact.createElement(Text, null, label ?? children));
   },
+  ScreenIconTile: ({ iconName }: any) => {
+    const mockReact = jest.requireActual('react');
+    const { Text } = jest.requireActual('react-native');
+    return mockReact.createElement(Text, null, iconName);
+  },
+  ScreenModalOverlay: ({ children }: any) => children,
   ScreenSheet: ({ children }: any) => children,
   HeaderBackButton: ({ children, ...props }: any) => {
     const mockReact = jest.requireActual('react');
@@ -199,6 +227,13 @@ jest.mock('../../src/components/ui/ModelParametersSheet', () => {
     },
   };
 });
+
+jest.mock('../../src/components/ui/ErrorReportSheet', () => ({
+  ErrorReportSheet: (props: any) => {
+    lastErrorReportSheetProps = props;
+    return null;
+  },
+}));
 
 jest.mock('../../src/components/ui/text', () => {
   const mockReact = jest.requireActual('react');
@@ -334,6 +369,8 @@ describe('ModelDetailsScreen', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     lastModelParametersSheetProps = null;
+    lastErrorReportSheetProps = null;
+    lastContentBlurTargetProps = null;
     mockFitsInRam.mockResolvedValue(true);
     useDownloadStore.setState({ queue: [], activeDownloadId: null });
     mockEngineState.status = EngineStatus.IDLE;
@@ -363,6 +400,20 @@ describe('ModelDetailsScreen', () => {
   afterEach(() => {
     openUrlSpy.mockRestore();
     alertSpy.mockRestore();
+  });
+
+  it('passes the details content blur target to modal sheets', async () => {
+    render(<ModelDetailsScreen />);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const blurTarget = lastContentBlurTargetProps?.blurTargetRef;
+
+    expect(blurTarget).toBeTruthy();
+    expect(lastModelParametersSheetProps?.androidContentBlurTargetRef).toBe(blurTarget);
+    expect(lastErrorReportSheetProps?.androidContentBlurTargetRef).toBe(blurTarget);
   });
 
   it('opens the Hugging Face model page from the details flow', async () => {

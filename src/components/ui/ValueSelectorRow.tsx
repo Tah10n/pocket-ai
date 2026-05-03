@@ -1,8 +1,7 @@
 import React from 'react';
 import { Box } from './box';
 import { MaterialSymbols } from './MaterialSymbols';
-import { Pressable } from './pressable';
-import { joinClassNames } from './ScreenShell';
+import { joinClassNames, ScreenPressableSurface, ScreenSurface, useScreenAppearance } from './ScreenShell';
 import { Text, composeTextRole } from './text';
 import { cardPaddingByDensity, radiusTokens } from '../../utils/themeTokens';
 
@@ -25,10 +24,12 @@ export function ValueSelectorRow({
   className,
   testID,
 }: ValueSelectorRowProps) {
+  const appearance = useScreenAppearance();
   const isInteractive = typeof onPress === 'function' && !disabled;
   const containerClassName = joinClassNames(
     // DS-EXCEPTION: keep an explicit 44px min touch target for list rows.
-    'min-h-[44px] flex-row items-center gap-3 border border-outline-200 bg-background-50 dark:border-outline-700 dark:bg-background-900',
+    'min-h-[44px] flex-row items-center gap-3 border',
+    appearance.classNames.toneClassNameByTone.neutral.surfaceClassName,
     radiusTokens.md,
     cardPaddingByDensity.compact,
     disabled ? 'opacity-60' : undefined,
@@ -57,21 +58,22 @@ export function ValueSelectorRow({
 
   if (isInteractive) {
     return (
-      <Pressable
+      <ScreenPressableSurface
         testID={testID}
         onPress={onPress}
         disabled={disabled}
         accessibilityRole="button"
+        tone="neutral"
         className={containerClassName}
       >
         {content}
-      </Pressable>
+      </ScreenPressableSurface>
     );
   }
 
   return (
-    <Box testID={testID} className={containerClassName}>
+    <ScreenSurface testID={testID} tone="neutral" className={containerClassName}>
       {content}
-    </Box>
+    </ScreenSurface>
   );
 }

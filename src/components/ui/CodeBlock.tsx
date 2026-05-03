@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import * as Clipboard from 'expo-clipboard';
 import { useTranslation } from 'react-i18next';
 import { Box } from '@/components/ui/box';
-import { ScreenActionPill } from '@/components/ui/ScreenShell';
+import { ScreenActionPill, ScreenCard } from '@/components/ui/ScreenShell';
 import { Text } from '@/components/ui/text';
 
 interface CodeBlockProps {
@@ -33,12 +33,12 @@ export function CodeBlock({ code, language, selectable = false }: CodeBlockProps
   };
 
   return (
-    <Box className="rounded-xl border border-outline-200 bg-background-50 px-3 py-3 dark:border-outline-800 dark:bg-background-900/60">
+    <ScreenCard padding="none" className="px-3 py-3">
       <Box className="mb-2 flex-row items-center justify-between">
         <Text className="text-xs font-semibold uppercase tracking-wide text-typography-500 dark:text-typography-400">
           {language || t('common.code')}
         </Text>
-        <ScreenActionPill testID="copy-code-button" onPress={handleCopy} tone="soft" size="sm" className="border-0 bg-primary-500/10">
+        <ScreenActionPill testID="copy-code-button" onPress={handleCopy} tone="soft" size="sm" className="border-0">
           <Text className="text-xs font-semibold text-primary-500">
             {copied ? t('common.copied') : t('common.copy')}
           </Text>
@@ -47,6 +47,6 @@ export function CodeBlock({ code, language, selectable = false }: CodeBlockProps
       <Text selectable={selectable} className="font-mono text-sm leading-6 text-typography-900 dark:text-typography-100">
         {code}
       </Text>
-    </Box>
+    </ScreenCard>
   );
 }

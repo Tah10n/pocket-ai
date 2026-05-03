@@ -6,7 +6,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Box } from '@/components/ui/box';
 import { Button, ButtonText } from '@/components/ui/button';
 import { MaterialSymbols } from '@/components/ui/MaterialSymbols';
-import { ScreenActionPill, ScreenBadge, ScreenCard, ScreenContent, ScreenIconButton, ScreenPressableCard, ScreenTextField } from '@/components/ui/ScreenShell';
+import { ScreenActionPill, ScreenBadge, ScreenCard, ScreenContent, ScreenIconButton, ScreenPressableCard, ScreenRoot, ScreenTextField, useScreenAppearance } from '@/components/ui/ScreenShell';
 import { HeaderBar } from '@/components/ui/HeaderBar';
 import { ScrollView } from '@/components/ui/scroll-view';
 import { Text } from '@/components/ui/text';
@@ -15,6 +15,7 @@ import { presetManager, SystemPromptPreset } from '../../services/PresetManager'
 import { getSettings, subscribeSettings, updateSettings } from '../../services/SettingsStore';
 import { getReportedErrorMessage } from '../../services/AppError';
 import { toTestIdSegment } from '../../utils/testIds';
+import { getThemeActionContentClassName } from '../../utils/themeTokens';
 
 interface EditorState {
     preset: SystemPromptPreset | null;
@@ -30,6 +31,8 @@ export function PresetManagerScreen() {
     const [draftPrompt, setDraftPrompt] = useState('');
 
     const { t } = useTranslation();
+    const appearance = useScreenAppearance();
+    const primaryActionContentClassName = getThemeActionContentClassName(appearance, 'primary');
     const insets = useSafeAreaInsets();
 
     useEffect(() => {
@@ -147,8 +150,8 @@ export function PresetManagerScreen() {
                 padding="compact"
                 className={`active:opacity-80 ${
                     isActive
-                        ? 'border-primary-500/40 bg-primary-500/10 dark:border-primary-400'
-                        : 'bg-background-0 dark:bg-background-950'
+                        ? appearance.classNames.selectedInsetCardClassName
+                        : ''
                 }`}
             >
                 <Box className="flex-row items-start justify-between gap-3">
@@ -172,11 +175,11 @@ export function PresetManagerScreen() {
                 </Box>
             </ScreenPressableCard>
         );
-    }, [activePresetId, openEditPreset, t]);
+    }, [activePresetId, appearance.classNames.selectedInsetCardClassName, openEditPreset, t]);
 
     const renderEmptyState = useCallback(() => (
         <Box className="flex-1 justify-center py-6">
-            <ScreenCard dashed padding="compact" className="items-center dark:border-outline-700">
+            <ScreenCard dashed padding="compact" className="items-center">
                 <Text className="text-center text-base font-semibold text-typography-900 dark:text-typography-100">
                     {t('presets.emptyTitle')}
                 </Text>
@@ -188,7 +191,7 @@ export function PresetManagerScreen() {
     ), [t]);
 
     return (
-        <Box className="flex-1 bg-background-0 dark:bg-background-950">
+        <ScreenRoot>
             <HeaderBar
                 title={t('settings.presets')}
                 subtitle={t('presets.activePreset', { name: activePresetName })}
@@ -199,11 +202,11 @@ export function PresetManagerScreen() {
                     <ScreenActionPill
                         onPress={openCreatePreset}
                         tone="primary"
-                        size="sm"
+                        size="lg"
                         testID="preset-manager-add-preset"
                     >
-                        <MaterialSymbols name="add" size="sm" className="text-typography-0" />
-                        <Text className="text-sm font-semibold text-typography-0">{t('presets.addPreset')}</Text>
+                        <MaterialSymbols name="add" size="sm" className={primaryActionContentClassName} />
+                        <Text className={`text-sm font-semibold ${primaryActionContentClassName}`}>{t('presets.addPreset')}</Text>
                     </ScreenActionPill>
                 )}
             />
@@ -225,7 +228,7 @@ export function PresetManagerScreen() {
                 presentationStyle="fullScreen"
                 onRequestClose={closeEditor}
             >
-                <Box className="flex-1 bg-background-0 dark:bg-background-950">
+                <ScreenRoot>
                     <HeaderBar
                         title={editorTitle}
                         subtitle={t('presets.editorDescription')}
@@ -283,8 +286,8 @@ export function PresetManagerScreen() {
                             </Button>
                         </Box>
                     </ScreenContent>
-                </Box>
+                </ScreenRoot>
             </Modal>
-        </Box>
+        </ScreenRoot>
     );
 }

@@ -5,7 +5,8 @@ import { Box } from '@/components/ui/box';
 import { Text, composeTextRole } from '@/components/ui/text';
 import { Pressable } from '@/components/ui/pressable';
 import { MaterialSymbols } from './MaterialSymbols';
-import { ScreenBadge, ScreenCard } from './ScreenShell';
+import { ScreenActionPill, ScreenBadge, ScreenCard, ScreenSurface, useScreenAppearance } from './ScreenShell';
+import { getThemeActionContentClassName } from '@/utils/themeTokens';
 
 export interface ModelListItemProps {
   id: string;
@@ -21,12 +22,19 @@ export interface ModelListItemProps {
 
 export const ModelListItem = ({ name, sizeMB, status, fitsInRam, onAction, imageUrl, isDownloading, downloadProgress }: ModelListItemProps) => {
   const { t } = useTranslation();
+  const appearance = useScreenAppearance();
+  const accentToneClassNames = appearance.classNames.toneClassNameByTone.accent;
+  const neutralToneClassNames = appearance.classNames.toneClassNameByTone.neutral;
+  const modelProgressFillClassName = appearance.classNames.toneClassNameByTone.primary.progressFillClassName;
+  const primaryActionContentClassName = getThemeActionContentClassName(appearance, 'primary');
+  const softActionContentClassName = getThemeActionContentClassName(appearance, 'soft');
+  const progressPercent = Math.max(0, Math.min(100, (downloadProgress || 0) * 100));
 
   return (
-    <ScreenCard className="flex-row overflow-hidden gap-3" padding="compact">
+    <ScreenCard className="flex-row overflow-hidden gap-3" decorative="tint" padding="compact">
       <ImageBackground 
         source={{ uri: imageUrl || "https://lh3.googleusercontent.com/aida-public/AB6AXuClqJ0QsvXxhk32IfvK9KR5KtKAebI2v0rQoKXNy9mkHBiAObgp7YdhdUq5xwpkxuyWoQbIyMn0P30tRnXdEOKSYVGsploFFf1XtDHSwMsIPhjvSRFrDjPWgzhAljeVNZ3cZ6ym66vftvisNupauWLox5PJrkTbqhbloaqXDgiZj1qT0SsAuStE6i4Soe2hjJoI3nTW3JUsoxZIl4tHTOw3EuP3iOrvvHMD5CoSzAe7n2qDV2814t7j2xZ5BAeRiwiWaqLJHxzmwUzz" }}
-        className="h-16 w-16 shrink-0 rounded-2xl bg-background-200 overflow-hidden dark:bg-background-800"
+        className={`h-16 w-16 shrink-0 ${appearance.classNames.thumbnailSurfaceClassName}`}
       />
       
       <Box className="flex-1 min-w-0">
@@ -43,45 +51,51 @@ export const ModelListItem = ({ name, sizeMB, status, fitsInRam, onAction, image
         
         <Box className="mt-2.5 flex-row gap-2">
           {isDownloading ? (
-            <Box className="relative flex-1 overflow-hidden rounded-2xl border border-outline-200 bg-background-100 py-1.5 dark:border-outline-700 dark:bg-background-800">
-              <Box className="absolute left-0 top-0 bottom-0 bg-primary-500/20" style={{ width: `${(downloadProgress || 0) * 100}%` }} />
+            <ScreenSurface tone="accent" withControlTint className={`relative flex-1 overflow-hidden rounded-2xl border ${accentToneClassNames.surfaceClassName}`}>
+              <Box className={`absolute left-0 top-0 bottom-0 ${modelProgressFillClassName}`} style={{ width: `${progressPercent}%` }} />
               <Pressable 
                 onPress={() => onAction?.('cancel')} 
-                className="flex-1 w-full items-center justify-center active:opacity-70"
+                className="flex-1 w-full items-center justify-center py-1.5 active:opacity-70"
               >
-                <Text className="text-xs font-bold text-primary-500">{t('models.cancel')} ({((downloadProgress || 0) * 100).toFixed(0)}%)</Text>
+                <Text className={composeTextRole('chip', `${accentToneClassNames.textClassName} text-center`)}>{t('models.cancel')} ({progressPercent.toFixed(0)}%)</Text>
               </Pressable>
-            </Box>
+            </ScreenSurface>
           ) : status === 'available' && (
-            <Pressable 
+            <ScreenActionPill
               onPress={() => onAction?.('download')} 
-              className="flex-1 items-center justify-center rounded-2xl border border-outline-200 bg-background-100 py-1.5 active:opacity-70 dark:border-outline-700 dark:bg-background-800"
+              tone="soft"
+              size="sm"
+              className="flex-1"
             >
-                <Text className="text-xs font-bold text-typography-900 dark:text-typography-100">{t('models.download')}</Text>
-            </Pressable>
+                <Text className={composeTextRole('chip', softActionContentClassName)}>{t('models.download')}</Text>
+            </ScreenActionPill>
           )}
           
           {status === 'downloaded' && (
-            <Pressable 
+            <ScreenActionPill
               onPress={() => onAction?.('load')} 
-              className="flex-1 items-center justify-center rounded-2xl bg-primary-500 py-1.5 active:opacity-80"
+              tone="primary"
+              size="sm"
+              className="flex-1"
             >
-              <Text className="text-xs font-bold text-typography-0">{t('models.load')}</Text>
-            </Pressable>
+              <Text className={composeTextRole('chip', primaryActionContentClassName)}>{t('models.load')}</Text>
+            </ScreenActionPill>
           )}
 
           {status === 'active' && (
-            <Pressable 
+            <ScreenActionPill
               onPress={() => onAction?.('unload')} 
-              className="flex-1 items-center justify-center rounded-2xl bg-background-200 py-1.5 active:opacity-70 dark:bg-background-0/10"
+              tone="soft"
+              size="sm"
+              className="flex-1"
             >
-              <Text className="text-xs font-bold text-typography-900 dark:text-typography-0">{t('models.unload')}</Text>
-            </Pressable>
+              <Text className={composeTextRole('chip', softActionContentClassName)}>{t('models.unload')}</Text>
+            </ScreenActionPill>
           )}
           
-          <Box className="items-center justify-center rounded-2xl border border-outline-200 bg-background-100 px-3 dark:border-outline-700 dark:bg-background-800">
-            <MaterialSymbols name="more-horiz" size="sm" className="text-typography-500" />
-          </Box>
+          <ScreenSurface tone="neutral" withControlTint className={`items-center justify-center rounded-2xl px-3 ${neutralToneClassNames.iconTileClassName}`}>
+            <MaterialSymbols name="more-horiz" size="sm" className={neutralToneClassNames.iconClassName} />
+          </ScreenSurface>
         </Box>
       </Box>
     </ScreenCard>

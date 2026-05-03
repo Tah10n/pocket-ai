@@ -96,6 +96,7 @@ const {
   ScreenInlineInput,
   ScreenPressableCard,
   ScreenRoot,
+  ScreenSegmentedControl,
   ScreenSheet,
   useFloatingHeaderInset,
 } = require('../../src/components/ui/ScreenShell');
@@ -447,6 +448,53 @@ describe('ScreenShell', () => {
     );
 
     expect(UNSAFE_getAllByType(View).some((node: any) => Array.isArray(node.props.colors))).toBe(false);
+  });
+
+  it('keeps dark glass segmented labels above decorative active layers after switching', () => {
+    const { StyleSheet } = require('react-native');
+    const { getThemeAppearance, getThemeColors } = require('../../src/utils/themeTokens');
+    mockThemeContext = {
+      colors: getThemeColors('dark', 'glass'),
+      resolvedMode: 'dark',
+      themeId: 'glass',
+      appearance: getThemeAppearance('glass', 'dark'),
+    };
+
+    function SegmentedControlHarness() {
+      const [activeKey, setActiveKey] = React.useState('light');
+
+      return (
+        <ScreenSegmentedControl
+          activeKey={activeKey}
+          onChange={setActiveKey}
+          options={[
+            { key: 'light', label: 'Light', testID: 'segmented-light' },
+            { key: 'dark', label: 'Dark', testID: 'segmented-dark' },
+          ]}
+        />
+      );
+    }
+
+    const { getByTestId, getByText } = render(<SegmentedControlHarness />);
+
+    fireEvent.press(getByTestId('segmented-dark'));
+
+    expect(getByText('Light').props.children).toBe('Light');
+    expect(getByText('Dark').props.children).toBe('Dark');
+    expect(StyleSheet.flatten(getByText('Light').props.style)).toMatchObject({
+      color: '#c9d5e7',
+      opacity: 1,
+      position: 'relative',
+      zIndex: 1,
+      elevation: 1,
+    });
+    expect(StyleSheet.flatten(getByText('Dark').props.style)).toMatchObject({
+      color: '#d9ebff',
+      opacity: 1,
+      position: 'relative',
+      zIndex: 1,
+      elevation: 1,
+    });
   });
 
   it('keeps glass icon button frames on the same radius as their touch target', () => {

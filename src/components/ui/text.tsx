@@ -2,7 +2,7 @@ import React from 'react';
 import { Text as RNText, type TextProps as RNTextProps, type TextStyle } from 'react-native';
 import { cssInterop } from 'nativewind';
 import { useTheme } from '../../providers/ThemeProvider';
-import { semanticColorTokens, withAlpha } from '../../utils/themeTokens';
+import { semanticColorTokens, withAlpha, type ResolvedThemeMode } from '../../utils/themeTokens';
 
 const BaseText = cssInterop(RNText, { className: 'style' });
 
@@ -37,6 +37,15 @@ const readableDarkGlassTypographyTokenBySource: Record<string, keyof typeof sema
   600: '300',
 };
 
+const glassTextColorScales = {
+  typography: semanticColorTokens.typography,
+  primary: semanticColorTokens.primary,
+  success: semanticColorTokens.success,
+  info: semanticColorTokens.info,
+  warning: semanticColorTokens.warning,
+  error: semanticColorTokens.error,
+} as const;
+
 function getDarkGlassReadableClassName(className: string) {
   return className
     .split(/\s+/)
@@ -57,24 +66,41 @@ function getDarkGlassReadableClassName(className: string) {
     .join(' ');
 }
 
-function getDarkGlassReadableColor(className: string): string | undefined {
+function getGlassResolvedTextColor(className: string, mode: ResolvedThemeMode): string | undefined {
   const tokens = className.split(/\s+/).filter(Boolean);
 
   for (const rawToken of [...tokens].reverse()) {
-    const token = rawToken.startsWith('dark:') ? rawToken.slice('dark:'.length) : rawToken;
-    const match = /^text-typography-(\d+)(?:\/(\d+))?$/.exec(token);
+    const parts = rawToken.split(':');
+    const token = parts.pop();
+    const modifiers = parts;
 
+    if (!token) {
+      continue;
+    }
+
+    const isDarkVariant = modifiers.includes('dark');
+    if (modifiers.some((modifier) => modifier !== 'dark')) {
+      continue;
+    }
+
+    if (isDarkVariant && mode !== 'dark') {
+      continue;
+    }
+
+    const match = /^text-(typography|primary|success|info|warning|error)-(\d+)(?:\/(\d+))?$/.exec(token);
     if (!match) {
       continue;
     }
 
-    const readableToken = readableDarkGlassTypographyTokenBySource[match[1]];
-    if (!readableToken) {
-      return undefined;
+    const [, scaleName, colorToken, opacityToken] = match;
+    const colorScale = glassTextColorScales[scaleName as keyof typeof glassTextColorScales];
+    const color = colorScale[colorToken as keyof typeof colorScale];
+
+    if (!color) {
+      continue;
     }
 
-    const color = semanticColorTokens.typography[readableToken];
-    const opacity = match[2] ? Number(match[2]) / 100 : undefined;
+    const opacity = opacityToken ? Number(opacityToken) / 100 : undefined;
 
     return Number.isFinite(opacity) && opacity !== undefined
       ? withAlpha(color, opacity)
@@ -82,6 +108,25 @@ function getDarkGlassReadableColor(className: string): string | undefined {
   }
 
   return undefined;
+}
+
+function isGlassResolvedTextColorClassName(rawToken: string) {
+  const parts = rawToken.split(':');
+  const token = parts.pop();
+  const modifiers = parts;
+
+  if (!token || modifiers.some((modifier) => modifier !== 'dark')) {
+    return false;
+  }
+
+  return /^text-(typography|primary|success|info|warning|error)-\d+(?:\/\d+)?$/.test(token);
+}
+
+function stripGlassResolvedTextColorClassNames(className: string) {
+  return className
+    .split(/\s+/)
+    .filter((token) => token && !isGlassResolvedTextColorClassName(token))
+    .join(' ');
 }
 
 export function Text({
@@ -93,20 +138,27 @@ export function Text({
 }: TextProps) {
   const theme = useTheme();
   const resolvedClassName = textRole ? composeTextRole(textRole, className) : className;
-  const isDarkGlass = theme.resolvedMode === 'dark' && theme.appearance.surfaceKind === 'glass';
-  const darkGlassTextColor = isDarkGlass ? getDarkGlassReadableColor(resolvedClassName) : undefined;
-  const readableDarkGlassTextStyle: TextStyle | undefined = darkGlassTextColor
-    ? { color: darkGlassTextColor }
-    : undefined;
+  const resolvedMode = theme.resolvedMode ?? 'light';
+  const isGlass = theme.appearance?.surfaceKind === 'glass';
+  const isDarkGlass = resolvedMode === 'dark' && isGlass;
   const resolvedReadableClassName = isDarkGlass
     ? getDarkGlassReadableClassName(resolvedClassName)
     : resolvedClassName;
+  const glassTextColor = isGlass
+    ? getGlassResolvedTextColor(resolvedReadableClassName, resolvedMode)
+    : undefined;
+  const nativeWindClassName = glassTextColor
+    ? stripGlassResolvedTextColorClassNames(resolvedReadableClassName)
+    : resolvedReadableClassName;
+  const readableGlassTextStyle: TextStyle | undefined = glassTextColor
+    ? { color: glassTextColor }
+    : undefined;
 
   return (
     <BaseText
       allowFontScaling={allowFontScaling}
-      className={resolvedReadableClassName}
-      style={readableDarkGlassTextStyle ? [readableDarkGlassTextStyle, style] : style}
+      className={nativeWindClassName}
+      style={readableGlassTextStyle ? [readableGlassTextStyle, style] : style}
       {...props}
     />
   );

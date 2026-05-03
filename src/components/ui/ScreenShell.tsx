@@ -1,5 +1,5 @@
 import React from 'react';
-import { Platform, StyleSheet, type LayoutChangeEvent, type StyleProp, type View, type ViewStyle } from 'react-native';
+import { Platform, StyleSheet, Text as RNText, type LayoutChangeEvent, type StyleProp, type View, type ViewStyle } from 'react-native';
 import { BlurTargetView, BlurView } from 'expo-blur';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useIsFocused } from '@react-navigation/native';
@@ -12,7 +12,7 @@ import { MaterialSymbols, type MaterialSymbolsProps } from './MaterialSymbols';
 import { Text, composeTextRole } from './text';
 import { getAndroidBlurProps, getGlassBlurTint, isAndroidBlurFallbackRequired, setActiveAndroidBlurTarget } from '../../utils/androidBlur';
 import { getNativeBottomSafeAreaInset } from '../../utils/safeArea';
-import { DEFAULT_THEME_ID, buttonLayoutTokens, getThemeActionContentClassName, getThemeAppearance, getThemeToneIconColor, radiusTokens, screenChromeTokens, screenLayoutMetrics, screenLayoutTokens, tailwindRadiusPxByToken, typographyColors, withAlpha, type ResolvedThemeMode, type ThemeAppearance, type ThemeColors, type ThemeTone } from '../../utils/themeTokens';
+import { DEFAULT_THEME_ID, buttonLayoutTokens, getThemeActionContentClassName, getThemeAppearance, getThemeToneIconColor, radiusTokens, screenChromeTokens, screenLayoutMetrics, screenLayoutTokens, semanticColorTokens, tailwindRadiusPxByToken, typographyColors, withAlpha, type ResolvedThemeMode, type ThemeAppearance, type ThemeColors, type ThemeTone } from '../../utils/themeTokens';
 import { useTheme } from '../../providers/ThemeProvider';
 
 interface ScreenHeaderShellProps {
@@ -746,6 +746,16 @@ const styles = StyleSheet.create({
     ...StyleSheet.absoluteFillObject,
     borderWidth: StyleSheet.hairlineWidth,
     opacity: 0.9,
+  },
+  segmentedControlLabelText: {
+    fontSize: 14,
+    fontWeight: '600',
+    lineHeight: 20,
+    opacity: 1,
+    position: 'relative',
+    textAlign: 'center',
+    zIndex: 1,
+    elevation: 1,
   },
 });
 
@@ -1998,14 +2008,55 @@ export function ScreenSegmentedControl({
   disabled = false,
 }: ScreenSegmentedControlProps) {
   const { appearance, theme } = useResolvedThemeAppearance();
+  const isGlass = appearance.surfaceKind === 'glass';
   const glassCornerRadiusStyle = getGlassCornerRadiusStyle(appearance.classNames.segmentedControlClassName, className);
+  const getGlassLabelColor = (isActive: boolean) => {
+    if (!isActive) {
+      return theme.colors.textSecondary;
+    }
+
+    return theme.resolvedMode === 'dark'
+      ? semanticColorTokens.primary[100]
+      : semanticColorTokens.primary[700];
+  };
+  const renderLabel = (option: ScreenSegmentedControlOption, isActive: boolean) => {
+    const labelKey = `${option.key}-${isActive ? 'active' : 'inactive'}-label`;
+
+    if (isGlass) {
+      return (
+        <RNText
+          key={labelKey}
+          numberOfLines={1}
+          style={[styles.segmentedControlLabelText, { color: getGlassLabelColor(isActive) }]}
+        >
+          {option.label}
+        </RNText>
+      );
+    }
+
+    return (
+      <Text
+        key={labelKey}
+        numberOfLines={1}
+        className={composeTextRole(
+          'action',
+          `text-center ${isActive
+            ? getThemeActionContentClassName(appearance, 'primary')
+            : 'text-typography-600 dark:text-typography-300'}`,
+        )}
+      >
+        {option.label}
+      </Text>
+    );
+  };
+
   return (
     <Box
       testID={testID}
       accessibilityRole="tablist"
       className={joinClassNames(
         appearance.classNames.segmentedControlClassName,
-        appearance.surfaceKind === 'glass' ? 'relative overflow-hidden' : undefined,
+        isGlass ? 'relative overflow-hidden' : undefined,
         disabled ? 'opacity-60' : undefined,
         className,
       )}
@@ -2035,33 +2086,16 @@ export function ScreenSegmentedControl({
             accessibilityState={{ selected: isActive, disabled }}
             className={joinClassNames(
               screenLayoutTokens.segmentedControlItemClassName,
-              appearance.surfaceKind === 'glass' ? 'relative overflow-hidden' : undefined,
               isActive
                 ? appearance.classNames.segmentedControlActiveItemClassName
                 : 'bg-transparent',
               itemClassName,
             )}
-            style={appearance.surfaceKind === 'glass' && isActive
+            style={isGlass && isActive
               ? getGlassSurfaceFrameStyle(appearance, theme.resolvedMode, theme.colors, 'primary', true, activeCornerRadiusStyle)
               : undefined}
           >
-            {isActive ? (
-              <>
-                <GlassSurfaceBackdrop appearance={appearance} tint={theme.colors.headerBlurTint} decorative="tint" cornerRadiusStyle={activeCornerRadiusStyle} />
-                <GlassControlTint appearance={appearance} colors={theme.colors} mode={theme.resolvedMode} tone="primary" />
-              </>
-            ) : null}
-            <Text
-              numberOfLines={1}
-              className={composeTextRole(
-                'action',
-                `text-center ${isActive
-                  ? getThemeActionContentClassName(appearance, 'primary')
-                  : 'text-typography-600 dark:text-typography-300'}`,
-              )}
-            >
-              {option.label}
-            </Text>
+            {renderLabel(option, isActive)}
           </Pressable>
         );
       })}

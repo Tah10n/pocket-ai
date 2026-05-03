@@ -59,7 +59,8 @@ describe('Text dark glass readability', () => {
     expect(StyleSheet.flatten(getByText('Muted copy').props.style)).toMatchObject({
       color: '#c9d5e7',
     });
-    expect(getByText('Muted copy').props.className).toContain('dark:text-typography-200');
+    expect(getByText('Muted copy').props.className).not.toContain('text-typography-500');
+    expect(getByText('Muted copy').props.className).not.toContain('dark:text-typography-200');
   });
 
   it('keeps explicit runtime text colors above the dark glass readability lift', () => {
@@ -79,5 +80,66 @@ describe('Text dark glass readability', () => {
     expect(StyleSheet.flatten(getByText('Explicit').props.style)).toMatchObject({
       color: '#ff00aa',
     });
+  });
+
+  it('resolves glass action text colors from the current theme mode', () => {
+    mockUseTheme.mockReturnValue({
+      resolvedMode: 'dark',
+      appearance: { surfaceKind: 'glass' },
+    });
+
+    const renderAction = () => React.createElement(
+      Text,
+      { className: 'text-primary-700 dark:text-primary-100' },
+      'Mode action',
+    );
+    const { getByText, rerender } = render(renderAction());
+
+    expect(StyleSheet.flatten(getByText('Mode action').props.style)).toMatchObject({
+      color: '#d9ebff',
+    });
+
+    mockUseTheme.mockReturnValue({
+      resolvedMode: 'light',
+      appearance: { surfaceKind: 'glass' },
+    });
+    rerender(renderAction());
+
+    expect(StyleSheet.flatten(getByText('Mode action').props.style)).toMatchObject({
+      color: '#164fb0',
+    });
+  });
+
+  it('updates glass text color when a reused label switches from active to inactive', () => {
+    mockUseTheme.mockReturnValue({
+      resolvedMode: 'light',
+      appearance: { surfaceKind: 'glass' },
+    });
+
+    const { getByText, rerender } = render(
+      React.createElement(
+        Text,
+        { className: 'text-center text-primary-700 dark:text-primary-100' },
+        'Reusable label',
+      ),
+    );
+
+    expect(StyleSheet.flatten(getByText('Reusable label').props.style)).toMatchObject({
+      color: '#164fb0',
+    });
+    expect(getByText('Reusable label').props.className).toBe('text-center');
+
+    rerender(
+      React.createElement(
+        Text,
+        { className: 'text-center text-typography-600 dark:text-typography-300' },
+        'Reusable label',
+      ),
+    );
+
+    expect(StyleSheet.flatten(getByText('Reusable label').props.style)).toMatchObject({
+      color: '#46546a',
+    });
+    expect(getByText('Reusable label').props.className).toBe('text-center');
   });
 });

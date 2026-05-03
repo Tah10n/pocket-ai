@@ -99,6 +99,14 @@ describe('SettingsStore', () => {
     expect(getModelLoadParametersForModel('author/model-q4').backendPolicy).toBeUndefined();
   });
 
+  it('keeps parallel slots at one until parallel decoding is supported', () => {
+    updateModelLoadParametersForModel('author/model-q4', {
+      parallelSlots: 4,
+    });
+
+    expect(getModelLoadParametersForModel('author/model-q4').parallelSlots).toBe(1);
+  });
+
   it('rejects backend device selectors with control chars, path traversal, or over-length', () => {
     updateModelLoadParametersForModel('author/model-q4', {
       selectedBackendDevices: [

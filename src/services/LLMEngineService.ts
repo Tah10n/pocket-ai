@@ -1977,9 +1977,6 @@ class LLMEngineService {
         ? loadParams.cpuMask.trim()
         : undefined;
       const requestedCpuStrict = typeof loadParams.cpuStrict === 'boolean' ? loadParams.cpuStrict : undefined;
-      const requestedParallelSlots = typeof loadParams.parallelSlots === 'number' && Number.isFinite(loadParams.parallelSlots) && loadParams.parallelSlots > 0
-        ? Math.max(1, Math.round(loadParams.parallelSlots))
-        : undefined;
       const requestedKvUnified = typeof loadParams.kvUnified === 'boolean' ? loadParams.kvUnified : undefined;
       const configuredBatchParams = typeof loadParams.nBatch === 'number'
         && Number.isFinite(loadParams.nBatch)
@@ -2158,7 +2155,8 @@ class LLMEngineService {
 
       this.requestedGpuLayers = requestedGpuLayers;
       // shouldUseLowMemoryContextParams is decided by the safe-load policy.
-      const resolvedParallelSlots = requestedParallelSlots ?? 1;
+      // Keep llama.cpp parallel slots disabled until the app implements the official parallel decoding flow.
+      const resolvedParallelSlots = 1;
       const lowMemoryBatchParams = this.resolveLowMemoryBatchParams(
         finalContextSize,
         shouldUseLowMemoryContextParams,

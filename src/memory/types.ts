@@ -24,6 +24,8 @@ export interface MemoryBudget {
   totalMemoryBytes: number;
   liveAvailableBytes?: number;
   freeBytes?: number;
+  processAvailableBytes?: number;
+  advertisedMemoryBytes?: number;
   thresholdBytes?: number;
   appResidentBytes?: number;
   appPssBytes?: number;

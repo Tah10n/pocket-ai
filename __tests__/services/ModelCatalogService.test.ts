@@ -10,6 +10,7 @@ import { huggingFaceTokenService } from '../../src/services/HuggingFaceTokenServ
 import { hardwareListenerService } from '../../src/services/HardwareListenerService';
 import { registry } from '../../src/services/LocalStorageRegistry';
 import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../src/types/models';
+import { REQUEST_AUTH_POLICY } from '../../src/types/huggingFace';
 
 jest.mock('../../src/services/HardwareListenerService', () => ({
   hardwareListenerService: {
@@ -1019,6 +1020,59 @@ describe('ModelCatalogService', () => {
     expect(result.models[0].requiresTreeProbe).toBe(false);
     expect(global.fetch).toHaveBeenCalledTimes(3);
     expect((global.fetch as jest.Mock).mock.calls[2][0]).toContain('cursor=tree-page-2');
+  });
+
+  it('does not stop paginated tree revalidation on an exact projector filename', async () => {
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.includes('cursor=tree-page-2')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          headers: {
+            get: jest.fn(() => null),
+          },
+          json: () => Promise.resolve([
+            {
+              path: 'model.Q4_K_M.gguf',
+              size: 3 * 1024 * 1024 * 1024,
+            },
+          ]),
+        });
+      }
+
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: {
+          get: jest.fn((headerName: string) => (
+            headerName === 'link'
+              ? '<https://huggingface.co/api/models/org/paged-projector-model/tree/main?recursive=true&cursor=tree-page-2>; rel="next"'
+              : null
+          )),
+        },
+        json: () => Promise.resolve([
+          { path: 'model.mmproj.gguf', size: 512 * 1024 * 1024 },
+        ]),
+      });
+    }) as jest.Mock;
+
+    const requestContext = await (modelCatalogService as any).createRequestContext();
+    const treeResponse = await (modelCatalogService as any).fetchHuggingFaceModelTree(
+      'org/paged-projector-model',
+      undefined,
+      requestContext,
+      REQUEST_AUTH_POLICY.ANONYMOUS,
+      { expectedFileName: 'model.mmproj.gguf' },
+    );
+
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    expect(treeResponse.entries.map((entry: { path?: string }) => entry.path)).toEqual([
+      'model.mmproj.gguf',
+      'model.Q4_K_M.gguf',
+    ]);
+    expect(treeResponse.stopReason).toBe('complete');
   });
 
   it('marks gated models as auth_required when no token is configured', async () => {

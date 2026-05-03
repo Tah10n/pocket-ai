@@ -1778,7 +1778,7 @@ export class ModelCatalogService {
 
             if (expectedFileName.length > 0) {
               const targetMatch = pageEntries.find((entry) => getFileName(entry) === expectedFileName);
-              if (targetMatch) {
+              if (targetMatch && isEligibleGgufEntry(targetMatch)) {
                 isComplete = resolvedNextCursor === null;
                 stopReason = 'target_found';
                 break;

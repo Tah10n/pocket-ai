@@ -109,7 +109,7 @@ function normalizeCatalogSignals(values: (string | undefined)[] | undefined): st
 export function selectTreeEntryForModel(model: ModelMetadata, entries: HuggingFaceTreeEntry[]): HuggingFaceTreeEntry | undefined {
   if (model.requiresTreeProbe !== true && model.resolvedFileName) {
     const exactMatch = entries.find((entry) => getFileName(entry) === model.resolvedFileName);
-    if (exactMatch) {
+    if (exactMatch && isEligibleGgufEntry(exactMatch)) {
       return exactMatch;
     }
   }

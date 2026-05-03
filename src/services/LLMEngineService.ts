@@ -352,7 +352,9 @@ class LLMEngineService {
   private hwUnsubscribe?: () => void;
   private initPromise: Promise<void> | null = null;
   private operationQueue: Promise<void> = Promise.resolve();
+  private contextOperationQueue: Promise<void> = Promise.resolve();
   private activeCompletionPromise: Promise<NativeCompletionResult> | null = null;
+  private activeContextOperationPromises: Set<Promise<unknown>> = new Set();
   private completionInterruptGeneration = 0;
   private isUnloading = false;
   private activeCalibrationSession: CalibrationSession | null = null;
@@ -400,6 +402,45 @@ class LLMEngineService {
   private assertCompletionNotInterrupted(generation: number): void {
     if (this.completionInterruptGeneration !== generation) {
       throw new AppError('engine_not_ready', 'Completion was interrupted before generation started');
+    }
+  }
+
+  private trackContextOperation<T>(operation: () => Promise<T>): Promise<T> {
+    const previousOperation = this.contextOperationQueue;
+    let releaseQueue: () => void = () => undefined;
+    const queueSlot = new Promise<void>((resolve) => {
+      releaseQueue = resolve;
+    });
+
+    this.contextOperationQueue = previousOperation.catch(() => undefined).then(() => queueSlot);
+
+    const operationPromise = (async () => {
+      await previousOperation.catch(() => undefined);
+
+      try {
+        return await operation();
+      } finally {
+        releaseQueue();
+      }
+    })();
+    this.activeContextOperationPromises.add(operationPromise);
+
+    void operationPromise.then(
+      () => {
+        this.activeContextOperationPromises.delete(operationPromise);
+      },
+      () => {
+        this.activeContextOperationPromises.delete(operationPromise);
+      },
+    );
+
+    return operationPromise;
+  }
+
+  private async waitForActiveContextOperations(): Promise<void> {
+    const activeContextOperations = Array.from(this.activeContextOperationPromises);
+    if (activeContextOperations.length > 0) {
+      await Promise.allSettled(activeContextOperations);
     }
   }
 
@@ -1124,6 +1165,8 @@ class LLMEngineService {
           await this.initPromise;
         }
 
+        await this.waitForActiveContextOperations();
+
         const { context, generation: contextGeneration } = this.getReadyContextOrThrow();
 
         let hasStreamedTokens = false;
@@ -1404,10 +1447,6 @@ class LLMEngineService {
       add_generation_prompt?: boolean;
     };
   }): Promise<number> {
-    if (this.state.status === EngineStatus.INITIALIZING && this.initPromise) {
-      await this.initPromise;
-    }
-
     if (this.isUnloading) {
       throw new AppError('engine_unloading', 'The model engine is unloading. Please wait a moment.');
     }
@@ -1416,37 +1455,59 @@ class LLMEngineService {
       throw new AppError('engine_busy', 'A response is already being generated.');
     }
 
-    const context = this.context;
-    if (!context || this.state.status !== EngineStatus.READY) {
-      throw new AppError('engine_not_ready', 'Engine not ready');
-    }
-
-    const countTokens = async (promptMessages: LlmChatMessage[]) => {
-      const formatted = await context.getFormattedChat(promptMessages as any, null, {
-        enable_thinking: params?.enable_thinking ?? false,
-        reasoning_format: params?.reasoning_format ?? 'none',
-        add_generation_prompt: params?.add_generation_prompt,
-      });
-
-      const tokenized = await context.tokenize(
-        formatted.prompt,
-        formatted.media_paths ? { media_paths: formatted.media_paths } : undefined,
-      );
-
-      return tokenized.tokens.length;
-    };
-
-    try {
-      return await countTokens(messages);
-    } catch (error) {
-      if (isConversationAlternationError(error)) {
-        console.warn('[LLMEngine] Retrying prompt token count after normalizing chat roles for strict templates');
-        const normalizedMessages = normalizeMessagesForStrictRoleAlternation(messages);
-        return await countTokens(normalizedMessages);
+    return this.trackContextOperation(async () => {
+      if (this.state.status === EngineStatus.INITIALIZING && this.initPromise) {
+        await this.initPromise;
       }
 
-      throw error;
-    }
+      if (this.activeCompletionPromise) {
+        throw new AppError('engine_busy', 'A response is already being generated.');
+      }
+
+      const { context, generation: contextGeneration } = this.getReadyContextOrThrow();
+
+      const countTokens = async (promptMessages: LlmChatMessage[]) => {
+        this.assertContextStillCurrent(context, contextGeneration);
+        let formatted: Awaited<ReturnType<LlamaContext['getFormattedChat']>>;
+        try {
+          formatted = await context.getFormattedChat(promptMessages as any, null, {
+            enable_thinking: params?.enable_thinking ?? false,
+            reasoning_format: params?.reasoning_format ?? 'none',
+            add_generation_prompt: params?.add_generation_prompt,
+          });
+        } catch (error) {
+          this.assertContextStillCurrent(context, contextGeneration);
+          throw error;
+        }
+
+        this.assertContextStillCurrent(context, contextGeneration);
+        let tokenized: Awaited<ReturnType<LlamaContext['tokenize']>>;
+        try {
+          tokenized = await context.tokenize(
+            formatted.prompt,
+            formatted.media_paths ? { media_paths: formatted.media_paths } : undefined,
+          );
+        } catch (error) {
+          this.assertContextStillCurrent(context, contextGeneration);
+          throw error;
+        }
+
+        this.assertContextStillCurrent(context, contextGeneration);
+        return tokenized.tokens.length;
+      };
+
+      try {
+        return await countTokens(messages);
+      } catch (error) {
+        if (isConversationAlternationError(error)) {
+          console.warn('[LLMEngine] Retrying prompt token count after normalizing chat roles for strict templates');
+          const normalizedMessages = normalizeMessagesForStrictRoleAlternation(messages);
+          return await countTokens(normalizedMessages);
+        }
+
+        throw error;
+      }
+    });
   }
 
   public async stopCompletion(): Promise<void> {
@@ -3033,7 +3094,7 @@ class LLMEngineService {
       })();
 
       if (contextAtProbeStart && shouldProbeThinkingCapability && process.env.NODE_ENV !== 'test') {
-        void (async () => {
+        void this.trackContextOperation(async () => {
           try {
             const thinkingCapability = await this.probeThinkingCapability(contextAtProbeStart);
             if (thinkingCapability && this.context === contextAtProbeStart && !this.isUnloading) {
@@ -3050,7 +3111,7 @@ class LLMEngineService {
               console.warn('[LLMEngine] Failed to persist chat template thinking capability', error);
             }
           }
-        })();
+        });
       }
     } catch (error) {
       const baseError = toAppError(error, 'model_load_failed');
@@ -3152,6 +3213,8 @@ class LLMEngineService {
           // Completion failures are handled by the chat flow.
         }
       }
+
+      await this.waitForActiveContextOperations();
 
       if (this.context) {
         await requireLlamaModule().releaseAllLlama();

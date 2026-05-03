@@ -1,6 +1,7 @@
 import {
   isEligibleGgufEntry,
   isProjectorFileName,
+  selectTreeEntryForModel,
   selectPreferredGgufEntry,
 } from '../../src/services/ModelCatalogFileSelector';
 
@@ -25,6 +26,24 @@ describe('ModelCatalogFileSelector', () => {
     ]);
 
     expect(selected?.rfilename).toBe('model.Q4_K_M.gguf');
+  });
+
+  it('ignores an exact resolved projector filename during tree revalidation', () => {
+    const selected = selectTreeEntryForModel(
+      {
+        id: 'org/model',
+        name: 'model',
+        downloadUrl: 'https://example.com/model.mmproj.gguf',
+        resolvedFileName: 'model.mmproj.gguf',
+        requiresTreeProbe: false,
+      } as any,
+      [
+        { path: 'model.mmproj.gguf', size: largeFileSize },
+        { path: 'model.Q4_K_M.gguf', size: largeFileSize },
+      ],
+    );
+
+    expect(selected?.path).toBe('model.Q4_K_M.gguf');
   });
 
   it('does not reject text GGUF names that only contain projector as a normal word', () => {

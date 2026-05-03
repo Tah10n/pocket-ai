@@ -519,6 +519,7 @@ describe('useChatSession', () => {
 
     await act(async () => {
       await getSession()?.stopGeneration();
+      onToken?.(' late token');
       resolveCompletion?.();
       await sendPromise;
     });
@@ -558,12 +559,7 @@ describe('useChatSession', () => {
       await getSession()?.stopGeneration();
     });
 
-    await act(async () => {
-      resolvePromptCount?.();
-      await sendPromise;
-    });
-
-    const thread = useChatStore.getState().getActiveThread();
+    let thread = useChatStore.getState().getActiveThread();
     expect(llmEngineService.stopCompletion).toHaveBeenCalled();
     expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
     expect(thread?.status).toBe('stopped');
@@ -571,6 +567,164 @@ describe('useChatSession', () => {
       role: 'assistant',
       state: 'stopped',
     }));
+
+    await act(async () => {
+      resolvePromptCount?.();
+      await sendPromise;
+    });
+
+    thread = useChatStore.getState().getActiveThread();
+    expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
+    expect(thread?.status).toBe('stopped');
+    expect(thread?.messages.at(-1)).toEqual(expect.objectContaining({
+      role: 'assistant',
+      state: 'stopped',
+    }));
+  });
+
+  it('does not let an old stopped prompt-prep run start after a new send', async () => {
+    let resolveFirstPromptCount: (() => void) | undefined;
+    let resolveSecondCompletion: (() => void) | undefined;
+    (llmEngineService.countPromptTokens as jest.Mock).mockImplementationOnce(
+      () => new Promise((resolve) => {
+        resolveFirstPromptCount = () => resolve(16);
+      }),
+    );
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      async ({ onToken }: { onToken?: (token: string) => void }) => new Promise((resolve) => {
+        resolveSecondCompletion = () => {
+          onToken?.('Hello back');
+          resolve({ text: 'Hello back' });
+        };
+      }),
+    );
+
+    const getSession = renderHookHarness();
+    let firstSendPromise: Promise<void> | undefined;
+    await act(async () => {
+      firstSendPromise = getSession()?.appendUserMessage('First request');
+    });
+
+    await waitFor(() => {
+      expect(llmEngineService.countPromptTokens).toHaveBeenCalledTimes(1);
+    });
+
+    await act(async () => {
+      await getSession()?.stopGeneration();
+    });
+
+    await waitFor(() => {
+      expect(useChatStore.getState().getActiveThread()?.status).toBe('stopped');
+    });
+
+    let secondSendPromise: Promise<void> | undefined;
+    await act(async () => {
+      secondSendPromise = getSession()?.appendUserMessage('Second request');
+    });
+
+    await waitFor(() => {
+      expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1);
+    });
+
+    expect(backgroundTaskService.isTaskActive('inference')).toBe(true);
+
+    await act(async () => {
+      resolveFirstPromptCount?.();
+      await firstSendPromise;
+    });
+
+    expect(backgroundTaskService.isTaskActive('inference')).toBe(true);
+
+    await act(async () => {
+      resolveSecondCompletion?.();
+      await secondSendPromise;
+    });
+
+    const thread = useChatStore.getState().getActiveThread();
+    expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1);
+    expect(thread?.status).toBe('idle');
+    expect(thread?.messages.filter((message) => message.role === 'assistant')).toHaveLength(2);
+    expect(thread?.messages.at(-1)).toEqual(expect.objectContaining({
+      role: 'assistant',
+      content: 'Hello back',
+      state: 'complete',
+    }));
+  });
+
+  it('does not let a slow stale stop clear a newer generation background task', async () => {
+    let resolveFirstPromptCount: (() => void) | undefined;
+    let resolveStopCompletion: (() => void) | undefined;
+    let resolveSecondCompletion: (() => void) | undefined;
+
+    (llmEngineService.countPromptTokens as jest.Mock).mockImplementationOnce(
+      () => new Promise((resolve) => {
+        resolveFirstPromptCount = () => resolve(16);
+      }),
+    );
+    (llmEngineService.stopCompletion as jest.Mock).mockImplementationOnce(
+      () => new Promise((resolve) => {
+        resolveStopCompletion = () => resolve(undefined);
+      }),
+    );
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      async ({ onToken }: { onToken?: (token: string) => void }) => new Promise((resolve) => {
+        resolveSecondCompletion = () => {
+          onToken?.('Hello back');
+          resolve({ text: 'Hello back' });
+        };
+      }),
+    );
+
+    const getSession = renderHookHarness();
+    let firstSendPromise: Promise<void> | undefined;
+    await act(async () => {
+      firstSendPromise = getSession()?.appendUserMessage('First request');
+    });
+
+    await waitFor(() => {
+      expect(llmEngineService.countPromptTokens).toHaveBeenCalledTimes(1);
+    });
+
+    let stopPromise: Promise<void> | undefined;
+    await act(async () => {
+      stopPromise = getSession()?.stopGeneration();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(useChatStore.getState().getActiveThread()?.status).toBe('stopped');
+    });
+
+    let secondSendPromise: Promise<void> | undefined;
+    await act(async () => {
+      secondSendPromise = getSession()?.appendUserMessage('Second request');
+    });
+
+    await waitFor(() => {
+      expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1);
+    });
+
+    await act(async () => {
+      resolveStopCompletion?.();
+      await stopPromise;
+    });
+
+    expect(backgroundTaskService.isTaskActive('inference')).toBe(true);
+
+    await act(async () => {
+      resolveFirstPromptCount?.();
+      await firstSendPromise;
+    });
+
+    expect(backgroundTaskService.isTaskActive('inference')).toBe(true);
+
+    await act(async () => {
+      resolveSecondCompletion?.();
+      await secondSendPromise;
+    });
+
+    expect(backgroundTaskService.isTaskActive('inference')).toBe(false);
+    expect(useChatStore.getState().getActiveThread()?.status).toBe('idle');
   });
 
   it('regenerates the last assistant response in-place', async () => {

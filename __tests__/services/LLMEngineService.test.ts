@@ -87,6 +87,8 @@ describe('LLMEngineService', () => {
     jest.clearAllMocks();
     createStorage('pocket-ai-autotune', { tier: 'private' }).clearAll();
     inferenceBackendService.clearCache();
+    (llmEngineService as any).contextOperationQueue = Promise.resolve();
+    (llmEngineService as any).activeContextOperationPromises?.clear?.();
     (llmEngineService as any).additionalStopWordsCache?.clear?.();
     getBackendDevicesInfoMock().mockResolvedValue([
       {

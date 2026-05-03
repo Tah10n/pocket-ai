@@ -221,11 +221,12 @@ export const useChatSession = () => {
     performanceMonitor.mark('chat.send.start', { modelId });
     const generationSpan = performanceMonitor.startSpan('chat.generation', { modelId });
 
-    sharedGenerationState.current = {
+    const generationState: ActiveGenerationState = {
       threadId,
       messageId: assistantMessageId,
       stopRequested: false,
     };
+    sharedGenerationState.current = generationState;
 
     let currentText = '';
     let currentRawText = '';
@@ -275,10 +276,19 @@ export const useChatSession = () => {
         ? llmEngineService.getContextSize()
         : DEFAULT_CONTEXT_SIZE;
 
-    const flushAssistantPatch = () => {
+    const canMutateAssistantMessage = (options?: { allowStopped?: boolean }) => (
+      isMatchingGeneration(threadId, assistantMessageId)
+      && (options?.allowStopped === true || !generationState.stopRequested)
+    );
+
+    const flushAssistantPatch = (options?: { allowStopped?: boolean }) => {
       if (flushTimeout) {
         clearTimeout(flushTimeout);
         flushTimeout = null;
+      }
+
+      if (!canMutateAssistantMessage(options)) {
+        return;
       }
 
       refreshVisibleAssistantContent();
@@ -345,7 +355,7 @@ export const useChatSession = () => {
           flushAssistantPatch();
           stopAssistantMessage(threadId, assistantMessageId);
           finalizeThreadStatus(threadId, 'stopped');
-          sharedGenerationState.current!.stopRequested = true;
+          generationState.stopRequested = true;
           sendOutcomeNotificationOnce('interrupted');
         } finally {
           void llmEngineService.stopCompletion();
@@ -456,13 +466,15 @@ export const useChatSession = () => {
         ? reasoningRuntimeConfig.reasoningFormat
         : 'none';
 
-      if (isMatchingGeneration(threadId, assistantMessageId) && sharedGenerationState.current?.stopRequested) {
-        flushAssistantPatch();
-        stopAssistantMessage(threadId, assistantMessageId);
-        finalizeThreadStatus(threadId, 'stopped');
-        recordCompletionStats('stopped');
+      if (generationState.stopRequested) {
+        if (isMatchingGeneration(threadId, assistantMessageId)) {
+      flushAssistantPatch();
+          stopAssistantMessage(threadId, assistantMessageId);
+          finalizeThreadStatus(threadId, 'stopped');
+          recordCompletionStats('stopped');
 
-        sendOutcomeNotificationOnce('interrupted');
+          sendOutcomeNotificationOnce('interrupted');
+        }
         return;
       }
 
@@ -486,6 +498,10 @@ export const useChatSession = () => {
           reasoning_format: reasoningFormatForRequest,
         },
         onToken: (token) => {
+          if (!canMutateAssistantMessage()) {
+            return;
+          }
+
           if (!hasMarkedFirstToken) {
             hasMarkedFirstToken = true;
             performanceMonitor.mark('chat.firstToken', { modelId });
@@ -543,13 +559,15 @@ export const useChatSession = () => {
         },
       });
 
-      if (isMatchingGeneration(threadId, assistantMessageId) && sharedGenerationState.current?.stopRequested) {
-        flushAssistantPatch();
-        stopAssistantMessage(threadId, assistantMessageId);
-        finalizeThreadStatus(threadId, 'stopped');
-        recordCompletionStats('stopped');
+      if (generationState.stopRequested) {
+        if (isMatchingGeneration(threadId, assistantMessageId)) {
+          flushAssistantPatch({ allowStopped: true });
+          stopAssistantMessage(threadId, assistantMessageId);
+          finalizeThreadStatus(threadId, 'stopped');
+          recordCompletionStats('stopped');
 
-        sendOutcomeNotificationOnce('interrupted');
+          sendOutcomeNotificationOnce('interrupted');
+        }
         return;
       }
 
@@ -574,13 +592,15 @@ export const useChatSession = () => {
         void notificationService.sendCompletionNotification('inference', { threadId });
       }
     } catch (error) {
-      if (isMatchingGeneration(threadId, assistantMessageId) && sharedGenerationState.current?.stopRequested) {
-        flushAssistantPatch();
-        stopAssistantMessage(threadId, assistantMessageId);
-        finalizeThreadStatus(threadId, 'stopped');
-        recordCompletionStats('stopped');
+      if (generationState.stopRequested) {
+        if (isMatchingGeneration(threadId, assistantMessageId)) {
+          flushAssistantPatch({ allowStopped: true });
+          stopAssistantMessage(threadId, assistantMessageId);
+          finalizeThreadStatus(threadId, 'stopped');
+          recordCompletionStats('stopped');
 
-        sendOutcomeNotificationOnce('interrupted');
+          sendOutcomeNotificationOnce('interrupted');
+        }
         return;
       }
 
@@ -608,11 +628,12 @@ export const useChatSession = () => {
       unsubscribeExpiration?.();
       unsubscribeExpiration = null;
 
-      if (isMatchingGeneration(threadId, assistantMessageId)) {
+      const wasCurrentGeneration = isMatchingGeneration(threadId, assistantMessageId);
+      if (wasCurrentGeneration) {
         sharedGenerationState.current = null;
       }
 
-      if (backgroundTaskService.isTaskActive('inference')) {
+      if (wasCurrentGeneration && backgroundTaskService.isTaskActive('inference')) {
         await backgroundTaskService.stopBackgroundTask('inference');
       }
     }
@@ -717,13 +738,21 @@ export const useChatSession = () => {
   }, [activeThread, appendMessage, createAssistantPlaceholder, createThread, ensureThreadUsesModelForSend, runAssistantCompletion, setActiveThread, syncThreadParametersCallback]);
 
   const stopGeneration = useCallback(async () => {
-    if (!sharedGenerationState.current) {
+    const generation = sharedGenerationState.current;
+    if (!generation) {
       return;
     }
 
-    sharedGenerationState.current.stopRequested = true;
+    generation.stopRequested = true;
+    stopAssistantMessage(generation.threadId, generation.messageId);
+    finalizeThreadStatus(generation.threadId, 'stopped');
+
     await llmEngineService.stopCompletion();
-  }, []);
+
+    if (sharedGenerationState.current === generation && backgroundTaskService.isTaskActive('inference')) {
+      await backgroundTaskService.stopBackgroundTask('inference');
+    }
+  }, [finalizeThreadStatus, stopAssistantMessage]);
 
   const regenerateFromUserMessage = useCallback(async (messageId: string, nextContent: string) => {
     if (!activeThread) {

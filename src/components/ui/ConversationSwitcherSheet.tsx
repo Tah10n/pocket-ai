@@ -8,6 +8,7 @@ import { Pressable } from '@/components/ui/pressable';
 import { ScreenModalOverlay, ScreenPressableCard } from '@/components/ui/ScreenShell';
 import { Text } from '@/components/ui/text';
 import { getShortModelLabel } from '@/utils/modelLabel';
+import type { AndroidBlurTargetRef } from '@/utils/androidBlur';
 import { ListPickerSheetContent, type ListPickerSheetItem } from './ListPickerSheet';
 import { MaterialSymbols } from './MaterialSymbols';
 import { ConversationIndexItem } from '../../types/chat';
@@ -20,6 +21,7 @@ interface ConversationSwitcherSheetProps {
   activeThreadId: string | null;
   conversations: ConversationIndexItem[];
   activePresetName?: string;
+  androidContentBlurTargetRef?: AndroidBlurTargetRef | null;
   canOpenPresetSelector?: boolean;
   onClose: () => void;
   onSelectConversation: (threadId: string) => void;
@@ -33,6 +35,7 @@ export function ConversationSwitcherSheet({
   activeThreadId,
   conversations,
   activePresetName,
+  androidContentBlurTargetRef,
   canOpenPresetSelector = true,
   onClose,
   onSelectConversation,
@@ -91,6 +94,7 @@ export function ConversationSwitcherSheet({
           title={t('chat.conversationSwitcher.title')}
           subtitle={t('chat.conversationSwitcher.subtitle')}
           onClose={onClose}
+          androidContentBlurTargetRef={androidContentBlurTargetRef}
           items={items}
           sheetClassName={conversations.length === 0 ? 'min-h-[45%]' : undefined}
           actions={(

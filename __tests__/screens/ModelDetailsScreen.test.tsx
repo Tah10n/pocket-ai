@@ -37,6 +37,8 @@ const mockGetRecommendedLoadProfile = jest.fn<
 const mockReloadModel = jest.fn();
 const mockHardwareStatus = jest.fn();
 let lastModelParametersSheetProps: any = null;
+let lastErrorReportSheetProps: any = null;
+let lastContentBlurTargetProps: any = null;
 const mockEngineState = {
   status: EngineStatus.IDLE,
   activeModelId: undefined as string | undefined,
@@ -123,6 +125,10 @@ jest.mock('../../src/components/ui/ScreenShell', () => ({
   joinClassNames: (...values: Array<string | undefined | false>) => values.filter(Boolean).join(' '),
   useScreenAppearance: () => require('../../src/utils/themeTokens').getThemeAppearance('default', 'light'),
   ScreenHeaderShell: ({ children }: any) => children,
+  ScreenAndroidContentBlurTarget: (props: any) => {
+    lastContentBlurTargetProps = props;
+    return props.children;
+  },
   ScreenRoot: ({ children }: any) => children,
   ScreenContent: ({ children }: any) => children,
   ScreenStack: ({ children }: any) => children,
@@ -221,6 +227,13 @@ jest.mock('../../src/components/ui/ModelParametersSheet', () => {
     },
   };
 });
+
+jest.mock('../../src/components/ui/ErrorReportSheet', () => ({
+  ErrorReportSheet: (props: any) => {
+    lastErrorReportSheetProps = props;
+    return null;
+  },
+}));
 
 jest.mock('../../src/components/ui/text', () => {
   const mockReact = jest.requireActual('react');
@@ -356,6 +369,8 @@ describe('ModelDetailsScreen', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     lastModelParametersSheetProps = null;
+    lastErrorReportSheetProps = null;
+    lastContentBlurTargetProps = null;
     mockFitsInRam.mockResolvedValue(true);
     useDownloadStore.setState({ queue: [], activeDownloadId: null });
     mockEngineState.status = EngineStatus.IDLE;
@@ -385,6 +400,20 @@ describe('ModelDetailsScreen', () => {
   afterEach(() => {
     openUrlSpy.mockRestore();
     alertSpy.mockRestore();
+  });
+
+  it('passes the details content blur target to modal sheets', async () => {
+    render(<ModelDetailsScreen />);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const blurTarget = lastContentBlurTargetProps?.blurTargetRef;
+
+    expect(blurTarget).toBeTruthy();
+    expect(lastModelParametersSheetProps?.androidContentBlurTargetRef).toBe(blurTarget);
+    expect(lastErrorReportSheetProps?.androidContentBlurTargetRef).toBe(blurTarget);
   });
 
   it('opens the Hugging Face model page from the details flow', async () => {

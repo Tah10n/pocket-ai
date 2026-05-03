@@ -98,6 +98,7 @@ const {
   ScreenRoot,
   ScreenSegmentedControl,
   ScreenSheet,
+  ScreenSurface,
   useFloatingHeaderInset,
 } = require('../../src/components/ui/ScreenShell');
 
@@ -826,6 +827,91 @@ describe('ScreenShell', () => {
       expect(() => backgroundBlurTarget.findByProps({ testID: 'android-glass-sheet' })).toThrow();
       expect(sceneBlurTarget.findByProps({ testID: 'android-glass-sheet' })).toBeTruthy();
       expect(blurBackdrop).toBeUndefined();
+    } finally {
+      Object.defineProperty(Platform, 'OS', { configurable: true, get: () => originalPlatform });
+      Object.defineProperty(Platform, 'Version', { configurable: true, get: () => originalVersion });
+    }
+  });
+
+  it('uses an explicit Android blur target for glass sheets', () => {
+    const { Platform } = require('react-native');
+    const { getThemeAppearance } = require('../../src/utils/themeTokens');
+    const originalPlatform = Platform.OS;
+    const originalVersion = Platform.Version;
+    const appearance = getThemeAppearance('glass', 'light');
+    const blurTargetRef = React.createRef<any>();
+    Object.defineProperty(Platform, 'OS', { configurable: true, get: () => 'android' });
+    Object.defineProperty(Platform, 'Version', { configurable: true, get: () => 34 });
+    mockThemeContext = {
+      colors: { background: '#fff', headerBlurTint: 'light' },
+      resolvedMode: 'light',
+      themeId: 'glass',
+      appearance,
+    };
+
+    try {
+      const { UNSAFE_getAllByType } = render(
+        <ScreenSheet androidBlurTargetRef={blurTargetRef} testID="android-targeted-glass-sheet">content</ScreenSheet>,
+      );
+
+      const { View } = require('react-native');
+      const blurBackdrop = UNSAFE_getAllByType(View).find((node: any) =>
+        node.props.pointerEvents === 'none'
+        && node.props.intensity === appearance.effects.surfaceBlurIntensity,
+      );
+
+      expect(blurBackdrop).toBeTruthy();
+      expect(blurBackdrop.props).toEqual(expect.objectContaining({
+        blurMethod: 'dimezisBlurViewSdk31Plus',
+        blurReductionFactor: appearance.effects.blurReductionFactor,
+        blurTarget: blurTargetRef,
+      }));
+    } finally {
+      Object.defineProperty(Platform, 'OS', { configurable: true, get: () => originalPlatform });
+      Object.defineProperty(Platform, 'Version', { configurable: true, get: () => originalVersion });
+    }
+  });
+
+  it('uses an explicit Android blur target for glass surfaces when requested', () => {
+    const { Platform } = require('react-native');
+    const { getThemeAppearance } = require('../../src/utils/themeTokens');
+    const originalPlatform = Platform.OS;
+    const originalVersion = Platform.Version;
+    const appearance = getThemeAppearance('glass', 'light');
+    const blurTargetRef = React.createRef<any>();
+    Object.defineProperty(Platform, 'OS', { configurable: true, get: () => 'android' });
+    Object.defineProperty(Platform, 'Version', { configurable: true, get: () => 34 });
+    mockThemeContext = {
+      colors: { background: '#fff', headerBlurTint: 'light' },
+      resolvedMode: 'light',
+      themeId: 'glass',
+      appearance,
+    };
+
+    try {
+      const { UNSAFE_getAllByType } = render(
+        <ScreenSurface
+          androidBlurTargetRef={blurTargetRef}
+          forceNativeAndroidBlur
+          decorative="matte"
+          testID="android-targeted-glass-surface"
+        >
+          content
+        </ScreenSurface>,
+      );
+
+      const { View } = require('react-native');
+      const blurBackdrop = UNSAFE_getAllByType(View).find((node: any) =>
+        node.props.pointerEvents === 'none'
+        && node.props.intensity === appearance.effects.surfaceBlurIntensity,
+      );
+
+      expect(blurBackdrop).toBeTruthy();
+      expect(blurBackdrop.props).toEqual(expect.objectContaining({
+        blurMethod: 'dimezisBlurViewSdk31Plus',
+        blurReductionFactor: appearance.effects.blurReductionFactor,
+        blurTarget: blurTargetRef,
+      }));
     } finally {
       Object.defineProperty(Platform, 'OS', { configurable: true, get: () => originalPlatform });
       Object.defineProperty(Platform, 'Version', { configurable: true, get: () => originalVersion });

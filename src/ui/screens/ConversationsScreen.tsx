@@ -1,5 +1,5 @@
-import React, { useCallback, useDeferredValue, useEffect, useMemo, useState } from 'react';
-import { Alert, KeyboardAvoidingView, Modal } from 'react-native';
+import React, { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
+import { Alert, KeyboardAvoidingView, Modal, type View } from 'react-native';
 import { useRouter } from 'expo-router';
 import { FlashList, ListRenderItem } from '@shopify/flash-list';
 import { useIsFocused } from '@react-navigation/native';
@@ -12,6 +12,7 @@ import { MaterialSymbols } from '@/components/ui/MaterialSymbols';
 import { Pressable } from '@/components/ui/pressable';
 import {
   ScreenActionPill,
+  ScreenAndroidContentBlurTarget,
   ScreenBadge,
   ScreenCard,
   ScreenContent,
@@ -93,6 +94,7 @@ export function ConversationsScreen() {
   const [editingTitle, setEditingTitle] = useState('');
   const [chatRetentionDays, setChatRetentionDays] = useState<number | null>(() => getSettings().chatRetentionDays);
   const [isRetentionExpanded, setRetentionExpanded] = useState(false);
+  const contentBlurTargetRef = useRef<View | null>(null);
   const handleBack = useCallback(() => {
     if (canGoBack) {
       router.back();
@@ -399,108 +401,114 @@ export function ConversationsScreen() {
 
   return (
     <ScreenRoot>
-      <HeaderBar
-        title={t('conversations.title')}
-        subtitle={t('conversations.subtitle')}
-        onBack={handleBack}
-        backAccessibilityLabel={t('chat.headerBackAccessibilityLabel')}
-        rightAccessory={(
-          <ScreenActionPill
-            testID="start-new-chat"
-            onPress={handleStartNewChat}
-            accessibilityLabel={t('conversations.newChat')}
-            tone="primary"
-            size="lg"
-            className="shrink-0"
-          >
-            <MaterialSymbols name="edit-square" size="sm" className={primaryActionContentClassName} />
-            <Text className={`text-sm font-semibold ${primaryActionContentClassName}`}>
-              {t('conversations.newChat')}
-            </Text>
-          </ScreenActionPill>
-        )}
-      />
-
-      <ScreenContent
-        className="flex-1"
-        respectFloatingHeader={false}
-        style={{ paddingTop: headerInset + 8 }}
+      <ScreenAndroidContentBlurTarget
+        blurTargetRef={contentBlurTargetRef}
+        style={{ flex: 1 }}
+        testID="conversations-content-blur-target"
       >
-        <ScreenStack className="flex-1" gap="compact">
-          <ScreenInlineInput
-            variant="search"
-            testID="conversation-search-input"
-            accessibilityLabel={t('conversations.searchPlaceholder')}
-            placeholder={t('conversations.searchPlaceholder')}
-            value={searchQuery}
-            onChangeText={setSearchQuery}
-            leadingAccessory={<MaterialSymbols name="search" size="sm" className="text-typography-500 dark:text-typography-400" />}
-            trailingAccessory={searchQuery.length > 0 ? (
-              <ScreenIconButton
-                testID="clear-conversation-search"
-                onPress={() => {
-                  setSearchQuery('');
-                }}
-                accessibilityLabel={t('common.clear')}
-                iconName="close"
-                size="compact"
-                className="border-0 bg-transparent dark:bg-transparent"
-                iconClassName="text-typography-400"
-              />
-            ) : null}
-          />
-
-          {renderRetentionCard()}
-
-          {filteredConversations.length > 0 ? (
-            <Box className="flex-1">
-              <FlashList
-                data={filteredConversations}
-                keyExtractor={(item) => item.id}
-                renderItem={renderItem}
-                keyboardShouldPersistTaps="handled"
-                contentContainerStyle={{ paddingBottom: insets.bottom + 20 }}
-                ItemSeparatorComponent={() => <Box className="h-2" />}
-              />
-            </Box>
-          ) : (
-            <Box className="flex-1 pt-4">
-              <ScreenCard padding="compact" decorative="matte">
-                <ScreenIconTile
-                  iconName={conversationIndex.length === 0 ? 'forum' : 'search'}
-                  tone="accent"
-                  size="lg"
-                  iconSize="xl"
-                  className="h-10 w-10 rounded-xl"
-                  iconClassName="text-primary-500"
-                />
-
-                <Text className={composeTextRole('screenTitle', 'mt-3')}>
-                  {conversationIndex.length === 0 ? t('conversations.emptyTitle') : t('conversations.emptySearchTitle')}
-                </Text>
-
-                <Text className={composeTextRole('bodyMuted', 'mt-2')}>
-                  {conversationIndex.length === 0
-                    ? t('conversations.emptyDescription')
-                    : t('conversations.emptySearchDescription')}
-                </Text>
-
-                {conversationIndex.length === 0 ? null : (
-                  <Button action="secondary" size="sm" className="mt-5 self-start" onPress={() => setSearchQuery('')}>
-                    <ButtonText>{t('common.clear')}</ButtonText>
-                  </Button>
-                )}
-              </ScreenCard>
-            </Box>
+        <HeaderBar
+          title={t('conversations.title')}
+          subtitle={t('conversations.subtitle')}
+          onBack={handleBack}
+          backAccessibilityLabel={t('chat.headerBackAccessibilityLabel')}
+          rightAccessory={(
+            <ScreenActionPill
+              testID="start-new-chat"
+              onPress={handleStartNewChat}
+              accessibilityLabel={t('conversations.newChat')}
+              tone="primary"
+              size="lg"
+              className="shrink-0"
+            >
+              <MaterialSymbols name="edit-square" size="sm" className={primaryActionContentClassName} />
+              <Text className={`text-sm font-semibold ${primaryActionContentClassName}`}>
+                {t('conversations.newChat')}
+              </Text>
+            </ScreenActionPill>
           )}
-        </ScreenStack>
-      </ScreenContent>
+        />
+
+        <ScreenContent
+          className="flex-1"
+          respectFloatingHeader={false}
+          style={{ paddingTop: headerInset + 8 }}
+        >
+          <ScreenStack className="flex-1" gap="compact">
+            <ScreenInlineInput
+              variant="search"
+              testID="conversation-search-input"
+              accessibilityLabel={t('conversations.searchPlaceholder')}
+              placeholder={t('conversations.searchPlaceholder')}
+              value={searchQuery}
+              onChangeText={setSearchQuery}
+              leadingAccessory={<MaterialSymbols name="search" size="sm" className="text-typography-500 dark:text-typography-400" />}
+              trailingAccessory={searchQuery.length > 0 ? (
+                <ScreenIconButton
+                  testID="clear-conversation-search"
+                  onPress={() => {
+                    setSearchQuery('');
+                  }}
+                  accessibilityLabel={t('common.clear')}
+                  iconName="close"
+                  size="compact"
+                  className="border-0 bg-transparent dark:bg-transparent"
+                  iconClassName="text-typography-400"
+                />
+              ) : null}
+            />
+
+            {renderRetentionCard()}
+
+            {filteredConversations.length > 0 ? (
+              <Box className="flex-1">
+                <FlashList
+                  data={filteredConversations}
+                  keyExtractor={(item) => item.id}
+                  renderItem={renderItem}
+                  keyboardShouldPersistTaps="handled"
+                  contentContainerStyle={{ paddingBottom: insets.bottom + 20 }}
+                  ItemSeparatorComponent={() => <Box className="h-2" />}
+                />
+              </Box>
+            ) : (
+              <Box className="flex-1 pt-4">
+                <ScreenCard padding="compact" decorative="matte">
+                  <ScreenIconTile
+                    iconName={conversationIndex.length === 0 ? 'forum' : 'search'}
+                    tone="accent"
+                    size="lg"
+                    iconSize="xl"
+                    className="h-10 w-10 rounded-xl"
+                    iconClassName="text-primary-500"
+                  />
+
+                  <Text className={composeTextRole('screenTitle', 'mt-3')}>
+                    {conversationIndex.length === 0 ? t('conversations.emptyTitle') : t('conversations.emptySearchTitle')}
+                  </Text>
+
+                  <Text className={composeTextRole('bodyMuted', 'mt-2')}>
+                    {conversationIndex.length === 0
+                      ? t('conversations.emptyDescription')
+                      : t('conversations.emptySearchDescription')}
+                  </Text>
+
+                  {conversationIndex.length === 0 ? null : (
+                    <Button action="secondary" size="sm" className="mt-5 self-start" onPress={() => setSearchQuery('')}>
+                      <ButtonText>{t('common.clear')}</ButtonText>
+                    </Button>
+                  )}
+                </ScreenCard>
+              </Box>
+            )}
+          </ScreenStack>
+        </ScreenContent>
+      </ScreenAndroidContentBlurTarget>
 
       <Modal visible={editingThreadId !== null} animationType="fade" transparent onRequestClose={resetRenameState}>
         <KeyboardAvoidingView behavior="padding" style={{ flex: 1 }} keyboardVerticalOffset={0}>
           <ScreenModalOverlay>
             <Pressable className="flex-1" onPress={resetRenameState} />
-            <ScreenSheet>
+            <ScreenSheet androidBlurTargetRef={contentBlurTargetRef}>
               <Box className="mb-5 flex-row items-start justify-between gap-4">
                 <Box className="min-w-0 flex-1">
                   <Text className="text-lg font-semibold text-typography-900 dark:text-typography-100">

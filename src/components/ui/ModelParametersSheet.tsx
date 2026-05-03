@@ -19,6 +19,7 @@ import {
 } from '@/components/ui/ScreenShell';
 import { Text } from '@/components/ui/text';
 import type { EngineDiagnostics } from '@/types/models';
+import type { AndroidBlurTargetRef } from '@/utils/androidBlur';
 import { screenLayoutTokens } from '@/utils/themeTokens';
 import {
   GenerationParameters,
@@ -41,6 +42,7 @@ interface ModelParametersSheetProps {
   visible: boolean;
   modelId: string | null;
   modelLabel: string;
+  androidContentBlurTargetRef?: AndroidBlurTargetRef | null;
   params: GenerationParameters;
   defaultParams: GenerationParameters;
   supportsReasoning?: boolean;
@@ -301,6 +303,7 @@ export function ModelParametersSheet({
   visible,
   modelId,
   modelLabel,
+  androidContentBlurTargetRef,
   params,
   defaultParams,
   supportsReasoning = true,
@@ -683,7 +686,10 @@ export function ModelParametersSheet({
     <Modal visible={visible} animationType="fade" transparent onRequestClose={onClose}>
       <ScreenModalOverlay>
         <Pressable className="flex-1" onPress={onClose} />
-        <ScreenSheet className={screenLayoutTokens.sheetMaxHeightDefaultClassName}>
+        <ScreenSheet
+          className={screenLayoutTokens.sheetMaxHeightDefaultClassName}
+          androidBlurTargetRef={androidContentBlurTargetRef}
+        >
           <Box className="mb-4 flex-row items-start justify-between gap-4">
             <Box className="min-w-0 flex-1">
               <Text className="text-lg font-semibold text-typography-900 dark:text-typography-100">

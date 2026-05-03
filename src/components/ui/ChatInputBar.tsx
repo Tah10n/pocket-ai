@@ -7,6 +7,7 @@ import { getThemeActionContentClassName, screenChromeTokens, withAlpha, type Res
 import { useTheme } from '../../providers/ThemeProvider';
 import { useTranslation } from 'react-i18next';
 import { getReportedErrorMessage } from '../../services/AppError';
+import type { AndroidBlurTargetRef } from '../../utils/androidBlur';
 
 interface ChatInputBarProps {
     onSendMessage: (content: string) => Promise<void> | void;
@@ -15,6 +16,7 @@ interface ChatInputBarProps {
     isSending?: boolean;
     draft?: string;
     onDraftChange?: (value: string) => void;
+    androidContentBlurTargetRef?: AndroidBlurTargetRef | null;
     modeLabel?: string;
     modeDescription?: string;
     onCancelMode?: () => void;
@@ -66,6 +68,7 @@ export const ChatInputBar = ({
     isSending = false,
     draft,
     onDraftChange,
+    androidContentBlurTargetRef,
     modeLabel,
     modeDescription,
     onCancelMode,
@@ -271,7 +274,9 @@ export const ChatInputBar = ({
             {attachmentsContent}
             <ScreenSurface
                 testID="chat-input-bar-capsule"
-                decorative={isDarkGlass ? 'tint' : 'matte'}
+                decorative="matte"
+                androidBlurTargetRef={androidContentBlurTargetRef}
+                forceNativeAndroidBlur={Boolean(androidContentBlurTargetRef)}
                 className="h-12 rounded-full px-1.5 py-1"
                 style={glassComposerCapsuleStyle}
             >

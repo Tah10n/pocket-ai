@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef } from 'react';
-import { Alert } from 'react-native';
+import { Alert, StyleSheet, type View } from 'react-native';
 import { FlashList, ListRenderItem } from '@shopify/flash-list';
 import { Box } from '@/components/ui/box';
 import { Button, ButtonText } from '@/components/ui/button';
@@ -7,7 +7,7 @@ import { ErrorReportSheet } from '@/components/ui/ErrorReportSheet';
 import { ModelCard } from '@/components/ui/ModelCard';
 import { MODEL_WARMUP_BANNER_RESERVED_HEIGHT, ModelWarmupBanner } from '@/components/ui/ModelWarmupBanner';
 import { ModelParametersSheet } from '@/components/ui/ModelParametersSheet';
-import { ScreenBanner, ScreenCard, ScreenStack } from '@/components/ui/ScreenShell';
+import { ScreenAndroidContentBlurTarget, ScreenBanner, ScreenCard, ScreenStack } from '@/components/ui/ScreenShell';
 import { Spinner } from '@/components/ui/spinner';
 import { Text } from '@/components/ui/text';
 import { useErrorReportSheetController, type ErrorReportContext } from '@/hooks/useErrorReportSheetController';
@@ -222,6 +222,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
   const autoFillAttemptsRef = useRef(0);
   const lastAutoFillCursorRef = useRef<string | null>(null);
   const catalogFirstResultsShownSessionRef = useRef<string | null>(null);
+  const warmupContentBlurTargetRef = useRef<View | null>(null);
 
   const {
     models,
@@ -645,74 +646,96 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
 
   return (
     <>
-      <Box style={headerInset > 0 ? { paddingTop: headerInset } : undefined}>
-        <ModelsFilter
-          filters={filters}
-          sort={sort}
-          onFitsInRamToggle={(enabled) => setFitsInRamOnly(activeTab, enabled)}
-          onNoTokenRequiredToggle={(enabled) => setNoTokenRequiredOnly(activeTab, enabled)}
-          onSizeRangeToggle={(sizeRange) => toggleSizeRange(activeTab, sizeRange)}
-          onSortChange={(nextSort) => setSort(activeTab, nextSort)}
-          onClear={() => clearFilters(activeTab)}
-        />
-      </Box>
-
-      <ScreenStack className="flex-1 pt-2" gap="compact">
-        {discoveryBanner}
-
-        {engineState.status === EngineStatus.ERROR && engineState.lastError ? (
-          <ScreenCard padding="compact" tone="error">
-            <Text className="text-sm font-semibold text-error-700 dark:text-error-300">
-              {t('common.errors.modelLoadFailed')}
-            </Text>
-            <Text selectable className="mt-1 text-sm text-error-700 dark:text-error-300">
-              {engineState.lastError}
-            </Text>
-            <Box className="mt-3 flex-row gap-2">
-              <Button action="secondary" size="sm" onPress={handleDismissEngineError} className="flex-1">
-                <ButtonText>{t('common.close')}</ButtonText>
-              </Button>
-              <Button action="softPrimary" size="sm" onPress={handleReportEngineError} className="flex-1">
-                <ButtonText>{t('models.errorReport.reportButton')}</ButtonText>
-              </Button>
-            </Box>
-          </ScreenCard>
-        ) : null}
-
-        {warningMessage ? (
-          <ScreenCard padding="compact" tone="warning">
-            <Text className="text-sm text-warning-700 dark:text-warning-300">{warningMessage}</Text>
-          </ScreenCard>
-        ) : null}
-
-        {(isCatalogInitializing || (loading && models.length === 0)) ? (
-          <Box className="flex-1 items-center justify-center pb-8 pt-6">
-            <Spinner size="large" />
-            <Text className="mt-2 text-typography-500">{t('models.searching', 'Searching Hugging Face...')}</Text>
-          </Box>
-        ) : (
-          <FlashList
-            data={filteredModels}
-            keyExtractor={(item) => item.id}
-            renderItem={renderModelItem}
-            ItemSeparatorComponent={renderItemSeparator}
-            ListEmptyComponent={renderEmptyState}
-            ListFooterComponent={renderFooter}
-            contentContainerStyle={{ flexGrow: 1, paddingBottom: listBottomInset }}
-            refreshing={isRefreshing}
-            onRefresh={handlePullToRefresh}
-            onScroll={handleCatalogScroll}
-            onEndReached={() => handleLoadMore('auto')}
-            onEndReachedThreshold={0.6}
-            showsVerticalScrollIndicator={false}
+      <ScreenAndroidContentBlurTarget
+        blurTargetRef={warmupContentBlurTargetRef}
+        style={styles.warmupContentBlurTarget}
+        testID="models-warmup-content-blur-target"
+      >
+        <Box style={headerInset > 0 ? { paddingTop: headerInset } : undefined}>
+          <ModelsFilter
+            filters={filters}
+            sort={sort}
+            onFitsInRamToggle={(enabled) => setFitsInRamOnly(activeTab, enabled)}
+            onNoTokenRequiredToggle={(enabled) => setNoTokenRequiredOnly(activeTab, enabled)}
+            onSizeRangeToggle={(sizeRange) => toggleSizeRange(activeTab, sizeRange)}
+            onSortChange={(nextSort) => setSort(activeTab, nextSort)}
+            onClear={() => clearFilters(activeTab)}
           />
-        )}
-      </ScreenStack>
+        </Box>
 
-      <ModelWarmupBanner engineState={engineState} bottomOffset={tabBarInset} />
+        <ScreenStack className="flex-1 pt-2" gap="compact">
+          {discoveryBanner}
 
-      <ModelParametersSheet {...modelParametersSheetProps} />
-      <ErrorReportSheet {...errorReportSheetProps} />
+          {engineState.status === EngineStatus.ERROR && engineState.lastError ? (
+            <ScreenCard padding="compact" tone="error">
+              <Text className="text-sm font-semibold text-error-700 dark:text-error-300">
+                {t('common.errors.modelLoadFailed')}
+              </Text>
+              <Text selectable className="mt-1 text-sm text-error-700 dark:text-error-300">
+                {engineState.lastError}
+              </Text>
+              <Box className="mt-3 flex-row gap-2">
+                <Button action="secondary" size="sm" onPress={handleDismissEngineError} className="flex-1">
+                  <ButtonText>{t('common.close')}</ButtonText>
+                </Button>
+                <Button action="softPrimary" size="sm" onPress={handleReportEngineError} className="flex-1">
+                  <ButtonText>{t('models.errorReport.reportButton')}</ButtonText>
+                </Button>
+              </Box>
+            </ScreenCard>
+          ) : null}
+
+          {warningMessage ? (
+            <ScreenCard padding="compact" tone="warning">
+              <Text className="text-sm text-warning-700 dark:text-warning-300">{warningMessage}</Text>
+            </ScreenCard>
+          ) : null}
+
+          {(isCatalogInitializing || (loading && models.length === 0)) ? (
+            <Box className="flex-1 items-center justify-center pb-8 pt-6">
+              <Spinner size="large" />
+              <Text className="mt-2 text-typography-500">{t('models.searching', 'Searching Hugging Face...')}</Text>
+            </Box>
+          ) : (
+            <FlashList
+              data={filteredModels}
+              keyExtractor={(item) => item.id}
+              renderItem={renderModelItem}
+              ItemSeparatorComponent={renderItemSeparator}
+              ListEmptyComponent={renderEmptyState}
+              ListFooterComponent={renderFooter}
+              contentContainerStyle={{ flexGrow: 1, paddingBottom: listBottomInset }}
+              refreshing={isRefreshing}
+              onRefresh={handlePullToRefresh}
+              onScroll={handleCatalogScroll}
+              onEndReached={() => handleLoadMore('auto')}
+              onEndReachedThreshold={0.6}
+              showsVerticalScrollIndicator={false}
+            />
+          )}
+        </ScreenStack>
+      </ScreenAndroidContentBlurTarget>
+
+      <ModelWarmupBanner
+        androidContentBlurTargetRef={warmupContentBlurTargetRef}
+        engineState={engineState}
+        bottomOffset={tabBarInset}
+      />
+
+      <ModelParametersSheet
+        {...modelParametersSheetProps}
+        androidContentBlurTargetRef={warmupContentBlurTargetRef}
+      />
+      <ErrorReportSheet
+        {...errorReportSheetProps}
+        androidContentBlurTargetRef={warmupContentBlurTargetRef}
+      />
     </>
   );
 };
+
+const styles = StyleSheet.create({
+  warmupContentBlurTarget: {
+    flex: 1,
+  },
+});

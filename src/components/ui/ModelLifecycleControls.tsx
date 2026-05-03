@@ -114,6 +114,7 @@ function ModelDownloadProgressInner({
   const progressPresentation = getDownloadProgressPresentation(lifecycleStatus, t);
   const progressTone = progressPresentation.progressTone === 'primary' ? 'accent' : progressPresentation.progressTone;
   const progressToneClassNames = appearance.classNames.toneClassNameByTone[progressTone];
+  const activeProgressFillClassName = appearance.classNames.toneClassNameByTone.primary.progressFillClassName;
   const isCompact = density === 'compact';
 
   return (
@@ -155,6 +156,7 @@ function ModelDownloadProgressInner({
         size={isCompact ? 'md' : 'lg'}
         tone={progressPresentation.progressTone}
         variant="framed"
+        fillClassName={activeProgressFillClassName}
       />
     </ScreenSurface>
   );

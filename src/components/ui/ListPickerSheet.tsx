@@ -7,6 +7,7 @@ import { ScrollView } from '@/components/ui/scroll-view';
 import { joinClassNames, ScreenBadge, ScreenCard, ScreenIconButton, ScreenModalOverlay, ScreenPressableCard, ScreenSheet, useScreenAppearance } from '@/components/ui/ScreenShell';
 import { Text } from '@/components/ui/text';
 import { MaterialSymbols, type MaterialSymbolsProps } from './MaterialSymbols';
+import type { AndroidBlurTargetRef } from '../../utils/androidBlur';
 import { screenLayoutTokens } from '../../utils/themeTokens';
 
 export interface ListPickerSheetItem {
@@ -33,6 +34,7 @@ interface ListPickerSheetContentProps {
   title: string;
   subtitle?: string;
   onClose: () => void;
+  androidContentBlurTargetRef?: AndroidBlurTargetRef | null;
   actions?: React.ReactNode;
   items: ListPickerSheetItem[];
   emptyState?: ListPickerSheetEmptyState;
@@ -132,6 +134,7 @@ export function ListPickerSheetContent({
   title,
   subtitle,
   onClose,
+  androidContentBlurTargetRef,
   actions,
   items,
   emptyState,
@@ -142,7 +145,11 @@ export function ListPickerSheetContent({
   const activeLabel = t('common.active');
 
   return (
-    <ScreenSheet testID={testID} className={joinClassNames(screenLayoutTokens.sheetMaxHeightCompactClassName, sheetClassName)}>
+    <ScreenSheet
+      testID={testID}
+      className={joinClassNames(screenLayoutTokens.sheetMaxHeightCompactClassName, sheetClassName)}
+      androidBlurTargetRef={androidContentBlurTargetRef}
+    >
       <Box className="mb-4 flex-row items-center justify-between gap-3">
         <Box className="min-w-0 flex-1">
           <Text className="text-lg font-semibold text-typography-900 dark:text-typography-100">

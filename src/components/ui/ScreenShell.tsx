@@ -10,7 +10,7 @@ import { Pressable } from '@/components/ui/pressable';
 import { GlassSpecular } from './GlassSpecular';
 import { MaterialSymbols, type MaterialSymbolsProps } from './MaterialSymbols';
 import { Text, composeTextRole } from './text';
-import { getAndroidBlurProps, getGlassBlurTint, isAndroidBlurFallbackRequired, setActiveAndroidBlurTarget } from '../../utils/androidBlur';
+import { getAndroidBlurProps, getGlassBlurTint, isAndroidBlurFallbackRequired, setActiveAndroidBlurTarget, type AndroidBlurTargetRef } from '../../utils/androidBlur';
 import { getNativeBottomSafeAreaInset } from '../../utils/safeArea';
 import { DEFAULT_THEME_ID, buttonLayoutTokens, getThemeActionContentClassName, getThemeAppearance, getThemeToneIconColor, radiusTokens, screenChromeTokens, screenLayoutMetrics, screenLayoutTokens, semanticColorTokens, tailwindRadiusPxByToken, typographyColors, withAlpha, type ResolvedThemeMode, type ThemeAppearance, type ThemeColors, type ThemeTone } from '../../utils/themeTokens';
 import { useTheme } from '../../providers/ThemeProvider';
@@ -37,6 +37,13 @@ interface ScreenContentProps {
 interface ScreenRootProps {
   children: React.ReactNode;
   className?: string;
+  style?: StyleProp<ViewStyle>;
+  testID?: string;
+}
+
+interface ScreenAndroidContentBlurTargetProps {
+  blurTargetRef: AndroidBlurTargetRef;
+  children: React.ReactNode;
   style?: StyleProp<ViewStyle>;
   testID?: string;
 }
@@ -471,13 +478,18 @@ export function GlassSurfaceBackdrop({
   tint,
   cornerRadiusStyle,
   decorative = 'standard',
+  forceNativeAndroidBlur = false,
+  androidBlurTargetRef,
 }: {
   appearance: ThemeAppearance;
   tint: 'light' | 'dark';
   cornerRadiusStyle?: GlassCornerRadiusStyle;
   decorative?: GlassSurfaceDecorative;
+  forceNativeAndroidBlur?: boolean;
+  androidBlurTargetRef?: AndroidBlurTargetRef | null;
 }) {
-  const blurTarget = React.useContext(GlassBlurTargetContext);
+  const contextBlurTarget = React.useContext(GlassBlurTargetContext);
+  const blurTarget = androidBlurTargetRef === undefined ? contextBlurTarget : androidBlurTargetRef;
   const isMatte = decorative === 'matte';
   const isTintOnly = decorative === 'tint';
 
@@ -506,7 +518,11 @@ export function GlassSurfaceBackdrop({
 
   if (
     Platform.OS === 'android'
-    && (isAndroidBlurFallbackRequired() || shouldUseAndroidGlassMatteFallback() || !blurTarget)
+    && (
+      isAndroidBlurFallbackRequired()
+      || (!forceNativeAndroidBlur && shouldUseAndroidGlassMatteFallback())
+      || !blurTarget
+    )
   ) {
     return (
       <>
@@ -929,6 +945,8 @@ interface ScreenBannerProps {
   children: React.ReactNode;
   tone?: ThemeTone;
   floating?: boolean;
+  forceNativeAndroidBlur?: boolean;
+  androidBlurTargetRef?: AndroidBlurTargetRef | null;
   className?: string;
   style?: StyleProp<ViewStyle>;
   testID?: string;
@@ -938,9 +956,11 @@ type ScreenSurfaceTone = ThemeTone | 'danger' | 'default';
 
 interface ScreenSurfaceProps {
   applyGlassFrame?: boolean;
+  androidBlurTargetRef?: AndroidBlurTargetRef | null;
   children: React.ReactNode;
   className?: string;
   decorative?: GlassSurfaceDecorative;
+  forceNativeAndroidBlur?: boolean;
   style?: StyleProp<ViewStyle>;
   testID?: string;
   tone?: ScreenSurfaceTone;
@@ -1028,6 +1048,7 @@ interface ScreenSegmentedControlProps {
 
 interface ScreenSheetProps {
   children: React.ReactNode;
+  androidBlurTargetRef?: AndroidBlurTargetRef | null;
   className?: string;
   style?: StyleProp<ViewStyle>;
   testID?: string;
@@ -1222,6 +1243,37 @@ export function ScreenRoot({
       ) : (
         screenContent
       )}
+    </Box>
+  );
+}
+
+export function ScreenAndroidContentBlurTarget({
+  blurTargetRef,
+  children,
+  style,
+  testID,
+}: ScreenAndroidContentBlurTargetProps) {
+  const { appearance } = useResolvedThemeAppearance();
+  const shouldUseAndroidBlurTarget = appearance.surfaceKind === 'glass'
+    && Platform.OS === 'android'
+    && !isAndroidBlurFallbackRequired();
+
+  if (shouldUseAndroidBlurTarget) {
+    return (
+      <BlurTargetView
+        ref={blurTargetRef}
+        collapsable={false}
+        testID={testID}
+        style={style}
+      >
+        {children}
+      </BlurTargetView>
+    );
+  }
+
+  return (
+    <Box testID={testID} style={style}>
+      {children}
     </Box>
   );
 }
@@ -1630,8 +1682,10 @@ export function ScreenIconTile({
 
 export function ScreenBanner({
   children,
+  androidBlurTargetRef,
   tone = 'neutral',
   floating = false,
+  forceNativeAndroidBlur = false,
   className,
   style,
   testID,
@@ -1651,7 +1705,13 @@ export function ScreenBanner({
     >
       {appearance.surfaceKind === 'glass' ? (
         <>
-          <GlassSurfaceBackdrop appearance={appearance} tint={theme.colors.headerBlurTint} cornerRadiusStyle={glassCornerRadiusStyle} />
+          <GlassSurfaceBackdrop
+            appearance={appearance}
+            tint={theme.colors.headerBlurTint}
+            cornerRadiusStyle={glassCornerRadiusStyle}
+            forceNativeAndroidBlur={forceNativeAndroidBlur}
+            androidBlurTargetRef={androidBlurTargetRef}
+          />
           <GlassControlTint appearance={appearance} colors={theme.colors} mode={theme.resolvedMode} tone={tone} />
         </>
       ) : null}
@@ -1662,9 +1722,11 @@ export function ScreenBanner({
 
 export function ScreenSurface({
   applyGlassFrame = true,
+  androidBlurTargetRef,
   children,
   className,
   decorative = 'tint',
+  forceNativeAndroidBlur = false,
   style,
   testID,
   tone = 'default',
@@ -1686,7 +1748,16 @@ export function ScreenSurface({
       )}
       style={glassFrameStyle ? [glassFrameStyle, style] : style}
     >
-      {shouldUseGlassChrome ? <GlassSurfaceBackdrop appearance={appearance} tint={theme.colors.headerBlurTint} decorative={decorative} cornerRadiusStyle={glassCornerRadiusStyle} /> : null}
+      {shouldUseGlassChrome ? (
+        <GlassSurfaceBackdrop
+          appearance={appearance}
+          tint={theme.colors.headerBlurTint}
+          decorative={decorative}
+          cornerRadiusStyle={glassCornerRadiusStyle}
+          forceNativeAndroidBlur={forceNativeAndroidBlur}
+          androidBlurTargetRef={androidBlurTargetRef}
+        />
+      ) : null}
       {shouldUseGlassChrome && withControlTint ? <GlassControlTint appearance={appearance} colors={theme.colors} mode={theme.resolvedMode} tone={tone} /> : null}
       {children}
     </Box>
@@ -2132,6 +2203,7 @@ export function ScreenChromeBar({
 
 export function ScreenSheet({
   children,
+  androidBlurTargetRef,
   className,
   style,
   testID,
@@ -2156,7 +2228,13 @@ export function ScreenSheet({
         style,
       ]}
     >
-      <GlassSurfaceBackdrop appearance={appearance} tint={theme.colors.headerBlurTint} cornerRadiusStyle={glassCornerRadiusStyle} />
+      <GlassSurfaceBackdrop
+        appearance={appearance}
+        tint={theme.colors.headerBlurTint}
+        cornerRadiusStyle={glassCornerRadiusStyle}
+        forceNativeAndroidBlur={Boolean(androidBlurTargetRef)}
+        androidBlurTargetRef={androidBlurTargetRef}
+      />
       {children}
     </Box>
   );

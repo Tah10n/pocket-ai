@@ -2,6 +2,7 @@ import React, { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { ModelMetadata } from '@/types/models';
 import { getShortModelLabel } from '@/utils/modelLabel';
+import type { AndroidBlurTargetRef } from '@/utils/androidBlur';
 import { ListPickerSheet, type ListPickerSheetItem } from './ListPickerSheet';
 
 interface ChatModelSelectorSheetProps {
@@ -9,6 +10,7 @@ interface ChatModelSelectorSheetProps {
   models: ModelMetadata[];
   currentModelId: string | null;
   canSelect?: boolean;
+  androidContentBlurTargetRef?: AndroidBlurTargetRef | null;
   onClose: () => void;
   onSelectModel: (modelId: string) => void;
 }
@@ -18,6 +20,7 @@ export function ChatModelSelectorSheet({
   models,
   currentModelId,
   canSelect = true,
+  androidContentBlurTargetRef,
   onClose,
   onSelectModel,
 }: ChatModelSelectorSheetProps) {
@@ -47,6 +50,7 @@ export function ChatModelSelectorSheet({
       onClose={onClose}
       title={t('chat.modelSelector.title')}
       subtitle={t('chat.modelSelector.subtitle')}
+      androidContentBlurTargetRef={androidContentBlurTargetRef}
       items={items}
       emptyState={models.length === 0
         ? {

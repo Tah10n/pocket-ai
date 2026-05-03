@@ -109,6 +109,7 @@ const mockGetTotalMemory = jest.fn().mockResolvedValue(8 * 1024 * 1024 * 1024);
 const mockRefreshModelMetadata = jest.fn((model) => Promise.resolve(model));
 let lastPresetSelectorProps: any = null;
 let lastModelParametersSheetProps: any = null;
+let lastErrorReportSheetProps: any = null;
 let lastChatHeaderProps: any = null;
 let lastChatInputBarProps: any = null;
 const mockStartNewChat = jest.fn(() => {
@@ -332,11 +333,12 @@ jest.mock('../../src/components/ui/ChatInputBar', () => {
   const { Pressable, Text, View } = require('react-native');
 
   return {
-    ChatInputBar: ({ isSending, onStopGeneration, onSendMessage, modeLabel, leadingActions, attachmentsTray }: any) => {
+    ChatInputBar: ({ isSending, onStopGeneration, onSendMessage, androidContentBlurTargetRef, modeLabel, leadingActions, attachmentsTray }: any) => {
       lastChatInputBarProps = {
         isSending,
         onStopGeneration,
         onSendMessage,
+        androidContentBlurTargetRef,
         modeLabel,
         leadingActions,
         attachmentsTray,
@@ -463,6 +465,20 @@ jest.mock('@/components/ui/ModelParametersSheet', () => {
               mockReact.createElement(Text, null, 'Reset all'),
             ),
           )
+        : null;
+    },
+  };
+});
+
+jest.mock('@/components/ui/ErrorReportSheet', () => {
+  const mockReact = require('react');
+  const { Text, View } = require('react-native');
+
+  return {
+    ErrorReportSheet: (props: any) => {
+      lastErrorReportSheetProps = props;
+      return props.visible
+        ? mockReact.createElement(View, { testID: 'error-report-sheet' }, mockReact.createElement(Text, null, 'Error report'))
         : null;
     },
   };
@@ -616,6 +632,7 @@ describe('ChatScreen', () => {
     alertSpy.mockClear();
     lastPresetSelectorProps = null;
     lastModelParametersSheetProps = null;
+    lastErrorReportSheetProps = null;
     lastChatHeaderProps = null;
     lastChatInputBarProps = null;
     mockLoadModel.mockClear();
@@ -854,6 +871,20 @@ describe('ChatScreen', () => {
 
     expect(getByTestId('chat-flash-list').props.maintainVisibleContentPosition.autoscrollToBottomThreshold)
       .toBeCloseTo(32 / 640);
+  });
+
+  it('passes the chat content blur target to floating chrome and modal sheets', () => {
+    const { getByTestId } = render(React.createElement(ChatScreen));
+
+    const blurTarget = lastPresetSelectorProps?.androidContentBlurTargetRef;
+    const contentBlurTarget = getByTestId('chat-warmup-content-blur-target');
+
+    expect(contentBlurTarget).toBeTruthy();
+    expect(blurTarget).toBeTruthy();
+    expect(lastChatInputBarProps?.androidContentBlurTargetRef).toBe(blurTarget);
+    expect(lastModelParametersSheetProps?.androidContentBlurTargetRef).toBe(blurTarget);
+    expect(lastErrorReportSheetProps?.androidContentBlurTargetRef).toBe(blurTarget);
+    expect(() => contentBlurTarget.findByProps({ testID: 'chat-input-bar' })).toThrow();
   });
 
   it('clears the list-touch guard after drag end so auto-follow can resume without touchEnd', () => {

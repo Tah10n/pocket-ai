@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button, ButtonText } from '@/components/ui/button';
+import type { AndroidBlurTargetRef } from '@/utils/androidBlur';
 import { ListPickerSheet, type ListPickerSheetItem } from './ListPickerSheet';
 import { MaterialSymbols } from './MaterialSymbols';
 import { presetManager, SystemPromptPreset } from '../../services/PresetManager';
@@ -8,6 +9,7 @@ import { presetManager, SystemPromptPreset } from '../../services/PresetManager'
 interface PresetSelectorSheetProps {
   visible: boolean;
   activePresetId: string | null;
+  androidContentBlurTargetRef?: AndroidBlurTargetRef | null;
   onClose: () => void;
   onSelectPreset: (presetId: string | null) => void;
   onManagePresets?: () => void;
@@ -16,6 +18,7 @@ interface PresetSelectorSheetProps {
 export function PresetSelectorSheet({
   visible,
   activePresetId,
+  androidContentBlurTargetRef,
   onClose,
   onSelectPreset,
   onManagePresets,
@@ -60,6 +63,7 @@ export function PresetSelectorSheet({
       onClose={onClose}
       title={t('chat.presetSelector.title')}
       subtitle={t('chat.presetSelector.subtitle')}
+      androidContentBlurTargetRef={androidContentBlurTargetRef}
       items={items}
       actions={onManagePresets ? (
         <Button

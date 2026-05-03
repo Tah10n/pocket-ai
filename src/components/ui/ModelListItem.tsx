@@ -25,6 +25,7 @@ export const ModelListItem = ({ name, sizeMB, status, fitsInRam, onAction, image
   const appearance = useScreenAppearance();
   const accentToneClassNames = appearance.classNames.toneClassNameByTone.accent;
   const neutralToneClassNames = appearance.classNames.toneClassNameByTone.neutral;
+  const modelProgressFillClassName = appearance.classNames.toneClassNameByTone.primary.progressFillClassName;
   const primaryActionContentClassName = getThemeActionContentClassName(appearance, 'primary');
   const softActionContentClassName = getThemeActionContentClassName(appearance, 'soft');
   const progressPercent = Math.max(0, Math.min(100, (downloadProgress || 0) * 100));
@@ -51,7 +52,7 @@ export const ModelListItem = ({ name, sizeMB, status, fitsInRam, onAction, image
         <Box className="mt-2.5 flex-row gap-2">
           {isDownloading ? (
             <ScreenSurface tone="accent" withControlTint className={`relative flex-1 overflow-hidden rounded-2xl border ${accentToneClassNames.surfaceClassName}`}>
-              <Box className={`absolute left-0 top-0 bottom-0 ${accentToneClassNames.percentPillClassName}`} style={{ width: `${progressPercent}%` }} />
+              <Box className={`absolute left-0 top-0 bottom-0 ${modelProgressFillClassName}`} style={{ width: `${progressPercent}%` }} />
               <Pressable 
                 onPress={() => onAction?.('cancel')} 
                 className="flex-1 w-full items-center justify-center py-1.5 active:opacity-70"

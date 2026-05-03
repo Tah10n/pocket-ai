@@ -14,6 +14,7 @@ import { ScreenCard, ScreenIconButton, ScreenModalOverlay, ScreenSheet, ScreenSt
 import { Text } from '@/components/ui/text';
 import { toAppError } from '@/services/AppError';
 import type { ErrorReportContext } from '@/hooks/useErrorReportSheetController';
+import type { AndroidBlurTargetRef } from '@/utils/androidBlur';
 import { screenLayoutTokens } from '@/utils/themeTokens';
 
 type DeviceReportData = {
@@ -30,6 +31,7 @@ export interface ErrorReportSheetProps {
   scope: string;
   error: unknown;
   context?: ErrorReportContext;
+  androidContentBlurTargetRef?: AndroidBlurTargetRef | null;
   onClose: () => void;
 }
 
@@ -86,6 +88,7 @@ export function ErrorReportSheet({
   scope,
   error,
   context,
+  androidContentBlurTargetRef,
   onClose,
 }: ErrorReportSheetProps) {
   const { t } = useTranslation();
@@ -370,7 +373,10 @@ export function ErrorReportSheet({
     <Modal visible={visible} animationType="fade" transparent onRequestClose={handleClose}>
       <ScreenModalOverlay>
         <Pressable className="flex-1" onPress={handleClose} />
-        <ScreenSheet className={screenLayoutTokens.sheetMaxHeightDefaultClassName}>
+        <ScreenSheet
+          className={screenLayoutTokens.sheetMaxHeightDefaultClassName}
+          androidBlurTargetRef={androidContentBlurTargetRef}
+        >
           <Box className="mb-5 flex-row items-start justify-between gap-4">
             <Box className="min-w-0 flex-1">
               <Text className="text-lg font-semibold text-typography-900 dark:text-typography-100">

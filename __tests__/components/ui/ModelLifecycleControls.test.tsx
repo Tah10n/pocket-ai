@@ -61,6 +61,7 @@ describe('ModelDownloadProgress', () => {
     expect(getByText('models.downloading')).toBeTruthy();
     expect(getByText('42%')).toBeTruthy();
     expect(getByTestId('model-download-progress-track-org/model').props.className).toContain('h-4');
+    expect(getByTestId('model-download-progress-fill-org/model').props.className).toContain('bg-primary-500');
     expect(getByTestId('model-download-progress-fill-org/model').props.style).toEqual({ width: '42%' });
   });
 
@@ -72,7 +73,8 @@ describe('ModelDownloadProgress', () => {
     expect(getByText('models.paused')).toBeTruthy();
     expect(getByText('24%')).toBeTruthy();
     expect(getByTestId('model-download-progress-org/model').props.className).toContain('bg-background-warning');
-    expect(getByTestId('model-download-progress-fill-org/model').props.className).toContain('bg-warning-500');
+    expect(getByTestId('model-download-progress-fill-org/model').props.className).toContain('bg-primary-500');
+    expect(getByTestId('model-download-progress-fill-org/model').props.className).not.toContain('bg-warning-500');
   });
 
   it('can render a compact layout for catalog cards', () => {

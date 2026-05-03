@@ -200,9 +200,12 @@ export const ModelsFilter = ({
   const activeFilterCount = getActiveFilterCount(filters);
   const hasActiveFilters = activeFilterCount > 0;
   const sortSummary = getSortSummary(t, sort);
+  const rootClassName = appearance.surfaceKind === 'glass'
+    ? 'py-1.5'
+    : `${appearance.classNames.surfaceBarClassName} py-1.5`;
 
   return (
-    <Box className={`${appearance.classNames.surfaceBarClassName} py-1.5`}>
+    <Box className={rootClassName}>
       <Box className="flex-row gap-1.5">
         <TriggerButton
           testID="models-filter-toggle"

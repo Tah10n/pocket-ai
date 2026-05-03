@@ -302,6 +302,7 @@ function normalizeMessagesForStrictRoleAlternation(messages: LlmChatMessage[]): 
 
 class LLMEngineService {
   private context: LlamaContext | null = null;
+  private contextGeneration = 0;
   private activeContextSize = DEFAULT_CONTEXT_SIZE;
   private activeGpuLayers: number | null = null;
   private safeModeLoadLimits: {
@@ -361,6 +362,34 @@ class LLMEngineService {
         this.unload();
       }
     });
+  }
+
+  private setContext(context: LlamaContext | null): void {
+    this.context = context;
+    this.contextGeneration += 1;
+  }
+
+  private getReadyContextOrThrow(): { context: LlamaContext; generation: number } {
+    if (this.isUnloading) {
+      throw new AppError('engine_unloading', 'The model engine is unloading. Please wait a moment.');
+    }
+
+    const context = this.context;
+    if (!context || this.state.status !== EngineStatus.READY) {
+      throw new AppError('engine_not_ready', 'Engine not ready');
+    }
+
+    return { context, generation: this.contextGeneration };
+  }
+
+  private assertContextStillCurrent(context: LlamaContext, generation: number): void {
+    if (this.isUnloading) {
+      throw new AppError('engine_unloading', 'The model engine is unloading. Please wait a moment.');
+    }
+
+    if (this.context !== context || this.contextGeneration !== generation || this.state.status !== EngineStatus.READY) {
+      throw new AppError('engine_not_ready', 'Engine context changed during operation');
+    }
   }
 
   public async getBackendAvailability(): Promise<BackendAvailability> {
@@ -964,10 +993,7 @@ class LLMEngineService {
           await this.initPromise;
         }
 
-        const context = this.context;
-        if (!context || this.state.status !== EngineStatus.READY) {
-          throw new AppError('engine_not_ready', 'Engine not ready');
-        }
+        const { context, generation: contextGeneration } = this.getReadyContextOrThrow();
 
         let hasStreamedTokens = false;
         const markTokensStreamed = () => {
@@ -994,6 +1020,7 @@ class LLMEngineService {
 
           let stopWords = baseStopWords;
           try {
+            this.assertContextStillCurrent(context, contextGeneration);
             const formatted = await context.getFormattedChat(
               completionMessages as any,
               null,
@@ -1022,9 +1049,7 @@ class LLMEngineService {
             }
           }
 
-          if (this.isUnloading) {
-            throw new AppError('engine_unloading', 'The model engine is unloading. Please wait a moment.');
-          }
+          this.assertContextStillCurrent(context, contextGeneration);
 
           const resolvedStops = Array.from(
             new Set(stopWords.map((stop) => stop.trim()).filter((stop) => stop.length > 0)),
@@ -1056,6 +1081,8 @@ class LLMEngineService {
           } else {
             completionParams.thinking_budget_tokens = -1;
           }
+
+          this.assertContextStillCurrent(context, contextGeneration);
 
           return await context.completion(
             completionParams as any,
@@ -2737,7 +2764,7 @@ class LLMEngineService {
             applyCalibrationForGpuLayers(candidateGpuLayers);
           }
 
-          this.context = context;
+          this.setContext(context);
           gpuInitError = null;
           break;
         } catch (error) {
@@ -2940,7 +2967,7 @@ class LLMEngineService {
           ? '[LLMEngine] Model load blocked during initialize'
           : '[LLMEngine] Memory warning during initialize';
         console.warn(logLabel, appError, Object.keys(extraDetails).length > 0 ? extraDetails : undefined);
-        this.context = null;
+        this.setContext(null);
         this.activeContextSize = DEFAULT_CONTEXT_SIZE;
         this.activeGpuLayers = null;
         this.safeModeLoadLimits = null;
@@ -2957,7 +2984,7 @@ class LLMEngineService {
       console.error('[LLMEngine] Failed to initialize', appError, Object.keys(extraDetails).length > 0 ? extraDetails : undefined);
       this.lastModelLoadError = appError;
       this.lastModelLoadErrorScope = 'LLMEngineService.load';
-      this.context = null;
+      this.setContext(null);
       this.activeContextSize = DEFAULT_CONTEXT_SIZE;
       this.activeGpuLayers = null;
       this.safeModeLoadLimits = null;
@@ -3031,7 +3058,7 @@ class LLMEngineService {
         calibrationSession.afterUnloadSnapshot = await getFreshMemorySnapshot(0).catch(() => null);
       }
 
-      this.context = null;
+      this.setContext(null);
       this.activeContextSize = DEFAULT_CONTEXT_SIZE;
       this.activeGpuLayers = null;
       this.safeModeLoadLimits = null;

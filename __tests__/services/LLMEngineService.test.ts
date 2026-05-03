@@ -214,6 +214,31 @@ describe('LLMEngineService', () => {
     await expect(completionPromise).resolves.toEqual({ text: 'Hello back' });
   });
 
+  it('aborts completion before native generation when the context changes after formatting', async () => {
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    const originalContext = (llmEngineService as any).context;
+    const replacementCompletion = jest.fn().mockResolvedValue({ text: 'replacement' });
+    const replacementContext = {
+      ...originalContext,
+      completion: replacementCompletion,
+    };
+    getFormattedChatMock().mockImplementationOnce(async () => {
+      (llmEngineService as any).setContext(replacementContext);
+      return { prompt: 'Formatted prompt', additional_stops: [] };
+    });
+
+    await expect(llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Hello' }],
+      params: { n_predict: 16 },
+    })).rejects.toMatchObject({ code: 'engine_not_ready' });
+
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).not.toHaveBeenCalled();
+    expect(replacementCompletion).not.toHaveBeenCalled();
+
+    await llmEngineService.unload();
+  });
+
   it('clears thinking_budget_tokens when thinking is disabled', async () => {
     await llmEngineService.load('test/model');
 

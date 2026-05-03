@@ -7,6 +7,7 @@ describe('SystemMetrics config plugins', () => {
 
     expect(source).toContain('val totalBytes = memoryInfo.totalMem.coerceAtLeast(0L)');
     expect(source).toContain('val advertisedMemoryBytes = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE)');
+    expect(source).toContain('readProcMemInfoBytes("MemFree:")');
     expect(source).toContain('putDouble("advertisedMemoryBytes", advertisedMemoryBytes.toDouble())');
     expect(source).toContain('hasPressureRatio && pressureRatio <= 0.15 -> "warning"');
   });

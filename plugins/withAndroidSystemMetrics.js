@@ -52,8 +52,25 @@ class ${SYSTEM_METRICS_MODULE_NAME}Module(
     }
   }
 
-  private fun readFreeMemoryBytes(memoryInfo: ActivityManager.MemoryInfo): Long? {
+  private fun readProcMemInfoBytes(entryName: String): Long? {
     return try {
+      File("/proc/meminfo").useLines { lines ->
+        lines.firstOrNull { it.startsWith(entryName) }
+          ?.substringAfter(':')
+          ?.trim()
+          ?.split(Regex("\\\\s+"))
+          ?.firstOrNull()
+          ?.toLongOrNull()
+          ?.times(1024L)
+          ?.coerceAtLeast(0L)
+      }
+    } catch (_: Exception) {
+      null
+    }
+  }
+
+  private fun readFreeMemoryBytes(memoryInfo: ActivityManager.MemoryInfo): Long? {
+    val reflectedFreeBytes = try {
       ActivityManager.MemoryInfo::class.java
         .getField("freeMem")
         .getLong(memoryInfo)
@@ -61,6 +78,8 @@ class ${SYSTEM_METRICS_MODULE_NAME}Module(
     } catch (_: Exception) {
       null
     }
+
+    return reflectedFreeBytes ?: readProcMemInfoBytes("MemFree:")
   }
 
   @ReactMethod

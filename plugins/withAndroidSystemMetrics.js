@@ -52,8 +52,25 @@ class ${SYSTEM_METRICS_MODULE_NAME}Module(
     }
   }
 
-  private fun readFreeMemoryBytes(memoryInfo: ActivityManager.MemoryInfo): Long? {
+  private fun readProcMemInfoBytes(entryName: String): Long? {
     return try {
+      File("/proc/meminfo").useLines { lines ->
+        lines.firstOrNull { it.startsWith(entryName) }
+          ?.substringAfter(':')
+          ?.trim()
+          ?.split(Regex("\\\\s+"))
+          ?.firstOrNull()
+          ?.toLongOrNull()
+          ?.times(1024L)
+          ?.coerceAtLeast(0L)
+      }
+    } catch (_: Exception) {
+      null
+    }
+  }
+
+  private fun readFreeMemoryBytes(memoryInfo: ActivityManager.MemoryInfo): Long? {
+    val reflectedFreeBytes = try {
       ActivityManager.MemoryInfo::class.java
         .getField("freeMem")
         .getLong(memoryInfo)
@@ -61,6 +78,8 @@ class ${SYSTEM_METRICS_MODULE_NAME}Module(
     } catch (_: Exception) {
       null
     }
+
+    return reflectedFreeBytes ?: readProcMemInfoBytes("MemFree:")
   }
 
   @ReactMethod
@@ -79,21 +98,35 @@ class ${SYSTEM_METRICS_MODULE_NAME}Module(
       val appPssBytes = processMemoryInfo.firstOrNull()?.totalPss?.toLong()?.times(1024L)?.coerceAtLeast(0L) ?: 0L
       val appResidentBytes = readProcessResidentBytes()
       val appUsedBytes = appResidentBytes.takeIf { it > 0L } ?: appPssBytes
-      val totalBytes = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE
-        && memoryInfo.advertisedMem > 0L
-      ) {
+      val totalBytes = memoryInfo.totalMem.coerceAtLeast(0L)
+      val advertisedMemoryBytes = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
         memoryInfo.advertisedMem.coerceAtLeast(0L)
       } else {
-        memoryInfo.totalMem.coerceAtLeast(0L)
+        0L
       }
       val availableBytes = memoryInfo.availMem.coerceAtLeast(0L)
       val freeBytes = readFreeMemoryBytes(memoryInfo)
       val usedBytes = (totalBytes - (freeBytes ?: availableBytes)).coerceAtLeast(0L)
-      val pressureLevel = if (memoryInfo.lowMemory) "critical" else "normal"
+      val pressureRatio = if (totalBytes > 0L) {
+        availableBytes.toDouble() / totalBytes.toDouble()
+      } else {
+        Double.NaN
+      }
+      val hasPressureRatio = !pressureRatio.isNaN() && !pressureRatio.isInfinite()
+      val pressureLevel = when {
+        memoryInfo.lowMemory -> "critical"
+        hasPressureRatio && pressureRatio <= 0.08 -> "critical"
+        hasPressureRatio && pressureRatio <= 0.15 -> "warning"
+        hasPressureRatio -> "normal"
+        else -> "unknown"
+      }
 
       val result = Arguments.createMap().apply {
         putDouble("timestampMs", System.currentTimeMillis().toDouble())
         putDouble("totalBytes", totalBytes.toDouble())
+        if (advertisedMemoryBytes > 0L) {
+          putDouble("advertisedMemoryBytes", advertisedMemoryBytes.toDouble())
+        }
         putDouble("availableBytes", availableBytes.toDouble())
         if (freeBytes != null) {
           putDouble("freeBytes", freeBytes.toDouble())
@@ -187,8 +220,15 @@ function withAndroidSystemMetricsMainApplication(config) {
   });
 }
 
-module.exports = function withAndroidSystemMetrics(config) {
+function withAndroidSystemMetrics(config) {
   config = withAndroidSystemMetricsSourceFiles(config);
   config = withAndroidSystemMetricsMainApplication(config);
   return config;
+}
+
+withAndroidSystemMetrics._internal = {
+  createSystemMetricsModuleSource,
+  createSystemMetricsPackageSource,
 };
+
+module.exports = withAndroidSystemMetrics;

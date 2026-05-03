@@ -1,9 +1,9 @@
-import type { SystemMemorySnapshot } from '../services/SystemMetricsService';
 import {
   createMemoryBudget,
   FITS_IN_RAM_HEADROOM_RATIO,
   resolveConservativeAvailableMemoryBudget,
 } from '../memory/budget';
+import type { MemoryBudgetSnapshot } from '../memory/budget';
 import { isFinitePositiveNumber } from '../memory/guards';
 import { estimateModelRuntimeBytes } from '../memory/estimator';
 
@@ -13,8 +13,6 @@ export {
 };
 
 export { estimateModelRuntimeBytes };
-
-type MemoryBudgetSnapshot = Pick<SystemMemorySnapshot, 'availableBytes' | 'freeBytes' | 'thresholdBytes'>;
 
 export interface MemoryFitAssessment {
   estimatedRuntimeBytes: number;

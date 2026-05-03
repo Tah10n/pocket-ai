@@ -1,5 +1,6 @@
 import type { MemoryFitResult } from '../memory/types';
 import { FITS_IN_RAM_HEADROOM_RATIO, resolveConservativeAvailableMemoryBudget } from '../memory/budget';
+import type { MemoryPressureLevel } from './SystemMetricsService';
 import { MIN_CONTEXT_WINDOW_TOKENS } from '../utils/contextWindow';
 import { AppError } from './AppError';
 import { canAutoUseSafeLoadProfile, shouldHardBlockSafeLoad } from './LLMEngineService.helpers';
@@ -36,8 +37,10 @@ export function resolveSafeLoadPolicyOrThrow({
   systemMemorySnapshot: {
     availableBytes?: number | null;
     freeBytes?: number | null;
+    processAvailableBytes?: number | null;
     thresholdBytes?: number | null;
     lowMemory?: boolean | null;
+    pressureLevel?: MemoryPressureLevel | null;
     totalBytes?: number | null;
   } | null;
   lowMemorySignal: boolean;

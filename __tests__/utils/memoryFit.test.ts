@@ -23,7 +23,20 @@ describe('memoryFit', () => {
       availableBytes: 100,
       freeBytes: 60,
       thresholdBytes: 20,
-    })).toBe(60);
+    })).toBe(80);
+
+    expect(resolveConservativeAvailableMemoryBudget({
+      availableBytes: 100,
+      freeBytes: 60,
+      thresholdBytes: 20,
+    }, { strictFreeCap: true })).toBe(60);
+
+    expect(resolveConservativeAvailableMemoryBudget({
+      availableBytes: 100,
+      processAvailableBytes: 70,
+      freeBytes: 20,
+      thresholdBytes: 10,
+    })).toBe(70);
   });
 
   it('assesses fits-in-ram using total and available budgets', () => {

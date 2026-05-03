@@ -13,6 +13,8 @@ const LOW_MEMORY_EXTRA_RESERVE_BYTES = 256 * 1024 * 1024;
 export interface MemoryBudgetSnapshot {
   availableBytes: number;
   freeBytes?: number;
+  processAvailableBytes?: number;
+  advertisedMemoryBytes?: number;
   thresholdBytes?: number;
   appUsedBytes?: number;
   appResidentBytes?: number;
@@ -21,20 +23,38 @@ export interface MemoryBudgetSnapshot {
   pressureLevel?: SystemMemorySnapshot['pressureLevel'];
 }
 
-export function resolveConservativeAvailableMemoryBudget(snapshot: MemoryBudgetSnapshot): number | null {
+export interface ConservativeAvailableMemoryBudgetOptions {
+  strictFreeCap?: boolean;
+}
+
+function isFiniteNonNegativeNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+}
+
+export function resolveConservativeAvailableMemoryBudget(
+  snapshot: MemoryBudgetSnapshot,
+  options: ConservativeAvailableMemoryBudgetOptions = {},
+): number | null {
   if (!isFinitePositiveNumber(snapshot.availableBytes)) {
     return null;
   }
 
   const thresholdBytes = isFinitePositiveNumber(snapshot.thresholdBytes) ? snapshot.thresholdBytes : 0;
-  const thresholdAdjustedAvailableBytes = Math.max(snapshot.availableBytes - thresholdBytes, 0);
-  const strictFreeBytes = isFinitePositiveNumber(snapshot.freeBytes) ? snapshot.freeBytes : null;
+  let budgetBytes = Math.max(snapshot.availableBytes - thresholdBytes, 0);
 
-  if (strictFreeBytes === null) {
-    return thresholdAdjustedAvailableBytes;
+  if (isFinitePositiveNumber(snapshot.processAvailableBytes)) {
+    budgetBytes = Math.min(budgetBytes, snapshot.processAvailableBytes);
   }
 
-  return Math.min(thresholdAdjustedAvailableBytes, strictFreeBytes);
+  const shouldApplyStrictFreeCap = options.strictFreeCap === true
+    || snapshot.lowMemory === true
+    || snapshot.pressureLevel === 'critical';
+
+  if (shouldApplyStrictFreeCap && isFiniteNonNegativeNumber(snapshot.freeBytes)) {
+    budgetBytes = Math.min(budgetBytes, snapshot.freeBytes);
+  }
+
+  return budgetBytes;
 }
 
 function resolveReserveBudgets({
@@ -135,6 +155,8 @@ export function createMemoryBudget({
       totalMemoryBytes: resolvedTotalMemoryBytes,
       liveAvailableBytes: systemMemorySnapshot?.availableBytes,
       freeBytes: systemMemorySnapshot?.freeBytes,
+      processAvailableBytes: systemMemorySnapshot?.processAvailableBytes,
+      advertisedMemoryBytes: systemMemorySnapshot?.advertisedMemoryBytes,
       thresholdBytes: systemMemorySnapshot?.thresholdBytes,
       appResidentBytes: systemMemorySnapshot?.appResidentBytes,
       appPssBytes: systemMemorySnapshot?.appPssBytes,

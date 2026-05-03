@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > Note: This file is maintained automatically by Release Please based on Conventional Commits (PR titles).
 > Avoid editing it manually unless you are bootstrapping or fixing the release history.
 
+## [1.3.0](https://github.com/Tah10n/pocket-ai/compare/v1.2.0...v1.3.0) (2026-05-03)
+
+
+### Features
+
+* refine glass visual design ([#65](https://github.com/Tah10n/pocket-ai/issues/65)) ([4ecd0ab](https://github.com/Tah10n/pocket-ai/commit/4ecd0ab6b06a6ce3cff182b13365abdc94d62f85))
+
+
+### Bug Fixes
+
+* respect native bottom safe areas ([#64](https://github.com/Tah10n/pocket-ai/issues/64)) ([a58f6a8](https://github.com/Tah10n/pocket-ai/commit/a58f6a8bb0d2ba630712c13c7b80382c50bc168e))
+
 ## [1.2.0](https://github.com/Tah10n/pocket-ai/compare/v1.1.2...v1.2.0) (2026-04-23)
 
 

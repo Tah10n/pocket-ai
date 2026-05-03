@@ -2,7 +2,7 @@
   "expo": {
     "name": "Pocket AI",
     "slug": "pocket-ai",
-    "version": "1.2.0",
+    "version": "1.3.0",
     "description": "Offline-first local AI assistant with GGUF model downloads, on-device inference, and persisted chat history.",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",

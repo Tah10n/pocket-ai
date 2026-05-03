@@ -189,6 +189,31 @@ describe('LLMEngineService', () => {
     );
   });
 
+  it('blocks another completion while the first request is still resolving template stops', async () => {
+    let resolveFormatted!: () => void;
+    getFormattedChatMock().mockImplementationOnce(() => new Promise((resolve) => {
+      resolveFormatted = () => resolve({ prompt: 'Formatted prompt', additional_stops: [] });
+    }));
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    const completionPromise = llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Hello' }],
+      params: { n_predict: 16 },
+    });
+
+    await Promise.resolve();
+    expect(getFormattedChatMock()).toHaveBeenCalledTimes(1);
+
+    await expect(llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Second request' }],
+      params: { n_predict: 16 },
+    })).rejects.toMatchObject({ code: 'engine_busy' });
+
+    resolveFormatted();
+    await expect(completionPromise).resolves.toEqual({ text: 'Hello back' });
+  });
+
   it('clears thinking_budget_tokens when thinking is disabled', async () => {
     await llmEngineService.load('test/model');
 

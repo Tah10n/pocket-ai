@@ -59,6 +59,7 @@ function createMockContext(options?: { n_gpu_layers?: number }) {
 
     return {
         completion: jest.fn().mockResolvedValue({ text: '' }),
+        getFormattedChat: jest.fn().mockResolvedValue({ prompt: 'Formatted prompt', additional_stops: [] }),
         stopCompletion: jest.fn().mockResolvedValue(undefined),
         gpu: accelerated,
         devices: accelerated ? ['Adreno GPU'] : [],
@@ -251,6 +252,48 @@ describe('LLMEngineService Stability', () => {
 
         await expect(completionPromise).resolves.toEqual({ text: 'Stopped during unload' });
         expect(stopCompletion).toHaveBeenCalled();
+        expect(llmEngineService.getState().status).toBe('idle');
+    });
+
+    it('waits for a completion task that has not reached native completion before releasing llama', async () => {
+        let resolveFormatted: (() => void) | undefined;
+        const getFormattedChat = jest.fn(() => new Promise((resolve) => {
+            resolveFormatted = () => resolve({ prompt: 'Formatted prompt', additional_stops: [] });
+        }));
+        const completion = jest.fn().mockResolvedValue({ text: 'Should not run during unload' });
+        const stopCompletion = jest.fn().mockResolvedValue(undefined);
+
+        (initLlama as jest.Mock).mockImplementation(async (options?: { n_gpu_layers?: number }) => ({
+            ...createMockContext(options),
+            completion,
+            getFormattedChat,
+            stopCompletion,
+        }));
+
+        await llmEngineService.load(mockModel.id);
+        const completionPromise = llmEngineService.chatCompletion({
+            messages: [{ role: 'user', content: 'Hello' }],
+            params: { n_predict: 16 },
+        });
+
+        await Promise.resolve();
+        expect(getFormattedChat).toHaveBeenCalled();
+
+        const unloadPromise = llmEngineService.unload();
+        for (let i = 0; i < 5 && stopCompletion.mock.calls.length === 0; i += 1) {
+            await Promise.resolve();
+        }
+
+        expect(stopCompletion).toHaveBeenCalled();
+        expect(releaseAllLlama).not.toHaveBeenCalled();
+
+        resolveFormatted?.();
+        await Promise.resolve();
+        expect(completion).not.toHaveBeenCalled();
+        await expect(completionPromise).rejects.toMatchObject({ code: 'engine_unloading' });
+        await unloadPromise;
+
+        expect(releaseAllLlama).toHaveBeenCalled();
         expect(llmEngineService.getState().status).toBe('idle');
     });
 });

@@ -941,10 +941,6 @@ class LLMEngineService {
     onToken,
     params,
   }: LlmChatCompletionOptions): Promise<NativeCompletionResult> {
-    if (this.state.status === EngineStatus.INITIALIZING && this.initPromise) {
-      await this.initPromise;
-    }
-
     if (this.isUnloading) {
       throw new AppError('engine_unloading', 'The model engine is unloading. Please wait a moment.');
     }
@@ -953,141 +949,161 @@ class LLMEngineService {
       throw new AppError('engine_busy', 'A response is already being generated.');
     }
 
-    const context = this.context;
-    if (!context || this.state.status !== EngineStatus.READY) {
-      throw new AppError('engine_not_ready', 'Engine not ready');
-    }
+    let resolveCompletion!: (result: NativeCompletionResult) => void;
+    let rejectCompletion!: (error: unknown) => void;
+    const completionTask = new Promise<NativeCompletionResult>((resolve, reject) => {
+      resolveCompletion = resolve;
+      rejectCompletion = reject;
+    });
 
-    let hasStreamedTokens = false;
-    const markTokensStreamed = () => {
-      if (!hasStreamedTokens) {
-        void this.captureAfterFirstTokenSnapshotIfNeeded();
-      }
-      hasStreamedTokens = true;
-    };
+    this.activeCompletionPromise = completionTask;
 
-    const runCompletion = async (completionMessages: LlmChatMessage[], onTokensStreamed: () => void) => {
-      const enableThinking = params?.enable_thinking ?? false;
-      const reasoningFormat = params?.reasoning_format ?? 'none';
-      const baseStopWords = [
-        '</s>',
-        '<|end|>',
-        '<|eot_id|>',
-        '<|end_of_text|>',
-        '<|im_end|>',
-        '<|EOT|>',
-        '<|END_OF_TURN_TOKEN|>',
-        '<|end_of_turn|>',
-        '<|endoftext|>',
-      ];
-
-      let stopWords = baseStopWords;
+    void (async () => {
       try {
-        const formatted = await context.getFormattedChat(
-          completionMessages as any,
-          null,
-          {
+        if (this.state.status === EngineStatus.INITIALIZING && this.initPromise) {
+          await this.initPromise;
+        }
+
+        const context = this.context;
+        if (!context || this.state.status !== EngineStatus.READY) {
+          throw new AppError('engine_not_ready', 'Engine not ready');
+        }
+
+        let hasStreamedTokens = false;
+        const markTokensStreamed = () => {
+          if (!hasStreamedTokens) {
+            void this.captureAfterFirstTokenSnapshotIfNeeded();
+          }
+          hasStreamedTokens = true;
+        };
+
+        const runCompletion = async (completionMessages: LlmChatMessage[], onTokensStreamed: () => void) => {
+          const enableThinking = params?.enable_thinking ?? false;
+          const reasoningFormat = params?.reasoning_format ?? 'none';
+          const baseStopWords = [
+            '</s>',
+            '<|end|>',
+            '<|eot_id|>',
+            '<|end_of_text|>',
+            '<|im_end|>',
+            '<|EOT|>',
+            '<|END_OF_TURN_TOKEN|>',
+            '<|end_of_turn|>',
+            '<|endoftext|>',
+          ];
+
+          let stopWords = baseStopWords;
+          try {
+            const formatted = await context.getFormattedChat(
+              completionMessages as any,
+              null,
+              {
+                enable_thinking: enableThinking,
+                reasoning_format: reasoningFormat,
+                add_generation_prompt: true,
+              },
+            );
+            const additionalStops = (
+              formatted
+              && typeof formatted === 'object'
+              && 'additional_stops' in formatted
+              && Array.isArray((formatted as any).additional_stops)
+            )
+              ? ((formatted as any).additional_stops as unknown[])
+              : [];
+
+            stopWords = [
+              ...baseStopWords,
+              ...additionalStops.filter((stop): stop is string => typeof stop === 'string'),
+            ];
+          } catch (error) {
+            if (process.env.NODE_ENV !== 'test') {
+              console.warn('[LLMEngine] Failed to resolve template stop tokens', error);
+            }
+          }
+
+          if (this.isUnloading) {
+            throw new AppError('engine_unloading', 'The model engine is unloading. Please wait a moment.');
+          }
+
+          const resolvedStops = Array.from(
+            new Set(stopWords.map((stop) => stop.trim()).filter((stop) => stop.length > 0)),
+          );
+
+          const completionParams: Record<string, unknown> = {
+            messages: completionMessages,
+            n_predict: params?.n_predict ?? 512,
+            temperature: params?.temperature ?? 0.7,
+            top_p: params?.top_p ?? 0.9,
+            top_k: params?.top_k ?? 40,
+            min_p: params?.min_p ?? 0.05,
+            penalty_repeat: params?.penalty_repeat ?? 1,
             enable_thinking: enableThinking,
             reasoning_format: reasoningFormat,
-            add_generation_prompt: true,
-          },
-        );
-        const additionalStops = (
-          formatted
-          && typeof formatted === 'object'
-          && 'additional_stops' in formatted
-          && Array.isArray((formatted as any).additional_stops)
-        )
-          ? ((formatted as any).additional_stops as unknown[])
-          : [];
+            stop: resolvedStops,
+          };
 
-        stopWords = [
-          ...baseStopWords,
-          ...additionalStops.filter((stop): stop is string => typeof stop === 'string'),
-        ];
-      } catch (error) {
-        if (process.env.NODE_ENV !== 'test') {
-          console.warn('[LLMEngine] Failed to resolve template stop tokens', error);
-        }
-      }
-
-      const resolvedStops = Array.from(
-        new Set(stopWords.map((stop) => stop.trim()).filter((stop) => stop.length > 0)),
-      );
-
-      const completionParams: Record<string, unknown> = {
-        messages: completionMessages,
-        n_predict: params?.n_predict ?? 512,
-        temperature: params?.temperature ?? 0.7,
-        top_p: params?.top_p ?? 0.9,
-        top_k: params?.top_k ?? 40,
-        min_p: params?.min_p ?? 0.05,
-        penalty_repeat: params?.penalty_repeat ?? 1,
-        enable_thinking: enableThinking,
-        reasoning_format: reasoningFormat,
-        stop: resolvedStops,
-      };
-
-      if (typeof params?.seed === 'number' && Number.isFinite(params.seed)) {
-        completionParams.seed = Math.round(params.seed);
-      }
-
-      // Explicitly clear the thinking budget whenever it is not set for this request so llama.rn never
-      // reuses a previously-supplied value across completions. (`llama.rn` treats -1 as unset.)
-      if (!enableThinking) {
-        completionParams.thinking_budget_tokens = -1;
-      } else if (typeof params?.thinking_budget_tokens === 'number' && Number.isFinite(params.thinking_budget_tokens)) {
-        completionParams.thinking_budget_tokens = Math.max(0, Math.round(params.thinking_budget_tokens));
-      } else {
-        completionParams.thinking_budget_tokens = -1;
-      }
-
-      const completionPromise = context.completion(
-        completionParams as any,
-        (data: TokenData) => {
-          if (data.token || data.content !== undefined || data.reasoning_content !== undefined) {
-            onTokensStreamed();
-            onToken?.({
-              token: data.token ?? '',
-              content: data.content,
-              reasoningContent: data.reasoning_content,
-              accumulatedText: data.accumulated_text,
-            });
+          if (typeof params?.seed === 'number' && Number.isFinite(params.seed)) {
+            completionParams.seed = Math.round(params.seed);
           }
-        },
-      );
 
-      this.activeCompletionPromise = completionPromise;
+          // Explicitly clear the thinking budget whenever it is not set for this request so llama.rn never
+          // reuses a previously-supplied value across completions. (`llama.rn` treats -1 as unset.)
+          if (!enableThinking) {
+            completionParams.thinking_budget_tokens = -1;
+          } else if (typeof params?.thinking_budget_tokens === 'number' && Number.isFinite(params.thinking_budget_tokens)) {
+            completionParams.thinking_budget_tokens = Math.max(0, Math.round(params.thinking_budget_tokens));
+          } else {
+            completionParams.thinking_budget_tokens = -1;
+          }
 
-      try {
-        return await completionPromise;
+          return await context.completion(
+            completionParams as any,
+            (data: TokenData) => {
+              if (data.token || data.content !== undefined || data.reasoning_content !== undefined) {
+                onTokensStreamed();
+                onToken?.({
+                  token: data.token ?? '',
+                  content: data.content,
+                  reasoningContent: data.reasoning_content,
+                  accumulatedText: data.accumulated_text,
+                });
+              }
+            },
+          );
+        };
+
+        try {
+          hasStreamedTokens = false;
+          resolveCompletion(await runCompletion(messages, markTokensStreamed));
+        } catch (error) {
+          if (isConversationAlternationError(error)) {
+            if (hasStreamedTokens && onToken) {
+              console.warn(
+                '[LLMEngine] Conversation alternation error after streaming started; skipping retry to avoid duplicate output',
+              );
+              throw error;
+            }
+
+            console.warn('[LLMEngine] Retrying completion after normalizing chat roles for strict templates');
+            const normalizedMessages = normalizeMessagesForStrictRoleAlternation(messages);
+            hasStreamedTokens = false;
+            resolveCompletion(await runCompletion(normalizedMessages, markTokensStreamed));
+            return;
+          }
+
+          throw error;
+        }
+      } catch (error) {
+        rejectCompletion(error);
       } finally {
-        if (this.activeCompletionPromise === completionPromise) {
+        if (this.activeCompletionPromise === completionTask) {
           this.activeCompletionPromise = null;
         }
       }
-    };
+    })();
 
-    try {
-      hasStreamedTokens = false;
-      return await runCompletion(messages, markTokensStreamed);
-    } catch (error) {
-      if (isConversationAlternationError(error)) {
-        if (hasStreamedTokens && onToken) {
-          console.warn(
-            '[LLMEngine] Conversation alternation error after streaming started; skipping retry to avoid duplicate output',
-          );
-          throw error;
-        }
-
-        console.warn('[LLMEngine] Retrying completion after normalizing chat roles for strict templates');
-        const normalizedMessages = normalizeMessagesForStrictRoleAlternation(messages);
-        hasStreamedTokens = false;
-        return await runCompletion(normalizedMessages, markTokensStreamed);
-      }
-
-      throw error;
-    }
+    return completionTask;
   }
 
   private async probeThinkingCapability(context: LlamaContext): Promise<ModelThinkingCapabilitySnapshot | null> {
@@ -2978,7 +2994,8 @@ class LLMEngineService {
     });
 
     try {
-      if (this.activeCompletionPromise) {
+      const activeCompletion = this.activeCompletionPromise;
+      if (activeCompletion) {
         try {
           await this.stopCompletion();
         } catch (error) {
@@ -2986,7 +3003,7 @@ class LLMEngineService {
         }
 
         try {
-          await this.activeCompletionPromise;
+          await activeCompletion;
         } catch {
           // Completion failures are handled by the chat flow.
         }

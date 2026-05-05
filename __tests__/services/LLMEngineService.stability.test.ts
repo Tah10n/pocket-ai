@@ -103,7 +103,6 @@ describe('LLMEngineService Stability', () => {
         (llmEngineService as any).contextOperationQueue = Promise.resolve();
         (llmEngineService as any).activeCompletionPromise = null;
         (llmEngineService as any).activeContextOperationPromises?.clear?.();
-        (llmEngineService as any).activeContextReleaseOperationPromises?.clear?.();
         (llmEngineService as any).completionInterruptGeneration = 0;
         (llmEngineService as any).additionalStopWordsCache?.clear?.();
         (llmEngineService as any).isUnloading = false;
@@ -426,7 +425,7 @@ describe('LLMEngineService Stability', () => {
         expect(tokenize).toHaveBeenCalledTimes(2);
     });
 
-    it('waits for the thinking capability probe before releasing llama during unload', async () => {
+    it('releases llama during unload without waiting for the thinking capability probe', async () => {
         const previousEnv = process.env.NODE_ENV;
         (process.env as any).NODE_ENV = 'development';
 
@@ -446,20 +445,29 @@ describe('LLMEngineService Stability', () => {
 
         try {
             await llmEngineService.load(mockModel.id);
+            (llmEngineService as any).launchThinkingCapabilityProbe(mockModel.id);
             for (let i = 0; i < 5 && getFormattedChat.mock.calls.length === 0; i += 1) {
                 await Promise.resolve();
             }
             expect(getFormattedChat).toHaveBeenCalled();
+            (registry.updateModel as jest.Mock).mockClear();
 
             const unloadPromise = llmEngineService.unload();
-            await Promise.resolve();
-
-            expect(releaseAllLlama).not.toHaveBeenCalled();
-
-            resolveProbeFormat?.();
-            await unloadPromise;
+            for (let i = 0; i < 5 && (releaseAllLlama as jest.Mock).mock.calls.length === 0; i += 1) {
+                await Promise.resolve();
+            }
 
             expect(releaseAllLlama).toHaveBeenCalled();
+            await unloadPromise;
+
+            resolveProbeFormat?.();
+            for (let i = 0; i < 5; i += 1) {
+                await Promise.resolve();
+            }
+
+            expect(registry.updateModel).not.toHaveBeenCalledWith(expect.objectContaining({
+                thinkingCapability: expect.anything(),
+            }));
         } finally {
             (process.env as any).NODE_ENV = previousEnv;
         }

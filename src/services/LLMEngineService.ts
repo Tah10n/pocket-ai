@@ -355,7 +355,6 @@ class LLMEngineService {
   private contextOperationQueue: Promise<void> = Promise.resolve();
   private activeCompletionPromise: Promise<NativeCompletionResult> | null = null;
   private activeContextOperationPromises: Set<Promise<unknown>> = new Set();
-  private activeContextReleaseOperationPromises: Set<Promise<unknown>> = new Set();
   private completionInterruptGeneration = 0;
   private isUnloading = false;
   private activeCalibrationSession: CalibrationSession | null = null;
@@ -425,37 +424,23 @@ class LLMEngineService {
       }
     })();
     this.activeContextOperationPromises.add(operationPromise);
-    this.activeContextReleaseOperationPromises.add(operationPromise);
 
     void operationPromise.then(
       () => {
         this.activeContextOperationPromises.delete(operationPromise);
-        this.activeContextReleaseOperationPromises.delete(operationPromise);
       },
       () => {
         this.activeContextOperationPromises.delete(operationPromise);
-        this.activeContextReleaseOperationPromises.delete(operationPromise);
       },
     );
 
     return operationPromise;
   }
 
-  private trackContextReleaseOperation<T>(operation: () => Promise<T>): Promise<T> {
-    return this.trackContextOperation(operation);
-  }
-
   private async waitForActiveContextOperations(): Promise<void> {
     const activeContextOperations = Array.from(this.activeContextOperationPromises);
     if (activeContextOperations.length > 0) {
       await Promise.allSettled(activeContextOperations);
-    }
-  }
-
-  private async waitForActiveContextReleaseOperations(): Promise<void> {
-    const activeContextReleaseOperations = Array.from(this.activeContextReleaseOperationPromises);
-    if (activeContextReleaseOperations.length > 0) {
-      await Promise.allSettled(activeContextReleaseOperations);
     }
   }
 
@@ -1449,6 +1434,42 @@ class LLMEngineService {
     }
 
     return null;
+  }
+
+  private launchThinkingCapabilityProbe(modelId: string): void {
+    const contextAtProbeStart = this.context;
+    const generationAtProbeStart = this.contextGeneration;
+
+    if (!contextAtProbeStart) {
+      return;
+    }
+
+    const isProbeStillCurrent = () => (
+      this.context === contextAtProbeStart
+      && this.contextGeneration === generationAtProbeStart
+      && !this.isUnloading
+      && this.state.status === EngineStatus.READY
+      && this.state.activeModelId === modelId
+    );
+
+    void (async () => {
+      try {
+        const thinkingCapability = await this.probeThinkingCapability(contextAtProbeStart);
+        if (thinkingCapability && isProbeStillCurrent()) {
+          const model = registry.getModel(modelId);
+          if (model && isProbeStillCurrent() && !areThinkingCapabilitySnapshotsEqual(model.thinkingCapability, thinkingCapability)) {
+            registry.updateModel({
+              ...model,
+              thinkingCapability,
+            });
+          }
+        }
+      } catch (error) {
+        if (isProbeStillCurrent()) {
+          console.warn('[LLMEngine] Failed to persist chat template thinking capability', error);
+        }
+      }
+    })();
   }
 
   public async countPromptTokens({
@@ -3102,31 +3123,15 @@ class LLMEngineService {
       this.updateState({ ...this.state, status: EngineStatus.READY, loadProgress: 1 });
       updateSettings({ activeModelId: modelId });
 
-      const contextAtProbeStart = this.context;
       const shouldProbeThinkingCapability = (() => {
         const model = registry.getModel(modelId);
         return model ? model.thinkingCapability === undefined : true;
       })();
 
-      if (contextAtProbeStart && shouldProbeThinkingCapability && process.env.NODE_ENV !== 'test') {
-        void this.trackContextReleaseOperation(async () => {
-          try {
-            const thinkingCapability = await this.probeThinkingCapability(contextAtProbeStart);
-            if (thinkingCapability && this.context === contextAtProbeStart && !this.isUnloading) {
-              const model = registry.getModel(modelId);
-              if (model && !areThinkingCapabilitySnapshotsEqual(model.thinkingCapability, thinkingCapability)) {
-                registry.updateModel({
-                  ...model,
-                  thinkingCapability,
-                });
-              }
-            }
-          } catch (error) {
-            if (this.context === contextAtProbeStart && !this.isUnloading) {
-              console.warn('[LLMEngine] Failed to persist chat template thinking capability', error);
-            }
-          }
-        });
+      const shouldLaunchThinkingProbe = process.env.NODE_ENV !== 'test';
+
+      if (shouldProbeThinkingCapability && shouldLaunchThinkingProbe) {
+        this.launchThinkingCapabilityProbe(modelId);
       }
     } catch (error) {
       const baseError = toAppError(error, 'model_load_failed');
@@ -3229,7 +3234,7 @@ class LLMEngineService {
         }
       }
 
-      await this.waitForActiveContextReleaseOperations();
+      await this.waitForActiveContextOperations();
 
       if (this.context) {
         await requireLlamaModule().releaseAllLlama();

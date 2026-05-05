@@ -740,6 +740,49 @@ describe('useChatSession', () => {
     }));
   });
 
+  it('cleans up background inference when pre-native stopCompletion rejects', async () => {
+    let resolvePromptCount: (() => void) | undefined;
+    const stopError = new Error('pre-native stop failed');
+
+    (llmEngineService.countPromptTokens as jest.Mock).mockImplementationOnce(
+      () => new Promise((resolve) => {
+        resolvePromptCount = () => resolve(16);
+      }),
+    );
+    (llmEngineService.stopCompletion as jest.Mock).mockRejectedValueOnce(stopError);
+
+    const getSession = renderHookHarness();
+    let sendPromise: Promise<void> | undefined;
+
+    await act(async () => {
+      sendPromise = getSession()?.appendUserMessage('Stop before native cleanup');
+    });
+
+    await waitFor(() => {
+      expect(llmEngineService.countPromptTokens).toHaveBeenCalled();
+      expect(backgroundTaskService.isTaskActive('inference')).toBe(true);
+    });
+
+    let caughtError: unknown;
+    await act(async () => {
+      try {
+        await getSession()?.stopGeneration();
+      } catch (error) {
+        caughtError = error;
+      }
+    });
+
+    expect(caughtError).toBe(stopError);
+    expect(backgroundTaskService.isTaskActive('inference')).toBe(false);
+    expect(useChatStore.getState().getActiveThread()?.status).toBe('stopped');
+    expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolvePromptCount?.();
+      await sendPromise;
+    });
+  });
+
   it('does not let an old stopped prompt-prep run start after a new send', async () => {
     let resolveFirstPromptCount: (() => void) | undefined;
     let resolveSecondCompletion: (() => void) | undefined;
@@ -1225,6 +1268,59 @@ describe('useChatSession', () => {
     });
 
     expect(interruptedSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('logs rejected expiration stop without changing stopped notification flow', async () => {
+    let resolveCompletion: (() => void) | undefined;
+    const stopError = new Error('expiration stop failed');
+    const interruptedSpy = jest.spyOn(notificationService, 'sendInterruptedNotification').mockResolvedValue(undefined);
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    Object.defineProperty(AppState, 'currentState', {
+      configurable: true,
+      value: 'background',
+    });
+
+    (llmEngineService.stopCompletion as jest.Mock).mockRejectedValueOnce(stopError);
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveCompletion = () => resolve({ text: 'Stopped after rejected expiration stop' });
+        }),
+    );
+
+    try {
+      const getSession = renderHookHarness();
+      let sendPromise: Promise<void> | undefined;
+
+      await act(async () => {
+        sendPromise = getSession()?.appendUserMessage('Expire and reject stop');
+      });
+
+      await waitFor(() => {
+        expect(BackgroundTaskServiceOnExpirationHandler()).toEqual(expect.any(Function));
+      });
+
+      await act(async () => {
+        BackgroundTaskServiceOnExpirationHandler()?.();
+        await Promise.resolve();
+      });
+
+      await waitFor(() => {
+        expect(useChatStore.getState().getActiveThread()?.status).toBe('stopped');
+      });
+
+      expect(llmEngineService.stopCompletion).toHaveBeenCalledTimes(1);
+      expect(warnSpy).toHaveBeenCalledWith('[ChatSession] Failed to stop expired completion', stopError);
+      expect(interruptedSpy).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        resolveCompletion?.();
+        await sendPromise;
+      });
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
   it('builds inference context from frozen preset snapshot, history, and params', async () => {

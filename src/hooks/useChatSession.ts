@@ -377,7 +377,9 @@ export const useChatSession = () => {
           generationState.stopRequested = true;
           sendOutcomeNotificationOnce('interrupted');
         } finally {
-          void llmEngineService.stopCompletion();
+          void llmEngineService.stopCompletion().catch((error) => {
+            console.warn('[ChatSession] Failed to stop expired completion', error);
+          });
         }
       });
 
@@ -780,14 +782,16 @@ export const useChatSession = () => {
     stopAssistantMessage(generation.threadId, generation.messageId);
     finalizeThreadStatus(generation.threadId, 'stopped');
 
-    if (generation.nativeCompletionStarted) {
-      await llmEngineService.interruptActiveCompletion();
-    } else {
-      await llmEngineService.stopCompletion();
-    }
-
-    if (sharedGenerationState.current === generation && backgroundTaskService.isTaskActive('inference')) {
-      await backgroundTaskService.stopBackgroundTask('inference');
+    try {
+      if (generation.nativeCompletionStarted) {
+        await llmEngineService.interruptActiveCompletion();
+      } else {
+        await llmEngineService.stopCompletion();
+      }
+    } finally {
+      if (sharedGenerationState.current === generation && backgroundTaskService.isTaskActive('inference')) {
+        await backgroundTaskService.stopBackgroundTask('inference');
+      }
     }
   }, [finalizeThreadStatus, stopAssistantMessage]);
 

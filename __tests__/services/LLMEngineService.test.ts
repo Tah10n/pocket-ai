@@ -89,7 +89,6 @@ describe('LLMEngineService', () => {
     inferenceBackendService.clearCache();
     (llmEngineService as any).contextOperationQueue = Promise.resolve();
     (llmEngineService as any).activeContextOperationPromises?.clear?.();
-    (llmEngineService as any).activeContextReleaseOperationPromises?.clear?.();
     (llmEngineService as any).additionalStopWordsCache?.clear?.();
     getBackendDevicesInfoMock().mockResolvedValue([
       {
@@ -495,7 +494,7 @@ describe('LLMEngineService', () => {
     }
   });
 
-  it('waits for a slow thinking capability probe before starting chat completion', async () => {
+  it('starts chat completion without waiting for a slow thinking capability probe', async () => {
     const previousEnv = process.env.NODE_ENV;
     (process.env as any).NODE_ENV = 'development';
 
@@ -545,27 +544,28 @@ describe('LLMEngineService', () => {
         params: { n_predict: 16 },
       });
 
-      await Promise.resolve();
-      await Promise.resolve();
-      expect(completionMock).not.toHaveBeenCalled();
-
-      resolveProbeFormat();
       for (let i = 0; i < 10 && completionMock.mock.calls.length === 0; i += 1) {
         await Promise.resolve();
       }
       expect(completionMock).toHaveBeenCalled();
       expect(probeFormatCalls).toBe(1);
 
+      expect(registry.updateModel).not.toHaveBeenCalledWith(expect.objectContaining({
+        thinkingCapability: expect.anything(),
+      }));
+
       resolveNativeCompletion();
       await expect(completionPromise).resolves.toEqual({ text: 'Hello back' });
 
+      resolveProbeFormat();
+      await Promise.resolve();
       await llmEngineService.unload();
     } finally {
       (process.env as any).NODE_ENV = previousEnv;
     }
   });
 
-  it('waits for a slow thinking capability probe before counting prompt tokens', async () => {
+  it('counts prompt tokens without waiting for a slow thinking capability probe', async () => {
     const previousEnv = process.env.NODE_ENV;
     (process.env as any).NODE_ENV = 'development';
 
@@ -610,15 +610,17 @@ describe('LLMEngineService', () => {
         messages: [{ role: 'user', content: 'Hello' }],
       });
 
-      await Promise.resolve();
-      await Promise.resolve();
-      expect(tokenizeMock).not.toHaveBeenCalled();
-
-      resolveProbeFormat();
       await expect(countPromise).resolves.toBe(4);
       expect(tokenizeMock).toHaveBeenCalled();
+      expect(probeFormatCalls).toBe(1);
+
+      expect(registry.updateModel).not.toHaveBeenCalledWith(expect.objectContaining({
+        thinkingCapability: expect.anything(),
+      }));
 
       await llmEngineService.unload();
+      resolveProbeFormat();
+      await Promise.resolve();
     } finally {
       (process.env as any).NODE_ENV = previousEnv;
     }

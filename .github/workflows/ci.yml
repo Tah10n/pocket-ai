@@ -7,6 +7,8 @@ on:
       - reopened
       - synchronize
       - edited
+      - labeled
+      - unlabeled
   push:
     branches:
       - main
@@ -41,7 +43,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     needs: verify
-    if: github.event_name == 'pull_request' && (contains(github.event.pull_request.body, '- [x] Run Android checks') || contains(github.event.pull_request.body, '- [X] Run Android checks'))
+    if: >-
+      github.event_name == 'pull_request' &&
+      (
+        contains(github.event.pull_request.labels.*.name, 'run-android-checks') ||
+        contains(github.event.pull_request.body, '- [x] Run Android checks') ||
+        contains(github.event.pull_request.body, '- [X] Run Android checks')
+      )
 
     steps:
       - name: Checkout
@@ -108,7 +116,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     needs: verify
-    if: github.event_name == 'pull_request' && (contains(github.event.pull_request.body, '- [x] Run Android scenarios') || contains(github.event.pull_request.body, '- [X] Run Android scenarios'))
+    if: >-
+      github.event_name == 'pull_request' &&
+      (
+        contains(github.event.pull_request.labels.*.name, 'run-android-scenarios') ||
+        contains(github.event.pull_request.body, '- [x] Run Android scenarios') ||
+        contains(github.event.pull_request.body, '- [X] Run Android scenarios')
+      )
 
     steps:
       - name: Checkout

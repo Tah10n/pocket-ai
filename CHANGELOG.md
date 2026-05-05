@@ -8,6 +8,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > Note: This file is maintained automatically by Release Please based on Conventional Commits (PR titles).
 > Avoid editing it manually unless you are bootstrapping or fixing the release history.
 
+## [1.3.1](https://github.com/Tah10n/pocket-ai/compare/v1.3.0...v1.3.1) (2026-05-05)
+
+
+### Bug Fixes
+
+* guard chat completion context freshness ([1f05a16](https://github.com/Tah10n/pocket-ai/commit/1f05a1666d1521575ec7e752465fd15de3ba0319))
+* harden chat cancellation lifecycle ([71b4daf](https://github.com/Tah10n/pocket-ai/commit/71b4daf8fba1e66b12d5c047cf7599e71521e725))
+* harden chat completion lifecycle ([3be59cc](https://github.com/Tah10n/pocket-ai/commit/3be59cc42f5f58ab92f69c7491bcb25bc40a6343))
+* harden chat lifecycle and catalog cache ([40c66d7](https://github.com/Tah10n/pocket-ai/commit/40c66d76fa3fb292f95b51ce9fa328cb8e7d9b4e))
+* harden chat stop and probe lifecycle ([5601601](https://github.com/Tah10n/pocket-ai/commit/56016014f116e3f7a09e1cbb7ec0335ad566b102))
+* harden generation cancellation edge cases ([de1a155](https://github.com/Tah10n/pocket-ai/commit/de1a155804130b1e55e0363307901305bb3961e5))
+* honor stops before native generation ([0111ba6](https://github.com/Tah10n/pocket-ai/commit/0111ba6acb5e22f9d6a37f32415bf9ae5148921c))
+* improve memory budget portability ([#69](https://github.com/Tah10n/pocket-ai/issues/69)) ([fb5e493](https://github.com/Tah10n/pocket-ai/commit/fb5e49392e9bf2fc7b74de3b54e5adf5ae2ec7fb))
+* keep llama parallel slots disabled ([42de6f7](https://github.com/Tah10n/pocket-ai/commit/42de6f7f4f8d684cd37f702e3ff76808ea2aec52))
+* lock chat completions during preparation ([6830fda](https://github.com/Tah10n/pocket-ai/commit/6830fda7798fe44c1c8f23c97c74d0a15002ff5a))
+
+
+### Performance Improvements
+
+* cache chat template stop tokens safely ([93d5e87](https://github.com/Tah10n/pocket-ai/commit/93d5e874599f9c1e080cdac42f3ce14ba2c6647a))
+
 ## [1.3.0](https://github.com/Tah10n/pocket-ai/compare/v1.2.0...v1.3.0) (2026-05-03)
 
 

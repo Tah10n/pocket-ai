@@ -44,6 +44,8 @@ interface ActiveGenerationState {
   threadId: string;
   messageId: string;
   stopRequested: boolean;
+  nativeCompletionStarted: boolean;
+  flushPendingAssistantPatch?: () => void;
 }
 
 const sharedGenerationState: { current: ActiveGenerationState | null } = {
@@ -55,6 +57,11 @@ function isMatchingGeneration(threadId: string, messageId: string) {
     sharedGenerationState.current?.threadId === threadId &&
     sharedGenerationState.current?.messageId === messageId
   );
+}
+
+function isNativeCompletionSettlingAfterStop() {
+  const generation = sharedGenerationState.current;
+  return generation?.stopRequested === true && generation.nativeCompletionStarted;
 }
 
 export function resetSharedGenerationStateForTests() {
@@ -221,11 +228,13 @@ export const useChatSession = () => {
     performanceMonitor.mark('chat.send.start', { modelId });
     const generationSpan = performanceMonitor.startSpan('chat.generation', { modelId });
 
-    sharedGenerationState.current = {
+    const generationState: ActiveGenerationState = {
       threadId,
       messageId: assistantMessageId,
       stopRequested: false,
+      nativeCompletionStarted: false,
     };
+    sharedGenerationState.current = generationState;
 
     let currentText = '';
     let currentRawText = '';
@@ -275,10 +284,19 @@ export const useChatSession = () => {
         ? llmEngineService.getContextSize()
         : DEFAULT_CONTEXT_SIZE;
 
-    const flushAssistantPatch = () => {
+    const canMutateAssistantMessage = (options?: { allowStopped?: boolean }) => (
+      isMatchingGeneration(threadId, assistantMessageId)
+      && (options?.allowStopped === true || !generationState.stopRequested)
+    );
+
+    const flushAssistantPatch = (options?: { allowStopped?: boolean; includeStreamingState?: boolean }) => {
       if (flushTimeout) {
         clearTimeout(flushTimeout);
         flushTimeout = null;
+      }
+
+      if (!canMutateAssistantMessage(options)) {
+        return;
       }
 
       refreshVisibleAssistantContent();
@@ -286,12 +304,17 @@ export const useChatSession = () => {
       const elapsedSec = (Date.now() - startTime) / 1000;
       const tokensPerSec = elapsedSec > 0 ? tokensCount / elapsedSec : 0;
 
-      patchAssistantMessage(threadId, assistantMessageId, {
+      const updates: Partial<ChatMessage> = {
         content: currentText,
         thoughtContent: currentThoughtText || undefined,
         tokensPerSec,
-        state: 'streaming',
-      });
+      };
+
+      if (options?.includeStreamingState !== false) {
+        updates.state = 'streaming';
+      }
+
+      patchAssistantMessage(threadId, assistantMessageId, updates);
     };
 
     const scheduleAssistantPatch = () => {
@@ -303,6 +326,12 @@ export const useChatSession = () => {
         flushTimeout = null;
         flushAssistantPatch();
       }, STREAM_PATCH_INTERVAL_MS);
+    };
+
+    generationState.flushPendingAssistantPatch = () => {
+      flushAssistantPatch(generationState.stopRequested
+        ? { allowStopped: true, includeStreamingState: false }
+        : undefined);
     };
 
     const sendOutcomeNotificationOnce = (outcome: 'interrupted' | 'error') => {
@@ -345,10 +374,12 @@ export const useChatSession = () => {
           flushAssistantPatch();
           stopAssistantMessage(threadId, assistantMessageId);
           finalizeThreadStatus(threadId, 'stopped');
-          sharedGenerationState.current!.stopRequested = true;
+          generationState.stopRequested = true;
           sendOutcomeNotificationOnce('interrupted');
         } finally {
-          void llmEngineService.stopCompletion();
+          void llmEngineService.stopCompletion().catch((error) => {
+            console.warn('[ChatSession] Failed to stop expired completion', error);
+          });
         }
       });
 
@@ -456,6 +487,23 @@ export const useChatSession = () => {
         ? reasoningRuntimeConfig.reasoningFormat
         : 'none';
 
+      if (generationState.stopRequested) {
+        if (isMatchingGeneration(threadId, assistantMessageId)) {
+          flushAssistantPatch();
+          stopAssistantMessage(threadId, assistantMessageId);
+          finalizeThreadStatus(threadId, 'stopped');
+          recordCompletionStats('stopped');
+
+          sendOutcomeNotificationOnce('interrupted');
+        }
+        return;
+      }
+
+      if (llmEngineService.hasActiveCompletion() || isNativeCompletionSettlingAfterStop()) {
+        throw new Error('Wait for the current response to finish stopping before starting another response.');
+      }
+
+      generationState.nativeCompletionStarted = true;
       const completion = await llmEngineService.chatCompletion({
         messages,
         params: {
@@ -476,6 +524,10 @@ export const useChatSession = () => {
           reasoning_format: reasoningFormatForRequest,
         },
         onToken: (token) => {
+          if (!canMutateAssistantMessage()) {
+            return;
+          }
+
           if (!hasMarkedFirstToken) {
             hasMarkedFirstToken = true;
             performanceMonitor.mark('chat.firstToken', { modelId });
@@ -533,13 +585,15 @@ export const useChatSession = () => {
         },
       });
 
-      if (isMatchingGeneration(threadId, assistantMessageId) && sharedGenerationState.current?.stopRequested) {
-        flushAssistantPatch();
-        stopAssistantMessage(threadId, assistantMessageId);
-        finalizeThreadStatus(threadId, 'stopped');
-        recordCompletionStats('stopped');
+      if (generationState.stopRequested) {
+        if (isMatchingGeneration(threadId, assistantMessageId)) {
+          flushAssistantPatch({ allowStopped: true, includeStreamingState: false });
+          stopAssistantMessage(threadId, assistantMessageId);
+          finalizeThreadStatus(threadId, 'stopped');
+          recordCompletionStats('stopped');
 
-        sendOutcomeNotificationOnce('interrupted');
+          sendOutcomeNotificationOnce('interrupted');
+        }
         return;
       }
 
@@ -564,13 +618,15 @@ export const useChatSession = () => {
         void notificationService.sendCompletionNotification('inference', { threadId });
       }
     } catch (error) {
-      if (isMatchingGeneration(threadId, assistantMessageId) && sharedGenerationState.current?.stopRequested) {
-        flushAssistantPatch();
-        stopAssistantMessage(threadId, assistantMessageId);
-        finalizeThreadStatus(threadId, 'stopped');
-        recordCompletionStats('stopped');
+      if (generationState.stopRequested) {
+        if (isMatchingGeneration(threadId, assistantMessageId)) {
+          flushAssistantPatch({ allowStopped: true, includeStreamingState: false });
+          stopAssistantMessage(threadId, assistantMessageId);
+          finalizeThreadStatus(threadId, 'stopped');
+          recordCompletionStats('stopped');
 
-        sendOutcomeNotificationOnce('interrupted');
+          sendOutcomeNotificationOnce('interrupted');
+        }
         return;
       }
 
@@ -598,11 +654,12 @@ export const useChatSession = () => {
       unsubscribeExpiration?.();
       unsubscribeExpiration = null;
 
-      if (isMatchingGeneration(threadId, assistantMessageId)) {
+      const wasCurrentGeneration = isMatchingGeneration(threadId, assistantMessageId);
+      if (wasCurrentGeneration) {
         sharedGenerationState.current = null;
       }
 
-      if (backgroundTaskService.isTaskActive('inference')) {
+      if (wasCurrentGeneration && backgroundTaskService.isTaskActive('inference')) {
         await backgroundTaskService.stopBackgroundTask('inference');
       }
     }
@@ -630,6 +687,10 @@ export const useChatSession = () => {
     const threadModelId = getThreadActiveModelId(thread);
     if (engineState.activeModelId !== threadModelId) {
       throw new Error(`Load ${threadModelId} before ${actionLabel}.`);
+    }
+
+    if (llmEngineService.hasActiveCompletion() || isNativeCompletionSettlingAfterStop()) {
+      throw new Error(`Wait for the current response to finish stopping before ${actionLabel}.`);
     }
   }, []);
 
@@ -663,6 +724,10 @@ export const useChatSession = () => {
 
     if (activeThread?.status === 'generating') {
       throw new Error('A response is already being generated for this thread.');
+    }
+
+    if (llmEngineService.hasActiveCompletion() || isNativeCompletionSettlingAfterStop()) {
+      throw new Error('Wait for the current response to finish stopping before sending another message.');
     }
 
     const threadId = activeThread?.id
@@ -707,13 +772,28 @@ export const useChatSession = () => {
   }, [activeThread, appendMessage, createAssistantPlaceholder, createThread, ensureThreadUsesModelForSend, runAssistantCompletion, setActiveThread, syncThreadParametersCallback]);
 
   const stopGeneration = useCallback(async () => {
-    if (!sharedGenerationState.current) {
+    const generation = sharedGenerationState.current;
+    if (!generation) {
       return;
     }
 
-    sharedGenerationState.current.stopRequested = true;
-    await llmEngineService.stopCompletion();
-  }, []);
+    generation.flushPendingAssistantPatch?.();
+    generation.stopRequested = true;
+    stopAssistantMessage(generation.threadId, generation.messageId);
+    finalizeThreadStatus(generation.threadId, 'stopped');
+
+    try {
+      if (generation.nativeCompletionStarted) {
+        await llmEngineService.interruptActiveCompletion();
+      } else {
+        await llmEngineService.stopCompletion();
+      }
+    } finally {
+      if (sharedGenerationState.current === generation && backgroundTaskService.isTaskActive('inference')) {
+        await backgroundTaskService.stopBackgroundTask('inference');
+      }
+    }
+  }, [finalizeThreadStatus, stopAssistantMessage]);
 
   const regenerateFromUserMessage = useCallback(async (messageId: string, nextContent: string) => {
     if (!activeThread) {

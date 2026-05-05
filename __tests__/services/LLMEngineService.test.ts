@@ -87,6 +87,9 @@ describe('LLMEngineService', () => {
     jest.clearAllMocks();
     createStorage('pocket-ai-autotune', { tier: 'private' }).clearAll();
     inferenceBackendService.clearCache();
+    (llmEngineService as any).contextOperationQueue = Promise.resolve();
+    (llmEngineService as any).activeContextOperationPromises?.clear?.();
+    (llmEngineService as any).additionalStopWordsCache?.clear?.();
     getBackendDevicesInfoMock().mockResolvedValue([
       {
         type: 'gpu',
@@ -187,6 +190,146 @@ describe('LLMEngineService', () => {
       }),
       expect.any(Function),
     );
+  });
+
+  it('reuses cached template additional stop tokens for the same loaded context, messages, and options', async () => {
+    getFormattedChatMock().mockResolvedValue({
+      prompt: 'Formatted prompt',
+      additional_stops: ['<|cached_stop|>'],
+    });
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    await llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Hello' }],
+      params: { n_predict: 32 },
+    });
+    await llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Hello' }],
+      params: { n_predict: 32 },
+    });
+
+    expect(getFormattedChatMock()).toHaveBeenCalledTimes(1);
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        stop: expect.arrayContaining(['<|cached_stop|>']),
+      }),
+      expect.any(Function),
+    );
+  });
+
+  it('resolves template additional stops again for a different message payload', async () => {
+    getFormattedChatMock()
+      .mockResolvedValueOnce({
+        prompt: 'Formatted prompt',
+        additional_stops: ['<|first_payload_stop|>'],
+      })
+      .mockResolvedValueOnce({
+        prompt: 'Formatted prompt',
+        additional_stops: ['<|second_payload_stop|>'],
+      });
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    await llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Hello' }],
+      params: { n_predict: 32 },
+    });
+    await llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Hello again' }],
+      params: { n_predict: 32 },
+    });
+
+    expect(getFormattedChatMock()).toHaveBeenCalledTimes(2);
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        stop: expect.arrayContaining(['<|second_payload_stop|>']),
+      }),
+      expect.any(Function),
+    );
+  });
+
+  it('invalidates cached template additional stops after unload and reload', async () => {
+    getFormattedChatMock()
+      .mockResolvedValueOnce({
+        prompt: 'Formatted prompt',
+        additional_stops: ['<|first_stop|>'],
+      })
+      .mockResolvedValueOnce({
+        prompt: 'Formatted prompt',
+        additional_stops: ['<|second_stop|>'],
+      });
+
+    await llmEngineService.load('test/model', { forceReload: true });
+    await llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Hello' }],
+      params: { n_predict: 32 },
+    });
+
+    await llmEngineService.unload();
+    await llmEngineService.load('test/model', { forceReload: true });
+    await llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Hello again' }],
+      params: { n_predict: 32 },
+    });
+
+    expect(getFormattedChatMock()).toHaveBeenCalledTimes(2);
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        stop: expect.arrayContaining(['<|second_stop|>']),
+      }),
+      expect.any(Function),
+    );
+  });
+
+  it('blocks another completion while the first request is still resolving template stops', async () => {
+    let resolveFormatted!: () => void;
+    getFormattedChatMock().mockImplementationOnce(() => new Promise((resolve) => {
+      resolveFormatted = () => resolve({ prompt: 'Formatted prompt', additional_stops: [] });
+    }));
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    const completionPromise = llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Hello' }],
+      params: { n_predict: 16 },
+    });
+
+    await Promise.resolve();
+    expect(getFormattedChatMock()).toHaveBeenCalledTimes(1);
+
+    await expect(llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Second request' }],
+      params: { n_predict: 16 },
+    })).rejects.toMatchObject({ code: 'engine_busy' });
+
+    resolveFormatted();
+    await expect(completionPromise).resolves.toEqual({ text: 'Hello back' });
+  });
+
+  it('aborts completion before native generation when the context changes after formatting', async () => {
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    const originalContext = (llmEngineService as any).context;
+    const replacementCompletion = jest.fn().mockResolvedValue({ text: 'replacement' });
+    const replacementContext = {
+      ...originalContext,
+      completion: replacementCompletion,
+    };
+    getFormattedChatMock().mockImplementationOnce(async () => {
+      (llmEngineService as any).setContext(replacementContext);
+      return { prompt: 'Formatted prompt', additional_stops: [] };
+    });
+
+    await expect(llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Hello' }],
+      params: { n_predict: 16 },
+    })).rejects.toMatchObject({ code: 'engine_not_ready' });
+
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).not.toHaveBeenCalled();
+    expect(replacementCompletion).not.toHaveBeenCalled();
+
+    await llmEngineService.unload();
   });
 
   it('clears thinking_budget_tokens when thinking is disabled', async () => {
@@ -346,6 +489,138 @@ describe('LLMEngineService', () => {
           thinkingEndTag: '</think>',
         }),
       }));
+    } finally {
+      (process.env as any).NODE_ENV = previousEnv;
+    }
+  });
+
+  it('starts chat completion without waiting for a slow thinking capability probe', async () => {
+    const previousEnv = process.env.NODE_ENV;
+    (process.env as any).NODE_ENV = 'development';
+
+    const completionMock = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock;
+    let resolveProbeFormat!: () => void;
+    let resolveNativeCompletion!: () => void;
+    let probeFormatCalls = 0;
+
+    try {
+      completionMock.mockImplementationOnce(() => new Promise((resolve) => {
+        resolveNativeCompletion = () => resolve({ text: 'Hello back' });
+      }));
+
+      getFormattedChatMock().mockImplementation((_messages, _tools, formattingOptions) => {
+        if (formattingOptions?.jinja === true) {
+          probeFormatCalls += 1;
+
+          if (probeFormatCalls === 1) {
+            return new Promise((resolve) => {
+              resolveProbeFormat = () => resolve({
+                type: 'jinja',
+                prompt: 'Formatted prompt <think>reasoning</think>',
+                thinking_start_tag: '<think>',
+                thinking_end_tag: '</think>',
+              });
+            });
+          }
+
+          return Promise.resolve({
+            type: 'jinja',
+            prompt: 'Formatted prompt',
+            thinking_forced_open: false,
+          });
+        }
+
+        return Promise.resolve({ prompt: 'Completion prompt', additional_stops: [] });
+      });
+
+      await llmEngineService.load('test/model', { forceReload: true });
+      for (let i = 0; i < 5 && probeFormatCalls === 0; i += 1) {
+        await Promise.resolve();
+      }
+      expect(probeFormatCalls).toBe(1);
+
+      const completionPromise = llmEngineService.chatCompletion({
+        messages: [{ role: 'user', content: 'Hello' }],
+        params: { n_predict: 16 },
+      });
+
+      for (let i = 0; i < 10 && completionMock.mock.calls.length === 0; i += 1) {
+        await Promise.resolve();
+      }
+      expect(completionMock).toHaveBeenCalled();
+      expect(probeFormatCalls).toBe(1);
+
+      expect(registry.updateModel).not.toHaveBeenCalledWith(expect.objectContaining({
+        thinkingCapability: expect.anything(),
+      }));
+
+      resolveNativeCompletion();
+      await expect(completionPromise).resolves.toEqual({ text: 'Hello back' });
+
+      resolveProbeFormat();
+      await Promise.resolve();
+      await llmEngineService.unload();
+    } finally {
+      (process.env as any).NODE_ENV = previousEnv;
+    }
+  });
+
+  it('counts prompt tokens without waiting for a slow thinking capability probe', async () => {
+    const previousEnv = process.env.NODE_ENV;
+    (process.env as any).NODE_ENV = 'development';
+
+    const tokenizeMock = (llamaRn as unknown as { __tokenizeMock: jest.Mock }).__tokenizeMock;
+    let resolveProbeFormat!: () => void;
+    let probeFormatCalls = 0;
+
+    try {
+      tokenizeMock.mockResolvedValueOnce({ tokens: [1, 2, 3, 4] });
+      getFormattedChatMock().mockImplementation((_messages, _tools, formattingOptions) => {
+        if (formattingOptions?.jinja === true) {
+          probeFormatCalls += 1;
+
+          if (probeFormatCalls === 1) {
+            return new Promise((resolve) => {
+              resolveProbeFormat = () => resolve({
+                type: 'jinja',
+                prompt: 'Formatted prompt <think>reasoning</think>',
+                thinking_start_tag: '<think>',
+                thinking_end_tag: '</think>',
+              });
+            });
+          }
+
+          return Promise.resolve({
+            type: 'jinja',
+            prompt: 'Formatted prompt',
+            thinking_forced_open: false,
+          });
+        }
+
+        return Promise.resolve({ prompt: 'Count prompt', additional_stops: [] });
+      });
+
+      await llmEngineService.load('test/model', { forceReload: true });
+      for (let i = 0; i < 5 && probeFormatCalls === 0; i += 1) {
+        await Promise.resolve();
+      }
+      expect(probeFormatCalls).toBe(1);
+
+      const countPromise = llmEngineService.countPromptTokens({
+        messages: [{ role: 'user', content: 'Hello' }],
+      });
+
+      await expect(countPromise).resolves.toBe(4);
+      expect(tokenizeMock).toHaveBeenCalled();
+      expect(probeFormatCalls).toBe(1);
+
+      expect(registry.updateModel).not.toHaveBeenCalledWith(expect.objectContaining({
+        thinkingCapability: expect.anything(),
+      }));
+
+      await llmEngineService.unload();
+      resolveProbeFormat();
+      await Promise.resolve();
     } finally {
       (process.env as any).NODE_ENV = previousEnv;
     }
@@ -1154,7 +1429,7 @@ describe('LLMEngineService', () => {
         n_threads: 6,
         cpu_mask: '4,5',
         cpu_strict: true,
-        n_parallel: 2,
+        n_parallel: 1,
         flash_attn_type: 'on',
         use_mmap: false,
         use_mlock: true,
@@ -1169,7 +1444,7 @@ describe('LLMEngineService', () => {
       initFlashAttnType: 'on',
       initUseMmap: false,
       initUseMlock: true,
-      initNParallel: 2,
+      initNParallel: 1,
       initNThreads: 6,
       initCpuMask: '4,5',
       initCpuStrict: true,
@@ -1457,6 +1732,19 @@ describe('LLMEngineService', () => {
   it('rejects mmproj / CLIP projector GGUF files before initializing the engine', async () => {
     (llamaRn.loadLlamaModelInfo as jest.Mock).mockResolvedValueOnce({
       'general.type': 'mmproj',
+      'general.architecture': 'clip',
+    });
+
+    await expect(
+      llmEngineService.load('test/model', { forceReload: true }),
+    ).rejects.toMatchObject({ code: 'model_incompatible' });
+
+    expect(llamaRn.initLlama).not.toHaveBeenCalled();
+  });
+
+  it('rejects CLIP architecture GGUF files even when the GGUF type is not mmproj', async () => {
+    (llamaRn.loadLlamaModelInfo as jest.Mock).mockResolvedValueOnce({
+      'general.type': 'model',
       'general.architecture': 'clip',
     });
 

@@ -28,6 +28,7 @@ import {
   getFileSize,
   isEligibleGgufEntry,
   isPreferredQuantFileName,
+  isProjectorFileName,
   selectTreeEntryForModel,
 } from './ModelCatalogFileSelector';
 import {
@@ -339,7 +340,9 @@ export class ModelCatalogService {
     }
 
     if (!forceRefresh && cached && (isCacheFresh || isBufferedCursorFresh)) {
-      const filteredCachedModels = filterCatalogSearchModels(cached.result.models);
+      const filteredCachedModels = filterCatalogSearchModels(
+        this.sanitizeCachedCatalogModelsResolvedFiles(cached.result.models),
+      );
       const memoryFitContext = await memoryFitContextPromise;
       return {
         ...cached.result,
@@ -575,6 +578,112 @@ export class ModelCatalogService {
     return localModel ? this.withResolvedMemoryFit(localModel, this.getRememberedMemoryFitContext()) : null;
   }
 
+  private isSupportedResolvedCatalogFileName(fileName: string | undefined): boolean {
+    const normalized = fileName?.trim();
+    return Boolean(
+      normalized
+      && normalized.toLowerCase().endsWith('.gguf')
+      && !isProjectorFileName(normalized),
+    );
+  }
+
+  private extractResolvedFileNameFromDownloadUrl(downloadUrl: string | undefined): string | undefined {
+    const normalized = downloadUrl?.trim();
+    if (!normalized) {
+      return undefined;
+    }
+
+    try {
+      const parsed = new URL(normalized);
+      const pathSegments = parsed.pathname.split('/').filter((segment) => segment.length > 0);
+      const resolveIndex = pathSegments.indexOf('resolve');
+      const fileSegments = resolveIndex >= 0 && pathSegments.length > resolveIndex + 2
+        ? pathSegments.slice(resolveIndex + 2)
+        : pathSegments.slice(-1);
+      const decoded = fileSegments.map((segment) => decodeURIComponent(segment)).join('/').trim();
+      return decoded.length > 0 ? decoded : undefined;
+    } catch {
+      const withoutQuery = normalized.split(/[?#]/)[0] ?? normalized;
+      const fallback = withoutQuery.split(/[\\/]/).filter(Boolean).pop()?.trim();
+      return fallback && fallback.length > 0 ? fallback : undefined;
+    }
+  }
+
+  private sanitizeCachedCatalogModelResolvedFile(
+    model: ModelMetadata,
+    fallbackModel?: ModelMetadata,
+  ): ModelMetadata {
+    const resolvedFileName = model.resolvedFileName?.trim();
+    const downloadFileName = this.extractResolvedFileNameFromDownloadUrl(model.downloadUrl);
+    const hasSupportedResolvedFileName = this.isSupportedResolvedCatalogFileName(resolvedFileName);
+    const hasUnsupportedDownloadFileName = Boolean(
+      downloadFileName && !this.isSupportedResolvedCatalogFileName(downloadFileName),
+    );
+    const hasMismatchedDownloadFileName = Boolean(
+      hasSupportedResolvedFileName
+      && downloadFileName
+      && downloadFileName !== resolvedFileName,
+    );
+
+    if (
+      (!resolvedFileName || hasSupportedResolvedFileName)
+      && !hasUnsupportedDownloadFileName
+      && !hasMismatchedDownloadFileName
+    ) {
+      return model;
+    }
+
+    const fallbackFileName = this.isSupportedResolvedCatalogFileName(fallbackModel?.resolvedFileName)
+      ? fallbackModel?.resolvedFileName
+      : undefined;
+    const replacementFileName = fallbackFileName ?? (hasSupportedResolvedFileName ? resolvedFileName : undefined);
+    const metadataSource = fallbackFileName ? fallbackModel : undefined;
+
+    if (replacementFileName) {
+      const hfRevision = metadataSource ? metadataSource.hfRevision : model.hfRevision;
+      return normalizePersistedModelMetadata({
+        ...model,
+        size: metadataSource?.size ?? null,
+        fitsInRam: metadataSource?.fitsInRam ?? null,
+        memoryFitDecision: metadataSource?.memoryFitDecision,
+        memoryFitConfidence: metadataSource?.memoryFitConfidence,
+        metadataTrust: metadataSource?.metadataTrust,
+        gguf: metadataSource?.gguf,
+        capabilitySnapshot: metadataSource?.capabilitySnapshot,
+        maxContextTokens: metadataSource?.maxContextTokens,
+        hasVerifiedContextWindow: metadataSource?.hasVerifiedContextWindow === true,
+        parameterSizeLabel: metadataSource?.parameterSizeLabel,
+        hfRevision,
+        resolvedFileName: replacementFileName,
+        downloadUrl: buildHuggingFaceResolveUrl(model.id, replacementFileName, hfRevision),
+        sha256: metadataSource?.sha256,
+        requiresTreeProbe: metadataSource ? metadataSource.requiresTreeProbe === true : true,
+      });
+    }
+
+    return normalizePersistedModelMetadata({
+      ...model,
+      size: null,
+      fitsInRam: null,
+      memoryFitDecision: undefined,
+      memoryFitConfidence: undefined,
+      metadataTrust: undefined,
+      gguf: undefined,
+      capabilitySnapshot: undefined,
+      maxContextTokens: undefined,
+      hasVerifiedContextWindow: false,
+      parameterSizeLabel: undefined,
+      resolvedFileName: undefined,
+      downloadUrl: buildHuggingFaceResolveUrl(model.id, 'model.gguf', model.hfRevision),
+      sha256: undefined,
+      requiresTreeProbe: true,
+    });
+  }
+
+  private sanitizeCachedCatalogModelsResolvedFiles(models: ModelMetadata[]): ModelMetadata[] {
+    return models.map((model) => this.sanitizeCachedCatalogModelResolvedFile(model, registry.getModel(model.id)));
+  }
+
   private getCachedModelSnapshot(
     modelId: string,
   ): { model: ModelMetadata; authScope: CatalogCacheAuthScope } | null {
@@ -683,7 +792,9 @@ export class ModelCatalogService {
     }
 
     if (isMemoryEntryFresh && memoryEntry) {
-      const filteredMemoryModels = filterCatalogSearchModels(memoryEntry.result.models);
+      const filteredMemoryModels = filterCatalogSearchModels(
+        this.sanitizeCachedCatalogModelsResolvedFiles(memoryEntry.result.models),
+      );
       return {
         ...memoryEntry.result,
         models: this.mergeWithRegistry(filteredMemoryModels, this.getAuthScope(hasToken), memoryFitContext),
@@ -702,7 +813,9 @@ export class ModelCatalogService {
       return null;
     }
 
-    const filteredPersistedModels = filterCatalogSearchModels(persistentEntry.models);
+    const filteredPersistedModels = filterCatalogSearchModels(
+      this.sanitizeCachedCatalogModelsResolvedFiles(persistentEntry.models),
+    );
     const mergedModels = this.mergeWithRegistry(
       filteredPersistedModels,
       this.getAuthScope(hasToken),
@@ -1518,6 +1631,7 @@ export class ModelCatalogService {
     }
 
     const localModel = registry.getModel(remoteModel.id);
+    remoteModel = this.sanitizeCachedCatalogModelResolvedFile(remoteModel, localModel);
     if (!localModel) {
       // Search results and model snapshots are cached in memory (and persisted), but the local
       // registry is not. When a user offloads/deletes a model, cached results can still contain
@@ -1698,6 +1812,7 @@ export class ModelCatalogService {
         const expectedFileName = typeof options?.expectedFileName === 'string'
           ? options.expectedFileName.trim()
           : '';
+        let expectedTargetKnownIneligible = expectedFileName.length > 0 && isProjectorFileName(expectedFileName);
         let nextCursor: string | null = buildHuggingFaceTreeUrl(repoId, revision);
         const visitedCursors = new Set<string>();
         const entries: HuggingFaceTreeEntry[] = [];
@@ -1776,21 +1891,29 @@ export class ModelCatalogService {
               visitedCursors,
             );
 
-            if (expectedFileName.length > 0) {
-              const targetMatch = pageEntries.find((entry) => getFileName(entry) === expectedFileName);
-              if (targetMatch) {
+            const targetMatch = expectedFileName.length > 0 && !expectedTargetKnownIneligible
+              ? pageEntries.find((entry) => getFileName(entry) === expectedFileName)
+              : undefined;
+            if (targetMatch) {
+              if (isEligibleGgufEntry(targetMatch)) {
                 isComplete = resolvedNextCursor === null;
                 stopReason = 'target_found';
                 break;
               }
-            } else {
-              if (firstEligibleGgufPage === null) {
-                const firstGguf = pageEntries.find((entry) => isEligibleGgufEntry(entry));
-                if (firstGguf) {
-                  firstEligibleGgufPage = pageCount;
-                }
-              }
 
+              expectedTargetKnownIneligible = true;
+            }
+
+            const canUseFallbackStop = expectedFileName.length === 0 || expectedTargetKnownIneligible;
+
+            if (canUseFallbackStop && firstEligibleGgufPage === null) {
+              const firstGguf = pageEntries.find((entry) => isEligibleGgufEntry(entry));
+              if (firstGguf) {
+                firstEligibleGgufPage = pageCount;
+              }
+            }
+
+            if (canUseFallbackStop) {
               const preferred = pageEntries.find((entry) => (
                 isEligibleGgufEntry(entry) && isPreferredQuantFileName(getFileName(entry))
               ));

@@ -26,6 +26,7 @@ jest.mock('../../src/services/LLMEngineService', () => ({
     chatCompletion: jest.fn(),
     countPromptTokens: jest.fn(),
     stopCompletion: jest.fn(),
+    interruptActiveCompletion: jest.fn(),
     hasActiveCompletion: jest.fn(),
   },
 }));
@@ -108,6 +109,9 @@ describe('useChatSession', () => {
       async ({ messages }: { messages: any[] }) => estimateLlmMessagesTokens(messages as any),
     );
     (llmEngineService.stopCompletion as jest.Mock).mockResolvedValue(undefined);
+    (llmEngineService.interruptActiveCompletion as jest.Mock).mockImplementation(
+      async () => (llmEngineService.stopCompletion as jest.Mock)(),
+    );
     (llmEngineService.hasActiveCompletion as jest.Mock).mockReturnValue(false);
     jest.spyOn(AppState, 'addEventListener').mockImplementation((type: any, listener: any) => {
       if (type === 'change') {
@@ -519,6 +523,7 @@ describe('useChatSession', () => {
 
     await act(async () => {
       await getSession()?.stopGeneration();
+      onToken?.(' late token');
       resolveCompletion?.();
       await sendPromise;
     });
@@ -533,6 +538,394 @@ describe('useChatSession', () => {
         state: 'stopped',
       }),
     );
+  });
+
+  it('flushes throttled assistant content before marking a pending stop as stopped', async () => {
+    let onToken: ((token: any) => void) | undefined;
+    let resolveCompletion: (() => void) | undefined;
+    let resolveStopCompletion: (() => void) | undefined;
+
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementation(
+      ({ onToken: tokenHandler }: { onToken?: (token: any) => void }) =>
+        new Promise((resolve) => {
+          onToken = tokenHandler;
+          resolveCompletion = () => resolve({ text: 'Native completion resolved later' });
+        }),
+    );
+    (llmEngineService.stopCompletion as jest.Mock).mockImplementationOnce(
+      () => new Promise((resolve) => {
+        resolveStopCompletion = () => resolve(undefined);
+      }),
+    );
+
+    const getSession = renderHookHarness();
+    let sendPromise: Promise<void> | undefined;
+    await act(async () => {
+      sendPromise = getSession()?.appendUserMessage('Stream, then stop');
+    });
+
+    await waitFor(() => {
+      expect(useChatStore.getState().getActiveThread()?.status).toBe('generating');
+    });
+
+    jest.useFakeTimers();
+    try {
+      await act(async () => {
+        onToken?.({
+          token: 'answer-1',
+          content: 'Buffered answer',
+          reasoningContent: 'Buffered thought',
+        });
+      });
+
+      let thread = useChatStore.getState().getActiveThread();
+      expect(thread?.messages.at(-1)).toEqual(expect.objectContaining({
+        content: '',
+        state: 'streaming',
+      }));
+
+      let stopPromise: Promise<void> | undefined;
+      await act(async () => {
+        stopPromise = getSession()?.stopGeneration();
+        await Promise.resolve();
+      });
+
+      thread = useChatStore.getState().getActiveThread();
+      expect(llmEngineService.stopCompletion).toHaveBeenCalled();
+      expect(thread?.status).toBe('stopped');
+      expect(thread?.messages.at(-1)).toEqual(expect.objectContaining({
+        role: 'assistant',
+        content: 'Buffered answer',
+        thoughtContent: 'Buffered thought',
+        state: 'stopped',
+      }));
+
+      await act(async () => {
+        onToken?.({
+          token: 'late-answer',
+          content: 'Late answer',
+          reasoningContent: 'Late thought',
+        });
+        await Promise.resolve();
+      });
+
+      expect(useChatStore.getState().getActiveThread()?.messages.at(-1)).toEqual(expect.objectContaining({
+        content: 'Buffered answer',
+        thoughtContent: 'Buffered thought',
+        state: 'stopped',
+      }));
+
+      await act(async () => {
+        resolveStopCompletion?.();
+        resolveCompletion?.();
+        await stopPromise;
+        await sendPromise;
+      });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('blocks a new send while a stopped native completion is still settling', async () => {
+    let onToken: ((token: string) => void) | undefined;
+    let resolveCompletion: (() => void) | undefined;
+    let resolveInterrupt: (() => void) | undefined;
+
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      ({ onToken: tokenHandler }: { onToken?: (token: string) => void }) =>
+        new Promise((resolve) => {
+          onToken = tokenHandler;
+          resolveCompletion = () => resolve({ text: 'Stopped' });
+        }),
+    );
+    (llmEngineService.interruptActiveCompletion as jest.Mock).mockImplementationOnce(
+      () => new Promise((resolve) => {
+        resolveInterrupt = () => resolve(undefined);
+      }),
+    );
+
+    const getSession = renderHookHarness();
+    let sendPromise: Promise<void> | undefined;
+    await act(async () => {
+      sendPromise = getSession()?.appendUserMessage('Long answer please');
+    });
+
+    await waitFor(() => {
+      expect(useChatStore.getState().getActiveThread()?.status).toBe('generating');
+      expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1);
+    });
+
+    await act(async () => {
+      onToken?.('Partial answer');
+    });
+
+    let stopPromise: Promise<void> | undefined;
+    await act(async () => {
+      stopPromise = getSession()?.stopGeneration();
+      await Promise.resolve();
+    });
+
+    expect(llmEngineService.interruptActiveCompletion).toHaveBeenCalledTimes(1);
+    expect(useChatStore.getState().getActiveThread()?.status).toBe('stopped');
+
+    let sendError: unknown;
+    await act(async () => {
+      try {
+        await getSession()?.appendUserMessage('Too soon');
+      } catch (error) {
+        sendError = error;
+      }
+    });
+
+    expect(sendError).toEqual(expect.objectContaining({
+      message: expect.stringContaining('finish stopping'),
+    }));
+    expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1);
+    expect(useChatStore.getState().getActiveThread()?.messages.map((message) => message.content)).toEqual([
+      'Long answer please',
+      'Partial answer',
+    ]);
+
+    await act(async () => {
+      resolveInterrupt?.();
+      await stopPromise;
+      resolveCompletion?.();
+      await sendPromise;
+    });
+  });
+
+  it('does not start engine completion when stop is requested during prompt preparation', async () => {
+    let resolvePromptCount: (() => void) | undefined;
+    (llmEngineService.countPromptTokens as jest.Mock).mockImplementationOnce(
+      () => new Promise((resolve) => {
+        resolvePromptCount = () => resolve(16);
+      }),
+    );
+
+    const getSession = renderHookHarness();
+    let sendPromise: Promise<void> | undefined;
+
+    await act(async () => {
+      sendPromise = getSession()?.appendUserMessage('Stop before native generation');
+    });
+
+    await waitFor(() => {
+      expect(llmEngineService.countPromptTokens).toHaveBeenCalled();
+    });
+
+    await act(async () => {
+      await getSession()?.stopGeneration();
+    });
+
+    let thread = useChatStore.getState().getActiveThread();
+    expect(llmEngineService.stopCompletion).toHaveBeenCalled();
+    expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
+    expect(thread?.status).toBe('stopped');
+    expect(thread?.messages.at(-1)).toEqual(expect.objectContaining({
+      role: 'assistant',
+      state: 'stopped',
+    }));
+
+    await act(async () => {
+      resolvePromptCount?.();
+      await sendPromise;
+    });
+
+    thread = useChatStore.getState().getActiveThread();
+    expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
+    expect(thread?.status).toBe('stopped');
+    expect(thread?.messages.at(-1)).toEqual(expect.objectContaining({
+      role: 'assistant',
+      state: 'stopped',
+    }));
+  });
+
+  it('cleans up background inference when pre-native stopCompletion rejects', async () => {
+    let resolvePromptCount: (() => void) | undefined;
+    const stopError = new Error('pre-native stop failed');
+
+    (llmEngineService.countPromptTokens as jest.Mock).mockImplementationOnce(
+      () => new Promise((resolve) => {
+        resolvePromptCount = () => resolve(16);
+      }),
+    );
+    (llmEngineService.stopCompletion as jest.Mock).mockRejectedValueOnce(stopError);
+
+    const getSession = renderHookHarness();
+    let sendPromise: Promise<void> | undefined;
+
+    await act(async () => {
+      sendPromise = getSession()?.appendUserMessage('Stop before native cleanup');
+    });
+
+    await waitFor(() => {
+      expect(llmEngineService.countPromptTokens).toHaveBeenCalled();
+      expect(backgroundTaskService.isTaskActive('inference')).toBe(true);
+    });
+
+    let caughtError: unknown;
+    await act(async () => {
+      try {
+        await getSession()?.stopGeneration();
+      } catch (error) {
+        caughtError = error;
+      }
+    });
+
+    expect(caughtError).toBe(stopError);
+    expect(backgroundTaskService.isTaskActive('inference')).toBe(false);
+    expect(useChatStore.getState().getActiveThread()?.status).toBe('stopped');
+    expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolvePromptCount?.();
+      await sendPromise;
+    });
+  });
+
+  it('does not let an old stopped prompt-prep run start after a new send', async () => {
+    let resolveFirstPromptCount: (() => void) | undefined;
+    let resolveSecondCompletion: (() => void) | undefined;
+    (llmEngineService.countPromptTokens as jest.Mock).mockImplementationOnce(
+      () => new Promise((resolve) => {
+        resolveFirstPromptCount = () => resolve(16);
+      }),
+    );
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      async ({ onToken }: { onToken?: (token: string) => void }) => new Promise((resolve) => {
+        resolveSecondCompletion = () => {
+          onToken?.('Hello back');
+          resolve({ text: 'Hello back' });
+        };
+      }),
+    );
+
+    const getSession = renderHookHarness();
+    let firstSendPromise: Promise<void> | undefined;
+    await act(async () => {
+      firstSendPromise = getSession()?.appendUserMessage('First request');
+    });
+
+    await waitFor(() => {
+      expect(llmEngineService.countPromptTokens).toHaveBeenCalledTimes(1);
+    });
+
+    await act(async () => {
+      await getSession()?.stopGeneration();
+    });
+
+    await waitFor(() => {
+      expect(useChatStore.getState().getActiveThread()?.status).toBe('stopped');
+    });
+
+    let secondSendPromise: Promise<void> | undefined;
+    await act(async () => {
+      secondSendPromise = getSession()?.appendUserMessage('Second request');
+    });
+
+    await waitFor(() => {
+      expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1);
+    });
+
+    expect(backgroundTaskService.isTaskActive('inference')).toBe(true);
+
+    await act(async () => {
+      resolveFirstPromptCount?.();
+      await firstSendPromise;
+    });
+
+    expect(backgroundTaskService.isTaskActive('inference')).toBe(true);
+
+    await act(async () => {
+      resolveSecondCompletion?.();
+      await secondSendPromise;
+    });
+
+    const thread = useChatStore.getState().getActiveThread();
+    expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1);
+    expect(thread?.status).toBe('idle');
+    expect(thread?.messages.filter((message) => message.role === 'assistant')).toHaveLength(2);
+    expect(thread?.messages.at(-1)).toEqual(expect.objectContaining({
+      role: 'assistant',
+      content: 'Hello back',
+      state: 'complete',
+    }));
+  });
+
+  it('does not let a slow stale stop clear a newer generation background task', async () => {
+    let resolveFirstPromptCount: (() => void) | undefined;
+    let resolveStopCompletion: (() => void) | undefined;
+    let resolveSecondCompletion: (() => void) | undefined;
+
+    (llmEngineService.countPromptTokens as jest.Mock).mockImplementationOnce(
+      () => new Promise((resolve) => {
+        resolveFirstPromptCount = () => resolve(16);
+      }),
+    );
+    (llmEngineService.stopCompletion as jest.Mock).mockImplementationOnce(
+      () => new Promise((resolve) => {
+        resolveStopCompletion = () => resolve(undefined);
+      }),
+    );
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      async ({ onToken }: { onToken?: (token: string) => void }) => new Promise((resolve) => {
+        resolveSecondCompletion = () => {
+          onToken?.('Hello back');
+          resolve({ text: 'Hello back' });
+        };
+      }),
+    );
+
+    const getSession = renderHookHarness();
+    let firstSendPromise: Promise<void> | undefined;
+    await act(async () => {
+      firstSendPromise = getSession()?.appendUserMessage('First request');
+    });
+
+    await waitFor(() => {
+      expect(llmEngineService.countPromptTokens).toHaveBeenCalledTimes(1);
+    });
+
+    let stopPromise: Promise<void> | undefined;
+    await act(async () => {
+      stopPromise = getSession()?.stopGeneration();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(useChatStore.getState().getActiveThread()?.status).toBe('stopped');
+    });
+
+    let secondSendPromise: Promise<void> | undefined;
+    await act(async () => {
+      secondSendPromise = getSession()?.appendUserMessage('Second request');
+    });
+
+    await waitFor(() => {
+      expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1);
+    });
+
+    await act(async () => {
+      resolveStopCompletion?.();
+      await stopPromise;
+    });
+
+    expect(backgroundTaskService.isTaskActive('inference')).toBe(true);
+
+    await act(async () => {
+      resolveFirstPromptCount?.();
+      await firstSendPromise;
+    });
+
+    expect(backgroundTaskService.isTaskActive('inference')).toBe(true);
+
+    await act(async () => {
+      resolveSecondCompletion?.();
+      await secondSendPromise;
+    });
+
+    expect(backgroundTaskService.isTaskActive('inference')).toBe(false);
+    expect(useChatStore.getState().getActiveThread()?.status).toBe('idle');
   });
 
   it('regenerates the last assistant response in-place', async () => {
@@ -875,6 +1268,59 @@ describe('useChatSession', () => {
     });
 
     expect(interruptedSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('logs rejected expiration stop without changing stopped notification flow', async () => {
+    let resolveCompletion: (() => void) | undefined;
+    const stopError = new Error('expiration stop failed');
+    const interruptedSpy = jest.spyOn(notificationService, 'sendInterruptedNotification').mockResolvedValue(undefined);
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    Object.defineProperty(AppState, 'currentState', {
+      configurable: true,
+      value: 'background',
+    });
+
+    (llmEngineService.stopCompletion as jest.Mock).mockRejectedValueOnce(stopError);
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveCompletion = () => resolve({ text: 'Stopped after rejected expiration stop' });
+        }),
+    );
+
+    try {
+      const getSession = renderHookHarness();
+      let sendPromise: Promise<void> | undefined;
+
+      await act(async () => {
+        sendPromise = getSession()?.appendUserMessage('Expire and reject stop');
+      });
+
+      await waitFor(() => {
+        expect(BackgroundTaskServiceOnExpirationHandler()).toEqual(expect.any(Function));
+      });
+
+      await act(async () => {
+        BackgroundTaskServiceOnExpirationHandler()?.();
+        await Promise.resolve();
+      });
+
+      await waitFor(() => {
+        expect(useChatStore.getState().getActiveThread()?.status).toBe('stopped');
+      });
+
+      expect(llmEngineService.stopCompletion).toHaveBeenCalledTimes(1);
+      expect(warnSpy).toHaveBeenCalledWith('[ChatSession] Failed to stop expired completion', stopError);
+      expect(interruptedSpy).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        resolveCompletion?.();
+        await sendPromise;
+      });
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
   it('builds inference context from frozen preset snapshot, history, and params', async () => {

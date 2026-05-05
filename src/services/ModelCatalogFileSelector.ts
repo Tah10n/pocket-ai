@@ -109,7 +109,7 @@ function normalizeCatalogSignals(values: (string | undefined)[] | undefined): st
 export function selectTreeEntryForModel(model: ModelMetadata, entries: HuggingFaceTreeEntry[]): HuggingFaceTreeEntry | undefined {
   if (model.requiresTreeProbe !== true && model.resolvedFileName) {
     const exactMatch = entries.find((entry) => getFileName(entry) === model.resolvedFileName);
-    if (exactMatch) {
+    if (exactMatch && isEligibleGgufEntry(exactMatch)) {
       return exactMatch;
     }
   }
@@ -132,7 +132,8 @@ export function isPreferredQuantFileName(fileName: string): boolean {
 }
 
 export function isProjectorFileName(fileName: string): boolean {
-  const normalized = fileName.trim().toLowerCase();
+  const normalizedPath = fileName.trim().toLowerCase();
+  const normalized = normalizedPath.split(/[\\/]/).pop() ?? normalizedPath;
   return /(^|[._-])(mmproj|mm_projector|clip-projector|clip_projector)([._-]|$)/.test(normalized);
 }
 

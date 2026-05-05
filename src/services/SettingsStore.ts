@@ -310,11 +310,9 @@ function sanitizeModelLoadParameters(input: Partial<ModelLoadParameters> | undef
 
     const rawParallelSlots = input?.parallelSlots;
     const normalizedParallelSlots =
-        typeof rawParallelSlots === 'number' || typeof rawParallelSlots === 'string'
-            ? Math.round(clampNumber(rawParallelSlots, 1, 4, 1))
-            : rawParallelSlots === undefined
-              ? undefined
-              : 1;
+        rawParallelSlots === undefined
+            ? undefined
+            : 1;
 
     const rawNBatch = input?.nBatch;
     const normalizedNBatch =

@@ -442,19 +442,7 @@ class LLMEngineService {
   }
 
   private trackContextReleaseOperation<T>(operation: () => Promise<T>): Promise<T> {
-    const operationPromise = (async () => operation())();
-    this.activeContextReleaseOperationPromises.add(operationPromise);
-
-    void operationPromise.then(
-      () => {
-        this.activeContextReleaseOperationPromises.delete(operationPromise);
-      },
-      () => {
-        this.activeContextReleaseOperationPromises.delete(operationPromise);
-      },
-    );
-
-    return operationPromise;
+    return this.trackContextOperation(operation);
   }
 
   private async waitForActiveContextOperations(): Promise<void> {

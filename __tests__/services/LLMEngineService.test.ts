@@ -495,7 +495,7 @@ describe('LLMEngineService', () => {
     }
   });
 
-  it('starts chat completion while a slow thinking capability probe is pending', async () => {
+  it('waits for a slow thinking capability probe before starting chat completion', async () => {
     const previousEnv = process.env.NODE_ENV;
     (process.env as any).NODE_ENV = 'development';
 
@@ -545,18 +545,78 @@ describe('LLMEngineService', () => {
         params: { n_predict: 16 },
       });
 
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(completionMock).not.toHaveBeenCalled();
+
+      resolveProbeFormat();
       for (let i = 0; i < 10 && completionMock.mock.calls.length === 0; i += 1) {
         await Promise.resolve();
       }
-
       expect(completionMock).toHaveBeenCalled();
-      resolveProbeFormat();
-      await Promise.resolve();
-      await Promise.resolve();
       expect(probeFormatCalls).toBe(1);
 
       resolveNativeCompletion();
       await expect(completionPromise).resolves.toEqual({ text: 'Hello back' });
+
+      await llmEngineService.unload();
+    } finally {
+      (process.env as any).NODE_ENV = previousEnv;
+    }
+  });
+
+  it('waits for a slow thinking capability probe before counting prompt tokens', async () => {
+    const previousEnv = process.env.NODE_ENV;
+    (process.env as any).NODE_ENV = 'development';
+
+    const tokenizeMock = (llamaRn as unknown as { __tokenizeMock: jest.Mock }).__tokenizeMock;
+    let resolveProbeFormat!: () => void;
+    let probeFormatCalls = 0;
+
+    try {
+      tokenizeMock.mockResolvedValueOnce({ tokens: [1, 2, 3, 4] });
+      getFormattedChatMock().mockImplementation((_messages, _tools, formattingOptions) => {
+        if (formattingOptions?.jinja === true) {
+          probeFormatCalls += 1;
+
+          if (probeFormatCalls === 1) {
+            return new Promise((resolve) => {
+              resolveProbeFormat = () => resolve({
+                type: 'jinja',
+                prompt: 'Formatted prompt <think>reasoning</think>',
+                thinking_start_tag: '<think>',
+                thinking_end_tag: '</think>',
+              });
+            });
+          }
+
+          return Promise.resolve({
+            type: 'jinja',
+            prompt: 'Formatted prompt',
+            thinking_forced_open: false,
+          });
+        }
+
+        return Promise.resolve({ prompt: 'Count prompt', additional_stops: [] });
+      });
+
+      await llmEngineService.load('test/model', { forceReload: true });
+      for (let i = 0; i < 5 && probeFormatCalls === 0; i += 1) {
+        await Promise.resolve();
+      }
+      expect(probeFormatCalls).toBe(1);
+
+      const countPromise = llmEngineService.countPromptTokens({
+        messages: [{ role: 'user', content: 'Hello' }],
+      });
+
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(tokenizeMock).not.toHaveBeenCalled();
+
+      resolveProbeFormat();
+      await expect(countPromise).resolves.toBe(4);
+      expect(tokenizeMock).toHaveBeenCalled();
 
       await llmEngineService.unload();
     } finally {

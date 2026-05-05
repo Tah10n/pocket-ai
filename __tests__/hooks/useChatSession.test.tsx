@@ -26,6 +26,7 @@ jest.mock('../../src/services/LLMEngineService', () => ({
     chatCompletion: jest.fn(),
     countPromptTokens: jest.fn(),
     stopCompletion: jest.fn(),
+    interruptActiveCompletion: jest.fn(),
     hasActiveCompletion: jest.fn(),
   },
 }));
@@ -108,6 +109,9 @@ describe('useChatSession', () => {
       async ({ messages }: { messages: any[] }) => estimateLlmMessagesTokens(messages as any),
     );
     (llmEngineService.stopCompletion as jest.Mock).mockResolvedValue(undefined);
+    (llmEngineService.interruptActiveCompletion as jest.Mock).mockImplementation(
+      async () => (llmEngineService.stopCompletion as jest.Mock)(),
+    );
     (llmEngineService.hasActiveCompletion as jest.Mock).mockReturnValue(false);
     jest.spyOn(AppState, 'addEventListener').mockImplementation((type: any, listener: any) => {
       if (type === 'change') {
@@ -620,6 +624,74 @@ describe('useChatSession', () => {
     } finally {
       jest.useRealTimers();
     }
+  });
+
+  it('blocks a new send while a stopped native completion is still settling', async () => {
+    let onToken: ((token: string) => void) | undefined;
+    let resolveCompletion: (() => void) | undefined;
+    let resolveInterrupt: (() => void) | undefined;
+
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      ({ onToken: tokenHandler }: { onToken?: (token: string) => void }) =>
+        new Promise((resolve) => {
+          onToken = tokenHandler;
+          resolveCompletion = () => resolve({ text: 'Stopped' });
+        }),
+    );
+    (llmEngineService.interruptActiveCompletion as jest.Mock).mockImplementationOnce(
+      () => new Promise((resolve) => {
+        resolveInterrupt = () => resolve(undefined);
+      }),
+    );
+
+    const getSession = renderHookHarness();
+    let sendPromise: Promise<void> | undefined;
+    await act(async () => {
+      sendPromise = getSession()?.appendUserMessage('Long answer please');
+    });
+
+    await waitFor(() => {
+      expect(useChatStore.getState().getActiveThread()?.status).toBe('generating');
+      expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1);
+    });
+
+    await act(async () => {
+      onToken?.('Partial answer');
+    });
+
+    let stopPromise: Promise<void> | undefined;
+    await act(async () => {
+      stopPromise = getSession()?.stopGeneration();
+      await Promise.resolve();
+    });
+
+    expect(llmEngineService.interruptActiveCompletion).toHaveBeenCalledTimes(1);
+    expect(useChatStore.getState().getActiveThread()?.status).toBe('stopped');
+
+    let sendError: unknown;
+    await act(async () => {
+      try {
+        await getSession()?.appendUserMessage('Too soon');
+      } catch (error) {
+        sendError = error;
+      }
+    });
+
+    expect(sendError).toEqual(expect.objectContaining({
+      message: expect.stringContaining('finish stopping'),
+    }));
+    expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1);
+    expect(useChatStore.getState().getActiveThread()?.messages.map((message) => message.content)).toEqual([
+      'Long answer please',
+      'Partial answer',
+    ]);
+
+    await act(async () => {
+      resolveInterrupt?.();
+      await stopPromise;
+      resolveCompletion?.();
+      await sendPromise;
+    });
   });
 
   it('does not start engine completion when stop is requested during prompt preparation', async () => {

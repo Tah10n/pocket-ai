@@ -44,6 +44,7 @@ interface ActiveGenerationState {
   threadId: string;
   messageId: string;
   stopRequested: boolean;
+  nativeCompletionStarted: boolean;
   flushPendingAssistantPatch?: () => void;
 }
 
@@ -56,6 +57,11 @@ function isMatchingGeneration(threadId: string, messageId: string) {
     sharedGenerationState.current?.threadId === threadId &&
     sharedGenerationState.current?.messageId === messageId
   );
+}
+
+function isNativeCompletionSettlingAfterStop() {
+  const generation = sharedGenerationState.current;
+  return generation?.stopRequested === true && generation.nativeCompletionStarted;
 }
 
 export function resetSharedGenerationStateForTests() {
@@ -226,6 +232,7 @@ export const useChatSession = () => {
       threadId,
       messageId: assistantMessageId,
       stopRequested: false,
+      nativeCompletionStarted: false,
     };
     sharedGenerationState.current = generationState;
 
@@ -490,6 +497,11 @@ export const useChatSession = () => {
         return;
       }
 
+      if (llmEngineService.hasActiveCompletion() || isNativeCompletionSettlingAfterStop()) {
+        throw new Error('Wait for the current response to finish stopping before starting another response.');
+      }
+
+      generationState.nativeCompletionStarted = true;
       const completion = await llmEngineService.chatCompletion({
         messages,
         params: {
@@ -674,6 +686,10 @@ export const useChatSession = () => {
     if (engineState.activeModelId !== threadModelId) {
       throw new Error(`Load ${threadModelId} before ${actionLabel}.`);
     }
+
+    if (llmEngineService.hasActiveCompletion() || isNativeCompletionSettlingAfterStop()) {
+      throw new Error(`Wait for the current response to finish stopping before ${actionLabel}.`);
+    }
   }, []);
 
   const ensureThreadUsesModelForSend = useCallback((thread: ChatThread, nextModelId: string) => {
@@ -706,6 +722,10 @@ export const useChatSession = () => {
 
     if (activeThread?.status === 'generating') {
       throw new Error('A response is already being generated for this thread.');
+    }
+
+    if (llmEngineService.hasActiveCompletion() || isNativeCompletionSettlingAfterStop()) {
+      throw new Error('Wait for the current response to finish stopping before sending another message.');
     }
 
     const threadId = activeThread?.id
@@ -760,7 +780,11 @@ export const useChatSession = () => {
     stopAssistantMessage(generation.threadId, generation.messageId);
     finalizeThreadStatus(generation.threadId, 'stopped');
 
-    await llmEngineService.stopCompletion();
+    if (generation.nativeCompletionStarted) {
+      await llmEngineService.interruptActiveCompletion();
+    } else {
+      await llmEngineService.stopCompletion();
+    }
 
     if (sharedGenerationState.current === generation && backgroundTaskService.isTaskActive('inference')) {
       await backgroundTaskService.stopBackgroundTask('inference');

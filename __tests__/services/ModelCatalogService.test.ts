@@ -134,6 +134,21 @@ function makeLocalModel(id: string): ModelMetadata {
   };
 }
 
+function makeStaleProjectorCacheModel(id: string): ModelMetadata {
+  const fileName = 'mmproj-model.Q4_K_M.gguf';
+  return {
+    ...makeLocalModel(id),
+    size: 96 * 1024 * 1024,
+    downloadUrl: `https://huggingface.co/${id}/resolve/main/${fileName}`,
+    localPath: undefined,
+    resolvedFileName: fileName,
+    sha256: 'stale-projector-sha',
+    requiresTreeProbe: false,
+    lifecycleStatus: LifecycleStatus.AVAILABLE,
+    downloadProgress: 0,
+  };
+}
+
 function createDeferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason?: unknown) => void;
@@ -216,6 +231,191 @@ describe('ModelCatalogService', () => {
     expect(coldStartCachedResult?.models[0].fitsInRam).toBe(true);
 
     coldStartService.dispose();
+  });
+
+  it('sanitizes stale projector filenames from in-memory cached search results', async () => {
+    const service = new ModelCatalogService();
+    const staleModel = makeStaleProjectorCacheModel('org/projector-cache-model');
+    const cacheKey = (service as any).buildMemorySearchCacheKey('gguf', null, 20, null, false, undefined);
+    (service as any).searchCache.set(cacheKey, {
+      result: {
+        models: [staleModel],
+        hasMore: false,
+        nextCursor: null,
+      },
+      timestamp: Date.now(),
+      isBufferedCursor: false,
+    });
+    global.fetch = jest.fn() as jest.Mock;
+
+    const result = await service.searchModels();
+    const model = result.models[0];
+
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(model.id).toBe(staleModel.id);
+    expect(model.resolvedFileName).toBeUndefined();
+    expect(model.sha256).toBeUndefined();
+    expect(model.requiresTreeProbe).toBe(true);
+    expect(model.downloadUrl).not.toContain('mmproj');
+
+    service.dispose();
+  });
+
+  it('clears stale file metadata when a valid resolved filename has a projector download URL', async () => {
+    const staleModel: ModelMetadata = {
+      ...makeStaleProjectorCacheModel('org/mismatched-projector-url-cache-model'),
+      resolvedFileName: 'model.Q4_K_M.gguf',
+      metadataTrust: 'trusted_remote',
+      gguf: { totalBytes: 96 * 1024 * 1024, architecture: 'clip' },
+      memoryFitDecision: 'fits_high_confidence',
+      memoryFitConfidence: 'high',
+      fitsInRam: true,
+    };
+    const service = new ModelCatalogService();
+    const cacheKey = (service as any).buildMemorySearchCacheKey('gguf', null, 20, null, false, undefined);
+    (service as any).searchCache.set(cacheKey, {
+      result: {
+        models: [staleModel],
+        hasMore: false,
+        nextCursor: null,
+      },
+      timestamp: Date.now(),
+      isBufferedCursor: false,
+    });
+
+    const result = await service.searchModels();
+    const model = result.models[0];
+
+    expect(model.resolvedFileName).toBe('model.Q4_K_M.gguf');
+    expect(model.downloadUrl).toContain('model.Q4_K_M.gguf');
+    expect(model.downloadUrl).not.toContain('mmproj');
+    expect(model.size).toBeNull();
+    expect(model.sha256).toBeUndefined();
+    expect(model.gguf).toBeUndefined();
+    expect(model.metadataTrust).toBeUndefined();
+    expect(model.memoryFitDecision).toBeUndefined();
+    expect(model.requiresTreeProbe).toBe(true);
+
+    service.dispose();
+  });
+
+  it('sanitizes stale projector filenames from persisted search and snapshot caches', async () => {
+    const staleModel: ModelMetadata = {
+      ...makeStaleProjectorCacheModel('org/persisted-projector-cache-model'),
+      resolvedFileName: undefined,
+    };
+    const seedService = new ModelCatalogService();
+    (seedService as any).persistentCache.putSearch(
+      (seedService as any).buildPersistentSearchScope('gguf', 20, null, false),
+      {
+        models: [staleModel],
+        hasMore: false,
+        nextCursor: null,
+      },
+    );
+    (seedService as any).persistentCache.putModelSnapshots([staleModel], 'anon');
+    seedService.dispose();
+
+    const coldStartService = new ModelCatalogService();
+    const cachedSearch = coldStartService.getCachedSearchResult('gguf');
+    const cachedSnapshot = coldStartService.getCachedModel(staleModel.id);
+
+    expect(cachedSearch?.models[0]).toEqual(expect.objectContaining({
+      id: staleModel.id,
+      resolvedFileName: undefined,
+      sha256: undefined,
+      requiresTreeProbe: true,
+    }));
+    expect(cachedSearch?.models[0].downloadUrl).not.toContain('mmproj');
+    expect(cachedSnapshot).toEqual(expect.objectContaining({
+      id: staleModel.id,
+      resolvedFileName: undefined,
+      sha256: undefined,
+      requiresTreeProbe: true,
+    }));
+    expect(cachedSnapshot?.downloadUrl).not.toContain('mmproj');
+
+    coldStartService.dispose();
+  });
+
+  it('uses valid local file metadata instead of stale projector cache metadata', async () => {
+    const staleModel = makeStaleProjectorCacheModel('org/local-fallback-projector-cache-model');
+    const localModel: ModelMetadata = {
+      ...makeLocalModel(staleModel.id),
+      size: 4 * 1024 * 1024 * 1024,
+      hfRevision: 'new-local-revision',
+      metadataTrust: 'verified_local',
+      gguf: { totalBytes: 4 * 1024 * 1024 * 1024, architecture: 'llama' },
+      resolvedFileName: 'model.Q4_K_M.gguf',
+      downloadUrl: `https://huggingface.co/${staleModel.id}/resolve/new-local-revision/model.Q4_K_M.gguf`,
+      sha256: 'real-model-sha',
+      fitsInRam: true,
+      memoryFitDecision: 'fits_high_confidence',
+      memoryFitConfidence: 'high',
+    };
+    staleModel.hfRevision = 'old-projector-revision';
+    mockedRegistry.getModel.mockReturnValue(localModel);
+
+    const service = new ModelCatalogService();
+    const cacheKey = (service as any).buildMemorySearchCacheKey('gguf', null, 20, null, false, undefined);
+    (service as any).searchCache.set(cacheKey, {
+      result: {
+        models: [staleModel],
+        hasMore: false,
+        nextCursor: null,
+      },
+      timestamp: Date.now(),
+      isBufferedCursor: false,
+    });
+
+    const result = await service.searchModels();
+    const model = result.models[0];
+
+    expect(model.resolvedFileName).toBe(localModel.resolvedFileName);
+    expect(model.downloadUrl).toContain('model.Q4_K_M.gguf');
+    expect(model.downloadUrl).toContain('new-local-revision');
+    expect(model.downloadUrl).not.toContain('mmproj');
+    expect(model.size).toBe(localModel.size);
+    expect(model.metadataTrust).toBe('verified_local');
+    expect(model.gguf?.totalBytes).toBe(localModel.gguf?.totalBytes);
+    expect(model.sha256).toBe(localModel.sha256);
+
+    service.dispose();
+  });
+
+  it('does not reuse a stale projector revision when the valid local fallback uses the default revision', async () => {
+    const staleModel = makeStaleProjectorCacheModel('org/local-main-fallback-projector-cache-model');
+    staleModel.hfRevision = 'old-projector-revision';
+    const localModel: ModelMetadata = {
+      ...makeLocalModel(staleModel.id),
+      resolvedFileName: 'model.Q4_K_M.gguf',
+      downloadUrl: `https://huggingface.co/${staleModel.id}/resolve/main/model.Q4_K_M.gguf`,
+      sha256: 'real-main-model-sha',
+      metadataTrust: 'verified_local',
+    };
+    mockedRegistry.getModel.mockReturnValue(localModel);
+
+    const service = new ModelCatalogService();
+    const cacheKey = (service as any).buildMemorySearchCacheKey('gguf', null, 20, null, false, undefined);
+    (service as any).searchCache.set(cacheKey, {
+      result: {
+        models: [staleModel],
+        hasMore: false,
+        nextCursor: null,
+      },
+      timestamp: Date.now(),
+      isBufferedCursor: false,
+    });
+
+    const result = await service.searchModels();
+    const model = result.models[0];
+
+    expect(model.resolvedFileName).toBe(localModel.resolvedFileName);
+    expect(model.downloadUrl).toContain('/resolve/main/model.Q4_K_M.gguf');
+    expect(model.downloadUrl).not.toContain('old-projector-revision');
+    expect(model.sha256).toBe(localModel.sha256);
+
+    service.dispose();
   });
 
   it('does not preemptively warn on borderline GGUF models when only summary metadata is available', async () => {

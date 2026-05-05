@@ -19,14 +19,13 @@ updates:
           - "@expo/*"
           - "expo-router"
           - "@expo-google-fonts/*"
-      react-native-ecosystem:
-        patterns:
-          - "react-native"
-          - "react-native-*"
-          - "@react-native/*"
-          - "@react-navigation/*"
-          - "@shopify/flash-list"
+          - "babel-preset-expo"
+          - "eslint-config-expo"
+          - "jest-expo"
       tooling:
+        update-types:
+          - minor
+          - patch
         patterns:
           - "typescript"
           - "eslint"
@@ -49,22 +48,52 @@ updates:
       - dependency-name: "expo-router"
         update-types:
           - "version-update:semver-major"
+      - dependency-name: "babel-preset-expo"
+        update-types:
+          - "version-update:semver-major"
+      - dependency-name: "eslint-config-expo"
+        update-types:
+          - "version-update:semver-major"
+      - dependency-name: "jest-expo"
+        update-types:
+          - "version-update:semver-major"
       - dependency-name: "react"
-        update-types:
-          - "version-update:semver-major"
       - dependency-name: "react-dom"
-        update-types:
-          - "version-update:semver-major"
+      - dependency-name: "react-test-renderer"
       - dependency-name: "react-native"
-        update-types:
-          - "version-update:semver-major"
       - dependency-name: "react-native-*"
-        update-types:
-          - "version-update:semver-major"
       - dependency-name: "@react-native/*"
+      - dependency-name: "@react-native-community/*"
+      - dependency-name: "@react-navigation/*"
+      - dependency-name: "@shopify/flash-list"
+      - dependency-name: "tailwindcss"
         update-types:
           - "version-update:semver-major"
-      - dependency-name: "react-native-reanimated"
+      - dependency-name: "@tailwindcss/*"
+        update-types:
+          - "version-update:semver-major"
+      - dependency-name: "typescript"
+        update-types:
+          - "version-update:semver-major"
+      - dependency-name: "eslint"
+        update-types:
+          - "version-update:semver-major"
+      - dependency-name: "eslint-*"
+        update-types:
+          - "version-update:semver-major"
+      - dependency-name: "jest"
+        update-types:
+          - "version-update:semver-major"
+      - dependency-name: "jest-*"
+        update-types:
+          - "version-update:semver-major"
+      - dependency-name: "babel-*"
+        update-types:
+          - "version-update:semver-major"
+      - dependency-name: "@types/*"
+        update-types:
+          - "version-update:semver-major"
+      - dependency-name: "@testing-library/*"
         update-types:
           - "version-update:semver-major"
       - dependency-name: "llama.rn"

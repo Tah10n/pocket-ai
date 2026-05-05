@@ -4,7 +4,49 @@ const fs = require("fs");
 const path = require("path");
 const { spawnSync } = require("child_process");
 const DEFAULT_SCENARIO_PACK = "core";
-const SCENARIO_PACKS = new Set([DEFAULT_SCENARIO_PACK, "extended", "all"]);
+const SCENARIO_PACK_SCENARIOS = {
+  core: [
+    "home-smoke",
+    "bottom-tabs",
+    "new-chat-cta",
+  ],
+  "dependency-ui": [
+    "home-smoke",
+    "bottom-tabs",
+    "new-chat-cta",
+    "style-screenshots",
+  ],
+  runtime: [
+    "home-smoke",
+    "bottom-tabs",
+    "new-chat-cta",
+    "language-switch",
+    "conversations-management",
+  ],
+  native: [
+    "home-smoke",
+    "bottom-tabs",
+    "new-chat-cta",
+    "swap-model-cta",
+    "hf-token-education",
+    "conversations-management",
+  ],
+  extended: [
+    "home-smoke",
+    "bottom-tabs",
+    "new-chat-cta",
+    "swap-model-cta",
+    "hf-token-education",
+    "conversations-management",
+  ],
+  optional: [
+    "hf-catalog-hardening",
+    "memory-fit-badges",
+    "memory-fit-download-warning",
+    "performance-logcat",
+  ],
+};
+const SCENARIO_PACKS = new Set([...Object.keys(SCENARIO_PACK_SCENARIOS), "all"]);
 
 const cliOptions = require.main === module
   ? parseCliOptions(process.argv.slice(2))
@@ -559,6 +601,30 @@ function buildScenarios() {
       },
     },
     {
+      id: "style-screenshots",
+      tier: "secondary",
+      description: "Capture stable Home, Chat, Models, and Settings screenshots for styling dependency checks.",
+      run: async (ctx) => {
+        await goToHome(ctx);
+        await ctx.expectAnyText(APP_TITLE_LABELS);
+        ctx.captureScreenshot("style-home.png");
+
+        await ctx.tapBottomTab(CHAT_TAB_LABELS);
+        await ctx.expectAnyText(CHAT_ROUTE_LABELS);
+        ctx.captureScreenshot("style-chat.png");
+
+        await ctx.tapBottomTab(MODELS_TAB_LABELS);
+        await ctx.expectAnyText(MODEL_CATALOG_LABELS);
+        await ctx.expectAnyText(ALL_MODELS_LABELS);
+        ctx.captureScreenshot("style-models.png");
+
+        await ctx.tapBottomTab(SETTINGS_TAB_LABELS);
+        await ctx.expectAnyText(SETTINGS_TITLE_LABELS);
+        await scrollToAnyText(ctx, LANGUAGE_ROW_LABELS, { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
+        ctx.captureScreenshot("style-settings.png");
+      },
+    },
+    {
       id: "new-chat-cta",
       tier: "core",
       description: "Verify the Home screen New Chat button opens the chat screen empty state.",
@@ -682,6 +748,43 @@ function buildScenarios() {
       },
     },
     {
+      id: "language-switch",
+      tier: "secondary",
+      description: "Verify language switching updates navigation and home copy, then restores the original language.",
+      run: async (ctx) => {
+        await goToSettings(ctx);
+
+        const adbPath = resolveAdbPath();
+        const englishRow = await findAnyNodeNow(adbPath, ctx.serial, ["Language"], {
+          visibleOnly: true,
+        });
+        const russianRow = await findAnyNodeNow(adbPath, ctx.serial, ["Язык"], {
+          visibleOnly: true,
+        });
+
+        if (!englishRow && !russianRow) {
+          throw new Error("Could not detect the current language row before toggling language.");
+        }
+
+        const startedInEnglish = Boolean(englishRow);
+        const currentLanguageLabel = startedInEnglish ? ["Language"] : ["Язык"];
+        const nextLanguageLabel = startedInEnglish ? ["Язык"] : ["Language"];
+        const nextHomeLabel = startedInEnglish ? ["Недавние разговоры"] : ["Recent Conversations"];
+        const restoredHomeLabel = startedInEnglish ? ["Recent Conversations"] : ["Недавние разговоры"];
+
+        await ctx.tapAnyText(currentLanguageLabel, { afterTapDelayMs: 1_200 });
+        await ctx.expectAnyText(nextLanguageLabel, { timeoutMs: 10_000 });
+        await ctx.tapBottomTab(HOME_TAB_LABELS);
+        await ctx.expectAnyText(nextHomeLabel, { timeoutMs: 10_000 });
+
+        await goToSettings(ctx);
+        await ctx.tapAnyText(nextLanguageLabel, { afterTapDelayMs: 1_200 });
+        await ctx.expectAnyText(currentLanguageLabel, { timeoutMs: 10_000 });
+        await ctx.tapBottomTab(HOME_TAB_LABELS);
+        await ctx.expectAnyText(restoredHomeLabel, { timeoutMs: 10_000 });
+      },
+    },
+    {
       id: "conversations-management",
       tier: "secondary",
       description: "Verify the conversation management route is reachable from Home.",
@@ -759,19 +862,19 @@ function selectScenarios(scenarios, options) {
   }
 
   const requestedPack = options.pack || DEFAULT_SCENARIO_PACK;
-  return scenarios.filter((scenario) => isScenarioIncludedInPack(scenario, requestedPack));
-}
-
-function isScenarioIncludedInPack(scenario, pack) {
-  if (pack === "all") {
-    return true;
+  if (requestedPack === "all") {
+    return scenarios;
   }
 
-  if (pack === "extended") {
-    return scenario.tier === "core" || scenario.tier === "secondary";
+  const scenarioIds = SCENARIO_PACK_SCENARIOS[requestedPack];
+  if (!scenarioIds) {
+    return [];
   }
 
-  return scenario.tier === "core";
+  const scenariosById = new Map(scenarios.map((scenario) => [scenario.id, scenario]));
+  return scenarioIds
+    .map((scenarioId) => scenariosById.get(scenarioId))
+    .filter(Boolean);
 }
 
 async function goToHome(ctx) {
@@ -1574,6 +1677,8 @@ function writeReport(results) {
     JSON.stringify(
       {
         generatedAt: new Date().toISOString(),
+        pack: cliOptions.scenario ? null : cliOptions.pack,
+        selectedScenario: cliOptions.scenario,
         scenarioCount: results.length,
         summary,
         results,
@@ -1586,6 +1691,8 @@ function writeReport(results) {
 }
 
 function printScenarioList(scenarios) {
+  console.log(`Available Android scenario packs: ${[...SCENARIO_PACKS].join(", ")}`);
+  console.log("");
   console.log("Available Android scenarios:");
   for (const scenario of scenarios) {
     console.log(`- ${scenario.id} [${scenario.tier}]: ${scenario.description}`);
@@ -1686,7 +1793,7 @@ function printHelp() {
   console.log("  --emulator                 Run scenarios on an Android emulator instead of a connected phone");
   console.log("  --avd <name>               Use a specific AVD when starting an emulator");
   console.log("  --serial <serial>          Target a specific connected device");
-  console.log(`  --pack <core|extended|all> Run a scenario pack (default: ${DEFAULT_SCENARIO_PACK})`);
+  console.log(`  --pack <${[...SCENARIO_PACKS].join("|")}> Run a scenario pack (default: ${DEFAULT_SCENARIO_PACK})`);
   console.log("  --scenario <id>            Run only one scenario");
   console.log("  --skip-build               Reuse the existing debug APK");
   console.log("  --bootstrap-screenshot     Save a smoke bootstrap screenshot before scenarios");

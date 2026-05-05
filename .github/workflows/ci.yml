@@ -38,8 +38,8 @@ jobs:
       - name: Verify (typecheck + lint + tests)
         run: npm run verify:mobile-change
 
-  android-smoke:
-    name: android (smoke)
+  android-qa:
+    name: android (qa)
     runs-on: ubuntu-latest
     timeout-minutes: 60
     needs: verify
@@ -47,79 +47,14 @@ jobs:
       github.event_name == 'pull_request' &&
       (
         contains(github.event.pull_request.labels.*.name, 'run-android-checks') ||
-        contains(github.event.pull_request.body, '- [x] Run Android checks') ||
-        contains(github.event.pull_request.body, '- [X] Run Android checks')
-      )
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Setup Node
-        uses: actions/setup-node@v6
-        with:
-          node-version: 20
-          cache: npm
-
-      - name: Setup Java
-        uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: 17
-
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v6
-
-      - name: Enable KVM
-        run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Generate Android native project
-        run: |
-          npx expo prebuild --platform android --no-install
-          chmod +x android/gradlew
-
-      - name: Build Android debug APK
-        working-directory: android
-        run: ./gradlew app:assembleDebug
-
-      - name: Run Android smoke check
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: 34
-          arch: x86_64
-          profile: pixel_6
-          disable-linux-hw-accel: false
-          disable-animations: true
-          emulator-boot-timeout: 900
-          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none
-          script: node ./scripts/android-smoke.js --emulator --skip-build --screenshot artifacts/android-emulator-smoke.png
-
-      - name: Upload Android smoke artifacts
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: android-smoke
-          if-no-files-found: warn
-          path: |
-            artifacts/android-emulator-smoke.png
-            artifacts/bootstrap-logcat.txt
-            android/app/build/outputs/apk/debug/app-debug.apk
-
-  android-scenarios:
-    name: android (scenarios)
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    needs: verify
-    if: >-
-      github.event_name == 'pull_request' &&
-      (
         contains(github.event.pull_request.labels.*.name, 'run-android-scenarios') ||
+        contains(github.event.pull_request.labels.*.name, 'android-pack-dependency-ui') ||
+        contains(github.event.pull_request.labels.*.name, 'android-pack-runtime') ||
+        contains(github.event.pull_request.labels.*.name, 'android-pack-native') ||
+        contains(github.event.pull_request.labels.*.name, 'android-pack-extended') ||
+        contains(github.event.pull_request.labels.*.name, 'android-pack-all') ||
+        contains(github.event.pull_request.body, '- [x] Run Android checks') ||
+        contains(github.event.pull_request.body, '- [X] Run Android checks') ||
         contains(github.event.pull_request.body, '- [x] Run Android scenarios') ||
         contains(github.event.pull_request.body, '- [X] Run Android scenarios')
       )
@@ -149,6 +84,34 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
+      - name: Select Android QA pack
+        shell: bash
+        run: |
+          pack="core"
+
+          if [[ "${{ contains(github.event.pull_request.labels.*.name, 'android-pack-extended') || contains(github.event.pull_request.labels.*.name, 'run-android-scenarios') || contains(github.event.pull_request.body, '- [x] Run Android scenarios') || contains(github.event.pull_request.body, '- [X] Run Android scenarios') }}" == "true" ]]; then
+            pack="extended"
+          fi
+
+          if [[ "${{ contains(github.event.pull_request.labels.*.name, 'android-pack-dependency-ui') }}" == "true" ]]; then
+            pack="dependency-ui"
+          fi
+
+          if [[ "${{ contains(github.event.pull_request.labels.*.name, 'android-pack-runtime') }}" == "true" ]]; then
+            pack="runtime"
+          fi
+
+          if [[ "${{ contains(github.event.pull_request.labels.*.name, 'android-pack-native') }}" == "true" ]]; then
+            pack="native"
+          fi
+
+          if [[ "${{ contains(github.event.pull_request.labels.*.name, 'android-pack-all') }}" == "true" ]]; then
+            pack="all"
+          fi
+
+          echo "ANDROID_QA_PACK=$pack" >> "$GITHUB_ENV"
+          echo "Selected Android QA pack: $pack"
+
       - name: Install dependencies
         run: npm ci
 
@@ -171,13 +134,13 @@ jobs:
           disable-animations: true
           emulator-boot-timeout: 900
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none
-          script: npm run android:scenarios -- --emulator --skip-build --pack extended
+          script: npm run android:scenarios -- --emulator --skip-build --pack "$ANDROID_QA_PACK" --bootstrap-screenshot
 
-      - name: Upload Android scenario artifacts
+      - name: Upload Android QA artifacts
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: android-scenarios
+          name: android-qa
           if-no-files-found: warn
           path: |
             artifacts/android-scenarios/**

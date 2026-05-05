@@ -71,9 +71,16 @@ describe('android-scenarios smoke bootstrap args', () => {
 describe('android-scenarios npm defaults', () => {
   const packageJson = require('../../package.json');
 
-  it('keeps the npm scenario script on the extended stable pack', () => {
-    expect(packageJson.scripts['android:scenarios']).toContain('--pack extended');
-    expect(packageJson.scripts['android:scenarios:emulator']).toContain('--pack extended');
+  it('keeps the default npm scenario scripts on the fast core pack', () => {
+    expect(packageJson.scripts['android:scenarios']).toContain('--pack core');
+    expect(packageJson.scripts['android:scenarios:emulator']).toContain('--pack core');
+  });
+
+  it('exposes targeted scenario packs for dependency checks', () => {
+    expect(packageJson.scripts['android:scenarios:dependency-ui']).toContain('--pack dependency-ui');
+    expect(packageJson.scripts['android:scenarios:runtime']).toContain('--pack runtime');
+    expect(packageJson.scripts['android:scenarios:native']).toContain('--pack native');
+    expect(packageJson.scripts['android:scenarios:extended']).toContain('--pack extended');
   });
 });
 
@@ -200,6 +207,25 @@ describe('android-scenarios pack selection', () => {
       'new-chat-cta',
       'swap-model-cta',
       'hf-token-education',
+      'conversations-management',
+    ]);
+  });
+
+  it('selects styling-focused screenshots for dependency-ui checks', () => {
+    expect(selectScenarios(scenarios, parseCliOptions(['--pack', 'dependency-ui'])).map((scenario) => scenario.id)).toEqual([
+      'home-smoke',
+      'bottom-tabs',
+      'new-chat-cta',
+      'style-screenshots',
+    ]);
+  });
+
+  it('selects language switching for runtime dependency checks', () => {
+    expect(selectScenarios(scenarios, parseCliOptions(['--pack', 'runtime'])).map((scenario) => scenario.id)).toEqual([
+      'home-smoke',
+      'bottom-tabs',
+      'new-chat-cta',
+      'language-switch',
       'conversations-management',
     ]);
   });

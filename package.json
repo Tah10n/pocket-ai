@@ -102,7 +102,7 @@
     "nativewind": "^4.1.23",
     "react": "19.2.0",
     "react-dom": "19.2.0",
-    "react-i18next": "^16.5.4",
+    "react-i18next": "^17.0.6",
     "react-native": "0.83.6",
     "react-native-background-actions": "^4.1.0",
     "react-native-device-info": "^15.0.2",

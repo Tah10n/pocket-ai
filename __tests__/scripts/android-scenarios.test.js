@@ -136,6 +136,20 @@ describe('android-scenarios UI snapshot matching', () => {
     expect(isAppForegroundSnapshot(launcherSnapshot)).toBe(false);
   });
 
+  it('recognizes app foreground content when package names are hidden by the UI dump', () => {
+    const appSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="" package="android" clickable="false" bounds="[0,0][1080,2400]" />
+        <node text="Pocket AI" content-desc="" package="android" clickable="false" bounds="[148,177][396,216]" />
+        <node text="NO MODEL LOADED" content-desc="" package="android" clickable="false" bounds="[78,337][373,377]" />
+        <node text="Choose a local model" content-desc="" package="android" clickable="false" bounds="[78,496][588,535]" />
+        <node text="Browse models" content-desc="" package="android" clickable="true" bounds="[714,581][1003,649]" />
+      </hierarchy>
+    `);
+
+    expect(isAppForegroundSnapshot(appSnapshot)).toBe(true);
+  });
+
   it('prefers waiting over closing the app when an ANR dialog appears', () => {
     const snapshot = parseUiSnapshot(`
       <hierarchy>

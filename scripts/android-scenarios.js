@@ -116,6 +116,19 @@ const ACTIVE_MODEL_CTA_LABELS = [
 const CONVERSATIONS_TITLE_LABELS = ["All Conversations", "Все разговоры"];
 const MANAGE_CONVERSATIONS_LABELS = ["Manage", "Управлять"];
 const CONVERSATIONS_SEARCH_LABELS = ["Search conversations", "Поиск по разговорам"];
+const APP_FOREGROUND_MARKER_LABELS = [
+  "NO MODEL LOADED",
+  "МОДЕЛЬ НЕ ЗАГРУЖЕНА",
+  "Active model",
+  "Активная модель",
+  "Choose a local model",
+  "Выберите локальную модель",
+  ...ACTIVE_MODEL_CTA_LABELS,
+  ...HOME_SECTION_LABELS,
+  ...NEW_CHAT_LABELS,
+  "No conversations yet",
+  "Разговоров пока нет",
+];
 const MODEL_DETAILS_TITLE_LABELS = ["Model details", "Детали модели"];
 const MODEL_DETAILS_CTA_LABELS = ["Details", "Детали"];
 const OPEN_ON_HF_LABELS = ["Open on HF", "Открыть на HF"];
@@ -1441,7 +1454,18 @@ function isAppForegroundSnapshot(snapshot) {
     return false;
   }
 
-  return snapshot.nodes.some((node) => node.packageName === appPackageName);
+  if (snapshot.nodes.some((node) => node.packageName === appPackageName)) {
+    return true;
+  }
+
+  const hasAppTitle = findAnyNodeInSnapshot(snapshot, APP_TITLE_LABELS, {
+    visibleOnly: true,
+  });
+  const hasAppForegroundMarker = findAnyNodeInSnapshot(snapshot, APP_FOREGROUND_MARKER_LABELS, {
+    visibleOnly: true,
+  });
+
+  return Boolean(hasAppTitle && hasAppForegroundMarker);
 }
 
 function findNodesForLabelsInSnapshot(snapshot, labels, options = {}) {

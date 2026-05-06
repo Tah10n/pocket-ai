@@ -11,6 +11,8 @@ const cliOptions = require.main === module ? parseCliOptions(process.argv.slice(
 const projectRoot = path.resolve(__dirname, "..");
 const artifactsRoot = path.join(projectRoot, "artifacts", "android-scenarios");
 const androidRoot = path.join(projectRoot, "android");
+const apkVariant = parseApkVariant(cliOptions.apkVariant ?? process.env.ANDROID_SMOKE_APK_VARIANT ?? "debug");
+const shouldUseEmbeddedBundle = apkVariant === "release" || process.env.ANDROID_SMOKE_SKIP_METRO === "1";
 const localPropertiesPath = path.join(androidRoot, "local.properties");
 const appConfigPath = path.join(projectRoot, "app.json");
 const packageJsonPath = path.join(projectRoot, "package.json");
@@ -29,8 +31,8 @@ const apkPath = path.join(
   "build",
   "outputs",
   "apk",
-  "debug",
-  "app-debug.apk"
+  apkVariant,
+  `app-${apkVariant}.apk`
 );
 const cacheRoot = path.join(artifactsRoot, ".cache");
 const buildStampPath = path.join(cacheRoot, "android-debug-build.json");
@@ -120,26 +122,36 @@ async function main() {
       ? "Requested --skip-build, but the existing debug APK cannot be reused"
       : "Building a fresh Android debug APK";
     log(`${prefix} (${buildReuse.reason}).`);
-    buildDebugApk();
+    buildAndroidApk();
     didBuildDebugApk = true;
     writeBuildStamp(collectNativeBuildInputState(), createFileFingerprint(apkPath));
   }
 
   if (!fs.existsSync(apkPath)) {
-    throw new Error(`Expected debug APK at ${apkPath}, but it was not found.`);
+    throw new Error(`Expected Android ${apkVariant} APK at ${apkPath}, but it was not found.`);
   }
 
-  const metro = await ensureMetroServer();
-  await prewarmMetroBundle(metro.port, appPackage);
+  const metro = shouldUseEmbeddedBundle ? null : await ensureMetroServer();
+  if (metro) {
+    await prewarmMetroBundle(metro.port, appPackage);
+  } else {
+    log(`Using embedded JS bundle from the ${apkVariant} APK; Metro startup is not required.`);
+  }
 
   installDebugApk(tools.adb, device.serial, appPackage, {
     allowReuseExistingInstallOnLowStorage: !didBuildDebugApk,
     didBuildDebugApk,
   });
-  reverseMetroPort(tools.adb, device.serial, metro.port);
+  if (metro) {
+    reverseMetroPort(tools.adb, device.serial, metro.port);
+  }
 
   runCapture(tools.adb, ["-s", device.serial, "logcat", "-c"], { allowFailure: true });
-  launchDevClient(tools.adb, device.serial, appPackage, appScheme, metro.port);
+  if (metro) {
+    launchDevClient(tools.adb, device.serial, appPackage, appScheme, metro.port);
+  } else {
+    launchInstalledApp(tools.adb, device.serial, appPackage);
+  }
 
   if (screenshotPath) {
     await delay(launchDelayMs);
@@ -151,13 +163,17 @@ async function main() {
   }
 
   log(
-    `Android smoke check finished on ${device.serial} using Metro port ${metro.port}.`
+    metro
+      ? `Android smoke check finished on ${device.serial} using Metro port ${metro.port}.`
+      : `Android smoke check finished on ${device.serial} using the embedded ${apkVariant} APK bundle.`
   );
-  log(
-    metro.started
-      ? `Started Metro in the background on port ${metro.port}.`
-      : `Reused an existing Metro server on port ${metro.port}.`
-  );
+  if (metro) {
+    log(
+      metro.started
+        ? `Started Metro in the background on port ${metro.port}.`
+        : `Reused an existing Metro server on port ${metro.port}.`
+    );
+  }
 
   if (screenshotPath) {
     log(`Saved screenshot to ${screenshotPath}.`);
@@ -1046,26 +1062,37 @@ async function isPortFree(port) {
   });
 }
 
-function buildDebugApk() {
+function buildAndroidApk() {
   ensureAndroidNativeProject();
   ensureGradleWrapperExecutable();
-  log("Building Android debug APK...");
+  log(`Building Android ${apkVariant} APK...`);
+
+  const assembleTask = `app:assemble${apkVariant[0].toUpperCase()}${apkVariant.slice(1)}`;
+  const buildEnv = apkVariant === "release"
+    ? {
+        ...process.env,
+        POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING:
+          process.env.POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING || "true",
+      }
+    : process.env;
 
   if (process.platform === "win32") {
     runChecked(
       process.env.ComSpec || process.env.COMSPEC || "cmd.exe",
-      ["/d", "/s", "/c", "gradlew.bat app:assembleDebug"],
+      ["/d", "/s", "/c", `gradlew.bat ${assembleTask}`],
       {
         cwd: androidRoot,
         stdio: "inherit",
+        env: buildEnv,
       }
     );
     return;
   }
 
-  runChecked(gradleWrapperPath, ["app:assembleDebug"], {
+  runChecked(gradleWrapperPath, [assembleTask], {
     cwd: androidRoot,
     stdio: "inherit",
+    env: buildEnv,
   });
 }
 
@@ -1331,29 +1358,33 @@ function reverseMetroPort(adbPath, serial, port) {
   });
 }
 
+function launchInstalledApp(adbPath, serial, appPackage) {
+  log("Launching the installed Android app...");
+  runCapture(adbPath, ["-s", serial, "shell", "am", "force-stop", appPackage], {
+    allowFailure: true,
+  });
+  runChecked(
+    adbPath,
+    [
+      "-s",
+      serial,
+      "shell",
+      "monkey",
+      "-p",
+      appPackage,
+      "-c",
+      "android.intent.category.LAUNCHER",
+      "1",
+    ],
+    {
+      stdio: "inherit",
+    }
+  );
+}
+
 function launchDevClient(adbPath, serial, appPackage, appScheme, port) {
   if (!hasExpoDevClientDependency()) {
-    log("Launching the Android debug app...");
-    runCapture(adbPath, ["-s", serial, "shell", "am", "force-stop", appPackage], {
-      allowFailure: true,
-    });
-    runChecked(
-      adbPath,
-      [
-        "-s",
-        serial,
-        "shell",
-        "monkey",
-        "-p",
-        appPackage,
-        "-c",
-        "android.intent.category.LAUNCHER",
-        "1",
-      ],
-      {
-        stdio: "inherit",
-      }
-    );
+    launchInstalledApp(adbPath, serial, appPackage);
     return;
   }
 
@@ -1533,6 +1564,7 @@ function parseCliOptions(argv) {
     serial: null,
     port: null,
     launchDelayMs: null,
+    apkVariant: null,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -1565,6 +1597,11 @@ function parseCliOptions(argv) {
 
     if (arg === "--launch-delay-ms") {
       options.launchDelayMs = readCliValue(argv, ++index, "--launch-delay-ms");
+      continue;
+    }
+
+    if (arg === "--apk-variant") {
+      options.apkVariant = readCliValue(argv, ++index, "--apk-variant");
       continue;
     }
 
@@ -1607,7 +1644,8 @@ function printHelp() {
   console.log("  --avd <name>               Use a specific AVD when launching an emulator");
   console.log("  --serial <serial>          Target a specific connected device");
   console.log("  --port <number>            First Metro port to probe");
-  console.log("  --skip-build               Reuse the existing debug APK");
+  console.log("  --skip-build               Reuse the existing APK");
+  console.log("  --apk-variant <variant>    Install debug or release APK (default: debug)");
   console.log("  --screenshot [path]        Save a screenshot after launch");
   console.log("  --launch-delay-ms <ms>     Wait time before saving a screenshot");
 }
@@ -1619,6 +1657,15 @@ function parsePositiveInteger(value, label) {
   }
 
   return parsed;
+}
+
+function parseApkVariant(value) {
+  const normalized = `${value || "debug"}`.trim().toLowerCase();
+  if (normalized !== "debug" && normalized !== "release") {
+    throw new Error(`Invalid Android APK variant: ${value}`);
+  }
+
+  return normalized;
 }
 
 function isEmulatorSerial(serial) {
@@ -1654,6 +1701,7 @@ module.exports = {
   evaluateInstallReuse,
   isInsufficientStorageInstallFailure,
   parseDumpsysPackageOutput,
+  parseApkVariant,
   parsePackagePathOutput,
   sanitizeForFileName,
 };

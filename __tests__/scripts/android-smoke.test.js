@@ -3,6 +3,7 @@ const {
   evaluateApkReuse,
   evaluateInstallReuse,
   isInsufficientStorageInstallFailure,
+  parseApkVariant,
   parseDumpsysPackageOutput,
   parsePackagePathOutput,
   sanitizeForFileName,
@@ -42,6 +43,17 @@ describe('android-smoke storage failure detection', () => {
 
   it('does not match unrelated install failures', () => {
     expect(isInsufficientStorageInstallFailure('Failure [INSTALL_FAILED_VERSION_DOWNGRADE]')).toBe(false);
+  });
+});
+
+describe('android-smoke APK variant parsing', () => {
+  it('accepts supported APK variants', () => {
+    expect(parseApkVariant('debug')).toBe('debug');
+    expect(parseApkVariant('Release')).toBe('release');
+  });
+
+  it('rejects unsupported APK variants', () => {
+    expect(() => parseApkVariant('qa')).toThrow('Invalid Android APK variant');
   });
 });
 

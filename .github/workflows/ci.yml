@@ -112,12 +112,16 @@ jobs:
           npx expo prebuild --platform android --no-install
           chmod +x android/gradlew
 
-      - name: Build Android debug APK
+      - name: Build Android QA APK
         working-directory: android
-        run: ./gradlew app:assembleDebug
+        env:
+          POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING: "true"
+        run: ./gradlew app:assembleRelease
 
       - name: Run Android scenarios
         uses: reactivecircus/android-emulator-runner@v2
+        env:
+          ANDROID_SMOKE_APK_VARIANT: release
         with:
           api-level: 34
           arch: x86_64
@@ -137,5 +141,5 @@ jobs:
           path: |
             artifacts/android-scenarios/**
             artifacts/bootstrap-logcat.txt
-            android/app/build/outputs/apk/debug/app-debug.apk
+            android/app/build/outputs/apk/release/app-release.apk
 

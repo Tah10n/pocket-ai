@@ -130,7 +130,7 @@ async function main() {
   }
 
   const metro = await ensureMetroServer();
-  await prewarmMetroBundle(metro.port);
+  await prewarmMetroBundle(metro.port, appPackage);
 
   installDebugApk(tools.adb, device.serial, appPackage, {
     allowReuseExistingInstallOnLowStorage: !didBuildDebugApk,
@@ -917,20 +917,26 @@ async function isMetroRunning(port) {
   });
 }
 
-async function prewarmMetroBundle(port) {
-  const bundlePath = buildMetroBundlePath();
+async function prewarmMetroBundle(port, appPackage) {
+  const bundlePath = buildMetroBundlePath(readPackageEntryPoint(), { appPackage });
   log(`Prewarming Android Metro bundle on port ${port}...`);
 
   const bytes = await requestMetroBundle(port, bundlePath, metroBundleTimeoutMs);
   log(`Prewarmed Android Metro bundle (${bytes} bytes).`);
 }
 
-function buildMetroBundlePath(entryPoint = readPackageEntryPoint()) {
+function buildMetroBundlePath(entryPoint = readPackageEntryPoint(), options = {}) {
+  const appPackage = options.appPackage ?? readExpoConfig().packageName;
   const params = new URLSearchParams({
     platform: "android",
     dev: "true",
-    minify: "false",
     lazy: "true",
+    minify: "false",
+    app: appPackage,
+    modulesOnly: "false",
+    runModule: "true",
+    excludeSource: "true",
+    sourcePaths: "url-server",
   });
 
   return `${buildMetroEntryBundlePath(entryPoint)}?${params.toString()}`;

@@ -11,14 +11,18 @@ const {
 describe('android-smoke Metro prewarm', () => {
   it('builds an Android bundle URL from the package entrypoint', () => {
     expect(buildMetroBundlePath()).toBe(
-      '/node_modules/expo-router/entry.bundle?platform=android&dev=true&minify=false&lazy=true',
+      '/node_modules/expo-router/entry.bundle?platform=android&dev=true&lazy=true&minify=false&app=com.github.tah10n.pocketai&modulesOnly=false&runModule=true&excludeSource=true&sourcePaths=url-server',
     );
   });
 
   it('keeps local entrypoints rooted at the app source tree', () => {
-    expect(buildMetroBundlePath('./index')).toBe('/index.bundle?platform=android&dev=true&minify=false&lazy=true');
+    const options = { appPackage: 'com.example.app' };
+
+    expect(buildMetroBundlePath('./index', options)).toBe(
+      '/index.bundle?platform=android&dev=true&lazy=true&minify=false&app=com.example.app&modulesOnly=false&runModule=true&excludeSource=true&sourcePaths=url-server',
+    );
     expect(buildMetroBundlePath('./src/index.ts')).toBe(
-      '/src/index.bundle?platform=android&dev=true&minify=false&lazy=true',
+      '/src/index.bundle?platform=android&dev=true&lazy=true&minify=false&app=com.github.tah10n.pocketai&modulesOnly=false&runModule=true&excludeSource=true&sourcePaths=url-server',
     );
   });
 });

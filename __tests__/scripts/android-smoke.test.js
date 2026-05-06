@@ -9,8 +9,17 @@ const {
 } = require('../../scripts/android-smoke');
 
 describe('android-smoke Metro prewarm', () => {
-  it('builds an Android bundle URL for prewarming Metro before app launch', () => {
-    expect(buildMetroBundlePath()).toBe('/index.bundle?platform=android&dev=true&minify=false&lazy=true');
+  it('builds an Android bundle URL from the package entrypoint', () => {
+    expect(buildMetroBundlePath()).toBe(
+      '/node_modules/expo-router/entry.bundle?platform=android&dev=true&minify=false&lazy=true',
+    );
+  });
+
+  it('keeps local entrypoints rooted at the app source tree', () => {
+    expect(buildMetroBundlePath('./index')).toBe('/index.bundle?platform=android&dev=true&minify=false&lazy=true');
+    expect(buildMetroBundlePath('./src/index.ts')).toBe(
+      '/src/index.bundle?platform=android&dev=true&minify=false&lazy=true',
+    );
   });
 });
 

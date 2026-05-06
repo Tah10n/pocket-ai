@@ -925,7 +925,7 @@ async function prewarmMetroBundle(port) {
   log(`Prewarmed Android Metro bundle (${bytes} bytes).`);
 }
 
-function buildMetroBundlePath() {
+function buildMetroBundlePath(entryPoint = readPackageEntryPoint()) {
   const params = new URLSearchParams({
     platform: "android",
     dev: "true",
@@ -933,7 +933,35 @@ function buildMetroBundlePath() {
     lazy: "true",
   });
 
-  return `/index.bundle?${params.toString()}`;
+  return `${buildMetroEntryBundlePath(entryPoint)}?${params.toString()}`;
+}
+
+function readPackageEntryPoint() {
+  const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
+  return typeof packageJson.main === "string" && packageJson.main.trim() ? packageJson.main : "index";
+}
+
+function buildMetroEntryBundlePath(entryPoint) {
+  let normalized = `${entryPoint || "index"}`.trim();
+
+  normalized = normalized.replace(/\\/g, "/");
+  normalized = normalized.replace(/^\.\//, "");
+  normalized = normalized.replace(/^\/+/, "");
+  normalized = normalized.replace(/\.(android|native)?\.(js|jsx|ts|tsx|mjs|cjs)$/, "");
+  normalized = normalized.replace(/\.(js|jsx|ts|tsx|mjs|cjs)$/, "");
+
+  if (!normalized) {
+    normalized = "index";
+  }
+
+  const isProjectLocalEntry =
+    normalized === "index" ||
+    normalized.startsWith("src/") ||
+    normalized.startsWith("app/") ||
+    normalized.startsWith("node_modules/");
+  const bundleEntry = isProjectLocalEntry ? normalized : `node_modules/${normalized}`;
+
+  return `/${bundleEntry}.bundle`;
 }
 
 async function requestMetroBundle(port, bundlePath, timeoutMs = metroBundleTimeoutMs) {

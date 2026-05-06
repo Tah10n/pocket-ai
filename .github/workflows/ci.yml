@@ -89,24 +89,16 @@ jobs:
         run: |
           pack="core"
 
-          if [[ "${{ contains(github.event.pull_request.labels.*.name, 'android-pack-extended') || contains(github.event.pull_request.labels.*.name, 'run-android-scenarios') || contains(github.event.pull_request.body, '- [x] Run Android scenarios') || contains(github.event.pull_request.body, '- [X] Run Android scenarios') }}" == "true" ]]; then
-            pack="extended"
-          fi
-
-          if [[ "${{ contains(github.event.pull_request.labels.*.name, 'android-pack-dependency-ui') }}" == "true" ]]; then
-            pack="dependency-ui"
-          fi
-
-          if [[ "${{ contains(github.event.pull_request.labels.*.name, 'android-pack-runtime') }}" == "true" ]]; then
-            pack="runtime"
-          fi
-
-          if [[ "${{ contains(github.event.pull_request.labels.*.name, 'android-pack-native') }}" == "true" ]]; then
-            pack="native"
-          fi
-
           if [[ "${{ contains(github.event.pull_request.labels.*.name, 'android-pack-all') }}" == "true" ]]; then
             pack="all"
+          elif [[ "${{ contains(github.event.pull_request.labels.*.name, 'android-pack-native') }}" == "true" ]]; then
+            pack="native"
+          elif [[ "${{ contains(github.event.pull_request.labels.*.name, 'android-pack-runtime') }}" == "true" ]]; then
+            pack="runtime"
+          elif [[ "${{ contains(github.event.pull_request.labels.*.name, 'android-pack-dependency-ui') }}" == "true" ]]; then
+            pack="dependency-ui"
+          elif [[ "${{ contains(github.event.pull_request.labels.*.name, 'android-pack-extended') || contains(github.event.pull_request.labels.*.name, 'run-android-scenarios') || contains(github.event.pull_request.body, '- [x] Run Android scenarios') || contains(github.event.pull_request.body, '- [X] Run Android scenarios') }}" == "true" ]]; then
+            pack="extended"
           fi
 
           echo "ANDROID_QA_PACK=$pack" >> "$GITHUB_ENV"

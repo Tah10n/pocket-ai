@@ -23,7 +23,7 @@ Link the issue this pull request addresses, if one exists.
 - [ ] Run Android checks
 - [ ] Run Android scenarios
 
-Optional Android QA pack labels: `android-pack-dependency-ui`, `android-pack-runtime`, `android-pack-native`, `android-pack-all`.
+Optional Android QA pack labels: `android-pack-dependency-ui`, `android-pack-runtime`, `android-pack-native`, `android-pack-extended`, `android-pack-all`.
 
 ## UI evidence
 

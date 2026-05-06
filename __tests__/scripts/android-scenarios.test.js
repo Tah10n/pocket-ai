@@ -4,14 +4,17 @@ const {
   buildScenarios,
   buildSmokeLaunchArgs,
   findCatalogRiskModelCard,
+  findAnyNodeClearOfBottomOverlay,
   findAnyNodeInSnapshot,
   findNodeInSnapshot,
+  isBoundsClearOfBottomOverlay,
   isAppForegroundSnapshot,
   parseCliOptions,
   parseUiSnapshot,
   pickClosestNodePair,
   selectScenarios,
   ScenarioSkipError,
+  restoreLanguageAfterScenario,
 } = require('../../scripts/android-scenarios');
 
 describe('android-scenarios smoke bootstrap args', () => {
@@ -131,6 +134,24 @@ describe('android-scenarios UI snapshot matching', () => {
 
     expect(isAppForegroundSnapshot(launcherSnapshot)).toBe(false);
   });
+
+  it('treats text under the floating tab bar as visible but unsafe to tap', () => {
+    const snapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
+        <node text="" content-desc="icon, Language, English (US)" clickable="true" bounds="[37,2174][1043,2378]" />
+        <node text="" content-desc="icon, Language, English (US)" clickable="true" bounds="[37,1600][1043,1804]" />
+      </hierarchy>
+    `);
+
+    const bottomLanguage = findAnyNodeInSnapshot(snapshot, ['Language'], { visibleOnly: true });
+    const safeLanguage = findAnyNodeClearOfBottomOverlay(snapshot, ['Language']);
+
+    expect(bottomLanguage).toBeTruthy();
+    expect(isBoundsClearOfBottomOverlay(bottomLanguage.node.bounds, snapshot.viewportBounds)).toBe(false);
+    expect(safeLanguage.node.bounds.centerY).toBe(1702);
+    expect(isBoundsClearOfBottomOverlay(safeLanguage.node.bounds, snapshot.viewportBounds)).toBe(true);
+  });
 });
 
 describe('android-scenarios catalog risk matching', () => {
@@ -148,6 +169,18 @@ describe('android-scenarios catalog risk matching', () => {
 
     expect(card).toBeTruthy();
     expect(card.detailsNode.bounds.centerY).toBe(530);
+  });
+
+  it('ignores catalog detail CTAs hidden under the floating tab bar', () => {
+    const snapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
+        <node text="RAM Warning" content-desc="" clickable="false" bounds="[40,500][260,560]" />
+        <node text="Details" content-desc="" clickable="true" bounds="[820,2174][1020,2378]" />
+      </hierarchy>
+    `);
+
+    expect(findCatalogRiskModelCard('ignored', 'ignored', snapshot)).toBeNull();
   });
 
   it('scores the closest node pair by vertical proximity first', () => {
@@ -187,6 +220,10 @@ describe('android-scenarios CLI parsing', () => {
       })
     );
   });
+
+  it('does not expose optional scenarios as a named pack', () => {
+    expect(() => parseCliOptions(['--pack', 'optional'])).toThrow('Unknown scenario pack "optional"');
+  });
 });
 
 describe('android-scenarios pack selection', () => {
@@ -202,6 +239,17 @@ describe('android-scenarios pack selection', () => {
 
   it('includes secondary scenarios in the extended pack', () => {
     expect(selectScenarios(scenarios, parseCliOptions(['--pack', 'extended'])).map((scenario) => scenario.id)).toEqual([
+      'home-smoke',
+      'bottom-tabs',
+      'new-chat-cta',
+      'swap-model-cta',
+      'hf-token-education',
+      'conversations-management',
+    ]);
+  });
+
+  it('uses the stable secondary surface for native dependency checks', () => {
+    expect(selectScenarios(scenarios, parseCliOptions(['--pack', 'native'])).map((scenario) => scenario.id)).toEqual([
       'home-smoke',
       'bottom-tabs',
       'new-chat-cta',
@@ -234,6 +282,62 @@ describe('android-scenarios pack selection', () => {
     expect(selectScenarios(scenarios, parseCliOptions(['--scenario', 'memory-fit-download-warning'])).map((scenario) => scenario.id)).toEqual([
       'memory-fit-download-warning',
     ]);
+  });
+
+  it('runs every scenario, including optional checks, only for the all pack', () => {
+    const selectedIds = selectScenarios(scenarios, parseCliOptions(['--pack', 'all'])).map((scenario) => scenario.id);
+
+    expect(selectedIds).toEqual(scenarios.map((scenario) => scenario.id));
+    expect(selectedIds).toEqual(
+      expect.arrayContaining([
+        'hf-catalog-hardening',
+        'memory-fit-badges',
+        'memory-fit-download-warning',
+        'performance-logcat',
+      ])
+    );
+  });
+});
+
+describe('android-scenarios language restore', () => {
+  function createRestoreContext() {
+    return {
+      serial: 'emulator-5554',
+      tapAnyText: jest.fn().mockResolvedValue(undefined),
+      tapBottomTab: jest.fn().mockResolvedValue(undefined),
+      expectAnyText: jest.fn().mockResolvedValue(undefined),
+    };
+  }
+
+  it('returns home without toggling when the original language is already restored', async () => {
+    const ctx = createRestoreContext();
+
+    await restoreLanguageAfterScenario(ctx, ['Original'], ['Alternate'], ['Restored Home'], {
+      findAnyNodeNow: jest.fn().mockResolvedValue({ label: 'Original' }),
+      goToSettings: jest.fn().mockResolvedValue(undefined),
+      resolveAdbPath: () => 'adb',
+      scrollToAnyText: jest.fn().mockResolvedValue(undefined),
+    });
+
+    expect(ctx.tapAnyText).not.toHaveBeenCalled();
+    expect(ctx.tapBottomTab).toHaveBeenCalledWith(expect.arrayContaining(['Home']));
+    expect(ctx.expectAnyText).toHaveBeenCalledWith(['Restored Home'], { timeoutMs: 10_000 });
+  });
+
+  it('toggles back before returning home when the alternate language is still active', async () => {
+    const ctx = createRestoreContext();
+
+    await restoreLanguageAfterScenario(ctx, ['Original'], ['Alternate'], ['Restored Home'], {
+      findAnyNodeNow: jest.fn().mockResolvedValue(null),
+      goToSettings: jest.fn().mockResolvedValue(undefined),
+      resolveAdbPath: () => 'adb',
+      scrollToAnyText: jest.fn().mockResolvedValue(undefined),
+    });
+
+    expect(ctx.tapAnyText).toHaveBeenCalledWith(['Alternate'], { afterTapDelayMs: 1_200 });
+    expect(ctx.expectAnyText).toHaveBeenCalledWith(['Original'], { timeoutMs: 10_000 });
+    expect(ctx.tapBottomTab).toHaveBeenCalledWith(expect.arrayContaining(['Home']));
+    expect(ctx.expectAnyText).toHaveBeenCalledWith(['Restored Home'], { timeoutMs: 10_000 });
   });
 });
 

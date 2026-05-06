@@ -4,6 +4,14 @@ const fs = require("fs");
 const path = require("path");
 const { spawnSync } = require("child_process");
 const DEFAULT_SCENARIO_PACK = "core";
+const DEFAULT_TAP_SAFE_BOTTOM_INSET_RATIO = 0.14;
+const DEFAULT_TAP_SAFE_BOTTOM_INSET_MIN_PX = 220;
+// Native and extended both use the stable secondary surface; optional catalog/perf checks stay targeted or behind all.
+const STABLE_SECONDARY_SCENARIOS = [
+  "swap-model-cta",
+  "hf-token-education",
+  "conversations-management",
+];
 const SCENARIO_PACK_SCENARIOS = {
   core: [
     "home-smoke",
@@ -27,23 +35,13 @@ const SCENARIO_PACK_SCENARIOS = {
     "home-smoke",
     "bottom-tabs",
     "new-chat-cta",
-    "swap-model-cta",
-    "hf-token-education",
-    "conversations-management",
+    ...STABLE_SECONDARY_SCENARIOS,
   ],
   extended: [
     "home-smoke",
     "bottom-tabs",
     "new-chat-cta",
-    "swap-model-cta",
-    "hf-token-education",
-    "conversations-management",
-  ],
-  optional: [
-    "hf-catalog-hardening",
-    "memory-fit-badges",
-    "memory-fit-download-warning",
-    "performance-logcat",
+    ...STABLE_SECONDARY_SCENARIOS,
   ],
 };
 const SCENARIO_PACKS = new Set([...Object.keys(SCENARIO_PACK_SCENARIOS), "all"]);
@@ -355,9 +353,9 @@ function createScenarioContext(adbPath, serial) {
     tapText: async (label, options = {}) => {
       await dismissDebuggerBannerIfPresent(adbPath, serial);
 
-      const node = await waitForNode(adbPath, serial, label, {
+      const { node } = await waitForAnyTappableNode(adbPath, serial, [label], {
         timeoutMs: options.timeoutMs,
-        visibleOnly: true,
+        allowBottomOverlay: options.allowBottomOverlay,
       });
 
       if (!node.bounds) {
@@ -392,9 +390,9 @@ function createScenarioContext(adbPath, serial) {
     tapAnyText: async (labels, options = {}) => {
       await dismissDebuggerBannerIfPresent(adbPath, serial);
 
-      const { label, node } = await waitForAnyNode(adbPath, serial, labels, {
+      const { label, node } = await waitForAnyTappableNode(adbPath, serial, labels, {
         timeoutMs: options.timeoutMs,
-        visibleOnly: true,
+        allowBottomOverlay: options.allowBottomOverlay,
       });
 
       if (!node.bounds) {
@@ -540,10 +538,10 @@ function findCatalogRiskModelCard(adbPath, serial, snapshot = null) {
   const resolvedSnapshot = snapshot || createUiSnapshot(adbPath, serial);
   const riskBadges = findNodesForLabelsInSnapshot(resolvedSnapshot, RAM_FIT_RISK_BADGE_LABELS, {
     visibleOnly: true,
-  });
+  }).filter((node) => isBoundsClearOfBottomOverlay(node.bounds, resolvedSnapshot.viewportBounds));
   const detailNodes = findNodesForLabelsInSnapshot(resolvedSnapshot, MODEL_DETAILS_CTA_LABELS, {
     visibleOnly: true,
-  }).filter((node) => node.bounds);
+  }).filter((node) => isBoundsClearOfBottomOverlay(node.bounds, resolvedSnapshot.viewportBounds));
 
   if (riskBadges.length === 0 || detailNodes.length === 0) {
     return null;
@@ -632,7 +630,7 @@ function buildScenarios() {
         await goToHome(ctx);
         await ctx.tapAnyText(NEW_CHAT_LABELS);
         await ctx.expectAnyText(CHAT_EMPTY_LABELS);
-        await ctx.tapAnyText(HOME_TAB_LABELS);
+        await ctx.tapBottomTab(HOME_TAB_LABELS);
         await ctx.expectAnyText(NEW_CHAT_LABELS);
       },
     },
@@ -646,7 +644,7 @@ function buildScenarios() {
         await ctx.expectAnyText(MODEL_CATALOG_LABELS);
         await ctx.expectAnyText(ALL_MODELS_LABELS);
         await ctx.expectAnyText(DOWNLOADED_TAB_LABELS);
-        await ctx.tapAnyText(HOME_TAB_LABELS);
+        await ctx.tapBottomTab(HOME_TAB_LABELS);
         await ctx.expectAnyText(ACTIVE_MODEL_CTA_LABELS);
       },
     },
@@ -722,7 +720,10 @@ function buildScenarios() {
             visibleOnly: true,
           });
 
-          await ctx.tapAnyText(DOWNLOAD_WARNING_CANCEL_LABELS, { timeoutMs: 5_000 });
+          await ctx.tapAnyText(DOWNLOAD_WARNING_CANCEL_LABELS, {
+            timeoutMs: 5_000,
+            allowBottomOverlay: true,
+          });
           await ctx.pressBack();
           await ctx.expectAnyText(MODEL_CATALOG_LABELS, { timeoutMs: 8_000 });
           return;
@@ -753,14 +754,17 @@ function buildScenarios() {
       description: "Verify language switching updates navigation and home copy, then restores the original language.",
       run: async (ctx) => {
         await goToSettings(ctx);
+        await scrollToAnyText(ctx, LANGUAGE_ROW_LABELS, { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
 
         const adbPath = resolveAdbPath();
         const englishRow = await findAnyNodeNow(adbPath, ctx.serial, ["Language"], {
           visibleOnly: true,
         });
-        const russianRow = await findAnyNodeNow(adbPath, ctx.serial, ["Язык"], {
-          visibleOnly: true,
-        });
+        const russianRow = englishRow
+          ? null
+          : await findAnyNodeNow(adbPath, ctx.serial, ["Язык"], {
+              visibleOnly: true,
+            });
 
         if (!englishRow && !russianRow) {
           throw new Error("Could not detect the current language row before toggling language.");
@@ -772,16 +776,33 @@ function buildScenarios() {
         const nextHomeLabel = startedInEnglish ? ["Недавние разговоры"] : ["Recent Conversations"];
         const restoredHomeLabel = startedInEnglish ? ["Recent Conversations"] : ["Недавние разговоры"];
 
-        await ctx.tapAnyText(currentLanguageLabel, { afterTapDelayMs: 1_200 });
-        await ctx.expectAnyText(nextLanguageLabel, { timeoutMs: 10_000 });
-        await ctx.tapBottomTab(HOME_TAB_LABELS);
-        await ctx.expectAnyText(nextHomeLabel, { timeoutMs: 10_000 });
+        let languageToggled = false;
+        let scenarioError = null;
 
-        await goToSettings(ctx);
-        await ctx.tapAnyText(nextLanguageLabel, { afterTapDelayMs: 1_200 });
-        await ctx.expectAnyText(currentLanguageLabel, { timeoutMs: 10_000 });
-        await ctx.tapBottomTab(HOME_TAB_LABELS);
-        await ctx.expectAnyText(restoredHomeLabel, { timeoutMs: 10_000 });
+        try {
+          await ctx.tapAnyText(currentLanguageLabel, { afterTapDelayMs: 1_200 });
+          languageToggled = true;
+          await ctx.expectAnyText(nextLanguageLabel, { timeoutMs: 10_000 });
+          await ctx.tapBottomTab(HOME_TAB_LABELS);
+          await ctx.expectAnyText(nextHomeLabel, { timeoutMs: 10_000 });
+        } catch (error) {
+          scenarioError = error;
+          throw error;
+        } finally {
+          if (languageToggled) {
+            try {
+              await restoreLanguageAfterScenario(ctx, currentLanguageLabel, nextLanguageLabel, restoredHomeLabel);
+            } catch (restoreError) {
+              if (!scenarioError) {
+                throw restoreError;
+              }
+
+              log(
+                `WARN language restore failed after scenario error: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`
+              );
+            }
+          }
+        }
       },
     },
     {
@@ -801,42 +822,30 @@ function buildScenarios() {
       description: "Verify the Performance screen can dump a trace to logcat in dev builds.",
       run: async (ctx) => {
         await goToSettings(ctx);
-
-        const adbPath = resolveAdbPath();
-
-        for (let attempt = 0; attempt < 5; attempt += 1) {
-          const performanceRow = await findAnyNodeNow(adbPath, ctx.serial, PERFORMANCE_ROW_LABELS, {
-            visibleOnly: true,
-          });
-
-          if (performanceRow) {
-            break;
-          }
-
-          await ctx.swipeUp();
-        }
-
-        const performanceRow = await findAnyNodeNow(adbPath, ctx.serial, PERFORMANCE_ROW_LABELS, {
-          visibleOnly: true,
-        });
-
-        if (!performanceRow) {
-          throw new Error("Timed out waiting for the Performance settings row.");
-        }
+        await scrollToAnyText(ctx, PERFORMANCE_ROW_LABELS, { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
 
         await ctx.tapAnyText(PERFORMANCE_ROW_LABELS);
         await ctx.expectAnyText(PERFORMANCE_COPY_TRACE_LABELS);
 
+        const adbPath = resolveAdbPath();
         const enableInstrumentation = await findAnyNodeNow(adbPath, ctx.serial, PERFORMANCE_ENABLE_INSTRUMENTATION_LABELS, {
           visibleOnly: true,
         });
 
         if (enableInstrumentation) {
+          await scrollToAnyText(ctx, PERFORMANCE_ENABLE_INSTRUMENTATION_LABELS, {
+            timeoutMs: 5_000,
+            maxSwipesDown: 0,
+          });
           await ctx.tapAnyText(PERFORMANCE_ENABLE_INSTRUMENTATION_LABELS);
         }
 
         runChecked(adbPath, ["-s", ctx.serial, "logcat", "-c"]);
 
+        await scrollToAnyText(ctx, PERFORMANCE_DUMP_TO_LOGCAT_LABELS, {
+          timeoutMs: 5_000,
+          maxSwipesDown: 0,
+        });
         await ctx.tapAnyText(PERFORMANCE_DUMP_TO_LOGCAT_LABELS);
 
         let logs = "";
@@ -923,7 +932,10 @@ async function tryReachHome(ctx, maxAttempts = 4) {
       visibleOnly: true,
     });
     if (downloadWarning) {
-      await ctx.tapAnyText(DOWNLOAD_WARNING_CANCEL_LABELS, { timeoutMs: 5_000 });
+      await ctx.tapAnyText(DOWNLOAD_WARNING_CANCEL_LABELS, {
+        timeoutMs: 5_000,
+        allowBottomOverlay: true,
+      });
       continue;
     }
 
@@ -946,7 +958,7 @@ async function tryReachHome(ctx, maxAttempts = 4) {
       visibleOnly: true,
     });
     if (homeNode) {
-      await ctx.tapAnyText(HOME_TAB_LABELS, { afterTapDelayMs: 500 });
+      await ctx.tapBottomTab(HOME_TAB_LABELS, { afterTapDelayMs: 500 });
       continue;
     }
 
@@ -963,6 +975,37 @@ async function goToSettings(ctx) {
   await goToHome(ctx);
   await ctx.tapBottomTab(SETTINGS_TAB_LABELS);
   await ctx.expectAnyText(SETTINGS_TITLE_LABELS);
+}
+
+async function restoreLanguageAfterScenario(
+  ctx,
+  originalLanguageLabel,
+  alternateLanguageLabel,
+  restoredHomeLabel,
+  options = {}
+) {
+  const goSettings = options.goToSettings || goToSettings;
+  const resolveAdb = options.resolveAdbPath || resolveAdbPath;
+  const findNodeNow = options.findAnyNodeNow || findAnyNodeNow;
+  const scrollToText = options.scrollToAnyText || scrollToAnyText;
+
+  await goSettings(ctx);
+  await scrollToText(ctx, [...originalLanguageLabel, ...alternateLanguageLabel], {
+    timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS,
+  });
+
+  const adbPath = resolveAdb();
+  const originalLanguageRow = await findNodeNow(adbPath, ctx.serial, originalLanguageLabel, {
+    visibleOnly: true,
+  });
+
+  if (!originalLanguageRow) {
+    await ctx.tapAnyText(alternateLanguageLabel, { afterTapDelayMs: 1_200 });
+    await ctx.expectAnyText(originalLanguageLabel, { timeoutMs: 10_000 });
+  }
+
+  await ctx.tapBottomTab(HOME_TAB_LABELS);
+  await ctx.expectAnyText(restoredHomeLabel, { timeoutMs: 10_000 });
 }
 
 async function goToConversationManagement(ctx) {
@@ -1003,10 +1046,19 @@ async function scrollToAnyText(ctx, labels, options = {}) {
   const timeoutMs = options.timeoutMs ?? 20_000;
   const maxSwipesDown = options.maxSwipesDown ?? 3;
   const maxSwipesUp = options.maxSwipesUp ?? 10;
+  const requireClearTapArea = options.requireClearTapArea !== false;
   const adbPath = resolveAdbPath();
   const startedAt = Date.now();
 
-  const findNow = async () => findAnyNodeNow(adbPath, ctx.serial, labels, { visibleOnly: true });
+  const findNow = async () => {
+    const snapshot = createUiSnapshot(adbPath, ctx.serial);
+
+    if (!requireClearTapArea) {
+      return findAnyNodeInSnapshot(snapshot, labels, { visibleOnly: true });
+    }
+
+    return findAnyNodeClearOfBottomOverlay(snapshot, labels, options);
+  };
 
   let match = await findNow();
   if (match) {
@@ -1217,6 +1269,32 @@ async function waitForAnyNode(adbPath, serial, labels, options = {}) {
       adbPath,
       serial,
       `Timed out waiting for any of: ${labels.map((label) => `"${label}"`).join(", ")}.`
+    )
+  );
+}
+
+async function waitForAnyTappableNode(adbPath, serial, labels, options = {}) {
+  const timeoutMs = options.timeoutMs ?? 20_000;
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const snapshot = createUiSnapshot(adbPath, serial);
+    const match = options.allowBottomOverlay
+      ? findAnyNodeInSnapshot(snapshot, labels, { visibleOnly: true })
+      : findAnyNodeClearOfBottomOverlay(snapshot, labels, options);
+
+    if (match) {
+      return match;
+    }
+
+    await delay(600);
+  }
+
+  throw new Error(
+    withUiSummary(
+      adbPath,
+      serial,
+      `Timed out waiting for a tappable node matching any of: ${labels.map((label) => `"${label}"`).join(", ")}.`
     )
   );
 }
@@ -1471,6 +1549,44 @@ function isBoundsInViewport(bounds, viewportBounds) {
     && bounds.centerY >= viewportBounds.top
     && bounds.centerY <= viewportBounds.bottom
   );
+}
+
+function findAnyNodeClearOfBottomOverlay(snapshot, labels, options = {}) {
+  for (const label of labels) {
+    const nodes = findMatchingNodes(snapshot, label, { visibleOnly: true })
+      .filter((node) => isBoundsClearOfBottomOverlay(node.bounds, snapshot.viewportBounds, options));
+
+    const node = pickBestNode(nodes);
+    if (node) {
+      return { label, node };
+    }
+  }
+
+  return null;
+}
+
+function isBoundsClearOfBottomOverlay(bounds, viewportBounds, options = {}) {
+  if (!isBoundsInViewport(bounds, viewportBounds)) {
+    return false;
+  }
+
+  const bottomInsetPx = resolveTapSafeBottomInsetPx(viewportBounds, options);
+  return bounds.centerY <= viewportBounds.bottom - bottomInsetPx;
+}
+
+function resolveTapSafeBottomInsetPx(viewportBounds, options = {}) {
+  if (Number.isFinite(options.bottomSafeInsetPx) && options.bottomSafeInsetPx >= 0) {
+    return options.bottomSafeInsetPx;
+  }
+
+  const ratio = Number.isFinite(options.bottomSafeInsetRatio)
+    ? options.bottomSafeInsetRatio
+    : DEFAULT_TAP_SAFE_BOTTOM_INSET_RATIO;
+  const minPx = Number.isFinite(options.minBottomSafeInsetPx)
+    ? options.minBottomSafeInsetPx
+    : DEFAULT_TAP_SAFE_BOTTOM_INSET_MIN_PX;
+
+  return Math.max(minPx, Math.round(viewportBounds.height * ratio));
 }
 
 function pickBestNode(nodes) {
@@ -1932,11 +2048,14 @@ module.exports = {
   buildSmokeLaunchArgs,
   findCatalogRiskModelCard,
   findAnyNodeInSnapshot,
+  findAnyNodeClearOfBottomOverlay,
   findNodeInSnapshot,
+  isBoundsClearOfBottomOverlay,
   isAppForegroundSnapshot,
   pickClosestNodePair,
   selectScenarios,
   parseCliOptions,
   parseUiSnapshot,
+  restoreLanguageAfterScenario,
   ScenarioSkipError,
 };

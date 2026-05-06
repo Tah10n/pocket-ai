@@ -158,7 +158,7 @@ npm run android:scenarios -- --pack runtime
 npm run android:scenarios -- --pack native
 ```
 
-In GitHub PRs, `Run Android checks` runs the core pack. `Run Android scenarios` keeps the legacy extended pack. Maintainers can apply `android-pack-dependency-ui`, `android-pack-runtime`, `android-pack-native`, or `android-pack-all` labels to choose a more specific pack without running every optional scenario. Explicit `android-pack-*` labels take precedence over the legacy checkbox, with `android-pack-all` as the final override.
+In GitHub PRs, `Run Android checks` runs the core pack. `Run Android scenarios` keeps the legacy extended pack. Maintainers can apply `android-pack-dependency-ui`, `android-pack-runtime`, `android-pack-native`, `android-pack-extended`, or `android-pack-all` labels to choose a specific pack. If multiple pack labels are present, CI uses the first match in this priority order: `android-pack-all`, `android-pack-native`, `android-pack-runtime`, `android-pack-dependency-ui`, then `android-pack-extended`. Optional catalog/performance scenarios stay targeted via `--scenario <id>` unless `android-pack-all` is selected.
 
 ## Localization
 

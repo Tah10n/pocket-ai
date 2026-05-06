@@ -1,4 +1,5 @@
 const {
+  buildMetroBundlePath,
   evaluateApkReuse,
   evaluateInstallReuse,
   isInsufficientStorageInstallFailure,
@@ -6,6 +7,12 @@ const {
   parsePackagePathOutput,
   sanitizeForFileName,
 } = require('../../scripts/android-smoke');
+
+describe('android-smoke Metro prewarm', () => {
+  it('builds an Android bundle URL for prewarming Metro before app launch', () => {
+    expect(buildMetroBundlePath()).toBe('/index.bundle?platform=android&dev=true&minify=false&lazy=true');
+  });
+});
 
 describe('android-smoke storage failure detection', () => {
   it('detects the explicit ADB insufficient-storage install failure code', () => {

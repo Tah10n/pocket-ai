@@ -36,6 +36,7 @@ const cacheRoot = path.join(artifactsRoot, ".cache");
 const buildStampPath = path.join(cacheRoot, "android-debug-build.json");
 const requiredNativeLibraries = ["libreactnative.so"];
 const metroStartupTimeoutMs = 90_000;
+const metroBundleTimeoutMs = 120_000;
 const deviceStartupTimeoutMs = 180_000;
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const launchDelayMs = parsePositiveInteger(
@@ -129,6 +130,7 @@ async function main() {
   }
 
   const metro = await ensureMetroServer();
+  await prewarmMetroBundle(metro.port);
 
   installDebugApk(tools.adb, device.serial, appPackage, {
     allowReuseExistingInstallOnLowStorage: !didBuildDebugApk,
@@ -915,6 +917,85 @@ async function isMetroRunning(port) {
   });
 }
 
+async function prewarmMetroBundle(port) {
+  const bundlePath = buildMetroBundlePath();
+  log(`Prewarming Android Metro bundle on port ${port}...`);
+
+  const bytes = await requestMetroBundle(port, bundlePath, metroBundleTimeoutMs);
+  log(`Prewarmed Android Metro bundle (${bytes} bytes).`);
+}
+
+function buildMetroBundlePath() {
+  const params = new URLSearchParams({
+    platform: "android",
+    dev: "true",
+    minify: "false",
+    lazy: "true",
+  });
+
+  return `/index.bundle?${params.toString()}`;
+}
+
+async function requestMetroBundle(port, bundlePath, timeoutMs = metroBundleTimeoutMs) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let receivedBytes = 0;
+    let responseBody = "";
+
+    const finish = (error, value) => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      if (error) {
+        reject(error);
+        return;
+      }
+
+      resolve(value);
+    };
+
+    const request = http.get(
+      {
+        host: "127.0.0.1",
+        port,
+        path: bundlePath,
+        timeout: timeoutMs,
+      },
+      (response) => {
+        response.on("data", (chunk) => {
+          receivedBytes += chunk.length;
+          if (response.statusCode !== 200 && responseBody.length < 4096) {
+            responseBody += chunk.toString("utf8");
+          }
+        });
+        response.on("end", () => {
+          if (response.statusCode !== 200) {
+            finish(
+              new Error(
+                `Metro bundle prewarm failed with HTTP ${response.statusCode}: ${responseBody.slice(0, 500)}`
+              )
+            );
+            return;
+          }
+
+          finish(null, receivedBytes);
+        });
+      }
+    );
+
+    request.on("timeout", () => {
+      request.destroy();
+      finish(new Error(`Timed out while prewarming Metro bundle on port ${port}.`));
+    });
+
+    request.on("error", (error) => {
+      finish(error);
+    });
+  });
+}
+
 async function isPortFree(port) {
   return new Promise((resolve) => {
     const server = net.createServer();
@@ -1534,6 +1615,7 @@ function wakeAndUnlockDevice(adbPath, serial) {
 }
 
 module.exports = {
+  buildMetroBundlePath,
   evaluateApkReuse,
   evaluateInstallReuse,
   isInsufficientStorageInstallFailure,

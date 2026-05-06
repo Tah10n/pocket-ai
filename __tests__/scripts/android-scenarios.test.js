@@ -4,6 +4,7 @@ const {
   buildScenarios,
   buildSmokeLaunchArgs,
   findCatalogRiskModelCard,
+  findBlockingSystemDialogAction,
   findAnyNodeClearOfBottomOverlay,
   findAnyNodeInSnapshot,
   findNodeInSnapshot,
@@ -133,6 +134,24 @@ describe('android-scenarios UI snapshot matching', () => {
     `);
 
     expect(isAppForegroundSnapshot(launcherSnapshot)).toBe(false);
+  });
+
+  it('prefers waiting over closing the app when an ANR dialog appears', () => {
+    const snapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="" package="android" clickable="false" bounds="[0,0][1080,2400]" />
+        <node text="Pocket AI isn't responding" content-desc="" package="android" clickable="false" bounds="[70,1200][1000,1300]" />
+        <node text="Close app" content-desc="" package="android" clickable="true" bounds="[200,1400][820,1510]" />
+        <node text="Wait" content-desc="" package="android" clickable="true" bounds="[200,1560][820,1670]" />
+      </hierarchy>
+    `);
+
+    expect(findBlockingSystemDialogAction(snapshot)).toEqual(
+      expect.objectContaining({
+        kind: 'wait',
+        label: 'Wait',
+      })
+    );
   });
 
   it('treats text under the floating tab bar as visible but unsafe to tap', () => {

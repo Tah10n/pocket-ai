@@ -161,7 +161,7 @@ const DOWNLOAD_WARNING_CANCEL_LABELS = [
   "Отмена",
   "ОТМЕНА",
 ];
-const INITIAL_APP_VISIBLE_TIMEOUT_MS = 20_000;
+const INITIAL_APP_VISIBLE_TIMEOUT_MS = 60_000;
 const HOME_ROUTE_TIMEOUT_MS = 90_000;
 const SETTINGS_ROUTE_TIMEOUT_MS = 60_000;
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
@@ -497,6 +497,18 @@ function readExpoConfig() {
 
 async function dismissBlockingSystemDialogIfPresent(adbPath, serial) {
   const snapshot = createUiSnapshot(adbPath, serial);
+  const action = findBlockingSystemDialogAction(snapshot);
+
+  if (!action?.node?.bounds) {
+    return action ? "detected" : null;
+  }
+
+  tapBounds(adbPath, serial, action.node.bounds);
+  await delay(action.kind === "wait" ? 2_000 : 1_200);
+  return action.kind;
+}
+
+function findBlockingSystemDialogAction(snapshot) {
   const hasAppNotRespondingDialog = snapshot.nodes.some((node) =>
     APP_NOT_RESPONDING_LABEL_FRAGMENTS.some((fragment) => matchesUiFragment(node, fragment))
   );
@@ -505,21 +517,17 @@ async function dismissBlockingSystemDialogIfPresent(adbPath, serial) {
     return null;
   }
 
-  const closeAppAction = findAnyNodeInSnapshot(snapshot, CLOSE_APP_LABELS, { visibleOnly: true });
-  if (closeAppAction?.node?.bounds) {
-    tapBounds(adbPath, serial, closeAppAction.node.bounds);
-    await delay(1_200);
-    return "close-app";
-  }
-
   const waitAction = findAnyNodeInSnapshot(snapshot, WAIT_LABELS, { visibleOnly: true });
-  if (waitAction?.node?.bounds) {
-    tapBounds(adbPath, serial, waitAction.node.bounds);
-    await delay(2_000);
-    return "wait";
+  if (waitAction) {
+    return { ...waitAction, kind: "wait" };
   }
 
-  return "detected";
+  const closeAppAction = findAnyNodeInSnapshot(snapshot, CLOSE_APP_LABELS, { visibleOnly: true });
+  if (closeAppAction) {
+    return { ...closeAppAction, kind: "close-app" };
+  }
+
+  return { kind: "detected", label: null, node: null };
 }
 
 function tapBounds(adbPath, serial, bounds) {
@@ -2052,6 +2060,7 @@ module.exports = {
   findNodeInSnapshot,
   isBoundsClearOfBottomOverlay,
   isAppForegroundSnapshot,
+  findBlockingSystemDialogAction,
   pickClosestNodePair,
   selectScenarios,
   parseCliOptions,

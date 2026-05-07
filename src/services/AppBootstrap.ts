@@ -25,6 +25,7 @@ import {
   type PrivateStorageHealthSnapshot,
 } from './storage';
 import { toAppError } from './AppError';
+import { stopPrivateRuntimeWorkForStorageBlocked } from './PrivateStorageRecovery';
 import { EngineStatus } from '../types/models';
 import { isHighConfidenceLikelyOomMemoryFit } from '../utils/modelMemoryFitState';
 import { safeJoinModelPath } from '../utils/safeFilePath';
@@ -154,6 +155,16 @@ function buildStorageBlockedBackgroundResult(
     outcome: 'storage_blocked',
     storageHealth: sanitizePrivateStorageHealthSnapshot(storageHealth),
   };
+}
+
+async function stopPrivateRuntimeWorkForStorageBlockedSafely(): Promise<void> {
+  try {
+    await stopPrivateRuntimeWorkForStorageBlocked();
+  } catch (error) {
+    if (!isRuntimeTestEnvironment()) {
+      console.warn('[bootstrapApp] Failed to stop runtime work after private storage blocked', error);
+    }
+  }
 }
 
 function getBlockedPrivateStorageHealthSnapshot(): PrivateStorageHealthSnapshot | null {
@@ -478,13 +489,14 @@ export async function bootstrapAppBackground(): Promise<BootstrapBackgroundResul
     }
   };
 
-  const buildBlockedResultIfNeeded = (): BootstrapBackgroundResult | null => {
+  const buildBlockedResultIfNeeded = async (): Promise<BootstrapBackgroundResult | null> => {
     const blockedStorageHealth = getBlockedPrivateStorageHealthSnapshot();
     if (!blockedStorageHealth) {
       return null;
     }
 
     outcome = 'storage_blocked';
+    await stopPrivateRuntimeWorkForStorageBlockedSafely();
     return buildStorageBlockedBackgroundResult(blockedStorageHealth);
   };
 
@@ -492,6 +504,7 @@ export async function bootstrapAppBackground(): Promise<BootstrapBackgroundResul
     const currentStorageHealth = getPrivateStorageHealthSnapshot();
     if (currentStorageHealth.status === 'blocked') {
       outcome = 'storage_blocked';
+      await stopPrivateRuntimeWorkForStorageBlockedSafely();
       return buildStorageBlockedBackgroundResult(currentStorageHealth);
     }
 
@@ -502,7 +515,7 @@ export async function bootstrapAppBackground(): Promise<BootstrapBackgroundResul
     } catch (e) {
       recordError('setupFileSystem', e);
     }
-    const blockedAfterFileSystem = buildBlockedResultIfNeeded();
+    const blockedAfterFileSystem = await buildBlockedResultIfNeeded();
     if (blockedAfterFileSystem) {
       return blockedAfterFileSystem;
     }
@@ -512,7 +525,7 @@ export async function bootstrapAppBackground(): Promise<BootstrapBackgroundResul
     } catch (e) {
       recordError('validateRegistry', e);
     }
-    const blockedAfterRegistry = buildBlockedResultIfNeeded();
+    const blockedAfterRegistry = await buildBlockedResultIfNeeded();
     if (blockedAfterRegistry) {
       return blockedAfterRegistry;
     }
@@ -520,9 +533,13 @@ export async function bootstrapAppBackground(): Promise<BootstrapBackgroundResul
     if (!isRuntimeTestEnvironment() && Platform.OS !== 'web') {
       scheduleAfterFirstFrame(() => {
         try {
+          if (getPrivateStorageHealthSnapshot().status !== 'ready') {
+            return;
+          }
+
           // eslint-disable-next-line @typescript-eslint/no-require-imports
           const module = require('./ModelDownloadManager') as typeof import('./ModelDownloadManager');
-          module.getModelDownloadManager();
+          module.resumeModelDownloadQueueIfStorageReady();
         } catch (e) {
           if (!isRuntimeTestEnvironment()) {
             console.warn('[bootstrapApp] Failed to warm modelDownloadManager', e);
@@ -536,7 +553,7 @@ export async function bootstrapAppBackground(): Promise<BootstrapBackgroundResul
     } catch (e) {
       recordError('presetManager.getPresets', e);
     }
-    const blockedAfterPresets = buildBlockedResultIfNeeded();
+    const blockedAfterPresets = await buildBlockedResultIfNeeded();
     if (blockedAfterPresets) {
       return blockedAfterPresets;
     }
@@ -548,7 +565,7 @@ export async function bootstrapAppBackground(): Promise<BootstrapBackgroundResul
     } catch (e) {
       recordError('chatHistory', e);
     }
-    const blockedAfterChatHistory = buildBlockedResultIfNeeded();
+    const blockedAfterChatHistory = await buildBlockedResultIfNeeded();
     if (blockedAfterChatHistory) {
       return blockedAfterChatHistory;
     }
@@ -568,6 +585,7 @@ export async function bootstrapAppBackground(): Promise<BootstrapBackgroundResul
     const blockedStorageHealth = getBlockedPrivateStorageHealthSnapshot();
     if (blockedStorageHealth) {
       outcome = 'storage_blocked';
+      await stopPrivateRuntimeWorkForStorageBlockedSafely();
       return buildStorageBlockedBackgroundResult(blockedStorageHealth);
     }
 

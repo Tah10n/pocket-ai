@@ -11,13 +11,14 @@ import {
   getThreadTruncationState,
   resetSharedGenerationStateForTests,
   resolvePresetSnapshot,
+  stopActiveChatGenerationForPrivateStorageBlocked,
   SUMMARY_PLACEHOLDER_CONTENT,
 } from '../../src/hooks/useChatSession';
 import { presetManager } from '../../src/services/PresetManager';
 import { backgroundTaskService } from '../../src/services/BackgroundTaskService';
 import { notificationService } from '../../src/services/NotificationService';
 import { registry } from '../../src/services/LocalStorageRegistry';
-import { getPrivateStorageHealthSnapshot, isPrivateStorageWritable } from '../../src/services/storage';
+import { PrivateStorageUnavailableError, getPrivateStorageHealthSnapshot, isPrivateStorageWritable } from '../../src/services/storage';
 
 jest.mock('../../src/services/LLMEngineService', () => ({
   llmEngineService: {
@@ -662,6 +663,106 @@ describe('useChatSession', () => {
         state: 'stopped',
       }),
     );
+  });
+
+  it('stops active generation when private storage becomes blocked', async () => {
+    let onToken: ((token: string) => void) | undefined;
+    let resolveCompletion: (() => void) | undefined;
+
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementation(
+      ({ onToken: tokenHandler }: { onToken?: (token: string) => void }) =>
+        new Promise((resolve) => {
+          onToken = tokenHandler;
+          resolveCompletion = () => resolve({ text: 'Stopped by storage block' });
+        }),
+    );
+
+    const getSession = renderHookHarness();
+    let sendPromise: Promise<void> | undefined;
+    await act(async () => {
+      sendPromise = getSession()?.appendUserMessage('Long answer please');
+    });
+
+    await waitFor(() => {
+      expect(useChatStore.getState().getActiveThread()?.status).toBe('generating');
+    });
+
+    await act(async () => {
+      onToken?.('Partial answer');
+      await stopActiveChatGenerationForPrivateStorageBlocked();
+      resolveCompletion?.();
+      await sendPromise;
+    });
+
+    expect(llmEngineService.interruptActiveCompletion).toHaveBeenCalledTimes(1);
+    expect(backgroundTaskService.isTaskActive('inference')).toBe(false);
+    expect(useChatStore.getState().getActiveThread()?.status).toBe('stopped');
+    expect(useChatStore.getState().getActiveThread()?.messages.at(-1)).toEqual(expect.objectContaining({
+      content: 'Partial answer',
+      state: 'stopped',
+    }));
+  });
+
+  it('interrupts active generation when a pending flush cannot persist after storage blocks', async () => {
+    let onToken: ((token: string) => void) | undefined;
+    let resolveCompletion: (() => void) | undefined;
+    const originalPatchAssistantMessage = useChatStore.getState().patchAssistantMessage;
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const privateStorageError = new PrivateStorageUnavailableError('encrypted_open_failed', {
+      status: 'blocked',
+      reason: 'encrypted_open_failed',
+      retryable: true,
+      requiresExplicitReset: true,
+      lastUpdatedAt: 1,
+    });
+
+    useChatStore.setState({
+      patchAssistantMessage: jest.fn(() => {
+        throw privateStorageError;
+      }),
+    } as Partial<ReturnType<typeof useChatStore.getState>>);
+
+    try {
+      (llmEngineService.chatCompletion as jest.Mock).mockImplementation(
+        ({ onToken: tokenHandler }: { onToken?: (token: string) => void }) =>
+          new Promise((resolve) => {
+            onToken = tokenHandler;
+            resolveCompletion = () => resolve({ text: 'Stopped by storage block' });
+          }),
+      );
+
+      const getSession = renderHookHarness();
+      let sendPromise: Promise<void> | undefined;
+      await act(async () => {
+        sendPromise = getSession()?.appendUserMessage('Long answer please');
+      });
+
+      await waitFor(() => {
+        expect(useChatStore.getState().getActiveThread()?.status).toBe('generating');
+      });
+
+      await act(async () => {
+        onToken?.('Partial answer');
+        await expect(stopActiveChatGenerationForPrivateStorageBlocked()).resolves.toBeUndefined();
+      });
+
+      expect(llmEngineService.interruptActiveCompletion).toHaveBeenCalledTimes(1);
+      expect(backgroundTaskService.isTaskActive('inference')).toBe(false);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('pending assistant patch'),
+        privateStorageError,
+      );
+
+      await act(async () => {
+        resolveCompletion?.();
+        await expect(sendPromise).rejects.toBe(privateStorageError);
+      });
+    } finally {
+      await act(async () => {
+        useChatStore.setState({ patchAssistantMessage: originalPatchAssistantMessage } as Partial<ReturnType<typeof useChatStore.getState>>);
+      });
+      warnSpy.mockRestore();
+    }
   });
 
   it('flushes throttled assistant content before marking a pending stop as stopped', async () => {

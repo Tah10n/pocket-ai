@@ -67,6 +67,13 @@ jest.mock('../../src/services/LLMEngineService', () => ({
 
 jest.mock('../../src/services/ModelDownloadManager', () => ({
   getModelDownloadManager: jest.fn(),
+  resumeModelDownloadQueueIfStorageReady: jest.fn(),
+}));
+
+const mockStopPrivateRuntimeWorkForStorageBlocked = jest.fn();
+
+jest.mock('../../src/services/PrivateStorageRecovery', () => ({
+  stopPrivateRuntimeWorkForStorageBlocked: (...args: unknown[]) => mockStopPrivateRuntimeWorkForStorageBlocked(...args),
 }));
 
 const mockMergeImportedThreads = jest.fn();
@@ -95,7 +102,7 @@ jest.mock('../../src/store/modelsStore', () => ({
 import { bootstrapApp, bootstrapAppBackground, bootstrapAppCritical } from '../../src/services/AppBootstrap';
 import { setupFileSystem } from '../../src/services/FileSystemSetup';
 import { llmEngineService } from '../../src/services/LLMEngineService';
-import { getModelDownloadManager } from '../../src/services/ModelDownloadManager';
+import { getModelDownloadManager, resumeModelDownloadQueueIfStorageReady } from '../../src/services/ModelDownloadManager';
 import { presetManager } from '../../src/services/PresetManager';
 import { registry } from '../../src/services/LocalStorageRegistry';
 import { clearLegacyChatHistory, getChatHistoryEntries, getSettings, updateSettings } from '../../src/services/SettingsStore';
@@ -128,6 +135,7 @@ describe('AppBootstrap', () => {
     const readyStorageHealth = buildPrivateStorageHealth();
     (getPrivateStorageHealthSnapshot as jest.Mock).mockReturnValue(readyStorageHealth);
     (initializePrivateStorageEncryption as jest.Mock).mockResolvedValue(readyStorageHealth);
+    mockStopPrivateRuntimeWorkForStorageBlocked.mockResolvedValue(undefined);
     (useChatStore.persist.rehydrate as jest.Mock).mockResolvedValue(undefined);
     (useDownloadStore.persist.rehydrate as jest.Mock).mockResolvedValue(undefined);
     (useModelsStore.persist.rehydrate as jest.Mock).mockResolvedValue(undefined);
@@ -315,6 +323,7 @@ describe('AppBootstrap', () => {
     });
     expect(presetManager.getPresets).not.toHaveBeenCalled();
     expect(mockMergeImportedThreads).not.toHaveBeenCalled();
+    expect(mockStopPrivateRuntimeWorkForStorageBlocked).toHaveBeenCalledTimes(1);
   });
 
   it('restores the persisted active model during critical bootstrap when the file is still available', async () => {
@@ -717,7 +726,7 @@ describe('AppBootstrap', () => {
         chatRetentionDays: null,
       });
 
-      (getModelDownloadManager as unknown as jest.Mock).mockImplementation(() => {
+      (resumeModelDownloadQueueIfStorageReady as unknown as jest.Mock).mockImplementation(() => {
         throw new Error('download manager init failed');
       });
 
@@ -738,6 +747,54 @@ describe('AppBootstrap', () => {
       (process.env as any).JEST_WORKER_ID = originalJestWorkerId;
       globalThis.requestAnimationFrame = originalRequestAnimationFrame;
       warnSpy.mockRestore();
+      jest.useRealTimers();
+    }
+  });
+
+  it('skips scheduled ModelDownloadManager warm-up if private storage blocks before it runs', async () => {
+    const originalNodeEnv = process.env.NODE_ENV;
+    const originalExpoOs = process.env.EXPO_OS;
+    const originalJestWorkerId = process.env.JEST_WORKER_ID;
+    const originalRequestAnimationFrame = globalThis.requestAnimationFrame;
+    const blockedStorageHealth = buildPrivateStorageHealth({
+      status: 'blocked',
+      reason: 'encrypted_open_failed',
+      retryable: true,
+      requiresExplicitReset: true,
+      messageKey: 'storage.private.encryptedOpenFailed',
+    });
+
+    jest.useFakeTimers();
+
+    try {
+      (process.env as any).NODE_ENV = 'production';
+      (process.env as any).EXPO_OS = 'ios';
+      delete (process.env as any).JEST_WORKER_ID;
+
+      globalThis.requestAnimationFrame = jest.fn((cb: any) => cb(0));
+      (getSettings as jest.Mock).mockReturnValue({
+        language: 'en',
+        activePresetId: null,
+        activeModelId: null,
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 2048,
+        theme: 'system',
+        chatRetentionDays: null,
+      });
+
+      await expect(bootstrapAppBackground()).resolves.toEqual({ outcome: 'success' });
+      (getPrivateStorageHealthSnapshot as jest.Mock).mockReturnValue(blockedStorageHealth);
+
+      jest.advanceTimersByTime(800);
+      await Promise.resolve();
+
+      expect(resumeModelDownloadQueueIfStorageReady).not.toHaveBeenCalled();
+    } finally {
+      (process.env as any).NODE_ENV = originalNodeEnv;
+      (process.env as any).EXPO_OS = originalExpoOs;
+      (process.env as any).JEST_WORKER_ID = originalJestWorkerId;
+      globalThis.requestAnimationFrame = originalRequestAnimationFrame;
       jest.useRealTimers();
     }
   });

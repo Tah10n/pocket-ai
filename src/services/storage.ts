@@ -14,9 +14,11 @@ function getRuntimeNodeEnv(): string | undefined {
 
 const IS_WEB = typeof window !== 'undefined' && Platform.OS === 'web';
 const RUNTIME_NODE_ENV = getRuntimeNodeEnv();
+const HAS_JEST_GLOBAL = typeof (globalThis as unknown as { jest?: unknown }).jest !== 'undefined'
+    || typeof (globalThis as unknown as { expect?: unknown }).expect !== 'undefined';
 const IS_TESTING = RUNTIME_NODE_ENV === 'test'
     || (RUNTIME_NODE_ENV !== 'production'
-        && (typeof getRuntimeEnvValue('JEST_WORKER_ID') === 'string' || getRuntimeEnvValue('EXPO_OS') === 'web'));
+        && (HAS_JEST_GLOBAL || typeof getRuntimeEnvValue('JEST_WORKER_ID') === 'string' || getRuntimeEnvValue('EXPO_OS') === 'web'));
 const fallbackStores = new Map<string, Map<string, string>>();
 const warnedFallbackStores = new Set<string>();
 

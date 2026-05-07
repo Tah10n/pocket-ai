@@ -64,6 +64,7 @@
     "resetConfirmCancel": "Keep data",
     "resetConfirmAction": "Reset private data",
     "resetScope": "Reset only affects private app data. Downloaded GGUF model files are not deleted.",
+    "privateUnavailableMessage": "Private storage is unavailable. Retry recovery before starting chats or downloads.",
     "unavailableMessage": "Private storage is unavailable. Retry recovery, or reset private app data only if you accept losing saved app state.",
     "status": {
       "unknown": "Unknown",

@@ -3,8 +3,8 @@ import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import * as SplashScreen from 'expo-splash-screen';
 import * as SystemUI from 'expo-system-ui';
-import { Alert, Platform } from 'react-native';
-import { useCallback, useEffect, useState } from 'react';
+import { Alert, Platform, useColorScheme as useSystemColorScheme } from 'react-native';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import 'react-native-reanimated';
 import { useTranslation } from 'react-i18next';
 
@@ -24,6 +24,7 @@ import { resetPrivateAppStorageAndRuntimeStateAfterConfirmation } from '../src/s
 import { notificationService } from '../src/services/NotificationService';
 import { useBootstrapStore, type BootstrapCriticalOutcome } from '../src/store/bootstrapStore';
 import { StorageRecoveryScreen, type StorageRecoveryBusyState } from '../src/ui/screens/StorageRecoveryScreen';
+import { createNavigationTheme, getThemeColors, type ResolvedThemeMode } from '../src/utils/themeTokens';
 import '../src/i18n';
 import '../global.css';
 
@@ -213,6 +214,7 @@ function startBackgroundBootstrapFromRoot(): void {
 
 export default function RootLayout() {
   const [isReady, setIsReady] = useState(false);
+  const criticalOutcome = useBootstrapStore((state) => state.criticalOutcome);
 
   if (!hasMarkedFirstRootRender) {
     hasMarkedFirstRootRender = true;
@@ -258,6 +260,10 @@ export default function RootLayout() {
     return null;
   }
 
+  if (criticalOutcome === 'storage_blocked') {
+    return <StorageBlockedRootNavigator />;
+  }
+
   return (
     <CustomThemeProvider>
       <RootNavigator />
@@ -265,15 +271,8 @@ export default function RootLayout() {
   );
 }
 
-function RootNavigator() {
-  const { colors, navigationTheme } = useTheme();
-  const { t } = useTranslation();
-  const motion = useMotionPreferences();
-  const criticalOutcome = useBootstrapStore((state) => state.criticalOutcome);
-  const criticalStorageHealth = useBootstrapStore((state) => state.criticalStorageHealth);
+function useStorageRecoveryActions() {
   const [recoveryBusy, setRecoveryBusy] = useState<StorageRecoveryBusyState>(false);
-
-  usePerformanceNavigationTrace();
 
   const runStorageRecovery = useCallback(async (action: Exclude<StorageRecoveryBusyState, boolean>) => {
     setRecoveryBusy(action);
@@ -300,8 +299,51 @@ function RootNavigator() {
     }
   }, []);
 
-  const handleStorageRetry = useCallback(() => runStorageRecovery('retry'), [runStorageRecovery]);
-  const handleStorageReset = useCallback(() => runStorageRecovery('reset'), [runStorageRecovery]);
+  return {
+    recoveryBusy,
+    handleStorageRetry: useCallback(() => runStorageRecovery('retry'), [runStorageRecovery]),
+    handleStorageReset: useCallback(() => runStorageRecovery('reset'), [runStorageRecovery]),
+  };
+}
+
+function StorageBlockedRootNavigator() {
+  const systemScheme = useSystemColorScheme();
+  const resolvedMode: ResolvedThemeMode = systemScheme === 'dark' ? 'dark' : 'light';
+  const colors = useMemo(() => getThemeColors(resolvedMode), [resolvedMode]);
+  const navigationTheme = useMemo(() => createNavigationTheme(resolvedMode), [resolvedMode]);
+  const criticalStorageHealth = useBootstrapStore((state) => state.criticalStorageHealth);
+  const { recoveryBusy, handleStorageReset, handleStorageRetry } = useStorageRecoveryActions();
+
+  useEffect(() => {
+    void SystemUI.setBackgroundColorAsync(colors.background).catch((error) => {
+      if (__DEV__) {
+        console.warn('[StorageBlockedRootNavigator] Failed to set root background color', error);
+      }
+    });
+  }, [colors.background]);
+
+  return (
+    <ThemeProvider value={navigationTheme}>
+      <StorageRecoveryScreen
+        health={criticalStorageHealth ?? getPrivateStorageHealthSnapshot()}
+        busy={recoveryBusy}
+        onRetry={handleStorageRetry}
+        onReset={handleStorageReset}
+      />
+      <StatusBar style={colors.statusBarStyle} />
+    </ThemeProvider>
+  );
+}
+
+function RootNavigator() {
+  const { colors, navigationTheme } = useTheme();
+  const { t } = useTranslation();
+  const motion = useMotionPreferences();
+  const criticalOutcome = useBootstrapStore((state) => state.criticalOutcome);
+  const criticalStorageHealth = useBootstrapStore((state) => state.criticalStorageHealth);
+  const { recoveryBusy, handleStorageReset, handleStorageRetry } = useStorageRecoveryActions();
+
+  usePerformanceNavigationTrace();
 
   useEffect(() => {
     if (criticalOutcome === 'storage_blocked') {

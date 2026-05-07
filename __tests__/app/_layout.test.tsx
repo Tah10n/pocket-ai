@@ -30,6 +30,8 @@ jest.mock('@react-navigation/native', () => {
   const mockReact = require('react');
   const { View } = require('react-native');
   return {
+    DefaultTheme: { dark: false, colors: {} },
+    DarkTheme: { dark: true, colors: {} },
     ThemeProvider: ({ children }: any) => mockReact.createElement(View, { testID: 'navigation-theme' }, children),
   };
 });

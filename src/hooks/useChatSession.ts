@@ -32,7 +32,7 @@ import {
 import { getVisibleAssistantContent } from '../utils/chatPresentation';
 import { resolveModelReasoningCapability, resolveReasoningRuntimeConfig } from '../utils/modelReasoningCapabilities';
 import { syncThreadParameters } from '../utils/chatThreadParameters';
-import { getPrivateStorageHealthSnapshot, isPrivateStorageWritable } from '../services/storage';
+import { PrivateStorageUnavailableError, getPrivateStorageHealthSnapshot, isPrivateStorageWritable } from '../services/storage';
 import { useTruncationTracking } from './useTruncationTracking';
 
 export const SUMMARY_PLACEHOLDER_CONTENT =
@@ -67,6 +67,65 @@ function isNativeCompletionSettlingAfterStop() {
 
 export function resetSharedGenerationStateForTests() {
   sharedGenerationState.current = null;
+}
+
+function ignorePrivateStorageUnavailableDuringRuntimeStop(error: unknown, scope: string): boolean {
+  if (error instanceof PrivateStorageUnavailableError) {
+    console.warn(`[ChatSession] Skipped persisting ${scope} while private storage is blocked`, error);
+    return true;
+  }
+
+  return false;
+}
+
+export async function stopActiveChatGenerationForPrivateStorageBlocked(): Promise<void> {
+  const generation = sharedGenerationState.current;
+  let deferredStateError: unknown = null;
+
+  if (generation) {
+    generation.stopRequested = true;
+
+    try {
+      generation.flushPendingAssistantPatch?.();
+    } catch (error) {
+      if (!ignorePrivateStorageUnavailableDuringRuntimeStop(error, 'pending assistant patch')) {
+        deferredStateError = error;
+      }
+    }
+
+    const chatState = useChatStore.getState();
+    try {
+      chatState.stopAssistantMessage(generation.threadId, generation.messageId);
+    } catch (error) {
+      if (!ignorePrivateStorageUnavailableDuringRuntimeStop(error, 'assistant stop state')) {
+        throw error;
+      }
+    }
+
+    try {
+      chatState.finalizeThreadStatus(generation.threadId, 'stopped');
+    } catch (error) {
+      if (!ignorePrivateStorageUnavailableDuringRuntimeStop(error, 'thread stop state')) {
+        throw error;
+      }
+    }
+  }
+
+  try {
+    if (generation?.nativeCompletionStarted) {
+      await llmEngineService.interruptActiveCompletion();
+    } else {
+      await llmEngineService.stopCompletion();
+    }
+  } finally {
+    if (backgroundTaskService.isTaskActive('inference')) {
+      await backgroundTaskService.stopBackgroundTask('inference');
+    }
+  }
+
+  if (deferredStateError) {
+    throw deferredStateError;
+  }
 }
 
 function assertPrivateStorageWritableForChatMutation() {

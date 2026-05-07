@@ -2,7 +2,25 @@
 import 'react-native/jest/setup';
 import 'react-native-gesture-handler/jestSetup';
 
+process.env.NODE_ENV = 'test';
 process.env.EXPO_OS = process.env.EXPO_OS || 'web';
+
+const ReactForActPatch = require('react');
+if (typeof ReactForActPatch.act !== 'function') {
+  Object.defineProperty(ReactForActPatch, 'act', {
+    configurable: true,
+    value: (callback) => {
+      const result = callback();
+      if (result && typeof result.then === 'function') {
+        return result.then(() => undefined);
+      }
+      return undefined;
+    },
+  });
+}
+
+globalThis.requestAnimationFrame = (callback) => setTimeout(() => callback(Date.now()), 0);
+globalThis.cancelAnimationFrame = (handle) => clearTimeout(handle);
 
 const mockExpoRouter = {
   push: jest.fn(),
@@ -206,6 +224,7 @@ jest.mock('@react-native-community/netinfo', () => ({
 jest.mock('react-native-mmkv', () => {
     class MockMMKV {
         store = new Map();
+        isEncrypted = false;
 
         set = jest.fn((key, value) => {
             this.store.set(key, value);
@@ -241,10 +260,18 @@ jest.mock('react-native-mmkv', () => {
         contains = jest.fn((key) => this.store.has(key));
 
         getAllKeys = jest.fn(() => Array.from(this.store.keys()));
+
+        encrypt = jest.fn(() => {
+            this.isEncrypted = true;
+        });
     }
+
+    const createMMKV = jest.fn(() => new MockMMKV());
 
     return {
         MMKV: jest.fn().mockImplementation(() => new MockMMKV()),
+        createMMKV,
+        deleteMMKV: jest.fn(),
     };
 });
 

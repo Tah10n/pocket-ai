@@ -23,6 +23,29 @@ import { hardwareListenerService, type HardwareStatus } from './HardwareListener
 import { getSettings, subscribeSettings } from './SettingsStore';
 import { backgroundTaskService } from './BackgroundTaskService';
 import { notificationService, type DownloadErrorReason } from './NotificationService';
+import { PrivateStorageUnavailableError, isPrivateStorageWritable } from './storage';
+
+function ignorePrivateStorageUnavailableDuringDownloadStop(error: unknown, scope: string): boolean {
+  if (error instanceof PrivateStorageUnavailableError) {
+    console.warn(`[ModelDownloadManager] Skipped persisting ${scope} while private storage is blocked`, error);
+    return true;
+  }
+
+  return false;
+}
+
+function setDownloadRuntimeStateForStorageStop(
+  nextState: Partial<ReturnType<typeof useDownloadStore.getState>>,
+  scope: string,
+): void {
+  try {
+    useDownloadStore.setState(nextState);
+  } catch (error) {
+    if (!ignorePrivateStorageUnavailableDuringDownloadStop(error, scope)) {
+      throw error;
+    }
+  }
+}
 
 function safeSerializeResumeSnapshotValue(
   snapshot: unknown,
@@ -141,10 +164,22 @@ export class ModelDownloadManager {
       return;
     }
 
-    await ModelDownloadManager.instance.stopActiveJobForPrivateStorageReset();
+    await ModelDownloadManager.instance.stopActiveJobForPrivateStorageReset({ clearQueue: true });
   }
 
-  private async stopActiveJobForPrivateStorageReset(): Promise<void> {
+  public static async stopRuntimeForPrivateStorageBlocked(): Promise<void> {
+    if (!ModelDownloadManager.instance) {
+      return;
+    }
+
+    await ModelDownloadManager.instance.stopActiveJobForPrivateStorageReset({ clearQueue: false });
+  }
+
+  public resumeQueueIfStorageReady(): void {
+    void this.processQueue();
+  }
+
+  private async stopActiveJobForPrivateStorageReset(options: { clearQueue: boolean }): Promise<void> {
     const job = this.activeJob;
     if (job) {
       job.stopReason = 'cancel';
@@ -153,7 +188,24 @@ export class ModelDownloadManager {
     this.isProcessing = true;
     this.nextJobToken += 1;
     this.activeJob = null;
-    useDownloadStore.setState({ queue: [], activeDownloadId: null });
+    if (options.clearQueue) {
+      setDownloadRuntimeStateForStorageStop({ queue: [], activeDownloadId: null }, 'download reset state');
+    } else if (job) {
+      const currentState = useDownloadStore.getState();
+      setDownloadRuntimeStateForStorageStop({
+        activeDownloadId: null,
+        queue: currentState.queue.map((model) => (
+          model.id === job.modelId && (
+            model.lifecycleStatus === LifecycleStatus.DOWNLOADING
+            || model.lifecycleStatus === LifecycleStatus.VERIFYING
+          )
+            ? { ...model, lifecycleStatus: LifecycleStatus.QUEUED, downloadProgress: 0 }
+            : model
+        )),
+      }, 'download blocked state');
+    } else {
+      setDownloadRuntimeStateForStorageStop({ activeDownloadId: null }, 'download blocked idle state');
+    }
 
     try {
       if (job?.resumable) {
@@ -179,6 +231,10 @@ export class ModelDownloadManager {
    */
   private async processQueue() {
     if (this.isProcessing) return;
+
+    if (!isPrivateStorageWritable()) {
+      return;
+    }
     
     const { queue, activeDownloadId, setActiveDownload, updateModelInQueue } = useDownloadStore.getState();
     
@@ -940,6 +996,14 @@ export function getModelDownloadManager(): ModelDownloadManager {
   return ModelDownloadManager.getInstance();
 }
 
+export function resumeModelDownloadQueueIfStorageReady(): void {
+  ModelDownloadManager.getInstance().resumeQueueIfStorageReady();
+}
+
 export async function resetModelDownloadManagerForPrivateStorageReset(): Promise<void> {
   await ModelDownloadManager.resetRuntimeForPrivateStorageReset();
+}
+
+export async function stopModelDownloadManagerForPrivateStorageBlocked(): Promise<void> {
+  await ModelDownloadManager.stopRuntimeForPrivateStorageBlocked();
 }

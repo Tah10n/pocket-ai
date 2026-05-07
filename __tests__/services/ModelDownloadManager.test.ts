@@ -1,4 +1,8 @@
-import { getModelDownloadManager, resetModelDownloadManagerForPrivateStorageReset } from '../../src/services/ModelDownloadManager';
+import {
+  getModelDownloadManager,
+  resetModelDownloadManagerForPrivateStorageReset,
+  stopModelDownloadManagerForPrivateStorageBlocked,
+} from '../../src/services/ModelDownloadManager';
 import { useDownloadStore } from '../../src/store/downloadStore';
 import { LifecycleStatus, ModelAccessState, ModelMetadata } from '../../src/types/models';
 import * as FileSystem from 'expo-file-system/legacy';
@@ -13,6 +17,7 @@ import { hardwareListenerService } from '../../src/services/HardwareListenerServ
 import { updateSettings } from '../../src/services/SettingsStore';
 import { notificationService } from '../../src/services/NotificationService';
 import { AppError } from '../../src/services/AppError';
+import { isPrivateStorageWritable } from '../../src/services/storage';
 
 let logSpy: jest.SpyInstance;
 let errorSpy: jest.SpyInstance;
@@ -75,6 +80,14 @@ jest.mock('../../src/services/SystemMetricsService', () => ({
   getSystemMemorySnapshot: jest.fn().mockResolvedValue(null),
 }));
 
+jest.mock('../../src/services/storage', () => {
+  const actual = jest.requireActual('../../src/services/storage');
+  return {
+    ...actual,
+    isPrivateStorageWritable: jest.fn(() => true),
+  };
+});
+
 const mockModel: ModelMetadata = {
   id: 'test/model',
   name: 'model',
@@ -103,6 +116,7 @@ describe('ModelDownloadManager Basic', () => {
     (RNFS.hash as jest.Mock).mockResolvedValue('tree-sha');
     (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(8 * 1024 * 1024 * 1024);
     (getSystemMemorySnapshot as jest.Mock).mockResolvedValue(null);
+    (isPrivateStorageWritable as jest.Mock).mockReturnValue(true);
     updateSettings({ allowCellularDownloads: false });
     useDownloadStore.setState({ queue: [], activeDownloadId: null });
     (modelDownloadManager as any).isProcessing = false;
@@ -123,6 +137,17 @@ describe('ModelDownloadManager Basic', () => {
       progressPercent: 0,
     });
     expect(FileSystem.createDownloadResumable).toHaveBeenCalled();
+  });
+
+  it('does not start queued downloads while private storage is blocked', async () => {
+    (isPrivateStorageWritable as jest.Mock).mockReturnValue(false);
+
+    useDownloadStore.getState().addToQueue(mockModel);
+    await new Promise(r => setTimeout(r, 0));
+
+    expect(FileSystem.createDownloadResumable).not.toHaveBeenCalled();
+    expect(useDownloadStore.getState().activeDownloadId).toBeNull();
+    expect(backgroundTaskService.isTaskActive('download')).toBe(false);
   });
 
   it('invalidates an active job during private storage reset', async () => {
@@ -158,6 +183,59 @@ describe('ModelDownloadManager Basic', () => {
 
     await expect((modelDownloadManager as any).downloadModel(mockModel, jobToken)).resolves.toBeUndefined();
     expect(mockedRegistry.updateModel).not.toHaveBeenCalled();
+  });
+
+  it('stops an active job without clearing queued downloads when private storage blocks', async () => {
+    const pauseAsync = jest.fn().mockResolvedValue(undefined);
+    (modelDownloadManager as any).activeJob = {
+      modelId: mockModel.id,
+      jobToken: 43,
+      resumable: { pauseAsync },
+      stopReason: null,
+    };
+    useDownloadStore.setState({
+      queue: [
+        { ...mockModel, lifecycleStatus: LifecycleStatus.DOWNLOADING, downloadProgress: 0.5 },
+        { ...mockModel, id: 'test/queued-model', lifecycleStatus: LifecycleStatus.QUEUED },
+      ],
+      activeDownloadId: mockModel.id,
+    });
+    await backgroundTaskService.startBackgroundDownload({ type: 'downloadProgress', modelName: mockModel.name, progressPercent: 50 });
+
+    await stopModelDownloadManagerForPrivateStorageBlocked();
+
+    expect(pauseAsync).toHaveBeenCalledTimes(1);
+    expect((modelDownloadManager as any).activeJob).toBeNull();
+    expect(useDownloadStore.getState().activeDownloadId).toBeNull();
+    expect(useDownloadStore.getState().queue).toEqual([
+      expect.objectContaining({ id: mockModel.id, lifecycleStatus: LifecycleStatus.QUEUED, downloadProgress: 0 }),
+      expect.objectContaining({ id: 'test/queued-model', lifecycleStatus: LifecycleStatus.QUEUED }),
+    ]);
+    expect(backgroundTaskService.isTaskActive('download')).toBe(false);
+  });
+
+  it('resumes queued downloads after private storage becomes writable again', async () => {
+    const pauseAsync = jest.fn().mockResolvedValue(undefined);
+    (modelDownloadManager as any).activeJob = {
+      modelId: mockModel.id,
+      jobToken: 44,
+      resumable: { pauseAsync },
+      stopReason: null,
+    };
+    useDownloadStore.setState({
+      queue: [{ ...mockModel, lifecycleStatus: LifecycleStatus.DOWNLOADING, downloadProgress: 0.5 }],
+      activeDownloadId: mockModel.id,
+    });
+
+    (isPrivateStorageWritable as jest.Mock).mockReturnValue(false);
+    await stopModelDownloadManagerForPrivateStorageBlocked();
+    expect(FileSystem.createDownloadResumable).not.toHaveBeenCalled();
+
+    (isPrivateStorageWritable as jest.Mock).mockReturnValue(true);
+    modelDownloadManager.resumeQueueIfStorageReady();
+    await new Promise(r => setTimeout(r, 0));
+
+    expect(FileSystem.createDownloadResumable).toHaveBeenCalled();
   });
 
   it('verifies a downloaded file when the size matches', async () => {

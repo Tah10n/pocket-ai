@@ -1,4 +1,28 @@
-import { createStorage } from '../../src/services/storage';
+const mockStorageValues = new Map<string, unknown>();
+const mockStorage = {
+  set: jest.fn((key: string, value: unknown) => {
+    mockStorageValues.set(key, value);
+  }),
+  getString: jest.fn((key: string) => {
+    const value = mockStorageValues.get(key);
+    return typeof value === 'string' ? value : undefined;
+  }),
+  remove: jest.fn((key: string) => {
+    mockStorageValues.delete(key);
+  }),
+  clearAll: jest.fn(() => {
+    mockStorageValues.clear();
+  }),
+  contains: jest.fn((key: string) => mockStorageValues.has(key)),
+  getAllKeys: jest.fn(() => Array.from(mockStorageValues.keys())),
+};
+const mockCreateStorage = jest.fn((_id?: string, _options?: unknown) => mockStorage);
+
+jest.mock('../../src/services/storage', () => ({
+  assertPrivateStorageWritable: jest.fn(),
+  createStorage: (id?: string, options?: unknown) => mockCreateStorage(id, options),
+}));
+
 import {
   DEFAULT_AUTOTUNE_MAX_AGE_MS,
   getCurrentNativeModuleVersion,
@@ -8,7 +32,29 @@ import {
 } from '../../src/services/InferenceAutotuneStore';
 
 function clearAutotuneStorage() {
-  createStorage('pocket-ai-autotune', { tier: 'private' }).clearAll();
+  mockStorage.clearAll();
+}
+
+function createMockStorage() {
+  const values = new Map<string, unknown>();
+
+  return {
+    set: jest.fn((key: string, value: unknown) => {
+      values.set(key, value);
+    }),
+    getString: jest.fn((key: string) => {
+      const value = values.get(key);
+      return typeof value === 'string' ? value : undefined;
+    }),
+    remove: jest.fn((key: string) => {
+      values.delete(key);
+    }),
+    clearAll: jest.fn(() => {
+      values.clear();
+    }),
+    contains: jest.fn((key: string) => values.has(key)),
+    getAllKeys: jest.fn(() => Array.from(values.keys())),
+  };
 }
 
 describe('InferenceAutotuneStore', () => {
@@ -16,6 +62,7 @@ describe('InferenceAutotuneStore', () => {
   let dateNowSpy: jest.SpyInstance | null = null;
 
   beforeEach(() => {
+    jest.clearAllMocks();
     clearAutotuneStorage();
     dateNowSpy = jest.spyOn(Date, 'now').mockReturnValue(1_700_000_000_000);
   });
@@ -31,6 +78,58 @@ describe('InferenceAutotuneStore', () => {
       contextSize: 4096,
       kvCacheType: 'auto',
     })).toBeNull();
+  });
+
+  it('retries private autotune storage creation after an early failure', () => {
+    const blockedError = Object.assign(new Error('private storage blocked'), {
+      name: 'PrivateStorageUnavailableError',
+    });
+    const mockStorage = createMockStorage();
+    const createStorageMock = jest.fn()
+      .mockImplementationOnce(() => {
+        throw blockedError;
+      })
+      .mockReturnValue(mockStorage);
+
+    try {
+      jest.resetModules();
+      jest.doMock('../../src/services/storage', () => ({
+        assertPrivateStorageWritable: jest.fn(),
+        createStorage: createStorageMock,
+      }));
+      const isolatedStore = require('../../src/services/InferenceAutotuneStore') as typeof import('../../src/services/InferenceAutotuneStore');
+
+      expect(() => isolatedStore.readAutotuneResult({
+        modelId: 'test/model',
+        contextSize: 4096,
+        kvCacheType: 'f16',
+        expectedNativeModuleVersion: nativeVersion,
+      })).toThrow(blockedError);
+      expect(createStorageMock).toHaveBeenCalledTimes(1);
+
+      isolatedStore.writeAutotuneResult({
+        createdAtMs: 1_700_000_000_000,
+        modelId: 'test/model',
+        contextSize: 4096,
+        kvCacheType: 'f16',
+        nativeModuleVersion: nativeVersion,
+        bestStable: { backendMode: 'gpu', nGpuLayers: 12 },
+        candidates: [],
+      });
+
+      expect(isolatedStore.readAutotuneResult({
+        modelId: 'test/model',
+        contextSize: 4096,
+        kvCacheType: 'f16',
+        expectedNativeModuleVersion: nativeVersion,
+      })).toEqual(expect.objectContaining({
+        modelId: 'test/model',
+        bestStable: { backendMode: 'gpu', nGpuLayers: 12 },
+      }));
+      expect(createStorageMock).toHaveBeenCalledTimes(2);
+    } finally {
+      jest.dontMock('../../src/services/storage');
+    }
   });
 
   it('round-trips autotune results and stamps native version', () => {

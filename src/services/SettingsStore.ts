@@ -1,5 +1,5 @@
 import type { MMKV } from 'react-native-mmkv';
-import { createStorage } from './storage';
+import { assertPrivateStorageWritable, createStorage, PrivateStorageUnavailableError } from './storage';
 import { DEFAULT_REASONING_EFFORT, normalizeReasoningEffort, type ReasoningEffort } from '../types/reasoning';
 import { MAX_CONTEXT_WINDOW_TOKENS } from '../utils/contextWindow';
 import { UNKNOWN_MODEL_GPU_LAYERS_CEILING } from '../utils/modelLimits';
@@ -9,12 +9,19 @@ export { UNKNOWN_MODEL_GPU_LAYERS_CEILING };
 
 let storageInstance: MMKV | null = null;
 
+export function invalidateSettingsStorageForPrivateReset(): void {
+    storageInstance = null;
+}
+
 export function getSettingsStorage(): MMKV {
-    if (!storageInstance) {
-        storageInstance = createStorage('pocket-ai-settings', { tier: 'private' });
+    if (storageInstance) {
+        assertPrivateStorageWritable();
+        return storageInstance;
     }
 
-    return storageInstance;
+    const created = createStorage('pocket-ai-settings', { tier: 'private' });
+    storageInstance = created;
+    return created;
 }
 
 export type SettingsStorageFacade = Pick<
@@ -129,6 +136,14 @@ const DEFAULT_SETTINGS: AppSettings = {
     modelLoadParamsByModelId: {},
 };
 
+export function getDefaultSettings(): AppSettings {
+    return {
+        ...DEFAULT_SETTINGS,
+        modelParamsByModelId: {},
+        modelLoadParamsByModelId: {},
+    };
+}
+
 export const SETTINGS_KEY = 'app_settings';
 export const CHAT_HISTORY_INDEX_KEY = 'chat_history_index';
 export const CHAT_HISTORY_PREFIX = 'chat_history_';
@@ -137,6 +152,10 @@ type SettingsListener = (settings: AppSettings) => void;
 const settingsListeners: Set<SettingsListener> = new Set();
 type ChatHistoryListener = () => void;
 const chatHistoryListeners: Set<ChatHistoryListener> = new Set();
+
+function notifySettingsListeners(settings: AppSettings): void {
+    settingsListeners.forEach((listener) => listener(settings));
+}
 
 function normalizeLanguage(language: unknown): 'en' | 'ru' {
     if (typeof language !== 'string') return DEFAULT_SETTINGS.language;
@@ -473,7 +492,7 @@ function writeJsonValue(key: string, value: unknown) {
 export function getSettings(): AppSettings {
     const parsed = readJsonValue<Partial<AppSettings>>(SETTINGS_KEY);
     if (!parsed) {
-        return { ...DEFAULT_SETTINGS };
+        return getDefaultSettings();
     }
 
     const hasExplicitChatRetention =
@@ -508,14 +527,21 @@ export function updateSettings(partial: Partial<AppSettings>) {
     const current = getSettings();
     const updated = sanitizeSettings({ ...current, ...partial });
     writeJsonValue(SETTINGS_KEY, updated);
-    settingsListeners.forEach((l) => l(updated));
+    notifySettingsListeners(updated);
     return updated;
 }
 
 export function resetSettings() {
     getSettingsStorage().remove(SETTINGS_KEY);
-    const defaults = { ...DEFAULT_SETTINGS };
-    settingsListeners.forEach((listener) => listener(defaults));
+    const defaults = getDefaultSettings();
+    notifySettingsListeners(defaults);
+    return defaults;
+}
+
+export function resetSettingsRuntimeForPrivateStorageReset(): AppSettings {
+    storageInstance = null;
+    const defaults = getDefaultSettings();
+    notifySettingsListeners(defaults);
     return defaults;
 }
 
@@ -660,7 +686,16 @@ export function resetAllParametersForModel(modelId: string | null | undefined) {
 
 export function subscribeSettings(listener: SettingsListener) {
     settingsListeners.add(listener);
-    listener(getSettings());
+    try {
+        listener(getSettings());
+    } catch (error) {
+        if (error instanceof PrivateStorageUnavailableError) {
+            listener(getDefaultSettings());
+        } else {
+            settingsListeners.delete(listener);
+            throw error;
+        }
+    }
     return () => {
         settingsListeners.delete(listener);
     };

@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
 import { mmkvStorage } from '../lib/mmkv';
 import type { ModelsCatalogTab } from './modelsCatalogTabs';
+import { assertPrivateStorageWritable } from '../services/storage';
 
 export type ModelSizeRange = 'small' | 'medium' | 'large';
 export type ModelSortField = 'name' | 'lastModified' | 'downloaded' | 'downloads' | 'likes';
@@ -68,6 +69,21 @@ function createDiscoveryFilters(hasToken: boolean): ModelFilterCriteria {
     fitsInRamOnly: true,
     noTokenRequiredOnly: !hasToken,
     sizeRanges: [],
+  };
+}
+
+function createDefaultTabPreferences(): Record<ModelsCatalogTabId, ModelsCatalogTabPreferences> {
+  return {
+    all: {
+      filters: createDefaultFilters(),
+      sort: DEFAULT_SORT,
+      discoveryMode: 'uninitialized',
+    },
+    downloaded: {
+      filters: createDefaultFilters(),
+      sort: DEFAULT_SORT,
+      discoveryMode: 'full',
+    },
   };
 }
 
@@ -162,22 +178,19 @@ function resolvePersistedDiscoveryMode(
 
 export const useModelsStore = create<ModelsStoreState>()(
   persist(
-    (set) => ({
-      tabPreferences: {
-        all: {
-          filters: createDefaultFilters(),
-          sort: DEFAULT_SORT,
-          discoveryMode: 'uninitialized',
-        },
-        downloaded: {
-          filters: createDefaultFilters(),
-          sort: DEFAULT_SORT,
-          discoveryMode: 'full',
-        },
-      },
+    (set) => {
+      const setWhenPrivateStorageWritable: typeof set = (partial, replace) => {
+        assertPrivateStorageWritable();
+        return (set as any)(partial, replace);
+      };
 
-      applyDiscoveryPreset: ({ hasToken }) =>
-        set((state) => ({
+      return {
+        tabPreferences: {
+          ...createDefaultTabPreferences(),
+        },
+
+        applyDiscoveryPreset: ({ hasToken }) =>
+          setWhenPrivateStorageWritable((state) => ({
           tabPreferences: {
             ...state.tabPreferences,
             all: {
@@ -186,10 +199,10 @@ export const useModelsStore = create<ModelsStoreState>()(
               discoveryMode: 'guided',
             },
           },
-        })),
+          })),
 
-      syncDiscoveryTokenState: (hasToken) =>
-        set((state) => {
+        syncDiscoveryTokenState: (hasToken) =>
+          setWhenPrivateStorageWritable((state) => {
           const allPreferences = state.tabPreferences.all;
           if (allPreferences.discoveryMode !== 'guided') {
             return state;
@@ -218,10 +231,10 @@ export const useModelsStore = create<ModelsStoreState>()(
               },
             },
           };
-        }),
+          }),
 
-      showFullCatalog: () =>
-        set((state) => ({
+        showFullCatalog: () =>
+          setWhenPrivateStorageWritable((state) => ({
           tabPreferences: {
             ...state.tabPreferences,
             all: {
@@ -230,10 +243,10 @@ export const useModelsStore = create<ModelsStoreState>()(
               discoveryMode: 'full',
             },
           },
-        })),
+          })),
 
-      setFitsInRamOnly: (tab, enabled) =>
-        set((state) => ({
+        setFitsInRamOnly: (tab, enabled) =>
+          setWhenPrivateStorageWritable((state) => ({
           tabPreferences: {
             ...state.tabPreferences,
             [tab]: {
@@ -242,10 +255,10 @@ export const useModelsStore = create<ModelsStoreState>()(
               discoveryMode: 'custom',
             },
           },
-        })),
+          })),
 
-      setNoTokenRequiredOnly: (tab, enabled) =>
-        set((state) => ({
+        setNoTokenRequiredOnly: (tab, enabled) =>
+          setWhenPrivateStorageWritable((state) => ({
           tabPreferences: {
             ...state.tabPreferences,
             [tab]: {
@@ -254,10 +267,10 @@ export const useModelsStore = create<ModelsStoreState>()(
               discoveryMode: 'custom',
             },
           },
-        })),
+          })),
 
-      toggleSizeRange: (tab, sizeRange) =>
-        set((state) => ({
+        toggleSizeRange: (tab, sizeRange) =>
+          setWhenPrivateStorageWritable((state) => ({
           tabPreferences: {
             ...state.tabPreferences,
             [tab]: {
@@ -269,10 +282,10 @@ export const useModelsStore = create<ModelsStoreState>()(
               discoveryMode: 'custom',
             },
           },
-        })),
+          })),
 
-      setSort: (tab, sort) =>
-        set((state) => ({
+        setSort: (tab, sort) =>
+          setWhenPrivateStorageWritable((state) => ({
           tabPreferences: {
             ...state.tabPreferences,
             [tab]: {
@@ -281,10 +294,10 @@ export const useModelsStore = create<ModelsStoreState>()(
               discoveryMode: 'custom',
             },
           },
-        })),
+          })),
 
-      clearFilters: (tab) =>
-        set((state) => ({
+        clearFilters: (tab) =>
+          setWhenPrivateStorageWritable((state) => ({
           tabPreferences: {
             ...state.tabPreferences,
             [tab]: {
@@ -293,8 +306,9 @@ export const useModelsStore = create<ModelsStoreState>()(
               discoveryMode: 'full',
             },
           },
-        })),
-    }),
+          })),
+      };
+    },
     {
       name: 'models-list-preferences',
       version: 6,
@@ -403,3 +417,10 @@ export const useModelsStore = create<ModelsStoreState>()(
     },
   ),
 );
+
+export function resetModelsStoreForPrivateStorageReset(): void {
+  useModelsStore.setState({
+    tabPreferences: createDefaultTabPreferences(),
+  });
+  void useModelsStore.persist.clearStorage();
+}

@@ -1,14 +1,21 @@
 import type { MMKV } from 'react-native-mmkv';
-import { createStorage } from './storage';
+import { assertPrivateStorageWritable, createStorage } from './storage';
 
 let storageInstance: MMKV | null = null;
 
+export function invalidatePresetStorageForPrivateReset(): void {
+    storageInstance = null;
+}
+
 function getPresetStorage(): MMKV {
-    if (!storageInstance) {
-        storageInstance = createStorage('pocket-ai-presets', { tier: 'private' });
+    if (storageInstance) {
+        assertPrivateStorageWritable();
+        return storageInstance;
     }
 
-    return storageInstance;
+    const created = createStorage('pocket-ai-presets', { tier: 'private' });
+    storageInstance = created;
+    return created;
 }
 
 export interface SystemPromptPreset {

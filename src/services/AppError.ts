@@ -17,6 +17,7 @@ export type AppErrorCode =
   | 'download_http_error'
   | 'download_verification_failed'
   | 'download_file_missing'
+  | 'storage_private_unavailable'
   | 'message_empty'
   | 'message_too_long';
 
@@ -36,6 +37,7 @@ const ERROR_MESSAGE_KEYS: Partial<Record<AppErrorCode, string>> = {
   download_http_error: 'common.errors.downloadHttpError',
   download_verification_failed: 'common.errors.downloadVerificationFailed',
   download_file_missing: 'common.errors.downloadFileMissing',
+  storage_private_unavailable: 'common.errors.storagePrivateUnavailable',
   message_empty: 'common.errors.messageEmpty',
   message_too_long: 'common.errors.messageTooLong',
 };
@@ -47,6 +49,7 @@ const ERROR_PATTERNS: { pattern: RegExp; code: AppErrorCode }[] = [
   { pattern: /HTTP status/i, code: 'download_http_error' },
   { pattern: /Size mismatch|checksum/i, code: 'download_verification_failed' },
   { pattern: /File does not exist after download|Model file not found/i, code: 'download_file_missing' },
+  { pattern: /Private storage is unavailable/i, code: 'storage_private_unavailable' },
   { pattern: /Engine not ready|Model is not loaded/i, code: 'engine_not_ready' },
   { pattern: /already being generated|Stop the current response/i, code: 'engine_busy' },
   { pattern: /unloading/i, code: 'engine_unloading' },

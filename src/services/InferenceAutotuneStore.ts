@@ -1,6 +1,6 @@
 import type { MMKV } from 'react-native-mmkv';
 import llamaPackageJson from 'llama.rn/package.json';
-import { createStorage } from './storage';
+import { assertPrivateStorageWritable, createStorage } from './storage';
 
 const LLAMA_RN_VERSION: string = typeof llamaPackageJson?.version === 'string' ? llamaPackageJson.version : 'unknown';
 
@@ -50,12 +50,19 @@ export type AutotuneResult = {
 
 let autotuneStorageInstance: MMKV | null = null;
 
+export function invalidateAutotuneStorageForPrivateReset(): void {
+  autotuneStorageInstance = null;
+}
+
 function getAutotuneStorage(): MMKV {
-  if (!autotuneStorageInstance) {
-    autotuneStorageInstance = createStorage('pocket-ai-autotune', { tier: 'private' });
+  if (autotuneStorageInstance) {
+    assertPrivateStorageWritable();
+    return autotuneStorageInstance;
   }
 
-  return autotuneStorageInstance;
+  const created = createStorage('pocket-ai-autotune', { tier: 'private' });
+  autotuneStorageInstance = created;
+  return created;
 }
 
 function buildAutotuneKey({

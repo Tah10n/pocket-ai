@@ -2,6 +2,7 @@ import { Alert } from 'react-native';
 import { hardwareListenerService } from '../services/HardwareListenerService';
 import { modelCatalogService } from '../services/ModelCatalogService';
 import { getSettings } from '../services/SettingsStore';
+import { isPrivateStorageWritable } from '../services/storage';
 import { ModelAccessState, type ModelMetadata } from '../types/models';
 
 type Translate = (key: string) => string;
@@ -25,6 +26,23 @@ function shouldRefreshDownloadMetadata(model: ModelMetadata): boolean {
   );
 }
 
+function isPrivateStorageReadyForDownload(): boolean {
+  return isPrivateStorageWritable();
+}
+
+function showPrivateStorageUnavailableAlert(t: Translate): void {
+  Alert.alert(t('storageRecovery.title'), t('storageRecovery.privateUnavailableMessage'));
+}
+
+function ensurePrivateStorageReadyForDownload(t: Translate): boolean {
+  if (isPrivateStorageReadyForDownload()) {
+    return true;
+  }
+
+  showPrivateStorageUnavailableAlert(t);
+  return false;
+}
+
 export function startModelDownloadFlow({
   model,
   t,
@@ -34,6 +52,14 @@ export function startModelDownloadFlow({
   onResolvedModel,
   onError,
 }: StartModelDownloadFlowParams): void {
+  const startDownloadWhenStorageReady = (downloadModel: ModelMetadata) => {
+    if (!ensurePrivateStorageReadyForDownload(t)) {
+      return;
+    }
+
+    startDownload(downloadModel);
+  };
+
   const startPreparedDownload = async () => {
     try {
       if (model.accessState === ModelAccessState.AUTH_REQUIRED) {
@@ -43,6 +69,10 @@ export function startModelDownloadFlow({
 
       if (model.accessState === ModelAccessState.ACCESS_DENIED) {
         await openModelPage(model.id);
+        return;
+      }
+
+      if (!ensurePrivateStorageReadyForDownload(t)) {
         return;
       }
 
@@ -76,7 +106,7 @@ export function startModelDownloadFlow({
             {
               text: t('models.downloadWithLimitedVerification'),
               onPress: () => {
-                startDownload({
+                startDownloadWhenStorageReady({
                   ...resolvedModel,
                   allowUnknownSizeDownload: true,
                 });
@@ -96,13 +126,13 @@ export function startModelDownloadFlow({
           t('models.downloadMemoryWarningMessage'),
           [
             { text: t('common.cancel'), style: 'cancel' },
-            { text: t('models.downloadAnyway'), onPress: () => { startDownload(resolvedModel); } },
+            { text: t('models.downloadAnyway'), onPress: () => { startDownloadWhenStorageReady(resolvedModel); } },
           ],
         );
         return;
       }
 
-      startDownload(resolvedModel);
+      startDownloadWhenStorageReady(resolvedModel);
     } catch (error) {
       onError(error);
     }
@@ -110,6 +140,10 @@ export function startModelDownloadFlow({
 
   const status = hardwareListenerService.getCurrentStatus();
   if (status.networkType === 'cellular') {
+    if (!ensurePrivateStorageReadyForDownload(t)) {
+      return;
+    }
+
     if (getSettings().allowCellularDownloads === false) {
       Alert.alert(t('models.cellularDownloadsDisabledTitle'), t('models.cellularDownloadsDisabledMessage'));
       return;

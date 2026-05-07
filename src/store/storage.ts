@@ -1,15 +1,22 @@
 import type { MMKV } from 'react-native-mmkv';
 import { StateStorage } from 'zustand/middleware';
-import { createStorage } from '../services/storage';
+import { assertPrivateStorageWritable, createStorage } from '../services/storage';
 
 let storageInstance: MMKV | null = null;
 
+export function invalidateAppStorageForPrivateReset(): void {
+  storageInstance = null;
+}
+
 export function getAppStorage(): MMKV {
-  if (!storageInstance) {
-    storageInstance = createStorage('global-app-storage', { tier: 'private' });
+  if (storageInstance) {
+    assertPrivateStorageWritable();
+    return storageInstance;
   }
 
-  return storageInstance;
+  const created = createStorage('global-app-storage', { tier: 'private' });
+  storageInstance = created;
+  return created;
 }
 
 export type AppStorageFacade = Pick<

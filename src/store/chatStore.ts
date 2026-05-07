@@ -21,6 +21,7 @@ import {
 } from '../types/chat';
 import { normalizeReasoningEffort } from '../types/reasoning';
 import { createInstrumentedStateStorage } from './persistStateStorage';
+import { assertPrivateStorageWritable } from '../services/storage';
 
 const FALLBACK_TOP_K = 40;
 const FALLBACK_MIN_P = 0.05;
@@ -150,11 +151,17 @@ export function findMostRecentThreadId(threads: Record<string, ChatThread>): str
 
 export const useChatStore = create<ChatStoreState>()(
   persist(
-    (set, get) => ({
-      threads: {},
-      activeThreadId: null,
+    (set, get) => {
+      const setWhenPrivateStorageWritable: typeof set = (partial, replace) => {
+        assertPrivateStorageWritable();
+        return (set as any)(partial, replace);
+      };
 
-      createThread: ({ modelId, presetId, presetSnapshot, paramsSnapshot, title }) => {
+      return {
+        threads: {},
+        activeThreadId: null,
+
+        createThread: ({ modelId, presetId, presetSnapshot, paramsSnapshot, title }) => {
         const id = createChatId('thread');
         const now = Date.now();
         const thread: ChatThread = {
@@ -188,7 +195,7 @@ export const useChatStore = create<ChatStoreState>()(
           status: 'idle',
         };
 
-        set((state) => ({
+        setWhenPrivateStorageWritable((state) => ({
           threads: {
             ...state.threads,
             [id]: thread,
@@ -197,16 +204,16 @@ export const useChatStore = create<ChatStoreState>()(
         }));
 
         return id;
-      },
+        },
 
-      mergeImportedThreads: (threads) => {
+        mergeImportedThreads: (threads) => {
         if (threads.length === 0) {
           return 0;
         }
 
         let importedCount = 0;
 
-        set((state) => {
+        setWhenPrivateStorageWritable((state) => {
           const nextThreads = { ...state.threads };
 
           threads.forEach((thread) => {
@@ -234,9 +241,9 @@ export const useChatStore = create<ChatStoreState>()(
         });
 
         return importedCount;
-      },
+        },
 
-      pruneExpiredThreads: (retentionDays, now = Date.now()) => {
+        pruneExpiredThreads: (retentionDays, now = Date.now()) => {
         const state = get();
         const expiredThreadIds = getExpiredThreadIds(state.threads, retentionDays, now, state.activeThreadId);
         if (expiredThreadIds.length === 0) {
@@ -245,7 +252,7 @@ export const useChatStore = create<ChatStoreState>()(
 
         let nextThreadsSnapshot: Record<string, ChatThread> | null = null;
 
-        set((state) => {
+        setWhenPrivateStorageWritable((state) => {
           const nextThreads = { ...state.threads };
           expiredThreadIds.forEach((threadId) => {
             delete nextThreads[threadId];
@@ -268,28 +275,29 @@ export const useChatStore = create<ChatStoreState>()(
         }
 
         return expiredThreadIds.length;
-      },
+        },
 
-      clearAllThreads: () => {
+        clearAllThreads: () => {
         const threadCount = Object.keys(get().threads).length;
         if (threadCount === 0) {
+          assertPrivateStorageWritable();
           getAppStorage().remove(CHAT_STORE_STORAGE_KEY);
           return 0;
         }
 
-        set({
+        setWhenPrivateStorageWritable({
           threads: {},
           activeThreadId: null,
         });
         getAppStorage().remove(CHAT_STORE_STORAGE_KEY);
 
         return threadCount;
-      },
+        },
 
-      setActiveThread: (threadId) => set({ activeThreadId: threadId }),
+        setActiveThread: (threadId) => setWhenPrivateStorageWritable({ activeThreadId: threadId }),
 
-      updateThreadPresetSnapshot: (threadId, presetId, presetSnapshot) =>
-        set((state) => {
+        updateThreadPresetSnapshot: (threadId, presetId, presetSnapshot) =>
+          setWhenPrivateStorageWritable((state) => {
           const existingThread = state.threads[threadId];
           if (!existingThread) {
             return state;
@@ -309,10 +317,10 @@ export const useChatStore = create<ChatStoreState>()(
               }),
             },
           };
-        }),
+          }),
 
-      updateThreadParamsSnapshot: (threadId, paramsSnapshot) =>
-        set((state) => {
+        updateThreadParamsSnapshot: (threadId, paramsSnapshot) =>
+          setWhenPrivateStorageWritable((state) => {
           const existingThread = state.threads[threadId];
           if (!existingThread) {
             return state;
@@ -339,12 +347,12 @@ export const useChatStore = create<ChatStoreState>()(
               }),
             },
           };
-        }),
+          }),
 
-      switchThreadModel: (threadId, nextModelId, at) => {
+        switchThreadModel: (threadId, nextModelId, at) => {
         let createdMessageId: string | null = null;
 
-        set((state) => {
+        setWhenPrivateStorageWritable((state) => {
           const existingThread = state.threads[threadId];
           if (!existingThread) {
             return state;
@@ -384,10 +392,10 @@ export const useChatStore = create<ChatStoreState>()(
         });
 
         return createdMessageId;
-      },
+        },
 
-      appendMessage: (threadId, message) =>
-        set((state) => {
+        appendMessage: (threadId, message) =>
+          setWhenPrivateStorageWritable((state) => {
           const existingThread = state.threads[threadId];
           if (!existingThread) {
             return state;
@@ -417,7 +425,7 @@ export const useChatStore = create<ChatStoreState>()(
               [threadId]: nextThread,
             },
           };
-        }),
+          }),
 
       createAssistantPlaceholder: (threadId, modelId) => {
         const messageId = createChatId('message');
@@ -455,7 +463,7 @@ export const useChatStore = create<ChatStoreState>()(
       deleteThread: (threadId) => {
         let nextThreadsSnapshot: Record<string, ChatThread> | null = null;
 
-        set((state) => {
+        setWhenPrivateStorageWritable((state) => {
           if (!state.threads[threadId]) {
             return state;
           }
@@ -487,7 +495,7 @@ export const useChatStore = create<ChatStoreState>()(
           return false;
         }
 
-        set((state) => {
+        setWhenPrivateStorageWritable((state) => {
           const thread = state.threads[threadId];
           if (!thread) {
             return state;
@@ -521,7 +529,7 @@ export const useChatStore = create<ChatStoreState>()(
           return false;
         }
 
-        set((state) => {
+        setWhenPrivateStorageWritable((state) => {
           const existingThread = state.threads[threadId];
           if (!existingThread) {
             return state;
@@ -551,7 +559,7 @@ export const useChatStore = create<ChatStoreState>()(
       },
 
       patchAssistantMessage: (threadId, messageId, updates) =>
-        set((state) => {
+        setWhenPrivateStorageWritable((state) => {
           const existingThread = state.threads[threadId];
           if (!existingThread) {
             return state;
@@ -623,7 +631,7 @@ export const useChatStore = create<ChatStoreState>()(
 
         const nextMessageId = createChatId('message');
 
-        set((state) => {
+        setWhenPrivateStorageWritable((state) => {
           const existingThread = state.threads[threadId];
           if (!existingThread) {
             return state;
@@ -680,7 +688,7 @@ export const useChatStore = create<ChatStoreState>()(
 
         const nextAssistantMessageId = createChatId('message');
 
-        set((state) => {
+        setWhenPrivateStorageWritable((state) => {
           const existingThread = state.threads[threadId];
           if (!existingThread) {
             return state;
@@ -750,7 +758,7 @@ export const useChatStore = create<ChatStoreState>()(
       },
 
       finalizeThreadStatus: (threadId, status) =>
-        set((state) => {
+        setWhenPrivateStorageWritable((state) => {
           const existingThread = state.threads[threadId];
           if (!existingThread) {
             return state;
@@ -770,7 +778,7 @@ export const useChatStore = create<ChatStoreState>()(
         }),
 
       setThreadSummary: (threadId, summary) =>
-        set((state) => {
+        setWhenPrivateStorageWritable((state) => {
           const existingThread = state.threads[threadId];
           if (!existingThread) {
             return state;
@@ -796,7 +804,8 @@ export const useChatStore = create<ChatStoreState>()(
       },
       getConversationIndex: () =>
         buildConversationIndex(get().threads),
-    }),
+      };
+    },
     {
       name: 'chat-store',
       version: 1,
@@ -873,6 +882,14 @@ export const useChatStore = create<ChatStoreState>()(
     },
   ),
 );
+
+export function resetChatStoreForPrivateStorageReset(): void {
+  useChatStore.setState({
+    threads: {},
+    activeThreadId: null,
+  });
+  void useChatStore.persist.clearStorage();
+}
 export type { ThreadInferenceWindow, ThreadInferenceWindowOptions } from '../utils/inferenceWindow';
 export {
   DEFAULT_INFERENCE_PROMPT_SAFETY_MARGIN_TOKENS,

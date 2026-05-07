@@ -11,12 +11,14 @@ import {
   getThreadTruncationState,
   resetSharedGenerationStateForTests,
   resolvePresetSnapshot,
+  stopActiveChatGenerationForPrivateStorageBlocked,
   SUMMARY_PLACEHOLDER_CONTENT,
 } from '../../src/hooks/useChatSession';
 import { presetManager } from '../../src/services/PresetManager';
 import { backgroundTaskService } from '../../src/services/BackgroundTaskService';
 import { notificationService } from '../../src/services/NotificationService';
 import { registry } from '../../src/services/LocalStorageRegistry';
+import { PrivateStorageUnavailableError, getPrivateStorageHealthSnapshot, isPrivateStorageWritable } from '../../src/services/storage';
 
 jest.mock('../../src/services/LLMEngineService', () => ({
   llmEngineService: {
@@ -45,6 +47,69 @@ jest.mock('../../src/services/PresetManager', () => ({
     }),
   },
 }));
+
+jest.mock('../../src/services/storage', () => {
+  const actual = jest.requireActual('../../src/services/storage');
+  const stores = new Map<string, Map<string, string>>();
+  const getStore = (id?: string) => {
+    const key = id ?? '__default__';
+    const existing = stores.get(key);
+    if (existing) {
+      return existing;
+    }
+
+    const created = new Map<string, string>();
+    stores.set(key, created);
+    return created;
+  };
+
+  return {
+    ...actual,
+    createStorage: jest.fn((id?: string) => {
+      const store = getStore(id);
+      return {
+        set: jest.fn((key: string, value: string | number | boolean) => {
+          store.set(key, String(value));
+        }),
+        getString: jest.fn((key: string) => store.get(key)),
+        getNumber: jest.fn((key: string) => {
+          const raw = store.get(key);
+          if (raw === undefined) {
+            return undefined;
+          }
+
+          const parsed = Number(raw);
+          return Number.isFinite(parsed) ? parsed : undefined;
+        }),
+        getBoolean: jest.fn((key: string) => {
+          const raw = store.get(key);
+          if (raw === 'true') {
+            return true;
+          }
+          if (raw === 'false') {
+            return false;
+          }
+          return undefined;
+        }),
+        remove: jest.fn((key: string) => {
+          store.delete(key);
+        }),
+        clearAll: jest.fn(() => {
+          store.clear();
+        }),
+        contains: jest.fn((key: string) => store.has(key)),
+        getAllKeys: jest.fn(() => Array.from(store.keys())),
+      };
+    }),
+    getPrivateStorageHealthSnapshot: jest.fn(() => ({
+      status: 'ready',
+      retryable: false,
+      requiresExplicitReset: false,
+      lastUpdatedAt: 0,
+    })),
+    isPrivateStorageWritable: jest.fn(() => true),
+  };
+});
 
 describe('useChatSession', () => {
   let appStateListeners: Array<(state: 'active' | 'background' | 'inactive') => void>;
@@ -93,6 +158,13 @@ describe('useChatSession', () => {
       maxTokens: modelId ? 1024 : 512,
       reasoningEffort: 'auto',
     }));
+    (isPrivateStorageWritable as jest.Mock).mockReturnValue(true);
+    (getPrivateStorageHealthSnapshot as jest.Mock).mockReturnValue({
+      status: 'ready',
+      retryable: false,
+      requiresExplicitReset: false,
+      lastUpdatedAt: 0,
+    });
     registry.saveModels([]);
     (llmEngineService.getState as jest.Mock).mockReturnValue({
       status: EngineStatus.READY,
@@ -151,6 +223,59 @@ describe('useChatSession', () => {
     });
     expect(thread?.messages.map((message) => message.role)).toEqual(['user', 'assistant']);
     expect(thread?.messages.at(-1)?.content).toBe('Hello back');
+  });
+
+  it('blocks sending before persisted chat mutations when private storage is unavailable', async () => {
+    const blockedHealth = {
+      status: 'blocked',
+      reason: 'encrypted_open_failed',
+      retryable: true,
+      requiresExplicitReset: false,
+      messageKey: 'storage.private.encryptedOpenFailed',
+      lastUpdatedAt: 123,
+    };
+    (isPrivateStorageWritable as jest.Mock).mockReturnValue(false);
+    (getPrivateStorageHealthSnapshot as jest.Mock).mockReturnValue(blockedHealth);
+
+    const chatState = useChatStore.getState();
+    const createThreadSpy = jest.spyOn(chatState, 'createThread');
+    const appendMessageSpy = jest.spyOn(chatState, 'appendMessage');
+    const createAssistantPlaceholderSpy = jest.spyOn(chatState, 'createAssistantPlaceholder');
+    const setActiveThreadSpy = jest.spyOn(chatState, 'setActiveThread');
+    const getSession = renderHookHarness();
+    let thrown: unknown;
+
+    try {
+      await act(async () => {
+        try {
+          await getSession()?.appendUserMessage('Hello there');
+        } catch (error) {
+          thrown = error;
+        }
+      });
+
+      expect(thrown).toEqual(
+        expect.objectContaining({
+          name: 'AppError',
+          code: 'storage_private_unavailable',
+          details: {
+            privateStorageHealth: blockedHealth,
+          },
+        }),
+      );
+      expect(getSettings).not.toHaveBeenCalled();
+      expect(createThreadSpy).not.toHaveBeenCalled();
+      expect(appendMessageSpy).not.toHaveBeenCalled();
+      expect(createAssistantPlaceholderSpy).not.toHaveBeenCalled();
+      expect(setActiveThreadSpy).not.toHaveBeenCalled();
+      expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
+      expect(useChatStore.getState().getConversationIndex()).toHaveLength(0);
+    } finally {
+      createThreadSpy.mockRestore();
+      appendMessageSpy.mockRestore();
+      createAssistantPlaceholderSpy.mockRestore();
+      setActiveThreadSpy.mockRestore();
+    }
   });
 
   it('stores reasoning separately from the final assistant content when the engine exposes it', async () => {
@@ -538,6 +663,106 @@ describe('useChatSession', () => {
         state: 'stopped',
       }),
     );
+  });
+
+  it('stops active generation when private storage becomes blocked', async () => {
+    let onToken: ((token: string) => void) | undefined;
+    let resolveCompletion: (() => void) | undefined;
+
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementation(
+      ({ onToken: tokenHandler }: { onToken?: (token: string) => void }) =>
+        new Promise((resolve) => {
+          onToken = tokenHandler;
+          resolveCompletion = () => resolve({ text: 'Stopped by storage block' });
+        }),
+    );
+
+    const getSession = renderHookHarness();
+    let sendPromise: Promise<void> | undefined;
+    await act(async () => {
+      sendPromise = getSession()?.appendUserMessage('Long answer please');
+    });
+
+    await waitFor(() => {
+      expect(useChatStore.getState().getActiveThread()?.status).toBe('generating');
+    });
+
+    await act(async () => {
+      onToken?.('Partial answer');
+      await stopActiveChatGenerationForPrivateStorageBlocked();
+      resolveCompletion?.();
+      await sendPromise;
+    });
+
+    expect(llmEngineService.interruptActiveCompletion).toHaveBeenCalledTimes(1);
+    expect(backgroundTaskService.isTaskActive('inference')).toBe(false);
+    expect(useChatStore.getState().getActiveThread()?.status).toBe('stopped');
+    expect(useChatStore.getState().getActiveThread()?.messages.at(-1)).toEqual(expect.objectContaining({
+      content: 'Partial answer',
+      state: 'stopped',
+    }));
+  });
+
+  it('interrupts active generation when a pending flush cannot persist after storage blocks', async () => {
+    let onToken: ((token: string) => void) | undefined;
+    let resolveCompletion: (() => void) | undefined;
+    const originalPatchAssistantMessage = useChatStore.getState().patchAssistantMessage;
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const privateStorageError = new PrivateStorageUnavailableError('encrypted_open_failed', {
+      status: 'blocked',
+      reason: 'encrypted_open_failed',
+      retryable: true,
+      requiresExplicitReset: true,
+      lastUpdatedAt: 1,
+    });
+
+    useChatStore.setState({
+      patchAssistantMessage: jest.fn(() => {
+        throw privateStorageError;
+      }),
+    } as Partial<ReturnType<typeof useChatStore.getState>>);
+
+    try {
+      (llmEngineService.chatCompletion as jest.Mock).mockImplementation(
+        ({ onToken: tokenHandler }: { onToken?: (token: string) => void }) =>
+          new Promise((resolve) => {
+            onToken = tokenHandler;
+            resolveCompletion = () => resolve({ text: 'Stopped by storage block' });
+          }),
+      );
+
+      const getSession = renderHookHarness();
+      let sendPromise: Promise<void> | undefined;
+      await act(async () => {
+        sendPromise = getSession()?.appendUserMessage('Long answer please');
+      });
+
+      await waitFor(() => {
+        expect(useChatStore.getState().getActiveThread()?.status).toBe('generating');
+      });
+
+      await act(async () => {
+        onToken?.('Partial answer');
+        await expect(stopActiveChatGenerationForPrivateStorageBlocked()).resolves.toBeUndefined();
+      });
+
+      expect(llmEngineService.interruptActiveCompletion).toHaveBeenCalledTimes(1);
+      expect(backgroundTaskService.isTaskActive('inference')).toBe(false);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('pending assistant patch'),
+        privateStorageError,
+      );
+
+      await act(async () => {
+        resolveCompletion?.();
+        await expect(sendPromise).rejects.toBe(privateStorageError);
+      });
+    } finally {
+      await act(async () => {
+        useChatStore.setState({ patchAssistantMessage: originalPatchAssistantMessage } as Partial<ReturnType<typeof useChatStore.getState>>);
+      });
+      warnSpy.mockRestore();
+    }
   });
 
   it('flushes throttled assistant content before marking a pending stop as stopped', async () => {
@@ -1002,6 +1227,57 @@ describe('useChatSession', () => {
         ],
       }),
     );
+  });
+
+  it('blocks edited regeneration before replacing a persisted branch when private storage is unavailable', async () => {
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Original prompt');
+    });
+
+    const threadBeforeBlock = useChatStore.getState().getActiveThread();
+    const userMessageId = threadBeforeBlock?.messages[0].id ?? '';
+    const blockedHealth = {
+      status: 'blocked',
+      reason: 'encrypted_open_failed',
+      retryable: true,
+      requiresExplicitReset: false,
+      messageKey: 'storage.private.encryptedOpenFailed',
+      lastUpdatedAt: 456,
+    };
+    (isPrivateStorageWritable as jest.Mock).mockReturnValue(false);
+    (getPrivateStorageHealthSnapshot as jest.Mock).mockReturnValue(blockedHealth);
+
+    const chatCompletionCallsBeforeBlock = (llmEngineService.chatCompletion as jest.Mock).mock.calls.length;
+    const replaceBranchSpy = jest.spyOn(useChatStore.getState(), 'replaceBranchFromUserMessage');
+    const getBlockedSession = renderHookHarness();
+    let thrown: unknown;
+
+    try {
+      await act(async () => {
+        try {
+          await getBlockedSession()?.regenerateFromUserMessage(userMessageId, 'Edited prompt');
+        } catch (error) {
+          thrown = error;
+        }
+      });
+
+      expect(thrown).toEqual(
+        expect.objectContaining({
+          name: 'AppError',
+          code: 'storage_private_unavailable',
+          details: {
+            privateStorageHealth: blockedHealth,
+          },
+        }),
+      );
+      expect(replaceBranchSpy).not.toHaveBeenCalled();
+      expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(chatCompletionCallsBeforeBlock);
+      expect(useChatStore.getState().getActiveThread()?.messages).toEqual(threadBeforeBlock?.messages);
+    } finally {
+      replaceBranchSpy.mockRestore();
+    }
   });
 
   it('keeps backgrounded generation alive until completion resolves', async () => {

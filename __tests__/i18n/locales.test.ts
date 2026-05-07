@@ -18,6 +18,7 @@ describe('chat locale coverage', () => {
     'chat.modelSelector.subtitle',
     'chat.modelSelector.emptyTitle',
     'chat.modelSelector.emptyDescription',
+    'storageRecovery.privateUnavailableMessage',
   ];
 
   it.each(requiredKeys)('includes %s in both English and Russian locales', (key) => {

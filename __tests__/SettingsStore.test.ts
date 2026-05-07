@@ -3,7 +3,9 @@ import {
   getModelLoadParametersForModel,
   getSettings,
   getSettingsStorage,
+  resetSettingsRuntimeForPrivateStorageReset,
   resetSettings,
+  subscribeSettings,
   updateModelLoadParametersForModel,
   updateSettings,
 } from '../src/services/SettingsStore';
@@ -30,6 +32,21 @@ describe('SettingsStore', () => {
   it('persists valid visual theme ids', () => {
     updateSettings({ themeId: 'glass' });
     expect(getSettings().themeId).toBe('glass');
+  });
+
+  it('notifies live subscribers with default settings after a private storage reset', () => {
+    updateSettings({ theme: 'dark', themeId: 'glass' });
+    const listener = jest.fn();
+    const unsubscribe = subscribeSettings(listener);
+    listener.mockClear();
+
+    resetSettingsRuntimeForPrivateStorageReset();
+
+    expect(listener).toHaveBeenCalledWith(expect.objectContaining({
+      theme: 'system',
+      themeId: 'default',
+    }));
+    unsubscribe();
   });
 
   it('sanitizes invalid visual theme ids back to the default', () => {

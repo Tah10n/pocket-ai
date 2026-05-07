@@ -45,8 +45,43 @@
       "downloadHttpError": "The download failed because the remote server returned an error.",
       "downloadVerificationFailed": "The downloaded file could not be verified. Try downloading it again.",
       "downloadFileMissing": "The downloaded file could not be found on disk.",
+      "storagePrivateUnavailable": "Private storage is unavailable. Retry recovery before saving chats or downloads.",
       "messageEmpty": "Type a message before sending.",
       "messageTooLong": "This message is too long for the current context window. Shorten it or increase the context size in Model Controls."
+    }
+  },
+  "storageRecovery": {
+    "eyebrow": "Private storage recovery",
+    "title": "Private storage needs attention",
+    "description": "Pocket AI stopped before opening chats, settings, downloads, or model metadata because private app storage is not safe yet.",
+    "existingDataPreserved": "Existing app data is preserved",
+    "retry": "Retry private storage",
+    "retryBusy": "Retrying...",
+    "reset": "Reset private app data",
+    "resetBusy": "Resetting...",
+    "resetConfirmTitle": "Reset private app data?",
+    "resetConfirmMessage": "This clears chats, settings, presets, model metadata, and other private Pocket AI app data. Try retry first if you want to keep existing data.",
+    "resetConfirmCancel": "Keep data",
+    "resetConfirmAction": "Reset private data",
+    "resetScope": "Reset only affects private app data. Downloaded GGUF model files are not deleted.",
+    "privateUnavailableMessage": "Private storage is unavailable. Retry recovery before starting chats or downloads.",
+    "unavailableMessage": "Private storage is unavailable. Retry recovery, or reset private app data only if you accept losing saved app state.",
+    "status": {
+      "unknown": "Unknown",
+      "initializing": "Initializing",
+      "ready": "Ready",
+      "blocked": "Blocked",
+      "resetting": "Resetting"
+    },
+    "reason": {
+      "encryptionNotInitialized": "Private storage encryption has not finished initializing.",
+      "encryptionInitializing": "Private storage encryption is already initializing. Wait a moment, then retry.",
+      "encryptionUnavailable": "Encrypted private storage is unavailable on this device right now.",
+      "secureKeyUnavailable": "Pocket AI could not access the secure key needed to open private storage.",
+      "migrationFailed": "A private storage migration could not finish safely.",
+      "encryptedOpenFailed": "Existing encrypted private storage could not be opened. No automatic reset was performed.",
+      "resetFailed": "The previous private app data reset did not finish. Retry or reset again after confirming.",
+      "unknown": "Private storage is blocked for an unknown safe-storage reason."
     }
   },
   "notifications": {

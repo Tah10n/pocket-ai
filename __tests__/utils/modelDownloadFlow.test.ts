@@ -5,6 +5,8 @@ import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../src
 const mockGetCurrentStatus = jest.fn();
 const mockRefreshModelMetadata = jest.fn();
 const mockGetSettings = jest.fn();
+const mockGetPrivateStorageHealthSnapshot = jest.fn();
+const mockIsPrivateStorageWritable = jest.fn();
 
 jest.mock('../../src/services/HardwareListenerService', () => ({
   hardwareListenerService: {
@@ -20,6 +22,11 @@ jest.mock('../../src/services/ModelCatalogService', () => ({
 
 jest.mock('../../src/services/SettingsStore', () => ({
   getSettings: () => mockGetSettings(),
+}));
+
+jest.mock('../../src/services/storage', () => ({
+  getPrivateStorageHealthSnapshot: () => mockGetPrivateStorageHealthSnapshot(),
+  isPrivateStorageWritable: () => mockIsPrivateStorageWritable(),
 }));
 
 function createModel(overrides: Partial<ModelMetadata> = {}): ModelMetadata {
@@ -48,6 +55,13 @@ describe('modelDownloadFlow', () => {
     mockGetCurrentStatus.mockReturnValue({ networkType: 'wifi' });
     mockRefreshModelMetadata.mockImplementation(async (model: ModelMetadata) => model);
     mockGetSettings.mockReturnValue({ allowCellularDownloads: true });
+    mockGetPrivateStorageHealthSnapshot.mockReturnValue({
+      status: 'ready',
+      retryable: false,
+      requiresExplicitReset: false,
+      lastUpdatedAt: 1,
+    });
+    mockIsPrivateStorageWritable.mockReturnValue(true);
     alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(jest.fn());
   });
 
@@ -136,6 +150,66 @@ describe('modelDownloadFlow', () => {
     });
 
     expect(alertSpy).toHaveBeenCalledWith('models.cellularDownloadsDisabledTitle', 'models.cellularDownloadsDisabledMessage');
+    expect(startDownload).not.toHaveBeenCalled();
+  });
+
+  it('blocks cellular downloads before reading settings when private storage is unavailable', async () => {
+    mockGetCurrentStatus.mockReturnValue({ networkType: 'cellular' });
+    mockIsPrivateStorageWritable.mockReturnValue(false);
+    const startDownload = jest.fn();
+
+    startModelDownloadFlow({
+      model: createModel(),
+      t: (key) => key,
+      startDownload,
+      openTokenSettings: jest.fn(),
+      openModelPage: jest.fn().mockResolvedValue(undefined),
+      onError: jest.fn(),
+    });
+
+    expect(alertSpy).toHaveBeenCalledWith(
+      'storageRecovery.title',
+      'storageRecovery.privateUnavailableMessage',
+    );
+    expect(mockGetSettings).not.toHaveBeenCalled();
+    expect(startDownload).not.toHaveBeenCalled();
+  });
+
+  it('blocks before metadata refresh and download start when private storage is unavailable', async () => {
+    mockGetPrivateStorageHealthSnapshot.mockReturnValue({
+      status: 'blocked',
+      reason: 'encrypted_open_failed',
+      retryable: true,
+      requiresExplicitReset: true,
+      lastUpdatedAt: 2,
+    });
+    mockIsPrivateStorageWritable.mockReturnValue(false);
+    mockRefreshModelMetadata.mockResolvedValue(createModel({ size: 2048 }));
+    const startDownload = jest.fn();
+    const onResolvedModel = jest.fn();
+
+    startModelDownloadFlow({
+      model: createModel({
+        size: null,
+        resolvedFileName: undefined,
+        requiresTreeProbe: true,
+      }),
+      t: (key) => key,
+      startDownload,
+      openTokenSettings: jest.fn(),
+      openModelPage: jest.fn().mockResolvedValue(undefined),
+      onResolvedModel,
+      onError: jest.fn(),
+    });
+
+    await Promise.resolve();
+
+    expect(alertSpy).toHaveBeenCalledWith(
+      'storageRecovery.title',
+      'storageRecovery.privateUnavailableMessage',
+    );
+    expect(mockRefreshModelMetadata).not.toHaveBeenCalled();
+    expect(onResolvedModel).not.toHaveBeenCalled();
     expect(startDownload).not.toHaveBeenCalled();
   });
 

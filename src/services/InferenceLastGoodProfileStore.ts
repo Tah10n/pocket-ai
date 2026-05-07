@@ -1,6 +1,6 @@
 import type { MMKV } from 'react-native-mmkv';
 import llamaPackageJson from 'llama.rn/package.json';
-import { createStorage } from './storage';
+import { assertPrivateStorageWritable, createStorage } from './storage';
 
 const LLAMA_RN_VERSION: string = typeof llamaPackageJson?.version === 'string' ? llamaPackageJson.version : 'unknown';
 
@@ -27,12 +27,19 @@ export type LastGoodInferenceProfile = {
 
 let lastGoodStorageInstance: MMKV | null = null;
 
+export function invalidateLastGoodProfileStorageForPrivateReset(): void {
+  lastGoodStorageInstance = null;
+}
+
 function getLastGoodStorage(): MMKV {
-  if (!lastGoodStorageInstance) {
-    lastGoodStorageInstance = createStorage('pocket-ai-last-good-profiles', { tier: 'private' });
+  if (lastGoodStorageInstance) {
+    assertPrivateStorageWritable();
+    return lastGoodStorageInstance;
   }
 
-  return lastGoodStorageInstance;
+  const created = createStorage('pocket-ai-last-good-profiles', { tier: 'private' });
+  lastGoodStorageInstance = created;
+  return created;
 }
 
 function buildLastGoodKey({

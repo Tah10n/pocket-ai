@@ -4,14 +4,18 @@ const {
   buildScenarios,
   buildSmokeLaunchArgs,
   findCatalogRiskModelCard,
+  findBlockingSystemDialogAction,
+  findAnyNodeClearOfBottomOverlay,
   findAnyNodeInSnapshot,
   findNodeInSnapshot,
+  isBoundsClearOfBottomOverlay,
   isAppForegroundSnapshot,
   parseCliOptions,
   parseUiSnapshot,
   pickClosestNodePair,
   selectScenarios,
   ScenarioSkipError,
+  restoreLanguageAfterScenario,
 } = require('../../scripts/android-scenarios');
 
 describe('android-scenarios smoke bootstrap args', () => {
@@ -71,9 +75,16 @@ describe('android-scenarios smoke bootstrap args', () => {
 describe('android-scenarios npm defaults', () => {
   const packageJson = require('../../package.json');
 
-  it('keeps the npm scenario script on the extended stable pack', () => {
-    expect(packageJson.scripts['android:scenarios']).toContain('--pack extended');
-    expect(packageJson.scripts['android:scenarios:emulator']).toContain('--pack extended');
+  it('keeps the default npm scenario scripts on the fast core pack', () => {
+    expect(packageJson.scripts['android:scenarios']).toContain('--pack core');
+    expect(packageJson.scripts['android:scenarios:emulator']).toContain('--pack core');
+  });
+
+  it('exposes targeted scenario packs for dependency checks', () => {
+    expect(packageJson.scripts['android:scenarios:dependency-ui']).toContain('--pack dependency-ui');
+    expect(packageJson.scripts['android:scenarios:runtime']).toContain('--pack runtime');
+    expect(packageJson.scripts['android:scenarios:native']).toContain('--pack native');
+    expect(packageJson.scripts['android:scenarios:extended']).toContain('--pack extended');
   });
 });
 
@@ -124,6 +135,56 @@ describe('android-scenarios UI snapshot matching', () => {
 
     expect(isAppForegroundSnapshot(launcherSnapshot)).toBe(false);
   });
+
+  it('recognizes app foreground content when package names are hidden by the UI dump', () => {
+    const appSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="" package="android" clickable="false" bounds="[0,0][1080,2400]" />
+        <node text="Pocket AI" content-desc="" package="android" clickable="false" bounds="[148,177][396,216]" />
+        <node text="NO MODEL LOADED" content-desc="" package="android" clickable="false" bounds="[78,337][373,377]" />
+        <node text="Choose a local model" content-desc="" package="android" clickable="false" bounds="[78,496][588,535]" />
+        <node text="Browse models" content-desc="" package="android" clickable="true" bounds="[714,581][1003,649]" />
+      </hierarchy>
+    `);
+
+    expect(isAppForegroundSnapshot(appSnapshot)).toBe(true);
+  });
+
+  it('prefers waiting over closing the app when an ANR dialog appears', () => {
+    const snapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="" package="android" clickable="false" bounds="[0,0][1080,2400]" />
+        <node text="Pocket AI isn't responding" content-desc="" package="android" clickable="false" bounds="[70,1200][1000,1300]" />
+        <node text="Close app" content-desc="" package="android" clickable="true" bounds="[200,1400][820,1510]" />
+        <node text="Wait" content-desc="" package="android" clickable="true" bounds="[200,1560][820,1670]" />
+      </hierarchy>
+    `);
+
+    expect(findBlockingSystemDialogAction(snapshot)).toEqual(
+      expect.objectContaining({
+        kind: 'wait',
+        label: 'Wait',
+      })
+    );
+  });
+
+  it('treats text under the floating tab bar as visible but unsafe to tap', () => {
+    const snapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
+        <node text="" content-desc="icon, Language, English (US)" clickable="true" bounds="[37,2174][1043,2378]" />
+        <node text="" content-desc="icon, Language, English (US)" clickable="true" bounds="[37,1600][1043,1804]" />
+      </hierarchy>
+    `);
+
+    const bottomLanguage = findAnyNodeInSnapshot(snapshot, ['Language'], { visibleOnly: true });
+    const safeLanguage = findAnyNodeClearOfBottomOverlay(snapshot, ['Language']);
+
+    expect(bottomLanguage).toBeTruthy();
+    expect(isBoundsClearOfBottomOverlay(bottomLanguage.node.bounds, snapshot.viewportBounds)).toBe(false);
+    expect(safeLanguage.node.bounds.centerY).toBe(1702);
+    expect(isBoundsClearOfBottomOverlay(safeLanguage.node.bounds, snapshot.viewportBounds)).toBe(true);
+  });
 });
 
 describe('android-scenarios catalog risk matching', () => {
@@ -141,6 +202,18 @@ describe('android-scenarios catalog risk matching', () => {
 
     expect(card).toBeTruthy();
     expect(card.detailsNode.bounds.centerY).toBe(530);
+  });
+
+  it('ignores catalog detail CTAs hidden under the floating tab bar', () => {
+    const snapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
+        <node text="RAM Warning" content-desc="" clickable="false" bounds="[40,500][260,560]" />
+        <node text="Details" content-desc="" clickable="true" bounds="[820,2174][1020,2378]" />
+      </hierarchy>
+    `);
+
+    expect(findCatalogRiskModelCard('ignored', 'ignored', snapshot)).toBeNull();
   });
 
   it('scores the closest node pair by vertical proximity first', () => {
@@ -180,6 +253,10 @@ describe('android-scenarios CLI parsing', () => {
       })
     );
   });
+
+  it('does not expose optional scenarios as a named pack', () => {
+    expect(() => parseCliOptions(['--pack', 'optional'])).toThrow('Unknown scenario pack "optional"');
+  });
 });
 
 describe('android-scenarios pack selection', () => {
@@ -204,10 +281,96 @@ describe('android-scenarios pack selection', () => {
     ]);
   });
 
+  it('uses the stable secondary surface for native dependency checks', () => {
+    expect(selectScenarios(scenarios, parseCliOptions(['--pack', 'native'])).map((scenario) => scenario.id)).toEqual([
+      'home-smoke',
+      'bottom-tabs',
+      'new-chat-cta',
+      'swap-model-cta',
+      'hf-token-education',
+      'conversations-management',
+    ]);
+  });
+
+  it('selects styling-focused screenshots for dependency-ui checks', () => {
+    expect(selectScenarios(scenarios, parseCliOptions(['--pack', 'dependency-ui'])).map((scenario) => scenario.id)).toEqual([
+      'home-smoke',
+      'bottom-tabs',
+      'new-chat-cta',
+      'style-screenshots',
+    ]);
+  });
+
+  it('selects language switching for runtime dependency checks', () => {
+    expect(selectScenarios(scenarios, parseCliOptions(['--pack', 'runtime'])).map((scenario) => scenario.id)).toEqual([
+      'home-smoke',
+      'bottom-tabs',
+      'new-chat-cta',
+      'language-switch',
+      'conversations-management',
+    ]);
+  });
+
   it('keeps direct scenario selection working for optional checks', () => {
     expect(selectScenarios(scenarios, parseCliOptions(['--scenario', 'memory-fit-download-warning'])).map((scenario) => scenario.id)).toEqual([
       'memory-fit-download-warning',
     ]);
+  });
+
+  it('runs every scenario, including optional checks, only for the all pack', () => {
+    const selectedIds = selectScenarios(scenarios, parseCliOptions(['--pack', 'all'])).map((scenario) => scenario.id);
+
+    expect(selectedIds).toEqual(scenarios.map((scenario) => scenario.id));
+    expect(selectedIds).toEqual(
+      expect.arrayContaining([
+        'hf-catalog-hardening',
+        'memory-fit-badges',
+        'memory-fit-download-warning',
+        'performance-logcat',
+      ])
+    );
+  });
+});
+
+describe('android-scenarios language restore', () => {
+  function createRestoreContext() {
+    return {
+      serial: 'emulator-5554',
+      tapAnyText: jest.fn().mockResolvedValue(undefined),
+      tapBottomTab: jest.fn().mockResolvedValue(undefined),
+      expectAnyText: jest.fn().mockResolvedValue(undefined),
+    };
+  }
+
+  it('returns home without toggling when the original language is already restored', async () => {
+    const ctx = createRestoreContext();
+
+    await restoreLanguageAfterScenario(ctx, ['Original'], ['Alternate'], ['Restored Home'], {
+      findAnyNodeNow: jest.fn().mockResolvedValue({ label: 'Original' }),
+      goToSettings: jest.fn().mockResolvedValue(undefined),
+      resolveAdbPath: () => 'adb',
+      scrollToAnyText: jest.fn().mockResolvedValue(undefined),
+    });
+
+    expect(ctx.tapAnyText).not.toHaveBeenCalled();
+    expect(ctx.tapBottomTab).toHaveBeenCalledWith(expect.arrayContaining(['Home']));
+    expect(ctx.expectAnyText).toHaveBeenCalledWith(['Restored Home'], { timeoutMs: 10_000 });
+  });
+
+  it('toggles back before returning home when the alternate language is still active', async () => {
+    const ctx = createRestoreContext();
+
+    await restoreLanguageAfterScenario(ctx, ['Original'], ['Alternate'], ['Restored Home'], {
+      findAnyNodeNow: jest.fn().mockResolvedValue(null),
+      goToSettings: jest.fn().mockResolvedValue(undefined),
+      resolveAdbPath: () => 'adb',
+      scrollToAnyText: jest.fn().mockResolvedValue(undefined),
+    });
+
+    expect(ctx.tapAnyText).toHaveBeenCalledWith(['Alternate'], { afterTapDelayMs: 1_200 });
+    expect(ctx.expectAnyText).toHaveBeenCalledWith(['Original'], { timeoutMs: 10_000 });
+    expect(ctx.tapBottomTab).toHaveBeenCalledWith(expect.arrayContaining(['Home']));
+    expect(ctx.expectAnyText).toHaveBeenCalledWith(['Restored Home'], { timeoutMs: 10_000 });
   });
 });
 

@@ -208,12 +208,12 @@ If you change shared theme, header, localization, motion, or routed-screen chrom
 
 ```bash
 npm run verify:mobile-change
-npm run android:scenarios -- --skip-build
+npm run android:scenarios -- --skip-build --pack dependency-ui
 node .\scripts\android-scenarios.js --skip-build --scenario hf-catalog-hardening
 node .\scripts\android-screen-capture.js --skip-build --screen home,models,settings,conversations,huggingface-token,model-details --output-dir artifacts/android-scenarios/manual-sample
 ```
 
-The raw runner defaults to a small core smoke pack. `npm run android:scenarios` expands that to the stable extended pack; keep catalog/perf scenarios as targeted checks.
+`npm run android:scenarios` defaults to a small core smoke pack. Use `--pack dependency-ui` for UI architecture changes, `--pack runtime` for localization or persisted-state changes, `--pack native` for Expo or native-module changes, and `--pack extended` when you need the previous broader stable pass. Keep catalog/perf scenarios as targeted checks.
 
 Manual follow-up is still required for:
 

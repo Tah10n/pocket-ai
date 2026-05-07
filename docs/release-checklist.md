@@ -63,13 +63,12 @@ If the release changes shared theme, tab chrome, routed headers, localization fi
 
 ```bash
 npm run verify:mobile-change
-npm run android:scenarios -- --skip-build
+npm run android:scenarios -- --skip-build --pack dependency-ui
 node .\scripts\android-scenarios.js --skip-build --scenario hf-catalog-hardening
 node .\scripts\android-screen-capture.js --skip-build --screen home,models,settings,conversations,huggingface-token,model-details --output-dir artifacts/android-scenarios/manual-sample
 ```
 
-The raw runner defaults to the small core pack (`home-smoke`, `bottom-tabs`, `new-chat-cta`).
-`npm run android:scenarios` uses the extended stable pack, while noisy catalog/perf checks should stay targeted via `--scenario <id>`.
+`npm run android:scenarios` defaults to the small core pack (`home-smoke`, `bottom-tabs`, `new-chat-cta`). Use `--pack dependency-ui` for shared theme, tab chrome, routed headers, or motion changes; `--pack runtime` for localization, state, or storage behavior; `--pack native` for Expo or native-module changes; and `--pack extended` when you need the previous broader stable pass. Keep noisy catalog/perf checks targeted via `--scenario <id>`.
 
 ## Build commands
 

@@ -1,11 +1,32 @@
 const {
+  buildMetroBundlePath,
   evaluateApkReuse,
   evaluateInstallReuse,
   isInsufficientStorageInstallFailure,
+  parseApkVariant,
   parseDumpsysPackageOutput,
   parsePackagePathOutput,
   sanitizeForFileName,
 } = require('../../scripts/android-smoke');
+
+describe('android-smoke Metro prewarm', () => {
+  it('builds an Android bundle URL from the package entrypoint', () => {
+    expect(buildMetroBundlePath()).toBe(
+      '/node_modules/expo-router/entry.bundle?platform=android&dev=true&lazy=true&minify=false&app=com.github.tah10n.pocketai&modulesOnly=false&runModule=true&excludeSource=true&sourcePaths=url-server',
+    );
+  });
+
+  it('keeps local entrypoints rooted at the app source tree', () => {
+    const options = { appPackage: 'com.example.app' };
+
+    expect(buildMetroBundlePath('./index', options)).toBe(
+      '/index.bundle?platform=android&dev=true&lazy=true&minify=false&app=com.example.app&modulesOnly=false&runModule=true&excludeSource=true&sourcePaths=url-server',
+    );
+    expect(buildMetroBundlePath('./src/index.ts')).toBe(
+      '/src/index.bundle?platform=android&dev=true&lazy=true&minify=false&app=com.github.tah10n.pocketai&modulesOnly=false&runModule=true&excludeSource=true&sourcePaths=url-server',
+    );
+  });
+});
 
 describe('android-smoke storage failure detection', () => {
   it('detects the explicit ADB insufficient-storage install failure code', () => {
@@ -22,6 +43,17 @@ describe('android-smoke storage failure detection', () => {
 
   it('does not match unrelated install failures', () => {
     expect(isInsufficientStorageInstallFailure('Failure [INSTALL_FAILED_VERSION_DOWNGRADE]')).toBe(false);
+  });
+});
+
+describe('android-smoke APK variant parsing', () => {
+  it('accepts supported APK variants', () => {
+    expect(parseApkVariant('debug')).toBe('debug');
+    expect(parseApkVariant('Release')).toBe('release');
+  });
+
+  it('rejects unsupported APK variants', () => {
+    expect(() => parseApkVariant('qa')).toThrow('Invalid Android APK variant');
   });
 });
 

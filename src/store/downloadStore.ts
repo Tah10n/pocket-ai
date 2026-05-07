@@ -5,6 +5,7 @@ import { ModelMetadata, LifecycleStatus } from '../types/models';
 import { normalizePersistedModelMetadata } from '../services/ModelMetadataNormalizer';
 import { getCandidateModelDownloadFileNames } from '../utils/modelFiles';
 import { createInstrumentedStateStorage } from './persistStateStorage';
+import { assertPrivateStorageWritable } from '../services/storage';
 
 const downloadStoreStateStorage = createInstrumentedStateStorage(mmkvStorage, { scope: 'downloadStore', dedupe: true });
 
@@ -38,11 +39,17 @@ export function normalizePersistedDownloadQueue(queue: ModelMetadata[]): ModelMe
 export const useDownloadStore = create<DownloadState>()(
   subscribeWithSelector(
     persist(
-      (set) => ({
-        queue: [],
-        activeDownloadId: null,
+      (set) => {
+        const setWhenPrivateStorageWritable: typeof set = (partial, replace) => {
+          assertPrivateStorageWritable();
+          return (set as any)(partial, replace);
+        };
 
-        addToQueue: (model) => set((state) => {
+        return {
+          queue: [],
+          activeDownloadId: null,
+
+          addToQueue: (model) => setWhenPrivateStorageWritable((state) => {
           const existing = state.queue.find((queued) => queued.id === model.id);
 
           if (!existing) {
@@ -98,23 +105,24 @@ export const useDownloadStore = create<DownloadState>()(
           }
 
           return state;
-        }),
+          }),
 
-        removeFromQueue: (modelId) => set((state) => ({
+          removeFromQueue: (modelId) => setWhenPrivateStorageWritable((state) => ({
           queue: state.queue.filter(m => m.id !== modelId),
           activeDownloadId: state.activeDownloadId === modelId ? null : state.activeDownloadId
-        })),
+          })),
 
-        setActiveDownload: (modelId) => set({ activeDownloadId: modelId }),
+          setActiveDownload: (modelId) => setWhenPrivateStorageWritable({ activeDownloadId: modelId }),
 
-        updateModelInQueue: (modelId, updates) => set((state) => ({
+          updateModelInQueue: (modelId, updates) => setWhenPrivateStorageWritable((state) => ({
           queue: state.queue.map((model) => (
             model.id === modelId
               ? normalizePersistedModelMetadata({ ...model, ...updates })
               : model
           )),
-        })),
-      }),
+          })),
+        };
+      },
       {
         name: 'download-queue-storage',
         skipHydration: true,

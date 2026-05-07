@@ -4,7 +4,7 @@ import { normalizePersistedModelMetadata } from '../../src/services/ModelMetadat
 import * as FileSystem from 'expo-file-system/legacy';
 import DeviceInfo from 'react-native-device-info';
 import { getSystemMemorySnapshot } from '../../src/services/SystemMetricsService';
-import { createStorage } from '../../src/services/storage';
+import { assertPrivateStorageWritable, createStorage } from '../../src/services/storage';
 
 const mockStorage = {
   getString: jest.fn(),
@@ -77,6 +77,8 @@ describe('LocalStorageRegistry', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    (assertPrivateStorageWritable as jest.Mock).mockReset();
+    (assertPrivateStorageWritable as jest.Mock).mockImplementation(() => undefined);
     (createStorage as jest.Mock).mockReturnValue(mockStorage);
     mockStorage.getString.mockReset();
     mockStorage.getString.mockReturnValue(null);
@@ -354,6 +356,122 @@ describe('LocalStorageRegistry', () => {
       successCount: 2,
       failureCount: 0,
     });
+  });
+
+  it('does not mutate cached calibration records when private storage blocks before save', () => {
+    mockStorage.getString.mockImplementation((key: string) => {
+      if (key === 'memory-fit-calibration-records-v1') {
+        return JSON.stringify({
+          existing: {
+            key: 'existing',
+            sampleCount: 1,
+            successCount: 1,
+            failureCount: 0,
+            weightsCorrectionFactor: 1,
+            computeCorrectionFactor: 1,
+            overheadCorrectionFactor: 1,
+            failurePenaltyFactor: 1,
+            lastObservedAtMs: 1,
+          },
+        });
+      }
+
+      return null;
+    });
+
+    const freshRegistry = new (LocalStorageRegistry as any)();
+    (freshRegistry as any).storage = mockStorage;
+    expect(freshRegistry.getCalibrationRecord('existing')).toMatchObject({ key: 'existing' });
+
+    const blockedError = Object.assign(new Error('private storage blocked'), {
+      name: 'PrivateStorageUnavailableError',
+    });
+    mockStorage.set.mockClear();
+    (assertPrivateStorageWritable as jest.Mock).mockImplementationOnce(() => {
+      throw blockedError;
+    });
+
+    expect(() => freshRegistry.saveCalibrationRecord({
+      key: 'blocked',
+      sampleCount: 1,
+      successCount: 1,
+      failureCount: 0,
+      weightsCorrectionFactor: 1,
+      computeCorrectionFactor: 1,
+      overheadCorrectionFactor: 1,
+      failurePenaltyFactor: 1,
+      lastObservedAtMs: 2,
+    })).toThrow(blockedError);
+
+    expect(mockStorage.set).not.toHaveBeenCalled();
+    expect(freshRegistry.getCalibrationRecord('blocked')).toBeUndefined();
+    expect(freshRegistry.getCalibrationRecord('existing')).toMatchObject({ key: 'existing' });
+  });
+
+  it('does not mutate cached models when private storage blocks before update', () => {
+    mockStorage.getString.mockImplementation((key: string) => {
+      if (key === 'models-registry:index-v1') {
+        return JSON.stringify([mockModel.id]);
+      }
+
+      if (key === 'models-registry:model-v1:test%2Fmodel') {
+        return JSON.stringify(mockModel);
+      }
+
+      return null;
+    });
+
+    const freshRegistry = new (LocalStorageRegistry as any)();
+    (freshRegistry as any).storage = mockStorage;
+    expect(freshRegistry.getModel(mockModel.id)?.name).toBe('model');
+
+    const blockedError = Object.assign(new Error('private storage blocked'), {
+      name: 'PrivateStorageUnavailableError',
+    });
+    mockStorage.set.mockClear();
+    mockStorage.remove.mockClear();
+    (assertPrivateStorageWritable as jest.Mock).mockImplementationOnce(() => {
+      throw blockedError;
+    });
+
+    expect(() => freshRegistry.updateModel(createMockModel({ name: 'blocked-update' }))).toThrow(blockedError);
+
+    expect(mockStorage.set).not.toHaveBeenCalled();
+    expect(mockStorage.remove).not.toHaveBeenCalled();
+    expect(freshRegistry.getModel(mockModel.id)?.name).toBe('model');
+  });
+
+  it('does not delete model files or mutate cache when private storage blocks before removal', async () => {
+    mockStorage.getString.mockImplementation((key: string) => {
+      if (key === 'models-registry:index-v1') {
+        return JSON.stringify([mockModel.id]);
+      }
+
+      if (key === 'models-registry:model-v1:test%2Fmodel') {
+        return JSON.stringify(mockModel);
+      }
+
+      return null;
+    });
+
+    const freshRegistry = new (LocalStorageRegistry as any)();
+    (freshRegistry as any).storage = mockStorage;
+    expect(freshRegistry.getModel(mockModel.id)?.localPath).toBe('model.gguf');
+
+    const blockedError = Object.assign(new Error('private storage blocked'), {
+      name: 'PrivateStorageUnavailableError',
+    });
+    mockStorage.remove.mockClear();
+    (FileSystem.deleteAsync as jest.Mock).mockClear();
+    (assertPrivateStorageWritable as jest.Mock).mockImplementationOnce(() => {
+      throw blockedError;
+    });
+
+    await expect(freshRegistry.removeModel(mockModel.id)).rejects.toThrow(blockedError);
+
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalled();
+    expect(mockStorage.remove).not.toHaveBeenCalled();
+    expect(freshRegistry.getModel(mockModel.id)?.localPath).toBe('model.gguf');
   });
 
   it('hydrates the registry from storage once and serves repeated lookups from cache', () => {

@@ -319,6 +319,52 @@ describe('ModelDownloadManager Basic', () => {
     ]);
   });
 
+  it('does not persist PAUSED for queued downloads when private storage blocks before pause', async () => {
+    useDownloadStore.setState({
+      queue: [{ ...mockModel, lifecycleStatus: LifecycleStatus.QUEUED }],
+      activeDownloadId: null,
+    });
+    (isPrivateStorageWritable as jest.Mock).mockReturnValue(false);
+
+    await modelDownloadManager.pauseDownload(mockModel.id);
+
+    expect(useDownloadStore.getState().queue).toEqual([
+      expect.objectContaining({
+        id: mockModel.id,
+        lifecycleStatus: LifecycleStatus.QUEUED,
+      }),
+    ]);
+    expect(useDownloadStore.getState().activeDownloadId).toBeNull();
+  });
+
+  it('does not remove queued downloads or delete partial files when private storage blocks before cancel', async () => {
+    const pauseAsync = jest.fn().mockResolvedValue(undefined);
+    (modelDownloadManager as any).activeJob = {
+      modelId: mockModel.id,
+      jobToken: 45,
+      resumable: { pauseAsync },
+      stopReason: null,
+    };
+    useDownloadStore.setState({
+      queue: [{ ...mockModel, lifecycleStatus: LifecycleStatus.DOWNLOADING, downloadProgress: 0.4 }],
+      activeDownloadId: mockModel.id,
+    });
+    (isPrivateStorageWritable as jest.Mock).mockReturnValue(false);
+
+    await modelDownloadManager.cancelDownload(mockModel.id);
+
+    expect(pauseAsync).toHaveBeenCalledTimes(1);
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalled();
+    expect(useDownloadStore.getState().activeDownloadId).toBeNull();
+    expect(useDownloadStore.getState().queue).toEqual([
+      expect.objectContaining({
+        id: mockModel.id,
+        lifecycleStatus: LifecycleStatus.QUEUED,
+        downloadProgress: 0,
+      }),
+    ]);
+  });
+
   it('verifies a downloaded file when the size matches', async () => {
     (FileSystem.getInfoAsync as jest.Mock).mockResolvedValueOnce({ exists: true, size: 1000 });
 

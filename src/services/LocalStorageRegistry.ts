@@ -332,7 +332,8 @@ export class LocalStorageRegistry {
       return;
     }
 
-    const records = this.getCachedCalibrationRecords();
+    assertPrivateStorageWritable();
+    const records = new Map(this.getCachedCalibrationRecords());
     records.set(normalizedKey, cloneCalibrationRecord({ ...record, key: normalizedKey }));
     this.persistCalibrationRecords(records);
   }
@@ -341,6 +342,7 @@ export class LocalStorageRegistry {
    * Save the entire list of models.
    */
   public saveModels(models: ModelMetadata[]): void {
+    assertPrivateStorageWritable();
     const previousState = this.getCachedModelsState();
     const nextState = this.normalizeModelsState(models);
     const removedIds = previousState.ids.filter((id) => !nextState.modelsById.has(id));
@@ -378,32 +380,31 @@ export class LocalStorageRegistry {
       return;
     }
 
+    assertPrivateStorageWritable();
     const { ids, modelsById } = this.getCachedModelsState();
     const normalized = normalizePersistedModelMetadata({ ...model, id: modelId });
     const existing = modelsById.get(modelId);
     const hadLocalPath = typeof existing?.localPath === 'string';
     const hasLocalPath = typeof normalized.localPath === 'string';
-
     const isNew = !modelsById.has(modelId);
-    if (isNew) {
-      ids.push(modelId);
-    }
+    const nextIds = isNew ? [...ids, modelId] : ids.slice();
+    const nextModelsById = new Map(modelsById);
+    nextModelsById.set(modelId, normalized);
 
-    modelsById.set(modelId, normalized);
     this.persistModel(modelId, normalized);
 
     if (isNew) {
-      this.persistModelsIndex(ids);
+      this.persistModelsIndex(nextIds);
     }
 
     // Ensure the new format is the single source of truth.
     this.getStorage().remove(LEGACY_MODELS_KEY);
 
-    if (this.cachedDownloadedModelsCount == null) {
-      this.cachedDownloadedModelsCount = this.countDownloadedModels(modelsById);
-    } else if (hadLocalPath !== hasLocalPath) {
-      this.cachedDownloadedModelsCount += hasLocalPath ? 1 : -1;
-    }
+    this.cachedModelIds = nextIds;
+    this.cachedModelsById = nextModelsById;
+    this.cachedDownloadedModelsCount = this.cachedDownloadedModelsCount == null
+      ? this.countDownloadedModels(nextModelsById)
+      : this.cachedDownloadedModelsCount + (hadLocalPath === hasLocalPath ? 0 : hasLocalPath ? 1 : -1);
 
     this.emitModelsChanged();
   }
@@ -417,6 +418,7 @@ export class LocalStorageRegistry {
       return;
     }
 
+    assertPrivateStorageWritable();
     const model = this.getModel(normalizedId);
     const modelsDir = getModelsDir();
     if (model && model.localPath) {
@@ -440,24 +442,24 @@ export class LocalStorageRegistry {
     const state = this.getCachedModelsState();
     const existing = state.modelsById.get(normalizedId);
     const hadLocalPath = typeof existing?.localPath === 'string';
+    const nextModelsById = new Map(state.modelsById);
+    const nextIds = state.ids.filter((id) => id !== normalizedId);
 
-    state.modelsById.delete(normalizedId);
-    const index = state.ids.indexOf(normalizedId);
-    if (index !== -1) {
-      state.ids.splice(index, 1);
-    }
+    nextModelsById.delete(normalizedId);
 
     this.getStorage().remove(getModelStorageKey(normalizedId));
-    this.persistModelsIndex(state.ids);
+    this.persistModelsIndex(nextIds);
 
     // Ensure the new format is the single source of truth.
     this.getStorage().remove(LEGACY_MODELS_KEY);
 
-    if (this.cachedDownloadedModelsCount == null) {
-      this.cachedDownloadedModelsCount = this.countDownloadedModels(state.modelsById);
-    } else if (hadLocalPath) {
-      this.cachedDownloadedModelsCount = Math.max(0, this.cachedDownloadedModelsCount - 1);
-    }
+    this.cachedModelIds = nextIds;
+    this.cachedModelsById = nextModelsById;
+    this.cachedDownloadedModelsCount = this.cachedDownloadedModelsCount == null
+      ? this.countDownloadedModels(nextModelsById)
+      : hadLocalPath
+        ? Math.max(0, this.cachedDownloadedModelsCount - 1)
+        : this.cachedDownloadedModelsCount;
 
     this.emitModelsChanged();
   }

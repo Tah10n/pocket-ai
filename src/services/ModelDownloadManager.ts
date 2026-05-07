@@ -276,7 +276,12 @@ export class ModelDownloadManager {
     const hardwareStatus = hardwareListenerService.getCurrentStatus();
     if (hardwareStatus.networkType === 'cellular' && settings.allowCellularDownloads === false) {
       if (next.lifecycleStatus !== LifecycleStatus.QUEUED) {
-        updateModelInQueue(next.id, { lifecycleStatus: LifecycleStatus.QUEUED });
+        const didPersist = await this.persistDownloadStoreMutation(() => {
+          updateModelInQueue(next.id, { lifecycleStatus: LifecycleStatus.QUEUED });
+        });
+        if (!didPersist) {
+          return;
+        }
       }
 
       return;
@@ -286,7 +291,12 @@ export class ModelDownloadManager {
     this.activeJob = { modelId: next.id, jobToken, resumable: null, stopReason: null };
 
     this.isProcessing = true;
-    setActiveDownload(next.id);
+    const didPersistActiveDownload = await this.persistDownloadStoreMutation(() => {
+      setActiveDownload(next.id);
+    });
+    if (!didPersistActiveDownload) {
+      return;
+    }
     void this.runDownloadJob(next, jobToken);
   }
 
@@ -309,6 +319,33 @@ export class ModelDownloadManager {
 
     await this.stopActiveJobForPrivateStorageReset({ clearQueue: false });
     return true;
+  }
+
+  private async canPersistDownloadMutation(): Promise<boolean> {
+    try {
+      assertPrivateStorageWritableForDownloadMutation();
+      return true;
+    } catch (error) {
+      if (await this.handlePrivateStorageUnavailable(error)) {
+        return false;
+      }
+
+      throw error;
+    }
+  }
+
+  private async persistDownloadStoreMutation(mutation: () => void): Promise<boolean> {
+    try {
+      assertPrivateStorageWritableForDownloadMutation();
+      mutation();
+      return true;
+    } catch (error) {
+      if (await this.handlePrivateStorageUnavailable(error)) {
+        return false;
+      }
+
+      throw error;
+    }
   }
 
   private async runDownloadJob(model: ModelMetadata, jobToken: number): Promise<void> {
@@ -334,7 +371,9 @@ export class ModelDownloadManager {
       console.error(`[ModelDownloadManager] Failed to download ${model.id}`, e);
 
       if (this.isCurrentJob(model.id, jobToken)) {
-        setActiveDownload(null);
+        await this.persistDownloadStoreMutation(() => {
+          setActiveDownload(null);
+        });
       }
     } finally {
       if (!this.isCurrentJob(model.id, jobToken)) {
@@ -525,7 +564,18 @@ export class ModelDownloadManager {
       ) {
         lastProgressUpdatedAt = now;
         lastProgress = clampedProgress;
-        updateModelInQueue(model.id, { downloadProgress: clampedProgress });
+        if (isPrivateStorageWritable()) {
+          try {
+            assertPrivateStorageWritableForDownloadMutation();
+            updateModelInQueue(model.id, { downloadProgress: clampedProgress });
+          } catch (error) {
+            void this.handlePrivateStorageUnavailable(error).then((handled) => {
+              if (!handled) {
+                console.warn(`[ModelDownloadManager] Failed to persist progress for ${model.id}`, error);
+              }
+            });
+          }
+        }
       }
 
       if (
@@ -837,10 +887,16 @@ export class ModelDownloadManager {
       return;
     }
 
+    if (!(await this.canPersistDownloadMutation())) {
+      return;
+    }
+
     const job = this.activeJob;
     if (!job || job.modelId !== modelId) {
       // Best-effort: allow pausing a queued download before it becomes active.
-      updateModelInQueue(modelId, { lifecycleStatus: LifecycleStatus.PAUSED });
+      await this.persistDownloadStoreMutation(() => {
+        updateModelInQueue(modelId, { lifecycleStatus: LifecycleStatus.PAUSED });
+      });
       return;
     }
 
@@ -872,8 +928,10 @@ export class ModelDownloadManager {
           updates.resumeData = resumeData;
         }
 
-        updateModelInQueue(modelId, updates);
-        setActiveDownload(null);
+        await this.persistDownloadStoreMutation(() => {
+          updateModelInQueue(modelId, updates);
+          setActiveDownload(null);
+        });
       }
     }
   }
@@ -881,6 +939,10 @@ export class ModelDownloadManager {
   public async cancelDownload(modelId: string) {
     const { queue, removeFromQueue, activeDownloadId, setActiveDownload } = useDownloadStore.getState();
     const queuedModel = queue.find((model) => model.id === modelId);
+
+    if (!(await this.canPersistDownloadMutation())) {
+      return;
+    }
 
     const job = this.activeJob?.modelId === modelId
       ? this.activeJob
@@ -898,11 +960,21 @@ export class ModelDownloadManager {
         }
       }
 
-      setActiveDownload(null);
+      const didPersistActiveClear = await this.persistDownloadStoreMutation(() => {
+        setActiveDownload(null);
+      });
+      if (!didPersistActiveClear) {
+        return;
+      }
     }
     
     // Remove from queue first to stop UI
-    removeFromQueue(modelId);
+    const didPersistQueueRemoval = await this.persistDownloadStoreMutation(() => {
+      removeFromQueue(modelId);
+    });
+    if (!didPersistQueueRemoval) {
+      return;
+    }
 
     void this.processQueue();
 

@@ -4,6 +4,7 @@ import { normalizePersistedModelMetadata } from '../../src/services/ModelMetadat
 import * as FileSystem from 'expo-file-system/legacy';
 import DeviceInfo from 'react-native-device-info';
 import { getSystemMemorySnapshot } from '../../src/services/SystemMetricsService';
+import { createStorage } from '../../src/services/storage';
 
 const mockStorage = {
   getString: jest.fn(),
@@ -75,7 +76,14 @@ describe('LocalStorageRegistry', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    (createStorage as jest.Mock).mockReturnValue(mockStorage);
+    mockStorage.getString.mockReset();
+    mockStorage.getString.mockReturnValue(null);
+    mockStorage.getAllKeys.mockReset();
     mockStorage.getAllKeys.mockReturnValue([]);
+    (FileSystem.deleteAsync as jest.Mock).mockResolvedValue(undefined);
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: true });
+    (FileSystem.readDirectoryAsync as jest.Mock).mockResolvedValue([]);
     (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(8 * 1024 * 1024 * 1024);
     (getSystemMemorySnapshot as jest.Mock).mockResolvedValue(null);
     (registry as any).getModels = originalGetModels;
@@ -505,5 +513,49 @@ describe('LocalStorageRegistry', () => {
     expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/models/orphan.gguf', { idempotent: true });
     expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/models/keep.gguf', expect.anything());
     expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/models/queued.gguf', expect.anything());
+  });
+
+  it('preserves model files that existed before a private storage reset', async () => {
+    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([]);
+    (FileSystem.readDirectoryAsync as jest.Mock)
+      .mockResolvedValueOnce(['pre-reset.gguf', '../bad'])
+      .mockResolvedValueOnce(['pre-reset.gguf', 'new-orphan.gguf']);
+
+    await registry.preserveExistingModelFilesForPrivateStorageReset();
+    const preservationPayload = mockStorage.set.mock.calls.find(
+      ([key]) => key === 'private-reset-preserved-model-files-v1',
+    )?.[1];
+    mockStorage.getString.mockImplementation((key: string) => (
+      key === 'private-reset-preserved-model-files-v1' ? preservationPayload : null
+    ));
+
+    await registry.validateRegistry([]);
+
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/models/new-orphan.gguf', { idempotent: true });
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/models/pre-reset.gguf', expect.anything());
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/models/../bad', expect.anything());
+  });
+
+  it('suspends orphan cleanup when reset-time model file snapshot fails', async () => {
+    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([]);
+    (FileSystem.readDirectoryAsync as jest.Mock)
+      .mockRejectedValueOnce(new Error('directory temporarily unavailable'))
+      .mockResolvedValueOnce(['preserved-after-rescan.gguf', 'also-preserved.gguf']);
+
+    await registry.preserveExistingModelFilesForPrivateStorageReset();
+    const preservationPayload = mockStorage.set.mock.calls.find(
+      ([key]) => key === 'private-reset-preserved-model-files-v1',
+    )?.[1];
+    mockStorage.getString.mockImplementation((key: string) => (
+      key === 'private-reset-preserved-model-files-v1' ? preservationPayload : null
+    ));
+
+    await registry.validateRegistry([]);
+
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalled();
+    expect(mockStorage.set).toHaveBeenLastCalledWith(
+      'private-reset-preserved-model-files-v1',
+      expect.stringContaining('preserved-after-rescan.gguf'),
+    );
   });
 });

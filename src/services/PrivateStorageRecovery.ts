@@ -45,6 +45,7 @@ export async function resetPrivateAppStorageAndRuntimeStateAfterConfirmation(): 
     resetModelDownloadManagerForPrivateStorageReset(),
     stopActiveChatGenerationForPrivateStorageBlocked(),
   ]);
+  await registry.preserveExistingModelFilesForPrivateStorageReset();
   invalidatePrivateStorageRuntimeHandles();
 
   const storageHealth = await resetPrivateAppStorageAfterConfirmation();

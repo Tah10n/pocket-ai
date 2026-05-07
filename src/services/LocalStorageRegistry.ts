@@ -6,10 +6,12 @@ import { ModelMetadata, LifecycleStatus } from '../types/models';
 import { getModelsDir } from './FileSystemSetup';
 import { normalizePersistedModelMetadata } from './ModelMetadataNormalizer';
 import { estimateFastMemoryFit } from '../memory/estimator';
-import { safeJoinModelPath } from '../utils/safeFilePath';
+import { isValidLocalFileName, safeJoinModelPath } from '../utils/safeFilePath';
 import type { CalibrationRecord } from '../memory/types';
 
 const REGISTRY_STORAGE_ID = 'models-registry';
+const MODEL_FILE_PRESERVATION_STORAGE_ID = 'model-file-preservation';
+const PRIVATE_RESET_PRESERVED_MODEL_FILES_KEY = 'private-reset-preserved-model-files-v1';
 
 // Legacy format: one JSON array stored under the same key as the MMKV instance id.
 const LEGACY_MODELS_KEY = REGISTRY_STORAGE_ID;
@@ -21,12 +23,87 @@ const MODEL_KEY_PREFIX = 'models-registry:model-v1:';
 const CALIBRATION_RECORDS_KEY = 'memory-fit-calibration-records-v1';
 const MAX_CALIBRATION_RECORDS = 200;
 
+let modelFilePreservationStorage: MMKV | null = null;
+
+type PrivateResetModelFilePreservationState = {
+  fileNames: Set<string>;
+  scanComplete: boolean;
+};
+
 function cloneCalibrationRecord(record: CalibrationRecord): CalibrationRecord {
   return { ...record };
 }
 
 function normalizeModelId(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
+}
+
+function getModelFilePreservationStorage(): MMKV {
+  if (modelFilePreservationStorage) {
+    return modelFilePreservationStorage;
+  }
+
+  const created = createStorage(MODEL_FILE_PRESERVATION_STORAGE_ID, { tier: 'cache' });
+  modelFilePreservationStorage = created;
+  return created;
+}
+
+function normalizeModelFileNames(input: unknown): Set<string> {
+  const values = Array.isArray(input) ? input : [];
+  return new Set(values.filter(isValidLocalFileName));
+}
+
+function readPrivateResetPreservedModelFiles(): PrivateResetModelFilePreservationState {
+  const raw = getModelFilePreservationStorage().getString(PRIVATE_RESET_PRESERVED_MODEL_FILES_KEY);
+  if (!raw) {
+    return {
+      fileNames: new Set(),
+      scanComplete: true,
+    };
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (Array.isArray(parsed)) {
+      return {
+        fileNames: normalizeModelFileNames(parsed),
+        scanComplete: true,
+      };
+    }
+
+    const state = parsed as {
+      fileNames?: unknown;
+      scanComplete?: unknown;
+    };
+
+    return {
+      fileNames: normalizeModelFileNames(state.fileNames),
+      scanComplete: state.scanComplete !== false,
+    };
+  } catch {
+    getModelFilePreservationStorage().remove(PRIVATE_RESET_PRESERVED_MODEL_FILES_KEY);
+    return {
+      fileNames: new Set(),
+      scanComplete: true,
+    };
+  }
+}
+
+function writePrivateResetPreservedModelFiles(state: PrivateResetModelFilePreservationState): void {
+  const fileNames = Array.from(state.fileNames).sort((left, right) => left.localeCompare(right));
+  if (state.scanComplete && fileNames.length === 0) {
+    getModelFilePreservationStorage().remove(PRIVATE_RESET_PRESERVED_MODEL_FILES_KEY);
+    return;
+  }
+
+  getModelFilePreservationStorage().set(
+    PRIVATE_RESET_PRESERVED_MODEL_FILES_KEY,
+    JSON.stringify({
+      fileNames,
+      scanComplete: state.scanComplete,
+      updatedAt: Date.now(),
+    }),
+  );
 }
 
 function sanitizeModelIndex(input: unknown): string[] {
@@ -211,6 +288,36 @@ export class LocalStorageRegistry {
     this.cachedDownloadedModelsCount = 0;
     this.cachedCalibrationRecordsByKey = new Map<string, CalibrationRecord>();
     this.emitModelsChanged();
+  }
+
+  public async preserveExistingModelFilesForPrivateStorageReset(): Promise<string[]> {
+    const currentState = readPrivateResetPreservedModelFiles();
+    const modelsDir = getModelsDir();
+
+    if (!modelsDir) {
+      writePrivateResetPreservedModelFiles({
+        fileNames: currentState.fileNames,
+        scanComplete: false,
+      });
+      return Array.from(currentState.fileNames).sort((left, right) => left.localeCompare(right));
+    }
+
+    try {
+      const fileNames = normalizeModelFileNames(await FileSystem.readDirectoryAsync(modelsDir));
+      const nextFileNames = new Set([...currentState.fileNames, ...fileNames]);
+      writePrivateResetPreservedModelFiles({
+        fileNames: nextFileNames,
+        scanComplete: true,
+      });
+      return Array.from(nextFileNames).sort((left, right) => left.localeCompare(right));
+    } catch (error) {
+      console.warn('[LocalStorageRegistry] Failed to snapshot model files before private storage reset; suspending orphan cleanup until the next registry validation can rescan.', error);
+      writePrivateResetPreservedModelFiles({
+        fileNames: currentState.fileNames,
+        scanComplete: false,
+      });
+      return Array.from(currentState.fileNames).sort((left, right) => left.localeCompare(right));
+    }
   }
 
   public getCalibrationRecord(key: string): CalibrationRecord | undefined {
@@ -499,9 +606,17 @@ export class LocalStorageRegistry {
           .filter((localPath): localPath is string => typeof localPath === 'string'),
       );
       const queuedFileNamesSet = new Set(queuedFileNames);
+      const privateResetPreservedFileNames = this.getPreservedModelFileNamesForCleanup(
+        dirInfo,
+        completedLocalPaths,
+      );
 
       for (const filename of dirInfo) {
-        if (completedLocalPaths.has(filename) || queuedFileNamesSet.has(filename)) {
+        if (
+          completedLocalPaths.has(filename)
+          || queuedFileNamesSet.has(filename)
+          || privateResetPreservedFileNames.has(filename)
+        ) {
           continue;
         }
 
@@ -548,6 +663,47 @@ export class LocalStorageRegistry {
       ids: this.cachedModelIds ?? [],
       modelsById: this.cachedModelsById ?? new Map<string, ModelMetadata>(),
     };
+  }
+
+  private getPreservedModelFileNamesForCleanup(
+    directoryFileNames: string[],
+    completedLocalPaths: Set<string>,
+  ): Set<string> {
+    const state = readPrivateResetPreservedModelFiles();
+    const safeDirectoryFileNames = normalizeModelFileNames(directoryFileNames);
+    const nextFileNames = new Set<string>();
+
+    if (!state.scanComplete) {
+      for (const fileName of safeDirectoryFileNames) {
+        state.fileNames.add(fileName);
+      }
+    }
+
+    for (const fileName of state.fileNames) {
+      if (!safeDirectoryFileNames.has(fileName)) {
+        continue;
+      }
+
+      if (completedLocalPaths.has(fileName)) {
+        continue;
+      }
+
+      nextFileNames.add(fileName);
+    }
+
+    const shouldPersist =
+      !state.scanComplete
+      || nextFileNames.size !== state.fileNames.size
+      || [...nextFileNames].some((fileName) => !state.fileNames.has(fileName));
+
+    if (shouldPersist) {
+      writePrivateResetPreservedModelFiles({
+        fileNames: nextFileNames,
+        scanComplete: true,
+      });
+    }
+
+    return nextFileNames;
   }
 
   private emitModelsChanged(): void {

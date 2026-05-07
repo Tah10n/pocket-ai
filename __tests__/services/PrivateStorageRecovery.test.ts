@@ -36,6 +36,7 @@ function createModel(overrides: Partial<ModelMetadata> = {}): ModelMetadata {
 describe('PrivateStorageRecovery', () => {
   beforeEach(() => {
     jest.restoreAllMocks();
+    jest.spyOn(registry, 'preserveExistingModelFilesForPrivateStorageReset').mockResolvedValue([]);
     useChatStore.setState({ threads: {}, activeThreadId: null });
     useDownloadStore.setState({ queue: [], activeDownloadId: null });
     useModelsStore.setState({
@@ -82,6 +83,7 @@ describe('PrivateStorageRecovery', () => {
     expect(useDownloadStore.getState().activeDownloadId).toBeNull();
     expect(useModelsStore.getState().tabPreferences.all.filters.fitsInRamOnly).toBe(false);
     expect(useModelsStore.getState().tabPreferences.all.discoveryMode).toBe('uninitialized');
+    expect(registry.preserveExistingModelFilesForPrivateStorageReset).toHaveBeenCalledTimes(1);
     expect(registry.getModels()).toEqual([]);
   });
 
@@ -106,6 +108,7 @@ describe('PrivateStorageRecovery', () => {
       id: cachedModel.id,
       localPath: cachedModel.localPath,
     })]);
+    expect(registry.preserveExistingModelFilesForPrivateStorageReset).toHaveBeenCalledTimes(1);
     expect(registry.hasAnyDownloadedModels()).toBe(true);
   });
 });

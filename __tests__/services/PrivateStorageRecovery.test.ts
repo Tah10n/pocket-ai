@@ -1,5 +1,6 @@
 import { resetPrivateAppStorageAndRuntimeStateAfterConfirmation } from '../../src/services/PrivateStorageRecovery';
 import { registry } from '../../src/services/LocalStorageRegistry';
+import * as privateStorage from '../../src/services/storage';
 import { getAppStorage } from '../../src/store/storage';
 import { useChatStore } from '../../src/store/chatStore';
 import { useDownloadStore } from '../../src/store/downloadStore';
@@ -34,6 +35,7 @@ function createModel(overrides: Partial<ModelMetadata> = {}): ModelMetadata {
 
 describe('PrivateStorageRecovery', () => {
   beforeEach(() => {
+    jest.restoreAllMocks();
     useChatStore.setState({ threads: {}, activeThreadId: null });
     useDownloadStore.setState({ queue: [], activeDownloadId: null });
     useModelsStore.setState({
@@ -81,5 +83,29 @@ describe('PrivateStorageRecovery', () => {
     expect(useModelsStore.getState().tabPreferences.all.filters.fitsInRamOnly).toBe(false);
     expect(useModelsStore.getState().tabPreferences.all.discoveryMode).toBe('uninitialized');
     expect(registry.getModels()).toEqual([]);
+  });
+
+  it('preserves the registry cache when the destructive reset remains blocked', async () => {
+    jest.spyOn(privateStorage, 'resetPrivateAppStorageAfterConfirmation').mockResolvedValueOnce({
+      status: 'blocked',
+      reason: 'reset_failed',
+      retryable: true,
+      requiresExplicitReset: true,
+      messageKey: 'storage.private.resetFailed',
+      lastUpdatedAt: 1,
+    });
+    const cachedModel = createModel();
+    registry.saveModels([cachedModel]);
+
+    await expect(resetPrivateAppStorageAndRuntimeStateAfterConfirmation()).resolves.toEqual(expect.objectContaining({
+      status: 'blocked',
+      reason: 'reset_failed',
+    }));
+
+    expect(registry.getModels()).toEqual([expect.objectContaining({
+      id: cachedModel.id,
+      localPath: cachedModel.localPath,
+    })]);
+    expect(registry.hasAnyDownloadedModels()).toBe(true);
   });
 });

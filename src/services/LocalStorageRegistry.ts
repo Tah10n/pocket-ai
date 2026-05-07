@@ -200,8 +200,12 @@ export class LocalStorageRegistry {
     };
   }
 
-  public invalidatePrivateStorageRuntimeState(): void {
+  public invalidatePrivateStorageRuntimeHandle(): void {
     this.storage = null;
+  }
+
+  public invalidatePrivateStorageRuntimeState(): void {
+    this.invalidatePrivateStorageRuntimeHandle();
     this.cachedModelIds = [];
     this.cachedModelsById = new Map<string, ModelMetadata>();
     this.cachedDownloadedModelsCount = 0;

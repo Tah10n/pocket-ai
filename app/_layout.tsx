@@ -8,7 +8,11 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import 'react-native-reanimated';
 import { useTranslation } from 'react-i18next';
 
-import { ThemeProvider as CustomThemeProvider, useTheme } from '../src/providers/ThemeProvider';
+import {
+  StaticThemeProvider as StaticAppThemeProvider,
+  ThemeProvider as CustomThemeProvider,
+  useTheme,
+} from '../src/providers/ThemeProvider';
 import { useMotionPreferences } from '../src/hooks/useDeviceMetrics';
 import { usePerformanceNavigationTrace } from '../src/hooks/usePerformanceNavigationTrace';
 import { hardwareListenerService } from '../src/services/HardwareListenerService';
@@ -323,15 +327,17 @@ function StorageBlockedRootNavigator() {
   }, [colors.background]);
 
   return (
-    <ThemeProvider value={navigationTheme}>
-      <StorageRecoveryScreen
-        health={criticalStorageHealth ?? getPrivateStorageHealthSnapshot()}
-        busy={recoveryBusy}
-        onRetry={handleStorageRetry}
-        onReset={handleStorageReset}
-      />
-      <StatusBar style={colors.statusBarStyle} />
-    </ThemeProvider>
+    <StaticAppThemeProvider resolvedMode={resolvedMode}>
+      <ThemeProvider value={navigationTheme}>
+        <StorageRecoveryScreen
+          health={criticalStorageHealth ?? getPrivateStorageHealthSnapshot()}
+          busy={recoveryBusy}
+          onRetry={handleStorageRetry}
+          onReset={handleStorageReset}
+        />
+        <StatusBar style={colors.statusBarStyle} />
+      </ThemeProvider>
+    </StaticAppThemeProvider>
   );
 }
 

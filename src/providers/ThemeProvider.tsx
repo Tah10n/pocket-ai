@@ -40,6 +40,8 @@ const ThemeContext = createContext<ThemeContextValue>({
 
 type SystemColorScheme = ReturnType<typeof useSystemColorScheme>;
 
+const noopThemeAction = () => {};
+
 function resolveThemeMode(mode: ThemeMode, systemScheme: SystemColorScheme): ResolvedThemeMode {
     if (mode === 'system') {
         return systemScheme === 'dark' ? 'dark' : 'light';
@@ -96,6 +98,47 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
 
     return (
         <ThemeContext.Provider value={{ mode, themeId, resolvedMode, colors, appearance, navigationTheme, toggleTheme, setTheme, setThemeId }}>
+            {children}
+        </ThemeContext.Provider>
+    );
+}
+
+type StaticThemeProviderProps = {
+    children: React.ReactNode;
+    resolvedMode: ResolvedThemeMode;
+    mode?: ThemeMode;
+    themeId?: ThemeId;
+};
+
+export function StaticThemeProvider({
+    children,
+    resolvedMode,
+    mode = 'system',
+    themeId = DEFAULT_THEME_ID,
+}: StaticThemeProviderProps) {
+    const { setColorScheme } = useNativewindColorScheme();
+    const colors = useMemo(() => getThemeColors(resolvedMode, themeId), [resolvedMode, themeId]);
+    const appearance = useMemo(() => getThemeAppearance(themeId, resolvedMode), [resolvedMode, themeId]);
+    const navigationTheme = useMemo(() => createNavigationTheme(resolvedMode, themeId), [resolvedMode, themeId]);
+
+    useEffect(() => {
+        setColorScheme(resolvedMode);
+    }, [resolvedMode, setColorScheme]);
+
+    const value = useMemo<ThemeContextValue>(() => ({
+        mode,
+        themeId,
+        resolvedMode,
+        colors,
+        appearance,
+        navigationTheme,
+        toggleTheme: noopThemeAction,
+        setTheme: noopThemeAction,
+        setThemeId: noopThemeAction,
+    }), [appearance, colors, mode, navigationTheme, resolvedMode, themeId]);
+
+    return (
+        <ThemeContext.Provider value={value}>
             {children}
         </ThemeContext.Provider>
     );

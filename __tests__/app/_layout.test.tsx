@@ -9,6 +9,8 @@ const mockGetStorageFallbackReport = jest.fn();
 const mockResetPrivateAppStorageAndRuntimeStateAfterConfirmation = jest.fn();
 const mockRetryPrivateStorageInitialization = jest.fn();
 const mockNotificationInitialize = jest.fn();
+const mockStaticThemeResolvedModes = jest.fn();
+const mockUseColorScheme = jest.fn(() => 'light');
 
 const blockedHealth = {
   status: 'blocked' as const,
@@ -25,6 +27,15 @@ const readyHealth = {
   requiresExplicitReset: false,
   lastUpdatedAt: 2,
 };
+
+jest.mock('react-native', () => {
+  const actual = jest.requireActual('react-native');
+  Object.defineProperty(actual, 'useColorScheme', {
+    configurable: true,
+    value: () => mockUseColorScheme(),
+  });
+  return actual;
+});
 
 jest.mock('@react-navigation/native', () => {
   const mockReact = require('react');
@@ -79,6 +90,10 @@ jest.mock('../../src/providers/ThemeProvider', () => {
   const mockReact = require('react');
   const { View } = require('react-native');
   return {
+    StaticThemeProvider: ({ children, resolvedMode }: any) => {
+      mockStaticThemeResolvedModes(resolvedMode);
+      return mockReact.createElement(View, { testID: `static-theme-${resolvedMode}` }, children);
+    },
     ThemeProvider: ({ children }: any) => mockReact.createElement(View, { testID: 'custom-theme' }, children),
     useTheme: () => ({
       colors: {
@@ -167,6 +182,7 @@ function resetBootstrapStore() {
 describe('RootLayout storage recovery gate', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockUseColorScheme.mockReturnValue('light');
     resetBootstrapStore();
     mockBootstrapAppBackground.mockResolvedValue({ outcome: 'success' });
     mockGetPrivateStorageHealthSnapshot.mockReturnValue(blockedHealth);
@@ -181,12 +197,25 @@ describe('RootLayout storage recovery gate', () => {
     const { findByTestId } = render(<RootLayout />);
 
     expect(await findByTestId('storage-recovery-screen')).toBeTruthy();
+    expect(await findByTestId('static-theme-light')).toBeTruthy();
+    expect(mockStaticThemeResolvedModes).toHaveBeenCalledWith('light');
     expect(mockBootstrapAppBackground).not.toHaveBeenCalled();
     expect(mockNotificationInitialize).not.toHaveBeenCalled();
     expect(useBootstrapStore.getState().criticalOutcome).toBe('storage_blocked');
     expect(useBootstrapStore.getState().criticalStorageHealth).toEqual(expect.objectContaining({
       reason: 'encrypted_open_failed',
     }));
+  });
+
+  it('provides app theme context to the boot recovery screen in dark mode', async () => {
+    mockUseColorScheme.mockReturnValue('dark');
+    mockBootstrapAppCritical.mockResolvedValueOnce({ outcome: 'storage_blocked', storageHealth: blockedHealth });
+
+    const { findByTestId } = render(<RootLayout />);
+
+    expect(await findByTestId('storage-recovery-screen')).toBeTruthy();
+    expect(await findByTestId('static-theme-dark')).toBeTruthy();
+    expect(mockStaticThemeResolvedModes).toHaveBeenCalledWith('dark');
   });
 
   it('retries private storage and starts background bootstrap after critical bootstrap succeeds', async () => {

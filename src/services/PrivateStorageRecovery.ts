@@ -23,7 +23,7 @@ export function invalidatePrivateStorageRuntimeHandles(): void {
   invalidatePresetStorageForPrivateReset();
   invalidateLastGoodProfileStorageForPrivateReset();
   invalidateAutotuneStorageForPrivateReset();
-  registry.invalidatePrivateStorageRuntimeState();
+  registry.invalidatePrivateStorageRuntimeHandle();
 }
 
 export function resetPrivatePersistedRuntimeStateForStorageReset(): void {
@@ -52,6 +52,7 @@ export async function resetPrivateAppStorageAndRuntimeStateAfterConfirmation(): 
   if (storageHealth.status !== 'blocked') {
     resetPrivatePersistedRuntimeStateForStorageReset();
     invalidatePrivateStorageRuntimeHandles();
+    registry.invalidatePrivateStorageRuntimeState();
   }
 
   return storageHealth;

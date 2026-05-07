@@ -1,5 +1,5 @@
 import type { MMKV } from 'react-native-mmkv';
-import { createStorage, PrivateStorageUnavailableError } from './storage';
+import { assertPrivateStorageWritable, createStorage, PrivateStorageUnavailableError } from './storage';
 import { DEFAULT_REASONING_EFFORT, normalizeReasoningEffort, type ReasoningEffort } from '../types/reasoning';
 import { MAX_CONTEXT_WINDOW_TOKENS } from '../utils/contextWindow';
 import { UNKNOWN_MODEL_GPU_LAYERS_CEILING } from '../utils/modelLimits';
@@ -15,6 +15,7 @@ export function invalidateSettingsStorageForPrivateReset(): void {
 
 export function getSettingsStorage(): MMKV {
     if (storageInstance) {
+        assertPrivateStorageWritable();
         return storageInstance;
     }
 

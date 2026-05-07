@@ -21,6 +21,7 @@ jest.mock('expo-file-system/legacy', () => ({
 }));
 
 jest.mock('../../src/services/storage', () => ({
+  assertPrivateStorageWritable: jest.fn(),
   createStorage: jest.fn().mockReturnValue(mockStorage),
 }));
 

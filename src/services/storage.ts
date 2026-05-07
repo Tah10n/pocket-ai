@@ -179,6 +179,30 @@ export function isPrivateStorageWritable(): boolean {
         && privateEncryptionKey.length > 0;
 }
 
+export function assertPrivateStorageWritable(
+    fallbackReason: PrivateStorageBlockReason = 'encryption_not_initialized',
+): void {
+    if (isPrivateStorageWritable()) {
+        return;
+    }
+
+    const health = snapshotPrivateStorageHealth();
+    const reason =
+        health.status === 'blocked' && health.reason
+            ? health.reason
+            : health.status === 'initializing'
+                ? 'encryption_initializing'
+                : health.status === 'resetting'
+                    ? 'unknown'
+                    : fallbackReason;
+
+    if (health.status === 'unknown') {
+        throw new PrivateStorageUnavailableError(reason, blockPrivateStorage(reason));
+    }
+
+    throw new PrivateStorageUnavailableError(reason, health);
+}
+
 export function getStorageFallbackReport(): StorageFallbackReport | null {
     const storeIds: string[] = [];
     const reasons: Record<string, StorageFallbackReason> = {};

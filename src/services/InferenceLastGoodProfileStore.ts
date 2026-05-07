@@ -1,6 +1,6 @@
 import type { MMKV } from 'react-native-mmkv';
 import llamaPackageJson from 'llama.rn/package.json';
-import { createStorage } from './storage';
+import { assertPrivateStorageWritable, createStorage } from './storage';
 
 const LLAMA_RN_VERSION: string = typeof llamaPackageJson?.version === 'string' ? llamaPackageJson.version : 'unknown';
 
@@ -33,6 +33,7 @@ export function invalidateLastGoodProfileStorageForPrivateReset(): void {
 
 function getLastGoodStorage(): MMKV {
   if (lastGoodStorageInstance) {
+    assertPrivateStorageWritable();
     return lastGoodStorageInstance;
   }
 

@@ -23,10 +23,10 @@ import { hardwareListenerService, type HardwareStatus } from './HardwareListener
 import { getSettings, subscribeSettings } from './SettingsStore';
 import { backgroundTaskService } from './BackgroundTaskService';
 import { notificationService, type DownloadErrorReason } from './NotificationService';
-import { PrivateStorageUnavailableError, isPrivateStorageWritable } from './storage';
+import { PrivateStorageUnavailableError, getPrivateStorageHealthSnapshot, isPrivateStorageWritable } from './storage';
 
 function ignorePrivateStorageUnavailableDuringDownloadStop(error: unknown, scope: string): boolean {
-  if (error instanceof PrivateStorageUnavailableError) {
+  if (isPrivateStorageUnavailableError(error)) {
     console.warn(`[ModelDownloadManager] Skipped persisting ${scope} while private storage is blocked`, error);
     return true;
   }
@@ -45,6 +45,20 @@ function setDownloadRuntimeStateForStorageStop(
       throw error;
     }
   }
+}
+
+function isPrivateStorageUnavailableError(error: unknown): error is PrivateStorageUnavailableError {
+  return error instanceof PrivateStorageUnavailableError
+    || (error instanceof Error && error.name === 'PrivateStorageUnavailableError');
+}
+
+function assertPrivateStorageWritableForDownloadMutation(): void {
+  if (isPrivateStorageWritable()) {
+    return;
+  }
+
+  const health = getPrivateStorageHealthSnapshot();
+  throw new PrivateStorageUnavailableError(health.reason ?? 'unknown', health);
 }
 
 function safeSerializeResumeSnapshotValue(
@@ -288,6 +302,15 @@ export class ModelDownloadManager {
     return this.activeJob?.stopReason ?? null;
   }
 
+  private async handlePrivateStorageUnavailable(error: unknown): Promise<boolean> {
+    if (!isPrivateStorageUnavailableError(error)) {
+      return false;
+    }
+
+    await this.stopActiveJobForPrivateStorageReset({ clearQueue: false });
+    return true;
+  }
+
   private async runDownloadJob(model: ModelMetadata, jobToken: number): Promise<void> {
     const { setActiveDownload } = useDownloadStore.getState();
 
@@ -407,10 +430,23 @@ export class ModelDownloadManager {
         return;
       }
 
+      if (await this.handlePrivateStorageUnavailable(e)) {
+        return;
+      }
+
       if (this.isCurrentJob(model.id, jobToken)) {
-        updateModelInQueue(model.id, { lifecycleStatus: LifecycleStatus.AVAILABLE });
-        removeFromQueue(model.id);
-        setActiveDownload(null);
+        try {
+          assertPrivateStorageWritableForDownloadMutation();
+          updateModelInQueue(model.id, { lifecycleStatus: LifecycleStatus.AVAILABLE });
+          removeFromQueue(model.id);
+          setActiveDownload(null);
+        } catch (storageError) {
+          if (await this.handlePrivateStorageUnavailable(storageError)) {
+            return;
+          }
+
+          throw storageError;
+        }
       }
       throw e;
     }
@@ -543,6 +579,7 @@ export class ModelDownloadManager {
         return;
       }
 
+      assertPrivateStorageWritableForDownloadMutation();
       updateModelInQueue(model.id, { lifecycleStatus: LifecycleStatus.DOWNLOADING });
       
       const result = await resumable.downloadAsync();
@@ -564,6 +601,7 @@ export class ModelDownloadManager {
           updates.resumeData = resumeData;
         }
 
+        assertPrivateStorageWritableForDownloadMutation();
         updateModelInQueue(model.id, updates);
         setActiveDownload(null);
 
@@ -581,6 +619,7 @@ export class ModelDownloadManager {
         });
       }
 
+      assertPrivateStorageWritableForDownloadMutation();
       updateModelInQueue(model.id, { lifecycleStatus: LifecycleStatus.VERIFYING });
 
       if (!this.isCurrentJob(model.id, jobToken)) {
@@ -653,7 +692,9 @@ export class ModelDownloadManager {
         sha256: verificationHash ?? model.sha256,
       };
 
+      assertPrivateStorageWritableForDownloadMutation();
       registry.updateModel(completedModel);
+      assertPrivateStorageWritableForDownloadMutation();
       removeFromQueue(model.id);
 
       if (AppState.currentState !== 'active') {
@@ -671,16 +712,29 @@ export class ModelDownloadManager {
         return;
       }
 
+      if (await this.handlePrivateStorageUnavailable(e)) {
+        return;
+      }
+
       console.error(`[ModelDownloadManager] Error during download: ${model.id}`, e);
 
       // If it fails, save resume data if we can and keep the entry in the queue as "available".
       // This avoids infinite retry loops while still allowing the user to retry and resume later.
       const resumeData = safeSerializeResumeSnapshot(resumable as any, { modelId: model.id, scope: 'downloadError' });
-      updateModelInQueue(model.id, {
-        resumeData,
-        lifecycleStatus: LifecycleStatus.AVAILABLE,
-      });
-      setActiveDownload(null);
+      try {
+        assertPrivateStorageWritableForDownloadMutation();
+        updateModelInQueue(model.id, {
+          resumeData,
+          lifecycleStatus: LifecycleStatus.AVAILABLE,
+        });
+        setActiveDownload(null);
+      } catch (storageError) {
+        if (await this.handlePrivateStorageUnavailable(storageError)) {
+          return;
+        }
+
+        throw storageError;
+      }
 
       if (AppState.currentState !== 'active') {
         const appError = toAppError(e);

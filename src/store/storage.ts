@@ -1,6 +1,6 @@
 import type { MMKV } from 'react-native-mmkv';
 import { StateStorage } from 'zustand/middleware';
-import { createStorage } from '../services/storage';
+import { assertPrivateStorageWritable, createStorage } from '../services/storage';
 
 let storageInstance: MMKV | null = null;
 
@@ -10,6 +10,7 @@ export function invalidateAppStorageForPrivateReset(): void {
 
 export function getAppStorage(): MMKV {
   if (storageInstance) {
+    assertPrivateStorageWritable();
     return storageInstance;
   }
 

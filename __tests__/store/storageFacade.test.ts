@@ -37,9 +37,10 @@ describe('store/storage facade', () => {
   it('memoizes the shared app storage instance', () => {
     const mockStorage = createMockStorage();
     const createStorage = jest.fn(() => mockStorage);
+    const assertPrivateStorageWritable = jest.fn();
 
     jest.isolateModules(() => {
-      jest.doMock('../../src/services/storage', () => ({ createStorage }));
+      jest.doMock('../../src/services/storage', () => ({ assertPrivateStorageWritable, createStorage }));
 
       const { getAppStorage } = require('../../src/store/storage');
 
@@ -47,6 +48,7 @@ describe('store/storage facade', () => {
       expect(getAppStorage()).toBe(mockStorage);
       expect(createStorage).toHaveBeenCalledTimes(1);
       expect(createStorage).toHaveBeenCalledWith('global-app-storage', { tier: 'private' });
+      expect(assertPrivateStorageWritable).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -60,9 +62,10 @@ describe('store/storage facade', () => {
         throw blockedError;
       })
       .mockReturnValue(mockStorage);
+    const assertPrivateStorageWritable = jest.fn();
 
     jest.isolateModules(() => {
-      jest.doMock('../../src/services/storage', () => ({ createStorage }));
+      jest.doMock('../../src/services/storage', () => ({ assertPrivateStorageWritable, createStorage }));
 
       const { getAppStorage, storage } = require('../../src/store/storage');
 
@@ -77,15 +80,40 @@ describe('store/storage facade', () => {
     });
   });
 
+  it('blocks cached app storage access when private storage becomes unsafe', () => {
+    const blockedError = Object.assign(new Error('private storage blocked'), {
+      name: 'PrivateStorageUnavailableError',
+    });
+    const mockStorage = createMockStorage();
+    const createStorage = jest.fn(() => mockStorage);
+    const assertPrivateStorageWritable = jest.fn(() => {
+      throw blockedError;
+    });
+
+    jest.isolateModules(() => {
+      jest.doMock('../../src/services/storage', () => ({ assertPrivateStorageWritable, createStorage }));
+
+      const { getAppStorage, storage } = require('../../src/store/storage');
+
+      expect(getAppStorage()).toBe(mockStorage);
+      expect(() => getAppStorage()).toThrow(blockedError);
+      expect(() => storage.set('unsafe', 'write')).toThrow(blockedError);
+      expect(mockStorage.set).not.toHaveBeenCalled();
+      expect(createStorage).toHaveBeenCalledTimes(1);
+      expect(assertPrivateStorageWritable).toHaveBeenCalledTimes(2);
+    });
+  });
+
   it('recreates the shared app storage instance after private reset invalidation', () => {
     const firstStorage = createMockStorage();
     const secondStorage = createMockStorage();
     const createStorage = jest.fn()
       .mockReturnValueOnce(firstStorage)
       .mockReturnValueOnce(secondStorage);
+    const assertPrivateStorageWritable = jest.fn();
 
     jest.isolateModules(() => {
-      jest.doMock('../../src/services/storage', () => ({ createStorage }));
+      jest.doMock('../../src/services/storage', () => ({ assertPrivateStorageWritable, createStorage }));
 
       const { getAppStorage, invalidateAppStorageForPrivateReset } = require('../../src/store/storage');
 
@@ -99,9 +127,10 @@ describe('store/storage facade', () => {
   it('delegates facade and zustand persistence calls to the cached storage instance', () => {
     const mockStorage = createMockStorage();
     const createStorage = jest.fn(() => mockStorage);
+    const assertPrivateStorageWritable = jest.fn();
 
     jest.isolateModules(() => {
-      jest.doMock('../../src/services/storage', () => ({ createStorage }));
+      jest.doMock('../../src/services/storage', () => ({ assertPrivateStorageWritable, createStorage }));
 
       const { mmkvStorage, storage } = require('../../src/store/storage');
 

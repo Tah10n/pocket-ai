@@ -19,6 +19,7 @@ const mockStorage = {
 const mockCreateStorage = jest.fn((_id?: string, _options?: unknown) => mockStorage);
 
 jest.mock('../../src/services/storage', () => ({
+  assertPrivateStorageWritable: jest.fn(),
   createStorage: (id?: string, options?: unknown) => mockCreateStorage(id, options),
 }));
 
@@ -92,7 +93,10 @@ describe('InferenceAutotuneStore', () => {
 
     try {
       jest.resetModules();
-      jest.doMock('../../src/services/storage', () => ({ createStorage: createStorageMock }));
+      jest.doMock('../../src/services/storage', () => ({
+        assertPrivateStorageWritable: jest.fn(),
+        createStorage: createStorageMock,
+      }));
       const isolatedStore = require('../../src/services/InferenceAutotuneStore') as typeof import('../../src/services/InferenceAutotuneStore');
 
       expect(() => isolatedStore.readAutotuneResult({

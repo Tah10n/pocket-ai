@@ -1,7 +1,7 @@
 import DeviceInfo from 'react-native-device-info';
 import * as FileSystem from 'expo-file-system/legacy';
 import type { MMKV } from 'react-native-mmkv';
-import { createStorage } from './storage';
+import { assertPrivateStorageWritable, createStorage } from './storage';
 import { ModelMetadata, LifecycleStatus } from '../types/models';
 import { getModelsDir } from './FileSystemSetup';
 import { normalizePersistedModelMetadata } from './ModelMetadataNormalizer';
@@ -228,6 +228,7 @@ export class LocalStorageRegistry {
 
   private getStorage(): MMKV {
     if (this.storage) {
+      assertPrivateStorageWritable();
       return this.storage;
     }
 

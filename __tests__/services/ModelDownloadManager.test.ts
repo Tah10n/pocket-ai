@@ -17,7 +17,11 @@ import { hardwareListenerService } from '../../src/services/HardwareListenerServ
 import { updateSettings } from '../../src/services/SettingsStore';
 import { notificationService } from '../../src/services/NotificationService';
 import { AppError } from '../../src/services/AppError';
-import { isPrivateStorageWritable } from '../../src/services/storage';
+import {
+  PrivateStorageUnavailableError,
+  getPrivateStorageHealthSnapshot,
+  isPrivateStorageWritable,
+} from '../../src/services/storage';
 
 let logSpy: jest.SpyInstance;
 let errorSpy: jest.SpyInstance;
@@ -84,6 +88,14 @@ jest.mock('../../src/services/storage', () => {
   const actual = jest.requireActual('../../src/services/storage');
   return {
     ...actual,
+    getPrivateStorageHealthSnapshot: jest.fn(() => ({
+      status: 'blocked',
+      reason: 'encrypted_open_failed',
+      retryable: true,
+      requiresExplicitReset: true,
+      messageKey: 'storage.private.encryptedOpenFailed',
+      lastUpdatedAt: 1,
+    })),
     isPrivateStorageWritable: jest.fn(() => true),
   };
 });
@@ -116,6 +128,14 @@ describe('ModelDownloadManager Basic', () => {
     (RNFS.hash as jest.Mock).mockResolvedValue('tree-sha');
     (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(8 * 1024 * 1024 * 1024);
     (getSystemMemorySnapshot as jest.Mock).mockResolvedValue(null);
+    (getPrivateStorageHealthSnapshot as jest.Mock).mockReturnValue({
+      status: 'blocked',
+      reason: 'encrypted_open_failed',
+      retryable: true,
+      requiresExplicitReset: true,
+      messageKey: 'storage.private.encryptedOpenFailed',
+      lastUpdatedAt: 1,
+    });
     (isPrivateStorageWritable as jest.Mock).mockReturnValue(true);
     updateSettings({ allowCellularDownloads: false });
     useDownloadStore.setState({ queue: [], activeDownloadId: null });
@@ -236,6 +256,67 @@ describe('ModelDownloadManager Basic', () => {
     await new Promise(r => setTimeout(r, 0));
 
     expect(FileSystem.createDownloadResumable).toHaveBeenCalled();
+  });
+
+  it('stops without completing registry writes when private storage blocks mid-download', async () => {
+    const pauseAsync = jest.fn().mockResolvedValue(undefined);
+    (FileSystem.createDownloadResumable as jest.Mock).mockReturnValueOnce({
+      downloadAsync: jest.fn().mockResolvedValue({ status: 200 }),
+      pauseAsync,
+      savable: jest.fn(() => 'resume-data'),
+    });
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValueOnce({ exists: true, size: 1000 });
+    useDownloadStore.setState({
+      queue: [{ ...mockModel, lifecycleStatus: LifecycleStatus.QUEUED }],
+      activeDownloadId: mockModel.id,
+    });
+    (isPrivateStorageWritable as jest.Mock)
+      .mockReturnValueOnce(true)
+      .mockReturnValueOnce(true)
+      .mockReturnValueOnce(false);
+
+    await expect(runDownloadModel({})).resolves.toBeUndefined();
+
+    expect(mockedRegistry.updateModel).not.toHaveBeenCalled();
+    expect(pauseAsync).toHaveBeenCalledTimes(1);
+    expect(useDownloadStore.getState().activeDownloadId).toBeNull();
+    expect(useDownloadStore.getState().queue).toEqual([
+      expect.objectContaining({
+        id: mockModel.id,
+        lifecycleStatus: LifecycleStatus.QUEUED,
+        downloadProgress: 0,
+      }),
+    ]);
+  });
+
+  it('does not write AVAILABLE resume state when registry persistence reports private storage unavailable', async () => {
+    const pauseAsync = jest.fn().mockResolvedValue(undefined);
+    (FileSystem.createDownloadResumable as jest.Mock).mockReturnValueOnce({
+      downloadAsync: jest.fn().mockResolvedValue({ status: 200 }),
+      pauseAsync,
+      savable: jest.fn(() => 'resume-data'),
+    });
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValueOnce({ exists: true, size: 1000 });
+    useDownloadStore.setState({
+      queue: [{ ...mockModel, lifecycleStatus: LifecycleStatus.QUEUED }],
+      activeDownloadId: mockModel.id,
+    });
+    mockedRegistry.updateModel.mockImplementationOnce(() => {
+      throw new PrivateStorageUnavailableError('encrypted_open_failed', getPrivateStorageHealthSnapshot());
+    });
+
+    await expect(runDownloadModel({})).resolves.toBeUndefined();
+
+    expect(mockedRegistry.updateModel).toHaveBeenCalledTimes(1);
+    expect(pauseAsync).toHaveBeenCalledTimes(1);
+    expect(useDownloadStore.getState().activeDownloadId).toBeNull();
+    expect(useDownloadStore.getState().queue).toEqual([
+      expect.objectContaining({
+        id: mockModel.id,
+        lifecycleStatus: LifecycleStatus.QUEUED,
+        downloadProgress: 0,
+      }),
+    ]);
   });
 
   it('verifies a downloaded file when the size matches', async () => {

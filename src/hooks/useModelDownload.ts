@@ -3,11 +3,25 @@ import { Alert } from 'react-native';
 import { useDownloadStore } from '../store/downloadStore';
 import { getModelDownloadManager } from '../services/ModelDownloadManager';
 import { notificationService } from '../services/NotificationService';
+import { isPrivateStorageWritable } from '../services/storage';
 import { ModelMetadata } from '../types/models';
 import { useShallow } from 'zustand/react/shallow';
 import i18n from '../i18n';
 
 let hasShownNotificationsWarning = false;
+
+function isPrivateStorageReadyForDownload(): boolean {
+  return isPrivateStorageWritable();
+}
+
+function ensurePrivateStorageReadyForDownload(): boolean {
+  if (isPrivateStorageReadyForDownload()) {
+    return true;
+  }
+
+  Alert.alert(i18n.t('storageRecovery.title'), i18n.t('storageRecovery.privateUnavailableMessage'));
+  return false;
+}
 
 export function useModelDownload() {
   const queueIds = useDownloadStore(useShallow((state) => state.queue.map((model) => model.id)));
@@ -19,22 +33,33 @@ export function useModelDownload() {
       let didQueueDownload = false;
       const queueDownload = () => {
         if (didQueueDownload) {
-          return;
+          return true;
+        }
+
+        if (!ensurePrivateStorageReadyForDownload()) {
+          return false;
         }
 
         didQueueDownload = true;
         addToQueue(model);
+        return true;
       };
 
       try {
+        if (!ensurePrivateStorageReadyForDownload()) {
+          return;
+        }
+
         const canStartForegroundNotifications = await notificationService.canStartForegroundServiceNotifications();
         if (canStartForegroundNotifications || hasShownNotificationsWarning) {
           queueDownload();
           return;
         }
 
+        if (!queueDownload()) {
+          return;
+        }
         hasShownNotificationsWarning = true;
-        queueDownload();
         Alert.alert(
           i18n.t('notifications.permissions.title'),
           i18n.t('notifications.permissions.body'),

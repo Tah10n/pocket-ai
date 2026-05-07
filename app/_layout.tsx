@@ -4,7 +4,7 @@ import { StatusBar } from 'expo-status-bar';
 import * as SplashScreen from 'expo-splash-screen';
 import * as SystemUI from 'expo-system-ui';
 import { Alert, Platform } from 'react-native';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import 'react-native-reanimated';
 import { useTranslation } from 'react-i18next';
 
@@ -14,9 +14,16 @@ import { usePerformanceNavigationTrace } from '../src/hooks/usePerformanceNaviga
 import { hardwareListenerService } from '../src/services/HardwareListenerService';
 import { bootstrapAppBackground, bootstrapAppCritical } from '../src/services/AppBootstrap';
 import { performanceMonitor } from '../src/services/PerformanceMonitor';
-import { getStorageFallbackReport } from '../src/services/storage';
+import {
+  getPrivateStorageHealthSnapshot,
+  getStorageFallbackReport,
+  resetPrivateAppStorageAfterConfirmation,
+  retryPrivateStorageInitialization,
+  type PrivateStorageHealthSnapshot,
+} from '../src/services/storage';
 import { notificationService } from '../src/services/NotificationService';
-import { useBootstrapStore } from '../src/store/bootstrapStore';
+import { useBootstrapStore, type BootstrapCriticalOutcome } from '../src/store/bootstrapStore';
+import { StorageRecoveryScreen, type StorageRecoveryBusyState } from '../src/ui/screens/StorageRecoveryScreen';
 import '../src/i18n';
 import '../global.css';
 
@@ -153,6 +160,51 @@ export const unstable_settings = {
   anchor: '(tabs)',
 };
 
+type RootCriticalBootstrapResult = {
+  outcome: BootstrapCriticalOutcome;
+  storageHealth: PrivateStorageHealthSnapshot | null;
+  errorMessage: string | null;
+};
+
+async function runCriticalBootstrapFromRoot(): Promise<RootCriticalBootstrapResult> {
+  let criticalOutcome: BootstrapCriticalOutcome = 'success';
+  let criticalStorageHealth: PrivateStorageHealthSnapshot | null = null;
+  let criticalErrorMessage: string | null = null;
+
+  try {
+    const result = await bootstrapAppCritical();
+    criticalOutcome = result.outcome;
+    criticalStorageHealth = result.outcome === 'storage_blocked' ? result.storageHealth : null;
+  } catch (e) {
+    criticalOutcome = 'error';
+    criticalErrorMessage = e instanceof Error ? e.message : String(e);
+    console.warn('[RootLayout] Error during preparation:', e);
+  }
+
+  useBootstrapStore.getState().setCriticalOutcome(criticalOutcome, criticalStorageHealth);
+
+  return {
+    outcome: criticalOutcome,
+    storageHealth: criticalStorageHealth,
+    errorMessage: criticalErrorMessage,
+  };
+}
+
+function startBackgroundBootstrapFromRoot(): void {
+  useBootstrapStore.getState().setBackgroundState('running');
+  useBootstrapStore.getState().setBackgroundError(null);
+
+  void bootstrapAppBackground()
+    .then(() => {
+      useBootstrapStore.getState().setBackgroundState('done');
+    })
+    .catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      useBootstrapStore.getState().setBackgroundError(message);
+      useBootstrapStore.getState().setBackgroundState('error');
+    });
+}
+
 export default function RootLayout() {
   const [isReady, setIsReady] = useState(false);
 
@@ -170,39 +222,27 @@ export default function RootLayout() {
     async function prepare() {
       const span = performanceMonitor.startSpan('root.prepare');
       performanceMonitor.mark('root.prepare.start');
-      let criticalOutcome: 'success' | 'active_model_missing' | 'active_model_blocked' | 'error' = 'success';
-      let criticalErrorMessage: string | null = null;
+      let criticalResult: RootCriticalBootstrapResult = {
+        outcome: 'success',
+        storageHealth: null,
+        errorMessage: null,
+      };
       try {
-        const result = await bootstrapAppCritical();
-        criticalOutcome = result.outcome;
-      } catch (e) {
-        criticalOutcome = 'error';
-        criticalErrorMessage = e instanceof Error ? e.message : String(e);
-        console.warn('[RootLayout] Error during preparation:', e);
+        criticalResult = await runCriticalBootstrapFromRoot();
       } finally {
-        useBootstrapStore.getState().setCriticalOutcome(criticalOutcome);
         setIsReady(true);
         performanceMonitor.mark('root.ready');
         await SplashScreen.hideAsync().catch((e) => console.warn('[SplashScreen] hideAsync failed', e));
         performanceMonitor.mark('root.splashHidden');
         span.end({
-          outcome: criticalOutcome,
-          error: criticalErrorMessage ?? undefined,
+          outcome: criticalResult.outcome,
+          error: criticalResult.errorMessage ?? undefined,
         });
       }
 
-      useBootstrapStore.getState().setBackgroundState('running');
-      useBootstrapStore.getState().setBackgroundError(null);
-
-      void bootstrapAppBackground()
-        .then(() => {
-          useBootstrapStore.getState().setBackgroundState('done');
-        })
-        .catch((error) => {
-          const message = error instanceof Error ? error.message : String(error);
-          useBootstrapStore.getState().setBackgroundError(message);
-          useBootstrapStore.getState().setBackgroundState('error');
-        });
+      if (criticalResult.outcome !== 'storage_blocked') {
+        startBackgroundBootstrapFromRoot();
+      }
     }
 
     prepare().catch((e) => console.warn('[RootLayout] prepare failed', e));
@@ -223,16 +263,51 @@ function RootNavigator() {
   const { colors, navigationTheme } = useTheme();
   const { t } = useTranslation();
   const motion = useMotionPreferences();
+  const criticalOutcome = useBootstrapStore((state) => state.criticalOutcome);
+  const criticalStorageHealth = useBootstrapStore((state) => state.criticalStorageHealth);
+  const [recoveryBusy, setRecoveryBusy] = useState<StorageRecoveryBusyState>(false);
 
   usePerformanceNavigationTrace();
 
+  const runStorageRecovery = useCallback(async (action: Exclude<StorageRecoveryBusyState, boolean>) => {
+    setRecoveryBusy(action);
+
+    try {
+      const recoveryHealth = action === 'reset'
+        ? await resetPrivateAppStorageAfterConfirmation()
+        : await retryPrivateStorageInitialization();
+
+      if (recoveryHealth.status === 'blocked') {
+        useBootstrapStore.getState().setCriticalOutcome('storage_blocked', recoveryHealth);
+        return;
+      }
+
+      const criticalResult = await runCriticalBootstrapFromRoot();
+      if (criticalResult.outcome !== 'storage_blocked') {
+        startBackgroundBootstrapFromRoot();
+      }
+    } catch (error) {
+      console.warn(`[RootNavigator] Failed to ${action} private storage`, error);
+      useBootstrapStore.getState().setCriticalOutcome('storage_blocked', getPrivateStorageHealthSnapshot());
+    } finally {
+      setRecoveryBusy(false);
+    }
+  }, []);
+
+  const handleStorageRetry = useCallback(() => runStorageRecovery('retry'), [runStorageRecovery]);
+  const handleStorageReset = useCallback(() => runStorageRecovery('reset'), [runStorageRecovery]);
+
   useEffect(() => {
+    if (criticalOutcome === 'storage_blocked') {
+      return;
+    }
+
     if (Platform.OS === 'web') {
       return;
     }
 
     void notificationService.initialize();
-  }, []);
+  }, [criticalOutcome]);
 
   useEffect(() => {
     if (typeof __DEV__ !== 'undefined' && __DEV__) {
@@ -240,6 +315,10 @@ function RootNavigator() {
     }
 
     if (Platform.OS === 'web') {
+      return;
+    }
+
+    if (criticalOutcome === 'storage_blocked') {
       return;
     }
 
@@ -256,7 +335,7 @@ function RootNavigator() {
 
     console.error('[Storage] Persistent storage is unavailable; using in-memory fallback.', fallbackReport);
     Alert.alert(t('common.storageDegradedTitle'), t('common.storageDegradedMessage'));
-  }, [t]);
+  }, [criticalOutcome, t]);
 
   useEffect(() => {
     // Keep native root view background in sync with the app theme.
@@ -267,6 +346,20 @@ function RootNavigator() {
       }
     });
   }, [colors.background]);
+
+  if (criticalOutcome === 'storage_blocked') {
+    return (
+      <ThemeProvider value={navigationTheme}>
+        <StorageRecoveryScreen
+          health={criticalStorageHealth ?? getPrivateStorageHealthSnapshot()}
+          busy={recoveryBusy}
+          onRetry={handleStorageRetry}
+          onReset={handleStorageReset}
+        />
+        <StatusBar style={colors.statusBarStyle} />
+      </ThemeProvider>
+    );
+  }
 
   return (
     <ThemeProvider value={navigationTheme}>

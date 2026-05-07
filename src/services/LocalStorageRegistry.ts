@@ -150,11 +150,13 @@ export class LocalStorageRegistry {
   }
 
   private getStorage(): MMKV {
-    if (!this.storage) {
-      this.storage = createStorage(REGISTRY_STORAGE_ID, { tier: 'private' });
+    if (this.storage) {
+      return this.storage;
     }
 
-    return this.storage;
+    const created = createStorage(REGISTRY_STORAGE_ID, { tier: 'private' });
+    this.storage = created;
+    return created;
   }
 
   /**

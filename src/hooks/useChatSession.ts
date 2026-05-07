@@ -32,6 +32,7 @@ import {
 import { getVisibleAssistantContent } from '../utils/chatPresentation';
 import { resolveModelReasoningCapability, resolveReasoningRuntimeConfig } from '../utils/modelReasoningCapabilities';
 import { syncThreadParameters } from '../utils/chatThreadParameters';
+import { getPrivateStorageHealthSnapshot, isPrivateStorageWritable } from '../services/storage';
 import { useTruncationTracking } from './useTruncationTracking';
 
 export const SUMMARY_PLACEHOLDER_CONTENT =
@@ -66,6 +67,18 @@ function isNativeCompletionSettlingAfterStop() {
 
 export function resetSharedGenerationStateForTests() {
   sharedGenerationState.current = null;
+}
+
+function assertPrivateStorageWritableForChatMutation() {
+  if (isPrivateStorageWritable()) {
+    return;
+  }
+
+  throw new AppError('storage_private_unavailable', 'Private storage is unavailable.', {
+    details: {
+      privateStorageHealth: getPrivateStorageHealthSnapshot(),
+    },
+  });
 }
 
 export function resolvePresetSnapshot(presetId: string | null): PresetSnapshot {
@@ -730,6 +743,8 @@ export const useChatSession = () => {
       throw new Error('Wait for the current response to finish stopping before sending another message.');
     }
 
+    assertPrivateStorageWritableForChatMutation();
+
     const threadId = activeThread?.id
       ?? createThread({
         modelId: activeModelId,
@@ -806,6 +821,7 @@ export const useChatSession = () => {
     }
 
     ensureThreadCanGenerate(activeThread, 'regenerating this response');
+    assertPrivateStorageWritableForChatMutation();
     const syncedThread = syncThreadParametersCallback(activeThread);
 
     const assistantMessageId = replaceBranchFromUserMessage(
@@ -843,6 +859,7 @@ export const useChatSession = () => {
     }
 
     ensureThreadCanGenerate(activeThread, 'regenerating this response');
+    assertPrivateStorageWritableForChatMutation();
     const syncedThread = syncThreadParametersCallback(activeThread);
 
     const assistantMessageId = replaceLastAssistantMessage(syncedThread.id);
@@ -870,6 +887,8 @@ export const useChatSession = () => {
     if (!truncationState.shouldOfferSummary) {
       return false;
     }
+
+    assertPrivateStorageWritableForChatMutation();
 
     setThreadSummary(activeThread.id, {
       content: SUMMARY_PLACEHOLDER_CONTENT,
@@ -909,10 +928,14 @@ export const useChatSession = () => {
       throw new Error('Stop the current response before deleting this conversation.');
     }
 
+    assertPrivateStorageWritableForChatMutation();
+
     deleteThreadState(threadId);
   }, [deleteThreadState]);
 
   const renameThread = useCallback((threadId: string, title: string) => {
+    assertPrivateStorageWritableForChatMutation();
+
     const renamed = renameThreadState(threadId, title);
     if (!renamed) {
       throw new Error('The selected conversation is no longer available.');
@@ -927,6 +950,8 @@ export const useChatSession = () => {
     if (activeThread.status === 'generating') {
       throw new Error('Stop the current response before editing this conversation.');
     }
+
+    assertPrivateStorageWritableForChatMutation();
 
     const deleted = deleteMessageBranch(activeThread.id, messageId);
     return deleted;

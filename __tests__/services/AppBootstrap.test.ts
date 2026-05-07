@@ -32,6 +32,11 @@ jest.mock('../../src/services/FileSystemSetup', () => ({
   getModelsDir: jest.fn().mockReturnValue('test-dir/models/'),
 }));
 
+jest.mock('../../src/services/storage', () => ({
+  getPrivateStorageHealthSnapshot: jest.fn(),
+  initializePrivateStorageEncryption: jest.fn(),
+}));
+
 jest.mock('expo-file-system/legacy', () => ({
   getInfoAsync: jest.fn().mockResolvedValue({ exists: true }),
 }));
@@ -45,6 +50,11 @@ jest.mock('../../src/services/LocalStorageRegistry', () => ({
 
 jest.mock('../../src/store/downloadStore', () => ({
   getQueuedDownloadFileNames: jest.fn().mockReturnValue([]),
+  useDownloadStore: {
+    persist: {
+      rehydrate: jest.fn().mockResolvedValue(undefined),
+    },
+  },
 }));
 
 jest.mock('../../src/services/LLMEngineService', () => ({
@@ -64,6 +74,9 @@ const mockPruneExpiredThreads = jest.fn();
 
 jest.mock('../../src/store/chatStore', () => ({
   useChatStore: {
+    persist: {
+      rehydrate: jest.fn().mockResolvedValue(undefined),
+    },
     getState: () => ({
       mergeImportedThreads: mockMergeImportedThreads,
       pruneExpiredThreads: mockPruneExpiredThreads,
@@ -71,18 +84,53 @@ jest.mock('../../src/store/chatStore', () => ({
   },
 }));
 
+jest.mock('../../src/store/modelsStore', () => ({
+  useModelsStore: {
+    persist: {
+      rehydrate: jest.fn().mockResolvedValue(undefined),
+    },
+  },
+}));
+
 import { bootstrapApp, bootstrapAppBackground, bootstrapAppCritical } from '../../src/services/AppBootstrap';
 import { setupFileSystem } from '../../src/services/FileSystemSetup';
 import { llmEngineService } from '../../src/services/LLMEngineService';
 import { getModelDownloadManager } from '../../src/services/ModelDownloadManager';
+import { presetManager } from '../../src/services/PresetManager';
 import { registry } from '../../src/services/LocalStorageRegistry';
 import { clearLegacyChatHistory, getChatHistoryEntries, getSettings, updateSettings } from '../../src/services/SettingsStore';
+import {
+  getPrivateStorageHealthSnapshot,
+  initializePrivateStorageEncryption,
+  type PrivateStorageHealthSnapshot,
+} from '../../src/services/storage';
+import { useChatStore } from '../../src/store/chatStore';
+import { getQueuedDownloadFileNames, useDownloadStore } from '../../src/store/downloadStore';
+import { useModelsStore } from '../../src/store/modelsStore';
 import * as FileSystem from 'expo-file-system/legacy';
 import { EngineStatus } from '../../src/types/models';
+
+function buildPrivateStorageHealth(
+  overrides: Partial<PrivateStorageHealthSnapshot> = {},
+): PrivateStorageHealthSnapshot {
+  return {
+    status: 'ready',
+    retryable: false,
+    requiresExplicitReset: false,
+    lastUpdatedAt: 1_700_000_000_000,
+    ...overrides,
+  };
+}
 
 describe('AppBootstrap', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    const readyStorageHealth = buildPrivateStorageHealth();
+    (getPrivateStorageHealthSnapshot as jest.Mock).mockReturnValue(readyStorageHealth);
+    (initializePrivateStorageEncryption as jest.Mock).mockResolvedValue(readyStorageHealth);
+    (useChatStore.persist.rehydrate as jest.Mock).mockResolvedValue(undefined);
+    (useDownloadStore.persist.rehydrate as jest.Mock).mockResolvedValue(undefined);
+    (useModelsStore.persist.rehydrate as jest.Mock).mockResolvedValue(undefined);
     mockMergeImportedThreads.mockReset();
     mockMergeImportedThreads.mockReturnValue(0);
     mockPruneExpiredThreads.mockReset();
@@ -94,6 +142,142 @@ describe('AppBootstrap', () => {
       loadProgress: 0,
       lastError: undefined,
     });
+  });
+
+  it('returns a storage-blocked critical outcome and skips hydration when private storage is already blocked', async () => {
+    const blockedStorageHealth = {
+      ...buildPrivateStorageHealth({
+        status: 'blocked',
+        reason: 'secure_key_unavailable',
+        retryable: true,
+        messageKey: 'storage.private.secureKeyUnavailable',
+      }),
+      errorMessage: 'raw secure-store failure',
+    } as PrivateStorageHealthSnapshot & { errorMessage: string };
+
+    (getPrivateStorageHealthSnapshot as jest.Mock).mockReturnValue(blockedStorageHealth);
+
+    const result = await bootstrapAppCritical();
+
+    expect(result.outcome).toBe('storage_blocked');
+    if (result.outcome !== 'storage_blocked') {
+      throw new Error('Expected storage-blocked bootstrap result');
+    }
+    expect(result).toEqual({
+      outcome: 'storage_blocked',
+      storageHealth: {
+        status: 'blocked',
+        reason: 'secure_key_unavailable',
+        retryable: true,
+        requiresExplicitReset: false,
+        messageKey: 'storage.private.secureKeyUnavailable',
+        lastUpdatedAt: 1_700_000_000_000,
+      },
+    });
+    expect(result.storageHealth).not.toHaveProperty('errorMessage');
+    expect(initializePrivateStorageEncryption).not.toHaveBeenCalled();
+    expect(useChatStore.persist.rehydrate).not.toHaveBeenCalled();
+    expect(useDownloadStore.persist.rehydrate).not.toHaveBeenCalled();
+    expect(useModelsStore.persist.rehydrate).not.toHaveBeenCalled();
+    expect(getSettings).not.toHaveBeenCalled();
+    expect(registry.getModel).not.toHaveBeenCalled();
+  });
+
+  it('returns a storage-blocked critical outcome and skips hydration when encryption initialization blocks', async () => {
+    const blockedStorageHealth = buildPrivateStorageHealth({
+      status: 'blocked',
+      reason: 'encrypted_open_failed',
+      retryable: true,
+      requiresExplicitReset: true,
+      messageKey: 'storage.private.encryptedOpenFailed',
+    });
+
+    (initializePrivateStorageEncryption as jest.Mock).mockResolvedValueOnce(blockedStorageHealth);
+
+    const result = await bootstrapAppCritical();
+
+    expect(result).toEqual({
+      outcome: 'storage_blocked',
+      storageHealth: blockedStorageHealth,
+    });
+    expect(initializePrivateStorageEncryption).toHaveBeenCalledTimes(1);
+    expect(useChatStore.persist.rehydrate).not.toHaveBeenCalled();
+    expect(useDownloadStore.persist.rehydrate).not.toHaveBeenCalled();
+    expect(useModelsStore.persist.rehydrate).not.toHaveBeenCalled();
+    expect(getSettings).not.toHaveBeenCalled();
+  });
+
+  it('returns a storage-blocked critical outcome and stops remaining hydration when private storage blocks during resolved hydration', async () => {
+    const readyStorageHealth = buildPrivateStorageHealth();
+    const blockedStorageHealth = buildPrivateStorageHealth({
+      status: 'blocked',
+      reason: 'encrypted_open_failed',
+      retryable: true,
+      requiresExplicitReset: true,
+      messageKey: 'storage.private.encryptedOpenFailed',
+    });
+
+    (getPrivateStorageHealthSnapshot as jest.Mock)
+      .mockReturnValueOnce(readyStorageHealth)
+      .mockReturnValueOnce(blockedStorageHealth);
+    (initializePrivateStorageEncryption as jest.Mock).mockResolvedValueOnce(readyStorageHealth);
+    (useChatStore.persist.rehydrate as jest.Mock).mockResolvedValueOnce(undefined);
+
+    const result = await bootstrapAppCritical();
+
+    expect(result).toEqual({
+      outcome: 'storage_blocked',
+      storageHealth: blockedStorageHealth,
+    });
+    expect(useChatStore.persist.rehydrate).toHaveBeenCalledTimes(1);
+    expect(useDownloadStore.persist.rehydrate).not.toHaveBeenCalled();
+    expect(useModelsStore.persist.rehydrate).not.toHaveBeenCalled();
+    expect(getSettings).not.toHaveBeenCalled();
+    expect(registry.getModel).not.toHaveBeenCalled();
+  });
+
+  it('does not run background bootstrap work when private storage is blocked during full bootstrap', async () => {
+    const blockedStorageHealth = buildPrivateStorageHealth({
+      status: 'blocked',
+      reason: 'secure_key_unavailable',
+      retryable: true,
+      messageKey: 'storage.private.secureKeyUnavailable',
+    });
+
+    (initializePrivateStorageEncryption as jest.Mock).mockResolvedValueOnce(blockedStorageHealth);
+
+    await bootstrapApp();
+
+    expect(useChatStore.persist.rehydrate).not.toHaveBeenCalled();
+    expect(useDownloadStore.persist.rehydrate).not.toHaveBeenCalled();
+    expect(useModelsStore.persist.rehydrate).not.toHaveBeenCalled();
+    expect(setupFileSystem).not.toHaveBeenCalled();
+    expect(getQueuedDownloadFileNames).not.toHaveBeenCalled();
+    expect(registry.validateRegistry).not.toHaveBeenCalled();
+    expect(presetManager.getPresets).not.toHaveBeenCalled();
+    expect(mockMergeImportedThreads).not.toHaveBeenCalled();
+    expect(getModelDownloadManager).not.toHaveBeenCalled();
+  });
+
+  it('does not run background bootstrap work while private storage health is blocked', async () => {
+    const blockedStorageHealth = buildPrivateStorageHealth({
+      status: 'blocked',
+      reason: 'secure_key_unavailable',
+      retryable: true,
+      messageKey: 'storage.private.secureKeyUnavailable',
+    });
+
+    (getPrivateStorageHealthSnapshot as jest.Mock).mockReturnValue(blockedStorageHealth);
+
+    await bootstrapAppBackground();
+
+    expect(getSettings).not.toHaveBeenCalled();
+    expect(setupFileSystem).not.toHaveBeenCalled();
+    expect(getQueuedDownloadFileNames).not.toHaveBeenCalled();
+    expect(registry.validateRegistry).not.toHaveBeenCalled();
+    expect(presetManager.getPresets).not.toHaveBeenCalled();
+    expect(mockMergeImportedThreads).not.toHaveBeenCalled();
+    expect(getModelDownloadManager).not.toHaveBeenCalled();
   });
 
   it('restores the persisted active model during critical bootstrap when the file is still available', async () => {
@@ -470,6 +654,8 @@ describe('AppBootstrap', () => {
 
   it('does not fail background bootstrap when warming ModelDownloadManager fails outside tests', async () => {
     const originalNodeEnv = process.env.NODE_ENV;
+    const originalExpoOs = process.env.EXPO_OS;
+    const originalJestWorkerId = process.env.JEST_WORKER_ID;
     const originalRequestAnimationFrame = globalThis.requestAnimationFrame;
 
     jest.useFakeTimers();
@@ -477,6 +663,8 @@ describe('AppBootstrap', () => {
 
     try {
       (process.env as any).NODE_ENV = 'production';
+      (process.env as any).EXPO_OS = 'ios';
+      delete (process.env as any).JEST_WORKER_ID;
 
       const requestAnimationFrameMock = jest.fn((cb: any) => cb(0));
       globalThis.requestAnimationFrame = requestAnimationFrameMock;
@@ -509,6 +697,8 @@ describe('AppBootstrap', () => {
       );
     } finally {
       (process.env as any).NODE_ENV = originalNodeEnv;
+      (process.env as any).EXPO_OS = originalExpoOs;
+      (process.env as any).JEST_WORKER_ID = originalJestWorkerId;
       globalThis.requestAnimationFrame = originalRequestAnimationFrame;
       warnSpy.mockRestore();
       jest.useRealTimers();

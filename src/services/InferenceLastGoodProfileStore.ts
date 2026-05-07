@@ -28,11 +28,13 @@ export type LastGoodInferenceProfile = {
 let lastGoodStorageInstance: MMKV | null = null;
 
 function getLastGoodStorage(): MMKV {
-  if (!lastGoodStorageInstance) {
-    lastGoodStorageInstance = createStorage('pocket-ai-last-good-profiles', { tier: 'private' });
+  if (lastGoodStorageInstance) {
+    return lastGoodStorageInstance;
   }
 
-  return lastGoodStorageInstance;
+  const created = createStorage('pocket-ai-last-good-profiles', { tier: 'private' });
+  lastGoodStorageInstance = created;
+  return created;
 }
 
 function buildLastGoodKey({

@@ -19,7 +19,11 @@ import { llmEngineService } from './LLMEngineService';
 import { useChatStore } from '../store/chatStore';
 import { useModelsStore } from '../store/modelsStore';
 import { performanceMonitor } from './PerformanceMonitor';
-import { initializePrivateStorageEncryption } from './storage';
+import {
+  getPrivateStorageHealthSnapshot,
+  initializePrivateStorageEncryption,
+  type PrivateStorageHealthSnapshot,
+} from './storage';
 import { toAppError } from './AppError';
 import { EngineStatus } from '../types/models';
 import { isHighConfidenceLikelyOomMemoryFit } from '../utils/modelMemoryFitState';
@@ -31,6 +35,12 @@ import {
   DEFAULT_SYSTEM_PROMPT,
   deriveThreadTitle,
 } from '../types/chat';
+
+function isRuntimeTestEnvironment(): boolean {
+  return process.env.NODE_ENV === 'test'
+    || typeof process.env.JEST_WORKER_ID === 'string'
+    || process.env.EXPO_OS === 'web';
+}
 
 function resolveMigratedPresetSnapshot(presetId: string | null) {
   if (!presetId) {
@@ -107,31 +117,90 @@ function migrateLegacyChatHistory(settings: AppSettings) {
   return importedCount;
 }
 
-type BootstrapOutcome = 'success' | 'active_model_missing' | 'active_model_blocked' | 'error';
+type BootstrapOutcome = 'success' | 'active_model_missing' | 'active_model_blocked' | 'storage_blocked' | 'error';
+type BootstrapCriticalResult =
+  | { outcome: Exclude<BootstrapOutcome, 'storage_blocked'> }
+  | { outcome: 'storage_blocked'; storageHealth: PrivateStorageHealthSnapshot };
 
-async function hydratePersistedStores(): Promise<void> {
+function sanitizePrivateStorageHealthSnapshot(
+  storageHealth: PrivateStorageHealthSnapshot,
+): PrivateStorageHealthSnapshot {
+  return {
+    status: storageHealth.status,
+    ...(storageHealth.reason ? { reason: storageHealth.reason } : {}),
+    retryable: storageHealth.retryable === true,
+    requiresExplicitReset: storageHealth.requiresExplicitReset === true,
+    ...(storageHealth.messageKey ? { messageKey: storageHealth.messageKey } : {}),
+    lastUpdatedAt: Number.isFinite(storageHealth.lastUpdatedAt) ? storageHealth.lastUpdatedAt : Date.now(),
+  };
+}
+
+function buildStorageBlockedCriticalResult(
+  storageHealth: PrivateStorageHealthSnapshot,
+): BootstrapCriticalResult {
+  return {
+    outcome: 'storage_blocked',
+    storageHealth: sanitizePrivateStorageHealthSnapshot(storageHealth),
+  };
+}
+
+function getBlockedPrivateStorageHealthSnapshot(): PrivateStorageHealthSnapshot | null {
+  const storageHealth = getPrivateStorageHealthSnapshot();
+  return storageHealth.status === 'blocked' ? storageHealth : null;
+}
+
+async function hydratePersistedStores(): Promise<PrivateStorageHealthSnapshot | null> {
   const span = performanceMonitor.startSpan('bootstrap.hydratePersistedStores');
-  let outcome: 'success' | 'error' = 'success';
+  let outcome: 'success' | 'storage_blocked' | 'error' = 'success';
   const errors: { scope: string; error: unknown }[] = [];
 
   const hydrate = async (scope: string, rehydrate: () => unknown) => {
     const hydrateSpan = performanceMonitor.startSpan(`bootstrap.hydrate.${scope}`);
     try {
       await Promise.resolve(rehydrate());
+      const blockedStorageHealth = getBlockedPrivateStorageHealthSnapshot();
+      if (blockedStorageHealth) {
+        outcome = 'storage_blocked';
+        hydrateSpan.end({ outcome: 'storage_blocked' });
+        return blockedStorageHealth;
+      }
+
       hydrateSpan.end({ outcome: 'success' });
+      return null;
     } catch (error) {
       errors.push({ scope, error });
+      const blockedStorageHealth = getBlockedPrivateStorageHealthSnapshot();
+      if (blockedStorageHealth) {
+        outcome = 'storage_blocked';
+        hydrateSpan.end({ outcome: 'storage_blocked' });
+        return blockedStorageHealth;
+      }
+
       hydrateSpan.end({ outcome: 'error' });
-      if (process.env.NODE_ENV !== 'test') {
+      if (!isRuntimeTestEnvironment()) {
         console.warn(`[bootstrapApp] Failed to hydrate persisted store: ${scope}`, error);
       }
+      return null;
     }
   };
 
   try {
-    await hydrate('chatStore', () => useChatStore.persist.rehydrate());
-    await hydrate('downloadStore', () => useDownloadStore.persist.rehydrate());
-    await hydrate('modelsStore', () => useModelsStore.persist.rehydrate());
+    const chatStorageHealth = await hydrate('chatStore', () => useChatStore.persist.rehydrate());
+    if (chatStorageHealth) {
+      return chatStorageHealth;
+    }
+
+    const downloadStorageHealth = await hydrate('downloadStore', () => useDownloadStore.persist.rehydrate());
+    if (downloadStorageHealth) {
+      return downloadStorageHealth;
+    }
+
+    const modelsStorageHealth = await hydrate('modelsStore', () => useModelsStore.persist.rehydrate());
+    if (modelsStorageHealth) {
+      return modelsStorageHealth;
+    }
+
+    return null;
   } catch (error) {
     outcome = 'error';
     throw error;
@@ -278,21 +347,45 @@ function scheduleActiveModelRestore(activeModelId: string): void {
   });
 }
 
-export async function bootstrapAppCritical(): Promise<{ outcome: BootstrapOutcome }> {
+export async function bootstrapAppCritical(): Promise<BootstrapCriticalResult> {
   const bootstrapSpan = performanceMonitor.startSpan('bootstrap.critical');
   let outcome: BootstrapOutcome = 'success';
 
   try {
     const encryptionSpan = performanceMonitor.startSpan('bootstrap.initializePrivateStorageEncryption');
     try {
-      await initializePrivateStorageEncryption();
+      const currentStorageHealth = getPrivateStorageHealthSnapshot();
+      if (currentStorageHealth.status === 'blocked') {
+        outcome = 'storage_blocked';
+        encryptionSpan.end({ outcome });
+        return buildStorageBlockedCriticalResult(currentStorageHealth);
+      }
+
+      const initializedStorageHealth = await initializePrivateStorageEncryption();
+      if (initializedStorageHealth.status === 'blocked') {
+        outcome = 'storage_blocked';
+        encryptionSpan.end({ outcome });
+        return buildStorageBlockedCriticalResult(initializedStorageHealth);
+      }
+
       encryptionSpan.end({ outcome: 'success' });
     } catch (error) {
+      const currentStorageHealth = getPrivateStorageHealthSnapshot();
+      if (currentStorageHealth.status === 'blocked') {
+        outcome = 'storage_blocked';
+        encryptionSpan.end({ outcome });
+        return buildStorageBlockedCriticalResult(currentStorageHealth);
+      }
+
       encryptionSpan.end({ outcome: 'error' });
       throw error;
     }
 
-    await hydratePersistedStores();
+    const hydrationBlockedStorageHealth = await hydratePersistedStores();
+    if (hydrationBlockedStorageHealth) {
+      outcome = 'storage_blocked';
+      return buildStorageBlockedCriticalResult(hydrationBlockedStorageHealth);
+    }
 
     const settings = getSettings();
 
@@ -348,6 +441,12 @@ export async function bootstrapAppCritical(): Promise<{ outcome: BootstrapOutcom
 
     return { outcome };
   } catch (error) {
+    const blockedStorageHealth = getBlockedPrivateStorageHealthSnapshot();
+    if (blockedStorageHealth) {
+      outcome = 'storage_blocked';
+      return buildStorageBlockedCriticalResult(blockedStorageHealth);
+    }
+
     outcome = 'error';
     throw error;
   } finally {
@@ -357,17 +456,23 @@ export async function bootstrapAppCritical(): Promise<{ outcome: BootstrapOutcom
 
 export async function bootstrapAppBackground(): Promise<void> {
   const bootstrapSpan = performanceMonitor.startSpan('bootstrap.background');
-  let outcome: 'success' | 'error' = 'success';
+  let outcome: 'success' | 'storage_blocked' | 'error' = 'success';
   const errors: { scope: string; error: unknown }[] = [];
 
   const recordError = (scope: string, error: unknown) => {
     errors.push({ scope, error });
-    if (process.env.NODE_ENV !== 'test') {
+    if (!isRuntimeTestEnvironment()) {
       console.warn(`[bootstrapApp] Background bootstrap failed: ${scope}`, error);
     }
   };
 
   try {
+    const currentStorageHealth = getPrivateStorageHealthSnapshot();
+    if (currentStorageHealth.status === 'blocked') {
+      outcome = 'storage_blocked';
+      return;
+    }
+
     const settings = getSettings();
 
     try {
@@ -382,14 +487,14 @@ export async function bootstrapAppBackground(): Promise<void> {
       recordError('validateRegistry', e);
     }
 
-    if (process.env.NODE_ENV !== 'test' && Platform.OS !== 'web') {
+    if (!isRuntimeTestEnvironment() && Platform.OS !== 'web') {
       scheduleAfterFirstFrame(() => {
         try {
           // eslint-disable-next-line @typescript-eslint/no-require-imports
           const module = require('./ModelDownloadManager') as typeof import('./ModelDownloadManager');
           module.getModelDownloadManager();
         } catch (e) {
-          if (process.env.NODE_ENV !== 'test') {
+          if (!isRuntimeTestEnvironment()) {
             console.warn('[bootstrapApp] Failed to warm modelDownloadManager', e);
           }
         }
@@ -420,6 +525,11 @@ export async function bootstrapAppBackground(): Promise<void> {
       throw aggregateError;
     }
   } catch (error) {
+    if (getBlockedPrivateStorageHealthSnapshot()) {
+      outcome = 'storage_blocked';
+      return;
+    }
+
     outcome = 'error';
     throw error;
   } finally {
@@ -434,6 +544,10 @@ export async function bootstrapApp() {
   try {
     const critical = await bootstrapAppCritical();
     outcome = critical.outcome;
+
+    if (critical.outcome === 'storage_blocked') {
+      return;
+    }
 
     await bootstrapAppBackground();
   } catch (error) {

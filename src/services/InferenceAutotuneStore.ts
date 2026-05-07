@@ -51,11 +51,13 @@ export type AutotuneResult = {
 let autotuneStorageInstance: MMKV | null = null;
 
 function getAutotuneStorage(): MMKV {
-  if (!autotuneStorageInstance) {
-    autotuneStorageInstance = createStorage('pocket-ai-autotune', { tier: 'private' });
+  if (autotuneStorageInstance) {
+    return autotuneStorageInstance;
   }
 
-  return autotuneStorageInstance;
+  const created = createStorage('pocket-ai-autotune', { tier: 'private' });
+  autotuneStorageInstance = created;
+  return created;
 }
 
 function buildAutotuneKey({

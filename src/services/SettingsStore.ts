@@ -10,11 +10,13 @@ export { UNKNOWN_MODEL_GPU_LAYERS_CEILING };
 let storageInstance: MMKV | null = null;
 
 export function getSettingsStorage(): MMKV {
-    if (!storageInstance) {
-        storageInstance = createStorage('pocket-ai-settings', { tier: 'private' });
+    if (storageInstance) {
+        return storageInstance;
     }
 
-    return storageInstance;
+    const created = createStorage('pocket-ai-settings', { tier: 'private' });
+    storageInstance = created;
+    return created;
 }
 
 export type SettingsStorageFacade = Pick<

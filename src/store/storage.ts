@@ -5,11 +5,13 @@ import { createStorage } from '../services/storage';
 let storageInstance: MMKV | null = null;
 
 export function getAppStorage(): MMKV {
-  if (!storageInstance) {
-    storageInstance = createStorage('global-app-storage', { tier: 'private' });
+  if (storageInstance) {
+    return storageInstance;
   }
 
-  return storageInstance;
+  const created = createStorage('global-app-storage', { tier: 'private' });
+  storageInstance = created;
+  return created;
 }
 
 export type AppStorageFacade = Pick<

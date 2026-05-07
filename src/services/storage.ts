@@ -4,8 +4,19 @@ import * as SecureStore from 'expo-secure-store';
 
 type MmkvModule = typeof import('react-native-mmkv');
 
+function getRuntimeEnvValue(key: string): string | undefined {
+    return (globalThis as unknown as { process?: { env?: Record<string, string | undefined> } }).process?.env?.[key];
+}
+
+function getRuntimeNodeEnv(): string | undefined {
+    return getRuntimeEnvValue('NODE_ENV');
+}
+
 const IS_WEB = typeof window !== 'undefined' && Platform.OS === 'web';
-const IS_TESTING = process.env.NODE_ENV === 'test';
+const RUNTIME_NODE_ENV = getRuntimeNodeEnv();
+const IS_TESTING = RUNTIME_NODE_ENV === 'test'
+    || (RUNTIME_NODE_ENV !== 'production'
+        && (typeof getRuntimeEnvValue('JEST_WORKER_ID') === 'string' || getRuntimeEnvValue('EXPO_OS') === 'web'));
 const fallbackStores = new Map<string, Map<string, string>>();
 const warnedFallbackStores = new Set<string>();
 
@@ -16,6 +27,61 @@ export type StorageFallbackReason =
     | 'mmkv_init_failed'
     | 'encryption_not_initialized'
     | 'encryption_unavailable';
+
+export type PrivateStorageBlockReason =
+    | 'encryption_not_initialized'
+    | 'encryption_initializing'
+    | 'encryption_unavailable'
+    | 'secure_key_unavailable'
+    | 'migration_failed'
+    | 'encrypted_open_failed'
+    | 'reset_failed'
+    | 'unknown';
+
+export type StorageRecoveryAction = 'retry' | 'reset_private_storage' | 'none';
+
+export type PrivateStorageHealthSnapshot = {
+    status: 'unknown' | 'initializing' | 'ready' | 'blocked' | 'resetting';
+    reason?: PrivateStorageBlockReason;
+    retryable: boolean;
+    requiresExplicitReset: boolean;
+    messageKey?: string;
+    lastUpdatedAt: number;
+};
+
+const PRIVATE_STORAGE_MESSAGE_KEYS: Record<PrivateStorageBlockReason, string> = {
+    encryption_not_initialized: 'storage.private.encryptionNotInitialized',
+    encryption_initializing: 'storage.private.encryptionInitializing',
+    encryption_unavailable: 'storage.private.encryptionUnavailable',
+    secure_key_unavailable: 'storage.private.secureKeyUnavailable',
+    migration_failed: 'storage.private.migrationFailed',
+    encrypted_open_failed: 'storage.private.encryptedOpenFailed',
+    reset_failed: 'storage.private.resetFailed',
+    unknown: 'storage.private.unknown',
+};
+
+function getRecoveryAction(snapshot: PrivateStorageHealthSnapshot): StorageRecoveryAction {
+    if (snapshot.requiresExplicitReset) {
+        return 'reset_private_storage';
+    }
+
+    return snapshot.retryable ? 'retry' : 'none';
+}
+
+export class PrivateStorageUnavailableError extends Error {
+    readonly reason: PrivateStorageBlockReason;
+    readonly recoveryAction: StorageRecoveryAction;
+    readonly health: PrivateStorageHealthSnapshot;
+
+    constructor(reason: PrivateStorageBlockReason, health: PrivateStorageHealthSnapshot) {
+        super(`Private storage is unavailable (${reason})`);
+        this.name = 'PrivateStorageUnavailableError';
+        Object.setPrototypeOf(this, PrivateStorageUnavailableError.prototype);
+        this.reason = reason;
+        this.health = { ...health };
+        this.recoveryAction = getRecoveryAction(health);
+    }
+}
 
 type StorageHealthEntry = {
     implementation: StorageImplementation;
@@ -40,13 +106,76 @@ const PRIVATE_STORAGE_INSTANCE_IDS = [
     'pocket-ai-settings',
     'pocket-ai-presets',
     'models-registry',
+    'pocket-ai-last-good-profiles',
+    'pocket-ai-autotune',
 ] as const;
 
 type PrivateStorageEncryptionState = 'uninitialized' | 'ready' | 'unavailable';
 
 let privateEncryptionState: PrivateStorageEncryptionState = 'uninitialized';
 let privateEncryptionKey: string | null = null;
-let privateEncryptionInitPromise: Promise<void> | null = null;
+let privateEncryptionInitPromise: Promise<PrivateStorageHealthSnapshot> | null = null;
+let privateStorageResetPromise: Promise<PrivateStorageHealthSnapshot> | null = null;
+let privateStorageHealth: PrivateStorageHealthSnapshot = {
+    status: 'unknown',
+    retryable: true,
+    requiresExplicitReset: false,
+    lastUpdatedAt: Date.now(),
+};
+
+function snapshotPrivateStorageHealth(): PrivateStorageHealthSnapshot {
+    return { ...privateStorageHealth };
+}
+
+function setPrivateStorageHealth(
+    status: PrivateStorageHealthSnapshot['status'],
+    reason?: PrivateStorageBlockReason,
+    overrides?: Partial<Pick<PrivateStorageHealthSnapshot, 'retryable' | 'requiresExplicitReset'>>,
+): PrivateStorageHealthSnapshot {
+    const retryable = overrides?.retryable ?? (status === 'blocked');
+    const requiresExplicitReset = overrides?.requiresExplicitReset ?? false;
+
+    privateStorageHealth = {
+        status,
+        ...(reason ? { reason, messageKey: PRIVATE_STORAGE_MESSAGE_KEYS[reason] } : {}),
+        retryable,
+        requiresExplicitReset,
+        lastUpdatedAt: Date.now(),
+    };
+
+    return snapshotPrivateStorageHealth();
+}
+
+function blockPrivateStorage(
+    reason: PrivateStorageBlockReason,
+    options?: Partial<Pick<PrivateStorageHealthSnapshot, 'retryable' | 'requiresExplicitReset'>>,
+): PrivateStorageHealthSnapshot {
+    privateEncryptionState = 'unavailable';
+    privateEncryptionKey = null;
+    return setPrivateStorageHealth('blocked', reason, {
+        retryable: options?.retryable ?? true,
+        requiresExplicitReset: options?.requiresExplicitReset ?? false,
+    });
+}
+
+function throwPrivateStorageUnavailable(reason: PrivateStorageBlockReason, health?: PrivateStorageHealthSnapshot): never {
+    throw new PrivateStorageUnavailableError(reason, health ?? blockPrivateStorage(reason));
+}
+
+export function getPrivateStorageHealthSnapshot(): PrivateStorageHealthSnapshot {
+    return snapshotPrivateStorageHealth();
+}
+
+export function isPrivateStorageWritable(): boolean {
+    if (IS_WEB || IS_TESTING) {
+        return true;
+    }
+
+    return privateStorageHealth.status === 'ready'
+        && privateEncryptionState === 'ready'
+        && typeof privateEncryptionKey === 'string'
+        && privateEncryptionKey.length > 0;
+}
 
 export function getStorageFallbackReport(): StorageFallbackReport | null {
     const storeIds: string[] = [];
@@ -193,7 +322,6 @@ function requireMmkvModule(): MmkvModule {
 function encryptMmkvInstance(id: string, encryptionKeyValue: string): void {
     const mmkvModule = requireMmkvModule();
     const createMMKV = mmkvModule.createMMKV;
-    const deleteMMKV = mmkvModule.deleteMMKV;
 
     try {
         const store = createMMKV({ id });
@@ -212,9 +340,10 @@ function encryptMmkvInstance(id: string, encryptionKeyValue: string): void {
         }
 
         return;
-    } catch (error) {
+    } catch {
         // If the store was already encrypted (and can't be opened without a key),
-        // try opening it with the configured key. If that still fails, reset it.
+        // try opening it with the configured key. If that still fails, block private
+        // storage and wait for an explicit user-confirmed reset instead of deleting data.
         try {
             const store = createMMKV({
                 id,
@@ -227,29 +356,12 @@ function encryptMmkvInstance(id: string, encryptionKeyValue: string): void {
             }
 
             return;
-        } catch (openError) {
-            try {
-                deleteMMKV(id);
-            } catch {
-                // ignore
-            }
-
-            const store = createMMKV({
-                id,
-                encryptionKey: encryptionKeyValue,
-                encryptionType: PRIVATE_STORAGE_ENCRYPTION_TYPE,
+        } catch {
+            const health = blockPrivateStorage('encrypted_open_failed', {
+                retryable: true,
+                requiresExplicitReset: true,
             });
-
-            if (!store.isEncrypted) {
-                store.encrypt(encryptionKeyValue, PRIVATE_STORAGE_ENCRYPTION_TYPE);
-            }
-
-            if (!IS_TESTING) {
-                console.warn(`[Storage] Reset encrypted MMKV store after open failure (id: ${id})`, {
-                    error: error instanceof Error ? error.message : String(error),
-                    openError: openError instanceof Error ? openError.message : String(openError),
-                });
-            }
+            throw new PrivateStorageUnavailableError('encrypted_open_failed', health);
         }
     }
 }
@@ -270,15 +382,32 @@ async function runPrivateStorageMigrations(encryptionKeyValue: string): Promise<
     await SecureStore.setItemAsync(PRIVATE_STORAGE_MIGRATION_VERSION_ID, String(PRIVATE_STORAGE_MIGRATION_VERSION));
 }
 
-export async function initializePrivateStorageEncryption(): Promise<void> {
+export async function initializePrivateStorageEncryption(): Promise<PrivateStorageHealthSnapshot> {
+    return initializePrivateStorageEncryptionInternal(false);
+}
+
+async function initializePrivateStorageEncryptionInternal(
+    ignoreResetPromise: boolean,
+): Promise<PrivateStorageHealthSnapshot> {
     if (IS_WEB || IS_TESTING) {
         privateEncryptionState = 'unavailable';
         privateEncryptionKey = null;
-        return;
+        return setPrivateStorageHealth('ready', undefined, {
+            retryable: false,
+            requiresExplicitReset: false,
+        });
     }
 
-    if (privateEncryptionState !== 'uninitialized') {
-        return;
+    if (!ignoreResetPromise && privateStorageResetPromise) {
+        return privateStorageResetPromise;
+    }
+
+    if (isPrivateStorageWritable()) {
+        return snapshotPrivateStorageHealth();
+    }
+
+    if (privateStorageHealth.status === 'blocked' && privateEncryptionState !== 'uninitialized') {
+        return snapshotPrivateStorageHealth();
     }
 
     if (privateEncryptionInitPromise) {
@@ -286,55 +415,169 @@ export async function initializePrivateStorageEncryption(): Promise<void> {
     }
 
     privateEncryptionInitPromise = (async () => {
+        setPrivateStorageHealth('initializing', 'encryption_initializing', {
+            retryable: false,
+            requiresExplicitReset: false,
+        });
+
         if (!await isSecureStoreAvailable()) {
-            privateEncryptionState = 'unavailable';
-            privateEncryptionKey = null;
-            return;
+            return blockPrivateStorage('secure_key_unavailable');
         }
 
-        let key = await SecureStore.getItemAsync(PRIVATE_STORAGE_ENCRYPTION_KEY_ID);
-        key = typeof key === 'string' ? key.trim() : null;
-        if (!key || key.length !== PRIVATE_STORAGE_ENCRYPTION_KEY_BYTE_LENGTH) {
-            try {
+        let key: string | null = null;
+        try {
+            key = await SecureStore.getItemAsync(PRIVATE_STORAGE_ENCRYPTION_KEY_ID);
+            key = typeof key === 'string' ? key.trim() : null;
+            if (!key || key.length !== PRIVATE_STORAGE_ENCRYPTION_KEY_BYTE_LENGTH) {
                 key = await generatePrivateStorageEncryptionKey();
                 await SecureStore.setItemAsync(PRIVATE_STORAGE_ENCRYPTION_KEY_ID, key);
-            } catch (error) {
-                privateEncryptionState = 'unavailable';
-                privateEncryptionKey = null;
-                if (!IS_TESTING) {
-                    console.warn('[Storage] Failed to generate private storage encryption key; disabling encrypted storage.', error);
-                }
-                return;
             }
+        } catch {
+            if (!IS_TESTING) {
+                console.warn('[Storage] Failed to prepare private storage encryption key; private storage is blocked.');
+            }
+            return blockPrivateStorage('secure_key_unavailable');
         }
 
+        privateEncryptionState = 'ready';
         privateEncryptionKey = key;
 
         try {
             await runPrivateStorageMigrations(key);
-        } catch {
-            privateEncryptionState = 'unavailable';
-            privateEncryptionKey = null;
-            if (!IS_TESTING) {
-                console.warn('[Storage] Private storage migrations failed; disabling encrypted storage for this session.');
+        } catch (error) {
+            if (error instanceof PrivateStorageUnavailableError) {
+                return snapshotPrivateStorageHealth();
             }
-            return;
+
+            if (!IS_TESTING) {
+                console.warn('[Storage] Private storage migrations failed; private storage is blocked.');
+            }
+            return blockPrivateStorage('migration_failed');
         }
 
         privateEncryptionState = 'ready';
-    })();
+        return setPrivateStorageHealth('ready', undefined, {
+            retryable: false,
+            requiresExplicitReset: false,
+        });
+    })().finally(() => {
+        privateEncryptionInitPromise = null;
+    });
 
     return privateEncryptionInitPromise;
 }
 
 export function isPrivateStorageEncryptionReady(): boolean {
-    return privateEncryptionState === 'ready' && typeof privateEncryptionKey === 'string' && privateEncryptionKey.length > 0;
+    return isPrivateStorageWritable();
+}
+
+export async function retryPrivateStorageInitialization(): Promise<PrivateStorageHealthSnapshot> {
+    if (privateStorageResetPromise) {
+        return privateStorageResetPromise;
+    }
+
+    if (privateEncryptionInitPromise) {
+        return privateEncryptionInitPromise;
+    }
+
+    privateEncryptionState = 'uninitialized';
+    privateEncryptionKey = null;
+    privateEncryptionInitPromise = null;
+
+    return initializePrivateStorageEncryption();
+}
+
+export async function resetPrivateAppStorageAfterConfirmation(): Promise<PrivateStorageHealthSnapshot> {
+    if (privateStorageResetPromise) {
+        return privateStorageResetPromise;
+    }
+
+    privateStorageResetPromise = (async () => {
+        if (privateEncryptionInitPromise) {
+            await privateEncryptionInitPromise.catch(() => snapshotPrivateStorageHealth());
+        }
+
+        setPrivateStorageHealth('resetting', undefined, {
+            retryable: false,
+            requiresExplicitReset: false,
+        });
+
+        try {
+            if (!IS_WEB && !IS_TESTING) {
+                const { deleteMMKV } = requireMmkvModule();
+                for (const storeId of PRIVATE_STORAGE_INSTANCE_IDS) {
+                    deleteMMKV(storeId);
+                }
+            }
+
+            try {
+                await SecureStore.deleteItemAsync(PRIVATE_STORAGE_ENCRYPTION_KEY_ID);
+                await SecureStore.deleteItemAsync(PRIVATE_STORAGE_MIGRATION_VERSION_ID);
+            } catch {
+                // SecureStore cleanup may be unavailable in unsupported environments; initialization will re-check below.
+            }
+
+            privateEncryptionState = 'uninitialized';
+            privateEncryptionKey = null;
+            privateEncryptionInitPromise = null;
+
+            return initializePrivateStorageEncryptionInternal(true);
+        } catch {
+            return blockPrivateStorage('reset_failed', {
+                retryable: true,
+                requiresExplicitReset: true,
+            });
+        }
+    })().finally(() => {
+        privateStorageResetPromise = null;
+    });
+
+    return privateStorageResetPromise;
 }
 
 function getPrivateStorageEncryptionConfig(): { encryptionKey: string; encryptionType: typeof PRIVATE_STORAGE_ENCRYPTION_TYPE } | null {
     return isPrivateStorageEncryptionReady() && privateEncryptionKey
         ? { encryptionKey: privateEncryptionKey, encryptionType: PRIVATE_STORAGE_ENCRYPTION_TYPE }
         : null;
+}
+
+function createNativePrivateStorage(normalizedId: string | undefined, healthKey: string): MMKV {
+    if (privateStorageResetPromise || privateStorageHealth.status === 'resetting') {
+        throwPrivateStorageUnavailable('unknown', snapshotPrivateStorageHealth());
+    }
+
+    if (privateEncryptionInitPromise || privateStorageHealth.status === 'initializing') {
+        throwPrivateStorageUnavailable('encryption_initializing', snapshotPrivateStorageHealth());
+    }
+
+    const config = getPrivateStorageEncryptionConfig();
+    if (!config) {
+        if (privateStorageHealth.status === 'blocked' && privateStorageHealth.reason) {
+            throwPrivateStorageUnavailable(privateStorageHealth.reason, snapshotPrivateStorageHealth());
+        }
+
+        throwPrivateStorageUnavailable('encryption_not_initialized', blockPrivateStorage('encryption_not_initialized'));
+    }
+
+    if (!normalizedId) {
+        throw new Error('Private MMKV instances require an explicit id');
+    }
+
+    try {
+        const { createMMKV } = requireMmkvModule();
+        storageHealthById.set(healthKey, { implementation: 'mmkv' });
+        return createMMKV({
+            id: normalizedId,
+            encryptionKey: config.encryptionKey,
+            encryptionType: config.encryptionType,
+        });
+    } catch {
+        const health = blockPrivateStorage('encrypted_open_failed', {
+            retryable: true,
+            requiresExplicitReset: true,
+        });
+        throw new PrivateStorageUnavailableError('encrypted_open_failed', health);
+    }
 }
 
 export function createStorage(
@@ -346,6 +589,11 @@ export function createStorage(
     const normalizedId = trimmedId.length > 0 ? trimmedId : undefined;
     const logId = normalizedId ?? 'default';
     const healthKey = resolveTieredStoreId(tier, logId);
+
+    if (!IS_WEB && !IS_TESTING && tier === 'private') {
+        return createNativePrivateStorage(normalizedId, healthKey);
+    }
+
     try {
         if (IS_WEB || IS_TESTING) {
             throw new Error('MMKV is not supported on web or during testing');
@@ -357,28 +605,6 @@ export function createStorage(
 
         const mmkvModule = requireMmkvModule();
         const createMMKV = mmkvModule.createMMKV;
-
-        if (tier === 'private') {
-            const config = getPrivateStorageEncryptionConfig();
-            if (!config) {
-                throw new Error(
-                    privateEncryptionState === 'unavailable'
-                        ? 'Private storage encryption is unavailable'
-                        : 'Private storage encryption is not initialized',
-                );
-            }
-
-            if (!normalizedId) {
-                throw new Error('Private MMKV instances require an explicit id');
-            }
-
-            storageHealthById.set(healthKey, { implementation: 'mmkv' });
-            return createMMKV({
-                id: normalizedId,
-                encryptionKey: config.encryptionKey,
-                encryptionType: config.encryptionType,
-            });
-        }
 
         storageHealthById.set(healthKey, { implementation: 'mmkv' });
         return normalizedId ? createMMKV({ id: normalizedId }) : createMMKV();

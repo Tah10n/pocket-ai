@@ -1,10 +1,37 @@
 describe('storage (createStorage)', () => {
   it('does not report in-memory fallback during tests', () => {
-    const { createStorage, getStorageFallbackReport } = require('../../src/services/storage');
+    const originalNodeEnv = process.env.NODE_ENV;
+    const originalProcess = (globalThis as any).process;
 
-    createStorage('test-store');
+    try {
+      Object.defineProperty(process.env, 'NODE_ENV', {
+        value: 'test',
+        configurable: true,
+        writable: true,
+      });
+      (globalThis as any).process = {
+        ...originalProcess,
+        env: {
+          ...originalProcess.env,
+          NODE_ENV: 'test',
+        },
+      };
+      jest.resetModules();
 
-    expect(getStorageFallbackReport()).toBeNull();
+      const { createStorage, getStorageFallbackReport } = require('../../src/services/storage');
+
+      createStorage('test-store');
+
+      expect(getStorageFallbackReport()).toBeNull();
+    } finally {
+      (globalThis as any).process = originalProcess;
+      Object.defineProperty(process.env, 'NODE_ENV', {
+        value: originalNodeEnv,
+        configurable: true,
+        writable: true,
+      });
+      jest.resetModules();
+    }
   });
 
   it('reports MMKV init failures outside the test environment', () => {
@@ -151,7 +178,7 @@ describe('storage (createStorage)', () => {
     }
   });
 
-  it('falls back for private tier when encryption is not initialized', async () => {
+  it('fails closed for native private tier when encryption is not initialized', async () => {
     const originalNodeEnv = process.env.NODE_ENV;
     const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
 
@@ -175,23 +202,119 @@ describe('storage (createStorage)', () => {
         deleteMMKV: jest.fn(),
       }));
 
-      const { createStorage, getStorageFallbackReport } = require('../../src/services/storage');
+      const {
+        createStorage,
+        getPrivateStorageHealthSnapshot,
+        getStorageFallbackReport,
+        isPrivateStorageWritable,
+        PrivateStorageUnavailableError,
+      } = require('../../src/services/storage');
 
-      const storage = createStorage('private-a', { tier: 'private' });
-      storage.set('k', 'v');
+      expect(() => createStorage('private-a', { tier: 'private' })).toThrow(PrivateStorageUnavailableError);
 
       expect(createMMKV).not.toHaveBeenCalled();
-      expect(getStorageFallbackReport()).toEqual({
-        storeIds: ['private:private-a'],
-        reasons: {
-          'private:private-a': 'encryption_not_initialized',
-        },
-      });
+      expect(getStorageFallbackReport()).toBeNull();
+      expect(isPrivateStorageWritable()).toBe(false);
+      expect(getPrivateStorageHealthSnapshot()).toEqual(expect.objectContaining({
+        status: 'blocked',
+        reason: 'encryption_not_initialized',
+        retryable: true,
+        requiresExplicitReset: false,
+        messageKey: expect.any(String),
+        lastUpdatedAt: expect.any(Number),
+      }));
     } finally {
       (process.env as any).NODE_ENV = originalNodeEnv;
       warnSpy.mockRestore();
       jest.resetModules();
       jest.unmock('react-native');
+      jest.unmock('react-native-mmkv');
+    }
+  });
+
+  it('recovers from a blocked pre-encryption access through retry initialization', async () => {
+    const originalNodeEnv = process.env.NODE_ENV;
+    const originalCrypto = (globalThis as any).crypto;
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      (process.env as any).NODE_ENV = 'production';
+      (globalThis as any).crypto = {
+        getRandomValues: (array: Uint8Array) => {
+          for (let i = 0; i < array.length; i += 1) {
+            array[i] = (i + 5) & 0xff;
+          }
+        },
+      };
+      jest.resetModules();
+
+      jest.doMock('react-native', () => ({
+        Platform: { OS: 'ios' },
+      }));
+
+      const secureStoreState: Record<string, string> = {};
+      jest.doMock('expo-secure-store', () => ({
+        isAvailableAsync: jest.fn(async () => true),
+        getItemAsync: jest.fn(async (key: string) => secureStoreState[key] ?? null),
+        setItemAsync: jest.fn(async (key: string, value: string) => {
+          secureStoreState[key] = value;
+        }),
+        deleteItemAsync: jest.fn(async (key: string) => {
+          delete secureStoreState[key];
+        }),
+      }), { virtual: true });
+
+      const createMMKV = jest.fn((config?: any) => ({
+        isEncrypted: Boolean(config?.encryptionKey),
+        getAllKeys: jest.fn(() => []),
+        getString: jest.fn(() => undefined),
+        encrypt: jest.fn(),
+      }));
+
+      jest.doMock('react-native-mmkv', () => ({
+        createMMKV,
+        deleteMMKV: jest.fn(),
+      }));
+
+      const {
+        createStorage,
+        getPrivateStorageHealthSnapshot,
+        isPrivateStorageWritable,
+        retryPrivateStorageInitialization,
+        PrivateStorageUnavailableError,
+      } = require('../../src/services/storage');
+
+      expect(getPrivateStorageHealthSnapshot()).toEqual(expect.objectContaining({
+        status: 'unknown',
+        retryable: true,
+        requiresExplicitReset: false,
+      }));
+      expect(() => createStorage('private-retry', { tier: 'private' })).toThrow(PrivateStorageUnavailableError);
+      expect(getPrivateStorageHealthSnapshot()).toEqual(expect.objectContaining({
+        status: 'blocked',
+        reason: 'encryption_not_initialized',
+      }));
+
+      await expect(retryPrivateStorageInitialization()).resolves.toEqual(expect.objectContaining({
+        status: 'ready',
+        retryable: false,
+        requiresExplicitReset: false,
+      }));
+
+      expect(isPrivateStorageWritable()).toBe(true);
+      expect(createStorage('private-retry', { tier: 'private' })).toBeTruthy();
+      expect(createMMKV).toHaveBeenCalledWith(expect.objectContaining({
+        id: 'private-retry',
+        encryptionKey: expect.any(String),
+        encryptionType: 'AES-256',
+      }));
+    } finally {
+      (process.env as any).NODE_ENV = originalNodeEnv;
+      (globalThis as any).crypto = originalCrypto;
+      warnSpy.mockRestore();
+      jest.resetModules();
+      jest.unmock('react-native');
+      jest.unmock('expo-secure-store');
       jest.unmock('react-native-mmkv');
     }
   });
@@ -224,18 +347,102 @@ describe('storage (createStorage)', () => {
         deleteMMKV: jest.fn(),
       }));
 
-      const { initializePrivateStorageEncryption, createStorage, getStorageFallbackReport } = require('../../src/services/storage');
+      const {
+        initializePrivateStorageEncryption,
+        createStorage,
+        getPrivateStorageHealthSnapshot,
+        getStorageFallbackReport,
+        isPrivateStorageWritable,
+        PrivateStorageUnavailableError,
+      } = require('../../src/services/storage');
 
-      await initializePrivateStorageEncryption();
+      await expect(initializePrivateStorageEncryption()).resolves.toEqual(expect.objectContaining({
+        status: 'blocked',
+        reason: 'secure_key_unavailable',
+      }));
 
-      createStorage('private-b', { tier: 'private' });
+      expect(() => createStorage('private-b', { tier: 'private' })).toThrow(PrivateStorageUnavailableError);
 
-      expect(getStorageFallbackReport()).toEqual({
-        storeIds: ['private:private-b'],
-        reasons: {
-          'private:private-b': 'encryption_unavailable',
-        },
+      expect(getStorageFallbackReport()).toBeNull();
+      expect(isPrivateStorageWritable()).toBe(false);
+      expect(getPrivateStorageHealthSnapshot()).toEqual(expect.objectContaining({
+        status: 'blocked',
+        reason: 'secure_key_unavailable',
+        retryable: true,
+        requiresExplicitReset: false,
+      }));
+    } finally {
+      (process.env as any).NODE_ENV = originalNodeEnv;
+      warnSpy.mockRestore();
+      jest.resetModules();
+      jest.unmock('react-native');
+      jest.unmock('expo-secure-store');
+      jest.unmock('react-native-mmkv');
+    }
+  });
+
+  it('blocks private encryption when reading the secure key fails', async () => {
+    const originalNodeEnv = process.env.NODE_ENV;
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      (process.env as any).NODE_ENV = 'production';
+      jest.resetModules();
+
+      jest.doMock('react-native', () => ({
+        Platform: { OS: 'ios' },
+      }));
+
+      const getItemAsync = jest.fn(async () => {
+        throw new Error('secure key read failed');
       });
+      const setItemAsync = jest.fn(async () => undefined);
+
+      jest.doMock('expo-secure-store', () => ({
+        isAvailableAsync: jest.fn(async () => true),
+        getItemAsync,
+        setItemAsync,
+        deleteItemAsync: jest.fn(async () => undefined),
+      }), { virtual: true });
+
+      const createMMKV = jest.fn(() => ({
+        isEncrypted: false,
+        getAllKeys: jest.fn(() => []),
+        getString: jest.fn(() => undefined),
+        encrypt: jest.fn(),
+      }));
+
+      jest.doMock('react-native-mmkv', () => ({
+        createMMKV,
+        deleteMMKV: jest.fn(),
+      }));
+
+      const {
+        initializePrivateStorageEncryption,
+        createStorage,
+        getPrivateStorageHealthSnapshot,
+        isPrivateStorageWritable,
+        PrivateStorageUnavailableError,
+      } = require('../../src/services/storage');
+
+      await expect(initializePrivateStorageEncryption()).resolves.toEqual(expect.objectContaining({
+        status: 'blocked',
+        reason: 'secure_key_unavailable',
+        retryable: true,
+        requiresExplicitReset: false,
+      }));
+
+      expect(getItemAsync).toHaveBeenCalledWith('pocket-ai-private-mmkv-key-v1');
+      expect(setItemAsync).not.toHaveBeenCalled();
+      expect(createMMKV).not.toHaveBeenCalled();
+      expect(isPrivateStorageWritable()).toBe(false);
+      expect(() => createStorage('private-secure-key-read-fails', { tier: 'private' })).toThrow(PrivateStorageUnavailableError);
+      expect(getPrivateStorageHealthSnapshot()).toEqual(expect.objectContaining({
+        status: 'blocked',
+        reason: 'secure_key_unavailable',
+        retryable: true,
+        requiresExplicitReset: false,
+      }));
     } finally {
       (process.env as any).NODE_ENV = originalNodeEnv;
       warnSpy.mockRestore();
@@ -327,7 +534,7 @@ describe('storage (createStorage)', () => {
     }
   });
 
-  it('uses expo-crypto for entropy and repairs MMKV stores during migrations', async () => {
+  it('blocks encrypted open failures during migrations without deleting MMKV', async () => {
     const originalNodeEnv = process.env.NODE_ENV;
     const originalCrypto = (globalThis as any).crypto;
     const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
@@ -432,13 +639,28 @@ describe('storage (createStorage)', () => {
         deleteMMKV,
       }));
 
-      const { initializePrivateStorageEncryption, isPrivateStorageEncryptionReady } = require('../../src/services/storage');
+      const {
+        getPrivateStorageHealthSnapshot,
+        initializePrivateStorageEncryption,
+        isPrivateStorageEncryptionReady,
+      } = require('../../src/services/storage');
 
-      await initializePrivateStorageEncryption();
-      expect(isPrivateStorageEncryptionReady()).toBe(true);
+      await expect(initializePrivateStorageEncryption()).resolves.toEqual(expect.objectContaining({
+        status: 'blocked',
+        reason: 'encrypted_open_failed',
+        retryable: true,
+        requiresExplicitReset: true,
+      }));
+      expect(isPrivateStorageEncryptionReady()).toBe(false);
 
-      expect(setItemAsync).toHaveBeenCalledWith('pocket-ai-private-mmkv-migration-version', '1');
-      expect(deleteMMKV).toHaveBeenCalledWith('pocket-ai-settings');
+      expect(setItemAsync).not.toHaveBeenCalledWith('pocket-ai-private-mmkv-migration-version', '1');
+      expect(deleteMMKV).not.toHaveBeenCalled();
+      expect(getPrivateStorageHealthSnapshot()).toEqual(expect.objectContaining({
+        status: 'blocked',
+        reason: 'encrypted_open_failed',
+        retryable: true,
+        requiresExplicitReset: true,
+      }));
     } finally {
       (process.env as any).NODE_ENV = originalNodeEnv;
       (globalThis as any).crypto = originalCrypto;
@@ -446,6 +668,122 @@ describe('storage (createStorage)', () => {
       jest.resetModules();
       jest.unmock('react-native');
       jest.unmock('expo-crypto');
+      jest.unmock('expo-secure-store');
+      jest.unmock('react-native-mmkv');
+    }
+  });
+
+  it('deletes private MMKV stores only through explicit reset after an encrypted open failure', async () => {
+    const originalNodeEnv = process.env.NODE_ENV;
+    const originalCrypto = (globalThis as any).crypto;
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      (process.env as any).NODE_ENV = 'production';
+      (globalThis as any).crypto = {
+        getRandomValues: (array: Uint8Array) => {
+          for (let i = 0; i < array.length; i += 1) {
+            array[i] = (i + 11) & 0xff;
+          }
+        },
+      };
+      jest.resetModules();
+
+      jest.doMock('react-native', () => ({
+        Platform: { OS: 'ios' },
+      }));
+
+      const secureStoreState: Record<string, string> = {
+        'pocket-ai-private-mmkv-key-v1': 'a'.repeat(32),
+        'pocket-ai-private-mmkv-migration-version': '1',
+      };
+      const deleteItemAsync = jest.fn(async (key: string) => {
+        delete secureStoreState[key];
+      });
+
+      jest.doMock('expo-secure-store', () => ({
+        isAvailableAsync: jest.fn(async () => true),
+        getItemAsync: jest.fn(async (key: string) => secureStoreState[key] ?? null),
+        setItemAsync: jest.fn(async (key: string, value: string) => {
+          secureStoreState[key] = value;
+        }),
+        deleteItemAsync,
+      }), { virtual: true });
+
+      let resetStarted = false;
+      const deleteMMKV = jest.fn((_id: string) => {
+        resetStarted = true;
+      });
+      const createMMKV = jest.fn((config?: any) => {
+        if (config?.id === 'pocket-ai-settings' && config?.encryptionKey && !resetStarted) {
+          throw new Error('raw native open failure with sensitive details');
+        }
+
+        return {
+          isEncrypted: Boolean(config?.encryptionKey),
+          getAllKeys: jest.fn(() => []),
+          getString: jest.fn(() => undefined),
+          encrypt: jest.fn(),
+        };
+      });
+
+      jest.doMock('react-native-mmkv', () => ({
+        createMMKV,
+        deleteMMKV,
+      }));
+
+      const {
+        createStorage,
+        getPrivateStorageHealthSnapshot,
+        initializePrivateStorageEncryption,
+        isPrivateStorageWritable,
+        resetPrivateAppStorageAfterConfirmation,
+        PrivateStorageUnavailableError,
+      } = require('../../src/services/storage');
+
+      await expect(initializePrivateStorageEncryption()).resolves.toEqual(expect.objectContaining({
+        status: 'ready',
+      }));
+      expect(isPrivateStorageWritable()).toBe(true);
+
+      let thrown: any;
+      try {
+        createStorage('pocket-ai-settings', { tier: 'private' });
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect(thrown).toBeInstanceOf(PrivateStorageUnavailableError);
+      expect(thrown.message).toBe('Private storage is unavailable (encrypted_open_failed)');
+      expect(thrown.message).not.toContain('raw native open failure');
+      expect(deleteMMKV).not.toHaveBeenCalled();
+      expect(getPrivateStorageHealthSnapshot()).toEqual(expect.objectContaining({
+        status: 'blocked',
+        reason: 'encrypted_open_failed',
+        retryable: true,
+        requiresExplicitReset: true,
+      }));
+
+      await expect(resetPrivateAppStorageAfterConfirmation()).resolves.toEqual(expect.objectContaining({
+        status: 'ready',
+      }));
+
+      expect(deleteMMKV).toHaveBeenCalledWith('global-app-storage');
+      expect(deleteMMKV).toHaveBeenCalledWith('pocket-ai-settings');
+      expect(deleteMMKV).toHaveBeenCalledWith('pocket-ai-presets');
+      expect(deleteMMKV).toHaveBeenCalledWith('models-registry');
+      expect(deleteMMKV).toHaveBeenCalledWith('pocket-ai-last-good-profiles');
+      expect(deleteMMKV).toHaveBeenCalledWith('pocket-ai-autotune');
+      expect(deleteMMKV).not.toHaveBeenCalledWith(expect.stringContaining('gguf'));
+      expect(deleteItemAsync).toHaveBeenCalledWith('pocket-ai-private-mmkv-key-v1');
+      expect(deleteItemAsync).toHaveBeenCalledWith('pocket-ai-private-mmkv-migration-version');
+      expect(isPrivateStorageWritable()).toBe(true);
+    } finally {
+      (process.env as any).NODE_ENV = originalNodeEnv;
+      (globalThis as any).crypto = originalCrypto;
+      warnSpy.mockRestore();
+      jest.resetModules();
+      jest.unmock('react-native');
       jest.unmock('expo-secure-store');
       jest.unmock('react-native-mmkv');
     }
@@ -483,20 +821,26 @@ describe('storage (createStorage)', () => {
         initializePrivateStorageEncryption,
         isPrivateStorageEncryptionReady,
         createStorage,
+        getPrivateStorageHealthSnapshot,
         getStorageFallbackReport,
+        PrivateStorageUnavailableError,
       } = require('../../src/services/storage');
 
-      await initializePrivateStorageEncryption();
+      await expect(initializePrivateStorageEncryption()).resolves.toEqual(expect.objectContaining({
+        status: 'blocked',
+        reason: 'secure_key_unavailable',
+      }));
       expect(isPrivateStorageEncryptionReady()).toBe(false);
 
-      createStorage('private-c', { tier: 'private' });
+      expect(() => createStorage('private-c', { tier: 'private' })).toThrow(PrivateStorageUnavailableError);
 
-      expect(getStorageFallbackReport()).toEqual({
-        storeIds: ['private:private-c'],
-        reasons: {
-          'private:private-c': 'encryption_unavailable',
-        },
-      });
+      expect(getStorageFallbackReport()).toBeNull();
+      expect(getPrivateStorageHealthSnapshot()).toEqual(expect.objectContaining({
+        status: 'blocked',
+        reason: 'secure_key_unavailable',
+        retryable: true,
+        requiresExplicitReset: false,
+      }));
     } finally {
       (process.env as any).NODE_ENV = originalNodeEnv;
       (globalThis as any).crypto = originalCrypto;

@@ -50,6 +50,33 @@ describe('store/storage facade', () => {
     });
   });
 
+  it('retries private app storage creation after an early failure', () => {
+    const blockedError = Object.assign(new Error('private storage blocked'), {
+      name: 'PrivateStorageUnavailableError',
+    });
+    const mockStorage = createMockStorage();
+    const createStorage = jest.fn()
+      .mockImplementationOnce(() => {
+        throw blockedError;
+      })
+      .mockReturnValue(mockStorage);
+
+    jest.isolateModules(() => {
+      jest.doMock('../../src/services/storage', () => ({ createStorage }));
+
+      const { getAppStorage, storage } = require('../../src/store/storage');
+
+      expect(() => getAppStorage()).toThrow(blockedError);
+      expect(createStorage).toHaveBeenCalledTimes(1);
+
+      storage.set('ready', 'yes');
+
+      expect(storage.getString('ready')).toBe('yes');
+      expect(getAppStorage()).toBe(mockStorage);
+      expect(createStorage).toHaveBeenCalledTimes(2);
+    });
+  });
+
   it('delegates facade and zustand persistence calls to the cached storage instance', () => {
     const mockStorage = createMockStorage();
     const createStorage = jest.fn(() => mockStorage);

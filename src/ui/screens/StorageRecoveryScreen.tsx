@@ -133,13 +133,19 @@ export function StorageRecoveryScreen({
                                     {t('storageRecovery.description')}
                                 </Text>
 
-                                <ScreenCard variant="inset" tone="warning" padding="compact" testID="storage-recovery-health-message">
+                                <Box
+                                    className="rounded-lg border border-warning-200 bg-warning-50 p-3 dark:border-warning-700 dark:bg-warning-950"
+                                    testID="storage-recovery-health-message"
+                                >
                                     <Text textRole="bodyMuted" className="text-typography-700 dark:text-typography-200">
                                         {healthMessage}
                                     </Text>
-                                </ScreenCard>
+                                </Box>
 
-                                <ScreenCard variant="inset" tone="accent" padding="compact" testID="storage-recovery-data-preserved">
+                                <Box
+                                    className="rounded-lg border border-outline-200 bg-background-0 p-3 dark:border-outline-700 dark:bg-background-950"
+                                    testID="storage-recovery-data-preserved"
+                                >
                                     <Box className="flex-row items-start gap-3">
                                         <ScreenIconTile iconName="verified-user" tone="accent" size="sm" iconSize={18} />
                                         <Box className="min-w-0 flex-1 gap-1">
@@ -151,7 +157,7 @@ export function StorageRecoveryScreen({
                                             </Text>
                                         </Box>
                                     </Box>
-                                </ScreenCard>
+                                </Box>
 
                                 <Box className="gap-3 pt-1">
                                     {canShowRetry ? (

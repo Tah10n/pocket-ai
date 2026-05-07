@@ -4,6 +4,10 @@ import { createStorage } from '../services/storage';
 
 let storageInstance: MMKV | null = null;
 
+export function invalidateAppStorageForPrivateReset(): void {
+  storageInstance = null;
+}
+
 export function getAppStorage(): MMKV {
   if (storageInstance) {
     return storageInstance;

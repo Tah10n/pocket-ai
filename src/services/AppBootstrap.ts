@@ -121,6 +121,9 @@ type BootstrapOutcome = 'success' | 'active_model_missing' | 'active_model_block
 type BootstrapCriticalResult =
   | { outcome: Exclude<BootstrapOutcome, 'storage_blocked'> }
   | { outcome: 'storage_blocked'; storageHealth: PrivateStorageHealthSnapshot };
+export type BootstrapBackgroundResult =
+  | { outcome: 'success' }
+  | { outcome: 'storage_blocked'; storageHealth: PrivateStorageHealthSnapshot };
 
 function sanitizePrivateStorageHealthSnapshot(
   storageHealth: PrivateStorageHealthSnapshot,
@@ -138,6 +141,15 @@ function sanitizePrivateStorageHealthSnapshot(
 function buildStorageBlockedCriticalResult(
   storageHealth: PrivateStorageHealthSnapshot,
 ): BootstrapCriticalResult {
+  return {
+    outcome: 'storage_blocked',
+    storageHealth: sanitizePrivateStorageHealthSnapshot(storageHealth),
+  };
+}
+
+function buildStorageBlockedBackgroundResult(
+  storageHealth: PrivateStorageHealthSnapshot,
+): BootstrapBackgroundResult {
   return {
     outcome: 'storage_blocked',
     storageHealth: sanitizePrivateStorageHealthSnapshot(storageHealth),
@@ -454,7 +466,7 @@ export async function bootstrapAppCritical(): Promise<BootstrapCriticalResult> {
   }
 }
 
-export async function bootstrapAppBackground(): Promise<void> {
+export async function bootstrapAppBackground(): Promise<BootstrapBackgroundResult> {
   const bootstrapSpan = performanceMonitor.startSpan('bootstrap.background');
   let outcome: 'success' | 'storage_blocked' | 'error' = 'success';
   const errors: { scope: string; error: unknown }[] = [];
@@ -466,11 +478,21 @@ export async function bootstrapAppBackground(): Promise<void> {
     }
   };
 
+  const buildBlockedResultIfNeeded = (): BootstrapBackgroundResult | null => {
+    const blockedStorageHealth = getBlockedPrivateStorageHealthSnapshot();
+    if (!blockedStorageHealth) {
+      return null;
+    }
+
+    outcome = 'storage_blocked';
+    return buildStorageBlockedBackgroundResult(blockedStorageHealth);
+  };
+
   try {
     const currentStorageHealth = getPrivateStorageHealthSnapshot();
     if (currentStorageHealth.status === 'blocked') {
       outcome = 'storage_blocked';
-      return;
+      return buildStorageBlockedBackgroundResult(currentStorageHealth);
     }
 
     const settings = getSettings();
@@ -480,11 +502,19 @@ export async function bootstrapAppBackground(): Promise<void> {
     } catch (e) {
       recordError('setupFileSystem', e);
     }
+    const blockedAfterFileSystem = buildBlockedResultIfNeeded();
+    if (blockedAfterFileSystem) {
+      return blockedAfterFileSystem;
+    }
 
     try {
       await registry.validateRegistry(getQueuedDownloadFileNames());
     } catch (e) {
       recordError('validateRegistry', e);
+    }
+    const blockedAfterRegistry = buildBlockedResultIfNeeded();
+    if (blockedAfterRegistry) {
+      return blockedAfterRegistry;
     }
 
     if (!isRuntimeTestEnvironment() && Platform.OS !== 'web') {
@@ -506,6 +536,10 @@ export async function bootstrapAppBackground(): Promise<void> {
     } catch (e) {
       recordError('presetManager.getPresets', e);
     }
+    const blockedAfterPresets = buildBlockedResultIfNeeded();
+    if (blockedAfterPresets) {
+      return blockedAfterPresets;
+    }
 
     try {
       repairChatHistoryIndex();
@@ -513,6 +547,10 @@ export async function bootstrapAppBackground(): Promise<void> {
       useChatStore.getState().pruneExpiredThreads(settings.chatRetentionDays);
     } catch (e) {
       recordError('chatHistory', e);
+    }
+    const blockedAfterChatHistory = buildBlockedResultIfNeeded();
+    if (blockedAfterChatHistory) {
+      return blockedAfterChatHistory;
     }
 
     if (errors.length > 0) {
@@ -524,10 +562,13 @@ export async function bootstrapAppBackground(): Promise<void> {
       (aggregateError as unknown as { cause?: unknown }).cause = firstError?.error;
       throw aggregateError;
     }
+
+    return { outcome: 'success' };
   } catch (error) {
-    if (getBlockedPrivateStorageHealthSnapshot()) {
+    const blockedStorageHealth = getBlockedPrivateStorageHealthSnapshot();
+    if (blockedStorageHealth) {
       outcome = 'storage_blocked';
-      return;
+      return buildStorageBlockedBackgroundResult(blockedStorageHealth);
     }
 
     outcome = 'error';
@@ -549,7 +590,10 @@ export async function bootstrapApp() {
       return;
     }
 
-    await bootstrapAppBackground();
+    const background = await bootstrapAppBackground();
+    if (background.outcome === 'storage_blocked') {
+      outcome = 'storage_blocked';
+    }
   } catch (error) {
     outcome = 'error';
     throw error;

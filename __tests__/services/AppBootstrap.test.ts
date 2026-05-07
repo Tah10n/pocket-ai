@@ -269,7 +269,10 @@ describe('AppBootstrap', () => {
 
     (getPrivateStorageHealthSnapshot as jest.Mock).mockReturnValue(blockedStorageHealth);
 
-    await bootstrapAppBackground();
+    await expect(bootstrapAppBackground()).resolves.toEqual({
+      outcome: 'storage_blocked',
+      storageHealth: blockedStorageHealth,
+    });
 
     expect(getSettings).not.toHaveBeenCalled();
     expect(setupFileSystem).not.toHaveBeenCalled();
@@ -278,6 +281,40 @@ describe('AppBootstrap', () => {
     expect(presetManager.getPresets).not.toHaveBeenCalled();
     expect(mockMergeImportedThreads).not.toHaveBeenCalled();
     expect(getModelDownloadManager).not.toHaveBeenCalled();
+  });
+
+  it('returns a storage-blocked background outcome when private storage blocks during background work', async () => {
+    const readyStorageHealth = buildPrivateStorageHealth();
+    const blockedStorageHealth = buildPrivateStorageHealth({
+      status: 'blocked',
+      reason: 'encrypted_open_failed',
+      retryable: true,
+      requiresExplicitReset: true,
+      messageKey: 'storage.private.encryptedOpenFailed',
+    });
+
+    (getPrivateStorageHealthSnapshot as jest.Mock).mockReturnValue(readyStorageHealth);
+    (getSettings as jest.Mock).mockReturnValue({
+      language: 'en',
+      activePresetId: null,
+      activeModelId: null,
+      temperature: 0.7,
+      topP: 0.9,
+      maxTokens: 2048,
+      theme: 'system',
+      chatRetentionDays: null,
+    });
+    (registry.validateRegistry as jest.Mock).mockImplementationOnce(() => {
+      (getPrivateStorageHealthSnapshot as jest.Mock).mockReturnValue(blockedStorageHealth);
+      throw new Error('registry private storage blocked');
+    });
+
+    await expect(bootstrapAppBackground()).resolves.toEqual({
+      outcome: 'storage_blocked',
+      storageHealth: blockedStorageHealth,
+    });
+    expect(presetManager.getPresets).not.toHaveBeenCalled();
+    expect(mockMergeImportedThreads).not.toHaveBeenCalled();
   });
 
   it('restores the persisted active model during critical bootstrap when the file is still available', async () => {
@@ -589,7 +626,7 @@ describe('AppBootstrap', () => {
       },
     ]);
 
-    await bootstrapAppBackground();
+    await expect(bootstrapAppBackground()).resolves.toEqual({ outcome: 'success' });
 
     expect(mockMergeImportedThreads).toHaveBeenCalledWith([
       expect.objectContaining({
@@ -684,7 +721,7 @@ describe('AppBootstrap', () => {
         throw new Error('download manager init failed');
       });
 
-      await expect(bootstrapAppBackground()).resolves.toBeUndefined();
+      await expect(bootstrapAppBackground()).resolves.toEqual({ outcome: 'success' });
 
       expect(requestAnimationFrameMock).toHaveBeenCalledTimes(2);
 

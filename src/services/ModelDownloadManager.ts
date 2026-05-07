@@ -91,7 +91,7 @@ type ActiveDownloadJob = {
 };
 
 export class ModelDownloadManager {
-  private static instance: ModelDownloadManager;
+  private static instance: ModelDownloadManager | undefined;
   private activeJob: ActiveDownloadJob | null = null;
   private nextJobToken = 0;
   private isProcessing = false;
@@ -134,6 +134,44 @@ export class ModelDownloadManager {
       ModelDownloadManager.instance = new ModelDownloadManager();
     }
     return ModelDownloadManager.instance;
+  }
+
+  public static async resetRuntimeForPrivateStorageReset(): Promise<void> {
+    if (!ModelDownloadManager.instance) {
+      return;
+    }
+
+    await ModelDownloadManager.instance.stopActiveJobForPrivateStorageReset();
+  }
+
+  private async stopActiveJobForPrivateStorageReset(): Promise<void> {
+    const job = this.activeJob;
+    if (job) {
+      job.stopReason = 'cancel';
+    }
+
+    this.isProcessing = true;
+    this.nextJobToken += 1;
+    this.activeJob = null;
+    useDownloadStore.setState({ queue: [], activeDownloadId: null });
+
+    try {
+      if (job?.resumable) {
+        try {
+          await job.resumable.pauseAsync();
+        } catch (error) {
+          console.warn(`[ModelDownloadManager] Failed to pause active download during private storage reset for ${job.modelId}`, error);
+        }
+      }
+
+      if (backgroundTaskService.isTaskActive('download')) {
+        await backgroundTaskService.stopBackgroundTask('download').catch((error) => {
+          console.warn('[ModelDownloadManager] Failed to stop background download task during private storage reset', error);
+        });
+      }
+    } finally {
+      this.isProcessing = false;
+    }
   }
 
   /**
@@ -900,4 +938,8 @@ export class ModelDownloadManager {
 
 export function getModelDownloadManager(): ModelDownloadManager {
   return ModelDownloadManager.getInstance();
+}
+
+export async function resetModelDownloadManagerForPrivateStorageReset(): Promise<void> {
+  await ModelDownloadManager.resetRuntimeForPrivateStorageReset();
 }

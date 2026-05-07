@@ -718,6 +718,8 @@ export const useChatSession = () => {
   }, [switchThreadModel, updateThreadParamsSnapshot]);
 
   const appendUserMessage = useCallback(async (text: string) => {
+    assertPrivateStorageWritableForChatMutation();
+
     const settings = getSettings();
     const activeModelId = settings.activeModelId;
     const activeModelParams = getGenerationParametersForModel(activeModelId);
@@ -742,8 +744,6 @@ export const useChatSession = () => {
     if (llmEngineService.hasActiveCompletion() || isNativeCompletionSettlingAfterStop()) {
       throw new Error('Wait for the current response to finish stopping before sending another message.');
     }
-
-    assertPrivateStorageWritableForChatMutation();
 
     const threadId = activeThread?.id
       ?? createThread({
@@ -917,6 +917,8 @@ export const useChatSession = () => {
     if (!thread) {
       throw new Error('The selected conversation is no longer available.');
     }
+
+    assertPrivateStorageWritableForChatMutation();
 
     syncThreadParametersCallback(thread);
     setActiveThread(threadId);

@@ -50,6 +50,10 @@ export type AutotuneResult = {
 
 let autotuneStorageInstance: MMKV | null = null;
 
+export function invalidateAutotuneStorageForPrivateReset(): void {
+  autotuneStorageInstance = null;
+}
+
 function getAutotuneStorage(): MMKV {
   if (autotuneStorageInstance) {
     return autotuneStorageInstance;

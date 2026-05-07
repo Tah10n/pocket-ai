@@ -220,6 +220,15 @@ function resolveTieredStoreId(tier: StorageTier, id?: string): string {
     return `${normalizedTier}:${normalizedId}`;
 }
 
+function clearPrivateStorageRuntimeCaches(): void {
+    for (const storeId of PRIVATE_STORAGE_INSTANCE_IDS) {
+        const healthKey = resolveTieredStoreId('private', storeId);
+        fallbackStores.delete(healthKey);
+        storageHealthById.delete(healthKey);
+        warnedFallbackStores.delete(healthKey);
+    }
+}
+
 type CryptoLike = { getRandomValues: (array: Uint8Array) => void };
 
 function getCrypto(): CryptoLike | null {
@@ -501,6 +510,8 @@ export async function resetPrivateAppStorageAfterConfirmation(): Promise<Private
             retryable: false,
             requiresExplicitReset: false,
         });
+
+        clearPrivateStorageRuntimeCaches();
 
         try {
             if (!IS_WEB && !IS_TESTING) {

@@ -17,10 +17,10 @@ import { performanceMonitor } from '../src/services/PerformanceMonitor';
 import {
   getPrivateStorageHealthSnapshot,
   getStorageFallbackReport,
-  resetPrivateAppStorageAfterConfirmation,
   retryPrivateStorageInitialization,
   type PrivateStorageHealthSnapshot,
 } from '../src/services/storage';
+import { resetPrivateAppStorageAndRuntimeStateAfterConfirmation } from '../src/services/PrivateStorageRecovery';
 import { notificationService } from '../src/services/NotificationService';
 import { useBootstrapStore, type BootstrapCriticalOutcome } from '../src/store/bootstrapStore';
 import { StorageRecoveryScreen, type StorageRecoveryBusyState } from '../src/ui/screens/StorageRecoveryScreen';
@@ -195,7 +195,13 @@ function startBackgroundBootstrapFromRoot(): void {
   useBootstrapStore.getState().setBackgroundError(null);
 
   void bootstrapAppBackground()
-    .then(() => {
+    .then((backgroundResult) => {
+      if (backgroundResult.outcome === 'storage_blocked') {
+        useBootstrapStore.getState().setCriticalOutcome('storage_blocked', backgroundResult.storageHealth);
+        useBootstrapStore.getState().setBackgroundState('blocked');
+        return;
+      }
+
       useBootstrapStore.getState().setBackgroundState('done');
     })
     .catch((error) => {
@@ -274,7 +280,7 @@ function RootNavigator() {
 
     try {
       const recoveryHealth = action === 'reset'
-        ? await resetPrivateAppStorageAfterConfirmation()
+        ? await resetPrivateAppStorageAndRuntimeStateAfterConfirmation()
         : await retryPrivateStorageInitialization();
 
       if (recoveryHealth.status === 'blocked') {

@@ -77,6 +77,25 @@ describe('store/storage facade', () => {
     });
   });
 
+  it('recreates the shared app storage instance after private reset invalidation', () => {
+    const firstStorage = createMockStorage();
+    const secondStorage = createMockStorage();
+    const createStorage = jest.fn()
+      .mockReturnValueOnce(firstStorage)
+      .mockReturnValueOnce(secondStorage);
+
+    jest.isolateModules(() => {
+      jest.doMock('../../src/services/storage', () => ({ createStorage }));
+
+      const { getAppStorage, invalidateAppStorageForPrivateReset } = require('../../src/store/storage');
+
+      expect(getAppStorage()).toBe(firstStorage);
+      invalidateAppStorageForPrivateReset();
+      expect(getAppStorage()).toBe(secondStorage);
+      expect(createStorage).toHaveBeenCalledTimes(2);
+    });
+  });
+
   it('delegates facade and zustand persistence calls to the cached storage instance', () => {
     const mockStorage = createMockStorage();
     const createStorage = jest.fn(() => mockStorage);

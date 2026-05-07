@@ -200,6 +200,15 @@ export class LocalStorageRegistry {
     };
   }
 
+  public invalidatePrivateStorageRuntimeState(): void {
+    this.storage = null;
+    this.cachedModelIds = [];
+    this.cachedModelsById = new Map<string, ModelMetadata>();
+    this.cachedDownloadedModelsCount = 0;
+    this.cachedCalibrationRecordsByKey = new Map<string, CalibrationRecord>();
+    this.emitModelsChanged();
+  }
+
   public getCalibrationRecord(key: string): CalibrationRecord | undefined {
     const record = this.getCachedCalibrationRecords().get(key);
     return record ? cloneCalibrationRecord(record) : undefined;

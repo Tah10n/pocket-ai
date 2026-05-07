@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { subscribeWithSelector } from 'zustand/middleware';
 import type { PrivateStorageHealthSnapshot } from '../services/storage';
 
-export type BootstrapBackgroundState = 'idle' | 'running' | 'done' | 'error';
+export type BootstrapBackgroundState = 'idle' | 'running' | 'done' | 'blocked' | 'error';
 export type BootstrapCriticalOutcome = 'success' | 'active_model_missing' | 'active_model_blocked' | 'storage_blocked' | 'error';
 
 type BootstrapState = {

@@ -873,6 +873,14 @@ export const useChatStore = create<ChatStoreState>()(
     },
   ),
 );
+
+export function resetChatStoreForPrivateStorageReset(): void {
+  useChatStore.setState({
+    threads: {},
+    activeThreadId: null,
+  });
+  void useChatStore.persist.clearStorage();
+}
 export type { ThreadInferenceWindow, ThreadInferenceWindowOptions } from '../utils/inferenceWindow';
 export {
   DEFAULT_INFERENCE_PROMPT_SAFETY_MARGIN_TOKENS,

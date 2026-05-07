@@ -140,6 +140,10 @@ export function startModelDownloadFlow({
 
   const status = hardwareListenerService.getCurrentStatus();
   if (status.networkType === 'cellular') {
+    if (!ensurePrivateStorageReadyForDownload(t)) {
+      return;
+    }
+
     if (getSettings().allowCellularDownloads === false) {
       Alert.alert(t('models.cellularDownloadsDisabledTitle'), t('models.cellularDownloadsDisabledMessage'));
       return;

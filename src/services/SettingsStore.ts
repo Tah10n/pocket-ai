@@ -9,6 +9,10 @@ export { UNKNOWN_MODEL_GPU_LAYERS_CEILING };
 
 let storageInstance: MMKV | null = null;
 
+export function invalidateSettingsStorageForPrivateReset(): void {
+    storageInstance = null;
+}
+
 export function getSettingsStorage(): MMKV {
     if (storageInstance) {
         return storageInstance;

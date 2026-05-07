@@ -35,12 +35,12 @@ describe('bootstrapStore', () => {
       backgroundError: 'disk full',
     }));
 
-    useBootstrapStore.getState().setBackgroundState('error');
+    useBootstrapStore.getState().setBackgroundState('blocked');
     useBootstrapStore.getState().setBackgroundError(null);
 
     expect(useBootstrapStore.getState()).toEqual(expect.objectContaining({
       criticalOutcome: 'active_model_blocked',
-      backgroundState: 'error',
+      backgroundState: 'blocked',
       backgroundError: null,
     }));
   });

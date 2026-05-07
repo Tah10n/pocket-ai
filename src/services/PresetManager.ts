@@ -3,6 +3,10 @@ import { createStorage } from './storage';
 
 let storageInstance: MMKV | null = null;
 
+export function invalidatePresetStorageForPrivateReset(): void {
+    storageInstance = null;
+}
+
 function getPresetStorage(): MMKV {
     if (storageInstance) {
         return storageInstance;

@@ -1,4 +1,4 @@
-import { getModelDownloadManager } from '../../src/services/ModelDownloadManager';
+import { getModelDownloadManager, resetModelDownloadManagerForPrivateStorageReset } from '../../src/services/ModelDownloadManager';
 import { useDownloadStore } from '../../src/store/downloadStore';
 import { LifecycleStatus, ModelAccessState, ModelMetadata } from '../../src/types/models';
 import * as FileSystem from 'expo-file-system/legacy';
@@ -123,6 +123,41 @@ describe('ModelDownloadManager Basic', () => {
       progressPercent: 0,
     });
     expect(FileSystem.createDownloadResumable).toHaveBeenCalled();
+  });
+
+  it('invalidates an active job during private storage reset', async () => {
+    const pauseAsync = jest.fn().mockResolvedValue(undefined);
+    const jobToken = 42;
+    (modelDownloadManager as any).activeJob = {
+      modelId: mockModel.id,
+      jobToken,
+      resumable: { pauseAsync },
+      stopReason: null,
+    };
+    (modelDownloadManager as any).isProcessing = true;
+    useDownloadStore.setState({
+      queue: [
+        { ...mockModel, lifecycleStatus: LifecycleStatus.DOWNLOADING },
+        { ...mockModel, id: 'test/queued-model', lifecycleStatus: LifecycleStatus.QUEUED },
+      ],
+      activeDownloadId: mockModel.id,
+    });
+    await backgroundTaskService.startBackgroundDownload({ type: 'downloadProgress', modelName: mockModel.name, progressPercent: 10 });
+
+    await resetModelDownloadManagerForPrivateStorageReset();
+
+    expect(pauseAsync).toHaveBeenCalledTimes(1);
+    expect((modelDownloadManager as any).activeJob).toBeNull();
+    expect((modelDownloadManager as any).isProcessing).toBe(false);
+    expect(useDownloadStore.getState().activeDownloadId).toBeNull();
+    expect(useDownloadStore.getState().queue).toEqual([]);
+    expect(backgroundTaskService.isTaskActive('download')).toBe(false);
+
+    await Promise.resolve();
+    expect((modelDownloadManager as any).activeJob).toBeNull();
+
+    await expect((modelDownloadManager as any).downloadModel(mockModel, jobToken)).resolves.toBeUndefined();
+    expect(mockedRegistry.updateModel).not.toHaveBeenCalled();
   });
 
   it('verifies a downloaded file when the size matches', async () => {

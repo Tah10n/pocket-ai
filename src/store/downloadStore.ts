@@ -154,3 +154,11 @@ export function getQueuedDownloadFileNames(): string[] {
       .flatMap((model) => getCandidateModelDownloadFileNames(model)),
   ));
 }
+
+export function resetDownloadStoreForPrivateStorageReset(): void {
+  useDownloadStore.setState({
+    queue: [],
+    activeDownloadId: null,
+  });
+  void useDownloadStore.persist.clearStorage();
+}

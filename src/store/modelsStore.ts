@@ -71,6 +71,21 @@ function createDiscoveryFilters(hasToken: boolean): ModelFilterCriteria {
   };
 }
 
+function createDefaultTabPreferences(): Record<ModelsCatalogTabId, ModelsCatalogTabPreferences> {
+  return {
+    all: {
+      filters: createDefaultFilters(),
+      sort: DEFAULT_SORT,
+      discoveryMode: 'uninitialized',
+    },
+    downloaded: {
+      filters: createDefaultFilters(),
+      sort: DEFAULT_SORT,
+      discoveryMode: 'full',
+    },
+  };
+}
+
 function toggleValue<T>(values: T[], value: T): T[] {
   return values.includes(value)
     ? values.filter((current) => current !== value)
@@ -164,16 +179,7 @@ export const useModelsStore = create<ModelsStoreState>()(
   persist(
     (set) => ({
       tabPreferences: {
-        all: {
-          filters: createDefaultFilters(),
-          sort: DEFAULT_SORT,
-          discoveryMode: 'uninitialized',
-        },
-        downloaded: {
-          filters: createDefaultFilters(),
-          sort: DEFAULT_SORT,
-          discoveryMode: 'full',
-        },
+        ...createDefaultTabPreferences(),
       },
 
       applyDiscoveryPreset: ({ hasToken }) =>
@@ -403,3 +409,10 @@ export const useModelsStore = create<ModelsStoreState>()(
     },
   ),
 );
+
+export function resetModelsStoreForPrivateStorageReset(): void {
+  useModelsStore.setState({
+    tabPreferences: createDefaultTabPreferences(),
+  });
+  void useModelsStore.persist.clearStorage();
+}

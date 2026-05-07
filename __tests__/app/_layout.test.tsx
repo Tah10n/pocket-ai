@@ -6,7 +6,7 @@ const mockBootstrapAppCritical = jest.fn();
 const mockBootstrapAppBackground = jest.fn();
 const mockGetPrivateStorageHealthSnapshot = jest.fn();
 const mockGetStorageFallbackReport = jest.fn();
-const mockResetPrivateAppStorageAfterConfirmation = jest.fn();
+const mockResetPrivateAppStorageAndRuntimeStateAfterConfirmation = jest.fn();
 const mockRetryPrivateStorageInitialization = jest.fn();
 const mockNotificationInitialize = jest.fn();
 
@@ -118,8 +118,13 @@ jest.mock('../../src/services/PerformanceMonitor', () => ({
 jest.mock('../../src/services/storage', () => ({
   getPrivateStorageHealthSnapshot: (...args: unknown[]) => mockGetPrivateStorageHealthSnapshot(...args),
   getStorageFallbackReport: (...args: unknown[]) => mockGetStorageFallbackReport(...args),
-  resetPrivateAppStorageAfterConfirmation: (...args: unknown[]) => mockResetPrivateAppStorageAfterConfirmation(...args),
   retryPrivateStorageInitialization: (...args: unknown[]) => mockRetryPrivateStorageInitialization(...args),
+}));
+
+jest.mock('../../src/services/PrivateStorageRecovery', () => ({
+  resetPrivateAppStorageAndRuntimeStateAfterConfirmation: (...args: unknown[]) => (
+    mockResetPrivateAppStorageAndRuntimeStateAfterConfirmation(...args)
+  ),
 }));
 
 jest.mock('../../src/services/NotificationService', () => ({
@@ -161,11 +166,11 @@ describe('RootLayout storage recovery gate', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     resetBootstrapStore();
-    mockBootstrapAppBackground.mockResolvedValue(undefined);
+    mockBootstrapAppBackground.mockResolvedValue({ outcome: 'success' });
     mockGetPrivateStorageHealthSnapshot.mockReturnValue(blockedHealth);
     mockGetStorageFallbackReport.mockReturnValue(null);
     mockRetryPrivateStorageInitialization.mockResolvedValue(readyHealth);
-    mockResetPrivateAppStorageAfterConfirmation.mockResolvedValue(readyHealth);
+    mockResetPrivateAppStorageAndRuntimeStateAfterConfirmation.mockResolvedValue(readyHealth);
   });
 
   it('renders storage recovery and skips background bootstrap when critical storage is blocked', async () => {
@@ -202,6 +207,24 @@ describe('RootLayout storage recovery gate', () => {
     expect(queryByTestId('storage-recovery-screen')).toBeNull();
   });
 
+  it('shows recovery when background bootstrap reports private storage is blocked', async () => {
+    mockBootstrapAppCritical.mockResolvedValueOnce({ outcome: 'success' });
+    mockBootstrapAppBackground.mockResolvedValueOnce({ outcome: 'storage_blocked', storageHealth: blockedHealth });
+
+    const { findByTestId } = render(<RootLayout />);
+
+    expect(await findByTestId('storage-recovery-screen')).toBeTruthy();
+    await waitFor(() => expect(mockBootstrapAppBackground).toHaveBeenCalledTimes(1));
+    expect(useBootstrapStore.getState()).toEqual(expect.objectContaining({
+      criticalOutcome: 'storage_blocked',
+      backgroundState: 'blocked',
+      backgroundError: null,
+    }));
+    expect(useBootstrapStore.getState().criticalStorageHealth).toEqual(expect.objectContaining({
+      reason: 'encrypted_open_failed',
+    }));
+  });
+
   it('runs explicit reset recovery through the root gate before remounting the app shell', async () => {
     mockBootstrapAppCritical
       .mockResolvedValueOnce({ outcome: 'storage_blocked', storageHealth: blockedHealth })
@@ -215,7 +238,7 @@ describe('RootLayout storage recovery gate', () => {
       await Promise.resolve();
     });
 
-    await waitFor(() => expect(mockResetPrivateAppStorageAfterConfirmation).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(mockResetPrivateAppStorageAndRuntimeStateAfterConfirmation).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(mockBootstrapAppCritical).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(mockBootstrapAppBackground).toHaveBeenCalledTimes(1));
     expect(queryByTestId('storage-recovery-screen')).toBeNull();

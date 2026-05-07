@@ -262,6 +262,7 @@ describe('useChatSession', () => {
           },
         }),
       );
+      expect(getSettings).not.toHaveBeenCalled();
       expect(createThreadSpy).not.toHaveBeenCalled();
       expect(appendMessageSpy).not.toHaveBeenCalled();
       expect(createAssistantPlaceholderSpy).not.toHaveBeenCalled();

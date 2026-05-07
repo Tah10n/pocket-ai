@@ -153,6 +153,28 @@ describe('modelDownloadFlow', () => {
     expect(startDownload).not.toHaveBeenCalled();
   });
 
+  it('blocks cellular downloads before reading settings when private storage is unavailable', async () => {
+    mockGetCurrentStatus.mockReturnValue({ networkType: 'cellular' });
+    mockIsPrivateStorageWritable.mockReturnValue(false);
+    const startDownload = jest.fn();
+
+    startModelDownloadFlow({
+      model: createModel(),
+      t: (key) => key,
+      startDownload,
+      openTokenSettings: jest.fn(),
+      openModelPage: jest.fn().mockResolvedValue(undefined),
+      onError: jest.fn(),
+    });
+
+    expect(alertSpy).toHaveBeenCalledWith(
+      'storageRecovery.title',
+      'storageRecovery.privateUnavailableMessage',
+    );
+    expect(mockGetSettings).not.toHaveBeenCalled();
+    expect(startDownload).not.toHaveBeenCalled();
+  });
+
   it('blocks before metadata refresh and download start when private storage is unavailable', async () => {
     mockGetPrivateStorageHealthSnapshot.mockReturnValue({
       status: 'blocked',

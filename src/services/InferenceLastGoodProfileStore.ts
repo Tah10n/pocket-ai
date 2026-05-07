@@ -27,6 +27,10 @@ export type LastGoodInferenceProfile = {
 
 let lastGoodStorageInstance: MMKV | null = null;
 
+export function invalidateLastGoodProfileStorageForPrivateReset(): void {
+  lastGoodStorageInstance = null;
+}
+
 function getLastGoodStorage(): MMKV {
   if (lastGoodStorageInstance) {
     return lastGoodStorageInstance;

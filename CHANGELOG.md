@@ -8,6 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > Note: This file is maintained automatically by Release Please based on Conventional Commits (PR titles).
 > Avoid editing it manually unless you are bootstrapping or fixing the release history.
 
+## [1.3.2](https://github.com/Tah10n/pocket-ai/compare/v1.3.1...v1.3.2) (2026-05-08)
+
+
+### Bug Fixes
+
+* fail closed private storage recovery ([42d3361](https://github.com/Tah10n/pocket-ai/commit/42d3361c3139ff1da12a9e252dc820f1d578eae8))
+* harden private storage recovery ([bc28d70](https://github.com/Tah10n/pocket-ai/commit/bc28d70103122abf9038f9b7f56d2371f52fa914))
+* harden private storage recovery flow ([1df6312](https://github.com/Tah10n/pocket-ai/commit/1df6312ef38003922e3a577e484a9ac8273bd9ee))
+* harden private storage reset recovery ([6ac4a46](https://github.com/Tah10n/pocket-ai/commit/6ac4a46fcfb6639dd9c7fd71e6f2f6d494fb1919))
+* preserve typed private storage migrations ([5481c0a](https://github.com/Tah10n/pocket-ai/commit/5481c0a8cd2926272da14ec324d7b349c8857f54))
+* **storage:** enforce fail-closed private writes ([dc4562c](https://github.com/Tah10n/pocket-ai/commit/dc4562c4cdfcedfd7bb40560509da0b2d8b4eb3a))
+* **storage:** fail closed for private store mutations ([6cff72a](https://github.com/Tah10n/pocket-ai/commit/6cff72a21bedb8396e7940b2a5a0b14446ee617b))
+* **storage:** fail closed for private store mutations ([#82](https://github.com/Tah10n/pocket-ai/issues/82)) ([6e40678](https://github.com/Tah10n/pocket-ai/commit/6e406783d4f1a732c014d90e09ac2cef42a6cf2b))
+* **storage:** harden private MMKV recovery ([86bd0a3](https://github.com/Tah10n/pocket-ai/commit/86bd0a39a09246bebe4eac2815daaaa27ebd757d))
+* **storage:** preserve model files after private reset ([275c1e2](https://github.com/Tah10n/pocket-ai/commit/275c1e22edfad350b4aa79ee091dc06a52da3af3))
+* **storage:** preserve typed private MMKV migration ([427067b](https://github.com/Tah10n/pocket-ai/commit/427067b1c5531c8196b0040342569197d63483f9))
+* **storage:** recover encrypted MMKV with keyed open ([add2d73](https://github.com/Tah10n/pocket-ai/commit/add2d73bf807ee2e8dbe5f306c771ccfa923ee9c))
+* **storage:** refine recovery screen panels ([e1cd5ac](https://github.com/Tah10n/pocket-ai/commit/e1cd5ac2ceda08912f8fca78077f0a6a0ab998f4))
+
 ## [1.3.1](https://github.com/Tah10n/pocket-ai/compare/v1.3.0...v1.3.1) (2026-05-05)
 
 

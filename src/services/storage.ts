@@ -96,6 +96,17 @@ class PrivateStorageMigrationFailedError extends PrivateStorageUnavailableError 
     }
 }
 
+class PrivateStorageKeyedRecoveryRequiredError extends Error {
+    readonly expectedKeys?: readonly string[];
+
+    constructor(expectedKeys?: readonly string[]) {
+        super('Private storage requires keyed recovery');
+        this.name = 'PrivateStorageKeyedRecoveryRequiredError';
+        Object.setPrototypeOf(this, PrivateStorageKeyedRecoveryRequiredError.prototype);
+        this.expectedKeys = expectedKeys ? [...expectedKeys] : undefined;
+    }
+}
+
 type StorageHealthEntry = {
     implementation: StorageImplementation;
     reason?: StorageFallbackReason;
@@ -123,6 +134,23 @@ const PRIVATE_STORAGE_INSTANCE_IDS = [
     'pocket-ai-last-good-profiles',
     'pocket-ai-autotune',
 ] as const;
+
+type PrivateStorageInstanceId = (typeof PRIVATE_STORAGE_INSTANCE_IDS)[number];
+
+type PrivateStorageMigrationMarkerPhase = 'pre_encrypt' | 'encrypting' | 'encrypted_verified' | 'reset_required';
+type RecoverablePrivateStorageMigrationMarkerPhase = PrivateStorageMigrationMarkerPhase | 'legacy';
+
+type PrivateStorageMigrationMarker =
+    | { kind: 'none' }
+    | { kind: 'invalid'; raw: string }
+    | {
+        kind: 'valid';
+        storeId: PrivateStorageInstanceId;
+        phase: RecoverablePrivateStorageMigrationMarkerPhase;
+        legacy: boolean;
+    };
+
+const PRIVATE_STORAGE_MIGRATION_MARKER_SCHEMA_VERSION = 1;
 
 type PrivateStorageEncryptionState = 'uninitialized' | 'ready' | 'unavailable';
 
@@ -390,6 +418,94 @@ function throwPrivateStorageMigrationFailed(
     throw new PrivateStorageMigrationFailedError(health, options.retainInProgressMarker ?? false);
 }
 
+function throwPrivateStorageKeyedRecoveryRequired(expectedKeys?: readonly string[]): never {
+    throw new PrivateStorageKeyedRecoveryRequiredError(expectedKeys);
+}
+
+function isPrivateStorageInstanceId(value: string): value is PrivateStorageInstanceId {
+    return (PRIVATE_STORAGE_INSTANCE_IDS as readonly string[]).includes(value);
+}
+
+function isPrivateStorageMigrationMarkerPhase(value: unknown): value is PrivateStorageMigrationMarkerPhase {
+    return value === 'pre_encrypt'
+        || value === 'encrypting'
+        || value === 'encrypted_verified'
+        || value === 'reset_required';
+}
+
+function parsePrivateStorageMigrationMarker(raw: string | null): PrivateStorageMigrationMarker {
+    if (raw === null) {
+        return { kind: 'none' };
+    }
+
+    const trimmed = raw.trim();
+    if (isPrivateStorageInstanceId(trimmed)) {
+        return { kind: 'valid', storeId: trimmed, phase: 'legacy', legacy: true };
+    }
+
+    try {
+        const parsed = JSON.parse(trimmed) as {
+            schemaVersion?: unknown;
+            storeId?: unknown;
+            phase?: unknown;
+        };
+
+        if (
+            parsed
+            && typeof parsed === 'object'
+            && parsed.schemaVersion === PRIVATE_STORAGE_MIGRATION_MARKER_SCHEMA_VERSION
+            && typeof parsed.storeId === 'string'
+            && isPrivateStorageInstanceId(parsed.storeId)
+            && isPrivateStorageMigrationMarkerPhase(parsed.phase)
+        ) {
+            return {
+                kind: 'valid',
+                storeId: parsed.storeId,
+                phase: parsed.phase,
+                legacy: false,
+            };
+        }
+    } catch {
+        // Fall through to an invalid marker. A malformed in-progress marker is unsafe to ignore.
+    }
+
+    return { kind: 'invalid', raw };
+}
+
+async function readPrivateStorageMigrationMarker(): Promise<PrivateStorageMigrationMarker> {
+    try {
+        return parsePrivateStorageMigrationMarker(
+            await SecureStore.getItemAsync(PRIVATE_STORAGE_MIGRATION_IN_PROGRESS_ID),
+        );
+    } catch {
+        throwPrivateStorageMigrationFailed({
+            retainInProgressMarker: true,
+            requiresExplicitReset: false,
+        });
+    }
+}
+
+function serializePrivateStorageMigrationMarker(
+    storeId: PrivateStorageInstanceId,
+    phase: PrivateStorageMigrationMarkerPhase,
+): string {
+    return JSON.stringify({
+        schemaVersion: PRIVATE_STORAGE_MIGRATION_MARKER_SCHEMA_VERSION,
+        storeId,
+        phase,
+    });
+}
+
+async function writePrivateStorageMigrationMarker(
+    storeId: PrivateStorageInstanceId,
+    phase: PrivateStorageMigrationMarkerPhase,
+): Promise<void> {
+    await SecureStore.setItemAsync(
+        PRIVATE_STORAGE_MIGRATION_IN_PROGRESS_ID,
+        serializePrivateStorageMigrationMarker(storeId, phase),
+    );
+}
+
 function copyArrayBuffer(value: ArrayBuffer): ArrayBuffer {
     const source = new Uint8Array(value);
     const copy = new Uint8Array(source.length);
@@ -402,7 +518,11 @@ function readBufferValue(store: MMKV, key: string): ArrayBuffer | undefined {
     return typeof getBuffer === 'function' ? getBuffer.call(store, key) : undefined;
 }
 
-function readTypedMigrationValue(store: MMKV, key: string): TypedMigrationValue {
+function readTypedMigrationValue(
+    store: MMKV,
+    key: string,
+    options: { recoverableReadFailure?: boolean } = {},
+): TypedMigrationValue {
     const matches: TypedMigrationValue[] = [];
 
     try {
@@ -426,6 +546,10 @@ function readTypedMigrationValue(store: MMKV, key: string): TypedMigrationValue 
             matches.push({ kind: 'binary', value: copyArrayBuffer(bufferValue) });
         }
     } catch {
+        if (options.recoverableReadFailure) {
+            throwPrivateStorageKeyedRecoveryRequired();
+        }
+
         throwPrivateStorageMigrationFailed();
     }
 
@@ -436,12 +560,49 @@ function readTypedMigrationValue(store: MMKV, key: string): TypedMigrationValue 
     return matches[0];
 }
 
-function captureTypedMigrationSnapshot(store: MMKV): TypedMigrationSnapshot[] {
+function captureTypedMigrationSnapshot(
+    store: MMKV,
+    options: { recoverableReadFailure?: boolean } = {},
+): TypedMigrationSnapshot[] {
+    let keys: string[] | null = null;
+
     try {
-        return store.getAllKeys().map((key) => ({
+        keys = store.getAllKeys();
+        return keys.map((key) => ({
             key,
-            ...readTypedMigrationValue(store, key),
+            ...readTypedMigrationValue(store, key, options),
         }));
+    } catch (error) {
+        if (error instanceof PrivateStorageKeyedRecoveryRequiredError) {
+            if (keys && options.recoverableReadFailure) {
+                throwPrivateStorageKeyedRecoveryRequired(keys);
+            }
+
+            throw error;
+        }
+
+        if (error instanceof PrivateStorageUnavailableError) {
+            throw error;
+        }
+
+        if (options.recoverableReadFailure) {
+            throwPrivateStorageKeyedRecoveryRequired(keys ?? undefined);
+        }
+
+        throwPrivateStorageMigrationFailed();
+    }
+}
+
+function verifyExpectedTypedMigrationKeys(store: MMKV, expectedKeys?: readonly string[]): void {
+    if (!expectedKeys || expectedKeys.length === 0) {
+        return;
+    }
+
+    try {
+        const actualKeys = new Set(store.getAllKeys());
+        if (expectedKeys.some((key) => !actualKeys.has(key))) {
+            throwPrivateStorageMigrationFailed();
+        }
     } catch (error) {
         if (error instanceof PrivateStorageUnavailableError) {
             throw error;
@@ -506,26 +667,68 @@ function restoreTypedMigrationSnapshot(store: MMKV, snapshot: TypedMigrationSnap
     }
 }
 
+type WritePrivateStorageMigrationPhase = (phase: PrivateStorageMigrationMarkerPhase) => Promise<void>;
+
 async function encryptOpenedMmkvStore(
     store: MMKV,
     encryptionKeyValue: string,
-    markMigrationInProgress?: () => Promise<void>,
+    writeMigrationPhase?: WritePrivateStorageMigrationPhase,
+    options: { allowKeyedRecoveryOnReadFailure?: boolean } = {},
 ): Promise<void> {
     if (store.isEncrypted) {
+        if (options.allowKeyedRecoveryOnReadFailure) {
+            try {
+                throwPrivateStorageKeyedRecoveryRequired(store.getAllKeys());
+            } catch (error) {
+                if (error instanceof PrivateStorageKeyedRecoveryRequiredError) {
+                    throw error;
+                }
+
+                throwPrivateStorageKeyedRecoveryRequired();
+            }
+        }
+
+        captureTypedMigrationSnapshot(store);
         return;
     }
 
-    const snapshot = captureTypedMigrationSnapshot(store);
+    const snapshot = captureTypedMigrationSnapshot(store, {
+        recoverableReadFailure: options.allowKeyedRecoveryOnReadFailure,
+    });
     let didStartEncrypt = false;
+    let didVerifyEncrypted = false;
 
     try {
-        await markMigrationInProgress?.();
+        await writeMigrationPhase?.('pre_encrypt');
+        await writeMigrationPhase?.('encrypting');
         didStartEncrypt = true;
         store.encrypt(encryptionKeyValue, PRIVATE_STORAGE_ENCRYPTION_TYPE);
         verifyTypedMigrationSnapshot(store, snapshot);
+        didVerifyEncrypted = true;
+        await writeMigrationPhase?.('encrypted_verified');
     } catch (error) {
+        if (error instanceof PrivateStorageKeyedRecoveryRequiredError) {
+            throw error;
+        }
+
+        if (didVerifyEncrypted) {
+            const didClearMarker = await clearPrivateStorageMigrationInProgressMarker();
+            throwPrivateStorageMigrationFailed({
+                retainInProgressMarker: !didClearMarker,
+                requiresExplicitReset: !didClearMarker,
+            });
+        }
+
         if (didStartEncrypt) {
             const didRestore = restoreTypedMigrationSnapshot(store, snapshot);
+            if (!didRestore) {
+                try {
+                    await writeMigrationPhase?.('reset_required');
+                } catch {
+                    // Keep the sanitized reset-required health in memory even if durable marker update fails.
+                }
+            }
+
             throwPrivateStorageMigrationFailed({
                 retainInProgressMarker: !didRestore,
                 requiresExplicitReset: !didRestore,
@@ -541,20 +744,33 @@ async function encryptOpenedMmkvStore(
 }
 
 async function encryptMmkvInstance(
-    id: string,
+    id: PrivateStorageInstanceId,
     encryptionKeyValue: string,
-    markMigrationInProgress?: () => Promise<void>,
+    writeMigrationPhase?: WritePrivateStorageMigrationPhase,
 ): Promise<void> {
     const mmkvModule = requireMmkvModule();
     const createMMKV = mmkvModule.createMMKV;
+    let keyedRecoveryExpectedKeys: readonly string[] | undefined;
+    let shouldRequireEncryptedKeyedStore = false;
 
     try {
         const store = createMMKV({ id });
-        await encryptOpenedMmkvStore(store, encryptionKeyValue, markMigrationInProgress);
+        await encryptOpenedMmkvStore(store, encryptionKeyValue, writeMigrationPhase, {
+            allowKeyedRecoveryOnReadFailure: true,
+        });
         return;
     } catch (error) {
+        if (error instanceof PrivateStorageKeyedRecoveryRequiredError) {
+            keyedRecoveryExpectedKeys = error.expectedKeys;
+            shouldRequireEncryptedKeyedStore = !error.expectedKeys;
+        }
+
         if (error instanceof PrivateStorageUnavailableError) {
             throw error;
+        }
+
+        if (!(error instanceof PrivateStorageKeyedRecoveryRequiredError)) {
+            shouldRequireEncryptedKeyedStore = true;
         }
 
         // If the store was already encrypted (and can't be opened without a key),
@@ -567,7 +783,17 @@ async function encryptMmkvInstance(
                 encryptionType: PRIVATE_STORAGE_ENCRYPTION_TYPE,
             });
 
-            await encryptOpenedMmkvStore(store, encryptionKeyValue, markMigrationInProgress);
+            if (shouldRequireEncryptedKeyedStore && !keyedRecoveryExpectedKeys) {
+                throwPrivateStorageMigrationFailed();
+            }
+
+            if (shouldRequireEncryptedKeyedStore && !store.isEncrypted) {
+                throwPrivateStorageMigrationFailed();
+            }
+
+            verifyExpectedTypedMigrationKeys(store, keyedRecoveryExpectedKeys);
+            await encryptOpenedMmkvStore(store, encryptionKeyValue, writeMigrationPhase);
+            verifyExpectedTypedMigrationKeys(store, keyedRecoveryExpectedKeys);
             return;
         } catch (encryptedOpenError) {
             if (encryptedOpenError instanceof PrivateStorageUnavailableError) {
@@ -583,14 +809,58 @@ async function encryptMmkvInstance(
     }
 }
 
-async function runPrivateStorageMigrations(encryptionKeyValue: string): Promise<void> {
-    const inProgressStoreId = await SecureStore.getItemAsync(PRIVATE_STORAGE_MIGRATION_IN_PROGRESS_ID);
-    if (inProgressStoreId) {
+async function recoverPrivateStorageMigrationMarker(
+    marker: PrivateStorageMigrationMarker,
+    encryptionKeyValue: string,
+): Promise<void> {
+    if (marker.kind === 'none') {
+        return;
+    }
+
+    if (
+        marker.kind === 'invalid'
+        || marker.phase === 'legacy'
+        || marker.phase === 'encrypting'
+        || marker.phase === 'reset_required'
+    ) {
         throwPrivateStorageMigrationFailed({
             retainInProgressMarker: true,
             requiresExplicitReset: true,
         });
     }
+
+    try {
+        await encryptMmkvInstance(marker.storeId, encryptionKeyValue, (phase) => (
+            writePrivateStorageMigrationMarker(marker.storeId, phase)
+        ));
+    } catch (error) {
+        if (error instanceof PrivateStorageMigrationFailedError && !error.retainInProgressMarker) {
+            const didClearMarker = await clearPrivateStorageMigrationInProgressMarker();
+            if (!didClearMarker) {
+                throwPrivateStorageMigrationFailed({
+                    retainInProgressMarker: true,
+                    requiresExplicitReset: false,
+                });
+            }
+        }
+
+        throw error;
+    }
+
+    const didClearMarker = await clearPrivateStorageMigrationInProgressMarker();
+    if (!didClearMarker) {
+        throwPrivateStorageMigrationFailed({
+            retainInProgressMarker: true,
+            requiresExplicitReset: false,
+        });
+    }
+}
+
+async function runPrivateStorageMigrations(encryptionKeyValue: string): Promise<void> {
+    await recoverPrivateStorageMigrationMarker(
+        await readPrivateStorageMigrationMarker(),
+        encryptionKeyValue,
+    );
 
     const versionRaw = await SecureStore.getItemAsync(PRIVATE_STORAGE_MIGRATION_VERSION_ID);
     const currentVersion = versionRaw ? Number(versionRaw) : 0;
@@ -604,8 +874,8 @@ async function runPrivateStorageMigrations(encryptionKeyValue: string): Promise<
         let wroteInProgressMarker = false;
 
         try {
-            await encryptMmkvInstance(storeId, encryptionKeyValue, async () => {
-                await SecureStore.setItemAsync(PRIVATE_STORAGE_MIGRATION_IN_PROGRESS_ID, storeId);
+            await encryptMmkvInstance(storeId, encryptionKeyValue, async (phase) => {
+                await writePrivateStorageMigrationMarker(storeId, phase);
                 wroteInProgressMarker = true;
             });
 
@@ -614,7 +884,7 @@ async function runPrivateStorageMigrations(encryptionKeyValue: string): Promise<
                 if (!didClearMarker) {
                     throwPrivateStorageMigrationFailed({
                         retainInProgressMarker: true,
-                        requiresExplicitReset: true,
+                        requiresExplicitReset: false,
                     });
                 }
             }
@@ -627,7 +897,7 @@ async function runPrivateStorageMigrations(encryptionKeyValue: string): Promise<
                 if (!didClearMarker) {
                     throwPrivateStorageMigrationFailed({
                         retainInProgressMarker: true,
-                        requiresExplicitReset: true,
+                        requiresExplicitReset: false,
                     });
                 }
             }

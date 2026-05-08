@@ -85,6 +85,17 @@ export class PrivateStorageUnavailableError extends Error {
     }
 }
 
+class PrivateStorageMigrationFailedError extends PrivateStorageUnavailableError {
+    readonly retainInProgressMarker: boolean;
+
+    constructor(health: PrivateStorageHealthSnapshot, retainInProgressMarker: boolean) {
+        super('migration_failed', health);
+        this.name = 'PrivateStorageMigrationFailedError';
+        Object.setPrototypeOf(this, PrivateStorageMigrationFailedError.prototype);
+        this.retainInProgressMarker = retainInProgressMarker;
+    }
+}
+
 type StorageHealthEntry = {
     implementation: StorageImplementation;
     reason?: StorageFallbackReason;
@@ -100,6 +111,7 @@ export type StorageFallbackReport = {
 
 const PRIVATE_STORAGE_ENCRYPTION_KEY_ID = 'pocket-ai-private-mmkv-key-v1';
 const PRIVATE_STORAGE_MIGRATION_VERSION_ID = 'pocket-ai-private-mmkv-migration-version';
+const PRIVATE_STORAGE_MIGRATION_IN_PROGRESS_ID = 'pocket-ai-private-mmkv-migration-in-progress';
 const PRIVATE_STORAGE_MIGRATION_VERSION = 1;
 const PRIVATE_STORAGE_ENCRYPTION_TYPE = 'AES-256' as const;
 
@@ -354,28 +366,197 @@ function requireMmkvModule(): MmkvModule {
     return require('react-native-mmkv') as MmkvModule;
 }
 
-function encryptMmkvInstance(id: string, encryptionKeyValue: string): void {
+type MmkvWithOptionalBuffer = MMKV & {
+    getBuffer?: (key: string) => ArrayBuffer | undefined;
+};
+
+type TypedMigrationValue =
+    | { kind: 'string'; value: string }
+    | { kind: 'number'; value: number }
+    | { kind: 'boolean'; value: boolean }
+    | { kind: 'binary'; value: ArrayBuffer };
+
+type TypedMigrationSnapshot = TypedMigrationValue & {
+    key: string;
+};
+
+function throwPrivateStorageMigrationFailed(
+    options: { retainInProgressMarker?: boolean; requiresExplicitReset?: boolean } = {},
+): never {
+    const health = blockPrivateStorage('migration_failed', {
+        retryable: true,
+        requiresExplicitReset: options.requiresExplicitReset ?? false,
+    });
+    throw new PrivateStorageMigrationFailedError(health, options.retainInProgressMarker ?? false);
+}
+
+function copyArrayBuffer(value: ArrayBuffer): ArrayBuffer {
+    const source = new Uint8Array(value);
+    const copy = new Uint8Array(source.length);
+    copy.set(source);
+    return copy.buffer;
+}
+
+function readBufferValue(store: MMKV, key: string): ArrayBuffer | undefined {
+    const getBuffer = (store as MmkvWithOptionalBuffer).getBuffer;
+    return typeof getBuffer === 'function' ? getBuffer.call(store, key) : undefined;
+}
+
+function readTypedMigrationValue(store: MMKV, key: string): TypedMigrationValue {
+    const matches: TypedMigrationValue[] = [];
+
+    try {
+        const stringValue = store.getString(key);
+        if (stringValue !== undefined) {
+            matches.push({ kind: 'string', value: stringValue });
+        }
+
+        const numberValue = store.getNumber(key);
+        if (numberValue !== undefined) {
+            matches.push({ kind: 'number', value: numberValue });
+        }
+
+        const booleanValue = store.getBoolean(key);
+        if (booleanValue !== undefined) {
+            matches.push({ kind: 'boolean', value: booleanValue });
+        }
+
+        const bufferValue = readBufferValue(store, key);
+        if (bufferValue !== undefined) {
+            matches.push({ kind: 'binary', value: copyArrayBuffer(bufferValue) });
+        }
+    } catch {
+        throwPrivateStorageMigrationFailed();
+    }
+
+    if (matches.length !== 1) {
+        throwPrivateStorageMigrationFailed();
+    }
+
+    return matches[0];
+}
+
+function captureTypedMigrationSnapshot(store: MMKV): TypedMigrationSnapshot[] {
+    try {
+        return store.getAllKeys().map((key) => ({
+            key,
+            ...readTypedMigrationValue(store, key),
+        }));
+    } catch (error) {
+        if (error instanceof PrivateStorageUnavailableError) {
+            throw error;
+        }
+
+        throwPrivateStorageMigrationFailed();
+    }
+}
+
+function migrationValuesMatch(expected: TypedMigrationValue, actual: TypedMigrationValue): boolean {
+    if (expected.kind !== actual.kind) {
+        return false;
+    }
+
+    switch (expected.kind) {
+        case 'string':
+            return actual.kind === 'string' && actual.value === expected.value;
+        case 'number':
+            return actual.kind === 'number' && Object.is(actual.value, expected.value);
+        case 'boolean':
+            return actual.kind === 'boolean' && actual.value === expected.value;
+        case 'binary': {
+            if (actual.kind !== 'binary' || actual.value.byteLength !== expected.value.byteLength) {
+                return false;
+            }
+
+            const expectedBytes = new Uint8Array(expected.value);
+            const actualBytes = new Uint8Array(actual.value);
+            return expectedBytes.every((byte, index) => byte === actualBytes[index]);
+        }
+    }
+}
+
+function verifyTypedMigrationSnapshot(store: MMKV, snapshot: TypedMigrationSnapshot[]): void {
+    for (const expected of snapshot) {
+        const actual = readTypedMigrationValue(store, expected.key);
+        if (!migrationValuesMatch(expected, actual)) {
+            throwPrivateStorageMigrationFailed();
+        }
+    }
+}
+
+function writeTypedMigrationValue(store: MMKV, entry: TypedMigrationSnapshot): void {
+    if (entry.kind === 'binary') {
+        store.set(entry.key, copyArrayBuffer(entry.value));
+        return;
+    }
+
+    store.set(entry.key, entry.value);
+}
+
+function restoreTypedMigrationSnapshot(store: MMKV, snapshot: TypedMigrationSnapshot[]): boolean {
+    try {
+        for (const entry of snapshot) {
+            writeTypedMigrationValue(store, entry);
+        }
+        verifyTypedMigrationSnapshot(store, snapshot);
+        return true;
+    } catch {
+        // Best-effort restore only. The caller still fails closed with a sanitized migration error.
+        return false;
+    }
+}
+
+async function encryptOpenedMmkvStore(
+    store: MMKV,
+    encryptionKeyValue: string,
+    markMigrationInProgress?: () => Promise<void>,
+): Promise<void> {
+    if (store.isEncrypted) {
+        return;
+    }
+
+    const snapshot = captureTypedMigrationSnapshot(store);
+    let didStartEncrypt = false;
+
+    try {
+        await markMigrationInProgress?.();
+        didStartEncrypt = true;
+        store.encrypt(encryptionKeyValue, PRIVATE_STORAGE_ENCRYPTION_TYPE);
+        verifyTypedMigrationSnapshot(store, snapshot);
+    } catch (error) {
+        if (didStartEncrypt) {
+            const didRestore = restoreTypedMigrationSnapshot(store, snapshot);
+            throwPrivateStorageMigrationFailed({
+                retainInProgressMarker: !didRestore,
+                requiresExplicitReset: !didRestore,
+            });
+        }
+
+        if (error instanceof PrivateStorageUnavailableError) {
+            throw error;
+        }
+
+        throwPrivateStorageMigrationFailed();
+    }
+}
+
+async function encryptMmkvInstance(
+    id: string,
+    encryptionKeyValue: string,
+    markMigrationInProgress?: () => Promise<void>,
+): Promise<void> {
     const mmkvModule = requireMmkvModule();
     const createMMKV = mmkvModule.createMMKV;
 
     try {
         const store = createMMKV({ id });
-        if (!store.isEncrypted) {
-            const keys = store.getAllKeys();
-            const snapshot = new Map<string, string | undefined>(keys.map((key) => [key, store.getString(key)]));
-
-            store.encrypt(encryptionKeyValue, PRIVATE_STORAGE_ENCRYPTION_TYPE);
-
-            for (const [key, value] of snapshot.entries()) {
-                const storedValue = store.getString(key);
-                if (storedValue !== value) {
-                    throw new Error(`Encrypted value mismatch for key "${key}"`);
-                }
-            }
+        await encryptOpenedMmkvStore(store, encryptionKeyValue, markMigrationInProgress);
+        return;
+    } catch (error) {
+        if (error instanceof PrivateStorageUnavailableError) {
+            throw error;
         }
 
-        return;
-    } catch {
         // If the store was already encrypted (and can't be opened without a key),
         // try opening it with the configured key. If that still fails, block private
         // storage and wait for an explicit user-confirmed reset instead of deleting data.
@@ -386,12 +567,13 @@ function encryptMmkvInstance(id: string, encryptionKeyValue: string): void {
                 encryptionType: PRIVATE_STORAGE_ENCRYPTION_TYPE,
             });
 
-            if (!store.isEncrypted) {
-                store.encrypt(encryptionKeyValue, PRIVATE_STORAGE_ENCRYPTION_TYPE);
+            await encryptOpenedMmkvStore(store, encryptionKeyValue, markMigrationInProgress);
+            return;
+        } catch (encryptedOpenError) {
+            if (encryptedOpenError instanceof PrivateStorageUnavailableError) {
+                throw encryptedOpenError;
             }
 
-            return;
-        } catch {
             const health = blockPrivateStorage('encrypted_open_failed', {
                 retryable: true,
                 requiresExplicitReset: true,
@@ -402,6 +584,14 @@ function encryptMmkvInstance(id: string, encryptionKeyValue: string): void {
 }
 
 async function runPrivateStorageMigrations(encryptionKeyValue: string): Promise<void> {
+    const inProgressStoreId = await SecureStore.getItemAsync(PRIVATE_STORAGE_MIGRATION_IN_PROGRESS_ID);
+    if (inProgressStoreId) {
+        throwPrivateStorageMigrationFailed({
+            retainInProgressMarker: true,
+            requiresExplicitReset: true,
+        });
+    }
+
     const versionRaw = await SecureStore.getItemAsync(PRIVATE_STORAGE_MIGRATION_VERSION_ID);
     const currentVersion = versionRaw ? Number(versionRaw) : 0;
     const normalizedVersion = Number.isFinite(currentVersion) ? Math.max(0, Math.floor(currentVersion)) : 0;
@@ -411,10 +601,55 @@ async function runPrivateStorageMigrations(encryptionKeyValue: string): Promise<
     }
 
     for (const storeId of PRIVATE_STORAGE_INSTANCE_IDS) {
-        encryptMmkvInstance(storeId, encryptionKeyValue);
+        let wroteInProgressMarker = false;
+
+        try {
+            await encryptMmkvInstance(storeId, encryptionKeyValue, async () => {
+                await SecureStore.setItemAsync(PRIVATE_STORAGE_MIGRATION_IN_PROGRESS_ID, storeId);
+                wroteInProgressMarker = true;
+            });
+
+            if (wroteInProgressMarker) {
+                const didClearMarker = await clearPrivateStorageMigrationInProgressMarker();
+                if (!didClearMarker) {
+                    throwPrivateStorageMigrationFailed({
+                        retainInProgressMarker: true,
+                        requiresExplicitReset: true,
+                    });
+                }
+            }
+        } catch (error) {
+            const shouldRetainMarker = error instanceof PrivateStorageMigrationFailedError
+                && error.retainInProgressMarker;
+
+            if (wroteInProgressMarker && !shouldRetainMarker) {
+                const didClearMarker = await clearPrivateStorageMigrationInProgressMarker();
+                if (!didClearMarker) {
+                    throwPrivateStorageMigrationFailed({
+                        retainInProgressMarker: true,
+                        requiresExplicitReset: true,
+                    });
+                }
+            }
+
+            throw error;
+        }
     }
 
     await SecureStore.setItemAsync(PRIVATE_STORAGE_MIGRATION_VERSION_ID, String(PRIVATE_STORAGE_MIGRATION_VERSION));
+}
+
+async function clearPrivateStorageMigrationInProgressMarker(): Promise<boolean> {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+            await SecureStore.deleteItemAsync(PRIVATE_STORAGE_MIGRATION_IN_PROGRESS_ID);
+            return true;
+        } catch {
+            // Retry once; callers decide whether the remaining marker is fatal.
+        }
+    }
+
+    return false;
 }
 
 export async function initializePrivateStorageEncryption(): Promise<PrivateStorageHealthSnapshot> {
@@ -549,7 +784,16 @@ export async function resetPrivateAppStorageAfterConfirmation(): Promise<Private
 
             try {
                 await SecureStore.deleteItemAsync(PRIVATE_STORAGE_ENCRYPTION_KEY_ID);
+            } catch {
+                // SecureStore cleanup may be unavailable in unsupported environments; initialization will re-check below.
+            }
+            try {
                 await SecureStore.deleteItemAsync(PRIVATE_STORAGE_MIGRATION_VERSION_ID);
+            } catch {
+                // SecureStore cleanup may be unavailable in unsupported environments; initialization will re-check below.
+            }
+            try {
+                await SecureStore.deleteItemAsync(PRIVATE_STORAGE_MIGRATION_IN_PROGRESS_ID);
             } catch {
                 // SecureStore cleanup may be unavailable in unsupported environments; initialization will re-check below.
             }

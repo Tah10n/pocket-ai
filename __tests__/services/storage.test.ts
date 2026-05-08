@@ -712,6 +712,7 @@ describe('storage (createStorage)', () => {
       jest.doMock('react-native-mmkv', () => ({ createMMKV, deleteMMKV }));
 
       const {
+        createStorage,
         initializePrivateStorageEncryption,
         isPrivateStorageEncryptionReady,
         getStorageFallbackReport,
@@ -730,6 +731,20 @@ describe('storage (createStorage)', () => {
       expect(globalStore.getBoolean('yes')).toBe(true);
       expect(globalStore.getBoolean('no')).toBe(false);
       expect(Array.from(new Uint8Array((globalStore.getBuffer as jest.Mock)('binary')))).toEqual([1, 2, 3, 255]);
+
+      const reopenedStore = createStorage('global-app-storage', { tier: 'private' });
+      expect(reopenedStore.getString('json')).toBe('{"theme":"dark"}');
+      expect(reopenedStore.getString('numericString')).toBe('42');
+      expect(reopenedStore.getNumber('zero')).toBe(0);
+      expect(reopenedStore.getNumber('negative')).toBe(-7.5);
+      expect(reopenedStore.getBoolean('yes')).toBe(true);
+      expect(reopenedStore.getBoolean('no')).toBe(false);
+      expect(Array.from(new Uint8Array((reopenedStore as any).getBuffer('binary')))).toEqual([1, 2, 3, 255]);
+      expect(createMMKV).toHaveBeenCalledWith(expect.objectContaining({
+        id: 'global-app-storage',
+        encryptionKey: expect.any(String),
+        encryptionType: 'AES-256',
+      }));
       expect(setItemAsync).toHaveBeenCalledWith('pocket-ai-private-mmkv-migration-version', '1');
       expect(deleteMMKV).not.toHaveBeenCalled();
       expect(getStorageFallbackReport()).toBeNull();
@@ -1029,6 +1044,59 @@ describe('storage (createStorage)', () => {
       expect(secureStoreState['pocket-ai-private-mmkv-migration-version']).toBe('1');
       expect(secureStoreState['pocket-ai-private-mmkv-migration-in-progress']).toBeUndefined();
       expect(stores.get('global-app-storage')?.getNumber('later')).toBe(2);
+    } finally {
+      (process.env as any).NODE_ENV = originalNodeEnv;
+      (globalThis as any).crypto = originalCrypto;
+      warnSpy.mockRestore();
+      jest.resetModules();
+      jest.unmock('react-native');
+      jest.unmock('expo-secure-store');
+      jest.unmock('react-native-mmkv');
+    }
+  });
+
+  it('blocks binary byte verification mismatches without advancing migration', async () => {
+    const originalNodeEnv = process.env.NODE_ENV;
+    const originalCrypto = (globalThis as any).crypto;
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      (process.env as any).NODE_ENV = 'production';
+      mockCryptoBytes(75);
+      jest.resetModules();
+      mockReactNativeIos();
+
+      const secureStoreState: Record<string, string> = {};
+      const { setItemAsync } = mockSecureStoreState(secureStoreState);
+      const deleteMMKV = jest.fn();
+      const stores = createEmptyPrivateStores();
+      const binaryStore = createTypedMmkvStore({ binary: new Uint8Array([1, 2, 3]).buffer }, {
+        mutateOnEncrypt: (values) => {
+          values.set('binary', new Uint8Array([1, 2, 4]).buffer);
+        },
+      });
+      stores.set('global-app-storage', binaryStore);
+      const createMMKV = jest.fn((config?: any) => stores.get(config?.id) ?? createTypedMmkvStore());
+      jest.doMock('react-native-mmkv', () => ({ createMMKV, deleteMMKV }));
+
+      const {
+        getStorageFallbackReport,
+        initializePrivateStorageEncryption,
+        isPrivateStorageEncryptionReady,
+      } = require('../../src/services/storage');
+
+      await expect(initializePrivateStorageEncryption()).resolves.toEqual(expect.objectContaining({
+        status: 'blocked',
+        reason: 'migration_failed',
+      }));
+
+      expect(isPrivateStorageEncryptionReady()).toBe(false);
+      expect(secureStoreState['pocket-ai-private-mmkv-migration-version']).toBeUndefined();
+      expect(secureStoreState['pocket-ai-private-mmkv-migration-in-progress']).toBeUndefined();
+      expect(setItemAsync).not.toHaveBeenCalledWith('pocket-ai-private-mmkv-migration-version', '1');
+      expect(deleteMMKV).not.toHaveBeenCalled();
+      expect(getStorageFallbackReport()).toBeNull();
+      expect(Array.from(new Uint8Array((binaryStore.getBuffer as jest.Mock)('binary')))).toEqual([1, 2, 3]);
     } finally {
       (process.env as any).NODE_ENV = originalNodeEnv;
       (globalThis as any).crypto = originalCrypto;

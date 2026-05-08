@@ -751,7 +751,7 @@ async function encryptMmkvInstance(
     const mmkvModule = requireMmkvModule();
     const createMMKV = mmkvModule.createMMKV;
     let keyedRecoveryExpectedKeys: readonly string[] | undefined;
-    let shouldRequireEncryptedKeyedStore = false;
+    let shouldValidateEncryptedKeyedStore = false;
 
     try {
         const store = createMMKV({ id });
@@ -762,7 +762,7 @@ async function encryptMmkvInstance(
     } catch (error) {
         if (error instanceof PrivateStorageKeyedRecoveryRequiredError) {
             keyedRecoveryExpectedKeys = error.expectedKeys;
-            shouldRequireEncryptedKeyedStore = !error.expectedKeys;
+            shouldValidateEncryptedKeyedStore = true;
         }
 
         if (error instanceof PrivateStorageUnavailableError) {
@@ -770,7 +770,7 @@ async function encryptMmkvInstance(
         }
 
         if (!(error instanceof PrivateStorageKeyedRecoveryRequiredError)) {
-            shouldRequireEncryptedKeyedStore = true;
+            shouldValidateEncryptedKeyedStore = true;
         }
 
         // If the store was already encrypted (and can't be opened without a key),
@@ -783,16 +783,16 @@ async function encryptMmkvInstance(
                 encryptionType: PRIVATE_STORAGE_ENCRYPTION_TYPE,
             });
 
-            if (shouldRequireEncryptedKeyedStore && !keyedRecoveryExpectedKeys) {
-                throwPrivateStorageMigrationFailed();
-            }
-
-            if (shouldRequireEncryptedKeyedStore && !store.isEncrypted) {
+            if (shouldValidateEncryptedKeyedStore && !store.isEncrypted) {
                 throwPrivateStorageMigrationFailed();
             }
 
             verifyExpectedTypedMigrationKeys(store, keyedRecoveryExpectedKeys);
-            await encryptOpenedMmkvStore(store, encryptionKeyValue, writeMigrationPhase);
+            if (shouldValidateEncryptedKeyedStore) {
+                captureTypedMigrationSnapshot(store);
+            } else {
+                await encryptOpenedMmkvStore(store, encryptionKeyValue, writeMigrationPhase);
+            }
             verifyExpectedTypedMigrationKeys(store, keyedRecoveryExpectedKeys);
             return;
         } catch (encryptedOpenError) {

@@ -1,3 +1,177 @@
+const PRIVATE_STORAGE_INSTANCE_IDS = [
+  'global-app-storage',
+  'pocket-ai-settings',
+  'pocket-ai-presets',
+  'models-registry',
+  'pocket-ai-last-good-profiles',
+  'pocket-ai-autotune',
+] as const;
+
+type TypedMmkvValue = string | number | boolean | ArrayBuffer | { unsupported: true };
+
+function copyBuffer(value: ArrayBuffer): ArrayBuffer {
+  const source = new Uint8Array(value);
+  const copy = new Uint8Array(source.length);
+  copy.set(source);
+  return copy.buffer;
+}
+
+function cloneTypedValue(value: TypedMmkvValue): TypedMmkvValue {
+  return value instanceof ArrayBuffer ? copyBuffer(value) : value;
+}
+
+function createTypedMmkvStore(
+  initialValues: Record<string, TypedMmkvValue> = {},
+  options: {
+    encrypted?: boolean;
+    omitBufferReader?: boolean;
+    ambiguousKeys?: string[];
+    throwOnEncrypt?: boolean;
+    throwOnSetKeys?: string[];
+    mutateOnEncrypt?: (values: Map<string, TypedMmkvValue>) => void;
+  } = {},
+) {
+  const values = new Map<string, TypedMmkvValue>(
+    Object.entries(initialValues).map(([key, value]) => [key, cloneTypedValue(value)]),
+  );
+  const ambiguousKeys = new Set(options.ambiguousKeys ?? []);
+  const throwOnSetKeys = new Set(options.throwOnSetKeys ?? []);
+  let encrypted = Boolean(options.encrypted);
+
+  const store: any = {
+    get isEncrypted() {
+      return encrypted;
+    },
+    set: jest.fn((key: string, value: TypedMmkvValue) => {
+      if (throwOnSetKeys.has(key)) {
+        throw new Error('set failed');
+      }
+      values.set(key, cloneTypedValue(value));
+    }),
+    getAllKeys: jest.fn(() => Array.from(values.keys())),
+    getString: jest.fn((key: string) => {
+      const value = values.get(key);
+      if (ambiguousKeys.has(key) && value !== undefined) {
+        return 'ambiguous';
+      }
+      return typeof value === 'string' ? value : undefined;
+    }),
+    getNumber: jest.fn((key: string) => {
+      const value = values.get(key);
+      return typeof value === 'number' ? value : undefined;
+    }),
+    getBoolean: jest.fn((key: string) => {
+      const value = values.get(key);
+      return typeof value === 'boolean' ? value : undefined;
+    }),
+    contains: jest.fn((key: string) => values.has(key)),
+    remove: jest.fn((key: string) => values.delete(key)),
+    clearAll: jest.fn(() => values.clear()),
+    encrypt: jest.fn(() => {
+      encrypted = true;
+      options.mutateOnEncrypt?.(values);
+      if (options.throwOnEncrypt) {
+        throw new Error('encrypt failed');
+      }
+    }),
+    __values: values,
+  };
+
+  if (!options.omitBufferReader) {
+    store.getBuffer = jest.fn((key: string) => {
+      const value = values.get(key);
+      return value instanceof ArrayBuffer ? copyBuffer(value) : undefined;
+    });
+  }
+
+  return store;
+}
+
+function createEmptyPrivateStores() {
+  return new Map<string, any>(
+    PRIVATE_STORAGE_INSTANCE_IDS.map((storeId) => [storeId, createTypedMmkvStore()]),
+  );
+}
+
+function mockReactNativeIos() {
+  jest.doMock('react-native', () => ({
+    Platform: { OS: 'ios' },
+  }));
+}
+
+function mockCryptoBytes(offset = 1) {
+  (globalThis as any).crypto = {
+    getRandomValues: (array: Uint8Array) => {
+      for (let i = 0; i < array.length; i += 1) {
+        array[i] = (i + offset) & 0xff;
+      }
+    },
+  };
+}
+
+function mockSecureStoreState(
+  secureStoreState: Record<string, string>,
+  options: {
+    failDeleteForKeys?: string[];
+    failDeleteOnceForKeys?: string[];
+    failSetWhenValueIncludes?: string[];
+    failSetOnceWhenValueIncludes?: string[];
+  } = {},
+) {
+  const failedDeleteKeys = new Set<string>();
+  const failedSetTokens = new Set<string>();
+  const getItemAsync = jest.fn(async (key: string) => secureStoreState[key] ?? null);
+  const setItemAsync = jest.fn(async (key: string, value: string) => {
+    if ((options.failSetWhenValueIncludes ?? []).some((token) => value.includes(token))) {
+      throw new Error('set failed');
+    }
+
+    const failOnceToken = (options.failSetOnceWhenValueIncludes ?? [])
+      .find((token) => value.includes(token) && !failedSetTokens.has(token));
+    if (failOnceToken) {
+      failedSetTokens.add(failOnceToken);
+      throw new Error('set failed');
+    }
+
+    secureStoreState[key] = value;
+  });
+  const deleteItemAsync = jest.fn(async (key: string) => {
+    if ((options.failDeleteForKeys ?? []).includes(key)) {
+      throw new Error('delete failed');
+    }
+    if ((options.failDeleteOnceForKeys ?? []).includes(key) && !failedDeleteKeys.has(key)) {
+      failedDeleteKeys.add(key);
+      throw new Error('delete failed');
+    }
+    delete secureStoreState[key];
+  });
+
+  jest.doMock('expo-secure-store', () => ({
+    isAvailableAsync: jest.fn(async () => true),
+    getItemAsync,
+    setItemAsync,
+    deleteItemAsync,
+  }), { virtual: true });
+
+  return { getItemAsync, setItemAsync, deleteItemAsync };
+}
+
+function serializeMigrationMarker(storeId: string, phase: string): string {
+  return JSON.stringify({ schemaVersion: 1, storeId, phase });
+}
+
+function parseMigrationMarker(raw: string | undefined): any {
+  if (raw === undefined) {
+    return undefined;
+  }
+
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return { legacyStoreId: raw };
+  }
+}
+
 describe('storage (createStorage)', () => {
   it('does not report in-memory fallback during tests', () => {
     const originalNodeEnv = process.env.NODE_ENV;
@@ -534,6 +708,1107 @@ describe('storage (createStorage)', () => {
     }
   });
 
+  it('preserves typed values during private MMKV encryption migration', async () => {
+    const originalNodeEnv = process.env.NODE_ENV;
+    const originalCrypto = (globalThis as any).crypto;
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      (process.env as any).NODE_ENV = 'production';
+      mockCryptoBytes(17);
+      jest.resetModules();
+      mockReactNativeIos();
+
+      const secureStoreState: Record<string, string> = {};
+      const { setItemAsync } = mockSecureStoreState(secureStoreState);
+
+      const stores = createEmptyPrivateStores();
+      const binaryValue = new Uint8Array([1, 2, 3, 255]).buffer;
+      const globalStore = createTypedMmkvStore({
+        json: '{"theme":"dark"}',
+        empty: '',
+        numericString: '42',
+        zero: 0,
+        negative: -7.5,
+        yes: true,
+        no: false,
+        binary: binaryValue,
+      });
+      stores.set('global-app-storage', globalStore);
+
+      const createMMKV = jest.fn((config?: any) => {
+        const id = config?.id;
+        return stores.get(id) ?? createTypedMmkvStore({}, { encrypted: Boolean(config?.encryptionKey) });
+      });
+      const deleteMMKV = jest.fn();
+
+      jest.doMock('react-native-mmkv', () => ({ createMMKV, deleteMMKV }));
+
+      const {
+        createStorage,
+        initializePrivateStorageEncryption,
+        isPrivateStorageEncryptionReady,
+        getStorageFallbackReport,
+      } = require('../../src/services/storage');
+
+      await expect(initializePrivateStorageEncryption()).resolves.toEqual(expect.objectContaining({
+        status: 'ready',
+      }));
+
+      expect(isPrivateStorageEncryptionReady()).toBe(true);
+      expect(globalStore.getString('json')).toBe('{"theme":"dark"}');
+      expect(globalStore.getString('empty')).toBe('');
+      expect(globalStore.getString('numericString')).toBe('42');
+      expect(globalStore.getNumber('zero')).toBe(0);
+      expect(globalStore.getNumber('negative')).toBe(-7.5);
+      expect(globalStore.getBoolean('yes')).toBe(true);
+      expect(globalStore.getBoolean('no')).toBe(false);
+      expect(Array.from(new Uint8Array((globalStore.getBuffer as jest.Mock)('binary')))).toEqual([1, 2, 3, 255]);
+
+      const reopenedStore = createStorage('global-app-storage', { tier: 'private' });
+      expect(reopenedStore.getString('json')).toBe('{"theme":"dark"}');
+      expect(reopenedStore.getString('numericString')).toBe('42');
+      expect(reopenedStore.getNumber('zero')).toBe(0);
+      expect(reopenedStore.getNumber('negative')).toBe(-7.5);
+      expect(reopenedStore.getBoolean('yes')).toBe(true);
+      expect(reopenedStore.getBoolean('no')).toBe(false);
+      expect(Array.from(new Uint8Array((reopenedStore as any).getBuffer('binary')))).toEqual([1, 2, 3, 255]);
+      expect(createMMKV).toHaveBeenCalledWith(expect.objectContaining({
+        id: 'global-app-storage',
+        encryptionKey: expect.any(String),
+        encryptionType: 'AES-256',
+      }));
+      expect(setItemAsync).toHaveBeenCalledWith('pocket-ai-private-mmkv-migration-version', '1');
+      expect(deleteMMKV).not.toHaveBeenCalled();
+      expect(getStorageFallbackReport()).toBeNull();
+    } finally {
+      (process.env as any).NODE_ENV = originalNodeEnv;
+      (globalThis as any).crypto = originalCrypto;
+      warnSpy.mockRestore();
+      jest.resetModules();
+      jest.unmock('react-native');
+      jest.unmock('expo-secure-store');
+      jest.unmock('react-native-mmkv');
+    }
+  });
+
+  it('recovers with keyed open when an unkeyed migration read fails', async () => {
+    const originalNodeEnv = process.env.NODE_ENV;
+    const originalCrypto = (globalThis as any).crypto;
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      (process.env as any).NODE_ENV = 'production';
+      mockCryptoBytes(18);
+      jest.resetModules();
+      mockReactNativeIos();
+
+      const secureStoreState: Record<string, string> = {};
+      mockSecureStoreState(secureStoreState);
+
+      const stores = createEmptyPrivateStores();
+      const keyedGlobalStore = createTypedMmkvStore({ value: 'safe', count: 2 }, { encrypted: true });
+      const unkeyedGlobalStore = {
+        isEncrypted: false,
+        getAllKeys: jest.fn(() => ['value']),
+        getString: jest.fn(() => {
+          throw new Error('encrypted store cannot be read without key');
+        }),
+        getNumber: jest.fn(() => undefined),
+        getBoolean: jest.fn(() => undefined),
+        getBuffer: jest.fn(() => undefined),
+        encrypt: jest.fn(),
+      };
+      const createMMKV = jest.fn((config?: any) => {
+        if (config?.id === 'global-app-storage') {
+          return config?.encryptionKey ? keyedGlobalStore : unkeyedGlobalStore;
+        }
+
+        return stores.get(config?.id) ?? createTypedMmkvStore({}, { encrypted: Boolean(config?.encryptionKey) });
+      });
+      const deleteMMKV = jest.fn();
+      jest.doMock('react-native-mmkv', () => ({ createMMKV, deleteMMKV }));
+
+      const {
+        getStorageFallbackReport,
+        initializePrivateStorageEncryption,
+        isPrivateStorageEncryptionReady,
+      } = require('../../src/services/storage');
+
+      await expect(initializePrivateStorageEncryption()).resolves.toEqual(expect.objectContaining({
+        status: 'ready',
+      }));
+
+      expect(isPrivateStorageEncryptionReady()).toBe(true);
+      expect(keyedGlobalStore.getString('value')).toBe('safe');
+      expect(keyedGlobalStore.getNumber('count')).toBe(2);
+      expect(createMMKV).toHaveBeenCalledWith({ id: 'global-app-storage' });
+      expect(createMMKV).toHaveBeenCalledWith(expect.objectContaining({
+        id: 'global-app-storage',
+        encryptionKey: expect.any(String),
+        encryptionType: 'AES-256',
+      }));
+      expect(secureStoreState['pocket-ai-private-mmkv-migration-in-progress']).toBeUndefined();
+      expect(secureStoreState['pocket-ai-private-mmkv-migration-version']).toBe('1');
+      expect(deleteMMKV).not.toHaveBeenCalled();
+      expect(getStorageFallbackReport()).toBeNull();
+    } finally {
+      (process.env as any).NODE_ENV = originalNodeEnv;
+      (globalThis as any).crypto = originalCrypto;
+      warnSpy.mockRestore();
+      jest.resetModules();
+      jest.unmock('react-native');
+      jest.unmock('expo-secure-store');
+      jest.unmock('react-native-mmkv');
+    }
+  });
+
+  it('blocks keyed recovery when keyed storage is missing keys seen by the unkeyed probe', async () => {
+    const originalNodeEnv = process.env.NODE_ENV;
+    const originalCrypto = (globalThis as any).crypto;
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      (process.env as any).NODE_ENV = 'production';
+      mockCryptoBytes(19);
+      jest.resetModules();
+      mockReactNativeIos();
+
+      const secureStoreState: Record<string, string> = {};
+      const { setItemAsync } = mockSecureStoreState(secureStoreState);
+
+      const stores = createEmptyPrivateStores();
+      const keyedGlobalStore = createTypedMmkvStore({}, { encrypted: false });
+      const unkeyedGlobalStore = {
+        isEncrypted: false,
+        getAllKeys: jest.fn(() => ['value']),
+        getString: jest.fn(() => {
+          throw new Error('encrypted store cannot be read without key');
+        }),
+        getNumber: jest.fn(() => undefined),
+        getBoolean: jest.fn(() => undefined),
+        getBuffer: jest.fn(() => undefined),
+        encrypt: jest.fn(),
+      };
+      const createMMKV = jest.fn((config?: any) => {
+        if (config?.id === 'global-app-storage') {
+          return config?.encryptionKey ? keyedGlobalStore : unkeyedGlobalStore;
+        }
+
+        return stores.get(config?.id) ?? createTypedMmkvStore({}, { encrypted: Boolean(config?.encryptionKey) });
+      });
+      const deleteMMKV = jest.fn();
+      jest.doMock('react-native-mmkv', () => ({ createMMKV, deleteMMKV }));
+
+      const {
+        getPrivateStorageHealthSnapshot,
+        initializePrivateStorageEncryption,
+        isPrivateStorageEncryptionReady,
+      } = require('../../src/services/storage');
+
+      await expect(initializePrivateStorageEncryption()).resolves.toEqual(expect.objectContaining({
+        status: 'blocked',
+        reason: 'migration_failed',
+        requiresExplicitReset: false,
+      }));
+
+      expect(isPrivateStorageEncryptionReady()).toBe(false);
+      expect(getPrivateStorageHealthSnapshot()).toEqual(expect.objectContaining({
+        status: 'blocked',
+        reason: 'migration_failed',
+        retryable: true,
+        requiresExplicitReset: false,
+      }));
+      expect(createMMKV).toHaveBeenCalledWith(expect.objectContaining({
+        id: 'global-app-storage',
+        encryptionKey: expect.any(String),
+        encryptionType: 'AES-256',
+      }));
+      expect(secureStoreState['pocket-ai-private-mmkv-migration-in-progress']).toBeUndefined();
+      expect(secureStoreState['pocket-ai-private-mmkv-migration-version']).toBeUndefined();
+      expect(setItemAsync).not.toHaveBeenCalledWith('pocket-ai-private-mmkv-migration-version', '1');
+      expect(keyedGlobalStore.encrypt).not.toHaveBeenCalled();
+      expect(deleteMMKV).not.toHaveBeenCalled();
+    } finally {
+      (process.env as any).NODE_ENV = originalNodeEnv;
+      (globalThis as any).crypto = originalCrypto;
+      warnSpy.mockRestore();
+      jest.resetModules();
+      jest.unmock('react-native');
+      jest.unmock('expo-secure-store');
+      jest.unmock('react-native-mmkv');
+    }
+  });
+
+  it('recovers with keyed open when the unkeyed probe cannot enumerate keys', async () => {
+    const originalNodeEnv = process.env.NODE_ENV;
+    const originalCrypto = (globalThis as any).crypto;
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      (process.env as any).NODE_ENV = 'production';
+      mockCryptoBytes(20);
+      jest.resetModules();
+      mockReactNativeIos();
+
+      const secureStoreState: Record<string, string> = {};
+      mockSecureStoreState(secureStoreState);
+
+      const stores = createEmptyPrivateStores();
+      const keyedGlobalStore = createTypedMmkvStore({ value: 'safe', count: 2 }, { encrypted: true });
+      const unkeyedGlobalStore = {
+        isEncrypted: false,
+        getAllKeys: jest.fn(() => {
+          throw new Error('cannot enumerate without key');
+        }),
+        getString: jest.fn(() => undefined),
+        getNumber: jest.fn(() => undefined),
+        getBoolean: jest.fn(() => undefined),
+        getBuffer: jest.fn(() => undefined),
+        encrypt: jest.fn(),
+      };
+      const createMMKV = jest.fn((config?: any) => {
+        if (config?.id === 'global-app-storage') {
+          return config?.encryptionKey ? keyedGlobalStore : unkeyedGlobalStore;
+        }
+
+        return stores.get(config?.id) ?? createTypedMmkvStore({}, { encrypted: Boolean(config?.encryptionKey) });
+      });
+      const deleteMMKV = jest.fn();
+      jest.doMock('react-native-mmkv', () => ({ createMMKV, deleteMMKV }));
+
+      const {
+        getStorageFallbackReport,
+        initializePrivateStorageEncryption,
+        isPrivateStorageEncryptionReady,
+      } = require('../../src/services/storage');
+
+      await expect(initializePrivateStorageEncryption()).resolves.toEqual(expect.objectContaining({
+        status: 'ready',
+      }));
+
+      expect(isPrivateStorageEncryptionReady()).toBe(true);
+      expect(createMMKV).toHaveBeenCalledWith(expect.objectContaining({
+        id: 'global-app-storage',
+        encryptionKey: expect.any(String),
+        encryptionType: 'AES-256',
+      }));
+      expect(keyedGlobalStore.getString('value')).toBe('safe');
+      expect(keyedGlobalStore.getNumber('count')).toBe(2);
+      expect(keyedGlobalStore.encrypt).not.toHaveBeenCalled();
+      expect(secureStoreState['pocket-ai-private-mmkv-migration-in-progress']).toBeUndefined();
+      expect(secureStoreState['pocket-ai-private-mmkv-migration-version']).toBe('1');
+      expect(deleteMMKV).not.toHaveBeenCalled();
+      expect(getStorageFallbackReport()).toBeNull();
+    } finally {
+      (process.env as any).NODE_ENV = originalNodeEnv;
+      (globalThis as any).crypto = originalCrypto;
+      warnSpy.mockRestore();
+      jest.resetModules();
+      jest.unmock('react-native');
+      jest.unmock('expo-secure-store');
+      jest.unmock('react-native-mmkv');
+    }
+  });
+
+  it('blocks keyed recovery when keyed open returns an unencrypted store', async () => {
+    const originalNodeEnv = process.env.NODE_ENV;
+    const originalCrypto = (globalThis as any).crypto;
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      (process.env as any).NODE_ENV = 'production';
+      mockCryptoBytes(21);
+      jest.resetModules();
+      mockReactNativeIos();
+
+      const secureStoreState: Record<string, string> = {};
+      const { setItemAsync } = mockSecureStoreState(secureStoreState);
+
+      const stores = createEmptyPrivateStores();
+      const keyedGlobalStore = createTypedMmkvStore({ value: 'unsafe-fallback' }, { encrypted: false });
+      const unkeyedGlobalStore = {
+        isEncrypted: false,
+        getAllKeys: jest.fn(() => ['value']),
+        getString: jest.fn(() => {
+          throw new Error('encrypted store cannot be read without key');
+        }),
+        getNumber: jest.fn(() => undefined),
+        getBoolean: jest.fn(() => undefined),
+        getBuffer: jest.fn(() => undefined),
+        encrypt: jest.fn(),
+      };
+      const createMMKV = jest.fn((config?: any) => {
+        if (config?.id === 'global-app-storage') {
+          return config?.encryptionKey ? keyedGlobalStore : unkeyedGlobalStore;
+        }
+
+        return stores.get(config?.id) ?? createTypedMmkvStore({}, { encrypted: Boolean(config?.encryptionKey) });
+      });
+      const deleteMMKV = jest.fn();
+      jest.doMock('react-native-mmkv', () => ({ createMMKV, deleteMMKV }));
+
+      const {
+        getPrivateStorageHealthSnapshot,
+        getStorageFallbackReport,
+        initializePrivateStorageEncryption,
+        isPrivateStorageEncryptionReady,
+      } = require('../../src/services/storage');
+
+      await expect(initializePrivateStorageEncryption()).resolves.toEqual(expect.objectContaining({
+        status: 'blocked',
+        reason: 'migration_failed',
+        requiresExplicitReset: false,
+      }));
+
+      expect(isPrivateStorageEncryptionReady()).toBe(false);
+      expect(getPrivateStorageHealthSnapshot()).toEqual(expect.objectContaining({
+        status: 'blocked',
+        reason: 'migration_failed',
+        retryable: true,
+        requiresExplicitReset: false,
+      }));
+      expect(createMMKV).toHaveBeenCalledWith(expect.objectContaining({
+        id: 'global-app-storage',
+        encryptionKey: expect.any(String),
+        encryptionType: 'AES-256',
+      }));
+      expect(keyedGlobalStore.encrypt).not.toHaveBeenCalled();
+      expect(secureStoreState['pocket-ai-private-mmkv-migration-in-progress']).toBeUndefined();
+      expect(secureStoreState['pocket-ai-private-mmkv-migration-version']).toBeUndefined();
+      expect(setItemAsync).not.toHaveBeenCalledWith('pocket-ai-private-mmkv-migration-version', '1');
+      expect(deleteMMKV).not.toHaveBeenCalled();
+      expect(getStorageFallbackReport()).toBeNull();
+    } finally {
+      (process.env as any).NODE_ENV = originalNodeEnv;
+      (globalThis as any).crypto = originalCrypto;
+      warnSpy.mockRestore();
+      jest.resetModules();
+      jest.unmock('react-native');
+      jest.unmock('expo-secure-store');
+      jest.unmock('react-native-mmkv');
+    }
+  });
+
+  it('runs migrations for missing, invalid, and stale markers while skipping current markers', async () => {
+    const originalNodeEnv = process.env.NODE_ENV;
+    const originalCrypto = (globalThis as any).crypto;
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const cases: Array<{ marker?: string; expectedMigrationCalls: number }> = [
+      { marker: undefined, expectedMigrationCalls: PRIVATE_STORAGE_INSTANCE_IDS.length },
+      { marker: 'not-a-number', expectedMigrationCalls: PRIVATE_STORAGE_INSTANCE_IDS.length },
+      { marker: '0', expectedMigrationCalls: PRIVATE_STORAGE_INSTANCE_IDS.length },
+      { marker: '1', expectedMigrationCalls: 0 },
+    ];
+
+    try {
+      for (const [index, testCase] of cases.entries()) {
+        (process.env as any).NODE_ENV = 'production';
+        mockCryptoBytes(30 + index);
+        jest.resetModules();
+        mockReactNativeIos();
+
+        const secureStoreState: Record<string, string> = {};
+        if (testCase.marker !== undefined) {
+          secureStoreState['pocket-ai-private-mmkv-migration-version'] = testCase.marker;
+        }
+        mockSecureStoreState(secureStoreState);
+
+        const stores = createEmptyPrivateStores();
+        const createMMKV = jest.fn((config?: any) => stores.get(config?.id) ?? createTypedMmkvStore());
+        jest.doMock('react-native-mmkv', () => ({
+          createMMKV,
+          deleteMMKV: jest.fn(),
+        }));
+
+        const { initializePrivateStorageEncryption } = require('../../src/services/storage');
+
+        await expect(initializePrivateStorageEncryption()).resolves.toEqual(expect.objectContaining({
+          status: 'ready',
+        }));
+
+        const migrationCalls = createMMKV.mock.calls.filter(([config]) => config?.id && !config?.encryptionKey);
+        expect(migrationCalls).toHaveLength(testCase.expectedMigrationCalls);
+        expect(secureStoreState['pocket-ai-private-mmkv-migration-version']).toBe('1');
+
+        jest.unmock('react-native');
+        jest.unmock('expo-secure-store');
+        jest.unmock('react-native-mmkv');
+      }
+    } finally {
+      (process.env as any).NODE_ENV = originalNodeEnv;
+      (globalThis as any).crypto = originalCrypto;
+      warnSpy.mockRestore();
+      jest.resetModules();
+      jest.unmock('react-native');
+      jest.unmock('expo-secure-store');
+      jest.unmock('react-native-mmkv');
+    }
+  });
+
+  it('retries transient in-progress marker cleanup after successful migration', async () => {
+    const originalNodeEnv = process.env.NODE_ENV;
+    const originalCrypto = (globalThis as any).crypto;
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      (process.env as any).NODE_ENV = 'production';
+      mockCryptoBytes(45);
+      jest.resetModules();
+      mockReactNativeIos();
+
+      const secureStoreState: Record<string, string> = {};
+      const { deleteItemAsync } = mockSecureStoreState(secureStoreState, {
+        failDeleteOnceForKeys: ['pocket-ai-private-mmkv-migration-in-progress'],
+      });
+
+      const stores = createEmptyPrivateStores();
+      stores.set('global-app-storage', createTypedMmkvStore({ value: 'safe' }));
+      const createMMKV = jest.fn((config?: any) => stores.get(config?.id) ?? createTypedMmkvStore());
+      jest.doMock('react-native-mmkv', () => ({
+        createMMKV,
+        deleteMMKV: jest.fn(),
+      }));
+
+      const { initializePrivateStorageEncryption } = require('../../src/services/storage');
+
+      await expect(initializePrivateStorageEncryption()).resolves.toEqual(expect.objectContaining({
+        status: 'ready',
+      }));
+
+      expect(deleteItemAsync).toHaveBeenCalledWith('pocket-ai-private-mmkv-migration-in-progress');
+      expect(secureStoreState['pocket-ai-private-mmkv-migration-in-progress']).toBeUndefined();
+      expect(secureStoreState['pocket-ai-private-mmkv-migration-version']).toBe('1');
+    } finally {
+      (process.env as any).NODE_ENV = originalNodeEnv;
+      (globalThis as any).crypto = originalCrypto;
+      warnSpy.mockRestore();
+      jest.resetModules();
+      jest.unmock('react-native');
+      jest.unmock('expo-secure-store');
+      jest.unmock('react-native-mmkv');
+    }
+  });
+
+  it('blocks retryably when a verified in-progress marker cannot be cleared', async () => {
+    const originalNodeEnv = process.env.NODE_ENV;
+    const originalCrypto = (globalThis as any).crypto;
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      (process.env as any).NODE_ENV = 'production';
+      mockCryptoBytes(46);
+      jest.resetModules();
+      mockReactNativeIos();
+
+      const secureStoreState: Record<string, string> = {};
+      const { deleteItemAsync, setItemAsync } = mockSecureStoreState(secureStoreState, {
+        failDeleteForKeys: ['pocket-ai-private-mmkv-migration-in-progress'],
+      });
+
+      const stores = createEmptyPrivateStores();
+      stores.set('global-app-storage', createTypedMmkvStore({ value: 'safe' }));
+      const createMMKV = jest.fn((config?: any) => stores.get(config?.id) ?? createTypedMmkvStore());
+      const deleteMMKV = jest.fn();
+      jest.doMock('react-native-mmkv', () => ({ createMMKV, deleteMMKV }));
+
+      const {
+        getPrivateStorageHealthSnapshot,
+        initializePrivateStorageEncryption,
+      } = require('../../src/services/storage');
+
+      await expect(initializePrivateStorageEncryption()).resolves.toEqual(expect.objectContaining({
+        status: 'blocked',
+        reason: 'migration_failed',
+        requiresExplicitReset: false,
+      }));
+
+      expect(getPrivateStorageHealthSnapshot()).toEqual(expect.objectContaining({
+        status: 'blocked',
+        reason: 'migration_failed',
+        retryable: true,
+        requiresExplicitReset: false,
+      }));
+      expect(parseMigrationMarker(secureStoreState['pocket-ai-private-mmkv-migration-in-progress'])).toEqual({
+        schemaVersion: 1,
+        storeId: 'global-app-storage',
+        phase: 'encrypted_verified',
+      });
+      expect(secureStoreState['pocket-ai-private-mmkv-migration-version']).toBeUndefined();
+      expect(setItemAsync).not.toHaveBeenCalledWith('pocket-ai-private-mmkv-migration-version', '1');
+      expect(deleteItemAsync.mock.calls.filter(([key]) => key === 'pocket-ai-private-mmkv-migration-in-progress')).toHaveLength(2);
+      expect(deleteMMKV).not.toHaveBeenCalled();
+    } finally {
+      (process.env as any).NODE_ENV = originalNodeEnv;
+      (globalThis as any).crypto = originalCrypto;
+      warnSpy.mockRestore();
+      jest.resetModules();
+      jest.unmock('react-native');
+      jest.unmock('expo-secure-store');
+      jest.unmock('react-native-mmkv');
+    }
+  });
+
+  it('clears the in-progress marker when persisting encrypted-verified phase fails after verification', async () => {
+    const originalNodeEnv = process.env.NODE_ENV;
+    const originalCrypto = (globalThis as any).crypto;
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      (process.env as any).NODE_ENV = 'production';
+      mockCryptoBytes(47);
+      jest.resetModules();
+      mockReactNativeIos();
+
+      const secureStoreState: Record<string, string> = {};
+      const { deleteItemAsync, setItemAsync } = mockSecureStoreState(secureStoreState, {
+        failSetOnceWhenValueIncludes: ['"phase":"encrypted_verified"'],
+      });
+
+      const stores = createEmptyPrivateStores();
+      stores.set('global-app-storage', createTypedMmkvStore({ value: 'safe' }));
+      const createMMKV = jest.fn((config?: any) => stores.get(config?.id) ?? createTypedMmkvStore());
+      const deleteMMKV = jest.fn();
+      jest.doMock('react-native-mmkv', () => ({ createMMKV, deleteMMKV }));
+
+      const {
+        initializePrivateStorageEncryption,
+        retryPrivateStorageInitialization,
+      } = require('../../src/services/storage');
+
+      await expect(initializePrivateStorageEncryption()).resolves.toEqual(expect.objectContaining({
+        status: 'blocked',
+        reason: 'migration_failed',
+        retryable: true,
+        requiresExplicitReset: false,
+      }));
+
+      expect(deleteItemAsync).toHaveBeenCalledWith('pocket-ai-private-mmkv-migration-in-progress');
+      expect(secureStoreState['pocket-ai-private-mmkv-migration-in-progress']).toBeUndefined();
+      expect(secureStoreState['pocket-ai-private-mmkv-migration-version']).toBeUndefined();
+      expect(setItemAsync).not.toHaveBeenCalledWith('pocket-ai-private-mmkv-migration-version', '1');
+      expect(deleteMMKV).not.toHaveBeenCalled();
+
+      await expect(retryPrivateStorageInitialization()).resolves.toEqual(expect.objectContaining({
+        status: 'ready',
+      }));
+      expect(secureStoreState['pocket-ai-private-mmkv-migration-in-progress']).toBeUndefined();
+      expect(secureStoreState['pocket-ai-private-mmkv-migration-version']).toBe('1');
+    } finally {
+      (process.env as any).NODE_ENV = originalNodeEnv;
+      (globalThis as any).crypto = originalCrypto;
+      warnSpy.mockRestore();
+      jest.resetModules();
+      jest.unmock('react-native');
+      jest.unmock('expo-secure-store');
+      jest.unmock('react-native-mmkv');
+    }
+  });
+
+  it('blocks unsupported unreadable and ambiguous typed migration values without fallback or deletion', async () => {
+    const originalNodeEnv = process.env.NODE_ENV;
+    const originalCrypto = (globalThis as any).crypto;
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const cases = [
+      {
+        name: 'unsupported',
+        store: createTypedMmkvStore({ unsupported: { unsupported: true } }),
+      },
+      {
+        name: 'unreadable-binary',
+        store: createTypedMmkvStore({ binary: new Uint8Array([9, 8, 7]).buffer }, { omitBufferReader: true }),
+      },
+      {
+        name: 'ambiguous',
+        store: createTypedMmkvStore({ ambiguous: 3 }, { ambiguousKeys: ['ambiguous'] }),
+      },
+    ];
+
+    try {
+      for (const [index, testCase] of cases.entries()) {
+        (process.env as any).NODE_ENV = 'production';
+        mockCryptoBytes(50 + index);
+        jest.resetModules();
+        mockReactNativeIos();
+
+        const secureStoreState: Record<string, string> = {};
+        const { setItemAsync } = mockSecureStoreState(secureStoreState);
+        const deleteMMKV = jest.fn();
+        const stores = createEmptyPrivateStores();
+        stores.set('global-app-storage', testCase.store);
+        const createMMKV = jest.fn((config?: any) => stores.get(config?.id) ?? createTypedMmkvStore());
+        jest.doMock('react-native-mmkv', () => ({ createMMKV, deleteMMKV }));
+
+        const {
+          createStorage,
+          getPrivateStorageHealthSnapshot,
+          getStorageFallbackReport,
+          initializePrivateStorageEncryption,
+          isPrivateStorageEncryptionReady,
+          PrivateStorageUnavailableError,
+        } = require('../../src/services/storage');
+
+        await expect(initializePrivateStorageEncryption()).resolves.toEqual(expect.objectContaining({
+          status: 'blocked',
+          reason: 'migration_failed',
+          requiresExplicitReset: false,
+        }));
+
+        expect(isPrivateStorageEncryptionReady()).toBe(false);
+        expect(() => createStorage(`blocked-${testCase.name}`, { tier: 'private' })).toThrow(PrivateStorageUnavailableError);
+        expect(getPrivateStorageHealthSnapshot()).toEqual(expect.objectContaining({
+          status: 'blocked',
+          reason: 'migration_failed',
+          retryable: true,
+          requiresExplicitReset: false,
+        }));
+        expect(secureStoreState['pocket-ai-private-mmkv-migration-in-progress']).toBeUndefined();
+        expect(secureStoreState['pocket-ai-private-mmkv-migration-version']).toBeUndefined();
+        expect(setItemAsync).not.toHaveBeenCalledWith('pocket-ai-private-mmkv-migration-version', '1');
+        expect(deleteMMKV).not.toHaveBeenCalled();
+        expect(getStorageFallbackReport()).toBeNull();
+
+        jest.unmock('react-native');
+        jest.unmock('expo-secure-store');
+        jest.unmock('react-native-mmkv');
+      }
+    } finally {
+      (process.env as any).NODE_ENV = originalNodeEnv;
+      (globalThis as any).crypto = originalCrypto;
+      warnSpy.mockRestore();
+      jest.resetModules();
+      jest.unmock('react-native');
+      jest.unmock('expo-secure-store');
+      jest.unmock('react-native-mmkv');
+    }
+  });
+
+  it('blocks mixed-key verification mismatches without fallback or deletion', async () => {
+    const originalNodeEnv = process.env.NODE_ENV;
+    const originalCrypto = (globalThis as any).crypto;
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      (process.env as any).NODE_ENV = 'production';
+      mockCryptoBytes(70);
+      jest.resetModules();
+      mockReactNativeIos();
+
+      const secureStoreState: Record<string, string> = {};
+      const { setItemAsync } = mockSecureStoreState(secureStoreState);
+      const deleteMMKV = jest.fn();
+      const stores = createEmptyPrivateStores();
+      stores.set('global-app-storage', createTypedMmkvStore({ first: 'ok', later: 2 }, {
+        mutateOnEncrypt: (values) => {
+          values.set('later', 3);
+        },
+      }));
+      const createMMKV = jest.fn((config?: any) => stores.get(config?.id) ?? createTypedMmkvStore());
+      jest.doMock('react-native-mmkv', () => ({ createMMKV, deleteMMKV }));
+
+      const {
+        createStorage,
+        getStorageFallbackReport,
+        initializePrivateStorageEncryption,
+        isPrivateStorageEncryptionReady,
+        retryPrivateStorageInitialization,
+        PrivateStorageUnavailableError,
+      } = require('../../src/services/storage');
+
+      await expect(initializePrivateStorageEncryption()).resolves.toEqual(expect.objectContaining({
+        status: 'blocked',
+        reason: 'migration_failed',
+      }));
+
+      expect(isPrivateStorageEncryptionReady()).toBe(false);
+      expect(() => createStorage('blocked-mismatch', { tier: 'private' })).toThrow(PrivateStorageUnavailableError);
+      expect(secureStoreState['pocket-ai-private-mmkv-migration-version']).toBeUndefined();
+      expect(secureStoreState['pocket-ai-private-mmkv-migration-in-progress']).toBeUndefined();
+      expect(setItemAsync).not.toHaveBeenCalledWith('pocket-ai-private-mmkv-migration-version', '1');
+      expect(deleteMMKV).not.toHaveBeenCalled();
+      expect(getStorageFallbackReport()).toBeNull();
+      expect(stores.get('global-app-storage')?.getNumber('later')).toBe(2);
+
+      await expect(retryPrivateStorageInitialization()).resolves.toEqual(expect.objectContaining({
+        status: 'ready',
+      }));
+      expect(secureStoreState['pocket-ai-private-mmkv-migration-version']).toBe('1');
+      expect(secureStoreState['pocket-ai-private-mmkv-migration-in-progress']).toBeUndefined();
+      expect(stores.get('global-app-storage')?.getNumber('later')).toBe(2);
+    } finally {
+      (process.env as any).NODE_ENV = originalNodeEnv;
+      (globalThis as any).crypto = originalCrypto;
+      warnSpy.mockRestore();
+      jest.resetModules();
+      jest.unmock('react-native');
+      jest.unmock('expo-secure-store');
+      jest.unmock('react-native-mmkv');
+    }
+  });
+
+  it('blocks binary byte verification mismatches without advancing migration', async () => {
+    const originalNodeEnv = process.env.NODE_ENV;
+    const originalCrypto = (globalThis as any).crypto;
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      (process.env as any).NODE_ENV = 'production';
+      mockCryptoBytes(75);
+      jest.resetModules();
+      mockReactNativeIos();
+
+      const secureStoreState: Record<string, string> = {};
+      const { setItemAsync } = mockSecureStoreState(secureStoreState);
+      const deleteMMKV = jest.fn();
+      const stores = createEmptyPrivateStores();
+      const binaryStore = createTypedMmkvStore({ binary: new Uint8Array([1, 2, 3]).buffer }, {
+        mutateOnEncrypt: (values) => {
+          values.set('binary', new Uint8Array([1, 2, 4]).buffer);
+        },
+      });
+      stores.set('global-app-storage', binaryStore);
+      const createMMKV = jest.fn((config?: any) => stores.get(config?.id) ?? createTypedMmkvStore());
+      jest.doMock('react-native-mmkv', () => ({ createMMKV, deleteMMKV }));
+
+      const {
+        getStorageFallbackReport,
+        initializePrivateStorageEncryption,
+        isPrivateStorageEncryptionReady,
+      } = require('../../src/services/storage');
+
+      await expect(initializePrivateStorageEncryption()).resolves.toEqual(expect.objectContaining({
+        status: 'blocked',
+        reason: 'migration_failed',
+      }));
+
+      expect(isPrivateStorageEncryptionReady()).toBe(false);
+      expect(secureStoreState['pocket-ai-private-mmkv-migration-version']).toBeUndefined();
+      expect(secureStoreState['pocket-ai-private-mmkv-migration-in-progress']).toBeUndefined();
+      expect(setItemAsync).not.toHaveBeenCalledWith('pocket-ai-private-mmkv-migration-version', '1');
+      expect(deleteMMKV).not.toHaveBeenCalled();
+      expect(getStorageFallbackReport()).toBeNull();
+      expect(Array.from(new Uint8Array((binaryStore.getBuffer as jest.Mock)('binary')))).toEqual([1, 2, 3]);
+    } finally {
+      (process.env as any).NODE_ENV = originalNodeEnv;
+      (globalThis as any).crypto = originalCrypto;
+      warnSpy.mockRestore();
+      jest.resetModules();
+      jest.unmock('react-native');
+      jest.unmock('expo-secure-store');
+      jest.unmock('react-native-mmkv');
+    }
+  });
+
+  it('blocks encryption failures after typed snapshot capture without fallback or deletion', async () => {
+    const originalNodeEnv = process.env.NODE_ENV;
+    const originalCrypto = (globalThis as any).crypto;
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      (process.env as any).NODE_ENV = 'production';
+      mockCryptoBytes(80);
+      jest.resetModules();
+      mockReactNativeIos();
+
+      const secureStoreState: Record<string, string> = {};
+      const { setItemAsync } = mockSecureStoreState(secureStoreState);
+      const deleteMMKV = jest.fn();
+      const stores = createEmptyPrivateStores();
+      stores.set('global-app-storage', createTypedMmkvStore({ value: 'safe' }, { throwOnEncrypt: true }));
+      const createMMKV = jest.fn((config?: any) => stores.get(config?.id) ?? createTypedMmkvStore());
+      jest.doMock('react-native-mmkv', () => ({ createMMKV, deleteMMKV }));
+
+      const {
+        getStorageFallbackReport,
+        initializePrivateStorageEncryption,
+        isPrivateStorageEncryptionReady,
+      } = require('../../src/services/storage');
+
+      await expect(initializePrivateStorageEncryption()).resolves.toEqual(expect.objectContaining({
+        status: 'blocked',
+        reason: 'migration_failed',
+      }));
+
+      expect(isPrivateStorageEncryptionReady()).toBe(false);
+      expect(secureStoreState['pocket-ai-private-mmkv-migration-version']).toBeUndefined();
+      expect(secureStoreState['pocket-ai-private-mmkv-migration-in-progress']).toBeUndefined();
+      expect(setItemAsync).not.toHaveBeenCalledWith('pocket-ai-private-mmkv-migration-version', '1');
+      expect(deleteMMKV).not.toHaveBeenCalled();
+      expect(getStorageFallbackReport()).toBeNull();
+    } finally {
+      (process.env as any).NODE_ENV = originalNodeEnv;
+      (globalThis as any).crypto = originalCrypto;
+      warnSpy.mockRestore();
+      jest.resetModules();
+      jest.unmock('react-native');
+      jest.unmock('expo-secure-store');
+      jest.unmock('react-native-mmkv');
+    }
+  });
+
+  it('does not advance migration marker on retry after a failed encrypted restore', async () => {
+    const originalNodeEnv = process.env.NODE_ENV;
+    const originalCrypto = (globalThis as any).crypto;
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      (process.env as any).NODE_ENV = 'production';
+      mockCryptoBytes(90);
+      jest.resetModules();
+      mockReactNativeIos();
+
+      const secureStoreState: Record<string, string> = {};
+      const { setItemAsync } = mockSecureStoreState(secureStoreState);
+      const deleteMMKV = jest.fn();
+      const stores = createEmptyPrivateStores();
+      stores.set('global-app-storage', createTypedMmkvStore({ value: 'safe' }, {
+        mutateOnEncrypt: (values) => {
+          values.set('value', 'corrupt');
+        },
+        throwOnEncrypt: true,
+        throwOnSetKeys: ['value'],
+      }));
+      const createMMKV = jest.fn((config?: any) => stores.get(config?.id) ?? createTypedMmkvStore());
+      jest.doMock('react-native-mmkv', () => ({ createMMKV, deleteMMKV }));
+
+      const {
+        getPrivateStorageHealthSnapshot,
+        initializePrivateStorageEncryption,
+        retryPrivateStorageInitialization,
+      } = require('../../src/services/storage');
+
+      await expect(initializePrivateStorageEncryption()).resolves.toEqual(expect.objectContaining({
+        status: 'blocked',
+        reason: 'migration_failed',
+        requiresExplicitReset: true,
+      }));
+      expect(parseMigrationMarker(secureStoreState['pocket-ai-private-mmkv-migration-in-progress'])).toEqual({
+        schemaVersion: 1,
+        storeId: 'global-app-storage',
+        phase: 'reset_required',
+      });
+      expect(secureStoreState['pocket-ai-private-mmkv-migration-version']).toBeUndefined();
+
+      createMMKV.mockClear();
+      await expect(retryPrivateStorageInitialization()).resolves.toEqual(expect.objectContaining({
+        status: 'blocked',
+        reason: 'migration_failed',
+      }));
+
+      expect(createMMKV).not.toHaveBeenCalled();
+      expect(getPrivateStorageHealthSnapshot()).toEqual(expect.objectContaining({
+        status: 'blocked',
+        reason: 'migration_failed',
+        requiresExplicitReset: true,
+      }));
+      expect(secureStoreState['pocket-ai-private-mmkv-migration-version']).toBeUndefined();
+      expect(setItemAsync).not.toHaveBeenCalledWith('pocket-ai-private-mmkv-migration-version', '1');
+      expect(deleteMMKV).not.toHaveBeenCalled();
+    } finally {
+      (process.env as any).NODE_ENV = originalNodeEnv;
+      (globalThis as any).crypto = originalCrypto;
+      warnSpy.mockRestore();
+      jest.resetModules();
+      jest.unmock('react-native');
+      jest.unmock('expo-secure-store');
+      jest.unmock('react-native-mmkv');
+    }
+  });
+
+  it('keeps failed restore markers reset-only when reset-required phase persistence fails', async () => {
+    const originalNodeEnv = process.env.NODE_ENV;
+    const originalCrypto = (globalThis as any).crypto;
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      (process.env as any).NODE_ENV = 'production';
+      mockCryptoBytes(91);
+      jest.resetModules();
+      mockReactNativeIos();
+
+      const secureStoreState: Record<string, string> = {};
+      const { setItemAsync } = mockSecureStoreState(secureStoreState, {
+        failSetWhenValueIncludes: ['"phase":"reset_required"'],
+      });
+      const deleteMMKV = jest.fn();
+      const stores = createEmptyPrivateStores();
+      stores.set('global-app-storage', createTypedMmkvStore({ value: 'safe' }, {
+        mutateOnEncrypt: (values) => {
+          values.set('value', 'corrupt');
+        },
+        throwOnEncrypt: true,
+        throwOnSetKeys: ['value'],
+      }));
+      const createMMKV = jest.fn((config?: any) => stores.get(config?.id) ?? createTypedMmkvStore());
+      jest.doMock('react-native-mmkv', () => ({ createMMKV, deleteMMKV }));
+
+      const {
+        initializePrivateStorageEncryption,
+        retryPrivateStorageInitialization,
+      } = require('../../src/services/storage');
+
+      await expect(initializePrivateStorageEncryption()).resolves.toEqual(expect.objectContaining({
+        status: 'blocked',
+        reason: 'migration_failed',
+        requiresExplicitReset: true,
+      }));
+      expect(parseMigrationMarker(secureStoreState['pocket-ai-private-mmkv-migration-in-progress'])).toEqual({
+        schemaVersion: 1,
+        storeId: 'global-app-storage',
+        phase: 'encrypting',
+      });
+
+      createMMKV.mockClear();
+      await expect(retryPrivateStorageInitialization()).resolves.toEqual(expect.objectContaining({
+        status: 'blocked',
+        reason: 'migration_failed',
+        requiresExplicitReset: true,
+      }));
+
+      expect(createMMKV).not.toHaveBeenCalled();
+      expect(secureStoreState['pocket-ai-private-mmkv-migration-version']).toBeUndefined();
+      expect(setItemAsync).not.toHaveBeenCalledWith('pocket-ai-private-mmkv-migration-version', '1');
+      expect(deleteMMKV).not.toHaveBeenCalled();
+    } finally {
+      (process.env as any).NODE_ENV = originalNodeEnv;
+      (globalThis as any).crypto = originalCrypto;
+      warnSpy.mockRestore();
+      jest.resetModules();
+      jest.unmock('react-native');
+      jest.unmock('expo-secure-store');
+      jest.unmock('react-native-mmkv');
+    }
+  });
+
+  it('blocks legacy raw in-progress markers before touching MMKV', async () => {
+    const originalNodeEnv = process.env.NODE_ENV;
+    const originalCrypto = (globalThis as any).crypto;
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      (process.env as any).NODE_ENV = 'production';
+      mockCryptoBytes(92);
+      jest.resetModules();
+      mockReactNativeIos();
+
+      const secureStoreState: Record<string, string> = {
+        'pocket-ai-private-mmkv-migration-in-progress': 'global-app-storage',
+      };
+      mockSecureStoreState(secureStoreState);
+      const createMMKV = jest.fn(() => createTypedMmkvStore());
+      const deleteMMKV = jest.fn();
+      jest.doMock('react-native-mmkv', () => ({ createMMKV, deleteMMKV }));
+
+      const { initializePrivateStorageEncryption } = require('../../src/services/storage');
+
+      await expect(initializePrivateStorageEncryption()).resolves.toEqual(expect.objectContaining({
+        status: 'blocked',
+        reason: 'migration_failed',
+        requiresExplicitReset: true,
+      }));
+
+      expect(createMMKV).not.toHaveBeenCalled();
+      expect(secureStoreState['pocket-ai-private-mmkv-migration-in-progress']).toBe('global-app-storage');
+      expect(secureStoreState['pocket-ai-private-mmkv-migration-version']).toBeUndefined();
+      expect(deleteMMKV).not.toHaveBeenCalled();
+    } finally {
+      (process.env as any).NODE_ENV = originalNodeEnv;
+      (globalThis as any).crypto = originalCrypto;
+      warnSpy.mockRestore();
+      jest.resetModules();
+      jest.unmock('react-native');
+      jest.unmock('expo-secure-store');
+      jest.unmock('react-native-mmkv');
+    }
+  });
+
+  it('recovers structured leftover in-progress markers when the marked store is readable', async () => {
+    const originalNodeEnv = process.env.NODE_ENV;
+    const originalCrypto = (globalThis as any).crypto;
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const cases = [
+      {
+        name: 'verified json marker',
+        marker: serializeMigrationMarker('global-app-storage', 'encrypted_verified'),
+        encryptedAtStart: true,
+      },
+      {
+        name: 'pre-encrypt json marker',
+        marker: serializeMigrationMarker('global-app-storage', 'pre_encrypt'),
+        encryptedAtStart: false,
+      },
+    ];
+
+    try {
+      for (const [index, testCase] of cases.entries()) {
+        (process.env as any).NODE_ENV = 'production';
+        mockCryptoBytes(100 + index);
+        jest.resetModules();
+        mockReactNativeIos();
+
+        const secureStoreState: Record<string, string> = {
+          'pocket-ai-private-mmkv-migration-in-progress': testCase.marker,
+        };
+        const { deleteItemAsync } = mockSecureStoreState(secureStoreState);
+
+        const stores = createEmptyPrivateStores();
+        const markedStore = createTypedMmkvStore({ value: 'safe' }, {
+          encrypted: testCase.encryptedAtStart,
+        });
+        stores.set('global-app-storage', markedStore);
+        const unkeyedEncryptedProbe = {
+          isEncrypted: true,
+          getAllKeys: jest.fn(() => ['value']),
+          getString: jest.fn(() => {
+            throw new Error(`${testCase.name}: value requires key`);
+          }),
+          getNumber: jest.fn(() => undefined),
+          getBoolean: jest.fn(() => undefined),
+          getBuffer: jest.fn(() => undefined),
+          encrypt: jest.fn(),
+        };
+        const createMMKV = jest.fn((config?: any) => {
+          if (config?.id === 'global-app-storage' && testCase.encryptedAtStart && !config?.encryptionKey) {
+            return unkeyedEncryptedProbe;
+          }
+
+          return stores.get(config?.id) ?? createTypedMmkvStore({}, { encrypted: Boolean(config?.encryptionKey) });
+        });
+        const deleteMMKV = jest.fn();
+        jest.doMock('react-native-mmkv', () => ({ createMMKV, deleteMMKV }));
+
+        const {
+          initializePrivateStorageEncryption,
+          isPrivateStorageEncryptionReady,
+        } = require('../../src/services/storage');
+
+        await expect(initializePrivateStorageEncryption()).resolves.toEqual(expect.objectContaining({
+          status: 'ready',
+        }));
+
+        expect(isPrivateStorageEncryptionReady()).toBe(true);
+        expect(markedStore.getString('value')).toBe('safe');
+        expect(deleteItemAsync).toHaveBeenCalledWith('pocket-ai-private-mmkv-migration-in-progress');
+        expect(secureStoreState['pocket-ai-private-mmkv-migration-in-progress']).toBeUndefined();
+        expect(secureStoreState['pocket-ai-private-mmkv-migration-version']).toBe('1');
+        expect(deleteMMKV).not.toHaveBeenCalled();
+
+        jest.unmock('react-native');
+        jest.unmock('expo-secure-store');
+        jest.unmock('react-native-mmkv');
+      }
+    } finally {
+      (process.env as any).NODE_ENV = originalNodeEnv;
+      (globalThis as any).crypto = originalCrypto;
+      warnSpy.mockRestore();
+      jest.resetModules();
+      jest.unmock('react-native');
+      jest.unmock('expo-secure-store');
+      jest.unmock('react-native-mmkv');
+    }
+  });
+
   it('blocks encrypted open failures during migrations without deleting MMKV', async () => {
     const originalNodeEnv = process.env.NODE_ENV;
     const originalCrypto = (globalThis as any).crypto;
@@ -582,16 +1857,16 @@ describe('storage (createStorage)', () => {
         const id = config?.id;
         const hasKey = Boolean(config?.encryptionKey);
 
-        // Case 1: mismatch after encryption -> open with key repair.
+        // Case 1: typed migration succeeds before the next store fails to open.
         if (id === 'global-app-storage' && !hasKey) {
-          let encrypted = false;
           return {
             isEncrypted: false,
             getAllKeys: jest.fn(() => ['k']),
-            getString: jest.fn((_key: string) => (encrypted ? 'x' : 'v')),
-            encrypt: jest.fn(() => {
-              encrypted = true;
-            }),
+            getString: jest.fn((_key: string) => 'v'),
+            getNumber: jest.fn(() => undefined),
+            getBoolean: jest.fn(() => undefined),
+            getBuffer: jest.fn(() => undefined),
+            encrypt: jest.fn(),
           };
         }
         if (id === 'global-app-storage' && hasKey) {
@@ -764,6 +2039,8 @@ describe('storage (createStorage)', () => {
         requiresExplicitReset: true,
       }));
 
+      secureStoreState['pocket-ai-private-mmkv-migration-in-progress'] = 'pocket-ai-settings';
+
       await expect(resetPrivateAppStorageAfterConfirmation()).resolves.toEqual(expect.objectContaining({
         status: 'ready',
       }));
@@ -777,6 +2054,8 @@ describe('storage (createStorage)', () => {
       expect(deleteMMKV).not.toHaveBeenCalledWith(expect.stringContaining('gguf'));
       expect(deleteItemAsync).toHaveBeenCalledWith('pocket-ai-private-mmkv-key-v1');
       expect(deleteItemAsync).toHaveBeenCalledWith('pocket-ai-private-mmkv-migration-version');
+      expect(deleteItemAsync).toHaveBeenCalledWith('pocket-ai-private-mmkv-migration-in-progress');
+      expect(secureStoreState['pocket-ai-private-mmkv-migration-in-progress']).toBeUndefined();
       expect(isPrivateStorageWritable()).toBe(true);
     } finally {
       (process.env as any).NODE_ENV = originalNodeEnv;

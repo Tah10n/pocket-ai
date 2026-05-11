@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > Note: This file is maintained automatically by Release Please based on Conventional Commits (PR titles).
 > Avoid editing it manually unless you are bootstrapping or fixing the release history.
 
+## [1.3.3](https://github.com/Tah10n/pocket-ai/compare/v1.3.2...v1.3.3) (2026-05-11)
+
+
+### Bug Fixes
+
+* **ui:** align glass user chat bubbles ([4af5825](https://github.com/Tah10n/pocket-ai/commit/4af58256cf9a3f90caa1d1ed4fde59622e2b039a))
+* **ui:** polish dark glass chat surfaces ([#89](https://github.com/Tah10n/pocket-ai/issues/89)) ([5f656e3](https://github.com/Tah10n/pocket-ai/commit/5f656e3c5315c14428b403244fecd36324af11f9))
+* **ui:** remove dark glass input fill ([7c44936](https://github.com/Tah10n/pocket-ai/commit/7c44936b34a6ef87890aa7dc4a33e7a1dd8ce0fb))
+
 ## [1.3.2](https://github.com/Tah10n/pocket-ai/compare/v1.3.1...v1.3.2) (2026-05-08)
 
 

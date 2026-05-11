@@ -644,7 +644,7 @@ function getGlassThemeAppearance(mode: ResolvedThemeMode): ThemeAppearance {
       floatingBannerClassName: `rounded-2xl ${neutralSurfaceStrongClassName} px-3 py-2.5`,
       inlinePillClassName: `rounded-full ${neutralSurfaceStrongClassName} px-3 py-1.5`,
       systemEventPillClassName: `rounded-full ${neutralSurfaceClassName} px-3 py-1`,
-      chatUserBubbleClassName: `rounded-[24px] rounded-br-lg px-3.5 py-2 ${isDark ? 'bg-primary-500/80 dark:bg-primary-500/80' : 'bg-primary-600 dark:bg-primary-600'}`,
+      chatUserBubbleClassName: `rounded-[24px] rounded-br-lg px-3.5 py-2 ${primarySurfaceClassName}`,
       chatAssistantBubbleClassName: `rounded-[22px] rounded-bl-lg ${neutralSurfaceStrongClassName} px-3 py-1.5`,
       chatThoughtBubbleClassName: `min-w-[220px] max-w-full rounded-[20px] ${neutralSurfaceClassName} px-3 py-2`,
       chatInlineErrorClassName: 'rounded-2xl bg-error-500/15 dark:bg-error-500/15',

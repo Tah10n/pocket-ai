@@ -11,6 +11,7 @@ import { StreamingCursor } from './StreamingCursor';
 import { MarkdownRenderer } from './MarkdownRenderer';
 import { ThinkingPulse } from './ThinkingPulse';
 import { getAssistantPresentation } from '../../utils/chatPresentation';
+import { getThemeActionContentClassName } from '../../utils/themeTokens';
 
 export interface ChatMessageBubbleProps {
   id: string;
@@ -162,7 +163,9 @@ const ChatMessageBubbleComponent = ({
   const shouldShowStreamingPlaceholder = isAssistantStreaming && !shouldShowThoughtSection && !assistantBodyContent;
   // Thought containers keep a minimum width so the collapsible panel does not jitter while content streams in.
   const thoughtBubbleClassName = appearance.classNames.chatThoughtBubbleClassName;
+  const shouldUseGlassBubble = appearance.surfaceKind === 'glass';
   const shouldUseAssistantGlass = appearance.surfaceKind === 'glass' && !isUser;
+  const userTextClassName = getThemeActionContentClassName(appearance, 'primary');
 
   return (
     <Box className={`w-full flex-col gap-0.5 ${isUser ? 'items-end' : 'items-start'}`} onLayout={onLayout}>
@@ -171,7 +174,8 @@ const ChatMessageBubbleComponent = ({
           testID={`message-bubble-shell-${id}`}
           tone={isUser ? 'primary' : 'default'}
           decorative="matte"
-          applyGlassFrame={!isUser}
+          applyGlassFrame={shouldUseGlassBubble}
+          withControlTint={shouldUseGlassBubble && isUser}
           className={`max-w-full min-w-0 flex-shrink ${bubbleAlignmentClassName} ${bubbleClassName}`}
         >
           {shouldShowThoughtSection ? (
@@ -243,7 +247,7 @@ const ChatMessageBubbleComponent = ({
           ) : null}
 
           {isUser ? (
-            <Text selectable className="text-base leading-relaxed text-typography-0">
+            <Text selectable className={`text-base leading-relaxed ${userTextClassName}`}>
               {content}
             </Text>
           ) : shouldShowStreamingPlaceholder ? (

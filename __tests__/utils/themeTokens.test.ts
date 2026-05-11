@@ -1,4 +1,4 @@
-import { getThemeAppearance, getThemeColors, tailwindRadiusPxByToken } from '../../src/utils/themeTokens';
+import { getThemeAppearance, getThemeColors, screenLayoutTokens, tailwindRadiusPxByToken } from '../../src/utils/themeTokens';
 
 const tailwindConfig = require('../../tailwind.config.js') as {
   theme?: {
@@ -144,6 +144,18 @@ describe('themeTokens', () => {
     expect(glass.effects.tabBarStyle).toMatchObject({ elevation: 0, shadowOpacity: 0 });
   });
 
+  it('keeps glass user chat bubbles on translucent primary surfaces', () => {
+    const lightGlassUserBubble = getThemeAppearance('glass', 'light').classNames.chatUserBubbleClassName;
+    const darkGlassUserBubble = getThemeAppearance('glass', 'dark').classNames.chatUserBubbleClassName;
+
+    expect(lightGlassUserBubble).toContain('bg-primary-500/25');
+    expect(darkGlassUserBubble).toContain('bg-primary-500/22');
+    expect(lightGlassUserBubble.split(/\s+/)).not.toContain('bg-primary-600');
+    expect(lightGlassUserBubble.split(/\s+/)).not.toContain('dark:bg-primary-600');
+    expect(darkGlassUserBubble).not.toContain('bg-primary-500/80');
+    expect(darkGlassUserBubble).not.toContain('dark:bg-primary-500/80');
+  });
+
   it('keeps glass opacity modifiers in the configured Tailwind scale', () => {
     const lightGlass = getThemeAppearance('glass', 'light').classNames;
     const darkGlass = getThemeAppearance('glass', 'dark').classNames;
@@ -196,6 +208,12 @@ describe('themeTokens', () => {
     expect(lightGlass.dividerClassName).toContain('border-transparent');
     expect(darkGlass.headerBorderClassName).toContain('border-transparent');
     expect(darkGlass.dividerClassName).toContain('border-transparent');
+  });
+
+  it('keeps inline input interiors transparent in dark mode', () => {
+    expect(screenLayoutTokens.inlineInputShellClassName).toContain('bg-transparent');
+    expect(screenLayoutTokens.inlineInputShellClassName).toContain('dark:bg-transparent');
+    expect(screenLayoutTokens.inlineInputShellClassName).not.toContain('dark:bg-background');
   });
 
   it('keeps parsed Tailwind radius tokens aligned with the NativeWind preset scale used by glass chrome', () => {

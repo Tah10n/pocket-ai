@@ -1,7 +1,9 @@
 import React from 'react';
+import { StyleSheet } from 'react-native';
 import { act, fireEvent, render, within } from '@testing-library/react-native';
 import * as Clipboard from 'expo-clipboard';
 import { ChatMessageBubble } from '../../src/components/ui/ChatMessageBubble';
+import { StaticThemeProvider } from '../../src/providers/ThemeProvider';
 
 jest.mock('react-native-css-interop', () => {
   const mockReact = require('react');
@@ -90,6 +92,28 @@ describe('ChatMessageBubble', () => {
 
     expect(getByText('Hello user')).toBeTruthy();
     expect(queryByTestId('markdown-renderer')).toBeNull();
+  });
+
+  it('renders glass user messages as framed translucent primary surfaces', () => {
+    const { getByTestId, getByText } = render(
+      <StaticThemeProvider themeId="glass" resolvedMode="dark">
+        <ChatMessageBubble id="glass-user" isUser content="Hello glass" />
+      </StaticThemeProvider>,
+    );
+    const shell = getByTestId('message-bubble-shell-glass-user');
+    const text = getByText('Hello glass');
+
+    expect(shell.props.className).toContain('relative overflow-hidden');
+    expect(shell.props.className).toContain('bg-primary-500/22');
+    expect(shell.props.className).not.toContain('bg-primary-500/80');
+    expect(shell.props.className).not.toContain('bg-primary-600');
+    expect(StyleSheet.flatten(shell.props.style)).toMatchObject({
+      borderWidth: 0,
+      elevation: 0,
+      shadowOpacity: 0,
+    });
+    expect(StyleSheet.flatten(shell.props.style)?.backgroundColor).toMatch(/^rgba/);
+    expect(text.props.className).toContain('dark:text-primary-100');
   });
 
   it('renders assistant messages through the markdown renderer when stable', () => {

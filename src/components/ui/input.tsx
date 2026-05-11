@@ -1,5 +1,5 @@
 import React from 'react';
-import { View, TextInput, type TextInputProps, type ViewProps } from 'react-native';
+import { StyleSheet, View, TextInput, type TextInputProps, type ViewProps } from 'react-native';
 import { cssInterop } from 'nativewind';
 import { useTheme } from '../../providers/ThemeProvider';
 import { DEFAULT_THEME_ID, getThemeAppearance, typographyColors } from '../../utils/themeTokens';
@@ -31,6 +31,7 @@ export function InputField({
   className = '',
   allowFontScaling = true,
   placeholderTextColor,
+  style,
   ...props
 }: InputFieldProps) {
   return (
@@ -38,9 +39,16 @@ export function InputField({
       allowFontScaling={allowFontScaling}
       placeholderTextColor={placeholderTextColor ?? typographyColors[400]}
       underlineColorAndroid="transparent"
-      className={`min-h-11 py-0 text-base text-typography-900 dark:text-typography-100 ${className}`.trim()}
+      className={`min-h-11 bg-transparent py-0 text-base text-typography-900 dark:bg-transparent dark:text-typography-100 ${className}`.trim()}
+      style={style ? [styles.transparentField, style] : styles.transparentField}
       {...props}
     />
   );
 }
+
+const styles = StyleSheet.create({
+  transparentField: {
+    backgroundColor: 'transparent',
+  },
+});
 

@@ -1,4 +1,4 @@
-import { getThemeAppearance, getThemeColors, tailwindRadiusPxByToken } from '../../src/utils/themeTokens';
+import { getThemeAppearance, getThemeColors, screenLayoutTokens, tailwindRadiusPxByToken } from '../../src/utils/themeTokens';
 
 const tailwindConfig = require('../../tailwind.config.js') as {
   theme?: {
@@ -196,6 +196,12 @@ describe('themeTokens', () => {
     expect(lightGlass.dividerClassName).toContain('border-transparent');
     expect(darkGlass.headerBorderClassName).toContain('border-transparent');
     expect(darkGlass.dividerClassName).toContain('border-transparent');
+  });
+
+  it('keeps inline input interiors transparent in dark mode', () => {
+    expect(screenLayoutTokens.inlineInputShellClassName).toContain('bg-transparent');
+    expect(screenLayoutTokens.inlineInputShellClassName).toContain('dark:bg-transparent');
+    expect(screenLayoutTokens.inlineInputShellClassName).not.toContain('dark:bg-background');
   });
 
   it('keeps parsed Tailwind radius tokens aligned with the NativeWind preset scale used by glass chrome', () => {

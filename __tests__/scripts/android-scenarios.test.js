@@ -1,8 +1,12 @@
 const path = require('path');
+const fs = require('fs');
+const os = require('os');
 
 const {
   buildScenarios,
   buildSmokeLaunchArgs,
+  captureAndroidScreenshot,
+  dumpUiHierarchy,
   findCatalogRiskModelCard,
   findBlockingSystemDialogAction,
   findAnyNodeClearOfBottomOverlay,
@@ -69,6 +73,117 @@ describe('android-scenarios smoke bootstrap args', () => {
         'emulator-5554',
       ])
     );
+  });
+});
+
+describe('android-scenarios screenshot capture', () => {
+  const pngBuffer = Buffer.from([
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00,
+  ]);
+
+  it('retries transient invalid screenshots before failing the scenario', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-ai-screenshot-'));
+    const screenshotPath = path.join(tempDir, 'capture.png');
+    const sleepSync = jest.fn();
+    let directAttempts = 0;
+    const spawn = jest.fn((_command, args) => {
+      if (args.includes('exec-out')) {
+        directAttempts += 1;
+        return {
+          status: 0,
+          stdout: directAttempts === 1 ? Buffer.from('not a png') : pngBuffer,
+          stderr: '',
+        };
+      }
+
+      if (args.includes('pull')) {
+        fs.writeFileSync(screenshotPath, Buffer.from('still not a png'));
+      }
+
+      return {
+        status: 0,
+        stdout: '',
+        stderr: '',
+      };
+    });
+
+    try {
+      expect(captureAndroidScreenshot('adb', 'device-1', screenshotPath, {
+        maxAttempts: 2,
+        retryDelayMs: 1,
+        sleepSync,
+        spawnSync: spawn,
+      })).toBe(screenshotPath);
+
+      expect(sleepSync).toHaveBeenCalledWith(1);
+      expect(directAttempts).toBe(2);
+      expect(fs.readFileSync(screenshotPath).subarray(0, 8)).toEqual(pngBuffer.subarray(0, 8));
+    } finally {
+      fs.rmSync(tempDir, { force: true, recursive: true });
+    }
+  });
+
+  it('waits for the target serial when adb temporarily reports the device offline', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-ai-screenshot-'));
+    const screenshotPath = path.join(tempDir, 'capture.png');
+    const sleepSync = jest.fn();
+    let directAttempts = 0;
+    const spawn = jest.fn((_command, args) => {
+      if (args.includes('wait-for-device')) {
+        return {
+          status: 0,
+          stdout: '',
+          stderr: '',
+        };
+      }
+
+      if (args.includes('exec-out')) {
+        directAttempts += 1;
+        return directAttempts === 1
+          ? {
+              status: 1,
+              stdout: Buffer.alloc(0),
+              stderr: "error: device 'device-1' not found",
+            }
+          : {
+              status: 0,
+              stdout: pngBuffer,
+              stderr: '',
+            };
+      }
+
+      if (args.includes('screencap')) {
+        return {
+          status: 1,
+          stdout: '',
+          stderr: 'adb.exe: device offline',
+        };
+      }
+
+      return {
+        status: 0,
+        stdout: '',
+        stderr: '',
+      };
+    });
+
+    try {
+      expect(captureAndroidScreenshot('adb', 'device-1', screenshotPath, {
+        maxAttempts: 2,
+        retryDelayMs: 1,
+        sleepSync,
+        spawnSync: spawn,
+      })).toBe(screenshotPath);
+
+      expect(spawn).toHaveBeenCalledWith(
+        'adb',
+        ['-s', 'device-1', 'wait-for-device'],
+        expect.objectContaining({ timeout: 15000 })
+      );
+      expect(fs.readFileSync(screenshotPath).subarray(0, 8)).toEqual(pngBuffer.subarray(0, 8));
+    } finally {
+      fs.rmSync(tempDir, { force: true, recursive: true });
+    }
   });
 });
 
@@ -184,6 +299,66 @@ describe('android-scenarios UI snapshot matching', () => {
     expect(isBoundsClearOfBottomOverlay(bottomLanguage.node.bounds, snapshot.viewportBounds)).toBe(false);
     expect(safeLanguage.node.bounds.centerY).toBe(1702);
     expect(isBoundsClearOfBottomOverlay(safeLanguage.node.bounds, snapshot.viewportBounds)).toBe(true);
+  });
+});
+
+describe('android-scenarios UI hierarchy capture', () => {
+  it('waits for the target serial when uiautomator temporarily loses adb', () => {
+    const sleepSync = jest.fn();
+    let dumpAttempts = 0;
+    const spawn = jest.fn((_command, args) => {
+      if (args.includes('wait-for-device')) {
+        return {
+          status: 0,
+          stdout: '',
+          stderr: '',
+        };
+      }
+
+      if (args.includes('uiautomator')) {
+        dumpAttempts += 1;
+        return dumpAttempts === 1
+          ? {
+              status: 1,
+              stdout: '',
+              stderr: "error: device 'device-1' not found",
+            }
+          : {
+              status: 0,
+              stdout: 'UI hierchary dumped to: /sdcard/window_dump.xml',
+              stderr: '',
+            };
+      }
+
+      if (args.includes('cat')) {
+        return {
+          status: 0,
+          stdout: '<hierarchy><node text="Pocket AI" bounds="[0,0][1,1]" /></hierarchy>',
+          stderr: '',
+        };
+      }
+
+      return {
+        status: 0,
+        stdout: '',
+        stderr: '',
+      };
+    });
+
+    const xml = dumpUiHierarchy('adb', 'device-1', {
+      maxAttempts: 2,
+      retryDelayMs: 1,
+      sleepSync,
+      spawnSync: spawn,
+    });
+
+    expect(xml).toContain('Pocket AI');
+    expect(spawn).toHaveBeenCalledWith(
+      'adb',
+      ['-s', 'device-1', 'wait-for-device'],
+      expect.objectContaining({ timeout: 15000 })
+    );
+    expect(sleepSync).toHaveBeenCalledWith(1);
   });
 });
 

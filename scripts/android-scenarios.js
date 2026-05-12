@@ -178,6 +178,8 @@ const INITIAL_APP_VISIBLE_TIMEOUT_MS = 60_000;
 const HOME_ROUTE_TIMEOUT_MS = 90_000;
 const SETTINGS_ROUTE_TIMEOUT_MS = 60_000;
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const SCREENSHOT_CAPTURE_MAX_ATTEMPTS = 4;
+const SCREENSHOT_CAPTURE_RETRY_DELAY_MS = 350;
 
 if (require.main === module) {
   main().catch((error) => {
@@ -1352,12 +1354,67 @@ async function findNodeNow(adbPath, serial, label, options = {}) {
   return findNodeInSnapshot(createUiSnapshot(adbPath, serial), label, options);
 }
 
-function dumpUiHierarchy(adbPath, serial) {
-  runChecked(adbPath, ["-s", serial, "shell", "uiautomator", "dump", dumpPathOnDevice], {
-    stdio: "ignore",
-  });
+function dumpUiHierarchy(adbPath, serial, options = {}) {
+  const maxAttempts = options.maxAttempts ?? SCREENSHOT_CAPTURE_MAX_ATTEMPTS;
+  const retryDelayMs = options.retryDelayMs ?? SCREENSHOT_CAPTURE_RETRY_DELAY_MS;
+  const runSpawnSync = options.spawnSync ?? spawnSync;
+  const runSleepSync = options.sleepSync ?? sleepSync;
+  const failures = [];
 
-  return runCapture(adbPath, ["-s", serial, "exec-out", "cat", dumpPathOnDevice]);
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    let sawAdbDeviceUnavailable = false;
+    const dumpResult = runSpawnSync(
+      adbPath,
+      ["-s", serial, "shell", "uiautomator", "dump", dumpPathOnDevice],
+      {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      }
+    );
+
+    if (dumpResult.error) {
+      throw dumpResult.error;
+    }
+
+    if (dumpResult.status !== 0) {
+      failures.push(describeSpawnResult("uiautomator dump", dumpResult));
+      sawAdbDeviceUnavailable = sawAdbDeviceUnavailable || isAdbDeviceUnavailableResult(dumpResult);
+    } else {
+      const catResult = runSpawnSync(
+        adbPath,
+        ["-s", serial, "exec-out", "cat", dumpPathOnDevice],
+        {
+          encoding: "utf8",
+          maxBuffer: 10 * 1024 * 1024,
+        }
+      );
+
+      if (catResult.error) {
+        throw catResult.error;
+      }
+
+      if (catResult.status === 0 && typeof catResult.stdout === "string" && catResult.stdout.includes("<hierarchy")) {
+        return catResult.stdout;
+      }
+
+      failures.push(describeSpawnResult("cat UI hierarchy", catResult));
+      sawAdbDeviceUnavailable = sawAdbDeviceUnavailable || isAdbDeviceUnavailableResult(catResult);
+    }
+
+    if (attempt < maxAttempts) {
+      if (sawAdbDeviceUnavailable) {
+        const waitResult = waitForAdbDevice(adbPath, serial, runSpawnSync);
+        failures.push(describeSpawnResult("adb wait-for-device", waitResult));
+      }
+      log(`UI hierarchy dump attempt ${attempt} failed; retrying.`);
+      runSleepSync(retryDelayMs);
+    }
+  }
+
+  throw new Error(
+    `Failed to dump Android UI hierarchy after ${maxAttempts} attempts. `
+    + failures.slice(-6).join(" | ")
+  );
 }
 
 function createUiSnapshot(adbPath, serial) {
@@ -1970,75 +2027,146 @@ function runCapture(command, args) {
   return result.stdout || "";
 }
 
-function captureAndroidScreenshot(adbPath, serial, screenshotPath) {
+function captureAndroidScreenshot(adbPath, serial, screenshotPath, options = {}) {
   fs.mkdirSync(path.dirname(screenshotPath), { recursive: true });
 
-  const directCapture = spawnSync(
-    adbPath,
-    ["-s", serial, "exec-out", "screencap", "-p"],
-    { maxBuffer: 20 * 1024 * 1024 }
+  const failures = [];
+  const maxAttempts = options.maxAttempts ?? SCREENSHOT_CAPTURE_MAX_ATTEMPTS;
+  const retryDelayMs = options.retryDelayMs ?? SCREENSHOT_CAPTURE_RETRY_DELAY_MS;
+  const runSpawnSync = options.spawnSync ?? spawnSync;
+  const runSleepSync = options.sleepSync ?? sleepSync;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    let sawAdbDeviceUnavailable = false;
+
+    try {
+      fs.rmSync(screenshotPath, { force: true });
+
+      const directCapture = runSpawnSync(
+        adbPath,
+        ["-s", serial, "exec-out", "screencap", "-p"],
+        { maxBuffer: 20 * 1024 * 1024 }
+      );
+
+      if (directCapture.error) {
+        throw directCapture.error;
+      }
+
+      if (directCapture.status === 0 && isPngBuffer(directCapture.stdout)) {
+        fs.writeFileSync(screenshotPath, directCapture.stdout);
+        return screenshotPath;
+      }
+
+      failures.push(describeSpawnResult("exec-out screencap", directCapture));
+      sawAdbDeviceUnavailable = isAdbDeviceUnavailableResult(directCapture);
+      log("Direct screencap failed; retrying screenshot capture via a temporary device file.");
+
+      const remotePath = `/data/local/tmp/pocket-ai-qa-${process.pid}-${Date.now()}-${attempt}.png`;
+      const remoteCapture = runSpawnSync(
+        adbPath,
+        ["-s", serial, "shell", "screencap", "-p", remotePath],
+        {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"],
+        }
+      );
+
+      if (remoteCapture.error) {
+        throw remoteCapture.error;
+      }
+
+      try {
+        if (remoteCapture.status !== 0) {
+          const failure = describeSpawnResult("remote screencap", remoteCapture);
+          failures.push(failure);
+          sawAdbDeviceUnavailable = sawAdbDeviceUnavailable || isAdbDeviceUnavailableResult(remoteCapture);
+          throw new Error(failure);
+        }
+
+        const pullResult = runSpawnSync(
+          adbPath,
+          ["-s", serial, "pull", remotePath, screenshotPath],
+          {
+            encoding: "utf8",
+            stdio: ["ignore", "pipe", "pipe"],
+          }
+        );
+
+        if (pullResult.error) {
+          throw pullResult.error;
+        }
+
+        if (pullResult.status !== 0) {
+          const failure = describeSpawnResult("adb pull screenshot", pullResult);
+          failures.push(failure);
+          sawAdbDeviceUnavailable = sawAdbDeviceUnavailable || isAdbDeviceUnavailableResult(pullResult);
+          throw new Error(failure);
+        }
+
+        const screenshotBuffer = fs.readFileSync(screenshotPath);
+        if (isPngBuffer(screenshotBuffer)) {
+          return screenshotPath;
+        }
+
+        failures.push(`pulled screenshot was not a PNG (${screenshotBuffer.length} bytes)`);
+      } finally {
+        runSpawnSync(
+          adbPath,
+          ["-s", serial, "shell", "rm", "-f", remotePath],
+          { stdio: "ignore" }
+        );
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      failures.push(message);
+      sawAdbDeviceUnavailable = sawAdbDeviceUnavailable || isAdbDeviceUnavailableMessage(message);
+    }
+
+    if (attempt < maxAttempts) {
+      if (sawAdbDeviceUnavailable) {
+        const waitResult = waitForAdbDevice(adbPath, serial, runSpawnSync);
+        failures.push(describeSpawnResult("adb wait-for-device", waitResult));
+      }
+      log(`Screenshot capture attempt ${attempt} failed; retrying.`);
+      runSleepSync(retryDelayMs);
+    }
+  }
+
+  throw new Error(
+    `Failed to capture an Android screenshot after ${maxAttempts} attempts. `
+    + failures.slice(-6).join(" | ")
   );
+}
 
-  if (directCapture.error) {
-    throw directCapture.error;
-  }
+function describeSpawnResult(label, result) {
+  const stdoutLength = Buffer.isBuffer(result.stdout)
+    ? result.stdout.length
+    : String(result.stdout || "").length;
+  const stderr = String(result.stderr || "").trim();
+  return `${label} status=${result.status} stdout=${stdoutLength} stderr=${stderr || "<empty>"}`;
+}
 
-  if (directCapture.status === 0 && isPngBuffer(directCapture.stdout)) {
-    fs.writeFileSync(screenshotPath, directCapture.stdout);
-    return screenshotPath;
-  }
+function isAdbDeviceUnavailableResult(result) {
+  return isAdbDeviceUnavailableMessage(String(result.stderr || ""))
+    || isAdbDeviceUnavailableMessage(String(result.stdout || ""));
+}
 
-  log("Direct screencap failed; retrying screenshot capture via a temporary device file.");
+function isAdbDeviceUnavailableMessage(message) {
+  return /device ['"].+['"] not found/i.test(message)
+    || /device offline/i.test(message)
+    || /no devices?\/emulators? found/i.test(message);
+}
 
-  const remotePath = `/data/local/tmp/pocket-ai-qa-${process.pid}-${Date.now()}.png`;
-  const remoteCapture = spawnSync(
+function waitForAdbDevice(adbPath, serial, runSpawnSync = spawnSync) {
+  return runSpawnSync(
     adbPath,
-    ["-s", serial, "shell", "screencap", "-p", remotePath],
+    ["-s", serial, "wait-for-device"],
     {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
+      timeout: 15_000,
     }
   );
-
-  if (remoteCapture.error) {
-    throw remoteCapture.error;
-  }
-
-  try {
-    if (remoteCapture.status !== 0) {
-      throw new Error("Failed to capture an Android screenshot.");
-    }
-
-    const pullResult = spawnSync(
-      adbPath,
-      ["-s", serial, "pull", remotePath, screenshotPath],
-      {
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "pipe"],
-      }
-    );
-
-    if (pullResult.error) {
-      throw pullResult.error;
-    }
-
-    if (pullResult.status !== 0) {
-      throw new Error("Failed to capture an Android screenshot.");
-    }
-
-    const screenshotBuffer = fs.readFileSync(screenshotPath);
-    if (!isPngBuffer(screenshotBuffer)) {
-      throw new Error("Failed to capture an Android screenshot.");
-    }
-
-    return screenshotPath;
-  } finally {
-    spawnSync(
-      adbPath,
-      ["-s", serial, "shell", "rm", "-f", remotePath],
-      { stdio: "ignore" }
-    );
-  }
 }
 
 function isPngBuffer(value) {
@@ -2075,9 +2203,15 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
 module.exports = {
   buildScenarios,
   buildSmokeLaunchArgs,
+  captureAndroidScreenshot,
+  dumpUiHierarchy,
   findCatalogRiskModelCard,
   findAnyNodeInSnapshot,
   findAnyNodeClearOfBottomOverlay,

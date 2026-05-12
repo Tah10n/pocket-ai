@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { NativeScrollEvent, NativeSyntheticEvent } from 'react-native';
 import {
   type CatalogServerSort,
   getModelCatalogErrorMessage,
@@ -426,11 +425,8 @@ export function useModelsCatalogData({
       });
   }, [activeTab, fetchModels, isFetchingMore, isRefreshing, loading, searchQuery]);
 
-  const handleCatalogScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
-    const offsetY = event.nativeEvent.contentOffset.y;
-    if (typeof offsetY === 'number' && offsetY > 0) {
-      hasUserScrolledCatalogRef.current = true;
-    }
+  const handleCatalogScrollBeginDrag = useCallback(() => {
+    hasUserScrolledCatalogRef.current = true;
   }, []);
 
   return {
@@ -447,7 +443,7 @@ export function useModelsCatalogData({
     sessionIdentity,
     handleLoadMore,
     handlePullToRefresh,
-    handleCatalogScroll,
+    handleCatalogScrollBeginDrag,
     refreshDownloadedModels,
     requestCatalogRefresh,
   };

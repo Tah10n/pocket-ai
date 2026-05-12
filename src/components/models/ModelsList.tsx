@@ -238,7 +238,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
     sessionIdentity,
     handleLoadMore,
     handlePullToRefresh,
-    handleCatalogScroll,
+    handleCatalogScrollBeginDrag,
     refreshDownloadedModels,
     requestCatalogRefresh,
   } = useModelsCatalogData({
@@ -498,6 +498,10 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
       return;
     }
 
+    if (!nextCursor.startsWith('catalog-buffer:')) {
+      return;
+    }
+
     if (autoFillAttemptsRef.current >= 4) {
       return;
     }
@@ -707,7 +711,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
               contentContainerStyle={{ flexGrow: 1, paddingBottom: listBottomInset }}
               refreshing={isRefreshing}
               onRefresh={handlePullToRefresh}
-              onScroll={handleCatalogScroll}
+              onScrollBeginDrag={handleCatalogScrollBeginDrag}
               onEndReached={() => handleLoadMore('auto')}
               onEndReachedThreshold={0.6}
               showsVerticalScrollIndicator={false}

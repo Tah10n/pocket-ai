@@ -76,7 +76,8 @@ const PERSISTENT_CACHE_MAX_AGE = 24 * 60 * 60 * 1000; // 24 hours
 const ACCESS_PROBE_CACHE_TTL = 2 * 60 * 1000; // 2 minutes
 const DEFAULT_RATE_LIMIT_BACKOFF_MS = 60_000;
 const MAX_RATE_LIMIT_BACKOFF_MS = 15 * 60 * 1000;
-const CATALOG_PREFETCH_PAGES = 3;
+// Keep one buffered page for fast first load-more without hydrating three pages on entry.
+const CATALOG_PREFETCH_PAGES = 2;
 const CATALOG_PREFETCH_MAX_LIMIT = 60;
 const HF_TREE_PAGINATION_MAX_PAGES = 20;
 const HF_TREE_PREFERRED_LOOKAHEAD_PAGES = 2;

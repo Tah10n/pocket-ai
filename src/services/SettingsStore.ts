@@ -168,6 +168,10 @@ function normalizeLanguage(language: unknown): 'en' | 'ru' {
 
 const BACKEND_DEVICE_SELECTOR_REGEX = /^[A-Za-z0-9_*.-]{1,32}$/;
 export const MAX_BACKEND_DEVICE_SELECTORS = 10;
+const CPU_MASK_SEGMENT_REGEX = /^\d{1,3}(?:-\d{1,3})?$/;
+const MAX_CPU_MASK_SEGMENTS = 64;
+const MAX_CPU_INDEX = 255;
+const SUPPORTED_PARALLEL_SLOTS = 1;
 
 export function isSafeBackendDeviceSelector(value: unknown): value is string {
     if (typeof value !== 'string') {
@@ -180,6 +184,51 @@ function clampNumber(value: unknown, min: number, max: number, fallback: number)
     const n = typeof value === 'number' ? value : Number(value);
     if (!Number.isFinite(n)) return fallback;
     return Math.min(max, Math.max(min, n));
+}
+
+function normalizeCpuMask(value: unknown): string | null | undefined {
+    if (value === undefined) {
+        return undefined;
+    }
+
+    if (value === null) {
+        return null;
+    }
+
+    if (typeof value !== 'string') {
+        return null;
+    }
+
+    const compact = value.replace(/\s+/g, '');
+    if (!compact) {
+        return null;
+    }
+
+    const segments = compact.split(',');
+    if (segments.length > MAX_CPU_MASK_SEGMENTS) {
+        return null;
+    }
+
+    for (const segment of segments) {
+        if (!CPU_MASK_SEGMENT_REGEX.test(segment)) {
+            return null;
+        }
+
+        const [startRaw, endRaw] = segment.split('-');
+        const start = Number(startRaw);
+        const end = endRaw === undefined ? start : Number(endRaw);
+        if (
+            !Number.isInteger(start) ||
+            !Number.isInteger(end) ||
+            start < 0 ||
+            end < start ||
+            end > MAX_CPU_INDEX
+        ) {
+            return null;
+        }
+    }
+
+    return compact;
 }
 
 function normalizeChatRetentionDays(value: unknown): number | null {
@@ -267,6 +316,7 @@ function sanitizeModelLoadParameters(input: Partial<ModelLoadParameters> | undef
                   : DEFAULT_MODEL_LOAD_PARAMETERS.kvCacheType;
 
     const rawBackendPolicy = typeof input?.backendPolicy === 'string' ? input.backendPolicy.trim().toLowerCase() : '';
+    // `auto` is the default policy and is intentionally omitted from persisted model load params.
     const normalizedBackendPolicy =
         rawBackendPolicy === 'cpu'
             ? 'cpu'
@@ -299,15 +349,7 @@ function sanitizeModelLoadParameters(input: Partial<ModelLoadParameters> | undef
                 ? undefined
                 : null;
 
-    const rawCpuMask = input?.cpuMask;
-    const normalizedCpuMask =
-        rawCpuMask === null
-            ? null
-            : typeof rawCpuMask === 'string'
-              ? (rawCpuMask.trim().length > 0 ? rawCpuMask.trim() : null)
-              : rawCpuMask === undefined
-                ? undefined
-                : null;
+    const normalizedCpuMask = normalizeCpuMask(input?.cpuMask);
 
     const rawCpuStrict = input?.cpuStrict;
     const normalizedCpuStrict = typeof rawCpuStrict === 'boolean' ? rawCpuStrict : undefined;
@@ -331,7 +373,7 @@ function sanitizeModelLoadParameters(input: Partial<ModelLoadParameters> | undef
     const normalizedParallelSlots =
         rawParallelSlots === undefined
             ? undefined
-            : 1;
+            : Math.round(clampNumber(rawParallelSlots, SUPPORTED_PARALLEL_SLOTS, SUPPORTED_PARALLEL_SLOTS, SUPPORTED_PARALLEL_SLOTS));
 
     const rawNBatch = input?.nBatch;
     const normalizedNBatch =

@@ -140,6 +140,14 @@ describe('SettingsStore', () => {
     expect(getModelLoadParametersForModel('author/model-q4').cpuMask).toBeNull();
   });
 
+  it('rejects CPU masks with internal whitespace instead of changing their meaning', () => {
+    updateModelLoadParametersForModel('author/model-q4', {
+      cpuMask: '0 1',
+    });
+
+    expect(getModelLoadParametersForModel('author/model-q4').cpuMask).toBeNull();
+  });
+
   it('rejects backend device selectors with control chars, path traversal, or over-length', () => {
     updateModelLoadParametersForModel('author/model-q4', {
       selectedBackendDevices: [

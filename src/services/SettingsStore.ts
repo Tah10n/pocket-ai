@@ -199,17 +199,21 @@ function normalizeCpuMask(value: unknown): string | null | undefined {
         return null;
     }
 
-    const compact = value.replace(/\s+/g, '');
-    if (!compact) {
+    const trimmed = value.trim();
+    if (!trimmed) {
         return null;
     }
 
-    const segments = compact.split(',');
+    const segments = trimmed.split(',').map((segment) => segment.trim());
     if (segments.length > MAX_CPU_MASK_SEGMENTS) {
         return null;
     }
 
     for (const segment of segments) {
+        if (!segment) {
+            return null;
+        }
+
         if (!CPU_MASK_SEGMENT_REGEX.test(segment)) {
             return null;
         }
@@ -228,7 +232,7 @@ function normalizeCpuMask(value: unknown): string | null | undefined {
         }
     }
 
-    return compact;
+    return segments.join(',');
 }
 
 function normalizeChatRetentionDays(value: unknown): number | null {

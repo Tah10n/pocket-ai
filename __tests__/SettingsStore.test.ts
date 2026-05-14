@@ -124,6 +124,22 @@ describe('SettingsStore', () => {
     expect(getModelLoadParametersForModel('author/model-q4').parallelSlots).toBe(1);
   });
 
+  it('normalizes CPU masks to a documented numeric list and range grammar', () => {
+    updateModelLoadParametersForModel('author/model-q4', {
+      cpuMask: ' 0-3, 5,7 ',
+    });
+
+    expect(getModelLoadParametersForModel('author/model-q4').cpuMask).toBe('0-3,5,7');
+  });
+
+  it('rejects unsafe CPU masks instead of persisting arbitrary native input', () => {
+    updateModelLoadParametersForModel('author/model-q4', {
+      cpuMask: '0-3;../../tmp',
+    });
+
+    expect(getModelLoadParametersForModel('author/model-q4').cpuMask).toBeNull();
+  });
+
   it('rejects backend device selectors with control chars, path traversal, or over-length', () => {
     updateModelLoadParametersForModel('author/model-q4', {
       selectedBackendDevices: [
@@ -177,6 +193,37 @@ describe('SettingsStore', () => {
         }),
       },
     }));
+  });
+
+  it('persists sanitized settings after non-theme migrations', () => {
+    getSettingsStorage().set('app_settings', JSON.stringify({
+      themeId: 'default',
+      modelLoadParamsByModelId: {
+        'author/model-q4': {
+          contextSize: 16384,
+          gpuLayers: 999,
+          kvCacheType: 'q8',
+          backendPolicy: 'auto',
+          cpuMask: '../bad',
+          parallelSlots: 8,
+        },
+      },
+    }));
+
+    const settings = getSettings();
+    expect(settings.modelLoadParamsByModelId['author/model-q4']).toEqual({
+      contextSize: 16384,
+      gpuLayers: UNKNOWN_MODEL_GPU_LAYERS_CEILING,
+      kvCacheType: 'q8_0',
+      cpuMask: null,
+      parallelSlots: 1,
+    });
+
+    const storedOnce = getSettingsStorage().getString('app_settings');
+    expect(storedOnce).toBe(JSON.stringify(settings));
+
+    getSettings();
+    expect(getSettingsStorage().getString('app_settings')).toBe(storedOnce);
   });
 });
 

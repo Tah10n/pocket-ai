@@ -1,4 +1,5 @@
-import { presetManager } from '../../src/services/PresetManager';
+import { createStorage } from '../../src/services/storage';
+import { invalidatePresetStorageForPrivateReset, presetManager } from '../../src/services/PresetManager';
 import {
     getModelLoadParametersForModel,
     getGenerationParametersForModel,
@@ -23,6 +24,14 @@ jest.mock('react-native-mmkv', () => {
 });
 
 describe('PresetManager', () => {
+    const presetStorage = () => createStorage('pocket-ai-presets', { tier: 'private' });
+
+    beforeEach(() => {
+        invalidatePresetStorageForPrivateReset();
+        presetStorage().clearAll();
+        jest.restoreAllMocks();
+    });
+
     it('returns default presets on first access', () => {
         const presets = presetManager.getPresets();
         expect(presets.length).toBeGreaterThanOrEqual(10);
@@ -69,6 +78,83 @@ describe('PresetManager', () => {
         expect(normalized).toHaveLength(1);
         expect(normalized[0].isBuiltIn).toBe(false);
         expect(normalized[0].id).toBe('helpful-assistant');
+    });
+
+    it('restores starter presets and quarantines corrupt JSON payloads', () => {
+        const storage = presetStorage();
+        const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+        storage.set('system_prompt_presets', '{not-json');
+
+        const presets = presetManager.getPresets();
+
+        expect(presets.length).toBeGreaterThanOrEqual(10);
+        const stored = JSON.parse(storage.getString('system_prompt_presets') ?? '{}');
+        expect(stored).toEqual(expect.objectContaining({
+            schemaVersion: 2,
+            presets: expect.any(Array),
+        }));
+        expect(stored.presets.some((preset: { name?: unknown }) => preset.name === 'Helpful Assistant')).toBe(true);
+        const quarantineKeys = storage.getAllKeys().filter((key) => key.startsWith('system_prompt_presets_corrupt_'));
+        expect(quarantineKeys).toHaveLength(1);
+        expect(storage.getString(quarantineKeys[0])).toBe('{not-json');
+        expect(warnSpy).toHaveBeenCalled();
+    });
+
+    it('repairs legacy preset arrays with duplicate IDs and invalid entries', () => {
+        const storage = presetStorage();
+        storage.set('system_prompt_presets', JSON.stringify([
+            {
+                id: 'duplicate-id',
+                name: ' First preset ',
+                systemPrompt: ' First prompt ',
+                isBuiltIn: true,
+            },
+            {
+                id: 'duplicate-id',
+                name: 'Second preset',
+                systemPrompt: 'Second prompt',
+                isBuiltIn: false,
+            },
+            {
+                id: 'invalid-entry',
+                name: '',
+                systemPrompt: 'Missing name',
+                isBuiltIn: false,
+            },
+        ]));
+
+        const presets = presetManager.getPresets();
+
+        expect(presets).toHaveLength(2);
+        expect(new Set(presets.map((preset) => preset.id)).size).toBe(2);
+        expect(presets[0]).toEqual({
+            id: 'duplicate-id',
+            name: 'First preset',
+            systemPrompt: 'First prompt',
+            isBuiltIn: false,
+        });
+        expect(presets[1].id).not.toBe('duplicate-id');
+        const stored = JSON.parse(storage.getString('system_prompt_presets') ?? '{}');
+        expect(stored.schemaVersion).toBe(2);
+        expect(stored.presets).toHaveLength(2);
+    });
+
+    it('generates unique preset IDs when the random UUID source repeats', () => {
+        const cryptoObject = globalThis.crypto as { randomUUID?: () => `${string}` } | undefined;
+        const randomUuidSpy = cryptoObject?.randomUUID
+            ? jest.spyOn(cryptoObject, 'randomUUID').mockReturnValue('same-random-id')
+            : null;
+        jest.spyOn(Date, 'now').mockReturnValue(42);
+        jest.spyOn(Math, 'random').mockReturnValue(0.1);
+
+        const first = presetManager.addPreset('First', 'First prompt');
+        const second = presetManager.addPreset('Second', 'Second prompt');
+
+        expect(first.id).not.toBe(second.id);
+        expect(presetManager.getPresets().map((preset) => preset.id)).toEqual(
+            expect.arrayContaining([first.id, second.id]),
+        );
+        randomUuidSpy?.mockRestore();
     });
 });
 

@@ -531,6 +531,10 @@ function writeJsonValue(key: string, value: unknown) {
     getSettingsStorage().set(key, JSON.stringify(value));
 }
 
+function shouldPersistSanitizedSettings(parsed: unknown, sanitized: AppSettings): boolean {
+    return JSON.stringify(parsed) !== JSON.stringify(sanitized);
+}
+
 export function getSettings(): AppSettings {
     const parsed = readJsonValue<Partial<AppSettings>>(SETTINGS_KEY);
     if (!parsed) {
@@ -545,11 +549,6 @@ export function getSettings(): AppSettings {
         typeof parsed === 'object' &&
         parsed !== null &&
         Object.prototype.hasOwnProperty.call(parsed, 'reasoningEffort');
-    const hasValidPersistedThemeId =
-        typeof parsed === 'object' &&
-        parsed !== null &&
-        Object.prototype.hasOwnProperty.call(parsed, 'themeId') &&
-        isThemeId(parsed.themeId);
 
     const sanitized = sanitizeSettings({
         ...DEFAULT_SETTINGS,
@@ -558,7 +557,7 @@ export function getSettings(): AppSettings {
         chatRetentionDays: hasExplicitChatRetention ? parsed.chatRetentionDays : null,
     });
 
-    if (!hasValidPersistedThemeId) {
+    if (shouldPersistSanitizedSettings(parsed, sanitized)) {
         writeJsonValue(SETTINGS_KEY, sanitized);
     }
 

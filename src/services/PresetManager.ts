@@ -26,6 +26,22 @@ export interface SystemPromptPreset {
 }
 
 const PRESETS_KEY = 'system_prompt_presets';
+const PRESETS_CORRUPT_PREFIX = `${PRESETS_KEY}_corrupt_`;
+const PRESET_SCHEMA_VERSION = 2;
+const MAX_PRESET_ID_LENGTH = 128;
+const MAX_PRESET_NAME_LENGTH = 120;
+const MAX_SYSTEM_PROMPT_LENGTH = 12000;
+
+type StoredPresetPayload = {
+    schemaVersion: typeof PRESET_SCHEMA_VERSION;
+    presets: SystemPromptPreset[];
+};
+
+type PresetReadResult = {
+    presets: SystemPromptPreset[];
+    shouldPersist: boolean;
+    corruptRaw?: string;
+};
 
 const DEFAULT_PRESETS: SystemPromptPreset[] = [
     {
@@ -90,38 +106,216 @@ const DEFAULT_PRESETS: SystemPromptPreset[] = [
     },
 ];
 
-function normalizeStoredPresets(storedPresets: SystemPromptPreset[]): SystemPromptPreset[] {
-    let didChange = false;
+function clonePreset(preset: SystemPromptPreset): SystemPromptPreset {
+    return { ...preset };
+}
 
-    const normalized = storedPresets.map((preset) => {
-        if (preset.isBuiltIn) {
+function clonePresets(presets: SystemPromptPreset[]): SystemPromptPreset[] {
+    return presets.map(clonePreset);
+}
+
+function getDefaultPresets(): SystemPromptPreset[] {
+    return clonePresets(DEFAULT_PRESETS);
+}
+
+function encodePresetPayload(presets: SystemPromptPreset[]): string {
+    const payload: StoredPresetPayload = {
+        schemaVersion: PRESET_SCHEMA_VERSION,
+        presets,
+    };
+    return JSON.stringify(payload);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function normalizePresetText(value: unknown, maxLength: number): string | null {
+    if (typeof value !== 'string') {
+        return null;
+    }
+
+    const normalized = value.trim();
+    if (!normalized || normalized.length > maxLength) {
+        return null;
+    }
+
+    return normalized;
+}
+
+function generatePresetIdCandidate(): string {
+    try {
+        const cryptoObject = globalThis.crypto as { randomUUID?: () => string } | undefined;
+        const uuid = cryptoObject?.randomUUID?.();
+        if (uuid) {
+            return `preset-${uuid}`;
+        }
+    } catch {
+        // fall through to Expo/fallback entropy
+    }
+
+    try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const expoCrypto = require('expo-crypto') as { randomUUID?: () => string };
+        const uuid = expoCrypto.randomUUID?.();
+        if (uuid) {
+            return `preset-${uuid}`;
+        }
+    } catch {
+        // fall through to non-crypto fallback
+    }
+
+    return `preset-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function createPresetId(existingIds: Set<string>): string {
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+        const base = generatePresetIdCandidate();
+        const candidate = attempt === 0 ? base : `${base}-${attempt + 1}`;
+        if (!existingIds.has(candidate)) {
+            existingIds.add(candidate);
+            return candidate;
+        }
+    }
+
+    let fallbackCounter = 0;
+    let candidate = '';
+    do {
+        fallbackCounter += 1;
+        candidate = `preset-${Date.now().toString(36)}-${fallbackCounter.toString(36)}`;
+    } while (existingIds.has(candidate));
+
+    existingIds.add(candidate);
+    return candidate;
+}
+
+function sanitizePresetArray(rawPresets: unknown[]): { presets: SystemPromptPreset[]; didChange: boolean } {
+    let didChange = false;
+    const seenIds = new Set<string>();
+    const presets: SystemPromptPreset[] = [];
+
+    for (const rawPreset of rawPresets) {
+        if (!isRecord(rawPreset)) {
             didChange = true;
-            return { ...preset, isBuiltIn: false };
+            continue;
         }
 
-        return preset;
-    });
+        const rawId = normalizePresetText(rawPreset.id, MAX_PRESET_ID_LENGTH);
+        const name = normalizePresetText(rawPreset.name, MAX_PRESET_NAME_LENGTH);
+        const systemPrompt = normalizePresetText(rawPreset.systemPrompt, MAX_SYSTEM_PROMPT_LENGTH);
 
-    return didChange ? normalized : storedPresets;
+        if (!rawId || !name || !systemPrompt) {
+            didChange = true;
+            continue;
+        }
+
+        const id = seenIds.has(rawId) ? createPresetId(seenIds) : rawId;
+        if (id !== rawId) {
+            didChange = true;
+        }
+        seenIds.add(id);
+
+        const preset: SystemPromptPreset = {
+            id,
+            name,
+            systemPrompt,
+            isBuiltIn: false,
+        };
+
+        if (
+            rawPreset.id !== id ||
+            rawPreset.name !== name ||
+            rawPreset.systemPrompt !== systemPrompt ||
+            rawPreset.isBuiltIn !== false
+        ) {
+            didChange = true;
+        }
+
+        presets.push(preset);
+    }
+
+    return { presets, didChange };
+}
+
+function decodePresetPayload(raw: string): PresetReadResult {
+    let parsed: unknown;
+
+    try {
+        parsed = JSON.parse(raw);
+    } catch (error) {
+        console.warn('[PresetManager] Corrupted preset JSON payload, restoring starter presets.', error);
+        return {
+            presets: getDefaultPresets(),
+            shouldPersist: true,
+            corruptRaw: raw,
+        };
+    }
+
+    const rawPresets = Array.isArray(parsed)
+        ? parsed
+        : isRecord(parsed) && Array.isArray(parsed.presets)
+            ? parsed.presets
+            : null;
+
+    if (!rawPresets) {
+        console.warn('[PresetManager] Invalid preset payload shape, restoring starter presets.');
+        return {
+            presets: getDefaultPresets(),
+            shouldPersist: true,
+            corruptRaw: raw,
+        };
+    }
+
+    const sanitized = sanitizePresetArray(rawPresets);
+    const isCurrentSchema =
+        isRecord(parsed) &&
+        parsed.schemaVersion === PRESET_SCHEMA_VERSION &&
+        Array.isArray(parsed.presets);
+
+    if (rawPresets.length > 0 && sanitized.presets.length === 0) {
+        console.warn('[PresetManager] Preset payload contained no valid entries, restoring starter presets.');
+        return {
+            presets: getDefaultPresets(),
+            shouldPersist: true,
+            corruptRaw: raw,
+        };
+    }
+
+    return {
+        presets: sanitized.presets,
+        shouldPersist: !isCurrentSchema || sanitized.didChange,
+    };
+}
+
+let corruptPresetCounter = 0;
+
+function quarantineCorruptPresetPayload(storage: MMKV, raw: string): void {
+    corruptPresetCounter += 1;
+    const quarantineKey = `${PRESETS_CORRUPT_PREFIX}${Date.now().toString(36)}_${corruptPresetCounter.toString(36)}`;
+    storage.set(quarantineKey, raw);
 }
 
 class PresetManager {
     getPresets(): SystemPromptPreset[] {
-        const raw = getPresetStorage().getString(PRESETS_KEY);
+        const storage = getPresetStorage();
+        const raw = storage.getString(PRESETS_KEY);
         if (!raw) {
-            // Initialize with defaults
-            this.savePresets(DEFAULT_PRESETS);
-            return [...DEFAULT_PRESETS];
+            const presets = getDefaultPresets();
+            this.savePresets(presets);
+            return presets;
         }
 
-        const parsed = JSON.parse(raw) as SystemPromptPreset[];
-        const normalized = normalizeStoredPresets(parsed);
+        const decoded = decodePresetPayload(raw);
 
-        if (normalized !== parsed) {
-            this.savePresets(normalized);
+        if (decoded.corruptRaw) {
+            quarantineCorruptPresetPayload(storage, decoded.corruptRaw);
         }
 
-        return normalized;
+        if (decoded.shouldPersist) {
+            this.savePresets(decoded.presets);
+        }
+
+        return clonePresets(decoded.presets);
     }
 
     getPreset(id: string): SystemPromptPreset | undefined {
@@ -129,13 +323,14 @@ class PresetManager {
     }
 
     addPreset(name: string, systemPrompt: string): SystemPromptPreset {
+        const presets = this.getPresets();
+        const existingIds = new Set(presets.map((preset) => preset.id));
         const preset: SystemPromptPreset = {
-            id: Date.now().toString(),
+            id: createPresetId(existingIds),
             name,
             systemPrompt,
             isBuiltIn: false,
         };
-        const presets = this.getPresets();
         presets.push(preset);
         this.savePresets(presets);
         return preset;
@@ -160,7 +355,7 @@ class PresetManager {
     }
 
     private savePresets(presets: SystemPromptPreset[]) {
-        getPresetStorage().set(PRESETS_KEY, JSON.stringify(presets));
+        getPresetStorage().set(PRESETS_KEY, encodePresetPayload(clonePresets(presets)));
     }
 }
 

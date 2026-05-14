@@ -43,7 +43,7 @@ type PresetReadResult = {
     corruptRaw?: string;
 };
 
-const DEFAULT_PRESETS: SystemPromptPreset[] = [
+const STARTER_PRESETS: SystemPromptPreset[] = [
     {
         id: 'helpful-assistant',
         name: 'Helpful Assistant',
@@ -114,8 +114,8 @@ function clonePresets(presets: SystemPromptPreset[]): SystemPromptPreset[] {
     return presets.map(clonePreset);
 }
 
-function getDefaultPresets(): SystemPromptPreset[] {
-    return clonePresets(DEFAULT_PRESETS);
+function getStarterPresets(): SystemPromptPreset[] {
+    return clonePresets(STARTER_PRESETS);
 }
 
 function encodePresetPayload(presets: SystemPromptPreset[]): string {
@@ -245,7 +245,7 @@ function decodePresetPayload(raw: string): PresetReadResult {
     } catch (error) {
         console.warn('[PresetManager] Corrupted preset JSON payload, restoring starter presets.', error);
         return {
-            presets: getDefaultPresets(),
+            presets: getStarterPresets(),
             shouldPersist: true,
             corruptRaw: raw,
         };
@@ -260,7 +260,7 @@ function decodePresetPayload(raw: string): PresetReadResult {
     if (!rawPresets) {
         console.warn('[PresetManager] Invalid preset payload shape, restoring starter presets.');
         return {
-            presets: getDefaultPresets(),
+            presets: getStarterPresets(),
             shouldPersist: true,
             corruptRaw: raw,
         };
@@ -275,7 +275,7 @@ function decodePresetPayload(raw: string): PresetReadResult {
     if (rawPresets.length > 0 && sanitized.presets.length === 0) {
         console.warn('[PresetManager] Preset payload contained no valid entries, restoring starter presets.');
         return {
-            presets: getDefaultPresets(),
+            presets: getStarterPresets(),
             shouldPersist: true,
             corruptRaw: raw,
         };
@@ -300,7 +300,7 @@ class PresetManager {
         const storage = getPresetStorage();
         const raw = storage.getString(PRESETS_KEY);
         if (!raw) {
-            const presets = getDefaultPresets();
+            const presets = getStarterPresets();
             this.savePresets(presets);
             return presets;
         }
@@ -325,10 +325,16 @@ class PresetManager {
     addPreset(name: string, systemPrompt: string): SystemPromptPreset {
         const presets = this.getPresets();
         const existingIds = new Set(presets.map((preset) => preset.id));
+        const normalizedName = normalizePresetText(name, MAX_PRESET_NAME_LENGTH);
+        const normalizedSystemPrompt = normalizePresetText(systemPrompt, MAX_SYSTEM_PROMPT_LENGTH);
+        if (!normalizedName || !normalizedSystemPrompt) {
+            throw new Error('Preset name and system prompt are required');
+        }
+
         const preset: SystemPromptPreset = {
             id: createPresetId(existingIds),
-            name,
-            systemPrompt,
+            name: normalizedName,
+            systemPrompt: normalizedSystemPrompt,
             isBuiltIn: false,
         };
         presets.push(preset);
@@ -341,7 +347,23 @@ class PresetManager {
         const index = presets.findIndex(p => p.id === id);
         if (index === -1) throw new Error(`Preset ${id} not found`);
 
-        presets[index] = { ...presets[index], ...updates };
+        const normalizedUpdates: Partial<Pick<SystemPromptPreset, 'name' | 'systemPrompt'>> = {};
+        if (Object.prototype.hasOwnProperty.call(updates, 'name')) {
+            const normalizedName = normalizePresetText(updates.name, MAX_PRESET_NAME_LENGTH);
+            if (!normalizedName) {
+                throw new Error('Preset name is required');
+            }
+            normalizedUpdates.name = normalizedName;
+        }
+        if (Object.prototype.hasOwnProperty.call(updates, 'systemPrompt')) {
+            const normalizedSystemPrompt = normalizePresetText(updates.systemPrompt, MAX_SYSTEM_PROMPT_LENGTH);
+            if (!normalizedSystemPrompt) {
+                throw new Error('Preset system prompt is required');
+            }
+            normalizedUpdates.systemPrompt = normalizedSystemPrompt;
+        }
+
+        presets[index] = { ...presets[index], ...normalizedUpdates, isBuiltIn: false };
         this.savePresets(presets);
         return presets[index];
     }

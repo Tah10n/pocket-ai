@@ -345,6 +345,105 @@ describe('chatStore', () => {
     expect(after?.status).toBe(before?.status);
   });
 
+  it('ignores stale assistant patches once the target is no longer the latest message', () => {
+    const threadId = useChatStore.getState().createThread({
+      modelId: 'author/model-q4',
+      presetId: null,
+      presetSnapshot: {
+        id: null,
+        name: 'Default',
+        systemPrompt: 'You are helpful.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 1024,
+        seed: null,
+      },
+    });
+
+    useChatStore.getState().appendMessage(threadId, {
+      id: 'user-1',
+      role: 'user',
+      content: 'Original prompt',
+      createdAt: 1,
+      state: 'complete',
+    });
+    useChatStore.getState().appendMessage(threadId, {
+      id: 'assistant-1',
+      role: 'assistant',
+      content: 'Original answer',
+      createdAt: 2,
+      state: 'complete',
+    });
+    useChatStore.getState().appendMessage(threadId, {
+      id: 'user-2',
+      role: 'user',
+      content: 'New prompt',
+      createdAt: 3,
+      state: 'complete',
+    });
+    const replacementId = useChatStore.getState().createAssistantPlaceholder(threadId);
+    const before = useChatStore.getState().getThread(threadId);
+
+    useChatStore.getState().patchAssistantMessage(threadId, 'assistant-1', {
+      content: 'Late stale token',
+      state: 'complete',
+    });
+
+    const after = useChatStore.getState().getThread(threadId);
+    expect(after).toBe(before);
+    expect(after?.messages.find((message) => message.id === 'assistant-1')).toEqual(
+      expect.objectContaining({
+        content: 'Original answer',
+        state: 'complete',
+      }),
+    );
+    expect(after?.messages.at(-1)).toEqual(
+      expect.objectContaining({
+        id: replacementId,
+        state: 'streaming',
+      }),
+    );
+  });
+
+  it('ignores late streaming patches after the assistant message is stopped', () => {
+    const threadId = useChatStore.getState().createThread({
+      modelId: 'author/model-q4',
+      presetId: null,
+      presetSnapshot: {
+        id: null,
+        name: 'Default',
+        systemPrompt: 'You are helpful.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 1024,
+        seed: null,
+      },
+    });
+
+    const assistantId = useChatStore.getState().createAssistantPlaceholder(threadId);
+    useChatStore.getState().stopAssistantMessage(threadId, assistantId);
+    const before = useChatStore.getState().getThread(threadId);
+
+    useChatStore.getState().patchAssistantMessage(threadId, assistantId, {
+      content: 'Late token after stop',
+      state: 'streaming',
+    });
+
+    const after = useChatStore.getState().getThread(threadId);
+    expect(after).toBe(before);
+    expect(after?.messages.at(-1)).toEqual(
+      expect.objectContaining({
+        id: assistantId,
+        content: '',
+        state: 'stopped',
+      }),
+    );
+  });
+
   it('stops an assistant message and marks the thread as stopped', () => {
     const threadId = useChatStore.getState().createThread({
       modelId: 'author/model-q4',
@@ -502,6 +601,57 @@ describe('chatStore', () => {
         modelId: 'author/model-q4',
       }),
     ]);
+  });
+
+  it('trims edited user branch content and rejects empty branch edits inside the store', () => {
+    const threadId = useChatStore.getState().createThread({
+      modelId: 'author/model-q4',
+      presetId: null,
+      presetSnapshot: {
+        id: null,
+        name: 'Default',
+        systemPrompt: 'You are helpful.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 1024,
+        seed: null,
+      },
+    });
+
+    useChatStore.getState().appendMessage(threadId, {
+      id: 'user-1',
+      role: 'user',
+      content: 'First prompt',
+      createdAt: 1,
+      state: 'complete',
+    });
+    useChatStore.getState().appendMessage(threadId, {
+      id: 'assistant-1',
+      role: 'assistant',
+      content: 'First reply',
+      createdAt: 2,
+      state: 'complete',
+    });
+
+    const replacementAssistantId = useChatStore.getState().replaceBranchFromUserMessage(
+      threadId,
+      'user-1',
+      '  Edited first prompt  ',
+    );
+
+    expect(replacementAssistantId).toBeTruthy();
+    expect(useChatStore.getState().getThread(threadId)?.messages[0]).toEqual(
+      expect.objectContaining({
+        id: 'user-1',
+        content: 'Edited first prompt',
+      }),
+    );
+
+    const beforeEmptyEdit = useChatStore.getState().getThread(threadId);
+    expect(useChatStore.getState().replaceBranchFromUserMessage(threadId, 'user-1', '   ')).toBeNull();
+    expect(useChatStore.getState().getThread(threadId)).toBe(beforeEmptyEdit);
   });
 
   it('replaces an older user branch with the active switched model metadata', () => {
@@ -1377,6 +1527,57 @@ describe('chatStore', () => {
     expect(storage.getString(getChatThreadStorageKey('thread-corrupt-v2'))).toBeUndefined();
     expect(index.threadIds).toEqual([validThread.id]);
     expect(index.corruptThreadIds).toEqual(['thread-corrupt-v2']);
+  });
+
+  it('recovers hydrated streaming assistant messages as stopped while preserving partial content', async () => {
+    const streamingThread: ChatThread = {
+      ...buildThread('thread-streaming-v2', 20),
+      messages: [
+        {
+          id: 'user-1',
+          role: 'user',
+          content: 'Prompt before crash',
+          createdAt: 20,
+          state: 'complete',
+        },
+        {
+          id: 'assistant-1',
+          role: 'assistant',
+          content: 'Partial answer before crash',
+          createdAt: 21,
+          state: 'streaming',
+        },
+      ],
+      status: 'generating',
+    };
+
+    writeChatThreadRecord(storage, streamingThread, 22);
+    writeChatPersistenceIndex(storage, {
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      activeThreadId: streamingThread.id,
+      threadIds: [streamingThread.id],
+      updatedAt: 22,
+    });
+
+    useChatStore.setState({ threads: {}, activeThreadId: null });
+    await useChatStore.persist.rehydrate();
+
+    expect(useChatStore.getState().getThread(streamingThread.id)).toEqual(
+      expect.objectContaining({
+        status: 'stopped',
+        messages: [
+          expect.objectContaining({
+            id: 'user-1',
+            state: 'complete',
+          }),
+          expect.objectContaining({
+            id: 'assistant-1',
+            content: 'Partial answer before crash',
+            state: 'stopped',
+          }),
+        ],
+      }),
+    );
   });
 
   it('reconstructs missing message modelId values using model_switch events during rehydration', async () => {

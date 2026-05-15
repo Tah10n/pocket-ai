@@ -64,6 +64,10 @@ interface CreateThreadInput {
   title?: string;
 }
 
+type AssistantMessagePatch = Partial<
+  Pick<ChatMessage, 'content' | 'thoughtContent' | 'tokensPerSec' | 'state' | 'errorCode' | 'errorMessage'>
+>;
+
 interface ChatStoreState {
   threads: Record<string, ChatThread>;
   activeThreadId: string | null;
@@ -85,7 +89,7 @@ interface ChatStoreState {
   patchAssistantMessage: (
     threadId: string,
     messageId: string,
-    updates: Partial<Pick<ChatMessage, 'content' | 'thoughtContent' | 'tokensPerSec' | 'state' | 'errorCode' | 'errorMessage'>>,
+    updates: AssistantMessagePatch,
   ) => void;
   replaceLastAssistantMessage: (threadId: string) => string | null;
   replaceBranchFromUserMessage: (
@@ -449,6 +453,26 @@ function persistChatStoreMutation(
   });
 
   writeChatPersistenceIndexForSnapshot(storage, next);
+}
+
+function canPatchAssistantMessage(
+  messages: ChatMessage[],
+  targetIndex: number,
+) {
+  const targetMessage = messages[targetIndex];
+  if (!targetMessage || targetMessage.role !== 'assistant') {
+    return false;
+  }
+
+  if (targetIndex !== messages.length - 1) {
+    return false;
+  }
+
+  if (targetMessage.state !== 'streaming') {
+    return false;
+  }
+
+  return true;
 }
 
 export const useChatStore = create<ChatStoreState>()(
@@ -897,6 +921,10 @@ export const useChatStore = create<ChatStoreState>()(
             return state;
           }
 
+          if (!canPatchAssistantMessage(messages, targetIndex)) {
+            return state;
+          }
+
           const nextMessages = messages.slice();
           nextMessages[targetIndex] = { ...messages[targetIndex], ...updates };
 
@@ -993,6 +1021,11 @@ export const useChatStore = create<ChatStoreState>()(
           return null;
         }
 
+        const normalizedNextUserContent = nextUserContent.trim();
+        if (!normalizedNextUserContent) {
+          return null;
+        }
+
         const targetMessage = thread.messages.find((message) => message.id === messageId);
         if (!targetMessage || targetMessage.role !== 'user') {
           return null;
@@ -1036,7 +1069,7 @@ export const useChatStore = create<ChatStoreState>()(
             ...(insertedSwitchMessage ? [insertedSwitchMessage] : []),
             {
               ...existingTargetMessage,
-              content: nextUserContent,
+              content: normalizedNextUserContent,
               state: 'complete',
               tokensPerSec: undefined,
               errorCode: undefined,

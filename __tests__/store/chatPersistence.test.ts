@@ -148,4 +148,86 @@ describe('chatPersistence', () => {
     jest.advanceTimersByTime(1);
     expect(flushThread).toHaveBeenCalledTimes(1);
   });
+
+  it('keeps the scheduled retry when an explicit pending flush fails', () => {
+    jest.useFakeTimers();
+    const storageError = new Error('private storage unavailable');
+    const flushThread = jest.fn((_threadId: string, reason: string) => {
+      if (reason === 'background') {
+        throw storageError;
+      }
+    });
+    const scheduler = createChatPersistenceWriteScheduler({
+      flushThread,
+      debounceMs: 1000,
+    });
+
+    scheduler.scheduleStreamingThreadWrite('thread-1');
+
+    expect(() => scheduler.flushThreadWrite('thread-1', 'background')).toThrow(storageError);
+    expect(flushThread).toHaveBeenCalledWith('thread-1', 'background');
+
+    jest.advanceTimersByTime(1000);
+
+    expect(flushThread).toHaveBeenCalledWith('thread-1', 'streaming_patch');
+    expect(flushThread).toHaveBeenCalledTimes(2);
+  });
+
+  it('continues flushing pending threads after one explicit flush fails', () => {
+    jest.useFakeTimers();
+    const storageError = new Error('private storage unavailable');
+    const flushThread = jest.fn((threadId: string, reason: string) => {
+      if (threadId === 'thread-1' && reason === 'background') {
+        throw storageError;
+      }
+    });
+    const scheduler = createChatPersistenceWriteScheduler({
+      flushThread,
+      debounceMs: 1000,
+    });
+
+    scheduler.scheduleStreamingThreadWrite('thread-1');
+    scheduler.scheduleStreamingThreadWrite('thread-2');
+
+    expect(() => scheduler.flushAllPendingWrites('background')).toThrow(storageError);
+    expect(flushThread).toHaveBeenCalledWith('thread-1', 'background');
+    expect(flushThread).toHaveBeenCalledWith('thread-2', 'background');
+    expect(flushThread).toHaveBeenCalledTimes(2);
+
+    jest.advanceTimersByTime(1000);
+
+    expect(flushThread).toHaveBeenCalledWith('thread-1', 'streaming_patch');
+    expect(flushThread).toHaveBeenCalledTimes(3);
+  });
+
+  it('contains scheduled streaming flush failures instead of throwing from timer callbacks', () => {
+    jest.useFakeTimers();
+    const storageError = new Error('private storage unavailable');
+    const flushThread = jest.fn((_threadId: string, reason: string) => {
+      if (reason === 'streaming_patch') {
+        throw storageError;
+      }
+    });
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const scheduler = createChatPersistenceWriteScheduler({
+      flushThread,
+      debounceMs: 1000,
+    });
+
+    scheduler.scheduleStreamingThreadWrite('thread-1');
+
+    expect(() => jest.advanceTimersByTime(1000)).not.toThrow();
+    expect(flushThread).toHaveBeenCalledWith('thread-1', 'streaming_patch');
+    expect(warnSpy).toHaveBeenCalledWith(
+      '[ChatPersistence] Failed to flush scheduled streaming thread write',
+      { threadId: 'thread-1', reason: 'streaming_patch' },
+      storageError,
+    );
+
+    scheduler.flushAllPendingWrites('background');
+    expect(flushThread).toHaveBeenCalledWith('thread-1', 'background');
+    expect(flushThread).toHaveBeenCalledTimes(2);
+
+    warnSpy.mockRestore();
+  });
 });

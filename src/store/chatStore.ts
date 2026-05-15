@@ -457,14 +457,16 @@ function persistChatStoreMutation(
   }
 
   if (nextThreadIds.length === 0) {
-    chatPersistenceScheduler.cancelAllPendingWrites();
     clearPersistedChatRecords(storage);
+    chatPersistenceScheduler.cancelAllPendingWrites();
     return;
   }
 
+  const persistedThreadIds = new Set<string>();
+
   removedThreadIds.forEach((threadId) => {
-    chatPersistenceScheduler.cancelThreadWrite(threadId);
     removeChatThreadRecord(storage, threadId);
+    persistedThreadIds.add(threadId);
   });
 
   if (reason === 'streaming_patch') {
@@ -475,6 +477,10 @@ function persistChatStoreMutation(
     if (removedThreadIds.length > 0 || activeThreadChanged) {
       writeChatPersistenceIndexForSnapshot(storage, next);
     }
+
+    persistedThreadIds.forEach((threadId) => {
+      chatPersistenceScheduler.cancelThreadWrite(threadId);
+    });
     return;
   }
 
@@ -484,11 +490,15 @@ function persistChatStoreMutation(
       return;
     }
 
-    chatPersistenceScheduler.cancelThreadWrite(threadId);
     writeChatThreadRecord(storage, thread);
+    persistedThreadIds.add(threadId);
   });
 
   writeChatPersistenceIndexForSnapshot(storage, next);
+
+  persistedThreadIds.forEach((threadId) => {
+    chatPersistenceScheduler.cancelThreadWrite(threadId);
+  });
 }
 
 function canPatchAssistantMessage(

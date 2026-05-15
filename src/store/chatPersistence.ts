@@ -213,39 +213,68 @@ export function createChatPersistenceWriteScheduler({
   flushThread: (threadId: string, reason: ChatPersistenceWriteReason) => void;
   debounceMs?: number;
 }): ChatPersistenceWriteScheduler {
-  const timers = new Map<string, ReturnType<typeof setTimeout>>();
+  const timers = new Map<string, ReturnType<typeof setTimeout> | null>();
 
   const clearThreadTimer = (threadId: string) => {
+    if (!timers.has(threadId)) {
+      return;
+    }
+
     const timer = timers.get(threadId);
     if (timer) {
       clearTimeout(timer);
-      timers.delete(threadId);
     }
+    timers.delete(threadId);
   };
 
   const flushThreadWrite = (threadId: string, reason: ChatPersistenceWriteReason) => {
-    clearThreadTimer(threadId);
     flushThread(threadId, reason);
+    clearThreadTimer(threadId);
   };
 
   return {
     scheduleStreamingThreadWrite: (threadId) => {
-      if (timers.has(threadId)) {
+      if (timers.get(threadId) != null) {
         return;
       }
 
       timers.set(
         threadId,
         setTimeout(() => {
-          timers.delete(threadId);
-          flushThread(threadId, 'streaming_patch');
+          try {
+            flushThread(threadId, 'streaming_patch');
+            timers.delete(threadId);
+          } catch (error) {
+            timers.set(threadId, null);
+            console.warn(
+              '[ChatPersistence] Failed to flush scheduled streaming thread write',
+              { threadId, reason: 'streaming_patch' },
+              error,
+            );
+          }
         }, debounceMs),
       );
     },
     flushThreadWrite,
     flushAllPendingWrites: (reason) => {
       const pendingThreadIds = Array.from(timers.keys());
-      pendingThreadIds.forEach((threadId) => flushThreadWrite(threadId, reason));
+      let firstError: unknown;
+      let hasError = false;
+
+      pendingThreadIds.forEach((threadId) => {
+        try {
+          flushThreadWrite(threadId, reason);
+        } catch (error) {
+          if (!hasError) {
+            firstError = error;
+            hasError = true;
+          }
+        }
+      });
+
+      if (hasError) {
+        throw firstError;
+      }
     },
     cancelThreadWrite: clearThreadTimer,
     cancelAllPendingWrites: () => {

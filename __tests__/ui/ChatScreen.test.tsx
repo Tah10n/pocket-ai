@@ -2034,7 +2034,7 @@ describe('ChatScreen', () => {
     expect(getByText('chat.thermalTitle')).toBeTruthy();
   });
 
-  it('shows summarize affordance when older messages are truncated from prompt context', () => {
+  it('shows summary unavailable notice when older messages are truncated from prompt context', () => {
     useChatStore.setState({
       threads: {
         'thread-1': {
@@ -2051,14 +2051,14 @@ describe('ChatScreen', () => {
       activeThreadId: 'thread-1',
     });
 
-    const { getByText } = render(React.createElement(ChatScreen));
+    const { getByText, queryByText } = render(React.createElement(ChatScreen));
 
-    expect(getByText('chat.summaryTrimmedTitle')).toBeTruthy();
-    fireEvent.press(getByText('chat.summarizeChat'));
-    expect(mockCreateSummaryPlaceholder).toHaveBeenCalledTimes(1);
+    expect(getByText('chat.summaryUnavailableTitle')).toBeTruthy();
+    expect(queryByText('chat.summarizeChat')).toBeNull();
+    expect(mockCreateSummaryPlaceholder).not.toHaveBeenCalled();
   });
 
-  it('renders a summary placeholder card when the thread already has summary metadata', () => {
+  it('does not render legacy summary placeholder metadata as a generated summary', () => {
     useChatStore.setState({
       threads: {
         'thread-1': {
@@ -2067,16 +2067,17 @@ describe('ChatScreen', () => {
             content: 'Summary generation is not available yet.',
             createdAt: 10,
             sourceMessageIds: ['message-1'],
+            isPlaceholder: true,
           },
         },
       },
       activeThreadId: 'thread-1',
     });
 
-    const { getByText } = render(React.createElement(ChatScreen));
+    const { queryByText } = render(React.createElement(ChatScreen));
 
-    expect(getByText('chat.summaryPlaceholderTitle')).toBeTruthy();
-    expect(getByText('Summary generation is not available yet.')).toBeTruthy();
+    expect(queryByText('chat.summarySavedTitle')).toBeNull();
+    expect(queryByText('Summary generation is not available yet.')).toBeNull();
   });
 
   it('opens preset selection from the header and updates the active thread preset', () => {

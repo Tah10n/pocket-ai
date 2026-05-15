@@ -14,7 +14,6 @@ import {
   resetSharedGenerationStateForTests,
   resolvePresetSnapshot,
   stopActiveChatGenerationForPrivateStorageBlocked,
-  SUMMARY_PLACEHOLDER_CONTENT,
 } from '../../src/hooks/useChatSession';
 import { presetManager } from '../../src/services/PresetManager';
 import { backgroundTaskService } from '../../src/services/BackgroundTaskService';
@@ -2093,7 +2092,7 @@ describe('useChatSession', () => {
     expect(messages[1]).toEqual({ role: 'user', content: `${longMessage}-7` });
   });
 
-  it('creates a persisted summary placeholder when truncation is active', async () => {
+  it('does not persist a summary placeholder when truncation is active', async () => {
     const threadId = useChatStore.getState().createThread({
       modelId: 'author/model-q4',
       presetId: 'preset-1',
@@ -2129,25 +2128,19 @@ describe('useChatSession', () => {
       expect(getSession()?.shouldOfferSummary).toBe(true);
     });
 
-    let created = false;
+    let created = true;
     await act(async () => {
       created = getSession()?.createSummaryPlaceholder() ?? false;
     });
 
-    expect(created).toBe(true);
+    expect(created).toBe(false);
     const activeThread = useChatStore.getState().getActiveThread();
-    expect(activeThread?.summary).toEqual(
-      expect.objectContaining({
-        content: SUMMARY_PLACEHOLDER_CONTENT,
-        sourceMessageIds: Array.from({ length: messageCount - 2 }, (_, index) => `message-${index + 1}`),
-        isPlaceholder: true,
-      }),
-    );
+    expect(activeThread?.summary).toBeUndefined();
     expect(buildInferenceMessagesForThread(activeThread!)).not.toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           role: 'system',
-          content: expect.stringContaining(SUMMARY_PLACEHOLDER_CONTENT),
+          content: expect.stringContaining('Summary generation is not available yet.'),
         }),
       ]),
     );
@@ -2202,18 +2195,13 @@ describe('useChatSession', () => {
       expect(getSession()?.truncatedMessageCount).toBe(4);
     });
 
-    let created = false;
+    let created = true;
     await act(async () => {
       created = getSession()?.createSummaryPlaceholder() ?? false;
     });
 
-    expect(created).toBe(true);
-    expect(useChatStore.getState().getActiveThread()?.summary).toEqual(
-      expect.objectContaining({
-        sourceMessageIds: ['message-1', 'message-2', 'message-3', 'message-4'],
-        isPlaceholder: true,
-      }),
-    );
+    expect(created).toBe(false);
+    expect(useChatStore.getState().getActiveThread()?.summary).toBeUndefined();
   });
 });
 

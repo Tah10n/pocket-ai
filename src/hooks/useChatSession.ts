@@ -35,8 +35,6 @@ import { syncThreadParameters } from '../utils/chatThreadParameters';
 import { PrivateStorageUnavailableError, getPrivateStorageHealthSnapshot, isPrivateStorageWritable } from '../services/storage';
 import { useTruncationTracking } from './useTruncationTracking';
 
-export const SUMMARY_PLACEHOLDER_CONTENT =
-  'Summary generation is not available yet. Older messages stay visible in the thread, but only the most recent context is sent to the model right now.';
 export { SUMMARY_AFFORDANCE_MIN_TRUNCATED_MESSAGES } from '../utils/inferenceWindow';
 const DEFAULT_CONTEXT_SIZE = 4096;
 const STREAM_PATCH_INTERVAL_MS = 100;
@@ -233,7 +231,6 @@ export const useChatSession = () => {
   const renameThreadState = useChatStore((state) => state.renameThread);
   const finalizeThreadStatus = useChatStore((state) => state.finalizeThreadStatus);
   const setActiveThread = useChatStore((state) => state.setActiveThread);
-  const setThreadSummary = useChatStore((state) => state.setThreadSummary);
   const updateThreadParamsSnapshot = useChatStore((state) => state.updateThreadParamsSnapshot);
 
   const activeContextTokenBudget = (() => {
@@ -950,25 +947,8 @@ export const useChatSession = () => {
   ]);
 
   const createSummaryPlaceholder = useCallback(() => {
-    if (!activeThread) {
-      return false;
-    }
-
-    if (!truncationState.shouldOfferSummary) {
-      return false;
-    }
-
-    assertPrivateStorageWritableForChatMutation();
-
-    setThreadSummary(activeThread.id, {
-      content: SUMMARY_PLACEHOLDER_CONTENT,
-      createdAt: Date.now(),
-      sourceMessageIds: truncationState.truncatedMessageIds,
-      isPlaceholder: true,
-    });
-
-    return true;
-  }, [activeThread, setThreadSummary, truncationState.shouldOfferSummary, truncationState.truncatedMessageIds]);
+    return false;
+  }, []);
 
   const startNewChat = useCallback(() => {
     if (activeThread?.status === 'generating') {

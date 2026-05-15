@@ -19,7 +19,7 @@ import {
   createChatId,
   getThreadActiveModelId,
 } from '../types/chat';
-import { useChatStore } from '../store/chatStore';
+import { flushPendingChatPersistenceWrites, useChatStore } from '../store/chatStore';
 import {
   DEFAULT_INFERENCE_PROMPT_SAFETY_MARGIN_TOKENS,
   buildInferenceWindowWithAccurateTokenCounts,
@@ -257,6 +257,17 @@ export const useChatSession = () => {
     const subscription = AppState.addEventListener('change', (nextAppState) => {
       const previousAppState = appStateRef.current;
       appStateRef.current = nextAppState;
+
+      if (nextAppState === 'background' || nextAppState === 'inactive') {
+        try {
+          sharedGenerationState.current?.flushPendingAssistantPatch?.();
+        } catch (error) {
+          if (!ignorePrivateStorageUnavailableDuringRuntimeStop(error, 'background assistant patch')) {
+            console.warn('[ChatSession] Failed to flush background assistant patch', error);
+          }
+        }
+        flushPendingChatPersistenceWrites('background');
+      }
 
       const returnedToForeground =
         (previousAppState === 'background' || previousAppState === 'inactive') &&

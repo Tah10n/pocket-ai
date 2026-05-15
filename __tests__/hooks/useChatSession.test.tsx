@@ -4,8 +4,10 @@ import { useChatSession } from '../../src/hooks/useChatSession';
 import { llmEngineService } from '../../src/services/LLMEngineService';
 import { getGenerationParametersForModel, getSettings } from '../../src/services/SettingsStore';
 import { EngineStatus, LifecycleStatus, ModelAccessState } from '../../src/types/models';
-import { estimateLlmMessagesTokens, useChatStore } from '../../src/store/chatStore';
+import { estimateLlmMessagesTokens, flushPendingChatPersistenceWrites, useChatStore } from '../../src/store/chatStore';
 import { AppState } from 'react-native';
+import { storage } from '../../src/store/storage';
+import { getChatThreadStorageKey } from '../../src/store/chatPersistence';
 import {
   buildInferenceMessagesForThread,
   getThreadTruncationState,
@@ -136,7 +138,9 @@ describe('useChatSession', () => {
       value: 'active',
     });
     await backgroundTaskService.stopBackgroundTask();
+    flushPendingChatPersistenceWrites('background');
     useChatStore.setState({ threads: {}, activeThreadId: null });
+    storage.getAllKeys().forEach((key) => storage.remove(key));
     resetSharedGenerationStateForTests();
     appStateListeners = [];
     (presetManager.getPreset as jest.Mock).mockReset();
@@ -1319,6 +1323,44 @@ describe('useChatSession', () => {
         state: 'complete',
       }),
     );
+  });
+
+  it('flushes pending streaming content into bounded storage before backgrounding', async () => {
+    let onToken: ((token: string) => void) | undefined;
+    let resolveCompletion: (() => void) | undefined;
+    let sendPromise: Promise<void> | undefined;
+
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementation(
+      ({ onToken: tokenHandler }: { onToken?: (token: string) => void }) =>
+        new Promise((resolve) => {
+          onToken = tokenHandler;
+          resolveCompletion = () => resolve({ text: 'Finished after background flush' });
+        }),
+    );
+
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      sendPromise = getSession()?.appendUserMessage('Persist partial before background');
+    });
+
+    await waitFor(() => {
+      expect(useChatStore.getState().getActiveThread()?.status).toBe('generating');
+    });
+
+    await act(async () => {
+      onToken?.('Partial before background');
+      emitAppState('background');
+    });
+
+    const threadId = useChatStore.getState().activeThreadId;
+    expect(threadId).toBeTruthy();
+    expect(storage.getString(getChatThreadStorageKey(threadId ?? ''))).toContain('Partial before background');
+
+    await act(async () => {
+      resolveCompletion?.();
+      await sendPromise;
+    });
   });
 
   it('marks orphaned generating state as stopped when returning to foreground', async () => {

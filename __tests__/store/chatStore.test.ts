@@ -1,5 +1,17 @@
 import { ChatThread } from '../../src/types/chat';
-import { findMostRecentThreadId, getThreadInferenceWindow, useChatStore } from '../../src/store/chatStore';
+import {
+  findMostRecentThreadId,
+  flushPendingChatPersistenceWrites,
+  getThreadInferenceWindow,
+  useChatStore,
+} from '../../src/store/chatStore';
+import {
+  CHAT_PERSISTENCE_INDEX_KEY,
+  CHAT_PERSISTENCE_SCHEMA_VERSION,
+  getChatThreadStorageKey,
+  writeChatPersistenceIndex,
+  writeChatThreadRecord,
+} from '../../src/store/chatPersistence';
 import { storage } from '../../src/store/storage';
 
 function buildThread(id: string, updatedAt: number): ChatThread {
@@ -36,8 +48,9 @@ function buildThread(id: string, updatedAt: number): ChatThread {
 
 describe('chatStore', () => {
   beforeEach(() => {
+    flushPendingChatPersistenceWrites('background');
     useChatStore.setState({ threads: {}, activeThreadId: null });
-    storage.remove('chat-store');
+    storage.getAllKeys().forEach((key) => storage.remove(key));
   });
 
   it('findMostRecentThreadId returns the newest thread id without sorting', () => {
@@ -845,7 +858,7 @@ describe('chatStore', () => {
     expect(useChatStore.getState().activeThreadId).toBe(firstThreadId);
   });
 
-  it('removes persisted chat-store when deleting the last thread', () => {
+  it('removes persisted v2 records when deleting the last thread', () => {
     const threadId = useChatStore.getState().createThread({
       modelId: 'author/model-q4',
       presetId: null,
@@ -862,16 +875,19 @@ describe('chatStore', () => {
       },
     });
 
-    expect(storage.getString('chat-store')).toBeTruthy();
+    expect(storage.getString(getChatThreadStorageKey(threadId))).toBeTruthy();
+    expect(storage.getString(CHAT_PERSISTENCE_INDEX_KEY)).toBeTruthy();
 
     useChatStore.getState().deleteThread(threadId);
 
     expect(useChatStore.getState().getThread(threadId)).toBeNull();
     expect(storage.getString('chat-store')).toBeUndefined();
+    expect(storage.getString(getChatThreadStorageKey(threadId))).toBeUndefined();
+    expect(storage.getString(CHAT_PERSISTENCE_INDEX_KEY)).toBeUndefined();
   });
 
-  it('removes persisted chat-store when clearing all threads', () => {
-    useChatStore.getState().createThread({
+  it('removes persisted v2 records when clearing all threads', () => {
+    const threadId = useChatStore.getState().createThread({
       modelId: 'author/model-q4',
       presetId: null,
       presetSnapshot: {
@@ -887,9 +903,12 @@ describe('chatStore', () => {
       },
     });
 
-    expect(storage.getString('chat-store')).toBeTruthy();
+    expect(storage.getString(getChatThreadStorageKey(threadId))).toBeTruthy();
+    expect(storage.getString(CHAT_PERSISTENCE_INDEX_KEY)).toBeTruthy();
     expect(useChatStore.getState().clearAllThreads()).toBe(1);
     expect(storage.getString('chat-store')).toBeUndefined();
+    expect(storage.getString(getChatThreadStorageKey(threadId))).toBeUndefined();
+    expect(storage.getString(CHAT_PERSISTENCE_INDEX_KEY)).toBeUndefined();
   });
 
   it('captures preset and params snapshots immutably at thread creation', () => {
@@ -1120,6 +1139,35 @@ describe('chatStore', () => {
     expect(useChatStore.getState().getThread(recentThread.id)).toEqual(recentThread);
   });
 
+  it('removes expired v2 records during retention cleanup without touching retained threads', () => {
+    const now = 100 * 24 * 60 * 60 * 1000;
+    const staleThread = buildThread('thread-stale-v2', now - 95 * 24 * 60 * 60 * 1000);
+    const recentThread = buildThread('thread-recent-v2', now - 10 * 24 * 60 * 60 * 1000);
+
+    writeChatThreadRecord(storage, staleThread, now);
+    writeChatThreadRecord(storage, recentThread, now);
+    writeChatPersistenceIndex(storage, {
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      activeThreadId: recentThread.id,
+      threadIds: [staleThread.id, recentThread.id],
+      updatedAt: now,
+    });
+    useChatStore.setState({
+      threads: {
+        [staleThread.id]: staleThread,
+        [recentThread.id]: recentThread,
+      },
+      activeThreadId: recentThread.id,
+    });
+
+    expect(useChatStore.getState().pruneExpiredThreads(90, now)).toBe(1);
+
+    const index = JSON.parse(storage.getString(CHAT_PERSISTENCE_INDEX_KEY) ?? '{}');
+    expect(storage.getString(getChatThreadStorageKey(staleThread.id))).toBeUndefined();
+    expect(storage.getString(getChatThreadStorageKey(recentThread.id))).toContain(recentThread.title);
+    expect(index.threadIds).toEqual([recentThread.id]);
+  });
+
   it('moves activeThreadId to the most recent remaining thread when pruning runs with a missing activeThreadId', () => {
     const now = 100 * 24 * 60 * 60 * 1000;
     const staleThread = buildThread('thread-stale', now - 95 * 24 * 60 * 60 * 1000);
@@ -1225,6 +1273,110 @@ describe('chatStore', () => {
         modelId: legacyThread.modelId,
       }),
     ]);
+    expect(storage.getString(getChatThreadStorageKey(legacyThread.id))).toContain('Legacy prompt');
+    expect(storage.getString('chat-store')).not.toContain('Legacy prompt');
+  });
+
+  it('migrates valid legacy threads while isolating invalid legacy records', async () => {
+    const validThread = buildThread('thread-valid-legacy', 20);
+
+    storage.set(
+      'chat-store',
+      JSON.stringify({
+        state: {
+          threads: {
+            [validThread.id]: validThread,
+            'thread-invalid-legacy': {
+              id: 'thread-invalid-legacy',
+              messages: [],
+            },
+          },
+          activeThreadId: 'thread-invalid-legacy',
+        },
+        version: 0,
+      }),
+    );
+
+    useChatStore.setState({ threads: {}, activeThreadId: null });
+    await useChatStore.persist.rehydrate();
+
+    const index = JSON.parse(storage.getString(CHAT_PERSISTENCE_INDEX_KEY) ?? '{}');
+
+    expect(useChatStore.getState().getThread(validThread.id)).toEqual(
+      expect.objectContaining({ id: validThread.id }),
+    );
+    expect(useChatStore.getState().getThread('thread-invalid-legacy')).toBeNull();
+    expect(useChatStore.getState().activeThreadId).toBe(validThread.id);
+    expect(storage.getString(getChatThreadStorageKey(validThread.id))).toContain(validThread.title);
+    expect(index.threadIds).toEqual([validThread.id]);
+    expect(index.corruptThreadIds).toEqual(['thread-invalid-legacy']);
+  });
+
+  it('does not let an empty v2 index shadow a valid legacy snapshot during migration', async () => {
+    const validThread = buildThread('thread-shadowed-legacy', 30);
+
+    writeChatPersistenceIndex(storage, {
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      activeThreadId: null,
+      threadIds: [],
+      updatedAt: 1,
+    });
+    storage.set(
+      'chat-store',
+      JSON.stringify({
+        state: {
+          threads: {
+            [validThread.id]: validThread,
+          },
+          activeThreadId: validThread.id,
+        },
+        version: 0,
+      }),
+    );
+
+    useChatStore.setState({ threads: {}, activeThreadId: null });
+    await useChatStore.persist.rehydrate();
+
+    expect(useChatStore.getState().getThread(validThread.id)).toEqual(
+      expect.objectContaining({ id: validThread.id }),
+    );
+    expect(storage.getString(getChatThreadStorageKey(validThread.id))).toContain(validThread.title);
+  });
+
+  it('hydrates valid v2 records when another v2 record is corrupt', async () => {
+    const validThread = buildThread('thread-valid-v2', 20);
+
+    writeChatThreadRecord(storage, validThread, 20);
+    storage.set(
+      getChatThreadStorageKey('thread-corrupt-v2'),
+      JSON.stringify({
+        schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+        thread: {
+          id: 'thread-corrupt-v2',
+        },
+        persistedAt: 21,
+      }),
+    );
+    writeChatPersistenceIndex(storage, {
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      activeThreadId: 'thread-corrupt-v2',
+      threadIds: [validThread.id, 'thread-corrupt-v2'],
+      updatedAt: 22,
+    });
+
+    useChatStore.setState({ threads: {}, activeThreadId: null });
+    await useChatStore.persist.rehydrate();
+
+    const index = JSON.parse(storage.getString(CHAT_PERSISTENCE_INDEX_KEY) ?? '{}');
+
+    expect(useChatStore.getState().getThread(validThread.id)).toEqual(
+      expect.objectContaining({ id: validThread.id }),
+    );
+    expect(useChatStore.getState().getThread('thread-corrupt-v2')).toBeNull();
+    expect(useChatStore.getState().activeThreadId).toBe(validThread.id);
+    expect(storage.getString(getChatThreadStorageKey('thread-corrupt-v2'))).toBeUndefined();
+    expect(index.threadIds).toEqual([validThread.id]);
+    expect(index.corruptThreadIds).toEqual(['thread-corrupt-v2']);
   });
 
   it('reconstructs missing message modelId values using model_switch events during rehydration', async () => {
@@ -1323,11 +1475,12 @@ describe('chatStore', () => {
       state: 'complete',
     });
 
-    const persistedSnapshot = storage.getString('chat-store');
-    expect(persistedSnapshot).toContain('Persist this thread');
+    const persistedRecord = storage.getString(getChatThreadStorageKey(threadId));
+    const persistedAnchor = storage.getString('chat-store');
+    expect(persistedRecord).toContain('Persist this thread');
+    expect(persistedAnchor).not.toContain('Persist this thread');
 
     useChatStore.setState({ threads: {}, activeThreadId: null });
-    storage.set('chat-store', persistedSnapshot ?? '');
     await useChatStore.persist.rehydrate();
 
     expect(useChatStore.getState().activeThreadId).toBe(threadId);
@@ -1344,55 +1497,82 @@ describe('chatStore', () => {
     );
   });
 
-  it('documents legacy streaming patches serialize unrelated threads into the chat-store snapshot', () => {
+  it('debounces streaming patches to the active thread without rewriting unrelated records', () => {
+    jest.useFakeTimers();
+    const activeThread = {
+      ...buildThread('thread-active', 20),
+      messages: [
+        {
+          id: 'active-user-1',
+          role: 'user' as const,
+          content: 'Active prompt',
+          createdAt: 20,
+          state: 'complete' as const,
+        },
+        {
+          id: 'active-assistant-1',
+          role: 'assistant' as const,
+          content: '',
+          createdAt: 21,
+          state: 'streaming' as const,
+        },
+      ],
+      status: 'generating' as const,
+    };
+    const archivedThread = {
+      ...buildThread('thread-archive', 10),
+      messages: [
+        {
+          id: 'archive-user-1',
+          role: 'user' as const,
+          content: 'Archived prompt that should not be rewritten by active streaming',
+          createdAt: 10,
+          state: 'complete' as const,
+        },
+      ],
+    };
+
+    writeChatThreadRecord(storage, archivedThread, 10);
+    writeChatPersistenceIndex(storage, {
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      activeThreadId: activeThread.id,
+      threadIds: [activeThread.id, archivedThread.id],
+      updatedAt: 10,
+    });
+    const archivedRecordBefore = storage.getString(getChatThreadStorageKey(archivedThread.id));
+
     useChatStore.setState({
       threads: {
-        'thread-active': {
-          ...buildThread('thread-active', 20),
-          messages: [
-            {
-              id: 'active-user-1',
-              role: 'user',
-              content: 'Active prompt',
-              createdAt: 20,
-              state: 'complete',
-            },
-            {
-              id: 'active-assistant-1',
-              role: 'assistant',
-              content: '',
-              createdAt: 21,
-              state: 'streaming',
-            },
-          ],
-          status: 'generating',
-        },
-        'thread-archive': {
-          ...buildThread('thread-archive', 10),
-          messages: [
-            {
-              id: 'archive-user-1',
-              role: 'user',
-              content: 'Archived prompt that should not be rewritten by active streaming',
-              createdAt: 10,
-              state: 'complete',
-            },
-          ],
-        },
+        [activeThread.id]: activeThread,
+        [archivedThread.id]: archivedThread,
       },
-      activeThreadId: 'thread-active',
+      activeThreadId: activeThread.id,
     });
 
-    useChatStore.getState().patchAssistantMessage('thread-active', 'active-assistant-1', {
+    useChatStore.getState().patchAssistantMessage(activeThread.id, 'active-assistant-1', {
       content: 'Streaming token',
       state: 'streaming',
     });
 
-    const persistedSnapshot = storage.getString('chat-store');
+    expect(storage.getString('chat-store')).not.toContain('Archived prompt that should not be rewritten by active streaming');
+    expect(storage.getString(getChatThreadStorageKey(activeThread.id))).toBeUndefined();
+    expect(storage.getString(getChatThreadStorageKey(archivedThread.id))).toBe(archivedRecordBefore);
 
-    expect(persistedSnapshot).toContain('thread-active');
-    expect(persistedSnapshot).toContain('thread-archive');
-    expect(persistedSnapshot).toContain('Archived prompt that should not be rewritten by active streaming');
+    jest.advanceTimersByTime(749);
+    expect(storage.getString(getChatThreadStorageKey(activeThread.id))).toBeUndefined();
+
+    flushPendingChatPersistenceWrites('background');
+    expect(storage.getString(getChatThreadStorageKey(activeThread.id))).toContain('Streaming token');
+    expect(storage.getString(getChatThreadStorageKey(archivedThread.id))).toBe(archivedRecordBefore);
+
+    useChatStore.getState().finalizeAssistantMessage(
+      activeThread.id,
+      'active-assistant-1',
+      'Final answer',
+    );
+
+    expect(storage.getString(getChatThreadStorageKey(activeThread.id))).toContain('Final answer');
+    jest.useRealTimers();
   });
 
   it('persists activeModelId, model switches, and per-message model metadata across rehydration', async () => {
@@ -1451,12 +1631,13 @@ describe('chatStore', () => {
       }),
     );
 
-    const persistedSnapshot = storage.getString('chat-store');
-    expect(persistedSnapshot).toContain('model_switch');
-    expect(persistedSnapshot).toContain('author/model-q6');
+    const persistedRecord = storage.getString(getChatThreadStorageKey(legacyThread.id));
+    const persistedAnchor = storage.getString('chat-store');
+    expect(persistedRecord).toContain('model_switch');
+    expect(persistedRecord).toContain('author/model-q6');
+    expect(persistedAnchor).not.toContain('model_switch');
 
     useChatStore.setState({ threads: {}, activeThreadId: null });
-    storage.set('chat-store', persistedSnapshot ?? '');
     await useChatStore.persist.rehydrate();
 
     const rehydrated = useChatStore.getState().getThread(legacyThread.id);

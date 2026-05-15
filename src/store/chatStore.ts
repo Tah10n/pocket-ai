@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { createJSONStorage, persist } from 'zustand/middleware';
+import { createJSONStorage, persist, type StateStorage } from 'zustand/middleware';
 import { getAppStorage, mmkvStorage } from '../store/storage';
 import {
   ChatMessage,
@@ -22,13 +22,39 @@ import {
 import { normalizeReasoningEffort } from '../types/reasoning';
 import { createInstrumentedStateStorage } from './persistStateStorage';
 import { assertPrivateStorageWritable } from '../services/storage';
+import {
+  CHAT_PERSISTENCE_SCHEMA_VERSION,
+  ChatPersistenceWriteReason,
+  LEGACY_CHAT_STORE_STORAGE_KEY,
+  clearPersistedChatRecords,
+  createChatPersistenceWriteScheduler,
+  getThreadIdFromChatThreadStorageKey,
+  listChatThreadStorageKeys,
+  readChatPersistenceIndex,
+  readChatThreadRecord,
+  recoverStaleStreamingThread,
+  removeChatThreadRecord,
+  writeChatPersistenceIndex,
+  writeChatThreadRecord,
+} from './chatPersistence';
 
 const FALLBACK_TOP_K = 40;
 const FALLBACK_MIN_P = 0.05;
 const FALLBACK_REPETITION_PENALTY = 1;
-const CHAT_STORE_STORAGE_KEY = 'chat-store';
+const CHAT_STORE_STORAGE_KEY = LEGACY_CHAT_STORE_STORAGE_KEY;
 
-const chatStoreStateStorage = createInstrumentedStateStorage(mmkvStorage, { scope: 'chatStore', dedupe: true });
+const chatStoreStateStorage = createInstrumentedStateStorage(createChatStoreStateStorage(), {
+  scope: 'chatStore',
+  dedupe: true,
+});
+
+type ChatStorePersistedState = Partial<Pick<ChatStoreState, 'threads' | 'activeThreadId'>>;
+type ChatStoreSnapshot = Pick<ChatStoreState, 'threads' | 'activeThreadId'>;
+
+interface ChatStoreHydrationResult {
+  threads: Record<string, ChatThread>;
+  activeThreadId: string | null;
+}
 
 interface CreateThreadInput {
   modelId: string;
@@ -112,7 +138,7 @@ function createModelSwitchMessage({
 
 function clearPersistedChatStoreIfEmpty(threads: Record<string, ChatThread>) {
   if (Object.keys(threads).length === 0) {
-    getAppStorage().remove(CHAT_STORE_STORAGE_KEY);
+    clearPersistedChatRecords(getAppStorage());
   }
 }
 
@@ -149,12 +175,297 @@ export function findMostRecentThreadId(threads: Record<string, ChatThread>): str
   return bestId;
 }
 
+function createChatStoreStateStorage(): StateStorage {
+  return {
+    ...mmkvStorage,
+    getItem: (name) => {
+      const value = mmkvStorage.getItem(name);
+      if (value != null || name !== CHAT_STORE_STORAGE_KEY) {
+        return value;
+      }
+
+      try {
+        return hasV2ChatPersistence()
+          ? JSON.stringify({
+              state: { activeThreadId: null },
+              version: CHAT_PERSISTENCE_SCHEMA_VERSION,
+            })
+          : null;
+      } catch {
+        return null;
+      }
+    },
+  };
+}
+
+function hasV2ChatPersistence() {
+  const storage = getAppStorage();
+  if (readChatPersistenceIndex(storage).ok) {
+    return true;
+  }
+
+  return listChatThreadStorageKeys(storage).length > 0;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isChatThreadStatus(value: unknown): value is ChatThreadStatus {
+  return value === 'idle' || value === 'generating' || value === 'stopped' || value === 'error';
+}
+
+function isHydratableChatThread(value: unknown): value is ChatThread {
+  if (!isRecord(value)) {
+    return false;
+  }
+
+  return (
+    typeof value.id === 'string' &&
+    typeof value.title === 'string' &&
+    typeof value.modelId === 'string' &&
+    (typeof value.presetId === 'string' || value.presetId === null) &&
+    isRecord(value.paramsSnapshot) &&
+    Array.isArray(value.messages) &&
+    typeof value.createdAt === 'number' &&
+    typeof value.updatedAt === 'number' &&
+    isChatThreadStatus(value.status)
+  );
+}
+
+function sanitizePersistedChatThread(value: unknown, now = Date.now()): ChatThread | null {
+  if (!isHydratableChatThread(value)) {
+    return null;
+  }
+
+  try {
+    return sanitizeHydratedThread(recoverStaleStreamingThread(value, now));
+  } catch {
+    return null;
+  }
+}
+
+function resolveActiveThreadId(
+  threads: Record<string, ChatThread>,
+  activeThreadId: string | null | undefined,
+) {
+  return activeThreadId && threads[activeThreadId]
+    ? activeThreadId
+    : findMostRecentThreadId(threads);
+}
+
+function writeChatPersistenceIndexForSnapshot(
+  storage: ReturnType<typeof getAppStorage>,
+  snapshot: ChatStoreSnapshot,
+  options?: {
+    migratedFromLegacyAt?: number;
+    corruptThreadIds?: string[];
+  },
+) {
+  const threadIds = Object.keys(snapshot.threads);
+  writeChatPersistenceIndex(storage, {
+    schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+    activeThreadId: resolveActiveThreadId(snapshot.threads, snapshot.activeThreadId),
+    threadIds,
+    updatedAt: Date.now(),
+    migratedFromLegacyAt: options?.migratedFromLegacyAt,
+    corruptThreadIds: options?.corruptThreadIds?.length ? options.corruptThreadIds : undefined,
+  });
+}
+
+function readV2PersistedChatState(now = Date.now()): ChatStoreHydrationResult | null {
+  const storage = getAppStorage();
+  const indexResult = readChatPersistenceIndex(storage);
+  const indexedThreadIds = indexResult.ok ? indexResult.value.threadIds : [];
+  const discoveredThreadIds = listChatThreadStorageKeys(storage)
+    .map((key) => getThreadIdFromChatThreadStorageKey(key))
+    .filter((threadId): threadId is string => threadId != null);
+  const threadIds = Array.from(new Set([...indexedThreadIds, ...discoveredThreadIds]));
+
+  if (!indexResult.ok && threadIds.length === 0) {
+    return null;
+  }
+
+  const threads: Record<string, ChatThread> = {};
+  const corruptThreadIds: string[] = [];
+
+  threadIds.forEach((threadId) => {
+    const recordResult = readChatThreadRecord(storage, threadId);
+    const thread = recordResult.ok
+      ? sanitizePersistedChatThread(recordResult.value.thread, now)
+      : null;
+
+    if (!thread) {
+      corruptThreadIds.push(threadId);
+      removeChatThreadRecord(storage, threadId);
+      return;
+    }
+
+    threads[thread.id] = thread;
+  });
+
+  const activeThreadId = resolveActiveThreadId(
+    threads,
+    indexResult.ok ? indexResult.value.activeThreadId : null,
+  );
+  writeChatPersistenceIndexForSnapshot(storage, { threads, activeThreadId }, { corruptThreadIds });
+
+  return { threads, activeThreadId };
+}
+
+function migrateLegacyPersistedChatState(
+  persistedState: unknown,
+  now = Date.now(),
+): ChatStoreHydrationResult | null {
+  if (!hasLegacyThreadPayload(persistedState)) {
+    return null;
+  }
+
+  const storage = getAppStorage();
+  const threads: Record<string, ChatThread> = {};
+  const corruptThreadIds: string[] = [];
+
+  Object.entries(persistedState.threads).forEach(([threadId, rawThread]) => {
+    const thread = sanitizePersistedChatThread(rawThread, now);
+    if (!thread) {
+      corruptThreadIds.push(threadId);
+      return;
+    }
+
+    threads[thread.id] = thread;
+    writeChatThreadRecord(storage, thread, now);
+  });
+
+  const rawActiveThreadId = typeof persistedState.activeThreadId === 'string'
+    ? persistedState.activeThreadId
+    : null;
+  const activeThreadId = resolveActiveThreadId(threads, rawActiveThreadId);
+  writeChatPersistenceIndexForSnapshot(storage, { threads, activeThreadId }, {
+    migratedFromLegacyAt: now,
+    corruptThreadIds,
+  });
+  storage.set(CHAT_STORE_STORAGE_KEY, JSON.stringify({
+    state: { activeThreadId },
+    version: CHAT_PERSISTENCE_SCHEMA_VERSION,
+  }));
+
+  return { threads, activeThreadId };
+}
+
+function hasLegacyThreadPayload(
+  value: unknown,
+): value is { threads: Record<string, unknown>; activeThreadId?: unknown } {
+  return isRecord(value) && isRecord(value.threads) && Object.keys(value.threads).length > 0;
+}
+
+function hydratePersistedChatState(persistedState: unknown): ChatStoreHydrationResult {
+  const v2State = readV2PersistedChatState();
+  if (v2State && (Object.keys(v2State.threads).length > 0 || !hasLegacyThreadPayload(persistedState))) {
+    return v2State;
+  }
+
+  const legacyState = migrateLegacyPersistedChatState(persistedState);
+  if (legacyState) {
+    return legacyState;
+  }
+
+  if (v2State) {
+    return v2State;
+  }
+
+  const activeThreadId =
+    isRecord(persistedState) && typeof persistedState.activeThreadId === 'string'
+      ? persistedState.activeThreadId
+      : null;
+
+  return { threads: {}, activeThreadId: activeThreadId ?? null };
+}
+
+let chatPersistenceContext: { reason: ChatPersistenceWriteReason } | null = null;
+
+function withChatPersistenceContext<T>(
+  context: { reason: ChatPersistenceWriteReason },
+  callback: () => T,
+): T {
+  const previousContext = chatPersistenceContext;
+  chatPersistenceContext = context;
+  try {
+    return callback();
+  } finally {
+    chatPersistenceContext = previousContext;
+  }
+}
+
+function persistChatStoreMutation(
+  previous: ChatStoreSnapshot,
+  next: ChatStoreSnapshot,
+  reason: ChatPersistenceWriteReason,
+) {
+  const storage = getAppStorage();
+  const previousThreadIds = Object.keys(previous.threads);
+  const nextThreadIds = Object.keys(next.threads);
+  const removedThreadIds = previousThreadIds.filter((threadId) => !next.threads[threadId]);
+  const changedThreadIds = nextThreadIds.filter((threadId) => previous.threads[threadId] !== next.threads[threadId]);
+  const activeThreadChanged = previous.activeThreadId !== next.activeThreadId;
+
+  if (
+    removedThreadIds.length === 0 &&
+    changedThreadIds.length === 0 &&
+    !activeThreadChanged
+  ) {
+    return;
+  }
+
+  if (nextThreadIds.length === 0) {
+    chatPersistenceScheduler.cancelAllPendingWrites();
+    clearPersistedChatRecords(storage);
+    return;
+  }
+
+  removedThreadIds.forEach((threadId) => {
+    chatPersistenceScheduler.cancelThreadWrite(threadId);
+    removeChatThreadRecord(storage, threadId);
+  });
+
+  if (reason === 'streaming_patch') {
+    changedThreadIds.forEach((threadId) => {
+      chatPersistenceScheduler.scheduleStreamingThreadWrite(threadId);
+    });
+
+    if (removedThreadIds.length > 0 || activeThreadChanged) {
+      writeChatPersistenceIndexForSnapshot(storage, next);
+    }
+    return;
+  }
+
+  changedThreadIds.forEach((threadId) => {
+    const thread = next.threads[threadId];
+    if (!thread) {
+      return;
+    }
+
+    chatPersistenceScheduler.cancelThreadWrite(threadId);
+    writeChatThreadRecord(storage, thread);
+  });
+
+  writeChatPersistenceIndexForSnapshot(storage, next);
+}
+
 export const useChatStore = create<ChatStoreState>()(
   persist(
     (set, get) => {
       const setWhenPrivateStorageWritable: typeof set = (partial, replace) => {
         assertPrivateStorageWritable();
-        return (set as any)(partial, replace);
+        const previous = {
+          threads: get().threads,
+          activeThreadId: get().activeThreadId,
+        };
+        const result = (set as any)(partial, replace);
+        persistChatStoreMutation(previous, {
+          threads: get().threads,
+          activeThreadId: get().activeThreadId,
+        }, chatPersistenceContext?.reason ?? 'thread_mutation');
+        return result;
       };
 
       return {
@@ -281,7 +592,7 @@ export const useChatStore = create<ChatStoreState>()(
         const threadCount = Object.keys(get().threads).length;
         if (threadCount === 0) {
           assertPrivateStorageWritable();
-          getAppStorage().remove(CHAT_STORE_STORAGE_KEY);
+          clearPersistedChatRecords(getAppStorage());
           return 0;
         }
 
@@ -289,7 +600,7 @@ export const useChatStore = create<ChatStoreState>()(
           threads: {},
           activeThreadId: null,
         });
-        getAppStorage().remove(CHAT_STORE_STORAGE_KEY);
+        clearPersistedChatRecords(getAppStorage());
 
         return threadCount;
         },
@@ -559,7 +870,13 @@ export const useChatStore = create<ChatStoreState>()(
       },
 
       patchAssistantMessage: (threadId, messageId, updates) =>
-        setWhenPrivateStorageWritable((state) => {
+        withChatPersistenceContext({
+          reason: updates.state === 'streaming'
+            ? 'streaming_patch'
+            : updates.state
+              ? 'terminal_state'
+              : 'thread_mutation',
+        }, () => setWhenPrivateStorageWritable((state) => {
           const existingThread = state.threads[threadId];
           if (!existingThread) {
             return state;
@@ -616,7 +933,7 @@ export const useChatStore = create<ChatStoreState>()(
               },
             },
           };
-        }),
+        })),
 
       replaceLastAssistantMessage: (threadId) => {
         const thread = get().threads[threadId];
@@ -807,58 +1124,24 @@ export const useChatStore = create<ChatStoreState>()(
       };
     },
     {
-      name: 'chat-store',
-      version: 1,
+      name: CHAT_STORE_STORAGE_KEY,
+      version: CHAT_PERSISTENCE_SCHEMA_VERSION,
       skipHydration: true,
       storage: createJSONStorage(() => chatStoreStateStorage),
       partialize: (state) => ({
-        threads: (() => {
-          const threads = state.threads;
-          const hasAnyGeneratingThread = Object.values(threads).some((thread) =>
-            thread.status === 'generating',
-          );
-
-          if (!hasAnyGeneratingThread) {
-            return threads;
-          }
-
-          return Object.fromEntries(
-            Object.entries(threads).map(([threadId, thread]) => {
-              if (thread.status !== 'generating') {
-                return [threadId, thread];
-              }
-
-              const stoppedStatus = 'stopped';
-              return [
-                threadId,
-                {
-                  ...thread,
-                  status: stoppedStatus,
-                  messages: thread.messages.filter((message) => message.state !== 'streaming'),
-                },
-              ];
-            }),
-          );
-        })(),
         activeThreadId: state.activeThreadId,
       }),
       migrate: (persistedState, version) => {
-        const state = (persistedState ?? {}) as Partial<Pick<ChatStoreState, 'threads' | 'activeThreadId'>>;
-        const threads = (state.threads ?? {}) as Record<string, ChatThread>;
-
-        const sanitizedThreads = Object.fromEntries(
-          Object.entries(threads).map(([threadId, thread]) => [threadId, sanitizeHydratedThread(thread)]),
-        );
-
-        const resolvedActiveThreadId = state.activeThreadId && sanitizedThreads[state.activeThreadId]
-          ? state.activeThreadId
-          : findMostRecentThreadId(sanitizedThreads);
-
         void version;
+        return (persistedState ?? {}) as ChatStorePersistedState;
+      },
+      merge: (persistedState, currentState) => {
+        const hydratedState = hydratePersistedChatState(persistedState);
 
         return {
-          threads: sanitizedThreads,
-          activeThreadId: resolvedActiveThreadId,
+          ...currentState,
+          threads: hydratedState.threads,
+          activeThreadId: hydratedState.activeThreadId,
         };
       },
       onRehydrateStorage: () => (state) => {
@@ -866,28 +1149,45 @@ export const useChatStore = create<ChatStoreState>()(
           return;
         }
 
-        const sanitizedThreads = Object.fromEntries(
-          Object.entries(state.threads).map(([threadId, thread]) => [
-            threadId,
-            sanitizeHydratedThread(thread),
-          ]),
-        );
-
-        state.threads = sanitizedThreads;
-
-        if (state.activeThreadId && !sanitizedThreads[state.activeThreadId]) {
-          state.activeThreadId = findMostRecentThreadId(sanitizedThreads);
+        if (state.activeThreadId && !state.threads[state.activeThreadId]) {
+          state.activeThreadId = findMostRecentThreadId(state.threads);
         }
       },
     },
   ),
 );
 
+function flushChatThreadPersistence(threadId: string, reason: ChatPersistenceWriteReason): void {
+  const state = useChatStore.getState();
+  const storage = getAppStorage();
+  const thread = state.threads[threadId];
+
+  if (!thread) {
+    removeChatThreadRecord(storage, threadId);
+    writeChatPersistenceIndexForSnapshot(storage, state);
+    return;
+  }
+
+  void reason;
+  writeChatThreadRecord(storage, thread);
+  writeChatPersistenceIndexForSnapshot(storage, state);
+}
+
+const chatPersistenceScheduler = createChatPersistenceWriteScheduler({
+  flushThread: flushChatThreadPersistence,
+});
+
+export function flushPendingChatPersistenceWrites(reason: ChatPersistenceWriteReason = 'background'): void {
+  chatPersistenceScheduler.flushAllPendingWrites(reason);
+}
+
 export function resetChatStoreForPrivateStorageReset(): void {
+  chatPersistenceScheduler.cancelAllPendingWrites();
   useChatStore.setState({
     threads: {},
     activeThreadId: null,
   });
+  clearPersistedChatRecords(getAppStorage());
   void useChatStore.persist.clearStorage();
 }
 export type { ThreadInferenceWindow, ThreadInferenceWindowOptions } from '../utils/inferenceWindow';

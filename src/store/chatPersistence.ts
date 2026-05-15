@@ -147,6 +147,16 @@ export function writeChatThreadRecord(storage: AppStorageFacade, thread: ChatThr
   storage.set(getChatThreadStorageKey(thread.id), JSON.stringify(record));
 }
 
+export function removeChatThreadRecord(storage: AppStorageFacade, threadId: string): void {
+  storage.remove(getChatThreadStorageKey(threadId));
+}
+
+export function clearPersistedChatRecords(storage: AppStorageFacade): void {
+  storage.remove(LEGACY_CHAT_STORE_STORAGE_KEY);
+  storage.remove(CHAT_PERSISTENCE_INDEX_KEY);
+  listChatThreadStorageKeys(storage).forEach((key) => storage.remove(key));
+}
+
 export function readChatPersistenceIndex(storage: AppStorageFacade): ChatPersistenceReadResult<ChatPersistenceIndex> {
   return parseChatPersistenceIndex(storage.getString(CHAT_PERSISTENCE_INDEX_KEY) ?? null);
 }

@@ -257,6 +257,25 @@ describe('StorageManagerService', () => {
     );
   });
 
+  it('treats an empty v2 chat persistence tombstone as zero chat history bytes', async () => {
+    mockedAppStorage.getAllKeys.mockReturnValue([CHAT_PERSISTENCE_INDEX_KEY]);
+    mockedAppStorage.getString.mockImplementation((key: string) => (
+      key === CHAT_PERSISTENCE_INDEX_KEY
+        ? JSON.stringify({
+          schemaVersion: 2,
+          activeThreadId: null,
+          threadIds: [],
+          updatedAt: 20,
+          clearedAt: 20,
+        })
+        : undefined
+    ));
+
+    const metrics = await getAppStorageMetrics();
+
+    expect(metrics.chatHistoryBytes).toBe(0);
+  });
+
   it('treats an empty legacy chat history index as zero chat history bytes', async () => {
     mockedSettingsStorage.getAllKeys.mockReturnValue(['chat_history_index']);
     mockedSettingsStorage.getString.mockImplementation((key: string) => (

@@ -21,6 +21,7 @@ export interface ChatPersistenceIndex {
   activeThreadId: string | null;
   threadIds: string[];
   updatedAt: number;
+  clearedAt?: number;
   migratedFromLegacyAt?: number;
   corruptThreadIds?: string[];
 }
@@ -96,6 +97,7 @@ export function parseChatPersistenceIndex(raw: string | null | undefined): ChatP
       activeThreadId: value.activeThreadId,
       threadIds: value.threadIds,
       updatedAt: value.updatedAt,
+      clearedAt: typeof value.clearedAt === 'number' ? value.clearedAt : undefined,
       migratedFromLegacyAt: typeof value.migratedFromLegacyAt === 'number' ? value.migratedFromLegacyAt : undefined,
       corruptThreadIds: isStringArray(value.corruptThreadIds) ? value.corruptThreadIds : undefined,
     },
@@ -152,8 +154,15 @@ export function removeChatThreadRecord(storage: AppStorageFacade, threadId: stri
 }
 
 export function clearPersistedChatRecords(storage: AppStorageFacade): void {
+  const clearedAt = Date.now();
+  writeChatPersistenceIndex(storage, {
+    schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+    activeThreadId: null,
+    threadIds: [],
+    updatedAt: clearedAt,
+    clearedAt,
+  });
   storage.remove(LEGACY_CHAT_STORE_STORAGE_KEY);
-  storage.remove(CHAT_PERSISTENCE_INDEX_KEY);
   listChatThreadStorageKeys(storage).forEach((key) => storage.remove(key));
 }
 

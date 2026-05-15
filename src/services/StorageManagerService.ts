@@ -202,6 +202,21 @@ function getPersistedChatStoreBytes() {
       }
     }
 
+    if (key === CHAT_PERSISTENCE_INDEX_KEY) {
+      try {
+        const parsed = JSON.parse(value ?? '') as { activeThreadId?: unknown; threadIds?: unknown };
+        if (
+          parsed.activeThreadId === null &&
+          Array.isArray(parsed.threadIds) &&
+          parsed.threadIds.length === 0
+        ) {
+          return sum;
+        }
+      } catch {
+        // If the persisted index is corrupted, still count its occupied bytes.
+      }
+    }
+
     return sum + getTextByteLength(key) + getTextByteLength(value);
   }, 0);
 }

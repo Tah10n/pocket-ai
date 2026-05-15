@@ -54,6 +54,7 @@ type ChatStoreSnapshot = Pick<ChatStoreState, 'threads' | 'activeThreadId'>;
 interface ChatStoreHydrationResult {
   threads: Record<string, ChatThread>;
   activeThreadId: string | null;
+  clearedAt?: number;
   corruptThreadIds?: string[];
 }
 
@@ -309,13 +310,28 @@ function writeChatPersistenceIndexForSnapshot(
 function readV2PersistedChatState(now = Date.now()): ChatStoreHydrationResult | null {
   const storage = getAppStorage();
   const indexResult = readChatPersistenceIndex(storage);
-  const indexedThreadIds = indexResult.ok ? indexResult.value.threadIds : [];
-  const discoveredThreadIds = listChatThreadStorageKeys(storage)
-    .map((key) => getThreadIdFromChatThreadStorageKey(key))
-    .filter((threadId): threadId is string => threadId != null);
+  const index = indexResult.ok ? indexResult.value : null;
+  const isClearTombstone = index?.clearedAt != null && index.threadIds.length === 0;
+  const indexedThreadIds = index?.threadIds ?? [];
+  const discoveredThreadIds = isClearTombstone
+    ? []
+    : listChatThreadStorageKeys(storage)
+      .map((key) => getThreadIdFromChatThreadStorageKey(key))
+      .filter((threadId): threadId is string => threadId != null);
   const threadIds = Array.from(new Set([...indexedThreadIds, ...discoveredThreadIds]));
 
-  if (!indexResult.ok && threadIds.length === 0) {
+  if (isClearTombstone) {
+    try {
+      storage.remove(LEGACY_CHAT_STORE_STORAGE_KEY);
+      listChatThreadStorageKeys(storage).forEach((key) => storage.remove(key));
+    } catch (error) {
+      console.warn('[ChatPersistence] Failed to clean up stale records after clear tombstone', error);
+    }
+
+    return { threads: {}, activeThreadId: null, clearedAt: index.clearedAt };
+  }
+
+  if (!index && threadIds.length === 0) {
     return null;
   }
 
@@ -343,7 +359,7 @@ function readV2PersistedChatState(now = Date.now()): ChatStoreHydrationResult | 
 
   const activeThreadId = resolveActiveThreadId(
     threads,
-    indexResult.ok ? indexResult.value.activeThreadId : null,
+    index ? index.activeThreadId : null,
   );
   writeChatPersistenceIndexForSnapshot(storage, { threads, activeThreadId }, { corruptThreadIds });
 
@@ -415,6 +431,10 @@ function hasLegacyThreadPayload(
 function hydratePersistedChatState(persistedState: unknown): ChatStoreHydrationResult {
   const v2State = readV2PersistedChatState();
 
+  if (v2State?.clearedAt != null) {
+    return v2State;
+  }
+
   if (hasLegacyThreadPayload(persistedState)) {
     const legacyState = migrateLegacyPersistedChatState(persistedState, Date.now(), v2State);
     if (legacyState) {
@@ -470,8 +490,8 @@ function persistChatStoreMutation(
   }
 
   if (nextThreadIds.length === 0) {
-    clearPersistedChatRecords(storage);
     chatPersistenceScheduler.cancelAllPendingWrites();
+    clearPersistedChatRecords(storage);
     return;
   }
 

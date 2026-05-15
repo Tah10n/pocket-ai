@@ -205,6 +205,19 @@ describe('useChatSession', () => {
     });
   }
 
+  function readPersistedThreadRecord(threadId: string | null | undefined) {
+    expect(threadId).toBeTruthy();
+    const rawRecord = storage.getString(getChatThreadStorageKey(threadId ?? ''));
+    expect(rawRecord).toBeTruthy();
+
+    return JSON.parse(rawRecord ?? '{}') as {
+      thread?: {
+        status?: string;
+        messages?: Array<Record<string, unknown>>;
+      };
+    };
+  }
+
   it('creates and persists a thread-backed conversation', async () => {
     const getSession = renderHookHarness();
 
@@ -260,8 +273,7 @@ describe('useChatSession', () => {
       errorMessage: 'native generation failed',
     }));
 
-    const rawRecord = storage.getString(getChatThreadStorageKey(thread?.id ?? ''));
-    const record = JSON.parse(rawRecord ?? '{}') as { thread?: { status?: string; messages?: Array<Record<string, unknown>> } };
+    const record = readPersistedThreadRecord(thread?.id);
     const persistedAssistant = record.thread?.messages?.at(-1);
     expect(record.thread?.status).toBe('error');
     expect(persistedAssistant).toEqual(expect.objectContaining({
@@ -713,6 +725,16 @@ describe('useChatSession', () => {
         state: 'stopped',
       }),
     );
+
+    const persistedRecord = readPersistedThreadRecord(thread?.id);
+    const persistedAssistant = persistedRecord.thread?.messages?.at(-1);
+    expect(persistedRecord.thread?.status).toBe('stopped');
+    expect(persistedAssistant).toEqual(expect.objectContaining({
+      role: 'assistant',
+      content: 'Partial answer',
+      state: 'stopped',
+    }));
+    expect(persistedAssistant?.content).not.toContain('late token');
   });
 
   it('stops active generation when private storage becomes blocked', async () => {
@@ -1651,7 +1673,9 @@ describe('useChatSession', () => {
   });
 
   it('sends only one interrupted notification when iOS expiration stops generation', async () => {
+    let onToken: ((token: string) => void) | undefined;
     let resolveCompletion: (() => void) | undefined;
+    let sendPromise: Promise<void> | undefined;
     const interruptedSpy = jest.spyOn(notificationService, 'sendInterruptedNotification').mockResolvedValue(undefined);
 
     Object.defineProperty(AppState, 'currentState', {
@@ -1660,8 +1684,9 @@ describe('useChatSession', () => {
     });
 
     (llmEngineService.chatCompletion as jest.Mock).mockImplementation(
-      () =>
+      ({ onToken: tokenHandler }: { onToken?: (token: string) => void }) =>
         new Promise((resolve) => {
+          onToken = tokenHandler;
           resolveCompletion = () => resolve({ text: 'Stopped after expiration' });
         }),
     );
@@ -1669,22 +1694,35 @@ describe('useChatSession', () => {
     const getSession = renderHookHarness();
 
     await act(async () => {
-      void getSession()?.appendUserMessage('Expire this response');
+      sendPromise = getSession()?.appendUserMessage('Expire this response');
     });
 
     await waitFor(() => {
       expect(BackgroundTaskServiceOnExpirationHandler()).toEqual(expect.any(Function));
+      expect(onToken).toEqual(expect.any(Function));
     });
 
     await act(async () => {
+      onToken?.('Partial before expiration');
       BackgroundTaskServiceOnExpirationHandler()?.();
       resolveCompletion?.();
+      await sendPromise;
     });
 
     await waitFor(() => {
       expect(useChatStore.getState().getActiveThread()?.status).toBe('stopped');
     });
 
+    const thread = useChatStore.getState().getActiveThread();
+    const persistedRecord = readPersistedThreadRecord(thread?.id);
+    const persistedAssistant = persistedRecord.thread?.messages?.at(-1);
+    expect(persistedRecord.thread?.status).toBe('stopped');
+    expect(persistedAssistant).toEqual(expect.objectContaining({
+      role: 'assistant',
+      content: 'Partial before expiration',
+      state: 'stopped',
+    }));
+    expect(persistedRecord.thread?.messages?.some((message) => message.state === 'streaming')).toBe(false);
     expect(interruptedSpy).toHaveBeenCalledTimes(1);
   });
 

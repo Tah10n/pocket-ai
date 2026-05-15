@@ -56,6 +56,7 @@ interface ChatStoreHydrationResult {
   activeThreadId: string | null;
   clearedAt?: number;
   corruptThreadIds?: string[];
+  legacyBlockedByClear?: boolean;
 }
 
 interface CreateThreadInput {
@@ -307,28 +308,116 @@ function writeChatPersistenceIndexForSnapshot(
   });
 }
 
+function resolveThreadRecordPersistedAtForWrite(
+  storage: ReturnType<typeof getAppStorage>,
+  now = Date.now(),
+) {
+  const indexResult = readChatPersistenceIndex(storage);
+  if (!indexResult.ok) {
+    return now;
+  }
+
+  const { clearedAt, threadIds } = indexResult.value;
+  if (clearedAt == null || threadIds.length > 0) {
+    return now;
+  }
+
+  return Math.max(now, clearedAt + 1);
+}
+
+function writeChatThreadRecordForMutation(
+  storage: ReturnType<typeof getAppStorage>,
+  thread: ChatThread,
+) {
+  writeChatThreadRecord(storage, thread, resolveThreadRecordPersistedAtForWrite(storage));
+}
+
+function readHydratableChatThreadRecord(
+  storage: ReturnType<typeof getAppStorage>,
+  threadId: string,
+  now: number,
+):
+  | { ok: true; thread: ChatThread; recovered: boolean; persistedAt: number }
+  | { ok: false; persistedAt?: number } {
+  const recordResult = readChatThreadRecord(storage, threadId);
+  if (!recordResult.ok) {
+    return { ok: false };
+  }
+
+  const sanitized = sanitizePersistedChatThread(recordResult.value.thread, now);
+  if (!sanitized) {
+    return { ok: false, persistedAt: recordResult.value.persistedAt };
+  }
+
+  return {
+    ok: true,
+    thread: sanitized.thread,
+    recovered: sanitized.recovered,
+    persistedAt: recordResult.value.persistedAt,
+  };
+}
+
 function readV2PersistedChatState(now = Date.now()): ChatStoreHydrationResult | null {
   const storage = getAppStorage();
   const indexResult = readChatPersistenceIndex(storage);
   const index = indexResult.ok ? indexResult.value : null;
   const isClearTombstone = index?.clearedAt != null && index.threadIds.length === 0;
   const indexedThreadIds = index?.threadIds ?? [];
-  const discoveredThreadIds = isClearTombstone
-    ? []
-    : listChatThreadStorageKeys(storage)
-      .map((key) => getThreadIdFromChatThreadStorageKey(key))
-      .filter((threadId): threadId is string => threadId != null);
+  const discoveredThreadIds = listChatThreadStorageKeys(storage)
+    .map((key) => getThreadIdFromChatThreadStorageKey(key))
+    .filter((threadId): threadId is string => threadId != null);
   const threadIds = Array.from(new Set([...indexedThreadIds, ...discoveredThreadIds]));
 
   if (isClearTombstone) {
+    const clearedAt = index.clearedAt;
+    if (clearedAt == null) {
+      return null;
+    }
+
+    const threads: Record<string, ChatThread> = {};
+    const corruptThreadIds: string[] = [];
+
     try {
       storage.remove(LEGACY_CHAT_STORE_STORAGE_KEY);
-      listChatThreadStorageKeys(storage).forEach((key) => storage.remove(key));
+      discoveredThreadIds.forEach((threadId) => {
+        const record = readHydratableChatThreadRecord(storage, threadId, now);
+        const isNewerThanClear = record.persistedAt != null && record.persistedAt > clearedAt;
+
+        if (!isNewerThanClear) {
+          removeChatThreadRecord(storage, threadId);
+          return;
+        }
+
+        if (!record.ok) {
+          corruptThreadIds.push(threadId);
+          return;
+        }
+
+        threads[record.thread.id] = record.thread;
+
+        if (record.recovered) {
+          writeChatThreadRecord(storage, record.thread, Math.max(now, clearedAt + 1));
+        }
+      });
     } catch (error) {
       console.warn('[ChatPersistence] Failed to clean up stale records after clear tombstone', error);
     }
 
-    return { threads: {}, activeThreadId: null, clearedAt: index.clearedAt };
+    const activeThreadId = resolveActiveThreadId(threads, index.activeThreadId);
+
+    if (Object.keys(threads).length > 0 || corruptThreadIds.length > 0) {
+      writeChatPersistenceIndexForSnapshot(storage, { threads, activeThreadId }, { corruptThreadIds });
+    }
+
+    return {
+      threads,
+      activeThreadId,
+      clearedAt: Object.keys(threads).length === 0 && corruptThreadIds.length === 0
+        ? clearedAt
+        : undefined,
+      corruptThreadIds,
+      legacyBlockedByClear: true,
+    };
   }
 
   if (!index && threadIds.length === 0) {
@@ -339,20 +428,17 @@ function readV2PersistedChatState(now = Date.now()): ChatStoreHydrationResult | 
   const corruptThreadIds: string[] = [];
 
   threadIds.forEach((threadId) => {
-    const recordResult = readChatThreadRecord(storage, threadId);
-    const sanitized = recordResult.ok
-      ? sanitizePersistedChatThread(recordResult.value.thread, now)
-      : null;
+    const record = readHydratableChatThreadRecord(storage, threadId, now);
 
-    if (!sanitized) {
+    if (!record.ok) {
       corruptThreadIds.push(threadId);
       return;
     }
 
-    const { thread } = sanitized;
+    const { thread } = record;
     threads[thread.id] = thread;
 
-    if (sanitized.recovered) {
+    if (record.recovered) {
       writeChatThreadRecord(storage, thread, now);
     }
   });
@@ -431,7 +517,7 @@ function hasLegacyThreadPayload(
 function hydratePersistedChatState(persistedState: unknown): ChatStoreHydrationResult {
   const v2State = readV2PersistedChatState();
 
-  if (v2State?.clearedAt != null) {
+  if (v2State?.legacyBlockedByClear) {
     return v2State;
   }
 
@@ -523,7 +609,7 @@ function persistChatStoreMutation(
       return;
     }
 
-    writeChatThreadRecord(storage, thread);
+    writeChatThreadRecordForMutation(storage, thread);
     persistedThreadIds.add(threadId);
   });
 
@@ -1283,7 +1369,7 @@ function flushChatThreadPersistence(threadId: string, reason: ChatPersistenceWri
   }
 
   void reason;
-  writeChatThreadRecord(storage, thread);
+  writeChatThreadRecordForMutation(storage, thread);
   writeChatPersistenceIndexForSnapshot(storage, state);
 }
 

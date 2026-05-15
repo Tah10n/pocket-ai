@@ -1624,6 +1624,218 @@ describe('chatStore', () => {
     expect(storage.getString(getChatThreadStorageKey(orphanThread.id))).toBeUndefined();
   });
 
+  it('recovers v2 records written after a clear tombstone without resurrecting stale payloads', async () => {
+    const staleBeforeClearThread = buildThread('thread-before-clear', 35);
+    const equalToClearThread = buildThread('thread-equal-clear', 40);
+    const recoveredAfterClearThread = buildThread('thread-after-clear', 45);
+    const staleLegacyThread = buildThread('thread-stale-legacy-after-clear', 30);
+    const clearedAt = 40;
+
+    writeChatPersistenceIndex(storage, {
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      activeThreadId: null,
+      threadIds: [],
+      updatedAt: clearedAt,
+      clearedAt,
+    });
+    writeChatThreadRecord(storage, staleBeforeClearThread, clearedAt - 1);
+    writeChatThreadRecord(storage, equalToClearThread, clearedAt);
+    writeChatThreadRecord(storage, recoveredAfterClearThread, clearedAt + 1);
+    storage.set(
+      'chat-store',
+      JSON.stringify({
+        state: {
+          threads: {
+            [staleLegacyThread.id]: staleLegacyThread,
+          },
+          activeThreadId: staleLegacyThread.id,
+        },
+        version: 0,
+      }),
+    );
+
+    useChatStore.setState({ threads: {}, activeThreadId: null });
+    await useChatStore.persist.rehydrate();
+
+    const index = readPersistedChatIndex();
+    expect(useChatStore.getState().getThread(staleBeforeClearThread.id)).toBeNull();
+    expect(useChatStore.getState().getThread(equalToClearThread.id)).toBeNull();
+    expect(useChatStore.getState().getThread(staleLegacyThread.id)).toBeNull();
+    expect(useChatStore.getState().getThread(recoveredAfterClearThread.id)).toEqual(
+      expect.objectContaining({ id: recoveredAfterClearThread.id }),
+    );
+    expect(useChatStore.getState().activeThreadId).toBe(recoveredAfterClearThread.id);
+    expect(index.threadIds).toEqual([recoveredAfterClearThread.id]);
+    expect(index.activeThreadId).toBe(recoveredAfterClearThread.id);
+    expect(index.clearedAt).toBeUndefined();
+    expect(storage.getString('chat-store') ?? '').not.toContain(staleLegacyThread.title);
+    expect(storage.getString(getChatThreadStorageKey(staleBeforeClearThread.id))).toBeUndefined();
+    expect(storage.getString(getChatThreadStorageKey(equalToClearThread.id))).toBeUndefined();
+    expect(storage.getString(getChatThreadStorageKey(recoveredAfterClearThread.id))).toContain(recoveredAfterClearThread.title);
+  });
+
+  it('persists post-clear mutations after the tombstone timestamp when they share the same millisecond', async () => {
+    const clearedAt = 40;
+    const originalDateNow = Date.now;
+    let threadId = '';
+
+    writeChatPersistenceIndex(storage, {
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      activeThreadId: null,
+      threadIds: [],
+      updatedAt: clearedAt,
+      clearedAt,
+    });
+
+    Date.now = jest.fn(() => clearedAt);
+    try {
+      threadId = useChatStore.getState().createThread({
+        modelId: 'author/model-q4',
+        presetId: null,
+        presetSnapshot: {
+          id: null,
+          name: 'Default',
+          systemPrompt: 'You are helpful.',
+        },
+        paramsSnapshot: {
+          temperature: 0.7,
+          topP: 0.9,
+          maxTokens: 1024,
+          seed: null,
+        },
+      });
+    } finally {
+      Date.now = originalDateNow;
+    }
+
+    const record = JSON.parse(storage.getString(getChatThreadStorageKey(threadId)) ?? '{}') as { persistedAt?: unknown };
+    expect(record.persistedAt).toBe(clearedAt + 1);
+
+    // Simulate a crash after the thread record write but before the index rewrite
+    // replaced the clear tombstone.
+    writeChatPersistenceIndex(storage, {
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      activeThreadId: null,
+      threadIds: [],
+      updatedAt: clearedAt,
+      clearedAt,
+    });
+
+    useChatStore.setState({ threads: {}, activeThreadId: null });
+    await useChatStore.persist.rehydrate();
+
+    const index = readPersistedChatIndex();
+    expect(useChatStore.getState().getThread(threadId)).toEqual(
+      expect.objectContaining({ id: threadId }),
+    );
+    expect(useChatStore.getState().activeThreadId).toBe(threadId);
+    expect(index.threadIds).toEqual([threadId]);
+    expect(index.clearedAt).toBeUndefined();
+  });
+
+  it('does not resurrect same-millisecond records when a later clear crashes before record removal', async () => {
+    const firstClearedAt = 40;
+    const originalDateNow = Date.now;
+    let threadId = '';
+    let rawRecord: string | undefined;
+
+    writeChatPersistenceIndex(storage, {
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      activeThreadId: null,
+      threadIds: [],
+      updatedAt: firstClearedAt,
+      clearedAt: firstClearedAt,
+    });
+
+    Date.now = jest.fn(() => firstClearedAt);
+    try {
+      threadId = useChatStore.getState().createThread({
+        modelId: 'author/model-q4',
+        presetId: null,
+        presetSnapshot: {
+          id: null,
+          name: 'Default',
+          systemPrompt: 'You are helpful.',
+        },
+        paramsSnapshot: {
+          temperature: 0.7,
+          topP: 0.9,
+          maxTokens: 1024,
+          seed: null,
+        },
+      });
+      rawRecord = storage.getString(getChatThreadStorageKey(threadId));
+
+      expect(useChatStore.getState().clearAllThreads()).toBe(1);
+    } finally {
+      Date.now = originalDateNow;
+    }
+
+    const secondClearIndex = readPersistedChatIndex();
+    expect(secondClearIndex.clearedAt).toBe(firstClearedAt + 2);
+    expect(rawRecord).toBeTruthy();
+
+    // Simulate a crash after the second clear tombstone was written but before
+    // the old thread record was removed.
+    storage.set(getChatThreadStorageKey(threadId), rawRecord ?? '');
+
+    useChatStore.setState({ threads: {}, activeThreadId: null });
+    await useChatStore.persist.rehydrate();
+
+    const index = readPersistedChatIndex();
+    expect(useChatStore.getState().getThread(threadId)).toBeNull();
+    expect(useChatStore.getState().activeThreadId).toBeNull();
+    expect(index.threadIds).toEqual([]);
+    expect(index.clearedAt).toBe(firstClearedAt + 2);
+    expect(storage.getString(getChatThreadStorageKey(threadId))).toBeUndefined();
+  });
+
+  it('keeps newer corrupt v2 records isolated after a clear tombstone', async () => {
+    const staleLegacyThread = buildThread('thread-legacy-behind-corrupt-clear', 30);
+    const corruptThreadId = 'thread-corrupt-after-clear';
+    const clearedAt = 40;
+
+    writeChatPersistenceIndex(storage, {
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      activeThreadId: null,
+      threadIds: [],
+      updatedAt: clearedAt,
+      clearedAt,
+    });
+    storage.set(getChatThreadStorageKey(corruptThreadId), JSON.stringify({
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      thread: {
+        id: corruptThreadId,
+      },
+      persistedAt: clearedAt + 1,
+    }));
+    storage.set(
+      'chat-store',
+      JSON.stringify({
+        state: {
+          threads: {
+            [staleLegacyThread.id]: staleLegacyThread,
+          },
+          activeThreadId: staleLegacyThread.id,
+        },
+        version: 0,
+      }),
+    );
+
+    useChatStore.setState({ threads: {}, activeThreadId: null });
+    await useChatStore.persist.rehydrate();
+
+    const index = readPersistedChatIndex();
+    expect(useChatStore.getState().getThread(staleLegacyThread.id)).toBeNull();
+    expect(useChatStore.getState().activeThreadId).toBeNull();
+    expect(index.threadIds).toEqual([]);
+    expect(index.activeThreadId).toBeNull();
+    expect(index.clearedAt).toBeUndefined();
+    expect(index.corruptThreadIds).toEqual([corruptThreadId]);
+    expect(storage.getString('chat-store')).toBeUndefined();
+    expect(storage.getString(getChatThreadStorageKey(corruptThreadId))).toContain(corruptThreadId);
+  });
+
   it('recovers v2 thread records when the v2 index is missing', async () => {
     const recoveredThread = buildThread('thread-indexless-v2', 36);
 

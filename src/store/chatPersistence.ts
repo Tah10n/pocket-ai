@@ -153,8 +153,29 @@ export function removeChatThreadRecord(storage: AppStorageFacade, threadId: stri
   storage.remove(getChatThreadStorageKey(threadId));
 }
 
+function resolveClearTombstoneTimestamp(storage: AppStorageFacade, now = Date.now()): number {
+  const indexResult = readChatPersistenceIndex(storage);
+  const baseTimestamp = indexResult.ok && indexResult.value.clearedAt != null
+    ? Math.max(now, indexResult.value.clearedAt)
+    : now;
+
+  return listChatThreadStorageKeys(storage).reduce((timestamp, key) => {
+    const threadId = getThreadIdFromChatThreadStorageKey(key);
+    if (!threadId) {
+      return timestamp;
+    }
+
+    const recordResult = readChatThreadRecord(storage, threadId);
+    if (!recordResult.ok) {
+      return timestamp;
+    }
+
+    return Math.max(timestamp, recordResult.value.persistedAt + 1);
+  }, baseTimestamp);
+}
+
 export function clearPersistedChatRecords(storage: AppStorageFacade): void {
-  const clearedAt = Date.now();
+  const clearedAt = resolveClearTombstoneTimestamp(storage);
   writeChatPersistenceIndex(storage, {
     schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
     activeThreadId: null,

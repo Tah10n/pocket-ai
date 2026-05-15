@@ -263,7 +263,13 @@ export const useChatSession = () => {
             console.warn('[ChatSession] Failed to flush background assistant patch', error);
           }
         }
-        flushPendingChatPersistenceWrites('background');
+        try {
+          flushPendingChatPersistenceWrites('background');
+        } catch (error) {
+          if (!ignorePrivateStorageUnavailableDuringRuntimeStop(error, 'background chat persistence')) {
+            console.warn('[ChatSession] Failed to flush background chat persistence', error);
+          }
+        }
       }
 
       const returnedToForeground =

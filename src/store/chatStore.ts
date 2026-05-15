@@ -54,6 +54,7 @@ type ChatStoreSnapshot = Pick<ChatStoreState, 'threads' | 'activeThreadId'>;
 interface ChatStoreHydrationResult {
   threads: Record<string, ChatThread>;
   activeThreadId: string | null;
+  corruptThreadIds?: string[];
 }
 
 interface CreateThreadInput {
@@ -184,16 +185,21 @@ function createChatStoreStateStorage(): StateStorage {
     ...mmkvStorage,
     getItem: (name) => {
       const value = mmkvStorage.getItem(name);
-      if (value != null || name !== CHAT_STORE_STORAGE_KEY) {
+      if (name !== CHAT_STORE_STORAGE_KEY) {
+        return value;
+      }
+
+      if (typeof value === 'string') {
+        if (canParsePersistedJson(value)) {
+          return value;
+        }
+      } else if (value != null) {
         return value;
       }
 
       try {
         return hasV2ChatPersistence()
-          ? JSON.stringify({
-              state: { activeThreadId: null },
-              version: CHAT_PERSISTENCE_SCHEMA_VERSION,
-            })
+          ? createChatStoreHydrationSentinel()
           : null;
       } catch {
         return null;
@@ -209,6 +215,22 @@ function hasV2ChatPersistence() {
   }
 
   return listChatThreadStorageKeys(storage).length > 0;
+}
+
+function canParsePersistedJson(value: string): boolean {
+  try {
+    const parsed = JSON.parse(value);
+    return isRecord(parsed);
+  } catch {
+    return false;
+  }
+}
+
+function createChatStoreHydrationSentinel(): string {
+  return JSON.stringify({
+    state: { activeThreadId: null },
+    version: CHAT_PERSISTENCE_SCHEMA_VERSION,
+  });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -301,7 +323,6 @@ function readV2PersistedChatState(now = Date.now()): ChatStoreHydrationResult | 
 
     if (!thread) {
       corruptThreadIds.push(threadId);
-      removeChatThreadRecord(storage, threadId);
       return;
     }
 
@@ -314,39 +335,55 @@ function readV2PersistedChatState(now = Date.now()): ChatStoreHydrationResult | 
   );
   writeChatPersistenceIndexForSnapshot(storage, { threads, activeThreadId }, { corruptThreadIds });
 
-  return { threads, activeThreadId };
+  return { threads, activeThreadId, corruptThreadIds };
 }
 
 function migrateLegacyPersistedChatState(
   persistedState: unknown,
   now = Date.now(),
+  existingV2State: ChatStoreHydrationResult | null = null,
 ): ChatStoreHydrationResult | null {
   if (!hasLegacyThreadPayload(persistedState)) {
     return null;
   }
 
   const storage = getAppStorage();
-  const threads: Record<string, ChatThread> = {};
-  const corruptThreadIds: string[] = [];
+  const threads: Record<string, ChatThread> = existingV2State
+    ? { ...existingV2State.threads }
+    : {};
+  const corruptThreadIds = new Set(existingV2State?.corruptThreadIds ?? []);
 
   Object.entries(persistedState.threads).forEach(([threadId, rawThread]) => {
     const thread = sanitizePersistedChatThread(rawThread, now);
     if (!thread) {
-      corruptThreadIds.push(threadId);
+      corruptThreadIds.add(threadId);
+      return;
+    }
+
+    if (threads[thread.id]) {
       return;
     }
 
     threads[thread.id] = thread;
+    corruptThreadIds.delete(thread.id);
     writeChatThreadRecord(storage, thread, now);
   });
 
   const rawActiveThreadId = typeof persistedState.activeThreadId === 'string'
     ? persistedState.activeThreadId
     : null;
-  const activeThreadId = resolveActiveThreadId(threads, rawActiveThreadId);
+  const preferredActiveThreadId = rawActiveThreadId && threads[rawActiveThreadId]
+    ? rawActiveThreadId
+    : existingV2State?.activeThreadId && threads[existingV2State.activeThreadId]
+      ? existingV2State.activeThreadId
+      : null;
+  const activeThreadId = resolveActiveThreadId(
+    threads,
+    preferredActiveThreadId,
+  );
   writeChatPersistenceIndexForSnapshot(storage, { threads, activeThreadId }, {
     migratedFromLegacyAt: now,
-    corruptThreadIds,
+    corruptThreadIds: Array.from(corruptThreadIds),
   });
   storage.set(CHAT_STORE_STORAGE_KEY, JSON.stringify({
     state: { activeThreadId },
@@ -364,13 +401,12 @@ function hasLegacyThreadPayload(
 
 function hydratePersistedChatState(persistedState: unknown): ChatStoreHydrationResult {
   const v2State = readV2PersistedChatState();
-  if (v2State && (Object.keys(v2State.threads).length > 0 || !hasLegacyThreadPayload(persistedState))) {
-    return v2State;
-  }
 
-  const legacyState = migrateLegacyPersistedChatState(persistedState);
-  if (legacyState) {
-    return legacyState;
+  if (hasLegacyThreadPayload(persistedState)) {
+    const legacyState = migrateLegacyPersistedChatState(persistedState, Date.now(), v2State);
+    if (legacyState) {
+      return legacyState;
+    }
   }
 
   if (v2State) {

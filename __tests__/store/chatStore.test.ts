@@ -1493,6 +1493,114 @@ describe('chatStore', () => {
     expect(storage.getString(getChatThreadStorageKey(validThread.id))).toContain(validThread.title);
   });
 
+  it('merges legacy-only threads into existing v2 records during partial migration recovery', async () => {
+    const v2Thread = {
+      ...buildThread('thread-v2-partial', 40),
+      title: 'V2 title should win',
+    };
+    const legacyDuplicate = {
+      ...v2Thread,
+      title: 'Legacy duplicate should not overwrite v2',
+      updatedAt: 10,
+    };
+    const legacyOnlyThread = buildThread('thread-legacy-only-after-partial', 50);
+
+    writeChatThreadRecord(storage, v2Thread, 40);
+    writeChatPersistenceIndex(storage, {
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      activeThreadId: v2Thread.id,
+      threadIds: [v2Thread.id],
+      updatedAt: 40,
+    });
+    storage.set(
+      'chat-store',
+      JSON.stringify({
+        state: {
+          threads: {
+            [legacyDuplicate.id]: legacyDuplicate,
+            [legacyOnlyThread.id]: legacyOnlyThread,
+          },
+          activeThreadId: legacyOnlyThread.id,
+        },
+        version: 0,
+      }),
+    );
+
+    useChatStore.setState({ threads: {}, activeThreadId: null });
+    await useChatStore.persist.rehydrate();
+
+    const index = JSON.parse(storage.getString(CHAT_PERSISTENCE_INDEX_KEY) ?? '{}');
+
+    expect(useChatStore.getState().getThread(v2Thread.id)).toEqual(
+      expect.objectContaining({
+        id: v2Thread.id,
+        title: 'V2 title should win',
+      }),
+    );
+    expect(useChatStore.getState().getThread(legacyOnlyThread.id)).toEqual(
+      expect.objectContaining({ id: legacyOnlyThread.id }),
+    );
+    expect(useChatStore.getState().activeThreadId).toBe(legacyOnlyThread.id);
+    expect(storage.getString(getChatThreadStorageKey(legacyOnlyThread.id))).toContain(legacyOnlyThread.title);
+    expect(index.threadIds).toEqual([v2Thread.id, legacyOnlyThread.id]);
+    expect(storage.getString('chat-store')).not.toContain(legacyOnlyThread.title);
+  });
+
+  it('keeps the v2 active thread when a partial migration has a stale legacy active id', async () => {
+    const v2Thread = buildThread('thread-v2-active-after-partial', 40);
+    const newerLegacyOnlyThread = buildThread('thread-newer-legacy-only-after-partial', 60);
+
+    writeChatThreadRecord(storage, v2Thread, 40);
+    writeChatPersistenceIndex(storage, {
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      activeThreadId: v2Thread.id,
+      threadIds: [v2Thread.id],
+      updatedAt: 40,
+    });
+    storage.set(
+      'chat-store',
+      JSON.stringify({
+        state: {
+          threads: {
+            [newerLegacyOnlyThread.id]: newerLegacyOnlyThread,
+          },
+          activeThreadId: 'missing-legacy-thread',
+        },
+        version: 0,
+      }),
+    );
+
+    useChatStore.setState({ threads: {}, activeThreadId: null });
+    await useChatStore.persist.rehydrate();
+
+    expect(useChatStore.getState().getThread(newerLegacyOnlyThread.id)).toEqual(
+      expect.objectContaining({ id: newerLegacyOnlyThread.id }),
+    );
+    expect(useChatStore.getState().activeThreadId).toBe(v2Thread.id);
+  });
+
+  it('hydrates valid v2 records when the legacy chat-store value is malformed', async () => {
+    const validThread = buildThread('thread-v2-with-broken-legacy-anchor', 60);
+
+    writeChatThreadRecord(storage, validThread, 60);
+    writeChatPersistenceIndex(storage, {
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      activeThreadId: validThread.id,
+      threadIds: [validThread.id],
+      updatedAt: 60,
+    });
+    storage.set('chat-store', '{broken legacy json');
+
+    useChatStore.setState({ threads: {}, activeThreadId: null });
+    await useChatStore.persist.rehydrate();
+
+    expect(useChatStore.getState().getThread(validThread.id)).toEqual(
+      expect.objectContaining({ id: validThread.id }),
+    );
+    expect(useChatStore.getState().activeThreadId).toBe(validThread.id);
+    expect(storage.getString('chat-store')).toBe('{broken legacy json');
+  });
+
   it('hydrates valid v2 records when another v2 record is corrupt', async () => {
     const validThread = buildThread('thread-valid-v2', 20);
 
@@ -1524,7 +1632,7 @@ describe('chatStore', () => {
     );
     expect(useChatStore.getState().getThread('thread-corrupt-v2')).toBeNull();
     expect(useChatStore.getState().activeThreadId).toBe(validThread.id);
-    expect(storage.getString(getChatThreadStorageKey('thread-corrupt-v2'))).toBeUndefined();
+    expect(storage.getString(getChatThreadStorageKey('thread-corrupt-v2'))).toContain('thread-corrupt-v2');
     expect(index.threadIds).toEqual([validThread.id]);
     expect(index.corruptThreadIds).toEqual(['thread-corrupt-v2']);
   });

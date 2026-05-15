@@ -6,7 +6,7 @@ import { getGenerationParametersForModel, getSettings } from '../../src/services
 import { EngineStatus, LifecycleStatus, ModelAccessState } from '../../src/types/models';
 import { estimateLlmMessagesTokens, flushPendingChatPersistenceWrites, useChatStore } from '../../src/store/chatStore';
 import { AppState } from 'react-native';
-import { storage } from '../../src/store/storage';
+import { getAppStorage, storage } from '../../src/store/storage';
 import { getChatThreadStorageKey } from '../../src/store/chatPersistence';
 import {
   buildInferenceMessagesForThread,
@@ -1360,6 +1360,60 @@ describe('useChatSession', () => {
       resolveCompletion?.();
       await sendPromise;
     });
+  });
+
+  it('does not throw when background persistence flush hits blocked private storage', async () => {
+    renderHookHarness();
+
+    await act(async () => {
+      const threadId = useChatStore.getState().createThread({
+        modelId: 'author/model-q4',
+        presetId: 'preset-1',
+        presetSnapshot: {
+          id: 'preset-1',
+          name: 'Helpful Assistant',
+          systemPrompt: 'Be concise.',
+        },
+        paramsSnapshot: {
+          temperature: 0.7,
+          topP: 0.9,
+          maxTokens: 1024,
+          seed: null,
+        },
+      });
+      const assistantMessageId = useChatStore.getState().createAssistantPlaceholder(threadId);
+      useChatStore.getState().patchAssistantMessage(threadId, assistantMessageId, {
+        content: 'Partial before blocked background flush',
+        state: 'streaming',
+      });
+    });
+
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const privateStorageError = new PrivateStorageUnavailableError('encrypted_open_failed', {
+      status: 'blocked',
+      reason: 'encrypted_open_failed',
+      retryable: true,
+      requiresExplicitReset: true,
+      lastUpdatedAt: 1,
+    });
+    const appStorage = getAppStorage();
+    const originalSet = appStorage.set;
+    appStorage.set = jest.fn(() => {
+      throw privateStorageError;
+    }) as unknown as typeof appStorage.set;
+
+    try {
+      await act(async () => {
+        expect(() => emitAppState('background')).not.toThrow();
+      });
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('background chat persistence'),
+        privateStorageError,
+      );
+    } finally {
+      appStorage.set = originalSet;
+      warnSpy.mockRestore();
+    }
   });
 
   it('marks orphaned generating state as stopped when returning to foreground', async () => {

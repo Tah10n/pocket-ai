@@ -1,4 +1,4 @@
-import { ChatThread } from '../types/chat';
+import type { ChatMessage, ChatThread } from '../types/chat';
 import type { AppStorageFacade } from './storage';
 
 export const LEGACY_CHAT_STORE_STORAGE_KEY = 'chat-store';
@@ -141,7 +141,7 @@ export function writeChatPersistenceIndex(storage: AppStorageFacade, index: Chat
 export function writeChatThreadRecord(storage: AppStorageFacade, thread: ChatThread, persistedAt = Date.now()): void {
   const record: ChatThreadRecord = {
     schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
-    thread,
+    thread: sanitizeChatThreadForPersistence(thread),
     persistedAt,
   };
   storage.set(getChatThreadStorageKey(thread.id), JSON.stringify(record));
@@ -172,9 +172,58 @@ export function listChatThreadStorageKeys(storage: Pick<AppStorageFacade, 'getAl
   return storage.getAllKeys().filter((key) => getThreadIdFromChatThreadStorageKey(key) != null);
 }
 
+function hasPersistableAssistantContent(message: ChatMessage): boolean {
+  return (
+    message.content.trim().length > 0 ||
+    (message.thoughtContent?.trim().length ?? 0) > 0 ||
+    Boolean(message.errorCode || message.errorMessage)
+  );
+}
+
+function isEmptyAssistantProgressPlaceholder(message: ChatMessage): boolean {
+  if (message.role !== 'assistant' || (message.kind ?? 'message') !== 'message') {
+    return false;
+  }
+
+  if (message.state !== 'streaming' && message.state !== 'stopped') {
+    return false;
+  }
+
+  return !hasPersistableAssistantContent(message);
+}
+
+export function sanitizeChatThreadForPersistence(thread: ChatThread): ChatThread {
+  let removedEmptyProgressPlaceholder = false;
+  const messages = thread.messages.filter((message) => {
+    if (!isEmptyAssistantProgressPlaceholder(message)) {
+      return true;
+    }
+
+    removedEmptyProgressPlaceholder = true;
+    return false;
+  });
+
+  if (!removedEmptyProgressPlaceholder) {
+    return thread;
+  }
+
+  const hasPersistedStreamingMessage = messages.some((message) => message.state === 'streaming');
+  const status =
+    (thread.status === 'generating' || thread.status === 'stopped') && !hasPersistedStreamingMessage
+      ? 'idle'
+      : thread.status;
+
+  return {
+    ...thread,
+    messages,
+    status,
+  };
+}
+
 export function recoverStaleStreamingThread(thread: ChatThread, now = Date.now()): ChatThread {
-  let changed = thread.status === 'generating';
-  const messages = thread.messages.map((message) => {
+  const sanitizedThread = sanitizeChatThreadForPersistence(thread);
+  let changed = sanitizedThread !== thread || sanitizedThread.status === 'generating';
+  const messages = sanitizedThread.messages.map((message) => {
     if (message.state !== 'streaming') {
       return message;
     }
@@ -191,10 +240,10 @@ export function recoverStaleStreamingThread(thread: ChatThread, now = Date.now()
   }
 
   return {
-    ...thread,
+    ...sanitizedThread,
     messages,
-    status: thread.status === 'generating' ? 'stopped' : thread.status,
-    updatedAt: Math.max(thread.updatedAt, now),
+    status: sanitizedThread.status === 'generating' ? 'stopped' : sanitizedThread.status,
+    updatedAt: Math.max(sanitizedThread.updatedAt, now),
   };
 }
 

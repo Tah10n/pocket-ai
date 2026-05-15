@@ -228,6 +228,53 @@ describe('useChatSession', () => {
     expect(thread?.messages.at(-1)?.content).toBe('Hello back');
   });
 
+  it('persists errored generation terminal state into bounded storage', async () => {
+    const generationError = new Error('native generation failed');
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      async ({ onToken }: { onToken?: (token: string) => void }) => {
+        onToken?.('Partial before failure');
+        throw generationError;
+      },
+    );
+
+    const getSession = renderHookHarness();
+    let thrown: unknown;
+
+    await act(async () => {
+      try {
+        await getSession()?.appendUserMessage('Please fail durably');
+      } catch (error) {
+        thrown = error;
+      }
+    });
+
+    expect(thrown).toBe(generationError);
+
+    const thread = useChatStore.getState().getActiveThread();
+    expect(thread).toEqual(expect.objectContaining({ status: 'error' }));
+    expect(thread?.messages.at(-1)).toEqual(expect.objectContaining({
+      role: 'assistant',
+      content: 'Partial before failure',
+      state: 'error',
+      errorCode: 'generation_failed',
+      errorMessage: 'native generation failed',
+    }));
+
+    const rawRecord = storage.getString(getChatThreadStorageKey(thread?.id ?? ''));
+    const record = JSON.parse(rawRecord ?? '{}') as { thread?: { status?: string; messages?: Array<Record<string, unknown>> } };
+    const persistedAssistant = record.thread?.messages?.at(-1);
+    expect(record.thread?.status).toBe('error');
+    expect(persistedAssistant).toEqual(expect.objectContaining({
+      role: 'assistant',
+      content: 'Partial before failure',
+      state: 'error',
+      errorCode: 'generation_failed',
+      errorMessage: 'native generation failed',
+    }));
+    expect(record.thread?.messages?.some((message) => message.state === 'streaming')).toBe(false);
+    expect(storage.getString('chat-store') ?? '').not.toContain('Partial before failure');
+  });
+
   it('blocks sending before persisted chat mutations when private storage is unavailable', async () => {
     const blockedHealth = {
       status: 'blocked',

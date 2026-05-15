@@ -7,6 +7,7 @@ import {
   parseChatPersistenceIndex,
   parseChatThreadRecord,
   recoverStaleStreamingThread,
+  sanitizeChatThreadForPersistence,
   writeChatPersistenceIndex,
   writeChatThreadRecord,
 } from '../../src/store/chatPersistence';
@@ -110,6 +111,47 @@ describe('chatPersistence', () => {
     expect(storage.getString(getChatThreadStorageKey(thread.id))).toContain('Partial response');
   });
 
+  it('omits empty assistant progress placeholders from durable thread records', () => {
+    const thread: ChatThread = {
+      ...buildThread('thread-empty-placeholder'),
+      messages: [
+        {
+          id: 'user-1',
+          role: 'user',
+          content: 'Prompt before first token',
+          createdAt: 1,
+          state: 'complete',
+        },
+        {
+          id: 'assistant-empty',
+          role: 'assistant',
+          content: '',
+          thoughtContent: '   ',
+          createdAt: 2,
+          state: 'streaming',
+        },
+      ],
+      status: 'generating',
+    };
+
+    writeChatThreadRecord(storage, thread, 11);
+
+    expect(parseChatThreadRecord(storage.getString(getChatThreadStorageKey(thread.id)), thread.id)).toEqual({
+      ok: true,
+      value: expect.objectContaining({
+        thread: expect.objectContaining({
+          status: 'idle',
+          messages: [
+            expect.objectContaining({
+              id: 'user-1',
+              role: 'user',
+            }),
+          ],
+        }),
+      }),
+    });
+  });
+
   it('recovers cold-hydrated stale streaming messages as stopped without dropping partial content', () => {
     const thread = buildThread('thread-1');
 
@@ -126,6 +168,76 @@ describe('chatPersistence', () => {
         ],
       }),
     );
+  });
+
+  it('drops empty streaming and stopped assistant placeholders during cold recovery', () => {
+    const thread: ChatThread = {
+      ...buildThread('thread-empty-recovery'),
+      messages: [
+        {
+          id: 'user-1',
+          role: 'user',
+          content: 'Prompt before crash',
+          createdAt: 1,
+          state: 'complete',
+        },
+        {
+          id: 'assistant-empty-streaming',
+          role: 'assistant',
+          content: '',
+          createdAt: 2,
+          state: 'streaming',
+        },
+        {
+          id: 'assistant-empty-stopped',
+          role: 'assistant',
+          content: '   ',
+          thoughtContent: '',
+          createdAt: 3,
+          state: 'stopped',
+        },
+      ],
+      status: 'generating',
+    };
+
+    expect(recoverStaleStreamingThread(thread, 20)).toEqual(
+      expect.objectContaining({
+        status: 'idle',
+        updatedAt: 20,
+        messages: [
+          expect.objectContaining({
+            id: 'user-1',
+            role: 'user',
+          }),
+        ],
+      }),
+    );
+  });
+
+  it('keeps errored empty assistant messages durable', () => {
+    const thread: ChatThread = {
+      ...buildThread('thread-error'),
+      messages: [
+        {
+          id: 'assistant-error',
+          role: 'assistant',
+          content: '',
+          createdAt: 1,
+          state: 'error',
+          errorCode: 'generation_failed',
+          errorMessage: 'Native failure',
+        },
+      ],
+      status: 'error',
+    };
+
+    expect(sanitizeChatThreadForPersistence(thread).messages).toEqual([
+      expect.objectContaining({
+        id: 'assistant-error',
+        state: 'error',
+        errorCode: 'generation_failed',
+      }),
+    ]);
   });
 
   it('debounces streaming writes and lets terminal flush win over a pending timer', () => {

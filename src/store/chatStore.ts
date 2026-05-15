@@ -259,13 +259,20 @@ function isHydratableChatThread(value: unknown): value is ChatThread {
   );
 }
 
-function sanitizePersistedChatThread(value: unknown, now = Date.now()): ChatThread | null {
+function sanitizePersistedChatThread(
+  value: unknown,
+  now = Date.now(),
+): { thread: ChatThread; recovered: boolean } | null {
   if (!isHydratableChatThread(value)) {
     return null;
   }
 
   try {
-    return sanitizeHydratedThread(recoverStaleStreamingThread(value, now));
+    const recoveredThread = recoverStaleStreamingThread(value, now);
+    return {
+      thread: sanitizeHydratedThread(recoveredThread),
+      recovered: recoveredThread !== value,
+    };
   } catch {
     return null;
   }
@@ -317,16 +324,21 @@ function readV2PersistedChatState(now = Date.now()): ChatStoreHydrationResult | 
 
   threadIds.forEach((threadId) => {
     const recordResult = readChatThreadRecord(storage, threadId);
-    const thread = recordResult.ok
+    const sanitized = recordResult.ok
       ? sanitizePersistedChatThread(recordResult.value.thread, now)
       : null;
 
-    if (!thread) {
+    if (!sanitized) {
       corruptThreadIds.push(threadId);
       return;
     }
 
+    const { thread } = sanitized;
     threads[thread.id] = thread;
+
+    if (sanitized.recovered) {
+      writeChatThreadRecord(storage, thread, now);
+    }
   });
 
   const activeThreadId = resolveActiveThreadId(
@@ -354,12 +366,13 @@ function migrateLegacyPersistedChatState(
   const corruptThreadIds = new Set(existingV2State?.corruptThreadIds ?? []);
 
   Object.entries(persistedState.threads).forEach(([threadId, rawThread]) => {
-    const thread = sanitizePersistedChatThread(rawThread, now);
-    if (!thread) {
+    const sanitized = sanitizePersistedChatThread(rawThread, now);
+    if (!sanitized) {
       corruptThreadIds.add(threadId);
       return;
     }
 
+    const { thread } = sanitized;
     if (threads[thread.id]) {
       return;
     }
@@ -812,15 +825,17 @@ export const useChatStore = create<ChatStoreState>()(
         const messageId = createChatId('message');
         const thread = get().threads[threadId];
         const resolvedModelId = modelId ?? (thread ? getThreadActiveModelId(thread) : undefined);
-        get().appendMessage(threadId, {
-          id: messageId,
-          role: 'assistant',
-          content: '',
-          thoughtContent: undefined,
-          createdAt: Date.now(),
-          state: 'streaming',
-          kind: 'message',
-          modelId: resolvedModelId,
+        withChatPersistenceContext({ reason: 'streaming_patch' }, () => {
+          get().appendMessage(threadId, {
+            id: messageId,
+            role: 'assistant',
+            content: '',
+            thoughtContent: undefined,
+            createdAt: Date.now(),
+            state: 'streaming',
+            kind: 'message',
+            modelId: resolvedModelId,
+          });
         });
         return messageId;
       },

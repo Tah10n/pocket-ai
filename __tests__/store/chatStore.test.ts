@@ -306,6 +306,53 @@ describe('chatStore', () => {
     );
   });
 
+  it('keeps an empty assistant placeholder in memory but out of durable records before the first token', () => {
+    const threadId = useChatStore.getState().createThread({
+      modelId: 'author/model-q4',
+      presetId: null,
+      presetSnapshot: {
+        id: null,
+        name: 'Default',
+        systemPrompt: 'You are helpful.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 1024,
+        seed: null,
+      },
+    });
+
+    useChatStore.getState().appendMessage(threadId, {
+      id: 'user-1',
+      role: 'user',
+      content: 'Prompt before first token',
+      createdAt: 1,
+      state: 'complete',
+    });
+
+    const assistantId = useChatStore.getState().createAssistantPlaceholder(threadId);
+    flushPendingChatPersistenceWrites('background');
+
+    expect(useChatStore.getState().getThread(threadId)?.messages.at(-1)).toEqual(
+      expect.objectContaining({
+        id: assistantId,
+        state: 'streaming',
+      }),
+    );
+
+    const rawRecord = storage.getString(getChatThreadStorageKey(threadId));
+    const record = JSON.parse(rawRecord ?? '{}') as { thread: ChatThread };
+    expect(record.thread.status).toBe('idle');
+    expect(record.thread.messages).toEqual([
+      expect.objectContaining({
+        id: 'user-1',
+        role: 'user',
+        content: 'Prompt before first token',
+      }),
+    ]);
+  });
+
   it('ignores assistant patches when the target message does not exist', () => {
     const threadId = useChatStore.getState().createThread({
       modelId: 'author/model-q4',
@@ -1804,6 +1851,68 @@ describe('chatStore', () => {
         ],
       }),
     );
+  });
+
+  it('drops polluted empty streaming placeholders during v2 hydration instead of recovering phantom stopped messages', async () => {
+    const pollutedThread: ChatThread = {
+      ...buildThread('thread-empty-placeholder-v2', 20),
+      messages: [
+        {
+          id: 'user-1',
+          role: 'user',
+          content: 'Prompt before a cold restart',
+          createdAt: 20,
+          state: 'complete',
+        },
+        {
+          id: 'assistant-empty-1',
+          role: 'assistant',
+          content: '',
+          createdAt: 21,
+          state: 'streaming',
+        },
+      ],
+      status: 'generating',
+    };
+
+    storage.set(getChatThreadStorageKey(pollutedThread.id), JSON.stringify({
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      thread: pollutedThread,
+      persistedAt: 22,
+    }));
+    writeChatPersistenceIndex(storage, {
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      activeThreadId: pollutedThread.id,
+      threadIds: [pollutedThread.id],
+      updatedAt: 22,
+    });
+
+    useChatStore.setState({ threads: {}, activeThreadId: null });
+    await useChatStore.persist.rehydrate();
+
+    expect(useChatStore.getState().getThread(pollutedThread.id)).toEqual(
+      expect.objectContaining({
+        status: 'idle',
+        messages: [
+          expect.objectContaining({
+            id: 'user-1',
+            role: 'user',
+            content: 'Prompt before a cold restart',
+          }),
+        ],
+      }),
+    );
+
+    const recoveredRecord = JSON.parse(
+      storage.getString(getChatThreadStorageKey(pollutedThread.id)) ?? '{}',
+    ) as { thread: ChatThread };
+    expect(recoveredRecord.thread.status).toBe('idle');
+    expect(recoveredRecord.thread.messages).toEqual([
+      expect.objectContaining({
+        id: 'user-1',
+        role: 'user',
+      }),
+    ]);
   });
 
   it('debounces streaming patches to the active thread without rewriting unrelated records', () => {

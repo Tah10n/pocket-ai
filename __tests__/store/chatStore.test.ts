@@ -1344,6 +1344,57 @@ describe('chatStore', () => {
     );
   });
 
+  it('documents legacy streaming patches serialize unrelated threads into the chat-store snapshot', () => {
+    useChatStore.setState({
+      threads: {
+        'thread-active': {
+          ...buildThread('thread-active', 20),
+          messages: [
+            {
+              id: 'active-user-1',
+              role: 'user',
+              content: 'Active prompt',
+              createdAt: 20,
+              state: 'complete',
+            },
+            {
+              id: 'active-assistant-1',
+              role: 'assistant',
+              content: '',
+              createdAt: 21,
+              state: 'streaming',
+            },
+          ],
+          status: 'generating',
+        },
+        'thread-archive': {
+          ...buildThread('thread-archive', 10),
+          messages: [
+            {
+              id: 'archive-user-1',
+              role: 'user',
+              content: 'Archived prompt that should not be rewritten by active streaming',
+              createdAt: 10,
+              state: 'complete',
+            },
+          ],
+        },
+      },
+      activeThreadId: 'thread-active',
+    });
+
+    useChatStore.getState().patchAssistantMessage('thread-active', 'active-assistant-1', {
+      content: 'Streaming token',
+      state: 'streaming',
+    });
+
+    const persistedSnapshot = storage.getString('chat-store');
+
+    expect(persistedSnapshot).toContain('thread-active');
+    expect(persistedSnapshot).toContain('thread-archive');
+    expect(persistedSnapshot).toContain('Archived prompt that should not be rewritten by active streaming');
+  });
+
   it('persists activeModelId, model switches, and per-message model metadata across rehydration', async () => {
     const legacyThread: ChatThread = buildThread('thread-persist-switches', 10);
 

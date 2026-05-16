@@ -684,6 +684,10 @@ describe('LLMEngineService', () => {
 
   it('retries strict alternation failures with normalized chat history', async () => {
     const completionMock = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock;
+    getFormattedChatMock().mockResolvedValue({
+      prompt: '[INST] <<SYS>>\nBe concise.\n<</SYS>>\n\nHello [/INST]',
+      additional_stops: [],
+    });
     completionMock
       .mockRejectedValueOnce(new Error('Conversation roles must alternate user/assistant'))
       .mockResolvedValueOnce({ text: 'Recovered reply' });
@@ -726,6 +730,50 @@ describe('LLMEngineService', () => {
         ],
         temperature: 0.25,
         n_predict: 64,
+      }),
+      expect.any(Function),
+    );
+  });
+
+  it('retries strict alternation without Llama system wrappers for non-Llama templates', async () => {
+    const completionMock = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock;
+    getFormattedChatMock().mockResolvedValue({
+      prompt: '<|system|>\nBe concise.\n<|user|>\nHello',
+      additional_stops: [],
+    });
+    completionMock
+      .mockRejectedValueOnce(new Error('Conversation roles must alternate user/assistant'))
+      .mockResolvedValueOnce({ text: 'Recovered reply' });
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    await expect(llmEngineService.chatCompletion({
+      messages: [
+        { role: 'system', content: 'Be concise.' },
+        { role: 'assistant', content: 'Leading assistant draft.' },
+        { role: 'user', content: 'First user question.' },
+        { role: 'assistant', content: 'First assistant reply.' },
+        { role: 'assistant', content: 'Extra assistant details.' },
+      ],
+      params: {
+        temperature: 0.25,
+        n_predict: 64,
+      },
+    })).resolves.toEqual({ text: 'Recovered reply' });
+
+    expect(completionMock).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        messages: [
+          {
+            role: 'user',
+            content: 'Be concise.\n\nFirst user question.',
+          },
+          {
+            role: 'assistant',
+            content: 'First assistant reply.\n\nExtra assistant details.',
+          },
+        ],
       }),
       expect.any(Function),
     );

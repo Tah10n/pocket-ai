@@ -97,6 +97,13 @@ const DEFAULT_CONTEXT_SIZE = 4096;
 const MAX_NATIVE_LOG_LINES = 120;
 const MAX_ADDITIONAL_STOP_WORDS_CACHE_ENTRIES = 8;
 
+type StrictRoleSystemNormalization = 'plain' | 'llama';
+
+type TemplateAdditionalStopWordsResolution = {
+  stopWords: string[];
+  strictRoleSystemNormalization: StrictRoleSystemNormalization;
+};
+
 type CalibrationSession = {
   modelId: string;
   calibrationKey: string;
@@ -245,7 +252,21 @@ function mergeConsecutiveMessages(messages: LlmChatMessage[]): LlmChatMessage[] 
   return merged;
 }
 
-function normalizeMessagesForStrictRoleAlternation(messages: LlmChatMessage[]): LlmChatMessage[] {
+function resolveStrictRoleSystemNormalization(formatted: unknown): StrictRoleSystemNormalization {
+  const prompt = formatted && typeof formatted === 'object' && typeof (formatted as { prompt?: unknown }).prompt === 'string'
+    ? (formatted as { prompt: string }).prompt
+    : '';
+
+  return prompt.includes('<<SYS>>') && prompt.includes('<</SYS>>')
+    ? 'llama'
+    : 'plain';
+}
+
+function normalizeMessagesForStrictRoleAlternation(
+  messages: LlmChatMessage[],
+  options: { systemNormalization?: StrictRoleSystemNormalization } = {},
+): LlmChatMessage[] {
+  const systemNormalization = options.systemNormalization ?? 'plain';
   const systemParts: string[] = [];
   const nonSystemMessages: LlmChatMessage[] = [];
 
@@ -286,9 +307,11 @@ function normalizeMessagesForStrictRoleAlternation(messages: LlmChatMessage[]): 
       return mergeConsecutiveMessages(merged);
     }
 
-    const normalizedSystemContent = isAlreadyWrapped
-      ? cleanedSystemContent
-      : `<<SYS>>\n${cleanedSystemContent}\n<</SYS>>`;
+    const normalizedSystemContent = systemNormalization === 'llama'
+      ? isAlreadyWrapped
+        ? cleanedSystemContent
+        : `<<SYS>>\n${cleanedSystemContent}\n<</SYS>>`
+      : cleanedSystemContent;
 
     if (merged.length === 0) {
       merged = [{ role: 'user', content: normalizedSystemContent }];
@@ -337,7 +360,7 @@ class LLMEngineService {
   private initNBatch: number | null = null;
   private initNUbatch: number | null = null;
   private initKvUnified: boolean | null = null;
-  private additionalStopWordsCache: Map<string, string[]> = new Map();
+  private additionalStopWordsCache: Map<string, TemplateAdditionalStopWordsResolution> = new Map();
   private state: EngineState = {
     status: EngineStatus.IDLE,
     loadProgress: 0,
@@ -523,6 +546,15 @@ class LLMEngineService {
     );
   }
 
+  private copyTemplateStopWordsResolution(
+    resolution: TemplateAdditionalStopWordsResolution,
+  ): TemplateAdditionalStopWordsResolution {
+    return {
+      stopWords: [...resolution.stopWords],
+      strictRoleSystemNormalization: resolution.strictRoleSystemNormalization,
+    };
+  }
+
   private async resolveTemplateAdditionalStopWords({
     context,
     generation,
@@ -535,7 +567,7 @@ class LLMEngineService {
     messages: LlmChatMessage[];
     enableThinking: boolean;
     reasoningFormat: ChatCompletionReasoningFormat;
-  }): Promise<string[]> {
+  }): Promise<TemplateAdditionalStopWordsResolution> {
     const cacheKey = this.buildAdditionalStopWordsCacheKey({
       generation,
       messages,
@@ -545,7 +577,7 @@ class LLMEngineService {
     const cached = this.additionalStopWordsCache.get(cacheKey);
     if (cached) {
       this.assertContextStillCurrent(context, generation);
-      return [...cached];
+      return this.copyTemplateStopWordsResolution(cached);
     }
 
     try {
@@ -570,20 +602,27 @@ class LLMEngineService {
         ? ((formatted as any).additional_stops as unknown[])
         : [];
       const normalizedStops = this.normalizeAdditionalStopWords(additionalStops);
-      this.additionalStopWordsCache.set(cacheKey, normalizedStops);
+      const resolution: TemplateAdditionalStopWordsResolution = {
+        stopWords: normalizedStops,
+        strictRoleSystemNormalization: resolveStrictRoleSystemNormalization(formatted),
+      };
+      this.additionalStopWordsCache.set(cacheKey, resolution);
       if (this.additionalStopWordsCache.size > MAX_ADDITIONAL_STOP_WORDS_CACHE_ENTRIES) {
         const oldestCacheKey = this.additionalStopWordsCache.keys().next().value;
         if (oldestCacheKey) {
           this.additionalStopWordsCache.delete(oldestCacheKey);
         }
       }
-      return [...normalizedStops];
+      return this.copyTemplateStopWordsResolution(resolution);
     } catch (error) {
       this.assertContextStillCurrent(context, generation);
       if (process.env.NODE_ENV !== 'test') {
         console.warn('[LLMEngine] Failed to resolve template stop tokens', error);
       }
-      return [];
+      return {
+        stopWords: [],
+        strictRoleSystemNormalization: 'plain',
+      };
     }
   }
 
@@ -1201,6 +1240,7 @@ class LLMEngineService {
           hasStreamedTokens = true;
         };
 
+        let strictRoleSystemNormalization: StrictRoleSystemNormalization = 'plain';
         const runCompletion = async (completionMessages: LlmChatMessage[], onTokensStreamed: () => void) => {
           this.assertCompletionNotInterrupted(interruptGeneration);
           const enableThinking = params?.enable_thinking ?? false;
@@ -1217,18 +1257,19 @@ class LLMEngineService {
             '<|endoftext|>',
           ];
 
-          const additionalStopWords = await this.resolveTemplateAdditionalStopWords({
+          const templateStopResolution = await this.resolveTemplateAdditionalStopWords({
             context,
             generation: contextGeneration,
             messages: completionMessages,
             enableThinking,
             reasoningFormat,
           });
+          strictRoleSystemNormalization = templateStopResolution.strictRoleSystemNormalization;
           this.assertCompletionNotInterrupted(interruptGeneration);
 
           const resolvedStops = Array.from(
             new Set(
-              [...baseStopWords, ...additionalStopWords]
+              [...baseStopWords, ...templateStopResolution.stopWords]
                 .map((stop) => stop.trim())
                 .filter((stop) => stop.length > 0),
             ),
@@ -1293,7 +1334,9 @@ class LLMEngineService {
             }
 
             console.warn('[LLMEngine] Retrying completion after normalizing chat roles for strict templates');
-            const normalizedMessages = normalizeMessagesForStrictRoleAlternation(messages);
+            const normalizedMessages = normalizeMessagesForStrictRoleAlternation(messages, {
+              systemNormalization: strictRoleSystemNormalization,
+            });
             hasStreamedTokens = false;
             resolveCompletion(await runCompletion(normalizedMessages, markTokensStreamed));
             return;
@@ -1526,6 +1569,7 @@ class LLMEngineService {
 
       const { context, generation: contextGeneration } = this.getReadyContextOrThrow();
 
+      let strictRoleSystemNormalization: StrictRoleSystemNormalization = 'plain';
       const countTokens = async (promptMessages: LlmChatMessage[]) => {
         this.assertContextStillCurrent(context, contextGeneration);
         let formatted: Awaited<ReturnType<LlamaContext['getFormattedChat']>>;
@@ -1540,6 +1584,7 @@ class LLMEngineService {
           throw error;
         }
 
+        strictRoleSystemNormalization = resolveStrictRoleSystemNormalization(formatted);
         this.assertContextStillCurrent(context, contextGeneration);
         let tokenized: Awaited<ReturnType<LlamaContext['tokenize']>>;
         try {
@@ -1561,7 +1606,9 @@ class LLMEngineService {
       } catch (error) {
         if (isConversationAlternationError(error)) {
           console.warn('[LLMEngine] Retrying prompt token count after normalizing chat roles for strict templates');
-          const normalizedMessages = normalizeMessagesForStrictRoleAlternation(messages);
+          const normalizedMessages = normalizeMessagesForStrictRoleAlternation(messages, {
+            systemNormalization: strictRoleSystemNormalization,
+          });
           return await countTokens(normalizedMessages);
         }
 

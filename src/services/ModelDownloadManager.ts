@@ -397,7 +397,7 @@ export class ModelDownloadManager {
   }
 
   private async runDownloadJob(model: ModelMetadata, jobToken: number): Promise<void> {
-    const { setActiveDownload } = useDownloadStore.getState();
+    const { setActiveDownload, updateModelInQueue } = useDownloadStore.getState();
 
     try {
       if (!this.isCurrentJob(model.id, jobToken)) {
@@ -420,6 +420,13 @@ export class ModelDownloadManager {
 
       if (this.isCurrentJob(model.id, jobToken)) {
         await this.persistDownloadStoreMutation(() => {
+          const currentQueueEntry = useDownloadStore
+            .getState()
+            .queue
+            .find((queuedModel) => queuedModel.id === model.id);
+          if (currentQueueEntry?.lifecycleStatus !== LifecycleStatus.FAILED) {
+            updateModelInQueue(model.id, this.getDownloadFailureUpdates(e));
+          }
           setActiveDownload(null);
         });
       }

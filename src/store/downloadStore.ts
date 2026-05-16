@@ -4,6 +4,7 @@ import { mmkvStorage } from '../lib/mmkv';
 import { ModelMetadata, LifecycleStatus } from '../types/models';
 import { normalizePersistedModelMetadata } from '../services/ModelMetadataNormalizer';
 import { getCandidateModelDownloadFileNames } from '../utils/modelFiles';
+import { isValidLocalFileName } from '../utils/safeFilePath';
 import { createInstrumentedStateStorage } from './persistStateStorage';
 import { assertPrivateStorageWritable } from '../services/storage';
 
@@ -168,7 +169,10 @@ export function getQueuedDownloadFileNames(): string[] {
     useDownloadStore
       .getState()
       .queue
-      .flatMap((model) => getCandidateModelDownloadFileNames(model)),
+      .flatMap((model) => [
+        ...(model.localPath && isValidLocalFileName(model.localPath) ? [model.localPath] : []),
+        ...getCandidateModelDownloadFileNames(model),
+      ]),
   ));
 }
 

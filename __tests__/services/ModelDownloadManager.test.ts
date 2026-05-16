@@ -476,6 +476,60 @@ describe('ModelDownloadManager Basic', () => {
     expect(useDownloadStore.getState().activeDownloadId).toBeNull();
   });
 
+  it('marks setup failures as failed instead of leaving queued downloads in a retry loop', async () => {
+    const jobToken = 99;
+    (modelDownloadManager as any).activeJob = {
+      modelId: mockModel.id,
+      jobToken,
+      resumable: null,
+      stopReason: null,
+    };
+    (modelDownloadManager as any).isProcessing = true;
+    (FileSystem.createDownloadResumable as jest.Mock).mockImplementationOnce(() => {
+      throw new Error('cannot create download');
+    });
+    useDownloadStore.setState({
+      queue: [{ ...mockModel, lifecycleStatus: LifecycleStatus.QUEUED }],
+      activeDownloadId: mockModel.id,
+    });
+
+    await expect((modelDownloadManager as any).runDownloadJob(mockModel, jobToken)).resolves.toBeUndefined();
+
+    const entry = useDownloadStore.getState().queue.find((model) => model.id === mockModel.id);
+    expect(entry?.lifecycleStatus).toBe(LifecycleStatus.FAILED);
+    expect(entry?.downloadErrorCode).toBe('action_failed');
+    expect(useDownloadStore.getState().activeDownloadId).toBeNull();
+    expect((modelDownloadManager as any).activeJob).toBeNull();
+    expect((modelDownloadManager as any).isProcessing).toBe(false);
+  });
+
+  it('does not overwrite failed resume data in the runDownloadJob safety net', async () => {
+    const jobToken = 100;
+    (modelDownloadManager as any).activeJob = {
+      modelId: mockModel.id,
+      jobToken,
+      resumable: null,
+      stopReason: null,
+    };
+    (modelDownloadManager as any).isProcessing = true;
+    (FileSystem.createDownloadResumable as jest.Mock).mockReturnValueOnce({
+      downloadAsync: jest.fn().mockRejectedValue(new Error('network error')),
+      savable: () => ({ resumeData: 'resume-data' }),
+    });
+    useDownloadStore.setState({
+      queue: [{ ...mockModel, lifecycleStatus: LifecycleStatus.QUEUED }],
+      activeDownloadId: mockModel.id,
+    });
+
+    await expect((modelDownloadManager as any).runDownloadJob(mockModel, jobToken)).resolves.toBeUndefined();
+
+    const entry = useDownloadStore.getState().queue.find((model) => model.id === mockModel.id);
+    expect(entry?.lifecycleStatus).toBe(LifecycleStatus.FAILED);
+    expect(entry?.downloadErrorCode).toBe('action_failed');
+    expect(entry?.resumeData).toEqual(expect.stringContaining('resume-data'));
+    expect(useDownloadStore.getState().activeDownloadId).toBeNull();
+  });
+
   it('rejects downloads when the GGUF filename still needs a tree probe', async () => {
     useDownloadStore.setState({ queue: [], activeDownloadId: null });
 

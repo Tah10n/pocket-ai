@@ -208,4 +208,25 @@ describe('downloadStore', () => {
       queuedFileNames.some((fileName) => fileName.startsWith('model-cafebabe1234-') && fileName.endsWith('.gguf')),
     ).toBe(true);
   });
+
+  it('keeps queued localPath filenames protected from quarantine scans', () => {
+    useDownloadStore.setState({
+      queue: [
+        {
+          ...buildQueuedModel('legacy/model', LifecycleStatus.PAUSED),
+          localPath: 'custom-partial.gguf',
+        },
+        {
+          ...buildQueuedModel('bad/model', LifecycleStatus.FAILED),
+          localPath: '../bad.gguf',
+        },
+      ],
+      activeDownloadId: null,
+    });
+
+    const queuedFileNames = getQueuedDownloadFileNames();
+
+    expect(queuedFileNames).toContain('custom-partial.gguf');
+    expect(queuedFileNames).not.toContain('../bad.gguf');
+  });
 });

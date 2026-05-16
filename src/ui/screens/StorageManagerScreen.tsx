@@ -14,6 +14,7 @@ import { hardwareListenerService, type HardwareStatus } from '../../services/Har
 import {
     clearActiveCache,
     clearChatHistory,
+    cleanupQuarantinedModelFiles,
     getAppStorageMetrics,
     offloadModel,
     resetAppSettings,
@@ -23,7 +24,7 @@ import { getReportedErrorMessage } from '../../services/AppError';
 import { formatModelFileSize } from '../../utils/modelSize';
 import { toTestIdSegment } from '../../utils/testIds';
 
-type BusyAction = 'cache' | 'chat' | 'settings' | `offload:${string}` | `offload:${string}:reset` | null;
+type BusyAction = 'cache' | 'quarantine' | 'chat' | 'settings' | `offload:${string}` | `offload:${string}:reset` | null;
 
 function formatBytes(value: number) {
     if (!Number.isFinite(value) || value <= 0) return '0 MB';
@@ -106,7 +107,7 @@ export function StorageManagerScreen() {
     }, [canGoBack, router]);
 
     const loadAppMetrics = useCallback(async () => {
-        const next = await getAppStorageMetrics();
+        const next = await getAppStorageMetrics({ refreshModelFileQuarantine: true });
         if (mountedRef.current) {
             setAppMetrics(next);
         }
@@ -148,6 +149,10 @@ export function StorageManagerScreen() {
         }
     }, [refreshAll, t]);
 
+    const quarantineCount = appMetrics?.quarantinedModelFiles.count ?? 0;
+    const quarantineBytes = appMetrics?.quarantinedModelFiles.bytes ?? 0;
+    const quarantineSizeLabel = formatBytes(quarantineBytes);
+
     const handleDeleteModel = useCallback((modelId: string, modelName: string) => {
         Alert.alert(
             t('storageManager.deleteModelTitle'),
@@ -174,6 +179,32 @@ export function StorageManagerScreen() {
             ],
         );
     }, [runBusyAction, t]);
+
+    const handleCleanupQuarantinedModelFiles = useCallback(() => {
+        if (quarantineCount <= 0) {
+            return;
+        }
+
+        Alert.alert(
+            t('storageManager.clearQuarantineTitle'),
+            t('storageManager.clearQuarantineMessage', {
+                count: quarantineCount,
+                size: quarantineSizeLabel,
+            }),
+            [
+                { text: t('common.cancel'), style: 'cancel' },
+                {
+                    text: t('storageManager.clearQuarantineAction'),
+                    style: 'destructive',
+                    onPress: () => {
+                        void runBusyAction('quarantine', async () => {
+                            await cleanupQuarantinedModelFiles();
+                        });
+                    },
+                },
+            ],
+        );
+    }, [quarantineCount, quarantineSizeLabel, runBusyAction, t]);
 
     const handleClearCache = useCallback(() => {
         Alert.alert(
@@ -274,6 +305,21 @@ export function StorageManagerScreen() {
                                     buttonLabel={busyAction === 'cache' ? t('common.loading') : t('common.clear')}
                                     buttonTestID="storage-manager-clear-cache"
                                     onPress={handleClearCache}
+                                />
+                                <ActionCard
+                                    title={t('storageManager.clearQuarantineTitle')}
+                                    description={t('storageManager.clearQuarantineDescription')}
+                                    meta={t('storageManager.clearQuarantineMeta', {
+                                        count: quarantineCount,
+                                        size: quarantineSizeLabel,
+                                    })}
+                                    busy={busyAction === 'quarantine'}
+                                    disabled={busyAction !== null || quarantineCount <= 0}
+                                    buttonLabel={busyAction === 'quarantine'
+                                        ? t('common.loading')
+                                        : t('storageManager.clearQuarantineAction')}
+                                    buttonTestID="storage-manager-cleanup-quarantine"
+                                    onPress={handleCleanupQuarantinedModelFiles}
                                 />
                                 <ActionCard
                                     title={t('storageManager.clearChatHistoryTitle')}

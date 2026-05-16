@@ -358,14 +358,38 @@ class LLMEngineService {
   private completionInterruptGeneration = 0;
   private isUnloading = false;
   private activeCalibrationSession: CalibrationSession | null = null;
+  private lastLifecycleEvent: 'low_memory_unload_failed' | null = null;
+  private lastLifecycleError: string | null = null;
 
   constructor() {
     this.hwUnsubscribe = hardwareListenerService.subscribe((status) => {
       if (status.isLowMemory && this.context) {
-        if (process.env.NODE_ENV !== 'test') {
-          console.warn('[LLMEngine] Low memory warning — unloading model');
-        }
-        this.unload();
+        this.handleLowMemoryUnload();
+      }
+    });
+  }
+
+  private handleLowMemoryUnload(): void {
+    if (!this.context || this.isUnloading) {
+      return;
+    }
+
+    if (process.env.NODE_ENV !== 'test') {
+      console.warn('[LLMEngine] Low memory warning - unloading model');
+    }
+
+    void this.unload().catch((error) => {
+      const appError = toAppError(error, 'action_failed');
+      this.lastLifecycleEvent = 'low_memory_unload_failed';
+      this.lastLifecycleError = appError.message;
+      this.updateState({
+        ...this.state,
+        status: EngineStatus.ERROR,
+        lastError: appError.message,
+      });
+
+      if (process.env.NODE_ENV !== 'test') {
+        console.warn('[LLMEngine] Failed to unload model after low memory warning', error);
       }
     });
   }
@@ -1711,6 +1735,8 @@ class LLMEngineService {
       initNBatch: this.initNBatch,
       initNUbatch: this.initNUbatch,
       initKvUnified: this.initKvUnified,
+      lastLifecycleEvent: this.lastLifecycleEvent,
+      lastLifecycleError: this.lastLifecycleError,
     });
   }
 
@@ -1752,6 +1778,8 @@ class LLMEngineService {
     this.initNBatch = null;
     this.initNUbatch = null;
     this.initKvUnified = null;
+    this.lastLifecycleEvent = null;
+    this.lastLifecycleError = null;
   }
 
   private resolveReportedLoadedGpuLayers(resolvedGpuLayers: number | null): number {

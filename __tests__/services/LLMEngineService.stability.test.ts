@@ -200,6 +200,31 @@ describe('LLMEngineService Stability', () => {
         expect(hardwareListenerService.getCurrentStatus().isLowMemory).toBe(false);
     });
 
+    it('reports low-memory unload failures without an unhandled rejection', async () => {
+        (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(8 * 1024 * 1024 * 1024);
+        (initLlama as jest.Mock).mockImplementation(async (options?: { n_gpu_layers?: number }) => createMockContext(options));
+        (releaseAllLlama as jest.Mock).mockRejectedValueOnce(new Error('native release failed'));
+
+        await llmEngineService.load(mockModel.id);
+        expect(llmEngineService.getState().status).toBe('ready');
+
+        // @ts-ignore - drive the same service update used by the native memory warning event.
+        hardwareListenerService.updateStatus({ isLowMemory: true });
+
+        for (let i = 0; i < 10 && llmEngineService.getState().status !== 'error'; i += 1) {
+            await new Promise(process.nextTick);
+        }
+
+        expect(llmEngineService.getState()).toEqual(expect.objectContaining({
+            status: 'error',
+            lastError: 'native release failed',
+            diagnostics: expect.objectContaining({
+                lastLifecycleEvent: 'low_memory_unload_failed',
+                lastLifecycleError: 'native release failed',
+            }),
+        }));
+    });
+
     it('serializes concurrent load requests and leaves the newest model active', async () => {
         (registry.getModel as jest.Mock).mockImplementation((modelId: string) => ({
             id: modelId,

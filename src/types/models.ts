@@ -174,6 +174,8 @@ export interface EngineDiagnostics {
   initNBatch?: number;
   initNUbatch?: number;
   initKvUnified?: boolean;
+  lastLifecycleEvent?: 'low_memory_unload_failed';
+  lastLifecycleError?: string;
 }
 
 export interface EngineState {

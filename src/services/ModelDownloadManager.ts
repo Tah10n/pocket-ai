@@ -228,9 +228,13 @@ export class ModelDownloadManager {
 
   private getDownloadFailureUpdates(error: unknown, resumeData?: string): Partial<ModelMetadata> {
     const appError = toAppError(error);
+    const shouldDiscardResumeData = appError.code === 'download_verification_failed'
+      || appError.code === 'download_file_missing';
+
     return {
       lifecycleStatus: LifecycleStatus.FAILED,
-      resumeData,
+      resumeData: shouldDiscardResumeData ? undefined : resumeData,
+      ...(shouldDiscardResumeData ? { downloadProgress: 0, downloadIntegrity: undefined } : {}),
       downloadErrorCode: appError.code,
       downloadErrorMessage: appError.message,
       downloadErrorAt: Date.now(),

@@ -39,7 +39,14 @@ export function getModelDownloadFileName(
   return `${repoName}-${revision}-${fingerprint}${extension}`;
 }
 
-export function getLegacyModelDownloadFileName(modelId: string): string {
+function getClassicLegacyModelDownloadFileName(modelId: string): string | undefined {
+  const legacyBase = modelId.replace(/\//g, '_');
+  const candidate = `${legacyBase}.gguf`;
+
+  return isValidLocalFileName(candidate) ? candidate : undefined;
+}
+
+function getSanitizedLegacyModelDownloadFileName(modelId: string): string {
   const legacyBase = modelId.replace(/\//g, '_');
   const sanitizedBase = sanitizeModelFileSegment(legacyBase, 'model');
   const candidate = `${sanitizedBase}.gguf`;
@@ -51,11 +58,18 @@ export function getLegacyModelDownloadFileName(modelId: string): string {
   return `${sanitizedBase}-${hashString(modelId)}.gguf`;
 }
 
+export function getLegacyModelDownloadFileName(modelId: string): string {
+  return getClassicLegacyModelDownloadFileName(modelId) ?? getSanitizedLegacyModelDownloadFileName(modelId);
+}
+
 export function getCandidateModelDownloadFileNames(
   model: Pick<ModelMetadata, 'id' | 'resolvedFileName' | 'hfRevision'>,
 ): string[] {
+  const classicLegacyName = getClassicLegacyModelDownloadFileName(model.id);
+
   return Array.from(new Set([
     getModelDownloadFileName(model),
-    getLegacyModelDownloadFileName(model.id),
+    ...(classicLegacyName ? [classicLegacyName] : []),
+    getSanitizedLegacyModelDownloadFileName(model.id),
   ])).filter(isValidLocalFileName);
 }

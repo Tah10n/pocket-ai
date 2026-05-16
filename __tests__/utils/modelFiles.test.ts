@@ -35,6 +35,17 @@ describe('modelFiles', () => {
     expect(candidates[0]).toBe(fileName);
   });
 
+  it('keeps valid classic legacy filenames with dots as candidates', () => {
+    const candidates = getCandidateModelDownloadFileNames({
+      id: 'Qwen/Qwen2.5-0.5B',
+      resolvedFileName: 'model.gguf',
+      hfRevision: 'main',
+    });
+
+    expect(getLegacyModelDownloadFileName('Qwen/Qwen2.5-0.5B')).toBe('Qwen_Qwen2.5-0.5B.gguf');
+    expect(candidates).toContain('Qwen_Qwen2.5-0.5B.gguf');
+  });
+
   it('falls back to sanitized default segments and gguf extension when metadata is unusable', () => {
     const fileName = getModelDownloadFileName({
       id: '///',
@@ -55,5 +66,10 @@ describe('modelFiles', () => {
       resolvedFileName: '../../bad.gguf',
       hfRevision: '../main',
     })).toEqual(expect.arrayContaining([legacyName]));
+    expect(getCandidateModelDownloadFileNames({
+      id: 'author/../../bad model',
+      resolvedFileName: '../../bad.gguf',
+      hfRevision: '../main',
+    })).not.toContain('author_.._.._bad model.gguf');
   });
 });

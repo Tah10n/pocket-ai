@@ -46,6 +46,7 @@ describe('ModelMetadataNormalizer', () => {
       id: 'legacy/model',
       lifecycleStatus: LifecycleStatus.DOWNLOADED,
       downloadProgress: 1,
+      localPath: 'legacy_model.gguf',
       downloadIntegrity: {
         kind: 'size',
         sizeBytes: 2048,
@@ -82,6 +83,29 @@ describe('ModelMetadataNormalizer', () => {
     });
 
     expect(normalized.localPath).toBeUndefined();
+  });
+
+  it('resets downloaded state when persisted local paths are unsafe', () => {
+    const normalized = normalizePersistedModelMetadata({
+      id: 'legacy/model',
+      localPath: '../escape.gguf',
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      downloadedAt: 123,
+      metadataTrust: 'verified_local',
+      downloadIntegrity: {
+        kind: 'size',
+        sizeBytes: 2048,
+        checkedAt: 10,
+      },
+    });
+
+    expect(normalized.localPath).toBeUndefined();
+    expect(normalized.lifecycleStatus).toBe(LifecycleStatus.AVAILABLE);
+    expect(normalized.downloadProgress).toBe(0);
+    expect(normalized.downloadedAt).toBeUndefined();
+    expect(normalized.metadataTrust).toBeUndefined();
+    expect(normalized.downloadIntegrity).toBeUndefined();
   });
 
   it('preserves prefixed GGUF metadata keys needed by memory-fit estimation', () => {

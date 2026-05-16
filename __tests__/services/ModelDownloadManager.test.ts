@@ -903,7 +903,7 @@ describe('ModelDownloadManager Basic', () => {
     });
 
     useDownloadStore.setState({
-      queue: [{ ...mockModel, lifecycleStatus: LifecycleStatus.QUEUED }],
+      queue: [{ ...mockModel, lifecycleStatus: LifecycleStatus.QUEUED, downloadProgress: 0.8 }],
       activeDownloadId: mockModel.id,
     });
 
@@ -913,6 +913,11 @@ describe('ModelDownloadManager Basic', () => {
     });
 
     expect(sendErrorSpy).toHaveBeenCalledWith({ modelName: 'model', reason: 'verificationFailed' });
+    const entry = useDownloadStore.getState().queue.find((model) => model.id === mockModel.id);
+    expect(entry?.lifecycleStatus).toBe(LifecycleStatus.FAILED);
+    expect(entry?.downloadErrorCode).toBe('download_verification_failed');
+    expect(entry?.resumeData).toBeUndefined();
+    expect(entry?.downloadProgress).toBe(0);
     sendErrorSpy.mockRestore();
     verifySpy.mockRestore();
   });

@@ -133,6 +133,35 @@ describe('LocalStorageRegistry', () => {
     expect(updatedModels[0].localPath).toBeUndefined();
   });
 
+  it('should reset downloaded models that no longer have a local path', async () => {
+    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([
+      createMockModel({
+        localPath: undefined,
+        downloadedAt: 123,
+        downloadIntegrity: {
+          kind: 'size',
+          sizeBytes: 1000,
+          checkedAt: 10,
+        },
+        metadataTrust: 'verified_local',
+        downloadProgress: 1,
+      }),
+    ]);
+    (registry.saveModels as jest.Mock) = jest.fn();
+
+    await registry.validateRegistry();
+
+    expect(FileSystem.getInfoAsync).not.toHaveBeenCalled();
+    expect(registry.saveModels).toHaveBeenCalled();
+    const updatedModels = (registry.saveModels as jest.Mock).mock.calls[0][0];
+    expect(updatedModels[0].lifecycleStatus).toBe(LifecycleStatus.AVAILABLE);
+    expect(updatedModels[0].localPath).toBeUndefined();
+    expect(updatedModels[0].downloadedAt).toBeUndefined();
+    expect(updatedModels[0].downloadIntegrity).toBeUndefined();
+    expect(updatedModels[0].metadataTrust).toBeUndefined();
+    expect(updatedModels[0].downloadProgress).toBe(0);
+  });
+
   it('should normalize persisted active models back to downloaded on bootstrap', async () => {
     (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([
       createMockModel({ lifecycleStatus: LifecycleStatus.ACTIVE }),

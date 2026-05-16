@@ -270,6 +270,17 @@ function cloneModelMetadata(model: ModelMetadata): ModelMetadata {
   };
 }
 
+function resetLocalDownloadState(model: ModelMetadata): void {
+  model.lifecycleStatus = LifecycleStatus.AVAILABLE;
+  model.localPath = undefined;
+  model.downloadedAt = undefined;
+  model.downloadIntegrity = undefined;
+  model.downloadProgress = 0;
+  if (model.metadataTrust === 'verified_local') {
+    model.metadataTrust = undefined;
+  }
+}
+
 export class LocalStorageRegistry {
   private static instance: LocalStorageRegistry;
   private storage: MMKV | null = null;
@@ -539,13 +550,13 @@ export class LocalStorageRegistry {
 
     if (!modelsDir) {
       for (const model of models) {
-        if (model.localPath) {
-          model.localPath = undefined;
-          if (
-            model.lifecycleStatus === LifecycleStatus.DOWNLOADED ||
-            model.lifecycleStatus === LifecycleStatus.ACTIVE
-          ) {
-            model.lifecycleStatus = LifecycleStatus.AVAILABLE;
+        const hasDownloadedState = model.lifecycleStatus === LifecycleStatus.DOWNLOADED
+          || model.lifecycleStatus === LifecycleStatus.ACTIVE;
+        if (model.localPath || hasDownloadedState) {
+          if (hasDownloadedState) {
+            resetLocalDownloadState(model);
+          } else {
+            model.localPath = undefined;
           }
           changed = true;
         }
@@ -561,98 +572,101 @@ export class LocalStorageRegistry {
     // 1. Check if recorded files actually exist
     for (const model of models) {
       if (model.lifecycleStatus === LifecycleStatus.DOWNLOADED || model.lifecycleStatus === LifecycleStatus.ACTIVE) {
-        if (model.localPath) {
-          const fileUri = safeJoinModelPath(modelsDir, model.localPath);
-          if (!fileUri) {
-            console.warn(`[LocalStorageRegistry] Invalid localPath for ${model.id}, resetting to available`);
-            model.lifecycleStatus = LifecycleStatus.AVAILABLE;
-            model.localPath = undefined;
-            changed = true;
-            continue;
-          }
-          const info = await FileSystem.getInfoAsync(fileUri);
-          if (!info.exists) {
-            console.warn(`[LocalStorageRegistry] File missing for ${model.id}, resetting to available`);
-            model.lifecycleStatus = LifecycleStatus.AVAILABLE;
-            model.localPath = undefined;
-            changed = true;
-            continue;
-          } else if (model.lifecycleStatus === LifecycleStatus.ACTIVE) {
-            model.lifecycleStatus = LifecycleStatus.DOWNLOADED;
-            changed = true;
-          }
+        if (!model.localPath) {
+          console.warn(`[LocalStorageRegistry] Missing localPath for ${model.id}, resetting to available`);
+          resetLocalDownloadState(model);
+          changed = true;
+          continue;
+        }
 
-          const verifiedSizeBytes = (
-            typeof info.size === 'number'
-            && Number.isFinite(info.size)
-            && info.size > 0
-          )
-            ? Math.round(info.size)
-            : null;
+        const fileUri = safeJoinModelPath(modelsDir, model.localPath);
+        if (!fileUri) {
+          console.warn(`[LocalStorageRegistry] Invalid localPath for ${model.id}, resetting to available`);
+          resetLocalDownloadState(model);
+          changed = true;
+          continue;
+        }
+        const info = await FileSystem.getInfoAsync(fileUri);
+        if (!info.exists) {
+          console.warn(`[LocalStorageRegistry] File missing for ${model.id}, resetting to available`);
+          resetLocalDownloadState(model);
+          changed = true;
+          continue;
+        } else if (model.lifecycleStatus === LifecycleStatus.ACTIVE) {
+          model.lifecycleStatus = LifecycleStatus.DOWNLOADED;
+          changed = true;
+        }
 
-          if (verifiedSizeBytes !== null && model.size !== verifiedSizeBytes) {
-            model.size = verifiedSizeBytes;
-            changed = true;
-          }
+        const verifiedSizeBytes = (
+          typeof info.size === 'number'
+          && Number.isFinite(info.size)
+          && info.size > 0
+        )
+          ? Math.round(info.size)
+          : null;
 
-          const persistedSizeBytes = (
-            typeof model.size === 'number'
-            && Number.isFinite(model.size)
-            && model.size > 0
-          )
-            ? Math.round(model.size)
-            : null;
-          const sizeBytesForFit = verifiedSizeBytes ?? persistedSizeBytes;
+        if (verifiedSizeBytes !== null && model.size !== verifiedSizeBytes) {
+          model.size = verifiedSizeBytes;
+          changed = true;
+        }
 
-          if (sizeBytesForFit !== null) {
-            const metadataTrustForFit = verifiedSizeBytes !== null
-              ? 'verified_local' as const
-              : model.metadataTrust;
-            const fit = estimateFastMemoryFit({
-              modelSizeBytes: sizeBytesForFit,
-              totalMemoryBytes,
-              metadataTrust: metadataTrustForFit,
-              ggufMetadata: model.gguf as Record<string, unknown> | undefined,
-            });
-            const fitsInRam = fit.decision === 'unknown'
-              ? null
-              : fit.decision === 'fits_high_confidence' || fit.decision === 'fits_low_confidence';
-            const memoryFitDecision = fit.decision;
-            const memoryFitConfidence = fit.confidence;
+        const persistedSizeBytes = (
+          typeof model.size === 'number'
+          && Number.isFinite(model.size)
+          && model.size > 0
+        )
+          ? Math.round(model.size)
+          : null;
+        const sizeBytesForFit = verifiedSizeBytes ?? persistedSizeBytes;
 
-            if (verifiedSizeBytes !== null) {
-              const metadataTrust = 'verified_local' as const;
-              if (model.metadataTrust !== metadataTrust) {
-                model.metadataTrust = metadataTrust;
-                changed = true;
-              }
+        if (sizeBytesForFit !== null) {
+          const metadataTrustForFit = verifiedSizeBytes !== null
+            ? 'verified_local' as const
+            : model.metadataTrust;
+          const fit = estimateFastMemoryFit({
+            modelSizeBytes: sizeBytesForFit,
+            totalMemoryBytes,
+            metadataTrust: metadataTrustForFit,
+            ggufMetadata: model.gguf as Record<string, unknown> | undefined,
+          });
+          const fitsInRam = fit.decision === 'unknown'
+            ? null
+            : fit.decision === 'fits_high_confidence' || fit.decision === 'fits_low_confidence';
+          const memoryFitDecision = fit.decision;
+          const memoryFitConfidence = fit.confidence;
 
-              const mergedGgufTotalBytes = model.gguf?.totalBytes === verifiedSizeBytes
-                ? model.gguf
-                : {
-                  ...(model.gguf ?? {}),
-                  totalBytes: verifiedSizeBytes,
-                };
-              if (mergedGgufTotalBytes !== model.gguf) {
-                model.gguf = mergedGgufTotalBytes;
-                changed = true;
-              }
-            }
-
-            if (model.fitsInRam !== fitsInRam) {
-              model.fitsInRam = fitsInRam;
+          if (verifiedSizeBytes !== null) {
+            const metadataTrust = 'verified_local' as const;
+            if (model.metadataTrust !== metadataTrust) {
+              model.metadataTrust = metadataTrust;
               changed = true;
             }
 
-            if (model.memoryFitDecision !== memoryFitDecision) {
-              model.memoryFitDecision = memoryFitDecision;
+            const mergedGgufTotalBytes = model.gguf?.totalBytes === verifiedSizeBytes
+              ? model.gguf
+              : {
+                ...(model.gguf ?? {}),
+                totalBytes: verifiedSizeBytes,
+              };
+            if (mergedGgufTotalBytes !== model.gguf) {
+              model.gguf = mergedGgufTotalBytes;
               changed = true;
             }
+          }
 
-            if (model.memoryFitConfidence !== memoryFitConfidence) {
-              model.memoryFitConfidence = memoryFitConfidence;
-              changed = true;
-            }
+          if (model.fitsInRam !== fitsInRam) {
+            model.fitsInRam = fitsInRam;
+            changed = true;
+          }
+
+          if (model.memoryFitDecision !== memoryFitDecision) {
+            model.memoryFitDecision = memoryFitDecision;
+            changed = true;
+          }
+
+          if (model.memoryFitConfidence !== memoryFitConfidence) {
+            model.memoryFitConfidence = memoryFitConfidence;
+            changed = true;
           }
         }
       }

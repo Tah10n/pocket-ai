@@ -248,21 +248,38 @@ export function normalizePersistedModelMetadata(
     ?? buildHuggingFaceResolveUrl(model.id, 'model.gguf', normalizedRevision);
   const normalizedName = normalizeNonEmptyString(model.name) ?? (getShortModelLabel(model.id) || model.id);
   const normalizedAuthor = normalizeNonEmptyString(model.author) ?? model.id.split('/')[0] ?? 'unknown';
-  const lifecycleStatus = normalizeLifecycleStatus(model.lifecycleStatus);
-  const metadataTrust = normalizeMetadataTrust(model.metadataTrust);
+  const localPath = normalizeLocalFileName(model.localPath);
+  const persistedLifecycleStatus = normalizeLifecycleStatus(model.lifecycleStatus);
+  const shouldDropDownloadedState = localPath === undefined && (
+    persistedLifecycleStatus === LifecycleStatus.DOWNLOADED
+    || persistedLifecycleStatus === LifecycleStatus.ACTIVE
+  );
+  const lifecycleStatus = shouldDropDownloadedState
+    ? LifecycleStatus.AVAILABLE
+    : persistedLifecycleStatus;
+  const rawMetadataTrust = normalizeMetadataTrust(model.metadataTrust);
+  const metadataTrust = shouldDropDownloadedState && rawMetadataTrust === 'verified_local'
+    ? undefined
+    : rawMetadataTrust;
   const memoryFitDecision = size === null ? undefined : normalizeMemoryFitDecision(model.memoryFitDecision);
   const memoryFitConfidence = size === null ? undefined : normalizeMemoryFitConfidence(model.memoryFitConfidence);
   const gguf = normalizeGgufMetadata(model.gguf);
   const thinkingCapability = normalizeThinkingCapabilitySnapshot(
     (model as PersistedModelMetadata & { thinkingCapability?: unknown }).thinkingCapability,
   );
-  const downloadIntegrity = normalizeFileIntegrityMarker(
+  const normalizedDownloadIntegrity = normalizeFileIntegrityMarker(
     (model as PersistedModelMetadata & { downloadIntegrity?: unknown }).downloadIntegrity,
   );
+  const downloadIntegrity = shouldDropDownloadedState ? undefined : normalizedDownloadIntegrity;
   const rawProgress = typeof model.downloadProgress === 'number' && Number.isFinite(model.downloadProgress)
     ? model.downloadProgress
     : 0;
-  const downloadProgress = Math.max(0, Math.min(rawProgress, 1));
+  const downloadProgress = shouldDropDownloadedState ? 0 : Math.max(0, Math.min(rawProgress, 1));
+  const downloadedAt = !shouldDropDownloadedState
+    && typeof model.downloadedAt === 'number'
+    && Number.isFinite(model.downloadedAt)
+    ? Math.round(model.downloadedAt)
+    : undefined;
   const capabilitySnapshot = normalizePersistedModelCapabilitySnapshot({
     gguf,
     hasVerifiedContextWindow: model.hasVerifiedContextWindow === true,
@@ -287,10 +304,8 @@ export function normalizePersistedModelMetadata(
     requiresTreeProbe: model.requiresTreeProbe === true,
     hfRevision: normalizedRevision,
     resolvedFileName: normalizeNonEmptyString(model.resolvedFileName),
-    localPath: normalizeLocalFileName(model.localPath),
-    downloadedAt: typeof model.downloadedAt === 'number' && Number.isFinite(model.downloadedAt)
-      ? Math.round(model.downloadedAt)
-      : undefined,
+    localPath,
+    downloadedAt,
     lastModifiedAt: typeof model.lastModifiedAt === 'number' && Number.isFinite(model.lastModifiedAt)
       ? Math.round(model.lastModifiedAt)
       : undefined,

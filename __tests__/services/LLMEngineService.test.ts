@@ -8,6 +8,7 @@ import { writeAutotuneResult } from '../../src/services/InferenceAutotuneStore';
 import { createStorage } from '../../src/services/storage';
 import { getModelLoadParametersForModel, updateSettings } from '../../src/services/SettingsStore';
 import { getFreshMemorySnapshot } from '../../src/services/SystemMetricsService';
+import { performanceMonitor } from '../../src/services/PerformanceMonitor';
 import { EngineStatus, LifecycleStatus } from '../../src/types/models';
 
 jest.mock('llama.rn', () => {
@@ -85,6 +86,8 @@ describe('LLMEngineService', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    performanceMonitor.clear();
+    performanceMonitor.setEnabled(false);
     createStorage('pocket-ai-autotune', { tier: 'private' }).clearAll();
     inferenceBackendService.clearCache();
     (llmEngineService as any).contextOperationQueue = Promise.resolve();
@@ -252,11 +255,16 @@ describe('LLMEngineService', () => {
     );
   });
 
-  it('reuses cached template additional stops when only message text changes', async () => {
-    getFormattedChatMock().mockResolvedValue({
-      prompt: 'Formatted prompt',
-      additional_stops: ['<|shape_cached_stop|>'],
-    });
+  it('resolves template additional stops again when same-length message text changes', async () => {
+    getFormattedChatMock()
+      .mockResolvedValueOnce({
+        prompt: 'First formatted prompt',
+        additional_stops: ['<|first_same_length_stop|>'],
+      })
+      .mockResolvedValueOnce({
+        prompt: 'Second formatted prompt',
+        additional_stops: ['<|second_same_length_stop|>'],
+      });
 
     await llmEngineService.load('test/model', { forceReload: true });
 
@@ -269,13 +277,47 @@ describe('LLMEngineService', () => {
       params: { n_predict: 32 },
     });
 
-    expect(getFormattedChatMock()).toHaveBeenCalledTimes(1);
+    expect(getFormattedChatMock()).toHaveBeenCalledTimes(2);
     expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).toHaveBeenLastCalledWith(
       expect.objectContaining({
-        stop: expect.arrayContaining(['<|shape_cached_stop|>']),
+        stop: expect.arrayContaining(['<|second_same_length_stop|>']),
       }),
       expect.any(Function),
     );
+  });
+
+  it('uses template stops without global fallback for jinja templates with explicit stops', async () => {
+    performanceMonitor.setEnabled(true);
+    getFormattedChatMock().mockResolvedValueOnce({
+      type: 'jinja',
+      prompt: '<|user|>\nHello\n<|assistant|>',
+      additional_stops: ['  <|jinja_stop|>  '],
+    });
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    await llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Hello' }],
+      params: { n_predict: 32 },
+    });
+
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        stop: ['<|jinja_stop|>'],
+      }),
+      expect.any(Function),
+    );
+    const stopEvent = performanceMonitor
+      .snapshot()
+      .events
+      .find((event) => event.name === 'llm.stopWords.resolved');
+    expect(stopEvent?.meta).toEqual(expect.objectContaining({
+      source: 'template',
+      templateType: 'jinja',
+      templateStopCount: 1,
+      fallbackStopCount: 0,
+      resolvedStops: ['<|jinja_stop|>'],
+    }));
   });
 
   it('invalidates cached template additional stops after unload and reload', async () => {

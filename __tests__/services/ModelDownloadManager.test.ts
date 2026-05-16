@@ -126,6 +126,7 @@ describe('ModelDownloadManager Basic', () => {
     });
     (huggingFaceTokenService.getToken as jest.Mock).mockResolvedValue(null);
     (RNFS.hash as jest.Mock).mockResolvedValue('tree-sha');
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: true, size: 1000 });
     (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(8 * 1024 * 1024 * 1024);
     (getSystemMemorySnapshot as jest.Mock).mockResolvedValue(null);
     (getPrivateStorageHealthSnapshot as jest.Mock).mockReturnValue({
@@ -365,10 +366,46 @@ describe('ModelDownloadManager Basic', () => {
     ]);
   });
 
+  it('does not delete directory paths while canceling queued partial downloads', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    useDownloadStore.setState({
+      queue: [{
+        ...mockModel,
+        localPath: 'nested-cache',
+        lifecycleStatus: LifecycleStatus.PAUSED,
+      }],
+      activeDownloadId: null,
+    });
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (uri === 'test-dir/models/nested-cache') {
+        return { exists: true, isDirectory: true };
+      }
+
+      if (uri.startsWith('test-dir/models/')) {
+        return { exists: false, size: 0 };
+      }
+
+      return { exists: true, size: 1000 };
+    });
+
+    try {
+      await modelDownloadManager.cancelDownload(mockModel.id);
+
+      expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/models/nested-cache', expect.anything());
+      expect(FileSystem.deleteAsync).not.toHaveBeenCalled();
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Partial download candidate for test/model is a directory'));
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
   it('verifies a downloaded file when the size matches', async () => {
     (FileSystem.getInfoAsync as jest.Mock).mockResolvedValueOnce({ exists: true, size: 1000 });
 
-    await expect(modelDownloadManager.verifyChecksum(mockModel, 'test-dir/model.gguf')).resolves.toBeUndefined();
+    await expect(modelDownloadManager.verifyChecksum(mockModel, 'test-dir/model.gguf')).resolves.toEqual({
+      integrity: 'size',
+      sizeBytes: 1000,
+    });
   });
 
   it('preserves a real checksum when size validation succeeds', async () => {
@@ -377,7 +414,11 @@ describe('ModelDownloadManager Basic', () => {
 
     await expect(
       modelDownloadManager.verifyChecksum({ ...mockModel, sha256: 'tree-sha' }, 'test-dir/model.gguf'),
-    ).resolves.toBe('tree-sha');
+    ).resolves.toEqual({
+      integrity: 'sha256',
+      sha256: 'tree-sha',
+      sizeBytes: 1000,
+    });
   });
 
   it('normalizes sha256 digests with a sha256 prefix', async () => {
@@ -386,7 +427,11 @@ describe('ModelDownloadManager Basic', () => {
 
     await expect(
       modelDownloadManager.verifyChecksum({ ...mockModel, sha256: 'sha256:ABC123' }, 'test-dir/model.gguf'),
-    ).resolves.toBe('abc123');
+    ).resolves.toEqual({
+      integrity: 'sha256',
+      sha256: 'abc123',
+      sizeBytes: 1000,
+    });
   });
 
   it('converts Expo file URIs into native filesystem paths before hashing', async () => {
@@ -398,7 +443,11 @@ describe('ModelDownloadManager Basic', () => {
         { ...mockModel, sha256: 'tree-sha' },
         'file:///test-dir/model.gguf',
       ),
-    ).resolves.toBe('tree-sha');
+    ).resolves.toEqual({
+      integrity: 'sha256',
+      sha256: 'tree-sha',
+      sizeBytes: 1000,
+    });
 
     expect(RNFS.hash).toHaveBeenCalledWith('/test-dir/model.gguf', 'sha256');
   });
@@ -411,10 +460,21 @@ describe('ModelDownloadManager Basic', () => {
     );
   });
 
-  it('fails verification when the downloaded file size is too different', async () => {
+  it('fails verification without deleting when the download path is a directory', async () => {
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValueOnce({ exists: true, isDirectory: true, size: 0 });
+
+    await expect(modelDownloadManager.verifyChecksum(mockModel, 'test-dir/model.gguf')).rejects.toThrow(
+      'Downloaded path is a directory, not a model file',
+    );
+
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalled();
+    expect(RNFS.hash).not.toHaveBeenCalled();
+  });
+
+  it('fails verification when the downloaded file size differs from the trusted expected size', async () => {
     (FileSystem.getInfoAsync as jest.Mock).mockResolvedValueOnce({
       exists: true,
-      size: (mockModel.size ?? 0) + 2 * 1024 * 1024,
+      size: (mockModel.size ?? 0) + 1,
     });
 
     await expect(modelDownloadManager.verifyChecksum(mockModel, 'test-dir/model.gguf')).rejects.toThrow(
@@ -433,22 +493,110 @@ describe('ModelDownloadManager Basic', () => {
     expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/model.gguf', { idempotent: true });
   });
 
-  it('skips size mismatch verification when the expected size is unknown', async () => {
+  it('marks no-sha downloads as unverified when the expected size is unknown', async () => {
     (FileSystem.getInfoAsync as jest.Mock).mockResolvedValueOnce({ exists: true, size: 42 });
 
     await expect(
       modelDownloadManager.verifyChecksum({ ...mockModel, size: null }, 'test-dir/model.gguf'),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({
+      integrity: 'unverified',
+      sizeBytes: 42,
+    });
   });
 
   it('rejects downloads that still have unknown size at preflight time', async () => {
-    useDownloadStore.setState({ queue: [], activeDownloadId: null });
+    useDownloadStore.setState({
+      queue: [{ ...mockModel, lifecycleStatus: LifecycleStatus.QUEUED }],
+      activeDownloadId: mockModel.id,
+    });
 
     await expect(
       runDownloadModel({ size: null }),
     ).rejects.toThrow('MODEL_SIZE_UNKNOWN');
 
     expect(FileSystem.createDownloadResumable).not.toHaveBeenCalled();
+    const entry = useDownloadStore.getState().queue.find((model) => model.id === mockModel.id);
+    expect(entry?.lifecycleStatus).toBe(LifecycleStatus.FAILED);
+    expect(entry?.downloadErrorCode).toBe('download_size_unknown');
+    expect(useDownloadStore.getState().activeDownloadId).toBeNull();
+  });
+
+  it('marks setup failures as failed instead of leaving queued downloads in a retry loop', async () => {
+    const jobToken = 99;
+    (modelDownloadManager as any).activeJob = {
+      modelId: mockModel.id,
+      jobToken,
+      resumable: null,
+      stopReason: null,
+    };
+    (modelDownloadManager as any).isProcessing = true;
+    (FileSystem.createDownloadResumable as jest.Mock).mockImplementationOnce(() => {
+      throw new Error('cannot create download');
+    });
+    useDownloadStore.setState({
+      queue: [{ ...mockModel, lifecycleStatus: LifecycleStatus.QUEUED }],
+      activeDownloadId: mockModel.id,
+    });
+
+    await expect((modelDownloadManager as any).runDownloadJob(mockModel, jobToken)).resolves.toBeUndefined();
+
+    const entry = useDownloadStore.getState().queue.find((model) => model.id === mockModel.id);
+    expect(entry?.lifecycleStatus).toBe(LifecycleStatus.FAILED);
+    expect(entry?.downloadErrorCode).toBe('action_failed');
+    expect(useDownloadStore.getState().activeDownloadId).toBeNull();
+    expect((modelDownloadManager as any).activeJob).toBeNull();
+    expect((modelDownloadManager as any).isProcessing).toBe(false);
+  });
+
+  it('does not overwrite failed resume data in the runDownloadJob safety net', async () => {
+    const jobToken = 100;
+    (modelDownloadManager as any).activeJob = {
+      modelId: mockModel.id,
+      jobToken,
+      resumable: null,
+      stopReason: null,
+    };
+    (modelDownloadManager as any).isProcessing = true;
+    (FileSystem.createDownloadResumable as jest.Mock).mockReturnValueOnce({
+      downloadAsync: jest.fn().mockRejectedValue(new Error('network error')),
+      savable: () => ({ resumeData: 'resume-data' }),
+    });
+    useDownloadStore.setState({
+      queue: [{ ...mockModel, lifecycleStatus: LifecycleStatus.QUEUED }],
+      activeDownloadId: mockModel.id,
+    });
+
+    await expect((modelDownloadManager as any).runDownloadJob(mockModel, jobToken)).resolves.toBeUndefined();
+
+    const entry = useDownloadStore.getState().queue.find((model) => model.id === mockModel.id);
+    expect(entry?.lifecycleStatus).toBe(LifecycleStatus.FAILED);
+    expect(entry?.downloadErrorCode).toBe('action_failed');
+    expect(entry?.resumeData).toEqual(expect.stringContaining('resume-data'));
+    expect(useDownloadStore.getState().activeDownloadId).toBeNull();
+  });
+
+  it('does not complete when the verified file disappears before the final registry write', async () => {
+    const verifySpy = jest.spyOn(modelDownloadManager, 'verifyChecksum').mockResolvedValue({
+      integrity: 'size',
+      sizeBytes: 1000,
+    });
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: false, size: 0 });
+    useDownloadStore.setState({
+      queue: [{ ...mockModel, lifecycleStatus: LifecycleStatus.QUEUED }],
+      activeDownloadId: mockModel.id,
+    });
+
+    try {
+      await expect(runDownloadModel({})).rejects.toThrow('Downloaded file disappeared before completion');
+
+      expect(mockedRegistry.updateModel).not.toHaveBeenCalled();
+      const entry = useDownloadStore.getState().queue.find((model) => model.id === mockModel.id);
+      expect(entry?.lifecycleStatus).toBe(LifecycleStatus.FAILED);
+      expect(entry?.downloadErrorCode).toBe('download_file_missing');
+      expect(entry?.downloadProgress).toBe(0);
+    } finally {
+      verifySpy.mockRestore();
+    }
   });
 
   it('rejects downloads when the GGUF filename still needs a tree probe', async () => {
@@ -476,6 +624,8 @@ describe('ModelDownloadManager Basic', () => {
         size: 1000,
         fitsInRam: true,
         allowUnknownSizeDownload: false,
+        metadataTrust: undefined,
+        downloadIntegrity: undefined,
         sha256: undefined,
       }),
     );
@@ -502,6 +652,11 @@ describe('ModelDownloadManager Basic', () => {
         id: 'test/model',
         size: 1_000,
         fitsInRam: true,
+        metadataTrust: 'verified_local',
+        downloadIntegrity: expect.objectContaining({
+          kind: 'size',
+          sizeBytes: 1_000,
+        }),
       }),
     );
   });
@@ -555,6 +710,78 @@ describe('ModelDownloadManager Basic', () => {
     expect(mockedRegistry.updateModel).toHaveBeenCalledWith(
       expect.objectContaining({
         localPath: 'test_model.gguf',
+      }),
+    );
+  });
+
+  it('skips directory download candidates while preserving legacy partial resume', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (/^test-dir\/models\/model-main-[a-z0-9]+\.gguf$/.test(uri)) {
+        return { exists: true, isDirectory: true };
+      }
+
+      if (uri === 'test-dir/models/test_model.gguf') {
+        return { exists: true, size: 1000 };
+      }
+
+      if (uri.startsWith('test-dir/models/')) {
+        return { exists: false, size: 0 };
+      }
+
+      return { exists: true, size: 1000 };
+    });
+
+    try {
+      await expect(
+        runDownloadModel({ resumeData: 'resume-data' }),
+      ).resolves.toBeUndefined();
+
+      expect(FileSystem.createDownloadResumable).toHaveBeenCalledWith(
+        'http://example.com/model.gguf',
+        'test-dir/models/test_model.gguf',
+        {},
+        expect.any(Function),
+        'resume-data',
+      );
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Download candidate for test/model is a directory'));
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('reuses previous generated partial filenames with dotted repo labels', async () => {
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (/^test-dir\/models\/Qwen2\.5-0\.5B-main-[a-z0-9]+\.gguf$/.test(uri)) {
+        return { exists: true, size: 1000 };
+      }
+
+      if (uri.startsWith('test-dir/models/')) {
+        return { exists: false, size: 0 };
+      }
+
+      return { exists: true, size: 1000 };
+    });
+
+    await expect(
+      runDownloadModel({
+        id: 'Qwen/Qwen2.5-0.5B',
+        name: 'Qwen2.5 0.5B',
+        resolvedFileName: 'weights/model-Q4_K_M.GGUF',
+        resumeData: 'resume-data',
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(FileSystem.createDownloadResumable).toHaveBeenCalledWith(
+      'http://example.com/model.gguf',
+      expect.stringMatching(/^test-dir\/models\/Qwen2\.5-0\.5B-main-[a-z0-9]+\.gguf$/),
+      {},
+      expect.any(Function),
+      'resume-data',
+    );
+    expect(mockedRegistry.updateModel).toHaveBeenCalledWith(
+      expect.objectContaining({
+        localPath: expect.stringMatching(/^Qwen2\.5-0\.5B-main-[a-z0-9]+\.gguf$/),
       }),
     );
   });
@@ -724,7 +951,8 @@ describe('ModelDownloadManager Basic', () => {
 
       expect(useDownloadStore.getState().activeDownloadId).toBeNull();
       const entry = useDownloadStore.getState().queue.find((model) => model.id === mockModel.id);
-      expect(entry?.lifecycleStatus).toBe(LifecycleStatus.AVAILABLE);
+      expect(entry?.lifecycleStatus).toBe(LifecycleStatus.FAILED);
+      expect(entry?.downloadErrorCode).toBe('action_failed');
     } finally {
       warnSpy.mockRestore();
     }
@@ -750,7 +978,8 @@ describe('ModelDownloadManager Basic', () => {
 
       expect(useDownloadStore.getState().activeDownloadId).toBeNull();
       const entry = useDownloadStore.getState().queue.find((model) => model.id === mockModel.id);
-      expect(entry?.lifecycleStatus).toBe(LifecycleStatus.AVAILABLE);
+      expect(entry?.lifecycleStatus).toBe(LifecycleStatus.FAILED);
+      expect(entry?.downloadErrorCode).toBe('action_failed');
       expect(entry?.resumeData).toBeUndefined();
     } finally {
       warnSpy.mockRestore();
@@ -773,7 +1002,8 @@ describe('ModelDownloadManager Basic', () => {
       await expect(runDownloadModel({ lifecycleStatus: LifecycleStatus.QUEUED })).rejects.toThrow('network error');
 
       const entry = useDownloadStore.getState().queue.find((model) => model.id === mockModel.id);
-      expect(entry?.lifecycleStatus).toBe(LifecycleStatus.AVAILABLE);
+      expect(entry?.lifecycleStatus).toBe(LifecycleStatus.FAILED);
+      expect(entry?.downloadErrorCode).toBe('action_failed');
       expect(entry?.resumeData).toEqual(expect.stringContaining('resume-data'));
     } finally {
       warnSpy.mockRestore();
@@ -868,7 +1098,7 @@ describe('ModelDownloadManager Basic', () => {
     });
 
     useDownloadStore.setState({
-      queue: [{ ...mockModel, lifecycleStatus: LifecycleStatus.QUEUED }],
+      queue: [{ ...mockModel, lifecycleStatus: LifecycleStatus.QUEUED, downloadProgress: 0.8 }],
       activeDownloadId: mockModel.id,
     });
 
@@ -878,6 +1108,11 @@ describe('ModelDownloadManager Basic', () => {
     });
 
     expect(sendErrorSpy).toHaveBeenCalledWith({ modelName: 'model', reason: 'verificationFailed' });
+    const entry = useDownloadStore.getState().queue.find((model) => model.id === mockModel.id);
+    expect(entry?.lifecycleStatus).toBe(LifecycleStatus.FAILED);
+    expect(entry?.downloadErrorCode).toBe('download_verification_failed');
+    expect(entry?.resumeData).toBeUndefined();
+    expect(entry?.downloadProgress).toBe(0);
     sendErrorSpy.mockRestore();
     verifySpy.mockRestore();
   });

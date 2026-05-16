@@ -17,7 +17,7 @@ import { huggingFaceTokenService } from './HuggingFaceTokenService';
 import { isHuggingFaceUrl } from '../utils/huggingFaceUrls';
 import { getCandidateModelDownloadFileNames } from '../utils/modelFiles';
 import { estimateFastMemoryFit } from '../memory/estimator';
-import { safeJoinModelPath } from '../utils/safeFilePath';
+import { fileUriToNativePath, isValidLocalFileName, safeJoinModelPath } from '../utils/safeFilePath';
 import { DECIMAL_GIGABYTE } from '../utils/modelSize';
 import { hardwareListenerService, type HardwareStatus } from './HardwareListenerService';
 import { getSettings, subscribeSettings } from './SettingsStore';
@@ -127,17 +127,43 @@ type ActiveDownloadJob = {
   stopReason: 'pause' | 'cancel' | null;
 };
 
+type DownloadVerificationResult = {
+  integrity: 'sha256' | 'size' | 'unverified';
+  sha256?: string;
+  sizeBytes: number;
+};
+
+function buildDownloadIntegrityMarker(
+  verification: DownloadVerificationResult,
+): ModelMetadata['downloadIntegrity'] {
+  if (verification.integrity === 'unverified') {
+    return undefined;
+  }
+
+  return {
+    kind: verification.integrity,
+    sizeBytes: verification.sizeBytes,
+    checkedAt: Date.now(),
+    ...(verification.sha256 ? { sha256: verification.sha256 } : {}),
+  };
+}
+
+function isFileSystemDirectory(info: { isDirectory?: boolean }): boolean {
+  return info.isDirectory === true;
+}
+
 export class ModelDownloadManager {
   private static instance: ModelDownloadManager | undefined;
   private activeJob: ActiveDownloadJob | null = null;
   private nextJobToken = 0;
   private isProcessing = false;
+  private downloadStoreUnsubscribe?: () => void;
   private hwUnsubscribe?: () => void;
   private settingsUnsubscribe?: () => void;
 
   private constructor() {
     // Subscribe to store changes to trigger queue processing
-    useDownloadStore.subscribe(
+    this.downloadStoreUnsubscribe = useDownloadStore.subscribe(
       (state) => `${state.activeDownloadId ?? ''}|${state.queue.map((model) => `${model.id}:${model.lifecycleStatus}`).join(',')}`,
       () => { void this.processQueue(); },
     );
@@ -178,7 +204,9 @@ export class ModelDownloadManager {
       return;
     }
 
+    ModelDownloadManager.instance.dispose();
     await ModelDownloadManager.instance.stopActiveJobForPrivateStorageReset({ clearQueue: true });
+    ModelDownloadManager.instance = undefined;
   }
 
   public static async stopRuntimeForPrivateStorageBlocked(): Promise<void> {
@@ -191,6 +219,30 @@ export class ModelDownloadManager {
 
   public resumeQueueIfStorageReady(): void {
     void this.processQueue();
+  }
+
+  public dispose(): void {
+    this.downloadStoreUnsubscribe?.();
+    this.downloadStoreUnsubscribe = undefined;
+    this.settingsUnsubscribe?.();
+    this.settingsUnsubscribe = undefined;
+    this.hwUnsubscribe?.();
+    this.hwUnsubscribe = undefined;
+  }
+
+  private getDownloadFailureUpdates(error: unknown, resumeData?: string): Partial<ModelMetadata> {
+    const appError = toAppError(error);
+    const shouldDiscardResumeData = appError.code === 'download_verification_failed'
+      || appError.code === 'download_file_missing';
+
+    return {
+      lifecycleStatus: LifecycleStatus.FAILED,
+      resumeData: shouldDiscardResumeData ? undefined : resumeData,
+      ...(shouldDiscardResumeData ? { downloadProgress: 0, downloadIntegrity: undefined } : {}),
+      downloadErrorCode: appError.code,
+      downloadErrorMessage: appError.message,
+      downloadErrorAt: Date.now(),
+    };
   }
 
   private async stopActiveJobForPrivateStorageReset(options: { clearQueue: boolean }): Promise<void> {
@@ -349,7 +401,7 @@ export class ModelDownloadManager {
   }
 
   private async runDownloadJob(model: ModelMetadata, jobToken: number): Promise<void> {
-    const { setActiveDownload } = useDownloadStore.getState();
+    const { setActiveDownload, updateModelInQueue } = useDownloadStore.getState();
 
     try {
       if (!this.isCurrentJob(model.id, jobToken)) {
@@ -372,6 +424,13 @@ export class ModelDownloadManager {
 
       if (this.isCurrentJob(model.id, jobToken)) {
         await this.persistDownloadStoreMutation(() => {
+          const currentQueueEntry = useDownloadStore
+            .getState()
+            .queue
+            .find((queuedModel) => queuedModel.id === model.id);
+          if (currentQueueEntry?.lifecycleStatus !== LifecycleStatus.FAILED) {
+            updateModelInQueue(model.id, this.getDownloadFailureUpdates(e));
+          }
           setActiveDownload(null);
         });
       }
@@ -476,8 +535,7 @@ export class ModelDownloadManager {
       if (this.isCurrentJob(model.id, jobToken)) {
         try {
           assertPrivateStorageWritableForDownloadMutation();
-          updateModelInQueue(model.id, { lifecycleStatus: LifecycleStatus.AVAILABLE });
-          removeFromQueue(model.id);
+          updateModelInQueue(model.id, this.getDownloadFailureUpdates(e));
           setActiveDownload(null);
         } catch (storageError) {
           if (await this.handlePrivateStorageUnavailable(storageError)) {
@@ -630,7 +688,13 @@ export class ModelDownloadManager {
       }
 
       assertPrivateStorageWritableForDownloadMutation();
-      updateModelInQueue(model.id, { lifecycleStatus: LifecycleStatus.DOWNLOADING });
+      updateModelInQueue(model.id, {
+        lifecycleStatus: LifecycleStatus.DOWNLOADING,
+        downloadIntegrity: undefined,
+        downloadErrorAt: undefined,
+        downloadErrorCode: undefined,
+        downloadErrorMessage: undefined,
+      });
       
       const result = await resumable.downloadAsync();
 
@@ -680,7 +744,7 @@ export class ModelDownloadManager {
         return;
       }
 
-      const verificationHash = await this.verifyChecksum(model, localUri);
+      const verification = await this.verifyChecksum(model, localUri);
 
       if (!this.isCurrentJob(model.id, jobToken)) {
         return;
@@ -698,15 +762,28 @@ export class ModelDownloadManager {
       if (this.getStopReason(model.id, jobToken)) {
         return;
       }
+      if (!downloadedFileInfo.exists || isFileSystemDirectory(downloadedFileInfo)) {
+        throw new AppError(
+          'download_file_missing',
+          downloadedFileInfo.exists
+            ? 'Downloaded path became a directory before completion'
+            : 'Downloaded file disappeared before completion',
+          {
+            details: { modelId: model.id, localUri },
+          },
+        );
+      }
       const downloadedSize = (
         downloadedFileInfo.exists &&
+        !isFileSystemDirectory(downloadedFileInfo) &&
         typeof downloadedFileInfo.size === 'number' &&
         Number.isFinite(downloadedFileInfo.size) &&
         downloadedFileInfo.size > 0
       )
         ? Math.round(downloadedFileInfo.size)
         : model.size;
-      const metadataTrust = typeof downloadedSize === 'number' && Number.isFinite(downloadedSize) && downloadedSize > 0
+      const hasVerifiedIntegrity = verification.integrity !== 'unverified';
+      const metadataTrust = hasVerifiedIntegrity && typeof downloadedSize === 'number' && Number.isFinite(downloadedSize) && downloadedSize > 0
         ? 'verified_local' as const
         : model.metadataTrust;
       const memoryFit = await this.resolveMemoryFit(downloadedSize, metadataTrust, model.gguf);
@@ -727,6 +804,7 @@ export class ModelDownloadManager {
         memoryFitDecision: memoryFit.decision,
         memoryFitConfidence: memoryFit.confidence,
         metadataTrust,
+        downloadIntegrity: buildDownloadIntegrityMarker(verification),
         gguf: typeof downloadedSize === 'number' && Number.isFinite(downloadedSize) && downloadedSize > 0
           ? {
             ...(model.gguf ?? {}),
@@ -739,7 +817,10 @@ export class ModelDownloadManager {
         downloadProgress: 1,
         allowUnknownSizeDownload: false,
         resumeData: undefined,
-        sha256: verificationHash ?? model.sha256,
+        downloadErrorAt: undefined,
+        downloadErrorCode: undefined,
+        downloadErrorMessage: undefined,
+        sha256: verification.sha256 ?? model.sha256,
       };
 
       assertPrivateStorageWritableForDownloadMutation();
@@ -768,15 +849,12 @@ export class ModelDownloadManager {
 
       console.error(`[ModelDownloadManager] Error during download: ${model.id}`, e);
 
-      // If it fails, save resume data if we can and keep the entry in the queue as "available".
-      // This avoids infinite retry loops while still allowing the user to retry and resume later.
+      // If it fails, keep the entry in the queue with explicit failed state.
+      // This avoids infinite retry loops while preserving retry and resume context.
       const resumeData = safeSerializeResumeSnapshot(resumable as any, { modelId: model.id, scope: 'downloadError' });
       try {
         assertPrivateStorageWritableForDownloadMutation();
-        updateModelInQueue(model.id, {
-          resumeData,
-          lifecycleStatus: LifecycleStatus.AVAILABLE,
-        });
+        updateModelInQueue(model.id, this.getDownloadFailureUpdates(e, resumeData));
         setActiveDownload(null);
       } catch (storageError) {
         if (await this.handlePrivateStorageUnavailable(storageError)) {
@@ -810,7 +888,7 @@ export class ModelDownloadManager {
   public async verifyChecksum(
     model: Pick<ModelMetadata, 'id' | 'size' | 'sha256'>,
     localUri: string,
-  ): Promise<string | undefined> {
+  ): Promise<DownloadVerificationResult> {
     try {
       const fileInfo = await FileSystem.getInfoAsync(localUri);
       if (!fileInfo.exists) {
@@ -818,11 +896,16 @@ export class ModelDownloadManager {
           details: { modelId: model.id, localUri },
         });
       }
+      if (isFileSystemDirectory(fileInfo)) {
+        throw new AppError('download_file_missing', 'Downloaded path is a directory, not a model file', {
+          details: { modelId: model.id, localUri },
+        });
+      }
 
       const downloadedSize = fileInfo.size ?? 0;
       const expectedSize = model.size;
 
-      if (typeof expectedSize === 'number' && expectedSize > 0 && Math.abs(downloadedSize - expectedSize) > 1024 * 1024) {
+      if (typeof expectedSize === 'number' && expectedSize > 0 && downloadedSize !== expectedSize) {
         await this.deleteCorruptedDownload(localUri, model.id);
         throw new AppError(
           'download_verification_failed',
@@ -835,7 +918,10 @@ export class ModelDownloadManager {
 
       const expectedHash = this.normalizeSha256Digest(model.sha256);
       if (!expectedHash) {
-        return undefined;
+        return {
+          integrity: typeof expectedSize === 'number' && expectedSize > 0 ? 'size' : 'unverified',
+          sizeBytes: downloadedSize,
+        };
       }
 
       const actualHash = this.normalizeSha256Digest(
@@ -852,7 +938,7 @@ export class ModelDownloadManager {
         );
       }
 
-      return actualHash;
+      return { integrity: 'sha256', sha256: actualHash, sizeBytes: downloadedSize };
     } catch (error) {
       throw toAppError(error, 'download_verification_failed');
     }
@@ -999,7 +1085,7 @@ export class ModelDownloadManager {
     model: Pick<ModelMetadata, 'id' | 'resolvedFileName' | 'hfRevision' | 'localPath'>,
   ): string[] {
     const candidates = getCandidateModelDownloadFileNames(model);
-    return model.localPath
+    return model.localPath && isValidLocalFileName(model.localPath)
       ? Array.from(new Set([model.localPath, ...candidates]))
       : candidates;
   }
@@ -1009,6 +1095,7 @@ export class ModelDownloadManager {
     modelsDir: string,
   ): Promise<string> {
     const candidates = this.getDownloadFileNameCandidates(model);
+    let firstAvailableCandidate: string | undefined;
 
     for (const candidate of candidates) {
       const candidatePath = safeJoinModelPath(modelsDir, candidate);
@@ -1016,12 +1103,26 @@ export class ModelDownloadManager {
         continue;
       }
       const info = await FileSystem.getInfoAsync(candidatePath);
+      if (!info.exists) {
+        firstAvailableCandidate ??= candidate;
+        continue;
+      }
+      if (isFileSystemDirectory(info)) {
+        console.warn(`[ModelDownloadManager] Download candidate for ${model.id} is a directory, skipping: ${candidate}`);
+        continue;
+      }
       if (info.exists) {
         return candidate;
       }
     }
 
-    return candidates[0];
+    if (firstAvailableCandidate) {
+      return firstAvailableCandidate;
+    }
+
+    throw new AppError('download_file_missing', `No safe download file target is available for ${model.id}`, {
+      details: { modelId: model.id, candidates },
+    });
   }
 
   private async deleteDownloadFiles(fileNames: string[], modelId: string): Promise<void> {
@@ -1039,6 +1140,10 @@ export class ModelDownloadManager {
       }
       const fileInfo = await FileSystem.getInfoAsync(localUri);
       if (!fileInfo.exists) {
+        continue;
+      }
+      if (isFileSystemDirectory(fileInfo)) {
+        console.warn(`[ModelDownloadManager] Partial download candidate for ${modelId} is a directory, skipping: ${fileName}`);
         continue;
       }
 
@@ -1067,11 +1172,7 @@ export class ModelDownloadManager {
   }
 
   private toNativeFilePath(fileUri: string): string {
-    if (!fileUri.startsWith('file://')) {
-      return fileUri;
-    }
-
-    return decodeURI(fileUri.replace(/^file:\/+/, '/'));
+    return fileUriToNativePath(fileUri);
   }
 
   private async resolveMemoryFit(
@@ -1111,6 +1212,13 @@ export class ModelDownloadManager {
 
   private async deleteCorruptedDownload(localUri: string, modelId: string): Promise<void> {
     try {
+      const fileInfo = await FileSystem.getInfoAsync(localUri);
+      if (!fileInfo.exists || isFileSystemDirectory(fileInfo)) {
+        if (fileInfo.exists) {
+          console.warn(`[ModelDownloadManager] Corrupted download path for ${modelId} is a directory, skipping delete`);
+        }
+        return;
+      }
       await FileSystem.deleteAsync(localUri, { idempotent: true });
     } catch (error) {
       console.warn(`[ModelDownloadManager] Failed to delete corrupted download for ${modelId}`, error);

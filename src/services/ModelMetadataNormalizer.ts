@@ -2,6 +2,7 @@ import {
   LifecycleStatus,
   ModelAccessState,
   type ModelCapabilitySnapshot,
+  type ModelFileIntegrityMarker,
   type ModelGgufMetadata,
   type ModelMetadata,
   type ModelMemoryFitConfidence,
@@ -12,6 +13,7 @@ import {
 import { normalizePersistedModelCapabilitySnapshot } from '../utils/modelCapabilities';
 import { getShortModelLabel } from '../utils/modelLabel';
 import { buildHuggingFaceResolveUrl } from '../utils/huggingFaceUrls';
+import { isValidLocalFileName } from '../utils/safeFilePath';
 
 type PersistedModelMetadata = Partial<ModelMetadata> & {
   id: string;
@@ -55,6 +57,11 @@ function normalizeNonEmptyString(value: unknown): string | undefined {
 
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function normalizeLocalFileName(value: unknown): string | undefined {
+  const normalized = normalizeNonEmptyString(value);
+  return normalized !== undefined && isValidLocalFileName(normalized) ? normalized : undefined;
 }
 
 function normalizeStringArray(value: unknown): string[] | undefined {
@@ -203,6 +210,35 @@ function normalizeThinkingCapabilitySnapshot(value: unknown): ModelThinkingCapab
   };
 }
 
+function normalizeFileIntegrityMarker(value: unknown): ModelFileIntegrityMarker | undefined {
+  if (!value || typeof value !== 'object') {
+    return undefined;
+  }
+
+  const record = value as Record<string, unknown>;
+  const kind = record.kind === 'sha256' || record.kind === 'size' ? record.kind : null;
+  const sizeBytes = normalizePositiveInteger(record.sizeBytes);
+  const checkedAt = typeof record.checkedAt === 'number' && Number.isFinite(record.checkedAt)
+    ? Math.max(0, Math.round(record.checkedAt))
+    : undefined;
+  const sha256 = normalizeNonEmptyString(record.sha256);
+
+  if (!kind || sizeBytes === undefined || checkedAt === undefined) {
+    return undefined;
+  }
+
+  if (kind === 'sha256' && !sha256) {
+    return undefined;
+  }
+
+  return {
+    kind,
+    sizeBytes,
+    checkedAt,
+    ...(sha256 ? { sha256 } : {}),
+  };
+}
+
 export function normalizePersistedModelMetadata(
   model: PersistedModelMetadata,
 ): ModelMetadata {
@@ -212,18 +248,52 @@ export function normalizePersistedModelMetadata(
     ?? buildHuggingFaceResolveUrl(model.id, 'model.gguf', normalizedRevision);
   const normalizedName = normalizeNonEmptyString(model.name) ?? (getShortModelLabel(model.id) || model.id);
   const normalizedAuthor = normalizeNonEmptyString(model.author) ?? model.id.split('/')[0] ?? 'unknown';
-  const lifecycleStatus = normalizeLifecycleStatus(model.lifecycleStatus);
-  const metadataTrust = normalizeMetadataTrust(model.metadataTrust);
+  const localPath = normalizeLocalFileName(model.localPath);
+  const persistedLifecycleStatus = normalizeLifecycleStatus(model.lifecycleStatus);
+  const shouldDropDownloadedState = localPath === undefined && (
+    persistedLifecycleStatus === LifecycleStatus.DOWNLOADED
+    || persistedLifecycleStatus === LifecycleStatus.ACTIVE
+  );
+  const lifecycleStatus = shouldDropDownloadedState
+    ? LifecycleStatus.AVAILABLE
+    : persistedLifecycleStatus;
+  const rawMetadataTrust = normalizeMetadataTrust(model.metadataTrust);
+  const metadataTrust = shouldDropDownloadedState && rawMetadataTrust === 'verified_local'
+    ? undefined
+    : rawMetadataTrust;
   const memoryFitDecision = size === null ? undefined : normalizeMemoryFitDecision(model.memoryFitDecision);
   const memoryFitConfidence = size === null ? undefined : normalizeMemoryFitConfidence(model.memoryFitConfidence);
   const gguf = normalizeGgufMetadata(model.gguf);
   const thinkingCapability = normalizeThinkingCapabilitySnapshot(
     (model as PersistedModelMetadata & { thinkingCapability?: unknown }).thinkingCapability,
   );
+  const normalizedDownloadIntegrity = normalizeFileIntegrityMarker(
+    (model as PersistedModelMetadata & { downloadIntegrity?: unknown }).downloadIntegrity,
+  );
+  const downloadIntegrity = shouldDropDownloadedState ? undefined : normalizedDownloadIntegrity;
   const rawProgress = typeof model.downloadProgress === 'number' && Number.isFinite(model.downloadProgress)
     ? model.downloadProgress
     : 0;
-  const downloadProgress = Math.max(0, Math.min(rawProgress, 1));
+  const downloadProgress = shouldDropDownloadedState ? 0 : Math.max(0, Math.min(rawProgress, 1));
+  const downloadedAt = !shouldDropDownloadedState
+    && typeof model.downloadedAt === 'number'
+    && Number.isFinite(model.downloadedAt)
+    ? Math.round(model.downloadedAt)
+    : undefined;
+  const resumeData = shouldDropDownloadedState
+    ? undefined
+    : normalizeNonEmptyString(model.resumeData);
+  const downloadErrorCode = shouldDropDownloadedState
+    ? undefined
+    : normalizeNonEmptyString(model.downloadErrorCode);
+  const downloadErrorMessage = shouldDropDownloadedState
+    ? undefined
+    : normalizeNonEmptyString(model.downloadErrorMessage);
+  const downloadErrorAt = !shouldDropDownloadedState
+    && typeof model.downloadErrorAt === 'number'
+    && Number.isFinite(model.downloadErrorAt)
+    ? Math.max(0, Math.round(model.downloadErrorAt))
+    : undefined;
   const capabilitySnapshot = normalizePersistedModelCapabilitySnapshot({
     gguf,
     hasVerifiedContextWindow: model.hasVerifiedContextWindow === true,
@@ -248,14 +318,13 @@ export function normalizePersistedModelMetadata(
     requiresTreeProbe: model.requiresTreeProbe === true,
     hfRevision: normalizedRevision,
     resolvedFileName: normalizeNonEmptyString(model.resolvedFileName),
-    localPath: normalizeNonEmptyString(model.localPath),
-    downloadedAt: typeof model.downloadedAt === 'number' && Number.isFinite(model.downloadedAt)
-      ? Math.round(model.downloadedAt)
-      : undefined,
+    localPath,
+    downloadedAt,
     lastModifiedAt: typeof model.lastModifiedAt === 'number' && Number.isFinite(model.lastModifiedAt)
       ? Math.round(model.lastModifiedAt)
       : undefined,
     sha256: normalizeNonEmptyString(model.sha256),
+    ...(downloadIntegrity !== undefined ? { downloadIntegrity } : {}),
     fitsInRam: size === null
       ? null
       : memoryFitDecision !== undefined
@@ -273,7 +342,10 @@ export function normalizePersistedModelMetadata(
     isPrivate: model.isPrivate === true,
     lifecycleStatus,
     downloadProgress,
-    resumeData: normalizeNonEmptyString(model.resumeData),
+    resumeData,
+    downloadErrorCode,
+    downloadErrorMessage,
+    downloadErrorAt,
     maxContextTokens: typeof model.maxContextTokens === 'number' && Number.isFinite(model.maxContextTokens)
       ? Math.round(model.maxContextTokens)
       : undefined,

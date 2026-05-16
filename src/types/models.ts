@@ -1,6 +1,7 @@
 export enum LifecycleStatus {
   AVAILABLE = 'available',
   DOWNLOADING = 'downloading',
+  FAILED = 'failed',
   PAUSED = 'paused',
   QUEUED = 'queued',
   VERIFYING = 'verifying',
@@ -68,6 +69,13 @@ export interface ModelThinkingCapabilitySnapshot {
   thinkingEndTag?: string;
 }
 
+export interface ModelFileIntegrityMarker {
+  kind: 'sha256' | 'size';
+  sizeBytes: number;
+  checkedAt: number;
+  sha256?: string;
+}
+
 export interface ModelMetadata {
   id: string;
   name: string;
@@ -82,6 +90,7 @@ export interface ModelMetadata {
   downloadedAt?: number;
   lastModifiedAt?: number;
   sha256?: string;
+  downloadIntegrity?: ModelFileIntegrityMarker;
   fitsInRam: boolean | null;
   memoryFitDecision?: ModelMemoryFitDecision;
   memoryFitConfidence?: ModelMemoryFitConfidence;
@@ -93,6 +102,9 @@ export interface ModelMetadata {
   lifecycleStatus: LifecycleStatus;
   downloadProgress: number;
   resumeData?: string;
+  downloadErrorCode?: string;
+  downloadErrorMessage?: string;
+  downloadErrorAt?: number;
   maxContextTokens?: number;
   hasVerifiedContextWindow?: boolean;
   capabilitySnapshot?: ModelCapabilitySnapshot;

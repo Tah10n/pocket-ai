@@ -1,5 +1,6 @@
 import * as FileSystem from 'expo-file-system/legacy';
 import { useChatStore } from '../store/chatStore';
+import { getQueuedDownloadFileNames } from '../store/downloadStore';
 import { storage as appStorage } from '../store/storage';
 import { getCacheDir, getModelsDir } from './FileSystemSetup';
 import { llmEngineService } from './LLMEngineService';
@@ -29,6 +30,8 @@ import {
 const CHAT_STORE_KEY = LEGACY_CHAT_STORE_STORAGE_KEY;
 const MIN_DIRECTORY_SIZE_FALLBACK_BYTES = 0;
 const MIN_ESTIMATED_CONTEXT_BYTES = 64 * 1024 * 1024;
+const DIRECTORY_SIZE_CACHE_TTL_MS = 5000;
+const DIRECTORY_SIZE_MAX_CONCURRENT_STATS = 8;
 
 type PersistedChatStorePayload = {
   state?: {
@@ -40,6 +43,7 @@ type PersistedChatStorePayload = {
 export interface AppStorageMetrics {
   downloadedModels: ModelMetadata[];
   modelsBytes: number;
+  quarantinedModelFiles: QuarantinedModelFilesMetrics;
   cacheBytes: number;
   chatHistoryBytes: number;
   settingsBytes: number;
@@ -48,9 +52,28 @@ export interface AppStorageMetrics {
   activeModelId: string | null;
 }
 
+export interface QuarantinedModelFilesMetrics {
+  fileNames: string[];
+  count: number;
+  bytes: number;
+}
+
+export interface AppStorageMetricsOptions {
+  refreshModelFileQuarantine?: boolean;
+}
+
 interface OffloadModelOptions {
   preserveSettings?: boolean;
 }
+
+type DirectorySizeCacheEntry = {
+  measuredAt: number;
+  sizeBytes: number;
+};
+
+type DirectoryStatLimiter = <T>(task: () => Promise<T>) => Promise<T>;
+
+const directorySizeCache = new Map<string, DirectorySizeCacheEntry>();
 
 function getTextByteLength(value: string | null | undefined) {
   if (!value) {
@@ -64,40 +87,122 @@ function getTextByteLength(value: string | null | undefined) {
   return unescape(encodeURIComponent(value)).length;
 }
 
-async function getDirectorySizeBytes(directoryUri: string): Promise<number> {
+function normalizeDirectoryUri(directoryUri: string): string {
+  return directoryUri.endsWith('/') ? directoryUri : `${directoryUri}/`;
+}
+
+function joinDirectoryEntryUri(directoryUri: string, entryName: string): string {
+  return `${normalizeDirectoryUri(directoryUri)}${entryName}`;
+}
+
+function createDirectoryStatLimiter(maxConcurrent: number): DirectoryStatLimiter {
+  const queue: (() => void)[] = [];
+  let activeCount = 0;
+
+  const drainQueue = () => {
+    if (activeCount >= maxConcurrent) {
+      return;
+    }
+
+    const next = queue.shift();
+    if (next) {
+      next();
+    }
+  };
+
+  return async <T>(task: () => Promise<T>): Promise<T> => new Promise<T>((resolve, reject) => {
+    const run = () => {
+      activeCount += 1;
+      task()
+        .then(resolve, reject)
+        .finally(() => {
+          activeCount -= 1;
+          drainQueue();
+        });
+    };
+
+    if (activeCount < maxConcurrent) {
+      run();
+    } else {
+      queue.push(run);
+    }
+  });
+}
+
+function getCachedDirectorySize(directoryUri: string): number | null {
+  const cached = directorySizeCache.get(directoryUri);
+  if (!cached) {
+    return null;
+  }
+
+  if (Date.now() - cached.measuredAt > DIRECTORY_SIZE_CACHE_TTL_MS) {
+    directorySizeCache.delete(directoryUri);
+    return null;
+  }
+
+  return cached.sizeBytes;
+}
+
+async function getDirectorySizeBytes(
+  directoryUri: string,
+  statLimiter = createDirectoryStatLimiter(DIRECTORY_SIZE_MAX_CONCURRENT_STATS),
+): Promise<number> {
+  const normalizedDirectoryUri = normalizeDirectoryUri(directoryUri);
+  const cachedSize = getCachedDirectorySize(normalizedDirectoryUri);
+  if (cachedSize !== null) {
+    return cachedSize;
+  }
+
   try {
-    const info = await FileSystem.getInfoAsync(directoryUri);
+    const info = await FileSystem.getInfoAsync(normalizedDirectoryUri);
     if (!info.exists) {
+      directorySizeCache.set(normalizedDirectoryUri, {
+        measuredAt: Date.now(),
+        sizeBytes: MIN_DIRECTORY_SIZE_FALLBACK_BYTES,
+      });
       return MIN_DIRECTORY_SIZE_FALLBACK_BYTES;
     }
 
-    const entries = await FileSystem.readDirectoryAsync(directoryUri);
+    const entries = await FileSystem.readDirectoryAsync(normalizedDirectoryUri);
     if (entries.length === 0) {
+      directorySizeCache.set(normalizedDirectoryUri, {
+        measuredAt: Date.now(),
+        sizeBytes: 0,
+      });
       return 0;
     }
 
     const entrySizes = await Promise.all(
       entries.map(async (entryName) => {
-        const entryUri = `${directoryUri}${entryName}`;
-        const entryInfo = await FileSystem.getInfoAsync(entryUri);
+        const entryUri = joinDirectoryEntryUri(normalizedDirectoryUri, entryName);
+        const entryInfo = await statLimiter(() => FileSystem.getInfoAsync(entryUri));
 
         if (!entryInfo.exists) {
           return 0;
         }
 
         if ((entryInfo as { isDirectory?: boolean }).isDirectory) {
-          return getDirectorySizeBytes(`${entryUri}/`);
+          return getDirectorySizeBytes(entryUri, statLimiter);
         }
 
         return typeof entryInfo.size === 'number' ? entryInfo.size : 0;
       }),
     );
 
-    return entrySizes.reduce((sum, size) => sum + size, 0);
+    const sizeBytes = entrySizes.reduce((sum, size) => sum + size, 0);
+    directorySizeCache.set(normalizedDirectoryUri, {
+      measuredAt: Date.now(),
+      sizeBytes,
+    });
+    return sizeBytes;
   } catch (error) {
-    console.warn('[StorageManagerService] Failed to read directory size', directoryUri, error);
+    console.warn('[StorageManagerService] Failed to read directory size', normalizedDirectoryUri, error);
     return MIN_DIRECTORY_SIZE_FALLBACK_BYTES;
   }
+}
+
+export function __resetStorageManagerDirectorySizeCacheForTests(): void {
+  directorySizeCache.clear();
 }
 
 function getDownloadedModels() {
@@ -151,6 +256,59 @@ async function getDownloadedModelsWithResolvedSizes(): Promise<ModelMetadata[]> 
       ? { ...model, size: resolvedSize }
       : model;
   });
+}
+
+async function getQuarantinedModelFilesMetrics(): Promise<QuarantinedModelFilesMetrics> {
+  const fileNames = registry.getQuarantinedModelFileNames();
+  const modelsDir = getModelsDir();
+
+  if (!modelsDir || fileNames.length === 0) {
+    return {
+      fileNames,
+      count: fileNames.length,
+      bytes: 0,
+    };
+  }
+
+  const sizes = await Promise.all(
+    fileNames.map(async (fileName) => {
+      const fileUri = safeJoinModelPath(modelsDir, fileName);
+      if (!fileUri) {
+        return 0;
+      }
+
+      try {
+        const info = await FileSystem.getInfoAsync(fileUri);
+        if (
+          info.exists
+          && !(info as { isDirectory?: boolean }).isDirectory
+          && typeof info.size === 'number'
+          && Number.isFinite(info.size)
+          && info.size > 0
+        ) {
+          return Math.round(info.size);
+        }
+      } catch {
+        // Keep the file visible in quarantine metrics even if size probing fails.
+      }
+
+      return 0;
+    }),
+  );
+
+  return {
+    fileNames,
+    count: fileNames.length,
+    bytes: sizes.reduce((sum, size) => sum + size, 0),
+  };
+}
+
+async function refreshModelFileQuarantine() {
+  try {
+    await registry.validateRegistry(getQueuedDownloadFileNames());
+  } catch (error) {
+    console.warn('[StorageManagerService] Failed to refresh model file quarantine', error);
+  }
 }
 
 function getLegacyChatHistoryBytes() {
@@ -247,11 +405,17 @@ async function getActiveModelEstimateBytes(downloadedModels: ModelMetadata[]) {
   return Math.round(baseModelBytes * (1 + ESTIMATED_MODEL_RUNTIME_OVERHEAD_FACTOR) + contextBytes);
 }
 
-export async function getAppStorageMetrics(): Promise<AppStorageMetrics> {
+export async function getAppStorageMetrics(options: AppStorageMetricsOptions = {}): Promise<AppStorageMetrics> {
+  if (options.refreshModelFileQuarantine) {
+    directorySizeCache.clear();
+    await refreshModelFileQuarantine();
+  }
+
   const downloadedModels = await getDownloadedModelsWithResolvedSizes();
   const modelsBytes = downloadedModels.reduce((sum, model) => sum + Math.max(model.size ?? 0, 0), 0);
   const cacheDir = getCacheDir();
-  const [cacheDirectoryBytes] = await Promise.all([
+  const [quarantinedModelFiles, cacheDirectoryBytes] = await Promise.all([
+    getQuarantinedModelFilesMetrics(),
     cacheDir ? getDirectorySizeBytes(cacheDir) : Promise.resolve(0),
   ]);
   const cacheBytes = cacheDirectoryBytes + modelCatalogService.getPersistentCacheBytes();
@@ -262,10 +426,11 @@ export async function getAppStorageMetrics(): Promise<AppStorageMetrics> {
   return {
     downloadedModels,
     modelsBytes,
+    quarantinedModelFiles,
     cacheBytes,
     chatHistoryBytes,
     settingsBytes,
-    appFilesBytes: modelsBytes + cacheBytes + chatHistoryBytes + settingsBytes,
+    appFilesBytes: modelsBytes + quarantinedModelFiles.bytes + cacheBytes + chatHistoryBytes + settingsBytes,
     activeModelEstimateBytes,
     activeModelId: llmEngineService.getState().activeModelId ?? null,
   };
@@ -286,6 +451,8 @@ export async function offloadModel(modelId: string, options?: OffloadModelOption
 }
 
 export async function clearActiveCache() {
+  directorySizeCache.clear();
+
   const deleteWithRetry = async (uri: string) => {
     let lastError: unknown = null;
     for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -340,6 +507,36 @@ export async function clearActiveCache() {
   }
 
   return clearedEntries;
+}
+
+export async function cleanupQuarantinedModelFiles() {
+  directorySizeCache.clear();
+  const getCurrentQueuedModelFileNames = () => getQueuedDownloadFileNames();
+  await registry.validateRegistry(getCurrentQueuedModelFileNames());
+
+  const fileNames = registry.getQuarantinedModelFileNames();
+  let deletedCount = 0;
+  let firstError: unknown = null;
+
+  for (const fileName of fileNames) {
+    try {
+      deletedCount += await registry.deleteQuarantinedModelFiles(
+        [fileName],
+        getCurrentQueuedModelFileNames,
+      );
+    } catch (error) {
+      console.warn('[StorageManagerService] Failed to delete quarantined model file', fileName, error);
+      firstError ??= error;
+    }
+  }
+
+  directorySizeCache.clear();
+
+  if (firstError) {
+    throw firstError;
+  }
+
+  return deletedCount;
 }
 
 export async function clearChatHistory() {

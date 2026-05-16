@@ -77,6 +77,16 @@ describe('ModelDownloadProgress', () => {
     expect(getByTestId('model-download-progress-fill-org/model').props.className).not.toContain('bg-warning-500');
   });
 
+  it('renders failed downloads as visible retry state', () => {
+    const { getByTestId, getByText } = render(
+      <ModelDownloadProgress model={buildModel({ lifecycleStatus: LifecycleStatus.FAILED, downloadProgress: 0.24 })} />,
+    );
+
+    expect(getByText('models.downloadFailed')).toBeTruthy();
+    expect(getByText('24%')).toBeTruthy();
+    expect(getByTestId('model-download-progress-org/model').props.className).toContain('bg-error-500/10');
+  });
+
   it('can render a compact layout for catalog cards', () => {
     const { getByTestId } = render(
       <ModelDownloadProgress density="compact" model={buildModel({ downloadProgress: 0.33 })} />,

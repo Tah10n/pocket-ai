@@ -4,6 +4,10 @@ jest.mock('../../src/store/chatStore', () => ({
   },
 }));
 
+jest.mock('../../src/store/downloadStore', () => ({
+  getQueuedDownloadFileNames: jest.fn().mockReturnValue([]),
+}));
+
 jest.mock('../../src/store/storage', () => ({
   storage: {
     getAllKeys: jest.fn().mockReturnValue([]),
@@ -37,6 +41,9 @@ jest.mock('../../src/services/LocalStorageRegistry', () => ({
     getModels: jest.fn().mockReturnValue([]),
     getModel: jest.fn(),
     removeModel: jest.fn(),
+    validateRegistry: jest.fn().mockResolvedValue(undefined),
+    getQuarantinedModelFileNames: jest.fn().mockReturnValue([]),
+    deleteQuarantinedModelFiles: jest.fn().mockResolvedValue(0),
   },
 }));
 
@@ -62,7 +69,9 @@ jest.mock('../../src/services/SettingsStore', () => ({
 
 import { clearChatHistory } from '../../src/services/StorageManagerService';
 import { clearActiveCache } from '../../src/services/StorageManagerService';
+import { cleanupQuarantinedModelFiles } from '../../src/services/StorageManagerService';
 import { getAppStorageMetrics } from '../../src/services/StorageManagerService';
+import { __resetStorageManagerDirectorySizeCacheForTests } from '../../src/services/StorageManagerService';
 import { offloadModel } from '../../src/services/StorageManagerService';
 import { resetAppSettings } from '../../src/services/StorageManagerService';
 import { llmEngineService } from '../../src/services/LLMEngineService';
@@ -75,6 +84,7 @@ import {
   storage as settingsStorage,
 } from '../../src/services/SettingsStore';
 import { useChatStore } from '../../src/store/chatStore';
+import { getQueuedDownloadFileNames } from '../../src/store/downloadStore';
 import { storage as appStorage } from '../../src/store/storage';
 import { CHAT_PERSISTENCE_INDEX_KEY, getChatThreadStorageKey } from '../../src/store/chatPersistence';
 import * as FileSystem from 'expo-file-system/legacy';
@@ -84,6 +94,7 @@ const mockedRegistry = registry as jest.Mocked<typeof registry>;
 const mockedModelCatalogService = modelCatalogService as jest.Mocked<typeof modelCatalogService>;
 const mockedAppStorage = appStorage as jest.Mocked<typeof appStorage>;
 const mockedSettingsStorage = settingsStorage as jest.Mocked<typeof settingsStorage>;
+const mockedGetQueuedDownloadFileNames = getQueuedDownloadFileNames as jest.MockedFunction<typeof getQueuedDownloadFileNames>;
 
 function createDownloadedModel(overrides: Partial<ModelMetadata> = {}): ModelMetadata {
   return {
@@ -108,6 +119,7 @@ describe('StorageManagerService', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    __resetStorageManagerDirectorySizeCacheForTests();
     mockClearAllThreads.mockReturnValue(2);
     (clearLegacyChatHistory as jest.Mock).mockReturnValue(3);
     (useChatStore.getState as jest.Mock).mockReturnValue({
@@ -115,6 +127,10 @@ describe('StorageManagerService', () => {
     });
     mockedRegistry.getModels.mockReturnValue([]);
     mockedRegistry.getModel.mockReturnValue(undefined);
+    mockedRegistry.validateRegistry.mockResolvedValue(undefined);
+    mockedRegistry.getQuarantinedModelFileNames.mockReturnValue([]);
+    mockedRegistry.deleteQuarantinedModelFiles.mockResolvedValue(0);
+    mockedGetQueuedDownloadFileNames.mockReturnValue([]);
     mockedModelCatalogService.getPersistentCacheBytes.mockReturnValue(0);
     mockedAppStorage.getAllKeys.mockReturnValue([]);
     mockedAppStorage.getString.mockReturnValue(undefined);
@@ -194,6 +210,176 @@ describe('StorageManagerService', () => {
 
     expect(metrics.cacheBytes).toBe(1536);
     expect(metrics.appFilesBytes).toBe(1548);
+  });
+
+  it('includes quarantined model files in app file metrics without counting them as downloaded models', async () => {
+    mockedRegistry.getQuarantinedModelFileNames.mockReturnValue(['missing.gguf', 'orphan.gguf']);
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (uri === 'test-cache/') {
+        return { exists: false };
+      }
+
+      if (uri === 'test-models/orphan.gguf') {
+        return { exists: true, size: 2048 };
+      }
+
+      return { exists: false };
+    });
+
+    const metrics = await getAppStorageMetrics();
+
+    expect(metrics.downloadedModels).toHaveLength(0);
+    expect(metrics.modelsBytes).toBe(0);
+    expect(metrics.quarantinedModelFiles).toEqual({
+      fileNames: ['missing.gguf', 'orphan.gguf'],
+      count: 2,
+      bytes: 2048,
+    });
+    expect(metrics.appFilesBytes).toBe(2060);
+  });
+
+  it('refreshes model file quarantine before building metrics when requested', async () => {
+    mockedGetQueuedDownloadFileNames.mockReturnValue(['queued.gguf']);
+    mockedRegistry.validateRegistry.mockImplementation(async () => {
+      mockedRegistry.getQuarantinedModelFileNames.mockReturnValue(['fresh-orphan.gguf']);
+    });
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (uri === 'test-cache/') {
+        return { exists: false };
+      }
+
+      if (uri === 'test-models/fresh-orphan.gguf') {
+        return { exists: true, size: 1024 };
+      }
+
+      return { exists: false };
+    });
+
+    const metrics = await getAppStorageMetrics({ refreshModelFileQuarantine: true });
+
+    expect(mockedRegistry.validateRegistry).toHaveBeenCalledWith(['queued.gguf']);
+    expect(mockedRegistry.validateRegistry.mock.invocationCallOrder[0]).toBeLessThan(
+      mockedRegistry.getQuarantinedModelFileNames.mock.invocationCallOrder[0],
+    );
+    expect(metrics.quarantinedModelFiles).toEqual({
+      fileNames: ['fresh-orphan.gguf'],
+      count: 1,
+      bytes: 1024,
+    });
+    expect(metrics.appFilesBytes).toBe(1036);
+  });
+
+  it('does not mutate registry validation state for default metrics callers', async () => {
+    await getAppStorageMetrics();
+
+    expect(mockedRegistry.validateRegistry).not.toHaveBeenCalled();
+  });
+
+  it('keeps returning metrics when quarantine refresh fails', async () => {
+    const refreshError = new Error('scan failed');
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    mockedRegistry.validateRegistry.mockRejectedValue(refreshError);
+    mockedRegistry.getQuarantinedModelFileNames.mockReturnValue(['known-orphan.gguf']);
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (uri === 'test-cache/') {
+        return { exists: false };
+      }
+
+      if (uri === 'test-models/known-orphan.gguf') {
+        return { exists: true, size: 512 };
+      }
+
+      return { exists: false };
+    });
+
+    const metrics = await getAppStorageMetrics({ refreshModelFileQuarantine: true });
+
+    expect(metrics.quarantinedModelFiles).toEqual({
+      fileNames: ['known-orphan.gguf'],
+      count: 1,
+      bytes: 512,
+    });
+    expect(warnSpy).toHaveBeenCalledWith(
+      '[StorageManagerService] Failed to refresh model file quarantine',
+      refreshError,
+    );
+
+    warnSpy.mockRestore();
+  });
+
+  it('validates queued downloads before deleting quarantined model files', async () => {
+    mockedGetQueuedDownloadFileNames.mockReturnValue(['queued.gguf']);
+    mockedRegistry.getQuarantinedModelFileNames.mockReturnValue(['orphan-a.gguf', 'orphan-b.gguf']);
+    mockedRegistry.deleteQuarantinedModelFiles
+      .mockResolvedValueOnce(1)
+      .mockResolvedValueOnce(1);
+
+    await expect(cleanupQuarantinedModelFiles()).resolves.toBe(2);
+
+    expect(mockedRegistry.validateRegistry).toHaveBeenCalledWith(['queued.gguf']);
+    expect(mockedRegistry.deleteQuarantinedModelFiles).toHaveBeenNthCalledWith(
+      1,
+      ['orphan-a.gguf'],
+      expect.any(Function),
+    );
+    expect(mockedRegistry.deleteQuarantinedModelFiles).toHaveBeenNthCalledWith(
+      2,
+      ['orphan-b.gguf'],
+      expect.any(Function),
+    );
+    const queuedProvider = mockedRegistry.deleteQuarantinedModelFiles.mock.calls[0][1] as () => string[];
+    expect(queuedProvider()).toEqual(['queued.gguf']);
+  });
+
+  it('passes the latest queued downloads into final quarantine deletion guard', async () => {
+    mockedGetQueuedDownloadFileNames
+      .mockReturnValueOnce(['queued-before-validation.gguf'])
+      .mockReturnValueOnce(['queued-at-delete.gguf']);
+    mockedRegistry.getQuarantinedModelFileNames.mockReturnValue(['queued-at-delete.gguf']);
+
+    await expect(cleanupQuarantinedModelFiles()).resolves.toBe(0);
+
+    expect(mockedRegistry.validateRegistry).toHaveBeenCalledWith(['queued-before-validation.gguf']);
+    expect(mockedRegistry.deleteQuarantinedModelFiles).toHaveBeenCalledWith(
+      ['queued-at-delete.gguf'],
+      expect.any(Function),
+    );
+    const queuedProvider = mockedRegistry.deleteQuarantinedModelFiles.mock.calls[0][1] as () => string[];
+    expect(queuedProvider()).toEqual(['queued-at-delete.gguf']);
+  });
+
+  it('skips quarantine deletion when validation leaves no quarantined model files', async () => {
+    mockedRegistry.getQuarantinedModelFileNames.mockReturnValue([]);
+
+    await expect(cleanupQuarantinedModelFiles()).resolves.toBe(0);
+
+    expect(mockedRegistry.validateRegistry).toHaveBeenCalledWith([]);
+    expect(mockedRegistry.deleteQuarantinedModelFiles).not.toHaveBeenCalled();
+  });
+
+  it('attempts remaining quarantine cleanup entries after one deletion fails', async () => {
+    const deleteError = new Error('locked');
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    mockedRegistry.getQuarantinedModelFileNames.mockReturnValue(['locked.gguf', 'free.gguf']);
+    mockedRegistry.deleteQuarantinedModelFiles
+      .mockRejectedValueOnce(deleteError)
+      .mockResolvedValueOnce(1);
+
+    await expect(cleanupQuarantinedModelFiles()).rejects.toBe(deleteError);
+
+    expect(mockedRegistry.deleteQuarantinedModelFiles).toHaveBeenCalledTimes(2);
+    expect(mockedRegistry.deleteQuarantinedModelFiles).toHaveBeenNthCalledWith(
+      2,
+      ['free.gguf'],
+      expect.any(Function),
+    );
+    expect(warnSpy).toHaveBeenCalledWith(
+      '[StorageManagerService] Failed to delete quarantined model file',
+      'locked.gguf',
+      deleteError,
+    );
+
+    warnSpy.mockRestore();
   });
 
   it('treats an empty persisted chat-store payload as zero chat history bytes', async () => {
@@ -341,6 +527,62 @@ describe('StorageManagerService', () => {
     const metrics = await getAppStorageMetrics();
 
     expect(metrics.cacheBytes).toBe(384);
+  });
+
+  it('limits concurrent file stats while measuring cache directory size', async () => {
+    const entryNames = Array.from({ length: 20 }, (_, index) => `entry-${index}.bin`);
+    let activeStats = 0;
+    let maxActiveStats = 0;
+
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (uri === 'test-cache/') {
+        return { exists: true };
+      }
+
+      activeStats += 1;
+      maxActiveStats = Math.max(maxActiveStats, activeStats);
+      await Promise.resolve();
+      activeStats -= 1;
+
+      if (uri.startsWith('test-cache/entry-')) {
+        return { exists: true, size: 1 };
+      }
+
+      return { exists: false };
+    });
+    (FileSystem.readDirectoryAsync as jest.Mock).mockImplementation(async (uri: string) => (
+      uri === 'test-cache/' ? entryNames : []
+    ));
+
+    const metrics = await getAppStorageMetrics();
+
+    expect(metrics.cacheBytes).toBe(20);
+    expect(maxActiveStats).toBeLessThanOrEqual(8);
+  });
+
+  it('reuses a recent cache directory size measurement', async () => {
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (uri === 'test-cache/') {
+        return { exists: true };
+      }
+
+      if (uri === 'test-cache/cache.bin') {
+        return { exists: true, size: 128 };
+      }
+
+      return { exists: false };
+    });
+    (FileSystem.readDirectoryAsync as jest.Mock).mockImplementation(async (uri: string) => (
+      uri === 'test-cache/' ? ['cache.bin'] : []
+    ));
+
+    await expect(getAppStorageMetrics()).resolves.toEqual(expect.objectContaining({ cacheBytes: 128 }));
+    await expect(getAppStorageMetrics()).resolves.toEqual(expect.objectContaining({ cacheBytes: 128 }));
+
+    expect((FileSystem.readDirectoryAsync as jest.Mock).mock.calls.filter((call) => call[0] === 'test-cache/'))
+      .toHaveLength(1);
+    expect((FileSystem.getInfoAsync as jest.Mock).mock.calls.filter((call) => call[0] === 'test-cache/cache.bin'))
+      .toHaveLength(1);
   });
 
   it('uses the actual downloaded file size when estimating active model memory usage', async () => {

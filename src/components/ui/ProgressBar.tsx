@@ -6,7 +6,7 @@ import { GlassSurfaceBackdrop, getGlassCornerRadiusStyle, getGlassSurfaceFrameSt
 import type { AndroidBlurTargetRef } from '@/utils/androidBlur';
 
 type ProgressBarSize = 'sm' | 'md' | 'lg';
-type ProgressBarTone = 'neutral' | 'primary' | 'success' | 'warning';
+type ProgressBarTone = 'neutral' | 'primary' | 'success' | 'warning' | 'error';
 type ProgressBarVariant = 'plain' | 'framed';
 
 interface ProgressBarProps {

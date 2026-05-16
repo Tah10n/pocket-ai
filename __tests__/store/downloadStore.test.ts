@@ -108,6 +108,27 @@ describe('downloadStore', () => {
     expect(entry?.downloadProgress).toBe(0.12);
   });
 
+  it('re-queues failed entries while clearing the visible failure state', () => {
+    useDownloadStore.setState({
+      queue: [
+        {
+          ...buildQueuedModel('failed', LifecycleStatus.FAILED),
+          downloadErrorAt: 123,
+          downloadErrorCode: 'download_size_unknown',
+          downloadErrorMessage: 'MODEL_SIZE_UNKNOWN',
+        },
+      ],
+      activeDownloadId: null,
+    });
+
+    useDownloadStore.getState().addToQueue(buildQueuedModel('failed', LifecycleStatus.AVAILABLE));
+    const entry = useDownloadStore.getState().queue.find((model) => model.id === 'failed');
+    expect(entry?.lifecycleStatus).toBe(LifecycleStatus.QUEUED);
+    expect(entry?.downloadErrorAt).toBeUndefined();
+    expect(entry?.downloadErrorCode).toBeUndefined();
+    expect(entry?.downloadErrorMessage).toBeUndefined();
+  });
+
   it('removeFromQueue clears activeDownloadId when removing the active entry', () => {
     useDownloadStore.setState({
       queue: [buildQueuedModel('active', LifecycleStatus.QUEUED)],
@@ -186,5 +207,26 @@ describe('downloadStore', () => {
     expect(
       queuedFileNames.some((fileName) => fileName.startsWith('model-cafebabe1234-') && fileName.endsWith('.gguf')),
     ).toBe(true);
+  });
+
+  it('keeps queued localPath filenames protected from quarantine scans', () => {
+    useDownloadStore.setState({
+      queue: [
+        {
+          ...buildQueuedModel('legacy/model', LifecycleStatus.PAUSED),
+          localPath: 'custom-partial.gguf',
+        },
+        {
+          ...buildQueuedModel('bad/model', LifecycleStatus.FAILED),
+          localPath: '../bad.gguf',
+        },
+      ],
+      activeDownloadId: null,
+    });
+
+    const queuedFileNames = getQueuedDownloadFileNames();
+
+    expect(queuedFileNames).toContain('custom-partial.gguf');
+    expect(queuedFileNames).not.toContain('../bad.gguf');
   });
 });

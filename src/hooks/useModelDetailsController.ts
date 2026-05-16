@@ -384,7 +384,12 @@ export function useModelDetailsController(modelId: string) {
         downloadProgress: 0,
         localPath: undefined,
         downloadedAt: undefined,
+        downloadIntegrity: undefined,
         resumeData: undefined,
+        downloadErrorAt: undefined,
+        downloadErrorCode: undefined,
+        downloadErrorMessage: undefined,
+        metadataTrust: current.metadataTrust === 'verified_local' ? undefined : current.metadataTrust,
       } : current));
       setRuntimeRevision((current) => current + 1);
     };

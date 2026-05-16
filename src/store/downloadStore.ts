@@ -4,6 +4,7 @@ import { mmkvStorage } from '../lib/mmkv';
 import { ModelMetadata, LifecycleStatus } from '../types/models';
 import { normalizePersistedModelMetadata } from '../services/ModelMetadataNormalizer';
 import { getCandidateModelDownloadFileNames } from '../utils/modelFiles';
+import { isValidLocalFileName } from '../utils/safeFilePath';
 import { createInstrumentedStateStorage } from './persistStateStorage';
 import { assertPrivateStorageWritable } from '../services/storage';
 
@@ -64,7 +65,10 @@ export const useDownloadStore = create<DownloadState>()(
             };
           }
 
-          if (existing.lifecycleStatus === LifecycleStatus.PAUSED) {
+          if (
+            existing.lifecycleStatus === LifecycleStatus.PAUSED
+            || existing.lifecycleStatus === LifecycleStatus.FAILED
+          ) {
             const nextEntry = normalizePersistedModelMetadata({
               ...existing,
               ...model,
@@ -72,6 +76,9 @@ export const useDownloadStore = create<DownloadState>()(
               downloadProgress: existing.downloadProgress,
               localPath: existing.localPath ?? model.localPath,
               lifecycleStatus: LifecycleStatus.QUEUED,
+              downloadErrorAt: undefined,
+              downloadErrorCode: undefined,
+              downloadErrorMessage: undefined,
             });
 
             return {
@@ -87,8 +94,8 @@ export const useDownloadStore = create<DownloadState>()(
             return state;
           }
 
-          // If a previous download attempt failed, we keep it in the queue as "available"
-          // so it won't auto-retry. Re-queue it when the user taps Download again.
+          // Legacy queues may still contain a retryable entry stored as AVAILABLE.
+          // Re-queue it only when the user explicitly taps Download again.
           if (existing.lifecycleStatus === LifecycleStatus.AVAILABLE) {
             const nextEntry = normalizePersistedModelMetadata({
               ...existing,
@@ -97,6 +104,9 @@ export const useDownloadStore = create<DownloadState>()(
               downloadProgress: existing.downloadProgress,
               localPath: existing.localPath ?? model.localPath,
               lifecycleStatus: LifecycleStatus.QUEUED,
+              downloadErrorAt: undefined,
+              downloadErrorCode: undefined,
+              downloadErrorMessage: undefined,
             });
 
             return {
@@ -159,7 +169,10 @@ export function getQueuedDownloadFileNames(): string[] {
     useDownloadStore
       .getState()
       .queue
-      .flatMap((model) => getCandidateModelDownloadFileNames(model)),
+      .flatMap((model) => [
+        ...(model.localPath && isValidLocalFileName(model.localPath) ? [model.localPath] : []),
+        ...getCandidateModelDownloadFileNames(model),
+      ]),
   ));
 }
 

@@ -67,6 +67,34 @@ describe('modelRuntimeState', () => {
     expect(merged.modelCreator).toBe('Meta');
   });
 
+  it('preserves local integrity and failure runtime fields', () => {
+    const merged = mergeModelWithRuntimeState(
+      makeModel(),
+      {
+        localModel: makeModel({
+          lifecycleStatus: LifecycleStatus.FAILED,
+          downloadIntegrity: {
+            kind: 'size',
+            sizeBytes: 2048,
+            checkedAt: 123,
+          },
+          downloadErrorAt: 456,
+          downloadErrorCode: 'download_http_error',
+          downloadErrorMessage: 'HTTP status 500',
+        }),
+      },
+    );
+
+    expect(merged.downloadIntegrity).toEqual({
+      kind: 'size',
+      sizeBytes: 2048,
+      checkedAt: 123,
+    });
+    expect(merged.downloadErrorAt).toBe(456);
+    expect(merged.downloadErrorCode).toBe('download_http_error');
+    expect(merged.downloadErrorMessage).toBe('HTTP status 500');
+  });
+
   it('does not overwrite richer incoming metadata with local fallbacks', () => {
     const merged = mergeModelWithRuntimeState(
       makeModel({

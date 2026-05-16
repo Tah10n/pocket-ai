@@ -12,6 +12,7 @@ import type { CalibrationRecord } from '../memory/types';
 const REGISTRY_STORAGE_ID = 'models-registry';
 const MODEL_FILE_PRESERVATION_STORAGE_ID = 'model-file-preservation';
 const PRIVATE_RESET_PRESERVED_MODEL_FILES_KEY = 'private-reset-preserved-model-files-v1';
+const QUARANTINED_MODEL_FILES_KEY = 'quarantined-model-files-v1';
 
 // Legacy format: one JSON array stored under the same key as the MMKV instance id.
 const LEGACY_MODELS_KEY = REGISTRY_STORAGE_ID;
@@ -29,6 +30,18 @@ type PrivateResetModelFilePreservationState = {
   fileNames: Set<string>;
   scanComplete: boolean;
 };
+
+type QuarantinedModelFile = {
+  fileName: string;
+  detectedAt: number;
+  reason: 'orphaned';
+};
+
+type QueuedModelFileNamesInput = string[] | (() => string[]);
+
+type ModelDirectoryEntryInspection =
+  | { kind: 'file'; fileUri: string }
+  | { kind: 'directory' | 'missing' | 'unknown'; fileUri?: string };
 
 function cloneCalibrationRecord(record: CalibrationRecord): CalibrationRecord {
   return { ...record };
@@ -51,6 +64,54 @@ function getModelFilePreservationStorage(): MMKV {
 function normalizeModelFileNames(input: unknown): Set<string> {
   const values = Array.isArray(input) ? input : [];
   return new Set(values.filter(isValidLocalFileName));
+}
+
+function isFileSystemDirectory(info: { isDirectory?: boolean }): boolean {
+  return info.isDirectory === true;
+}
+
+function getFileInfoSizeBytes(info: { size?: number }): number | null {
+  return (
+    typeof info.size === 'number'
+    && Number.isFinite(info.size)
+    && info.size > 0
+  )
+    ? Math.round(info.size)
+    : null;
+}
+
+function resolveQueuedModelFileNames(input: QueuedModelFileNamesInput): string[] {
+  return typeof input === 'function' ? input() : input;
+}
+
+async function inspectModelDirectoryEntry(
+  modelsDir: string,
+  fileName: string,
+  scope: string,
+): Promise<ModelDirectoryEntryInspection> {
+  const fileUri = safeJoinModelPath(modelsDir, fileName);
+  if (!fileUri) {
+    return { kind: 'unknown' };
+  }
+
+  try {
+    const info = await FileSystem.getInfoAsync(fileUri);
+    if (!info.exists) {
+      return { kind: 'missing', fileUri };
+    }
+
+    if (isFileSystemDirectory(info)) {
+      return { kind: 'directory', fileUri };
+    }
+
+    return { kind: 'file', fileUri };
+  } catch (error) {
+    console.warn(
+      `[LocalStorageRegistry] Failed to inspect model directory entry during ${scope}: ${fileName}`,
+      error,
+    );
+    return { kind: 'unknown', fileUri };
+  }
 }
 
 function readPrivateResetPreservedModelFiles(): PrivateResetModelFilePreservationState {
@@ -103,6 +164,61 @@ function writePrivateResetPreservedModelFiles(state: PrivateResetModelFilePreser
       scanComplete: state.scanComplete,
       updatedAt: Date.now(),
     }),
+  );
+}
+
+function readQuarantinedModelFiles(): Map<string, QuarantinedModelFile> {
+  const raw = getModelFilePreservationStorage().getString(QUARANTINED_MODEL_FILES_KEY);
+  if (!raw) {
+    return new Map();
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    const entries = Array.isArray(parsed)
+      ? parsed
+      : parsed && typeof parsed === 'object' && Array.isArray((parsed as { files?: unknown }).files)
+        ? (parsed as { files: unknown[] }).files
+        : [];
+
+    const quarantined = new Map<string, QuarantinedModelFile>();
+    for (const entry of entries) {
+      if (!entry || typeof entry !== 'object') {
+        continue;
+      }
+
+      const record = entry as Record<string, unknown>;
+      const fileName = record.fileName;
+      if (!isValidLocalFileName(fileName)) {
+        continue;
+      }
+
+      const detectedAt = typeof record.detectedAt === 'number' && Number.isFinite(record.detectedAt)
+        ? Math.max(0, Math.round(record.detectedAt))
+        : Date.now();
+      quarantined.set(fileName, { fileName, detectedAt, reason: 'orphaned' });
+    }
+
+    return quarantined;
+  } catch {
+    getModelFilePreservationStorage().remove(QUARANTINED_MODEL_FILES_KEY);
+    return new Map();
+  }
+}
+
+function writeQuarantinedModelFiles(filesByName: Map<string, QuarantinedModelFile>): void {
+  const files = Array.from(filesByName.values())
+    .filter((entry) => isValidLocalFileName(entry.fileName))
+    .sort((left, right) => left.fileName.localeCompare(right.fileName));
+
+  if (files.length === 0) {
+    getModelFilePreservationStorage().remove(QUARANTINED_MODEL_FILES_KEY);
+    return;
+  }
+
+  getModelFilePreservationStorage().set(
+    QUARANTINED_MODEL_FILES_KEY,
+    JSON.stringify({ files }),
   );
 }
 
@@ -197,6 +313,7 @@ function cloneModelMetadata(model: ModelMetadata): ModelMetadata {
   return {
     ...model,
     capabilitySnapshot: model.capabilitySnapshot ? { ...model.capabilitySnapshot } : undefined,
+    downloadIntegrity: model.downloadIntegrity ? { ...model.downloadIntegrity } : undefined,
     gguf: model.gguf ? { ...model.gguf } : undefined,
     thinkingCapability: model.thinkingCapability ? { ...model.thinkingCapability } : undefined,
     architectures: model.architectures ? [...model.architectures] : undefined,
@@ -205,6 +322,29 @@ function cloneModelMetadata(model: ModelMetadata): ModelMetadata {
     languages: model.languages ? [...model.languages] : undefined,
     tags: model.tags ? [...model.tags] : undefined,
   };
+}
+
+function resetLocalDownloadState(model: ModelMetadata): void {
+  model.lifecycleStatus = LifecycleStatus.AVAILABLE;
+  model.localPath = undefined;
+  model.downloadedAt = undefined;
+  model.downloadIntegrity = undefined;
+  model.resumeData = undefined;
+  model.downloadErrorAt = undefined;
+  model.downloadErrorCode = undefined;
+  model.downloadErrorMessage = undefined;
+  model.downloadProgress = 0;
+  if (model.metadataTrust === 'verified_local') {
+    model.metadataTrust = undefined;
+  }
+}
+
+function hasCompletedLocalModelFile(model: Pick<ModelMetadata, 'lifecycleStatus' | 'localPath'>): boolean {
+  return (
+    (model.lifecycleStatus === LifecycleStatus.DOWNLOADED
+      || model.lifecycleStatus === LifecycleStatus.ACTIVE)
+    && typeof model.localPath === 'string'
+  );
 }
 
 export class LocalStorageRegistry {
@@ -384,8 +524,8 @@ export class LocalStorageRegistry {
     const { ids, modelsById } = this.getCachedModelsState();
     const normalized = normalizePersistedModelMetadata({ ...model, id: modelId });
     const existing = modelsById.get(modelId);
-    const hadLocalPath = typeof existing?.localPath === 'string';
-    const hasLocalPath = typeof normalized.localPath === 'string';
+    const hadCompletedLocalFile = existing ? hasCompletedLocalModelFile(existing) : false;
+    const hasCompletedLocalFile = hasCompletedLocalModelFile(normalized);
     const isNew = !modelsById.has(modelId);
     const nextIds = isNew ? [...ids, modelId] : ids.slice();
     const nextModelsById = new Map(modelsById);
@@ -404,7 +544,11 @@ export class LocalStorageRegistry {
     this.cachedModelsById = nextModelsById;
     this.cachedDownloadedModelsCount = this.cachedDownloadedModelsCount == null
       ? this.countDownloadedModels(nextModelsById)
-      : this.cachedDownloadedModelsCount + (hadLocalPath === hasLocalPath ? 0 : hasLocalPath ? 1 : -1);
+      : this.cachedDownloadedModelsCount + (
+        hadCompletedLocalFile === hasCompletedLocalFile
+          ? 0
+          : hasCompletedLocalFile ? 1 : -1
+      );
 
     this.emitModelsChanged();
   }
@@ -429,8 +573,10 @@ export class LocalStorageRegistry {
             console.warn(`[LocalStorageRegistry] Invalid localPath for ${modelId}, skipping file deletion`);
           } else {
             const info = await FileSystem.getInfoAsync(fileUri);
-            if (info.exists) {
+            if (info.exists && !isFileSystemDirectory(info)) {
               await FileSystem.deleteAsync(fileUri);
+            } else if (info.exists) {
+              console.warn(`[LocalStorageRegistry] Local path for ${modelId} points to a directory, skipping file deletion`);
             }
           }
         }
@@ -441,7 +587,7 @@ export class LocalStorageRegistry {
 
     const state = this.getCachedModelsState();
     const existing = state.modelsById.get(normalizedId);
-    const hadLocalPath = typeof existing?.localPath === 'string';
+    const hadCompletedLocalFile = existing ? hasCompletedLocalModelFile(existing) : false;
     const nextModelsById = new Map(state.modelsById);
     const nextIds = state.ids.filter((id) => id !== normalizedId);
 
@@ -457,7 +603,7 @@ export class LocalStorageRegistry {
     this.cachedModelsById = nextModelsById;
     this.cachedDownloadedModelsCount = this.cachedDownloadedModelsCount == null
       ? this.countDownloadedModels(nextModelsById)
-      : hadLocalPath
+      : hadCompletedLocalFile
         ? Math.max(0, this.cachedDownloadedModelsCount - 1)
         : this.cachedDownloadedModelsCount;
 
@@ -466,7 +612,7 @@ export class LocalStorageRegistry {
 
   /**
    * Validate the registry on startup: check if files exist and update status.
-   * Also performs Garbage Collection: deletes files in the models directory that are neither completed nor currently queued.
+   * Also quarantines files in the models directory that are neither completed nor currently queued.
    */
   public async validateRegistry(queuedFileNames: string[] = []): Promise<void> {
     const models = this.getModels();
@@ -476,14 +622,10 @@ export class LocalStorageRegistry {
 
     if (!modelsDir) {
       for (const model of models) {
-        if (model.localPath) {
-          model.localPath = undefined;
-          if (
-            model.lifecycleStatus === LifecycleStatus.DOWNLOADED ||
-            model.lifecycleStatus === LifecycleStatus.ACTIVE
-          ) {
-            model.lifecycleStatus = LifecycleStatus.AVAILABLE;
-          }
+        const hasDownloadedState = model.lifecycleStatus === LifecycleStatus.DOWNLOADED
+          || model.lifecycleStatus === LifecycleStatus.ACTIVE;
+        if (model.localPath || hasDownloadedState) {
+          resetLocalDownloadState(model);
           changed = true;
         }
       }
@@ -497,99 +639,123 @@ export class LocalStorageRegistry {
 
     // 1. Check if recorded files actually exist
     for (const model of models) {
-      if (model.lifecycleStatus === LifecycleStatus.DOWNLOADED || model.lifecycleStatus === LifecycleStatus.ACTIVE) {
-        if (model.localPath) {
-          const fileUri = safeJoinModelPath(modelsDir, model.localPath);
-          if (!fileUri) {
-            console.warn(`[LocalStorageRegistry] Invalid localPath for ${model.id}, resetting to available`);
-            model.lifecycleStatus = LifecycleStatus.AVAILABLE;
-            model.localPath = undefined;
-            changed = true;
-            continue;
-          }
-          const info = await FileSystem.getInfoAsync(fileUri);
-          if (!info.exists) {
-            console.warn(`[LocalStorageRegistry] File missing for ${model.id}, resetting to available`);
-            model.lifecycleStatus = LifecycleStatus.AVAILABLE;
-            model.localPath = undefined;
-            changed = true;
-            continue;
-          } else if (model.lifecycleStatus === LifecycleStatus.ACTIVE) {
-            model.lifecycleStatus = LifecycleStatus.DOWNLOADED;
-            changed = true;
-          }
+      const hasDownloadedState = model.lifecycleStatus === LifecycleStatus.DOWNLOADED
+        || model.lifecycleStatus === LifecycleStatus.ACTIVE;
 
-          const verifiedSizeBytes = (
-            typeof info.size === 'number'
-            && Number.isFinite(info.size)
-            && info.size > 0
-          )
-            ? Math.round(info.size)
-            : null;
+      if (!hasDownloadedState && model.localPath) {
+        resetLocalDownloadState(model);
+        changed = true;
+        continue;
+      }
 
-          if (verifiedSizeBytes !== null && model.size !== verifiedSizeBytes) {
-            model.size = verifiedSizeBytes;
-            changed = true;
-          }
+      if (hasDownloadedState) {
+        if (!model.localPath) {
+          console.warn(`[LocalStorageRegistry] Missing localPath for ${model.id}, resetting to available`);
+          resetLocalDownloadState(model);
+          changed = true;
+          continue;
+        }
 
-          const persistedSizeBytes = (
-            typeof model.size === 'number'
-            && Number.isFinite(model.size)
-            && model.size > 0
-          )
-            ? Math.round(model.size)
-            : null;
-          const sizeBytesForFit = verifiedSizeBytes ?? persistedSizeBytes;
+        const fileUri = safeJoinModelPath(modelsDir, model.localPath);
+        if (!fileUri) {
+          console.warn(`[LocalStorageRegistry] Invalid localPath for ${model.id}, resetting to available`);
+          resetLocalDownloadState(model);
+          changed = true;
+          continue;
+        }
+        const info = await FileSystem.getInfoAsync(fileUri);
+        if (!info.exists) {
+          console.warn(`[LocalStorageRegistry] File missing for ${model.id}, resetting to available`);
+          resetLocalDownloadState(model);
+          changed = true;
+          continue;
+        } else if (isFileSystemDirectory(info)) {
+          console.warn(`[LocalStorageRegistry] Local path for ${model.id} points to a directory, resetting to available`);
+          resetLocalDownloadState(model);
+          changed = true;
+          continue;
+        } else if (model.lifecycleStatus === LifecycleStatus.ACTIVE) {
+          model.lifecycleStatus = LifecycleStatus.DOWNLOADED;
+          changed = true;
+        }
 
-          if (sizeBytesForFit !== null) {
-            const metadataTrustForFit = verifiedSizeBytes !== null
-              ? 'verified_local' as const
-              : model.metadataTrust;
-            const fit = estimateFastMemoryFit({
-              modelSizeBytes: sizeBytesForFit,
-              totalMemoryBytes,
-              metadataTrust: metadataTrustForFit,
-              ggufMetadata: model.gguf as Record<string, unknown> | undefined,
-            });
-            const fitsInRam = fit.decision === 'unknown'
-              ? null
-              : fit.decision === 'fits_high_confidence' || fit.decision === 'fits_low_confidence';
-            const memoryFitDecision = fit.decision;
-            const memoryFitConfidence = fit.confidence;
+        const verifiedSizeBytes = getFileInfoSizeBytes(info);
 
-            if (verifiedSizeBytes !== null) {
-              const metadataTrust = 'verified_local' as const;
-              if (model.metadataTrust !== metadataTrust) {
-                model.metadataTrust = metadataTrust;
-                changed = true;
-              }
+        const integritySizeBytes = model.downloadIntegrity?.sizeBytes;
+        if (
+          typeof integritySizeBytes === 'number'
+          && Number.isFinite(integritySizeBytes)
+          && integritySizeBytes > 0
+          && verifiedSizeBytes !== integritySizeBytes
+        ) {
+          console.warn(`[LocalStorageRegistry] Integrity marker size mismatch for ${model.id}, resetting to available`);
+          resetLocalDownloadState(model);
+          changed = true;
+          continue;
+        }
 
-              const mergedGgufTotalBytes = model.gguf?.totalBytes === verifiedSizeBytes
-                ? model.gguf
-                : {
-                  ...(model.gguf ?? {}),
-                  totalBytes: verifiedSizeBytes,
-                };
-              if (mergedGgufTotalBytes !== model.gguf) {
-                model.gguf = mergedGgufTotalBytes;
-                changed = true;
-              }
-            }
+        if (verifiedSizeBytes !== null && model.size !== verifiedSizeBytes) {
+          model.size = verifiedSizeBytes;
+          changed = true;
+        }
 
-            if (model.fitsInRam !== fitsInRam) {
-              model.fitsInRam = fitsInRam;
+        const persistedSizeBytes = (
+          typeof model.size === 'number'
+          && Number.isFinite(model.size)
+          && model.size > 0
+        )
+          ? Math.round(model.size)
+          : null;
+        const sizeBytesForFit = verifiedSizeBytes ?? persistedSizeBytes;
+
+        if (sizeBytesForFit !== null) {
+          const metadataTrustForFit = verifiedSizeBytes !== null
+            ? 'verified_local' as const
+            : model.metadataTrust;
+          const fit = estimateFastMemoryFit({
+            modelSizeBytes: sizeBytesForFit,
+            totalMemoryBytes,
+            metadataTrust: metadataTrustForFit,
+            ggufMetadata: model.gguf as Record<string, unknown> | undefined,
+          });
+          const fitsInRam = fit.decision === 'unknown'
+            ? null
+            : fit.decision === 'fits_high_confidence' || fit.decision === 'fits_low_confidence';
+          const memoryFitDecision = fit.decision;
+          const memoryFitConfidence = fit.confidence;
+
+          if (verifiedSizeBytes !== null) {
+            const metadataTrust = 'verified_local' as const;
+            if (model.metadataTrust !== metadataTrust) {
+              model.metadataTrust = metadataTrust;
               changed = true;
             }
 
-            if (model.memoryFitDecision !== memoryFitDecision) {
-              model.memoryFitDecision = memoryFitDecision;
+            const mergedGgufTotalBytes = model.gguf?.totalBytes === verifiedSizeBytes
+              ? model.gguf
+              : {
+                ...(model.gguf ?? {}),
+                totalBytes: verifiedSizeBytes,
+              };
+            if (mergedGgufTotalBytes !== model.gguf) {
+              model.gguf = mergedGgufTotalBytes;
               changed = true;
             }
+          }
 
-            if (model.memoryFitConfidence !== memoryFitConfidence) {
-              model.memoryFitConfidence = memoryFitConfidence;
-              changed = true;
-            }
+          if (model.fitsInRam !== fitsInRam) {
+            model.fitsInRam = fitsInRam;
+            changed = true;
+          }
+
+          if (model.memoryFitDecision !== memoryFitDecision) {
+            model.memoryFitDecision = memoryFitDecision;
+            changed = true;
+          }
+
+          if (model.memoryFitConfidence !== memoryFitConfidence) {
+            model.memoryFitConfidence = memoryFitConfidence;
+            changed = true;
           }
         }
       }
@@ -599,41 +765,132 @@ export class LocalStorageRegistry {
       this.saveModels(models);
     }
 
-    // 2. Garbage Collection: clean up orphaned files
+    // 2. Quarantine orphaned files instead of deleting them automatically.
     try {
       const dirInfo = await FileSystem.readDirectoryAsync(modelsDir);
 
-      const completedLocalPaths = new Set(
-        models
-          .map((model) => model.localPath)
-          .filter((localPath): localPath is string => typeof localPath === 'string'),
-      );
-      const queuedFileNamesSet = new Set(queuedFileNames);
-      const privateResetPreservedFileNames = this.getPreservedModelFileNamesForCleanup(
-        dirInfo,
-        completedLocalPaths,
-      );
+      const {
+        currentSafeDirectoryFileNames,
+        protectedFileNames,
+      } = this.getProtectedModelFileNamesForCleanup(dirInfo, queuedFileNames, models);
+      const quarantinedFileNames = readQuarantinedModelFiles();
+      const entryInspectionCache = new Map<string, ModelDirectoryEntryInspection>();
+      const inspectEntry = async (fileName: string) => {
+        let inspection = entryInspectionCache.get(fileName);
+        if (!inspection) {
+          inspection = await inspectModelDirectoryEntry(modelsDir, fileName, 'orphan quarantine scan');
+          entryInspectionCache.set(fileName, inspection);
+        }
+
+        return inspection;
+      };
+      let quarantineChanged = false;
+
+      for (const fileName of Array.from(quarantinedFileNames.keys())) {
+        if (
+          !currentSafeDirectoryFileNames.has(fileName)
+          || protectedFileNames.has(fileName)
+        ) {
+          quarantinedFileNames.delete(fileName);
+          quarantineChanged = true;
+          continue;
+        }
+
+        const inspection = await inspectEntry(fileName);
+        if (inspection.kind === 'missing' || inspection.kind === 'directory') {
+          quarantinedFileNames.delete(fileName);
+          quarantineChanged = true;
+        }
+      }
 
       for (const filename of dirInfo) {
-        if (
-          completedLocalPaths.has(filename)
-          || queuedFileNamesSet.has(filename)
-          || privateResetPreservedFileNames.has(filename)
-        ) {
+        if (!currentSafeDirectoryFileNames.has(filename) || protectedFileNames.has(filename)) {
           continue;
         }
 
-        // It's neither completed nor queued -> it's a dead partial download. Delete it.
-        const fileUri = safeJoinModelPath(modelsDir, filename);
-        if (!fileUri) {
+        // It is neither completed nor queued, so hold it for explicit cleanup.
+        const inspection = await inspectEntry(filename);
+        if (inspection.kind !== 'file') {
           continue;
         }
-        console.log(`[LocalStorageRegistry] Garbage collecting orphaned file: ${filename}`);
-        await FileSystem.deleteAsync(fileUri, { idempotent: true });
+        if (!quarantinedFileNames.has(filename)) {
+          console.warn(`[LocalStorageRegistry] Quarantining orphaned model file: ${filename}`);
+          quarantinedFileNames.set(filename, {
+            fileName: filename,
+            detectedAt: Date.now(),
+            reason: 'orphaned',
+          });
+          quarantineChanged = true;
+        }
+      }
+
+      if (quarantineChanged) {
+        writeQuarantinedModelFiles(quarantinedFileNames);
       }
     } catch (e) {
-      console.warn('[LocalStorageRegistry] Garbage collection failed', e);
+      console.warn('[LocalStorageRegistry] Orphan quarantine scan failed', e);
     }
+  }
+
+  public getQuarantinedModelFileNames(): string[] {
+    return Array.from(readQuarantinedModelFiles().keys())
+      .sort((left, right) => left.localeCompare(right));
+  }
+
+  public async deleteQuarantinedModelFiles(
+    fileNames?: string[],
+    queuedFileNames: QueuedModelFileNamesInput = [],
+  ): Promise<number> {
+    const modelsDir = getModelsDir();
+    if (!modelsDir) {
+      return 0;
+    }
+
+    const dirInfo = await FileSystem.readDirectoryAsync(modelsDir);
+    const currentSafeDirectoryFileNames = normalizeModelFileNames(dirInfo);
+    const quarantinedFileNames = readQuarantinedModelFiles();
+    const requestedFileNames = fileNames
+      ? normalizeModelFileNames(fileNames)
+      : new Set(quarantinedFileNames.keys());
+    let deletedCount = 0;
+    let changed = false;
+
+    for (const fileName of requestedFileNames) {
+      if (!quarantinedFileNames.has(fileName)) {
+        continue;
+      }
+
+      const { protectedFileNames } = this.getProtectedModelFileNamesForCleanup(
+        dirInfo,
+        resolveQueuedModelFileNames(queuedFileNames),
+      );
+      if (!currentSafeDirectoryFileNames.has(fileName) || protectedFileNames.has(fileName)) {
+        quarantinedFileNames.delete(fileName);
+        changed = true;
+        continue;
+      }
+
+      const inspection = await inspectModelDirectoryEntry(modelsDir, fileName, 'quarantined model cleanup');
+      if (inspection.kind === 'missing' || inspection.kind === 'directory') {
+        quarantinedFileNames.delete(fileName);
+        changed = true;
+        continue;
+      }
+      if (inspection.kind !== 'file') {
+        continue;
+      }
+
+      await FileSystem.deleteAsync(inspection.fileUri, { idempotent: true });
+      quarantinedFileNames.delete(fileName);
+      deletedCount += 1;
+      changed = true;
+    }
+
+    if (changed) {
+      writeQuarantinedModelFiles(quarantinedFileNames);
+    }
+
+    return deletedCount;
   }
 
   /**
@@ -665,6 +922,37 @@ export class LocalStorageRegistry {
     return {
       ids: this.cachedModelIds ?? [],
       modelsById: this.cachedModelsById ?? new Map<string, ModelMetadata>(),
+    };
+  }
+
+  private getProtectedModelFileNamesForCleanup(
+    directoryFileNames: string[],
+    queuedFileNames: string[],
+    models: ModelMetadata[] = this.getModels(),
+  ): {
+    currentSafeDirectoryFileNames: Set<string>;
+    protectedFileNames: Set<string>;
+  } {
+    const currentSafeDirectoryFileNames = normalizeModelFileNames(directoryFileNames);
+    const completedLocalPaths = new Set(
+      models
+        .filter(hasCompletedLocalModelFile)
+        .map((model) => model.localPath)
+        .filter((localPath): localPath is string => isValidLocalFileName(localPath)),
+    );
+    const queuedFileNamesSet = normalizeModelFileNames(queuedFileNames);
+    const privateResetPreservedFileNames = this.getPreservedModelFileNamesForCleanup(
+      directoryFileNames,
+      completedLocalPaths,
+    );
+
+    return {
+      currentSafeDirectoryFileNames,
+      protectedFileNames: new Set([
+        ...completedLocalPaths,
+        ...queuedFileNamesSet,
+        ...privateResetPreservedFileNames,
+      ]),
     };
   }
 
@@ -752,7 +1040,7 @@ export class LocalStorageRegistry {
     let count = 0;
 
     for (const model of modelsById.values()) {
-      if (typeof model.localPath === 'string') {
+      if (hasCompletedLocalModelFile(model)) {
         count += 1;
       }
     }

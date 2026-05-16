@@ -1,7 +1,18 @@
 import type { ModelMetadata } from '../types/models';
 import { getShortModelLabel } from './modelLabel';
+import { isValidLocalFileName } from './safeFilePath';
 
-function sanitizeFileSegment(value: string, fallback: string): string {
+export function sanitizeModelFileSegment(value: string, fallback: string): string {
+  const sanitized = value
+    .trim()
+    .replace(/[^A-Za-z0-9_-]+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '');
+
+  return sanitized.length > 0 ? sanitized : fallback;
+}
+
+function sanitizePreviousModelFileSegment(value: string, fallback: string): string {
   const sanitized = value
     .trim()
     .replace(/[^A-Za-z0-9._-]+/g, '_')
@@ -26,8 +37,8 @@ export function getModelDownloadFileName(
 ): string {
   const extensionMatch = model.resolvedFileName?.match(/(\.[A-Za-z0-9]+)$/);
   const extension = extensionMatch?.[1]?.toLowerCase() ?? '.gguf';
-  const repoName = sanitizeFileSegment(getShortModelLabel(model.id) || model.id, 'model');
-  const revision = sanitizeFileSegment(model.hfRevision ?? 'main', 'main').slice(0, 16);
+  const repoName = sanitizeModelFileSegment(getShortModelLabel(model.id) || model.id, 'model');
+  const revision = sanitizeModelFileSegment(model.hfRevision ?? 'main', 'main').slice(0, 16);
   const fingerprint = hashString([
     model.id,
     model.resolvedFileName ?? '',
@@ -37,15 +48,57 @@ export function getModelDownloadFileName(
   return `${repoName}-${revision}-${fingerprint}${extension}`;
 }
 
+function getPreviousModelDownloadFileName(
+  model: Pick<ModelMetadata, 'id' | 'resolvedFileName' | 'hfRevision'>,
+): string | undefined {
+  // Keep paused downloads from earlier builds resumable after tightening filename sanitation.
+  const extensionMatch = model.resolvedFileName?.match(/(\.[A-Za-z0-9]+)$/);
+  const extension = extensionMatch?.[1]?.toLowerCase() ?? '.gguf';
+  const repoName = sanitizePreviousModelFileSegment(getShortModelLabel(model.id) || model.id, 'model');
+  const revision = sanitizePreviousModelFileSegment(model.hfRevision ?? 'main', 'main').slice(0, 16);
+  const fingerprint = hashString([
+    model.id,
+    model.resolvedFileName ?? '',
+    model.hfRevision ?? 'main',
+  ].join('::'));
+  const candidate = `${repoName}-${revision}-${fingerprint}${extension}`;
+
+  return isValidLocalFileName(candidate) ? candidate : undefined;
+}
+
+function getClassicLegacyModelDownloadFileName(modelId: string): string | undefined {
+  const legacyBase = modelId.replace(/\//g, '_');
+  const candidate = `${legacyBase}.gguf`;
+
+  return isValidLocalFileName(candidate) ? candidate : undefined;
+}
+
+function getSanitizedLegacyModelDownloadFileName(modelId: string): string {
+  const legacyBase = modelId.replace(/\//g, '_');
+  const sanitizedBase = sanitizeModelFileSegment(legacyBase, 'model');
+  const candidate = `${sanitizedBase}.gguf`;
+
+  if (sanitizedBase === legacyBase && isValidLocalFileName(candidate)) {
+    return candidate;
+  }
+
+  return `${sanitizedBase}-${hashString(modelId)}.gguf`;
+}
+
 export function getLegacyModelDownloadFileName(modelId: string): string {
-  return `${modelId.replace(/\//g, '_')}.gguf`;
+  return getClassicLegacyModelDownloadFileName(modelId) ?? getSanitizedLegacyModelDownloadFileName(modelId);
 }
 
 export function getCandidateModelDownloadFileNames(
   model: Pick<ModelMetadata, 'id' | 'resolvedFileName' | 'hfRevision'>,
 ): string[] {
+  const previousGeneratedName = getPreviousModelDownloadFileName(model);
+  const classicLegacyName = getClassicLegacyModelDownloadFileName(model.id);
+
   return Array.from(new Set([
     getModelDownloadFileName(model),
-    getLegacyModelDownloadFileName(model.id),
-  ]));
+    ...(previousGeneratedName ? [previousGeneratedName] : []),
+    ...(classicLegacyName ? [classicLegacyName] : []),
+    getSanitizedLegacyModelDownloadFileName(model.id),
+  ])).filter(isValidLocalFileName);
 }

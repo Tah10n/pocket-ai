@@ -127,6 +127,7 @@ function getStatusWeight(status: LifecycleStatus): number {
     || status === LifecycleStatus.QUEUED
     || status === LifecycleStatus.VERIFYING
     || status === LifecycleStatus.PAUSED
+    || status === LifecycleStatus.FAILED
   ) return 1;
   return 0;
 }

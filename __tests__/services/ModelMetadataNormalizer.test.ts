@@ -41,6 +41,81 @@ describe('ModelMetadataNormalizer', () => {
     expect(normalized.hasVerifiedContextWindow).toBe(true);
   });
 
+  it('preserves valid local download integrity markers', () => {
+    const normalized = normalizePersistedModelMetadata({
+      id: 'legacy/model',
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      localPath: 'legacy_model.gguf',
+      downloadIntegrity: {
+        kind: 'size',
+        sizeBytes: 2048,
+        checkedAt: 10,
+      },
+    });
+
+    expect(normalized.downloadIntegrity).toEqual({
+      kind: 'size',
+      sizeBytes: 2048,
+      checkedAt: 10,
+    });
+  });
+
+  it('drops invalid sha integrity markers without a digest', () => {
+    const normalized = normalizePersistedModelMetadata({
+      id: 'legacy/model',
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      downloadIntegrity: {
+        kind: 'sha256',
+        sizeBytes: 2048,
+        checkedAt: 10,
+      },
+    });
+
+    expect(normalized.downloadIntegrity).toBeUndefined();
+  });
+
+  it('drops unsafe persisted local paths', () => {
+    const normalized = normalizePersistedModelMetadata({
+      id: 'legacy/model',
+      localPath: '../escape.gguf',
+    });
+
+    expect(normalized.localPath).toBeUndefined();
+  });
+
+  it('resets downloaded state when persisted local paths are unsafe', () => {
+    const normalized = normalizePersistedModelMetadata({
+      id: 'legacy/model',
+      localPath: '../escape.gguf',
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      downloadedAt: 123,
+      metadataTrust: 'verified_local',
+      resumeData: JSON.stringify({ resumeData: 'stale-resume-data' }),
+      downloadErrorAt: 456,
+      downloadErrorCode: 'download_http_error',
+      downloadErrorMessage: 'HTTP status 500',
+      downloadIntegrity: {
+        kind: 'size',
+        sizeBytes: 2048,
+        checkedAt: 10,
+      },
+    });
+
+    expect(normalized.localPath).toBeUndefined();
+    expect(normalized.lifecycleStatus).toBe(LifecycleStatus.AVAILABLE);
+    expect(normalized.downloadProgress).toBe(0);
+    expect(normalized.downloadedAt).toBeUndefined();
+    expect(normalized.metadataTrust).toBeUndefined();
+    expect(normalized.downloadIntegrity).toBeUndefined();
+    expect(normalized.resumeData).toBeUndefined();
+    expect(normalized.downloadErrorAt).toBeUndefined();
+    expect(normalized.downloadErrorCode).toBeUndefined();
+    expect(normalized.downloadErrorMessage).toBeUndefined();
+  });
+
   it('preserves prefixed GGUF metadata keys needed by memory-fit estimation', () => {
     const normalized = normalizePersistedModelMetadata({
       id: 'llama/model',

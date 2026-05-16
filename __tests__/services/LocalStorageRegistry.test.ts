@@ -120,6 +120,30 @@ describe('LocalStorageRegistry', () => {
     expect(mockStorage.remove).toHaveBeenCalledWith('models-registry:index-v1');
   });
 
+  it('should remove model metadata without deleting a directory localPath', async () => {
+    const model = createMockModel({ localPath: 'nested-cache' });
+    mockStorage.getString.mockImplementation((key: string) => {
+      if (key === 'models-registry:index-v1') {
+        return JSON.stringify([model.id]);
+      }
+
+      if (key === 'models-registry:model-v1:test%2Fmodel') {
+        return JSON.stringify(model);
+      }
+
+      return null;
+    });
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValueOnce({ exists: true, isDirectory: true });
+
+    await registry.removeModel(model.id);
+
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalled();
+    expect(mockStorage.remove).toHaveBeenCalledWith('models-registry:model-v1:test%2Fmodel');
+    expect(consoleWarnSpy).toHaveBeenCalledWith(
+      '[LocalStorageRegistry] Local path for test/model points to a directory, skipping file deletion',
+    );
+  });
+
   it('should validate registry and reset status if file is missing', async () => {
     (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([createMockModel()]);
     (registry.saveModels as jest.Mock) = jest.fn();
@@ -131,6 +155,103 @@ describe('LocalStorageRegistry', () => {
     const updatedModels = (registry.saveModels as jest.Mock).mock.calls[0][0];
     expect(updatedModels[0].lifecycleStatus).toBe(LifecycleStatus.AVAILABLE);
     expect(updatedModels[0].localPath).toBeUndefined();
+  });
+
+  it('should reset downloaded models whose local path points to a directory', async () => {
+    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([
+      createMockModel({ localPath: 'nested-cache' }),
+    ]);
+    (registry.saveModels as jest.Mock) = jest.fn();
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: true, isDirectory: true });
+
+    await registry.validateRegistry();
+
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalled();
+    expect(registry.saveModels).toHaveBeenCalled();
+    const updatedModels = (registry.saveModels as jest.Mock).mock.calls[0][0];
+    expect(updatedModels[0].lifecycleStatus).toBe(LifecycleStatus.AVAILABLE);
+    expect(updatedModels[0].localPath).toBeUndefined();
+  });
+
+  it('should reset downloaded models that no longer have a local path', async () => {
+    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([
+      createMockModel({
+        localPath: undefined,
+        downloadedAt: 123,
+        downloadIntegrity: {
+          kind: 'size',
+          sizeBytes: 1000,
+          checkedAt: 10,
+        },
+        metadataTrust: 'verified_local',
+        downloadProgress: 1,
+        resumeData: 'stale-resume-data',
+        downloadErrorAt: 456,
+        downloadErrorCode: 'download_http_error',
+        downloadErrorMessage: 'HTTP status 500',
+      }),
+    ]);
+    (registry.saveModels as jest.Mock) = jest.fn();
+
+    await registry.validateRegistry();
+
+    expect(FileSystem.getInfoAsync).not.toHaveBeenCalled();
+    expect(registry.saveModels).toHaveBeenCalled();
+    const updatedModels = (registry.saveModels as jest.Mock).mock.calls[0][0];
+    expect(updatedModels[0].lifecycleStatus).toBe(LifecycleStatus.AVAILABLE);
+    expect(updatedModels[0].localPath).toBeUndefined();
+    expect(updatedModels[0].downloadedAt).toBeUndefined();
+    expect(updatedModels[0].downloadIntegrity).toBeUndefined();
+    expect(updatedModels[0].metadataTrust).toBeUndefined();
+    expect(updatedModels[0].downloadProgress).toBe(0);
+    expect(updatedModels[0].resumeData).toBeUndefined();
+    expect(updatedModels[0].downloadErrorAt).toBeUndefined();
+    expect(updatedModels[0].downloadErrorCode).toBeUndefined();
+    expect(updatedModels[0].downloadErrorMessage).toBeUndefined();
+  });
+
+  it('clears stale local paths for non-downloaded registry entries before quarantine scans', async () => {
+    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([
+      createMockModel({
+        lifecycleStatus: LifecycleStatus.AVAILABLE,
+        localPath: 'stale.gguf',
+        downloadedAt: 123,
+        downloadIntegrity: {
+          kind: 'size',
+          sizeBytes: 1000,
+          checkedAt: 10,
+        },
+        metadataTrust: 'verified_local',
+        downloadProgress: 1,
+        resumeData: 'stale-resume-data',
+        downloadErrorAt: 456,
+        downloadErrorCode: 'download_http_error',
+        downloadErrorMessage: 'HTTP status 500',
+      }),
+    ]);
+    (registry.saveModels as jest.Mock) = jest.fn();
+    (FileSystem.readDirectoryAsync as jest.Mock).mockResolvedValueOnce(['stale.gguf']);
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: true, size: 1000 });
+
+    await registry.validateRegistry();
+
+    expect(registry.saveModels).toHaveBeenCalled();
+    const updatedModels = (registry.saveModels as jest.Mock).mock.calls[0][0];
+    expect(updatedModels[0].lifecycleStatus).toBe(LifecycleStatus.AVAILABLE);
+    expect(updatedModels[0].localPath).toBeUndefined();
+    expect(updatedModels[0].downloadedAt).toBeUndefined();
+    expect(updatedModels[0].downloadIntegrity).toBeUndefined();
+    expect(updatedModels[0].metadataTrust).toBeUndefined();
+    expect(updatedModels[0].downloadProgress).toBe(0);
+    expect(updatedModels[0].resumeData).toBeUndefined();
+    expect(updatedModels[0].downloadErrorAt).toBeUndefined();
+    expect(updatedModels[0].downloadErrorCode).toBeUndefined();
+    expect(updatedModels[0].downloadErrorMessage).toBeUndefined();
+
+    const quarantinePayload = mockStorage.set.mock.calls.find(
+      ([key]) => key === 'quarantined-model-files-v1',
+    )?.[1];
+    expect(quarantinePayload).toEqual(expect.stringContaining('stale.gguf'));
   });
 
   it('should normalize persisted active models back to downloaded on bootstrap', async () => {
@@ -161,6 +282,35 @@ describe('LocalStorageRegistry', () => {
     expect(updatedModels[0].fitsInRam).toBe(false);
     expect(updatedModels[0].metadataTrust).toBe('verified_local');
     expect(updatedModels[0].gguf).toEqual(expect.objectContaining({ totalBytes: 2048 }));
+  });
+
+  it('resets downloaded state when the local file no longer matches its integrity marker size', async () => {
+    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([
+      createMockModel({
+        size: 1000,
+        downloadedAt: 123,
+        downloadIntegrity: {
+          kind: 'size',
+          sizeBytes: 1000,
+          checkedAt: 10,
+        },
+        metadataTrust: 'verified_local',
+        downloadProgress: 1,
+      }),
+    ]);
+    (registry.saveModels as jest.Mock) = jest.fn();
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: true, size: 999 });
+
+    await registry.validateRegistry();
+
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalled();
+    const updatedModels = (registry.saveModels as jest.Mock).mock.calls[0][0];
+    expect(updatedModels[0].lifecycleStatus).toBe(LifecycleStatus.AVAILABLE);
+    expect(updatedModels[0].localPath).toBeUndefined();
+    expect(updatedModels[0].downloadedAt).toBeUndefined();
+    expect(updatedModels[0].downloadIntegrity).toBeUndefined();
+    expect(updatedModels[0].metadataTrust).toBeUndefined();
+    expect(updatedModels[0].downloadProgress).toBe(0);
   });
 
   it('recomputes fitsInRam for downloaded models when legacy persisted metadata is missing the flag', async () => {
@@ -530,6 +680,54 @@ describe('LocalStorageRegistry', () => {
     expect(mockStorage.set).not.toHaveBeenCalledWith('models-registry', expect.anything());
   });
 
+  it('updates the downloaded count only for completed local model files', () => {
+    const freshRegistry = new (LocalStorageRegistry as any)();
+    (freshRegistry as any).storage = mockStorage;
+
+    freshRegistry.updateModel(createMockModel({
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      localPath: 'stale.gguf',
+    }));
+    expect(freshRegistry.getDownloadedModelsCount()).toBe(0);
+
+    freshRegistry.updateModel(createMockModel({
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      localPath: 'model.gguf',
+    }));
+    expect(freshRegistry.getDownloadedModelsCount()).toBe(1);
+
+    freshRegistry.updateModel(createMockModel({
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      localPath: 'model.gguf',
+    }));
+    expect(freshRegistry.getDownloadedModelsCount()).toBe(0);
+  });
+
+  it('does not count stale available localPath metadata as a downloaded model', () => {
+    const staleModel = createMockModel({
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      localPath: 'stale.gguf',
+    });
+    mockStorage.getString.mockImplementation((key: string) => {
+      if (key === 'models-registry:index-v1') {
+        return JSON.stringify([staleModel.id]);
+      }
+
+      if (key === 'models-registry:model-v1:test%2Fmodel') {
+        return JSON.stringify(staleModel);
+      }
+
+      return null;
+    });
+
+    const freshRegistry = new (LocalStorageRegistry as any)();
+    (freshRegistry as any).storage = mockStorage;
+
+    expect(freshRegistry.getModel(staleModel.id)?.localPath).toBe('stale.gguf');
+    expect(freshRegistry.getDownloadedModelsCount()).toBe(0);
+    expect(freshRegistry.hasAnyDownloadedModels()).toBe(false);
+  });
+
   it('migrates the legacy array registry into index + per-model keys', () => {
     mockStorage.getAllKeys.mockReturnValue(['models-registry:model-v1:stale%2Fmodel']);
     mockStorage.getString.mockImplementation((key: string) => {
@@ -597,6 +795,23 @@ describe('LocalStorageRegistry', () => {
       (isolatedRegistry.getModels as jest.Mock) = jest.fn().mockReturnValue([
         createMockModel({ lifecycleStatus: LifecycleStatus.DOWNLOADED, localPath: 'model.gguf' }),
         createMockModel({ id: 'test/active', lifecycleStatus: LifecycleStatus.ACTIVE, localPath: 'active.gguf' }),
+        createMockModel({
+          id: 'test/stale',
+          lifecycleStatus: LifecycleStatus.AVAILABLE,
+          localPath: 'stale.gguf',
+          downloadedAt: 123,
+          downloadIntegrity: {
+            kind: 'size',
+            sizeBytes: 1000,
+            checkedAt: 10,
+          },
+          metadataTrust: 'verified_local',
+          downloadProgress: 1,
+          resumeData: 'stale-resume-data',
+          downloadErrorAt: 456,
+          downloadErrorCode: 'download_http_error',
+          downloadErrorMessage: 'HTTP status 500',
+        }),
       ]);
       (isolatedRegistry.saveModels as jest.Mock) = jest.fn();
 
@@ -609,13 +824,23 @@ describe('LocalStorageRegistry', () => {
         expect(updatedModels[0].lifecycleStatus).toBe(LifecycleStatus.AVAILABLE);
         expect(updatedModels[1].localPath).toBeUndefined();
         expect(updatedModels[1].lifecycleStatus).toBe(LifecycleStatus.AVAILABLE);
+        expect(updatedModels[2].localPath).toBeUndefined();
+        expect(updatedModels[2].lifecycleStatus).toBe(LifecycleStatus.AVAILABLE);
+        expect(updatedModels[2].downloadedAt).toBeUndefined();
+        expect(updatedModels[2].downloadIntegrity).toBeUndefined();
+        expect(updatedModels[2].metadataTrust).toBeUndefined();
+        expect(updatedModels[2].downloadProgress).toBe(0);
+        expect(updatedModels[2].resumeData).toBeUndefined();
+        expect(updatedModels[2].downloadErrorAt).toBeUndefined();
+        expect(updatedModels[2].downloadErrorCode).toBeUndefined();
+        expect(updatedModels[2].downloadErrorMessage).toBeUndefined();
       })();
     });
 
     await promise;
   });
 
-  it('garbage collects orphaned files while preserving completed and queued ones', async () => {
+  it('quarantines orphaned files while preserving completed and queued ones', async () => {
     (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([
       createMockModel({ localPath: 'keep.gguf', lifecycleStatus: LifecycleStatus.DOWNLOADED }),
     ]);
@@ -629,9 +854,235 @@ describe('LocalStorageRegistry', () => {
 
     await registry.validateRegistry(['queued.gguf']);
 
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalled();
+    const quarantinePayload = mockStorage.set.mock.calls.find(
+      ([key]) => key === 'quarantined-model-files-v1',
+    )?.[1];
+    expect(quarantinePayload).toEqual(expect.stringContaining('orphan.gguf'));
+    expect(quarantinePayload).not.toEqual(expect.stringContaining('keep.gguf'));
+    expect(quarantinePayload).not.toEqual(expect.stringContaining('queued.gguf'));
+  });
+
+  it('does not quarantine model directory subdirectories', async () => {
+    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([]);
+    (FileSystem.readDirectoryAsync as jest.Mock).mockResolvedValueOnce([
+      'orphan.gguf',
+      'nested-cache',
+    ]);
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => ({
+      exists: true,
+      isDirectory: uri.endsWith('/nested-cache'),
+    }));
+
+    await registry.validateRegistry();
+
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalled();
+    const quarantinePayload = mockStorage.set.mock.calls.find(
+      ([key]) => key === 'quarantined-model-files-v1',
+    )?.[1];
+    expect(quarantinePayload).toEqual(expect.stringContaining('orphan.gguf'));
+    expect(quarantinePayload).not.toEqual(expect.stringContaining('nested-cache'));
+  });
+
+  it('deletes quarantined model files only through explicit cleanup', async () => {
+    mockStorage.getString.mockImplementation((key: string) => (
+      key === 'quarantined-model-files-v1'
+        ? JSON.stringify({
+          files: [
+            { fileName: 'orphan.gguf', detectedAt: 1, reason: 'orphaned' },
+            { fileName: 'keep.gguf', detectedAt: 2, reason: 'orphaned' },
+          ],
+        })
+        : null
+    ));
+    (FileSystem.readDirectoryAsync as jest.Mock).mockResolvedValueOnce([
+      'orphan.gguf',
+      'keep.gguf',
+    ]);
+
+    await expect(registry.deleteQuarantinedModelFiles(['orphan.gguf'])).resolves.toBe(1);
+
     expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/models/orphan.gguf', { idempotent: true });
     expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/models/keep.gguf', expect.anything());
+    const nextPayload = mockStorage.set.mock.calls.find(
+      ([key]) => key === 'quarantined-model-files-v1',
+    )?.[1];
+    expect(nextPayload).toEqual(expect.stringContaining('keep.gguf'));
+    expect(nextPayload).not.toEqual(expect.stringContaining('orphan.gguf'));
+  });
+
+  it('rechecks queued filenames before each quarantined file deletion', async () => {
+    mockStorage.getString.mockImplementation((key: string) => (
+      key === 'quarantined-model-files-v1'
+        ? JSON.stringify({
+          files: [
+            { fileName: 'first.gguf', detectedAt: 1, reason: 'orphaned' },
+            { fileName: 'second.gguf', detectedAt: 2, reason: 'orphaned' },
+          ],
+        })
+        : null
+    ));
+    (FileSystem.readDirectoryAsync as jest.Mock).mockResolvedValueOnce([
+      'first.gguf',
+      'second.gguf',
+    ]);
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: true, isDirectory: false, size: 1024 });
+    const getQueuedFileNames = jest.fn()
+      .mockReturnValueOnce([])
+      .mockReturnValueOnce(['second.gguf']);
+
+    await expect(
+      registry.deleteQuarantinedModelFiles(['first.gguf', 'second.gguf'], getQueuedFileNames),
+    ).resolves.toBe(1);
+
+    expect(getQueuedFileNames).toHaveBeenCalledTimes(2);
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/models/first.gguf', { idempotent: true });
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/models/second.gguf', expect.anything());
+    const nextPayload = mockStorage.set.mock.calls.find(
+      ([key]) => key === 'quarantined-model-files-v1',
+    )?.[1];
+    expect(nextPayload).not.toEqual(expect.stringContaining('first.gguf'));
+    expect(nextPayload).not.toEqual(expect.stringContaining('second.gguf'));
+  });
+
+  it('removes quarantined directory markers without deleting directories', async () => {
+    mockStorage.getString.mockImplementation((key: string) => (
+      key === 'quarantined-model-files-v1'
+        ? JSON.stringify({
+          files: [
+            { fileName: 'nested-cache', detectedAt: 1, reason: 'orphaned' },
+            { fileName: 'orphan.gguf', detectedAt: 2, reason: 'orphaned' },
+          ],
+        })
+        : null
+    ));
+    (FileSystem.readDirectoryAsync as jest.Mock).mockResolvedValueOnce([
+      'nested-cache',
+      'orphan.gguf',
+    ]);
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => ({
+      exists: true,
+      isDirectory: uri.endsWith('/nested-cache'),
+    }));
+
+    await expect(registry.deleteQuarantinedModelFiles(['nested-cache'])).resolves.toBe(0);
+
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/models/nested-cache', expect.anything());
+    const nextPayload = mockStorage.set.mock.calls.find(
+      ([key]) => key === 'quarantined-model-files-v1',
+    )?.[1];
+    expect(nextPayload).toEqual(expect.stringContaining('orphan.gguf'));
+    expect(nextPayload).not.toEqual(expect.stringContaining('nested-cache'));
+  });
+
+  it('keeps quarantined markers when file inspection fails during cleanup', async () => {
+    const inspectError = new Error('stat failed');
+    mockStorage.getString.mockImplementation((key: string) => (
+      key === 'quarantined-model-files-v1'
+        ? JSON.stringify({
+          files: [
+            { fileName: 'orphan.gguf', detectedAt: 1, reason: 'orphaned' },
+          ],
+        })
+        : null
+    ));
+    (FileSystem.readDirectoryAsync as jest.Mock).mockResolvedValueOnce(['orphan.gguf']);
+    (FileSystem.getInfoAsync as jest.Mock).mockRejectedValueOnce(inspectError);
+
+    await expect(registry.deleteQuarantinedModelFiles(['orphan.gguf'])).resolves.toBe(0);
+
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalled();
+    expect(mockStorage.set).not.toHaveBeenCalledWith('quarantined-model-files-v1', expect.anything());
+    expect(mockStorage.remove).not.toHaveBeenCalledWith('quarantined-model-files-v1');
+    expect(consoleWarnSpy).toHaveBeenCalledWith(
+      '[LocalStorageRegistry] Failed to inspect model directory entry during quarantined model cleanup: orphan.gguf',
+      inspectError,
+    );
+  });
+
+  it('does not delete quarantined model files when the directory cannot be scanned', async () => {
+    const scanError = new Error('scan failed');
+    mockStorage.getString.mockImplementation((key: string) => (
+      key === 'quarantined-model-files-v1'
+        ? JSON.stringify({
+          files: [
+            { fileName: 'queued.gguf', detectedAt: 1, reason: 'orphaned' },
+            { fileName: 'orphan.gguf', detectedAt: 2, reason: 'orphaned' },
+          ],
+        })
+        : null
+    ));
+    (FileSystem.readDirectoryAsync as jest.Mock).mockRejectedValueOnce(scanError);
+
+    await expect(registry.deleteQuarantinedModelFiles(undefined, ['queued.gguf'])).rejects.toBe(scanError);
+
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalled();
+    expect(mockStorage.set).not.toHaveBeenCalledWith('quarantined-model-files-v1', expect.anything());
+    expect(mockStorage.remove).not.toHaveBeenCalledWith('quarantined-model-files-v1');
+  });
+
+  it('keeps queued and completed files safe during final quarantine deletion', async () => {
+    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([
+      createMockModel({ localPath: 'keep.gguf', lifecycleStatus: LifecycleStatus.DOWNLOADED }),
+    ]);
+    mockStorage.getString.mockImplementation((key: string) => (
+      key === 'quarantined-model-files-v1'
+        ? JSON.stringify({
+          files: [
+            { fileName: 'queued.gguf', detectedAt: 1, reason: 'orphaned' },
+            { fileName: 'keep.gguf', detectedAt: 2, reason: 'orphaned' },
+            { fileName: 'orphan.gguf', detectedAt: 3, reason: 'orphaned' },
+          ],
+        })
+        : null
+    ));
+    (FileSystem.readDirectoryAsync as jest.Mock).mockResolvedValueOnce([
+      'queued.gguf',
+      'keep.gguf',
+      'orphan.gguf',
+    ]);
+
+    await expect(registry.deleteQuarantinedModelFiles(undefined, ['queued.gguf'])).resolves.toBe(1);
+
+    expect(FileSystem.deleteAsync).toHaveBeenCalledTimes(1);
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/models/orphan.gguf', { idempotent: true });
     expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/models/queued.gguf', expect.anything());
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/models/keep.gguf', expect.anything());
+    expect(mockStorage.remove).toHaveBeenCalledWith('quarantined-model-files-v1');
+  });
+
+  it('keeps private-reset-preserved files safe during final quarantine deletion', async () => {
+    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([]);
+    mockStorage.getString.mockImplementation((key: string) => {
+      if (key === 'private-reset-preserved-model-files-v1') {
+        return JSON.stringify({
+          fileNames: ['preserved.gguf'],
+          scanComplete: true,
+        });
+      }
+
+      if (key === 'quarantined-model-files-v1') {
+        return JSON.stringify({
+          files: [
+            { fileName: 'preserved.gguf', detectedAt: 1, reason: 'orphaned' },
+            { fileName: 'orphan.gguf', detectedAt: 2, reason: 'orphaned' },
+          ],
+        });
+      }
+
+      return null;
+    });
+    (FileSystem.readDirectoryAsync as jest.Mock).mockResolvedValueOnce([
+      'preserved.gguf',
+      'orphan.gguf',
+    ]);
+
+    await expect(registry.deleteQuarantinedModelFiles()).resolves.toBe(1);
+
+    expect(FileSystem.deleteAsync).toHaveBeenCalledTimes(1);
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/models/orphan.gguf', { idempotent: true });
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/models/preserved.gguf', expect.anything());
+    expect(mockStorage.remove).toHaveBeenCalledWith('quarantined-model-files-v1');
   });
 
   it('preserves model files that existed before a private storage reset', async () => {
@@ -650,7 +1101,11 @@ describe('LocalStorageRegistry', () => {
 
     await registry.validateRegistry([]);
 
-    expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/models/new-orphan.gguf', { idempotent: true });
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalled();
+    const quarantinePayload = mockStorage.set.mock.calls.find(
+      ([key]) => key === 'quarantined-model-files-v1',
+    )?.[1];
+    expect(quarantinePayload).toEqual(expect.stringContaining('new-orphan.gguf'));
     expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/models/pre-reset.gguf', expect.anything());
     expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/models/../bad', expect.anything());
   });

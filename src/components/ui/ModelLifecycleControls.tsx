@@ -72,7 +72,11 @@ export function ModelDownloadProgress({
   model: Pick<ModelMetadata, 'id' | 'downloadProgress' | 'lifecycleStatus'>;
   className?: string;
 }) {
-  if (!isModelDownloading(model) && model.lifecycleStatus !== LifecycleStatus.PAUSED) {
+  if (
+    !isModelDownloading(model)
+    && model.lifecycleStatus !== LifecycleStatus.PAUSED
+    && model.lifecycleStatus !== LifecycleStatus.FAILED
+  ) {
     return null;
   }
 
@@ -165,8 +169,16 @@ function ModelDownloadProgressInner({
 function getDownloadProgressPresentation(lifecycleStatus: LifecycleStatus, t: (key: string) => string): {
   iconName: MaterialSymbolName;
   label: string;
-  progressTone: 'neutral' | 'primary' | 'success' | 'warning';
+  progressTone: 'neutral' | 'primary' | 'success' | 'warning' | 'error';
 } {
+  if (lifecycleStatus === LifecycleStatus.FAILED) {
+    return {
+      iconName: 'error-outline',
+      label: t('models.downloadFailed'),
+      progressTone: 'error',
+    };
+  }
+
   if (lifecycleStatus === LifecycleStatus.VERIFYING) {
     return {
       iconName: 'check-circle',
@@ -235,6 +247,15 @@ export function ModelLifecycleActionRow({
         )
       ) : null}
 
+      {model.lifecycleStatus === LifecycleStatus.FAILED ? (
+        <ActionPill
+          label={t('models.retryDownload')}
+          tone="primary"
+          onPress={() => onDownload(model)}
+          className={pillClassName}
+        />
+      ) : null}
+
       {model.lifecycleStatus === LifecycleStatus.PAUSED ? (
         <ActionPill
           label={t('models.resume')}
@@ -244,7 +265,9 @@ export function ModelLifecycleActionRow({
         />
       ) : null}
 
-      {isModelDownloading(model) || model.lifecycleStatus === LifecycleStatus.PAUSED ? (
+      {isModelDownloading(model)
+      || model.lifecycleStatus === LifecycleStatus.PAUSED
+      || model.lifecycleStatus === LifecycleStatus.FAILED ? (
         <ActionPill
           label={t('models.cancel')}
           onPress={() => onCancel(model.id)}

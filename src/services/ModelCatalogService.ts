@@ -1643,8 +1643,12 @@ export class ModelCatalogService {
         remoteModel.lifecycleStatus !== LifecycleStatus.AVAILABLE
         || typeof remoteModel.localPath === 'string'
         || typeof remoteModel.downloadedAt === 'number'
+        || typeof remoteModel.downloadIntegrity === 'object'
         || remoteModel.downloadProgress > 0
         || typeof remoteModel.resumeData === 'string'
+        || typeof remoteModel.downloadErrorAt === 'number'
+        || typeof remoteModel.downloadErrorCode === 'string'
+        || typeof remoteModel.downloadErrorMessage === 'string'
       );
 
       const sanitized = needsRuntimeReset
@@ -1652,7 +1656,11 @@ export class ModelCatalogService {
             ...remoteModel,
             localPath: undefined,
             downloadedAt: undefined,
+            downloadIntegrity: undefined,
             resumeData: undefined,
+            downloadErrorAt: undefined,
+            downloadErrorCode: undefined,
+            downloadErrorMessage: undefined,
             downloadProgress: 0,
             lifecycleStatus: LifecycleStatus.AVAILABLE,
           })
@@ -1692,6 +1700,7 @@ export class ModelCatalogService {
       downloadedAt: localModel.downloadedAt,
       lastModifiedAt: remoteModel.lastModifiedAt ?? localModel.lastModifiedAt,
       sha256: remoteModel.sha256 ?? localModel.sha256,
+      downloadIntegrity: localModel.downloadIntegrity,
       metadataTrust,
       gguf,
       fitsInRam,
@@ -1703,6 +1712,9 @@ export class ModelCatalogService {
       lifecycleStatus: localModel.lifecycleStatus,
       downloadProgress: localModel.downloadProgress,
       resumeData: localModel.resumeData,
+      downloadErrorAt: localModel.downloadErrorAt,
+      downloadErrorCode: localModel.downloadErrorCode,
+      downloadErrorMessage: localModel.downloadErrorMessage,
       maxContextTokens,
       hasVerifiedContextWindow,
       parameterSizeLabel: remoteModel.parameterSizeLabel ?? localModel.parameterSizeLabel,

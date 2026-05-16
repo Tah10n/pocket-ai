@@ -6,6 +6,7 @@ import { StorageManagerScreen } from '../../src/ui/screens/StorageManagerScreen'
 import {
   clearActiveCache,
   clearChatHistory,
+  cleanupQuarantinedModelFiles,
   getAppStorageMetrics,
   resetAppSettings,
 } from '../../src/services/StorageManagerService';
@@ -32,9 +33,15 @@ jest.mock('../../src/services/HardwareListenerService', () => ({
 jest.mock('../../src/services/StorageManagerService', () => ({
   clearActiveCache: jest.fn(() => Promise.resolve(0)),
   clearChatHistory: jest.fn(() => Promise.resolve(0)),
+  cleanupQuarantinedModelFiles: jest.fn(() => Promise.resolve(0)),
   getAppStorageMetrics: jest.fn(() => Promise.resolve({
     downloadedModels: [],
     modelsBytes: 0,
+    quarantinedModelFiles: {
+      fileNames: [],
+      count: 0,
+      bytes: 0,
+    },
     cacheBytes: 0,
     chatHistoryBytes: 0,
     settingsBytes: 0,
@@ -57,6 +64,7 @@ jest.mock('../../src/components/ui/MaterialSymbols', () => {
 
 const mockClearActiveCache = clearActiveCache as jest.MockedFunction<typeof clearActiveCache>;
 const mockClearChatHistory = clearChatHistory as jest.MockedFunction<typeof clearChatHistory>;
+const mockCleanupQuarantinedModelFiles = cleanupQuarantinedModelFiles as jest.MockedFunction<typeof cleanupQuarantinedModelFiles>;
 const mockGetAppStorageMetrics = getAppStorageMetrics as jest.MockedFunction<typeof getAppStorageMetrics>;
 const mockResetAppSettings = resetAppSettings as jest.MockedFunction<typeof resetAppSettings>;
 
@@ -84,10 +92,28 @@ describe('StorageManagerScreen', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockCanGoBack = true;
+    mockGetAppStorageMetrics.mockResolvedValue({
+      downloadedModels: [],
+      modelsBytes: 0,
+      quarantinedModelFiles: {
+        fileNames: [],
+        count: 0,
+        bytes: 0,
+      },
+      cacheBytes: 0,
+      chatHistoryBytes: 0,
+      settingsBytes: 0,
+      appFilesBytes: 0,
+      activeModelEstimateBytes: 0,
+      activeModelId: null,
+    });
+    mockCleanupQuarantinedModelFiles.mockResolvedValue(0);
   });
 
   it('navigates back when possible', async () => {
     const { getByTestId } = await renderScreen();
+
+    expect(mockGetAppStorageMetrics).toHaveBeenCalledWith({ refreshModelFileQuarantine: true });
 
     fireEvent.press(getByTestId('storage-manager-back-button'));
 
@@ -143,6 +169,46 @@ describe('StorageManagerScreen', () => {
     });
 
     expect(mockClearChatHistory).toHaveBeenCalledTimes(1);
+    alertSpy.mockRestore();
+  });
+
+  it('confirms and cleans up quarantined model files', async () => {
+    mockGetAppStorageMetrics.mockResolvedValue({
+      downloadedModels: [],
+      modelsBytes: 0,
+      quarantinedModelFiles: {
+        fileNames: ['orphan.gguf'],
+        count: 1,
+        bytes: 2048,
+      },
+      cacheBytes: 0,
+      chatHistoryBytes: 0,
+      settingsBytes: 0,
+      appFilesBytes: 2048,
+      activeModelEstimateBytes: 0,
+      activeModelId: null,
+    });
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    const { getByTestId } = await renderScreen();
+
+    fireEvent.press(getByTestId('storage-manager-cleanup-quarantine'));
+
+    expect(alertSpy).toHaveBeenCalledWith(
+      'storageManager.clearQuarantineTitle',
+      'storageManager.clearQuarantineMessage',
+      expect.any(Array),
+    );
+
+    const actions = alertSpy.mock.calls[0]?.[2] as any[];
+    await act(async () => {
+      actions[1].onPress();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(mockCleanupQuarantinedModelFiles).toHaveBeenCalledTimes(1);
+    expect(mockGetAppStorageMetrics).toHaveBeenCalled();
+
     alertSpy.mockRestore();
   });
 

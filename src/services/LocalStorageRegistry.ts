@@ -12,6 +12,7 @@ import type { CalibrationRecord } from '../memory/types';
 const REGISTRY_STORAGE_ID = 'models-registry';
 const MODEL_FILE_PRESERVATION_STORAGE_ID = 'model-file-preservation';
 const PRIVATE_RESET_PRESERVED_MODEL_FILES_KEY = 'private-reset-preserved-model-files-v1';
+const QUARANTINED_MODEL_FILES_KEY = 'quarantined-model-files-v1';
 
 // Legacy format: one JSON array stored under the same key as the MMKV instance id.
 const LEGACY_MODELS_KEY = REGISTRY_STORAGE_ID;
@@ -28,6 +29,12 @@ let modelFilePreservationStorage: MMKV | null = null;
 type PrivateResetModelFilePreservationState = {
   fileNames: Set<string>;
   scanComplete: boolean;
+};
+
+type QuarantinedModelFile = {
+  fileName: string;
+  detectedAt: number;
+  reason: 'orphaned';
 };
 
 function cloneCalibrationRecord(record: CalibrationRecord): CalibrationRecord {
@@ -103,6 +110,61 @@ function writePrivateResetPreservedModelFiles(state: PrivateResetModelFilePreser
       scanComplete: state.scanComplete,
       updatedAt: Date.now(),
     }),
+  );
+}
+
+function readQuarantinedModelFiles(): Map<string, QuarantinedModelFile> {
+  const raw = getModelFilePreservationStorage().getString(QUARANTINED_MODEL_FILES_KEY);
+  if (!raw) {
+    return new Map();
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    const entries = Array.isArray(parsed)
+      ? parsed
+      : parsed && typeof parsed === 'object' && Array.isArray((parsed as { files?: unknown }).files)
+        ? (parsed as { files: unknown[] }).files
+        : [];
+
+    const quarantined = new Map<string, QuarantinedModelFile>();
+    for (const entry of entries) {
+      if (!entry || typeof entry !== 'object') {
+        continue;
+      }
+
+      const record = entry as Record<string, unknown>;
+      const fileName = record.fileName;
+      if (!isValidLocalFileName(fileName)) {
+        continue;
+      }
+
+      const detectedAt = typeof record.detectedAt === 'number' && Number.isFinite(record.detectedAt)
+        ? Math.max(0, Math.round(record.detectedAt))
+        : Date.now();
+      quarantined.set(fileName, { fileName, detectedAt, reason: 'orphaned' });
+    }
+
+    return quarantined;
+  } catch {
+    getModelFilePreservationStorage().remove(QUARANTINED_MODEL_FILES_KEY);
+    return new Map();
+  }
+}
+
+function writeQuarantinedModelFiles(filesByName: Map<string, QuarantinedModelFile>): void {
+  const files = Array.from(filesByName.values())
+    .filter((entry) => isValidLocalFileName(entry.fileName))
+    .sort((left, right) => left.fileName.localeCompare(right.fileName));
+
+  if (files.length === 0) {
+    getModelFilePreservationStorage().remove(QUARANTINED_MODEL_FILES_KEY);
+    return;
+  }
+
+  getModelFilePreservationStorage().set(
+    QUARANTINED_MODEL_FILES_KEY,
+    JSON.stringify({ files }),
   );
 }
 
@@ -600,7 +662,7 @@ export class LocalStorageRegistry {
       this.saveModels(models);
     }
 
-    // 2. Garbage Collection: clean up orphaned files
+    // 2. Quarantine orphaned files instead of deleting them automatically.
     try {
       const dirInfo = await FileSystem.readDirectoryAsync(modelsDir);
 
@@ -614,6 +676,21 @@ export class LocalStorageRegistry {
         dirInfo,
         completedLocalPaths,
       );
+      const quarantinedFileNames = readQuarantinedModelFiles();
+      let quarantineChanged = false;
+      const currentSafeDirectoryFileNames = normalizeModelFileNames(dirInfo);
+
+      for (const fileName of Array.from(quarantinedFileNames.keys())) {
+        if (
+          !currentSafeDirectoryFileNames.has(fileName)
+          || completedLocalPaths.has(fileName)
+          || queuedFileNamesSet.has(fileName)
+          || privateResetPreservedFileNames.has(fileName)
+        ) {
+          quarantinedFileNames.delete(fileName);
+          quarantineChanged = true;
+        }
+      }
 
       for (const filename of dirInfo) {
         if (
@@ -629,12 +706,66 @@ export class LocalStorageRegistry {
         if (!fileUri) {
           continue;
         }
-        console.log(`[LocalStorageRegistry] Garbage collecting orphaned file: ${filename}`);
-        await FileSystem.deleteAsync(fileUri, { idempotent: true });
+        if (!quarantinedFileNames.has(filename)) {
+          console.warn(`[LocalStorageRegistry] Quarantining orphaned model file: ${filename}`);
+          quarantinedFileNames.set(filename, {
+            fileName: filename,
+            detectedAt: Date.now(),
+            reason: 'orphaned',
+          });
+          quarantineChanged = true;
+        }
+      }
+
+      if (quarantineChanged) {
+        writeQuarantinedModelFiles(quarantinedFileNames);
       }
     } catch (e) {
-      console.warn('[LocalStorageRegistry] Garbage collection failed', e);
+      console.warn('[LocalStorageRegistry] Orphan quarantine scan failed', e);
     }
+  }
+
+  public getQuarantinedModelFileNames(): string[] {
+    return Array.from(readQuarantinedModelFiles().keys())
+      .sort((left, right) => left.localeCompare(right));
+  }
+
+  public async deleteQuarantinedModelFiles(fileNames?: string[]): Promise<number> {
+    const modelsDir = getModelsDir();
+    if (!modelsDir) {
+      return 0;
+    }
+
+    const quarantinedFileNames = readQuarantinedModelFiles();
+    const requestedFileNames = fileNames
+      ? normalizeModelFileNames(fileNames)
+      : new Set(quarantinedFileNames.keys());
+    let deletedCount = 0;
+    let changed = false;
+
+    for (const fileName of requestedFileNames) {
+      if (!quarantinedFileNames.has(fileName)) {
+        continue;
+      }
+
+      const fileUri = safeJoinModelPath(modelsDir, fileName);
+      if (!fileUri) {
+        quarantinedFileNames.delete(fileName);
+        changed = true;
+        continue;
+      }
+
+      await FileSystem.deleteAsync(fileUri, { idempotent: true });
+      quarantinedFileNames.delete(fileName);
+      deletedCount += 1;
+      changed = true;
+    }
+
+    if (changed) {
+      writeQuarantinedModelFiles(quarantinedFileNames);
+    }
+
+    return deletedCount;
   }
 
   /**

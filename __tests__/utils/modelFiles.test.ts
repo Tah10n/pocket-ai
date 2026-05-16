@@ -46,6 +46,25 @@ describe('modelFiles', () => {
     expect(candidates).toContain('Qwen_Qwen2.5-0.5B.gguf');
   });
 
+  it('keeps previous generated filenames with dotted repo labels as candidates', () => {
+    const fileName = getModelDownloadFileName({
+      id: 'Qwen/Qwen2.5-0.5B',
+      resolvedFileName: 'weights/model-Q4_K_M.GGUF',
+      hfRevision: 'main',
+    });
+    const candidates = getCandidateModelDownloadFileNames({
+      id: 'Qwen/Qwen2.5-0.5B',
+      resolvedFileName: 'weights/model-Q4_K_M.GGUF',
+      hfRevision: 'main',
+    });
+
+    expect(fileName).toMatch(/^Qwen2_5-0_5B-main-[a-z0-9]+\.gguf$/);
+    expect(candidates[0]).toBe(fileName);
+    expect(candidates).toEqual(expect.arrayContaining([
+      expect.stringMatching(/^Qwen2\.5-0\.5B-main-[a-z0-9]+\.gguf$/),
+    ]));
+  });
+
   it('falls back to sanitized default segments and gguf extension when metadata is unusable', () => {
     const fileName = getModelDownloadFileName({
       id: '///',

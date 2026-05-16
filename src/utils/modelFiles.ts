@@ -12,6 +12,15 @@ export function sanitizeModelFileSegment(value: string, fallback: string): strin
   return sanitized.length > 0 ? sanitized : fallback;
 }
 
+function sanitizePreviousModelFileSegment(value: string, fallback: string): string {
+  const sanitized = value
+    .trim()
+    .replace(/[^A-Za-z0-9._-]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+
+  return sanitized.length > 0 ? sanitized : fallback;
+}
+
 function hashString(value: string): string {
   let hash = 2166136261;
 
@@ -37,6 +46,24 @@ export function getModelDownloadFileName(
   ].join('::'));
 
   return `${repoName}-${revision}-${fingerprint}${extension}`;
+}
+
+function getPreviousModelDownloadFileName(
+  model: Pick<ModelMetadata, 'id' | 'resolvedFileName' | 'hfRevision'>,
+): string | undefined {
+  // Keep paused downloads from earlier builds resumable after tightening filename sanitation.
+  const extensionMatch = model.resolvedFileName?.match(/(\.[A-Za-z0-9]+)$/);
+  const extension = extensionMatch?.[1]?.toLowerCase() ?? '.gguf';
+  const repoName = sanitizePreviousModelFileSegment(getShortModelLabel(model.id) || model.id, 'model');
+  const revision = sanitizePreviousModelFileSegment(model.hfRevision ?? 'main', 'main').slice(0, 16);
+  const fingerprint = hashString([
+    model.id,
+    model.resolvedFileName ?? '',
+    model.hfRevision ?? 'main',
+  ].join('::'));
+  const candidate = `${repoName}-${revision}-${fingerprint}${extension}`;
+
+  return isValidLocalFileName(candidate) ? candidate : undefined;
 }
 
 function getClassicLegacyModelDownloadFileName(modelId: string): string | undefined {
@@ -65,10 +92,12 @@ export function getLegacyModelDownloadFileName(modelId: string): string {
 export function getCandidateModelDownloadFileNames(
   model: Pick<ModelMetadata, 'id' | 'resolvedFileName' | 'hfRevision'>,
 ): string[] {
+  const previousGeneratedName = getPreviousModelDownloadFileName(model);
   const classicLegacyName = getClassicLegacyModelDownloadFileName(model.id);
 
   return Array.from(new Set([
     getModelDownloadFileName(model),
+    ...(previousGeneratedName ? [previousGeneratedName] : []),
     ...(classicLegacyName ? [classicLegacyName] : []),
     getSanitizedLegacyModelDownloadFileName(model.id),
   ])).filter(isValidLocalFileName);

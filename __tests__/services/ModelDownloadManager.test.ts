@@ -126,6 +126,7 @@ describe('ModelDownloadManager Basic', () => {
     });
     (huggingFaceTokenService.getToken as jest.Mock).mockResolvedValue(null);
     (RNFS.hash as jest.Mock).mockResolvedValue('tree-sha');
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: true, size: 1000 });
     (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(8 * 1024 * 1024 * 1024);
     (getSystemMemorySnapshot as jest.Mock).mockResolvedValue(null);
     (getPrivateStorageHealthSnapshot as jest.Mock).mockReturnValue({
@@ -641,6 +642,42 @@ describe('ModelDownloadManager Basic', () => {
     expect(mockedRegistry.updateModel).toHaveBeenCalledWith(
       expect.objectContaining({
         localPath: 'test_model.gguf',
+      }),
+    );
+  });
+
+  it('reuses previous generated partial filenames with dotted repo labels', async () => {
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (/^test-dir\/models\/Qwen2\.5-0\.5B-main-[a-z0-9]+\.gguf$/.test(uri)) {
+        return { exists: true, size: 1000 };
+      }
+
+      if (uri.startsWith('test-dir/models/')) {
+        return { exists: false, size: 0 };
+      }
+
+      return { exists: true, size: 1000 };
+    });
+
+    await expect(
+      runDownloadModel({
+        id: 'Qwen/Qwen2.5-0.5B',
+        name: 'Qwen2.5 0.5B',
+        resolvedFileName: 'weights/model-Q4_K_M.GGUF',
+        resumeData: 'resume-data',
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(FileSystem.createDownloadResumable).toHaveBeenCalledWith(
+      'http://example.com/model.gguf',
+      expect.stringMatching(/^test-dir\/models\/Qwen2\.5-0\.5B-main-[a-z0-9]+\.gguf$/),
+      {},
+      expect.any(Function),
+      'resume-data',
+    );
+    expect(mockedRegistry.updateModel).toHaveBeenCalledWith(
+      expect.objectContaining({
+        localPath: expect.stringMatching(/^Qwen2\.5-0\.5B-main-[a-z0-9]+\.gguf$/),
       }),
     );
   });

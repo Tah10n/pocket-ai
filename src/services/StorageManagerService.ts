@@ -281,6 +281,7 @@ async function getQuarantinedModelFilesMetrics(): Promise<QuarantinedModelFilesM
         const info = await FileSystem.getInfoAsync(fileUri);
         if (
           info.exists
+          && !(info as { isDirectory?: boolean }).isDirectory
           && typeof info.size === 'number'
           && Number.isFinite(info.size)
           && info.size > 0

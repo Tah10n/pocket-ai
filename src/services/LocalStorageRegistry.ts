@@ -39,6 +39,10 @@ type QuarantinedModelFile = {
 
 type QueuedModelFileNamesInput = string[] | (() => string[]);
 
+type ModelDirectoryEntryInspection =
+  | { kind: 'file'; fileUri: string }
+  | { kind: 'directory' | 'missing' | 'unknown'; fileUri?: string };
+
 function cloneCalibrationRecord(record: CalibrationRecord): CalibrationRecord {
   return { ...record };
 }
@@ -62,8 +66,52 @@ function normalizeModelFileNames(input: unknown): Set<string> {
   return new Set(values.filter(isValidLocalFileName));
 }
 
+function isFileSystemDirectory(info: { isDirectory?: boolean }): boolean {
+  return info.isDirectory === true;
+}
+
+function getFileInfoSizeBytes(info: { size?: number }): number | null {
+  return (
+    typeof info.size === 'number'
+    && Number.isFinite(info.size)
+    && info.size > 0
+  )
+    ? Math.round(info.size)
+    : null;
+}
+
 function resolveQueuedModelFileNames(input: QueuedModelFileNamesInput): string[] {
   return typeof input === 'function' ? input() : input;
+}
+
+async function inspectModelDirectoryEntry(
+  modelsDir: string,
+  fileName: string,
+  scope: string,
+): Promise<ModelDirectoryEntryInspection> {
+  const fileUri = safeJoinModelPath(modelsDir, fileName);
+  if (!fileUri) {
+    return { kind: 'unknown' };
+  }
+
+  try {
+    const info = await FileSystem.getInfoAsync(fileUri);
+    if (!info.exists) {
+      return { kind: 'missing', fileUri };
+    }
+
+    if (isFileSystemDirectory(info)) {
+      return { kind: 'directory', fileUri };
+    }
+
+    return { kind: 'file', fileUri };
+  } catch (error) {
+    console.warn(
+      `[LocalStorageRegistry] Failed to inspect model directory entry during ${scope}: ${fileName}`,
+      error,
+    );
+    return { kind: 'unknown', fileUri };
+  }
 }
 
 function readPrivateResetPreservedModelFiles(): PrivateResetModelFilePreservationState {
@@ -509,8 +557,10 @@ export class LocalStorageRegistry {
             console.warn(`[LocalStorageRegistry] Invalid localPath for ${modelId}, skipping file deletion`);
           } else {
             const info = await FileSystem.getInfoAsync(fileUri);
-            if (info.exists) {
+            if (info.exists && !isFileSystemDirectory(info)) {
               await FileSystem.deleteAsync(fileUri);
+            } else if (info.exists) {
+              console.warn(`[LocalStorageRegistry] Local path for ${modelId} points to a directory, skipping file deletion`);
             }
           }
         }
@@ -598,18 +648,17 @@ export class LocalStorageRegistry {
           resetLocalDownloadState(model);
           changed = true;
           continue;
+        } else if (isFileSystemDirectory(info)) {
+          console.warn(`[LocalStorageRegistry] Local path for ${model.id} points to a directory, resetting to available`);
+          resetLocalDownloadState(model);
+          changed = true;
+          continue;
         } else if (model.lifecycleStatus === LifecycleStatus.ACTIVE) {
           model.lifecycleStatus = LifecycleStatus.DOWNLOADED;
           changed = true;
         }
 
-        const verifiedSizeBytes = (
-          typeof info.size === 'number'
-          && Number.isFinite(info.size)
-          && info.size > 0
-        )
-          ? Math.round(info.size)
-          : null;
+        const verifiedSizeBytes = getFileInfoSizeBytes(info);
 
         const integritySizeBytes = model.downloadIntegrity?.sizeBytes;
         if (
@@ -704,6 +753,16 @@ export class LocalStorageRegistry {
         protectedFileNames,
       } = this.getProtectedModelFileNamesForCleanup(dirInfo, queuedFileNames, models);
       const quarantinedFileNames = readQuarantinedModelFiles();
+      const entryInspectionCache = new Map<string, ModelDirectoryEntryInspection>();
+      const inspectEntry = async (fileName: string) => {
+        let inspection = entryInspectionCache.get(fileName);
+        if (!inspection) {
+          inspection = await inspectModelDirectoryEntry(modelsDir, fileName, 'orphan quarantine scan');
+          entryInspectionCache.set(fileName, inspection);
+        }
+
+        return inspection;
+      };
       let quarantineChanged = false;
 
       for (const fileName of Array.from(quarantinedFileNames.keys())) {
@@ -711,6 +770,13 @@ export class LocalStorageRegistry {
           !currentSafeDirectoryFileNames.has(fileName)
           || protectedFileNames.has(fileName)
         ) {
+          quarantinedFileNames.delete(fileName);
+          quarantineChanged = true;
+          continue;
+        }
+
+        const inspection = await inspectEntry(fileName);
+        if (inspection.kind === 'missing' || inspection.kind === 'directory') {
           quarantinedFileNames.delete(fileName);
           quarantineChanged = true;
         }
@@ -722,8 +788,8 @@ export class LocalStorageRegistry {
         }
 
         // It is neither completed nor queued, so hold it for explicit cleanup.
-        const fileUri = safeJoinModelPath(modelsDir, filename);
-        if (!fileUri) {
+        const inspection = await inspectEntry(filename);
+        if (inspection.kind !== 'file') {
           continue;
         }
         if (!quarantinedFileNames.has(filename)) {
@@ -783,14 +849,17 @@ export class LocalStorageRegistry {
         continue;
       }
 
-      const fileUri = safeJoinModelPath(modelsDir, fileName);
-      if (!fileUri) {
+      const inspection = await inspectModelDirectoryEntry(modelsDir, fileName, 'quarantined model cleanup');
+      if (inspection.kind === 'missing' || inspection.kind === 'directory') {
         quarantinedFileNames.delete(fileName);
         changed = true;
         continue;
       }
+      if (inspection.kind !== 'file') {
+        continue;
+      }
 
-      await FileSystem.deleteAsync(fileUri, { idempotent: true });
+      await FileSystem.deleteAsync(inspection.fileUri, { idempotent: true });
       quarantinedFileNames.delete(fileName);
       deletedCount += 1;
       changed = true;

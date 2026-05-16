@@ -120,6 +120,30 @@ describe('LocalStorageRegistry', () => {
     expect(mockStorage.remove).toHaveBeenCalledWith('models-registry:index-v1');
   });
 
+  it('should remove model metadata without deleting a directory localPath', async () => {
+    const model = createMockModel({ localPath: 'nested-cache' });
+    mockStorage.getString.mockImplementation((key: string) => {
+      if (key === 'models-registry:index-v1') {
+        return JSON.stringify([model.id]);
+      }
+
+      if (key === 'models-registry:model-v1:test%2Fmodel') {
+        return JSON.stringify(model);
+      }
+
+      return null;
+    });
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValueOnce({ exists: true, isDirectory: true });
+
+    await registry.removeModel(model.id);
+
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalled();
+    expect(mockStorage.remove).toHaveBeenCalledWith('models-registry:model-v1:test%2Fmodel');
+    expect(consoleWarnSpy).toHaveBeenCalledWith(
+      '[LocalStorageRegistry] Local path for test/model points to a directory, skipping file deletion',
+    );
+  });
+
   it('should validate registry and reset status if file is missing', async () => {
     (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([createMockModel()]);
     (registry.saveModels as jest.Mock) = jest.fn();
@@ -127,6 +151,22 @@ describe('LocalStorageRegistry', () => {
 
     await registry.validateRegistry();
 
+    expect(registry.saveModels).toHaveBeenCalled();
+    const updatedModels = (registry.saveModels as jest.Mock).mock.calls[0][0];
+    expect(updatedModels[0].lifecycleStatus).toBe(LifecycleStatus.AVAILABLE);
+    expect(updatedModels[0].localPath).toBeUndefined();
+  });
+
+  it('should reset downloaded models whose local path points to a directory', async () => {
+    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([
+      createMockModel({ localPath: 'nested-cache' }),
+    ]);
+    (registry.saveModels as jest.Mock) = jest.fn();
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: true, isDirectory: true });
+
+    await registry.validateRegistry();
+
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalled();
     expect(registry.saveModels).toHaveBeenCalled();
     const updatedModels = (registry.saveModels as jest.Mock).mock.calls[0][0];
     expect(updatedModels[0].lifecycleStatus).toBe(LifecycleStatus.AVAILABLE);
@@ -696,6 +736,27 @@ describe('LocalStorageRegistry', () => {
     expect(quarantinePayload).not.toEqual(expect.stringContaining('queued.gguf'));
   });
 
+  it('does not quarantine model directory subdirectories', async () => {
+    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([]);
+    (FileSystem.readDirectoryAsync as jest.Mock).mockResolvedValueOnce([
+      'orphan.gguf',
+      'nested-cache',
+    ]);
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => ({
+      exists: true,
+      isDirectory: uri.endsWith('/nested-cache'),
+    }));
+
+    await registry.validateRegistry();
+
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalled();
+    const quarantinePayload = mockStorage.set.mock.calls.find(
+      ([key]) => key === 'quarantined-model-files-v1',
+    )?.[1];
+    expect(quarantinePayload).toEqual(expect.stringContaining('orphan.gguf'));
+    expect(quarantinePayload).not.toEqual(expect.stringContaining('nested-cache'));
+  });
+
   it('deletes quarantined model files only through explicit cleanup', async () => {
     mockStorage.getString.mockImplementation((key: string) => (
       key === 'quarantined-model-files-v1'
@@ -721,6 +782,95 @@ describe('LocalStorageRegistry', () => {
     )?.[1];
     expect(nextPayload).toEqual(expect.stringContaining('keep.gguf'));
     expect(nextPayload).not.toEqual(expect.stringContaining('orphan.gguf'));
+  });
+
+  it('rechecks queued filenames before each quarantined file deletion', async () => {
+    mockStorage.getString.mockImplementation((key: string) => (
+      key === 'quarantined-model-files-v1'
+        ? JSON.stringify({
+          files: [
+            { fileName: 'first.gguf', detectedAt: 1, reason: 'orphaned' },
+            { fileName: 'second.gguf', detectedAt: 2, reason: 'orphaned' },
+          ],
+        })
+        : null
+    ));
+    (FileSystem.readDirectoryAsync as jest.Mock).mockResolvedValueOnce([
+      'first.gguf',
+      'second.gguf',
+    ]);
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: true, isDirectory: false, size: 1024 });
+    const getQueuedFileNames = jest.fn()
+      .mockReturnValueOnce([])
+      .mockReturnValueOnce(['second.gguf']);
+
+    await expect(
+      registry.deleteQuarantinedModelFiles(['first.gguf', 'second.gguf'], getQueuedFileNames),
+    ).resolves.toBe(1);
+
+    expect(getQueuedFileNames).toHaveBeenCalledTimes(2);
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/models/first.gguf', { idempotent: true });
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/models/second.gguf', expect.anything());
+    const nextPayload = mockStorage.set.mock.calls.find(
+      ([key]) => key === 'quarantined-model-files-v1',
+    )?.[1];
+    expect(nextPayload).not.toEqual(expect.stringContaining('first.gguf'));
+    expect(nextPayload).not.toEqual(expect.stringContaining('second.gguf'));
+  });
+
+  it('removes quarantined directory markers without deleting directories', async () => {
+    mockStorage.getString.mockImplementation((key: string) => (
+      key === 'quarantined-model-files-v1'
+        ? JSON.stringify({
+          files: [
+            { fileName: 'nested-cache', detectedAt: 1, reason: 'orphaned' },
+            { fileName: 'orphan.gguf', detectedAt: 2, reason: 'orphaned' },
+          ],
+        })
+        : null
+    ));
+    (FileSystem.readDirectoryAsync as jest.Mock).mockResolvedValueOnce([
+      'nested-cache',
+      'orphan.gguf',
+    ]);
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => ({
+      exists: true,
+      isDirectory: uri.endsWith('/nested-cache'),
+    }));
+
+    await expect(registry.deleteQuarantinedModelFiles(['nested-cache'])).resolves.toBe(0);
+
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/models/nested-cache', expect.anything());
+    const nextPayload = mockStorage.set.mock.calls.find(
+      ([key]) => key === 'quarantined-model-files-v1',
+    )?.[1];
+    expect(nextPayload).toEqual(expect.stringContaining('orphan.gguf'));
+    expect(nextPayload).not.toEqual(expect.stringContaining('nested-cache'));
+  });
+
+  it('keeps quarantined markers when file inspection fails during cleanup', async () => {
+    const inspectError = new Error('stat failed');
+    mockStorage.getString.mockImplementation((key: string) => (
+      key === 'quarantined-model-files-v1'
+        ? JSON.stringify({
+          files: [
+            { fileName: 'orphan.gguf', detectedAt: 1, reason: 'orphaned' },
+          ],
+        })
+        : null
+    ));
+    (FileSystem.readDirectoryAsync as jest.Mock).mockResolvedValueOnce(['orphan.gguf']);
+    (FileSystem.getInfoAsync as jest.Mock).mockRejectedValueOnce(inspectError);
+
+    await expect(registry.deleteQuarantinedModelFiles(['orphan.gguf'])).resolves.toBe(0);
+
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalled();
+    expect(mockStorage.set).not.toHaveBeenCalledWith('quarantined-model-files-v1', expect.anything());
+    expect(mockStorage.remove).not.toHaveBeenCalledWith('quarantined-model-files-v1');
+    expect(consoleWarnSpy).toHaveBeenCalledWith(
+      '[LocalStorageRegistry] Failed to inspect model directory entry during quarantined model cleanup: orphan.gguf',
+      inspectError,
+    );
   });
 
   it('does not delete quarantined model files when the directory cannot be scanned', async () => {

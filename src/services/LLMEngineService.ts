@@ -10,6 +10,7 @@ import { hardwareListenerService } from './HardwareListenerService';
 import {
   EngineBackendMode,
   type EngineBackendInitAttempt,
+  type EngineLifecycleEvent,
   type EngineBackendPolicy,
   EngineStatus,
   EngineState,
@@ -96,6 +97,17 @@ type ChatCompletionReasoningFormat = NonNullable<NonNullable<LlmChatCompletionOp
 const DEFAULT_CONTEXT_SIZE = 4096;
 const MAX_NATIVE_LOG_LINES = 120;
 const MAX_ADDITIONAL_STOP_WORDS_CACHE_ENTRIES = 8;
+const CONTEXT_OPERATION_UNLOAD_DRAIN_TIMEOUT_MS = 5000;
+const CONTEXT_OPERATION_UNLOAD_TIMEOUT_MESSAGE = 'Timed out waiting for active context operations during unload';
+const ACTIVE_COMPLETION_UNLOAD_TIMEOUT_MESSAGE = 'Timed out waiting for active completion during unload';
+
+type StrictRoleSystemNormalization = 'plain' | 'llama';
+type ContextOperationDrainResult = 'drained' | 'timed_out';
+
+type TemplateAdditionalStopWordsResolution = {
+  stopWords: string[];
+  strictRoleSystemNormalization: StrictRoleSystemNormalization;
+};
 
 type CalibrationSession = {
   modelId: string;
@@ -245,7 +257,31 @@ function mergeConsecutiveMessages(messages: LlmChatMessage[]): LlmChatMessage[] 
   return merged;
 }
 
-function normalizeMessagesForStrictRoleAlternation(messages: LlmChatMessage[]): LlmChatMessage[] {
+function resolveStrictRoleSystemNormalization(formatted: unknown): StrictRoleSystemNormalization {
+  if (!formatted || typeof formatted !== 'object') {
+    return 'plain';
+  }
+
+  const formattedResult = formatted as { prompt?: unknown; type?: unknown };
+  const formattedType = typeof formattedResult.type === 'string' ? formattedResult.type : null;
+  if (formattedType === 'jinja') {
+    return 'plain';
+  }
+
+  const prompt = typeof formattedResult.prompt === 'string' ? formattedResult.prompt : '';
+  const hasLlamaSystemBlock = /\[INST\][\s\S]*<<SYS>>[\s\S]*<<\/SYS>>/.test(prompt)
+    || /^\s*<<SYS>>[\s\S]*<<\/SYS>>/.test(prompt);
+
+  return hasLlamaSystemBlock
+    ? 'llama'
+    : 'plain';
+}
+
+function normalizeMessagesForStrictRoleAlternation(
+  messages: LlmChatMessage[],
+  options: { systemNormalization?: StrictRoleSystemNormalization } = {},
+): LlmChatMessage[] {
+  const systemNormalization = options.systemNormalization ?? 'plain';
   const systemParts: string[] = [];
   const nonSystemMessages: LlmChatMessage[] = [];
 
@@ -272,23 +308,30 @@ function normalizeMessagesForStrictRoleAlternation(messages: LlmChatMessage[]): 
   const systemContent = systemParts.join('\n\n');
   const trimmedSystemContent = systemContent.trim();
   if (trimmedSystemContent.length > 0) {
-    const sysWrappedRegex = /^\s*<<SYS>>[\s\S]*<<\/SYS>>\s*$/;
-    const isAlreadyWrapped = sysWrappedRegex.test(trimmedSystemContent);
+    const normalizedSystemContent = systemNormalization === 'llama'
+      ? (() => {
+          const sysWrappedRegex = /^\s*<<SYS>>[\s\S]*<<\/SYS>>\s*$/;
+          const isAlreadyWrapped = sysWrappedRegex.test(trimmedSystemContent);
+          const cleanedSystemContent = isAlreadyWrapped
+            ? trimmedSystemContent
+            : trimmedSystemContent
+                .replace(/<<SYS>>/g, '')
+                .replace(/<<\/SYS>>/g, '')
+                .trim();
 
-    const cleanedSystemContent = isAlreadyWrapped
-      ? trimmedSystemContent
-      : trimmedSystemContent
-          .replace(/<<SYS>>/g, '')
-          .replace(/<<\/SYS>>/g, '')
-          .trim();
+          if (cleanedSystemContent.length === 0) {
+            return '';
+          }
 
-    if (cleanedSystemContent.length === 0) {
+          return isAlreadyWrapped
+            ? cleanedSystemContent
+            : `<<SYS>>\n${cleanedSystemContent}\n<</SYS>>`;
+        })()
+      : trimmedSystemContent;
+
+    if (normalizedSystemContent.length === 0) {
       return mergeConsecutiveMessages(merged);
     }
-
-    const normalizedSystemContent = isAlreadyWrapped
-      ? cleanedSystemContent
-      : `<<SYS>>\n${cleanedSystemContent}\n<</SYS>>`;
 
     if (merged.length === 0) {
       merged = [{ role: 'user', content: normalizedSystemContent }];
@@ -337,7 +380,7 @@ class LLMEngineService {
   private initNBatch: number | null = null;
   private initNUbatch: number | null = null;
   private initKvUnified: boolean | null = null;
-  private additionalStopWordsCache: Map<string, string[]> = new Map();
+  private additionalStopWordsCache: Map<string, TemplateAdditionalStopWordsResolution> = new Map();
   private state: EngineState = {
     status: EngineStatus.IDLE,
     loadProgress: 0,
@@ -354,18 +397,45 @@ class LLMEngineService {
   private operationQueue: Promise<void> = Promise.resolve();
   private contextOperationQueue: Promise<void> = Promise.resolve();
   private activeCompletionPromise: Promise<NativeCompletionResult> | null = null;
+  private activeCompletionReject: ((error: unknown) => void) | null = null;
   private activeContextOperationPromises: Set<Promise<unknown>> = new Set();
+  private activeContextOperationRejects: Map<Promise<unknown>, (error: unknown) => void> = new Map();
+  private contextOperationCancelGeneration = 0;
   private completionInterruptGeneration = 0;
   private isUnloading = false;
   private activeCalibrationSession: CalibrationSession | null = null;
+  private lastLifecycleEvent: EngineLifecycleEvent | null = null;
+  private lastLifecycleError: string | null = null;
 
   constructor() {
     this.hwUnsubscribe = hardwareListenerService.subscribe((status) => {
       if (status.isLowMemory && this.context) {
-        if (process.env.NODE_ENV !== 'test') {
-          console.warn('[LLMEngine] Low memory warning — unloading model');
-        }
-        this.unload();
+        this.handleLowMemoryUnload();
+      }
+    });
+  }
+
+  private handleLowMemoryUnload(): void {
+    if (!this.context || this.isUnloading) {
+      return;
+    }
+
+    if (process.env.NODE_ENV !== 'test') {
+      console.warn('[LLMEngine] Low memory warning - unloading model');
+    }
+
+    void this.unload().catch((error) => {
+      const appError = toAppError(error, 'action_failed');
+      this.lastLifecycleEvent = 'low_memory_unload_failed';
+      this.lastLifecycleError = appError.message;
+      this.updateState({
+        ...this.state,
+        status: EngineStatus.ERROR,
+        lastError: appError.message,
+      });
+
+      if (process.env.NODE_ENV !== 'test') {
+        console.warn('[LLMEngine] Failed to unload model after low memory warning', error);
       }
     });
   }
@@ -405,42 +475,150 @@ class LLMEngineService {
     }
   }
 
+  private assertContextOperationNotCancelled(generation: number): void {
+    if (this.contextOperationCancelGeneration !== generation) {
+      throw new AppError('engine_unloading', CONTEXT_OPERATION_UNLOAD_TIMEOUT_MESSAGE);
+    }
+  }
+
   private trackContextOperation<T>(operation: () => Promise<T>): Promise<T> {
     const previousOperation = this.contextOperationQueue;
+    const operationGeneration = this.contextOperationCancelGeneration;
     let releaseQueue: () => void = () => undefined;
+    let didReleaseQueue = false;
     const queueSlot = new Promise<void>((resolve) => {
       releaseQueue = resolve;
     });
+    const releaseOperationQueue = () => {
+      if (!didReleaseQueue) {
+        didReleaseQueue = true;
+        releaseQueue();
+      }
+    };
 
     this.contextOperationQueue = previousOperation.catch(() => undefined).then(() => queueSlot);
 
-    const operationPromise = (async () => {
+    let rejectCancellation: (error: unknown) => void = () => undefined;
+    const cancellationPromise = new Promise<never>((_, reject) => {
+      rejectCancellation = reject;
+    });
+
+    const rawOperationPromise = (async () => {
       await previousOperation.catch(() => undefined);
+      this.assertContextOperationNotCancelled(operationGeneration);
 
       try {
-        return await operation();
+        const result = await operation();
+        this.assertContextOperationNotCancelled(operationGeneration);
+        return result;
       } finally {
-        releaseQueue();
+        releaseOperationQueue();
       }
     })();
+    void rawOperationPromise.catch(() => undefined);
+
+    const operationPromise = Promise.race([rawOperationPromise, cancellationPromise])
+      .finally(releaseOperationQueue);
     this.activeContextOperationPromises.add(operationPromise);
+    this.activeContextOperationRejects.set(operationPromise, rejectCancellation);
 
     void operationPromise.then(
       () => {
         this.activeContextOperationPromises.delete(operationPromise);
+        this.activeContextOperationRejects.delete(operationPromise);
       },
       () => {
         this.activeContextOperationPromises.delete(operationPromise);
+        this.activeContextOperationRejects.delete(operationPromise);
       },
     );
 
     return operationPromise;
   }
 
-  private async waitForActiveContextOperations(): Promise<void> {
+  private async waitForActiveContextOperations(options: { timeoutMs?: number } = {}): Promise<ContextOperationDrainResult> {
     const activeContextOperations = Array.from(this.activeContextOperationPromises);
-    if (activeContextOperations.length > 0) {
-      await Promise.allSettled(activeContextOperations);
+    if (activeContextOperations.length === 0) {
+      return 'drained';
+    }
+
+    const drainPromise = Promise.allSettled(activeContextOperations).then((): ContextOperationDrainResult => 'drained');
+    if (typeof options.timeoutMs !== 'number' || options.timeoutMs <= 0) {
+      return await drainPromise;
+    }
+
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    const timeoutPromise = new Promise<ContextOperationDrainResult>((resolve) => {
+      timeoutId = setTimeout(() => resolve('timed_out'), options.timeoutMs);
+    });
+
+    const result = await Promise.race([drainPromise, timeoutPromise]);
+    if (timeoutId !== null) {
+      clearTimeout(timeoutId);
+    }
+
+    return result;
+  }
+
+  private async waitForUnloadPromise(
+    promise: Promise<unknown>,
+    timeoutMs: number,
+  ): Promise<ContextOperationDrainResult> {
+    if (timeoutMs <= 0) {
+      await promise;
+      return 'drained';
+    }
+
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    const timeoutPromise = new Promise<ContextOperationDrainResult>((resolve) => {
+      timeoutId = setTimeout(() => resolve('timed_out'), timeoutMs);
+    });
+    const settledPromise = promise.then(
+      (): ContextOperationDrainResult => 'drained',
+      (): ContextOperationDrainResult => 'drained',
+    );
+
+    const result = await Promise.race([settledPromise, timeoutPromise]);
+    if (timeoutId !== null) {
+      clearTimeout(timeoutId);
+    }
+
+    return result;
+  }
+
+  private recordContextOperationUnloadTimeout(): void {
+    this.lastLifecycleEvent = 'context_operation_unload_timeout';
+    this.lastLifecycleError = CONTEXT_OPERATION_UNLOAD_TIMEOUT_MESSAGE;
+    this.contextOperationCancelGeneration += 1;
+    const timeoutError = new AppError('engine_unloading', CONTEXT_OPERATION_UNLOAD_TIMEOUT_MESSAGE);
+    const rejectActiveOperations = Array.from(this.activeContextOperationRejects.values());
+    this.activeContextOperationRejects.clear();
+    rejectActiveOperations.forEach((reject) => reject(timeoutError));
+    this.contextOperationQueue = Promise.resolve();
+    this.activeContextOperationPromises.clear();
+    this.updateState({
+      ...this.state,
+      lastError: CONTEXT_OPERATION_UNLOAD_TIMEOUT_MESSAGE,
+    });
+
+    if (process.env.NODE_ENV !== 'test') {
+      console.warn(`[LLMEngine] ${CONTEXT_OPERATION_UNLOAD_TIMEOUT_MESSAGE}`);
+    }
+  }
+
+  private recordActiveCompletionUnloadTimeout(): void {
+    this.lastLifecycleEvent = 'active_completion_unload_timeout';
+    this.lastLifecycleError = ACTIVE_COMPLETION_UNLOAD_TIMEOUT_MESSAGE;
+    this.activeCompletionReject?.(
+      new AppError('engine_unloading', ACTIVE_COMPLETION_UNLOAD_TIMEOUT_MESSAGE),
+    );
+    this.updateState({
+      ...this.state,
+      lastError: ACTIVE_COMPLETION_UNLOAD_TIMEOUT_MESSAGE,
+    });
+
+    if (process.env.NODE_ENV !== 'test') {
+      console.warn(`[LLMEngine] ${ACTIVE_COMPLETION_UNLOAD_TIMEOUT_MESSAGE}`);
     }
   }
 
@@ -471,8 +649,6 @@ class LLMEngineService {
       hash = this.updateCacheHash(hash, message.role);
       hash = this.updateCacheHash(hash, '\u0000');
       hash = this.updateCacheHash(hash, String(message.content.length));
-      hash = this.updateCacheHash(hash, '\u0000');
-      hash = this.updateCacheHash(hash, message.content);
       hash = this.updateCacheHash(hash, '\u0001');
     }
 
@@ -499,6 +675,15 @@ class LLMEngineService {
     );
   }
 
+  private copyTemplateStopWordsResolution(
+    resolution: TemplateAdditionalStopWordsResolution,
+  ): TemplateAdditionalStopWordsResolution {
+    return {
+      stopWords: [...resolution.stopWords],
+      strictRoleSystemNormalization: resolution.strictRoleSystemNormalization,
+    };
+  }
+
   private async resolveTemplateAdditionalStopWords({
     context,
     generation,
@@ -511,7 +696,7 @@ class LLMEngineService {
     messages: LlmChatMessage[];
     enableThinking: boolean;
     reasoningFormat: ChatCompletionReasoningFormat;
-  }): Promise<string[]> {
+  }): Promise<TemplateAdditionalStopWordsResolution> {
     const cacheKey = this.buildAdditionalStopWordsCacheKey({
       generation,
       messages,
@@ -521,7 +706,7 @@ class LLMEngineService {
     const cached = this.additionalStopWordsCache.get(cacheKey);
     if (cached) {
       this.assertContextStillCurrent(context, generation);
-      return [...cached];
+      return this.copyTemplateStopWordsResolution(cached);
     }
 
     try {
@@ -546,20 +731,27 @@ class LLMEngineService {
         ? ((formatted as any).additional_stops as unknown[])
         : [];
       const normalizedStops = this.normalizeAdditionalStopWords(additionalStops);
-      this.additionalStopWordsCache.set(cacheKey, normalizedStops);
+      const resolution: TemplateAdditionalStopWordsResolution = {
+        stopWords: normalizedStops,
+        strictRoleSystemNormalization: resolveStrictRoleSystemNormalization(formatted),
+      };
+      this.additionalStopWordsCache.set(cacheKey, resolution);
       if (this.additionalStopWordsCache.size > MAX_ADDITIONAL_STOP_WORDS_CACHE_ENTRIES) {
         const oldestCacheKey = this.additionalStopWordsCache.keys().next().value;
         if (oldestCacheKey) {
           this.additionalStopWordsCache.delete(oldestCacheKey);
         }
       }
-      return [...normalizedStops];
+      return this.copyTemplateStopWordsResolution(resolution);
     } catch (error) {
       this.assertContextStillCurrent(context, generation);
       if (process.env.NODE_ENV !== 'test') {
         console.warn('[LLMEngine] Failed to resolve template stop tokens', error);
       }
-      return [];
+      return {
+        stopWords: [],
+        strictRoleSystemNormalization: 'plain',
+      };
     }
   }
 
@@ -1157,6 +1349,7 @@ class LLMEngineService {
     });
 
     this.activeCompletionPromise = completionTask;
+    this.activeCompletionReject = rejectCompletion;
     const interruptGeneration = this.completionInterruptGeneration;
 
     void (async () => {
@@ -1177,6 +1370,7 @@ class LLMEngineService {
           hasStreamedTokens = true;
         };
 
+        let strictRoleSystemNormalization: StrictRoleSystemNormalization = 'plain';
         const runCompletion = async (completionMessages: LlmChatMessage[], onTokensStreamed: () => void) => {
           this.assertCompletionNotInterrupted(interruptGeneration);
           const enableThinking = params?.enable_thinking ?? false;
@@ -1193,18 +1387,19 @@ class LLMEngineService {
             '<|endoftext|>',
           ];
 
-          const additionalStopWords = await this.resolveTemplateAdditionalStopWords({
+          const templateStopResolution = await this.resolveTemplateAdditionalStopWords({
             context,
             generation: contextGeneration,
             messages: completionMessages,
             enableThinking,
             reasoningFormat,
           });
+          strictRoleSystemNormalization = templateStopResolution.strictRoleSystemNormalization;
           this.assertCompletionNotInterrupted(interruptGeneration);
 
           const resolvedStops = Array.from(
             new Set(
-              [...baseStopWords, ...additionalStopWords]
+              [...baseStopWords, ...templateStopResolution.stopWords]
                 .map((stop) => stop.trim())
                 .filter((stop) => stop.length > 0),
             ),
@@ -1269,7 +1464,9 @@ class LLMEngineService {
             }
 
             console.warn('[LLMEngine] Retrying completion after normalizing chat roles for strict templates');
-            const normalizedMessages = normalizeMessagesForStrictRoleAlternation(messages);
+            const normalizedMessages = normalizeMessagesForStrictRoleAlternation(messages, {
+              systemNormalization: strictRoleSystemNormalization,
+            });
             hasStreamedTokens = false;
             resolveCompletion(await runCompletion(normalizedMessages, markTokensStreamed));
             return;
@@ -1282,6 +1479,7 @@ class LLMEngineService {
       } finally {
         if (this.activeCompletionPromise === completionTask) {
           this.activeCompletionPromise = null;
+          this.activeCompletionReject = null;
         }
       }
     })();
@@ -1502,6 +1700,7 @@ class LLMEngineService {
 
       const { context, generation: contextGeneration } = this.getReadyContextOrThrow();
 
+      let strictRoleSystemNormalization: StrictRoleSystemNormalization = 'plain';
       const countTokens = async (promptMessages: LlmChatMessage[]) => {
         this.assertContextStillCurrent(context, contextGeneration);
         let formatted: Awaited<ReturnType<LlamaContext['getFormattedChat']>>;
@@ -1516,6 +1715,7 @@ class LLMEngineService {
           throw error;
         }
 
+        strictRoleSystemNormalization = resolveStrictRoleSystemNormalization(formatted);
         this.assertContextStillCurrent(context, contextGeneration);
         let tokenized: Awaited<ReturnType<LlamaContext['tokenize']>>;
         try {
@@ -1537,7 +1737,9 @@ class LLMEngineService {
       } catch (error) {
         if (isConversationAlternationError(error)) {
           console.warn('[LLMEngine] Retrying prompt token count after normalizing chat roles for strict templates');
-          const normalizedMessages = normalizeMessagesForStrictRoleAlternation(messages);
+          const normalizedMessages = normalizeMessagesForStrictRoleAlternation(messages, {
+            systemNormalization: strictRoleSystemNormalization,
+          });
           return await countTokens(normalizedMessages);
         }
 
@@ -1711,6 +1913,8 @@ class LLMEngineService {
       initNBatch: this.initNBatch,
       initNUbatch: this.initNUbatch,
       initKvUnified: this.initKvUnified,
+      lastLifecycleEvent: this.lastLifecycleEvent,
+      lastLifecycleError: this.lastLifecycleError,
     });
   }
 
@@ -1752,6 +1956,8 @@ class LLMEngineService {
     this.initNBatch = null;
     this.initNUbatch = null;
     this.initKvUnified = null;
+    this.lastLifecycleEvent = null;
+    this.lastLifecycleError = null;
   }
 
   private resolveReportedLoadedGpuLayers(resolvedGpuLayers: number | null): number {
@@ -3221,20 +3427,35 @@ class LLMEngineService {
     try {
       const activeCompletion = this.activeCompletionPromise;
       if (activeCompletion) {
-        try {
-          await this.stopCompletion();
-        } catch (error) {
-          console.warn('[LLMEngine] Failed to stop completion before unload', error);
+        let stopCompletionError: unknown;
+        const stopCompletionPromise = this.stopCompletion().catch((error) => {
+          stopCompletionError = error;
+        });
+        const stopCompletionResult = await this.waitForUnloadPromise(
+          stopCompletionPromise,
+          CONTEXT_OPERATION_UNLOAD_DRAIN_TIMEOUT_MS,
+        );
+        if (stopCompletionResult === 'timed_out') {
+          this.recordActiveCompletionUnloadTimeout();
+        } else if (stopCompletionError) {
+          console.warn('[LLMEngine] Failed to stop completion before unload', stopCompletionError);
         }
 
-        try {
-          await activeCompletion;
-        } catch {
-          // Completion failures are handled by the chat flow.
+        const activeCompletionResult = await this.waitForUnloadPromise(
+          activeCompletion.catch(() => undefined),
+          CONTEXT_OPERATION_UNLOAD_DRAIN_TIMEOUT_MS,
+        );
+        if (activeCompletionResult === 'timed_out') {
+          this.recordActiveCompletionUnloadTimeout();
         }
       }
 
-      await this.waitForActiveContextOperations();
+      const contextDrainResult = await this.waitForActiveContextOperations({
+        timeoutMs: CONTEXT_OPERATION_UNLOAD_DRAIN_TIMEOUT_MS,
+      });
+      if (contextDrainResult === 'timed_out') {
+        this.recordContextOperationUnloadTimeout();
+      }
 
       if (this.context) {
         await requireLlamaModule().releaseAllLlama();
@@ -3265,6 +3486,7 @@ class LLMEngineService {
       this.resetRuntimeTelemetry();
       this.initPromise = null;
       this.activeCompletionPromise = null;
+      this.activeCompletionReject = null;
       this.isUnloading = false;
       updateSettings({ activeModelId: null });
       hardwareListenerService.resetLowMemoryFlag();

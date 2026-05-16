@@ -89,6 +89,9 @@ describe('LLMEngineService', () => {
     inferenceBackendService.clearCache();
     (llmEngineService as any).contextOperationQueue = Promise.resolve();
     (llmEngineService as any).activeContextOperationPromises?.clear?.();
+    (llmEngineService as any).activeContextOperationRejects?.clear?.();
+    (llmEngineService as any).contextOperationCancelGeneration = 0;
+    (llmEngineService as any).activeCompletionReject = null;
     (llmEngineService as any).additionalStopWordsCache?.clear?.();
     getBackendDevicesInfoMock().mockResolvedValue([
       {
@@ -244,6 +247,32 @@ describe('LLMEngineService', () => {
     expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).toHaveBeenLastCalledWith(
       expect.objectContaining({
         stop: expect.arrayContaining(['<|second_payload_stop|>']),
+      }),
+      expect.any(Function),
+    );
+  });
+
+  it('reuses cached template additional stops when only message text changes', async () => {
+    getFormattedChatMock().mockResolvedValue({
+      prompt: 'Formatted prompt',
+      additional_stops: ['<|shape_cached_stop|>'],
+    });
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    await llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Hello' }],
+      params: { n_predict: 32 },
+    });
+    await llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Jello' }],
+      params: { n_predict: 32 },
+    });
+
+    expect(getFormattedChatMock()).toHaveBeenCalledTimes(1);
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        stop: expect.arrayContaining(['<|shape_cached_stop|>']),
       }),
       expect.any(Function),
     );
@@ -684,6 +713,11 @@ describe('LLMEngineService', () => {
 
   it('retries strict alternation failures with normalized chat history', async () => {
     const completionMock = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock;
+    getFormattedChatMock().mockResolvedValue({
+      type: 'llama-chat',
+      prompt: '[INST] <<SYS>>\nBe concise.\n<</SYS>>\n\nHello [/INST]',
+      additional_stops: [],
+    });
     completionMock
       .mockRejectedValueOnce(new Error('Conversation roles must alternate user/assistant'))
       .mockResolvedValueOnce({ text: 'Recovered reply' });
@@ -726,6 +760,85 @@ describe('LLMEngineService', () => {
         ],
         temperature: 0.25,
         n_predict: 64,
+      }),
+      expect.any(Function),
+    );
+  });
+
+  it('retries strict alternation without Llama system wrappers for non-Llama templates', async () => {
+    const completionMock = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock;
+    getFormattedChatMock().mockResolvedValue({
+      type: 'jinja',
+      prompt: '<|system|>\nBe concise. Literal <<SYS>> marker <</SYS>>.\n<|user|>\nHello',
+      additional_stops: [],
+    });
+    completionMock
+      .mockRejectedValueOnce(new Error('Conversation roles must alternate user/assistant'))
+      .mockResolvedValueOnce({ text: 'Recovered reply' });
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    await expect(llmEngineService.chatCompletion({
+      messages: [
+        { role: 'system', content: 'Be concise. Literal <<SYS>> marker <</SYS>>.' },
+        { role: 'assistant', content: 'Leading assistant draft.' },
+        { role: 'user', content: 'First user question.' },
+        { role: 'assistant', content: 'First assistant reply.' },
+        { role: 'assistant', content: 'Extra assistant details.' },
+      ],
+      params: {
+        temperature: 0.25,
+        n_predict: 64,
+      },
+    })).resolves.toEqual({ text: 'Recovered reply' });
+
+    expect(completionMock).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        messages: [
+          {
+            role: 'user',
+            content: 'Be concise. Literal <<SYS>> marker <</SYS>>.\n\nFirst user question.',
+          },
+          {
+            role: 'assistant',
+            content: 'First assistant reply.\n\nExtra assistant details.',
+          },
+        ],
+      }),
+      expect.any(Function),
+    );
+  });
+
+  it('falls back to Llama system wrapping for legacy formatted payloads without type metadata', async () => {
+    const completionMock = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock;
+    getFormattedChatMock().mockResolvedValue({
+      prompt: '[INST] <<SYS>>\nBe concise.\n<</SYS>>\n\nHello [/INST]',
+      additional_stops: [],
+    });
+    completionMock
+      .mockRejectedValueOnce(new Error('Conversation roles must alternate user/assistant'))
+      .mockResolvedValueOnce({ text: 'Recovered reply' });
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    await expect(llmEngineService.chatCompletion({
+      messages: [
+        { role: 'system', content: 'Be concise.' },
+        { role: 'user', content: 'First user question.' },
+      ],
+      params: { n_predict: 64 },
+    })).resolves.toEqual({ text: 'Recovered reply' });
+
+    expect(completionMock).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        messages: [
+          {
+            role: 'user',
+            content: '<<SYS>>\nBe concise.\n<</SYS>>\n\nFirst user question.',
+          },
+        ],
       }),
       expect.any(Function),
     );

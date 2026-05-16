@@ -137,6 +137,11 @@ export type EngineBackendMode = 'cpu' | 'gpu' | 'npu' | 'unknown';
 
 export type EngineBackendPolicy = 'auto' | 'cpu' | 'gpu' | 'npu';
 
+export type EngineLifecycleEvent =
+  | 'low_memory_unload_failed'
+  | 'context_operation_unload_timeout'
+  | 'active_completion_unload_timeout';
+
 export type EngineBackendInitAttempt = {
   candidate: 'npu' | 'gpu' | 'cpu';
   nGpuLayers: number;
@@ -174,6 +179,8 @@ export interface EngineDiagnostics {
   initNBatch?: number;
   initNUbatch?: number;
   initKvUnified?: boolean;
+  lastLifecycleEvent?: EngineLifecycleEvent;
+  lastLifecycleError?: string;
 }
 
 export interface EngineState {

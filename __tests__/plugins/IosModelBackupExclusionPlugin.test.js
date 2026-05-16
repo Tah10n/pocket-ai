@@ -19,6 +19,7 @@ public class AppDelegate: ExpoAppDelegate {
 
     const result = withIosModelBackupExclusion._internal.applyIosModelBackupExclusionToAppDelegate(appDelegate);
 
+    expect(result.contents).toContain('import Foundation');
     expect(result.contents).toContain('excludePocketAiModelDirectoryFromBackup()');
     expect(result.contents).toContain('URLResourceValues()');
     expect(result.contents).toContain('resourceValues.isExcludedFromBackup = true');
@@ -69,6 +70,7 @@ public class AppDelegate: ExpoAppDelegate {
     const once = withIosModelBackupExclusion._internal.applyIosModelBackupExclusionToAppDelegate(appDelegate);
     const twice = withIosModelBackupExclusion._internal.applyIosModelBackupExclusionToAppDelegate(once);
 
+    expect(twice.contents.match(/^import Foundation$/gm)).toHaveLength(1);
     expect(twice.contents).toBe(once.contents);
   });
 });

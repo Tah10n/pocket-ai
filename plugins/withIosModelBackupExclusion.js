@@ -54,8 +54,29 @@ function insertBeforeLastOccurrence(contents, needle, insertion) {
   return `${contents.slice(0, index)}${insertion}${contents.slice(index)}`;
 }
 
+function ensureSwiftFoundationImport(contents) {
+  if (/^import\s+Foundation\b/m.test(contents)) {
+    return contents;
+  }
+
+  const importPattern = /^import\s+[^\n]+/gm;
+  let lastImport = null;
+  let match = importPattern.exec(contents);
+  while (match) {
+    lastImport = match;
+    match = importPattern.exec(contents);
+  }
+
+  if (!lastImport) {
+    return `import Foundation\n${contents}`;
+  }
+
+  const insertIndex = lastImport.index + lastImport[0].length;
+  return `${contents.slice(0, insertIndex)}\nimport Foundation${contents.slice(insertIndex)}`;
+}
+
 function addSwiftBackupExclusion(contents) {
-  let nextContents = contents;
+  let nextContents = ensureSwiftFoundationImport(contents);
 
   if (!nextContents.includes(SWIFT_CALL_MARKER)) {
     nextContents = nextContents.replace(

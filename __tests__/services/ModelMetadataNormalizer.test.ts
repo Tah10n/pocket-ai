@@ -93,6 +93,10 @@ describe('ModelMetadataNormalizer', () => {
       downloadProgress: 1,
       downloadedAt: 123,
       metadataTrust: 'verified_local',
+      resumeData: JSON.stringify({ resumeData: 'stale-resume-data' }),
+      downloadErrorAt: 456,
+      downloadErrorCode: 'download_http_error',
+      downloadErrorMessage: 'HTTP status 500',
       downloadIntegrity: {
         kind: 'size',
         sizeBytes: 2048,
@@ -106,6 +110,10 @@ describe('ModelMetadataNormalizer', () => {
     expect(normalized.downloadedAt).toBeUndefined();
     expect(normalized.metadataTrust).toBeUndefined();
     expect(normalized.downloadIntegrity).toBeUndefined();
+    expect(normalized.resumeData).toBeUndefined();
+    expect(normalized.downloadErrorAt).toBeUndefined();
+    expect(normalized.downloadErrorCode).toBeUndefined();
+    expect(normalized.downloadErrorMessage).toBeUndefined();
   });
 
   it('preserves prefixed GGUF metadata keys needed by memory-fit estimation', () => {

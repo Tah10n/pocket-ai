@@ -280,6 +280,20 @@ export function normalizePersistedModelMetadata(
     && Number.isFinite(model.downloadedAt)
     ? Math.round(model.downloadedAt)
     : undefined;
+  const resumeData = shouldDropDownloadedState
+    ? undefined
+    : normalizeNonEmptyString(model.resumeData);
+  const downloadErrorCode = shouldDropDownloadedState
+    ? undefined
+    : normalizeNonEmptyString(model.downloadErrorCode);
+  const downloadErrorMessage = shouldDropDownloadedState
+    ? undefined
+    : normalizeNonEmptyString(model.downloadErrorMessage);
+  const downloadErrorAt = !shouldDropDownloadedState
+    && typeof model.downloadErrorAt === 'number'
+    && Number.isFinite(model.downloadErrorAt)
+    ? Math.max(0, Math.round(model.downloadErrorAt))
+    : undefined;
   const capabilitySnapshot = normalizePersistedModelCapabilitySnapshot({
     gguf,
     hasVerifiedContextWindow: model.hasVerifiedContextWindow === true,
@@ -328,12 +342,10 @@ export function normalizePersistedModelMetadata(
     isPrivate: model.isPrivate === true,
     lifecycleStatus,
     downloadProgress,
-    resumeData: normalizeNonEmptyString(model.resumeData),
-    downloadErrorCode: normalizeNonEmptyString(model.downloadErrorCode),
-    downloadErrorMessage: normalizeNonEmptyString(model.downloadErrorMessage),
-    downloadErrorAt: typeof model.downloadErrorAt === 'number' && Number.isFinite(model.downloadErrorAt)
-      ? Math.max(0, Math.round(model.downloadErrorAt))
-      : undefined,
+    resumeData,
+    downloadErrorCode,
+    downloadErrorMessage,
+    downloadErrorAt,
     maxContextTokens: typeof model.maxContextTokens === 'number' && Number.isFinite(model.maxContextTokens)
       ? Math.round(model.maxContextTokens)
       : undefined,

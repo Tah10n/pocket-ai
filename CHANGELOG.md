@@ -8,6 +8,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > Note: This file is maintained automatically by Release Please based on Conventional Commits (PR titles).
 > Avoid editing it manually unless you are bootstrapping or fixing the release history.
 
+## [1.4.0](https://github.com/Tah10n/pocket-ai/compare/v1.3.3...v1.4.0) (2026-05-16)
+
+
+### Features
+
+* **storage:** add quarantine cleanup action ([eaf5426](https://github.com/Tah10n/pocket-ai/commit/eaf5426276b6e35a1a62225e4b45a539b6ff1caf))
+
+
+### Bug Fixes
+
+* **chat:** harden assistant patch and branch edits ([a3ae5da](https://github.com/Tah10n/pocket-ai/commit/a3ae5da17c23363c56b882ea3114f88c3945556e))
+* **chat:** harden persistence recovery paths ([fef5022](https://github.com/Tah10n/pocket-ai/commit/fef5022b74e103021d93918ac408580038af062c))
+* **chat:** harden streaming persistence flushes ([43591cc](https://github.com/Tah10n/pocket-ai/commit/43591cc94f0f2ae76e054a01c3d673e785e10e62))
+* **chat:** make clear tombstones authoritative ([58f5d9c](https://github.com/Tah10n/pocket-ai/commit/58f5d9cb5ad1640d84db9fbdafda5b5bdef53779))
+* **chat:** make summary affordance unavailable ([683f31f](https://github.com/Tah10n/pocket-ai/commit/683f31f39a5a3058d2feb5358d8e52b15348abed))
+* **chat:** preserve blank active thread selection ([a002ec0](https://github.com/Tah10n/pocket-ai/commit/a002ec06caa71b6804e19257585195d7c07fe2d2))
+* **chat:** preserve post-clear persistence records ([9aca687](https://github.com/Tah10n/pocket-ai/commit/9aca687fd576eb7eee4028d1b0fcd88efb63c331))
+* **chat:** prevent phantom persisted assistant placeholders ([2252c6a](https://github.com/Tah10n/pocket-ai/commit/2252c6ad0e83d5cdc64b3a327fdeb1aabdcece36))
+* **download:** harden model file lifecycle guards ([e7900f3](https://github.com/Tah10n/pocket-ai/commit/e7900f31803284adad787bdc557fb7658d154859))
+* **download:** harden queue failure handling ([7d7f209](https://github.com/Tah10n/pocket-ai/commit/7d7f209ffbbe6a925088a1a9326995beb34c5eff))
+* **download:** harden retry recovery paths ([6eb1411](https://github.com/Tah10n/pocket-ai/commit/6eb14115bfa2374136ee9088c0f456d10a3958eb))
+* **download:** keep pre-download failures explicit ([b709559](https://github.com/Tah10n/pocket-ai/commit/b709559ddc64b2584e22723e523c54c362887d92))
+* **download:** preserve legacy partial filenames ([6ae9324](https://github.com/Tah10n/pocket-ai/commit/6ae9324b99e388a6322b31495cdf491409ca3812))
+* **download:** tighten model file integrity verification ([4607319](https://github.com/Tah10n/pocket-ai/commit/4607319515fd817f92f36bd5a04b9111daadcedd))
+* **engine:** avoid jinja prompt marker role wrapping ([8deb337](https://github.com/Tah10n/pocket-ai/commit/8deb33712c6875289849f2bc12fc79ddb3021844))
+* **engine:** bound active context operations during unload ([1f9ab18](https://github.com/Tah10n/pocket-ai/commit/1f9ab18b6712606b02ad8d1c37bf37ad1da906b1))
+* **engine:** bound completion unload ([81ad7d4](https://github.com/Tah10n/pocket-ai/commit/81ad7d49bfc73cf2e5516eb5e29d23f99f0625e3))
+* **engine:** cancel timed-out context operations ([d676fdd](https://github.com/Tah10n/pocket-ai/commit/d676fddcaa2fdf47367631e6e1224919eb383dd9))
+* **engine:** handle low-memory unload failures ([6cc847e](https://github.com/Tah10n/pocket-ai/commit/6cc847e3e1a2b86ccbef46cca687367e524d158d))
+* **engine:** harden LLM lifecycle shutdown ([#96](https://github.com/Tah10n/pocket-ai/issues/96)) ([f0facd1](https://github.com/Tah10n/pocket-ai/commit/f0facd1c7dcdf5f0d1b2c0e884783346379830a9))
+* **engine:** make strict role normalization template-aware ([356f28b](https://github.com/Tah10n/pocket-ai/commit/356f28b18d92596e202cb0ca8943c71f0832cbe1))
+* **files:** harden model path and filename handling ([a0bacce](https://github.com/Tah10n/pocket-ai/commit/a0bacce851a0d26bb4ebc1e9a4b827646c944523))
+* harden chat persistence ([e1fe361](https://github.com/Tah10n/pocket-ai/commit/e1fe361e2c75db37869ac7a40681af4fa1bffaf8))
+* **ios:** import Foundation for backup exclusion plugin ([46d709e](https://github.com/Tah10n/pocket-ai/commit/46d709e132937f710d40c08d7746d116b8a48585))
+* **models:** clear local runtime state after offload ([6513279](https://github.com/Tah10n/pocket-ai/commit/6513279cbb5f846858b00f0a5b623dedffab02cd))
+* **models:** clear stale runtime metadata on path reset ([09edb3b](https://github.com/Tah10n/pocket-ai/commit/09edb3b51289094f129ace3e2fe15cc8bdd90fd4))
+* **models:** harden local model file lifecycle ([#95](https://github.com/Tah10n/pocket-ai/issues/95)) ([8d65c67](https://github.com/Tah10n/pocket-ai/commit/8d65c67ce0c09fa0c0118b2de862803635c8300a))
+* **models:** preserve download integrity state ([55aa499](https://github.com/Tah10n/pocket-ai/commit/55aa49930421ab0af2af4980a455a45f9f3071d2))
+* **presets:** recover from corrupt preset storage ([edf5bf1](https://github.com/Tah10n/pocket-ai/commit/edf5bf1c79c17b5637aa51c745fc3ab8931f76ab))
+* **presets:** use collision-safe preset ids and clear preset origin semantics ([890cba4](https://github.com/Tah10n/pocket-ai/commit/890cba4e6b72862516664ecd1156bb1603b4ad74))
+* **registry:** ignore stale local paths in model file lifecycle ([25b5542](https://github.com/Tah10n/pocket-ai/commit/25b55422b6ef65123c56ae598cfb60822152c8a5))
+* **registry:** quarantine orphaned model files before deletion ([dfb384a](https://github.com/Tah10n/pocket-ai/commit/dfb384a08a6fb00ac2ad12319301c1f99bee8f60))
+* **settings:** harden preset and settings schema recovery ([4ef015d](https://github.com/Tah10n/pocket-ai/commit/4ef015df19d200da70ab8eba4d2eb933eb86c6fd))
+* **settings:** normalize advanced model load parameters consistently ([9ba599a](https://github.com/Tah10n/pocket-ai/commit/9ba599abe97e0e41a07934179591f8f56f7010e8))
+* **settings:** persist sanitized settings migrations once ([634d0f6](https://github.com/Tah10n/pocket-ai/commit/634d0f6947cb14f60db5d7466d8ed70f4a9c889e))
+* **settings:** reject ambiguous CPU mask whitespace ([07c89b3](https://github.com/Tah10n/pocket-ai/commit/07c89b33e85ce939bf769258e31b30f163e23a65))
+* **storage:** guard model file cleanup paths ([0e2c1dd](https://github.com/Tah10n/pocket-ai/commit/0e2c1dd692840073da38f1e17904c70b61ddb682))
+* **storage:** harden quarantine cleanup ([a8ea696](https://github.com/Tah10n/pocket-ai/commit/a8ea696d47274dd3210808ed88e3dc2588aef0c1))
+
+
+### Performance Improvements
+
+* **engine:** reduce stop-token cache key cost ([c2a3442](https://github.com/Tah10n/pocket-ai/commit/c2a34428bbec0cdd8a1ecb063785af44edb9387d))
+* reduce startup catalog prefetch ([0463f2c](https://github.com/Tah10n/pocket-ai/commit/0463f2c38cc58d8438d39d081f1112bb9f2217a6))
+* reduce startup catalog prefetch ([5379d6a](https://github.com/Tah10n/pocket-ai/commit/5379d6adbd811fa14b3ae699378218abb9782cd6))
+* **storage:** bound recursive directory size scans ([d912220](https://github.com/Tah10n/pocket-ai/commit/d912220a2b9c3edfcab2208b118947255e1d8713))
+
 ## [1.3.3](https://github.com/Tah10n/pocket-ai/compare/v1.3.2...v1.3.3) (2026-05-11)
 
 

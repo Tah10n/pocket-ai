@@ -1036,6 +1036,41 @@ describe('ModelCatalogService', () => {
     expect(result.models[0].gguf).toEqual(expect.objectContaining({ totalBytes: 4 * 1024 * 1024 * 1024 }));
   });
 
+  it('preserves local download integrity markers when merging catalog results with the registry', async () => {
+    const localModel: ModelMetadata = {
+      ...makeLocalModel('org/verified-local-integrity-model'),
+      accessState: ModelAccessState.PUBLIC,
+      size: 4 * 1024 * 1024 * 1024,
+      metadataTrust: 'verified_local',
+      downloadIntegrity: {
+        kind: 'size',
+        sizeBytes: 4 * 1024 * 1024 * 1024,
+        checkedAt: 123,
+      },
+      localPath: 'verified-local-integrity-model.gguf',
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+    };
+    mockedRegistry.getModel.mockImplementation((modelId: string) => (
+      modelId === localModel.id ? localModel : undefined
+    ));
+
+    global.fetch = jest.fn(() =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: {
+          get: jest.fn(() => null),
+        },
+        json: () => Promise.resolve([makeRepo(localModel.id, 3 * 1024 * 1024 * 1024)]),
+      }),
+    ) as jest.Mock;
+
+    const result = await modelCatalogService.searchModels('phi');
+
+    expect(result.models[0].downloadIntegrity).toEqual(localModel.downloadIntegrity);
+  });
+
   it('skips mmproj projector files when selecting a GGUF download candidate', async () => {
     global.fetch = jest.fn(() =>
       Promise.resolve({

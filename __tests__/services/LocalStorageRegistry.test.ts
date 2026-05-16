@@ -192,6 +192,35 @@ describe('LocalStorageRegistry', () => {
     expect(updatedModels[0].gguf).toEqual(expect.objectContaining({ totalBytes: 2048 }));
   });
 
+  it('resets downloaded state when the local file no longer matches its integrity marker size', async () => {
+    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([
+      createMockModel({
+        size: 1000,
+        downloadedAt: 123,
+        downloadIntegrity: {
+          kind: 'size',
+          sizeBytes: 1000,
+          checkedAt: 10,
+        },
+        metadataTrust: 'verified_local',
+        downloadProgress: 1,
+      }),
+    ]);
+    (registry.saveModels as jest.Mock) = jest.fn();
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: true, size: 999 });
+
+    await registry.validateRegistry();
+
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalled();
+    const updatedModels = (registry.saveModels as jest.Mock).mock.calls[0][0];
+    expect(updatedModels[0].lifecycleStatus).toBe(LifecycleStatus.AVAILABLE);
+    expect(updatedModels[0].localPath).toBeUndefined();
+    expect(updatedModels[0].downloadedAt).toBeUndefined();
+    expect(updatedModels[0].downloadIntegrity).toBeUndefined();
+    expect(updatedModels[0].metadataTrust).toBeUndefined();
+    expect(updatedModels[0].downloadProgress).toBe(0);
+  });
+
   it('recomputes fitsInRam for downloaded models when legacy persisted metadata is missing the flag', async () => {
     (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(1024);
     (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([

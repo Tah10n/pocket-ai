@@ -611,6 +611,19 @@ export class LocalStorageRegistry {
           ? Math.round(info.size)
           : null;
 
+        const integritySizeBytes = model.downloadIntegrity?.sizeBytes;
+        if (
+          typeof integritySizeBytes === 'number'
+          && Number.isFinite(integritySizeBytes)
+          && integritySizeBytes > 0
+          && verifiedSizeBytes !== integritySizeBytes
+        ) {
+          console.warn(`[LocalStorageRegistry] Integrity marker size mismatch for ${model.id}, resetting to available`);
+          resetLocalDownloadState(model);
+          changed = true;
+          continue;
+        }
+
         if (verifiedSizeBytes !== null && model.size !== verifiedSizeBytes) {
           model.size = verifiedSizeBytes;
           changed = true;

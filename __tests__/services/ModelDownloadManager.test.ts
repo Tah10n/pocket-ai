@@ -442,13 +442,20 @@ describe('ModelDownloadManager Basic', () => {
   });
 
   it('rejects downloads that still have unknown size at preflight time', async () => {
-    useDownloadStore.setState({ queue: [], activeDownloadId: null });
+    useDownloadStore.setState({
+      queue: [{ ...mockModel, lifecycleStatus: LifecycleStatus.QUEUED }],
+      activeDownloadId: mockModel.id,
+    });
 
     await expect(
       runDownloadModel({ size: null }),
     ).rejects.toThrow('MODEL_SIZE_UNKNOWN');
 
     expect(FileSystem.createDownloadResumable).not.toHaveBeenCalled();
+    const entry = useDownloadStore.getState().queue.find((model) => model.id === mockModel.id);
+    expect(entry?.lifecycleStatus).toBe(LifecycleStatus.FAILED);
+    expect(entry?.downloadErrorCode).toBe('download_size_unknown');
+    expect(useDownloadStore.getState().activeDownloadId).toBeNull();
   });
 
   it('rejects downloads when the GGUF filename still needs a tree probe', async () => {
@@ -724,7 +731,8 @@ describe('ModelDownloadManager Basic', () => {
 
       expect(useDownloadStore.getState().activeDownloadId).toBeNull();
       const entry = useDownloadStore.getState().queue.find((model) => model.id === mockModel.id);
-      expect(entry?.lifecycleStatus).toBe(LifecycleStatus.AVAILABLE);
+      expect(entry?.lifecycleStatus).toBe(LifecycleStatus.FAILED);
+      expect(entry?.downloadErrorCode).toBe('action_failed');
     } finally {
       warnSpy.mockRestore();
     }
@@ -750,7 +758,8 @@ describe('ModelDownloadManager Basic', () => {
 
       expect(useDownloadStore.getState().activeDownloadId).toBeNull();
       const entry = useDownloadStore.getState().queue.find((model) => model.id === mockModel.id);
-      expect(entry?.lifecycleStatus).toBe(LifecycleStatus.AVAILABLE);
+      expect(entry?.lifecycleStatus).toBe(LifecycleStatus.FAILED);
+      expect(entry?.downloadErrorCode).toBe('action_failed');
       expect(entry?.resumeData).toBeUndefined();
     } finally {
       warnSpy.mockRestore();
@@ -773,7 +782,8 @@ describe('ModelDownloadManager Basic', () => {
       await expect(runDownloadModel({ lifecycleStatus: LifecycleStatus.QUEUED })).rejects.toThrow('network error');
 
       const entry = useDownloadStore.getState().queue.find((model) => model.id === mockModel.id);
-      expect(entry?.lifecycleStatus).toBe(LifecycleStatus.AVAILABLE);
+      expect(entry?.lifecycleStatus).toBe(LifecycleStatus.FAILED);
+      expect(entry?.downloadErrorCode).toBe('action_failed');
       expect(entry?.resumeData).toEqual(expect.stringContaining('resume-data'));
     } finally {
       warnSpy.mockRestore();

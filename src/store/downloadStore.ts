@@ -64,7 +64,10 @@ export const useDownloadStore = create<DownloadState>()(
             };
           }
 
-          if (existing.lifecycleStatus === LifecycleStatus.PAUSED) {
+          if (
+            existing.lifecycleStatus === LifecycleStatus.PAUSED
+            || existing.lifecycleStatus === LifecycleStatus.FAILED
+          ) {
             const nextEntry = normalizePersistedModelMetadata({
               ...existing,
               ...model,
@@ -72,6 +75,9 @@ export const useDownloadStore = create<DownloadState>()(
               downloadProgress: existing.downloadProgress,
               localPath: existing.localPath ?? model.localPath,
               lifecycleStatus: LifecycleStatus.QUEUED,
+              downloadErrorAt: undefined,
+              downloadErrorCode: undefined,
+              downloadErrorMessage: undefined,
             });
 
             return {
@@ -97,6 +103,9 @@ export const useDownloadStore = create<DownloadState>()(
               downloadProgress: existing.downloadProgress,
               localPath: existing.localPath ?? model.localPath,
               lifecycleStatus: LifecycleStatus.QUEUED,
+              downloadErrorAt: undefined,
+              downloadErrorCode: undefined,
+              downloadErrorMessage: undefined,
             });
 
             return {

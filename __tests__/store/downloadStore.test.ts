@@ -108,6 +108,27 @@ describe('downloadStore', () => {
     expect(entry?.downloadProgress).toBe(0.12);
   });
 
+  it('re-queues failed entries while clearing the visible failure state', () => {
+    useDownloadStore.setState({
+      queue: [
+        {
+          ...buildQueuedModel('failed', LifecycleStatus.FAILED),
+          downloadErrorAt: 123,
+          downloadErrorCode: 'download_size_unknown',
+          downloadErrorMessage: 'MODEL_SIZE_UNKNOWN',
+        },
+      ],
+      activeDownloadId: null,
+    });
+
+    useDownloadStore.getState().addToQueue(buildQueuedModel('failed', LifecycleStatus.AVAILABLE));
+    const entry = useDownloadStore.getState().queue.find((model) => model.id === 'failed');
+    expect(entry?.lifecycleStatus).toBe(LifecycleStatus.QUEUED);
+    expect(entry?.downloadErrorAt).toBeUndefined();
+    expect(entry?.downloadErrorCode).toBeUndefined();
+    expect(entry?.downloadErrorMessage).toBeUndefined();
+  });
+
   it('removeFromQueue clears activeDownloadId when removing the active entry', () => {
     useDownloadStore.setState({
       queue: [buildQueuedModel('active', LifecycleStatus.QUEUED)],

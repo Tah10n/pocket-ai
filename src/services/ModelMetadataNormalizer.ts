@@ -274,6 +274,11 @@ export function normalizePersistedModelMetadata(
     lifecycleStatus,
     downloadProgress,
     resumeData: normalizeNonEmptyString(model.resumeData),
+    downloadErrorCode: normalizeNonEmptyString(model.downloadErrorCode),
+    downloadErrorMessage: normalizeNonEmptyString(model.downloadErrorMessage),
+    downloadErrorAt: typeof model.downloadErrorAt === 'number' && Number.isFinite(model.downloadErrorAt)
+      ? Math.max(0, Math.round(model.downloadErrorAt))
+      : undefined,
     maxContextTokens: typeof model.maxContextTokens === 'number' && Number.isFinite(model.maxContextTokens)
       ? Math.round(model.maxContextTokens)
       : undefined,

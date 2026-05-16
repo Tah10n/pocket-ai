@@ -132,12 +132,13 @@ export class ModelDownloadManager {
   private activeJob: ActiveDownloadJob | null = null;
   private nextJobToken = 0;
   private isProcessing = false;
+  private downloadStoreUnsubscribe?: () => void;
   private hwUnsubscribe?: () => void;
   private settingsUnsubscribe?: () => void;
 
   private constructor() {
     // Subscribe to store changes to trigger queue processing
-    useDownloadStore.subscribe(
+    this.downloadStoreUnsubscribe = useDownloadStore.subscribe(
       (state) => `${state.activeDownloadId ?? ''}|${state.queue.map((model) => `${model.id}:${model.lifecycleStatus}`).join(',')}`,
       () => { void this.processQueue(); },
     );
@@ -178,7 +179,9 @@ export class ModelDownloadManager {
       return;
     }
 
+    ModelDownloadManager.instance.dispose();
     await ModelDownloadManager.instance.stopActiveJobForPrivateStorageReset({ clearQueue: true });
+    ModelDownloadManager.instance = undefined;
   }
 
   public static async stopRuntimeForPrivateStorageBlocked(): Promise<void> {
@@ -191,6 +194,26 @@ export class ModelDownloadManager {
 
   public resumeQueueIfStorageReady(): void {
     void this.processQueue();
+  }
+
+  public dispose(): void {
+    this.downloadStoreUnsubscribe?.();
+    this.downloadStoreUnsubscribe = undefined;
+    this.settingsUnsubscribe?.();
+    this.settingsUnsubscribe = undefined;
+    this.hwUnsubscribe?.();
+    this.hwUnsubscribe = undefined;
+  }
+
+  private getDownloadFailureUpdates(error: unknown, resumeData?: string): Partial<ModelMetadata> {
+    const appError = toAppError(error);
+    return {
+      lifecycleStatus: LifecycleStatus.FAILED,
+      resumeData,
+      downloadErrorCode: appError.code,
+      downloadErrorMessage: appError.message,
+      downloadErrorAt: Date.now(),
+    };
   }
 
   private async stopActiveJobForPrivateStorageReset(options: { clearQueue: boolean }): Promise<void> {
@@ -476,8 +499,7 @@ export class ModelDownloadManager {
       if (this.isCurrentJob(model.id, jobToken)) {
         try {
           assertPrivateStorageWritableForDownloadMutation();
-          updateModelInQueue(model.id, { lifecycleStatus: LifecycleStatus.AVAILABLE });
-          removeFromQueue(model.id);
+          updateModelInQueue(model.id, this.getDownloadFailureUpdates(e));
           setActiveDownload(null);
         } catch (storageError) {
           if (await this.handlePrivateStorageUnavailable(storageError)) {
@@ -630,7 +652,12 @@ export class ModelDownloadManager {
       }
 
       assertPrivateStorageWritableForDownloadMutation();
-      updateModelInQueue(model.id, { lifecycleStatus: LifecycleStatus.DOWNLOADING });
+      updateModelInQueue(model.id, {
+        lifecycleStatus: LifecycleStatus.DOWNLOADING,
+        downloadErrorAt: undefined,
+        downloadErrorCode: undefined,
+        downloadErrorMessage: undefined,
+      });
       
       const result = await resumable.downloadAsync();
 
@@ -739,6 +766,9 @@ export class ModelDownloadManager {
         downloadProgress: 1,
         allowUnknownSizeDownload: false,
         resumeData: undefined,
+        downloadErrorAt: undefined,
+        downloadErrorCode: undefined,
+        downloadErrorMessage: undefined,
         sha256: verificationHash ?? model.sha256,
       };
 
@@ -768,15 +798,12 @@ export class ModelDownloadManager {
 
       console.error(`[ModelDownloadManager] Error during download: ${model.id}`, e);
 
-      // If it fails, save resume data if we can and keep the entry in the queue as "available".
-      // This avoids infinite retry loops while still allowing the user to retry and resume later.
+      // If it fails, keep the entry in the queue with explicit failed state.
+      // This avoids infinite retry loops while preserving retry and resume context.
       const resumeData = safeSerializeResumeSnapshot(resumable as any, { modelId: model.id, scope: 'downloadError' });
       try {
         assertPrivateStorageWritableForDownloadMutation();
-        updateModelInQueue(model.id, {
-          resumeData,
-          lifecycleStatus: LifecycleStatus.AVAILABLE,
-        });
+        updateModelInQueue(model.id, this.getDownloadFailureUpdates(e, resumeData));
         setActiveDownload(null);
       } catch (storageError) {
         if (await this.handlePrivateStorageUnavailable(storageError)) {

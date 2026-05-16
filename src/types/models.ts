@@ -1,6 +1,7 @@
 export enum LifecycleStatus {
   AVAILABLE = 'available',
   DOWNLOADING = 'downloading',
+  FAILED = 'failed',
   PAUSED = 'paused',
   QUEUED = 'queued',
   VERIFYING = 'verifying',
@@ -93,6 +94,9 @@ export interface ModelMetadata {
   lifecycleStatus: LifecycleStatus;
   downloadProgress: number;
   resumeData?: string;
+  downloadErrorCode?: string;
+  downloadErrorMessage?: string;
+  downloadErrorAt?: number;
   maxContextTokens?: number;
   hasVerifiedContextWindow?: boolean;
   capabilitySnapshot?: ModelCapabilitySnapshot;

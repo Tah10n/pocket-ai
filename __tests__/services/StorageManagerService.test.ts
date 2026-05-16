@@ -63,6 +63,7 @@ jest.mock('../../src/services/SettingsStore', () => ({
 import { clearChatHistory } from '../../src/services/StorageManagerService';
 import { clearActiveCache } from '../../src/services/StorageManagerService';
 import { getAppStorageMetrics } from '../../src/services/StorageManagerService';
+import { __resetStorageManagerDirectorySizeCacheForTests } from '../../src/services/StorageManagerService';
 import { offloadModel } from '../../src/services/StorageManagerService';
 import { resetAppSettings } from '../../src/services/StorageManagerService';
 import { llmEngineService } from '../../src/services/LLMEngineService';
@@ -108,6 +109,7 @@ describe('StorageManagerService', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    __resetStorageManagerDirectorySizeCacheForTests();
     mockClearAllThreads.mockReturnValue(2);
     (clearLegacyChatHistory as jest.Mock).mockReturnValue(3);
     (useChatStore.getState as jest.Mock).mockReturnValue({
@@ -341,6 +343,62 @@ describe('StorageManagerService', () => {
     const metrics = await getAppStorageMetrics();
 
     expect(metrics.cacheBytes).toBe(384);
+  });
+
+  it('limits concurrent file stats while measuring cache directory size', async () => {
+    const entryNames = Array.from({ length: 20 }, (_, index) => `entry-${index}.bin`);
+    let activeStats = 0;
+    let maxActiveStats = 0;
+
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (uri === 'test-cache/') {
+        return { exists: true };
+      }
+
+      activeStats += 1;
+      maxActiveStats = Math.max(maxActiveStats, activeStats);
+      await Promise.resolve();
+      activeStats -= 1;
+
+      if (uri.startsWith('test-cache/entry-')) {
+        return { exists: true, size: 1 };
+      }
+
+      return { exists: false };
+    });
+    (FileSystem.readDirectoryAsync as jest.Mock).mockImplementation(async (uri: string) => (
+      uri === 'test-cache/' ? entryNames : []
+    ));
+
+    const metrics = await getAppStorageMetrics();
+
+    expect(metrics.cacheBytes).toBe(20);
+    expect(maxActiveStats).toBeLessThanOrEqual(8);
+  });
+
+  it('reuses a recent cache directory size measurement', async () => {
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (uri === 'test-cache/') {
+        return { exists: true };
+      }
+
+      if (uri === 'test-cache/cache.bin') {
+        return { exists: true, size: 128 };
+      }
+
+      return { exists: false };
+    });
+    (FileSystem.readDirectoryAsync as jest.Mock).mockImplementation(async (uri: string) => (
+      uri === 'test-cache/' ? ['cache.bin'] : []
+    ));
+
+    await expect(getAppStorageMetrics()).resolves.toEqual(expect.objectContaining({ cacheBytes: 128 }));
+    await expect(getAppStorageMetrics()).resolves.toEqual(expect.objectContaining({ cacheBytes: 128 }));
+
+    expect((FileSystem.readDirectoryAsync as jest.Mock).mock.calls.filter((call) => call[0] === 'test-cache/'))
+      .toHaveLength(1);
+    expect((FileSystem.getInfoAsync as jest.Mock).mock.calls.filter((call) => call[0] === 'test-cache/cache.bin'))
+      .toHaveLength(1);
   });
 
   it('uses the actual downloaded file size when estimating active model memory usage', async () => {

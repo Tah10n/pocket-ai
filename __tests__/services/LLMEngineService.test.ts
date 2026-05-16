@@ -89,6 +89,7 @@ describe('LLMEngineService', () => {
     inferenceBackendService.clearCache();
     (llmEngineService as any).contextOperationQueue = Promise.resolve();
     (llmEngineService as any).activeContextOperationPromises?.clear?.();
+    (llmEngineService as any).activeCompletionReject = null;
     (llmEngineService as any).additionalStopWordsCache?.clear?.();
     getBackendDevicesInfoMock().mockResolvedValue([
       {
@@ -777,7 +778,7 @@ describe('LLMEngineService', () => {
 
     await expect(llmEngineService.chatCompletion({
       messages: [
-        { role: 'system', content: 'Be concise.' },
+        { role: 'system', content: 'Be concise. Literal <<SYS>> marker <</SYS>>.' },
         { role: 'assistant', content: 'Leading assistant draft.' },
         { role: 'user', content: 'First user question.' },
         { role: 'assistant', content: 'First assistant reply.' },
@@ -795,7 +796,7 @@ describe('LLMEngineService', () => {
         messages: [
           {
             role: 'user',
-            content: 'Be concise.\n\nFirst user question.',
+            content: 'Be concise. Literal <<SYS>> marker <</SYS>>.\n\nFirst user question.',
           },
           {
             role: 'assistant',

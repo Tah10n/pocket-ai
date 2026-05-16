@@ -99,6 +99,7 @@ const MAX_NATIVE_LOG_LINES = 120;
 const MAX_ADDITIONAL_STOP_WORDS_CACHE_ENTRIES = 8;
 const CONTEXT_OPERATION_UNLOAD_DRAIN_TIMEOUT_MS = 5000;
 const CONTEXT_OPERATION_UNLOAD_TIMEOUT_MESSAGE = 'Timed out waiting for active context operations during unload';
+const ACTIVE_COMPLETION_UNLOAD_TIMEOUT_MESSAGE = 'Timed out waiting for active completion during unload';
 
 type StrictRoleSystemNormalization = 'plain' | 'llama';
 type ContextOperationDrainResult = 'drained' | 'timed_out';
@@ -307,25 +308,30 @@ function normalizeMessagesForStrictRoleAlternation(
   const systemContent = systemParts.join('\n\n');
   const trimmedSystemContent = systemContent.trim();
   if (trimmedSystemContent.length > 0) {
-    const sysWrappedRegex = /^\s*<<SYS>>[\s\S]*<<\/SYS>>\s*$/;
-    const isAlreadyWrapped = sysWrappedRegex.test(trimmedSystemContent);
+    const normalizedSystemContent = systemNormalization === 'llama'
+      ? (() => {
+          const sysWrappedRegex = /^\s*<<SYS>>[\s\S]*<<\/SYS>>\s*$/;
+          const isAlreadyWrapped = sysWrappedRegex.test(trimmedSystemContent);
+          const cleanedSystemContent = isAlreadyWrapped
+            ? trimmedSystemContent
+            : trimmedSystemContent
+                .replace(/<<SYS>>/g, '')
+                .replace(/<<\/SYS>>/g, '')
+                .trim();
 
-    const cleanedSystemContent = isAlreadyWrapped
-      ? trimmedSystemContent
-      : trimmedSystemContent
-          .replace(/<<SYS>>/g, '')
-          .replace(/<<\/SYS>>/g, '')
-          .trim();
+          if (cleanedSystemContent.length === 0) {
+            return '';
+          }
 
-    if (cleanedSystemContent.length === 0) {
+          return isAlreadyWrapped
+            ? cleanedSystemContent
+            : `<<SYS>>\n${cleanedSystemContent}\n<</SYS>>`;
+        })()
+      : trimmedSystemContent;
+
+    if (normalizedSystemContent.length === 0) {
       return mergeConsecutiveMessages(merged);
     }
-
-    const normalizedSystemContent = systemNormalization === 'llama'
-      ? isAlreadyWrapped
-        ? cleanedSystemContent
-        : `<<SYS>>\n${cleanedSystemContent}\n<</SYS>>`
-      : cleanedSystemContent;
 
     if (merged.length === 0) {
       merged = [{ role: 'user', content: normalizedSystemContent }];
@@ -391,6 +397,7 @@ class LLMEngineService {
   private operationQueue: Promise<void> = Promise.resolve();
   private contextOperationQueue: Promise<void> = Promise.resolve();
   private activeCompletionPromise: Promise<NativeCompletionResult> | null = null;
+  private activeCompletionReject: ((error: unknown) => void) | null = null;
   private activeContextOperationPromises: Set<Promise<unknown>> = new Set();
   private completionInterruptGeneration = 0;
   private isUnloading = false;
@@ -522,6 +529,32 @@ class LLMEngineService {
     return result;
   }
 
+  private async waitForUnloadPromise(
+    promise: Promise<unknown>,
+    timeoutMs: number,
+  ): Promise<ContextOperationDrainResult> {
+    if (timeoutMs <= 0) {
+      await promise;
+      return 'drained';
+    }
+
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    const timeoutPromise = new Promise<ContextOperationDrainResult>((resolve) => {
+      timeoutId = setTimeout(() => resolve('timed_out'), timeoutMs);
+    });
+    const settledPromise = promise.then(
+      (): ContextOperationDrainResult => 'drained',
+      (): ContextOperationDrainResult => 'drained',
+    );
+
+    const result = await Promise.race([settledPromise, timeoutPromise]);
+    if (timeoutId !== null) {
+      clearTimeout(timeoutId);
+    }
+
+    return result;
+  }
+
   private recordContextOperationUnloadTimeout(): void {
     this.lastLifecycleEvent = 'context_operation_unload_timeout';
     this.lastLifecycleError = CONTEXT_OPERATION_UNLOAD_TIMEOUT_MESSAGE;
@@ -534,6 +567,22 @@ class LLMEngineService {
 
     if (process.env.NODE_ENV !== 'test') {
       console.warn(`[LLMEngine] ${CONTEXT_OPERATION_UNLOAD_TIMEOUT_MESSAGE}`);
+    }
+  }
+
+  private recordActiveCompletionUnloadTimeout(): void {
+    this.lastLifecycleEvent = 'active_completion_unload_timeout';
+    this.lastLifecycleError = ACTIVE_COMPLETION_UNLOAD_TIMEOUT_MESSAGE;
+    this.activeCompletionReject?.(
+      new AppError('engine_unloading', ACTIVE_COMPLETION_UNLOAD_TIMEOUT_MESSAGE),
+    );
+    this.updateState({
+      ...this.state,
+      lastError: ACTIVE_COMPLETION_UNLOAD_TIMEOUT_MESSAGE,
+    });
+
+    if (process.env.NODE_ENV !== 'test') {
+      console.warn(`[LLMEngine] ${ACTIVE_COMPLETION_UNLOAD_TIMEOUT_MESSAGE}`);
     }
   }
 
@@ -1264,6 +1313,7 @@ class LLMEngineService {
     });
 
     this.activeCompletionPromise = completionTask;
+    this.activeCompletionReject = rejectCompletion;
     const interruptGeneration = this.completionInterruptGeneration;
 
     void (async () => {
@@ -1393,6 +1443,7 @@ class LLMEngineService {
       } finally {
         if (this.activeCompletionPromise === completionTask) {
           this.activeCompletionPromise = null;
+          this.activeCompletionReject = null;
         }
       }
     })();
@@ -3340,16 +3391,26 @@ class LLMEngineService {
     try {
       const activeCompletion = this.activeCompletionPromise;
       if (activeCompletion) {
-        try {
-          await this.stopCompletion();
-        } catch (error) {
-          console.warn('[LLMEngine] Failed to stop completion before unload', error);
+        let stopCompletionError: unknown;
+        const stopCompletionPromise = this.stopCompletion().catch((error) => {
+          stopCompletionError = error;
+        });
+        const stopCompletionResult = await this.waitForUnloadPromise(
+          stopCompletionPromise,
+          CONTEXT_OPERATION_UNLOAD_DRAIN_TIMEOUT_MS,
+        );
+        if (stopCompletionResult === 'timed_out') {
+          this.recordActiveCompletionUnloadTimeout();
+        } else if (stopCompletionError) {
+          console.warn('[LLMEngine] Failed to stop completion before unload', stopCompletionError);
         }
 
-        try {
-          await activeCompletion;
-        } catch {
-          // Completion failures are handled by the chat flow.
+        const activeCompletionResult = await this.waitForUnloadPromise(
+          activeCompletion.catch(() => undefined),
+          CONTEXT_OPERATION_UNLOAD_DRAIN_TIMEOUT_MS,
+        );
+        if (activeCompletionResult === 'timed_out') {
+          this.recordActiveCompletionUnloadTimeout();
         }
       }
 
@@ -3389,6 +3450,7 @@ class LLMEngineService {
       this.resetRuntimeTelemetry();
       this.initPromise = null;
       this.activeCompletionPromise = null;
+      this.activeCompletionReject = null;
       this.isUnloading = false;
       updateSettings({ activeModelId: null });
       hardwareListenerService.resetLowMemoryFlag();

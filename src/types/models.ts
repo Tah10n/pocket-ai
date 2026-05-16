@@ -69,6 +69,13 @@ export interface ModelThinkingCapabilitySnapshot {
   thinkingEndTag?: string;
 }
 
+export interface ModelFileIntegrityMarker {
+  kind: 'sha256' | 'size';
+  sizeBytes: number;
+  checkedAt: number;
+  sha256?: string;
+}
+
 export interface ModelMetadata {
   id: string;
   name: string;
@@ -83,6 +90,7 @@ export interface ModelMetadata {
   downloadedAt?: number;
   lastModifiedAt?: number;
   sha256?: string;
+  downloadIntegrity?: ModelFileIntegrityMarker;
   fitsInRam: boolean | null;
   memoryFitDecision?: ModelMemoryFitDecision;
   memoryFitConfidence?: ModelMemoryFitConfidence;

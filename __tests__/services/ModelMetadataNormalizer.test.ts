@@ -41,6 +41,40 @@ describe('ModelMetadataNormalizer', () => {
     expect(normalized.hasVerifiedContextWindow).toBe(true);
   });
 
+  it('preserves valid local download integrity markers', () => {
+    const normalized = normalizePersistedModelMetadata({
+      id: 'legacy/model',
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      downloadIntegrity: {
+        kind: 'size',
+        sizeBytes: 2048,
+        checkedAt: 10,
+      },
+    });
+
+    expect(normalized.downloadIntegrity).toEqual({
+      kind: 'size',
+      sizeBytes: 2048,
+      checkedAt: 10,
+    });
+  });
+
+  it('drops invalid sha integrity markers without a digest', () => {
+    const normalized = normalizePersistedModelMetadata({
+      id: 'legacy/model',
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      downloadIntegrity: {
+        kind: 'sha256',
+        sizeBytes: 2048,
+        checkedAt: 10,
+      },
+    });
+
+    expect(normalized.downloadIntegrity).toBeUndefined();
+  });
+
   it('preserves prefixed GGUF metadata keys needed by memory-fit estimation', () => {
     const normalized = normalizePersistedModelMetadata({
       id: 'llama/model',

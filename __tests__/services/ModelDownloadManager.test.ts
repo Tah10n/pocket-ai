@@ -368,7 +368,10 @@ describe('ModelDownloadManager Basic', () => {
   it('verifies a downloaded file when the size matches', async () => {
     (FileSystem.getInfoAsync as jest.Mock).mockResolvedValueOnce({ exists: true, size: 1000 });
 
-    await expect(modelDownloadManager.verifyChecksum(mockModel, 'test-dir/model.gguf')).resolves.toBeUndefined();
+    await expect(modelDownloadManager.verifyChecksum(mockModel, 'test-dir/model.gguf')).resolves.toEqual({
+      integrity: 'size',
+      sizeBytes: 1000,
+    });
   });
 
   it('preserves a real checksum when size validation succeeds', async () => {
@@ -377,7 +380,11 @@ describe('ModelDownloadManager Basic', () => {
 
     await expect(
       modelDownloadManager.verifyChecksum({ ...mockModel, sha256: 'tree-sha' }, 'test-dir/model.gguf'),
-    ).resolves.toBe('tree-sha');
+    ).resolves.toEqual({
+      integrity: 'sha256',
+      sha256: 'tree-sha',
+      sizeBytes: 1000,
+    });
   });
 
   it('normalizes sha256 digests with a sha256 prefix', async () => {
@@ -386,7 +393,11 @@ describe('ModelDownloadManager Basic', () => {
 
     await expect(
       modelDownloadManager.verifyChecksum({ ...mockModel, sha256: 'sha256:ABC123' }, 'test-dir/model.gguf'),
-    ).resolves.toBe('abc123');
+    ).resolves.toEqual({
+      integrity: 'sha256',
+      sha256: 'abc123',
+      sizeBytes: 1000,
+    });
   });
 
   it('converts Expo file URIs into native filesystem paths before hashing', async () => {
@@ -398,7 +409,11 @@ describe('ModelDownloadManager Basic', () => {
         { ...mockModel, sha256: 'tree-sha' },
         'file:///test-dir/model.gguf',
       ),
-    ).resolves.toBe('tree-sha');
+    ).resolves.toEqual({
+      integrity: 'sha256',
+      sha256: 'tree-sha',
+      sizeBytes: 1000,
+    });
 
     expect(RNFS.hash).toHaveBeenCalledWith('/test-dir/model.gguf', 'sha256');
   });
@@ -411,10 +426,10 @@ describe('ModelDownloadManager Basic', () => {
     );
   });
 
-  it('fails verification when the downloaded file size is too different', async () => {
+  it('fails verification when the downloaded file size differs from the trusted expected size', async () => {
     (FileSystem.getInfoAsync as jest.Mock).mockResolvedValueOnce({
       exists: true,
-      size: (mockModel.size ?? 0) + 2 * 1024 * 1024,
+      size: (mockModel.size ?? 0) + 1,
     });
 
     await expect(modelDownloadManager.verifyChecksum(mockModel, 'test-dir/model.gguf')).rejects.toThrow(
@@ -433,12 +448,15 @@ describe('ModelDownloadManager Basic', () => {
     expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/model.gguf', { idempotent: true });
   });
 
-  it('skips size mismatch verification when the expected size is unknown', async () => {
+  it('marks no-sha downloads as unverified when the expected size is unknown', async () => {
     (FileSystem.getInfoAsync as jest.Mock).mockResolvedValueOnce({ exists: true, size: 42 });
 
     await expect(
       modelDownloadManager.verifyChecksum({ ...mockModel, size: null }, 'test-dir/model.gguf'),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({
+      integrity: 'unverified',
+      sizeBytes: 42,
+    });
   });
 
   it('rejects downloads that still have unknown size at preflight time', async () => {
@@ -483,6 +501,8 @@ describe('ModelDownloadManager Basic', () => {
         size: 1000,
         fitsInRam: true,
         allowUnknownSizeDownload: false,
+        metadataTrust: undefined,
+        downloadIntegrity: undefined,
         sha256: undefined,
       }),
     );
@@ -509,6 +529,11 @@ describe('ModelDownloadManager Basic', () => {
         id: 'test/model',
         size: 1_000,
         fitsInRam: true,
+        metadataTrust: 'verified_local',
+        downloadIntegrity: expect.objectContaining({
+          kind: 'size',
+          sizeBytes: 1_000,
+        }),
       }),
     );
   });

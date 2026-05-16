@@ -2,6 +2,7 @@ import {
   LifecycleStatus,
   ModelAccessState,
   type ModelCapabilitySnapshot,
+  type ModelFileIntegrityMarker,
   type ModelGgufMetadata,
   type ModelMetadata,
   type ModelMemoryFitConfidence,
@@ -203,6 +204,35 @@ function normalizeThinkingCapabilitySnapshot(value: unknown): ModelThinkingCapab
   };
 }
 
+function normalizeFileIntegrityMarker(value: unknown): ModelFileIntegrityMarker | undefined {
+  if (!value || typeof value !== 'object') {
+    return undefined;
+  }
+
+  const record = value as Record<string, unknown>;
+  const kind = record.kind === 'sha256' || record.kind === 'size' ? record.kind : null;
+  const sizeBytes = normalizePositiveInteger(record.sizeBytes);
+  const checkedAt = typeof record.checkedAt === 'number' && Number.isFinite(record.checkedAt)
+    ? Math.max(0, Math.round(record.checkedAt))
+    : undefined;
+  const sha256 = normalizeNonEmptyString(record.sha256);
+
+  if (!kind || sizeBytes === undefined || checkedAt === undefined) {
+    return undefined;
+  }
+
+  if (kind === 'sha256' && !sha256) {
+    return undefined;
+  }
+
+  return {
+    kind,
+    sizeBytes,
+    checkedAt,
+    ...(sha256 ? { sha256 } : {}),
+  };
+}
+
 export function normalizePersistedModelMetadata(
   model: PersistedModelMetadata,
 ): ModelMetadata {
@@ -219,6 +249,9 @@ export function normalizePersistedModelMetadata(
   const gguf = normalizeGgufMetadata(model.gguf);
   const thinkingCapability = normalizeThinkingCapabilitySnapshot(
     (model as PersistedModelMetadata & { thinkingCapability?: unknown }).thinkingCapability,
+  );
+  const downloadIntegrity = normalizeFileIntegrityMarker(
+    (model as PersistedModelMetadata & { downloadIntegrity?: unknown }).downloadIntegrity,
   );
   const rawProgress = typeof model.downloadProgress === 'number' && Number.isFinite(model.downloadProgress)
     ? model.downloadProgress
@@ -256,6 +289,7 @@ export function normalizePersistedModelMetadata(
       ? Math.round(model.lastModifiedAt)
       : undefined,
     sha256: normalizeNonEmptyString(model.sha256),
+    ...(downloadIntegrity !== undefined ? { downloadIntegrity } : {}),
     fitsInRam: size === null
       ? null
       : memoryFitDecision !== undefined

@@ -127,6 +127,27 @@ type ActiveDownloadJob = {
   stopReason: 'pause' | 'cancel' | null;
 };
 
+type DownloadVerificationResult = {
+  integrity: 'sha256' | 'size' | 'unverified';
+  sha256?: string;
+  sizeBytes: number;
+};
+
+function buildDownloadIntegrityMarker(
+  verification: DownloadVerificationResult,
+): ModelMetadata['downloadIntegrity'] {
+  if (verification.integrity === 'unverified') {
+    return undefined;
+  }
+
+  return {
+    kind: verification.integrity,
+    sizeBytes: verification.sizeBytes,
+    checkedAt: Date.now(),
+    ...(verification.sha256 ? { sha256: verification.sha256 } : {}),
+  };
+}
+
 export class ModelDownloadManager {
   private static instance: ModelDownloadManager | undefined;
   private activeJob: ActiveDownloadJob | null = null;
@@ -654,6 +675,7 @@ export class ModelDownloadManager {
       assertPrivateStorageWritableForDownloadMutation();
       updateModelInQueue(model.id, {
         lifecycleStatus: LifecycleStatus.DOWNLOADING,
+        downloadIntegrity: undefined,
         downloadErrorAt: undefined,
         downloadErrorCode: undefined,
         downloadErrorMessage: undefined,
@@ -707,7 +729,7 @@ export class ModelDownloadManager {
         return;
       }
 
-      const verificationHash = await this.verifyChecksum(model, localUri);
+      const verification = await this.verifyChecksum(model, localUri);
 
       if (!this.isCurrentJob(model.id, jobToken)) {
         return;
@@ -733,7 +755,8 @@ export class ModelDownloadManager {
       )
         ? Math.round(downloadedFileInfo.size)
         : model.size;
-      const metadataTrust = typeof downloadedSize === 'number' && Number.isFinite(downloadedSize) && downloadedSize > 0
+      const hasVerifiedIntegrity = verification.integrity !== 'unverified';
+      const metadataTrust = hasVerifiedIntegrity && typeof downloadedSize === 'number' && Number.isFinite(downloadedSize) && downloadedSize > 0
         ? 'verified_local' as const
         : model.metadataTrust;
       const memoryFit = await this.resolveMemoryFit(downloadedSize, metadataTrust, model.gguf);
@@ -754,6 +777,7 @@ export class ModelDownloadManager {
         memoryFitDecision: memoryFit.decision,
         memoryFitConfidence: memoryFit.confidence,
         metadataTrust,
+        downloadIntegrity: buildDownloadIntegrityMarker(verification),
         gguf: typeof downloadedSize === 'number' && Number.isFinite(downloadedSize) && downloadedSize > 0
           ? {
             ...(model.gguf ?? {}),
@@ -769,7 +793,7 @@ export class ModelDownloadManager {
         downloadErrorAt: undefined,
         downloadErrorCode: undefined,
         downloadErrorMessage: undefined,
-        sha256: verificationHash ?? model.sha256,
+        sha256: verification.sha256 ?? model.sha256,
       };
 
       assertPrivateStorageWritableForDownloadMutation();
@@ -837,7 +861,7 @@ export class ModelDownloadManager {
   public async verifyChecksum(
     model: Pick<ModelMetadata, 'id' | 'size' | 'sha256'>,
     localUri: string,
-  ): Promise<string | undefined> {
+  ): Promise<DownloadVerificationResult> {
     try {
       const fileInfo = await FileSystem.getInfoAsync(localUri);
       if (!fileInfo.exists) {
@@ -849,7 +873,7 @@ export class ModelDownloadManager {
       const downloadedSize = fileInfo.size ?? 0;
       const expectedSize = model.size;
 
-      if (typeof expectedSize === 'number' && expectedSize > 0 && Math.abs(downloadedSize - expectedSize) > 1024 * 1024) {
+      if (typeof expectedSize === 'number' && expectedSize > 0 && downloadedSize !== expectedSize) {
         await this.deleteCorruptedDownload(localUri, model.id);
         throw new AppError(
           'download_verification_failed',
@@ -862,7 +886,10 @@ export class ModelDownloadManager {
 
       const expectedHash = this.normalizeSha256Digest(model.sha256);
       if (!expectedHash) {
-        return undefined;
+        return {
+          integrity: typeof expectedSize === 'number' && expectedSize > 0 ? 'size' : 'unverified',
+          sizeBytes: downloadedSize,
+        };
       }
 
       const actualHash = this.normalizeSha256Digest(
@@ -879,7 +906,7 @@ export class ModelDownloadManager {
         );
       }
 
-      return actualHash;
+      return { integrity: 'sha256', sha256: actualHash, sizeBytes: downloadedSize };
     } catch (error) {
       throw toAppError(error, 'download_verification_failed');
     }

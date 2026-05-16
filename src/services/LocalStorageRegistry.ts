@@ -197,6 +197,7 @@ function cloneModelMetadata(model: ModelMetadata): ModelMetadata {
   return {
     ...model,
     capabilitySnapshot: model.capabilitySnapshot ? { ...model.capabilitySnapshot } : undefined,
+    downloadIntegrity: model.downloadIntegrity ? { ...model.downloadIntegrity } : undefined,
     gguf: model.gguf ? { ...model.gguf } : undefined,
     thinkingCapability: model.thinkingCapability ? { ...model.thinkingCapability } : undefined,
     architectures: model.architectures ? [...model.architectures] : undefined,

@@ -399,6 +399,8 @@ class LLMEngineService {
   private activeCompletionPromise: Promise<NativeCompletionResult> | null = null;
   private activeCompletionReject: ((error: unknown) => void) | null = null;
   private activeContextOperationPromises: Set<Promise<unknown>> = new Set();
+  private activeContextOperationRejects: Map<Promise<unknown>, (error: unknown) => void> = new Map();
+  private contextOperationCancelGeneration = 0;
   private completionInterruptGeneration = 0;
   private isUnloading = false;
   private activeCalibrationSession: CalibrationSession | null = null;
@@ -473,32 +475,61 @@ class LLMEngineService {
     }
   }
 
+  private assertContextOperationNotCancelled(generation: number): void {
+    if (this.contextOperationCancelGeneration !== generation) {
+      throw new AppError('engine_unloading', CONTEXT_OPERATION_UNLOAD_TIMEOUT_MESSAGE);
+    }
+  }
+
   private trackContextOperation<T>(operation: () => Promise<T>): Promise<T> {
     const previousOperation = this.contextOperationQueue;
+    const operationGeneration = this.contextOperationCancelGeneration;
     let releaseQueue: () => void = () => undefined;
+    let didReleaseQueue = false;
     const queueSlot = new Promise<void>((resolve) => {
       releaseQueue = resolve;
     });
+    const releaseOperationQueue = () => {
+      if (!didReleaseQueue) {
+        didReleaseQueue = true;
+        releaseQueue();
+      }
+    };
 
     this.contextOperationQueue = previousOperation.catch(() => undefined).then(() => queueSlot);
 
-    const operationPromise = (async () => {
+    let rejectCancellation: (error: unknown) => void = () => undefined;
+    const cancellationPromise = new Promise<never>((_, reject) => {
+      rejectCancellation = reject;
+    });
+
+    const rawOperationPromise = (async () => {
       await previousOperation.catch(() => undefined);
+      this.assertContextOperationNotCancelled(operationGeneration);
 
       try {
-        return await operation();
+        const result = await operation();
+        this.assertContextOperationNotCancelled(operationGeneration);
+        return result;
       } finally {
-        releaseQueue();
+        releaseOperationQueue();
       }
     })();
+    void rawOperationPromise.catch(() => undefined);
+
+    const operationPromise = Promise.race([rawOperationPromise, cancellationPromise])
+      .finally(releaseOperationQueue);
     this.activeContextOperationPromises.add(operationPromise);
+    this.activeContextOperationRejects.set(operationPromise, rejectCancellation);
 
     void operationPromise.then(
       () => {
         this.activeContextOperationPromises.delete(operationPromise);
+        this.activeContextOperationRejects.delete(operationPromise);
       },
       () => {
         this.activeContextOperationPromises.delete(operationPromise);
+        this.activeContextOperationRejects.delete(operationPromise);
       },
     );
 
@@ -558,6 +589,11 @@ class LLMEngineService {
   private recordContextOperationUnloadTimeout(): void {
     this.lastLifecycleEvent = 'context_operation_unload_timeout';
     this.lastLifecycleError = CONTEXT_OPERATION_UNLOAD_TIMEOUT_MESSAGE;
+    this.contextOperationCancelGeneration += 1;
+    const timeoutError = new AppError('engine_unloading', CONTEXT_OPERATION_UNLOAD_TIMEOUT_MESSAGE);
+    const rejectActiveOperations = Array.from(this.activeContextOperationRejects.values());
+    this.activeContextOperationRejects.clear();
+    rejectActiveOperations.forEach((reject) => reject(timeoutError));
     this.contextOperationQueue = Promise.resolve();
     this.activeContextOperationPromises.clear();
     this.updateState({

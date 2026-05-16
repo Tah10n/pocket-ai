@@ -89,6 +89,8 @@ describe('LLMEngineService', () => {
     inferenceBackendService.clearCache();
     (llmEngineService as any).contextOperationQueue = Promise.resolve();
     (llmEngineService as any).activeContextOperationPromises?.clear?.();
+    (llmEngineService as any).activeContextOperationRejects?.clear?.();
+    (llmEngineService as any).contextOperationCancelGeneration = 0;
     (llmEngineService as any).activeCompletionReject = null;
     (llmEngineService as any).additionalStopWordsCache?.clear?.();
     getBackendDevicesInfoMock().mockResolvedValue([

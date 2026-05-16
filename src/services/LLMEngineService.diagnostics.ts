@@ -1,4 +1,10 @@
-import type { EngineBackendInitAttempt, EngineBackendMode, EngineBackendPolicy, EngineState } from '../types/models';
+import type {
+  EngineBackendInitAttempt,
+  EngineBackendMode,
+  EngineBackendPolicy,
+  EngineLifecycleEvent,
+  EngineState,
+} from '../types/models';
 
 export function buildEngineDiagnosticsSnapshot(source: {
   activeBackendMode: EngineBackendMode | 'unknown';
@@ -27,7 +33,7 @@ export function buildEngineDiagnosticsSnapshot(source: {
   initNBatch: number | null;
   initNUbatch: number | null;
   initKvUnified: boolean | null;
-  lastLifecycleEvent: 'low_memory_unload_failed' | null;
+  lastLifecycleEvent: EngineLifecycleEvent | null;
   lastLifecycleError: string | null;
 }): NonNullable<EngineState['diagnostics']> {
   return {

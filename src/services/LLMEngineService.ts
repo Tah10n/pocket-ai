@@ -10,6 +10,7 @@ import { hardwareListenerService } from './HardwareListenerService';
 import {
   EngineBackendMode,
   type EngineBackendInitAttempt,
+  type EngineLifecycleEvent,
   type EngineBackendPolicy,
   EngineStatus,
   EngineState,
@@ -96,8 +97,11 @@ type ChatCompletionReasoningFormat = NonNullable<NonNullable<LlmChatCompletionOp
 const DEFAULT_CONTEXT_SIZE = 4096;
 const MAX_NATIVE_LOG_LINES = 120;
 const MAX_ADDITIONAL_STOP_WORDS_CACHE_ENTRIES = 8;
+const CONTEXT_OPERATION_UNLOAD_DRAIN_TIMEOUT_MS = 5000;
+const CONTEXT_OPERATION_UNLOAD_TIMEOUT_MESSAGE = 'Timed out waiting for active context operations during unload';
 
 type StrictRoleSystemNormalization = 'plain' | 'llama';
+type ContextOperationDrainResult = 'drained' | 'timed_out';
 
 type TemplateAdditionalStopWordsResolution = {
   stopWords: string[];
@@ -381,7 +385,7 @@ class LLMEngineService {
   private completionInterruptGeneration = 0;
   private isUnloading = false;
   private activeCalibrationSession: CalibrationSession | null = null;
-  private lastLifecycleEvent: 'low_memory_unload_failed' | null = null;
+  private lastLifecycleEvent: EngineLifecycleEvent | null = null;
   private lastLifecycleError: string | null = null;
 
   constructor() {
@@ -484,10 +488,42 @@ class LLMEngineService {
     return operationPromise;
   }
 
-  private async waitForActiveContextOperations(): Promise<void> {
+  private async waitForActiveContextOperations(options: { timeoutMs?: number } = {}): Promise<ContextOperationDrainResult> {
     const activeContextOperations = Array.from(this.activeContextOperationPromises);
-    if (activeContextOperations.length > 0) {
-      await Promise.allSettled(activeContextOperations);
+    if (activeContextOperations.length === 0) {
+      return 'drained';
+    }
+
+    const drainPromise = Promise.allSettled(activeContextOperations).then((): ContextOperationDrainResult => 'drained');
+    if (typeof options.timeoutMs !== 'number' || options.timeoutMs <= 0) {
+      return await drainPromise;
+    }
+
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    const timeoutPromise = new Promise<ContextOperationDrainResult>((resolve) => {
+      timeoutId = setTimeout(() => resolve('timed_out'), options.timeoutMs);
+    });
+
+    const result = await Promise.race([drainPromise, timeoutPromise]);
+    if (timeoutId !== null) {
+      clearTimeout(timeoutId);
+    }
+
+    return result;
+  }
+
+  private recordContextOperationUnloadTimeout(): void {
+    this.lastLifecycleEvent = 'context_operation_unload_timeout';
+    this.lastLifecycleError = CONTEXT_OPERATION_UNLOAD_TIMEOUT_MESSAGE;
+    this.contextOperationQueue = Promise.resolve();
+    this.activeContextOperationPromises.clear();
+    this.updateState({
+      ...this.state,
+      lastError: CONTEXT_OPERATION_UNLOAD_TIMEOUT_MESSAGE,
+    });
+
+    if (process.env.NODE_ENV !== 'test') {
+      console.warn(`[LLMEngine] ${CONTEXT_OPERATION_UNLOAD_TIMEOUT_MESSAGE}`);
     }
   }
 
@@ -3307,7 +3343,12 @@ class LLMEngineService {
         }
       }
 
-      await this.waitForActiveContextOperations();
+      const contextDrainResult = await this.waitForActiveContextOperations({
+        timeoutMs: CONTEXT_OPERATION_UNLOAD_DRAIN_TIMEOUT_MS,
+      });
+      if (contextDrainResult === 'timed_out') {
+        this.recordContextOperationUnloadTimeout();
+      }
 
       if (this.context) {
         await requireLlamaModule().releaseAllLlama();

@@ -1074,6 +1074,59 @@ describe('chatStore', () => {
     expect(useChatStore.getState().activeThreadId).toBe(firstThreadId);
   });
 
+  it('persists an explicit blank active thread selection across rehydrate', async () => {
+    const firstThreadId = useChatStore.getState().createThread({
+      modelId: 'author/model-q4',
+      presetId: null,
+      presetSnapshot: {
+        id: null,
+        name: 'Default',
+        systemPrompt: 'You are helpful.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 1024,
+        seed: null,
+      },
+    });
+    const secondThreadId = useChatStore.getState().createThread({
+      modelId: 'author/model-q4',
+      presetId: null,
+      presetSnapshot: {
+        id: null,
+        name: 'Default',
+        systemPrompt: 'You are helpful.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 1024,
+        seed: null,
+      },
+    });
+
+    useChatStore.getState().setActiveThread(null);
+
+    expect(useChatStore.getState().activeThreadId).toBeNull();
+    expect(readPersistedChatIndex()).toEqual(expect.objectContaining({
+      activeThreadId: null,
+      threadIds: [firstThreadId, secondThreadId],
+    }));
+
+    useChatStore.setState({ threads: {}, activeThreadId: secondThreadId });
+    await useChatStore.persist.rehydrate();
+
+    expect(useChatStore.getState().getThread(firstThreadId)).toEqual(
+      expect.objectContaining({ id: firstThreadId }),
+    );
+    expect(useChatStore.getState().getThread(secondThreadId)).toEqual(
+      expect.objectContaining({ id: secondThreadId }),
+    );
+    expect(useChatStore.getState().activeThreadId).toBeNull();
+    expect(readPersistedChatIndex().activeThreadId).toBeNull();
+  });
+
   it('removes persisted v2 records when deleting the last thread', () => {
     const threadId = useChatStore.getState().createThread({
       modelId: 'author/model-q4',

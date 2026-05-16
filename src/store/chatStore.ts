@@ -283,7 +283,12 @@ function sanitizePersistedChatThread(
 function resolveActiveThreadId(
   threads: Record<string, ChatThread>,
   activeThreadId: string | null | undefined,
+  options?: { fallbackOnExplicitNull?: boolean },
 ) {
+  if (activeThreadId === null && !options?.fallbackOnExplicitNull) {
+    return null;
+  }
+
   return activeThreadId && threads[activeThreadId]
     ? activeThreadId
     : findMostRecentThreadId(threads);
@@ -403,7 +408,9 @@ function readV2PersistedChatState(now = Date.now()): ChatStoreHydrationResult | 
       console.warn('[ChatPersistence] Failed to clean up stale records after clear tombstone', error);
     }
 
-    const activeThreadId = resolveActiveThreadId(threads, index.activeThreadId);
+    const activeThreadId = resolveActiveThreadId(threads, index.activeThreadId, {
+      fallbackOnExplicitNull: true,
+    });
 
     if (Object.keys(threads).length > 0 || corruptThreadIds.length > 0) {
       writeChatPersistenceIndexForSnapshot(storage, { threads, activeThreadId }, { corruptThreadIds });
@@ -445,7 +452,10 @@ function readV2PersistedChatState(now = Date.now()): ChatStoreHydrationResult | 
 
   const activeThreadId = resolveActiveThreadId(
     threads,
-    index ? index.activeThreadId : null,
+    index ? index.activeThreadId : undefined,
+    {
+      fallbackOnExplicitNull: index != null && index.threadIds.length === 0,
+    },
   );
   writeChatPersistenceIndexForSnapshot(storage, { threads, activeThreadId }, { corruptThreadIds });
 
@@ -484,14 +494,17 @@ function migrateLegacyPersistedChatState(
     writeChatThreadRecord(storage, thread, now);
   });
 
-  const rawActiveThreadId = typeof persistedState.activeThreadId === 'string'
-    ? persistedState.activeThreadId
-    : null;
-  const preferredActiveThreadId = rawActiveThreadId && threads[rawActiveThreadId]
-    ? rawActiveThreadId
-    : existingV2State?.activeThreadId && threads[existingV2State.activeThreadId]
-      ? existingV2State.activeThreadId
-      : null;
+  const preferredActiveThreadId = typeof persistedState.activeThreadId === 'string'
+    ? threads[persistedState.activeThreadId]
+      ? persistedState.activeThreadId
+      : existingV2State?.activeThreadId && threads[existingV2State.activeThreadId]
+        ? existingV2State.activeThreadId
+        : undefined
+    : persistedState.activeThreadId === null
+      ? null
+      : existingV2State?.activeThreadId && threads[existingV2State.activeThreadId]
+        ? existingV2State.activeThreadId
+        : undefined;
   const activeThreadId = resolveActiveThreadId(
     threads,
     preferredActiveThreadId,

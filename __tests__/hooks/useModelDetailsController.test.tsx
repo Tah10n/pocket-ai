@@ -328,7 +328,16 @@ describe('useModelDetailsController', () => {
       lifecycleStatus: LifecycleStatus.DOWNLOADED,
       localPath: 'models/model.gguf',
       downloadedAt: 123,
+      downloadIntegrity: {
+        kind: 'size',
+        sizeBytes: 2048,
+        checkedAt: 456,
+      },
       resumeData: 'resume-data',
+      downloadErrorAt: 789,
+      downloadErrorCode: 'download_http_error',
+      downloadErrorMessage: 'HTTP status 500',
+      metadataTrust: 'verified_local',
     });
     mockGetCachedModel.mockReturnValue(model);
     mockGetModelDetails.mockResolvedValue(model);
@@ -354,6 +363,13 @@ describe('useModelDetailsController', () => {
     expect(getCurrentValue()?.displayModel?.lifecycleStatus).toBe(LifecycleStatus.AVAILABLE);
     expect(getCurrentValue()?.displayModel?.downloadProgress).toBe(0);
     expect(getCurrentValue()?.displayModel?.localPath).toBeUndefined();
+    expect(getCurrentValue()?.displayModel?.downloadedAt).toBeUndefined();
+    expect(getCurrentValue()?.displayModel?.downloadIntegrity).toBeUndefined();
+    expect(getCurrentValue()?.displayModel?.resumeData).toBeUndefined();
+    expect(getCurrentValue()?.displayModel?.downloadErrorAt).toBeUndefined();
+    expect(getCurrentValue()?.displayModel?.downloadErrorCode).toBeUndefined();
+    expect(getCurrentValue()?.displayModel?.downloadErrorMessage).toBeUndefined();
+    expect(getCurrentValue()?.displayModel?.metadataTrust).toBeUndefined();
   });
 
   it('surfaces reset-settings deletion failures', async () => {

@@ -148,6 +148,10 @@ function buildDownloadIntegrityMarker(
   };
 }
 
+function isFileSystemDirectory(info: { isDirectory?: boolean }): boolean {
+  return info.isDirectory === true;
+}
+
 export class ModelDownloadManager {
   private static instance: ModelDownloadManager | undefined;
   private activeJob: ActiveDownloadJob | null = null;
@@ -758,8 +762,20 @@ export class ModelDownloadManager {
       if (this.getStopReason(model.id, jobToken)) {
         return;
       }
+      if (!downloadedFileInfo.exists || isFileSystemDirectory(downloadedFileInfo)) {
+        throw new AppError(
+          'download_file_missing',
+          downloadedFileInfo.exists
+            ? 'Downloaded path became a directory before completion'
+            : 'Downloaded file disappeared before completion',
+          {
+            details: { modelId: model.id, localUri },
+          },
+        );
+      }
       const downloadedSize = (
         downloadedFileInfo.exists &&
+        !isFileSystemDirectory(downloadedFileInfo) &&
         typeof downloadedFileInfo.size === 'number' &&
         Number.isFinite(downloadedFileInfo.size) &&
         downloadedFileInfo.size > 0
@@ -877,6 +893,11 @@ export class ModelDownloadManager {
       const fileInfo = await FileSystem.getInfoAsync(localUri);
       if (!fileInfo.exists) {
         throw new AppError('download_file_missing', 'File does not exist after download', {
+          details: { modelId: model.id, localUri },
+        });
+      }
+      if (isFileSystemDirectory(fileInfo)) {
+        throw new AppError('download_file_missing', 'Downloaded path is a directory, not a model file', {
           details: { modelId: model.id, localUri },
         });
       }
@@ -1074,6 +1095,7 @@ export class ModelDownloadManager {
     modelsDir: string,
   ): Promise<string> {
     const candidates = this.getDownloadFileNameCandidates(model);
+    let firstAvailableCandidate: string | undefined;
 
     for (const candidate of candidates) {
       const candidatePath = safeJoinModelPath(modelsDir, candidate);
@@ -1081,12 +1103,26 @@ export class ModelDownloadManager {
         continue;
       }
       const info = await FileSystem.getInfoAsync(candidatePath);
+      if (!info.exists) {
+        firstAvailableCandidate ??= candidate;
+        continue;
+      }
+      if (isFileSystemDirectory(info)) {
+        console.warn(`[ModelDownloadManager] Download candidate for ${model.id} is a directory, skipping: ${candidate}`);
+        continue;
+      }
       if (info.exists) {
         return candidate;
       }
     }
 
-    return candidates[0];
+    if (firstAvailableCandidate) {
+      return firstAvailableCandidate;
+    }
+
+    throw new AppError('download_file_missing', `No safe download file target is available for ${model.id}`, {
+      details: { modelId: model.id, candidates },
+    });
   }
 
   private async deleteDownloadFiles(fileNames: string[], modelId: string): Promise<void> {
@@ -1104,6 +1140,10 @@ export class ModelDownloadManager {
       }
       const fileInfo = await FileSystem.getInfoAsync(localUri);
       if (!fileInfo.exists) {
+        continue;
+      }
+      if (isFileSystemDirectory(fileInfo)) {
+        console.warn(`[ModelDownloadManager] Partial download candidate for ${modelId} is a directory, skipping: ${fileName}`);
         continue;
       }
 
@@ -1172,6 +1212,13 @@ export class ModelDownloadManager {
 
   private async deleteCorruptedDownload(localUri: string, modelId: string): Promise<void> {
     try {
+      const fileInfo = await FileSystem.getInfoAsync(localUri);
+      if (!fileInfo.exists || isFileSystemDirectory(fileInfo)) {
+        if (fileInfo.exists) {
+          console.warn(`[ModelDownloadManager] Corrupted download path for ${modelId} is a directory, skipping delete`);
+        }
+        return;
+      }
       await FileSystem.deleteAsync(localUri, { idempotent: true });
     } catch (error) {
       console.warn(`[ModelDownloadManager] Failed to delete corrupted download for ${modelId}`, error);

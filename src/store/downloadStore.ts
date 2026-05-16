@@ -94,8 +94,8 @@ export const useDownloadStore = create<DownloadState>()(
             return state;
           }
 
-          // If a previous download attempt failed, we keep it in the queue as "available"
-          // so it won't auto-retry. Re-queue it when the user taps Download again.
+          // Legacy queues may still contain a retryable entry stored as AVAILABLE.
+          // Re-queue it only when the user explicitly taps Download again.
           if (existing.lifecycleStatus === LifecycleStatus.AVAILABLE) {
             const nextEntry = normalizePersistedModelMetadata({
               ...existing,

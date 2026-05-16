@@ -366,6 +366,39 @@ describe('ModelDownloadManager Basic', () => {
     ]);
   });
 
+  it('does not delete directory paths while canceling queued partial downloads', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    useDownloadStore.setState({
+      queue: [{
+        ...mockModel,
+        localPath: 'nested-cache',
+        lifecycleStatus: LifecycleStatus.PAUSED,
+      }],
+      activeDownloadId: null,
+    });
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (uri === 'test-dir/models/nested-cache') {
+        return { exists: true, isDirectory: true };
+      }
+
+      if (uri.startsWith('test-dir/models/')) {
+        return { exists: false, size: 0 };
+      }
+
+      return { exists: true, size: 1000 };
+    });
+
+    try {
+      await modelDownloadManager.cancelDownload(mockModel.id);
+
+      expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/models/nested-cache', expect.anything());
+      expect(FileSystem.deleteAsync).not.toHaveBeenCalled();
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Partial download candidate for test/model is a directory'));
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
   it('verifies a downloaded file when the size matches', async () => {
     (FileSystem.getInfoAsync as jest.Mock).mockResolvedValueOnce({ exists: true, size: 1000 });
 
@@ -425,6 +458,17 @@ describe('ModelDownloadManager Basic', () => {
     await expect(modelDownloadManager.verifyChecksum(mockModel, 'test-dir/model.gguf')).rejects.toThrow(
       'File does not exist after download',
     );
+  });
+
+  it('fails verification without deleting when the download path is a directory', async () => {
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValueOnce({ exists: true, isDirectory: true, size: 0 });
+
+    await expect(modelDownloadManager.verifyChecksum(mockModel, 'test-dir/model.gguf')).rejects.toThrow(
+      'Downloaded path is a directory, not a model file',
+    );
+
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalled();
+    expect(RNFS.hash).not.toHaveBeenCalled();
   });
 
   it('fails verification when the downloaded file size differs from the trusted expected size', async () => {
@@ -529,6 +573,30 @@ describe('ModelDownloadManager Basic', () => {
     expect(entry?.downloadErrorCode).toBe('action_failed');
     expect(entry?.resumeData).toEqual(expect.stringContaining('resume-data'));
     expect(useDownloadStore.getState().activeDownloadId).toBeNull();
+  });
+
+  it('does not complete when the verified file disappears before the final registry write', async () => {
+    const verifySpy = jest.spyOn(modelDownloadManager, 'verifyChecksum').mockResolvedValue({
+      integrity: 'size',
+      sizeBytes: 1000,
+    });
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: false, size: 0 });
+    useDownloadStore.setState({
+      queue: [{ ...mockModel, lifecycleStatus: LifecycleStatus.QUEUED }],
+      activeDownloadId: mockModel.id,
+    });
+
+    try {
+      await expect(runDownloadModel({})).rejects.toThrow('Downloaded file disappeared before completion');
+
+      expect(mockedRegistry.updateModel).not.toHaveBeenCalled();
+      const entry = useDownloadStore.getState().queue.find((model) => model.id === mockModel.id);
+      expect(entry?.lifecycleStatus).toBe(LifecycleStatus.FAILED);
+      expect(entry?.downloadErrorCode).toBe('download_file_missing');
+      expect(entry?.downloadProgress).toBe(0);
+    } finally {
+      verifySpy.mockRestore();
+    }
   });
 
   it('rejects downloads when the GGUF filename still needs a tree probe', async () => {
@@ -644,6 +712,42 @@ describe('ModelDownloadManager Basic', () => {
         localPath: 'test_model.gguf',
       }),
     );
+  });
+
+  it('skips directory download candidates while preserving legacy partial resume', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (/^test-dir\/models\/model-main-[a-z0-9]+\.gguf$/.test(uri)) {
+        return { exists: true, isDirectory: true };
+      }
+
+      if (uri === 'test-dir/models/test_model.gguf') {
+        return { exists: true, size: 1000 };
+      }
+
+      if (uri.startsWith('test-dir/models/')) {
+        return { exists: false, size: 0 };
+      }
+
+      return { exists: true, size: 1000 };
+    });
+
+    try {
+      await expect(
+        runDownloadModel({ resumeData: 'resume-data' }),
+      ).resolves.toBeUndefined();
+
+      expect(FileSystem.createDownloadResumable).toHaveBeenCalledWith(
+        'http://example.com/model.gguf',
+        'test-dir/models/test_model.gguf',
+        {},
+        expect.any(Function),
+        'resume-data',
+      );
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Download candidate for test/model is a directory'));
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
   it('reuses previous generated partial filenames with dotted repo labels', async () => {

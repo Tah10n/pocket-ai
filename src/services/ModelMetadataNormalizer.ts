@@ -13,6 +13,7 @@ import {
 import { normalizePersistedModelCapabilitySnapshot } from '../utils/modelCapabilities';
 import { getShortModelLabel } from '../utils/modelLabel';
 import { buildHuggingFaceResolveUrl } from '../utils/huggingFaceUrls';
+import { isValidLocalFileName } from '../utils/safeFilePath';
 
 type PersistedModelMetadata = Partial<ModelMetadata> & {
   id: string;
@@ -56,6 +57,11 @@ function normalizeNonEmptyString(value: unknown): string | undefined {
 
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function normalizeLocalFileName(value: unknown): string | undefined {
+  const normalized = normalizeNonEmptyString(value);
+  return normalized !== undefined && isValidLocalFileName(normalized) ? normalized : undefined;
 }
 
 function normalizeStringArray(value: unknown): string[] | undefined {
@@ -281,7 +287,7 @@ export function normalizePersistedModelMetadata(
     requiresTreeProbe: model.requiresTreeProbe === true,
     hfRevision: normalizedRevision,
     resolvedFileName: normalizeNonEmptyString(model.resolvedFileName),
-    localPath: normalizeNonEmptyString(model.localPath),
+    localPath: normalizeLocalFileName(model.localPath),
     downloadedAt: typeof model.downloadedAt === 'number' && Number.isFinite(model.downloadedAt)
       ? Math.round(model.downloadedAt)
       : undefined,

@@ -1,6 +1,6 @@
 # Privacy & Disclosures
 
-Last updated: 2026-04-08
+Last updated: 2026-05-16
 
 ## Summary
 
@@ -11,7 +11,7 @@ This document summarizes the current behavior of the app as configured in this r
 ## What stays on-device
 
 - Chat prompts and generated responses stay on the device during local inference.
-- Downloaded GGUF files are stored in app-managed local storage.
+- Downloaded GGUF files are stored in app-managed local storage. Android release builds disable OS auto-backup, and iOS release builds mark the downloaded-model storage directory as excluded from device and iCloud backups.
 - Conversation history is persisted locally on the device and encrypted at rest.
 - System prompt presets, generation settings, and model-specific load profiles are persisted locally on the device and encrypted at rest.
 - An optional Hugging Face access token can be stored locally in secure device storage for browsing and downloading gated or private models.
@@ -61,6 +61,7 @@ For the release configuration currently committed here:
 
 - Android package name: `com.github.tah10n.pocketai`
 - Android auto-backup is disabled to avoid backing up local chat and model state
+- iOS excludes downloaded model files under the app-managed `Documents/models/` directory from device and iCloud backups
 - Android permissions include:
   - `INTERNET` (Hugging Face catalog and model downloads)
   - `VIBRATE` (UI haptics)

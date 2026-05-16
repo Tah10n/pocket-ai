@@ -17,7 +17,7 @@ import { huggingFaceTokenService } from './HuggingFaceTokenService';
 import { isHuggingFaceUrl } from '../utils/huggingFaceUrls';
 import { getCandidateModelDownloadFileNames } from '../utils/modelFiles';
 import { estimateFastMemoryFit } from '../memory/estimator';
-import { safeJoinModelPath } from '../utils/safeFilePath';
+import { fileUriToNativePath, isValidLocalFileName, safeJoinModelPath } from '../utils/safeFilePath';
 import { DECIMAL_GIGABYTE } from '../utils/modelSize';
 import { hardwareListenerService, type HardwareStatus } from './HardwareListenerService';
 import { getSettings, subscribeSettings } from './SettingsStore';
@@ -1053,7 +1053,7 @@ export class ModelDownloadManager {
     model: Pick<ModelMetadata, 'id' | 'resolvedFileName' | 'hfRevision' | 'localPath'>,
   ): string[] {
     const candidates = getCandidateModelDownloadFileNames(model);
-    return model.localPath
+    return model.localPath && isValidLocalFileName(model.localPath)
       ? Array.from(new Set([model.localPath, ...candidates]))
       : candidates;
   }
@@ -1121,11 +1121,7 @@ export class ModelDownloadManager {
   }
 
   private toNativeFilePath(fileUri: string): string {
-    if (!fileUri.startsWith('file://')) {
-      return fileUri;
-    }
-
-    return decodeURI(fileUri.replace(/^file:\/+/, '/'));
+    return fileUriToNativePath(fileUri);
   }
 
   private async resolveMemoryFit(

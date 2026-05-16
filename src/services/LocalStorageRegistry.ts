@@ -701,7 +701,7 @@ export class LocalStorageRegistry {
           continue;
         }
 
-        // It's neither completed nor queued -> it's a dead partial download. Delete it.
+        // It is neither completed nor queued, so hold it for explicit cleanup.
         const fileUri = safeJoinModelPath(modelsDir, filename);
         if (!fileUri) {
           continue;

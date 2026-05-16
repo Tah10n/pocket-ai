@@ -2,6 +2,7 @@ import {
   getCandidateModelDownloadFileNames,
   getLegacyModelDownloadFileName,
   getModelDownloadFileName,
+  sanitizeModelFileSegment,
 } from '../../src/utils/modelFiles';
 
 describe('modelFiles', () => {
@@ -42,5 +43,17 @@ describe('modelFiles', () => {
     });
 
     expect(fileName).toMatch(/^model-main-[a-z0-9]+\.gguf$/);
+  });
+
+  it('sanitizes generated and legacy filenames into safe single path segments', () => {
+    expect(sanitizeModelFileSegment('../bad model', 'model')).toBe('bad_model');
+
+    const legacyName = getLegacyModelDownloadFileName('author/../../bad model');
+    expect(legacyName).toMatch(/^author_bad_model-[a-z0-9]+\.gguf$/);
+    expect(getCandidateModelDownloadFileNames({
+      id: 'author/../../bad model',
+      resolvedFileName: '../../bad.gguf',
+      hfRevision: '../main',
+    })).toEqual(expect.arrayContaining([legacyName]));
   });
 });

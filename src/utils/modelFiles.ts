@@ -1,10 +1,12 @@
 import type { ModelMetadata } from '../types/models';
 import { getShortModelLabel } from './modelLabel';
+import { isValidLocalFileName } from './safeFilePath';
 
-function sanitizeFileSegment(value: string, fallback: string): string {
+export function sanitizeModelFileSegment(value: string, fallback: string): string {
   const sanitized = value
     .trim()
-    .replace(/[^A-Za-z0-9._-]+/g, '_')
+    .replace(/[^A-Za-z0-9_-]+/g, '_')
+    .replace(/_+/g, '_')
     .replace(/^_+|_+$/g, '');
 
   return sanitized.length > 0 ? sanitized : fallback;
@@ -26,8 +28,8 @@ export function getModelDownloadFileName(
 ): string {
   const extensionMatch = model.resolvedFileName?.match(/(\.[A-Za-z0-9]+)$/);
   const extension = extensionMatch?.[1]?.toLowerCase() ?? '.gguf';
-  const repoName = sanitizeFileSegment(getShortModelLabel(model.id) || model.id, 'model');
-  const revision = sanitizeFileSegment(model.hfRevision ?? 'main', 'main').slice(0, 16);
+  const repoName = sanitizeModelFileSegment(getShortModelLabel(model.id) || model.id, 'model');
+  const revision = sanitizeModelFileSegment(model.hfRevision ?? 'main', 'main').slice(0, 16);
   const fingerprint = hashString([
     model.id,
     model.resolvedFileName ?? '',
@@ -38,7 +40,15 @@ export function getModelDownloadFileName(
 }
 
 export function getLegacyModelDownloadFileName(modelId: string): string {
-  return `${modelId.replace(/\//g, '_')}.gguf`;
+  const legacyBase = modelId.replace(/\//g, '_');
+  const sanitizedBase = sanitizeModelFileSegment(legacyBase, 'model');
+  const candidate = `${sanitizedBase}.gguf`;
+
+  if (sanitizedBase === legacyBase && isValidLocalFileName(candidate)) {
+    return candidate;
+  }
+
+  return `${sanitizedBase}-${hashString(modelId)}.gguf`;
 }
 
 export function getCandidateModelDownloadFileNames(
@@ -47,5 +57,5 @@ export function getCandidateModelDownloadFileNames(
   return Array.from(new Set([
     getModelDownloadFileName(model),
     getLegacyModelDownloadFileName(model.id),
-  ]));
+  ])).filter(isValidLocalFileName);
 }

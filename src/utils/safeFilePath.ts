@@ -29,12 +29,38 @@ export function isValidLocalFileName(name: unknown): name is string {
 
 /**
  * Joins a base directory with a filename, returning null if the filename is unsafe.
- * The base directory must end with '/'.
  */
 export function safeJoinModelPath(baseDir: string, fileName: string): string | null {
   if (!isValidLocalFileName(fileName)) {
     return null;
   }
 
-  return baseDir + fileName;
+  if (typeof baseDir !== 'string' || baseDir.length === 0) {
+    return null;
+  }
+
+  const normalizedBaseDir = baseDir.endsWith('/') ? baseDir : `${baseDir}/`;
+  return `${normalizedBaseDir}${fileName}`;
+}
+
+function decodeSafePercentSequences(segment: string): string {
+  return segment.replace(/(?:%[0-9A-Fa-f]{2})+/g, (encoded) => {
+    try {
+      const decoded = decodeURIComponent(encoded);
+      return decoded.includes('/') || decoded.includes('\\') || decoded.includes('\0')
+        ? encoded
+        : decoded;
+    } catch {
+      return encoded;
+    }
+  });
+}
+
+export function fileUriToNativePath(pathOrUri: string): string {
+  if (!pathOrUri.startsWith('file://')) {
+    return pathOrUri;
+  }
+
+  const pathWithEscapes = pathOrUri.replace(/^file:\/+/, '/');
+  return pathWithEscapes.split('/').map(decodeSafePercentSequences).join('/');
 }

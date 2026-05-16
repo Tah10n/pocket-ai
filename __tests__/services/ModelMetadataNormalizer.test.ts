@@ -75,6 +75,15 @@ describe('ModelMetadataNormalizer', () => {
     expect(normalized.downloadIntegrity).toBeUndefined();
   });
 
+  it('drops unsafe persisted local paths', () => {
+    const normalized = normalizePersistedModelMetadata({
+      id: 'legacy/model',
+      localPath: '../escape.gguf',
+    });
+
+    expect(normalized.localPath).toBeUndefined();
+  });
+
   it('preserves prefixed GGUF metadata keys needed by memory-fit estimation', () => {
     const normalized = normalizePersistedModelMetadata({
       id: 'llama/model',

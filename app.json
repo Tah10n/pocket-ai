@@ -81,6 +81,7 @@
       "./plugins/withAndroidSystemMetrics",
       "./plugins/withAndroidGpuInfo",
       "./plugins/withIosSystemMetrics",
+      "./plugins/withIosModelBackupExclusion",
       "expo-secure-store",
       "expo-image",
       "expo-sharing",

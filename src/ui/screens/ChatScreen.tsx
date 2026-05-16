@@ -224,7 +224,6 @@ export const ChatScreen = () => {
         deleteMessage,
         stopGeneration,
         regenerateFromUserMessage,
-        createSummaryPlaceholder,
         startNewChat,
     } = useChatSession();
     const { state: engineState, loadModel } = useLLMEngine();
@@ -1354,20 +1353,18 @@ export const ChatScreen = () => {
                     {shouldOfferSummary ? (
                         <Box className="mb-3">
                             <ChatStatusBanner
-                                title={t('chat.summaryTrimmedTitle')}
-                                description={t('chat.summaryTrimmedDescription', { count: truncatedMessageCount })}
-                                actionLabel={t('chat.summarizeChat')}
-                                onAction={createSummaryPlaceholder}
+                                title={t('chat.summaryUnavailableTitle')}
+                                description={t('chat.summaryUnavailableDescription', { count: truncatedMessageCount })}
                                 tone="info"
-                                iconName="summarize"
+                                iconName="notes"
                             />
                         </Box>
                     ) : null}
 
-                    {activeThread?.summary ? (
+                    {activeThread?.summary && !activeThread.summary.isPlaceholder ? (
                         <Box className="mb-3">
                             <ChatStatusBanner
-                                title={t('chat.summaryPlaceholderTitle')}
+                                title={t('chat.summarySavedTitle')}
                                 description={activeThread.summary.content}
                                 tone="neutral"
                                 iconName="notes"

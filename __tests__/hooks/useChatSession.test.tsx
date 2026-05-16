@@ -4,15 +4,16 @@ import { useChatSession } from '../../src/hooks/useChatSession';
 import { llmEngineService } from '../../src/services/LLMEngineService';
 import { getGenerationParametersForModel, getSettings } from '../../src/services/SettingsStore';
 import { EngineStatus, LifecycleStatus, ModelAccessState } from '../../src/types/models';
-import { estimateLlmMessagesTokens, useChatStore } from '../../src/store/chatStore';
+import { estimateLlmMessagesTokens, flushPendingChatPersistenceWrites, useChatStore } from '../../src/store/chatStore';
 import { AppState } from 'react-native';
+import { getAppStorage, storage } from '../../src/store/storage';
+import { getChatThreadStorageKey } from '../../src/store/chatPersistence';
 import {
   buildInferenceMessagesForThread,
   getThreadTruncationState,
   resetSharedGenerationStateForTests,
   resolvePresetSnapshot,
   stopActiveChatGenerationForPrivateStorageBlocked,
-  SUMMARY_PLACEHOLDER_CONTENT,
 } from '../../src/hooks/useChatSession';
 import { presetManager } from '../../src/services/PresetManager';
 import { backgroundTaskService } from '../../src/services/BackgroundTaskService';
@@ -136,7 +137,9 @@ describe('useChatSession', () => {
       value: 'active',
     });
     await backgroundTaskService.stopBackgroundTask();
+    flushPendingChatPersistenceWrites('background');
     useChatStore.setState({ threads: {}, activeThreadId: null });
+    storage.getAllKeys().forEach((key) => storage.remove(key));
     resetSharedGenerationStateForTests();
     appStateListeners = [];
     (presetManager.getPreset as jest.Mock).mockReset();
@@ -202,6 +205,19 @@ describe('useChatSession', () => {
     });
   }
 
+  function readPersistedThreadRecord(threadId: string | null | undefined) {
+    expect(threadId).toBeTruthy();
+    const rawRecord = storage.getString(getChatThreadStorageKey(threadId ?? ''));
+    expect(rawRecord).toBeTruthy();
+
+    return JSON.parse(rawRecord ?? '{}') as {
+      thread?: {
+        status?: string;
+        messages?: Array<Record<string, unknown>>;
+      };
+    };
+  }
+
   it('creates and persists a thread-backed conversation', async () => {
     const getSession = renderHookHarness();
 
@@ -223,6 +239,52 @@ describe('useChatSession', () => {
     });
     expect(thread?.messages.map((message) => message.role)).toEqual(['user', 'assistant']);
     expect(thread?.messages.at(-1)?.content).toBe('Hello back');
+  });
+
+  it('persists errored generation terminal state into bounded storage', async () => {
+    const generationError = new Error('native generation failed');
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      async ({ onToken }: { onToken?: (token: string) => void }) => {
+        onToken?.('Partial before failure');
+        throw generationError;
+      },
+    );
+
+    const getSession = renderHookHarness();
+    let thrown: unknown;
+
+    await act(async () => {
+      try {
+        await getSession()?.appendUserMessage('Please fail durably');
+      } catch (error) {
+        thrown = error;
+      }
+    });
+
+    expect(thrown).toBe(generationError);
+
+    const thread = useChatStore.getState().getActiveThread();
+    expect(thread).toEqual(expect.objectContaining({ status: 'error' }));
+    expect(thread?.messages.at(-1)).toEqual(expect.objectContaining({
+      role: 'assistant',
+      content: 'Partial before failure',
+      state: 'error',
+      errorCode: 'generation_failed',
+      errorMessage: 'native generation failed',
+    }));
+
+    const record = readPersistedThreadRecord(thread?.id);
+    const persistedAssistant = record.thread?.messages?.at(-1);
+    expect(record.thread?.status).toBe('error');
+    expect(persistedAssistant).toEqual(expect.objectContaining({
+      role: 'assistant',
+      content: 'Partial before failure',
+      state: 'error',
+      errorCode: 'generation_failed',
+      errorMessage: 'native generation failed',
+    }));
+    expect(record.thread?.messages?.some((message) => message.state === 'streaming')).toBe(false);
+    expect(storage.getString('chat-store') ?? '').not.toContain('Partial before failure');
   });
 
   it('blocks sending before persisted chat mutations when private storage is unavailable', async () => {
@@ -663,6 +725,16 @@ describe('useChatSession', () => {
         state: 'stopped',
       }),
     );
+
+    const persistedRecord = readPersistedThreadRecord(thread?.id);
+    const persistedAssistant = persistedRecord.thread?.messages?.at(-1);
+    expect(persistedRecord.thread?.status).toBe('stopped');
+    expect(persistedAssistant).toEqual(expect.objectContaining({
+      role: 'assistant',
+      content: 'Partial answer',
+      state: 'stopped',
+    }));
+    expect(persistedAssistant?.content).not.toContain('late token');
   });
 
   it('stops active generation when private storage becomes blocked', async () => {
@@ -1321,6 +1393,98 @@ describe('useChatSession', () => {
     );
   });
 
+  it('flushes pending streaming content into bounded storage before backgrounding', async () => {
+    let onToken: ((token: string) => void) | undefined;
+    let resolveCompletion: (() => void) | undefined;
+    let sendPromise: Promise<void> | undefined;
+
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementation(
+      ({ onToken: tokenHandler }: { onToken?: (token: string) => void }) =>
+        new Promise((resolve) => {
+          onToken = tokenHandler;
+          resolveCompletion = () => resolve({ text: 'Finished after background flush' });
+        }),
+    );
+
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      sendPromise = getSession()?.appendUserMessage('Persist partial before background');
+    });
+
+    await waitFor(() => {
+      expect(useChatStore.getState().getActiveThread()?.status).toBe('generating');
+    });
+
+    await act(async () => {
+      onToken?.('Partial before background');
+      emitAppState('background');
+    });
+
+    const threadId = useChatStore.getState().activeThreadId;
+    expect(threadId).toBeTruthy();
+    expect(storage.getString(getChatThreadStorageKey(threadId ?? ''))).toContain('Partial before background');
+
+    await act(async () => {
+      resolveCompletion?.();
+      await sendPromise;
+    });
+  });
+
+  it('does not throw when background persistence flush hits blocked private storage', async () => {
+    renderHookHarness();
+
+    await act(async () => {
+      const threadId = useChatStore.getState().createThread({
+        modelId: 'author/model-q4',
+        presetId: 'preset-1',
+        presetSnapshot: {
+          id: 'preset-1',
+          name: 'Helpful Assistant',
+          systemPrompt: 'Be concise.',
+        },
+        paramsSnapshot: {
+          temperature: 0.7,
+          topP: 0.9,
+          maxTokens: 1024,
+          seed: null,
+        },
+      });
+      const assistantMessageId = useChatStore.getState().createAssistantPlaceholder(threadId);
+      useChatStore.getState().patchAssistantMessage(threadId, assistantMessageId, {
+        content: 'Partial before blocked background flush',
+        state: 'streaming',
+      });
+    });
+
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const privateStorageError = new PrivateStorageUnavailableError('encrypted_open_failed', {
+      status: 'blocked',
+      reason: 'encrypted_open_failed',
+      retryable: true,
+      requiresExplicitReset: true,
+      lastUpdatedAt: 1,
+    });
+    const appStorage = getAppStorage();
+    const originalSet = appStorage.set;
+    appStorage.set = jest.fn(() => {
+      throw privateStorageError;
+    }) as unknown as typeof appStorage.set;
+
+    try {
+      await act(async () => {
+        expect(() => emitAppState('background')).not.toThrow();
+      });
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('background chat persistence'),
+        privateStorageError,
+      );
+    } finally {
+      appStorage.set = originalSet;
+      warnSpy.mockRestore();
+    }
+  });
+
   it('marks orphaned generating state as stopped when returning to foreground', async () => {
     renderHookHarness();
 
@@ -1509,7 +1673,9 @@ describe('useChatSession', () => {
   });
 
   it('sends only one interrupted notification when iOS expiration stops generation', async () => {
+    let onToken: ((token: string) => void) | undefined;
     let resolveCompletion: (() => void) | undefined;
+    let sendPromise: Promise<void> | undefined;
     const interruptedSpy = jest.spyOn(notificationService, 'sendInterruptedNotification').mockResolvedValue(undefined);
 
     Object.defineProperty(AppState, 'currentState', {
@@ -1518,8 +1684,9 @@ describe('useChatSession', () => {
     });
 
     (llmEngineService.chatCompletion as jest.Mock).mockImplementation(
-      () =>
+      ({ onToken: tokenHandler }: { onToken?: (token: string) => void }) =>
         new Promise((resolve) => {
+          onToken = tokenHandler;
           resolveCompletion = () => resolve({ text: 'Stopped after expiration' });
         }),
     );
@@ -1527,22 +1694,35 @@ describe('useChatSession', () => {
     const getSession = renderHookHarness();
 
     await act(async () => {
-      void getSession()?.appendUserMessage('Expire this response');
+      sendPromise = getSession()?.appendUserMessage('Expire this response');
     });
 
     await waitFor(() => {
       expect(BackgroundTaskServiceOnExpirationHandler()).toEqual(expect.any(Function));
+      expect(onToken).toEqual(expect.any(Function));
     });
 
     await act(async () => {
+      onToken?.('Partial before expiration');
       BackgroundTaskServiceOnExpirationHandler()?.();
       resolveCompletion?.();
+      await sendPromise;
     });
 
     await waitFor(() => {
       expect(useChatStore.getState().getActiveThread()?.status).toBe('stopped');
     });
 
+    const thread = useChatStore.getState().getActiveThread();
+    const persistedRecord = readPersistedThreadRecord(thread?.id);
+    const persistedAssistant = persistedRecord.thread?.messages?.at(-1);
+    expect(persistedRecord.thread?.status).toBe('stopped');
+    expect(persistedAssistant).toEqual(expect.objectContaining({
+      role: 'assistant',
+      content: 'Partial before expiration',
+      state: 'stopped',
+    }));
+    expect(persistedRecord.thread?.messages?.some((message) => message.state === 'streaming')).toBe(false);
     expect(interruptedSpy).toHaveBeenCalledTimes(1);
   });
 
@@ -2051,7 +2231,7 @@ describe('useChatSession', () => {
     expect(messages[1]).toEqual({ role: 'user', content: `${longMessage}-7` });
   });
 
-  it('creates a persisted summary placeholder when truncation is active', async () => {
+  it('does not persist a summary placeholder when truncation is active', async () => {
     const threadId = useChatStore.getState().createThread({
       modelId: 'author/model-q4',
       presetId: 'preset-1',
@@ -2087,25 +2267,19 @@ describe('useChatSession', () => {
       expect(getSession()?.shouldOfferSummary).toBe(true);
     });
 
-    let created = false;
+    let created = true;
     await act(async () => {
       created = getSession()?.createSummaryPlaceholder() ?? false;
     });
 
-    expect(created).toBe(true);
+    expect(created).toBe(false);
     const activeThread = useChatStore.getState().getActiveThread();
-    expect(activeThread?.summary).toEqual(
-      expect.objectContaining({
-        content: SUMMARY_PLACEHOLDER_CONTENT,
-        sourceMessageIds: Array.from({ length: messageCount - 2 }, (_, index) => `message-${index + 1}`),
-        isPlaceholder: true,
-      }),
-    );
+    expect(activeThread?.summary).toBeUndefined();
     expect(buildInferenceMessagesForThread(activeThread!)).not.toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           role: 'system',
-          content: expect.stringContaining(SUMMARY_PLACEHOLDER_CONTENT),
+          content: expect.stringContaining('Summary generation is not available yet.'),
         }),
       ]),
     );
@@ -2160,18 +2334,13 @@ describe('useChatSession', () => {
       expect(getSession()?.truncatedMessageCount).toBe(4);
     });
 
-    let created = false;
+    let created = true;
     await act(async () => {
       created = getSession()?.createSummaryPlaceholder() ?? false;
     });
 
-    expect(created).toBe(true);
-    expect(useChatStore.getState().getActiveThread()?.summary).toEqual(
-      expect.objectContaining({
-        sourceMessageIds: ['message-1', 'message-2', 'message-3', 'message-4'],
-        isPlaceholder: true,
-      }),
-    );
+    expect(created).toBe(false);
+    expect(useChatStore.getState().getActiveThread()?.summary).toBeUndefined();
   });
 });
 

@@ -20,8 +20,13 @@ import {
   ESTIMATED_CONTEXT_BYTES_PER_TOKEN,
   ESTIMATED_MODEL_RUNTIME_OVERHEAD_FACTOR,
 } from '../utils/contextWindow';
+import {
+  CHAT_PERSISTENCE_INDEX_KEY,
+  CHAT_THREAD_STORAGE_KEY_PREFIX,
+  LEGACY_CHAT_STORE_STORAGE_KEY,
+} from '../store/chatPersistence';
 
-const CHAT_STORE_KEY = 'chat-store';
+const CHAT_STORE_KEY = LEGACY_CHAT_STORE_STORAGE_KEY;
 const MIN_DIRECTORY_SIZE_FALLBACK_BYTES = 0;
 const MIN_ESTIMATED_CONTEXT_BYTES = 64 * 1024 * 1024;
 
@@ -171,28 +176,49 @@ function getLegacyChatHistoryBytes() {
 }
 
 function getPersistedChatStoreBytes() {
-  const persistedState = appStorage.getString(CHAT_STORE_KEY);
-  if (!persistedState) {
-    return 0;
-  }
+  const chatKeys = appStorage.getAllKeys().filter((key) => (
+    key === CHAT_STORE_KEY ||
+    key === CHAT_PERSISTENCE_INDEX_KEY ||
+    key.startsWith(CHAT_THREAD_STORAGE_KEY_PREFIX)
+  ));
 
-  try {
-    const parsed = JSON.parse(persistedState) as PersistedChatStorePayload;
-    const threads = parsed?.state?.threads;
-    const activeThreadId = parsed?.state?.activeThreadId ?? null;
-    const threadCount =
-      threads && typeof threads === 'object' && !Array.isArray(threads)
-        ? Object.keys(threads).length
-        : 0;
+  return chatKeys.reduce((sum, key) => {
+    const value = appStorage.getString(key);
+    if (key === CHAT_STORE_KEY) {
+      try {
+        const parsed = JSON.parse(value ?? '') as PersistedChatStorePayload;
+        const threads = parsed?.state?.threads;
+        const activeThreadId = parsed?.state?.activeThreadId ?? null;
+        const threadCount =
+          threads && typeof threads === 'object' && !Array.isArray(threads)
+            ? Object.keys(threads).length
+            : 0;
 
-    if (threadCount === 0 && activeThreadId === null) {
-      return 0;
+        if (threadCount === 0 && activeThreadId === null) {
+          return sum;
+        }
+      } catch {
+        // If the persisted payload is corrupted, still count its occupied bytes.
+      }
     }
-  } catch {
-    // If the persisted payload is corrupted, still count its occupied bytes.
-  }
 
-  return getTextByteLength(CHAT_STORE_KEY) + getTextByteLength(persistedState);
+    if (key === CHAT_PERSISTENCE_INDEX_KEY) {
+      try {
+        const parsed = JSON.parse(value ?? '') as { activeThreadId?: unknown; threadIds?: unknown };
+        if (
+          parsed.activeThreadId === null &&
+          Array.isArray(parsed.threadIds) &&
+          parsed.threadIds.length === 0
+        ) {
+          return sum;
+        }
+      } catch {
+        // If the persisted index is corrupted, still count its occupied bytes.
+      }
+    }
+
+    return sum + getTextByteLength(key) + getTextByteLength(value);
+  }, 0);
 }
 
 function getSettingsBytes() {

@@ -6,6 +6,7 @@ jest.mock('../../src/store/chatStore', () => ({
 
 jest.mock('../../src/store/storage', () => ({
   storage: {
+    getAllKeys: jest.fn().mockReturnValue([]),
     getString: jest.fn(),
   },
 }));
@@ -75,6 +76,7 @@ import {
 } from '../../src/services/SettingsStore';
 import { useChatStore } from '../../src/store/chatStore';
 import { storage as appStorage } from '../../src/store/storage';
+import { CHAT_PERSISTENCE_INDEX_KEY, getChatThreadStorageKey } from '../../src/store/chatPersistence';
 import * as FileSystem from 'expo-file-system/legacy';
 import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../src/types/models';
 
@@ -114,6 +116,7 @@ describe('StorageManagerService', () => {
     mockedRegistry.getModels.mockReturnValue([]);
     mockedRegistry.getModel.mockReturnValue(undefined);
     mockedModelCatalogService.getPersistentCacheBytes.mockReturnValue(0);
+    mockedAppStorage.getAllKeys.mockReturnValue([]);
     mockedAppStorage.getString.mockReturnValue(undefined);
     mockedSettingsStorage.getAllKeys.mockReturnValue([]);
     mockedSettingsStorage.getString.mockReturnValue(undefined);
@@ -194,6 +197,7 @@ describe('StorageManagerService', () => {
   });
 
   it('treats an empty persisted chat-store payload as zero chat history bytes', async () => {
+    mockedAppStorage.getAllKeys.mockReturnValue(['chat-store']);
     mockedAppStorage.getString.mockImplementation((key: string) => (
       key === 'chat-store'
         ? JSON.stringify({ state: { threads: {}, activeThreadId: null }, version: 0 })
@@ -206,6 +210,7 @@ describe('StorageManagerService', () => {
   });
 
   it('counts corrupted persisted chat-store payload bytes instead of dropping them', async () => {
+    mockedAppStorage.getAllKeys.mockReturnValue(['chat-store']);
     mockedAppStorage.getString.mockImplementation((key: string) => (
       key === 'chat-store' ? '{corrupted-json' : undefined
     ));
@@ -213,6 +218,62 @@ describe('StorageManagerService', () => {
     const metrics = await getAppStorageMetrics();
 
     expect(metrics.chatHistoryBytes).toBeGreaterThan(0);
+  });
+
+  it('counts v2 chat persistence index and per-thread record bytes', async () => {
+    const threadKey = getChatThreadStorageKey('thread-1');
+    const indexPayload = JSON.stringify({
+      schemaVersion: 2,
+      activeThreadId: 'thread-1',
+      threadIds: ['thread-1'],
+      updatedAt: 10,
+    });
+    const threadPayload = JSON.stringify({
+      schemaVersion: 2,
+      thread: { id: 'thread-1', messages: [] },
+      persistedAt: 11,
+    });
+
+    mockedAppStorage.getAllKeys.mockReturnValue([CHAT_PERSISTENCE_INDEX_KEY, threadKey]);
+    mockedAppStorage.getString.mockImplementation((key: string) => {
+      if (key === CHAT_PERSISTENCE_INDEX_KEY) {
+        return indexPayload;
+      }
+
+      if (key === threadKey) {
+        return threadPayload;
+      }
+
+      return undefined;
+    });
+
+    const metrics = await getAppStorageMetrics();
+
+    expect(metrics.chatHistoryBytes).toBe(
+      CHAT_PERSISTENCE_INDEX_KEY.length +
+      indexPayload.length +
+      threadKey.length +
+      threadPayload.length
+    );
+  });
+
+  it('treats an empty v2 chat persistence tombstone as zero chat history bytes', async () => {
+    mockedAppStorage.getAllKeys.mockReturnValue([CHAT_PERSISTENCE_INDEX_KEY]);
+    mockedAppStorage.getString.mockImplementation((key: string) => (
+      key === CHAT_PERSISTENCE_INDEX_KEY
+        ? JSON.stringify({
+          schemaVersion: 2,
+          activeThreadId: null,
+          threadIds: [],
+          updatedAt: 20,
+          clearedAt: 20,
+        })
+        : undefined
+    ));
+
+    const metrics = await getAppStorageMetrics();
+
+    expect(metrics.chatHistoryBytes).toBe(0);
   });
 
   it('treats an empty legacy chat history index as zero chat history bytes', async () => {

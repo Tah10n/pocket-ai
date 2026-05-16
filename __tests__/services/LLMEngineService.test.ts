@@ -249,6 +249,32 @@ describe('LLMEngineService', () => {
     );
   });
 
+  it('reuses cached template additional stops when only message text changes', async () => {
+    getFormattedChatMock().mockResolvedValue({
+      prompt: 'Formatted prompt',
+      additional_stops: ['<|shape_cached_stop|>'],
+    });
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    await llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Hello' }],
+      params: { n_predict: 32 },
+    });
+    await llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Jello' }],
+      params: { n_predict: 32 },
+    });
+
+    expect(getFormattedChatMock()).toHaveBeenCalledTimes(1);
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        stop: expect.arrayContaining(['<|shape_cached_stop|>']),
+      }),
+      expect.any(Function),
+    );
+  });
+
   it('invalidates cached template additional stops after unload and reload', async () => {
     getFormattedChatMock()
       .mockResolvedValueOnce({

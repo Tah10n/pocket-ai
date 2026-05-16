@@ -518,8 +518,6 @@ class LLMEngineService {
       hash = this.updateCacheHash(hash, message.role);
       hash = this.updateCacheHash(hash, '\u0000');
       hash = this.updateCacheHash(hash, String(message.content.length));
-      hash = this.updateCacheHash(hash, '\u0000');
-      hash = this.updateCacheHash(hash, message.content);
       hash = this.updateCacheHash(hash, '\u0001');
     }
 

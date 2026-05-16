@@ -257,11 +257,21 @@ function mergeConsecutiveMessages(messages: LlmChatMessage[]): LlmChatMessage[] 
 }
 
 function resolveStrictRoleSystemNormalization(formatted: unknown): StrictRoleSystemNormalization {
-  const prompt = formatted && typeof formatted === 'object' && typeof (formatted as { prompt?: unknown }).prompt === 'string'
-    ? (formatted as { prompt: string }).prompt
-    : '';
+  if (!formatted || typeof formatted !== 'object') {
+    return 'plain';
+  }
 
-  return prompt.includes('<<SYS>>') && prompt.includes('<</SYS>>')
+  const formattedResult = formatted as { prompt?: unknown; type?: unknown };
+  const formattedType = typeof formattedResult.type === 'string' ? formattedResult.type : null;
+  if (formattedType === 'jinja') {
+    return 'plain';
+  }
+
+  const prompt = typeof formattedResult.prompt === 'string' ? formattedResult.prompt : '';
+  const hasLlamaSystemBlock = /\[INST\][\s\S]*<<SYS>>[\s\S]*<<\/SYS>>/.test(prompt)
+    || /^\s*<<SYS>>[\s\S]*<<\/SYS>>/.test(prompt);
+
+  return hasLlamaSystemBlock
     ? 'llama'
     : 'plain';
 }

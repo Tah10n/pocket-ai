@@ -711,6 +711,7 @@ describe('LLMEngineService', () => {
   it('retries strict alternation failures with normalized chat history', async () => {
     const completionMock = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock;
     getFormattedChatMock().mockResolvedValue({
+      type: 'llama-chat',
       prompt: '[INST] <<SYS>>\nBe concise.\n<</SYS>>\n\nHello [/INST]',
       additional_stops: [],
     });
@@ -764,7 +765,8 @@ describe('LLMEngineService', () => {
   it('retries strict alternation without Llama system wrappers for non-Llama templates', async () => {
     const completionMock = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock;
     getFormattedChatMock().mockResolvedValue({
-      prompt: '<|system|>\nBe concise.\n<|user|>\nHello',
+      type: 'jinja',
+      prompt: '<|system|>\nBe concise. Literal <<SYS>> marker <</SYS>>.\n<|user|>\nHello',
       additional_stops: [],
     });
     completionMock
@@ -798,6 +800,40 @@ describe('LLMEngineService', () => {
           {
             role: 'assistant',
             content: 'First assistant reply.\n\nExtra assistant details.',
+          },
+        ],
+      }),
+      expect.any(Function),
+    );
+  });
+
+  it('falls back to Llama system wrapping for legacy formatted payloads without type metadata', async () => {
+    const completionMock = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock;
+    getFormattedChatMock().mockResolvedValue({
+      prompt: '[INST] <<SYS>>\nBe concise.\n<</SYS>>\n\nHello [/INST]',
+      additional_stops: [],
+    });
+    completionMock
+      .mockRejectedValueOnce(new Error('Conversation roles must alternate user/assistant'))
+      .mockResolvedValueOnce({ text: 'Recovered reply' });
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    await expect(llmEngineService.chatCompletion({
+      messages: [
+        { role: 'system', content: 'Be concise.' },
+        { role: 'user', content: 'First user question.' },
+      ],
+      params: { n_predict: 64 },
+    })).resolves.toEqual({ text: 'Recovered reply' });
+
+    expect(completionMock).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        messages: [
+          {
+            role: 'user',
+            content: '<<SYS>>\nBe concise.\n<</SYS>>\n\nFirst user question.',
           },
         ],
       }),

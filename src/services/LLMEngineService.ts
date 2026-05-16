@@ -77,6 +77,7 @@ import { resolveModelFilePathOrThrow } from './LLMEngineService.modelFile';
 import {
   resolveSafeLoadPolicyOrThrow,
 } from './LLMEngineService.safeLoadPolicy';
+import { performanceMonitor } from './PerformanceMonitor';
 
 export interface LoadModelOptions {
   forceReload?: boolean;
@@ -100,13 +101,34 @@ const MAX_ADDITIONAL_STOP_WORDS_CACHE_ENTRIES = 8;
 const CONTEXT_OPERATION_UNLOAD_DRAIN_TIMEOUT_MS = 5000;
 const CONTEXT_OPERATION_UNLOAD_TIMEOUT_MESSAGE = 'Timed out waiting for active context operations during unload';
 const ACTIVE_COMPLETION_UNLOAD_TIMEOUT_MESSAGE = 'Timed out waiting for active completion during unload';
+const FALLBACK_STOP_WORDS = [
+  '</s>',
+  '<|end|>',
+  '<|eot_id|>',
+  '<|end_of_text|>',
+  '<|im_end|>',
+  '<|EOT|>',
+  '<|END_OF_TURN_TOKEN|>',
+  '<|end_of_turn|>',
+  '<|endoftext|>',
+];
 
 type StrictRoleSystemNormalization = 'plain' | 'llama';
+type StopWordsResolutionSource = 'template' | 'fallback' | 'template_with_fallback';
 type ContextOperationDrainResult = 'drained' | 'timed_out';
 
 type TemplateAdditionalStopWordsResolution = {
   stopWords: string[];
   strictRoleSystemNormalization: StrictRoleSystemNormalization;
+  templateType: string | null;
+};
+
+type CompletionStopWordsResolution = {
+  stopWords: string[];
+  source: StopWordsResolutionSource;
+  templateType: string | null;
+  templateStopCount: number;
+  fallbackStopCount: number;
 };
 
 type CalibrationSession = {
@@ -257,17 +279,31 @@ function mergeConsecutiveMessages(messages: LlmChatMessage[]): LlmChatMessage[] 
   return merged;
 }
 
+function readFormattedChatType(formatted: unknown): string | null {
+  if (!formatted || typeof formatted !== 'object') {
+    return null;
+  }
+
+  const formattedType = (formatted as { type?: unknown }).type;
+  if (typeof formattedType !== 'string') {
+    return null;
+  }
+
+  const normalizedType = formattedType.trim();
+  return normalizedType.length > 0 ? normalizedType : null;
+}
+
 function resolveStrictRoleSystemNormalization(formatted: unknown): StrictRoleSystemNormalization {
   if (!formatted || typeof formatted !== 'object') {
     return 'plain';
   }
 
-  const formattedResult = formatted as { prompt?: unknown; type?: unknown };
-  const formattedType = typeof formattedResult.type === 'string' ? formattedResult.type : null;
+  const formattedType = readFormattedChatType(formatted);
   if (formattedType === 'jinja') {
     return 'plain';
   }
 
+  const formattedResult = formatted as { prompt?: unknown };
   const prompt = typeof formattedResult.prompt === 'string' ? formattedResult.prompt : '';
   const hasLlamaSystemBlock = /\[INST\][\s\S]*<<SYS>>[\s\S]*<<\/SYS>>/.test(prompt)
     || /^\s*<<SYS>>[\s\S]*<<\/SYS>>/.test(prompt);
@@ -650,6 +686,8 @@ class LLMEngineService {
       hash = this.updateCacheHash(hash, '\u0000');
       hash = this.updateCacheHash(hash, String(message.content.length));
       hash = this.updateCacheHash(hash, '\u0001');
+      hash = this.updateCacheHash(hash, message.content);
+      hash = this.updateCacheHash(hash, '\u0002');
     }
 
     return `${messages.length}:${hash.toString(36)}`;
@@ -681,7 +719,66 @@ class LLMEngineService {
     return {
       stopWords: [...resolution.stopWords],
       strictRoleSystemNormalization: resolution.strictRoleSystemNormalization,
+      templateType: resolution.templateType,
     };
+  }
+
+  private shouldIncludeFallbackStopWords(templateType: string | null, templateStopCount: number): boolean {
+    if (templateStopCount === 0) {
+      return true;
+    }
+
+    if (templateType === null) {
+      return true;
+    }
+
+    const normalizedType = templateType.toLowerCase();
+    return normalizedType === 'llama' || normalizedType === 'llama-chat';
+  }
+
+  private resolveCompletionStopWords(
+    templateStopResolution: TemplateAdditionalStopWordsResolution,
+  ): CompletionStopWordsResolution {
+    const templateStops = templateStopResolution.stopWords;
+    const shouldIncludeFallbackStops = this.shouldIncludeFallbackStopWords(
+      templateStopResolution.templateType,
+      templateStops.length,
+    );
+    const stopWords = Array.from(
+      new Set(
+        [
+          ...(shouldIncludeFallbackStops ? FALLBACK_STOP_WORDS : []),
+          ...templateStops,
+        ]
+          .map((stop) => stop.trim())
+          .filter((stop) => stop.length > 0),
+      ),
+    );
+
+    let source: StopWordsResolutionSource = 'template';
+    if (shouldIncludeFallbackStops) {
+      source = templateStops.length > 0 ? 'template_with_fallback' : 'fallback';
+    }
+
+    return {
+      stopWords,
+      source,
+      templateType: templateStopResolution.templateType,
+      templateStopCount: templateStops.length,
+      fallbackStopCount: shouldIncludeFallbackStops ? FALLBACK_STOP_WORDS.length : 0,
+    };
+  }
+
+  private recordResolvedCompletionStopWords(resolution: CompletionStopWordsResolution): void {
+    performanceMonitor.mark('llm.stopWords.resolved', {
+      modelId: this.state.activeModelId ?? 'unknown-model',
+      source: resolution.source,
+      templateType: resolution.templateType ?? 'unknown',
+      templateStopCount: resolution.templateStopCount,
+      fallbackStopCount: resolution.fallbackStopCount,
+      stopCount: resolution.stopWords.length,
+      resolvedStops: resolution.stopWords,
+    });
   }
 
   private async resolveTemplateAdditionalStopWords({
@@ -734,6 +831,7 @@ class LLMEngineService {
       const resolution: TemplateAdditionalStopWordsResolution = {
         stopWords: normalizedStops,
         strictRoleSystemNormalization: resolveStrictRoleSystemNormalization(formatted),
+        templateType: readFormattedChatType(formatted),
       };
       this.additionalStopWordsCache.set(cacheKey, resolution);
       if (this.additionalStopWordsCache.size > MAX_ADDITIONAL_STOP_WORDS_CACHE_ENTRIES) {
@@ -751,6 +849,7 @@ class LLMEngineService {
       return {
         stopWords: [],
         strictRoleSystemNormalization: 'plain',
+        templateType: null,
       };
     }
   }
@@ -1375,18 +1474,6 @@ class LLMEngineService {
           this.assertCompletionNotInterrupted(interruptGeneration);
           const enableThinking = params?.enable_thinking ?? false;
           const reasoningFormat: ChatCompletionReasoningFormat = params?.reasoning_format ?? 'none';
-          const baseStopWords = [
-            '</s>',
-            '<|end|>',
-            '<|eot_id|>',
-            '<|end_of_text|>',
-            '<|im_end|>',
-            '<|EOT|>',
-            '<|END_OF_TURN_TOKEN|>',
-            '<|end_of_turn|>',
-            '<|endoftext|>',
-          ];
-
           const templateStopResolution = await this.resolveTemplateAdditionalStopWords({
             context,
             generation: contextGeneration,
@@ -1397,13 +1484,8 @@ class LLMEngineService {
           strictRoleSystemNormalization = templateStopResolution.strictRoleSystemNormalization;
           this.assertCompletionNotInterrupted(interruptGeneration);
 
-          const resolvedStops = Array.from(
-            new Set(
-              [...baseStopWords, ...templateStopResolution.stopWords]
-                .map((stop) => stop.trim())
-                .filter((stop) => stop.length > 0),
-            ),
-          );
+          const resolvedStops = this.resolveCompletionStopWords(templateStopResolution);
+          this.recordResolvedCompletionStopWords(resolvedStops);
 
           const completionParams: Record<string, unknown> = {
             messages: completionMessages,
@@ -1415,7 +1497,7 @@ class LLMEngineService {
             penalty_repeat: params?.penalty_repeat ?? 1,
             enable_thinking: enableThinking,
             reasoning_format: reasoningFormat,
-            stop: resolvedStops,
+            stop: resolvedStops.stopWords,
           };
 
           if (typeof params?.seed === 'number' && Number.isFinite(params.seed)) {

@@ -37,6 +37,8 @@ type QuarantinedModelFile = {
   reason: 'orphaned';
 };
 
+type QueuedModelFileNamesInput = string[] | (() => string[]);
+
 function cloneCalibrationRecord(record: CalibrationRecord): CalibrationRecord {
   return { ...record };
 }
@@ -58,6 +60,10 @@ function getModelFilePreservationStorage(): MMKV {
 function normalizeModelFileNames(input: unknown): Set<string> {
   const values = Array.isArray(input) ? input : [];
   return new Set(values.filter(isValidLocalFileName));
+}
+
+function resolveQueuedModelFileNames(input: QueuedModelFileNamesInput): string[] {
+  return typeof input === 'function' ? input() : input;
 }
 
 function readPrivateResetPreservedModelFiles(): PrivateResetModelFilePreservationState {
@@ -540,7 +546,7 @@ export class LocalStorageRegistry {
 
   /**
    * Validate the registry on startup: check if files exist and update status.
-   * Also performs Garbage Collection: deletes files in the models directory that are neither completed nor currently queued.
+   * Also quarantines files in the models directory that are neither completed nor currently queued.
    */
   public async validateRegistry(queuedFileNames: string[] = []): Promise<void> {
     const models = this.getModels();
@@ -680,26 +686,17 @@ export class LocalStorageRegistry {
     try {
       const dirInfo = await FileSystem.readDirectoryAsync(modelsDir);
 
-      const completedLocalPaths = new Set(
-        models
-          .map((model) => model.localPath)
-          .filter((localPath): localPath is string => typeof localPath === 'string'),
-      );
-      const queuedFileNamesSet = new Set(queuedFileNames);
-      const privateResetPreservedFileNames = this.getPreservedModelFileNamesForCleanup(
-        dirInfo,
-        completedLocalPaths,
-      );
+      const {
+        currentSafeDirectoryFileNames,
+        protectedFileNames,
+      } = this.getProtectedModelFileNamesForCleanup(dirInfo, queuedFileNames, models);
       const quarantinedFileNames = readQuarantinedModelFiles();
       let quarantineChanged = false;
-      const currentSafeDirectoryFileNames = normalizeModelFileNames(dirInfo);
 
       for (const fileName of Array.from(quarantinedFileNames.keys())) {
         if (
           !currentSafeDirectoryFileNames.has(fileName)
-          || completedLocalPaths.has(fileName)
-          || queuedFileNamesSet.has(fileName)
-          || privateResetPreservedFileNames.has(fileName)
+          || protectedFileNames.has(fileName)
         ) {
           quarantinedFileNames.delete(fileName);
           quarantineChanged = true;
@@ -707,11 +704,7 @@ export class LocalStorageRegistry {
       }
 
       for (const filename of dirInfo) {
-        if (
-          completedLocalPaths.has(filename)
-          || queuedFileNamesSet.has(filename)
-          || privateResetPreservedFileNames.has(filename)
-        ) {
+        if (!currentSafeDirectoryFileNames.has(filename) || protectedFileNames.has(filename)) {
           continue;
         }
 
@@ -744,12 +737,17 @@ export class LocalStorageRegistry {
       .sort((left, right) => left.localeCompare(right));
   }
 
-  public async deleteQuarantinedModelFiles(fileNames?: string[]): Promise<number> {
+  public async deleteQuarantinedModelFiles(
+    fileNames?: string[],
+    queuedFileNames: QueuedModelFileNamesInput = [],
+  ): Promise<number> {
     const modelsDir = getModelsDir();
     if (!modelsDir) {
       return 0;
     }
 
+    const dirInfo = await FileSystem.readDirectoryAsync(modelsDir);
+    const currentSafeDirectoryFileNames = normalizeModelFileNames(dirInfo);
     const quarantinedFileNames = readQuarantinedModelFiles();
     const requestedFileNames = fileNames
       ? normalizeModelFileNames(fileNames)
@@ -759,6 +757,16 @@ export class LocalStorageRegistry {
 
     for (const fileName of requestedFileNames) {
       if (!quarantinedFileNames.has(fileName)) {
+        continue;
+      }
+
+      const { protectedFileNames } = this.getProtectedModelFileNamesForCleanup(
+        dirInfo,
+        resolveQueuedModelFileNames(queuedFileNames),
+      );
+      if (!currentSafeDirectoryFileNames.has(fileName) || protectedFileNames.has(fileName)) {
+        quarantinedFileNames.delete(fileName);
+        changed = true;
         continue;
       }
 
@@ -811,6 +819,36 @@ export class LocalStorageRegistry {
     return {
       ids: this.cachedModelIds ?? [],
       modelsById: this.cachedModelsById ?? new Map<string, ModelMetadata>(),
+    };
+  }
+
+  private getProtectedModelFileNamesForCleanup(
+    directoryFileNames: string[],
+    queuedFileNames: string[],
+    models: ModelMetadata[] = this.getModels(),
+  ): {
+    currentSafeDirectoryFileNames: Set<string>;
+    protectedFileNames: Set<string>;
+  } {
+    const currentSafeDirectoryFileNames = normalizeModelFileNames(directoryFileNames);
+    const completedLocalPaths = new Set(
+      models
+        .map((model) => model.localPath)
+        .filter((localPath): localPath is string => isValidLocalFileName(localPath)),
+    );
+    const queuedFileNamesSet = normalizeModelFileNames(queuedFileNames);
+    const privateResetPreservedFileNames = this.getPreservedModelFileNamesForCleanup(
+      directoryFileNames,
+      completedLocalPaths,
+    );
+
+    return {
+      currentSafeDirectoryFileNames,
+      protectedFileNames: new Set([
+        ...completedLocalPaths,
+        ...queuedFileNamesSet,
+        ...privateResetPreservedFileNames,
+      ]),
     };
   }
 

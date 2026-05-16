@@ -678,6 +678,10 @@ describe('LocalStorageRegistry', () => {
         })
         : null
     ));
+    (FileSystem.readDirectoryAsync as jest.Mock).mockResolvedValueOnce([
+      'orphan.gguf',
+      'keep.gguf',
+    ]);
 
     await expect(registry.deleteQuarantinedModelFiles(['orphan.gguf'])).resolves.toBe(1);
 
@@ -688,6 +692,91 @@ describe('LocalStorageRegistry', () => {
     )?.[1];
     expect(nextPayload).toEqual(expect.stringContaining('keep.gguf'));
     expect(nextPayload).not.toEqual(expect.stringContaining('orphan.gguf'));
+  });
+
+  it('does not delete quarantined model files when the directory cannot be scanned', async () => {
+    const scanError = new Error('scan failed');
+    mockStorage.getString.mockImplementation((key: string) => (
+      key === 'quarantined-model-files-v1'
+        ? JSON.stringify({
+          files: [
+            { fileName: 'queued.gguf', detectedAt: 1, reason: 'orphaned' },
+            { fileName: 'orphan.gguf', detectedAt: 2, reason: 'orphaned' },
+          ],
+        })
+        : null
+    ));
+    (FileSystem.readDirectoryAsync as jest.Mock).mockRejectedValueOnce(scanError);
+
+    await expect(registry.deleteQuarantinedModelFiles(undefined, ['queued.gguf'])).rejects.toBe(scanError);
+
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalled();
+    expect(mockStorage.set).not.toHaveBeenCalledWith('quarantined-model-files-v1', expect.anything());
+    expect(mockStorage.remove).not.toHaveBeenCalledWith('quarantined-model-files-v1');
+  });
+
+  it('keeps queued and completed files safe during final quarantine deletion', async () => {
+    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([
+      createMockModel({ localPath: 'keep.gguf', lifecycleStatus: LifecycleStatus.DOWNLOADED }),
+    ]);
+    mockStorage.getString.mockImplementation((key: string) => (
+      key === 'quarantined-model-files-v1'
+        ? JSON.stringify({
+          files: [
+            { fileName: 'queued.gguf', detectedAt: 1, reason: 'orphaned' },
+            { fileName: 'keep.gguf', detectedAt: 2, reason: 'orphaned' },
+            { fileName: 'orphan.gguf', detectedAt: 3, reason: 'orphaned' },
+          ],
+        })
+        : null
+    ));
+    (FileSystem.readDirectoryAsync as jest.Mock).mockResolvedValueOnce([
+      'queued.gguf',
+      'keep.gguf',
+      'orphan.gguf',
+    ]);
+
+    await expect(registry.deleteQuarantinedModelFiles(undefined, ['queued.gguf'])).resolves.toBe(1);
+
+    expect(FileSystem.deleteAsync).toHaveBeenCalledTimes(1);
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/models/orphan.gguf', { idempotent: true });
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/models/queued.gguf', expect.anything());
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/models/keep.gguf', expect.anything());
+    expect(mockStorage.remove).toHaveBeenCalledWith('quarantined-model-files-v1');
+  });
+
+  it('keeps private-reset-preserved files safe during final quarantine deletion', async () => {
+    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([]);
+    mockStorage.getString.mockImplementation((key: string) => {
+      if (key === 'private-reset-preserved-model-files-v1') {
+        return JSON.stringify({
+          fileNames: ['preserved.gguf'],
+          scanComplete: true,
+        });
+      }
+
+      if (key === 'quarantined-model-files-v1') {
+        return JSON.stringify({
+          files: [
+            { fileName: 'preserved.gguf', detectedAt: 1, reason: 'orphaned' },
+            { fileName: 'orphan.gguf', detectedAt: 2, reason: 'orphaned' },
+          ],
+        });
+      }
+
+      return null;
+    });
+    (FileSystem.readDirectoryAsync as jest.Mock).mockResolvedValueOnce([
+      'preserved.gguf',
+      'orphan.gguf',
+    ]);
+
+    await expect(registry.deleteQuarantinedModelFiles()).resolves.toBe(1);
+
+    expect(FileSystem.deleteAsync).toHaveBeenCalledTimes(1);
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/models/orphan.gguf', { idempotent: true });
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/models/preserved.gguf', expect.anything());
+    expect(mockStorage.remove).toHaveBeenCalledWith('quarantined-model-files-v1');
   });
 
   it('preserves model files that existed before a private storage reset', async () => {

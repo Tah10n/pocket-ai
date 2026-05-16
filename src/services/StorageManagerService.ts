@@ -1,5 +1,6 @@
 import * as FileSystem from 'expo-file-system/legacy';
 import { useChatStore } from '../store/chatStore';
+import { getQueuedDownloadFileNames } from '../store/downloadStore';
 import { storage as appStorage } from '../store/storage';
 import { getCacheDir, getModelsDir } from './FileSystemSetup';
 import { llmEngineService } from './LLMEngineService';
@@ -42,12 +43,23 @@ type PersistedChatStorePayload = {
 export interface AppStorageMetrics {
   downloadedModels: ModelMetadata[];
   modelsBytes: number;
+  quarantinedModelFiles: QuarantinedModelFilesMetrics;
   cacheBytes: number;
   chatHistoryBytes: number;
   settingsBytes: number;
   appFilesBytes: number;
   activeModelEstimateBytes: number;
   activeModelId: string | null;
+}
+
+export interface QuarantinedModelFilesMetrics {
+  fileNames: string[];
+  count: number;
+  bytes: number;
+}
+
+export interface AppStorageMetricsOptions {
+  refreshModelFileQuarantine?: boolean;
 }
 
 interface OffloadModelOptions {
@@ -246,6 +258,58 @@ async function getDownloadedModelsWithResolvedSizes(): Promise<ModelMetadata[]> 
   });
 }
 
+async function getQuarantinedModelFilesMetrics(): Promise<QuarantinedModelFilesMetrics> {
+  const fileNames = registry.getQuarantinedModelFileNames();
+  const modelsDir = getModelsDir();
+
+  if (!modelsDir || fileNames.length === 0) {
+    return {
+      fileNames,
+      count: fileNames.length,
+      bytes: 0,
+    };
+  }
+
+  const sizes = await Promise.all(
+    fileNames.map(async (fileName) => {
+      const fileUri = safeJoinModelPath(modelsDir, fileName);
+      if (!fileUri) {
+        return 0;
+      }
+
+      try {
+        const info = await FileSystem.getInfoAsync(fileUri);
+        if (
+          info.exists
+          && typeof info.size === 'number'
+          && Number.isFinite(info.size)
+          && info.size > 0
+        ) {
+          return Math.round(info.size);
+        }
+      } catch {
+        // Keep the file visible in quarantine metrics even if size probing fails.
+      }
+
+      return 0;
+    }),
+  );
+
+  return {
+    fileNames,
+    count: fileNames.length,
+    bytes: sizes.reduce((sum, size) => sum + size, 0),
+  };
+}
+
+async function refreshModelFileQuarantine() {
+  try {
+    await registry.validateRegistry(getQueuedDownloadFileNames());
+  } catch (error) {
+    console.warn('[StorageManagerService] Failed to refresh model file quarantine', error);
+  }
+}
+
 function getLegacyChatHistoryBytes() {
   const legacyKeys = settingsStorage
     .getAllKeys()
@@ -340,11 +404,17 @@ async function getActiveModelEstimateBytes(downloadedModels: ModelMetadata[]) {
   return Math.round(baseModelBytes * (1 + ESTIMATED_MODEL_RUNTIME_OVERHEAD_FACTOR) + contextBytes);
 }
 
-export async function getAppStorageMetrics(): Promise<AppStorageMetrics> {
+export async function getAppStorageMetrics(options: AppStorageMetricsOptions = {}): Promise<AppStorageMetrics> {
+  if (options.refreshModelFileQuarantine) {
+    directorySizeCache.clear();
+    await refreshModelFileQuarantine();
+  }
+
   const downloadedModels = await getDownloadedModelsWithResolvedSizes();
   const modelsBytes = downloadedModels.reduce((sum, model) => sum + Math.max(model.size ?? 0, 0), 0);
   const cacheDir = getCacheDir();
-  const [cacheDirectoryBytes] = await Promise.all([
+  const [quarantinedModelFiles, cacheDirectoryBytes] = await Promise.all([
+    getQuarantinedModelFilesMetrics(),
     cacheDir ? getDirectorySizeBytes(cacheDir) : Promise.resolve(0),
   ]);
   const cacheBytes = cacheDirectoryBytes + modelCatalogService.getPersistentCacheBytes();
@@ -355,10 +425,11 @@ export async function getAppStorageMetrics(): Promise<AppStorageMetrics> {
   return {
     downloadedModels,
     modelsBytes,
+    quarantinedModelFiles,
     cacheBytes,
     chatHistoryBytes,
     settingsBytes,
-    appFilesBytes: modelsBytes + cacheBytes + chatHistoryBytes + settingsBytes,
+    appFilesBytes: modelsBytes + quarantinedModelFiles.bytes + cacheBytes + chatHistoryBytes + settingsBytes,
     activeModelEstimateBytes,
     activeModelId: llmEngineService.getState().activeModelId ?? null,
   };
@@ -435,6 +506,36 @@ export async function clearActiveCache() {
   }
 
   return clearedEntries;
+}
+
+export async function cleanupQuarantinedModelFiles() {
+  directorySizeCache.clear();
+  const getCurrentQueuedModelFileNames = () => getQueuedDownloadFileNames();
+  await registry.validateRegistry(getCurrentQueuedModelFileNames());
+
+  const fileNames = registry.getQuarantinedModelFileNames();
+  let deletedCount = 0;
+  let firstError: unknown = null;
+
+  for (const fileName of fileNames) {
+    try {
+      deletedCount += await registry.deleteQuarantinedModelFiles(
+        [fileName],
+        getCurrentQueuedModelFileNames,
+      );
+    } catch (error) {
+      console.warn('[StorageManagerService] Failed to delete quarantined model file', fileName, error);
+      firstError ??= error;
+    }
+  }
+
+  directorySizeCache.clear();
+
+  if (firstError) {
+    throw firstError;
+  }
+
+  return deletedCount;
 }
 
 export async function clearChatHistory() {

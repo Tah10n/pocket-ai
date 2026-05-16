@@ -329,10 +329,22 @@ function resetLocalDownloadState(model: ModelMetadata): void {
   model.localPath = undefined;
   model.downloadedAt = undefined;
   model.downloadIntegrity = undefined;
+  model.resumeData = undefined;
+  model.downloadErrorAt = undefined;
+  model.downloadErrorCode = undefined;
+  model.downloadErrorMessage = undefined;
   model.downloadProgress = 0;
   if (model.metadataTrust === 'verified_local') {
     model.metadataTrust = undefined;
   }
+}
+
+function hasCompletedLocalModelFile(model: Pick<ModelMetadata, 'lifecycleStatus' | 'localPath'>): boolean {
+  return (
+    (model.lifecycleStatus === LifecycleStatus.DOWNLOADED
+      || model.lifecycleStatus === LifecycleStatus.ACTIVE)
+    && typeof model.localPath === 'string'
+  );
 }
 
 export class LocalStorageRegistry {
@@ -512,8 +524,8 @@ export class LocalStorageRegistry {
     const { ids, modelsById } = this.getCachedModelsState();
     const normalized = normalizePersistedModelMetadata({ ...model, id: modelId });
     const existing = modelsById.get(modelId);
-    const hadLocalPath = typeof existing?.localPath === 'string';
-    const hasLocalPath = typeof normalized.localPath === 'string';
+    const hadCompletedLocalFile = existing ? hasCompletedLocalModelFile(existing) : false;
+    const hasCompletedLocalFile = hasCompletedLocalModelFile(normalized);
     const isNew = !modelsById.has(modelId);
     const nextIds = isNew ? [...ids, modelId] : ids.slice();
     const nextModelsById = new Map(modelsById);
@@ -532,7 +544,11 @@ export class LocalStorageRegistry {
     this.cachedModelsById = nextModelsById;
     this.cachedDownloadedModelsCount = this.cachedDownloadedModelsCount == null
       ? this.countDownloadedModels(nextModelsById)
-      : this.cachedDownloadedModelsCount + (hadLocalPath === hasLocalPath ? 0 : hasLocalPath ? 1 : -1);
+      : this.cachedDownloadedModelsCount + (
+        hadCompletedLocalFile === hasCompletedLocalFile
+          ? 0
+          : hasCompletedLocalFile ? 1 : -1
+      );
 
     this.emitModelsChanged();
   }
@@ -571,7 +587,7 @@ export class LocalStorageRegistry {
 
     const state = this.getCachedModelsState();
     const existing = state.modelsById.get(normalizedId);
-    const hadLocalPath = typeof existing?.localPath === 'string';
+    const hadCompletedLocalFile = existing ? hasCompletedLocalModelFile(existing) : false;
     const nextModelsById = new Map(state.modelsById);
     const nextIds = state.ids.filter((id) => id !== normalizedId);
 
@@ -587,7 +603,7 @@ export class LocalStorageRegistry {
     this.cachedModelsById = nextModelsById;
     this.cachedDownloadedModelsCount = this.cachedDownloadedModelsCount == null
       ? this.countDownloadedModels(nextModelsById)
-      : hadLocalPath
+      : hadCompletedLocalFile
         ? Math.max(0, this.cachedDownloadedModelsCount - 1)
         : this.cachedDownloadedModelsCount;
 
@@ -609,11 +625,7 @@ export class LocalStorageRegistry {
         const hasDownloadedState = model.lifecycleStatus === LifecycleStatus.DOWNLOADED
           || model.lifecycleStatus === LifecycleStatus.ACTIVE;
         if (model.localPath || hasDownloadedState) {
-          if (hasDownloadedState) {
-            resetLocalDownloadState(model);
-          } else {
-            model.localPath = undefined;
-          }
+          resetLocalDownloadState(model);
           changed = true;
         }
       }
@@ -627,7 +639,16 @@ export class LocalStorageRegistry {
 
     // 1. Check if recorded files actually exist
     for (const model of models) {
-      if (model.lifecycleStatus === LifecycleStatus.DOWNLOADED || model.lifecycleStatus === LifecycleStatus.ACTIVE) {
+      const hasDownloadedState = model.lifecycleStatus === LifecycleStatus.DOWNLOADED
+        || model.lifecycleStatus === LifecycleStatus.ACTIVE;
+
+      if (!hasDownloadedState && model.localPath) {
+        resetLocalDownloadState(model);
+        changed = true;
+        continue;
+      }
+
+      if (hasDownloadedState) {
         if (!model.localPath) {
           console.warn(`[LocalStorageRegistry] Missing localPath for ${model.id}, resetting to available`);
           resetLocalDownloadState(model);
@@ -915,6 +936,7 @@ export class LocalStorageRegistry {
     const currentSafeDirectoryFileNames = normalizeModelFileNames(directoryFileNames);
     const completedLocalPaths = new Set(
       models
+        .filter(hasCompletedLocalModelFile)
         .map((model) => model.localPath)
         .filter((localPath): localPath is string => isValidLocalFileName(localPath)),
     );
@@ -1018,7 +1040,7 @@ export class LocalStorageRegistry {
     let count = 0;
 
     for (const model of modelsById.values()) {
-      if (typeof model.localPath === 'string') {
+      if (hasCompletedLocalModelFile(model)) {
         count += 1;
       }
     }

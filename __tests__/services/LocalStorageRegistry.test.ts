@@ -185,6 +185,10 @@ describe('LocalStorageRegistry', () => {
         },
         metadataTrust: 'verified_local',
         downloadProgress: 1,
+        resumeData: 'stale-resume-data',
+        downloadErrorAt: 456,
+        downloadErrorCode: 'download_http_error',
+        downloadErrorMessage: 'HTTP status 500',
       }),
     ]);
     (registry.saveModels as jest.Mock) = jest.fn();
@@ -200,6 +204,54 @@ describe('LocalStorageRegistry', () => {
     expect(updatedModels[0].downloadIntegrity).toBeUndefined();
     expect(updatedModels[0].metadataTrust).toBeUndefined();
     expect(updatedModels[0].downloadProgress).toBe(0);
+    expect(updatedModels[0].resumeData).toBeUndefined();
+    expect(updatedModels[0].downloadErrorAt).toBeUndefined();
+    expect(updatedModels[0].downloadErrorCode).toBeUndefined();
+    expect(updatedModels[0].downloadErrorMessage).toBeUndefined();
+  });
+
+  it('clears stale local paths for non-downloaded registry entries before quarantine scans', async () => {
+    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([
+      createMockModel({
+        lifecycleStatus: LifecycleStatus.AVAILABLE,
+        localPath: 'stale.gguf',
+        downloadedAt: 123,
+        downloadIntegrity: {
+          kind: 'size',
+          sizeBytes: 1000,
+          checkedAt: 10,
+        },
+        metadataTrust: 'verified_local',
+        downloadProgress: 1,
+        resumeData: 'stale-resume-data',
+        downloadErrorAt: 456,
+        downloadErrorCode: 'download_http_error',
+        downloadErrorMessage: 'HTTP status 500',
+      }),
+    ]);
+    (registry.saveModels as jest.Mock) = jest.fn();
+    (FileSystem.readDirectoryAsync as jest.Mock).mockResolvedValueOnce(['stale.gguf']);
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: true, size: 1000 });
+
+    await registry.validateRegistry();
+
+    expect(registry.saveModels).toHaveBeenCalled();
+    const updatedModels = (registry.saveModels as jest.Mock).mock.calls[0][0];
+    expect(updatedModels[0].lifecycleStatus).toBe(LifecycleStatus.AVAILABLE);
+    expect(updatedModels[0].localPath).toBeUndefined();
+    expect(updatedModels[0].downloadedAt).toBeUndefined();
+    expect(updatedModels[0].downloadIntegrity).toBeUndefined();
+    expect(updatedModels[0].metadataTrust).toBeUndefined();
+    expect(updatedModels[0].downloadProgress).toBe(0);
+    expect(updatedModels[0].resumeData).toBeUndefined();
+    expect(updatedModels[0].downloadErrorAt).toBeUndefined();
+    expect(updatedModels[0].downloadErrorCode).toBeUndefined();
+    expect(updatedModels[0].downloadErrorMessage).toBeUndefined();
+
+    const quarantinePayload = mockStorage.set.mock.calls.find(
+      ([key]) => key === 'quarantined-model-files-v1',
+    )?.[1];
+    expect(quarantinePayload).toEqual(expect.stringContaining('stale.gguf'));
   });
 
   it('should normalize persisted active models back to downloaded on bootstrap', async () => {
@@ -628,6 +680,54 @@ describe('LocalStorageRegistry', () => {
     expect(mockStorage.set).not.toHaveBeenCalledWith('models-registry', expect.anything());
   });
 
+  it('updates the downloaded count only for completed local model files', () => {
+    const freshRegistry = new (LocalStorageRegistry as any)();
+    (freshRegistry as any).storage = mockStorage;
+
+    freshRegistry.updateModel(createMockModel({
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      localPath: 'stale.gguf',
+    }));
+    expect(freshRegistry.getDownloadedModelsCount()).toBe(0);
+
+    freshRegistry.updateModel(createMockModel({
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      localPath: 'model.gguf',
+    }));
+    expect(freshRegistry.getDownloadedModelsCount()).toBe(1);
+
+    freshRegistry.updateModel(createMockModel({
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      localPath: 'model.gguf',
+    }));
+    expect(freshRegistry.getDownloadedModelsCount()).toBe(0);
+  });
+
+  it('does not count stale available localPath metadata as a downloaded model', () => {
+    const staleModel = createMockModel({
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      localPath: 'stale.gguf',
+    });
+    mockStorage.getString.mockImplementation((key: string) => {
+      if (key === 'models-registry:index-v1') {
+        return JSON.stringify([staleModel.id]);
+      }
+
+      if (key === 'models-registry:model-v1:test%2Fmodel') {
+        return JSON.stringify(staleModel);
+      }
+
+      return null;
+    });
+
+    const freshRegistry = new (LocalStorageRegistry as any)();
+    (freshRegistry as any).storage = mockStorage;
+
+    expect(freshRegistry.getModel(staleModel.id)?.localPath).toBe('stale.gguf');
+    expect(freshRegistry.getDownloadedModelsCount()).toBe(0);
+    expect(freshRegistry.hasAnyDownloadedModels()).toBe(false);
+  });
+
   it('migrates the legacy array registry into index + per-model keys', () => {
     mockStorage.getAllKeys.mockReturnValue(['models-registry:model-v1:stale%2Fmodel']);
     mockStorage.getString.mockImplementation((key: string) => {
@@ -695,6 +795,23 @@ describe('LocalStorageRegistry', () => {
       (isolatedRegistry.getModels as jest.Mock) = jest.fn().mockReturnValue([
         createMockModel({ lifecycleStatus: LifecycleStatus.DOWNLOADED, localPath: 'model.gguf' }),
         createMockModel({ id: 'test/active', lifecycleStatus: LifecycleStatus.ACTIVE, localPath: 'active.gguf' }),
+        createMockModel({
+          id: 'test/stale',
+          lifecycleStatus: LifecycleStatus.AVAILABLE,
+          localPath: 'stale.gguf',
+          downloadedAt: 123,
+          downloadIntegrity: {
+            kind: 'size',
+            sizeBytes: 1000,
+            checkedAt: 10,
+          },
+          metadataTrust: 'verified_local',
+          downloadProgress: 1,
+          resumeData: 'stale-resume-data',
+          downloadErrorAt: 456,
+          downloadErrorCode: 'download_http_error',
+          downloadErrorMessage: 'HTTP status 500',
+        }),
       ]);
       (isolatedRegistry.saveModels as jest.Mock) = jest.fn();
 
@@ -707,6 +824,16 @@ describe('LocalStorageRegistry', () => {
         expect(updatedModels[0].lifecycleStatus).toBe(LifecycleStatus.AVAILABLE);
         expect(updatedModels[1].localPath).toBeUndefined();
         expect(updatedModels[1].lifecycleStatus).toBe(LifecycleStatus.AVAILABLE);
+        expect(updatedModels[2].localPath).toBeUndefined();
+        expect(updatedModels[2].lifecycleStatus).toBe(LifecycleStatus.AVAILABLE);
+        expect(updatedModels[2].downloadedAt).toBeUndefined();
+        expect(updatedModels[2].downloadIntegrity).toBeUndefined();
+        expect(updatedModels[2].metadataTrust).toBeUndefined();
+        expect(updatedModels[2].downloadProgress).toBe(0);
+        expect(updatedModels[2].resumeData).toBeUndefined();
+        expect(updatedModels[2].downloadErrorAt).toBeUndefined();
+        expect(updatedModels[2].downloadErrorCode).toBeUndefined();
+        expect(updatedModels[2].downloadErrorMessage).toBeUndefined();
       })();
     });
 

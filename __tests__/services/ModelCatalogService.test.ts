@@ -571,8 +571,19 @@ describe('ModelCatalogService', () => {
   });
 
   it('preserves verified local context ceilings when unverified search results report a smaller value', async () => {
+    const remoteSize = 1.5 * 1024 * 1024 * 1024;
     const localModel: ModelMetadata = {
       ...makeLocalModel('org/verified-local-context-model'),
+      size: remoteSize,
+      resolvedFileName: 'model.Q4_K_M.gguf',
+      sha256: LOCAL_SHA256,
+      downloadIntegrity: {
+        kind: 'sha256',
+        sizeBytes: remoteSize,
+        checkedAt: 1,
+        sha256: LOCAL_SHA256,
+      },
+      metadataTrust: 'verified_local',
       maxContextTokens: 32768,
       hasVerifiedContextWindow: true,
     };
@@ -585,7 +596,7 @@ describe('ModelCatalogService', () => {
         ok: true,
         json: () => Promise.resolve([
           {
-            ...makeRepo(localModel.id),
+            ...makeRepo(localModel.id, remoteSize),
             config: {
               max_position_embeddings: 8192,
             },
@@ -1046,7 +1057,7 @@ describe('ModelCatalogService', () => {
     }));
   });
 
-  it('prefers remote sizes over unverified local sizes when merging catalog results with the registry', async () => {
+  it('resets unverified local downloads when remote size conflicts with persisted state', async () => {
     const localModel: ModelMetadata = {
       ...makeLocalModel('org/unverified-local-size-model'),
       accessState: ModelAccessState.PUBLIC,
@@ -1082,8 +1093,9 @@ describe('ModelCatalogService', () => {
 
     expect(result.models).toHaveLength(1);
     expect(result.models[0].id).toBe(localModel.id);
-    expect(result.models[0].localPath).toBe(localModel.localPath);
-    expect(result.models[0].lifecycleStatus).toBe(LifecycleStatus.DOWNLOADED);
+    expect(result.models[0].localPath).toBeUndefined();
+    expect(result.models[0].lifecycleStatus).toBe(LifecycleStatus.AVAILABLE);
+    expect(result.models[0].downloadProgress).toBe(0);
     expect(result.models[0].size).toBe(3 * 1024 * 1024 * 1024);
   });
 
@@ -2847,6 +2859,8 @@ describe('ModelCatalogService', () => {
     const localModel: ModelMetadata = {
       ...makeLocalModel('org/unverified-fallback-context-model'),
       accessState: ModelAccessState.PUBLIC,
+      size: 1.5 * 1024 * 1024 * 1024,
+      resolvedFileName: 'model.Q4_K_M.gguf',
       maxContextTokens: 32768,
       hasVerifiedContextWindow: false,
     };
@@ -3678,7 +3692,7 @@ describe('ModelCatalogService', () => {
       return Promise.resolve({
         ok: true,
         json: () => Promise.resolve({
-          ...makeRepo('org/stale-context-model', 2 * 1024 * 1024 * 1024),
+          ...makeRepo('org/stale-context-model', 2 * 1024 * 1024 * 1024, 'model.gguf'),
           config: {
             max_position_embeddings: 8192,
             rope_scaling: {
@@ -3862,7 +3876,7 @@ describe('ModelCatalogService', () => {
         return Promise.resolve({
           ok: true,
           json: () => Promise.resolve({
-            ...makeRepo('org/stale-gated-context-model', 2 * 1024 * 1024 * 1024),
+            ...makeRepo('org/stale-gated-context-model', 2 * 1024 * 1024 * 1024, 'model.gguf'),
             gated: 'manual',
             config: {
               max_position_embeddings: 8192,

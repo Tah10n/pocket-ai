@@ -25,6 +25,7 @@ import { backgroundTaskService } from './BackgroundTaskService';
 import { notificationService, type DownloadErrorReason } from './NotificationService';
 import { PrivateStorageUnavailableError, getPrivateStorageHealthSnapshot, isPrivateStorageWritable } from './storage';
 import { GgufValidationError, validateGgufFileHeader } from '../utils/ggufValidation';
+import { normalizeSha256Digest } from '../utils/sha256';
 
 function ignorePrivateStorageUnavailableDuringDownloadStop(error: unknown, scope: string): boolean {
   if (isPrivateStorageUnavailableError(error)) {
@@ -869,7 +870,7 @@ export class ModelDownloadManager {
         downloadErrorAt: undefined,
         downloadErrorCode: undefined,
         downloadErrorMessage: undefined,
-        sha256: verification.sha256 ?? model.sha256,
+        sha256: verification.sha256 ?? normalizeSha256Digest(model.sha256),
       };
 
       assertPrivateStorageWritableForDownloadMutation();
@@ -965,39 +966,43 @@ export class ModelDownloadManager {
         );
       }
 
-      const expectedHash = this.normalizeSha256Digest(model.sha256);
-      if (!expectedHash) {
-        try {
-          await validateGgufFileHeader(localUri, fileInfo);
-        } catch (error) {
-          if (error instanceof GgufValidationError) {
-            if (shouldDeleteInvalidGgufDownload(error.reason)) {
-              await this.deleteCorruptedDownload(localUri, model.id);
-            }
-            throw new AppError(
-              'download_verification_failed',
-              error.message,
-              {
-                details: {
-                  modelId: model.id,
-                  localUri,
-                  reason: error.reason,
-                  ...(error.details ?? {}),
-                },
-              },
-            );
+      // SHA-256 proves byte-for-byte integrity against upstream metadata, but it does
+      // not prove that the bytes are a loadable GGUF payload. Keep this validation
+      // outside the hash branch so every completed download passes the same file
+      // format gate before it can be marked DOWNLOADED/verified_local.
+      try {
+        await validateGgufFileHeader(localUri, fileInfo);
+      } catch (error) {
+        if (error instanceof GgufValidationError) {
+          if (shouldDeleteInvalidGgufDownload(error.reason)) {
+            await this.deleteCorruptedDownload(localUri, model.id);
           }
-
-          throw error;
+          throw new AppError(
+            'download_verification_failed',
+            error.message,
+            {
+              details: {
+                modelId: model.id,
+                localUri,
+                reason: error.reason,
+                ...(error.details ?? {}),
+              },
+            },
+          );
         }
 
+        throw error;
+      }
+
+      const expectedHash = normalizeSha256Digest(model.sha256);
+      if (!expectedHash) {
         return {
           integrity: typeof expectedSize === 'number' && expectedSize > 0 ? 'size' : 'unverified',
           sizeBytes: downloadedSize,
         };
       }
 
-      const actualHash = this.normalizeSha256Digest(
+      const actualHash = normalizeSha256Digest(
         await RNFS.hash(this.toNativeFilePath(localUri), 'sha256'),
       );
       if (!actualHash || actualHash !== expectedHash) {
@@ -1289,21 +1294,6 @@ export class ModelDownloadManager {
     if (deletedAnyFile) {
       console.log(`[ModelDownloadManager] Deleted partial download for ${modelId}`);
     }
-  }
-
-  private normalizeSha256Digest(value: string | undefined): string | undefined {
-    if (typeof value !== 'string') {
-      return undefined;
-    }
-
-    const trimmed = value.trim().toLowerCase();
-    if (!trimmed) {
-      return undefined;
-    }
-
-    return trimmed.startsWith('sha256:')
-      ? trimmed.slice('sha256:'.length)
-      : trimmed;
   }
 
   private toNativeFilePath(fileUri: string): string {

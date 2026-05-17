@@ -41,6 +41,11 @@ jest.mock('../../src/services/SystemMetricsService', () => ({
 }));
 
 const mockedRegistry = registry as jest.Mocked<typeof registry>;
+const TREE_SHA256 = 'a'.repeat(64);
+const LOCAL_SHA256 = 'b'.repeat(64);
+const OTHER_TREE_SHA256 = 'c'.repeat(64);
+const PAGED_TREE_SHA256 = 'd'.repeat(64);
+const PROJECTOR_CACHE_SHA256 = 'e'.repeat(64);
 
 function makeRepo(
   id: string,
@@ -142,7 +147,7 @@ function makeStaleProjectorCacheModel(id: string): ModelMetadata {
     downloadUrl: `https://huggingface.co/${id}/resolve/main/${fileName}`,
     localPath: undefined,
     resolvedFileName: fileName,
-    sha256: 'stale-projector-sha',
+    sha256: PROJECTOR_CACHE_SHA256,
     requiresTreeProbe: false,
     lifecycleStatus: LifecycleStatus.AVAILABLE,
     downloadProgress: 0,
@@ -348,7 +353,13 @@ describe('ModelCatalogService', () => {
       gguf: { totalBytes: 4 * 1024 * 1024 * 1024, architecture: 'llama' },
       resolvedFileName: 'model.Q4_K_M.gguf',
       downloadUrl: `https://huggingface.co/${staleModel.id}/resolve/new-local-revision/model.Q4_K_M.gguf`,
-      sha256: 'real-model-sha',
+      sha256: LOCAL_SHA256,
+      downloadIntegrity: {
+        kind: 'sha256',
+        sizeBytes: 4 * 1024 * 1024 * 1024,
+        checkedAt: 123,
+        sha256: LOCAL_SHA256,
+      },
       fitsInRam: true,
       memoryFitDecision: 'fits_high_confidence',
       memoryFitConfidence: 'high',
@@ -390,7 +401,13 @@ describe('ModelCatalogService', () => {
       ...makeLocalModel(staleModel.id),
       resolvedFileName: 'model.Q4_K_M.gguf',
       downloadUrl: `https://huggingface.co/${staleModel.id}/resolve/main/model.Q4_K_M.gguf`,
-      sha256: 'real-main-model-sha',
+      sha256: LOCAL_SHA256,
+      downloadIntegrity: {
+        kind: 'sha256',
+        sizeBytes: 1024,
+        checkedAt: 123,
+        sha256: LOCAL_SHA256,
+      },
       metadataTrust: 'verified_local',
     };
     mockedRegistry.getModel.mockReturnValue(localModel);
@@ -810,7 +827,7 @@ describe('ModelCatalogService', () => {
             {
               path: 'model.Q4_K_M.gguf',
               size: 2 * 1024 * 1024 * 1024,
-              lfs: { sha256: 'tree-sha' },
+              lfs: { sha256: TREE_SHA256 },
             },
           ]),
         });
@@ -831,10 +848,74 @@ describe('ModelCatalogService', () => {
     expect(result.models).toHaveLength(1);
     expect(result.models[0].id).toBe('org/unknown-size-model');
     expect(result.models[0].size).toBe(2 * 1024 * 1024 * 1024);
-    expect(result.models[0].sha256).toBe('tree-sha');
+    expect(result.models[0].sha256).toBe(TREE_SHA256);
     expect(result.models[0].requiresTreeProbe).toBe(false);
     expect(global.fetch).toHaveBeenCalledTimes(2);
     expect((global.fetch as jest.Mock).mock.calls[1][0]).toContain('/tree/main?recursive=true');
+  });
+
+  it('preserves verified local metadata when tree probes omit the remote digest', async () => {
+    const service = new ModelCatalogService();
+    const localModel: ModelMetadata = {
+      ...makeLocalModel('org/tree-missing-digest-model'),
+      accessState: ModelAccessState.PUBLIC,
+      size: 4 * 1024 * 1024 * 1024,
+      sha256: LOCAL_SHA256,
+      metadataTrust: 'verified_local',
+      downloadIntegrity: {
+        kind: 'sha256',
+        sizeBytes: 4 * 1024 * 1024 * 1024,
+        checkedAt: 123,
+        sha256: LOCAL_SHA256,
+      },
+      gguf: {
+        totalBytes: 4 * 1024 * 1024 * 1024,
+        architecture: 'llama',
+        nLayers: 40,
+      },
+      maxContextTokens: 8192,
+      hasVerifiedContextWindow: true,
+      requiresTreeProbe: true,
+    };
+
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      expect(String(input)).toContain('/tree/main?recursive=true');
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: {
+          get: jest.fn(() => null),
+        },
+        json: () => Promise.resolve([{
+          path: 'model.Q4_K_M.gguf',
+          size: 3 * 1024 * 1024 * 1024,
+        }]),
+      });
+    }) as jest.Mock;
+
+    const [resolved] = await (service as any).resolveMissingModelMetadata(
+      [localModel],
+      { totalMemoryBytes: 8 * 1024 * 1024 * 1024, systemMemorySnapshot: null },
+      { authToken: null, hasAuthToken: false, authVersion: 0 },
+    );
+
+    expect(resolved).toEqual(expect.objectContaining({
+      id: localModel.id,
+      size: 4 * 1024 * 1024 * 1024,
+      sha256: LOCAL_SHA256,
+      metadataTrust: 'verified_local',
+      requiresTreeProbe: false,
+      maxContextTokens: 8192,
+      hasVerifiedContextWindow: true,
+    }));
+    expect(resolved.downloadIntegrity).toEqual(localModel.downloadIntegrity);
+    expect(resolved.gguf).toEqual(expect.objectContaining({
+      totalBytes: 4 * 1024 * 1024 * 1024,
+      architecture: 'llama',
+      nLayers: 40,
+    }));
+
+    service.dispose();
   });
 
   it('keeps public GGUF repos visible when the list response omits siblings entirely', async () => {
@@ -986,7 +1067,14 @@ describe('ModelCatalogService', () => {
         headers: {
           get: jest.fn(() => null),
         },
-        json: () => Promise.resolve([makeRepo(localModel.id, 3 * 1024 * 1024 * 1024)]),
+        json: () => Promise.resolve([{
+          ...makeRepo(localModel.id, 3 * 1024 * 1024 * 1024),
+          siblings: [{
+            rfilename: 'model.Q4_K_M.gguf',
+            size: 3 * 1024 * 1024 * 1024,
+            lfs: { sha256: LOCAL_SHA256 },
+          }],
+        }]),
       }),
     ) as jest.Mock;
 
@@ -1004,8 +1092,21 @@ describe('ModelCatalogService', () => {
       ...makeLocalModel('org/verified-local-size-model'),
       accessState: ModelAccessState.PUBLIC,
       size: 4 * 1024 * 1024 * 1024,
+      sha256: LOCAL_SHA256,
       metadataTrust: 'verified_local',
-      gguf: { totalBytes: 4 * 1024 * 1024 * 1024 },
+      downloadIntegrity: {
+        kind: 'sha256',
+        sizeBytes: 4 * 1024 * 1024 * 1024,
+        checkedAt: 123,
+        sha256: LOCAL_SHA256,
+      },
+      gguf: {
+        totalBytes: 4 * 1024 * 1024 * 1024,
+        architecture: 'llama',
+        nLayers: 40,
+      },
+      maxContextTokens: 8192,
+      hasVerifiedContextWindow: true,
       localPath: 'verified-local-size-model.gguf',
       lifecycleStatus: LifecycleStatus.DOWNLOADED,
       downloadProgress: 1,
@@ -1021,7 +1122,14 @@ describe('ModelCatalogService', () => {
         headers: {
           get: jest.fn(() => null),
         },
-        json: () => Promise.resolve([makeRepo(localModel.id, 3 * 1024 * 1024 * 1024)]),
+        json: () => Promise.resolve([{
+          ...makeRepo(localModel.id, 3 * 1024 * 1024 * 1024),
+          siblings: [{
+            rfilename: 'model.Q4_K_M.gguf',
+            size: 3 * 1024 * 1024 * 1024,
+            lfs: { sha256: LOCAL_SHA256 },
+          }],
+        }]),
       }),
     ) as jest.Mock;
 
@@ -1041,11 +1149,13 @@ describe('ModelCatalogService', () => {
       ...makeLocalModel('org/verified-local-integrity-model'),
       accessState: ModelAccessState.PUBLIC,
       size: 4 * 1024 * 1024 * 1024,
+      sha256: LOCAL_SHA256,
       metadataTrust: 'verified_local',
       downloadIntegrity: {
-        kind: 'size',
+        kind: 'sha256',
         sizeBytes: 4 * 1024 * 1024 * 1024,
         checkedAt: 123,
+        sha256: LOCAL_SHA256,
       },
       localPath: 'verified-local-integrity-model.gguf',
       lifecycleStatus: LifecycleStatus.DOWNLOADED,
@@ -1062,13 +1172,232 @@ describe('ModelCatalogService', () => {
         headers: {
           get: jest.fn(() => null),
         },
-        json: () => Promise.resolve([makeRepo(localModel.id, 3 * 1024 * 1024 * 1024)]),
+        json: () => Promise.resolve([{
+          ...makeRepo(localModel.id, 3 * 1024 * 1024 * 1024),
+          siblings: [{
+            rfilename: 'model.Q4_K_M.gguf',
+            size: 3 * 1024 * 1024 * 1024,
+            lfs: { sha256: LOCAL_SHA256 },
+          }],
+        }]),
       }),
     ) as jest.Mock;
 
     const result = await modelCatalogService.searchModels('phi');
 
     expect(result.models[0].downloadIntegrity).toEqual(localModel.downloadIntegrity);
+  });
+
+  it('preserves verified local integrity when catalog results omit the remote digest', async () => {
+    const localModel: ModelMetadata = {
+      ...makeLocalModel('org/verified-local-missing-remote-digest-model'),
+      accessState: ModelAccessState.PUBLIC,
+      size: 4 * 1024 * 1024 * 1024,
+      sha256: LOCAL_SHA256,
+      metadataTrust: 'verified_local',
+      downloadIntegrity: {
+        kind: 'sha256',
+        sizeBytes: 4 * 1024 * 1024 * 1024,
+        checkedAt: 123,
+        sha256: LOCAL_SHA256,
+      },
+      gguf: {
+        totalBytes: 4 * 1024 * 1024 * 1024,
+        architecture: 'llama',
+        nLayers: 40,
+      },
+      maxContextTokens: 8192,
+      hasVerifiedContextWindow: true,
+      localPath: 'verified-local-missing-remote-digest-model.gguf',
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+    };
+    mockedRegistry.getModel.mockImplementation((modelId: string) => (
+      modelId === localModel.id ? localModel : undefined
+    ));
+
+    global.fetch = jest.fn(() =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: {
+          get: jest.fn(() => null),
+        },
+        json: () => Promise.resolve([{
+          ...makeRepo(localModel.id, 3 * 1024 * 1024 * 1024),
+          siblings: [{
+            rfilename: 'model.Q4_K_M.gguf',
+            size: 3 * 1024 * 1024 * 1024,
+          }],
+        }]),
+      }),
+    ) as jest.Mock;
+
+    const result = await modelCatalogService.searchModels('phi');
+
+    expect(result.models[0]).toEqual(expect.objectContaining({
+      id: localModel.id,
+      localPath: localModel.localPath,
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      size: 4 * 1024 * 1024 * 1024,
+      sha256: LOCAL_SHA256,
+      metadataTrust: 'verified_local',
+      maxContextTokens: 8192,
+      hasVerifiedContextWindow: true,
+    }));
+    expect(result.models[0].downloadIntegrity).toEqual(localModel.downloadIntegrity);
+    expect(result.models[0].gguf).toEqual(expect.objectContaining({
+      totalBytes: 4 * 1024 * 1024 * 1024,
+      architecture: 'llama',
+      nLayers: 40,
+    }));
+  });
+
+  it('drops stale verified_local trust when the remote digest changes', async () => {
+    const localModel: ModelMetadata = {
+      ...makeLocalModel('org/stale-verified-local-integrity-model'),
+      accessState: ModelAccessState.PUBLIC,
+      size: 4 * 1024 * 1024 * 1024,
+      sha256: LOCAL_SHA256,
+      metadataTrust: 'verified_local',
+      downloadIntegrity: {
+        kind: 'sha256',
+        sizeBytes: 4 * 1024 * 1024 * 1024,
+        checkedAt: 123,
+        sha256: LOCAL_SHA256,
+      },
+      gguf: {
+        totalBytes: 4 * 1024 * 1024 * 1024,
+        architecture: 'llama',
+        nLayers: 40,
+      },
+      maxContextTokens: 8192,
+      hasVerifiedContextWindow: true,
+      localPath: 'stale-verified-local-integrity-model.gguf',
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+    };
+    mockedRegistry.getModel.mockImplementation((modelId: string) => (
+      modelId === localModel.id ? localModel : undefined
+    ));
+
+    global.fetch = jest.fn(() =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: {
+          get: jest.fn(() => null),
+        },
+        json: () => Promise.resolve([{
+          ...makeRepo(localModel.id, 3 * 1024 * 1024 * 1024),
+          siblings: [{
+            rfilename: 'model.Q4_K_M.gguf',
+            size: 3 * 1024 * 1024 * 1024,
+            lfs: { sha256: OTHER_TREE_SHA256 },
+          }],
+        }]),
+      }),
+    ) as jest.Mock;
+
+    const result = await modelCatalogService.searchModels('phi');
+
+    expect(result.models[0]).toEqual(expect.objectContaining({
+      id: localModel.id,
+      localPath: localModel.localPath,
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      size: 3 * 1024 * 1024 * 1024,
+      sha256: OTHER_TREE_SHA256,
+      metadataTrust: 'trusted_remote',
+    }));
+    expect(result.models[0].downloadIntegrity).toBeUndefined();
+    expect(result.models[0].gguf?.totalBytes).toBe(3 * 1024 * 1024 * 1024);
+    expect(result.models[0].gguf?.architecture).toBeUndefined();
+    expect(result.models[0].gguf?.nLayers).toBeUndefined();
+    expect(result.models[0].hasVerifiedContextWindow).toBe(false);
+    expect(result.models[0].maxContextTokens).toBeUndefined();
+  });
+
+  it('does not restore verified local size when a conflicting digest has unknown remote size', async () => {
+    const localModel: ModelMetadata = {
+      ...makeLocalModel('org/stale-verified-local-unknown-size-model'),
+      accessState: ModelAccessState.PUBLIC,
+      size: 4 * 1024 * 1024 * 1024,
+      sha256: LOCAL_SHA256,
+      metadataTrust: 'verified_local',
+      fitsInRam: true,
+      memoryFitDecision: 'fits_high_confidence',
+      memoryFitConfidence: 'high',
+      downloadIntegrity: {
+        kind: 'sha256',
+        sizeBytes: 4 * 1024 * 1024 * 1024,
+        checkedAt: 123,
+        sha256: LOCAL_SHA256,
+      },
+      gguf: {
+        totalBytes: 4 * 1024 * 1024 * 1024,
+        architecture: 'llama',
+        nLayers: 40,
+      },
+      maxContextTokens: 8192,
+      hasVerifiedContextWindow: true,
+      localPath: 'stale-verified-local-unknown-size-model.gguf',
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+    };
+    mockedRegistry.getModel.mockImplementation((modelId: string) => (
+      modelId === localModel.id ? localModel : undefined
+    ));
+
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.includes('/tree/main?recursive=true')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          headers: {
+            get: jest.fn(() => null),
+          },
+          json: () => Promise.resolve([{
+            path: 'model.Q4_K_M.gguf',
+            lfs: { sha256: OTHER_TREE_SHA256 },
+          }]),
+        });
+      }
+
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: {
+          get: jest.fn(() => null),
+        },
+        json: () => Promise.resolve([{
+          ...makeRepoWithUnknownSize(localModel.id),
+          siblings: [{
+            rfilename: 'model.Q4_K_M.gguf',
+            lfs: { sha256: OTHER_TREE_SHA256 },
+          }],
+        }]),
+      });
+    }) as jest.Mock;
+
+    const result = await modelCatalogService.searchModels('phi');
+
+    expect(result.models[0]).toEqual(expect.objectContaining({
+      id: localModel.id,
+      localPath: localModel.localPath,
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      size: null,
+      sha256: OTHER_TREE_SHA256,
+      fitsInRam: null,
+    }));
+    expect(result.models[0].metadataTrust).toBeUndefined();
+    expect(result.models[0].downloadIntegrity).toBeUndefined();
+    expect(result.models[0].gguf).toBeUndefined();
+    expect(result.models[0].memoryFitDecision).toBeUndefined();
+    expect(result.models[0].memoryFitConfidence).toBeUndefined();
+    expect(result.models[0].hasVerifiedContextWindow).toBe(false);
+    expect(result.models[0].maxContextTokens).toBeUndefined();
   });
 
   it('skips mmproj projector files when selecting a GGUF download candidate', async () => {
@@ -1170,7 +1499,7 @@ describe('ModelCatalogService', () => {
             {
               path: 'model.Q8_0.gguf',
               size: 5 * 1024 * 1024 * 1024,
-              lfs: { sha256: 'partial-tree-q8-sha' },
+              lfs: { sha256: OTHER_TREE_SHA256 },
             },
           ]),
         });
@@ -1194,7 +1523,7 @@ describe('ModelCatalogService', () => {
     expect(result.models[0].resolvedFileName).toBe('model.Q8_0.gguf');
     expect(result.models[0].downloadUrl).toBe('https://huggingface.co/org/incomplete-tree-probe/resolve/main/model.Q8_0.gguf');
     expect(result.models[0].size).toBe(5 * 1024 * 1024 * 1024);
-    expect(result.models[0].sha256).toBe('partial-tree-q8-sha');
+    expect(result.models[0].sha256).toBe(OTHER_TREE_SHA256);
     expect(global.fetch).toHaveBeenCalledTimes(3);
     expect((global.fetch as jest.Mock).mock.calls[2][0]).toContain('cursor=tree-page-2');
   });
@@ -1214,7 +1543,7 @@ describe('ModelCatalogService', () => {
             {
               path: 'model.Q4_K_M.gguf',
               size: 3 * 1024 * 1024 * 1024,
-              lfs: { sha256: 'paged-tree-sha' },
+              lfs: { sha256: PAGED_TREE_SHA256 },
             },
           ]),
         });
@@ -1251,7 +1580,7 @@ describe('ModelCatalogService', () => {
 
     expect(result.models).toHaveLength(1);
     expect(result.models[0].size).toBe(3 * 1024 * 1024 * 1024);
-    expect(result.models[0].sha256).toBe('paged-tree-sha');
+    expect(result.models[0].sha256).toBe(PAGED_TREE_SHA256);
     expect(result.models[0].requiresTreeProbe).toBe(false);
     expect(global.fetch).toHaveBeenCalledTimes(3);
     expect((global.fetch as jest.Mock).mock.calls[2][0]).toContain('cursor=tree-page-2');
@@ -2445,6 +2774,151 @@ describe('ModelCatalogService', () => {
       maxContextTokens: 8192,
       hasVerifiedContextWindow: true,
     }));
+
+    service.dispose();
+  });
+
+  it('preserves verified local detail metadata when the remote digest is missing', async () => {
+    const service = new ModelCatalogService();
+    const localModel: ModelMetadata = {
+      ...makeLocalModel('org/detail-missing-digest-model'),
+      accessState: ModelAccessState.PUBLIC,
+      size: 4 * 1024 * 1024 * 1024,
+      sha256: LOCAL_SHA256,
+      metadataTrust: 'verified_local',
+      downloadIntegrity: {
+        kind: 'sha256',
+        sizeBytes: 4 * 1024 * 1024 * 1024,
+        checkedAt: 123,
+        sha256: LOCAL_SHA256,
+      },
+      gguf: {
+        totalBytes: 4 * 1024 * 1024 * 1024,
+        architecture: 'llama',
+        nLayers: 40,
+      },
+      maxContextTokens: 32768,
+      hasVerifiedContextWindow: true,
+    };
+    mockedRegistry.getModel.mockImplementation((modelId: string) => (
+      modelId === localModel.id ? localModel : undefined
+    ));
+
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.endsWith('/raw/main/README.md')) {
+        return Promise.resolve({
+          ok: false,
+          status: 404,
+          text: () => Promise.resolve(''),
+        });
+      }
+
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({
+          ...makeRepo(localModel.id, 3 * 1024 * 1024 * 1024),
+          siblings: [{
+            rfilename: 'model.Q4_K_M.gguf',
+            size: 3 * 1024 * 1024 * 1024,
+          }],
+        }),
+      });
+    }) as jest.Mock;
+
+    const result = await service.getModelDetails(localModel.id);
+
+    expect(result).toEqual(expect.objectContaining({
+      id: localModel.id,
+      size: 4 * 1024 * 1024 * 1024,
+      sha256: LOCAL_SHA256,
+      metadataTrust: 'verified_local',
+      maxContextTokens: 32768,
+      hasVerifiedContextWindow: true,
+    }));
+    expect(result.downloadIntegrity).toEqual(localModel.downloadIntegrity);
+    expect(result.gguf).toEqual(expect.objectContaining({
+      totalBytes: 4 * 1024 * 1024 * 1024,
+      architecture: 'llama',
+      nLayers: 40,
+    }));
+    expect(mockedRegistry.updateModel).toHaveBeenCalledWith(expect.objectContaining({
+      id: localModel.id,
+      sha256: LOCAL_SHA256,
+      downloadIntegrity: localModel.downloadIntegrity,
+      metadataTrust: 'verified_local',
+      maxContextTokens: 32768,
+      hasVerifiedContextWindow: true,
+    }));
+
+    service.dispose();
+  });
+
+  it('drops stale verified local detail metadata when the remote digest changes', async () => {
+    const service = new ModelCatalogService();
+    const localModel: ModelMetadata = {
+      ...makeLocalModel('org/stale-detail-digest-model'),
+      accessState: ModelAccessState.PUBLIC,
+      size: 4 * 1024 * 1024 * 1024,
+      sha256: LOCAL_SHA256,
+      metadataTrust: 'verified_local',
+      downloadIntegrity: {
+        kind: 'sha256',
+        sizeBytes: 4 * 1024 * 1024 * 1024,
+        checkedAt: 123,
+        sha256: LOCAL_SHA256,
+      },
+      gguf: {
+        totalBytes: 4 * 1024 * 1024 * 1024,
+        architecture: 'llama',
+        nLayers: 40,
+      },
+      maxContextTokens: 32768,
+      hasVerifiedContextWindow: true,
+    };
+    mockedRegistry.getModel.mockImplementation((modelId: string) => (
+      modelId === localModel.id ? localModel : undefined
+    ));
+
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.endsWith('/raw/main/README.md')) {
+        return Promise.resolve({
+          ok: false,
+          status: 404,
+          text: () => Promise.resolve(''),
+        });
+      }
+
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({
+          ...makeRepo(localModel.id, 3 * 1024 * 1024 * 1024),
+          siblings: [{
+            rfilename: 'model.Q4_K_M.gguf',
+            size: 3 * 1024 * 1024 * 1024,
+            lfs: { sha256: OTHER_TREE_SHA256 },
+          }],
+        }),
+      });
+    }) as jest.Mock;
+
+    const result = await service.getModelDetails(localModel.id);
+
+    expect(result).toEqual(expect.objectContaining({
+      id: localModel.id,
+      size: 3 * 1024 * 1024 * 1024,
+      sha256: OTHER_TREE_SHA256,
+      metadataTrust: 'trusted_remote',
+      maxContextTokens: undefined,
+      hasVerifiedContextWindow: false,
+    }));
+    expect(result.downloadIntegrity).toBeUndefined();
+    expect(result.gguf?.totalBytes).toBe(3 * 1024 * 1024 * 1024);
+    expect(result.gguf?.architecture).toBeUndefined();
+    expect(result.gguf?.nLayers).toBeUndefined();
 
     service.dispose();
   });

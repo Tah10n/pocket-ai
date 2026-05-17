@@ -1,14 +1,14 @@
 import DeviceInfo from 'react-native-device-info';
 import * as FileSystem from 'expo-file-system/legacy';
-import * as RNFS from 'react-native-fs';
 import type { MMKV } from 'react-native-mmkv';
 import { assertPrivateStorageWritable, createStorage } from './storage';
 import { ModelMetadata, LifecycleStatus } from '../types/models';
 import { getModelsDir } from './FileSystemSetup';
 import { normalizePersistedModelMetadata } from './ModelMetadataNormalizer';
 import { estimateFastMemoryFit } from '../memory/estimator';
-import { fileUriToNativePath, isValidLocalFileName, safeJoinModelPath } from '../utils/safeFilePath';
+import { isValidLocalFileName, safeJoinModelPath } from '../utils/safeFilePath';
 import { GgufValidationError, validateGgufFileHeader } from '../utils/ggufValidation';
+import { normalizeSha256Digest } from '../utils/sha256';
 import type { CalibrationRecord } from '../memory/types';
 
 const REGISTRY_STORAGE_ID = 'models-registry';
@@ -89,7 +89,7 @@ function getValidDownloadIntegritySizeBytes(
     return null;
   }
 
-  if (marker.kind === 'sha256' && (typeof marker.sha256 !== 'string' || marker.sha256.trim().length === 0)) {
+  if (marker.kind === 'sha256' && normalizeSha256Digest(marker.sha256) === undefined) {
     return null;
   }
 
@@ -104,41 +104,20 @@ function getValidDownloadIntegritySizeBytes(
     : null;
 }
 
-function normalizeSha256Digest(value: string | undefined): string | undefined {
-  if (typeof value !== 'string') {
-    return undefined;
-  }
-
-  const trimmed = value.trim().toLowerCase();
-  if (!trimmed) {
-    return undefined;
-  }
-
-  return trimmed.startsWith('sha256:')
-    ? trimmed.slice('sha256:'.length)
-    : trimmed;
+function getSha256IntegrityMarkerDigest(marker: ModelMetadata['downloadIntegrity']): string | undefined {
+  return marker?.kind === 'sha256'
+    ? normalizeSha256Digest(marker.sha256)
+    : undefined;
 }
 
-async function verifySha256IntegrityMarker(
-  fileUri: string,
-  marker: ModelMetadata['downloadIntegrity'],
-): Promise<'match' | 'mismatch' | 'unavailable'> {
-  if (!marker || marker.kind !== 'sha256') {
-    return 'unavailable';
-  }
+function getModelSha256Digest(model: Pick<ModelMetadata, 'sha256'>): string | undefined {
+  return normalizeSha256Digest(model.sha256);
+}
 
-  const expectedHash = normalizeSha256Digest(marker.sha256);
-  if (!expectedHash) {
-    return 'mismatch';
-  }
-
-  try {
-    const actualHash = normalizeSha256Digest(await RNFS.hash(fileUriToNativePath(fileUri), 'sha256'));
-    return actualHash === expectedHash ? 'match' : 'mismatch';
-  } catch (error) {
-    console.warn('[LocalStorageRegistry] Failed to hash local model file during registry validation', error);
-    return 'unavailable';
-  }
+function hasMatchingExpectedSha256IntegrityMarker(model: ModelMetadata): boolean {
+  const markerDigest = getSha256IntegrityMarkerDigest(model.downloadIntegrity);
+  const expectedDigest = getModelSha256Digest(model);
+  return markerDigest !== undefined && expectedDigest !== undefined && markerDigest === expectedDigest;
 }
 
 function clearVerifiedLocalDerivedMetadata(model: ModelMetadata): boolean {
@@ -171,6 +150,16 @@ function clearVerifiedLocalDerivedMetadata(model: ModelMetadata): boolean {
 
   if (model.memoryFitConfidence !== undefined) {
     model.memoryFitConfidence = undefined;
+    changed = true;
+  }
+
+  if (model.maxContextTokens !== undefined) {
+    model.maxContextTokens = undefined;
+    changed = true;
+  }
+
+  if (model.hasVerifiedContextWindow !== undefined) {
+    model.hasVerifiedContextWindow = undefined;
     changed = true;
   }
 
@@ -777,6 +766,41 @@ export class LocalStorageRegistry {
 
         const fileSizeBytes = getFileInfoSizeBytes(info);
 
+        if (model.downloadIntegrity?.kind === 'sha256') {
+          const markerSha256 = getSha256IntegrityMarkerDigest(model.downloadIntegrity);
+          if (!markerSha256) {
+            console.warn(`[LocalStorageRegistry] SHA-256 integrity marker is invalid for ${model.id}, resetting to available`);
+            resetLocalDownloadState(model);
+            changed = true;
+            continue;
+          }
+
+          if (model.downloadIntegrity.sha256 !== markerSha256) {
+            model.downloadIntegrity = {
+              ...model.downloadIntegrity,
+              sha256: markerSha256,
+            };
+            changed = true;
+          }
+
+          const expectedSha256 = getModelSha256Digest(model);
+          if (model.sha256 !== undefined && expectedSha256 === undefined) {
+            console.warn(`[LocalStorageRegistry] Expected SHA-256 digest is invalid for ${model.id}, downgrading local trust`);
+            model.sha256 = undefined;
+            changed = true;
+          } else if (expectedSha256 !== undefined && model.sha256 !== expectedSha256) {
+            model.sha256 = expectedSha256;
+            changed = true;
+          }
+
+          if (expectedSha256 !== undefined && markerSha256 !== expectedSha256) {
+            console.warn(`[LocalStorageRegistry] SHA-256 integrity marker no longer matches expected digest for ${model.id}, resetting to available`);
+            resetLocalDownloadState(model);
+            changed = true;
+            continue;
+          }
+        }
+
         const integritySizeBytes = getValidDownloadIntegritySizeBytes(model.downloadIntegrity);
         const hasMatchingIntegrityMarker = integritySizeBytes !== null
           && fileSizeBytes !== null
@@ -805,21 +829,8 @@ export class LocalStorageRegistry {
           continue;
         }
 
-        const sha256IntegrityResult = model.downloadIntegrity?.kind === 'sha256' && hasMatchingIntegrityMarker
-          ? await verifySha256IntegrityMarker(fileUri, model.downloadIntegrity)
-          : 'unavailable';
-        if (sha256IntegrityResult === 'mismatch') {
-          console.warn(`[LocalStorageRegistry] SHA-256 integrity marker mismatch for ${model.id}, resetting to available`);
-          resetLocalDownloadState(model);
-          changed = true;
-          continue;
-        }
-        if (sha256IntegrityResult === 'unavailable' && model.downloadIntegrity?.kind === 'sha256' && hasMatchingIntegrityMarker) {
-          changed = clearVerifiedLocalDerivedMetadata(model) || changed;
-          continue;
-        }
-
-        const hasTrustedIntegrityMarker = hasMatchingIntegrityMarker && sha256IntegrityResult === 'match';
+        const hasTrustedIntegrityMarker = hasMatchingIntegrityMarker
+          && hasMatchingExpectedSha256IntegrityMarker(model);
 
         if (!hasTrustedIntegrityMarker) {
           changed = clearVerifiedLocalDerivedMetadata(model) || changed;

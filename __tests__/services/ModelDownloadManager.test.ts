@@ -35,6 +35,8 @@ const mockValidGgufHeaderBase64 = Buffer.from([
   0x00, 0x00, 0x00, 0x00, // metadata kv count
   0x00, 0x00, 0x00, 0x00,
 ]).toString('base64');
+const VALID_SHA256 = 'a'.repeat(64);
+const OTHER_VALID_SHA256 = 'b'.repeat(64);
 
 function runDownloadModel(overrides: Partial<ModelMetadata>) {
   const jobToken = 1;
@@ -138,7 +140,7 @@ describe('ModelDownloadManager Basic', () => {
     });
     (huggingFaceTokenService.getToken as jest.Mock).mockResolvedValue(null);
     (mockedRegistry.getModels as jest.Mock).mockReturnValue([]);
-    (RNFS.hash as jest.Mock).mockResolvedValue('tree-sha');
+    (RNFS.hash as jest.Mock).mockResolvedValue(VALID_SHA256);
     (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: true, size: 1000 });
     (FileSystem.readAsStringAsync as jest.Mock).mockResolvedValue(mockValidGgufHeaderBase64);
     (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(8 * 1024 * 1024 * 1024);
@@ -1010,6 +1012,23 @@ describe('ModelDownloadManager Basic', () => {
     expect(RNFS.hash).not.toHaveBeenCalled();
   });
 
+  it('fails and deletes sha-backed downloads when the GGUF header is invalid', async () => {
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValueOnce({ exists: true, size: 1000 });
+    (FileSystem.readAsStringAsync as jest.Mock).mockResolvedValueOnce(
+      Buffer.from('<html><body>not a GGUF file').toString('base64'),
+    );
+
+    await expect(
+      modelDownloadManager.verifyChecksum({ ...mockModel, sha256: VALID_SHA256 }, 'test-dir/model.gguf'),
+    ).rejects.toMatchObject({
+      name: 'AppError',
+      code: 'download_verification_failed',
+    });
+
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/model.gguf', { idempotent: true });
+    expect(RNFS.hash).not.toHaveBeenCalled();
+  });
+
   it('fails and deletes no-sha downloads that are too small to be GGUF files', async () => {
     (FileSystem.getInfoAsync as jest.Mock).mockResolvedValueOnce({ exists: true, size: 128 });
 
@@ -1040,43 +1059,60 @@ describe('ModelDownloadManager Basic', () => {
 
   it('preserves a real checksum when size validation succeeds', async () => {
     (FileSystem.getInfoAsync as jest.Mock).mockResolvedValueOnce({ exists: true, size: 1000 });
-    (RNFS.hash as jest.Mock).mockResolvedValueOnce('tree-sha');
+    (RNFS.hash as jest.Mock).mockResolvedValueOnce(VALID_SHA256);
 
     await expect(
-      modelDownloadManager.verifyChecksum({ ...mockModel, sha256: 'tree-sha' }, 'test-dir/model.gguf'),
+      modelDownloadManager.verifyChecksum({ ...mockModel, sha256: VALID_SHA256 }, 'test-dir/model.gguf'),
     ).resolves.toEqual({
       integrity: 'sha256',
-      sha256: 'tree-sha',
+      sha256: VALID_SHA256,
       sizeBytes: 1000,
     });
-    expect(FileSystem.readAsStringAsync).not.toHaveBeenCalled();
+    expect(FileSystem.readAsStringAsync).toHaveBeenCalledWith('test-dir/model.gguf', {
+      encoding: FileSystem.EncodingType.Base64,
+      position: 0,
+      length: 24,
+    });
   });
 
   it('normalizes sha256 digests with a sha256 prefix', async () => {
     (FileSystem.getInfoAsync as jest.Mock).mockResolvedValueOnce({ exists: true, size: 1000 });
-    (RNFS.hash as jest.Mock).mockResolvedValueOnce('abc123');
+    (RNFS.hash as jest.Mock).mockResolvedValueOnce(VALID_SHA256);
 
     await expect(
-      modelDownloadManager.verifyChecksum({ ...mockModel, sha256: 'sha256:ABC123' }, 'test-dir/model.gguf'),
+      modelDownloadManager.verifyChecksum({ ...mockModel, sha256: `sha256:${VALID_SHA256.toUpperCase()}` }, 'test-dir/model.gguf'),
     ).resolves.toEqual({
       integrity: 'sha256',
-      sha256: 'abc123',
+      sha256: VALID_SHA256,
       sizeBytes: 1000,
     });
   });
 
+  it('treats malformed expected sha256 digests as no-sha downloads', async () => {
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValueOnce({ exists: true, size: 1000 });
+
+    await expect(
+      modelDownloadManager.verifyChecksum({ ...mockModel, sha256: 'sha256:' }, 'test-dir/model.gguf'),
+    ).resolves.toEqual({
+      integrity: 'size',
+      sizeBytes: 1000,
+    });
+    expect(FileSystem.readAsStringAsync).toHaveBeenCalled();
+    expect(RNFS.hash).not.toHaveBeenCalled();
+  });
+
   it('converts Expo file URIs into native filesystem paths before hashing', async () => {
     (FileSystem.getInfoAsync as jest.Mock).mockResolvedValueOnce({ exists: true, size: 1000 });
-    (RNFS.hash as jest.Mock).mockResolvedValueOnce('tree-sha');
+    (RNFS.hash as jest.Mock).mockResolvedValueOnce(VALID_SHA256);
 
     await expect(
       modelDownloadManager.verifyChecksum(
-        { ...mockModel, sha256: 'tree-sha' },
+        { ...mockModel, sha256: VALID_SHA256 },
         'file:///test-dir/model.gguf',
       ),
     ).resolves.toEqual({
       integrity: 'sha256',
-      sha256: 'tree-sha',
+      sha256: VALID_SHA256,
       sizeBytes: 1000,
     });
 
@@ -1115,10 +1151,10 @@ describe('ModelDownloadManager Basic', () => {
 
   it('fails verification when the downloaded file hash does not match the upstream digest', async () => {
     (FileSystem.getInfoAsync as jest.Mock).mockResolvedValueOnce({ exists: true, size: 1000 });
-    (RNFS.hash as jest.Mock).mockResolvedValueOnce('other-sha');
+    (RNFS.hash as jest.Mock).mockResolvedValueOnce(OTHER_VALID_SHA256);
 
     await expect(
-      modelDownloadManager.verifyChecksum({ ...mockModel, sha256: 'tree-sha' }, 'test-dir/model.gguf'),
+      modelDownloadManager.verifyChecksum({ ...mockModel, sha256: VALID_SHA256 }, 'test-dir/model.gguf'),
     ).rejects.toThrow('Checksum mismatch');
 
     expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/model.gguf', { idempotent: true });

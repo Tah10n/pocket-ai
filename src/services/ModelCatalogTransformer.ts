@@ -3,7 +3,9 @@ import { LifecycleStatus, ModelAccessState, type ModelMemoryFitConfidence, type 
 import type { CreateTreeProbeCandidateOptions, HuggingFaceModelCardData, HuggingFaceModelConfig, HuggingFaceModelSummary } from '../types/huggingFace';
 import { buildHuggingFaceResolveUrl } from '../utils/huggingFaceUrls';
 import { getShortModelLabel } from '../utils/modelLabel';
+import { normalizeSha256Digest } from '../utils/sha256';
 import { getFileName, getFileSha, getFileSize, isCatalogSummarySupported, selectPreferredGgufEntry, shouldRevalidateCatalogSummarySelection } from './ModelCatalogFileSelector';
+import { resolveVerifiedLocalShaCompatibility } from './ModelIntegrityMetadata';
 import { normalizePersistedModelMetadata } from './ModelMetadataNormalizer';
 
 type MemoryFitContext = { totalMemoryBytes: number | null } | null;
@@ -423,15 +425,29 @@ export function buildModelMetadataFromPayload(
   const hfRevision = payload.sha ?? fallbackModel.hfRevision;
   const selectedEntry = selectPreferredGgufEntry(payload.siblings ?? []);
   const selectedEntrySize = getFileSize(selectedEntry);
+  const selectedEntrySha256 = selectedEntry ? getFileSha(selectedEntry) : undefined;
+  const fallbackSha256 = normalizeSha256Digest(fallbackModel.sha256);
+  const fallbackShaCompatibility = resolveVerifiedLocalShaCompatibility(fallbackModel, selectedEntrySha256);
+  const shouldPreserveFallbackVerifiedLocal = fallbackShaCompatibility.canUseLocalVerifiedMetadata;
+  const canUseFallbackVerifiedDerivedMetadata = fallbackModel.metadataTrust !== 'verified_local'
+    || shouldPreserveFallbackVerifiedLocal;
+  const fallbackMetadataTrust = canUseFallbackVerifiedDerivedMetadata
+    ? fallbackModel.metadataTrust
+    : undefined;
   const resolvedFileName = selectedEntry
     ? getFileName(selectedEntry)
     : fallbackModel.resolvedFileName;
-  const size = selectedEntrySize ?? payload.gguf?.total ?? fallbackModel.size;
-  const metadataTrustFromPayload = typeof selectedEntrySize === 'number' && Number.isFinite(selectedEntrySize) && selectedEntrySize > 0
-    ? 'trusted_remote' as const
-    : typeof payload.gguf?.total === 'number' && Number.isFinite(payload.gguf.total) && payload.gguf.total > 0
-      ? 'inferred' as const
-      : fallbackModel.metadataTrust;
+  const remotePayloadSize = selectedEntrySize ?? payload.gguf?.total;
+  const size = shouldPreserveFallbackVerifiedLocal
+    ? fallbackModel.size ?? remotePayloadSize ?? null
+    : remotePayloadSize ?? (canUseFallbackVerifiedDerivedMetadata ? fallbackModel.size : null);
+  const metadataTrustFromPayload = shouldPreserveFallbackVerifiedLocal
+    ? 'verified_local' as const
+    : typeof selectedEntrySize === 'number' && Number.isFinite(selectedEntrySize) && selectedEntrySize > 0
+      ? 'trusted_remote' as const
+      : typeof payload.gguf?.total === 'number' && Number.isFinite(payload.gguf.total) && payload.gguf.total > 0
+        ? 'inferred' as const
+        : fallbackMetadataTrust;
   const slidingWindowTokens = resolveLargestContextTokenValue([
     payload.cardData?.sliding_window,
     payload.config?.sliding_window,
@@ -453,15 +469,20 @@ export function buildModelMetadataFromPayload(
       : {}),
   };
   const gguf = Object.keys(ggufFromPayload).length > 0
-    ? {
-      ...(fallbackModel.gguf ?? {}),
-      ...ggufFromPayload,
-    }
-    : fallbackModel.gguf;
+    ? shouldPreserveFallbackVerifiedLocal
+      ? {
+        ...ggufFromPayload,
+        ...(fallbackModel.gguf ?? {}),
+      }
+      : {
+        ...(canUseFallbackVerifiedDerivedMetadata ? (fallbackModel.gguf ?? {}) : {}),
+        ...ggufFromPayload,
+      }
+    : canUseFallbackVerifiedDerivedMetadata ? fallbackModel.gguf : undefined;
   const resolvedMemoryFit = resolveMemoryFitSummary({ size, metadataTrust: metadataTrustFromPayload }, memoryFitContext);
-  const fitsInRam = resolvedMemoryFit?.fitsInRam ?? fallbackModel.fitsInRam;
-  const memoryFitDecision = resolvedMemoryFit?.decision ?? fallbackModel.memoryFitDecision;
-  const memoryFitConfidence = resolvedMemoryFit?.confidence ?? fallbackModel.memoryFitConfidence;
+  const fitsInRam = resolvedMemoryFit?.fitsInRam ?? (canUseFallbackVerifiedDerivedMetadata ? fallbackModel.fitsInRam : null);
+  const memoryFitDecision = resolvedMemoryFit?.decision ?? (canUseFallbackVerifiedDerivedMetadata ? fallbackModel.memoryFitDecision : undefined);
+  const memoryFitConfidence = resolvedMemoryFit?.confidence ?? (canUseFallbackVerifiedDerivedMetadata ? fallbackModel.memoryFitConfidence : undefined);
   const lastModifiedAt = parseHuggingFaceLastModifiedAt(payload.lastModified) ?? fallbackModel.lastModifiedAt;
   const requiresAuth = Boolean(payload.gated) || payload.private === true;
   const requiresTreeProbe = selectedEntry
@@ -490,8 +511,13 @@ export function buildModelMetadataFromPayload(
     isPrivate: payload.private === true,
     requiresTreeProbe,
     parameterSizeLabel: resolveStringMetadata(fallbackModel.parameterSizeLabel, payload.gguf?.size_label),
-    sha256: selectedEntry ? getFileSha(selectedEntry) ?? fallbackModel.sha256 : fallbackModel.sha256,
-    maxContextTokens: payloadMaxContextTokens ?? fallbackModel.maxContextTokens,
+    sha256: selectedEntry
+      ? selectedEntrySha256 ?? (shouldPreserveFallbackVerifiedLocal ? fallbackShaCompatibility.localVerifiedSha256 : undefined)
+      : canUseFallbackVerifiedDerivedMetadata ? fallbackSha256 : undefined,
+    maxContextTokens: shouldPreserveFallbackVerifiedLocal
+      ? fallbackModel.maxContextTokens ?? payloadMaxContextTokens
+      : payloadMaxContextTokens ?? (canUseFallbackVerifiedDerivedMetadata ? fallbackModel.maxContextTokens : undefined),
+    hasVerifiedContextWindow: canUseFallbackVerifiedDerivedMetadata && fallbackModel.hasVerifiedContextWindow === true,
     modelType: payload.config?.model_type ?? payload.cardData?.model_type ?? fallbackModel.modelType,
     architectures: payload.config?.architectures ?? fallbackModel.architectures,
     baseModels: resolveStringArrayMetadata(fallbackModel.baseModels, payload.cardData?.base_model),

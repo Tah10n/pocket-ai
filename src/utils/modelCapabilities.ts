@@ -5,6 +5,7 @@ import type {
   ModelMetadataTrust,
 } from '../types/models';
 import { UNKNOWN_MODEL_GPU_LAYERS_CEILING } from './modelLimits';
+import { normalizeSha256Digest } from './sha256';
 
 export const MODEL_CAPABILITY_HEURISTIC_VERSION = 1;
 
@@ -182,7 +183,7 @@ export function buildModelCapabilitySnapshot(
   const verifiedFileSizeBytes = resolveVerifiedFileSizeBytes(input);
   const verifiedMaxContextTokens = resolveVerifiedMaxContextTokens(input);
   const ggufCapabilityDigest = buildGgufCapabilityDigest(input.gguf);
-  const sha256 = normalizeOptionalString(input.sha256);
+  const sha256 = normalizeSha256Digest(input.sha256);
   const lastModifiedAt = toPositiveIntegerOrNull(input.lastModifiedAt);
 
   return {
@@ -194,7 +195,7 @@ export function buildModelCapabilitySnapshot(
     ...(verifiedFileSizeBytes !== null ? { verifiedFileSizeBytes } : {}),
     ...(verifiedMaxContextTokens !== null ? { verifiedMaxContextTokens } : {}),
     ...(ggufCapabilityDigest !== null ? { ggufCapabilityDigest } : {}),
-    ...(sha256 !== null ? { sha256 } : {}),
+    ...(sha256 !== undefined ? { sha256 } : {}),
     ...(lastModifiedAt !== null ? { lastModifiedAt } : {}),
   };
 }
@@ -216,7 +217,7 @@ function normalizeCapabilitySnapshot(
   const verifiedFileSizeBytes = toPositiveIntegerOrNull(candidate.verifiedFileSizeBytes);
   const verifiedMaxContextTokens = toPositiveIntegerOrNull(candidate.verifiedMaxContextTokens);
   const ggufCapabilityDigest = normalizeOptionalString(candidate.ggufCapabilityDigest);
-  const sha256 = normalizeOptionalString(candidate.sha256);
+  const sha256 = normalizeSha256Digest(candidate.sha256);
   const lastModifiedAt = toPositiveIntegerOrNull(candidate.lastModifiedAt);
 
   if (heuristicVersion === null || gpuLayersCeiling === null) {
@@ -232,7 +233,7 @@ function normalizeCapabilitySnapshot(
     ...(verifiedFileSizeBytes !== null ? { verifiedFileSizeBytes } : {}),
     ...(verifiedMaxContextTokens !== null ? { verifiedMaxContextTokens } : {}),
     ...(ggufCapabilityDigest !== null ? { ggufCapabilityDigest } : {}),
-    ...(sha256 !== null ? { sha256 } : {}),
+    ...(sha256 !== undefined ? { sha256 } : {}),
     ...(lastModifiedAt !== null ? { lastModifiedAt } : {}),
   };
 }

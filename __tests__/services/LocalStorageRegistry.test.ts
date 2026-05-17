@@ -2,7 +2,6 @@ import { LocalStorageRegistry, registry } from '../../src/services/LocalStorageR
 import { LifecycleStatus, ModelAccessState, ModelMetadata } from '../../src/types/models';
 import { normalizePersistedModelMetadata } from '../../src/services/ModelMetadataNormalizer';
 import * as FileSystem from 'expo-file-system/legacy';
-import * as RNFS from 'react-native-fs';
 import DeviceInfo from 'react-native-device-info';
 import { getSystemMemorySnapshot } from '../../src/services/SystemMetricsService';
 import { assertPrivateStorageWritable, createStorage } from '../../src/services/storage';
@@ -27,6 +26,8 @@ const mockInvalidGgufHeaderBase64 = Buffer.from(Uint8Array.from([
   0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 ])).toString('base64');
+const VALID_SHA256 = 'a'.repeat(64);
+const OTHER_VALID_SHA256 = 'b'.repeat(64);
 
 jest.mock('expo-file-system/legacy', () => ({
   deleteAsync: jest.fn().mockResolvedValue(undefined),
@@ -44,10 +45,6 @@ jest.mock('../../src/services/storage', () => ({
 
 jest.mock('react-native-device-info', () => ({
   getTotalMemory: jest.fn(),
-}));
-
-jest.mock('react-native-fs', () => ({
-  hash: jest.fn().mockResolvedValue('abc123'),
 }));
 
 jest.mock('../../src/services/SystemMetricsService', () => ({
@@ -109,7 +106,6 @@ describe('LocalStorageRegistry', () => {
     (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: true, size: 1000 });
     (FileSystem.readAsStringAsync as jest.Mock).mockResolvedValue(mockValidGgufHeaderBase64);
     (FileSystem.readDirectoryAsync as jest.Mock).mockResolvedValue([]);
-    (RNFS.hash as jest.Mock).mockResolvedValue('abc123');
     (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(8 * 1024 * 1024 * 1024);
     (getSystemMemorySnapshot as jest.Mock).mockResolvedValue(null);
     (registry as any).getModels = originalGetModels;
@@ -425,17 +421,18 @@ describe('LocalStorageRegistry', () => {
     expect(updatedModels[0].gguf).toBeUndefined();
   });
 
-  it('keeps matching sha256 integrity markers verified_local after GGUF header validation', async () => {
+  it('keeps matching sha256 integrity markers verified_local after lightweight registry validation', async () => {
     (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([
       createMockModel({
         size: 4096,
+        sha256: VALID_SHA256,
         metadataTrust: 'verified_local',
         gguf: { architecture: 'llama' },
         downloadIntegrity: {
           kind: 'sha256',
           sizeBytes: 4096,
           checkedAt: 10,
-          sha256: 'abc123',
+          sha256: `sha256:${VALID_SHA256.toUpperCase()}`,
         },
       }),
     ]);
@@ -447,8 +444,12 @@ describe('LocalStorageRegistry', () => {
     expect(FileSystem.readAsStringAsync).toHaveBeenCalledWith('test-dir/models/model.gguf', expect.objectContaining({
       encoding: FileSystem.EncodingType.Base64,
     }));
-    expect(RNFS.hash).toHaveBeenCalledWith('test-dir/models/model.gguf', 'sha256');
     const updatedModels = (registry.saveModels as jest.Mock).mock.calls[0][0];
+    expect(updatedModels[0].sha256).toBe(VALID_SHA256);
+    expect(updatedModels[0].downloadIntegrity).toEqual(expect.objectContaining({
+      kind: 'sha256',
+      sha256: VALID_SHA256,
+    }));
     expect(updatedModels[0].metadataTrust).toBe('verified_local');
     expect(updatedModels[0].gguf).toEqual(expect.objectContaining({
       architecture: 'llama',
@@ -460,16 +461,19 @@ describe('LocalStorageRegistry', () => {
     (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([
       createMockModel({
         size: 4096,
+        sha256: VALID_SHA256,
         metadataTrust: 'verified_local',
         fitsInRam: true,
         memoryFitDecision: 'fits_high_confidence',
         memoryFitConfidence: 'high',
         gguf: { architecture: 'llama', totalBytes: 4096 },
+        maxContextTokens: 8192,
+        hasVerifiedContextWindow: true,
         downloadIntegrity: {
           kind: 'sha256',
           sizeBytes: 4096,
           checkedAt: 10,
-          sha256: 'abc123',
+          sha256: VALID_SHA256,
         },
       }),
     ]);
@@ -491,7 +495,7 @@ describe('LocalStorageRegistry', () => {
     expect(updatedModels[0].gguf).toBeUndefined();
   });
 
-  it('resets matching sha256 integrity markers when file hash mismatches', async () => {
+  it('resets matching sha256 integrity markers when the digest is missing', async () => {
     (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([
       createMockModel({
         size: 4096,
@@ -500,17 +504,17 @@ describe('LocalStorageRegistry', () => {
         memoryFitDecision: 'fits_high_confidence',
         memoryFitConfidence: 'high',
         gguf: { architecture: 'llama', totalBytes: 4096 },
+        maxContextTokens: 8192,
+        hasVerifiedContextWindow: true,
         downloadIntegrity: {
           kind: 'sha256',
           sizeBytes: 4096,
           checkedAt: 10,
-          sha256: 'abc123',
         },
       }),
     ]);
     (registry.saveModels as jest.Mock) = jest.fn();
     (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: true, size: 4096 });
-    (RNFS.hash as jest.Mock).mockResolvedValue('different');
 
     await registry.validateRegistry();
 
@@ -526,10 +530,115 @@ describe('LocalStorageRegistry', () => {
     expect(updatedModels[0].gguf).toBeUndefined();
   });
 
+  it('resets sha256 integrity markers when the digest is malformed', async () => {
+    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([
+      createMockModel({
+        size: 4096,
+        sha256: VALID_SHA256,
+        metadataTrust: 'verified_local',
+        fitsInRam: true,
+        memoryFitDecision: 'fits_high_confidence',
+        memoryFitConfidence: 'high',
+        gguf: { architecture: 'llama', totalBytes: 4096 },
+        maxContextTokens: 8192,
+        hasVerifiedContextWindow: true,
+        downloadIntegrity: {
+          kind: 'sha256',
+          sizeBytes: 4096,
+          checkedAt: 10,
+          sha256: 'abc123',
+        },
+      }),
+    ]);
+    (registry.saveModels as jest.Mock) = jest.fn();
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: true, size: 4096 });
+
+    await registry.validateRegistry();
+
+    const updatedModels = (registry.saveModels as jest.Mock).mock.calls[0][0];
+    expect(updatedModels[0].lifecycleStatus).toBe(LifecycleStatus.AVAILABLE);
+    expect(updatedModels[0].localPath).toBeUndefined();
+    expect(updatedModels[0].downloadIntegrity).toBeUndefined();
+    expect(updatedModels[0].metadataTrust).toBeUndefined();
+    expect(updatedModels[0].gguf).toBeUndefined();
+    expect(updatedModels[0].maxContextTokens).toBeUndefined();
+    expect(updatedModels[0].hasVerifiedContextWindow).toBeUndefined();
+  });
+
+  it('resets sha256 integrity markers when the expected digest changes', async () => {
+    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([
+      createMockModel({
+        size: 4096,
+        sha256: OTHER_VALID_SHA256,
+        metadataTrust: 'verified_local',
+        fitsInRam: true,
+        memoryFitDecision: 'fits_high_confidence',
+        memoryFitConfidence: 'high',
+        gguf: { architecture: 'llama', totalBytes: 4096 },
+        maxContextTokens: 8192,
+        hasVerifiedContextWindow: true,
+        downloadIntegrity: {
+          kind: 'sha256',
+          sizeBytes: 4096,
+          checkedAt: 10,
+          sha256: VALID_SHA256,
+        },
+      }),
+    ]);
+    (registry.saveModels as jest.Mock) = jest.fn();
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: true, size: 4096 });
+
+    await registry.validateRegistry();
+
+    const updatedModels = (registry.saveModels as jest.Mock).mock.calls[0][0];
+    expect(updatedModels[0].lifecycleStatus).toBe(LifecycleStatus.AVAILABLE);
+    expect(updatedModels[0].localPath).toBeUndefined();
+    expect(updatedModels[0].downloadIntegrity).toBeUndefined();
+    expect(updatedModels[0].metadataTrust).toBeUndefined();
+    expect(updatedModels[0].gguf).toBeUndefined();
+    expect(updatedModels[0].maxContextTokens).toBeUndefined();
+    expect(updatedModels[0].hasVerifiedContextWindow).toBeUndefined();
+  });
+
+  it('keeps valid sha256 markers downloaded but untrusted when no expected digest is available', async () => {
+    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([
+      createMockModel({
+        size: 4096,
+        sha256: undefined,
+        metadataTrust: 'verified_local',
+        fitsInRam: true,
+        memoryFitDecision: 'fits_high_confidence',
+        memoryFitConfidence: 'high',
+        gguf: { architecture: 'llama', totalBytes: 4096 },
+        downloadIntegrity: {
+          kind: 'sha256',
+          sizeBytes: 4096,
+          checkedAt: 10,
+          sha256: VALID_SHA256,
+        },
+      }),
+    ]);
+    (registry.saveModels as jest.Mock) = jest.fn();
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: true, size: 4096 });
+
+    await registry.validateRegistry();
+
+    const updatedModels = (registry.saveModels as jest.Mock).mock.calls[0][0];
+    expect(updatedModels[0].lifecycleStatus).toBe(LifecycleStatus.DOWNLOADED);
+    expect(updatedModels[0].localPath).toBe('model.gguf');
+    expect(updatedModels[0].downloadIntegrity).toEqual(expect.objectContaining({
+      kind: 'sha256',
+      sha256: VALID_SHA256,
+    }));
+    expect(updatedModels[0].metadataTrust).toBeUndefined();
+    expect(updatedModels[0].gguf).toBeUndefined();
+  });
+
   it('preserves downloaded state but downgrades trust when GGUF header cannot be read during registry validation', async () => {
     (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([
       createMockModel({
         size: 4096,
+        sha256: VALID_SHA256,
         metadataTrust: 'verified_local',
         localPath: 'model.gguf',
         fitsInRam: true,
@@ -540,7 +649,7 @@ describe('LocalStorageRegistry', () => {
           kind: 'sha256',
           sizeBytes: 4096,
           checkedAt: 10,
-          sha256: 'abc123',
+          sha256: VALID_SHA256,
         },
       }),
     ]);
@@ -563,10 +672,11 @@ describe('LocalStorageRegistry', () => {
     }));
   });
 
-  it('downgrades verified_local trust without resetting when sha256 rehash is unavailable', async () => {
+  it('does not rehash sha256 integrity markers during registry validation', async () => {
     (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([
       createMockModel({
         size: 4096,
+        sha256: VALID_SHA256,
         metadataTrust: 'verified_local',
         localPath: 'model.gguf',
         fitsInRam: true,
@@ -577,26 +687,25 @@ describe('LocalStorageRegistry', () => {
           kind: 'sha256',
           sizeBytes: 4096,
           checkedAt: 10,
-          sha256: 'abc123',
+          sha256: VALID_SHA256,
         },
       }),
     ]);
     (registry.saveModels as jest.Mock) = jest.fn();
     (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: true, size: 4096 });
-    (RNFS.hash as jest.Mock).mockRejectedValue(new Error('hash failed'));
 
     await registry.validateRegistry();
 
     expect(FileSystem.deleteAsync).not.toHaveBeenCalled();
-    const updatedModels = (registry.saveModels as jest.Mock).mock.calls[0][0];
+    const updatedModels = (registry.saveModels as jest.Mock).mock.calls[0]?.[0] ?? registry.getModels();
     expect(updatedModels[0].lifecycleStatus).toBe(LifecycleStatus.DOWNLOADED);
     expect(updatedModels[0].localPath).toBe('model.gguf');
     expect(updatedModels[0].downloadIntegrity).toEqual(expect.objectContaining({ kind: 'sha256' }));
-    expect(updatedModels[0].metadataTrust).toBeUndefined();
-    expect(updatedModels[0].fitsInRam).toBeNull();
-    expect(updatedModels[0].memoryFitDecision).toBeUndefined();
-    expect(updatedModels[0].memoryFitConfidence).toBeUndefined();
-    expect(updatedModels[0].gguf).toBeUndefined();
+    expect(updatedModels[0].metadataTrust).toBe('verified_local');
+    expect(updatedModels[0].fitsInRam).toBe(true);
+    expect(updatedModels[0].memoryFitDecision).toBe('fits_high_confidence');
+    expect(updatedModels[0].memoryFitConfidence).toBe('medium');
+    expect(updatedModels[0].gguf).toEqual(expect.objectContaining({ architecture: 'llama', totalBytes: 4096 }));
   });
 
   it('preserves trusted remote metadata when GGUF header cannot be read', async () => {
@@ -730,6 +839,7 @@ describe('LocalStorageRegistry', () => {
     (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([
       createMockModel({
         size: 3_784_824_896,
+        sha256: VALID_SHA256,
         fitsInRam: true,
         memoryFitDecision: undefined,
         metadataTrust: 'verified_local',
@@ -737,7 +847,7 @@ describe('LocalStorageRegistry', () => {
           kind: 'sha256',
           sizeBytes: 3_784_824_896,
           checkedAt: 10,
-          sha256: 'abc123',
+          sha256: VALID_SHA256,
         },
         gguf: {
           architecture: 'llama',
@@ -763,6 +873,7 @@ describe('LocalStorageRegistry', () => {
     (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([
       createMockModel({
         size: 1_700_000_000,
+        sha256: VALID_SHA256,
         fitsInRam: false,
         memoryFitDecision: 'likely_oom',
         memoryFitConfidence: 'high',
@@ -771,7 +882,7 @@ describe('LocalStorageRegistry', () => {
           kind: 'sha256',
           sizeBytes: 1_700_000_000,
           checkedAt: 10,
-          sha256: 'abc123',
+          sha256: VALID_SHA256,
         },
       }),
     ]);

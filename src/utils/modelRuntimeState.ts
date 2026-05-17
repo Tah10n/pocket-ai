@@ -1,9 +1,39 @@
 import { LifecycleStatus, type ModelMetadata } from '../types/models';
+import { resolveVerifiedLocalShaCompatibility } from '../services/ModelIntegrityMetadata';
 
 interface MergeModelWithRuntimeStateOptions {
   activeModelId?: string;
   localModel?: ModelMetadata;
   queuedItem?: ModelMetadata;
+}
+
+function hasResolvedFileNameConflict(
+  localFileName: ModelMetadata['resolvedFileName'],
+  remoteFileName: ModelMetadata['resolvedFileName'],
+): boolean {
+  return typeof localFileName === 'string'
+    && localFileName.trim().length > 0
+    && typeof remoteFileName === 'string'
+    && remoteFileName.trim().length > 0
+    && localFileName.trim() !== remoteFileName.trim();
+}
+
+function normalizePositiveSize(value: ModelMetadata['size']): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? Math.round(value)
+    : undefined;
+}
+
+function hasSizeConflict(
+  localSize: ModelMetadata['size'],
+  remoteSize: ModelMetadata['size'],
+): boolean {
+  const normalizedLocalSize = normalizePositiveSize(localSize);
+  const normalizedRemoteSize = normalizePositiveSize(remoteSize);
+
+  return normalizedLocalSize !== undefined
+    && normalizedRemoteSize !== undefined
+    && normalizedLocalSize !== normalizedRemoteSize;
 }
 
 export function mergeModelWithRuntimeState(
@@ -19,41 +49,57 @@ export function mergeModelWithRuntimeState(
   const isActiveModel = activeModelId === mergedModel.id;
 
   if (localModel) {
+    const localCompatibility = resolveVerifiedLocalShaCompatibility(localModel, {
+      sha256: mergedModel.sha256,
+      resolvedFileName: mergedModel.resolvedFileName,
+      size: mergedModel.size,
+    });
+    const canUseLocalRuntimeState = !localCompatibility.shouldResetLocalDownloadState;
+    const canUseLocalMetadataFallback = canUseLocalRuntimeState;
+
     mergedModel = {
       ...mergedModel,
-      size: mergedModel.size ?? localModel.size,
-      allowUnknownSizeDownload: mergedModel.allowUnknownSizeDownload ?? localModel.allowUnknownSizeDownload,
-      requiresTreeProbe: mergedModel.requiresTreeProbe ?? localModel.requiresTreeProbe,
-      hfRevision: mergedModel.hfRevision ?? localModel.hfRevision,
-      resolvedFileName: mergedModel.resolvedFileName ?? localModel.resolvedFileName,
-      localPath: localModel.localPath,
-      downloadedAt: localModel.downloadedAt,
-      sha256: mergedModel.sha256 ?? localModel.sha256,
-      downloadIntegrity: localModel.downloadIntegrity,
-      fitsInRam: localModel.fitsInRam ?? mergedModel.fitsInRam,
-      memoryFitDecision: localModel.memoryFitDecision ?? mergedModel.memoryFitDecision,
-      memoryFitConfidence: localModel.memoryFitConfidence ?? mergedModel.memoryFitConfidence,
-      lifecycleStatus: localModel.lifecycleStatus,
-      downloadProgress: localModel.downloadProgress,
-      resumeData: localModel.resumeData,
-      downloadErrorAt: localModel.downloadErrorAt,
-      downloadErrorCode: localModel.downloadErrorCode,
-      downloadErrorMessage: localModel.downloadErrorMessage,
-      maxContextTokens: mergedModel.maxContextTokens ?? localModel.maxContextTokens,
-      hasVerifiedContextWindow: mergedModel.hasVerifiedContextWindow ?? localModel.hasVerifiedContextWindow,
-      parameterSizeLabel: mergedModel.parameterSizeLabel ?? localModel.parameterSizeLabel,
-      modelType: mergedModel.modelType ?? localModel.modelType,
-      architectures: mergedModel.architectures ?? localModel.architectures,
-      baseModels: mergedModel.baseModels ?? localModel.baseModels,
-      license: mergedModel.license ?? localModel.license,
-      languages: mergedModel.languages ?? localModel.languages,
-      datasets: mergedModel.datasets ?? localModel.datasets,
-      quantizedBy: mergedModel.quantizedBy ?? localModel.quantizedBy,
-      modelCreator: mergedModel.modelCreator ?? localModel.modelCreator,
-      downloads: mergedModel.downloads ?? localModel.downloads,
-      likes: mergedModel.likes ?? localModel.likes,
-      tags: mergedModel.tags ?? localModel.tags,
-      description: mergedModel.description ?? localModel.description,
+      size: mergedModel.size ?? (canUseLocalMetadataFallback ? localModel.size : null),
+      allowUnknownSizeDownload: mergedModel.allowUnknownSizeDownload ?? (canUseLocalMetadataFallback ? localModel.allowUnknownSizeDownload : undefined),
+      requiresTreeProbe: mergedModel.requiresTreeProbe ?? (canUseLocalMetadataFallback ? localModel.requiresTreeProbe : undefined),
+      hfRevision: mergedModel.hfRevision ?? (canUseLocalMetadataFallback ? localModel.hfRevision : undefined),
+      resolvedFileName: mergedModel.resolvedFileName ?? (canUseLocalMetadataFallback ? localModel.resolvedFileName : undefined),
+      localPath: canUseLocalRuntimeState ? localModel.localPath : undefined,
+      downloadedAt: canUseLocalRuntimeState ? localModel.downloadedAt : undefined,
+      sha256: mergedModel.sha256 ?? (
+        localCompatibility.canUseLocalVerifiedMetadata
+          ? localCompatibility.localVerifiedSha256
+          : canUseLocalMetadataFallback && localModel.metadataTrust !== 'verified_local'
+            ? localModel.sha256
+            : undefined
+      ),
+      downloadIntegrity: localCompatibility.canPreserveDownloadIntegrity
+        ? localModel.downloadIntegrity
+        : undefined,
+      fitsInRam: canUseLocalMetadataFallback ? localModel.fitsInRam ?? mergedModel.fitsInRam : mergedModel.fitsInRam,
+      memoryFitDecision: canUseLocalMetadataFallback ? localModel.memoryFitDecision ?? mergedModel.memoryFitDecision : mergedModel.memoryFitDecision,
+      memoryFitConfidence: canUseLocalMetadataFallback ? localModel.memoryFitConfidence ?? mergedModel.memoryFitConfidence : mergedModel.memoryFitConfidence,
+      lifecycleStatus: canUseLocalRuntimeState ? localModel.lifecycleStatus : mergedModel.lifecycleStatus,
+      downloadProgress: canUseLocalRuntimeState ? localModel.downloadProgress : mergedModel.downloadProgress,
+      resumeData: canUseLocalRuntimeState ? localModel.resumeData : undefined,
+      downloadErrorAt: canUseLocalRuntimeState ? localModel.downloadErrorAt : undefined,
+      downloadErrorCode: canUseLocalRuntimeState ? localModel.downloadErrorCode : undefined,
+      downloadErrorMessage: canUseLocalRuntimeState ? localModel.downloadErrorMessage : undefined,
+      maxContextTokens: mergedModel.maxContextTokens ?? (canUseLocalMetadataFallback ? localModel.maxContextTokens : undefined),
+      hasVerifiedContextWindow: mergedModel.hasVerifiedContextWindow ?? (canUseLocalMetadataFallback ? localModel.hasVerifiedContextWindow : undefined),
+      parameterSizeLabel: mergedModel.parameterSizeLabel ?? (canUseLocalMetadataFallback ? localModel.parameterSizeLabel : undefined),
+      modelType: mergedModel.modelType ?? (canUseLocalMetadataFallback ? localModel.modelType : undefined),
+      architectures: mergedModel.architectures ?? (canUseLocalMetadataFallback ? localModel.architectures : undefined),
+      baseModels: mergedModel.baseModels ?? (canUseLocalMetadataFallback ? localModel.baseModels : undefined),
+      license: mergedModel.license ?? (canUseLocalMetadataFallback ? localModel.license : undefined),
+      languages: mergedModel.languages ?? (canUseLocalMetadataFallback ? localModel.languages : undefined),
+      datasets: mergedModel.datasets ?? (canUseLocalMetadataFallback ? localModel.datasets : undefined),
+      quantizedBy: mergedModel.quantizedBy ?? (canUseLocalMetadataFallback ? localModel.quantizedBy : undefined),
+      modelCreator: mergedModel.modelCreator ?? (canUseLocalMetadataFallback ? localModel.modelCreator : undefined),
+      downloads: mergedModel.downloads ?? (canUseLocalMetadataFallback ? localModel.downloads : undefined),
+      likes: mergedModel.likes ?? (canUseLocalMetadataFallback ? localModel.likes : undefined),
+      tags: mergedModel.tags ?? (canUseLocalMetadataFallback ? localModel.tags : undefined),
+      description: mergedModel.description ?? (canUseLocalMetadataFallback ? localModel.description : undefined),
     };
   }
 
@@ -64,24 +110,41 @@ export function mergeModelWithRuntimeState(
   }
 
   if (queuedItem) {
+    const queuedCompatibility = resolveVerifiedLocalShaCompatibility(queuedItem, {
+      sha256: mergedModel.sha256,
+      resolvedFileName: mergedModel.resolvedFileName,
+      size: mergedModel.size,
+    });
+    const canUseQueuedRuntimeState = !queuedCompatibility.shouldResetLocalDownloadState
+      && !hasResolvedFileNameConflict(queuedItem.resolvedFileName, mergedModel.resolvedFileName)
+      && !hasSizeConflict(queuedItem.size, mergedModel.size);
+
     mergedModel = {
       ...mergedModel,
-      size: mergedModel.size ?? queuedItem.size,
-      hfRevision: mergedModel.hfRevision ?? queuedItem.hfRevision,
-      resolvedFileName: mergedModel.resolvedFileName ?? queuedItem.resolvedFileName,
-      localPath: queuedItem.localPath ?? mergedModel.localPath,
-      downloadedAt: queuedItem.downloadedAt ?? mergedModel.downloadedAt,
-      sha256: mergedModel.sha256 ?? queuedItem.sha256,
-      downloadIntegrity: queuedItem.downloadIntegrity ?? mergedModel.downloadIntegrity,
-      fitsInRam: mergedModel.fitsInRam ?? queuedItem.fitsInRam,
-      memoryFitDecision: mergedModel.memoryFitDecision ?? queuedItem.memoryFitDecision,
-      memoryFitConfidence: mergedModel.memoryFitConfidence ?? queuedItem.memoryFitConfidence,
-      lifecycleStatus: queuedItem.lifecycleStatus,
-      downloadProgress: queuedItem.downloadProgress,
-      resumeData: queuedItem.resumeData,
-      downloadErrorAt: queuedItem.downloadErrorAt,
-      downloadErrorCode: queuedItem.downloadErrorCode,
-      downloadErrorMessage: queuedItem.downloadErrorMessage,
+      size: mergedModel.size ?? (canUseQueuedRuntimeState ? queuedItem.size : null),
+      hfRevision: mergedModel.hfRevision ?? (canUseQueuedRuntimeState ? queuedItem.hfRevision : undefined),
+      resolvedFileName: mergedModel.resolvedFileName ?? (canUseQueuedRuntimeState ? queuedItem.resolvedFileName : undefined),
+      localPath: canUseQueuedRuntimeState ? queuedItem.localPath ?? mergedModel.localPath : mergedModel.localPath,
+      downloadedAt: canUseQueuedRuntimeState ? queuedItem.downloadedAt ?? mergedModel.downloadedAt : mergedModel.downloadedAt,
+      sha256: mergedModel.sha256 ?? (
+        queuedCompatibility.canUseLocalVerifiedMetadata
+          ? queuedCompatibility.localVerifiedSha256
+          : canUseQueuedRuntimeState && queuedItem.metadataTrust !== 'verified_local'
+            ? queuedItem.sha256
+            : undefined
+      ),
+      downloadIntegrity: queuedCompatibility.canPreserveDownloadIntegrity && canUseQueuedRuntimeState
+        ? queuedItem.downloadIntegrity ?? mergedModel.downloadIntegrity
+        : mergedModel.downloadIntegrity,
+      fitsInRam: mergedModel.fitsInRam ?? (canUseQueuedRuntimeState ? queuedItem.fitsInRam : null),
+      memoryFitDecision: mergedModel.memoryFitDecision ?? (canUseQueuedRuntimeState ? queuedItem.memoryFitDecision : undefined),
+      memoryFitConfidence: mergedModel.memoryFitConfidence ?? (canUseQueuedRuntimeState ? queuedItem.memoryFitConfidence : undefined),
+      lifecycleStatus: canUseQueuedRuntimeState ? queuedItem.lifecycleStatus : mergedModel.lifecycleStatus,
+      downloadProgress: canUseQueuedRuntimeState ? queuedItem.downloadProgress : mergedModel.downloadProgress,
+      resumeData: canUseQueuedRuntimeState ? queuedItem.resumeData : mergedModel.resumeData,
+      downloadErrorAt: canUseQueuedRuntimeState ? queuedItem.downloadErrorAt : mergedModel.downloadErrorAt,
+      downloadErrorCode: canUseQueuedRuntimeState ? queuedItem.downloadErrorCode : mergedModel.downloadErrorCode,
+      downloadErrorMessage: canUseQueuedRuntimeState ? queuedItem.downloadErrorMessage : mergedModel.downloadErrorMessage,
     };
   }
 

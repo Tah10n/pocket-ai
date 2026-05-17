@@ -3,6 +3,7 @@ import {
   createFallbackModel,
   transformHFResponse,
 } from '../../src/services/ModelCatalogTransformer';
+import { LifecycleStatus } from '../../src/types/models';
 
 const LOCAL_SHA256 = 'b'.repeat(64);
 const OTHER_SHA256 = 'c'.repeat(64);
@@ -85,11 +86,11 @@ describe('ModelCatalogTransformer', () => {
       {
         id: fallbackModel.id,
         gguf: {
-          total: REMOTE_SIZE,
+          total: LOCAL_SIZE,
           context_length: 4096,
           architecture: 'mistral',
         },
-        siblings: [{ rfilename: 'model.Q4_K_M.gguf', size: REMOTE_SIZE }],
+        siblings: [{ rfilename: 'model.Q4_K_M.gguf', size: LOCAL_SIZE }],
       },
       null,
       null,
@@ -114,6 +115,69 @@ describe('ModelCatalogTransformer', () => {
     }));
     expect(result.maxContextTokens).toBe(8192);
     expect(result.hasVerifiedContextWindow).toBe(true);
+  });
+
+  it('drops verified local integrity when a missing-sha payload selects a different file', () => {
+    const fallbackModel = {
+      ...createFallbackModel('author/model-q4'),
+      size: LOCAL_SIZE,
+      resolvedFileName: 'model.Q4_K_M.gguf',
+      localPath: 'model.Q4_K_M.gguf',
+      downloadedAt: 123,
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      sha256: LOCAL_SHA256,
+      metadataTrust: 'verified_local' as const,
+      downloadIntegrity: {
+        kind: 'sha256' as const,
+        sizeBytes: LOCAL_SIZE,
+        checkedAt: 123,
+        sha256: LOCAL_SHA256,
+      },
+      gguf: {
+        totalBytes: LOCAL_SIZE,
+        contextLengthTokens: 8192,
+        architecture: 'llama',
+        nLayers: 32,
+      },
+      maxContextTokens: 8192,
+      hasVerifiedContextWindow: true,
+    };
+
+    const result = buildModelMetadataFromPayload(
+      {
+        id: fallbackModel.id,
+        gguf: {
+          total: REMOTE_SIZE,
+          context_length: 4096,
+          architecture: 'mistral',
+        },
+        siblings: [{ rfilename: 'model.Q5_K_M.gguf', size: REMOTE_SIZE }],
+      },
+      null,
+      null,
+      fallbackModel,
+      4096,
+    );
+
+    expect(result).toEqual(expect.objectContaining({
+      size: REMOTE_SIZE,
+      resolvedFileName: 'model.Q5_K_M.gguf',
+      localPath: undefined,
+      downloadedAt: undefined,
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+      sha256: undefined,
+      metadataTrust: 'trusted_remote',
+      maxContextTokens: 4096,
+      hasVerifiedContextWindow: false,
+    }));
+    expect(result.downloadIntegrity).toBeUndefined();
+    expect(result.gguf).toEqual({
+      totalBytes: REMOTE_SIZE,
+      contextLengthTokens: 4096,
+      architecture: 'mistral',
+    });
   });
 
   it('drops verified local integrity when the payload entry has a conflicting sha256', () => {

@@ -5,7 +5,10 @@ import { buildHuggingFaceResolveUrl } from '../utils/huggingFaceUrls';
 import { getShortModelLabel } from '../utils/modelLabel';
 import { normalizeSha256Digest } from '../utils/sha256';
 import { getFileName, getFileSha, getFileSize, isCatalogSummarySupported, selectPreferredGgufEntry, shouldRevalidateCatalogSummarySelection } from './ModelCatalogFileSelector';
-import { resolveVerifiedLocalShaCompatibility } from './ModelIntegrityMetadata';
+import {
+  getCompatibleLocalDownloadStatePatch,
+  resolveVerifiedLocalShaCompatibility,
+} from './ModelIntegrityMetadata';
 import { normalizePersistedModelMetadata } from './ModelMetadataNormalizer';
 
 type MemoryFitContext = { totalMemoryBytes: number | null } | null;
@@ -426,17 +429,23 @@ export function buildModelMetadataFromPayload(
   const selectedEntry = selectPreferredGgufEntry(payload.siblings ?? []);
   const selectedEntrySize = getFileSize(selectedEntry);
   const selectedEntrySha256 = selectedEntry ? getFileSha(selectedEntry) : undefined;
+  const selectedEntryFileName = selectedEntry ? getFileName(selectedEntry) : undefined;
   const fallbackSha256 = normalizeSha256Digest(fallbackModel.sha256);
-  const fallbackShaCompatibility = resolveVerifiedLocalShaCompatibility(fallbackModel, selectedEntrySha256);
+  const fallbackShaCompatibility = resolveVerifiedLocalShaCompatibility(fallbackModel, selectedEntry
+    ? {
+      sha256: selectedEntrySha256,
+      resolvedFileName: selectedEntryFileName,
+      size: selectedEntrySize,
+    }
+    : {});
   const shouldPreserveFallbackVerifiedLocal = fallbackShaCompatibility.canUseLocalVerifiedMetadata;
-  const canUseFallbackVerifiedDerivedMetadata = fallbackModel.metadataTrust !== 'verified_local'
-    || shouldPreserveFallbackVerifiedLocal;
+  const canUseFallbackVerifiedDerivedMetadata = !fallbackShaCompatibility.shouldResetLocalDownloadState
+    && (fallbackModel.metadataTrust !== 'verified_local' || shouldPreserveFallbackVerifiedLocal);
+  const localDownloadStatePatch = getCompatibleLocalDownloadStatePatch(fallbackModel, fallbackShaCompatibility);
   const fallbackMetadataTrust = canUseFallbackVerifiedDerivedMetadata
     ? fallbackModel.metadataTrust
     : undefined;
-  const resolvedFileName = selectedEntry
-    ? getFileName(selectedEntry)
-    : fallbackModel.resolvedFileName;
+  const resolvedFileName = selectedEntryFileName ?? fallbackModel.resolvedFileName;
   const remotePayloadSize = selectedEntrySize ?? payload.gguf?.total;
   const size = shouldPreserveFallbackVerifiedLocal
     ? fallbackModel.size ?? remotePayloadSize ?? null
@@ -491,6 +500,7 @@ export function buildModelMetadataFromPayload(
 
   return normalizePersistedModelMetadata({
     ...fallbackModel,
+    ...localDownloadStatePatch,
     id: repoId,
     name: getShortModelLabel(repoId) || repoId,
     author: payload.author || repoId.split('/')[0],
@@ -514,6 +524,9 @@ export function buildModelMetadataFromPayload(
     sha256: selectedEntry
       ? selectedEntrySha256 ?? (shouldPreserveFallbackVerifiedLocal ? fallbackShaCompatibility.localVerifiedSha256 : undefined)
       : canUseFallbackVerifiedDerivedMetadata ? fallbackSha256 : undefined,
+    downloadIntegrity: fallbackShaCompatibility.canPreserveDownloadIntegrity
+      ? fallbackModel.downloadIntegrity
+      : undefined,
     maxContextTokens: shouldPreserveFallbackVerifiedLocal
       ? fallbackModel.maxContextTokens ?? payloadMaxContextTokens
       : payloadMaxContextTokens ?? (canUseFallbackVerifiedDerivedMetadata ? fallbackModel.maxContextTokens : undefined),

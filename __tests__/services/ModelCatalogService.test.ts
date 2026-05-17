@@ -888,7 +888,7 @@ describe('ModelCatalogService', () => {
         },
         json: () => Promise.resolve([{
           path: 'model.Q4_K_M.gguf',
-          size: 3 * 1024 * 1024 * 1024,
+          size: 4 * 1024 * 1024 * 1024,
         }]),
       });
     }) as jest.Mock;
@@ -1224,10 +1224,10 @@ describe('ModelCatalogService', () => {
           get: jest.fn(() => null),
         },
         json: () => Promise.resolve([{
-          ...makeRepo(localModel.id, 3 * 1024 * 1024 * 1024),
+          ...makeRepo(localModel.id, 4 * 1024 * 1024 * 1024),
           siblings: [{
             rfilename: 'model.Q4_K_M.gguf',
-            size: 3 * 1024 * 1024 * 1024,
+            size: 4 * 1024 * 1024 * 1024,
           }],
         }]),
       }),
@@ -1253,6 +1253,74 @@ describe('ModelCatalogService', () => {
     }));
   });
 
+  it('resets local state when a missing-digest catalog result selects a different file', async () => {
+    const localModel: ModelMetadata = {
+      ...makeLocalModel('org/verified-local-missing-digest-new-file-model'),
+      accessState: ModelAccessState.PUBLIC,
+      size: 4 * 1024 * 1024 * 1024,
+      resolvedFileName: 'model.Q4_K_M.gguf',
+      sha256: LOCAL_SHA256,
+      metadataTrust: 'verified_local',
+      downloadIntegrity: {
+        kind: 'sha256',
+        sizeBytes: 4 * 1024 * 1024 * 1024,
+        checkedAt: 123,
+        sha256: LOCAL_SHA256,
+      },
+      gguf: {
+        totalBytes: 4 * 1024 * 1024 * 1024,
+        architecture: 'llama',
+        nLayers: 40,
+      },
+      maxContextTokens: 8192,
+      hasVerifiedContextWindow: true,
+      localPath: 'verified-local-missing-digest-new-file-model.gguf',
+      downloadedAt: 123456,
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+    };
+    mockedRegistry.getModel.mockImplementation((modelId: string) => (
+      modelId === localModel.id ? localModel : undefined
+    ));
+
+    global.fetch = jest.fn(() =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: {
+          get: jest.fn(() => null),
+        },
+        json: () => Promise.resolve([{
+          ...makeRepo(localModel.id, 4 * 1024 * 1024 * 1024),
+          siblings: [{
+            rfilename: 'model.Q5_K_M.gguf',
+            size: 4 * 1024 * 1024 * 1024,
+          }],
+        }]),
+      }),
+    ) as jest.Mock;
+
+    const result = await modelCatalogService.searchModels('phi');
+
+    expect(result.models[0]).toEqual(expect.objectContaining({
+      id: localModel.id,
+      resolvedFileName: 'model.Q5_K_M.gguf',
+      localPath: undefined,
+      downloadedAt: undefined,
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+      size: 4 * 1024 * 1024 * 1024,
+      sha256: undefined,
+      metadataTrust: 'trusted_remote',
+      maxContextTokens: undefined,
+      hasVerifiedContextWindow: false,
+    }));
+    expect(result.models[0].downloadIntegrity).toBeUndefined();
+    expect(result.models[0].gguf).toEqual({
+      totalBytes: 4 * 1024 * 1024 * 1024,
+    });
+  });
+
   it('drops stale verified_local trust when the remote digest changes', async () => {
     const localModel: ModelMetadata = {
       ...makeLocalModel('org/stale-verified-local-integrity-model'),
@@ -1274,6 +1342,11 @@ describe('ModelCatalogService', () => {
       maxContextTokens: 8192,
       hasVerifiedContextWindow: true,
       localPath: 'stale-verified-local-integrity-model.gguf',
+      downloadedAt: 123456,
+      resumeData: JSON.stringify({ resumeData: 'stale' }),
+      downloadErrorAt: 234567,
+      downloadErrorCode: 'download_http_error',
+      downloadErrorMessage: 'stale failure',
       lifecycleStatus: LifecycleStatus.DOWNLOADED,
       downloadProgress: 1,
     };
@@ -1303,8 +1376,14 @@ describe('ModelCatalogService', () => {
 
     expect(result.models[0]).toEqual(expect.objectContaining({
       id: localModel.id,
-      localPath: localModel.localPath,
-      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      localPath: undefined,
+      downloadedAt: undefined,
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+      resumeData: undefined,
+      downloadErrorAt: undefined,
+      downloadErrorCode: undefined,
+      downloadErrorMessage: undefined,
       size: 3 * 1024 * 1024 * 1024,
       sha256: OTHER_TREE_SHA256,
       metadataTrust: 'trusted_remote',
@@ -1341,6 +1420,7 @@ describe('ModelCatalogService', () => {
       maxContextTokens: 8192,
       hasVerifiedContextWindow: true,
       localPath: 'stale-verified-local-unknown-size-model.gguf',
+      downloadedAt: 123456,
       lifecycleStatus: LifecycleStatus.DOWNLOADED,
       downloadProgress: 1,
     };
@@ -1385,8 +1465,10 @@ describe('ModelCatalogService', () => {
 
     expect(result.models[0]).toEqual(expect.objectContaining({
       id: localModel.id,
-      localPath: localModel.localPath,
-      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      localPath: undefined,
+      downloadedAt: undefined,
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
       size: null,
       sha256: OTHER_TREE_SHA256,
       fitsInRam: null,
@@ -2799,6 +2881,86 @@ describe('ModelCatalogService', () => {
       },
       maxContextTokens: 32768,
       hasVerifiedContextWindow: true,
+      downloadedAt: 123456,
+      resumeData: JSON.stringify({ resumeData: 'stale' }),
+      downloadErrorAt: 234567,
+      downloadErrorCode: 'download_http_error',
+      downloadErrorMessage: 'stale failure',
+    };
+    mockedRegistry.getModel.mockImplementation((modelId: string) => (
+      modelId === localModel.id ? localModel : undefined
+    ));
+
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.endsWith('/raw/main/README.md')) {
+        return Promise.resolve({
+          ok: false,
+          status: 404,
+          text: () => Promise.resolve(''),
+        });
+      }
+
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({
+          ...makeRepo(localModel.id, 4 * 1024 * 1024 * 1024),
+          siblings: [{
+            rfilename: 'model.Q4_K_M.gguf',
+            size: 4 * 1024 * 1024 * 1024,
+          }],
+        }),
+      });
+    }) as jest.Mock;
+
+    const result = await service.getModelDetails(localModel.id);
+
+    expect(result).toEqual(expect.objectContaining({
+      id: localModel.id,
+      size: 4 * 1024 * 1024 * 1024,
+      sha256: LOCAL_SHA256,
+      metadataTrust: 'verified_local',
+      maxContextTokens: 32768,
+      hasVerifiedContextWindow: true,
+    }));
+    expect(result.downloadIntegrity).toEqual(localModel.downloadIntegrity);
+    expect(result.gguf).toEqual(expect.objectContaining({
+      totalBytes: 4 * 1024 * 1024 * 1024,
+      architecture: 'llama',
+      nLayers: 40,
+    }));
+    expect(mockedRegistry.updateModel).toHaveBeenCalledWith(expect.objectContaining({
+      id: localModel.id,
+      sha256: LOCAL_SHA256,
+      downloadIntegrity: localModel.downloadIntegrity,
+      metadataTrust: 'verified_local',
+      maxContextTokens: 32768,
+      hasVerifiedContextWindow: true,
+    }));
+
+    service.dispose();
+  });
+
+  it('preserves size-only integrity markers through compatible detail sync', async () => {
+    const service = new ModelCatalogService();
+    const localModel: ModelMetadata = {
+      ...makeLocalModel('org/detail-size-integrity-model'),
+      accessState: ModelAccessState.PUBLIC,
+      size: 3 * 1024 * 1024 * 1024,
+      resolvedFileName: 'model.Q4_K_M.gguf',
+      localPath: 'detail-size-integrity-model.gguf',
+      metadataTrust: 'trusted_remote',
+      downloadIntegrity: {
+        kind: 'size',
+        sizeBytes: 3 * 1024 * 1024 * 1024,
+        checkedAt: 123,
+      },
+      gguf: {
+        totalBytes: 3 * 1024 * 1024 * 1024,
+      },
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
     };
     mockedRegistry.getModel.mockImplementation((modelId: string) => (
       modelId === localModel.id ? localModel : undefined
@@ -2831,26 +2993,88 @@ describe('ModelCatalogService', () => {
 
     expect(result).toEqual(expect.objectContaining({
       id: localModel.id,
-      size: 4 * 1024 * 1024 * 1024,
-      sha256: LOCAL_SHA256,
-      metadataTrust: 'verified_local',
-      maxContextTokens: 32768,
-      hasVerifiedContextWindow: true,
+      localPath: localModel.localPath,
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      metadataTrust: 'trusted_remote',
+      sha256: undefined,
     }));
     expect(result.downloadIntegrity).toEqual(localModel.downloadIntegrity);
-    expect(result.gguf).toEqual(expect.objectContaining({
-      totalBytes: 4 * 1024 * 1024 * 1024,
-      architecture: 'llama',
-      nLayers: 40,
-    }));
     expect(mockedRegistry.updateModel).toHaveBeenCalledWith(expect.objectContaining({
       id: localModel.id,
-      sha256: LOCAL_SHA256,
+      localPath: localModel.localPath,
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
       downloadIntegrity: localModel.downloadIntegrity,
-      metadataTrust: 'verified_local',
-      maxContextTokens: 32768,
-      hasVerifiedContextWindow: true,
+      metadataTrust: 'trusted_remote',
     }));
+
+    service.dispose();
+  });
+
+  it('resets size-only downloaded state when the stored local sha conflicts with a new remote sha', async () => {
+    const service = new ModelCatalogService();
+    const localModel: ModelMetadata = {
+      ...makeLocalModel('org/detail-size-integrity-sha-conflict-model'),
+      accessState: ModelAccessState.PUBLIC,
+      size: 3 * 1024 * 1024 * 1024,
+      resolvedFileName: 'model.Q4_K_M.gguf',
+      localPath: 'detail-size-integrity-sha-conflict-model.gguf',
+      sha256: LOCAL_SHA256,
+      metadataTrust: 'trusted_remote',
+      downloadIntegrity: {
+        kind: 'size',
+        sizeBytes: 3 * 1024 * 1024 * 1024,
+        checkedAt: 123,
+      },
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+    };
+    mockedRegistry.getModel.mockImplementation((modelId: string) => (
+      modelId === localModel.id ? localModel : undefined
+    ));
+
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.endsWith('/raw/main/README.md')) {
+        return Promise.resolve({
+          ok: false,
+          status: 404,
+          text: () => Promise.resolve(''),
+        });
+      }
+
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({
+          ...makeRepo(localModel.id, 3 * 1024 * 1024 * 1024),
+          siblings: [{
+            rfilename: 'model.Q4_K_M.gguf',
+            size: 3 * 1024 * 1024 * 1024,
+            lfs: { sha256: OTHER_TREE_SHA256 },
+          }],
+        }),
+      });
+    }) as jest.Mock;
+
+    const result = await service.getModelDetails(localModel.id);
+
+    expect(result).toEqual(expect.objectContaining({
+      id: localModel.id,
+      localPath: undefined,
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+      sha256: OTHER_TREE_SHA256,
+      metadataTrust: 'trusted_remote',
+    }));
+    expect(result.downloadIntegrity).toBeUndefined();
+    expect(mockedRegistry.updateModel).toHaveBeenCalledWith(expect.objectContaining({
+      id: localModel.id,
+      localPath: undefined,
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      sha256: OTHER_TREE_SHA256,
+    }));
+    expect(mockedRegistry.updateModel.mock.calls.at(-1)?.[0].downloadIntegrity).toBeUndefined();
 
     service.dispose();
   });
@@ -2910,6 +3134,14 @@ describe('ModelCatalogService', () => {
     expect(result).toEqual(expect.objectContaining({
       id: localModel.id,
       size: 3 * 1024 * 1024 * 1024,
+      localPath: undefined,
+      downloadedAt: undefined,
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+      resumeData: undefined,
+      downloadErrorAt: undefined,
+      downloadErrorCode: undefined,
+      downloadErrorMessage: undefined,
       sha256: OTHER_TREE_SHA256,
       metadataTrust: 'trusted_remote',
       maxContextTokens: undefined,

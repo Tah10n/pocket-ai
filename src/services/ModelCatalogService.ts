@@ -49,7 +49,10 @@ import {
   getHuggingFaceModelUrl,
   HF_BASE_URL,
 } from '../utils/huggingFaceUrls';
-import { resolveVerifiedLocalShaCompatibility } from './ModelIntegrityMetadata';
+import {
+  getCompatibleLocalDownloadStatePatch,
+  resolveVerifiedLocalShaCompatibility,
+} from './ModelIntegrityMetadata';
 import {
   REQUEST_AUTH_POLICY,
   type CatalogBatchResult,
@@ -1224,12 +1227,22 @@ export class ModelCatalogService {
 
         const resolvedFileName = getFileName(selectedEntry);
         const treeEntrySha256 = getFileSha(selectedEntry);
+        const treeEntrySize = getFileSize(selectedEntry);
         const {
           localVerifiedSha256,
           canUseLocalVerifiedMetadata,
-        } = resolveVerifiedLocalShaCompatibility(model, treeEntrySha256);
+          canPreserveDownloadIntegrity,
+          shouldResetLocalDownloadState,
+        } = resolveVerifiedLocalShaCompatibility(model, {
+          sha256: treeEntrySha256,
+          resolvedFileName,
+          size: treeEntrySize,
+        });
         const shouldPreserveVerifiedLocal = canUseLocalVerifiedMetadata;
-        const treeEntrySize = getFileSize(selectedEntry);
+        const localDownloadStatePatch = getCompatibleLocalDownloadStatePatch(model, {
+          shouldResetLocalDownloadState,
+          canPreserveDownloadIntegrity,
+        });
         const size = shouldPreserveVerifiedLocal
           ? model.size ?? treeEntrySize
           : treeEntrySize;
@@ -1258,11 +1271,17 @@ export class ModelCatalogService {
             : didChangeSize
               ? undefined
               : model.memoryFitConfidence;
-        const sha256 = treeEntrySha256 ?? (shouldPreserveVerifiedLocal ? localVerifiedSha256 : model.sha256);
+        const canCarryForwardLocalSha256 = !shouldResetLocalDownloadState
+          && model.metadataTrust !== 'verified_local';
+        const sha256 = treeEntrySha256
+          ?? (shouldPreserveVerifiedLocal
+            ? localVerifiedSha256
+            : canCarryForwardLocalSha256 ? model.sha256 : undefined);
 
         if (model.requiresTreeProbe && !treeProbeIsFinal) {
           return normalizePersistedModelMetadata({
             ...model,
+            ...localDownloadStatePatch,
             size,
             fitsInRam,
             memoryFitDecision,
@@ -1278,6 +1297,7 @@ export class ModelCatalogService {
 
         return normalizePersistedModelMetadata({
           ...model,
+          ...localDownloadStatePatch,
           size,
           fitsInRam,
           memoryFitDecision,
@@ -1692,9 +1712,20 @@ export class ModelCatalogService {
       remoteSha256,
       localVerifiedSha256,
       canUseLocalVerifiedMetadata,
-    } = resolveVerifiedLocalShaCompatibility(localModel, remoteModel.sha256);
+      canPreserveDownloadIntegrity,
+      shouldResetLocalDownloadState,
+    } = resolveVerifiedLocalShaCompatibility(localModel, {
+      sha256: remoteModel.sha256,
+      resolvedFileName: remoteModel.resolvedFileName,
+      size: remoteModel.size,
+    });
     const localHasVerifiedSize = canUseLocalVerifiedMetadata;
-    const allowLocalVerifiedDerivedMetadata = localHasVerifiedSize || localModel.metadataTrust !== 'verified_local';
+    const allowLocalVerifiedDerivedMetadata = !shouldResetLocalDownloadState
+      && (localHasVerifiedSize || localModel.metadataTrust !== 'verified_local');
+    const localDownloadStatePatch = getCompatibleLocalDownloadStatePatch(localModel, {
+      shouldResetLocalDownloadState,
+      canPreserveDownloadIntegrity,
+    });
     const {
       maxContextTokens,
       hasVerifiedContextWindow,
@@ -1732,14 +1763,15 @@ export class ModelCatalogService {
 
     return normalizePersistedModelMetadata({
       ...remoteModel,
+      ...localDownloadStatePatch,
       size: resolvedSize,
       hfRevision: remoteModel.hfRevision ?? localModel.hfRevision,
       resolvedFileName: remoteModel.resolvedFileName ?? localModel.resolvedFileName,
-      localPath: localModel.localPath,
-      downloadedAt: localModel.downloadedAt,
+      localPath: shouldResetLocalDownloadState ? undefined : localModel.localPath,
+      downloadedAt: shouldResetLocalDownloadState ? undefined : localModel.downloadedAt,
       lastModifiedAt: remoteModel.lastModifiedAt ?? localModel.lastModifiedAt,
       sha256: remoteSha256 ?? (localHasVerifiedSize ? localVerifiedSha256 : undefined),
-      downloadIntegrity: localHasVerifiedSize ? localModel.downloadIntegrity : undefined,
+      downloadIntegrity: canPreserveDownloadIntegrity ? localModel.downloadIntegrity : undefined,
       metadataTrust,
       gguf,
       fitsInRam,
@@ -1748,12 +1780,12 @@ export class ModelCatalogService {
       accessState: remoteModel.accessState,
       isGated: remoteModel.isGated,
       isPrivate: remoteModel.isPrivate,
-      lifecycleStatus: localModel.lifecycleStatus,
-      downloadProgress: localModel.downloadProgress,
-      resumeData: localModel.resumeData,
-      downloadErrorAt: localModel.downloadErrorAt,
-      downloadErrorCode: localModel.downloadErrorCode,
-      downloadErrorMessage: localModel.downloadErrorMessage,
+      lifecycleStatus: shouldResetLocalDownloadState ? LifecycleStatus.AVAILABLE : localModel.lifecycleStatus,
+      downloadProgress: shouldResetLocalDownloadState ? 0 : localModel.downloadProgress,
+      resumeData: shouldResetLocalDownloadState ? undefined : localModel.resumeData,
+      downloadErrorAt: shouldResetLocalDownloadState ? undefined : localModel.downloadErrorAt,
+      downloadErrorCode: shouldResetLocalDownloadState ? undefined : localModel.downloadErrorCode,
+      downloadErrorMessage: shouldResetLocalDownloadState ? undefined : localModel.downloadErrorMessage,
       maxContextTokens,
       hasVerifiedContextWindow,
       parameterSizeLabel: remoteModel.parameterSizeLabel ?? localModel.parameterSizeLabel,

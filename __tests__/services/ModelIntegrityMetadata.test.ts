@@ -123,6 +123,50 @@ describe('ModelIntegrityMetadata', () => {
     }));
   });
 
+  it('resets legacy completed local state when the selected filename changes without integrity markers', () => {
+    const compatibility = resolveVerifiedLocalShaCompatibility(makeLocalIdentity({
+      sha256: undefined,
+      metadataTrust: 'trusted_remote',
+      downloadIntegrity: undefined,
+      localPath: 'legacy-model.Q4_K_M.gguf',
+      downloadedAt: 123,
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+    }), {
+      resolvedFileName: 'model.Q5_K_M.gguf',
+      size: LOCAL_SIZE,
+    });
+
+    expect(compatibility).toEqual(expect.objectContaining({
+      hasRemoteFileNameConflict: true,
+      hasRemoteIdentityConflict: true,
+      shouldResetLocalDownloadState: true,
+      canUseLocalVerifiedMetadata: false,
+      canPreserveDownloadIntegrity: false,
+    }));
+  });
+
+  it('resets legacy completed local state when the remote size changes without integrity markers', () => {
+    const compatibility = resolveVerifiedLocalShaCompatibility(makeLocalIdentity({
+      sha256: undefined,
+      metadataTrust: 'trusted_remote',
+      downloadIntegrity: undefined,
+      localPath: 'legacy-model.Q4_K_M.gguf',
+      downloadedAt: 123,
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+    }), {
+      resolvedFileName: 'model.Q4_K_M.gguf',
+      size: LOCAL_SIZE - 1,
+    });
+
+    expect(compatibility).toEqual(expect.objectContaining({
+      hasRemoteSizeConflict: true,
+      hasRemoteIdentityConflict: true,
+      shouldResetLocalDownloadState: true,
+      canUseLocalVerifiedMetadata: false,
+      canPreserveDownloadIntegrity: false,
+    }));
+  });
+
   it('builds a local download-state reset patch for incompatible files', () => {
     const compatibility = resolveVerifiedLocalShaCompatibility(makeLocalIdentity(), {
       sha256: REMOTE_SHA256,

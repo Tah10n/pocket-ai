@@ -1321,6 +1321,77 @@ describe('ModelCatalogService', () => {
     });
   });
 
+  it('resets legacy downloaded local state when a missing-digest catalog result selects a different file', async () => {
+    const localModel: ModelMetadata = {
+      ...makeLocalModel('org/legacy-downloaded-new-file-model'),
+      accessState: ModelAccessState.PUBLIC,
+      size: 4 * 1024 * 1024 * 1024,
+      resolvedFileName: 'model.Q4_K_M.gguf',
+      sha256: undefined,
+      metadataTrust: 'trusted_remote',
+      downloadIntegrity: undefined,
+      gguf: {
+        totalBytes: 4 * 1024 * 1024 * 1024,
+        architecture: 'llama',
+        nLayers: 40,
+      },
+      maxContextTokens: 8192,
+      hasVerifiedContextWindow: true,
+      localPath: 'legacy-downloaded-new-file-model.gguf',
+      downloadedAt: 123456,
+      resumeData: JSON.stringify({ resumeData: 'stale' }),
+      downloadErrorAt: 234567,
+      downloadErrorCode: 'download_http_error',
+      downloadErrorMessage: 'stale failure',
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+    };
+    mockedRegistry.getModel.mockImplementation((modelId: string) => (
+      modelId === localModel.id ? localModel : undefined
+    ));
+
+    global.fetch = jest.fn(() =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: {
+          get: jest.fn(() => null),
+        },
+        json: () => Promise.resolve([{
+          ...makeRepo(localModel.id, 4 * 1024 * 1024 * 1024),
+          siblings: [{
+            rfilename: 'model.Q5_K_M.gguf',
+            size: 4 * 1024 * 1024 * 1024,
+          }],
+        }]),
+      }),
+    ) as jest.Mock;
+
+    const result = await modelCatalogService.searchModels('phi');
+
+    expect(result.models[0]).toEqual(expect.objectContaining({
+      id: localModel.id,
+      resolvedFileName: 'model.Q5_K_M.gguf',
+      localPath: undefined,
+      downloadedAt: undefined,
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+      resumeData: undefined,
+      downloadErrorAt: undefined,
+      downloadErrorCode: undefined,
+      downloadErrorMessage: undefined,
+      size: 4 * 1024 * 1024 * 1024,
+      sha256: undefined,
+      metadataTrust: 'trusted_remote',
+      maxContextTokens: undefined,
+      hasVerifiedContextWindow: false,
+    }));
+    expect(result.models[0].downloadIntegrity).toBeUndefined();
+    expect(result.models[0].gguf).toEqual({
+      totalBytes: 4 * 1024 * 1024 * 1024,
+    });
+  });
+
   it('drops stale verified_local trust when the remote digest changes', async () => {
     const localModel: ModelMetadata = {
       ...makeLocalModel('org/stale-verified-local-integrity-model'),

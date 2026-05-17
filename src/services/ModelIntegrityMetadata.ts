@@ -6,7 +6,7 @@ type ShaIntegrityModel = Pick<ModelMetadata, 'downloadIntegrity' | 'metadataTrus
 type LocalCatalogFileIdentity = Pick<
   ModelMetadata,
   'downloadIntegrity' | 'metadataTrust' | 'resolvedFileName' | 'sha256' | 'size'
->;
+> & Partial<Pick<ModelMetadata, 'downloadedAt' | 'lifecycleStatus' | 'localPath'>>;
 
 type RemoteCatalogFileIdentity = Partial<Pick<ModelMetadata, 'resolvedFileName' | 'sha256' | 'size'>>;
 
@@ -79,6 +79,15 @@ function normalizeFileName(value: ModelMetadata['resolvedFileName']): string | u
   return normalized.length > 0 ? normalized : undefined;
 }
 
+function hasCompletedLocalRuntimeState(localModel: LocalCatalogFileIdentity): boolean {
+  return Boolean(
+    normalizeFileName(localModel.localPath)
+    || (typeof localModel.downloadedAt === 'number' && Number.isFinite(localModel.downloadedAt))
+    || localModel.lifecycleStatus === LifecycleStatus.DOWNLOADED
+    || localModel.lifecycleStatus === LifecycleStatus.ACTIVE,
+  );
+}
+
 export function resolveVerifiedLocalShaCompatibility(
   localModel: LocalCatalogFileIdentity,
   remoteFile: RemoteCatalogFileIdentity,
@@ -99,6 +108,7 @@ export function resolveVerifiedLocalShaCompatibility(
     && localSha256Identity !== normalizedRemoteSha256,
   );
   const localIntegritySizeBytes = getIntegrityMarkerSizeBytes(localModel.downloadIntegrity);
+  const hasLocalCompletedRuntimeState = hasCompletedLocalRuntimeState(localModel);
   const hasLocalIntegrityClaim = Boolean(
     localModelSha256
     || localIntegritySha256
@@ -109,17 +119,19 @@ export function resolveVerifiedLocalShaCompatibility(
   const remoteResolvedFileName = normalizeFileName(remoteFile.resolvedFileName);
   const hasRemoteFileNameConflict = Boolean(
     !hasMatchingRemoteShaProof
-    && hasLocalIntegrityClaim
+    && (hasLocalIntegrityClaim || hasLocalCompletedRuntimeState)
     && localResolvedFileName
     && remoteResolvedFileName
     && localResolvedFileName !== remoteResolvedFileName,
   );
   const remoteSizeBytes = normalizePositiveSize(remoteFile.size ?? null);
+  const localSizeBytes = localIntegritySizeBytes
+    ?? (hasLocalCompletedRuntimeState ? normalizePositiveSize(localModel.size ?? null) : undefined);
   const hasRemoteSizeConflict = Boolean(
     !hasMatchingRemoteShaProof
-    && localIntegritySizeBytes !== undefined
+    && localSizeBytes !== undefined
     && remoteSizeBytes !== undefined
-    && localIntegritySizeBytes !== remoteSizeBytes,
+    && localSizeBytes !== remoteSizeBytes,
   );
   const hasRemoteIdentityConflict = hasRemoteShaConflict
     || hasRemoteFileNameConflict

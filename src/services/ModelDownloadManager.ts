@@ -24,6 +24,7 @@ import { getSettings, subscribeSettings } from './SettingsStore';
 import { backgroundTaskService } from './BackgroundTaskService';
 import { notificationService, type DownloadErrorReason } from './NotificationService';
 import { PrivateStorageUnavailableError, getPrivateStorageHealthSnapshot, isPrivateStorageWritable } from './storage';
+import { GgufValidationError, validateGgufFileHeader } from '../utils/ggufValidation';
 
 function ignorePrivateStorageUnavailableDuringDownloadStop(error: unknown, scope: string): boolean {
   if (isPrivateStorageUnavailableError(error)) {
@@ -148,6 +149,10 @@ function buildDownloadIntegrityMarker(
   };
 }
 
+function shouldDeleteInvalidGgufDownload(reason: GgufValidationError['reason']): boolean {
+  return reason !== 'read_failed';
+}
+
 function isFileSystemDirectory(info: { isDirectory?: boolean }): boolean {
   return info.isDirectory === true;
 }
@@ -157,6 +162,7 @@ export class ModelDownloadManager {
   private activeJob: ActiveDownloadJob | null = null;
   private nextJobToken = 0;
   private isProcessing = false;
+  private queueProcessingHoldCount = 0;
   private downloadStoreUnsubscribe?: () => void;
   private hwUnsubscribe?: () => void;
   private settingsUnsubscribe?: () => void;
@@ -296,6 +302,7 @@ export class ModelDownloadManager {
    * Check the queue and start next download if idle.
    */
   private async processQueue() {
+    if (this.queueProcessingHoldCount > 0) return;
     if (this.isProcessing) return;
 
     if (!isPrivateStorageWritable()) {
@@ -343,11 +350,17 @@ export class ModelDownloadManager {
     this.activeJob = { modelId: next.id, jobToken, resumable: null, stopReason: null };
 
     this.isProcessing = true;
-    const didPersistActiveDownload = await this.persistDownloadStoreMutation(() => {
-      setActiveDownload(next.id);
-    });
-    if (!didPersistActiveDownload) {
-      return;
+    try {
+      const didPersistActiveDownload = await this.persistDownloadStoreMutation(() => {
+        setActiveDownload(next.id);
+      });
+      if (!didPersistActiveDownload) {
+        this.clearFailedQueueStart(next.id, jobToken);
+        return;
+      }
+    } catch (error) {
+      this.clearFailedQueueStart(next.id, jobToken);
+      throw error;
     }
     void this.runDownloadJob(next, jobToken);
   }
@@ -362,6 +375,26 @@ export class ModelDownloadManager {
     }
 
     return this.activeJob?.stopReason ?? null;
+  }
+
+  private clearFailedQueueStart(modelId: string, jobToken: number): void {
+    if (this.isCurrentJob(modelId, jobToken)) {
+      this.activeJob = null;
+      this.isProcessing = false;
+    }
+
+    if (useDownloadStore.getState().activeDownloadId !== modelId) {
+      return;
+    }
+
+    this.queueProcessingHoldCount += 1;
+    try {
+      useDownloadStore.setState({ activeDownloadId: null });
+    } catch (error) {
+      console.warn(`[ModelDownloadManager] Failed to clear active download after queue start failure for ${modelId}`, error);
+    } finally {
+      this.queueProcessingHoldCount = Math.max(0, this.queueProcessingHoldCount - 1);
+    }
   }
 
   private async handlePrivateStorageUnavailable(error: unknown): Promise<boolean> {
@@ -782,11 +815,15 @@ export class ModelDownloadManager {
       )
         ? Math.round(downloadedFileInfo.size)
         : model.size;
-      const hasVerifiedIntegrity = verification.integrity !== 'unverified';
-      const metadataTrust = hasVerifiedIntegrity && typeof downloadedSize === 'number' && Number.isFinite(downloadedSize) && downloadedSize > 0
+      const hasTrustedIntegrity = verification.integrity === 'sha256';
+      const metadataTrust = hasTrustedIntegrity && typeof downloadedSize === 'number' && Number.isFinite(downloadedSize) && downloadedSize > 0
         ? 'verified_local' as const
-        : model.metadataTrust;
-      const memoryFit = await this.resolveMemoryFit(downloadedSize, metadataTrust, model.gguf);
+        : model.metadataTrust === 'verified_local'
+          ? undefined
+          : model.metadataTrust;
+      const shouldCarryForwardGgufMetadata = hasTrustedIntegrity || model.metadataTrust === 'trusted_remote';
+      const ggufMetadata = shouldCarryForwardGgufMetadata ? model.gguf : undefined;
+      const memoryFit = await this.resolveMemoryFit(downloadedSize, metadataTrust, ggufMetadata);
 
       if (!this.isCurrentJob(model.id, jobToken)) {
         return;
@@ -805,12 +842,12 @@ export class ModelDownloadManager {
         memoryFitConfidence: memoryFit.confidence,
         metadataTrust,
         downloadIntegrity: buildDownloadIntegrityMarker(verification),
-        gguf: typeof downloadedSize === 'number' && Number.isFinite(downloadedSize) && downloadedSize > 0
+        gguf: shouldCarryForwardGgufMetadata && typeof downloadedSize === 'number' && Number.isFinite(downloadedSize) && downloadedSize > 0
           ? {
-            ...(model.gguf ?? {}),
+            ...(ggufMetadata ?? {}),
             totalBytes: Math.round(downloadedSize),
           }
-          : model.gguf,
+          : ggufMetadata,
         localPath: fileName,
         downloadedAt: Date.now(),
         lifecycleStatus: LifecycleStatus.DOWNLOADED,
@@ -918,6 +955,30 @@ export class ModelDownloadManager {
 
       const expectedHash = this.normalizeSha256Digest(model.sha256);
       if (!expectedHash) {
+        try {
+          await validateGgufFileHeader(localUri, fileInfo);
+        } catch (error) {
+          if (error instanceof GgufValidationError) {
+            if (shouldDeleteInvalidGgufDownload(error.reason)) {
+              await this.deleteCorruptedDownload(localUri, model.id);
+            }
+            throw new AppError(
+              'download_verification_failed',
+              error.message,
+              {
+                details: {
+                  modelId: model.id,
+                  localUri,
+                  reason: error.reason,
+                  ...(error.details ?? {}),
+                },
+              },
+            );
+          }
+
+          throw error;
+        }
+
         return {
           integrity: typeof expectedSize === 'number' && expectedSize > 0 ? 'size' : 'unverified',
           sizeBytes: downloadedSize,
@@ -1025,59 +1086,74 @@ export class ModelDownloadManager {
   public async cancelDownload(modelId: string) {
     const { queue, removeFromQueue, activeDownloadId, setActiveDownload } = useDownloadStore.getState();
     const queuedModel = queue.find((model) => model.id === modelId);
+    let shouldProcessAfterCleanup = false;
+    let shouldDeletePartialFiles = false;
 
-    if (!(await this.canPersistDownloadMutation())) {
-      return;
-    }
+    this.queueProcessingHoldCount += 1;
+    try {
+      if (!(await this.canPersistDownloadMutation())) {
+        return;
+      }
 
-    const job = this.activeJob?.modelId === modelId
-      ? this.activeJob
-      : null;
-    if (job) {
-      job.stopReason = 'cancel';
-    }
+      const job = this.activeJob?.modelId === modelId
+        ? this.activeJob
+        : null;
+      if (job) {
+        job.stopReason = 'cancel';
+      }
 
-    if (activeDownloadId === modelId) {
-      if (job?.resumable) {
-        try {
-          await job.resumable.pauseAsync(); // Stop active one
-        } catch (error) {
-          console.warn(`[ModelDownloadManager] Failed to pause active download during cancel for ${modelId}`, error);
+      if (activeDownloadId === modelId) {
+        if (job?.resumable) {
+          try {
+            await job.resumable.pauseAsync(); // Stop active one
+          } catch (error) {
+            console.warn(`[ModelDownloadManager] Failed to pause active download during cancel for ${modelId}`, error);
+          }
+        }
+
+        const didPersistActiveClear = await this.persistDownloadStoreMutation(() => {
+          setActiveDownload(null);
+        });
+        if (!didPersistActiveClear) {
+          return;
         }
       }
 
-      const didPersistActiveClear = await this.persistDownloadStoreMutation(() => {
-        setActiveDownload(null);
+      shouldProcessAfterCleanup = true;
+
+      // Remove from queue first to stop UI
+      const didPersistQueueRemoval = await this.persistDownloadStoreMutation(() => {
+        removeFromQueue(modelId);
       });
-      if (!didPersistActiveClear) {
+      if (!didPersistQueueRemoval) {
         return;
       }
-    }
-    
-    // Remove from queue first to stop UI
-    const didPersistQueueRemoval = await this.persistDownloadStoreMutation(() => {
-      removeFromQueue(modelId);
-    });
-    if (!didPersistQueueRemoval) {
-      return;
-    }
+      shouldDeletePartialFiles = true;
 
-    void this.processQueue();
-
-    // Delete the partial file to free up disk space
-    try {
-      await this.deleteDownloadFiles(
-        queuedModel
-          ? this.getDownloadFileNameCandidates(queuedModel)
-          : getCandidateModelDownloadFileNames({
-            id: modelId,
-            resolvedFileName: undefined,
-            hfRevision: undefined,
-          }),
-        modelId,
-      );
-    } catch (e) {
-      console.error(`[ModelDownloadManager] Failed to delete partial file for ${modelId}`, e);
+    } finally {
+      try {
+        if (shouldDeletePartialFiles) {
+          // Delete the partial file to free up disk space before allowing any requeued
+          // item for the same filename to create a new resumable.
+          await this.deleteDownloadFiles(
+            queuedModel
+              ? this.getDownloadFileNameCandidates(queuedModel)
+              : getCandidateModelDownloadFileNames({
+                id: modelId,
+                resolvedFileName: undefined,
+                hfRevision: undefined,
+              }),
+            modelId,
+          );
+        }
+      } catch (error) {
+        console.error(`[ModelDownloadManager] Failed to delete partial file for ${modelId}`, error);
+      } finally {
+        this.queueProcessingHoldCount = Math.max(0, this.queueProcessingHoldCount - 1);
+        if (shouldProcessAfterCleanup) {
+          void this.processQueue();
+        }
+      }
     }
   }
 
@@ -1132,8 +1208,22 @@ export class ModelDownloadManager {
     }
 
     let deletedAnyFile = false;
+    const protectedCompletedFileNames = new Set(
+      registry.getModels()
+        .filter((model) => (
+          model.lifecycleStatus === LifecycleStatus.DOWNLOADED
+          || model.lifecycleStatus === LifecycleStatus.ACTIVE
+        ))
+        .map((model) => model.localPath)
+        .filter((fileName): fileName is string => typeof fileName === 'string' && isValidLocalFileName(fileName)),
+    );
 
     for (const fileName of Array.from(new Set(fileNames))) {
+      if (protectedCompletedFileNames.has(fileName)) {
+        console.warn(`[ModelDownloadManager] Partial download candidate for ${modelId} is a completed model file, skipping: ${fileName}`);
+        continue;
+      }
+
       const localUri = safeJoinModelPath(modelsDir, fileName);
       if (!localUri) {
         continue;

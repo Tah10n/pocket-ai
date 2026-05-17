@@ -126,6 +126,7 @@ type ActiveDownloadJob = {
   jobToken: number;
   resumable: ReturnType<typeof FileSystem.createDownloadResumable> | null;
   stopReason: 'pause' | 'cancel' | null;
+  deferredCancelCleanupFileNames?: string[];
 };
 
 type DownloadVerificationResult = {
@@ -470,6 +471,17 @@ export class ModelDownloadManager {
     } finally {
       if (!this.isCurrentJob(model.id, jobToken)) {
         return;
+      }
+
+      const deferredCancelCleanupFileNames = this.activeJob?.stopReason === 'cancel'
+        ? this.activeJob.deferredCancelCleanupFileNames
+        : undefined;
+      if (deferredCancelCleanupFileNames?.length) {
+        try {
+          await this.deleteDownloadFiles(deferredCancelCleanupFileNames, model.id);
+        } catch (error) {
+          console.error(`[ModelDownloadManager] Failed to delete deferred canceled partial file for ${model.id}`, error);
+        }
       }
 
       this.activeJob = null;
@@ -1088,6 +1100,9 @@ export class ModelDownloadManager {
     const queuedModel = queue.find((model) => model.id === modelId);
     let shouldProcessAfterCleanup = false;
     let shouldDeletePartialFiles = false;
+    let safeToDeletePartialFiles = true;
+    let shouldWaitForActiveJobToSettle = false;
+    let cancelJob: ActiveDownloadJob | null = null;
 
     this.queueProcessingHoldCount += 1;
     try {
@@ -1098,19 +1113,28 @@ export class ModelDownloadManager {
       const job = this.activeJob?.modelId === modelId
         ? this.activeJob
         : null;
+      cancelJob = job;
       if (job) {
         job.stopReason = 'cancel';
       }
 
-      if (activeDownloadId === modelId) {
-        if (job?.resumable) {
-          try {
-            await job.resumable.pauseAsync(); // Stop active one
-          } catch (error) {
-            console.warn(`[ModelDownloadManager] Failed to pause active download during cancel for ${modelId}`, error);
+      if (job?.resumable) {
+        job.deferredCancelCleanupFileNames = this.getCancelCleanupFileNameCandidates(queuedModel, modelId);
+        try {
+          await job.resumable.pauseAsync(); // Stop active one
+          job.deferredCancelCleanupFileNames = undefined;
+        } catch (error) {
+          console.warn(`[ModelDownloadManager] Failed to pause active download during cancel for ${modelId}`, error);
+          const activeJobStillCurrent = this.activeJob === job && this.isCurrentJob(modelId, job.jobToken);
+          safeToDeletePartialFiles = !activeJobStillCurrent;
+          shouldWaitForActiveJobToSettle = activeJobStillCurrent;
+          if (activeJobStillCurrent) {
+            this.isProcessing = true;
           }
         }
+      }
 
+      if (activeDownloadId === modelId) {
         const didPersistActiveClear = await this.persistDownloadStoreMutation(() => {
           setActiveDownload(null);
         });
@@ -1119,7 +1143,7 @@ export class ModelDownloadManager {
         }
       }
 
-      shouldProcessAfterCleanup = true;
+      shouldProcessAfterCleanup = !shouldWaitForActiveJobToSettle;
 
       // Remove from queue first to stop UI
       const didPersistQueueRemoval = await this.persistDownloadStoreMutation(() => {
@@ -1128,7 +1152,7 @@ export class ModelDownloadManager {
       if (!didPersistQueueRemoval) {
         return;
       }
-      shouldDeletePartialFiles = true;
+      shouldDeletePartialFiles = safeToDeletePartialFiles;
 
     } finally {
       try {
@@ -1136,13 +1160,7 @@ export class ModelDownloadManager {
           // Delete the partial file to free up disk space before allowing any requeued
           // item for the same filename to create a new resumable.
           await this.deleteDownloadFiles(
-            queuedModel
-              ? this.getDownloadFileNameCandidates(queuedModel)
-              : getCandidateModelDownloadFileNames({
-                id: modelId,
-                resolvedFileName: undefined,
-                hfRevision: undefined,
-              }),
+            this.getCancelCleanupFileNameCandidates(queuedModel, modelId),
             modelId,
           );
         }
@@ -1150,7 +1168,11 @@ export class ModelDownloadManager {
         console.error(`[ModelDownloadManager] Failed to delete partial file for ${modelId}`, error);
       } finally {
         this.queueProcessingHoldCount = Math.max(0, this.queueProcessingHoldCount - 1);
-        if (shouldProcessAfterCleanup) {
+        const activeCancelJobStillCurrent = shouldWaitForActiveJobToSettle
+          && cancelJob !== null
+          && this.activeJob === cancelJob
+          && this.isCurrentJob(modelId, cancelJob.jobToken);
+        if (shouldProcessAfterCleanup || (shouldWaitForActiveJobToSettle && !activeCancelJobStillCurrent)) {
           void this.processQueue();
         }
       }
@@ -1166,14 +1188,45 @@ export class ModelDownloadManager {
       : candidates;
   }
 
+  private getCancelCleanupFileNameCandidates(
+    queuedModel: Pick<ModelMetadata, 'id' | 'resolvedFileName' | 'hfRevision' | 'localPath'> | undefined,
+    modelId: string,
+  ): string[] {
+    return queuedModel
+      ? this.getDownloadFileNameCandidates(queuedModel)
+      : getCandidateModelDownloadFileNames({
+        id: modelId,
+        resolvedFileName: undefined,
+        hfRevision: undefined,
+      });
+  }
+
+  private getProtectedCompletedModelFileNames(): Set<string> {
+    return new Set(
+      registry.getModels()
+        .filter((model) => (
+          model.lifecycleStatus === LifecycleStatus.DOWNLOADED
+          || model.lifecycleStatus === LifecycleStatus.ACTIVE
+        ))
+        .map((model) => model.localPath)
+        .filter((fileName): fileName is string => typeof fileName === 'string' && isValidLocalFileName(fileName)),
+    );
+  }
+
   private async resolveDownloadFileName(
     model: Pick<ModelMetadata, 'id' | 'resolvedFileName' | 'hfRevision' | 'localPath'>,
     modelsDir: string,
   ): Promise<string> {
     const candidates = this.getDownloadFileNameCandidates(model);
+    const protectedCompletedFileNames = this.getProtectedCompletedModelFileNames();
     let firstAvailableCandidate: string | undefined;
 
     for (const candidate of candidates) {
+      if (protectedCompletedFileNames.has(candidate)) {
+        console.warn(`[ModelDownloadManager] Download candidate for ${model.id} is a completed model file, skipping: ${candidate}`);
+        continue;
+      }
+
       const candidatePath = safeJoinModelPath(modelsDir, candidate);
       if (!candidatePath) {
         continue;
@@ -1208,15 +1261,7 @@ export class ModelDownloadManager {
     }
 
     let deletedAnyFile = false;
-    const protectedCompletedFileNames = new Set(
-      registry.getModels()
-        .filter((model) => (
-          model.lifecycleStatus === LifecycleStatus.DOWNLOADED
-          || model.lifecycleStatus === LifecycleStatus.ACTIVE
-        ))
-        .map((model) => model.localPath)
-        .filter((fileName): fileName is string => typeof fileName === 'string' && isValidLocalFileName(fileName)),
-    );
+    const protectedCompletedFileNames = this.getProtectedCompletedModelFileNames();
 
     for (const fileName of Array.from(new Set(fileNames))) {
       if (protectedCompletedFileNames.has(fileName)) {
@@ -1302,6 +1347,19 @@ export class ModelDownloadManager {
 
   private async deleteCorruptedDownload(localUri: string, modelId: string): Promise<void> {
     try {
+      const modelsDir = getModelsDir();
+      const protectedCompletedUris = modelsDir
+        ? new Set(
+          Array.from(this.getProtectedCompletedModelFileNames())
+            .map((fileName) => safeJoinModelPath(modelsDir, fileName))
+            .filter((uri): uri is string => typeof uri === 'string'),
+        )
+        : new Set<string>();
+      if (protectedCompletedUris.has(localUri)) {
+        console.warn(`[ModelDownloadManager] Corrupted download path for ${modelId} is a completed model file, skipping delete`);
+        return;
+      }
+
       const fileInfo = await FileSystem.getInfoAsync(localUri);
       if (!fileInfo.exists || isFileSystemDirectory(fileInfo)) {
         if (fileInfo.exists) {

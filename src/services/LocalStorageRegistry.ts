@@ -143,10 +143,15 @@ async function verifySha256IntegrityMarker(
 
 function clearVerifiedLocalDerivedMetadata(model: ModelMetadata): boolean {
   let changed = false;
+  const shouldClearDerivedMetadata = model.metadataTrust === 'verified_local' || model.metadataTrust == null;
 
   if (model.metadataTrust === 'verified_local') {
     model.metadataTrust = undefined;
     changed = true;
+  }
+
+  if (!shouldClearDerivedMetadata) {
+    return changed;
   }
 
   if (model.gguf !== undefined) {
@@ -816,7 +821,7 @@ export class LocalStorageRegistry {
 
         const hasTrustedIntegrityMarker = hasMatchingIntegrityMarker && sha256IntegrityResult === 'match';
 
-        if (!hasTrustedIntegrityMarker && model.metadataTrust === 'verified_local') {
+        if (!hasTrustedIntegrityMarker) {
           changed = clearVerifiedLocalDerivedMetadata(model) || changed;
         }
 

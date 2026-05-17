@@ -599,6 +599,77 @@ describe('LocalStorageRegistry', () => {
     expect(updatedModels[0].gguf).toBeUndefined();
   });
 
+  it('preserves trusted remote metadata when GGUF header cannot be read', async () => {
+    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([
+      createMockModel({
+        size: 4096,
+        metadataTrust: 'trusted_remote',
+        localPath: 'model.gguf',
+        fitsInRam: true,
+        memoryFitDecision: 'fits_high_confidence',
+        memoryFitConfidence: 'high',
+        gguf: { architecture: 'llama', totalBytes: 4096 },
+        downloadIntegrity: {
+          kind: 'size',
+          sizeBytes: 4096,
+          checkedAt: 10,
+        },
+      }),
+    ]);
+    (registry.saveModels as jest.Mock) = jest.fn();
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: true, size: 4096 });
+    (FileSystem.readAsStringAsync as jest.Mock).mockRejectedValue(new Error('read failed'));
+
+    await registry.validateRegistry();
+
+    expect(registry.saveModels).not.toHaveBeenCalled();
+    expect(registry.getModels()[0]).toEqual(expect.objectContaining({
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      localPath: 'model.gguf',
+      metadataTrust: 'trusted_remote',
+      fitsInRam: true,
+      memoryFitDecision: 'fits_high_confidence',
+      memoryFitConfidence: 'high',
+      gguf: { architecture: 'llama', totalBytes: 4096 },
+    }));
+  });
+
+  it('clears stale GGUF metadata before recomputing size-only models with missing trust', async () => {
+    (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(8 * 1024 * 1024 * 1024);
+    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([
+      createMockModel({
+        size: 1_700_000_000,
+        metadataTrust: undefined,
+        localPath: 'model.gguf',
+        fitsInRam: false,
+        memoryFitDecision: 'likely_oom',
+        memoryFitConfidence: 'high',
+        gguf: {
+          architecture: 'llama',
+          'llama.block_count': 120,
+          'llama.embedding_length': 8192,
+          totalBytes: 1_700_000_000,
+        },
+        downloadIntegrity: {
+          kind: 'size',
+          sizeBytes: 1_700_000_000,
+          checkedAt: 10,
+        },
+      }),
+    ]);
+    (registry.saveModels as jest.Mock) = jest.fn();
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: true, size: 1_700_000_000 });
+
+    await registry.validateRegistry();
+
+    const updatedModels = (registry.saveModels as jest.Mock).mock.calls[0][0];
+    expect(updatedModels[0].metadataTrust).toBeUndefined();
+    expect(updatedModels[0].gguf).toBeUndefined();
+    expect(updatedModels[0].fitsInRam).toBe(true);
+    expect(updatedModels[0].memoryFitDecision).toBe('fits_low_confidence');
+    expect(updatedModels[0].memoryFitConfidence).toBe('low');
+  });
+
   it('resets no-marker downloaded files when local file size metadata is unavailable', async () => {
     (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(1024);
     (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([

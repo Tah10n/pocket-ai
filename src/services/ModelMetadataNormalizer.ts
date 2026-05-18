@@ -14,6 +14,7 @@ import { normalizePersistedModelCapabilitySnapshot } from '../utils/modelCapabil
 import { getShortModelLabel } from '../utils/modelLabel';
 import { buildHuggingFaceResolveUrl } from '../utils/huggingFaceUrls';
 import { isValidLocalFileName } from '../utils/safeFilePath';
+import { normalizeSha256Digest } from '../utils/sha256';
 
 type PersistedModelMetadata = Partial<ModelMetadata> & {
   id: string;
@@ -221,7 +222,7 @@ function normalizeFileIntegrityMarker(value: unknown): ModelFileIntegrityMarker 
   const checkedAt = typeof record.checkedAt === 'number' && Number.isFinite(record.checkedAt)
     ? Math.max(0, Math.round(record.checkedAt))
     : undefined;
-  const sha256 = normalizeNonEmptyString(record.sha256);
+  const sha256 = normalizeSha256Digest(typeof record.sha256 === 'string' ? record.sha256 : undefined);
 
   if (!kind || sizeBytes === undefined || checkedAt === undefined) {
     return undefined;
@@ -258,19 +259,38 @@ export function normalizePersistedModelMetadata(
     ? LifecycleStatus.AVAILABLE
     : persistedLifecycleStatus;
   const rawMetadataTrust = normalizeMetadataTrust(model.metadataTrust);
-  const metadataTrust = shouldDropDownloadedState && rawMetadataTrust === 'verified_local'
-    ? undefined
-    : rawMetadataTrust;
-  const memoryFitDecision = size === null ? undefined : normalizeMemoryFitDecision(model.memoryFitDecision);
-  const memoryFitConfidence = size === null ? undefined : normalizeMemoryFitConfidence(model.memoryFitConfidence);
-  const gguf = normalizeGgufMetadata(model.gguf);
+  const normalizedSha256 = normalizeSha256Digest(model.sha256);
+  const normalizedMemoryFitDecision = size === null ? undefined : normalizeMemoryFitDecision(model.memoryFitDecision);
+  const normalizedMemoryFitConfidence = size === null ? undefined : normalizeMemoryFitConfidence(model.memoryFitConfidence);
+  const normalizedGguf = normalizeGgufMetadata(model.gguf);
   const thinkingCapability = normalizeThinkingCapabilitySnapshot(
     (model as PersistedModelMetadata & { thinkingCapability?: unknown }).thinkingCapability,
   );
   const normalizedDownloadIntegrity = normalizeFileIntegrityMarker(
     (model as PersistedModelMetadata & { downloadIntegrity?: unknown }).downloadIntegrity,
   );
-  const downloadIntegrity = shouldDropDownloadedState ? undefined : normalizedDownloadIntegrity;
+  const hasCurrentSha256Integrity = normalizedDownloadIntegrity?.kind === 'sha256'
+    && normalizedSha256 !== undefined
+    && normalizedDownloadIntegrity.sha256 === normalizedSha256;
+  const hasMismatchedSha256Integrity = normalizedDownloadIntegrity?.kind === 'sha256'
+    && normalizedSha256 !== undefined
+    && normalizedDownloadIntegrity.sha256 !== normalizedSha256;
+  const shouldClearVerifiedLocalTrust = rawMetadataTrust === 'verified_local'
+    && !hasCurrentSha256Integrity;
+  const metadataTrust = (shouldDropDownloadedState && rawMetadataTrust === 'verified_local') || shouldClearVerifiedLocalTrust
+    ? undefined
+    : rawMetadataTrust;
+  const memoryFitDecision = shouldClearVerifiedLocalTrust ? undefined : normalizedMemoryFitDecision;
+  const memoryFitConfidence = shouldClearVerifiedLocalTrust ? undefined : normalizedMemoryFitConfidence;
+  const gguf = shouldClearVerifiedLocalTrust ? undefined : normalizedGguf;
+  const normalizedMaxContextTokens = typeof model.maxContextTokens === 'number' && Number.isFinite(model.maxContextTokens)
+    ? Math.round(model.maxContextTokens)
+    : undefined;
+  const maxContextTokens = shouldClearVerifiedLocalTrust ? undefined : normalizedMaxContextTokens;
+  const hasVerifiedContextWindow = !shouldClearVerifiedLocalTrust && model.hasVerifiedContextWindow === true;
+  const downloadIntegrity = shouldDropDownloadedState || hasMismatchedSha256Integrity
+    ? undefined
+    : normalizedDownloadIntegrity;
   const rawProgress = typeof model.downloadProgress === 'number' && Number.isFinite(model.downloadProgress)
     ? model.downloadProgress
     : 0;
@@ -296,7 +316,7 @@ export function normalizePersistedModelMetadata(
     : undefined;
   const capabilitySnapshot = normalizePersistedModelCapabilitySnapshot({
     gguf,
-    hasVerifiedContextWindow: model.hasVerifiedContextWindow === true,
+    hasVerifiedContextWindow,
     lastModifiedAt: typeof model.lastModifiedAt === 'number' && Number.isFinite(model.lastModifiedAt)
       ? Math.round(model.lastModifiedAt)
       : undefined,
@@ -304,7 +324,7 @@ export function normalizePersistedModelMetadata(
       ? Math.round(model.maxContextTokens)
       : undefined,
     metadataTrust,
-    sha256: normalizeNonEmptyString(model.sha256),
+    sha256: normalizedSha256,
     size,
   }, (model as PersistedModelMetadata & { capabilitySnapshot?: ModelCapabilitySnapshot }).capabilitySnapshot);
 
@@ -323,9 +343,9 @@ export function normalizePersistedModelMetadata(
     lastModifiedAt: typeof model.lastModifiedAt === 'number' && Number.isFinite(model.lastModifiedAt)
       ? Math.round(model.lastModifiedAt)
       : undefined,
-    sha256: normalizeNonEmptyString(model.sha256),
+    sha256: normalizedSha256,
     ...(downloadIntegrity !== undefined ? { downloadIntegrity } : {}),
-    fitsInRam: size === null
+    fitsInRam: size === null || shouldClearVerifiedLocalTrust
       ? null
       : memoryFitDecision !== undefined
         ? fitsInRamForMemoryFitDecision(memoryFitDecision)
@@ -346,10 +366,8 @@ export function normalizePersistedModelMetadata(
     downloadErrorCode,
     downloadErrorMessage,
     downloadErrorAt,
-    maxContextTokens: typeof model.maxContextTokens === 'number' && Number.isFinite(model.maxContextTokens)
-      ? Math.round(model.maxContextTokens)
-      : undefined,
-    hasVerifiedContextWindow: model.hasVerifiedContextWindow === true,
+    maxContextTokens,
+    hasVerifiedContextWindow,
     capabilitySnapshot,
     parameterSizeLabel: normalizeNonEmptyString(model.parameterSizeLabel),
     modelType: normalizeNonEmptyString(model.modelType),

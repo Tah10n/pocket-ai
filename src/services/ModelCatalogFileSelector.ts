@@ -1,5 +1,6 @@
 import type { ModelMetadata } from '../types/models';
 import type { HuggingFaceModelSummary, HuggingFaceSibling, HuggingFaceTreeEntry } from '../types/huggingFace';
+import { normalizeSha256Digest } from '../utils/sha256';
 
 const MIN_GGUF_BYTES = 50 * 1024 * 1024;
 
@@ -161,6 +162,6 @@ export function getFileSize(entry: HuggingFaceSibling | HuggingFaceTreeEntry | u
 
 export function getFileSha(entry: HuggingFaceSibling | HuggingFaceTreeEntry): string | undefined {
   const lfs = entry.lfs as { sha256?: string; oid?: string } | undefined;
-  return lfs?.sha256 || lfs?.oid;
+  return normalizeSha256Digest(lfs?.sha256) ?? normalizeSha256Digest(lfs?.oid);
 }
 

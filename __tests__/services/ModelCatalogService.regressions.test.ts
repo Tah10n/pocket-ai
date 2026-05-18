@@ -29,6 +29,8 @@ jest.mock('react-native-device-info', () => ({
 }));
 
 const mockedRegistry = registry as jest.Mocked<typeof registry>;
+const TREE_SHA256 = 'a'.repeat(64);
+const PARTIAL_TREE_SHA256 = 'b'.repeat(64);
 
 function makeIncompleteGatedRepo(id: string) {
   return {
@@ -213,7 +215,7 @@ describe('ModelCatalogService regressions', () => {
             {
               path: 'model.Q4_K_M.gguf',
               size: 2 * 1024 * 1024 * 1024,
-              lfs: { sha256: 'tree-sha' },
+              lfs: { sha256: TREE_SHA256 },
             },
           ]),
         });
@@ -230,7 +232,7 @@ describe('ModelCatalogService regressions', () => {
     expect(result.models).toHaveLength(1);
     expect(result.models[0].accessState).toBe(ModelAccessState.AUTHORIZED);
     expect(result.models[0].size).toBe(2 * 1024 * 1024 * 1024);
-    expect(result.models[0].sha256).toBe('tree-sha');
+    expect(result.models[0].sha256).toBe(TREE_SHA256);
     expect(result.models[0].requiresTreeProbe).toBe(false);
     expect(global.fetch).toHaveBeenCalledTimes(2);
   });
@@ -293,7 +295,7 @@ describe('ModelCatalogService regressions', () => {
             {
               path: 'model.Q4_K_M.gguf',
               size: 2 * 1024 * 1024 * 1024,
-              lfs: { sha256: 'partial-tree-sha' },
+              lfs: { sha256: PARTIAL_TREE_SHA256 },
             },
           ]),
         });
@@ -311,7 +313,7 @@ describe('ModelCatalogService regressions', () => {
     expect(result.models[0].id).toBe('org/paged-probe');
     expect(result.models[0].accessState).toBe(ModelAccessState.AUTH_REQUIRED);
     expect(result.models[0].size).toBe(2 * 1024 * 1024 * 1024);
-    expect(result.models[0].sha256).toBe('partial-tree-sha');
+    expect(result.models[0].sha256).toBe(PARTIAL_TREE_SHA256);
     expect(result.models[0].requiresTreeProbe).toBe(true);
   });
 

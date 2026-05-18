@@ -24,6 +24,8 @@ import { getSettings, subscribeSettings } from './SettingsStore';
 import { backgroundTaskService } from './BackgroundTaskService';
 import { notificationService, type DownloadErrorReason } from './NotificationService';
 import { PrivateStorageUnavailableError, getPrivateStorageHealthSnapshot, isPrivateStorageWritable } from './storage';
+import { GgufValidationError, validateGgufFileHeader } from '../utils/ggufValidation';
+import { normalizeSha256Digest } from '../utils/sha256';
 
 function ignorePrivateStorageUnavailableDuringDownloadStop(error: unknown, scope: string): boolean {
   if (isPrivateStorageUnavailableError(error)) {
@@ -125,6 +127,7 @@ type ActiveDownloadJob = {
   jobToken: number;
   resumable: ReturnType<typeof FileSystem.createDownloadResumable> | null;
   stopReason: 'pause' | 'cancel' | null;
+  deferredCancelCleanupFileNames?: string[];
 };
 
 type DownloadVerificationResult = {
@@ -148,6 +151,10 @@ function buildDownloadIntegrityMarker(
   };
 }
 
+function shouldDeleteInvalidGgufDownload(reason: GgufValidationError['reason']): boolean {
+  return reason !== 'read_failed';
+}
+
 function isFileSystemDirectory(info: { isDirectory?: boolean }): boolean {
   return info.isDirectory === true;
 }
@@ -157,6 +164,7 @@ export class ModelDownloadManager {
   private activeJob: ActiveDownloadJob | null = null;
   private nextJobToken = 0;
   private isProcessing = false;
+  private queueProcessingHoldCount = 0;
   private downloadStoreUnsubscribe?: () => void;
   private hwUnsubscribe?: () => void;
   private settingsUnsubscribe?: () => void;
@@ -296,6 +304,7 @@ export class ModelDownloadManager {
    * Check the queue and start next download if idle.
    */
   private async processQueue() {
+    if (this.queueProcessingHoldCount > 0) return;
     if (this.isProcessing) return;
 
     if (!isPrivateStorageWritable()) {
@@ -343,11 +352,17 @@ export class ModelDownloadManager {
     this.activeJob = { modelId: next.id, jobToken, resumable: null, stopReason: null };
 
     this.isProcessing = true;
-    const didPersistActiveDownload = await this.persistDownloadStoreMutation(() => {
-      setActiveDownload(next.id);
-    });
-    if (!didPersistActiveDownload) {
-      return;
+    try {
+      const didPersistActiveDownload = await this.persistDownloadStoreMutation(() => {
+        setActiveDownload(next.id);
+      });
+      if (!didPersistActiveDownload) {
+        this.clearFailedQueueStart(next.id, jobToken);
+        return;
+      }
+    } catch (error) {
+      this.clearFailedQueueStart(next.id, jobToken);
+      throw error;
     }
     void this.runDownloadJob(next, jobToken);
   }
@@ -362,6 +377,26 @@ export class ModelDownloadManager {
     }
 
     return this.activeJob?.stopReason ?? null;
+  }
+
+  private clearFailedQueueStart(modelId: string, jobToken: number): void {
+    if (this.isCurrentJob(modelId, jobToken)) {
+      this.activeJob = null;
+      this.isProcessing = false;
+    }
+
+    if (useDownloadStore.getState().activeDownloadId !== modelId) {
+      return;
+    }
+
+    this.queueProcessingHoldCount += 1;
+    try {
+      useDownloadStore.setState({ activeDownloadId: null });
+    } catch (error) {
+      console.warn(`[ModelDownloadManager] Failed to clear active download after queue start failure for ${modelId}`, error);
+    } finally {
+      this.queueProcessingHoldCount = Math.max(0, this.queueProcessingHoldCount - 1);
+    }
   }
 
   private async handlePrivateStorageUnavailable(error: unknown): Promise<boolean> {
@@ -437,6 +472,17 @@ export class ModelDownloadManager {
     } finally {
       if (!this.isCurrentJob(model.id, jobToken)) {
         return;
+      }
+
+      const deferredCancelCleanupFileNames = this.activeJob?.stopReason === 'cancel'
+        ? this.activeJob.deferredCancelCleanupFileNames
+        : undefined;
+      if (deferredCancelCleanupFileNames?.length) {
+        try {
+          await this.deleteDownloadFiles(deferredCancelCleanupFileNames, model.id);
+        } catch (error) {
+          console.error(`[ModelDownloadManager] Failed to delete deferred canceled partial file for ${model.id}`, error);
+        }
       }
 
       this.activeJob = null;
@@ -782,11 +828,15 @@ export class ModelDownloadManager {
       )
         ? Math.round(downloadedFileInfo.size)
         : model.size;
-      const hasVerifiedIntegrity = verification.integrity !== 'unverified';
-      const metadataTrust = hasVerifiedIntegrity && typeof downloadedSize === 'number' && Number.isFinite(downloadedSize) && downloadedSize > 0
+      const hasTrustedIntegrity = verification.integrity === 'sha256';
+      const metadataTrust = hasTrustedIntegrity && typeof downloadedSize === 'number' && Number.isFinite(downloadedSize) && downloadedSize > 0
         ? 'verified_local' as const
-        : model.metadataTrust;
-      const memoryFit = await this.resolveMemoryFit(downloadedSize, metadataTrust, model.gguf);
+        : model.metadataTrust === 'verified_local'
+          ? undefined
+          : model.metadataTrust;
+      const shouldCarryForwardGgufMetadata = hasTrustedIntegrity || model.metadataTrust === 'trusted_remote';
+      const ggufMetadata = shouldCarryForwardGgufMetadata ? model.gguf : undefined;
+      const memoryFit = await this.resolveMemoryFit(downloadedSize, metadataTrust, ggufMetadata);
 
       if (!this.isCurrentJob(model.id, jobToken)) {
         return;
@@ -805,12 +855,12 @@ export class ModelDownloadManager {
         memoryFitConfidence: memoryFit.confidence,
         metadataTrust,
         downloadIntegrity: buildDownloadIntegrityMarker(verification),
-        gguf: typeof downloadedSize === 'number' && Number.isFinite(downloadedSize) && downloadedSize > 0
+        gguf: shouldCarryForwardGgufMetadata && typeof downloadedSize === 'number' && Number.isFinite(downloadedSize) && downloadedSize > 0
           ? {
-            ...(model.gguf ?? {}),
+            ...(ggufMetadata ?? {}),
             totalBytes: Math.round(downloadedSize),
           }
-          : model.gguf,
+          : ggufMetadata,
         localPath: fileName,
         downloadedAt: Date.now(),
         lifecycleStatus: LifecycleStatus.DOWNLOADED,
@@ -820,7 +870,7 @@ export class ModelDownloadManager {
         downloadErrorAt: undefined,
         downloadErrorCode: undefined,
         downloadErrorMessage: undefined,
-        sha256: verification.sha256 ?? model.sha256,
+        sha256: verification.sha256 ?? normalizeSha256Digest(model.sha256),
       };
 
       assertPrivateStorageWritableForDownloadMutation();
@@ -916,7 +966,35 @@ export class ModelDownloadManager {
         );
       }
 
-      const expectedHash = this.normalizeSha256Digest(model.sha256);
+      // SHA-256 proves byte-for-byte integrity against upstream metadata, but it does
+      // not prove that the bytes are a loadable GGUF payload. Keep this validation
+      // outside the hash branch so every completed download passes the same file
+      // format gate before it can be marked DOWNLOADED/verified_local.
+      try {
+        await validateGgufFileHeader(localUri, fileInfo);
+      } catch (error) {
+        if (error instanceof GgufValidationError) {
+          if (shouldDeleteInvalidGgufDownload(error.reason)) {
+            await this.deleteCorruptedDownload(localUri, model.id);
+          }
+          throw new AppError(
+            'download_verification_failed',
+            error.message,
+            {
+              details: {
+                modelId: model.id,
+                localUri,
+                reason: error.reason,
+                ...(error.details ?? {}),
+              },
+            },
+          );
+        }
+
+        throw error;
+      }
+
+      const expectedHash = normalizeSha256Digest(model.sha256);
       if (!expectedHash) {
         return {
           integrity: typeof expectedSize === 'number' && expectedSize > 0 ? 'size' : 'unverified',
@@ -924,7 +1002,7 @@ export class ModelDownloadManager {
         };
       }
 
-      const actualHash = this.normalizeSha256Digest(
+      const actualHash = normalizeSha256Digest(
         await RNFS.hash(this.toNativeFilePath(localUri), 'sha256'),
       );
       if (!actualHash || actualHash !== expectedHash) {
@@ -1025,59 +1103,84 @@ export class ModelDownloadManager {
   public async cancelDownload(modelId: string) {
     const { queue, removeFromQueue, activeDownloadId, setActiveDownload } = useDownloadStore.getState();
     const queuedModel = queue.find((model) => model.id === modelId);
+    let shouldProcessAfterCleanup = false;
+    let shouldDeletePartialFiles = false;
+    let safeToDeletePartialFiles = true;
+    let shouldWaitForActiveJobToSettle = false;
+    let cancelJob: ActiveDownloadJob | null = null;
 
-    if (!(await this.canPersistDownloadMutation())) {
-      return;
-    }
+    this.queueProcessingHoldCount += 1;
+    try {
+      if (!(await this.canPersistDownloadMutation())) {
+        return;
+      }
 
-    const job = this.activeJob?.modelId === modelId
-      ? this.activeJob
-      : null;
-    if (job) {
-      job.stopReason = 'cancel';
-    }
+      const job = this.activeJob?.modelId === modelId
+        ? this.activeJob
+        : null;
+      cancelJob = job;
+      if (job) {
+        job.stopReason = 'cancel';
+      }
 
-    if (activeDownloadId === modelId) {
       if (job?.resumable) {
+        job.deferredCancelCleanupFileNames = this.getCancelCleanupFileNameCandidates(queuedModel, modelId);
         try {
           await job.resumable.pauseAsync(); // Stop active one
+          job.deferredCancelCleanupFileNames = undefined;
         } catch (error) {
           console.warn(`[ModelDownloadManager] Failed to pause active download during cancel for ${modelId}`, error);
+          const activeJobStillCurrent = this.activeJob === job && this.isCurrentJob(modelId, job.jobToken);
+          safeToDeletePartialFiles = !activeJobStillCurrent;
+          shouldWaitForActiveJobToSettle = activeJobStillCurrent;
+          if (activeJobStillCurrent) {
+            this.isProcessing = true;
+          }
         }
       }
 
-      const didPersistActiveClear = await this.persistDownloadStoreMutation(() => {
-        setActiveDownload(null);
+      if (activeDownloadId === modelId) {
+        const didPersistActiveClear = await this.persistDownloadStoreMutation(() => {
+          setActiveDownload(null);
+        });
+        if (!didPersistActiveClear) {
+          return;
+        }
+      }
+
+      shouldProcessAfterCleanup = !shouldWaitForActiveJobToSettle;
+
+      // Remove from queue first to stop UI
+      const didPersistQueueRemoval = await this.persistDownloadStoreMutation(() => {
+        removeFromQueue(modelId);
       });
-      if (!didPersistActiveClear) {
+      if (!didPersistQueueRemoval) {
         return;
       }
-    }
-    
-    // Remove from queue first to stop UI
-    const didPersistQueueRemoval = await this.persistDownloadStoreMutation(() => {
-      removeFromQueue(modelId);
-    });
-    if (!didPersistQueueRemoval) {
-      return;
-    }
+      shouldDeletePartialFiles = safeToDeletePartialFiles;
 
-    void this.processQueue();
-
-    // Delete the partial file to free up disk space
-    try {
-      await this.deleteDownloadFiles(
-        queuedModel
-          ? this.getDownloadFileNameCandidates(queuedModel)
-          : getCandidateModelDownloadFileNames({
-            id: modelId,
-            resolvedFileName: undefined,
-            hfRevision: undefined,
-          }),
-        modelId,
-      );
-    } catch (e) {
-      console.error(`[ModelDownloadManager] Failed to delete partial file for ${modelId}`, e);
+    } finally {
+      try {
+        if (shouldDeletePartialFiles) {
+          // Delete the partial file to free up disk space before allowing any requeued
+          // item for the same filename to create a new resumable.
+          await this.deleteDownloadFiles(
+            this.getCancelCleanupFileNameCandidates(queuedModel, modelId),
+            modelId,
+          );
+        }
+      } catch (error) {
+        console.error(`[ModelDownloadManager] Failed to delete partial file for ${modelId}`, error);
+      } finally {
+        this.queueProcessingHoldCount = Math.max(0, this.queueProcessingHoldCount - 1);
+        const activeCancelJobStillCurrent = shouldWaitForActiveJobToSettle
+          && cancelJob !== null
+          && this.activeJob === cancelJob
+          && this.isCurrentJob(modelId, cancelJob.jobToken);
+        if (shouldProcessAfterCleanup || (shouldWaitForActiveJobToSettle && !activeCancelJobStillCurrent)) {
+          void this.processQueue();
+        }
+      }
     }
   }
 
@@ -1090,14 +1193,45 @@ export class ModelDownloadManager {
       : candidates;
   }
 
+  private getCancelCleanupFileNameCandidates(
+    queuedModel: Pick<ModelMetadata, 'id' | 'resolvedFileName' | 'hfRevision' | 'localPath'> | undefined,
+    modelId: string,
+  ): string[] {
+    return queuedModel
+      ? this.getDownloadFileNameCandidates(queuedModel)
+      : getCandidateModelDownloadFileNames({
+        id: modelId,
+        resolvedFileName: undefined,
+        hfRevision: undefined,
+      });
+  }
+
+  private getProtectedCompletedModelFileNames(): Set<string> {
+    return new Set(
+      registry.getModels()
+        .filter((model) => (
+          model.lifecycleStatus === LifecycleStatus.DOWNLOADED
+          || model.lifecycleStatus === LifecycleStatus.ACTIVE
+        ))
+        .map((model) => model.localPath)
+        .filter((fileName): fileName is string => typeof fileName === 'string' && isValidLocalFileName(fileName)),
+    );
+  }
+
   private async resolveDownloadFileName(
     model: Pick<ModelMetadata, 'id' | 'resolvedFileName' | 'hfRevision' | 'localPath'>,
     modelsDir: string,
   ): Promise<string> {
     const candidates = this.getDownloadFileNameCandidates(model);
+    const protectedCompletedFileNames = this.getProtectedCompletedModelFileNames();
     let firstAvailableCandidate: string | undefined;
 
     for (const candidate of candidates) {
+      if (protectedCompletedFileNames.has(candidate)) {
+        console.warn(`[ModelDownloadManager] Download candidate for ${model.id} is a completed model file, skipping: ${candidate}`);
+        continue;
+      }
+
       const candidatePath = safeJoinModelPath(modelsDir, candidate);
       if (!candidatePath) {
         continue;
@@ -1132,8 +1266,14 @@ export class ModelDownloadManager {
     }
 
     let deletedAnyFile = false;
+    const protectedCompletedFileNames = this.getProtectedCompletedModelFileNames();
 
     for (const fileName of Array.from(new Set(fileNames))) {
+      if (protectedCompletedFileNames.has(fileName)) {
+        console.warn(`[ModelDownloadManager] Partial download candidate for ${modelId} is a completed model file, skipping: ${fileName}`);
+        continue;
+      }
+
       const localUri = safeJoinModelPath(modelsDir, fileName);
       if (!localUri) {
         continue;
@@ -1154,21 +1294,6 @@ export class ModelDownloadManager {
     if (deletedAnyFile) {
       console.log(`[ModelDownloadManager] Deleted partial download for ${modelId}`);
     }
-  }
-
-  private normalizeSha256Digest(value: string | undefined): string | undefined {
-    if (typeof value !== 'string') {
-      return undefined;
-    }
-
-    const trimmed = value.trim().toLowerCase();
-    if (!trimmed) {
-      return undefined;
-    }
-
-    return trimmed.startsWith('sha256:')
-      ? trimmed.slice('sha256:'.length)
-      : trimmed;
   }
 
   private toNativeFilePath(fileUri: string): string {
@@ -1212,6 +1337,19 @@ export class ModelDownloadManager {
 
   private async deleteCorruptedDownload(localUri: string, modelId: string): Promise<void> {
     try {
+      const modelsDir = getModelsDir();
+      const protectedCompletedUris = modelsDir
+        ? new Set(
+          Array.from(this.getProtectedCompletedModelFileNames())
+            .map((fileName) => safeJoinModelPath(modelsDir, fileName))
+            .filter((uri): uri is string => typeof uri === 'string'),
+        )
+        : new Set<string>();
+      if (protectedCompletedUris.has(localUri)) {
+        console.warn(`[ModelDownloadManager] Corrupted download path for ${modelId} is a completed model file, skipping delete`);
+        return;
+      }
+
       const fileInfo = await FileSystem.getInfoAsync(localUri);
       if (!fileInfo.exists || isFileSystemDirectory(fileInfo)) {
         if (fileInfo.exists) {

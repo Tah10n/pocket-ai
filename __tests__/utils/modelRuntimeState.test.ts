@@ -1,6 +1,9 @@
 import { mergeModelWithRuntimeState } from '../../src/utils/modelRuntimeState';
 import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../src/types/models';
 
+const LOCAL_SHA256 = 'b'.repeat(64);
+const REMOTE_SHA256 = 'c'.repeat(64);
+
 function makeModel(overrides: Partial<ModelMetadata> = {}): ModelMetadata {
   return {
     id: 'org/model',
@@ -126,5 +129,117 @@ describe('modelRuntimeState', () => {
     expect(merged.datasets).toEqual(['custom-dataset']);
     expect(merged.quantizedBy).toBe('maintainer');
     expect(merged.modelCreator).toBe('Open Source Lab');
+  });
+
+  it('does not reattach stale local runtime state when incoming remote identity conflicts', () => {
+    const merged = mergeModelWithRuntimeState(
+      makeModel({
+        size: 3 * 1024 * 1024 * 1024,
+        resolvedFileName: 'model.Q4_K_M.gguf',
+        sha256: REMOTE_SHA256,
+        metadataTrust: 'trusted_remote',
+      }),
+      {
+        localModel: makeModel({
+          size: 4 * 1024 * 1024 * 1024,
+          resolvedFileName: 'model.Q4_K_M.gguf',
+          localPath: 'model.Q4_K_M.gguf',
+          downloadedAt: 123,
+          sha256: LOCAL_SHA256,
+          metadataTrust: 'verified_local',
+          downloadIntegrity: {
+            kind: 'sha256',
+            sizeBytes: 4 * 1024 * 1024 * 1024,
+            checkedAt: 123,
+            sha256: LOCAL_SHA256,
+          },
+          lifecycleStatus: LifecycleStatus.DOWNLOADED,
+          downloadProgress: 1,
+          resumeData: JSON.stringify({ resumeData: 'stale' }),
+        }),
+      },
+    );
+
+    expect(merged).toEqual(expect.objectContaining({
+      size: 3 * 1024 * 1024 * 1024,
+      localPath: undefined,
+      downloadedAt: undefined,
+      sha256: REMOTE_SHA256,
+      downloadIntegrity: undefined,
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+      resumeData: undefined,
+    }));
+  });
+
+  it('does not reattach stale queued runtime state when the selected filename changed', () => {
+    const merged = mergeModelWithRuntimeState(
+      makeModel({
+        size: 3 * 1024 * 1024 * 1024,
+        resolvedFileName: 'model.Q5_K_M.gguf',
+        metadataTrust: 'trusted_remote',
+      }),
+      {
+        queuedItem: makeModel({
+          size: 4 * 1024 * 1024 * 1024,
+          resolvedFileName: 'model.Q4_K_M.gguf',
+          localPath: 'model.Q4_K_M.gguf',
+          downloadedAt: 123,
+          lifecycleStatus: LifecycleStatus.PAUSED,
+          downloadProgress: 0.5,
+          resumeData: JSON.stringify({ resumeData: 'stale' }),
+          downloadErrorAt: 456,
+          downloadErrorCode: 'download_network_unavailable',
+          downloadErrorMessage: 'Offline',
+        }),
+      },
+    );
+
+    expect(merged).toEqual(expect.objectContaining({
+      size: 3 * 1024 * 1024 * 1024,
+      resolvedFileName: 'model.Q5_K_M.gguf',
+      localPath: undefined,
+      downloadedAt: undefined,
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+      resumeData: undefined,
+      downloadErrorAt: undefined,
+      downloadErrorCode: undefined,
+      downloadErrorMessage: undefined,
+    }));
+  });
+
+  it('does not reattach stale queued resume state when the selected file size changed', () => {
+    const merged = mergeModelWithRuntimeState(
+      makeModel({
+        size: 3 * 1024 * 1024 * 1024,
+        resolvedFileName: 'model.Q4_K_M.gguf',
+        sha256: REMOTE_SHA256,
+        metadataTrust: 'trusted_remote',
+      }),
+      {
+        queuedItem: makeModel({
+          size: 4 * 1024 * 1024 * 1024,
+          resolvedFileName: 'model.Q4_K_M.gguf',
+          sha256: REMOTE_SHA256,
+          downloadIntegrity: {
+            kind: 'sha256',
+            sizeBytes: 4 * 1024 * 1024 * 1024,
+            checkedAt: 123,
+            sha256: REMOTE_SHA256,
+          },
+          lifecycleStatus: LifecycleStatus.PAUSED,
+          downloadProgress: 0.5,
+          resumeData: JSON.stringify({ resumeData: 'stale' }),
+        }),
+      },
+    );
+
+    expect(merged).toEqual(expect.objectContaining({
+      size: 3 * 1024 * 1024 * 1024,
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+      resumeData: undefined,
+    }));
   });
 });

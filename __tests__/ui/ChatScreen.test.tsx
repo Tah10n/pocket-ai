@@ -600,6 +600,7 @@ const {
 } = require('../../src/services/SettingsStore');
 const { registry } = require('../../src/services/LocalStorageRegistry');
 const { buildModelCapabilitySnapshot } = require('../../src/utils/modelCapabilities');
+const VERIFIED_LOCAL_SHA256 = 'f'.repeat(64);
 
 describe('ChatScreen', () => {
   let alertSpy: jest.SpyInstance;
@@ -2651,6 +2652,13 @@ describe('ChatScreen', () => {
         name: 'Q4 model',
         author: 'Test',
         size: modelSizeBytes,
+        sha256: VERIFIED_LOCAL_SHA256,
+        downloadIntegrity: {
+          kind: 'sha256',
+          sizeBytes: modelSizeBytes,
+          checkedAt: 1,
+          sha256: VERIFIED_LOCAL_SHA256,
+        },
         metadataTrust: 'verified_local',
         gguf: {
           totalBytes: modelSizeBytes,
@@ -2672,7 +2680,7 @@ describe('ChatScreen', () => {
           hasVerifiedContextWindow: true,
           maxContextTokens: 8192,
           lastModifiedAt: undefined,
-          sha256: undefined,
+          sha256: VERIFIED_LOCAL_SHA256,
         }),
       },
     ]);
@@ -2838,6 +2846,13 @@ describe('ChatScreen', () => {
         name: 'Q4 model',
         author: 'Test',
         size: modelSizeBytes,
+        sha256: VERIFIED_LOCAL_SHA256,
+        downloadIntegrity: {
+          kind: 'sha256',
+          sizeBytes: modelSizeBytes,
+          checkedAt: 1,
+          sha256: VERIFIED_LOCAL_SHA256,
+        },
         metadataTrust: 'verified_local',
         gguf: {
           totalBytes: modelSizeBytes,
@@ -3056,6 +3071,13 @@ describe('ChatScreen', () => {
         name: 'Q4 model',
         author: 'Test',
         size: modelSizeBytes,
+        sha256: VERIFIED_LOCAL_SHA256,
+        downloadIntegrity: {
+          kind: 'sha256',
+          sizeBytes: modelSizeBytes,
+          checkedAt: 1,
+          sha256: VERIFIED_LOCAL_SHA256,
+        },
         metadataTrust: 'verified_local',
         gguf: {
           totalBytes: modelSizeBytes,

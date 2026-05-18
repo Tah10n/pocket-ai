@@ -50,6 +50,10 @@ import {
   HF_BASE_URL,
 } from '../utils/huggingFaceUrls';
 import {
+  getCompatibleLocalDownloadStatePatch,
+  resolveVerifiedLocalShaCompatibility,
+} from './ModelIntegrityMetadata';
+import {
   REQUEST_AUTH_POLICY,
   type CatalogBatchResult,
   type CatalogCacheEntry,
@@ -897,7 +901,7 @@ export class ModelCatalogService {
           requestContext,
         );
         detailedModel = resolvedModel ?? detailedModel;
-        hasVerifiedContextWindow = hasVerifiedContextWindow || typeof payloadMaxContextTokens === 'number';
+        hasVerifiedContextWindow = detailedModel.hasVerifiedContextWindow === true || typeof payloadMaxContextTokens === 'number';
       } else if (response.status === 401 || response.status === 403) {
         detailedModel = normalizePersistedModelMetadata({
           ...fallbackModel,
@@ -1222,28 +1226,62 @@ export class ModelCatalogService {
         }
 
         const resolvedFileName = getFileName(selectedEntry);
-        const size = getFileSize(selectedEntry);
-        const resolvedMemoryFit = resolveMemoryFitSummary({ size, metadataTrust: model.metadataTrust }, memoryFitContext);
+        const treeEntrySha256 = getFileSha(selectedEntry);
+        const treeEntrySize = getFileSize(selectedEntry);
+        const {
+          localVerifiedSha256,
+          canUseLocalVerifiedMetadata,
+          canPreserveDownloadIntegrity,
+          shouldResetLocalDownloadState,
+        } = resolveVerifiedLocalShaCompatibility(model, {
+          sha256: treeEntrySha256,
+          resolvedFileName,
+          size: treeEntrySize,
+        });
+        const shouldPreserveVerifiedLocal = canUseLocalVerifiedMetadata;
+        const localDownloadStatePatch = getCompatibleLocalDownloadStatePatch(model, {
+          shouldResetLocalDownloadState,
+          canPreserveDownloadIntegrity,
+        });
+        const size = shouldPreserveVerifiedLocal
+          ? model.size ?? treeEntrySize
+          : treeEntrySize;
+        const resolvedMemoryFit = shouldPreserveVerifiedLocal
+          ? null
+          : resolveMemoryFitSummary({ size, metadataTrust: model.metadataTrust }, memoryFitContext);
         const didChangeSize = size !== model.size;
-        const fitsInRam = resolvedMemoryFit
-          ? resolvedMemoryFit.fitsInRam
-          : didChangeSize
-            ? null
-            : model.fitsInRam;
-        const memoryFitDecision = resolvedMemoryFit
-          ? resolvedMemoryFit.decision
-          : didChangeSize
-            ? undefined
-            : model.memoryFitDecision;
-        const memoryFitConfidence = resolvedMemoryFit
-          ? resolvedMemoryFit.confidence
-          : didChangeSize
-            ? undefined
-            : model.memoryFitConfidence;
+        const fitsInRam = shouldPreserveVerifiedLocal
+          ? model.fitsInRam
+          : resolvedMemoryFit
+            ? resolvedMemoryFit.fitsInRam
+            : didChangeSize
+              ? null
+              : model.fitsInRam;
+        const memoryFitDecision = shouldPreserveVerifiedLocal
+          ? model.memoryFitDecision
+          : resolvedMemoryFit
+            ? resolvedMemoryFit.decision
+            : didChangeSize
+              ? undefined
+              : model.memoryFitDecision;
+        const memoryFitConfidence = shouldPreserveVerifiedLocal
+          ? model.memoryFitConfidence
+          : resolvedMemoryFit
+            ? resolvedMemoryFit.confidence
+            : didChangeSize
+              ? undefined
+              : model.memoryFitConfidence;
+        const canCarryForwardLocalSha256 = !shouldResetLocalDownloadState
+          && model.metadataTrust !== 'verified_local';
+        const sha256 = treeEntrySha256
+          ?? (shouldPreserveVerifiedLocal
+            ? localVerifiedSha256
+            : canCarryForwardLocalSha256 ? model.sha256 : undefined);
 
         if (model.requiresTreeProbe && !treeProbeIsFinal) {
           return normalizePersistedModelMetadata({
             ...model,
+            ...localDownloadStatePatch,
             size,
             fitsInRam,
             memoryFitDecision,
@@ -1253,12 +1291,13 @@ export class ModelCatalogService {
             hfRevision: model.hfRevision,
             resolvedFileName,
             downloadUrl: buildHuggingFaceResolveUrl(model.id, resolvedFileName, model.hfRevision),
-            sha256: getFileSha(selectedEntry) ?? model.sha256,
+            sha256,
           });
         }
 
         return normalizePersistedModelMetadata({
           ...model,
+          ...localDownloadStatePatch,
           size,
           fitsInRam,
           memoryFitDecision,
@@ -1268,7 +1307,7 @@ export class ModelCatalogService {
           hfRevision: model.hfRevision,
           resolvedFileName,
           downloadUrl: buildHuggingFaceResolveUrl(model.id, resolvedFileName, model.hfRevision),
-          sha256: getFileSha(selectedEntry) ?? model.sha256,
+          sha256,
         });
       } catch (error) {
         if (error instanceof StaleCatalogAuthError) {
@@ -1670,37 +1709,69 @@ export class ModelCatalogService {
     }
 
     const {
+      remoteSha256,
+      localVerifiedSha256,
+      canUseLocalVerifiedMetadata,
+      canPreserveDownloadIntegrity,
+      shouldResetLocalDownloadState,
+    } = resolveVerifiedLocalShaCompatibility(localModel, {
+      sha256: remoteModel.sha256,
+      resolvedFileName: remoteModel.resolvedFileName,
+      size: remoteModel.size,
+    });
+    const localHasVerifiedSize = canUseLocalVerifiedMetadata;
+    const allowLocalVerifiedDerivedMetadata = !shouldResetLocalDownloadState
+      && (localHasVerifiedSize || localModel.metadataTrust !== 'verified_local');
+    const localDownloadStatePatch = getCompatibleLocalDownloadStatePatch(localModel, {
+      shouldResetLocalDownloadState,
+      canPreserveDownloadIntegrity,
+    });
+    const {
       maxContextTokens,
       hasVerifiedContextWindow,
-    } = this.resolveMergedContextWindowMetadata(remoteModel, localModel);
-    const localHasVerifiedSize = localModel.metadataTrust === 'verified_local';
+    } = this.resolveMergedContextWindowMetadata(remoteModel, localModel, allowLocalVerifiedDerivedMetadata);
     const resolvedSize = localHasVerifiedSize
       ? localModel.size ?? remoteModel.size
-      : remoteModel.size ?? localModel.size;
-    const metadataTrust = localModel.metadataTrust === 'verified_local'
+      : remoteModel.size ?? (allowLocalVerifiedDerivedMetadata ? localModel.size : null);
+    const fallbackLocalMetadataTrust = localModel.metadataTrust === 'verified_local'
+      ? undefined
+      : localModel.metadataTrust;
+    const metadataTrust = localHasVerifiedSize
       ? localModel.metadataTrust
-      : remoteModel.metadataTrust ?? localModel.metadataTrust;
-    const gguf = remoteModel.gguf || localModel.gguf
-      ? {
-        ...(localHasVerifiedSize ? (remoteModel.gguf ?? {}) : (localModel.gguf ?? {})),
-        ...(localHasVerifiedSize ? (localModel.gguf ?? {}) : (remoteModel.gguf ?? {})),
-      }
+      : remoteModel.metadataTrust ?? fallbackLocalMetadataTrust;
+    const gguf = remoteModel.gguf || (allowLocalVerifiedDerivedMetadata ? localModel.gguf : undefined)
+      ? localHasVerifiedSize
+        ? {
+          ...(remoteModel.gguf ?? {}),
+          ...(localModel.gguf ?? {}),
+        }
+        : {
+          ...(allowLocalVerifiedDerivedMetadata ? (localModel.gguf ?? {}) : {}),
+          ...(remoteModel.gguf ?? {}),
+        }
       : undefined;
     const resolvedMemoryFit = resolveMemoryFitSummary({ size: resolvedSize, metadataTrust }, memoryFitContext);
-    const fitsInRam = resolvedMemoryFit?.fitsInRam ?? remoteModel.fitsInRam ?? localModel.fitsInRam;
-    const memoryFitDecision = resolvedMemoryFit?.decision ?? remoteModel.memoryFitDecision ?? localModel.memoryFitDecision;
-    const memoryFitConfidence = resolvedMemoryFit?.confidence ?? remoteModel.memoryFitConfidence ?? localModel.memoryFitConfidence;
+    const fitsInRam = resolvedMemoryFit?.fitsInRam
+      ?? remoteModel.fitsInRam
+      ?? (allowLocalVerifiedDerivedMetadata ? localModel.fitsInRam : null);
+    const memoryFitDecision = resolvedMemoryFit?.decision
+      ?? remoteModel.memoryFitDecision
+      ?? (allowLocalVerifiedDerivedMetadata ? localModel.memoryFitDecision : undefined);
+    const memoryFitConfidence = resolvedMemoryFit?.confidence
+      ?? remoteModel.memoryFitConfidence
+      ?? (allowLocalVerifiedDerivedMetadata ? localModel.memoryFitConfidence : undefined);
 
     return normalizePersistedModelMetadata({
       ...remoteModel,
+      ...localDownloadStatePatch,
       size: resolvedSize,
       hfRevision: remoteModel.hfRevision ?? localModel.hfRevision,
       resolvedFileName: remoteModel.resolvedFileName ?? localModel.resolvedFileName,
-      localPath: localModel.localPath,
-      downloadedAt: localModel.downloadedAt,
+      localPath: shouldResetLocalDownloadState ? undefined : localModel.localPath,
+      downloadedAt: shouldResetLocalDownloadState ? undefined : localModel.downloadedAt,
       lastModifiedAt: remoteModel.lastModifiedAt ?? localModel.lastModifiedAt,
-      sha256: remoteModel.sha256 ?? localModel.sha256,
-      downloadIntegrity: localModel.downloadIntegrity,
+      sha256: remoteSha256 ?? (localHasVerifiedSize ? localVerifiedSha256 : undefined),
+      downloadIntegrity: canPreserveDownloadIntegrity ? localModel.downloadIntegrity : undefined,
       metadataTrust,
       gguf,
       fitsInRam,
@@ -1709,12 +1780,12 @@ export class ModelCatalogService {
       accessState: remoteModel.accessState,
       isGated: remoteModel.isGated,
       isPrivate: remoteModel.isPrivate,
-      lifecycleStatus: localModel.lifecycleStatus,
-      downloadProgress: localModel.downloadProgress,
-      resumeData: localModel.resumeData,
-      downloadErrorAt: localModel.downloadErrorAt,
-      downloadErrorCode: localModel.downloadErrorCode,
-      downloadErrorMessage: localModel.downloadErrorMessage,
+      lifecycleStatus: shouldResetLocalDownloadState ? LifecycleStatus.AVAILABLE : localModel.lifecycleStatus,
+      downloadProgress: shouldResetLocalDownloadState ? 0 : localModel.downloadProgress,
+      resumeData: shouldResetLocalDownloadState ? undefined : localModel.resumeData,
+      downloadErrorAt: shouldResetLocalDownloadState ? undefined : localModel.downloadErrorAt,
+      downloadErrorCode: shouldResetLocalDownloadState ? undefined : localModel.downloadErrorCode,
+      downloadErrorMessage: shouldResetLocalDownloadState ? undefined : localModel.downloadErrorMessage,
       maxContextTokens,
       hasVerifiedContextWindow,
       parameterSizeLabel: remoteModel.parameterSizeLabel ?? localModel.parameterSizeLabel,
@@ -1736,9 +1807,10 @@ export class ModelCatalogService {
   private resolveMergedContextWindowMetadata(
     remoteModel: ModelMetadata,
     localModel: ModelMetadata,
+    allowLocalVerifiedContextWindow: boolean,
   ): Pick<ModelMetadata, 'maxContextTokens' | 'hasVerifiedContextWindow'> {
     const remoteHasVerifiedContextWindow = remoteModel.hasVerifiedContextWindow === true;
-    const localHasVerifiedContextWindow = localModel.hasVerifiedContextWindow === true;
+    const localHasVerifiedContextWindow = allowLocalVerifiedContextWindow && localModel.hasVerifiedContextWindow === true;
 
     if (remoteHasVerifiedContextWindow) {
       return {
@@ -1757,7 +1829,7 @@ export class ModelCatalogService {
     return {
       maxContextTokens: resolveMergedMaxContextTokens(
         remoteModel.maxContextTokens,
-        localModel.maxContextTokens,
+        allowLocalVerifiedContextWindow ? localModel.maxContextTokens : undefined,
       ),
       hasVerifiedContextWindow: false,
     };

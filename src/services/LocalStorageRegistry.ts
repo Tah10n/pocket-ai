@@ -7,6 +7,8 @@ import { getModelsDir } from './FileSystemSetup';
 import { normalizePersistedModelMetadata } from './ModelMetadataNormalizer';
 import { estimateFastMemoryFit } from '../memory/estimator';
 import { isValidLocalFileName, safeJoinModelPath } from '../utils/safeFilePath';
+import { GgufValidationError, validateGgufFileHeader } from '../utils/ggufValidation';
+import { normalizeSha256Digest } from '../utils/sha256';
 import type { CalibrationRecord } from '../memory/types';
 
 const REGISTRY_STORAGE_ID = 'models-registry';
@@ -78,6 +80,90 @@ function getFileInfoSizeBytes(info: { size?: number }): number | null {
   )
     ? Math.round(info.size)
     : null;
+}
+
+function getValidDownloadIntegritySizeBytes(
+  marker: ModelMetadata['downloadIntegrity'],
+): number | null {
+  if (!marker || (marker.kind !== 'size' && marker.kind !== 'sha256')) {
+    return null;
+  }
+
+  if (marker.kind === 'sha256' && normalizeSha256Digest(marker.sha256) === undefined) {
+    return null;
+  }
+
+  return (
+    typeof marker.sizeBytes === 'number'
+    && Number.isFinite(marker.sizeBytes)
+    && marker.sizeBytes > 0
+    && typeof marker.checkedAt === 'number'
+    && Number.isFinite(marker.checkedAt)
+  )
+    ? Math.round(marker.sizeBytes)
+    : null;
+}
+
+function getSha256IntegrityMarkerDigest(marker: ModelMetadata['downloadIntegrity']): string | undefined {
+  return marker?.kind === 'sha256'
+    ? normalizeSha256Digest(marker.sha256)
+    : undefined;
+}
+
+function getModelSha256Digest(model: Pick<ModelMetadata, 'sha256'>): string | undefined {
+  return normalizeSha256Digest(model.sha256);
+}
+
+function hasMatchingExpectedSha256IntegrityMarker(model: ModelMetadata): boolean {
+  const markerDigest = getSha256IntegrityMarkerDigest(model.downloadIntegrity);
+  const expectedDigest = getModelSha256Digest(model);
+  return markerDigest !== undefined && expectedDigest !== undefined && markerDigest === expectedDigest;
+}
+
+function clearVerifiedLocalDerivedMetadata(model: ModelMetadata): boolean {
+  let changed = false;
+  const shouldClearDerivedMetadata = model.metadataTrust === 'verified_local' || model.metadataTrust == null;
+
+  if (model.metadataTrust === 'verified_local') {
+    model.metadataTrust = undefined;
+    changed = true;
+  }
+
+  if (!shouldClearDerivedMetadata) {
+    return changed;
+  }
+
+  if (model.gguf !== undefined) {
+    model.gguf = undefined;
+    changed = true;
+  }
+
+  if (model.fitsInRam !== null) {
+    model.fitsInRam = null;
+    changed = true;
+  }
+
+  if (model.memoryFitDecision !== undefined) {
+    model.memoryFitDecision = undefined;
+    changed = true;
+  }
+
+  if (model.memoryFitConfidence !== undefined) {
+    model.memoryFitConfidence = undefined;
+    changed = true;
+  }
+
+  if (model.maxContextTokens !== undefined) {
+    model.maxContextTokens = undefined;
+    changed = true;
+  }
+
+  if (model.hasVerifiedContextWindow !== undefined) {
+    model.hasVerifiedContextWindow = undefined;
+    changed = true;
+  }
+
+  return changed;
 }
 
 function resolveQueuedModelFileNames(input: QueuedModelFileNamesInput): string[] {
@@ -325,6 +411,8 @@ function cloneModelMetadata(model: ModelMetadata): ModelMetadata {
 }
 
 function resetLocalDownloadState(model: ModelMetadata): void {
+  clearVerifiedLocalDerivedMetadata(model);
+
   model.lifecycleStatus = LifecycleStatus.AVAILABLE;
   model.localPath = undefined;
   model.downloadedAt = undefined;
@@ -334,9 +422,6 @@ function resetLocalDownloadState(model: ModelMetadata): void {
   model.downloadErrorCode = undefined;
   model.downloadErrorMessage = undefined;
   model.downloadProgress = 0;
-  if (model.metadataTrust === 'verified_local') {
-    model.metadataTrust = undefined;
-  }
 }
 
 function hasCompletedLocalModelFile(model: Pick<ModelMetadata, 'lifecycleStatus' | 'localPath'>): boolean {
@@ -679,23 +764,80 @@ export class LocalStorageRegistry {
           changed = true;
         }
 
-        const verifiedSizeBytes = getFileInfoSizeBytes(info);
+        const fileSizeBytes = getFileInfoSizeBytes(info);
 
-        const integritySizeBytes = model.downloadIntegrity?.sizeBytes;
-        if (
-          typeof integritySizeBytes === 'number'
-          && Number.isFinite(integritySizeBytes)
-          && integritySizeBytes > 0
-          && verifiedSizeBytes !== integritySizeBytes
-        ) {
+        if (model.downloadIntegrity?.kind === 'sha256') {
+          const markerSha256 = getSha256IntegrityMarkerDigest(model.downloadIntegrity);
+          if (!markerSha256) {
+            console.warn(`[LocalStorageRegistry] SHA-256 integrity marker is invalid for ${model.id}, resetting to available`);
+            resetLocalDownloadState(model);
+            changed = true;
+            continue;
+          }
+
+          if (model.downloadIntegrity.sha256 !== markerSha256) {
+            model.downloadIntegrity = {
+              ...model.downloadIntegrity,
+              sha256: markerSha256,
+            };
+            changed = true;
+          }
+
+          const expectedSha256 = getModelSha256Digest(model);
+          if (model.sha256 !== undefined && expectedSha256 === undefined) {
+            console.warn(`[LocalStorageRegistry] Expected SHA-256 digest is invalid for ${model.id}, downgrading local trust`);
+            model.sha256 = undefined;
+            changed = true;
+          } else if (expectedSha256 !== undefined && model.sha256 !== expectedSha256) {
+            model.sha256 = expectedSha256;
+            changed = true;
+          }
+
+          if (expectedSha256 !== undefined && markerSha256 !== expectedSha256) {
+            console.warn(`[LocalStorageRegistry] SHA-256 integrity marker no longer matches expected digest for ${model.id}, resetting to available`);
+            resetLocalDownloadState(model);
+            changed = true;
+            continue;
+          }
+        }
+
+        const integritySizeBytes = getValidDownloadIntegritySizeBytes(model.downloadIntegrity);
+        const hasMatchingIntegrityMarker = integritySizeBytes !== null
+          && fileSizeBytes !== null
+          && fileSizeBytes === integritySizeBytes;
+        if (integritySizeBytes !== null && !hasMatchingIntegrityMarker) {
           console.warn(`[LocalStorageRegistry] Integrity marker size mismatch for ${model.id}, resetting to available`);
           resetLocalDownloadState(model);
           changed = true;
           continue;
         }
 
-        if (verifiedSizeBytes !== null && model.size !== verifiedSizeBytes) {
-          model.size = verifiedSizeBytes;
+        let localSizeBytesForRegistry = fileSizeBytes;
+        try {
+          const ggufValidation = await validateGgufFileHeader(fileUri, info);
+          localSizeBytesForRegistry = ggufValidation.sizeBytes;
+        } catch (error) {
+          if (error instanceof GgufValidationError && error.reason === 'read_failed') {
+            console.warn(`[LocalStorageRegistry] Local GGUF validation could not read ${model.id}, preserving downloaded state`, error);
+            changed = clearVerifiedLocalDerivedMetadata(model) || changed;
+            continue;
+          }
+
+          console.warn(`[LocalStorageRegistry] Local GGUF validation failed for ${model.id}, resetting to available`, error);
+          resetLocalDownloadState(model);
+          changed = true;
+          continue;
+        }
+
+        const hasTrustedIntegrityMarker = hasMatchingIntegrityMarker
+          && hasMatchingExpectedSha256IntegrityMarker(model);
+
+        if (!hasTrustedIntegrityMarker) {
+          changed = clearVerifiedLocalDerivedMetadata(model) || changed;
+        }
+
+        if (localSizeBytesForRegistry !== null && model.size !== localSizeBytesForRegistry) {
+          model.size = localSizeBytesForRegistry;
           changed = true;
         }
 
@@ -706,10 +848,10 @@ export class LocalStorageRegistry {
         )
           ? Math.round(model.size)
           : null;
-        const sizeBytesForFit = verifiedSizeBytes ?? persistedSizeBytes;
+        const sizeBytesForFit = localSizeBytesForRegistry ?? persistedSizeBytes;
 
         if (sizeBytesForFit !== null) {
-          const metadataTrustForFit = verifiedSizeBytes !== null
+          const metadataTrustForFit = hasTrustedIntegrityMarker
             ? 'verified_local' as const
             : model.metadataTrust;
           const fit = estimateFastMemoryFit({
@@ -724,18 +866,18 @@ export class LocalStorageRegistry {
           const memoryFitDecision = fit.decision;
           const memoryFitConfidence = fit.confidence;
 
-          if (verifiedSizeBytes !== null) {
+          if (hasTrustedIntegrityMarker && localSizeBytesForRegistry !== null) {
             const metadataTrust = 'verified_local' as const;
             if (model.metadataTrust !== metadataTrust) {
               model.metadataTrust = metadataTrust;
               changed = true;
             }
 
-            const mergedGgufTotalBytes = model.gguf?.totalBytes === verifiedSizeBytes
+            const mergedGgufTotalBytes = model.gguf?.totalBytes === localSizeBytesForRegistry
               ? model.gguf
               : {
                 ...(model.gguf ?? {}),
-                totalBytes: verifiedSizeBytes,
+                totalBytes: localSizeBytesForRegistry,
               };
             if (mergedGgufTotalBytes !== model.gguf) {
               model.gguf = mergedGgufTotalBytes;

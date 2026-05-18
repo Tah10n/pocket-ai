@@ -8,6 +8,8 @@ import {
   resolveModelCapabilitySnapshot,
 } from '../../src/utils/modelCapabilities';
 
+const VALID_SHA256 = 'a'.repeat(64);
+
 describe('modelCapabilities', () => {
   it('builds a stable snapshot from model metadata when none is persisted', () => {
     const result = resolveModelCapabilitySnapshot({
@@ -20,7 +22,7 @@ describe('modelCapabilities', () => {
       },
       maxContextTokens: 8192,
       hasVerifiedContextWindow: true,
-      sha256: 'abc123',
+      sha256: VALID_SHA256,
       lastModifiedAt: 1700000000000,
       capabilitySnapshot: undefined,
     });
@@ -34,7 +36,7 @@ describe('modelCapabilities', () => {
       sizeBytes: 2_000_000_000,
       verifiedFileSizeBytes: 2_000_000_000,
       verifiedMaxContextTokens: 8192,
-      sha256: 'abc123',
+      sha256: VALID_SHA256,
       lastModifiedAt: 1700000000000,
     }));
   });
@@ -50,7 +52,7 @@ describe('modelCapabilities', () => {
       },
       maxContextTokens: 4096,
       hasVerifiedContextWindow: true,
-      sha256: 'same-sha',
+      sha256: VALID_SHA256,
       lastModifiedAt: 1700000000001,
     });
 
@@ -64,7 +66,7 @@ describe('modelCapabilities', () => {
       },
       maxContextTokens: 4096,
       hasVerifiedContextWindow: true,
-      sha256: 'same-sha',
+      sha256: VALID_SHA256,
       lastModifiedAt: 1700000000001,
       capabilitySnapshot,
     });
@@ -84,7 +86,7 @@ describe('modelCapabilities', () => {
       },
       maxContextTokens: 4096,
       hasVerifiedContextWindow: true,
-      sha256: 'same-sha',
+      sha256: VALID_SHA256,
       lastModifiedAt: 1700000000002,
     });
 
@@ -108,7 +110,7 @@ describe('modelCapabilities', () => {
       downloadProgress: 1,
       maxContextTokens: 4096,
       hasVerifiedContextWindow: true,
-      sha256: 'same-sha',
+      sha256: VALID_SHA256,
       lastModifiedAt: 1700000000002,
       capabilitySnapshot: staleSnapshot,
     });

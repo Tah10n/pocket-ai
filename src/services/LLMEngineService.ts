@@ -80,6 +80,12 @@ import {
   buildIntermediateGpuLayerCandidates,
   chooseSafeLoadProfileCandidate,
 } from './LLMEngineService.safeLoadSearch';
+import {
+  ActiveCompletionRunner,
+  ContextOperationRunner,
+  waitForPromiseWithTimeout,
+  type ContextOperationDrainResult,
+} from './LLMEngineService.runners';
 import { performanceMonitor } from './PerformanceMonitor';
 import {
   addNativeLlamaLogListener,
@@ -131,7 +137,6 @@ const FALLBACK_STOP_WORDS = [
 
 type StrictRoleSystemNormalization = 'plain' | 'llama';
 type StopWordsResolutionSource = 'template' | 'fallback' | 'template_with_fallback';
-type ContextOperationDrainResult = 'drained' | 'timed_out';
 
 type TemplateAdditionalStopWordsResolution = {
   stopWords: string[];
@@ -447,17 +452,60 @@ class LLMEngineService {
   private hwUnsubscribe?: () => void;
   private initPromise: Promise<void> | null = null;
   private operationQueue: Promise<void> = Promise.resolve();
-  private contextOperationQueue: Promise<void> = Promise.resolve();
-  private activeCompletionPromise: Promise<NativeCompletionResult> | null = null;
-  private activeCompletionReject: ((error: unknown) => void) | null = null;
-  private activeContextOperationPromises: Set<Promise<unknown>> = new Set();
-  private activeContextOperationRejects: Map<Promise<unknown>, (error: unknown) => void> = new Map();
-  private contextOperationCancelGeneration = 0;
-  private completionInterruptGeneration = 0;
+  private contextOperationRunner = new ContextOperationRunner();
+  private completionRunner = new ActiveCompletionRunner<NativeCompletionResult>();
   private isUnloading = false;
   private activeCalibrationSession: CalibrationSession | null = null;
   private lastLifecycleEvent: EngineLifecycleEvent | null = null;
   private lastLifecycleError: string | null = null;
+
+  private get contextOperationQueue(): Promise<void> {
+    return this.contextOperationRunner.queue;
+  }
+
+  private set contextOperationQueue(value: Promise<void>) {
+    this.contextOperationRunner.queue = value;
+  }
+
+  private get activeContextOperationPromises(): Set<Promise<unknown>> {
+    return this.contextOperationRunner.activePromises;
+  }
+
+  private get activeContextOperationRejects(): Map<Promise<unknown>, (error: unknown) => void> {
+    return this.contextOperationRunner.activeRejects;
+  }
+
+  private get contextOperationCancelGeneration(): number {
+    return this.contextOperationRunner.cancelGeneration;
+  }
+
+  private set contextOperationCancelGeneration(value: number) {
+    this.contextOperationRunner.cancelGeneration = value;
+  }
+
+  private get activeCompletionPromise(): Promise<NativeCompletionResult> | null {
+    return this.completionRunner.activePromise;
+  }
+
+  private set activeCompletionPromise(value: Promise<NativeCompletionResult> | null) {
+    this.completionRunner.activePromise = value;
+  }
+
+  private get activeCompletionReject(): ((error: unknown) => void) | null {
+    return this.completionRunner.activeReject;
+  }
+
+  private set activeCompletionReject(value: ((error: unknown) => void) | null) {
+    this.completionRunner.activeReject = value;
+  }
+
+  private get completionInterruptGeneration(): number {
+    return this.completionRunner.interruptGeneration;
+  }
+
+  private set completionInterruptGeneration(value: number) {
+    this.completionRunner.interruptGeneration = value;
+  }
 
   constructor() {
     this.hwUnsubscribe = hardwareListenerService.subscribe((status) => {
@@ -522,132 +570,35 @@ class LLMEngineService {
   }
 
   private assertCompletionNotInterrupted(generation: number): void {
-    if (this.completionInterruptGeneration !== generation) {
-      throw new AppError('engine_not_ready', 'Completion was interrupted before generation started');
-    }
-  }
-
-  private assertContextOperationNotCancelled(generation: number): void {
-    if (this.contextOperationCancelGeneration !== generation) {
-      throw new AppError('engine_unloading', CONTEXT_OPERATION_UNLOAD_TIMEOUT_MESSAGE);
-    }
+    this.completionRunner.assertNotInterrupted(
+      generation,
+      () => new AppError('engine_not_ready', 'Completion was interrupted before generation started'),
+    );
   }
 
   private trackContextOperation<T>(operation: () => Promise<T>): Promise<T> {
-    const previousOperation = this.contextOperationQueue;
-    const operationGeneration = this.contextOperationCancelGeneration;
-    let releaseQueue: () => void = () => undefined;
-    let didReleaseQueue = false;
-    const queueSlot = new Promise<void>((resolve) => {
-      releaseQueue = resolve;
-    });
-    const releaseOperationQueue = () => {
-      if (!didReleaseQueue) {
-        didReleaseQueue = true;
-        releaseQueue();
-      }
-    };
-
-    this.contextOperationQueue = previousOperation.catch(() => undefined).then(() => queueSlot);
-
-    let rejectCancellation: (error: unknown) => void = () => undefined;
-    const cancellationPromise = new Promise<never>((_, reject) => {
-      rejectCancellation = reject;
-    });
-
-    const rawOperationPromise = (async () => {
-      await previousOperation.catch(() => undefined);
-      this.assertContextOperationNotCancelled(operationGeneration);
-
-      try {
-        const result = await operation();
-        this.assertContextOperationNotCancelled(operationGeneration);
-        return result;
-      } finally {
-        releaseOperationQueue();
-      }
-    })();
-    void rawOperationPromise.catch(() => undefined);
-
-    const operationPromise = Promise.race([rawOperationPromise, cancellationPromise])
-      .finally(releaseOperationQueue);
-    this.activeContextOperationPromises.add(operationPromise);
-    this.activeContextOperationRejects.set(operationPromise, rejectCancellation);
-
-    void operationPromise.then(
-      () => {
-        this.activeContextOperationPromises.delete(operationPromise);
-        this.activeContextOperationRejects.delete(operationPromise);
-      },
-      () => {
-        this.activeContextOperationPromises.delete(operationPromise);
-        this.activeContextOperationRejects.delete(operationPromise);
-      },
+    return this.contextOperationRunner.track(
+      operation,
+      () => new AppError('engine_unloading', CONTEXT_OPERATION_UNLOAD_TIMEOUT_MESSAGE),
     );
-
-    return operationPromise;
   }
 
-  private async waitForActiveContextOperations(options: { timeoutMs?: number } = {}): Promise<ContextOperationDrainResult> {
-    const activeContextOperations = Array.from(this.activeContextOperationPromises);
-    if (activeContextOperations.length === 0) {
-      return 'drained';
-    }
-
-    const drainPromise = Promise.allSettled(activeContextOperations).then((): ContextOperationDrainResult => 'drained');
-    if (typeof options.timeoutMs !== 'number' || options.timeoutMs <= 0) {
-      return await drainPromise;
-    }
-
-    let timeoutId: ReturnType<typeof setTimeout> | null = null;
-    const timeoutPromise = new Promise<ContextOperationDrainResult>((resolve) => {
-      timeoutId = setTimeout(() => resolve('timed_out'), options.timeoutMs);
-    });
-
-    const result = await Promise.race([drainPromise, timeoutPromise]);
-    if (timeoutId !== null) {
-      clearTimeout(timeoutId);
-    }
-
-    return result;
+  private waitForActiveContextOperations(options: { timeoutMs?: number } = {}): Promise<ContextOperationDrainResult> {
+    return this.contextOperationRunner.waitForActive(options);
   }
 
-  private async waitForUnloadPromise(
+  private waitForUnloadPromise(
     promise: Promise<unknown>,
     timeoutMs: number,
   ): Promise<ContextOperationDrainResult> {
-    if (timeoutMs <= 0) {
-      await promise;
-      return 'drained';
-    }
-
-    let timeoutId: ReturnType<typeof setTimeout> | null = null;
-    const timeoutPromise = new Promise<ContextOperationDrainResult>((resolve) => {
-      timeoutId = setTimeout(() => resolve('timed_out'), timeoutMs);
-    });
-    const settledPromise = promise.then(
-      (): ContextOperationDrainResult => 'drained',
-      (): ContextOperationDrainResult => 'drained',
-    );
-
-    const result = await Promise.race([settledPromise, timeoutPromise]);
-    if (timeoutId !== null) {
-      clearTimeout(timeoutId);
-    }
-
-    return result;
+    return waitForPromiseWithTimeout(promise, timeoutMs);
   }
 
   private recordContextOperationUnloadTimeout(): void {
     this.lastLifecycleEvent = 'context_operation_unload_timeout';
     this.lastLifecycleError = CONTEXT_OPERATION_UNLOAD_TIMEOUT_MESSAGE;
-    this.contextOperationCancelGeneration += 1;
     const timeoutError = new AppError('engine_unloading', CONTEXT_OPERATION_UNLOAD_TIMEOUT_MESSAGE);
-    const rejectActiveOperations = Array.from(this.activeContextOperationRejects.values());
-    this.activeContextOperationRejects.clear();
-    rejectActiveOperations.forEach((reject) => reject(timeoutError));
-    this.contextOperationQueue = Promise.resolve();
-    this.activeContextOperationPromises.clear();
+    this.contextOperationRunner.cancelActive(timeoutError);
     this.updateState({
       ...this.state,
       lastError: CONTEXT_OPERATION_UNLOAD_TIMEOUT_MESSAGE,
@@ -661,7 +612,7 @@ class LLMEngineService {
   private recordActiveCompletionUnloadTimeout(): void {
     this.lastLifecycleEvent = 'active_completion_unload_timeout';
     this.lastLifecycleError = ACTIVE_COMPLETION_UNLOAD_TIMEOUT_MESSAGE;
-    this.activeCompletionReject?.(
+    this.completionRunner.rejectActive(
       new AppError('engine_unloading', ACTIVE_COMPLETION_UNLOAD_TIMEOUT_MESSAGE),
     );
     this.updateState({
@@ -1439,7 +1390,7 @@ class LLMEngineService {
       throw new AppError('engine_unloading', 'The model engine is unloading. Please wait a moment.');
     }
 
-    if (this.activeCompletionPromise) {
+    if (this.completionRunner.hasActive()) {
       throw new AppError('engine_busy', 'A response is already being generated.');
     }
 
@@ -1450,9 +1401,7 @@ class LLMEngineService {
       rejectCompletion = reject;
     });
 
-    this.activeCompletionPromise = completionTask;
-    this.activeCompletionReject = rejectCompletion;
-    const interruptGeneration = this.completionInterruptGeneration;
+    const interruptGeneration = this.completionRunner.start(completionTask, rejectCompletion);
 
     void (async () => {
       try {
@@ -1563,10 +1512,7 @@ class LLMEngineService {
       } catch (error) {
         rejectCompletion(error);
       } finally {
-        if (this.activeCompletionPromise === completionTask) {
-          this.activeCompletionPromise = null;
-          this.activeCompletionReject = null;
-        }
+        this.completionRunner.clearIfActive(completionTask);
       }
     })();
 
@@ -1832,9 +1778,7 @@ class LLMEngineService {
   }
 
   public async stopCompletion(): Promise<void> {
-    if (this.activeCompletionPromise) {
-      this.completionInterruptGeneration += 1;
-    }
+    this.completionRunner.interruptIfActive();
 
     if (this.context) {
       await this.context.stopCompletion();
@@ -1842,7 +1786,7 @@ class LLMEngineService {
   }
 
   public async interruptActiveCompletion(): Promise<void> {
-    const activeCompletion = this.activeCompletionPromise;
+    const activeCompletion = this.completionRunner.activePromise;
     if (!activeCompletion) {
       return;
     }
@@ -1861,7 +1805,7 @@ class LLMEngineService {
   }
 
   public hasActiveCompletion(): boolean {
-    return this.activeCompletionPromise != null;
+    return this.completionRunner.hasActive();
   }
 
   public getState(): EngineState {
@@ -3568,8 +3512,7 @@ class LLMEngineService {
       this.safeModeLoadLimits = null;
       this.resetRuntimeTelemetry();
       this.initPromise = null;
-      this.activeCompletionPromise = null;
-      this.activeCompletionReject = null;
+      this.completionRunner.reset();
       this.isUnloading = false;
       updateSettings({ activeModelId: null });
       hardwareListenerService.resetLowMemoryFlag();

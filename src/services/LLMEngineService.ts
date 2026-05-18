@@ -76,6 +76,10 @@ import { resolveModelFilePathOrThrow } from './LLMEngineService.modelFile';
 import {
   resolveSafeLoadPolicyOrThrow,
 } from './LLMEngineService.safeLoadPolicy';
+import {
+  buildIntermediateGpuLayerCandidates,
+  chooseSafeLoadProfileCandidate,
+} from './LLMEngineService.safeLoadSearch';
 import { performanceMonitor } from './PerformanceMonitor';
 import {
   addNativeLlamaLogListener,
@@ -1260,18 +1264,13 @@ class LLMEngineService {
     }
 
     if (bestGpuLayers === 0) {
-      const gpuCandidates = normalizedGpuCeiling > 0 ? [0, normalizedGpuCeiling] : [0];
-      let contextOptimizedGpuLayers = 0;
-      for (const gpuLayers of gpuCandidates) {
-        const candidateContext = solveMaxContextForGpuLayers(gpuLayers);
-        if (
-          candidateContext > bestContextTokens
-          || (candidateContext === bestContextTokens && gpuLayers > contextOptimizedGpuLayers)
-        ) {
-          bestContextTokens = candidateContext;
-          contextOptimizedGpuLayers = gpuLayers;
-        }
-      }
+      const contextOptimizedCandidate = chooseSafeLoadProfileCandidate(
+        buildIntermediateGpuLayerCandidates(normalizedGpuCeiling).map((gpuLayers) => ({
+          contextTokens: solveMaxContextForGpuLayers(gpuLayers),
+          gpuLayers,
+        })),
+      );
+      bestContextTokens = contextOptimizedCandidate.contextTokens;
 
       if (normalizedGpuCeiling > 0) {
         for (let gpuLayers = normalizedGpuCeiling; gpuLayers >= 0; gpuLayers -= 1) {

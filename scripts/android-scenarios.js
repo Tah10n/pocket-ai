@@ -87,6 +87,7 @@ const MODEL_CATALOG_LABELS = ["Model Catalog", "Каталог моделей"];
 const ALL_MODELS_LABELS = ["All Models", "Все модели"];
 const DOWNLOADED_TAB_LABELS = ["Downloaded", "Загруженные"];
 const MODELS_FILTER_TOGGLE_LABELS = ["Filters", "Фильтры"];
+const MODELS_FILTER_SIZE_LARGE_LABELS = ["> 5 GB", "> 5 ГБ"];
 const MODELS_FILTER_NO_TOKEN_REQUIRED_LABELS = ["No token required", "Без токена"];
 const MODELS_FILTER_CLEAR_LABELS = ["Clear", "Очистить"];
 const SORT_LABELS = ["Sort", "Сортировка"];
@@ -701,16 +702,17 @@ function buildScenarios() {
         await goToHome(ctx);
         await ctx.tapAnyText(ACTIVE_MODEL_CTA_LABELS);
         await ctx.expectAnyText(MODEL_CATALOG_LABELS);
+        await prepareCatalogForMemoryFitRiskBadgeScenario(ctx);
 
         const adbPath = resolveAdbPath();
-        await waitForAnyNode(adbPath, ctx.serial, RAM_FIT_BADGE_LABELS, {
+        await waitForAnyNode(adbPath, ctx.serial, RAM_FIT_RISK_BADGE_LABELS, {
           timeoutMs: 12_000,
           visibleOnly: true,
         });
 
         await ctx.tapAnyText(MODEL_DETAILS_CTA_LABELS, { timeoutMs: 15_000 });
         await ctx.expectAnyText(MODEL_DETAILS_TITLE_LABELS, { timeoutMs: 10_000 });
-        await ctx.expectAnyText(RAM_FIT_BADGE_LABELS, { timeoutMs: 10_000 });
+        await ctx.expectAnyText(RAM_FIT_RISK_BADGE_LABELS, { timeoutMs: 10_000 });
       },
     },
     {
@@ -1035,6 +1037,33 @@ async function goToConversationManagement(ctx) {
   await goToHome(ctx);
   await ctx.tapAnyText(MANAGE_CONVERSATIONS_LABELS);
   await ctx.expectAnyText(CONVERSATIONS_TITLE_LABELS);
+}
+
+async function prepareCatalogForMemoryFitRiskBadgeScenario(ctx) {
+  const adbPath = resolveAdbPath();
+
+  const panelAlreadyOpen = await findAnyNodeNow(adbPath, ctx.serial, MODELS_FILTER_SIZE_LARGE_LABELS, {
+    visibleOnly: true,
+  });
+
+  if (!panelAlreadyOpen) {
+    await ctx.tapAnyText(MODELS_FILTER_TOGGLE_LABELS);
+    await ctx.expectAnyText(MODELS_FILTER_SIZE_LARGE_LABELS);
+  }
+
+  const clearButton = await findAnyNodeNow(adbPath, ctx.serial, MODELS_FILTER_CLEAR_LABELS, {
+    visibleOnly: true,
+  });
+
+  if (clearButton) {
+    await ctx.tapAnyText(MODELS_FILTER_CLEAR_LABELS);
+    await delay(600);
+  }
+
+  await ctx.tapAnyText(MODELS_FILTER_SIZE_LARGE_LABELS);
+  await delay(1_200);
+  await ctx.tapAnyText(MODELS_FILTER_TOGGLE_LABELS);
+  await ctx.expectAnyText(MODEL_CATALOG_LABELS);
 }
 
 async function prepareCatalogForRamWarningScenario(ctx) {

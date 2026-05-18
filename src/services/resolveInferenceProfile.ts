@@ -51,16 +51,27 @@ function clampNonNegativeInt(value: number): number {
   return Math.max(0, Math.round(value));
 }
 
+function resolveConservativeGpuProbeLayers(targetGpuLayers: number): number | null {
+  const normalizedTarget = clampNonNegativeInt(targetGpuLayers);
+  if (normalizedTarget <= 1) {
+    return null;
+  }
+
+  return Math.max(1, Math.min(normalizedTarget - 1, Math.floor(normalizedTarget / 4)));
+}
+
 export function resolveInferenceProfileCandidates({
   capabilities,
   loadParams,
   gpuLayers,
   baseProfile,
+  preferConservativeGpuProbe = false,
 }: {
   capabilities: BackendCapabilitiesSummary | null;
   loadParams: Pick<ModelLoadParameters, 'backendPolicy' | 'selectedBackendDevices'>;
   gpuLayers: number;
   baseProfile: Omit<ResolvedInferenceProfile, 'backendMode' | 'devices' | 'nGpuLayers'>;
+  preferConservativeGpuProbe?: boolean;
 }): {
   effectiveBackendPolicy: NormalizedBackendPolicy;
   candidates: ResolvedInferenceProfile[];
@@ -220,6 +231,17 @@ export function resolveInferenceProfileCandidates({
       };
     }
 
+    const conservativeProbeLayers = preferConservativeGpuProbe
+      ? resolveConservativeGpuProbeLayers(normalizedGpuLayers)
+      : null;
+    if (conservativeProbeLayers !== null) {
+      candidates.push({
+        ...baseProfile,
+        backendMode: 'gpu',
+        nGpuLayers: conservativeProbeLayers,
+      });
+    }
+
     candidates.push({
       ...baseProfile,
       backendMode: 'gpu',
@@ -248,6 +270,17 @@ export function resolveInferenceProfileCandidates({
   // Include a GPU candidate in AUTO only when backend discovery has confirmed the GPU path is
   // available. Some older devices can crash natively when initializing unsupported GPU backends.
   if (gpuAvailable) {
+    const conservativeProbeLayers = preferConservativeGpuProbe
+      ? resolveConservativeGpuProbeLayers(normalizedGpuLayers)
+      : null;
+    if (conservativeProbeLayers !== null) {
+      candidates.push({
+        ...baseProfile,
+        backendMode: 'gpu',
+        nGpuLayers: conservativeProbeLayers,
+      });
+    }
+
     candidates.push({
       ...baseProfile,
       backendMode: 'gpu',

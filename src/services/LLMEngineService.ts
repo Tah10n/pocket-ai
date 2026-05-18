@@ -1,8 +1,8 @@
 import type {
+  CompletionParams,
   LlamaContext,
   NativeBackendDeviceInfo,
   NativeCompletionResult,
-  TokenData,
 } from 'llama.rn';
 import DeviceInfo from 'react-native-device-info';
 import { Platform } from 'react-native';
@@ -54,7 +54,6 @@ import {
   resolveModelLayerCountFromGgufMetadata,
 } from '../utils/modelCapabilities';
 import { resolveKvCacheTypes } from '../utils/kvCache';
-import { requireLlamaModule } from './llamaRnModule';
 import { inferenceBackendService } from './InferenceBackendService';
 import { resolveInferenceProfileCandidates, type ResolvedInferenceProfile } from './resolveInferenceProfile';
 import { readAutotuneResult } from './InferenceAutotuneStore';
@@ -78,6 +77,19 @@ import {
   resolveSafeLoadPolicyOrThrow,
 } from './LLMEngineService.safeLoadPolicy';
 import { performanceMonitor } from './PerformanceMonitor';
+import {
+  addNativeLlamaLogListener,
+  getFormattedChatFromContext,
+  getLlamaBuildInfo,
+  initLlamaContext,
+  loadLlamaModelInfo,
+  releaseAllLlamaContexts,
+  runCompletionOnContext,
+  tokenizeFormattedPrompt,
+  toggleNativeLlamaLogs,
+  type LlamaContextInitParams,
+  type LlamaFormattedChatResult,
+} from './LlamaRuntimeAdapter';
 
 export interface LoadModelOptions {
   forceReload?: boolean;
@@ -808,26 +820,18 @@ class LLMEngineService {
 
     try {
       this.assertContextStillCurrent(context, generation);
-      const formatted = await context.getFormattedChat(
-        messages as any,
-        null,
-        {
+      const formatted = await getFormattedChatFromContext({
+        context,
+        messages,
+        options: {
           enable_thinking: enableThinking,
           reasoning_format: reasoningFormat,
           add_generation_prompt: true,
         },
-      );
+      });
       this.assertContextStillCurrent(context, generation);
 
-      const additionalStops = (
-        formatted
-        && typeof formatted === 'object'
-        && 'additional_stops' in formatted
-        && Array.isArray((formatted as any).additional_stops)
-      )
-        ? ((formatted as any).additional_stops as unknown[])
-        : [];
-      const normalizedStops = this.normalizeAdditionalStopWords(additionalStops);
+      const normalizedStops = this.normalizeAdditionalStopWords(formatted.additional_stops);
       const resolution: TemplateAdditionalStopWordsResolution = {
         stopWords: normalizedStops,
         strictRoleSystemNormalization: resolveStrictRoleSystemNormalization(formatted),
@@ -1487,7 +1491,7 @@ class LLMEngineService {
           const resolvedStops = this.resolveCompletionStopWords(templateStopResolution);
           this.recordResolvedCompletionStopWords(resolvedStops);
 
-          const completionParams: Record<string, unknown> = {
+          const completionParams: CompletionParams = {
             messages: completionMessages,
             n_predict: params?.n_predict ?? 512,
             temperature: params?.temperature ?? 0.7,
@@ -1517,9 +1521,10 @@ class LLMEngineService {
           this.assertContextStillCurrent(context, contextGeneration);
           this.assertCompletionNotInterrupted(interruptGeneration);
 
-          return await context.completion(
-            completionParams as any,
-            (data: TokenData) => {
+          return await runCompletionOnContext({
+            context,
+            params: completionParams,
+            onToken: (data) => {
               if (data.token || data.content !== undefined || data.reasoning_content !== undefined) {
                 onTokensStreamed();
                 onToken?.({
@@ -1530,7 +1535,7 @@ class LLMEngineService {
                 });
               }
             },
-          );
+          });
         };
 
         try {
@@ -1570,7 +1575,7 @@ class LLMEngineService {
   }
 
   private async probeThinkingCapability(context: LlamaContext): Promise<ModelThinkingCapabilitySnapshot | null> {
-    const sampleMessages = [{ role: 'user', content: 'ping' }];
+    const sampleMessages: LlmChatMessage[] = [{ role: 'user', content: 'ping' }];
     const shouldAbort = () => this.isUnloading || this.context !== context || this.activeCompletionPromise !== null;
 
     const safeFormat = async ({
@@ -1579,17 +1584,21 @@ class LLMEngineService {
     }: {
       enableThinking: boolean;
       reasoningFormat: 'none' | 'auto';
-    }) => {
+    }): Promise<LlamaFormattedChatResult | null> => {
       if (shouldAbort()) {
         return null;
       }
 
       try {
-        const formatted = await context.getFormattedChat(sampleMessages as any, null, {
-          jinja: true,
-          enable_thinking: enableThinking,
-          reasoning_format: reasoningFormat,
-          add_generation_prompt: true,
+        const formatted = await getFormattedChatFromContext({
+          context,
+          messages: sampleMessages,
+          options: {
+            jinja: true,
+            enable_thinking: enableThinking,
+            reasoning_format: reasoningFormat,
+            add_generation_prompt: true,
+          },
         });
 
         if (shouldAbort()) {
@@ -1612,16 +1621,13 @@ class LLMEngineService {
       return null;
     }
 
-    const isJinjaResult = (value: unknown): boolean => {
-      if (!value || typeof value !== 'object') {
-        return false;
-      }
-
-      const record = value as Record<string, unknown>;
-      return record.type === 'jinja'
-        || typeof record.thinking_start_tag === 'string'
-        || typeof record.thinking_end_tag === 'string'
-        || typeof record.thinking_forced_open === 'boolean';
+    const isJinjaResult = (value: LlamaFormattedChatResult | null): value is LlamaFormattedChatResult => {
+      return value !== null && (
+        value.type === 'jinja'
+        || typeof value.thinking_start_tag === 'string'
+        || typeof value.thinking_end_tag === 'string'
+        || typeof value.thinking_forced_open === 'boolean'
+      );
     };
 
     const detectThinkingTagsFromPrompt = (prompt: string) => {
@@ -1642,25 +1648,16 @@ class LLMEngineService {
       return null;
     };
 
-    const readPrompt = (value: unknown): string | null => {
-      if (!value || typeof value !== 'object') {
-        return null;
-      }
-
-      if (!('prompt' in value)) {
-        return null;
-      }
-
-      const prompt = (value as any).prompt;
-      return typeof prompt === 'string' ? prompt : null;
+    const readPrompt = (value: LlamaFormattedChatResult | null): string | null => {
+      return value ? value.prompt : null;
     };
 
     const promptOn = readPrompt(formattedOn);
     const promptOff = readPrompt(formattedOff);
 
     if (promptOn && promptOff) {
-      const jinjaOn = isJinjaResult(formattedOn) ? formattedOn as any : null;
-      const jinjaOff = isJinjaResult(formattedOff) ? formattedOff as any : null;
+      const jinjaOn = isJinjaResult(formattedOn) ? formattedOn : null;
+      const jinjaOff = isJinjaResult(formattedOff) ? formattedOff : null;
 
       if (jinjaOn && jinjaOff) {
         let thinkingStartTag = typeof jinjaOn?.thinking_start_tag === 'string' && jinjaOn.thinking_start_tag.trim().length > 0
@@ -1785,12 +1782,16 @@ class LLMEngineService {
       let strictRoleSystemNormalization: StrictRoleSystemNormalization = 'plain';
       const countTokens = async (promptMessages: LlmChatMessage[]) => {
         this.assertContextStillCurrent(context, contextGeneration);
-        let formatted: Awaited<ReturnType<LlamaContext['getFormattedChat']>>;
+        let formatted: LlamaFormattedChatResult;
         try {
-          formatted = await context.getFormattedChat(promptMessages as any, null, {
-            enable_thinking: params?.enable_thinking ?? false,
-            reasoning_format: params?.reasoning_format ?? 'none',
-            add_generation_prompt: params?.add_generation_prompt,
+          formatted = await getFormattedChatFromContext({
+            context,
+            messages: promptMessages,
+            options: {
+              enable_thinking: params?.enable_thinking ?? false,
+              reasoning_format: params?.reasoning_format ?? 'none',
+              add_generation_prompt: params?.add_generation_prompt,
+            },
           });
         } catch (error) {
           this.assertContextStillCurrent(context, contextGeneration);
@@ -1801,10 +1802,11 @@ class LLMEngineService {
         this.assertContextStillCurrent(context, contextGeneration);
         let tokenized: Awaited<ReturnType<LlamaContext['tokenize']>>;
         try {
-          tokenized = await context.tokenize(
-            formatted.prompt,
-            formatted.media_paths ? { media_paths: formatted.media_paths } : undefined,
-          );
+          tokenized = await tokenizeFormattedPrompt({
+            context,
+            prompt: formatted.prompt,
+            mediaPaths: formatted.media_paths,
+          });
         } catch (error) {
           this.assertContextStillCurrent(context, contextGeneration);
           throw error;
@@ -2157,7 +2159,6 @@ class LLMEngineService {
     let initDiagnostics: Record<string, unknown> | null = null;
     let gpuInitError: unknown | null = null;
     let cpuInitError: unknown | null = null;
-    let llamaModule: ReturnType<typeof requireLlamaModule> | null = null;
     const shouldBridgeNativeLogs = (
       isDev
       && process.env.NODE_ENV !== 'test'
@@ -2179,9 +2180,6 @@ class LLMEngineService {
       });
 
       const { modelPath, fileInfo } = await resolveModelFilePathOrThrow({ modelId, localPath });
-
-      const llama = requireLlamaModule();
-      llamaModule = llama;
 
       const persistedLoadParams = getModelLoadParametersForModel(modelId);
       const loadParams = loadParamsOverride
@@ -2229,7 +2227,7 @@ class LLMEngineService {
 
       let modelInfo: Record<string, unknown> | null = null;
       try {
-        modelInfo = await llama.loadLlamaModelInfo(modelPath) as Record<string, unknown>;
+        modelInfo = await loadLlamaModelInfo(modelPath);
       } catch (error) {
         if (process.env.NODE_ENV !== 'test') {
           console.warn('[LLMEngine] Failed to read GGUF metadata', error);
@@ -2256,7 +2254,7 @@ class LLMEngineService {
 
       initDiagnostics = {
         modelId,
-        llamaRnBuild: llama.BuildInfo,
+        llamaRnBuild: getLlamaBuildInfo(),
         fileSizeBytes: typeof fileInfo.size === 'number' ? fileInfo.size : null,
         totalMemoryBytes: resolvedTotalMemoryBytes,
         hasSystemMemorySnapshot: systemMemorySnapshot !== null,
@@ -2700,13 +2698,13 @@ class LLMEngineService {
 
        if (shouldBridgeNativeLogs) {
          try {
-           nativeLogListener = llama.addNativeLogListener((level, text) => {
+           nativeLogListener = addNativeLlamaLogListener((level, text) => {
             nativeLogs.push({ level, text });
             if (nativeLogs.length > MAX_NATIVE_LOG_LINES) {
               nativeLogs.splice(0, nativeLogs.length - MAX_NATIVE_LOG_LINES);
             }
           });
-          await llama.toggleNativeLog(true);
+          await toggleNativeLlamaLogs(true);
           didEnableNativeLogs = true;
         } catch (error) {
           console.warn('[LLMEngine] Failed to enable native llama logs', error);
@@ -2800,7 +2798,7 @@ class LLMEngineService {
           nParallel,
         } = profile;
 
-        const buildOptions = (layers: number) => {
+        const buildOptions = (layers: number): LlamaContextInitParams => {
           // llama.cpp requires Flash Attention when using quantized V cache.
           // Some candidate profiles force flashAttnType='off' (e.g., CPU fallback). When
           // combined with cache_type_v=q8_0/q4_0, llama.cpp returns a null context and
@@ -2841,7 +2839,7 @@ class LLMEngineService {
           };
         };
 
-        const initOnce = async (layers: number) => llama.initLlama(
+        const initOnce = async (layers: number) => initLlamaContext(
           buildOptions(layers),
           (progress) => {
             this.updateState({ ...this.state, loadProgress: progress });
@@ -3243,7 +3241,7 @@ class LLMEngineService {
                 : 'falling back to CPU profile';
               console.warn(`[LLMEngine] ${candidate.toUpperCase()} init returned CPU runtime, ${fallbackLabel}`);
             }
-            await llama.releaseAllLlama().catch(() => undefined);
+            await releaseAllLlamaContexts().catch(() => undefined);
             lastBackendInitError = new Error(
               reasonNoGPU || `${candidate.toUpperCase()} acceleration was not enabled.`,
             );
@@ -3285,7 +3283,7 @@ class LLMEngineService {
             gpuInitError = error;
           }
 
-          await llama.releaseAllLlama().catch(() => undefined);
+          await releaseAllLlamaContexts().catch(() => undefined);
         }
       }
 
@@ -3488,8 +3486,8 @@ class LLMEngineService {
         nativeLogListener.remove();
       }
 
-      if (didEnableNativeLogs && llamaModule) {
-        await llamaModule.toggleNativeLog(false).catch(() => undefined);
+      if (didEnableNativeLogs) {
+        await toggleNativeLlamaLogs(false).catch(() => undefined);
       }
 
       this.initPromise = null;
@@ -3540,7 +3538,7 @@ class LLMEngineService {
       }
 
       if (this.context) {
-        await requireLlamaModule().releaseAllLlama();
+        await releaseAllLlamaContexts();
       }
     } finally {
       const calibrationSession = this.activeCalibrationSession;

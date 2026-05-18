@@ -1,6 +1,9 @@
 import type { NativeBackendDeviceInfo } from 'llama.rn';
 import { Platform } from 'react-native';
-import { requireLlamaModule } from './llamaRnModule';
+import {
+  getLlamaBackendDevicesInfo,
+  LlamaRuntimeFeatureUnavailableError,
+} from './LlamaRuntimeAdapter';
 
 export type RuntimeBackendKind = 'cpu' | 'gpu' | 'npu';
 
@@ -107,23 +110,18 @@ class InferenceBackendService {
         if (!this.backendDevicesInfoNativePromise) {
           this.backendDevicesInfoNativePromise = (async (): Promise<NativeBackendDeviceInfo[] | null> => {
             try {
-              const llama = requireLlamaModule() as unknown as {
-                getBackendDevicesInfo?: () => Promise<NativeBackendDeviceInfo[]>;
-              };
-
-              if (typeof llama.getBackendDevicesInfo !== 'function') {
+              // Ensure sync throws become Promise rejections.
+              const devices = await Promise.resolve().then(() => getLlamaBackendDevicesInfo());
+              this.backendDevicesInfo = devices;
+              this.backendDiscoveryCooldownUntilMs = 0;
+              return devices;
+            } catch (error) {
+              if (error instanceof LlamaRuntimeFeatureUnavailableError) {
                 this.backendDiscoveryUnsupported = true;
                 this.backendDevicesInfo = null;
                 return null;
               }
 
-              // Ensure sync throws become Promise rejections.
-              const result = await Promise.resolve().then(() => llama.getBackendDevicesInfo!());
-              const devices = Array.isArray(result) ? result : [];
-              this.backendDevicesInfo = devices;
-              this.backendDiscoveryCooldownUntilMs = 0;
-              return devices;
-            } catch (error) {
               // Do not permanently cache transient discovery failures.
               if (process.env.NODE_ENV !== 'test') {
                 console.warn('[InferenceBackend] Failed to read backend devices info', error);

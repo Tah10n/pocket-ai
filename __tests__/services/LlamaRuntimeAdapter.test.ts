@@ -1,0 +1,156 @@
+import type { LlamaContext } from 'llama.rn';
+import {
+  getFormattedChatFromContext,
+  normalizeBackendDeviceInfoList,
+  normalizeCompletionResult,
+  normalizeLlamaMessages,
+  runCompletionOnContext,
+} from '../../src/services/LlamaRuntimeAdapter';
+
+function createContext(overrides: Record<string, unknown>): LlamaContext {
+  return overrides as unknown as LlamaContext;
+}
+
+describe('LlamaRuntimeAdapter', () => {
+  it('normalizes formatted chat payloads from llama.rn', async () => {
+    const getFormattedChat = jest.fn().mockResolvedValue({
+      type: ' jinja ',
+      prompt: 'Formatted prompt',
+      media_paths: [' /tmp/image.png ', 42, ''],
+      additional_stops: [' </s> ', 12, '<|done|>', ''],
+      thinking_start_tag: '<think>',
+      thinking_end_tag: '</think>',
+      thinking_forced_open: false,
+    });
+    const context = createContext({ getFormattedChat });
+
+    const result = await getFormattedChatFromContext({
+      context,
+      messages: [{ role: 'user', content: 'Hello' }],
+      options: {
+        enable_thinking: true,
+        reasoning_format: 'auto',
+      },
+    });
+
+    expect(getFormattedChat).toHaveBeenCalledWith(
+      [{ role: 'user', content: 'Hello' }],
+      null,
+      expect.objectContaining({
+        enable_thinking: true,
+        reasoning_format: 'auto',
+      }),
+    );
+    expect(result).toEqual(expect.objectContaining({
+      type: 'jinja',
+      prompt: 'Formatted prompt',
+      has_media: true,
+      media_paths: ['/tmp/image.png'],
+      additional_stops: ['</s>', '<|done|>'],
+      thinking_start_tag: '<think>',
+      thinking_end_tag: '</think>',
+      thinking_forced_open: false,
+    }));
+  });
+
+  it('rejects malformed formatted chat payloads before engine code uses them', async () => {
+    const context = createContext({
+      getFormattedChat: jest.fn().mockResolvedValue({ additional_stops: ['</s>'] }),
+    });
+
+    await expect(getFormattedChatFromContext({
+      context,
+      messages: [{ role: 'user', content: 'Hello' }],
+    })).rejects.toThrow('prompt must be a string');
+  });
+
+  it('normalizes token callbacks and validates completion results', async () => {
+    const completion = jest.fn(async (_params, onToken) => {
+      onToken?.({
+        content: 'visible',
+        reasoning_content: 'reason',
+        accumulated_text: 'visible',
+      });
+      return { text: 'done' };
+    });
+    const context = createContext({ completion });
+    const onToken = jest.fn();
+
+    await expect(runCompletionOnContext({
+      context,
+      params: {
+        messages: [{ role: 'user', content: 'Hello' }],
+        n_predict: 8,
+      },
+      onToken,
+    })).resolves.toEqual({ text: 'done' });
+
+    expect(onToken).toHaveBeenCalledWith({
+      token: '',
+      content: 'visible',
+      reasoning_content: 'reason',
+      accumulated_text: 'visible',
+    });
+  });
+
+  it('rejects invalid completion result scalar fields', () => {
+    expect(() => normalizeCompletionResult({ text: 123 })).toThrow('text must be a string');
+  });
+
+  it('rejects malformed token callback scalar fields', async () => {
+    const context = createContext({
+      completion: jest.fn(async (_params, onToken) => {
+        onToken?.({ token: 123 });
+        return { text: 'unreachable' };
+      }),
+    });
+
+    await expect(runCompletionOnContext({
+      context,
+      params: {
+        messages: [{ role: 'user', content: 'Hello' }],
+      },
+      onToken: jest.fn(),
+    })).rejects.toThrow('token must be a string');
+  });
+
+  it('normalizes backend device discovery results', () => {
+    expect(normalizeBackendDeviceInfoList([
+      {
+        backend: ' OpenCL ',
+        type: ' gpu ',
+        deviceName: ' Adreno ',
+        maxMemorySize: 1024,
+        metadata: { vendor: 'qualcomm' },
+      },
+      {
+        backend: 'HTP',
+        type: 'gpu',
+        deviceName: '',
+        maxMemorySize: 1024,
+      },
+      'bad',
+      null,
+    ])).toEqual([
+      {
+        backend: 'OpenCL',
+        type: 'gpu',
+        deviceName: 'Adreno',
+        maxMemorySize: 1024,
+        metadata: { vendor: 'qualcomm' },
+      },
+    ]);
+  });
+
+  it('keeps empty string message content as a valid native chat message', () => {
+    expect(normalizeLlamaMessages([{ role: 'user', content: '' }])).toEqual([
+      { role: 'user', content: '' },
+    ]);
+  });
+
+  it('rejects unsupported chat roles before calling the native formatter', () => {
+    expect(() => normalizeLlamaMessages([
+      { role: 'tool' as never, content: 'Nope' },
+    ])).toThrow('unsupported role');
+  });
+});

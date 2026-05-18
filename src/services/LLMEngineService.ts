@@ -2391,14 +2391,15 @@ class LLMEngineService {
 
       const requestedBackendPolicy = loadParams.backendPolicy;
 
+      const explicitGpuLayers = typeof loadParams.gpuLayers === 'number'
+        && Number.isFinite(loadParams.gpuLayers)
+        && loadParams.gpuLayers >= 0
+        ? Math.round(loadParams.gpuLayers)
+        : null;
       const requestedGpuLayersCandidate = requestedBackendPolicy === 'cpu'
         ? 0
-        : (
-          typeof loadParams.gpuLayers === 'number'
-          && Number.isFinite(loadParams.gpuLayers)
-          && loadParams.gpuLayers >= 0
-        )
-          ? Math.round(loadParams.gpuLayers)
+        : explicitGpuLayers !== null
+          ? explicitGpuLayers
           : recommendedGpuLayers;
       const requestedGpuLayers = Math.max(
         0,
@@ -2990,6 +2991,9 @@ class LLMEngineService {
         },
         gpuLayers,
         baseProfile: baseInferenceProfile,
+        preferConservativeGpuProbe: normalizedBackendPolicy === 'auto'
+          && explicitGpuLayers === null
+          && !autotuneBestStableProfile,
       });
 
       let inferenceCandidatesForInit = resolvedInferenceCandidates;

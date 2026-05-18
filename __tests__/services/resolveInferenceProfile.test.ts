@@ -236,6 +236,49 @@ describe('resolveInferenceProfileCandidates', () => {
     expect(result.candidates.map((candidate) => candidate.backendMode)).toEqual(['gpu', 'cpu']);
   });
 
+  it('adds a small GPU probe before the target GPU profile when requested', () => {
+    const capabilitiesGpuOnly = {
+      ...capabilitiesBoth,
+      npu: { ...capabilitiesBoth.npu, available: false },
+      rawDevices: [{ backend: 'OpenCL', type: 'gpu', deviceName: 'Adreno GPU', maxMemorySize: 0 }],
+    };
+
+    const result = resolveInferenceProfileCandidates({
+      capabilities: capabilitiesGpuOnly,
+      loadParams: { backendPolicy: undefined, selectedBackendDevices: null },
+      gpuLayers: 12,
+      baseProfile,
+      preferConservativeGpuProbe: true,
+    });
+
+    expect(result.candidates.map((candidate) => ({
+      backendMode: candidate.backendMode,
+      nGpuLayers: candidate.nGpuLayers,
+    }))).toEqual([
+      { backendMode: 'gpu', nGpuLayers: 3 },
+      { backendMode: 'gpu', nGpuLayers: 12 },
+      { backendMode: 'cpu', nGpuLayers: 0 },
+    ]);
+  });
+
+  it('does not duplicate the target GPU profile when the target has only one layer', () => {
+    const capabilitiesGpuOnly = {
+      ...capabilitiesBoth,
+      npu: { ...capabilitiesBoth.npu, available: false },
+      rawDevices: [{ backend: 'OpenCL', type: 'gpu', deviceName: 'Adreno GPU', maxMemorySize: 0 }],
+    };
+
+    const result = resolveInferenceProfileCandidates({
+      capabilities: capabilitiesGpuOnly,
+      loadParams: { backendPolicy: undefined, selectedBackendDevices: null },
+      gpuLayers: 1,
+      baseProfile,
+      preferConservativeGpuProbe: true,
+    });
+
+    expect(result.candidates.map((candidate) => candidate.nGpuLayers)).toEqual([1, 0]);
+  });
+
   it('forces CPU and reports effective CPU when backend discovery is unavailable', () => {
     const result = resolveInferenceProfileCandidates({
       capabilities: null,

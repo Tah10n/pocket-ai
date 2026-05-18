@@ -906,6 +906,39 @@ describe('LLMEngineService', () => {
     expect(llmEngineService.getLoadedGpuLayers()).toBe(12);
   });
 
+  it('starts automatic first GPU loads with a small conservative probe profile', async () => {
+    (getModelLoadParametersForModel as jest.Mock).mockReturnValueOnce({
+      contextSize: 4096,
+      gpuLayers: null,
+      kvCacheType: 'f16',
+    });
+    (llamaRn.loadLlamaModelInfo as jest.Mock).mockResolvedValueOnce({
+      'general.architecture': 'llama',
+      'general.type': 'model',
+      'llama.block_count': 12,
+      'llama.attention.head_count': 8,
+      'llama.embedding_length': 2048,
+    });
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    const calls = (llamaRn.initLlama as jest.Mock).mock.calls;
+    expect(calls).toHaveLength(1);
+    expect(calls[0][0]).toEqual(expect.objectContaining({
+      n_ctx: 4096,
+      n_gpu_layers: 3,
+    }));
+    expect(llmEngineService.getLoadedGpuLayers()).toBe(3);
+    expect(llmEngineService.getState().diagnostics).toEqual(expect.objectContaining({
+      backendMode: 'gpu',
+      requestedGpuLayers: 12,
+      loadedGpuLayers: 3,
+      backendInitAttempts: expect.arrayContaining([
+        expect.objectContaining({ candidate: 'gpu', nGpuLayers: 3, outcome: 'success', actualGpu: true }),
+      ]),
+    }));
+  });
+
   it('reports requested and loaded GPU layers separately after retrying with fewer layers', async () => {
     (getModelLoadParametersForModel as jest.Mock).mockReturnValueOnce({
       contextSize: 4096,
@@ -2011,6 +2044,11 @@ describe('LLMEngineService', () => {
     (llamaRn.loadLlamaModelInfo as jest.Mock).mockResolvedValueOnce({
       'general.architecture': 'gemma2',
       'general.type': 'model',
+    });
+    (getModelLoadParametersForModel as jest.Mock).mockReturnValueOnce({
+      contextSize: 2048,
+      gpuLayers: 20,
+      kvCacheType: 'f16',
     });
 
     await expect(

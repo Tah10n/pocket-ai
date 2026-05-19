@@ -1,13 +1,17 @@
 import {
   CHAT_PERSISTENCE_INDEX_KEY,
+  CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY,
   CHAT_PERSISTENCE_SCHEMA_VERSION,
+  type ChatPersistencePendingIndexCommit,
   createChatPersistenceWriteScheduler,
   getChatThreadStorageKey,
   getThreadIdFromChatThreadStorageKey,
   parseChatPersistenceIndex,
+  parseChatPendingIndexCommit,
   parseChatThreadRecord,
   recoverStaleStreamingThread,
   sanitizeChatThreadForPersistence,
+  writeChatPendingIndexCommit,
   writeChatPersistenceIndex,
   writeChatThreadRecord,
 } from '../../src/store/chatPersistence';
@@ -95,20 +99,50 @@ describe('chatPersistence', () => {
     });
   });
 
+  it('parses pending index commits and rejects malformed revisions', () => {
+    const validCommit: ChatPersistencePendingIndexCommit = {
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      revision: 3,
+      activeThreadId: 'thread-1',
+      threadIds: ['thread-1'],
+      updatedAt: 12,
+      reason: 'thread_mutation',
+      changedThreadIds: ['thread-1'],
+    };
+
+    expect(parseChatPendingIndexCommit(JSON.stringify(validCommit))).toEqual({
+      ok: true,
+      value: validCommit,
+    });
+    expect(parseChatPendingIndexCommit(JSON.stringify({
+      ...validCommit,
+      revision: 1.5,
+    }))).toEqual({ ok: false, reason: 'invalid_shape' });
+    expect(parseChatPendingIndexCommit(JSON.stringify({
+      ...validCommit,
+      reason: 'unknown',
+    }))).toEqual({ ok: false, reason: 'invalid_shape' });
+
+    writeChatPendingIndexCommit(storage, validCommit);
+    expect(storage.getString(CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY)).toContain('"revision":3');
+  });
+
   it('writes v2 index and per-thread records without using the legacy all-thread key', () => {
     const thread = buildThread('thread-1');
 
-    writeChatThreadRecord(storage, thread, 11);
+    writeChatThreadRecord(storage, thread, 11, { commitRevision: 1 });
     writeChatPersistenceIndex(storage, {
       schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
       activeThreadId: thread.id,
       threadIds: [thread.id],
       updatedAt: 12,
+      revision: 1,
     });
 
     expect(storage.getString('chat-store')).toBeUndefined();
     expect(storage.getString(CHAT_PERSISTENCE_INDEX_KEY)).toContain(thread.id);
     expect(storage.getString(getChatThreadStorageKey(thread.id))).toContain('Partial response');
+    expect(storage.getString(getChatThreadStorageKey(thread.id))).toContain('"commitRevision":1');
   });
 
   it('omits empty assistant progress placeholders from durable thread records', () => {

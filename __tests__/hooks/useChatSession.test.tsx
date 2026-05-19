@@ -11,8 +11,11 @@ import { getChatThreadStorageKey } from '../../src/store/chatPersistence';
 import {
   buildInferenceMessagesForThread,
   getThreadTruncationState,
+  LONG_STREAM_PATCH_INTERVAL_MS,
   resetSharedGenerationStateForTests,
+  resolveAssistantStreamPatchInterval,
   resolvePresetSnapshot,
+  shouldFlushAssistantStreamPatchOnBoundary,
   stopActiveChatGenerationForPrivateStorageBlocked,
 } from '../../src/hooks/useChatSession';
 import { presetManager } from '../../src/services/PresetManager';
@@ -217,6 +220,25 @@ describe('useChatSession', () => {
       };
     };
   }
+
+  it('resolves adaptive stream patch cadence for short and long rendered buffers', () => {
+    expect(resolveAssistantStreamPatchInterval({
+      tokensCount: 1,
+      visibleCharCount: 12,
+      thoughtCharCount: 0,
+    })).toBeLessThan(resolveAssistantStreamPatchInterval({
+      tokensCount: 20,
+      visibleCharCount: 320,
+      thoughtCharCount: 0,
+    }));
+    expect(resolveAssistantStreamPatchInterval({
+      tokensCount: 80,
+      visibleCharCount: 300,
+      thoughtCharCount: 950,
+    })).toBe(LONG_STREAM_PATCH_INTERVAL_MS);
+    expect(shouldFlushAssistantStreamPatchOnBoundary('Rendered markdown sentence.')).toBe(true);
+    expect(shouldFlushAssistantStreamPatchOnBoundary('Rendered markdown fragment')).toBe(false);
+  });
 
   it('creates and persists a thread-backed conversation', async () => {
     const getSession = renderHookHarness();
@@ -788,8 +810,15 @@ describe('useChatSession', () => {
       lastUpdatedAt: 1,
     });
 
+    let patchCallCount = 0;
     useChatStore.setState({
-      patchAssistantMessage: jest.fn(() => {
+      patchAssistantMessage: jest.fn((...args: Parameters<typeof originalPatchAssistantMessage>) => {
+        patchCallCount += 1;
+        if (patchCallCount === 1) {
+          originalPatchAssistantMessage(...args);
+          return;
+        }
+
         throw privateStorageError;
       }),
     } as Partial<ReturnType<typeof useChatStore.getState>>);
@@ -815,6 +844,7 @@ describe('useChatSession', () => {
 
       await act(async () => {
         onToken?.('Partial answer');
+        onToken?.(' still pending');
         await expect(stopActiveChatGenerationForPrivateStorageBlocked()).resolves.toBeUndefined();
       });
 
@@ -877,7 +907,8 @@ describe('useChatSession', () => {
 
       let thread = useChatStore.getState().getActiveThread();
       expect(thread?.messages.at(-1)).toEqual(expect.objectContaining({
-        content: '',
+        content: 'Buffered answer',
+        thoughtContent: 'Buffered thought',
         state: 'streaming',
       }));
 
@@ -916,6 +947,112 @@ describe('useChatSession', () => {
         resolveStopCompletion?.();
         resolveCompletion?.();
         await stopPromise;
+        await sendPromise;
+      });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('slows long streaming UI patches while keeping first token and sentence boundaries immediate', async () => {
+    let onToken: ((token: any) => void) | undefined;
+    let resolveCompletion: (() => void) | undefined;
+    let sendPromise: Promise<void> | undefined;
+
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementation(
+      ({ onToken: tokenHandler }: { onToken?: (token: any) => void }) =>
+        new Promise((resolve) => {
+          onToken = tokenHandler;
+          resolveCompletion = () => resolve({ text: 'Final long answer.' });
+        }),
+    );
+
+    const getSession = renderHookHarness();
+    await act(async () => {
+      sendPromise = getSession()?.appendUserMessage('Stream a long markdown answer');
+    });
+
+    await waitFor(() => {
+      expect(useChatStore.getState().getActiveThread()?.status).toBe('generating');
+    });
+
+    jest.useFakeTimers();
+    try {
+      await act(async () => {
+        onToken?.({
+          token: 'intro',
+          content: 'Intro',
+          accumulatedText: 'Intro',
+          reasoningContent: 'Plan',
+        });
+        await Promise.resolve();
+      });
+
+      expect(useChatStore.getState().getActiveThread()?.messages.at(-1)).toEqual(expect.objectContaining({
+        content: 'Intro',
+        thoughtContent: 'Plan',
+        state: 'streaming',
+      }));
+
+      const longMarkdown = `Intro ${'**markdown** '.repeat(120)}`;
+      const longReasoning = 'Plan '.repeat(260);
+      await act(async () => {
+        onToken?.({
+          token: 'long',
+          content: longMarkdown,
+          accumulatedText: longMarkdown,
+          reasoningContent: longReasoning,
+        });
+        await Promise.resolve();
+      });
+
+      expect(useChatStore.getState().getActiveThread()?.messages.at(-1)).toEqual(expect.objectContaining({
+        content: 'Intro',
+        thoughtContent: 'Plan',
+      }));
+
+      act(() => {
+        jest.advanceTimersByTime(LONG_STREAM_PATCH_INTERVAL_MS - 1);
+      });
+      expect(useChatStore.getState().getActiveThread()?.messages.at(-1)).toEqual(expect.objectContaining({
+        content: 'Intro',
+      }));
+
+      act(() => {
+        jest.advanceTimersByTime(1);
+      });
+      expect(useChatStore.getState().getActiveThread()?.messages.at(-1)?.content).toContain('**markdown**');
+
+      await act(async () => {
+        onToken?.({
+          token: '.',
+          content: `${longMarkdown}.`,
+          accumulatedText: `${longMarkdown}.`,
+          reasoningContent: longReasoning,
+        });
+        await Promise.resolve();
+      });
+
+      expect(useChatStore.getState().getActiveThread()?.messages.at(-1)?.content.endsWith('.')).toBe(true);
+
+      await act(async () => {
+        onToken?.({
+          token: 'reasoning-tail',
+          accumulatedText: `${longMarkdown}.`,
+          reasoningContent: `${longReasoning} more reasoning`,
+        });
+        await Promise.resolve();
+      });
+
+      expect(useChatStore.getState().getActiveThread()?.messages.at(-1)?.thoughtContent).toBe(longReasoning);
+
+      act(() => {
+        jest.advanceTimersByTime(LONG_STREAM_PATCH_INTERVAL_MS);
+      });
+      expect(useChatStore.getState().getActiveThread()?.messages.at(-1)?.thoughtContent).toContain('more reasoning');
+
+      await act(async () => {
+        resolveCompletion?.();
         await sendPromise;
       });
     } finally {

@@ -24,9 +24,9 @@ import { createInstrumentedStateStorage } from './persistStateStorage';
 import { assertPrivateStorageWritable } from '../services/storage';
 import {
   CHAT_PERSISTENCE_SCHEMA_VERSION,
-  ChatPersistenceIndex,
-  ChatPersistencePendingIndexCommit,
-  ChatPersistenceWriteReason,
+  type ChatPersistenceIndex,
+  type ChatPersistencePendingIndexCommit,
+  type ChatPersistenceWriteReason,
   LEGACY_CHAT_STORE_STORAGE_KEY,
   clearPersistedChatRecords,
   createChatPersistenceWriteScheduler,

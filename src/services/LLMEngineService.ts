@@ -2668,6 +2668,15 @@ class LLMEngineService {
         : null;
 
       const backendInitAttempts: EngineBackendInitAttempt[] = [];
+      const publishBackendInitAttempts = () => {
+        this.backendInitAttemptsSnapshot = backendInitAttempts;
+        if (initDiagnostics) {
+          initDiagnostics = {
+            ...initDiagnostics,
+            backendInitAttempts,
+          };
+        }
+      };
 
       const applyCalibrationForGpuLayers = (nextGpuLayers: number) => {
         const normalized = Math.max(0, Math.round(nextGpuLayers));
@@ -2802,6 +2811,14 @@ class LLMEngineService {
           applyCalibrationForGpuLayers(normalizedLayers);
           return { context, resolvedGpuLayers: normalizedLayers };
         } catch (error) {
+          backendInitAttempts.push({
+            candidate,
+            nGpuLayers: normalizedLayers,
+            devices,
+            outcome: 'error',
+            error: getErrorMessageText(error),
+          });
+
           const isOomLikely = isProbableMemoryFailure(error);
           if (calibrationKeyForLoad && isOomLikely) {
             this.persistCalibrationFailure({
@@ -2852,6 +2869,13 @@ class LLMEngineService {
               applyCalibrationForGpuLayers(candidateLayers);
               return { context, resolvedGpuLayers: candidateLayers };
             } catch (retryError) {
+              backendInitAttempts.push({
+                candidate,
+                nGpuLayers: candidateLayers,
+                devices,
+                outcome: 'error',
+                error: getErrorMessageText(retryError),
+              });
               lastError = retryError;
               if (candidateCalibrationKey && isProbableMemoryFailure(retryError)) {
                 this.persistCalibrationFailure({
@@ -3159,6 +3183,7 @@ class LLMEngineService {
         const { backendMode: candidate, nGpuLayers, devices } = profile;
         const hasAcceleratorCandidateAfter = inferenceCandidatesForInit.slice(i + 1).some((next) => next.backendMode !== 'cpu');
 
+        const attemptsBeforeProfile = backendInitAttempts.length;
         try {
           const { context, resolvedGpuLayers: candidateGpuLayers } = await initLlamaWithRetry(profile);
           const reasonNoGPU = typeof context.reasonNoGPU === 'string' ? context.reasonNoGPU.trim() : '';
@@ -3169,7 +3194,7 @@ class LLMEngineService {
 
           backendInitAttempts.push({
             candidate,
-            nGpuLayers: Math.max(0, Math.round(nGpuLayers)),
+            nGpuLayers: Math.max(0, Math.round(candidateGpuLayers)),
             devices,
             outcome: 'success',
             actualGpu,
@@ -3216,13 +3241,15 @@ class LLMEngineService {
           break;
         } catch (error) {
           lastBackendInitError = error;
-          backendInitAttempts.push({
-            candidate,
-            nGpuLayers: Math.max(0, Math.round(nGpuLayers)),
-            devices,
-            outcome: 'error',
-            error: getErrorMessageText(error),
-          });
+          if (backendInitAttempts.length === attemptsBeforeProfile) {
+            backendInitAttempts.push({
+              candidate,
+              nGpuLayers: Math.max(0, Math.round(nGpuLayers)),
+              devices,
+              outcome: 'error',
+              error: getErrorMessageText(error),
+            });
+          }
 
           if (candidate === 'cpu') {
             cpuInitError = error;
@@ -3234,11 +3261,11 @@ class LLMEngineService {
         }
       }
 
+      publishBackendInitAttempts();
+
       if (!this.context) {
         throw lastBackendInitError ?? new Error('Failed to initialize inference backend');
       }
-
-      this.backendInitAttemptsSnapshot = backendInitAttempts;
 
       // If the user explicitly requested an accelerator but we ended up initializing a CPU profile,
       // reflect that in the effective backend policy so diagnostics/UI make the fallback obvious.
@@ -3277,13 +3304,6 @@ class LLMEngineService {
           ? Math.round(resolvedInitProfile.nUbatch)
           : null;
         this.initKvUnified = typeof resolvedInitProfile.kvUnified === 'boolean' ? resolvedInitProfile.kvUnified : null;
-      }
-
-      if (initDiagnostics) {
-        initDiagnostics = {
-          ...initDiagnostics,
-          backendInitAttempts,
-        };
       }
 
       if (initDiagnostics) {

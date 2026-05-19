@@ -970,7 +970,86 @@ describe('LLMEngineService', () => {
       loadedGpuLayers: 9,
       actualGpuAccelerated: true,
       backendDevices: ['Adreno GPU'],
+      backendInitAttempts: [
+        expect.objectContaining({
+          candidate: 'gpu',
+          nGpuLayers: 12,
+          outcome: 'error',
+          error: 'GPU OOM',
+        }),
+        expect.objectContaining({
+          candidate: 'gpu',
+          nGpuLayers: 9,
+          outcome: 'success',
+          actualGpu: true,
+        }),
+      ],
     }));
+  });
+
+  it('includes backend init attempts in load errors when every profile fails', async () => {
+    (getModelLoadParametersForModel as jest.Mock).mockReturnValueOnce({
+      contextSize: 4096,
+      gpuLayers: 12,
+      kvCacheType: 'f16',
+    });
+    (llamaRn.initLlama as jest.Mock).mockImplementation(async (options?: { n_gpu_layers?: number }) => {
+      const layers = options?.n_gpu_layers ?? 0;
+      throw new Error(layers > 0 ? `GPU OOM at ${layers}` : 'CPU init failed');
+    });
+
+    const thrown = await llmEngineService.load('test/model', { forceReload: true }).catch((error) => error);
+
+    expect(thrown).toMatchObject({
+      code: 'model_load_failed',
+      details: expect.objectContaining({
+        gpuInitError: 'GPU OOM at 1',
+        cpuInitError: 'CPU init failed',
+        backendInitAttempts: [
+          expect.objectContaining({
+            candidate: 'gpu',
+            nGpuLayers: 12,
+            outcome: 'error',
+            error: 'GPU OOM at 12',
+          }),
+          expect.objectContaining({
+            candidate: 'gpu',
+            nGpuLayers: 9,
+            outcome: 'error',
+            error: 'GPU OOM at 9',
+          }),
+          expect.objectContaining({
+            candidate: 'gpu',
+            nGpuLayers: 6,
+            outcome: 'error',
+            error: 'GPU OOM at 6',
+          }),
+          expect.objectContaining({
+            candidate: 'gpu',
+            nGpuLayers: 3,
+            outcome: 'error',
+            error: 'GPU OOM at 3',
+          }),
+          expect.objectContaining({
+            candidate: 'gpu',
+            nGpuLayers: 1,
+            outcome: 'error',
+            error: 'GPU OOM at 1',
+          }),
+          expect.objectContaining({
+            candidate: 'cpu',
+            nGpuLayers: 0,
+            outcome: 'error',
+            error: 'CPU init failed',
+          }),
+        ],
+      }),
+    });
+    expect(llmEngineService.getLastModelLoadError()?.error.details).toEqual(
+      expect.objectContaining({
+        backendInitAttempts: thrown.details.backendInitAttempts,
+      }),
+    );
   });
 
   it('reports CPU runtime honestly when upstream does not enable GPU acceleration', async () => {

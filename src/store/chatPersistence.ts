@@ -4,6 +4,7 @@ import type { AppStorageFacade } from './storage';
 export const LEGACY_CHAT_STORE_STORAGE_KEY = 'chat-store';
 export const CHAT_PERSISTENCE_SCHEMA_VERSION = 2;
 export const CHAT_PERSISTENCE_INDEX_KEY = 'chat-store:v2:index';
+export const CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY = 'chat-store:v2:index:pending';
 export const CHAT_THREAD_STORAGE_KEY_PREFIX = 'chat-store:v2:thread:';
 export const DEFAULT_STREAMING_PERSISTENCE_DEBOUNCE_MS = 750;
 
@@ -21,6 +22,7 @@ export interface ChatPersistenceIndex {
   activeThreadId: string | null;
   threadIds: string[];
   updatedAt: number;
+  revision?: number;
   clearedAt?: number;
   migratedFromLegacyAt?: number;
   corruptThreadIds?: string[];
@@ -30,6 +32,20 @@ export interface ChatThreadRecord {
   schemaVersion: typeof CHAT_PERSISTENCE_SCHEMA_VERSION;
   thread: ChatThread;
   persistedAt: number;
+  commitRevision?: number;
+}
+
+export interface ChatPersistencePendingIndexCommit {
+  schemaVersion: typeof CHAT_PERSISTENCE_SCHEMA_VERSION;
+  revision: number;
+  activeThreadId: string | null;
+  threadIds: string[];
+  updatedAt: number;
+  reason: ChatPersistenceWriteReason;
+  changedThreadIds?: string[];
+  removedThreadIds?: string[];
+  corruptThreadIds?: string[];
+  migratedFromLegacyAt?: number;
 }
 
 export type ChatPersistenceReadResult<T> =
@@ -74,6 +90,26 @@ function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((entry) => typeof entry === 'string');
 }
 
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+function parseOptionalRevision(value: unknown): number | undefined {
+  return isNonNegativeSafeInteger(value) ? value : undefined;
+}
+
+function isChatPersistenceWriteReason(value: unknown): value is ChatPersistenceWriteReason {
+  return (
+    value === 'streaming_patch' ||
+    value === 'terminal_state' ||
+    value === 'thread_mutation' ||
+    value === 'retention_cleanup' ||
+    value === 'migration' ||
+    value === 'active_thread' ||
+    value === 'background'
+  );
+}
+
 export function parseChatPersistenceIndex(raw: string | null | undefined): ChatPersistenceReadResult<ChatPersistenceIndex> {
   const parsed = parseJsonObject(raw);
   if (!parsed.ok) {
@@ -85,7 +121,8 @@ export function parseChatPersistenceIndex(raw: string | null | undefined): ChatP
     value.schemaVersion !== CHAT_PERSISTENCE_SCHEMA_VERSION ||
     !(typeof value.activeThreadId === 'string' || value.activeThreadId === null) ||
     !isStringArray(value.threadIds) ||
-    typeof value.updatedAt !== 'number'
+    typeof value.updatedAt !== 'number' ||
+    (value.revision != null && !isNonNegativeSafeInteger(value.revision))
   ) {
     return { ok: false, reason: 'invalid_shape' };
   }
@@ -97,6 +134,7 @@ export function parseChatPersistenceIndex(raw: string | null | undefined): ChatP
       activeThreadId: value.activeThreadId,
       threadIds: value.threadIds,
       updatedAt: value.updatedAt,
+      revision: parseOptionalRevision(value.revision),
       clearedAt: typeof value.clearedAt === 'number' ? value.clearedAt : undefined,
       migratedFromLegacyAt: typeof value.migratedFromLegacyAt === 'number' ? value.migratedFromLegacyAt : undefined,
       corruptThreadIds: isStringArray(value.corruptThreadIds) ? value.corruptThreadIds : undefined,
@@ -121,7 +159,8 @@ export function parseChatThreadRecord(
     typeof thread !== 'object' ||
     typeof thread.id !== 'string' ||
     (expectedThreadId != null && thread.id !== expectedThreadId) ||
-    typeof value.persistedAt !== 'number'
+    typeof value.persistedAt !== 'number' ||
+    (value.commitRevision != null && !isNonNegativeSafeInteger(value.commitRevision))
   ) {
     return { ok: false, reason: 'invalid_shape' };
   }
@@ -132,6 +171,47 @@ export function parseChatThreadRecord(
       schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
       thread: thread as ChatThread,
       persistedAt: value.persistedAt,
+      commitRevision: parseOptionalRevision(value.commitRevision),
+    },
+  };
+}
+
+export function parseChatPendingIndexCommit(
+  raw: string | null | undefined,
+): ChatPersistenceReadResult<ChatPersistencePendingIndexCommit> {
+  const parsed = parseJsonObject(raw);
+  if (!parsed.ok) {
+    return parsed;
+  }
+
+  const value = parsed.value;
+  if (
+    value.schemaVersion !== CHAT_PERSISTENCE_SCHEMA_VERSION ||
+    !isNonNegativeSafeInteger(value.revision) ||
+    !(typeof value.activeThreadId === 'string' || value.activeThreadId === null) ||
+    !isStringArray(value.threadIds) ||
+    typeof value.updatedAt !== 'number' ||
+    !isChatPersistenceWriteReason(value.reason) ||
+    (value.changedThreadIds != null && !isStringArray(value.changedThreadIds)) ||
+    (value.removedThreadIds != null && !isStringArray(value.removedThreadIds)) ||
+    (value.corruptThreadIds != null && !isStringArray(value.corruptThreadIds))
+  ) {
+    return { ok: false, reason: 'invalid_shape' };
+  }
+
+  return {
+    ok: true,
+    value: {
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      revision: value.revision,
+      activeThreadId: value.activeThreadId,
+      threadIds: value.threadIds,
+      updatedAt: value.updatedAt,
+      reason: value.reason,
+      changedThreadIds: isStringArray(value.changedThreadIds) ? value.changedThreadIds : undefined,
+      removedThreadIds: isStringArray(value.removedThreadIds) ? value.removedThreadIds : undefined,
+      corruptThreadIds: isStringArray(value.corruptThreadIds) ? value.corruptThreadIds : undefined,
+      migratedFromLegacyAt: typeof value.migratedFromLegacyAt === 'number' ? value.migratedFromLegacyAt : undefined,
     },
   };
 }
@@ -140,11 +220,28 @@ export function writeChatPersistenceIndex(storage: AppStorageFacade, index: Chat
   storage.set(CHAT_PERSISTENCE_INDEX_KEY, JSON.stringify(index));
 }
 
-export function writeChatThreadRecord(storage: AppStorageFacade, thread: ChatThread, persistedAt = Date.now()): void {
+export function writeChatPendingIndexCommit(
+  storage: AppStorageFacade,
+  commit: ChatPersistencePendingIndexCommit,
+): void {
+  storage.set(CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY, JSON.stringify(commit));
+}
+
+export function removeChatPendingIndexCommit(storage: AppStorageFacade): void {
+  storage.remove(CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY);
+}
+
+export function writeChatThreadRecord(
+  storage: AppStorageFacade,
+  thread: ChatThread,
+  persistedAt = Date.now(),
+  options?: { commitRevision?: number },
+): void {
   const record: ChatThreadRecord = {
     schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
     thread: sanitizeChatThreadForPersistence(thread),
     persistedAt,
+    commitRevision: options?.commitRevision,
   };
   storage.set(getChatThreadStorageKey(thread.id), JSON.stringify(record));
 }
@@ -176,19 +273,38 @@ function resolveClearTombstoneTimestamp(storage: AppStorageFacade, now = Date.no
 
 export function clearPersistedChatRecords(storage: AppStorageFacade): void {
   const clearedAt = resolveClearTombstoneTimestamp(storage);
+  const revision = resolveNextChatPersistenceRevision(storage);
+  removeChatPendingIndexCommit(storage);
   writeChatPersistenceIndex(storage, {
     schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
     activeThreadId: null,
     threadIds: [],
     updatedAt: clearedAt,
+    revision,
     clearedAt,
   });
   storage.remove(LEGACY_CHAT_STORE_STORAGE_KEY);
   listChatThreadStorageKeys(storage).forEach((key) => storage.remove(key));
+  removeChatPendingIndexCommit(storage);
 }
 
 export function readChatPersistenceIndex(storage: AppStorageFacade): ChatPersistenceReadResult<ChatPersistenceIndex> {
   return parseChatPersistenceIndex(storage.getString(CHAT_PERSISTENCE_INDEX_KEY) ?? null);
+}
+
+export function readChatPendingIndexCommit(
+  storage: AppStorageFacade,
+): ChatPersistenceReadResult<ChatPersistencePendingIndexCommit> {
+  return parseChatPendingIndexCommit(storage.getString(CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY) ?? null);
+}
+
+export function getChatPersistenceIndexRevision(index: ChatPersistenceIndex | null | undefined): number {
+  return index?.revision ?? 0;
+}
+
+export function resolveNextChatPersistenceRevision(storage: AppStorageFacade): number {
+  const indexResult = readChatPersistenceIndex(storage);
+  return getChatPersistenceIndexRevision(indexResult.ok ? indexResult.value : null) + 1;
 }
 
 export function readChatThreadRecord(

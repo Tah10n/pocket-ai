@@ -24,17 +24,24 @@ import { createInstrumentedStateStorage } from './persistStateStorage';
 import { assertPrivateStorageWritable } from '../services/storage';
 import {
   CHAT_PERSISTENCE_SCHEMA_VERSION,
+  ChatPersistenceIndex,
+  ChatPersistencePendingIndexCommit,
   ChatPersistenceWriteReason,
   LEGACY_CHAT_STORE_STORAGE_KEY,
   clearPersistedChatRecords,
   createChatPersistenceWriteScheduler,
+  getChatPersistenceIndexRevision,
   getThreadIdFromChatThreadStorageKey,
   listChatThreadStorageKeys,
   readChatPersistenceIndex,
+  readChatPendingIndexCommit,
   readChatThreadRecord,
   recoverStaleStreamingThread,
+  removeChatPendingIndexCommit,
   removeChatThreadRecord,
+  resolveNextChatPersistenceRevision,
   writeChatPersistenceIndex,
+  writeChatPendingIndexCommit,
   writeChatThreadRecord,
 } from './chatPersistence';
 
@@ -216,6 +223,10 @@ function hasV2ChatPersistence() {
     return true;
   }
 
+  if (readChatPendingIndexCommit(storage).ok) {
+    return true;
+  }
+
   return listChatThreadStorageKeys(storage).length > 0;
 }
 
@@ -294,23 +305,40 @@ function resolveActiveThreadId(
     : findMostRecentThreadId(threads);
 }
 
+function createChatPersistenceIndexForSnapshot(
+  snapshot: ChatStoreSnapshot,
+  options?: {
+    updatedAt?: number;
+    revision?: number;
+    migratedFromLegacyAt?: number;
+    corruptThreadIds?: string[];
+  },
+): ChatPersistenceIndex {
+  const threadIds = Object.keys(snapshot.threads);
+  return {
+    schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+    activeThreadId: resolveActiveThreadId(snapshot.threads, snapshot.activeThreadId),
+    threadIds,
+    updatedAt: options?.updatedAt ?? Date.now(),
+    revision: options?.revision,
+    migratedFromLegacyAt: options?.migratedFromLegacyAt,
+    corruptThreadIds: options?.corruptThreadIds?.length ? options.corruptThreadIds : undefined,
+  };
+}
+
 function writeChatPersistenceIndexForSnapshot(
   storage: ReturnType<typeof getAppStorage>,
   snapshot: ChatStoreSnapshot,
   options?: {
+    updatedAt?: number;
+    revision?: number;
     migratedFromLegacyAt?: number;
     corruptThreadIds?: string[];
   },
 ) {
-  const threadIds = Object.keys(snapshot.threads);
-  writeChatPersistenceIndex(storage, {
-    schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
-    activeThreadId: resolveActiveThreadId(snapshot.threads, snapshot.activeThreadId),
-    threadIds,
-    updatedAt: Date.now(),
-    migratedFromLegacyAt: options?.migratedFromLegacyAt,
-    corruptThreadIds: options?.corruptThreadIds?.length ? options.corruptThreadIds : undefined,
-  });
+  const index = createChatPersistenceIndexForSnapshot(snapshot, options);
+  writeChatPersistenceIndex(storage, index);
+  return index;
 }
 
 function resolveThreadRecordPersistedAtForWrite(
@@ -333,8 +361,60 @@ function resolveThreadRecordPersistedAtForWrite(
 function writeChatThreadRecordForMutation(
   storage: ReturnType<typeof getAppStorage>,
   thread: ChatThread,
+  options?: { commitRevision?: number },
 ) {
-  writeChatThreadRecord(storage, thread, resolveThreadRecordPersistedAtForWrite(storage));
+  writeChatThreadRecord(storage, thread, resolveThreadRecordPersistedAtForWrite(storage), {
+    commitRevision: options?.commitRevision,
+  });
+}
+
+function writeChatPersistenceSnapshotTransaction(
+  storage: ReturnType<typeof getAppStorage>,
+  snapshot: ChatStoreSnapshot,
+  reason: ChatPersistenceWriteReason,
+  options?: {
+    changedThreadIds?: string[];
+    removedThreadIds?: string[];
+    migratedFromLegacyAt?: number;
+    corruptThreadIds?: string[];
+  },
+) {
+  const updatedAt = Date.now();
+  const revision = resolveNextChatPersistenceRevision(storage);
+  const index = createChatPersistenceIndexForSnapshot(snapshot, {
+    updatedAt,
+    revision,
+    migratedFromLegacyAt: options?.migratedFromLegacyAt,
+    corruptThreadIds: options?.corruptThreadIds,
+  });
+  const changedThreadIds = options?.changedThreadIds?.filter((threadId) => snapshot.threads[threadId]) ?? [];
+  const removedThreadIds = options?.removedThreadIds ?? [];
+
+  writeChatPendingIndexCommit(storage, {
+    schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+    revision,
+    activeThreadId: index.activeThreadId,
+    threadIds: index.threadIds,
+    updatedAt,
+    reason,
+    changedThreadIds: changedThreadIds.length ? changedThreadIds : undefined,
+    removedThreadIds: removedThreadIds.length ? removedThreadIds : undefined,
+    corruptThreadIds: index.corruptThreadIds,
+    migratedFromLegacyAt: index.migratedFromLegacyAt,
+  });
+
+  removedThreadIds.forEach((threadId) => {
+    removeChatThreadRecord(storage, threadId);
+  });
+  changedThreadIds.forEach((threadId) => {
+    const thread = snapshot.threads[threadId];
+    if (thread) {
+      writeChatThreadRecordForMutation(storage, thread, { commitRevision: revision });
+    }
+  });
+
+  writeChatPersistenceIndex(storage, index);
+  removeChatPendingIndexCommit(storage);
 }
 
 function readHydratableChatThreadRecord(
@@ -362,8 +442,91 @@ function readHydratableChatThreadRecord(
   };
 }
 
+function sameStringList(left: string[], right: string[]) {
+  return left.length === right.length && left.every((entry, index) => entry === right[index]);
+}
+
+function isPendingIndexCommitAlreadyApplied(
+  index: ChatPersistenceIndex | null,
+  pending: ChatPersistencePendingIndexCommit,
+) {
+  if (!index) {
+    return false;
+  }
+
+  if (getChatPersistenceIndexRevision(index) > pending.revision) {
+    return true;
+  }
+
+  return (
+    getChatPersistenceIndexRevision(index) === pending.revision &&
+    index.activeThreadId === pending.activeThreadId &&
+    sameStringList(index.threadIds, pending.threadIds)
+  );
+}
+
+function recoverPendingChatIndexCommit(storage: ReturnType<typeof getAppStorage>, now: number): void {
+  const pendingResult = readChatPendingIndexCommit(storage);
+  if (!pendingResult.ok) {
+    if (pendingResult.reason !== 'missing') {
+      removeChatPendingIndexCommit(storage);
+    }
+    return;
+  }
+
+  const pending = pendingResult.value;
+  const indexResult = readChatPersistenceIndex(storage);
+  const index = indexResult.ok ? indexResult.value : null;
+  if (isPendingIndexCommitAlreadyApplied(index, pending)) {
+    if (getChatPersistenceIndexRevision(index) === pending.revision) {
+      pending.removedThreadIds?.forEach((threadId) => {
+        removeChatThreadRecord(storage, threadId);
+      });
+    }
+    removeChatPendingIndexCommit(storage);
+    return;
+  }
+
+  const threads: Record<string, ChatThread> = {};
+  const corruptThreadIds = new Set(pending.corruptThreadIds ?? []);
+  const removedThreadIds = new Set(pending.removedThreadIds ?? []);
+
+  removedThreadIds.forEach((threadId) => {
+    removeChatThreadRecord(storage, threadId);
+  });
+
+  pending.threadIds.forEach((threadId) => {
+    if (removedThreadIds.has(threadId)) {
+      return;
+    }
+
+    const record = readHydratableChatThreadRecord(storage, threadId, now);
+    if (!record.ok) {
+      corruptThreadIds.add(threadId);
+      return;
+    }
+
+    threads[record.thread.id] = record.thread;
+    corruptThreadIds.delete(record.thread.id);
+
+    if (record.recovered) {
+      writeChatThreadRecord(storage, record.thread, now, { commitRevision: pending.revision });
+    }
+  });
+
+  const activeThreadId = resolveActiveThreadId(threads, pending.activeThreadId);
+  writeChatPersistenceIndexForSnapshot(storage, { threads, activeThreadId }, {
+    updatedAt: Math.max(now, pending.updatedAt),
+    revision: pending.revision,
+    migratedFromLegacyAt: pending.migratedFromLegacyAt,
+    corruptThreadIds: Array.from(corruptThreadIds),
+  });
+  removeChatPendingIndexCommit(storage);
+}
+
 function readV2PersistedChatState(now = Date.now()): ChatStoreHydrationResult | null {
   const storage = getAppStorage();
+  recoverPendingChatIndexCommit(storage, now);
   const indexResult = readChatPersistenceIndex(storage);
   const index = indexResult.ok ? indexResult.value : null;
   const isClearTombstone = index?.clearedAt != null && index.threadIds.length === 0;
@@ -380,7 +543,7 @@ function readV2PersistedChatState(now = Date.now()): ChatStoreHydrationResult | 
     }
 
     const threads: Record<string, ChatThread> = {};
-    const corruptThreadIds: string[] = [];
+    const corruptThreadIds = new Set(index.corruptThreadIds ?? []);
 
     try {
       storage.remove(LEGACY_CHAT_STORE_STORAGE_KEY);
@@ -394,11 +557,12 @@ function readV2PersistedChatState(now = Date.now()): ChatStoreHydrationResult | 
         }
 
         if (!record.ok) {
-          corruptThreadIds.push(threadId);
+          corruptThreadIds.add(threadId);
           return;
         }
 
         threads[record.thread.id] = record.thread;
+        corruptThreadIds.delete(record.thread.id);
 
         if (record.recovered) {
           writeChatThreadRecord(storage, record.thread, Math.max(now, clearedAt + 1));
@@ -412,17 +576,21 @@ function readV2PersistedChatState(now = Date.now()): ChatStoreHydrationResult | 
       fallbackOnExplicitNull: true,
     });
 
-    if (Object.keys(threads).length > 0 || corruptThreadIds.length > 0) {
-      writeChatPersistenceIndexForSnapshot(storage, { threads, activeThreadId }, { corruptThreadIds });
+    const corruptThreadIdList = Array.from(corruptThreadIds);
+    if (Object.keys(threads).length > 0 || corruptThreadIdList.length > 0) {
+      writeChatPersistenceIndexForSnapshot(storage, { threads, activeThreadId }, {
+        revision: getChatPersistenceIndexRevision(index),
+        corruptThreadIds: corruptThreadIdList,
+      });
     }
 
     return {
       threads,
       activeThreadId,
-      clearedAt: Object.keys(threads).length === 0 && corruptThreadIds.length === 0
+      clearedAt: Object.keys(threads).length === 0 && corruptThreadIdList.length === 0
         ? clearedAt
         : undefined,
-      corruptThreadIds,
+      corruptThreadIds: corruptThreadIdList,
       legacyBlockedByClear: true,
     };
   }
@@ -432,18 +600,19 @@ function readV2PersistedChatState(now = Date.now()): ChatStoreHydrationResult | 
   }
 
   const threads: Record<string, ChatThread> = {};
-  const corruptThreadIds: string[] = [];
+  const corruptThreadIds = new Set(index?.corruptThreadIds ?? []);
 
   threadIds.forEach((threadId) => {
     const record = readHydratableChatThreadRecord(storage, threadId, now);
 
     if (!record.ok) {
-      corruptThreadIds.push(threadId);
+      corruptThreadIds.add(threadId);
       return;
     }
 
     const { thread } = record;
     threads[thread.id] = thread;
+    corruptThreadIds.delete(thread.id);
 
     if (record.recovered) {
       writeChatThreadRecord(storage, thread, now);
@@ -457,9 +626,13 @@ function readV2PersistedChatState(now = Date.now()): ChatStoreHydrationResult | 
       fallbackOnExplicitNull: index != null && index.threadIds.length === 0,
     },
   );
-  writeChatPersistenceIndexForSnapshot(storage, { threads, activeThreadId }, { corruptThreadIds });
+  const corruptThreadIdList = Array.from(corruptThreadIds);
+  writeChatPersistenceIndexForSnapshot(storage, { threads, activeThreadId }, {
+    revision: getChatPersistenceIndexRevision(index),
+    corruptThreadIds: corruptThreadIdList,
+  });
 
-  return { threads, activeThreadId, corruptThreadIds };
+  return { threads, activeThreadId, corruptThreadIds: corruptThreadIdList };
 }
 
 function migrateLegacyPersistedChatState(
@@ -476,6 +649,7 @@ function migrateLegacyPersistedChatState(
     ? { ...existingV2State.threads }
     : {};
   const corruptThreadIds = new Set(existingV2State?.corruptThreadIds ?? []);
+  const changedThreadIds: string[] = [];
 
   Object.entries(persistedState.threads).forEach(([threadId, rawThread]) => {
     const sanitized = sanitizePersistedChatThread(rawThread, now);
@@ -491,7 +665,7 @@ function migrateLegacyPersistedChatState(
 
     threads[thread.id] = thread;
     corruptThreadIds.delete(thread.id);
-    writeChatThreadRecord(storage, thread, now);
+    changedThreadIds.push(thread.id);
   });
 
   const preferredActiveThreadId = typeof persistedState.activeThreadId === 'string'
@@ -509,7 +683,8 @@ function migrateLegacyPersistedChatState(
     threads,
     preferredActiveThreadId,
   );
-  writeChatPersistenceIndexForSnapshot(storage, { threads, activeThreadId }, {
+  writeChatPersistenceSnapshotTransaction(storage, { threads, activeThreadId }, 'migration', {
+    changedThreadIds,
     migratedFromLegacyAt: now,
     corruptThreadIds: Array.from(corruptThreadIds),
   });
@@ -594,41 +769,29 @@ function persistChatStoreMutation(
     return;
   }
 
-  const persistedThreadIds = new Set<string>();
-
-  removedThreadIds.forEach((threadId) => {
-    removeChatThreadRecord(storage, threadId);
-    persistedThreadIds.add(threadId);
-  });
-
   if (reason === 'streaming_patch') {
     changedThreadIds.forEach((threadId) => {
       chatPersistenceScheduler.scheduleStreamingThreadWrite(threadId);
     });
 
     if (removedThreadIds.length > 0 || activeThreadChanged) {
-      writeChatPersistenceIndexForSnapshot(storage, next);
+      writeChatPersistenceSnapshotTransaction(storage, next, reason, {
+        removedThreadIds,
+      });
     }
 
-    persistedThreadIds.forEach((threadId) => {
+    removedThreadIds.forEach((threadId) => {
       chatPersistenceScheduler.cancelThreadWrite(threadId);
     });
     return;
   }
 
-  changedThreadIds.forEach((threadId) => {
-    const thread = next.threads[threadId];
-    if (!thread) {
-      return;
-    }
-
-    writeChatThreadRecordForMutation(storage, thread);
-    persistedThreadIds.add(threadId);
+  writeChatPersistenceSnapshotTransaction(storage, next, reason, {
+    changedThreadIds,
+    removedThreadIds,
   });
 
-  writeChatPersistenceIndexForSnapshot(storage, next);
-
-  persistedThreadIds.forEach((threadId) => {
+  [...changedThreadIds, ...removedThreadIds].forEach((threadId) => {
     chatPersistenceScheduler.cancelThreadWrite(threadId);
   });
 }
@@ -1376,14 +1539,15 @@ function flushChatThreadPersistence(threadId: string, reason: ChatPersistenceWri
   const thread = state.threads[threadId];
 
   if (!thread) {
-    removeChatThreadRecord(storage, threadId);
-    writeChatPersistenceIndexForSnapshot(storage, state);
+    writeChatPersistenceSnapshotTransaction(storage, state, reason, {
+      removedThreadIds: [threadId],
+    });
     return;
   }
 
-  void reason;
-  writeChatThreadRecordForMutation(storage, thread);
-  writeChatPersistenceIndexForSnapshot(storage, state);
+  writeChatPersistenceSnapshotTransaction(storage, state, reason, {
+    changedThreadIds: [threadId],
+  });
 }
 
 const chatPersistenceScheduler = createChatPersistenceWriteScheduler({

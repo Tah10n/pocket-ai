@@ -37,7 +37,12 @@ import { useTruncationTracking } from './useTruncationTracking';
 
 export { SUMMARY_AFFORDANCE_MIN_TRUNCATED_MESSAGES } from '../utils/inferenceWindow';
 const DEFAULT_CONTEXT_SIZE = 4096;
-const STREAM_PATCH_INTERVAL_MS = 100;
+export const INITIAL_STREAM_PATCH_INTERVAL_MS = 80;
+export const DEFAULT_STREAM_PATCH_INTERVAL_MS = 140;
+export const LONG_STREAM_PATCH_INTERVAL_MS = 320;
+export const LONG_STREAM_PATCH_TOKEN_THRESHOLD = 64;
+export const LONG_STREAM_PATCH_CHAR_THRESHOLD = 1200;
+const STREAM_BOUNDARY_PATTERN = /[.!?。！？](?:["')\]}]|[\s])*$/;
 
 interface ActiveGenerationState {
   threadId: string;
@@ -61,6 +66,33 @@ function isMatchingGeneration(threadId: string, messageId: string) {
 function isNativeCompletionSettlingAfterStop() {
   const generation = sharedGenerationState.current;
   return generation?.stopRequested === true && generation.nativeCompletionStarted;
+}
+
+export function resolveAssistantStreamPatchInterval({
+  tokensCount,
+  visibleCharCount,
+  thoughtCharCount,
+}: {
+  tokensCount: number;
+  visibleCharCount: number;
+  thoughtCharCount: number;
+}) {
+  if (tokensCount <= 8 && visibleCharCount + thoughtCharCount < 240) {
+    return INITIAL_STREAM_PATCH_INTERVAL_MS;
+  }
+
+  if (
+    tokensCount >= LONG_STREAM_PATCH_TOKEN_THRESHOLD ||
+    visibleCharCount + thoughtCharCount >= LONG_STREAM_PATCH_CHAR_THRESHOLD
+  ) {
+    return LONG_STREAM_PATCH_INTERVAL_MS;
+  }
+
+  return DEFAULT_STREAM_PATCH_INTERVAL_MS;
+}
+
+export function shouldFlushAssistantStreamPatchOnBoundary(content: string) {
+  return STREAM_BOUNDARY_PATTERN.test(content.trimEnd());
 }
 
 export function resetSharedGenerationStateForTests() {
@@ -329,8 +361,11 @@ export const useChatSession = () => {
     let hasMarkedFirstToken = false;
     const startTime = Date.now();
     let flushTimeout: ReturnType<typeof setTimeout> | null = null;
+    let scheduledFlushDelayMs: number | null = null;
     let unsubscribeExpiration: (() => void) | null = null;
     let sentBackgroundOutcomeNotification: 'interrupted' | 'error' | null = null;
+    let hasFlushedFirstAssistantPatch = false;
+    let lastFlushedVisibleContent = '';
 
     let needsVisibleRefresh = false;
 
@@ -375,10 +410,17 @@ export const useChatSession = () => {
       && (options?.allowStopped === true || !generationState.stopRequested)
     );
 
+    const hasBufferedAssistantContent = () => (
+      currentRawText.length > 0 ||
+      currentText.length > 0 ||
+      currentThoughtText.length > 0
+    );
+
     const flushAssistantPatch = (options?: { allowStopped?: boolean; includeStreamingState?: boolean }) => {
       if (flushTimeout) {
         clearTimeout(flushTimeout);
         flushTimeout = null;
+        scheduledFlushDelayMs = null;
       }
 
       if (!canMutateAssistantMessage(options)) {
@@ -401,17 +443,49 @@ export const useChatSession = () => {
       }
 
       patchAssistantMessage(threadId, assistantMessageId, updates);
+      if (hasBufferedAssistantContent()) {
+        hasFlushedFirstAssistantPatch = true;
+        lastFlushedVisibleContent = currentText || currentRawText;
+      }
     };
 
-    const scheduleAssistantPatch = () => {
+    const scheduleAssistantPatch = (options?: { sentenceBoundary?: boolean }) => {
+      if (!hasFlushedFirstAssistantPatch && hasBufferedAssistantContent()) {
+        flushAssistantPatch();
+        return;
+      }
+
+      if (options?.sentenceBoundary && hasBufferedAssistantContent()) {
+        flushAssistantPatch();
+        return;
+      }
+
+      const delayMs = resolveAssistantStreamPatchInterval({
+        tokensCount,
+        visibleCharCount: Math.max(currentText.length, currentRawText.length),
+        thoughtCharCount: currentThoughtText.length,
+      });
+
+      if (flushTimeout) {
+        if (scheduledFlushDelayMs != null && delayMs > scheduledFlushDelayMs) {
+          clearTimeout(flushTimeout);
+          flushTimeout = null;
+          scheduledFlushDelayMs = null;
+        } else {
+          return;
+        }
+      }
+
       if (flushTimeout) {
         return;
       }
 
+      scheduledFlushDelayMs = delayMs;
       flushTimeout = setTimeout(() => {
         flushTimeout = null;
+        scheduledFlushDelayMs = null;
         flushAssistantPatch();
-      }, STREAM_PATCH_INTERVAL_MS);
+      }, delayMs);
     };
 
     generationState.flushPendingAssistantPatch = () => {
@@ -667,7 +741,14 @@ export const useChatSession = () => {
           }
 
           tokensCount += 1;
-          scheduleAssistantPatch();
+          const boundaryCandidate = needsVisibleRefresh
+            ? currentRawText
+            : (currentText || currentRawText);
+          scheduleAssistantPatch({
+            sentenceBoundary:
+              boundaryCandidate !== lastFlushedVisibleContent &&
+              shouldFlushAssistantStreamPatchOnBoundary(boundaryCandidate),
+          });
         },
       });
 
@@ -735,6 +816,7 @@ export const useChatSession = () => {
     } finally {
       if (flushTimeout) {
         clearTimeout(flushTimeout);
+        scheduledFlushDelayMs = null;
       }
 
       unsubscribeExpiration?.();

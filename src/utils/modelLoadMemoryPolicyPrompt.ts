@@ -124,5 +124,16 @@ export function handleModelLoadMemoryPolicyError({
     return true;
   }
 
+  if (appError.code === 'model_memory_insufficient') {
+    onBlocked?.();
+
+    Alert.alert(
+      t('models.ramLikelyOom'),
+      t('common.errors.modelMemoryInsufficient'),
+      [{ text: t('common.close') }],
+    );
+    return true;
+  }
+
   return false;
 }

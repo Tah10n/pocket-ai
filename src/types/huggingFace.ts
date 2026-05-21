@@ -63,6 +63,13 @@ export type HuggingFaceModelConfig = {
   };
   model_type?: string;
   architectures?: string[];
+  nextn_predict_layers?: number | string;
+  next_n_predict_layers?: number | string;
+  num_nextn_predict_layers?: number | string;
+  num_next_n_predict_layers?: number | string;
+  mtp_depth?: number | string;
+  mtp_layers?: number | string;
+  mtp_num_layers?: number | string;
 };
 
 export type HuggingFaceSibling = {
@@ -98,6 +105,7 @@ export type HuggingFaceTreeStopReason =
   | 'preferred_found'
   | 'lookahead'
   | 'max_pages'
+  | 'invalid_cursor'
   | 'http_error';
 
 export type HuggingFaceTreeResponse = {

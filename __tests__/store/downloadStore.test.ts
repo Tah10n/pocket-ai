@@ -52,6 +52,13 @@ describe('downloadStore', () => {
           ...buildQueuedModel('paused', LifecycleStatus.PAUSED),
           resumeData: 'resume-data',
           downloadProgress: 0.42,
+          localPath: 'paused.partial.gguf',
+          allowUnknownSizeDownload: true,
+          downloadIntegrity: {
+            kind: 'size',
+            sizeBytes: 1024,
+            checkedAt: 123,
+          },
         },
       ],
       activeDownloadId: null,
@@ -64,6 +71,141 @@ describe('downloadStore', () => {
     expect(entry?.lifecycleStatus).toBe(LifecycleStatus.QUEUED);
     expect(entry?.resumeData).toBe('resume-data');
     expect(entry?.downloadProgress).toBe(0.42);
+    expect(entry?.localPath).toBe('paused.partial.gguf');
+    expect(entry?.allowUnknownSizeDownload).toBe(true);
+    expect(entry?.downloadIntegrity).toEqual({
+      kind: 'size',
+      sizeBytes: 1024,
+      checkedAt: 123,
+    });
+  });
+
+  it('clears resumable state for legacy entries lacking file identity when another variant is queued', () => {
+    useDownloadStore.setState({
+      queue: [
+        {
+          ...buildQueuedModel('legacy-variant', LifecycleStatus.PAUSED),
+          size: null,
+          downloadUrl: undefined as unknown as string,
+          hfRevision: 'main',
+          resumeData: 'legacy-resume-data',
+          downloadProgress: 0.64,
+          localPath: 'legacy-variant.Q4_K_M.partial.gguf',
+          allowUnknownSizeDownload: true,
+          downloadIntegrity: {
+            kind: 'size',
+            sizeBytes: 4 * 1024 * 1024 * 1024,
+            checkedAt: 456,
+          },
+        },
+      ],
+      activeDownloadId: null,
+    });
+
+    useDownloadStore.getState().addToQueue({
+      ...buildQueuedModel('legacy-variant', LifecycleStatus.AVAILABLE),
+      size: null,
+      downloadUrl: 'https://example.com/legacy-variant.Q8_0.gguf',
+      resolvedFileName: 'legacy-variant.Q8_0.gguf',
+      hfRevision: 'main',
+      downloadProgress: 0,
+      allowUnknownSizeDownload: false,
+    });
+
+    const entry = useDownloadStore.getState().queue.find((model) => model.id === 'legacy-variant');
+    expect(entry).toEqual(expect.objectContaining({
+      lifecycleStatus: LifecycleStatus.QUEUED,
+      size: null,
+      downloadUrl: 'https://example.com/legacy-variant.Q8_0.gguf',
+      resolvedFileName: 'legacy-variant.Q8_0.gguf',
+      hfRevision: 'main',
+      downloadProgress: 0,
+      allowUnknownSizeDownload: false,
+    }));
+    expect(entry?.resumeData).toBeUndefined();
+    expect(entry?.localPath).toBeUndefined();
+    expect(entry?.downloadIntegrity).toBeUndefined();
+  });
+
+  it.each([
+    LifecycleStatus.PAUSED,
+    LifecycleStatus.FAILED,
+    LifecycleStatus.AVAILABLE,
+  ])('clears resumable state when re-queuing a %s entry for another variant', (lifecycleStatus) => {
+    const oldSha256 = 'a'.repeat(64);
+    const newSha256 = 'b'.repeat(64);
+
+    useDownloadStore.setState({
+      queue: [
+        {
+          ...buildQueuedModel('variant', lifecycleStatus),
+          size: 4 * 1024 * 1024 * 1024,
+          downloadUrl: 'https://example.com/variant.Q4_K_M.gguf',
+          resolvedFileName: 'variant.Q4_K_M.gguf',
+          sha256: oldSha256,
+          metadataTrust: 'trusted_remote',
+          gguf: {
+            totalBytes: 4 * 1024 * 1024 * 1024,
+            sizeLabel: 'Q4_K_M',
+            contextLengthTokens: 4096,
+          },
+          memoryFitDecision: 'fits_high_confidence',
+          memoryFitConfidence: 'high',
+          maxContextTokens: 4096,
+          hasVerifiedContextWindow: true,
+          capabilitySnapshot: {
+            heuristicVersion: 1,
+            modelLayerCount: null,
+            gpuLayersCeiling: 0,
+            metadataTrust: 'trusted_remote',
+            sizeBytes: 4 * 1024 * 1024 * 1024,
+            sha256: oldSha256,
+          },
+          resumeData: 'resume-data',
+          downloadProgress: 0.42,
+          localPath: 'variant.Q4_K_M.partial.gguf',
+          allowUnknownSizeDownload: true,
+          downloadIntegrity: {
+            kind: 'sha256',
+            sizeBytes: 4 * 1024 * 1024 * 1024,
+            sha256: oldSha256,
+            checkedAt: 123,
+          },
+        },
+      ],
+      activeDownloadId: null,
+    });
+
+    useDownloadStore.getState().addToQueue({
+      ...buildQueuedModel('variant', LifecycleStatus.AVAILABLE),
+      size: 8 * 1024 * 1024 * 1024,
+      downloadUrl: 'https://example.com/variant.Q8_0.gguf',
+      resolvedFileName: 'variant.Q8_0.gguf',
+      sha256: newSha256,
+      downloadProgress: 0,
+      allowUnknownSizeDownload: false,
+    });
+
+    const entry = useDownloadStore.getState().queue.find((model) => model.id === 'variant');
+    expect(entry).toEqual(expect.objectContaining({
+      lifecycleStatus: LifecycleStatus.QUEUED,
+      size: 8 * 1024 * 1024 * 1024,
+      downloadUrl: 'https://example.com/variant.Q8_0.gguf',
+      resolvedFileName: 'variant.Q8_0.gguf',
+      sha256: newSha256,
+      downloadProgress: 0,
+      allowUnknownSizeDownload: false,
+    }));
+    expect(entry?.resumeData).toBeUndefined();
+    expect(entry?.localPath).toBeUndefined();
+    expect(entry?.downloadIntegrity).toBeUndefined();
+    expect(entry?.metadataTrust).toBeUndefined();
+    expect(entry?.gguf).toBeUndefined();
+    expect(entry?.memoryFitDecision).toBeUndefined();
+    expect(entry?.memoryFitConfidence).toBeUndefined();
+    expect(entry?.maxContextTokens).toBeUndefined();
+    expect(entry?.hasVerifiedContextWindow).toBe(false);
+    expect(entry?.capabilitySnapshot).toBeUndefined();
   });
 
   it('adds new models to the queue as QUEUED', () => {

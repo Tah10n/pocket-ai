@@ -40,26 +40,92 @@ describe('HuggingFaceTokenService', () => {
     expect(listener).toHaveBeenCalledWith(expect.objectContaining({ hasToken: false }), 'mutation');
   });
 
-  it('emits an updated state after startup when secure storage already contains a token', async () => {
+  it('hydrates token state only when refreshState is called explicitly', async () => {
     await SecureStore.setItemAsync('huggingface-access-token', 'hf_bootstrap_token');
     const service = new HuggingFaceTokenService();
     const listener = jest.fn();
 
     service.subscribe(listener);
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await Promise.resolve();
 
     expect(listener).toHaveBeenCalledWith(expect.objectContaining({ hasToken: false }), 'replay');
+    expect(listener).not.toHaveBeenCalledWith(expect.objectContaining({ hasToken: true }), 'hydrate');
+
+    await service.refreshState();
+
     expect(listener).toHaveBeenCalledWith(expect.objectContaining({ hasToken: true }), 'hydrate');
     await expect(service.getToken()).resolves.toBe('hf_bootstrap_token');
   });
 
+  it('notifies hydrate subscribers when the stored token changes but remains present', async () => {
+    await SecureStore.setItemAsync('huggingface-access-token', 'hf_token_a');
+    const service = new HuggingFaceTokenService();
+    const listener = jest.fn();
+    service.subscribe(listener);
+
+    await service.refreshState();
+    listener.mockClear();
+
+    await SecureStore.setItemAsync('huggingface-access-token', 'hf_token_b');
+    await service.refreshState();
+
+    expect(listener).toHaveBeenCalledWith(expect.objectContaining({ hasToken: true }), 'hydrate');
+    await expect(service.getToken()).resolves.toBe('hf_token_b');
+  });
+
   it('rejects token saves when secure storage is unavailable', async () => {
-    (SecureStore.isAvailableAsync as jest.Mock).mockResolvedValue(false);
+    (SecureStore.isAvailableAsync as jest.Mock).mockResolvedValueOnce(false);
     const service = new HuggingFaceTokenService();
 
     await expect(service.saveToken('hf_secret_token')).rejects.toThrow(
       'Secure storage is unavailable on this device.',
     );
     await expect(service.getToken()).resolves.toBeNull();
+  });
+
+  it('fails closed when clearing while secure storage is unavailable', async () => {
+    const service = new HuggingFaceTokenService();
+    const serviceWithState = service as unknown as {
+      state: { hasToken: boolean; updatedAt: number };
+    };
+    serviceWithState.state = {
+      hasToken: true,
+      updatedAt: 1234,
+    };
+    const listener = jest.fn();
+    service.subscribe(listener);
+    listener.mockClear();
+
+    (SecureStore.isAvailableAsync as jest.Mock).mockResolvedValueOnce(false);
+
+    await expect(service.clearToken()).rejects.toMatchObject({
+      code: 'action_failed',
+    });
+    expect(SecureStore.deleteItemAsync).not.toHaveBeenCalled();
+    expect(service.getCachedState()).toEqual({
+      hasToken: true,
+      updatedAt: 1234,
+    });
+    expect(listener).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when secure storage deletion fails', async () => {
+    const service = new HuggingFaceTokenService();
+    await service.saveToken('hf_secret_token');
+    const cachedState = service.getCachedState();
+    const listener = jest.fn();
+    service.subscribe(listener);
+    listener.mockClear();
+
+    (SecureStore.deleteItemAsync as jest.Mock).mockRejectedValueOnce(
+      new Error('delete failed'),
+    );
+
+    await expect(service.clearToken()).rejects.toMatchObject({
+      code: 'action_failed',
+    });
+    expect(service.getCachedState()).toEqual(cachedState);
+    await expect(service.getToken()).resolves.toBe('hf_secret_token');
+    expect(listener).not.toHaveBeenCalled();
   });
 });

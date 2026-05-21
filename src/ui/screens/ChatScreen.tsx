@@ -50,7 +50,7 @@ import { getChatHardwareBannerInputs, hardwareListenerService } from '../../serv
 import { registry } from '../../services/LocalStorageRegistry';
 import { useChatStore } from '../../store/chatStore';
 import { getShortModelLabel } from '@/utils/modelLabel';
-import { getReportedErrorMessage } from '../../services/AppError';
+import { getReportedErrorMessage, toAppError } from '../../services/AppError';
 import {
     getGenerationParametersForModel,
     getSettings,
@@ -60,6 +60,8 @@ import {
     updateGenerationParametersForModel,
 } from '../../services/SettingsStore';
 import { getThemeActionContentClassName, screenLayoutMetrics } from '../../utils/themeTokens';
+import { handleModelLoadMemoryPolicyError } from '../../utils/modelLoadMemoryPolicyPrompt';
+import type { LoadModelOptions } from '../../services/LLMEngineService';
 
 const AUTO_SCROLL_REARM_THRESHOLD_PX = 32;
 const AUTO_SCROLL_DISARM_THRESHOLD_PX = 64;
@@ -497,33 +499,52 @@ export const ChatScreen = () => {
             return;
         }
 
-        setPendingModelSelection({ threadId: selectionThreadId, modelId: nextModelId });
         setModelSelectorOpen(false);
 
-        try {
-            await loadModel(nextModelId);
-        } catch (error) {
+        const clearPendingModelSelection = () => {
             setPendingModelSelection((currentValue) => (
                 currentValue?.threadId === selectionThreadId && currentValue.modelId === nextModelId
                     ? null
                     : currentValue
             ));
-            showAlertForError('common.actionFailed', 'ChatScreen.loadModel', error);
-            return;
-        }
+        };
 
-        setPendingModelSelection((currentValue) => (
-            currentValue?.threadId === selectionThreadId && currentValue.modelId === nextModelId
-                ? null
-                : currentValue
-        ));
+        const attemptLoadSelectedModel = async (options?: LoadModelOptions): Promise<void> => {
+            setPendingModelSelection({ threadId: selectionThreadId, modelId: nextModelId });
 
-        if (!activeThread) {
-            return;
-        }
+            try {
+                await loadModel(nextModelId, options);
+            } catch (error) {
+                clearPendingModelSelection();
 
-        switchThreadModel(activeThread.id, nextModelId);
-        updateThreadParamsSnapshot(activeThread.id, getGenerationParametersForModel(nextModelId));
+                const appError = toAppError(error, 'model_load_failed');
+                const handledByMemoryPolicy = handleModelLoadMemoryPolicyError({
+                    t,
+                    appError,
+                    options,
+                    onRetry: (nextOptions) => {
+                        void attemptLoadSelectedModel(nextOptions);
+                    },
+                });
+
+                if (!handledByMemoryPolicy) {
+                    showAlertForError('common.actionFailed', 'ChatScreen.loadModel', appError);
+                }
+
+                return;
+            }
+
+            clearPendingModelSelection();
+
+            if (!activeThread) {
+                return;
+            }
+
+            switchThreadModel(activeThread.id, nextModelId);
+            updateThreadParamsSnapshot(activeThread.id, getGenerationParametersForModel(nextModelId));
+        };
+
+        await attemptLoadSelectedModel();
     }, [
         activeThread,
         currentChatActiveModelId,
@@ -531,6 +552,7 @@ export const ChatScreen = () => {
         loadModel,
         showAlertForError,
         switchThreadModel,
+        t,
         updateThreadParamsSnapshot,
     ]);
 

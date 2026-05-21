@@ -42,6 +42,7 @@
     "android:emulator": "node ./scripts/android-smoke.js --emulator --screenshot artifacts/android-emulator-smoke.png",
     "android:scenarios": "node ./scripts/android-scenarios.js --pack core",
     "android:scenarios:emulator": "node ./scripts/android-scenarios.js --emulator --pack core",
+    "android:scenarios:catalog": "node ./scripts/android-scenarios.js --pack catalog",
     "android:scenarios:dependency-ui": "node ./scripts/android-scenarios.js --pack dependency-ui",
     "android:scenarios:runtime": "node ./scripts/android-scenarios.js --pack runtime",
     "android:scenarios:native": "node ./scripts/android-scenarios.js --pack native",

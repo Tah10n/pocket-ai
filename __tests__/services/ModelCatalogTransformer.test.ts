@@ -38,6 +38,84 @@ describe('ModelCatalogTransformer', () => {
     }));
   });
 
+  it('filters MTP tree-probe candidates from catalog summaries', () => {
+    const models = transformHFResponse([
+      {
+        id: 'author/model-mtp-gguf',
+        tags: ['gguf', 'chat'],
+        gguf: {
+          total: 1_000_000_000,
+        },
+      },
+      {
+        id: 'author/model-with-nextn-config',
+        tags: ['gguf', 'chat'],
+        config: {
+          nextn_predict_layers: 1,
+        },
+        gguf: {
+          total: 1_000_000_000,
+        },
+      },
+    ], null, null);
+
+    expect(models).toEqual([]);
+  });
+
+  it('exposes sorted GGUF variants and selects the default download target from catalog siblings', () => {
+    const models = transformHFResponse([
+      {
+        id: 'author/model-q4',
+        author: 'author',
+        tags: ['gguf', 'chat'],
+        siblings: [
+          { rfilename: 'model.mmproj.gguf', size: REMOTE_SIZE },
+          { rfilename: 'model.NextN.Q4_K_M.gguf', size: REMOTE_SIZE },
+          { rfilename: 'model.Q8_0.gguf', size: 8_000_000_000, lfs: { sha256: 'a'.repeat(64) } },
+          { rfilename: 'model.Q4_K_M.gguf', size: REMOTE_SIZE, lfs: { sha256: OTHER_SHA256 } },
+        ],
+      },
+    ], null, null);
+
+    expect(models).toHaveLength(1);
+    expect(models[0]).toEqual(expect.objectContaining({
+      resolvedFileName: 'model.Q4_K_M.gguf',
+      activeVariantId: 'model.Q4_K_M.gguf',
+      size: REMOTE_SIZE,
+      sha256: OTHER_SHA256,
+    }));
+    expect(models[0].variants).toEqual([
+      expect.objectContaining({
+        variantId: 'model.Q4_K_M.gguf',
+        fileName: 'model.Q4_K_M.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: REMOTE_SIZE,
+      }),
+      expect.objectContaining({
+        variantId: 'model.Q8_0.gguf',
+        fileName: 'model.Q8_0.gguf',
+        quantizationLabel: 'Q8_0',
+        size: 8_000_000_000,
+      }),
+    ]);
+  });
+
+  it('drops MTP-only sibling payloads instead of creating a fallback tree-probe model', () => {
+    const models = transformHFResponse([
+      {
+        id: 'author/model-q4',
+        author: 'author',
+        gated: 'manual',
+        tags: ['gguf', 'chat'],
+        siblings: [
+          { rfilename: 'model.MTP.Q4_K_M.gguf', size: REMOTE_SIZE },
+        ],
+      },
+    ], null, null);
+
+    expect(models).toEqual([]);
+  });
+
   it('recomputes the short repo label when payload metadata changes the repo id', () => {
     const result = buildModelMetadataFromPayload(
       {
@@ -58,6 +136,48 @@ describe('ModelCatalogTransformer', () => {
     expect(result.id).toBe('author/model-q8');
     expect(result.name).toBe('model-q8');
     expect(result.author).toBe('author');
+  });
+
+  it('preserves an explicitly selected variant during metadata refresh', () => {
+    const result = buildModelMetadataFromPayload(
+      {
+        id: 'author/model-q4',
+        siblings: [
+          { rfilename: 'model.Q4_K_M.gguf', size: REMOTE_SIZE, lfs: { sha256: OTHER_SHA256 } },
+          { rfilename: 'model.Q8_0.gguf', size: 8_000_000_000, lfs: { sha256: LOCAL_SHA256 } },
+        ],
+      },
+      null,
+      null,
+      {
+        ...createFallbackModel('author/model-q4'),
+        resolvedFileName: 'model.Q8_0.gguf',
+        activeVariantId: 'model.Q8_0.gguf',
+        variants: [
+          {
+            variantId: 'model.Q4_K_M.gguf',
+            fileName: 'model.Q4_K_M.gguf',
+            quantizationLabel: 'Q4_K_M',
+            size: REMOTE_SIZE,
+            sha256: OTHER_SHA256,
+          },
+          {
+            variantId: 'model.Q8_0.gguf',
+            fileName: 'model.Q8_0.gguf',
+            quantizationLabel: 'Q8_0',
+            size: 8_000_000_000,
+            sha256: LOCAL_SHA256,
+          },
+        ],
+      },
+    );
+
+    expect(result).toEqual(expect.objectContaining({
+      resolvedFileName: 'model.Q8_0.gguf',
+      activeVariantId: 'model.Q8_0.gguf',
+      size: 8_000_000_000,
+      sha256: LOCAL_SHA256,
+    }));
   });
 
   it('preserves verified local integrity when the payload entry has no sha256', () => {

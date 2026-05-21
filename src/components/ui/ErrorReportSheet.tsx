@@ -372,8 +372,9 @@ export function ErrorReportSheet({
   return (
     <Modal visible={visible} animationType="fade" transparent onRequestClose={handleClose}>
       <ScreenModalOverlay>
-        <Pressable className="flex-1" onPress={handleClose} />
+        <Pressable testID="error-report-sheet-backdrop" className="flex-1" onPress={handleClose} />
         <ScreenSheet
+          testID="error-report-sheet"
           className={screenLayoutTokens.sheetMaxHeightDefaultClassName}
           androidBlurTargetRef={androidContentBlurTargetRef}
         >
@@ -528,4 +529,3 @@ export function ErrorReportSheet({
     </Modal>
   );
 }
-

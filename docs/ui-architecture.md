@@ -213,7 +213,7 @@ node .\scripts\android-scenarios.js --skip-build --scenario hf-catalog-hardening
 node .\scripts\android-screen-capture.js --skip-build --screen home,models,settings,conversations,huggingface-token,model-details --output-dir artifacts/android-scenarios/manual-sample
 ```
 
-`npm run android:scenarios` defaults to a small core smoke pack. Use `--pack dependency-ui` for UI architecture changes, `--pack runtime` for localization or persisted-state changes, `--pack native` for Expo or native-module changes, and `--pack extended` when you need the previous broader stable pass. Keep catalog/perf scenarios as targeted checks.
+`npm run android:scenarios` defaults to a small core smoke pack (`home-smoke`, `bottom-tabs`, `new-chat-cta`). Use `--pack catalog` or `--scenario variant-picker-smoke` for live model-catalog checks, `--pack dependency-ui` for UI architecture changes, `--pack runtime` for localization or persisted-state changes, `--pack native` for Expo or native-module changes, and `--pack extended` when you need the broader stable pass without live catalog smoke. Keep perf and other optional scenarios targeted unless `--pack all` is needed.
 
 Manual follow-up is still required for:
 

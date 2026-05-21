@@ -1,4 +1,4 @@
-import React, { useCallback, useRef } from 'react';
+import React, { useCallback, useMemo, useRef, useState } from 'react';
 import type { View } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useTranslation } from 'react-i18next';
@@ -16,21 +16,27 @@ import { HeaderBar } from '@/components/ui/HeaderBar';
 import { ModelDownloadProgress, ModelLifecycleActionRow } from '@/components/ui/ModelLifecycleControls';
 import { MaterialSymbols } from '@/components/ui/MaterialSymbols';
 import { ErrorReportSheet } from '@/components/ui/ErrorReportSheet';
+import { ModelVariantPickerSheet } from '@/components/ui/ModelVariantPickerSheet';
 import { MODEL_WARMUP_BANNER_RESERVED_HEIGHT, ModelWarmupBanner } from '@/components/ui/ModelWarmupBanner';
 import { ModelParametersSheet } from '@/components/ui/ModelParametersSheet';
 import { ScreenAndroidContentBlurTarget, ScreenBadge, ScreenCard, ScreenContent, ScreenRoot, ScreenStack } from '@/components/ui/ScreenShell';
 import { ScrollView } from '@/components/ui/scroll-view';
 import { Spinner } from '@/components/ui/spinner';
 import { Text } from '@/components/ui/text';
+import { ValueSelectorRow } from '@/components/ui/ValueSelectorRow';
 import { useModelDetailsController } from '@/hooks/useModelDetailsController';
 import { EngineStatus, LifecycleStatus, ModelAccessState } from '@/types/models';
+import { getVariantMemoryBadgePresentation } from '@/utils/modelMemoryBadgePresentation';
+import { formatModelFileSize } from '@/utils/modelSize';
 import { getModelDetailsTagTone } from '@/utils/modelDetailsPresentation';
+import { canSelectModelVariant, getActiveModelVariant } from '@/utils/modelVariants';
 
 export function ModelDetailsScreen() {
   const router = useRouter();
   const { t } = useTranslation();
-  const params = useLocalSearchParams<{ modelId?: string }>();
+  const params = useLocalSearchParams<{ modelId?: string; variantId?: string }>();
   const modelId = typeof params.modelId === 'string' ? params.modelId : '';
+  const variantId = typeof params.variantId === 'string' ? params.variantId : undefined;
   const {
     accessBadge,
     cancelDownload,
@@ -45,6 +51,7 @@ export function ModelDetailsScreen() {
     handleLoad,
     handleOpenModelPage,
     handleOpenTokenSettings,
+    handleSelectVariant,
     handleUnload,
     heroMetrics,
     loading,
@@ -52,8 +59,9 @@ export function ModelDetailsScreen() {
     modelParametersSheetProps,
     openModelParameters,
     reportEngineError,
-  } = useModelDetailsController(modelId);
+  } = useModelDetailsController(modelId, variantId);
   const warmupContentBlurTargetRef = useRef<View | null>(null);
+  const [isVariantPickerVisible, setVariantPickerVisible] = useState(false);
 
   const handleBack = useCallback(() => {
     if (router.canGoBack()) {
@@ -86,6 +94,33 @@ export function ModelDetailsScreen() {
     size: 'default' as const,
     className: 'max-w-full',
   })) ?? [];
+  const activeVariant = displayModel ? getActiveModelVariant(displayModel) : undefined;
+  const detailsMemoryBadge = displayModel
+    ? getVariantMemoryBadgePresentation(displayModel, activeVariant, { useModelFallback: true })
+    : null;
+  const detailsMemoryDecision = activeVariant?.ramFit ?? displayModel?.memoryFitDecision;
+  const detailsDisplaySize = activeVariant?.size ?? displayModel?.size ?? null;
+  const shouldShowDetailsMemoryBadge = detailsMemoryBadge !== null && (
+    detailsMemoryBadge.tone !== 'neutral'
+    || (detailsMemoryDecision === 'unknown' && detailsDisplaySize !== null)
+  );
+  const detailsQuantizationLabel = activeVariant?.quantizationLabel ?? displayModel?.gguf?.sizeLabel?.trim();
+  const variantSelectorValue = useMemo(() => {
+    if (!detailsQuantizationLabel) {
+      return null;
+    }
+
+    return `${detailsQuantizationLabel} - ${formatModelFileSize(detailsDisplaySize, t('models.sizeUnknown'))}`;
+  }, [detailsDisplaySize, detailsQuantizationLabel, t]);
+  const shouldShowStandaloneDetailsMemoryBadge = !variantSelectorValue && shouldShowDetailsMemoryBadge;
+  const canOpenVariantPicker = displayModel ? canSelectModelVariant(displayModel) : false;
+  const closeVariantPicker = useCallback(() => {
+    setVariantPickerVisible(false);
+  }, []);
+  const selectVariant = useCallback((variantId: string) => {
+    handleSelectVariant(variantId);
+    setVariantPickerVisible(false);
+  }, [handleSelectVariant]);
 
   return (
     <ScreenRoot>
@@ -163,30 +198,11 @@ export function ModelDetailsScreen() {
                           {t('common.active')}
                         </ScreenBadge>
                       ) : null}
-                      {displayModel.memoryFitDecision === 'fits_high_confidence'
-                      || displayModel.memoryFitDecision === 'fits_low_confidence'
-                      || (displayModel.memoryFitDecision === undefined && displayModel.fitsInRam === true) ? (
-                        <ScreenBadge tone="success" size="micro" iconName="memory">
-                          {t('models.ramFitYes')}
+                      {shouldShowStandaloneDetailsMemoryBadge && detailsMemoryBadge ? (
+                        <ScreenBadge tone={detailsMemoryBadge.tone} size="micro" iconName={detailsMemoryBadge.iconName}>
+                          {t(detailsMemoryBadge.labelKey)}
                         </ScreenBadge>
                       ) : null}
-                      {displayModel.memoryFitDecision === 'likely_oom' ? (
-                        <ScreenBadge tone="error" size="micro" iconName="warning">
-                          {t('models.ramLikelyOom')}
-                        </ScreenBadge>
-                      ) : displayModel.memoryFitDecision === 'borderline' ? (
-                          <ScreenBadge tone="warning" size="micro" iconName="warning">
-                            {t('models.ramBorderline')}
-                          </ScreenBadge>
-                        ) : displayModel.memoryFitDecision === 'unknown' && displayModel.size !== null ? (
-                          <ScreenBadge tone="neutral" size="micro" iconName="help">
-                            {t('models.ramFitUnknown')}
-                          </ScreenBadge>
-                        ) : displayModel.memoryFitDecision === undefined && displayModel.fitsInRam === false ? (
-                          <ScreenBadge tone="warning" size="micro" iconName="warning">
-                            {t('models.ramWarning')}
-                          </ScreenBadge>
-                        ) : null}
                     </>
                   )}
                   title={displayModel.name}
@@ -210,6 +226,30 @@ export function ModelDetailsScreen() {
                     />
                   )}
                   progress={<ModelDownloadProgress model={displayModel} />}
+                  variantSelector={variantSelectorValue ? (
+                    <ValueSelectorRow
+                      value={variantSelectorValue}
+                      badges={detailsMemoryBadge ? (
+                        <ScreenBadge
+                          tone={detailsMemoryBadge.tone}
+                          size="micro"
+                          iconName={detailsMemoryBadge.iconName}
+                        >
+                          {t(detailsMemoryBadge.labelKey)}
+                        </ScreenBadge>
+                      ) : undefined}
+                      onPress={canOpenVariantPicker ? () => setVariantPickerVisible(true) : undefined}
+                      showChevron={canOpenVariantPicker}
+                      accessibilityLabel={t('models.variantSelectorAccessibilityLabel', {
+                        modelName: displayModel.name,
+                        value: variantSelectorValue,
+                      })}
+                      accessibilityHint={canOpenVariantPicker
+                        ? t('models.variantSelectorAccessibilityHint')
+                        : t('models.variantSelectorReadOnlyAccessibilityHint')}
+                      testID={`model-details-variant-selector-${displayModel.id}`}
+                    />
+                  ) : undefined}
                   openOnHuggingFaceButton={!(
                     displayModel.lifecycleStatus === LifecycleStatus.AVAILABLE
                     && displayModel.accessState === ModelAccessState.ACCESS_DENIED
@@ -263,6 +303,13 @@ export function ModelDetailsScreen() {
       <ModelParametersSheet
         {...modelParametersSheetProps}
         androidContentBlurTargetRef={warmupContentBlurTargetRef}
+      />
+      <ModelVariantPickerSheet
+        visible={isVariantPickerVisible}
+        model={displayModel}
+        androidContentBlurTargetRef={warmupContentBlurTargetRef}
+        onSelectVariant={selectVariant}
+        onClose={closeVariantPicker}
       />
       <ErrorReportSheet
         {...errorReportSheetProps}

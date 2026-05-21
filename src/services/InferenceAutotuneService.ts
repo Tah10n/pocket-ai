@@ -767,6 +767,7 @@ class InferenceAutotuneService {
         try {
           await llmEngineService.load(previousActiveModelId, {
             forceReload: true,
+            allowUnsafeMemoryLoad: true,
             ...(restoreLoadParamsOverride ? { loadParamsOverride: restoreLoadParamsOverride } : null),
           });
         } catch (restoreError) {

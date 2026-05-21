@@ -19,6 +19,7 @@ import { llmEngineService } from './LLMEngineService';
 import { useChatStore } from '../store/chatStore';
 import { useModelsStore } from '../store/modelsStore';
 import { performanceMonitor } from './PerformanceMonitor';
+import { huggingFaceTokenService } from './HuggingFaceTokenService';
 import {
   getPrivateStorageHealthSnapshot,
   initializePrivateStorageEncryption,
@@ -232,6 +233,22 @@ async function hydratePersistedStores(): Promise<PrivateStorageHealthSnapshot | 
   }
 }
 
+async function hydrateHuggingFaceTokenState(): Promise<void> {
+  const span = performanceMonitor.startSpan('bootstrap.hydrate.huggingFaceToken');
+  let outcome: 'success' | 'error' = 'success';
+
+  try {
+    await huggingFaceTokenService.refreshState();
+  } catch (error) {
+    outcome = 'error';
+    if (!isRuntimeTestEnvironment()) {
+      console.warn('[bootstrapApp] Failed to hydrate Hugging Face token state', error);
+    }
+  } finally {
+    span.end({ outcome });
+  }
+}
+
 function scheduleAfterFirstFrame(task: () => void): void {
   if (process.env.NODE_ENV === 'test') {
     setTimeout(task, 0);
@@ -409,6 +426,8 @@ export async function bootstrapAppCritical(): Promise<BootstrapCriticalResult> {
       outcome = 'storage_blocked';
       return buildStorageBlockedCriticalResult(hydrationBlockedStorageHealth);
     }
+
+    await hydrateHuggingFaceTokenState();
 
     const settings = getSettings();
 

@@ -12,6 +12,22 @@ jest.mock('react-native-safe-area-context', () => ({
   useSafeAreaInsets: () => ({ top: 0, right: 0, bottom: 0, left: 0 }),
 }));
 
+jest.mock('react-i18next', () => ({
+  initReactI18next: {
+    type: '3rdParty',
+    init: jest.fn(),
+  },
+  useTranslation: () => ({
+    t: (key: string, options?: Record<string, unknown>) => {
+      if (key === 'models.variantSelectorAccessibilityLabel') {
+        return `${key}:${String(options?.modelName ?? '')}:${String(options?.value ?? '')}`;
+      }
+
+      return key;
+    },
+  }),
+}));
+
 const mockRouter = {
   back: jest.fn(),
   canGoBack: jest.fn(() => true),
@@ -39,6 +55,7 @@ const mockHardwareStatus = jest.fn();
 let lastModelParametersSheetProps: any = null;
 let lastErrorReportSheetProps: any = null;
 let lastContentBlurTargetProps: any = null;
+let lastModelVariantPickerSheetProps: any = null;
 const mockEngineState = {
   status: EngineStatus.IDLE,
   activeModelId: undefined as string | undefined,
@@ -133,7 +150,11 @@ jest.mock('../../src/components/ui/ScreenShell', () => ({
   ScreenContent: ({ children }: any) => children,
   ScreenStack: ({ children }: any) => children,
   ScreenCard: ({ children }: any) => children,
-  ScreenSurface: ({ children }: any) => children,
+  ScreenSurface: ({ children, ...props }: any) => {
+    const mockReact = jest.requireActual('react');
+    const { View } = jest.requireActual('react-native');
+    return mockReact.createElement(View, props, children);
+  },
   ScreenPressableSurface: ({ children, onPress, ...props }: any) => {
     const mockReact = jest.requireActual('react');
     const { Pressable } = jest.requireActual('react-native');
@@ -223,6 +244,31 @@ jest.mock('../../src/components/ui/ModelParametersSheet', () => {
       lastModelParametersSheetProps = props;
       return props.visible
         ? mockReact.createElement(View, null, mockReact.createElement(Text, null, 'model-parameters-sheet'))
+        : null;
+    },
+  };
+});
+
+jest.mock('../../src/components/ui/ModelVariantPickerSheet', () => {
+  const mockReact = jest.requireActual('react');
+  const { Pressable, Text, View } = jest.requireActual('react-native');
+  return {
+    ModelVariantPickerSheet: (props: any) => {
+      lastModelVariantPickerSheetProps = props;
+      return props.visible
+        ? mockReact.createElement(
+          View,
+          null,
+          mockReact.createElement(Text, null, 'model-variant-picker'),
+          ...(props.model?.variants ?? []).map((variant: any) => mockReact.createElement(
+            Pressable,
+            {
+              key: variant.variantId,
+              onPress: () => props.onSelectVariant(variant.variantId),
+            },
+            mockReact.createElement(Text, null, variant.quantizationLabel),
+          )),
+        )
         : null;
     },
   };
@@ -371,6 +417,7 @@ describe('ModelDetailsScreen', () => {
     lastModelParametersSheetProps = null;
     lastErrorReportSheetProps = null;
     lastContentBlurTargetProps = null;
+    lastModelVariantPickerSheetProps = null;
     mockFitsInRam.mockResolvedValue(true);
     useDownloadStore.setState({ queue: [], activeDownloadId: null });
     mockEngineState.status = EngineStatus.IDLE;
@@ -413,6 +460,7 @@ describe('ModelDetailsScreen', () => {
 
     expect(blurTarget).toBeTruthy();
     expect(lastModelParametersSheetProps?.androidContentBlurTargetRef).toBe(blurTarget);
+    expect(lastModelVariantPickerSheetProps?.androidContentBlurTargetRef).toBe(blurTarget);
     expect(lastErrorReportSheetProps?.androidContentBlurTargetRef).toBe(blurTarget);
   });
 
@@ -491,6 +539,104 @@ describe('ModelDetailsScreen', () => {
     }));
   });
 
+  it('uses the selected GGUF variant as the details download target', async () => {
+    const variantModel = createModel({
+      size: 4_000_000_000,
+      downloadUrl: 'https://huggingface.co/org/model/resolve/main/model.Q4_K_M.gguf',
+      resolvedFileName: 'model.Q4_K_M.gguf',
+      activeVariantId: 'model.Q4_K_M.gguf',
+      gguf: {
+        sizeLabel: 'Q4_K_M',
+        totalBytes: 4_000_000_000,
+      },
+      variants: [
+        {
+          variantId: 'model.Q4_K_M.gguf',
+          fileName: 'model.Q4_K_M.gguf',
+          quantizationLabel: 'Q4_K_M',
+          size: 4_000_000_000,
+          sha256: 'a'.repeat(64),
+        },
+        {
+          variantId: 'model.Q8_0.gguf',
+          fileName: 'model.Q8_0.gguf',
+          quantizationLabel: 'Q8_0',
+          size: 8_000_000_000,
+          sha256: 'b'.repeat(64),
+        },
+      ],
+    });
+    const { modelCatalogService } = jest.requireMock('../../src/services/ModelCatalogService');
+    modelCatalogService.getCachedModel.mockReturnValue(variantModel);
+    modelCatalogService.getModelDetails.mockResolvedValue(variantModel);
+
+    const screen = render(<ModelDetailsScreen />);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const selectorRow = screen.getByTestId('model-details-variant-selector-org/model');
+    expect(selectorRow.props.accessibilityLabel).toBe('models.variantSelectorAccessibilityLabel:Llama-3.1-8B-Instruct-GGUF:Q4_K_M - 4.00 GB');
+    expect(selectorRow.props.accessibilityHint).toBe('models.variantSelectorAccessibilityHint');
+
+    fireEvent.press(selectorRow);
+    expect(lastModelVariantPickerSheetProps?.visible).toBe(true);
+
+    await act(async () => {
+      lastModelVariantPickerSheetProps.onSelectVariant('model.Q8_0.gguf');
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      fireEvent.press(screen.getByText('models.download'));
+      await Promise.resolve();
+    });
+
+    expect(mockStartDownload).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'org/model',
+      size: 8_000_000_000,
+      resolvedFileName: 'model.Q8_0.gguf',
+      activeVariantId: 'model.Q8_0.gguf',
+      downloadUrl: 'https://huggingface.co/org/model/resolve/main/model.Q8_0.gguf',
+      sha256: 'b'.repeat(64),
+    }));
+  });
+
+  it('marks the details variant selector as read-only when no alternate variant is selectable', async () => {
+    const variantModel = createModel({
+      size: 4_000_000_000,
+      resolvedFileName: 'model.Q4_K_M.gguf',
+      activeVariantId: 'model.Q4_K_M.gguf',
+      gguf: {
+        sizeLabel: 'Q4_K_M',
+        totalBytes: 4_000_000_000,
+      },
+      variants: [{
+        variantId: 'model.Q4_K_M.gguf',
+        fileName: 'model.Q4_K_M.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: 4_000_000_000,
+      }],
+    });
+    const { modelCatalogService } = jest.requireMock('../../src/services/ModelCatalogService');
+    modelCatalogService.getCachedModel.mockReturnValue(variantModel);
+    modelCatalogService.getModelDetails.mockResolvedValue(variantModel);
+
+    const screen = render(<ModelDetailsScreen />);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const selectorRow = screen.getByTestId('model-details-variant-selector-org/model');
+    expect(selectorRow.props.accessibilityLabel).toBe('models.variantSelectorAccessibilityLabel:Llama-3.1-8B-Instruct-GGUF:Q4_K_M - 4.00 GB');
+    expect(selectorRow.props.accessibilityHint).toBe('models.variantSelectorReadOnlyAccessibilityHint');
+
+    fireEvent.press(selectorRow);
+    expect(lastModelVariantPickerSheetProps?.visible).toBe(false);
+  });
+
   it('warns before downloading a model that does not fit in current memory', async () => {
     const { modelCatalogService } = jest.requireMock('../../src/services/ModelCatalogService');
     modelCatalogService.getCachedModel.mockReturnValue(createModel({ fitsInRam: false }));
@@ -554,6 +700,29 @@ describe('ModelDetailsScreen', () => {
       await Promise.resolve();
     });
     expect(screen.getByText('model-parameters-sheet')).toBeTruthy();
+  });
+
+  it('shows downloaded model quantization in the selector row without a separate label', async () => {
+    const downloadedModel = createModel({
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      size: 4_000_000_000,
+      gguf: {
+        sizeLabel: 'Q4_K_M',
+      },
+    });
+    const { modelCatalogService } = jest.requireMock('../../src/services/ModelCatalogService');
+    modelCatalogService.getCachedModel.mockReturnValue(downloadedModel);
+    modelCatalogService.getModelDetails.mockResolvedValue(downloadedModel);
+
+    const screen = render(<ModelDetailsScreen />);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText('Q4_K_M - 4.00 GB')).toBeTruthy();
+    expect(screen.queryByText('models.quantizationLabel')).toBeNull();
+    expect(screen.queryByText('Q4_K_M')).toBeNull();
   });
 
   it('uses the cached capability snapshot ceiling before async recommendations resolve in the details flow', async () => {
@@ -724,8 +893,9 @@ describe('ModelDetailsScreen', () => {
     expect(screen.getByText('Meta')).toBeTruthy();
   });
 
-  it('does not expose memory-fit confidence badges in the details UI', async () => {
+  it('shows memory-fit badges in the details UI without confidence labels', async () => {
     const confidenceModel = createModel({
+      fitsInRam: false,
       memoryFitDecision: 'likely_oom',
       memoryFitConfidence: 'high',
     });

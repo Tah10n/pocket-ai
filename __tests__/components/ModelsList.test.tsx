@@ -1,9 +1,17 @@
 import React from 'react';
 import { act, render } from '@testing-library/react-native';
+import { View } from 'react-native';
 import { ModelsList } from '../../src/components/models/ModelsList';
 import { useModelsCatalogData } from '../../src/hooks/useModelsCatalogData';
 import { useModelsStore } from '../../src/store/modelsStore';
 import type { ModelFilterCriteria, ModelSortPreference } from '../../src/store/modelsStore';
+import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../src/types/models';
+
+let mockLastFlashListProps: any = null;
+let mockModelCardPropsLog: any[] = [];
+let mockLastVariantPickerProps: any = null;
+let mockDownloadQueue: ModelMetadata[] = [];
+let mockOpenModelDetails = jest.fn();
 
 const defaultFilters: ModelFilterCriteria = {
   fitsInRamOnly: true,
@@ -17,7 +25,19 @@ const defaultSort: ModelSortPreference = {
 };
 
 jest.mock('@shopify/flash-list', () => ({
-  FlashList: () => null,
+  FlashList: (props: any) => {
+    mockLastFlashListProps = props;
+    const mockReact = require('react');
+    return mockReact.createElement(
+      mockReact.Fragment,
+      null,
+      props.data?.map((item: any, index: number) => mockReact.createElement(
+        mockReact.Fragment,
+        { key: props.keyExtractor?.(item, index) ?? index },
+        props.renderItem({ item, index }),
+      )),
+    );
+  },
 }));
 
 jest.mock('react-i18next', () => ({
@@ -56,7 +76,10 @@ jest.mock('@/components/ui/ErrorReportSheet', () => ({
 }));
 
 jest.mock('@/components/ui/ModelCard', () => ({
-  ModelCard: () => null,
+  ModelCard: (props: any) => {
+    mockModelCardPropsLog.push(props);
+    return null;
+  },
 }));
 
 jest.mock('@/components/ui/ModelWarmupBanner', () => ({
@@ -66,6 +89,13 @@ jest.mock('@/components/ui/ModelWarmupBanner', () => ({
 
 jest.mock('@/components/ui/ModelParametersSheet', () => ({
   ModelParametersSheet: () => null,
+}));
+
+jest.mock('@/components/ui/ModelVariantPickerSheet', () => ({
+  ModelVariantPickerSheet: (props: any) => {
+    mockLastVariantPickerProps = props;
+    return null;
+  },
 }));
 
 jest.mock('@/components/ui/ScreenShell', () => ({
@@ -156,7 +186,7 @@ jest.mock('@/hooks/useModelActions', () => ({
     handleLoad: jest.fn(),
     handleUnload: jest.fn(),
     openChat: jest.fn(),
-    openModelDetails: jest.fn(),
+    openModelDetails: mockOpenModelDetails,
     openModelPage: jest.fn(),
     openTokenSettings: jest.fn(),
   }),
@@ -186,9 +216,13 @@ jest.mock('@/services/PerformanceMonitor', () => ({
   },
 }));
 
-jest.mock('@/store/downloadStore', () => ({
-  useDownloadStore: jest.fn((selector: any) => selector({ queue: [] })),
-}));
+jest.mock('@/store/downloadStore', () => {
+  const useDownloadStoreMock = jest.fn((selector: any) => selector({ queue: mockDownloadQueue }));
+  (useDownloadStoreMock as any).getState = () => ({ queue: mockDownloadQueue });
+  return {
+    useDownloadStore: useDownloadStoreMock,
+  };
+});
 
 jest.mock('@/store/modelsStore', () => {
   const actual = jest.requireActual('@/store/modelsStore');
@@ -216,6 +250,45 @@ function createCatalogData(nextCursor: string | null, handleLoadMore: jest.Mock)
     handleCatalogScrollBeginDrag: jest.fn(),
     refreshDownloadedModels: jest.fn(),
     requestCatalogRefresh: jest.fn(),
+  };
+}
+
+function createModel(overrides: Partial<ModelMetadata> = {}): ModelMetadata {
+  return {
+    id: 'org/model',
+    name: 'Model',
+    author: 'org',
+    size: 4_000_000_000,
+    downloadUrl: 'https://huggingface.co/org/model/resolve/main/model.Q4_K_M.gguf',
+    resolvedFileName: 'model.Q4_K_M.gguf',
+    activeVariantId: 'model.Q4_K_M.gguf',
+    fitsInRam: true,
+    memoryFitDecision: 'fits_low_confidence',
+    memoryFitConfidence: 'medium',
+    accessState: ModelAccessState.PUBLIC,
+    isGated: false,
+    isPrivate: false,
+    lifecycleStatus: LifecycleStatus.AVAILABLE,
+    downloadProgress: 0,
+    variants: [
+      {
+        variantId: 'model.Q4_K_M.gguf',
+        fileName: 'model.Q4_K_M.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: 4_000_000_000,
+        ramFit: 'fits_low_confidence',
+        ramFitConfidence: 'medium',
+      },
+      {
+        variantId: 'model.Q8_0.gguf',
+        fileName: 'model.Q8_0.gguf',
+        quantizationLabel: 'Q8_0',
+        size: 8_000_000_000,
+        ramFit: 'likely_oom',
+        ramFitConfidence: 'medium',
+      },
+    ],
+    ...overrides,
   };
 }
 
@@ -256,6 +329,11 @@ describe('ModelsList', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    mockLastFlashListProps = null;
+    mockModelCardPropsLog = [];
+    mockLastVariantPickerProps = null;
+    mockDownloadQueue = [];
+    mockOpenModelDetails = jest.fn();
     setModelsStoreState();
   });
 
@@ -287,5 +365,266 @@ describe('ModelsList', () => {
 
     expect(handleLoadMore).toHaveBeenCalledTimes(1);
     expect(handleLoadMore).toHaveBeenCalledWith('manual');
+  });
+
+  it('routes picker chrome through a provided full-screen blur target', async () => {
+    const handleLoadMore = jest.fn();
+    const androidBlurTargetRef = React.createRef<any>();
+    const renderContentContainer = jest.fn((content) => (
+      <View testID="external-catalog-content-container">{content}</View>
+    ));
+    mockUseModelsCatalogData.mockReturnValue({
+      ...createCatalogData(null, handleLoadMore),
+      models: [createModel()],
+    } as any);
+
+    const { getByTestId, queryByTestId } = render(
+      <ModelsList
+        activeTab="all"
+        searchQuery="phi"
+        androidContentBlurTargetRef={androidBlurTargetRef}
+        renderContentContainer={renderContentContainer}
+      />,
+    );
+
+    expect(renderContentContainer).toHaveBeenCalledTimes(1);
+    expect(getByTestId('external-catalog-content-container')).toBeTruthy();
+    expect(queryByTestId('models-warmup-content-blur-target')).toBeNull();
+
+    act(() => {
+      mockModelCardPropsLog.at(-1)?.onOpenVariantSelector('org/model');
+    });
+
+    expect(mockLastVariantPickerProps.androidContentBlurTargetRef).toBe(androidBlurTargetRef);
+  });
+
+  it('hides a selected variant that no longer satisfies RAM filters', async () => {
+    const handleLoadMore = jest.fn();
+    mockUseModelsCatalogData.mockReturnValue({
+      ...createCatalogData(null, handleLoadMore),
+      models: [createModel()],
+    } as any);
+
+    render(<ModelsList activeTab="all" searchQuery="phi" />);
+
+    expect(mockLastFlashListProps.data).toHaveLength(1);
+    expect(mockModelCardPropsLog.at(-1)?.model.resolvedFileName).toBe('model.Q4_K_M.gguf');
+
+    act(() => {
+      mockModelCardPropsLog.at(-1)?.onOpenVariantSelector('org/model');
+    });
+    expect(mockLastVariantPickerProps.visible).toBe(true);
+    expect(mockLastVariantPickerProps.model).toEqual(expect.objectContaining({
+      id: 'org/model',
+      resolvedFileName: 'model.Q4_K_M.gguf',
+      activeVariantId: 'model.Q4_K_M.gguf',
+    }));
+    act(() => {
+      mockLastVariantPickerProps.onSelectVariant('model.Q4_K_M.gguf');
+    });
+
+    expect(mockLastFlashListProps.data).toHaveLength(1);
+    expect(mockLastFlashListProps.extraData).toEqual({ 'org/model': 'model.Q4_K_M.gguf' });
+    expect(mockModelCardPropsLog.at(-1)?.model).toEqual(expect.objectContaining({
+      resolvedFileName: 'model.Q4_K_M.gguf',
+      activeVariantId: 'model.Q4_K_M.gguf',
+      memoryFitDecision: 'fits_low_confidence',
+    }));
+
+    act(() => {
+      mockModelCardPropsLog.at(-1)?.onOpenVariantSelector('org/model');
+    });
+    expect(mockLastVariantPickerProps.visible).toBe(true);
+    act(() => {
+      mockLastVariantPickerProps.onSelectVariant('model.Q8_0.gguf');
+    });
+
+    expect(mockLastFlashListProps.data).toHaveLength(0);
+    expect(mockLastFlashListProps.extraData).toEqual({ 'org/model': 'model.Q8_0.gguf' });
+  });
+
+  it('defaults available catalog cards to Q4_K_M before explicit selection', async () => {
+    const handleLoadMore = jest.fn();
+    mockUseModelsCatalogData.mockReturnValue({
+      ...createCatalogData(null, handleLoadMore),
+      models: [
+        createModel({
+          size: 8_000_000_000,
+          downloadUrl: 'https://huggingface.co/org/model/resolve/main/model.Q8_0.gguf',
+          resolvedFileName: 'model.Q8_0.gguf',
+          activeVariantId: 'model.Q8_0.gguf',
+          fitsInRam: false,
+          memoryFitDecision: 'likely_oom',
+          gguf: {
+            sizeLabel: 'Q8_0',
+            totalBytes: 8_000_000_000,
+          },
+          variants: [
+            createModel().variants![1],
+            createModel().variants![0],
+          ],
+        }),
+      ],
+    } as any);
+
+    render(<ModelsList activeTab="all" searchQuery="phi" />);
+
+    expect(mockLastFlashListProps.data).toHaveLength(1);
+    expect(mockModelCardPropsLog.at(-1)?.model).toEqual(expect.objectContaining({
+      size: 4_000_000_000,
+      resolvedFileName: 'model.Q4_K_M.gguf',
+      activeVariantId: 'model.Q4_K_M.gguf',
+      downloadUrl: 'https://huggingface.co/org/model/resolve/main/model.Q4_K_M.gguf',
+      fitsInRam: true,
+      memoryFitDecision: 'fits_low_confidence',
+    }));
+  });
+
+  it('keeps an explicit selected variant ahead of stale paused queue state', async () => {
+    const handleLoadMore = jest.fn();
+    setModelsStoreState({
+      ...defaultFilters,
+      fitsInRamOnly: false,
+    });
+    mockDownloadQueue = [createModel({
+      lifecycleStatus: LifecycleStatus.PAUSED,
+      downloadProgress: 0.4,
+      resumeData: JSON.stringify({ resumeData: 'resume-q4' }),
+    })];
+    mockUseModelsCatalogData.mockReturnValue({
+      ...createCatalogData(null, handleLoadMore),
+      models: [createModel()],
+    } as any);
+
+    render(<ModelsList activeTab="all" searchQuery="phi" />);
+
+    act(() => {
+      mockModelCardPropsLog.at(-1)?.onOpenVariantSelector('org/model');
+    });
+    expect(mockLastVariantPickerProps.visible).toBe(true);
+    expect(mockLastVariantPickerProps.model).toEqual(expect.objectContaining({
+      id: 'org/model',
+      resolvedFileName: 'model.Q4_K_M.gguf',
+    }));
+    act(() => {
+      mockLastVariantPickerProps.onSelectVariant('model.Q8_0.gguf');
+    });
+
+    expect(mockModelCardPropsLog.at(-1)?.model).toEqual(expect.objectContaining({
+      resolvedFileName: 'model.Q8_0.gguf',
+      activeVariantId: 'model.Q8_0.gguf',
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+      resumeData: undefined,
+    }));
+  });
+
+  it('prunes selected variants when the unfiltered catalog no longer contains them', async () => {
+    const handleLoadMore = jest.fn();
+    mockUseModelsCatalogData.mockReturnValue({
+      ...createCatalogData(null, handleLoadMore),
+      models: [createModel()],
+    } as any);
+
+    const { rerender } = render(<ModelsList activeTab="all" searchQuery="phi" />);
+
+    act(() => {
+      mockModelCardPropsLog.at(-1)?.onOpenVariantSelector('org/model');
+    });
+    act(() => {
+      mockLastVariantPickerProps.onSelectVariant('model.Q8_0.gguf');
+    });
+
+    expect(mockLastFlashListProps.extraData).toEqual({ 'org/model': 'model.Q8_0.gguf' });
+
+    mockUseModelsCatalogData.mockReturnValue({
+      ...createCatalogData(null, handleLoadMore),
+      models: [createModel({
+        variants: [createModel().variants![0]],
+      })],
+    } as any);
+
+    await act(async () => {
+      rerender(<ModelsList activeTab="all" searchQuery="phi" />);
+      await Promise.resolve();
+    });
+
+    expect(mockLastFlashListProps.extraData).toEqual({});
+    expect(mockModelCardPropsLog.at(-1)?.model).toEqual(expect.objectContaining({
+      resolvedFileName: 'model.Q4_K_M.gguf',
+      activeVariantId: 'model.Q4_K_M.gguf',
+    }));
+  });
+
+  it('preserves selected variants while the model is absent from temporary catalog results', async () => {
+    const handleLoadMore = jest.fn();
+    setModelsStoreState({
+      ...defaultFilters,
+      fitsInRamOnly: false,
+    });
+    mockUseModelsCatalogData.mockReturnValue({
+      ...createCatalogData(null, handleLoadMore),
+      models: [createModel()],
+    } as any);
+
+    const { rerender } = render(<ModelsList activeTab="all" searchQuery="phi" />);
+
+    act(() => {
+      mockModelCardPropsLog.at(-1)?.onOpenVariantSelector('org/model');
+    });
+    act(() => {
+      mockLastVariantPickerProps.onSelectVariant('model.Q8_0.gguf');
+    });
+
+    mockUseModelsCatalogData.mockReturnValue({
+      ...createCatalogData(null, handleLoadMore),
+      models: [],
+    } as any);
+
+    await act(async () => {
+      rerender(<ModelsList activeTab="all" searchQuery="missing" />);
+      await Promise.resolve();
+    });
+
+    expect(mockLastFlashListProps.extraData).toEqual({ 'org/model': 'model.Q8_0.gguf' });
+
+    mockUseModelsCatalogData.mockReturnValue({
+      ...createCatalogData(null, handleLoadMore),
+      models: [createModel()],
+    } as any);
+
+    await act(async () => {
+      rerender(<ModelsList activeTab="all" searchQuery="phi" />);
+      await Promise.resolve();
+    });
+
+    expect(mockModelCardPropsLog.at(-1)?.model).toEqual(expect.objectContaining({
+      resolvedFileName: 'model.Q8_0.gguf',
+      activeVariantId: 'model.Q8_0.gguf',
+    }));
+  });
+
+  it('hides a downloaded-tab item when selecting another variant resets it to available', async () => {
+    const handleLoadMore = jest.fn();
+    mockUseModelsCatalogData.mockReturnValue({
+      ...createCatalogData(null, handleLoadMore),
+      models: [createModel({ lifecycleStatus: LifecycleStatus.PAUSED })],
+    } as any);
+
+    render(<ModelsList activeTab="downloaded" searchQuery="phi" />);
+
+    expect(mockLastFlashListProps.data).toHaveLength(1);
+
+    act(() => {
+      mockModelCardPropsLog.at(-1)?.onOpenVariantSelector('org/model');
+    });
+    expect(mockLastVariantPickerProps.visible).toBe(true);
+
+    act(() => {
+      mockLastVariantPickerProps.onSelectVariant('model.Q8_0.gguf');
+    });
+
+    expect(mockLastFlashListProps.data).toHaveLength(0);
+    expect(mockLastFlashListProps.extraData).toEqual({ 'org/model': 'model.Q8_0.gguf' });
   });
 });

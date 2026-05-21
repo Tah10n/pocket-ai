@@ -29,6 +29,7 @@ export interface MemoryBudget {
   thresholdBytes?: number;
   appResidentBytes?: number;
   appPssBytes?: number;
+  reclaimableBytes?: number;
   learnedSafeBudgetBytes?: number;
   effectiveBudgetBytes: number;
 }

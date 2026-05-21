@@ -228,8 +228,9 @@ export function getGlassSurfaceFrameStyle(
   mode: ResolvedThemeMode,
   colors: ThemeColors,
   tone: 'default' | ThemeTone | 'danger' = 'default',
-  _softened = false,
+  softened = false,
   cornerRadiusStyle?: GlassCornerRadiusStyle,
+  emphasizeAccentFrame = false,
 ): ViewStyle | undefined {
   if (appearance.surfaceKind !== 'glass') {
     return undefined;
@@ -247,15 +248,19 @@ export function getGlassSurfaceFrameStyle(
       : tone === 'accent' || tone === 'primary'
         ? colors.primaryStrong
         : undefined;
+  const shouldEmphasizeAccentFrame = emphasizeAccentFrame && tone === 'accent' && !softened && Boolean(toneColor);
 
   return {
     ...(cornerRadiusStyle ?? {}),
     backgroundColor: toneColor
-      ? withAlpha(toneColor, isDark ? 0.07 : 0.08)
+      ? withAlpha(toneColor, shouldEmphasizeAccentFrame ? (isDark ? 0.1 : 0.13) : (isDark ? 0.07 : 0.08))
       : isDark
         ? 'rgba(244, 247, 251, 0.045)'
         : 'rgba(255, 255, 255, 0.08)',
-    borderWidth: 0,
+    borderWidth: shouldEmphasizeAccentFrame ? (isDark ? StyleSheet.hairlineWidth : 1) : 0,
+    ...(shouldEmphasizeAccentFrame && toneColor
+      ? { borderColor: withAlpha(toneColor, isDark ? 0.3 : 0.42) }
+      : {}),
     elevation: 0,
     shadowOpacity: 0,
   };
@@ -490,6 +495,10 @@ export function GlassSurfaceBackdrop({
 }) {
   const contextBlurTarget = React.useContext(GlassBlurTargetContext);
   const blurTarget = androidBlurTargetRef === undefined ? contextBlurTarget : androidBlurTargetRef;
+  const isInsideOwnAndroidBlurTarget = Platform.OS === 'android'
+    && Boolean(blurTarget)
+    && Boolean(contextBlurTarget)
+    && blurTarget === contextBlurTarget;
   const isMatte = decorative === 'matte';
   const isTintOnly = decorative === 'tint';
 
@@ -521,6 +530,8 @@ export function GlassSurfaceBackdrop({
     && (
       isAndroidBlurFallbackRequired()
       || (!forceNativeAndroidBlur && shouldUseAndroidGlassMatteFallback())
+      // Android native blur cannot render inside the same target it is asked to blur.
+      || isInsideOwnAndroidBlurTarget
       || !blurTarget
     )
   ) {
@@ -545,7 +556,7 @@ export function GlassSurfaceBackdrop({
         intensity={appearance.effects.surfaceBlurIntensity}
         tint={getGlassBlurTint(tint)}
         {...getAndroidBlurProps(appearance, blurTarget)}
-        style={StyleSheet.absoluteFill}
+        style={[StyleSheet.absoluteFill, cornerRadiusStyle]}
       />
       <LiquidGlassContrastLayer tint={tint} variant={isMatte ? 'matte' : 'standard'} cornerRadiusStyle={cornerRadiusStyle} />
       <LiquidGlassTintLayer tint={tint} variant={isMatte ? 'matte' : 'standard'} cornerRadiusStyle={cornerRadiusStyle} />
@@ -957,6 +968,11 @@ type ScreenSurfaceTone = ThemeTone | 'danger' | 'default';
 interface ScreenSurfaceProps {
   applyGlassFrame?: boolean;
   androidBlurTargetRef?: AndroidBlurTargetRef | null;
+  accessibilityHint?: React.ComponentProps<typeof Box>['accessibilityHint'];
+  accessibilityLabel?: React.ComponentProps<typeof Box>['accessibilityLabel'];
+  accessibilityRole?: React.ComponentProps<typeof Box>['accessibilityRole'];
+  accessibilityState?: React.ComponentProps<typeof Box>['accessibilityState'];
+  accessible?: React.ComponentProps<typeof Box>['accessible'];
   children: React.ReactNode;
   className?: string;
   decorative?: GlassSurfaceDecorative;
@@ -1267,7 +1283,9 @@ export function ScreenAndroidContentBlurTarget({
         testID={testID}
         style={style}
       >
-        {children}
+        <GlassBlurTargetContext.Provider value={blurTargetRef}>
+          {children}
+        </GlassBlurTargetContext.Provider>
       </BlurTargetView>
     );
   }
@@ -1365,7 +1383,15 @@ export function ScreenCard({
         ? appearance.classNames.toneClassNameByTone.error.surfaceClassName
         : undefined;
   const glassCornerRadiusStyle = getGlassCornerRadiusStyle(baseClassName, className);
-  const glassFrameStyle = getGlassSurfaceFrameStyle(appearance, theme.resolvedMode, theme.colors, tone, dashed, glassCornerRadiusStyle);
+  const glassFrameStyle = getGlassSurfaceFrameStyle(
+    appearance,
+    theme.resolvedMode,
+    theme.colors,
+    tone,
+    dashed,
+    glassCornerRadiusStyle,
+    tone === 'accent',
+  );
 
   return (
     <Box
@@ -1724,6 +1750,11 @@ export function ScreenBanner({
 export function ScreenSurface({
   applyGlassFrame = true,
   androidBlurTargetRef,
+  accessibilityHint,
+  accessibilityLabel,
+  accessibilityRole,
+  accessibilityState,
+  accessible,
   children,
   className,
   decorative = 'tint',
@@ -1742,6 +1773,11 @@ export function ScreenSurface({
 
   return (
     <Box
+      accessible={accessible}
+      accessibilityHint={accessibilityHint}
+      accessibilityLabel={accessibilityLabel}
+      accessibilityRole={accessibilityRole}
+      accessibilityState={accessibilityState}
       testID={testID}
       className={joinClassNames(
         shouldUseGlassChrome ? 'relative overflow-hidden' : undefined,
@@ -2220,9 +2256,12 @@ export function ScreenSheet({
   return (
     <Box
       testID={testID}
-      className={joinClassNames(appearance.classNames.sheetClassName, appearance.surfaceKind === 'glass' ? 'relative overflow-hidden' : undefined, className)}
+      className={joinClassNames(
+        appearance.classNames.sheetClassName,
+        appearance.surfaceKind === 'glass' ? 'relative overflow-hidden' : undefined,
+        className,
+      )}
       style={[
-        bottomInsetStyle,
         appearance.surfaceKind === 'glass'
           ? getGlassSurfaceFrameStyle(appearance, theme.resolvedMode, theme.colors, 'default', false, glassCornerRadiusStyle)
           : undefined,
@@ -2236,7 +2275,12 @@ export function ScreenSheet({
         forceNativeAndroidBlur={Boolean(androidBlurTargetRef)}
         androidBlurTargetRef={androidBlurTargetRef}
       />
-      {children}
+      <Box
+        className={screenLayoutTokens.sheetContentPaddingClassName}
+        style={bottomInsetStyle}
+      >
+        {children}
+      </Box>
     </Box>
   );
 }
@@ -2247,10 +2291,15 @@ export function ScreenModalOverlay({
   testID,
 }: ScreenModalOverlayProps) {
   const appearance = useScreenAppearance();
+
   return (
     <Box
       testID={testID}
-      className={joinClassNames(appearance.classNames.modalOverlayClassName, className)}
+      className={joinClassNames(
+        'relative overflow-hidden',
+        appearance.classNames.modalOverlayClassName,
+        className,
+      )}
     >
       {children}
     </Box>

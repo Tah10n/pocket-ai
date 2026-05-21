@@ -1,10 +1,11 @@
-import React, { useCallback, useEffect, useMemo, useRef } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Alert, StyleSheet, type View } from 'react-native';
 import { FlashList, ListRenderItem } from '@shopify/flash-list';
 import { Box } from '@/components/ui/box';
 import { Button, ButtonText } from '@/components/ui/button';
 import { ErrorReportSheet } from '@/components/ui/ErrorReportSheet';
 import { ModelCard } from '@/components/ui/ModelCard';
+import { ModelVariantPickerSheet } from '@/components/ui/ModelVariantPickerSheet';
 import { MODEL_WARMUP_BANNER_RESERVED_HEIGHT, ModelWarmupBanner } from '@/components/ui/ModelWarmupBanner';
 import { ModelParametersSheet } from '@/components/ui/ModelParametersSheet';
 import { ScreenAndroidContentBlurTarget, ScreenBanner, ScreenCard, ScreenStack } from '@/components/ui/ScreenShell';
@@ -30,6 +31,7 @@ import {
 import { useDownloadStore } from '@/store/downloadStore';
 import { EngineStatus, LifecycleStatus, ModelAccessState, type ModelMetadata } from '@/types/models';
 import { mergeModelWithRuntimeState } from '@/utils/modelRuntimeState';
+import { applyDefaultCatalogModelVariantSelection, applyModelVariantSelection } from '@/utils/modelVariants';
 import { DECIMAL_GIGABYTE } from '@/utils/modelSize';
 import { screenLayoutMetrics } from '@/utils/themeTokens';
 import { uniqueByKey } from '@/utils/uniqueBy';
@@ -38,20 +40,27 @@ import { type ModelsCatalogTab } from '@/store/modelsCatalogTabs';
 import { useTranslation } from 'react-i18next';
 import { useModelsCatalogData } from '@/hooks/useModelsCatalogData';
 import { useModelActions } from '@/hooks/useModelActions';
+import type { AndroidBlurTargetRef } from '@/utils/androidBlur';
 
 interface ModelsListProps {
   activeTab: ModelsCatalogTab;
   searchQuery: string;
   searchSessionKey?: number | string;
+  androidContentBlurTargetRef?: AndroidBlurTargetRef | null;
+  // Keep modal sheets outside Android's blur target while letting the routed screen own the full content target.
+  renderContentContainer?: (content: ReactNode) => ReactNode;
 }
 
 interface ModelCardWithRuntimeStateProps {
   model: ModelMetadata;
   activeModelId: string | null | undefined;
-  onOpenDetails: (modelId: string) => void;
+  onOpenDetails: (modelId: string, model?: ModelMetadata) => void;
   onDownload: (model: ModelMetadata) => void;
   onConfigureToken: () => void;
   onOpenModelPage: (modelId: string) => void;
+  selectedVariantId?: string;
+  activeTab: ModelsCatalogTab;
+  onOpenVariantSelector: (modelId: string) => void;
   onLoad: (id: string) => void;
   onOpenSettings: (id: string) => void;
   onUnload: () => void;
@@ -67,6 +76,9 @@ const ModelCardWithRuntimeState = React.memo(({
   onDownload,
   onConfigureToken,
   onOpenModelPage,
+  selectedVariantId,
+  activeTab,
+  onOpenVariantSelector,
   onLoad,
   onOpenSettings,
   onUnload,
@@ -77,19 +89,24 @@ const ModelCardWithRuntimeState = React.memo(({
   const queuedItem = useDownloadStore((state) => state.queue.find((item) => item.id === model.id));
   const localModel = registry.getModel(model.id);
 
-  const displayModel = mergeModelWithRuntimeState(model, {
+  const runtimeModel = mergeModelWithRuntimeState(model, {
     activeModelId: activeModelId ?? undefined,
     localModel,
     queuedItem: queuedItem?.id === model.id ? queuedItem : undefined,
   });
+  const displayModel = getModelForCardDisplay(runtimeModel, activeTab, selectedVariantId);
+  const handleOpenDetails = React.useCallback((modelId: string) => {
+    onOpenDetails(modelId, displayModel);
+  }, [displayModel, onOpenDetails]);
 
   return (
     <ModelCard
       model={displayModel}
-      onOpenDetails={onOpenDetails}
+      onOpenDetails={handleOpenDetails}
       onDownload={onDownload}
       onConfigureToken={onConfigureToken}
       onOpenModelPage={onOpenModelPage}
+      onOpenVariantSelector={onOpenVariantSelector}
       onLoad={onLoad}
       onOpenSettings={onOpenSettings}
       onUnload={onUnload}
@@ -141,7 +158,33 @@ function matchesActiveTab(model: ModelMetadata, activeTab: ModelsListProps['acti
   return true;
 }
 
-function matchesSize(model: ModelMetadata, filters: ModelFilterCriteria): boolean {
+function applyCatalogDefaultVariantForTab(model: ModelMetadata, activeTab: ModelsCatalogTab): ModelMetadata {
+  if (activeTab !== 'all' || model.lifecycleStatus !== LifecycleStatus.AVAILABLE) {
+    return model;
+  }
+
+  return applyDefaultCatalogModelVariantSelection(model);
+}
+
+function getModelForCardDisplay(
+  model: ModelMetadata,
+  activeTab: ModelsCatalogTab,
+  selectedVariantId?: string,
+): ModelMetadata {
+  return selectedVariantId
+    ? applyModelVariantSelection(model, selectedVariantId)
+    : applyCatalogDefaultVariantForTab(model, activeTab);
+}
+
+function getModelForCatalogFiltering(
+  model: ModelMetadata,
+  activeTab: ModelsCatalogTab,
+  selectedVariantId?: string,
+): ModelMetadata {
+  return getModelForCardDisplay(model, activeTab, selectedVariantId);
+}
+
+function matchesSize(model: Pick<ModelMetadata, 'size'>, filters: ModelFilterCriteria): boolean {
   if (filters.sizeRanges.length === 0) {
     return true;
   }
@@ -196,7 +239,13 @@ function sortModels(models: ModelMetadata[], sort: ModelSortPreference): ModelMe
   });
 }
 
-export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsListProps) => {
+export const ModelsList = ({
+  activeTab,
+  searchQuery,
+  searchSessionKey,
+  androidContentBlurTargetRef,
+  renderContentContainer,
+}: ModelsListProps) => {
   const { t } = useTranslation();
   const { startDownload, cancelDownload } = useModelDownload();
   const { paddingTop: headerInset, paddingBottom: tabBarInset } = useFloatingScrollInsets();
@@ -223,7 +272,10 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
   const autoFillAttemptsRef = useRef(0);
   const lastAutoFillCursorRef = useRef<string | null>(null);
   const catalogFirstResultsShownSessionRef = useRef<string | null>(null);
-  const warmupContentBlurTargetRef = useRef<View | null>(null);
+  const localContentBlurTargetRef = useRef<View | null>(null);
+  const warmupContentBlurTargetRef = androidContentBlurTargetRef ?? localContentBlurTargetRef;
+  const [selectedVariantIds, setSelectedVariantIds] = useState<Record<string, string>>({});
+  const [variantPickerModelId, setVariantPickerModelId] = useState<string | null>(null);
 
   const {
     models,
@@ -281,10 +333,41 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
     }));
   }, [activeTab, engineState.activeModelId, models, modelsRegistryRevision, queueLifecycleSignature]);
 
+  useEffect(() => {
+    setSelectedVariantIds((current) => {
+      const displayModelsById = new Map(displayModels.map((model) => [model.id, model] as const));
+      let didPrune = false;
+      const nextSelectedVariantIds: Record<string, string> = {};
+
+      Object.entries(current).forEach(([modelId, variantId]) => {
+        const model = displayModelsById.get(modelId);
+        if (!model) {
+          nextSelectedVariantIds[modelId] = variantId;
+          return;
+        }
+
+        const modelVariants = Array.isArray(model.variants) ? model.variants : [];
+        if (
+          modelVariants.length > 0
+          && !modelVariants.some((variant) => variant.variantId === variantId)
+        ) {
+          didPrune = true;
+          return;
+        }
+
+        nextSelectedVariantIds[modelId] = variantId;
+      });
+
+      return didPrune ? nextSelectedVariantIds : current;
+    });
+  }, [displayModels]);
+
   const filteredModels = useMemo(() => {
     const filtered = displayModels.filter((model) => {
+      const filterModel = getModelForCatalogFiltering(model, activeTab, selectedVariantIds[model.id]);
+
       if (filters.fitsInRamOnly) {
-        const decision = model.memoryFitDecision;
+        const decision = filterModel.memoryFitDecision;
         if (decision) {
           const decisionFitsInRam =
             decision === 'fits_high_confidence'
@@ -292,20 +375,20 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
           if (!decisionFitsInRam) {
             return false;
           }
-        } else if (model.fitsInRam !== true) {
+        } else if (filterModel.fitsInRam !== true) {
           return false;
         }
       }
 
-      if (!matchesActiveTab(model, activeTab)) {
+      if (!matchesActiveTab(filterModel, activeTab)) {
         return false;
       }
 
-      if (!matchesTokenRequirement(model, filters)) {
+      if (!matchesTokenRequirement(filterModel, filters)) {
         return false;
       }
 
-      if (!matchesSize(model, filters)) {
+      if (!matchesSize(filterModel, filters)) {
         return false;
       }
 
@@ -317,7 +400,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
     }
 
     return sortModels(filtered, sort);
-  }, [activeTab, displayModels, filters, serverSort, sort]);
+  }, [activeTab, displayModels, filters, selectedVariantIds, serverSort, sort]);
 
   useEffect(() => {
     autoFillAttemptsRef.current = 0;
@@ -619,6 +702,9 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
       onDownload={handleDownload}
       onConfigureToken={openTokenSettings}
       onOpenModelPage={openModelPage}
+      selectedVariantId={selectedVariantIds[item.id]}
+      activeTab={activeTab}
+      onOpenVariantSelector={setVariantPickerModelId}
       onLoad={handleLoad}
       onOpenSettings={openModelParameters}
       onUnload={handleUnload}
@@ -629,6 +715,7 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
   ), [
     cancelModelDownload,
     engineState.activeModelId,
+    activeTab,
     handleDelete,
     handleDownload,
     handleLoad,
@@ -636,6 +723,8 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
     openChat,
     openModelDetails,
     openModelPage,
+    setVariantPickerModelId,
+    selectedVariantIds,
     openModelParameters,
     openTokenSettings,
   ]);
@@ -645,81 +734,119 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
   const renderFooter = useCallback(() => footer, [footer]);
   const isCatalogInitializing = activeTab === 'all' && !isTokenStateHydrated;
   const isModelWarmingUp = engineState.status === EngineStatus.INITIALIZING;
+  const variantPickerModel = useMemo(() => {
+    if (!variantPickerModelId) {
+      return null;
+    }
+
+    const model = filteredModels.find((item) => item.id === variantPickerModelId);
+    return model
+      ? getModelForCardDisplay(model, activeTab, selectedVariantIds[model.id])
+      : null;
+  }, [activeTab, filteredModels, selectedVariantIds, variantPickerModelId]);
+  const closeVariantPicker = useCallback(() => {
+    setVariantPickerModelId(null);
+  }, []);
+  const selectVariant = useCallback((variantId: string) => {
+    if (!variantPickerModelId) {
+      return;
+    }
+
+    setSelectedVariantIds((current) => ({
+      ...current,
+      [variantPickerModelId]: variantId,
+    }));
+    setVariantPickerModelId(null);
+  }, [variantPickerModelId]);
   const listBottomInset = screenLayoutMetrics.contentBottomInset
     + (isModelWarmingUp ? MODEL_WARMUP_BANNER_RESERVED_HEIGHT : 0)
     + tabBarInset;
 
-  return (
+  const catalogContent = (
     <>
+      <Box style={headerInset > 0 ? { paddingTop: headerInset } : undefined}>
+        <ModelsFilter
+          filters={filters}
+          sort={sort}
+          onFitsInRamToggle={(enabled) => setFitsInRamOnly(activeTab, enabled)}
+          onNoTokenRequiredToggle={(enabled) => setNoTokenRequiredOnly(activeTab, enabled)}
+          onSizeRangeToggle={(sizeRange) => toggleSizeRange(activeTab, sizeRange)}
+          onSortChange={(nextSort) => setSort(activeTab, nextSort)}
+          onClear={() => clearFilters(activeTab)}
+        />
+      </Box>
+
+      <ScreenStack className="flex-1 pt-2" gap="compact">
+        {discoveryBanner}
+
+        {engineState.status === EngineStatus.ERROR && engineState.lastError ? (
+          <ScreenCard padding="compact" tone="error">
+            <Text className="text-sm font-semibold text-error-700 dark:text-error-300">
+              {t('common.errors.modelLoadFailed')}
+            </Text>
+            <Text selectable className="mt-1 text-sm text-error-700 dark:text-error-300">
+              {engineState.lastError}
+            </Text>
+            <Box className="mt-3 flex-row gap-2">
+              <Button action="secondary" size="sm" onPress={handleDismissEngineError} className="flex-1">
+                <ButtonText>{t('common.close')}</ButtonText>
+              </Button>
+              <Button action="softPrimary" size="sm" onPress={handleReportEngineError} className="flex-1">
+                <ButtonText>{t('models.errorReport.reportButton')}</ButtonText>
+              </Button>
+            </Box>
+          </ScreenCard>
+        ) : null}
+
+        {warningMessage ? (
+          <ScreenCard padding="compact" tone="warning">
+            <Text className="text-sm text-warning-700 dark:text-warning-300">{warningMessage}</Text>
+          </ScreenCard>
+        ) : null}
+
+        {(isCatalogInitializing || (loading && models.length === 0)) ? (
+          <Box className="flex-1 items-center justify-center pb-8 pt-6">
+            <Spinner size="large" />
+            <Text className="mt-2 text-typography-500">{t('models.searching', 'Searching Hugging Face...')}</Text>
+          </Box>
+        ) : (
+          <FlashList
+            data={filteredModels}
+            extraData={selectedVariantIds}
+            keyExtractor={(item) => item.id}
+            renderItem={renderModelItem}
+            ItemSeparatorComponent={renderItemSeparator}
+            ListEmptyComponent={renderEmptyState}
+            ListFooterComponent={renderFooter}
+            contentContainerStyle={{ flexGrow: 1, paddingBottom: listBottomInset }}
+            refreshing={isRefreshing}
+            onRefresh={handlePullToRefresh}
+            onScrollBeginDrag={handleCatalogScrollBeginDrag}
+            onEndReached={() => handleLoadMore('auto')}
+            onEndReachedThreshold={0.6}
+            showsVerticalScrollIndicator={false}
+          />
+        )}
+      </ScreenStack>
+    </>
+  );
+  const blurTargetContent = renderContentContainer
+    ? renderContentContainer(catalogContent)
+    : androidContentBlurTargetRef ? (
+      catalogContent
+    ) : (
       <ScreenAndroidContentBlurTarget
         blurTargetRef={warmupContentBlurTargetRef}
         style={styles.warmupContentBlurTarget}
         testID="models-warmup-content-blur-target"
       >
-        <Box style={headerInset > 0 ? { paddingTop: headerInset } : undefined}>
-          <ModelsFilter
-            filters={filters}
-            sort={sort}
-            onFitsInRamToggle={(enabled) => setFitsInRamOnly(activeTab, enabled)}
-            onNoTokenRequiredToggle={(enabled) => setNoTokenRequiredOnly(activeTab, enabled)}
-            onSizeRangeToggle={(sizeRange) => toggleSizeRange(activeTab, sizeRange)}
-            onSortChange={(nextSort) => setSort(activeTab, nextSort)}
-            onClear={() => clearFilters(activeTab)}
-          />
-        </Box>
-
-        <ScreenStack className="flex-1 pt-2" gap="compact">
-          {discoveryBanner}
-
-          {engineState.status === EngineStatus.ERROR && engineState.lastError ? (
-            <ScreenCard padding="compact" tone="error">
-              <Text className="text-sm font-semibold text-error-700 dark:text-error-300">
-                {t('common.errors.modelLoadFailed')}
-              </Text>
-              <Text selectable className="mt-1 text-sm text-error-700 dark:text-error-300">
-                {engineState.lastError}
-              </Text>
-              <Box className="mt-3 flex-row gap-2">
-                <Button action="secondary" size="sm" onPress={handleDismissEngineError} className="flex-1">
-                  <ButtonText>{t('common.close')}</ButtonText>
-                </Button>
-                <Button action="softPrimary" size="sm" onPress={handleReportEngineError} className="flex-1">
-                  <ButtonText>{t('models.errorReport.reportButton')}</ButtonText>
-                </Button>
-              </Box>
-            </ScreenCard>
-          ) : null}
-
-          {warningMessage ? (
-            <ScreenCard padding="compact" tone="warning">
-              <Text className="text-sm text-warning-700 dark:text-warning-300">{warningMessage}</Text>
-            </ScreenCard>
-          ) : null}
-
-          {(isCatalogInitializing || (loading && models.length === 0)) ? (
-            <Box className="flex-1 items-center justify-center pb-8 pt-6">
-              <Spinner size="large" />
-              <Text className="mt-2 text-typography-500">{t('models.searching', 'Searching Hugging Face...')}</Text>
-            </Box>
-          ) : (
-            <FlashList
-              data={filteredModels}
-              keyExtractor={(item) => item.id}
-              renderItem={renderModelItem}
-              ItemSeparatorComponent={renderItemSeparator}
-              ListEmptyComponent={renderEmptyState}
-              ListFooterComponent={renderFooter}
-              contentContainerStyle={{ flexGrow: 1, paddingBottom: listBottomInset }}
-              refreshing={isRefreshing}
-              onRefresh={handlePullToRefresh}
-              onScrollBeginDrag={handleCatalogScrollBeginDrag}
-              onEndReached={() => handleLoadMore('auto')}
-              onEndReachedThreshold={0.6}
-              showsVerticalScrollIndicator={false}
-            />
-          )}
-        </ScreenStack>
+        {catalogContent}
       </ScreenAndroidContentBlurTarget>
+    );
+
+  return (
+    <>
+      {blurTargetContent}
 
       <ModelWarmupBanner
         androidContentBlurTargetRef={warmupContentBlurTargetRef}
@@ -730,6 +857,13 @@ export const ModelsList = ({ activeTab, searchQuery, searchSessionKey }: ModelsL
       <ModelParametersSheet
         {...modelParametersSheetProps}
         androidContentBlurTargetRef={warmupContentBlurTargetRef}
+      />
+      <ModelVariantPickerSheet
+        visible={variantPickerModel !== null}
+        model={variantPickerModel}
+        androidContentBlurTargetRef={warmupContentBlurTargetRef}
+        onSelectVariant={selectVariant}
+        onClose={closeVariantPicker}
       />
       <ErrorReportSheet
         {...errorReportSheetProps}

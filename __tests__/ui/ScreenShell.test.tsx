@@ -87,6 +87,7 @@ jest.mock('expo-linear-gradient', () => {
 const {
   getGlassCornerRadiusStyle,
   ScreenActionPill,
+  ScreenAndroidContentBlurTarget,
   ScreenCard,
   ScreenChip,
   ScreenContent,
@@ -94,6 +95,7 @@ const {
   ScreenIconButton,
   ScreenIconTile,
   ScreenInlineInput,
+  ScreenModalOverlay,
   ScreenPressableCard,
   ScreenRoot,
   ScreenSegmentedControl,
@@ -344,12 +346,47 @@ describe('ScreenShell', () => {
   });
 
   it('uses the normalized sheet padding tokens', () => {
-    const { getByTestId } = render(
+    const { screenLayoutTokens } = require('../../src/utils/themeTokens');
+    const { View } = require('react-native');
+    const { getByTestId, UNSAFE_getAllByType } = render(
       <ScreenSheet testID="screen-sheet">content</ScreenSheet>,
     );
 
-    expect(getByTestId('screen-sheet').props.className).toContain('px-4');
-    expect(getByTestId('screen-sheet').props.className).toContain('pt-5');
+    expect(getByTestId('screen-sheet').props.className).not.toContain('px-4');
+    expect(getByTestId('screen-sheet').props.className).not.toContain('pt-5');
+    expect(UNSAFE_getAllByType(View).some((node: any) =>
+      node.props.className === screenLayoutTokens.sheetContentPaddingClassName,
+    )).toBe(true);
+  });
+
+  it('keeps glass sheets on their themed surface while the blur backdrop is clipped inside', () => {
+    const { getThemeAppearance, semanticColorTokens } = require('../../src/utils/themeTokens');
+    const appearance = getThemeAppearance('glass', 'light');
+    mockThemeContext = {
+      colors: { background: '#fff', headerBlurTint: 'light' },
+      resolvedMode: 'light',
+      themeId: 'glass',
+      appearance,
+    };
+
+    const { getByTestId, UNSAFE_getAllByType } = render(
+      <ScreenSheet testID="glass-sheet">content</ScreenSheet>,
+    );
+
+    const className = getByTestId('glass-sheet').props.className;
+    const backgroundTokens = className
+      .split(/\s+/)
+      .filter((token: string) => token.startsWith('bg-'));
+    expect(className).toContain('relative overflow-hidden');
+    expect(backgroundTokens).toContain('bg-background-0/15');
+    expect(backgroundTokens).not.toContain('bg-transparent');
+
+    const { View } = require('react-native');
+    const blurBackdrop = UNSAFE_getAllByType(View).find((node: any) =>
+      node.props.pointerEvents === 'none'
+      && node.props.intensity === appearance.effects.surfaceBlurIntensity,
+    );
+    expect(blurBackdrop).toBeTruthy();
   });
 
   it('renders frosted backdrops for glass cards', () => {
@@ -384,6 +421,9 @@ describe('ScreenShell', () => {
       && node.props.intensity === appearance.effects.surfaceBlurIntensity,
     );
     expect(blurBackdrop).toBeTruthy();
+    expect(StyleSheet.flatten(blurBackdrop?.props.style)).toMatchObject({
+      borderRadius: 20,
+    });
 
     const innerRim = UNSAFE_getAllByType(View).find((node: any) =>
       Array.isArray(node.props.style)
@@ -393,6 +433,57 @@ describe('ScreenShell', () => {
       expect.objectContaining({ borderRadius: 20 }),
     ]));
     expect(StyleSheet.flatten(innerRim?.props.style).borderWidth).toBe(StyleSheet.hairlineWidth);
+  });
+
+  it('keeps light glass accent cards visually separated from the screen background', () => {
+    const { StyleSheet } = require('react-native');
+    const { getThemeAppearance, getThemeColors, withAlpha } = require('../../src/utils/themeTokens');
+    const colors = getThemeColors('light', 'glass');
+    mockThemeContext = {
+      colors,
+      resolvedMode: 'light',
+      themeId: 'glass',
+      appearance: getThemeAppearance('glass', 'light'),
+    };
+
+    const { getByTestId } = render(
+      <ScreenCard testID="active-model-glass-card" tone="accent">content</ScreenCard>,
+    );
+
+    expect(StyleSheet.flatten(getByTestId('active-model-glass-card').props.style)).toMatchObject({
+      backgroundColor: withAlpha(colors.primaryStrong, 0.13),
+      borderColor: withAlpha(colors.primaryStrong, 0.42),
+      borderRadius: 20,
+      borderWidth: 1,
+      elevation: 0,
+      shadowOpacity: 0,
+    });
+  });
+
+  it('keeps light glass accent icon tiles tint-only without card outline', () => {
+    const { StyleSheet } = require('react-native');
+    const { getThemeAppearance, getThemeColors, withAlpha } = require('../../src/utils/themeTokens');
+    const colors = getThemeColors('light', 'glass');
+    mockThemeContext = {
+      colors,
+      resolvedMode: 'light',
+      themeId: 'glass',
+      appearance: getThemeAppearance('glass', 'light'),
+    };
+
+    const { getByTestId } = render(
+      <ScreenIconTile testID="accent-glass-icon-tile" iconName="memory" />,
+    );
+
+    const style = StyleSheet.flatten(getByTestId('accent-glass-icon-tile').props.style);
+    expect(style).toMatchObject({
+      backgroundColor: withAlpha(colors.primaryStrong, 0.08),
+      borderRadius: 12,
+      borderWidth: 0,
+      elevation: 0,
+      shadowOpacity: 0,
+    });
+    expect(style.borderColor).toBeUndefined();
   });
 
   it('keeps dark glass cards contrasty without white feathered stripes', () => {
@@ -897,6 +988,129 @@ describe('ScreenShell', () => {
     }
   });
 
+  it('falls back when forced Android blur is rendered inside its own target', () => {
+    const { Platform, StyleSheet } = require('react-native');
+    const { getThemeAppearance } = require('../../src/utils/themeTokens');
+    const originalPlatform = Platform.OS;
+    const originalVersion = Platform.Version;
+    const appearance = getThemeAppearance('glass', 'light');
+    const blurTargetRef = React.createRef<any>();
+    Object.defineProperty(Platform, 'OS', { configurable: true, get: () => 'android' });
+    Object.defineProperty(Platform, 'Version', { configurable: true, get: () => 34 });
+    mockThemeContext = {
+      colors: { background: '#fff', headerBlurTint: 'light' },
+      resolvedMode: 'light',
+      themeId: 'glass',
+      appearance,
+    };
+
+    try {
+      const { UNSAFE_getAllByType } = render(
+        <ScreenAndroidContentBlurTarget blurTargetRef={blurTargetRef}>
+          <ScreenSheet androidBlurTargetRef={blurTargetRef} testID="recursive-android-glass-sheet">content</ScreenSheet>
+        </ScreenAndroidContentBlurTarget>,
+      );
+
+      const { View } = require('react-native');
+      const views = UNSAFE_getAllByType(View);
+      expect(views.some((node: any) =>
+        node.props.blurMethod === 'dimezisBlurViewSdk31Plus'
+        && node.props.blurTarget === blurTargetRef,
+      )).toBe(false);
+      expect(views.some((node: any) =>
+        StyleSheet.flatten(node.props.style)?.backgroundColor === 'rgba(255,255,255,0.42)',
+      )).toBe(true);
+    } finally {
+      Object.defineProperty(Platform, 'OS', { configurable: true, get: () => originalPlatform });
+      Object.defineProperty(Platform, 'Version', { configurable: true, get: () => originalVersion });
+    }
+  });
+
+  it('keeps Android modal overlays translucent instead of blurring the whole app', () => {
+    const { Platform } = require('react-native');
+    const { getThemeAppearance } = require('../../src/utils/themeTokens');
+    const originalPlatform = Platform.OS;
+    const originalVersion = Platform.Version;
+    const appearance = getThemeAppearance('glass', 'light');
+    Object.defineProperty(Platform, 'OS', { configurable: true, get: () => 'android' });
+    Object.defineProperty(Platform, 'Version', { configurable: true, get: () => 34 });
+    mockThemeContext = {
+      colors: { background: '#fff', headerBlurTint: 'light' },
+      resolvedMode: 'light',
+      themeId: 'glass',
+      appearance,
+    };
+
+    try {
+      const { getByTestId, UNSAFE_getAllByType } = render(
+        <ScreenModalOverlay testID="android-glass-modal-overlay">
+          content
+        </ScreenModalOverlay>,
+      );
+
+      const overlayClassName = getByTestId('android-glass-modal-overlay').props.className;
+      expect(overlayClassName).toContain('relative overflow-hidden');
+      expect(overlayClassName).toContain(appearance.classNames.modalOverlayClassName);
+
+      const { View } = require('react-native');
+      const blurBackdrop = UNSAFE_getAllByType(View).find((node: any) =>
+        node.props.pointerEvents === 'none'
+        && node.props.intensity === appearance.effects.surfaceBlurIntensity,
+      );
+      const dimOverlay = UNSAFE_getAllByType(View).find((node: any) =>
+        node.props.pointerEvents === 'none'
+        && node.props.className === 'absolute inset-0 bg-background-950/20',
+      );
+
+      expect(blurBackdrop).toBeUndefined();
+      expect(dimOverlay).toBeUndefined();
+    } finally {
+      Object.defineProperty(Platform, 'OS', { configurable: true, get: () => originalPlatform });
+      Object.defineProperty(Platform, 'Version', { configurable: true, get: () => originalVersion });
+    }
+  });
+
+  it('renders the sheet glass backdrop outside the padded content wrapper', () => {
+    const { Platform } = require('react-native');
+    const { getThemeAppearance, screenLayoutTokens } = require('../../src/utils/themeTokens');
+    const originalPlatform = Platform.OS;
+    const originalVersion = Platform.Version;
+    const appearance = getThemeAppearance('glass', 'light');
+    const blurTargetRef = React.createRef<any>();
+    Object.defineProperty(Platform, 'OS', { configurable: true, get: () => 'android' });
+    Object.defineProperty(Platform, 'Version', { configurable: true, get: () => 34 });
+    mockThemeContext = {
+      colors: { background: '#fff', headerBlurTint: 'light' },
+      resolvedMode: 'light',
+      themeId: 'glass',
+      appearance,
+    };
+
+    try {
+      const { UNSAFE_getAllByType } = render(
+        <ScreenSheet androidBlurTargetRef={blurTargetRef} testID="android-padded-glass-sheet">content</ScreenSheet>,
+      );
+
+      const { View } = require('react-native');
+      const views = UNSAFE_getAllByType(View);
+      const sheetIndex = views.findIndex((node: any) => node.props.testID === 'android-padded-glass-sheet');
+      const blurIndex = views.findIndex((node: any) =>
+        node.props.pointerEvents === 'none'
+        && node.props.intensity === appearance.effects.surfaceBlurIntensity,
+      );
+      const contentIndex = views.findIndex((node: any) =>
+        node.props.className === screenLayoutTokens.sheetContentPaddingClassName,
+      );
+
+      expect(sheetIndex).toBeGreaterThanOrEqual(0);
+      expect(blurIndex).toBeGreaterThan(sheetIndex);
+      expect(contentIndex).toBeGreaterThan(blurIndex);
+    } finally {
+      Object.defineProperty(Platform, 'OS', { configurable: true, get: () => originalPlatform });
+      Object.defineProperty(Platform, 'Version', { configurable: true, get: () => originalVersion });
+    }
+  });
+
   it('uses an explicit Android blur target for glass surfaces when requested', () => {
     const { Platform } = require('react-native');
     const { getThemeAppearance } = require('../../src/utils/themeTokens');
@@ -978,7 +1192,7 @@ describe('ScreenShell', () => {
   });
 
   it('falls back to dense tint surfaces instead of BlurView on pre-31 Android', () => {
-    const { Platform } = require('react-native');
+    const { Platform, StyleSheet } = require('react-native');
     const { getThemeAppearance } = require('../../src/utils/themeTokens');
     const originalPlatform = Platform.OS;
     const originalVersion = Platform.Version;
@@ -1002,8 +1216,15 @@ describe('ScreenShell', () => {
       const { View } = require('react-native');
       const views = UNSAFE_getAllByType(View);
       expect(views.some((node: any) => node.props.intensity === appearance.effects.surfaceBlurIntensity)).toBe(false);
-      expect(views.some((node: any) => typeof node.props.className === 'string'
-        && node.props.className.includes('bg-background-0/15'))).toBe(true);
+      const sheetClassName = views.find((node: any) => node.props.testID === 'legacy-glass-sheet')?.props.className ?? '';
+      const backgroundTokens = sheetClassName
+        .split(/\s+/)
+        .filter((token: string) => token.startsWith('bg-'));
+      expect(backgroundTokens).toContain('bg-background-0/15');
+      expect(backgroundTokens).not.toContain('bg-transparent');
+      expect(views.some((node: any) =>
+        StyleSheet.flatten(node.props.style)?.backgroundColor === 'rgba(255,255,255,0.42)',
+      )).toBe(true);
     } finally {
       Object.defineProperty(Platform, 'OS', { configurable: true, get: () => originalPlatform });
       Object.defineProperty(Platform, 'Version', { configurable: true, get: () => originalVersion });
@@ -1018,11 +1239,18 @@ describe('ScreenShell', () => {
     mockSafeAreaInsets = { top: 0, right: 0, bottom: 18, left: 0 };
 
     try {
-      const { getByTestId } = render(
+      const { View } = require('react-native');
+      const { screenLayoutTokens } = require('../../src/utils/themeTokens');
+      const { getByTestId, UNSAFE_getAllByType } = render(
         <ScreenSheet testID="safe-screen-sheet">content</ScreenSheet>,
       );
+      const sheetContent = UNSAFE_getAllByType(View).find((node: any) =>
+        node.props.className === screenLayoutTokens.sheetContentPaddingClassName,
+      );
 
-      expect(StyleSheet.flatten(getByTestId('safe-screen-sheet').props.style).paddingBottom)
+      expect(StyleSheet.flatten(getByTestId('safe-screen-sheet').props.style)?.paddingBottom)
+        .toBeUndefined();
+      expect(StyleSheet.flatten(sheetContent?.props.style).paddingBottom)
         .toBe(screenLayoutMetrics.sheetBottomInset + 18);
     } finally {
       Object.defineProperty(Platform, 'OS', { configurable: true, get: () => originalPlatform });

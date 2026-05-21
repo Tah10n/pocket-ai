@@ -11,6 +11,7 @@ const FRAGMENTATION_GUARD_RATIO = 0.05;
 const LOW_MEMORY_EXTRA_RESERVE_BYTES = 256 * 1024 * 1024;
 
 export interface MemoryBudgetSnapshot {
+  totalBytes?: number;
   availableBytes: number;
   freeBytes?: number;
   processAvailableBytes?: number;
@@ -19,6 +20,7 @@ export interface MemoryBudgetSnapshot {
   appUsedBytes?: number;
   appResidentBytes?: number;
   appPssBytes?: number;
+  reclaimableBytes?: number;
   lowMemory?: boolean;
   pressureLevel?: SystemMemorySnapshot['pressureLevel'];
 }
@@ -31,6 +33,28 @@ function isFiniteNonNegativeNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0;
 }
 
+function resolveBoundedReclaimableBytes(
+  snapshot: MemoryBudgetSnapshot,
+  options: ConservativeAvailableMemoryBudgetOptions,
+): number {
+  if (
+    options.strictFreeCap === true
+    || snapshot.lowMemory === true
+    || snapshot.pressureLevel === 'critical'
+    || !isFinitePositiveNumber(snapshot.reclaimableBytes)
+  ) {
+    return 0;
+  }
+
+  const reclaimableBytes = Math.round(snapshot.reclaimableBytes);
+  if (!isFinitePositiveNumber(snapshot.totalBytes)) {
+    return reclaimableBytes;
+  }
+
+  const remainingSystemCapacityBytes = Math.max(snapshot.totalBytes - snapshot.availableBytes, 0);
+  return Math.max(0, Math.min(reclaimableBytes, Math.round(remainingSystemCapacityBytes)));
+}
+
 export function resolveConservativeAvailableMemoryBudget(
   snapshot: MemoryBudgetSnapshot,
   options: ConservativeAvailableMemoryBudgetOptions = {},
@@ -39,11 +63,13 @@ export function resolveConservativeAvailableMemoryBudget(
     return null;
   }
 
+  const reclaimableBytes = resolveBoundedReclaimableBytes(snapshot, options);
+  const adjustedAvailableBytes = snapshot.availableBytes + reclaimableBytes;
   const thresholdBytes = isFinitePositiveNumber(snapshot.thresholdBytes) ? snapshot.thresholdBytes : 0;
-  let budgetBytes = Math.max(snapshot.availableBytes - thresholdBytes, 0);
+  let budgetBytes = Math.max(adjustedAvailableBytes - thresholdBytes, 0);
 
   if (isFinitePositiveNumber(snapshot.processAvailableBytes)) {
-    budgetBytes = Math.min(budgetBytes, snapshot.processAvailableBytes);
+    budgetBytes = Math.min(budgetBytes, snapshot.processAvailableBytes + reclaimableBytes);
   }
 
   const shouldApplyStrictFreeCap = options.strictFreeCap === true
@@ -127,6 +153,9 @@ export function createMemoryBudget({
     totalMemoryBytes: resolvedTotalMemoryBytes,
     systemMemorySnapshot,
   });
+  const reclaimableBytes = systemMemorySnapshot
+    ? resolveBoundedReclaimableBytes(systemMemorySnapshot, {})
+    : 0;
 
   const learnedSafeBudgetCandidate = isFinitePositiveNumber(learnedSafeBudgetBytes) ? learnedSafeBudgetBytes : null;
   const softEffectiveBudgetBytes = Math.max(0, softTotalBudgetBytes - softReserveBytes);
@@ -160,6 +189,7 @@ export function createMemoryBudget({
       thresholdBytes: systemMemorySnapshot?.thresholdBytes,
       appResidentBytes: systemMemorySnapshot?.appResidentBytes,
       appPssBytes: systemMemorySnapshot?.appPssBytes,
+      reclaimableBytes: reclaimableBytes > 0 ? reclaimableBytes : undefined,
       learnedSafeBudgetBytes: learnedSafeBudgetCandidate === null ? undefined : learnedSafeBudgetCandidate,
       effectiveBudgetBytes,
     },

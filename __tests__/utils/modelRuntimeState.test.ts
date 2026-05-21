@@ -209,6 +209,40 @@ describe('modelRuntimeState', () => {
     }));
   });
 
+  it('does not use resolved filename fallback for stale queued variants without an explicit active variant', () => {
+    const merged = mergeModelWithRuntimeState(
+      makeModel({
+        size: 3 * 1024 * 1024 * 1024,
+        resolvedFileName: 'model.Q4_K_M.gguf',
+        activeVariantId: 'model.Q4_K_M.gguf',
+        metadataTrust: 'trusted_remote',
+        variants: [
+          { variantId: 'model.Q4_K_M.gguf', fileName: 'model.Q4_K_M.gguf', quantizationLabel: 'Q4_K_M', size: 3 * 1024 * 1024 * 1024 },
+        ],
+      }),
+      {
+        queuedItem: makeModel({
+          size: 8 * 1024 * 1024 * 1024,
+          resolvedFileName: 'model.Q8_0.gguf',
+          localPath: 'partial-model.Q8_0.gguf',
+          lifecycleStatus: LifecycleStatus.PAUSED,
+          downloadProgress: 0.5,
+          resumeData: JSON.stringify({ resumeData: 'stale' }),
+        }),
+      },
+    );
+
+    expect(merged).toEqual(expect.objectContaining({
+      size: 3 * 1024 * 1024 * 1024,
+      resolvedFileName: 'model.Q4_K_M.gguf',
+      activeVariantId: 'model.Q4_K_M.gguf',
+      localPath: undefined,
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+      resumeData: undefined,
+    }));
+  });
+
   it('does not reattach stale queued resume state when the selected file size changed', () => {
     const merged = mergeModelWithRuntimeState(
       makeModel({
@@ -240,6 +274,172 @@ describe('modelRuntimeState', () => {
       lifecycleStatus: LifecycleStatus.AVAILABLE,
       downloadProgress: 0,
       resumeData: undefined,
+    }));
+  });
+
+  it('surfaces downloaded runtime state for a non-default catalog variant', () => {
+    const merged = mergeModelWithRuntimeState(
+      makeModel({
+        size: 3 * 1024 * 1024 * 1024,
+        resolvedFileName: 'model.Q4_K_M.gguf',
+        activeVariantId: 'model.Q4_K_M.gguf',
+        sha256: REMOTE_SHA256,
+        metadataTrust: 'trusted_remote',
+        variants: [
+          { variantId: 'model.Q4_K_M.gguf', fileName: 'model.Q4_K_M.gguf', quantizationLabel: 'Q4_K_M', size: 3 * 1024 * 1024 * 1024, sha256: REMOTE_SHA256 },
+          { variantId: 'model.Q8_0.gguf', fileName: 'model.Q8_0.gguf', quantizationLabel: 'Q8_0', size: 8 * 1024 * 1024 * 1024, sha256: LOCAL_SHA256 },
+        ],
+      }),
+      {
+        localModel: makeModel({
+          size: 8 * 1024 * 1024 * 1024,
+          resolvedFileName: 'model.Q8_0.gguf',
+          activeVariantId: 'model.Q8_0.gguf',
+          localPath: 'model.Q8_0.gguf',
+          downloadedAt: 123,
+          sha256: LOCAL_SHA256,
+          metadataTrust: 'verified_local',
+          downloadIntegrity: {
+            kind: 'sha256',
+            sizeBytes: 8 * 1024 * 1024 * 1024,
+            checkedAt: 456,
+            sha256: LOCAL_SHA256,
+          },
+          lifecycleStatus: LifecycleStatus.DOWNLOADED,
+          downloadProgress: 1,
+        }),
+      },
+    );
+
+    expect(merged).toEqual(expect.objectContaining({
+      size: 8 * 1024 * 1024 * 1024,
+      resolvedFileName: 'model.Q8_0.gguf',
+      activeVariantId: 'model.Q8_0.gguf',
+      localPath: 'model.Q8_0.gguf',
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      sha256: LOCAL_SHA256,
+    }));
+  });
+
+  it('preserves legacy downloaded variant selections without activeVariantId when the catalog default is non-preferred', () => {
+    const merged = mergeModelWithRuntimeState(
+      makeModel({
+        size: 5 * 1024 * 1024 * 1024,
+        resolvedFileName: 'model.Q5_K_M.gguf',
+        activeVariantId: 'model.Q5_K_M.gguf',
+        metadataTrust: 'trusted_remote',
+        variants: [
+          { variantId: 'model.Q5_K_M.gguf', fileName: 'model.Q5_K_M.gguf', quantizationLabel: 'Q5_K_M', size: 5 * 1024 * 1024 * 1024 },
+        ],
+      }),
+      {
+        localModel: makeModel({
+          size: 8 * 1024 * 1024 * 1024,
+          resolvedFileName: 'model.Q8_0.gguf',
+          localPath: 'model.Q8_0.gguf',
+          downloadedAt: 123,
+          sha256: LOCAL_SHA256,
+          metadataTrust: 'verified_local',
+          downloadIntegrity: {
+            kind: 'sha256',
+            sizeBytes: 8 * 1024 * 1024 * 1024,
+            checkedAt: 456,
+            sha256: LOCAL_SHA256,
+          },
+          lifecycleStatus: LifecycleStatus.DOWNLOADED,
+          downloadProgress: 1,
+        }),
+      },
+    );
+
+    expect(merged).toEqual(expect.objectContaining({
+      size: 8 * 1024 * 1024 * 1024,
+      resolvedFileName: 'model.Q8_0.gguf',
+      activeVariantId: 'model.Q8_0.gguf',
+      localPath: 'model.Q8_0.gguf',
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      sha256: LOCAL_SHA256,
+    }));
+  });
+
+  it('does not preserve same-size legacy local files when a fresh catalog result selects a different filename', () => {
+    const merged = mergeModelWithRuntimeState(
+      makeModel({
+        size: 4 * 1024 * 1024 * 1024,
+        resolvedFileName: 'model.Q5_K_M.gguf',
+        activeVariantId: 'model.Q5_K_M.gguf',
+        metadataTrust: 'trusted_remote',
+        variants: [
+          { variantId: 'model.Q5_K_M.gguf', fileName: 'model.Q5_K_M.gguf', quantizationLabel: 'Q5_K_M', size: 4 * 1024 * 1024 * 1024 },
+          { variantId: 'model.Q4_K_M.gguf', fileName: 'model.Q4_K_M.gguf', quantizationLabel: 'Q4_K_M', size: 4 * 1024 * 1024 * 1024 },
+        ],
+      }),
+      {
+        localModel: makeModel({
+          size: 4 * 1024 * 1024 * 1024,
+          resolvedFileName: 'model.Q4_K_M.gguf',
+          localPath: 'model.Q4_K_M.gguf',
+          downloadedAt: 123,
+          sha256: LOCAL_SHA256,
+          metadataTrust: 'verified_local',
+          downloadIntegrity: {
+            kind: 'sha256',
+            sizeBytes: 4 * 1024 * 1024 * 1024,
+            checkedAt: 456,
+            sha256: LOCAL_SHA256,
+          },
+          lifecycleStatus: LifecycleStatus.DOWNLOADED,
+          downloadProgress: 1,
+        }),
+      },
+    );
+
+    expect(merged).toEqual(expect.objectContaining({
+      size: 4 * 1024 * 1024 * 1024,
+      resolvedFileName: 'model.Q5_K_M.gguf',
+      activeVariantId: 'model.Q5_K_M.gguf',
+      localPath: undefined,
+      downloadedAt: undefined,
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+      sha256: undefined,
+    }));
+  });
+
+  it('surfaces queued runtime state for a non-default catalog variant', () => {
+    const merged = mergeModelWithRuntimeState(
+      makeModel({
+        size: 3 * 1024 * 1024 * 1024,
+        resolvedFileName: 'model.Q4_K_M.gguf',
+        activeVariantId: 'model.Q4_K_M.gguf',
+        metadataTrust: 'trusted_remote',
+        variants: [
+          { variantId: 'model.Q4_K_M.gguf', fileName: 'model.Q4_K_M.gguf', quantizationLabel: 'Q4_K_M', size: 3 * 1024 * 1024 * 1024 },
+        ],
+      }),
+      {
+        queuedItem: makeModel({
+          size: 8 * 1024 * 1024 * 1024,
+          resolvedFileName: 'model.Q8_0.gguf',
+          activeVariantId: 'model.Q8_0.gguf',
+          localPath: 'partial-model.Q8_0.gguf',
+          lifecycleStatus: LifecycleStatus.PAUSED,
+          downloadProgress: 0.5,
+          resumeData: JSON.stringify({ resumeData: 'resume' }),
+        }),
+      },
+    );
+
+    expect(merged).toEqual(expect.objectContaining({
+      size: 8 * 1024 * 1024 * 1024,
+      resolvedFileName: 'model.Q8_0.gguf',
+      activeVariantId: 'model.Q8_0.gguf',
+      localPath: 'partial-model.Q8_0.gguf',
+      lifecycleStatus: LifecycleStatus.PAUSED,
+      downloadProgress: 0.5,
+      resumeData: JSON.stringify({ resumeData: 'resume' }),
     }));
   });
 });

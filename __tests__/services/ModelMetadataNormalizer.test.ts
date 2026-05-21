@@ -222,4 +222,138 @@ describe('ModelMetadataNormalizer', () => {
     expect(normalized.name).toBe('model-q4');
     expect(normalized.author).toBe('author');
   });
+
+  it('normalizes catalog variants and preserves valid active variant selections', () => {
+    const normalized = normalizePersistedModelMetadata({
+      id: 'author/model-q4',
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+      resolvedFileName: 'model.Q4_K_M.gguf',
+      activeVariantId: 'model.Q4_K_M.gguf',
+      variants: [
+        {
+          variantId: 'model.Q4_K_M.gguf',
+          fileName: 'model.Q4_K_M.gguf',
+          quantizationLabel: 'Q4_K_M',
+          size: 4_000_000_000,
+          sha256: `sha256:${VALID_SHA256.toUpperCase()}`,
+          ramFit: 'fits_low_confidence',
+          ramFitConfidence: 'low',
+        },
+        {
+          variantId: '',
+          fileName: '',
+          quantizationLabel: 'broken',
+          size: 0,
+        },
+      ],
+    });
+
+    expect(normalized.variants).toEqual([
+      {
+        variantId: 'model.Q4_K_M.gguf',
+        fileName: 'model.Q4_K_M.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: 4_000_000_000,
+        sha256: VALID_SHA256,
+        ramFit: 'fits_low_confidence',
+        ramFitConfidence: 'low',
+      },
+    ]);
+    expect(normalized.activeVariantId).toBe('model.Q4_K_M.gguf');
+
+    const mismatched = normalizePersistedModelMetadata({
+      id: 'author/model-q4',
+      activeVariantId: 'missing.gguf',
+      variants: normalized.variants,
+    });
+
+    expect(mismatched.activeVariantId).toBeUndefined();
+
+    const opaqueWithoutVariants = normalizePersistedModelMetadata({
+      id: 'author/model-q4',
+      activeVariantId: 'catalog-choice-q8',
+    });
+
+    expect(opaqueWithoutVariants.activeVariantId).toBe('catalog-choice-q8');
+  });
+
+  it('rejects non-GGUF, projector, and MTP persisted variants', () => {
+    const normalized = normalizePersistedModelMetadata({
+      id: 'author/model-q4',
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+      activeVariantId: 'model.mmproj.gguf',
+      variants: [
+        {
+          variantId: 'model.bin',
+          fileName: 'model.bin',
+          quantizationLabel: 'BIN',
+          size: 4_000_000_000,
+        },
+        {
+          variantId: 'model.mmproj.gguf',
+          fileName: 'model.mmproj.gguf',
+          quantizationLabel: 'Q4_K_M',
+          size: 4_000_000_000,
+        },
+        {
+          variantId: 'model.NextN.Q4_K_M.gguf',
+          fileName: 'model.NextN.Q4_K_M.gguf',
+          quantizationLabel: 'Q4_K_M',
+          size: 4_000_000_000,
+        },
+        {
+          variantId: 'model.Q4_K_M.gguf',
+          fileName: 'model.Q4_K_M.gguf',
+          quantizationLabel: 'Q4_K_M',
+          size: 4_000_000_000,
+        },
+      ],
+    });
+
+    expect(normalized.variants).toEqual([
+      {
+        variantId: 'model.Q4_K_M.gguf',
+        fileName: 'model.Q4_K_M.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: 4_000_000_000,
+      },
+    ]);
+    expect(normalized.activeVariantId).toBeUndefined();
+  });
+
+  it('drops unsupported MTP variants from persisted catalog metadata', () => {
+    const normalized = normalizePersistedModelMetadata({
+      id: 'author/model-q4',
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+      resolvedFileName: 'model.Q4_K_M.gguf',
+      activeVariantId: 'model.NextN.Q4_K_M.gguf',
+      variants: [
+        {
+          variantId: 'model.NextN.Q4_K_M.gguf',
+          fileName: 'model.NextN.Q4_K_M.gguf',
+          quantizationLabel: 'Q4_K_M',
+          size: 4_000_000_000,
+        },
+        {
+          variantId: 'model.Q4_K_M.gguf',
+          fileName: 'model.Q4_K_M.gguf',
+          quantizationLabel: 'Q4_K_M',
+          size: 4_000_000_000,
+        },
+      ],
+    });
+
+    expect(normalized.variants).toEqual([
+      {
+        variantId: 'model.Q4_K_M.gguf',
+        fileName: 'model.Q4_K_M.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: 4_000_000_000,
+      },
+    ]);
+    expect(normalized.activeVariantId).toBe('model.Q4_K_M.gguf');
+  });
 });

@@ -166,6 +166,7 @@ describe('InferenceAutotuneService', () => {
 
     expect(llmEngineService.load).toHaveBeenLastCalledWith('prev/model', {
       forceReload: true,
+      allowUnsafeMemoryLoad: true,
       loadParamsOverride: {
         backendPolicy: 'cpu',
         gpuLayers: 0,
@@ -763,6 +764,7 @@ describe('InferenceAutotuneService', () => {
 
     expect(llmEngineService.load).toHaveBeenLastCalledWith('prev/model', {
       forceReload: true,
+      allowUnsafeMemoryLoad: true,
       loadParamsOverride: {
         backendPolicy: 'cpu',
         gpuLayers: 0,
@@ -824,6 +826,7 @@ describe('InferenceAutotuneService', () => {
 
     expect(llmEngineService.load).toHaveBeenLastCalledWith('prev/model', {
       forceReload: true,
+      allowUnsafeMemoryLoad: true,
       loadParamsOverride: {
         backendPolicy: 'cpu',
         gpuLayers: 0,

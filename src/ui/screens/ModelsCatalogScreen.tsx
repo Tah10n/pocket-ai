@@ -1,6 +1,7 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { StyleSheet, type View } from 'react-native';
 import { SearchHeader } from '@/components/ui/SearchHeader';
-import { ScreenContent, ScreenRoot } from '@/components/ui/ScreenShell';
+import { ScreenAndroidContentBlurTarget, ScreenContent, ScreenRoot } from '@/components/ui/ScreenShell';
 import { ModelsList } from '@/components/models/ModelsList';
 import { resolveModelsCatalogTab, type ModelsCatalogTab } from '@/store/modelsCatalogTabs';
 import { useLocalSearchParams, useRouter } from 'expo-router';
@@ -12,6 +13,7 @@ export const ModelsCatalogScreen = () => {
   const [activeTab, setActiveTab] = useState<ModelsCatalogTab>(requestedTab);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchSessionKey, setSearchSessionKey] = useState(0);
+  const catalogContentBlurTargetRef = useRef<View | null>(null);
 
   useEffect(() => {
     setActiveTab(requestedTab);
@@ -31,9 +33,12 @@ export const ModelsCatalogScreen = () => {
   const handleTabChange = useCallback((tab: ModelsCatalogTab) => {
     setActiveTab(tab);
   }, []);
-
-  return (
-    <ScreenRoot>
+  const renderCatalogContentContainer = useCallback((content: ReactNode) => (
+    <ScreenAndroidContentBlurTarget
+      blurTargetRef={catalogContentBlurTargetRef}
+      style={styles.catalogContentBlurTarget}
+      testID="models-catalog-content-blur-target"
+    >
       <SearchHeader
         searchQuery={searchQuery}
         onSearchChange={handleSearchChange}
@@ -48,12 +53,26 @@ export const ModelsCatalogScreen = () => {
         respectFloatingHeader={false}
         style={{ paddingBottom: 0 }}
       >
-        <ModelsList
-          activeTab={activeTab}
-          searchQuery={searchQuery}
-          searchSessionKey={searchSessionKey}
-        />
+        {content}
       </ScreenContent>
+    </ScreenAndroidContentBlurTarget>
+  ), [activeTab, handleSearchChange, handleTabChange, router, searchQuery]);
+
+  return (
+    <ScreenRoot>
+      <ModelsList
+        activeTab={activeTab}
+        searchQuery={searchQuery}
+        searchSessionKey={searchSessionKey}
+        androidContentBlurTargetRef={catalogContentBlurTargetRef}
+        renderContentContainer={renderCatalogContentContainer}
+      />
     </ScreenRoot>
   );
 };
+
+const styles = StyleSheet.create({
+  catalogContentBlurTarget: {
+    flex: 1,
+  },
+});

@@ -43,6 +43,7 @@ export interface ChatPersistencePendingIndexCommit {
   updatedAt: number;
   reason: ChatPersistenceWriteReason;
   changedThreadIds?: string[];
+  requiresChangedThreadCommitRevision?: boolean;
   removedThreadIds?: string[];
   corruptThreadIds?: string[];
   migratedFromLegacyAt?: number;
@@ -193,6 +194,10 @@ export function parseChatPendingIndexCommit(
     typeof value.updatedAt !== 'number' ||
     !isChatPersistenceWriteReason(value.reason) ||
     (value.changedThreadIds != null && !isStringArray(value.changedThreadIds)) ||
+    (
+      value.requiresChangedThreadCommitRevision != null
+      && typeof value.requiresChangedThreadCommitRevision !== 'boolean'
+    ) ||
     (value.removedThreadIds != null && !isStringArray(value.removedThreadIds)) ||
     (value.corruptThreadIds != null && !isStringArray(value.corruptThreadIds))
   ) {
@@ -209,6 +214,7 @@ export function parseChatPendingIndexCommit(
       updatedAt: value.updatedAt,
       reason: value.reason,
       changedThreadIds: isStringArray(value.changedThreadIds) ? value.changedThreadIds : undefined,
+      requiresChangedThreadCommitRevision: value.requiresChangedThreadCommitRevision === true ? true : undefined,
       removedThreadIds: isStringArray(value.removedThreadIds) ? value.removedThreadIds : undefined,
       corruptThreadIds: isStringArray(value.corruptThreadIds) ? value.corruptThreadIds : undefined,
       migratedFromLegacyAt: typeof value.migratedFromLegacyAt === 'number' ? value.migratedFromLegacyAt : undefined,

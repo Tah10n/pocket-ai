@@ -57,6 +57,27 @@ describe('modelLoadMemoryPolicyPrompt', () => {
     expect(onProceed).toHaveBeenCalledWith(expect.objectContaining({ allowUnsafeMemoryLoad: true }));
   });
 
+  it('prompts from model memory flags when replacing an active model', () => {
+    const onProceed = jest.fn();
+    mockIsHighConfidenceLikelyOom.mockReturnValue(true);
+    mockShouldWarnForModelMemoryLoad.mockReturnValue(false);
+
+    expect(promptModelLoadMemoryPolicyIfNeeded({
+      t: t as any,
+      model: { memoryFitDecision: 'likely_oom', memoryFitConfidence: 'high', fitsInRam: false },
+      onProceed,
+    })).toBe(true);
+
+    expect(Alert.alert).toHaveBeenCalledWith(
+      'models.ramLikelyOom',
+      'models.loadMemoryBlockedMessage',
+      expect.any(Array),
+    );
+    expect(mockIsHighConfidenceLikelyOom).toHaveBeenCalledTimes(1);
+    expect(mockShouldWarnForModelMemoryLoad).not.toHaveBeenCalled();
+    expect(onProceed).not.toHaveBeenCalled();
+  });
+
   it('prompts and proceeds for warning models', () => {
     const onProceed = jest.fn();
     mockIsHighConfidenceLikelyOom.mockReturnValue(false);
@@ -127,6 +148,26 @@ describe('modelLoadMemoryPolicyPrompt', () => {
     jest.runOnlyPendingTimers();
 
     expect(onRetry).toHaveBeenCalledWith({ allowUnsafeMemoryLoad: true });
+  });
+
+  it('handles model_memory_insufficient with a terminal visible alert', () => {
+    const onRetry = jest.fn();
+    const onBlocked = jest.fn();
+
+    expect(handleModelLoadMemoryPolicyError({
+      t: t as any,
+      appError: { code: 'model_memory_insufficient' } as any,
+      onRetry,
+      onBlocked,
+    })).toBe(true);
+
+    expect(onBlocked).toHaveBeenCalledTimes(1);
+    expect(alertSpy).toHaveBeenCalledWith(
+      'models.ramLikelyOom',
+      'common.errors.modelMemoryInsufficient',
+      [{ text: 'common.close' }],
+    );
+    expect(onRetry).not.toHaveBeenCalled();
   });
 
   it('returns false for unrelated errors', () => {

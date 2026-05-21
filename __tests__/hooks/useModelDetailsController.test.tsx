@@ -29,7 +29,7 @@ const mockHandleModelLoadMemoryPolicyError = jest.fn();
 const mockGetLastModelLoadError = jest.fn();
 const mockClearLastModelLoadError = jest.fn();
 
-let mockDownloadQueue: Array<{ id: string }> = [];
+let mockDownloadQueue: ModelMetadata[] = [];
 const mockEngineState = {
   status: EngineStatus.IDLE,
   activeModelId: undefined as string | undefined,
@@ -151,11 +151,11 @@ describe('useModelDetailsController', () => {
   let openUrlSpy: jest.SpiedFunction<typeof Linking.openURL>;
   let consoleErrorSpy: jest.SpiedFunction<typeof console.error>;
 
-  function renderHookHarness(initialModelId = 'org/model') {
+  function renderHookHarness(initialModelId = 'org/model', initialVariantId?: string) {
     let currentValue: ReturnType<typeof useModelDetailsController> | null = null;
 
-    const Harness = ({ modelId }: { modelId: string }) => {
-      const value = useModelDetailsController(modelId);
+    const Harness = ({ modelId, variantId }: { modelId: string; variantId?: string }) => {
+      const value = useModelDetailsController(modelId, variantId);
 
       useEffect(() => {
         currentValue = value;
@@ -164,11 +164,12 @@ describe('useModelDetailsController', () => {
       return null;
     };
 
-    const rendered = render(<Harness modelId={initialModelId} />);
+    const rendered = render(<Harness modelId={initialModelId} variantId={initialVariantId} />);
 
     return {
       getCurrentValue: () => currentValue,
-      rerenderWithModelId: (modelId: string) => rendered.rerender(<Harness modelId={modelId} />),
+      rerenderWithModelId: (modelId: string) => rendered.rerender(<Harness modelId={modelId} variantId={initialVariantId} />),
+      rerenderWithVariantId: (variantId?: string) => rendered.rerender(<Harness modelId={initialModelId} variantId={variantId} />),
       ...rendered,
     };
   }
@@ -233,6 +234,198 @@ describe('useModelDetailsController', () => {
     });
 
     expect(getCurrentValue()?.displayModel?.name).toBe('Resolved Model');
+  });
+
+  it('preserves a user-selected variant when delayed model details resolve', async () => {
+    const deferred = createDeferred<ModelMetadata>();
+    const cachedModel = buildModel({
+      resolvedFileName: 'model.Q4_K_M.gguf',
+      activeVariantId: 'model.Q4_K_M.gguf',
+      variants: [
+        {
+          variantId: 'model.Q4_K_M.gguf',
+          fileName: 'model.Q4_K_M.gguf',
+          quantizationLabel: 'Q4_K_M',
+          size: 4_000_000_000,
+        },
+        {
+          variantId: 'model.Q8_0.gguf',
+          fileName: 'model.Q8_0.gguf',
+          quantizationLabel: 'Q8_0',
+          size: 8_000_000_000,
+          ramFit: 'likely_oom',
+          ramFitConfidence: 'medium',
+        },
+      ],
+    });
+    mockGetCachedModel.mockReturnValue(cachedModel);
+    mockGetModelDetails.mockReturnValue(deferred.promise);
+
+    const { getCurrentValue } = renderHookHarness();
+
+    act(() => {
+      getCurrentValue()?.handleSelectVariant('model.Q8_0.gguf');
+    });
+
+    expect(getCurrentValue()?.displayModel).toEqual(expect.objectContaining({
+      resolvedFileName: 'model.Q8_0.gguf',
+      activeVariantId: 'model.Q8_0.gguf',
+    }));
+
+    await act(async () => {
+      deferred.resolve(buildModel({
+        name: 'Resolved Model',
+        resolvedFileName: 'model.Q4_K_M.gguf',
+        activeVariantId: 'model.Q4_K_M.gguf',
+        variants: [cachedModel.variants![0]],
+      }));
+      await deferred.promise;
+    });
+
+    await waitFor(() => {
+      expect(getCurrentValue()?.loading).toBe(false);
+    });
+
+    expect(getCurrentValue()?.displayModel).toEqual(expect.objectContaining({
+      name: 'Resolved Model',
+      resolvedFileName: 'model.Q8_0.gguf',
+      activeVariantId: 'model.Q8_0.gguf',
+      memoryFitDecision: 'likely_oom',
+      fitsInRam: false,
+    }));
+  });
+
+  it('applies an initial variant from navigation params after model details resolve', async () => {
+    const cachedModel = buildModel({
+      resolvedFileName: 'model.Q4_K_M.gguf',
+      activeVariantId: 'model.Q4_K_M.gguf',
+      variants: [
+        {
+          variantId: 'model.Q4_K_M.gguf',
+          fileName: 'model.Q4_K_M.gguf',
+          quantizationLabel: 'Q4_K_M',
+          size: 4_000_000_000,
+        },
+        {
+          variantId: 'model.Q8_0.gguf',
+          fileName: 'model.Q8_0.gguf',
+          quantizationLabel: 'Q8_0',
+          size: 8_000_000_000,
+          ramFit: 'likely_oom',
+          ramFitConfidence: 'medium',
+        },
+      ],
+    });
+    mockGetCachedModel.mockReturnValue(cachedModel);
+    mockGetModelDetails.mockResolvedValue(cachedModel);
+
+    const { getCurrentValue } = renderHookHarness('org/model', 'model.Q8_0.gguf');
+
+    await waitFor(() => {
+      expect(getCurrentValue()?.loading).toBe(false);
+    });
+
+    expect(getCurrentValue()?.displayModel).toEqual(expect.objectContaining({
+      resolvedFileName: 'model.Q8_0.gguf',
+      activeVariantId: 'model.Q8_0.gguf',
+      memoryFitDecision: 'likely_oom',
+    }));
+  });
+
+  it('clears an initial variant when navigation params drop it for the same model', async () => {
+    const cachedModel = buildModel({
+      resolvedFileName: 'model.Q4_K_M.gguf',
+      activeVariantId: 'model.Q4_K_M.gguf',
+      variants: [
+        {
+          variantId: 'model.Q4_K_M.gguf',
+          fileName: 'model.Q4_K_M.gguf',
+          quantizationLabel: 'Q4_K_M',
+          size: 4_000_000_000,
+        },
+        {
+          variantId: 'model.Q8_0.gguf',
+          fileName: 'model.Q8_0.gguf',
+          quantizationLabel: 'Q8_0',
+          size: 8_000_000_000,
+          ramFit: 'likely_oom',
+          ramFitConfidence: 'medium',
+        },
+      ],
+    });
+    mockGetCachedModel.mockReturnValue(cachedModel);
+    mockGetModelDetails.mockResolvedValue(cachedModel);
+
+    const { getCurrentValue, rerenderWithVariantId } = renderHookHarness('org/model', 'model.Q8_0.gguf');
+
+    await waitFor(() => {
+      expect(getCurrentValue()?.loading).toBe(false);
+    });
+
+    expect(getCurrentValue()?.displayModel?.activeVariantId).toBe('model.Q8_0.gguf');
+
+    rerenderWithVariantId(undefined);
+
+    await waitFor(() => {
+      expect(getCurrentValue()?.loading).toBe(false);
+    });
+
+    expect(getCurrentValue()?.displayModel).toEqual(expect.objectContaining({
+      resolvedFileName: 'model.Q4_K_M.gguf',
+      activeVariantId: 'model.Q4_K_M.gguf',
+    }));
+    expect(getCurrentValue()?.displayModel?.memoryFitDecision).toBeUndefined();
+  });
+
+  it('keeps an explicit selected variant ahead of stale queued runtime state', async () => {
+    const model = buildModel({
+      resolvedFileName: 'model.Q4_K_M.gguf',
+      activeVariantId: 'model.Q4_K_M.gguf',
+      variants: [
+        {
+          variantId: 'model.Q4_K_M.gguf',
+          fileName: 'model.Q4_K_M.gguf',
+          quantizationLabel: 'Q4_K_M',
+          size: 4_000_000_000,
+        },
+        {
+          variantId: 'model.Q8_0.gguf',
+          fileName: 'model.Q8_0.gguf',
+          quantizationLabel: 'Q8_0',
+          size: 8_000_000_000,
+          ramFit: 'likely_oom',
+          ramFitConfidence: 'medium',
+        },
+      ],
+    });
+    mockGetCachedModel.mockReturnValue(model);
+    mockGetModelDetails.mockResolvedValue(model);
+    mockDownloadQueue = [buildModel({
+      resolvedFileName: 'model.Q4_K_M.gguf',
+      activeVariantId: 'model.Q4_K_M.gguf',
+      lifecycleStatus: LifecycleStatus.PAUSED,
+      downloadProgress: 0.5,
+      resumeData: JSON.stringify({ resumeData: 'resume-q4' }),
+    })];
+
+    const { getCurrentValue } = renderHookHarness();
+
+    await waitFor(() => {
+      expect(getCurrentValue()?.loading).toBe(false);
+    });
+
+    act(() => {
+      getCurrentValue()?.handleSelectVariant('model.Q8_0.gguf');
+    });
+
+    expect(getCurrentValue()?.displayModel).toEqual(expect.objectContaining({
+      resolvedFileName: 'model.Q8_0.gguf',
+      activeVariantId: 'model.Q8_0.gguf',
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+      resumeData: undefined,
+      memoryFitDecision: 'likely_oom',
+    }));
   });
 
   it('falls back to the cached model and an error message when catalog loading fails', async () => {
@@ -321,6 +514,45 @@ describe('useModelDetailsController', () => {
 
     expect(mockLoadModel).toHaveBeenCalledWith('org/model', undefined);
     expect(alertSpy).toHaveBeenLastCalledWith('models.actionFailedTitle', 'load exploded');
+  });
+
+  it('shows a reportable alert when a memory-insufficient load error is not consumed by policy handling', async () => {
+    const error = new AppError('model_memory_insufficient', 'minimum context still exceeds budget');
+    mockLoadModel.mockRejectedValueOnce(error);
+    const { getCurrentValue } = renderHookHarness();
+
+    await waitFor(() => {
+      expect(getCurrentValue()?.loading).toBe(false);
+    });
+
+    await act(async () => {
+      await getCurrentValue()?.handleLoad();
+    });
+
+    expect(mockHandleModelLoadMemoryPolicyError).toHaveBeenCalledWith(expect.objectContaining({
+      appError: error,
+    }));
+    expect(alertSpy).toHaveBeenLastCalledWith(
+      'models.actionFailedTitle',
+      'common.errors.modelMemoryInsufficient',
+      expect.any(Array),
+    );
+
+    const buttons = alertSpy.mock.calls.at(-1)?.[2] as Array<{ text: string; onPress?: () => void }>;
+    expect(buttons[1]?.text).toBe('models.errorReport.reportButton');
+
+    act(() => {
+      buttons[1]?.onPress?.();
+    });
+
+    expect(mockOpenErrorReport).toHaveBeenCalledWith({
+      scope: 'ModelDetailsScreen.performLoad',
+      error,
+      context: expect.objectContaining({
+        model: expect.objectContaining({ id: 'org/model' }),
+        engine: expect.objectContaining({ status: EngineStatus.IDLE }),
+      }),
+    });
   });
 
   it('offloads the model with preserved settings and applies the deleted state', async () => {

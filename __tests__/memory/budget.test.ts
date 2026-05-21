@@ -74,6 +74,49 @@ describe('memory/budget', () => {
     })).toBe(90);
   });
 
+  it('adds bounded recently-unloaded model memory to normal live budgets', () => {
+    expect(resolveConservativeAvailableMemoryBudget({
+      totalBytes: 1_000,
+      availableBytes: 400,
+      processAvailableBytes: 350,
+      reclaimableBytes: 300,
+      thresholdBytes: 100,
+      lowMemory: false,
+      pressureLevel: 'normal',
+    })).toBe(600);
+
+    expect(resolveConservativeAvailableMemoryBudget({
+      totalBytes: 1_000,
+      availableBytes: 900,
+      reclaimableBytes: 300,
+      thresholdBytes: 100,
+      lowMemory: false,
+      pressureLevel: 'normal',
+    })).toBe(900);
+  });
+
+  it('does not spend reclaimable model memory for strict or critical budgets', () => {
+    expect(resolveConservativeAvailableMemoryBudget({
+      totalBytes: 1_000,
+      availableBytes: 400,
+      freeBytes: 250,
+      reclaimableBytes: 300,
+      thresholdBytes: 100,
+      lowMemory: false,
+      pressureLevel: 'normal',
+    }, { strictFreeCap: true })).toBe(250);
+
+    expect(resolveConservativeAvailableMemoryBudget({
+      totalBytes: 1_000,
+      availableBytes: 400,
+      freeBytes: 250,
+      reclaimableBytes: 300,
+      thresholdBytes: 100,
+      lowMemory: false,
+      pressureLevel: 'critical',
+    })).toBe(250);
+  });
+
   it('uses the soft total-RAM budget when no live snapshot is available', () => {
     const totalMemoryBytes = 8 * 1024 * 1024 * 1024;
     const { totalBudgetBytes, availableBudgetBytes, effectiveBudgetBytes } = createMemoryBudget({

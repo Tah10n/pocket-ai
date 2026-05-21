@@ -1,6 +1,6 @@
 import React from 'react';
 import { fireEvent, render } from '@testing-library/react-native';
-import { Pressable } from 'react-native';
+import { Pressable, Text as RNText } from 'react-native';
 import { ValueSelectorRow } from '../../src/components/ui/ValueSelectorRow';
 
 jest.mock('../../src/components/ui/box', () => {
@@ -42,13 +42,13 @@ describe('ValueSelectorRow', () => {
     const screen = render(
       <ValueSelectorRow
         label="models.quantizationLabel"
-        value="Q4_K_M + 3.80 GB"
+        value="Q4_K_M - 3.80 GB"
         testID="value-selector-row"
       />,
     );
 
     expect(screen.getByText('models.quantizationLabel')).toBeTruthy();
-    expect(screen.getByText('Q4_K_M + 3.80 GB')).toBeTruthy();
+    expect(screen.getByText('Q4_K_M - 3.80 GB')).toBeTruthy();
     fireEvent.press(screen.getByTestId('value-selector-row'));
     expect(onPress).not.toHaveBeenCalled();
     expect(screen.queryByText('chevron-right')).toBeNull();
@@ -59,7 +59,7 @@ describe('ValueSelectorRow', () => {
     const screen = render(
       <ValueSelectorRow
         label="models.quantizationLabel"
-        value="Q4_K_M + 3.80 GB"
+        value="Q4_K_M - 3.80 GB"
         onPress={onPress}
         showChevron
         testID="value-selector-row"
@@ -71,12 +71,73 @@ describe('ValueSelectorRow', () => {
     expect(onPress).toHaveBeenCalledTimes(1);
   });
 
+  it('passes accessibility label and hint to the interactive row', () => {
+    const screen = render(
+      <ValueSelectorRow
+        value="Q4_K_M - 3.80 GB"
+        onPress={jest.fn()}
+        accessibilityLabel="Selected GGUF file: Q4_K_M - 3.80 GB"
+        accessibilityHint="Opens the GGUF file picker."
+        testID="value-selector-row"
+      />,
+    );
+
+    const row = screen.getByTestId('value-selector-row');
+    expect(row.props.accessible).toBe(true);
+    expect(row.props.accessibilityLabel).toBe('Selected GGUF file: Q4_K_M - 3.80 GB');
+    expect(row.props.accessibilityHint).toBe('Opens the GGUF file picker.');
+  });
+
+  it('passes accessibility label and hint to the read-only row', () => {
+    const screen = render(
+      <ValueSelectorRow
+        value="Q4_K_M - 3.80 GB"
+        accessibilityLabel="Selected GGUF file: Q4_K_M - 3.80 GB"
+        accessibilityHint="Current GGUF file."
+        testID="value-selector-row"
+      />,
+    );
+
+    const row = screen.getByTestId('value-selector-row');
+    expect(row.props.accessible).toBe(true);
+    expect(row.props.accessibilityLabel).toBe('Selected GGUF file: Q4_K_M - 3.80 GB');
+    expect(row.props.accessibilityHint).toBe('Current GGUF file.');
+  });
+
+  it('renders badges beside the selected value', () => {
+    const screen = render(
+      <ValueSelectorRow
+        label="models.quantizationLabel"
+        value="Q4_K_M - 3.80 GB"
+        badges={<RNText>models.ramFitYes</RNText>}
+        testID="value-selector-row"
+      />,
+    );
+
+    expect(screen.getByText('Q4_K_M - 3.80 GB')).toBeTruthy();
+    expect(screen.getByText('models.ramFitYes')).toBeTruthy();
+  });
+
+  it('can render the selected value without a visible label', () => {
+    const screen = render(
+      <ValueSelectorRow
+        value="Q4_K_M - 3.80 GB"
+        badges={<RNText>models.ramFitYes</RNText>}
+        testID="value-selector-row"
+      />,
+    );
+
+    expect(screen.getByText('Q4_K_M - 3.80 GB')).toBeTruthy();
+    expect(screen.getByText('models.ramFitYes')).toBeTruthy();
+    expect(screen.queryByText('models.quantizationLabel')).toBeNull();
+  });
+
   it('renders disabled rows with muted opacity and no press handling', () => {
     const onPress = jest.fn();
     const screen = render(
       <ValueSelectorRow
         label="models.quantizationLabel"
-        value="Q4_K_M + 3.80 GB"
+        value="Q4_K_M - 3.80 GB"
         onPress={onPress}
         disabled
         testID="value-selector-row"
@@ -87,6 +148,7 @@ describe('ValueSelectorRow', () => {
     expect(row.props.className).toContain('opacity-60');
     expect(row.props.onPress).toBeUndefined();
     expect(row.props.accessibilityRole).toBeUndefined();
+    expect(row.props.accessibilityState).toEqual({ disabled: true });
     expect(() => screen.UNSAFE_getByType(Pressable)).toThrow();
     expect(onPress).not.toHaveBeenCalled();
   });

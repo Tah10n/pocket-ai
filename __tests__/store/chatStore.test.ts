@@ -1165,7 +1165,120 @@ describe('chatStore', () => {
     expect(storage.getString(CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY)).toBeUndefined();
   });
 
-  it('drops a pending index target when its thread record is missing', async () => {
+  it('recovers legacy pending commits whose changed records predate commit revision markers', async () => {
+    const thread = buildThread('thread-pending-legacy-record', 20);
+
+    writeChatPersistenceIndex(storage, {
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      activeThreadId: null,
+      threadIds: [],
+      updatedAt: 10,
+      revision: 1,
+    });
+    writeChatThreadRecord(storage, thread, 23);
+    writeChatPendingIndexCommit(storage, {
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      revision: 2,
+      activeThreadId: thread.id,
+      threadIds: [thread.id],
+      updatedAt: 22,
+      reason: 'thread_mutation',
+      changedThreadIds: [thread.id],
+    });
+
+    useChatStore.setState({ threads: {}, activeThreadId: null });
+    await useChatStore.persist.rehydrate();
+
+    expect(useChatStore.getState().getThread(thread.id)).toEqual(
+      expect.objectContaining({ id: thread.id }),
+    );
+    expect(useChatStore.getState().activeThreadId).toBe(thread.id);
+    expect(readPersistedChatIndex()).toEqual(expect.objectContaining({
+      activeThreadId: thread.id,
+      threadIds: [thread.id],
+      revision: 2,
+    }));
+    expect(storage.getString(getChatThreadStorageKey(thread.id))).toContain('"commitRevision":2');
+    expect(storage.getString(CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY)).toBeUndefined();
+  });
+
+  it('falls back to the previous index when a legacy changed record predates the pending commit', async () => {
+    const staleThread = {
+      ...buildThread('thread-legacy-stale-record', 10),
+      title: 'Old title',
+    };
+
+    writeChatThreadRecord(storage, staleThread, 11);
+    writeChatPersistenceIndex(storage, {
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      activeThreadId: staleThread.id,
+      threadIds: [staleThread.id],
+      updatedAt: 12,
+      revision: 1,
+    });
+    writeChatPendingIndexCommit(storage, {
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      revision: 2,
+      activeThreadId: staleThread.id,
+      threadIds: [staleThread.id],
+      updatedAt: 13,
+      reason: 'thread_mutation',
+      changedThreadIds: [staleThread.id],
+    });
+
+    useChatStore.setState({ threads: {}, activeThreadId: null });
+    await useChatStore.persist.rehydrate();
+
+    expect(useChatStore.getState().getThread(staleThread.id)).toEqual(
+      expect.objectContaining({ title: 'Old title' }),
+    );
+    expect(readPersistedChatIndex()).toEqual(expect.objectContaining({
+      activeThreadId: staleThread.id,
+      threadIds: [staleThread.id],
+      revision: 1,
+    }));
+    expect(storage.getString(getChatThreadStorageKey(staleThread.id))).not.toContain('"commitRevision"');
+    expect(storage.getString(CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY)).toBeUndefined();
+  });
+
+  it('falls back to the previous index when a strict pending record lacks a commit revision marker', async () => {
+    const staleThread = buildThread('thread-strict-record-without-revision', 10);
+
+    writeChatThreadRecord(storage, staleThread, 11);
+    writeChatPersistenceIndex(storage, {
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      activeThreadId: staleThread.id,
+      threadIds: [staleThread.id],
+      updatedAt: 12,
+      revision: 1,
+    });
+    writeChatPendingIndexCommit(storage, {
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      revision: 2,
+      activeThreadId: staleThread.id,
+      threadIds: [staleThread.id],
+      updatedAt: 13,
+      reason: 'thread_mutation',
+      changedThreadIds: [staleThread.id],
+      requiresChangedThreadCommitRevision: true,
+    });
+
+    useChatStore.setState({ threads: {}, activeThreadId: null });
+    await useChatStore.persist.rehydrate();
+
+    expect(useChatStore.getState().getThread(staleThread.id)).toEqual(
+      expect.objectContaining({ id: staleThread.id }),
+    );
+    expect(readPersistedChatIndex()).toEqual(expect.objectContaining({
+      activeThreadId: staleThread.id,
+      threadIds: [staleThread.id],
+      revision: 1,
+    }));
+    expect(storage.getString(getChatThreadStorageKey(staleThread.id))).not.toContain('"commitRevision"');
+    expect(storage.getString(CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY)).toBeUndefined();
+  });
+
+  it('falls back to the previous index when a changed pending thread record is missing', async () => {
     const existingThread = buildThread('thread-existing', 10);
     const missingThreadId = 'thread-missing-record';
 
@@ -1198,7 +1311,193 @@ describe('chatStore', () => {
     expect(readPersistedChatIndex()).toEqual(expect.objectContaining({
       activeThreadId: existingThread.id,
       threadIds: [existingThread.id],
-      corruptThreadIds: [missingThreadId],
+      revision: 1,
+    }));
+    expect(readPersistedChatIndex()).not.toHaveProperty('corruptThreadIds');
+    expect(storage.getString(CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY)).toBeUndefined();
+  });
+
+  it('does not apply pending removals when a mixed commit has no durable changed record', async () => {
+    const retainedThread = buildThread('thread-mixed-retained', 10);
+    const removedThread = buildThread('thread-mixed-removed', 20);
+    const missingThreadId = 'thread-mixed-missing-record';
+
+    writeChatThreadRecord(storage, retainedThread, 11, { commitRevision: 1 });
+    writeChatThreadRecord(storage, removedThread, 21, { commitRevision: 1 });
+    writeChatPersistenceIndex(storage, {
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      activeThreadId: removedThread.id,
+      threadIds: [retainedThread.id, removedThread.id],
+      updatedAt: 22,
+      revision: 1,
+    });
+    writeChatPendingIndexCommit(storage, {
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      revision: 2,
+      activeThreadId: retainedThread.id,
+      threadIds: [retainedThread.id, missingThreadId],
+      updatedAt: 23,
+      reason: 'thread_mutation',
+      changedThreadIds: [missingThreadId],
+      removedThreadIds: [removedThread.id],
+      requiresChangedThreadCommitRevision: true,
+    });
+
+    useChatStore.setState({ threads: {}, activeThreadId: null });
+    await useChatStore.persist.rehydrate();
+
+    expect(useChatStore.getState().getThread(retainedThread.id)).toEqual(
+      expect.objectContaining({ id: retainedThread.id }),
+    );
+    expect(useChatStore.getState().getThread(removedThread.id)).toEqual(
+      expect.objectContaining({ id: removedThread.id }),
+    );
+    expect(useChatStore.getState().getThread(missingThreadId)).toBeNull();
+    expect(readPersistedChatIndex()).toEqual(expect.objectContaining({
+      activeThreadId: removedThread.id,
+      threadIds: [retainedThread.id, removedThread.id],
+      revision: 1,
+    }));
+    expect(storage.getString(getChatThreadStorageKey(removedThread.id))).toContain(removedThread.title);
+    expect(storage.getString(CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY)).toBeUndefined();
+  });
+
+  it('falls back to the previous index when a changed pending thread record has an older commit revision', async () => {
+    const staleThread = {
+      ...buildThread('thread-stale-record', 10),
+      title: 'Old title',
+    };
+
+    writeChatThreadRecord(storage, staleThread, 11, { commitRevision: 1 });
+    writeChatPersistenceIndex(storage, {
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      activeThreadId: staleThread.id,
+      threadIds: [staleThread.id],
+      updatedAt: 12,
+      revision: 1,
+    });
+    writeChatPendingIndexCommit(storage, {
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      revision: 2,
+      activeThreadId: staleThread.id,
+      threadIds: [staleThread.id],
+      updatedAt: 13,
+      reason: 'thread_mutation',
+      changedThreadIds: [staleThread.id],
+    });
+
+    useChatStore.setState({ threads: {}, activeThreadId: null });
+    await useChatStore.persist.rehydrate();
+
+    expect(useChatStore.getState().getThread(staleThread.id)).toEqual(
+      expect.objectContaining({ title: 'Old title' }),
+    );
+    expect(readPersistedChatIndex()).toEqual(expect.objectContaining({
+      activeThreadId: staleThread.id,
+      threadIds: [staleThread.id],
+      revision: 1,
+    }));
+    expect(storage.getString(getChatThreadStorageKey(staleThread.id))).toContain('"commitRevision":1');
+    expect(storage.getString(CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY)).toBeUndefined();
+  });
+
+  it('removes unindexed changed records when their commit revision does not match the pending revision', async () => {
+    const uncommittedThread = buildThread('thread-uncommitted-record', 10);
+
+    writeChatThreadRecord(storage, uncommittedThread, 11, { commitRevision: 1 });
+    writeChatPersistenceIndex(storage, {
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      activeThreadId: null,
+      threadIds: [],
+      updatedAt: 12,
+      revision: 1,
+    });
+    writeChatPendingIndexCommit(storage, {
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      revision: 2,
+      activeThreadId: uncommittedThread.id,
+      threadIds: [uncommittedThread.id],
+      updatedAt: 13,
+      reason: 'thread_mutation',
+      changedThreadIds: [uncommittedThread.id],
+    });
+
+    useChatStore.setState({ threads: {}, activeThreadId: null });
+    await useChatStore.persist.rehydrate();
+
+    expect(useChatStore.getState().getThread(uncommittedThread.id)).toBeNull();
+    expect(storage.getString(getChatThreadStorageKey(uncommittedThread.id))).toBeUndefined();
+    expect(readPersistedChatIndex()).toEqual(expect.objectContaining({
+      activeThreadId: null,
+      threadIds: [],
+      revision: 1,
+    }));
+    expect(storage.getString(CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY)).toBeUndefined();
+  });
+
+  it('removes unapplied changed records when discarding a pending commit without a trusted index', async () => {
+    const unappliedThread = buildThread('thread-pending-indexless-record', 10);
+
+    writeChatThreadRecord(storage, unappliedThread, 11, { commitRevision: 1 });
+    writeChatPendingIndexCommit(storage, {
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      revision: 2,
+      activeThreadId: unappliedThread.id,
+      threadIds: [unappliedThread.id],
+      updatedAt: 13,
+      reason: 'thread_mutation',
+      changedThreadIds: [unappliedThread.id],
+      requiresChangedThreadCommitRevision: true,
+    });
+
+    useChatStore.setState({ threads: {}, activeThreadId: null });
+    await useChatStore.persist.rehydrate();
+
+    expect(useChatStore.getState().getThread(unappliedThread.id)).toBeNull();
+    expect(storage.getString(getChatThreadStorageKey(unappliedThread.id))).toBeUndefined();
+    expect(storage.getString(CHAT_PERSISTENCE_INDEX_KEY)).toBeUndefined();
+    expect(storage.getString(CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY)).toBeUndefined();
+  });
+
+  it('applies pending commits when changed records match the pending revision and unchanged records are older', async () => {
+    const unchangedThread = buildThread('thread-unchanged-record', 10);
+    const changedThread = {
+      ...buildThread('thread-changed-record', 20),
+      title: 'Changed title',
+    };
+
+    writeChatThreadRecord(storage, unchangedThread, 11, { commitRevision: 1 });
+    writeChatThreadRecord(storage, changedThread, 21, { commitRevision: 2 });
+    writeChatPersistenceIndex(storage, {
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      activeThreadId: unchangedThread.id,
+      threadIds: [unchangedThread.id],
+      updatedAt: 12,
+      revision: 1,
+    });
+    writeChatPendingIndexCommit(storage, {
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      revision: 2,
+      activeThreadId: changedThread.id,
+      threadIds: [unchangedThread.id, changedThread.id],
+      updatedAt: 22,
+      reason: 'thread_mutation',
+      changedThreadIds: [changedThread.id],
+    });
+
+    useChatStore.setState({ threads: {}, activeThreadId: null });
+    await useChatStore.persist.rehydrate();
+
+    expect(useChatStore.getState().getThread(unchangedThread.id)).toEqual(
+      expect.objectContaining({ id: unchangedThread.id }),
+    );
+    expect(useChatStore.getState().getThread(changedThread.id)).toEqual(
+      expect.objectContaining({ title: 'Changed title' }),
+    );
+    expect(useChatStore.getState().activeThreadId).toBe(changedThread.id);
+    expect(readPersistedChatIndex()).toEqual(expect.objectContaining({
+      activeThreadId: changedThread.id,
+      threadIds: [unchangedThread.id, changedThread.id],
       revision: 2,
     }));
     expect(storage.getString(CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY)).toBeUndefined();

@@ -6,7 +6,9 @@ import { ScreenBadge, ScreenCard, ScreenIconButton } from './ScreenShell';
 import { Text, composeTextRole } from './text';
 import { ValueSelectorRow } from './ValueSelectorRow';
 import { ModelAccessState, type ModelMetadata } from '../../types/models';
+import { getVariantMemoryBadgePresentation } from '../../utils/modelMemoryBadgePresentation';
 import { formatModelFileSize } from '../../utils/modelSize';
+import { canSelectModelVariant, getActiveModelVariant } from '../../utils/modelVariants';
 
 interface ModelCardProps {
   model: ModelMetadata;
@@ -40,14 +42,21 @@ const ModelCardComponent = ({
   isActive,
 }: ModelCardProps) => {
   const { t } = useTranslation();
-  const sizeLabel = formatModelFileSize(model.size, t('models.sizeUnknown'));
-  const memoryFitDecision = model.memoryFitDecision;
-  const quantizationLabel = model.gguf?.sizeLabel?.trim();
-  const hasKnownFileSize = typeof model.size === 'number' && Number.isFinite(model.size) && model.size > 0;
-  const quantizationAndSize = quantizationLabel && hasKnownFileSize
-    ? `${quantizationLabel} + ${sizeLabel}`
+  const activeVariant = getActiveModelVariant(model);
+  const displaySize = activeVariant?.size ?? model.size;
+  const sizeLabel = formatModelFileSize(displaySize, t('models.sizeUnknown'));
+  const quantizationLabel = activeVariant?.quantizationLabel ?? model.gguf?.sizeLabel?.trim();
+  const hasKnownFileSize = typeof displaySize === 'number' && Number.isFinite(displaySize) && displaySize > 0;
+  const quantizationAndSize = quantizationLabel
+    ? `${quantizationLabel} - ${sizeLabel}`
     : null;
-  const canOpenVariantSelector = typeof onOpenVariantSelector === 'function' && (model.variants?.length ?? 0) > 1;
+  const memoryBadge = getVariantMemoryBadgePresentation(model, activeVariant, { useModelFallback: true });
+  const memoryDecision = activeVariant?.ramFit ?? model.memoryFitDecision;
+  const shouldShowStandaloneMemoryBadge = !quantizationAndSize && (
+    memoryBadge.tone !== 'neutral'
+    || (memoryDecision === 'unknown' && displaySize !== null)
+  );
+  const canOpenVariantSelector = typeof onOpenVariantSelector === 'function' && canSelectModelVariant(model);
   const accessBadge = model.accessState === ModelAccessState.AUTH_REQUIRED
     ? {
         text: t('models.requiresToken'),
@@ -97,24 +106,12 @@ const ModelCardComponent = ({
             {accessBadge.text}
           </ScreenBadge>
         ) : null}
-        {memoryFitDecision === 'likely_oom' ? (
-          <ScreenBadge tone="error" size="micro" iconName="warning">
-            {t('models.ramLikelyOom')}
-          </ScreenBadge>
-        ) : memoryFitDecision === 'borderline' ? (
-          <ScreenBadge tone="warning" size="micro" iconName="warning">
-            {t('models.ramBorderline')}
-          </ScreenBadge>
-        ) : memoryFitDecision === 'unknown' && model.size !== null ? (
-          <ScreenBadge tone="neutral" size="micro" iconName="help">
-            {t('models.ramFitUnknown')}
-          </ScreenBadge>
-        ) : memoryFitDecision === undefined && model.fitsInRam === false ? (
-          <ScreenBadge tone="warning" size="micro" iconName="warning">
-            {t('models.ramWarning')}
+        {shouldShowStandaloneMemoryBadge ? (
+          <ScreenBadge tone={memoryBadge.tone} size="micro" iconName={memoryBadge.iconName}>
+            {t(memoryBadge.labelKey)}
           </ScreenBadge>
         ) : null}
-        {model.size === null ? (
+        {displaySize === null && !quantizationAndSize ? (
           <ScreenBadge tone="warning" size="micro" iconName="help">
             {t('models.sizeUnknownBadge')}
           </ScreenBadge>
@@ -127,10 +124,22 @@ const ModelCardComponent = ({
 
       {quantizationAndSize ? (
         <ValueSelectorRow
-          label={t('models.quantizationLabel')}
           value={quantizationAndSize}
+          badges={(
+            <ScreenBadge tone={memoryBadge.tone} size="micro" iconName={memoryBadge.iconName}>
+              {t(memoryBadge.labelKey)}
+            </ScreenBadge>
+          )}
           onPress={canOpenVariantSelector ? () => onOpenVariantSelector(model.id) : undefined}
           showChevron={canOpenVariantSelector}
+          accessibilityLabel={t('models.variantSelectorAccessibilityLabel', {
+            modelName: model.name,
+            value: quantizationAndSize,
+          })}
+          accessibilityHint={canOpenVariantSelector
+            ? t('models.variantSelectorAccessibilityHint')
+            : t('models.variantSelectorReadOnlyAccessibilityHint')}
+          testID={`model-variant-selector-${model.id}`}
           className="mt-2.5"
         />
       ) : null}
@@ -157,22 +166,62 @@ const ModelCardComponent = ({
 
 ModelCardComponent.displayName = 'ModelCard';
 
+function modelVariantsSignature(model: ModelMetadata): string {
+  return (model.variants ?? [])
+    .map((variant) => [
+      variant.variantId,
+      variant.fileName,
+      variant.quantizationLabel,
+      variant.size ?? 'unknown',
+      variant.sha256 ?? '',
+      variant.ramFit ?? '',
+      variant.ramFitConfidence ?? '',
+      variant.isLocal === true ? 'local' : 'remote',
+    ].join('\u001f'))
+    .join('\u001e');
+}
+
 export const ModelCard = memo(ModelCardComponent, (prevProps, nextProps) => {
   // Custom comparison to ensure fast check since model is an object
   return prevProps.isActive === nextProps.isActive &&
+         prevProps.onOpenDetails === nextProps.onOpenDetails &&
+         prevProps.onDownload === nextProps.onDownload &&
+         prevProps.onConfigureToken === nextProps.onConfigureToken &&
          prevProps.onOpenVariantSelector === nextProps.onOpenVariantSelector &&
+         prevProps.onOpenModelPage === nextProps.onOpenModelPage &&
+         prevProps.onLoad === nextProps.onLoad &&
+         prevProps.onOpenSettings === nextProps.onOpenSettings &&
+         prevProps.onUnload === nextProps.onUnload &&
+         prevProps.onDelete === nextProps.onDelete &&
+         prevProps.onCancel === nextProps.onCancel &&
+         prevProps.onChat === nextProps.onChat &&
          prevProps.model.id === nextProps.model.id &&
          prevProps.model.name === nextProps.model.name &&
          prevProps.model.author === nextProps.model.author &&
+         prevProps.model.downloadUrl === nextProps.model.downloadUrl &&
+         prevProps.model.resolvedFileName === nextProps.model.resolvedFileName &&
+         prevProps.model.sha256 === nextProps.model.sha256 &&
+         prevProps.model.hfRevision === nextProps.model.hfRevision &&
+         prevProps.model.requiresTreeProbe === nextProps.model.requiresTreeProbe &&
+         prevProps.model.allowUnknownSizeDownload === nextProps.model.allowUnknownSizeDownload &&
          prevProps.model.lifecycleStatus === nextProps.model.lifecycleStatus &&
          prevProps.model.downloadProgress === nextProps.model.downloadProgress &&
+         prevProps.model.downloadErrorAt === nextProps.model.downloadErrorAt &&
+         prevProps.model.downloadErrorCode === nextProps.model.downloadErrorCode &&
+         prevProps.model.downloadErrorMessage === nextProps.model.downloadErrorMessage &&
+         prevProps.model.resumeData === nextProps.model.resumeData &&
+         prevProps.model.localPath === nextProps.model.localPath &&
+         prevProps.model.downloadedAt === nextProps.model.downloadedAt &&
          prevProps.model.fitsInRam === nextProps.model.fitsInRam &&
          prevProps.model.memoryFitDecision === nextProps.model.memoryFitDecision &&
          prevProps.model.memoryFitConfidence === nextProps.model.memoryFitConfidence &&
          prevProps.model.gguf?.sizeLabel === nextProps.model.gguf?.sizeLabel &&
+         prevProps.model.gguf?.totalBytes === nextProps.model.gguf?.totalBytes &&
          prevProps.model.size === nextProps.model.size &&
-         (prevProps.model.variants?.length ?? 0) === (nextProps.model.variants?.length ?? 0) &&
+         modelVariantsSignature(prevProps.model) === modelVariantsSignature(nextProps.model) &&
          prevProps.model.activeVariantId === nextProps.model.activeVariantId &&
-         prevProps.model.accessState === nextProps.model.accessState;
+         prevProps.model.accessState === nextProps.model.accessState &&
+         prevProps.model.isGated === nextProps.model.isGated &&
+         prevProps.model.isPrivate === nextProps.model.isPrivate;
 });
 

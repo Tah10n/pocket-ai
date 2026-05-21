@@ -108,6 +108,7 @@ describe('chatPersistence', () => {
       updatedAt: 12,
       reason: 'thread_mutation',
       changedThreadIds: ['thread-1'],
+      requiresChangedThreadCommitRevision: true,
     };
 
     expect(parseChatPendingIndexCommit(JSON.stringify(validCommit))).toEqual({
@@ -122,9 +123,14 @@ describe('chatPersistence', () => {
       ...validCommit,
       reason: 'unknown',
     }))).toEqual({ ok: false, reason: 'invalid_shape' });
+    expect(parseChatPendingIndexCommit(JSON.stringify({
+      ...validCommit,
+      requiresChangedThreadCommitRevision: 'yes',
+    }))).toEqual({ ok: false, reason: 'invalid_shape' });
 
     writeChatPendingIndexCommit(storage, validCommit);
     expect(storage.getString(CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY)).toContain('"revision":3');
+    expect(storage.getString(CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY)).toContain('"requiresChangedThreadCommitRevision":true');
   });
 
   it('writes v2 index and per-thread records without using the legacy all-thread key', () => {

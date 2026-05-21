@@ -636,7 +636,8 @@ describe('ChatScreen', () => {
     lastErrorReportSheetProps = null;
     lastChatHeaderProps = null;
     lastChatInputBarProps = null;
-    mockLoadModel.mockClear();
+    mockLoadModel.mockReset();
+    mockLoadModel.mockResolvedValue(undefined);
     hardwareStatusListener = null;
     mockHardwareBannerInputs = {
       showLowMemoryWarning: false,
@@ -1712,6 +1713,77 @@ describe('ChatScreen', () => {
     }
   });
 
+  it.each([
+    ['model_load_blocked', 'models.ramLikelyOom'],
+    ['model_memory_warning', 'models.memoryWarningTitle'],
+  ])('retries a header model switch after %s without mutating the thread first', async (errorCode, alertTitle) => {
+    const { AppError } = require('../../src/services/AppError');
+    registry.saveModels([
+      {
+        id: 'author/model-q4',
+        name: 'Model Q4',
+        author: 'Test',
+        size: 1024,
+        localPath: 'model-q4.gguf',
+        lifecycleStatus: 'downloaded',
+      },
+      {
+        id: 'author/model-q8',
+        name: 'Model Q8',
+        author: 'Test',
+        size: 1024,
+        localPath: 'model-q8.gguf',
+        lifecycleStatus: 'downloaded',
+      },
+    ]);
+
+    mockLoadModel
+      .mockRejectedValueOnce(new AppError(errorCode as any))
+      .mockResolvedValueOnce(undefined);
+
+    const { getByTestId } = render(React.createElement(ChatScreen));
+    const beforeThread = useChatStore.getState().getActiveThread();
+    const { getThreadActiveModelId } = require('../../src/types/chat');
+
+    fireEvent.press(getByTestId('model-selector-button'));
+
+    await act(async () => {
+      fireEvent.press(getByTestId('model-option-author/model-q8'));
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(alertSpy).toHaveBeenCalledWith(alertTitle, expect.any(String), expect.any(Array));
+    });
+
+    expect(useChatStore.getState().getActiveThread()).toBe(beforeThread);
+    expect(getThreadActiveModelId(useChatStore.getState().getActiveThread())).toBe('author/model-q4');
+    expect(useChatStore.getState().getActiveThread()?.messages.some((message: any) => message.kind === 'model_switch')).toBe(false);
+
+    const alertButtons = alertSpy.mock.calls.find((call) => call[0] === alertTitle)?.[2] as Array<{ onPress?: () => void }>;
+    expect(alertButtons).toBeTruthy();
+
+    await act(async () => {
+      alertButtons[1]?.onPress?.();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    await waitFor(() => {
+      expect(mockLoadModel).toHaveBeenCalledTimes(2);
+    });
+
+    expect(mockLoadModel).toHaveBeenNthCalledWith(
+      2,
+      'author/model-q8',
+      expect.objectContaining({ allowUnsafeMemoryLoad: true }),
+    );
+
+    await waitFor(() => {
+      expect(useChatStore.getState().getActiveThread()?.activeModelId).toBe('author/model-q8');
+      expect(useChatStore.getState().getActiveThread()?.messages.some((message: any) => message.kind === 'model_switch')).toBe(true);
+    });
+  });
+
   it('disables the model selector while a response is generating', () => {
     registry.saveModels([
       {
@@ -2751,7 +2823,14 @@ describe('ChatScreen', () => {
       await Promise.resolve();
     });
 
-    expect(mockLoadModel).toHaveBeenCalledWith('author/model-q4', { forceReload: true });
+    expect(mockLoadModel).toHaveBeenCalledWith('author/model-q4', {
+      forceReload: true,
+      loadParamsOverride: expect.objectContaining({
+        contextSize: 8192,
+        gpuLayers: null,
+        kvCacheType: 'auto',
+      }),
+    });
 
     mockEngineState = {
       ...mockEngineState,
@@ -2767,6 +2846,103 @@ describe('ChatScreen', () => {
     await act(async () => {
       reloadDeferred.resolve();
       await applyPromise;
+    });
+  });
+
+  it('defers saving active load profile changes until a blocked reload is retried successfully', async () => {
+    const { AppError } = require('../../src/services/AppError');
+    updateSettings({
+      modelLoadParamsByModelId: {
+        'author/model-q4': {
+          contextSize: 4096,
+          gpuLayers: 6,
+          kvCacheType: 'q8_0',
+        },
+      },
+    });
+    registry.saveModels([
+      {
+        id: 'author/model-q4',
+        name: 'Q4 model',
+        author: 'Test',
+        size: 512 * 1024 * 1024,
+        maxContextTokens: 8192,
+        hasVerifiedContextWindow: true,
+        localPath: 'author-model-q4.gguf',
+        lifecycleStatus: 'downloaded',
+      },
+    ]);
+    mockLoadModel
+      .mockRejectedValueOnce(new AppError('model_load_blocked'))
+      .mockResolvedValueOnce(undefined);
+
+    const { getByTestId } = render(React.createElement(ChatScreen));
+
+    await act(async () => {
+      fireEvent.press(getByTestId('model-controls-button'));
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      lastModelParametersSheetProps.onChangeLoadParams({
+        contextSize: 8192,
+        kvCacheType: 'f16',
+      });
+    });
+
+    await act(async () => {
+      await lastModelParametersSheetProps.onApplyReload();
+      await Promise.resolve();
+    });
+
+    expect(mockLoadModel).toHaveBeenNthCalledWith(1, 'author/model-q4', {
+      forceReload: true,
+      loadParamsOverride: expect.objectContaining({
+        contextSize: 8192,
+        gpuLayers: 6,
+        kvCacheType: 'f16',
+      }),
+    });
+    expect(getSettings().modelLoadParamsByModelId['author/model-q4']).toEqual({
+      contextSize: 4096,
+      gpuLayers: 6,
+      kvCacheType: 'q8_0',
+    });
+
+    await waitFor(() => {
+      expect(alertSpy).toHaveBeenCalledWith('models.ramLikelyOom', expect.any(String), expect.any(Array));
+    });
+
+    const alertButtons = alertSpy.mock.calls.find((call) => call[0] === 'models.ramLikelyOom')?.[2] as Array<{ onPress?: () => void }>;
+    expect(alertButtons).toBeTruthy();
+
+    await act(async () => {
+      alertButtons[1]?.onPress?.();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    await waitFor(() => {
+      expect(mockLoadModel).toHaveBeenCalledTimes(2);
+    });
+    expect(mockLoadModel).toHaveBeenNthCalledWith(
+      2,
+      'author/model-q4',
+      expect.objectContaining({
+        forceReload: true,
+        allowUnsafeMemoryLoad: true,
+        loadParamsOverride: expect.objectContaining({
+          contextSize: 8192,
+          gpuLayers: 6,
+          kvCacheType: 'f16',
+        }),
+      }),
+    );
+    await waitFor(() => {
+      expect(getSettings().modelLoadParamsByModelId['author/model-q4']).toEqual({
+        contextSize: 8192,
+        gpuLayers: 6,
+        kvCacheType: 'f16',
+      });
     });
   });
 

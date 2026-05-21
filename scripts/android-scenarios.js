@@ -6,41 +6,38 @@ const { spawnSync } = require("child_process");
 const DEFAULT_SCENARIO_PACK = "core";
 const DEFAULT_TAP_SAFE_BOTTOM_INSET_RATIO = 0.14;
 const DEFAULT_TAP_SAFE_BOTTOM_INSET_MIN_PX = 220;
-// Native and extended both use the stable secondary surface; optional catalog/perf checks stay targeted or behind all.
+// Native and extended keep the stable secondary surface; live catalog smokes stay targeted, in catalog, or behind all.
 const STABLE_SECONDARY_SCENARIOS = [
   "swap-model-cta",
   "hf-token-education",
   "conversations-management",
 ];
+const CORE_SCENARIOS = [
+  "home-smoke",
+  "bottom-tabs",
+  "new-chat-cta",
+];
+const CATALOG_SCENARIOS = [
+  "variant-picker-smoke",
+];
 const SCENARIO_PACK_SCENARIOS = {
-  core: [
-    "home-smoke",
-    "bottom-tabs",
-    "new-chat-cta",
-  ],
+  core: CORE_SCENARIOS,
+  catalog: CATALOG_SCENARIOS,
   "dependency-ui": [
-    "home-smoke",
-    "bottom-tabs",
-    "new-chat-cta",
+    ...CORE_SCENARIOS,
     "style-screenshots",
   ],
   runtime: [
-    "home-smoke",
-    "bottom-tabs",
-    "new-chat-cta",
+    ...CORE_SCENARIOS,
     "language-switch",
     "conversations-management",
   ],
   native: [
-    "home-smoke",
-    "bottom-tabs",
-    "new-chat-cta",
+    ...CORE_SCENARIOS,
     ...STABLE_SECONDARY_SCENARIOS,
   ],
   extended: [
-    "home-smoke",
-    "bottom-tabs",
-    "new-chat-cta",
+    ...CORE_SCENARIOS,
     ...STABLE_SECONDARY_SCENARIOS,
   ],
 };
@@ -133,6 +130,14 @@ const APP_FOREGROUND_MARKER_LABELS = [
 const MODEL_DETAILS_TITLE_LABELS = ["Model details", "Детали модели"];
 const MODEL_DETAILS_CTA_LABELS = ["Details", "Детали"];
 const OPEN_ON_HF_LABELS = ["Open on HF", "Открыть на HF"];
+const VARIANT_PICKER_TITLE_LABELS = ["Choose GGUF file", "Выберите GGUF-файл"];
+const MODEL_CATALOG_LOADING_LABELS = ["Searching Hugging Face...", "Поиск в Hugging Face..."];
+const MODEL_CATALOG_EMPTY_OR_ERROR_LABELS = [
+  "No models found",
+  "Модели не найдены",
+  "The model could not be loaded",
+  "Не удалось загрузить модель",
+];
 const RAM_FIT_BADGE_LABELS = [
   "Fits in RAM",
   "Won't fit RAM",
@@ -659,6 +664,25 @@ function buildScenarios() {
       },
     },
     {
+      id: "variant-picker-smoke",
+      tier: "optional",
+      description: "Verify the model catalog opens the GGUF file variant picker.",
+      run: async (ctx) => {
+        await goToHome(ctx);
+        await ctx.tapAnyText(ACTIVE_MODEL_CTA_LABELS);
+        await ctx.expectAnyText(MODEL_CATALOG_LABELS);
+        await prepareCatalogForVariantPickerSmokeScenario(ctx);
+
+        await openFirstVisibleVariantPicker(ctx);
+        await ctx.expectAnyText(VARIANT_PICKER_TITLE_LABELS, { timeoutMs: 10_000 });
+
+        await ctx.pressBack();
+        await ctx.expectAnyText(MODEL_CATALOG_LABELS, { timeoutMs: 8_000 });
+        await ctx.tapBottomTab(HOME_TAB_LABELS);
+        await ctx.expectAnyText(HOME_SECTION_LABELS);
+      },
+    },
+    {
       id: "swap-model-cta",
       tier: "secondary",
       description: "Verify the Home screen active-model CTA opens the model catalog.",
@@ -697,22 +721,17 @@ function buildScenarios() {
     {
       id: "memory-fit-badges",
       tier: "optional",
-      description: "Verify memory-fit badges show up in catalog and model details.",
+      description: "Verify memory-fit badges show up in quantization picker rows.",
       run: async (ctx) => {
         await goToHome(ctx);
         await ctx.tapAnyText(ACTIVE_MODEL_CTA_LABELS);
         await ctx.expectAnyText(MODEL_CATALOG_LABELS);
         await prepareCatalogForMemoryFitRiskBadgeScenario(ctx);
 
-        const adbPath = resolveAdbPath();
-        await waitForAnyNode(adbPath, ctx.serial, RAM_FIT_RISK_BADGE_LABELS, {
-          timeoutMs: 12_000,
-          visibleOnly: true,
-        });
-
-        await ctx.tapAnyText(MODEL_DETAILS_CTA_LABELS, { timeoutMs: 15_000 });
-        await ctx.expectAnyText(MODEL_DETAILS_TITLE_LABELS, { timeoutMs: 10_000 });
-        await ctx.expectAnyText(RAM_FIT_RISK_BADGE_LABELS, { timeoutMs: 10_000 });
+        await openFirstVisibleVariantPicker(ctx);
+        await ctx.expectAnyText(VARIANT_PICKER_TITLE_LABELS, { timeoutMs: 10_000 });
+        await ctx.expectAnyText(RAM_FIT_BADGE_LABELS, { timeoutMs: 10_000 });
+        ctx.captureScreenshot("memory-fit-variant-picker.png");
       },
     },
     {
@@ -1064,6 +1083,192 @@ async function prepareCatalogForMemoryFitRiskBadgeScenario(ctx) {
   await delay(1_200);
   await ctx.tapAnyText(MODELS_FILTER_TOGGLE_LABELS);
   await ctx.expectAnyText(MODEL_CATALOG_LABELS);
+}
+
+async function prepareCatalogForVariantPickerSmokeScenario(ctx, options = {}) {
+  const resolveAdb = options.resolveAdbPath || resolveAdbPath;
+  const findNodeNow = options.findAnyNodeNow || findAnyNodeNow;
+  const adbPath = resolveAdb();
+
+  const allModelsTab = await findNodeNow(adbPath, ctx.serial, ALL_MODELS_LABELS, {
+    visibleOnly: true,
+  });
+  if (allModelsTab?.node?.bounds) {
+    await ctx.tapAnyText(ALL_MODELS_LABELS, {
+      afterTapDelayMs: 600,
+      timeoutMs: 5_000,
+    });
+  }
+
+  const filterPanelOpen = await findNodeNow(
+    adbPath,
+    ctx.serial,
+    [
+      ...MODELS_FILTER_SIZE_LARGE_LABELS,
+      ...MODELS_FILTER_NO_TOKEN_REQUIRED_LABELS,
+      ...MODELS_FILTER_CLEAR_LABELS,
+    ],
+    { visibleOnly: true }
+  );
+
+  if (!filterPanelOpen) {
+    await ctx.tapAnyText(MODELS_FILTER_TOGGLE_LABELS, {
+      afterTapDelayMs: 600,
+      timeoutMs: 8_000,
+    });
+    await ctx.expectAnyText(MODELS_FILTER_NO_TOKEN_REQUIRED_LABELS, { timeoutMs: 8_000 });
+  }
+
+  const clearButton = await findNodeNow(adbPath, ctx.serial, MODELS_FILTER_CLEAR_LABELS, {
+    visibleOnly: true,
+  });
+  if (clearButton) {
+    await ctx.tapAnyText(MODELS_FILTER_CLEAR_LABELS, {
+      afterTapDelayMs: 600,
+      timeoutMs: 5_000,
+    });
+  }
+
+  const filterPanelStillOpen = await findNodeNow(adbPath, ctx.serial, MODELS_FILTER_NO_TOKEN_REQUIRED_LABELS, {
+    visibleOnly: true,
+  });
+  if (filterPanelStillOpen) {
+    await ctx.tapAnyText(MODELS_FILTER_TOGGLE_LABELS, {
+      afterTapDelayMs: 600,
+      timeoutMs: 5_000,
+    });
+  }
+
+  await ctx.expectAnyText(MODEL_CATALOG_LABELS, { timeoutMs: 8_000 });
+}
+
+async function openFirstVisibleVariantPicker(ctx, options = {}) {
+  const resolveAdb = options.resolveAdbPath || resolveAdbPath;
+  const createSnapshot = options.createUiSnapshot || createUiSnapshot;
+  const findNodeNow = options.findAnyNodeNow || findAnyNodeNow;
+  const waitForAny = options.waitForAnyNode || waitForAnyNode;
+  const tap = options.tapBounds || tapBounds;
+  const waitAfterTapTimeoutMs = options.waitAfterTapTimeoutMs ?? 2_000;
+  const adbPath = resolveAdb();
+  const maxAttempts = 8;
+
+  const initialPickerAlreadyOpen = await findNodeNow(adbPath, ctx.serial, VARIANT_PICKER_TITLE_LABELS, {
+    visibleOnly: true,
+  });
+  if (initialPickerAlreadyOpen) {
+    return;
+  }
+
+  await waitForVariantPickerCatalogScanTarget(adbPath, ctx.serial, {
+    createSnapshot,
+    timeoutMs: options.catalogReadyTimeoutMs,
+    pollIntervalMs: options.catalogReadyPollIntervalMs,
+    delayFn: options.delayFn,
+  });
+
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const pickerAlreadyOpen = await findNodeNow(adbPath, ctx.serial, VARIANT_PICKER_TITLE_LABELS, {
+      visibleOnly: true,
+    });
+    if (pickerAlreadyOpen) {
+      return;
+    }
+
+    const snapshot = createSnapshot(adbPath, ctx.serial);
+    const quantizationNode = findQuantizationSelectorNodeClearOfBottomOverlay(snapshot);
+
+    if (quantizationNode?.node.bounds) {
+      tap(adbPath, ctx.serial, quantizationNode.node.bounds);
+
+      try {
+        await waitForAny(adbPath, ctx.serial, VARIANT_PICKER_TITLE_LABELS, {
+          timeoutMs: waitAfterTapTimeoutMs,
+          visibleOnly: true,
+        });
+        return;
+      } catch (error) {
+        if (!isWaitForAnyNodeTimeout(error)) {
+          throw error;
+        }
+        // Keep scanning; the tapped quantization text may have belonged to a non-interactive row.
+      }
+    }
+
+    await ctx.swipeUp();
+  }
+
+  throw new Error(withUiSummary(adbPath, ctx.serial, "Timed out opening a visible quantization picker."));
+}
+
+async function waitForVariantPickerCatalogScanTarget(adbPath, serial, options = {}) {
+  const createSnapshot = options.createSnapshot || createUiSnapshot;
+  const timeoutMs = options.timeoutMs ?? 12_000;
+  const pollIntervalMs = options.pollIntervalMs ?? 600;
+  const wait = options.delayFn || delay;
+  const startedAt = Date.now();
+  let lastState = "waiting for catalog content";
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const snapshot = createSnapshot(adbPath, serial);
+
+    const pickerAlreadyOpen = findAnyNodeInSnapshot(snapshot, VARIANT_PICKER_TITLE_LABELS, {
+      visibleOnly: true,
+    });
+    if (pickerAlreadyOpen) {
+      return;
+    }
+
+    if (findQuantizationSelectorNodeClearOfBottomOverlay(snapshot)) {
+      return;
+    }
+
+    const emptyOrError = findAnyNodeInSnapshot(snapshot, MODEL_CATALOG_EMPTY_OR_ERROR_LABELS, {
+      visibleOnly: true,
+    });
+    if (emptyOrError) {
+      throw new Error(withUiSummary(
+        adbPath,
+        serial,
+        `Catalog reached ${emptyOrError.label || "an empty/error state"} before a variant picker row appeared.`
+      ));
+    }
+
+    const loading = findAnyNodeInSnapshot(snapshot, MODEL_CATALOG_LOADING_LABELS, {
+      visibleOnly: true,
+    });
+    lastState = loading ? "catalog still loading" : "waiting for catalog rows";
+    await wait(pollIntervalMs);
+  }
+
+  throw new Error(withUiSummary(
+    adbPath,
+    serial,
+    `Timed out waiting for catalog rows before opening a variant picker (${lastState}).`
+  ));
+}
+
+function isWaitForAnyNodeTimeout(error) {
+  return error instanceof Error
+    && error.message.includes("Timed out waiting for any of:");
+}
+
+function findQuantizationSelectorNodeClearOfBottomOverlay(snapshot) {
+  const candidates = snapshot.nodes.filter((node) => (
+    node.clickable
+    && isLikelyQuantizationSelectorNode(node)
+    && isBoundsClearOfBottomOverlay(node.bounds, snapshot.viewportBounds)
+  ));
+  const node = pickBestNode(candidates);
+  return node ? { label: "quantization-value", node } : null;
+}
+
+function isLikelyQuantizationSelectorNode(node) {
+  const normalizedLabel = normalizeUiLabel(`${node.text || ""} ${node.contentDesc || ""}`);
+  const hasQuantizationValue = /\b(?:(?:i?q|tq)\d(?:_[a-z0-9]+){0,3}|bf16|f16|fp16)\b/.test(normalizedLabel);
+  const hasSizeContext = normalizedLabel.includes(" gb")
+    || normalizedLabel.includes("unknown")
+    || normalizedLabel.includes("неизвестно");
+  return hasQuantizationValue && hasSizeContext;
 }
 
 async function prepareCatalogForRamWarningScenario(ctx) {
@@ -2242,6 +2447,9 @@ module.exports = {
   captureAndroidScreenshot,
   dumpUiHierarchy,
   findCatalogRiskModelCard,
+  findQuantizationSelectorNodeClearOfBottomOverlay,
+  openFirstVisibleVariantPicker,
+  prepareCatalogForVariantPickerSmokeScenario,
   findAnyNodeInSnapshot,
   findAnyNodeClearOfBottomOverlay,
   findNodeInSnapshot,

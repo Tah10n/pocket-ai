@@ -1,5 +1,6 @@
 import { LifecycleStatus, type ModelMetadata } from '../types/models';
 import { resolveVerifiedLocalShaCompatibility } from '../services/ModelIntegrityMetadata';
+import { applyModelVariantSelectionIfAvailable } from './modelVariants';
 
 interface MergeModelWithRuntimeStateOptions {
   activeModelId?: string;
@@ -49,6 +50,7 @@ export function mergeModelWithRuntimeState(
   const isActiveModel = activeModelId === mergedModel.id;
 
   if (localModel) {
+    mergedModel = applyModelVariantSelectionIfAvailable(mergedModel, localModel);
     const localCompatibility = resolveVerifiedLocalShaCompatibility(localModel, {
       sha256: mergedModel.sha256,
       resolvedFileName: mergedModel.resolvedFileName,
@@ -100,6 +102,8 @@ export function mergeModelWithRuntimeState(
       likes: mergedModel.likes ?? (canUseLocalMetadataFallback ? localModel.likes : undefined),
       tags: mergedModel.tags ?? (canUseLocalMetadataFallback ? localModel.tags : undefined),
       description: mergedModel.description ?? (canUseLocalMetadataFallback ? localModel.description : undefined),
+      variants: mergedModel.variants ?? (canUseLocalMetadataFallback ? localModel.variants : undefined),
+      activeVariantId: mergedModel.activeVariantId ?? (canUseLocalMetadataFallback ? localModel.activeVariantId : undefined),
     };
   }
 
@@ -110,6 +114,10 @@ export function mergeModelWithRuntimeState(
   }
 
   if (queuedItem) {
+    mergedModel = applyModelVariantSelectionIfAvailable(mergedModel, queuedItem, {
+      allowResolvedFileNameFallback: false,
+      allowResolvedFileNameVariantMatch: false,
+    });
     const queuedCompatibility = resolveVerifiedLocalShaCompatibility(queuedItem, {
       sha256: mergedModel.sha256,
       resolvedFileName: mergedModel.resolvedFileName,
@@ -145,6 +153,8 @@ export function mergeModelWithRuntimeState(
       downloadErrorAt: canUseQueuedRuntimeState ? queuedItem.downloadErrorAt : mergedModel.downloadErrorAt,
       downloadErrorCode: canUseQueuedRuntimeState ? queuedItem.downloadErrorCode : mergedModel.downloadErrorCode,
       downloadErrorMessage: canUseQueuedRuntimeState ? queuedItem.downloadErrorMessage : mergedModel.downloadErrorMessage,
+      variants: mergedModel.variants ?? (canUseQueuedRuntimeState ? queuedItem.variants : undefined),
+      activeVariantId: mergedModel.activeVariantId ?? (canUseQueuedRuntimeState ? queuedItem.activeVariantId : undefined),
     };
   }
 

@@ -17,6 +17,7 @@ export interface SystemMemorySnapshot {
   thresholdBytes: number;
   advertisedMemoryBytes?: number;
   processAvailableBytes?: number;
+  reclaimableBytes?: number;
 }
 
 interface NativeSystemMetricsModule {

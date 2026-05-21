@@ -76,6 +76,27 @@ describe('ErrorReportSheet', () => {
     expect(queryByTestId('include-diagnostics-on')).not.toBeNull();
   });
 
+  it('closes through the sheet backdrop', async () => {
+    const onClose = jest.fn();
+    const { getByTestId } = render(
+      <ErrorReportSheet
+        visible
+        scope="test"
+        error={new Error('boom')}
+        onClose={onClose}
+      />,
+    );
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(getByTestId('error-report-sheet')).toBeTruthy();
+    fireEvent.press(getByTestId('error-report-sheet-backdrop'));
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
   it('builds payload based on toggles and additional info; copy success/failure alerts', async () => {
     const error = new Error('boom');
     error.stack = 'STACKTRACE';

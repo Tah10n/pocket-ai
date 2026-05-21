@@ -286,7 +286,7 @@ describe('LocalStorageRegistry', () => {
     expect(updatedModels[0].lifecycleStatus).toBe(LifecycleStatus.DOWNLOADED);
   });
 
-  it('hydrates valid no-marker local files without promoting metadata trust to verified_local', async () => {
+  it('hydrates valid no-marker local files without promoting metadata trust or fabricating OOM', async () => {
     (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(1024);
     (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([
       createMockModel({ size: null, fitsInRam: null, metadataTrust: undefined, gguf: undefined }),
@@ -298,7 +298,7 @@ describe('LocalStorageRegistry', () => {
 
     const updatedModels = (registry.saveModels as jest.Mock).mock.calls[0][0];
     expect(updatedModels[0].size).toBe(2048);
-    expect(updatedModels[0].fitsInRam).toBe(false);
+    expect(updatedModels[0].fitsInRam).toBeNull();
     expect(updatedModels[0].metadataTrust).toBeUndefined();
     expect(updatedModels[0].gguf).toBeUndefined();
   });
@@ -357,7 +357,7 @@ describe('LocalStorageRegistry', () => {
     expect(updatedModels[0].downloadProgress).toBe(0);
   });
 
-  it('keeps matching size integrity markers limited while recomputing fitsInRam', async () => {
+  it('keeps matching size integrity markers limited without fabricating OOM', async () => {
     (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(1024);
     (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([
       createMockModel({
@@ -382,7 +382,7 @@ describe('LocalStorageRegistry', () => {
     }));
     const updatedModels = (registry.saveModels as jest.Mock).mock.calls[0][0];
     expect(updatedModels[0].size).toBe(2048);
-    expect(updatedModels[0].fitsInRam).toBe(false);
+    expect(updatedModels[0].fitsInRam).toBeNull();
     expect(updatedModels[0].metadataTrust).toBeUndefined();
     expect(updatedModels[0].gguf).toBeUndefined();
   });

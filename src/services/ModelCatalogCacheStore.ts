@@ -1,4 +1,5 @@
-import { ModelAccessState, type ModelMetadata } from '../types/models';
+import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../types/models';
+import { CATALOG_SEARCH_VARIANT_LIMIT, limitModelVariants } from './ModelCatalogFileSelector';
 import { normalizePersistedModelMetadata } from './ModelMetadataNormalizer';
 import { createStorage } from './storage';
 
@@ -42,39 +43,98 @@ type PersistedPayload<T> = {
 type ParsedPayload<T> = {
   status: 'empty' | 'invalid' | 'ok';
   entries: T[];
+  needsRewrite: boolean;
 };
 
 const STORAGE_ID = 'model-catalog-cache';
 const SEARCH_CACHE_KEY = 'catalog-search-cache-v1';
 const SNAPSHOT_CACHE_KEY = 'catalog-snapshot-cache-v1';
-const PERSISTED_CACHE_VERSION = 2;
+// Cache-tier persistence is intentionally limited to anonymous catalog data.
+// Auth-scoped searches/snapshots can include gated/private access state, so
+// they stay memory-only and anonymous snapshots are sanitized before storage.
+const PERSISTED_CACHE_VERSION = 4;
+const SUPPORTED_PERSISTED_CACHE_VERSIONS = new Set([3, PERSISTED_CACHE_VERSION]);
 const MAX_PERSISTED_SEARCH_ENTRIES = 6;
 const MAX_PERSISTED_SNAPSHOT_ENTRIES = 40;
 const PERSISTED_CACHE_KEYS = [SEARCH_CACHE_KEY, SNAPSHOT_CACHE_KEY] as const;
 
-function sanitizeAnonymousPersistedModel(model: ModelMetadata): ModelMetadata {
-  if (
-    model.accessState !== ModelAccessState.AUTHORIZED
-    && model.accessState !== ModelAccessState.ACCESS_DENIED
-  ) {
-    return normalizePersistedModelMetadata(model);
+function isPublicAnonymousModel(model: ModelMetadata): boolean {
+  return model.accessState === ModelAccessState.PUBLIC
+    && model.isGated !== true
+    && model.isPrivate !== true;
+}
+
+function sanitizeAnonymousPersistedModel(model: ModelMetadata): ModelMetadata | null {
+  if (model.isPrivate) {
+    return null;
   }
 
-  const shouldRequireAuth = model.isGated || model.isPrivate;
-  const accessState = shouldRequireAuth ? ModelAccessState.AUTH_REQUIRED : ModelAccessState.PUBLIC;
+  if (isPublicAnonymousModel(model)) {
+    return limitPersistedModelVariants(toAnonymousPublicCatalogModel(model));
+  }
+
+  return normalizePersistedModelMetadata({
+    id: model.id,
+    name: model.name,
+    author: model.author,
+    accessState: ModelAccessState.AUTH_REQUIRED,
+    isGated: model.isGated === true,
+    isPrivate: false,
+    lifecycleStatus: LifecycleStatus.AVAILABLE,
+    downloadProgress: 0,
+  });
+}
+
+function toAnonymousPublicCatalogModel(model: ModelMetadata): ModelMetadata {
+  const hasVerifiedLocalMetadata = model.metadataTrust === 'verified_local';
+
   return normalizePersistedModelMetadata({
     ...model,
-    accessState,
+    localPath: undefined,
+    downloadedAt: undefined,
+    downloadIntegrity: undefined,
+    resumeData: undefined,
+    downloadErrorAt: undefined,
+    downloadErrorCode: undefined,
+    downloadErrorMessage: undefined,
+    lifecycleStatus: LifecycleStatus.AVAILABLE,
+    downloadProgress: 0,
+    metadataTrust: hasVerifiedLocalMetadata ? undefined : model.metadataTrust,
+    ...(hasVerifiedLocalMetadata ? {
+      sha256: undefined,
+      capabilitySnapshot: undefined,
+    } : {}),
+  });
+}
+
+function limitPersistedModelVariants(model: ModelMetadata): ModelMetadata {
+  const variants = limitModelVariants(model.variants, {
+    limit: CATALOG_SEARCH_VARIANT_LIMIT,
+    includeFileNames: [model.resolvedFileName, model.activeVariantId],
+    includeVariantIds: [model.activeVariantId],
+  });
+  const hasLocalVariantMarker = variants?.some((variant) => variant.isLocal === true) ?? false;
+  const sanitizedVariants = variants?.map(({ isLocal: _isLocal, ...variant }) => variant);
+
+  if (variants === model.variants && !hasLocalVariantMarker) {
+    return model;
+  }
+
+  return normalizePersistedModelMetadata({
+    ...model,
+    variants: sanitizedVariants,
   });
 }
 
 function sanitizeAnonymousPersistedModels(models: ModelMetadata[]): ModelMetadata[] {
-  return models.map((model) => sanitizeAnonymousPersistedModel(model));
+  return models.flatMap((model) => {
+    const sanitized = sanitizeAnonymousPersistedModel(model);
+    return sanitized ? [sanitized] : [];
+  });
 }
 
 function needsAnonymousPersistedModelSanitization(model: ModelMetadata): boolean {
-  return model.accessState === ModelAccessState.AUTHORIZED
-    || model.accessState === ModelAccessState.ACCESS_DENIED;
+  return !isPublicAnonymousModel(model);
 }
 
 function needsAnonymousPersistedModelsSanitization(models: ModelMetadata[]): boolean {
@@ -259,6 +319,7 @@ export class ModelCatalogCacheStore {
 
   public putSearch(scope: CatalogCacheScope, result: CatalogCacheResult): void {
     const key = this.buildSearchKey(scope);
+    const clonedResult = this.cloneSearchResult(result);
     const entry: SearchCacheEntry = {
       key,
       timestamp: Date.now(),
@@ -266,7 +327,12 @@ export class ModelCatalogCacheStore {
         ...scope,
         cursor: scope.cursor ?? null,
       },
-      result: this.cloneSearchResult(result),
+      result: scope.authScope === 'anon'
+        ? {
+          ...clonedResult,
+          models: sanitizeAnonymousPersistedModels(clonedResult.models),
+        }
+        : clonedResult,
     };
 
     this.searchEntries.set(key, entry);
@@ -296,14 +362,18 @@ export class ModelCatalogCacheStore {
 
   public putModelSnapshots(models: ModelMetadata[], authScope: CatalogCacheAuthScope): void {
     const timestamp = Date.now();
-    models.forEach((model) => {
+    const modelsToStore = authScope === 'anon'
+      ? sanitizeAnonymousPersistedModels(models)
+      : models.map((model) => normalizePersistedModelMetadata(model));
+
+    modelsToStore.forEach((model) => {
       const key = buildSnapshotKey(model.id, authScope);
       this.snapshotEntries.set(key, {
         key,
         id: model.id,
         authScope,
         timestamp,
-        model: normalizePersistedModelMetadata(model),
+        model,
       });
     });
 
@@ -311,6 +381,66 @@ export class ModelCatalogCacheStore {
 
     if (authScope === 'anon') {
       this.persistSnapshotEntries();
+    }
+  }
+
+  public deleteModelSnapshots(modelIds: string[], authScope: CatalogCacheAuthScope): void {
+    const uniqueModelIds = new Set(modelIds.filter((modelId) => modelId.trim().length > 0));
+    if (uniqueModelIds.size === 0) {
+      return;
+    }
+
+    let didDelete = false;
+    uniqueModelIds.forEach((modelId) => {
+      didDelete = this.snapshotEntries.delete(buildSnapshotKey(modelId, authScope)) || didDelete;
+    });
+
+    if (didDelete && authScope === 'anon') {
+      this.persistSnapshotEntries();
+    }
+  }
+
+  public reconcileAnonymousSearchModels(models: ModelMetadata[]): void {
+    const replacements = new Map<string, ModelMetadata | null>();
+    models.forEach((model) => {
+      replacements.set(model.id, sanitizeAnonymousPersistedModel(model));
+    });
+
+    if (replacements.size === 0) {
+      return;
+    }
+
+    let didChange = false;
+    for (const [key, entry] of this.searchEntries.entries()) {
+      if (entry.scope.authScope !== 'anon') {
+        continue;
+      }
+
+      let didChangeEntry = false;
+      const nextModels = entry.result.models.flatMap((model) => {
+        if (!replacements.has(model.id)) {
+          return [model];
+        }
+
+        didChangeEntry = true;
+        const replacement = replacements.get(model.id) ?? null;
+        return replacement ? [replacement] : [];
+      });
+
+      if (didChangeEntry) {
+        didChange = true;
+        this.searchEntries.set(key, {
+          ...entry,
+          result: {
+            ...entry.result,
+            models: nextModels,
+          },
+        });
+      }
+    }
+
+    if (didChange) {
+      this.persistSearchEntries();
     }
   }
 
@@ -337,12 +467,29 @@ export class ModelCatalogCacheStore {
     this.storage.remove(SNAPSHOT_CACHE_KEY);
   }
 
+  public clearSnapshotsForScope(authScope: CatalogCacheAuthScope): void {
+    let didDelete = false;
+    for (const [key, entry] of this.snapshotEntries.entries()) {
+      if (entry.authScope !== authScope) {
+        continue;
+      }
+
+      this.snapshotEntries.delete(key);
+      didDelete = true;
+    }
+
+    if (didDelete && authScope === 'anon') {
+      this.persistSnapshotEntries();
+    }
+  }
+
   private loadPersistedEntries(): void {
     let shouldRewriteSearchPayload = false;
     const searchPayloadResult = this.parsePayload<SearchCacheEntry>(
       this.storage.getString(SEARCH_CACHE_KEY),
       normalizeSearchEntry,
     );
+    shouldRewriteSearchPayload = searchPayloadResult.needsRewrite;
 
     if (searchPayloadResult.status === 'invalid') {
       this.storage.remove(SEARCH_CACHE_KEY);
@@ -367,6 +514,7 @@ export class ModelCatalogCacheStore {
       this.storage.getString(SNAPSHOT_CACHE_KEY),
       normalizeSnapshotEntry,
     );
+    shouldRewriteSnapshotPayload = snapshotPayloadResult.needsRewrite;
 
     if (snapshotPayloadResult.status === 'invalid') {
       this.storage.remove(SNAPSHOT_CACHE_KEY);
@@ -382,8 +530,13 @@ export class ModelCatalogCacheStore {
         shouldRewriteSnapshotPayload = true;
       }
 
-      entry.model = sanitizeAnonymousPersistedModel(entry.model);
-      this.snapshotEntries.set(entry.key, entry);
+      const sanitizedModel = sanitizeAnonymousPersistedModel(entry.model);
+      if (sanitizedModel) {
+        entry.model = sanitizedModel;
+        this.snapshotEntries.set(entry.key, entry);
+      } else {
+        shouldRewriteSnapshotPayload = true;
+      }
     });
 
     const searchEntriesBeforePrune = this.searchEntries.size;
@@ -412,7 +565,7 @@ export class ModelCatalogCacheStore {
     normalizeEntry: (value: unknown) => T | null,
   ): ParsedPayload<T> {
     if (!rawValue) {
-      return { status: 'empty', entries: [] };
+      return { status: 'empty', entries: [], needsRewrite: false };
     }
 
     try {
@@ -420,19 +573,24 @@ export class ModelCatalogCacheStore {
       if (
         !parsed
         || typeof parsed !== 'object'
-        || parsed.version !== PERSISTED_CACHE_VERSION
+        || typeof parsed.version !== 'number'
+        || !SUPPORTED_PERSISTED_CACHE_VERSIONS.has(parsed.version)
         || !Array.isArray(parsed.entries)
       ) {
-        return { status: 'invalid', entries: [] };
+        return { status: 'invalid', entries: [], needsRewrite: false };
       }
 
       const entries = parsed.entries
         .map((entry) => normalizeEntry(entry))
         .filter((entry): entry is T => entry !== null);
 
-      return { status: 'ok', entries };
+      return {
+        status: 'ok',
+        entries,
+        needsRewrite: parsed.version !== PERSISTED_CACHE_VERSION,
+      };
     } catch {
-      return { status: 'invalid', entries: [] };
+      return { status: 'invalid', entries: [], needsRewrite: false };
     }
   }
 
@@ -453,14 +611,20 @@ export class ModelCatalogCacheStore {
   }
 
   private persistSnapshotEntries(): void {
+    const entries = this.getSortedSnapshotEntries()
+      .filter((entry) => entry.authScope === 'anon')
+      .flatMap((entry) => {
+        const sanitizedModel = sanitizeAnonymousPersistedModel(entry.model);
+        return sanitizedModel
+          ? [{
+            ...entry,
+            model: sanitizedModel,
+          }]
+          : [];
+      });
     const payload: PersistedPayload<SnapshotCacheEntry> = {
       version: PERSISTED_CACHE_VERSION,
-      entries: this.getSortedSnapshotEntries()
-        .filter((entry) => entry.authScope === 'anon')
-        .map((entry) => ({
-          ...entry,
-          model: sanitizeAnonymousPersistedModel(entry.model),
-        })),
+      entries,
     };
     this.storage.set(SNAPSHOT_CACHE_KEY, JSON.stringify(payload));
   }

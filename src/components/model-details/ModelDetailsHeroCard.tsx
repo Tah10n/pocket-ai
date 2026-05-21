@@ -11,6 +11,7 @@ export interface ModelDetailsHeroCardProps {
   title: React.ReactNode;
   modelId: React.ReactNode;
   actions?: React.ReactNode;
+  variantSelector?: React.ReactNode;
   progress?: React.ReactNode;
   openOnHuggingFaceButton?: React.ReactNode;
   className?: string;
@@ -21,6 +22,7 @@ export function ModelDetailsHeroCard({
   title,
   modelId,
   actions,
+  variantSelector,
   progress,
   openOnHuggingFaceButton,
   className,
@@ -45,6 +47,12 @@ export function ModelDetailsHeroCard({
           {modelId}
         </Text>
       </ScreenSurface>
+
+      {variantSelector ? (
+        <Box className="mt-4">
+          {variantSelector}
+        </Box>
+      ) : null}
 
       {actions ? (
         <Box className="mt-4">

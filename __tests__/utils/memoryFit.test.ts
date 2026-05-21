@@ -200,4 +200,33 @@ describe('memoryFit', () => {
       }),
     }));
   });
+
+  it('returns unknown for accurate estimates when effective budget evidence is zero', () => {
+    const result = estimateAccurateMemoryFit({
+      input: {
+        modelSizeBytes: 1_000_000_000,
+        verifiedFileSizeBytes: 1_000_000_000,
+        metadataTrust: 'verified_local',
+        runtimeParams: {},
+        snapshot: {
+          timestampMs: 0,
+          platform: 'android',
+          totalBytes: 8_000_000_000,
+          availableBytes: 100_000_000,
+          usedBytes: 7_900_000_000,
+          appUsedBytes: 500_000_000,
+          lowMemory: false,
+          pressureLevel: 'normal',
+          thresholdBytes: 100_000_000,
+        },
+      },
+      totalMemoryBytes: 8_000_000_000,
+    });
+
+    expect(result).toEqual(expect.objectContaining({
+      decision: 'unknown',
+      confidence: 'low',
+      effectiveBudgetBytes: 0,
+    }));
+  });
 });

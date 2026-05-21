@@ -8,15 +8,18 @@ const {
   captureAndroidScreenshot,
   dumpUiHierarchy,
   findCatalogRiskModelCard,
+  findQuantizationSelectorNodeClearOfBottomOverlay,
   findBlockingSystemDialogAction,
   findAnyNodeClearOfBottomOverlay,
   findAnyNodeInSnapshot,
   findNodeInSnapshot,
   isBoundsClearOfBottomOverlay,
   isAppForegroundSnapshot,
+  openFirstVisibleVariantPicker,
   parseCliOptions,
   parseUiSnapshot,
   pickClosestNodePair,
+  prepareCatalogForVariantPickerSmokeScenario,
   selectScenarios,
   ScenarioSkipError,
   restoreLanguageAfterScenario,
@@ -196,6 +199,7 @@ describe('android-scenarios npm defaults', () => {
   });
 
   it('exposes targeted scenario packs for dependency checks', () => {
+    expect(packageJson.scripts['android:scenarios:catalog']).toContain('--pack catalog');
     expect(packageJson.scripts['android:scenarios:dependency-ui']).toContain('--pack dependency-ui');
     expect(packageJson.scripts['android:scenarios:runtime']).toContain('--pack runtime');
     expect(packageJson.scripts['android:scenarios:native']).toContain('--pack native');
@@ -299,6 +303,229 @@ describe('android-scenarios UI snapshot matching', () => {
     expect(isBoundsClearOfBottomOverlay(bottomLanguage.node.bounds, snapshot.viewportBounds)).toBe(false);
     expect(safeLanguage.node.bounds.centerY).toBe(1702);
     expect(isBoundsClearOfBottomOverlay(safeLanguage.node.bounds, snapshot.viewportBounds)).toBe(true);
+  });
+
+  it('finds quantization selector rows by the compact value text', () => {
+    const compactSelectorSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
+        <node text="Q4_K_M - 3.80 GB" content-desc="" clickable="true" bounds="[40,500][1040,590]" />
+        <node text="Quantization" content-desc="" clickable="true" bounds="[40,2100][1040,2190]" />
+      </hierarchy>
+    `);
+
+    const match = findQuantizationSelectorNodeClearOfBottomOverlay(compactSelectorSnapshot);
+
+    expect(match).toBeTruthy();
+    expect(match.node.text).toBe('Q4_K_M - 3.80 GB');
+  });
+
+  it('ignores read-only quantization text when opening variant picker rows', () => {
+    const compactSelectorSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
+        <node text="Q4_K_M - 3.80 GB" content-desc="" clickable="false" bounds="[40,500][1040,590]" />
+        <node text="" content-desc="Choose GGUF file, current: Q8_0 - 7.20 GB" clickable="true" bounds="[40,700][1040,790]" />
+      </hierarchy>
+    `);
+
+    const match = findQuantizationSelectorNodeClearOfBottomOverlay(compactSelectorSnapshot);
+
+    expect(match).toBeTruthy();
+    expect(match.node.contentDesc).toBe('Choose GGUF file, current: Q8_0 - 7.20 GB');
+  });
+
+  it('finds i-quant and float selector rows by the compact value text', () => {
+    const compactSelectorSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
+        <node text="IQ4_XS - 2.10 GB" content-desc="" clickable="true" bounds="[40,500][1040,590]" />
+        <node text="F16 - unknown" content-desc="" clickable="true" bounds="[40,700][1040,790]" />
+      </hierarchy>
+    `);
+
+    const match = findQuantizationSelectorNodeClearOfBottomOverlay(compactSelectorSnapshot);
+
+    expect(match).toBeTruthy();
+    expect(match.node.text).toBe('IQ4_XS - 2.10 GB');
+
+    const f16SelectorSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
+        <node text="F16 - unknown" content-desc="" clickable="true" bounds="[40,700][1040,790]" />
+      </hierarchy>
+    `);
+
+    const f16Match = findQuantizationSelectorNodeClearOfBottomOverlay(f16SelectorSnapshot);
+
+    expect(f16Match).toBeTruthy();
+    expect(f16Match.node.text).toBe('F16 - unknown');
+  });
+});
+
+describe('android-scenarios variant picker helpers', () => {
+  it('does not tap catalog rows when the variant picker is already open', async () => {
+    const tapBounds = jest.fn();
+    const createUiSnapshot = jest.fn();
+    const waitForAnyNode = jest.fn();
+
+    await openFirstVisibleVariantPicker(
+      {
+        serial: 'emulator-5554',
+        swipeUp: jest.fn(),
+      },
+      {
+        resolveAdbPath: () => 'adb',
+        findAnyNodeNow: jest.fn().mockResolvedValue({ label: 'Choose GGUF file' }),
+        createUiSnapshot,
+        tapBounds,
+        waitForAnyNode,
+      }
+    );
+
+    expect(createUiSnapshot).not.toHaveBeenCalled();
+    expect(tapBounds).not.toHaveBeenCalled();
+    expect(waitForAnyNode).not.toHaveBeenCalled();
+  });
+
+  it('uses a bounded title wait after tapping a quantization candidate', async () => {
+    const ctx = {
+      serial: 'emulator-5554',
+      swipeUp: jest.fn(),
+    };
+    const tapBounds = jest.fn();
+    const waitForAnyNode = jest.fn().mockResolvedValue({ label: 'Choose GGUF file' });
+
+    await openFirstVisibleVariantPicker(ctx, {
+      resolveAdbPath: () => 'adb',
+      findAnyNodeNow: jest.fn().mockResolvedValue(null),
+      createUiSnapshot: jest.fn(() => parseUiSnapshot(`
+        <hierarchy>
+          <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
+          <node text="Q4_K_M - 3.80 GB" content-desc="" clickable="true" bounds="[40,500][1040,590]" />
+        </hierarchy>
+      `)),
+      tapBounds,
+      waitForAnyNode,
+      waitAfterTapTimeoutMs: 123,
+    });
+
+    expect(tapBounds).toHaveBeenCalledWith(
+      'adb',
+      'emulator-5554',
+      expect.objectContaining({ centerY: 545 })
+    );
+    expect(waitForAnyNode).toHaveBeenCalledWith(
+      'adb',
+      'emulator-5554',
+      expect.arrayContaining(['Choose GGUF file']),
+      { timeoutMs: 123, visibleOnly: true }
+    );
+    expect(ctx.swipeUp).not.toHaveBeenCalled();
+  });
+
+  it('waits for catalog loading to finish before scanning variant picker rows', async () => {
+    const ctx = {
+      serial: 'emulator-5554',
+      swipeUp: jest.fn(),
+    };
+    const createUiSnapshot = jest.fn()
+      .mockReturnValueOnce(parseUiSnapshot(`
+        <hierarchy>
+          <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
+          <node text="Searching Hugging Face..." content-desc="" clickable="false" bounds="[40,500][1040,590]" />
+        </hierarchy>
+      `))
+      .mockReturnValueOnce(parseUiSnapshot(`
+        <hierarchy>
+          <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
+          <node text="Q4_K_M - 3.80 GB" content-desc="" clickable="true" bounds="[40,500][1040,590]" />
+        </hierarchy>
+      `))
+      .mockReturnValueOnce(parseUiSnapshot(`
+        <hierarchy>
+          <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
+          <node text="Q4_K_M - 3.80 GB" content-desc="" clickable="true" bounds="[40,500][1040,590]" />
+        </hierarchy>
+      `));
+    const delayFn = jest.fn().mockResolvedValue(undefined);
+
+    await openFirstVisibleVariantPicker(ctx, {
+      resolveAdbPath: () => 'adb',
+      findAnyNodeNow: jest.fn().mockResolvedValue(null),
+      createUiSnapshot,
+      tapBounds: jest.fn(),
+      waitForAnyNode: jest.fn().mockResolvedValue({ label: 'Choose GGUF file' }),
+      delayFn,
+      catalogReadyPollIntervalMs: 1,
+    });
+
+    expect(delayFn).toHaveBeenCalledWith(1);
+    expect(createUiSnapshot).toHaveBeenCalledTimes(3);
+  });
+
+  it('rethrows non-timeout errors from the post-tap picker title wait', async () => {
+    const ctx = {
+      serial: 'emulator-5554',
+      swipeUp: jest.fn(),
+    };
+    const waitError = new Error('adb device offline');
+
+    await expect(openFirstVisibleVariantPicker(ctx, {
+      resolveAdbPath: () => 'adb',
+      findAnyNodeNow: jest.fn().mockResolvedValue(null),
+      createUiSnapshot: jest.fn(() => parseUiSnapshot(`
+        <hierarchy>
+          <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
+          <node text="Q4_K_M - 3.80 GB" content-desc="" clickable="true" bounds="[40,500][1040,590]" />
+        </hierarchy>
+      `)),
+      tapBounds: jest.fn(),
+      waitForAnyNode: jest.fn().mockRejectedValue(waitError),
+    })).rejects.toThrow('adb device offline');
+
+    expect(ctx.swipeUp).not.toHaveBeenCalled();
+  });
+
+  it('normalizes catalog tab and filters before variant-picker smoke opens rows', async () => {
+    const ctx = {
+      serial: 'emulator-5554',
+      tapAnyText: jest.fn().mockResolvedValue(undefined),
+      expectAnyText: jest.fn().mockResolvedValue(undefined),
+    };
+    const findAnyNodeNow = jest.fn()
+      .mockResolvedValueOnce({ node: { bounds: { centerX: 100, centerY: 100 } } })
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ label: 'Clear' })
+      .mockResolvedValueOnce({ label: 'No token required' });
+
+    await prepareCatalogForVariantPickerSmokeScenario(ctx, {
+      resolveAdbPath: () => 'adb',
+      findAnyNodeNow,
+    });
+
+    expect(ctx.tapAnyText).toHaveBeenNthCalledWith(
+      1,
+      expect.arrayContaining(['All Models']),
+      expect.objectContaining({ timeoutMs: 5_000 })
+    );
+    expect(ctx.tapAnyText).toHaveBeenNthCalledWith(
+      2,
+      expect.arrayContaining(['Filters']),
+      expect.objectContaining({ timeoutMs: 8_000 })
+    );
+    expect(ctx.tapAnyText).toHaveBeenNthCalledWith(
+      3,
+      expect.arrayContaining(['Clear']),
+      expect.objectContaining({ timeoutMs: 5_000 })
+    );
+    expect(ctx.tapAnyText).toHaveBeenNthCalledWith(
+      4,
+      expect.arrayContaining(['Filters']),
+      expect.objectContaining({ timeoutMs: 5_000 })
+    );
+    expect(ctx.expectAnyText).toHaveBeenCalledWith(expect.arrayContaining(['No token required']), { timeoutMs: 8_000 });
+    expect(ctx.expectAnyText).toHaveBeenCalledWith(expect.arrayContaining(['Model Catalog']), { timeoutMs: 8_000 });
   });
 });
 
@@ -437,6 +664,17 @@ describe('android-scenarios CLI parsing', () => {
 describe('android-scenarios pack selection', () => {
   const scenarios = buildScenarios();
 
+  it('keeps the live-catalog variant picker smoke check targeted', () => {
+    expect(scenarios).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'variant-picker-smoke',
+          tier: 'optional',
+        }),
+      ])
+    );
+  });
+
   it('runs only core scenarios by default', () => {
     expect(selectScenarios(scenarios, parseCliOptions([])).map((scenario) => scenario.id)).toEqual([
       'home-smoke',
@@ -445,8 +683,16 @@ describe('android-scenarios pack selection', () => {
     ]);
   });
 
-  it('includes secondary scenarios in the extended pack', () => {
-    expect(selectScenarios(scenarios, parseCliOptions(['--pack', 'extended'])).map((scenario) => scenario.id)).toEqual([
+  it('runs the variant picker smoke check from the catalog pack', () => {
+    expect(selectScenarios(scenarios, parseCliOptions(['--pack', 'catalog'])).map((scenario) => scenario.id)).toEqual([
+      'variant-picker-smoke',
+    ]);
+  });
+
+  it('includes stable secondary scenarios in the extended pack without live catalog smoke', () => {
+    const selectedIds = selectScenarios(scenarios, parseCliOptions(['--pack', 'extended'])).map((scenario) => scenario.id);
+
+    expect(selectedIds).toEqual([
       'home-smoke',
       'bottom-tabs',
       'new-chat-cta',
@@ -454,6 +700,7 @@ describe('android-scenarios pack selection', () => {
       'hf-token-education',
       'conversations-management',
     ]);
+    expect(selectedIds).not.toContain('variant-picker-smoke');
   });
 
   it('uses the stable secondary surface for native dependency checks', () => {
@@ -492,12 +739,19 @@ describe('android-scenarios pack selection', () => {
     ]);
   });
 
+  it('keeps direct scenario selection working for the variant picker smoke check', () => {
+    expect(selectScenarios(scenarios, parseCliOptions(['--scenario', 'variant-picker-smoke'])).map((scenario) => scenario.id)).toEqual([
+      'variant-picker-smoke',
+    ]);
+  });
+
   it('runs every scenario, including optional checks, only for the all pack', () => {
     const selectedIds = selectScenarios(scenarios, parseCliOptions(['--pack', 'all'])).map((scenario) => scenario.id);
 
     expect(selectedIds).toEqual(scenarios.map((scenario) => scenario.id));
     expect(selectedIds).toEqual(
       expect.arrayContaining([
+        'variant-picker-smoke',
         'hf-catalog-hardening',
         'memory-fit-badges',
         'memory-fit-download-warning',

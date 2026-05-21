@@ -753,6 +753,25 @@ export function useModelParametersSheetController({
         && clampedNextGpuLayers === null
         && nextKvCacheType === DEFAULT_MODEL_LOAD_PARAMETERS.kvCacheType
         && normalizedNextBackendPolicy === undefined;
+      const nextLoadParams: ModelLoadParameters = {
+        contextSize: nextContextSize,
+        gpuLayers: clampedNextGpuLayers,
+        kvCacheType: nextKvCacheType,
+        backendPolicy: normalizedNextBackendPolicy,
+      };
+      let didCommitLoadProfile = false;
+      const commitLoadProfile = () => {
+        if (didCommitLoadProfile) {
+          return;
+        }
+
+        didCommitLoadProfile = true;
+        if (isResetToDefaultProfile) {
+          resetModelLoadParametersForModel(configurableModelId);
+        } else {
+          updateModelLoadParametersForModel(configurableModelId, nextLoadParams);
+        }
+      };
 
       if (nextContextSize !== draftLoadParams.contextSize) {
         setDraftLoadParams((current) => ({
@@ -761,19 +780,12 @@ export function useModelParametersSheetController({
         }));
       }
 
-      if (isResetToDefaultProfile) {
-        resetModelLoadParametersForModel(configurableModelId);
-      } else {
-        updateModelLoadParametersForModel(configurableModelId, {
-          contextSize: nextContextSize,
-          gpuLayers: clampedNextGpuLayers,
-          kvCacheType: nextKvCacheType,
-          backendPolicy: normalizedNextBackendPolicy,
-        });
-      }
-
       if (isActiveModel) {
-        await llmEngineService.load(configurableModelId, { forceReload: true });
+        await llmEngineService.load(configurableModelId, {
+          forceReload: true,
+          loadParamsOverride: nextLoadParams,
+        });
+        commitLoadProfile();
 
         const effectiveLoadedContextSize = llmEngineService.getContextSize();
         if (
@@ -798,16 +810,67 @@ export function useModelParametersSheetController({
 
         await Promise.resolve(onAfterActiveModelReload?.(configurableModelId));
       } else {
+        commitLoadProfile();
         setDidSaveLoadProfile(true);
       }
     } catch (error) {
       const appError = toAppError(error);
 
-      const baseLoadOptions: LoadModelOptions = { forceReload: true };
+      const nextLoadParams: ModelLoadParameters = {
+        contextSize: clampContextWindowTokens(
+          draftLoadParams.contextSize,
+          contextWindowCeiling,
+        ),
+        gpuLayers: clampGpuLayers(
+          loadDraftSourceRef.current.gpuLayers === 'current'
+            ? (currentLoadParams.gpuLayers ?? null)
+            : loadDraftSourceRef.current.gpuLayers === 'default'
+              ? (effectiveDefaultLoadParams.gpuLayers ?? null)
+              : draftLoadParams.gpuLayers,
+          gpuLayersCeiling,
+        ),
+        kvCacheType: loadDraftSourceRef.current.kvCacheType === 'current'
+          ? currentLoadParams.kvCacheType
+          : loadDraftSourceRef.current.kvCacheType === 'default'
+            ? effectiveDefaultLoadParams.kvCacheType
+            : draftLoadParams.kvCacheType,
+        backendPolicy: loadDraftSourceRef.current.backendPolicy === 'current'
+          ? effectiveCurrentLoadParams.backendPolicy
+          : loadDraftSourceRef.current.backendPolicy === 'default'
+            ? effectiveDefaultLoadParams.backendPolicy
+            : normalizeBackendPolicy(draftLoadParams.backendPolicy),
+      };
+      const defaultContextSize = clampContextWindowTokens(
+        DEFAULT_MODEL_LOAD_PARAMETERS.contextSize,
+        contextWindowCeiling,
+      );
+      const shouldResetLoadProfile =
+        nextLoadParams.contextSize === defaultContextSize
+        && nextLoadParams.gpuLayers === null
+        && nextLoadParams.kvCacheType === DEFAULT_MODEL_LOAD_PARAMETERS.kvCacheType
+        && nextLoadParams.backendPolicy === undefined;
+      let didCommitLoadProfile = false;
+      const commitLoadProfile = () => {
+        if (didCommitLoadProfile) {
+          return;
+        }
+
+        didCommitLoadProfile = true;
+        if (shouldResetLoadProfile) {
+          resetModelLoadParametersForModel(configurableModelId);
+        } else {
+          updateModelLoadParametersForModel(configurableModelId, nextLoadParams);
+        }
+      };
+      const baseLoadOptions: LoadModelOptions = {
+        forceReload: true,
+        loadParamsOverride: nextLoadParams,
+      };
       const retryLoad = (loadOptions: LoadModelOptions) => {
         void (async () => {
           try {
             await llmEngineService.load(configurableModelId, loadOptions);
+            commitLoadProfile();
             await Promise.resolve(onAfterActiveModelReload?.(configurableModelId));
           } catch (retryError) {
             const retryAppError = toAppError(retryError);

@@ -4,6 +4,19 @@ import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../../
 import { ModelCard } from '../../../src/components/ui/ModelCard';
 
 const mockScreenBadge = jest.fn();
+const mockT = jest.fn((key: string, options?: Record<string, unknown>) => {
+  if (key === 'models.variantSelectorAccessibilityLabel') {
+    return `${key}:${String(options?.modelName ?? '')}:${String(options?.value ?? '')}`;
+  }
+
+  return key;
+});
+
+jest.mock('react-i18next', () => ({
+  useTranslation: () => ({
+    t: mockT,
+  }),
+}));
 
 jest.mock('../../../src/components/ui/box', () => {
   const mockReact = jest.requireActual('react');
@@ -87,9 +100,26 @@ function buildModel(accessState: ModelAccessState): ModelMetadata {
   };
 }
 
+function buildModelCardHandlers(overrides: Partial<React.ComponentProps<typeof ModelCard>> = {}) {
+  return {
+    onOpenDetails: jest.fn(),
+    onDownload: jest.fn(),
+    onConfigureToken: jest.fn(),
+    onOpenModelPage: jest.fn(),
+    onLoad: jest.fn(),
+    onOpenSettings: jest.fn(),
+    onUnload: jest.fn(),
+    onDelete: jest.fn(),
+    onCancel: jest.fn(),
+    onChat: jest.fn(),
+    ...overrides,
+  };
+}
+
 describe('ModelCard', () => {
   beforeEach(() => {
     mockScreenBadge.mockClear();
+    mockT.mockClear();
   });
 
   it('renders a token CTA for auth-required models', () => {
@@ -269,13 +299,18 @@ describe('ModelCard', () => {
     ).toBe(true);
   });
 
-  it('renders a RAM warning badge when the model fit decision is borderline', () => {
-    render(
+  it('renders the active quantization memory badge on the model card row', () => {
+    const screen = render(
       <ModelCard
         model={{
           ...buildModel(ModelAccessState.PUBLIC),
+          size: 3_800_000_000,
           fitsInRam: false,
           memoryFitDecision: 'borderline',
+          gguf: {
+            sizeLabel: 'Q4_K_M',
+            totalBytes: 3_800_000_000,
+          },
         }}
         onOpenDetails={jest.fn()}
         onDownload={jest.fn()}
@@ -291,9 +326,63 @@ describe('ModelCard', () => {
       />,
     );
 
+    expect(screen.queryByText('models.quantizationLabel')).toBeNull();
+    expect(screen.getByText('Q4_K_M - 3.80 GB')).toBeTruthy();
     expect(
       mockScreenBadge.mock.calls.some(([props]) => props.tone === 'warning' && props.children === 'models.ramBorderline'),
     ).toBe(true);
+  });
+
+  it('keeps RAM warning visible when quantization metadata is unavailable', () => {
+    const screen = render(
+      <ModelCard
+        model={{
+          ...buildModel(ModelAccessState.PUBLIC),
+          size: 3_800_000_000,
+          fitsInRam: false,
+          memoryFitDecision: 'likely_oom',
+        }}
+        {...buildModelCardHandlers()}
+        isActive={false}
+      />,
+    );
+
+    expect(screen.queryByText('models.quantizationLabel')).toBeNull();
+    expect(
+      mockScreenBadge.mock.calls.some(([props]) => props.tone === 'error' && props.children === 'models.ramLikelyOom'),
+    ).toBe(true);
+  });
+
+  it('does not render a separate quantization badge for downloaded models', () => {
+    const screen = render(
+      <ModelCard
+        model={{
+          ...buildModel(ModelAccessState.PUBLIC),
+          lifecycleStatus: LifecycleStatus.DOWNLOADED,
+          size: 3_800_000_000,
+          gguf: {
+            sizeLabel: 'Q4_K_M',
+          },
+        }}
+        onOpenDetails={jest.fn()}
+        onDownload={jest.fn()}
+        onConfigureToken={jest.fn()}
+        onOpenModelPage={jest.fn()}
+        onLoad={jest.fn()}
+        onOpenSettings={jest.fn()}
+        onUnload={jest.fn()}
+        onDelete={jest.fn()}
+        onCancel={jest.fn()}
+        onChat={jest.fn()}
+        isActive={false}
+      />,
+    );
+
+    expect(screen.getByText('Q4_K_M - 3.80 GB')).toBeTruthy();
+    expect(screen.queryByText('models.quantizationLabel')).toBeNull();
+    expect(
+      mockScreenBadge.mock.calls.some(([props]) => props.tone === 'neutral' && props.children === 'Q4_K_M'),
+    ).toBe(false);
   });
 
   it('renders a quantization and size row when GGUF metadata is complete', () => {
@@ -320,8 +409,8 @@ describe('ModelCard', () => {
       />,
     );
 
-    expect(screen.getByText('models.quantizationLabel')).toBeTruthy();
-    expect(screen.getByText('Q4_K_M + 3.80 GB')).toBeTruthy();
+    expect(screen.queryByText('models.quantizationLabel')).toBeNull();
+    expect(screen.getByText('Q4_K_M - 3.80 GB')).toBeTruthy();
     expect(screen.queryByText('chevron-right')).toBeNull();
   });
 
@@ -347,7 +436,7 @@ describe('ModelCard', () => {
     );
 
     expect(screen.queryByText('models.quantizationLabel')).toBeNull();
-    expect(screen.queryByText('Q4_K_M + 3.80 GB')).toBeNull();
+    expect(screen.queryByText('Q4_K_M - 3.80 GB')).toBeNull();
     expect(
       mockScreenBadge.mock.calls.some(([props]) => {
         const children = Array.isArray(props.children) ? props.children.join('') : String(props.children);
@@ -366,8 +455,8 @@ describe('ModelCard', () => {
             sizeLabel: 'Q4_K_M',
           },
           variants: [
-            { variantId: 'q4', quantizationLabel: 'Q4_K_M', size: 3_800_000_000 },
-            { variantId: 'q6', quantizationLabel: 'Q6_K', size: 4_100_000_000 },
+            { variantId: 'q4', fileName: 'model.Q4_K_M.gguf', quantizationLabel: 'Q4_K_M', size: 3_800_000_000 },
+            { variantId: 'q6', fileName: 'model.Q6_K.gguf', quantizationLabel: 'Q6_K', size: 4_100_000_000 },
           ],
         }}
         onOpenDetails={jest.fn()}
@@ -385,5 +474,120 @@ describe('ModelCard', () => {
     );
 
     expect(screen.queryByText('chevron-right')).toBeNull();
+    const selectorRow = screen.getByTestId('model-variant-selector-org/model');
+    expect(selectorRow.props.accessibilityLabel).toBe('models.variantSelectorAccessibilityLabel:Model:Q4_K_M - 3.80 GB');
+    expect(selectorRow.props.accessibilityHint).toBe('models.variantSelectorReadOnlyAccessibilityHint');
+  });
+
+  it('opens the variant selector when multiple variants are available', () => {
+    const onOpenVariantSelector = jest.fn();
+    const screen = render(
+      <ModelCard
+        model={{
+          ...buildModel(ModelAccessState.PUBLIC),
+          size: 3_800_000_000,
+          resolvedFileName: 'model.Q4_K_M.gguf',
+          activeVariantId: 'model.Q4_K_M.gguf',
+          gguf: {
+            sizeLabel: 'Q4_K_M',
+          },
+          variants: [
+            { variantId: 'model.Q4_K_M.gguf', fileName: 'model.Q4_K_M.gguf', quantizationLabel: 'Q4_K_M', size: 3_800_000_000 },
+            { variantId: 'model.Q8_0.gguf', fileName: 'model.Q8_0.gguf', quantizationLabel: 'Q8_0', size: 7_200_000_000 },
+          ],
+        }}
+        onOpenDetails={jest.fn()}
+        onDownload={jest.fn()}
+        onConfigureToken={jest.fn()}
+        onOpenVariantSelector={onOpenVariantSelector}
+        onOpenModelPage={jest.fn()}
+        onLoad={jest.fn()}
+        onOpenSettings={jest.fn()}
+        onUnload={jest.fn()}
+        onDelete={jest.fn()}
+        onCancel={jest.fn()}
+        onChat={jest.fn()}
+        isActive={false}
+      />,
+    );
+
+    const selectorRow = screen.getByTestId('model-variant-selector-org/model');
+    expect(selectorRow.props.accessibilityLabel).toBe('models.variantSelectorAccessibilityLabel:Model:Q4_K_M - 3.80 GB');
+    expect(selectorRow.props.accessibilityHint).toBe('models.variantSelectorAccessibilityHint');
+    expect(mockT).toHaveBeenCalledWith('models.variantSelectorAccessibilityLabel', {
+      modelName: 'Model',
+      value: 'Q4_K_M - 3.80 GB',
+    });
+
+    fireEvent.press(selectorRow);
+
+    expect(screen.getByText('chevron-right')).toBeTruthy();
+    expect(onOpenVariantSelector).toHaveBeenCalledWith('org/model');
+  });
+
+  it('keeps the variant selector available when the active variant size is unknown', () => {
+    const onOpenVariantSelector = jest.fn();
+    const screen = render(
+      <ModelCard
+        model={{
+          ...buildModel(ModelAccessState.PUBLIC),
+          size: null,
+          resolvedFileName: 'model.Q4_K_M.gguf',
+          activeVariantId: 'model.Q4_K_M.gguf',
+          variants: [
+            { variantId: 'model.Q4_K_M.gguf', fileName: 'model.Q4_K_M.gguf', quantizationLabel: 'Q4_K_M', size: null },
+            { variantId: 'model.Q8_0.gguf', fileName: 'model.Q8_0.gguf', quantizationLabel: 'Q8_0', size: 7_200_000_000 },
+          ],
+        }}
+        {...buildModelCardHandlers({ onOpenVariantSelector })}
+        isActive={false}
+      />,
+    );
+
+    expect(screen.getByText('Q4_K_M - models.sizeUnknown')).toBeTruthy();
+    expect(screen.queryByText('models.sizeUnknownBadge')).toBeNull();
+
+    fireEvent.press(screen.getByTestId('model-variant-selector-org/model'));
+    expect(onOpenVariantSelector).toHaveBeenCalledWith('org/model');
+  });
+
+  it('rerenders when catalog refresh changes active variant metadata without changing variant count', () => {
+    const handlers = buildModelCardHandlers({ onOpenVariantSelector: jest.fn() });
+    const baseModel = {
+      ...buildModel(ModelAccessState.PUBLIC),
+      size: 3_800_000_000,
+      resolvedFileName: 'model.Q4_K_M.gguf',
+      activeVariantId: 'model.Q4_K_M.gguf',
+      variants: [
+        { variantId: 'model.Q4_K_M.gguf', fileName: 'model.Q4_K_M.gguf', quantizationLabel: 'Q4_K_M', size: 3_800_000_000 },
+        { variantId: 'model.Q8_0.gguf', fileName: 'model.Q8_0.gguf', quantizationLabel: 'Q8_0', size: 7_200_000_000 },
+      ],
+    } satisfies ModelMetadata;
+    const screen = render(
+      <ModelCard
+        model={baseModel}
+        {...handlers}
+        isActive={false}
+      />,
+    );
+
+    expect(screen.getByText('Q4_K_M - 3.80 GB')).toBeTruthy();
+
+    screen.rerender(
+      <ModelCard
+        model={{
+          ...baseModel,
+          variants: [
+            { variantId: 'model.Q4_K_M.gguf', fileName: 'model.Q4_K_M.gguf', quantizationLabel: 'Q4_K_M', size: 4_100_000_000 },
+            { variantId: 'model.Q8_0.gguf', fileName: 'model.Q8_0.gguf', quantizationLabel: 'Q8_0', size: 7_200_000_000 },
+          ],
+        }}
+        {...handlers}
+        isActive={false}
+      />,
+    );
+
+    expect(screen.queryByText('Q4_K_M - 3.80 GB')).toBeNull();
+    expect(screen.getByText('Q4_K_M - 4.10 GB')).toBeTruthy();
   });
 });

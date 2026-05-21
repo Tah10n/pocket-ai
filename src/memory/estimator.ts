@@ -541,7 +541,7 @@ function decisionForBudgetFit({
   }
 
   if (!Number.isFinite(effectiveBudgetBytes) || effectiveBudgetBytes <= 0) {
-    return requiredBytes > 0 ? 'likely_oom' : 'unknown';
+    return 'unknown';
   }
 
   const overBudgetRatio = requiredBytes / effectiveBudgetBytes;

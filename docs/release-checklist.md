@@ -68,7 +68,9 @@ node .\scripts\android-scenarios.js --skip-build --scenario hf-catalog-hardening
 node .\scripts\android-screen-capture.js --skip-build --screen home,models,settings,conversations,huggingface-token,model-details --output-dir artifacts/android-scenarios/manual-sample
 ```
 
-`npm run android:scenarios` defaults to the small core pack (`home-smoke`, `bottom-tabs`, `new-chat-cta`). Use `--pack dependency-ui` for shared theme, tab chrome, routed headers, or motion changes; `--pack runtime` for localization, state, or storage behavior; `--pack native` for Expo or native-module changes; and `--pack extended` when you need the previous broader stable pass. Keep noisy catalog/perf checks targeted via `--scenario <id>`.
+`npm run android:scenarios` defaults to the small core pack (`home-smoke`, `bottom-tabs`, `new-chat-cta`). Use `--pack catalog` or `--scenario variant-picker-smoke` for live model-catalog checks, `--pack dependency-ui` for shared theme, tab chrome, routed headers, or motion changes, `--pack runtime` for localization, state, or storage behavior, `--pack native` for Expo or native-module changes, and `--pack extended` when you need the broader stable pass without live catalog smoke. Keep noisy perf and other optional checks targeted via `--scenario <id>` or `--pack all`.
+
+For PR CI, `android-pack-catalog` selects the catalog pack. If multiple Android pack labels are applied, CI uses this priority order: `android-pack-all`, `android-pack-native`, `android-pack-runtime`, `android-pack-dependency-ui`, `android-pack-catalog`, then `android-pack-extended`.
 
 ## Build commands
 

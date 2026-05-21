@@ -54,10 +54,14 @@ export function useModelActions({
     }
   }, [showError]);
 
-  const openModelDetails = useCallback((modelId: string) => {
+  const openModelDetails = useCallback((modelId: string, model?: Pick<ModelMetadata, 'activeVariantId'>) => {
+    const variantId = typeof model?.activeVariantId === 'string' && model.activeVariantId.trim().length > 0
+      ? model.activeVariantId.trim()
+      : undefined;
+
     router.push({
       pathname: '/model-details',
-      params: { modelId },
+      params: variantId ? { modelId, variantId } : { modelId },
     });
   }, [router]);
 
@@ -99,10 +103,9 @@ export function useModelActions({
 
       if (
         appError.code === 'model_load_failed'
-        || appError.code === 'model_memory_insufficient'
         || appError.code === 'model_incompatible'
       ) {
-        // ModelsList renders a persistent engine error card (with report action) for these cases.
+        // ModelsList renders a persistent engine error card with a report action for native load failures.
         return;
       }
 

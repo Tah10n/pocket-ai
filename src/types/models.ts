@@ -55,9 +55,12 @@ export interface ModelCapabilitySnapshot {
 
 export interface ModelVariant {
   variantId: string;
+  fileName: string;
   quantizationLabel: string;
   size: number | null;
+  sha256?: string;
   ramFit?: ModelMemoryFitDecision;
+  ramFitConfidence?: ModelMemoryFitConfidence;
   isLocal?: boolean;
 }
 

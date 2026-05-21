@@ -10,6 +10,87 @@ import { assertPrivateStorageWritable } from '../services/storage';
 
 const downloadStoreStateStorage = createInstrumentedStateStorage(mmkvStorage, { scope: 'downloadStore', dedupe: true });
 
+function normalizeComparableString(value: string | undefined): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function normalizeComparableSha256(value: string | undefined): string | undefined {
+  return normalizeComparableString(value)?.toLowerCase();
+}
+
+function normalizeComparableSize(value: number | null | undefined): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? Math.round(value)
+    : undefined;
+}
+
+function hasCompatibleQueuedFileIdentity(existing: ModelMetadata, model: ModelMetadata): boolean {
+  const fileIdentityComparisons: [string | undefined, string | undefined][] = [
+    [normalizeComparableString(existing.resolvedFileName), normalizeComparableString(model.resolvedFileName)],
+    [normalizeComparableString(existing.downloadUrl), normalizeComparableString(model.downloadUrl)],
+    [normalizeComparableSha256(existing.sha256), normalizeComparableSha256(model.sha256)],
+  ];
+  const revisionComparison: [string | undefined, string | undefined] = [
+    normalizeComparableString(existing.hfRevision),
+    normalizeComparableString(model.hfRevision),
+  ];
+
+  if ([...fileIdentityComparisons, revisionComparison].some(([existingValue, nextValue]) => (
+    existingValue !== undefined && nextValue !== undefined && existingValue !== nextValue
+  ))) {
+    return false;
+  }
+
+  const existingSize = normalizeComparableSize(existing.size);
+  const nextSize = normalizeComparableSize(model.size);
+  if (existingSize !== undefined && nextSize !== undefined && existingSize !== nextSize) {
+    return false;
+  }
+
+  const hasMatchingFileIdentity = fileIdentityComparisons.some(([existingValue, nextValue]) => (
+    existingValue !== undefined && existingValue === nextValue
+  ));
+  if (hasMatchingFileIdentity) {
+    return true;
+  }
+
+  const hasVariantDifferentiatingField = fileIdentityComparisons.some(([existingValue, nextValue]) => (
+    existingValue !== undefined || nextValue !== undefined
+  ));
+  return !hasVariantDifferentiatingField
+    && existingSize !== undefined
+    && nextSize !== undefined;
+}
+
+function buildRetryableQueueEntry(existing: ModelMetadata, model: ModelMetadata): ModelMetadata {
+  const canPreserveResumeState = hasCompatibleQueuedFileIdentity(existing, model);
+  const retryableBaseModel = canPreserveResumeState
+    ? { ...existing, ...model }
+    : model;
+
+  return normalizePersistedModelMetadata({
+    ...retryableBaseModel,
+    resumeData: canPreserveResumeState ? existing.resumeData : undefined,
+    downloadProgress: canPreserveResumeState ? existing.downloadProgress : 0,
+    localPath: canPreserveResumeState ? existing.localPath ?? model.localPath : model.localPath,
+    downloadIntegrity: canPreserveResumeState
+      ? model.downloadIntegrity ?? existing.downloadIntegrity
+      : model.downloadIntegrity,
+    allowUnknownSizeDownload: canPreserveResumeState
+      ? existing.allowUnknownSizeDownload === true || model.allowUnknownSizeDownload === true
+      : model.allowUnknownSizeDownload === true,
+    lifecycleStatus: LifecycleStatus.QUEUED,
+    downloadErrorAt: undefined,
+    downloadErrorCode: undefined,
+    downloadErrorMessage: undefined,
+  });
+}
+
 interface DownloadState {
   queue: ModelMetadata[];
   activeDownloadId: string | null;
@@ -69,17 +150,7 @@ export const useDownloadStore = create<DownloadState>()(
             existing.lifecycleStatus === LifecycleStatus.PAUSED
             || existing.lifecycleStatus === LifecycleStatus.FAILED
           ) {
-            const nextEntry = normalizePersistedModelMetadata({
-              ...existing,
-              ...model,
-              resumeData: existing.resumeData,
-              downloadProgress: existing.downloadProgress,
-              localPath: existing.localPath ?? model.localPath,
-              lifecycleStatus: LifecycleStatus.QUEUED,
-              downloadErrorAt: undefined,
-              downloadErrorCode: undefined,
-              downloadErrorMessage: undefined,
-            });
+            const nextEntry = buildRetryableQueueEntry(existing, model);
 
             return {
               queue: state.queue.map((queued) => queued.id === model.id ? nextEntry : queued),
@@ -97,17 +168,7 @@ export const useDownloadStore = create<DownloadState>()(
           // Legacy queues may still contain a retryable entry stored as AVAILABLE.
           // Re-queue it only when the user explicitly taps Download again.
           if (existing.lifecycleStatus === LifecycleStatus.AVAILABLE) {
-            const nextEntry = normalizePersistedModelMetadata({
-              ...existing,
-              ...model,
-              resumeData: existing.resumeData,
-              downloadProgress: existing.downloadProgress,
-              localPath: existing.localPath ?? model.localPath,
-              lifecycleStatus: LifecycleStatus.QUEUED,
-              downloadErrorAt: undefined,
-              downloadErrorCode: undefined,
-              downloadErrorMessage: undefined,
-            });
+            const nextEntry = buildRetryableQueueEntry(existing, model);
 
             return {
               queue: state.queue.map((queued) => queued.id === model.id ? nextEntry : queued),

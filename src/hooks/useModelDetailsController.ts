@@ -27,16 +27,28 @@ import {
 import { handleModelLoadMemoryPolicyError, promptModelLoadMemoryPolicyIfNeeded } from '../utils/modelLoadMemoryPolicyPrompt';
 import { startModelDownloadFlow } from '../utils/modelDownloadFlow';
 import { mergeModelWithRuntimeState } from '../utils/modelRuntimeState';
+import { applyModelVariantSelection } from '../utils/modelVariants';
 
-export function useModelDetailsController(modelId: string) {
+export function useModelDetailsController(modelId: string, initialVariantId?: string) {
   const router = useRouter();
   const { t } = useTranslation();
   const missingModelMessage = t('models.detailMissingModel');
+  const normalizedInitialVariantId = typeof initialVariantId === 'string' && initialVariantId.trim().length > 0
+    ? initialVariantId.trim()
+    : null;
   const previousModelIdRef = useRef<string | null>(null);
+  const selectedVariantIdRef = useRef<string | null>(normalizedInitialVariantId);
   const [model, setModel] = useState<ModelMetadata | null>(
-    () => (modelId
-      ? modelCatalogService.getCachedModel(modelId) ?? createModelDetailsPlaceholder(modelId)
-      : null),
+    () => {
+      if (!modelId) {
+        return null;
+      }
+
+      const cachedModel = modelCatalogService.getCachedModel(modelId) ?? createModelDetailsPlaceholder(modelId);
+      return normalizedInitialVariantId
+        ? applyModelVariantSelection(cachedModel, normalizedInitialVariantId)
+        : cachedModel;
+    },
   );
   const [loading, setLoading] = useState(Boolean(modelId));
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -63,7 +75,11 @@ export function useModelDetailsController(modelId: string) {
     const previousModelId = previousModelIdRef.current;
     if (previousModelId !== modelId) {
       previousModelIdRef.current = modelId;
-      setModel(modelCatalogService.getCachedModel(modelId) ?? createModelDetailsPlaceholder(modelId));
+      selectedVariantIdRef.current = normalizedInitialVariantId;
+      const cachedModel = modelCatalogService.getCachedModel(modelId) ?? createModelDetailsPlaceholder(modelId);
+      setModel(normalizedInitialVariantId
+        ? applyModelVariantSelection(cachedModel, normalizedInitialVariantId)
+        : cachedModel);
     }
 
     void modelCatalogService.getModelDetails(modelId)
@@ -72,7 +88,29 @@ export function useModelDetailsController(modelId: string) {
           return;
         }
 
-        setModel(resolvedModel);
+        setModel((current) => {
+          const selectedVariantId = selectedVariantIdRef.current;
+          if (!selectedVariantId || current?.id !== resolvedModel.id) {
+            return resolvedModel;
+          }
+
+          const variantsById = new Map((resolvedModel.variants ?? []).map((variant) => [variant.variantId, variant]));
+          for (const variant of current.variants ?? []) {
+            if (!variantsById.has(variant.variantId)) {
+              variantsById.set(variant.variantId, variant);
+            }
+          }
+          const variants = Array.from(variantsById.values());
+
+          if (!variants.some((variant) => variant.variantId === selectedVariantId)) {
+            return resolvedModel;
+          }
+
+          return applyModelVariantSelection({
+            ...resolvedModel,
+            variants,
+          }, selectedVariantId);
+        });
       })
       .catch((error) => {
         if (cancelled) {
@@ -91,7 +129,26 @@ export function useModelDetailsController(modelId: string) {
     return () => {
       cancelled = true;
     };
-  }, [missingModelMessage, modelId]);
+  }, [missingModelMessage, modelId, normalizedInitialVariantId]);
+
+  useEffect(() => {
+    if (selectedVariantIdRef.current === normalizedInitialVariantId) {
+      return;
+    }
+
+    selectedVariantIdRef.current = normalizedInitialVariantId;
+    setModel((current) => {
+      if (!current) {
+        return current;
+      }
+
+      if (!normalizedInitialVariantId) {
+        return modelCatalogService.getCachedModel(modelId) ?? current;
+      }
+
+      return applyModelVariantSelection(current, normalizedInitialVariantId);
+    });
+  }, [modelId, normalizedInitialVariantId]);
 
   const displayModel = useMemo(() => {
     if (!model) {
@@ -101,11 +158,14 @@ export function useModelDetailsController(modelId: string) {
     void runtimeRevision;
     void modelsRegistryRevision;
 
-    return mergeModelWithRuntimeState(model, {
+    const runtimeModel = mergeModelWithRuntimeState(model, {
       activeModelId: engineState.activeModelId,
       localModel: registry.getModel(model.id),
       queuedItem: queuedItem?.id === model.id ? queuedItem : undefined,
     });
+
+    const selectedVariantId = selectedVariantIdRef.current;
+    return selectedVariantId ? applyModelVariantSelection(runtimeModel, selectedVariantId) : runtimeModel;
   }, [engineState.activeModelId, model, modelsRegistryRevision, queuedItem, runtimeRevision]);
 
   const getConfigurableModelById = useCallback((targetModelId: string | null) => {
@@ -282,6 +342,11 @@ export function useModelDetailsController(modelId: string) {
     });
   }, [handleOpenModelPage, handleOpenTokenSettings, showModelActionError, startDownload, t]);
 
+  const handleSelectVariant = useCallback((variantId: string) => {
+    selectedVariantIdRef.current = variantId;
+    setModel((current) => (current ? applyModelVariantSelection(current, variantId) : current));
+  }, []);
+
   const performLoad = useCallback(async (targetModelId: string, options?: LoadModelOptions) => {
     try {
       await loadModel(targetModelId, options);
@@ -305,7 +370,6 @@ export function useModelDetailsController(modelId: string) {
 
       if (
         appError.code === 'model_load_failed'
-        || appError.code === 'model_memory_insufficient'
         || appError.code === 'model_incompatible'
       ) {
         return;
@@ -438,6 +502,7 @@ export function useModelDetailsController(modelId: string) {
     handleLoad,
     handleOpenModelPage,
     handleOpenTokenSettings,
+    handleSelectVariant,
     handleUnload,
     heroMetrics,
     loading,

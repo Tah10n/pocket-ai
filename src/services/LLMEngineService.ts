@@ -123,6 +123,7 @@ const MAX_ADDITIONAL_STOP_WORDS_CACHE_ENTRIES = 8;
 const CONTEXT_OPERATION_UNLOAD_DRAIN_TIMEOUT_MS = 5000;
 const CONTEXT_OPERATION_UNLOAD_TIMEOUT_MESSAGE = 'Timed out waiting for active context operations during unload';
 const ACTIVE_COMPLETION_UNLOAD_TIMEOUT_MESSAGE = 'Timed out waiting for active completion during unload';
+const MAX_UNLOAD_RECLAIM_FRACTION_OF_TOTAL_MEMORY = 0.25;
 const FALLBACK_STOP_WORDS = [
   '</s>',
   '<|end|>',
@@ -162,6 +163,32 @@ type CalibrationSession = {
   afterFirstTokenSnapshot: SystemMemorySnapshot | null;
   afterUnloadSnapshot: SystemMemorySnapshot | null;
   didRecordSuccess: boolean;
+};
+
+type ModelUnloadReclaimEstimate = {
+  previousModelId: string | null;
+  source: 'observed_load_delta' | 'predicted_load_footprint';
+  estimatedReclaimableBytes: number;
+  budgetReclaimableBytes: number;
+  observedFreedBytes: number;
+  beforeUnloadSnapshot: SystemMemorySnapshot | null;
+  afterUnloadSnapshot: SystemMemorySnapshot | null;
+};
+
+type LoadedModelArtifactIdentity = {
+  localPath: string | null;
+  resolvedPath: string | null;
+  sizeBytes: number | null;
+  modificationTime: number | null;
+  fallbackDownloadMarker: number | null;
+};
+
+type ResolvedModelArtifactInfo = {
+  modelPath: string;
+  fileInfo: {
+    size?: number | null;
+    modificationTime?: number | null;
+  };
 };
 
 function normalizeArchitecturePrefix(value: unknown): string | null {
@@ -456,6 +483,7 @@ class LLMEngineService {
   private completionRunner = new ActiveCompletionRunner<NativeCompletionResult>();
   private isUnloading = false;
   private activeCalibrationSession: CalibrationSession | null = null;
+  private loadedArtifactIdentity: LoadedModelArtifactIdentity | null = null;
   private lastLifecycleEvent: EngineLifecycleEvent | null = null;
   private lastLifecycleError: string | null = null;
 
@@ -544,6 +572,216 @@ class LLMEngineService {
     this.context = context;
     this.contextGeneration += 1;
     this.additionalStopWordsCache.clear();
+  }
+
+  private toPositiveByteCount(value: unknown): number | null {
+    return typeof value === 'number' && Number.isFinite(value) && value > 0
+      ? Math.round(value)
+      : null;
+  }
+
+  private normalizeArtifactString(value: unknown): string | null {
+    if (typeof value !== 'string') {
+      return null;
+    }
+
+    const normalized = value.trim();
+    return normalized.length > 0 ? normalized : null;
+  }
+
+  private toArtifactTimestamp(value: unknown): number | null {
+    return typeof value === 'number' && Number.isFinite(value) && value > 0
+      ? value
+      : null;
+  }
+
+  private resolveArtifactFallbackDownloadMarker(model: ModelMetadata): number | null {
+    return this.toArtifactTimestamp(model.downloadIntegrity?.checkedAt)
+      ?? this.toArtifactTimestamp(model.downloadedAt);
+  }
+
+  private buildLoadedModelArtifactIdentity({
+    localPath,
+    resolvedArtifactInfo,
+    fallbackDownloadMarker,
+  }: {
+    localPath: string;
+    resolvedArtifactInfo: ResolvedModelArtifactInfo;
+    fallbackDownloadMarker: number | null;
+  }): LoadedModelArtifactIdentity {
+    const modificationTime = this.toArtifactTimestamp(resolvedArtifactInfo.fileInfo.modificationTime);
+
+    return {
+      localPath: this.normalizeArtifactString(localPath),
+      resolvedPath: this.normalizeArtifactString(resolvedArtifactInfo.modelPath),
+      sizeBytes: this.toPositiveByteCount(resolvedArtifactInfo.fileInfo.size),
+      modificationTime,
+      fallbackDownloadMarker: modificationTime === null ? fallbackDownloadMarker : null,
+    };
+  }
+
+  private areLoadedModelArtifactIdentitiesEqual(
+    previous: LoadedModelArtifactIdentity | null,
+    current: LoadedModelArtifactIdentity,
+  ): boolean {
+    return previous !== null
+      && previous.localPath === current.localPath
+      && previous.resolvedPath === current.resolvedPath
+      && previous.sizeBytes === current.sizeBytes
+      && previous.modificationTime === current.modificationTime
+      && previous.fallbackDownloadMarker === current.fallbackDownloadMarker;
+  }
+
+  private resolveSnapshotAppUsedBytes(snapshot: SystemMemorySnapshot | null): number | null {
+    if (!snapshot) {
+      return null;
+    }
+
+    return this.toPositiveByteCount(snapshot.appUsedBytes)
+      ?? this.toPositiveByteCount(snapshot.appPssBytes)
+      ?? this.toPositiveByteCount(snapshot.appResidentBytes);
+  }
+
+  private resolveObservedLoadResidentDelta(session: CalibrationSession | null): number | null {
+    if (!session?.beforeLoadSnapshot) {
+      return null;
+    }
+
+    const afterLoadSnapshot = session.afterFirstTokenSnapshot ?? session.afterModelInitSnapshot;
+    const beforeLoadBytes = this.resolveSnapshotAppUsedBytes(session.beforeLoadSnapshot);
+    const afterLoadBytes = this.resolveSnapshotAppUsedBytes(afterLoadSnapshot);
+    if (beforeLoadBytes === null || afterLoadBytes === null) {
+      return null;
+    }
+
+    return this.toPositiveByteCount(afterLoadBytes - beforeLoadBytes);
+  }
+
+  private resolvePredictedLoadResidentBytes(predictedFit: MemoryFitResult | null): number | null {
+    if (!predictedFit) {
+      return null;
+    }
+
+    const withoutSafetyMargin = predictedFit.requiredBytes - Math.max(0, predictedFit.breakdown.safetyMarginBytes);
+    return this.toPositiveByteCount(withoutSafetyMargin);
+  }
+
+  private resolveActiveContextEstimatedReclaimableBytes(): {
+    bytes: number;
+    source: ModelUnloadReclaimEstimate['source'];
+  } | null {
+    const session = this.activeCalibrationSession;
+    const observedBytes = this.resolveObservedLoadResidentDelta(session);
+    if (observedBytes !== null) {
+      return { bytes: observedBytes, source: 'observed_load_delta' };
+    }
+
+    const predictedBytes = this.resolvePredictedLoadResidentBytes(session?.predictedFit ?? null);
+    if (predictedBytes !== null) {
+      return { bytes: predictedBytes, source: 'predicted_load_footprint' };
+    }
+
+    return null;
+  }
+
+  private resolveObservedFreedBytes(
+    beforeUnloadSnapshot: SystemMemorySnapshot | null,
+    afterUnloadSnapshot: SystemMemorySnapshot | null,
+  ): number {
+    if (!beforeUnloadSnapshot || !afterUnloadSnapshot) {
+      return 0;
+    }
+
+    const beforeAppBytes = this.resolveSnapshotAppUsedBytes(beforeUnloadSnapshot);
+    const afterAppBytes = this.resolveSnapshotAppUsedBytes(afterUnloadSnapshot);
+    const appDropBytes = beforeAppBytes !== null && afterAppBytes !== null
+      ? Math.max(0, beforeAppBytes - afterAppBytes)
+      : 0;
+    const availableGainBytes = Math.max(0, afterUnloadSnapshot.availableBytes - beforeUnloadSnapshot.availableBytes);
+
+    return Math.round(Math.max(appDropBytes, availableGainBytes));
+  }
+
+  private buildModelUnloadReclaimEstimate({
+    previousModelId,
+    estimatedReclaimableBytes,
+    source,
+    beforeUnloadSnapshot,
+    afterUnloadSnapshot,
+  }: {
+    previousModelId: string | null;
+    estimatedReclaimableBytes: number;
+    source: ModelUnloadReclaimEstimate['source'];
+    beforeUnloadSnapshot: SystemMemorySnapshot | null;
+    afterUnloadSnapshot: SystemMemorySnapshot | null;
+  }): ModelUnloadReclaimEstimate | null {
+    if (!beforeUnloadSnapshot || !afterUnloadSnapshot) {
+      return null;
+    }
+
+    if (afterUnloadSnapshot?.lowMemory === true || afterUnloadSnapshot?.pressureLevel === 'critical') {
+      return null;
+    }
+
+    const totalBytes = this.toPositiveByteCount(afterUnloadSnapshot?.totalBytes)
+      ?? this.toPositiveByteCount(beforeUnloadSnapshot?.totalBytes)
+      ?? 0;
+    const maxReclaimableBytes = totalBytes > 0
+      ? Math.round(totalBytes * MAX_UNLOAD_RECLAIM_FRACTION_OF_TOTAL_MEMORY)
+      : estimatedReclaimableBytes;
+    const observedFreedBytes = this.resolveObservedFreedBytes(beforeUnloadSnapshot, afterUnloadSnapshot);
+    const remainingReclaimableBytes = Math.max(0, estimatedReclaimableBytes - observedFreedBytes);
+    const budgetReclaimableBytes = Math.min(remainingReclaimableBytes, maxReclaimableBytes);
+
+    if (!Number.isFinite(budgetReclaimableBytes) || budgetReclaimableBytes <= 0) {
+      return null;
+    }
+
+    return {
+      previousModelId,
+      source,
+      estimatedReclaimableBytes: Math.round(estimatedReclaimableBytes),
+      budgetReclaimableBytes: Math.round(budgetReclaimableBytes),
+      observedFreedBytes,
+      beforeUnloadSnapshot,
+      afterUnloadSnapshot,
+    };
+  }
+
+  private withRecentUnloadReclaimableBudget(
+    snapshot: SystemMemorySnapshot | null,
+    recentUnloadReclaim: ModelUnloadReclaimEstimate | null,
+  ): SystemMemorySnapshot | null {
+    if (!snapshot || !recentUnloadReclaim || recentUnloadReclaim.budgetReclaimableBytes <= 0) {
+      return snapshot;
+    }
+
+    if (snapshot.lowMemory || snapshot.pressureLevel === 'critical') {
+      return snapshot;
+    }
+
+    return {
+      ...snapshot,
+      reclaimableBytes: recentUnloadReclaim.budgetReclaimableBytes,
+    };
+  }
+
+  private summarizeRecentUnloadReclaim(
+    recentUnloadReclaim: ModelUnloadReclaimEstimate | null,
+  ): Record<string, unknown> | undefined {
+    if (!recentUnloadReclaim) {
+      return undefined;
+    }
+
+    return {
+      previousModelId: recentUnloadReclaim.previousModelId,
+      source: recentUnloadReclaim.source,
+      estimatedReclaimableBytes: recentUnloadReclaim.estimatedReclaimableBytes,
+      budgetReclaimableBytes: recentUnloadReclaim.budgetReclaimableBytes,
+      observedFreedBytes: recentUnloadReclaim.observedFreedBytes,
+      hasBeforeUnloadSnapshot: recentUnloadReclaim.beforeUnloadSnapshot !== null,
+      hasAfterUnloadSnapshot: recentUnloadReclaim.afterUnloadSnapshot !== null,
+    };
   }
 
   private getReadyContextOrThrow(): { context: LlamaContext; generation: number } {
@@ -1332,11 +1570,30 @@ class LLMEngineService {
 
       const forceReload = options?.forceReload === true;
       const allowUnsafeMemoryLoad = options?.allowUnsafeMemoryLoad === true;
+      const fallbackDownloadMarker = this.resolveArtifactFallbackDownloadMarker(model);
+      let resolvedArtifactInfo: ResolvedModelArtifactInfo | null = null;
+      let isCurrentLoadedArtifact = false;
+      if (this.state.activeModelId === modelId && !forceReload) {
+        resolvedArtifactInfo = await resolveModelFilePathOrThrow({ modelId, localPath: model.localPath });
+        const currentArtifactIdentity = this.buildLoadedModelArtifactIdentity({
+          localPath: model.localPath,
+          resolvedArtifactInfo,
+          fallbackDownloadMarker,
+        });
+        isCurrentLoadedArtifact = this.areLoadedModelArtifactIdentitiesEqual(
+          this.loadedArtifactIdentity,
+          currentArtifactIdentity,
+        );
+      }
+      const shouldUnloadActiveModel = Boolean(
+        this.state.activeModelId && (this.state.activeModelId !== modelId || forceReload || !isCurrentLoadedArtifact),
+      );
 
       if (
         this.state.status === EngineStatus.READY &&
         this.state.activeModelId === modelId &&
-        !forceReload
+        !forceReload &&
+        isCurrentLoadedArtifact
       ) {
         return;
       }
@@ -1358,8 +1615,9 @@ class LLMEngineService {
         );
       }
 
-      if (this.state.activeModelId && (this.state.activeModelId !== modelId || forceReload)) {
-        await this.unloadInternal();
+      let recentUnloadReclaim: ModelUnloadReclaimEstimate | null = null;
+      if (shouldUnloadActiveModel) {
+        recentUnloadReclaim = await this.unloadInternal();
       }
 
       this.initPromise = this.initializeModel(
@@ -1370,6 +1628,9 @@ class LLMEngineService {
         allowUnsafeMemoryLoad,
         options?.loadParamsOverride,
         options?.preferLastWorkingProfile === true,
+        recentUnloadReclaim,
+        fallbackDownloadMarker,
+        resolvedArtifactInfo,
       );
       await this.initPromise;
     });
@@ -2094,6 +2355,9 @@ class LLMEngineService {
     allowUnsafeMemoryLoad = false,
     loadParamsOverride?: Partial<ModelLoadParameters>,
     preferLastWorkingProfile = false,
+    recentUnloadReclaim: ModelUnloadReclaimEstimate | null = null,
+    fallbackDownloadMarker: number | null = null,
+    resolvedArtifactInfo: ResolvedModelArtifactInfo | null = null,
   ): Promise<void> {
     const isDev = typeof __DEV__ !== 'undefined' && __DEV__;
     const nativeLogs: { level: string; text: string }[] = [];
@@ -2113,6 +2377,7 @@ class LLMEngineService {
       this.lastModelLoadErrorScope = null;
       this.isUnloading = false;
       this.activeCalibrationSession = null;
+      this.loadedArtifactIdentity = null;
       this.safeModeLoadLimits = null;
       this.resetRuntimeTelemetry();
       this.updateState({
@@ -2122,14 +2387,25 @@ class LLMEngineService {
         lastError: undefined,
       });
 
-      const { modelPath, fileInfo } = await resolveModelFilePathOrThrow({ modelId, localPath });
+      const resolvedArtifact = resolvedArtifactInfo ?? (await resolveModelFilePathOrThrow({ modelId, localPath }));
+      const { modelPath, fileInfo } = resolvedArtifact;
+      const loadedArtifactIdentity = this.buildLoadedModelArtifactIdentity({
+        localPath,
+        resolvedArtifactInfo: resolvedArtifact,
+        fallbackDownloadMarker,
+      });
 
       const persistedLoadParams = getModelLoadParametersForModel(modelId);
       const loadParams = loadParamsOverride
         ? { ...persistedLoadParams, ...loadParamsOverride }
         : persistedLoadParams;
-      const systemMemorySnapshot = await getFreshMemorySnapshot(1500).catch(() => null);
-      const observedRawBudgetBytes = this.resolveObservedRawBudgetBytes(systemMemorySnapshot);
+      const rawSystemMemorySnapshot = recentUnloadReclaim?.afterUnloadSnapshot
+        ?? await getFreshMemorySnapshot(recentUnloadReclaim ? 0 : 1500).catch(() => null);
+      const systemMemorySnapshot = this.withRecentUnloadReclaimableBudget(
+        rawSystemMemorySnapshot,
+        recentUnloadReclaim,
+      );
+      const observedRawBudgetBytes = this.resolveObservedRawBudgetBytes(rawSystemMemorySnapshot);
       let totalMemoryBytes: number | null = null;
       try {
         totalMemoryBytes = await DeviceInfo.getTotalMemory();
@@ -2203,6 +2479,7 @@ class LLMEngineService {
         hasSystemMemorySnapshot: systemMemorySnapshot !== null,
         lowMemorySignal: systemMemorySnapshot?.lowMemory ?? hardwareListenerService.getCurrentStatus().isLowMemory,
         requestedModelSizeBytes: resolvedModelSizeBytes,
+        recentUnloadReclaim: this.summarizeRecentUnloadReclaim(recentUnloadReclaim),
         ggufInfo: {
           architecture: ggufArchitecture,
           type: ggufType,
@@ -3373,6 +3650,7 @@ class LLMEngineService {
           });
         }
       }
+      this.loadedArtifactIdentity = loadedArtifactIdentity;
       this.updateState({ ...this.state, status: EngineStatus.READY, loadProgress: 1 });
       updateSettings({ activeModelId: modelId });
 
@@ -3413,12 +3691,19 @@ class LLMEngineService {
           })
         : baseError;
 
-      if (appError.code === 'model_memory_warning' || appError.code === 'model_load_blocked') {
+      if (
+        appError.code === 'model_memory_warning'
+        || appError.code === 'model_load_blocked'
+        || appError.code === 'model_memory_insufficient'
+      ) {
         const logLabel = appError.code === 'model_load_blocked'
           ? '[LLMEngine] Model load blocked during initialize'
-          : '[LLMEngine] Memory warning during initialize';
+          : appError.code === 'model_memory_insufficient'
+            ? '[LLMEngine] Insufficient memory during initialize'
+            : '[LLMEngine] Memory warning during initialize';
         console.warn(logLabel, appError, Object.keys(extraDetails).length > 0 ? extraDetails : undefined);
         this.setContext(null);
+        this.loadedArtifactIdentity = null;
         this.activeContextSize = DEFAULT_CONTEXT_SIZE;
         this.activeGpuLayers = null;
         this.safeModeLoadLimits = null;
@@ -3436,6 +3721,7 @@ class LLMEngineService {
       this.lastModelLoadError = appError;
       this.lastModelLoadErrorScope = 'LLMEngineService.load';
       this.setContext(null);
+      this.loadedArtifactIdentity = null;
       this.activeContextSize = DEFAULT_CONTEXT_SIZE;
       this.activeGpuLayers = null;
       this.safeModeLoadLimits = null;
@@ -3461,7 +3747,13 @@ class LLMEngineService {
     }
   }
 
-  private async unloadInternal(): Promise<void> {
+  private async unloadInternal(): Promise<ModelUnloadReclaimEstimate | null> {
+    const previousModelId = this.state.activeModelId ?? null;
+    const activeContextReclaimEstimate = this.context
+      ? this.resolveActiveContextEstimatedReclaimableBytes()
+      : null;
+    let beforeUnloadSnapshot: SystemMemorySnapshot | null = null;
+    let unloadReclaimEstimate: ModelUnloadReclaimEstimate | null = null;
     this.isUnloading = true;
     this.resetRuntimeTelemetry();
     this.updateState({
@@ -3505,6 +3797,9 @@ class LLMEngineService {
       }
 
       if (this.context) {
+        if (activeContextReclaimEstimate) {
+          beforeUnloadSnapshot = await getFreshMemorySnapshot(0).catch(() => null);
+        }
         await releaseAllLlamaContexts();
       }
     } finally {
@@ -3522,11 +3817,24 @@ class LLMEngineService {
         calibrationSession.didRecordSuccess = true;
       }
 
-      if (calibrationSession) {
-        calibrationSession.afterUnloadSnapshot = await getFreshMemorySnapshot(0).catch(() => null);
+      if (calibrationSession || activeContextReclaimEstimate) {
+        const afterUnloadSnapshot = await getFreshMemorySnapshot(0).catch(() => null);
+        if (calibrationSession) {
+          calibrationSession.afterUnloadSnapshot = afterUnloadSnapshot;
+        }
+        if (activeContextReclaimEstimate) {
+          unloadReclaimEstimate = this.buildModelUnloadReclaimEstimate({
+            previousModelId,
+            estimatedReclaimableBytes: activeContextReclaimEstimate.bytes,
+            source: activeContextReclaimEstimate.source,
+            beforeUnloadSnapshot,
+            afterUnloadSnapshot,
+          });
+        }
       }
 
       this.setContext(null);
+      this.loadedArtifactIdentity = null;
       this.activeContextSize = DEFAULT_CONTEXT_SIZE;
       this.activeGpuLayers = null;
       this.safeModeLoadLimits = null;
@@ -3537,6 +3845,8 @@ class LLMEngineService {
       updateSettings({ activeModelId: null });
       hardwareListenerService.resetLowMemoryFlag();
     }
+
+    return unloadReclaimEstimate;
   }
 }
 

@@ -28,12 +28,13 @@ jest.mock('../../src/components/ui/box', () => {
 jest.mock('../../src/components/ui/ScreenShell', () => {
   const mockReact = require('react');
   const { View } = require('react-native');
-    return {
-      joinClassNames: (...values: Array<string | undefined | false>) => values.filter(Boolean).join(' '),
-      ScreenRoot: ({ children, ...props }: any) => mockReact.createElement(View, props, children),
-      ScreenContent: ({ children, ...props }: any) => mockReact.createElement(View, props, children),
-    };
-  });
+  return {
+    joinClassNames: (...values: Array<string | undefined | false>) => values.filter(Boolean).join(' '),
+    ScreenAndroidContentBlurTarget: ({ children, ...props }: any) => mockReact.createElement(View, props, children),
+    ScreenRoot: ({ children, ...props }: any) => mockReact.createElement(View, props, children),
+    ScreenContent: ({ children, ...props }: any) => mockReact.createElement(View, props, children),
+  };
+});
 
 jest.mock('../../src/components/ui/SearchHeader', () => {
   const mockReact = require('react');
@@ -79,10 +80,17 @@ jest.mock('../../src/components/ui/SearchHeader', () => {
 
 jest.mock('../../src/components/models/ModelsList', () => {
   const mockReact = require('react');
-  const { Text } = require('react-native');
+  const { Text, View } = require('react-native');
   return {
-    ModelsList: ({ activeTab, searchQuery, searchSessionKey }: any) =>
-      mockReact.createElement(Text, { testID: 'models-list-state' }, `${activeTab}:${searchQuery}:${searchSessionKey}`),
+    ModelsList: ({ activeTab, androidContentBlurTargetRef, renderContentContainer, searchQuery, searchSessionKey }: any) => {
+      const content = mockReact.createElement(
+        View,
+        { testID: 'models-list-props', androidContentBlurTargetRef },
+        mockReact.createElement(Text, { testID: 'models-list-state' }, `${activeTab}:${searchQuery}:${searchSessionKey}`),
+      );
+
+      return renderContentContainer ? renderContentContainer(content) : content;
+    },
   };
 });
 
@@ -93,9 +101,12 @@ describe('ModelsCatalogScreen', () => {
   });
 
   it('opens on the downloaded tab from route params and keeps tab changes on one screen', () => {
-    const { getByTestId } = render(<ModelsCatalogScreen />);
+    const { getByTestId, queryByTestId } = render(<ModelsCatalogScreen />);
 
     expect(getByTestId('models-screen-content').props.style).toMatchObject({ paddingBottom: 0 });
+    expect(queryByTestId('models-catalog-content-blur-target')).toBeTruthy();
+    expect(getByTestId('models-list-props').props.androidContentBlurTargetRef)
+      .toBe(getByTestId('models-catalog-content-blur-target').props.blurTargetRef);
     expect(getByTestId('models-active-tab').props.children).toBe('downloaded');
     expect(getByTestId('models-list-state').props.children).toBe('downloaded::0');
 

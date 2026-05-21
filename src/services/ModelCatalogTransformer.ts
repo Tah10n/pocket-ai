@@ -1,10 +1,27 @@
 import { estimateFastMemoryFit } from '../memory/estimator';
-import { LifecycleStatus, ModelAccessState, type ModelMemoryFitConfidence, type ModelMemoryFitDecision, type ModelMetadata } from '../types/models';
+import {
+  LifecycleStatus,
+  ModelAccessState,
+  type ModelMemoryFitConfidence,
+  type ModelMemoryFitDecision,
+  type ModelMetadata,
+  type ModelVariant,
+} from '../types/models';
 import type { CreateTreeProbeCandidateOptions, HuggingFaceModelCardData, HuggingFaceModelConfig, HuggingFaceModelSummary } from '../types/huggingFace';
 import { buildHuggingFaceResolveUrl } from '../utils/huggingFaceUrls';
 import { getShortModelLabel } from '../utils/modelLabel';
 import { normalizeSha256Digest } from '../utils/sha256';
-import { getFileName, getFileSha, getFileSize, isCatalogSummarySupported, selectPreferredGgufEntry, shouldRevalidateCatalogSummarySelection } from './ModelCatalogFileSelector';
+import {
+  buildCatalogModelVariantsFromRankedEntries,
+  CATALOG_SEARCH_VARIANT_LIMIT,
+  getFileName,
+  getFileSha,
+  getFileSize,
+  isCatalogSummarySupported,
+  isUnsupportedMtpFileName,
+  rankCatalogGgufEntries,
+  shouldRevalidateCatalogSummarySelection,
+} from './ModelCatalogFileSelector';
 import {
   getCompatibleLocalDownloadStatePatch,
   resolveVerifiedLocalShaCompatibility,
@@ -58,6 +75,32 @@ export function resolveMemoryFitSummary(
     decision: fit.decision,
     confidence: fit.confidence,
   };
+}
+
+export function attachMemoryFitToVariants(
+  variants: ModelVariant[],
+  memoryFitContext: MemoryFitContext,
+): ModelVariant[] {
+  if (!memoryFitContext) {
+    return variants;
+  }
+
+  return variants.map((variant) => {
+    const resolvedMemoryFit = resolveMemoryFitSummary({
+      size: variant.size,
+      metadataTrust: typeof variant.size === 'number' && Number.isFinite(variant.size) && variant.size > 0
+        ? 'trusted_remote'
+        : undefined,
+    }, memoryFitContext);
+
+    return resolvedMemoryFit
+      ? {
+          ...variant,
+          ramFit: resolvedMemoryFit.decision,
+          ramFitConfidence: resolvedMemoryFit.confidence,
+        }
+      : variant;
+  });
 }
 
 export function normalizeContextTokenValue(value: unknown): number | undefined {
@@ -342,9 +385,17 @@ export function transformHFResponse(
     }
 
     const siblings = item.siblings ?? [];
-    const ggufSibling = selectPreferredGgufEntry(siblings);
+    const hasUnsupportedMtpGgufSibling = siblings.some((entry) => {
+      const fileName = getFileName(entry);
+      return fileName.toLowerCase().endsWith('.gguf') && isUnsupportedMtpFileName(fileName);
+    });
+    const rankedGgufSiblings = rankCatalogGgufEntries(siblings);
+    const variants = attachMemoryFitToVariants(buildCatalogModelVariantsFromRankedEntries(rankedGgufSiblings, {
+      limit: CATALOG_SEARCH_VARIANT_LIMIT,
+    }), memoryFitContext);
+    const ggufSibling = rankedGgufSiblings[0];
     if (!ggufSibling) {
-      if (probeCandidate) {
+      if (!hasUnsupportedMtpGgufSibling && probeCandidate) {
         results.push(probeCandidate);
       }
       continue;
@@ -411,6 +462,8 @@ export function transformHFResponse(
       maxContextTokens,
       downloads: item.downloads ?? null,
       likes: item.likes ?? null,
+      variants,
+      activeVariantId: fileName,
     }));
   }
 
@@ -426,7 +479,13 @@ export function buildModelMetadataFromPayload(
 ): ModelMetadata {
   const repoId = payload.id || payload.modelId || fallbackModel.id;
   const hfRevision = payload.sha ?? fallbackModel.hfRevision;
-  const selectedEntry = selectPreferredGgufEntry(payload.siblings ?? []);
+  const siblings = payload.siblings ?? [];
+  const rankedGgufSiblings = rankCatalogGgufEntries(siblings);
+  const variants = attachMemoryFitToVariants(buildCatalogModelVariantsFromRankedEntries(rankedGgufSiblings), memoryFitContext);
+  const fallbackSelectedEntry = fallbackModel.resolvedFileName
+    ? rankedGgufSiblings.find((entry) => getFileName(entry) === fallbackModel.resolvedFileName)
+    : undefined;
+  const selectedEntry = fallbackSelectedEntry ?? rankedGgufSiblings[0];
   const selectedEntrySize = getFileSize(selectedEntry);
   const selectedEntrySha256 = selectedEntry ? getFileSha(selectedEntry) : undefined;
   const selectedEntryFileName = selectedEntry ? getFileName(selectedEntry) : undefined;
@@ -542,6 +601,8 @@ export function buildModelMetadataFromPayload(
     downloads: payload.downloads ?? fallbackModel.downloads ?? null,
     likes: payload.likes ?? fallbackModel.likes ?? null,
     tags: payload.tags ?? fallbackModel.tags,
+    variants: variants.length > 0 ? variants : fallbackModel.variants,
+    activeVariantId: resolvedFileName ?? fallbackModel.activeVariantId,
   });
 }
 

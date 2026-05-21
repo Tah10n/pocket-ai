@@ -76,6 +76,14 @@ jest.mock('../../src/services/PrivateStorageRecovery', () => ({
   stopPrivateRuntimeWorkForStorageBlocked: (...args: unknown[]) => mockStopPrivateRuntimeWorkForStorageBlocked(...args),
 }));
 
+const mockRefreshHuggingFaceTokenState = jest.fn();
+
+jest.mock('../../src/services/HuggingFaceTokenService', () => ({
+  huggingFaceTokenService: {
+    refreshState: (...args: unknown[]) => mockRefreshHuggingFaceTokenState(...args),
+  },
+}));
+
 const mockMergeImportedThreads = jest.fn();
 const mockPruneExpiredThreads = jest.fn();
 
@@ -136,6 +144,10 @@ describe('AppBootstrap', () => {
     (getPrivateStorageHealthSnapshot as jest.Mock).mockReturnValue(readyStorageHealth);
     (initializePrivateStorageEncryption as jest.Mock).mockResolvedValue(readyStorageHealth);
     mockStopPrivateRuntimeWorkForStorageBlocked.mockResolvedValue(undefined);
+    mockRefreshHuggingFaceTokenState.mockResolvedValue({
+      hasToken: false,
+      updatedAt: 1_700_000_000_000,
+    });
     (useChatStore.persist.rehydrate as jest.Mock).mockResolvedValue(undefined);
     (useDownloadStore.persist.rehydrate as jest.Mock).mockResolvedValue(undefined);
     (useModelsStore.persist.rehydrate as jest.Mock).mockResolvedValue(undefined);
@@ -187,6 +199,7 @@ describe('AppBootstrap', () => {
     expect(useChatStore.persist.rehydrate).not.toHaveBeenCalled();
     expect(useDownloadStore.persist.rehydrate).not.toHaveBeenCalled();
     expect(useModelsStore.persist.rehydrate).not.toHaveBeenCalled();
+    expect(mockRefreshHuggingFaceTokenState).not.toHaveBeenCalled();
     expect(getSettings).not.toHaveBeenCalled();
     expect(registry.getModel).not.toHaveBeenCalled();
   });
@@ -212,6 +225,7 @@ describe('AppBootstrap', () => {
     expect(useChatStore.persist.rehydrate).not.toHaveBeenCalled();
     expect(useDownloadStore.persist.rehydrate).not.toHaveBeenCalled();
     expect(useModelsStore.persist.rehydrate).not.toHaveBeenCalled();
+    expect(mockRefreshHuggingFaceTokenState).not.toHaveBeenCalled();
     expect(getSettings).not.toHaveBeenCalled();
   });
 
@@ -240,8 +254,33 @@ describe('AppBootstrap', () => {
     expect(useChatStore.persist.rehydrate).toHaveBeenCalledTimes(1);
     expect(useDownloadStore.persist.rehydrate).not.toHaveBeenCalled();
     expect(useModelsStore.persist.rehydrate).not.toHaveBeenCalled();
+    expect(mockRefreshHuggingFaceTokenState).not.toHaveBeenCalled();
     expect(getSettings).not.toHaveBeenCalled();
     expect(registry.getModel).not.toHaveBeenCalled();
+  });
+
+  it('hydrates Hugging Face token state during critical bootstrap before settings-dependent work', async () => {
+    (getSettings as jest.Mock).mockReturnValue({
+      language: 'en',
+      activePresetId: null,
+      activeModelId: null,
+      temperature: 0.7,
+      topP: 0.9,
+      maxTokens: 2048,
+      theme: 'system',
+      chatRetentionDays: null,
+    });
+
+    const result = await bootstrapAppCritical();
+
+    expect(result).toEqual({ outcome: 'success' });
+    expect(mockRefreshHuggingFaceTokenState).toHaveBeenCalledTimes(1);
+    expect(mockRefreshHuggingFaceTokenState.mock.invocationCallOrder[0]).toBeGreaterThan(
+      (useModelsStore.persist.rehydrate as jest.Mock).mock.invocationCallOrder[0],
+    );
+    expect(mockRefreshHuggingFaceTokenState.mock.invocationCallOrder[0]).toBeLessThan(
+      (getSettings as jest.Mock).mock.invocationCallOrder[0],
+    );
   });
 
   it('does not run background bootstrap work when private storage is blocked during full bootstrap', async () => {

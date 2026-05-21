@@ -3,7 +3,7 @@ import { FITS_IN_RAM_HEADROOM_RATIO, resolveConservativeAvailableMemoryBudget } 
 import type { MemoryPressureLevel } from './SystemMetricsService';
 import { MIN_CONTEXT_WINDOW_TOKENS } from '../utils/contextWindow';
 import { AppError } from './AppError';
-import { canAutoUseSafeLoadProfile, shouldHardBlockSafeLoad } from './LLMEngineService.helpers';
+import { canAutoUseSafeLoadProfile, hasTrustedPositiveEffectiveMemoryBudget, shouldHardBlockSafeLoad } from './LLMEngineService.helpers';
 
 export type SafeLoadProfile = { contextTokens: number; gpuLayers: number };
 
@@ -39,6 +39,7 @@ export function resolveSafeLoadPolicyOrThrow({
     freeBytes?: number | null;
     processAvailableBytes?: number | null;
     thresholdBytes?: number | null;
+    reclaimableBytes?: number | null;
     lowMemory?: boolean | null;
     pressureLevel?: MemoryPressureLevel | null;
     totalBytes?: number | null;
@@ -63,22 +64,35 @@ export function resolveSafeLoadPolicyOrThrow({
   shouldUseLowMemoryContextParams: boolean;
   validateBudgetOrThrow: (input: SafeLoadBudgetValidationInput) => SafeLoadBudgetValidationResult;
 } {
-  const overBudgetRatio = memoryFit.effectiveBudgetBytes > 0
+  const overBudgetRatio = Number.isFinite(memoryFit.effectiveBudgetBytes) && memoryFit.effectiveBudgetBytes > 0
     ? memoryFit.requiredBytes / memoryFit.effectiveBudgetBytes
     : Number.POSITIVE_INFINITY;
-  const hasTrustedBudget = memoryFit.budget.totalMemoryBytes > 0;
+  const hasTrustedPositiveBudget = hasTrustedPositiveEffectiveMemoryBudget(memoryFit);
 
   const exceedsEffectiveBudget = (
     memoryFit.requiredBytes > 0
-    && memoryFit.effectiveBudgetBytes > 0
-    && memoryFit.requiredBytes >= memoryFit.effectiveBudgetBytes
+    && (
+      !Number.isFinite(memoryFit.effectiveBudgetBytes)
+      || memoryFit.effectiveBudgetBytes <= 0
+      || memoryFit.requiredBytes > memoryFit.effectiveBudgetBytes
+    )
   );
   const availableBudgetBytes = systemMemorySnapshot
-    ? resolveConservativeAvailableMemoryBudget(systemMemorySnapshot as any)
+    ? resolveConservativeAvailableMemoryBudget({
+        ...systemMemorySnapshot,
+        availableBytes: systemMemorySnapshot.availableBytes ?? 0,
+        freeBytes: systemMemorySnapshot.freeBytes ?? undefined,
+        processAvailableBytes: systemMemorySnapshot.processAvailableBytes ?? undefined,
+        thresholdBytes: systemMemorySnapshot.thresholdBytes ?? undefined,
+        reclaimableBytes: systemMemorySnapshot.reclaimableBytes ?? undefined,
+        totalBytes: systemMemorySnapshot.totalBytes ?? undefined,
+        lowMemory: systemMemorySnapshot.lowMemory ?? undefined,
+        pressureLevel: systemMemorySnapshot.pressureLevel ?? undefined,
+      })
     : null;
 
   const shouldHardBlock = (
-    hasTrustedBudget
+    hasTrustedPositiveBudget
     && memoryFit.decision === 'likely_oom'
     && memoryFit.confidence === 'high'
   );
@@ -117,9 +131,23 @@ export function resolveSafeLoadPolicyOrThrow({
       ? configuredContextCeilingTokens
       : Math.min(configuredContextCeilingTokens, modelContextCeilingTokens);
 
+    const safeProfileHasTrustedPositiveBudget = hasTrustedPositiveEffectiveMemoryBudget(safeMemoryFit);
+    const safeProfileFitsBudget = (
+      safeProfileHasTrustedPositiveBudget
+      && safeMemoryFit.requiredBytes > 0
+      && safeMemoryFit.requiredBytes <= safeMemoryFit.effectiveBudgetBytes
+    );
+    const safeProfileExceedsTrustedBudget = (
+      safeProfileHasTrustedPositiveBudget
+      && safeMemoryFit.requiredBytes > 0
+      && safeMemoryFit.requiredBytes > safeMemoryFit.effectiveBudgetBytes
+    );
+
     if (
-      safeLoadProfile.contextTokens === MIN_CONTEXT_WINDOW_TOKENS
+      !allowUnsafeMemoryLoad
+      && safeLoadProfile.contextTokens === MIN_CONTEXT_WINDOW_TOKENS
       && effectiveContextCeilingTokens > MIN_CONTEXT_WINDOW_TOKENS
+      && safeProfileFitsBudget
     ) {
       onHardBlock('high');
       throw new AppError(
@@ -135,6 +163,43 @@ export function resolveSafeLoadPolicyOrThrow({
             safeLoadProfile,
             safeMemoryFit,
             memoryFit,
+          },
+        },
+      );
+    }
+
+    if (
+      safeLoadProfile.contextTokens === MIN_CONTEXT_WINDOW_TOKENS
+      && safeProfileExceedsTrustedBudget
+    ) {
+      onHardBlock('high');
+      throw new AppError(
+        'model_memory_insufficient',
+        'Not enough memory to load this model, even at the minimum context window.',
+        {
+          details: {
+            modelId,
+            modelSizeBytes: resolvedModelSizeBytes,
+            estimatedRuntimeBytes: safeMemoryFit.requiredBytes,
+            totalMemoryBytes: resolvedTotalMemoryBytes,
+            availableMemoryBytes: systemMemorySnapshot?.availableBytes,
+            freeMemoryBytes: systemMemorySnapshot?.freeBytes,
+            thresholdBytes: systemMemorySnapshot?.thresholdBytes,
+            reclaimableBytes: systemMemorySnapshot?.reclaimableBytes,
+            totalBudgetBytes: safeMemoryFit.budget.totalMemoryBytes * FITS_IN_RAM_HEADROOM_RATIO,
+            availableBudgetBytes,
+            effectiveAvailableBudgetBytes: safeMemoryFit.effectiveBudgetBytes,
+            lowMemory: lowMemorySignal,
+            allowUnsafeMemoryLoad,
+            decision: safeMemoryFit.decision,
+            confidence: safeMemoryFit.confidence,
+            requestedLoadProfile: {
+              contextTokens: resolvedContextSize,
+              gpuLayers: requestedGpuLayers,
+            },
+            safeLoadProfile,
+            memoryFit,
+            safeMemoryFit,
           },
         },
       );
@@ -235,6 +300,7 @@ function validateSafeLoadBudgetOrThrowInternal({
     availableBytes?: number | null;
     freeBytes?: number | null;
     thresholdBytes?: number | null;
+    reclaimableBytes?: number | null;
   } | null;
   availableBudgetBytes: number | null;
   lowMemorySignal: boolean;
@@ -269,6 +335,7 @@ function validateSafeLoadBudgetOrThrowInternal({
       availableMemoryBytes: systemMemorySnapshot?.availableBytes,
       freeMemoryBytes: systemMemorySnapshot?.freeBytes,
       thresholdBytes: systemMemorySnapshot?.thresholdBytes,
+      reclaimableBytes: systemMemorySnapshot?.reclaimableBytes,
       totalBudgetBytes: predictedFitForLoad.budget.totalMemoryBytes * FITS_IN_RAM_HEADROOM_RATIO,
       availableBudgetBytes,
       effectiveAvailableBudgetBytes: predictedFitForLoad.effectiveBudgetBytes,

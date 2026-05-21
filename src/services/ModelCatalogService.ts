@@ -22,6 +22,8 @@ import {
   resolveRetryAfterMs,
 } from './ModelCatalogHttpClient';
 import {
+  buildCatalogModelVariants,
+  CATALOG_SEARCH_VARIANT_LIMIT,
   filterCatalogSearchModels,
   getFileName,
   getFileSha,
@@ -29,9 +31,12 @@ import {
   isEligibleGgufEntry,
   isPreferredQuantFileName,
   isProjectorFileName,
+  isUnsupportedMtpFileName,
+  limitModelVariants,
   selectTreeEntryForModel,
 } from './ModelCatalogFileSelector';
 import {
+  attachMemoryFitToVariants,
   buildModelMetadataFromPayload,
   createFallbackModel,
   resolveMemoryFitSummary,
@@ -49,6 +54,7 @@ import {
   getHuggingFaceModelUrl,
   HF_BASE_URL,
 } from '../utils/huggingFaceUrls';
+import { applyModelVariantSelectionIfAvailable } from '../utils/modelVariants';
 import {
   getCompatibleLocalDownloadStatePatch,
   resolveVerifiedLocalShaCompatibility,
@@ -84,6 +90,8 @@ const MAX_RATE_LIMIT_BACKOFF_MS = 15 * 60 * 1000;
 const CATALOG_PREFETCH_PAGES = 2;
 const CATALOG_PREFETCH_MAX_LIMIT = 60;
 const HF_TREE_PAGINATION_MAX_PAGES = 20;
+const HF_TREE_SEARCH_PAGINATION_MAX_PAGES = 4;
+const HF_TREE_DETAIL_PAGINATION_MAX_PAGES = HF_TREE_SEARCH_PAGINATION_MAX_PAGES;
 const HF_TREE_PREFERRED_LOOKAHEAD_PAGES = 2;
 const SEARCH_CACHE_MAX_ENTRIES = 120;
 const BUFFERED_SEARCH_CACHE_MAX_AGE = 20 * 60 * 1000; // 20 minutes
@@ -111,6 +119,16 @@ type RefreshModelMetadataOptions = {
   includeDetails?: boolean;
 };
 
+type ResolveMissingModelMetadataOptions = {
+  treeProbeMode?: 'bounded' | 'full';
+};
+
+type FetchModelTreeOptions = {
+  expectedFileName?: string;
+  allowTargetEarlyStop?: boolean;
+  maxPages?: number;
+};
+
 type CatalogMemoryFitContext = {
   totalMemoryBytes: number | null;
   systemMemorySnapshot: SystemMemorySnapshot | null;
@@ -136,12 +154,18 @@ export class ModelCatalogService {
 
   constructor() {
     this.unsubscribeFromTokenService = huggingFaceTokenService.subscribe((_state, source) => {
-      if (source !== 'mutation') {
+      if (source === 'replay') {
         return;
       }
 
       this.authCacheVersion += 1;
-      this.clearCache('token');
+      if (source === 'mutation') {
+        this.clearCache('token');
+      } else {
+        this.clearVolatileCache('token', { emit: false });
+        this.persistentCache.clearSnapshotsForScope('auth');
+        this.emitCacheInvalidation('token');
+      }
     });
   }
 
@@ -162,6 +186,21 @@ export class ModelCatalogService {
   }
 
   public clearCache(source: Exclude<ModelCatalogCacheInvalidationSource, 'replay'> = 'unknown'): void {
+    this.clearVolatileCache(source, { emit: false });
+
+    if (source === 'token') {
+      this.persistentCache.clearSnapshots();
+    } else {
+      this.persistentCache.clearAll();
+    }
+
+    this.emitCacheInvalidation(source);
+  }
+
+  private clearVolatileCache(
+    source: Exclude<ModelCatalogCacheInvalidationSource, 'replay'> = 'unknown',
+    options: { emit?: boolean } = {},
+  ): void {
     this.bufferedCursorSequence = 0;
     this.searchCache.clear();
     this.searchRequestCache.clear();
@@ -174,13 +213,9 @@ export class ModelCatalogService {
     this.resolvedFileProbeStateCache.clear();
     this.lastMemoryFitContext = null;
 
-    if (source === 'token') {
-      this.persistentCache.clearSnapshots();
-    } else {
-      this.persistentCache.clearAll();
+    if (options.emit !== false) {
+      this.emitCacheInvalidation(source);
     }
-
-    this.emitCacheInvalidation(source);
   }
 
   private emitCacheInvalidation(source: Exclude<ModelCatalogCacheInvalidationSource, 'replay'>) {
@@ -307,7 +342,11 @@ export class ModelCatalogService {
   ): Promise<ModelCatalogSearchResult> {
     const requestContext = await this.createRequestContext();
     const memoryFitContextPromise = this.getCurrentMemoryFitContext();
-    const cursor = options?.cursor ?? null;
+    const rawCursor = options?.cursor ?? null;
+    const cursor = this.normalizeCatalogSearchCursor(rawCursor);
+    if (rawCursor !== null && cursor === null) {
+      throw new ModelCatalogError('network', 'Invalid Hugging Face catalog cursor');
+    }
     const pageSize = options?.pageSize ?? 20;
     const sort = options?.sort ?? null;
     const forceRefresh = options?.forceRefresh === true && cursor === null;
@@ -347,10 +386,10 @@ export class ModelCatalogService {
     if (!forceRefresh && cached && (isCacheFresh || isBufferedCursorFresh)) {
       const filteredCachedModels = filterCatalogSearchModels(
         this.sanitizeCachedCatalogModelsResolvedFiles(cached.result.models),
-      );
+      ).map((model) => this.toSearchResultModel(model));
       const memoryFitContext = await memoryFitContextPromise;
       return {
-        ...cached.result,
+        ...this.sanitizeSearchResultCursor(cached.result),
         models: this.mergeWithRegistry(
           filteredCachedModels,
           this.getAuthScope(catalogSearchHasAuthScope),
@@ -438,8 +477,9 @@ export class ModelCatalogService {
         );
         this.assertRequestContextIsCurrent(requestContext);
         const filteredModels = filterCatalogSearchModels(fetched.models);
+        const searchResultModels = filteredModels.map((model) => this.toSearchResultModel(model));
         const result = {
-          models: filteredModels,
+          models: searchResultModels,
           hasMore: fetched.nextCursor !== null,
           nextCursor: fetched.nextCursor,
         };
@@ -450,9 +490,20 @@ export class ModelCatalogService {
           isBufferedCursor,
         });
         this.pruneSearchCache();
-        if (cursor === null && typeof gated !== 'boolean') {
+        if (cursor === null && typeof gated !== 'boolean' && !catalogSearchHasAuthScope) {
           const persistableResult = this.toPersistableSearchResult(result);
-          const persistableModels = persistableResult.models.filter((model) => !model.isPrivate);
+          const persistableModels = persistableResult.models.filter((model) => {
+            if (model.isPrivate) {
+              return false;
+            }
+
+            if (!catalogSearchHasAuthScope) {
+              return true;
+            }
+
+            return model.accessState === ModelAccessState.PUBLIC && !model.isGated;
+          });
+
           this.persistentCache.putSearch(
             this.buildPersistentSearchScope(normalizedQuery, pageSize, sort, false),
             {
@@ -477,11 +528,8 @@ export class ModelCatalogService {
           memoryFitContext,
         );
 
-        if (catalogSearchHasAuthScope) {
-          const publicSnapshots = mergedModels.filter((model) => !model.isPrivate);
-          if (publicSnapshots.length > 0) {
-            this.upsertModelSnapshots(publicSnapshots, 'anon');
-          }
+        if (catalogSearchHasAuthScope && mergedModels.length > 0) {
+          this.reconcileAnonymousModelVisibility(mergedModels);
         }
 
         return {
@@ -588,7 +636,8 @@ export class ModelCatalogService {
     return Boolean(
       normalized
       && normalized.toLowerCase().endsWith('.gguf')
-      && !isProjectorFileName(normalized),
+      && !isProjectorFileName(normalized)
+      && !isUnsupportedMtpFileName(normalized),
     );
   }
 
@@ -658,6 +707,8 @@ export class ModelCatalogService {
         maxContextTokens: metadataSource?.maxContextTokens,
         hasVerifiedContextWindow: metadataSource?.hasVerifiedContextWindow === true,
         parameterSizeLabel: metadataSource?.parameterSizeLabel,
+        variants: metadataSource?.variants ?? model.variants,
+        activeVariantId: replacementFileName,
         hfRevision,
         resolvedFileName: replacementFileName,
         downloadUrl: buildHuggingFaceResolveUrl(model.id, replacementFileName, hfRevision),
@@ -678,6 +729,8 @@ export class ModelCatalogService {
       maxContextTokens: undefined,
       hasVerifiedContextWindow: false,
       parameterSizeLabel: undefined,
+      variants: undefined,
+      activeVariantId: undefined,
       resolvedFileName: undefined,
       downloadUrl: buildHuggingFaceResolveUrl(model.id, 'model.gguf', model.hfRevision),
       sha256: undefined,
@@ -799,7 +852,7 @@ export class ModelCatalogService {
     if (isMemoryEntryFresh && memoryEntry) {
       const filteredMemoryModels = filterCatalogSearchModels(
         this.sanitizeCachedCatalogModelsResolvedFiles(memoryEntry.result.models),
-      );
+      ).map((model) => this.toSearchResultModel(model));
       return {
         ...memoryEntry.result,
         models: this.mergeWithRegistry(filteredMemoryModels, this.getAuthScope(hasToken), memoryFitContext),
@@ -820,16 +873,16 @@ export class ModelCatalogService {
 
     const filteredPersistedModels = filterCatalogSearchModels(
       this.sanitizeCachedCatalogModelsResolvedFiles(persistentEntry.models),
-    );
+    ).map((model) => this.toSearchResultModel(model));
     const mergedModels = this.mergeWithRegistry(
       filteredPersistedModels,
       this.getAuthScope(hasToken),
       memoryFitContext,
     );
-    return {
-      ...persistentEntry,
-      models: mergedModels,
-    };
+      return {
+        ...this.sanitizeSearchResultCursor(persistentEntry),
+        models: mergedModels,
+      };
   }
 
   private coerceCachedResultForConnectivity(
@@ -847,6 +900,23 @@ export class ModelCatalogService {
       hasMore: false,
       nextCursor: null,
     };
+  }
+
+  private toSearchResultModel(model: ModelMetadata): ModelMetadata {
+    const variants = limitModelVariants(model.variants, {
+      limit: CATALOG_SEARCH_VARIANT_LIMIT,
+      includeFileNames: [model.resolvedFileName, model.activeVariantId],
+      includeVariantIds: [model.activeVariantId],
+    });
+
+    if (variants === model.variants) {
+      return model;
+    }
+
+    return normalizePersistedModelMetadata({
+      ...model,
+      variants,
+    });
   }
 
   public async getModelDetails(modelId: string): Promise<ModelMetadata> {
@@ -899,6 +969,7 @@ export class ModelCatalogService {
           [detailedModel],
           memoryFitContext,
           requestContext,
+          { treeProbeMode: 'full' },
         );
         detailedModel = resolvedModel ?? detailedModel;
         hasVerifiedContextWindow = detailedModel.hasVerifiedContextWindow === true || typeof payloadMaxContextTokens === 'number';
@@ -928,6 +999,9 @@ export class ModelCatalogService {
         modelId,
         detailedModel.hfRevision,
         requestContext,
+        {
+          retryNotFoundWithAuth: this.isAuthRestrictedModel(detailedModel),
+        },
       ).catch((error) => {
         if (error instanceof StaleCatalogAuthError) {
           throw error;
@@ -988,8 +1062,9 @@ export class ModelCatalogService {
       this.assertRequestContextIsCurrent(requestContext);
       if (detailsAuthToken) {
         this.upsertModelSnapshots([detailedModel], 'auth');
+        this.reconcileAnonymousModelVisibility([detailedModel]);
       } else {
-        this.upsertModelSnapshots([detailedModel], 'anon');
+        this.reconcileAnonymousModelVisibility([detailedModel]);
         if (
           detailedModel.accessState === ModelAccessState.AUTHORIZED
           || detailedModel.accessState === ModelAccessState.ACCESS_DENIED
@@ -1036,7 +1111,9 @@ export class ModelCatalogService {
       }
 
       const memoryFitContext = await this.getCurrentMemoryFitContext();
-      const [resolved] = await this.resolveMissingModelMetadata([model], memoryFitContext, requestContext);
+      const [resolved] = await this.resolveMissingModelMetadata([model], memoryFitContext, requestContext, {
+        treeProbeMode: options.includeDetails ? 'full' : 'bounded',
+      });
       this.assertRequestContextIsCurrent(requestContext);
       const refreshed = resolved ?? model;
       const snapshotAuthScope = this.getAuthScope(requestContext.hasAuthToken && (
@@ -1045,6 +1122,9 @@ export class ModelCatalogService {
         || refreshed.isPrivate
       ));
       this.upsertModelSnapshots([refreshed], snapshotAuthScope);
+      if (snapshotAuthScope === 'auth') {
+        this.reconcileAnonymousModelVisibility([refreshed]);
+      }
       return this.syncRegistryModelIfPresent(refreshed);
     } catch (error) {
       if (error instanceof StaleCatalogAuthError && retryCount < 1) {
@@ -1142,6 +1222,7 @@ export class ModelCatalogService {
     models: ModelMetadata[],
     memoryFitContext: CatalogMemoryFitContext,
     requestContext: CatalogRequestContext,
+    options: ResolveMissingModelMetadataOptions = {},
   ): Promise<ModelMetadata[]> {
     const batchSize = 5;
     const span = performanceMonitor.startSpan('catalog.resolveMissingModelMetadata', {
@@ -1182,13 +1263,16 @@ export class ModelCatalogService {
         )
           ? REQUEST_AUTH_POLICY.OPTIONAL_AUTH
           : REQUEST_AUTH_POLICY.ANONYMOUS;
+        const useFullTreeProbe = options.treeProbeMode === 'full' && model.requiresTreeProbe === true;
         const treeResponse = await this.fetchHuggingFaceModelTree(
           model.id,
           model.hfRevision,
           requestContext,
           treeAuthPolicy,
           {
-            expectedFileName: model.requiresTreeProbe !== true ? model.resolvedFileName : undefined,
+            expectedFileName: model.resolvedFileName,
+            allowTargetEarlyStop: !useFullTreeProbe,
+            maxPages: useFullTreeProbe ? HF_TREE_DETAIL_PAGINATION_MAX_PAGES : HF_TREE_SEARCH_PAGINATION_MAX_PAGES,
           },
         );
         const selectedEntry = selectTreeEntryForModel(model, treeResponse.entries);
@@ -1226,6 +1310,28 @@ export class ModelCatalogService {
         }
 
         const resolvedFileName = getFileName(selectedEntry);
+        const expectedResolvedFileName = model.resolvedFileName?.trim();
+        const selectedEntryMatchesExpectedFile = Boolean(
+          expectedResolvedFileName && resolvedFileName === expectedResolvedFileName,
+        );
+
+        if (
+          expectedResolvedFileName
+          && !selectedEntryMatchesExpectedFile
+          && !treeProbeIsFinal
+        ) {
+          return normalizePersistedModelMetadata({
+            ...model,
+            accessState,
+            requiresTreeProbe: true,
+          });
+        }
+
+        const variants = attachMemoryFitToVariants(buildCatalogModelVariants(treeResponse.entries, {
+          limit: useFullTreeProbe ? null : CATALOG_SEARCH_VARIANT_LIMIT,
+          includeFileNames: [resolvedFileName, model.resolvedFileName, model.activeVariantId],
+          includeVariantIds: [model.activeVariantId],
+        }), memoryFitContext);
         const treeEntrySha256 = getFileSha(selectedEntry);
         const treeEntrySize = getFileSize(selectedEntry);
         const {
@@ -1246,9 +1352,26 @@ export class ModelCatalogService {
         const size = shouldPreserveVerifiedLocal
           ? model.size ?? treeEntrySize
           : treeEntrySize;
+        const treeEntryHasTrustedSize = typeof treeEntrySize === 'number'
+          && Number.isFinite(treeEntrySize)
+          && treeEntrySize > 0;
+        const metadataTrust = shouldPreserveVerifiedLocal
+          ? model.metadataTrust
+          : treeEntryHasTrustedSize ? 'trusted_remote' as const : undefined;
+        const { totalBytes: _staleTotalBytes, ...existingGguf } = model.gguf ?? {};
+        const gguf = shouldPreserveVerifiedLocal
+          ? model.gguf
+          : treeEntryHasTrustedSize
+            ? {
+              ...existingGguf,
+              totalBytes: Math.round(treeEntrySize),
+            }
+            : Object.keys(existingGguf).length > 0
+              ? existingGguf
+              : undefined;
         const resolvedMemoryFit = shouldPreserveVerifiedLocal
           ? null
-          : resolveMemoryFitSummary({ size, metadataTrust: model.metadataTrust }, memoryFitContext);
+          : resolveMemoryFitSummary({ size, metadataTrust, gguf }, memoryFitContext);
         const didChangeSize = size !== model.size;
         const fitsInRam = shouldPreserveVerifiedLocal
           ? model.fitsInRam
@@ -1286,12 +1409,16 @@ export class ModelCatalogService {
             fitsInRam,
             memoryFitDecision,
             memoryFitConfidence,
+            metadataTrust,
+            gguf,
             accessState,
             requiresTreeProbe: true,
             hfRevision: model.hfRevision,
             resolvedFileName,
             downloadUrl: buildHuggingFaceResolveUrl(model.id, resolvedFileName, model.hfRevision),
             sha256,
+            variants,
+            activeVariantId: resolvedFileName,
           });
         }
 
@@ -1302,12 +1429,16 @@ export class ModelCatalogService {
           fitsInRam,
           memoryFitDecision,
           memoryFitConfidence,
+          metadataTrust,
+          gguf,
           accessState,
           requiresTreeProbe: false,
           hfRevision: model.hfRevision,
           resolvedFileName,
           downloadUrl: buildHuggingFaceResolveUrl(model.id, resolvedFileName, model.hfRevision),
           sha256,
+          variants,
+          activeVariantId: resolvedFileName,
         });
       } catch (error) {
         if (error instanceof StaleCatalogAuthError) {
@@ -1390,6 +1521,7 @@ export class ModelCatalogService {
           baseModels,
           memoryFitContext,
           requestContext,
+          { treeProbeMode: 'bounded' },
         );
         // Merge with the local registry so downloaded entries don't disappear just because the
         // remote payload omitted some metadata or a tree lookup failed.
@@ -1579,11 +1711,11 @@ export class ModelCatalogService {
 
       return {
         items,
-        nextCursor: parseNextCursor(
+        nextCursor: this.resolveTrustedHuggingFaceApiCursor(parseNextCursor(
           typeof response.headers?.get === 'function'
             ? response.headers.get('link')
             : null,
-        ),
+        )),
       };
     } catch (error) {
       outcome = 'error';
@@ -1707,6 +1839,15 @@ export class ModelCatalogService {
 
       return this.withResolvedMemoryFit(sanitized, memoryFitContext);
     }
+
+    remoteModel = applyModelVariantSelectionIfAvailable(remoteModel, localModel, {
+      // Catalog merges must remain conservative: if a fresh catalog payload selects a
+      // same-size different file and the previous local record has no explicit
+      // variant id, keep the remote identity so compatibility checks can clear stale
+      // downloaded state. Exact catalog variant matches with distinct identity can
+      // still preserve legacy downloaded non-default variants.
+      allowResolvedFileNameFallback: false,
+    });
 
     const {
       remoteSha256,
@@ -1848,7 +1989,9 @@ export class ModelCatalogService {
     models: ModelMetadata[],
     authScope: CatalogCacheAuthScope,
   ) {
-    const normalizedModels = models.map((model) => normalizePersistedModelMetadata(model));
+    const normalizedModels = models.map((model) => (
+      this.limitSnapshotModelVariants(normalizePersistedModelMetadata(model))
+    ));
     normalizedModels.forEach((model) => {
       this.setModelSnapshotInMemory(this.buildModelSnapshotCacheKey(model.id, authScope), model);
     });
@@ -1859,21 +2002,127 @@ export class ModelCatalogService {
     models: ModelMetadata[],
     authScope: CatalogCacheAuthScope = 'anon',
   ) {
+    const modelIdsToDelete: string[] = [];
     const sanitizedModels = authScope === 'anon'
-      ? models.map((model) => (
-        model.accessState === ModelAccessState.AUTHORIZED || model.accessState === ModelAccessState.ACCESS_DENIED
-          ? {
-            ...model,
-            accessState: model.isGated || model.isPrivate
-              ? ModelAccessState.AUTH_REQUIRED
-              : ModelAccessState.PUBLIC,
-          }
-          : model
-      ))
+      ? models.flatMap((model) => {
+        const sanitized = this.sanitizeAnonymousSnapshotModel(model);
+        if (!sanitized) {
+          modelIdsToDelete.push(model.id);
+          return [];
+        }
+
+        return [sanitized];
+      })
       : models;
-    const normalizedModels = sanitizedModels.map((model) => normalizePersistedModelMetadata(model));
+
+    if (modelIdsToDelete.length > 0) {
+      modelIdsToDelete.forEach((modelId) => {
+        this.modelSnapshotCache.delete(this.buildModelSnapshotCacheKey(modelId, authScope));
+      });
+      this.persistentCache.deleteModelSnapshots(modelIdsToDelete, authScope);
+    }
+
+    const normalizedModels = sanitizedModels.map((model) => (
+      this.limitSnapshotModelVariants(normalizePersistedModelMetadata(model))
+    ));
+    if (normalizedModels.length === 0) {
+      return;
+    }
+
     this.cacheModelSnapshotsInMemory(normalizedModels, authScope);
     this.persistentCache.putModelSnapshots(normalizedModels, authScope);
+  }
+
+  private reconcileAnonymousModelVisibility(models: ModelMetadata[]): void {
+    if (models.length === 0) {
+      return;
+    }
+
+    this.upsertModelSnapshots(models, 'anon');
+    this.reconcileAnonymousSearchCacheEntries(models);
+    this.persistentCache.reconcileAnonymousSearchModels(models);
+  }
+
+  private reconcileAnonymousSearchCacheEntries(models: ModelMetadata[]): void {
+    const replacements = new Map<string, ModelMetadata | null>();
+    models.forEach((model) => {
+      replacements.set(model.id, this.sanitizeAnonymousSnapshotModel(model));
+    });
+
+    if (replacements.size === 0) {
+      return;
+    }
+
+    for (const [key, entry] of this.searchCache.entries()) {
+      if (!key.includes('::anon::')) {
+        continue;
+      }
+
+      let didChange = false;
+      const modelsForEntry = entry.result.models.flatMap((model) => {
+        if (!replacements.has(model.id)) {
+          return [model];
+        }
+
+        didChange = true;
+        const replacement = replacements.get(model.id) ?? null;
+        return replacement ? [this.toSearchResultModel(replacement)] : [];
+      });
+
+      if (didChange) {
+        this.searchCache.set(key, {
+          ...entry,
+          result: {
+            ...entry.result,
+            models: modelsForEntry,
+          },
+        });
+      }
+    }
+  }
+
+  private isAnonymousPublicSnapshot(model: ModelMetadata): boolean {
+    return model.accessState === ModelAccessState.PUBLIC
+      && model.isGated !== true
+      && model.isPrivate !== true;
+  }
+
+  private limitSnapshotModelVariants(model: ModelMetadata): ModelMetadata {
+    const variants = limitModelVariants(model.variants, {
+      limit: CATALOG_SEARCH_VARIANT_LIMIT,
+      includeFileNames: [model.resolvedFileName, model.activeVariantId],
+      includeVariantIds: [model.activeVariantId],
+    });
+
+    if (variants === model.variants) {
+      return model;
+    }
+
+    return normalizePersistedModelMetadata({
+      ...model,
+      variants,
+    });
+  }
+
+  private sanitizeAnonymousSnapshotModel(model: ModelMetadata): ModelMetadata | null {
+    if (model.isPrivate) {
+      return null;
+    }
+
+    if (this.isAnonymousPublicSnapshot(model)) {
+      return model;
+    }
+
+    return normalizePersistedModelMetadata({
+      id: model.id,
+      name: model.name,
+      author: model.author,
+      accessState: ModelAccessState.AUTH_REQUIRED,
+      isGated: model.isGated === true,
+      isPrivate: false,
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+    });
   }
 
   private async fetchHuggingFaceModelTree(
@@ -1881,11 +2130,31 @@ export class ModelCatalogService {
     revision: string | undefined,
     requestContext: CatalogRequestContext,
     authPolicy: RequestAuthPolicy,
-    options?: { expectedFileName?: string },
+    options?: FetchModelTreeOptions,
   ): Promise<HuggingFaceTreeResponse> {
+    const expectedFileName = typeof options?.expectedFileName === 'string'
+      ? options.expectedFileName.trim()
+      : '';
+    const allowTargetEarlyStop = options?.allowTargetEarlyStop !== false;
+    const maxPages = typeof options?.maxPages === 'number' && Number.isFinite(options.maxPages)
+      ? Math.max(1, Math.round(options.maxPages))
+      : HF_TREE_PAGINATION_MAX_PAGES;
+    const expectedFileNameCacheSegment = expectedFileName.length > 0
+      ? `target:${encodeURIComponent(expectedFileName)}`
+      : 'target:__none__';
+    const targetEarlyStopCacheSegment = allowTargetEarlyStop ? 'target-stop:early' : 'target-stop:full';
+    const treeCacheSegment = `${expectedFileNameCacheSegment}:${targetEarlyStopCacheSegment}:max-pages:${maxPages}`;
+
     return this.withInFlightDedup(
       this.treeRequestCache,
-      this.buildRequestCacheKey('tree', repoId, revision, requestContext, authPolicy),
+      this.buildRequestCacheKey(
+        'tree',
+        repoId,
+        revision,
+        requestContext,
+        authPolicy,
+        treeCacheSegment,
+      ),
       async () => {
         const span = performanceMonitor.startSpan('catalog.fetchHuggingFaceModelTree', {
           repoId,
@@ -1894,10 +2163,10 @@ export class ModelCatalogService {
         });
         performanceMonitor.incrementCounter('catalog.fetchHuggingFaceModelTree.calls');
 
-        const expectedFileName = typeof options?.expectedFileName === 'string'
-          ? options.expectedFileName.trim()
-          : '';
-        let expectedTargetKnownIneligible = expectedFileName.length > 0 && isProjectorFileName(expectedFileName);
+        let expectedTargetKnownIneligible = expectedFileName.length > 0 && (
+          isProjectorFileName(expectedFileName)
+          || isUnsupportedMtpFileName(expectedFileName)
+        );
         let nextCursor: string | null = buildHuggingFaceTreeUrl(repoId, revision);
         const visitedCursors = new Set<string>();
         const entries: HuggingFaceTreeEntry[] = [];
@@ -1910,7 +2179,7 @@ export class ModelCatalogService {
 
         try {
           while (nextCursor !== null) {
-            if (pageCount >= HF_TREE_PAGINATION_MAX_PAGES) {
+            if (pageCount >= maxPages) {
               isComplete = false;
               stopReason = 'max_pages';
               break;
@@ -1966,30 +2235,41 @@ export class ModelCatalogService {
             entries.push(...pageEntries);
             this.assertRequestContextIsCurrent(requestContext);
 
+            const parsedNextCursor = parseNextCursor(
+              typeof response.headers?.get === 'function'
+                ? response.headers.get('link')
+                : null,
+            );
             const resolvedNextCursor = this.resolveNextCatalogCursor(
               requestedCursor,
-              parseNextCursor(
-                typeof response.headers?.get === 'function'
-                  ? response.headers.get('link')
-                  : null,
-              ),
+              parsedNextCursor,
               visitedCursors,
             );
+
+            if (parsedNextCursor && !resolvedNextCursor && !this.isTrustedHuggingFaceApiCursor(parsedNextCursor)) {
+              isComplete = false;
+              stopReason = 'invalid_cursor';
+              break;
+            }
 
             const targetMatch = expectedFileName.length > 0 && !expectedTargetKnownIneligible
               ? pageEntries.find((entry) => getFileName(entry) === expectedFileName)
               : undefined;
             if (targetMatch) {
               if (isEligibleGgufEntry(targetMatch)) {
-                isComplete = resolvedNextCursor === null;
-                stopReason = 'target_found';
-                break;
+                if (allowTargetEarlyStop) {
+                  isComplete = resolvedNextCursor === null;
+                  stopReason = 'target_found';
+                  break;
+                }
+              } else {
+                expectedTargetKnownIneligible = true;
               }
-
-              expectedTargetKnownIneligible = true;
             }
 
-            const canUseFallbackStop = expectedFileName.length === 0 || expectedTargetKnownIneligible;
+            const canUseFallbackStop = allowTargetEarlyStop && (
+              expectedFileName.length === 0 || expectedTargetKnownIneligible
+            );
 
             if (canUseFallbackStop && firstEligibleGgufPage === null) {
               const firstGguf = pageEntries.find((entry) => isEligibleGgufEntry(entry));
@@ -2048,13 +2328,22 @@ export class ModelCatalogService {
     repoId: string,
     revision: string | undefined,
     requestContext: CatalogRequestContext,
+    options?: { retryNotFoundWithAuth?: boolean },
   ): Promise<ReadmeModelData | undefined> {
     const authPolicy = requestContext.hasAuthToken
       ? REQUEST_AUTH_POLICY.OPTIONAL_AUTH
       : REQUEST_AUTH_POLICY.ANONYMOUS;
+    const retryNotFoundWithAuth = options?.retryNotFoundWithAuth === true;
     return this.withInFlightDedup(
       this.readmeRequestCache,
-      this.buildRequestCacheKey('readme', repoId, revision, requestContext, authPolicy),
+      this.buildRequestCacheKey(
+        'readme',
+        repoId,
+        revision,
+        requestContext,
+        authPolicy,
+        retryNotFoundWithAuth ? 'hidden-404-auth-retry' : 'default',
+      ),
       async () => {
         const readmeUrl = buildHuggingFaceRawUrl(repoId, 'README.md', revision);
         let response = await fetchWithTimeout(readmeUrl, {
@@ -2064,7 +2353,11 @@ export class ModelCatalogService {
 
         if (
           !response.ok
-          && (response.status === 401 || response.status === 403)
+          && (
+            response.status === 401
+            || response.status === 403
+            || (response.status === 404 && retryNotFoundWithAuth)
+          )
           && requestContext.hasAuthToken
         ) {
           response = await fetchWithTimeout(readmeUrl, {
@@ -2092,7 +2385,7 @@ export class ModelCatalogService {
   }
 
   private async probeResolvedModelAccess(
-    model: Pick<ModelMetadata, 'id' | 'resolvedFileName' | 'hfRevision'>,
+    model: Pick<ModelMetadata, 'id' | 'resolvedFileName' | 'hfRevision' | 'accessState' | 'isGated' | 'isPrivate'>,
     requestContext: CatalogRequestContext,
   ): Promise<ModelAccessState | null> {
     const resolvedFileName = model.resolvedFileName;
@@ -2123,6 +2416,11 @@ export class ModelCatalogService {
           model.hfRevision,
         );
         const cacheResolvedProbeState = (state: ModelAccessState | null): ModelAccessState | null => {
+          if (state === ModelAccessState.AUTHORIZED && this.isAuthRestrictedModel(model)) {
+            this.resolvedFileProbeStateCache.delete(cacheKey);
+            return state;
+          }
+
           this.setCachedResolvedFileProbeState(cacheKey, state);
           return state;
         };
@@ -2136,6 +2434,7 @@ export class ModelCatalogService {
           const headState = this.resolveResolvedFileProbeState(
             headResponse.status,
             requestContext.authToken,
+            model,
           );
           if (headState) {
             return cacheResolvedProbeState(headState);
@@ -2160,6 +2459,7 @@ export class ModelCatalogService {
           const getState = this.resolveResolvedFileProbeState(
             getResponse.status,
             requestContext.authToken,
+            model,
           );
           if (getState) {
             return cacheResolvedProbeState(getState);
@@ -2263,17 +2563,44 @@ export class ModelCatalogService {
     nextCursor: string | null,
     visitedCursors: Set<string>,
   ): string | null {
-    if (!nextCursor) {
+    const trustedNextCursor = this.resolveTrustedHuggingFaceApiCursor(nextCursor);
+    if (!trustedNextCursor) {
       return null;
     }
 
     // Stop pagination if the API points back to the page we just fetched or to an
     // already-visited cursor, otherwise we can loop forever on duplicate pages.
-    if (nextCursor === requestedCursor || visitedCursors.has(nextCursor)) {
+    if (trustedNextCursor === requestedCursor || visitedCursors.has(trustedNextCursor)) {
       return null;
     }
 
-    return nextCursor;
+    return trustedNextCursor;
+  }
+
+  private resolveTrustedHuggingFaceApiCursor(cursor: string | null): string | null {
+    if (!cursor) {
+      return null;
+    }
+
+    try {
+      const baseUrl = new URL(HF_BASE_URL);
+      const cursorUrl = new URL(cursor, baseUrl);
+      if (
+        cursorUrl.protocol !== 'https:'
+        || cursorUrl.origin !== baseUrl.origin
+        || !cursorUrl.pathname.startsWith('/api/models')
+      ) {
+        return null;
+      }
+
+      return cursorUrl.toString();
+    } catch {
+      return null;
+    }
+  }
+
+  private isTrustedHuggingFaceApiCursor(cursor: string): boolean {
+    return this.resolveTrustedHuggingFaceApiCursor(cursor) !== null;
   }
 
   private mergeUniqueModelsById(models: ModelMetadata[]): ModelMetadata[] {
@@ -2287,6 +2614,10 @@ export class ModelCatalogService {
     options?: ResolveTreeAccessStateOptions,
   ): ModelAccessState {
     if (responseStatus === 401 || responseStatus === 403) {
+      return this.resolveDeniedAccessState(authToken);
+    }
+
+    if (responseStatus === 404 && this.isAuthRestrictedModel(model)) {
       return this.resolveDeniedAccessState(authToken);
     }
 
@@ -2306,12 +2637,23 @@ export class ModelCatalogService {
   private resolveResolvedFileProbeState(
     responseStatus: number,
     authToken: string | null,
+    model: Pick<ModelMetadata, 'accessState' | 'isGated' | 'isPrivate'>,
   ): ModelAccessState | null {
     if (responseStatus === 401 || responseStatus === 403) {
       return this.resolveDeniedAccessState(authToken);
     }
 
+    if (responseStatus === 404 && this.isAuthRestrictedModel(model)) {
+      return this.resolveDeniedAccessState(authToken);
+    }
+
     return null;
+  }
+
+  private isAuthRestrictedModel(model: Pick<ModelMetadata, 'accessState' | 'isGated' | 'isPrivate'>): boolean {
+    return model.accessState !== ModelAccessState.PUBLIC
+      || model.isGated === true
+      || model.isPrivate === true;
   }
 
   private shouldRetryResolvedFileProbe(responseStatus: number): boolean {
@@ -2340,6 +2682,31 @@ export class ModelCatalogService {
 
   private isBufferedCursor(cursor: string | null): boolean {
     return typeof cursor === 'string' && cursor.startsWith('catalog-buffer:');
+  }
+
+  private normalizeCatalogSearchCursor(cursor: string | null): string | null {
+    if (cursor === null) {
+      return null;
+    }
+
+    if (this.isBufferedCursor(cursor)) {
+      return cursor;
+    }
+
+    return this.resolveTrustedHuggingFaceApiCursor(cursor);
+  }
+
+  private sanitizeSearchResultCursor<T extends Omit<ModelCatalogSearchResult, 'warning'>>(result: T): T {
+    const nextCursor = this.normalizeCatalogSearchCursor(result.nextCursor);
+    if (result.nextCursor === nextCursor) {
+      return result;
+    }
+
+    return {
+      ...result,
+      hasMore: nextCursor !== null,
+      nextCursor,
+    };
   }
 
   private toPersistableSearchResult(

@@ -8,6 +8,7 @@ import {
   type ModelMemoryFitConfidence,
   type ModelMemoryFitDecision,
   type ModelMetadataTrust,
+  type ModelVariant,
   type ModelThinkingCapabilitySnapshot,
 } from '../types/models';
 import { normalizePersistedModelCapabilitySnapshot } from '../utils/modelCapabilities';
@@ -15,6 +16,11 @@ import { getShortModelLabel } from '../utils/modelLabel';
 import { buildHuggingFaceResolveUrl } from '../utils/huggingFaceUrls';
 import { isValidLocalFileName } from '../utils/safeFilePath';
 import { normalizeSha256Digest } from '../utils/sha256';
+import {
+  isProjectorFileName,
+  isSupportedGgufFileName,
+  isUnsupportedMtpFileName,
+} from './ModelCatalogFileSelector';
 
 type PersistedModelMetadata = Partial<ModelMetadata> & {
   id: string;
@@ -211,6 +217,105 @@ function normalizeThinkingCapabilitySnapshot(value: unknown): ModelThinkingCapab
   };
 }
 
+function normalizeModelVariant(value: unknown): ModelVariant | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+  const fileName = normalizeNonEmptyString(record.fileName ?? record.resolvedFileName ?? record.variantId);
+  if (!fileName) {
+    return null;
+  }
+  if (!isSupportedGgufFileName(fileName)) {
+    return null;
+  }
+
+  const variantId = normalizeNonEmptyString(record.variantId) ?? fileName;
+  const quantizationLabel = normalizeNonEmptyString(record.quantizationLabel) ?? 'GGUF';
+  const size = normalizeSize(record.size);
+  const sha256 = normalizeSha256Digest(typeof record.sha256 === 'string' ? record.sha256 : undefined);
+  const ramFit = normalizeMemoryFitDecision(record.ramFit);
+  const ramFitConfidence = normalizeMemoryFitConfidence(record.ramFitConfidence);
+
+  return {
+    variantId,
+    fileName,
+    quantizationLabel,
+    size,
+    ...(sha256 ? { sha256 } : {}),
+    ...(ramFit ? { ramFit } : {}),
+    ...(ramFitConfidence ? { ramFitConfidence } : {}),
+    ...(record.isLocal === true ? { isLocal: true } : {}),
+  };
+}
+
+function isSupportedOpaqueActiveVariantId(value: string): boolean {
+  const normalized = value.trim();
+  if (normalized.length === 0) {
+    return false;
+  }
+
+  if (normalized.toLowerCase().endsWith('.gguf')) {
+    return isSupportedGgufFileName(normalized);
+  }
+
+  return !isProjectorFileName(normalized) && !isUnsupportedMtpFileName(normalized);
+}
+
+function resolveActiveVariantId(
+  activeVariantId: string | undefined,
+  resolvedFileName: string | undefined,
+  variants: ModelVariant[] | undefined,
+): string | undefined {
+  if (activeVariantId && isSupportedOpaqueActiveVariantId(activeVariantId)) {
+    if (!variants || variants.length === 0) {
+      return activeVariantId;
+    }
+
+    const activeVariant = variants.find((variant) => (
+      variant.variantId === activeVariantId
+      || variant.fileName === activeVariantId
+    ));
+    if (activeVariant) {
+      return activeVariant.variantId;
+    }
+  }
+
+  if (resolvedFileName) {
+    const resolvedVariant = variants?.find((variant) => (
+      variant.variantId === resolvedFileName
+      || variant.fileName === resolvedFileName
+    ));
+    if (resolvedVariant) {
+      return resolvedVariant.variantId;
+    }
+  }
+
+  return undefined;
+}
+
+function normalizeModelVariants(value: unknown): ModelVariant[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const seen = new Set<string>();
+  const variants = value
+    .map((entry) => normalizeModelVariant(entry))
+    .filter((entry): entry is ModelVariant => entry !== null)
+    .filter((entry) => {
+      if (seen.has(entry.variantId)) {
+        return false;
+      }
+
+      seen.add(entry.variantId);
+      return true;
+    });
+
+  return variants.length > 0 ? variants : undefined;
+}
+
 function normalizeFileIntegrityMarker(value: unknown): ModelFileIntegrityMarker | undefined {
   if (!value || typeof value !== 'object') {
     return undefined;
@@ -266,6 +371,10 @@ export function normalizePersistedModelMetadata(
   const thinkingCapability = normalizeThinkingCapabilitySnapshot(
     (model as PersistedModelMetadata & { thinkingCapability?: unknown }).thinkingCapability,
   );
+  const variants = normalizeModelVariants((model as PersistedModelMetadata & { variants?: unknown }).variants);
+  const normalizedActiveVariantId = normalizeNonEmptyString(model.activeVariantId);
+  const normalizedResolvedFileName = normalizeNonEmptyString(model.resolvedFileName);
+  const activeVariantId = resolveActiveVariantId(normalizedActiveVariantId, normalizedResolvedFileName, variants);
   const normalizedDownloadIntegrity = normalizeFileIntegrityMarker(
     (model as PersistedModelMetadata & { downloadIntegrity?: unknown }).downloadIntegrity,
   );
@@ -382,5 +491,7 @@ export function normalizePersistedModelMetadata(
     likes: normalizeNullableCount(model.likes),
     tags: normalizeStringArray(model.tags),
     description: normalizeNonEmptyString(model.description),
+    variants,
+    activeVariantId,
   };
 }

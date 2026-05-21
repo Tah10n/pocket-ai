@@ -58,7 +58,7 @@ export function shouldHardBlockSafeLoad({
     return false;
   }
 
-  if (!Number.isFinite(memoryFit.budget.totalMemoryBytes) || memoryFit.budget.totalMemoryBytes <= 0) {
+  if (!hasTrustedPositiveEffectiveMemoryBudget(memoryFit)) {
     return false;
   }
 
@@ -81,6 +81,21 @@ export function shouldHardBlockSafeLoad({
   return memoryFit.requiredBytes >= availableBudgetBytes;
 }
 
+export function hasTrustedPositiveEffectiveMemoryBudget(
+  memoryFit: MemoryFitResult | null | undefined,
+): memoryFit is MemoryFitResult {
+  if (!memoryFit) {
+    return false;
+  }
+
+  return (
+    Number.isFinite(memoryFit.budget.totalMemoryBytes)
+    && memoryFit.budget.totalMemoryBytes > 0
+    && Number.isFinite(memoryFit.effectiveBudgetBytes)
+    && memoryFit.effectiveBudgetBytes > 0
+  );
+}
+
 export function canAutoUseSafeLoadProfile({
   memoryFit,
   availableBudgetBytes,
@@ -99,6 +114,10 @@ export function canAutoUseSafeLoadProfile({
   }
 
   if (!Number.isFinite(memoryFit.requiredBytes) || memoryFit.requiredBytes <= 0) {
+    return false;
+  }
+
+  if (!hasTrustedPositiveEffectiveMemoryBudget(memoryFit)) {
     return false;
   }
 

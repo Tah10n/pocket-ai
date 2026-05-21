@@ -398,19 +398,20 @@ function writeChatPersistenceSnapshotTransaction(
     updatedAt,
     reason,
     changedThreadIds: changedThreadIds.length ? changedThreadIds : undefined,
+    requiresChangedThreadCommitRevision: changedThreadIds.length ? true : undefined,
     removedThreadIds: removedThreadIds.length ? removedThreadIds : undefined,
     corruptThreadIds: index.corruptThreadIds,
     migratedFromLegacyAt: index.migratedFromLegacyAt,
   });
 
-  removedThreadIds.forEach((threadId) => {
-    removeChatThreadRecord(storage, threadId);
-  });
   changedThreadIds.forEach((threadId) => {
     const thread = snapshot.threads[threadId];
     if (thread) {
       writeChatThreadRecordForMutation(storage, thread, { commitRevision: revision });
     }
+  });
+  removedThreadIds.forEach((threadId) => {
+    removeChatThreadRecord(storage, threadId);
   });
 
   writeChatPersistenceIndex(storage, index);
@@ -422,7 +423,7 @@ function readHydratableChatThreadRecord(
   threadId: string,
   now: number,
 ):
-  | { ok: true; thread: ChatThread; recovered: boolean; persistedAt: number }
+  | { ok: true; thread: ChatThread; recovered: boolean; persistedAt: number; commitRevision?: number }
   | { ok: false; persistedAt?: number } {
   const recordResult = readChatThreadRecord(storage, threadId);
   if (!recordResult.ok) {
@@ -439,6 +440,7 @@ function readHydratableChatThreadRecord(
     thread: sanitized.thread,
     recovered: sanitized.recovered,
     persistedAt: recordResult.value.persistedAt,
+    commitRevision: recordResult.value.commitRevision,
   };
 }
 
@@ -465,6 +467,21 @@ function isPendingIndexCommitAlreadyApplied(
   );
 }
 
+function discardUnappliedPendingIndexCommit(
+  storage: ReturnType<typeof getAppStorage>,
+  pending: ChatPersistencePendingIndexCommit,
+  index: ChatPersistenceIndex | null,
+): void {
+  const indexedThreadIds = new Set(index?.threadIds ?? []);
+  pending.changedThreadIds?.forEach((threadId) => {
+    if (!indexedThreadIds.has(threadId)) {
+      removeChatThreadRecord(storage, threadId);
+    }
+  });
+
+  removeChatPendingIndexCommit(storage);
+}
+
 function recoverPendingChatIndexCommit(storage: ReturnType<typeof getAppStorage>, now: number): void {
   const pendingResult = readChatPendingIndexCommit(storage);
   if (!pendingResult.ok) {
@@ -489,7 +506,41 @@ function recoverPendingChatIndexCommit(storage: ReturnType<typeof getAppStorage>
 
   const threads: Record<string, ChatThread> = {};
   const corruptThreadIds = new Set(pending.corruptThreadIds ?? []);
+  const changedThreadIds = new Set(pending.changedThreadIds ?? []);
   const removedThreadIds = new Set(pending.removedThreadIds ?? []);
+  const requiresChangedThreadCommitRevision = pending.requiresChangedThreadCommitRevision === true;
+  const recordCache = new Map<string, ReturnType<typeof readHydratableChatThreadRecord>>();
+  const readCachedRecord = (threadId: string) => {
+    const cachedRecord = recordCache.get(threadId);
+    if (cachedRecord) {
+      return cachedRecord;
+    }
+
+    const record = readHydratableChatThreadRecord(storage, threadId, now);
+    recordCache.set(threadId, record);
+    return record;
+  };
+
+  const hasUnappliedChangedRecord = (pending.changedThreadIds ?? []).some((threadId) => {
+    if (removedThreadIds.has(threadId)) {
+      return false;
+    }
+
+    const record = readCachedRecord(threadId);
+    if (!record.ok) {
+      return true;
+    }
+
+    if (record.commitRevision === undefined) {
+      return requiresChangedThreadCommitRevision || record.persistedAt < pending.updatedAt;
+    }
+
+    return record.commitRevision !== pending.revision;
+  });
+  if (hasUnappliedChangedRecord) {
+    discardUnappliedPendingIndexCommit(storage, pending, index);
+    return;
+  }
 
   removedThreadIds.forEach((threadId) => {
     removeChatThreadRecord(storage, threadId);
@@ -500,7 +551,7 @@ function recoverPendingChatIndexCommit(storage: ReturnType<typeof getAppStorage>
       return;
     }
 
-    const record = readHydratableChatThreadRecord(storage, threadId, now);
+    const record = readCachedRecord(threadId);
     if (!record.ok) {
       corruptThreadIds.add(threadId);
       return;
@@ -509,7 +560,7 @@ function recoverPendingChatIndexCommit(storage: ReturnType<typeof getAppStorage>
     threads[record.thread.id] = record.thread;
     corruptThreadIds.delete(record.thread.id);
 
-    if (record.recovered) {
+    if (record.recovered || (changedThreadIds.has(threadId) && record.commitRevision !== pending.revision)) {
       writeChatThreadRecord(storage, record.thread, now, { commitRevision: pending.revision });
     }
   });

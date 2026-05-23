@@ -119,8 +119,9 @@ export function ModelDetailsScreen() {
   }, []);
   const selectVariant = useCallback((variantId: string) => {
     handleSelectVariant(variantId);
+    router.setParams({ modelId, variantId });
     setVariantPickerVisible(false);
-  }, [handleSelectVariant]);
+  }, [handleSelectVariant, modelId, router]);
 
   return (
     <ScreenRoot>

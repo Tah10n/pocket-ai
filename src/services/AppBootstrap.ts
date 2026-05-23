@@ -427,8 +427,6 @@ export async function bootstrapAppCritical(): Promise<BootstrapCriticalResult> {
       return buildStorageBlockedCriticalResult(hydrationBlockedStorageHealth);
     }
 
-    await hydrateHuggingFaceTokenState();
-
     const settings = getSettings();
 
     try {
@@ -526,6 +524,8 @@ export async function bootstrapAppBackground(): Promise<BootstrapBackgroundResul
       await stopPrivateRuntimeWorkForStorageBlockedSafely();
       return buildStorageBlockedBackgroundResult(currentStorageHealth);
     }
+
+    await hydrateHuggingFaceTokenState();
 
     const settings = getSettings();
 

@@ -259,7 +259,7 @@ describe('AppBootstrap', () => {
     expect(registry.getModel).not.toHaveBeenCalled();
   });
 
-  it('hydrates Hugging Face token state during critical bootstrap before settings-dependent work', async () => {
+  it('does not hydrate Hugging Face token state during critical bootstrap', async () => {
     (getSettings as jest.Mock).mockReturnValue({
       language: 'en',
       activePresetId: null,
@@ -274,13 +274,8 @@ describe('AppBootstrap', () => {
     const result = await bootstrapAppCritical();
 
     expect(result).toEqual({ outcome: 'success' });
-    expect(mockRefreshHuggingFaceTokenState).toHaveBeenCalledTimes(1);
-    expect(mockRefreshHuggingFaceTokenState.mock.invocationCallOrder[0]).toBeGreaterThan(
-      (useModelsStore.persist.rehydrate as jest.Mock).mock.invocationCallOrder[0],
-    );
-    expect(mockRefreshHuggingFaceTokenState.mock.invocationCallOrder[0]).toBeLessThan(
-      (getSettings as jest.Mock).mock.invocationCallOrder[0],
-    );
+    expect(mockRefreshHuggingFaceTokenState).not.toHaveBeenCalled();
+    expect(getSettings).toHaveBeenCalledTimes(1);
   });
 
   it('does not run background bootstrap work when private storage is blocked during full bootstrap', async () => {
@@ -304,6 +299,7 @@ describe('AppBootstrap', () => {
     expect(presetManager.getPresets).not.toHaveBeenCalled();
     expect(mockMergeImportedThreads).not.toHaveBeenCalled();
     expect(getModelDownloadManager).not.toHaveBeenCalled();
+    expect(mockRefreshHuggingFaceTokenState).not.toHaveBeenCalled();
   });
 
   it('does not run background bootstrap work while private storage health is blocked', async () => {
@@ -328,6 +324,27 @@ describe('AppBootstrap', () => {
     expect(presetManager.getPresets).not.toHaveBeenCalled();
     expect(mockMergeImportedThreads).not.toHaveBeenCalled();
     expect(getModelDownloadManager).not.toHaveBeenCalled();
+    expect(mockRefreshHuggingFaceTokenState).not.toHaveBeenCalled();
+  });
+
+  it('hydrates Hugging Face token state during background bootstrap after storage is ready', async () => {
+    (getSettings as jest.Mock).mockReturnValue({
+      language: 'en',
+      activePresetId: null,
+      activeModelId: null,
+      temperature: 0.7,
+      topP: 0.9,
+      maxTokens: 2048,
+      theme: 'system',
+      chatRetentionDays: null,
+    });
+
+    await expect(bootstrapAppBackground()).resolves.toEqual({ outcome: 'success' });
+
+    expect(mockRefreshHuggingFaceTokenState).toHaveBeenCalledTimes(1);
+    expect(mockRefreshHuggingFaceTokenState.mock.invocationCallOrder[0]).toBeLessThan(
+      (getSettings as jest.Mock).mock.invocationCallOrder[0],
+    );
   });
 
   it('returns a storage-blocked background outcome when private storage blocks during background work', async () => {

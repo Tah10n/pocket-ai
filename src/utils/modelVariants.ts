@@ -29,7 +29,7 @@ interface ApplyModelVariantSelectionOptions {
 }
 
 export function getActiveModelVariant(model: Pick<ModelMetadata, 'activeVariantId' | 'resolvedFileName' | 'variants'>): ModelVariant | undefined {
-  const variants = (model.variants ?? []).filter((variant) => isGgufFileName(variant.fileName));
+  const variants = getSelectableModelVariants(model);
   if (variants.length === 0) {
     return undefined;
   }
@@ -40,7 +40,7 @@ export function getActiveModelVariant(model: Pick<ModelMetadata, 'activeVariantI
 }
 
 export function canSelectModelVariant(model: Pick<ModelMetadata, 'lifecycleStatus' | 'variants'>): boolean {
-  const variants = (model.variants ?? []).filter((variant) => isGgufFileName(variant.fileName));
+  const variants = getSelectableModelVariants(model);
   if (variants.length <= 1) {
     return false;
   }
@@ -54,7 +54,7 @@ function findVariantByIdOrFileName(
   model: Pick<ModelMetadata, 'variants'>,
   variantIdOrFileName: string,
 ): ModelVariant | undefined {
-  const variants = (model.variants ?? []).filter((variant) => isGgufFileName(variant.fileName));
+  const variants = getSelectableModelVariants(model);
   if (variants.length === 0) {
     return undefined;
   }
@@ -139,8 +139,16 @@ function isGgufFileName(value: string): boolean {
   return isSupportedGgufFileName(value);
 }
 
+export function isSelectableModelVariant(variant: Pick<ModelVariant, 'fileName'>): boolean {
+  return isGgufFileName(variant.fileName);
+}
+
+export function getSelectableModelVariants(model: Pick<ModelMetadata, 'variants'>): ModelVariant[] {
+  return (model.variants ?? []).filter(isSelectableModelVariant);
+}
+
 export function getDefaultCatalogModelVariant(model: Pick<ModelMetadata, 'variants'>): ModelVariant | undefined {
-  const variants = (model.variants ?? []).filter((variant) => isGgufFileName(variant.fileName));
+  const variants = getSelectableModelVariants(model);
   if (variants.length === 0) {
     return undefined;
   }
@@ -324,8 +332,8 @@ function getVariantMemoryFitPatch(
 }
 
 export function applyModelVariantSelection(model: ModelMetadata, variantId: string): ModelMetadata {
-  const variant = model.variants?.find((entry) => entry.variantId === variantId);
-  if (!variant || !isGgufFileName(variant.fileName)) {
+  const variant = getSelectableModelVariants(model).find((entry) => entry.variantId === variantId);
+  if (!variant) {
     return model;
   }
 

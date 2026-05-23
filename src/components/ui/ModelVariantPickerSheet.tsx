@@ -4,7 +4,7 @@ import type { ModelMetadata } from '../../types/models';
 import type { AndroidBlurTargetRef } from '../../utils/androidBlur';
 import { getVariantMemoryBadgePresentation } from '../../utils/modelMemoryBadgePresentation';
 import { formatModelFileSize } from '../../utils/modelSize';
-import { getActiveModelVariant } from '../../utils/modelVariants';
+import { getActiveModelVariant, getSelectableModelVariants } from '../../utils/modelVariants';
 import { ListPickerSheet, type ListPickerSheetItem } from './ListPickerSheet';
 
 interface ModelVariantPickerSheetProps {
@@ -29,7 +29,7 @@ export function ModelVariantPickerSheet({
       return [];
     }
 
-    return model.variants.map((variant) => {
+    return getSelectableModelVariants(model).map((variant) => {
       const sizeLabel = formatModelFileSize(variant.size, t('models.sizeUnknown'));
       const selected = variant.variantId === activeVariant?.variantId;
       const memoryBadge = getVariantMemoryBadgePresentation(model, variant, { useModelFallback: selected });

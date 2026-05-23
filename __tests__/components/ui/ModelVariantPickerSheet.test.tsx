@@ -135,4 +135,37 @@ describe('ModelVariantPickerSheet', () => {
 
     expect(mockLastListPickerProps.items).toEqual([]);
   });
+
+  it('filters unsupported GGUF companion files out of the picker rows', () => {
+    const model = buildModel();
+    model.variants = [
+      ...model.variants!,
+      {
+        variantId: 'model.mmproj.gguf',
+        fileName: 'model.mmproj.gguf',
+        quantizationLabel: 'Projector',
+        size: 256_000_000,
+      },
+      {
+        variantId: 'model.NextN.gguf',
+        fileName: 'model.NextN.gguf',
+        quantizationLabel: 'NextN',
+        size: 512_000_000,
+      },
+    ];
+
+    render(
+      <ModelVariantPickerSheet
+        visible
+        model={model}
+        onSelectVariant={jest.fn()}
+        onClose={jest.fn()}
+      />,
+    );
+
+    expect(mockLastListPickerProps.items.map((item: { key: string }) => item.key)).toEqual([
+      'model.Q4_K_M.gguf',
+      'model.Q8_0.gguf',
+    ]);
+  });
 });

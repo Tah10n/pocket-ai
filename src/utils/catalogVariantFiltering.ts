@@ -36,7 +36,9 @@ export function shouldProjectCatalogVariantForFiltering(
   const variantSensitiveFilters = hasVariantSensitiveFilters(filters);
 
   if (selectedVariantId) {
-    return activeTab === 'downloaded' || variantSensitiveFilters;
+    return model.lifecycleStatus === LifecycleStatus.AVAILABLE && (
+      activeTab === 'downloaded' || variantSensitiveFilters
+    );
   }
 
   return activeTab === 'all'

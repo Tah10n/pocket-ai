@@ -239,6 +239,8 @@ describe('useModelDetailsController', () => {
   it('preserves a user-selected variant when delayed model details resolve', async () => {
     const deferred = createDeferred<ModelMetadata>();
     const cachedModel = buildModel({
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
       resolvedFileName: 'model.Q4_K_M.gguf',
       activeVariantId: 'model.Q4_K_M.gguf',
       variants: [
@@ -275,6 +277,8 @@ describe('useModelDetailsController', () => {
     await act(async () => {
       deferred.resolve(buildModel({
         name: 'Resolved Model',
+        lifecycleStatus: LifecycleStatus.AVAILABLE,
+        downloadProgress: 0,
         resolvedFileName: 'model.Q4_K_M.gguf',
         activeVariantId: 'model.Q4_K_M.gguf',
         variants: [cachedModel.variants![0]],
@@ -297,6 +301,8 @@ describe('useModelDetailsController', () => {
 
   it('applies an initial variant from navigation params after model details resolve', async () => {
     const cachedModel = buildModel({
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
       resolvedFileName: 'model.Q4_K_M.gguf',
       activeVariantId: 'model.Q4_K_M.gguf',
       variants: [
@@ -332,8 +338,49 @@ describe('useModelDetailsController', () => {
     }));
   });
 
+  it('ignores an initial variant param that would switch a paused model', async () => {
+    const pausedModel = buildModel({
+      lifecycleStatus: LifecycleStatus.PAUSED,
+      downloadProgress: 0.5,
+      resumeData: JSON.stringify({ resumeData: 'resume-q4' }),
+      resolvedFileName: 'model.Q4_K_M.gguf',
+      activeVariantId: 'model.Q4_K_M.gguf',
+      variants: [
+        {
+          variantId: 'model.Q4_K_M.gguf',
+          fileName: 'model.Q4_K_M.gguf',
+          quantizationLabel: 'Q4_K_M',
+          size: 4_000_000_000,
+        },
+        {
+          variantId: 'model.Q8_0.gguf',
+          fileName: 'model.Q8_0.gguf',
+          quantizationLabel: 'Q8_0',
+          size: 8_000_000_000,
+        },
+      ],
+    });
+    mockGetCachedModel.mockReturnValue(pausedModel);
+    mockGetModelDetails.mockResolvedValue(pausedModel);
+
+    const { getCurrentValue } = renderHookHarness('org/model', 'model.Q8_0.gguf');
+
+    await waitFor(() => {
+      expect(getCurrentValue()?.loading).toBe(false);
+    });
+
+    expect(getCurrentValue()?.displayModel).toEqual(expect.objectContaining({
+      resolvedFileName: 'model.Q4_K_M.gguf',
+      activeVariantId: 'model.Q4_K_M.gguf',
+      lifecycleStatus: LifecycleStatus.PAUSED,
+      downloadProgress: 0.5,
+    }));
+  });
+
   it('clears an initial variant when navigation params drop it for the same model', async () => {
     const cachedModel = buildModel({
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
       resolvedFileName: 'model.Q4_K_M.gguf',
       activeVariantId: 'model.Q4_K_M.gguf',
       variants: [
@@ -377,8 +424,11 @@ describe('useModelDetailsController', () => {
     expect(getCurrentValue()?.displayModel?.memoryFitDecision).toBeUndefined();
   });
 
-  it('keeps an explicit selected variant ahead of stale queued runtime state', async () => {
+  it('ignores explicit variant selection while the model is paused', async () => {
     const model = buildModel({
+      lifecycleStatus: LifecycleStatus.PAUSED,
+      downloadProgress: 0.5,
+      resumeData: JSON.stringify({ resumeData: 'resume-q4' }),
       resolvedFileName: 'model.Q4_K_M.gguf',
       activeVariantId: 'model.Q4_K_M.gguf',
       variants: [
@@ -400,13 +450,6 @@ describe('useModelDetailsController', () => {
     });
     mockGetCachedModel.mockReturnValue(model);
     mockGetModelDetails.mockResolvedValue(model);
-    mockDownloadQueue = [buildModel({
-      resolvedFileName: 'model.Q4_K_M.gguf',
-      activeVariantId: 'model.Q4_K_M.gguf',
-      lifecycleStatus: LifecycleStatus.PAUSED,
-      downloadProgress: 0.5,
-      resumeData: JSON.stringify({ resumeData: 'resume-q4' }),
-    })];
 
     const { getCurrentValue } = renderHookHarness();
 
@@ -419,12 +462,11 @@ describe('useModelDetailsController', () => {
     });
 
     expect(getCurrentValue()?.displayModel).toEqual(expect.objectContaining({
-      resolvedFileName: 'model.Q8_0.gguf',
-      activeVariantId: 'model.Q8_0.gguf',
-      lifecycleStatus: LifecycleStatus.AVAILABLE,
-      downloadProgress: 0,
-      resumeData: undefined,
-      memoryFitDecision: 'likely_oom',
+      resolvedFileName: 'model.Q4_K_M.gguf',
+      activeVariantId: 'model.Q4_K_M.gguf',
+      lifecycleStatus: LifecycleStatus.PAUSED,
+      downloadProgress: 0.5,
+      resumeData: JSON.stringify({ resumeData: 'resume-q4' }),
     }));
   });
 

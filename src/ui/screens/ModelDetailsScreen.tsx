@@ -118,10 +118,15 @@ export function ModelDetailsScreen() {
     setVariantPickerVisible(false);
   }, []);
   const selectVariant = useCallback((variantId: string) => {
+    if (!displayModel || !canOpenVariantPicker) {
+      setVariantPickerVisible(false);
+      return;
+    }
+
     handleSelectVariant(variantId);
     router.setParams({ modelId, variantId });
     setVariantPickerVisible(false);
-  }, [handleSelectVariant, modelId, router]);
+  }, [canOpenVariantPicker, displayModel, handleSelectVariant, modelId, router]);
 
   return (
     <ScreenRoot>

@@ -3,6 +3,7 @@ import {
   createFallbackModel,
   transformHFResponse,
 } from '../../src/services/ModelCatalogTransformer';
+import { CATALOG_SEARCH_VARIANT_LIMIT } from '../../src/services/ModelCatalogFileSelector';
 import { LifecycleStatus } from '../../src/types/models';
 
 const LOCAL_SHA256 = 'b'.repeat(64);
@@ -178,6 +179,30 @@ describe('ModelCatalogTransformer', () => {
       size: 8_000_000_000,
       sha256: LOCAL_SHA256,
     }));
+  });
+
+  it('caps detail payload variants while pinning the selected fallback variant', () => {
+    const selectedFileName = `model-${String(CATALOG_SEARCH_VARIANT_LIMIT + 2).padStart(3, '0')}.Q4_K_M.gguf`;
+    const result = buildModelMetadataFromPayload(
+      {
+        id: 'author/model-q4',
+        siblings: Array.from({ length: CATALOG_SEARCH_VARIANT_LIMIT + 3 }, (_value, index) => ({
+          rfilename: `model-${String(index).padStart(3, '0')}.Q4_K_M.gguf`,
+          size: (index + 1) * 1024 * 1024 * 1024,
+        })),
+      },
+      null,
+      null,
+      {
+        ...createFallbackModel('author/model-q4'),
+        resolvedFileName: selectedFileName,
+        activeVariantId: selectedFileName,
+      },
+    );
+
+    expect(result.variants).toHaveLength(CATALOG_SEARCH_VARIANT_LIMIT);
+    expect(result.variants?.some((variant) => variant.fileName === selectedFileName)).toBe(true);
+    expect(result.variants?.some((variant) => variant.fileName === `model-${String(CATALOG_SEARCH_VARIANT_LIMIT).padStart(3, '0')}.Q4_K_M.gguf`)).toBe(false);
   });
 
   it('preserves verified local integrity when the payload entry has no sha256', () => {

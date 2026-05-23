@@ -27,7 +27,25 @@ import {
 import { handleModelLoadMemoryPolicyError, promptModelLoadMemoryPolicyIfNeeded } from '../utils/modelLoadMemoryPolicyPrompt';
 import { startModelDownloadFlow } from '../utils/modelDownloadFlow';
 import { mergeModelWithRuntimeState } from '../utils/modelRuntimeState';
-import { applyModelVariantSelection } from '../utils/modelVariants';
+import { applyModelVariantSelection, canSelectModelVariant } from '../utils/modelVariants';
+
+function shouldApplyVariantSelection(model: ModelMetadata, variantId: string | null): variantId is string {
+  if (!variantId) {
+    return false;
+  }
+
+  if (canSelectModelVariant(model)) {
+    return true;
+  }
+
+  return model.activeVariantId === variantId || model.resolvedFileName === variantId;
+}
+
+function applyVariantSelectionIfAllowed(model: ModelMetadata, variantId: string | null): ModelMetadata {
+  return shouldApplyVariantSelection(model, variantId)
+    ? applyModelVariantSelection(model, variantId)
+    : model;
+}
 
 export function useModelDetailsController(modelId: string, initialVariantId?: string) {
   const router = useRouter();
@@ -45,9 +63,7 @@ export function useModelDetailsController(modelId: string, initialVariantId?: st
       }
 
       const cachedModel = modelCatalogService.getCachedModel(modelId) ?? createModelDetailsPlaceholder(modelId);
-      return normalizedInitialVariantId
-        ? applyModelVariantSelection(cachedModel, normalizedInitialVariantId)
-        : cachedModel;
+      return applyVariantSelectionIfAllowed(cachedModel, normalizedInitialVariantId);
     },
   );
   const [loading, setLoading] = useState(Boolean(modelId));
@@ -77,9 +93,7 @@ export function useModelDetailsController(modelId: string, initialVariantId?: st
       previousModelIdRef.current = modelId;
       selectedVariantIdRef.current = normalizedInitialVariantId;
       const cachedModel = modelCatalogService.getCachedModel(modelId) ?? createModelDetailsPlaceholder(modelId);
-      setModel(normalizedInitialVariantId
-        ? applyModelVariantSelection(cachedModel, normalizedInitialVariantId)
-        : cachedModel);
+      setModel(applyVariantSelectionIfAllowed(cachedModel, normalizedInitialVariantId));
     }
 
     void modelCatalogService.getModelDetails(modelId)
@@ -106,7 +120,7 @@ export function useModelDetailsController(modelId: string, initialVariantId?: st
             return resolvedModel;
           }
 
-          return applyModelVariantSelection({
+          return applyVariantSelectionIfAllowed({
             ...resolvedModel,
             variants,
           }, selectedVariantId);
@@ -146,7 +160,7 @@ export function useModelDetailsController(modelId: string, initialVariantId?: st
         return modelCatalogService.getCachedModel(modelId) ?? current;
       }
 
-      return applyModelVariantSelection(current, normalizedInitialVariantId);
+      return applyVariantSelectionIfAllowed(current, normalizedInitialVariantId);
     });
   }, [modelId, normalizedInitialVariantId]);
 
@@ -165,7 +179,9 @@ export function useModelDetailsController(modelId: string, initialVariantId?: st
     });
 
     const selectedVariantId = selectedVariantIdRef.current;
-    return selectedVariantId ? applyModelVariantSelection(runtimeModel, selectedVariantId) : runtimeModel;
+    return shouldApplyVariantSelection(runtimeModel, selectedVariantId)
+      ? applyModelVariantSelection(runtimeModel, selectedVariantId)
+      : runtimeModel;
   }, [engineState.activeModelId, model, modelsRegistryRevision, queuedItem, runtimeRevision]);
 
   const getConfigurableModelById = useCallback((targetModelId: string | null) => {
@@ -343,9 +359,19 @@ export function useModelDetailsController(modelId: string, initialVariantId?: st
   }, [handleOpenModelPage, handleOpenTokenSettings, showModelActionError, startDownload, t]);
 
   const handleSelectVariant = useCallback((variantId: string) => {
+    if (!displayModel || !canSelectModelVariant(displayModel)) {
+      return;
+    }
+
     selectedVariantIdRef.current = variantId;
-    setModel((current) => (current ? applyModelVariantSelection(current, variantId) : current));
-  }, []);
+    setModel((current) => {
+      if (!current) {
+        return current;
+      }
+
+      return applyModelVariantSelection(current, variantId);
+    });
+  }, [displayModel]);
 
   const performLoad = useCallback(async (targetModelId: string, options?: LoadModelOptions) => {
     try {

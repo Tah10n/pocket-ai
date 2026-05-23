@@ -481,7 +481,11 @@ export function buildModelMetadataFromPayload(
   const hfRevision = payload.sha ?? fallbackModel.hfRevision;
   const siblings = payload.siblings ?? [];
   const rankedGgufSiblings = rankCatalogGgufEntries(siblings);
-  const variants = attachMemoryFitToVariants(buildCatalogModelVariantsFromRankedEntries(rankedGgufSiblings), memoryFitContext);
+  const variants = attachMemoryFitToVariants(buildCatalogModelVariantsFromRankedEntries(rankedGgufSiblings, {
+    limit: CATALOG_SEARCH_VARIANT_LIMIT,
+    includeFileNames: [fallbackModel.resolvedFileName, fallbackModel.activeVariantId],
+    includeVariantIds: [fallbackModel.activeVariantId],
+  }), memoryFitContext);
   const fallbackSelectedEntry = fallbackModel.resolvedFileName
     ? rankedGgufSiblings.find((entry) => getFileName(entry) === fallbackModel.resolvedFileName)
     : undefined;

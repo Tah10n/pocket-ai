@@ -34,6 +34,7 @@ import { mergeModelWithRuntimeState } from '@/utils/modelRuntimeState';
 import {
   applyDefaultCatalogModelVariantSelection,
   applyModelVariantSelection,
+  canSelectModelVariant,
   getSelectableModelVariants,
 } from '@/utils/modelVariants';
 import {
@@ -179,7 +180,7 @@ function getModelForCardDisplay(
   activeTab: ModelsCatalogTab,
   selectedVariantId?: string,
 ): ModelMetadata {
-  return selectedVariantId
+  return selectedVariantId && canSelectModelVariant(model)
     ? applyModelVariantSelection(model, selectedVariantId)
     : applyCatalogDefaultVariantForTab(model, activeTab);
 }
@@ -344,6 +345,11 @@ export const ModelsList = ({
         const model = displayModelsById.get(modelId);
         if (!model) {
           nextSelectedVariantIds[modelId] = variantId;
+          return;
+        }
+
+        if (model.lifecycleStatus !== LifecycleStatus.AVAILABLE) {
+          didPrune = true;
           return;
         }
 
@@ -702,6 +708,15 @@ export const ModelsList = ({
     </Box>
   ) : null), [activeTab, filteredModels.length, handleLoadMore, hasMore, isFetchingMore, loadMoreError, nextCursor, shouldAutoLoadMore, t]);
 
+  const openVariantPicker = useCallback((modelId: string) => {
+    const model = filteredModels.find((item) => item.id === modelId);
+    if (!model || !canSelectModelVariant(model)) {
+      return;
+    }
+
+    setVariantPickerModelId(modelId);
+  }, [filteredModels]);
+
   const renderModelItem = useCallback<ListRenderItem<ModelMetadata>>(({ item }) => (
     <ModelCardWithRuntimeState
       model={item}
@@ -712,7 +727,7 @@ export const ModelsList = ({
       onOpenModelPage={openModelPage}
       selectedVariantId={selectedVariantIds[item.id]}
       activeTab={activeTab}
-      onOpenVariantSelector={setVariantPickerModelId}
+      onOpenVariantSelector={openVariantPicker}
       onLoad={handleLoad}
       onOpenSettings={openModelParameters}
       onUnload={handleUnload}
@@ -731,7 +746,7 @@ export const ModelsList = ({
     openChat,
     openModelDetails,
     openModelPage,
-    setVariantPickerModelId,
+    openVariantPicker,
     selectedVariantIds,
     openModelParameters,
     openTokenSettings,
@@ -748,15 +763,17 @@ export const ModelsList = ({
     }
 
     const model = filteredModels.find((item) => item.id === variantPickerModelId);
-    return model
-      ? getModelForCardDisplay(model, activeTab, selectedVariantIds[model.id])
-      : null;
+    if (!model || !canSelectModelVariant(model)) {
+      return null;
+    }
+
+    return getModelForCardDisplay(model, activeTab, selectedVariantIds[model.id]);
   }, [activeTab, filteredModels, selectedVariantIds, variantPickerModelId]);
   const closeVariantPicker = useCallback(() => {
     setVariantPickerModelId(null);
   }, []);
   const selectVariant = useCallback((variantId: string) => {
-    if (!variantPickerModelId) {
+    if (!variantPickerModelId || !variantPickerModel || !canSelectModelVariant(variantPickerModel)) {
       return;
     }
 
@@ -765,7 +782,7 @@ export const ModelsList = ({
       [variantPickerModelId]: variantId,
     }));
     setVariantPickerModelId(null);
-  }, [variantPickerModelId]);
+  }, [variantPickerModel, variantPickerModelId]);
   const listBottomInset = screenLayoutMetrics.contentBottomInset
     + (isModelWarmingUp ? MODEL_WARMUP_BANNER_RESERVED_HEIGHT : 0)
     + tabBarInset;

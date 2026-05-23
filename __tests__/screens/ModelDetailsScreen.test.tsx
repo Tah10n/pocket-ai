@@ -643,6 +643,61 @@ describe('ModelDetailsScreen', () => {
     expect(lastModelVariantPickerSheetProps?.visible).toBe(false);
   });
 
+  it.each([
+    LifecycleStatus.PAUSED,
+    LifecycleStatus.FAILED,
+  ])('does not allow selecting another details variant for %s models', async (lifecycleStatus) => {
+    const variantModel = createModel({
+      lifecycleStatus,
+      size: 4_000_000_000,
+      downloadUrl: 'https://huggingface.co/org/model/resolve/main/model.Q4_K_M.gguf',
+      resolvedFileName: 'model.Q4_K_M.gguf',
+      activeVariantId: 'model.Q4_K_M.gguf',
+      gguf: {
+        sizeLabel: 'Q4_K_M',
+        totalBytes: 4_000_000_000,
+      },
+      variants: [
+        {
+          variantId: 'model.Q4_K_M.gguf',
+          fileName: 'model.Q4_K_M.gguf',
+          quantizationLabel: 'Q4_K_M',
+          size: 4_000_000_000,
+        },
+        {
+          variantId: 'model.Q8_0.gguf',
+          fileName: 'model.Q8_0.gguf',
+          quantizationLabel: 'Q8_0',
+          size: 8_000_000_000,
+        },
+      ],
+    });
+    const { modelCatalogService } = jest.requireMock('../../src/services/ModelCatalogService');
+    modelCatalogService.getCachedModel.mockReturnValue(variantModel);
+    modelCatalogService.getModelDetails.mockResolvedValue(variantModel);
+
+    const screen = render(<ModelDetailsScreen />);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const selectorRow = screen.getByTestId('model-details-variant-selector-org/model');
+    expect(selectorRow.props.accessibilityHint).toBe('models.variantSelectorReadOnlyAccessibilityHint');
+
+    fireEvent.press(selectorRow);
+    expect(lastModelVariantPickerSheetProps?.visible).toBe(false);
+
+    await act(async () => {
+      lastModelVariantPickerSheetProps.onSelectVariant('model.Q8_0.gguf');
+      await Promise.resolve();
+    });
+
+    expect(mockRouter.setParams).not.toHaveBeenCalledWith(expect.objectContaining({
+      variantId: 'model.Q8_0.gguf',
+    }));
+  });
+
   it('warns before downloading a model that does not fit in current memory', async () => {
     const { modelCatalogService } = jest.requireMock('../../src/services/ModelCatalogService');
     modelCatalogService.getCachedModel.mockReturnValue(createModel({ fitsInRam: false }));

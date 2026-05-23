@@ -95,9 +95,10 @@ describe('modelVariants', () => {
     }));
   });
 
-  it('limits variant selection to downloadable remote states', () => {
+  it('limits variant selection to available remote models', () => {
     expect(canSelectModelVariant(createModel())).toBe(true);
-    expect(canSelectModelVariant(createModel({ lifecycleStatus: LifecycleStatus.FAILED }))).toBe(true);
+    expect(canSelectModelVariant(createModel({ lifecycleStatus: LifecycleStatus.FAILED }))).toBe(false);
+    expect(canSelectModelVariant(createModel({ lifecycleStatus: LifecycleStatus.PAUSED }))).toBe(false);
     expect(canSelectModelVariant(createModel({ lifecycleStatus: LifecycleStatus.DOWNLOADED }))).toBe(false);
     expect(canSelectModelVariant(createModel({ variants: [createModel().variants![0]] }))).toBe(false);
   });

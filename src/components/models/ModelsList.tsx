@@ -31,7 +31,15 @@ import {
 import { useDownloadStore } from '@/store/downloadStore';
 import { EngineStatus, LifecycleStatus, ModelAccessState, type ModelMetadata } from '@/types/models';
 import { mergeModelWithRuntimeState } from '@/utils/modelRuntimeState';
-import { applyDefaultCatalogModelVariantSelection, applyModelVariantSelection } from '@/utils/modelVariants';
+import {
+  applyDefaultCatalogModelVariantSelection,
+  applyModelVariantSelection,
+  getSelectableModelVariants,
+} from '@/utils/modelVariants';
+import {
+  createCatalogFilterVariantProjectionCache,
+  getCatalogFilterModelForVariantState,
+} from '@/utils/catalogVariantFiltering';
 import { DECIMAL_GIGABYTE } from '@/utils/modelSize';
 import { screenLayoutMetrics } from '@/utils/themeTokens';
 import { uniqueByKey } from '@/utils/uniqueBy';
@@ -176,14 +184,6 @@ function getModelForCardDisplay(
     : applyCatalogDefaultVariantForTab(model, activeTab);
 }
 
-function getModelForCatalogFiltering(
-  model: ModelMetadata,
-  activeTab: ModelsCatalogTab,
-  selectedVariantId?: string,
-): ModelMetadata {
-  return getModelForCardDisplay(model, activeTab, selectedVariantId);
-}
-
 function matchesSize(model: Pick<ModelMetadata, 'size'>, filters: ModelFilterCriteria): boolean {
   if (filters.sizeRanges.length === 0) {
     return true;
@@ -276,6 +276,7 @@ export const ModelsList = ({
   const warmupContentBlurTargetRef = androidContentBlurTargetRef ?? localContentBlurTargetRef;
   const [selectedVariantIds, setSelectedVariantIds] = useState<Record<string, string>>({});
   const [variantPickerModelId, setVariantPickerModelId] = useState<string | null>(null);
+  const catalogFilterVariantProjectionCacheRef = useRef(createCatalogFilterVariantProjectionCache());
 
   const {
     models,
@@ -346,9 +347,10 @@ export const ModelsList = ({
           return;
         }
 
-        const modelVariants = Array.isArray(model.variants) ? model.variants : [];
+        const hasVariantInventory = Array.isArray(model.variants) && model.variants.length > 0;
+        const modelVariants = hasVariantInventory ? getSelectableModelVariants(model) : [];
         if (
-          modelVariants.length > 0
+          hasVariantInventory
           && !modelVariants.some((variant) => variant.variantId === variantId)
         ) {
           didPrune = true;
@@ -364,7 +366,13 @@ export const ModelsList = ({
 
   const filteredModels = useMemo(() => {
     const filtered = displayModels.filter((model) => {
-      const filterModel = getModelForCatalogFiltering(model, activeTab, selectedVariantIds[model.id]);
+      const filterModel = getCatalogFilterModelForVariantState(
+        model,
+        activeTab,
+        filters,
+        selectedVariantIds[model.id],
+        catalogFilterVariantProjectionCacheRef.current,
+      );
 
       if (filters.fitsInRamOnly) {
         const decision = filterModel.memoryFitDecision;

@@ -128,6 +128,17 @@ describe('useModelsCatalogData', () => {
     jest.useRealTimers();
   });
 
+  it('hydrates Hugging Face token state independently when the catalog hook mounts', async () => {
+    const { getCurrentValue, syncDiscoveryTokenState } = renderHookHarness();
+
+    await flushMicrotasks();
+
+    expect(mockTokenService.refreshState).toHaveBeenCalledTimes(1);
+    expect(getCurrentValue()?.isTokenStateHydrated).toBe(true);
+    expect(getCurrentValue()?.hasTokenConfigured).toBe(false);
+    expect(syncDiscoveryTokenState).toHaveBeenCalledWith(false);
+  });
+
   it('requires fresh user drag input before auto-loading the next catalog page', async () => {
     const { getCurrentValue, syncDiscoveryTokenState } = renderHookHarness();
     await flushMicrotasks();

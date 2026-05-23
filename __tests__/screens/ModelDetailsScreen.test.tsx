@@ -33,6 +33,7 @@ const mockRouter = {
   canGoBack: jest.fn(() => true),
   push: jest.fn(),
   replace: jest.fn(),
+  setParams: jest.fn(),
 };
 
 const mockStartDownload = jest.fn();
@@ -586,6 +587,11 @@ describe('ModelDetailsScreen', () => {
     await act(async () => {
       lastModelVariantPickerSheetProps.onSelectVariant('model.Q8_0.gguf');
       await Promise.resolve();
+    });
+
+    expect(mockRouter.setParams).toHaveBeenCalledWith({
+      modelId: 'org/model',
+      variantId: 'model.Q8_0.gguf',
     });
 
     await act(async () => {

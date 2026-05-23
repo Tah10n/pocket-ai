@@ -1328,7 +1328,7 @@ export class ModelCatalogService {
         }
 
         const variants = attachMemoryFitToVariants(buildCatalogModelVariants(treeResponse.entries, {
-          limit: useFullTreeProbe ? null : CATALOG_SEARCH_VARIANT_LIMIT,
+          limit: CATALOG_SEARCH_VARIANT_LIMIT,
           includeFileNames: [resolvedFileName, model.resolvedFileName, model.activeVariantId],
           includeVariantIds: [model.activeVariantId],
         }), memoryFitContext);

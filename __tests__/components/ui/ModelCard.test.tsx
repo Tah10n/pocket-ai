@@ -48,6 +48,7 @@ jest.mock('../../../src/components/ui/ScreenShell', () => {
   const mockReact = jest.requireActual('react');
   const { Pressable, Text, View } = jest.requireActual('react-native');
   return {
+    getGlassCornerRadiusStyle: () => undefined,
     getGlassSurfaceFrameStyle: () => undefined,
     joinClassNames: (...values: Array<string | undefined | false>) => values.filter(Boolean).join(' '),
     useScreenAppearance: () => require('../../../src/utils/themeTokens').getThemeAppearance('default', 'light'),
@@ -523,6 +524,40 @@ describe('ModelCard', () => {
 
     expect(screen.getByText('chevron-right')).toBeTruthy();
     expect(onOpenVariantSelector).toHaveBeenCalledWith('org/model');
+  });
+
+  it.each([
+    LifecycleStatus.PAUSED,
+    LifecycleStatus.FAILED,
+  ])('keeps the variant selector read-only for %s models', (lifecycleStatus) => {
+    const onOpenVariantSelector = jest.fn();
+    const screen = render(
+      <ModelCard
+        model={{
+          ...buildModel(ModelAccessState.PUBLIC),
+          lifecycleStatus,
+          size: 3_800_000_000,
+          resolvedFileName: 'model.Q4_K_M.gguf',
+          activeVariantId: 'model.Q4_K_M.gguf',
+          gguf: {
+            sizeLabel: 'Q4_K_M',
+          },
+          variants: [
+            { variantId: 'model.Q4_K_M.gguf', fileName: 'model.Q4_K_M.gguf', quantizationLabel: 'Q4_K_M', size: 3_800_000_000 },
+            { variantId: 'model.Q8_0.gguf', fileName: 'model.Q8_0.gguf', quantizationLabel: 'Q8_0', size: 7_200_000_000 },
+          ],
+        }}
+        {...buildModelCardHandlers({ onOpenVariantSelector })}
+        isActive={false}
+      />,
+    );
+
+    const selectorRow = screen.getByTestId('model-variant-selector-org/model');
+    expect(selectorRow.props.accessibilityHint).toBe('models.variantSelectorReadOnlyAccessibilityHint');
+
+    fireEvent.press(selectorRow);
+    expect(screen.queryByText('chevron-right')).toBeNull();
+    expect(onOpenVariantSelector).not.toHaveBeenCalled();
   });
 
   it('keeps the variant selector available when the active variant size is unknown', () => {

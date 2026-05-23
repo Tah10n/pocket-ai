@@ -480,7 +480,7 @@ describe('ModelsList', () => {
     }));
   });
 
-  it('keeps an explicit selected variant ahead of stale paused queue state', async () => {
+  it('keeps stale paused queue state read-only instead of applying another variant', async () => {
     const handleLoadMore = jest.fn();
     setModelsStoreState({
       ...defaultFilters,
@@ -501,22 +501,19 @@ describe('ModelsList', () => {
     act(() => {
       mockModelCardPropsLog.at(-1)?.onOpenVariantSelector('org/model');
     });
-    expect(mockLastVariantPickerProps.visible).toBe(true);
-    expect(mockLastVariantPickerProps.model).toEqual(expect.objectContaining({
-      id: 'org/model',
-      resolvedFileName: 'model.Q4_K_M.gguf',
-    }));
+    expect(mockLastVariantPickerProps.visible).toBe(false);
     act(() => {
       mockLastVariantPickerProps.onSelectVariant('model.Q8_0.gguf');
     });
 
     expect(mockModelCardPropsLog.at(-1)?.model).toEqual(expect.objectContaining({
-      resolvedFileName: 'model.Q8_0.gguf',
-      activeVariantId: 'model.Q8_0.gguf',
-      lifecycleStatus: LifecycleStatus.AVAILABLE,
-      downloadProgress: 0,
-      resumeData: undefined,
+      resolvedFileName: 'model.Q4_K_M.gguf',
+      activeVariantId: 'model.Q4_K_M.gguf',
+      lifecycleStatus: LifecycleStatus.PAUSED,
+      downloadProgress: 0.4,
+      resumeData: JSON.stringify({ resumeData: 'resume-q4' }),
     }));
+    expect(mockLastFlashListProps.extraData).toEqual({});
   });
 
   it('prunes selected variants when the unfiltered catalog no longer contains them', async () => {
@@ -604,7 +601,7 @@ describe('ModelsList', () => {
     }));
   });
 
-  it('hides a downloaded-tab item when selecting another variant resets it to available', async () => {
+  it('keeps paused downloaded-tab items visible and ignores alternate variant selection', async () => {
     const handleLoadMore = jest.fn();
     mockUseModelsCatalogData.mockReturnValue({
       ...createCatalogData(null, handleLoadMore),
@@ -614,6 +611,38 @@ describe('ModelsList', () => {
     render(<ModelsList activeTab="downloaded" searchQuery="phi" />);
 
     expect(mockLastFlashListProps.data).toHaveLength(1);
+    expect(mockLastVariantPickerProps.visible).toBe(false);
+
+    act(() => {
+      mockModelCardPropsLog.at(-1)?.onOpenVariantSelector('org/model');
+    });
+    expect(mockLastVariantPickerProps.visible).toBe(false);
+
+    act(() => {
+      mockLastVariantPickerProps.onSelectVariant('model.Q8_0.gguf');
+    });
+
+    expect(mockLastFlashListProps.data).toHaveLength(1);
+    expect(mockLastFlashListProps.extraData).toEqual({});
+    expect(mockModelCardPropsLog.at(-1)?.model).toEqual(expect.objectContaining({
+      lifecycleStatus: LifecycleStatus.PAUSED,
+      resolvedFileName: 'model.Q4_K_M.gguf',
+      activeVariantId: 'model.Q4_K_M.gguf',
+    }));
+  });
+
+  it('stops applying a previously selected variant when runtime state becomes paused', async () => {
+    const handleLoadMore = jest.fn();
+    setModelsStoreState({
+      ...defaultFilters,
+      fitsInRamOnly: false,
+    });
+    mockUseModelsCatalogData.mockReturnValue({
+      ...createCatalogData(null, handleLoadMore),
+      models: [createModel()],
+    } as any);
+
+    const { rerender } = render(<ModelsList activeTab="all" searchQuery="phi" />);
 
     act(() => {
       mockModelCardPropsLog.at(-1)?.onOpenVariantSelector('org/model');
@@ -623,8 +652,30 @@ describe('ModelsList', () => {
     act(() => {
       mockLastVariantPickerProps.onSelectVariant('model.Q8_0.gguf');
     });
+    expect(mockModelCardPropsLog.at(-1)?.model).toEqual(expect.objectContaining({
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      resolvedFileName: 'model.Q8_0.gguf',
+      activeVariantId: 'model.Q8_0.gguf',
+    }));
 
-    expect(mockLastFlashListProps.data).toHaveLength(0);
-    expect(mockLastFlashListProps.extraData).toEqual({ 'org/model': 'model.Q8_0.gguf' });
+    mockDownloadQueue = [createModel({
+      lifecycleStatus: LifecycleStatus.PAUSED,
+      downloadProgress: 0.4,
+      resumeData: JSON.stringify({ resumeData: 'resume-q4' }),
+    })];
+
+    await act(async () => {
+      rerender(<ModelsList activeTab="all" searchQuery="phi" />);
+      await Promise.resolve();
+    });
+
+    expect(mockModelCardPropsLog.at(-1)?.model).toEqual(expect.objectContaining({
+      lifecycleStatus: LifecycleStatus.PAUSED,
+      resolvedFileName: 'model.Q4_K_M.gguf',
+      activeVariantId: 'model.Q4_K_M.gguf',
+      downloadProgress: 0.4,
+      resumeData: JSON.stringify({ resumeData: 'resume-q4' }),
+    }));
+    expect(mockLastFlashListProps.extraData).toEqual({});
   });
 });

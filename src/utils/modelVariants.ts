@@ -45,9 +45,7 @@ export function canSelectModelVariant(model: Pick<ModelMetadata, 'lifecycleStatu
     return false;
   }
 
-  return model.lifecycleStatus === LifecycleStatus.AVAILABLE
-    || model.lifecycleStatus === LifecycleStatus.FAILED
-    || model.lifecycleStatus === LifecycleStatus.PAUSED;
+  return model.lifecycleStatus === LifecycleStatus.AVAILABLE;
 }
 
 function findVariantByIdOrFileName(

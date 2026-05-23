@@ -3531,7 +3531,7 @@ describe('ModelCatalogService', () => {
     }
   });
 
-  it('caps variant arrays stored in in-memory model snapshots', async () => {
+  it('caps detail variant arrays and in-memory model snapshots', async () => {
     const modelId = 'org/large-detail-variant-model';
     const siblings = Array.from({ length: CATALOG_SEARCH_VARIANT_LIMIT + 5 }, (_value, index) => ({
       rfilename: `model-${index.toString().padStart(2, '0')}.Q4_K_M.gguf`,
@@ -3562,7 +3562,7 @@ describe('ModelCatalogService', () => {
     const details = await modelCatalogService.getModelDetails(modelId);
     const cached = modelCatalogService.getCachedModel(modelId);
 
-    expect(details.variants).toHaveLength(CATALOG_SEARCH_VARIANT_LIMIT + 5);
+    expect(details.variants).toHaveLength(CATALOG_SEARCH_VARIANT_LIMIT);
     expect(cached?.variants).toHaveLength(CATALOG_SEARCH_VARIANT_LIMIT);
     expect(cached?.resolvedFileName).toBe(details.resolvedFileName);
     expect(cached?.variants?.some((variant) => variant.fileName === details.resolvedFileName)).toBe(true);

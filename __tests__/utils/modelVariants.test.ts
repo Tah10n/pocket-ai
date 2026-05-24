@@ -550,6 +550,43 @@ describe('modelVariants', () => {
     }));
   });
 
+  it('dedupes fallback variants that point to an existing catalog file', () => {
+    const selected = applyModelVariantSelectionIfAvailable(
+      createModel(),
+      {
+        activeVariantId: 'legacy-q8-selection',
+        resolvedFileName: 'model.Q8_0.gguf',
+        size: 8_000_000_000,
+        sha256: 'c'.repeat(64),
+        metadataTrust: 'verified_local',
+        downloadedAt: 123,
+        variants: [{
+          variantId: 'legacy-q8-selection',
+          fileName: 'model.Q8_0.gguf',
+          quantizationLabel: 'Q8_0',
+          size: 8_000_000_000,
+          sha256: 'c'.repeat(64),
+        }],
+      },
+      {
+        allowResolvedFileNameFallback: true,
+        allowResolvedFileNameVariantMatch: false,
+      },
+    );
+
+    const q8Variants = selected.variants?.filter((variant) => variant.fileName === 'model.Q8_0.gguf') ?? [];
+    expect(q8Variants).toHaveLength(1);
+    expect(q8Variants[0]).toEqual(expect.objectContaining({
+      variantId: 'legacy-q8-selection',
+      fileName: 'model.Q8_0.gguf',
+      sha256: 'c'.repeat(64),
+    }));
+    expect(selected).toEqual(expect.objectContaining({
+      resolvedFileName: 'model.Q8_0.gguf',
+      activeVariantId: 'legacy-q8-selection',
+    }));
+  });
+
   it('clears stale gguf total bytes when the selected variant has unknown size', () => {
     const selected = applyModelVariantSelection(
       createModel({

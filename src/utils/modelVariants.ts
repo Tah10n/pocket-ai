@@ -2,6 +2,7 @@ import { LifecycleStatus, type ModelMetadata, type ModelVariant } from '../types
 import { buildHuggingFaceResolveUrl } from './huggingFaceUrls';
 import { normalizePersistedModelMetadata } from '../services/ModelMetadataNormalizer';
 import { isSupportedGgufFileName } from '../services/ModelCatalogFileSelector';
+import { dedupeModelVariantsByIdentity } from './modelVariantIdentity';
 
 type ModelVariantSelectionSource = Pick<ModelMetadata, 'activeVariantId' | 'resolvedFileName'> & Partial<Pick<
   ModelMetadata,
@@ -243,10 +244,13 @@ export function applyModelVariantSelectionIfAvailable(
     ? selection.size
     : !isDifferentFile ? model.size : null;
   const fallbackVariant = buildFallbackVariant(selectionFileMetadata, selectedFileName, nextSize);
-  const variants = [
-    ...(model.variants ?? []).filter((entry) => entry.variantId !== fallbackVariant.variantId),
-    fallbackVariant,
-  ];
+  const variants = dedupeModelVariantsByIdentity(
+    [...(model.variants ?? []), fallbackVariant],
+    {
+      activeVariantId: fallbackVariant.variantId,
+      resolvedFileName: selectedFileName,
+    },
+  );
 
   return normalizePersistedModelMetadata({
     ...model,

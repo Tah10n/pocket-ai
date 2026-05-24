@@ -41,7 +41,7 @@
 ## How it works
 
 1. **Search** — browse GGUF models from Hugging Face right on your phone.
-2. **Download** — pick a model and download it to local storage.
+2. **Download** — choose a GGUF file variant/quantization and download it to local storage.
 3. **Load** — the model runs through [`llama.rn`](https://github.com/mybigday/llama.rn) entirely on-device.
 4. **Chat** — have private conversations with zero network dependency, including switching models inside an existing conversation.
 
@@ -51,6 +51,8 @@
 
 - Browse and search Hugging Face GGUF models with popularity sorting
 - Guided discovery mode that surfaces RAM-friendly, token-free models first
+- Choose concrete GGUF file variants/quantizations from model cards and model details
+- Variant-aware size and RAM-fit labels before download
 - Model details with tags, popularity, access state, and Hugging Face deep links
 - Optional Hugging Face access token for gated or private repositories
 - Locked and access-denied states shown for gated models instead of generic errors
@@ -77,6 +79,7 @@
 
 - Storage manager for unloading, offloading, and clearing model data
 - Per-model settings survive model removal for easy re-download
+- Downloads track the selected GGUF file variant so verification and re-download target the same file
 - Bounded local cache for catalog results with online revalidation
 - Background model downloads with a persistent progress notification on Android
 - Explicit confirmation before downloading models with unverified file sizes

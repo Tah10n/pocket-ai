@@ -200,6 +200,7 @@ Use the shared header families instead of route-local chrome:
 - Header actions and icon-only controls should keep the shared minimum touch-target contract from `theme-contract.json`.
 - `Models` cards should stay visually dense: keep essential chips such as access, RAM warning, and size, but do not add a redundant `Status` chip when the lifecycle is already communicated by actions, progress, or the active badge.
 - RAM-fit chips and warnings should use short user-facing language such as `Fits in RAM`, `Near RAM limit`, or `Won't fit RAM`; do not surface internal estimator jargon like `OOM` or confidence-level badges in the shipped UI.
+- Finite option pickers should use `ListPickerSheet` before adding route-local modal UI. GGUF variant selection should go through `ModelVariantPickerSheet` and keep quantization, file name, size, selected state, and RAM-fit status visible without nesting cards.
 - `Models` filtering should stay focused on user-useful criteria. The compact filter UI should expose RAM, token, and size filters; lifecycle categories such as `Available`, `Downloading`, and `Downloaded` should not appear as separate filter rows.
 
 ## QA Handoff

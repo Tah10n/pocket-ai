@@ -141,6 +141,8 @@ keyPassword=your-key-password
 - On first catalog open with no Hugging Face token configured, confirm guided discovery defaults to RAM-friendly public models and offers `Show full catalog`.
 - Search for a public GGUF model whose list metadata does not expose a reliable size and confirm the card shows a resolved size or `Unknown`, never `0.00 GB`.
 - Confirm size labels use decimal units (1 GB = 1,000,000,000 bytes).
+- For a model with multiple GGUF files, open the variant picker from a catalog card and confirm each option shows quantization, file name, size, and RAM-fit status.
+- Select a non-default variant and confirm the catalog card updates its size and RAM-fit label without losing access state or jumping the list.
 - Open `Filter` and `Sort` and confirm both panels stay collapsed by default, open independently, use the compact trigger style, and do not permanently steal list height.
 - In `Filter`, confirm the visible criteria are limited to RAM, token, and size choices; do not show separate lifecycle categories such as `Available`, `Downloading`, or `Downloaded`.
 - Apply `No token required` and confirm gated/private repositories are excluded.
@@ -153,11 +155,12 @@ keyPassword=your-key-password
 - Save a valid Hugging Face token and confirm a newly accessible gated model leaves the locked state without restarting the app.
 - Save an invalid or insufficient Hugging Face token and confirm the affected model shows `Access denied` with a recovery path.
 - Open model details from a catalog card and confirm description, tags, popularity metrics, and the `Open on HF` action render without breaking list navigation.
+- Open the variant picker from model details and confirm the selected variant matches the catalog card, including file name, size, and RAM-fit status.
 - Change the Hugging Face token state, then reopen a gated or private model from the catalog and confirm the card plus detail screen agree on `Locked`, `Access denied`, or authorized access instead of showing stale access labels.
-- Download a GGUF model and wait for verification to finish.
+- Download the selected GGUF variant and wait for verification to finish.
 - While a download is active, background the app and confirm the Android foreground-service notification stays visible and continues updating.
 - On Android 13+, confirm the app requests notification permission when starting a download and denying it does not crash the app.
-- After download completion, confirm the model remains visible in `Downloaded` without requiring a manual refresh.
+- After download completion, confirm the selected variant remains active, the model appears in `Downloaded` without requiring a manual refresh, and load/settings actions target the downloaded file.
 - Confirm model cards stay compact and do not render a separate `Status` chip.
 - Confirm RAM-fit badges on model cards and the model-details hero use short user-facing labels such as `Fits in RAM`, `Near RAM limit`, or `Won't fit RAM`, and do not expose internal terms like `OOM` or confidence levels.
 - On a downloaded model card, confirm the secondary `Settings` action opens the model controls sheet without leaving the list.

@@ -137,6 +137,8 @@ The primary UI for changing these settings lives in:
 - `src/components/ui/ModelParametersSheet.tsx`
 - `src/hooks/useModelParametersSheetController.ts`
 
+GGUF file/quantization selection is separate from load profiles. The catalog and model-details flow selects the active file variant before download/load, while Model Controls continue to manage runtime settings for that selected file.
+
 Advanced runtime controls, backend autotune, and runtime diagnostics are shown only when `showAdvancedInferenceControls` is enabled in settings.
 
 When a conversation has switched models in-chat, Model Controls target the thread's current active model so the sheet can correctly choose between `Save load profile` for inactive models and `Apply & reload` for the active chat model.

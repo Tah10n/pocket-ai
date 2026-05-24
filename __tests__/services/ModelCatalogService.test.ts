@@ -3732,6 +3732,58 @@ describe('ModelCatalogService', () => {
     }
   });
 
+  it('strips local runtime fields from auth-derived public anonymous in-memory snapshots', async () => {
+    await huggingFaceTokenService.saveToken('hf_test_token');
+    const modelId = 'org/public-auth-local-model';
+    const localModel = {
+      ...makeLocalModel(modelId),
+      size: 1_500_000_000,
+      resolvedFileName: 'model.Q4_K_M.gguf',
+      activeVariantId: 'model.Q4_K_M.gguf',
+      downloadUrl: 'https://huggingface.co/org/public-auth-local-model/resolve/main/model.Q4_K_M.gguf',
+      metadataTrust: 'verified_local' as const,
+      downloadIntegrity: {
+        kind: 'size' as const,
+        sizeBytes: 1_500_000_000,
+        checkedAt: 123,
+      },
+      resumeData: JSON.stringify({ resumeData: 'private-resume-token' }),
+      downloadedAt: 456,
+    };
+    mockedRegistry.getModel.mockImplementation((id) => (id === modelId ? localModel : undefined));
+
+    global.fetch = jest.fn(() => Promise.resolve({
+      ok: true,
+      headers: {
+        get: jest.fn(() => null),
+      },
+      json: () => Promise.resolve([makeRepo(modelId, 1_500_000_000)]),
+    })) as jest.Mock;
+
+    await modelCatalogService.searchModels('phi');
+
+    const cacheKey = (modelCatalogService as any).buildModelSnapshotCacheKey(modelId, 'anon');
+    const anonymousSnapshot = (modelCatalogService as any).modelSnapshotCache.get(cacheKey);
+    expect(anonymousSnapshot).toEqual(expect.objectContaining({
+      id: modelId,
+      accessState: ModelAccessState.PUBLIC,
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+    }));
+    expect(anonymousSnapshot.localPath).toBeUndefined();
+    expect(anonymousSnapshot.downloadedAt).toBeUndefined();
+    expect(anonymousSnapshot.downloadIntegrity).toBeUndefined();
+    expect(anonymousSnapshot.resumeData).toBeUndefined();
+    expect(anonymousSnapshot.metadataTrust).not.toBe('verified_local');
+
+    const mergedCachedModel = modelCatalogService.getCachedModel(modelId);
+    expect(mergedCachedModel?.localPath).toBe(localModel.localPath);
+    const recachedAnonymousSnapshot = (modelCatalogService as any).modelSnapshotCache.get(cacheKey);
+    expect(recachedAnonymousSnapshot.localPath).toBeUndefined();
+    expect(recachedAnonymousSnapshot.downloadIntegrity).toBeUndefined();
+    expect(recachedAnonymousSnapshot.resumeData).toBeUndefined();
+  });
+
   it('does not persist authenticated search queries into the anonymous cache', async () => {
     await huggingFaceTokenService.saveToken('hf_test_token');
     const sensitiveQuery = 'private-org/exact-repo';

@@ -9,6 +9,7 @@ import type { SystemMemorySnapshot } from './SystemMetricsService';
 import { uniqueByKey } from '../utils/uniqueBy';
 import {
   ModelCatalogCacheStore,
+  sanitizeAnonymousCatalogModel,
   type CatalogCacheAuthScope,
   type CatalogCacheScope,
 } from './ModelCatalogCacheStore';
@@ -1989,7 +1990,13 @@ export class ModelCatalogService {
     models: ModelMetadata[],
     authScope: CatalogCacheAuthScope,
   ) {
-    const normalizedModels = models.map((model) => (
+    const scopedModels = authScope === 'anon'
+      ? models.flatMap((model) => {
+        const sanitized = this.sanitizeAnonymousSnapshotModel(model);
+        return sanitized ? [sanitized] : [];
+      })
+      : models;
+    const normalizedModels = scopedModels.map((model) => (
       this.limitSnapshotModelVariants(normalizePersistedModelMetadata(model))
     ));
     normalizedModels.forEach((model) => {
@@ -2081,12 +2088,6 @@ export class ModelCatalogService {
     }
   }
 
-  private isAnonymousPublicSnapshot(model: ModelMetadata): boolean {
-    return model.accessState === ModelAccessState.PUBLIC
-      && model.isGated !== true
-      && model.isPrivate !== true;
-  }
-
   private limitSnapshotModelVariants(model: ModelMetadata): ModelMetadata {
     const variants = limitModelVariants(model.variants, {
       limit: CATALOG_SEARCH_VARIANT_LIMIT,
@@ -2105,24 +2106,7 @@ export class ModelCatalogService {
   }
 
   private sanitizeAnonymousSnapshotModel(model: ModelMetadata): ModelMetadata | null {
-    if (model.isPrivate) {
-      return null;
-    }
-
-    if (this.isAnonymousPublicSnapshot(model)) {
-      return model;
-    }
-
-    return normalizePersistedModelMetadata({
-      id: model.id,
-      name: model.name,
-      author: model.author,
-      accessState: ModelAccessState.AUTH_REQUIRED,
-      isGated: model.isGated === true,
-      isPrivate: false,
-      lifecycleStatus: LifecycleStatus.AVAILABLE,
-      downloadProgress: 0,
-    });
+    return sanitizeAnonymousCatalogModel(model);
   }
 
   private async fetchHuggingFaceModelTree(

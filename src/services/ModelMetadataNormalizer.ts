@@ -12,6 +12,7 @@ import {
   type ModelThinkingCapabilitySnapshot,
 } from '../types/models';
 import { normalizePersistedModelCapabilitySnapshot } from '../utils/modelCapabilities';
+import { dedupeModelVariantsByIdentity } from '../utils/modelVariantIdentity';
 import { getShortModelLabel } from '../utils/modelLabel';
 import { buildHuggingFaceResolveUrl } from '../utils/huggingFaceUrls';
 import { isValidLocalFileName } from '../utils/safeFilePath';
@@ -295,25 +296,23 @@ function resolveActiveVariantId(
   return undefined;
 }
 
-function normalizeModelVariants(value: unknown): ModelVariant[] | undefined {
+function normalizeModelVariants(
+  value: unknown,
+  options: {
+    activeVariantId?: string;
+    resolvedFileName?: string;
+  } = {},
+): ModelVariant[] | undefined {
   if (!Array.isArray(value)) {
     return undefined;
   }
 
-  const seen = new Set<string>();
   const variants = value
     .map((entry) => normalizeModelVariant(entry))
-    .filter((entry): entry is ModelVariant => entry !== null)
-    .filter((entry) => {
-      if (seen.has(entry.variantId)) {
-        return false;
-      }
+    .filter((entry): entry is ModelVariant => entry !== null);
+  const dedupedVariants = dedupeModelVariantsByIdentity(variants, options);
 
-      seen.add(entry.variantId);
-      return true;
-    });
-
-  return variants.length > 0 ? variants : undefined;
+  return dedupedVariants.length > 0 ? dedupedVariants : undefined;
 }
 
 function normalizeFileIntegrityMarker(value: unknown): ModelFileIntegrityMarker | undefined {
@@ -371,9 +370,15 @@ export function normalizePersistedModelMetadata(
   const thinkingCapability = normalizeThinkingCapabilitySnapshot(
     (model as PersistedModelMetadata & { thinkingCapability?: unknown }).thinkingCapability,
   );
-  const variants = normalizeModelVariants((model as PersistedModelMetadata & { variants?: unknown }).variants);
   const normalizedActiveVariantId = normalizeNonEmptyString(model.activeVariantId);
   const normalizedResolvedFileName = normalizeNonEmptyString(model.resolvedFileName);
+  const variants = normalizeModelVariants(
+    (model as PersistedModelMetadata & { variants?: unknown }).variants,
+    {
+      activeVariantId: normalizedActiveVariantId,
+      resolvedFileName: normalizedResolvedFileName,
+    },
+  );
   const activeVariantId = resolveActiveVariantId(normalizedActiveVariantId, normalizedResolvedFileName, variants);
   const normalizedDownloadIntegrity = normalizeFileIntegrityMarker(
     (model as PersistedModelMetadata & { downloadIntegrity?: unknown }).downloadIntegrity,

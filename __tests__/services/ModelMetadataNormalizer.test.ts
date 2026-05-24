@@ -278,6 +278,43 @@ describe('ModelMetadataNormalizer', () => {
     expect(opaqueWithoutVariants.activeVariantId).toBe('catalog-choice-q8');
   });
 
+  it('dedupes persisted variants by file while preserving active legacy variant metadata', () => {
+    const normalized = normalizePersistedModelMetadata({
+      id: 'author/model-q4',
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+      resolvedFileName: 'model.Q8_0.gguf',
+      activeVariantId: 'legacy-q8-selection',
+      variants: [
+        {
+          variantId: 'model.Q8_0.gguf',
+          fileName: 'model.Q8_0.gguf',
+          quantizationLabel: 'Q8_0',
+          size: 8_000_000_000,
+          sha256: VALID_SHA256,
+        },
+        {
+          variantId: 'legacy-q8-selection',
+          fileName: 'model.Q8_0.gguf',
+          quantizationLabel: 'Q8_0',
+          size: 8_000_000_000,
+          sha256: OTHER_VALID_SHA256,
+        },
+      ],
+    });
+
+    expect(normalized.variants).toEqual([
+      {
+        variantId: 'legacy-q8-selection',
+        fileName: 'model.Q8_0.gguf',
+        quantizationLabel: 'Q8_0',
+        size: 8_000_000_000,
+        sha256: OTHER_VALID_SHA256,
+      },
+    ]);
+    expect(normalized.activeVariantId).toBe('legacy-q8-selection');
+  });
+
   it('rejects non-GGUF, projector, and MTP persisted variants', () => {
     const normalized = normalizePersistedModelMetadata({
       id: 'author/model-q4',

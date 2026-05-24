@@ -64,13 +64,13 @@ function isPublicAnonymousModel(model: ModelMetadata): boolean {
     && model.isPrivate !== true;
 }
 
-function sanitizeAnonymousPersistedModel(model: ModelMetadata): ModelMetadata | null {
+export function sanitizeAnonymousCatalogModel(model: ModelMetadata): ModelMetadata | null {
   if (model.isPrivate) {
     return null;
   }
 
   if (isPublicAnonymousModel(model)) {
-    return limitPersistedModelVariants(toAnonymousPublicCatalogModel(model));
+    return limitAnonymousCatalogModelVariants(toAnonymousPublicCatalogModel(model));
   }
 
   return normalizePersistedModelMetadata({
@@ -107,7 +107,7 @@ function toAnonymousPublicCatalogModel(model: ModelMetadata): ModelMetadata {
   });
 }
 
-function limitPersistedModelVariants(model: ModelMetadata): ModelMetadata {
+function limitAnonymousCatalogModelVariants(model: ModelMetadata): ModelMetadata {
   const variants = limitModelVariants(model.variants, {
     limit: CATALOG_SEARCH_VARIANT_LIMIT,
     includeFileNames: [model.resolvedFileName, model.activeVariantId],
@@ -128,13 +128,27 @@ function limitPersistedModelVariants(model: ModelMetadata): ModelMetadata {
 
 function sanitizeAnonymousPersistedModels(models: ModelMetadata[]): ModelMetadata[] {
   return models.flatMap((model) => {
-    const sanitized = sanitizeAnonymousPersistedModel(model);
+    const sanitized = sanitizeAnonymousCatalogModel(model);
     return sanitized ? [sanitized] : [];
   });
 }
 
+function hasAnonymousRuntimeFields(model: ModelMetadata): boolean {
+  return typeof model.localPath === 'string'
+    || typeof model.downloadedAt === 'number'
+    || model.downloadIntegrity !== undefined
+    || typeof model.resumeData === 'string'
+    || typeof model.downloadErrorAt === 'number'
+    || typeof model.downloadErrorCode === 'string'
+    || typeof model.downloadErrorMessage === 'string'
+    || model.lifecycleStatus !== LifecycleStatus.AVAILABLE
+    || model.downloadProgress !== 0
+    || model.metadataTrust === 'verified_local'
+    || (model.variants?.some((variant) => variant.isLocal === true) ?? false);
+}
+
 function needsAnonymousPersistedModelSanitization(model: ModelMetadata): boolean {
-  return !isPublicAnonymousModel(model);
+  return !isPublicAnonymousModel(model) || hasAnonymousRuntimeFields(model);
 }
 
 function needsAnonymousPersistedModelsSanitization(models: ModelMetadata[]): boolean {
@@ -403,7 +417,7 @@ export class ModelCatalogCacheStore {
   public reconcileAnonymousSearchModels(models: ModelMetadata[]): void {
     const replacements = new Map<string, ModelMetadata | null>();
     models.forEach((model) => {
-      replacements.set(model.id, sanitizeAnonymousPersistedModel(model));
+      replacements.set(model.id, sanitizeAnonymousCatalogModel(model));
     });
 
     if (replacements.size === 0) {
@@ -530,7 +544,7 @@ export class ModelCatalogCacheStore {
         shouldRewriteSnapshotPayload = true;
       }
 
-      const sanitizedModel = sanitizeAnonymousPersistedModel(entry.model);
+      const sanitizedModel = sanitizeAnonymousCatalogModel(entry.model);
       if (sanitizedModel) {
         entry.model = sanitizedModel;
         this.snapshotEntries.set(entry.key, entry);
@@ -614,7 +628,7 @@ export class ModelCatalogCacheStore {
     const entries = this.getSortedSnapshotEntries()
       .filter((entry) => entry.authScope === 'anon')
       .flatMap((entry) => {
-        const sanitizedModel = sanitizeAnonymousPersistedModel(entry.model);
+        const sanitizedModel = sanitizeAnonymousCatalogModel(entry.model);
         return sanitizedModel
           ? [{
             ...entry,

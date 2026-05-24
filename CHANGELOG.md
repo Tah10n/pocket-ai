@@ -8,6 +8,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > Note: This file is maintained automatically by Release Please based on Conventional Commits (PR titles).
 > Avoid editing it manually unless you are bootstrapping or fixing the release history.
 
+## [1.5.0](https://github.com/Tah10n/pocket-ai/compare/v1.4.0...v1.5.0) (2026-05-24)
+
+
+### Features
+
+* add catalog variant picker ([92a0d95](https://github.com/Tah10n/pocket-ai/commit/92a0d95b2205e7ee5e73908120d59dcca657fc3d))
+
+
+### Bug Fixes
+
+* **chat:** add indexed thread commit markers ([8d3bacc](https://github.com/Tah10n/pocket-ai/commit/8d3baccfbf4aa4846f381590b440ff00e98a0470))
+* **chat:** mark persistence imports as type-only ([f8d7aae](https://github.com/Tah10n/pocket-ai/commit/f8d7aae96aa7dc3d07d03f87647b11c0b8b56906))
+* **download:** defer unsafe cancel cleanup ([5460b81](https://github.com/Tah10n/pocket-ai/commit/5460b81e89d2e7c90a3c25837231f3d6fc5db61b))
+* **download:** harden cancel cleanup and GGUF integrity state ([#99](https://github.com/Tah10n/pocket-ai/issues/99)) ([59e6f03](https://github.com/Tah10n/pocket-ai/commit/59e6f030354936f9c3a50cf821db27b8c4d0b225))
+* **download:** validate cancel cleanup and GGUF payloads ([f0e758d](https://github.com/Tah10n/pocket-ai/commit/f0e758dc7498153e0fe1ce684452e5edea8d982f))
+* **engine:** evaluate intermediate safe load profiles ([3ca4df5](https://github.com/Tah10n/pocket-ai/commit/3ca4df5eeea82a70efdf830549329e0433acada3))
+* **engine:** harden template stop resolution ([94ad6fa](https://github.com/Tah10n/pocket-ai/commit/94ad6fa4b687e4c73ddaad8b03fc14a454191bcf))
+* **engine:** harden template stop resolution ([0972df5](https://github.com/Tah10n/pocket-ai/commit/0972df5f5d443af64aa15013c0ead26c9903e3a0))
+* **engine:** preserve backend init retry diagnostics ([d97d9e4](https://github.com/Tah10n/pocket-ai/commit/d97d9e4e31d2b55944879254a723be1db2236e06))
+* **engine:** probe first-run GPU profiles conservatively ([06c700d](https://github.com/Tah10n/pocket-ai/commit/06c700d611d8a4f70473df8a79b9b30d5e22b33f))
+* finalize catalog variant follow-ups ([06f2abd](https://github.com/Tah10n/pocket-ai/commit/06f2abd323282bee0888b677add998c30e8b1d4a))
+* harden catalog cache variant identities ([b759a3a](https://github.com/Tah10n/pocket-ai/commit/b759a3a59b9c757f418095614aadd05c8740abc0))
+* harden catalog variant filtering ([9ffa572](https://github.com/Tah10n/pocket-ai/commit/9ffa57237486351024896c45929a10c4a7f262ac))
+* harden catalog variant picker follow-ups ([9f0bfec](https://github.com/Tah10n/pocket-ai/commit/9f0bfec71727f420ef835073f2ca465c27165501))
+* **integrity:** harden SHA-backed GGUF validation ([5919c78](https://github.com/Tah10n/pocket-ai/commit/5919c78d3538797ffa79444e4a947d0d30ab3e91))
+* **integrity:** reset legacy local file changes ([d148c09](https://github.com/Tah10n/pocket-ai/commit/d148c0947052e2a20e0f39ff6dc3b58a56efd947))
+* **integrity:** reset stale local model state ([6e206db](https://github.com/Tah10n/pocket-ai/commit/6e206db280caec59baec1e49ec6b76e56d842c8e))
+
+
+### Performance Improvements
+
+* **chat:** adapt streaming UI patch cadence ([44677d3](https://github.com/Tah10n/pocket-ai/commit/44677d3d504bc04d236e253570cdfe56dca11d1c))
+
 ## [1.4.0](https://github.com/Tah10n/pocket-ai/compare/v1.3.3...v1.4.0) (2026-05-16)
 
 

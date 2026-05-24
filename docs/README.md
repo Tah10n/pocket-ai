@@ -20,6 +20,7 @@ Review this folder whenever you change:
 
 - product messaging in the public `README`
 - privacy or network behavior
+- model discovery, variant selection, or download behavior
 - release flow or build metadata
 - native architecture assumptions
 - UI component conventions or localization rules

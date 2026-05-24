@@ -1,6 +1,6 @@
 # Privacy & Disclosures
 
-Last updated: 2026-05-16
+Last updated: 2026-05-24
 
 ## Summary
 
@@ -15,8 +15,8 @@ This document summarizes the current behavior of the app as configured in this r
 - Conversation history is persisted locally on the device and encrypted at rest.
 - System prompt presets, generation settings, and model-specific load profiles are persisted locally on the device and encrypted at rest.
 - An optional Hugging Face access token can be stored locally in secure device storage for browsing and downloading gated or private models.
-- Catalog metadata such as resolved GGUF size, access state, and local download status is cached locally only for app behavior and is not synced to a hosted account service.
-- Recent first-page Hugging Face catalog results and recently opened public model-detail snapshots are stored in a bounded on-device cache so the catalog can reopen quickly on this device.
+- Catalog metadata such as resolved GGUF file/variant size, selected file identity, access state, and local download status is cached locally only for app behavior and is not synced to a hosted account service.
+- Recent first-page Hugging Face catalog results, GGUF variant metadata, and recently opened public model-detail snapshots are stored in a bounded on-device cache so the catalog can reopen quickly on this device.
 - Hugging Face popularity metadata, tag summaries, and routed model-detail state are cached locally only to improve catalog browsing on this device.
 - Storage cleanup controls are available in-app through `Storage Manager` and `All Conversations`, including model removal that can keep or reset saved per-model settings.
 
@@ -25,8 +25,8 @@ This document summarizes the current behavior of the app as configured in this r
 Pocket AI uses the network only for model-management flows:
 
 - Hugging Face model catalog search
-- Optional metadata, README summary, and config fetches used for model hints, popularity sorting, size recovery, context-window recovery, and gated-model access checks
-- Model file downloads from remote hosting endpoints
+- Optional metadata, repository file lists, README summary, and config fetches used for model hints, GGUF variant lists, popularity sorting, size recovery, context-window recovery, and gated-model access checks
+- Model file downloads for the selected GGUF variant from remote hosting endpoints
 - If a Hugging Face access token is configured, the app attaches it to Hugging Face API requests as needed to surface gated or private repositories (including catalog browsing). Some endpoints are still probed anonymously first and retried with auth only when required.
 - When a user taps through to Hugging Face from the token screen or a model detail view, the app opens the public Hugging Face site in the device browser
 

@@ -358,7 +358,7 @@
       "backendBenchmarkRestoreWarningTitle": "Предыдущая модель не была восстановлена",
       "backendBenchmarkRestoreWarningDescription": "Автотюнинг завершился, но ранее загруженную модель не удалось восстановить: {{error}}",
       "pendingLoadProfileTitle": "Есть изменения профиля загрузки",
-      "pendingLoadProfileDescription": "Сохраните профиль загрузки, чтобы при следующей загрузке модели применились новые параметры контекста и GPU layers.",
+      "pendingLoadProfileDescription": "Применятся при перезагрузке.",
       "savedLoadProfileTitle": "Профиль загрузки сохранен",
       "savedLoadProfileDescription": "Эти изменения применятся при следующей загрузке модели в память.",
       "contextWindow": "Контекстное окно",

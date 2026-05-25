@@ -352,7 +352,7 @@
       "backendBenchmarkRestoreWarningTitle": "Previous model was not restored",
       "backendBenchmarkRestoreWarningDescription": "Autotune completed, but the previously loaded model could not be restored: {{error}}",
       "pendingLoadProfileTitle": "Pending load changes",
-      "pendingLoadProfileDescription": "Save this load profile so the next model load uses the updated context window and GPU layers.",
+      "pendingLoadProfileDescription": "Applies on reload.",
       "savedLoadProfileTitle": "Load profile saved",
       "savedLoadProfileDescription": "These changes apply the next time the model is loaded into memory.",
       "contextWindow": "Context window",

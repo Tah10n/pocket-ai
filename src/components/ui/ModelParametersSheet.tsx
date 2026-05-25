@@ -1,13 +1,15 @@
 import React, { useEffect, useState } from 'react';
-import { Modal } from 'react-native';
+import { Modal, StyleSheet, useWindowDimensions } from 'react-native';
 import Slider from '@react-native-community/slider';
 import { useTranslation } from 'react-i18next';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Box } from '@/components/ui/box';
 import { Button, ButtonText } from '@/components/ui/button';
 import { Pressable } from '@/components/ui/pressable';
 import { ProgressBar } from '@/components/ui/ProgressBar';
 import { ScrollView } from '@/components/ui/scroll-view';
 import {
+  joinClassNames,
   ScreenBadge,
   ScreenCard,
   ScreenIconButton,
@@ -20,7 +22,8 @@ import {
 import { Text } from '@/components/ui/text';
 import type { EngineDiagnostics } from '@/types/models';
 import type { AndroidBlurTargetRef } from '@/utils/androidBlur';
-import { screenLayoutTokens } from '@/utils/themeTokens';
+import { getNativeSafeAreaInset } from '@/utils/safeArea';
+import { motionTokens, screenLayoutMetrics, screenLayoutTokens } from '@/utils/themeTokens';
 import {
   GenerationParameters,
   ModelLoadParameters,
@@ -112,6 +115,79 @@ interface ParameterControlCardProps {
 const accentEyebrowClassName = 'text-xs font-semibold uppercase tracking-wider text-primary-600 dark:text-primary-300';
 const cardTitleClassName = 'text-base font-semibold text-typography-900 dark:text-typography-100';
 const cardDescriptionClassName = 'text-sm leading-5 text-typography-500 dark:text-typography-400';
+const statusFooterTitleClassNameByTone = {
+  accent: accentEyebrowClassName,
+  success: 'text-xs font-semibold uppercase tracking-wider text-success-600 dark:text-success-400',
+} as const;
+const modelParametersSheetFooterFallbackHeightByKind = {
+  apply: 104,
+  saveConfirmation: 88,
+} as const;
+const modelParametersSheetFixedHeaderFallbackHeight = 76;
+const modelParametersSheetButtonHitSlopBySize = {
+  xs: { top: 6, right: 6, bottom: 6, left: 6 },
+  sm: { top: 4, right: 4, bottom: 4, left: 4 },
+  md: { top: 2, right: 2, bottom: 2, left: 2 },
+  lg: undefined,
+} as const;
+
+function ModelParametersSheetButton({
+  size = 'md',
+  hitSlop,
+  ...props
+}: React.ComponentProps<typeof Button>) {
+  return (
+    <Button
+      size={size}
+      hitSlop={hitSlop ?? modelParametersSheetButtonHitSlopBySize[size]}
+      {...props}
+    />
+  );
+}
+
+function ModelParametersSheetStatusFooter({
+  testID,
+  dividerClassName,
+  titleTone,
+  title,
+  description,
+  descriptionNumberOfLines,
+  action,
+  onMeasuredHeight,
+}: {
+  testID: string;
+  dividerClassName: string;
+  titleTone: keyof typeof statusFooterTitleClassNameByTone;
+  title: string;
+  description: string;
+  descriptionNumberOfLines?: number;
+  action?: React.ReactNode;
+  onMeasuredHeight: (height: number) => void;
+}) {
+  return (
+    <Box
+      testID={testID}
+      className={joinClassNames('mt-2 border-t pt-2', dividerClassName)}
+      onLayout={(event) => {
+        onMeasuredHeight(Math.ceil(event.nativeEvent.layout.height));
+      }}
+    >
+      <ScreenCard className="mb-2 px-3 py-2" tone="accent" variant="inset" padding="none">
+        <Text className={statusFooterTitleClassNameByTone[titleTone]}>
+          {title}
+        </Text>
+        <Text
+          numberOfLines={descriptionNumberOfLines}
+          className="mt-0.5 text-xs leading-4 text-typography-700 dark:text-typography-200"
+        >
+          {description}
+        </Text>
+      </ScreenCard>
+
+      {action}
+    </Box>
+  );
+}
 
 function ResetAction({
   onPress,
@@ -123,9 +199,9 @@ function ResetAction({
   const { t } = useTranslation();
 
   return (
-    <Button onPress={onPress} action="softPrimary" size="xs" disabled={disabled}>
+    <ModelParametersSheetButton onPress={onPress} action="softPrimary" size="xs" disabled={disabled}>
       <ButtonText>{t('common.reset')}</ButtonText>
-    </Button>
+    </ModelParametersSheetButton>
   );
 }
 
@@ -343,8 +419,13 @@ export function ModelParametersSheet({
 }: ModelParametersSheetProps) {
   const { t } = useTranslation();
   const { appearance } = useTheme();
+  const insets = useSafeAreaInsets();
+  const { height: windowHeight } = useWindowDimensions();
   const [seedInput, setSeedInput] = useState(() => (params.seed === null ? '' : String(params.seed)));
   const [androidGpuInfo, setAndroidGpuInfo] = useState<AndroidGpuInfoSnapshot | null>(null);
+  const [fixedHeaderHeight, setFixedHeaderHeight] = useState(0);
+  const [fixedApplyFooterHeight, setFixedApplyFooterHeight] = useState(0);
+  const [fixedSaveConfirmationFooterHeight, setFixedSaveConfirmationFooterHeight] = useState(0);
   const runtimeBackendDevicesText = (
     Array.isArray(engineDiagnostics?.backendDevices) && engineDiagnostics.backendDevices.length > 0
       ? engineDiagnostics.backendDevices.join(' ')
@@ -681,55 +762,173 @@ export function ModelParametersSheet({
       ? t('chat.modelControls.saving')
       : t('chat.modelControls.reloading')
     : applyButtonLabel;
+  const resolvedWindowHeight = Number.isFinite(windowHeight) && windowHeight > 0
+    ? windowHeight
+    : 720;
+  const nativeTopInset = getNativeSafeAreaInset(insets.top);
+  const nativeBottomInset = getNativeSafeAreaInset(insets.bottom);
+  const desiredSheetMaxHeight = Math.max(
+    240,
+    Math.floor(resolvedWindowHeight * screenLayoutMetrics.sheetExpandedMaxHeightRatio),
+  );
+  const safeSheetMaxHeight = Math.max(
+    0,
+    resolvedWindowHeight - nativeTopInset - motionTokens.minimumTouchTargetPx,
+  );
+  const sheetMaxHeight = Math.min(desiredSheetMaxHeight, safeSheetMaxHeight);
+  const fixedHeaderReservedHeight = fixedHeaderHeight > 0
+    ? fixedHeaderHeight
+    : modelParametersSheetFixedHeaderFallbackHeight;
+  const fixedChromeWithoutFooterHeight = screenLayoutMetrics.sheetContentTopInset
+    + screenLayoutMetrics.sheetBottomInset
+    + fixedHeaderReservedHeight
+    + nativeBottomInset;
+  const effectiveMinimumScrollHeight = Math.min(
+    screenLayoutMetrics.sheetMinimumScrollableContentHeight,
+    Math.max(0, sheetMaxHeight - fixedChromeWithoutFooterHeight),
+  );
+  const fixedFooterRequestedReservedHeight = showApplyReload
+    ? (fixedApplyFooterHeight > 0
+      ? fixedApplyFooterHeight
+      : modelParametersSheetFooterFallbackHeightByKind.apply) + screenLayoutMetrics.sheetFooterTopGap
+    : didSaveLoadProfile
+      ? (fixedSaveConfirmationFooterHeight > 0
+        ? fixedSaveConfirmationFooterHeight
+        : modelParametersSheetFooterFallbackHeightByKind.saveConfirmation) + screenLayoutMetrics.sheetFooterTopGap
+      : 0;
+  const fixedFooterMaximumReservedHeight = Math.max(
+    0,
+    sheetMaxHeight - fixedChromeWithoutFooterHeight - effectiveMinimumScrollHeight,
+  );
+  const shouldInlineFooterInScroll = fixedFooterRequestedReservedHeight > fixedFooterMaximumReservedHeight;
+  const fixedFooterReservedHeight = Math.min(
+    shouldInlineFooterInScroll ? 0 : fixedFooterRequestedReservedHeight,
+    fixedFooterMaximumReservedHeight,
+  );
+  const availableScrollMaxHeight = sheetMaxHeight
+    - fixedChromeWithoutFooterHeight
+    - fixedFooterReservedHeight;
+  const sheetScrollMaxHeight = Math.max(effectiveMinimumScrollHeight, availableScrollMaxHeight);
+  const handleFixedHeaderMeasuredHeight = React.useCallback((nextHeight: number) => {
+    setFixedHeaderHeight((currentHeight) => (
+      currentHeight === nextHeight ? currentHeight : nextHeight
+    ));
+  }, []);
+  const handleApplyFooterMeasuredHeight = React.useCallback((nextHeight: number) => {
+    setFixedApplyFooterHeight((currentHeight) => (
+      currentHeight === nextHeight ? currentHeight : nextHeight
+    ));
+  }, []);
+  const handleSaveConfirmationFooterMeasuredHeight = React.useCallback((nextHeight: number) => {
+    setFixedSaveConfirmationFooterHeight((currentHeight) => (
+      currentHeight === nextHeight ? currentHeight : nextHeight
+    ));
+  }, []);
+  const footerContent = showApplyReload ? (
+    <ModelParametersSheetStatusFooter
+      testID="model-apply-footer"
+      dividerClassName={appearance.classNames.dividerClassName}
+      titleTone="accent"
+      title={t('chat.modelControls.pendingLoadProfileTitle')}
+      description={t('chat.modelControls.pendingLoadProfileDescription')}
+      descriptionNumberOfLines={1}
+      onMeasuredHeight={handleApplyFooterMeasuredHeight}
+      action={(
+        <ModelParametersSheetButton
+          testID="apply-model-settings-button"
+          onPress={onApplyReload}
+          action="softPrimary"
+          size="sm"
+          disabled={!canApplyReload || isApplyingReload || !modelId}
+          className="w-full rounded-2xl"
+        >
+          <ButtonText>{applyProgressLabel}</ButtonText>
+        </ModelParametersSheetButton>
+      )}
+    />
+  ) : didSaveLoadProfile ? (
+    <ModelParametersSheetStatusFooter
+      testID="model-save-confirmation-footer"
+      dividerClassName={appearance.classNames.dividerClassName}
+      titleTone="success"
+      title={t('chat.modelControls.savedLoadProfileTitle')}
+      description={t('chat.modelControls.savedLoadProfileDescription')}
+      onMeasuredHeight={handleSaveConfirmationFooterMeasuredHeight}
+    />
+  ) : null;
 
   return (
     <Modal visible={visible} animationType="fade" transparent onRequestClose={onClose}>
       <ScreenModalOverlay>
         <Pressable className="flex-1" onPress={onClose} />
         <ScreenSheet
-          className={screenLayoutTokens.sheetMaxHeightDefaultClassName}
+          testID="model-parameters-sheet"
+          className={joinClassNames('min-h-0', screenLayoutTokens.sheetMaxHeightExpandedClassName)}
+          style={[styles.sheet, { maxHeight: sheetMaxHeight }]}
           androidBlurTargetRef={androidContentBlurTargetRef}
         >
-          <Box className="mb-4 flex-row items-start justify-between gap-4">
-            <Box className="min-w-0 flex-1">
-              <Text className="text-lg font-semibold text-typography-900 dark:text-typography-100">
-                {t('chat.modelControls.title')}
-              </Text>
-              <Text className="mt-1 text-sm leading-5 text-typography-500 dark:text-typography-400">
-                {modelId
-                  ? t('chat.modelControls.descriptionForModel', { modelLabel, loadAction: applyButtonLabel })
-                  : t('chat.modelControls.descriptionNoModel')}
-              </Text>
-            </Box>
+          <Box
+            testID="model-parameters-sheet-fixed-header"
+            className="pb-4"
+            onLayout={(event) => {
+              handleFixedHeaderMeasuredHeight(Math.ceil(event.nativeEvent.layout.height));
+            }}
+          >
+            <Box className="flex-row items-start justify-between gap-4">
+              <Box className="min-w-0 flex-1">
+                <Text className="text-lg font-semibold text-typography-900 dark:text-typography-100">
+                  {t('chat.modelControls.title')}
+                </Text>
+                <Text className="mt-1 text-sm leading-5 text-typography-500 dark:text-typography-400">
+                  {modelId
+                    ? t('chat.modelControls.descriptionForModel', { modelLabel, loadAction: applyButtonLabel })
+                    : t('chat.modelControls.descriptionNoModel')}
+                </Text>
+              </Box>
 
-            <ScreenIconButton
-              onPress={onClose}
-              accessibilityLabel={t('common.cancel')}
-              iconName="close"
-            />
+              <ScreenIconButton
+                testID="model-parameters-sheet-close-button"
+                onPress={onClose}
+                accessibilityLabel={t('common.cancel')}
+                iconName="close"
+              />
+            </Box>
           </Box>
 
-          <ScreenCard className="mb-3 flex-row items-center justify-between" tone="accent" variant="inset" padding="compact">
-            <Box className="min-w-0 flex-1 pr-3">
-              <Text className={accentEyebrowClassName}>
-                {t('chat.modelControls.activeProfile')}
-              </Text>
-              <Text numberOfLines={1} className="mt-1 text-sm font-semibold text-typography-900 dark:text-typography-100">
-                {modelLabel}
-              </Text>
-            </Box>
+          <ScrollView
+            testID="model-parameters-sheet-scroll"
+            className="min-h-0 flex-shrink"
+            contentContainerStyle={styles.scrollContent}
+            showsVerticalScrollIndicator={false}
+            style={[
+              styles.scroll,
+              {
+                maxHeight: sheetScrollMaxHeight,
+                minHeight: effectiveMinimumScrollHeight,
+              },
+            ]}
+          >
+            <ScreenCard testID="model-parameters-sheet-active-profile" className="mb-3 flex-row items-center justify-between" tone="accent" variant="inset" padding="compact">
+              <Box className="min-w-0 flex-1 pr-3">
+                <Text className={accentEyebrowClassName}>
+                  {t('chat.modelControls.activeProfile')}
+                </Text>
+                <Text numberOfLines={1} className="mt-1 text-sm font-semibold text-typography-900 dark:text-typography-100">
+                  {modelLabel}
+                </Text>
+              </Box>
 
-            <Button
-              onPress={onReset}
-              action="softPrimary"
-              size="sm"
-              disabled={!modelId}
-            >
-              <ButtonText>{t('common.resetAll')}</ButtonText>
-            </Button>
-          </ScreenCard>
+              <ModelParametersSheetButton
+                testID="reset-model-settings-button"
+                onPress={onReset}
+                action="softPrimary"
+                size="sm"
+                disabled={!modelId}
+              >
+                <ButtonText>{t('common.resetAll')}</ButtonText>
+              </ModelParametersSheetButton>
+            </ScreenCard>
 
-          <ScrollView showsVerticalScrollIndicator={false}>
             <ScreenStack gap="default" className="pb-2">
               <ScreenCard tone="accent">
                 <ScreenStack gap="default">
@@ -1100,23 +1299,25 @@ export function ModelParametersSheet({
 
                       <Box className="mt-3 flex-row justify-end gap-2">
                         {isAutotuneRunning ? (
-                          <Button
+                          <ModelParametersSheetButton
+                            testID="backend-benchmark-cancel-button"
                             onPress={() => onCancelAutotune?.()}
                             action="secondary"
                             size="sm"
                             disabled={!onCancelAutotune}
                           >
                             <ButtonText>{t('chat.modelControls.backendBenchmarkCancel')}</ButtonText>
-                          </Button>
+                          </ModelParametersSheetButton>
                         ) : (
-                          <Button
+                          <ModelParametersSheetButton
+                            testID="backend-benchmark-run-button"
                             onPress={() => onRunAutotune?.()}
                             action="softPrimary"
                             size="sm"
                             disabled={!canRunAutotune || isAutotuneRunning || !onRunAutotune}
                           >
                             <ButtonText>{t('chat.modelControls.backendBenchmarkRun')}</ButtonText>
-                          </Button>
+                          </ModelParametersSheetButton>
                         )}
                       </Box>
                     </ScreenCard>
@@ -1442,46 +1643,31 @@ export function ModelParametersSheet({
                 </ScreenStack>
               </ScreenCard>
             </ScreenStack>
+
+            {shouldInlineFooterInScroll ? footerContent : null}
           </ScrollView>
 
-          {showApplyReload ? (
-            <Box testID="model-apply-footer" className={`mt-4 border-t pt-4 ${appearance.classNames.dividerClassName}`}>
-              <ScreenCard className="mb-3" tone="accent" variant="inset" padding="compact">
-                <Text className={accentEyebrowClassName}>
-                  {t('chat.modelControls.pendingLoadProfileTitle')}
-                </Text>
-                <Text className="mt-1 text-sm leading-5 text-typography-700 dark:text-typography-200">
-                  {t('chat.modelControls.pendingLoadProfileDescription')}
-                </Text>
-              </ScreenCard>
-
-              <Button
-                testID="apply-model-settings-button"
-                onPress={onApplyReload}
-                action="softPrimary"
-                size="sm"
-                disabled={!canApplyReload || isApplyingReload || !modelId}
-                className="w-full rounded-2xl"
-              >
-                <ButtonText>{applyProgressLabel}</ButtonText>
-              </Button>
-            </Box>
-          ) : null}
-
-          {!showApplyReload && didSaveLoadProfile ? (
-            <Box testID="model-save-confirmation-footer" className={`mt-4 border-t pt-4 ${appearance.classNames.dividerClassName}`}>
-              <ScreenCard className="mb-3" tone="accent" variant="inset" padding="compact">
-                <Text className="text-xs font-semibold uppercase tracking-wider text-success-600 dark:text-success-400">
-                  {t('chat.modelControls.savedLoadProfileTitle')}
-                </Text>
-                <Text className="mt-1 text-sm leading-5 text-typography-700 dark:text-typography-200">
-                  {t('chat.modelControls.savedLoadProfileDescription')}
-                </Text>
-              </ScreenCard>
-            </Box>
-          ) : null}
+          {shouldInlineFooterInScroll ? null : footerContent}
         </ScreenSheet>
       </ScreenModalOverlay>
     </Modal>
   );
 }
+
+const styles = StyleSheet.create({
+  sheet: {
+    minHeight: 0,
+    flexShrink: 1,
+  },
+  scroll: {
+    alignSelf: 'stretch',
+    backgroundColor: 'transparent',
+    flexGrow: 0,
+    minHeight: screenLayoutMetrics.sheetMinimumScrollableContentHeight,
+    flexShrink: 1,
+  },
+  scrollContent: {
+    backgroundColor: 'transparent',
+    paddingBottom: screenLayoutMetrics.sheetBottomInset,
+  },
+});

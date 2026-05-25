@@ -1,19 +1,45 @@
 import React from 'react';
+import { StyleSheet, useWindowDimensions } from 'react-native';
 import { fireEvent, render } from '@testing-library/react-native';
 import { ModelParametersSheet } from '../../src/components/ui/ModelParametersSheet';
+import { getNativeBottomSafeAreaInset, getNativeSafeAreaInset } from '../../src/utils/safeArea';
+import { motionTokens, screenLayoutMetrics } from '../../src/utils/themeTokens';
+
+let mockSafeAreaInsets = { top: 0, right: 0, bottom: 0, left: 0 };
+
+jest.mock('react-native', () => {
+  const actual = jest.requireActual('react-native');
+
+  Object.defineProperty(actual, 'useWindowDimensions', {
+    configurable: true,
+    value: jest.fn(() => ({
+      width: 390,
+      height: 800,
+      scale: 1,
+      fontScale: 1,
+    })),
+  });
+
+  return actual;
+});
 
 jest.mock('react-native-safe-area-context', () => ({
-  useSafeAreaInsets: () => ({ top: 0, right: 0, bottom: 0, left: 0 }),
+  useSafeAreaInsets: () => mockSafeAreaInsets,
 }));
 
-jest.mock('../../src/providers/ThemeProvider', () => ({
-  useTheme: () => ({
-    colors: {
-      primaryStrong: '#3211d4',
-      borderStrong: '#cbd5e1',
-    },
-  }),
-}));
+jest.mock('../../src/providers/ThemeProvider', () => {
+  const themeTokens = jest.requireActual('../../src/utils/themeTokens');
+
+  return {
+    useTheme: () => ({
+      appearance: themeTokens.getThemeAppearance(themeTokens.DEFAULT_THEME_ID, 'light'),
+      colors: {
+        primaryStrong: '#3211d4',
+        borderStrong: '#cbd5e1',
+      },
+    }),
+  };
+});
 
 jest.mock('../../src/components/ui/MaterialSymbols', () => {
   return {
@@ -29,6 +55,26 @@ const reactI18nextMock = jest.requireMock('react-i18next') as {
   __setTranslationOverride: (key: string, value: string, nextLanguage?: string) => void;
   __resetTranslations: () => void;
 };
+const useWindowDimensionsMock = useWindowDimensions as jest.MockedFunction<typeof useWindowDimensions>;
+
+interface TestInstanceWithParent {
+  props: { testID?: string };
+  parent: TestInstanceWithParent | null;
+}
+
+function hasAncestorWithTestId(instance: TestInstanceWithParent, testID: string) {
+  let parent = instance.parent;
+
+  while (parent) {
+    if (parent.props.testID === testID) {
+      return true;
+    }
+
+    parent = parent.parent;
+  }
+
+  return false;
+}
 
 const baseGenerationParams = {
   temperature: 0.7,
@@ -79,6 +125,13 @@ function renderSheet(overrides: Partial<React.ComponentProps<typeof ModelParamet
 
 describe('ModelParametersSheet', () => {
   beforeEach(() => {
+    mockSafeAreaInsets = { top: 0, right: 0, bottom: 0, left: 0 };
+    useWindowDimensionsMock.mockReturnValue({
+      width: 390,
+      height: 800,
+      scale: 1,
+      fontScale: 1,
+    });
     reactI18nextMock.__resetTranslations();
     reactI18nextMock.__setTranslationOverride(
       'chat.modelControls.descriptionForModel',
@@ -224,6 +277,202 @@ describe('ModelParametersSheet', () => {
     expect(screen.queryByText('GPU 20')).toBeNull();
   });
 
+  it('bounds the scroll area so load controls and the apply footer remain reachable', () => {
+    const screen = renderSheet({
+      showApplyReload: true,
+      showAdvancedInferenceControls: true,
+    });
+
+    const sheet = screen.getByTestId('model-parameters-sheet');
+    const fixedHeader = screen.getByTestId('model-parameters-sheet-fixed-header');
+    const scroll = screen.getByTestId('model-parameters-sheet-scroll');
+    const fixedFooter = screen.getByTestId('model-apply-footer');
+    const resetButton = screen.getByTestId('reset-model-settings-button');
+    const applyButton = screen.getByTestId('apply-model-settings-button');
+
+    fireEvent(fixedHeader, 'layout', { nativeEvent: { layout: { height: 76 } } });
+
+    const sheetStyle = StyleSheet.flatten(sheet.props.style);
+    const scrollStyle = StyleSheet.flatten(scroll.props.style);
+
+    expect(sheetStyle).toMatchObject({
+      minHeight: 0,
+      flexShrink: 1,
+    });
+    expect(sheetStyle.maxHeight).toBeGreaterThan(0);
+    expect(fixedHeader).toBeTruthy();
+    expect(scrollStyle).toMatchObject({
+      alignSelf: 'stretch',
+      backgroundColor: 'transparent',
+      flexGrow: 0,
+      minHeight: screenLayoutMetrics.sheetMinimumScrollableContentHeight,
+      flexShrink: 1,
+    });
+    expect(scrollStyle.maxHeight).toBeGreaterThan(0);
+    expect(StyleSheet.flatten(scroll.props.contentContainerStyle)).toMatchObject({
+      backgroundColor: 'transparent',
+      paddingBottom: screenLayoutMetrics.sheetBottomInset,
+    });
+    expect(screen.getByText('chat.modelControls.kvCache')).toBeTruthy();
+    expect(screen.getByTestId('model-parameters-sheet-close-button')).toBeTruthy();
+    expect(typeof fixedFooter.props.onLayout).toBe('function');
+    expect(applyButton.props.hitSlop).toMatchObject({ top: 4, right: 4, bottom: 4, left: 4 });
+    expect(resetButton.props.hitSlop).toMatchObject({ top: 4, right: 4, bottom: 4, left: 4 });
+  });
+
+  it('does not force the scroll area beyond the remaining sheet height on compact screens', () => {
+    useWindowDimensionsMock.mockReturnValue({
+      width: 360,
+      height: 480,
+      scale: 1,
+      fontScale: 1,
+    });
+    const screen = renderSheet({
+      showApplyReload: true,
+      showAdvancedInferenceControls: true,
+    });
+
+    fireEvent(screen.getByTestId('model-parameters-sheet-fixed-header'), 'layout', { nativeEvent: { layout: { height: 76 } } });
+    const fixedFooter = screen.getByTestId('model-apply-footer');
+
+    fireEvent(fixedFooter, 'layout', { nativeEvent: { layout: { height: 110 } } });
+
+    const sheetStyle = StyleSheet.flatten(screen.getByTestId('model-parameters-sheet').props.style);
+    const scrollStyle = StyleSheet.flatten(screen.getByTestId('model-parameters-sheet-scroll').props.style);
+    const fixedChromeHeight = screenLayoutMetrics.sheetContentTopInset
+      + screenLayoutMetrics.sheetBottomInset
+      + 76
+      + 110
+      + screenLayoutMetrics.sheetFooterTopGap;
+
+    expect(scrollStyle.maxHeight).toBe(sheetStyle.maxHeight - fixedChromeHeight);
+    expect(fixedChromeHeight + scrollStyle.maxHeight).toBeLessThanOrEqual(sheetStyle.maxHeight);
+  });
+
+  it('reserves top safe area and a backdrop touch target on very compact screens', () => {
+    useWindowDimensionsMock.mockReturnValue({
+      width: 360,
+      height: 220,
+      scale: 1,
+      fontScale: 1,
+    });
+    mockSafeAreaInsets = { top: 44, right: 0, bottom: 0, left: 0 };
+    const screen = renderSheet({
+      showApplyReload: false,
+      showAdvancedInferenceControls: true,
+    });
+
+    fireEvent(screen.getByTestId('model-parameters-sheet-fixed-header'), 'layout', { nativeEvent: { layout: { height: 72 } } });
+
+    const sheetStyle = StyleSheet.flatten(screen.getByTestId('model-parameters-sheet').props.style);
+    const scrollStyle = StyleSheet.flatten(screen.getByTestId('model-parameters-sheet-scroll').props.style);
+    const expectedSheetMaxHeight = 220
+      - getNativeSafeAreaInset(mockSafeAreaInsets.top)
+      - motionTokens.minimumTouchTargetPx;
+    const fixedChromeWithoutFooterHeight = screenLayoutMetrics.sheetContentTopInset
+      + 72
+      + screenLayoutMetrics.sheetBottomInset;
+
+    expect(sheetStyle.maxHeight).toBe(expectedSheetMaxHeight);
+    expect(sheetStyle.maxHeight).toBeLessThanOrEqual(220 - motionTokens.minimumTouchTargetPx);
+    expect(scrollStyle.maxHeight).toBe(expectedSheetMaxHeight - fixedChromeWithoutFooterHeight);
+    expect(scrollStyle.minHeight).toBe(Math.min(
+      screenLayoutMetrics.sheetMinimumScrollableContentHeight,
+      scrollStyle.maxHeight,
+    ));
+  });
+
+  it('keeps the saved-profile confirmation fixed and reserves scroll space for it', () => {
+    const screen = renderSheet({
+      didSaveLoadProfile: true,
+      showApplyReload: false,
+      showAdvancedInferenceControls: true,
+    });
+
+    fireEvent(screen.getByTestId('model-parameters-sheet-fixed-header'), 'layout', { nativeEvent: { layout: { height: 76 } } });
+    const fixedFooter = screen.getByTestId('model-save-confirmation-footer');
+
+    expect(screen.queryByTestId('model-apply-footer')).toBeNull();
+    expect(typeof fixedFooter.props.onLayout).toBe('function');
+    expect(screen.getByText('chat.modelControls.kvCache')).toBeTruthy();
+
+    fireEvent(fixedFooter, 'layout', { nativeEvent: { layout: { height: 82 } } });
+
+    const sheetStyle = StyleSheet.flatten(screen.getByTestId('model-parameters-sheet').props.style);
+    const scrollStyle = StyleSheet.flatten(screen.getByTestId('model-parameters-sheet-scroll').props.style);
+    const fixedChromeHeight = screenLayoutMetrics.sheetContentTopInset
+      + screenLayoutMetrics.sheetBottomInset
+      + 76
+      + 82
+      + screenLayoutMetrics.sheetFooterTopGap;
+
+    expect(scrollStyle.maxHeight).toBe(sheetStyle.maxHeight - fixedChromeHeight);
+    expect(fixedChromeHeight + scrollStyle.maxHeight).toBeLessThanOrEqual(sheetStyle.maxHeight);
+  });
+
+  it('keeps a usable scroll area when footer chrome is taller than the compact sheet budget', () => {
+    useWindowDimensionsMock.mockReturnValue({
+      width: 360,
+      height: 260,
+      scale: 1,
+      fontScale: 2,
+    });
+    mockSafeAreaInsets = { top: 0, right: 0, bottom: 24, left: 0 };
+    const screen = renderSheet({
+      showApplyReload: true,
+      showAdvancedInferenceControls: true,
+    });
+
+    fireEvent(screen.getByTestId('model-parameters-sheet-fixed-header'), 'layout', { nativeEvent: { layout: { height: 76 } } });
+    fireEvent(screen.getByTestId('model-apply-footer'), 'layout', { nativeEvent: { layout: { height: 280 } } });
+
+    const sheetStyle = StyleSheet.flatten(screen.getByTestId('model-parameters-sheet').props.style);
+    const scrollStyle = StyleSheet.flatten(screen.getByTestId('model-parameters-sheet-scroll').props.style);
+    const fixedChromeWithoutFooterHeight = screenLayoutMetrics.sheetContentTopInset
+      + screenLayoutMetrics.sheetBottomInset
+      + 76
+      + getNativeBottomSafeAreaInset(mockSafeAreaInsets.bottom);
+    const expectedMinimumScrollHeight = Math.min(
+      screenLayoutMetrics.sheetMinimumScrollableContentHeight,
+      sheetStyle.maxHeight - fixedChromeWithoutFooterHeight,
+    );
+
+    expect(scrollStyle.minHeight).toBe(expectedMinimumScrollHeight);
+    expect(scrollStyle.maxHeight).toBe(sheetStyle.maxHeight - fixedChromeWithoutFooterHeight);
+    expect(scrollStyle.maxHeight).toBeGreaterThanOrEqual(scrollStyle.minHeight);
+    expect(fixedChromeWithoutFooterHeight + scrollStyle.maxHeight).toBeLessThanOrEqual(sheetStyle.maxHeight);
+  });
+
+  it('moves the apply footer into the scroll area when measured height exceeds the fixed footer budget', () => {
+    useWindowDimensionsMock.mockReturnValue({
+      width: 360,
+      height: 430,
+      scale: 1,
+      fontScale: 1,
+    });
+    const screen = renderSheet({
+      showApplyReload: true,
+      showAdvancedInferenceControls: true,
+    });
+
+    fireEvent(screen.getByTestId('model-parameters-sheet-fixed-header'), 'layout', { nativeEvent: { layout: { height: 76 } } });
+    const fixedFooter = screen.getByTestId('model-apply-footer');
+
+    expect(hasAncestorWithTestId(fixedFooter, 'model-parameters-sheet-scroll')).toBe(false);
+
+    fireEvent(fixedFooter, 'layout', { nativeEvent: { layout: { height: 180 } } });
+
+    const inlineFooter = screen.getByTestId('model-apply-footer');
+    const sheetStyle = StyleSheet.flatten(screen.getByTestId('model-parameters-sheet').props.style);
+    const scrollStyle = StyleSheet.flatten(screen.getByTestId('model-parameters-sheet-scroll').props.style);
+    const fixedChromeWithoutFooterHeight = screenLayoutMetrics.sheetContentTopInset
+      + 76
+      + screenLayoutMetrics.sheetBottomInset;
+
+    expect(hasAncestorWithTestId(inlineFooter, 'model-parameters-sheet-scroll')).toBe(true);
+    expect(scrollStyle.maxHeight).toBe(sheetStyle.maxHeight - fixedChromeWithoutFooterHeight);
+  });
+
   it('shows a CPU-specific GPU layers description when CPU backend is selected', () => {
     const screen = renderSheet({
       isGpuBackendAvailable: true,
@@ -261,6 +510,8 @@ describe('ModelParametersSheet', () => {
 
     expect(screen.getByText('chat.modelControls.backendBenchmarkCancelledNote')).toBeTruthy();
     expect(screen.getByText('chat.modelControls.backendBenchmarkResultsTitle')).toBeTruthy();
+    expect(screen.getByTestId('backend-benchmark-run-button').props.hitSlop)
+      .toMatchObject({ top: 4, right: 4, bottom: 4, left: 4 });
 
     fireEvent.press(screen.getByText('chat.modelControls.backendBenchmarkRun'));
 
@@ -283,6 +534,8 @@ describe('ModelParametersSheet', () => {
     });
 
     expect(screen.getByText('Loading chat.modelControls.backendModeNpu 1/3 50%')).toBeTruthy();
+    expect(screen.getByTestId('backend-benchmark-cancel-button').props.hitSlop)
+      .toMatchObject({ top: 4, right: 4, bottom: 4, left: 4 });
 
     fireEvent.press(screen.getByText('chat.modelControls.backendBenchmarkCancel'));
 

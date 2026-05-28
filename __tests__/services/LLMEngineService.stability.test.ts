@@ -131,6 +131,21 @@ describe('LLMEngineService Stability', () => {
         }
     });
 
+    it('clears stale multimodal diagnostics before a fresh model load', async () => {
+        (llmEngineService as any).recentMultimodalDiagnostics = {
+            visionCapability: 'vision_capable',
+            projectorPresence: 'failed',
+            projectorPathCategory: 'models',
+            readinessStatus: 'failed',
+            failureReason: 'Previous projector failure',
+            attachmentCount: 1,
+        };
+
+        await llmEngineService.load(mockModel.id);
+
+        expect(llmEngineService.getState().diagnostics?.multimodal).toBeUndefined();
+    });
+
     it('returns unknown for fitsInRam checks when total-memory resolution fails', async () => {
         const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
 

@@ -17,6 +17,10 @@ import {
 } from '../../src/store/chatPersistence';
 import { storage } from '../../src/store/storage';
 import type { ChatThread } from '../../src/types/chat';
+import {
+  copiedImageAttachment,
+  secondCopiedImageAttachment,
+} from '../fixtures/chatImageAttachmentFixtures';
 
 function buildThread(id: string): ChatThread {
   return {
@@ -149,6 +153,146 @@ describe('chatPersistence', () => {
     expect(storage.getString(CHAT_PERSISTENCE_INDEX_KEY)).toContain(thread.id);
     expect(storage.getString(getChatThreadStorageKey(thread.id))).toContain('Partial response');
     expect(storage.getString(getChatThreadStorageKey(thread.id))).toContain('"commitRevision":1');
+  });
+
+  it('persists normalized user image attachment metadata in v2 thread records', () => {
+    const thread: ChatThread = {
+      ...buildThread('thread-attachments'),
+      messages: [
+        {
+          id: 'user-with-image',
+          role: 'user',
+          content: 'What is in this image?',
+          createdAt: 1,
+          state: 'complete',
+          attachments: [
+            {
+              ...copiedImageAttachment,
+              threadId: 'stale-thread-id',
+              messageId: 'stale-message-id',
+              mediaType: 'IMAGE/JPEG',
+            },
+            {
+              ...secondCopiedImageAttachment,
+              id: 'mime-less-png',
+              threadId: 'stale-thread-id',
+              messageId: 'stale-message-id',
+              mediaType: undefined,
+            },
+          ],
+        },
+        {
+          id: 'assistant-with-invalid-image',
+          role: 'assistant',
+          content: 'A response',
+          createdAt: 2,
+          state: 'complete',
+          attachments: [copiedImageAttachment],
+        },
+      ],
+      status: 'idle',
+    };
+
+    writeChatThreadRecord(storage, thread, 11);
+
+    const record = parseChatThreadRecord(storage.getString(getChatThreadStorageKey(thread.id)), thread.id);
+
+    expect(record.ok).toBe(true);
+    if (!record.ok) {
+      throw new Error('Expected persisted thread record to parse');
+    }
+    expect(record.value.thread.messages[0]).toEqual(
+      expect.objectContaining({
+        id: 'user-with-image',
+        attachments: [
+          expect.objectContaining({
+            id: copiedImageAttachment.id,
+            threadId: thread.id,
+            messageId: 'user-with-image',
+            localUri: copiedImageAttachment.localUri,
+            mediaType: 'image/jpeg',
+            pathCategory: 'chat_attachment',
+            source: 'photo_library',
+          }),
+          expect.not.objectContaining({
+            mediaType: expect.any(String),
+          }),
+        ],
+      }),
+    );
+    expect(record.value.thread.messages[0].attachments?.[1]).toEqual(expect.objectContaining({
+      id: 'mime-less-png',
+      threadId: thread.id,
+      messageId: 'user-with-image',
+      localUri: secondCopiedImageAttachment.localUri,
+      fileName: secondCopiedImageAttachment.fileName,
+      pathCategory: 'chat_attachment',
+      source: 'photo_library',
+    }));
+    expect(record.value.thread.messages[0].attachments?.[1]).not.toHaveProperty('mediaType');
+    expect(record.value.thread.messages[1]).not.toHaveProperty('attachments');
+  });
+
+  it('drops malformed persisted attachment metadata during schema migration sanitization', () => {
+    const thread: ChatThread = {
+      ...buildThread('thread-attachment-migration'),
+      messages: [
+        {
+          id: 'user-legacy-attachments',
+          role: 'user',
+          content: 'Legacy image prompt',
+          createdAt: 1,
+          state: 'complete',
+          attachments: [
+            copiedImageAttachment,
+            {
+              ...copiedImageAttachment,
+              id: 'temp-picker-uri',
+              localUri: 'ph://temporary-library-uri',
+              fileName: 'temporary.jpg',
+            },
+            {
+              ...copiedImageAttachment,
+              id: 'unsupported-media',
+              mediaType: 'video/mp4',
+              fileName: 'clip.mp4',
+            },
+            {
+              ...copiedImageAttachment,
+              id: 'unsupported-mime-less-heic',
+              mediaType: undefined,
+              localUri: 'test-dir/chat-attachments/thread-vision-1/attachment-image-3.heic',
+              fileName: 'attachment-image-3.heic',
+            },
+            {
+              ...copiedImageAttachment,
+              id: 'outside-app-owned-storage',
+              localUri: 'file:///document/chat-attachments/thread-vision-1/attachment-image-4.jpg',
+              fileName: 'attachment-image-4.jpg',
+            },
+            {
+              ...copiedImageAttachment,
+              id: 'path-traversal-uri',
+              localUri: 'test-dir/chat-attachments/../models/model.gguf',
+              fileName: 'model.gguf',
+            },
+          ],
+        },
+      ],
+      status: 'idle',
+    };
+
+    expect(sanitizeChatThreadForPersistence(thread).messages[0]).toEqual(
+      expect.objectContaining({
+        attachments: [
+          expect.objectContaining({
+            id: copiedImageAttachment.id,
+            threadId: thread.id,
+            messageId: 'user-legacy-attachments',
+          }),
+        ],
+      }),
+    );
   });
 
   it('omits empty assistant progress placeholders from durable thread records', () => {

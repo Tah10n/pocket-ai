@@ -2,8 +2,10 @@ import React from 'react';
 import { StyleSheet } from 'react-native';
 import { act, fireEvent, render, within } from '@testing-library/react-native';
 import * as Clipboard from 'expo-clipboard';
+import * as FileSystem from 'expo-file-system/legacy';
 import { ChatMessageBubble } from '../../src/components/ui/ChatMessageBubble';
 import { StaticThemeProvider } from '../../src/providers/ThemeProvider';
+import { copiedImageAttachment } from '../fixtures/chatImageAttachmentFixtures';
 
 jest.mock('react-native-css-interop', () => {
   const mockReact = require('react');
@@ -83,6 +85,7 @@ jest.mock('@/components/ui/pressable', () => {
 describe('ChatMessageBubble', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: true, size: 1024 });
   });
 
   it('keeps user messages as plain text', () => {
@@ -293,5 +296,38 @@ describe('ChatMessageBubble', () => {
 
     expect(onRegenerate).toHaveBeenCalledTimes(1);
     expect(onDelete).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders persisted user attachment thumbnails from local storage', async () => {
+    const { findByTestId, getByText } = render(
+      <ChatMessageBubble
+        id="user-attachment"
+        isUser
+        content="Describe this"
+        attachments={[copiedImageAttachment]}
+      />,
+    );
+
+    expect(getByText('Describe this')).toBeTruthy();
+    expect(await findByTestId(`message-attachment-image-user-attachment-${copiedImageAttachment.id}`)).toBeTruthy();
+    expect(FileSystem.getInfoAsync).toHaveBeenCalledWith(copiedImageAttachment.localUri);
+  });
+
+  it('renders a localized unavailable state when a persisted attachment file is missing', async () => {
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: false });
+
+    const { findByTestId, getByText, queryByTestId } = render(
+      <ChatMessageBubble
+        id="user-missing-attachment"
+        isUser
+        content="Describe this"
+        attachments={[copiedImageAttachment]}
+      />,
+    );
+
+    expect(await findByTestId(`message-attachment-unavailable-user-missing-attachment-${copiedImageAttachment.id}`))
+      .toBeTruthy();
+    expect(getByText('chat.attachments.unavailable')).toBeTruthy();
+    expect(queryByTestId(`message-attachment-image-user-missing-attachment-${copiedImageAttachment.id}`)).toBeNull();
   });
 });

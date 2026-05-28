@@ -23,6 +23,11 @@ import { normalizeReasoningEffort } from '../types/reasoning';
 import { createInstrumentedStateStorage } from './persistStateStorage';
 import { assertPrivateStorageWritable } from '../services/storage';
 import {
+  chatAttachmentStorageService,
+  collectChatAttachmentLocalUrisFromUnknownThreadRecord,
+  collectReferencedChatAttachmentLocalUrisFromThreads,
+} from '../services/ChatAttachmentStorageService';
+import {
   CHAT_PERSISTENCE_SCHEMA_VERSION,
   type ChatPersistenceIndex,
   type ChatPersistencePendingIndexCommit,
@@ -31,6 +36,7 @@ import {
   clearPersistedChatRecords,
   createChatPersistenceWriteScheduler,
   getChatPersistenceIndexRevision,
+  getChatThreadStorageKey,
   getThreadIdFromChatThreadStorageKey,
   listChatThreadStorageKeys,
   readChatPersistenceIndex,
@@ -153,6 +159,77 @@ function createModelSwitchMessage({
 function clearPersistedChatStoreIfEmpty(threads: Record<string, ChatThread>) {
   if (Object.keys(threads).length === 0) {
     clearPersistedChatRecords(getAppStorage());
+  }
+}
+
+function scheduleUnreferencedChatAttachmentCleanup({
+  candidateLocalUris,
+  referencedLocalUris,
+}: {
+  candidateLocalUris: Iterable<string>;
+  referencedLocalUris: Iterable<string>;
+}): void {
+  const candidates = Array.from(new Set(candidateLocalUris));
+  if (candidates.length === 0) {
+    return;
+  }
+
+  void chatAttachmentStorageService.deleteUnreferencedAttachmentFiles({
+    candidateLocalUris: candidates,
+    referencedLocalUris,
+  }).catch((error) => {
+    console.warn('[chatStore] Failed to clean up chat attachments', {
+      errorName: error instanceof Error ? error.name : typeof error,
+    });
+  });
+}
+
+function scheduleChatAttachmentCleanupForSnapshots(
+  previous: ChatStoreSnapshot,
+  next: ChatStoreSnapshot,
+): void {
+  scheduleUnreferencedChatAttachmentCleanup({
+    candidateLocalUris: collectReferencedChatAttachmentLocalUrisFromThreads(previous.threads),
+    referencedLocalUris: collectReferencedChatAttachmentLocalUrisFromThreads(next.threads),
+  });
+}
+
+function scheduleChatAttachmentCleanupForStreamingPatch(
+  previous: ChatStoreSnapshot,
+  next: ChatStoreSnapshot,
+  removedThreadIds: string[],
+): void {
+  if (removedThreadIds.length > 0) {
+    scheduleChatAttachmentCleanupForSnapshots(previous, next);
+  }
+}
+
+function scheduleChatAttachmentDirectoryReconciliation(threads: Record<string, ChatThread>): void {
+  const referencedLocalUris = collectReferencedChatAttachmentLocalUrisFromThreads(threads);
+  const preserveDraftsCreatedAtOrAfter = Date.now();
+
+  void chatAttachmentStorageService
+    .reconcileAttachmentDirectory(referencedLocalUris, { preserveDraftsCreatedAtOrAfter })
+    .catch((error) => {
+      console.warn('[chatStore] Failed to reconcile chat attachment directory', {
+        errorName: error instanceof Error ? error.name : typeof error,
+      });
+    });
+}
+
+function collectPersistedThreadAttachmentCleanupCandidates(
+  storage: ReturnType<typeof getAppStorage>,
+  threadId: string,
+): Set<string> {
+  const rawRecord = storage.getString(getChatThreadStorageKey(threadId));
+  if (!rawRecord) {
+    return new Set();
+  }
+
+  try {
+    return collectChatAttachmentLocalUrisFromUnknownThreadRecord(JSON.parse(rawRecord));
+  } catch {
+    return new Set();
   }
 }
 
@@ -423,7 +500,14 @@ function readHydratableChatThreadRecord(
   threadId: string,
   now: number,
 ):
-  | { ok: true; thread: ChatThread; recovered: boolean; persistedAt: number; commitRevision?: number }
+  | {
+      ok: true;
+      thread: ChatThread;
+      recovered: boolean;
+      persistedAt: number;
+      commitRevision?: number;
+      droppedAttachmentLocalUris: Set<string>;
+    }
   | { ok: false; persistedAt?: number } {
   const recordResult = readChatThreadRecord(storage, threadId);
   if (!recordResult.ok) {
@@ -435,12 +519,19 @@ function readHydratableChatThreadRecord(
     return { ok: false, persistedAt: recordResult.value.persistedAt };
   }
 
+  const rawAttachmentLocalUris = collectReferencedChatAttachmentLocalUrisFromThreads([recordResult.value.thread]);
+  const sanitizedAttachmentLocalUris = collectReferencedChatAttachmentLocalUrisFromThreads([sanitized.thread]);
+  const droppedAttachmentLocalUris = new Set(
+    Array.from(rawAttachmentLocalUris).filter((localUri) => !sanitizedAttachmentLocalUris.has(localUri)),
+  );
+
   return {
     ok: true,
     thread: sanitized.thread,
     recovered: sanitized.recovered,
     persistedAt: recordResult.value.persistedAt,
     commitRevision: recordResult.value.commitRevision,
+    droppedAttachmentLocalUris,
   };
 }
 
@@ -508,6 +599,7 @@ function recoverPendingChatIndexCommit(storage: ReturnType<typeof getAppStorage>
   const corruptThreadIds = new Set(pending.corruptThreadIds ?? []);
   const changedThreadIds = new Set(pending.changedThreadIds ?? []);
   const removedThreadIds = new Set(pending.removedThreadIds ?? []);
+  const attachmentCleanupCandidates = new Set<string>();
   const requiresChangedThreadCommitRevision = pending.requiresChangedThreadCommitRevision === true;
   const recordCache = new Map<string, ReturnType<typeof readHydratableChatThreadRecord>>();
   const readCachedRecord = (threadId: string) => {
@@ -553,12 +645,15 @@ function recoverPendingChatIndexCommit(storage: ReturnType<typeof getAppStorage>
 
     const record = readCachedRecord(threadId);
     if (!record.ok) {
+      collectPersistedThreadAttachmentCleanupCandidates(storage, threadId)
+        .forEach((localUri) => attachmentCleanupCandidates.add(localUri));
       corruptThreadIds.add(threadId);
       return;
     }
 
     threads[record.thread.id] = record.thread;
     corruptThreadIds.delete(record.thread.id);
+    record.droppedAttachmentLocalUris.forEach((localUri) => attachmentCleanupCandidates.add(localUri));
 
     if (record.recovered || (changedThreadIds.has(threadId) && record.commitRevision !== pending.revision)) {
       writeChatThreadRecord(storage, record.thread, now, { commitRevision: pending.revision });
@@ -573,6 +668,10 @@ function recoverPendingChatIndexCommit(storage: ReturnType<typeof getAppStorage>
     corruptThreadIds: Array.from(corruptThreadIds),
   });
   removeChatPendingIndexCommit(storage);
+  scheduleUnreferencedChatAttachmentCleanup({
+    candidateLocalUris: attachmentCleanupCandidates,
+    referencedLocalUris: collectReferencedChatAttachmentLocalUrisFromThreads(threads),
+  });
 }
 
 function readV2PersistedChatState(now = Date.now()): ChatStoreHydrationResult | null {
@@ -595,6 +694,7 @@ function readV2PersistedChatState(now = Date.now()): ChatStoreHydrationResult | 
 
     const threads: Record<string, ChatThread> = {};
     const corruptThreadIds = new Set(index.corruptThreadIds ?? []);
+    const attachmentCleanupCandidates = new Set<string>();
 
     try {
       storage.remove(LEGACY_CHAT_STORE_STORAGE_KEY);
@@ -603,17 +703,22 @@ function readV2PersistedChatState(now = Date.now()): ChatStoreHydrationResult | 
         const isNewerThanClear = record.persistedAt != null && record.persistedAt > clearedAt;
 
         if (!isNewerThanClear) {
+          collectPersistedThreadAttachmentCleanupCandidates(storage, threadId)
+            .forEach((localUri) => attachmentCleanupCandidates.add(localUri));
           removeChatThreadRecord(storage, threadId);
           return;
         }
 
         if (!record.ok) {
+          collectPersistedThreadAttachmentCleanupCandidates(storage, threadId)
+            .forEach((localUri) => attachmentCleanupCandidates.add(localUri));
           corruptThreadIds.add(threadId);
           return;
         }
 
         threads[record.thread.id] = record.thread;
         corruptThreadIds.delete(record.thread.id);
+        record.droppedAttachmentLocalUris.forEach((localUri) => attachmentCleanupCandidates.add(localUri));
 
         if (record.recovered) {
           writeChatThreadRecord(storage, record.thread, Math.max(now, clearedAt + 1));
@@ -634,6 +739,10 @@ function readV2PersistedChatState(now = Date.now()): ChatStoreHydrationResult | 
         corruptThreadIds: corruptThreadIdList,
       });
     }
+    scheduleUnreferencedChatAttachmentCleanup({
+      candidateLocalUris: attachmentCleanupCandidates,
+      referencedLocalUris: collectReferencedChatAttachmentLocalUrisFromThreads(threads),
+    });
 
     return {
       threads,
@@ -652,11 +761,14 @@ function readV2PersistedChatState(now = Date.now()): ChatStoreHydrationResult | 
 
   const threads: Record<string, ChatThread> = {};
   const corruptThreadIds = new Set(index?.corruptThreadIds ?? []);
+  const attachmentCleanupCandidates = new Set<string>();
 
   threadIds.forEach((threadId) => {
     const record = readHydratableChatThreadRecord(storage, threadId, now);
 
     if (!record.ok) {
+      collectPersistedThreadAttachmentCleanupCandidates(storage, threadId)
+        .forEach((localUri) => attachmentCleanupCandidates.add(localUri));
       corruptThreadIds.add(threadId);
       return;
     }
@@ -664,6 +776,7 @@ function readV2PersistedChatState(now = Date.now()): ChatStoreHydrationResult | 
     const { thread } = record;
     threads[thread.id] = thread;
     corruptThreadIds.delete(thread.id);
+    record.droppedAttachmentLocalUris.forEach((localUri) => attachmentCleanupCandidates.add(localUri));
 
     if (record.recovered) {
       writeChatThreadRecord(storage, thread, now);
@@ -681,6 +794,10 @@ function readV2PersistedChatState(now = Date.now()): ChatStoreHydrationResult | 
   writeChatPersistenceIndexForSnapshot(storage, { threads, activeThreadId }, {
     revision: getChatPersistenceIndexRevision(index),
     corruptThreadIds: corruptThreadIdList,
+  });
+  scheduleUnreferencedChatAttachmentCleanup({
+    candidateLocalUris: attachmentCleanupCandidates,
+    referencedLocalUris: collectReferencedChatAttachmentLocalUrisFromThreads(threads),
   });
 
   return { threads, activeThreadId, corruptThreadIds: corruptThreadIdList };
@@ -817,6 +934,7 @@ function persistChatStoreMutation(
   if (nextThreadIds.length === 0) {
     chatPersistenceScheduler.cancelAllPendingWrites();
     clearPersistedChatRecords(storage);
+    scheduleChatAttachmentCleanupForSnapshots(previous, next);
     return;
   }
 
@@ -834,6 +952,10 @@ function persistChatStoreMutation(
     removedThreadIds.forEach((threadId) => {
       chatPersistenceScheduler.cancelThreadWrite(threadId);
     });
+    // Streaming patches only mutate the latest assistant text/state. Avoid
+    // traversing attachment references on every token; thread removal is the
+    // only streaming-path case that can orphan already persisted attachments.
+    scheduleChatAttachmentCleanupForStreamingPatch(previous, next, removedThreadIds);
     return;
   }
 
@@ -845,6 +967,7 @@ function persistChatStoreMutation(
   [...changedThreadIds, ...removedThreadIds].forEach((threadId) => {
     chatPersistenceScheduler.cancelThreadWrite(threadId);
   });
+  scheduleChatAttachmentCleanupForSnapshots(previous, next);
 }
 
 function canPatchAssistantMessage(
@@ -1415,13 +1538,14 @@ export const useChatStore = create<ChatStoreState>()(
           return null;
         }
 
-        const normalizedNextUserContent = nextUserContent.trim();
-        if (!normalizedNextUserContent) {
+        const targetMessage = thread.messages.find((message) => message.id === messageId);
+        if (!targetMessage || targetMessage.role !== 'user') {
           return null;
         }
 
-        const targetMessage = thread.messages.find((message) => message.id === messageId);
-        if (!targetMessage || targetMessage.role !== 'user') {
+        const normalizedNextUserContent = nextUserContent.trim();
+        const targetHasAttachments = (targetMessage.attachments?.length ?? 0) > 0;
+        if (!normalizedNextUserContent && !targetHasAttachments) {
           return null;
         }
 
@@ -1442,6 +1566,10 @@ export const useChatStore = create<ChatStoreState>()(
 
           const existingTargetMessage = existingThread.messages[targetIndex];
           if (!existingTargetMessage || existingTargetMessage.role !== 'user') {
+            return state;
+          }
+
+          if (!normalizedNextUserContent && (existingTargetMessage.attachments?.length ?? 0) === 0) {
             return state;
           }
 
@@ -1579,6 +1707,8 @@ export const useChatStore = create<ChatStoreState>()(
         if (state.activeThreadId && !state.threads[state.activeThreadId]) {
           state.activeThreadId = findMostRecentThreadId(state.threads);
         }
+
+        scheduleChatAttachmentDirectoryReconciliation(state.threads);
       },
     },
   ),

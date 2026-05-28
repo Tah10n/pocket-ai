@@ -68,7 +68,11 @@ describe('resolveModelFilePathOrThrow', () => {
       localPath: 'model.gguf',
     })).rejects.toEqual(expect.objectContaining({
       code: 'download_file_missing',
-      message: 'Model file not found at document://models/model.gguf',
+      message: 'Model file is not available locally.',
+      details: expect.objectContaining({
+        modelId: 'author/model-q4',
+        pathCategory: 'models',
+      }),
     }));
   });
 

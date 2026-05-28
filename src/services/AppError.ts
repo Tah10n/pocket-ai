@@ -19,7 +19,12 @@ export type AppErrorCode =
   | 'download_file_missing'
   | 'storage_private_unavailable'
   | 'message_empty'
-  | 'message_too_long';
+  | 'message_too_long'
+  | 'multimodal_not_ready'
+  | 'chat_attachment_copy_failed'
+  | 'chat_attachment_limit_exceeded'
+  | 'chat_attachment_missing'
+  | 'chat_attachment_not_ready';
 
 const ERROR_MESSAGE_KEYS: Partial<Record<AppErrorCode, string>> = {
   engine_not_ready: 'common.errors.engineNotReady',
@@ -40,6 +45,11 @@ const ERROR_MESSAGE_KEYS: Partial<Record<AppErrorCode, string>> = {
   storage_private_unavailable: 'common.errors.storagePrivateUnavailable',
   message_empty: 'common.errors.messageEmpty',
   message_too_long: 'common.errors.messageTooLong',
+  multimodal_not_ready: 'common.errors.multimodalNotReady',
+  chat_attachment_copy_failed: 'common.errors.chatAttachmentCopyFailed',
+  chat_attachment_limit_exceeded: 'common.errors.chatAttachmentLimitExceeded',
+  chat_attachment_missing: 'common.errors.chatAttachmentMissing',
+  chat_attachment_not_ready: 'common.errors.chatAttachmentNotReady',
 };
 
 const ERROR_PATTERNS: { pattern: RegExp; code: AppErrorCode }[] = [

@@ -1,4 +1,8 @@
 import { getVisibleMessageContent } from '../utils/chatPresentation';
+import type {
+  ChatImageAttachment,
+  MultimodalReadinessState,
+} from './multimodal';
 import { normalizeReasoningEffort, type ReasoningEffort } from './reasoning';
 
 export type ChatMessageRole = 'system' | 'user' | 'assistant';
@@ -45,6 +49,7 @@ export interface ChatMessage {
   modelId?: string | null;
   switchFromModelId?: string | null;
   switchToModelId?: string | null;
+  attachments?: ChatImageAttachment[];
 }
 
 export interface ChatThread {
@@ -77,10 +82,14 @@ export interface ConversationIndexItem {
 export interface LlmChatMessage {
   role: ChatMessageRole;
   content: string;
+  attachments?: ChatImageAttachment[];
+  mediaPaths?: string[];
 }
 
 export interface LlmChatCompletionOptions {
   messages: LlmChatMessage[];
+  mediaPaths?: string[];
+  multimodalReadiness?: MultimodalReadinessState;
   onToken?: (token: string | {
     token: string;
     content?: string;

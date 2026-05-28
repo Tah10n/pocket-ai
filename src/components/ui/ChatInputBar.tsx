@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { Alert, StyleSheet } from 'react-native';
+import React, { useRef, useState } from 'react';
+import { Alert, Image, ScrollView, StyleSheet } from 'react-native';
 import { Box } from '@/components/ui/box';
 import { Text } from '@/components/ui/text';
 import { ScreenIconButton, ScreenIconTile, ScreenInlineInput, ScreenSurface, useScreenAppearance } from './ScreenShell';
@@ -7,6 +7,12 @@ import { getThemeActionContentClassName, screenChromeTokens, withAlpha, type Res
 import { useTheme } from '../../providers/ThemeProvider';
 import { useTranslation } from 'react-i18next';
 import { getReportedErrorMessage } from '../../services/AppError';
+import {
+    MAX_CHAT_IMAGE_ATTACHMENTS,
+    getSendableDraftImageAttachments,
+    hasFailedDraftImageAttachments,
+} from '../../utils/chatImageAttachments';
+import type { AttachmentDraft } from '../../types/multimodal';
 import type { AndroidBlurTargetRef } from '../../utils/androidBlur';
 
 interface ChatInputBarProps {
@@ -16,6 +22,7 @@ interface ChatInputBarProps {
     isSending?: boolean;
     draft?: string;
     onDraftChange?: (value: string) => void;
+    allowEmptyMessageSend?: boolean;
     androidContentBlurTargetRef?: AndroidBlurTargetRef | null;
     modeLabel?: string;
     modeDescription?: string;
@@ -23,6 +30,37 @@ interface ChatInputBarProps {
     leadingActions?: React.ReactNode;
     trailingActions?: React.ReactNode;
     attachmentsTray?: React.ReactNode;
+    attachmentDrafts?: AttachmentDraft[];
+    onAttachImages?: () => Promise<void> | void;
+    onRemoveAttachmentDraft?: (draft: AttachmentDraft, index: number) => void;
+    imageAttachmentsEnabled?: boolean;
+    imageAttachmentsDisabledReason?: string;
+    isImageAttachmentActionBusy?: boolean;
+}
+
+const CHAT_INPUT_DRAFT_CONSUMED_ERROR_KEY = 'chatInputDraftConsumed';
+
+type ChatInputDraftConsumedError = Error & {
+    [CHAT_INPUT_DRAFT_CONSUMED_ERROR_KEY]?: true;
+};
+
+export function markChatInputDraftConsumedError(error: unknown): unknown {
+    if (error && typeof error === 'object') {
+        (error as ChatInputDraftConsumedError)[CHAT_INPUT_DRAFT_CONSUMED_ERROR_KEY] = true;
+        return error;
+    }
+
+    const wrapped = new Error(typeof error === 'string' ? error : 'Message send failed after the draft was consumed.');
+    (wrapped as ChatInputDraftConsumedError)[CHAT_INPUT_DRAFT_CONSUMED_ERROR_KEY] = true;
+    return wrapped;
+}
+
+export function isChatInputDraftConsumedError(error: unknown): boolean {
+    return Boolean(
+        error
+        && typeof error === 'object'
+        && (error as ChatInputDraftConsumedError)[CHAT_INPUT_DRAFT_CONSUMED_ERROR_KEY] === true,
+    );
 }
 
 export function getPrimaryActionGlassStyle(primaryStrong: string, mode: ResolvedThemeMode) {
@@ -68,6 +106,7 @@ export const ChatInputBar = ({
     isSending = false,
     draft,
     onDraftChange,
+    allowEmptyMessageSend = false,
     androidContentBlurTargetRef,
     modeLabel,
     modeDescription,
@@ -75,16 +114,44 @@ export const ChatInputBar = ({
     leadingActions,
     trailingActions,
     attachmentsTray,
+    attachmentDrafts = [],
+    onAttachImages,
+    onRemoveAttachmentDraft,
+    imageAttachmentsEnabled = false,
+    imageAttachmentsDisabledReason,
+    isImageAttachmentActionBusy = false,
 }: ChatInputBarProps) => {
     const [internalMessage, setInternalMessage] = useState('');
+    const [isSubmitting, setIsSubmitting] = useState(false);
+    const submitLockRef = useRef(false);
     const { t } = useTranslation();
     const theme = useTheme();
     const appearance = useScreenAppearance();
     const isDarkGlass = appearance.surfaceKind === 'glass' && theme.resolvedMode === 'dark';
     const isControlled = typeof draft === 'string';
     const message = isControlled ? draft : internalMessage;
-    const canSend = !disabled && !isSending && message.trim().length > 0;
+    const hasAttachmentCopyFailures = imageAttachmentsEnabled && hasFailedDraftImageAttachments(attachmentDrafts);
+    const sendableAttachmentDrafts = imageAttachmentsEnabled
+        ? getSendableDraftImageAttachments(attachmentDrafts)
+        : [];
+    const hasReadyAttachmentDrafts = imageAttachmentsEnabled
+        && attachmentDrafts.length > 0
+        && sendableAttachmentDrafts.length === attachmentDrafts.length;
+    const canSend = !disabled
+        && !isSending
+        && !isSubmitting
+        && !isImageAttachmentActionBusy
+        && !hasAttachmentCopyFailures
+        && (message.trim().length > 0 || hasReadyAttachmentDrafts || allowEmptyMessageSend);
     const placeholder = disabled ? t('chat.inputPlaceholderDisabled') : t('chat.inputPlaceholder');
+    const attachmentLimitReached = imageAttachmentsEnabled && attachmentDrafts.length >= MAX_CHAT_IMAGE_ATTACHMENTS;
+    const canAttachImages = Boolean(onAttachImages)
+        && imageAttachmentsEnabled
+        && !disabled
+        && !isSending
+        && !isSubmitting
+        && !isImageAttachmentActionBusy
+        && !attachmentLimitReached;
 
     const setMessage = (value: string) => {
         if (isControlled) {
@@ -96,16 +163,25 @@ export const ChatInputBar = ({
     };
 
     const handleSend = async () => {
-        if (canSend) {
-            const nextMessage = message.trim();
-            setMessage('');
+        if (!canSend || submitLockRef.current) {
+            return;
+        }
 
-            try {
-                await onSendMessage(nextMessage);
-            } catch (error) {
+        submitLockRef.current = true;
+        setIsSubmitting(true);
+        const nextMessage = message.trim();
+        setMessage('');
+
+        try {
+            await onSendMessage(nextMessage);
+        } catch (error) {
+            if (!isChatInputDraftConsumedError(error)) {
                 setMessage(nextMessage);
-                throw error;
             }
+            throw error;
+        } finally {
+            submitLockRef.current = false;
+            setIsSubmitting(false);
         }
     };
 
@@ -121,6 +197,21 @@ export const ChatInputBar = ({
             Alert.alert(
                 t('chat.sendErrorTitle'),
                 getReportedErrorMessage('ChatInputBar.handlePrimaryAction', error, t),
+            );
+        }
+    };
+
+    const handleAttachImages = async () => {
+        if (!canAttachImages) {
+            return;
+        }
+
+        try {
+            await onAttachImages?.();
+        } catch (error: any) {
+            Alert.alert(
+                t('chat.attachments.attachImage'),
+                getReportedErrorMessage('ChatInputBar.handleAttachImages', error, t),
             );
         }
     };
@@ -160,6 +251,20 @@ export const ChatInputBar = ({
             style={primaryActionStyle}
         />
     );
+    const attachmentAction = onAttachImages ? (
+        <ScreenIconButton
+            onPress={() => {
+                void handleAttachImages();
+            }}
+            disabled={!canAttachImages}
+            accessibilityLabel={t('chat.attachments.attachImageAccessibilityLabel')}
+            accessibilityState={{ disabled: !canAttachImages }}
+            iconName="image"
+            iconSize="sm"
+            size="compact"
+            testID="chat-attach-image-button"
+        />
+    ) : null;
     const inputRow = (
         <Box
             testID="chat-input-bar-row"
@@ -167,8 +272,9 @@ export const ChatInputBar = ({
                 ? 'h-full flex-row items-center gap-2'
                 : 'flex-row items-center gap-2'}
         >
-            {leadingActions ? (
+            {attachmentAction || leadingActions ? (
                 <Box testID="chat-input-bar-leading-actions" className="flex-row items-center gap-2">
+                    {attachmentAction}
                     {leadingActions}
                 </Box>
             ) : null}
@@ -194,7 +300,7 @@ export const ChatInputBar = ({
                 onSubmitEditing={() => {
                     void handlePrimaryAction();
                 }}
-                editable={!disabled && !isSending}
+                editable={!disabled && !isSending && !isSubmitting}
             />
 
             <Box testID="chat-input-bar-trailing-actions" className="flex-row items-center gap-2">
@@ -202,6 +308,105 @@ export const ChatInputBar = ({
             </Box>
         </Box>
     );
+
+    const attachmentHelperText = hasAttachmentCopyFailures
+        ? t('chat.attachments.copyFailed')
+        : attachmentLimitReached
+            ? t('chat.attachments.limitReached', { count: MAX_CHAT_IMAGE_ATTACHMENTS })
+            : !imageAttachmentsEnabled && imageAttachmentsDisabledReason
+                ? t(imageAttachmentsDisabledReason)
+                : null;
+    const builtInAttachmentsTray = attachmentDrafts.length > 0 || attachmentHelperText || isImageAttachmentActionBusy ? (
+        <Box testID="chat-image-attachments-tray" className="gap-2">
+            {isImageAttachmentActionBusy ? (
+                <Box
+                    testID="chat-image-attachment-busy-indicator"
+                    accessibilityRole="progressbar"
+                    accessibilityLabel={t('chat.attachments.preparingImage')}
+                    className="flex-row items-center gap-2 self-start rounded-full border border-primary-500/20 bg-primary-500/10 px-3 py-1.5"
+                >
+                    <ScreenIconTile
+                        testID="chat-image-attachment-busy-spinner"
+                        iconName="hourglass-empty"
+                        iconSize="xs"
+                        size="sm"
+                        tone="accent"
+                        className="h-6 w-6 border-0 bg-transparent"
+                        iconClassName="text-primary-500"
+                    />
+                    <Text className="text-xs font-semibold text-primary-700 dark:text-primary-300">
+                        {t('chat.attachments.preparingImage')}
+                    </Text>
+                </Box>
+            ) : null}
+
+            {attachmentDrafts.length > 0 ? (
+                <ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    contentContainerStyle={styles.attachmentsScrollContent}
+                >
+                    {attachmentDrafts.map((draft, index) => {
+                        const draftKey = draft.id ?? draft.localUri ?? draft.previewUri ?? draft.pickerUri;
+                        const isFailed = draft.copyStatus === 'failed';
+
+                        return (
+                            <Box key={`${draftKey}-${index}`} className="mr-2">
+                                <ScreenSurface
+                                    tone={isFailed ? 'danger' : 'default'}
+                                    className="relative h-16 w-16 overflow-hidden rounded-2xl p-1"
+                                >
+                                    {isFailed ? (
+                                        <Box
+                                            testID={`chat-image-attachment-preview-${index}`}
+                                            className="h-full w-full items-center justify-center rounded-xl"
+                                        >
+                                            <ScreenIconTile
+                                                iconName="warning"
+                                                tone="error"
+                                                iconSize="sm"
+                                                size="sm"
+                                                className="h-8 w-8"
+                                            />
+                                        </Box>
+                                    ) : (
+                                        <Image
+                                            testID={`chat-image-attachment-preview-${index}`}
+                                            accessibilityLabel={t('chat.attachments.previewAccessibilityLabel')}
+                                            source={{ uri: draft.previewUri }}
+                                            style={styles.attachmentPreviewImage}
+                                        />
+                                    )}
+                                </ScreenSurface>
+
+                                {onRemoveAttachmentDraft ? (
+                                    <Box className="absolute -right-1 -top-1">
+                                        <ScreenIconButton
+                                            onPress={() => onRemoveAttachmentDraft(draft, index)}
+                                            accessibilityLabel={t('chat.attachments.removeImageAccessibilityLabel')}
+                                            iconName="close"
+                                            iconSize="xs"
+                                            size="micro"
+                                            testID={`chat-image-attachment-remove-${index}`}
+                                        />
+                                    </Box>
+                                ) : null}
+                            </Box>
+                        );
+                    })}
+                </ScrollView>
+            ) : null}
+
+            {attachmentHelperText ? (
+                <Text
+                    testID="chat-image-attachment-readiness-text"
+                    className="text-xs leading-4 text-typography-600 dark:text-typography-300"
+                >
+                    {attachmentHelperText}
+                </Text>
+            ) : null}
+        </Box>
+    ) : null;
 
     const modeBanner = modeLabel ? (
         <ScreenSurface
@@ -246,8 +451,9 @@ export const ChatInputBar = ({
             </Box>
         </ScreenSurface>
     ) : null;
-    const attachmentsContent = attachmentsTray ? (
+    const attachmentsContent = attachmentsTray || builtInAttachmentsTray ? (
         <Box testID="chat-input-bar-attachments-tray" className="mb-2">
+            {builtInAttachmentsTray}
             {attachmentsTray}
         </Box>
     ) : null;
@@ -287,6 +493,15 @@ export const ChatInputBar = ({
 };
 
 const styles = StyleSheet.create({
+    attachmentPreviewImage: {
+        width: 56,
+        height: 56,
+        borderRadius: 12,
+    },
+    attachmentsScrollContent: {
+        paddingTop: 4,
+        paddingRight: 4,
+    },
     transparentInlineInput: {
         backgroundColor: 'transparent',
         borderWidth: 0,

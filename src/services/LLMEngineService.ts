@@ -66,13 +66,19 @@ import {
   isProbableMemoryFailure,
   readNumericMetadata,
 } from './LLMEngineService.helpers';
-import { buildEngineDiagnosticsSnapshot } from './LLMEngineService.diagnostics';
+import {
+  buildEngineDiagnosticsSnapshot,
+  buildMultimodalDiagnosticsSummary,
+} from './LLMEngineService.diagnostics';
 import {
   hasNpuRuntimeSignal as hasNpuRuntimeSignalHelper,
   resolveBackendMode as resolveBackendModeHelper,
   resolveBackendTelemetry,
 } from './LLMEngineService.backend';
-import { resolveModelFilePathOrThrow } from './LLMEngineService.modelFile';
+import {
+  resolveModelFilePathOrThrow,
+  resolveProjectorFilePathOrThrow,
+} from './LLMEngineService.modelFile';
 import {
   resolveSafeLoadPolicyOrThrow,
 } from './LLMEngineService.safeLoadPolicy';
@@ -91,15 +97,34 @@ import {
   addNativeLlamaLogListener,
   getFormattedChatFromContext,
   getLlamaBuildInfo,
+  getMultimodalSupportFromContext,
+  initMultimodalOnContext,
   initLlamaContext,
   loadLlamaModelInfo,
   releaseAllLlamaContexts,
+  releaseMultimodalFromContext,
   runCompletionOnContext,
   tokenizeFormattedPrompt,
   toggleNativeLlamaLogs,
+  LlamaRuntimeFeatureUnavailableError,
   type LlamaContextInitParams,
   type LlamaFormattedChatResult,
+  type LlamaMultimodalSupport,
 } from './LlamaRuntimeAdapter';
+import { projectorArtifactService } from './ProjectorArtifactService';
+import {
+  MAX_CHAT_IMAGE_ATTACHMENTS,
+  getChatImageAttachmentMediaPaths,
+  summarizeChatImageAttachments,
+} from '../utils/chatImageAttachments';
+import { sanitizeMultimodalFailureReason } from '../utils/multimodalFailureReason';
+import type {
+  MultimodalDiagnosticsSummary,
+  MultimodalReadinessState,
+  MultimodalReadinessStatus,
+  MultimodalSupportModality,
+  ProjectorArtifact,
+} from '../types/multimodal';
 
 export interface LoadModelOptions {
   forceReload?: boolean;
@@ -183,6 +208,12 @@ type LoadedModelArtifactIdentity = {
   fallbackDownloadMarker: number | null;
 };
 
+type ActiveMultimodalContext = {
+  modelId: string;
+  projectorId: string;
+  projectorLocalPath: string | null;
+};
+
 type ResolvedModelArtifactInfo = {
   modelPath: string;
   fileInfo: {
@@ -190,6 +221,111 @@ type ResolvedModelArtifactInfo = {
     modificationTime?: number | null;
   };
 };
+
+function normalizeMediaPaths(paths: readonly string[] | undefined): string[] {
+  if (!paths || paths.length === 0) {
+    return [];
+  }
+
+  return Array.from(new Set(paths
+    .map((path) => path.trim())
+    .filter((path) => path.length > 0)));
+}
+
+function getMessageMediaPaths(message: LlmChatMessage): string[] {
+  return normalizeMediaPaths([
+    ...(message.mediaPaths ?? []),
+    ...getChatImageAttachmentMediaPaths(message.attachments),
+  ]);
+}
+
+function getMessagesMediaPaths(messages: readonly LlmChatMessage[]): string[] {
+  return normalizeMediaPaths(messages.flatMap((message) => getMessageMediaPaths(message)));
+}
+
+function withResolvedMediaPaths(message: LlmChatMessage): LlmChatMessage {
+  const mediaPaths = getMessageMediaPaths(message);
+  return {
+    ...message,
+    ...(mediaPaths.length > 0 ? { mediaPaths } : null),
+  };
+}
+
+function mergeTopLevelMediaPathsIntoLatestUserMessage(
+  messages: readonly LlmChatMessage[],
+  mediaPaths: readonly string[] | undefined,
+): LlmChatMessage[] {
+  const normalizedTopLevelMediaPaths = normalizeMediaPaths(mediaPaths);
+  const resolvedMessages = messages.map(withResolvedMediaPaths);
+  if (normalizedTopLevelMediaPaths.length === 0) {
+    return resolvedMessages;
+  }
+
+  const latestUserMessageIndex = (() => {
+    for (let index = resolvedMessages.length - 1; index >= 0; index -= 1) {
+      if (resolvedMessages[index].role === 'user') {
+        return index;
+      }
+    }
+
+    return -1;
+  })();
+
+  if (latestUserMessageIndex < 0) {
+    return resolvedMessages;
+  }
+
+  const existingMessageMediaPaths = new Set(getMessagesMediaPaths(resolvedMessages));
+  const mediaPathsToAppend = normalizedTopLevelMediaPaths.filter(
+    (mediaPath) => !existingMessageMediaPaths.has(mediaPath),
+  );
+  if (mediaPathsToAppend.length === 0) {
+    return resolvedMessages;
+  }
+
+  return resolvedMessages.map((message, index) => {
+    if (index !== latestUserMessageIndex) {
+      return message;
+    }
+
+    return withResolvedMediaPaths({
+      ...message,
+      mediaPaths: normalizeMediaPaths([
+        ...getMessageMediaPaths(message),
+        ...mediaPathsToAppend,
+      ]),
+    });
+  });
+}
+
+function assertMultimodalReadyForMediaPaths(
+  mediaPaths: readonly string[],
+  readiness: LlmChatCompletionOptions['multimodalReadiness'],
+): void {
+  if (mediaPaths.length === 0) {
+    return;
+  }
+
+  if (mediaPaths.length > MAX_CHAT_IMAGE_ATTACHMENTS) {
+    throw new AppError('chat_attachment_limit_exceeded', 'Too many image attachments.', {
+      details: {
+        mediaPathCount: mediaPaths.length,
+        limit: MAX_CHAT_IMAGE_ATTACHMENTS,
+      },
+    });
+  }
+
+  if (readiness?.status === 'ready' && readiness.support.includes('vision')) {
+    return;
+  }
+
+  throw new AppError('multimodal_not_ready', 'Vision chat is not ready for image attachments.', {
+    details: {
+      readinessStatus: readiness?.status ?? 'unknown',
+      mediaPathCount: mediaPaths.length,
+    },
+  });
+}
 
 function normalizeArchitecturePrefix(value: unknown): string | null {
   if (typeof value !== 'string') {
@@ -307,21 +443,32 @@ function mergeConsecutiveMessages(messages: LlmChatMessage[]): LlmChatMessage[] 
   const merged: LlmChatMessage[] = [];
 
   for (const message of messages) {
+    const normalizedMessage = withResolvedMediaPaths(message);
     if (merged.length === 0) {
-      merged.push({ ...message });
+      merged.push(normalizedMessage);
       continue;
     }
 
     const lastMessage = merged[merged.length - 1];
     if (lastMessage.role === message.role) {
+      const mediaPaths = normalizeMediaPaths([
+        ...getMessageMediaPaths(lastMessage),
+        ...getMessageMediaPaths(normalizedMessage),
+      ]);
       merged[merged.length - 1] = {
+        ...lastMessage,
         role: lastMessage.role,
-        content: `${lastMessage.content}\n\n${message.content}`,
+        content: `${lastMessage.content}\n\n${normalizedMessage.content}`,
+        attachments: [
+          ...(lastMessage.attachments ?? []),
+          ...(normalizedMessage.attachments ?? []),
+        ],
+        ...(mediaPaths.length > 0 ? { mediaPaths } : null),
       };
       continue;
     }
 
-    merged.push({ ...message });
+    merged.push(normalizedMessage);
   }
 
   return merged;
@@ -371,16 +518,19 @@ function normalizeMessagesForStrictRoleAlternation(
 
   for (const message of messages) {
     const content = message.content ?? '';
-    if (content.trim().length === 0) {
+    const mediaPaths = getMessageMediaPaths(message);
+    if (content.trim().length === 0 && mediaPaths.length === 0) {
       continue;
     }
 
     if (message.role === 'system') {
-      systemParts.push(content);
+      if (content.trim().length > 0) {
+        systemParts.push(content);
+      }
       continue;
     }
 
-    nonSystemMessages.push({ role: message.role, content });
+    nonSystemMessages.push(withResolvedMediaPaths({ ...message, content }));
   }
 
   let merged = mergeConsecutiveMessages(nonSystemMessages);
@@ -420,7 +570,7 @@ function normalizeMessagesForStrictRoleAlternation(
     if (merged.length === 0) {
       merged = [{ role: 'user', content: normalizedSystemContent }];
     } else if (merged[0].role === 'user') {
-      merged[0] = { role: 'user', content: `${normalizedSystemContent}\n\n${merged[0].content}` };
+      merged[0] = { ...merged[0], role: 'user', content: `${normalizedSystemContent}\n\n${merged[0].content}` };
     } else {
       merged.unshift({ role: 'user', content: normalizedSystemContent });
     }
@@ -484,8 +634,16 @@ class LLMEngineService {
   private isUnloading = false;
   private activeCalibrationSession: CalibrationSession | null = null;
   private loadedArtifactIdentity: LoadedModelArtifactIdentity | null = null;
+  private activeMultimodalContext: ActiveMultimodalContext | null = null;
+  private pendingMultimodalReadinessRefresh: {
+    modelId: string;
+    context: LlamaContext;
+    useGpu: boolean;
+  } | null = null;
+  private pendingMultimodalReadinessRefreshPromise: Promise<void> | null = null;
   private lastLifecycleEvent: EngineLifecycleEvent | null = null;
   private lastLifecycleError: string | null = null;
+  private recentMultimodalDiagnostics: MultimodalDiagnosticsSummary | null = null;
 
   private get contextOperationQueue(): Promise<void> {
     return this.contextOperationRunner.queue;
@@ -569,6 +727,10 @@ class LLMEngineService {
   }
 
   private setContext(context: LlamaContext | null): void {
+    if (this.context !== context) {
+      this.activeMultimodalContext = null;
+      this.pendingMultimodalReadinessRefresh = null;
+    }
     this.context = context;
     this.contextGeneration += 1;
     this.additionalStopWordsCache.clear();
@@ -893,6 +1055,13 @@ class LLMEngineService {
       hash = this.updateCacheHash(hash, '\u0001');
       hash = this.updateCacheHash(hash, message.content);
       hash = this.updateCacheHash(hash, '\u0002');
+      const mediaPaths = getMessageMediaPaths(message);
+      hash = this.updateCacheHash(hash, String(mediaPaths.length));
+      hash = this.updateCacheHash(hash, '\u0003');
+      for (const mediaPath of mediaPaths) {
+        hash = this.updateCacheHash(hash, mediaPath);
+        hash = this.updateCacheHash(hash, '\u0004');
+      }
     }
 
     return `${messages.length}:${hash.toString(36)}`;
@@ -1323,6 +1492,8 @@ class LLMEngineService {
     cacheTypeK,
     cacheTypeV,
     useMmap,
+    multimodalSizeBytes,
+    hasMmproj = false,
     preferGpuLayers = false,
   }: {
     ggufMetadata?: Record<string, unknown>;
@@ -1336,6 +1507,8 @@ class LLMEngineService {
     cacheTypeK: string;
     cacheTypeV: string;
     useMmap: boolean;
+    multimodalSizeBytes?: number;
+    hasMmproj?: boolean;
     preferGpuLayers?: boolean;
   }): { safeLoadProfile: { contextTokens: number; gpuLayers: number }; safeMemoryFit: MemoryFitResult } {
     const normalizedContextCeiling = clampContextWindowTokens(
@@ -1348,7 +1521,7 @@ class LLMEngineService {
     const estimateFit = (contextTokens: number, gpuLayers: number): MemoryFitResult => {
       const normalizedContext = clampContextWindowTokens(contextTokens, normalizedContextCeiling);
       const normalizedGpuLayers = Math.max(0, Math.min(normalizedGpuCeiling, Math.round(gpuLayers)));
-      const cacheKey = `${normalizedContext}:${normalizedGpuLayers}:${cacheTypeK}:${cacheTypeV}:${useMmap ? 'mmap' : 'nommap'}`;
+      const cacheKey = `${normalizedContext}:${normalizedGpuLayers}:${cacheTypeK}:${cacheTypeV}:${useMmap ? 'mmap' : 'nommap'}:${hasMmproj ? 'mmproj' : 'text'}:${multimodalSizeBytes ?? 0}`;
       const cached = fitCache.get(cacheKey);
       if (cached) {
         return cached;
@@ -1367,7 +1540,7 @@ class LLMEngineService {
             cacheTypeK,
             cacheTypeV,
             useMmap,
-            hasMmproj: false,
+            hasMmproj,
             nBatch: lowMemoryBatchParams?.nBatch,
             nUbatch: lowMemoryBatchParams?.nUbatch,
           })
@@ -1378,6 +1551,7 @@ class LLMEngineService {
         input: {
           modelSizeBytes: resolvedModelSizeBytes,
           verifiedFileSizeBytes: verifiedFileSizeBytes ?? undefined,
+          ...(multimodalSizeBytes ? { multimodalSizeBytes } : null),
           metadataTrust,
           ggufMetadata,
           runtimeParams: {
@@ -1595,6 +1769,18 @@ class LLMEngineService {
         !forceReload &&
         isCurrentLoadedArtifact
       ) {
+        if (this.context) {
+          const refreshRequest = {
+            modelId,
+            context: this.context,
+            useGpu: this.actualGpuAccelerated === true,
+          };
+          if (this.activeCompletionPromise) {
+            this.queueMultimodalReadinessRefreshAfterCompletion(refreshRequest);
+          } else {
+            await this.initializeMultimodalReadinessForLoadedContext(refreshRequest);
+          }
+        }
         return;
       }
 
@@ -1644,6 +1830,8 @@ class LLMEngineService {
 
   public async chatCompletion({
     messages,
+    mediaPaths,
+    multimodalReadiness,
     onToken,
     params,
   }: LlmChatCompletionOptions): Promise<NativeCompletionResult> {
@@ -1653,6 +1841,32 @@ class LLMEngineService {
 
     if (this.completionRunner.hasActive()) {
       throw new AppError('engine_busy', 'A response is already being generated.');
+    }
+
+    const requestMessages = mergeTopLevelMediaPathsIntoLatestUserMessage(messages, mediaPaths);
+    const requestMediaPaths = normalizeMediaPaths([
+      ...(mediaPaths ?? []),
+      ...getMessagesMediaPaths(requestMessages),
+    ]);
+    const shouldRecordMultimodalDiagnostics = requestMediaPaths.length > 0
+      || (multimodalReadiness !== undefined && multimodalReadiness.status !== 'ready');
+    if (shouldRecordMultimodalDiagnostics) {
+      this.recordRecentMultimodalDiagnostics({
+        messages: requestMessages,
+        mediaPaths: requestMediaPaths,
+        readiness: multimodalReadiness,
+      });
+    }
+    try {
+      assertMultimodalReadyForMediaPaths(requestMediaPaths, multimodalReadiness);
+    } catch (error) {
+      this.recordRecentMultimodalDiagnostics({
+        messages: requestMessages,
+        mediaPaths: requestMediaPaths,
+        readiness: multimodalReadiness,
+        failureReason: multimodalReadiness?.failureReason ?? getErrorMessageText(error),
+      });
+      throw error;
     }
 
     let resolveCompletion!: (result: NativeCompletionResult) => void;
@@ -1673,6 +1887,17 @@ class LLMEngineService {
         await this.waitForActiveContextOperations();
 
         const { context, generation: contextGeneration } = this.getReadyContextOrThrow();
+        try {
+          this.assertActiveMultimodalRuntimeReadyForMediaPaths(requestMediaPaths, multimodalReadiness);
+        } catch (error) {
+          this.recordRecentMultimodalDiagnostics({
+            messages: requestMessages,
+            mediaPaths: requestMediaPaths,
+            readiness: multimodalReadiness,
+            failureReason: multimodalReadiness?.failureReason ?? getErrorMessageText(error),
+          });
+          throw error;
+        }
 
         let hasStreamedTokens = false;
         const markTokensStreamed = () => {
@@ -1713,6 +1938,10 @@ class LLMEngineService {
             stop: resolvedStops.stopWords,
           };
 
+          if (requestMediaPaths.length > 0) {
+            completionParams.media_paths = requestMediaPaths;
+          }
+
           if (typeof params?.seed === 'number' && Number.isFinite(params.seed)) {
             completionParams.seed = Math.round(params.seed);
           }
@@ -1749,7 +1978,7 @@ class LLMEngineService {
 
         try {
           hasStreamedTokens = false;
-          resolveCompletion(await runCompletion(messages, markTokensStreamed));
+          resolveCompletion(await runCompletion(requestMessages, markTokensStreamed));
         } catch (error) {
           if (isConversationAlternationError(error)) {
             if (hasStreamedTokens && onToken) {
@@ -1760,7 +1989,7 @@ class LLMEngineService {
             }
 
             console.warn('[LLMEngine] Retrying completion after normalizing chat roles for strict templates');
-            const normalizedMessages = normalizeMessagesForStrictRoleAlternation(messages, {
+            const normalizedMessages = normalizeMessagesForStrictRoleAlternation(requestMessages, {
               systemNormalization: strictRoleSystemNormalization,
             });
             hasStreamedTokens = false;
@@ -1771,9 +2000,20 @@ class LLMEngineService {
           throw error;
         }
       } catch (error) {
+        if (requestMediaPaths.length > 0) {
+          this.recordRecentMultimodalDiagnostics({
+            messages: requestMessages,
+            mediaPaths: requestMediaPaths,
+            readiness: multimodalReadiness,
+            failureReason: getErrorMessageText(error),
+          });
+        }
         rejectCompletion(error);
       } finally {
         this.completionRunner.clearIfActive(completionTask);
+        if (this.pendingMultimodalReadinessRefresh) {
+          this.schedulePendingMultimodalReadinessRefresh();
+        }
       }
     })();
 
@@ -1974,6 +2214,8 @@ class LLMEngineService {
       throw new AppError('engine_busy', 'A response is already being generated.');
     }
 
+    const requestMessages = messages.map(withResolvedMediaPaths);
+
     return this.trackContextOperation(async () => {
       if (this.state.status === EngineStatus.INITIALIZING && this.initPromise) {
         await this.initPromise;
@@ -2011,7 +2253,9 @@ class LLMEngineService {
           tokenized = await tokenizeFormattedPrompt({
             context,
             prompt: formatted.prompt,
-            mediaPaths: formatted.media_paths,
+            mediaPaths: formatted.media_paths && formatted.media_paths.length > 0
+              ? formatted.media_paths
+              : getMessagesMediaPaths(promptMessages),
           });
         } catch (error) {
           this.assertContextStillCurrent(context, contextGeneration);
@@ -2023,11 +2267,11 @@ class LLMEngineService {
       };
 
       try {
-        return await countTokens(messages);
+        return await countTokens(requestMessages);
       } catch (error) {
         if (isConversationAlternationError(error)) {
           console.warn('[LLMEngine] Retrying prompt token count after normalizing chat roles for strict templates');
-          const normalizedMessages = normalizeMessagesForStrictRoleAlternation(messages, {
+          const normalizedMessages = normalizeMessagesForStrictRoleAlternation(requestMessages, {
             systemNormalization: strictRoleSystemNormalization,
           });
           return await countTokens(normalizedMessages);
@@ -2203,7 +2447,480 @@ class LLMEngineService {
       initKvUnified: this.initKvUnified,
       lastLifecycleEvent: this.lastLifecycleEvent,
       lastLifecycleError: this.lastLifecycleError,
+      multimodalDiagnostics: this.recentMultimodalDiagnostics,
     });
+  }
+
+  private recordRecentMultimodalDiagnostics({
+    messages,
+    mediaPaths,
+    readiness,
+    failureReason,
+  }: {
+    messages: readonly LlmChatMessage[];
+    mediaPaths: readonly string[];
+    readiness: MultimodalReadinessState | undefined;
+    failureReason?: string | null;
+  }): void {
+    const attachmentSummary = summarizeChatImageAttachments(
+      messages.flatMap((message) => message.attachments ?? []),
+    );
+    const multimodalDiagnostics = buildMultimodalDiagnosticsSummary({
+      readiness,
+      attachmentCount: Math.max(attachmentSummary.count, mediaPaths.length),
+      attachmentTotalBytes: attachmentSummary.totalBytes,
+      failureReason,
+    });
+
+    if (!multimodalDiagnostics) {
+      return;
+    }
+
+    this.recentMultimodalDiagnostics = multimodalDiagnostics;
+    this.updateState(this.state);
+  }
+
+  private getMultimodalVariantId(model: ModelMetadata): string | undefined {
+    return model.activeVariantId ?? model.resolvedFileName;
+  }
+
+  private isVisionCapableModel(model: ModelMetadata): boolean {
+    return model.chatModalities?.includes('vision') === true
+      || Boolean(model.projectorCandidates?.length);
+  }
+
+  private async resolveLoadTimeProjectorMemoryInfo(
+    model: ModelMetadata | null | undefined,
+  ): Promise<{ projectorId: string; sizeBytes: number } | null> {
+    if (!model || !this.isVisionCapableModel(model)) {
+      return null;
+    }
+
+    const resolution = projectorArtifactService.resolveProjectorForModel(model);
+    const projector = resolution.selectedProjector;
+    if (!projector || (projector.lifecycleStatus !== 'downloaded' && projector.lifecycleStatus !== 'active')) {
+      return null;
+    }
+
+    try {
+      const resolvedProjector = await resolveProjectorFilePathOrThrow({ modelId: model.id, projector });
+      const sizeBytes = this.toPositiveByteCount(resolvedProjector.fileInfo.size)
+        ?? this.toPositiveByteCount(projector.size);
+
+      return sizeBytes ? { projectorId: projector.id, sizeBytes } : null;
+    } catch (error) {
+      if (process.env.NODE_ENV !== 'test') {
+        console.warn('[LLMEngine] Failed to resolve projector size for load-time memory fit', {
+          modelId: model.id,
+          projectorId: projector.id,
+          errorName: error instanceof Error ? error.name : typeof error,
+        });
+      }
+      return null;
+    }
+  }
+
+  private buildMultimodalReadinessState(
+    model: ModelMetadata,
+    status: MultimodalReadinessStatus,
+    options: {
+      projector?: Pick<ProjectorArtifact, 'id' | 'size'> | null;
+      projectorSize?: number | null;
+      support?: readonly MultimodalSupportModality[];
+      failureReason?: string | null;
+    } = {},
+  ): MultimodalReadinessState {
+    const projectorSize = this.toPositiveByteCount(options.projectorSize)
+      ?? this.toPositiveByteCount(options.projector?.size);
+    const support = Array.from(new Set(options.support ?? []));
+    const failureReason = sanitizeMultimodalFailureReason(options.failureReason);
+
+    return {
+      modelId: model.id,
+      ...(this.getMultimodalVariantId(model) ? { variantId: this.getMultimodalVariantId(model) } : null),
+      status,
+      ...(options.projector?.id ? { projectorId: options.projector.id } : null),
+      ...(projectorSize ? { projectorSize } : null),
+      support,
+      ...(failureReason ? { failureReason } : null),
+      checkedAt: Date.now(),
+    };
+  }
+
+  private persistMultimodalReadiness(modelId: string, readiness: MultimodalReadinessState): void {
+    const currentModel = registry.getModel(modelId);
+    if (!currentModel) {
+      return;
+    }
+
+    registry.updateModel({
+      ...currentModel,
+      multimodalReadiness: readiness,
+    });
+
+    this.recordRecentMultimodalDiagnostics({
+      messages: [],
+      mediaPaths: [],
+      readiness,
+      failureReason: readiness.failureReason,
+    });
+  }
+
+  private resolveMultimodalSupportList(support: LlamaMultimodalSupport): MultimodalSupportModality[] {
+    return [
+      ...(support.vision ? ['vision' as const] : []),
+      ...(support.audio ? ['audio' as const] : []),
+    ];
+  }
+
+  private getReadinessStatusForProjectorLifecycle(
+    projector: Pick<ProjectorArtifact, 'lifecycleStatus'>,
+  ): MultimodalReadinessStatus | null {
+    switch (projector.lifecycleStatus) {
+      case 'downloaded':
+      case 'active':
+        return null;
+      case 'queued':
+      case 'downloading':
+      case 'paused':
+        return 'projector_downloading';
+      case 'failed':
+        return 'failed';
+      case 'available':
+      default:
+        return 'missing_projector';
+    }
+  }
+
+  private getMultimodalRuntimeFailureStatus(error: unknown): MultimodalReadinessStatus {
+    return error instanceof LlamaRuntimeFeatureUnavailableError ? 'unsupported' : 'failed';
+  }
+
+  private queueMultimodalReadinessRefreshAfterCompletion(refresh: {
+    modelId: string;
+    context: LlamaContext;
+    useGpu: boolean;
+  }): void {
+    this.pendingMultimodalReadinessRefresh = refresh;
+    const activeCompletion = this.activeCompletionPromise;
+    if (activeCompletion) {
+      void activeCompletion.catch(() => undefined).then(() => {
+        this.schedulePendingMultimodalReadinessRefresh();
+      });
+      return;
+    }
+
+    this.schedulePendingMultimodalReadinessRefresh();
+  }
+
+  private schedulePendingMultimodalReadinessRefresh(): void {
+    if (this.pendingMultimodalReadinessRefreshPromise) {
+      return;
+    }
+
+    const refreshPromise = this.runPendingMultimodalReadinessRefresh();
+    this.pendingMultimodalReadinessRefreshPromise = refreshPromise;
+    void refreshPromise.finally(() => {
+      if (this.pendingMultimodalReadinessRefreshPromise === refreshPromise) {
+        this.pendingMultimodalReadinessRefreshPromise = null;
+      }
+
+      if (this.pendingMultimodalReadinessRefresh && !this.activeCompletionPromise && !this.isUnloading) {
+        this.schedulePendingMultimodalReadinessRefresh();
+      }
+    });
+  }
+
+  private async runPendingMultimodalReadinessRefresh(): Promise<void> {
+    const pendingRefresh = this.pendingMultimodalReadinessRefresh;
+    if (!pendingRefresh || this.activeCompletionPromise || this.isUnloading) {
+      return;
+    }
+
+    this.pendingMultimodalReadinessRefresh = null;
+
+    try {
+      await this.trackContextOperation(async () => {
+        if (this.activeCompletionPromise) {
+          this.pendingMultimodalReadinessRefresh ??= pendingRefresh;
+          return;
+        }
+
+        if (
+          this.context !== pendingRefresh.context
+          || this.state.activeModelId !== pendingRefresh.modelId
+          || this.state.status !== EngineStatus.READY
+        ) {
+          return;
+        }
+
+        await this.initializeMultimodalReadinessForLoadedContext(pendingRefresh);
+      });
+    } catch (error) {
+      if (process.env.NODE_ENV !== 'test') {
+        console.warn('[LLMEngine] Deferred multimodal readiness refresh failed', {
+          modelId: pendingRefresh.modelId,
+          error: sanitizeMultimodalFailureReason(getErrorMessageText(error))
+            ?? (error instanceof Error ? error.name : typeof error),
+        });
+      }
+    }
+  }
+
+  private async initializeMultimodalReadinessForLoadedContext({
+    modelId,
+    context,
+    useGpu,
+  }: {
+    modelId: string;
+    context: LlamaContext;
+    useGpu: boolean;
+  }): Promise<void> {
+    const model = registry.getModel(modelId);
+    if (!model) {
+      return;
+    }
+
+    if (!this.isVisionCapableModel(model)) {
+      if (model.multimodalReadiness) {
+        this.persistMultimodalReadiness(
+          model.id,
+          this.buildMultimodalReadinessState(model, 'text_only'),
+        );
+      }
+      await this.releaseActiveMultimodalContext({ modelId: model.id, context });
+      return;
+    }
+
+    const resolution = projectorArtifactService.resolveProjectorForModel(model);
+    const projector = resolution.selectedProjector;
+    if (!projector) {
+      const status: MultimodalReadinessStatus = resolution.status === 'ambiguous'
+        ? 'ambiguous_projector'
+        : resolution.status === 'failed'
+          ? 'failed'
+          : 'missing_projector';
+      this.persistMultimodalReadiness(
+        model.id,
+        this.buildMultimodalReadinessState(model, status, {
+          failureReason: resolution.reason,
+        }),
+      );
+      await this.releaseActiveMultimodalContext({ modelId: model.id, context });
+      return;
+    }
+
+    const lifecycleReadiness = this.getReadinessStatusForProjectorLifecycle(projector);
+    if (lifecycleReadiness) {
+      this.persistMultimodalReadiness(
+        model.id,
+        this.buildMultimodalReadinessState(model, lifecycleReadiness, {
+          projector,
+          failureReason: lifecycleReadiness === 'failed' ? projector.matchReason ?? 'projector_download_failed' : undefined,
+        }),
+      );
+      await this.releaseActiveMultimodalContext({ modelId: model.id, context });
+      return;
+    }
+
+    if (
+      this.activeMultimodalContext?.modelId === model.id
+      && this.activeMultimodalContext.projectorId === projector.id
+    ) {
+      if (model.multimodalReadiness?.status === 'ready') {
+        return;
+      }
+
+      try {
+        const support = this.resolveMultimodalSupportList(await getMultimodalSupportFromContext(context));
+        const readiness = support.includes('vision')
+          ? this.buildMultimodalReadinessState(model, 'ready', {
+            projector,
+            support,
+          })
+          : this.buildMultimodalReadinessState(model, 'unsupported', {
+            projector,
+            support,
+            failureReason: 'Runtime did not report vision support for the active projector.',
+          });
+
+        this.persistMultimodalReadiness(model.id, readiness);
+        if (readiness.status !== 'ready') {
+          await this.releaseActiveMultimodalContext({ modelId: model.id, context });
+        }
+      } catch (error) {
+        this.persistMultimodalReadiness(
+          model.id,
+          this.buildMultimodalReadinessState(model, this.getMultimodalRuntimeFailureStatus(error), {
+            projector,
+            failureReason: getErrorMessageText(error),
+          }),
+        );
+        await this.releaseActiveMultimodalContext({ modelId: model.id, context });
+      }
+      return;
+    }
+
+    if (
+      this.activeMultimodalContext
+      && this.activeMultimodalContext.modelId === model.id
+      && this.activeMultimodalContext.projectorId !== projector.id
+    ) {
+      const didReleasePreviousProjector = await this.releaseActiveMultimodalContext({ modelId: model.id, context });
+      if (!didReleasePreviousProjector) {
+        this.persistMultimodalReadiness(
+          model.id,
+          this.buildMultimodalReadinessState(model, 'failed', {
+            projector,
+            failureReason: 'Failed to release the previously initialized multimodal projector.',
+          }),
+        );
+        return;
+      }
+    }
+
+    let resolvedProjector: Awaited<ReturnType<typeof resolveProjectorFilePathOrThrow>>;
+    try {
+      resolvedProjector = await resolveProjectorFilePathOrThrow({ modelId: model.id, projector });
+    } catch (error) {
+      this.persistMultimodalReadiness(
+        model.id,
+        this.buildMultimodalReadinessState(model, 'failed', {
+          projector,
+          failureReason: getErrorMessageText(error),
+        }),
+      );
+      await this.releaseActiveMultimodalContext({ modelId: model.id, context });
+      return;
+    }
+
+    try {
+      const didInitialize = await initMultimodalOnContext({
+        context,
+        path: resolvedProjector.projectorPath,
+        useGpu,
+      });
+
+      if (!didInitialize) {
+        this.persistMultimodalReadiness(
+          model.id,
+          this.buildMultimodalReadinessState(model, 'failed', {
+            projector,
+            projectorSize: resolvedProjector.fileInfo.size,
+            failureReason: 'llama.rn did not initialize the multimodal projector.',
+          }),
+        );
+        await this.releaseActiveMultimodalContext({ modelId: model.id, context });
+        return;
+      }
+
+      this.activeMultimodalContext = {
+        modelId: model.id,
+        projectorId: projector.id,
+        projectorLocalPath: resolvedProjector.localPath,
+      };
+
+      const support = this.resolveMultimodalSupportList(await getMultimodalSupportFromContext(context));
+      const readiness = support.includes('vision')
+        ? this.buildMultimodalReadinessState(model, 'ready', {
+          projector,
+          projectorSize: resolvedProjector.fileInfo.size,
+          support,
+        })
+        : this.buildMultimodalReadinessState(model, 'unsupported', {
+          projector,
+          projectorSize: resolvedProjector.fileInfo.size,
+          support,
+          failureReason: 'Runtime did not report vision support after projector initialization.',
+        });
+
+      this.persistMultimodalReadiness(model.id, readiness);
+      if (readiness.status !== 'ready') {
+        await this.releaseActiveMultimodalContext({ modelId: model.id, context });
+      }
+    } catch (error) {
+      this.persistMultimodalReadiness(
+        model.id,
+        this.buildMultimodalReadinessState(model, this.getMultimodalRuntimeFailureStatus(error), {
+          projector,
+          projectorSize: resolvedProjector.fileInfo.size,
+          failureReason: getErrorMessageText(error),
+        }),
+      );
+      await this.releaseActiveMultimodalContext({ modelId: model.id, context });
+    }
+  }
+
+  private assertActiveMultimodalRuntimeReadyForMediaPaths(
+    mediaPaths: readonly string[],
+    readiness: MultimodalReadinessState | undefined,
+  ): void {
+    if (mediaPaths.length === 0) {
+      return;
+    }
+
+    const activeMultimodal = this.activeMultimodalContext;
+    if (!activeMultimodal || activeMultimodal.modelId !== this.state.activeModelId) {
+      throw new AppError('multimodal_not_ready', 'Multimodal runtime is not initialized for the active model.', {
+        details: {
+          activeModelId: this.state.activeModelId,
+          readinessStatus: readiness?.status,
+        },
+      });
+    }
+
+    if (readiness?.projectorId && readiness.projectorId !== activeMultimodal.projectorId) {
+      throw new AppError('multimodal_not_ready', 'Multimodal runtime is initialized with a different projector.', {
+        details: {
+          activeModelId: this.state.activeModelId,
+          readinessProjectorId: readiness.projectorId,
+          runtimeProjectorId: activeMultimodal.projectorId,
+        },
+      });
+    }
+  }
+
+  private async releaseActiveMultimodalContext(expected?: {
+    modelId?: string;
+    context?: LlamaContext;
+  }): Promise<boolean> {
+    const activeMultimodal = this.activeMultimodalContext;
+    if (!activeMultimodal) {
+      return true;
+    }
+
+    if (expected?.modelId && activeMultimodal.modelId !== expected.modelId) {
+      return true;
+    }
+
+    const context = this.context;
+    if (expected?.context && context !== expected.context) {
+      return true;
+    }
+
+    if (!context) {
+      this.activeMultimodalContext = null;
+      return true;
+    }
+
+    this.activeMultimodalContext = null;
+    try {
+      await releaseMultimodalFromContext(context);
+      return true;
+    } catch (error) {
+      if (this.context === context && this.state.activeModelId === activeMultimodal.modelId) {
+        this.activeMultimodalContext = activeMultimodal;
+      }
+      if (process.env.NODE_ENV !== 'test') {
+        const sanitizedErrorMessage = sanitizeMultimodalFailureReason(getErrorMessageText(error));
+        console.warn('[LLMEngine] Failed to release multimodal context', {
+          modelId: activeMultimodal.modelId,
+          projectorId: activeMultimodal.projectorId,
+          error: sanitizedErrorMessage ?? (error instanceof Error ? error.name : typeof error),
+        });
+      }
+      return false;
+    }
   }
 
   private updateState(newState: EngineState) {
@@ -2225,6 +2942,7 @@ class LLMEngineService {
 
   private resetRuntimeTelemetry(): void {
     this.resetBackendTelemetry();
+    this.recentMultimodalDiagnostics = null;
     this.requestedGpuLayers = null;
     this.requestedBackendPolicy = null;
     this.effectiveBackendPolicy = null;
@@ -2488,6 +3206,11 @@ class LLMEngineService {
       };
 
       const cachedModel = registry.getModel(modelId);
+      const loadTimeProjectorMemory = await this.resolveLoadTimeProjectorMemoryInfo(cachedModel);
+      const loadTimeProjectorSizeBytes = loadTimeProjectorMemory?.sizeBytes;
+      const hasLoadTimeMmproj = typeof loadTimeProjectorSizeBytes === 'number'
+        && Number.isFinite(loadTimeProjectorSizeBytes)
+        && loadTimeProjectorSizeBytes > 0;
       const ggufMetadata = modelInfo !== null || cachedModel?.gguf
         ? {
           ...(cachedModel?.gguf ?? {}),
@@ -2559,12 +3282,18 @@ class LLMEngineService {
           size: verifiedFileSizeBytes ?? cachedModel.size,
         })
         : null;
+      const baseLoadProfileModelSizeBytes = verifiedFileSizeBytes ?? resolvedModelSizeBytes;
+      const loadProfileModelSizeBytes = typeof baseLoadProfileModelSizeBytes === 'number'
+        && Number.isFinite(baseLoadProfileModelSizeBytes)
+        && baseLoadProfileModelSizeBytes > 0
+        ? baseLoadProfileModelSizeBytes + (loadTimeProjectorSizeBytes ?? 0)
+        : baseLoadProfileModelSizeBytes;
       const { recommendedGpuLayers, gpuLayersCeiling } = this.resolveRecommendedLoadProfile({
         totalMemoryBytes: typeof resolvedTotalMemoryBytes === 'number' && Number.isFinite(resolvedTotalMemoryBytes) && resolvedTotalMemoryBytes > 0
           ? resolvedTotalMemoryBytes
           : null,
         systemMemorySnapshot,
-        modelSizeBytes: verifiedFileSizeBytes ?? resolvedModelSizeBytes,
+        modelSizeBytes: loadProfileModelSizeBytes,
         ggufMetadata,
         modelLayerCount: stableCapability?.modelLayerCount,
         gpuLayersCeilingOverride: stableCapability?.gpuLayersCeiling,
@@ -2636,6 +3365,7 @@ class LLMEngineService {
         input: {
           modelSizeBytes: resolvedModelSizeBytes,
           verifiedFileSizeBytes: verifiedFileSizeBytes ?? undefined,
+          ...(loadTimeProjectorSizeBytes ? { multimodalSizeBytes: loadTimeProjectorSizeBytes } : null),
           metadataTrust: metadataTrustForEstimator,
           ggufMetadata,
           runtimeParams: {
@@ -2661,7 +3391,7 @@ class LLMEngineService {
           cacheTypeK,
           cacheTypeV,
           useMmap: requestedUseMmap,
-          hasMmproj: false,
+          hasMmproj: hasLoadTimeMmproj,
           nBatch: configuredBatchParams?.nBatch,
           nUbatch: configuredBatchParams?.nUbatch,
         })
@@ -2672,6 +3402,7 @@ class LLMEngineService {
       const requestedEstimatorInput = {
         modelSizeBytes: resolvedModelSizeBytes,
         verifiedFileSizeBytes: verifiedFileSizeBytes ?? undefined,
+        ...(loadTimeProjectorSizeBytes ? { multimodalSizeBytes: loadTimeProjectorSizeBytes } : null),
         metadataTrust: metadataTrustForEstimator,
         ggufMetadata,
         runtimeParams: {
@@ -2750,6 +3481,8 @@ class LLMEngineService {
             cacheTypeK,
             cacheTypeV,
             useMmap: requestedUseMmap,
+            ...(loadTimeProjectorSizeBytes ? { multimodalSizeBytes: loadTimeProjectorSizeBytes } : null),
+            hasMmproj: hasLoadTimeMmproj,
             preferGpuLayers: requestedBackendPolicy === 'gpu' || requestedBackendPolicy === 'npu',
           }),
           onHardBlock: (confidence) => this.persistHardBlockedMemoryFit(modelId, confidence),
@@ -2852,7 +3585,7 @@ class LLMEngineService {
           cacheTypeK,
           cacheTypeV,
           useMmap: requestedUseMmap,
-          hasMmproj: false,
+          hasMmproj: hasLoadTimeMmproj,
           nBatch: effectiveBatchParams?.nBatch,
           nUbatch: effectiveBatchParams?.nUbatch,
         })
@@ -2967,7 +3700,7 @@ class LLMEngineService {
               cacheTypeK,
               cacheTypeV,
               useMmap: requestedUseMmap,
-              hasMmproj: false,
+              hasMmproj: hasLoadTimeMmproj,
               nBatch: effectiveBatchParams?.nBatch,
               nUbatch: effectiveBatchParams?.nUbatch,
             })
@@ -3135,7 +3868,7 @@ class LLMEngineService {
                   cacheTypeK,
                   cacheTypeV,
                   useMmap: requestedUseMmap,
-                  hasMmproj: false,
+                  hasMmproj: hasLoadTimeMmproj,
                   nBatch: effectiveBatchParams?.nBatch,
                   nUbatch: effectiveBatchParams?.nUbatch,
                 })
@@ -3621,6 +4354,14 @@ class LLMEngineService {
         ? { maxContextTokens: finalContextSize, requestedGpuLayers, loadedGpuLayers: reportedLoadedGpuLayers }
         : null;
 
+      if (this.context) {
+        await this.initializeMultimodalReadinessForLoadedContext({
+          modelId,
+          context: this.context,
+          useGpu: resolvedInitActualGpu === true,
+        });
+      }
+
       if (resolvedInitProfile) {
         const isAcceleratorRequested = normalizedBackendPolicy === 'auto'
           || normalizedBackendPolicy === 'gpu'
@@ -3800,6 +4541,7 @@ class LLMEngineService {
         if (activeContextReclaimEstimate) {
           beforeUnloadSnapshot = await getFreshMemorySnapshot(0).catch(() => null);
         }
+        await this.releaseActiveMultimodalContext();
         await releaseAllLlamaContexts();
       }
     } finally {

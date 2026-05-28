@@ -1,10 +1,12 @@
 import React, { useEffect, useState } from 'react';
-import { LayoutChangeEvent } from 'react-native';
+import { Image, LayoutChangeEvent } from 'react-native';
 import { useTranslation } from 'react-i18next';
 import * as Clipboard from 'expo-clipboard';
+import * as FileSystem from 'expo-file-system/legacy';
 import { Box } from '@/components/ui/box';
 import { Pressable } from '@/components/ui/pressable';
 import { Text } from '@/components/ui/text';
+import type { ChatImageAttachment } from '@/types/multimodal';
 import { MaterialSymbols } from './MaterialSymbols';
 import { ScreenBadge, ScreenIconButton, ScreenIconTile, ScreenSurface, useScreenAppearance } from './ScreenShell';
 import { StreamingCursor } from './StreamingCursor';
@@ -17,6 +19,7 @@ export interface ChatMessageBubbleProps {
   id: string;
   isUser: boolean;
   content: string;
+  attachments?: ChatImageAttachment[];
   thoughtContent?: string;
   errorMessage?: string;
   isStreaming?: boolean;
@@ -28,11 +31,34 @@ export interface ChatMessageBubbleProps {
   onLayout?: (event: LayoutChangeEvent) => void;
 }
 
+function areChatImageAttachmentPropsEqual(
+  prev: ChatImageAttachment[] | undefined,
+  next: ChatImageAttachment[] | undefined,
+) {
+  if (prev === next) {
+    return true;
+  }
+
+  if (!prev || !next || prev.length !== next.length) {
+    return false;
+  }
+
+  return prev.every((attachment, index) => {
+    const nextAttachment = next[index];
+    return (
+      attachment.id === nextAttachment.id
+      && attachment.localUri === nextAttachment.localUri
+      && attachment.fileName === nextAttachment.fileName
+    );
+  });
+}
+
 function areChatMessageBubblePropsEqual(prev: ChatMessageBubbleProps, next: ChatMessageBubbleProps) {
   return (
     prev.id === next.id
     && prev.isUser === next.isUser
     && prev.content === next.content
+    && areChatImageAttachmentPropsEqual(prev.attachments, next.attachments)
     && prev.thoughtContent === next.thoughtContent
     && prev.errorMessage === next.errorMessage
     && prev.isStreaming === next.isStreaming
@@ -77,6 +103,7 @@ const ChatMessageBubbleComponent = ({
   id,
   isUser,
   content,
+  attachments,
   thoughtContent: explicitThoughtContent,
   errorMessage,
   isStreaming,
@@ -89,6 +116,7 @@ const ChatMessageBubbleComponent = ({
 }: ChatMessageBubbleProps) => {
   const [copied, setCopied] = useState(false);
   const [isThoughtExpanded, setThoughtExpanded] = useState(false);
+  const [attachmentAvailability, setAttachmentAvailability] = useState<Record<string, boolean>>({});
   const { t } = useTranslation();
   const appearance = useScreenAppearance();
   const hasExplicitThoughtContent = explicitThoughtContent !== undefined;
@@ -166,6 +194,40 @@ const ChatMessageBubbleComponent = ({
   const shouldUseGlassBubble = appearance.surfaceKind === 'glass';
   const shouldUseAssistantGlass = appearance.surfaceKind === 'glass' && !isUser;
   const userTextClassName = getThemeActionContentClassName(appearance, 'primary');
+  const userAttachments = React.useMemo(
+    () => (isUser ? attachments ?? [] : []),
+    [attachments, isUser],
+  );
+  const attachmentSignature = userAttachments
+    .map((attachment) => `${attachment.id}:${attachment.localUri}`)
+    .join('|');
+
+  useEffect(() => {
+    if (userAttachments.length === 0) {
+      setAttachmentAvailability({});
+      return;
+    }
+
+    let cancelled = false;
+    void Promise.all(userAttachments.map(async (attachment) => {
+      try {
+        const info = await FileSystem.getInfoAsync(attachment.localUri);
+        return [attachment.id, info.exists === true] as const;
+      } catch {
+        return [attachment.id, false] as const;
+      }
+    })).then((entries) => {
+      if (cancelled) {
+        return;
+      }
+
+      setAttachmentAvailability(Object.fromEntries(entries));
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [attachmentSignature, userAttachments]);
 
   return (
     <Box className={`w-full flex-col gap-0.5 ${isUser ? 'items-end' : 'items-start'}`} onLayout={onLayout}>
@@ -247,9 +309,46 @@ const ChatMessageBubbleComponent = ({
           ) : null}
 
           {isUser ? (
-            <Text selectable className={`text-base leading-relaxed ${userTextClassName}`}>
-              {content}
-            </Text>
+            <>
+              {userAttachments.length > 0 ? (
+                <Box
+                  testID={`message-attachments-${id}`}
+                  className={`${content ? 'mb-2 ' : ''}flex-row flex-wrap gap-1.5`}
+                >
+                  {userAttachments.map((attachment) => {
+                    const isAvailable = attachmentAvailability[attachment.id] !== false;
+                    return isAvailable ? (
+                      <Image
+                        key={attachment.id}
+                        testID={`message-attachment-image-${id}-${attachment.id}`}
+                        source={{ uri: attachment.localUri }}
+                        accessibilityLabel={t('chat.attachments.previewAccessibilityLabel')}
+                        resizeMode="cover"
+                        style={{ width: 72, height: 72, borderRadius: 8 }}
+                      />
+                    ) : (
+                      <ScreenSurface
+                        key={attachment.id}
+                        testID={`message-attachment-unavailable-${id}-${attachment.id}`}
+                        tone="default"
+                        decorative="matte"
+                        className="w-36 flex-row items-center gap-1.5 px-2 py-1.5"
+                      >
+                        <MaterialSymbols name="broken-image" size="sm" className="text-typography-500 dark:text-typography-300" />
+                        <Text className="min-w-0 flex-1 text-xs leading-4 text-typography-700 dark:text-typography-200">
+                          {t('chat.attachments.unavailable')}
+                        </Text>
+                      </ScreenSurface>
+                    );
+                  })}
+                </Box>
+              ) : null}
+              {content ? (
+                <Text selectable className={`text-base leading-relaxed ${userTextClassName}`}>
+                  {content}
+                </Text>
+              ) : null}
+            </>
           ) : shouldShowStreamingPlaceholder ? (
             <StreamingCursor compact />
           ) : isStreaming && assistantBodyContent ? (

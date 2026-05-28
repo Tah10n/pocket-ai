@@ -1,5 +1,10 @@
 import type { ChatThread, LlmChatMessage } from '../../src/types/chat';
-import { buildInferenceWindowWithAccurateTokenCounts } from '../../src/utils/inferenceWindow';
+import {
+  buildInferenceWindowWithAccurateTokenCounts,
+  estimateLlmMessageTokens,
+  getThreadInferenceWindow,
+} from '../../src/utils/inferenceWindow';
+import { copiedImageAttachment } from '../fixtures/chatImageAttachmentFixtures';
 
 describe('buildInferenceWindowWithAccurateTokenCounts', () => {
   it('throws message_too_long when even the newest message cannot fit the context window', async () => {
@@ -118,6 +123,64 @@ describe('buildInferenceWindowWithAccurateTokenCounts', () => {
       ),
     ).resolves.toEqual(expect.objectContaining({
       truncatedMessageIds: [],
+    }));
+  });
+
+  it('retains user image attachments and media paths in the inference window', async () => {
+    const thread: ChatThread = {
+      id: 'thread-vision-1',
+      title: 'Vision',
+      modelId: 'author/model-q4',
+      presetId: null,
+      presetSnapshot: {
+        id: null,
+        name: 'Default',
+        systemPrompt: 'You are helpful.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        topK: 40,
+        minP: 0.05,
+        repetitionPenalty: 1,
+        maxTokens: 128,
+        seed: null,
+      },
+      messages: [
+        {
+          id: 'message-user-1',
+          role: 'user',
+          content: 'Describe this image',
+          createdAt: 1,
+          state: 'complete',
+          attachments: [copiedImageAttachment],
+        },
+      ],
+      createdAt: 1,
+      updatedAt: 1,
+      status: 'idle',
+    };
+
+    const window = getThreadInferenceWindow(thread, { maxContextMessages: 24 });
+
+    expect(window.messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        role: 'user',
+        content: 'Describe this image',
+        attachments: [copiedImageAttachment],
+        mediaPaths: ['test-dir/chat-attachments/thread-vision-1/attachment-image-1.jpg'],
+      }),
+    ]));
+  });
+
+  it('adds image attachment overhead to heuristic token estimates', () => {
+    expect(estimateLlmMessageTokens({
+      role: 'user',
+      content: 'Describe this image',
+      mediaPaths: ['/document/image.jpg'],
+    })).toBeGreaterThan(estimateLlmMessageTokens({
+      role: 'user',
+      content: 'Describe this image',
     }));
   });
 });

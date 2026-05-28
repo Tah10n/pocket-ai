@@ -24,7 +24,7 @@ import { ChatStatusBanner } from '@/components/ui/ChatStatusBanner';
 import { ChatMessageBubble } from '@/components/ui/ChatMessageBubble';
 import { ChatSystemEventRow } from '@/components/ui/ChatSystemEventRow';
 import { ChatModelSelectorSheet } from '@/components/ui/ChatModelSelectorSheet';
-import { ChatInputBar } from '@/components/ui/ChatInputBar';
+import { ChatInputBar, markChatInputDraftConsumedError } from '@/components/ui/ChatInputBar';
 import { ErrorReportSheet } from '@/components/ui/ErrorReportSheet';
 import {
     MODEL_WARMUP_BANNER_RESERVED_HEIGHT,
@@ -41,11 +41,13 @@ import { resolvePresetSnapshot, useChatSession } from '../../hooks/useChatSessio
 import { useLLMEngine } from '../../hooks/useLLMEngine';
 import { useErrorReportSheetController, type ErrorReportContext } from '@/hooks/useErrorReportSheetController';
 import { useFloatingScrollInsets } from '../../hooks/useTabBarContentInset';
+import { useChatImageAttachments } from '../../hooks/useChatImageAttachments';
 import { useModelParametersSheetController } from '@/hooks/useModelParametersSheetController';
 import { useModelRegistryRevision } from '@/hooks/useModelRegistryRevision';
 import { useRouter } from 'expo-router';
-import { EngineStatus, LifecycleStatus } from '../../types/models';
+import { EngineStatus, LifecycleStatus, type ModelMetadata } from '../../types/models';
 import { ChatMessage, getThreadActiveModelId } from '../../types/chat';
+import type { MultimodalReadinessState, MultimodalReadinessStatus } from '../../types/multimodal';
 import { getChatHardwareBannerInputs, hardwareListenerService } from '../../services/HardwareListenerService';
 import { registry } from '../../services/LocalStorageRegistry';
 import { useChatStore } from '../../store/chatStore';
@@ -71,8 +73,41 @@ const FALLBACK_MIN_P = 0.05;
 const FALLBACK_REPETITION_PENALTY = 1;
 const SHOULD_USE_KEYBOARD_AVOIDING_VIEW = Platform.OS === 'ios';
 const KEYBOARD_SPACER_SETTLE_EPSILON = 0.5;
+const VISION_READINESS_TRANSLATION_KEYS: Record<MultimodalReadinessStatus, string> = {
+    ready: 'chat.visionReadiness.ready',
+    text_only: 'chat.visionReadiness.textOnly',
+    missing_projector: 'chat.visionReadiness.missingProjector',
+    ambiguous_projector: 'chat.visionReadiness.ambiguousProjector',
+    projector_downloading: 'chat.visionReadiness.projectorDownloading',
+    initializing: 'chat.visionReadiness.initializing',
+    failed: 'chat.visionReadiness.failed',
+    unsupported: 'chat.visionReadiness.unsupported',
+};
+const IMAGE_ATTACHMENTS_NO_MODEL_REASON_KEY = 'chat.visionReadiness.noModel';
+const IMAGE_ATTACHMENTS_EDITING_REASON_KEY = 'chat.visionReadiness.editingMessage';
 
 type ScrollMetrics = Pick<NativeScrollEvent, 'contentOffset' | 'contentSize' | 'layoutMeasurement'>;
+
+function getVisionReadinessTranslationKey(status: MultimodalReadinessStatus): string {
+    return VISION_READINESS_TRANSLATION_KEYS[status];
+}
+
+function resolveFallbackMultimodalReadiness(
+    model: ModelMetadata | undefined,
+    modelId: string | null,
+): MultimodalReadinessState {
+    if (model?.multimodalReadiness) {
+        return model.multimodalReadiness;
+    }
+
+    const supportsVision = model?.chatModalities?.includes('vision') === true;
+    return {
+        modelId: modelId ?? model?.id ?? '',
+        status: supportsVision ? 'missing_projector' : 'text_only',
+        support: [],
+        checkedAt: 0,
+    };
+}
 
 function snapshotScrollMetrics(metrics: ScrollMetrics): ScrollMetrics {
     return {
@@ -255,6 +290,7 @@ export const ChatScreen = () => {
     const [pendingRegenerateMessage, setPendingRegenerateMessage] = useState<{
         messageId: string;
         originalContent: string;
+        hasAttachments: boolean;
     } | null>(null);
     const updateThreadPresetSnapshot = useChatStore((state) => state.updateThreadPresetSnapshot);
     const updateThreadParamsSnapshot = useChatStore((state) => state.updateThreadParamsSnapshot);
@@ -280,6 +316,7 @@ export const ChatScreen = () => {
     const dragStartOffsetYRef = useRef<number | null>(null);
     const momentumStartOffsetYRef = useRef<number | null>(null);
     const shouldStickToBottomRef = useRef(true);
+    const sendMessageInFlightRef = useRef(false);
     const hasActiveModel = Boolean(engineState.activeModelId);
     const isEngineReady = engineState.status === EngineStatus.READY;
     const isModelInitializing = engineState.status === EngineStatus.INITIALIZING;
@@ -337,6 +374,38 @@ export const ChatScreen = () => {
     const displayedChatActiveModelId = isPendingModelSelectionForCurrentThread
         ? pendingModelSelection.modelId
         : currentChatActiveModelId;
+    const activeChatModel = useMemo(() => {
+        void modelRegistryRevision;
+
+        return displayedChatActiveModelId ? registry.getModel(displayedChatActiveModelId) : undefined;
+    }, [displayedChatActiveModelId, modelRegistryRevision]);
+    const multimodalReadiness = useMemo(
+        () => resolveFallbackMultimodalReadiness(activeChatModel, displayedChatActiveModelId),
+        [activeChatModel, displayedChatActiveModelId],
+    );
+    const hasReadyVisionSupport = multimodalReadiness.status === 'ready'
+        && multimodalReadiness.support.includes('vision');
+    const imageAttachmentsDisabledReason = pendingRegenerateMessage
+        ? IMAGE_ATTACHMENTS_EDITING_REASON_KEY
+        : !displayedChatActiveModelId
+            ? IMAGE_ATTACHMENTS_NO_MODEL_REASON_KEY
+            : !isEngineReady || engineState.activeModelId !== displayedChatActiveModelId
+                ? 'chat.visionReadiness.initializing'
+                : getVisionReadinessTranslationKey(multimodalReadiness.status);
+    const imageAttachmentsEnabled =
+        !isInputDisabled
+        && !pendingRegenerateMessage
+        && engineState.activeModelId === displayedChatActiveModelId
+        && hasReadyVisionSupport;
+    const imageAttachmentOwnerKey = [
+        activeThread?.id ?? 'new-thread',
+        displayedChatActiveModelId ?? 'no-displayed-model',
+    ].join('|');
+    const imageAttachmentDrafts = useChatImageAttachments({
+        enabled: imageAttachmentsEnabled,
+        disabledReason: imageAttachmentsDisabledReason,
+        ownerKey: imageAttachmentOwnerKey,
+    });
 
     const headerTitle = activeThread?.title ?? t('chat.newChatTitle');
     const configurableModelId = currentChatActiveModelId;
@@ -1027,29 +1096,66 @@ export const ChatScreen = () => {
     ]);
 
     const handleSendMessage = async (content: string) => {
-        armFollowLatestMessage(false);
-        if (pendingRegenerateMessage) {
-            const targetMessage = pendingRegenerateMessage;
-            setPendingRegenerateMessage(null);
-            setComposerDraft('');
-
-            try {
-                await regenerateFromUserMessage(targetMessage.messageId, content);
-            } catch (error) {
-                setPendingRegenerateMessage(targetMessage);
-                setComposerDraft(content);
-                throw error;
-            }
-
+        if (sendMessageInFlightRef.current) {
             return;
         }
 
-        setComposerDraft('');
+        sendMessageInFlightRef.current = true;
+        armFollowLatestMessage(false);
         try {
-            await appendUserMessage(content);
-        } catch (error) {
-            setComposerDraft(content);
-            throw error;
+            if (pendingRegenerateMessage) {
+                const targetMessage = pendingRegenerateMessage;
+                setPendingRegenerateMessage(null);
+                setComposerDraft('');
+
+                try {
+                    if (targetMessage.hasAttachments) {
+                        await regenerateFromUserMessage(targetMessage.messageId, content, { multimodalReadiness });
+                    } else {
+                        await regenerateFromUserMessage(targetMessage.messageId, content);
+                    }
+                } catch (error) {
+                    setPendingRegenerateMessage(targetMessage);
+                    setComposerDraft(content);
+                    throw error;
+                }
+
+                return;
+            }
+
+            const attachmentDrafts = imageAttachmentDrafts.drafts;
+            const shouldSendAttachmentDrafts = attachmentDrafts.length > 0 && imageAttachmentsEnabled;
+
+            let userMessageAppended = false;
+            setComposerDraft('');
+            try {
+                await appendUserMessage(
+                    content,
+                    {
+                        ...(shouldSendAttachmentDrafts
+                            ? {
+                                attachmentDrafts,
+                                multimodalReadiness,
+                            }
+                            : null),
+                        onUserMessageAppended: () => {
+                            userMessageAppended = true;
+                            if (shouldSendAttachmentDrafts) {
+                                imageAttachmentDrafts.commitDrafts();
+                            }
+                        },
+                    },
+                );
+            } catch (error) {
+                if (userMessageAppended) {
+                    throw markChatInputDraftConsumedError(error);
+                }
+
+                setComposerDraft(content);
+                throw error;
+            }
+        } finally {
+            sendMessageInFlightRef.current = false;
         }
     };
 
@@ -1063,14 +1169,17 @@ export const ChatScreen = () => {
         setPendingRegenerateMessage({
             messageId: message.id,
             originalContent: message.content,
+            hasAttachments: (message.attachments?.length ?? 0) > 0,
         });
         setComposerDraft(message.content);
-    }, []);
+        imageAttachmentDrafts.clearDrafts();
+    }, [imageAttachmentDrafts]);
 
     const handleCancelComposerMode = useCallback(() => {
         setPendingRegenerateMessage(null);
         setComposerDraft('');
-    }, []);
+        imageAttachmentDrafts.clearDrafts();
+    }, [imageAttachmentDrafts]);
 
     const handleDeleteMessage = useCallback((messageId: string) => {
         const activeThread = useChatStore.getState().getActiveThread();
@@ -1278,6 +1387,7 @@ export const ChatScreen = () => {
                 id={msg.id}
                 isUser={msg.role === 'user'}
                 content={msg.content}
+                attachments={msg.attachments}
                 thoughtContent={msg.thoughtContent}
                 errorMessage={msg.errorMessage}
                 isStreaming={msg.state === 'streaming'}
@@ -1561,11 +1671,18 @@ export const ChatScreen = () => {
                             <ChatInputBar
                                 draft={composerDraft}
                                 onDraftChange={setComposerDraft}
+                                allowEmptyMessageSend={pendingRegenerateMessage?.hasAttachments === true}
                                 onSendMessage={handleSendMessage}
                                 onStopGeneration={stopGeneration}
                                 disabled={isInputDisabled}
                                 isSending={isGenerating}
                                 androidContentBlurTargetRef={warmupContentBlurTargetRef}
+                                attachmentDrafts={imageAttachmentDrafts.drafts}
+                                onAttachImages={imageAttachmentDrafts.attachImages}
+                                onRemoveAttachmentDraft={imageAttachmentDrafts.removeDraft}
+                                imageAttachmentsEnabled={imageAttachmentsEnabled}
+                                imageAttachmentsDisabledReason={imageAttachmentsDisabledReason}
+                                isImageAttachmentActionBusy={imageAttachmentDrafts.isPicking}
                                 modeLabel={pendingRegenerateMessage ? t('chat.editEarlierMessage') : undefined}
                                 modeDescription={pendingRegenerateMessage
                                     ? t('chat.editEarlierMessageDescription')
@@ -1586,11 +1703,18 @@ export const ChatScreen = () => {
                             <ChatInputBar
                                 draft={composerDraft}
                                 onDraftChange={setComposerDraft}
+                                allowEmptyMessageSend={pendingRegenerateMessage?.hasAttachments === true}
                                 onSendMessage={handleSendMessage}
                                 onStopGeneration={stopGeneration}
                                 disabled={isInputDisabled}
                                 isSending={isGenerating}
                                 androidContentBlurTargetRef={warmupContentBlurTargetRef}
+                                attachmentDrafts={imageAttachmentDrafts.drafts}
+                                onAttachImages={imageAttachmentDrafts.attachImages}
+                                onRemoveAttachmentDraft={imageAttachmentDrafts.removeDraft}
+                                imageAttachmentsEnabled={imageAttachmentsEnabled}
+                                imageAttachmentsDisabledReason={imageAttachmentsDisabledReason}
+                                isImageAttachmentActionBusy={imageAttachmentDrafts.isPicking}
                                 modeLabel={pendingRegenerateMessage ? t('chat.editEarlierMessage') : undefined}
                                 modeDescription={pendingRegenerateMessage
                                     ? t('chat.editEarlierMessageDescription')
@@ -1608,6 +1732,7 @@ export const ChatScreen = () => {
                 <ModelWarmupBanner
                     androidContentBlurTargetRef={warmupContentBlurTargetRef}
                     engineState={engineState}
+                    multimodalReadiness={multimodalReadiness}
                     bottomOffset={warmupBannerBottomOffset}
                 />
             ) : null}

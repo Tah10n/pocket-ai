@@ -1,6 +1,7 @@
 import type { ChatMessage, ChatThread, LlmChatMessage } from '../types/chat';
 import { AppError } from '../services/AppError';
 import { getVisibleMessageContent } from './chatPresentation';
+import { getChatImageAttachmentMediaPaths } from './chatImageAttachments';
 
 export interface ThreadInferenceWindow {
   messages: LlmChatMessage[];
@@ -16,12 +17,16 @@ export interface ThreadInferenceWindowOptions {
 
 const CHARS_PER_ESTIMATED_TOKEN = 4;
 const MESSAGE_TOKEN_OVERHEAD = 6;
+const IMAGE_ATTACHMENT_ESTIMATED_TOKENS = 576;
 export const DEFAULT_INFERENCE_PROMPT_SAFETY_MARGIN_TOKENS = 64;
 const RESPONSE_RESERVE_BALANCING_MIN_TOKENS = 256;
 const MAX_RESPONSE_RESERVE_SHARE_OF_PROMPT_BUDGET = 0.5;
 
 export function estimateLlmMessageTokens(message: LlmChatMessage) {
-  return Math.max(1, Math.ceil(message.content.trim().length / CHARS_PER_ESTIMATED_TOKEN)) + MESSAGE_TOKEN_OVERHEAD;
+  const mediaPathCount = getLlmMessageMediaPaths(message).length;
+  return Math.max(1, Math.ceil(message.content.trim().length / CHARS_PER_ESTIMATED_TOKEN))
+    + MESSAGE_TOKEN_OVERHEAD
+    + (mediaPathCount * IMAGE_ATTACHMENT_ESTIMATED_TOKENS);
 }
 
 export function estimateLlmMessagesTokens(messages: LlmChatMessage[]) {
@@ -76,6 +81,35 @@ function resolveInferenceWindowOptions(
   return optionsOrMaxContextMessages;
 }
 
+function normalizeMediaPaths(paths: readonly string[] | undefined): string[] {
+  if (!paths || paths.length === 0) {
+    return [];
+  }
+
+  return Array.from(new Set(paths
+    .map((path) => path.trim())
+    .filter((path) => path.length > 0)));
+}
+
+function getLlmMessageMediaPaths(message: LlmChatMessage): string[] {
+  return normalizeMediaPaths([
+    ...(message.mediaPaths ?? []),
+    ...getChatImageAttachmentMediaPaths(message.attachments),
+  ]);
+}
+
+function toLlmChatMessage(message: ChatMessage): LlmChatMessage {
+  const content = getVisibleMessageContent(message.role, message.content);
+  const mediaPaths = getChatImageAttachmentMediaPaths(message.attachments);
+
+  return {
+    role: message.role,
+    content,
+    ...(message.attachments && message.attachments.length > 0 ? { attachments: message.attachments } : null),
+    ...(mediaPaths.length > 0 ? { mediaPaths } : null),
+  };
+}
+
 export function getThreadInferenceWindow(
   thread: ChatThread,
   optionsOrMaxContextMessages: number | ThreadInferenceWindowOptions,
@@ -106,21 +140,18 @@ export function getThreadInferenceWindow(
     (message) =>
       message.state !== 'error'
       && (message.kind ?? 'message') !== 'model_switch'
-      && getVisibleMessageContent(message.role, message.content).trim().length > 0,
+      && (
+        getVisibleMessageContent(message.role, message.content).trim().length > 0
+        || getChatImageAttachmentMediaPaths(message.attachments).length > 0
+      ),
   );
-  const historyMessages = eligibleMessages.map<LlmChatMessage>((message) => ({
-    role: message.role,
-    content: getVisibleMessageContent(message.role, message.content),
-  }));
+  const historyMessages = eligibleMessages.map<LlmChatMessage>(toLlmChatMessage);
 
   if (
     latestUserMessage &&
-    !historyMessages.some((message) => message.content === latestUserMessage.content && message.role === 'user')
+    !thread.messages.some((message) => message.id === latestUserMessage.id)
   ) {
-    historyMessages.push({
-      role: 'user',
-      content: latestUserMessage.content,
-    });
+    historyMessages.push(toLlmChatMessage(latestUserMessage));
   }
 
   const reservedSlots = Math.min(systemMessages.length, options.maxContextMessages);
@@ -275,7 +306,10 @@ export function getEligibleThreadMessages(thread: ChatThread): ChatMessage[] {
     (message) =>
       message.state !== 'error'
       && (message.kind ?? 'message') !== 'model_switch'
-      && getVisibleMessageContent(message.role, message.content).trim().length > 0,
+      && (
+        getVisibleMessageContent(message.role, message.content).trim().length > 0
+        || getChatImageAttachmentMediaPaths(message.attachments).length > 0
+      ),
   );
 }
 

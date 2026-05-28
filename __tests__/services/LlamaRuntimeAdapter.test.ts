@@ -1,9 +1,12 @@
 import type { LlamaContext } from 'llama.rn';
 import {
   getFormattedChatFromContext,
+  getMultimodalSupportFromContext,
+  initMultimodalOnContext,
   normalizeBackendDeviceInfoList,
   normalizeCompletionResult,
   normalizeLlamaMessages,
+  releaseMultimodalFromContext,
   runCompletionOnContext,
 } from '../../src/services/LlamaRuntimeAdapter';
 
@@ -146,6 +149,80 @@ describe('LlamaRuntimeAdapter', () => {
     expect(normalizeLlamaMessages([{ role: 'user', content: '' }])).toEqual([
       { role: 'user', content: '' },
     ]);
+  });
+
+  it('normalizes user media paths into llama.rn image content parts', () => {
+    expect(normalizeLlamaMessages([
+      { role: 'user', content: 'Describe this', mediaPaths: [' /document/image.jpg ', ''] },
+      { role: 'assistant', content: 'Sure' },
+    ])).toEqual([
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'Describe this' },
+          { type: 'image_url', image_url: { url: '/document/image.jpg' } },
+        ],
+      },
+      { role: 'assistant', content: 'Sure' },
+    ]);
+  });
+
+  it('normalizes completion messages before calling the native runtime', async () => {
+    const completion = jest.fn().mockResolvedValue({ text: 'done' });
+    const context = createContext({ completion });
+
+    await runCompletionOnContext({
+      context,
+      params: {
+        messages: [{ role: 'user', content: 'Describe', mediaPaths: ['/document/image.jpg'] }] as never,
+        n_predict: 8,
+      },
+    });
+
+    expect(completion).toHaveBeenCalledWith(
+      expect.objectContaining({
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: 'Describe' },
+            { type: 'image_url', image_url: { url: '/document/image.jpg' } },
+          ],
+        }],
+      }),
+      undefined,
+    );
+  });
+
+  it('wraps llama.rn multimodal lifecycle helpers with feature checks', async () => {
+    const initMultimodal = jest.fn().mockResolvedValue(true);
+    const getMultimodalSupport = jest.fn().mockResolvedValue({ vision: true, audio: false });
+    const releaseMultimodal = jest.fn().mockResolvedValue(undefined);
+    const context = createContext({
+      initMultimodal,
+      getMultimodalSupport,
+      releaseMultimodal,
+    });
+
+    await expect(initMultimodalOnContext({
+      context,
+      path: 'file:///document/mmproj.gguf',
+      useGpu: false,
+      imageMinTokens: 256,
+      imageMaxTokens: 512,
+    })).resolves.toBe(true);
+    await expect(getMultimodalSupportFromContext(context)).resolves.toEqual({
+      vision: true,
+      audio: false,
+    });
+    await expect(releaseMultimodalFromContext(context)).resolves.toBeUndefined();
+
+    expect(initMultimodal).toHaveBeenCalledWith({
+      path: 'file:///document/mmproj.gguf',
+      use_gpu: false,
+      image_min_tokens: 256,
+      image_max_tokens: 512,
+    });
+    expect(releaseMultimodal).toHaveBeenCalledTimes(1);
   });
 
   it('rejects unsupported chat roles before calling the native formatter', () => {

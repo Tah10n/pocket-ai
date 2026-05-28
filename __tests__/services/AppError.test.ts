@@ -29,6 +29,10 @@ describe('AppError', () => {
     const t = ((key: string) => `t:${key}`) as any;
     expect(getErrorMessage(new AppError('engine_not_ready'), t)).toBe('t:common.errors.engineNotReady');
     expect(getErrorMessage(new AppError('download_http_error'), t)).toBe('t:common.errors.downloadHttpError');
+    expect(getErrorMessage(new AppError('multimodal_not_ready', 'Vision chat is not ready.'), t))
+      .toBe('t:common.errors.multimodalNotReady');
+    expect(getErrorMessage(new AppError('chat_attachment_missing', 'Missing image.'), t))
+      .toBe('t:common.errors.chatAttachmentMissing');
   });
 
   it('prefers the raw message for unknown error codes when available', () => {

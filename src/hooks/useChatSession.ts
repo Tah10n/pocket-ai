@@ -1,5 +1,6 @@
 import { AppState, AppStateStatus } from 'react-native';
 import { useCallback, useEffect, useRef } from 'react';
+import * as FileSystem from 'expo-file-system/legacy';
 import { llmEngineService } from '../services/LLMEngineService';
 import { performanceMonitor } from '../services/PerformanceMonitor';
 import { GenerationParameters, getGenerationParametersForModel, getSettings } from '../services/SettingsStore';
@@ -19,6 +20,7 @@ import {
   createChatId,
   getThreadActiveModelId,
 } from '../types/chat';
+import type { AttachmentDraft, MultimodalReadinessState } from '../types/multimodal';
 import { flushPendingChatPersistenceWrites, useChatStore } from '../store/chatStore';
 import {
   DEFAULT_INFERENCE_PROMPT_SAFETY_MARGIN_TOKENS,
@@ -34,6 +36,15 @@ import { resolveModelReasoningCapability, resolveReasoningRuntimeConfig } from '
 import { syncThreadParameters } from '../utils/chatThreadParameters';
 import { PrivateStorageUnavailableError, getPrivateStorageHealthSnapshot, isPrivateStorageWritable } from '../services/storage';
 import { useTruncationTracking } from './useTruncationTracking';
+import { materializeAttachmentDraftsForMessage } from '../services/ChatAttachmentStorageService';
+import { sanitizeMultimodalFailureReason } from '../utils/multimodalFailureReason';
+import {
+  MAX_CHAT_IMAGE_ATTACHMENTS,
+  getSendableDraftImageAttachments,
+  hasFailedDraftImageAttachments,
+  normalizeChatAttachmentLocalUri,
+  validateChatImageAttachmentLimit,
+} from '../utils/chatImageAttachments';
 
 export { SUMMARY_AFFORDANCE_MIN_TRUNCATED_MESSAGES } from '../utils/inferenceWindow';
 const DEFAULT_CONTEXT_SIZE = 4096;
@@ -43,6 +54,7 @@ export const LONG_STREAM_PATCH_INTERVAL_MS = 320;
 export const LONG_STREAM_PATCH_TOKEN_THRESHOLD = 64;
 export const LONG_STREAM_PATCH_CHAR_THRESHOLD = 1200;
 const STREAM_BOUNDARY_PATTERN = /[.!?。！？](?:["')\]}]|[\s])*$/;
+const ATTACHMENT_FILE_CHECK_CONCURRENCY = 8;
 
 interface ActiveGenerationState {
   threadId: string;
@@ -52,9 +64,59 @@ interface ActiveGenerationState {
   flushPendingAssistantPatch?: () => void;
 }
 
+export type AppendUserMessageOptions = {
+  attachmentDrafts?: readonly AttachmentDraft[];
+  multimodalReadiness?: MultimodalReadinessState;
+  onUserMessageAppended?: (message: ChatMessage) => void;
+};
+
+export type RegenerateUserMessageOptions = {
+  multimodalReadiness?: MultimodalReadinessState;
+};
+
 const sharedGenerationState: { current: ActiveGenerationState | null } = {
   current: null,
 };
+
+function resolveReadyAttachmentDrafts({
+  drafts,
+  readiness,
+}: {
+  drafts: readonly AttachmentDraft[];
+  readiness?: MultimodalReadinessState;
+}): AttachmentDraft[] {
+  if (drafts.length === 0) {
+    return [];
+  }
+
+  if (hasFailedDraftImageAttachments(drafts)) {
+    throw new AppError('chat_attachment_copy_failed', 'One or more image attachments failed to copy.');
+  }
+
+  const limit = validateChatImageAttachmentLimit(0, drafts.length);
+  if (!limit.ok) {
+    throw new AppError('chat_attachment_limit_exceeded', 'Too many image attachments.');
+  }
+
+  const sendableDrafts = getSendableDraftImageAttachments(drafts);
+  if (
+    sendableDrafts.length !== drafts.length
+    || sendableDrafts.some((draft) => draft.copyStatus !== 'copied')
+  ) {
+    throw new AppError('chat_attachment_not_ready', 'Image attachments are not ready to send.');
+  }
+
+  if (readiness?.status !== 'ready' || !readiness.support.includes('vision')) {
+    throw new AppError('multimodal_not_ready', 'Vision chat is not ready for image attachments.', {
+      details: {
+        readinessStatus: readiness?.status ?? 'unknown',
+        attachmentCount: drafts.length,
+      },
+    });
+  }
+
+  return sendableDrafts;
+}
 
 function isMatchingGeneration(threadId: string, messageId: string) {
   return (
@@ -168,6 +230,336 @@ function assertPrivateStorageWritableForChatMutation() {
       privateStorageHealth: getPrivateStorageHealthSnapshot(),
     },
   });
+}
+
+function isFileSystemDirectory(info: { isDirectory?: boolean }): boolean {
+  return info.isDirectory === true;
+}
+
+function resolvePersistedAssistantErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : 'Unknown chat generation error';
+  return sanitizeMultimodalFailureReason(message) ?? message;
+}
+
+function resolveUserFacingGenerationError(error: unknown, message: string): AppError {
+  const appError = toAppError(error);
+  return new AppError(appError.code, message);
+}
+
+function findLatestUserMessageIdBeforeAssistant(thread: ChatThread, assistantMessageId: string): string | null {
+  const assistantIndex = thread.messages.findIndex((message) => message.id === assistantMessageId);
+  const startIndex = assistantIndex >= 0 ? assistantIndex - 1 : thread.messages.length - 1;
+
+  for (let index = startIndex; index >= 0; index -= 1) {
+    const message = thread.messages[index];
+    if (message.role === 'user' && (message.kind ?? 'message') === 'message') {
+      return message.id;
+    }
+  }
+
+  return null;
+}
+
+async function doesChatAttachmentFileExist(localUri: string): Promise<boolean> {
+  try {
+    const info = await FileSystem.getInfoAsync(localUri);
+    return info.exists === true && !isFileSystemDirectory(info);
+  } catch {
+    return false;
+  }
+}
+
+function isVisionReady(readiness?: MultimodalReadinessState): boolean {
+  return readiness?.status === 'ready' && readiness.support.includes('vision');
+}
+
+function messageHasAttachments(message: ChatMessage | undefined): boolean {
+  return (message?.attachments?.length ?? 0) > 0;
+}
+
+function omitInferenceAttachments(message: ChatMessage): ChatMessage {
+  if (!message.attachments?.length) {
+    return message;
+  }
+
+  return {
+    ...message,
+    attachments: undefined,
+  };
+}
+
+function stripThreadInferenceAttachments(thread: ChatThread): ChatThread {
+  if (!thread.messages.some((message) => message.attachments?.length)) {
+    return thread;
+  }
+
+  return {
+    ...thread,
+    messages: thread.messages.map(omitInferenceAttachments),
+  };
+}
+
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  limit: number,
+  mapper: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  if (items.length === 0) {
+    return [];
+  }
+
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  const workerCount = Math.max(1, Math.min(limit, items.length));
+
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (nextIndex < items.length) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      results[currentIndex] = await mapper(items[currentIndex], currentIndex);
+    }
+  }));
+
+  return results;
+}
+
+function throwMissingAttachment(
+  messageId: string | undefined,
+  attachment: Pick<AttachmentDraft, 'id' | 'pathCategory'>,
+): never {
+  throw new AppError(
+    'chat_attachment_missing',
+    'One or more selected image attachments are no longer available. Remove the image and try again.',
+    {
+      details: {
+        ...(messageId ? { messageId } : null),
+        attachmentId: attachment.id,
+        pathCategory: attachment.pathCategory,
+      },
+    },
+  );
+}
+
+function throwMissingLatestAttachment(message: ChatMessage, attachment: NonNullable<ChatMessage['attachments']>[number]): never {
+  throwMissingAttachment(message.id, attachment);
+}
+
+async function assertDraftAttachmentFilesExist(drafts: readonly AttachmentDraft[]): Promise<void> {
+  if (drafts.length === 0) {
+    return;
+  }
+
+  const attachmentChecks = await mapWithConcurrency(
+    drafts,
+    ATTACHMENT_FILE_CHECK_CONCURRENCY,
+    async (draft) => {
+      const localUri = normalizeChatAttachmentLocalUri(draft.localUri);
+      return {
+        draft,
+        localUri,
+        exists: localUri ? await doesChatAttachmentFileExist(localUri) : false,
+      };
+    },
+  );
+
+  for (const { draft, localUri, exists } of attachmentChecks) {
+    if (!localUri || !exists) {
+      throwMissingAttachment(undefined, {
+        id: draft.id,
+        pathCategory: draft.pathCategory,
+      });
+    }
+  }
+}
+
+async function assertMessageAttachmentFilesExist(message: ChatMessage): Promise<void> {
+  const attachments = message.attachments;
+  if (!attachments?.length) {
+    return;
+  }
+
+  const attachmentChecks = await mapWithConcurrency(
+    attachments,
+    ATTACHMENT_FILE_CHECK_CONCURRENCY,
+    async (attachment) => {
+      const localUri = normalizeChatAttachmentLocalUri(attachment.localUri);
+      return {
+        attachment,
+        localUri,
+        exists: localUri ? await doesChatAttachmentFileExist(localUri) : false,
+      };
+    },
+  );
+
+  for (const { attachment, localUri, exists } of attachmentChecks) {
+    if (!localUri || !exists) {
+      throwMissingAttachment(message.id, attachment);
+    }
+  }
+}
+
+async function assertUserMessageAttachmentsReadyForRegeneration(
+  message: ChatMessage,
+  readiness?: MultimodalReadinessState,
+): Promise<void> {
+  if (!messageHasAttachments(message)) {
+    return;
+  }
+
+  assertMultimodalReadyForInferenceAttachments([message], readiness);
+  await assertMessageAttachmentFilesExist(message);
+}
+
+async function resolveMessageAttachmentsForInference(
+  message: ChatMessage,
+  latestUserMessageId: string | null,
+): Promise<ChatMessage> {
+  const attachments = message.attachments;
+  if (!attachments?.length) {
+    return message;
+  }
+
+  let didChangeAttachments = false;
+  const attachmentChecks = await mapWithConcurrency(
+    attachments,
+    ATTACHMENT_FILE_CHECK_CONCURRENCY,
+    async (attachment) => {
+      const localUri = normalizeChatAttachmentLocalUri(attachment.localUri);
+      return {
+        attachment,
+        localUri,
+        exists: localUri ? await doesChatAttachmentFileExist(localUri) : false,
+      };
+    },
+  );
+
+  const nextAttachments: NonNullable<ChatMessage['attachments']> = [];
+  for (const { attachment, localUri, exists } of attachmentChecks) {
+    if (!localUri || !exists) {
+      didChangeAttachments = true;
+      if (message.id === latestUserMessageId) {
+        throwMissingLatestAttachment(message, attachment);
+      }
+      continue;
+    }
+
+    if (localUri !== attachment.localUri) {
+      didChangeAttachments = true;
+      nextAttachments.push({ ...attachment, localUri });
+    } else {
+      nextAttachments.push(attachment);
+    }
+  }
+
+  if (!didChangeAttachments && nextAttachments.length === attachments.length) {
+    return message;
+  }
+
+  return {
+    ...message,
+    attachments: nextAttachments.length > 0 ? nextAttachments : undefined,
+  };
+}
+
+async function resolveRetainedMessagesForInferenceAttachments(
+  messages: readonly ChatMessage[],
+  latestUserMessageId: string | null,
+): Promise<ChatMessage[]> {
+  return mapWithConcurrency(
+    messages,
+    ATTACHMENT_FILE_CHECK_CONCURRENCY,
+    (message) => resolveMessageAttachmentsForInference(message, latestUserMessageId),
+  );
+}
+
+function assertMultimodalReadyForInferenceAttachments(
+  messages: readonly ChatMessage[],
+  readiness?: MultimodalReadinessState,
+): void {
+  const attachmentCount = messages.reduce(
+    (count, message) => count + (message.attachments?.length ?? 0),
+    0,
+  );
+
+  if (attachmentCount === 0 || isVisionReady(readiness)) {
+    return;
+  }
+
+  throw new AppError('multimodal_not_ready', 'Vision chat is not ready for image attachments.', {
+    details: {
+      readinessStatus: readiness?.status ?? 'unknown',
+      attachmentCount,
+    },
+  });
+}
+
+function constrainInferenceAttachmentsToRequestLimit(messages: readonly ChatMessage[]): ChatMessage[] {
+  let retainedAttachmentCount = 0;
+  let didConstrain = false;
+  const nextMessages = [...messages];
+
+  for (let index = nextMessages.length - 1; index >= 0; index -= 1) {
+    const message = nextMessages[index];
+    const attachments = message.attachments;
+    if (!attachments?.length) {
+      continue;
+    }
+
+    const remainingSlots = MAX_CHAT_IMAGE_ATTACHMENTS - retainedAttachmentCount;
+    if (remainingSlots <= 0) {
+      didConstrain = true;
+      nextMessages[index] = { ...message, attachments: undefined };
+      continue;
+    }
+
+    if (attachments.length > remainingSlots) {
+      didConstrain = true;
+      nextMessages[index] = {
+        ...message,
+        attachments: attachments.slice(attachments.length - remainingSlots),
+      };
+      retainedAttachmentCount = MAX_CHAT_IMAGE_ATTACHMENTS;
+      continue;
+    }
+
+    retainedAttachmentCount += attachments.length;
+  }
+
+  return didConstrain ? nextMessages : messages as ChatMessage[];
+}
+
+async function resolveThreadForInferenceAttachments({
+  thread,
+  latestUserMessageId,
+  multimodalReadiness,
+}: {
+  thread: ChatThread;
+  latestUserMessageId: string | null;
+  multimodalReadiness?: MultimodalReadinessState;
+}): Promise<ChatThread> {
+  const latestUserMessage = latestUserMessageId
+    ? thread.messages.find((message) => message.id === latestUserMessageId)
+    : undefined;
+  const shouldUseTextOnlyFallback = !messageHasAttachments(latestUserMessage) && !isVisionReady(multimodalReadiness);
+  const baseThread = shouldUseTextOnlyFallback
+    ? stripThreadInferenceAttachments(thread)
+    : thread;
+  const boundedMessages = constrainInferenceAttachmentsToRequestLimit(baseThread.messages);
+
+  if (shouldUseTextOnlyFallback) {
+    return {
+      ...baseThread,
+      messages: boundedMessages,
+    };
+  }
+
+  const messages = await resolveRetainedMessagesForInferenceAttachments(boundedMessages, latestUserMessageId);
+  assertMultimodalReadyForInferenceAttachments(messages, multimodalReadiness);
+
+  return {
+    ...thread,
+    messages,
+  };
 }
 
 export function resolvePresetSnapshot(presetId: string | null): PresetSnapshot {
@@ -335,13 +727,20 @@ export const useChatSession = () => {
     };
   }, []);
 
-  const runAssistantCompletion = useCallback(async (threadId: string, assistantMessageId: string) => {
-    const thread = useChatStore.getState().getThread(threadId);
-    if (!thread) {
+  const runAssistantCompletion = useCallback(async (
+    threadId: string,
+    assistantMessageId: string,
+    completionOptions: { multimodalReadiness?: MultimodalReadinessState } = {},
+  ) => {
+    const storedThread = useChatStore.getState().getThread(threadId);
+    if (!storedThread) {
       throw new Error('Thread not found');
     }
 
-    const modelId = getThreadActiveModelId(thread);
+    const latestUserMessageId = findLatestUserMessageIdBeforeAssistant(storedThread, assistantMessageId);
+    let thread = storedThread;
+
+    const modelId = getThreadActiveModelId(storedThread);
 
     performanceMonitor.mark('chat.send.start', { modelId });
     const generationSpan = performanceMonitor.startSpan('chat.generation', { modelId });
@@ -519,9 +918,12 @@ export const useChatSession = () => {
 
     try {
       const {
+        model,
         modelName,
         runtimeConfig: reasoningRuntimeConfig,
-      } = resolveThreadReasoningRuntimeConfig(thread);
+      } = resolveThreadReasoningRuntimeConfig(storedThread);
+      const effectiveMultimodalReadiness = completionOptions.multimodalReadiness
+        ?? model?.multimodalReadiness;
 
       await backgroundTaskService.startBackgroundInference(modelName);
 
@@ -546,6 +948,12 @@ export const useChatSession = () => {
       const windowOptions = resolveThreadInferenceWindowOptions(thread, {
         maxContextTokens: maxContextSize,
         responseReserveTokens: reasoningRuntimeConfig.responseReserveTokens,
+      });
+
+      thread = await resolveThreadForInferenceAttachments({
+        thread: storedThread,
+        latestUserMessageId,
+        multimodalReadiness: effectiveMultimodalReadiness,
       });
 
       const MESSAGE_TOO_LONG_ERROR_MESSAGE =
@@ -666,6 +1074,7 @@ export const useChatSession = () => {
       generationState.nativeCompletionStarted = true;
       const completion = await llmEngineService.chatCompletion({
         messages,
+        multimodalReadiness: effectiveMultimodalReadiness,
         params: {
           temperature: thread.paramsSnapshot.temperature,
           top_p: thread.paramsSnapshot.topP,
@@ -797,8 +1206,8 @@ export const useChatSession = () => {
         return;
       }
 
-      const message =
-        error instanceof Error ? error.message : 'Unknown chat generation error';
+      const message = resolvePersistedAssistantErrorMessage(error);
+      const userFacingError = resolveUserFacingGenerationError(error, message);
 
       flushAssistantPatch();
       patchAssistantMessage(threadId, assistantMessageId, {
@@ -812,7 +1221,7 @@ export const useChatSession = () => {
       recordCompletionStats('error');
 
       sendOutcomeNotificationOnce('error');
-      throw error;
+      throw userFacingError;
     } finally {
       if (flushTimeout) {
         clearTimeout(flushTimeout);
@@ -872,8 +1281,12 @@ export const useChatSession = () => {
     updateThreadParamsSnapshot(thread.id, getGenerationParametersForModel(nextModelId));
   }, [switchThreadModel, updateThreadParamsSnapshot]);
 
-  const appendUserMessage = useCallback(async (text: string) => {
+  const appendUserMessage = useCallback(async (text: string, options: AppendUserMessageOptions = {}) => {
     assertPrivateStorageWritableForChatMutation();
+    const attachmentDrafts = resolveReadyAttachmentDrafts({
+      drafts: options.attachmentDrafts ?? [],
+      readiness: options.multimodalReadiness,
+    });
 
     const settings = getSettings();
     const activeModelId = settings.activeModelId;
@@ -900,6 +1313,8 @@ export const useChatSession = () => {
       throw new Error('Wait for the current response to finish stopping before sending another message.');
     }
 
+    await assertDraftAttachmentFilesExist(attachmentDrafts);
+
     const threadId = activeThread?.id
       ?? createThread({
         modelId: activeModelId,
@@ -924,21 +1339,34 @@ export const useChatSession = () => {
       ? getThreadActiveModelId(threadAfterPossibleSwitch)
       : activeModelId;
 
+    const userMessageId = createChatId('message');
     const userMessage: ChatMessage = {
-      id: createChatId('message'),
+      id: userMessageId,
       role: 'user',
       content: text,
       createdAt: Date.now(),
       state: 'complete',
       kind: 'message',
       modelId: threadModelId,
+      ...(attachmentDrafts.length > 0
+        ? {
+            attachments: materializeAttachmentDraftsForMessage({
+              threadId,
+              messageId: userMessageId,
+              drafts: attachmentDrafts,
+            }),
+          }
+        : null),
     };
 
     appendMessage(threadId, userMessage);
+    options.onUserMessageAppended?.(userMessage);
 
     const assistantMessageId = createAssistantPlaceholder(threadId, threadModelId);
 
-    await runAssistantCompletion(threadId, assistantMessageId);
+    await runAssistantCompletion(threadId, assistantMessageId, {
+      multimodalReadiness: options.multimodalReadiness,
+    });
   }, [activeThread, appendMessage, createAssistantPlaceholder, createThread, ensureThreadUsesModelForSend, runAssistantCompletion, setActiveThread, syncThreadParametersCallback]);
 
   const stopGeneration = useCallback(async () => {
@@ -965,18 +1393,32 @@ export const useChatSession = () => {
     }
   }, [finalizeThreadStatus, stopAssistantMessage]);
 
-  const regenerateFromUserMessage = useCallback(async (messageId: string, nextContent: string) => {
+  const regenerateFromUserMessage = useCallback(async (
+    messageId: string,
+    nextContent: string,
+    options: RegenerateUserMessageOptions = {},
+  ) => {
     if (!activeThread) {
       return false;
     }
 
+    const targetMessage = activeThread.messages.find((message) => message.id === messageId);
+    if (!targetMessage || targetMessage.role !== 'user') {
+      throw new Error('The selected message could not be regenerated.');
+    }
+
     const normalizedContent = nextContent.trim();
-    if (!normalizedContent) {
+    if (!normalizedContent && !messageHasAttachments(targetMessage)) {
       throw new Error('Message cannot be empty.');
     }
 
     ensureThreadCanGenerate(activeThread, 'regenerating this response');
     assertPrivateStorageWritableForChatMutation();
+    const { model } = resolveThreadReasoningRuntimeConfig(activeThread);
+    await assertUserMessageAttachmentsReadyForRegeneration(
+      targetMessage,
+      options.multimodalReadiness ?? model?.multimodalReadiness,
+    );
     const syncedThread = syncThreadParametersCallback(activeThread);
 
     const assistantMessageId = replaceBranchFromUserMessage(
@@ -988,7 +1430,9 @@ export const useChatSession = () => {
       throw new Error('The selected message could not be regenerated.');
     }
 
-    await runAssistantCompletion(syncedThread.id, assistantMessageId);
+    await runAssistantCompletion(syncedThread.id, assistantMessageId, {
+      multimodalReadiness: options.multimodalReadiness,
+    });
 
     return true;
   }, [activeThread, ensureThreadCanGenerate, replaceBranchFromUserMessage, runAssistantCompletion, syncThreadParametersCallback]);
@@ -998,9 +1442,22 @@ export const useChatSession = () => {
       return false;
     }
 
-    const lastUserMessage = [...activeThread.messages]
-      .reverse()
-      .find((message) => message.role === 'user' && message.content.trim().length > 0);
+    const lastUserMessageIndex = (() => {
+      for (let index = activeThread.messages.length - 1; index >= 0; index -= 1) {
+        const message = activeThread.messages[index];
+        if (!message) {
+          continue;
+        }
+        if (message.role === 'user' && (message.content.trim().length > 0 || messageHasAttachments(message))) {
+          return index;
+        }
+      }
+
+      return -1;
+    })();
+    const lastUserMessage = lastUserMessageIndex >= 0
+      ? activeThread.messages[lastUserMessageIndex]
+      : undefined;
     if (!lastUserMessage) {
       return false;
     }
@@ -1015,7 +1472,29 @@ export const useChatSession = () => {
 
     ensureThreadCanGenerate(activeThread, 'regenerating this response');
     assertPrivateStorageWritableForChatMutation();
+    const { model } = resolveThreadReasoningRuntimeConfig(activeThread);
+    await assertUserMessageAttachmentsReadyForRegeneration(
+      lastUserMessage,
+      model?.multimodalReadiness,
+    );
     const syncedThread = syncThreadParametersCallback(activeThread);
+
+    const lastAssistantMessageIndex = (() => {
+      for (let index = syncedThread.messages.length - 1; index >= 0; index -= 1) {
+        if (syncedThread.messages[index]?.role === 'assistant') {
+          return index;
+        }
+      }
+
+      return -1;
+    })();
+    const canReplaceCurrentTurnAssistant =
+      lastAssistantMessageIndex > lastUserMessageIndex &&
+      lastAssistantMessageIndex === syncedThread.messages.length - 1;
+
+    if (!canReplaceCurrentTurnAssistant) {
+      return regenerateFromUserMessage(lastUserMessage.id, lastUserMessage.content);
+    }
 
     const assistantMessageId = replaceLastAssistantMessage(syncedThread.id);
     if (!assistantMessageId) {

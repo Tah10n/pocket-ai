@@ -5,6 +5,7 @@ import type {
   NativeBackendDeviceInfo,
   NativeCompletionResult,
   NativeTokenizeResult,
+  RNLlamaMessagePart,
   RNLlamaOAICompatibleMessage,
   TokenData,
 } from 'llama.rn';
@@ -14,6 +15,14 @@ import { requireLlamaModule, type LlamaModule } from './llamaRnModule';
 export type LlamaChatFormatOptions = NonNullable<Parameters<LlamaContext['getFormattedChat']>[2]>;
 export type LlamaContextInitParams = ContextParams;
 export type NativeLogListenerHandle = { remove: () => void };
+export type LlamaMultimodalSupport = { vision: boolean; audio: boolean };
+export type LlamaMultimodalInitOptions = {
+  context: LlamaContext;
+  path: string;
+  useGpu?: boolean;
+  imageMinTokens?: number;
+  imageMaxTokens?: number;
+};
 
 export type LlamaFormattedChatResult = {
   type: string | null;
@@ -99,6 +108,14 @@ function readStringArray(value: unknown): string[] | undefined {
   return strings.length > 0 ? strings : undefined;
 }
 
+function shouldNormalizeCompletionMessages(messages: unknown): messages is LlmChatMessage[] {
+  return Array.isArray(messages) && messages.every((message) => (
+    isRecord(message)
+    && typeof message.role === 'string'
+    && typeof message.content === 'string'
+  ));
+}
+
 function readGrammarTriggers(value: unknown): { type: number; value: string; token: number }[] | undefined {
   if (!Array.isArray(value)) {
     return undefined;
@@ -152,6 +169,22 @@ export function normalizeLlamaMessages(messages: LlmChatMessage[]): RNLlamaOAICo
 
     if (role !== 'system' && role !== 'user' && role !== 'assistant') {
       throw new Error(`[LLMEngine] Invalid chat message at index ${index}: unsupported role`);
+    }
+
+    const mediaPaths = role === 'user'
+      ? readStringArray((message as { mediaPaths?: unknown }).mediaPaths)
+      : undefined;
+
+    if (mediaPaths && mediaPaths.length > 0) {
+      const contentParts: RNLlamaMessagePart[] = [
+        ...(content.trim().length > 0 ? [{ type: 'text', text: content }] : []),
+        ...mediaPaths.map((url) => ({
+          type: 'image_url',
+          image_url: { url },
+        })),
+      ];
+
+      return { role, content: contentParts };
     }
 
     return { role, content };
@@ -300,10 +333,71 @@ export async function runCompletionOnContext({
   params: CompletionParams;
   onToken?: (data: TokenData) => void;
 }): Promise<NativeCompletionResult> {
-  const result = await context.completion(params, onToken
+  const rawMessages = (params as { messages?: unknown }).messages;
+  const normalizedParams = shouldNormalizeCompletionMessages(rawMessages)
+    ? {
+        ...params,
+        messages: normalizeLlamaMessages(rawMessages),
+      }
+    : params;
+  const result = await context.completion(normalizedParams, onToken
     ? (data) => onToken(normalizeTokenData(data))
     : undefined);
   return normalizeCompletionResult(result);
+}
+
+function readMultimodalSupport(value: unknown): LlamaMultimodalSupport {
+  const record = assertRecord(value, 'multimodal support');
+  return {
+    vision: readBoolean(record.vision) ?? false,
+    audio: readBoolean(record.audio) ?? false,
+  };
+}
+
+export async function initMultimodalOnContext({
+  context,
+  path,
+  useGpu,
+  imageMinTokens,
+  imageMaxTokens,
+}: LlamaMultimodalInitOptions): Promise<boolean> {
+  const maybeContext = context as LlamaContext & {
+    initMultimodal?: unknown;
+  };
+  if (typeof maybeContext.initMultimodal !== 'function') {
+    throw new LlamaRuntimeFeatureUnavailableError('initMultimodal');
+  }
+
+  return maybeContext.initMultimodal({
+    path,
+    use_gpu: useGpu,
+    image_min_tokens: imageMinTokens,
+    image_max_tokens: imageMaxTokens,
+  });
+}
+
+export async function getMultimodalSupportFromContext(
+  context: LlamaContext,
+): Promise<LlamaMultimodalSupport> {
+  const maybeContext = context as LlamaContext & {
+    getMultimodalSupport?: unknown;
+  };
+  if (typeof maybeContext.getMultimodalSupport !== 'function') {
+    throw new LlamaRuntimeFeatureUnavailableError('getMultimodalSupport');
+  }
+
+  return readMultimodalSupport(await maybeContext.getMultimodalSupport());
+}
+
+export async function releaseMultimodalFromContext(context: LlamaContext): Promise<void> {
+  const maybeContext = context as LlamaContext & {
+    releaseMultimodal?: unknown;
+  };
+  if (typeof maybeContext.releaseMultimodal !== 'function') {
+    throw new LlamaRuntimeFeatureUnavailableError('releaseMultimodal');
+  }
+
+  await maybeContext.releaseMultimodal();
 }
 
 export async function tokenizeFormattedPrompt({

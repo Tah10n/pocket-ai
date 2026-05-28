@@ -1,4 +1,13 @@
 import type { ChatMessage, ChatThread } from '../types/chat';
+import {
+  CHAT_IMAGE_ATTACHMENT_PATH_CATEGORY,
+  type ChatImageAttachment,
+} from '../types/multimodal';
+import {
+  MAX_CHAT_IMAGE_ATTACHMENTS,
+  isSupportedChatImageDraftFormat,
+  normalizeChatAttachmentLocalUri,
+} from '../utils/chatImageAttachments';
 import type { AppStorageFacade } from './storage';
 
 export const LEGACY_CHAT_STORE_STORAGE_KEY = 'chat-store';
@@ -93,6 +102,96 @@ function isStringArray(value: unknown): value is string[] {
 
 function isNonNegativeSafeInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isPositiveFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0;
+}
+
+function readRequiredString(value: unknown): string | null {
+  return typeof value === 'string' && value.trim().length > 0 ? value : null;
+}
+
+function readOptionalPositiveInteger(value: unknown): number | undefined {
+  return isPositiveFiniteNumber(value) ? Math.round(value) : undefined;
+}
+
+function sanitizePersistedChatImageAttachment(
+  value: unknown,
+  threadId: string,
+  messageId: string,
+): ChatImageAttachment | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+
+  const attachment = value as Partial<ChatImageAttachment>;
+  const id = readRequiredString(attachment.id);
+  const localUri = normalizeChatAttachmentLocalUri(readRequiredString(attachment.localUri));
+  const fileName = readRequiredString(attachment.fileName);
+  const mediaType = typeof attachment.mediaType === 'string'
+    ? attachment.mediaType.trim().toLowerCase()
+    : undefined;
+
+  if (
+    !id ||
+    !localUri ||
+    !fileName ||
+    attachment.pathCategory !== CHAT_IMAGE_ATTACHMENT_PATH_CATEGORY ||
+    attachment.source !== 'photo_library' ||
+    !isNonNegativeSafeInteger(attachment.createdAt) ||
+    !isSupportedChatImageDraftFormat({
+      mediaType,
+      fileName,
+      localUri,
+      previewUri: localUri,
+      pickerUri: localUri,
+    })
+  ) {
+    return null;
+  }
+
+  return {
+    id,
+    threadId,
+    messageId,
+    localUri,
+    pathCategory: CHAT_IMAGE_ATTACHMENT_PATH_CATEGORY,
+    ...(mediaType ? { mediaType } : null),
+    fileName,
+    ...(readOptionalPositiveInteger(attachment.size) ? { size: readOptionalPositiveInteger(attachment.size) } : null),
+    ...(readOptionalPositiveInteger(attachment.width) ? { width: readOptionalPositiveInteger(attachment.width) } : null),
+    ...(readOptionalPositiveInteger(attachment.height) ? { height: readOptionalPositiveInteger(attachment.height) } : null),
+    source: 'photo_library',
+    createdAt: attachment.createdAt,
+  };
+}
+
+function sanitizePersistedChatMessageAttachments(message: ChatMessage, threadId: string): ChatImageAttachment[] | undefined {
+  if (message.role !== 'user' || !Array.isArray(message.attachments)) {
+    return undefined;
+  }
+
+  const attachments = message.attachments
+    .flatMap((attachment) => {
+      const sanitized = sanitizePersistedChatImageAttachment(attachment, threadId, message.id);
+      return sanitized ? [sanitized] : [];
+    })
+    .slice(0, MAX_CHAT_IMAGE_ATTACHMENTS);
+
+  return attachments.length > 0 ? attachments : undefined;
+}
+
+function sanitizeChatMessageForPersistence(message: ChatMessage, threadId: string): ChatMessage {
+  const attachments = sanitizePersistedChatMessageAttachments(message, threadId);
+  if (attachments === message.attachments) {
+    return message;
+  }
+
+  return {
+    ...message,
+    ...(attachments ? { attachments } : { attachments: undefined }),
+  };
 }
 
 function parseOptionalRevision(value: unknown): number | undefined {
@@ -346,16 +445,23 @@ function isEmptyAssistantProgressPlaceholder(message: ChatMessage): boolean {
 
 export function sanitizeChatThreadForPersistence(thread: ChatThread): ChatThread {
   let removedEmptyProgressPlaceholder = false;
-  const messages = thread.messages.filter((message) => {
-    if (!isEmptyAssistantProgressPlaceholder(message)) {
-      return true;
+  let changedMessages = false;
+  const messages = thread.messages.flatMap((message) => {
+    if (isEmptyAssistantProgressPlaceholder(message)) {
+      removedEmptyProgressPlaceholder = true;
+      changedMessages = true;
+      return [];
     }
 
-    removedEmptyProgressPlaceholder = true;
-    return false;
+    const sanitizedMessage = sanitizeChatMessageForPersistence(message, thread.id);
+    if (sanitizedMessage !== message) {
+      changedMessages = true;
+    }
+
+    return [sanitizedMessage];
   });
 
-  if (!removedEmptyProgressPlaceholder) {
+  if (!removedEmptyProgressPlaceholder && !changedMessages) {
     return thread;
   }
 

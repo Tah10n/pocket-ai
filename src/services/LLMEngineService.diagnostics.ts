@@ -5,6 +5,118 @@ import type {
   EngineLifecycleEvent,
   EngineState,
 } from '../types/models';
+import type {
+  MultimodalDiagnosticsSummary,
+  MultimodalReadinessState,
+  ProjectorPathCategoryDiagnostic,
+  ProjectorPresenceDiagnostic,
+  VisionCapabilityDiagnostic,
+} from '../types/multimodal';
+import { sanitizeMultimodalFailureReason } from '../utils/multimodalFailureReason';
+
+function resolveVisionCapability(readiness: MultimodalReadinessState | null | undefined): VisionCapabilityDiagnostic {
+  if (!readiness) {
+    return 'unknown';
+  }
+
+  if (readiness.status === 'text_only') {
+    return 'text_only';
+  }
+
+  if (readiness.status === 'unsupported') {
+    return 'unsupported';
+  }
+
+  if (
+    readiness.support.includes('vision')
+    || readiness.projectorId
+    || typeof readiness.projectorSize === 'number'
+    || readiness.status === 'missing_projector'
+    || readiness.status === 'ambiguous_projector'
+    || readiness.status === 'projector_downloading'
+    || readiness.status === 'initializing'
+    || readiness.status === 'failed'
+  ) {
+    return 'vision_capable';
+  }
+
+  return 'unknown';
+}
+
+function resolveProjectorPresence(readiness: MultimodalReadinessState | null | undefined): ProjectorPresenceDiagnostic {
+  switch (readiness?.status) {
+    case 'ready':
+    case 'initializing':
+      return readiness.projectorId || readiness.support.includes('vision') ? 'downloaded' : 'available_remote';
+    case 'missing_projector':
+    case 'text_only':
+    case 'unsupported':
+      return 'missing';
+    case 'ambiguous_projector':
+      return 'ambiguous';
+    case 'projector_downloading':
+      return 'available_remote';
+    case 'failed':
+      return 'failed';
+    default:
+      return 'missing';
+  }
+}
+
+function resolveProjectorPathCategory(readiness: MultimodalReadinessState | null | undefined): ProjectorPathCategoryDiagnostic {
+  switch (readiness?.status) {
+    case 'ready':
+    case 'initializing':
+    case 'failed':
+      return readiness.projectorId || readiness.support.includes('vision') ? 'models' : 'unknown';
+    case 'missing_projector':
+    case 'text_only':
+    case 'unsupported':
+      return 'missing';
+    case 'ambiguous_projector':
+    case 'projector_downloading':
+      return 'unknown';
+    default:
+      return 'unknown';
+  }
+}
+
+export function buildMultimodalDiagnosticsSummary(source: {
+  readiness: MultimodalReadinessState | null | undefined;
+  attachmentCount: number;
+  attachmentTotalBytes?: number;
+  failureReason?: string | null;
+}): MultimodalDiagnosticsSummary | undefined {
+  const attachmentCount = Number.isFinite(source.attachmentCount) && source.attachmentCount > 0
+    ? Math.floor(source.attachmentCount)
+    : 0;
+  const hasAttachmentBytes = typeof source.attachmentTotalBytes === 'number'
+    && Number.isFinite(source.attachmentTotalBytes)
+    && source.attachmentTotalBytes > 0;
+  const readiness = source.readiness ?? null;
+  const failureReason = sanitizeMultimodalFailureReason(source.failureReason ?? readiness?.failureReason);
+
+  if (!readiness && attachmentCount === 0 && !failureReason) {
+    return undefined;
+  }
+
+  const projectorSize = typeof readiness?.projectorSize === 'number'
+    && Number.isFinite(readiness.projectorSize)
+    && readiness.projectorSize > 0
+    ? Math.round(readiness.projectorSize)
+    : undefined;
+
+  return {
+    visionCapability: resolveVisionCapability(readiness),
+    projectorPresence: resolveProjectorPresence(readiness),
+    projectorPathCategory: resolveProjectorPathCategory(readiness),
+    ...(projectorSize ? { projectorSize } : null),
+    readinessStatus: readiness?.status ?? 'unsupported',
+    ...(failureReason ? { failureReason } : null),
+    attachmentCount,
+    ...(hasAttachmentBytes ? { attachmentTotalBytes: Math.round(source.attachmentTotalBytes as number) } : null),
+  };
+}
 
 export function buildEngineDiagnosticsSnapshot(source: {
   activeBackendMode: EngineBackendMode | 'unknown';
@@ -35,6 +147,7 @@ export function buildEngineDiagnosticsSnapshot(source: {
   initKvUnified: boolean | null;
   lastLifecycleEvent: EngineLifecycleEvent | null;
   lastLifecycleError: string | null;
+  multimodalDiagnostics: MultimodalDiagnosticsSummary | null;
 }): NonNullable<EngineState['diagnostics']> {
   return {
     backendMode: source.activeBackendMode,
@@ -70,5 +183,6 @@ export function buildEngineDiagnosticsSnapshot(source: {
     initKvUnified: source.initKvUnified ?? undefined,
     lastLifecycleEvent: source.lastLifecycleEvent ?? undefined,
     lastLifecycleError: source.lastLifecycleError ?? undefined,
+    multimodal: source.multimodalDiagnostics ? { ...source.multimodalDiagnostics } : undefined,
   };
 }

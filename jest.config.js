@@ -10,5 +10,5 @@ module.exports = {
         '^react$': '<rootDir>/node_modules/react',
         '^react-native$': '<rootDir>/node_modules/react-native',
     },
-    testPathIgnorePatterns: ['/node_modules/', '/.expo/'],
+    testPathIgnorePatterns: ['/node_modules/', '/.expo/', '/__tests__/fixtures/'],
 };

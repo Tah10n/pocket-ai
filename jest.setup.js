@@ -78,6 +78,7 @@ jest.mock('expo-file-system/legacy', () => ({
   getInfoAsync: jest.fn().mockResolvedValue({ exists: true, size: 1024 }),
   readDirectoryAsync: jest.fn().mockResolvedValue([]),
   deleteAsync: jest.fn().mockResolvedValue(undefined),
+  copyAsync: jest.fn().mockResolvedValue(undefined),
   getFreeDiskStorageAsync: jest.fn().mockResolvedValue(10 * 1024 * 1024 * 1024),
   getTotalDiskCapacityAsync: jest.fn().mockResolvedValue(100 * 1024 * 1024 * 1024),
   makeDirectoryAsync: jest.fn().mockResolvedValue(undefined),
@@ -105,6 +106,33 @@ jest.mock('expo-clipboard', () => ({
 
 jest.mock('expo-linking', () => ({
   createURL: jest.fn((path) => `pocketai://${path ?? ''}`),
+}));
+
+jest.mock('expo-image-picker', () => ({
+  MediaTypeOptions: {
+    Images: 'Images',
+    All: 'All',
+    Videos: 'Videos',
+  },
+  PermissionStatus: {
+    GRANTED: 'granted',
+    DENIED: 'denied',
+    UNDETERMINED: 'undetermined',
+  },
+  getMediaLibraryPermissionsAsync: jest.fn().mockResolvedValue({
+    status: 'granted',
+    granted: true,
+    canAskAgain: true,
+  }),
+  requestMediaLibraryPermissionsAsync: jest.fn().mockResolvedValue({
+    status: 'granted',
+    granted: true,
+    canAskAgain: true,
+  }),
+  launchImageLibraryAsync: jest.fn().mockResolvedValue({
+    canceled: false,
+    assets: [],
+  }),
 }));
 
 jest.mock('expo-notifications', () => ({

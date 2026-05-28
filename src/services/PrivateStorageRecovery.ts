@@ -16,6 +16,7 @@ import { stopActiveChatGenerationForPrivateStorageBlocked } from '../hooks/useCh
 import { resetChatStoreForPrivateStorageReset } from '../store/chatStore';
 import { resetDownloadStoreForPrivateStorageReset } from '../store/downloadStore';
 import { resetModelsStoreForPrivateStorageReset } from '../store/modelsStore';
+import { chatAttachmentStorageService } from './ChatAttachmentStorageService';
 
 export function invalidatePrivateStorageRuntimeHandles(): void {
   invalidateAppStorageForPrivateReset();
@@ -51,6 +52,7 @@ export async function resetPrivateAppStorageAndRuntimeStateAfterConfirmation(): 
   const storageHealth = await resetPrivateAppStorageAfterConfirmation();
 
   if (storageHealth.status !== 'blocked') {
+    await chatAttachmentStorageService.deleteAllAttachmentFilesForPrivateStorageReset();
     resetPrivatePersistedRuntimeStateForStorageReset();
     invalidatePrivateStorageRuntimeHandles();
     registry.invalidatePrivateStorageRuntimeState();

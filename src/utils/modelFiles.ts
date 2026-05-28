@@ -1,3 +1,4 @@
+import type { ProjectorArtifact } from '../types/multimodal';
 import type { ModelMetadata } from '../types/models';
 import { getShortModelLabel } from './modelLabel';
 import { isValidLocalFileName } from './safeFilePath';
@@ -100,5 +101,37 @@ export function getCandidateModelDownloadFileNames(
     ...(previousGeneratedName ? [previousGeneratedName] : []),
     ...(classicLegacyName ? [classicLegacyName] : []),
     getSanitizedLegacyModelDownloadFileName(model.id),
+  ])).filter(isValidLocalFileName);
+}
+
+export function getProjectorDownloadFileName(
+  projector: Pick<ProjectorArtifact, 'id' | 'repoId' | 'fileName' | 'hfRevision' | 'ownerModelId' | 'ownerVariantId'>,
+): string {
+  const extensionMatch = projector.fileName.match(/(\.[A-Za-z0-9]+)$/);
+  const extension = extensionMatch?.[1]?.toLowerCase() ?? '.gguf';
+  const fileBase = sanitizeModelFileSegment(
+    projector.fileName.replace(/(\.[A-Za-z0-9]+)$/, ''),
+    'projector',
+  ).slice(0, 48);
+  const repoName = sanitizeModelFileSegment(getShortModelLabel(projector.repoId) || projector.repoId, 'projector');
+  const revision = sanitizeModelFileSegment(projector.hfRevision ?? 'main', 'main').slice(0, 16);
+  const fingerprint = hashString([
+    projector.id,
+    projector.repoId,
+    projector.ownerModelId,
+    projector.ownerVariantId ?? '',
+    projector.fileName,
+    projector.hfRevision ?? 'main',
+  ].join('::'));
+
+  return `${repoName}-${fileBase}-${revision}-${fingerprint}${extension}`;
+}
+
+export function getCandidateProjectorDownloadFileNames(
+  projector: Pick<ProjectorArtifact, 'id' | 'repoId' | 'fileName' | 'hfRevision' | 'ownerModelId' | 'ownerVariantId'>,
+): string[] {
+  return Array.from(new Set([
+    getProjectorDownloadFileName(projector),
+    projector.fileName,
   ])).filter(isValidLocalFileName);
 }

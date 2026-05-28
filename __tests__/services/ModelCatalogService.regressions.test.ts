@@ -3,7 +3,9 @@ import { ModelCatalogService } from '../../src/services/ModelCatalogService';
 import { huggingFaceTokenService } from '../../src/services/HuggingFaceTokenService';
 import { hardwareListenerService } from '../../src/services/HardwareListenerService';
 import { registry } from '../../src/services/LocalStorageRegistry';
-import { ModelAccessState } from '../../src/types/models';
+import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../src/types/models';
+import type { MultimodalReadinessState, ProjectorArtifact } from '../../src/types/multimodal';
+import { buildProjectorArtifactId } from '../../src/utils/modelProjectors';
 
 jest.mock('../../src/services/HardwareListenerService', () => ({
   hardwareListenerService: {
@@ -31,6 +33,8 @@ jest.mock('react-native-device-info', () => ({
 const mockedRegistry = registry as jest.Mocked<typeof registry>;
 const TREE_SHA256 = 'a'.repeat(64);
 const PARTIAL_TREE_SHA256 = 'b'.repeat(64);
+const PROJECTOR_SHA256 = 'c'.repeat(64);
+const DIFFERENT_PROJECTOR_SHA256 = 'd'.repeat(64);
 
 function makeIncompleteGatedRepo(id: string) {
   return {
@@ -74,6 +78,97 @@ function makeTextGenerationRepo(id: string) {
       },
     ],
   };
+}
+
+function makeVisionRepo(
+  id: string,
+  modelFileName: string,
+  projectorFileName: string,
+  projectorMetadata: { size?: number; sha256?: string } = {},
+) {
+  return {
+    id,
+    pipeline_tag: 'text-generation',
+    tags: ['gguf', 'chat', 'vision'],
+    siblings: [
+      {
+        rfilename: modelFileName,
+        size: 2 * 1024 * 1024 * 1024,
+      },
+      {
+        rfilename: projectorFileName,
+        size: projectorMetadata.size ?? 1024,
+        ...(projectorMetadata.sha256 ? { lfs: { sha256: projectorMetadata.sha256 } } : {}),
+      },
+    ],
+  };
+}
+
+function makeDownloadedVisionModelWithProjector(options: {
+  modelId: string;
+  modelFileName?: string;
+  projectorFileName?: string;
+  projectorSize?: number;
+  projectorSha256?: string;
+  projectorDownloadUrl?: string;
+}): {
+  localModel: ModelMetadata;
+  localProjector: ProjectorArtifact;
+  modelFileName: string;
+  projectorFileName: string;
+} {
+  const modelFileName = options.modelFileName ?? 'model.Q4_K_M.gguf';
+  const projectorFileName = options.projectorFileName ?? 'mmproj-model-f16.gguf';
+  const projectorId = buildProjectorArtifactId({
+    repoId: options.modelId,
+    hfRevision: 'main',
+    fileName: projectorFileName,
+  });
+  const projectorDownloadUrl = options.projectorDownloadUrl
+    ?? `https://huggingface.co/${options.modelId}/resolve/main/${projectorFileName}`;
+  const localProjector: ProjectorArtifact = {
+    id: projectorId,
+    ownerModelId: options.modelId,
+    repoId: options.modelId,
+    fileName: projectorFileName,
+    downloadUrl: projectorDownloadUrl,
+    hfRevision: 'main',
+    ...(options.projectorSha256 ? { sha256: options.projectorSha256 } : {}),
+    size: options.projectorSize ?? 1024,
+    localPath: `local-${projectorFileName}`,
+    lifecycleStatus: 'downloaded',
+    matchStatus: 'matched',
+  };
+  const localModel: ModelMetadata = {
+    id: options.modelId,
+    name: 'Downloaded Vision Model',
+    author: 'org',
+    size: 2 * 1024 * 1024 * 1024,
+    downloadUrl: `https://huggingface.co/${options.modelId}/resolve/main/${modelFileName}`,
+    hfRevision: 'main',
+    resolvedFileName: modelFileName,
+    localPath: modelFileName,
+    downloadedAt: 1234,
+    fitsInRam: true,
+    accessState: ModelAccessState.PUBLIC,
+    isGated: false,
+    isPrivate: false,
+    lifecycleStatus: LifecycleStatus.DOWNLOADED,
+    downloadProgress: 1,
+    chatModalities: ['text', 'vision'],
+    projectorCandidates: [localProjector],
+    selectedProjectorId: localProjector.id,
+    multimodalReadiness: {
+      modelId: options.modelId,
+      variantId: modelFileName,
+      status: 'ready',
+      projectorId: localProjector.id,
+      support: ['vision'],
+      checkedAt: 1234,
+    },
+  };
+
+  return { localModel, localProjector, modelFileName, projectorFileName };
 }
 
 function makeImageGenerationRepo(id: string) {
@@ -315,6 +410,377 @@ describe('ModelCatalogService regressions', () => {
     expect(result.models[0].size).toBe(2 * 1024 * 1024 * 1024);
     expect(result.models[0].sha256).toBe(PARTIAL_TREE_SHA256);
     expect(result.models[0].requiresTreeProbe).toBe(true);
+  });
+
+  it('preserves downloaded projector state when catalog projector ids become repo-level', async () => {
+    const modelId = 'org/vision-legacy';
+    const modelFileName = 'model.Q4_K_M.gguf';
+    const projectorFileName = 'mmproj-model-f16.gguf';
+    const legacyProjectorId = buildProjectorArtifactId({
+      repoId: modelId,
+      hfRevision: 'main',
+      ownerVariantId: modelFileName,
+      fileName: projectorFileName,
+    });
+    const localProjector: ProjectorArtifact = {
+      id: legacyProjectorId,
+      ownerModelId: modelId,
+      ownerVariantId: modelFileName,
+      repoId: modelId,
+      fileName: projectorFileName,
+      downloadUrl: `https://huggingface.co/${modelId}/resolve/main/${projectorFileName}`,
+      hfRevision: 'main',
+      sha256: PROJECTOR_SHA256,
+      size: 1024,
+      localPath: 'mmproj-model-f16.gguf',
+      lifecycleStatus: 'downloaded',
+      matchStatus: 'matched',
+    };
+    const localModel: ModelMetadata = {
+      id: modelId,
+      name: 'Vision Legacy',
+      author: 'org',
+      size: 2 * 1024 * 1024 * 1024,
+      downloadUrl: `https://huggingface.co/${modelId}/resolve/main/${modelFileName}`,
+      hfRevision: 'main',
+      resolvedFileName: modelFileName,
+      fitsInRam: true,
+      accessState: ModelAccessState.PUBLIC,
+      isGated: false,
+      isPrivate: false,
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      activeVariantId: modelFileName,
+      variants: [
+        {
+          variantId: modelFileName,
+          fileName: modelFileName,
+          quantizationLabel: 'Q4_K_M',
+          size: 2 * 1024 * 1024 * 1024,
+        },
+      ],
+      chatModalities: ['text', 'vision'],
+      projectorCandidates: [localProjector],
+      selectedProjectorId: localProjector.id,
+      multimodalReadiness: {
+        modelId,
+        variantId: modelFileName,
+        status: 'ready',
+        projectorId: localProjector.id,
+        support: ['vision'],
+        checkedAt: 1234,
+      },
+    };
+
+    mockedRegistry.getModel.mockImplementation((id) => (id === modelId ? localModel : undefined));
+    global.fetch = jest.fn(() =>
+      Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve([makeVisionRepo(modelId, modelFileName, projectorFileName)]),
+      }),
+    ) as jest.Mock;
+
+    const result = await service.searchModels('vision legacy');
+    const model = result.models[0];
+    const projector = model.projectorCandidates?.[0];
+
+    expect(projector?.ownerVariantId).toBeUndefined();
+    expect(projector).toEqual(expect.objectContaining({
+      localPath: localProjector.localPath,
+      lifecycleStatus: 'downloaded',
+      sha256: localProjector.sha256,
+      size: localProjector.size,
+    }));
+    expect(projector?.id).not.toBe(localProjector.id);
+    expect(model.selectedProjectorId).toBe(projector?.id);
+    expect(model.multimodalReadiness).toEqual(expect.objectContaining({
+      status: 'ready',
+      projectorId: projector?.id,
+    }));
+  });
+
+  it('resets downloaded projector state when catalog projector sha256 changes', async () => {
+    const modelId = 'org/vision-projector-sha-reset';
+    const {
+      localModel,
+      localProjector,
+      modelFileName,
+      projectorFileName,
+    } = makeDownloadedVisionModelWithProjector({
+      modelId,
+      projectorSha256: PROJECTOR_SHA256,
+    });
+
+    mockedRegistry.getModel.mockImplementation((id) => (id === modelId ? localModel : undefined));
+    global.fetch = jest.fn(() =>
+      Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve([makeVisionRepo(modelId, modelFileName, projectorFileName, {
+          size: localProjector.size ?? undefined,
+          sha256: DIFFERENT_PROJECTOR_SHA256,
+        })]),
+      }),
+    ) as jest.Mock;
+
+    const result = await service.searchModels('vision projector sha reset');
+    const projector = result.models[0].projectorCandidates?.[0];
+
+    expect(projector).toEqual(expect.objectContaining({
+      lifecycleStatus: 'available',
+      size: localProjector.size,
+      sha256: DIFFERENT_PROJECTOR_SHA256,
+    }));
+    expect(projector?.localPath).toBeUndefined();
+    expect(result.models[0].multimodalReadiness).toBeUndefined();
+  });
+
+  it('resets downloaded projector state when catalog projector size changes', async () => {
+    const modelId = 'org/vision-projector-size-reset';
+    const remoteProjectorSize = 1024;
+    const {
+      localModel,
+      modelFileName,
+      projectorFileName,
+    } = makeDownloadedVisionModelWithProjector({
+      modelId,
+      projectorSize: 2048,
+      projectorSha256: PROJECTOR_SHA256,
+    });
+
+    mockedRegistry.getModel.mockImplementation((id) => (id === modelId ? localModel : undefined));
+    global.fetch = jest.fn(() =>
+      Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve([makeVisionRepo(modelId, modelFileName, projectorFileName, {
+          size: remoteProjectorSize,
+          sha256: PROJECTOR_SHA256,
+        })]),
+      }),
+    ) as jest.Mock;
+
+    const result = await service.searchModels('vision projector size reset');
+    const projector = result.models[0].projectorCandidates?.[0];
+
+    expect(projector).toEqual(expect.objectContaining({
+      lifecycleStatus: 'available',
+      size: remoteProjectorSize,
+      sha256: PROJECTOR_SHA256,
+    }));
+    expect(projector?.localPath).toBeUndefined();
+    expect(result.models[0].multimodalReadiness).toBeUndefined();
+  });
+
+  it('resets downloaded projector state when catalog projector download URL changes', async () => {
+    const modelId = 'org/vision-projector-url-reset';
+    const localProjectorDownloadUrl = `https://huggingface.co/${modelId}/resolve/main/mmproj-model-f16.gguf?download=true`;
+    const {
+      localModel,
+      modelFileName,
+      projectorFileName,
+    } = makeDownloadedVisionModelWithProjector({
+      modelId,
+      projectorDownloadUrl: localProjectorDownloadUrl,
+      projectorSha256: PROJECTOR_SHA256,
+    });
+
+    mockedRegistry.getModel.mockImplementation((id) => (id === modelId ? localModel : undefined));
+    global.fetch = jest.fn(() =>
+      Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve([makeVisionRepo(modelId, modelFileName, projectorFileName, {
+          sha256: PROJECTOR_SHA256,
+        })]),
+      }),
+    ) as jest.Mock;
+
+    const result = await service.searchModels('vision projector url reset');
+    const projector = result.models[0].projectorCandidates?.[0];
+
+    expect(projector).toEqual(expect.objectContaining({
+      downloadUrl: `https://huggingface.co/${modelId}/resolve/main/${projectorFileName}`,
+      lifecycleStatus: 'available',
+      size: 1024,
+      sha256: PROJECTOR_SHA256,
+    }));
+    expect(projector?.localPath).toBeUndefined();
+    expect(result.models[0].multimodalReadiness).toBeUndefined();
+  });
+
+  it('drops remote readiness remaps for projector metadata conflicts', () => {
+    const catalogInternals = service as unknown as {
+      resolveMergedMultimodalReadiness: (
+        modelId: string,
+        remoteReadiness: MultimodalReadinessState | undefined,
+        localReadiness: MultimodalReadinessState | undefined,
+        candidateIds: Set<string>,
+        localToRemoteProjectorIds: Map<string, string>,
+        selectedProjectorId?: string,
+        blockedProjectorIds?: Set<string>,
+      ) => MultimodalReadinessState | undefined;
+    };
+    const readiness: MultimodalReadinessState = {
+      modelId: 'org/vision-projector-remote-readiness-reset',
+      status: 'ready',
+      projectorId: 'local-projector',
+      support: ['vision'],
+      checkedAt: 1234,
+    };
+
+    expect(catalogInternals.resolveMergedMultimodalReadiness(
+      readiness.modelId,
+      readiness,
+      undefined,
+      new Set(['remote-projector']),
+      new Map([['local-projector', 'remote-projector']]),
+      'remote-projector',
+      new Set(['local-projector', 'remote-projector']),
+    )).toBeUndefined();
+  });
+
+  it('hydrates already-downloaded text-only registry models with fresh vision metadata without projector download state', async () => {
+    const modelId = 'org/newly-vision-capable';
+    const modelFileName = 'model.Q4_K_M.gguf';
+    const projectorFileName = 'mmproj-model-f16.gguf';
+    const localModel: ModelMetadata = {
+      id: modelId,
+      name: 'Newly Vision Capable',
+      author: 'org',
+      size: 2 * 1024 * 1024 * 1024,
+      downloadUrl: `https://huggingface.co/${modelId}/resolve/main/${modelFileName}`,
+      hfRevision: 'main',
+      resolvedFileName: modelFileName,
+      localPath: 'newly-vision-capable.Q4_K_M.gguf',
+      downloadedAt: 1234,
+      fitsInRam: true,
+      accessState: ModelAccessState.PUBLIC,
+      isGated: false,
+      isPrivate: false,
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      chatModalities: ['text'],
+    };
+
+    mockedRegistry.getModel.mockImplementation((id) => (id === modelId ? localModel : undefined));
+    global.fetch = jest.fn(() =>
+      Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve([makeVisionRepo(modelId, modelFileName, projectorFileName)]),
+      }),
+    ) as jest.Mock;
+
+    const result = await service.searchModels('vision capable');
+    const model = result.models[0];
+    const projector = model.projectorCandidates?.[0];
+
+    expect(model).toEqual(expect.objectContaining({
+      chatModalities: ['text', 'vision'],
+      artifactRole: 'primary_chat_model',
+      visionSource: 'catalog_metadata',
+      visionConfidence: 'trusted',
+      localPath: localModel.localPath,
+      downloadedAt: localModel.downloadedAt,
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+    }));
+    expect(projector).toEqual(expect.objectContaining({
+      ownerModelId: modelId,
+      repoId: modelId,
+      fileName: projectorFileName,
+      lifecycleStatus: 'available',
+      matchStatus: 'matched',
+    }));
+    expect(projector?.localPath).toBeUndefined();
+    expect(model.selectedProjectorId).toBeUndefined();
+    expect(model.multimodalReadiness).toBeUndefined();
+  });
+
+  it('keeps local-only vision metadata visible for downloaded models after anonymous cache sanitization', async () => {
+    const localModel: ModelMetadata = {
+      id: 'org/local-runtime-vision',
+      name: 'Local Runtime Vision',
+      author: 'org',
+      size: 2 * 1024 * 1024 * 1024,
+      downloadUrl: 'https://huggingface.co/org/local-runtime-vision/resolve/main/model.Q4_K_M.gguf',
+      hfRevision: 'main',
+      resolvedFileName: 'model.Q4_K_M.gguf',
+      localPath: 'local-runtime-vision.Q4_K_M.gguf',
+      downloadedAt: 1234,
+      fitsInRam: true,
+      accessState: ModelAccessState.PUBLIC,
+      isGated: false,
+      isPrivate: false,
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      chatModalities: ['text', 'vision'],
+      artifactRole: 'primary_chat_model',
+      visionSource: 'gguf_metadata',
+      visionConfidence: 'verified',
+    };
+
+    mockedRegistry.getModels.mockReturnValue([localModel]);
+    mockedRegistry.getModel.mockImplementation((id) => (id === localModel.id ? localModel : undefined));
+
+    const firstResult = await service.getLocalModels();
+    const secondResult = await service.getLocalModels();
+
+    expect(firstResult[0]).toEqual(expect.objectContaining({
+      chatModalities: ['text', 'vision'],
+      visionSource: 'gguf_metadata',
+      visionConfidence: 'verified',
+      localPath: localModel.localPath,
+    }));
+    expect(secondResult[0]).toEqual(expect.objectContaining({
+      chatModalities: ['text', 'vision'],
+      visionSource: 'gguf_metadata',
+      visionConfidence: 'verified',
+      localPath: localModel.localPath,
+    }));
+  });
+
+  it('drops stale local-only vision metadata when catalog identity resets local download state', async () => {
+    const modelId = 'org/reset-local-metadata';
+    const localModel: ModelMetadata = {
+      id: modelId,
+      name: 'Reset Local Metadata',
+      author: 'org',
+      size: 1024,
+      downloadUrl: `https://huggingface.co/${modelId}/resolve/main/old.Q4_K_M.gguf`,
+      hfRevision: 'main',
+      resolvedFileName: 'old.Q4_K_M.gguf',
+      localPath: 'old.Q4_K_M.gguf',
+      downloadedAt: 1234,
+      fitsInRam: true,
+      accessState: ModelAccessState.PUBLIC,
+      isGated: false,
+      isPrivate: false,
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      chatModalities: ['text', 'vision'],
+      artifactRole: 'primary_chat_model',
+      visionSource: 'gguf_metadata',
+      visionConfidence: 'verified',
+    };
+
+    mockedRegistry.getModel.mockImplementation((id) => (id === modelId ? localModel : undefined));
+    global.fetch = jest.fn(() =>
+      Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve([makeTextGenerationRepo(modelId)]),
+      }),
+    ) as jest.Mock;
+
+    const result = await service.searchModels('reset local vision');
+    const model = result.models[0];
+
+    expect(model).toEqual(expect.objectContaining({
+      chatModalities: ['text'],
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+    }));
+    expect(model.localPath).toBeUndefined();
+    expect(model.downloadedAt).toBeUndefined();
+    expect(model.visionSource).toBeUndefined();
+    expect(model.visionConfidence).toBeUndefined();
   });
 
   it('keeps size-known gated repos authorized when access validation temporarily fails with a non-auth error', async () => {

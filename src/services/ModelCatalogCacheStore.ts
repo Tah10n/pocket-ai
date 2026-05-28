@@ -1,4 +1,5 @@
-import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../types/models';
+import { LifecycleStatus, ModelAccessState, type ModelMetadata, type ModelVariant } from '../types/models';
+import type { ProjectorArtifact, ProjectorMatchStatus, VisionCapabilitySource } from '../types/multimodal';
 import { CATALOG_SEARCH_VARIANT_LIMIT, limitModelVariants } from './ModelCatalogFileSelector';
 import { normalizePersistedModelMetadata } from './ModelMetadataNormalizer';
 import { createStorage } from './storage';
@@ -57,11 +58,148 @@ const SUPPORTED_PERSISTED_CACHE_VERSIONS = new Set([3, PERSISTED_CACHE_VERSION])
 const MAX_PERSISTED_SEARCH_ENTRIES = 6;
 const MAX_PERSISTED_SNAPSHOT_ENTRIES = 40;
 const PERSISTED_CACHE_KEYS = [SEARCH_CACHE_KEY, SNAPSHOT_CACHE_KEY] as const;
+const CATALOG_SAFE_VISION_SOURCES = new Set<VisionCapabilitySource>(['catalog_metadata', 'tree_probe']);
+
+type CatalogVisionRuntimeSource = Pick<ModelMetadata | ModelVariant, 'visionSource'> & Partial<Pick<
+  ModelMetadata | ModelVariant,
+  'chatModalities' | 'projectorCandidates' | 'visionConfidence'
+>>;
 
 function isPublicAnonymousModel(model: ModelMetadata): boolean {
   return model.accessState === ModelAccessState.PUBLIC
     && model.isGated !== true
     && model.isPrivate !== true;
+}
+
+function sanitizeCatalogProjectorMatchStatus(projector: ProjectorArtifact): ProjectorMatchStatus {
+  if (projector.matchStatus === 'failed' || projector.matchStatus === 'user_selected') {
+    return 'missing';
+  }
+
+  if (projector.matchReason === 'multiple_projector_candidates') {
+    return 'ambiguous';
+  }
+
+  if (projector.matchReason === 'single_projector_candidate') {
+    return 'matched';
+  }
+
+  return projector.matchStatus;
+}
+
+function sanitizeCatalogProjectorMatchReason(projector: ProjectorArtifact): string | undefined {
+  return projector.matchReason === 'single_projector_candidate'
+    || projector.matchReason === 'deterministic_filename_affinity'
+    || projector.matchReason === 'multiple_projector_candidates'
+    ? projector.matchReason
+    : undefined;
+}
+
+function modelHasCatalogSafeVisionSource(model: Pick<ModelMetadata, 'visionSource'>): boolean {
+  return Boolean(model.visionSource && CATALOG_SAFE_VISION_SOURCES.has(model.visionSource));
+}
+
+function hasProjectorRuntimeFields(projectors: ModelMetadata['projectorCandidates']): boolean {
+  return projectors?.some((projector) => (
+    typeof projector.localPath === 'string'
+    || typeof projector.resumeData === 'string'
+    || projector.lifecycleStatus !== 'available'
+    || projector.matchStatus === 'failed'
+    || projector.matchStatus === 'user_selected'
+    || projector.matchReason === 'user_selected_projector'
+    || projector.matchReason === 'unselected_projector_candidate'
+  )) ?? false;
+}
+
+function hasUnsafeAnonymousVisionProvenance(model: CatalogVisionRuntimeSource): boolean {
+  const hasSafeVisionSource = modelHasCatalogSafeVisionSource(model);
+  const hasVisionModality = Array.isArray(model.chatModalities) && model.chatModalities.includes('vision');
+  const hasUnsafeProjectorCandidates = Boolean(model.projectorCandidates?.length && !hasSafeVisionSource);
+  const hasCatalogVisionEvidence = hasSafeVisionSource;
+
+  return Boolean(
+    (model.visionSource && !hasSafeVisionSource)
+    || (model.visionConfidence && !hasSafeVisionSource)
+    || hasUnsafeProjectorCandidates
+    || (hasVisionModality && !hasCatalogVisionEvidence),
+  );
+}
+
+function hasAnonymousVariantRuntimeFields(variant: ModelVariant): boolean {
+  return variant.isLocal === true
+    || typeof variant.selectedProjectorId === 'string'
+    || hasUnsafeAnonymousVisionProvenance(variant)
+    || hasProjectorRuntimeFields(variant.projectorCandidates);
+}
+
+export function sanitizeCatalogProjectorRuntimeState(projectors: ModelMetadata['projectorCandidates']): ModelMetadata['projectorCandidates'] {
+  if (!projectors?.length) {
+    return projectors;
+  }
+
+  return projectors.map((projector) => ({
+    ...projector,
+    localPath: undefined,
+    resumeData: undefined,
+    lifecycleStatus: 'available' as const,
+    matchStatus: sanitizeCatalogProjectorMatchStatus(projector),
+    matchReason: sanitizeCatalogProjectorMatchReason(projector),
+  }));
+}
+
+export function sanitizeCatalogModelRuntimeState(model: ModelMetadata): ModelMetadata {
+  const hasCatalogSafeVisionSource = modelHasCatalogSafeVisionSource(model);
+  const projectorCandidates = hasCatalogSafeVisionSource
+    ? sanitizeCatalogProjectorRuntimeState(model.projectorCandidates)
+    : undefined;
+  const hasCatalogVisionEvidence = hasCatalogSafeVisionSource;
+  const chatModalities = Array.isArray(model.chatModalities) && !hasCatalogVisionEvidence
+    ? model.chatModalities.filter((modality) => modality !== 'vision')
+    : model.chatModalities;
+
+  return normalizePersistedModelMetadata({
+    ...model,
+    localPath: undefined,
+    downloadedAt: undefined,
+    downloadIntegrity: undefined,
+    resumeData: undefined,
+    downloadErrorAt: undefined,
+    downloadErrorCode: undefined,
+    downloadErrorMessage: undefined,
+    lifecycleStatus: LifecycleStatus.AVAILABLE,
+    downloadProgress: 0,
+    metadataTrust: model.metadataTrust === 'verified_local' ? undefined : model.metadataTrust,
+    ...(model.metadataTrust === 'verified_local' ? {
+      sha256: undefined,
+      capabilitySnapshot: undefined,
+    } : {}),
+    chatModalities,
+    visionSource: hasCatalogSafeVisionSource ? model.visionSource : undefined,
+    visionConfidence: hasCatalogSafeVisionSource ? model.visionConfidence : undefined,
+    selectedProjectorId: undefined,
+    multimodalReadiness: undefined,
+    projectorCandidates,
+  });
+}
+
+function sanitizeCatalogVariantRuntimeState(variant: ModelVariant): ModelVariant {
+  const hasCatalogSafeVisionSource = modelHasCatalogSafeVisionSource(variant);
+  const projectorCandidates = hasCatalogSafeVisionSource
+    ? sanitizeCatalogProjectorRuntimeState(variant.projectorCandidates)
+    : undefined;
+  const hasCatalogVisionEvidence = hasCatalogSafeVisionSource;
+  const chatModalities = Array.isArray(variant.chatModalities) && !hasCatalogVisionEvidence
+    ? variant.chatModalities.filter((modality) => modality !== 'vision')
+    : variant.chatModalities;
+
+  return {
+    ...variant,
+    chatModalities,
+    visionSource: hasCatalogSafeVisionSource ? variant.visionSource : undefined,
+    visionConfidence: hasCatalogSafeVisionSource ? variant.visionConfidence : undefined,
+    selectedProjectorId: undefined,
+    projectorCandidates,
+  };
 }
 
 export function sanitizeAnonymousCatalogModel(model: ModelMetadata): ModelMetadata | null {
@@ -86,25 +224,7 @@ export function sanitizeAnonymousCatalogModel(model: ModelMetadata): ModelMetada
 }
 
 function toAnonymousPublicCatalogModel(model: ModelMetadata): ModelMetadata {
-  const hasVerifiedLocalMetadata = model.metadataTrust === 'verified_local';
-
-  return normalizePersistedModelMetadata({
-    ...model,
-    localPath: undefined,
-    downloadedAt: undefined,
-    downloadIntegrity: undefined,
-    resumeData: undefined,
-    downloadErrorAt: undefined,
-    downloadErrorCode: undefined,
-    downloadErrorMessage: undefined,
-    lifecycleStatus: LifecycleStatus.AVAILABLE,
-    downloadProgress: 0,
-    metadataTrust: hasVerifiedLocalMetadata ? undefined : model.metadataTrust,
-    ...(hasVerifiedLocalMetadata ? {
-      sha256: undefined,
-      capabilitySnapshot: undefined,
-    } : {}),
-  });
+  return sanitizeCatalogModelRuntimeState(model);
 }
 
 function limitAnonymousCatalogModelVariants(model: ModelMetadata): ModelMetadata {
@@ -114,9 +234,12 @@ function limitAnonymousCatalogModelVariants(model: ModelMetadata): ModelMetadata
     includeVariantIds: [model.activeVariantId],
   });
   const hasLocalVariantMarker = variants?.some((variant) => variant.isLocal === true) ?? false;
-  const sanitizedVariants = variants?.map(({ isLocal: _isLocal, ...variant }) => variant);
+  const hasVariantRuntimeFields = variants?.some(hasAnonymousVariantRuntimeFields) ?? false;
+  const sanitizedVariants = variants?.map(({ isLocal: _isLocal, ...variant }) => (
+    sanitizeCatalogVariantRuntimeState(variant)
+  ));
 
-  if (variants === model.variants && !hasLocalVariantMarker) {
+  if (variants === model.variants && !hasLocalVariantMarker && !hasVariantRuntimeFields) {
     return model;
   }
 
@@ -144,7 +267,11 @@ function hasAnonymousRuntimeFields(model: ModelMetadata): boolean {
     || model.lifecycleStatus !== LifecycleStatus.AVAILABLE
     || model.downloadProgress !== 0
     || model.metadataTrust === 'verified_local'
-    || (model.variants?.some((variant) => variant.isLocal === true) ?? false);
+    || (model.variants?.some(hasAnonymousVariantRuntimeFields) ?? false)
+    || hasUnsafeAnonymousVisionProvenance(model)
+    || typeof model.selectedProjectorId === 'string'
+    || model.multimodalReadiness !== undefined
+    || hasProjectorRuntimeFields(model.projectorCandidates);
 }
 
 function needsAnonymousPersistedModelSanitization(model: ModelMetadata): boolean {

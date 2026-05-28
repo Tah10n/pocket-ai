@@ -67,6 +67,16 @@ function analyzeLocale(value: unknown): { baseKeys: Set<string>; pluralFormsByBa
   return { baseKeys, pluralFormsByBaseKey };
 }
 
+function getNestedValue(value: unknown, keyPath: string): unknown {
+  return keyPath.split('.').reduce<unknown>((current, key) => {
+    if (!isPlainObject(current)) {
+      return undefined;
+    }
+
+    return current[key];
+  }, value);
+}
+
 describe('i18n locale parity', () => {
   it('keeps en and ru locales in sync', () => {
     const enPath = path.resolve(__dirname, '../../src/i18n/locales/en.json');
@@ -132,5 +142,27 @@ describe('i18n locale parity', () => {
       missingPluralCategoriesInEn: [],
       missingPluralCategoriesInRu: [],
     });
+  });
+
+  it('covers all multimodal readiness explanation keys in both locales', () => {
+    const en = loadJson(path.resolve(__dirname, '../../src/i18n/locales/en.json'));
+    const ru = loadJson(path.resolve(__dirname, '../../src/i18n/locales/ru.json'));
+    const readinessKeys = [
+      'chat.visionReadiness.ready',
+      'chat.visionReadiness.textOnly',
+      'chat.visionReadiness.missingProjector',
+      'chat.visionReadiness.ambiguousProjector',
+      'chat.visionReadiness.projectorDownloading',
+      'chat.visionReadiness.initializing',
+      'chat.visionReadiness.failed',
+      'chat.visionReadiness.noModel',
+      'chat.visionReadiness.editingMessage',
+      'chat.visionReadiness.unsupported',
+    ];
+
+    for (const readinessKey of readinessKeys) {
+      expect(typeof getNestedValue(en, readinessKey)).toBe('string');
+      expect(typeof getNestedValue(ru, readinessKey)).toBe('string');
+    }
   });
 });

@@ -4,6 +4,7 @@ import { useDownloadStore } from '../store/downloadStore';
 import { getModelDownloadManager } from '../services/ModelDownloadManager';
 import { notificationService } from '../services/NotificationService';
 import { isPrivateStorageWritable } from '../services/storage';
+import { selectModelProjectorLifecycleState } from '../store/modelsStore';
 import { ModelMetadata } from '../types/models';
 import { useShallow } from 'zustand/react/shallow';
 import i18n from '../i18n';
@@ -118,6 +119,10 @@ export function useModelDownload() {
     return useDownloadStore.getState().queue.find((model) => model.id === modelId);
   }, []);
 
+  const getProjectorLifecycleState = useCallback((model: ModelMetadata) => {
+    return selectModelProjectorLifecycleState(model);
+  }, []);
+
   return {
     queueIds,
     activeDownloadId,
@@ -125,5 +130,6 @@ export function useModelDownload() {
     pauseDownload,
     cancelDownload,
     getModelFromQueue,
+    getProjectorLifecycleState,
   };
 }

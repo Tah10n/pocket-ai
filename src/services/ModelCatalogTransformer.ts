@@ -7,9 +7,24 @@ import {
   type ModelMetadata,
   type ModelVariant,
 } from '../types/models';
-import type { CreateTreeProbeCandidateOptions, HuggingFaceModelCardData, HuggingFaceModelConfig, HuggingFaceModelSummary } from '../types/huggingFace';
+import type {
+  ProjectorArtifact,
+  VisionCapabilitySource,
+} from '../types/multimodal';
+import type {
+  CreateTreeProbeCandidateOptions,
+  HuggingFaceModelCardData,
+  HuggingFaceModelConfig,
+  HuggingFaceModelSummary,
+  HuggingFaceSibling,
+  HuggingFaceTreeEntry,
+} from '../types/huggingFace';
 import { buildHuggingFaceResolveUrl } from '../utils/huggingFaceUrls';
 import { getShortModelLabel } from '../utils/modelLabel';
+import {
+  buildProjectorArtifactId,
+  resolveDeterministicProjectorCandidate,
+} from '../utils/modelProjectors';
 import { normalizeSha256Digest } from '../utils/sha256';
 import {
   buildCatalogModelVariantsFromRankedEntries,
@@ -17,6 +32,7 @@ import {
   getFileName,
   getFileSha,
   getFileSize,
+  getProjectorCompanionEntries,
   isCatalogSummarySupported,
   isUnsupportedMtpFileName,
   rankCatalogGgufEntries,
@@ -271,6 +287,119 @@ function normalizeStringArrayMetadata(value: string | string[] | undefined): str
   return normalized.length > 0 ? normalized : undefined;
 }
 
+function normalizeVisionSignal(value: string | undefined): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  return normalized.length > 0 ? normalized : null;
+}
+
+function hasVisionCatalogSignal(item: HuggingFaceModelSummary): boolean {
+  const signals = [
+    item.pipeline_tag,
+    item.config?.model_type,
+    item.cardData?.model_type,
+    item.gguf?.architecture,
+    ...(item.tags ?? []),
+    ...(item.config?.architectures ?? []),
+    item.id,
+    item.modelId,
+  ].map(normalizeVisionSignal).filter((value): value is string => value !== null);
+
+  return signals.some((signal) => (
+    signal === 'image-text-to-text'
+    || signal === 'visual-question-answering'
+    || signal.includes('vision')
+    || signal.includes('multimodal')
+    || signal.includes('vlm')
+    || signal.includes('llava')
+    || signal.includes('bakllava')
+    || signal.includes('moondream')
+    || signal.includes('pixtral')
+    || signal.includes('qwen2-vl')
+    || signal.includes('qwen2.5-vl')
+  ));
+}
+
+export function buildProjectorCandidatesFromEntries(
+  entries: (HuggingFaceSibling | HuggingFaceTreeEntry)[],
+  options: {
+    repoId: string;
+    hfRevision?: string;
+    ownerModelId: string;
+    ownerVariantId?: string;
+    ownerFileName?: string;
+  },
+): ProjectorArtifact[] | undefined {
+  const projectorEntries = getProjectorCompanionEntries(entries);
+  if (projectorEntries.length === 0) {
+    return undefined;
+  }
+
+  const candidates = projectorEntries.map((entry): ProjectorArtifact => {
+    const fileName = getFileName(entry);
+    const id = buildProjectorArtifactId({
+      repoId: options.repoId,
+      hfRevision: options.hfRevision,
+      fileName,
+      ownerVariantId: options.ownerVariantId,
+    });
+
+    return {
+      id,
+      ownerModelId: options.ownerModelId,
+      ...(options.ownerVariantId
+        ? { ownerVariantId: options.ownerVariantId }
+        : {}),
+      repoId: options.repoId,
+      fileName,
+      downloadUrl: buildHuggingFaceResolveUrl(options.repoId, fileName, options.hfRevision),
+      ...(options.hfRevision ? { hfRevision: options.hfRevision } : {}),
+      sha256: getFileSha(entry),
+      size: getFileSize(entry),
+      lifecycleStatus: 'available',
+      matchStatus: 'missing',
+    };
+  });
+
+  const deterministicCandidate = options.ownerFileName
+    ? resolveDeterministicProjectorCandidate(options.ownerFileName, candidates)
+    : null;
+  const matchStatus = candidates.length === 1 || deterministicCandidate ? 'matched' : 'ambiguous';
+  const matchReason = candidates.length === 1
+    ? 'single_projector_candidate'
+    : deterministicCandidate
+      ? 'deterministic_filename_affinity'
+      : 'multiple_projector_candidates';
+
+  return candidates.map((candidate) => ({
+    ...candidate,
+    matchStatus: deterministicCandidate && candidate.id !== deterministicCandidate.id
+      ? 'ambiguous'
+      : matchStatus,
+    matchReason,
+  }));
+}
+
+function getVisionMetadataPatch(options: {
+  item: HuggingFaceModelSummary;
+  projectorCandidates?: ProjectorArtifact[];
+  source: VisionCapabilitySource;
+}): Pick<ModelMetadata, 'artifactRole' | 'chatModalities' | 'visionSource' | 'visionConfidence' | 'projectorCandidates'> {
+  const hasProjectorCandidates = Boolean(options.projectorCandidates?.length);
+  const hasVisionSignal = hasProjectorCandidates || hasVisionCatalogSignal(options.item);
+
+  return {
+    artifactRole: 'primary_chat_model',
+    chatModalities: hasVisionSignal ? ['text', 'vision'] : ['text'],
+    ...(hasVisionSignal ? { visionSource: options.source } : {}),
+    ...(hasVisionSignal ? { visionConfidence: hasProjectorCandidates ? 'trusted' : 'inferred' } : {}),
+    ...(options.projectorCandidates ? { projectorCandidates: options.projectorCandidates } : {}),
+  };
+}
+
 export function createFallbackModel(modelId: string): ModelMetadata {
   return normalizePersistedModelMetadata({
     id: modelId,
@@ -333,6 +462,10 @@ function createTreeProbeCandidate(
   const resolvedMemoryFit = resolveMemoryFitSummary({ size, metadataTrust }, memoryFitContext);
   const fitsInRam = resolvedMemoryFit?.fitsInRam ?? null;
   const lastModifiedAt = parseHuggingFaceLastModifiedAt(item.lastModified);
+  const visionMetadata = getVisionMetadataPatch({
+    item,
+    source: 'catalog_metadata',
+  });
 
   return normalizePersistedModelMetadata({
     id: repoId,
@@ -356,6 +489,7 @@ function createTreeProbeCandidate(
     maxContextTokens,
     downloads: item.downloads ?? null,
     likes: item.likes ?? null,
+    ...visionMetadata,
   });
 }
 
@@ -433,6 +567,17 @@ export function transformHFResponse(
     const fitsInRam = resolvedMemoryFit?.fitsInRam ?? null;
     const fileName = getFileName(ggufSibling) || 'model.gguf';
     const hfRevision = item.sha ?? undefined;
+    const projectorCandidates = buildProjectorCandidatesFromEntries(siblings, {
+      repoId,
+      hfRevision,
+      ownerModelId: repoId,
+      ownerFileName: fileName,
+    });
+    const visionMetadata = getVisionMetadataPatch({
+      item,
+      projectorCandidates,
+      source: 'catalog_metadata',
+    });
     const lastModifiedAt = parseHuggingFaceLastModifiedAt(item.lastModified);
     const requiresAuth = Boolean(item.gated) || item.private === true;
     const requiresTreeProbe = shouldRevalidateCatalogSummarySelection(ggufSibling);
@@ -464,6 +609,7 @@ export function transformHFResponse(
       likes: item.likes ?? null,
       variants,
       activeVariantId: fileName,
+      ...visionMetadata,
     }));
   }
 
@@ -493,6 +639,17 @@ export function buildModelMetadataFromPayload(
   const selectedEntrySize = getFileSize(selectedEntry);
   const selectedEntrySha256 = selectedEntry ? getFileSha(selectedEntry) : undefined;
   const selectedEntryFileName = selectedEntry ? getFileName(selectedEntry) : undefined;
+  const projectorCandidates = buildProjectorCandidatesFromEntries(siblings, {
+    repoId,
+    hfRevision,
+    ownerModelId: repoId,
+    ownerFileName: selectedEntryFileName ?? fallbackModel.resolvedFileName,
+  });
+  const visionMetadata = getVisionMetadataPatch({
+    item: payload,
+    projectorCandidates,
+    source: 'catalog_metadata',
+  });
   const fallbackSha256 = normalizeSha256Digest(fallbackModel.sha256);
   const fallbackShaCompatibility = resolveVerifiedLocalShaCompatibility(fallbackModel, selectedEntry
     ? {
@@ -607,6 +764,7 @@ export function buildModelMetadataFromPayload(
     tags: payload.tags ?? fallbackModel.tags,
     variants: variants.length > 0 ? variants : fallbackModel.variants,
     activeVariantId: resolvedFileName ?? fallbackModel.activeVariantId,
+    ...visionMetadata,
   });
 }
 

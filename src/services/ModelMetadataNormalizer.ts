@@ -11,12 +11,27 @@ import {
   type ModelVariant,
   type ModelThinkingCapabilitySnapshot,
 } from '../types/models';
+import type {
+  ModelArtifactRole,
+  ModelChatModality,
+  MultimodalReadinessState,
+  MultimodalReadinessStatus,
+  MultimodalSupportModality,
+  ProjectorArtifact,
+  ProjectorLifecycleStatus,
+  ProjectorMatchStatus,
+  VisionCapabilityConfidence,
+  VisionCapabilitySource,
+} from '../types/multimodal';
 import { normalizePersistedModelCapabilitySnapshot } from '../utils/modelCapabilities';
 import { dedupeModelVariantsByIdentity } from '../utils/modelVariantIdentity';
 import { getShortModelLabel } from '../utils/modelLabel';
 import { buildHuggingFaceResolveUrl } from '../utils/huggingFaceUrls';
+import { resolveModelArtifactRole } from '../utils/modelProjectors';
 import { isValidLocalFileName } from '../utils/safeFilePath';
 import { normalizeSha256Digest } from '../utils/sha256';
+import { normalizeDownloadResumeData } from '../utils/downloadResumeData';
+import { sanitizeMultimodalFailureReason } from '../utils/multimodalFailureReason';
 import {
   isProjectorFileName,
   isSupportedGgufFileName,
@@ -44,6 +59,14 @@ function normalizeNullableCount(value: unknown): number | null {
   }
 
   return Math.round(value);
+}
+
+function normalizeProgress(value: unknown, fallback = 0): number {
+  const progress = typeof value === 'number' && Number.isFinite(value)
+    ? value
+    : fallback;
+
+  return Math.max(0, Math.min(progress, 1));
 }
 
 function normalizeLifecycleStatus(value: unknown): LifecycleStatus {
@@ -108,6 +131,185 @@ function normalizeMemoryFitConfidence(value: unknown): ModelMemoryFitConfidence 
   return value === 'high' || value === 'medium' || value === 'low'
     ? value
     : undefined;
+}
+
+function normalizeModelArtifactRole(value: unknown): ModelArtifactRole | undefined {
+  return value === 'primary_chat_model' || value === 'projector_companion'
+    ? value
+    : undefined;
+}
+
+function normalizeChatModalities(value: unknown): ModelChatModality[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const modalities = value.filter((entry): entry is ModelChatModality => (
+    entry === 'text' || entry === 'vision'
+  ));
+  const deduped = [...new Set(modalities)];
+
+  return deduped.length > 0 ? deduped : undefined;
+}
+
+function normalizeMultimodalReadinessStatus(value: unknown): MultimodalReadinessStatus | undefined {
+  return value === 'ready'
+    || value === 'text_only'
+    || value === 'missing_projector'
+    || value === 'ambiguous_projector'
+    || value === 'projector_downloading'
+    || value === 'initializing'
+    || value === 'failed'
+    || value === 'unsupported'
+    ? value
+    : undefined;
+}
+
+function normalizeMultimodalSupport(value: unknown): MultimodalSupportModality[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return [...new Set(value.filter((entry): entry is MultimodalSupportModality => (
+    entry === 'vision' || entry === 'audio'
+  )))];
+}
+
+function normalizeMultimodalReadinessState(value: unknown): MultimodalReadinessState | undefined {
+  if (!value || typeof value !== 'object') {
+    return undefined;
+  }
+
+  const record = value as Record<string, unknown>;
+  const modelId = normalizeNonEmptyString(record.modelId);
+  const status = normalizeMultimodalReadinessStatus(record.status);
+  if (!modelId || !status) {
+    return undefined;
+  }
+
+  const checkedAt = typeof record.checkedAt === 'number' && Number.isFinite(record.checkedAt)
+    ? Math.max(0, Math.round(record.checkedAt))
+    : 0;
+  const projectorSize = typeof record.projectorSize === 'number' && Number.isFinite(record.projectorSize) && record.projectorSize > 0
+    ? Math.round(record.projectorSize)
+    : undefined;
+  const failureReason = sanitizeMultimodalFailureReason(normalizeNonEmptyString(record.failureReason));
+
+  return {
+    modelId,
+    ...(normalizeNonEmptyString(record.variantId) ? { variantId: normalizeNonEmptyString(record.variantId) } : {}),
+    status,
+    ...(normalizeNonEmptyString(record.projectorId) ? { projectorId: normalizeNonEmptyString(record.projectorId) } : {}),
+    ...(projectorSize !== undefined ? { projectorSize } : {}),
+    support: normalizeMultimodalSupport(record.support),
+    ...(failureReason ? { failureReason } : {}),
+    checkedAt,
+  };
+}
+
+function normalizeVisionCapabilitySource(value: unknown): VisionCapabilitySource | undefined {
+  return value === 'catalog_metadata'
+    || value === 'tree_probe'
+    || value === 'gguf_metadata'
+    || value === 'runtime_probe'
+    || value === 'user_selected_projector'
+    ? value
+    : undefined;
+}
+
+function normalizeVisionCapabilityConfidence(value: unknown): VisionCapabilityConfidence | undefined {
+  return value === 'verified'
+    || value === 'trusted'
+    || value === 'inferred'
+    || value === 'unknown'
+    ? value
+    : undefined;
+}
+
+function normalizeProjectorLifecycleStatus(value: unknown): ProjectorLifecycleStatus {
+  return value === 'queued'
+    || value === 'downloading'
+    || value === 'paused'
+    || value === 'failed'
+    || value === 'downloaded'
+    || value === 'active'
+    ? value
+    : 'available';
+}
+
+function normalizeProjectorMatchStatus(value: unknown): ProjectorMatchStatus {
+  return value === 'matched'
+    || value === 'ambiguous'
+    || value === 'user_selected'
+    || value === 'failed'
+    ? value
+    : 'missing';
+}
+
+function normalizeProjectorArtifact(value: unknown): ProjectorArtifact | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+  const id = normalizeNonEmptyString(record.id);
+  const ownerModelId = normalizeNonEmptyString(record.ownerModelId);
+  const repoId = normalizeNonEmptyString(record.repoId);
+  const fileName = normalizeNonEmptyString(record.fileName);
+  const downloadUrl = normalizeNonEmptyString(record.downloadUrl);
+  if (!id || !ownerModelId || !repoId || !fileName || !downloadUrl) {
+    return null;
+  }
+
+  const ownerVariantId = normalizeNonEmptyString(record.ownerVariantId);
+  const hfRevision = normalizeNonEmptyString(record.hfRevision);
+  const sha256 = normalizeSha256Digest(typeof record.sha256 === 'string' ? record.sha256 : undefined);
+  const size = normalizeSize(record.size);
+  const localPath = normalizeLocalFileName(record.localPath);
+  const resumeData = normalizeDownloadResumeData(record.resumeData);
+  const downloadProgress = record.downloadProgress === undefined
+    ? undefined
+    : normalizeProgress(record.downloadProgress);
+  const lifecycleStatus = normalizeProjectorLifecycleStatus(record.lifecycleStatus);
+  const matchStatus = normalizeProjectorMatchStatus(record.matchStatus);
+  const matchReason = normalizeNonEmptyString(record.matchReason);
+
+  return {
+    id,
+    ownerModelId,
+    ...(ownerVariantId !== undefined ? { ownerVariantId } : {}),
+    repoId,
+    fileName,
+    downloadUrl,
+    ...(hfRevision !== undefined ? { hfRevision } : {}),
+    ...(sha256 !== undefined ? { sha256 } : {}),
+    size,
+    ...(localPath !== undefined ? { localPath } : {}),
+    ...(resumeData !== undefined ? { resumeData } : {}),
+    ...(downloadProgress !== undefined ? { downloadProgress } : {}),
+    lifecycleStatus,
+    matchStatus,
+    ...(matchReason !== undefined ? { matchReason } : {}),
+  };
+}
+
+function normalizeProjectorArtifacts(value: unknown): ProjectorArtifact[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const seen = new Set<string>();
+  const artifacts = value.flatMap((entry) => {
+    const artifact = normalizeProjectorArtifact(entry);
+    if (!artifact || seen.has(artifact.id)) {
+      return [];
+    }
+
+    seen.add(artifact.id);
+    return [artifact];
+  });
+
+  return artifacts.length > 0 ? artifacts : undefined;
 }
 
 function fitsInRamForMemoryFitDecision(decision: ModelMemoryFitDecision): boolean | null {
@@ -238,6 +440,12 @@ function normalizeModelVariant(value: unknown): ModelVariant | null {
   const sha256 = normalizeSha256Digest(typeof record.sha256 === 'string' ? record.sha256 : undefined);
   const ramFit = normalizeMemoryFitDecision(record.ramFit);
   const ramFitConfidence = normalizeMemoryFitConfidence(record.ramFitConfidence);
+  const chatModalities = normalizeChatModalities(record.chatModalities);
+  const artifactRole = normalizeModelArtifactRole(record.artifactRole);
+  const visionSource = normalizeVisionCapabilitySource(record.visionSource);
+  const visionConfidence = normalizeVisionCapabilityConfidence(record.visionConfidence);
+  const projectorCandidates = normalizeProjectorArtifacts(record.projectorCandidates);
+  const selectedProjectorId = normalizeNonEmptyString(record.selectedProjectorId);
 
   return {
     variantId,
@@ -248,6 +456,12 @@ function normalizeModelVariant(value: unknown): ModelVariant | null {
     ...(ramFit ? { ramFit } : {}),
     ...(ramFitConfidence ? { ramFitConfidence } : {}),
     ...(record.isLocal === true ? { isLocal: true } : {}),
+    ...(chatModalities ? { chatModalities } : {}),
+    ...(artifactRole === 'primary_chat_model' ? { artifactRole } : {}),
+    ...(visionSource ? { visionSource } : {}),
+    ...(visionConfidence ? { visionConfidence } : {}),
+    ...(projectorCandidates ? { projectorCandidates } : {}),
+    ...(selectedProjectorId ? { selectedProjectorId } : {}),
   };
 }
 
@@ -380,6 +594,16 @@ export function normalizePersistedModelMetadata(
     },
   );
   const activeVariantId = resolveActiveVariantId(normalizedActiveVariantId, normalizedResolvedFileName, variants);
+  const chatModalities = normalizeChatModalities(model.chatModalities);
+  const artifactRole = normalizeModelArtifactRole(model.artifactRole)
+    ?? (normalizedResolvedFileName ? resolveModelArtifactRole(normalizedResolvedFileName) : undefined);
+  const visionSource = normalizeVisionCapabilitySource(model.visionSource);
+  const visionConfidence = normalizeVisionCapabilityConfidence(model.visionConfidence);
+  const projectorCandidates = normalizeProjectorArtifacts(model.projectorCandidates);
+  const selectedProjectorId = normalizeNonEmptyString(model.selectedProjectorId);
+  const multimodalReadiness = normalizeMultimodalReadinessState(
+    (model as PersistedModelMetadata & { multimodalReadiness?: unknown }).multimodalReadiness,
+  );
   const normalizedDownloadIntegrity = normalizeFileIntegrityMarker(
     (model as PersistedModelMetadata & { downloadIntegrity?: unknown }).downloadIntegrity,
   );
@@ -405,10 +629,7 @@ export function normalizePersistedModelMetadata(
   const downloadIntegrity = shouldDropDownloadedState || hasMismatchedSha256Integrity
     ? undefined
     : normalizedDownloadIntegrity;
-  const rawProgress = typeof model.downloadProgress === 'number' && Number.isFinite(model.downloadProgress)
-    ? model.downloadProgress
-    : 0;
-  const downloadProgress = shouldDropDownloadedState ? 0 : Math.max(0, Math.min(rawProgress, 1));
+  const downloadProgress = shouldDropDownloadedState ? 0 : normalizeProgress(model.downloadProgress);
   const downloadedAt = !shouldDropDownloadedState
     && typeof model.downloadedAt === 'number'
     && Number.isFinite(model.downloadedAt)
@@ -416,7 +637,7 @@ export function normalizePersistedModelMetadata(
     : undefined;
   const resumeData = shouldDropDownloadedState
     ? undefined
-    : normalizeNonEmptyString(model.resumeData);
+    : normalizeDownloadResumeData(model.resumeData);
   const downloadErrorCode = shouldDropDownloadedState
     ? undefined
     : normalizeNonEmptyString(model.downloadErrorCode);
@@ -498,5 +719,12 @@ export function normalizePersistedModelMetadata(
     description: normalizeNonEmptyString(model.description),
     variants,
     activeVariantId,
+    ...(chatModalities !== undefined ? { chatModalities } : {}),
+    ...(artifactRole !== undefined ? { artifactRole } : {}),
+    ...(visionSource !== undefined ? { visionSource } : {}),
+    ...(visionConfidence !== undefined ? { visionConfidence } : {}),
+    ...(projectorCandidates !== undefined ? { projectorCandidates } : {}),
+    ...(selectedProjectorId !== undefined ? { selectedProjectorId } : {}),
+    ...(multimodalReadiness !== undefined ? { multimodalReadiness } : {}),
   };
 }

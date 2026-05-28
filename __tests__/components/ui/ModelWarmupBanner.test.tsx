@@ -110,6 +110,67 @@ describe('ModelWarmupBanner', () => {
     expect(screen.getByTestId('model-warmup-progress-fill').props.style).toEqual({ width: '42%' });
   });
 
+  it('surfaces model-level multimodal readiness while the model is warming up', () => {
+    const screen = render(
+      <ModelWarmupBanner
+        engineState={createEngineState({ loadProgress: 0.42 })}
+        multimodalReadiness={{
+          modelId: 'repo/model',
+          status: 'missing_projector',
+          support: [],
+          checkedAt: 1,
+        }}
+      />,
+    );
+
+    expect(screen.getByTestId('model-warmup-multimodal-readiness')).toBeTruthy();
+    expect(screen.getByText('chat.visionReadiness.missingProjector')).toBeTruthy();
+  });
+
+  it('surfaces sanitized projector failure context from diagnostics', () => {
+    const screen = render(
+      <ModelWarmupBanner
+        engineState={createEngineState({
+          diagnostics: {
+            backendMode: 'unknown',
+            backendDevices: [],
+            multimodal: {
+              visionCapability: 'vision_capable',
+              projectorPresence: 'failed',
+              projectorPathCategory: 'models',
+              readinessStatus: 'failed',
+              failureReason: 'Projector init failed at file:///private/mobile/projectors/mmproj.gguf',
+              attachmentCount: 0,
+            },
+          },
+        })}
+      />,
+    );
+
+    expect(screen.getByText('chat.visionReadiness.failed')).toBeTruthy();
+    expect(screen.getByTestId('model-warmup-multimodal-failure').props.children)
+      .toBe('Projector init failed at [path]');
+  });
+
+  it('redacts spaced local paths in direct readiness failure context', () => {
+    const screen = render(
+      <ModelWarmupBanner
+        engineState={createEngineState({ loadProgress: 0.42 })}
+        multimodalReadiness={{
+          modelId: 'repo/model',
+          status: 'failed',
+          support: [],
+          failureReason: 'Native init failed for file:///private/mobile/Project for Client/mmproj file.gguf after retry',
+          checkedAt: 1,
+        }}
+      />,
+    );
+
+    expect(screen.getByTestId('model-warmup-multimodal-failure').props.children)
+      .toBe('Native init failed for [path] after retry');
+    expect(JSON.stringify(screen.toJSON())).not.toContain('Project for Client');
+  });
+
   it('clamps direct percentages and falls back to zero for non-finite progress', () => {
     const directPercent = render(
       <ModelWarmupBanner engineState={createEngineState({ loadProgress: 42 })} />,

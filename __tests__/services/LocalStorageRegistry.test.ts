@@ -1,5 +1,6 @@
 import { LocalStorageRegistry, registry } from '../../src/services/LocalStorageRegistry';
 import { LifecycleStatus, ModelAccessState, ModelMetadata } from '../../src/types/models';
+import type { ProjectorArtifact } from '../../src/types/multimodal';
 import { normalizePersistedModelMetadata } from '../../src/services/ModelMetadataNormalizer';
 import * as FileSystem from 'expo-file-system/legacy';
 import DeviceInfo from 'react-native-device-info';
@@ -79,6 +80,21 @@ function createMockModel(overrides: Partial<ModelMetadata> = {}): ModelMetadata 
   };
 }
 
+function createProjector(overrides: Partial<ProjectorArtifact> = {}): ProjectorArtifact {
+  return {
+    id: 'projector-test-model-main-mmproj-model.gguf',
+    ownerModelId: mockModel.id,
+    repoId: mockModel.id,
+    fileName: 'mmproj-model.gguf',
+    downloadUrl: 'http://example.com/mmproj-model.gguf',
+    size: 1000,
+    lifecycleStatus: 'downloaded',
+    matchStatus: 'matched',
+    localPath: 'mmproj-model.gguf',
+    ...overrides,
+  };
+}
+
 describe('LocalStorageRegistry', () => {
   let consoleWarnSpy: jest.SpyInstance;
   let consoleLogSpy: jest.SpyInstance;
@@ -137,6 +153,66 @@ describe('LocalStorageRegistry', () => {
     expect(FileSystem.deleteAsync).toHaveBeenCalled();
     expect(mockStorage.remove).toHaveBeenCalledWith('models-registry:model-v1:test%2Fmodel');
     expect(mockStorage.remove).toHaveBeenCalledWith('models-registry:index-v1');
+  });
+
+  it('removes downloaded projector files with the owning model', async () => {
+    const model = createMockModel({
+      projectorCandidates: [createProjector()],
+    });
+    mockStorage.getString.mockImplementation((key: string) => {
+      if (key === 'models-registry:index-v1') {
+        return JSON.stringify([model.id]);
+      }
+
+      if (key === 'models-registry:model-v1:test%2Fmodel') {
+        return JSON.stringify(model);
+      }
+
+      return null;
+    });
+
+    await registry.removeModel(model.id);
+
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/models/model.gguf');
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/models/mmproj-model.gguf');
+  });
+
+  it('keeps a downloaded projector file when another model association still references it', async () => {
+    const sharedProjector = createProjector();
+    const model = createMockModel({
+      projectorCandidates: [sharedProjector],
+    });
+    const otherModel = createMockModel({
+      id: 'test/other-model',
+      localPath: 'other-model.gguf',
+      projectorCandidates: [
+        createProjector({
+          id: 'projector-test-other-main-mmproj-model.gguf',
+          ownerModelId: 'test/other-model',
+          localPath: sharedProjector.localPath,
+        }),
+      ],
+    });
+    mockStorage.getString.mockImplementation((key: string) => {
+      if (key === 'models-registry:index-v1') {
+        return JSON.stringify([model.id, otherModel.id]);
+      }
+
+      if (key === 'models-registry:model-v1:test%2Fmodel') {
+        return JSON.stringify(model);
+      }
+
+      if (key === 'models-registry:model-v1:test%2Fother-model') {
+        return JSON.stringify(otherModel);
+      }
+
+      return null;
+    });
+
+    await registry.removeModel(model.id);
+
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/models/model.gguf');
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/models/mmproj-model.gguf');
   });
 
   it('should remove model metadata without deleting a directory localPath', async () => {
@@ -227,6 +303,260 @@ describe('LocalStorageRegistry', () => {
     expect(updatedModels[0].downloadErrorAt).toBeUndefined();
     expect(updatedModels[0].downloadErrorCode).toBeUndefined();
     expect(updatedModels[0].downloadErrorMessage).toBeUndefined();
+  });
+
+  it('resets downloaded projector associations when the projector file is missing', async () => {
+    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([
+      createMockModel({
+        projectorCandidates: [createProjector()],
+      }),
+    ]);
+    (registry.saveModels as jest.Mock) = jest.fn();
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (uri.endsWith('/model.gguf')) {
+        return { exists: true, size: 1000 };
+      }
+
+      if (uri.endsWith('/mmproj-model.gguf')) {
+        return { exists: false };
+      }
+
+      return { exists: true, size: 1000 };
+    });
+
+    await registry.validateRegistry();
+
+    expect(registry.saveModels).toHaveBeenCalled();
+    const updatedModels = (registry.saveModels as jest.Mock).mock.calls[0][0];
+    expect(updatedModels[0].projectorCandidates[0]).toEqual(expect.objectContaining({
+      lifecycleStatus: 'available',
+      localPath: undefined,
+      matchStatus: 'matched',
+    }));
+  });
+
+  it('resets downloaded projector associations when localPath is missing', async () => {
+    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([
+      createMockModel({
+        projectorCandidates: [createProjector({ localPath: undefined })],
+      }),
+    ]);
+    (registry.saveModels as jest.Mock) = jest.fn();
+
+    await registry.validateRegistry();
+
+    expect(registry.saveModels).toHaveBeenCalled();
+    const updatedModels = (registry.saveModels as jest.Mock).mock.calls[0][0];
+    expect(updatedModels[0].projectorCandidates[0]).toEqual(expect.objectContaining({
+      lifecycleStatus: 'available',
+      localPath: undefined,
+      matchStatus: 'matched',
+    }));
+  });
+
+  it('clears ready multimodal readiness when a matching downloaded projector localPath is missing', async () => {
+    const projector = createProjector({ localPath: undefined });
+    const model = createMockModel({
+      projectorCandidates: [projector],
+      multimodalReadiness: {
+        modelId: mockModel.id,
+        status: 'ready',
+        projectorId: projector.id,
+        projectorSize: 1000,
+        support: ['vision'],
+        checkedAt: 123,
+      },
+    });
+    mockStorage.getString.mockImplementation((key: string) => {
+      if (key === 'models-registry:index-v1') {
+        return JSON.stringify([model.id]);
+      }
+
+      if (key === 'models-registry:model-v1:test%2Fmodel') {
+        return JSON.stringify(model);
+      }
+
+      return null;
+    });
+    const freshRegistry = new (LocalStorageRegistry as any)();
+    (freshRegistry as any).storage = mockStorage;
+
+    await freshRegistry.validateRegistry();
+
+    const updatedModel = freshRegistry.getModel(model.id);
+    expect(updatedModel?.projectorCandidates?.[0]).toEqual(expect.objectContaining({
+      lifecycleStatus: 'available',
+    }));
+    expect(updatedModel?.projectorCandidates?.[0].localPath).toBeUndefined();
+    expect(updatedModel?.multimodalReadiness).toBeUndefined();
+
+    const persistedModelCall = mockStorage.set.mock.calls.find(([key]) => (
+      key === 'models-registry:model-v1:test%2Fmodel'
+    ));
+    expect(persistedModelCall).toBeDefined();
+    expect(JSON.parse(persistedModelCall?.[1] as string).multimodalReadiness).toBeUndefined();
+  });
+
+  it('resets active projector associations when localPath is missing', async () => {
+    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([
+      createMockModel({
+        projectorCandidates: [createProjector({ lifecycleStatus: 'active', localPath: undefined })],
+      }),
+    ]);
+    (registry.saveModels as jest.Mock) = jest.fn();
+
+    await registry.validateRegistry();
+
+    expect(registry.saveModels).toHaveBeenCalled();
+    const updatedModels = (registry.saveModels as jest.Mock).mock.calls[0][0];
+    expect(updatedModels[0].projectorCandidates[0]).toEqual(expect.objectContaining({
+      lifecycleStatus: 'available',
+      localPath: undefined,
+      matchStatus: 'matched',
+    }));
+  });
+
+  it.each(['queued', 'downloading', 'paused', 'failed'] as const)(
+    'preserves %s projector associations when localPath is missing',
+    async (lifecycleStatus) => {
+      const projector = createProjector({ lifecycleStatus, localPath: undefined });
+      const model = createMockModel({
+        projectorCandidates: [projector],
+      });
+      (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([model]);
+      (registry.saveModels as jest.Mock) = jest.fn();
+
+      await registry.validateRegistry();
+
+      const updatedModels = (registry.saveModels as jest.Mock).mock.calls[0]?.[0] ?? [model];
+      expect(updatedModels[0].projectorCandidates[0]).toEqual(expect.objectContaining({
+        lifecycleStatus,
+        localPath: undefined,
+        matchStatus: 'matched',
+      }));
+    },
+  );
+
+  it('preserves downloaded projector associations when localPath is valid', async () => {
+    const projector = createProjector();
+    const model = createMockModel({
+      projectorCandidates: [projector],
+    });
+    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([model]);
+    (registry.saveModels as jest.Mock) = jest.fn();
+
+    await registry.validateRegistry();
+
+    const updatedModels = (registry.saveModels as jest.Mock).mock.calls[0]?.[0] ?? [model];
+    expect(updatedModels[0].projectorCandidates[0]).toEqual(expect.objectContaining({
+      lifecycleStatus: 'downloaded',
+      localPath: 'mmproj-model.gguf',
+      matchStatus: 'matched',
+    }));
+  });
+
+  it('resets downloaded projector associations when the local projector size no longer matches metadata', async () => {
+    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([
+      createMockModel({
+        projectorCandidates: [createProjector({ size: 2048 })],
+      }),
+    ]);
+    (registry.saveModels as jest.Mock) = jest.fn();
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (uri.endsWith('/model.gguf')) {
+        return { exists: true, size: 1000 };
+      }
+
+      if (uri.endsWith('/mmproj-model.gguf')) {
+        return { exists: true, size: 1000 };
+      }
+
+      return { exists: true, size: 1000 };
+    });
+
+    await registry.validateRegistry();
+
+    expect(registry.saveModels).toHaveBeenCalled();
+    const updatedModels = (registry.saveModels as jest.Mock).mock.calls[0][0];
+    expect(updatedModels[0].projectorCandidates[0]).toEqual(expect.objectContaining({
+      lifecycleStatus: 'available',
+      localPath: undefined,
+      matchStatus: 'matched',
+    }));
+  });
+
+  it('resets downloaded projector associations when projector GGUF validation fails', async () => {
+    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([
+      createMockModel({
+        projectorCandidates: [createProjector({ resumeData: 'stale-projector-resume-data' })],
+      }),
+    ]);
+    (registry.saveModels as jest.Mock) = jest.fn();
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (uri.endsWith('/model.gguf')) {
+        return { exists: true, size: 1000 };
+      }
+
+      if (uri.endsWith('/mmproj-model.gguf')) {
+        return { exists: true, size: 1000 };
+      }
+
+      return { exists: true, size: 1000 };
+    });
+    (FileSystem.readAsStringAsync as jest.Mock).mockImplementation(async (uri: string) => (
+      uri.endsWith('/mmproj-model.gguf')
+        ? mockInvalidGgufHeaderBase64
+        : mockValidGgufHeaderBase64
+    ));
+
+    await registry.validateRegistry();
+
+    expect(registry.saveModels).toHaveBeenCalled();
+    const updatedModels = (registry.saveModels as jest.Mock).mock.calls[0][0];
+    expect(updatedModels[0].projectorCandidates[0]).toEqual(expect.objectContaining({
+      lifecycleStatus: 'available',
+      localPath: undefined,
+      resumeData: undefined,
+      matchStatus: 'matched',
+    }));
+  });
+
+  it('preserves downloaded projector associations when projector GGUF header cannot be read transiently', async () => {
+    const projector = createProjector();
+    const model = createMockModel({
+      projectorCandidates: [projector],
+    });
+    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([
+      model,
+    ]);
+    (registry.saveModels as jest.Mock) = jest.fn();
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (uri.endsWith('/model.gguf')) {
+        return { exists: true, size: 1000 };
+      }
+
+      if (uri.endsWith('/mmproj-model.gguf')) {
+        return { exists: true, size: 1000 };
+      }
+
+      return { exists: true, size: 1000 };
+    });
+    (FileSystem.readAsStringAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (uri.endsWith('/mmproj-model.gguf')) {
+        throw new Error('transient read failed');
+      }
+
+      return mockValidGgufHeaderBase64;
+    });
+
+    await registry.validateRegistry();
+
+    const updatedModels = (registry.saveModels as jest.Mock).mock.calls[0]?.[0] ?? [model];
+    expect(updatedModels[0].projectorCandidates[0]).toEqual(expect.objectContaining({
+      lifecycleStatus: 'downloaded',
+      localPath: 'mmproj-model.gguf',
+      matchStatus: 'matched',
+    }));
   });
 
   it('clears stale local paths for non-downloaded registry entries before quarantine scans', async () => {
@@ -1151,6 +1481,34 @@ describe('LocalStorageRegistry', () => {
     expect(mockStorage.set).not.toHaveBeenCalledWith('models-registry', expect.anything());
   });
 
+  it('persists and deep-clones projector associations on model records', () => {
+    const projector = createProjector({ localPath: 'mmproj-model.gguf' });
+    const freshRegistry = new (LocalStorageRegistry as any)();
+    (freshRegistry as any).storage = mockStorage;
+
+    freshRegistry.updateModel(createMockModel({
+      chatModalities: ['text', 'vision'],
+      projectorCandidates: [projector],
+      selectedProjectorId: projector.id,
+    }));
+
+    expect(mockStorage.set).toHaveBeenCalledWith(
+      'models-registry:model-v1:test%2Fmodel',
+      expect.stringContaining('"localPath":"mmproj-model.gguf"'),
+    );
+
+    const firstRead = freshRegistry.getModel(mockModel.id);
+    firstRead?.projectorCandidates?.push(createProjector({ id: 'mutated-projector' }));
+
+    const secondRead = freshRegistry.getModel(mockModel.id);
+    expect(secondRead?.projectorCandidates).toHaveLength(1);
+    expect(secondRead?.projectorCandidates?.[0]).toEqual(expect.objectContaining({
+      id: projector.id,
+      localPath: 'mmproj-model.gguf',
+      lifecycleStatus: 'downloaded',
+    }));
+  });
+
   it('updates the downloaded count only for completed local model files', () => {
     const freshRegistry = new (LocalStorageRegistry as any)();
     (freshRegistry as any).storage = mockStorage;
@@ -1333,6 +1691,128 @@ describe('LocalStorageRegistry', () => {
     expect(quarantinePayload).not.toEqual(expect.stringContaining('keep.gguf'));
     expect(quarantinePayload).not.toEqual(expect.stringContaining('queued.gguf'));
   });
+
+  it('preserves downloaded projector files during orphan quarantine scans', async () => {
+    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([
+      createMockModel({
+        localPath: 'keep.gguf',
+        lifecycleStatus: LifecycleStatus.DOWNLOADED,
+        projectorCandidates: [createProjector({ localPath: 'mmproj-model.gguf' })],
+      }),
+    ]);
+
+    (FileSystem.readDirectoryAsync as jest.Mock).mockResolvedValueOnce([
+      'keep.gguf',
+      'mmproj-model.gguf',
+      'orphan.gguf',
+    ]);
+
+    await registry.validateRegistry([]);
+
+    const quarantinePayload = mockStorage.set.mock.calls.find(
+      ([key]) => key === 'quarantined-model-files-v1',
+    )?.[1];
+    expect(quarantinePayload).toEqual(expect.stringContaining('orphan.gguf'));
+    expect(quarantinePayload).not.toEqual(expect.stringContaining('keep.gguf'));
+    expect(quarantinePayload).not.toEqual(expect.stringContaining('mmproj-model.gguf'));
+  });
+
+  it.each(['paused', 'failed', 'downloading'] as const)(
+    'preserves %s projector partial localPath and resumeData during validation and quarantine scans',
+    async (lifecycleStatus) => {
+      const projector = createProjector({
+        lifecycleStatus,
+        localPath: 'mmproj-partial.gguf',
+        resumeData: 'projector-resume-data',
+      });
+      const model = createMockModel({
+        localPath: 'keep.gguf',
+        lifecycleStatus: LifecycleStatus.DOWNLOADED,
+        projectorCandidates: [projector],
+      });
+      (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([model]);
+      (registry.saveModels as jest.Mock) = jest.fn();
+      (FileSystem.readDirectoryAsync as jest.Mock).mockResolvedValueOnce([
+        'keep.gguf',
+        'mmproj-partial.gguf',
+        'orphan.gguf',
+      ]);
+      (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+        if (uri.endsWith('/keep.gguf') || uri.endsWith('/mmproj-partial.gguf') || uri.endsWith('/orphan.gguf')) {
+          return { exists: true, size: 1000 };
+        }
+
+        return { exists: true, size: 1000 };
+      });
+
+      await registry.validateRegistry([]);
+
+      const updatedModels = (registry.saveModels as jest.Mock).mock.calls[0]?.[0] ?? [model];
+      expect(updatedModels[0].projectorCandidates[0]).toEqual(expect.objectContaining({
+        lifecycleStatus,
+        localPath: 'mmproj-partial.gguf',
+        resumeData: 'projector-resume-data',
+      }));
+
+      const quarantinePayload = mockStorage.set.mock.calls.find(
+        ([key]) => key === 'quarantined-model-files-v1',
+      )?.[1];
+      expect(quarantinePayload).toEqual(expect.stringContaining('orphan.gguf'));
+      expect(quarantinePayload).not.toEqual(expect.stringContaining('mmproj-partial.gguf'));
+    },
+  );
+
+  it.each([
+    ['missing', { exists: false }],
+    ['directory', { exists: true, isDirectory: true }],
+  ] as const)(
+    'resets resumable projector partial state when the stored partial file is %s',
+    async (_caseName, partialInfo) => {
+      const projector = createProjector({
+        lifecycleStatus: 'paused',
+        localPath: 'mmproj-missing-partial.gguf',
+        resumeData: 'projector-resume-data',
+        downloadProgress: 0.42,
+      });
+      const model = createMockModel({
+        localPath: 'keep.gguf',
+        lifecycleStatus: LifecycleStatus.DOWNLOADED,
+        projectorCandidates: [projector],
+      });
+      (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([model]);
+      (registry.saveModels as jest.Mock) = jest.fn();
+      (FileSystem.readDirectoryAsync as jest.Mock).mockResolvedValueOnce([
+        'keep.gguf',
+        'orphan.gguf',
+      ]);
+      (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+        if (uri.endsWith('/mmproj-missing-partial.gguf')) {
+          return partialInfo;
+        }
+        if (uri.endsWith('/keep.gguf') || uri.endsWith('/orphan.gguf')) {
+          return { exists: true, size: 1000 };
+        }
+
+        return { exists: true, size: 1000 };
+      });
+
+      await registry.validateRegistry([]);
+
+      const updatedModels = (registry.saveModels as jest.Mock).mock.calls[0]?.[0];
+      expect(updatedModels?.[0].projectorCandidates[0]).toEqual(expect.objectContaining({
+        lifecycleStatus: 'available',
+        localPath: undefined,
+        resumeData: undefined,
+        downloadProgress: undefined,
+      }));
+
+      const quarantinePayload = mockStorage.set.mock.calls.find(
+        ([key]) => key === 'quarantined-model-files-v1',
+      )?.[1];
+      expect(quarantinePayload).toEqual(expect.stringContaining('orphan.gguf'));
+      expect(quarantinePayload ?? '').not.toEqual(expect.stringContaining('mmproj-missing-partial.gguf'));
+    },
+  );
 
   it('does not quarantine model directory subdirectories', async () => {
     (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([]);

@@ -1,6 +1,7 @@
 import { LifecycleStatus, type ModelMetadata } from '../types/models';
 import { resolveVerifiedLocalShaCompatibility } from '../services/ModelIntegrityMetadata';
 import { applyModelVariantSelectionIfAvailable } from './modelVariants';
+import { mergeProjectorCandidatesWithRuntimeStateAndIdMap } from './projectorRuntimeState';
 
 interface MergeModelWithRuntimeStateOptions {
   activeModelId?: string;
@@ -37,6 +38,113 @@ function hasSizeConflict(
     && normalizedLocalSize !== normalizedRemoteSize;
 }
 
+function getProjectorCandidateIds(model: Pick<ModelMetadata, 'projectorCandidates'>): Set<string> {
+  return new Set((model.projectorCandidates ?? []).map((projector) => projector.id));
+}
+
+function resolveMergedSelectedProjectorId(
+  nextSelectedProjectorId: string | undefined,
+  runtimeSelectedProjectorId: string | undefined,
+  candidateIds: Set<string>,
+  runtimeToNextProjectorIds: Map<string, string>,
+): string | undefined {
+  if (nextSelectedProjectorId && candidateIds.has(nextSelectedProjectorId)) {
+    return nextSelectedProjectorId;
+  }
+
+  if (!runtimeSelectedProjectorId) {
+    return undefined;
+  }
+
+  const selectedProjectorId = runtimeToNextProjectorIds.get(runtimeSelectedProjectorId)
+    ?? runtimeSelectedProjectorId;
+  return candidateIds.has(selectedProjectorId) ? selectedProjectorId : undefined;
+}
+
+function remapMultimodalReadiness(
+  modelId: string,
+  readiness: ModelMetadata['multimodalReadiness'],
+  candidateIds: Set<string>,
+  runtimeToNextProjectorIds: Map<string, string>,
+  selectedProjectorId: string | undefined,
+): ModelMetadata['multimodalReadiness'] {
+  if (!readiness || readiness.modelId !== modelId) {
+    return undefined;
+  }
+
+  if (!readiness.projectorId) {
+    return readiness;
+  }
+
+  const projectorId = runtimeToNextProjectorIds.get(readiness.projectorId)
+    ?? readiness.projectorId;
+
+  if (!candidateIds.has(projectorId)) {
+    return undefined;
+  }
+
+  if (selectedProjectorId && projectorId !== selectedProjectorId) {
+    return undefined;
+  }
+
+  return projectorId === readiness.projectorId
+    ? readiness
+    : { ...readiness, projectorId };
+}
+
+function resolveMergedMultimodalReadiness(
+  modelId: string,
+  nextReadiness: ModelMetadata['multimodalReadiness'],
+  runtimeReadiness: ModelMetadata['multimodalReadiness'],
+  candidateIds: Set<string>,
+  runtimeToNextProjectorIds: Map<string, string>,
+  selectedProjectorId: string | undefined,
+): ModelMetadata['multimodalReadiness'] {
+  return remapMultimodalReadiness(
+    modelId,
+    nextReadiness,
+    candidateIds,
+    runtimeToNextProjectorIds,
+    selectedProjectorId,
+  ) ?? remapMultimodalReadiness(
+    modelId,
+    runtimeReadiness,
+    candidateIds,
+    runtimeToNextProjectorIds,
+    selectedProjectorId,
+  );
+}
+
+function mergeProjectorRuntimeFields(
+  model: ModelMetadata,
+  runtimeModel: ModelMetadata,
+): Pick<ModelMetadata, 'projectorCandidates' | 'selectedProjectorId' | 'multimodalReadiness'> {
+  const { projectorCandidates, runtimeToNextProjectorIds } = mergeProjectorCandidatesWithRuntimeStateAndIdMap(
+    model.projectorCandidates,
+    runtimeModel.projectorCandidates,
+  );
+  const candidateIds = getProjectorCandidateIds({ projectorCandidates });
+  const selectedProjectorId = resolveMergedSelectedProjectorId(
+    model.selectedProjectorId,
+    runtimeModel.selectedProjectorId,
+    candidateIds,
+    runtimeToNextProjectorIds,
+  );
+
+  return {
+    projectorCandidates,
+    selectedProjectorId,
+    multimodalReadiness: resolveMergedMultimodalReadiness(
+      model.id,
+      model.multimodalReadiness,
+      runtimeModel.multimodalReadiness,
+      candidateIds,
+      runtimeToNextProjectorIds,
+      selectedProjectorId,
+    ),
+  };
+}
+
 export function mergeModelWithRuntimeState(
   model: ModelMetadata,
   {
@@ -58,6 +166,13 @@ export function mergeModelWithRuntimeState(
     });
     const canUseLocalRuntimeState = !localCompatibility.shouldResetLocalDownloadState;
     const canUseLocalMetadataFallback = canUseLocalRuntimeState;
+    const projectorRuntimeFields = canUseLocalRuntimeState
+      ? mergeProjectorRuntimeFields(mergedModel, localModel)
+      : {
+        projectorCandidates: mergedModel.projectorCandidates,
+        selectedProjectorId: mergedModel.selectedProjectorId,
+        multimodalReadiness: mergedModel.multimodalReadiness,
+      };
 
     mergedModel = {
       ...mergedModel,
@@ -104,6 +219,7 @@ export function mergeModelWithRuntimeState(
       description: mergedModel.description ?? (canUseLocalMetadataFallback ? localModel.description : undefined),
       variants: mergedModel.variants ?? (canUseLocalMetadataFallback ? localModel.variants : undefined),
       activeVariantId: mergedModel.activeVariantId ?? (canUseLocalMetadataFallback ? localModel.activeVariantId : undefined),
+      ...projectorRuntimeFields,
     };
   }
 
@@ -126,6 +242,13 @@ export function mergeModelWithRuntimeState(
     const canUseQueuedRuntimeState = !queuedCompatibility.shouldResetLocalDownloadState
       && !hasResolvedFileNameConflict(queuedItem.resolvedFileName, mergedModel.resolvedFileName)
       && !hasSizeConflict(queuedItem.size, mergedModel.size);
+    const projectorRuntimeFields = canUseQueuedRuntimeState
+      ? mergeProjectorRuntimeFields(mergedModel, queuedItem)
+      : {
+        projectorCandidates: mergedModel.projectorCandidates,
+        selectedProjectorId: mergedModel.selectedProjectorId,
+        multimodalReadiness: mergedModel.multimodalReadiness,
+      };
 
     mergedModel = {
       ...mergedModel,
@@ -155,6 +278,7 @@ export function mergeModelWithRuntimeState(
       downloadErrorMessage: canUseQueuedRuntimeState ? queuedItem.downloadErrorMessage : mergedModel.downloadErrorMessage,
       variants: mergedModel.variants ?? (canUseQueuedRuntimeState ? queuedItem.variants : undefined),
       activeVariantId: mergedModel.activeVariantId ?? (canUseQueuedRuntimeState ? queuedItem.activeVariantId : undefined),
+      ...projectorRuntimeFields,
     };
   }
 

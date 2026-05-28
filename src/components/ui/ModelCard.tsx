@@ -6,6 +6,7 @@ import { ScreenBadge, ScreenCard, ScreenIconButton } from './ScreenShell';
 import { Text, composeTextRole } from './text';
 import { ValueSelectorRow } from './ValueSelectorRow';
 import { ModelAccessState, type ModelMetadata } from '../../types/models';
+import { getModelVisionCapabilityBadgePresentation } from '../../utils/modelCapabilities';
 import { getVariantMemoryBadgePresentation } from '../../utils/modelMemoryBadgePresentation';
 import { formatModelFileSize } from '../../utils/modelSize';
 import { canSelectModelVariant, getActiveModelVariant } from '../../utils/modelVariants';
@@ -57,6 +58,7 @@ const ModelCardComponent = ({
     || (memoryDecision === 'unknown' && displaySize !== null)
   );
   const canOpenVariantSelector = typeof onOpenVariantSelector === 'function' && canSelectModelVariant(model);
+  const visionBadge = getModelVisionCapabilityBadgePresentation(model);
   const accessBadge = model.accessState === ModelAccessState.AUTH_REQUIRED
     ? {
         text: t('models.requiresToken'),
@@ -104,6 +106,11 @@ const ModelCardComponent = ({
         {accessBadge ? (
           <ScreenBadge tone={accessBadge.tone} size="micro">
             {accessBadge.text}
+          </ScreenBadge>
+        ) : null}
+        {visionBadge ? (
+          <ScreenBadge tone={visionBadge.tone} size="micro" iconName={visionBadge.iconName}>
+            {t(visionBadge.labelKey)}
           </ScreenBadge>
         ) : null}
         {shouldShowStandaloneMemoryBadge ? (
@@ -177,8 +184,30 @@ function modelVariantsSignature(model: ModelMetadata): string {
       variant.ramFit ?? '',
       variant.ramFitConfidence ?? '',
       variant.isLocal === true ? 'local' : 'remote',
+      variant.chatModalities?.join(',') ?? '',
+      variant.artifactRole ?? '',
+      variant.visionSource ?? '',
+      variant.visionConfidence ?? '',
+      variant.projectorCandidates?.map((candidate) => candidate.id).join(',') ?? '',
+      variant.selectedProjectorId ?? '',
     ].join('\u001f'))
     .join('\u001e');
+}
+
+function modelVisionSignature(model: ModelMetadata): string {
+  return [
+    model.chatModalities?.join(',') ?? '',
+    model.artifactRole ?? '',
+    model.visionSource ?? '',
+    model.visionConfidence ?? '',
+    model.projectorCandidates?.map((candidate) => [
+      candidate.id,
+      candidate.fileName,
+      candidate.lifecycleStatus,
+      candidate.matchStatus,
+    ].join(':')).join(',') ?? '',
+    model.selectedProjectorId ?? '',
+  ].join('\u001f');
 }
 
 export const ModelCard = memo(ModelCardComponent, (prevProps, nextProps) => {
@@ -219,6 +248,7 @@ export const ModelCard = memo(ModelCardComponent, (prevProps, nextProps) => {
          prevProps.model.gguf?.totalBytes === nextProps.model.gguf?.totalBytes &&
          prevProps.model.size === nextProps.model.size &&
          modelVariantsSignature(prevProps.model) === modelVariantsSignature(nextProps.model) &&
+         modelVisionSignature(prevProps.model) === modelVisionSignature(nextProps.model) &&
          prevProps.model.activeVariantId === nextProps.model.activeVariantId &&
          prevProps.model.accessState === nextProps.model.accessState &&
          prevProps.model.isGated === nextProps.model.isGated &&

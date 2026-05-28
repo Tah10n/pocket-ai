@@ -5,6 +5,9 @@ import {
 } from '../../src/services/SettingsStore';
 import {
   buildModelCapabilitySnapshot,
+  getModelVisionCapabilityBadgePresentation,
+  getModelVisionCapabilityStatusLabelKey,
+  modelSupportsVision,
   resolveModelCapabilitySnapshot,
 } from '../../src/utils/modelCapabilities';
 
@@ -134,5 +137,34 @@ describe('modelCapabilities', () => {
 
     expect(result.snapshot.modelLayerCount).toBeNull();
     expect(result.snapshot.gpuLayersCeiling).toBe(UNKNOWN_MODEL_GPU_LAYERS_CEILING);
+  });
+
+  it('presents vision capability only for primary chat models', () => {
+    const visionModel = {
+      artifactRole: 'primary_chat_model' as const,
+      chatModalities: ['text', 'vision'] as Array<'text' | 'vision'>,
+      projectorCandidates: [{
+        id: 'projector-1',
+        ownerModelId: 'author/model',
+        repoId: 'author/model',
+        fileName: 'mmproj-model-f16.gguf',
+        downloadUrl: 'https://huggingface.co/author/model/resolve/main/mmproj-model-f16.gguf',
+        size: 1,
+        lifecycleStatus: 'available' as const,
+        matchStatus: 'matched' as const,
+      }],
+    };
+
+    expect(modelSupportsVision(visionModel)).toBe(true);
+    expect(getModelVisionCapabilityStatusLabelKey(visionModel)).toBe('models.vision.capabilityNeedsProjector');
+    expect(getModelVisionCapabilityBadgePresentation(visionModel)).toEqual({
+      labelKey: 'models.vision.badge',
+      tone: 'warning',
+      iconName: 'visibility',
+    });
+    expect(modelSupportsVision({
+      ...visionModel,
+      artifactRole: 'projector_companion',
+    })).toBe(false);
   });
 });

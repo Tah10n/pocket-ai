@@ -9,6 +9,14 @@ import { normalizeSha256Digest } from './sha256';
 
 export const MODEL_CAPABILITY_HEURISTIC_VERSION = 1;
 
+export type ModelVisionCapabilityBadgeTone = 'info' | 'warning';
+
+export interface ModelVisionCapabilityBadgePresentation {
+  labelKey: string;
+  tone: ModelVisionCapabilityBadgeTone;
+  iconName: 'visibility' | 'extension';
+}
+
 type ModelCapabilityInput = Pick<
   ModelMetadata,
   | 'capabilitySnapshot'
@@ -306,5 +314,53 @@ export function resolveModelCapabilitySnapshot(
   return {
     snapshot: buildModelCapabilitySnapshot(normalizedInput),
     isCurrentPersisted: false,
+  };
+}
+
+export function modelSupportsVision(
+  model: Pick<ModelMetadata, 'artifactRole' | 'chatModalities'>,
+): boolean {
+  return model.artifactRole !== 'projector_companion'
+    && Array.isArray(model.chatModalities)
+    && model.chatModalities.includes('vision');
+}
+
+function hasReadyProjectorCandidate(
+  model: Pick<ModelMetadata, 'projectorCandidates' | 'selectedProjectorId'>,
+): boolean {
+  const candidates = model.projectorCandidates ?? [];
+  return candidates.some((candidate) => (
+    (model.selectedProjectorId === undefined || candidate.id === model.selectedProjectorId)
+    && (candidate.lifecycleStatus === 'downloaded' || candidate.lifecycleStatus === 'active')
+  ));
+}
+
+export function getModelVisionCapabilityStatusLabelKey(
+  model: Pick<ModelMetadata, 'artifactRole' | 'chatModalities' | 'projectorCandidates' | 'selectedProjectorId'>,
+): string | null {
+  if (!modelSupportsVision(model)) {
+    return null;
+  }
+
+  if (hasReadyProjectorCandidate(model)) {
+    return 'models.vision.capabilityReady';
+  }
+
+  return Array.isArray(model.projectorCandidates) && model.projectorCandidates.length > 0
+    ? 'models.vision.capabilityNeedsProjector'
+    : 'models.vision.projectorMissing';
+}
+
+export function getModelVisionCapabilityBadgePresentation(
+  model: Pick<ModelMetadata, 'artifactRole' | 'chatModalities' | 'projectorCandidates' | 'selectedProjectorId'>,
+): ModelVisionCapabilityBadgePresentation | null {
+  if (!modelSupportsVision(model)) {
+    return null;
+  }
+
+  return {
+    labelKey: 'models.vision.badge',
+    tone: hasReadyProjectorCandidate(model) ? 'info' : 'warning',
+    iconName: 'visibility',
   };
 }

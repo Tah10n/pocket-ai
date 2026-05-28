@@ -3,8 +3,9 @@ import { persist, createJSONStorage, subscribeWithSelector } from 'zustand/middl
 import { mmkvStorage } from '../lib/mmkv';
 import { ModelMetadata, LifecycleStatus } from '../types/models';
 import { normalizePersistedModelMetadata } from '../services/ModelMetadataNormalizer';
-import { getCandidateModelDownloadFileNames } from '../utils/modelFiles';
+import { getCandidateModelDownloadFileNames, getCandidateProjectorDownloadFileNames } from '../utils/modelFiles';
 import { isValidLocalFileName } from '../utils/safeFilePath';
+import { mergeProjectorCandidatesWithRuntimeStateAndIdMap } from '../utils/projectorRuntimeState';
 import { createInstrumentedStateStorage } from './persistStateStorage';
 import { assertPrivateStorageWritable } from '../services/storage';
 
@@ -67,8 +68,89 @@ function hasCompatibleQueuedFileIdentity(existing: ModelMetadata, model: ModelMe
     && nextSize !== undefined;
 }
 
+function resolveMergedSelectedProjectorId(
+  nextSelectedProjectorId: string | undefined,
+  existingSelectedProjectorId: string | undefined,
+  candidateIds: Set<string>,
+  existingToNextProjectorIds: Map<string, string>,
+): string | undefined {
+  if (nextSelectedProjectorId && candidateIds.has(nextSelectedProjectorId)) {
+    return nextSelectedProjectorId;
+  }
+
+  if (!existingSelectedProjectorId) {
+    return undefined;
+  }
+
+  const selectedProjectorId = existingToNextProjectorIds.get(existingSelectedProjectorId)
+    ?? existingSelectedProjectorId;
+  return candidateIds.has(selectedProjectorId) ? selectedProjectorId : undefined;
+}
+
+function remapMultimodalReadiness(
+  modelId: string,
+  readiness: ModelMetadata['multimodalReadiness'],
+  candidateIds: Set<string>,
+  existingToNextProjectorIds: Map<string, string>,
+  selectedProjectorId: string | undefined,
+): ModelMetadata['multimodalReadiness'] {
+  if (!readiness || readiness.modelId !== modelId) {
+    return undefined;
+  }
+
+  if (!readiness.projectorId) {
+    return readiness;
+  }
+
+  const projectorId = existingToNextProjectorIds.get(readiness.projectorId)
+    ?? readiness.projectorId;
+
+  if (!candidateIds.has(projectorId)) {
+    return undefined;
+  }
+
+  if (selectedProjectorId && projectorId !== selectedProjectorId) {
+    return undefined;
+  }
+
+  return projectorId === readiness.projectorId
+    ? readiness
+    : { ...readiness, projectorId };
+}
+
 function buildRetryableQueueEntry(existing: ModelMetadata, model: ModelMetadata): ModelMetadata {
   const canPreserveResumeState = hasCompatibleQueuedFileIdentity(existing, model);
+  const projectorRuntimeMerge = canPreserveResumeState
+    ? mergeProjectorCandidatesWithRuntimeStateAndIdMap(model.projectorCandidates, existing.projectorCandidates)
+    : {
+      projectorCandidates: model.projectorCandidates,
+      runtimeToNextProjectorIds: new Map<string, string>(),
+    };
+  const projectorCandidates = projectorRuntimeMerge.projectorCandidates;
+  const candidateIds = new Set((projectorCandidates ?? []).map((projector) => projector.id));
+  const selectedProjectorId = canPreserveResumeState
+    ? resolveMergedSelectedProjectorId(
+      model.selectedProjectorId,
+      existing.selectedProjectorId,
+      candidateIds,
+      projectorRuntimeMerge.runtimeToNextProjectorIds,
+    )
+    : model.selectedProjectorId;
+  const multimodalReadiness = canPreserveResumeState
+    ? remapMultimodalReadiness(
+      model.id,
+      model.multimodalReadiness,
+      candidateIds,
+      projectorRuntimeMerge.runtimeToNextProjectorIds,
+      selectedProjectorId,
+    ) ?? remapMultimodalReadiness(
+      model.id,
+      existing.multimodalReadiness,
+      candidateIds,
+      projectorRuntimeMerge.runtimeToNextProjectorIds,
+      selectedProjectorId,
+    )
+    : model.multimodalReadiness;
   const retryableBaseModel = canPreserveResumeState
     ? { ...existing, ...model }
     : model;
@@ -84,11 +166,21 @@ function buildRetryableQueueEntry(existing: ModelMetadata, model: ModelMetadata)
     allowUnknownSizeDownload: canPreserveResumeState
       ? existing.allowUnknownSizeDownload === true || model.allowUnknownSizeDownload === true
       : model.allowUnknownSizeDownload === true,
+    projectorCandidates,
+    selectedProjectorId,
+    multimodalReadiness,
     lifecycleStatus: LifecycleStatus.QUEUED,
     downloadErrorAt: undefined,
     downloadErrorCode: undefined,
     downloadErrorMessage: undefined,
   });
+}
+
+function getQueuedProjectorFileNames(model: ModelMetadata): string[] {
+  return (model.projectorCandidates ?? []).flatMap((projector) => [
+    ...(projector.localPath && isValidLocalFileName(projector.localPath) ? [projector.localPath] : []),
+    ...getCandidateProjectorDownloadFileNames(projector),
+  ]);
 }
 
 interface DownloadState {
@@ -233,6 +325,7 @@ export function getQueuedDownloadFileNames(): string[] {
       .flatMap((model) => [
         ...(model.localPath && isValidLocalFileName(model.localPath) ? [model.localPath] : []),
         ...getCandidateModelDownloadFileNames(model),
+        ...getQueuedProjectorFileNames(model),
       ]),
   ));
 }

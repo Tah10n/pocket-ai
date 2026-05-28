@@ -4,6 +4,7 @@ import {
   useDownloadStore,
 } from '../../src/store/downloadStore';
 import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../src/types/models';
+import type { ProjectorArtifact } from '../../src/types/multimodal';
 
 function buildQueuedModel(
   id: string,
@@ -21,6 +22,20 @@ function buildQueuedModel(
     isPrivate: false,
     lifecycleStatus,
     downloadProgress: 0.5,
+  };
+}
+
+function buildProjector(overrides: Partial<ProjectorArtifact> = {}): ProjectorArtifact {
+  return {
+    id: 'vision/model:mmproj',
+    ownerModelId: 'vision/model',
+    repoId: 'vision/model',
+    fileName: 'mmproj-model.gguf',
+    downloadUrl: 'https://example.com/mmproj-model.gguf',
+    size: 256,
+    lifecycleStatus: 'available',
+    matchStatus: 'matched',
+    ...overrides,
   };
 }
 
@@ -78,6 +93,92 @@ describe('downloadStore', () => {
       sizeBytes: 1024,
       checkedAt: 123,
     });
+  });
+
+  it('preserves compatible paused projector resume state when re-queuing a catalog model', () => {
+    useDownloadStore.setState({
+      queue: [
+        {
+          ...buildQueuedModel('vision/model', LifecycleStatus.PAUSED),
+          selectedProjectorId: 'vision/model:mmproj-v1',
+          multimodalReadiness: {
+            modelId: 'vision/model',
+            status: 'ready',
+            projectorId: 'vision/model:mmproj-v1',
+            projectorSize: 256,
+            support: ['vision'],
+            checkedAt: 123,
+          },
+          projectorCandidates: [buildProjector({
+            id: 'vision/model:mmproj-v1',
+            localPath: 'partial-mmproj-model.gguf',
+            resumeData: JSON.stringify({ resumeData: 'projector-resume-data' }),
+            lifecycleStatus: 'paused',
+            matchStatus: 'user_selected',
+            matchReason: 'user_selected_projector',
+          })],
+        },
+      ],
+      activeDownloadId: null,
+    });
+
+    useDownloadStore.getState().addToQueue({
+      ...buildQueuedModel('vision/model', LifecycleStatus.AVAILABLE),
+      projectorCandidates: [buildProjector({
+        id: 'vision/model:mmproj-v2',
+        lifecycleStatus: 'available',
+        matchStatus: 'matched',
+        matchReason: 'single_projector_candidate',
+      })],
+    });
+
+    const entry = useDownloadStore.getState().queue.find((model) => model.id === 'vision/model');
+    const projector = entry?.projectorCandidates?.[0];
+    expect(entry?.lifecycleStatus).toBe(LifecycleStatus.QUEUED);
+    expect(projector).toEqual(expect.objectContaining({
+      id: 'vision/model:mmproj-v2',
+      localPath: 'partial-mmproj-model.gguf',
+      resumeData: 'projector-resume-data',
+      lifecycleStatus: 'paused',
+      matchStatus: 'user_selected',
+      matchReason: 'user_selected_projector',
+    }));
+    expect(entry?.selectedProjectorId).toBe('vision/model:mmproj-v2');
+    expect(entry?.multimodalReadiness?.projectorId).toBe('vision/model:mmproj-v2');
+  });
+
+  it('preserves runtime projector candidates when re-queuing a model without catalog candidates', () => {
+    useDownloadStore.setState({
+      queue: [
+        {
+          ...buildQueuedModel('vision/model', LifecycleStatus.FAILED),
+          selectedProjectorId: 'vision/model:mmproj',
+          projectorCandidates: [buildProjector({
+            localPath: 'partial-mmproj-model.gguf',
+            resumeData: 'projector-resume-data',
+            lifecycleStatus: 'paused',
+            matchStatus: 'user_selected',
+            matchReason: 'user_selected_projector',
+          })],
+        },
+      ],
+      activeDownloadId: null,
+    });
+
+    useDownloadStore.getState().addToQueue(buildQueuedModel('vision/model', LifecycleStatus.AVAILABLE));
+
+    const entry = useDownloadStore.getState().queue.find((model) => model.id === 'vision/model');
+    expect(entry?.lifecycleStatus).toBe(LifecycleStatus.QUEUED);
+    expect(entry?.selectedProjectorId).toBe('vision/model:mmproj');
+    expect(entry?.projectorCandidates).toEqual([
+      expect.objectContaining({
+        id: 'vision/model:mmproj',
+        localPath: 'partial-mmproj-model.gguf',
+        resumeData: 'projector-resume-data',
+        lifecycleStatus: 'paused',
+        matchStatus: 'user_selected',
+      }),
+    ]);
   });
 
   it('clears resumable state for legacy entries lacking file identity when another variant is queued', () => {
@@ -370,5 +471,50 @@ describe('downloadStore', () => {
 
     expect(queuedFileNames).toContain('custom-partial.gguf');
     expect(queuedFileNames).not.toContain('../bad.gguf');
+  });
+
+  it('keeps queued projector file names protected from quarantine scans', () => {
+    useDownloadStore.setState({
+      queue: [
+        {
+          ...buildQueuedModel('vision/model', LifecycleStatus.QUEUED),
+          projectorCandidates: [
+            {
+              id: 'vision/model:projector',
+              ownerModelId: 'vision/model',
+              repoId: 'vision/model',
+              fileName: 'mmproj-model.gguf',
+              downloadUrl: 'https://example.com/mmproj-model.gguf',
+              size: 256,
+              localPath: 'queued-mmproj-model.gguf',
+              lifecycleStatus: 'queued',
+              matchStatus: 'matched',
+            },
+            {
+              id: 'vision/model:bad-projector',
+              ownerModelId: 'vision/model',
+              repoId: 'vision/model',
+              fileName: '../bad-mmproj.gguf',
+              downloadUrl: 'https://example.com/bad-mmproj.gguf',
+              size: 256,
+              localPath: '../bad-local-mmproj.gguf',
+              lifecycleStatus: 'queued',
+              matchStatus: 'matched',
+            },
+          ],
+        },
+      ],
+      activeDownloadId: null,
+    });
+
+    const queuedFileNames = getQueuedDownloadFileNames();
+
+    expect(queuedFileNames).toContain('mmproj-model.gguf');
+    expect(
+      queuedFileNames.some((fileName) => /^model-mmproj-model-main-[a-z0-9]+\.gguf$/.test(fileName)),
+    ).toBe(true);
+    expect(queuedFileNames).toContain('queued-mmproj-model.gguf');
+    expect(queuedFileNames).not.toContain('../bad-mmproj.gguf');
+    expect(queuedFileNames).not.toContain('../bad-local-mmproj.gguf');
   });
 });

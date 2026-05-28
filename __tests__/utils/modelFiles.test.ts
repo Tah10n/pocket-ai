@@ -1,7 +1,9 @@
 import {
   getCandidateModelDownloadFileNames,
+  getCandidateProjectorDownloadFileNames,
   getLegacyModelDownloadFileName,
   getModelDownloadFileName,
+  getProjectorDownloadFileName,
   sanitizeModelFileSegment,
 } from '../../src/utils/modelFiles';
 
@@ -90,5 +92,29 @@ describe('modelFiles', () => {
       resolvedFileName: '../../bad.gguf',
       hfRevision: '../main',
     })).not.toContain('author_.._.._bad model.gguf');
+  });
+
+  it('builds collision-resistant projector file names with the legacy projector filename as a candidate', () => {
+    const projector = {
+      id: 'author/model::main::mmproj-model.gguf',
+      ownerModelId: 'author/model',
+      repoId: 'author/model',
+      fileName: 'mmproj-model.gguf',
+      hfRevision: 'main',
+    };
+    const otherProjector = {
+      ...projector,
+      id: 'other/model::main::mmproj-model.gguf',
+      ownerModelId: 'other/model',
+      repoId: 'other/model',
+    };
+    const fileName = getProjectorDownloadFileName(projector);
+
+    expect(fileName).toMatch(/^model-mmproj-model-main-[a-z0-9]+\.gguf$/);
+    expect(getProjectorDownloadFileName(otherProjector)).not.toBe(fileName);
+    expect(getCandidateProjectorDownloadFileNames(projector)).toEqual([
+      fileName,
+      'mmproj-model.gguf',
+    ]);
   });
 });

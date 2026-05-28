@@ -6,7 +6,7 @@ import { getCacheDir, getModelsDir } from './FileSystemSetup';
 import { llmEngineService } from './LLMEngineService';
 import { registry } from './LocalStorageRegistry';
 import { modelCatalogService } from './ModelCatalogService';
-import { safeJoinModelPath } from '../utils/safeFilePath';
+import { isValidLocalFileName, safeJoinModelPath } from '../utils/safeFilePath';
 import {
   CHAT_HISTORY_INDEX_KEY,
   CHAT_HISTORY_PREFIX,
@@ -21,6 +21,11 @@ import {
   ESTIMATED_CONTEXT_BYTES_PER_TOKEN,
   ESTIMATED_MODEL_RUNTIME_OVERHEAD_FACTOR,
 } from '../utils/contextWindow';
+import type { ProjectorArtifact } from '../types/multimodal';
+import {
+  isStoredProjectorArtifact,
+  normalizePositiveByteSize,
+} from '../utils/modelSize';
 import {
   CHAT_PERSISTENCE_INDEX_KEY,
   CHAT_THREAD_STORAGE_KEY_PREFIX,
@@ -89,6 +94,10 @@ function getTextByteLength(value: string | null | undefined) {
 
 function normalizeDirectoryUri(directoryUri: string): string {
   return directoryUri.endsWith('/') ? directoryUri : `${directoryUri}/`;
+}
+
+function isFileSystemDirectory(info: { isDirectory?: boolean }): boolean {
+  return info.isDirectory === true;
 }
 
 function joinDirectoryEntryUri(directoryUri: string, entryName: string): string {
@@ -214,18 +223,18 @@ function getDownloadedModels() {
 
 async function resolveStoredModelSize(model: ModelMetadata): Promise<number | null> {
   if (!model.localPath) {
-    return model.size ?? null;
+    return normalizePositiveByteSize(model.size);
   }
 
   const modelsDir = getModelsDir();
   if (!modelsDir) {
-    return model.size ?? null;
+    return normalizePositiveByteSize(model.size);
   }
 
   try {
     const localUri = safeJoinModelPath(modelsDir, model.localPath);
     if (!localUri) {
-      return model.size ?? null;
+      return normalizePositiveByteSize(model.size);
     }
 
     const info = await FileSystem.getInfoAsync(localUri);
@@ -241,21 +250,94 @@ async function resolveStoredModelSize(model: ModelMetadata): Promise<number | nu
     // Fall back to persisted metadata when local stat lookup fails.
   }
 
-  return model.size ?? null;
+  return normalizePositiveByteSize(model.size);
+}
+
+async function resolveStoredProjectorSize(projector: ProjectorArtifact): Promise<number | null> {
+  if (!isStoredProjectorArtifact(projector)) {
+    return null;
+  }
+
+  const persistedSize = normalizePositiveByteSize(projector.size);
+  if (!projector.localPath) {
+    return persistedSize;
+  }
+
+  const modelsDir = getModelsDir();
+  if (!modelsDir) {
+    return persistedSize;
+  }
+
+  try {
+    const localUri = safeJoinModelPath(modelsDir, projector.localPath);
+    if (!localUri) {
+      return persistedSize;
+    }
+
+    const info = await FileSystem.getInfoAsync(localUri);
+    if (
+      info.exists &&
+      !isFileSystemDirectory(info) &&
+      typeof info.size === 'number' &&
+      Number.isFinite(info.size) &&
+      info.size > 0
+    ) {
+      return Math.round(info.size);
+    }
+  } catch {
+    // Fall back to persisted projector metadata when local stat lookup fails.
+  }
+
+  return persistedSize;
+}
+
+async function resolveStoredProjectorCandidates(model: ModelMetadata): Promise<ProjectorArtifact[] | undefined> {
+  if (!model.projectorCandidates?.length) {
+    return model.projectorCandidates;
+  }
+
+  const resolvedSizes = await Promise.all(
+    model.projectorCandidates.map((projector) => resolveStoredProjectorSize(projector)),
+  );
+  let didChangeProjectorSize = false;
+
+  const resolvedProjectors = model.projectorCandidates.map((projector, index) => {
+    const resolvedSize = resolvedSizes[index];
+    if (resolvedSize === null || resolvedSize === projector.size) {
+      return projector;
+    }
+
+    didChangeProjectorSize = true;
+    return {
+      ...projector,
+      size: resolvedSize,
+    };
+  });
+
+  return didChangeProjectorSize ? resolvedProjectors : model.projectorCandidates;
+}
+
+async function resolveStoredArtifactSizes(model: ModelMetadata): Promise<ModelMetadata> {
+  const [resolvedModelSize, resolvedProjectors] = await Promise.all([
+    resolveStoredModelSize(model),
+    resolveStoredProjectorCandidates(model),
+  ]);
+
+  const shouldUpdateModelSize = resolvedModelSize !== null && resolvedModelSize !== model.size;
+  const shouldUpdateProjectors = resolvedProjectors !== model.projectorCandidates;
+
+  return shouldUpdateModelSize || shouldUpdateProjectors
+    ? {
+      ...model,
+      ...(shouldUpdateModelSize ? { size: resolvedModelSize } : {}),
+      ...(shouldUpdateProjectors ? { projectorCandidates: resolvedProjectors } : {}),
+    }
+    : model;
 }
 
 async function getDownloadedModelsWithResolvedSizes(): Promise<ModelMetadata[]> {
   const downloadedModels = getDownloadedModels();
-  const resolvedSizes = await Promise.all(
-    downloadedModels.map((model) => resolveStoredModelSize(model)),
-  );
-
-  return downloadedModels.map((model, index) => {
-    const resolvedSize = resolvedSizes[index];
-    return resolvedSize !== null && resolvedSize !== model.size
-      ? { ...model, size: resolvedSize }
-      : model;
-  });
+  return Promise.all(downloadedModels.map((model) => resolveStoredArtifactSizes(model)));
 }
 
 async function getQuarantinedModelFilesMetrics(): Promise<QuarantinedModelFilesMetrics> {
@@ -396,13 +478,44 @@ async function getActiveModelEstimateBytes(downloadedModels: ModelMetadata[]) {
     return 0;
   }
 
-  const baseModelBytes = Math.max(await resolveStoredModelSize(activeModel) ?? 0, 0);
+  const activeModelWithResolvedSizes = downloadedModels.find((model) => model.id === activeModel.id)
+    ?? await resolveStoredArtifactSizes(activeModel);
+  const baseModelBytes = Math.max(getDownloadedModelsStoredBytes([activeModelWithResolvedSizes]), 0);
   const contextBytes = Math.max(
     llmEngineService.getContextSize() * ESTIMATED_CONTEXT_BYTES_PER_TOKEN,
     MIN_ESTIMATED_CONTEXT_BYTES,
   );
 
   return Math.round(baseModelBytes * (1 + ESTIMATED_MODEL_RUNTIME_OVERHEAD_FACTOR) + contextBytes);
+}
+
+function getDownloadedModelsStoredBytes(downloadedModels: ModelMetadata[]): number {
+  const countedProjectorKeys = new Set<string>();
+  return downloadedModels.reduce((sum, model) => {
+    const modelSizeBytes = normalizePositiveByteSize(model.size) ?? 0;
+    const projectorSizeBytes = (model.projectorCandidates ?? []).reduce((projectorSum, projector) => {
+      if (!isStoredProjectorArtifact(projector)) {
+        return projectorSum;
+      }
+
+      const projectorSize = normalizePositiveByteSize(projector.size);
+      if (projectorSize === null) {
+        return projectorSum;
+      }
+
+      const projectorKey = projector.localPath && isValidLocalFileName(projector.localPath)
+        ? `path:${projector.localPath}`
+        : `id:${projector.id}`;
+      if (countedProjectorKeys.has(projectorKey)) {
+        return projectorSum;
+      }
+
+      countedProjectorKeys.add(projectorKey);
+      return projectorSum + projectorSize;
+    }, 0);
+
+    return sum + modelSizeBytes + projectorSizeBytes;
+  }, 0);
 }
 
 export async function getAppStorageMetrics(options: AppStorageMetricsOptions = {}): Promise<AppStorageMetrics> {
@@ -412,7 +525,7 @@ export async function getAppStorageMetrics(options: AppStorageMetricsOptions = {
   }
 
   const downloadedModels = await getDownloadedModelsWithResolvedSizes();
-  const modelsBytes = downloadedModels.reduce((sum, model) => sum + Math.max(model.size ?? 0, 0), 0);
+  const modelsBytes = getDownloadedModelsStoredBytes(downloadedModels);
   const cacheDir = getCacheDir();
   const [quarantinedModelFiles, cacheDirectoryBytes] = await Promise.all([
     getQuarantinedModelFilesMetrics(),

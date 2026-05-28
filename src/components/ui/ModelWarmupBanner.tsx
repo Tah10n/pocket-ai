@@ -7,11 +7,25 @@ import { ScreenBanner, ScreenIconTile, useScreenAppearance } from '@/components/
 import { Spinner } from '@/components/ui/spinner';
 import { Text } from '@/components/ui/text';
 import { EngineStatus, type EngineState } from '@/types/models';
+import type { MultimodalReadinessState, MultimodalReadinessStatus } from '@/types/multimodal';
 import type { AndroidBlurTargetRef } from '@/utils/androidBlur';
+import { sanitizeMultimodalFailureReason } from '@/utils/multimodalFailureReason';
 import { getNativeBottomSafeAreaInset } from '@/utils/safeArea';
 
 export const MODEL_WARMUP_BANNER_BOTTOM_GAP = 8;
-export const MODEL_WARMUP_BANNER_RESERVED_HEIGHT = 96;
+export const MODEL_WARMUP_BANNER_RESERVED_HEIGHT = 120;
+
+const WARMUP_MULTIMODAL_READINESS_KEYS: Record<MultimodalReadinessStatus, string | null> = {
+  ready: null,
+  text_only: 'chat.visionReadiness.textOnly',
+  missing_projector: 'chat.visionReadiness.missingProjector',
+  ambiguous_projector: 'chat.visionReadiness.ambiguousProjector',
+  projector_downloading: 'chat.visionReadiness.projectorDownloading',
+  initializing: 'chat.visionReadiness.initializing',
+  failed: 'chat.visionReadiness.failed',
+  unsupported: 'chat.visionReadiness.unsupported',
+};
+const WARMUP_FAILURE_REASON_MAX_LENGTH = 140;
 
 export function resolveModelWarmupProgressPercent(loadProgress: number): number {
   const rawPercent = loadProgress > 1 ? loadProgress : loadProgress * 100;
@@ -23,10 +37,12 @@ export function ModelWarmupBanner({
   androidContentBlurTargetRef,
   bottomOffset,
   engineState,
+  multimodalReadiness,
 }: {
   androidContentBlurTargetRef?: AndroidBlurTargetRef | null;
   bottomOffset?: number;
   engineState: EngineState;
+  multimodalReadiness?: MultimodalReadinessState;
 }) {
   const { t } = useTranslation();
   const appearance = useScreenAppearance();
@@ -38,6 +54,15 @@ export function ModelWarmupBanner({
   );
   const safeBottomOffset = getNativeBottomSafeAreaInset(insets.bottom);
   const shouldForceNativeAndroidBlur = Boolean(androidContentBlurTargetRef);
+  const diagnosticsMultimodal = engineState.diagnostics?.multimodal;
+  const multimodalReadinessStatus = multimodalReadiness?.status ?? diagnosticsMultimodal?.readinessStatus;
+  const multimodalReadinessKey = multimodalReadinessStatus
+    ? WARMUP_MULTIMODAL_READINESS_KEYS[multimodalReadinessStatus]
+    : null;
+  const multimodalFailureReason = sanitizeMultimodalFailureReason(
+    diagnosticsMultimodal?.failureReason ?? multimodalReadiness?.failureReason,
+    WARMUP_FAILURE_REASON_MAX_LENGTH,
+  );
 
   if (engineState.status !== EngineStatus.INITIALIZING) {
     return null;
@@ -62,9 +87,35 @@ export function ModelWarmupBanner({
           <ScreenIconTile iconName="sync" tone="accent" size="sm" className="h-8 w-8">
             <Spinner className="text-primary-600 dark:text-primary-300" />
           </ScreenIconTile>
-          <Text numberOfLines={1} className="min-w-0 flex-1 text-sm font-semibold text-primary-700 dark:text-primary-200">
-            {t('chat.warmingUp')}{' '}{progressPercent}%
-          </Text>
+          <Box className="min-w-0 flex-1">
+            <Text
+              numberOfLines={1}
+              textRole="action"
+              className="text-primary-700 dark:text-primary-200"
+            >
+              {t('chat.warmingUp')}{' '}{progressPercent}%
+            </Text>
+            {multimodalReadinessKey ? (
+              <Text
+                testID="model-warmup-multimodal-readiness"
+                numberOfLines={1}
+                textRole="caption"
+                className="text-primary-700 dark:text-primary-200"
+              >
+                {t(multimodalReadinessKey)}
+              </Text>
+            ) : null}
+            {multimodalFailureReason ? (
+              <Text
+                testID="model-warmup-multimodal-failure"
+                numberOfLines={1}
+                textRole="caption"
+                className="text-primary-700 dark:text-primary-200"
+              >
+                {multimodalFailureReason}
+              </Text>
+            ) : null}
+          </Box>
         </Box>
         <ProgressBar
           testID="model-warmup-progress-track"

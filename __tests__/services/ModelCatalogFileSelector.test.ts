@@ -1,14 +1,23 @@
 import {
   buildCatalogModelVariants,
   CATALOG_SEARCH_VARIANT_LIMIT,
+  getProjectorCompanionEntries,
   getFileSize,
+  hasProjectorCompanionEntries,
   isEligibleGgufEntry,
+  isCatalogSummarySupported,
   isProjectorFileName,
   isUnsupportedMtpFileName,
   limitModelVariants,
   selectTreeEntryForModel,
   selectPreferredGgufEntry,
 } from '../../src/services/ModelCatalogFileSelector';
+import {
+  projectorFileName,
+  projectorSibling,
+  visionModelFileName,
+  visionModelSibling,
+} from '../fixtures/multimodalCatalogFixtures';
 
 describe('ModelCatalogFileSelector', () => {
   const largeFileSize = 512 * 1024 * 1024;
@@ -22,6 +31,21 @@ describe('ModelCatalogFileSelector', () => {
   ])('treats %s as a projector file', (fileName) => {
     expect(isProjectorFileName(fileName)).toBe(true);
     expect(isEligibleGgufEntry({ rfilename: fileName, size: largeFileSize })).toBe(false);
+  });
+
+  it.each([
+    'mmproj-config.json',
+    'clip_projector.txt',
+    'model.mmproj.safetensors',
+  ])('does not treat non-GGUF projector-like sibling %s as a projector companion', (fileName) => {
+    const entries = [
+      { rfilename: fileName, size: 10_000 },
+      { rfilename: 'model.Q4_K_M.gguf', size: largeFileSize },
+    ];
+
+    expect(isProjectorFileName(fileName)).toBe(false);
+    expect(getProjectorCompanionEntries(entries)).toEqual([]);
+    expect(selectPreferredGgufEntry(entries)?.rfilename).toBe('model.Q4_K_M.gguf');
   });
 
   it.each([
@@ -41,6 +65,53 @@ describe('ModelCatalogFileSelector', () => {
     ]);
 
     expect(selected?.rfilename).toBe('model.Q4_K_M.gguf');
+  });
+
+  it('classifies projector companions without offering them as chat variants', () => {
+    const entries = [
+      projectorSibling,
+      visionModelSibling,
+    ];
+
+    expect(hasProjectorCompanionEntries(entries)).toBe(true);
+    expect(getProjectorCompanionEntries(entries).map((entry) => entry.rfilename)).toEqual([projectorFileName]);
+    const variants = buildCatalogModelVariants(entries);
+    expect(variants).toHaveLength(1);
+    expect(variants[0]).toEqual(expect.objectContaining({
+      fileName: visionModelFileName,
+    }));
+    expect(variants[0]).not.toHaveProperty('artifactRole', 'projector_companion');
+  });
+
+  it('keeps GGUF vision-chat catalog summaries eligible even when the pipeline is image-text-to-text', () => {
+    expect(isCatalogSummarySupported({
+      id: 'test-org/vision-chat-model',
+      pipeline_tag: 'image-text-to-text',
+      siblings: [
+        projectorSibling,
+        visionModelSibling,
+      ],
+    })).toBe(true);
+  });
+
+  it('keeps GGUF vision-chat catalog summaries eligible when the vision task is only a tag', () => {
+    expect(isCatalogSummarySupported({
+      id: 'test-org/tagged-vision-chat-model',
+      tags: ['gguf', 'image-text-to-text'],
+      siblings: [
+        { rfilename: 'model.Q4_K_M.gguf', size: largeFileSize },
+      ],
+    })).toBe(true);
+  });
+
+  it('still excludes GGUF catalog summaries with non-vision unsupported tags', () => {
+    expect(isCatalogSummarySupported({
+      id: 'test-org/audio-model',
+      tags: ['gguf', 'text-to-audio'],
+      siblings: [
+        { rfilename: 'model.Q4_K_M.gguf', size: largeFileSize },
+      ],
+    })).toBe(false);
   });
 
   it('selects the supported text GGUF instead of an MTP candidate', () => {

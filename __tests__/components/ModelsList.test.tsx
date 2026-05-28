@@ -10,8 +10,15 @@ import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../src
 let mockLastFlashListProps: any = null;
 let mockModelCardPropsLog: any[] = [];
 let mockLastVariantPickerProps: any = null;
+let mockLastProjectorChoiceSheetProps: any = null;
 let mockDownloadQueue: ModelMetadata[] = [];
 let mockOpenModelDetails = jest.fn();
+let mockUseModelActionsInput: any = null;
+let mockHandleDownload = jest.fn();
+let mockRegistryModel: ModelMetadata | undefined;
+let mockRegistryUpdateModel = jest.fn((model: ModelMetadata) => {
+  mockRegistryModel = model;
+});
 
 const defaultFilters: ModelFilterCriteria = {
   fitsInRamOnly: true,
@@ -98,6 +105,13 @@ jest.mock('@/components/ui/ModelVariantPickerSheet', () => ({
   },
 }));
 
+jest.mock('@/components/ui/ProjectorChoiceSheet', () => ({
+  ProjectorChoiceSheet: (props: any) => {
+    mockLastProjectorChoiceSheetProps = props;
+    return null;
+  },
+}));
+
 jest.mock('@/components/ui/ScreenShell', () => ({
   ScreenAndroidContentBlurTarget: ({ children, ...props }: any) => {
     const mockReact = require('react');
@@ -179,17 +193,20 @@ jest.mock('@/hooks/useModelRegistryRevision', () => ({
 }));
 
 jest.mock('@/hooks/useModelActions', () => ({
-  useModelActions: () => ({
+  useModelActions: (input: any) => {
+    mockUseModelActionsInput = input;
+    return {
     cancelDownload: jest.fn(),
     handleDelete: jest.fn(),
-    handleDownload: jest.fn(),
+    handleDownload: mockHandleDownload,
     handleLoad: jest.fn(),
     handleUnload: jest.fn(),
     openChat: jest.fn(),
     openModelDetails: mockOpenModelDetails,
     openModelPage: jest.fn(),
     openTokenSettings: jest.fn(),
-  }),
+    };
+  },
 }));
 
 jest.mock('@/hooks/useModelsCatalogData', () => ({
@@ -198,8 +215,9 @@ jest.mock('@/hooks/useModelsCatalogData', () => ({
 
 jest.mock('@/services/LocalStorageRegistry', () => ({
   registry: {
-    getModel: jest.fn(() => undefined),
+    getModel: jest.fn(() => mockRegistryModel),
     getModels: jest.fn(() => []),
+    updateModel: (model: ModelMetadata) => mockRegistryUpdateModel(model),
   },
 }));
 
@@ -292,6 +310,19 @@ function createModel(overrides: Partial<ModelMetadata> = {}): ModelMetadata {
   };
 }
 
+function createProjectorCandidate(id: string, fileName: string) {
+  return {
+    id,
+    ownerModelId: 'org/model',
+    repoId: 'org/model',
+    fileName,
+    downloadUrl: `https://huggingface.co/org/model/resolve/main/${fileName}`,
+    size: 512,
+    lifecycleStatus: 'available' as const,
+    matchStatus: 'ambiguous' as const,
+  };
+}
+
 function setModelsStoreState(filters: ModelFilterCriteria = defaultFilters) {
   (useModelsStore as unknown as jest.Mock).mockReturnValue({
     tabPreferences: {
@@ -332,8 +363,15 @@ describe('ModelsList', () => {
     mockLastFlashListProps = null;
     mockModelCardPropsLog = [];
     mockLastVariantPickerProps = null;
+    mockLastProjectorChoiceSheetProps = null;
     mockDownloadQueue = [];
     mockOpenModelDetails = jest.fn();
+    mockUseModelActionsInput = null;
+    mockHandleDownload = jest.fn();
+    mockRegistryModel = undefined;
+    mockRegistryUpdateModel = jest.fn((model: ModelMetadata) => {
+      mockRegistryModel = model;
+    });
     setModelsStoreState();
   });
 
@@ -396,6 +434,147 @@ describe('ModelsList', () => {
     });
 
     expect(mockLastVariantPickerProps.androidContentBlurTargetRef).toBe(androidBlurTargetRef);
+  });
+
+  it('opens projector choice from the list download flow and resumes download after selection', async () => {
+    const handleLoadMore = jest.fn();
+    const firstProjector = createProjectorCandidate('projector-a', 'mmproj-a.gguf');
+    const secondProjector = createProjectorCandidate('projector-b', 'mmproj-b.gguf');
+    const model = createModel({
+      chatModalities: ['text', 'vision'],
+      projectorCandidates: [firstProjector, secondProjector],
+    });
+    mockUseModelsCatalogData.mockReturnValue({
+      ...createCatalogData(null, handleLoadMore),
+      models: [model],
+    } as any);
+
+    render(<ModelsList activeTab="all" searchQuery="vision" />);
+
+    expect(mockUseModelActionsInput.openProjectorChoice).toEqual(expect.any(Function));
+
+    act(() => {
+      mockUseModelActionsInput.openProjectorChoice(model);
+    });
+
+    expect(mockLastProjectorChoiceSheetProps).toEqual(expect.objectContaining({
+      visible: true,
+      model,
+    }));
+
+    act(() => {
+      mockLastProjectorChoiceSheetProps.onSelectProjector(secondProjector.id);
+    });
+
+    expect(mockHandleDownload).toHaveBeenCalledWith(expect.objectContaining({
+      id: model.id,
+      selectedProjectorId: secondProjector.id,
+      projectorCandidates: [
+        expect.objectContaining({ id: firstProjector.id }),
+        expect.objectContaining({
+          id: secondProjector.id,
+          matchStatus: 'user_selected',
+          matchReason: 'user_selected_projector',
+        }),
+      ],
+    }));
+    expect(mockLastProjectorChoiceSheetProps.visible).toBe(false);
+  });
+
+  it('uses the selected projector from the sheet when the registry has stale projector metadata', async () => {
+    const handleLoadMore = jest.fn();
+    const firstProjector = createProjectorCandidate('projector-a', 'mmproj-a.gguf');
+    const secondProjector = createProjectorCandidate('projector-b', 'mmproj-b.gguf');
+    const model = createModel({
+      chatModalities: ['text', 'vision'],
+      projectorCandidates: [firstProjector, secondProjector],
+    });
+    mockRegistryModel = createModel({
+      chatModalities: ['text', 'vision'],
+      projectorCandidates: [firstProjector],
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      localPath: 'models/model.Q4_K_M.gguf',
+    });
+    mockUseModelsCatalogData.mockReturnValue({
+      ...createCatalogData(null, handleLoadMore),
+      models: [model],
+    } as any);
+
+    render(<ModelsList activeTab="all" searchQuery="vision" />);
+
+    act(() => {
+      mockUseModelActionsInput.openProjectorChoice(model);
+    });
+    act(() => {
+      mockLastProjectorChoiceSheetProps.onSelectProjector(secondProjector.id);
+    });
+
+    expect(mockRegistryUpdateModel).toHaveBeenCalledWith(expect.objectContaining({
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      localPath: 'models/model.Q4_K_M.gguf',
+      selectedProjectorId: secondProjector.id,
+      projectorCandidates: [
+        expect.objectContaining({ id: firstProjector.id }),
+        expect.objectContaining({ id: secondProjector.id, matchStatus: 'user_selected' }),
+      ],
+    }));
+    expect(mockHandleDownload).toHaveBeenCalledWith(expect.objectContaining({
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      selectedProjectorId: secondProjector.id,
+    }));
+  });
+
+  it('preserves fresh vision metadata when merging projector selection into a stale registry model', async () => {
+    const handleLoadMore = jest.fn();
+    const firstProjector = createProjectorCandidate('projector-a', 'mmproj-a.gguf');
+    const secondProjector = createProjectorCandidate('projector-b', 'mmproj-b.gguf');
+    const model = createModel({
+      artifactRole: 'primary_chat_model',
+      chatModalities: ['text', 'vision'],
+      visionSource: 'tree_probe',
+      visionConfidence: 'trusted',
+      projectorCandidates: [firstProjector, secondProjector],
+    });
+    mockRegistryModel = createModel({
+      artifactRole: 'primary_chat_model',
+      chatModalities: ['text'],
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      localPath: 'models/model.Q4_K_M.gguf',
+      projectorCandidates: [firstProjector],
+    });
+    mockUseModelsCatalogData.mockReturnValue({
+      ...createCatalogData(null, handleLoadMore),
+      models: [model],
+    } as any);
+
+    render(<ModelsList activeTab="all" searchQuery="vision" />);
+
+    act(() => {
+      mockUseModelActionsInput.openProjectorChoice(model);
+    });
+    act(() => {
+      mockLastProjectorChoiceSheetProps.onSelectProjector(secondProjector.id);
+    });
+
+    expect(mockRegistryUpdateModel).toHaveBeenCalledWith(expect.objectContaining({
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      localPath: 'models/model.Q4_K_M.gguf',
+      artifactRole: 'primary_chat_model',
+      chatModalities: ['text', 'vision'],
+      visionSource: 'user_selected_projector',
+      visionConfidence: 'trusted',
+      selectedProjectorId: secondProjector.id,
+      projectorCandidates: [
+        expect.objectContaining({ id: firstProjector.id }),
+        expect.objectContaining({ id: secondProjector.id, matchStatus: 'user_selected' }),
+      ],
+    }));
+    expect(mockHandleDownload).toHaveBeenCalledWith(expect.objectContaining({
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      chatModalities: ['text', 'vision'],
+      visionConfidence: 'trusted',
+      selectedProjectorId: secondProjector.id,
+    }));
   });
 
   it('hides a selected variant that no longer satisfies RAM filters', async () => {

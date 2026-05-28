@@ -2,7 +2,8 @@ import DeviceInfo from 'react-native-device-info';
 import * as FileSystem from 'expo-file-system/legacy';
 import type { MMKV } from 'react-native-mmkv';
 import { assertPrivateStorageWritable, createStorage } from './storage';
-import { ModelMetadata, LifecycleStatus } from '../types/models';
+import { ModelMetadata, LifecycleStatus, type ModelVariant } from '../types/models';
+import type { MultimodalReadinessState, ProjectorArtifact } from '../types/multimodal';
 import { getModelsDir } from './FileSystemSetup';
 import { normalizePersistedModelMetadata } from './ModelMetadataNormalizer';
 import { estimateFastMemoryFit } from '../memory/estimator';
@@ -47,6 +48,25 @@ type ModelDirectoryEntryInspection =
 
 function cloneCalibrationRecord(record: CalibrationRecord): CalibrationRecord {
   return { ...record };
+}
+
+function cloneProjectorArtifact(projector: ProjectorArtifact): ProjectorArtifact {
+  return { ...projector };
+}
+
+function cloneMultimodalReadinessState(readiness: MultimodalReadinessState): MultimodalReadinessState {
+  return {
+    ...readiness,
+    support: [...readiness.support],
+  };
+}
+
+function cloneModelVariant(variant: ModelVariant): ModelVariant {
+  return {
+    ...variant,
+    chatModalities: variant.chatModalities ? [...variant.chatModalities] : undefined,
+    projectorCandidates: variant.projectorCandidates?.map(cloneProjectorArtifact),
+  };
 }
 
 function normalizeModelId(value: unknown): string {
@@ -407,7 +427,121 @@ function cloneModelMetadata(model: ModelMetadata): ModelMetadata {
     datasets: model.datasets ? [...model.datasets] : undefined,
     languages: model.languages ? [...model.languages] : undefined,
     tags: model.tags ? [...model.tags] : undefined,
+    variants: model.variants?.map(cloneModelVariant),
+    chatModalities: model.chatModalities ? [...model.chatModalities] : undefined,
+    projectorCandidates: model.projectorCandidates?.map(cloneProjectorArtifact),
+    multimodalReadiness: model.multimodalReadiness
+      ? cloneMultimodalReadinessState(model.multimodalReadiness)
+      : undefined,
   };
+}
+
+function hasCompletedLocalProjectorFile(projector: Pick<ProjectorArtifact, 'lifecycleStatus' | 'localPath'>): boolean {
+  return (
+    hasCompletedProjectorStatus(projector)
+    && isValidLocalFileName(projector.localPath)
+  );
+}
+
+function hasCompletedProjectorStatus(projector: Pick<ProjectorArtifact, 'lifecycleStatus'>): boolean {
+  return projector.lifecycleStatus === 'downloaded' || projector.lifecycleStatus === 'active';
+}
+
+function hasResumableProjectorStatus(projector: Pick<ProjectorArtifact, 'lifecycleStatus'>): boolean {
+  return projector.lifecycleStatus === 'queued'
+    || projector.lifecycleStatus === 'downloading'
+    || projector.lifecycleStatus === 'paused'
+    || projector.lifecycleStatus === 'failed';
+}
+
+function collectCompletedProjectorLocalPaths(models: ModelMetadata[]): Set<string> {
+  const localPaths = new Set<string>();
+
+  for (const model of models) {
+    for (const projector of model.projectorCandidates ?? []) {
+      const localPath = projector.localPath;
+      if (hasCompletedLocalProjectorFile(projector) && isValidLocalFileName(localPath)) {
+        localPaths.add(localPath);
+      }
+    }
+  }
+
+  return localPaths;
+}
+
+function collectProtectedProjectorLocalPaths(models: ModelMetadata[]): Set<string> {
+  const localPaths = new Set<string>();
+
+  for (const model of models) {
+    for (const projector of model.projectorCandidates ?? []) {
+      const localPath = projector.localPath;
+      if (
+        (hasCompletedProjectorStatus(projector) || hasResumableProjectorStatus(projector))
+        && isValidLocalFileName(localPath)
+      ) {
+        localPaths.add(localPath);
+      }
+    }
+  }
+
+  return localPaths;
+}
+
+function resetProjectorDownloadState(projector: ProjectorArtifact): boolean {
+  let changed = false;
+
+  if (projector.lifecycleStatus !== 'available') {
+    projector.lifecycleStatus = 'available';
+    changed = true;
+  }
+
+  if (projector.localPath !== undefined) {
+    projector.localPath = undefined;
+    changed = true;
+  }
+
+  if (projector.resumeData !== undefined) {
+    projector.resumeData = undefined;
+    changed = true;
+  }
+
+  if (projector.downloadProgress !== undefined) {
+    projector.downloadProgress = undefined;
+    changed = true;
+  }
+
+  return changed;
+}
+
+function clearMultimodalReadinessForProjector(
+  model: ModelMetadata,
+  projector: Pick<ProjectorArtifact, 'id'>,
+): boolean {
+  const readiness = model.multimodalReadiness;
+  if (!readiness || readiness.projectorId !== projector.id) {
+    return false;
+  }
+
+  model.multimodalReadiness = undefined;
+  return true;
+}
+
+function resetProjectorDownloadStateForModel(
+  model: ModelMetadata,
+  projector: ProjectorArtifact,
+): boolean {
+  const changed = resetProjectorDownloadState(projector);
+  return (changed && clearMultimodalReadinessForProjector(model, projector)) || changed;
+}
+
+function resetProjectorDownloadStates(model: ModelMetadata): boolean {
+  let changed = false;
+
+  for (const projector of model.projectorCandidates ?? []) {
+    changed = resetProjectorDownloadStateForModel(model, projector) || changed;
+  }
+
+  return changed;
 }
 
 function resetLocalDownloadState(model: ModelMetadata): void {
@@ -422,6 +556,7 @@ function resetLocalDownloadState(model: ModelMetadata): void {
   model.downloadErrorCode = undefined;
   model.downloadErrorMessage = undefined;
   model.downloadProgress = 0;
+  resetProjectorDownloadStates(model);
 }
 
 function hasCompletedLocalModelFile(model: Pick<ModelMetadata, 'lifecycleStatus' | 'localPath'>): boolean {
@@ -430,6 +565,49 @@ function hasCompletedLocalModelFile(model: Pick<ModelMetadata, 'lifecycleStatus'
       || model.lifecycleStatus === LifecycleStatus.ACTIVE)
     && typeof model.localPath === 'string'
   );
+}
+
+type ModelAssetFileForRemoval = {
+  fileName: string;
+  kind: 'model' | 'projector';
+};
+
+function getModelAssetFilesForRemoval(
+  model: ModelMetadata | undefined,
+  remainingModels: ModelMetadata[],
+): ModelAssetFileForRemoval[] {
+  if (!model) {
+    return [];
+  }
+
+  const sharedProjectorLocalPaths = collectCompletedProjectorLocalPaths(remainingModels);
+  const seen = new Set<string>();
+  const files: ModelAssetFileForRemoval[] = [];
+  const addFile = (fileName: string | undefined, kind: ModelAssetFileForRemoval['kind']) => {
+    if (!isValidLocalFileName(fileName) || seen.has(fileName)) {
+      return;
+    }
+
+    seen.add(fileName);
+    files.push({ fileName, kind });
+  };
+
+  addFile(model.localPath, 'model');
+
+  for (const projector of model.projectorCandidates ?? []) {
+    const localPath = projector.localPath;
+    if (!hasCompletedLocalProjectorFile(projector) || !isValidLocalFileName(localPath)) {
+      continue;
+    }
+
+    if (sharedProjectorLocalPaths.has(localPath)) {
+      continue;
+    }
+
+    addFile(localPath, 'projector');
+  }
+
+  return files;
 }
 
 export class LocalStorageRegistry {
@@ -638,6 +816,114 @@ export class LocalStorageRegistry {
     this.emitModelsChanged();
   }
 
+  private async deleteModelAssetFile(
+    modelsDir: string,
+    modelId: string,
+    file: ModelAssetFileForRemoval,
+  ): Promise<void> {
+    try {
+      const fileUri = safeJoinModelPath(modelsDir, file.fileName);
+      if (!fileUri) {
+        console.warn(`[LocalStorageRegistry] Invalid localPath for ${modelId}, skipping file deletion`);
+        return;
+      }
+
+      const info = await FileSystem.getInfoAsync(fileUri);
+      if (info.exists && !isFileSystemDirectory(info)) {
+        await FileSystem.deleteAsync(fileUri);
+      } else if (info.exists) {
+        const label = file.kind === 'model'
+          ? `Local path for ${modelId}`
+          : `Projector localPath for ${modelId}`;
+        console.warn(`[LocalStorageRegistry] ${label} points to a directory, skipping file deletion`);
+      }
+    } catch (e) {
+      const label = file.kind === 'model' ? 'file' : 'projector file';
+      console.error(`[LocalStorageRegistry] Failed to delete ${label} for ${modelId}`, e);
+    }
+  }
+
+  private async validateProjectorLocalState(model: ModelMetadata, modelsDir: string): Promise<boolean> {
+    let changed = false;
+
+    for (const projector of model.projectorCandidates ?? []) {
+      const localPath = projector.localPath;
+      const hasCompletedStatus = hasCompletedProjectorStatus(projector);
+      if (!isValidLocalFileName(localPath)) {
+        if (hasCompletedStatus || projector.localPath !== undefined) {
+          changed = resetProjectorDownloadStateForModel(model, projector) || changed;
+        }
+        continue;
+      }
+
+      const fileUri = safeJoinModelPath(modelsDir, localPath);
+      if (!fileUri) {
+        console.warn(`[LocalStorageRegistry] Invalid projector localPath for ${model.id}, resetting projector to available`);
+        changed = resetProjectorDownloadStateForModel(model, projector) || changed;
+        continue;
+      }
+
+      const info = await FileSystem.getInfoAsync(fileUri);
+      if (!info.exists) {
+        console.warn(`[LocalStorageRegistry] Projector localPath missing for ${model.id}, resetting projector to available`);
+        changed = resetProjectorDownloadStateForModel(model, projector) || changed;
+        continue;
+      }
+
+      if (isFileSystemDirectory(info)) {
+        console.warn(`[LocalStorageRegistry] Projector localPath for ${model.id} points to a directory, resetting projector to available`);
+        changed = resetProjectorDownloadStateForModel(model, projector) || changed;
+        continue;
+      }
+
+      if (!hasCompletedStatus) {
+        if (hasResumableProjectorStatus(projector)) {
+          continue;
+        }
+
+        changed = resetProjectorDownloadStateForModel(model, projector) || changed;
+        continue;
+      }
+
+      if (projector.lifecycleStatus === 'active') {
+        projector.lifecycleStatus = 'downloaded';
+        changed = true;
+      }
+
+      const fileSizeBytes = getFileInfoSizeBytes(info);
+      const expectedSizeBytes = getFileInfoSizeBytes({ size: projector.size ?? undefined });
+      if (expectedSizeBytes !== null && fileSizeBytes !== null && fileSizeBytes !== expectedSizeBytes) {
+        console.warn(`[LocalStorageRegistry] Projector file size mismatch for ${model.id}, resetting projector to available`);
+        changed = resetProjectorDownloadStateForModel(model, projector) || changed;
+        continue;
+      }
+
+      try {
+        const ggufValidation = await validateGgufFileHeader(fileUri, info);
+        if (projector.size !== ggufValidation.sizeBytes) {
+          projector.size = ggufValidation.sizeBytes;
+          changed = true;
+        }
+      } catch (error) {
+        if (error instanceof GgufValidationError && error.reason === 'read_failed') {
+          console.warn(`[LocalStorageRegistry] Projector GGUF validation could not read ${model.id}, preserving downloaded projector state`, error);
+          continue;
+        }
+
+        console.warn(`[LocalStorageRegistry] Projector GGUF validation failed for ${model.id}, resetting projector to available`, error);
+        changed = resetProjectorDownloadStateForModel(model, projector) || changed;
+        continue;
+      }
+
+      if (fileSizeBytes !== null && projector.size === null) {
+        projector.size = fileSizeBytes;
+        changed = true;
+      }
+    }
+
+    return changed;
+  }
+
   /**
    * Remove a model from the registry and delete its local files.
    */
@@ -648,35 +934,23 @@ export class LocalStorageRegistry {
     }
 
     assertPrivateStorageWritable();
-    const model = this.getModel(normalizedId);
+    const state = this.getCachedModelsState();
+    const model = state.modelsById.get(normalizedId);
+    const nextModelsById = new Map(state.modelsById);
+    const nextIds = state.ids.filter((id) => id !== normalizedId);
+    nextModelsById.delete(normalizedId);
+
     const modelsDir = getModelsDir();
-    if (model && model.localPath) {
-      try {
-        if (modelsDir) {
-          const fileUri = safeJoinModelPath(modelsDir, model.localPath);
-          if (!fileUri) {
-            console.warn(`[LocalStorageRegistry] Invalid localPath for ${modelId}, skipping file deletion`);
-          } else {
-            const info = await FileSystem.getInfoAsync(fileUri);
-            if (info.exists && !isFileSystemDirectory(info)) {
-              await FileSystem.deleteAsync(fileUri);
-            } else if (info.exists) {
-              console.warn(`[LocalStorageRegistry] Local path for ${modelId} points to a directory, skipping file deletion`);
-            }
-          }
-        }
-      } catch (e) {
-        console.error(`[LocalStorageRegistry] Failed to delete file for ${modelId}`, e);
+    if (model && modelsDir) {
+      const remainingModels = Array.from(nextModelsById.values());
+      const filesForRemoval = getModelAssetFilesForRemoval(model, remainingModels);
+
+      for (const file of filesForRemoval) {
+        await this.deleteModelAssetFile(modelsDir, normalizedId, file);
       }
     }
 
-    const state = this.getCachedModelsState();
-    const existing = state.modelsById.get(normalizedId);
-    const hadCompletedLocalFile = existing ? hasCompletedLocalModelFile(existing) : false;
-    const nextModelsById = new Map(state.modelsById);
-    const nextIds = state.ids.filter((id) => id !== normalizedId);
-
-    nextModelsById.delete(normalizedId);
+    const hadCompletedLocalFile = model ? hasCompletedLocalModelFile(model) : false;
 
     this.getStorage().remove(getModelStorageKey(normalizedId));
     this.persistModelsIndex(nextIds);
@@ -712,6 +986,8 @@ export class LocalStorageRegistry {
         if (model.localPath || hasDownloadedState) {
           resetLocalDownloadState(model);
           changed = true;
+        } else {
+          changed = resetProjectorDownloadStates(model) || changed;
         }
       }
 
@@ -901,6 +1177,8 @@ export class LocalStorageRegistry {
           }
         }
       }
+
+      changed = await this.validateProjectorLocalState(model, modelsDir) || changed;
     }
 
     if (changed) {
@@ -1082,16 +1360,18 @@ export class LocalStorageRegistry {
         .map((model) => model.localPath)
         .filter((localPath): localPath is string => isValidLocalFileName(localPath)),
     );
+    const protectedProjectorLocalPaths = collectProtectedProjectorLocalPaths(models);
     const queuedFileNamesSet = normalizeModelFileNames(queuedFileNames);
     const privateResetPreservedFileNames = this.getPreservedModelFileNamesForCleanup(
       directoryFileNames,
-      completedLocalPaths,
+      new Set([...completedLocalPaths, ...protectedProjectorLocalPaths]),
     );
 
     return {
       currentSafeDirectoryFileNames,
       protectedFileNames: new Set([
         ...completedLocalPaths,
+        ...protectedProjectorLocalPaths,
         ...queuedFileNamesSet,
         ...privateResetPreservedFileNames,
       ]),

@@ -1,6 +1,7 @@
 import { getHuggingFaceModelUrl } from '@/services/ModelCatalogService';
 import type { MaterialSymbolName } from '@/components/ui/MaterialSymbols';
 import { ModelAccessState, LifecycleStatus, type ModelMetadata } from '@/types/models';
+import { getModelVisionCapabilityStatusLabelKey, modelSupportsVision } from '@/utils/modelCapabilities';
 import { getShortModelLabel } from '@/utils/modelLabel';
 import { formatModelFileSize } from '@/utils/modelSize';
 
@@ -213,7 +214,17 @@ export function buildModelDetailsMetadataMetrics(
   model: ModelMetadata,
   t: Translate,
 ): ModelDetailsMetadataItem[] {
+  const visionStatusLabelKey = getModelVisionCapabilityStatusLabelKey(model);
+  const projectorCandidateNames = modelSupportsVision(model)
+    ? model.projectorCandidates
+      ?.map((candidate) => candidate.fileName.trim())
+      .filter((fileName) => fileName.length > 0)
+      .join(', ')
+    : undefined;
+
   return [
+    { label: t('models.vision.capabilityLabel'), value: visionStatusLabelKey ? t(visionStatusLabelKey) : undefined },
+    { label: t('models.vision.projectorCandidates'), value: projectorCandidateNames },
     { label: t('models.modelSizeLabel'), value: getModelParameterSizeLabel(model) },
     { label: t('models.quantFileLabel'), value: getQuantFileLabel(model) },
     { label: t('models.typeLabel'), value: getModelTypeLabel(model) },

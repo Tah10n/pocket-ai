@@ -278,6 +278,71 @@ describe('ModelMetadataNormalizer', () => {
     expect(opaqueWithoutVariants.activeVariantId).toBe('catalog-choice-q8');
   });
 
+  it('preserves multimodal model and variant metadata with valid projector candidates', () => {
+    const normalized = normalizePersistedModelMetadata({
+      id: 'author/vision-model',
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+      resolvedFileName: 'vision-model.Q4_K_M.gguf',
+      activeVariantId: 'vision-model.Q4_K_M.gguf',
+      chatModalities: ['text', 'vision'],
+      artifactRole: 'primary_chat_model',
+      visionSource: 'tree_probe',
+      visionConfidence: 'trusted',
+      selectedProjectorId: 'projector-author-vision-model-main-vision-model.Q4_K_M.gguf-mmproj-vision-model-f16.gguf',
+      projectorCandidates: [
+        {
+          id: 'projector-author-vision-model-main-vision-model.Q4_K_M.gguf-mmproj-vision-model-f16.gguf',
+          ownerModelId: 'author/vision-model',
+          ownerVariantId: 'vision-model.Q4_K_M.gguf',
+          repoId: 'author/vision-model',
+          fileName: 'mmproj-vision-model-f16.gguf',
+          downloadUrl: 'https://huggingface.co/author/vision-model/resolve/main/mmproj-vision-model-f16.gguf',
+          hfRevision: 'main',
+          sha256: `sha256:${VALID_SHA256.toUpperCase()}`,
+          size: 536_870_912,
+          lifecycleStatus: 'downloaded',
+          matchStatus: 'matched',
+          matchReason: 'single_projector_candidate',
+          localPath: 'mmproj-vision-model-f16.gguf',
+        },
+      ],
+      variants: [
+        {
+          variantId: 'vision-model.Q4_K_M.gguf',
+          fileName: 'vision-model.Q4_K_M.gguf',
+          quantizationLabel: 'Q4_K_M',
+          size: 4_000_000_000,
+          chatModalities: ['text', 'vision'],
+          artifactRole: 'primary_chat_model',
+        },
+      ],
+    });
+
+    expect(normalized).toEqual(expect.objectContaining({
+      chatModalities: ['text', 'vision'],
+      artifactRole: 'primary_chat_model',
+      visionSource: 'tree_probe',
+      visionConfidence: 'trusted',
+      selectedProjectorId: 'projector-author-vision-model-main-vision-model.Q4_K_M.gguf-mmproj-vision-model-f16.gguf',
+    }));
+    expect(normalized.projectorCandidates).toEqual([
+      expect.objectContaining({
+        id: 'projector-author-vision-model-main-vision-model.Q4_K_M.gguf-mmproj-vision-model-f16.gguf',
+        sha256: VALID_SHA256,
+        lifecycleStatus: 'downloaded',
+        matchStatus: 'matched',
+      }),
+    ]);
+    expect(normalized.variants).toEqual([
+      expect.objectContaining({
+        variantId: 'vision-model.Q4_K_M.gguf',
+        chatModalities: ['text', 'vision'],
+        artifactRole: 'primary_chat_model',
+      }),
+    ]);
+  });
+
   it('dedupes persisted variants by file while preserving active legacy variant metadata', () => {
     const normalized = normalizePersistedModelMetadata({
       id: 'author/model-q4',
@@ -392,5 +457,104 @@ describe('ModelMetadataNormalizer', () => {
       },
     ]);
     expect(normalized.activeVariantId).toBe('model.Q4_K_M.gguf');
+  });
+
+  it('normalizes persisted resumeData to opaque native strings without auth material', () => {
+    const legacySnapshot = JSON.stringify({
+      url: 'https://huggingface.co/author/model/resolve/main/model.gguf',
+      fileUri: 'file:///model.gguf',
+      options: { headers: { Authorization: 'Bearer model-secret' } },
+      resumeData: 'model-native-resume',
+    });
+    const projectorSnapshot = JSON.stringify({
+      url: 'https://huggingface.co/author/model/resolve/main/mmproj-model.gguf',
+      options: { headers: { Authorization: 'Bearer projector-secret' } },
+      resumeData: 'projector-native-resume',
+    });
+
+    const normalized = normalizePersistedModelMetadata({
+      id: 'author/vision-model',
+      lifecycleStatus: LifecycleStatus.PAUSED,
+      downloadProgress: 0.5,
+      resumeData: legacySnapshot,
+      projectorCandidates: [
+        {
+          id: 'projector-author-vision-model-main-mmproj-model.gguf',
+          ownerModelId: 'author/vision-model',
+          repoId: 'author/vision-model',
+          fileName: 'mmproj-model.gguf',
+          downloadUrl: 'https://huggingface.co/author/model/resolve/main/mmproj-model.gguf',
+          size: null,
+          lifecycleStatus: 'paused',
+          matchStatus: 'matched',
+          resumeData: projectorSnapshot,
+        },
+      ],
+    });
+
+    expect(normalized.resumeData).toBe('model-native-resume');
+    expect(normalized.projectorCandidates?.[0]?.resumeData).toBe('projector-native-resume');
+    expect(JSON.stringify(normalized)).not.toMatch(/Authorization|Bearer/);
+  });
+
+  it('drops persisted resumeData without native resumeData or with auth material', () => {
+    const normalized = normalizePersistedModelMetadata({
+      id: 'author/vision-model',
+      lifecycleStatus: LifecycleStatus.PAUSED,
+      downloadProgress: 0.5,
+      resumeData: JSON.stringify({ url: 'https://example.com/model.gguf' }),
+      projectorCandidates: [
+        {
+          id: 'projector-author-vision-model-main-mmproj-model.gguf',
+          ownerModelId: 'author/vision-model',
+          repoId: 'author/vision-model',
+          fileName: 'mmproj-model.gguf',
+          downloadUrl: 'https://huggingface.co/author/model/resolve/main/mmproj-model.gguf',
+          size: null,
+          lifecycleStatus: 'paused',
+          matchStatus: 'matched',
+          resumeData: 'Bearer projector-secret',
+        },
+      ],
+    });
+
+    expect(normalized.resumeData).toBeUndefined();
+    expect(normalized.projectorCandidates?.[0]?.resumeData).toBeUndefined();
+  });
+
+  it('sanitizes persisted multimodal readiness failure reasons', () => {
+    const normalized = normalizePersistedModelMetadata({
+      id: 'author/vision-model',
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      multimodalReadiness: {
+        modelId: 'author/vision-model',
+        status: 'failed',
+        support: ['vision'],
+        failureReason: 'Native init failed for C:\\Users\\tester\\Project for Client\\mmproj file.gguf after retry',
+        checkedAt: 10,
+      },
+    });
+
+    expect(normalized.multimodalReadiness?.failureReason).toBe('Native init failed for [path] after retry');
+    expect(JSON.stringify(normalized.multimodalReadiness)).not.toContain('Project for Client');
+    expect(JSON.stringify(normalized.multimodalReadiness)).not.toContain('C:\\Users\\tester');
+
+    const extensionless = normalizePersistedModelMetadata({
+      id: 'author/vision-model',
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      multimodalReadiness: {
+        modelId: 'author/vision-model',
+        status: 'failed',
+        support: ['vision'],
+        failureReason: 'Native init failed for C:\\Users\\tester\\Project for Client',
+        checkedAt: 11,
+      },
+    });
+
+    expect(extensionless.multimodalReadiness?.failureReason).toBe('Native init failed for [path]');
+    expect(JSON.stringify(extensionless.multimodalReadiness)).not.toContain('Project for Client');
+    expect(JSON.stringify(extensionless.multimodalReadiness)).not.toContain('C:\\Users\\tester');
   });
 });

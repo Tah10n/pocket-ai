@@ -3,7 +3,8 @@ import { hardwareListenerService } from '../services/HardwareListenerService';
 import { modelCatalogService } from '../services/ModelCatalogService';
 import { getSettings } from '../services/SettingsStore';
 import { isPrivateStorageWritable } from '../services/storage';
-import { ModelAccessState, type ModelMetadata } from '../types/models';
+import { selectModelProjectorLifecycleState, type ModelProjectorLifecycleState } from '../store/modelsStore';
+import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../types/models';
 
 type Translate = (key: string) => string;
 
@@ -13,6 +14,7 @@ type StartModelDownloadFlowParams = {
   startDownload: (model: ModelMetadata) => void;
   openTokenSettings: () => void;
   openModelPage: (modelId: string) => Promise<void>;
+  onProjectorChoiceRequired?: (model: ModelMetadata) => void;
   onResolvedModel?: (model: ModelMetadata) => void;
   onError: (error: unknown) => void;
 };
@@ -24,6 +26,27 @@ function shouldRefreshDownloadMetadata(model: ModelMetadata): boolean {
     || model.isGated
     || model.isPrivate
   );
+}
+
+function hasReusableDownloadedModelFile(model: ModelMetadata): boolean {
+  return (
+    model.lifecycleStatus === LifecycleStatus.DOWNLOADED
+    || model.lifecycleStatus === LifecycleStatus.ACTIVE
+  ) && typeof model.localPath === 'string'
+    && model.localPath.trim().length > 0;
+}
+
+function canDownloadSelectedProjectorWithReusableModelFile(
+  model: ModelMetadata,
+  projectorLifecycle: ModelProjectorLifecycleState,
+): boolean {
+  if (!hasReusableDownloadedModelFile(model) || !projectorLifecycle.selectedProjector) {
+    return false;
+  }
+
+  return projectorLifecycle.status === 'available'
+    || projectorLifecycle.status === 'failed'
+    || projectorLifecycle.status === 'paused';
 }
 
 function isPrivateStorageReadyForDownload(): boolean {
@@ -49,6 +72,7 @@ export function startModelDownloadFlow({
   startDownload,
   openTokenSettings,
   openModelPage,
+  onProjectorChoiceRequired,
   onResolvedModel,
   onError,
 }: StartModelDownloadFlowParams): void {
@@ -92,8 +116,26 @@ export function startModelDownloadFlow({
         return;
       }
 
-      if (!resolvedModel.resolvedFileName) {
+      const projectorLifecycle = selectModelProjectorLifecycleState(resolvedModel);
+      const canReuseDownloadedModelFileForProjector = canDownloadSelectedProjectorWithReusableModelFile(
+        resolvedModel,
+        projectorLifecycle,
+      );
+
+      if (!resolvedModel.resolvedFileName && !canReuseDownloadedModelFileForProjector) {
         Alert.alert(t('models.actionFailedTitle'), t('common.errors.downloadMetadataUnavailable'));
+        return;
+      }
+
+      if (projectorLifecycle.shouldPromptForChoice) {
+        if (onProjectorChoiceRequired) {
+          onProjectorChoiceRequired(resolvedModel);
+        } else {
+          Alert.alert(
+            t('models.vision.projectorChoiceRequiredTitle'),
+            t('models.vision.projectorChoiceRequiredMessage'),
+          );
+        }
         return;
       }
 

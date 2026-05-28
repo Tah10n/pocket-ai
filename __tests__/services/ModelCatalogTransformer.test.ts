@@ -5,6 +5,12 @@ import {
 } from '../../src/services/ModelCatalogTransformer';
 import { CATALOG_SEARCH_VARIANT_LIMIT } from '../../src/services/ModelCatalogFileSelector';
 import { LifecycleStatus } from '../../src/types/models';
+import {
+  ambiguousProjectorCatalogSiblings,
+  projectorFileName,
+  visionCatalogSiblings,
+  visionModelFileName,
+} from '../fixtures/multimodalCatalogFixtures';
 
 const LOCAL_SHA256 = 'b'.repeat(64);
 const OTHER_SHA256 = 'c'.repeat(64);
@@ -98,6 +104,81 @@ describe('ModelCatalogTransformer', () => {
         quantizationLabel: 'Q8_0',
         size: 8_000_000_000,
       }),
+    ]);
+  });
+
+  it('marks vision-capable catalog models and preserves projector candidates as companions', () => {
+    const models = transformHFResponse([
+      {
+        id: 'test-org/vision-chat-model',
+        author: 'test-org',
+        pipeline_tag: 'image-text-to-text',
+        tags: ['gguf', 'vision'],
+        siblings: [...visionCatalogSiblings],
+        sha: 'main',
+      },
+    ], null, null);
+
+    expect(models).toHaveLength(1);
+    expect(models[0]).toEqual(expect.objectContaining({
+      resolvedFileName: visionModelFileName,
+      activeVariantId: visionModelFileName,
+      artifactRole: 'primary_chat_model',
+      chatModalities: ['text', 'vision'],
+      visionSource: 'catalog_metadata',
+      visionConfidence: 'trusted',
+    }));
+    expect(models[0].variants?.map((variant) => variant.fileName)).toEqual([visionModelFileName]);
+    expect(models[0].projectorCandidates).toEqual([
+      expect.objectContaining({
+        ownerModelId: 'test-org/vision-chat-model',
+        fileName: projectorFileName,
+        lifecycleStatus: 'available',
+        matchStatus: 'matched',
+      }),
+    ]);
+    expect(models[0].projectorCandidates?.[0].ownerVariantId).toBeUndefined();
+  });
+
+  it('does not advertise non-GGUF projector-like siblings as downloadable projector artifacts', () => {
+    const models = transformHFResponse([
+      {
+        id: 'test-org/vision-chat-model',
+        author: 'test-org',
+        tags: ['gguf', 'vision'],
+        siblings: [
+          { rfilename: 'mmproj-config.json', size: 2_048 },
+          { rfilename: 'clip_projector.txt', size: 2_048 },
+          { rfilename: 'adapter.mmproj.safetensors', size: 2_048 },
+          { rfilename: visionModelFileName, size: REMOTE_SIZE },
+        ],
+      },
+    ], null, null);
+
+    expect(models).toHaveLength(1);
+    expect(models[0]).toEqual(expect.objectContaining({
+      resolvedFileName: visionModelFileName,
+      activeVariantId: visionModelFileName,
+    }));
+    expect(models[0].projectorCandidates).toBeUndefined();
+  });
+
+  it('keeps ambiguous projector candidates unresolved instead of silently selecting one', () => {
+    const models = transformHFResponse([
+      {
+        id: 'test-org/vision-chat-model',
+        author: 'test-org',
+        tags: ['gguf', 'vision'],
+        siblings: [...ambiguousProjectorCatalogSiblings],
+      },
+    ], null, null);
+
+    expect(models).toHaveLength(1);
+    expect(models[0].projectorCandidates).toHaveLength(2);
+    expect(models[0].selectedProjectorId).toBeUndefined();
+    expect(models[0].projectorCandidates?.map((candidate) => candidate.matchStatus)).toEqual([
+      'ambiguous',
+      'ambiguous',
     ]);
   });
 

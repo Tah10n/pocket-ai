@@ -57,6 +57,7 @@ let lastModelParametersSheetProps: any = null;
 let lastErrorReportSheetProps: any = null;
 let lastContentBlurTargetProps: any = null;
 let lastModelVariantPickerSheetProps: any = null;
+let lastProjectorChoiceSheetProps: any = null;
 const mockEngineState = {
   status: EngineStatus.IDLE,
   activeModelId: undefined as string | undefined,
@@ -275,6 +276,31 @@ jest.mock('../../src/components/ui/ModelVariantPickerSheet', () => {
   };
 });
 
+jest.mock('../../src/components/ui/ProjectorChoiceSheet', () => {
+  const mockReact = jest.requireActual('react');
+  const { Pressable, Text, View } = jest.requireActual('react-native');
+  return {
+    ProjectorChoiceSheet: (props: any) => {
+      lastProjectorChoiceSheetProps = props;
+      return props.visible
+        ? mockReact.createElement(
+          View,
+          null,
+          mockReact.createElement(Text, null, 'projector-choice-sheet'),
+          ...(props.model?.projectorCandidates ?? []).map((projector: any) => mockReact.createElement(
+            Pressable,
+            {
+              key: projector.id,
+              onPress: () => props.onSelectProjector(projector.id),
+            },
+            mockReact.createElement(Text, null, projector.fileName),
+          )),
+        )
+        : null;
+    },
+  };
+});
+
 jest.mock('../../src/components/ui/ErrorReportSheet', () => ({
   ErrorReportSheet: (props: any) => {
     lastErrorReportSheetProps = props;
@@ -419,6 +445,7 @@ describe('ModelDetailsScreen', () => {
     lastErrorReportSheetProps = null;
     lastContentBlurTargetProps = null;
     lastModelVariantPickerSheetProps = null;
+    lastProjectorChoiceSheetProps = null;
     mockFitsInRam.mockResolvedValue(true);
     useDownloadStore.setState({ queue: [], activeDownloadId: null });
     mockEngineState.status = EngineStatus.IDLE;
@@ -462,6 +489,7 @@ describe('ModelDetailsScreen', () => {
     expect(blurTarget).toBeTruthy();
     expect(lastModelParametersSheetProps?.androidContentBlurTargetRef).toBe(blurTarget);
     expect(lastModelVariantPickerSheetProps?.androidContentBlurTargetRef).toBe(blurTarget);
+    expect(lastProjectorChoiceSheetProps?.androidContentBlurTargetRef).toBe(blurTarget);
     expect(lastErrorReportSheetProps?.androidContentBlurTargetRef).toBe(blurTarget);
   });
 
@@ -909,6 +937,53 @@ describe('ModelDetailsScreen', () => {
     expect(screen.getByText('model-parameters-sheet')).toBeTruthy();
   });
 
+  it('keeps text chat available while ambiguous projector status blocks image readiness', async () => {
+    const activeVisionModel = createModel({
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      chatModalities: ['text', 'vision'],
+      projectorCandidates: [
+        {
+          id: 'projector-a',
+          ownerModelId: 'org/model',
+          repoId: 'org/model',
+          fileName: 'mmproj-a.gguf',
+          downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-a.gguf',
+          size: 512_000_000,
+          lifecycleStatus: 'available',
+          matchStatus: 'ambiguous',
+        },
+        {
+          id: 'projector-b',
+          ownerModelId: 'org/model',
+          repoId: 'org/model',
+          fileName: 'mmproj-b.gguf',
+          downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-b.gguf',
+          size: 256_000_000,
+          lifecycleStatus: 'available',
+          matchStatus: 'ambiguous',
+        },
+      ],
+    });
+    const { modelCatalogService } = jest.requireMock('../../src/services/ModelCatalogService');
+    modelCatalogService.getCachedModel.mockReturnValue(activeVisionModel);
+    modelCatalogService.getModelDetails.mockResolvedValue(activeVisionModel);
+    mockEngineState.activeModelId = 'org/model';
+
+    const screen = render(<ModelDetailsScreen />);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText('models.vision.projectorStatusAmbiguousTitle')).toBeTruthy();
+    expect(screen.getByText('models.vision.projectorStatusAmbiguousDescription')).toBeTruthy();
+    expect(screen.getByText('models.chat')).toBeTruthy();
+
+    fireEvent.press(screen.getByText('models.chat'));
+
+    expect(mockRouter.push).toHaveBeenCalledWith('/chat');
+  });
+
   it('shows cancel action while download is in progress', async () => {
     const downloadingModel = createModel({
       lifecycleStatus: LifecycleStatus.AVAILABLE,
@@ -952,6 +1027,106 @@ describe('ModelDetailsScreen', () => {
     expect(screen.getByText('ultrachat_200k')).toBeTruthy();
     expect(screen.getByText('bartowski')).toBeTruthy();
     expect(screen.getByText('Meta')).toBeTruthy();
+  });
+
+  it('continues the details download after choosing a projector for an ambiguous vision model', async () => {
+    const ambiguousVisionModel = createModel({
+      chatModalities: ['text', 'vision'],
+      projectorCandidates: [
+        {
+          id: 'projector-a',
+          ownerModelId: 'org/model',
+          repoId: 'org/model',
+          fileName: 'mmproj-a.gguf',
+          downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-a.gguf',
+          size: 512_000_000,
+          lifecycleStatus: 'available',
+          matchStatus: 'ambiguous',
+        },
+        {
+          id: 'projector-b',
+          ownerModelId: 'org/model',
+          repoId: 'org/model',
+          fileName: 'mmproj-b.gguf',
+          downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-b.gguf',
+          size: 256_000_000,
+          lifecycleStatus: 'available',
+          matchStatus: 'ambiguous',
+        },
+      ],
+    });
+    const { modelCatalogService } = jest.requireMock('../../src/services/ModelCatalogService');
+    modelCatalogService.getCachedModel.mockReturnValue(ambiguousVisionModel);
+    modelCatalogService.getModelDetails.mockResolvedValue(ambiguousVisionModel);
+
+    const screen = render(<ModelDetailsScreen />);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText('models.vision.projectorStatusAmbiguousTitle')).toBeTruthy();
+
+    await act(async () => {
+      fireEvent.press(screen.getByText('models.download'));
+      await Promise.resolve();
+    });
+
+    expect(mockStartDownload).not.toHaveBeenCalled();
+    expect(lastProjectorChoiceSheetProps?.visible).toBe(true);
+    expect(screen.getByText('projector-choice-sheet')).toBeTruthy();
+
+    await act(async () => {
+      lastProjectorChoiceSheetProps.onSelectProjector('projector-b');
+      await Promise.resolve();
+    });
+
+    expect(mockStartDownload).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'org/model',
+      selectedProjectorId: 'projector-b',
+      projectorCandidates: expect.arrayContaining([
+        expect.objectContaining({
+          id: 'projector-b',
+          matchStatus: 'user_selected',
+          matchReason: 'user_selected_projector',
+        }),
+      ]),
+    }));
+  });
+
+  it('renders vision capability and projector metadata in the details flow', async () => {
+    const visionModel = createModel({
+      chatModalities: ['text', 'vision'],
+      artifactRole: 'primary_chat_model',
+      visionSource: 'catalog_metadata',
+      visionConfidence: 'trusted',
+      projectorCandidates: [{
+        id: 'projector-org-model-main-mmproj-model-f16.gguf',
+        ownerModelId: 'org/model',
+        ownerVariantId: 'Llama-3.1-8B-Instruct-Q4_K_M.gguf',
+        repoId: 'org/model',
+        fileName: 'mmproj-model-f16.gguf',
+        downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-model-f16.gguf',
+        size: 536_870_912,
+        lifecycleStatus: 'available',
+        matchStatus: 'matched',
+      }],
+    });
+    const { modelCatalogService } = jest.requireMock('../../src/services/ModelCatalogService');
+    modelCatalogService.getCachedModel.mockReturnValue(visionModel);
+    modelCatalogService.getModelDetails.mockResolvedValue(visionModel);
+
+    const screen = render(<ModelDetailsScreen />);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText('models.vision.badge')).toBeTruthy();
+    expect(screen.getByText('models.vision.capabilityLabel')).toBeTruthy();
+    expect(screen.getByText('models.vision.capabilityNeedsProjector')).toBeTruthy();
+    expect(screen.getByText('models.vision.projectorCandidates')).toBeTruthy();
+    expect(screen.getByText('mmproj-model-f16.gguf')).toBeTruthy();
   });
 
   it('shows memory-fit badges in the details UI without confidence labels', async () => {

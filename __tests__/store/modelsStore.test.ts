@@ -1,5 +1,46 @@
-import { useModelsStore, DEFAULT_FILTERS, DEFAULT_SORT, DISCOVERY_SORT } from '../../src/store/modelsStore';
+import {
+  useModelsStore,
+  DEFAULT_FILTERS,
+  DEFAULT_SORT,
+  DISCOVERY_SORT,
+  clearModelProjectorLocalState,
+  selectModelProjectorLifecycleState,
+} from '../../src/store/modelsStore';
 import { storage } from '../../src/store/storage';
+import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../src/types/models';
+import type { ProjectorArtifact } from '../../src/types/multimodal';
+
+function createProjector(overrides: Partial<ProjectorArtifact> = {}): ProjectorArtifact {
+  return {
+    id: 'projector-org-model-main-mmproj-model.gguf',
+    ownerModelId: 'org/model',
+    repoId: 'org/model',
+    fileName: 'mmproj-model.gguf',
+    downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-model.gguf',
+    size: 1024,
+    lifecycleStatus: 'available',
+    matchStatus: 'matched',
+    ...overrides,
+  };
+}
+
+function createModel(overrides: Partial<ModelMetadata> = {}): ModelMetadata {
+  return {
+    id: 'org/model',
+    name: 'model',
+    author: 'org',
+    size: 1024,
+    downloadUrl: 'https://huggingface.co/org/model/resolve/main/model.gguf',
+    resolvedFileName: 'model.gguf',
+    fitsInRam: true,
+    accessState: ModelAccessState.PUBLIC,
+    isGated: false,
+    isPrivate: false,
+    lifecycleStatus: LifecycleStatus.AVAILABLE,
+    downloadProgress: 0,
+    ...overrides,
+  };
+}
 
 describe('modelsStore', () => {
   beforeEach(async () => {
@@ -134,5 +175,65 @@ describe('modelsStore', () => {
     expect(useModelsStore.getState().tabPreferences.downloaded.filters.fitsInRamOnly).toBe(true);
     expect(useModelsStore.getState().tabPreferences.downloaded.discoveryMode).toBe('custom');
     expect(useModelsStore.getState().tabPreferences.all.discoveryMode).toBe('guided');
+  });
+
+  it('selects projector lifecycle state for ready, ambiguous, and text-only models', () => {
+    expect(selectModelProjectorLifecycleState(createModel()).status).toBe('text_only');
+
+    const readyProjector = createProjector({ lifecycleStatus: 'downloaded', localPath: 'mmproj-model.gguf' });
+    expect(selectModelProjectorLifecycleState(createModel({
+      chatModalities: ['text', 'vision'],
+      projectorCandidates: [readyProjector],
+      selectedProjectorId: readyProjector.id,
+    }))).toEqual(expect.objectContaining({
+      status: 'downloaded',
+      selectedProjector: expect.objectContaining({ id: readyProjector.id }),
+      isReady: true,
+      shouldPromptForChoice: false,
+    }));
+
+    const ambiguousState = selectModelProjectorLifecycleState(createModel({
+      chatModalities: ['text', 'vision'],
+      projectorCandidates: [
+        createProjector({ id: 'projector-a', fileName: 'mmproj-a.gguf', matchStatus: 'ambiguous' }),
+        createProjector({ id: 'projector-b', fileName: 'mmproj-b.gguf', matchStatus: 'ambiguous' }),
+      ],
+    }));
+    expect(ambiguousState).toEqual(expect.objectContaining({
+      status: 'ambiguous',
+      shouldPromptForChoice: true,
+    }));
+    expect(ambiguousState.selectedProjector).toBeUndefined();
+  });
+
+  it('clears local projector lifecycle after model removal while preserving the selected projector', () => {
+    const projector = createProjector({
+      lifecycleStatus: 'active',
+      localPath: 'mmproj-model.gguf',
+      resumeData: 'stale-projector-resume-data',
+      matchStatus: 'user_selected',
+    });
+    const clearedModel = clearModelProjectorLocalState(createModel({
+      chatModalities: ['text', 'vision'],
+      selectedProjectorId: projector.id,
+      projectorCandidates: [projector],
+      multimodalReadiness: {
+        modelId: 'org/model',
+        status: 'ready',
+        support: ['vision'],
+        projectorId: projector.id,
+        checkedAt: 1,
+      },
+    }));
+
+    expect(clearedModel.selectedProjectorId).toBe(projector.id);
+    expect(clearedModel.multimodalReadiness).toBeUndefined();
+    expect(clearedModel.projectorCandidates?.[0]).toEqual(expect.objectContaining({
+      id: projector.id,
+      lifecycleStatus: 'available',
+      localPath: undefined,
+      resumeData: undefined,
+      matchStatus: 'user_selected',
+    }));
   });
 });

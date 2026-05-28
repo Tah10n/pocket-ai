@@ -6,6 +6,7 @@ import {
 import type { MemoryBudgetSnapshot } from '../memory/budget';
 import { isFinitePositiveNumber } from '../memory/guards';
 import { estimateModelRuntimeBytes } from '../memory/estimator';
+import { normalizePositiveByteSize } from './modelSize';
 
 export {
   FITS_IN_RAM_HEADROOM_RATIO,
@@ -22,20 +23,41 @@ export interface MemoryFitAssessment {
   fitsInRam: boolean;
 }
 
+export function getModelMemoryFitInputSizeBytes({
+  modelSizeBytes,
+  projectorSizeBytes,
+}: {
+  modelSizeBytes: number;
+  projectorSizeBytes?: number | null;
+}): number | null {
+  const normalizedModelSize = normalizePositiveByteSize(modelSizeBytes);
+  if (normalizedModelSize === null) {
+    return null;
+  }
+
+  return normalizedModelSize + (normalizePositiveByteSize(projectorSizeBytes) ?? 0);
+}
+
 export function assessModelMemoryFit({
   modelSizeBytes,
+  projectorSizeBytes,
   totalMemoryBytes,
   systemMemorySnapshot,
 }: {
   modelSizeBytes: number;
+  projectorSizeBytes?: number | null;
   totalMemoryBytes: number;
   systemMemorySnapshot?: MemoryBudgetSnapshot | null;
 }): MemoryFitAssessment | null {
-  if (!isFinitePositiveNumber(modelSizeBytes) || !isFinitePositiveNumber(totalMemoryBytes)) {
+  const memoryFitInputSizeBytes = getModelMemoryFitInputSizeBytes({
+    modelSizeBytes,
+    projectorSizeBytes,
+  });
+  if (memoryFitInputSizeBytes === null || !isFinitePositiveNumber(totalMemoryBytes)) {
     return null;
   }
 
-  const estimatedRuntimeBytes = estimateModelRuntimeBytes(modelSizeBytes);
+  const estimatedRuntimeBytes = estimateModelRuntimeBytes(memoryFitInputSizeBytes);
   const { totalBudgetBytes, availableBudgetBytes, effectiveBudgetBytes } = createMemoryBudget({
     totalMemoryBytes,
     systemMemorySnapshot,

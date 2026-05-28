@@ -300,6 +300,56 @@ describe('ModelCard', () => {
     ).toBe(true);
   });
 
+  it('renders a vision badge for vision-capable primary chat models', () => {
+    render(
+      <ModelCard
+        model={{
+          ...buildModel(ModelAccessState.PUBLIC),
+          chatModalities: ['text', 'vision'],
+          artifactRole: 'primary_chat_model',
+          projectorCandidates: [{
+            id: 'projector-org-model-main-mmproj-model-f16.gguf',
+            ownerModelId: 'org/model',
+            repoId: 'org/model',
+            fileName: 'mmproj-model-f16.gguf',
+            downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-model-f16.gguf',
+            size: 536_870_912,
+            lifecycleStatus: 'available',
+            matchStatus: 'matched',
+          }],
+        }}
+        {...buildModelCardHandlers()}
+        isActive={false}
+      />,
+    );
+
+    expect(
+      mockScreenBadge.mock.calls.some(([props]) => (
+        props.tone === 'warning'
+        && props.iconName === 'visibility'
+        && props.children === 'models.vision.badge'
+      )),
+    ).toBe(true);
+  });
+
+  it('does not render a vision badge for projector companion artifacts', () => {
+    render(
+      <ModelCard
+        model={{
+          ...buildModel(ModelAccessState.PUBLIC),
+          chatModalities: ['vision'],
+          artifactRole: 'projector_companion',
+        }}
+        {...buildModelCardHandlers()}
+        isActive={false}
+      />,
+    );
+
+    expect(
+      mockScreenBadge.mock.calls.some(([props]) => props.children === 'models.vision.badge'),
+    ).toBe(false);
+  });
+
   it('renders the active quantization memory badge on the model card row', () => {
     const screen = render(
       <ModelCard

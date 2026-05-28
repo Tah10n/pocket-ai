@@ -6,6 +6,7 @@ import { useChatStore } from '../../src/store/chatStore';
 import { useDownloadStore } from '../../src/store/downloadStore';
 import { useModelsStore } from '../../src/store/modelsStore';
 import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../src/types/models';
+import { chatAttachmentStorageService } from '../../src/services/ChatAttachmentStorageService';
 
 jest.mock('expo-secure-store', () => ({
   isAvailableAsync: jest.fn(async () => true),
@@ -37,6 +38,7 @@ describe('PrivateStorageRecovery', () => {
   beforeEach(() => {
     jest.restoreAllMocks();
     jest.spyOn(registry, 'preserveExistingModelFilesForPrivateStorageReset').mockResolvedValue([]);
+    jest.spyOn(chatAttachmentStorageService, 'deleteAllAttachmentFilesForPrivateStorageReset').mockResolvedValue(undefined);
     useChatStore.setState({ threads: {}, activeThreadId: null });
     useDownloadStore.setState({ queue: [], activeDownloadId: null });
     useModelsStore.setState({
@@ -84,6 +86,7 @@ describe('PrivateStorageRecovery', () => {
     expect(useModelsStore.getState().tabPreferences.all.filters.fitsInRamOnly).toBe(false);
     expect(useModelsStore.getState().tabPreferences.all.discoveryMode).toBe('uninitialized');
     expect(registry.preserveExistingModelFilesForPrivateStorageReset).toHaveBeenCalledTimes(1);
+    expect(chatAttachmentStorageService.deleteAllAttachmentFilesForPrivateStorageReset).toHaveBeenCalledTimes(1);
     expect(registry.getModels()).toEqual([]);
   });
 
@@ -109,6 +112,7 @@ describe('PrivateStorageRecovery', () => {
       localPath: cachedModel.localPath,
     })]);
     expect(registry.preserveExistingModelFilesForPrivateStorageReset).toHaveBeenCalledTimes(1);
+    expect(chatAttachmentStorageService.deleteAllAttachmentFilesForPrivateStorageReset).not.toHaveBeenCalled();
     expect(registry.hasAnyDownloadedModels()).toBe(true);
   });
 });

@@ -1,9 +1,26 @@
-import { assessModelMemoryFit, estimateModelRuntimeBytes, resolveConservativeAvailableMemoryBudget } from '../../src/utils/memoryFit';
+import {
+  assessModelMemoryFit,
+  estimateModelRuntimeBytes,
+  getModelMemoryFitInputSizeBytes,
+  resolveConservativeAvailableMemoryBudget,
+} from '../../src/utils/memoryFit';
 import { estimateAccurateMemoryFit, estimateFastMemoryFit, estimateMemoryFitFromModelSize } from '../../src/memory/estimator';
 
 describe('memoryFit', () => {
   it('estimates runtime bytes with overhead', () => {
     expect(estimateModelRuntimeBytes(100)).toBe(120);
+  });
+
+  it('includes projector bytes in simple memory-fit input size', () => {
+    expect(getModelMemoryFitInputSizeBytes({
+      modelSizeBytes: 100,
+      projectorSizeBytes: 25,
+    })).toBe(125);
+
+    expect(getModelMemoryFitInputSizeBytes({
+      modelSizeBytes: 100,
+      projectorSizeBytes: null,
+    })).toBe(100);
   });
 
   it('derives conservative available memory budgets', () => {
@@ -66,6 +83,19 @@ describe('memoryFit', () => {
         fitsInRam: false,
       }),
     );
+  });
+
+  it('assesses fits-in-ram against model plus projector bytes', () => {
+    const assessment = assessModelMemoryFit({
+      modelSizeBytes: 100,
+      projectorSizeBytes: 25,
+      totalMemoryBytes: 500,
+    });
+
+    expect(assessment).toEqual(expect.objectContaining({
+      estimatedRuntimeBytes: 150,
+      fitsInRam: true,
+    }));
   });
 
   it('returns null for invalid inputs', () => {

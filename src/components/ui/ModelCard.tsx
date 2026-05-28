@@ -8,7 +8,7 @@ import { ValueSelectorRow } from './ValueSelectorRow';
 import { ModelAccessState, type ModelMetadata } from '../../types/models';
 import { getModelVisionCapabilityBadgePresentation } from '../../utils/modelCapabilities';
 import { getVariantMemoryBadgePresentation } from '../../utils/modelMemoryBadgePresentation';
-import { formatModelFileSize } from '../../utils/modelSize';
+import { formatModelFileSize, getModelDisplayArtifactSizeBytes } from '../../utils/modelSize';
 import { canSelectModelVariant, getActiveModelVariant } from '../../utils/modelVariants';
 
 interface ModelCardProps {
@@ -44,7 +44,12 @@ const ModelCardComponent = ({
 }: ModelCardProps) => {
   const { t } = useTranslation();
   const activeVariant = getActiveModelVariant(model);
-  const displaySize = activeVariant?.size ?? model.size;
+  const displaySize = getModelDisplayArtifactSizeBytes(
+    model,
+    activeVariant?.size ?? model.size,
+    activeVariant?.projectorCandidates ?? model.projectorCandidates,
+    activeVariant?.selectedProjectorId ?? model.selectedProjectorId,
+  );
   const sizeLabel = formatModelFileSize(displaySize, t('models.sizeUnknown'));
   const quantizationLabel = activeVariant?.quantizationLabel ?? model.gguf?.sizeLabel?.trim();
   const hasKnownFileSize = typeof displaySize === 'number' && Number.isFinite(displaySize) && displaySize > 0;
@@ -188,7 +193,14 @@ function modelVariantsSignature(model: ModelMetadata): string {
       variant.artifactRole ?? '',
       variant.visionSource ?? '',
       variant.visionConfidence ?? '',
-      variant.projectorCandidates?.map((candidate) => candidate.id).join(',') ?? '',
+      variant.projectorCandidates?.map((candidate) => [
+        candidate.id,
+        candidate.fileName,
+        candidate.localPath ?? '',
+        candidate.size ?? 'unknown',
+        candidate.lifecycleStatus,
+        candidate.matchStatus,
+      ].join(':')).join(',') ?? '',
       variant.selectedProjectorId ?? '',
     ].join('\u001f'))
     .join('\u001e');
@@ -203,6 +215,8 @@ function modelVisionSignature(model: ModelMetadata): string {
     model.projectorCandidates?.map((candidate) => [
       candidate.id,
       candidate.fileName,
+      candidate.localPath ?? '',
+      candidate.size ?? 'unknown',
       candidate.lifecycleStatus,
       candidate.matchStatus,
     ].join(':')).join(',') ?? '',

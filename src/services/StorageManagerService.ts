@@ -23,6 +23,7 @@ import {
 } from '../utils/contextWindow';
 import type { ProjectorArtifact } from '../types/multimodal';
 import {
+  hasTrackableProjectorLocalFile,
   isStoredProjectorArtifact,
   normalizePositiveByteSize,
 } from '../utils/modelSize';
@@ -254,13 +255,15 @@ async function resolveStoredModelSize(model: ModelMetadata): Promise<number | nu
 }
 
 async function resolveStoredProjectorSize(projector: ProjectorArtifact): Promise<number | null> {
-  if (!isStoredProjectorArtifact(projector)) {
+  const shouldStatLocalFile = hasTrackableProjectorLocalFile(projector) && isValidLocalFileName(projector.localPath);
+  const shouldUsePersistedSizeFallback = isStoredProjectorArtifact(projector);
+  if (!shouldUsePersistedSizeFallback && !shouldStatLocalFile) {
     return null;
   }
 
   const persistedSize = normalizePositiveByteSize(projector.size);
   if (!projector.localPath) {
-    return persistedSize;
+    return shouldUsePersistedSizeFallback ? persistedSize : null;
   }
 
   const modelsDir = getModelsDir();
@@ -285,10 +288,11 @@ async function resolveStoredProjectorSize(projector: ProjectorArtifact): Promise
       return Math.round(info.size);
     }
   } catch {
-    // Fall back to persisted projector metadata when local stat lookup fails.
+    // Fall back to persisted metadata only for completed projector files. Partial failed/paused
+    // files should be counted only when the local bytes still exist.
   }
 
-  return persistedSize;
+  return shouldUsePersistedSizeFallback ? persistedSize : null;
 }
 
 async function resolveStoredProjectorCandidates(model: ModelMetadata): Promise<ProjectorArtifact[] | undefined> {
@@ -303,7 +307,19 @@ async function resolveStoredProjectorCandidates(model: ModelMetadata): Promise<P
 
   const resolvedProjectors = model.projectorCandidates.map((projector, index) => {
     const resolvedSize = resolvedSizes[index];
-    if (resolvedSize === null || resolvedSize === projector.size) {
+    if (resolvedSize === null) {
+      if (!isStoredProjectorArtifact(projector) && hasTrackableProjectorLocalFile(projector)) {
+        didChangeProjectorSize = true;
+        return {
+          ...projector,
+          localPath: undefined,
+        };
+      }
+
+      return projector;
+    }
+
+    if (resolvedSize === projector.size) {
       return projector;
     }
 
@@ -494,7 +510,10 @@ function getDownloadedModelsStoredBytes(downloadedModels: ModelMetadata[]): numb
   return downloadedModels.reduce((sum, model) => {
     const modelSizeBytes = normalizePositiveByteSize(model.size) ?? 0;
     const projectorSizeBytes = (model.projectorCandidates ?? []).reduce((projectorSum, projector) => {
-      if (!isStoredProjectorArtifact(projector)) {
+      const hasCountablePartialLocalFile = !isStoredProjectorArtifact(projector)
+        && hasTrackableProjectorLocalFile(projector)
+        && isValidLocalFileName(projector.localPath);
+      if (!isStoredProjectorArtifact(projector) && !hasCountablePartialLocalFile) {
         return projectorSum;
       }
 

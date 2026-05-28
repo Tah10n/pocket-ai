@@ -136,6 +136,7 @@ export function materializeAttachmentDraftsForMessage({
     const id = readNonEmptyString(draft.id);
     const localUri = normalizeChatAttachmentLocalUri(draft.localUri);
     const fileName = resolveDraftFileName(draft);
+    const size = normalizePositiveInteger(draft.size);
 
     if (
       draft.copyStatus !== 'copied'
@@ -143,6 +144,7 @@ export function materializeAttachmentDraftsForMessage({
       || !localUri
       || draft.pathCategory !== CHAT_IMAGE_ATTACHMENT_PATH_CATEGORY
       || !fileName
+      || !size
       || !isSupportedChatImageDraftFormat({ ...draft, fileName })
       || !validateChatImageAttachmentBounds(draft).ok
     ) {
@@ -157,7 +159,7 @@ export function materializeAttachmentDraftsForMessage({
       pathCategory: CHAT_IMAGE_ATTACHMENT_PATH_CATEGORY,
       ...(draft.mediaType ? { mediaType: draft.mediaType } : null),
       fileName,
-      ...(normalizePositiveInteger(draft.size) ? { size: normalizePositiveInteger(draft.size) } : null),
+      size,
       ...(normalizePositiveInteger(draft.width) ? { width: normalizePositiveInteger(draft.width) } : null),
       ...(normalizePositiveInteger(draft.height) ? { height: normalizePositiveInteger(draft.height) } : null),
       source: 'photo_library',

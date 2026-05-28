@@ -34,7 +34,7 @@ import { useModelDetailsController } from '@/hooks/useModelDetailsController';
 import { EngineStatus, LifecycleStatus, ModelAccessState } from '@/types/models';
 import { getModelVisionCapabilityBadgePresentation } from '@/utils/modelCapabilities';
 import { getVariantMemoryBadgePresentation } from '@/utils/modelMemoryBadgePresentation';
-import { formatModelFileSize } from '@/utils/modelSize';
+import { formatModelFileSize, getModelDisplayArtifactSizeBytes } from '@/utils/modelSize';
 import { getModelDetailsTagTone } from '@/utils/modelDetailsPresentation';
 import { canSelectModelVariant, getActiveModelVariant } from '@/utils/modelVariants';
 import { selectModelProjectorLifecycleState } from '@/store/modelsStore';
@@ -112,7 +112,14 @@ export function ModelDetailsScreen() {
     ? getVariantMemoryBadgePresentation(displayModel, activeVariant, { useModelFallback: true })
     : null;
   const detailsMemoryDecision = activeVariant?.ramFit ?? displayModel?.memoryFitDecision;
-  const detailsDisplaySize = activeVariant?.size ?? displayModel?.size ?? null;
+  const detailsDisplaySize = displayModel
+    ? getModelDisplayArtifactSizeBytes(
+      displayModel,
+      activeVariant?.size ?? displayModel.size,
+      activeVariant?.projectorCandidates ?? displayModel.projectorCandidates,
+      activeVariant?.selectedProjectorId ?? displayModel.selectedProjectorId,
+    )
+    : null;
   const shouldShowDetailsMemoryBadge = detailsMemoryBadge !== null && (
     detailsMemoryBadge.tone !== 'neutral'
     || (detailsMemoryDecision === 'unknown' && detailsDisplaySize !== null)

@@ -112,19 +112,22 @@ describe('ChatAttachmentStorageService', () => {
     expect(FileSystem.copyAsync).not.toHaveBeenCalled();
   });
 
-  it('rejects picked images with missing or invalid dimensions before copying into storage', async () => {
-    const service = new ChatAttachmentStorageService();
+  it('accepts picked images with missing or invalid dimensions when copied size is known', async () => {
+    const service = new ChatAttachmentStorageService({
+      now: () => 123,
+      random: () => 0.456,
+    });
 
-    await expect(service.copyImageAssetToDraft({
+    const missingWidthDraft = await service.copyImageAssetToDraft({
       uri: 'ph://library-image-missing-dimensions',
       fileName: 'IMG_MISSING_DIMENSIONS.JPG',
       fileSize: 2048,
       mimeType: 'image/jpeg',
       height: 768,
       type: 'image',
-    } as any)).rejects.toThrow('size limits');
+    } as any);
 
-    await expect(service.copyImageAssetToDraft({
+    const zeroHeightDraft = await service.copyImageAssetToDraft({
       uri: 'ph://library-image-zero-height',
       fileName: 'IMG_ZERO_HEIGHT.JPG',
       fileSize: 2048,
@@ -132,10 +135,21 @@ describe('ChatAttachmentStorageService', () => {
       width: 1024,
       height: 0,
       type: 'image',
-    })).rejects.toThrow('size limits');
+    });
 
-    expect(FileSystem.makeDirectoryAsync).not.toHaveBeenCalled();
-    expect(FileSystem.copyAsync).not.toHaveBeenCalled();
+    expect(missingWidthDraft).toEqual(expect.objectContaining({
+      copyStatus: 'copied',
+      size: 1234,
+      height: 768,
+    }));
+    expect(missingWidthDraft.width).toBeUndefined();
+    expect(zeroHeightDraft).toEqual(expect.objectContaining({
+      copyStatus: 'copied',
+      size: 1234,
+      width: 1024,
+    }));
+    expect(zeroHeightDraft.height).toBeUndefined();
+    expect(FileSystem.copyAsync).toHaveBeenCalledTimes(2);
   });
 
   it('deletes copied files that exceed the byte limit after copy', async () => {
@@ -341,6 +355,40 @@ describe('ChatAttachmentStorageService', () => {
         size: MAX_CHAT_IMAGE_ATTACHMENT_BYTES + 1,
       }],
     })).toThrow('not ready to send');
+  });
+
+  it('rejects copied drafts without a positive verified copied file size', () => {
+    const invalidSizes = [undefined, 0, Number.NaN] as const;
+
+    invalidSizes.forEach((size) => {
+      expect(() => materializeAttachmentDraftsForMessage({
+        threadId: chatAttachmentThreadId,
+        messageId: chatAttachmentMessageId,
+        drafts: [{
+          ...copiedDraftImageAttachment,
+          size,
+        }],
+      })).toThrow('not ready to send');
+    });
+  });
+
+  it('materializes copied drafts with positive size and missing dimensions', () => {
+    expect(materializeAttachmentDraftsForMessage({
+      threadId: chatAttachmentThreadId,
+      messageId: chatAttachmentMessageId,
+      drafts: [{
+        ...copiedDraftImageAttachment,
+        width: undefined,
+        height: undefined,
+      }],
+      now: () => 1_780_000_000_000,
+    })).toEqual([
+      expect.objectContaining({
+        id: 'draft-image-1',
+        size: 123_456,
+        createdAt: 1_780_000_000_000,
+      }),
+    ]);
   });
 
   it('discards only copied drafts inside the app-owned attachment directory', async () => {

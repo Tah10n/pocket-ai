@@ -233,6 +233,87 @@ describe('StorageManagerService', () => {
     );
   });
 
+  it('includes existing failed projector partial files in model storage metrics', async () => {
+    mockedRegistry.getModels.mockReturnValue([
+      createDownloadedModel({
+        projectorCandidates: [
+          createDownloadedProjector({
+            id: 'org/model:failed-projector',
+            lifecycleStatus: 'failed',
+            matchStatus: 'failed',
+            localPath: 'mmproj-partial.gguf',
+            size: 1024,
+            resumeData: 'projector-resume-data',
+          }),
+        ],
+      }),
+    ]);
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (uri === 'test-cache/') {
+        return { exists: false };
+      }
+
+      if (uri === 'test-models/org_model.gguf') {
+        return { exists: true, size: 4096 };
+      }
+
+      if (uri === 'test-models/mmproj-partial.gguf') {
+        return { exists: true, size: 1536 };
+      }
+
+      return { exists: false };
+    });
+
+    const metrics = await getAppStorageMetrics();
+
+    expect(FileSystem.getInfoAsync).toHaveBeenCalledWith('test-models/mmproj-partial.gguf');
+    expect(metrics.modelsBytes).toBe(5632);
+    expect(metrics.downloadedModels[0].projectorCandidates?.[0]).toEqual(
+      expect.objectContaining({
+        id: 'org/model:failed-projector',
+        size: 1536,
+        localPath: 'mmproj-partial.gguf',
+      }),
+    );
+  });
+
+  it('does not count missing failed projector partial files in model storage metrics', async () => {
+    mockedRegistry.getModels.mockReturnValue([
+      createDownloadedModel({
+        projectorCandidates: [
+          createDownloadedProjector({
+            id: 'org/model:failed-projector',
+            lifecycleStatus: 'failed',
+            matchStatus: 'failed',
+            localPath: 'mmproj-missing-partial.gguf',
+            size: 4096,
+          }),
+        ],
+      }),
+    ]);
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (uri === 'test-cache/') {
+        return { exists: false };
+      }
+
+      if (uri === 'test-models/org_model.gguf') {
+        return { exists: true, size: 4096 };
+      }
+
+      if (uri === 'test-models/mmproj-missing-partial.gguf') {
+        return { exists: false };
+      }
+
+      return { exists: false };
+    });
+
+    const metrics = await getAppStorageMetrics();
+
+    expect(metrics.modelsBytes).toBe(4096);
+    expect(metrics.downloadedModels[0].projectorCandidates?.[0]?.id).toBe('org/model:failed-projector');
+    expect(metrics.downloadedModels[0].projectorCandidates?.[0]?.localPath).toBeUndefined();
+  });
+
   it('deduplicates shared downloaded projector files across model storage metrics', async () => {
     mockedRegistry.getModels.mockReturnValue([
       createDownloadedModel({

@@ -1638,17 +1638,70 @@ describe('ModelDownloadManager Basic', () => {
       code: 'download_http_error',
     });
 
-    const entry = useDownloadStore.getState().queue.find((model) => model.id === mockModel.id);
-    expect(entry?.lifecycleStatus).toBe(LifecycleStatus.FAILED);
-    expect(entry?.localPath).toEqual(expect.stringMatching(/^model-main-[a-z0-9]+\.gguf$/));
-    expect(entry?.downloadProgress).toBe(1);
-    expect(entry?.downloadIntegrity).toEqual(expect.objectContaining({ kind: 'size', sizeBytes: 1000 }));
-    expect(entry?.resumeData).toBeUndefined();
-    expect(entry?.projectorCandidates?.[0]).toEqual(expect.objectContaining({
-      id: mockProjector.id,
-      lifecycleStatus: 'failed',
-      matchStatus: 'failed',
-      matchReason: 'download_http_error',
+    expect(mockedRegistry.updateModel).toHaveBeenCalledWith(expect.objectContaining({
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      localPath: expect.stringMatching(/^model-main-[a-z0-9]+\.gguf$/),
+      downloadProgress: 1,
+      downloadIntegrity: expect.objectContaining({ kind: 'size', sizeBytes: 1000 }),
+      resumeData: undefined,
+      downloadErrorAt: undefined,
+      downloadErrorCode: undefined,
+      downloadErrorMessage: undefined,
+      projectorCandidates: [expect.objectContaining({
+        id: mockProjector.id,
+        lifecycleStatus: 'failed',
+        matchStatus: 'failed',
+        matchReason: 'download_http_error',
+      })],
+    }));
+    expect(useDownloadStore.getState().queue.find((model) => model.id === mockModel.id)).toBeUndefined();
+    expect(useDownloadStore.getState().activeDownloadId).toBeNull();
+  });
+
+  it('preserves failed projector localPath when HTTP failure has no resume snapshot', async () => {
+    let modelDownloaded = false;
+    (FileSystem.createDownloadResumable as jest.Mock).mockImplementation((url: string, localUri: string) => ({
+      downloadAsync: jest.fn().mockImplementation(async () => {
+        if (url === mockProjector.downloadUrl || localUri.includes('mmproj')) {
+          return { status: 500 };
+        }
+        modelDownloaded = true;
+        return { status: 200 };
+      }),
+      pauseAsync: jest.fn().mockResolvedValue(undefined),
+      savable: jest.fn(() => undefined),
+    }));
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (!uri.startsWith('test-dir/models/')) {
+        return { exists: true, size: 1000 };
+      }
+
+      if (uri.includes('mmproj')) {
+        return { exists: false, size: 0 };
+      }
+
+      return modelDownloaded ? { exists: true, size: 1000 } : { exists: false, size: 0 };
+    });
+    useDownloadStore.setState({
+      queue: [{ ...mockModel, projectorCandidates: [mockProjector], lifecycleStatus: LifecycleStatus.QUEUED }],
+      activeDownloadId: mockModel.id,
+    });
+
+    await expect(runDownloadModel({ projectorCandidates: [mockProjector] })).rejects.toMatchObject({
+      code: 'download_http_error',
+    });
+
+    expect(mockedRegistry.updateModel).toHaveBeenCalledWith(expect.objectContaining({
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      projectorCandidates: [expect.objectContaining({
+        id: mockProjector.id,
+        lifecycleStatus: 'failed',
+        matchStatus: 'failed',
+        matchReason: 'download_http_error',
+        localPath: expect.stringMatching(/^model-mmproj-model-main-[a-z0-9]+\.gguf$/),
+        resumeData: undefined,
+        downloadProgress: undefined,
+      })],
     }));
   });
 
@@ -1693,22 +1746,31 @@ describe('ModelDownloadManager Basic', () => {
         code: 'download_verification_failed',
       });
 
-      const entry = useDownloadStore.getState().queue.find((model) => model.id === mockModel.id);
-      expect(entry).toEqual(expect.objectContaining({
-        lifecycleStatus: LifecycleStatus.FAILED,
+      expect(mockedRegistry.updateModel).toHaveBeenCalledWith(expect.objectContaining({
+        lifecycleStatus: LifecycleStatus.DOWNLOADED,
         localPath: expect.stringMatching(/^model-main-[a-z0-9]+\.gguf$/),
         downloadProgress: 1,
         metadataTrust: 'verified_local',
         resumeData: undefined,
+        downloadErrorAt: undefined,
+        downloadErrorCode: undefined,
+        downloadErrorMessage: undefined,
+        projectorCandidates: [expect.objectContaining({
+          id: mockProjector.id,
+          lifecycleStatus: 'failed',
+          matchStatus: 'failed',
+          matchReason: 'download_verification_failed',
+          resumeData: undefined,
+        })],
       }));
-      expect(entry?.downloadIntegrity).toEqual(expect.objectContaining({ kind: 'sha256', sha256: VALID_SHA256, sizeBytes: 1000 }));
-      expect(entry?.projectorCandidates?.[0]).toEqual(expect.objectContaining({
-        id: mockProjector.id,
-        lifecycleStatus: 'failed',
-        matchStatus: 'failed',
-        matchReason: 'download_verification_failed',
+      const completedModel = mockedRegistry.updateModel.mock.calls[mockedRegistry.updateModel.mock.calls.length - 1]?.[0];
+      expect(completedModel?.downloadIntegrity).toEqual(expect.objectContaining({
+        kind: 'sha256',
+        sha256: VALID_SHA256,
+        sizeBytes: 1000,
       }));
-      expect(entry?.projectorCandidates?.[0]?.resumeData).toBeUndefined();
+      expect(useDownloadStore.getState().queue.find((model) => model.id === mockModel.id)).toBeUndefined();
+      expect(useDownloadStore.getState().activeDownloadId).toBeNull();
     } finally {
       verifySpy.mockRestore();
     }
@@ -1805,17 +1867,23 @@ describe('ModelDownloadManager Basic', () => {
       code: 'download_file_missing',
     });
 
-    const entry = useDownloadStore.getState().queue.find((model) => model.id === mockModel.id);
-    expect(entry?.lifecycleStatus).toBe(LifecycleStatus.FAILED);
-    expect(entry?.downloadProgress).toBe(1);
-    expect(entry?.downloadIntegrity).toEqual(expect.objectContaining({ kind: 'size', sizeBytes: 1000 }));
-    expect(entry?.projectorCandidates?.[0]).toEqual(expect.objectContaining({
-      id: mockProjector.id,
-      lifecycleStatus: 'failed',
-      matchStatus: 'failed',
-      matchReason: 'download_file_missing',
+    expect(mockedRegistry.updateModel).toHaveBeenCalledWith(expect.objectContaining({
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      downloadIntegrity: expect.objectContaining({ kind: 'size', sizeBytes: 1000 }),
+      downloadErrorAt: undefined,
+      downloadErrorCode: undefined,
+      downloadErrorMessage: undefined,
+      projectorCandidates: [expect.objectContaining({
+        id: mockProjector.id,
+        lifecycleStatus: 'failed',
+        matchStatus: 'failed',
+        matchReason: 'download_file_missing',
+        resumeData: undefined,
+      })],
     }));
-    expect(entry?.projectorCandidates?.[0]?.resumeData).toBeUndefined();
+    expect(useDownloadStore.getState().queue.find((model) => model.id === mockModel.id)).toBeUndefined();
+    expect(useDownloadStore.getState().activeDownloadId).toBeNull();
   });
 
   it('retries failed selected projector artifacts with a fresh companion download', async () => {

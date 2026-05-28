@@ -26,6 +26,8 @@ import {
   resolveDeterministicProjectorCandidate,
 } from '../utils/modelProjectors';
 import { normalizeSha256Digest } from '../utils/sha256';
+import { getModelMemoryFitInputSizeBytes } from '../utils/memoryFit';
+import { getProjectorMemoryFitSizeBytes } from '../utils/modelSize';
 import {
   buildCatalogModelVariantsFromRankedEntries,
   CATALOG_SEARCH_VARIANT_LIMIT,
@@ -63,6 +65,7 @@ export function parseHuggingFaceLastModifiedAt(value: unknown): number | undefin
 export function resolveMemoryFitSummary(
   model: Pick<ModelMetadata, 'size' | 'metadataTrust' | 'gguf'>,
   memoryFitContext: MemoryFitContext,
+  options: { projectorSizeBytes?: number | null } = {},
 ): {
   fitsInRam: boolean | null;
   decision: ModelMemoryFitDecision;
@@ -77,8 +80,13 @@ export function resolveMemoryFitSummary(
     return null;
   }
 
-  const fit = estimateFastMemoryFit({
+  const memoryFitInputSize = getModelMemoryFitInputSizeBytes({
     modelSizeBytes: size,
+    projectorSizeBytes: options.projectorSizeBytes,
+  }) ?? size;
+
+  const fit = estimateFastMemoryFit({
+    modelSizeBytes: memoryFitInputSize,
     totalMemoryBytes: memoryFitContext.totalMemoryBytes,
     metadataTrust: model.metadataTrust,
     ggufMetadata: model.gguf as Record<string, unknown> | undefined,
@@ -96,18 +104,25 @@ export function resolveMemoryFitSummary(
 export function attachMemoryFitToVariants(
   variants: ModelVariant[],
   memoryFitContext: MemoryFitContext,
+  options: {
+    resolveProjectorSizeBytes?: (variant: ModelVariant) => number | null | undefined;
+  } = {},
 ): ModelVariant[] {
   if (!memoryFitContext) {
     return variants;
   }
 
   return variants.map((variant) => {
-    const resolvedMemoryFit = resolveMemoryFitSummary({
-      size: variant.size,
-      metadataTrust: typeof variant.size === 'number' && Number.isFinite(variant.size) && variant.size > 0
-        ? 'trusted_remote'
-        : undefined,
-    }, memoryFitContext);
+    const resolvedMemoryFit = resolveMemoryFitSummary(
+      {
+        size: variant.size,
+        metadataTrust: typeof variant.size === 'number' && Number.isFinite(variant.size) && variant.size > 0
+          ? 'trusted_remote'
+          : undefined,
+      },
+      memoryFitContext,
+      { projectorSizeBytes: options.resolveProjectorSizeBytes?.(variant) },
+    );
 
     return resolvedMemoryFit
       ? {
@@ -383,6 +398,30 @@ export function buildProjectorCandidatesFromEntries(
   }));
 }
 
+function resolveVariantProjectorMemoryFitSizeBytes({
+  entries,
+  repoId,
+  hfRevision,
+  ownerModelId,
+  variant,
+}: {
+  entries: (HuggingFaceSibling | HuggingFaceTreeEntry)[];
+  repoId: string;
+  hfRevision?: string;
+  ownerModelId: string;
+  variant: ModelVariant;
+}): number {
+  const projectorCandidates = buildProjectorCandidatesFromEntries(entries, {
+    repoId,
+    hfRevision,
+    ownerModelId,
+    ownerVariantId: variant.variantId,
+    ownerFileName: variant.fileName,
+  });
+
+  return getProjectorMemoryFitSizeBytes(projectorCandidates, variant.selectedProjectorId);
+}
+
 function getVisionMetadataPatch(options: {
   item: HuggingFaceModelSummary;
   projectorCandidates?: ProjectorArtifact[];
@@ -526,7 +565,15 @@ export function transformHFResponse(
     const rankedGgufSiblings = rankCatalogGgufEntries(siblings);
     const variants = attachMemoryFitToVariants(buildCatalogModelVariantsFromRankedEntries(rankedGgufSiblings, {
       limit: CATALOG_SEARCH_VARIANT_LIMIT,
-    }), memoryFitContext);
+    }), memoryFitContext, {
+      resolveProjectorSizeBytes: (variant) => resolveVariantProjectorMemoryFitSizeBytes({
+        entries: siblings,
+        repoId,
+        hfRevision: item.sha ?? undefined,
+        ownerModelId: repoId,
+        variant,
+      }),
+    });
     const ggufSibling = rankedGgufSiblings[0];
     if (!ggufSibling) {
       if (!hasUnsupportedMtpGgufSibling && probeCandidate) {
@@ -563,8 +610,6 @@ export function transformHFResponse(
         ? { slidingWindowTokens }
         : {}),
     };
-    const resolvedMemoryFit = resolveMemoryFitSummary({ size, metadataTrust }, memoryFitContext);
-    const fitsInRam = resolvedMemoryFit?.fitsInRam ?? null;
     const fileName = getFileName(ggufSibling) || 'model.gguf';
     const hfRevision = item.sha ?? undefined;
     const projectorCandidates = buildProjectorCandidatesFromEntries(siblings, {
@@ -573,6 +618,12 @@ export function transformHFResponse(
       ownerModelId: repoId,
       ownerFileName: fileName,
     });
+    const resolvedMemoryFit = resolveMemoryFitSummary(
+      { size, metadataTrust },
+      memoryFitContext,
+      { projectorSizeBytes: getProjectorMemoryFitSizeBytes(projectorCandidates) },
+    );
+    const fitsInRam = resolvedMemoryFit?.fitsInRam ?? null;
     const visionMetadata = getVisionMetadataPatch({
       item,
       projectorCandidates,
@@ -631,7 +682,15 @@ export function buildModelMetadataFromPayload(
     limit: CATALOG_SEARCH_VARIANT_LIMIT,
     includeFileNames: [fallbackModel.resolvedFileName, fallbackModel.activeVariantId],
     includeVariantIds: [fallbackModel.activeVariantId],
-  }), memoryFitContext);
+  }), memoryFitContext, {
+    resolveProjectorSizeBytes: (variant) => resolveVariantProjectorMemoryFitSizeBytes({
+      entries: siblings,
+      repoId,
+      hfRevision,
+      ownerModelId: repoId,
+      variant,
+    }),
+  });
   const fallbackSelectedEntry = fallbackModel.resolvedFileName
     ? rankedGgufSiblings.find((entry) => getFileName(entry) === fallbackModel.resolvedFileName)
     : undefined;
@@ -708,7 +767,11 @@ export function buildModelMetadataFromPayload(
         ...ggufFromPayload,
       }
     : canUseFallbackVerifiedDerivedMetadata ? fallbackModel.gguf : undefined;
-  const resolvedMemoryFit = resolveMemoryFitSummary({ size, metadataTrust: metadataTrustFromPayload }, memoryFitContext);
+  const resolvedMemoryFit = resolveMemoryFitSummary(
+    { size, metadataTrust: metadataTrustFromPayload },
+    memoryFitContext,
+    { projectorSizeBytes: getProjectorMemoryFitSizeBytes(projectorCandidates, fallbackModel.selectedProjectorId) },
+  );
   const fitsInRam = resolvedMemoryFit?.fitsInRam ?? (canUseFallbackVerifiedDerivedMetadata ? fallbackModel.fitsInRam : null);
   const memoryFitDecision = resolvedMemoryFit?.decision ?? (canUseFallbackVerifiedDerivedMetadata ? fallbackModel.memoryFitDecision : undefined);
   const memoryFitConfidence = resolvedMemoryFit?.confidence ?? (canUseFallbackVerifiedDerivedMetadata ? fallbackModel.memoryFitConfidence : undefined);

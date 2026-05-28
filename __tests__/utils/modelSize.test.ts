@@ -1,7 +1,9 @@
 import {
   DECIMAL_GIGABYTE,
   formatModelFileSize,
+  getModelDisplayArtifactSizeBytes,
   getModelStoredArtifactsSizeBytes,
+  getProjectorMemoryFitSizeBytes,
   getProjectorArtifactsSizeBytes,
   getStoredProjectorArtifactsSizeBytes,
   normalizePositiveByteSize,
@@ -70,6 +72,43 @@ describe('modelSize', () => {
         },
       ],
     })).toBe(1_250);
+  });
+
+  it('uses the selected or matched projector size for display and memory-fit totals', () => {
+    const projectorCandidates = [
+      {
+        id: 'projector-a',
+        ownerModelId: 'model-a',
+        repoId: 'repo',
+        fileName: 'projector-a.gguf',
+        downloadUrl: 'https://example.com/projector-a.gguf',
+        size: 250,
+        lifecycleStatus: 'available' as const,
+        matchStatus: 'matched' as const,
+      },
+      {
+        id: 'projector-b',
+        ownerModelId: 'model-a',
+        repoId: 'repo',
+        fileName: 'projector-b.gguf',
+        downloadUrl: 'https://example.com/projector-b.gguf',
+        size: 500,
+        lifecycleStatus: 'available' as const,
+        matchStatus: 'ambiguous' as const,
+      },
+    ];
+
+    expect(getProjectorMemoryFitSizeBytes(projectorCandidates)).toBe(250);
+    expect(getModelDisplayArtifactSizeBytes({
+      size: 1_000,
+      projectorCandidates,
+    })).toBe(1_250);
+    expect(getProjectorMemoryFitSizeBytes(projectorCandidates, 'projector-b')).toBe(500);
+    expect(getModelDisplayArtifactSizeBytes({
+      size: 1_000,
+      projectorCandidates,
+      selectedProjectorId: 'projector-b',
+    })).toBe(1_500);
   });
 });
 

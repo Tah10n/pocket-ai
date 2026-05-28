@@ -783,6 +783,201 @@ describe('ModelCatalogService regressions', () => {
     expect(model.visionConfidence).toBeUndefined();
   });
 
+  it('keeps projector-aware likely OOM through tree merge, cache, and local recomputes', async () => {
+    const modelId = 'org/projector-memory-rv03';
+    const modelFileName = 'model.Q4_K_M.gguf';
+    const projectorFileName = 'mmproj-model-f16.gguf';
+    const baseSizeBytes = 1 * 1024 * 1024 * 1024;
+    const projectorSizeBytes = 4 * 1024 * 1024 * 1024;
+    const { localProjector } = makeDownloadedVisionModelWithProjector({
+      modelId,
+      modelFileName,
+      projectorFileName,
+      projectorSize: projectorSizeBytes,
+      projectorSha256: PROJECTOR_SHA256,
+    });
+    const localModel: ModelMetadata = {
+      id: modelId,
+      name: 'Projector Memory RV03',
+      author: 'org',
+      size: baseSizeBytes,
+      downloadUrl: `https://huggingface.co/${modelId}/resolve/main/${modelFileName}`,
+      hfRevision: 'main',
+      resolvedFileName: modelFileName,
+      localPath: modelFileName,
+      downloadedAt: 1234,
+      fitsInRam: true,
+      memoryFitDecision: 'fits_high_confidence',
+      memoryFitConfidence: 'high',
+      accessState: ModelAccessState.PUBLIC,
+      isGated: false,
+      isPrivate: false,
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      metadataTrust: 'trusted_remote',
+      chatModalities: ['text', 'vision'],
+      projectorCandidates: [localProjector],
+      selectedProjectorId: localProjector.id,
+    };
+
+    (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(4 * 1024 * 1024 * 1024);
+    mockedRegistry.getModels.mockReturnValue([localModel]);
+    mockedRegistry.getModel.mockImplementation((id) => (id === modelId ? localModel : undefined));
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      if (String(input).includes('/tree/main?recursive=true')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          headers: { get: jest.fn(() => null) },
+          json: () => Promise.resolve([
+            { path: modelFileName, size: baseSizeBytes, lfs: { sha256: TREE_SHA256 } },
+            { path: projectorFileName, size: projectorSizeBytes, lfs: { sha256: PROJECTOR_SHA256 } },
+          ]),
+        });
+      }
+
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: { get: jest.fn(() => null) },
+        json: () => Promise.resolve([{
+          id: modelId,
+          pipeline_tag: 'text-generation',
+          tags: ['gguf', 'chat', 'vision'],
+          siblings: [{ rfilename: modelFileName }],
+        }]),
+      });
+    }) as jest.Mock;
+
+    const onlineResult = await service.searchModels('rv03 remote');
+    const cachedResult = service.getCachedSearchResult('rv03 remote');
+    const cachedModel = service.getCachedModel(modelId);
+
+    (hardwareListenerService.getCurrentStatus as jest.Mock).mockReturnValue({ isConnected: false });
+    const localSearchResult = await service.searchModels('Projector Memory RV03');
+
+    for (const model of [
+      onlineResult.models[0],
+      cachedResult?.models[0],
+      cachedModel,
+      localSearchResult.models[0],
+    ]) {
+      expect(model).toEqual(expect.objectContaining({
+        id: modelId,
+        fitsInRam: false,
+        memoryFitDecision: 'likely_oom',
+      }));
+    }
+  });
+
+  it('counts a preserved selected projector during ambiguous tree memory-fit recomputes', async () => {
+    const modelId = 'org/selected-projector-memory-rv03';
+    const modelFileName = 'model.Q4_K_M.gguf';
+    const selectedProjectorFileName = 'mmproj-alpha-f16.gguf';
+    const otherProjectorFileName = 'mmproj-beta-f16.gguf';
+    const baseSizeBytes = 1 * 1024 * 1024 * 1024;
+    const selectedProjectorSizeBytes = 4 * 1024 * 1024 * 1024;
+    const otherProjectorSizeBytes = 512 * 1024 * 1024;
+    const selectedProjectorId = buildProjectorArtifactId({
+      repoId: modelId,
+      hfRevision: 'main',
+      fileName: selectedProjectorFileName,
+    });
+    const otherProjectorId = buildProjectorArtifactId({
+      repoId: modelId,
+      hfRevision: 'main',
+      fileName: otherProjectorFileName,
+    });
+    const localModel: ModelMetadata = {
+      id: modelId,
+      name: 'Selected Projector Memory RV03',
+      author: 'org',
+      size: baseSizeBytes,
+      downloadUrl: `https://huggingface.co/${modelId}/resolve/main/${modelFileName}`,
+      hfRevision: 'main',
+      resolvedFileName: modelFileName,
+      fitsInRam: true,
+      memoryFitDecision: 'fits_high_confidence',
+      memoryFitConfidence: 'high',
+      accessState: ModelAccessState.PUBLIC,
+      isGated: false,
+      isPrivate: false,
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+      metadataTrust: 'trusted_remote',
+      chatModalities: ['text', 'vision'],
+      projectorCandidates: [
+        {
+          id: selectedProjectorId,
+          ownerModelId: modelId,
+          repoId: modelId,
+          fileName: selectedProjectorFileName,
+          downloadUrl: `https://huggingface.co/${modelId}/resolve/main/${selectedProjectorFileName}`,
+          hfRevision: 'main',
+          size: selectedProjectorSizeBytes,
+          lifecycleStatus: 'available',
+          matchStatus: 'user_selected',
+          matchReason: 'user_selected_projector',
+        },
+        {
+          id: otherProjectorId,
+          ownerModelId: modelId,
+          repoId: modelId,
+          fileName: otherProjectorFileName,
+          downloadUrl: `https://huggingface.co/${modelId}/resolve/main/${otherProjectorFileName}`,
+          hfRevision: 'main',
+          size: otherProjectorSizeBytes,
+          lifecycleStatus: 'available',
+          matchStatus: 'ambiguous',
+          matchReason: 'multiple_projector_candidates',
+        },
+      ],
+      selectedProjectorId,
+    };
+
+    (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(4 * 1024 * 1024 * 1024);
+    mockedRegistry.getModel.mockImplementation((id) => (id === modelId ? localModel : undefined));
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      if (String(input).includes('/tree/main?recursive=true')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          headers: { get: jest.fn(() => null) },
+          json: () => Promise.resolve([
+            { path: modelFileName, size: baseSizeBytes, lfs: { sha256: TREE_SHA256 } },
+            { path: selectedProjectorFileName, size: selectedProjectorSizeBytes, lfs: { sha256: PROJECTOR_SHA256 } },
+            { path: otherProjectorFileName, size: otherProjectorSizeBytes, lfs: { sha256: DIFFERENT_PROJECTOR_SHA256 } },
+          ]),
+        });
+      }
+
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: { get: jest.fn(() => null) },
+        json: () => Promise.resolve([{
+          id: modelId,
+          pipeline_tag: 'text-generation',
+          tags: ['gguf', 'chat', 'vision'],
+          siblings: [{ rfilename: modelFileName }],
+        }]),
+      });
+    }) as jest.Mock;
+
+    const result = await service.searchModels('selected projector rv03');
+    const model = result.models[0];
+
+    expect(model).toEqual(expect.objectContaining({
+      id: modelId,
+      selectedProjectorId,
+      fitsInRam: false,
+      memoryFitDecision: 'likely_oom',
+    }));
+    expect(model.variants?.find((variant) => variant.fileName === modelFileName)).toEqual(expect.objectContaining({
+      ramFit: 'likely_oom',
+    }));
+  });
+
   it('keeps size-known gated repos authorized when access validation temporarily fails with a non-auth error', async () => {
     await huggingFaceTokenService.saveToken('hf_test_token');
 

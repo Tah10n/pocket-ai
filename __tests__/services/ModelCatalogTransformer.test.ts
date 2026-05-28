@@ -140,6 +140,28 @@ describe('ModelCatalogTransformer', () => {
     expect(models[0].projectorCandidates?.[0].ownerVariantId).toBeUndefined();
   });
 
+  it('includes matched projector bytes in catalog memory-fit estimates', () => {
+    const models = transformHFResponse([
+      {
+        id: 'test-org/vision-chat-model',
+        author: 'test-org',
+        tags: ['gguf', 'vision'],
+        siblings: [
+          { rfilename: 'vision-model.Q4_K_M.gguf', size: 100_000_000 },
+          { rfilename: 'vision-model.mmproj.gguf', size: 1_600_000_000 },
+        ],
+      },
+    ], { totalMemoryBytes: 2_000_000_000 }, null);
+
+    expect(models).toHaveLength(1);
+    expect(models[0].fitsInRam).toBe(false);
+    expect(models[0].memoryFitDecision).toBe('likely_oom');
+    expect(models[0].variants?.[0]).toEqual(expect.objectContaining({
+      fileName: 'vision-model.Q4_K_M.gguf',
+      ramFit: 'likely_oom',
+    }));
+  });
+
   it('does not advertise non-GGUF projector-like siblings as downloadable projector artifacts', () => {
     const models = transformHFResponse([
       {

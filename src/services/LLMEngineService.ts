@@ -243,10 +243,39 @@ function getMessagesMediaPaths(messages: readonly LlmChatMessage[]): string[] {
   return normalizeMediaPaths(messages.flatMap((message) => getMessageMediaPaths(message)));
 }
 
+function getLatestUserMessageIndex(messages: readonly LlmChatMessage[]): number {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index].role === 'user') {
+      return index;
+    }
+  }
+
+  return -1;
+}
+
+function getLatestUserMessageMediaPaths(messages: readonly LlmChatMessage[]): string[] {
+  const latestUserMessageIndex = getLatestUserMessageIndex(messages);
+  if (latestUserMessageIndex < 0) {
+    return [];
+  }
+
+  return getMessageMediaPaths(messages[latestUserMessageIndex]);
+}
+
+function withoutMessageMedia(message: LlmChatMessage): LlmChatMessage {
+  if (!message.mediaPaths?.length && !message.attachments?.length) {
+    return message;
+  }
+
+  const { mediaPaths: _mediaPaths, attachments: _attachments, ...messageWithoutMedia } = message;
+  return messageWithoutMedia;
+}
+
 function withResolvedMediaPaths(message: LlmChatMessage): LlmChatMessage {
   const mediaPaths = getMessageMediaPaths(message);
+  const { mediaPaths: _mediaPaths, ...messageWithoutMediaPaths } = message;
   return {
-    ...message,
+    ...messageWithoutMediaPaths,
     ...(mediaPaths.length > 0 ? { mediaPaths } : null),
   };
 }
@@ -257,35 +286,20 @@ function mergeTopLevelMediaPathsIntoLatestUserMessage(
 ): LlmChatMessage[] {
   const normalizedTopLevelMediaPaths = normalizeMediaPaths(mediaPaths);
   const resolvedMessages = messages.map(withResolvedMediaPaths);
-  if (normalizedTopLevelMediaPaths.length === 0) {
-    return resolvedMessages;
-  }
-
-  const latestUserMessageIndex = (() => {
-    for (let index = resolvedMessages.length - 1; index >= 0; index -= 1) {
-      if (resolvedMessages[index].role === 'user') {
-        return index;
-      }
-    }
-
-    return -1;
-  })();
+  const latestUserMessageIndex = getLatestUserMessageIndex(resolvedMessages);
 
   if (latestUserMessageIndex < 0) {
-    return resolvedMessages;
+    return resolvedMessages.map(withoutMessageMedia);
   }
 
   const existingMessageMediaPaths = new Set(getMessagesMediaPaths(resolvedMessages));
   const mediaPathsToAppend = normalizedTopLevelMediaPaths.filter(
     (mediaPath) => !existingMessageMediaPaths.has(mediaPath),
   );
-  if (mediaPathsToAppend.length === 0) {
-    return resolvedMessages;
-  }
 
   return resolvedMessages.map((message, index) => {
     if (index !== latestUserMessageIndex) {
-      return message;
+      return withoutMessageMedia(message);
     }
 
     return withResolvedMediaPaths({
@@ -1844,10 +1858,7 @@ class LLMEngineService {
     }
 
     const requestMessages = mergeTopLevelMediaPathsIntoLatestUserMessage(messages, mediaPaths);
-    const requestMediaPaths = normalizeMediaPaths([
-      ...(mediaPaths ?? []),
-      ...getMessagesMediaPaths(requestMessages),
-    ]);
+    const requestMediaPaths = getLatestUserMessageMediaPaths(requestMessages);
     const shouldRecordMultimodalDiagnostics = requestMediaPaths.length > 0
       || (multimodalReadiness !== undefined && multimodalReadiness.status !== 'ready');
     if (shouldRecordMultimodalDiagnostics) {
@@ -2255,7 +2266,7 @@ class LLMEngineService {
             prompt: formatted.prompt,
             mediaPaths: formatted.media_paths && formatted.media_paths.length > 0
               ? formatted.media_paths
-              : getMessagesMediaPaths(promptMessages),
+              : getLatestUserMessageMediaPaths(promptMessages),
           });
         } catch (error) {
           this.assertContextStillCurrent(context, contextGeneration);

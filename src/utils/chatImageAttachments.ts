@@ -180,9 +180,8 @@ export function validateChatImageAttachmentLimit(
 
 export function validateChatImageAttachmentBounds(
   image: Pick<AttachmentDraft, 'size' | 'width' | 'height'>,
-  options: { requireDimensions?: boolean } = {},
+  _options: { requireDimensions?: boolean } = {},
 ): { ok: true } | { ok: false; reason: 'too_large' } {
-  const requireDimensions = options.requireDimensions ?? true;
   const size = normalizeKnownPositiveMeasurement(image.size);
   if (size > MAX_CHAT_IMAGE_ATTACHMENT_BYTES) {
     return { ok: false, reason: 'too_large' };
@@ -190,10 +189,6 @@ export function validateChatImageAttachmentBounds(
 
   const width = normalizeKnownPositiveMeasurement(image.width);
   const height = normalizeKnownPositiveMeasurement(image.height);
-
-  if (requireDimensions && (width <= 0 || height <= 0)) {
-    return { ok: false, reason: 'too_large' };
-  }
 
   if (width > MAX_CHAT_IMAGE_ATTACHMENT_SIDE_PIXELS || height > MAX_CHAT_IMAGE_ATTACHMENT_SIDE_PIXELS) {
     return { ok: false, reason: 'too_large' };

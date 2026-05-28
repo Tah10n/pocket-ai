@@ -190,6 +190,12 @@ type ProjectorDownloadResult = {
   sizeBytes: number | null;
 };
 
+type DownloadMemoryFitSummary = {
+  fitsInRam: boolean | null;
+  decision: ModelMemoryFitDecision;
+  confidence: ModelMemoryFitConfidence;
+};
+
 type ReusableModelDownloadFile = {
   fileName: string;
   localUri: string;
@@ -603,14 +609,47 @@ export class ModelDownloadManager {
     const appError = toSanitizedDownloadAppError(error);
     const shouldDiscardResumeData = appError.code === 'download_verification_failed'
       || appError.code === 'download_file_missing';
+    const normalizedResumeData = shouldDiscardResumeData ? undefined : resumeData;
+    const shouldClearLocalPath = shouldDiscardResumeData;
     const projectorCandidates = this.updateProjectorCandidates(model, projectorId, {
       lifecycleStatus: 'failed',
       matchStatus: 'failed',
       matchReason: appError.code,
-      resumeData: shouldDiscardResumeData ? undefined : resumeData,
+      resumeData: normalizedResumeData,
+      ...(normalizedResumeData
+        ? {}
+        : {
+          ...(shouldClearLocalPath ? { localPath: undefined } : {}),
+          downloadProgress: undefined,
+        }),
     });
 
     return projectorCandidates ? { projectorCandidates } : {};
+  }
+
+  private buildTextReadyModelAfterProjectorFailure({
+    model,
+    projectorFailureUpdates,
+    memoryFit,
+  }: {
+    model: ModelMetadata;
+    projectorFailureUpdates: Partial<ModelMetadata>;
+    memoryFit: DownloadMemoryFitSummary;
+  }): ModelMetadata {
+    return {
+      ...model,
+      ...projectorFailureUpdates,
+      fitsInRam: memoryFit.fitsInRam,
+      memoryFitDecision: memoryFit.decision,
+      memoryFitConfidence: memoryFit.confidence,
+      downloadedAt: Date.now(),
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      resumeData: undefined,
+      downloadErrorAt: undefined,
+      downloadErrorCode: undefined,
+      downloadErrorMessage: undefined,
+    };
   }
 
   private async stopActiveJobForPrivateStorageReset(options: { clearQueue: boolean }): Promise<void> {
@@ -896,6 +935,8 @@ export class ModelDownloadManager {
     const modelsDir = getModelsDir();
     const selectedProjector = this.resolveProjectorForDownload(model);
     let reusableModelFile: ReusableModelDownloadFile | null = null;
+    let baseModelMemoryFit: DownloadMemoryFitSummary | null = null;
+    let downloadStage: 'base' | 'projector' | 'finalizing' = 'base';
 
     try {
       if (!this.isCurrentJob(model.id, jobToken)) {
@@ -1235,6 +1276,22 @@ export class ModelDownloadManager {
         lifecycleStatus: selectedProjector ? LifecycleStatus.DOWNLOADING : LifecycleStatus.VERIFYING,
       });
 
+      const metadataTrust = baseCheckpointUpdates.metadataTrust;
+      const ggufMetadata = baseCheckpointUpdates.gguf;
+      baseModelMemoryFit = await this.resolveMemoryFit(downloadedSize, metadataTrust, ggufMetadata);
+
+      if (!this.isCurrentJob(model.id, jobToken)) {
+        return;
+      }
+
+      if (this.getStopReason(model.id, jobToken)) {
+        return;
+      }
+
+      if (selectedProjector) {
+        downloadStage = 'projector';
+      }
+
       const projectorResult = selectedProjector
         ? await this.downloadProjectorArtifact(
           this.getQueuedModel(model.id, model),
@@ -1255,15 +1312,16 @@ export class ModelDownloadManager {
         return;
       }
 
-      const metadataTrust = baseCheckpointUpdates.metadataTrust;
-      const ggufMetadata = baseCheckpointUpdates.gguf;
+      downloadStage = 'finalizing';
       const memoryFitInputSize = typeof downloadedSize === 'number'
         ? getModelMemoryFitInputSizeBytes({
           modelSizeBytes: downloadedSize,
           projectorSizeBytes: projectorResult?.sizeBytes ?? undefined,
         }) ?? downloadedSize
         : downloadedSize;
-      const memoryFit = await this.resolveMemoryFit(memoryFitInputSize, metadataTrust, ggufMetadata);
+      const memoryFit = projectorResult
+        ? await this.resolveMemoryFit(memoryFitInputSize, metadataTrust, ggufMetadata)
+        : baseModelMemoryFit ?? await this.resolveMemoryFit(memoryFitInputSize, metadataTrust, ggufMetadata);
 
       if (!this.isCurrentJob(model.id, jobToken)) {
         return;
@@ -1330,21 +1388,29 @@ export class ModelDownloadManager {
       try {
         assertPrivateStorageWritableForDownloadMutation();
         const currentModel = this.getQueuedModel(model.id, model);
-        const appError = toSanitizedDownloadAppError(e);
-        const failureUpdates = isProjectorFailure
-          ? {
-            downloadProgress: 1,
-            lifecycleStatus: LifecycleStatus.FAILED,
-            downloadErrorCode: appError.code,
-            downloadErrorMessage: appError.message,
-            downloadErrorAt: Date.now(),
-            ...this.getProjectorFailureUpdates(currentModel, failedProjectorId, e, projectorResumeData),
-          }
-          : {
+        const projectorStageFailedAfterBaseVerified = downloadStage === 'projector'
+          && selectedProjector !== null
+          && baseModelMemoryFit !== null;
+        const projectorFailureUpdates = this.getProjectorFailureUpdates(
+          currentModel,
+          failedProjectorId ?? (projectorStageFailedAfterBaseVerified ? selectedProjector?.id : undefined),
+          e,
+          projectorResumeData,
+        );
+
+        if (projectorStageFailedAfterBaseVerified && baseModelMemoryFit) {
+          registry.updateModel(this.buildTextReadyModelAfterProjectorFailure({
+            model: currentModel,
+            projectorFailureUpdates,
+            memoryFit: baseModelMemoryFit,
+          }));
+          removeFromQueue(model.id);
+        } else {
+          updateModelInQueue(model.id, {
             ...this.getDownloadFailureUpdates(e, resumeData),
-            ...this.getProjectorFailureUpdates(currentModel, failedProjectorId, e, projectorResumeData),
-          };
-        updateModelInQueue(model.id, failureUpdates);
+            ...projectorFailureUpdates,
+          });
+        }
         setActiveDownload(null);
       } catch (storageError) {
         if (await this.handlePrivateStorageUnavailable(storageError)) {

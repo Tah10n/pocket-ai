@@ -11,6 +11,8 @@ import { isValidLocalFileName, safeJoinModelPath } from '../utils/safeFilePath';
 import { GgufValidationError, validateGgufFileHeader } from '../utils/ggufValidation';
 import { normalizeSha256Digest } from '../utils/sha256';
 import type { CalibrationRecord } from '../memory/types';
+import { getModelMemoryFitInputSizeBytes } from '../utils/memoryFit';
+import { getStoredProjectorArtifactsSizeBytes } from '../utils/modelSize';
 
 const REGISTRY_STORAGE_ID = 'models-registry';
 const MODEL_FILE_PRESERVATION_STORAGE_ID = 'model-file-preservation';
@@ -436,13 +438,6 @@ function cloneModelMetadata(model: ModelMetadata): ModelMetadata {
   };
 }
 
-function hasCompletedLocalProjectorFile(projector: Pick<ProjectorArtifact, 'lifecycleStatus' | 'localPath'>): boolean {
-  return (
-    hasCompletedProjectorStatus(projector)
-    && isValidLocalFileName(projector.localPath)
-  );
-}
-
 function hasCompletedProjectorStatus(projector: Pick<ProjectorArtifact, 'lifecycleStatus'>): boolean {
   return projector.lifecycleStatus === 'downloaded' || projector.lifecycleStatus === 'active';
 }
@@ -454,14 +449,13 @@ function hasResumableProjectorStatus(projector: Pick<ProjectorArtifact, 'lifecyc
     || projector.lifecycleStatus === 'failed';
 }
 
-function collectCompletedProjectorLocalPaths(models: ModelMetadata[]): Set<string> {
+function collectReferencedProjectorLocalPaths(models: ModelMetadata[]): Set<string> {
   const localPaths = new Set<string>();
 
   for (const model of models) {
     for (const projector of model.projectorCandidates ?? []) {
-      const localPath = projector.localPath;
-      if (hasCompletedLocalProjectorFile(projector) && isValidLocalFileName(localPath)) {
-        localPaths.add(localPath);
+      if (isValidLocalFileName(projector.localPath)) {
+        localPaths.add(projector.localPath);
       }
     }
   }
@@ -580,7 +574,7 @@ function getModelAssetFilesForRemoval(
     return [];
   }
 
-  const sharedProjectorLocalPaths = collectCompletedProjectorLocalPaths(remainingModels);
+  const sharedProjectorLocalPaths = collectReferencedProjectorLocalPaths(remainingModels);
   const seen = new Set<string>();
   const files: ModelAssetFileForRemoval[] = [];
   const addFile = (fileName: string | undefined, kind: ModelAssetFileForRemoval['kind']) => {
@@ -596,7 +590,7 @@ function getModelAssetFilesForRemoval(
 
   for (const projector of model.projectorCandidates ?? []) {
     const localPath = projector.localPath;
-    if (!hasCompletedLocalProjectorFile(projector) || !isValidLocalFileName(localPath)) {
+    if (!isValidLocalFileName(localPath)) {
       continue;
     }
 
@@ -1002,6 +996,7 @@ export class LocalStorageRegistry {
     for (const model of models) {
       const hasDownloadedState = model.lifecycleStatus === LifecycleStatus.DOWNLOADED
         || model.lifecycleStatus === LifecycleStatus.ACTIVE;
+      let didValidateProjectors = false;
 
       if (!hasDownloadedState && model.localPath) {
         resetLocalDownloadState(model);
@@ -1117,6 +1112,9 @@ export class LocalStorageRegistry {
           changed = true;
         }
 
+        changed = await this.validateProjectorLocalState(model, modelsDir) || changed;
+        didValidateProjectors = true;
+
         const persistedSizeBytes = (
           typeof model.size === 'number'
           && Number.isFinite(model.size)
@@ -1127,11 +1125,15 @@ export class LocalStorageRegistry {
         const sizeBytesForFit = localSizeBytesForRegistry ?? persistedSizeBytes;
 
         if (sizeBytesForFit !== null) {
+          const memoryFitInputSizeBytes = getModelMemoryFitInputSizeBytes({
+            modelSizeBytes: sizeBytesForFit,
+            projectorSizeBytes: getStoredProjectorArtifactsSizeBytes(model.projectorCandidates),
+          }) ?? sizeBytesForFit;
           const metadataTrustForFit = hasTrustedIntegrityMarker
             ? 'verified_local' as const
             : model.metadataTrust;
           const fit = estimateFastMemoryFit({
-            modelSizeBytes: sizeBytesForFit,
+            modelSizeBytes: memoryFitInputSizeBytes,
             totalMemoryBytes,
             metadataTrust: metadataTrustForFit,
             ggufMetadata: model.gguf as Record<string, unknown> | undefined,
@@ -1178,7 +1180,9 @@ export class LocalStorageRegistry {
         }
       }
 
-      changed = await this.validateProjectorLocalState(model, modelsDir) || changed;
+      if (!didValidateProjectors) {
+        changed = await this.validateProjectorLocalState(model, modelsDir) || changed;
+      }
     }
 
     if (changed) {

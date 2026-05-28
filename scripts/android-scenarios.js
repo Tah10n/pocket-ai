@@ -95,6 +95,7 @@ const ATTACHMENT_PREVIEW_LABELS = [
   "Attached image preview",
   "Предпросмотр прикрепленного изображения",
 ];
+const UNLOAD_MODEL_LABELS = ["Unload", "Выгрузить"];
 const REMOVE_ATTACHMENT_LABELS = [
   "Remove attached image",
   "Удалить прикрепленное изображение",
@@ -685,15 +686,33 @@ function assertAttachmentPreviewRemovePreconditions({
 } = {}) {
   if (fallbackNode) {
     throw new ScenarioSkipError(
-      "Image attachment preview/remove requires a vision-ready composer; current composer is showing fallback copy."
+      "Prepared image attachment preview/remove precondition failed: the composer is still showing text-only fallback copy. Seed a vision-ready composer with an attached gallery image before running this scenario."
     );
   }
 
   if (!previewNode || !removeNode) {
+    const missingParts = [
+      !previewNode ? "attached image preview" : null,
+      !removeNode ? "remove attached image action" : null,
+    ].filter(Boolean).join(" and ");
+
     throw new ScenarioSkipError(
-      "No prepared image draft was visible; attach a seeded gallery image before running preview/remove coverage."
+      `Prepared image attachment preview/remove precondition failed: missing ${missingParts}. Seed a vision-ready composer with an attached gallery image before running this scenario.`
     );
   }
+}
+
+function assertAttachmentTextOnlyFallbackState({
+  fallbackNode = null,
+  attachNode = null,
+} = {}) {
+  if (!fallbackNode) {
+    throw new ScenarioSkipError(
+      "Text-only attachment fallback was not visible after navigating to a no-model chat state; a deterministic text-only composer could not be established."
+    );
+  }
+
+  assertAttachmentActionBlocked(attachNode);
 }
 
 function assertAttachmentActionBlocked(attachNode) {
@@ -799,7 +818,7 @@ function buildScenarios() {
       tier: "secondary",
       description: "Verify the chat composer exposes image attachment state with text-only fallback copy.",
       run: async (ctx) => {
-        await goToHome(ctx);
+        await ensureNoModelTextOnlyAttachmentState(ctx);
         await ctx.tapAnyText(NEW_CHAT_LABELS);
         await ctx.expectAnyText(CHAT_EMPTY_LABELS);
         await ctx.expectAnyText(ATTACH_IMAGE_LABELS, { timeoutMs: 8_000 });
@@ -819,11 +838,7 @@ function buildScenarios() {
           { visibleOnly: true }
         );
 
-        if (fallbackNode) {
-          assertAttachmentActionBlocked(attachNode);
-        } else {
-          assertAttachmentActionAvailable(attachNode);
-        }
+        assertAttachmentTextOnlyFallbackState({ fallbackNode, attachNode });
 
         await ctx.tapBottomTab(HOME_TAB_LABELS);
         await ctx.expectAnyText(HOME_SECTION_LABELS);
@@ -1167,6 +1182,41 @@ async function goToHome(ctx) {
   }
 
   await ctx.expectAnyText(APP_TITLE_LABELS);
+}
+
+async function ensureNoModelTextOnlyAttachmentState(ctx) {
+  await goToHome(ctx);
+
+  const adbPath = resolveAdbPath();
+  const unloadNode = await findAnyNodeNow(adbPath, ctx.serial, UNLOAD_MODEL_LABELS, {
+    visibleOnly: true,
+  });
+
+  if (unloadNode?.node?.bounds) {
+    tapBounds(adbPath, ctx.serial, unloadNode.node.bounds);
+    await delay(2_500);
+    await goToHome(ctx);
+  }
+
+  const noModelNode = await findAnyNodeNow(
+    adbPath,
+    ctx.serial,
+    [
+      "NO MODEL LOADED",
+      "МОДЕЛЬ НЕ ЗАГРУЖЕНА",
+      "Choose a local model",
+      "Выберите локальную модель",
+      "Browse Models",
+      "Открыть каталог",
+    ],
+    { visibleOnly: true }
+  );
+
+  if (!noModelNode) {
+    throw new ScenarioSkipError(
+      "Could not establish a deterministic no-model chat state for the text-only attachment fallback smoke without resetting app data."
+    );
+  }
 }
 
 async function tryReachHome(ctx, maxAttempts = 4) {
@@ -2734,4 +2784,5 @@ module.exports = {
   assertAttachmentActionBlocked,
   assertAttachmentActionAvailable,
   assertAttachmentPreviewRemovePreconditions,
+  assertAttachmentTextOnlyFallbackState,
 };

@@ -453,7 +453,7 @@ describe('useChatSession', () => {
     }
   });
 
-  it('filters missing historical images retained in a vision-ready inference window without mutating storage', async () => {
+  it('ignores historical images for a vision-ready text-only follow-up without mutating storage', async () => {
     const getSession = renderHookHarness();
 
     await act(async () => {
@@ -472,10 +472,7 @@ describe('useChatSession', () => {
     (llmEngineService.chatCompletion as jest.Mock).mockClear();
     (llmEngineService.countPromptTokens as jest.Mock).mockClear();
     (FileSystem.getInfoAsync as jest.Mock).mockClear();
-    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => ({
-      exists: !uri.includes('draft-image-1.jpg'),
-      size: 123_456,
-    }));
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: true, size: 123_456 });
 
     await act(async () => {
       await getSession()?.appendUserMessage('Continue with text only', {
@@ -489,7 +486,7 @@ describe('useChatSession', () => {
     });
 
     const completionCall = (llmEngineService.chatCompletion as jest.Mock).mock.calls.at(-1)?.[0];
-    expect(FileSystem.getInfoAsync).toHaveBeenCalledWith('test-dir/chat-attachments/draft-image-1.jpg');
+    expect(FileSystem.getInfoAsync).not.toHaveBeenCalled();
     expect(completionCall?.messages.flatMap((message: any) => message.mediaPaths ?? [])).toEqual([]);
     expect(completionCall?.messages.flatMap((message: any) => [
       ...(message.mediaPaths ?? []),
@@ -579,7 +576,7 @@ describe('useChatSession', () => {
     expect(useChatStore.getState().getThread(threadId)?.messages[0]?.attachments).toHaveLength(3);
   });
 
-  it('filters a bounded missing historical image without mutating storage when it falls outside the final prompt', async () => {
+  it('does not validate historical images for a latest text-only prompt', async () => {
     const chatState = useChatStore.getState();
     const threadId = chatState.createThread({
       modelId: 'author/model-q4',
@@ -639,7 +636,7 @@ describe('useChatSession', () => {
       });
     });
 
-    expect(FileSystem.getInfoAsync).toHaveBeenCalledWith('test-dir/chat-attachments/missing-outside.jpg');
+    expect(FileSystem.getInfoAsync).not.toHaveBeenCalledWith('test-dir/chat-attachments/missing-outside.jpg');
     expect(llmEngineService.chatCompletion).toHaveBeenCalled();
     expect(useChatStore.getState().getThread(threadId)?.messages[0]?.attachments?.[0]?.localUri)
       .toBe('test-dir/chat-attachments/missing-outside.jpg');

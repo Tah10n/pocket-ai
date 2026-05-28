@@ -299,6 +299,31 @@ function stripThreadInferenceAttachments(thread: ChatThread): ChatThread {
   };
 }
 
+function stripNonLatestUserInferenceAttachments(thread: ChatThread, latestUserMessageId: string | null): ChatThread {
+  if (!latestUserMessageId) {
+    return stripThreadInferenceAttachments(thread);
+  }
+
+  let didStripAttachments = false;
+  const messages = thread.messages.map((message) => {
+    if (message.id === latestUserMessageId || !message.attachments?.length) {
+      return message;
+    }
+
+    didStripAttachments = true;
+    return omitInferenceAttachments(message);
+  });
+
+  if (!didStripAttachments) {
+    return thread;
+  }
+
+  return {
+    ...thread,
+    messages,
+  };
+}
+
 async function mapWithConcurrency<T, R>(
   items: readonly T[],
   limit: number,
@@ -540,10 +565,10 @@ async function resolveThreadForInferenceAttachments({
   const latestUserMessage = latestUserMessageId
     ? thread.messages.find((message) => message.id === latestUserMessageId)
     : undefined;
-  const shouldUseTextOnlyFallback = !messageHasAttachments(latestUserMessage) && !isVisionReady(multimodalReadiness);
+  const shouldUseTextOnlyFallback = !messageHasAttachments(latestUserMessage);
   const baseThread = shouldUseTextOnlyFallback
     ? stripThreadInferenceAttachments(thread)
-    : thread;
+    : stripNonLatestUserInferenceAttachments(thread, latestUserMessageId);
   const boundedMessages = constrainInferenceAttachmentsToRequestLimit(baseThread.messages);
 
   if (shouldUseTextOnlyFallback) {

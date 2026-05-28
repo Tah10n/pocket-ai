@@ -1,5 +1,5 @@
 import DeviceInfo from 'react-native-device-info';
-import { LifecycleStatus, ModelAccessState, ModelMetadata } from '../types/models';
+import { LifecycleStatus, ModelAccessState, type ModelMetadata, type ModelVariant } from '../types/models';
 import type { MultimodalReadinessState, ProjectorArtifact } from '../types/multimodal';
 import { hardwareListenerService } from './HardwareListenerService';
 import { registry } from './LocalStorageRegistry';
@@ -60,6 +60,7 @@ import {
 } from '../utils/huggingFaceUrls';
 import { applyModelVariantSelectionIfAvailable } from '../utils/modelVariants';
 import { normalizeSha256Digest } from '../utils/sha256';
+import { getProjectorMemoryFitSizeBytes } from '../utils/modelSize';
 import {
   getCompatibleLocalDownloadStatePatch,
   resolveVerifiedLocalShaCompatibility,
@@ -1200,19 +1201,78 @@ export class ModelCatalogService {
     return this.lastMemoryFitContext;
   }
 
+  private resolveVariantProjectorMemoryFitSizeBytes(
+    entries: HuggingFaceTreeEntry[],
+    repoId: string,
+    hfRevision: string | undefined,
+    variant: ModelVariant,
+  ): number {
+    const projectorCandidates = buildProjectorCandidatesFromEntries(entries, {
+      repoId,
+      hfRevision,
+      ownerModelId: repoId,
+      ownerVariantId: variant.variantId,
+      ownerFileName: variant.fileName,
+    });
+
+    return getProjectorMemoryFitSizeBytes(projectorCandidates, variant.selectedProjectorId);
+  }
+
+  private withActiveVariantResolvedMemoryFit(
+    variants: ModelVariant[] | undefined,
+    activeVariantId: string | undefined,
+    resolvedMemoryFit: ReturnType<typeof resolveMemoryFitSummary>,
+  ): ModelVariant[] | undefined {
+    if (!variants?.length || !activeVariantId || !resolvedMemoryFit) {
+      return variants;
+    }
+
+    let didUpdate = false;
+    const nextVariants = variants.map((variant) => {
+      const isActiveVariant = variant.variantId === activeVariantId || variant.fileName === activeVariantId;
+      if (!isActiveVariant) {
+        return variant;
+      }
+
+      if (
+        variant.ramFit === resolvedMemoryFit.decision
+        && variant.ramFitConfidence === resolvedMemoryFit.confidence
+      ) {
+        return variant;
+      }
+
+      didUpdate = true;
+      return {
+        ...variant,
+        ramFit: resolvedMemoryFit.decision,
+        ramFitConfidence: resolvedMemoryFit.confidence,
+      };
+    });
+
+    return didUpdate ? nextVariants : variants;
+  }
+
   private withResolvedMemoryFit(
     model: ModelMetadata,
     memoryFitContext: CatalogMemoryFitContext | null = this.getRememberedMemoryFitContext(),
   ): ModelMetadata {
-    const resolvedMemoryFit = resolveMemoryFitSummary(model, memoryFitContext);
+    const resolvedMemoryFit = resolveMemoryFitSummary(model, memoryFitContext, {
+      projectorSizeBytes: getProjectorMemoryFitSizeBytes(model.projectorCandidates, model.selectedProjectorId),
+    });
     const fitsInRam = resolvedMemoryFit?.fitsInRam ?? model.fitsInRam;
     const memoryFitDecision = resolvedMemoryFit?.decision ?? model.memoryFitDecision;
     const memoryFitConfidence = resolvedMemoryFit?.confidence ?? model.memoryFitConfidence;
+    const variants = this.withActiveVariantResolvedMemoryFit(
+      model.variants,
+      model.activeVariantId ?? model.resolvedFileName,
+      resolvedMemoryFit,
+    );
 
     if (
       fitsInRam === model.fitsInRam
       && memoryFitDecision === model.memoryFitDecision
       && memoryFitConfidence === model.memoryFitConfidence
+      && variants === model.variants
     ) {
       return model;
     }
@@ -1222,6 +1282,7 @@ export class ModelCatalogService {
       fitsInRam,
       memoryFitDecision,
       memoryFitConfidence,
+      variants,
     });
   }
 
@@ -1338,7 +1399,14 @@ export class ModelCatalogService {
           limit: CATALOG_SEARCH_VARIANT_LIMIT,
           includeFileNames: [resolvedFileName, model.resolvedFileName, model.activeVariantId],
           includeVariantIds: [model.activeVariantId],
-        }), memoryFitContext);
+        }), memoryFitContext, {
+          resolveProjectorSizeBytes: (variant) => this.resolveVariantProjectorMemoryFitSizeBytes(
+            treeResponse.entries,
+            model.id,
+            model.hfRevision,
+            variant,
+          ),
+        });
         const projectorCandidates = buildProjectorCandidatesFromEntries(treeResponse.entries, {
           repoId: model.id,
           hfRevision: model.hfRevision,
@@ -1384,9 +1452,30 @@ export class ModelCatalogService {
             : Object.keys(existingGguf).length > 0
               ? existingGguf
               : undefined;
+        const canCarryForwardLocalSha256 = !shouldResetLocalDownloadState
+          && model.metadataTrust !== 'verified_local';
+        const sha256 = treeEntrySha256
+          ?? (shouldPreserveVerifiedLocal
+            ? localVerifiedSha256
+            : canCarryForwardLocalSha256 ? model.sha256 : undefined);
+        const projectorCandidatesForMerge = projectorCandidates
+          ?? (shouldResetLocalDownloadState ? undefined : model.projectorCandidates);
+        const projectorMetadataPatch = this.mergeProjectorMetadataWithLocalState(
+          {
+            ...model,
+            projectorCandidates: projectorCandidatesForMerge,
+          },
+          model,
+          shouldResetLocalDownloadState,
+        );
         const resolvedMemoryFit = shouldPreserveVerifiedLocal
           ? null
-          : resolveMemoryFitSummary({ size, metadataTrust, gguf }, memoryFitContext);
+          : resolveMemoryFitSummary({ size, metadataTrust, gguf }, memoryFitContext, {
+            projectorSizeBytes: getProjectorMemoryFitSizeBytes(
+              projectorMetadataPatch.projectorCandidates,
+              projectorMetadataPatch.selectedProjectorId,
+            ),
+          });
         const didChangeSize = size !== model.size;
         const fitsInRam = shouldPreserveVerifiedLocal
           ? model.fitsInRam
@@ -1409,21 +1498,10 @@ export class ModelCatalogService {
             : didChangeSize
               ? undefined
               : model.memoryFitConfidence;
-        const canCarryForwardLocalSha256 = !shouldResetLocalDownloadState
-          && model.metadataTrust !== 'verified_local';
-        const sha256 = treeEntrySha256
-          ?? (shouldPreserveVerifiedLocal
-            ? localVerifiedSha256
-            : canCarryForwardLocalSha256 ? model.sha256 : undefined);
-        const projectorCandidatesForMerge = projectorCandidates
-          ?? (shouldResetLocalDownloadState ? undefined : model.projectorCandidates);
-        const projectorMetadataPatch = this.mergeProjectorMetadataWithLocalState(
-          {
-            ...model,
-            projectorCandidates: projectorCandidatesForMerge,
-          },
-          model,
-          shouldResetLocalDownloadState,
+        const variantsWithResolvedActiveMemoryFit = this.withActiveVariantResolvedMemoryFit(
+          variants,
+          resolvedFileName,
+          resolvedMemoryFit,
         );
 
         if (model.requiresTreeProbe && !treeProbeIsFinal) {
@@ -1442,7 +1520,7 @@ export class ModelCatalogService {
             resolvedFileName,
             downloadUrl: buildHuggingFaceResolveUrl(model.id, resolvedFileName, model.hfRevision),
             sha256,
-            variants,
+            variants: variantsWithResolvedActiveMemoryFit,
             activeVariantId: resolvedFileName,
             chatModalities: hasVisionCapability ? ['text', 'vision'] : model.chatModalities,
             artifactRole: 'primary_chat_model',
@@ -1467,7 +1545,7 @@ export class ModelCatalogService {
           resolvedFileName,
           downloadUrl: buildHuggingFaceResolveUrl(model.id, resolvedFileName, model.hfRevision),
           sha256,
-          variants,
+          variants: variantsWithResolvedActiveMemoryFit,
           activeVariantId: resolvedFileName,
           chatModalities: hasVisionCapability ? ['text', 'vision'] : model.chatModalities,
           artifactRole: 'primary_chat_model',
@@ -2233,16 +2311,6 @@ export class ModelCatalogService {
           ...(remoteModel.gguf ?? {}),
         }
       : undefined;
-    const resolvedMemoryFit = resolveMemoryFitSummary({ size: resolvedSize, metadataTrust }, memoryFitContext);
-    const fitsInRam = resolvedMemoryFit?.fitsInRam
-      ?? remoteModel.fitsInRam
-      ?? (allowLocalVerifiedDerivedMetadata ? localModel.fitsInRam : null);
-    const memoryFitDecision = resolvedMemoryFit?.decision
-      ?? remoteModel.memoryFitDecision
-      ?? (allowLocalVerifiedDerivedMetadata ? localModel.memoryFitDecision : undefined);
-    const memoryFitConfidence = resolvedMemoryFit?.confidence
-      ?? remoteModel.memoryFitConfidence
-      ?? (allowLocalVerifiedDerivedMetadata ? localModel.memoryFitConfidence : undefined);
     const remoteHasVisionEvidence = remoteModel.chatModalities?.includes('vision') === true
       || Boolean(remoteModel.projectorCandidates?.length)
       || remoteModel.visionSource !== undefined;
@@ -2267,6 +2335,26 @@ export class ModelCatalogService {
       localModel,
       shouldResetLocalDownloadState,
     );
+    const resolvedMemoryFit = resolveMemoryFitSummary({ size: resolvedSize, metadataTrust, gguf }, memoryFitContext, {
+      projectorSizeBytes: getProjectorMemoryFitSizeBytes(
+        projectorMetadataPatch.projectorCandidates,
+        projectorMetadataPatch.selectedProjectorId,
+      ),
+    });
+    const fitsInRam = resolvedMemoryFit?.fitsInRam
+      ?? remoteModel.fitsInRam
+      ?? (allowLocalVerifiedDerivedMetadata ? localModel.fitsInRam : null);
+    const memoryFitDecision = resolvedMemoryFit?.decision
+      ?? remoteModel.memoryFitDecision
+      ?? (allowLocalVerifiedDerivedMetadata ? localModel.memoryFitDecision : undefined);
+    const memoryFitConfidence = resolvedMemoryFit?.confidence
+      ?? remoteModel.memoryFitConfidence
+      ?? (allowLocalVerifiedDerivedMetadata ? localModel.memoryFitConfidence : undefined);
+    const variants = this.withActiveVariantResolvedMemoryFit(
+      remoteModel.variants,
+      remoteModel.activeVariantId ?? remoteModel.resolvedFileName,
+      resolvedMemoryFit,
+    );
 
     return normalizePersistedModelMetadata({
       ...remoteModel,
@@ -2284,6 +2372,7 @@ export class ModelCatalogService {
       fitsInRam,
       memoryFitDecision,
       memoryFitConfidence,
+      variants,
       accessState: remoteModel.accessState,
       isGated: remoteModel.isGated,
       isPrivate: remoteModel.isPrivate,

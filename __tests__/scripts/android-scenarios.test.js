@@ -26,10 +26,32 @@ const {
   assertAttachmentPreviewRemovePreconditions,
   assertAttachmentActionBlocked,
   assertAttachmentActionAvailable,
+  assertAttachmentTextOnlyFallbackState,
   ScenarioSkipFailureError,
   serializeReportResults,
   shouldAppendRunnerFailure,
 } = require('../../scripts/android-scenarios');
+
+describe('app image picker configuration', () => {
+  const appConfig = require('../../app.json');
+
+  it('declares gallery-only image picker permissions explicitly', () => {
+    const imagePickerPlugin = appConfig.expo.plugins.find(
+      (plugin) => Array.isArray(plugin) && plugin[0] === 'expo-image-picker'
+    );
+
+    expect(imagePickerPlugin).toEqual([
+      'expo-image-picker',
+      expect.objectContaining({
+        photosPermission: expect.stringContaining('photo library'),
+        cameraPermission: false,
+        microphonePermission: false,
+      }),
+    ]);
+    expect(appConfig.expo.android.permissions).not.toContain('CAMERA');
+    expect(appConfig.expo.android.permissions).not.toContain('RECORD_AUDIO');
+  });
+});
 
 describe('android-scenarios smoke bootstrap args', () => {
   it('uses fast smoke reuse flags when skip-build is enabled', () => {
@@ -723,38 +745,66 @@ describe('android-scenarios pack selection', () => {
     ]);
   });
 
-  it('skips unmet prepared attachment preview/remove preconditions', () => {
-    let fallbackError;
-    try {
-      assertAttachmentPreviewRemovePreconditions({
-        fallbackNode: { label: 'Text-only fallback' },
-        previewNode: null,
-        removeNode: null,
-      });
-    } catch (error) {
-      fallbackError = error;
-    }
-    expect(fallbackError).toBeInstanceOf(Error);
-    expect(fallbackError).toBeInstanceOf(ScenarioSkipError);
+  it('signals unmet prepared attachment preview/remove preconditions as skips', () => {
+    expect(() => assertAttachmentPreviewRemovePreconditions({
+      fallbackNode: { label: 'Text-only fallback' },
+      previewNode: null,
+      removeNode: null,
+    })).toThrow(ScenarioSkipError);
+    expect(() => assertAttachmentPreviewRemovePreconditions({
+      fallbackNode: { label: 'Text-only fallback' },
+      previewNode: null,
+      removeNode: null,
+    })).toThrow(/precondition failed: the composer is still showing text-only fallback copy/);
 
-    let missingDraftError;
-    try {
-      assertAttachmentPreviewRemovePreconditions({
-        fallbackNode: null,
-        previewNode: { label: 'Attached image preview' },
-        removeNode: null,
-      });
-    } catch (error) {
-      missingDraftError = error;
-    }
-    expect(missingDraftError).toBeInstanceOf(Error);
-    expect(missingDraftError).toBeInstanceOf(ScenarioSkipError);
+    expect(() => assertAttachmentPreviewRemovePreconditions({
+      fallbackNode: null,
+      previewNode: { label: 'Attached image preview' },
+      removeNode: null,
+    })).toThrow(ScenarioSkipError);
+    expect(() => assertAttachmentPreviewRemovePreconditions({
+      fallbackNode: null,
+      previewNode: { label: 'Attached image preview' },
+      removeNode: null,
+    })).toThrow(/missing remove attached image action/);
+
+    expect(() => assertAttachmentPreviewRemovePreconditions({
+      fallbackNode: null,
+      previewNode: null,
+      removeNode: { label: 'Remove image attachment' },
+    })).toThrow(ScenarioSkipError);
+    expect(() => assertAttachmentPreviewRemovePreconditions({
+      fallbackNode: null,
+      previewNode: null,
+      removeNode: { label: 'Remove image attachment' },
+    })).toThrow(/missing attached image preview/);
 
     expect(() => assertAttachmentPreviewRemovePreconditions({
       fallbackNode: null,
       previewNode: { label: 'Attached image preview' },
       removeNode: { label: 'Remove image attachment' },
     })).not.toThrow();
+  });
+
+  it('requires known fallback copy and a blocked affordance for text-only attachment smoke', () => {
+    expect(() => assertAttachmentTextOnlyFallbackState({
+      fallbackNode: { label: 'This model supports text chat only.' },
+      attachNode: { clickable: true, enabled: false },
+    })).not.toThrow();
+
+    expect(() => assertAttachmentTextOnlyFallbackState({
+      fallbackNode: null,
+      attachNode: { clickable: true, enabled: false },
+    })).toThrow(ScenarioSkipError);
+    expect(() => assertAttachmentTextOnlyFallbackState({
+      fallbackNode: null,
+      attachNode: { clickable: true, enabled: false },
+    })).toThrow(/deterministic text-only composer could not be established/);
+
+    expect(() => assertAttachmentTextOnlyFallbackState({
+      fallbackNode: { label: 'This model supports text chat only.' },
+      attachNode: { clickable: true, enabled: true },
+    })).toThrow(/still enabled/);
   });
 
   it('asserts text-only attachment affordances are blocked', () => {

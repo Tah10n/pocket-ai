@@ -177,6 +177,33 @@ describe('LocalStorageRegistry', () => {
     expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/models/mmproj-model.gguf');
   });
 
+  it('removes failed projector partial files with the owning model', async () => {
+    const model = createMockModel({
+      projectorCandidates: [createProjector({
+        lifecycleStatus: 'failed',
+        matchStatus: 'failed',
+        localPath: 'mmproj-partial.gguf',
+        resumeData: 'projector-resume-data',
+      })],
+    });
+    mockStorage.getString.mockImplementation((key: string) => {
+      if (key === 'models-registry:index-v1') {
+        return JSON.stringify([model.id]);
+      }
+
+      if (key === 'models-registry:model-v1:test%2Fmodel') {
+        return JSON.stringify(model);
+      }
+
+      return null;
+    });
+
+    await registry.removeModel(model.id);
+
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/models/model.gguf');
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/models/mmproj-partial.gguf');
+  });
+
   it('keeps a downloaded projector file when another model association still references it', async () => {
     const sharedProjector = createProjector();
     const model = createMockModel({
@@ -213,6 +240,49 @@ describe('LocalStorageRegistry', () => {
 
     expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/models/model.gguf');
     expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/models/mmproj-model.gguf');
+  });
+
+  it('keeps a failed projector partial when another model association still references it', async () => {
+    const sharedProjector = createProjector({
+      lifecycleStatus: 'failed',
+      matchStatus: 'failed',
+      localPath: 'shared-mmproj-partial.gguf',
+    });
+    const model = createMockModel({
+      projectorCandidates: [sharedProjector],
+    });
+    const otherModel = createMockModel({
+      id: 'test/other-model',
+      localPath: 'other-model.gguf',
+      projectorCandidates: [
+        createProjector({
+          id: 'projector-test-other-main-mmproj-model.gguf',
+          ownerModelId: 'test/other-model',
+          lifecycleStatus: 'paused',
+          localPath: sharedProjector.localPath,
+        }),
+      ],
+    });
+    mockStorage.getString.mockImplementation((key: string) => {
+      if (key === 'models-registry:index-v1') {
+        return JSON.stringify([model.id, otherModel.id]);
+      }
+
+      if (key === 'models-registry:model-v1:test%2Fmodel') {
+        return JSON.stringify(model);
+      }
+
+      if (key === 'models-registry:model-v1:test%2Fother-model') {
+        return JSON.stringify(otherModel);
+      }
+
+      return null;
+    });
+
+    await registry.removeModel(model.id);
+
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/models/model.gguf');
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/models/shared-mmproj-partial.gguf');
   });
 
   it('should remove model metadata without deleting a directory localPath', async () => {
@@ -1162,6 +1232,49 @@ describe('LocalStorageRegistry', () => {
     expect(updatedModels[0].fitsInRam).toBe(true);
     expect(updatedModels[0].metadataTrust).toBeUndefined();
     expect(updatedModels[0].gguf).toBeUndefined();
+  });
+
+  it('includes downloaded projector bytes when recomputing memory fit', async () => {
+    (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(2_000_000_000);
+    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([
+      createMockModel({
+        size: 100_000_000,
+        metadataTrust: 'trusted_remote',
+        localPath: 'model.gguf',
+        fitsInRam: true,
+        memoryFitDecision: 'fits_high_confidence',
+        memoryFitConfidence: 'high',
+        projectorCandidates: [createProjector({
+          size: 1_600_000_000,
+          localPath: 'mmproj-model.gguf',
+          lifecycleStatus: 'downloaded',
+        })],
+        downloadIntegrity: {
+          kind: 'size',
+          sizeBytes: 100_000_000,
+          checkedAt: 10,
+        },
+      }),
+    ]);
+    (registry.saveModels as jest.Mock) = jest.fn();
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (uri.endsWith('/model.gguf')) {
+        return { exists: true, size: 100_000_000 };
+      }
+
+      if (uri.endsWith('/mmproj-model.gguf')) {
+        return { exists: true, size: 1_600_000_000 };
+      }
+
+      return { exists: false };
+    });
+
+    await registry.validateRegistry();
+
+    const updatedModels = (registry.saveModels as jest.Mock).mock.calls[0][0];
+    expect(updatedModels[0].projectorCandidates[0].size).toBe(1_600_000_000);
+    expect(updatedModels[0].fitsInRam).toBe(false);
+    expect(updatedModels[0].memoryFitDecision).toBe('likely_oom');
   });
 
   it('recomputes a RAM warning decision for large verified downloaded models', async () => {

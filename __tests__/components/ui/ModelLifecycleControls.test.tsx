@@ -234,6 +234,29 @@ describe('ModelLifecycleActionRow projector actions', () => {
     expect(props.onDownload).toHaveBeenCalledWith(model);
   });
 
+  it('keeps the base model load action visible when the selected projector failed', () => {
+    const model = buildModel({
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      chatModalities: ['text', 'vision'],
+      artifactRole: 'primary_chat_model',
+      projectorCandidates: [buildProjector({
+        lifecycleStatus: 'failed',
+        matchStatus: 'matched',
+        matchReason: 'download_http_error',
+      })],
+    });
+
+    const { getByTestId, getByText, props } = renderActionRow(model);
+
+    expect(getByText('models.load')).toBeTruthy();
+    expect(getByTestId('model-projector-retry-org/model')).toBeTruthy();
+
+    fireEvent.press(getByText('models.load'));
+
+    expect(props.onLoad).toHaveBeenCalledWith(model.id);
+  });
+
   it.each([
     ['downloaded', 'model-projector-download-org/model'],
     ['active', 'model-projector-download-org/model'],

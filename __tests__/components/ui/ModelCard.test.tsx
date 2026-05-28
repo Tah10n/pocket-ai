@@ -332,6 +332,85 @@ describe('ModelCard', () => {
     ).toBe(true);
   });
 
+  it('includes matched projector bytes in the displayed vision model size', () => {
+    const screen = render(
+      <ModelCard
+        model={{
+          ...buildModel(ModelAccessState.PUBLIC),
+          size: 3_800_000_000,
+          gguf: {
+            sizeLabel: 'Q4_K_M',
+          },
+          chatModalities: ['text', 'vision'],
+          artifactRole: 'primary_chat_model',
+          projectorCandidates: [{
+            id: 'projector-org-model-main-mmproj-model-f16.gguf',
+            ownerModelId: 'org/model',
+            repoId: 'org/model',
+            fileName: 'mmproj-model-f16.gguf',
+            downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-model-f16.gguf',
+            size: 200_000_000,
+            lifecycleStatus: 'available',
+            matchStatus: 'matched',
+          }],
+        }}
+        {...buildModelCardHandlers()}
+        isActive={false}
+      />,
+    );
+
+    expect(screen.getByText('Q4_K_M - 4.00 GB')).toBeTruthy();
+  });
+
+  it('uses active variant projector bytes and rerenders when projector size changes', () => {
+    const createVisionModel = (projectorSize: number): ModelMetadata => ({
+      ...buildModel(ModelAccessState.PUBLIC),
+      size: 3_800_000_000,
+      activeVariantId: 'model.Q4_K_M.gguf',
+      chatModalities: ['text', 'vision'],
+      artifactRole: 'primary_chat_model',
+      variants: [{
+        variantId: 'model.Q4_K_M.gguf',
+        fileName: 'model.Q4_K_M.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: 3_800_000_000,
+        projectorCandidates: [{
+          id: 'projector-org-model-main-mmproj-model-f16.gguf',
+          ownerModelId: 'org/model',
+          ownerVariantId: 'model.Q4_K_M.gguf',
+          repoId: 'org/model',
+          fileName: 'mmproj-model-f16.gguf',
+          downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-model-f16.gguf',
+          size: projectorSize,
+          lifecycleStatus: 'available',
+          matchStatus: 'matched',
+        }],
+      }],
+    });
+
+    const handlers = buildModelCardHandlers();
+    const screen = render(
+      <ModelCard
+        model={createVisionModel(100_000_000)}
+        {...handlers}
+        isActive={false}
+      />,
+    );
+
+    expect(screen.getByText('Q4_K_M - 3.90 GB')).toBeTruthy();
+
+    screen.rerender(
+      <ModelCard
+        model={createVisionModel(200_000_000)}
+        {...handlers}
+        isActive={false}
+      />,
+    );
+
+    expect(screen.queryByText('Q4_K_M - 3.90 GB')).toBeNull();
+    expect(screen.getByText('Q4_K_M - 4.00 GB')).toBeTruthy();
+  });
+
   it('does not render a vision badge for projector companion artifacts', () => {
     render(
       <ModelCard

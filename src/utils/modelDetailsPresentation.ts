@@ -3,7 +3,8 @@ import type { MaterialSymbolName } from '@/components/ui/MaterialSymbols';
 import { ModelAccessState, LifecycleStatus, type ModelMetadata } from '@/types/models';
 import { getModelVisionCapabilityStatusLabelKey, modelSupportsVision } from '@/utils/modelCapabilities';
 import { getShortModelLabel } from '@/utils/modelLabel';
-import { formatModelFileSize } from '@/utils/modelSize';
+import { formatModelFileSize, getModelDisplayArtifactSizeBytes } from '@/utils/modelSize';
+import { getActiveModelVariant } from '@/utils/modelVariants';
 
 export type ModelDetailsTone = 'neutral' | 'primary' | 'info' | 'success' | 'warning' | 'error';
 
@@ -173,6 +174,13 @@ export function buildModelDetailsHeroMetrics(
   model: ModelMetadata,
   t: Translate,
 ): ModelDetailsMetricItem[] {
+  const activeVariant = getActiveModelVariant(model);
+  const displaySize = getModelDisplayArtifactSizeBytes(
+    model,
+    activeVariant?.size ?? model.size,
+    activeVariant?.projectorCandidates ?? model.projectorCandidates,
+    activeVariant?.selectedProjectorId ?? model.selectedProjectorId,
+  );
   const accessStateLabel = getModelDetailsAccessStateLabel(model.accessState, t);
   const accessTone: ModelDetailsTone = model.accessState === ModelAccessState.ACCESS_DENIED
     ? 'warning'
@@ -185,7 +193,7 @@ export function buildModelDetailsHeroMetrics(
   return [
     {
       label: t('models.fileSizeLabel'),
-      value: formatModelFileSize(model.size, t('models.sizeUnknown')),
+      value: formatModelFileSize(displaySize, t('models.sizeUnknown')),
       iconName: 'storage',
       tone: 'success',
     },

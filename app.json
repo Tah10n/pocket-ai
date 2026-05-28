@@ -84,6 +84,14 @@
       "./plugins/withIosModelBackupExclusion",
       "expo-secure-store",
       "expo-image",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Pocket AI uses your photo library so you can attach images to vision-capable local chats.",
+          "cameraPermission": false,
+          "microphonePermission": false
+        }
+      ],
       "expo-sharing",
       "expo-web-browser"
     ],

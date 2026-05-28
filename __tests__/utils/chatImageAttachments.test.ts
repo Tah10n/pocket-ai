@@ -71,6 +71,16 @@ describe('chatImageAttachments', () => {
       size: MAX_CHAT_IMAGE_ATTACHMENT_BYTES + 1,
       copyStatus: 'copied',
     };
+    const unknownDimensionsDraft: AttachmentDraft = {
+      pickerUri: draftImageAttachment.pickerUri,
+      previewUri: draftImageAttachment.previewUri,
+      pathCategory: 'chat_attachment',
+      mediaType: draftImageAttachment.mediaType,
+      size: draftImageAttachment.size,
+      fileName: 'unknown-dimensions.jpg',
+      localUri: 'test-dir/chat-attachments/unknown-dimensions.jpg',
+      copyStatus: 'copied',
+    };
 
     expect(isSupportedChatImageMimeType('image/jpeg')).toBe(true);
     expect(isSupportedChatImageMimeType(undefined)).toBe(false);
@@ -94,7 +104,13 @@ describe('chatImageAttachments', () => {
       unknownMimeQueryDraft,
       unsupportedDraft,
       oversizedDraft,
-    ])).toEqual([copiedSupportedDraft, unknownMimeJpegDraft, unknownMimeQueryDraft]);
+      unknownDimensionsDraft,
+    ])).toEqual([
+      copiedSupportedDraft,
+      unknownMimeJpegDraft,
+      unknownMimeQueryDraft,
+      unknownDimensionsDraft,
+    ]);
   });
 
   it('normalizes persisted attachment URIs for runtime media paths and diagnostics summaries', () => {
@@ -114,7 +130,7 @@ describe('chatImageAttachments', () => {
     });
   });
 
-  it('enforces app-level image attachment byte and pixel bounds when metadata is known', () => {
+  it('enforces app-level image attachment byte and pixel bounds while accepting unknown dimensions', () => {
     expect(validateChatImageAttachmentBounds({
       size: MAX_CHAT_IMAGE_ATTACHMENT_BYTES,
       width: MAX_CHAT_IMAGE_ATTACHMENT_SIDE_PIXELS,
@@ -136,14 +152,10 @@ describe('chatImageAttachments', () => {
       ok: false,
       reason: 'too_large',
     });
-    expect(validateChatImageAttachmentBounds({ width: 1280 })).toEqual({
-      ok: false,
-      reason: 'too_large',
-    });
-    expect(validateChatImageAttachmentBounds({ width: 0, height: 768 })).toEqual({
-      ok: false,
-      reason: 'too_large',
-    });
+    expect(validateChatImageAttachmentBounds({ width: 1280 })).toEqual({ ok: true });
+    expect(validateChatImageAttachmentBounds({ height: 768 })).toEqual({ ok: true });
+    expect(validateChatImageAttachmentBounds({ width: 0, height: 768 })).toEqual({ ok: true });
+    expect(validateChatImageAttachmentBounds({ size: MAX_CHAT_IMAGE_ATTACHMENT_BYTES })).toEqual({ ok: true });
     expect(validateChatImageAttachmentBounds({ size: MAX_CHAT_IMAGE_ATTACHMENT_BYTES }, {
       requireDimensions: false,
     })).toEqual({ ok: true });

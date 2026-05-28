@@ -395,7 +395,7 @@ describe('LLMEngineService', () => {
     }));
   });
 
-  it('merges top-level media paths into the latest user message before llama normalization', async () => {
+  it('only forwards latest user media paths before llama normalization', async () => {
     (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
 
     await llmEngineService.load('test/model');
@@ -428,10 +428,7 @@ describe('LLMEngineService', () => {
         { role: 'system', content: 'Be concise.' },
         {
           role: 'user',
-          content: [
-            { type: 'text', text: 'Earlier image' },
-            { type: 'image_url', image_url: { url: '/document/first.jpg' } },
-          ],
+          content: 'Earlier image',
         },
         { role: 'assistant', content: 'Earlier answer' },
         {
@@ -448,7 +445,7 @@ describe('LLMEngineService', () => {
     );
     expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        media_paths: ['/document/first.jpg', '/document/latest-existing.jpg', '/document/top.jpg'],
+        media_paths: ['/document/latest-existing.jpg', '/document/top.jpg'],
         messages: expect.arrayContaining([
           expect.objectContaining({
             role: 'user',
@@ -462,6 +459,53 @@ describe('LLMEngineService', () => {
       }),
       expect.any(Function),
     );
+  });
+
+  it('does not forward historical image media paths for a latest text-only follow-up', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+
+    await llmEngineService.load('test/model');
+
+    await llmEngineService.chatCompletion({
+      messages: [
+        { role: 'system', content: 'Be concise.' },
+        { role: 'user', content: 'Earlier image', mediaPaths: ['/document/first.jpg'] },
+        { role: 'assistant', content: 'Earlier answer' },
+        { role: 'user', content: 'Continue with text only' },
+      ],
+      multimodalReadiness: {
+        modelId: 'test/model',
+        status: 'ready',
+        projectorId: downloadedProjector.id,
+        support: ['vision'],
+        checkedAt: 1,
+      },
+      params: { n_predict: 32 },
+    });
+
+    expect(getFormattedChatMock()).toHaveBeenCalledWith(
+      [
+        { role: 'system', content: 'Be concise.' },
+        { role: 'user', content: 'Earlier image' },
+        { role: 'assistant', content: 'Earlier answer' },
+        { role: 'user', content: 'Continue with text only' },
+      ],
+      null,
+      expect.any(Object),
+    );
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        messages: [
+          { role: 'system', content: 'Be concise.' },
+          { role: 'user', content: 'Earlier image' },
+          { role: 'assistant', content: 'Earlier answer' },
+          { role: 'user', content: 'Continue with text only' },
+        ],
+      }),
+      expect.any(Function),
+    );
+    const completionParams = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock.mock.calls.at(-1)?.[0];
+    expect(completionParams.media_paths).toBeUndefined();
   });
 
   it('waits for in-flight multimodal runtime initialization before sending image media paths', async () => {

@@ -20,9 +20,17 @@ const CORE_SCENARIOS = [
 const CATALOG_SCENARIOS = [
   "variant-picker-smoke",
 ];
+const ATTACHMENT_SCENARIOS = [
+  "chat-attachment-text-only-fallback",
+];
+const PREPARED_ATTACHMENT_SCENARIOS = [
+  "chat-attachment-preview-remove",
+];
 const SCENARIO_PACK_SCENARIOS = {
   core: CORE_SCENARIOS,
   catalog: CATALOG_SCENARIOS,
+  attachments: ATTACHMENT_SCENARIOS,
+  "attachments-prepared": PREPARED_ATTACHMENT_SCENARIOS,
   "dependency-ui": [
     ...CORE_SCENARIOS,
     "style-screenshots",
@@ -78,6 +86,38 @@ const CHAT_ROUTE_LABELS = [
   "Спросите локальный ИИ...",
   "Chat message input",
   "Поле ввода сообщения",
+];
+const ATTACH_IMAGE_LABELS = [
+  "Attach an image from the photo library",
+  "Прикрепить изображение из медиатеки",
+];
+const ATTACHMENT_PREVIEW_LABELS = [
+  "Attached image preview",
+  "Предпросмотр прикрепленного изображения",
+];
+const REMOVE_ATTACHMENT_LABELS = [
+  "Remove attached image",
+  "Удалить прикрепленное изображение",
+];
+const IMAGE_ATTACHMENT_TEXT_ONLY_FALLBACK_LABELS = [
+  "This model supports text chat only.",
+  "Download the vision projector before attaching images.",
+  "Choose the matching vision projector before attaching images.",
+  "The vision projector is still downloading.",
+  "Vision support is initializing.",
+  "Vision support could not start. Text chat is still available.",
+  "Choose and load a vision-capable model before attaching images.",
+  "Image attachments are disabled while editing an earlier message.",
+  "Vision chat is not supported by this runtime.",
+  "Эта модель поддерживает только текстовый чат.",
+  "Скачайте vision-проектор, прежде чем прикреплять изображения.",
+  "Выберите подходящий vision-проектор, прежде чем прикреплять изображения.",
+  "Vision-проектор еще скачивается.",
+  "Поддержка изображений инициализируется.",
+  "Не удалось запустить поддержку изображений. Текстовый чат по-прежнему доступен.",
+  "Выберите и загрузите модель с поддержкой изображений, прежде чем прикреплять изображения.",
+  "Вложения с изображениями отключены при редактировании предыдущего сообщения.",
+  "Чат с изображениями не поддерживается этим runtime.",
 ];
 const MODELS_TAB_LABELS = ["Models", "Модели"];
 const MODEL_CATALOG_LABELS = ["Model Catalog", "Каталог моделей"];
@@ -186,6 +226,7 @@ const SETTINGS_ROUTE_TIMEOUT_MS = 60_000;
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const SCREENSHOT_CAPTURE_MAX_ATTEMPTS = 4;
 const SCREENSHOT_CAPTURE_RETRY_DELAY_MS = 350;
+const REPORT_ARTIFACT_PATH_FIELDS = ["screenshotPath", "uiDumpPath", "logcatPath"];
 
 if (require.main === module) {
   main().catch((error) => {
@@ -237,14 +278,13 @@ async function main() {
         const outcome = await scenario.run(context);
 
         if (outcome && outcome.status === "skipped") {
-          results.push({
-            id: scenario.id,
-            tier: scenario.tier,
-            status: "skipped",
-            durationMs: Date.now() - startedAt,
+          recordScenarioSkip({
+            scenario,
+            results,
+            startedAt,
             reason: outcome.reason,
+            context,
           });
-          log(`SKIP ${scenario.id}: ${outcome.reason}`);
           continue;
         }
 
@@ -258,15 +298,18 @@ async function main() {
         });
         log(`PASS ${scenario.id}`);
       } catch (error) {
+        if (error instanceof ScenarioSkipFailureError) {
+          throw error;
+        }
+
         if (error instanceof ScenarioSkipError) {
-          results.push({
-            id: scenario.id,
-            tier: scenario.tier,
-            status: "skipped",
-            durationMs: Date.now() - startedAt,
+          recordScenarioSkip({
+            scenario,
+            results,
+            startedAt,
             reason: error.message,
+            context,
           });
-          log(`SKIP ${scenario.id}: ${error.message}`);
           continue;
         }
 
@@ -287,6 +330,10 @@ async function main() {
     writeReport(results);
     log(`Completed ${results.length} basic scenario(s).`);
   } catch (error) {
+    if (!shouldAppendRunnerFailure(error)) {
+      throw error;
+    }
+
     try {
       const screenshotPath = context.captureScreenshot("run-failed.png");
       const uiDumpPath = path.join(artifactsRoot, "run-failed.xml");
@@ -589,6 +636,90 @@ function findCatalogRiskModelCard(adbPath, serial, snapshot = null) {
 
 class ScenarioSkipError extends Error {}
 
+class ScenarioSkipFailureError extends Error {}
+
+function shouldAppendRunnerFailure(error) {
+  return !(error instanceof ScenarioSkipFailureError);
+}
+
+function recordScenarioSkip({
+  scenario,
+  results,
+  startedAt,
+  reason,
+  context,
+}) {
+  const durationMs = Date.now() - startedAt;
+
+  if (cliOptions.failOnSkip) {
+    const screenshotPath = context.captureScreenshot(`${scenario.id}-skipped.png`);
+    const message = `Scenario ${scenario.id} skipped while --fail-on-skip is enabled: ${reason}`;
+    results.push({
+      id: scenario.id,
+      tier: scenario.tier,
+      status: "failed",
+      durationMs,
+      screenshotPath,
+      error: message,
+      skipReason: reason,
+    });
+    writeReport(results);
+    log(`FAIL ${scenario.id}: ${message}`);
+    throw new ScenarioSkipFailureError(message);
+  }
+
+  results.push({
+    id: scenario.id,
+    tier: scenario.tier,
+    status: "skipped",
+    durationMs,
+    reason,
+  });
+  log(`SKIP ${scenario.id}: ${reason}`);
+}
+
+function assertAttachmentPreviewRemovePreconditions({
+  fallbackNode = null,
+  previewNode = null,
+  removeNode = null,
+} = {}) {
+  if (fallbackNode) {
+    throw new ScenarioSkipError(
+      "Image attachment preview/remove requires a vision-ready composer; current composer is showing fallback copy."
+    );
+  }
+
+  if (!previewNode || !removeNode) {
+    throw new ScenarioSkipError(
+      "No prepared image draft was visible; attach a seeded gallery image before running preview/remove coverage."
+    );
+  }
+}
+
+function assertAttachmentActionBlocked(attachNode) {
+  const node = attachNode && attachNode.node ? attachNode.node : attachNode;
+
+  if (!node) {
+    throw new Error("Image attachment action was not visible in the text-only fallback state.");
+  }
+
+  if (node.clickable && node.enabled !== false) {
+    throw new Error("Image attachment action is still enabled while the text-only fallback is visible.");
+  }
+}
+
+function assertAttachmentActionAvailable(attachNode) {
+  const node = attachNode && attachNode.node ? attachNode.node : attachNode;
+
+  if (!node) {
+    throw new Error("Image attachment action was not visible in the vision-ready composer state.");
+  }
+
+  if (node.enabled === false) {
+    throw new Error("Image attachment action is disabled while no text-only fallback is visible.");
+  }
+}
+
 function buildScenarios() {
   return [
     {
@@ -661,6 +792,85 @@ function buildScenarios() {
         await ctx.expectAnyText(CHAT_EMPTY_LABELS);
         await ctx.tapBottomTab(HOME_TAB_LABELS);
         await ctx.expectAnyText(NEW_CHAT_LABELS);
+      },
+    },
+    {
+      id: "chat-attachment-text-only-fallback",
+      tier: "secondary",
+      description: "Verify the chat composer exposes image attachment state with text-only fallback copy.",
+      run: async (ctx) => {
+        await goToHome(ctx);
+        await ctx.tapAnyText(NEW_CHAT_LABELS);
+        await ctx.expectAnyText(CHAT_EMPTY_LABELS);
+        await ctx.expectAnyText(ATTACH_IMAGE_LABELS, { timeoutMs: 8_000 });
+
+        const adbPath = resolveAdbPath();
+        const fallbackNode = await findAnyNodeNow(
+          adbPath,
+          ctx.serial,
+          IMAGE_ATTACHMENT_TEXT_ONLY_FALLBACK_LABELS,
+          { visibleOnly: true }
+        );
+
+        const attachNode = await findAnyNodeNow(
+          adbPath,
+          ctx.serial,
+          ATTACH_IMAGE_LABELS,
+          { visibleOnly: true }
+        );
+
+        if (fallbackNode) {
+          assertAttachmentActionBlocked(attachNode);
+        } else {
+          assertAttachmentActionAvailable(attachNode);
+        }
+
+        await ctx.tapBottomTab(HOME_TAB_LABELS);
+        await ctx.expectAnyText(HOME_SECTION_LABELS);
+      },
+    },
+    {
+      id: "chat-attachment-preview-remove",
+      tier: "optional",
+      description: "Verify a prepared vision-ready image attachment draft can be previewed and removed.",
+      run: async (ctx) => {
+        await goToHome(ctx);
+        await ctx.tapAnyText(NEW_CHAT_LABELS);
+        await ctx.expectAnyText(CHAT_EMPTY_LABELS);
+        await ctx.expectAnyText(ATTACH_IMAGE_LABELS, { timeoutMs: 8_000 });
+
+        const adbPath = resolveAdbPath();
+        const fallbackNode = await findAnyNodeNow(
+          adbPath,
+          ctx.serial,
+          IMAGE_ATTACHMENT_TEXT_ONLY_FALLBACK_LABELS,
+          { visibleOnly: true }
+        );
+
+        const previewNode = await findAnyNodeNow(
+          adbPath,
+          ctx.serial,
+          ATTACHMENT_PREVIEW_LABELS,
+          { visibleOnly: true }
+        );
+        const removeNode = await findAnyNodeNow(
+          adbPath,
+          ctx.serial,
+          REMOVE_ATTACHMENT_LABELS,
+          { visibleOnly: true }
+        );
+
+        assertAttachmentPreviewRemovePreconditions({
+          fallbackNode,
+          previewNode,
+          removeNode,
+        });
+
+        await ctx.tapAnyText(REMOVE_ATTACHMENT_LABELS, {
+          allowBottomOverlay: true,
+          timeoutMs: 5_000,
+        });
+        await ctx.expectAnyText(ATTACH_IMAGE_LABELS, { timeoutMs: 5_000 });
       },
     },
     {
@@ -1685,6 +1895,7 @@ function parseUiNodes(xml) {
       contentDesc: attributes["content-desc"] || "",
       packageName: attributes.package || "",
       clickable: attributes.clickable === "true",
+      enabled: attributes.enabled !== "false",
       bounds: parseBounds(attributes.bounds),
     });
 
@@ -2111,6 +2322,7 @@ function writeReport(results) {
     accumulator[result.status] = (accumulator[result.status] || 0) + 1;
     return accumulator;
   }, {});
+  const serializedResults = serializeReportResults(results);
   fs.writeFileSync(
     reportPath,
     JSON.stringify(
@@ -2120,13 +2332,60 @@ function writeReport(results) {
         selectedScenario: cliOptions.scenario,
         scenarioCount: results.length,
         summary,
-        results,
+        results: serializedResults,
       },
       null,
       2
     )
   );
   log(`Wrote scenario report to ${reportPath}`);
+}
+
+function serializeReportResults(results, roots = {}) {
+  const resolvedArtifactsRoot = path.resolve(roots.artifactsRoot || artifactsRoot);
+  const resolvedProjectRoot = path.resolve(roots.projectRoot || projectRoot);
+
+  return results.map((result) => {
+    const serializedResult = { ...result };
+
+    for (const field of REPORT_ARTIFACT_PATH_FIELDS) {
+      if (typeof serializedResult[field] === "string") {
+        serializedResult[field] = toReportRelativePath(serializedResult[field], {
+          artifactsRoot: resolvedArtifactsRoot,
+          projectRoot: resolvedProjectRoot,
+        });
+      }
+    }
+
+    return serializedResult;
+  });
+}
+
+function toReportRelativePath(filePath, roots) {
+  if (!path.isAbsolute(filePath)) {
+    return normalizeReportPath(filePath);
+  }
+
+  const resolvedPath = path.resolve(filePath);
+  const baseRoot = isPathInsideOrEqual(resolvedPath, roots.artifactsRoot)
+    ? roots.artifactsRoot
+    : roots.projectRoot;
+  const relativePath = path.relative(baseRoot, resolvedPath);
+
+  if (!relativePath || path.isAbsolute(relativePath) || /^[A-Za-z]:[\\/]/.test(relativePath)) {
+    return path.basename(resolvedPath);
+  }
+
+  return normalizeReportPath(relativePath);
+}
+
+function isPathInsideOrEqual(targetPath, rootPath) {
+  const relativePath = path.relative(rootPath, targetPath);
+  return relativePath === "" || (!relativePath.startsWith("..") && !path.isAbsolute(relativePath));
+}
+
+function normalizeReportPath(reportPath) {
+  return reportPath.replace(/\\/g, "/");
 }
 
 function printScenarioList(scenarios) {
@@ -2142,6 +2401,7 @@ function parseCliOptions(argv) {
   const options = {
     emulator: false,
     skipBuild: false,
+    failOnSkip: false,
     bootstrapScreenshot: false,
     list: false,
     pack: DEFAULT_SCENARIO_PACK,
@@ -2161,6 +2421,11 @@ function parseCliOptions(argv) {
 
     if (arg === "--skip-build") {
       options.skipBuild = true;
+      continue;
+    }
+
+    if (arg === "--fail-on-skip") {
+      options.failOnSkip = true;
       continue;
     }
 
@@ -2235,6 +2500,7 @@ function printHelp() {
   console.log(`  --pack <${[...SCENARIO_PACKS].join("|")}> Run a scenario pack (default: ${DEFAULT_SCENARIO_PACK})`);
   console.log("  --scenario <id>            Run only one scenario");
   console.log("  --skip-build               Reuse the existing debug APK");
+  console.log("  --fail-on-skip             Treat skipped scenarios as verification failures");
   console.log("  --bootstrap-screenshot     Save a smoke bootstrap screenshot before scenarios");
   console.log("  --port <number>            Forward a specific Metro port to android-smoke");
   console.log("  --list                     Print available scenarios");
@@ -2462,4 +2728,10 @@ module.exports = {
   parseUiSnapshot,
   restoreLanguageAfterScenario,
   ScenarioSkipError,
+  ScenarioSkipFailureError,
+  serializeReportResults,
+  shouldAppendRunnerFailure,
+  assertAttachmentActionBlocked,
+  assertAttachmentActionAvailable,
+  assertAttachmentPreviewRemovePreconditions,
 };

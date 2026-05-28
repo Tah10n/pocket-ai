@@ -23,6 +23,12 @@ const {
   selectScenarios,
   ScenarioSkipError,
   restoreLanguageAfterScenario,
+  assertAttachmentPreviewRemovePreconditions,
+  assertAttachmentActionBlocked,
+  assertAttachmentActionAvailable,
+  ScenarioSkipFailureError,
+  serializeReportResults,
+  shouldAppendRunnerFailure,
 } = require('../../scripts/android-scenarios');
 
 describe('android-scenarios smoke bootstrap args', () => {
@@ -200,10 +206,26 @@ describe('android-scenarios npm defaults', () => {
 
   it('exposes targeted scenario packs for dependency checks', () => {
     expect(packageJson.scripts['android:scenarios:catalog']).toContain('--pack catalog');
+    expect(packageJson.scripts['android:scenarios:attachments']).toContain('--pack attachments');
+    expect(packageJson.scripts['android:scenarios:attachments-prepared']).toContain('--pack attachments-prepared');
     expect(packageJson.scripts['android:scenarios:dependency-ui']).toContain('--pack dependency-ui');
     expect(packageJson.scripts['android:scenarios:runtime']).toContain('--pack runtime');
     expect(packageJson.scripts['android:scenarios:native']).toContain('--pack native');
     expect(packageJson.scripts['android:scenarios:extended']).toContain('--pack extended');
+  });
+
+  it('keeps vision-adjacent smoke verification self-contained and leaves prepared coverage opt-in', () => {
+    const smokeScript = packageJson.scripts['verify:mobile-change:android:vision-smoke'];
+
+    expect(packageJson.scripts['verify:mobile-change:android:vision']).toBe(
+      'npm run verify:mobile-change:android:vision-smoke'
+    );
+    expect(smokeScript).toContain('verify:mobile-change');
+    expect(smokeScript).toContain('android:scenarios:runtime');
+    expect(smokeScript).toContain('android:scenarios:catalog');
+    expect(smokeScript).toContain('android:scenarios:attachments');
+    expect(smokeScript).not.toContain('android:scenarios:attachments-prepared');
+    expect(packageJson.scripts['android:scenarios:attachments-prepared']).toContain('--fail-on-skip');
   });
 });
 
@@ -689,6 +711,90 @@ describe('android-scenarios pack selection', () => {
     ]);
   });
 
+  it('selects deterministic composer image attachment checks from the attachments pack', () => {
+    expect(selectScenarios(scenarios, parseCliOptions(['--pack', 'attachments'])).map((scenario) => scenario.id)).toEqual([
+      'chat-attachment-text-only-fallback',
+    ]);
+  });
+
+  it('keeps prepared image draft coverage in an explicit prepared attachments pack', () => {
+    expect(selectScenarios(scenarios, parseCliOptions(['--pack', 'attachments-prepared'])).map((scenario) => scenario.id)).toEqual([
+      'chat-attachment-preview-remove',
+    ]);
+  });
+
+  it('skips unmet prepared attachment preview/remove preconditions', () => {
+    let fallbackError;
+    try {
+      assertAttachmentPreviewRemovePreconditions({
+        fallbackNode: { label: 'Text-only fallback' },
+        previewNode: null,
+        removeNode: null,
+      });
+    } catch (error) {
+      fallbackError = error;
+    }
+    expect(fallbackError).toBeInstanceOf(Error);
+    expect(fallbackError).toBeInstanceOf(ScenarioSkipError);
+
+    let missingDraftError;
+    try {
+      assertAttachmentPreviewRemovePreconditions({
+        fallbackNode: null,
+        previewNode: { label: 'Attached image preview' },
+        removeNode: null,
+      });
+    } catch (error) {
+      missingDraftError = error;
+    }
+    expect(missingDraftError).toBeInstanceOf(Error);
+    expect(missingDraftError).toBeInstanceOf(ScenarioSkipError);
+
+    expect(() => assertAttachmentPreviewRemovePreconditions({
+      fallbackNode: null,
+      previewNode: { label: 'Attached image preview' },
+      removeNode: { label: 'Remove image attachment' },
+    })).not.toThrow();
+  });
+
+  it('asserts text-only attachment affordances are blocked', () => {
+    expect(() => assertAttachmentActionBlocked({ clickable: false, enabled: false })).not.toThrow();
+    expect(() => assertAttachmentActionBlocked({ clickable: true, enabled: false })).not.toThrow();
+    expect(() => assertAttachmentActionBlocked({ clickable: true, enabled: true })).toThrow(
+      /still enabled/
+    );
+  });
+
+  it('asserts matched text-only attachment affordance wrappers are blocked', () => {
+    const blockedMatch = findAnyNodeInSnapshot(parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="Attach an image from the photo library" clickable="true" enabled="false" bounds="[10,20][210,120]" />
+      </hierarchy>
+    `), ['Attach an image from the photo library'], { visibleOnly: true });
+    const enabledMatch = findAnyNodeInSnapshot(parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="Attach an image from the photo library" clickable="true" enabled="true" bounds="[10,20][210,120]" />
+      </hierarchy>
+    `), ['Attach an image from the photo library'], { visibleOnly: true });
+
+    expect(blockedMatch).toEqual(expect.objectContaining({
+      label: 'Attach an image from the photo library',
+      node: expect.objectContaining({ enabled: false }),
+    }));
+    expect(() => assertAttachmentActionBlocked(blockedMatch)).not.toThrow();
+
+    expect(() => assertAttachmentActionBlocked(enabledMatch)).toThrow(/still enabled/);
+  });
+
+  it('asserts vision-ready attachment affordances are visible and enabled', () => {
+    expect(() => assertAttachmentActionAvailable({ clickable: true, enabled: true })).not.toThrow();
+    expect(() => assertAttachmentActionAvailable({ clickable: false, enabled: true })).not.toThrow();
+    expect(() => assertAttachmentActionAvailable({ clickable: true, enabled: false })).toThrow(
+      /disabled/
+    );
+    expect(() => assertAttachmentActionAvailable(null)).toThrow(/not visible/);
+  });
+
   it('includes stable secondary scenarios in the extended pack without live catalog smoke', () => {
     const selectedIds = selectScenarios(scenarios, parseCliOptions(['--pack', 'extended'])).map((scenario) => scenario.id);
 
@@ -752,6 +858,8 @@ describe('android-scenarios pack selection', () => {
     expect(selectedIds).toEqual(
       expect.arrayContaining([
         'variant-picker-smoke',
+        'chat-attachment-text-only-fallback',
+        'chat-attachment-preview-remove',
         'hf-catalog-hardening',
         'memory-fit-badges',
         'memory-fit-download-warning',
@@ -809,5 +917,102 @@ describe('android-scenarios skip signaling', () => {
 
     expect(error).toBeInstanceOf(Error);
     expect(error.message).toBe('skip this');
+  });
+
+  it('parses fail-on-skip for verification packs that require prepared state', () => {
+    expect(parseCliOptions(['--pack', 'attachments-prepared', '--fail-on-skip'])).toEqual(
+      expect.objectContaining({
+        pack: 'attachments-prepared',
+        failOnSkip: true,
+      })
+    );
+  });
+
+  it('does not append a runner failure for skips already recorded as failed scenarios', () => {
+    expect(shouldAppendRunnerFailure(new ScenarioSkipFailureError('already recorded'))).toBe(false);
+    expect(shouldAppendRunnerFailure(new Error('real runner failure'))).toBe(true);
+  });
+});
+
+describe('android-scenarios report path serialization', () => {
+  it('stores artifact paths as relative report paths for all result outcomes', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-ai-report-paths-'));
+    const projectRoot = path.join(tempDir, 'project');
+    const artifactsRoot = path.join(projectRoot, 'artifacts', 'android-scenarios');
+    const results = [
+      {
+        id: 'home-smoke',
+        status: 'passed',
+        screenshotPath: path.join(artifactsRoot, 'home-smoke.png'),
+      },
+      {
+        id: 'bottom-tabs',
+        status: 'failed',
+        screenshotPath: path.join(artifactsRoot, 'bottom-tabs-failed.png'),
+      },
+      {
+        id: 'chat-attachment-preview-remove',
+        status: 'failed',
+        screenshotPath: path.join(artifactsRoot, 'chat-attachment-preview-remove-skipped.png'),
+        skipReason: 'prepared image draft missing',
+      },
+      {
+        id: 'runner-failure',
+        status: 'failed',
+        screenshotPath: path.join(artifactsRoot, 'run-failed.png'),
+        uiDumpPath: path.join(artifactsRoot, 'run-failed.xml'),
+        logcatPath: path.join(artifactsRoot, 'run-failed-logcat.txt'),
+      },
+      {
+        id: 'project-root-artifact',
+        status: 'failed',
+        screenshotPath: path.join(projectRoot, 'artifacts', 'other-captures', 'capture.png'),
+      },
+    ];
+
+    try {
+      const serializedResults = serializeReportResults(results, { artifactsRoot, projectRoot });
+
+      expect(serializedResults).toEqual([
+        expect.objectContaining({ screenshotPath: 'home-smoke.png' }),
+        expect.objectContaining({ screenshotPath: 'bottom-tabs-failed.png' }),
+        expect.objectContaining({
+          screenshotPath: 'chat-attachment-preview-remove-skipped.png',
+          skipReason: 'prepared image draft missing',
+        }),
+        expect.objectContaining({
+          screenshotPath: 'run-failed.png',
+          uiDumpPath: 'run-failed.xml',
+          logcatPath: 'run-failed-logcat.txt',
+        }),
+        expect.objectContaining({ screenshotPath: 'artifacts/other-captures/capture.png' }),
+      ]);
+
+      for (const result of serializedResults) {
+        for (const field of ['screenshotPath', 'uiDumpPath', 'logcatPath']) {
+          if (result[field]) {
+            expect(path.isAbsolute(result[field])).toBe(false);
+            expect(result[field]).not.toContain(tempDir);
+          }
+        }
+      }
+
+      expect(results[0].screenshotPath).toBe(path.join(artifactsRoot, 'home-smoke.png'));
+      expect(results[3].uiDumpPath).toBe(path.join(artifactsRoot, 'run-failed.xml'));
+    } finally {
+      fs.rmSync(tempDir, { force: true, recursive: true });
+    }
+  });
+
+  it('normalizes already-relative report paths', () => {
+    expect(
+      serializeReportResults([
+        {
+          id: 'relative-path',
+          status: 'passed',
+          screenshotPath: 'nested\\capture.png',
+        },
+      ])[0].screenshotPath
+    ).toBe('nested/capture.png');
   });
 });

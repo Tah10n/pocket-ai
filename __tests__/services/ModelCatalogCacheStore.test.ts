@@ -654,6 +654,94 @@ describe('ModelCatalogCacheStore', () => {
     expect(storage.getString(SNAPSHOT_CACHE_KEY)).not.toContain('legacy-variant-projector-resume-token');
   });
 
+  it('rewrites existing anonymous payloads with only projector download progress during hydration', () => {
+    const storage = createStorage(STORAGE_ID, { tier: 'cache' });
+    const searchScope = { query: 'q', cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };
+    const legacySearchModel = buildModel({
+      id: 'public/legacy-search-projector-progress',
+      chatModalities: ['text', 'vision'],
+      artifactRole: 'primary_chat_model',
+      visionSource: 'catalog_metadata',
+      visionConfidence: 'trusted',
+      projectorCandidates: [{
+        id: 'search-projector',
+        ownerModelId: 'public/legacy-search-projector-progress',
+        repoId: 'public/legacy-search-projector-progress',
+        fileName: 'mmproj-search-f16.gguf',
+        downloadUrl: 'https://huggingface.co/public/legacy-search-projector-progress/resolve/main/mmproj-search-f16.gguf',
+        size: 1024,
+        downloadProgress: 0,
+        lifecycleStatus: 'available',
+        matchStatus: 'matched',
+        matchReason: 'single_projector_candidate',
+      }],
+    });
+    const legacySnapshotModel = buildModel({
+      id: 'public/legacy-variant-projector-progress',
+      variants: [{
+        variantId: 'q4',
+        fileName: 'model-q4.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: 1024,
+        chatModalities: ['text', 'vision'],
+        artifactRole: 'primary_chat_model',
+        visionSource: 'catalog_metadata',
+        visionConfidence: 'trusted',
+        projectorCandidates: [{
+          id: 'variant-projector',
+          ownerModelId: 'public/legacy-variant-projector-progress',
+          ownerVariantId: 'q4',
+          repoId: 'public/legacy-variant-projector-progress',
+          fileName: 'mmproj-variant-f16.gguf',
+          downloadUrl: 'https://huggingface.co/public/legacy-variant-projector-progress/resolve/main/mmproj-variant-f16.gguf',
+          size: 2048,
+          downloadProgress: 0,
+          lifecycleStatus: 'available',
+          matchStatus: 'matched',
+          matchReason: 'single_projector_candidate',
+        }],
+      }],
+    });
+
+    storage.set(SEARCH_CACHE_KEY, JSON.stringify({
+      version: 4,
+      entries: [{
+        key: 'q::__initial__::20::__default__::anon',
+        timestamp: Date.now(),
+        scope: searchScope,
+        result: {
+          models: [legacySearchModel],
+          hasMore: false,
+          nextCursor: null,
+        },
+      }],
+    }));
+    storage.set(SNAPSHOT_CACHE_KEY, JSON.stringify({
+      version: 4,
+      entries: [{
+        key: 'public/legacy-variant-projector-progress::anon',
+        id: 'public/legacy-variant-projector-progress',
+        authScope: 'anon',
+        timestamp: Date.now(),
+        model: legacySnapshotModel,
+      }],
+    }));
+
+    const store = new ModelCatalogCacheStore();
+    const searchProjector = store.getSearch(searchScope, 1000)?.models[0]?.projectorCandidates?.[0];
+    const snapshotVariantProjector = store
+      .getModelSnapshot('public/legacy-variant-projector-progress', 'anon', 1000)
+      ?.variants?.[0]
+      ?.projectorCandidates?.[0];
+    const persistedSearch = JSON.parse(storage.getString(SEARCH_CACHE_KEY) as string) as any;
+    const persistedSnapshot = JSON.parse(storage.getString(SNAPSHOT_CACHE_KEY) as string) as any;
+
+    expect(searchProjector?.downloadProgress).toBeUndefined();
+    expect(snapshotVariantProjector?.downloadProgress).toBeUndefined();
+    expect(persistedSearch.entries[0].result.models[0].projectorCandidates[0].downloadProgress).toBeUndefined();
+    expect(persistedSnapshot.entries[0].model.variants[0].projectorCandidates[0].downloadProgress).toBeUndefined();
+  });
+
   it('migrates version 3 search payloads to version 4 with variant limiting', () => {
     const storage = createStorage(STORAGE_ID, { tier: 'cache' });
     const scope = { query: 'q', cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };

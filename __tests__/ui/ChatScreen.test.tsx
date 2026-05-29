@@ -606,6 +606,7 @@ const {
   getAndroidKeyboardSpacerHeight,
   getChatWarmupBannerBottomOffset,
   handleAndroidBackNavigation,
+  resolveFallbackMultimodalReadiness,
   shouldFloatAndroidComposerOverContent,
 } = require('../../src/ui/screens/ChatScreen');
 const { useChatStore } = require('../../src/store/chatStore');
@@ -630,6 +631,51 @@ const copiedDraftImageAttachment = {
   height: 768,
   copyStatus: 'copied',
 };
+
+function createVisionProjector(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 'author/model-q4-mmproj',
+    ownerModelId: 'author/model-q4',
+    repoId: 'author/model-q4',
+    fileName: 'mmproj.gguf',
+    downloadUrl: 'https://example.com/mmproj.gguf',
+    size: 32 * 1024 * 1024,
+    localPath: 'author-model-q4-mmproj.gguf',
+    lifecycleStatus: 'downloaded',
+    matchStatus: 'matched',
+    ...overrides,
+  };
+}
+
+function createVisionModel(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 'author/model-q4',
+    name: 'Vision model',
+    author: 'Test',
+    size: 512 * 1024 * 1024,
+    localPath: 'author-model-q4.gguf',
+    lifecycleStatus: 'downloaded',
+    chatModalities: ['text', 'vision'],
+    ...overrides,
+  };
+}
+
+function createReadyVisionModel(overrides: Record<string, unknown> = {}) {
+  const projector = createVisionProjector();
+
+  return createVisionModel({
+    selectedProjectorId: projector.id,
+    projectorCandidates: [projector],
+    multimodalReadiness: {
+      modelId: 'author/model-q4',
+      status: 'ready',
+      projectorId: projector.id,
+      support: ['vision'],
+      checkedAt: 1,
+    },
+    ...overrides,
+  });
+}
 
 describe('ChatScreen', () => {
   let alertSpy: jest.SpyInstance;
@@ -773,21 +819,7 @@ describe('ChatScreen', () => {
 
   it('enables ready vision attachments and sends copied drafts with multimodal readiness', async () => {
     registry.saveModels([
-      {
-        id: 'author/model-q4',
-        name: 'Vision model',
-        author: 'Test',
-        size: 512 * 1024 * 1024,
-        localPath: 'author-model-q4.gguf',
-        lifecycleStatus: 'downloaded',
-        chatModalities: ['text', 'vision'],
-        multimodalReadiness: {
-          modelId: 'author/model-q4',
-          status: 'ready',
-          support: ['vision'],
-          checkedAt: 1,
-        },
-      },
+      createReadyVisionModel(),
     ]);
     mockUseChatImageAttachments.mockImplementation((options) => ({
       drafts: [copiedDraftImageAttachment],
@@ -836,23 +868,269 @@ describe('ChatScreen', () => {
     expect(mockCommitAttachmentDrafts).toHaveBeenCalledTimes(1);
   });
 
-  it('sends copied drafts for an image-only composer submission', async () => {
+  it('uses initializing fallback for vision models with a selected downloaded projector and no persisted readiness', () => {
     registry.saveModels([
-      {
-        id: 'author/model-q4',
-        name: 'Vision model',
-        author: 'Test',
-        size: 512 * 1024 * 1024,
-        localPath: 'author-model-q4.gguf',
-        lifecycleStatus: 'downloaded',
-        chatModalities: ['text', 'vision'],
+      createVisionModel({
+        selectedProjectorId: 'author/model-q4-mmproj',
+        projectorCandidates: [
+          createVisionProjector({
+            matchStatus: 'user_selected',
+          }),
+        ],
+      }),
+    ]);
+    mockUseChatImageAttachments.mockImplementation((options) => ({
+      drafts: [],
+      isPicking: false,
+      remainingSlots: 4,
+      attachImages: mockAttachImages,
+      removeDraft: mockRemoveAttachmentDraft,
+      clearDrafts: mockClearAttachmentDrafts,
+      commitDrafts: mockCommitAttachmentDrafts,
+      options,
+    }));
+
+    render(React.createElement(ChatScreen));
+
+    expect(mockUseChatImageAttachments.mock.calls[mockUseChatImageAttachments.mock.calls.length - 1][0]).toEqual(
+      expect.objectContaining({
+        enabled: false,
+        disabledReason: 'chat.visionReadiness.initializing',
+      }),
+    );
+    expect(lastChatInputBarProps).toEqual(expect.objectContaining({
+      imageAttachmentsEnabled: false,
+      imageAttachmentsDisabledReason: 'chat.visionReadiness.initializing',
+    }));
+    expect(lastChatInputBarProps.imageAttachmentsDisabledReason).not.toBe('chat.visionReadiness.missingProjector');
+    expect(resolveFallbackMultimodalReadiness(registry.getModel('author/model-q4'), 'author/model-q4')).toEqual(
+      expect.objectContaining({
+        status: 'initializing',
+        projectorId: 'author/model-q4-mmproj',
+      }),
+    );
+  });
+
+  it('uses initializing fallback for a single downloaded projector without a selected projector id', () => {
+    const model = createVisionModel({
+      projectorCandidates: [createVisionProjector()],
+    });
+
+    expect(resolveFallbackMultimodalReadiness(model, 'author/model-q4')).toEqual(
+      expect.objectContaining({
+        modelId: 'author/model-q4',
+        status: 'initializing',
+        projectorId: 'author/model-q4-mmproj',
+      }),
+    );
+
+    registry.saveModels([model]);
+    render(React.createElement(ChatScreen));
+
+    expect(lastChatInputBarProps).toEqual(expect.objectContaining({
+      imageAttachmentsEnabled: false,
+      imageAttachmentsDisabledReason: 'chat.visionReadiness.initializing',
+    }));
+  });
+
+  it('uses runtime-compatible fallback when projector metadata is present before chat modalities hydrate', () => {
+    const model = createVisionModel({
+      chatModalities: undefined,
+      projectorCandidates: [createVisionProjector()],
+    });
+
+    expect(resolveFallbackMultimodalReadiness(model, 'author/model-q4')).toEqual(
+      expect.objectContaining({
+        modelId: 'author/model-q4',
+        status: 'initializing',
+        projectorId: 'author/model-q4-mmproj',
+      }),
+    );
+  });
+
+  it('refreshes stale persisted missing-projector readiness when projector metadata hydrates', () => {
+    const model = createVisionModel({
+      multimodalReadiness: {
+        modelId: 'author/model-q4',
+        status: 'missing_projector',
+        support: [],
+        checkedAt: 1,
+      },
+      projectorCandidates: [createVisionProjector()],
+    });
+
+    expect(resolveFallbackMultimodalReadiness(model, 'author/model-q4')).toEqual(
+      expect.objectContaining({
+        modelId: 'author/model-q4',
+        status: 'initializing',
+        projectorId: 'author/model-q4-mmproj',
+      }),
+    );
+  });
+
+  it('does not preserve stale ready readiness when current projector resolution is missing', () => {
+    const model = createVisionModel({
+      multimodalReadiness: {
+        modelId: 'author/model-q4',
+        status: 'ready',
+        projectorId: 'author/model-q4-mmproj',
+        support: ['vision'],
+        checkedAt: 1,
+      },
+    });
+
+    expect(resolveFallbackMultimodalReadiness(model, 'author/model-q4')).toEqual(
+      expect.objectContaining({
+        modelId: 'author/model-q4',
+        status: 'missing_projector',
+        support: [],
+      }),
+    );
+  });
+
+  it('does not preserve stale ready readiness when current projector resolution is ambiguous', () => {
+    const model = createVisionModel({
+      multimodalReadiness: {
+        modelId: 'author/model-q4',
+        status: 'ready',
+        projectorId: 'author/model-q4-mmproj-a',
+        support: ['vision'],
+        checkedAt: 1,
+      },
+      projectorCandidates: [
+        createVisionProjector({ id: 'author/model-q4-mmproj-a' }),
+        createVisionProjector({ id: 'author/model-q4-mmproj-b' }),
+      ],
+    });
+
+    expect(resolveFallbackMultimodalReadiness(model, 'author/model-q4')).toEqual(
+      expect.objectContaining({
+        modelId: 'author/model-q4',
+        status: 'ambiguous_projector',
+        support: [],
+      }),
+    );
+  });
+
+  it.each([
+    ['available', 'missing_projector'],
+    ['queued', 'projector_downloading'],
+    ['downloading', 'projector_downloading'],
+    ['paused', 'projector_downloading'],
+    ['failed', 'failed'],
+  ] as const)(
+    'does not preserve stale ready readiness for a %s selected projector',
+    (lifecycleStatus, expectedStatus) => {
+      const model = createVisionModel({
+        selectedProjectorId: 'author/model-q4-mmproj',
         multimodalReadiness: {
           modelId: 'author/model-q4',
           status: 'ready',
+          projectorId: 'author/model-q4-mmproj',
           support: ['vision'],
           checkedAt: 1,
         },
+        projectorCandidates: [
+          createVisionProjector({
+            lifecycleStatus,
+            matchReason: lifecycleStatus === 'failed' ? 'Checksum mismatch' : undefined,
+          }),
+        ],
+      });
+
+      expect(resolveFallbackMultimodalReadiness(model, 'author/model-q4')).toEqual(
+        expect.objectContaining({
+          modelId: 'author/model-q4',
+          status: expectedStatus,
+          support: [],
+        }),
+      );
+    },
+  );
+
+  it('preserves unsupported runtime readiness only for the same downloaded projector', () => {
+    const model = createVisionModel({
+      selectedProjectorId: 'author/model-q4-mmproj',
+      multimodalReadiness: {
+        modelId: 'author/model-q4',
+        status: 'unsupported',
+        projectorId: 'author/model-q4-mmproj',
+        support: [],
+        checkedAt: 1,
       },
+      projectorCandidates: [createVisionProjector()],
+    });
+
+    expect(resolveFallbackMultimodalReadiness(model, 'author/model-q4')).toEqual(
+      expect.objectContaining({
+        status: 'unsupported',
+        projectorId: 'author/model-q4-mmproj',
+      }),
+    );
+  });
+
+  it('preserves a runtime failure for the same downloaded projector until runtime refresh succeeds', () => {
+    const model = createVisionModel({
+      multimodalReadiness: {
+        modelId: 'author/model-q4',
+        status: 'failed',
+        projectorId: 'author/model-q4-mmproj',
+        support: ['vision'],
+        failureReason: 'Runtime init failed',
+        checkedAt: 1,
+      },
+      projectorCandidates: [createVisionProjector()],
+    });
+
+    expect(resolveFallbackMultimodalReadiness(model, 'author/model-q4')).toEqual(
+      expect.objectContaining({
+        status: 'failed',
+        projectorId: 'author/model-q4-mmproj',
+        failureReason: 'Runtime init failed',
+      }),
+    );
+  });
+
+  it.each(['downloading', 'paused'] as const)(
+    'uses projector_downloading fallback for a %s projector',
+    (lifecycleStatus) => {
+      const model = createVisionModel({
+        projectorCandidates: [createVisionProjector({ lifecycleStatus })],
+      });
+
+      expect(resolveFallbackMultimodalReadiness(model, 'author/model-q4')).toEqual(
+        expect.objectContaining({
+          modelId: 'author/model-q4',
+          status: 'projector_downloading',
+          projectorId: 'author/model-q4-mmproj',
+        }),
+      );
+    },
+  );
+
+  it('uses failed fallback with projector id and failure reason for a failed projector', () => {
+    const model = createVisionModel({
+      projectorCandidates: [
+        createVisionProjector({
+          lifecycleStatus: 'failed',
+          matchReason: 'Checksum mismatch',
+        }),
+      ],
+    });
+
+    expect(resolveFallbackMultimodalReadiness(model, 'author/model-q4')).toEqual(
+      expect.objectContaining({
+        modelId: 'author/model-q4',
+        status: 'failed',
+        projectorId: 'author/model-q4-mmproj',
+        failureReason: 'Checksum mismatch',
+      }),
+    );
+  });
+
+  it('sends copied drafts for an image-only composer submission', async () => {
+    registry.saveModels([
+      createReadyVisionModel(),
     ]);
     mockUseChatImageAttachments.mockImplementation(() => ({
       drafts: [copiedDraftImageAttachment],
@@ -886,21 +1164,7 @@ describe('ChatScreen', () => {
 
   it('commits copied drafts when generation fails after the user message was appended', async () => {
     registry.saveModels([
-      {
-        id: 'author/model-q4',
-        name: 'Vision model',
-        author: 'Test',
-        size: 512 * 1024 * 1024,
-        localPath: 'author-model-q4.gguf',
-        lifecycleStatus: 'downloaded',
-        chatModalities: ['text', 'vision'],
-        multimodalReadiness: {
-          modelId: 'author/model-q4',
-          status: 'ready',
-          support: ['vision'],
-          checkedAt: 1,
-        },
-      },
+      createReadyVisionModel(),
     ]);
     mockAppendUserMessage.mockImplementationOnce(async (_content, options) => {
       options?.onUserMessageAppended?.({ id: 'message-appended' });
@@ -938,21 +1202,7 @@ describe('ChatScreen', () => {
 
   it('preserves copied drafts when attachment send fails', async () => {
     registry.saveModels([
-      {
-        id: 'author/model-q4',
-        name: 'Vision model',
-        author: 'Test',
-        size: 512 * 1024 * 1024,
-        localPath: 'author-model-q4.gguf',
-        lifecycleStatus: 'downloaded',
-        chatModalities: ['text', 'vision'],
-        multimodalReadiness: {
-          modelId: 'author/model-q4',
-          status: 'ready',
-          support: ['vision'],
-          checkedAt: 1,
-        },
-      },
+      createReadyVisionModel(),
     ]);
     mockAppendUserMessage.mockRejectedValueOnce(new Error('send failed'));
     mockUseChatImageAttachments.mockImplementation(() => ({
@@ -2142,20 +2392,16 @@ describe('ChatScreen', () => {
     const readyReadiness = {
       modelId: 'author/model-q4',
       status: 'ready',
+      projectorId: 'author/model-q4-mmproj',
       support: ['vision'],
       checkedAt: 1,
     };
     registry.saveModels([
-      {
-        id: 'author/model-q4',
-        name: 'Vision model',
-        author: 'Test',
-        size: 512 * 1024 * 1024,
-        localPath: 'author-model-q4.gguf',
-        lifecycleStatus: 'downloaded',
-        chatModalities: ['text', 'vision'],
+      createVisionModel({
+        selectedProjectorId: 'author/model-q4-mmproj',
+        projectorCandidates: [createVisionProjector()],
         multimodalReadiness: readyReadiness,
-      },
+      }),
     ]);
     useChatStore.setState({
       threads: {

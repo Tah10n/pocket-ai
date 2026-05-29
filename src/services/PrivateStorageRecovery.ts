@@ -1,4 +1,5 @@
 import {
+  blockPrivateStorageAfterResetFailure,
   resetPrivateAppStorageAfterConfirmation,
   type PrivateStorageHealthSnapshot,
 } from './storage';
@@ -52,10 +53,28 @@ export async function resetPrivateAppStorageAndRuntimeStateAfterConfirmation(): 
   const storageHealth = await resetPrivateAppStorageAfterConfirmation();
 
   if (storageHealth.status !== 'blocked') {
-    await chatAttachmentStorageService.deleteAllAttachmentFilesForPrivateStorageReset();
-    resetPrivatePersistedRuntimeStateForStorageReset();
-    invalidatePrivateStorageRuntimeHandles();
-    registry.invalidatePrivateStorageRuntimeState();
+    let attachmentCleanupFailed = false;
+    try {
+      await chatAttachmentStorageService.deleteAllAttachmentFilesForPrivateStorageReset();
+    } catch (error) {
+      console.warn('[PrivateStorageRecovery] Failed to clean chat attachments during private storage reset', {
+        pathCategory: 'chat_attachment',
+        context: 'private_storage_reset_attachment_cleanup',
+        ...(error instanceof Error
+          ? { errorName: error.name || 'Error' }
+          : { errorType: typeof error }),
+      });
+
+      attachmentCleanupFailed = true;
+    } finally {
+      resetPrivatePersistedRuntimeStateForStorageReset();
+      invalidatePrivateStorageRuntimeHandles();
+      registry.invalidatePrivateStorageRuntimeState();
+    }
+
+    if (attachmentCleanupFailed) {
+      return blockPrivateStorageAfterResetFailure();
+    }
   }
 
   return storageHealth;

@@ -6,6 +6,7 @@ import { ScreenBadge, ScreenCard, ScreenIconButton } from './ScreenShell';
 import { Text, composeTextRole } from './text';
 import { ValueSelectorRow } from './ValueSelectorRow';
 import { ModelAccessState, type ModelMetadata } from '../../types/models';
+import type { ProjectorArtifact } from '../../types/multimodal';
 import { getModelVisionCapabilityBadgePresentation } from '../../utils/modelCapabilities';
 import { getVariantMemoryBadgePresentation } from '../../utils/modelMemoryBadgePresentation';
 import { formatModelFileSize, getModelDisplayArtifactSizeBytes } from '../../utils/modelSize';
@@ -178,50 +179,88 @@ const ModelCardComponent = ({
 
 ModelCardComponent.displayName = 'ModelCard';
 
-function modelVariantsSignature(model: ModelMetadata): string {
-  return (model.variants ?? [])
-    .map((variant) => [
-      variant.variantId,
-      variant.fileName,
-      variant.quantizationLabel,
-      variant.size ?? 'unknown',
-      variant.sha256 ?? '',
-      variant.ramFit ?? '',
-      variant.ramFitConfidence ?? '',
-      variant.isLocal === true ? 'local' : 'remote',
-      variant.chatModalities?.join(',') ?? '',
-      variant.artifactRole ?? '',
-      variant.visionSource ?? '',
-      variant.visionConfidence ?? '',
-      variant.projectorCandidates?.map((candidate) => [
-        candidate.id,
-        candidate.fileName,
-        candidate.localPath ?? '',
-        candidate.size ?? 'unknown',
-        candidate.lifecycleStatus,
-        candidate.matchStatus,
-      ].join(':')).join(',') ?? '',
-      variant.selectedProjectorId ?? '',
-    ].join('\u001f'))
-    .join('\u001e');
+type RuntimeProjectorArtifact = ProjectorArtifact & {
+  downloadErrorAt?: number;
+  downloadErrorCode?: string;
+  downloadErrorMessage?: string;
+};
+
+function nullableFieldEqual<T>(prev: T | null | undefined, next: T | null | undefined): boolean {
+  return (prev ?? null) === (next ?? null);
 }
 
-function modelVisionSignature(model: ModelMetadata): string {
-  return [
-    model.chatModalities?.join(',') ?? '',
-    model.artifactRole ?? '',
-    model.visionSource ?? '',
-    model.visionConfidence ?? '',
-    model.projectorCandidates?.map((candidate) => [
-      candidate.id,
-      candidate.fileName,
-      candidate.localPath ?? '',
-      candidate.size ?? 'unknown',
-      candidate.lifecycleStatus,
-      candidate.matchStatus,
-    ].join(':')).join(',') ?? '',
-    model.selectedProjectorId ?? '',
-  ].join('\u001f');
+function unknownSizeFieldEqual(prev: number | null | undefined, next: number | null | undefined): boolean {
+  return (prev ?? 'unknown') === (next ?? 'unknown');
+}
+
+function arrayFieldEqual<T>(
+  prev: readonly T[] | null | undefined,
+  next: readonly T[] | null | undefined,
+  itemEqual: (prevItem: T, nextItem: T) => boolean,
+): boolean {
+  const prevItems = prev ?? [];
+  const nextItems = next ?? [];
+  if (prevItems.length !== nextItems.length) {
+    return false;
+  }
+
+  return prevItems.every((prevItem, index) => itemEqual(prevItem, nextItems[index]));
+}
+
+function scalarArrayFieldEqual<T>(prev: readonly T[] | null | undefined, next: readonly T[] | null | undefined): boolean {
+  return arrayFieldEqual(prev, next, (prevItem, nextItem) => prevItem === nextItem);
+}
+
+function projectorArtifactEqual(prev: ProjectorArtifact, next: ProjectorArtifact): boolean {
+  const prevRuntime = prev as RuntimeProjectorArtifact;
+  const nextRuntime = next as RuntimeProjectorArtifact;
+
+  return prev.id === next.id &&
+    prev.ownerModelId === next.ownerModelId &&
+    nullableFieldEqual(prev.ownerVariantId, next.ownerVariantId) &&
+    prev.repoId === next.repoId &&
+    prev.fileName === next.fileName &&
+    prev.downloadUrl === next.downloadUrl &&
+    nullableFieldEqual(prev.hfRevision, next.hfRevision) &&
+    nullableFieldEqual(prev.sha256, next.sha256) &&
+    nullableFieldEqual(prev.localPath, next.localPath) &&
+    unknownSizeFieldEqual(prev.size, next.size) &&
+    prev.lifecycleStatus === next.lifecycleStatus &&
+    nullableFieldEqual(prev.downloadProgress, next.downloadProgress) &&
+    nullableFieldEqual(prevRuntime.downloadErrorAt, nextRuntime.downloadErrorAt) &&
+    nullableFieldEqual(prevRuntime.downloadErrorCode, nextRuntime.downloadErrorCode) &&
+    nullableFieldEqual(prevRuntime.downloadErrorMessage, nextRuntime.downloadErrorMessage) &&
+    nullableFieldEqual(prev.resumeData, next.resumeData) &&
+    prev.matchStatus === next.matchStatus &&
+    nullableFieldEqual(prev.matchReason, next.matchReason);
+}
+
+function modelVariantsEqual(prevModel: ModelMetadata, nextModel: ModelMetadata): boolean {
+  return arrayFieldEqual(prevModel.variants, nextModel.variants, (prevVariant, nextVariant) => (
+    prevVariant.variantId === nextVariant.variantId &&
+    prevVariant.fileName === nextVariant.fileName &&
+    nullableFieldEqual(prevVariant.quantizationLabel, nextVariant.quantizationLabel) &&
+    unknownSizeFieldEqual(prevVariant.size, nextVariant.size) &&
+    nullableFieldEqual(prevVariant.sha256, nextVariant.sha256) &&
+    nullableFieldEqual(prevVariant.ramFit, nextVariant.ramFit) &&
+    nullableFieldEqual(prevVariant.ramFitConfidence, nextVariant.ramFitConfidence) &&
+    (prevVariant.isLocal === true) === (nextVariant.isLocal === true) &&
+    scalarArrayFieldEqual(prevVariant.chatModalities, nextVariant.chatModalities) &&
+    nullableFieldEqual(prevVariant.artifactRole, nextVariant.artifactRole) &&
+    nullableFieldEqual(prevVariant.visionSource, nextVariant.visionSource) &&
+    nullableFieldEqual(prevVariant.visionConfidence, nextVariant.visionConfidence) &&
+    arrayFieldEqual(prevVariant.projectorCandidates, nextVariant.projectorCandidates, projectorArtifactEqual) &&
+    nullableFieldEqual(prevVariant.selectedProjectorId, nextVariant.selectedProjectorId)
+  ));
+}
+
+function modelVisionFieldsEqual(prevModel: ModelMetadata, nextModel: ModelMetadata): boolean {
+  return scalarArrayFieldEqual(prevModel.chatModalities, nextModel.chatModalities) &&
+    nullableFieldEqual(prevModel.artifactRole, nextModel.artifactRole) &&
+    nullableFieldEqual(prevModel.visionSource, nextModel.visionSource) &&
+    nullableFieldEqual(prevModel.visionConfidence, nextModel.visionConfidence) &&
+    arrayFieldEqual(prevModel.projectorCandidates, nextModel.projectorCandidates, projectorArtifactEqual) &&
+    nullableFieldEqual(prevModel.selectedProjectorId, nextModel.selectedProjectorId);
 }
 
 export const ModelCard = memo(ModelCardComponent, (prevProps, nextProps) => {
@@ -252,7 +291,7 @@ export const ModelCard = memo(ModelCardComponent, (prevProps, nextProps) => {
          prevProps.model.downloadErrorAt === nextProps.model.downloadErrorAt &&
          prevProps.model.downloadErrorCode === nextProps.model.downloadErrorCode &&
          prevProps.model.downloadErrorMessage === nextProps.model.downloadErrorMessage &&
-         prevProps.model.resumeData === nextProps.model.resumeData &&
+         nullableFieldEqual(prevProps.model.resumeData, nextProps.model.resumeData) &&
          prevProps.model.localPath === nextProps.model.localPath &&
          prevProps.model.downloadedAt === nextProps.model.downloadedAt &&
          prevProps.model.fitsInRam === nextProps.model.fitsInRam &&
@@ -261,8 +300,8 @@ export const ModelCard = memo(ModelCardComponent, (prevProps, nextProps) => {
          prevProps.model.gguf?.sizeLabel === nextProps.model.gguf?.sizeLabel &&
          prevProps.model.gguf?.totalBytes === nextProps.model.gguf?.totalBytes &&
          prevProps.model.size === nextProps.model.size &&
-         modelVariantsSignature(prevProps.model) === modelVariantsSignature(nextProps.model) &&
-         modelVisionSignature(prevProps.model) === modelVisionSignature(nextProps.model) &&
+         modelVariantsEqual(prevProps.model, nextProps.model) &&
+         modelVisionFieldsEqual(prevProps.model, nextProps.model) &&
          prevProps.model.activeVariantId === nextProps.model.activeVariantId &&
          prevProps.model.accessState === nextProps.model.accessState &&
          prevProps.model.isGated === nextProps.model.isGated &&

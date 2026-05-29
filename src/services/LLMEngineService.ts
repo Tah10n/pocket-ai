@@ -111,7 +111,7 @@ import {
   type LlamaFormattedChatResult,
   type LlamaMultimodalSupport,
 } from './LlamaRuntimeAdapter';
-import { projectorArtifactService } from './ProjectorArtifactService';
+import { getReadinessStatusForProjectorLifecycle, projectorArtifactService } from './ProjectorArtifactService';
 import {
   MAX_CHAT_IMAGE_ATTACHMENTS,
   getChatImageAttachmentMediaPaths,
@@ -2584,25 +2584,6 @@ class LLMEngineService {
     ];
   }
 
-  private getReadinessStatusForProjectorLifecycle(
-    projector: Pick<ProjectorArtifact, 'lifecycleStatus'>,
-  ): MultimodalReadinessStatus | null {
-    switch (projector.lifecycleStatus) {
-      case 'downloaded':
-      case 'active':
-        return null;
-      case 'queued':
-      case 'downloading':
-      case 'paused':
-        return 'projector_downloading';
-      case 'failed':
-        return 'failed';
-      case 'available':
-      default:
-        return 'missing_projector';
-    }
-  }
-
   private getMultimodalRuntimeFailureStatus(error: unknown): MultimodalReadinessStatus {
     return error instanceof LlamaRuntimeFeatureUnavailableError ? 'unsupported' : 'failed';
   }
@@ -2721,7 +2702,7 @@ class LLMEngineService {
       return;
     }
 
-    const lifecycleReadiness = this.getReadinessStatusForProjectorLifecycle(projector);
+    const lifecycleReadiness = getReadinessStatusForProjectorLifecycle(projector);
     if (lifecycleReadiness) {
       this.persistMultimodalReadiness(
         model.id,

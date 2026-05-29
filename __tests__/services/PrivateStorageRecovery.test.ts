@@ -1,6 +1,7 @@
 import { resetPrivateAppStorageAndRuntimeStateAfterConfirmation } from '../../src/services/PrivateStorageRecovery';
 import { registry } from '../../src/services/LocalStorageRegistry';
 import * as privateStorage from '../../src/services/storage';
+import { getPrivateStorageHealthSnapshot } from '../../src/services/storage';
 import { getAppStorage } from '../../src/store/storage';
 import { useChatStore } from '../../src/store/chatStore';
 import { useDownloadStore } from '../../src/store/downloadStore';
@@ -114,5 +115,47 @@ describe('PrivateStorageRecovery', () => {
     expect(registry.preserveExistingModelFilesForPrivateStorageReset).toHaveBeenCalledTimes(1);
     expect(chatAttachmentStorageService.deleteAllAttachmentFilesForPrivateStorageReset).not.toHaveBeenCalled();
     expect(registry.hasAnyDownloadedModels()).toBe(true);
+  });
+
+  it('returns blocked reset health when chat attachment cleanup fails after private storage reset', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    jest.spyOn(chatAttachmentStorageService, 'deleteAllAttachmentFilesForPrivateStorageReset')
+      .mockRejectedValueOnce(new Error('secret file:///private/chat-attachments/delete-me.jpg'));
+    useChatStore.getState().createThread({
+      modelId: 'author/model-q4',
+      presetId: null,
+      presetSnapshot: { id: 'default', name: 'Default', systemPrompt: 'Be helpful.' },
+      paramsSnapshot: { temperature: 0.7, topP: 0.9, maxTokens: 128, seed: null },
+    });
+    useDownloadStore.getState().addToQueue(createModel());
+    registry.saveModels([createModel()]);
+
+    await expect(resetPrivateAppStorageAndRuntimeStateAfterConfirmation()).resolves.toEqual(expect.objectContaining({
+      status: 'blocked',
+      reason: 'reset_failed',
+      retryable: true,
+      requiresExplicitReset: true,
+      messageKey: 'storage.private.resetFailed',
+    }));
+
+    expect(chatAttachmentStorageService.deleteAllAttachmentFilesForPrivateStorageReset).toHaveBeenCalledTimes(1);
+    expect(getPrivateStorageHealthSnapshot()).toEqual(expect.objectContaining({
+      status: 'blocked',
+      reason: 'reset_failed',
+      requiresExplicitReset: true,
+    }));
+    expect(useChatStore.getState().getConversationIndex()).toEqual([]);
+    expect(useDownloadStore.getState().queue).toEqual([]);
+    expect(registry.getModels()).toEqual([]);
+    expect(warnSpy).toHaveBeenCalledWith(
+      '[PrivateStorageRecovery] Failed to clean chat attachments during private storage reset',
+      expect.objectContaining({
+        pathCategory: 'chat_attachment',
+        context: 'private_storage_reset_attachment_cleanup',
+        errorName: 'Error',
+      }),
+    );
+    expect(JSON.stringify(warnSpy.mock.calls)).not.toContain('file:///private/chat-attachments/delete-me.jpg');
+    warnSpy.mockRestore();
   });
 });

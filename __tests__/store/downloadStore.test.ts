@@ -147,6 +147,58 @@ describe('downloadStore', () => {
     expect(entry?.multimodalReadiness?.projectorId).toBe('vision/model:mmproj-v2');
   });
 
+  it('does not preserve same-id incompatible projector state when re-queuing a catalog model', () => {
+    useDownloadStore.setState({
+      queue: [
+        {
+          ...buildQueuedModel('vision/model', LifecycleStatus.PAUSED),
+          selectedProjectorId: 'vision/model:mmproj',
+          multimodalReadiness: {
+            modelId: 'vision/model',
+            status: 'ready',
+            projectorId: 'vision/model:mmproj',
+            projectorSize: 256,
+            support: ['vision'],
+            checkedAt: 123,
+          },
+          projectorCandidates: [buildProjector({
+            fileName: 'stale-mmproj.gguf',
+            localPath: 'partial-stale-mmproj.gguf',
+            resumeData: JSON.stringify({ resumeData: 'stale-projector-resume' }),
+            lifecycleStatus: 'paused',
+            matchStatus: 'user_selected',
+            matchReason: 'user_selected_projector',
+          })],
+        },
+      ],
+      activeDownloadId: null,
+    });
+
+    useDownloadStore.getState().addToQueue({
+      ...buildQueuedModel('vision/model', LifecycleStatus.AVAILABLE),
+      projectorCandidates: [buildProjector({
+        fileName: 'fresh-mmproj.gguf',
+        lifecycleStatus: 'available',
+        matchStatus: 'matched',
+        matchReason: 'single_projector_candidate',
+      })],
+    });
+
+    const entry = useDownloadStore.getState().queue.find((model) => model.id === 'vision/model');
+    const projector = entry?.projectorCandidates?.[0];
+    expect(entry?.lifecycleStatus).toBe(LifecycleStatus.QUEUED);
+    expect(projector).toEqual(expect.objectContaining({
+      id: 'vision/model:mmproj',
+      fileName: 'fresh-mmproj.gguf',
+      lifecycleStatus: 'available',
+      matchStatus: 'matched',
+    }));
+    expect(projector?.localPath).toBeUndefined();
+    expect(projector?.resumeData).toBeUndefined();
+    expect(entry?.selectedProjectorId).toBeUndefined();
+    expect(entry?.multimodalReadiness).toBeUndefined();
+  });
+
   it('preserves runtime projector candidates when re-queuing a model without catalog candidates', () => {
     useDownloadStore.setState({
       queue: [

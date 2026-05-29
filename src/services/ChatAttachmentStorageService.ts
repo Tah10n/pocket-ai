@@ -226,6 +226,24 @@ function createUnknownCopiedFileSizeError(): Error {
   return new Error('Copied chat attachment file size is unknown.');
 }
 
+function createPrivateStorageResetAttachmentCleanupError(reason: string): Error {
+  return new Error(`Chat attachment cleanup failed during private storage reset (${reason}).`);
+}
+
+function resolvePrivateStorageResetChildUri(directory: string, fileName: string): string | null {
+  if (
+    fileName.length === 0
+    || fileName === '.'
+    || fileName === '..'
+    || fileName.includes('/')
+    || fileName.includes('\\')
+  ) {
+    return null;
+  }
+
+  return `${directory}${encodeURIComponent(fileName)}`;
+}
+
 function collectNormalizedChatAttachmentLocalUris(localUris: Iterable<string>): Set<string> {
   const normalized = new Set<string>();
 
@@ -423,13 +441,73 @@ export class ChatAttachmentStorageService {
     }
 
     try {
-      await FileSystem.deleteAsync(directory, { idempotent: true });
+      const directoryInfo = await FileSystem.getInfoAsync(directory);
+      if (!directoryInfo.exists) {
+        return;
+      }
+    } catch (error) {
+      console.warn('[ChatAttachmentStorage] Failed to inspect chat attachment storage before private reset', {
+        pathCategory: CHAT_IMAGE_ATTACHMENT_PATH_CATEGORY,
+        context: 'private_storage_reset_inspection',
+        ...getSanitizedErrorDetails(error),
+      });
+      throw createPrivateStorageResetAttachmentCleanupError('inspection_failed');
+    }
+
+    let fileNames: string[];
+    try {
+      fileNames = await FileSystem.readDirectoryAsync(directory);
     } catch (error) {
       console.warn('[ChatAttachmentStorage] Failed to delete chat attachment storage after private reset', {
         pathCategory: CHAT_IMAGE_ATTACHMENT_PATH_CATEGORY,
-        context: 'private_storage_reset',
+        context: 'private_storage_reset_enumeration',
         ...getSanitizedErrorDetails(error),
       });
+      throw createPrivateStorageResetAttachmentCleanupError('enumeration_failed');
+    }
+
+    const candidates: string[] = [];
+    const rejectedChildNames: string[] = [];
+
+    for (const fileName of fileNames) {
+      const localUri = resolvePrivateStorageResetChildUri(directory, fileName);
+      if (localUri) {
+        candidates.push(localUri);
+      } else {
+        rejectedChildNames.push(fileName);
+      }
+    }
+
+    const uniqueCandidates = Array.from(new Set(candidates));
+
+    const results = await Promise.all(uniqueCandidates.map(async (localUri) => {
+      try {
+        await FileSystem.deleteAsync(localUri, { idempotent: true });
+        return true;
+      } catch (error) {
+        console.warn('[ChatAttachmentStorage] Failed to delete chat attachment during private reset', {
+          pathCategory: CHAT_IMAGE_ATTACHMENT_PATH_CATEGORY,
+          context: 'private_storage_reset_child_delete',
+          ...getSanitizedErrorDetails(error),
+        });
+        return false;
+      }
+    }));
+
+    if (rejectedChildNames.length > 0) {
+      console.warn('[ChatAttachmentStorage] Refusing unsafe chat attachment child during private reset', {
+        pathCategory: CHAT_IMAGE_ATTACHMENT_PATH_CATEGORY,
+        context: 'private_storage_reset_child_name_rejected',
+        rejectedCount: rejectedChildNames.length,
+      });
+    }
+
+    if (results.some((result) => !result)) {
+      throw createPrivateStorageResetAttachmentCleanupError('child_delete_failed');
+    }
+
+    if (rejectedChildNames.length > 0) {
+      throw createPrivateStorageResetAttachmentCleanupError('child_name_rejected');
     }
   }
 

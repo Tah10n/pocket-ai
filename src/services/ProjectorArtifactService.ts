@@ -1,5 +1,5 @@
 import type { ModelMetadata, ModelVariant } from '../types/models';
-import type { ProjectorArtifact, ProjectorMatchStatus } from '../types/multimodal';
+import type { MultimodalReadinessStatus, ProjectorArtifact, ProjectorMatchStatus } from '../types/multimodal';
 import { resolveDeterministicProjectorCandidate } from '../utils/modelProjectors';
 import { registry } from './LocalStorageRegistry';
 
@@ -23,6 +23,25 @@ export type ProjectorSelection = {
   model?: ModelMetadata;
   resolution: ProjectorResolution;
 };
+
+export function getReadinessStatusForProjectorLifecycle(
+  projector: Pick<ProjectorArtifact, 'lifecycleStatus'>,
+): MultimodalReadinessStatus | null {
+  switch (projector.lifecycleStatus) {
+    case 'downloaded':
+    case 'active':
+      return null;
+    case 'queued':
+    case 'downloading':
+    case 'paused':
+      return 'projector_downloading';
+    case 'failed':
+      return 'failed';
+    case 'available':
+    default:
+      return 'missing_projector';
+  }
+}
 
 type ProjectorModelRegistry = Pick<typeof registry, 'getModel' | 'updateModel'>;
 

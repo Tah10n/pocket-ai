@@ -499,6 +499,257 @@ describe('ModelCatalogService regressions', () => {
     }));
   });
 
+  it('does not preserve projector runtime state for exact id matches with conflicting stable identity', async () => {
+    const modelId = 'org/vision-projector-id-conflict';
+    const {
+      localModel,
+      localProjector,
+      modelFileName,
+      projectorFileName,
+    } = makeDownloadedVisionModelWithProjector({
+      modelId,
+      projectorSha256: PROJECTOR_SHA256,
+    });
+    const conflictingProjector: ProjectorArtifact = {
+      ...localProjector,
+      ownerModelId: 'org/different-owner',
+      repoId: 'org/different-owner',
+      localPath: 'stale-conflicting-projector.gguf',
+      resumeData: 'stale-resume-token',
+      downloadProgress: 0.5,
+      lifecycleStatus: 'paused',
+      matchStatus: 'failed',
+      matchReason: 'stale_identity_conflict',
+    };
+    const conflictingLocalModel: ModelMetadata = {
+      ...localModel,
+      projectorCandidates: [conflictingProjector],
+      selectedProjectorId: conflictingProjector.id,
+      multimodalReadiness: {
+        modelId,
+        variantId: modelFileName,
+        status: 'ready',
+        projectorId: conflictingProjector.id,
+        support: ['vision'],
+        checkedAt: 1234,
+      },
+    };
+
+    mockedRegistry.getModel.mockImplementation((id) => (id === modelId ? conflictingLocalModel : undefined));
+    global.fetch = jest.fn(() =>
+      Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve([makeVisionRepo(modelId, modelFileName, projectorFileName, {
+          size: conflictingProjector.size ?? undefined,
+          sha256: conflictingProjector.sha256,
+        })]),
+      }),
+    ) as jest.Mock;
+
+    const result = await service.searchModels('vision projector id conflict');
+    const model = result.models[0];
+    const projector = model.projectorCandidates?.[0];
+
+    expect(projector?.id).toBe(conflictingProjector.id);
+    expect(projector).toEqual(expect.objectContaining({
+      lifecycleStatus: 'available',
+      matchStatus: 'matched',
+      ownerModelId: modelId,
+      repoId: modelId,
+    }));
+    expect(projector?.localPath).toBeUndefined();
+    expect(projector?.resumeData).toBeUndefined();
+    expect(projector?.downloadProgress).toBeUndefined();
+    expect(projector?.matchReason).not.toBe(conflictingProjector.matchReason);
+    expect(model.selectedProjectorId).toBeUndefined();
+    expect(model.multimodalReadiness?.status).not.toBe('ready');
+    expect(model.multimodalReadiness?.projectorId).not.toBe(conflictingProjector.id);
+
+    const remoteProjector = projector as ProjectorArtifact;
+    const directMerge = (service as unknown as {
+      mergeProjectorMetadataWithLocalState: (
+        remoteModel: ModelMetadata,
+        localModel: ModelMetadata,
+        shouldResetLocalDownloadState: boolean,
+      ) => {
+        selectedProjectorId?: string;
+        multimodalReadiness?: MultimodalReadinessState;
+        projectorCandidates?: ProjectorArtifact[];
+      };
+    }).mergeProjectorMetadataWithLocalState(
+      {
+        ...localModel,
+        projectorCandidates: [remoteProjector],
+        selectedProjectorId: remoteProjector.id,
+        multimodalReadiness: {
+          modelId,
+          variantId: modelFileName,
+          status: 'ready',
+          projectorId: remoteProjector.id,
+          support: ['vision'],
+          checkedAt: 5678,
+        },
+      },
+      conflictingLocalModel,
+      false,
+    );
+
+    expect(directMerge.selectedProjectorId).toBeUndefined();
+    expect(directMerge.multimodalReadiness?.status).not.toBe('ready');
+    expect(directMerge.multimodalReadiness?.projectorId).not.toBe(conflictingProjector.id);
+
+    const legacyProjectorId = buildProjectorArtifactId({
+      repoId: modelId,
+      hfRevision: 'main',
+      ownerVariantId: modelFileName,
+      fileName: projectorFileName,
+    });
+    const legacyCompatibleProjector: ProjectorArtifact = {
+      ...localProjector,
+      id: legacyProjectorId,
+      ownerVariantId: modelFileName,
+      localPath: `legacy-${projectorFileName}`,
+    };
+    const directMergeWithRemappedSelection = (service as unknown as {
+      mergeProjectorMetadataWithLocalState: (
+        remoteModel: ModelMetadata,
+        localModel: ModelMetadata,
+        shouldResetLocalDownloadState: boolean,
+      ) => {
+        selectedProjectorId?: string;
+        multimodalReadiness?: MultimodalReadinessState;
+      };
+    }).mergeProjectorMetadataWithLocalState(
+      {
+        ...localModel,
+        projectorCandidates: [remoteProjector],
+        selectedProjectorId: undefined,
+        multimodalReadiness: undefined,
+      },
+      {
+        ...localModel,
+        projectorCandidates: [conflictingProjector, legacyCompatibleProjector],
+        selectedProjectorId: legacyCompatibleProjector.id,
+        multimodalReadiness: {
+          modelId,
+          variantId: modelFileName,
+          status: 'ready',
+          projectorId: legacyCompatibleProjector.id,
+          support: ['vision'],
+          checkedAt: 9012,
+        },
+      },
+      false,
+    );
+
+    expect(directMergeWithRemappedSelection.selectedProjectorId).toBe(remoteProjector.id);
+    expect(directMergeWithRemappedSelection.multimodalReadiness).toEqual(expect.objectContaining({
+      status: 'ready',
+      projectorId: remoteProjector.id,
+    }));
+  });
+
+  it.each([
+    ['paused', 0.42],
+    ['failed', 0.67],
+    ['downloading', 0.18],
+  ] as const)(
+    'preserves %s compatible projector runtime state when catalog projector ids become repo-level',
+    async (lifecycleStatus, downloadProgress) => {
+      const modelId = `org/vision-${lifecycleStatus}-legacy`;
+      const modelFileName = 'model.Q4_K_M.gguf';
+      const projectorFileName = 'mmproj-model-f16.gguf';
+      const legacyProjectorId = buildProjectorArtifactId({
+        repoId: modelId,
+        hfRevision: 'main',
+        ownerVariantId: modelFileName,
+        fileName: projectorFileName,
+      });
+      const localProjector: ProjectorArtifact = {
+        id: legacyProjectorId,
+        ownerModelId: modelId,
+        ownerVariantId: modelFileName,
+        repoId: modelId,
+        fileName: projectorFileName,
+        downloadUrl: `https://huggingface.co/${modelId}/resolve/main/${projectorFileName}`,
+        hfRevision: 'main',
+        sha256: PROJECTOR_SHA256,
+        size: 1024,
+        localPath: `partial-${projectorFileName}`,
+        resumeData: `resume-${lifecycleStatus}`,
+        downloadProgress,
+        lifecycleStatus,
+        matchStatus: 'failed',
+        matchReason: `${lifecycleStatus}_runtime_reason`,
+      };
+      const localModel: ModelMetadata = {
+        id: modelId,
+        name: 'Vision Runtime Legacy',
+        author: 'org',
+        size: 2 * 1024 * 1024 * 1024,
+        downloadUrl: `https://huggingface.co/${modelId}/resolve/main/${modelFileName}`,
+        hfRevision: 'main',
+        resolvedFileName: modelFileName,
+        fitsInRam: true,
+        accessState: ModelAccessState.PUBLIC,
+        isGated: false,
+        isPrivate: false,
+        lifecycleStatus: LifecycleStatus.DOWNLOADED,
+        downloadProgress: 1,
+        activeVariantId: modelFileName,
+        variants: [
+          {
+            variantId: modelFileName,
+            fileName: modelFileName,
+            quantizationLabel: 'Q4_K_M',
+            size: 2 * 1024 * 1024 * 1024,
+          },
+        ],
+        chatModalities: ['text', 'vision'],
+        projectorCandidates: [localProjector],
+        selectedProjectorId: localProjector.id,
+        multimodalReadiness: {
+          modelId,
+          variantId: modelFileName,
+          status: lifecycleStatus === 'downloading' ? 'projector_downloading' : 'failed',
+          projectorId: localProjector.id,
+          support: ['vision'],
+          checkedAt: 1234,
+        },
+      };
+
+      mockedRegistry.getModel.mockImplementation((id) => (id === modelId ? localModel : undefined));
+      global.fetch = jest.fn(() =>
+        Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve([makeVisionRepo(modelId, modelFileName, projectorFileName, {
+            size: localProjector.size ?? undefined,
+            sha256: localProjector.sha256,
+          })]),
+        }),
+      ) as jest.Mock;
+
+      const result = await service.searchModels(`vision ${lifecycleStatus} legacy`);
+      const model = result.models[0];
+      const projector = model.projectorCandidates?.[0];
+
+      expect(projector?.ownerVariantId).toBeUndefined();
+      expect(projector?.id).not.toBe(localProjector.id);
+      expect(projector).toEqual(expect.objectContaining({
+        localPath: localProjector.localPath,
+        resumeData: localProjector.resumeData,
+        downloadProgress,
+        lifecycleStatus,
+        matchStatus: localProjector.matchStatus,
+        matchReason: localProjector.matchReason,
+        sha256: localProjector.sha256,
+        size: localProjector.size,
+      }));
+      expect(model.selectedProjectorId).toBe(projector?.id);
+      expect(model.multimodalReadiness?.projectorId).toBe(projector?.id);
+    },
+  );
+
   it('resets downloaded projector state when catalog projector sha256 changes', async () => {
     const modelId = 'org/vision-projector-sha-reset';
     const {

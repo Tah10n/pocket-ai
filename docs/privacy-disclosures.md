@@ -1,6 +1,6 @@
 # Privacy & Disclosures
 
-Last updated: 2026-05-24
+Last updated: 2026-05-29
 
 ## Summary
 
@@ -11,7 +11,8 @@ This document summarizes the current behavior of the app as configured in this r
 ## What stays on-device
 
 - Chat prompts and generated responses stay on the device during local inference.
-- Downloaded GGUF files are stored in app-managed local storage. Android release builds disable OS auto-backup, and iOS release builds mark the downloaded-model storage directory as excluded from device and iCloud backups.
+- Vision chat image attachments stay on the device during local inference. They are not uploaded to a hosted chat-completion API.
+- Downloaded GGUF files and copied vision chat attachments are stored in app-managed local storage. Android release builds disable OS auto-backup, and iOS release builds mark the downloaded-model and chat-attachment storage directories as excluded from device and iCloud backups.
 - Conversation history is persisted locally on the device and encrypted at rest.
 - System prompt presets, generation settings, and model-specific load profiles are persisted locally on the device and encrypted at rest.
 - An optional Hugging Face access token can be stored locally in secure device storage for browsing and downloading gated or private models.
@@ -19,6 +20,18 @@ This document summarizes the current behavior of the app as configured in this r
 - Recent first-page Hugging Face catalog results, GGUF variant metadata, and recently opened public model-detail snapshots are stored in a bounded on-device cache so the catalog can reopen quickly on this device.
 - Hugging Face popularity metadata, tag summaries, and routed model-detail state are cached locally only to improve catalog browsing on this device.
 - Storage cleanup controls are available in-app through `Storage Manager` and `All Conversations`, including model removal that can keep or reset saved per-model settings.
+
+## Vision chat image attachments
+
+When a user adds an image to a vision chat:
+
+- The app uses photo-library selection access only so the user can choose an image to attach. Depending on the platform and OS version, this may use the system photo picker or photo-library permission flow.
+- The selected image is copied into app-managed local storage under `Documents/chat-attachments/` so the conversation can reopen the attachment later.
+- Chat history stores attachment metadata needed to render and manage the attachment, such as its local file reference, media type, dimensions, file size, and the draft, message, or conversation it belongs to.
+- Raw attachment files are local app-managed files. This document does not claim those image bytes are separately encrypted beyond the device and platform storage protections in use.
+- The app attempts to clean up attachments when the related draft is discarded, the related message or chat history is deleted, or the user resets private app storage. Cleanup failures are logged without exposing raw file paths.
+- Vision inference uses the local model on the device. The current release flow does not send attached images to a hosted vision or chat-completion API.
+- Backup behavior follows the app's platform configuration: Android release builds disable OS auto-backup, and iOS release builds exclude downloaded model files and local chat attachments from device and iCloud backups.
 
 ## When the app uses the network
 
@@ -41,7 +54,9 @@ Users can manage local data directly in the app:
 - offload downloaded models while keeping or resetting saved per-model settings
 - unload the active model
 - clear persisted chat history
+- discard image drafts and delete messages or conversations, which attempts to remove their associated local attachment files when cleanup runs
 - reset settings
+- reset private app storage, including a best-effort cleanup of local chat attachments
 - manage retention for older conversations
 
 ## Device and resource limits
@@ -61,7 +76,7 @@ For the release configuration currently committed here:
 
 - Android package name: `com.github.tah10n.pocketai`
 - Android auto-backup is disabled to avoid backing up local chat and model state
-- iOS excludes downloaded model files under the app-managed `Documents/models/` directory from device and iCloud backups
+- iOS excludes downloaded model files under the app-managed `Documents/models/` directory and local image attachments under `Documents/chat-attachments/` from device and iCloud backups
 - Android permissions include:
   - `INTERNET` (Hugging Face catalog and model downloads)
   - `VIBRATE` (UI haptics)

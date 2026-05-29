@@ -362,6 +362,62 @@ describe('ModelCard', () => {
     expect(screen.getByText('Q4_K_M - 4.00 GB')).toBeTruthy();
   });
 
+  it('rerenders when the selected projector id changes the displayed size', () => {
+    const createVisionModel = (selectedProjectorId: string): ModelMetadata => ({
+      ...buildModel(ModelAccessState.PUBLIC),
+      size: 3_800_000_000,
+      gguf: {
+        sizeLabel: 'Q4_K_M',
+      },
+      chatModalities: ['text', 'vision'],
+      artifactRole: 'primary_chat_model',
+      selectedProjectorId,
+      projectorCandidates: [
+        {
+          id: 'projector-small',
+          ownerModelId: 'org/model',
+          repoId: 'org/model',
+          fileName: 'mmproj-small.gguf',
+          downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-small.gguf',
+          size: 100_000_000,
+          lifecycleStatus: 'available',
+          matchStatus: 'matched',
+        },
+        {
+          id: 'projector-large',
+          ownerModelId: 'org/model',
+          repoId: 'org/model',
+          fileName: 'mmproj-large.gguf',
+          downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-large.gguf',
+          size: 300_000_000,
+          lifecycleStatus: 'available',
+          matchStatus: 'matched',
+        },
+      ],
+    });
+    const handlers = buildModelCardHandlers();
+    const screen = render(
+      <ModelCard
+        model={createVisionModel('projector-small')}
+        {...handlers}
+        isActive={false}
+      />,
+    );
+
+    expect(screen.getByText('Q4_K_M - 3.90 GB')).toBeTruthy();
+
+    screen.rerender(
+      <ModelCard
+        model={createVisionModel('projector-large')}
+        {...handlers}
+        isActive={false}
+      />,
+    );
+
+    expect(screen.queryByText('Q4_K_M - 3.90 GB')).toBeNull();
+    expect(screen.getByText('Q4_K_M - 4.10 GB')).toBeTruthy();
+  });
+
   it('uses active variant projector bytes and rerenders when projector size changes', () => {
     const createVisionModel = (projectorSize: number): ModelMetadata => ({
       ...buildModel(ModelAccessState.PUBLIC),
@@ -409,6 +465,179 @@ describe('ModelCard', () => {
 
     expect(screen.queryByText('Q4_K_M - 3.90 GB')).toBeNull();
     expect(screen.getByText('Q4_K_M - 4.00 GB')).toBeTruthy();
+  });
+
+  it('rerenders when only selected projector runtime progress changes', () => {
+    const createVisionDownloadModel = (projectorProgress: number): ModelMetadata => ({
+      ...buildModel(ModelAccessState.PUBLIC),
+      lifecycleStatus: LifecycleStatus.DOWNLOADING,
+      downloadProgress: 1,
+      chatModalities: ['text', 'vision'],
+      artifactRole: 'primary_chat_model',
+      selectedProjectorId: 'projector-org-model-main-mmproj-model-f16.gguf',
+      projectorCandidates: [{
+        id: 'projector-org-model-main-mmproj-model-f16.gguf',
+        ownerModelId: 'org/model',
+        repoId: 'org/model',
+        fileName: 'mmproj-model-f16.gguf',
+        downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-model-f16.gguf',
+        sha256: 'projector-sha',
+        size: 200_000_000,
+        localPath: '/models/mmproj-model-f16.gguf.partial',
+        resumeData: 'resume-token',
+        downloadProgress: projectorProgress,
+        lifecycleStatus: 'downloading',
+        matchStatus: 'matched',
+        matchReason: 'selected projector',
+      }],
+    });
+
+    const handlers = buildModelCardHandlers();
+    const screen = render(
+      <ModelCard
+        model={createVisionDownloadModel(0.25)}
+        {...handlers}
+        isActive={false}
+      />,
+    );
+
+    expect(screen.getByText('models.vision.projectorDownloading')).toBeTruthy();
+    expect(screen.getByText('25%')).toBeTruthy();
+
+    screen.rerender(
+      <ModelCard
+        model={createVisionDownloadModel(0.5)}
+        {...handlers}
+        isActive={false}
+      />,
+    );
+
+    expect(screen.queryByText('25%')).toBeNull();
+    expect(screen.getByText('50%')).toBeTruthy();
+  });
+
+  it('passes updated model resume data after a token-only rerender', () => {
+    const createPausedModel = (resumeData: string): ModelMetadata => ({
+      ...buildModel(ModelAccessState.PUBLIC),
+      lifecycleStatus: LifecycleStatus.PAUSED,
+      downloadProgress: 0.5,
+      resumeData,
+    });
+    const handlers = buildModelCardHandlers();
+    const screen = render(
+      <ModelCard
+        model={createPausedModel('resume-token-old')}
+        {...handlers}
+        isActive={false}
+      />,
+    );
+
+    screen.rerender(
+      <ModelCard
+        model={createPausedModel('resume-token-new')}
+        {...handlers}
+        isActive={false}
+      />,
+    );
+
+    fireEvent.press(screen.getByText('models.resume'));
+
+    expect(handlers.onDownload).toHaveBeenCalledWith(expect.objectContaining({
+      resumeData: 'resume-token-new',
+    }));
+  });
+
+  it('passes updated projector resume data after a token-only rerender', () => {
+    const createDownloadedVisionModel = (projectorResumeData: string): ModelMetadata => ({
+      ...buildModel(ModelAccessState.PUBLIC),
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      chatModalities: ['text', 'vision'],
+      artifactRole: 'primary_chat_model',
+      selectedProjectorId: 'projector-org-model-main-mmproj-model-f16.gguf',
+      projectorCandidates: [{
+        id: 'projector-org-model-main-mmproj-model-f16.gguf',
+        ownerModelId: 'org/model',
+        repoId: 'org/model',
+        fileName: 'mmproj-model-f16.gguf',
+        downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-model-f16.gguf',
+        sha256: 'projector-sha',
+        size: 200_000_000,
+        resumeData: projectorResumeData,
+        downloadProgress: 0.5,
+        lifecycleStatus: 'paused',
+        matchStatus: 'matched',
+      }],
+    });
+    const handlers = buildModelCardHandlers();
+    const screen = render(
+      <ModelCard
+        model={createDownloadedVisionModel('projector-resume-old')}
+        {...handlers}
+        isActive={false}
+      />,
+    );
+
+    screen.rerender(
+      <ModelCard
+        model={createDownloadedVisionModel('projector-resume-new')}
+        {...handlers}
+        isActive={false}
+      />,
+    );
+
+    fireEvent.press(screen.getByTestId('model-projector-resume-org/model'));
+
+    expect(handlers.onDownload).toHaveBeenCalledWith(expect.objectContaining({
+      projectorCandidates: [expect.objectContaining({
+        resumeData: 'projector-resume-new',
+      })],
+    }));
+  });
+
+  it('rerenders when projector ownership changes active variant compatibility', () => {
+    const createDownloadedVisionModel = (ownerVariantId: string): ModelMetadata => ({
+      ...buildModel(ModelAccessState.PUBLIC),
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      activeVariantId: 'model-q4',
+      resolvedFileName: 'model-q4.gguf',
+      chatModalities: ['text', 'vision'],
+      artifactRole: 'primary_chat_model',
+      selectedProjectorId: 'projector-org-model-main-mmproj-model-f16.gguf',
+      projectorCandidates: [{
+        id: 'projector-org-model-main-mmproj-model-f16.gguf',
+        ownerModelId: 'org/model',
+        ownerVariantId,
+        repoId: 'org/model',
+        fileName: 'mmproj-model-f16.gguf',
+        downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-model-f16.gguf',
+        sha256: 'projector-sha',
+        size: 200_000_000,
+        lifecycleStatus: 'available',
+        matchStatus: 'matched',
+      }],
+    });
+    const handlers = buildModelCardHandlers();
+    const screen = render(
+      <ModelCard
+        model={createDownloadedVisionModel('model-q4')}
+        {...handlers}
+        isActive={false}
+      />,
+    );
+
+    expect(screen.getByTestId('model-projector-download-org/model')).toBeTruthy();
+
+    screen.rerender(
+      <ModelCard
+        model={createDownloadedVisionModel('model-q8')}
+        {...handlers}
+        isActive={false}
+      />,
+    );
+
+    expect(screen.queryByTestId('model-projector-download-org/model')).toBeNull();
   });
 
   it('does not render a vision badge for projector companion artifacts', () => {

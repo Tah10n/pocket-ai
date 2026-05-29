@@ -103,6 +103,7 @@ function hasProjectorRuntimeFields(projectors: ModelMetadata['projectorCandidate
   return projectors?.some((projector) => (
     typeof projector.localPath === 'string'
     || typeof projector.resumeData === 'string'
+    || projector.downloadProgress !== undefined
     || projector.lifecycleStatus !== 'available'
     || projector.matchStatus === 'failed'
     || projector.matchStatus === 'user_selected'
@@ -141,6 +142,7 @@ export function sanitizeCatalogProjectorRuntimeState(projectors: ModelMetadata['
     ...projector,
     localPath: undefined,
     resumeData: undefined,
+    downloadProgress: undefined,
     lifecycleStatus: 'available' as const,
     matchStatus: sanitizeCatalogProjectorMatchStatus(projector),
     matchReason: sanitizeCatalogProjectorMatchReason(projector),

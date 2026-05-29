@@ -4,6 +4,7 @@ const os = require('os');
 
 const {
   buildScenarios,
+  buildScenarioLaunchPlan,
   buildSmokeLaunchArgs,
   captureAndroidScreenshot,
   dumpUiHierarchy,
@@ -230,13 +231,15 @@ describe('android-scenarios npm defaults', () => {
     expect(packageJson.scripts['android:scenarios:catalog']).toContain('--pack catalog');
     expect(packageJson.scripts['android:scenarios:attachments']).toContain('--pack attachments');
     expect(packageJson.scripts['android:scenarios:attachments-prepared']).toContain('--pack attachments-prepared');
+    expect(packageJson.scripts['android:scenarios:attachments-prepared']).toContain('--preserve-running-app');
+    expect(packageJson.scripts['android:scenarios:attachments-prepared']).toContain('--fail-on-skip');
     expect(packageJson.scripts['android:scenarios:dependency-ui']).toContain('--pack dependency-ui');
     expect(packageJson.scripts['android:scenarios:runtime']).toContain('--pack runtime');
     expect(packageJson.scripts['android:scenarios:native']).toContain('--pack native');
     expect(packageJson.scripts['android:scenarios:extended']).toContain('--pack extended');
   });
 
-  it('keeps vision-adjacent smoke verification self-contained and leaves prepared coverage opt-in', () => {
+  it('keeps vision-adjacent smoke verification self-contained', () => {
     const smokeScript = packageJson.scripts['verify:mobile-change:android:vision-smoke'];
 
     expect(packageJson.scripts['verify:mobile-change:android:vision']).toBe(
@@ -246,8 +249,28 @@ describe('android-scenarios npm defaults', () => {
     expect(smokeScript).toContain('android:scenarios:runtime');
     expect(smokeScript).toContain('android:scenarios:catalog');
     expect(smokeScript).toContain('android:scenarios:attachments');
+    expect(smokeScript).toContain('android:scenarios:attachments -- --fail-on-skip');
     expect(smokeScript).not.toContain('android:scenarios:attachments-prepared');
-    expect(packageJson.scripts['android:scenarios:attachments-prepared']).toContain('--fail-on-skip');
+  });
+
+  it('skips bootstrap launch when preserving a prepared running app', () => {
+    const resolveSerial = jest.fn(() => 'emulator-5554');
+
+    expect(buildScenarioLaunchPlan({ preserveRunningApp: true, emulator: true }, resolveSerial)).toEqual({
+      shouldLaunch: false,
+      serialBeforeLaunch: 'emulator-5554',
+    });
+    expect(resolveSerial).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps emulator bootstrap launch serial resolution after launch', () => {
+    const resolveSerial = jest.fn(() => 'emulator-5554');
+
+    expect(buildScenarioLaunchPlan({ preserveRunningApp: false, emulator: true }, resolveSerial)).toEqual({
+      shouldLaunch: true,
+      serialBeforeLaunch: null,
+    });
+    expect(resolveSerial).not.toHaveBeenCalled();
   });
 });
 
@@ -739,7 +762,7 @@ describe('android-scenarios pack selection', () => {
     ]);
   });
 
-  it('keeps prepared image draft coverage in an explicit prepared attachments pack', () => {
+  it('keeps prepared image draft coverage in an explicit preserve-running-app pack', () => {
     expect(selectScenarios(scenarios, parseCliOptions(['--pack', 'attachments-prepared'])).map((scenario) => scenario.id)).toEqual([
       'chat-attachment-preview-remove',
     ]);
@@ -755,7 +778,7 @@ describe('android-scenarios pack selection', () => {
       fallbackNode: { label: 'Text-only fallback' },
       previewNode: null,
       removeNode: null,
-    })).toThrow(/precondition failed: the composer is still showing text-only fallback copy/);
+    })).toThrow(/preserve-running-app/);
 
     expect(() => assertAttachmentPreviewRemovePreconditions({
       fallbackNode: null,
@@ -901,21 +924,23 @@ describe('android-scenarios pack selection', () => {
     ]);
   });
 
-  it('runs every scenario, including optional checks, only for the all pack', () => {
+  it('runs broad non-prepared scenarios only for the all pack', () => {
     const selectedIds = selectScenarios(scenarios, parseCliOptions(['--pack', 'all'])).map((scenario) => scenario.id);
 
-    expect(selectedIds).toEqual(scenarios.map((scenario) => scenario.id));
+    expect(selectedIds).toEqual(scenarios
+      .map((scenario) => scenario.id)
+      .filter((scenarioId) => scenarioId !== 'chat-attachment-preview-remove'));
     expect(selectedIds).toEqual(
       expect.arrayContaining([
         'variant-picker-smoke',
         'chat-attachment-text-only-fallback',
-        'chat-attachment-preview-remove',
         'hf-catalog-hardening',
         'memory-fit-badges',
         'memory-fit-download-warning',
         'performance-logcat',
       ])
     );
+    expect(selectedIds).not.toContain('chat-attachment-preview-remove');
   });
 });
 
@@ -969,10 +994,20 @@ describe('android-scenarios skip signaling', () => {
     expect(error.message).toBe('skip this');
   });
 
-  it('parses fail-on-skip for verification packs that require prepared state', () => {
-    expect(parseCliOptions(['--pack', 'attachments-prepared', '--fail-on-skip'])).toEqual(
+  it('parses fail-on-skip for opt-in verification runs', () => {
+    expect(parseCliOptions(['--pack', 'attachments', '--fail-on-skip'])).toEqual(
+      expect.objectContaining({
+        pack: 'attachments',
+        failOnSkip: true,
+      })
+    );
+  });
+
+  it('parses preserve-running-app for prepared state scenarios', () => {
+    expect(parseCliOptions(['--pack', 'attachments-prepared', '--preserve-running-app', '--fail-on-skip'])).toEqual(
       expect.objectContaining({
         pack: 'attachments-prepared',
+        preserveRunningApp: true,
         failOnSkip: true,
       })
     );
@@ -1001,9 +1036,9 @@ describe('android-scenarios report path serialization', () => {
         screenshotPath: path.join(artifactsRoot, 'bottom-tabs-failed.png'),
       },
       {
-        id: 'chat-attachment-preview-remove',
+        id: 'chat-attachment-text-only-fallback',
         status: 'failed',
-        screenshotPath: path.join(artifactsRoot, 'chat-attachment-preview-remove-skipped.png'),
+        screenshotPath: path.join(artifactsRoot, 'chat-attachment-text-only-fallback-skipped.png'),
         skipReason: 'prepared image draft missing',
       },
       {
@@ -1027,7 +1062,7 @@ describe('android-scenarios report path serialization', () => {
         expect.objectContaining({ screenshotPath: 'home-smoke.png' }),
         expect.objectContaining({ screenshotPath: 'bottom-tabs-failed.png' }),
         expect.objectContaining({
-          screenshotPath: 'chat-attachment-preview-remove-skipped.png',
+          screenshotPath: 'chat-attachment-text-only-fallback-skipped.png',
           skipReason: 'prepared image draft missing',
         }),
         expect.objectContaining({

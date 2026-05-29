@@ -61,6 +61,7 @@ import {
 import { applyModelVariantSelectionIfAvailable } from '../utils/modelVariants';
 import { normalizeSha256Digest } from '../utils/sha256';
 import { getProjectorMemoryFitSizeBytes } from '../utils/modelSize';
+import { mergeProjectorRuntimeState as mergeCompatibleProjectorRuntimeState } from '../utils/projectorRuntimeState';
 import {
   getCompatibleLocalDownloadStatePatch,
   resolveVerifiedLocalShaCompatibility,
@@ -1963,8 +1964,23 @@ export class ModelCatalogService {
 
     const usedLocalProjectorIds = new Set<string>();
     const localToRemoteProjectorIds = new Map<string, string>();
-    const incompatibleReadinessProjectorIds = new Set<string>();
+    const incompatibleLocalReadinessProjectorIds = new Set<string>();
+    const incompatibleRemoteReadinessProjectorIds = new Set<string>();
+    const blockedLocalProjectorIds = new Set<string>();
+    const blockedRemoteProjectorIds = new Set<string>();
     const mergedCandidates = remoteCandidates.map((remoteProjector) => {
+      const exactLocalProjector = localCandidates.find((localProjector) => (
+        !usedLocalProjectorIds.has(localProjector.id)
+        && localProjector.id === remoteProjector.id
+      ));
+      if (
+        exactLocalProjector
+        && !this.projectorsShareStableArtifact(remoteProjector, exactLocalProjector)
+      ) {
+        blockedLocalProjectorIds.add(exactLocalProjector.id);
+        blockedRemoteProjectorIds.add(remoteProjector.id);
+      }
+
       const localProjector = this.findLocalProjectorForRemote(
         remoteProjector,
         localCandidates,
@@ -1979,8 +1995,8 @@ export class ModelCatalogService {
       localToRemoteProjectorIds.set(localProjector.id, remoteProjector.id);
 
       if (!this.projectorsHaveCompatibleRuntimeMetadata(remoteProjector, localProjector)) {
-        incompatibleReadinessProjectorIds.add(localProjector.id);
-        incompatibleReadinessProjectorIds.add(remoteProjector.id);
+        incompatibleLocalReadinessProjectorIds.add(localProjector.id);
+        incompatibleRemoteReadinessProjectorIds.add(remoteProjector.id);
       }
 
       return this.mergeProjectorRuntimeState(remoteProjector, localProjector);
@@ -1991,7 +2007,18 @@ export class ModelCatalogService {
       localModel.selectedProjectorId,
       mergedCandidateIds,
       localToRemoteProjectorIds,
+      blockedLocalProjectorIds,
+      blockedRemoteProjectorIds,
     );
+    const blockedRemoteReadinessProjectorIds = new Set([
+      ...incompatibleRemoteReadinessProjectorIds,
+      ...blockedRemoteProjectorIds,
+    ]);
+    const blockedLocalReadinessProjectorIds = new Set([
+      ...incompatibleLocalReadinessProjectorIds,
+      ...blockedLocalProjectorIds,
+    ]);
+    const blockedLocalResolvedReadinessProjectorIds = new Set(incompatibleRemoteReadinessProjectorIds);
 
     return {
       projectorCandidates: mergedCandidates,
@@ -2003,7 +2030,9 @@ export class ModelCatalogService {
         mergedCandidateIds,
         localToRemoteProjectorIds,
         selectedProjectorId,
-        incompatibleReadinessProjectorIds,
+        blockedRemoteReadinessProjectorIds,
+        blockedLocalReadinessProjectorIds,
+        blockedLocalResolvedReadinessProjectorIds,
       ),
     };
   }
@@ -2016,6 +2045,7 @@ export class ModelCatalogService {
     const exactMatch = localProjectors.find((localProjector) => (
       !usedLocalProjectorIds.has(localProjector.id)
       && localProjector.id === remoteProjector.id
+      && this.projectorsShareStableArtifact(remoteProjector, localProjector)
     ));
     if (exactMatch) {
       return exactMatch;
@@ -2113,7 +2143,11 @@ export class ModelCatalogService {
   ): ProjectorArtifact {
     const hasLocalRuntimeState = (
       typeof localProjector.localPath === 'string'
+      || typeof localProjector.resumeData === 'string'
+      || typeof localProjector.downloadProgress === 'number'
       || localProjector.lifecycleStatus !== 'available'
+      || localProjector.matchStatus !== remoteProjector.matchStatus
+      || localProjector.matchReason !== remoteProjector.matchReason
     );
 
     if (
@@ -2123,12 +2157,11 @@ export class ModelCatalogService {
       return remoteProjector;
     }
 
+    const mergedProjector = mergeCompatibleProjectorRuntimeState(remoteProjector, localProjector);
+
     return {
-      ...remoteProjector,
-      localPath: localProjector.localPath,
-      sha256: remoteProjector.sha256 ?? localProjector.sha256,
-      size: localProjector.size ?? remoteProjector.size,
-      lifecycleStatus: localProjector.lifecycleStatus,
+      ...mergedProjector,
+      downloadProgress: localProjector.downloadProgress ?? mergedProjector.downloadProgress,
     };
   }
 
@@ -2137,8 +2170,14 @@ export class ModelCatalogService {
     localSelectedProjectorId: string | undefined,
     candidateIds: Set<string>,
     localToRemoteProjectorIds: Map<string, string>,
+    blockedLocalProjectorIds: Set<string> = new Set(),
+    blockedRemoteProjectorIds: Set<string> = blockedLocalProjectorIds,
   ): string | undefined {
     if (remoteSelectedProjectorId && candidateIds.has(remoteSelectedProjectorId)) {
+      if (blockedRemoteProjectorIds.has(remoteSelectedProjectorId)) {
+        return undefined;
+      }
+
       return remoteSelectedProjectorId;
     }
 
@@ -2146,8 +2185,13 @@ export class ModelCatalogService {
       return undefined;
     }
 
+    if (blockedLocalProjectorIds.has(localSelectedProjectorId)) {
+      return undefined;
+    }
+
     const selectedProjectorId = localToRemoteProjectorIds.get(localSelectedProjectorId)
       ?? localSelectedProjectorId;
+
     return candidateIds.has(selectedProjectorId) ? selectedProjectorId : undefined;
   }
 
@@ -2158,7 +2202,9 @@ export class ModelCatalogService {
     candidateIds: Set<string>,
     localToRemoteProjectorIds: Map<string, string>,
     selectedProjectorId?: string,
-    blockedLocalProjectorIds: Set<string> = new Set(),
+    blockedRemoteReadinessProjectorIds: Set<string> = new Set(),
+    blockedLocalReadinessProjectorIds: Set<string> = blockedRemoteReadinessProjectorIds,
+    blockedLocalResolvedReadinessProjectorIds: Set<string> = blockedLocalReadinessProjectorIds,
   ): MultimodalReadinessState | undefined {
     return this.remapMultimodalReadiness(
       modelId,
@@ -2166,14 +2212,16 @@ export class ModelCatalogService {
       candidateIds,
       localToRemoteProjectorIds,
       selectedProjectorId,
-      blockedLocalProjectorIds,
+      blockedRemoteReadinessProjectorIds,
+      blockedRemoteReadinessProjectorIds,
     ) ?? this.remapMultimodalReadiness(
       modelId,
       localReadiness,
       candidateIds,
       localToRemoteProjectorIds,
       selectedProjectorId,
-      blockedLocalProjectorIds,
+      blockedLocalReadinessProjectorIds,
+      blockedLocalResolvedReadinessProjectorIds,
     );
   }
 
@@ -2183,7 +2231,8 @@ export class ModelCatalogService {
     candidateIds: Set<string>,
     localToRemoteProjectorIds: Map<string, string>,
     selectedProjectorId?: string,
-    blockedProjectorIds: Set<string> = new Set(),
+    blockedSourceProjectorIds: Set<string> = new Set(),
+    blockedResolvedProjectorIds: Set<string> = blockedSourceProjectorIds,
   ): MultimodalReadinessState | undefined {
     if (!readiness || readiness.modelId !== modelId) {
       return undefined;
@@ -2193,14 +2242,14 @@ export class ModelCatalogService {
       return readiness;
     }
 
-    if (blockedProjectorIds.has(readiness.projectorId)) {
+    if (blockedSourceProjectorIds.has(readiness.projectorId)) {
       return undefined;
     }
 
     const projectorId = localToRemoteProjectorIds.get(readiness.projectorId)
       ?? readiness.projectorId;
 
-    if (blockedProjectorIds.has(projectorId)) {
+    if (blockedResolvedProjectorIds.has(projectorId)) {
       return undefined;
     }
 

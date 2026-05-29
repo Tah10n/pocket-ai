@@ -47,6 +47,8 @@ function resolveMergedSelectedProjectorId(
   runtimeSelectedProjectorId: string | undefined,
   candidateIds: Set<string>,
   runtimeToNextProjectorIds: Map<string, string>,
+  blockedRuntimeProjectorIds: Set<string> = new Set(),
+  blockedNextProjectorIds: Set<string> = blockedRuntimeProjectorIds,
 ): string | undefined {
   if (nextSelectedProjectorId && candidateIds.has(nextSelectedProjectorId)) {
     return nextSelectedProjectorId;
@@ -56,8 +58,16 @@ function resolveMergedSelectedProjectorId(
     return undefined;
   }
 
+  if (blockedRuntimeProjectorIds.has(runtimeSelectedProjectorId)) {
+    return undefined;
+  }
+
   const selectedProjectorId = runtimeToNextProjectorIds.get(runtimeSelectedProjectorId)
     ?? runtimeSelectedProjectorId;
+  if (blockedNextProjectorIds.has(selectedProjectorId)) {
+    return undefined;
+  }
+
   return candidateIds.has(selectedProjectorId) ? selectedProjectorId : undefined;
 }
 
@@ -67,6 +77,8 @@ function remapMultimodalReadiness(
   candidateIds: Set<string>,
   runtimeToNextProjectorIds: Map<string, string>,
   selectedProjectorId: string | undefined,
+  blockedSourceProjectorIds: Set<string> = new Set(),
+  blockedResolvedProjectorIds: Set<string> = blockedSourceProjectorIds,
 ): ModelMetadata['multimodalReadiness'] {
   if (!readiness || readiness.modelId !== modelId) {
     return undefined;
@@ -76,8 +88,16 @@ function remapMultimodalReadiness(
     return readiness;
   }
 
+  if (blockedSourceProjectorIds.has(readiness.projectorId)) {
+    return undefined;
+  }
+
   const projectorId = runtimeToNextProjectorIds.get(readiness.projectorId)
     ?? readiness.projectorId;
+
+  if (blockedResolvedProjectorIds.has(projectorId)) {
+    return undefined;
+  }
 
   if (!candidateIds.has(projectorId)) {
     return undefined;
@@ -99,6 +119,9 @@ function resolveMergedMultimodalReadiness(
   candidateIds: Set<string>,
   runtimeToNextProjectorIds: Map<string, string>,
   selectedProjectorId: string | undefined,
+  blockedNextReadinessProjectorIds: Set<string> = new Set(),
+  blockedRuntimeReadinessProjectorIds: Set<string> = blockedNextReadinessProjectorIds,
+  blockedRuntimeResolvedReadinessProjectorIds: Set<string> = blockedRuntimeReadinessProjectorIds,
 ): ModelMetadata['multimodalReadiness'] {
   return remapMultimodalReadiness(
     modelId,
@@ -106,12 +129,16 @@ function resolveMergedMultimodalReadiness(
     candidateIds,
     runtimeToNextProjectorIds,
     selectedProjectorId,
+    blockedNextReadinessProjectorIds,
+    blockedNextReadinessProjectorIds,
   ) ?? remapMultimodalReadiness(
     modelId,
     runtimeReadiness,
     candidateIds,
     runtimeToNextProjectorIds,
     selectedProjectorId,
+    blockedRuntimeReadinessProjectorIds,
+    blockedRuntimeResolvedReadinessProjectorIds,
   );
 }
 
@@ -119,17 +146,32 @@ function mergeProjectorRuntimeFields(
   model: ModelMetadata,
   runtimeModel: ModelMetadata,
 ): Pick<ModelMetadata, 'projectorCandidates' | 'selectedProjectorId' | 'multimodalReadiness'> {
-  const { projectorCandidates, runtimeToNextProjectorIds } = mergeProjectorCandidatesWithRuntimeStateAndIdMap(
-    model.projectorCandidates,
-    runtimeModel.projectorCandidates,
-  );
+  const {
+    projectorCandidates,
+    runtimeToNextProjectorIds,
+    blockedRuntimeProjectorIds,
+    blockedNextProjectorIds,
+    blockedRuntimeReadinessProjectorIds: mergeBlockedRuntimeReadinessProjectorIds,
+    blockedNextReadinessProjectorIds: mergeBlockedNextReadinessProjectorIds,
+  } = mergeProjectorCandidatesWithRuntimeStateAndIdMap(model.projectorCandidates, runtimeModel.projectorCandidates);
   const candidateIds = getProjectorCandidateIds({ projectorCandidates });
   const selectedProjectorId = resolveMergedSelectedProjectorId(
     model.selectedProjectorId,
     runtimeModel.selectedProjectorId,
     candidateIds,
     runtimeToNextProjectorIds,
+    blockedRuntimeProjectorIds,
+    blockedNextProjectorIds,
   );
+  const blockedNextReadinessProjectorIds = new Set<string>([
+    ...mergeBlockedNextReadinessProjectorIds,
+    ...blockedNextProjectorIds,
+  ]);
+  const blockedRuntimeReadinessProjectorIds = new Set<string>([
+    ...mergeBlockedRuntimeReadinessProjectorIds,
+    ...blockedRuntimeProjectorIds,
+  ]);
+  const blockedRuntimeResolvedReadinessProjectorIds = new Set(blockedNextReadinessProjectorIds);
 
   return {
     projectorCandidates,
@@ -141,6 +183,9 @@ function mergeProjectorRuntimeFields(
       candidateIds,
       runtimeToNextProjectorIds,
       selectedProjectorId,
+      blockedNextReadinessProjectorIds,
+      blockedRuntimeReadinessProjectorIds,
+      blockedRuntimeResolvedReadinessProjectorIds,
     ),
   };
 }

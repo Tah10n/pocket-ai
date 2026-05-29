@@ -257,13 +257,13 @@ async function main() {
   fs.mkdirSync(artifactsRoot, { recursive: true });
 
   const adbPath = resolveAdbPath();
-  const serialBeforeLaunch = cliOptions.emulator
-    ? null
-    : resolveTargetSerial(adbPath, cliOptions);
+  const launchPlan = buildScenarioLaunchPlan(cliOptions, () => resolveTargetSerial(adbPath, cliOptions));
 
-  launchApp(serialBeforeLaunch);
+  if (launchPlan.shouldLaunch) {
+    launchApp(launchPlan.serialBeforeLaunch);
+  }
 
-  const serial = serialBeforeLaunch || resolveTargetSerial(adbPath, cliOptions);
+  const serial = launchPlan.serialBeforeLaunch || resolveTargetSerial(adbPath, cliOptions);
   const context = createScenarioContext(adbPath, serial);
   const results = [];
 
@@ -686,7 +686,7 @@ function assertAttachmentPreviewRemovePreconditions({
 } = {}) {
   if (fallbackNode) {
     throw new ScenarioSkipError(
-      "Prepared image attachment preview/remove precondition failed: the composer is still showing text-only fallback copy. Seed a vision-ready composer with an attached gallery image before running this scenario."
+      "Prepared image attachment preview/remove precondition failed: the composer is still showing text-only fallback copy. Open a running vision-ready chat composer, attach a gallery image, then rerun this scenario with --preserve-running-app."
     );
   }
 
@@ -697,7 +697,7 @@ function assertAttachmentPreviewRemovePreconditions({
     ].filter(Boolean).join(" and ");
 
     throw new ScenarioSkipError(
-      `Prepared image attachment preview/remove precondition failed: missing ${missingParts}. Seed a vision-ready composer with an attached gallery image before running this scenario.`
+      `Prepared image attachment preview/remove precondition failed: missing ${missingParts}. Open a running vision-ready chat composer, attach a gallery image, then rerun this scenario with --preserve-running-app.`
     );
   }
 }
@@ -847,11 +847,8 @@ function buildScenarios() {
     {
       id: "chat-attachment-preview-remove",
       tier: "optional",
-      description: "Verify a prepared vision-ready image attachment draft can be previewed and removed.",
+      description: "Verify a prepared running vision-ready image attachment draft can be previewed and removed without restarting the app.",
       run: async (ctx) => {
-        await goToHome(ctx);
-        await ctx.tapAnyText(NEW_CHAT_LABELS);
-        await ctx.expectAnyText(CHAT_EMPTY_LABELS);
         await ctx.expectAnyText(ATTACH_IMAGE_LABELS, { timeoutMs: 8_000 });
 
         const adbPath = resolveAdbPath();
@@ -1141,7 +1138,10 @@ function selectScenarios(scenarios, options) {
 
   const requestedPack = options.pack || DEFAULT_SCENARIO_PACK;
   if (requestedPack === "all") {
-    return scenarios;
+    // Prepared scenarios depend on in-memory app state set up manually by the tester, so keep
+    // them out of broad automated packs. They remain available by direct id or pack name.
+    const manualPreparedScenarioIds = new Set(PREPARED_ATTACHMENT_SCENARIOS);
+    return scenarios.filter((scenario) => !manualPreparedScenarioIds.has(scenario.id));
   }
 
   const scenarioIds = SCENARIO_PACK_SCENARIOS[requestedPack];
@@ -1657,6 +1657,27 @@ function buildSmokeLaunchArgs(options, resolvedSerial) {
   }
 
   return args;
+}
+
+function buildScenarioLaunchPlan(options, resolveSerial) {
+  if (options.preserveRunningApp) {
+    return {
+      shouldLaunch: false,
+      serialBeforeLaunch: resolveSerial(),
+    };
+  }
+
+  if (options.emulator) {
+    return {
+      shouldLaunch: true,
+      serialBeforeLaunch: null,
+    };
+  }
+
+  return {
+    shouldLaunch: true,
+    serialBeforeLaunch: resolveSerial(),
+  };
 }
 
 function resolveAdbPath() {
@@ -2452,6 +2473,7 @@ function parseCliOptions(argv) {
     emulator: false,
     skipBuild: false,
     failOnSkip: false,
+    preserveRunningApp: false,
     bootstrapScreenshot: false,
     list: false,
     pack: DEFAULT_SCENARIO_PACK,
@@ -2476,6 +2498,11 @@ function parseCliOptions(argv) {
 
     if (arg === "--fail-on-skip") {
       options.failOnSkip = true;
+      continue;
+    }
+
+    if (arg === "--preserve-running-app") {
+      options.preserveRunningApp = true;
       continue;
     }
 
@@ -2551,6 +2578,7 @@ function printHelp() {
   console.log("  --scenario <id>            Run only one scenario");
   console.log("  --skip-build               Reuse the existing debug APK");
   console.log("  --fail-on-skip             Treat skipped scenarios as verification failures");
+  console.log("  --preserve-running-app     Do not bootstrap or restart the app before scenarios");
   console.log("  --bootstrap-screenshot     Save a smoke bootstrap screenshot before scenarios");
   console.log("  --port <number>            Forward a specific Metro port to android-smoke");
   console.log("  --list                     Print available scenarios");
@@ -2759,6 +2787,7 @@ function sleepSync(ms) {
 
 module.exports = {
   buildScenarios,
+  buildScenarioLaunchPlan,
   buildSmokeLaunchArgs,
   captureAndroidScreenshot,
   dumpUiHierarchy,

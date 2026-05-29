@@ -2068,6 +2068,122 @@ describe('storage (createStorage)', () => {
     }
   });
 
+  it('persists a reset-failed marker when blocking after private reset cleanup failure', async () => {
+    const originalNodeEnv = process.env.NODE_ENV;
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      (process.env as any).NODE_ENV = 'production';
+      jest.resetModules();
+      mockReactNativeIos();
+      const secureStoreState: Record<string, string> = {};
+      const { setItemAsync } = mockSecureStoreState(secureStoreState);
+
+      const { blockPrivateStorageAfterResetFailure } = require('../../src/services/storage');
+
+      await expect(blockPrivateStorageAfterResetFailure()).resolves.toEqual(expect.objectContaining({
+        status: 'blocked',
+        reason: 'reset_failed',
+        requiresExplicitReset: true,
+      }));
+
+      expect(setItemAsync).toHaveBeenCalledWith(
+        'pocket-ai-private-mmkv-reset-failed-v1',
+        expect.stringContaining('reset_failed'),
+      );
+      expect(secureStoreState['pocket-ai-private-mmkv-reset-failed-v1']).toContain('reset_failed');
+    } finally {
+      (process.env as any).NODE_ENV = originalNodeEnv;
+      warnSpy.mockRestore();
+      jest.resetModules();
+      jest.unmock('react-native');
+      jest.unmock('expo-secure-store');
+    }
+  });
+
+  it('restores reset-failed private storage health from the durable marker before opening private MMKV', async () => {
+    const originalNodeEnv = process.env.NODE_ENV;
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      (process.env as any).NODE_ENV = 'production';
+      jest.resetModules();
+      mockReactNativeIos();
+      const secureStoreState: Record<string, string> = {
+        'pocket-ai-private-mmkv-key-v1': 'a'.repeat(32),
+        'pocket-ai-private-mmkv-reset-failed-v1': JSON.stringify({ schemaVersion: 1, reason: 'reset_failed' }),
+      };
+      mockSecureStoreState(secureStoreState);
+      const createMMKV = jest.fn(() => createTypedMmkvStore());
+      jest.doMock('react-native-mmkv', () => ({
+        createMMKV,
+        deleteMMKV: jest.fn(),
+      }));
+
+      const { initializePrivateStorageEncryption } = require('../../src/services/storage');
+
+      await expect(initializePrivateStorageEncryption()).resolves.toEqual(expect.objectContaining({
+        status: 'blocked',
+        reason: 'reset_failed',
+        requiresExplicitReset: true,
+      }));
+      expect(createMMKV).not.toHaveBeenCalled();
+    } finally {
+      (process.env as any).NODE_ENV = originalNodeEnv;
+      warnSpy.mockRestore();
+      jest.resetModules();
+      jest.unmock('react-native');
+      jest.unmock('expo-secure-store');
+      jest.unmock('react-native-mmkv');
+    }
+  });
+
+  it('clears a durable reset-failed marker during a successful explicit private reset', async () => {
+    const originalNodeEnv = process.env.NODE_ENV;
+    const originalCrypto = (globalThis as any).crypto;
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      (process.env as any).NODE_ENV = 'production';
+      mockCryptoBytes(21);
+      jest.resetModules();
+      mockReactNativeIos();
+      const secureStoreState: Record<string, string> = {
+        'pocket-ai-private-mmkv-key-v1': 'a'.repeat(32),
+        'pocket-ai-private-mmkv-reset-failed-v1': JSON.stringify({ schemaVersion: 1, reason: 'reset_failed' }),
+      };
+      const { deleteItemAsync } = mockSecureStoreState(secureStoreState);
+      const privateStores = createEmptyPrivateStores();
+      const createMMKV = jest.fn((config?: any) => (
+        config?.id && privateStores.has(config.id)
+          ? privateStores.get(config.id)
+          : createTypedMmkvStore()
+      ));
+      const deleteMMKV = jest.fn((storeId: string) => {
+        privateStores.set(storeId, createTypedMmkvStore());
+      });
+      jest.doMock('react-native-mmkv', () => ({ createMMKV, deleteMMKV }));
+
+      const { resetPrivateAppStorageAfterConfirmation } = require('../../src/services/storage');
+
+      await expect(resetPrivateAppStorageAfterConfirmation()).resolves.toEqual(expect.objectContaining({
+        status: 'ready',
+      }));
+
+      expect(deleteItemAsync).toHaveBeenCalledWith('pocket-ai-private-mmkv-reset-failed-v1');
+      expect(secureStoreState['pocket-ai-private-mmkv-reset-failed-v1']).toBeUndefined();
+      expect(deleteMMKV).toHaveBeenCalledWith('global-app-storage');
+    } finally {
+      (process.env as any).NODE_ENV = originalNodeEnv;
+      (globalThis as any).crypto = originalCrypto;
+      warnSpy.mockRestore();
+      jest.resetModules();
+      jest.unmock('react-native');
+      jest.unmock('expo-secure-store');
+      jest.unmock('react-native-mmkv');
+    }
+  });
+
   it('marks private encryption as unavailable when no secure randomness is available', async () => {
     const originalNodeEnv = process.env.NODE_ENV;
     const originalCrypto = (globalThis as any).crypto;

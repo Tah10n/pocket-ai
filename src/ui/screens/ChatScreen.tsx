@@ -64,6 +64,7 @@ import {
 import { getThemeActionContentClassName, screenLayoutMetrics } from '../../utils/themeTokens';
 import { handleModelLoadMemoryPolicyError } from '../../utils/modelLoadMemoryPolicyPrompt';
 import type { LoadModelOptions } from '../../services/LLMEngineService';
+import { getReadinessStatusForProjectorLifecycle, projectorArtifactService } from '../../services/ProjectorArtifactService';
 
 const AUTO_SCROLL_REARM_THRESHOLD_PX = 32;
 const AUTO_SCROLL_DISARM_THRESHOLD_PX = 64;
@@ -92,21 +93,87 @@ function getVisionReadinessTranslationKey(status: MultimodalReadinessStatus): st
     return VISION_READINESS_TRANSLATION_KEYS[status];
 }
 
-function resolveFallbackMultimodalReadiness(
+function canPreserveReadyOrUnsupportedReadiness(
+    readiness: MultimodalReadinessState | undefined,
+    selectedProjectorId: string | undefined,
+    lifecycleReadiness: MultimodalReadinessStatus | null,
+): boolean {
+    return (
+        (readiness?.status === 'ready' || readiness?.status === 'unsupported')
+        && readiness.projectorId === selectedProjectorId
+        && lifecycleReadiness === null
+    );
+}
+
+export function resolveFallbackMultimodalReadiness(
     model: ModelMetadata | undefined,
     modelId: string | null,
 ): MultimodalReadinessState {
-    if (model?.multimodalReadiness) {
-        return model.multimodalReadiness;
+    const resolvedModelId = modelId ?? model?.id ?? '';
+    const supportsVision = model?.chatModalities?.includes('vision') === true
+        || Boolean(model?.projectorCandidates?.length);
+
+    if (!supportsVision || !model) {
+        return {
+            modelId: resolvedModelId,
+            status: 'text_only',
+            support: [],
+            checkedAt: 0,
+        };
     }
 
-    const supportsVision = model?.chatModalities?.includes('vision') === true;
-    return {
-        modelId: modelId ?? model?.id ?? '',
-        status: supportsVision ? 'missing_projector' : 'text_only',
+    const resolution = projectorArtifactService.resolveProjectorForModel(model);
+    const selectedProjector = resolution.selectedProjector;
+    const persistedReadiness = model.multimodalReadiness;
+
+    if (!selectedProjector) {
+        const fallbackReadiness: MultimodalReadinessState = {
+            modelId: resolvedModelId,
+            status: resolution.status === 'ambiguous'
+                ? 'ambiguous_projector'
+                : resolution.status === 'failed'
+                    ? 'failed'
+                    : 'missing_projector',
+            support: [],
+            failureReason: resolution.status === 'failed' ? resolution.reason : undefined,
+            checkedAt: 0,
+        };
+
+        return fallbackReadiness;
+    }
+
+    const lifecycleReadiness = getReadinessStatusForProjectorLifecycle(selectedProjector);
+    const status = lifecycleReadiness ?? 'initializing';
+
+    const fallbackReadiness: MultimodalReadinessState = {
+        modelId: resolvedModelId,
+        status,
+        projectorId: selectedProjector.id,
+        projectorSize: selectedProjector.size ?? undefined,
         support: [],
+        failureReason: status === 'failed'
+            ? selectedProjector.matchReason ?? resolution.reason
+            : undefined,
         checkedAt: 0,
     };
+
+    if (persistedReadiness && canPreserveReadyOrUnsupportedReadiness(
+        persistedReadiness,
+        selectedProjector.id,
+        lifecycleReadiness,
+    )) {
+        return persistedReadiness;
+    }
+
+    if (
+        persistedReadiness?.status === 'failed'
+        && persistedReadiness.projectorId === selectedProjector.id
+        && status === 'initializing'
+    ) {
+        return persistedReadiness;
+    }
+
+    return fallbackReadiness;
 }
 
 function snapshotScrollMetrics(metrics: ScrollMetrics): ScrollMetrics {

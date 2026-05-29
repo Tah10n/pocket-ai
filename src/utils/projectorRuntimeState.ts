@@ -20,46 +20,29 @@ function normalizeComparableSize(value: number | null | undefined): number | und
     : undefined;
 }
 
+function normalizeComparableDownloadUrl(value: string | undefined): string | undefined {
+  const trimmed = normalizeComparableString(value);
+  if (!trimmed) {
+    return undefined;
+  }
+
+  try {
+    const parsed = new URL(trimmed);
+    parsed.hash = '';
+    parsed.protocol = parsed.protocol.toLowerCase();
+    parsed.hostname = parsed.hostname.toLowerCase();
+    return parsed.toString();
+  } catch {
+    return trimmed;
+  }
+}
+
 function normalizeComparableRevision(value: string | undefined): string {
   return normalizeComparableString(value) ?? 'main';
 }
 
 function valuesConflict<T>(first: T | undefined, second: T | undefined): boolean {
   return first !== undefined && second !== undefined && first !== second;
-}
-
-function hasProjectorIdentityConflict(
-  runtimeProjector: ProjectorArtifact,
-  nextProjector: ProjectorArtifact,
-): boolean {
-  if (
-    normalizeComparableString(runtimeProjector.ownerModelId) !== normalizeComparableString(nextProjector.ownerModelId)
-    || normalizeComparableString(runtimeProjector.repoId) !== normalizeComparableString(nextProjector.repoId)
-    || normalizeComparableString(runtimeProjector.fileName) !== normalizeComparableString(nextProjector.fileName)
-    || normalizeComparableString(runtimeProjector.downloadUrl) !== normalizeComparableString(nextProjector.downloadUrl)
-    || normalizeComparableRevision(runtimeProjector.hfRevision) !== normalizeComparableRevision(nextProjector.hfRevision)
-  ) {
-    return true;
-  }
-
-  if (valuesConflict(
-    normalizeComparableString(runtimeProjector.ownerVariantId),
-    normalizeComparableString(nextProjector.ownerVariantId),
-  )) {
-    return true;
-  }
-
-  if (valuesConflict(
-    normalizeComparableSha256(runtimeProjector.sha256),
-    normalizeComparableSha256(nextProjector.sha256),
-  )) {
-    return true;
-  }
-
-  return valuesConflict(
-    normalizeComparableSize(runtimeProjector.size),
-    normalizeComparableSize(nextProjector.size),
-  );
 }
 
 function projectorsShareStableArtifact(
@@ -69,7 +52,6 @@ function projectorsShareStableArtifact(
   return normalizeComparableString(runtimeProjector.ownerModelId) === normalizeComparableString(nextProjector.ownerModelId)
     && normalizeComparableString(runtimeProjector.repoId) === normalizeComparableString(nextProjector.repoId)
     && normalizeComparableString(runtimeProjector.fileName) === normalizeComparableString(nextProjector.fileName)
-    && normalizeComparableString(runtimeProjector.downloadUrl) === normalizeComparableString(nextProjector.downloadUrl)
     && normalizeComparableRevision(runtimeProjector.hfRevision) === normalizeComparableRevision(nextProjector.hfRevision)
     && !valuesConflict(
       normalizeComparableString(runtimeProjector.ownerVariantId),
@@ -77,20 +59,49 @@ function projectorsShareStableArtifact(
     );
 }
 
+function projectorsHaveCompatibleRuntimeMetadata(
+  runtimeProjector: ProjectorArtifact,
+  nextProjector: ProjectorArtifact,
+): boolean {
+  if (valuesConflict(
+    normalizeComparableSha256(runtimeProjector.sha256),
+    normalizeComparableSha256(nextProjector.sha256),
+  )) {
+    return false;
+  }
+
+  if (valuesConflict(
+    normalizeComparableSize(runtimeProjector.size),
+    normalizeComparableSize(nextProjector.size),
+  )) {
+    return false;
+  }
+
+  return !valuesConflict(
+    normalizeComparableDownloadUrl(runtimeProjector.downloadUrl),
+    normalizeComparableDownloadUrl(nextProjector.downloadUrl),
+  );
+}
+
 export function hasCompatibleProjectorRuntimeIdentity(
   runtimeProjector: ProjectorArtifact,
   nextProjector: ProjectorArtifact,
 ): boolean {
-  if (hasProjectorIdentityConflict(runtimeProjector, nextProjector)) {
+  if (!projectorsShareStableArtifact(runtimeProjector, nextProjector)) {
     return false;
   }
 
-  if (runtimeProjector.id === nextProjector.id) {
-    return true;
-  }
-
-  return projectorsShareStableArtifact(runtimeProjector, nextProjector);
+  return projectorsHaveCompatibleRuntimeMetadata(runtimeProjector, nextProjector);
 }
+
+export type ProjectorRuntimeStateMerge = {
+  projectorCandidates: ProjectorArtifact[] | undefined;
+  runtimeToNextProjectorIds: Map<string, string>;
+  blockedRuntimeProjectorIds: Set<string>;
+  blockedNextProjectorIds: Set<string>;
+  blockedRuntimeReadinessProjectorIds: Set<string>;
+  blockedNextReadinessProjectorIds: Set<string>;
+};
 
 function hasRuntimeMatchState(
   matchStatus: ProjectorMatchStatus,
@@ -120,6 +131,7 @@ export function mergeProjectorRuntimeState(
     size: nextProjector.size ?? runtimeProjector.size,
     localPath: runtimeProjector.localPath ?? nextProjector.localPath,
     resumeData: resumeData ?? nextResumeData,
+    downloadProgress: runtimeProjector.downloadProgress ?? nextProjector.downloadProgress,
     lifecycleStatus: shouldPreserveLifecycleStatus
       ? runtimeProjector.lifecycleStatus
       : nextProjector.lifecycleStatus,
@@ -145,43 +157,61 @@ export function mergeProjectorCandidatesWithRuntimeState(
 export function mergeProjectorCandidatesWithRuntimeStateAndIdMap(
   nextProjectors: ProjectorArtifact[] | undefined,
   runtimeProjectors: ProjectorArtifact[] | undefined,
-): {
-  projectorCandidates: ProjectorArtifact[] | undefined;
-  runtimeToNextProjectorIds: Map<string, string>;
-} {
+): ProjectorRuntimeStateMerge {
   const runtimeToNextProjectorIds = new Map<string, string>();
+  const blockedRuntimeProjectorIds = new Set<string>();
+  const blockedNextProjectorIds = new Set<string>();
+  const blockedRuntimeReadinessProjectorIds = new Set<string>();
+  const blockedNextReadinessProjectorIds = new Set<string>();
+  const buildResult = (projectorCandidates: ProjectorArtifact[] | undefined): ProjectorRuntimeStateMerge => ({
+    projectorCandidates,
+    runtimeToNextProjectorIds,
+    blockedRuntimeProjectorIds,
+    blockedNextProjectorIds,
+    blockedRuntimeReadinessProjectorIds,
+    blockedNextReadinessProjectorIds,
+  });
 
   if (!nextProjectors?.length) {
     if (!runtimeProjectors?.length) {
-      return { projectorCandidates: nextProjectors, runtimeToNextProjectorIds };
+      return buildResult(nextProjectors);
     }
 
     runtimeProjectors.forEach((runtimeProjector) => {
       runtimeToNextProjectorIds.set(runtimeProjector.id, runtimeProjector.id);
     });
 
-    return {
-      projectorCandidates: runtimeProjectors,
-      runtimeToNextProjectorIds,
-    };
+    return buildResult(runtimeProjectors);
   }
 
   if (!runtimeProjectors?.length) {
-    return { projectorCandidates: nextProjectors, runtimeToNextProjectorIds };
+    return buildResult(nextProjectors);
   }
 
   const usedRuntimeProjectorIds = new Set<string>();
 
   const projectorCandidates = nextProjectors.map((nextProjector) => {
+    const exactSameIdRuntimeProjector = runtimeProjectors.find((runtimeProjector) => (
+      !usedRuntimeProjectorIds.has(runtimeProjector.id)
+      && runtimeProjector.id === nextProjector.id
+    ));
+    if (
+      exactSameIdRuntimeProjector
+      && !projectorsShareStableArtifact(exactSameIdRuntimeProjector, nextProjector)
+    ) {
+      blockedRuntimeProjectorIds.add(exactSameIdRuntimeProjector.id);
+      blockedNextProjectorIds.add(nextProjector.id);
+    }
+
     const exactMatch = runtimeProjectors.find((runtimeProjector) => (
       !usedRuntimeProjectorIds.has(runtimeProjector.id)
       && runtimeProjector.id === nextProjector.id
-      && hasCompatibleProjectorRuntimeIdentity(runtimeProjector, nextProjector)
+      && projectorsShareStableArtifact(runtimeProjector, nextProjector)
     ));
     const runtimeProjector = exactMatch ?? runtimeProjectors.find((candidate) => (
       !usedRuntimeProjectorIds.has(candidate.id)
       && candidate.id !== nextProjector.id
-      && hasCompatibleProjectorRuntimeIdentity(candidate, nextProjector)
+      && projectorsShareStableArtifact(candidate, nextProjector)
     ));
 
     if (!runtimeProjector) {
@@ -190,8 +220,15 @@ export function mergeProjectorCandidatesWithRuntimeStateAndIdMap(
 
     usedRuntimeProjectorIds.add(runtimeProjector.id);
     runtimeToNextProjectorIds.set(runtimeProjector.id, nextProjector.id);
+
+    if (!projectorsHaveCompatibleRuntimeMetadata(runtimeProjector, nextProjector)) {
+      blockedRuntimeReadinessProjectorIds.add(runtimeProjector.id);
+      blockedNextReadinessProjectorIds.add(nextProjector.id);
+      return nextProjector;
+    }
+
     return mergeProjectorRuntimeState(nextProjector, runtimeProjector);
   });
 
-  return { projectorCandidates, runtimeToNextProjectorIds };
+  return buildResult(projectorCandidates);
 }

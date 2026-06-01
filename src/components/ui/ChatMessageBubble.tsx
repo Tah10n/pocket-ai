@@ -315,14 +315,17 @@ const ChatMessageBubbleComponent = ({
                   testID={`message-attachments-${id}`}
                   className={`${content ? 'mb-2 ' : ''}flex-row flex-wrap gap-1.5`}
                 >
-                  {userAttachments.map((attachment) => {
+                  {userAttachments.map((attachment, index) => {
                     const isAvailable = attachmentAvailability[attachment.id] !== false;
                     return isAvailable ? (
                       <Image
                         key={attachment.id}
                         testID={`message-attachment-image-${id}-${attachment.id}`}
                         source={{ uri: attachment.localUri }}
-                        accessibilityLabel={t('chat.attachments.previewAccessibilityLabel')}
+                        accessibilityLabel={t('chat.attachments.messagePreviewIndexedAccessibilityLabel', {
+                          index: index + 1,
+                          count: userAttachments.length,
+                        })}
                         resizeMode="cover"
                         style={{ width: 72, height: 72, borderRadius: 8 }}
                       />

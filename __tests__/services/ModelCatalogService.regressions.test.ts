@@ -623,8 +623,15 @@ describe('ModelCatalogService regressions', () => {
       {
         ...localModel,
         projectorCandidates: [remoteProjector],
-        selectedProjectorId: undefined,
-        multimodalReadiness: undefined,
+        selectedProjectorId: remoteProjector.id,
+        multimodalReadiness: {
+          modelId,
+          variantId: modelFileName,
+          status: 'ready',
+          projectorId: remoteProjector.id,
+          support: ['vision'],
+          checkedAt: 3456,
+        },
       },
       {
         ...localModel,

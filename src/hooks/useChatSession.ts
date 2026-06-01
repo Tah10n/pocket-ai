@@ -40,6 +40,7 @@ import { materializeAttachmentDraftsForMessage } from '../services/ChatAttachmen
 import { sanitizeMultimodalFailureReason } from '../utils/multimodalFailureReason';
 import {
   MAX_CHAT_IMAGE_ATTACHMENTS,
+  getChatImageAttachmentMediaPaths,
   getSendableDraftImageAttachments,
   hasFailedDraftImageAttachments,
   normalizeChatAttachmentLocalUri,
@@ -288,6 +289,44 @@ function omitInferenceAttachments(message: ChatMessage): ChatMessage {
   };
 }
 
+function omitLlmInferenceAttachments(message: LlmChatMessage): LlmChatMessage {
+  if (!message.attachments?.length && !message.mediaPaths?.length) {
+    return message;
+  }
+
+  const { attachments: _attachments, mediaPaths: _mediaPaths, ...messageWithoutAttachments } = message;
+  return messageWithoutAttachments;
+}
+
+function normalizeLlmInferenceMediaPaths(paths: readonly string[] | undefined): string[] {
+  if (!paths?.length) {
+    return [];
+  }
+
+  return Array.from(new Set(paths
+    .map((path) => path.trim())
+    .filter((path) => path.length > 0)));
+}
+
+function getLlmInferenceMessageMediaPaths(message: LlmChatMessage): string[] {
+  return normalizeLlmInferenceMediaPaths([
+    ...(message.mediaPaths ?? []),
+    ...getChatImageAttachmentMediaPaths(message.attachments),
+  ]);
+}
+
+function getLlmInferenceMessagesMediaPaths(messages: readonly LlmChatMessage[]): string[] {
+  return normalizeLlmInferenceMediaPaths(messages.flatMap(getLlmInferenceMessageMediaPaths));
+}
+
+function buildLlmInferenceMessagesSignature(messages: readonly LlmChatMessage[]): string {
+  return JSON.stringify(messages.map((message) => ({
+    role: message.role,
+    content: message.content,
+    mediaPaths: getLlmInferenceMessageMediaPaths(message),
+  })));
+}
+
 function stripThreadInferenceAttachments(thread: ChatThread): ChatThread {
   if (!thread.messages.some((message) => message.attachments?.length)) {
     return thread;
@@ -296,31 +335,6 @@ function stripThreadInferenceAttachments(thread: ChatThread): ChatThread {
   return {
     ...thread,
     messages: thread.messages.map(omitInferenceAttachments),
-  };
-}
-
-function stripNonLatestUserInferenceAttachments(thread: ChatThread, latestUserMessageId: string | null): ChatThread {
-  if (!latestUserMessageId) {
-    return stripThreadInferenceAttachments(thread);
-  }
-
-  let didStripAttachments = false;
-  const messages = thread.messages.map((message) => {
-    if (message.id === latestUserMessageId || !message.attachments?.length) {
-      return message;
-    }
-
-    didStripAttachments = true;
-    return omitInferenceAttachments(message);
-  });
-
-  if (!didStripAttachments) {
-    return thread;
-  }
-
-  return {
-    ...thread,
-    messages,
   };
 }
 
@@ -363,10 +377,6 @@ function throwMissingAttachment(
       },
     },
   );
-}
-
-function throwMissingLatestAttachment(message: ChatMessage, attachment: NonNullable<ChatMessage['attachments']>[number]): never {
-  throwMissingAttachment(message.id, attachment);
 }
 
 async function assertDraftAttachmentFilesExist(drafts: readonly AttachmentDraft[]): Promise<void> {
@@ -435,10 +445,12 @@ async function assertUserMessageAttachmentsReadyForRegeneration(
   await assertMessageAttachmentFilesExist(message);
 }
 
-async function resolveMessageAttachmentsForInference(
-  message: ChatMessage,
-  latestUserMessageId: string | null,
-): Promise<ChatMessage> {
+async function resolveLlmMessageAttachmentsForInference(
+  message: LlmChatMessage,
+  isLatestUserMessage: boolean,
+  latestUserMessageId?: string | null,
+  resolveAttachmentExists: (localUri: string) => Promise<boolean> = doesChatAttachmentFileExist,
+): Promise<LlmChatMessage> {
   const attachments = message.attachments;
   if (!attachments?.length) {
     return message;
@@ -453,7 +465,7 @@ async function resolveMessageAttachmentsForInference(
       return {
         attachment,
         localUri,
-        exists: localUri ? await doesChatAttachmentFileExist(localUri) : false,
+        exists: localUri ? await resolveAttachmentExists(localUri) : false,
       };
     },
   );
@@ -462,8 +474,8 @@ async function resolveMessageAttachmentsForInference(
   for (const { attachment, localUri, exists } of attachmentChecks) {
     if (!localUri || !exists) {
       didChangeAttachments = true;
-      if (message.id === latestUserMessageId) {
-        throwMissingLatestAttachment(message, attachment);
+      if (isLatestUserMessage) {
+        throwMissingAttachment(latestUserMessageId ?? undefined, attachment);
       }
       continue;
     }
@@ -480,25 +492,117 @@ async function resolveMessageAttachmentsForInference(
     return message;
   }
 
+  const mediaPaths = getChatImageAttachmentMediaPaths(nextAttachments);
+
   return {
     ...message,
     attachments: nextAttachments.length > 0 ? nextAttachments : undefined,
+    mediaPaths: mediaPaths.length > 0 ? mediaPaths : undefined,
+  };
+}
+
+function getLatestUserLlmMessageIndex(messages: readonly LlmChatMessage[]): number {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === 'user') {
+      return index;
+    }
+  }
+
+  return -1;
+}
+
+function hasLlmMessageInferenceContent(message: LlmChatMessage): boolean {
+  return message.role === 'system'
+    || message.content.trim().length > 0
+    || (message.mediaPaths?.length ?? 0) > 0
+    || getChatImageAttachmentMediaPaths(message.attachments).length > 0;
+}
+
+function filterEmptyLlmInferenceMessages(messages: readonly LlmChatMessage[]): LlmChatMessage[] {
+  return messages.filter(hasLlmMessageInferenceContent);
+}
+
+function normalizeLlmInferenceMessagePairs(messages: readonly LlmChatMessage[]): LlmChatMessage[] {
+  const normalized: LlmChatMessage[] = [];
+  let lastNonSystemRole: LlmChatMessage['role'] | null = null;
+
+  messages.forEach((message) => {
+    if (message.role === 'system') {
+      normalized.push(message);
+      return;
+    }
+
+    if (message.role === 'assistant' && lastNonSystemRole !== 'user') {
+      return;
+    }
+
+    normalized.push(message);
+    lastNonSystemRole = message.role;
+  });
+
+  return normalized;
+}
+
+function createChatAttachmentExistenceResolver(): (localUri: string) => Promise<boolean> {
+  const cache = new Map<string, Promise<boolean>>();
+
+  return (localUri: string) => {
+    const existing = cache.get(localUri);
+    if (existing) {
+      return existing;
+    }
+
+    const result = doesChatAttachmentFileExist(localUri);
+    cache.set(localUri, result);
+    return result;
   };
 }
 
 async function resolveRetainedMessagesForInferenceAttachments(
-  messages: readonly ChatMessage[],
-  latestUserMessageId: string | null,
-): Promise<ChatMessage[]> {
-  return mapWithConcurrency(
-    messages,
+  messages: readonly LlmChatMessage[],
+  multimodalReadiness?: MultimodalReadinessState,
+  latestUserMessageId?: string | null,
+  resolveAttachmentExists: (localUri: string) => Promise<boolean> = doesChatAttachmentFileExist,
+): Promise<LlmChatMessage[]> {
+  const boundedMessages = constrainInferenceAttachmentsToRequestLimit(messages);
+  if (!boundedMessages.some((message) => message.attachments?.length)) {
+    return normalizeLlmInferenceMessagePairs(filterEmptyLlmInferenceMessages(boundedMessages));
+  }
+
+  if (!isVisionReady(multimodalReadiness)) {
+    return normalizeLlmInferenceMessagePairs(filterEmptyLlmInferenceMessages(boundedMessages.map(omitLlmInferenceAttachments)));
+  }
+
+  const latestUserMessageIndex = getLatestUserLlmMessageIndex(boundedMessages);
+  const resolvedMessages = await mapWithConcurrency(
+    boundedMessages,
     ATTACHMENT_FILE_CHECK_CONCURRENCY,
-    (message) => resolveMessageAttachmentsForInference(message, latestUserMessageId),
+    (message, index) => resolveLlmMessageAttachmentsForInference(
+      message,
+      index === latestUserMessageIndex,
+      latestUserMessageId,
+      resolveAttachmentExists,
+    ),
   );
+
+  assertMultimodalReadyForInferenceAttachments(resolvedMessages, multimodalReadiness);
+  return normalizeLlmInferenceMessagePairs(filterEmptyLlmInferenceMessages(resolvedMessages));
+}
+
+async function resolveLatestUserMessageAttachmentsForInference(
+  message: ChatMessage | undefined,
+  readiness?: MultimodalReadinessState,
+): Promise<void> {
+  if (!message || !messageHasAttachments(message)) {
+    return;
+  }
+
+  assertMultimodalReadyForInferenceAttachments([message], readiness);
+  await assertMessageAttachmentFilesExist(message);
 }
 
 function assertMultimodalReadyForInferenceAttachments(
-  messages: readonly ChatMessage[],
+  messages: readonly { attachments?: readonly unknown[] }[],
   readiness?: MultimodalReadinessState,
 ): void {
   const attachmentCount = messages.reduce(
@@ -518,7 +622,24 @@ function assertMultimodalReadyForInferenceAttachments(
   });
 }
 
-function constrainInferenceAttachmentsToRequestLimit(messages: readonly ChatMessage[]): ChatMessage[] {
+type InferenceAttachmentMessage = {
+  attachments?: NonNullable<ChatMessage['attachments']>;
+  mediaPaths?: string[];
+};
+
+function withConstrainedInferenceAttachments<T extends InferenceAttachmentMessage>(
+  message: T,
+  attachments: NonNullable<ChatMessage['attachments']> | undefined,
+): T {
+  const mediaPaths = getChatImageAttachmentMediaPaths(attachments);
+  return {
+    ...message,
+    attachments: attachments && attachments.length > 0 ? attachments : undefined,
+    ...(message.mediaPaths ? { mediaPaths: mediaPaths.length > 0 ? mediaPaths : undefined } : null),
+  };
+}
+
+function constrainInferenceAttachmentsToRequestLimit<T extends InferenceAttachmentMessage>(messages: readonly T[]): T[] {
   let retainedAttachmentCount = 0;
   let didConstrain = false;
   const nextMessages = [...messages];
@@ -533,16 +654,16 @@ function constrainInferenceAttachmentsToRequestLimit(messages: readonly ChatMess
     const remainingSlots = MAX_CHAT_IMAGE_ATTACHMENTS - retainedAttachmentCount;
     if (remainingSlots <= 0) {
       didConstrain = true;
-      nextMessages[index] = { ...message, attachments: undefined };
+      nextMessages[index] = withConstrainedInferenceAttachments(message, undefined);
       continue;
     }
 
     if (attachments.length > remainingSlots) {
       didConstrain = true;
-      nextMessages[index] = {
-        ...message,
-        attachments: attachments.slice(attachments.length - remainingSlots),
-      };
+      nextMessages[index] = withConstrainedInferenceAttachments(
+        message,
+        attachments.slice(attachments.length - remainingSlots),
+      );
       retainedAttachmentCount = MAX_CHAT_IMAGE_ATTACHMENTS;
       continue;
     }
@@ -550,7 +671,7 @@ function constrainInferenceAttachmentsToRequestLimit(messages: readonly ChatMess
     retainedAttachmentCount += attachments.length;
   }
 
-  return didConstrain ? nextMessages : messages as ChatMessage[];
+  return didConstrain ? nextMessages : messages as T[];
 }
 
 async function resolveThreadForInferenceAttachments({
@@ -565,26 +686,13 @@ async function resolveThreadForInferenceAttachments({
   const latestUserMessage = latestUserMessageId
     ? thread.messages.find((message) => message.id === latestUserMessageId)
     : undefined;
-  const shouldUseTextOnlyFallback = !messageHasAttachments(latestUserMessage);
-  const baseThread = shouldUseTextOnlyFallback
-    ? stripThreadInferenceAttachments(thread)
-    : stripNonLatestUserInferenceAttachments(thread, latestUserMessageId);
-  const boundedMessages = constrainInferenceAttachmentsToRequestLimit(baseThread.messages);
-
-  if (shouldUseTextOnlyFallback) {
-    return {
-      ...baseThread,
-      messages: boundedMessages,
-    };
+  if (!isVisionReady(multimodalReadiness)) {
+    await resolveLatestUserMessageAttachmentsForInference(latestUserMessage, multimodalReadiness);
+    return stripThreadInferenceAttachments(thread);
   }
 
-  const messages = await resolveRetainedMessagesForInferenceAttachments(boundedMessages, latestUserMessageId);
-  assertMultimodalReadyForInferenceAttachments(messages, multimodalReadiness);
-
-  return {
-    ...thread,
-    messages,
-  };
+  await resolveLatestUserMessageAttachmentsForInference(latestUserMessage, multimodalReadiness);
+  return thread;
 }
 
 export function resolvePresetSnapshot(presetId: string | null): PresetSnapshot {
@@ -964,7 +1072,20 @@ export const useChatSession = () => {
           generationState.stopRequested = true;
           sendOutcomeNotificationOnce('interrupted');
         } finally {
-          void llmEngineService.stopCompletion().catch((error) => {
+          void (async () => {
+            if (generationState.nativeCompletionStarted) {
+              await llmEngineService.interruptActiveCompletion();
+              return;
+            }
+
+            if (typeof llmEngineService.cancelActiveContextOperations === 'function') {
+              const drainResult = await llmEngineService.cancelActiveContextOperations();
+              if (drainResult === 'timed_out') {
+                console.warn('[ChatSession] Timed out waiting for expired prompt preparation to stop');
+              }
+            }
+            await llmEngineService.stopCompletion();
+          })().catch((error) => {
             console.warn('[ChatSession] Failed to stop expired completion', error);
           });
         }
@@ -988,30 +1109,125 @@ export const useChatSession = () => {
       let messages: LlmChatMessage[] = [];
       let promptTokens = 0;
       let promptSafetyMarginTokens = 0;
+      const resolveAttachmentExistsForTokenCount = createChatAttachmentExistenceResolver();
+      const mediaTokenDeltaCache = new Map<string, Promise<number>>();
+      const exactPromptTokenCache = new Map<string, Promise<number>>();
+      let selectedTokenCountParams = {
+        enable_thinking: reasoningRuntimeConfig.enableThinking,
+        reasoning_format: reasoningRuntimeConfig.reasoningFormat,
+      };
+      let didUseHeuristicPromptTokens = false;
+      let didUseMediaDeltaPromptTokens = false;
+
+      const throwIfGenerationStopped = () => {
+        if (generationState.stopRequested) {
+          throw new Error('Generation was stopped before native completion started.');
+        }
+      };
+      const buildPromptTokenCacheKey = (
+        messagesToCount: LlmChatMessage[],
+        params: { enable_thinking: boolean; reasoning_format: 'none' | 'auto' | 'deepseek' },
+      ) => [
+        params.enable_thinking ? 'thinking' : 'plain',
+        params.reasoning_format,
+        buildLlmInferenceMessagesSignature(messagesToCount),
+      ].join('\u0001');
+      const countExactPromptTokens = async (
+        messagesToCount: LlmChatMessage[],
+        params: { enable_thinking: boolean; reasoning_format: 'none' | 'auto' | 'deepseek' },
+        options: { bypassCache?: boolean } = {},
+      ) => {
+        throwIfGenerationStopped();
+        const cacheKey = buildPromptTokenCacheKey(messagesToCount, params);
+        let cachedCount = options.bypassCache ? undefined : exactPromptTokenCache.get(cacheKey);
+        if (!cachedCount) {
+          cachedCount = llmEngineService.countPromptTokens({
+            messages: messagesToCount,
+            params,
+          }).catch((error) => {
+            exactPromptTokenCache.delete(cacheKey);
+            throw error;
+          });
+          exactPromptTokenCache.set(cacheKey, cachedCount);
+        }
+
+        const tokens = await cachedCount;
+        throwIfGenerationStopped();
+        return tokens;
+      };
 
       const countPromptTokens = async (
         windowMessages: LlmChatMessage[],
         params: { enable_thinking: boolean; reasoning_format: 'none' | 'auto' | 'deepseek' },
-      ) => llmEngineService.countPromptTokens({
-        messages: windowMessages,
-        params,
-      });
+      ) => {
+        throwIfGenerationStopped();
+        const resolvedWindowMessages = await resolveRetainedMessagesForInferenceAttachments(
+          windowMessages,
+          effectiveMultimodalReadiness,
+          latestUserMessageId,
+          resolveAttachmentExistsForTokenCount,
+        );
+        throwIfGenerationStopped();
+
+        const countResolvedMessages = async (messagesToCount: LlmChatMessage[]) => {
+          return countExactPromptTokens(messagesToCount, params);
+        };
+
+        const mediaPaths = getLlmInferenceMessagesMediaPaths(resolvedWindowMessages);
+        if (mediaPaths.length > 0) {
+          const textOnlyMessages = resolvedWindowMessages.map(omitLlmInferenceAttachments);
+          let textOnlyPromptTokens: number;
+          try {
+            textOnlyPromptTokens = await countResolvedMessages(textOnlyMessages);
+          } catch {
+            return countResolvedMessages(resolvedWindowMessages);
+          }
+
+          const mediaTokenCacheKey = [
+            params.enable_thinking ? 'thinking' : 'plain',
+            params.reasoning_format,
+            mediaPaths.join('\u0000'),
+          ].join('\u0001');
+          let mediaTokenDelta = mediaTokenDeltaCache.get(mediaTokenCacheKey);
+
+          if (!mediaTokenDelta) {
+            mediaTokenDelta = (async () => {
+              const mediaPromptTokens = await countResolvedMessages(resolvedWindowMessages);
+              return Math.max(0, mediaPromptTokens - textOnlyPromptTokens);
+            })();
+            mediaTokenDeltaCache.set(mediaTokenCacheKey, mediaTokenDelta);
+          }
+
+          didUseMediaDeltaPromptTokens = true;
+          const resolvedMediaTokenDelta = await mediaTokenDelta;
+          throwIfGenerationStopped();
+          return textOnlyPromptTokens + resolvedMediaTokenDelta;
+        }
+
+        return countResolvedMessages(resolvedWindowMessages);
+      };
 
       try {
         const tokenCountParams = {
           enable_thinking: reasoningRuntimeConfig.enableThinking,
           reasoning_format: reasoningRuntimeConfig.reasoningFormat,
         };
+        selectedTokenCountParams = tokenCountParams;
 
         const result = await buildInferenceWindowWithAccurateTokenCounts(
           thread,
           windowOptions,
           async (windowMessages) => countPromptTokens(windowMessages, tokenCountParams),
+          { throwIfCancelled: throwIfGenerationStopped },
         );
         messages = result.messages;
         promptTokens = result.promptTokens;
         promptSafetyMarginTokens = result.promptSafetyMarginTokens;
       } catch (error) {
+        if (generationState.stopRequested) {
+          throw error;
+        }
+
         const appError = toAppError(error);
 
         if (appError.code === 'message_too_long' && reasoningRuntimeConfig.enableThinking) {
@@ -1025,11 +1241,13 @@ export const useChatSession = () => {
             enable_thinking: false,
             reasoning_format: 'none' as const,
           };
+          selectedTokenCountParams = tokenCountParams;
 
           const result = await buildInferenceWindowWithAccurateTokenCounts(
             thread,
             noThinkingWindowOptions,
             async (windowMessages) => countPromptTokens(windowMessages, tokenCountParams),
+            { throwIfCancelled: throwIfGenerationStopped },
           );
           messages = result.messages;
           promptTokens = result.promptTokens;
@@ -1038,7 +1256,13 @@ export const useChatSession = () => {
           throw appError;
         } else {
           console.warn('[ChatSession] Failed to count prompt tokens accurately, falling back to heuristics', error);
-          messages = getThreadInferenceWindow(thread, windowOptions).messages;
+          didUseHeuristicPromptTokens = true;
+          messages = await resolveRetainedMessagesForInferenceAttachments(
+            getThreadInferenceWindow(thread, windowOptions).messages,
+            effectiveMultimodalReadiness,
+            latestUserMessageId,
+            resolveAttachmentExistsForTokenCount,
+          );
           promptTokens = estimateLlmMessagesTokens(messages);
           promptSafetyMarginTokens = Math.max(
             0,
@@ -1046,6 +1270,42 @@ export const useChatSession = () => {
           );
         }
       }
+
+      throwIfGenerationStopped();
+      const tokenCountResolvedMessages = await resolveRetainedMessagesForInferenceAttachments(
+        messages,
+        effectiveMultimodalReadiness,
+        latestUserMessageId,
+        resolveAttachmentExistsForTokenCount,
+      );
+      throwIfGenerationStopped();
+      const finalMessages = await resolveRetainedMessagesForInferenceAttachments(
+        messages,
+        effectiveMultimodalReadiness,
+        latestUserMessageId,
+      );
+      throwIfGenerationStopped();
+      const finalMessagesSignature = buildLlmInferenceMessagesSignature(finalMessages);
+      const tokenCountResolvedMessagesSignature = buildLlmInferenceMessagesSignature(tokenCountResolvedMessages);
+      const finalPromptTokenCacheKey = buildPromptTokenCacheKey(finalMessages, selectedTokenCountParams);
+      const shouldRecountFinalPrompt = finalMessagesSignature !== tokenCountResolvedMessagesSignature
+        || (
+          didUseMediaDeltaPromptTokens
+          && getLlmInferenceMessagesMediaPaths(finalMessages).length > 0
+          && !exactPromptTokenCache.has(finalPromptTokenCacheKey)
+        );
+      if (shouldRecountFinalPrompt) {
+        if (didUseHeuristicPromptTokens) {
+          promptTokens = estimateLlmMessagesTokens(finalMessages);
+        } else {
+          throwIfGenerationStopped();
+          promptTokens = await countExactPromptTokens(finalMessages, selectedTokenCountParams, {
+            bypassCache: finalMessagesSignature !== tokenCountResolvedMessagesSignature,
+          });
+          throwIfGenerationStopped();
+        }
+      }
+      messages = finalMessages;
 
       const nonSystemMessages = messages.filter((message) => message.role !== 'system');
       const lastNonSystemRole = nonSystemMessages.length > 0
@@ -1291,7 +1551,11 @@ export const useChatSession = () => {
       throw new Error(`Load ${threadModelId} before ${actionLabel}.`);
     }
 
-    if (llmEngineService.hasActiveCompletion() || isNativeCompletionSettlingAfterStop()) {
+    if (
+      llmEngineService.hasActiveCompletion()
+      || llmEngineService.hasActiveChatBlockingContextOperation()
+      || isNativeCompletionSettlingAfterStop()
+    ) {
       throw new Error(`Wait for the current response to finish stopping before ${actionLabel}.`);
     }
   }, []);
@@ -1334,7 +1598,11 @@ export const useChatSession = () => {
       throw new Error('A response is already being generated for this thread.');
     }
 
-    if (llmEngineService.hasActiveCompletion() || isNativeCompletionSettlingAfterStop()) {
+    if (
+      llmEngineService.hasActiveCompletion()
+      || llmEngineService.hasActiveChatBlockingContextOperation()
+      || isNativeCompletionSettlingAfterStop()
+    ) {
       throw new Error('Wait for the current response to finish stopping before sending another message.');
     }
 
@@ -1409,6 +1677,12 @@ export const useChatSession = () => {
       if (generation.nativeCompletionStarted) {
         await llmEngineService.interruptActiveCompletion();
       } else {
+        if (typeof llmEngineService.cancelActiveContextOperations === 'function') {
+          const drainResult = await llmEngineService.cancelActiveContextOperations();
+          if (drainResult === 'timed_out') {
+            console.warn('[ChatSession] Timed out waiting for prompt preparation to stop');
+          }
+        }
         await llmEngineService.stopCompletion();
       }
     } finally {

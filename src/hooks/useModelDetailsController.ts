@@ -28,6 +28,7 @@ import {
 import { handleModelLoadMemoryPolicyError, promptModelLoadMemoryPolicyIfNeeded } from '../utils/modelLoadMemoryPolicyPrompt';
 import { startModelDownloadFlow } from '../utils/modelDownloadFlow';
 import { mergeModelWithRuntimeState } from '../utils/modelRuntimeState';
+import { clearProjectorScopedMemoryFit, shouldClearProjectorScopedMemoryFit } from '../utils/projectorMemoryFitInvalidation';
 import { applyModelVariantSelection, canSelectModelVariant } from '../utils/modelVariants';
 import { clearModelProjectorLocalState, selectModelProjectorLifecycleState } from '../store/modelsStore';
 
@@ -440,7 +441,7 @@ export function useModelDetailsController(modelId: string, initialVariantId?: st
         ? selectedPersistedModel
         : persistedModelBeforeSelection;
     }
-    const nextModel = preserveFreshProjectorSelection(
+    const nextModelWithRuntimeState = preserveFreshProjectorSelection(
       persistedModelAfterSelection
         ? mergeModelWithRuntimeState(selection.model, {
           activeModelId: engineState.activeModelId,
@@ -450,6 +451,16 @@ export function useModelDetailsController(modelId: string, initialVariantId?: st
         : selection.model,
       selection.model,
     );
+    const selectedProjectorChangedForMemoryFit = shouldClearProjectorScopedMemoryFit(sourceModel, nextModelWithRuntimeState)
+      || (persistedModelBeforeSelection
+        ? shouldClearProjectorScopedMemoryFit(persistedModelBeforeSelection, nextModelWithRuntimeState)
+        : false);
+    const nextModel = selectedProjectorChangedForMemoryFit
+      ? clearProjectorScopedMemoryFit(nextModelWithRuntimeState)
+      : nextModelWithRuntimeState;
+    if (persistedModelBeforeSelection) {
+      registry.updateModel(nextModel);
+    }
 
     setModel((current) => (current?.id === sourceModel.id ? { ...current, ...nextModel } : current));
     pendingProjectorDownloadModelRef.current = null;

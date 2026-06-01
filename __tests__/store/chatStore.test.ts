@@ -2165,6 +2165,89 @@ describe('chatStore', () => {
     );
   });
 
+  it('does not schedule attachment cleanup for metadata-only thread mutations', async () => {
+    const cleanupSpy = jest
+      .spyOn(chatAttachmentStorageService, 'deleteUnreferencedAttachmentFiles')
+      .mockResolvedValue(0);
+    const threadId = useChatStore.getState().createThread({
+      modelId: 'author/model-q4',
+      presetId: null,
+      presetSnapshot: {
+        id: null,
+        name: 'Default',
+        systemPrompt: 'You are helpful.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 1024,
+        seed: null,
+      },
+    });
+    useChatStore.getState().appendMessage(threadId, {
+      id: 'user-with-attachment',
+      role: 'user',
+      content: 'Image prompt',
+      createdAt: Date.now(),
+      state: 'complete',
+      attachments: [buildStoredAttachment(threadId, 'user-with-attachment', 'metadata-kept.jpg')],
+    });
+    await flushAttachmentCleanup();
+    cleanupSpy.mockClear();
+
+    expect(useChatStore.getState().renameThread(threadId, 'Renamed')).toBe(true);
+    await flushAttachmentCleanup();
+
+    expect(cleanupSpy).not.toHaveBeenCalled();
+    cleanupSpy.mockRestore();
+  });
+
+  it('preserves live attachments dropped by persistence sanitization during store writes', async () => {
+    const threadId = useChatStore.getState().createThread({
+      modelId: 'author/model-q4',
+      presetId: null,
+      presetSnapshot: {
+        id: null,
+        name: 'Default',
+        systemPrompt: 'You are helpful.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 1024,
+        seed: null,
+      },
+    });
+    const attachments = [
+      buildStoredAttachment(threadId, 'user-over-limit', 'limit-kept-1.jpg'),
+      buildStoredAttachment(threadId, 'user-over-limit', 'limit-kept-2.jpg'),
+      buildStoredAttachment(threadId, 'user-over-limit', 'limit-kept-3.jpg'),
+      buildStoredAttachment(threadId, 'user-over-limit', 'limit-kept-4.jpg'),
+      buildStoredAttachment(threadId, 'user-over-limit', 'limit-dropped-5.jpg'),
+    ];
+
+    useChatStore.getState().appendMessage(threadId, {
+      id: 'user-over-limit',
+      role: 'user',
+      content: 'Image prompt over the persistence limit',
+      createdAt: Date.now(),
+      state: 'complete',
+      attachments,
+    });
+    await flushAttachmentCleanup();
+
+    const persistedRecord = JSON.parse(storage.getString(getChatThreadStorageKey(threadId)) ?? '{}') as {
+      thread?: ChatThread;
+    };
+
+    expect(useChatStore.getState().getThread(threadId)?.messages[0]?.attachments).toEqual(attachments);
+    expect(persistedRecord.thread?.messages[0]?.attachments).toEqual(attachments.slice(0, 4));
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith(attachments[4].localUri, expect.anything());
+    attachments.slice(0, 4).forEach((attachment) => {
+      expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith(attachment.localUri, expect.anything());
+    });
+  });
+
   it('prunes inactive threads that fall outside the retention window', () => {
     const now = 100 * 24 * 60 * 60 * 1000;
     const staleThread = buildThread('thread-stale', now - 95 * 24 * 60 * 60 * 1000);

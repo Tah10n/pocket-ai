@@ -1,5 +1,6 @@
 import type { ModelMetadata, ModelVariant } from '../types/models';
 import type { MultimodalReadinessStatus, ProjectorArtifact, ProjectorMatchStatus } from '../types/multimodal';
+import { clearProjectorScopedMemoryFit, shouldClearProjectorScopedMemoryFit } from '../utils/projectorMemoryFitInvalidation';
 import { resolveDeterministicProjectorCandidate } from '../utils/modelProjectors';
 import { registry } from './LocalStorageRegistry';
 
@@ -98,6 +99,12 @@ function shouldPreserveReadinessForSelectedProjector(model: ModelMetadata, proje
   return readiness.projectorId === projector.id;
 }
 
+function clearMemoryFitForProjectorChange(model: ModelMetadata, selectedProjectorId: string): ModelMetadata {
+  return shouldClearProjectorScopedMemoryFit(model, { ...model, selectedProjectorId })
+    ? clearProjectorScopedMemoryFit(model)
+    : model;
+}
+
 export class ProjectorArtifactService {
   public constructor(private readonly modelRegistry: ProjectorModelRegistry = registry) {}
 
@@ -176,8 +183,9 @@ export class ProjectorArtifactService {
     }
 
     const compatibleIds = new Set(compatibleProjectors.map((projector) => projector.id));
+    const modelWithProjectorScopedMemoryFit = clearMemoryFitForProjectorChange(model, targetProjector.id);
     const updatedModel: ModelMetadata = {
-      ...model,
+      ...modelWithProjectorScopedMemoryFit,
       selectedProjectorId: targetProjector.id,
       visionSource: 'user_selected_projector',
       multimodalReadiness: shouldPreserveReadinessForSelectedProjector(model, targetProjector)

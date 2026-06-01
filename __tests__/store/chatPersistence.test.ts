@@ -18,6 +18,10 @@ import {
 import { storage } from '../../src/store/storage';
 import type { ChatThread } from '../../src/types/chat';
 import {
+  MAX_CHAT_IMAGE_ATTACHMENT_BYTES,
+  MAX_CHAT_IMAGE_ATTACHMENT_SIDE_PIXELS,
+} from '../../src/utils/chatImageAttachments';
+import {
   copiedImageAttachment,
   secondCopiedImageAttachment,
 } from '../fixtures/chatImageAttachmentFixtures';
@@ -275,6 +279,17 @@ describe('chatPersistence', () => {
               id: 'path-traversal-uri',
               localUri: 'test-dir/chat-attachments/../models/model.gguf',
               fileName: 'model.gguf',
+            },
+            {
+              ...copiedImageAttachment,
+              id: 'oversized-bytes',
+              size: MAX_CHAT_IMAGE_ATTACHMENT_BYTES + 1,
+            },
+            {
+              ...copiedImageAttachment,
+              id: 'oversized-dimensions',
+              width: MAX_CHAT_IMAGE_ATTACHMENT_SIDE_PIXELS + 1,
+              height: 512,
             },
           ],
         },

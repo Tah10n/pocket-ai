@@ -88,6 +88,7 @@ import {
 } from './LLMEngineService.safeLoadSearch';
 import {
   ActiveCompletionRunner,
+  type ContextOperationCancellationToken,
   ContextOperationRunner,
   waitForPromiseWithTimeout,
   type ContextOperationDrainResult,
@@ -146,8 +147,11 @@ const DEFAULT_CONTEXT_SIZE = 4096;
 const MAX_NATIVE_LOG_LINES = 120;
 const MAX_ADDITIONAL_STOP_WORDS_CACHE_ENTRIES = 8;
 const CONTEXT_OPERATION_UNLOAD_DRAIN_TIMEOUT_MS = 5000;
+const CONTEXT_OPERATION_STOP_DRAIN_TIMEOUT_MS = 5000;
 const CONTEXT_OPERATION_UNLOAD_TIMEOUT_MESSAGE = 'Timed out waiting for active context operations during unload';
 const ACTIVE_COMPLETION_UNLOAD_TIMEOUT_MESSAGE = 'Timed out waiting for active completion during unload';
+const CONTEXT_OPERATION_STOP_MESSAGE = 'Prompt preparation was stopped before native completion started';
+const ACTIVE_COMPLETION_STOP_TIMEOUT_MESSAGE = 'Timed out waiting for active completion to stop';
 const MAX_UNLOAD_RECLAIM_FRACTION_OF_TOTAL_MEMORY = 0.25;
 const FALLBACK_STOP_WORDS = [
   '</s>',
@@ -253,24 +257,6 @@ function getLatestUserMessageIndex(messages: readonly LlmChatMessage[]): number 
   return -1;
 }
 
-function getLatestUserMessageMediaPaths(messages: readonly LlmChatMessage[]): string[] {
-  const latestUserMessageIndex = getLatestUserMessageIndex(messages);
-  if (latestUserMessageIndex < 0) {
-    return [];
-  }
-
-  return getMessageMediaPaths(messages[latestUserMessageIndex]);
-}
-
-function withoutMessageMedia(message: LlmChatMessage): LlmChatMessage {
-  if (!message.mediaPaths?.length && !message.attachments?.length) {
-    return message;
-  }
-
-  const { mediaPaths: _mediaPaths, attachments: _attachments, ...messageWithoutMedia } = message;
-  return messageWithoutMedia;
-}
-
 function withResolvedMediaPaths(message: LlmChatMessage): LlmChatMessage {
   const mediaPaths = getMessageMediaPaths(message);
   const { mediaPaths: _mediaPaths, ...messageWithoutMediaPaths } = message;
@@ -289,7 +275,7 @@ function mergeTopLevelMediaPathsIntoLatestUserMessage(
   const latestUserMessageIndex = getLatestUserMessageIndex(resolvedMessages);
 
   if (latestUserMessageIndex < 0) {
-    return resolvedMessages.map(withoutMessageMedia);
+    return resolvedMessages;
   }
 
   const existingMessageMediaPaths = new Set(getMessagesMediaPaths(resolvedMessages));
@@ -299,7 +285,7 @@ function mergeTopLevelMediaPathsIntoLatestUserMessage(
 
   return resolvedMessages.map((message, index) => {
     if (index !== latestUserMessageIndex) {
-      return withoutMessageMedia(message);
+      return message;
     }
 
     return withResolvedMediaPaths({
@@ -655,6 +641,7 @@ class LLMEngineService {
     useGpu: boolean;
   } | null = null;
   private pendingMultimodalReadinessRefreshPromise: Promise<void> | null = null;
+  private deferredContextReleasePromise: Promise<void> | null = null;
   private lastLifecycleEvent: EngineLifecycleEvent | null = null;
   private lastLifecycleError: string | null = null;
   private recentMultimodalDiagnostics: MultimodalDiagnosticsSummary | null = null;
@@ -687,8 +674,15 @@ class LLMEngineService {
     return this.completionRunner.activePromise;
   }
 
+  private get activeCompletionDriverPromise(): Promise<unknown> | null {
+    return this.completionRunner.getActiveDriverPromise();
+  }
+
   private set activeCompletionPromise(value: Promise<NativeCompletionResult> | null) {
     this.completionRunner.activePromise = value;
+    if (value === null) {
+      this.completionRunner.activeDriverPromise = null;
+    }
   }
 
   private get activeCompletionReject(): ((error: unknown) => void) | null {
@@ -990,15 +984,36 @@ class LLMEngineService {
     );
   }
 
-  private trackContextOperation<T>(operation: () => Promise<T>): Promise<T> {
+  private trackContextOperation<T>(
+    operation: (cancellation: ContextOperationCancellationToken) => Promise<T>,
+    options: { readonly chatBlocking?: boolean } = {},
+  ): Promise<T> {
     return this.contextOperationRunner.track(
       operation,
       () => new AppError('engine_unloading', CONTEXT_OPERATION_UNLOAD_TIMEOUT_MESSAGE),
+      options,
     );
   }
 
   private waitForActiveContextOperations(options: { timeoutMs?: number } = {}): Promise<ContextOperationDrainResult> {
     return this.contextOperationRunner.waitForActive(options);
+  }
+
+  public hasActiveContextOperation(): boolean {
+    return this.contextOperationRunner.hasActive();
+  }
+
+  public hasActiveChatBlockingContextOperation(): boolean {
+    return this.contextOperationRunner.hasActiveChatBlocking();
+  }
+
+  public async cancelActiveContextOperations(options: { timeoutMs?: number } = {}): Promise<ContextOperationDrainResult> {
+    this.contextOperationRunner.cancelActive(
+      new AppError('engine_busy', CONTEXT_OPERATION_STOP_MESSAGE),
+    );
+    return this.waitForActiveContextOperations({
+      timeoutMs: options.timeoutMs ?? CONTEXT_OPERATION_STOP_DRAIN_TIMEOUT_MS,
+    });
   }
 
   private waitForUnloadPromise(
@@ -1008,19 +1023,24 @@ class LLMEngineService {
     return waitForPromiseWithTimeout(promise, timeoutMs);
   }
 
-  private recordContextOperationUnloadTimeout(): void {
+  private recordContextOperationUnloadTimeout(activeModelId: string | null): AppError {
     this.lastLifecycleEvent = 'context_operation_unload_timeout';
     this.lastLifecycleError = CONTEXT_OPERATION_UNLOAD_TIMEOUT_MESSAGE;
     const timeoutError = new AppError('engine_unloading', CONTEXT_OPERATION_UNLOAD_TIMEOUT_MESSAGE);
     this.contextOperationRunner.cancelActive(timeoutError);
     this.updateState({
       ...this.state,
+      status: EngineStatus.ERROR,
+      activeModelId: activeModelId ?? this.state.activeModelId,
+      loadProgress: 0,
       lastError: CONTEXT_OPERATION_UNLOAD_TIMEOUT_MESSAGE,
     });
 
     if (process.env.NODE_ENV !== 'test') {
       console.warn(`[LLMEngine] ${CONTEXT_OPERATION_UNLOAD_TIMEOUT_MESSAGE}`);
     }
+
+    return timeoutError;
   }
 
   private recordActiveCompletionUnloadTimeout(): void {
@@ -1037,6 +1057,39 @@ class LLMEngineService {
     if (process.env.NODE_ENV !== 'test') {
       console.warn(`[LLMEngine] ${ACTIVE_COMPLETION_UNLOAD_TIMEOUT_MESSAGE}`);
     }
+  }
+
+  private scheduleDeferredContextReleaseAfterDrain({
+    context,
+    generation,
+  }: {
+    context: LlamaContext;
+    generation: number;
+  }): void {
+    if (this.deferredContextReleasePromise) {
+      return;
+    }
+
+    const deferredRelease = this.waitForActiveContextOperations()
+      .then(() => this.runExclusiveOperation(async () => {
+        if (this.context !== context || this.contextGeneration !== generation) {
+          return;
+        }
+
+        await this.unloadInternal();
+      }))
+      .catch((error) => {
+        if (process.env.NODE_ENV !== 'test') {
+          console.warn('[LLMEngine] Deferred context release after unload timeout failed', error);
+        }
+      })
+      .finally(() => {
+        if (this.deferredContextReleasePromise === deferredRelease) {
+          this.deferredContextReleasePromise = null;
+        }
+      });
+
+    this.deferredContextReleasePromise = deferredRelease;
   }
 
   private buildAdditionalStopWordsCacheKey({
@@ -1773,7 +1826,10 @@ class LLMEngineService {
           currentArtifactIdentity,
         );
       }
-      const shouldUnloadActiveModel = Boolean(
+      const hasStaleLoadedContext = Boolean(
+        this.context && (this.state.status !== EngineStatus.READY || !this.state.activeModelId),
+      );
+      const shouldUnloadActiveModel = hasStaleLoadedContext || Boolean(
         this.state.activeModelId && (this.state.activeModelId !== modelId || forceReload || !isCurrentLoadedArtifact),
       );
 
@@ -1858,7 +1914,7 @@ class LLMEngineService {
     }
 
     const requestMessages = mergeTopLevelMediaPathsIntoLatestUserMessage(messages, mediaPaths);
-    const requestMediaPaths = getLatestUserMessageMediaPaths(requestMessages);
+    const requestMediaPaths = getMessagesMediaPaths(requestMessages);
     const shouldRecordMultimodalDiagnostics = requestMediaPaths.length > 0
       || (multimodalReadiness !== undefined && multimodalReadiness.status !== 'ready');
     if (shouldRecordMultimodalDiagnostics) {
@@ -1889,7 +1945,7 @@ class LLMEngineService {
 
     const interruptGeneration = this.completionRunner.start(completionTask, rejectCompletion);
 
-    void (async () => {
+    const completionDriver = (async () => {
       try {
         if (this.state.status === EngineStatus.INITIALIZING && this.initPromise) {
           await this.initPromise;
@@ -2027,6 +2083,7 @@ class LLMEngineService {
         }
       }
     })();
+    this.completionRunner.attachDriver(completionTask, completionDriver);
 
     return completionTask;
   }
@@ -2209,6 +2266,7 @@ class LLMEngineService {
   public async countPromptTokens({
     messages,
     params,
+    chatBlocking = true,
   }: {
     messages: LlmChatMessage[];
     params?: {
@@ -2216,6 +2274,7 @@ class LLMEngineService {
       reasoning_format?: 'none' | 'auto' | 'deepseek';
       add_generation_prompt?: boolean;
     };
+    chatBlocking?: boolean;
   }): Promise<number> {
     if (this.isUnloading) {
       throw new AppError('engine_unloading', 'The model engine is unloading. Please wait a moment.');
@@ -2227,10 +2286,11 @@ class LLMEngineService {
 
     const requestMessages = messages.map(withResolvedMediaPaths);
 
-    return this.trackContextOperation(async () => {
+    return this.trackContextOperation(async (cancellation) => {
       if (this.state.status === EngineStatus.INITIALIZING && this.initPromise) {
         await this.initPromise;
       }
+      cancellation.throwIfCancelled();
 
       if (this.activeCompletionPromise) {
         throw new AppError('engine_busy', 'A response is already being generated.');
@@ -2257,6 +2317,7 @@ class LLMEngineService {
           throw error;
         }
 
+        cancellation.throwIfCancelled();
         strictRoleSystemNormalization = resolveStrictRoleSystemNormalization(formatted);
         this.assertContextStillCurrent(context, contextGeneration);
         let tokenized: Awaited<ReturnType<LlamaContext['tokenize']>>;
@@ -2266,7 +2327,7 @@ class LLMEngineService {
             prompt: formatted.prompt,
             mediaPaths: formatted.media_paths && formatted.media_paths.length > 0
               ? formatted.media_paths
-              : getLatestUserMessageMediaPaths(promptMessages),
+              : getMessagesMediaPaths(promptMessages),
           });
         } catch (error) {
           this.assertContextStillCurrent(context, contextGeneration);
@@ -2290,7 +2351,7 @@ class LLMEngineService {
 
         throw error;
       }
-    });
+    }, { chatBlocking });
   }
 
   public async stopCompletion(): Promise<void> {
@@ -2302,7 +2363,7 @@ class LLMEngineService {
   }
 
   public async interruptActiveCompletion(): Promise<void> {
-    const activeCompletion = this.completionRunner.activePromise;
+    const activeCompletion = this.activeCompletionDriverPromise;
     if (!activeCompletion) {
       return;
     }
@@ -2314,7 +2375,12 @@ class LLMEngineService {
     }
 
     try {
-      await activeCompletion;
+      const stopResult = await this.waitForUnloadPromise(activeCompletion, CONTEXT_OPERATION_STOP_DRAIN_TIMEOUT_MS);
+      if (stopResult === 'timed_out') {
+        this.completionRunner.rejectActive(
+          new AppError('engine_busy', ACTIVE_COMPLETION_STOP_TIMEOUT_MESSAGE),
+        );
+      }
     } catch {
       // Completion failures are handled by the chat flow that initiated them.
     }
@@ -2647,7 +2713,7 @@ class LLMEngineService {
         }
 
         await this.initializeMultimodalReadinessForLoadedContext(pendingRefresh);
-      });
+      }, { chatBlocking: false });
     } catch (error) {
       if (process.env.NODE_ENV !== 'test') {
         console.warn('[LLMEngine] Deferred multimodal readiness refresh failed', {
@@ -4487,6 +4553,7 @@ class LLMEngineService {
       : null;
     let beforeUnloadSnapshot: SystemMemorySnapshot | null = null;
     let unloadReclaimEstimate: ModelUnloadReclaimEstimate | null = null;
+    let deferredContextReleaseError: AppError | null = null;
     this.isUnloading = true;
     this.resetRuntimeTelemetry();
     this.updateState({
@@ -4497,7 +4564,7 @@ class LLMEngineService {
     });
 
     try {
-      const activeCompletion = this.activeCompletionPromise;
+      const activeCompletion = this.activeCompletionDriverPromise;
       if (activeCompletion) {
         let stopCompletionError: unknown;
         const stopCompletionPromise = this.stopCompletion().catch((error) => {
@@ -4526,10 +4593,16 @@ class LLMEngineService {
         timeoutMs: CONTEXT_OPERATION_UNLOAD_DRAIN_TIMEOUT_MS,
       });
       if (contextDrainResult === 'timed_out') {
-        this.recordContextOperationUnloadTimeout();
-      }
-
-      if (this.context) {
+        const contextAtTimeout = this.context;
+        const contextGenerationAtTimeout = this.contextGeneration;
+        deferredContextReleaseError = this.recordContextOperationUnloadTimeout(previousModelId);
+        if (contextAtTimeout) {
+          this.scheduleDeferredContextReleaseAfterDrain({
+            context: contextAtTimeout,
+            generation: contextGenerationAtTimeout,
+          });
+        }
+      } else if (this.context) {
         if (activeContextReclaimEstimate) {
           beforeUnloadSnapshot = await getFreshMemorySnapshot(0).catch(() => null);
         }
@@ -4537,47 +4610,56 @@ class LLMEngineService {
         await releaseAllLlamaContexts();
       }
     } finally {
-      const calibrationSession = this.activeCalibrationSession;
-      this.activeCalibrationSession = null;
+      if (!deferredContextReleaseError) {
+        const calibrationSession = this.activeCalibrationSession;
+        this.activeCalibrationSession = null;
 
-      if (calibrationSession && !calibrationSession.didRecordSuccess) {
-        this.persistCalibrationSuccess({
-          calibrationKey: calibrationSession.calibrationKey,
-          predictedFit: calibrationSession.predictedFit,
-          beforeLoadSnapshot: calibrationSession.beforeLoadSnapshot,
-          observedSnapshot: calibrationSession.afterModelInitSnapshot,
-          observedRawBudgetBytes: calibrationSession.observedRawBudgetBytes,
-        });
-        calibrationSession.didRecordSuccess = true;
-      }
-
-      if (calibrationSession || activeContextReclaimEstimate) {
-        const afterUnloadSnapshot = await getFreshMemorySnapshot(0).catch(() => null);
-        if (calibrationSession) {
-          calibrationSession.afterUnloadSnapshot = afterUnloadSnapshot;
-        }
-        if (activeContextReclaimEstimate) {
-          unloadReclaimEstimate = this.buildModelUnloadReclaimEstimate({
-            previousModelId,
-            estimatedReclaimableBytes: activeContextReclaimEstimate.bytes,
-            source: activeContextReclaimEstimate.source,
-            beforeUnloadSnapshot,
-            afterUnloadSnapshot,
+        if (calibrationSession && !calibrationSession.didRecordSuccess) {
+          this.persistCalibrationSuccess({
+            calibrationKey: calibrationSession.calibrationKey,
+            predictedFit: calibrationSession.predictedFit,
+            beforeLoadSnapshot: calibrationSession.beforeLoadSnapshot,
+            observedSnapshot: calibrationSession.afterModelInitSnapshot,
+            observedRawBudgetBytes: calibrationSession.observedRawBudgetBytes,
           });
+          calibrationSession.didRecordSuccess = true;
         }
+
+        if (calibrationSession || activeContextReclaimEstimate) {
+          const afterUnloadSnapshot = await getFreshMemorySnapshot(0).catch(() => null);
+          if (calibrationSession) {
+            calibrationSession.afterUnloadSnapshot = afterUnloadSnapshot;
+          }
+          if (activeContextReclaimEstimate) {
+            unloadReclaimEstimate = this.buildModelUnloadReclaimEstimate({
+              previousModelId,
+              estimatedReclaimableBytes: activeContextReclaimEstimate.bytes,
+              source: activeContextReclaimEstimate.source,
+              beforeUnloadSnapshot,
+              afterUnloadSnapshot,
+            });
+          }
+        }
+
+        this.setContext(null);
+        this.loadedArtifactIdentity = null;
+        this.activeContextSize = DEFAULT_CONTEXT_SIZE;
+        this.activeGpuLayers = null;
+        this.safeModeLoadLimits = null;
+        this.resetRuntimeTelemetry();
+        updateSettings({ activeModelId: null });
+        hardwareListenerService.resetLowMemoryFlag();
       }
 
-      this.setContext(null);
-      this.loadedArtifactIdentity = null;
-      this.activeContextSize = DEFAULT_CONTEXT_SIZE;
-      this.activeGpuLayers = null;
-      this.safeModeLoadLimits = null;
-      this.resetRuntimeTelemetry();
       this.initPromise = null;
-      this.completionRunner.reset();
+      if (!deferredContextReleaseError || !this.activeCompletionDriverPromise) {
+        this.completionRunner.reset();
+      }
       this.isUnloading = false;
-      updateSettings({ activeModelId: null });
-      hardwareListenerService.resetLowMemoryFlag();
+    }
+
+    if (deferredContextReleaseError) {
+      throw deferredContextReleaseError;
     }
 
     return unloadReclaimEstimate;

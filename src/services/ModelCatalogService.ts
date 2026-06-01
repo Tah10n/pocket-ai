@@ -2174,11 +2174,9 @@ export class ModelCatalogService {
     blockedRemoteProjectorIds: Set<string> = blockedLocalProjectorIds,
   ): string | undefined {
     if (remoteSelectedProjectorId && candidateIds.has(remoteSelectedProjectorId)) {
-      if (blockedRemoteProjectorIds.has(remoteSelectedProjectorId)) {
-        return undefined;
+      if (!blockedRemoteProjectorIds.has(remoteSelectedProjectorId)) {
+        return remoteSelectedProjectorId;
       }
-
-      return remoteSelectedProjectorId;
     }
 
     if (!localSelectedProjectorId) {

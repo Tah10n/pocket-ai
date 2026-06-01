@@ -299,7 +299,14 @@ describe('ChatMessageBubble', () => {
   });
 
   it('renders persisted user attachment thumbnails from local storage', async () => {
-    const { findByTestId, getByText } = render(
+    const { __setTranslationOverride } = jest.requireMock('react-i18next') as {
+      __setTranslationOverride: (key: string, value: string) => void;
+    };
+    __setTranslationOverride(
+      'chat.attachments.messagePreviewIndexedAccessibilityLabel',
+      'Message image {{index}} of {{count}} preview',
+    );
+    const { findByTestId, getByLabelText, getByText } = render(
       <ChatMessageBubble
         id="user-attachment"
         isUser
@@ -310,6 +317,7 @@ describe('ChatMessageBubble', () => {
 
     expect(getByText('Describe this')).toBeTruthy();
     expect(await findByTestId(`message-attachment-image-user-attachment-${copiedImageAttachment.id}`)).toBeTruthy();
+    expect(getByLabelText('Message image 1 of 1 preview')).toBeTruthy();
     expect(FileSystem.getInfoAsync).toHaveBeenCalledWith(copiedImageAttachment.localUri);
   });
 

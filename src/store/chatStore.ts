@@ -46,6 +46,7 @@ import {
   removeChatPendingIndexCommit,
   removeChatThreadRecord,
   resolveNextChatPersistenceRevision,
+  sanitizeChatThreadForPersistence,
   writeChatPersistenceIndex,
   writeChatPendingIndexCommit,
   writeChatThreadRecord,
@@ -194,6 +195,109 @@ function scheduleChatAttachmentCleanupForSnapshots(
   });
 }
 
+function collectReferencedChatAttachmentLocalUrisFromThread(thread: ChatThread | undefined): Set<string> {
+  return thread ? collectReferencedChatAttachmentLocalUrisFromThreads([thread]) : new Set();
+}
+
+function addSetValues<T>(target: Set<T>, source: Iterable<T>): void {
+  for (const value of source) {
+    target.add(value);
+  }
+}
+
+function collectAttachmentCleanupCandidatesForThreadChanges(
+  previous: ChatStoreSnapshot,
+  next: ChatStoreSnapshot,
+  {
+    changedThreadIds,
+    removedThreadIds,
+  }: {
+    changedThreadIds: readonly string[];
+    removedThreadIds: readonly string[];
+  },
+): Set<string> {
+  const candidates = new Set<string>();
+
+  removedThreadIds.forEach((threadId) => {
+    addSetValues(candidates, collectReferencedChatAttachmentLocalUrisFromThread(previous.threads[threadId]));
+  });
+
+  changedThreadIds.forEach((threadId) => {
+    const previousReferences = collectReferencedChatAttachmentLocalUrisFromThread(previous.threads[threadId]);
+    const nextReferences = collectReferencedChatAttachmentLocalUrisFromThread(next.threads[threadId]);
+
+    if (previousReferences.size > 0) {
+      previousReferences.forEach((localUri) => {
+        if (!nextReferences.has(localUri)) {
+          candidates.add(localUri);
+        }
+      });
+    }
+
+    const thread = next.threads[threadId];
+    if (!thread || nextReferences.size === 0) {
+      return;
+    }
+
+    const persistedReferences = collectReferencedChatAttachmentLocalUrisFromThread(
+      sanitizeChatThreadForPersistence(thread),
+    );
+    nextReferences.forEach((localUri) => {
+      if (!persistedReferences.has(localUri)) {
+        candidates.add(localUri);
+      }
+    });
+  });
+
+  return candidates;
+}
+
+function collectReferencedChatAttachmentLocalUrisForPersistedSnapshot(
+  threads: Record<string, ChatThread>,
+  changedThreadIds: readonly string[],
+): Set<string> {
+  const changedThreadIdSet = new Set(changedThreadIds);
+  return collectReferencedChatAttachmentLocalUrisFromThreads(
+    Object.values(threads).map((thread) => (
+      changedThreadIdSet.has(thread.id) ? sanitizeChatThreadForPersistence(thread) : thread
+    )),
+  );
+}
+
+function collectProtectedChatAttachmentLocalUrisForThreadChanges(
+  threads: Record<string, ChatThread>,
+  changedThreadIds: readonly string[],
+): Set<string> {
+  const protectedReferences = collectReferencedChatAttachmentLocalUrisForPersistedSnapshot(
+    threads,
+    changedThreadIds,
+  );
+  addSetValues(protectedReferences, collectReferencedChatAttachmentLocalUrisFromThreads(threads));
+  return protectedReferences;
+}
+
+function scheduleChatAttachmentCleanupForThreadChanges(
+  previous: ChatStoreSnapshot,
+  next: ChatStoreSnapshot,
+  changes: {
+    changedThreadIds: readonly string[];
+    removedThreadIds: readonly string[];
+  },
+): void {
+  const candidateLocalUris = collectAttachmentCleanupCandidatesForThreadChanges(previous, next, changes);
+  if (candidateLocalUris.size === 0) {
+    return;
+  }
+
+  scheduleUnreferencedChatAttachmentCleanup({
+    candidateLocalUris,
+    referencedLocalUris: collectProtectedChatAttachmentLocalUrisForThreadChanges(
+      next.threads,
+      changes.changedThreadIds,
+    ),
+  });
+}
+
 function scheduleChatAttachmentCleanupForStreamingPatch(
   previous: ChatStoreSnapshot,
   next: ChatStoreSnapshot,
@@ -205,11 +309,14 @@ function scheduleChatAttachmentCleanupForStreamingPatch(
 }
 
 function scheduleChatAttachmentDirectoryReconciliation(threads: Record<string, ChatThread>): void {
-  const referencedLocalUris = collectReferencedChatAttachmentLocalUrisFromThreads(threads);
   const preserveDraftsCreatedAtOrAfter = Date.now();
 
-  void chatAttachmentStorageService
-    .reconcileAttachmentDirectory(referencedLocalUris, { preserveDraftsCreatedAtOrAfter })
+  void Promise.resolve()
+    .then(() => collectReferencedChatAttachmentLocalUrisFromThreads(threads))
+    .then((referencedLocalUris) => chatAttachmentStorageService.reconcileAttachmentDirectory(
+      referencedLocalUris,
+      { preserveDraftsCreatedAtOrAfter },
+    ))
     .catch((error) => {
       console.warn('[chatStore] Failed to reconcile chat attachment directory', {
         errorName: error instanceof Error ? error.name : typeof error,
@@ -967,7 +1074,10 @@ function persistChatStoreMutation(
   [...changedThreadIds, ...removedThreadIds].forEach((threadId) => {
     chatPersistenceScheduler.cancelThreadWrite(threadId);
   });
-  scheduleChatAttachmentCleanupForSnapshots(previous, next);
+  scheduleChatAttachmentCleanupForThreadChanges(previous, next, {
+    changedThreadIds,
+    removedThreadIds,
+  });
 }
 
 function canPatchAssistantMessage(

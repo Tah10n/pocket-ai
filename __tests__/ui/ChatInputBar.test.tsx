@@ -231,6 +231,17 @@ describe('ChatInputBar', () => {
   });
 
   it('renders image attachment previews and removes a selected draft', () => {
+    const { __setTranslationOverride } = jest.requireMock('react-i18next') as {
+      __setTranslationOverride: (key: string, value: string) => void;
+    };
+    __setTranslationOverride(
+      'chat.attachments.previewIndexedAccessibilityLabel',
+      'Attached image {{index}} of {{count}} preview',
+    );
+    __setTranslationOverride(
+      'chat.attachments.removeImageIndexedAccessibilityLabel',
+      'Remove attached image {{index}} of {{count}}',
+    );
     const onRemoveAttachmentDraft = jest.fn();
     const drafts: AttachmentDraft[] = [
       {
@@ -256,8 +267,9 @@ describe('ChatInputBar', () => {
 
     expect(getByTestId('chat-image-attachments-tray')).toBeTruthy();
     expect(getByTestId('chat-image-attachment-preview-0')).toBeTruthy();
+    expect(getByLabelText('Attached image 1 of 1 preview')).toBeTruthy();
 
-    fireEvent.press(getByLabelText('chat.attachments.removeImageAccessibilityLabel'));
+    fireEvent.press(getByLabelText('Remove attached image 1 of 1'));
 
     expect(onRemoveAttachmentDraft).toHaveBeenCalledWith(drafts[0], 0);
   });

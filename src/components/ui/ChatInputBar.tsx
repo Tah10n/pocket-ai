@@ -349,6 +349,7 @@ export const ChatInputBar = ({
                     {attachmentDrafts.map((draft, index) => {
                         const draftKey = draft.id ?? draft.localUri ?? draft.previewUri ?? draft.pickerUri;
                         const isFailed = draft.copyStatus === 'failed';
+                        const attachmentLabelOptions = { index: index + 1, count: attachmentDrafts.length };
 
                         return (
                             <Box key={`${draftKey}-${index}`} className="mr-2">
@@ -372,7 +373,7 @@ export const ChatInputBar = ({
                                     ) : (
                                         <Image
                                             testID={`chat-image-attachment-preview-${index}`}
-                                            accessibilityLabel={t('chat.attachments.previewAccessibilityLabel')}
+                                            accessibilityLabel={t('chat.attachments.previewIndexedAccessibilityLabel', attachmentLabelOptions)}
                                             source={{ uri: draft.previewUri }}
                                             style={styles.attachmentPreviewImage}
                                         />
@@ -383,7 +384,7 @@ export const ChatInputBar = ({
                                     <Box className="absolute -right-1 -top-1">
                                         <ScreenIconButton
                                             onPress={() => onRemoveAttachmentDraft(draft, index)}
-                                            accessibilityLabel={t('chat.attachments.removeImageAccessibilityLabel')}
+                                            accessibilityLabel={t('chat.attachments.removeImageIndexedAccessibilityLabel', attachmentLabelOptions)}
                                             iconName="close"
                                             iconSize="xs"
                                             size="micro"

@@ -7,12 +7,17 @@ const {
   buildScenarioLaunchPlan,
   buildSmokeLaunchArgs,
   captureAndroidScreenshot,
+  CLEAR_TEXT_INPUT_FALLBACK_TOTAL_TIMEOUT_MS,
+  clearFocusedTextInput,
+  DEFAULT_CLEAR_TEXT_INPUT_MAX_DELETE_COUNT,
   dumpUiHierarchy,
   findCatalogRiskModelCard,
   findQuantizationSelectorNodeClearOfBottomOverlay,
   findBlockingSystemDialogAction,
+  escapeAdbInputText,
   findAnyNodeClearOfBottomOverlay,
   findAnyNodeInSnapshot,
+  findPreparedSentMessageContext,
   findNodeInSnapshot,
   isBoundsClearOfBottomOverlay,
   isAppForegroundSnapshot,
@@ -219,6 +224,121 @@ describe('android-scenarios screenshot capture', () => {
   });
 });
 
+describe('android-scenarios focused text clearing', () => {
+  it('uses bounded timeouts on the primary clear success path', () => {
+    const runCommand = jest.fn();
+
+    clearFocusedTextInput('adb', 'device-1', 3, runCommand);
+
+    expect(runCommand).toHaveBeenCalledTimes(2);
+    expect(runCommand).toHaveBeenNthCalledWith(
+      1,
+      'adb',
+      ['-s', 'device-1', 'shell', 'input', 'keycombination', 'KEYCODE_CTRL_LEFT', 'KEYCODE_A'],
+      expect.objectContaining({ timeout: 2_000 })
+    );
+    expect(runCommand).toHaveBeenNthCalledWith(
+      2,
+      'adb',
+      ['-s', 'device-1', 'shell', 'input', 'keyevent', 'KEYCODE_DEL'],
+      expect.objectContaining({ timeout: 2_000 })
+    );
+  });
+
+  it('uses timeouts for fallback keyevents and respects maxDeleteCount', () => {
+    const runCommand = jest.fn();
+    runCommand.mockImplementationOnce(() => {
+      throw new Error('keycombination unsupported');
+    });
+    const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+
+    try {
+      clearFocusedTextInput('adb', 'device-1', 3, runCommand);
+    } finally {
+      logSpy.mockRestore();
+    }
+
+    expect(runCommand).toHaveBeenCalledTimes(5);
+    expect(runCommand).toHaveBeenNthCalledWith(
+      2,
+      'adb',
+      ['-s', 'device-1', 'shell', 'input', 'keyevent', 'KEYCODE_MOVE_END'],
+      expect.objectContaining({ timeout: expect.any(Number) })
+    );
+
+    const deleteCalls = runCommand.mock.calls.slice(2);
+    expect(deleteCalls).toHaveLength(3);
+    for (const call of deleteCalls) {
+      expect(call).toEqual([
+        'adb',
+        ['-s', 'device-1', 'shell', 'input', 'keyevent', 'KEYCODE_DEL'],
+        expect.objectContaining({ timeout: expect.any(Number) }),
+      ]);
+    }
+  });
+
+  it('uses a bounded default max delete count for fallback clearing', () => {
+    const runCommand = jest.fn();
+    runCommand.mockImplementationOnce(() => {
+      throw new Error('keycombination unsupported');
+    });
+    const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+
+    try {
+      clearFocusedTextInput('adb', 'device-1', undefined, runCommand);
+    } finally {
+      logSpy.mockRestore();
+    }
+
+    expect(DEFAULT_CLEAR_TEXT_INPUT_MAX_DELETE_COUNT).toBeLessThanOrEqual(128);
+    expect(runCommand).toHaveBeenCalledTimes(2 + DEFAULT_CLEAR_TEXT_INPUT_MAX_DELETE_COUNT);
+
+    const deleteCalls = runCommand.mock.calls.slice(2);
+    expect(deleteCalls).toHaveLength(DEFAULT_CLEAR_TEXT_INPUT_MAX_DELETE_COUNT);
+  });
+
+  it('stops fallback deletes when the total budget is exhausted', () => {
+    const runCommand = jest.fn();
+    runCommand.mockImplementationOnce(() => {
+      throw new Error('keycombination unsupported');
+    });
+    const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+    const nowSpy = jest.spyOn(Date, 'now');
+    const nearBudgetEnd = CLEAR_TEXT_INPUT_FALLBACK_TOTAL_TIMEOUT_MS - 1;
+    const nowValues = [0, 0, 3_000, nearBudgetEnd, CLEAR_TEXT_INPUT_FALLBACK_TOTAL_TIMEOUT_MS];
+    nowSpy.mockImplementation(() => (nowValues.length > 0 ? nowValues.shift() : CLEAR_TEXT_INPUT_FALLBACK_TOTAL_TIMEOUT_MS));
+
+    try {
+      clearFocusedTextInput('adb', 'device-1', 100, runCommand);
+    } finally {
+      nowSpy.mockRestore();
+      logSpy.mockRestore();
+    }
+
+    expect(runCommand).toHaveBeenCalledTimes(4);
+    expect(runCommand.mock.calls[1][2]).toEqual(expect.objectContaining({ timeout: 2_000 }));
+    expect(runCommand.mock.calls[2][2]).toEqual(expect.objectContaining({ timeout: 2_000 }));
+    expect(runCommand.mock.calls[3][2]).toEqual(expect.objectContaining({ timeout: 1 }));
+  });
+
+  it('passes timeout options through runChecked to spawnSync', () => {
+    jest.isolateModules(() => {
+      const spawnSync = jest.fn(() => ({ status: 0 }));
+      jest.doMock('child_process', () => ({ spawnSync }));
+      const { runChecked } = require('../../scripts/android-scenarios');
+
+      runChecked('adb', ['devices'], { stdio: 'ignore', timeout: 1_234 });
+
+      expect(spawnSync).toHaveBeenCalledWith(
+        'adb',
+        ['devices'],
+        expect.objectContaining({ stdio: 'ignore', timeout: 1_234 })
+      );
+      jest.dontMock('child_process');
+    });
+  });
+});
+
 describe('android-scenarios npm defaults', () => {
   const packageJson = require('../../package.json');
 
@@ -233,6 +353,9 @@ describe('android-scenarios npm defaults', () => {
     expect(packageJson.scripts['android:scenarios:attachments-prepared']).toContain('--pack attachments-prepared');
     expect(packageJson.scripts['android:scenarios:attachments-prepared']).toContain('--preserve-running-app');
     expect(packageJson.scripts['android:scenarios:attachments-prepared']).toContain('--fail-on-skip');
+    expect(packageJson.scripts['android:scenarios:attachments-prepared-send']).toContain('--pack attachments-prepared-send');
+    expect(packageJson.scripts['android:scenarios:attachments-prepared-send']).toContain('--preserve-running-app');
+    expect(packageJson.scripts['android:scenarios:attachments-prepared-send']).toContain('--fail-on-skip');
     expect(packageJson.scripts['android:scenarios:dependency-ui']).toContain('--pack dependency-ui');
     expect(packageJson.scripts['android:scenarios:runtime']).toContain('--pack runtime');
     expect(packageJson.scripts['android:scenarios:native']).toContain('--pack native');
@@ -251,6 +374,13 @@ describe('android-scenarios npm defaults', () => {
     expect(smokeScript).toContain('android:scenarios:attachments');
     expect(smokeScript).toContain('android:scenarios:attachments -- --fail-on-skip');
     expect(smokeScript).not.toContain('android:scenarios:attachments-prepared');
+    expect(smokeScript).not.toContain('android:scenarios:attachments-prepared-send');
+  });
+
+  it('keeps prepared send ADB text input constrained and escaped', () => {
+    expect(escapeAdbInputText('Describe prepared image')).toBe('Describe%sprepared%simage');
+    expect(escapeAdbInputText('Describe prepared image 123')).toBe('Describe%sprepared%simage%s123');
+    expect(() => escapeAdbInputText('Describe: prepared image')).toThrow(/ASCII letters/);
   });
 
   it('skips bootstrap launch when preserving a prepared running app', () => {
@@ -292,6 +422,48 @@ describe('android-scenarios UI snapshot matching', () => {
       })
     );
     expect(match.node.text).toBe('Home');
+  });
+
+  it('does not treat stale composer text with an appended prompt as an exact prepared-send prompt match', () => {
+    const uniquePrompt = 'Describe prepared image 12345 67890';
+    const staleComposerSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node text="Old draft ${uniquePrompt}" content-desc="" clickable="true" bounds="[40,1900][900,2050]" />
+        <node text="" content-desc="Send message" clickable="true" enabled="true" bounds="[920,2050][1040,2170]" />
+      </hierarchy>
+    `);
+
+    expect(findAnyNodeInSnapshot(staleComposerSnapshot, [uniquePrompt], { visibleOnly: true })).toBeNull();
+  });
+
+  it('pairs prepared sent prompts with the adjacent message image preview', () => {
+    const uniquePrompt = 'Describe prepared image 12345 67890';
+    const sentSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
+        <node text="Message image 1 of 1 preview" content-desc="" clickable="false" bounds="[40,120][1040,520]" />
+        <node text="Message image 1 of 1 preview" content-desc="" clickable="false" bounds="[40,820][1040,1180]" />
+        <node text="${uniquePrompt}" content-desc="" clickable="false" bounds="[40,1200][1040,1320]" />
+      </hierarchy>
+    `);
+
+    const match = findPreparedSentMessageContext(sentSnapshot, uniquePrompt);
+
+    expect(match?.promptMatch.node.text).toBe(uniquePrompt);
+    expect(match?.messagePreviewMatch.node.bounds.top).toBe(820);
+  });
+
+  it('does not pair prepared sent prompts with distant stale image previews', () => {
+    const uniquePrompt = 'Describe prepared image 12345 67890';
+    const stalePreviewSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
+        <node text="Message image 1 of 1 preview" content-desc="" clickable="false" bounds="[40,120][1040,520]" />
+        <node text="${uniquePrompt}" content-desc="" clickable="false" bounds="[40,1200][1040,1320]" />
+      </hierarchy>
+    `);
+
+    expect(findPreparedSentMessageContext(stalePreviewSnapshot, uniquePrompt)).toBeNull();
   });
 
   it('matches normalized content descriptions from the same snapshot', () => {
@@ -652,7 +824,113 @@ describe('android-scenarios UI hierarchy capture', () => {
       ['-s', 'device-1', 'wait-for-device'],
       expect.objectContaining({ timeout: 15000 })
     );
+    expect(spawn).toHaveBeenCalledWith(
+      'adb',
+      ['-s', 'device-1', 'shell', 'uiautomator', 'dump', '/sdcard/window_dump.xml'],
+      expect.objectContaining({ timeout: 5000 })
+    );
+    expect(spawn).toHaveBeenCalledWith(
+      'adb',
+      ['-s', 'device-1', 'exec-out', 'cat', '/sdcard/window_dump.xml'],
+      expect.objectContaining({ timeout: 5000 })
+    );
     expect(sleepSync).toHaveBeenCalledWith(1);
+  });
+
+  it('retries when uiautomator dump times out before succeeding', () => {
+    const sleepSync = jest.fn();
+    let dumpAttempts = 0;
+    const spawn = jest.fn((_command, args) => {
+      if (args.includes('uiautomator')) {
+        dumpAttempts += 1;
+        return dumpAttempts === 1
+          ? { error: Object.assign(new Error('timed out'), { code: 'ETIMEDOUT' }) }
+          : {
+              status: 0,
+              stdout: 'UI hierchary dumped to: /sdcard/window_dump.xml',
+              stderr: '',
+            };
+      }
+
+      if (args.includes('cat')) {
+        return {
+          status: 0,
+          stdout: '<hierarchy><node text="Pocket AI" bounds="[0,0][1,1]" /></hierarchy>',
+          stderr: '',
+        };
+      }
+
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    const xml = dumpUiHierarchy('adb', 'device-1', {
+      maxAttempts: 2,
+      retryDelayMs: 7,
+      sleepSync,
+      spawnSync: spawn,
+    });
+
+    expect(xml).toContain('Pocket AI');
+    expect(dumpAttempts).toBe(2);
+    expect(sleepSync).toHaveBeenCalledWith(7);
+  });
+
+  it('retries when UI hierarchy cat times out before succeeding', () => {
+    const sleepSync = jest.fn();
+    let catAttempts = 0;
+    const spawn = jest.fn((_command, args) => {
+      if (args.includes('uiautomator')) {
+        return {
+          status: 0,
+          stdout: 'UI hierchary dumped to: /sdcard/window_dump.xml',
+          stderr: '',
+        };
+      }
+
+      if (args.includes('cat')) {
+        catAttempts += 1;
+        return catAttempts === 1
+          ? { error: Object.assign(new Error('timed out'), { code: 'ETIMEDOUT' }) }
+          : {
+              status: 0,
+              stdout: '<hierarchy><node text="Pocket AI" bounds="[0,0][1,1]" /></hierarchy>',
+              stderr: '',
+            };
+      }
+
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    const xml = dumpUiHierarchy('adb', 'device-1', {
+      maxAttempts: 2,
+      retryDelayMs: 3,
+      sleepSync,
+      spawnSync: spawn,
+    });
+
+    expect(xml).toContain('Pocket AI');
+    expect(catAttempts).toBe(2);
+    expect(sleepSync).toHaveBeenCalledWith(3);
+  });
+
+  it('summarizes exhausted UI hierarchy timeouts after bounded retries', () => {
+    const sleepSync = jest.fn();
+    const spawn = jest.fn((_command, args) => {
+      if (args.includes('uiautomator')) {
+        return { error: Object.assign(new Error('timed out'), { code: 'ETIMEDOUT' }) };
+      }
+
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    expect(() => dumpUiHierarchy('adb', 'device-1', {
+      maxAttempts: 2,
+      retryDelayMs: 5,
+      sleepSync,
+      spawnSync: spawn,
+    })).toThrow(/ETIMEDOUT/);
+    expect(spawn).toHaveBeenCalledTimes(2);
+    expect(sleepSync).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -766,6 +1044,145 @@ describe('android-scenarios pack selection', () => {
     expect(selectScenarios(scenarios, parseCliOptions(['--pack', 'attachments-prepared'])).map((scenario) => scenario.id)).toEqual([
       'chat-attachment-preview-remove',
     ]);
+  });
+
+  it('keeps prepared image send coverage in a separate preserve-running-app pack', () => {
+    expect(selectScenarios(scenarios, parseCliOptions(['--pack', 'attachments-prepared-send'])).map((scenario) => scenario.id)).toEqual([
+      'chat-attachment-prepared-send',
+    ]);
+  });
+
+  it('bounds prepared send adb text input', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-ai-adb-'));
+    const previousAndroidHome = process.env.ANDROID_HOME;
+    const previousAndroidSdkRoot = process.env.ANDROID_SDK_ROOT;
+    const adbDir = path.join(tempDir, 'platform-tools');
+    const adbPath = path.join(adbDir, process.platform === 'win32' ? 'adb.exe' : 'adb');
+    const preparedDraftHierarchyXml = `
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
+        <node text="Attached image 1 of 1 preview" content-desc="" clickable="false" bounds="[40,500][1040,900]" />
+        <node text="Remove attached image 1 of 1" content-desc="" clickable="true" bounds="[900,500][1040,640]" />
+        <node text="Chat message input" content-desc="" clickable="true" bounds="[40,1900][900,2050]" />
+        <node text="" content-desc="Send message" clickable="true" enabled="true" bounds="[920,2050][1040,2170]" />
+      </hierarchy>
+    `;
+
+    fs.mkdirSync(adbDir, { recursive: true });
+    fs.writeFileSync(adbPath, '');
+    process.env.ANDROID_HOME = tempDir;
+    delete process.env.ANDROID_SDK_ROOT;
+
+    try {
+      let hierarchyReads = 0;
+      let preparedPrompt = null;
+      let sendTapped = false;
+      const events = [];
+      const spawnSync = jest.fn((command, args) => {
+        if (args.includes('keycombination') && args.includes('KEYCODE_A')) {
+          events.push('clear-select-all');
+        }
+        if (args.includes('keyevent') && args.includes('KEYCODE_DEL')) {
+          events.push('clear-delete');
+        }
+        if (args.includes('text')) {
+          const escapedPrompt = args[args.length - 1];
+          preparedPrompt = escapedPrompt.replace(/%s/g, ' ');
+          events.push(`input-text:${preparedPrompt}`);
+        }
+        if (args.includes('exec-out')) {
+          hierarchyReads += 1;
+          const composerHierarchyXml = `
+            <hierarchy>
+              <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
+              <node text="Attached image 1 of 1 preview" content-desc="" clickable="false" bounds="[40,500][1040,900]" />
+              <node text="Remove attached image 1 of 1" content-desc="" clickable="true" bounds="[900,500][1040,640]" />
+              <node text="${preparedPrompt || ''}" content-desc="" clickable="true" bounds="[40,1900][900,2050]" />
+              <node text="" content-desc="Send message" clickable="true" enabled="true" bounds="[920,2050][1040,2170]" />
+            </hierarchy>
+          `;
+          const sentMessageHierarchyXml = `
+            <hierarchy>
+              <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
+              <node text="Message image 1 of 1 preview" content-desc="" clickable="false" bounds="[40,120][1040,520]" />
+              <node text="Message image 1 of 1 preview" content-desc="" clickable="false" bounds="[40,820][1040,1180]" />
+              <node text="${preparedPrompt || ''}" content-desc="" clickable="false" bounds="[40,1200][1040,1320]" />
+            </hierarchy>
+          `;
+          return {
+            status: 0,
+            stdout: sendTapped ? sentMessageHierarchyXml : (preparedPrompt ? composerHierarchyXml : preparedDraftHierarchyXml),
+            stderr: '',
+          };
+        }
+
+        return { status: 0, stdout: '', stderr: '' };
+      });
+      let isolatedBuildScenarios;
+      jest.isolateModules(() => {
+        jest.doMock('child_process', () => ({ spawnSync }));
+        ({ buildScenarios: isolatedBuildScenarios } = require('../../scripts/android-scenarios'));
+      });
+
+      const scenario = isolatedBuildScenarios().find((candidate) => candidate.id === 'chat-attachment-prepared-send');
+      const expectAnyText = jest.fn().mockResolvedValue(undefined);
+      const tapAnyText = jest.fn((labels) => {
+        if (labels.includes('Chat message input')) {
+          events.push('tap-input');
+        }
+        if (labels.includes('Send message')) {
+          events.push('tap-send');
+          sendTapped = true;
+        }
+        return Promise.resolve();
+      });
+      await scenario.run({
+        serial: 'device-1',
+        expectAnyText,
+        tapAnyText,
+      });
+
+      expect(preparedPrompt).toMatch(/^Describe prepared image \d+ \d+$/);
+      expect(spawnSync).toHaveBeenCalledWith(
+        adbPath,
+        ['-s', 'device-1', 'shell', 'input', 'text', escapeAdbInputText(preparedPrompt)],
+        expect.objectContaining({ timeout: 5_000 })
+      );
+      expect(events).toEqual(expect.arrayContaining([
+        'tap-input',
+        'clear-select-all',
+        'clear-delete',
+        expect.stringMatching(/^input-text:Describe prepared image \d+ \d+$/),
+        'tap-send',
+      ]));
+      expect(events.indexOf('tap-input')).toBeLessThan(events.indexOf('clear-select-all'));
+      expect(events.indexOf('clear-select-all')).toBeLessThan(events.indexOf('clear-delete'));
+      expect(events.indexOf('clear-delete')).toBeLessThan(events.findIndex((event) => event.startsWith('input-text:')));
+      expect(events.findIndex((event) => event.startsWith('input-text:'))).toBeLessThan(events.indexOf('tap-send'));
+      expect(tapAnyText).toHaveBeenCalledWith(
+        expect.arrayContaining(['Send message']),
+        expect.objectContaining({ afterTapDelayMs: 1_500 })
+      );
+      expect(expectAnyText).toHaveBeenCalledWith(
+        [preparedPrompt],
+        expect.objectContaining({ timeoutMs: 10_000 })
+      );
+      expect(expectAnyText).not.toHaveBeenCalledWith(['Describe prepared image'], expect.anything());
+      expect(hierarchyReads).toBeGreaterThanOrEqual(6);
+    } finally {
+      jest.dontMock('child_process');
+      if (previousAndroidHome === undefined) {
+        delete process.env.ANDROID_HOME;
+      } else {
+        process.env.ANDROID_HOME = previousAndroidHome;
+      }
+      if (previousAndroidSdkRoot === undefined) {
+        delete process.env.ANDROID_SDK_ROOT;
+      } else {
+        process.env.ANDROID_SDK_ROOT = previousAndroidSdkRoot;
+      }
+      fs.rmSync(tempDir, { force: true, recursive: true });
+    }
   });
 
   it('signals unmet prepared attachment preview/remove preconditions as skips', () => {
@@ -929,7 +1346,10 @@ describe('android-scenarios pack selection', () => {
 
     expect(selectedIds).toEqual(scenarios
       .map((scenario) => scenario.id)
-      .filter((scenarioId) => scenarioId !== 'chat-attachment-preview-remove'));
+      .filter((scenarioId) => ![
+        'chat-attachment-preview-remove',
+        'chat-attachment-prepared-send',
+      ].includes(scenarioId)));
     expect(selectedIds).toEqual(
       expect.arrayContaining([
         'variant-picker-smoke',
@@ -941,6 +1361,7 @@ describe('android-scenarios pack selection', () => {
       ])
     );
     expect(selectedIds).not.toContain('chat-attachment-preview-remove');
+    expect(selectedIds).not.toContain('chat-attachment-prepared-send');
   });
 });
 

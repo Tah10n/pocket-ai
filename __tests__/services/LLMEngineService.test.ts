@@ -243,9 +243,9 @@ describe('LLMEngineService', () => {
     createStorage('pocket-ai-autotune', { tier: 'private' }).clearAll();
     inferenceBackendService.clearCache();
     (llmEngineService as any).contextOperationQueue = Promise.resolve();
+    (llmEngineService as any).contextOperationRunner?.reset?.(new Error('test reset'));
     (llmEngineService as any).activeContextOperationPromises?.clear?.();
     (llmEngineService as any).activeContextOperationRejects?.clear?.();
-    (llmEngineService as any).contextOperationCancelGeneration = 0;
     (llmEngineService as any).activeCompletionReject = null;
     (llmEngineService as any).activeMultimodalContext = null;
     (llmEngineService as any).additionalStopWordsCache?.clear?.();
@@ -395,7 +395,7 @@ describe('LLMEngineService', () => {
     }));
   });
 
-  it('only forwards latest user media paths before llama normalization', async () => {
+  it('forwards retained historical and latest user media paths before llama normalization', async () => {
     (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
 
     await llmEngineService.load('test/model');
@@ -428,7 +428,10 @@ describe('LLMEngineService', () => {
         { role: 'system', content: 'Be concise.' },
         {
           role: 'user',
-          content: 'Earlier image',
+          content: [
+            { type: 'text', text: 'Earlier image' },
+            { type: 'image_url', image_url: { url: '/document/first.jpg' } },
+          ],
         },
         { role: 'assistant', content: 'Earlier answer' },
         {
@@ -445,8 +448,15 @@ describe('LLMEngineService', () => {
     );
     expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        media_paths: ['/document/latest-existing.jpg', '/document/top.jpg'],
+        media_paths: ['/document/first.jpg', '/document/latest-existing.jpg', '/document/top.jpg'],
         messages: expect.arrayContaining([
+          expect.objectContaining({
+            role: 'user',
+            content: [
+              { type: 'text', text: 'Earlier image' },
+              { type: 'image_url', image_url: { url: '/document/first.jpg' } },
+            ],
+          }),
           expect.objectContaining({
             role: 'user',
             content: [
@@ -461,7 +471,7 @@ describe('LLMEngineService', () => {
     );
   });
 
-  it('does not forward historical image media paths for a latest text-only follow-up', async () => {
+  it('forwards retained historical image media paths for a latest text-only follow-up', async () => {
     (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
 
     await llmEngineService.load('test/model');
@@ -486,7 +496,13 @@ describe('LLMEngineService', () => {
     expect(getFormattedChatMock()).toHaveBeenCalledWith(
       [
         { role: 'system', content: 'Be concise.' },
-        { role: 'user', content: 'Earlier image' },
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'Earlier image' },
+            { type: 'image_url', image_url: { url: '/document/first.jpg' } },
+          ],
+        },
         { role: 'assistant', content: 'Earlier answer' },
         { role: 'user', content: 'Continue with text only' },
       ],
@@ -495,9 +511,16 @@ describe('LLMEngineService', () => {
     );
     expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).toHaveBeenCalledWith(
       expect.objectContaining({
+        media_paths: ['/document/first.jpg'],
         messages: [
           { role: 'system', content: 'Be concise.' },
-          { role: 'user', content: 'Earlier image' },
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: 'Earlier image' },
+              { type: 'image_url', image_url: { url: '/document/first.jpg' } },
+            ],
+          },
           { role: 'assistant', content: 'Earlier answer' },
           { role: 'user', content: 'Continue with text only' },
         ],
@@ -505,7 +528,7 @@ describe('LLMEngineService', () => {
       expect.any(Function),
     );
     const completionParams = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock.mock.calls.at(-1)?.[0];
-    expect(completionParams.media_paths).toBeUndefined();
+    expect(completionParams.media_paths).toEqual(['/document/first.jpg']);
   });
 
   it('waits for in-flight multimodal runtime initialization before sending image media paths', async () => {
@@ -1020,6 +1043,28 @@ describe('LLMEngineService', () => {
     expect(getTokenizeMock()).toHaveBeenCalledWith(
       'Formatted prompt',
       { media_paths: ['/document/image.jpg'] },
+    );
+  });
+
+  it('falls back to all retained message media paths for prompt tokenization', async () => {
+    getFormattedChatMock().mockResolvedValueOnce({
+      prompt: 'Formatted prompt',
+      additional_stops: [],
+    });
+    await llmEngineService.load('test/model');
+
+    await llmEngineService.countPromptTokens({
+      messages: [
+        { role: 'system', content: 'Be concise.' },
+        { role: 'user', content: 'Earlier image', mediaPaths: ['/document/first.jpg'] },
+        { role: 'assistant', content: 'Earlier answer' },
+        { role: 'user', content: 'Latest image', mediaPaths: ['/document/latest.jpg'] },
+      ],
+    });
+
+    expect(getTokenizeMock()).toHaveBeenCalledWith(
+      'Formatted prompt',
+      { media_paths: ['/document/first.jpg', '/document/latest.jpg'] },
     );
   });
 

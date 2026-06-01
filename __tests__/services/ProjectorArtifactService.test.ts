@@ -231,6 +231,88 @@ describe('ProjectorArtifactService', () => {
     }));
   });
 
+  it('preserves projector-scoped memory fit when selecting an explicit id for the same effective artifact', () => {
+    const projectorSha = 'd'.repeat(64);
+    const implicitProjector = createProjector(projectorFileName, {
+      id: 'legacy-projector-id',
+      sha256: projectorSha,
+      size: 512,
+      matchStatus: 'matched',
+    });
+    const explicitProjector = createProjector(projectorFileName, {
+      id: 'current-projector-id',
+      sha256: projectorSha,
+      size: 512,
+      matchStatus: 'ambiguous',
+    });
+    const service = new ProjectorArtifactService();
+
+    const selection = service.selectProjectorForModel(createVisionModel({
+      fitsInRam: true,
+      memoryFitDecision: 'fits_high_confidence',
+      memoryFitConfidence: 'high',
+      variants: [{
+        variantId: visionModelFileName,
+        fileName: visionModelFileName,
+        quantizationLabel: 'Q4_K_M',
+        size: 4_000_000_000,
+        ramFit: 'fits_high_confidence',
+        ramFitConfidence: 'high',
+      }],
+      projectorCandidates: [implicitProjector, explicitProjector],
+    }), explicitProjector.id);
+
+    expect(selection.model).toEqual(expect.objectContaining({
+      selectedProjectorId: explicitProjector.id,
+      fitsInRam: true,
+      memoryFitDecision: 'fits_high_confidence',
+      memoryFitConfidence: 'high',
+      variants: [expect.objectContaining({
+        ramFit: 'fits_high_confidence',
+        ramFitConfidence: 'high',
+      })],
+    }));
+  });
+
+  it('clears projector-scoped memory fit when selected projector artifact size changes', () => {
+    const firstProjector = createProjector(projectorFileName, {
+      size: 512,
+      matchStatus: 'user_selected',
+    });
+    const secondProjector = createProjector(alternateProjectorFileName, {
+      size: 1024,
+      matchStatus: 'ambiguous',
+    });
+    const service = new ProjectorArtifactService();
+
+    const selection = service.selectProjectorForModel(createVisionModel({
+      selectedProjectorId: firstProjector.id,
+      fitsInRam: true,
+      memoryFitDecision: 'fits_high_confidence',
+      memoryFitConfidence: 'high',
+      variants: [{
+        variantId: visionModelFileName,
+        fileName: visionModelFileName,
+        quantizationLabel: 'Q4_K_M',
+        size: 4_000_000_000,
+        ramFit: 'fits_high_confidence',
+        ramFitConfidence: 'high',
+      }],
+      projectorCandidates: [firstProjector, secondProjector],
+    }), secondProjector.id);
+
+    expect(selection.model).toEqual(expect.objectContaining({
+      selectedProjectorId: secondProjector.id,
+      fitsInRam: null,
+      memoryFitDecision: undefined,
+      memoryFitConfidence: undefined,
+      variants: [expect.objectContaining({
+        ramFit: undefined,
+        ramFitConfidence: undefined,
+      })],
+    }));
+  });
+
   it('preserves multimodal readiness when reselecting the same projector', () => {
     const firstProjector = createProjector(projectorFileName, { matchStatus: 'user_selected' });
     const readiness = {

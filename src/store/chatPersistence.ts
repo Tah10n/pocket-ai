@@ -7,6 +7,7 @@ import {
   MAX_CHAT_IMAGE_ATTACHMENTS,
   isSupportedChatImageDraftFormat,
   normalizeChatAttachmentLocalUri,
+  validateChatImageAttachmentBounds,
 } from '../utils/chatImageAttachments';
 import type { AppStorageFacade } from './storage';
 
@@ -132,6 +133,9 @@ function sanitizePersistedChatImageAttachment(
   const mediaType = typeof attachment.mediaType === 'string'
     ? attachment.mediaType.trim().toLowerCase()
     : undefined;
+  const size = readOptionalPositiveInteger(attachment.size);
+  const width = readOptionalPositiveInteger(attachment.width);
+  const height = readOptionalPositiveInteger(attachment.height);
 
   if (
     !id ||
@@ -146,7 +150,8 @@ function sanitizePersistedChatImageAttachment(
       localUri,
       previewUri: localUri,
       pickerUri: localUri,
-    })
+    }) ||
+    !validateChatImageAttachmentBounds({ size, width, height }).ok
   ) {
     return null;
   }
@@ -159,9 +164,9 @@ function sanitizePersistedChatImageAttachment(
     pathCategory: CHAT_IMAGE_ATTACHMENT_PATH_CATEGORY,
     ...(mediaType ? { mediaType } : null),
     fileName,
-    ...(readOptionalPositiveInteger(attachment.size) ? { size: readOptionalPositiveInteger(attachment.size) } : null),
-    ...(readOptionalPositiveInteger(attachment.width) ? { width: readOptionalPositiveInteger(attachment.width) } : null),
-    ...(readOptionalPositiveInteger(attachment.height) ? { height: readOptionalPositiveInteger(attachment.height) } : null),
+    ...(size ? { size } : null),
+    ...(width ? { width } : null),
+    ...(height ? { height } : null),
     source: 'photo_library',
     createdAt: attachment.createdAt,
   };

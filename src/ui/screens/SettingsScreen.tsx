@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
+import { Alert } from 'react-native';
 import { useFocusEffect, useIsFocused } from '@react-navigation/native';
 import { useRouter } from 'expo-router';
 import { useTranslation } from 'react-i18next';
@@ -24,6 +25,7 @@ import { useLLMEngine } from '../../hooks/useLLMEngine';
 import { useTheme } from '../../providers/ThemeProvider';
 import { huggingFaceTokenService } from '../../services/HuggingFaceTokenService';
 import { llmEngineService } from '../../services/LLMEngineService';
+import { getErrorMessage } from '../../services/AppError';
 import { getAppStorageMetrics, type AppStorageMetrics } from '../../services/StorageManagerService';
 import { getSettings, subscribeSettings, updateSettings } from '../../services/SettingsStore';
 import { screenLayoutMetrics, semanticColorTokens, withAlpha, type ThemeId, type ThemeTone } from '../../utils/themeTokens';
@@ -314,8 +316,13 @@ export const SettingsScreen = () => {
     };
 
     const unloadActiveModel = async () => {
-        await llmEngineService.unload();
-        await refresh();
+        try {
+            await llmEngineService.unload();
+        } catch (error) {
+            Alert.alert(t('common.actionFailed'), getErrorMessage(error, t));
+        } finally {
+            await refresh();
+        }
     };
 
     const ramTotalBytes = metrics?.ram.totalBytes ?? 0;

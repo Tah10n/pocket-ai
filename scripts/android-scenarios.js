@@ -26,11 +26,15 @@ const ATTACHMENT_SCENARIOS = [
 const PREPARED_ATTACHMENT_SCENARIOS = [
   "chat-attachment-preview-remove",
 ];
+const PREPARED_ATTACHMENT_SEND_SCENARIOS = [
+  "chat-attachment-prepared-send",
+];
 const SCENARIO_PACK_SCENARIOS = {
   core: CORE_SCENARIOS,
   catalog: CATALOG_SCENARIOS,
   attachments: ATTACHMENT_SCENARIOS,
   "attachments-prepared": PREPARED_ATTACHMENT_SCENARIOS,
+  "attachments-prepared-send": PREPARED_ATTACHMENT_SEND_SCENARIOS,
   "dependency-ui": [
     ...CORE_SCENARIOS,
     "style-screenshots",
@@ -87,18 +91,28 @@ const CHAT_ROUTE_LABELS = [
   "Chat message input",
   "Поле ввода сообщения",
 ];
+const CHAT_INPUT_LABELS = [
+  "Chat message input",
+  "Поле ввода сообщения",
+];
 const ATTACH_IMAGE_LABELS = [
   "Attach an image from the photo library",
   "Прикрепить изображение из медиатеки",
 ];
 const ATTACHMENT_PREVIEW_LABELS = [
-  "Attached image preview",
-  "Предпросмотр прикрепленного изображения",
+  "Attached image 1 of 1 preview",
+  "Предпросмотр прикрепленного изображения 1 из 1",
 ];
+const MESSAGE_ATTACHMENT_PREVIEW_LABELS = [
+  "Message image 1 of 1 preview",
+  "Предпросмотр изображения 1 из 1 в сообщении",
+];
+const CHAT_SEND_LABELS = ["Send message", "Отправить сообщение"];
+const PREPARED_ATTACHMENT_SEND_PROMPT_PREFIX = "Describe prepared image";
 const UNLOAD_MODEL_LABELS = ["Unload", "Выгрузить"];
 const REMOVE_ATTACHMENT_LABELS = [
-  "Remove attached image",
-  "Удалить прикрепленное изображение",
+  "Remove attached image 1 of 1",
+  "Удалить прикрепленное изображение 1 из 1",
 ];
 const IMAGE_ATTACHMENT_TEXT_ONLY_FALLBACK_LABELS = [
   "This model supports text chat only.",
@@ -224,6 +238,12 @@ const DOWNLOAD_WARNING_CANCEL_LABELS = [
 const INITIAL_APP_VISIBLE_TIMEOUT_MS = 60_000;
 const HOME_ROUTE_TIMEOUT_MS = 90_000;
 const SETTINGS_ROUTE_TIMEOUT_MS = 60_000;
+const CLEAR_TEXT_INPUT_PRIMARY_TIMEOUT_MS = 2_000;
+const CLEAR_TEXT_INPUT_FALLBACK_TIMEOUT_MS = 2_000;
+const CLEAR_TEXT_INPUT_FALLBACK_TOTAL_TIMEOUT_MS = 5_000;
+const DEFAULT_CLEAR_TEXT_INPUT_MAX_DELETE_COUNT = 128;
+const ADB_INPUT_TEXT_TIMEOUT_MS = 5_000;
+const UI_HIERARCHY_DUMP_COMMAND_TIMEOUT_MS = 5_000;
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const SCREENSHOT_CAPTURE_MAX_ATTEMPTS = 4;
 const SCREENSHOT_CAPTURE_RETRY_DELAY_MS = 350;
@@ -611,6 +631,67 @@ function tapBounds(adbPath, serial, bounds) {
   ]);
 }
 
+function escapeAdbInputText(value) {
+  const normalized = String(value).trim();
+  if (!/^[A-Za-z0-9 ]+$/.test(normalized)) {
+    throw new Error(`ADB text input supports only ASCII letters, numbers, and spaces: ${normalized}`);
+  }
+
+  return normalized
+    .replace(/%/g, "%25")
+    .replace(/\s+/g, "%s");
+}
+
+function buildPreparedAttachmentSendPrompt() {
+  return `${PREPARED_ATTACHMENT_SEND_PROMPT_PREFIX} ${Date.now()} ${Math.floor(Math.random() * 1_000_000)}`;
+}
+
+function clearFocusedTextInput(
+  adbPath,
+  serial,
+  maxDeleteCount = DEFAULT_CLEAR_TEXT_INPUT_MAX_DELETE_COUNT,
+  runCommand = runChecked
+) {
+  const primaryCommandOptions = { timeout: CLEAR_TEXT_INPUT_PRIMARY_TIMEOUT_MS };
+  try {
+    runCommand(adbPath, ["-s", serial, "shell", "input", "keycombination", "KEYCODE_CTRL_LEFT", "KEYCODE_A"], primaryCommandOptions);
+    runCommand(adbPath, ["-s", serial, "shell", "input", "keyevent", "KEYCODE_DEL"], primaryCommandOptions);
+    return;
+  } catch (error) {
+    log(`Focused text select-all clear failed; falling back to repeated delete: ${error.message}`);
+  }
+
+  const boundedMaxDeleteCount = Number.isFinite(maxDeleteCount)
+    ? Math.max(0, Math.trunc(maxDeleteCount))
+    : DEFAULT_CLEAR_TEXT_INPUT_MAX_DELETE_COUNT;
+  const fallbackStartedAt = Date.now();
+  const buildFallbackCommandOptions = () => {
+    const remainingTimeoutMs = CLEAR_TEXT_INPUT_FALLBACK_TOTAL_TIMEOUT_MS - (Date.now() - fallbackStartedAt);
+    if (remainingTimeoutMs <= 0) {
+      return null;
+    }
+
+    return {
+      timeout: Math.min(CLEAR_TEXT_INPUT_FALLBACK_TIMEOUT_MS, remainingTimeoutMs),
+    };
+  };
+
+  const moveEndCommandOptions = buildFallbackCommandOptions();
+  if (!moveEndCommandOptions) {
+    return;
+  }
+
+  runCommand(adbPath, ["-s", serial, "shell", "input", "keyevent", "KEYCODE_MOVE_END"], moveEndCommandOptions);
+  for (let index = 0; index < boundedMaxDeleteCount; index += 1) {
+    const fallbackCommandOptions = buildFallbackCommandOptions();
+    if (!fallbackCommandOptions) {
+      break;
+    }
+
+    runCommand(adbPath, ["-s", serial, "shell", "input", "keyevent", "KEYCODE_DEL"], fallbackCommandOptions);
+  }
+}
+
 function findCatalogRiskModelCard(adbPath, serial, snapshot = null) {
   const resolvedSnapshot = snapshot || createUiSnapshot(adbPath, serial);
   const riskBadges = findNodesForLabelsInSnapshot(resolvedSnapshot, RAM_FIT_RISK_BADGE_LABELS, {
@@ -886,6 +967,83 @@ function buildScenarios() {
       },
     },
     {
+      id: "chat-attachment-prepared-send",
+      tier: "optional",
+      description: "Verify a manually prepared vision-ready image attachment draft can be sent without restarting the app.",
+      run: async (ctx) => {
+        const preparedAttachmentSendPrompt = buildPreparedAttachmentSendPrompt();
+        await ctx.expectAnyText(ATTACH_IMAGE_LABELS, { timeoutMs: 8_000 });
+
+        const adbPath = resolveAdbPath();
+        const fallbackNode = await findAnyNodeNow(
+          adbPath,
+          ctx.serial,
+          IMAGE_ATTACHMENT_TEXT_ONLY_FALLBACK_LABELS,
+          { visibleOnly: true }
+        );
+        const previewNode = await findAnyNodeNow(
+          adbPath,
+          ctx.serial,
+          ATTACHMENT_PREVIEW_LABELS,
+          { visibleOnly: true }
+        );
+        const removeNode = await findAnyNodeNow(
+          adbPath,
+          ctx.serial,
+          REMOVE_ATTACHMENT_LABELS,
+          { visibleOnly: true }
+        );
+
+        assertAttachmentPreviewRemovePreconditions({
+          fallbackNode,
+          previewNode,
+          removeNode,
+        });
+
+        await ctx.tapAnyText(CHAT_INPUT_LABELS, {
+          allowBottomOverlay: true,
+          timeoutMs: 5_000,
+        });
+        clearFocusedTextInput(adbPath, ctx.serial);
+        runChecked(adbPath, [
+          "-s",
+          ctx.serial,
+          "shell",
+          "input",
+          "text",
+          escapeAdbInputText(preparedAttachmentSendPrompt),
+        ], { timeout: ADB_INPUT_TEXT_TIMEOUT_MS });
+        await delay(500);
+
+        await waitForAnyNode(adbPath, ctx.serial, [preparedAttachmentSendPrompt], {
+          timeoutMs: 5_000,
+          visibleOnly: true,
+        });
+
+        const sendNode = await findAnyNodeNow(
+          adbPath,
+          ctx.serial,
+          CHAT_SEND_LABELS,
+          { visibleOnly: true }
+        );
+        if (!sendNode || sendNode.node.enabled === false) {
+          throw new Error("Prepared attachment send button is not enabled after entering the prompt.");
+        }
+
+        await ctx.tapAnyText(CHAT_SEND_LABELS, {
+          allowBottomOverlay: true,
+          timeoutMs: 5_000,
+          afterTapDelayMs: 1_500,
+        });
+        await waitForNoAnyNode(adbPath, ctx.serial, ATTACHMENT_PREVIEW_LABELS, { timeoutMs: 8_000 });
+        await waitForNoAnyNode(adbPath, ctx.serial, REMOVE_ATTACHMENT_LABELS, { timeoutMs: 8_000 });
+        await waitForPreparedSentMessageContext(adbPath, ctx.serial, preparedAttachmentSendPrompt, {
+          timeoutMs: 10_000,
+        });
+        await ctx.expectAnyText([preparedAttachmentSendPrompt], { timeoutMs: 10_000 });
+      },
+    },
+    {
       id: "variant-picker-smoke",
       tier: "optional",
       description: "Verify the model catalog opens the GGUF file variant picker.",
@@ -1140,7 +1298,10 @@ function selectScenarios(scenarios, options) {
   if (requestedPack === "all") {
     // Prepared scenarios depend on in-memory app state set up manually by the tester, so keep
     // them out of broad automated packs. They remain available by direct id or pack name.
-    const manualPreparedScenarioIds = new Set(PREPARED_ATTACHMENT_SCENARIOS);
+    const manualPreparedScenarioIds = new Set([
+      ...PREPARED_ATTACHMENT_SCENARIOS,
+      ...PREPARED_ATTACHMENT_SEND_SCENARIOS,
+    ]);
     return scenarios.filter((scenario) => !manualPreparedScenarioIds.has(scenario.id));
   }
 
@@ -1811,6 +1972,122 @@ async function waitForAnyNode(adbPath, serial, labels, options = {}) {
   );
 }
 
+async function waitForNoAnyNode(adbPath, serial, labels, options = {}) {
+  const timeoutMs = options.timeoutMs ?? 20_000;
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const snapshot = createUiSnapshot(adbPath, serial);
+    const match = findAnyNodeInSnapshot(snapshot, labels, {
+      ...options,
+      visibleOnly: true,
+    });
+    if (!match) {
+      return;
+    }
+
+    await delay(600);
+  }
+
+  throw new Error(
+    withUiSummary(
+      adbPath,
+      serial,
+      `Timed out waiting for all of these nodes to disappear: ${labels.map((label) => `"${label}"`).join(", ")}.`
+    )
+  );
+}
+
+async function waitForPreparedSentMessageContext(adbPath, serial, prompt, options = {}) {
+  const timeoutMs = options.timeoutMs ?? 20_000;
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const snapshot = createUiSnapshot(adbPath, serial);
+    const sentContext = findPreparedSentMessageContext(snapshot, prompt);
+
+    if (sentContext) {
+      return sentContext;
+    }
+
+    await delay(600);
+  }
+
+  throw new Error(
+    withUiSummary(
+      adbPath,
+      serial,
+      `Timed out waiting for sent message context containing prompt "${prompt}" and an image preview.`
+    )
+  );
+}
+
+function findPreparedSentMessageContext(snapshot, prompt) {
+  const promptNodes = findMatchingNodes(snapshot, prompt, { visibleOnly: true });
+  const previewMatches = MESSAGE_ATTACHMENT_PREVIEW_LABELS.flatMap((label) => (
+    findMatchingNodes(snapshot, label, { visibleOnly: true }).map((node) => ({ label, node }))
+  ));
+  let bestMatch = null;
+
+  for (const promptNode of promptNodes) {
+    for (const previewMatch of previewMatches) {
+      const score = scorePreparedSentMessagePair(promptNode.bounds, previewMatch.node.bounds);
+      if (score === null) {
+        continue;
+      }
+
+      if (!bestMatch || score < bestMatch.score) {
+        bestMatch = {
+          score,
+          promptMatch: { label: prompt, node: promptNode },
+          messagePreviewMatch: previewMatch,
+        };
+      }
+    }
+  }
+
+  return bestMatch
+    ? {
+        promptMatch: bestMatch.promptMatch,
+        messagePreviewMatch: bestMatch.messagePreviewMatch,
+      }
+    : null;
+}
+
+function scorePreparedSentMessagePair(promptBounds, previewBounds) {
+  if (!promptBounds || !previewBounds) {
+    return null;
+  }
+
+  const overlapWidth = Math.max(
+    0,
+    Math.min(promptBounds.right, previewBounds.right) - Math.max(promptBounds.left, previewBounds.left)
+  );
+  const minWidth = Math.max(1, Math.min(promptBounds.width, previewBounds.width));
+  const horizontalOverlapRatio = overlapWidth / minWidth;
+  if (horizontalOverlapRatio < 0.35) {
+    return null;
+  }
+
+  const verticalGap = previewBounds.bottom <= promptBounds.top
+    ? promptBounds.top - previewBounds.bottom
+    : promptBounds.bottom <= previewBounds.top
+      ? previewBounds.top - promptBounds.bottom
+      : 0;
+  if (verticalGap > 320) {
+    return null;
+  }
+
+  const centerXDelta = Math.abs(promptBounds.centerX - previewBounds.centerX);
+  const maxAllowedCenterXDelta = Math.max(promptBounds.width, previewBounds.width) * 0.75;
+  if (centerXDelta > maxAllowedCenterXDelta) {
+    return null;
+  }
+
+  const expectedImageAboveTextPenalty = previewBounds.bottom <= promptBounds.top ? 0 : 100;
+  return (verticalGap * 10) + centerXDelta + expectedImageAboveTextPenalty;
+}
+
 async function waitForAnyTappableNode(adbPath, serial, labels, options = {}) {
   const timeoutMs = options.timeoutMs ?? 20_000;
   const startedAt = Date.now();
@@ -1884,14 +2161,16 @@ function dumpUiHierarchy(adbPath, serial, options = {}) {
       {
         encoding: "utf8",
         stdio: ["ignore", "pipe", "pipe"],
+        timeout: UI_HIERARCHY_DUMP_COMMAND_TIMEOUT_MS,
       }
     );
 
     if (dumpResult.error) {
-      throw dumpResult.error;
-    }
-
-    if (dumpResult.status !== 0) {
+      if (!isRetryableSpawnError(dumpResult.error)) {
+        throw dumpResult.error;
+      }
+      failures.push(describeSpawnError("uiautomator dump", dumpResult.error));
+    } else if (dumpResult.status !== 0) {
       failures.push(describeSpawnResult("uiautomator dump", dumpResult));
       sawAdbDeviceUnavailable = sawAdbDeviceUnavailable || isAdbDeviceUnavailableResult(dumpResult);
     } else {
@@ -1901,19 +2180,21 @@ function dumpUiHierarchy(adbPath, serial, options = {}) {
         {
           encoding: "utf8",
           maxBuffer: 10 * 1024 * 1024,
+          timeout: UI_HIERARCHY_DUMP_COMMAND_TIMEOUT_MS,
         }
       );
 
       if (catResult.error) {
-        throw catResult.error;
-      }
-
-      if (catResult.status === 0 && typeof catResult.stdout === "string" && catResult.stdout.includes("<hierarchy")) {
+        if (!isRetryableSpawnError(catResult.error)) {
+          throw catResult.error;
+        }
+        failures.push(describeSpawnError("cat UI hierarchy", catResult.error));
+      } else if (catResult.status === 0 && typeof catResult.stdout === "string" && catResult.stdout.includes("<hierarchy")) {
         return catResult.stdout;
+      } else {
+        failures.push(describeSpawnResult("cat UI hierarchy", catResult));
+        sawAdbDeviceUnavailable = sawAdbDeviceUnavailable || isAdbDeviceUnavailableResult(catResult);
       }
-
-      failures.push(describeSpawnResult("cat UI hierarchy", catResult));
-      sawAdbDeviceUnavailable = sawAdbDeviceUnavailable || isAdbDeviceUnavailableResult(catResult);
     }
 
     if (attempt < maxAttempts) {
@@ -2724,6 +3005,16 @@ function describeSpawnResult(label, result) {
   return `${label} status=${result.status} stdout=${stdoutLength} stderr=${stderr || "<empty>"}`;
 }
 
+function describeSpawnError(label, error) {
+  const code = typeof error?.code === "string" && error.code.length > 0 ? error.code : "unknown";
+  const message = typeof error?.message === "string" && error.message.length > 0 ? error.message : String(error);
+  return `${label} error=${code} message=${message}`;
+}
+
+function isRetryableSpawnError(error) {
+  return error?.code === "ETIMEDOUT";
+}
+
 function isAdbDeviceUnavailableResult(result) {
   return isAdbDeviceUnavailableMessage(String(result.stderr || ""))
     || isAdbDeviceUnavailableMessage(String(result.stdout || ""));
@@ -2762,6 +3053,7 @@ function runChecked(command, args, options = {}) {
     cwd: options.cwd || projectRoot,
     stdio: options.stdio || "inherit",
     env: options.env || process.env,
+    timeout: options.timeout,
   });
 
   if (result.error) {
@@ -2790,6 +3082,9 @@ module.exports = {
   buildScenarioLaunchPlan,
   buildSmokeLaunchArgs,
   captureAndroidScreenshot,
+  clearFocusedTextInput,
+  CLEAR_TEXT_INPUT_FALLBACK_TOTAL_TIMEOUT_MS,
+  DEFAULT_CLEAR_TEXT_INPUT_MAX_DELETE_COUNT,
   dumpUiHierarchy,
   findCatalogRiskModelCard,
   findQuantizationSelectorNodeClearOfBottomOverlay,
@@ -2797,15 +3092,18 @@ module.exports = {
   prepareCatalogForVariantPickerSmokeScenario,
   findAnyNodeInSnapshot,
   findAnyNodeClearOfBottomOverlay,
+  findPreparedSentMessageContext,
   findNodeInSnapshot,
   isBoundsClearOfBottomOverlay,
   isAppForegroundSnapshot,
   findBlockingSystemDialogAction,
+  escapeAdbInputText,
   pickClosestNodePair,
   selectScenarios,
   parseCliOptions,
   parseUiSnapshot,
   restoreLanguageAfterScenario,
+  runChecked,
   ScenarioSkipError,
   ScenarioSkipFailureError,
   serializeReportResults,

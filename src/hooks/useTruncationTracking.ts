@@ -114,6 +114,7 @@ export function useTruncationTracking(
       llmEngineService.countPromptTokens({
         messages,
         params: tokenCountParams,
+        chatBlocking: false,
       });
 
     void buildInferenceWindowWithAccurateTokenCounts(activeThread, windowOptions, countPromptTokens)

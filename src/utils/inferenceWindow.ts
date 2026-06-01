@@ -325,12 +325,20 @@ export async function buildInferenceWindowWithAccurateTokenCounts(
   thread: ChatThread,
   options: ThreadInferenceWindowOptions,
   countPromptTokens: (messages: LlmChatMessage[]) => Promise<number>,
+  control: { throwIfCancelled?: () => void } = {},
 ): Promise<{
   messages: LlmChatMessage[];
   promptTokens: number;
   promptSafetyMarginTokens: number;
   truncatedMessageIds: string[];
 }> {
+  const countPromptTokensWithCancellation = async (messages: LlmChatMessage[]) => {
+    control.throwIfCancelled?.();
+    const tokens = await countPromptTokens(messages);
+    control.throwIfCancelled?.();
+    return tokens;
+  };
+
   const maxContextTokens =
     typeof options.maxContextTokens === 'number' && options.maxContextTokens > 0
       ? Math.round(options.maxContextTokens)
@@ -352,7 +360,7 @@ export async function buildInferenceWindowWithAccurateTokenCounts(
   if (maxContextTokens === null) {
     return {
       messages: fullMessages,
-      promptTokens: await countPromptTokens(fullMessages),
+      promptTokens: await countPromptTokensWithCancellation(fullMessages),
       promptSafetyMarginTokens,
       truncatedMessageIds: baseTruncatedMessageIds,
     };
@@ -380,7 +388,7 @@ export async function buildInferenceWindowWithAccurateTokenCounts(
   if (historyMessages.length === 0) {
     return {
       messages: fullMessages,
-      promptTokens: await countPromptTokens(fullMessages),
+      promptTokens: await countPromptTokensWithCancellation(fullMessages),
       promptSafetyMarginTokens,
       truncatedMessageIds: baseTruncatedMessageIds,
     };
@@ -402,7 +410,7 @@ export async function buildInferenceWindowWithAccurateTokenCounts(
     }
 
     const tryCount = async (startIndex: number) => {
-      const tokens = await countPromptTokens([
+      const tokens = await countPromptTokensWithCancellation([
         ...systemMessages,
         ...historyMessages.slice(startIndex),
       ]);
@@ -519,7 +527,7 @@ export async function buildInferenceWindowWithAccurateTokenCounts(
       effectiveHistoryStartIndex -= 1;
       normalizedHistoryMessages = historyMessages.slice(effectiveHistoryStartIndex);
     } else if (normalizedHistoryMessages.length === 1) {
-      const userOnlyTokens = await countPromptTokens([...systemMessages, leadingUserMessage]);
+      const userOnlyTokens = await countPromptTokensWithCancellation([...systemMessages, leadingUserMessage]);
       if (userOnlyTokens <= promptTokenBudget) {
         effectiveHistoryStartIndex -= 1;
         normalizedHistoryMessages = [leadingUserMessage];

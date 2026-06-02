@@ -199,6 +199,195 @@ describe('downloadStore', () => {
     expect(entry?.multimodalReadiness).toBeUndefined();
   });
 
+  it('does not keep an incoming selected projector id when its same-id runtime artifact is blocked', () => {
+    useDownloadStore.setState({
+      queue: [
+        {
+          ...buildQueuedModel('vision/model', LifecycleStatus.PAUSED),
+          selectedProjectorId: 'vision/model:mmproj',
+          projectorCandidates: [buildProjector({
+            fileName: 'stale-mmproj.gguf',
+            localPath: 'partial-stale-mmproj.gguf',
+            resumeData: JSON.stringify({ resumeData: 'stale-projector-resume' }),
+            lifecycleStatus: 'paused',
+            matchStatus: 'user_selected',
+            matchReason: 'user_selected_projector',
+          })],
+        },
+      ],
+      activeDownloadId: null,
+    });
+
+    useDownloadStore.getState().addToQueue({
+      ...buildQueuedModel('vision/model', LifecycleStatus.AVAILABLE),
+      selectedProjectorId: 'vision/model:mmproj',
+      projectorCandidates: [buildProjector({
+        fileName: 'fresh-mmproj.gguf',
+        lifecycleStatus: 'available',
+        matchStatus: 'matched',
+        matchReason: 'single_projector_candidate',
+      })],
+    });
+
+    const entry = useDownloadStore.getState().queue.find((model) => model.id === 'vision/model');
+    expect(entry?.projectorCandidates?.[0]).toEqual(expect.objectContaining({
+      id: 'vision/model:mmproj',
+      fileName: 'fresh-mmproj.gguf',
+      lifecycleStatus: 'available',
+    }));
+    expect(entry?.selectedProjectorId).toBeUndefined();
+    expect(entry?.multimodalReadiness).toBeUndefined();
+  });
+
+  it('preserves a compatible existing projector remapped to the blocked incoming selection', () => {
+    useDownloadStore.setState({
+      queue: [
+        {
+          ...buildQueuedModel('vision/model', LifecycleStatus.PAUSED),
+          selectedProjectorId: 'vision/model:mmproj-legacy',
+          multimodalReadiness: {
+            modelId: 'vision/model',
+            status: 'ready',
+            projectorId: 'vision/model:mmproj-legacy',
+            projectorSize: 256,
+            support: ['vision'],
+            checkedAt: 123,
+          },
+          projectorCandidates: [
+            buildProjector({
+              id: 'vision/model:mmproj',
+              fileName: 'stale-mmproj.gguf',
+              downloadUrl: 'https://example.com/stale-mmproj.gguf',
+              localPath: 'partial-stale-mmproj.gguf',
+              resumeData: JSON.stringify({ resumeData: 'stale-projector-resume' }),
+              lifecycleStatus: 'paused',
+              matchStatus: 'user_selected',
+              matchReason: 'user_selected_projector',
+            }),
+            buildProjector({
+              id: 'vision/model:mmproj-legacy',
+              fileName: 'fresh-mmproj.gguf',
+              downloadUrl: 'https://example.com/fresh-mmproj.gguf',
+              localPath: 'fresh-mmproj.gguf',
+              lifecycleStatus: 'downloaded',
+              matchStatus: 'user_selected',
+              matchReason: 'user_selected_projector',
+            }),
+          ],
+        },
+      ],
+      activeDownloadId: null,
+    });
+
+    useDownloadStore.getState().addToQueue({
+      ...buildQueuedModel('vision/model', LifecycleStatus.AVAILABLE),
+      selectedProjectorId: 'vision/model:mmproj',
+      multimodalReadiness: {
+        modelId: 'vision/model',
+        status: 'ready',
+        projectorId: 'vision/model:mmproj',
+        projectorSize: 256,
+        support: ['vision'],
+        checkedAt: 456,
+      },
+      projectorCandidates: [buildProjector({
+        id: 'vision/model:mmproj',
+        fileName: 'fresh-mmproj.gguf',
+        downloadUrl: 'https://example.com/fresh-mmproj.gguf',
+        lifecycleStatus: 'available',
+        matchStatus: 'matched',
+        matchReason: 'single_projector_candidate',
+      })],
+    });
+
+    const entry = useDownloadStore.getState().queue.find((model) => model.id === 'vision/model');
+    expect(entry?.projectorCandidates?.[0]).toEqual(expect.objectContaining({
+      id: 'vision/model:mmproj',
+      fileName: 'fresh-mmproj.gguf',
+      localPath: 'fresh-mmproj.gguf',
+      lifecycleStatus: 'downloaded',
+      matchStatus: 'user_selected',
+    }));
+    expect(entry?.selectedProjectorId).toBe('vision/model:mmproj');
+    expect(entry?.multimodalReadiness).toEqual(expect.objectContaining({
+      status: 'ready',
+      projectorId: 'vision/model:mmproj',
+      checkedAt: 123,
+    }));
+  });
+
+  it('does not fall back to a different existing projector when the incoming selection is blocked', () => {
+    useDownloadStore.setState({
+      queue: [
+        {
+          ...buildQueuedModel('vision/model', LifecycleStatus.PAUSED),
+          selectedProjectorId: 'vision/model:mmproj-a',
+          multimodalReadiness: {
+            modelId: 'vision/model',
+            status: 'ready',
+            projectorId: 'vision/model:mmproj-a',
+            projectorSize: 256,
+            support: ['vision'],
+            checkedAt: 123,
+          },
+          projectorCandidates: [
+            buildProjector({
+              id: 'vision/model:mmproj-a',
+              fileName: 'mmproj-a.gguf',
+              localPath: 'partial-mmproj-a.gguf',
+              resumeData: JSON.stringify({ resumeData: 'projector-a-resume' }),
+              lifecycleStatus: 'paused',
+              matchStatus: 'user_selected',
+              matchReason: 'user_selected_projector',
+            }),
+            buildProjector({
+              id: 'vision/model:mmproj-b',
+              fileName: 'stale-mmproj-b.gguf',
+              localPath: 'partial-stale-mmproj-b.gguf',
+              resumeData: JSON.stringify({ resumeData: 'stale-projector-b-resume' }),
+              lifecycleStatus: 'paused',
+            }),
+          ],
+        },
+      ],
+      activeDownloadId: null,
+    });
+
+    useDownloadStore.getState().addToQueue({
+      ...buildQueuedModel('vision/model', LifecycleStatus.AVAILABLE),
+      selectedProjectorId: 'vision/model:mmproj-b',
+      projectorCandidates: [
+        buildProjector({
+          id: 'vision/model:mmproj-a',
+          fileName: 'mmproj-a.gguf',
+          lifecycleStatus: 'available',
+          matchStatus: 'matched',
+        }),
+        buildProjector({
+          id: 'vision/model:mmproj-b',
+          fileName: 'fresh-mmproj-b.gguf',
+          lifecycleStatus: 'available',
+          matchStatus: 'matched',
+        }),
+      ],
+    });
+
+    const entry = useDownloadStore.getState().queue.find((model) => model.id === 'vision/model');
+    const projectorA = entry?.projectorCandidates?.find((projector) => projector.id === 'vision/model:mmproj-a');
+    const projectorB = entry?.projectorCandidates?.find((projector) => projector.id === 'vision/model:mmproj-b');
+    expect(projectorA).toEqual(expect.objectContaining({
+      id: 'vision/model:mmproj-a',
+      localPath: 'partial-mmproj-a.gguf',
+    }));
+    expect(projectorB).toEqual(expect.objectContaining({
+      id: 'vision/model:mmproj-b',
+      fileName: 'fresh-mmproj-b.gguf',
+    }));
+    expect(projectorB?.localPath).toBeUndefined();
+    expect(entry?.selectedProjectorId).toBeUndefined();
+    expect(entry?.multimodalReadiness).toBeUndefined();
+  });
+
   it('preserves runtime projector candidates when re-queuing a model without catalog candidates', () => {
     useDownloadStore.setState({
       queue: [

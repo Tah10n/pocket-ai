@@ -1046,6 +1046,254 @@ describe('android-scenarios pack selection', () => {
     ]);
   });
 
+  it('verifies prepared attachment preview/remove controls disappear after tapping remove', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-ai-adb-'));
+    const previousAndroidHome = process.env.ANDROID_HOME;
+    const previousAndroidSdkRoot = process.env.ANDROID_SDK_ROOT;
+    const adbDir = path.join(tempDir, 'platform-tools');
+    const adbPath = path.join(adbDir, process.platform === 'win32' ? 'adb.exe' : 'adb');
+    const preparedDraftHierarchyXml = `
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
+        <node text="" content-desc="Attach an image from the photo library" clickable="true" enabled="true" bounds="[40,1800][180,1940]" />
+        <node text="Attached image 1 of 1 preview" content-desc="" clickable="false" bounds="[40,500][1040,900]" />
+        <node text="Remove attached image 1 of 1" content-desc="" clickable="true" enabled="true" bounds="[900,500][1040,640]" />
+      </hierarchy>
+    `;
+    const previewRemovedHierarchyXml = `
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
+        <node text="" content-desc="Attach an image from the photo library" clickable="true" enabled="true" bounds="[40,1800][180,1940]" />
+        <node text="Remove attached image 1 of 1" content-desc="" clickable="true" enabled="true" bounds="[900,500][1040,640]" />
+      </hierarchy>
+    `;
+    const fullyRemovedDraftHierarchyXml = `
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
+        <node text="" content-desc="Attach an image from the photo library" clickable="true" enabled="true" bounds="[40,1800][180,1940]" />
+      </hierarchy>
+    `;
+
+    fs.mkdirSync(adbDir, { recursive: true });
+    fs.writeFileSync(adbPath, '');
+    process.env.ANDROID_HOME = tempDir;
+    delete process.env.ANDROID_SDK_ROOT;
+
+    try {
+      let removeTapped = false;
+      let postRemoveHierarchyReads = 0;
+      const postRemoveSnapshots = [];
+      const spawnSync = jest.fn((command, args) => {
+        if (args.includes('exec-out')) {
+          let stdout = preparedDraftHierarchyXml;
+          if (removeTapped) {
+            postRemoveHierarchyReads += 1;
+            stdout = postRemoveHierarchyReads === 1
+              ? preparedDraftHierarchyXml
+              : postRemoveHierarchyReads === 2
+                ? previewRemovedHierarchyXml
+                : fullyRemovedDraftHierarchyXml;
+            postRemoveSnapshots.push({
+              hasPreview: stdout.includes('Attached image 1 of 1 preview'),
+              hasRemove: stdout.includes('Remove attached image 1 of 1'),
+            });
+          }
+
+          return {
+            status: 0,
+            stdout,
+            stderr: '',
+          };
+        }
+
+        return { status: 0, stdout: '', stderr: '' };
+      });
+      let isolatedBuildScenarios;
+      jest.isolateModules(() => {
+        jest.doMock('child_process', () => ({ spawnSync }));
+        ({ buildScenarios: isolatedBuildScenarios } = require('../../scripts/android-scenarios'));
+      });
+
+      const scenario = isolatedBuildScenarios().find((candidate) => candidate.id === 'chat-attachment-preview-remove');
+      const expectAnyText = jest.fn().mockResolvedValue(undefined);
+      const tapAnyText = jest.fn((labels) => {
+        if (labels.includes('Remove attached image 1 of 1')) {
+          removeTapped = true;
+        }
+        return Promise.resolve();
+      });
+
+      await scenario.run({
+        serial: 'device-1',
+        expectAnyText,
+        tapAnyText,
+      });
+
+      expect(tapAnyText).toHaveBeenCalledWith(
+        expect.arrayContaining(['Remove attached image 1 of 1']),
+        expect.objectContaining({ timeoutMs: 5_000 })
+      );
+      expect(postRemoveSnapshots).toEqual([
+        { hasPreview: true, hasRemove: true },
+        { hasPreview: false, hasRemove: true },
+        { hasPreview: false, hasRemove: false },
+        { hasPreview: false, hasRemove: false },
+      ]);
+      expect(expectAnyText).toHaveBeenLastCalledWith(
+        expect.arrayContaining(['Attach an image from the photo library']),
+        expect.objectContaining({ timeoutMs: 5_000 })
+      );
+    } finally {
+      jest.dontMock('child_process');
+      if (previousAndroidHome === undefined) {
+        delete process.env.ANDROID_HOME;
+      } else {
+        process.env.ANDROID_HOME = previousAndroidHome;
+      }
+      if (previousAndroidSdkRoot === undefined) {
+        delete process.env.ANDROID_SDK_ROOT;
+      } else {
+        process.env.ANDROID_SDK_ROOT = previousAndroidSdkRoot;
+      }
+      fs.rmSync(tempDir, { force: true, recursive: true });
+    }
+  });
+
+  it('fails prepared attachment preview/remove when the attach action is disabled', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-ai-adb-'));
+    const previousAndroidHome = process.env.ANDROID_HOME;
+    const previousAndroidSdkRoot = process.env.ANDROID_SDK_ROOT;
+    const adbDir = path.join(tempDir, 'platform-tools');
+    const adbPath = path.join(adbDir, process.platform === 'win32' ? 'adb.exe' : 'adb');
+    const disabledPreparedDraftHierarchyXml = `
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
+        <node text="" content-desc="Attach an image from the photo library" clickable="true" enabled="false" bounds="[40,1800][180,1940]" />
+        <node text="Attached image 1 of 1 preview" content-desc="" clickable="false" bounds="[40,500][1040,900]" />
+        <node text="Remove attached image 1 of 1" content-desc="" clickable="true" enabled="true" bounds="[900,500][1040,640]" />
+      </hierarchy>
+    `;
+
+    fs.mkdirSync(adbDir, { recursive: true });
+    fs.writeFileSync(adbPath, '');
+    process.env.ANDROID_HOME = tempDir;
+    delete process.env.ANDROID_SDK_ROOT;
+
+    try {
+      const spawnSync = jest.fn((_command, args) => {
+        if (args.includes('exec-out')) {
+          return {
+            status: 0,
+            stdout: disabledPreparedDraftHierarchyXml,
+            stderr: '',
+          };
+        }
+
+        return { status: 0, stdout: '', stderr: '' };
+      });
+      let isolatedBuildScenarios;
+      jest.isolateModules(() => {
+        jest.doMock('child_process', () => ({ spawnSync }));
+        ({ buildScenarios: isolatedBuildScenarios } = require('../../scripts/android-scenarios'));
+      });
+
+      const scenario = isolatedBuildScenarios().find((candidate) => candidate.id === 'chat-attachment-preview-remove');
+
+      await expect(scenario.run({
+        serial: 'device-1',
+        expectAnyText: jest.fn().mockResolvedValue(undefined),
+        tapAnyText: jest.fn().mockResolvedValue(undefined),
+      })).rejects.toThrow(/disabled/);
+    } finally {
+      jest.dontMock('child_process');
+      if (previousAndroidHome === undefined) {
+        delete process.env.ANDROID_HOME;
+      } else {
+        process.env.ANDROID_HOME = previousAndroidHome;
+      }
+      if (previousAndroidSdkRoot === undefined) {
+        delete process.env.ANDROID_SDK_ROOT;
+      } else {
+        process.env.ANDROID_SDK_ROOT = previousAndroidSdkRoot;
+      }
+      fs.rmSync(tempDir, { force: true, recursive: true });
+    }
+  });
+
+  it('fails prepared attachment preview/remove when post-remove attach action is not actionable', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-ai-adb-'));
+    const previousAndroidHome = process.env.ANDROID_HOME;
+    const previousAndroidSdkRoot = process.env.ANDROID_SDK_ROOT;
+    const adbDir = path.join(tempDir, 'platform-tools');
+    const adbPath = path.join(adbDir, process.platform === 'win32' ? 'adb.exe' : 'adb');
+    const preparedDraftHierarchyXml = `
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
+        <node text="" content-desc="Attach an image from the photo library" clickable="true" enabled="true" bounds="[40,1800][180,1940]" />
+        <node text="Attached image 1 of 1 preview" content-desc="" clickable="false" bounds="[40,500][1040,900]" />
+        <node text="Remove attached image 1 of 1" content-desc="" clickable="true" enabled="true" bounds="[900,500][1040,640]" />
+      </hierarchy>
+    `;
+    const disabledRemovedDraftHierarchyXml = `
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
+        <node text="" content-desc="Attach an image from the photo library" clickable="false" enabled="false" bounds="[40,1800][180,1940]" />
+      </hierarchy>
+    `;
+
+    fs.mkdirSync(adbDir, { recursive: true });
+    fs.writeFileSync(adbPath, '');
+    process.env.ANDROID_HOME = tempDir;
+    delete process.env.ANDROID_SDK_ROOT;
+
+    try {
+      let removeTapped = false;
+      const spawnSync = jest.fn((_command, args) => {
+        if (args.includes('exec-out')) {
+          return {
+            status: 0,
+            stdout: removeTapped ? disabledRemovedDraftHierarchyXml : preparedDraftHierarchyXml,
+            stderr: '',
+          };
+        }
+
+        return { status: 0, stdout: '', stderr: '' };
+      });
+      let isolatedBuildScenarios;
+      jest.isolateModules(() => {
+        jest.doMock('child_process', () => ({ spawnSync }));
+        ({ buildScenarios: isolatedBuildScenarios } = require('../../scripts/android-scenarios'));
+      });
+
+      const scenario = isolatedBuildScenarios().find((candidate) => candidate.id === 'chat-attachment-preview-remove');
+      const tapAnyText = jest.fn((labels) => {
+        if (labels.includes('Remove attached image 1 of 1')) {
+          removeTapped = true;
+        }
+        return Promise.resolve();
+      });
+
+      await expect(scenario.run({
+        serial: 'device-1',
+        expectAnyText: jest.fn().mockResolvedValue(undefined),
+        tapAnyText,
+      })).rejects.toThrow(/disabled|not actionable/);
+    } finally {
+      jest.dontMock('child_process');
+      if (previousAndroidHome === undefined) {
+        delete process.env.ANDROID_HOME;
+      } else {
+        process.env.ANDROID_HOME = previousAndroidHome;
+      }
+      if (previousAndroidSdkRoot === undefined) {
+        delete process.env.ANDROID_SDK_ROOT;
+      } else {
+        process.env.ANDROID_SDK_ROOT = previousAndroidSdkRoot;
+      }
+      fs.rmSync(tempDir, { force: true, recursive: true });
+    }
+  });
+
   it('keeps prepared image send coverage in a separate preserve-running-app pack', () => {
     expect(selectScenarios(scenarios, parseCliOptions(['--pack', 'attachments-prepared-send'])).map((scenario) => scenario.id)).toEqual([
       'chat-attachment-prepared-send',
@@ -1061,6 +1309,7 @@ describe('android-scenarios pack selection', () => {
     const preparedDraftHierarchyXml = `
       <hierarchy>
         <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
+        <node text="" content-desc="Attach an image from the photo library" clickable="true" enabled="true" bounds="[40,1800][180,1940]" />
         <node text="Attached image 1 of 1 preview" content-desc="" clickable="false" bounds="[40,500][1040,900]" />
         <node text="Remove attached image 1 of 1" content-desc="" clickable="true" bounds="[900,500][1040,640]" />
         <node text="Chat message input" content-desc="" clickable="true" bounds="[40,1900][900,2050]" />
@@ -1095,6 +1344,7 @@ describe('android-scenarios pack selection', () => {
           const composerHierarchyXml = `
             <hierarchy>
               <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
+              <node text="" content-desc="Attach an image from the photo library" clickable="true" enabled="true" bounds="[40,1800][180,1940]" />
               <node text="Attached image 1 of 1 preview" content-desc="" clickable="false" bounds="[40,500][1040,900]" />
               <node text="Remove attached image 1 of 1" content-desc="" clickable="true" bounds="[900,500][1040,640]" />
               <node text="${preparedPrompt || ''}" content-desc="" clickable="true" bounds="[40,1900][900,2050]" />
@@ -1221,9 +1471,16 @@ describe('android-scenarios pack selection', () => {
 
     expect(() => assertAttachmentPreviewRemovePreconditions({
       fallbackNode: null,
+      attachNode: { clickable: true, enabled: true },
       previewNode: { label: 'Attached image preview' },
       removeNode: { label: 'Remove image attachment' },
     })).not.toThrow();
+    expect(() => assertAttachmentPreviewRemovePreconditions({
+      fallbackNode: null,
+      attachNode: { clickable: true, enabled: false },
+      previewNode: { label: 'Attached image preview' },
+      removeNode: { label: 'Remove image attachment' },
+    })).toThrow(/disabled/);
   });
 
   it('requires known fallback copy and a blocked affordance for text-only attachment smoke', () => {
@@ -1278,7 +1535,9 @@ describe('android-scenarios pack selection', () => {
 
   it('asserts vision-ready attachment affordances are visible and enabled', () => {
     expect(() => assertAttachmentActionAvailable({ clickable: true, enabled: true })).not.toThrow();
-    expect(() => assertAttachmentActionAvailable({ clickable: false, enabled: true })).not.toThrow();
+    expect(() => assertAttachmentActionAvailable({ clickable: false, enabled: true })).toThrow(
+      /not actionable/
+    );
     expect(() => assertAttachmentActionAvailable({ clickable: true, enabled: false })).toThrow(
       /disabled/
     );

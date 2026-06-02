@@ -610,7 +610,7 @@ describe('ModelCatalogService regressions', () => {
       ownerVariantId: modelFileName,
       localPath: `legacy-${projectorFileName}`,
     };
-    const directMergeWithRemappedSelection = (service as unknown as {
+    const directMergeWithBlockedIncomingSelection = (service as unknown as {
       mergeProjectorMetadataWithLocalState: (
         remoteModel: ModelMetadata,
         localModel: ModelMetadata,
@@ -649,10 +649,181 @@ describe('ModelCatalogService regressions', () => {
       false,
     );
 
-    expect(directMergeWithRemappedSelection.selectedProjectorId).toBe(remoteProjector.id);
-    expect(directMergeWithRemappedSelection.multimodalReadiness).toEqual(expect.objectContaining({
+    expect(directMergeWithBlockedIncomingSelection.selectedProjectorId).toBe(remoteProjector.id);
+    expect(directMergeWithBlockedIncomingSelection.multimodalReadiness).toEqual(expect.objectContaining({
       status: 'ready',
       projectorId: remoteProjector.id,
+      checkedAt: 9012,
+    }));
+  });
+
+  it('does not fall back to a different local ready projector when the incoming selected projector is blocked', () => {
+    const modelId = 'org/vision-blocked-selected-projector-local-fallback';
+    const modelFileName = 'model.Q4_K_M.gguf';
+    const selectedProjectorFileName = 'mmproj-selected-f16.gguf';
+    const localReadyProjectorFileName = 'mmproj-local-ready-f16.gguf';
+    const selectedProjectorId = buildProjectorArtifactId({
+      repoId: modelId,
+      hfRevision: 'main',
+      fileName: selectedProjectorFileName,
+    });
+    const localReadyProjectorId = buildProjectorArtifactId({
+      repoId: modelId,
+      hfRevision: 'main',
+      fileName: localReadyProjectorFileName,
+    });
+    const remoteSelectedProjector: ProjectorArtifact = {
+      id: selectedProjectorId,
+      ownerModelId: modelId,
+      repoId: modelId,
+      fileName: selectedProjectorFileName,
+      downloadUrl: `https://huggingface.co/${modelId}/resolve/main/${selectedProjectorFileName}`,
+      hfRevision: 'main',
+      sha256: PROJECTOR_SHA256,
+      size: 1024,
+      lifecycleStatus: 'available',
+      matchStatus: 'matched',
+    };
+    const conflictingLocalSelectedProjector: ProjectorArtifact = {
+      ...remoteSelectedProjector,
+      ownerModelId: 'org/different-owner',
+      repoId: 'org/different-owner',
+      localPath: 'stale-selected-projector.gguf',
+      lifecycleStatus: 'downloaded',
+    };
+    const remoteLocalReadyProjector: ProjectorArtifact = {
+      id: localReadyProjectorId,
+      ownerModelId: modelId,
+      repoId: modelId,
+      fileName: localReadyProjectorFileName,
+      downloadUrl: `https://huggingface.co/${modelId}/resolve/main/${localReadyProjectorFileName}`,
+      hfRevision: 'main',
+      sha256: DIFFERENT_PROJECTOR_SHA256,
+      size: 2048,
+      lifecycleStatus: 'available',
+      matchStatus: 'matched',
+    };
+    const localReadyProjector: ProjectorArtifact = {
+      ...remoteLocalReadyProjector,
+      localPath: 'local-ready-projector.gguf',
+      lifecycleStatus: 'downloaded',
+    };
+    const baseModel: ModelMetadata = {
+      id: modelId,
+      name: 'Blocked Selected Projector Local Fallback',
+      author: 'org',
+      size: 2 * 1024 * 1024 * 1024,
+      downloadUrl: `https://huggingface.co/${modelId}/resolve/main/${modelFileName}`,
+      hfRevision: 'main',
+      resolvedFileName: modelFileName,
+      fitsInRam: true,
+      accessState: ModelAccessState.PUBLIC,
+      isGated: false,
+      isPrivate: false,
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+      chatModalities: ['text', 'vision'],
+    };
+    const directMerge = (service as unknown as {
+      mergeProjectorMetadataWithLocalState: (
+        remoteModel: ModelMetadata,
+        localModel: ModelMetadata,
+        shouldResetLocalDownloadState: boolean,
+      ) => {
+        selectedProjectorId?: string;
+        multimodalReadiness?: MultimodalReadinessState;
+      };
+    }).mergeProjectorMetadataWithLocalState(
+      {
+        ...baseModel,
+        projectorCandidates: [remoteSelectedProjector, remoteLocalReadyProjector],
+        selectedProjectorId,
+        multimodalReadiness: {
+          modelId,
+          variantId: modelFileName,
+          status: 'ready',
+          projectorId: selectedProjectorId,
+          support: ['vision'],
+          checkedAt: 3456,
+        },
+      },
+      {
+        ...baseModel,
+        projectorCandidates: [conflictingLocalSelectedProjector, localReadyProjector],
+        selectedProjectorId: localReadyProjectorId,
+        multimodalReadiness: {
+          modelId,
+          variantId: modelFileName,
+          status: 'ready',
+          projectorId: localReadyProjectorId,
+          support: ['vision'],
+          checkedAt: 9012,
+        },
+      },
+      false,
+    );
+
+    expect(directMerge.selectedProjectorId).toBeUndefined();
+    expect(directMerge.multimodalReadiness).toBeUndefined();
+  });
+
+  it('preserves local projector readiness when the catalog selected projector id is stale', () => {
+    const modelId = 'org/vision-stale-remote-selected-projector';
+    const {
+      localModel,
+      localProjector,
+      modelFileName,
+    } = makeDownloadedVisionModelWithProjector({
+      modelId,
+      projectorSha256: PROJECTOR_SHA256,
+    });
+    const staleCatalogSelectedProjectorId = buildProjectorArtifactId({
+      repoId: modelId,
+      hfRevision: 'main',
+      fileName: 'stale-mmproj-no-longer-listed.gguf',
+    });
+    const remoteProjector: ProjectorArtifact = {
+      ...localProjector,
+      localPath: undefined,
+      lifecycleStatus: 'available',
+    };
+
+    const directMerge = (service as unknown as {
+      mergeProjectorMetadataWithLocalState: (
+        remoteModel: ModelMetadata,
+        localModel: ModelMetadata,
+        shouldResetLocalDownloadState: boolean,
+      ) => {
+        selectedProjectorId?: string;
+        multimodalReadiness?: MultimodalReadinessState;
+      };
+    }).mergeProjectorMetadataWithLocalState(
+      {
+        ...localModel,
+        lifecycleStatus: LifecycleStatus.AVAILABLE,
+        localPath: undefined,
+        downloadedAt: undefined,
+        downloadProgress: 0,
+        projectorCandidates: [remoteProjector],
+        selectedProjectorId: staleCatalogSelectedProjectorId,
+        multimodalReadiness: {
+          modelId,
+          variantId: modelFileName,
+          status: 'ready',
+          projectorId: staleCatalogSelectedProjectorId,
+          support: ['vision'],
+          checkedAt: 5678,
+        },
+      },
+      localModel,
+      false,
+    );
+
+    expect(directMerge.selectedProjectorId).toBe(localProjector.id);
+    expect(directMerge.multimodalReadiness).toEqual(expect.objectContaining({
+      status: 'ready',
+      projectorId: localProjector.id,
+      checkedAt: 1234,
     }));
   });
 

@@ -963,7 +963,75 @@ describe('modelRuntimeState', () => {
     expect(merged.multimodalReadiness).toBeUndefined();
   });
 
-  it('falls back to a compatible remapped selected projector when the incoming selected id is blocked', () => {
+  it('does not fall back to a different runtime projector when the incoming selection is blocked', () => {
+    const merged = mergeModelWithRuntimeState(
+      makeModel({
+        size: 3 * 1024 * 1024 * 1024,
+        resolvedFileName: 'model.Q4_K_M.gguf',
+        selectedProjectorId: 'org/model:mmproj-b',
+        projectorCandidates: [
+          makeProjector({
+            id: 'org/model:mmproj-a',
+            fileName: 'mmproj-a.gguf',
+          }),
+          makeProjector({
+            id: 'org/model:mmproj-b',
+            fileName: 'fresh-mmproj-b.gguf',
+          }),
+        ],
+      }),
+      {
+        queuedItem: makeModel({
+          size: 3 * 1024 * 1024 * 1024,
+          resolvedFileName: 'model.Q4_K_M.gguf',
+          lifecycleStatus: LifecycleStatus.PAUSED,
+          downloadProgress: 0.5,
+          selectedProjectorId: 'org/model:mmproj-a',
+          multimodalReadiness: {
+            modelId: 'org/model',
+            status: 'ready',
+            projectorId: 'org/model:mmproj-a',
+            support: ['vision'],
+            checkedAt: 123,
+          },
+          projectorCandidates: [
+            makeProjector({
+              id: 'org/model:mmproj-a',
+              fileName: 'mmproj-a.gguf',
+              localPath: 'partial-mmproj-a.gguf',
+              resumeData: JSON.stringify({ resumeData: 'projector-a-resume' }),
+              lifecycleStatus: 'paused',
+              matchStatus: 'user_selected',
+              matchReason: 'user_selected_projector',
+            }),
+            makeProjector({
+              id: 'org/model:mmproj-b',
+              fileName: 'stale-mmproj-b.gguf',
+              localPath: 'partial-stale-mmproj-b.gguf',
+              resumeData: JSON.stringify({ resumeData: 'stale-projector-b-resume' }),
+              lifecycleStatus: 'paused',
+            }),
+          ],
+        }),
+      },
+    );
+
+    const projectorA = merged.projectorCandidates?.find((projector) => projector.id === 'org/model:mmproj-a');
+    const projectorB = merged.projectorCandidates?.find((projector) => projector.id === 'org/model:mmproj-b');
+    expect(projectorA).toEqual(expect.objectContaining({
+      id: 'org/model:mmproj-a',
+      localPath: 'partial-mmproj-a.gguf',
+    }));
+    expect(projectorB).toEqual(expect.objectContaining({
+      id: 'org/model:mmproj-b',
+      fileName: 'fresh-mmproj-b.gguf',
+    }));
+    expect(projectorB?.localPath).toBeUndefined();
+    expect(merged.selectedProjectorId).toBeUndefined();
+    expect(merged.multimodalReadiness).toBeUndefined();
+  });
+
+  it('preserves a compatible runtime projector remapped to the blocked incoming selected projector', () => {
     const merged = mergeModelWithRuntimeState(
       makeModel({
         size: 3 * 1024 * 1024 * 1024,
@@ -1031,9 +1099,9 @@ describe('modelRuntimeState', () => {
     }));
     expect(merged.selectedProjectorId).toBe('org/model:mmproj');
     expect(merged.multimodalReadiness).toEqual(expect.objectContaining({
-      modelId: 'org/model',
       status: 'ready',
       projectorId: 'org/model:mmproj',
+      checkedAt: 123,
     }));
   });
 });

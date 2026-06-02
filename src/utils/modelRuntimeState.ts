@@ -51,10 +51,18 @@ function resolveMergedSelectedProjectorId(
   blockedRuntimeProjectorIds: Set<string> = new Set(),
   blockedNextProjectorIds: Set<string> = blockedRuntimeProjectorIds,
 ): string | undefined {
-  if (nextSelectedProjectorId && candidateIds.has(nextSelectedProjectorId)) {
-    if (!blockedNextProjectorIds.has(nextSelectedProjectorId)) {
-      return nextSelectedProjectorId;
-    }
+  const blockedIncomingSelectedProjectorId = nextSelectedProjectorId
+    && candidateIds.has(nextSelectedProjectorId)
+    && blockedNextProjectorIds.has(nextSelectedProjectorId)
+    ? nextSelectedProjectorId
+    : undefined;
+
+  if (
+    nextSelectedProjectorId
+    && candidateIds.has(nextSelectedProjectorId)
+    && !blockedIncomingSelectedProjectorId
+  ) {
+    return nextSelectedProjectorId;
   }
 
   if (!runtimeSelectedProjectorId) {
@@ -68,7 +76,33 @@ function resolveMergedSelectedProjectorId(
   const selectedProjectorId = runtimeToNextProjectorIds.get(runtimeSelectedProjectorId)
     ?? runtimeSelectedProjectorId;
 
+  if (blockedIncomingSelectedProjectorId) {
+    return selectedProjectorId === blockedIncomingSelectedProjectorId
+      && runtimeSelectedProjectorId !== selectedProjectorId
+      && candidateIds.has(selectedProjectorId)
+      ? selectedProjectorId
+      : undefined;
+  }
+
+  if (blockedNextProjectorIds.has(selectedProjectorId)) {
+    return undefined;
+  }
+
   return candidateIds.has(selectedProjectorId) ? selectedProjectorId : undefined;
+}
+
+function shouldSuppressReadinessForBlockedIncomingProjector(
+  nextSelectedProjectorId: string | undefined,
+  selectedProjectorId: string | undefined,
+  candidateIds: Set<string>,
+  blockedNextProjectorIds: Set<string>,
+): boolean {
+  return Boolean(
+    nextSelectedProjectorId
+    && candidateIds.has(nextSelectedProjectorId)
+    && blockedNextProjectorIds.has(nextSelectedProjectorId)
+    && selectedProjectorId !== nextSelectedProjectorId,
+  );
 }
 
 function remapMultimodalReadiness(
@@ -172,21 +206,29 @@ function mergeProjectorRuntimeFields(
     ...blockedRuntimeProjectorIds,
   ]);
   const blockedRuntimeResolvedReadinessProjectorIds = new Set(mergeBlockedNextReadinessProjectorIds);
+  const shouldSuppressMultimodalReadiness = shouldSuppressReadinessForBlockedIncomingProjector(
+    model.selectedProjectorId,
+    selectedProjectorId,
+    candidateIds,
+    blockedNextProjectorIds,
+  );
 
   return {
     projectorCandidates,
     selectedProjectorId,
-    multimodalReadiness: resolveMergedMultimodalReadiness(
-      model.id,
-      model.multimodalReadiness,
-      runtimeModel.multimodalReadiness,
-      candidateIds,
-      runtimeToNextProjectorIds,
-      selectedProjectorId,
-      blockedNextReadinessProjectorIds,
-      blockedRuntimeReadinessProjectorIds,
-      blockedRuntimeResolvedReadinessProjectorIds,
-    ),
+    multimodalReadiness: shouldSuppressMultimodalReadiness
+      ? undefined
+      : resolveMergedMultimodalReadiness(
+        model.id,
+        model.multimodalReadiness,
+        runtimeModel.multimodalReadiness,
+        candidateIds,
+        runtimeToNextProjectorIds,
+        selectedProjectorId,
+        blockedNextReadinessProjectorIds,
+        blockedRuntimeReadinessProjectorIds,
+        blockedRuntimeResolvedReadinessProjectorIds,
+      ),
   };
 }
 

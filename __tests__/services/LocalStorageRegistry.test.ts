@@ -242,6 +242,138 @@ describe('LocalStorageRegistry', () => {
     expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/models/mmproj-model.gguf');
   });
 
+  it('keeps a projector file when another model localPath still references it', async () => {
+    const model = createMockModel({
+      projectorCandidates: [createProjector({ localPath: 'shared-cross-asset.gguf' })],
+    });
+    const otherModel = createMockModel({
+      id: 'test/other-model',
+      localPath: 'shared-cross-asset.gguf',
+    });
+    mockStorage.getString.mockImplementation((key: string) => {
+      if (key === 'models-registry:index-v1') {
+        return JSON.stringify([model.id, otherModel.id]);
+      }
+
+      if (key === 'models-registry:model-v1:test%2Fmodel') {
+        return JSON.stringify(model);
+      }
+
+      if (key === 'models-registry:model-v1:test%2Fother-model') {
+        return JSON.stringify(otherModel);
+      }
+
+      return null;
+    });
+
+    await registry.removeModel(model.id);
+
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/models/model.gguf');
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/models/shared-cross-asset.gguf');
+  });
+
+  it('keeps a model file when another model projector still references it', async () => {
+    const model = createMockModel({ localPath: 'shared-cross-asset.gguf' });
+    const otherModel = createMockModel({
+      id: 'test/other-model',
+      localPath: 'other-model.gguf',
+      projectorCandidates: [
+        createProjector({
+          id: 'projector-test-other-main-shared-cross-asset.gguf',
+          ownerModelId: 'test/other-model',
+          localPath: 'shared-cross-asset.gguf',
+        }),
+      ],
+    });
+    mockStorage.getString.mockImplementation((key: string) => {
+      if (key === 'models-registry:index-v1') {
+        return JSON.stringify([model.id, otherModel.id]);
+      }
+
+      if (key === 'models-registry:model-v1:test%2Fmodel') {
+        return JSON.stringify(model);
+      }
+
+      if (key === 'models-registry:model-v1:test%2Fother-model') {
+        return JSON.stringify(otherModel);
+      }
+
+      return null;
+    });
+
+    await registry.removeModel(model.id);
+
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/models/shared-cross-asset.gguf');
+    expect(mockStorage.remove).toHaveBeenCalledWith('models-registry:model-v1:test%2Fmodel');
+  });
+
+  it('deletes a model file when only stale available model metadata still references it', async () => {
+    const model = createMockModel({ localPath: 'stale-available-model.gguf' });
+    const otherModel = createMockModel({
+      id: 'test/other-model',
+      localPath: 'stale-available-model.gguf',
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+    });
+    mockStorage.getString.mockImplementation((key: string) => {
+      if (key === 'models-registry:index-v1') {
+        return JSON.stringify([model.id, otherModel.id]);
+      }
+
+      if (key === 'models-registry:model-v1:test%2Fmodel') {
+        return JSON.stringify(model);
+      }
+
+      if (key === 'models-registry:model-v1:test%2Fother-model') {
+        return JSON.stringify(otherModel);
+      }
+
+      return null;
+    });
+
+    await registry.removeModel(model.id);
+
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/models/stale-available-model.gguf');
+    expect(mockStorage.remove).toHaveBeenCalledWith('models-registry:model-v1:test%2Fmodel');
+  });
+
+  it('deletes a projector file when only stale available projector metadata still references it', async () => {
+    const model = createMockModel({
+      projectorCandidates: [createProjector({ localPath: 'stale-available-projector.gguf' })],
+    });
+    const otherModel = createMockModel({
+      id: 'test/other-model',
+      localPath: 'other-model.gguf',
+      projectorCandidates: [
+        createProjector({
+          id: 'projector-test-other-main-stale-available-projector.gguf',
+          ownerModelId: 'test/other-model',
+          lifecycleStatus: 'available',
+          localPath: 'stale-available-projector.gguf',
+        }),
+      ],
+    });
+    mockStorage.getString.mockImplementation((key: string) => {
+      if (key === 'models-registry:index-v1') {
+        return JSON.stringify([model.id, otherModel.id]);
+      }
+
+      if (key === 'models-registry:model-v1:test%2Fmodel') {
+        return JSON.stringify(model);
+      }
+
+      if (key === 'models-registry:model-v1:test%2Fother-model') {
+        return JSON.stringify(otherModel);
+      }
+
+      return null;
+    });
+
+    await registry.removeModel(model.id);
+
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/models/model.gguf');
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/models/stale-available-projector.gguf');
+  });
+
   it('keeps a failed projector partial when another model association still references it', async () => {
     const sharedProjector = createProjector({
       lifecycleStatus: 'failed',

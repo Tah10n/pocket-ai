@@ -177,10 +177,17 @@ export function useChatImageAttachments({
         return;
       }
 
-      const selectedAssets = result.assets.slice(0, MAX_CHAT_IMAGE_ATTACHMENTS);
-      const nextDrafts = await Promise.all(selectedAssets.map(async (asset) => {
+      const selectedAssets = result.assets.slice(0, pickerRemainingSlots);
+      const nextDrafts: AttachmentDraft[] = [];
+      for (const asset of selectedAssets) {
+        if (!isCurrentFlow()) {
+          discardDraftsQuietly(nextDrafts, 'stale picked drafts');
+          return;
+        }
+
+        let nextDraft: AttachmentDraft;
         try {
-          return await chatAttachmentStorageService.copyImageAssetToDraft(asset);
+          nextDraft = await chatAttachmentStorageService.copyImageAssetToDraft(asset);
         } catch (error) {
           const isTooLarge = isChatImageAttachmentTooLargeError(error);
           const logMessage = isTooLarge
@@ -191,9 +198,16 @@ export function useChatImageAttachments({
             reason: isTooLarge ? 'too_large' : 'copy_failed',
             ...getSanitizedErrorDetails(error),
           });
-          return buildFailedAttachmentDraft(asset, isTooLarge ? 'too_large' : 'copy_failed');
+          nextDraft = buildFailedAttachmentDraft(asset, isTooLarge ? 'too_large' : 'copy_failed');
         }
-      }));
+
+        if (!isCurrentFlow()) {
+          discardDraftsQuietly([...nextDrafts, nextDraft], 'stale picked drafts');
+          return;
+        }
+
+        nextDrafts.push(nextDraft);
+      }
 
       if (!isCurrentFlow()) {
         discardDraftsQuietly(nextDrafts, 'stale picked drafts');

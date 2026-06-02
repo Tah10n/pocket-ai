@@ -187,7 +187,7 @@ describe('useChatImageAttachments', () => {
     expect(chatAttachmentStorageService.copyImageAssetToDraft).toHaveBeenCalledTimes(1);
   });
 
-  it('discards copied drafts that do not fit at commit time', async () => {
+  it('ignores extra picker assets beyond the remaining slot limit', async () => {
     const initialDrafts = Array.from({ length: MAX_CHAT_IMAGE_ATTACHMENTS - 1 }, (_, index) => ({
       id: `initial-draft-${index}`,
       pickerUri: `ph://initial-image-${index}`,
@@ -230,8 +230,7 @@ describe('useChatImageAttachments', () => {
       }],
     });
     (chatAttachmentStorageService.copyImageAssetToDraft as jest.Mock)
-      .mockResolvedValueOnce(appendedDraft)
-      .mockResolvedValueOnce(overflowDraft);
+      .mockResolvedValueOnce(appendedDraft);
     renderHarness({ enabled: true, initialDrafts });
 
     await act(async () => {
@@ -247,7 +246,8 @@ describe('useChatImageAttachments', () => {
     expect(latestHook?.drafts).not.toEqual(expect.arrayContaining([expect.objectContaining({
       id: 'draft-overflow',
     })]));
-    expect(chatAttachmentStorageService.discardDrafts).toHaveBeenCalledWith([overflowDraft]);
+    expect(chatAttachmentStorageService.copyImageAssetToDraft).toHaveBeenCalledTimes(1);
+    expect(chatAttachmentStorageService.discardDrafts).not.toHaveBeenCalledWith([overflowDraft]);
   });
 
   it('blocks selection when the draft limit is already reached', async () => {
@@ -546,6 +546,82 @@ describe('useChatImageAttachments', () => {
       expect(latestHook?.drafts).toHaveLength(0);
     });
     expect(chatAttachmentStorageService.discardDrafts).toHaveBeenCalledWith([staleDraft]);
+  });
+
+  it('does not start copying later picker assets after the owner context changes', async () => {
+    const firstDraft = {
+      id: 'draft-first-stale',
+      pickerUri: 'ph://library-image-1',
+      previewUri: 'test-dir/chat-attachments/draft-first-stale.jpg',
+      localUri: 'test-dir/chat-attachments/draft-first-stale.jpg',
+      copyStatus: 'copied' as const,
+    };
+    const firstCopyGate: { resolve?: (draft: typeof firstDraft) => void } = {};
+    (ImagePicker.launchImageLibraryAsync as jest.Mock).mockResolvedValueOnce({
+      canceled: false,
+      assets: [
+        {
+          uri: 'ph://library-image-1',
+          width: 1024,
+          height: 768,
+          mimeType: 'image/jpeg',
+          fileName: 'image-1.jpg',
+          fileSize: 1234,
+          type: 'image',
+        },
+        {
+          uri: 'ph://library-image-2',
+          width: 1024,
+          height: 768,
+          mimeType: 'image/jpeg',
+          fileName: 'image-2.jpg',
+          fileSize: 1234,
+          type: 'image',
+        },
+      ],
+    });
+    (chatAttachmentStorageService.copyImageAssetToDraft as jest.Mock).mockImplementationOnce(
+      () => new Promise((resolve) => {
+        firstCopyGate.resolve = resolve;
+      }),
+    );
+    const Harness = ({ ownerKey }: { ownerKey: string }) => {
+      const value = useChatImageAttachments({ enabled: true, ownerKey });
+      useEffect(() => {
+        latestHook = value;
+      }, [value]);
+      return null;
+    };
+
+    const { rerender } = render(<Harness ownerKey="thread-1:model-vision" />);
+
+    let attachPromise = Promise.resolve();
+    await act(async () => {
+      attachPromise = latestHook?.attachImages() ?? Promise.resolve();
+      for (let attempt = 0; attempt < 10 && !firstCopyGate.resolve; attempt += 1) {
+        // eslint-disable-next-line no-await-in-loop
+        await Promise.resolve();
+      }
+      if (!firstCopyGate.resolve) {
+        throw new Error('copy promise was not created');
+      }
+    });
+
+    const releaseFirstCopy = firstCopyGate.resolve;
+    if (!releaseFirstCopy) {
+      throw new Error('copy promise was not created');
+    }
+    await act(async () => {
+      rerender(<Harness ownerKey="thread-2:model-vision" />);
+    });
+
+    await act(async () => {
+      releaseFirstCopy(firstDraft);
+      await attachPromise;
+    });
+
+    expect(chatAttachmentStorageService.copyImageAssetToDraft).toHaveBeenCalledTimes(1);
+    expect(chatAttachmentStorageService.discardDrafts).toHaveBeenCalledWith([firstDraft]);
   });
 
   it('discards picker results that arrive after image attachments become disabled', async () => {

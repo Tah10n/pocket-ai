@@ -81,9 +81,24 @@ function buildStoredAttachment(threadId: string, messageId: string, fileName: st
   };
 }
 
-async function flushAttachmentCleanup() {
-  await Promise.resolve();
-  await Promise.resolve();
+async function flushAttachmentCleanup(cycles = 2) {
+  for (let cycle = 0; cycle < cycles; cycle += 1) {
+    await Promise.resolve();
+  }
+}
+
+function captureScheduledTimeouts() {
+  const callbacks: Array<() => void> = [];
+  const delays: Array<number | undefined> = [];
+  const setTimeoutSpy = jest
+    .spyOn(global, 'setTimeout')
+    .mockImplementation((callback, delay) => {
+      callbacks.push(callback as () => void);
+      delays.push(typeof delay === 'number' ? delay : undefined);
+      return callbacks.length as unknown as ReturnType<typeof setTimeout>;
+    });
+
+  return { callbacks, delays, setTimeoutSpy };
 }
 
 describe('chatStore', () => {
@@ -3070,16 +3085,24 @@ describe('chatStore', () => {
   it('reconciles the attachment directory on hydration with no referenced attachments', async () => {
     const reconcileSpy = jest
       .spyOn(chatAttachmentStorageService, 'reconcileAttachmentDirectory')
-      .mockResolvedValue(1);
+      .mockResolvedValue({
+        deletedCount: 1,
+        attemptedDeleteCount: 1,
+        candidateCount: 1,
+        hasMoreCandidates: false,
+      });
 
     try {
       useChatStore.setState({ threads: {}, activeThreadId: null });
       await useChatStore.persist.rehydrate();
+      await flushAttachmentCleanup();
 
       expect(reconcileSpy).toHaveBeenCalledTimes(1);
       expect(Array.from(reconcileSpy.mock.calls[0]?.[0] as Iterable<string>)).toEqual([]);
       expect(reconcileSpy.mock.calls[0]?.[1]).toEqual(expect.objectContaining({
         preserveDraftsCreatedAtOrAfter: expect.any(Number),
+        maxCandidates: 16,
+        maxDeletes: 16,
       }));
     } finally {
       reconcileSpy.mockRestore();
@@ -3103,7 +3126,12 @@ describe('chatStore', () => {
     };
     const reconcileSpy = jest
       .spyOn(chatAttachmentStorageService, 'reconcileAttachmentDirectory')
-      .mockResolvedValue(0);
+      .mockResolvedValue({
+        deletedCount: 0,
+        attemptedDeleteCount: 0,
+        candidateCount: 0,
+        hasMoreCandidates: false,
+      });
 
     try {
       writeChatThreadRecord(storage, thread, 20);
@@ -3116,6 +3144,7 @@ describe('chatStore', () => {
 
       useChatStore.setState({ threads: {}, activeThreadId: null });
       await useChatStore.persist.rehydrate();
+      await flushAttachmentCleanup();
 
       expect(reconcileSpy).toHaveBeenCalledTimes(1);
       expect(new Set(reconcileSpy.mock.calls[0]?.[0] as Iterable<string>)).toEqual(
@@ -3123,9 +3152,356 @@ describe('chatStore', () => {
       );
       expect(reconcileSpy.mock.calls[0]?.[1]).toEqual(expect.objectContaining({
         preserveDraftsCreatedAtOrAfter: expect.any(Number),
+        maxCandidates: 16,
+        maxDeletes: 16,
       }));
     } finally {
       reconcileSpy.mockRestore();
+    }
+  });
+
+  it('schedules a later hydration directory reconciliation pass when candidates remain', async () => {
+    const referencedAttachment = buildStoredAttachment('thread-reconcile-reschedule', 'user-1', 'keep.jpg');
+    const thread: ChatThread = {
+      ...buildThread('thread-reconcile-reschedule', 20),
+      messages: [
+        {
+          id: 'user-1',
+          role: 'user',
+          content: 'Preserve referenced attachment during rescheduled cleanup',
+          createdAt: 20,
+          state: 'complete',
+          attachments: [referencedAttachment],
+        },
+      ],
+    };
+    const reconcileSpy = jest
+      .spyOn(chatAttachmentStorageService, 'reconcileAttachmentDirectory')
+      .mockResolvedValueOnce({
+        deletedCount: 16,
+        attemptedDeleteCount: 16,
+        candidateCount: 17,
+        hasMoreCandidates: true,
+      })
+      .mockResolvedValue({
+        deletedCount: 0,
+        attemptedDeleteCount: 0,
+        candidateCount: 0,
+        hasMoreCandidates: false,
+      });
+    const { callbacks, delays, setTimeoutSpy } = captureScheduledTimeouts();
+
+    try {
+      writeChatThreadRecord(storage, thread, 20);
+      writeChatPersistenceIndex(storage, {
+        schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+        activeThreadId: thread.id,
+        threadIds: [thread.id],
+        updatedAt: 21,
+      });
+
+      useChatStore.setState({ threads: {}, activeThreadId: null });
+      await useChatStore.persist.rehydrate();
+      await flushAttachmentCleanup();
+
+      expect(reconcileSpy).toHaveBeenCalledTimes(1);
+      reconcileSpy.mock.calls.forEach(([referencedLocalUris, options]) => {
+        expect(new Set(referencedLocalUris as Iterable<string>)).toEqual(
+          new Set([referencedAttachment.localUri]),
+        );
+        expect(options).toEqual(expect.objectContaining({
+          preserveDraftsCreatedAtOrAfter: expect.any(Number),
+          maxCandidates: 16,
+          maxDeletes: 16,
+        }));
+      });
+      expect(setTimeoutSpy).toHaveBeenCalledTimes(1);
+      expect(delays[0]).toBe(1_000);
+    } finally {
+      const pendingRetry = callbacks.shift();
+      if (pendingRetry) {
+        pendingRetry();
+        await flushAttachmentCleanup();
+      }
+      setTimeoutSpy.mockRestore();
+      reconcileSpy.mockRestore();
+    }
+  });
+
+  it('keeps the original draft cutoff across hydration directory reconciliation retries', async () => {
+    let now = 100;
+    const dateNowSpy = jest.spyOn(Date, 'now').mockImplementation(() => now);
+    (FileSystem.readDirectoryAsync as jest.Mock)
+      .mockResolvedValueOnce(Array.from({ length: 17 }, (_, index) => `orphan-${index}.jpg`))
+      .mockResolvedValueOnce(['draft-150-between.jpg']);
+    const setTimeoutSpy = jest
+      .spyOn(global, 'setTimeout')
+      .mockImplementation((callback) => {
+        now = 200;
+        (callback as () => void)();
+        return 0 as unknown as ReturnType<typeof setTimeout>;
+      });
+
+    try {
+      useChatStore.setState({ threads: {}, activeThreadId: null });
+      await useChatStore.persist.rehydrate();
+      await flushAttachmentCleanup(80);
+
+      expect(FileSystem.readDirectoryAsync).toHaveBeenCalledTimes(2);
+      expect(setTimeoutSpy).toHaveBeenCalledTimes(1);
+      expect(FileSystem.deleteAsync).toHaveBeenCalledTimes(16);
+      expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith(
+        'test-dir/chat-attachments/draft-150-between.jpg',
+        expect.anything(),
+      );
+    } finally {
+      setTimeoutSpy.mockRestore();
+      dateNowSpy.mockRestore();
+    }
+  });
+
+  it('retries zero-progress hydration directory reconciliation only within a bounded budget', async () => {
+    const reconcileSpy = jest
+      .spyOn(chatAttachmentStorageService, 'reconcileAttachmentDirectory')
+      .mockResolvedValue({
+        deletedCount: 0,
+        attemptedDeleteCount: 16,
+        candidateCount: 17,
+        hasMoreCandidates: true,
+      });
+    const { callbacks, delays, setTimeoutSpy } = captureScheduledTimeouts();
+
+    try {
+      useChatStore.setState({ threads: {}, activeThreadId: null });
+      await useChatStore.persist.rehydrate();
+      await flushAttachmentCleanup();
+
+      expect(reconcileSpy).toHaveBeenCalledTimes(1);
+      expect(setTimeoutSpy).toHaveBeenCalledTimes(1);
+      expect(delays[0]).toBe(1_000);
+
+      callbacks.shift()?.();
+      await flushAttachmentCleanup();
+
+      expect(reconcileSpy).toHaveBeenCalledTimes(2);
+      expect(setTimeoutSpy).toHaveBeenCalledTimes(2);
+      expect(delays[1]).toBe(2_000);
+
+      callbacks.shift()?.();
+      await flushAttachmentCleanup();
+
+      expect(reconcileSpy).toHaveBeenCalledTimes(3);
+      expect(setTimeoutSpy).toHaveBeenCalledTimes(2);
+      expect(callbacks).toHaveLength(0);
+    } finally {
+      while (callbacks.length > 0) {
+        callbacks.shift()?.();
+        await flushAttachmentCleanup();
+      }
+      setTimeoutSpy.mockRestore();
+      reconcileSpy.mockRestore();
+    }
+  });
+
+  it('retries transient final-batch hydration directory delete failures', async () => {
+    const reconcileSpy = jest
+      .spyOn(chatAttachmentStorageService, 'reconcileAttachmentDirectory')
+      .mockResolvedValueOnce({
+        deletedCount: 0,
+        attemptedDeleteCount: 2,
+        candidateCount: 2,
+        hasMoreCandidates: false,
+      })
+      .mockResolvedValue({
+        deletedCount: 2,
+        attemptedDeleteCount: 2,
+        candidateCount: 2,
+        hasMoreCandidates: false,
+      });
+    const { callbacks, delays, setTimeoutSpy } = captureScheduledTimeouts();
+
+    try {
+      useChatStore.setState({ threads: {}, activeThreadId: null });
+      await useChatStore.persist.rehydrate();
+      await flushAttachmentCleanup();
+
+      expect(reconcileSpy).toHaveBeenCalledTimes(1);
+      expect(setTimeoutSpy).toHaveBeenCalledTimes(1);
+      expect(delays[0]).toBe(1_000);
+
+      callbacks.shift()?.();
+      await flushAttachmentCleanup();
+
+      expect(reconcileSpy).toHaveBeenCalledTimes(2);
+      expect(setTimeoutSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      while (callbacks.length > 0) {
+        callbacks.shift()?.();
+        await flushAttachmentCleanup();
+      }
+      setTimeoutSpy.mockRestore();
+      reconcileSpy.mockRestore();
+    }
+  });
+
+  it('deduplicates hydration directory reconciliation retry timers across repeated rehydrate', async () => {
+    const reconcileSpy = jest
+      .spyOn(chatAttachmentStorageService, 'reconcileAttachmentDirectory')
+      .mockResolvedValueOnce({
+        deletedCount: 0,
+        attemptedDeleteCount: 16,
+        candidateCount: 17,
+        hasMoreCandidates: true,
+      })
+      .mockResolvedValue({
+        deletedCount: 0,
+        attemptedDeleteCount: 0,
+        candidateCount: 0,
+        hasMoreCandidates: false,
+      });
+    const { callbacks, setTimeoutSpy } = captureScheduledTimeouts();
+
+    try {
+      useChatStore.setState({ threads: {}, activeThreadId: null });
+      await useChatStore.persist.rehydrate();
+      await flushAttachmentCleanup();
+
+      expect(reconcileSpy).toHaveBeenCalledTimes(1);
+      expect(setTimeoutSpy).toHaveBeenCalledTimes(1);
+      expect(callbacks).toHaveLength(1);
+
+      await useChatStore.persist.rehydrate();
+      await flushAttachmentCleanup();
+
+      expect(reconcileSpy).toHaveBeenCalledTimes(1);
+      expect(setTimeoutSpy).toHaveBeenCalledTimes(1);
+      expect(callbacks).toHaveLength(1);
+
+      callbacks.shift()?.();
+      await flushAttachmentCleanup();
+
+      expect(reconcileSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      while (callbacks.length > 0) {
+        callbacks.shift()?.();
+        await flushAttachmentCleanup();
+      }
+      setTimeoutSpy.mockRestore();
+      reconcileSpy.mockRestore();
+    }
+  });
+
+  it('uses current store threads when hydration directory reconciliation retries', async () => {
+    const firstAttachment = buildStoredAttachment('thread-reconcile-first', 'user-1', 'first.jpg');
+    const secondAttachment = buildStoredAttachment('thread-reconcile-second', 'user-1', 'second.jpg');
+    const firstThread: ChatThread = {
+      ...buildThread('thread-reconcile-first', 20),
+      messages: [
+        {
+          id: 'user-1',
+          role: 'user',
+          content: 'First referenced attachment',
+          createdAt: 20,
+          state: 'complete',
+          attachments: [firstAttachment],
+        },
+      ],
+    };
+    const secondThread: ChatThread = {
+      ...buildThread('thread-reconcile-second', 30),
+      messages: [
+        {
+          id: 'user-1',
+          role: 'user',
+          content: 'Second referenced attachment',
+          createdAt: 30,
+          state: 'complete',
+          attachments: [secondAttachment],
+        },
+      ],
+    };
+    const reconcileSpy = jest
+      .spyOn(chatAttachmentStorageService, 'reconcileAttachmentDirectory')
+      .mockResolvedValueOnce({
+        deletedCount: 16,
+        attemptedDeleteCount: 16,
+        candidateCount: 17,
+        hasMoreCandidates: true,
+      })
+      .mockResolvedValue({
+        deletedCount: 0,
+        attemptedDeleteCount: 0,
+        candidateCount: 0,
+        hasMoreCandidates: false,
+      });
+    const { callbacks, setTimeoutSpy } = captureScheduledTimeouts();
+
+    try {
+      writeChatThreadRecord(storage, firstThread, 20);
+      writeChatPersistenceIndex(storage, {
+        schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+        activeThreadId: firstThread.id,
+        threadIds: [firstThread.id],
+        updatedAt: 21,
+      });
+
+      useChatStore.setState({ threads: {}, activeThreadId: null });
+      await useChatStore.persist.rehydrate();
+      await flushAttachmentCleanup();
+
+      expect(new Set(reconcileSpy.mock.calls[0]?.[0] as Iterable<string>)).toEqual(
+        new Set([firstAttachment.localUri]),
+      );
+      expect(setTimeoutSpy).toHaveBeenCalledTimes(1);
+
+      useChatStore.setState({
+        threads: { [secondThread.id]: secondThread },
+        activeThreadId: secondThread.id,
+      });
+
+      callbacks.shift()?.();
+      await flushAttachmentCleanup();
+
+      expect(reconcileSpy).toHaveBeenCalledTimes(2);
+      expect(new Set(reconcileSpy.mock.calls[1]?.[0] as Iterable<string>)).toEqual(
+        new Set([secondAttachment.localUri]),
+      );
+    } finally {
+      while (callbacks.length > 0) {
+        callbacks.shift()?.();
+        await flushAttachmentCleanup();
+      }
+      setTimeoutSpy.mockRestore();
+      reconcileSpy.mockRestore();
+    }
+  });
+
+  it('does not perform unbounded hydration attachment directory deletion in one scheduled pass', async () => {
+    const fileNames = Array.from({ length: 40 }, (_, index) => `orphan-${index}.jpg`);
+    (FileSystem.readDirectoryAsync as jest.Mock).mockResolvedValueOnce(fileNames);
+    const { callbacks, delays, setTimeoutSpy } = captureScheduledTimeouts();
+
+    try {
+      useChatStore.setState({ threads: {}, activeThreadId: null });
+      await useChatStore.persist.rehydrate();
+      await flushAttachmentCleanup(80);
+
+      expect(FileSystem.readDirectoryAsync).toHaveBeenCalledTimes(1);
+      expect(FileSystem.readDirectoryAsync).toHaveBeenCalledWith('test-dir/chat-attachments/');
+      expect(FileSystem.deleteAsync).toHaveBeenCalledTimes(16);
+      expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/chat-attachments/orphan-15.jpg', {
+        idempotent: true,
+      });
+      expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/chat-attachments/orphan-16.jpg', expect.anything());
+      expect(setTimeoutSpy).toHaveBeenCalledTimes(1);
+      expect(delays[0]).toBe(1_000);
+    } finally {
+      const pendingRetry = callbacks.shift();
+      if (pendingRetry) {
+        pendingRetry();
+        await flushAttachmentCleanup();
+      }
+      setTimeoutSpy.mockRestore();
     }
   });
 

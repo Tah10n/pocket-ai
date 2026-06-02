@@ -131,6 +131,16 @@ export const ChatInputBar = ({
     const isControlled = typeof draft === 'string';
     const message = isControlled ? draft : internalMessage;
     const hasAttachmentCopyFailures = imageAttachmentsEnabled && hasFailedDraftImageAttachments(attachmentDrafts);
+    const hasTooLargeAttachmentFailures = imageAttachmentsEnabled
+        && attachmentDrafts.some((attachmentDraft) => (
+            attachmentDraft.copyStatus === 'failed'
+            && attachmentDraft.errorReason === 'too_large'
+        ));
+    const hasCopyOrStorageAttachmentFailures = imageAttachmentsEnabled
+        && attachmentDrafts.some((attachmentDraft) => (
+            attachmentDraft.copyStatus === 'failed'
+            && attachmentDraft.errorReason !== 'too_large'
+        ));
     const sendableAttachmentDrafts = imageAttachmentsEnabled
         ? getSendableDraftImageAttachments(attachmentDrafts)
         : [];
@@ -309,13 +319,29 @@ export const ChatInputBar = ({
         </Box>
     );
 
-    const attachmentHelperText = hasAttachmentCopyFailures
-        ? t('chat.attachments.copyFailed')
-        : attachmentLimitReached
-            ? t('chat.attachments.limitReached', { count: MAX_CHAT_IMAGE_ATTACHMENTS })
-            : !imageAttachmentsEnabled && imageAttachmentsDisabledReason
-                ? t(imageAttachmentsDisabledReason)
-                : null;
+    const attachmentHelperText = (() => {
+        if (hasTooLargeAttachmentFailures && hasCopyOrStorageAttachmentFailures) {
+            return t('chat.attachments.mixedFailures');
+        }
+
+        if (hasTooLargeAttachmentFailures) {
+            return t('chat.attachments.tooLarge');
+        }
+
+        if (hasAttachmentCopyFailures) {
+            return t('chat.attachments.copyFailed');
+        }
+
+        if (attachmentLimitReached) {
+            return t('chat.attachments.limitReached', { count: MAX_CHAT_IMAGE_ATTACHMENTS });
+        }
+
+        if (!imageAttachmentsEnabled && imageAttachmentsDisabledReason) {
+            return t(imageAttachmentsDisabledReason);
+        }
+
+        return null;
+    })();
     const builtInAttachmentsTray = attachmentDrafts.length > 0 || attachmentHelperText || isImageAttachmentActionBusy ? (
         <Box testID="chat-image-attachments-tray" className="gap-2">
             {isImageAttachmentActionBusy ? (
@@ -350,6 +376,13 @@ export const ChatInputBar = ({
                         const draftKey = draft.id ?? draft.localUri ?? draft.previewUri ?? draft.pickerUri;
                         const isFailed = draft.copyStatus === 'failed';
                         const attachmentLabelOptions = { index: index + 1, count: attachmentDrafts.length };
+                        const failedAttachmentReason = draft.errorReason === 'too_large'
+                            ? t('chat.attachments.tooLarge')
+                            : t('chat.attachments.copyFailed');
+                        const failedAttachmentLabel = t('chat.attachments.failedPreviewIndexedAccessibilityLabel', {
+                            ...attachmentLabelOptions,
+                            reason: failedAttachmentReason,
+                        });
 
                         return (
                             <Box key={`${draftKey}-${index}`} className="mr-2">
@@ -359,7 +392,10 @@ export const ChatInputBar = ({
                                 >
                                     {isFailed ? (
                                         <Box
-                                            testID={`chat-image-attachment-preview-${index}`}
+                                            testID={`chat-image-attachment-failed-preview-${index}`}
+                                            accessibilityRole="image"
+                                            accessibilityLabel={failedAttachmentLabel}
+                                            accessibilityState={{ disabled: true }}
                                             className="h-full w-full items-center justify-center rounded-xl"
                                         >
                                             <ScreenIconTile

@@ -24,8 +24,13 @@ import { backgroundTaskService } from '../../src/services/BackgroundTaskService'
 import { notificationService } from '../../src/services/NotificationService';
 import { registry } from '../../src/services/LocalStorageRegistry';
 import { PrivateStorageUnavailableError, getPrivateStorageHealthSnapshot, isPrivateStorageWritable } from '../../src/services/storage';
-import { copiedDraftImageAttachment, copiedImageAttachment } from '../fixtures/chatImageAttachmentFixtures';
-import type { MultimodalReadinessState } from '../../src/types/multimodal';
+import {
+  copiedDraftImageAttachment,
+  copiedImageAttachment,
+  draftImageAttachment,
+  failedDraftImageAttachment,
+} from '../fixtures/chatImageAttachmentFixtures';
+import type { AttachmentDraft, MultimodalReadinessState } from '../../src/types/multimodal';
 import { buildInferenceWindowWithAccurateTokenCounts } from '../../src/utils/inferenceWindow';
 
 jest.mock('../../src/services/LLMEngineService', () => ({
@@ -293,6 +298,32 @@ describe('useChatSession', () => {
     });
     expect(thread?.messages.map((message) => message.role)).toEqual(['user', 'assistant']);
     expect(thread?.messages.at(-1)?.content).toBe('Hello back');
+  });
+
+  it('sanitizes prompt token fallback warnings without logging raw attachment paths', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    (llmEngineService.countPromptTokens as jest.Mock).mockRejectedValueOnce(
+      new Error('native tokenize failed for file:///private/chat-attachments/image.jpg'),
+    );
+    const getSession = renderHookHarness();
+
+    try {
+      await act(async () => {
+        await getSession()?.appendUserMessage('Hello there');
+      });
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        '[ChatSession] Failed to count prompt tokens accurately, falling back to heuristics',
+        expect.objectContaining({
+          context: 'prompt_token_count_fallback',
+          errorName: 'Error',
+        }),
+      );
+      expect(warnSpy.mock.calls.flat().some((argument) => argument instanceof Error)).toBe(false);
+      expect(JSON.stringify(warnSpy.mock.calls)).not.toContain('file:///private/chat-attachments/image.jpg');
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
   it('persists copied image attachments on the user message and passes media paths to inference', async () => {
@@ -758,6 +789,52 @@ describe('useChatSession', () => {
       expect(createAssistantPlaceholderSpy).not.toHaveBeenCalled();
       expect(onUserMessageAppended).not.toHaveBeenCalled();
       expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
+      expect(useChatStore.getState().getConversationIndex()).toHaveLength(0);
+    } finally {
+      createThreadSpy.mockRestore();
+      appendMessageSpy.mockRestore();
+      createAssistantPlaceholderSpy.mockRestore();
+    }
+  });
+
+  it.each([
+    ['failed', failedDraftImageAttachment, 'chat_attachment_copy_failed'],
+    ['pending', draftImageAttachment, 'chat_attachment_not_ready'],
+  ] as const)('throws %s draft image error before appending', async (_label, draft, expectedCode) => {
+    const onUserMessageAppended = jest.fn();
+    const chatState = useChatStore.getState();
+    const createThreadSpy = jest.spyOn(chatState, 'createThread');
+    const appendMessageSpy = jest.spyOn(chatState, 'appendMessage');
+    const createAssistantPlaceholderSpy = jest.spyOn(chatState, 'createAssistantPlaceholder');
+    const getSession = renderHookHarness();
+    let thrown: unknown;
+
+    try {
+      await act(async () => {
+        try {
+          await getSession()?.appendUserMessage('Describe this image', {
+            attachmentDrafts: [draft as AttachmentDraft],
+            multimodalReadiness: {
+              modelId: 'author/model-q4',
+              status: 'ready',
+              support: ['vision'],
+              checkedAt: 1,
+            },
+            onUserMessageAppended,
+          });
+        } catch (error) {
+          thrown = error;
+        }
+      });
+
+      expect(thrown).toEqual(expect.objectContaining({ code: expectedCode }));
+      expect(createThreadSpy).not.toHaveBeenCalled();
+      expect(appendMessageSpy).not.toHaveBeenCalled();
+      expect(createAssistantPlaceholderSpy).not.toHaveBeenCalled();
+      expect(onUserMessageAppended).not.toHaveBeenCalled();
+      expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
+      expect(llmEngineService.countPromptTokens).not.toHaveBeenCalled();
+      expect(FileSystem.getInfoAsync).not.toHaveBeenCalled();
       expect(useChatStore.getState().getConversationIndex()).toHaveLength(0);
     } finally {
       createThreadSpy.mockRestore();

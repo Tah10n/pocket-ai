@@ -18,12 +18,19 @@ import {
 
 export { getChatAttachmentsDir } from '@/utils/chatImageAttachments';
 
-const RECENT_DRAFT_RECONCILIATION_PRESERVE_WINDOW_MS = 60 * 1000;
+export type ChatAttachmentDirectoryReconciliationResult = {
+  deletedCount: number;
+  attemptedDeleteCount: number;
+  candidateCount: number;
+  hasMoreCandidates: boolean;
+};
 
 type ChatAttachmentStorageServiceOptions = {
   now?: () => number;
   random?: () => number;
 };
+
+const RECENT_DRAFT_FUTURE_GRACE_MS = 5 * 60 * 1000;
 
 type CopyableImageAsset = Pick<
   ImagePickerAsset,
@@ -83,23 +90,32 @@ function getDraftTimestampFromFileName(fileName: string): number | null {
 function shouldPreserveRecentDraftFileName(
   fileName: string,
   preserveDraftsCreatedAtOrAfter: number | undefined,
+  now: number,
+  futureGraceMs = RECENT_DRAFT_FUTURE_GRACE_MS,
 ): boolean {
   if (
     preserveDraftsCreatedAtOrAfter === undefined
     || !Number.isFinite(preserveDraftsCreatedAtOrAfter)
+    || !Number.isFinite(now)
   ) {
     return false;
   }
 
   const cutoff = Math.max(0, Math.round(preserveDraftsCreatedAtOrAfter));
-  const latestPreservedDraftTimestamp = Math.min(
-    Number.MAX_SAFE_INTEGER,
-    cutoff + RECENT_DRAFT_RECONCILIATION_PRESERVE_WINDOW_MS,
-  );
+  const preserveThrough = Math.max(cutoff, Math.round(now) + Math.max(0, Math.round(futureGraceMs)));
   const draftTimestamp = getDraftTimestampFromFileName(fileName);
   return draftTimestamp !== null
     && draftTimestamp >= cutoff
-    && draftTimestamp <= latestPreservedDraftTimestamp;
+    && draftTimestamp <= preserveThrough;
+}
+
+function createEmptyDirectoryReconciliationResult(): ChatAttachmentDirectoryReconciliationResult {
+  return {
+    deletedCount: 0,
+    attemptedDeleteCount: 0,
+    candidateCount: 0,
+    hasMoreCandidates: false,
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -514,45 +530,55 @@ export class ChatAttachmentStorageService {
   public async deleteUnreferencedAttachmentFiles({
     candidateLocalUris,
     referencedLocalUris = new Set<string>(),
+    maxDeletes,
   }: {
     candidateLocalUris: Iterable<string>;
     referencedLocalUris?: Iterable<string>;
+    maxDeletes?: number;
   }): Promise<number> {
     const referenced = collectNormalizedChatAttachmentLocalUris(referencedLocalUris);
+    const deleteLimit = normalizePositiveInteger(maxDeletes);
     const candidates = Array.from(new Set(candidateLocalUris))
       .flatMap((candidateLocalUri) => {
         const localUri = normalizeChatAttachmentLocalUri(candidateLocalUri);
         return localUri && !referenced.has(localUri) ? [localUri] : [];
       });
+    const boundedCandidates = deleteLimit === undefined
+      ? candidates
+      : candidates.slice(0, deleteLimit);
 
-    if (candidates.length === 0) {
+    if (boundedCandidates.length === 0) {
       return 0;
     }
 
-    const results = await Promise.all(candidates.map(async (localUri) => {
+    let deletedCount = 0;
+    for (const localUri of boundedCandidates) {
       try {
         await FileSystem.deleteAsync(localUri, { idempotent: true });
-        return 1;
+        deletedCount += 1;
       } catch (error) {
         console.warn('[ChatAttachmentStorage] Failed to delete unreferenced chat attachment', {
           pathCategory: CHAT_IMAGE_ATTACHMENT_PATH_CATEGORY,
           context: 'unreferenced_cleanup',
           ...getSanitizedErrorDetails(error),
         });
-        return 0;
       }
-    }));
+    }
 
-    return results.reduce<number>((sum, result) => sum + result, 0);
+    return deletedCount;
   }
 
   public async reconcileAttachmentDirectory(
     referencedLocalUris: Iterable<string> = [],
-    options: { preserveDraftsCreatedAtOrAfter?: number } = {},
-  ): Promise<number> {
+    options: {
+      preserveDraftsCreatedAtOrAfter?: number;
+      maxCandidates?: number;
+      maxDeletes?: number;
+    } = {},
+  ): Promise<ChatAttachmentDirectoryReconciliationResult> {
     const directory = getChatAttachmentsDir();
     if (!directory) {
-      return 0;
+      return createEmptyDirectoryReconciliationResult();
     }
 
     let fileNames: string[];
@@ -564,19 +590,73 @@ export class ChatAttachmentStorageService {
         context: 'attachment_directory_reconciliation',
         ...getSanitizedErrorDetails(error),
       });
-      return 0;
+      return createEmptyDirectoryReconciliationResult();
     }
 
-    const candidateLocalUris = fileNames.flatMap((fileName) => (
-      shouldPreserveRecentDraftFileName(fileName, options.preserveDraftsCreatedAtOrAfter)
-        ? []
-        : [`${directory}${fileName}`]
-    ));
+    const referenced = collectNormalizedChatAttachmentLocalUris(referencedLocalUris);
+    const candidateLimit = normalizePositiveInteger(options.maxCandidates);
+    const candidateScanLimit = candidateLimit === undefined ? undefined : candidateLimit + 1;
+    const candidateLocalUris: string[] = [];
+    const seenCandidateLocalUris = new Set<string>();
+    let candidateCount = 0;
+    const preserveDraftsThroughNow = this.now();
 
-    return this.deleteUnreferencedAttachmentFiles({
-      candidateLocalUris,
-      referencedLocalUris,
-    });
+    for (const fileName of fileNames) {
+      if (shouldPreserveRecentDraftFileName(
+        fileName,
+        options.preserveDraftsCreatedAtOrAfter,
+        preserveDraftsThroughNow,
+      )) {
+        continue;
+      }
+
+      const localUri = normalizeChatAttachmentLocalUri(`${directory}${fileName}`);
+      if (!localUri || referenced.has(localUri)) {
+        continue;
+      }
+      if (seenCandidateLocalUris.has(localUri)) {
+        continue;
+      }
+
+      seenCandidateLocalUris.add(localUri);
+      candidateCount += 1;
+      if (candidateLimit === undefined || candidateLocalUris.length < candidateLimit) {
+        candidateLocalUris.push(localUri);
+      }
+      if (candidateScanLimit !== undefined && candidateCount >= candidateScanLimit) {
+        break;
+      }
+    }
+
+    const deleteLimit = normalizePositiveInteger(options.maxDeletes);
+    const deleteLocalUris = deleteLimit === undefined
+      ? candidateLocalUris
+      : candidateLocalUris.slice(0, deleteLimit);
+    let deletedCount = 0;
+    let attemptedDeleteCount = 0;
+
+    for (const localUri of deleteLocalUris) {
+      attemptedDeleteCount += 1;
+      try {
+        await FileSystem.deleteAsync(localUri, { idempotent: true });
+        deletedCount += 1;
+      } catch (error) {
+        console.warn('[ChatAttachmentStorage] Failed to delete unreferenced chat attachment', {
+          pathCategory: CHAT_IMAGE_ATTACHMENT_PATH_CATEGORY,
+          context: 'unreferenced_cleanup',
+          ...getSanitizedErrorDetails(error),
+        });
+      }
+    }
+
+    return {
+      deletedCount,
+      attemptedDeleteCount,
+      candidateCount,
+      hasMoreCandidates:
+        (candidateLimit !== undefined && candidateCount > candidateLocalUris.length)
+        || deleteLocalUris.length < candidateLocalUris.length,
+    };
   }
 
   public async deleteUnreferencedAttachmentFilesForThreads({

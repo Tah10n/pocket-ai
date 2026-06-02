@@ -213,9 +213,9 @@ describe('ModelLifecycleActionRow projector actions', () => {
   }
 
   it.each([
-    ['available', 'models.download', 'model-projector-download-org/model'],
-    ['failed', 'models.retryDownload', 'model-projector-retry-org/model'],
-    ['paused', 'models.resume', 'model-projector-resume-org/model'],
+    ['available', 'models.vision.downloadProjector', 'model-projector-download-org/model'],
+    ['failed', 'models.vision.retryProjectorDownload', 'model-projector-retry-org/model'],
+    ['paused', 'models.vision.resumeProjectorDownload', 'model-projector-resume-org/model'],
   ] as const)('shows %s selected projector recovery action for downloaded vision models', (projectorLifecycleStatus, expectedLabel, testID) => {
     const model = buildModel({
       lifecycleStatus: LifecycleStatus.DOWNLOADED,

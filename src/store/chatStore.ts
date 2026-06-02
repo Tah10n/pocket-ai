@@ -56,6 +56,10 @@ const FALLBACK_TOP_K = 40;
 const FALLBACK_MIN_P = 0.05;
 const FALLBACK_REPETITION_PENALTY = 1;
 const CHAT_STORE_STORAGE_KEY = LEGACY_CHAT_STORE_STORAGE_KEY;
+const HYDRATION_ATTACHMENT_RECONCILIATION_MAX_DELETES = 16;
+const HYDRATION_ATTACHMENT_RECONCILIATION_MAX_CANDIDATES = 16;
+const HYDRATION_ATTACHMENT_RECONCILIATION_RETRY_DELAY_MS = 1_000;
+const HYDRATION_ATTACHMENT_RECONCILIATION_ZERO_PROGRESS_RETRY_LIMIT = 2;
 
 const chatStoreStateStorage = createInstrumentedStateStorage(createChatStoreStateStorage(), {
   scope: 'chatStore',
@@ -64,6 +68,11 @@ const chatStoreStateStorage = createInstrumentedStateStorage(createChatStoreStat
 
 type ChatStorePersistedState = Partial<Pick<ChatStoreState, 'threads' | 'activeThreadId'>>;
 type ChatStoreSnapshot = Pick<ChatStoreState, 'threads' | 'activeThreadId'>;
+
+type HydrationAttachmentDirectoryReconciliationRequest = {
+  preserveDraftsCreatedAtOrAfter: number;
+  zeroProgressRetryCount: number;
+};
 
 interface ChatStoreHydrationResult {
   threads: Record<string, ChatThread>;
@@ -308,20 +317,154 @@ function scheduleChatAttachmentCleanupForStreamingPatch(
   }
 }
 
-function scheduleChatAttachmentDirectoryReconciliation(threads: Record<string, ChatThread>): void {
-  const preserveDraftsCreatedAtOrAfter = Date.now();
+let hydrationAttachmentDirectoryReconciliationInFlight = false;
+let hydrationAttachmentDirectoryReconciliationRetryPending = false;
+let queuedHydrationAttachmentDirectoryReconciliationRequest:
+  | HydrationAttachmentDirectoryReconciliationRequest
+  | null = null;
+
+function mergeHydrationAttachmentDirectoryReconciliationRequest(
+  current: HydrationAttachmentDirectoryReconciliationRequest | null,
+  next: HydrationAttachmentDirectoryReconciliationRequest,
+): HydrationAttachmentDirectoryReconciliationRequest {
+  if (!current) {
+    return next;
+  }
+
+  return {
+    preserveDraftsCreatedAtOrAfter: Math.min(
+      current.preserveDraftsCreatedAtOrAfter,
+      next.preserveDraftsCreatedAtOrAfter,
+    ),
+    zeroProgressRetryCount: Math.max(current.zeroProgressRetryCount, next.zeroProgressRetryCount),
+  };
+}
+
+function getHydrationAttachmentDirectoryReconciliationRetryDelay(
+  zeroProgressRetryCount: number,
+): number {
+  return HYDRATION_ATTACHMENT_RECONCILIATION_RETRY_DELAY_MS * Math.max(1, zeroProgressRetryCount);
+}
+
+function queueHydrationAttachmentDirectoryReconciliation(
+  request: HydrationAttachmentDirectoryReconciliationRequest,
+): void {
+  queuedHydrationAttachmentDirectoryReconciliationRequest = mergeHydrationAttachmentDirectoryReconciliationRequest(
+    queuedHydrationAttachmentDirectoryReconciliationRequest,
+    request,
+  );
+}
+
+function takeQueuedHydrationAttachmentDirectoryReconciliationRequest():
+  | HydrationAttachmentDirectoryReconciliationRequest
+  | null {
+  const request = queuedHydrationAttachmentDirectoryReconciliationRequest;
+  queuedHydrationAttachmentDirectoryReconciliationRequest = null;
+  return request;
+}
+
+function runHydrationAttachmentDirectoryReconciliation(
+  request: HydrationAttachmentDirectoryReconciliationRequest,
+): void {
+  if (hydrationAttachmentDirectoryReconciliationInFlight) {
+    queueHydrationAttachmentDirectoryReconciliation(request);
+    return;
+  }
+
+  hydrationAttachmentDirectoryReconciliationInFlight = true;
 
   void Promise.resolve()
-    .then(() => collectReferencedChatAttachmentLocalUrisFromThreads(threads))
-    .then((referencedLocalUris) => chatAttachmentStorageService.reconcileAttachmentDirectory(
-      referencedLocalUris,
-      { preserveDraftsCreatedAtOrAfter },
-    ))
+    .then(async () => {
+      const referencedLocalUris = collectReferencedChatAttachmentLocalUrisFromThreads(
+        useChatStore.getState().threads,
+      );
+      const result = await chatAttachmentStorageService.reconcileAttachmentDirectory(
+        referencedLocalUris,
+        {
+          preserveDraftsCreatedAtOrAfter: request.preserveDraftsCreatedAtOrAfter,
+          maxCandidates: HYDRATION_ATTACHMENT_RECONCILIATION_MAX_CANDIDATES,
+          maxDeletes: HYDRATION_ATTACHMENT_RECONCILIATION_MAX_DELETES,
+        },
+      );
+
+      const hasDeleteFailures = result.attemptedDeleteCount > result.deletedCount;
+      if (!result.hasMoreCandidates && !hasDeleteFailures) {
+        return;
+      }
+
+      if (result.deletedCount > 0) {
+        scheduleHydrationAttachmentDirectoryReconciliationRetry({
+          preserveDraftsCreatedAtOrAfter: request.preserveDraftsCreatedAtOrAfter,
+          zeroProgressRetryCount: 0,
+        });
+        return;
+      }
+
+      if (
+        result.attemptedDeleteCount > 0
+        && request.zeroProgressRetryCount < HYDRATION_ATTACHMENT_RECONCILIATION_ZERO_PROGRESS_RETRY_LIMIT
+      ) {
+        scheduleHydrationAttachmentDirectoryReconciliationRetry({
+          preserveDraftsCreatedAtOrAfter: request.preserveDraftsCreatedAtOrAfter,
+          zeroProgressRetryCount: request.zeroProgressRetryCount + 1,
+        });
+      }
+    })
     .catch((error) => {
       console.warn('[chatStore] Failed to reconcile chat attachment directory', {
         errorName: error instanceof Error ? error.name : typeof error,
       });
+    })
+    .finally(() => {
+      hydrationAttachmentDirectoryReconciliationInFlight = false;
+      if (!hydrationAttachmentDirectoryReconciliationRetryPending) {
+        const queuedRequest = takeQueuedHydrationAttachmentDirectoryReconciliationRequest();
+        if (queuedRequest) {
+          runHydrationAttachmentDirectoryReconciliation(queuedRequest);
+        }
+      }
     });
+}
+
+function scheduleHydrationAttachmentDirectoryReconciliationRetry(
+  request: HydrationAttachmentDirectoryReconciliationRequest,
+): void {
+  queueHydrationAttachmentDirectoryReconciliation(request);
+  if (hydrationAttachmentDirectoryReconciliationRetryPending) {
+    return;
+  }
+
+  hydrationAttachmentDirectoryReconciliationRetryPending = true;
+  setTimeout(() => {
+    hydrationAttachmentDirectoryReconciliationRetryPending = false;
+    if (hydrationAttachmentDirectoryReconciliationInFlight) {
+      return;
+    }
+
+    const queuedRequest = takeQueuedHydrationAttachmentDirectoryReconciliationRequest();
+    if (queuedRequest) {
+      runHydrationAttachmentDirectoryReconciliation(queuedRequest);
+    }
+  }, getHydrationAttachmentDirectoryReconciliationRetryDelay(request.zeroProgressRetryCount));
+}
+
+function scheduleChatAttachmentDirectoryReconciliation(
+  preserveDraftsCreatedAtOrAfter = Date.now(),
+): void {
+  const request: HydrationAttachmentDirectoryReconciliationRequest = {
+    preserveDraftsCreatedAtOrAfter,
+    zeroProgressRetryCount: 0,
+  };
+
+  if (
+    hydrationAttachmentDirectoryReconciliationInFlight
+    || hydrationAttachmentDirectoryReconciliationRetryPending
+  ) {
+    queueHydrationAttachmentDirectoryReconciliation(request);
+    return;
+  }
+
+  runHydrationAttachmentDirectoryReconciliation(request);
 }
 
 function collectPersistedThreadAttachmentCleanupCandidates(
@@ -1818,7 +1961,7 @@ export const useChatStore = create<ChatStoreState>()(
           state.activeThreadId = findMostRecentThreadId(state.threads);
         }
 
-        scheduleChatAttachmentDirectoryReconciliation(state.threads);
+        scheduleChatAttachmentDirectoryReconciliation();
       },
     },
   ),

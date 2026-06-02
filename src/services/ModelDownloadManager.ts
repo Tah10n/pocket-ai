@@ -202,6 +202,11 @@ type ReusableModelDownloadFile = {
   verification: DownloadVerificationResult;
 };
 
+type ReusableProjectorDownloadFile = {
+  fileName: string;
+  sizeBytes: number | null;
+};
+
 const SENSITIVE_ERROR_DETAIL_KEYS = new Set([
   'uri',
   'localuri',
@@ -339,6 +344,8 @@ function shouldDeleteInvalidGgufDownload(reason: GgufValidationError['reason']):
 function isFileSystemDirectory(info: { isDirectory?: boolean }): boolean {
   return info.isDirectory === true;
 }
+
+const REQUIRED_DOWNLOAD_BUFFER_BYTES = DECIMAL_GIGABYTE; // 1 GB
 
 export class ModelDownloadManager {
   private static instance: ModelDownloadManager | undefined;
@@ -935,6 +942,7 @@ export class ModelDownloadManager {
     const modelsDir = getModelsDir();
     const selectedProjector = this.resolveProjectorForDownload(model);
     let reusableModelFile: ReusableModelDownloadFile | null = null;
+    let reusableProjectorFile: ReusableProjectorDownloadFile | null = null;
     let baseModelMemoryFit: DownloadMemoryFitSummary | null = null;
     let downloadStage: 'base' | 'projector' | 'finalizing' = 'base';
 
@@ -966,19 +974,27 @@ export class ModelDownloadManager {
         });
       }
 
+      if (selectedProjector) {
+        reusableProjectorFile = await this.resolveReusableProjectorFile(selectedProjector, modelsDir);
+
+        if (!this.isCurrentJob(model.id, jobToken)) {
+          return;
+        }
+
+        if (this.getStopReason(model.id, jobToken)) {
+          return;
+        }
+      }
+
       const freeSpace = await FileSystem.getFreeDiskStorageAsync();
       if (this.getStopReason(model.id, jobToken)) {
         return;
       }
-      const REQUIRED_BUFFER_BYTES = DECIMAL_GIGABYTE; // 1 GB
       const requiredModelBytes = reusableModelFile ? 0 : model.size ?? 0;
-      const reusableProjector = selectedProjector
-        ? await this.resolveReusableProjectorFile(selectedProjector, modelsDir)
-        : null;
-      const requiredProjectorBytes = reusableProjector
-        ? 0
-        : normalizePositiveByteSize(selectedProjector?.size) ?? 0;
-      const requiredBytes = requiredModelBytes + requiredProjectorBytes + REQUIRED_BUFFER_BYTES;
+      const requiredProjectorBytes = selectedProjector && !reusableProjectorFile
+        ? normalizePositiveByteSize(selectedProjector.size) ?? 0
+        : 0;
+      const requiredBytes = requiredModelBytes + requiredProjectorBytes + REQUIRED_DOWNLOAD_BUFFER_BYTES;
       const hasKnownDiskRequirement = requiredModelBytes > 0 || requiredProjectorBytes > 0;
       if (hasKnownDiskRequirement && freeSpace !== undefined && freeSpace < requiredBytes) {
         throw new AppError('download_disk_space_low', 'DISK_SPACE_LOW', {
@@ -1290,6 +1306,14 @@ export class ModelDownloadManager {
 
       if (selectedProjector) {
         downloadStage = 'projector';
+
+        if (!this.isCurrentJob(model.id, jobToken)) {
+          return;
+        }
+
+        if (this.getStopReason(model.id, jobToken)) {
+          return;
+        }
       }
 
       const projectorResult = selectedProjector
@@ -1299,6 +1323,7 @@ export class ModelDownloadManager {
           modelsDir,
           jobToken,
           await this.buildDownloadOptions(model, selectedProjector.downloadUrl, selectedProjector.repoId),
+          reusableProjectorFile,
         )
         : null;
 
@@ -1446,7 +1471,7 @@ export class ModelDownloadManager {
   private async resolveReusableProjectorFile(
     projector: ProjectorArtifact,
     modelsDir: string,
-  ): Promise<{ fileName: string; sizeBytes: number | null } | null> {
+  ): Promise<ReusableProjectorDownloadFile | null> {
     if (!isStoredProjectorArtifact(projector) || !isValidLocalFileName(projector.localPath)) {
       return null;
     }
@@ -1461,15 +1486,36 @@ export class ModelDownloadManager {
       return null;
     }
 
-    try {
-      const verification = await this.verifyChecksum(projector, localUri);
-      return {
-        fileName: projector.localPath,
-        sizeBytes: verification.sizeBytes,
-      };
-    } catch (error) {
-      console.warn(`[ModelDownloadManager] Existing projector artifact for ${projector.id} cannot be reused`, summarizeErrorForLog(error));
-      return null;
+    const sizeBytes = typeof fileInfo.size === 'number' && Number.isFinite(fileInfo.size) && fileInfo.size > 0
+      ? Math.round(fileInfo.size)
+      : null;
+
+    return {
+      fileName: projector.localPath,
+      sizeBytes,
+    };
+  }
+
+  private async assertSufficientDiskSpaceForProjectorDownload(
+    model: ModelMetadata,
+    projector: ProjectorArtifact,
+  ): Promise<void> {
+    const requiredProjectorBytes = normalizePositiveByteSize(projector.size) ?? 0;
+    if (requiredProjectorBytes <= 0) {
+      return;
+    }
+
+    const freeSpace = await FileSystem.getFreeDiskStorageAsync();
+    const requiredBytes = requiredProjectorBytes + REQUIRED_DOWNLOAD_BUFFER_BYTES;
+    if (freeSpace !== undefined && freeSpace < requiredBytes) {
+      throw new AppError('download_disk_space_low', 'DISK_SPACE_LOW', {
+        details: {
+          modelId: model.id,
+          projectorId: projector.id,
+          freeSpace,
+          requiredBytes,
+        },
+      });
     }
   }
 
@@ -1608,22 +1654,60 @@ export class ModelDownloadManager {
     modelsDir: string,
     jobToken: number,
     downloadOptions: { headers?: Record<string, string> },
+    reusableProjectorFile: ReusableProjectorDownloadFile | null,
   ): Promise<ProjectorDownloadResult | null> {
-    const reusableProjectorFile = await this.resolveReusableProjectorFile(projector, modelsDir);
+    let reusableProjectorRejected = false;
+
     if (reusableProjectorFile) {
-      return {
-        projector: {
-          ...projector,
-          localPath: reusableProjectorFile.fileName,
-          size: reusableProjectorFile.sizeBytes ?? projector.size,
-          lifecycleStatus: 'downloaded',
-        },
-        sizeBytes: reusableProjectorFile.sizeBytes ?? normalizePositiveByteSize(projector.size),
-      };
+      if (!this.isCurrentJob(model.id, jobToken) || this.getStopReason(model.id, jobToken)) {
+        return null;
+      }
+
+      const reusableLocalUri = safeJoinModelPath(modelsDir, reusableProjectorFile.fileName);
+      if (reusableLocalUri) {
+        try {
+          if (this.isCurrentJob(model.id, jobToken) && this.activeJob) {
+            this.activeJob.resumable = null;
+            this.activeJob.activeArtifact = 'projector';
+            this.activeJob.activeProjectorId = projector.id;
+          }
+
+          const verification = await this.verifyChecksum(projector, reusableLocalUri);
+
+          if (!this.isCurrentJob(model.id, jobToken) || this.getStopReason(model.id, jobToken)) {
+            return null;
+          }
+
+          return {
+            projector: {
+              ...projector,
+              localPath: reusableProjectorFile.fileName,
+              size: verification.sizeBytes,
+              lifecycleStatus: 'downloaded',
+            },
+            sizeBytes: verification.sizeBytes,
+          };
+        } catch (error) {
+          if (!this.isCurrentJob(model.id, jobToken) || this.getStopReason(model.id, jobToken)) {
+            return null;
+          }
+
+          console.warn(`[ModelDownloadManager] Existing projector artifact for ${projector.id} cannot be reused`, summarizeErrorForLog(error));
+          reusableProjectorRejected = true;
+        }
+      }
     }
 
     if (!this.isCurrentJob(model.id, jobToken) || this.getStopReason(model.id, jobToken)) {
       return null;
+    }
+
+    if (reusableProjectorRejected) {
+      await this.assertSufficientDiskSpaceForProjectorDownload(model, projector);
+
+      if (!this.isCurrentJob(model.id, jobToken) || this.getStopReason(model.id, jobToken)) {
+        return null;
+      }
     }
 
     const fileName = await this.resolveProjectorDownloadFileName(projector, modelsDir);
@@ -1862,6 +1946,17 @@ export class ModelDownloadManager {
       return;
     }
 
+    const activeJobForPauseGuard = this.activeJob?.modelId === modelId
+      ? this.activeJob
+      : null;
+    if (activeJobForPauseGuard?.activeArtifact === 'projector' && activeJobForPauseGuard.resumable === null) {
+      // Reusable projector checksum/GGUF verification is not resumable, even if
+      // the owning model queue row still says DOWNLOADING after the base model
+      // phase. Treat it like VERIFYING so pause cannot persist stale resume data.
+      console.warn(`[ModelDownloadManager] pauseDownload(${modelId}) ignored during projector verification`);
+      return;
+    }
+
     if (!(await this.canPersistDownloadMutation())) {
       return;
     }
@@ -1948,6 +2043,7 @@ export class ModelDownloadManager {
         ? this.activeJob
         : null;
       cancelJob = job;
+      const canInvalidateActiveJobImmediately = job !== null && job.resumable === null;
       if (job) {
         job.stopReason = 'cancel';
       }
@@ -1985,6 +2081,10 @@ export class ModelDownloadManager {
       });
       if (!didPersistQueueRemoval) {
         return;
+      }
+      if (canInvalidateActiveJobImmediately && job !== null && this.activeJob === job && this.isCurrentJob(modelId, job.jobToken)) {
+        this.activeJob = null;
+        this.isProcessing = false;
       }
       shouldDeletePartialFiles = safeToDeletePartialFiles;
 

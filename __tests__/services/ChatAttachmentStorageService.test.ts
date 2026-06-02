@@ -472,6 +472,54 @@ describe('ChatAttachmentStorageService', () => {
     });
   });
 
+  it('bounds unreferenced attachment cleanup deletes', async () => {
+    const service = new ChatAttachmentStorageService();
+
+    await expect(service.deleteUnreferencedAttachmentFiles({
+      candidateLocalUris: [
+        'test-dir/chat-attachments/delete-1.jpg',
+        'test-dir/chat-attachments/delete-2.jpg',
+        'test-dir/chat-attachments/delete-3.jpg',
+      ],
+      maxDeletes: 2,
+    })).resolves.toBe(2);
+
+    expect(FileSystem.deleteAsync).toHaveBeenCalledTimes(2);
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/chat-attachments/delete-1.jpg', {
+      idempotent: true,
+    });
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/chat-attachments/delete-2.jpg', {
+      idempotent: true,
+    });
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/chat-attachments/delete-3.jpg', expect.anything());
+  });
+
+  it('serializes unreferenced attachment deletes to avoid native IO bursts', async () => {
+    const service = new ChatAttachmentStorageService();
+    let releaseFirstDelete!: () => void;
+    (FileSystem.deleteAsync as jest.Mock).mockImplementationOnce(() => new Promise<void>((resolve) => {
+      releaseFirstDelete = resolve;
+    }));
+
+    const cleanupPromise = service.deleteUnreferencedAttachmentFiles({
+      candidateLocalUris: [
+        'test-dir/chat-attachments/delete-1.jpg',
+        'test-dir/chat-attachments/delete-2.jpg',
+      ],
+    });
+
+    await Promise.resolve();
+    expect(FileSystem.deleteAsync).toHaveBeenCalledTimes(1);
+
+    releaseFirstDelete();
+    await cleanupPromise;
+
+    expect(FileSystem.deleteAsync).toHaveBeenCalledTimes(2);
+    expect(FileSystem.deleteAsync).toHaveBeenNthCalledWith(2, 'test-dir/chat-attachments/delete-2.jpg', {
+      idempotent: true,
+    });
+  });
+
   it('reconciles the attachment directory by preserving referenced files and deleting safe unreferenced files', async () => {
     (FileSystem.readDirectoryAsync as jest.Mock).mockResolvedValueOnce([
       'keep-me.jpg',
@@ -483,7 +531,12 @@ describe('ChatAttachmentStorageService', () => {
 
     await expect(service.reconcileAttachmentDirectory([
       'test-dir/chat-attachments/keep-me.jpg',
-    ])).resolves.toBe(1);
+    ])).resolves.toEqual(expect.objectContaining({
+      deletedCount: 1,
+      attemptedDeleteCount: 1,
+      candidateCount: 1,
+      hasMoreCandidates: false,
+    }));
 
     expect(FileSystem.readDirectoryAsync).toHaveBeenCalledWith('test-dir/chat-attachments/');
     expect(FileSystem.deleteAsync).toHaveBeenCalledTimes(1);
@@ -492,28 +545,148 @@ describe('ChatAttachmentStorageService', () => {
     });
   });
 
-  it('preserves only draft files created at or shortly after the reconciliation cutoff', async () => {
+  it('caps directory reconciliation deletes per pass and reports remaining bounded candidates', async () => {
     (FileSystem.readDirectoryAsync as jest.Mock).mockResolvedValueOnce([
-      'draft-99-before.jpg',
-      'draft-100-samems.jpg',
-      'draft-101-after.png',
-      'draft-60101-farfuture.jpg',
-      'legacy-orphan.jpg',
+      'delete-1.jpg',
+      'delete-2.jpg',
+      'delete-3.jpg',
     ]);
     const service = new ChatAttachmentStorageService();
 
     await expect(service.reconcileAttachmentDirectory([], {
+      maxCandidates: 2,
+      maxDeletes: 1,
+    })).resolves.toEqual(expect.objectContaining({
+      deletedCount: 1,
+      attemptedDeleteCount: 1,
+      candidateCount: 3,
+      hasMoreCandidates: true,
+    }));
+
+    expect(FileSystem.deleteAsync).toHaveBeenCalledTimes(1);
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/chat-attachments/delete-1.jpg', {
+      idempotent: true,
+    });
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/chat-attachments/delete-2.jpg', expect.anything());
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/chat-attachments/delete-3.jpg', expect.anything());
+  });
+
+  it('stops collecting reconciliation candidates after the bounded lookahead', async () => {
+    (FileSystem.readDirectoryAsync as jest.Mock).mockResolvedValueOnce(
+      Array.from({ length: 100 }, (_, index) => `delete-${index}.jpg`),
+    );
+    const service = new ChatAttachmentStorageService();
+
+    await expect(service.reconcileAttachmentDirectory([], {
+      maxCandidates: 2,
+      maxDeletes: 2,
+    })).resolves.toEqual(expect.objectContaining({
+      deletedCount: 2,
+      attemptedDeleteCount: 2,
+      candidateCount: 3,
+      hasMoreCandidates: true,
+    }));
+
+    expect(FileSystem.deleteAsync).toHaveBeenCalledTimes(2);
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/chat-attachments/delete-0.jpg', {
+      idempotent: true,
+    });
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/chat-attachments/delete-1.jpg', {
+      idempotent: true,
+    });
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/chat-attachments/delete-2.jpg', expect.anything());
+  });
+
+  it('continues directory reconciliation after a delete failure within the delete cap', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    (FileSystem.readDirectoryAsync as jest.Mock).mockResolvedValueOnce([
+      'delete-1.jpg',
+      'delete-2.jpg',
+      'delete-3.jpg',
+    ]);
+    (FileSystem.deleteAsync as jest.Mock)
+      .mockRejectedValueOnce(new Error('delete failed'))
+      .mockResolvedValue(undefined);
+    const service = new ChatAttachmentStorageService();
+
+    try {
+      await expect(service.reconcileAttachmentDirectory([], {
+        maxDeletes: 2,
+      })).resolves.toEqual(expect.objectContaining({
+        deletedCount: 1,
+        attemptedDeleteCount: 2,
+        candidateCount: 3,
+        hasMoreCandidates: true,
+      }));
+
+      expect(FileSystem.deleteAsync).toHaveBeenCalledTimes(2);
+      expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/chat-attachments/delete-2.jpg', {
+        idempotent: true,
+      });
+      expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/chat-attachments/delete-3.jpg', expect.anything());
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('applies directory reconciliation candidate bounds after excluding referenced files', async () => {
+    (FileSystem.readDirectoryAsync as jest.Mock).mockResolvedValueOnce([
+      'keep-1.jpg',
+      'keep-2.jpg',
+      'delete-1.jpg',
+      'delete-2.jpg',
+    ]);
+    const service = new ChatAttachmentStorageService();
+
+    await expect(service.reconcileAttachmentDirectory([
+      'test-dir/chat-attachments/keep-1.jpg',
+      'test-dir/chat-attachments/keep-2.jpg',
+    ], {
+      maxCandidates: 1,
+      maxDeletes: 1,
+    })).resolves.toEqual(expect.objectContaining({
+      deletedCount: 1,
+      attemptedDeleteCount: 1,
+      candidateCount: 2,
+      hasMoreCandidates: true,
+    }));
+
+    expect(FileSystem.deleteAsync).toHaveBeenCalledTimes(1);
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/chat-attachments/delete-1.jpg', {
+      idempotent: true,
+    });
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/chat-attachments/keep-1.jpg', expect.anything());
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/chat-attachments/keep-2.jpg', expect.anything());
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/chat-attachments/delete-2.jpg', expect.anything());
+  });
+
+  it('preserves draft files created at or after the reconciliation cutoff', async () => {
+    (FileSystem.readDirectoryAsync as jest.Mock).mockResolvedValueOnce([
+      'draft-99-before.jpg',
+      'draft-100-samems.jpg',
+      'draft-101-after.png',
+      'draft-400101-beyondgrace.jpg',
+      'legacy-orphan.jpg',
+    ]);
+    const service = new ChatAttachmentStorageService({ now: () => 100 });
+
+    await expect(service.reconcileAttachmentDirectory([], {
       preserveDraftsCreatedAtOrAfter: 100,
-    })).resolves.toBe(3);
+    })).resolves.toEqual(expect.objectContaining({
+      deletedCount: 3,
+      attemptedDeleteCount: 3,
+      candidateCount: 3,
+      hasMoreCandidates: false,
+    }));
 
     expect(FileSystem.deleteAsync).toHaveBeenCalledTimes(3);
     expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/chat-attachments/draft-99-before.jpg', {
       idempotent: true,
     });
-    expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/chat-attachments/draft-60101-farfuture.jpg', {
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/chat-attachments/legacy-orphan.jpg', {
       idempotent: true,
     });
-    expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/chat-attachments/legacy-orphan.jpg', {
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/chat-attachments/draft-400101-beyondgrace.jpg', {
       idempotent: true,
     });
     expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/chat-attachments/draft-100-samems.jpg', expect.anything());

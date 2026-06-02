@@ -357,7 +357,7 @@ export const ChatScreen = () => {
     const [pendingRegenerateMessage, setPendingRegenerateMessage] = useState<{
         messageId: string;
         originalContent: string;
-        hasAttachments: boolean;
+        attachments: ChatMessage['attachments'];
     } | null>(null);
     const updateThreadPresetSnapshot = useChatStore((state) => state.updateThreadPresetSnapshot);
     const updateThreadParamsSnapshot = useChatStore((state) => state.updateThreadParamsSnapshot);
@@ -473,6 +473,34 @@ export const ChatScreen = () => {
         disabledReason: imageAttachmentsDisabledReason,
         ownerKey: imageAttachmentOwnerKey,
     });
+    const retainedRegenerateAttachments = pendingRegenerateMessage?.attachments ?? [];
+    const retainedRegenerateAttachmentsTray = retainedRegenerateAttachments.length > 0 ? (
+        <ScreenSurface
+            testID="chat-regenerate-retained-attachments"
+            tone="accent"
+            withControlTint
+            className="rounded-2xl px-3 py-2"
+        >
+            <Box className="flex-row items-start gap-3">
+                <ScreenIconTile
+                    iconName="image"
+                    tone="accent"
+                    size="sm"
+                    iconSize="xs"
+                    className="mt-0.5 h-6 w-6"
+                    iconClassName="text-primary-500"
+                />
+                <Box className="min-w-0 flex-1">
+                    <Text className="text-xs font-semibold leading-4 text-primary-700 dark:text-primary-300">
+                        {t('chat.attachments.retainedForRegenerate', { count: retainedRegenerateAttachments.length })}
+                    </Text>
+                    <Text className="mt-0.5 text-xs leading-4 text-primary-700/80 dark:text-primary-300/80">
+                        {t('chat.attachments.retainedForRegenerateDescription')}
+                    </Text>
+                </Box>
+            </Box>
+        </ScreenSurface>
+    ) : undefined;
 
     const headerTitle = activeThread?.title ?? t('chat.newChatTitle');
     const configurableModelId = currentChatActiveModelId;
@@ -1176,7 +1204,7 @@ export const ChatScreen = () => {
                 setComposerDraft('');
 
                 try {
-                    if (targetMessage.hasAttachments) {
+                    if ((targetMessage.attachments?.length ?? 0) > 0) {
                         await regenerateFromUserMessage(targetMessage.messageId, content, { multimodalReadiness });
                     } else {
                         await regenerateFromUserMessage(targetMessage.messageId, content);
@@ -1236,7 +1264,7 @@ export const ChatScreen = () => {
         setPendingRegenerateMessage({
             messageId: message.id,
             originalContent: message.content,
-            hasAttachments: (message.attachments?.length ?? 0) > 0,
+            attachments: message.attachments ?? [],
         });
         setComposerDraft(message.content);
         imageAttachmentDrafts.clearDrafts();
@@ -1738,7 +1766,7 @@ export const ChatScreen = () => {
                             <ChatInputBar
                                 draft={composerDraft}
                                 onDraftChange={setComposerDraft}
-                                allowEmptyMessageSend={pendingRegenerateMessage?.hasAttachments === true}
+                                allowEmptyMessageSend={retainedRegenerateAttachments.length > 0}
                                 onSendMessage={handleSendMessage}
                                 onStopGeneration={stopGeneration}
                                 disabled={isInputDisabled}
@@ -1750,6 +1778,7 @@ export const ChatScreen = () => {
                                 imageAttachmentsEnabled={imageAttachmentsEnabled}
                                 imageAttachmentsDisabledReason={imageAttachmentsDisabledReason}
                                 isImageAttachmentActionBusy={imageAttachmentDrafts.isPicking}
+                                attachmentsTray={retainedRegenerateAttachmentsTray}
                                 modeLabel={pendingRegenerateMessage ? t('chat.editEarlierMessage') : undefined}
                                 modeDescription={pendingRegenerateMessage
                                     ? t('chat.editEarlierMessageDescription')
@@ -1770,7 +1799,7 @@ export const ChatScreen = () => {
                             <ChatInputBar
                                 draft={composerDraft}
                                 onDraftChange={setComposerDraft}
-                                allowEmptyMessageSend={pendingRegenerateMessage?.hasAttachments === true}
+                                allowEmptyMessageSend={retainedRegenerateAttachments.length > 0}
                                 onSendMessage={handleSendMessage}
                                 onStopGeneration={stopGeneration}
                                 disabled={isInputDisabled}
@@ -1782,6 +1811,7 @@ export const ChatScreen = () => {
                                 imageAttachmentsEnabled={imageAttachmentsEnabled}
                                 imageAttachmentsDisabledReason={imageAttachmentsDisabledReason}
                                 isImageAttachmentActionBusy={imageAttachmentDrafts.isPicking}
+                                attachmentsTray={retainedRegenerateAttachmentsTray}
                                 modeLabel={pendingRegenerateMessage ? t('chat.editEarlierMessage') : undefined}
                                 modeDescription={pendingRegenerateMessage
                                     ? t('chat.editEarlierMessageDescription')

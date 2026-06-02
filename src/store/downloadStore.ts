@@ -76,7 +76,17 @@ function resolveMergedSelectedProjectorId(
   blockedExistingProjectorIds: Set<string> = new Set(),
   blockedNextProjectorIds: Set<string> = blockedExistingProjectorIds,
 ): string | undefined {
-  if (nextSelectedProjectorId && candidateIds.has(nextSelectedProjectorId)) {
+  const blockedIncomingSelectedProjectorId = nextSelectedProjectorId
+    && candidateIds.has(nextSelectedProjectorId)
+    && blockedNextProjectorIds.has(nextSelectedProjectorId)
+    ? nextSelectedProjectorId
+    : undefined;
+
+  if (
+    nextSelectedProjectorId
+    && candidateIds.has(nextSelectedProjectorId)
+    && !blockedIncomingSelectedProjectorId
+  ) {
     return nextSelectedProjectorId;
   }
 
@@ -90,11 +100,34 @@ function resolveMergedSelectedProjectorId(
 
   const selectedProjectorId = existingToNextProjectorIds.get(existingSelectedProjectorId)
     ?? existingSelectedProjectorId;
+
+  if (blockedIncomingSelectedProjectorId) {
+    return selectedProjectorId === blockedIncomingSelectedProjectorId
+      && existingSelectedProjectorId !== selectedProjectorId
+      && candidateIds.has(selectedProjectorId)
+      ? selectedProjectorId
+      : undefined;
+  }
+
   if (blockedNextProjectorIds.has(selectedProjectorId)) {
     return undefined;
   }
 
   return candidateIds.has(selectedProjectorId) ? selectedProjectorId : undefined;
+}
+
+function shouldSuppressReadinessForBlockedIncomingProjector(
+  nextSelectedProjectorId: string | undefined,
+  selectedProjectorId: string | undefined,
+  candidateIds: Set<string>,
+  blockedNextProjectorIds: Set<string>,
+): boolean {
+  return Boolean(
+    nextSelectedProjectorId
+    && candidateIds.has(nextSelectedProjectorId)
+    && blockedNextProjectorIds.has(nextSelectedProjectorId)
+    && selectedProjectorId !== nextSelectedProjectorId,
+  );
 }
 
 function remapMultimodalReadiness(
@@ -160,7 +193,9 @@ function buildRetryableQueueEntry(existing: ModelMetadata, model: ModelMetadata)
     ...projectorRuntimeMerge.blockedRuntimeReadinessProjectorIds,
     ...projectorRuntimeMerge.blockedRuntimeProjectorIds,
   ]);
-  const blockedExistingResolvedReadinessProjectorIds = new Set(blockedNextReadinessProjectorIds);
+  const blockedExistingResolvedReadinessProjectorIds = new Set(
+    projectorRuntimeMerge.blockedNextReadinessProjectorIds,
+  );
   const selectedProjectorId = canPreserveResumeState
     ? resolveMergedSelectedProjectorId(
       model.selectedProjectorId,
@@ -171,24 +206,33 @@ function buildRetryableQueueEntry(existing: ModelMetadata, model: ModelMetadata)
       projectorRuntimeMerge.blockedNextProjectorIds,
     )
     : model.selectedProjectorId;
+  const shouldSuppressMultimodalReadiness = canPreserveResumeState
+    && shouldSuppressReadinessForBlockedIncomingProjector(
+      model.selectedProjectorId,
+      selectedProjectorId,
+      candidateIds,
+      projectorRuntimeMerge.blockedNextProjectorIds,
+    );
   const multimodalReadiness = canPreserveResumeState
-    ? remapMultimodalReadiness(
-      model.id,
-      model.multimodalReadiness,
-      candidateIds,
-      projectorRuntimeMerge.runtimeToNextProjectorIds,
-      selectedProjectorId,
-      blockedNextReadinessProjectorIds,
-      blockedNextReadinessProjectorIds,
-    ) ?? remapMultimodalReadiness(
-      model.id,
-      existing.multimodalReadiness,
-      candidateIds,
-      projectorRuntimeMerge.runtimeToNextProjectorIds,
-      selectedProjectorId,
-      blockedExistingReadinessProjectorIds,
-      blockedExistingResolvedReadinessProjectorIds,
-    )
+    ? shouldSuppressMultimodalReadiness
+      ? undefined
+      : remapMultimodalReadiness(
+        model.id,
+        model.multimodalReadiness,
+        candidateIds,
+        projectorRuntimeMerge.runtimeToNextProjectorIds,
+        selectedProjectorId,
+        blockedNextReadinessProjectorIds,
+        blockedNextReadinessProjectorIds,
+      ) ?? remapMultimodalReadiness(
+        model.id,
+        existing.multimodalReadiness,
+        candidateIds,
+        projectorRuntimeMerge.runtimeToNextProjectorIds,
+        selectedProjectorId,
+        blockedExistingReadinessProjectorIds,
+        blockedExistingResolvedReadinessProjectorIds,
+      )
     : model.multimodalReadiness;
   const retryableBaseModel = canPreserveResumeState
     ? { ...existing, ...model }

@@ -119,6 +119,12 @@ function resolveReadyAttachmentDrafts({
   return sendableDrafts;
 }
 
+function getSanitizedErrorDetails(error: unknown): { errorName: string } | { errorType: string } {
+  return error instanceof Error
+    ? { errorName: error.name || 'Error' }
+    : { errorType: typeof error };
+}
+
 function isMatchingGeneration(threadId: string, messageId: string) {
   return (
     sharedGenerationState.current?.threadId === threadId &&
@@ -1255,7 +1261,10 @@ export const useChatSession = () => {
         } else if (appError.code === 'message_too_long') {
           throw appError;
         } else {
-          console.warn('[ChatSession] Failed to count prompt tokens accurately, falling back to heuristics', error);
+          console.warn('[ChatSession] Failed to count prompt tokens accurately, falling back to heuristics', {
+            context: 'prompt_token_count_fallback',
+            ...getSanitizedErrorDetails(error),
+          });
           didUseHeuristicPromptTokens = true;
           messages = await resolveRetainedMessagesForInferenceAttachments(
             getThreadInferenceWindow(thread, windowOptions).messages,

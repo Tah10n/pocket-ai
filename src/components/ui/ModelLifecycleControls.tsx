@@ -79,21 +79,21 @@ function getProjectorDownloadAction(model: ModelMetadata): { labelKey: string; t
 
   if (projectorState.status === 'available') {
     return {
-      labelKey: 'models.download',
+      labelKey: 'models.vision.downloadProjector',
       testID: `model-projector-download-${model.id}`,
     };
   }
 
   if (projectorState.status === 'failed') {
     return {
-      labelKey: 'models.retryDownload',
+      labelKey: 'models.vision.retryProjectorDownload',
       testID: `model-projector-retry-${model.id}`,
     };
   }
 
   if (projectorState.status === 'paused') {
     return {
-      labelKey: 'models.resume',
+      labelKey: 'models.vision.resumeProjectorDownload',
       testID: `model-projector-resume-${model.id}`,
     };
   }

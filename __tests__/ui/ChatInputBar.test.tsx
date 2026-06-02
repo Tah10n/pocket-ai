@@ -13,6 +13,11 @@ import { getSendableDraftImageAttachments } from '../../src/utils/chatImageAttac
 import type { AttachmentDraft } from '../../src/types/multimodal';
 import { copiedDraftImageAttachment } from '../fixtures/chatImageAttachmentFixtures';
 
+const reactI18nextMock = jest.requireMock('react-i18next') as {
+  __setTranslationOverride: (key: string, value: string, nextLanguage?: string) => void;
+  __resetTranslations: () => void;
+};
+
 jest.mock('react-native-css-interop', () => {
   const mockReact = require('react');
   return {
@@ -46,6 +51,10 @@ jest.mock('../../src/components/ui/MaterialSymbols', () => {
 });
 
 describe('ChatInputBar', () => {
+  afterEach(() => {
+    reactI18nextMock.__resetTranslations();
+  });
+
   function flattenStyle(style: unknown) {
     if (!Array.isArray(style)) {
       return style as Record<string, unknown>;
@@ -230,15 +239,37 @@ describe('ChatInputBar', () => {
     expect(queryByText('arrow-upward')).toBeNull();
   });
 
+  it('renders a retained attachments tray and allows blank sends when explicitly enabled', async () => {
+    const onSendMessage = jest.fn();
+    const { getByPlaceholderText, getByTestId, getByText } = render(
+      <ChatInputBar
+        onSendMessage={onSendMessage}
+        allowEmptyMessageSend
+        attachmentsTray={<RNText testID="retained-attachments-tray">Retained attachments stay attached</RNText>}
+      />,
+    );
+
+    expect(getByTestId('chat-input-bar-attachments-tray')).toBeTruthy();
+    expect(getByTestId('retained-attachments-tray')).toBeTruthy();
+    expect(getByText('Retained attachments stay attached')).toBeTruthy();
+
+    fireEvent(getByPlaceholderText('chat.inputPlaceholder'), 'submitEditing', {
+      nativeEvent: {
+        text: '',
+      },
+    });
+
+    await waitFor(() => {
+      expect(onSendMessage).toHaveBeenCalledWith('');
+    });
+  });
+
   it('renders image attachment previews and removes a selected draft', () => {
-    const { __setTranslationOverride } = jest.requireMock('react-i18next') as {
-      __setTranslationOverride: (key: string, value: string) => void;
-    };
-    __setTranslationOverride(
+    reactI18nextMock.__setTranslationOverride(
       'chat.attachments.previewIndexedAccessibilityLabel',
       'Attached image {{index}} of {{count}} preview',
     );
-    __setTranslationOverride(
+    reactI18nextMock.__setTranslationOverride(
       'chat.attachments.removeImageIndexedAccessibilityLabel',
       'Remove attached image {{index}} of {{count}}',
     );
@@ -272,6 +303,114 @@ describe('ChatInputBar', () => {
     fireEvent.press(getByLabelText('Remove attached image 1 of 1'));
 
     expect(onRemoveAttachmentDraft).toHaveBeenCalledWith(drafts[0], 0);
+  });
+
+  it('marks failed attachment previews with a distinct id, localized label, and disabled state', () => {
+    reactI18nextMock.__setTranslationOverride('chat.attachments.tooLarge', 'Attachment is too large');
+    reactI18nextMock.__setTranslationOverride(
+      'chat.attachments.failedPreviewIndexedAccessibilityLabel',
+      'Failed attached image {{index}} of {{count}}: {{reason}}',
+    );
+    const failedDraft: AttachmentDraft = {
+      id: 'draft-too-large',
+      pickerUri: 'ph://library-image-too-large',
+      previewUri: 'ph://library-image-too-large',
+      mediaType: 'image/jpeg',
+      copyStatus: 'failed',
+      errorReason: 'too_large',
+    };
+
+    const { getByLabelText, getByTestId, getByText, queryByTestId } = render(
+      <ChatInputBar
+        onSendMessage={jest.fn()}
+        onAttachImages={jest.fn()}
+        attachmentDrafts={[failedDraft]}
+        imageAttachmentsEnabled
+      />,
+    );
+
+    const failedPreview = getByTestId('chat-image-attachment-failed-preview-0');
+
+    expect(queryByTestId('chat-image-attachment-preview-0')).toBeNull();
+    expect(getByLabelText('Failed attached image 1 of 1: Attachment is too large')).toBe(failedPreview);
+    expect(failedPreview.props.accessibilityRole).toBe('image');
+    expect(failedPreview.props.accessibilityState).toEqual({ disabled: true });
+    expect(getByText('Attachment is too large')).toBeTruthy();
+  });
+
+  it('uses distinct indexed accessibility labels for multiple failed attachment previews', () => {
+    reactI18nextMock.__setTranslationOverride('chat.attachments.copyFailed', 'Copy failed');
+    reactI18nextMock.__setTranslationOverride('chat.attachments.tooLarge', 'Attachment is too large');
+    reactI18nextMock.__setTranslationOverride(
+      'chat.attachments.failedPreviewIndexedAccessibilityLabel',
+      'Failed attached image {{index}} of {{count}}: {{reason}}',
+    );
+    const failedCopyDraft: AttachmentDraft = {
+      id: 'draft-copy-failed',
+      pickerUri: 'ph://library-image-copy-failed',
+      previewUri: 'ph://library-image-copy-failed',
+      mediaType: 'image/jpeg',
+      copyStatus: 'failed',
+      errorReason: 'copy_failed',
+    };
+    const failedTooLargeDraft: AttachmentDraft = {
+      id: 'draft-too-large',
+      pickerUri: 'ph://library-image-too-large',
+      previewUri: 'ph://library-image-too-large',
+      mediaType: 'image/jpeg',
+      copyStatus: 'failed',
+      errorReason: 'too_large',
+    };
+
+    const { getByLabelText, getByTestId, queryByLabelText } = render(
+      <ChatInputBar
+        onSendMessage={jest.fn()}
+        onAttachImages={jest.fn()}
+        attachmentDrafts={[failedCopyDraft, failedTooLargeDraft]}
+        imageAttachmentsEnabled
+      />,
+    );
+
+    expect(getByLabelText('Failed attached image 1 of 2: Copy failed')).toBe(getByTestId('chat-image-attachment-failed-preview-0'));
+    expect(getByLabelText('Failed attached image 2 of 2: Attachment is too large')).toBe(getByTestId('chat-image-attachment-failed-preview-1'));
+    expect(queryByLabelText('Copy failed')).toBeNull();
+    expect(queryByLabelText('Attachment is too large')).toBeNull();
+  });
+
+  it('surfaces both too-large and copy failures when persistent drafts fail for mixed reasons', () => {
+    reactI18nextMock.__setTranslationOverride(
+      'chat.attachments.mixedFailures',
+      'Attachment is too large. Copy failed.',
+    );
+    const failedCopyDraft: AttachmentDraft = {
+      id: 'draft-copy-failed',
+      pickerUri: 'ph://library-image-copy-failed',
+      previewUri: 'ph://library-image-copy-failed',
+      mediaType: 'image/jpeg',
+      copyStatus: 'failed',
+      errorReason: 'copy_failed',
+    };
+    const failedTooLargeDraft: AttachmentDraft = {
+      id: 'draft-too-large',
+      pickerUri: 'ph://library-image-too-large',
+      previewUri: 'ph://library-image-too-large',
+      mediaType: 'image/jpeg',
+      copyStatus: 'failed',
+      errorReason: 'too_large',
+    };
+
+    const { getByText, queryByText } = render(
+      <ChatInputBar
+        onSendMessage={jest.fn()}
+        onAttachImages={jest.fn()}
+        attachmentDrafts={[failedCopyDraft, failedTooLargeDraft]}
+        imageAttachmentsEnabled
+      />,
+    );
+
+    expect(getByText('Attachment is too large. Copy failed.')).toBeTruthy();
+    expect(queryByText('chat.attachments.tooLarge')).toBeNull();
+    expect(queryByText('chat.attachments.copyFailed')).toBeNull();
   });
 
   it('disables image picking and shows the limit once four drafts are selected', () => {

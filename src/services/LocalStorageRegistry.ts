@@ -449,12 +449,19 @@ function hasResumableProjectorStatus(projector: Pick<ProjectorArtifact, 'lifecyc
     || projector.lifecycleStatus === 'failed';
 }
 
-function collectReferencedProjectorLocalPaths(models: ModelMetadata[]): Set<string> {
+function collectProtectedModelAssetLocalPaths(models: ModelMetadata[]): Set<string> {
   const localPaths = new Set<string>();
 
   for (const model of models) {
+    if (hasCompletedLocalModelFile(model) && isValidLocalFileName(model.localPath)) {
+      localPaths.add(model.localPath);
+    }
+
     for (const projector of model.projectorCandidates ?? []) {
-      if (isValidLocalFileName(projector.localPath)) {
+      if (
+        (hasCompletedProjectorStatus(projector) || hasResumableProjectorStatus(projector))
+        && isValidLocalFileName(projector.localPath)
+      ) {
         localPaths.add(projector.localPath);
       }
     }
@@ -574,11 +581,11 @@ function getModelAssetFilesForRemoval(
     return [];
   }
 
-  const sharedProjectorLocalPaths = collectReferencedProjectorLocalPaths(remainingModels);
+  const protectedLocalPaths = collectProtectedModelAssetLocalPaths(remainingModels);
   const seen = new Set<string>();
   const files: ModelAssetFileForRemoval[] = [];
   const addFile = (fileName: string | undefined, kind: ModelAssetFileForRemoval['kind']) => {
-    if (!isValidLocalFileName(fileName) || seen.has(fileName)) {
+    if (!isValidLocalFileName(fileName) || seen.has(fileName) || protectedLocalPaths.has(fileName)) {
       return;
     }
 
@@ -591,10 +598,6 @@ function getModelAssetFilesForRemoval(
   for (const projector of model.projectorCandidates ?? []) {
     const localPath = projector.localPath;
     if (!isValidLocalFileName(localPath)) {
-      continue;
-    }
-
-    if (sharedProjectorLocalPaths.has(localPath)) {
       continue;
     }
 

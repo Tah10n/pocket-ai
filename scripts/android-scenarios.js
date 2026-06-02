@@ -761,6 +761,7 @@ function recordScenarioSkip({
 }
 
 function assertAttachmentPreviewRemovePreconditions({
+  attachNode = null,
   fallbackNode = null,
   previewNode = null,
   removeNode = null,
@@ -781,6 +782,8 @@ function assertAttachmentPreviewRemovePreconditions({
       `Prepared image attachment preview/remove precondition failed: missing ${missingParts}. Open a running vision-ready chat composer, attach a gallery image, then rerun this scenario with --preserve-running-app.`
     );
   }
+
+  assertAttachmentActionAvailable(attachNode);
 }
 
 function assertAttachmentTextOnlyFallbackState({
@@ -817,6 +820,10 @@ function assertAttachmentActionAvailable(attachNode) {
 
   if (node.enabled === false) {
     throw new Error("Image attachment action is disabled while no text-only fallback is visible.");
+  }
+
+  if (!node.clickable) {
+    throw new Error("Image attachment action is not actionable while no text-only fallback is visible.");
   }
 }
 
@@ -939,6 +946,12 @@ function buildScenarios() {
           IMAGE_ATTACHMENT_TEXT_ONLY_FALLBACK_LABELS,
           { visibleOnly: true }
         );
+        const attachNode = await findAnyNodeNow(
+          adbPath,
+          ctx.serial,
+          ATTACH_IMAGE_LABELS,
+          { visibleOnly: true }
+        );
 
         const previewNode = await findAnyNodeNow(
           adbPath,
@@ -954,6 +967,7 @@ function buildScenarios() {
         );
 
         assertAttachmentPreviewRemovePreconditions({
+          attachNode,
           fallbackNode,
           previewNode,
           removeNode,
@@ -963,7 +977,16 @@ function buildScenarios() {
           allowBottomOverlay: true,
           timeoutMs: 5_000,
         });
+        await waitForNoAnyNode(adbPath, ctx.serial, ATTACHMENT_PREVIEW_LABELS, { timeoutMs: 5_000 });
+        await waitForNoAnyNode(adbPath, ctx.serial, REMOVE_ATTACHMENT_LABELS, { timeoutMs: 5_000 });
         await ctx.expectAnyText(ATTACH_IMAGE_LABELS, { timeoutMs: 5_000 });
+        const restoredAttachNode = await findAnyNodeNow(
+          adbPath,
+          ctx.serial,
+          ATTACH_IMAGE_LABELS,
+          { visibleOnly: true }
+        );
+        assertAttachmentActionAvailable(restoredAttachNode);
       },
     },
     {
@@ -981,6 +1004,12 @@ function buildScenarios() {
           IMAGE_ATTACHMENT_TEXT_ONLY_FALLBACK_LABELS,
           { visibleOnly: true }
         );
+        const attachNode = await findAnyNodeNow(
+          adbPath,
+          ctx.serial,
+          ATTACH_IMAGE_LABELS,
+          { visibleOnly: true }
+        );
         const previewNode = await findAnyNodeNow(
           adbPath,
           ctx.serial,
@@ -995,6 +1024,7 @@ function buildScenarios() {
         );
 
         assertAttachmentPreviewRemovePreconditions({
+          attachNode,
           fallbackNode,
           previewNode,
           removeNode,

@@ -1630,7 +1630,7 @@ export function ScreenIconButton({
       accessibilityRole="button"
       accessibilityLabel={accessibilityLabel}
       disabled={disabled}
-      hitSlop={8}
+      hitSlop={size === 'micro' ? 10 : 8}
       className={joinClassNames(
         sizeClassName,
         screenLayoutTokens.iconButtonClassName,

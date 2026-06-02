@@ -2018,7 +2018,14 @@ export class ModelCatalogService {
       ...incompatibleLocalReadinessProjectorIds,
       ...blockedLocalProjectorIds,
     ]);
-    const blockedLocalResolvedReadinessProjectorIds = new Set(incompatibleRemoteReadinessProjectorIds);
+    const blockedLocalResolvedReadinessProjectorIds = new Set([
+      ...incompatibleRemoteReadinessProjectorIds,
+    ]);
+    const shouldSuppressLocalReadinessFallback = (
+      typeof remoteModel.selectedProjectorId === 'string'
+      && blockedRemoteProjectorIds.has(remoteModel.selectedProjectorId)
+      && selectedProjectorId === undefined
+    );
 
     return {
       projectorCandidates: mergedCandidates,
@@ -2033,6 +2040,7 @@ export class ModelCatalogService {
         blockedRemoteReadinessProjectorIds,
         blockedLocalReadinessProjectorIds,
         blockedLocalResolvedReadinessProjectorIds,
+        shouldSuppressLocalReadinessFallback,
       ),
     };
   }
@@ -2173,10 +2181,35 @@ export class ModelCatalogService {
     blockedLocalProjectorIds: Set<string> = new Set(),
     blockedRemoteProjectorIds: Set<string> = blockedLocalProjectorIds,
   ): string | undefined {
+    const blockedRemoteSelectedProjectorId = remoteSelectedProjectorId
+      && candidateIds.has(remoteSelectedProjectorId)
+      && blockedRemoteProjectorIds.has(remoteSelectedProjectorId)
+      ? remoteSelectedProjectorId
+      : undefined;
+
     if (remoteSelectedProjectorId && candidateIds.has(remoteSelectedProjectorId)) {
-      if (!blockedRemoteProjectorIds.has(remoteSelectedProjectorId)) {
+      if (candidateIds.has(remoteSelectedProjectorId) && !blockedRemoteSelectedProjectorId) {
         return remoteSelectedProjectorId;
       }
+
+      if (!localSelectedProjectorId || blockedLocalProjectorIds.has(localSelectedProjectorId)) {
+        return undefined;
+      }
+
+      const selectedProjectorId = localToRemoteProjectorIds.get(localSelectedProjectorId)
+        ?? localSelectedProjectorId;
+
+      if (blockedRemoteSelectedProjectorId) {
+        return selectedProjectorId === blockedRemoteSelectedProjectorId
+          && localSelectedProjectorId !== selectedProjectorId
+          && candidateIds.has(selectedProjectorId)
+          ? selectedProjectorId
+          : undefined;
+      }
+
+      return selectedProjectorId === remoteSelectedProjectorId && candidateIds.has(selectedProjectorId)
+        ? selectedProjectorId
+        : undefined;
     }
 
     if (!localSelectedProjectorId) {
@@ -2203,8 +2236,9 @@ export class ModelCatalogService {
     blockedRemoteReadinessProjectorIds: Set<string> = new Set(),
     blockedLocalReadinessProjectorIds: Set<string> = blockedRemoteReadinessProjectorIds,
     blockedLocalResolvedReadinessProjectorIds: Set<string> = blockedLocalReadinessProjectorIds,
+    suppressLocalReadinessFallback = false,
   ): MultimodalReadinessState | undefined {
-    return this.remapMultimodalReadiness(
+    const remoteMergedReadiness = this.remapMultimodalReadiness(
       modelId,
       remoteReadiness,
       candidateIds,
@@ -2212,7 +2246,13 @@ export class ModelCatalogService {
       selectedProjectorId,
       blockedRemoteReadinessProjectorIds,
       blockedRemoteReadinessProjectorIds,
-    ) ?? this.remapMultimodalReadiness(
+    );
+
+    if (remoteMergedReadiness || suppressLocalReadinessFallback) {
+      return remoteMergedReadiness;
+    }
+
+    return this.remapMultimodalReadiness(
       modelId,
       localReadiness,
       candidateIds,

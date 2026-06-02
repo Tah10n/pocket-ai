@@ -355,6 +355,7 @@ jest.mock('../../src/components/ui/ChatInputBar', () => {
         onStopGeneration,
         onSendMessage,
         modeLabel,
+        attachmentsTray,
       } = props;
       lastChatInputBarProps = {
         ...props,
@@ -364,6 +365,7 @@ jest.mock('../../src/components/ui/ChatInputBar', () => {
         View,
         { testID: 'chat-input-bar' },
         modeLabel ? mockReact.createElement(Text, null, modeLabel) : null,
+        attachmentsTray ?? null,
         mockReact.createElement(
           Pressable,
           { testID: 'send-button', onPress: () => onSendMessage('Edited from test') },
@@ -2443,6 +2445,8 @@ describe('ChatScreen', () => {
 
     fireEvent.press(getByTestId('regenerate-message-message-image-only'));
     expect(lastChatInputBarProps.allowEmptyMessageSend).toBe(true);
+    expect(getByTestId('chat-regenerate-retained-attachments')).toBeTruthy();
+    expect(lastChatInputBarProps.attachmentsTray).toBeTruthy();
 
     await act(async () => {
       await lastChatInputBarProps.onSendMessage('');

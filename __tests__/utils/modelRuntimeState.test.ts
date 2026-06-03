@@ -868,6 +868,50 @@ describe('modelRuntimeState', () => {
     expect(merged.multimodalReadiness).toBeUndefined();
   });
 
+  it('does not preserve variant-scoped projector runtime state for a different active variant without catalog candidates', () => {
+    const merged = mergeModelWithRuntimeState(
+      makeModel({
+        size: 8 * 1024 * 1024 * 1024,
+        resolvedFileName: 'model.Q8_0.gguf',
+        activeVariantId: 'model.Q8_0.gguf',
+        variants: [
+          { variantId: 'model.Q4_K_M.gguf', fileName: 'model.Q4_K_M.gguf', quantizationLabel: 'Q4_K_M', size: 3 * 1024 * 1024 * 1024 },
+          { variantId: 'model.Q8_0.gguf', fileName: 'model.Q8_0.gguf', quantizationLabel: 'Q8_0', size: 8 * 1024 * 1024 * 1024 },
+        ],
+      }),
+      {
+        queuedItem: makeModel({
+          size: 8 * 1024 * 1024 * 1024,
+          resolvedFileName: 'model.Q8_0.gguf',
+          lifecycleStatus: LifecycleStatus.PAUSED,
+          downloadProgress: 0.5,
+          selectedProjectorId: 'org/model:mmproj-q4',
+          multimodalReadiness: {
+            modelId: 'org/model',
+            variantId: 'model.Q4_K_M.gguf',
+            status: 'ready',
+            projectorId: 'org/model:mmproj-q4',
+            support: ['vision'],
+            checkedAt: 123,
+          },
+          projectorCandidates: [makeProjector({
+            id: 'org/model:mmproj-q4',
+            ownerVariantId: 'model.Q4_K_M.gguf',
+            localPath: 'partial-mmproj-q4.gguf',
+            resumeData: JSON.stringify({ resumeData: 'stale-projector-resume' }),
+            lifecycleStatus: 'paused',
+            matchStatus: 'user_selected',
+            matchReason: 'user_selected_projector',
+          })],
+        }),
+      },
+    );
+
+    expect(merged.projectorCandidates).toBeUndefined();
+    expect(merged.selectedProjectorId).toBeUndefined();
+    expect(merged.multimodalReadiness).toBeUndefined();
+  });
+
   it('does not preserve explicit runtime projector selection when stable artifact identity conflicts', () => {
     const merged = mergeModelWithRuntimeState(
       makeModel({

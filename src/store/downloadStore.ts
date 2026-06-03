@@ -2,10 +2,12 @@ import { create } from 'zustand';
 import { persist, createJSONStorage, subscribeWithSelector } from 'zustand/middleware';
 import { mmkvStorage } from '../lib/mmkv';
 import { ModelMetadata, LifecycleStatus } from '../types/models';
+import type { ProjectorArtifact } from '../types/multimodal';
 import { normalizePersistedModelMetadata } from '../services/ModelMetadataNormalizer';
 import { getCandidateModelDownloadFileNames, getCandidateProjectorDownloadFileNames } from '../utils/modelFiles';
 import { isValidLocalFileName } from '../utils/safeFilePath';
 import { mergeProjectorCandidatesWithRuntimeStateAndIdMap } from '../utils/projectorRuntimeState';
+import { normalizeDownloadResumeData } from '../utils/downloadResumeData';
 import { createInstrumentedStateStorage } from './persistStateStorage';
 import { assertPrivateStorageWritable } from '../services/storage';
 
@@ -173,8 +175,14 @@ function remapMultimodalReadiness(
 
 function buildRetryableQueueEntry(existing: ModelMetadata, model: ModelMetadata): ModelMetadata {
   const canPreserveResumeState = hasCompatibleQueuedFileIdentity(existing, model);
+  const activeProjectorVariantId = model.activeVariantId
+    ?? model.resolvedFileName
+    ?? existing.activeVariantId
+    ?? existing.resolvedFileName;
   const projectorRuntimeMerge = canPreserveResumeState
-    ? mergeProjectorCandidatesWithRuntimeStateAndIdMap(model.projectorCandidates, existing.projectorCandidates)
+    ? mergeProjectorCandidatesWithRuntimeStateAndIdMap(model.projectorCandidates, existing.projectorCandidates, {
+      activeVariantId: activeProjectorVariantId,
+    })
     : {
       projectorCandidates: model.projectorCandidates,
       runtimeToNextProjectorIds: new Map<string, string>(),
@@ -183,7 +191,9 @@ function buildRetryableQueueEntry(existing: ModelMetadata, model: ModelMetadata)
       blockedRuntimeReadinessProjectorIds: new Set<string>(),
       blockedNextReadinessProjectorIds: new Set<string>(),
     };
-  const projectorCandidates = projectorRuntimeMerge.projectorCandidates;
+  const projectorCandidates = normalizePersistedProjectorDownloadStates(
+    projectorRuntimeMerge.projectorCandidates,
+  );
   const candidateIds = new Set((projectorCandidates ?? []).map((projector) => projector.id));
   const blockedNextReadinessProjectorIds = new Set<string>([
     ...projectorRuntimeMerge.blockedNextReadinessProjectorIds,
@@ -266,6 +276,59 @@ function getQueuedProjectorFileNames(model: ModelMetadata): string[] {
   ]);
 }
 
+function normalizePersistedProjectorDownloadState(
+  projector: ProjectorArtifact,
+  options: { clearVolatileProgress?: boolean } = {},
+): ProjectorArtifact {
+  const resumeData = normalizeDownloadResumeData(projector.resumeData);
+  const isDownloading = projector.lifecycleStatus === 'downloading';
+  const shouldPauseQueuedWithResumeData = projector.lifecycleStatus === 'queued'
+    && resumeData !== undefined;
+  const lifecycleStatus = isDownloading
+    ? resumeData !== undefined ? 'paused' as const : 'queued' as const
+    : shouldPauseQueuedWithResumeData ? 'paused' as const : projector.lifecycleStatus;
+  const shouldNormalizeResumeData = resumeData !== projector.resumeData;
+  const shouldClearProgress = options.clearVolatileProgress === true
+    || isDownloading
+    || projector.lifecycleStatus === 'queued'
+    || lifecycleStatus === 'queued'
+    || lifecycleStatus === 'available';
+  const base = shouldClearProgress || shouldNormalizeResumeData
+    ? (() => {
+      const { downloadProgress: _downloadProgress, resumeData: _resumeData, ...withoutVolatileState } = projector;
+      return {
+        ...withoutVolatileState,
+        ...(resumeData !== undefined ? { resumeData } : {}),
+      };
+    })()
+    : projector;
+
+  return lifecycleStatus === projector.lifecycleStatus
+    ? base
+    : {
+      ...base,
+      lifecycleStatus,
+    };
+}
+
+function normalizePersistedProjectorDownloadStates(
+  projectors: ModelMetadata['projectorCandidates'],
+  options: { clearVolatileProgress?: boolean } = {},
+): ModelMetadata['projectorCandidates'] {
+  if (!projectors?.length) {
+    return projectors;
+  }
+
+  let didChange = false;
+  const normalized = projectors.map((projector) => {
+    const nextProjector = normalizePersistedProjectorDownloadState(projector, options);
+    didChange ||= nextProjector !== projector;
+    return nextProjector;
+  });
+
+  return didChange ? normalized : projectors;
+}
+
 interface DownloadState {
   queue: ModelMetadata[];
   activeDownloadId: string | null;
@@ -279,13 +342,27 @@ interface DownloadState {
 export function normalizePersistedDownloadQueue(queue: ModelMetadata[]): ModelMetadata[] {
   return queue.map((model) => {
     const normalizedModel = normalizePersistedModelMetadata(model);
+    const wasInFlight = normalizedModel.lifecycleStatus === LifecycleStatus.DOWNLOADING
+      || normalizedModel.lifecycleStatus === LifecycleStatus.VERIFYING;
+    const projectorCandidates = normalizePersistedProjectorDownloadStates(
+      normalizedModel.projectorCandidates,
+      { clearVolatileProgress: wasInFlight },
+    );
     if (
-      normalizedModel.lifecycleStatus === LifecycleStatus.DOWNLOADING ||
-      normalizedModel.lifecycleStatus === LifecycleStatus.VERIFYING
+      normalizedModel.lifecycleStatus === LifecycleStatus.DOWNLOADING
+      || normalizedModel.lifecycleStatus === LifecycleStatus.VERIFYING
     ) {
       return {
         ...normalizedModel,
         lifecycleStatus: LifecycleStatus.QUEUED,
+        ...(projectorCandidates !== normalizedModel.projectorCandidates ? { projectorCandidates } : {}),
+      };
+    }
+
+    if (projectorCandidates !== normalizedModel.projectorCandidates) {
+      return {
+        ...normalizedModel,
+        projectorCandidates,
       };
     }
 
@@ -384,6 +461,9 @@ export const useDownloadStore = create<DownloadState>()(
             return {
               ...model,
               downloadProgress: shouldZeroProgress ? 0 : model.downloadProgress,
+              projectorCandidates: normalizePersistedProjectorDownloadStates(model.projectorCandidates, {
+                clearVolatileProgress: shouldZeroProgress,
+              }),
             };
           }),
         }),

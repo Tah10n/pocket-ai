@@ -209,6 +209,7 @@
       "retainedForRegenerate_one": "{{count}} image will be reused",
       "retainedForRegenerate_other": "{{count}} images will be reused",
       "retainedForRegenerateDescription": "Original image attachments stay attached while this branch is regenerated.",
+      "retainedForRegenerateBlockedDescription": "Image attachments stay attached, but regeneration is blocked until vision is ready: {{reason}}",
       "limitReached": "You can attach up to {{count}} images.",
       "preparingImage": "Preparing image…",
       "copyFailed": "The image could not be copied into app storage. Try a different image.",

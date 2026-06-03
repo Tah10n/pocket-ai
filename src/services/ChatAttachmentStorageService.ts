@@ -483,46 +483,52 @@ export class ChatAttachmentStorageService {
     }
 
     const candidates: string[] = [];
-    const rejectedChildNames: string[] = [];
+    let rejectedChildNameCount = 0;
 
     for (const fileName of fileNames) {
       const localUri = resolvePrivateStorageResetChildUri(directory, fileName);
       if (localUri) {
         candidates.push(localUri);
       } else {
-        rejectedChildNames.push(fileName);
+        rejectedChildNameCount += 1;
       }
     }
 
     const uniqueCandidates = Array.from(new Set(candidates));
 
-    const results = await Promise.all(uniqueCandidates.map(async (localUri) => {
+    let failedDeleteCount = 0;
+    let firstDeleteErrorDetails: ReturnType<typeof getSanitizedErrorDetails> | null = null;
+    for (const localUri of uniqueCandidates) {
       try {
         await FileSystem.deleteAsync(localUri, { idempotent: true });
-        return true;
       } catch (error) {
-        console.warn('[ChatAttachmentStorage] Failed to delete chat attachment during private reset', {
-          pathCategory: CHAT_IMAGE_ATTACHMENT_PATH_CATEGORY,
-          context: 'private_storage_reset_child_delete',
-          ...getSanitizedErrorDetails(error),
-        });
-        return false;
+        failedDeleteCount += 1;
+        firstDeleteErrorDetails ??= getSanitizedErrorDetails(error);
       }
-    }));
+    }
 
-    if (rejectedChildNames.length > 0) {
-      console.warn('[ChatAttachmentStorage] Refusing unsafe chat attachment child during private reset', {
+    if (failedDeleteCount > 0) {
+      console.warn('[ChatAttachmentStorage] Failed to delete chat attachment during private reset', {
         pathCategory: CHAT_IMAGE_ATTACHMENT_PATH_CATEGORY,
-        context: 'private_storage_reset_child_name_rejected',
-        rejectedCount: rejectedChildNames.length,
+        context: 'private_storage_reset_child_delete',
+        failedCount: failedDeleteCount,
+        ...(firstDeleteErrorDetails ?? {}),
       });
     }
 
-    if (results.some((result) => !result)) {
+    if (rejectedChildNameCount > 0) {
+      console.warn('[ChatAttachmentStorage] Refusing unsafe chat attachment child during private reset', {
+        pathCategory: CHAT_IMAGE_ATTACHMENT_PATH_CATEGORY,
+        context: 'private_storage_reset_child_name_rejected',
+        rejectedCount: rejectedChildNameCount,
+      });
+    }
+
+    if (failedDeleteCount > 0) {
       throw createPrivateStorageResetAttachmentCleanupError('child_delete_failed');
     }
 
-    if (rejectedChildNames.length > 0) {
+    if (rejectedChildNameCount > 0) {
       throw createPrivateStorageResetAttachmentCleanupError('child_name_rejected');
     }
   }

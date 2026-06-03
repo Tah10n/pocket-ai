@@ -1,3 +1,8 @@
+// Keep direct `node ./node_modules/jest/bin/jest.js ...` invocations aligned with
+// scripts/run-jest.js. React Native and NativeWind read NODE_ENV while Jest is
+// bootstrapping, before setupFilesAfterEnv runs.
+process.env.NODE_ENV = 'test';
+
 module.exports = {
     preset: 'react-native',
     testEnvironment: './jest.environment.js',

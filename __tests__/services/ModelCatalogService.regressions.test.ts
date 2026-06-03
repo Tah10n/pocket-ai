@@ -17,6 +17,7 @@ jest.mock('../../src/services/LocalStorageRegistry', () => ({
   registry: {
     getModels: jest.fn(),
     getModel: jest.fn(),
+    updateModel: jest.fn(),
   },
 }));
 
@@ -412,6 +413,537 @@ describe('ModelCatalogService regressions', () => {
     expect(result.models[0].requiresTreeProbe).toBe(true);
   });
 
+  it('keeps bounded vision refresh self-contained and defers later projector entries', async () => {
+    const modelId = 'org/paged-vision-projector';
+    const modelFileName = 'model.Q4_K_M.gguf';
+    const projectorFileName = 'mmproj-model-f16.gguf';
+    const treePage2Cursor = 'tree-page-2';
+    const model: ModelMetadata = {
+      id: modelId,
+      name: 'Paged Vision Projector',
+      author: 'org',
+      size: null,
+      downloadUrl: `https://huggingface.co/${modelId}/resolve/main/${modelFileName}`,
+      fitsInRam: null,
+      accessState: ModelAccessState.PUBLIC,
+      isGated: false,
+      isPrivate: false,
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+      hfRevision: 'main',
+      resolvedFileName: modelFileName,
+      chatModalities: ['text', 'vision'],
+      requiresTreeProbe: true,
+    };
+
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.includes(`cursor=${treePage2Cursor}`)) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          headers: {
+            get: jest.fn(() => null),
+          },
+          json: () => Promise.resolve([
+            {
+              path: projectorFileName,
+              size: 1024,
+              lfs: { sha256: PROJECTOR_SHA256 },
+            },
+          ]),
+        });
+      }
+
+      if (url.includes('/tree/main?recursive=true')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          headers: {
+            get: jest.fn((headerName: string) => (
+              headerName === 'link'
+                ? `<https://huggingface.co/api/models/${modelId}/tree/main?recursive=true&cursor=${treePage2Cursor}>; rel="next"`
+                : null
+            )),
+          },
+          json: () => Promise.resolve([
+            {
+              path: modelFileName,
+              size: 2 * 1024 * 1024 * 1024,
+              lfs: { sha256: TREE_SHA256 },
+            },
+          ]),
+        });
+      }
+
+      throw new Error(`Unexpected fetch ${url}`);
+    }) as jest.Mock;
+
+    const refreshed = await service.refreshModelMetadata(model, { includeDetails: false });
+
+    expect(global.fetch).not.toHaveBeenCalledWith(
+      expect.stringContaining(`cursor=${treePage2Cursor}`),
+      expect.any(Object),
+    );
+    expect(refreshed.projectorCandidates).toBeUndefined();
+    expect(refreshed.chatModalities).toContain('vision');
+  });
+
+  it('uses the full projector-aware tree budget even when primary metadata is already known', async () => {
+    const modelId = 'org/deep-paged-vision-projector';
+    const modelFileName = 'model.Q4_K_M.gguf';
+    const projectorFileName = 'mmproj-model-f16.gguf';
+    const pageCount = 5;
+    const model: ModelMetadata = {
+      id: modelId,
+      name: 'Deep Paged Vision Projector',
+      author: 'org',
+      size: 2 * 1024 * 1024 * 1024,
+      downloadUrl: `https://huggingface.co/${modelId}/resolve/main/${modelFileName}`,
+      fitsInRam: true,
+      accessState: ModelAccessState.PUBLIC,
+      isGated: false,
+      isPrivate: false,
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+      hfRevision: 'main',
+      resolvedFileName: modelFileName,
+      chatModalities: ['text', 'vision'],
+      requiresTreeProbe: false,
+      hasVerifiedContextWindow: true,
+    };
+
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      const cursorMatch = url.match(/cursor=tree-page-(\d+)/);
+      const pageNumber = cursorMatch ? Number(cursorMatch[1]) : 1;
+      const nextPageNumber = pageNumber + 1;
+
+      if (!url.includes('/tree/main?recursive=true') || pageNumber < 1 || pageNumber > pageCount) {
+        throw new Error(`Unexpected fetch ${url}`);
+      }
+
+      const isLastPage = pageNumber === pageCount;
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: {
+          get: jest.fn((headerName: string) => (
+            headerName === 'link' && !isLastPage
+              ? `<https://huggingface.co/api/models/${modelId}/tree/main?recursive=true&cursor=tree-page-${nextPageNumber}>; rel="next"`
+              : null
+          )),
+        },
+        json: () => Promise.resolve(
+          pageNumber === 1
+            ? [{ path: modelFileName, size: model.size, lfs: { sha256: TREE_SHA256 } }]
+            : pageNumber === pageCount
+              ? [{ path: projectorFileName, size: 1024, lfs: { sha256: PROJECTOR_SHA256 } }]
+              : [{ path: `README-page-${pageNumber}.md`, size: 1024 }],
+        ),
+      });
+    }) as jest.Mock;
+
+    const refreshed = await service.refreshModelMetadata(model, { includeDetails: true });
+
+    expect(global.fetch).toHaveBeenCalledWith(
+      expect.stringContaining('cursor=tree-page-5'),
+      expect.any(Object),
+    );
+    expect(refreshed.projectorCandidates).toHaveLength(1);
+    expect(refreshed.projectorCandidates?.[0]).toEqual(expect.objectContaining({
+      fileName: projectorFileName,
+      sha256: PROJECTOR_SHA256,
+    }));
+    expect(refreshed.requiresTreeProbe).toBe(false);
+  });
+
+  it('preserves stale projector state when bounded projector-aware probes hit the page cap', async () => {
+    const modelId = 'org/bounded-stale-projector-preserve';
+    const modelFileName = 'model.Q4_K_M.gguf';
+    const {
+      localModel,
+      localProjector,
+    } = makeDownloadedVisionModelWithProjector({
+      modelId,
+      modelFileName,
+      projectorSha256: PROJECTOR_SHA256,
+    });
+    const refreshTarget = {
+      ...localModel,
+      sha256: TREE_SHA256,
+      downloadIntegrity: {
+        kind: 'sha256' as const,
+        sha256: TREE_SHA256,
+        sizeBytes: localModel.size ?? 0,
+        checkedAt: 1234,
+      },
+    };
+
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      const cursorMatch = url.match(/cursor=tree-page-(\d+)/);
+      const pageNumber = cursorMatch ? Number(cursorMatch[1]) : 1;
+      const nextPageNumber = pageNumber + 1;
+
+      if (!url.includes('/tree/main?recursive=true') || pageNumber < 1 || pageNumber > 4) {
+        throw new Error(`Unexpected fetch ${url}`);
+      }
+
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: {
+          get: jest.fn((headerName: string) => (
+            headerName === 'link'
+              ? `<https://huggingface.co/api/models/${modelId}/tree/main?recursive=true&cursor=tree-page-${nextPageNumber}>; rel="next"`
+              : null
+          )),
+        },
+        json: () => Promise.resolve([{ path: `README-page-${pageNumber}.md`, size: 1024 }]),
+      });
+    }) as jest.Mock;
+
+    mockedRegistry.getModel.mockReturnValue(refreshTarget);
+
+    const refreshed = await service.refreshModelMetadata(refreshTarget, { includeDetails: false });
+
+    expect(global.fetch).toHaveBeenCalledWith(
+      expect.stringContaining('cursor=tree-page-4'),
+      expect.any(Object),
+    );
+    expect(global.fetch).not.toHaveBeenCalledWith(
+      expect.stringContaining('cursor=tree-page-5'),
+      expect.any(Object),
+    );
+    expect(refreshed.projectorCandidates?.[0]).toEqual(expect.objectContaining({
+      id: localProjector.id,
+      localPath: localProjector.localPath,
+      lifecycleStatus: localProjector.lifecycleStatus,
+    }));
+    expect(refreshed.selectedProjectorId).toBe(localProjector.id);
+    expect(refreshed.multimodalReadiness?.projectorId).toBe(localProjector.id);
+    expect(refreshed.requiresTreeProbe).toBe(true);
+  });
+
+  it('preserves unmatched local projector state when incomplete probes discover partial remote candidates', async () => {
+    const modelId = 'org/bounded-partial-projector-preserve';
+    const modelFileName = 'model.Q4_K_M.gguf';
+    const localProjectorFileName = 'mmproj-local-f16.gguf';
+    const remoteProjectorFileName = 'mmproj-remote-f16.gguf';
+    const remoteProjectorId = buildProjectorArtifactId({
+      repoId: modelId,
+      hfRevision: 'main',
+      fileName: remoteProjectorFileName,
+    });
+    const {
+      localModel,
+      localProjector,
+    } = makeDownloadedVisionModelWithProjector({
+      modelId,
+      modelFileName,
+      projectorFileName: localProjectorFileName,
+      projectorSha256: PROJECTOR_SHA256,
+    });
+    const refreshTarget = {
+      ...localModel,
+      sha256: TREE_SHA256,
+      downloadIntegrity: {
+        kind: 'sha256' as const,
+        sha256: TREE_SHA256,
+        sizeBytes: localModel.size ?? 0,
+        checkedAt: 1234,
+      },
+    };
+
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      const cursorMatch = url.match(/cursor=tree-page-(\d+)/);
+      const pageNumber = cursorMatch ? Number(cursorMatch[1]) : 1;
+      const nextPageNumber = pageNumber + 1;
+
+      if (!url.includes('/tree/main?recursive=true') || pageNumber < 1 || pageNumber > 4) {
+        throw new Error(`Unexpected fetch ${url}`);
+      }
+
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: {
+          get: jest.fn((headerName: string) => (
+            headerName === 'link'
+              ? `<https://huggingface.co/api/models/${modelId}/tree/main?recursive=true&cursor=tree-page-${nextPageNumber}>; rel="next"`
+              : null
+          )),
+        },
+        json: () => Promise.resolve(
+          pageNumber === 4
+            ? [{ path: modelFileName, size: localModel.size, lfs: { sha256: TREE_SHA256 } }]
+            : pageNumber === 2
+              ? [{ path: remoteProjectorFileName, size: 2048, lfs: { sha256: DIFFERENT_PROJECTOR_SHA256 } }]
+              : [{ path: `README-page-${pageNumber}.md`, size: 1024 }],
+        ),
+      });
+    }) as jest.Mock;
+    mockedRegistry.getModel.mockReturnValue(refreshTarget);
+
+    const refreshed = await service.refreshModelMetadata(refreshTarget, { includeDetails: false });
+
+    expect(global.fetch).toHaveBeenCalledWith(
+      expect.stringContaining('cursor=tree-page-4'),
+      expect.any(Object),
+    );
+    expect(global.fetch).not.toHaveBeenCalledWith(
+      expect.stringContaining('cursor=tree-page-5'),
+      expect.any(Object),
+    );
+    expect(refreshed.projectorCandidates).toHaveLength(2);
+    expect(refreshed.projectorCandidates).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: remoteProjectorId,
+        fileName: remoteProjectorFileName,
+        sha256: DIFFERENT_PROJECTOR_SHA256,
+      }),
+      expect.objectContaining({
+        id: localProjector.id,
+        localPath: localProjector.localPath,
+        lifecycleStatus: localProjector.lifecycleStatus,
+      }),
+    ]));
+    expect(refreshed.selectedProjectorId).toBe(localProjector.id);
+    expect(refreshed.multimodalReadiness?.projectorId).toBe(localProjector.id);
+  });
+
+  it('does not preserve unmatched local projector state for another active variant during incomplete probes', async () => {
+    const modelId = 'org/bounded-partial-projector-variant-switch';
+    const staleModelFileName = 'model.Q4_K_M.gguf';
+    const activeModelFileName = 'model.Q8_0.gguf';
+    const localProjectorFileName = 'mmproj-local-f16.gguf';
+    const remoteProjectorFileName = 'mmproj-remote-f16.gguf';
+    const staleProjectorId = buildProjectorArtifactId({
+      repoId: modelId,
+      hfRevision: 'main',
+      ownerVariantId: staleModelFileName,
+      fileName: localProjectorFileName,
+    });
+    const remoteProjectorId = buildProjectorArtifactId({
+      repoId: modelId,
+      hfRevision: 'main',
+      fileName: remoteProjectorFileName,
+    });
+    const localProjector: ProjectorArtifact = {
+      id: staleProjectorId,
+      ownerModelId: modelId,
+      ownerVariantId: staleModelFileName,
+      repoId: modelId,
+      fileName: localProjectorFileName,
+      downloadUrl: `https://huggingface.co/${modelId}/resolve/main/${localProjectorFileName}`,
+      hfRevision: 'main',
+      sha256: PROJECTOR_SHA256,
+      size: 1024,
+      localPath: 'mmproj-local-f16.gguf',
+      lifecycleStatus: 'downloaded',
+      matchStatus: 'matched',
+    };
+    const refreshTarget: ModelMetadata = {
+      id: modelId,
+      name: 'Bounded Partial Projector Variant Switch',
+      author: 'org',
+      size: 4 * 1024 * 1024 * 1024,
+      downloadUrl: `https://huggingface.co/${modelId}/resolve/main/${activeModelFileName}`,
+      hfRevision: 'main',
+      resolvedFileName: activeModelFileName,
+      sha256: TREE_SHA256,
+      downloadIntegrity: {
+        kind: 'sha256',
+        sha256: TREE_SHA256,
+        sizeBytes: 4 * 1024 * 1024 * 1024,
+        checkedAt: 1234,
+      },
+      fitsInRam: true,
+      accessState: ModelAccessState.PUBLIC,
+      isGated: false,
+      isPrivate: false,
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      activeVariantId: activeModelFileName,
+      chatModalities: ['text', 'vision'],
+      projectorCandidates: [localProjector],
+      selectedProjectorId: localProjector.id,
+      multimodalReadiness: {
+        modelId,
+        variantId: staleModelFileName,
+        status: 'ready',
+        projectorId: localProjector.id,
+        support: ['vision'],
+        checkedAt: 1234,
+      },
+    };
+
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      const cursorMatch = url.match(/cursor=tree-page-(\d+)/);
+      const pageNumber = cursorMatch ? Number(cursorMatch[1]) : 1;
+      const nextPageNumber = pageNumber + 1;
+
+      if (!url.includes('/tree/main?recursive=true') || pageNumber < 1 || pageNumber > 4) {
+        throw new Error(`Unexpected fetch ${url}`);
+      }
+
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: {
+          get: jest.fn((headerName: string) => (
+            headerName === 'link'
+              ? `<https://huggingface.co/api/models/${modelId}/tree/main?recursive=true&cursor=tree-page-${nextPageNumber}>; rel="next"`
+              : null
+          )),
+        },
+        json: () => Promise.resolve(
+          pageNumber === 4
+            ? [{ path: activeModelFileName, size: refreshTarget.size, lfs: { sha256: TREE_SHA256 } }]
+            : pageNumber === 2
+              ? [{ path: remoteProjectorFileName, size: 2048, lfs: { sha256: DIFFERENT_PROJECTOR_SHA256 } }]
+              : [{ path: `README-page-${pageNumber}.md`, size: 1024 }],
+        ),
+      });
+    }) as jest.Mock;
+    mockedRegistry.getModel.mockReturnValue(refreshTarget);
+
+    const refreshed = await service.refreshModelMetadata(refreshTarget, { includeDetails: false });
+
+    expect(refreshed.projectorCandidates).toEqual([
+      expect.objectContaining({
+        id: remoteProjectorId,
+        fileName: remoteProjectorFileName,
+        sha256: DIFFERENT_PROJECTOR_SHA256,
+      }),
+    ]);
+    expect(refreshed.projectorCandidates).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: localProjector.id }),
+    ]));
+    expect(refreshed.selectedProjectorId).toBeUndefined();
+    expect(refreshed.multimodalReadiness).toBeUndefined();
+  });
+
+  it('clears stale projector state after a complete zero-projector tree probe', async () => {
+    const modelId = 'org/complete-zero-projector-clear';
+    const modelFileName = 'model.Q4_K_M.gguf';
+    const { localModel } = makeDownloadedVisionModelWithProjector({
+      modelId,
+      modelFileName,
+      projectorSha256: PROJECTOR_SHA256,
+    });
+    const refreshTarget: ModelMetadata = {
+      ...localModel,
+      hasVerifiedContextWindow: true,
+    };
+
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (!url.includes('/tree/main?recursive=true')) {
+        throw new Error(`Unexpected fetch ${url}`);
+      }
+
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: {
+          get: jest.fn(() => null),
+        },
+        json: () => Promise.resolve([
+          { path: modelFileName, size: localModel.size, lfs: { sha256: TREE_SHA256 } },
+        ]),
+      });
+    }) as jest.Mock;
+
+    const refreshed = await service.refreshModelMetadata(refreshTarget, { includeDetails: true });
+
+    expect(refreshed.projectorCandidates).toBeUndefined();
+    expect(refreshed.selectedProjectorId).toBeUndefined();
+    expect(refreshed.multimodalReadiness).toBeUndefined();
+    expect(refreshed.requiresTreeProbe).toBe(false);
+  });
+
+  it('keeps bounded visionConfidence-only refresh from scanning later projector pages', async () => {
+    const modelId = 'org/paged-vision-confidence-projector';
+    const modelFileName = 'model.Q4_K_M.gguf';
+    const projectorFileName = 'mmproj-model-f16.gguf';
+    const treePage2Cursor = 'tree-page-2';
+    const model: ModelMetadata = {
+      id: modelId,
+      name: 'Paged Vision Confidence Projector',
+      author: 'org',
+      size: null,
+      downloadUrl: `https://huggingface.co/${modelId}/resolve/main/${modelFileName}`,
+      fitsInRam: null,
+      accessState: ModelAccessState.PUBLIC,
+      isGated: false,
+      isPrivate: false,
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+      hfRevision: 'main',
+      resolvedFileName: modelFileName,
+      visionConfidence: 'inferred',
+      requiresTreeProbe: true,
+    };
+
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.includes(`cursor=${treePage2Cursor}`)) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          headers: {
+            get: jest.fn(() => null),
+          },
+          json: () => Promise.resolve([
+            {
+              path: projectorFileName,
+              size: 1024,
+              lfs: { sha256: PROJECTOR_SHA256 },
+            },
+          ]),
+        });
+      }
+
+      if (url.includes('/tree/main?recursive=true')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          headers: {
+            get: jest.fn((headerName: string) => (
+              headerName === 'link'
+                ? `<https://huggingface.co/api/models/${modelId}/tree/main?recursive=true&cursor=${treePage2Cursor}>; rel="next"`
+                : null
+            )),
+          },
+          json: () => Promise.resolve([
+            {
+              path: modelFileName,
+              size: 2 * 1024 * 1024 * 1024,
+              lfs: { sha256: TREE_SHA256 },
+            },
+          ]),
+        });
+      }
+
+      throw new Error(`Unexpected fetch ${url}`);
+    }) as jest.Mock;
+
+    const refreshed = await service.refreshModelMetadata(model, { includeDetails: false });
+
+    expect(global.fetch).not.toHaveBeenCalledWith(
+      expect.stringContaining(`cursor=${treePage2Cursor}`),
+      expect.any(Object),
+    );
+    expect(refreshed.projectorCandidates).toBeUndefined();
+    expect(refreshed.visionConfidence).toBe('inferred');
+  });
+
   it('preserves downloaded projector state when catalog projector ids become repo-level', async () => {
     const modelId = 'org/vision-legacy';
     const modelFileName = 'model.Q4_K_M.gguf';
@@ -497,6 +1029,166 @@ describe('ModelCatalogService regressions', () => {
       status: 'ready',
       projectorId: projector?.id,
     }));
+  });
+
+  it('does not preserve variant-scoped projector runtime state after switching to another active variant', async () => {
+    const modelId = 'org/vision-legacy-variant-switch';
+    const modelFileName = 'model.Q4_K_M.gguf';
+    const alternateModelFileName = 'model.Q8_0.gguf';
+    const projectorFileName = 'mmproj-model-f16.gguf';
+    const legacyProjectorId = buildProjectorArtifactId({
+      repoId: modelId,
+      hfRevision: 'main',
+      ownerVariantId: modelFileName,
+      fileName: projectorFileName,
+    });
+    const localProjector: ProjectorArtifact = {
+      id: legacyProjectorId,
+      ownerModelId: modelId,
+      ownerVariantId: modelFileName,
+      repoId: modelId,
+      fileName: projectorFileName,
+      downloadUrl: `https://huggingface.co/${modelId}/resolve/main/${projectorFileName}`,
+      hfRevision: 'main',
+      sha256: PROJECTOR_SHA256,
+      size: 1024,
+      localPath: 'mmproj-model-f16.gguf',
+      lifecycleStatus: 'downloaded',
+      matchStatus: 'matched',
+    };
+    const localModel: ModelMetadata = {
+      id: modelId,
+      name: 'Vision Legacy Variant Switch',
+      author: 'org',
+      size: 4 * 1024 * 1024 * 1024,
+      downloadUrl: `https://huggingface.co/${modelId}/resolve/main/${alternateModelFileName}`,
+      hfRevision: 'main',
+      resolvedFileName: alternateModelFileName,
+      fitsInRam: true,
+      accessState: ModelAccessState.PUBLIC,
+      isGated: false,
+      isPrivate: false,
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      activeVariantId: alternateModelFileName,
+      variants: [
+        {
+          variantId: modelFileName,
+          fileName: modelFileName,
+          quantizationLabel: 'Q4_K_M',
+          size: 2 * 1024 * 1024 * 1024,
+        },
+        {
+          variantId: alternateModelFileName,
+          fileName: alternateModelFileName,
+          quantizationLabel: 'Q8_0',
+          size: 4 * 1024 * 1024 * 1024,
+        },
+      ],
+      chatModalities: ['text', 'vision'],
+      projectorCandidates: [localProjector],
+      selectedProjectorId: localProjector.id,
+      multimodalReadiness: {
+        modelId,
+        variantId: modelFileName,
+        status: 'ready',
+        projectorId: localProjector.id,
+        support: ['vision'],
+        checkedAt: 1234,
+      },
+    };
+
+    mockedRegistry.getModel.mockImplementation((id) => (id === modelId ? localModel : undefined));
+    global.fetch = jest.fn(() =>
+      Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve([makeVisionRepo(modelId, alternateModelFileName, projectorFileName)]),
+      }),
+    ) as jest.Mock;
+
+    const result = await service.searchModels('vision legacy variant switch');
+    const model = result.models[0];
+    const projector = model.projectorCandidates?.[0];
+
+    expect(projector?.id).not.toBe(localProjector.id);
+    expect(projector?.localPath).toBeUndefined();
+    expect(projector?.lifecycleStatus).not.toBe('downloaded');
+    expect(model.selectedProjectorId).toBeUndefined();
+    expect(model.multimodalReadiness).toBeUndefined();
+  });
+
+  it('does not preserve variant-scoped local projector state for a different active variant when remote has no candidates', async () => {
+    const modelId = 'org/vision-legacy-variant-no-projector';
+    const modelFileName = 'model.Q4_K_M.gguf';
+    const alternateModelFileName = 'model.Q8_0.gguf';
+    const projectorFileName = 'mmproj-model-f16.gguf';
+    const legacyProjectorId = buildProjectorArtifactId({
+      repoId: modelId,
+      hfRevision: 'main',
+      ownerVariantId: modelFileName,
+      fileName: projectorFileName,
+    });
+    const localProjector: ProjectorArtifact = {
+      id: legacyProjectorId,
+      ownerModelId: modelId,
+      ownerVariantId: modelFileName,
+      repoId: modelId,
+      fileName: projectorFileName,
+      downloadUrl: `https://huggingface.co/${modelId}/resolve/main/${projectorFileName}`,
+      hfRevision: 'main',
+      sha256: PROJECTOR_SHA256,
+      size: 1024,
+      localPath: 'mmproj-model-f16.gguf',
+      lifecycleStatus: 'downloaded',
+      matchStatus: 'matched',
+    };
+    const localModel: ModelMetadata = {
+      id: modelId,
+      name: 'Vision Legacy Variant Without Projector',
+      author: 'org',
+      size: 4 * 1024 * 1024 * 1024,
+      downloadUrl: `https://huggingface.co/${modelId}/resolve/main/${alternateModelFileName}`,
+      hfRevision: 'main',
+      resolvedFileName: alternateModelFileName,
+      fitsInRam: true,
+      accessState: ModelAccessState.PUBLIC,
+      isGated: false,
+      isPrivate: false,
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      activeVariantId: alternateModelFileName,
+      chatModalities: ['text', 'vision'],
+      projectorCandidates: [localProjector],
+      selectedProjectorId: localProjector.id,
+      multimodalReadiness: {
+        modelId,
+        variantId: modelFileName,
+        status: 'ready',
+        projectorId: localProjector.id,
+        support: ['vision'],
+        checkedAt: 1234,
+      },
+    };
+
+    mockedRegistry.getModel.mockImplementation((id) => (id === modelId ? localModel : undefined));
+    global.fetch = jest.fn(() =>
+      Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve([{
+          id: modelId,
+          pipeline_tag: 'text-generation',
+          tags: ['gguf', 'chat', 'vision'],
+          siblings: [{ rfilename: alternateModelFileName, size: 4 * 1024 * 1024 * 1024 }],
+        }]),
+      }),
+    ) as jest.Mock;
+
+    const result = await service.searchModels('vision legacy variant without projector');
+    const model = result.models[0];
+
+    expect(model.projectorCandidates).toBeUndefined();
+    expect(model.selectedProjectorId).toBeUndefined();
+    expect(model.multimodalReadiness).toBeUndefined();
   });
 
   it('does not preserve projector runtime state for exact id matches with conflicting stable identity', async () => {

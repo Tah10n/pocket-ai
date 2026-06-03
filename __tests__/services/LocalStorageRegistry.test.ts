@@ -437,8 +437,15 @@ describe('LocalStorageRegistry', () => {
     expect(FileSystem.deleteAsync).not.toHaveBeenCalled();
     expect(mockStorage.remove).toHaveBeenCalledWith('models-registry:model-v1:test%2Fmodel');
     expect(consoleWarnSpy).toHaveBeenCalledWith(
-      '[LocalStorageRegistry] Local path for test/model points to a directory, skipping file deletion',
+      '[LocalStorageRegistry] Model asset localPath points to a directory, skipping file deletion',
+      expect.objectContaining({
+        fileKind: 'model',
+        pathCategory: 'model_storage',
+        scope: 'model_asset_delete',
+      }),
     );
+    expect(JSON.stringify(consoleWarnSpy.mock.calls)).not.toContain(model.id);
+    expect(JSON.stringify(consoleWarnSpy.mock.calls)).not.toContain(model.localPath ?? '');
   });
 
   it('should validate registry and reset status if file is missing', async () => {
@@ -1935,6 +1942,15 @@ describe('LocalStorageRegistry', () => {
     expect(quarantinePayload).toEqual(expect.stringContaining('orphan.gguf'));
     expect(quarantinePayload).not.toEqual(expect.stringContaining('keep.gguf'));
     expect(quarantinePayload).not.toEqual(expect.stringContaining('queued.gguf'));
+    expect(consoleWarnSpy).toHaveBeenCalledWith(
+      '[LocalStorageRegistry] Quarantined orphaned model files',
+      expect.objectContaining({
+        pathCategory: 'model_storage',
+        scope: 'orphan_quarantine_scan',
+        count: 1,
+      }),
+    );
+    expect(JSON.stringify(consoleWarnSpy.mock.calls)).not.toContain('orphan.gguf');
   });
 
   it('preserves downloaded projector files during orphan quarantine scans', async () => {
@@ -2191,9 +2207,15 @@ describe('LocalStorageRegistry', () => {
     expect(mockStorage.set).not.toHaveBeenCalledWith('quarantined-model-files-v1', expect.anything());
     expect(mockStorage.remove).not.toHaveBeenCalledWith('quarantined-model-files-v1');
     expect(consoleWarnSpy).toHaveBeenCalledWith(
-      '[LocalStorageRegistry] Failed to inspect model directory entry during quarantined model cleanup: orphan.gguf',
-      inspectError,
+      '[LocalStorageRegistry] Failed to inspect model directory entry',
+      expect.objectContaining({
+        pathCategory: 'model_storage',
+        scope: 'quarantined model cleanup',
+        errorName: 'Error',
+      }),
     );
+    expect(JSON.stringify(consoleWarnSpy.mock.calls)).not.toContain('orphan.gguf');
+    expect(JSON.stringify(consoleWarnSpy.mock.calls)).not.toContain(inspectError.message);
   });
 
   it('does not delete quarantined model files when the directory cannot be scanned', async () => {

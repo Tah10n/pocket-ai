@@ -717,6 +717,42 @@ describe('ChatAttachmentStorageService', () => {
     });
   });
 
+  it('deletes private storage reset attachment candidates sequentially', async () => {
+    let resolveFirstDelete!: () => void;
+    (FileSystem.readDirectoryAsync as jest.Mock).mockResolvedValueOnce([
+      'first.jpg',
+      'second.png',
+      'third.jpg',
+    ]);
+    (FileSystem.deleteAsync as jest.Mock)
+      .mockImplementationOnce(() => new Promise<void>((resolve) => {
+        resolveFirstDelete = resolve;
+      }))
+      .mockResolvedValue(undefined);
+    const service = new ChatAttachmentStorageService();
+
+    const cleanupPromise = service.deleteAllAttachmentFilesForPrivateStorageReset();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(FileSystem.deleteAsync).toHaveBeenCalledTimes(1);
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/chat-attachments/first.jpg', {
+      idempotent: true,
+    });
+
+    resolveFirstDelete();
+    await cleanupPromise;
+
+    expect(FileSystem.deleteAsync).toHaveBeenCalledTimes(3);
+    expect(FileSystem.deleteAsync).toHaveBeenNthCalledWith(2, 'test-dir/chat-attachments/second.png', {
+      idempotent: true,
+    });
+    expect(FileSystem.deleteAsync).toHaveBeenNthCalledWith(3, 'test-dir/chat-attachments/third.jpg', {
+      idempotent: true,
+    });
+  });
+
   it('fails private storage reset after deleting safe files rather than skipping unsafe child names', async () => {
     const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
     (FileSystem.readDirectoryAsync as jest.Mock).mockResolvedValueOnce([
@@ -805,6 +841,7 @@ describe('ChatAttachmentStorageService', () => {
       expect.objectContaining({
         pathCategory: 'chat_attachment',
         context: 'private_storage_reset_child_delete',
+        failedCount: 1,
         errorName: 'Error',
       }),
     );

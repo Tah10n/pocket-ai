@@ -6,9 +6,19 @@ type ContextOperationOptions = {
   readonly chatBlocking?: boolean;
 };
 
+type ContextOperationCancelOptions = {
+  readonly chatBlocking?: boolean;
+};
+
 export type ContextOperationCancellationToken = {
   readonly isCancelled: () => boolean;
   readonly throwIfCancelled: () => void;
+};
+
+type ActiveContextOperation = {
+  readonly promise: Promise<unknown>;
+  readonly chatBlocking: boolean;
+  readonly cancel: (error: unknown) => void;
 };
 
 export class ContextOperationRunner {
@@ -17,6 +27,7 @@ export class ContextOperationRunner {
   public rawActivePromises: Set<Promise<unknown>> = new Set();
   public chatBlockingRawActivePromises: Set<Promise<unknown>> = new Set();
   public activeRejects: Map<Promise<unknown>, (error: unknown) => void> = new Map();
+  private activeOperations: Map<Promise<unknown>, ActiveContextOperation> = new Map();
   public cancelGeneration = 0;
 
   public track<T>(
@@ -42,21 +53,25 @@ export class ContextOperationRunner {
     this.queue = previousOperation.catch(() => undefined).then(() => queueSlot);
 
     let rejectCancellation: (error: unknown) => void = () => undefined;
+    let operationCancelled = false;
+    let operationCancellationError: unknown | undefined;
     const cancellationPromise = new Promise<never>((_, reject) => {
       rejectCancellation = reject;
     });
+    const isOperationCancelled = () => this.cancelGeneration !== operationGeneration || operationCancelled;
+    const getCancellationError = () => operationCancellationError ?? createCancellationError();
     const cancellationToken: ContextOperationCancellationToken = {
-      isCancelled: () => this.cancelGeneration !== operationGeneration,
-      throwIfCancelled: () => this.assertNotCancelled(operationGeneration, createCancellationError),
+      isCancelled: isOperationCancelled,
+      throwIfCancelled: () => this.assertNotCancelled(isOperationCancelled, getCancellationError),
     };
 
     const rawOperationPromise = (async () => {
       await previousOperation.catch(() => undefined);
 
       try {
-        this.assertNotCancelled(operationGeneration, createCancellationError);
+        this.assertNotCancelled(isOperationCancelled, getCancellationError);
         const result = await operation(cancellationToken);
-        this.assertNotCancelled(operationGeneration, createCancellationError);
+        this.assertNotCancelled(isOperationCancelled, getCancellationError);
         return result;
       } finally {
         releaseOperationQueue();
@@ -75,6 +90,15 @@ export class ContextOperationRunner {
     const operationPromise = Promise.race([rawOperationPromise, cancellationPromise]);
     this.activePromises.add(operationPromise);
     this.activeRejects.set(operationPromise, rejectCancellation);
+    this.activeOperations.set(operationPromise, {
+      promise: operationPromise,
+      chatBlocking: isChatBlocking,
+      cancel: (error) => {
+        operationCancelled = true;
+        operationCancellationError = error;
+        rejectCancellation(error);
+      },
+    });
 
     void operationPromise.then(
       () => this.clearActiveOperation(operationPromise),
@@ -98,11 +122,25 @@ export class ContextOperationRunner {
     return waitForPromiseWithTimeout(drainPromise, options.timeoutMs);
   }
 
-  public cancelActive(error: unknown): void {
-    this.cancelGeneration += 1;
-    const rejectActiveOperations = Array.from(this.activeRejects.values());
-    this.activeRejects.clear();
-    rejectActiveOperations.forEach((reject) => reject(error));
+  public cancelActive(error: unknown, options: ContextOperationCancelOptions = {}): void {
+    const hasChatBlockingFilter = typeof options.chatBlocking === 'boolean';
+    if (!hasChatBlockingFilter) {
+      this.cancelGeneration += 1;
+    }
+
+    const operationsToCancel = Array.from(this.activeOperations.values()).filter((operation) => (
+      !hasChatBlockingFilter || operation.chatBlocking === options.chatBlocking
+    ));
+
+    for (const operation of operationsToCancel) {
+      this.activeRejects.delete(operation.promise);
+      operation.cancel(error);
+    }
+
+    if (!hasChatBlockingFilter) {
+      this.activeOperations.clear();
+      this.activeRejects.clear();
+    }
   }
 
   public reset(error?: unknown): void {
@@ -113,6 +151,7 @@ export class ContextOperationRunner {
       rejectActiveOperations.forEach((reject) => reject(error));
     }
     this.activePromises.clear();
+    this.activeOperations.clear();
     this.rawActivePromises.clear();
     this.chatBlockingRawActivePromises.clear();
     this.queue = Promise.resolve();
@@ -126,15 +165,16 @@ export class ContextOperationRunner {
     return this.chatBlockingRawActivePromises.size > 0;
   }
 
-  private assertNotCancelled(generation: number, createCancellationError: ErrorFactory): void {
-    if (this.cancelGeneration !== generation) {
-      throw createCancellationError();
+  private assertNotCancelled(isCancelled: () => boolean, getCancellationError: ErrorFactory): void {
+    if (isCancelled()) {
+      throw getCancellationError();
     }
   }
 
   private clearActiveOperation(operationPromise: Promise<unknown>): void {
     this.activePromises.delete(operationPromise);
     this.activeRejects.delete(operationPromise);
+    this.activeOperations.delete(operationPromise);
   }
 
   private clearRawActiveOperation(rawOperationPromise: Promise<unknown>): void {

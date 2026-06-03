@@ -17,6 +17,15 @@ export interface ModelVisionCapabilityBadgePresentation {
   iconName: 'visibility' | 'extension';
 }
 
+type ModelVisionCapabilityInput = Partial<Pick<
+  ModelMetadata,
+  | 'artifactRole'
+  | 'chatModalities'
+  | 'projectorCandidates'
+  | 'selectedProjectorId'
+  | 'multimodalReadiness'
+>>;
+
 type ModelCapabilityInput = Pick<
   ModelMetadata,
   | 'capabilitySnapshot'
@@ -317,12 +326,30 @@ export function resolveModelCapabilitySnapshot(
   };
 }
 
-export function modelSupportsVision(
-  model: Pick<ModelMetadata, 'artifactRole' | 'chatModalities'>,
+function hasPersistedVisionReadinessEvidence(
+  readiness: ModelVisionCapabilityInput['multimodalReadiness'],
 ): boolean {
-  return model.artifactRole !== 'projector_companion'
-    && Array.isArray(model.chatModalities)
-    && model.chatModalities.includes('vision');
+  if (!readiness) {
+    return false;
+  }
+
+  return readiness.support.includes('vision')
+    || typeof readiness.projectorId === 'string'
+    || readiness.status !== 'text_only';
+}
+
+export function modelSupportsVision(model: ModelVisionCapabilityInput): boolean {
+  if (model.artifactRole === 'projector_companion') {
+    return false;
+  }
+
+  if (Array.isArray(model.chatModalities)) {
+    return model.chatModalities.includes('vision');
+  }
+
+  return Boolean(model.projectorCandidates?.length)
+    || (typeof model.selectedProjectorId === 'string' && model.selectedProjectorId.trim().length > 0)
+    || hasPersistedVisionReadinessEvidence(model.multimodalReadiness);
 }
 
 function hasReadyProjectorCandidate(
@@ -336,7 +363,7 @@ function hasReadyProjectorCandidate(
 }
 
 export function getModelVisionCapabilityStatusLabelKey(
-  model: Pick<ModelMetadata, 'artifactRole' | 'chatModalities' | 'projectorCandidates' | 'selectedProjectorId'>,
+  model: ModelVisionCapabilityInput,
 ): string | null {
   if (!modelSupportsVision(model)) {
     return null;
@@ -352,7 +379,7 @@ export function getModelVisionCapabilityStatusLabelKey(
 }
 
 export function getModelVisionCapabilityBadgePresentation(
-  model: Pick<ModelMetadata, 'artifactRole' | 'chatModalities' | 'projectorCandidates' | 'selectedProjectorId'>,
+  model: ModelVisionCapabilityInput,
 ): ModelVisionCapabilityBadgePresentation | null {
   if (!modelSupportsVision(model)) {
     return null;

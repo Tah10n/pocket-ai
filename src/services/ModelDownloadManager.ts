@@ -215,6 +215,13 @@ const SENSITIVE_ERROR_DETAIL_KEYS = new Set([
   'nativepath',
   'filepath',
   'absolutepath',
+  'filename',
+  'filenames',
+  'candidate',
+  'candidates',
+  'projectorid',
+  'artifactid',
+  'ownervariantid',
 ]);
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -291,11 +298,11 @@ function buildVerificationErrorDetails(
   details?: Record<string, unknown>,
 ): Record<string, unknown> {
   const projector = artifact as Partial<Pick<ProjectorArtifact, 'ownerModelId' | 'ownerVariantId'>>;
+  const isProjector = typeof projector.ownerModelId === 'string' && projector.ownerModelId.length > 0;
   return {
     modelId: projector.ownerModelId ?? artifact.id,
-    artifactId: artifact.id,
-    ...(projector.ownerModelId ? { projectorId: artifact.id } : {}),
-    ...(projector.ownerVariantId ? { ownerVariantId: projector.ownerVariantId } : {}),
+    artifactKind: isProjector ? 'projector' : 'model',
+    ...(isProjector ? {} : { artifactId: artifact.id }),
     pathCategory: getPathCategory(localUri),
     ...(sanitizeErrorDetails(details) ?? {}),
   };
@@ -1000,7 +1007,7 @@ export class ModelDownloadManager {
         throw new AppError('download_disk_space_low', 'DISK_SPACE_LOW', {
           details: {
             modelId: model.id,
-            projectorId: selectedProjector?.id,
+            ...(selectedProjector ? { artifactKind: 'projector' } : null),
             freeSpace,
             requiredBytes,
           },
@@ -1053,8 +1060,8 @@ export class ModelDownloadManager {
 
     const localUri = reusableModelFile?.localUri ?? safeJoinModelPath(modelsDir, fileName);
     if (!localUri) {
-      throw new AppError('action_failed', `Invalid download file name: ${fileName}`, {
-        details: { modelId: model.id },
+      throw new AppError('action_failed', 'Invalid download file name', {
+        details: { modelId: model.id, artifactKind: 'model' },
       });
     }
 
@@ -1511,7 +1518,7 @@ export class ModelDownloadManager {
       throw new AppError('download_disk_space_low', 'DISK_SPACE_LOW', {
         details: {
           modelId: model.id,
-          projectorId: projector.id,
+          artifactKind: 'projector',
           freeSpace,
           requiredBytes,
         },
@@ -1617,7 +1624,10 @@ export class ModelDownloadManager {
 
     for (const candidate of candidates) {
       if (protectedCompletedFileNames.has(candidate)) {
-        console.warn(`[ModelDownloadManager] Projector download candidate for ${projector.id} is already completed, skipping overwrite: ${candidate}`);
+        console.warn('[ModelDownloadManager] Projector download candidate is already completed, skipping overwrite', {
+          artifactKind: 'projector',
+          pathCategory: 'model_storage',
+        });
         continue;
       }
 
@@ -1632,7 +1642,10 @@ export class ModelDownloadManager {
         continue;
       }
       if (isFileSystemDirectory(info)) {
-        console.warn(`[ModelDownloadManager] Projector download candidate for ${projector.id} is a directory, skipping: ${candidate}`);
+        console.warn('[ModelDownloadManager] Projector download candidate is a directory, skipping', {
+          artifactKind: 'projector',
+          pathCategory: 'model_storage',
+        });
         continue;
       }
 
@@ -1643,8 +1656,8 @@ export class ModelDownloadManager {
       return firstAvailableCandidate;
     }
 
-    throw new AppError('download_file_missing', `No safe projector download file target is available for ${projector.id}`, {
-      details: { projectorId: projector.id, candidates },
+    throw new AppError('download_file_missing', 'No safe projector download file target is available', {
+      details: { artifactKind: 'projector', candidateCount: candidates.length },
     });
   }
 
@@ -1692,7 +1705,10 @@ export class ModelDownloadManager {
             return null;
           }
 
-          console.warn(`[ModelDownloadManager] Existing projector artifact for ${projector.id} cannot be reused`, summarizeErrorForLog(error));
+          console.warn('[ModelDownloadManager] Existing projector artifact cannot be reused', {
+            artifactKind: 'projector',
+            ...summarizeErrorForLog(error),
+          });
           reusableProjectorRejected = true;
         }
       }
@@ -1713,8 +1729,8 @@ export class ModelDownloadManager {
     const fileName = await this.resolveProjectorDownloadFileName(projector, modelsDir);
     const localUri = safeJoinModelPath(modelsDir, fileName);
     if (!localUri) {
-      throw new AppError('action_failed', `Invalid projector download file name: ${fileName}`, {
-        details: { modelId: model.id, projectorId: projector.id },
+      throw new AppError('action_failed', 'Invalid projector download file name', {
+        details: { modelId: model.id, artifactKind: 'projector' },
       });
     }
 
@@ -1776,7 +1792,7 @@ export class ModelDownloadManager {
 
     if (result.status && result.status >= 400) {
       throw new AppError('download_http_error', `Projector download failed with HTTP status ${result.status}`, {
-        details: { modelId: model.id, projectorId: projector.id, status: result.status },
+        details: { modelId: model.id, artifactKind: 'projector', status: result.status },
       });
     }
 
@@ -2032,6 +2048,7 @@ export class ModelDownloadManager {
     let safeToDeletePartialFiles = true;
     let shouldWaitForActiveJobToSettle = false;
     let cancelJob: ActiveDownloadJob | null = null;
+    let cancelActiveArtifact: ActiveDownloadJob['activeArtifact'] = undefined;
 
     this.queueProcessingHoldCount += 1;
     try {
@@ -2043,13 +2060,16 @@ export class ModelDownloadManager {
         ? this.activeJob
         : null;
       cancelJob = job;
+      cancelActiveArtifact = job?.activeArtifact;
       const canInvalidateActiveJobImmediately = job !== null && job.resumable === null;
       if (job) {
         job.stopReason = 'cancel';
       }
 
       if (job?.resumable) {
-        job.deferredCancelCleanupFileNames = this.getCancelCleanupFileNameCandidates(queuedModel, modelId);
+        job.deferredCancelCleanupFileNames = this.getCancelCleanupFileNameCandidates(queuedModel, modelId, {
+          activeArtifact: job.activeArtifact,
+        });
         try {
           await job.resumable.pauseAsync(); // Stop active one
           job.deferredCancelCleanupFileNames = undefined;
@@ -2094,7 +2114,9 @@ export class ModelDownloadManager {
           // Delete the partial file to free up disk space before allowing any requeued
           // item for the same filename to create a new resumable.
           await this.deleteDownloadFiles(
-            this.getCancelCleanupFileNameCandidates(queuedModel, modelId),
+            this.getCancelCleanupFileNameCandidates(queuedModel, modelId, {
+              activeArtifact: cancelActiveArtifact,
+            }),
             modelId,
           );
         }
@@ -2125,6 +2147,7 @@ export class ModelDownloadManager {
   private getCancelCleanupFileNameCandidates(
     queuedModel: ModelMetadata | undefined,
     modelId: string,
+    options?: { activeArtifact?: ActiveDownloadJob['activeArtifact'] },
   ): string[] {
     const modelCandidates = queuedModel
       ? this.getDownloadFileNameCandidates(queuedModel)
@@ -2137,8 +2160,25 @@ export class ModelDownloadManager {
     const projectorCandidates = selectedProjector
       ? this.getProjectorDownloadFileNameCandidates(selectedProjector)
       : [];
+    const protectedBaseCheckpointFileName = options?.activeArtifact === 'projector' && queuedModel && this.hasVerifiedQueuedBaseCheckpoint(queuedModel)
+      ? queuedModel.localPath
+      : undefined;
+    const safeModelCandidates = protectedBaseCheckpointFileName
+      ? modelCandidates.filter((candidate) => candidate !== protectedBaseCheckpointFileName)
+      : modelCandidates;
+    const safeProjectorCandidates = protectedBaseCheckpointFileName
+      ? projectorCandidates.filter((candidate) => candidate !== protectedBaseCheckpointFileName)
+      : projectorCandidates;
 
-    return Array.from(new Set([...modelCandidates, ...projectorCandidates]));
+    return Array.from(new Set([...safeModelCandidates, ...safeProjectorCandidates]));
+  }
+
+  private hasVerifiedQueuedBaseCheckpoint(
+    model: Pick<ModelMetadata, 'localPath' | 'downloadProgress' | 'downloadIntegrity' | 'metadataTrust'>,
+  ): model is typeof model & { localPath: string } {
+    return isValidLocalFileName(model.localPath)
+      && model.downloadProgress === 1
+      && (model.downloadIntegrity !== undefined || model.metadataTrust === 'verified_local');
   }
 
   private getProtectedCompletedModelFileNames(): Set<string> {
@@ -2169,7 +2209,10 @@ export class ModelDownloadManager {
 
     for (const candidate of candidates) {
       if (protectedCompletedFileNames.has(candidate)) {
-        console.warn(`[ModelDownloadManager] Download candidate for ${model.id} is a completed model file, skipping: ${candidate}`);
+        console.warn('[ModelDownloadManager] Download candidate is a completed model file, skipping', {
+          artifactKind: 'model',
+          pathCategory: 'model_storage',
+        });
         continue;
       }
 
@@ -2183,7 +2226,10 @@ export class ModelDownloadManager {
         continue;
       }
       if (isFileSystemDirectory(info)) {
-        console.warn(`[ModelDownloadManager] Download candidate for ${model.id} is a directory, skipping: ${candidate}`);
+        console.warn('[ModelDownloadManager] Download candidate is a directory, skipping', {
+          artifactKind: 'model',
+          pathCategory: 'model_storage',
+        });
         continue;
       }
       if (info.exists) {
@@ -2196,7 +2242,7 @@ export class ModelDownloadManager {
     }
 
     throw new AppError('download_file_missing', `No safe download file target is available for ${model.id}`, {
-      details: { modelId: model.id, candidates },
+      details: { modelId: model.id, artifactKind: 'model', candidateCount: candidates.length },
     });
   }
 
@@ -2211,7 +2257,10 @@ export class ModelDownloadManager {
 
     for (const fileName of Array.from(new Set(fileNames))) {
       if (protectedCompletedFileNames.has(fileName)) {
-        console.warn(`[ModelDownloadManager] Partial download candidate for ${modelId} is a completed model file, skipping: ${fileName}`);
+        console.warn('[ModelDownloadManager] Partial download candidate is a completed model file, skipping', {
+          artifactKind: 'model',
+          pathCategory: 'model_storage',
+        });
         continue;
       }
 
@@ -2224,7 +2273,10 @@ export class ModelDownloadManager {
         continue;
       }
       if (isFileSystemDirectory(fileInfo)) {
-        console.warn(`[ModelDownloadManager] Partial download candidate for ${modelId} is a directory, skipping: ${fileName}`);
+        console.warn('[ModelDownloadManager] Partial download candidate is a directory, skipping', {
+          artifactKind: 'model',
+          pathCategory: 'model_storage',
+        });
         continue;
       }
 

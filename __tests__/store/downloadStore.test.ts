@@ -60,6 +60,103 @@ describe('downloadStore', () => {
     ]);
   });
 
+  it('normalizes in-flight persisted projector state on rehydrate', () => {
+    const queued = normalizePersistedDownloadQueue([
+      {
+        ...buildQueuedModel('vision/model', LifecycleStatus.DOWNLOADING),
+        projectorCandidates: [
+          buildProjector({
+            id: 'vision/model:mmproj-no-resume',
+            lifecycleStatus: 'downloading',
+            downloadProgress: 0.64,
+          }),
+          buildProjector({
+            id: 'vision/model:mmproj-resumable',
+            lifecycleStatus: 'downloading',
+            downloadProgress: 0.42,
+            resumeData: JSON.stringify({ resumeData: 'projector-resume-data' }),
+          }),
+        ],
+      },
+    ]);
+
+    expect(queued[0]).toEqual(expect.objectContaining({
+      lifecycleStatus: LifecycleStatus.QUEUED,
+    }));
+    expect(queued[0].projectorCandidates).toEqual([
+      expect.objectContaining({
+        id: 'vision/model:mmproj-no-resume',
+        lifecycleStatus: 'queued',
+      }),
+      expect.objectContaining({
+        id: 'vision/model:mmproj-resumable',
+        lifecycleStatus: 'paused',
+        resumeData: 'projector-resume-data',
+      }),
+    ]);
+    expect(queued[0].projectorCandidates?.[0]).not.toHaveProperty('downloadProgress');
+    expect(queued[0].projectorCandidates?.[1]).not.toHaveProperty('downloadProgress');
+  });
+
+  it('normalizes queued persisted projector resume state to paused on rehydrate', () => {
+    const queued = normalizePersistedDownloadQueue([
+      {
+        ...buildQueuedModel('vision/model', LifecycleStatus.QUEUED),
+        projectorCandidates: [
+          buildProjector({
+            id: 'vision/model:mmproj-queued-resumable',
+            lifecycleStatus: 'queued',
+            downloadProgress: 0.37,
+            resumeData: JSON.stringify({ resumeData: 'queued-projector-resume-data' }),
+          }),
+          buildProjector({
+            id: 'vision/model:mmproj-queued-no-resume',
+            lifecycleStatus: 'queued',
+            downloadProgress: 0.12,
+          }),
+          buildProjector({
+            id: 'vision/model:mmproj-failed-no-resume',
+            lifecycleStatus: 'failed',
+          }),
+          buildProjector({
+            id: 'vision/model:mmproj-downloaded-no-resume',
+            lifecycleStatus: 'downloaded',
+          }),
+          buildProjector({
+            id: 'vision/model:mmproj-available-no-resume',
+            lifecycleStatus: 'available',
+          }),
+        ],
+      },
+    ]);
+
+    expect(queued[0].projectorCandidates).toEqual([
+      expect.objectContaining({
+        id: 'vision/model:mmproj-queued-resumable',
+        lifecycleStatus: 'paused',
+        resumeData: 'queued-projector-resume-data',
+      }),
+      expect.objectContaining({
+        id: 'vision/model:mmproj-queued-no-resume',
+        lifecycleStatus: 'queued',
+      }),
+      expect.objectContaining({
+        id: 'vision/model:mmproj-failed-no-resume',
+        lifecycleStatus: 'failed',
+      }),
+      expect.objectContaining({
+        id: 'vision/model:mmproj-downloaded-no-resume',
+        lifecycleStatus: 'downloaded',
+      }),
+      expect.objectContaining({
+        id: 'vision/model:mmproj-available-no-resume',
+        lifecycleStatus: 'available',
+      }),
+    ]);
+    expect(queued[0].projectorCandidates?.[0]).not.toHaveProperty('downloadProgress');
+    expect(queued[0].projectorCandidates?.[1]).not.toHaveProperty('downloadProgress');
+  });
+
   it('re-queues paused downloads when the user taps download again', () => {
     useDownloadStore.setState({
       queue: [
@@ -145,6 +242,40 @@ describe('downloadStore', () => {
     }));
     expect(entry?.selectedProjectorId).toBe('vision/model:mmproj-v2');
     expect(entry?.multimodalReadiness?.projectorId).toBe('vision/model:mmproj-v2');
+  });
+
+  it('normalizes re-queued projector resume state from queued to paused', () => {
+    useDownloadStore.setState({
+      queue: [
+        {
+          ...buildQueuedModel('vision/model', LifecycleStatus.PAUSED),
+          projectorCandidates: [buildProjector({
+            id: 'vision/model:mmproj',
+            lifecycleStatus: 'queued',
+            downloadProgress: 0.55,
+            resumeData: JSON.stringify({ resumeData: 'queued-projector-resume-data' }),
+          })],
+        },
+      ],
+      activeDownloadId: null,
+    });
+
+    useDownloadStore.getState().addToQueue({
+      ...buildQueuedModel('vision/model', LifecycleStatus.AVAILABLE),
+      projectorCandidates: [buildProjector({
+        id: 'vision/model:mmproj',
+        lifecycleStatus: 'available',
+      })],
+    });
+
+    const entry = useDownloadStore.getState().queue.find((model) => model.id === 'vision/model');
+    const projector = entry?.projectorCandidates?.[0];
+    expect(projector).toEqual(expect.objectContaining({
+      id: 'vision/model:mmproj',
+      lifecycleStatus: 'paused',
+      resumeData: 'queued-projector-resume-data',
+    }));
+    expect(projector).not.toHaveProperty('downloadProgress');
   });
 
   it('does not preserve same-id incompatible projector state when re-queuing a catalog model', () => {
@@ -420,6 +551,49 @@ describe('downloadStore', () => {
         matchStatus: 'user_selected',
       }),
     ]);
+  });
+
+  it('does not preserve variant-scoped projector candidates for another active variant when re-queuing without catalog candidates', () => {
+    useDownloadStore.setState({
+      queue: [
+        {
+          ...buildQueuedModel('vision/model', LifecycleStatus.FAILED),
+          resolvedFileName: 'model.Q8_0.gguf',
+          activeVariantId: 'model.Q8_0.gguf',
+          selectedProjectorId: 'vision/model:mmproj-q4',
+          multimodalReadiness: {
+            modelId: 'vision/model',
+            variantId: 'model.Q4_K_M.gguf',
+            status: 'ready',
+            projectorId: 'vision/model:mmproj-q4',
+            support: ['vision'],
+            checkedAt: 123,
+          },
+          projectorCandidates: [buildProjector({
+            id: 'vision/model:mmproj-q4',
+            ownerVariantId: 'model.Q4_K_M.gguf',
+            localPath: 'partial-mmproj-q4.gguf',
+            resumeData: 'projector-resume-data',
+            lifecycleStatus: 'paused',
+            matchStatus: 'user_selected',
+            matchReason: 'user_selected_projector',
+          })],
+        },
+      ],
+      activeDownloadId: null,
+    });
+
+    useDownloadStore.getState().addToQueue({
+      ...buildQueuedModel('vision/model', LifecycleStatus.AVAILABLE),
+      resolvedFileName: 'model.Q8_0.gguf',
+      activeVariantId: 'model.Q8_0.gguf',
+    });
+
+    const entry = useDownloadStore.getState().queue.find((model) => model.id === 'vision/model');
+    expect(entry?.lifecycleStatus).toBe(LifecycleStatus.QUEUED);
+    expect(entry?.projectorCandidates).toBeUndefined();
+    expect(entry?.selectedProjectorId).toBeUndefined();
+    expect(entry?.multimodalReadiness).toBeUndefined();
   });
 
   it('clears resumable state for legacy entries lacking file identity when another variant is queued', () => {

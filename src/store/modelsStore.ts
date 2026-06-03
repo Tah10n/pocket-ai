@@ -250,6 +250,7 @@ export function clearModelProjectorLocalState(model: ModelMetadata): ModelMetada
       ...projector,
       localPath: undefined,
       resumeData: undefined,
+      downloadProgress: undefined,
       lifecycleStatus: 'available',
       ...(projector.matchStatus === 'failed'
         ? { matchStatus: 'matched' as const, matchReason: undefined }

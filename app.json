@@ -24,6 +24,12 @@
         "POST_NOTIFICATIONS",
         "VIBRATE"
       ],
+      "blockedPermissions": [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE"
+      ],
       "softwareKeyboardLayoutMode": "resize",
       "adaptiveIcon": {
         "backgroundColor": "#010100",
@@ -82,6 +88,7 @@
       "./plugins/withAndroidGpuInfo",
       "./plugins/withIosSystemMetrics",
       "./plugins/withIosModelBackupExclusion",
+      "./plugins/withIosPhotoLibraryPermissionLocalization",
       "expo-secure-store",
       "expo-image",
       [

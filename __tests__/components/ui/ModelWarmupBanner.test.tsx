@@ -1,5 +1,6 @@
 import React from 'react';
 import { render } from '@testing-library/react-native';
+import { AccessibilityInfo } from 'react-native';
 import { EngineStatus, type EngineState } from '../../../src/types/models';
 
 let mockThemeContext: any;
@@ -86,6 +87,7 @@ describe('ModelWarmupBanner', () => {
       themeId: DEFAULT_THEME_ID,
     };
     mockSafeAreaInsets = { top: 0, right: 0, bottom: 0, left: 0 };
+    (AccessibilityInfo.announceForAccessibility as jest.Mock).mockClear();
   });
 
   it('does not render when the engine is not initializing', () => {
@@ -97,17 +99,100 @@ describe('ModelWarmupBanner', () => {
   });
 
   it('renders percentage progress from fractional load values', () => {
-    const screen = render(
-      <ModelWarmupBanner engineState={createEngineState({ loadProgress: 0.42 })} />,
-    );
+    const { Platform } = require('react-native');
+    const originalPlatform = Platform.OS;
+    Object.defineProperty(Platform, 'OS', { configurable: true, get: () => 'android' });
 
-    expect(screen.getByTestId('model-warmup-banner-container').props.className).toContain('items-center');
-    expect(screen.getByTestId('model-warmup-banner').props.className).toContain('max-w-lg');
-    expect(screen.getByText('chat.warmingUp 42%')).toBeTruthy();
-    expect(screen.getByTestId('model-warmup-progress-track').props.className).toContain('h-4');
-    expect(screen.getByTestId('model-warmup-progress-fill').props.className).toContain('bg-primary-500');
-    expect(screen.getByTestId('model-warmup-progress-fill').props.className).not.toContain('bg-warning-500');
-    expect(screen.getByTestId('model-warmup-progress-fill').props.style).toEqual({ width: '42%' });
+    try {
+      const screen = render(
+        <ModelWarmupBanner engineState={createEngineState({ loadProgress: 0.42 })} />,
+      );
+
+      expect(screen.getByTestId('model-warmup-banner-container').props.className).toContain('items-center');
+      expect(screen.getByTestId('model-warmup-banner').props.className).toContain('max-w-lg');
+      expect(screen.getByTestId('model-warmup-banner-live-region').props.accessibilityLiveRegion).toBe('polite');
+      expect(screen.getByTestId('model-warmup-banner-live-region').props.role).toBe('status');
+      expect(() => screen.getByTestId('model-warmup-banner-live-region').findByProps({
+        testID: 'model-warmup-progress-track',
+      })).toThrow();
+      expect(screen.getByTestId('model-warmup-banner-live-region').props.accessibilityLabel).toBe('chat.warmingUp');
+      expect(screen.getByTestId('model-warmup-banner-live-region').props.accessibilityLabel).not.toContain('42%');
+      expect(screen.getByText('chat.warmingUp 42%')).toBeTruthy();
+      expect(screen.getByTestId('model-warmup-progress-track').props.accessibilityRole).toBe('progressbar');
+      expect(screen.getByTestId('model-warmup-progress-track').props.accessibilityValue).toEqual({ min: 0, max: 100, now: 42 });
+      expect(screen.getByTestId('model-warmup-progress-track').props.className).toContain('h-4');
+      expect(screen.getByTestId('model-warmup-progress-fill').props.className).toContain('bg-primary-500');
+      expect(screen.getByTestId('model-warmup-progress-fill').props.className).not.toContain('bg-warning-500');
+      expect(screen.getByTestId('model-warmup-progress-fill').props.style).toEqual({ width: '42%' });
+
+      screen.rerender(<ModelWarmupBanner engineState={createEngineState({ loadProgress: 0.7 })} />);
+
+      expect(screen.getByText('chat.warmingUp 70%')).toBeTruthy();
+      expect(screen.getByTestId('model-warmup-banner-live-region').props.accessibilityLabel).toBe('chat.warmingUp');
+    } finally {
+      Object.defineProperty(Platform, 'OS', { configurable: true, get: () => originalPlatform });
+    }
+  });
+
+  it('announces warmup readiness changes on iOS without repeating progress-only updates', () => {
+    const { Platform } = require('react-native');
+    const originalPlatform = Platform.OS;
+    Object.defineProperty(Platform, 'OS', { configurable: true, get: () => 'ios' });
+
+    try {
+      const screen = render(
+        <ModelWarmupBanner engineState={createEngineState({ loadProgress: 0.42 })} />,
+      );
+
+      expect(AccessibilityInfo.announceForAccessibility).toHaveBeenCalledTimes(1);
+      expect(AccessibilityInfo.announceForAccessibility).toHaveBeenLastCalledWith('chat.warmingUp');
+
+      screen.rerender(<ModelWarmupBanner engineState={createEngineState({ loadProgress: 0.7 })} />);
+
+      expect(AccessibilityInfo.announceForAccessibility).toHaveBeenCalledTimes(1);
+
+      screen.rerender(
+        <ModelWarmupBanner
+          engineState={createEngineState({ loadProgress: 0.8 })}
+          multimodalReadiness={{
+            modelId: 'repo/model',
+            status: 'missing_projector',
+            support: [],
+            checkedAt: 1,
+          }}
+        />,
+      );
+
+      expect(AccessibilityInfo.announceForAccessibility).toHaveBeenCalledTimes(2);
+      expect(AccessibilityInfo.announceForAccessibility)
+        .toHaveBeenLastCalledWith('chat.warmingUp chat.visionReadiness.missingProjector');
+
+      screen.rerender(
+        <ModelWarmupBanner
+          engineState={createEngineState({
+            loadProgress: 0.9,
+            diagnostics: {
+              backendMode: 'unknown',
+              backendDevices: [],
+              multimodal: {
+                visionCapability: 'vision_capable',
+                projectorPresence: 'failed',
+                projectorPathCategory: 'models',
+                readinessStatus: 'failed',
+                failureReason: 'Projector init failed at file:///private/mobile/projectors/mmproj.gguf',
+                attachmentCount: 0,
+              },
+            },
+          })}
+        />,
+      );
+
+      expect(AccessibilityInfo.announceForAccessibility).toHaveBeenCalledTimes(3);
+      expect(AccessibilityInfo.announceForAccessibility)
+        .toHaveBeenLastCalledWith('chat.warmingUp chat.visionReadiness.failed Projector init failed at [path]');
+    } finally {
+      Object.defineProperty(Platform, 'OS', { configurable: true, get: () => originalPlatform });
+    }
   });
 
   it('surfaces model-level multimodal readiness while the model is warming up', () => {
@@ -125,6 +210,8 @@ describe('ModelWarmupBanner', () => {
 
     expect(screen.getByTestId('model-warmup-multimodal-readiness')).toBeTruthy();
     expect(screen.getByText('chat.visionReadiness.missingProjector')).toBeTruthy();
+    expect(screen.getByTestId('model-warmup-banner-live-region').props.accessibilityLabel)
+      .toBe('chat.warmingUp chat.visionReadiness.missingProjector');
   });
 
   it('surfaces sanitized projector failure context from diagnostics', () => {
@@ -148,6 +235,8 @@ describe('ModelWarmupBanner', () => {
     );
 
     expect(screen.getByText('chat.visionReadiness.failed')).toBeTruthy();
+    expect(screen.getByTestId('model-warmup-banner-live-region').props.accessibilityLabel)
+      .toBe('chat.warmingUp chat.visionReadiness.failed Projector init failed at [path]');
     expect(screen.getByTestId('model-warmup-multimodal-failure').props.children)
       .toBe('Projector init failed at [path]');
   });

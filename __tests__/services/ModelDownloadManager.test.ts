@@ -497,6 +497,65 @@ describe('ModelDownloadManager Basic', () => {
     expect(useDownloadStore.getState().queue).toEqual([]);
   });
 
+  it.each([
+    ['resumable', { pauseAsync: jest.fn().mockResolvedValue(undefined) }],
+    ['non-resumable', null],
+  ])('does not delete a verified base checkpoint while canceling an active %s projector', async (_mode, resumable) => {
+    const pauseAsync = resumable?.pauseAsync;
+    const activeModel = {
+      ...mockModel,
+      lifecycleStatus: LifecycleStatus.DOWNLOADING,
+      localPath: 'verified-base.gguf',
+      downloadProgress: 1,
+      downloadIntegrity: {
+        kind: 'sha256' as const,
+        sha256: VALID_SHA256,
+        sizeBytes: 1000,
+        checkedAt: 1,
+      },
+      metadataTrust: 'verified_local' as const,
+      projectorCandidates: [{
+        ...mockProjector,
+        localPath: 'mmproj-partial.gguf',
+        lifecycleStatus: 'downloading' as const,
+      }],
+    };
+
+    (modelDownloadManager as any).activeJob = {
+      modelId: mockModel.id,
+      jobToken: 46,
+      resumable,
+      activeArtifact: 'projector',
+      activeProjectorId: mockProjector.id,
+      stopReason: null,
+    };
+    useDownloadStore.setState({
+      queue: [activeModel],
+      activeDownloadId: mockModel.id,
+    });
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (uri === 'test-dir/models/verified-base.gguf' || uri === 'test-dir/models/mmproj-partial.gguf') {
+        return { exists: true, size: 1000 };
+      }
+
+      if (uri.startsWith('test-dir/models/')) {
+        return { exists: false, size: 0 };
+      }
+
+      return { exists: true, size: 1000 };
+    });
+
+    await modelDownloadManager.cancelDownload(mockModel.id);
+
+    if (pauseAsync) {
+      expect(pauseAsync).toHaveBeenCalledTimes(1);
+    }
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/models/verified-base.gguf', expect.anything());
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/models/mmproj-partial.gguf', { idempotent: true });
+    expect(useDownloadStore.getState().activeDownloadId).toBeNull();
+    expect(useDownloadStore.getState().queue).toEqual([]);
+  });
+
   it('holds queue processing while active cancel deletes a same-file partial before requeue starts', async () => {
     let resolveDelete: () => void = () => {};
     let deletedPartial = false;
@@ -993,7 +1052,14 @@ describe('ModelDownloadManager Basic', () => {
 
       expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/models/nested-cache', expect.anything());
       expect(FileSystem.deleteAsync).not.toHaveBeenCalled();
-      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Partial download candidate for test/model is a directory'));
+      expect(warnSpy).toHaveBeenCalledWith(
+        '[ModelDownloadManager] Partial download candidate is a directory, skipping',
+        expect.objectContaining({
+          artifactKind: 'model',
+          pathCategory: 'model_storage',
+        }),
+      );
+      expect(JSON.stringify(warnSpy.mock.calls)).not.toContain('nested-cache');
     } finally {
       warnSpy.mockRestore();
     }
@@ -1028,7 +1094,14 @@ describe('ModelDownloadManager Basic', () => {
       await modelDownloadManager.cancelDownload(mockModel.id);
 
       expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/models/completed.gguf', expect.anything());
-      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('completed model file'));
+      expect(warnSpy).toHaveBeenCalledWith(
+        '[ModelDownloadManager] Partial download candidate is a completed model file, skipping',
+        expect.objectContaining({
+          artifactKind: 'model',
+          pathCategory: 'model_storage',
+        }),
+      );
+      expect(JSON.stringify(warnSpy.mock.calls)).not.toContain('completed.gguf');
     } finally {
       warnSpy.mockRestore();
     }
@@ -1107,15 +1180,17 @@ describe('ModelDownloadManager Basic', () => {
       thrownError = error as AppError;
     }
 
-    expect(thrownError).toMatchObject({
-      code: 'download_verification_failed',
-      message: 'GGUF header magic is invalid',
-      details: expect.objectContaining({
-        modelId: mockModel.id,
-        artifactId: mockModel.id,
-        reason: 'invalid_magic',
-      }),
-    });
+    expect(thrownError?.code).toBe('download_verification_failed');
+    expect(thrownError?.message).toBe('GGUF header magic is invalid');
+    expect(thrownError?.details).toEqual(expect.objectContaining({
+      modelId: mockModel.id,
+      artifactKind: 'model',
+      pathCategory: 'local_file',
+      reason: 'invalid_magic',
+    }));
+    expect(thrownError?.details).not.toEqual(expect.objectContaining({
+      artifactId: expect.anything(),
+    }));
     expectNoSensitiveDownloadPathLeak(JSON.stringify(thrownError?.details ?? {}));
   });
 
@@ -1258,16 +1333,18 @@ describe('ModelDownloadManager Basic', () => {
       thrownError = error as AppError;
     }
 
-    expect(thrownError).toMatchObject({
-      code: 'download_verification_failed',
-      message: expect.stringContaining('Size mismatch'),
-      details: expect.objectContaining({
-        modelId: mockModel.id,
-        artifactId: mockModel.id,
-        expectedSize: mockModel.size,
-        downloadedSize: (mockModel.size ?? 0) + 1,
-      }),
-    });
+    expect(thrownError?.code).toBe('download_verification_failed');
+    expect(thrownError?.message).toEqual(expect.stringContaining('Size mismatch'));
+    expect(thrownError?.details).toEqual(expect.objectContaining({
+      modelId: mockModel.id,
+      artifactKind: 'model',
+      pathCategory: 'model_storage',
+      expectedSize: mockModel.size,
+      downloadedSize: (mockModel.size ?? 0) + 1,
+    }));
+    expect(thrownError?.details).not.toEqual(expect.objectContaining({
+      artifactId: expect.anything(),
+    }));
     expectNoSensitiveDownloadPathLeak(JSON.stringify(thrownError?.details ?? {}));
   });
 
@@ -1346,7 +1423,7 @@ describe('ModelDownloadManager Basic', () => {
       code: 'download_disk_space_low',
       details: expect.objectContaining({
         requiredBytes: 1_000_002_000,
-        projectorId: mockProjector.id,
+        artifactKind: 'projector',
       }),
     });
 
@@ -1384,7 +1461,7 @@ describe('ModelDownloadManager Basic', () => {
       code: 'download_disk_space_low',
       details: expect.objectContaining({
         requiredBytes: 1_000_001_000,
-        projectorId: mockProjector.id,
+        artifactKind: 'projector',
       }),
     });
 
@@ -2100,6 +2177,7 @@ describe('ModelDownloadManager Basic', () => {
       expect(warningCalls).toContain('Projector checksum mismatch');
       expect(warningCalls).toContain(mockModel.id);
       expect(warningCalls).toContain('checksum_mismatch');
+      expect(warningCalls).not.toContain(storedProjector.id);
       expectNoSensitiveDownloadPathLeak(warningCalls);
     } finally {
       verifySpy.mockRestore();
@@ -2154,7 +2232,7 @@ describe('ModelDownloadManager Basic', () => {
         code: 'download_disk_space_low',
         details: expect.objectContaining({
           modelId: mockModel.id,
-          projectorId: storedProjector.id,
+          artifactKind: 'projector',
           requiredBytes: 1_000_001_000,
         }),
       });
@@ -2402,6 +2480,7 @@ describe('ModelDownloadManager Basic', () => {
       expect(errorCalls).toContain('Projector checksum mismatch');
       expect(errorCalls).toContain(mockModel.id);
       expect(errorCalls).toContain('invalid_magic');
+      expect(errorCalls).not.toContain(mockProjector.id);
       expectNoSensitiveDownloadPathLeak(errorCalls);
     } finally {
       verifySpy.mockRestore();
@@ -3189,7 +3268,14 @@ describe('ModelDownloadManager Basic', () => {
         expect.any(Function),
         'resume-data',
       );
-      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Download candidate for test/model is a directory'));
+      expect(warnSpy).toHaveBeenCalledWith(
+        '[ModelDownloadManager] Download candidate is a directory, skipping',
+        expect.objectContaining({
+          artifactKind: 'model',
+          pathCategory: 'model_storage',
+        }),
+      );
+      expect(JSON.stringify(warnSpy.mock.calls)).not.toContain('model-main-');
     } finally {
       warnSpy.mockRestore();
     }

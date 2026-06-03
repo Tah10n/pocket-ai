@@ -167,4 +167,64 @@ describe('modelCapabilities', () => {
       artifactRole: 'projector_companion',
     })).toBe(false);
   });
+
+  it('treats persisted projector evidence as vision support when modalities are stale', () => {
+    const projector = {
+      id: 'projector-1',
+      ownerModelId: 'author/model',
+      repoId: 'author/model',
+      fileName: 'mmproj-model-f16.gguf',
+      downloadUrl: 'https://huggingface.co/author/model/resolve/main/mmproj-model-f16.gguf',
+      size: 1,
+      lifecycleStatus: 'available' as const,
+      matchStatus: 'matched' as const,
+    };
+
+    expect(modelSupportsVision({
+      artifactRole: 'primary_chat_model',
+      projectorCandidates: [projector],
+    })).toBe(true);
+    expect(modelSupportsVision({
+      artifactRole: 'primary_chat_model',
+      selectedProjectorId: projector.id,
+    })).toBe(true);
+    expect(modelSupportsVision({
+      artifactRole: 'primary_chat_model',
+      multimodalReadiness: {
+        modelId: 'author/model',
+        status: 'missing_projector',
+        support: [],
+        checkedAt: 1,
+      },
+    })).toBe(true);
+    expect(modelSupportsVision({
+      artifactRole: 'primary_chat_model',
+      chatModalities: ['text'],
+      projectorCandidates: [projector],
+    })).toBe(false);
+    expect(modelSupportsVision({
+      artifactRole: 'primary_chat_model',
+      chatModalities: ['text'],
+      selectedProjectorId: projector.id,
+    })).toBe(false);
+    expect(modelSupportsVision({
+      artifactRole: 'primary_chat_model',
+      chatModalities: ['text'],
+      multimodalReadiness: {
+        modelId: 'author/model',
+        status: 'ready',
+        projectorId: projector.id,
+        support: ['vision'],
+        checkedAt: 1,
+      },
+    })).toBe(false);
+    expect(getModelVisionCapabilityStatusLabelKey({
+      artifactRole: 'primary_chat_model',
+      projectorCandidates: [projector],
+    })).toBe('models.vision.capabilityNeedsProjector');
+    expect(modelSupportsVision({
+      artifactRole: 'projector_companion',
+      projectorCandidates: [projector],
+    })).toBe(false);
+  });
 });

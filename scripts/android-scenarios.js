@@ -2895,7 +2895,7 @@ function printHelp() {
   console.log("  --list                     Print available scenarios");
 }
 
-function runCapture(command, args) {
+function runCapture(command, args, options = {}) {
   const result = spawnSync(command, args, {
     cwd: projectRoot,
     encoding: "utf8",
@@ -2903,11 +2903,19 @@ function runCapture(command, args) {
   });
 
   if (result.error) {
+    if (options.allowFailure) {
+      return result.error.message || String(result.error);
+    }
+
     throw result.error;
   }
 
   if (result.status !== 0) {
     const stderr = (result.stderr || "").trim();
+    if (options.allowFailure) {
+      return result.stdout || stderr || "";
+    }
+
     throw new Error(
       `Command failed: ${command} ${args.join(" ")}${stderr ? `\n${stderr}` : ""}`
     );
@@ -3133,6 +3141,7 @@ module.exports = {
   parseCliOptions,
   parseUiSnapshot,
   restoreLanguageAfterScenario,
+  runCapture,
   runChecked,
   ScenarioSkipError,
   ScenarioSkipFailureError,

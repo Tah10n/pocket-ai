@@ -82,9 +82,11 @@ const sharedGenerationState: { current: ActiveGenerationState | null } = {
 function resolveReadyAttachmentDrafts({
   drafts,
   readiness,
+  expectedModelId,
 }: {
   drafts: readonly AttachmentDraft[];
   readiness?: MultimodalReadinessState;
+  expectedModelId?: string | null;
 }): AttachmentDraft[] {
   if (drafts.length === 0) {
     return [];
@@ -107,10 +109,12 @@ function resolveReadyAttachmentDrafts({
     throw new AppError('chat_attachment_not_ready', 'Image attachments are not ready to send.');
   }
 
-  if (readiness?.status !== 'ready' || !readiness.support.includes('vision')) {
+  if (!isVisionReady(readiness, expectedModelId)) {
     throw new AppError('multimodal_not_ready', 'Vision chat is not ready for image attachments.', {
       details: {
         readinessStatus: readiness?.status ?? 'unknown',
+        readinessModelId: readiness?.modelId,
+        expectedModelId: expectedModelId ?? undefined,
         attachmentCount: drafts.length,
       },
     });
@@ -276,8 +280,10 @@ async function doesChatAttachmentFileExist(localUri: string): Promise<boolean> {
   }
 }
 
-function isVisionReady(readiness?: MultimodalReadinessState): boolean {
-  return readiness?.status === 'ready' && readiness.support.includes('vision');
+function isVisionReady(readiness?: MultimodalReadinessState, expectedModelId?: string | null): boolean {
+  return readiness?.status === 'ready'
+    && readiness.support.includes('vision')
+    && (!expectedModelId || readiness.modelId === expectedModelId);
 }
 
 function messageHasAttachments(message: ChatMessage | undefined): boolean {
@@ -442,12 +448,13 @@ async function assertMessageAttachmentFilesExist(message: ChatMessage): Promise<
 async function assertUserMessageAttachmentsReadyForRegeneration(
   message: ChatMessage,
   readiness?: MultimodalReadinessState,
+  expectedModelId?: string | null,
 ): Promise<void> {
   if (!messageHasAttachments(message)) {
     return;
   }
 
-  assertMultimodalReadyForInferenceAttachments([message], readiness);
+  assertMultimodalReadyForInferenceAttachments([message], readiness, expectedModelId);
   await assertMessageAttachmentFilesExist(message);
 }
 
@@ -569,13 +576,14 @@ async function resolveRetainedMessagesForInferenceAttachments(
   multimodalReadiness?: MultimodalReadinessState,
   latestUserMessageId?: string | null,
   resolveAttachmentExists: (localUri: string) => Promise<boolean> = doesChatAttachmentFileExist,
+  expectedModelId?: string | null,
 ): Promise<LlmChatMessage[]> {
   const boundedMessages = constrainInferenceAttachmentsToRequestLimit(messages);
   if (!boundedMessages.some((message) => message.attachments?.length)) {
     return normalizeLlmInferenceMessagePairs(filterEmptyLlmInferenceMessages(boundedMessages));
   }
 
-  if (!isVisionReady(multimodalReadiness)) {
+  if (!isVisionReady(multimodalReadiness, expectedModelId)) {
     return normalizeLlmInferenceMessagePairs(filterEmptyLlmInferenceMessages(boundedMessages.map(omitLlmInferenceAttachments)));
   }
 
@@ -591,38 +599,42 @@ async function resolveRetainedMessagesForInferenceAttachments(
     ),
   );
 
-  assertMultimodalReadyForInferenceAttachments(resolvedMessages, multimodalReadiness);
+  assertMultimodalReadyForInferenceAttachments(resolvedMessages, multimodalReadiness, expectedModelId);
   return normalizeLlmInferenceMessagePairs(filterEmptyLlmInferenceMessages(resolvedMessages));
 }
 
 async function resolveLatestUserMessageAttachmentsForInference(
   message: ChatMessage | undefined,
   readiness?: MultimodalReadinessState,
+  expectedModelId?: string | null,
 ): Promise<void> {
   if (!message || !messageHasAttachments(message)) {
     return;
   }
 
-  assertMultimodalReadyForInferenceAttachments([message], readiness);
+  assertMultimodalReadyForInferenceAttachments([message], readiness, expectedModelId);
   await assertMessageAttachmentFilesExist(message);
 }
 
 function assertMultimodalReadyForInferenceAttachments(
   messages: readonly { attachments?: readonly unknown[] }[],
   readiness?: MultimodalReadinessState,
+  expectedModelId?: string | null,
 ): void {
   const attachmentCount = messages.reduce(
     (count, message) => count + (message.attachments?.length ?? 0),
     0,
   );
 
-  if (attachmentCount === 0 || isVisionReady(readiness)) {
+  if (attachmentCount === 0 || isVisionReady(readiness, expectedModelId)) {
     return;
   }
 
   throw new AppError('multimodal_not_ready', 'Vision chat is not ready for image attachments.', {
     details: {
       readinessStatus: readiness?.status ?? 'unknown',
+      readinessModelId: readiness?.modelId,
+      expectedModelId: expectedModelId ?? undefined,
       attachmentCount,
     },
   });
@@ -684,20 +696,22 @@ async function resolveThreadForInferenceAttachments({
   thread,
   latestUserMessageId,
   multimodalReadiness,
+  expectedModelId,
 }: {
   thread: ChatThread;
   latestUserMessageId: string | null;
   multimodalReadiness?: MultimodalReadinessState;
+  expectedModelId?: string | null;
 }): Promise<ChatThread> {
   const latestUserMessage = latestUserMessageId
     ? thread.messages.find((message) => message.id === latestUserMessageId)
     : undefined;
-  if (!isVisionReady(multimodalReadiness)) {
-    await resolveLatestUserMessageAttachmentsForInference(latestUserMessage, multimodalReadiness);
+  if (!isVisionReady(multimodalReadiness, expectedModelId)) {
+    await resolveLatestUserMessageAttachmentsForInference(latestUserMessage, multimodalReadiness, expectedModelId);
     return stripThreadInferenceAttachments(thread);
   }
 
-  await resolveLatestUserMessageAttachmentsForInference(latestUserMessage, multimodalReadiness);
+  await resolveLatestUserMessageAttachmentsForInference(latestUserMessage, multimodalReadiness, expectedModelId);
   return thread;
 }
 
@@ -734,6 +748,7 @@ function resolveThreadReasoningRuntimeConfig(thread: Pick<ChatThread, 'modelId' 
   });
 
   return {
+    activeModelId,
     model,
     modelName,
     capability,
@@ -1057,6 +1072,7 @@ export const useChatSession = () => {
 
     try {
       const {
+        activeModelId,
         model,
         modelName,
         runtimeConfig: reasoningRuntimeConfig,
@@ -1106,6 +1122,7 @@ export const useChatSession = () => {
         thread: storedThread,
         latestUserMessageId,
         multimodalReadiness: effectiveMultimodalReadiness,
+        expectedModelId: activeModelId,
       });
 
       const MESSAGE_TOO_LONG_ERROR_MESSAGE =
@@ -1150,6 +1167,8 @@ export const useChatSession = () => {
           cachedCount = llmEngineService.countPromptTokens({
             messages: messagesToCount,
             params,
+            multimodalReadiness: effectiveMultimodalReadiness,
+            expectedModelId: activeModelId,
           }).catch((error) => {
             exactPromptTokenCache.delete(cacheKey);
             throw error;
@@ -1172,6 +1191,7 @@ export const useChatSession = () => {
           effectiveMultimodalReadiness,
           latestUserMessageId,
           resolveAttachmentExistsForTokenCount,
+          activeModelId,
         );
         throwIfGenerationStopped();
 
@@ -1271,6 +1291,7 @@ export const useChatSession = () => {
             effectiveMultimodalReadiness,
             latestUserMessageId,
             resolveAttachmentExistsForTokenCount,
+            activeModelId,
           );
           promptTokens = estimateLlmMessagesTokens(messages);
           promptSafetyMarginTokens = Math.max(
@@ -1286,12 +1307,15 @@ export const useChatSession = () => {
         effectiveMultimodalReadiness,
         latestUserMessageId,
         resolveAttachmentExistsForTokenCount,
+        activeModelId,
       );
       throwIfGenerationStopped();
       const finalMessages = await resolveRetainedMessagesForInferenceAttachments(
         messages,
         effectiveMultimodalReadiness,
         latestUserMessageId,
+        doesChatAttachmentFileExist,
+        activeModelId,
       );
       throwIfGenerationStopped();
       const finalMessagesSignature = buildLlmInferenceMessagesSignature(finalMessages);
@@ -1581,14 +1605,14 @@ export const useChatSession = () => {
 
   const appendUserMessage = useCallback(async (text: string, options: AppendUserMessageOptions = {}) => {
     assertPrivateStorageWritableForChatMutation();
-    const attachmentDrafts = resolveReadyAttachmentDrafts({
-      drafts: options.attachmentDrafts ?? [],
-      readiness: options.multimodalReadiness,
-    });
-
     const settings = getSettings();
     const activeModelId = settings.activeModelId;
     const activeModelParams = getGenerationParametersForModel(activeModelId);
+    const attachmentDrafts = resolveReadyAttachmentDrafts({
+      drafts: options.attachmentDrafts ?? [],
+      readiness: options.multimodalReadiness,
+      expectedModelId: activeModelId,
+    });
 
     if (!activeModelId) {
       throw new Error('Model is not loaded or engine is not ready. Please select and load a model in the Models tab.');
@@ -1722,10 +1746,11 @@ export const useChatSession = () => {
 
     ensureThreadCanGenerate(activeThread, 'regenerating this response');
     assertPrivateStorageWritableForChatMutation();
-    const { model } = resolveThreadReasoningRuntimeConfig(activeThread);
+    const { activeModelId, model } = resolveThreadReasoningRuntimeConfig(activeThread);
     await assertUserMessageAttachmentsReadyForRegeneration(
       targetMessage,
       options.multimodalReadiness ?? model?.multimodalReadiness,
+      activeModelId,
     );
     const syncedThread = syncThreadParametersCallback(activeThread);
 
@@ -1780,10 +1805,11 @@ export const useChatSession = () => {
 
     ensureThreadCanGenerate(activeThread, 'regenerating this response');
     assertPrivateStorageWritableForChatMutation();
-    const { model } = resolveThreadReasoningRuntimeConfig(activeThread);
+    const { activeModelId, model } = resolveThreadReasoningRuntimeConfig(activeThread);
     await assertUserMessageAttachmentsReadyForRegeneration(
       lastUserMessage,
       model?.multimodalReadiness,
+      activeModelId,
     );
     const syncedThread = syncThreadParametersCallback(activeThread);
 

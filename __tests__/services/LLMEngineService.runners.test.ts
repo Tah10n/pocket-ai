@@ -103,6 +103,52 @@ describe('ContextOperationRunner', () => {
     expect(runner.hasActiveChatBlocking()).toBe(false);
   });
 
+  it('selectively cancels background operations without cancelling chat-blocking operations', async () => {
+    const runner = new ContextOperationRunner();
+    const cancelError = new Error('background stopped');
+    let releaseBackground: () => void = () => undefined;
+    let releaseChatBlocking: () => void = () => undefined;
+    let markBackgroundStarted: () => void = () => undefined;
+    let markChatBlockingStarted: () => void = () => undefined;
+    const backgroundStarted = new Promise<void>((resolve) => {
+      markBackgroundStarted = resolve;
+    });
+    const chatBlockingStarted = new Promise<void>((resolve) => {
+      markChatBlockingStarted = resolve;
+    });
+
+    const backgroundOperation = runner.track(async (cancellation) => {
+      markBackgroundStarted();
+      await new Promise<void>((resolve) => {
+        releaseBackground = resolve;
+      });
+      cancellation.throwIfCancelled();
+      return 'background';
+    }, () => new Error('cancelled'), { chatBlocking: false });
+    const chatBlockingOperation = runner.track(async () => {
+      markChatBlockingStarted();
+      await new Promise<void>((resolve) => {
+        releaseChatBlocking = resolve;
+      });
+      return 'chat';
+    }, () => new Error('cancelled'));
+
+    await backgroundStarted;
+    runner.cancelActive(cancelError, { chatBlocking: false });
+
+    await expect(backgroundOperation).rejects.toThrow('background stopped');
+    expect(runner.hasActive()).toBe(true);
+    expect(runner.hasActiveChatBlocking()).toBe(true);
+
+    releaseBackground();
+    await chatBlockingStarted;
+    releaseChatBlocking();
+
+    await expect(chatBlockingOperation).resolves.toBe('chat');
+    expect(runner.hasActive()).toBe(false);
+    expect(runner.hasActiveChatBlocking()).toBe(false);
+  });
+
   it('resets stale raw operations so future operations are not blocked', async () => {
     const runner = new ContextOperationRunner();
     const resetError = new Error('unload timeout');

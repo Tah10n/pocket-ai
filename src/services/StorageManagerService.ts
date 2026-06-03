@@ -105,6 +105,26 @@ function joinDirectoryEntryUri(directoryUri: string, entryName: string): string 
   return `${normalizeDirectoryUri(directoryUri)}${entryName}`;
 }
 
+function getSanitizedStorageManagerErrorDetails(error: unknown): { errorName: string } | { errorType: string } {
+  return error instanceof Error
+    ? { errorName: error.name || 'Error' }
+    : { errorType: typeof error };
+}
+
+function getDirectoryPathCategory(directoryUri: string): 'cache_storage' | 'model_storage' | 'app_storage' {
+  const cacheDir = getCacheDir();
+  if (cacheDir && directoryUri.startsWith(cacheDir)) {
+    return 'cache_storage';
+  }
+
+  const modelsDir = getModelsDir();
+  if (modelsDir && directoryUri.startsWith(modelsDir)) {
+    return 'model_storage';
+  }
+
+  return 'app_storage';
+}
+
 function createDirectoryStatLimiter(maxConcurrent: number): DirectoryStatLimiter {
   const queue: (() => void)[] = [];
   let activeCount = 0;
@@ -206,7 +226,11 @@ async function getDirectorySizeBytes(
     });
     return sizeBytes;
   } catch (error) {
-    console.warn('[StorageManagerService] Failed to read directory size', normalizedDirectoryUri, error);
+    console.warn('[StorageManagerService] Failed to read directory size', {
+      pathCategory: getDirectoryPathCategory(normalizedDirectoryUri),
+      scope: 'directory_size',
+      ...getSanitizedStorageManagerErrorDetails(error),
+    });
     return MIN_DIRECTORY_SIZE_FALLBACK_BYTES;
   }
 }
@@ -222,7 +246,10 @@ function getDownloadedModels() {
   ));
 }
 
-async function resolveStoredModelSize(model: ModelMetadata): Promise<number | null> {
+async function resolveStoredModelSize(
+  model: ModelMetadata,
+  statLimiter: DirectoryStatLimiter,
+): Promise<number | null> {
   if (!model.localPath) {
     return normalizePositiveByteSize(model.size);
   }
@@ -238,7 +265,7 @@ async function resolveStoredModelSize(model: ModelMetadata): Promise<number | nu
       return normalizePositiveByteSize(model.size);
     }
 
-    const info = await FileSystem.getInfoAsync(localUri);
+    const info = await statLimiter(() => FileSystem.getInfoAsync(localUri));
     if (
       info.exists &&
       typeof info.size === 'number' &&
@@ -254,7 +281,10 @@ async function resolveStoredModelSize(model: ModelMetadata): Promise<number | nu
   return normalizePositiveByteSize(model.size);
 }
 
-async function resolveStoredProjectorSize(projector: ProjectorArtifact): Promise<number | null> {
+async function resolveStoredProjectorSize(
+  projector: ProjectorArtifact,
+  statLimiter: DirectoryStatLimiter,
+): Promise<number | null> {
   const shouldStatLocalFile = hasTrackableProjectorLocalFile(projector) && isValidLocalFileName(projector.localPath);
   const shouldUsePersistedSizeFallback = isStoredProjectorArtifact(projector);
   if (!shouldUsePersistedSizeFallback && !shouldStatLocalFile) {
@@ -277,7 +307,7 @@ async function resolveStoredProjectorSize(projector: ProjectorArtifact): Promise
       return persistedSize;
     }
 
-    const info = await FileSystem.getInfoAsync(localUri);
+    const info = await statLimiter(() => FileSystem.getInfoAsync(localUri));
     if (
       info.exists &&
       !isFileSystemDirectory(info) &&
@@ -295,13 +325,16 @@ async function resolveStoredProjectorSize(projector: ProjectorArtifact): Promise
   return shouldUsePersistedSizeFallback ? persistedSize : null;
 }
 
-async function resolveStoredProjectorCandidates(model: ModelMetadata): Promise<ProjectorArtifact[] | undefined> {
+async function resolveStoredProjectorCandidates(
+  model: ModelMetadata,
+  statLimiter: DirectoryStatLimiter,
+): Promise<ProjectorArtifact[] | undefined> {
   if (!model.projectorCandidates?.length) {
     return model.projectorCandidates;
   }
 
   const resolvedSizes = await Promise.all(
-    model.projectorCandidates.map((projector) => resolveStoredProjectorSize(projector)),
+    model.projectorCandidates.map((projector) => resolveStoredProjectorSize(projector, statLimiter)),
   );
   let didChangeProjectorSize = false;
 
@@ -333,10 +366,13 @@ async function resolveStoredProjectorCandidates(model: ModelMetadata): Promise<P
   return didChangeProjectorSize ? resolvedProjectors : model.projectorCandidates;
 }
 
-async function resolveStoredArtifactSizes(model: ModelMetadata): Promise<ModelMetadata> {
+async function resolveStoredArtifactSizes(
+  model: ModelMetadata,
+  statLimiter: DirectoryStatLimiter,
+): Promise<ModelMetadata> {
   const [resolvedModelSize, resolvedProjectors] = await Promise.all([
-    resolveStoredModelSize(model),
-    resolveStoredProjectorCandidates(model),
+    resolveStoredModelSize(model, statLimiter),
+    resolveStoredProjectorCandidates(model, statLimiter),
   ]);
 
   const shouldUpdateModelSize = resolvedModelSize !== null && resolvedModelSize !== model.size;
@@ -353,10 +389,13 @@ async function resolveStoredArtifactSizes(model: ModelMetadata): Promise<ModelMe
 
 async function getDownloadedModelsWithResolvedSizes(): Promise<ModelMetadata[]> {
   const downloadedModels = getDownloadedModels();
-  return Promise.all(downloadedModels.map((model) => resolveStoredArtifactSizes(model)));
+  const statLimiter = createDirectoryStatLimiter(DIRECTORY_SIZE_MAX_CONCURRENT_STATS);
+  return Promise.all(downloadedModels.map((model) => resolveStoredArtifactSizes(model, statLimiter)));
 }
 
-async function getQuarantinedModelFilesMetrics(): Promise<QuarantinedModelFilesMetrics> {
+async function getQuarantinedModelFilesMetrics(
+  statLimiter = createDirectoryStatLimiter(DIRECTORY_SIZE_MAX_CONCURRENT_STATS),
+): Promise<QuarantinedModelFilesMetrics> {
   const fileNames = registry.getQuarantinedModelFileNames();
   const modelsDir = getModelsDir();
 
@@ -376,7 +415,7 @@ async function getQuarantinedModelFilesMetrics(): Promise<QuarantinedModelFilesM
       }
 
       try {
-        const info = await FileSystem.getInfoAsync(fileUri);
+        const info = await statLimiter(() => FileSystem.getInfoAsync(fileUri));
         if (
           info.exists
           && !(info as { isDirectory?: boolean }).isDirectory
@@ -405,7 +444,11 @@ async function refreshModelFileQuarantine() {
   try {
     await registry.validateRegistry(getQueuedDownloadFileNames());
   } catch (error) {
-    console.warn('[StorageManagerService] Failed to refresh model file quarantine', error);
+    console.warn('[StorageManagerService] Failed to refresh model file quarantine', {
+      pathCategory: 'model_storage',
+      scope: 'orphan_quarantine_refresh',
+      ...getSanitizedStorageManagerErrorDetails(error),
+    });
   }
 }
 
@@ -495,7 +538,10 @@ async function getActiveModelEstimateBytes(downloadedModels: ModelMetadata[]) {
   }
 
   const activeModelWithResolvedSizes = downloadedModels.find((model) => model.id === activeModel.id)
-    ?? await resolveStoredArtifactSizes(activeModel);
+    ?? await resolveStoredArtifactSizes(
+      activeModel,
+      createDirectoryStatLimiter(DIRECTORY_SIZE_MAX_CONCURRENT_STATS),
+    );
   const baseModelBytes = Math.max(getDownloadedModelsStoredBytes([activeModelWithResolvedSizes]), 0);
   const contextBytes = Math.max(
     llmEngineService.getContextSize() * ESTIMATED_CONTEXT_BYTES_PER_TOKEN,
@@ -603,6 +649,7 @@ export async function clearActiveCache() {
   };
 
   let clearedEntries = 0;
+  let failedCacheEntryDeletes = 0;
   let firstError: unknown = null;
   const cacheDir = getCacheDir();
 
@@ -616,21 +663,38 @@ export async function clearActiveCache() {
             await deleteWithRetry(`${cacheDir}${entryName}`);
             clearedEntries += 1;
           } catch (error) {
-            console.warn('[StorageManagerService] Failed to delete cache entry', entryName, error);
+            failedCacheEntryDeletes += 1;
             firstError ??= error;
           }
         }
       }
     }
   } catch (error) {
-    console.warn('[StorageManagerService] Failed to clear cache directory', error);
+    console.warn('[StorageManagerService] Failed to clear cache directory', {
+      pathCategory: 'cache_storage',
+      scope: 'active_cache_clear',
+      ...getSanitizedStorageManagerErrorDetails(error),
+    });
     firstError = error;
+  }
+
+  if (failedCacheEntryDeletes > 0) {
+    console.warn('[StorageManagerService] Failed to delete cache entries', {
+      pathCategory: 'cache_storage',
+      scope: 'active_cache_clear',
+      failedCount: failedCacheEntryDeletes,
+      ...getSanitizedStorageManagerErrorDetails(firstError),
+    });
   }
 
   try {
     modelCatalogService.clearCache('manual');
   } catch (error) {
-    console.warn('[StorageManagerService] Failed to clear catalog cache', error);
+    console.warn('[StorageManagerService] Failed to clear catalog cache', {
+      pathCategory: 'cache_storage',
+      scope: 'catalog_cache_clear',
+      ...getSanitizedStorageManagerErrorDetails(error),
+    });
     firstError ??= error;
   }
 
@@ -648,6 +712,7 @@ export async function cleanupQuarantinedModelFiles() {
 
   const fileNames = registry.getQuarantinedModelFileNames();
   let deletedCount = 0;
+  let failedQuarantinedDeletes = 0;
   let firstError: unknown = null;
 
   for (const fileName of fileNames) {
@@ -657,9 +722,18 @@ export async function cleanupQuarantinedModelFiles() {
         getCurrentQueuedModelFileNames,
       );
     } catch (error) {
-      console.warn('[StorageManagerService] Failed to delete quarantined model file', fileName, error);
+      failedQuarantinedDeletes += 1;
       firstError ??= error;
     }
+  }
+
+  if (failedQuarantinedDeletes > 0) {
+    console.warn('[StorageManagerService] Failed to delete quarantined model files', {
+      pathCategory: 'model_storage',
+      scope: 'quarantined_model_cleanup',
+      failedCount: failedQuarantinedDeletes,
+      ...getSanitizedStorageManagerErrorDetails(firstError),
+    });
   }
 
   directorySizeCache.clear();

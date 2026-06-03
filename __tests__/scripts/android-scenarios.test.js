@@ -38,6 +38,8 @@ const {
   shouldAppendRunnerFailure,
 } = require('../../scripts/android-scenarios');
 
+const withAndroidReleaseConfig = require('../../plugins/withAndroidReleaseConfig');
+
 describe('app image picker configuration', () => {
   const appConfig = require('../../app.json');
 
@@ -54,8 +56,49 @@ describe('app image picker configuration', () => {
         microphonePermission: false,
       }),
     ]);
+    expect(appConfig.expo.plugins).toContain('./plugins/withIosPhotoLibraryPermissionLocalization');
     expect(appConfig.expo.android.permissions).not.toContain('CAMERA');
     expect(appConfig.expo.android.permissions).not.toContain('RECORD_AUDIO');
+    expect(appConfig.expo.android.permissions).not.toContain('READ_EXTERNAL_STORAGE');
+    expect(appConfig.expo.android.permissions).not.toContain('WRITE_EXTERNAL_STORAGE');
+    expect(appConfig.expo.android.blockedPermissions).toEqual(
+      expect.arrayContaining([
+        'android.permission.CAMERA',
+        'android.permission.RECORD_AUDIO',
+        'android.permission.READ_EXTERNAL_STORAGE',
+        'android.permission.WRITE_EXTERNAL_STORAGE',
+      ])
+    );
+  });
+
+  it('release config plugin removes blocked Android capture and broad storage permissions', () => {
+    const nextConfig = {
+      modResults: {
+        manifest: {
+          application: [{ $: {} }],
+          'uses-permission': [
+            { $: { 'android:name': 'android.permission.INTERNET' } },
+            { $: { 'android:name': 'android.permission.CAMERA' } },
+            { $: { 'android:name': 'android.permission.CAMERA', 'tools:node': 'remove' } },
+            { $: { 'android:name': 'android.permission.RECORD_AUDIO' } },
+            { $: { 'android:name': 'android.permission.READ_EXTERNAL_STORAGE' } },
+            { $: { 'android:name': 'android.permission.WRITE_EXTERNAL_STORAGE' } },
+          ],
+        },
+      },
+    };
+
+    const result = withAndroidReleaseConfig._internal.applyAndroidManifestReleaseConfig(nextConfig);
+    const permissionNames = result.modResults.manifest['uses-permission'].map(
+      (permission) => permission.$['android:name']
+    );
+
+    expect(result.modResults.manifest.application[0].$['android:allowBackup']).toBe('false');
+    expect(permissionNames).toEqual(['android.permission.INTERNET', 'android.permission.CAMERA']);
+    expect(result.modResults.manifest['uses-permission']).toEqual([
+      { $: { 'android:name': 'android.permission.INTERNET' } },
+      { $: { 'android:name': 'android.permission.CAMERA', 'tools:node': 'remove' } },
+    ]);
   });
 });
 
@@ -110,6 +153,31 @@ describe('android-scenarios smoke bootstrap args', () => {
         'emulator-5554',
       ])
     );
+  });
+});
+
+describe('android-scenarios command capture', () => {
+  it('returns captured output instead of throwing for allowed command failures', () => {
+    const spawnSync = jest.fn(() => ({
+      status: 1,
+      stdout: 'partial logcat output',
+      stderr: 'logcat read failed',
+    }));
+    let isolatedRunCapture;
+
+    jest.isolateModules(() => {
+      jest.doMock('child_process', () => ({ spawnSync }));
+      ({ runCapture: isolatedRunCapture } = require('../../scripts/android-scenarios'));
+    });
+
+    try {
+      expect(isolatedRunCapture('adb', ['-s', 'device-1', 'logcat', '-d'], { allowFailure: true })).toBe(
+        'partial logcat output'
+      );
+      expect(() => isolatedRunCapture('adb', ['-s', 'device-1', 'logcat', '-d'])).toThrow('Command failed');
+    } finally {
+      jest.dontMock('child_process');
+    }
   });
 });
 
@@ -362,12 +430,11 @@ describe('android-scenarios npm defaults', () => {
     expect(packageJson.scripts['android:scenarios:extended']).toContain('--pack extended');
   });
 
-  it('keeps vision-adjacent smoke verification self-contained', () => {
+  it('keeps vision verification self-contained and prepared send opt-in', () => {
     const smokeScript = packageJson.scripts['verify:mobile-change:android:vision-smoke'];
+    const preparedScript = packageJson.scripts['verify:mobile-change:android:vision-prepared'];
+    const fullVisionScript = packageJson.scripts['verify:mobile-change:android:vision'];
 
-    expect(packageJson.scripts['verify:mobile-change:android:vision']).toBe(
-      'npm run verify:mobile-change:android:vision-smoke'
-    );
     expect(smokeScript).toContain('verify:mobile-change');
     expect(smokeScript).toContain('android:scenarios:runtime');
     expect(smokeScript).toContain('android:scenarios:catalog');
@@ -375,6 +442,10 @@ describe('android-scenarios npm defaults', () => {
     expect(smokeScript).toContain('android:scenarios:attachments -- --fail-on-skip');
     expect(smokeScript).not.toContain('android:scenarios:attachments-prepared');
     expect(smokeScript).not.toContain('android:scenarios:attachments-prepared-send');
+    expect(preparedScript).toBe('npm run android:scenarios:attachments-prepared-send');
+    expect(fullVisionScript).toBe('npm run verify:mobile-change:android:vision-smoke');
+    expect(fullVisionScript).not.toContain('vision-prepared');
+    expect(fullVisionScript).not.toContain('android:scenarios:attachments-prepared-send');
   });
 
   it('keeps prepared send ADB text input constrained and escaped', () => {
@@ -1038,6 +1109,87 @@ describe('android-scenarios pack selection', () => {
     expect(selectScenarios(scenarios, parseCliOptions(['--pack', 'attachments'])).map((scenario) => scenario.id)).toEqual([
       'chat-attachment-text-only-fallback',
     ]);
+  });
+
+  it('runs the text-only attachment fallback scenario against a mocked ADB hierarchy', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-ai-adb-'));
+    const previousAndroidHome = process.env.ANDROID_HOME;
+    const previousAndroidSdkRoot = process.env.ANDROID_SDK_ROOT;
+    const adbDir = path.join(tempDir, 'platform-tools');
+    const adbPath = path.join(adbDir, process.platform === 'win32' ? 'adb.exe' : 'adb');
+    const textOnlyHierarchyXml = `
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" enabled="true" bounds="[0,0][1080,2400]" />
+        <node text="Pocket AI" content-desc="" clickable="false" enabled="true" bounds="[20,40][420,120]" />
+        <node text="Recent Conversations" content-desc="" clickable="false" enabled="true" bounds="[20,160][720,240]" />
+        <node text="NO MODEL LOADED" content-desc="" clickable="false" enabled="true" bounds="[20,260][720,340]" />
+        <node text="" content-desc="New Chat" clickable="true" enabled="true" bounds="[800,1600][1040,1720]" />
+        <node text="This model supports text chat only." content-desc="" clickable="false" enabled="true" bounds="[40,1720][1040,1800]" />
+        <node text="" content-desc="Attach an image from the photo library" clickable="true" enabled="false" bounds="[40,1840][180,1980]" />
+      </hierarchy>
+    `;
+
+    fs.mkdirSync(adbDir, { recursive: true });
+    fs.writeFileSync(adbPath, '');
+    process.env.ANDROID_HOME = tempDir;
+    delete process.env.ANDROID_SDK_ROOT;
+
+    try {
+      const spawnSync = jest.fn((_command, args) => {
+        if (args.includes('exec-out')) {
+          return {
+            status: 0,
+            stdout: textOnlyHierarchyXml,
+            stderr: '',
+          };
+        }
+
+        return { status: 0, stdout: '', stderr: '' };
+      });
+      let isolatedBuildScenarios;
+      jest.isolateModules(() => {
+        jest.doMock('child_process', () => ({ spawnSync }));
+        ({ buildScenarios: isolatedBuildScenarios } = require('../../scripts/android-scenarios'));
+      });
+
+      const scenario = isolatedBuildScenarios().find((candidate) => candidate.id === 'chat-attachment-text-only-fallback');
+      const ctx = {
+        serial: 'device-1',
+        ensureAppVisible: jest.fn().mockResolvedValue(undefined),
+        dismissDebuggerBanner: jest.fn().mockResolvedValue(undefined),
+        expectAnyText: jest.fn().mockResolvedValue(undefined),
+        tapAnyText: jest.fn().mockResolvedValue(undefined),
+        tapBottomTab: jest.fn().mockResolvedValue(undefined),
+      };
+
+      await scenario.run(ctx);
+
+      expect(ctx.ensureAppVisible).toHaveBeenCalled();
+      expect(ctx.tapAnyText).toHaveBeenCalledWith(expect.arrayContaining(['New Chat']));
+      expect(ctx.expectAnyText).toHaveBeenCalledWith(
+        expect.arrayContaining(['Attach an image from the photo library']),
+        expect.objectContaining({ timeoutMs: 8_000 })
+      );
+      expect(ctx.tapBottomTab).toHaveBeenCalledWith(expect.arrayContaining(['Home']));
+      expect(spawnSync).toHaveBeenCalledWith(
+        adbPath,
+        ['-s', 'device-1', 'exec-out', 'cat', '/sdcard/window_dump.xml'],
+        expect.objectContaining({ timeout: 5_000 })
+      );
+    } finally {
+      jest.dontMock('child_process');
+      if (previousAndroidHome === undefined) {
+        delete process.env.ANDROID_HOME;
+      } else {
+        process.env.ANDROID_HOME = previousAndroidHome;
+      }
+      if (previousAndroidSdkRoot === undefined) {
+        delete process.env.ANDROID_SDK_ROOT;
+      } else {
+        process.env.ANDROID_SDK_ROOT = previousAndroidSdkRoot;
+      }
+      fs.rmSync(tempDir, { force: true, recursive: true });
+    }
   });
 
   it('keeps prepared image draft coverage in an explicit preserve-running-app pack', () => {

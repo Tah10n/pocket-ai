@@ -38,13 +38,15 @@ export function useTruncationTracking(
     state: EMPTY_TRUNCATION_STATE,
   });
 
+  const activeThreadModelId = activeThread ? getThreadActiveModelId(activeThread) : null;
+  const activeThreadModel = activeThreadModelId ? registry.getModel(activeThreadModelId) : undefined;
+  const activeThreadMultimodalReadiness = activeThreadModel?.multimodalReadiness;
+
   let activeThreadReasoningEnabled = false;
   let activeThreadReasoningFormat: 'none' | 'auto' | 'deepseek' = 'none';
   let activeThreadResponseReserveTokens: number | undefined;
-  if (activeThread) {
-    const modelId = getThreadActiveModelId(activeThread);
-    const model = registry.getModel(modelId);
-    const capability = resolveModelReasoningCapability(model, modelId, model?.name);
+  if (activeThread && activeThreadModelId) {
+    const capability = resolveModelReasoningCapability(activeThreadModel, activeThreadModelId, activeThreadModel?.name);
     const runtimeConfig = resolveReasoningRuntimeConfig({
       reasoningEffort: activeThread.paramsSnapshot.reasoningEffort,
       capability,
@@ -92,13 +94,28 @@ export function useTruncationTracking(
       windowOptions.promptSafetyMarginTokens ?? null,
       activeThreadReasoningEnabled ? 1 : 0,
       activeThreadReasoningFormat,
+      activeThreadModelId,
+      activeThreadMultimodalReadiness?.modelId ?? null,
+      activeThreadMultimodalReadiness?.status ?? null,
+      activeThreadMultimodalReadiness?.projectorId ?? null,
+      activeThreadMultimodalReadiness?.support.join(',') ?? null,
+      activeThread.messages
+        .map((message) => `${message.id}:${message.attachments?.map((attachment) => attachment.localUri).join(',') ?? ''}`)
+        .join('|'),
       modelRegistryRevision,
     ].join(':');
 
     if (accurateTruncationCacheRef.current.key === cacheKey) {
-      setAccurateTruncationState({
-        threadId: activeThread.id,
-        state: accurateTruncationCacheRef.current.state,
+      const cachedState = accurateTruncationCacheRef.current.state;
+      setAccurateTruncationState((currentState) => {
+        if (currentState?.threadId === activeThread.id && currentState.state === cachedState) {
+          return currentState;
+        }
+
+        return {
+          threadId: activeThread.id,
+          state: cachedState,
+        };
       });
       return;
     }
@@ -110,14 +127,23 @@ export function useTruncationTracking(
       reasoning_format: activeThreadReasoningFormat,
     };
 
+    const throwIfCancelled = () => {
+      if (isCancelled) {
+        throw new Error('Accurate truncation probe was cancelled.');
+      }
+    };
+
     const countPromptTokens = async (messages: LlmChatMessage[]) =>
       llmEngineService.countPromptTokens({
         messages,
         params: tokenCountParams,
+        multimodalReadiness: activeThreadMultimodalReadiness,
+        expectedModelId: activeThreadModelId,
         chatBlocking: false,
+        allowMediaFallback: true,
       });
 
-    void buildInferenceWindowWithAccurateTokenCounts(activeThread, windowOptions, countPromptTokens)
+    void buildInferenceWindowWithAccurateTokenCounts(activeThread, windowOptions, countPromptTokens, { throwIfCancelled })
       .then(({ truncatedMessageIds }) => {
         if (!isCancelled) {
           const state = createTruncationState(truncatedMessageIds);
@@ -162,7 +188,7 @@ export function useTruncationTracking(
     return () => {
       isCancelled = true;
     };
-  }, [activeContextTokenBudget, activeThread, activeThreadReasoningEnabled, activeThreadReasoningFormat, activeThreadResponseReserveTokens, modelRegistryRevision]);
+  }, [activeContextTokenBudget, activeThread, activeThreadModelId, activeThreadMultimodalReadiness, activeThreadReasoningEnabled, activeThreadReasoningFormat, activeThreadResponseReserveTokens, modelRegistryRevision]);
 
   const truncationState = useMemo(() => {
     if (!activeThread) {

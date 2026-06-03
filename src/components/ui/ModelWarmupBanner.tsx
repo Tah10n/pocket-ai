@@ -1,5 +1,6 @@
-import React, { useMemo } from 'react';
+import React, { useEffect, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
+import { AccessibilityInfo, Platform } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Box } from '@/components/ui/box';
 import { ProgressBar } from '@/components/ui/ProgressBar';
@@ -47,6 +48,7 @@ export function ModelWarmupBanner({
   const { t } = useTranslation();
   const appearance = useScreenAppearance();
   const insets = useSafeAreaInsets();
+  const lastIosAnnouncementRef = useRef<string | null>(null);
 
   const progressPercent = useMemo(
     () => resolveModelWarmupProgressPercent(engineState.loadProgress),
@@ -63,6 +65,37 @@ export function ModelWarmupBanner({
     diagnosticsMultimodal?.failureReason ?? multimodalReadiness?.failureReason,
     WARMUP_FAILURE_REASON_MAX_LENGTH,
   );
+  const warmupPhaseText = t('chat.warmingUp');
+  const multimodalReadinessText = multimodalReadinessKey ? t(multimodalReadinessKey) : null;
+  const warmupAccessibilityLabel = [
+    warmupPhaseText,
+    multimodalReadinessText,
+    multimodalFailureReason,
+  ]
+    .filter((entry): entry is string => Boolean(entry))
+    .join(' ');
+  const warmupAnnouncement = engineState.status === EngineStatus.INITIALIZING
+    ? warmupAccessibilityLabel
+    : null;
+
+  useEffect(() => {
+    if (Platform.OS !== 'ios') {
+      return;
+    }
+
+    const announcement = warmupAnnouncement?.trim() || null;
+    if (!announcement) {
+      lastIosAnnouncementRef.current = null;
+      return;
+    }
+
+    if (lastIosAnnouncementRef.current === announcement) {
+      return;
+    }
+
+    lastIosAnnouncementRef.current = announcement;
+    AccessibilityInfo.announceForAccessibility(announcement);
+  }, [warmupAnnouncement]);
 
   if (engineState.status !== EngineStatus.INITIALIZING) {
     return null;
@@ -83,7 +116,14 @@ export function ModelWarmupBanner({
         androidBlurTargetRef={androidContentBlurTargetRef ?? null}
         className="w-full max-w-lg"
       >
-        <Box className="mb-2 flex-row items-center gap-2">
+        <Box
+          testID="model-warmup-banner-live-region"
+          accessible
+          accessibilityLabel={warmupAccessibilityLabel}
+          accessibilityLiveRegion={Platform.OS === 'android' ? 'polite' : undefined}
+          role="status"
+          className="mb-2 flex-row items-center gap-2"
+        >
           <ScreenIconTile iconName="sync" tone="accent" size="sm" className="h-8 w-8">
             <Spinner className="text-primary-600 dark:text-primary-300" />
           </ScreenIconTile>
@@ -93,16 +133,16 @@ export function ModelWarmupBanner({
               textRole="action"
               className="text-primary-700 dark:text-primary-200"
             >
-              {t('chat.warmingUp')}{' '}{progressPercent}%
+              {warmupPhaseText}{' '}{progressPercent}%
             </Text>
-            {multimodalReadinessKey ? (
+            {multimodalReadinessText ? (
               <Text
                 testID="model-warmup-multimodal-readiness"
                 numberOfLines={1}
                 textRole="caption"
                 className="text-primary-700 dark:text-primary-200"
               >
-                {t(multimodalReadinessKey)}
+                {multimodalReadinessText}
               </Text>
             ) : null}
             {multimodalFailureReason ? (

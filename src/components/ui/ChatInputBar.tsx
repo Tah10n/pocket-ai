@@ -1,5 +1,5 @@
-import React, { useRef, useState } from 'react';
-import { Alert, Image, ScrollView, StyleSheet } from 'react-native';
+import React, { useEffect, useRef, useState } from 'react';
+import { AccessibilityInfo, Alert, Image, Platform, ScrollView, StyleSheet } from 'react-native';
 import { Box } from '@/components/ui/box';
 import { Text } from '@/components/ui/text';
 import { ScreenIconButton, ScreenIconTile, ScreenInlineInput, ScreenSurface, useScreenAppearance } from './ScreenShell';
@@ -19,6 +19,7 @@ interface ChatInputBarProps {
     onSendMessage: (content: string) => Promise<void> | void;
     onStopGeneration?: () => Promise<void> | void;
     disabled?: boolean;
+    sendDisabled?: boolean;
     isSending?: boolean;
     draft?: string;
     onDraftChange?: (value: string) => void;
@@ -103,6 +104,7 @@ export const ChatInputBar = ({
     onSendMessage,
     onStopGeneration,
     disabled = false,
+    sendDisabled = false,
     isSending = false,
     draft,
     onDraftChange,
@@ -124,6 +126,7 @@ export const ChatInputBar = ({
     const [internalMessage, setInternalMessage] = useState('');
     const [isSubmitting, setIsSubmitting] = useState(false);
     const submitLockRef = useRef(false);
+    const lastIosAttachmentAnnouncementRef = useRef<string | null>(null);
     const { t } = useTranslation();
     const theme = useTheme();
     const appearance = useScreenAppearance();
@@ -148,6 +151,7 @@ export const ChatInputBar = ({
         && attachmentDrafts.length > 0
         && sendableAttachmentDrafts.length === attachmentDrafts.length;
     const canSend = !disabled
+        && !sendDisabled
         && !isSending
         && !isSubmitting
         && !isImageAttachmentActionBusy
@@ -261,6 +265,62 @@ export const ChatInputBar = ({
             style={primaryActionStyle}
         />
     );
+    const attachmentHelperText = (() => {
+        if (hasTooLargeAttachmentFailures && hasCopyOrStorageAttachmentFailures) {
+            return t('chat.attachments.mixedFailures');
+        }
+
+        if (hasTooLargeAttachmentFailures) {
+            return t('chat.attachments.tooLarge');
+        }
+
+        if (hasAttachmentCopyFailures) {
+            return t('chat.attachments.copyFailed');
+        }
+
+        if (attachmentLimitReached) {
+            return t('chat.attachments.limitReached', { count: MAX_CHAT_IMAGE_ATTACHMENTS });
+        }
+
+        if (!imageAttachmentsEnabled && imageAttachmentsDisabledReason) {
+            return t(imageAttachmentsDisabledReason);
+        }
+
+        return null;
+    })();
+    const attachImageDisabledContext = [
+        isImageAttachmentActionBusy ? t('chat.attachments.preparingImage') : null,
+        attachmentHelperText,
+        disabled ? placeholder : null,
+    ]
+        .filter((entry): entry is string => Boolean(entry))
+        .join(' ');
+    const attachImageAccessibilityState = isImageAttachmentActionBusy
+        ? { disabled: !canAttachImages, busy: true }
+        : { disabled: !canAttachImages };
+    const attachmentStatusAnnouncement = isImageAttachmentActionBusy
+        ? t('chat.attachments.preparingImage')
+        : attachmentHelperText;
+
+    useEffect(() => {
+        if (Platform.OS !== 'ios') {
+            return;
+        }
+
+        const announcement = attachmentStatusAnnouncement?.trim() || null;
+        if (!announcement) {
+            lastIosAttachmentAnnouncementRef.current = null;
+            return;
+        }
+
+        if (lastIosAttachmentAnnouncementRef.current === announcement) {
+            return;
+        }
+
+        lastIosAttachmentAnnouncementRef.current = announcement;
+        AccessibilityInfo.announceForAccessibility(announcement);
+    }, [attachmentStatusAnnouncement]);
+
     const attachmentAction = onAttachImages ? (
         <ScreenIconButton
             onPress={() => {
@@ -268,7 +328,8 @@ export const ChatInputBar = ({
             }}
             disabled={!canAttachImages}
             accessibilityLabel={t('chat.attachments.attachImageAccessibilityLabel')}
-            accessibilityState={{ disabled: !canAttachImages }}
+            accessibilityHint={!canAttachImages && attachImageDisabledContext ? attachImageDisabledContext : undefined}
+            accessibilityState={attachImageAccessibilityState}
             iconName="image"
             iconSize="sm"
             size="compact"
@@ -319,29 +380,6 @@ export const ChatInputBar = ({
         </Box>
     );
 
-    const attachmentHelperText = (() => {
-        if (hasTooLargeAttachmentFailures && hasCopyOrStorageAttachmentFailures) {
-            return t('chat.attachments.mixedFailures');
-        }
-
-        if (hasTooLargeAttachmentFailures) {
-            return t('chat.attachments.tooLarge');
-        }
-
-        if (hasAttachmentCopyFailures) {
-            return t('chat.attachments.copyFailed');
-        }
-
-        if (attachmentLimitReached) {
-            return t('chat.attachments.limitReached', { count: MAX_CHAT_IMAGE_ATTACHMENTS });
-        }
-
-        if (!imageAttachmentsEnabled && imageAttachmentsDisabledReason) {
-            return t(imageAttachmentsDisabledReason);
-        }
-
-        return null;
-    })();
     const builtInAttachmentsTray = attachmentDrafts.length > 0 || attachmentHelperText || isImageAttachmentActionBusy ? (
         <Box testID="chat-image-attachments-tray" className="gap-2">
             {isImageAttachmentActionBusy ? (
@@ -349,6 +387,8 @@ export const ChatInputBar = ({
                     testID="chat-image-attachment-busy-indicator"
                     accessibilityRole="progressbar"
                     accessibilityLabel={t('chat.attachments.preparingImage')}
+                    accessibilityLiveRegion={Platform.OS === 'android' ? 'polite' : undefined}
+                    accessibilityState={{ busy: true }}
                     className="flex-row items-center gap-2 self-start rounded-full border border-primary-500/20 bg-primary-500/10 px-3 py-1.5"
                 >
                     <ScreenIconTile
@@ -437,6 +477,8 @@ export const ChatInputBar = ({
             {attachmentHelperText ? (
                 <Text
                     testID="chat-image-attachment-readiness-text"
+                    accessibilityLiveRegion={Platform.OS === 'android' ? 'polite' : undefined}
+                    role="status"
                     className="text-xs leading-4 text-typography-600 dark:text-typography-300"
                 >
                     {attachmentHelperText}

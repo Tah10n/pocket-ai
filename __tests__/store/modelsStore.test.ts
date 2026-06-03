@@ -204,6 +204,15 @@ describe('modelsStore', () => {
       shouldPromptForChoice: true,
     }));
     expect(ambiguousState.selectedProjector).toBeUndefined();
+
+    expect(selectModelProjectorLifecycleState(createModel({
+      projectorCandidates: [readyProjector],
+      selectedProjectorId: readyProjector.id,
+    }))).toEqual(expect.objectContaining({
+      status: 'downloaded',
+      selectedProjector: expect.objectContaining({ id: readyProjector.id }),
+      isReady: true,
+    }));
   });
 
   it('clears local projector lifecycle after model removal while preserving the selected projector', () => {
@@ -211,6 +220,7 @@ describe('modelsStore', () => {
       lifecycleStatus: 'active',
       localPath: 'mmproj-model.gguf',
       resumeData: 'stale-projector-resume-data',
+      downloadProgress: 0.72,
       matchStatus: 'user_selected',
     });
     const clearedModel = clearModelProjectorLocalState(createModel({
@@ -233,6 +243,7 @@ describe('modelsStore', () => {
       lifecycleStatus: 'available',
       localPath: undefined,
       resumeData: undefined,
+      downloadProgress: undefined,
       matchStatus: 'user_selected',
     }));
   });

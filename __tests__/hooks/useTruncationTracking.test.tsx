@@ -173,7 +173,66 @@ describe('useTruncationTracking', () => {
     await waitFor(() => {
       expect(llmEngineService.countPromptTokens).toHaveBeenCalledWith(expect.objectContaining({
         chatBlocking: false,
+        allowMediaFallback: true,
       }));
     });
+  });
+
+  it('passes multimodal readiness and expected model id to passive media token probes', async () => {
+    const readiness = {
+      modelId: 'author/model-q4',
+      status: 'ready',
+      projectorId: 'author/model-q4-mmproj',
+      support: ['vision'],
+      checkedAt: 1,
+    };
+    (registry.getModel as jest.Mock).mockImplementation((modelId: string) => ({
+      ...getMockModel(modelId),
+      multimodalReadiness: readiness,
+    }));
+    const buildAccurateWindow = buildInferenceWindowWithAccurateTokenCounts as jest.Mock;
+    buildAccurateWindow.mockImplementationOnce(async (
+      _thread: unknown,
+      _options: unknown,
+      countPromptTokens: (messages: Array<{ role: 'user'; content: string; mediaPaths?: string[] }>) => Promise<number>,
+    ) => {
+      await countPromptTokens([{ role: 'user', content: 'Probe image', mediaPaths: ['file:///chat-attachments/image.jpg'] }]);
+      return { messages: [], promptTokens: 64, promptSafetyMarginTokens: 0, truncatedMessageIds: [] };
+    });
+
+    renderHookHarness(buildThread('author/model-q4'), 1600);
+
+    await waitFor(() => {
+      expect(llmEngineService.countPromptTokens).toHaveBeenCalledWith(expect.objectContaining({
+        expectedModelId: 'author/model-q4',
+        multimodalReadiness: readiness,
+        chatBlocking: false,
+        allowMediaFallback: true,
+      }));
+    });
+  });
+
+  it('passes cancellation control to stale accurate truncation probes', async () => {
+    const buildAccurateWindow = buildInferenceWindowWithAccurateTokenCounts as jest.Mock;
+    let firstProbeControl: { throwIfCancelled?: () => void } | undefined;
+    buildAccurateWindow.mockImplementationOnce(async (
+      _thread: unknown,
+      _options: unknown,
+      _countPromptTokens: unknown,
+      control: { throwIfCancelled?: () => void },
+    ) => {
+      firstProbeControl = control;
+      return new Promise(() => undefined);
+    });
+
+    const hook = renderHookHarness(buildThread('author/model-q4'), 1600);
+
+    await waitFor(() => {
+      expect(firstProbeControl?.throwIfCancelled).toEqual(expect.any(Function));
+    });
+
+    hook.rerender(buildThread('author/model-q8'), 1600);
+
+    expect(() => firstProbeControl?.throwIfCancelled?.()).toThrow('Accurate truncation probe was cancelled.');
   });
 });

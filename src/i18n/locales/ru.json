@@ -213,6 +213,7 @@
       "retainedForRegenerate_many": "{{count}} изображений будут использованы повторно",
       "retainedForRegenerate_other": "{{count}} изображения будут использованы повторно",
       "retainedForRegenerateDescription": "Исходные вложения останутся в сообщении при перегенерации этой ветки.",
+      "retainedForRegenerateBlockedDescription": "Вложения останутся в сообщении, но перегенерация заблокирована, пока vision не готов: {{reason}}",
       "limitReached": "Можно прикрепить до {{count}} изображений.",
       "preparingImage": "Подготавливаем изображение…",
       "copyFailed": "Не удалось скопировать изображение в хранилище приложения. Попробуйте другое изображение.",

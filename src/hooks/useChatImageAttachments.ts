@@ -28,6 +28,9 @@ export type UseChatImageAttachmentsResult = {
   removeDraft: (draftOrId: AttachmentDraft | string) => void;
   clearDrafts: () => void;
   commitDrafts: () => void;
+  consumeDraftsForSend: () => AttachmentDraft[];
+  restoreDraftsForRetry: (drafts: readonly AttachmentDraft[]) => void;
+  discardDrafts: (drafts: readonly AttachmentDraft[], context?: string) => void;
 };
 
 function getDraftKey(draft: AttachmentDraft): string {
@@ -99,6 +102,7 @@ export function useChatImageAttachments({
   const [isPicking, setIsPicking] = useState(false);
   const emptyDrafts = useMemo<AttachmentDraft[]>(() => [], []);
   const draftsRef = useRef<AttachmentDraft[]>(draftState.drafts);
+  const ownedDraftsRef = useRef<AttachmentDraft[]>(draftState.drafts);
   const mountedRef = useRef(true);
   const pickingLockRef = useRef(false);
   const enabledRef = useRef(enabled);
@@ -125,6 +129,29 @@ export function useChatImageAttachments({
   const showAttachmentAlert = useCallback((messageKey: string) => {
     Alert.alert(t('chat.attachments.attachImage'), t(messageKey, { count: MAX_CHAT_IMAGE_ATTACHMENTS }));
   }, [t]);
+
+  const releaseOwnedDrafts = useCallback((draftsToRelease: readonly AttachmentDraft[]): AttachmentDraft[] => {
+    if (draftsToRelease.length === 0 || ownedDraftsRef.current.length === 0) {
+      return [];
+    }
+
+    const releaseKeys = new Set(draftsToRelease.map(getDraftKey));
+    const releasedDrafts: AttachmentDraft[] = [];
+    ownedDraftsRef.current = ownedDraftsRef.current.filter((draft) => {
+      if (!releaseKeys.has(getDraftKey(draft))) {
+        return true;
+      }
+
+      releasedDrafts.push(draft);
+      return false;
+    });
+
+    return releasedDrafts;
+  }, []);
+
+  const discardOwnedDraftsQuietly = useCallback((draftsToDiscard: readonly AttachmentDraft[], context: string) => {
+    discardDraftsQuietly(releaseOwnedDrafts(draftsToDiscard), context);
+  }, [releaseOwnedDrafts]);
 
   const attachImages = useCallback(async () => {
     if (!mountedRef.current || pickingLockRef.current) {
@@ -227,6 +254,7 @@ export function useChatImageAttachments({
         ...draftsRef.current,
         ...draftsToAppend,
       ];
+      ownedDraftsRef.current = draftsRef.current;
       setDraftState({
         drafts: draftsRef.current,
         ownerKey: ownerKeyRef.current,
@@ -271,10 +299,12 @@ export function useChatImageAttachments({
 
     const removedDraft = draftsRef.current.find((draft) => getDraftKey(draft) === targetKey);
     if (removedDraft) {
-      void chatAttachmentStorageService.discardDraft(removedDraft).catch((error) => {
-        console.warn('[useChatImageAttachments] Failed to discard removed draft', {
-          context: 'remove_draft',
-          ...getSanitizedErrorDetails(error),
+      releaseOwnedDrafts([removedDraft]).forEach((draftToDiscard) => {
+        void chatAttachmentStorageService.discardDraft(draftToDiscard).catch((error) => {
+          console.warn('[useChatImageAttachments] Failed to discard removed draft', {
+            context: 'remove_draft',
+            ...getSanitizedErrorDetails(error),
+          });
         });
       });
     }
@@ -284,10 +314,11 @@ export function useChatImageAttachments({
       drafts: draftsRef.current,
       ownerKey: ownerKeyRef.current,
     });
-  }, []);
+  }, [releaseOwnedDrafts]);
 
   const clearDrafts = useCallback(() => {
-    discardDraftsQuietly(draftsRef.current, 'drafts');
+    ownerGenerationRef.current += 1;
+    discardOwnedDraftsQuietly(ownedDraftsRef.current, 'drafts');
     draftsRef.current = [];
     if (mountedRef.current) {
       setDraftState({
@@ -295,9 +326,11 @@ export function useChatImageAttachments({
         ownerKey: ownerKeyRef.current,
       });
     }
-  }, []);
+  }, [discardOwnedDraftsQuietly]);
 
   const commitDrafts = useCallback(() => {
+    ownerGenerationRef.current += 1;
+    releaseOwnedDrafts(draftsRef.current);
     draftsRef.current = [];
     if (mountedRef.current) {
       setDraftState({
@@ -305,6 +338,59 @@ export function useChatImageAttachments({
         ownerKey: ownerKeyRef.current,
       });
     }
+  }, [releaseOwnedDrafts]);
+
+  const consumeDraftsForSend = useCallback((): AttachmentDraft[] => {
+    const draftsToConsume = [...draftsRef.current];
+    if (draftsToConsume.length === 0) {
+      return [];
+    }
+
+    ownerGenerationRef.current += 1;
+    releaseOwnedDrafts(draftsToConsume);
+    draftsRef.current = [];
+    if (mountedRef.current) {
+      setDraftState({
+        drafts: [],
+        ownerKey: ownerKeyRef.current,
+      });
+    }
+
+    return draftsToConsume;
+  }, [releaseOwnedDrafts]);
+
+  const restoreDraftsForRetry = useCallback((draftsToRestore: readonly AttachmentDraft[]) => {
+    if (draftsToRestore.length === 0 || !mountedRef.current) {
+      return;
+    }
+
+    const currentDrafts = draftsRef.current;
+    const currentDraftKeys = new Set(currentDrafts.map(getDraftKey));
+    const restoredDrafts = draftsToRestore.filter((draft) => !currentDraftKeys.has(getDraftKey(draft)));
+    if (restoredDrafts.length === 0) {
+      return;
+    }
+
+    const nextDrafts = [...currentDrafts, ...restoredDrafts].slice(0, MAX_CHAT_IMAGE_ATTACHMENTS);
+    const nextDraftKeys = new Set(nextDrafts.map(getDraftKey));
+    const ownedDraftKeys = new Set(ownedDraftsRef.current.map(getDraftKey));
+    const restoredOwnedDrafts = restoredDrafts.filter((draft) => (
+      nextDraftKeys.has(getDraftKey(draft)) && !ownedDraftKeys.has(getDraftKey(draft))
+    ));
+
+    if (restoredOwnedDrafts.length > 0) {
+      ownedDraftsRef.current = [...ownedDraftsRef.current, ...restoredOwnedDrafts];
+    }
+
+    draftsRef.current = nextDrafts;
+    setDraftState({
+      drafts: nextDrafts,
+      ownerKey: ownerKeyRef.current,
+    });
+  }, []);
+
+  const discardDrafts = useCallback((draftsToDiscard: readonly AttachmentDraft[], context = 'drafts after failed send') => {
+    discardDraftsQuietly(draftsToDiscard, context);
   }, []);
 
   useEffect(() => {
@@ -321,7 +407,7 @@ export function useChatImageAttachments({
     }
 
     discardDraftsQuietly(
-      draftState.drafts,
+      releaseOwnedDrafts(draftState.drafts),
       enabled ? 'drafts from previous owner' : 'drafts while disabled',
     );
     setDraftState((current) => (
@@ -332,13 +418,14 @@ export function useChatImageAttachments({
         }
         : current
     ));
-  }, [draftState, enabled, normalizedOwnerKey]);
+  }, [draftState, enabled, normalizedOwnerKey, releaseOwnedDrafts]);
 
   useEffect(() => () => {
     mountedRef.current = false;
     ownerGenerationRef.current += 1;
     pickingLockRef.current = false;
-    discardDraftsQuietly(draftsRef.current, 'drafts during cleanup');
+    discardDraftsQuietly(ownedDraftsRef.current, 'drafts during cleanup');
+    ownedDraftsRef.current = [];
     draftsRef.current = [];
   }, []);
 
@@ -350,5 +437,8 @@ export function useChatImageAttachments({
     removeDraft,
     clearDrafts,
     commitDrafts,
-  }), [attachImages, clearDrafts, commitDrafts, drafts, isPicking, remainingSlots, removeDraft]);
+    consumeDraftsForSend,
+    restoreDraftsForRetry,
+    discardDrafts,
+  }), [attachImages, clearDrafts, commitDrafts, consumeDraftsForSend, discardDrafts, drafts, isPicking, remainingSlots, removeDraft, restoreDraftsForRetry]);
 }

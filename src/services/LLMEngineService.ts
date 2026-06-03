@@ -50,6 +50,7 @@ import {
 import { DECIMAL_GIGABYTE } from '../utils/modelSize';
 import { isHighConfidenceLikelyOomMemoryFit } from '../utils/modelMemoryFitState';
 import {
+  modelSupportsVision,
   resolveModelCapabilitySnapshot,
   resolveModelLayerCountFromGgufMetadata,
 } from '../utils/modelCapabilities';
@@ -151,6 +152,7 @@ const CONTEXT_OPERATION_STOP_DRAIN_TIMEOUT_MS = 5000;
 const CONTEXT_OPERATION_UNLOAD_TIMEOUT_MESSAGE = 'Timed out waiting for active context operations during unload';
 const ACTIVE_COMPLETION_UNLOAD_TIMEOUT_MESSAGE = 'Timed out waiting for active completion during unload';
 const CONTEXT_OPERATION_STOP_MESSAGE = 'Prompt preparation was stopped before native completion started';
+const CONTEXT_OPERATION_COMPLETION_DRAIN_TIMEOUT_MESSAGE = 'Timed out waiting for prompt preparation before native completion started';
 const ACTIVE_COMPLETION_STOP_TIMEOUT_MESSAGE = 'Timed out waiting for active completion to stop';
 const MAX_UNLOAD_RECLAIM_FRACTION_OF_TOTAL_MEMORY = 0.25;
 const FALLBACK_STOP_WORDS = [
@@ -348,6 +350,60 @@ function withResolvedMediaPaths(message: LlmChatMessage): LlmChatMessage {
   };
 }
 
+function withoutMediaPaths(message: LlmChatMessage): LlmChatMessage {
+  const {
+    attachments: _attachments,
+    mediaPaths: _mediaPaths,
+    ...messageWithoutMedia
+  } = message;
+  return messageWithoutMedia;
+}
+
+function sanitizeErrorMessageForDiagnostics(error: unknown): string {
+  return sanitizeMultimodalFailureReason(getErrorMessageText(error), 512)
+    ?? (error instanceof Error ? error.name : typeof error);
+}
+
+function sanitizeDiagnosticValue(value: unknown): unknown {
+  if (typeof value === 'string') {
+    return sanitizeMultimodalFailureReason(value, 512) ?? '[redacted]';
+  }
+
+  if (Array.isArray(value)) {
+    return value.map(sanitizeDiagnosticValue);
+  }
+
+  if (!value || typeof value !== 'object') {
+    return value;
+  }
+
+  if (value instanceof Error) {
+    return {
+      errorName: value.name,
+      message: sanitizeErrorMessageForDiagnostics(value),
+    };
+  }
+
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .map(([key, entry]) => [key, sanitizeDiagnosticValue(entry)]),
+  );
+}
+
+function buildSafeErrorLogDetails(error: unknown): Record<string, unknown> {
+  if (error instanceof AppError) {
+    return {
+      code: error.code,
+      message: sanitizeErrorMessageForDiagnostics(error),
+      ...(error.details ? { details: sanitizeDiagnosticValue(error.details) } : null),
+    };
+  }
+
+  return error instanceof Error
+    ? { errorName: error.name, message: sanitizeErrorMessageForDiagnostics(error) }
+    : { errorType: typeof error };
+}
+
 function mergeTopLevelMediaPathsIntoLatestUserMessage(
   messages: readonly LlmChatMessage[],
   mediaPaths: readonly string[] | undefined,
@@ -384,6 +440,7 @@ function assertMultimodalReadyForMediaPaths(
   mediaPaths: readonly string[],
   readiness: LlmChatCompletionOptions['multimodalReadiness'],
   mediaPathOccurrenceCount = mediaPaths.length,
+  expectedModelId?: string | null,
 ): void {
   if (mediaPathOccurrenceCount === 0) {
     return;
@@ -398,13 +455,19 @@ function assertMultimodalReadyForMediaPaths(
     });
   }
 
-  if (readiness?.status === 'ready' && readiness.support.includes('vision')) {
+  if (
+    readiness?.status === 'ready'
+    && readiness.support.includes('vision')
+    && (!expectedModelId || readiness.modelId === expectedModelId)
+  ) {
     return;
   }
 
   throw new AppError('multimodal_not_ready', 'Vision chat is not ready for image attachments.', {
     details: {
       readinessStatus: readiness?.status ?? 'unknown',
+      readinessModelId: readiness?.modelId,
+      expectedModelId: expectedModelId ?? undefined,
       mediaPathCount: mediaPathOccurrenceCount,
     },
   });
@@ -825,7 +888,7 @@ class LLMEngineService {
       });
 
       if (process.env.NODE_ENV !== 'test') {
-        console.warn('[LLMEngine] Failed to unload model after low memory warning', error);
+        console.warn('[LLMEngine] Failed to unload model after low memory warning', buildSafeErrorLogDetails(error));
       }
     });
   }
@@ -1203,11 +1266,55 @@ class LLMEngineService {
     });
   }
 
+  private isContextOperationStopError(error: unknown): boolean {
+    return error instanceof AppError
+      && error.code === 'engine_busy'
+      && error.message === CONTEXT_OPERATION_STOP_MESSAGE;
+  }
+
+  private async preemptBackgroundContextOperationsForCompletion(): Promise<void> {
+    this.contextOperationRunner.cancelActive(
+      new AppError('engine_busy', CONTEXT_OPERATION_STOP_MESSAGE),
+      { chatBlocking: false },
+    );
+    const drainResult = await this.waitForActiveContextOperations({
+      timeoutMs: CONTEXT_OPERATION_STOP_DRAIN_TIMEOUT_MS,
+    });
+
+    if (drainResult === 'timed_out') {
+      throw new AppError('engine_busy', CONTEXT_OPERATION_COMPLETION_DRAIN_TIMEOUT_MESSAGE);
+    }
+  }
+
   private waitForUnloadPromise(
     promise: Promise<unknown>,
     timeoutMs: number,
   ): Promise<ContextOperationDrainResult> {
     return waitForPromiseWithTimeout(promise, timeoutMs);
+  }
+
+  private async waitForDeferredContextReleaseDrain(
+    drainPromise: Promise<unknown>,
+    timeoutMessage: string,
+  ): Promise<void> {
+    const drainResult = await this.waitForUnloadPromise(
+      drainPromise.catch(() => undefined),
+      CONTEXT_OPERATION_UNLOAD_DRAIN_TIMEOUT_MS,
+    );
+
+    if (drainResult !== 'timed_out') {
+      return;
+    }
+
+    const timeoutError = new AppError('engine_unloading', timeoutMessage);
+    this.contextOperationRunner.reset(timeoutError);
+    this.completionRunner.reset();
+
+    if (process.env.NODE_ENV !== 'test') {
+      console.warn('[LLMEngine] Deferred context release drain timed out; forcing context release', {
+        message: timeoutMessage,
+      });
+    }
   }
 
   private recordContextOperationUnloadTimeout(activeModelId: string | null): AppError {
@@ -1230,20 +1337,75 @@ class LLMEngineService {
     return timeoutError;
   }
 
-  private recordActiveCompletionUnloadTimeout(): void {
+  private recordActiveCompletionUnloadTimeout(activeModelId: string | null): AppError {
     this.lastLifecycleEvent = 'active_completion_unload_timeout';
     this.lastLifecycleError = ACTIVE_COMPLETION_UNLOAD_TIMEOUT_MESSAGE;
+    const timeoutError = new AppError('engine_unloading', ACTIVE_COMPLETION_UNLOAD_TIMEOUT_MESSAGE);
     this.completionRunner.rejectActive(
-      new AppError('engine_unloading', ACTIVE_COMPLETION_UNLOAD_TIMEOUT_MESSAGE),
+      timeoutError,
     );
     this.updateState({
       ...this.state,
+      status: EngineStatus.ERROR,
+      activeModelId: activeModelId ?? this.state.activeModelId,
+      loadProgress: 0,
       lastError: ACTIVE_COMPLETION_UNLOAD_TIMEOUT_MESSAGE,
     });
 
     if (process.env.NODE_ENV !== 'test') {
       console.warn(`[LLMEngine] ${ACTIVE_COMPLETION_UNLOAD_TIMEOUT_MESSAGE}`);
     }
+
+    return timeoutError;
+  }
+
+  private scheduleDeferredContextReleaseAfterCompletionDrain({
+    drainPromise,
+    context,
+    generation,
+  }: {
+    drainPromise: Promise<unknown>;
+    context: LlamaContext;
+    generation: number;
+  }): void {
+    if (this.deferredContextReleasePromise) {
+      return;
+    }
+
+    const deferredRelease = this.waitForDeferredContextReleaseDrain(
+      drainPromise,
+      ACTIVE_COMPLETION_UNLOAD_TIMEOUT_MESSAGE,
+    )
+      .then(() => this.runExclusiveOperation(async () => {
+        if (this.context !== context || this.contextGeneration !== generation) {
+          return;
+        }
+
+        await this.unloadInternal();
+        this.lastLifecycleEvent = 'active_completion_unload_timeout';
+        this.lastLifecycleError = ACTIVE_COMPLETION_UNLOAD_TIMEOUT_MESSAGE;
+        this.updateState(this.state);
+      }))
+      .catch((error) => {
+        if (process.env.NODE_ENV !== 'test') {
+          console.warn(
+            '[LLMEngine] Deferred context release after active completion unload timeout failed',
+            buildSafeErrorLogDetails(error),
+          );
+        }
+      })
+      .finally(() => {
+        if (this.deferredContextReleasePromise === deferredRelease) {
+          this.deferredContextReleasePromise = null;
+        }
+      });
+
+    this.deferredContextReleasePromise = deferredRelease;
+  }
+
+  private cancelActiveContextOperationsForDeferredUnload(error: unknown): Promise<void> {
+    this.contextOperationRunner.cancelActive(error);
+    return this.waitForActiveContextOperations().then(() => undefined);
   }
 
   private scheduleDeferredContextReleaseAfterDrain({
@@ -1257,17 +1419,26 @@ class LLMEngineService {
       return;
     }
 
-    const deferredRelease = this.waitForActiveContextOperations()
+    const deferredRelease = this.waitForDeferredContextReleaseDrain(
+      this.waitForActiveContextOperations(),
+      CONTEXT_OPERATION_UNLOAD_TIMEOUT_MESSAGE,
+    )
       .then(() => this.runExclusiveOperation(async () => {
         if (this.context !== context || this.contextGeneration !== generation) {
           return;
         }
 
         await this.unloadInternal();
+        this.lastLifecycleEvent = 'context_operation_unload_timeout';
+        this.lastLifecycleError = CONTEXT_OPERATION_UNLOAD_TIMEOUT_MESSAGE;
+        this.updateState(this.state);
       }))
       .catch((error) => {
         if (process.env.NODE_ENV !== 'test') {
-          console.warn('[LLMEngine] Deferred context release after unload timeout failed', error);
+          console.warn(
+            '[LLMEngine] Deferred context release after unload timeout failed',
+            buildSafeErrorLogDetails(error),
+          );
         }
       })
       .finally(() => {
@@ -2038,18 +2209,26 @@ class LLMEngineService {
           if (this.activeCompletionPromise) {
             this.queueMultimodalReadinessRefreshAfterCompletion(refreshRequest);
           } else {
-            await this.trackContextOperation(async (cancellation) => {
-              if (
-                cancellation.isCancelled()
-                || this.context !== refreshRequest.context
-                || this.state.activeModelId !== refreshRequest.modelId
-                || this.state.status !== EngineStatus.READY
-              ) {
-                return;
+            try {
+              await this.trackContextOperation(async (cancellation) => {
+                if (
+                  cancellation.isCancelled()
+                  || this.context !== refreshRequest.context
+                  || this.state.activeModelId !== refreshRequest.modelId
+                  || this.state.status !== EngineStatus.READY
+                ) {
+                  return;
+                }
+
+                await this.initializeMultimodalReadinessForLoadedContext(refreshRequest, cancellation);
+              }, { chatBlocking: false });
+            } catch (error) {
+              if (!this.isContextOperationStopError(error) || !this.activeCompletionPromise) {
+                throw error;
               }
 
-              await this.initializeMultimodalReadinessForLoadedContext(refreshRequest, cancellation);
-            }, { chatBlocking: false });
+              this.queueMultimodalReadinessRefreshAfterCompletion(refreshRequest);
+            }
           }
         }
         return;
@@ -2128,7 +2307,12 @@ class LLMEngineService {
       });
     }
     try {
-      assertMultimodalReadyForMediaPaths(requestMediaPaths, multimodalReadiness, requestMediaPathOccurrenceCount);
+      assertMultimodalReadyForMediaPaths(
+        requestMediaPaths,
+        multimodalReadiness,
+        requestMediaPathOccurrenceCount,
+        this.state.activeModelId,
+      );
     } catch (error) {
       this.recordRecentMultimodalDiagnostics({
         messages: requestMessages,
@@ -2155,7 +2339,7 @@ class LLMEngineService {
           await this.initPromise;
         }
 
-        await this.waitForActiveContextOperations();
+        await this.preemptBackgroundContextOperationsForCompletion();
 
         const { context, generation: contextGeneration } = this.getReadyContextOrThrow();
         try {
@@ -2332,7 +2516,7 @@ class LLMEngineService {
         return formatted;
       } catch (error) {
         if (!shouldAbort() && process.env.NODE_ENV !== 'test') {
-          console.warn('[LLMEngine] Failed to probe chat template thinking capability', error);
+          console.warn('[LLMEngine] Failed to probe chat template thinking capability', buildSafeErrorLogDetails(error));
         }
         return null;
       }
@@ -2467,7 +2651,7 @@ class LLMEngineService {
         }
       } catch (error) {
         if (isProbeStillCurrent()) {
-          console.warn('[LLMEngine] Failed to persist chat template thinking capability', error);
+          console.warn('[LLMEngine] Failed to persist chat template thinking capability', buildSafeErrorLogDetails(error));
         }
       }
     })();
@@ -2476,7 +2660,10 @@ class LLMEngineService {
   public async countPromptTokens({
     messages,
     params,
+    multimodalReadiness,
+    expectedModelId,
     chatBlocking = true,
+    allowMediaFallback = false,
   }: {
     messages: LlmChatMessage[];
     params?: {
@@ -2484,7 +2671,10 @@ class LLMEngineService {
       reasoning_format?: 'none' | 'auto' | 'deepseek';
       add_generation_prompt?: boolean;
     };
+    multimodalReadiness?: MultimodalReadinessState;
+    expectedModelId?: string | null;
     chatBlocking?: boolean;
+    allowMediaFallback?: boolean;
   }): Promise<number> {
     if (this.isUnloading) {
       throw new AppError('engine_unloading', 'The model engine is unloading. Please wait a moment.');
@@ -2494,7 +2684,33 @@ class LLMEngineService {
       throw new AppError('engine_busy', 'A response is already being generated.');
     }
 
-    const requestMessages = messages.map(withResolvedMediaPaths);
+    const mediaAwareMessages = messages.map(withResolvedMediaPaths);
+    const mediaPaths = getMessagesMediaPaths(mediaAwareMessages);
+    const mediaPathOccurrenceCount = countMessageMediaPathOccurrences(mediaAwareMessages);
+    const shouldUseMediaPaths = (() => {
+      if (mediaPathOccurrenceCount === 0) {
+        return false;
+      }
+
+      try {
+        assertMultimodalReadyForMediaPaths(
+          mediaPaths,
+          multimodalReadiness,
+          mediaPathOccurrenceCount,
+          expectedModelId,
+        );
+        return true;
+      } catch (error) {
+        if (!allowMediaFallback || toAppError(error).code === 'chat_attachment_limit_exceeded') {
+          throw error;
+        }
+
+        return false;
+      }
+    })();
+    const requestMessages = shouldUseMediaPaths
+      ? mediaAwareMessages
+      : mediaAwareMessages.map(withoutMediaPaths);
 
     return this.trackContextOperation(async (cancellation) => {
       if (this.state.status === EngineStatus.INITIALIZING && this.initPromise) {
@@ -2535,9 +2751,11 @@ class LLMEngineService {
           tokenized = await tokenizeFormattedPrompt({
             context,
             prompt: formatted.prompt,
-            mediaPaths: formatted.media_paths && formatted.media_paths.length > 0
-              ? formatted.media_paths
-              : getMessagesMediaPaths(promptMessages),
+            mediaPaths: shouldUseMediaPaths
+              ? formatted.media_paths && formatted.media_paths.length > 0
+                ? formatted.media_paths
+                : getMessagesMediaPaths(promptMessages)
+              : undefined,
           });
         } catch (error) {
           this.assertContextStillCurrent(context, contextGeneration);
@@ -2581,7 +2799,7 @@ class LLMEngineService {
     try {
       await this.stopCompletion();
     } catch (error) {
-      console.warn('[LLMEngine] Failed to interrupt active completion', error);
+      console.warn('[LLMEngine] Failed to interrupt active completion', buildSafeErrorLogDetails(error));
     }
 
     try {
@@ -2652,7 +2870,7 @@ class LLMEngineService {
     try {
       totalMemoryBytes = await DeviceInfo.getTotalMemory();
     } catch (error) {
-      console.warn('[LLMEngine] Failed to resolve total device memory for GPU layer recommendation', error);
+      console.warn('[LLMEngine] Failed to resolve total device memory for GPU layer recommendation', buildSafeErrorLogDetails(error));
     }
 
     const snapshot = await getFreshMemorySnapshot(350).catch(() => null);
@@ -2774,8 +2992,7 @@ class LLMEngineService {
   }
 
   private isVisionCapableModel(model: ModelMetadata): boolean {
-    return model.chatModalities?.includes('vision') === true
-      || Boolean(model.projectorCandidates?.length);
+    return modelSupportsVision(model);
   }
 
   private async resolveLoadTimeProjectorMemoryInfo(
@@ -2928,6 +3145,11 @@ class LLMEngineService {
         await this.initializeMultimodalReadinessForLoadedContext(pendingRefresh, cancellation);
       }, { chatBlocking: false });
     } catch (error) {
+      if (this.isContextOperationStopError(error) && this.activeCompletionPromise) {
+        this.queueMultimodalReadinessRefreshAfterCompletion(pendingRefresh);
+        return;
+      }
+
       if (process.env.NODE_ENV !== 'test') {
         console.warn('[LLMEngine] Deferred multimodal readiness refresh failed', {
           modelId: pendingRefresh.modelId,
@@ -3205,6 +3427,16 @@ class LLMEngineService {
       });
     }
 
+    if (readiness?.modelId && readiness.modelId !== activeMultimodal.modelId) {
+      throw new AppError('multimodal_not_ready', 'Multimodal readiness belongs to a different model.', {
+        details: {
+          activeModelId: this.state.activeModelId,
+          readinessModelId: readiness.modelId,
+          mediaPathCount: mediaPathOccurrenceCount,
+        },
+      });
+    }
+
     if (readiness?.projectorId && readiness.projectorId !== activeMultimodal.projectorId) {
       throw new AppError('multimodal_not_ready', 'Multimodal runtime is initialized with a different projector.', {
         details: {
@@ -3379,7 +3611,7 @@ class LLMEngineService {
     try {
       totalMemoryBytes = await DeviceInfo.getTotalMemory();
     } catch (error) {
-      console.warn('[LLMEngine] Failed to resolve total device memory for fit estimate', error);
+      console.warn('[LLMEngine] Failed to resolve total device memory for fit estimate', buildSafeErrorLogDetails(error));
     }
 
     // This is a cheap UI-facing estimate: it must never depend on live "available memory" snapshots.
@@ -3473,7 +3705,7 @@ class LLMEngineService {
       try {
         totalMemoryBytes = await DeviceInfo.getTotalMemory();
       } catch (error) {
-        console.warn('[LLMEngine] Failed to resolve total device memory', error);
+        console.warn('[LLMEngine] Failed to resolve total device memory', buildSafeErrorLogDetails(error));
       }
 
       const resolvedTotalMemoryBytes = systemMemorySnapshot?.totalBytes ?? totalMemoryBytes;
@@ -3512,7 +3744,7 @@ class LLMEngineService {
         modelInfo = await loadLlamaModelInfo(modelPath);
       } catch (error) {
         if (process.env.NODE_ENV !== 'test') {
-          console.warn('[LLMEngine] Failed to read GGUF metadata', error);
+          console.warn('[LLMEngine] Failed to read GGUF metadata', buildSafeErrorLogDetails(error));
         }
       }
 
@@ -4006,7 +4238,7 @@ class LLMEngineService {
           await toggleNativeLlamaLogs(true);
           didEnableNativeLogs = true;
         } catch (error) {
-          console.warn('[LLMEngine] Failed to enable native llama logs', error);
+          console.warn('[LLMEngine] Failed to enable native llama logs', buildSafeErrorLogDetails(error));
         }
       }
 
@@ -4171,7 +4403,7 @@ class LLMEngineService {
             nGpuLayers: normalizedLayers,
             devices,
             outcome: 'error',
-            error: getErrorMessageText(error),
+            error: sanitizeErrorMessageForDiagnostics(error),
           });
 
           const isOomLikely = isProbableMemoryFailure(error);
@@ -4199,7 +4431,7 @@ class LLMEngineService {
             const logLabel = retryCandidates.length > 0
               ? `[LLMEngine] ${candidate.toUpperCase()} init failed, retrying with fewer layers`
               : `[LLMEngine] ${candidate.toUpperCase()} init failed`;
-            console.warn(logLabel, error);
+            console.warn(logLabel, buildSafeErrorLogDetails(error));
           }
 
           let lastError: unknown = error;
@@ -4229,7 +4461,7 @@ class LLMEngineService {
                 nGpuLayers: candidateLayers,
                 devices,
                 outcome: 'error',
-                error: getErrorMessageText(retryError),
+                error: sanitizeErrorMessageForDiagnostics(retryError),
               });
               lastError = retryError;
               if (candidateCalibrationKey && isProbableMemoryFailure(retryError)) {
@@ -4602,7 +4834,7 @@ class LLMEngineService {
               nGpuLayers: Math.max(0, Math.round(nGpuLayers)),
               devices,
               outcome: 'error',
-              error: getErrorMessageText(error),
+              error: sanitizeErrorMessageForDiagnostics(error),
             });
           }
 
@@ -4758,15 +4990,17 @@ class LLMEngineService {
       };
 
       if (gpuInitError) {
-        extraDetails.gpuInitError = getErrorMessageText(gpuInitError);
+        extraDetails.gpuInitError = sanitizeErrorMessageForDiagnostics(gpuInitError);
       }
 
       if (cpuInitError) {
-        extraDetails.cpuInitError = getErrorMessageText(cpuInitError);
+        extraDetails.cpuInitError = sanitizeErrorMessageForDiagnostics(cpuInitError);
       }
 
       if (isDev && nativeLogs.length > 0) {
-        extraDetails.nativeLogs = nativeLogs.map((line) => `${line.level}: ${line.text}`);
+        extraDetails.nativeLogs = nativeLogs.map((line) => (
+          sanitizeMultimodalFailureReason(`${line.level}: ${line.text}`, 512) ?? `${line.level}: [redacted]`
+        ));
       }
 
       const errorCause = baseError.cause ?? (error instanceof AppError ? error.cause : error);
@@ -4787,7 +5021,10 @@ class LLMEngineService {
           : appError.code === 'model_memory_insufficient'
             ? '[LLMEngine] Insufficient memory during initialize'
             : '[LLMEngine] Memory warning during initialize';
-        console.warn(logLabel, appError, Object.keys(extraDetails).length > 0 ? extraDetails : undefined);
+        console.warn(logLabel, {
+          ...buildSafeErrorLogDetails(appError),
+          ...(Object.keys(extraDetails).length > 0 ? { details: sanitizeDiagnosticValue(extraDetails) } : null),
+        });
         this.setContext(null);
         this.loadedArtifactIdentity = null;
         this.activeContextSize = DEFAULT_CONTEXT_SIZE;
@@ -4803,7 +5040,10 @@ class LLMEngineService {
         throw appError;
       }
 
-      console.error('[LLMEngine] Failed to initialize', appError, Object.keys(extraDetails).length > 0 ? extraDetails : undefined);
+      console.error('[LLMEngine] Failed to initialize', {
+        ...buildSafeErrorLogDetails(appError),
+        ...(Object.keys(extraDetails).length > 0 ? { details: sanitizeDiagnosticValue(extraDetails) } : null),
+      });
       this.lastModelLoadError = appError;
       this.lastModelLoadErrorScope = 'LLMEngineService.load';
       this.setContext(null);
@@ -4857,44 +5097,66 @@ class LLMEngineService {
         const stopCompletionPromise = this.stopCompletion().catch((error) => {
           stopCompletionError = error;
         });
+        const completionAndStopDrainPromise = Promise.all([
+          stopCompletionPromise,
+          activeCompletion.catch(() => undefined),
+        ]).then(() => undefined);
         const stopCompletionResult = await this.waitForUnloadPromise(
           stopCompletionPromise,
           CONTEXT_OPERATION_UNLOAD_DRAIN_TIMEOUT_MS,
         );
         if (stopCompletionResult === 'timed_out') {
-          this.recordActiveCompletionUnloadTimeout();
+          deferredContextReleaseError = this.recordActiveCompletionUnloadTimeout(previousModelId);
         } else if (stopCompletionError) {
-          console.warn('[LLMEngine] Failed to stop completion before unload', stopCompletionError);
+          console.warn('[LLMEngine] Failed to stop completion before unload', buildSafeErrorLogDetails(stopCompletionError));
         }
 
-        const activeCompletionResult = await this.waitForUnloadPromise(
-          activeCompletion.catch(() => undefined),
-          CONTEXT_OPERATION_UNLOAD_DRAIN_TIMEOUT_MS,
-        );
-        if (activeCompletionResult === 'timed_out') {
-          this.recordActiveCompletionUnloadTimeout();
+        if (!deferredContextReleaseError) {
+          const activeCompletionResult = await this.waitForUnloadPromise(
+            activeCompletion.catch(() => undefined),
+            CONTEXT_OPERATION_UNLOAD_DRAIN_TIMEOUT_MS,
+          );
+          if (activeCompletionResult === 'timed_out') {
+            deferredContextReleaseError = this.recordActiveCompletionUnloadTimeout(previousModelId);
+          }
+        }
+
+        if (deferredContextReleaseError && this.context) {
+          const contextOperationDrainPromise = this.cancelActiveContextOperationsForDeferredUnload(
+            deferredContextReleaseError,
+          );
+          this.scheduleDeferredContextReleaseAfterCompletionDrain({
+            drainPromise: Promise.all([
+              completionAndStopDrainPromise,
+              contextOperationDrainPromise,
+            ]).then(() => undefined),
+            context: this.context,
+            generation: this.contextGeneration,
+          });
         }
       }
 
-      const contextDrainResult = await this.waitForActiveContextOperations({
-        timeoutMs: CONTEXT_OPERATION_UNLOAD_DRAIN_TIMEOUT_MS,
-      });
-      if (contextDrainResult === 'timed_out') {
-        const contextAtTimeout = this.context;
-        const contextGenerationAtTimeout = this.contextGeneration;
-        deferredContextReleaseError = this.recordContextOperationUnloadTimeout(previousModelId);
-        if (contextAtTimeout) {
-          this.scheduleDeferredContextReleaseAfterDrain({
-            context: contextAtTimeout,
-            generation: contextGenerationAtTimeout,
-          });
+      if (!deferredContextReleaseError) {
+        const contextDrainResult = await this.waitForActiveContextOperations({
+          timeoutMs: CONTEXT_OPERATION_UNLOAD_DRAIN_TIMEOUT_MS,
+        });
+        if (contextDrainResult === 'timed_out') {
+          const contextAtTimeout = this.context;
+          const contextGenerationAtTimeout = this.contextGeneration;
+          deferredContextReleaseError = this.recordContextOperationUnloadTimeout(previousModelId);
+          if (contextAtTimeout) {
+            this.scheduleDeferredContextReleaseAfterDrain({
+              context: contextAtTimeout,
+              generation: contextGenerationAtTimeout,
+            });
+          }
+        } else if (this.context) {
+          if (activeContextReclaimEstimate) {
+            beforeUnloadSnapshot = await getFreshMemorySnapshot(0).catch(() => null);
+          }
+          await this.releaseActiveMultimodalContext();
+          await releaseAllLlamaContexts();
         }
-      } else if (this.context) {
-        if (activeContextReclaimEstimate) {
-          beforeUnloadSnapshot = await getFreshMemorySnapshot(0).catch(() => null);
-        }
-        await this.releaseActiveMultimodalContext();
-        await releaseAllLlamaContexts();
       }
     } finally {
       if (!deferredContextReleaseError) {

@@ -187,7 +187,12 @@ function mergeProjectorRuntimeFields(
     blockedNextProjectorIds,
     blockedRuntimeReadinessProjectorIds: mergeBlockedRuntimeReadinessProjectorIds,
     blockedNextReadinessProjectorIds: mergeBlockedNextReadinessProjectorIds,
-  } = mergeProjectorCandidatesWithRuntimeStateAndIdMap(model.projectorCandidates, runtimeModel.projectorCandidates);
+  } = mergeProjectorCandidatesWithRuntimeStateAndIdMap(model.projectorCandidates, runtimeModel.projectorCandidates, {
+    activeVariantId: model.activeVariantId
+      ?? model.resolvedFileName
+      ?? runtimeModel.activeVariantId
+      ?? runtimeModel.resolvedFileName,
+  });
   const candidateIds = getProjectorCandidateIds({ projectorCandidates });
   const selectedProjectorId = resolveMergedSelectedProjectorId(
     model.selectedProjectorId,

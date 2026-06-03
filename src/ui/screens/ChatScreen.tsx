@@ -84,6 +84,10 @@ const VISION_READINESS_TRANSLATION_KEYS: Record<MultimodalReadinessStatus, strin
     failed: 'chat.visionReadiness.failed',
     unsupported: 'chat.visionReadiness.unsupported',
 };
+
+function shouldDiscardConsumedDraftsAfterPreAppendFailure(error: unknown): boolean {
+    return toAppError(error).code === 'chat_attachment_missing';
+}
 const IMAGE_ATTACHMENTS_NO_MODEL_REASON_KEY = 'chat.visionReadiness.noModel';
 const IMAGE_ATTACHMENTS_EDITING_REASON_KEY = 'chat.visionReadiness.editingMessage';
 
@@ -452,13 +456,14 @@ export const ChatScreen = () => {
     );
     const hasReadyVisionSupport = multimodalReadiness.status === 'ready'
         && multimodalReadiness.support.includes('vision');
+    const visionAttachmentReadinessReason = !displayedChatActiveModelId
+        ? IMAGE_ATTACHMENTS_NO_MODEL_REASON_KEY
+        : !isEngineReady || engineState.activeModelId !== displayedChatActiveModelId
+            ? 'chat.visionReadiness.initializing'
+            : getVisionReadinessTranslationKey(multimodalReadiness.status);
     const imageAttachmentsDisabledReason = pendingRegenerateMessage
         ? IMAGE_ATTACHMENTS_EDITING_REASON_KEY
-        : !displayedChatActiveModelId
-            ? IMAGE_ATTACHMENTS_NO_MODEL_REASON_KEY
-            : !isEngineReady || engineState.activeModelId !== displayedChatActiveModelId
-                ? 'chat.visionReadiness.initializing'
-                : getVisionReadinessTranslationKey(multimodalReadiness.status);
+        : visionAttachmentReadinessReason;
     const imageAttachmentsEnabled =
         !isInputDisabled
         && !pendingRegenerateMessage
@@ -474,6 +479,12 @@ export const ChatScreen = () => {
         ownerKey: imageAttachmentOwnerKey,
     });
     const retainedRegenerateAttachments = pendingRegenerateMessage?.attachments ?? [];
+    const canSendRetainedRegenerateAttachments = retainedRegenerateAttachments.length > 0
+        && !isInputDisabled
+        && engineState.activeModelId === displayedChatActiveModelId
+        && hasReadyVisionSupport;
+    const retainedRegenerateAttachmentsSendBlocked = retainedRegenerateAttachments.length > 0
+        && !canSendRetainedRegenerateAttachments;
     const retainedRegenerateAttachmentsTray = retainedRegenerateAttachments.length > 0 ? (
         <ScreenSurface
             testID="chat-regenerate-retained-attachments"
@@ -495,7 +506,11 @@ export const ChatScreen = () => {
                         {t('chat.attachments.retainedForRegenerate', { count: retainedRegenerateAttachments.length })}
                     </Text>
                     <Text className="mt-0.5 text-xs leading-4 text-primary-700/80 dark:text-primary-300/80">
-                        {t('chat.attachments.retainedForRegenerateDescription')}
+                        {retainedRegenerateAttachmentsSendBlocked
+                            ? t('chat.attachments.retainedForRegenerateBlockedDescription', {
+                                reason: t(visionAttachmentReadinessReason),
+                            })
+                            : t('chat.attachments.retainedForRegenerateDescription')}
                     </Text>
                 </Box>
             </Box>
@@ -1200,11 +1215,17 @@ export const ChatScreen = () => {
         try {
             if (pendingRegenerateMessage) {
                 const targetMessage = pendingRegenerateMessage;
+                const hasRetainedAttachments = (targetMessage.attachments?.length ?? 0) > 0;
+
+                if (hasRetainedAttachments && !canSendRetainedRegenerateAttachments) {
+                    return;
+                }
+
                 setPendingRegenerateMessage(null);
                 setComposerDraft('');
 
                 try {
-                    if ((targetMessage.attachments?.length ?? 0) > 0) {
+                    if (hasRetainedAttachments) {
                         await regenerateFromUserMessage(targetMessage.messageId, content, { multimodalReadiness });
                     } else {
                         await regenerateFromUserMessage(targetMessage.messageId, content);
@@ -1218,8 +1239,10 @@ export const ChatScreen = () => {
                 return;
             }
 
-            const attachmentDrafts = imageAttachmentDrafts.drafts;
-            const shouldSendAttachmentDrafts = attachmentDrafts.length > 0 && imageAttachmentsEnabled;
+            const shouldSendAttachmentDrafts = imageAttachmentDrafts.drafts.length > 0 && imageAttachmentsEnabled;
+            const attachmentDrafts = shouldSendAttachmentDrafts
+                ? imageAttachmentDrafts.consumeDraftsForSend()
+                : [];
 
             let userMessageAppended = false;
             setComposerDraft('');
@@ -1235,15 +1258,18 @@ export const ChatScreen = () => {
                             : null),
                         onUserMessageAppended: () => {
                             userMessageAppended = true;
-                            if (shouldSendAttachmentDrafts) {
-                                imageAttachmentDrafts.commitDrafts();
-                            }
                         },
                     },
                 );
             } catch (error) {
                 if (userMessageAppended) {
                     throw markChatInputDraftConsumedError(error);
+                }
+
+                if (attachmentDrafts.length > 0 && shouldDiscardConsumedDraftsAfterPreAppendFailure(error)) {
+                    imageAttachmentDrafts.discardDrafts(attachmentDrafts, 'drafts after failed send');
+                } else if (attachmentDrafts.length > 0) {
+                    imageAttachmentDrafts.restoreDraftsForRetry(attachmentDrafts);
                 }
 
                 setComposerDraft(content);
@@ -1295,8 +1321,16 @@ export const ChatScreen = () => {
                     style: 'destructive',
                     onPress: () => {
                         try {
+                            const deletedMessageIndex = activeThread?.messages.findIndex((entry) => entry.id === messageId) ?? -1;
+                            const pendingRegenerateMessageIndex = pendingRegenerateMessage
+                                ? activeThread?.messages.findIndex((entry) => entry.id === pendingRegenerateMessage.messageId) ?? -1
+                                : -1;
                             const deleted = deleteMessage(messageId);
-                            if (deleted && pendingRegenerateMessage?.messageId === messageId) {
+                            const didDeletePendingRegenerateTarget = pendingRegenerateMessageIndex >= 0
+                                && deletedMessageIndex >= 0
+                                && pendingRegenerateMessageIndex >= deletedMessageIndex;
+
+                            if (deleted && didDeletePendingRegenerateTarget) {
                                 handleCancelComposerMode();
                             }
                         } catch (error: any) {
@@ -1306,7 +1340,7 @@ export const ChatScreen = () => {
                 },
             ],
         );
-    }, [deleteMessage, pendingRegenerateMessage?.messageId, showAlertForError, t, handleCancelComposerMode]);
+    }, [deleteMessage, pendingRegenerateMessage, showAlertForError, t, handleCancelComposerMode]);
 
     useEffect(() => {
         return hardwareListenerService.subscribe((nextStatus) => {
@@ -1766,8 +1800,9 @@ export const ChatScreen = () => {
                             <ChatInputBar
                                 draft={composerDraft}
                                 onDraftChange={setComposerDraft}
-                                allowEmptyMessageSend={retainedRegenerateAttachments.length > 0}
+                                allowEmptyMessageSend={canSendRetainedRegenerateAttachments}
                                 onSendMessage={handleSendMessage}
+                                sendDisabled={retainedRegenerateAttachmentsSendBlocked}
                                 onStopGeneration={stopGeneration}
                                 disabled={isInputDisabled}
                                 isSending={isGenerating}
@@ -1799,8 +1834,9 @@ export const ChatScreen = () => {
                             <ChatInputBar
                                 draft={composerDraft}
                                 onDraftChange={setComposerDraft}
-                                allowEmptyMessageSend={retainedRegenerateAttachments.length > 0}
+                                allowEmptyMessageSend={canSendRetainedRegenerateAttachments}
                                 onSendMessage={handleSendMessage}
+                                sendDisabled={retainedRegenerateAttachmentsSendBlocked}
                                 onStopGeneration={stopGeneration}
                                 disabled={isInputDisabled}
                                 isSending={isGenerating}

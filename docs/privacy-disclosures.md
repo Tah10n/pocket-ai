@@ -1,6 +1,6 @@
 # Privacy & Disclosures
 
-Last updated: 2026-05-29
+Last updated: 2026-06-02
 
 ## Summary
 
@@ -82,6 +82,7 @@ For the release configuration currently committed here:
   - `VIBRATE` (UI haptics)
   - `POST_NOTIFICATIONS` (Android 13+ notifications for download/inference status)
   - `FOREGROUND_SERVICE` and `FOREGROUND_SERVICE_DATA_SYNC` (keep long-running downloads/inference alive in the background via a foreground service)
+- Android gallery attachment support is configured for photo-library selection only. The app blocks merged `CAMERA`, `RECORD_AUDIO`, `READ_EXTERNAL_STORAGE`, and `WRITE_EXTERNAL_STORAGE` permissions from the Android manifest; it does not request camera capture, microphone capture, or broad external storage access for image attachments.
 
 ## Scope note
 

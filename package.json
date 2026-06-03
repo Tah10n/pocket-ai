@@ -64,6 +64,7 @@
     "verify:mobile-change": "npm run typecheck && npm run lint && npm test",
     "verify:mobile-change:android": "npm run verify:mobile-change && npm run android:scenarios",
     "verify:mobile-change:android:vision-smoke": "npm run verify:mobile-change && npm run android:scenarios:runtime && npm run android:scenarios:catalog && npm run android:scenarios:attachments -- --fail-on-skip",
+    "verify:mobile-change:android:vision-prepared": "npm run android:scenarios:attachments-prepared-send",
     "verify:mobile-change:android:vision": "npm run verify:mobile-change:android:vision-smoke",
     "roadmap:update": "node ./scripts/generate-roadmap.js",
     "roadmap:check": "node ./scripts/generate-roadmap.js --check",

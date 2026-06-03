@@ -1,6 +1,6 @@
 import React from 'react';
 import { fireEvent, render, waitFor } from '@testing-library/react-native';
-import { Text as RNText } from 'react-native';
+import { AccessibilityInfo, Platform, Text as RNText } from 'react-native';
 import {
   ChatInputBar,
   getGlassComposerCapsuleStyle,
@@ -53,7 +53,17 @@ jest.mock('../../src/components/ui/MaterialSymbols', () => {
 describe('ChatInputBar', () => {
   afterEach(() => {
     reactI18nextMock.__resetTranslations();
+    (AccessibilityInfo.announceForAccessibility as jest.Mock).mockClear();
   });
+
+  function mockPlatformOS(nextPlatform: 'android' | 'ios') {
+    const originalPlatform = Platform.OS;
+    Object.defineProperty(Platform, 'OS', { configurable: true, get: () => nextPlatform });
+
+    return () => {
+      Object.defineProperty(Platform, 'OS', { configurable: true, get: () => originalPlatform });
+    };
+  }
 
   function flattenStyle(style: unknown) {
     if (!Array.isArray(style)) {
@@ -264,6 +274,33 @@ describe('ChatInputBar', () => {
     });
   });
 
+  it('blocks retained attachment sends while the parent marks send disabled', () => {
+    const onSendMessage = jest.fn();
+    const { getByPlaceholderText } = render(
+      <ChatInputBar
+        onSendMessage={onSendMessage}
+        allowEmptyMessageSend
+        sendDisabled
+        attachmentsTray={<RNText testID="retained-attachments-tray">Retained attachments wait for vision</RNText>}
+      />,
+    );
+
+    const input = getByPlaceholderText('chat.inputPlaceholder');
+    fireEvent(input, 'submitEditing', {
+      nativeEvent: {
+        text: '',
+      },
+    });
+    fireEvent.changeText(input, 'Text while image is retained');
+    fireEvent(input, 'submitEditing', {
+      nativeEvent: {
+        text: 'Text while image is retained',
+      },
+    });
+
+    expect(onSendMessage).not.toHaveBeenCalled();
+  });
+
   it('renders image attachment previews and removes a selected draft', () => {
     reactI18nextMock.__setTranslationOverride(
       'chat.attachments.previewIndexedAccessibilityLabel',
@@ -414,6 +451,7 @@ describe('ChatInputBar', () => {
   });
 
   it('disables image picking and shows the limit once four drafts are selected', () => {
+    const restorePlatform = mockPlatformOS('android');
     const onAttachImages = jest.fn();
     const drafts: AttachmentDraft[] = Array.from({ length: 4 }, (_, index) => ({
       id: `draft-${index}`,
@@ -422,26 +460,34 @@ describe('ChatInputBar', () => {
       copyStatus: 'copied',
     }));
 
-    const { getByLabelText, getByText } = render(
-      <ChatInputBar
-        onSendMessage={jest.fn()}
-        onAttachImages={onAttachImages}
-        attachmentDrafts={drafts}
-        imageAttachmentsEnabled
-      />,
-    );
+    try {
+      const { getByLabelText, getByTestId, getByText } = render(
+        <ChatInputBar
+          onSendMessage={jest.fn()}
+          onAttachImages={onAttachImages}
+          attachmentDrafts={drafts}
+          imageAttachmentsEnabled
+        />,
+      );
 
-    const attachButton = getByLabelText('chat.attachments.attachImageAccessibilityLabel');
+      const attachButton = getByLabelText('chat.attachments.attachImageAccessibilityLabel');
 
-    expect(attachButton.props.accessibilityState).toEqual({ disabled: true });
-    expect(getByText('chat.attachments.limitReached')).toBeTruthy();
+      expect(attachButton.props.accessibilityState).toEqual({ disabled: true });
+      expect(attachButton.props.accessibilityHint).toBe('chat.attachments.limitReached');
+      expect(getByTestId('chat-image-attachment-readiness-text').props.accessibilityLiveRegion).toBe('polite');
+      expect(getByTestId('chat-image-attachment-readiness-text').props.role).toBe('status');
+      expect(getByText('chat.attachments.limitReached')).toBeTruthy();
 
-    fireEvent.press(attachButton);
+      fireEvent.press(attachButton);
 
-    expect(onAttachImages).not.toHaveBeenCalled();
+      expect(onAttachImages).not.toHaveBeenCalled();
+    } finally {
+      restorePlatform();
+    }
   });
 
   it('keeps attachment controls disabled with every non-ready readiness explanation', () => {
+    const restorePlatform = mockPlatformOS('android');
     const readinessKeys = [
       'chat.visionReadiness.textOnly',
       'chat.visionReadiness.missingProjector',
@@ -453,51 +499,132 @@ describe('ChatInputBar', () => {
       'chat.visionReadiness.unsupported',
     ];
 
-    for (const readinessKey of readinessKeys) {
-      const onAttachImages = jest.fn();
-      const { getByLabelText, getByTestId, getByText, unmount } = render(
+    try {
+      for (const readinessKey of readinessKeys) {
+        const onAttachImages = jest.fn();
+        const { getByLabelText, getByTestId, getByText, unmount } = render(
+          <ChatInputBar
+            onSendMessage={jest.fn()}
+            onAttachImages={onAttachImages}
+            imageAttachmentsEnabled={false}
+            imageAttachmentsDisabledReason={readinessKey}
+          />,
+        );
+
+        const attachButton = getByLabelText('chat.attachments.attachImageAccessibilityLabel');
+
+        expect(attachButton.props.accessibilityState).toEqual({ disabled: true });
+        expect(attachButton.props.accessibilityHint).toBe(readinessKey);
+        expect(getByTestId('chat-image-attachment-readiness-text')).toBeTruthy();
+        expect(getByTestId('chat-image-attachment-readiness-text').props.accessibilityLiveRegion).toBe('polite');
+        expect(getByTestId('chat-image-attachment-readiness-text').props.role).toBe('status');
+        expect(getByText(readinessKey)).toBeTruthy();
+
+        fireEvent.press(attachButton);
+
+        expect(onAttachImages).not.toHaveBeenCalled();
+        unmount();
+      }
+    } finally {
+      restorePlatform();
+    }
+  });
+
+  it('shows a busy attachment affordance while the image picker or copy is running', () => {
+    const restorePlatform = mockPlatformOS('android');
+    const onAttachImages = jest.fn();
+
+    try {
+      const { getByLabelText, getByTestId, getByText } = render(
         <ChatInputBar
           onSendMessage={jest.fn()}
           onAttachImages={onAttachImages}
-          imageAttachmentsEnabled={false}
-          imageAttachmentsDisabledReason={readinessKey}
+          imageAttachmentsEnabled
+          isImageAttachmentActionBusy
         />,
       );
 
       const attachButton = getByLabelText('chat.attachments.attachImageAccessibilityLabel');
 
-      expect(attachButton.props.accessibilityState).toEqual({ disabled: true });
-      expect(getByTestId('chat-image-attachment-readiness-text')).toBeTruthy();
-      expect(getByText(readinessKey)).toBeTruthy();
+      expect(attachButton.props.accessibilityHint).toBe('chat.attachments.preparingImage');
+      expect(attachButton.props.accessibilityState).toEqual({ disabled: true, busy: true });
+      expect(getByTestId('chat-image-attachment-busy-indicator')).toBeTruthy();
+      expect(getByTestId('chat-image-attachment-busy-indicator').props.accessibilityLiveRegion).toBe('polite');
+      expect(getByTestId('chat-image-attachment-busy-indicator').props.accessibilityState).toEqual({ busy: true });
+      expect(getByTestId('chat-image-attachment-busy-spinner')).toBeTruthy();
+      expect(getByText('chat.attachments.preparingImage')).toBeTruthy();
 
       fireEvent.press(attachButton);
 
       expect(onAttachImages).not.toHaveBeenCalled();
-      unmount();
+    } finally {
+      restorePlatform();
     }
   });
 
-  it('shows a busy attachment affordance while the image picker or copy is running', () => {
-    const onAttachImages = jest.fn();
-    const { getByLabelText, getByTestId, getByText } = render(
-      <ChatInputBar
-        onSendMessage={jest.fn()}
-        onAttachImages={onAttachImages}
-        imageAttachmentsEnabled
-        isImageAttachmentActionBusy
-      />,
-    );
+  it('announces attachment helper and busy changes on iOS without duplicate rerender announcements', () => {
+    const restorePlatform = mockPlatformOS('ios');
+    const drafts: AttachmentDraft[] = Array.from({ length: 4 }, (_, index) => ({
+      id: `draft-${index}`,
+      pickerUri: `ph://library-image-${index}`,
+      previewUri: `file:///document/chat-attachments/draft-${index}.jpg`,
+      copyStatus: 'copied',
+    }));
 
-    const attachButton = getByLabelText('chat.attachments.attachImageAccessibilityLabel');
+    try {
+      const screen = render(
+        <ChatInputBar
+          onSendMessage={jest.fn()}
+          onAttachImages={jest.fn()}
+          imageAttachmentsEnabled={false}
+          imageAttachmentsDisabledReason="chat.visionReadiness.missingProjector"
+        />,
+      );
 
-    expect(attachButton.props.accessibilityState).toEqual({ disabled: true });
-    expect(getByTestId('chat-image-attachment-busy-indicator')).toBeTruthy();
-    expect(getByTestId('chat-image-attachment-busy-spinner')).toBeTruthy();
-    expect(getByText('chat.attachments.preparingImage')).toBeTruthy();
+      expect(AccessibilityInfo.announceForAccessibility).toHaveBeenCalledTimes(1);
+      expect(AccessibilityInfo.announceForAccessibility)
+        .toHaveBeenLastCalledWith('chat.visionReadiness.missingProjector');
 
-    fireEvent.press(attachButton);
+      screen.rerender(
+        <ChatInputBar
+          onSendMessage={jest.fn()}
+          onAttachImages={jest.fn()}
+          imageAttachmentsEnabled={false}
+          imageAttachmentsDisabledReason="chat.visionReadiness.missingProjector"
+        />,
+      );
 
-    expect(onAttachImages).not.toHaveBeenCalled();
+      expect(AccessibilityInfo.announceForAccessibility).toHaveBeenCalledTimes(1);
+
+      screen.rerender(
+        <ChatInputBar
+          onSendMessage={jest.fn()}
+          onAttachImages={jest.fn()}
+          imageAttachmentsEnabled
+          isImageAttachmentActionBusy
+        />,
+      );
+
+      expect(AccessibilityInfo.announceForAccessibility).toHaveBeenCalledTimes(2);
+      expect(AccessibilityInfo.announceForAccessibility)
+        .toHaveBeenLastCalledWith('chat.attachments.preparingImage');
+
+      screen.rerender(
+        <ChatInputBar
+          onSendMessage={jest.fn()}
+          onAttachImages={jest.fn()}
+          attachmentDrafts={drafts}
+          imageAttachmentsEnabled
+        />,
+      );
+
+      expect(AccessibilityInfo.announceForAccessibility).toHaveBeenCalledTimes(3);
+      expect(AccessibilityInfo.announceForAccessibility)
+        .toHaveBeenLastCalledWith('chat.attachments.limitReached');
+      expect(screen.getByTestId('chat-image-attachment-readiness-text').props.accessibilityLiveRegion).toBeUndefined();
+    } finally {
+      restorePlatform();
+    }
   });
 
   it('blocks send and keeps the draft while an image attachment action is busy', () => {

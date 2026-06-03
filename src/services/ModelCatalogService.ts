@@ -99,6 +99,7 @@ const CATALOG_PREFETCH_MAX_LIMIT = 60;
 const HF_TREE_PAGINATION_MAX_PAGES = 20;
 const HF_TREE_SEARCH_PAGINATION_MAX_PAGES = 4;
 const HF_TREE_DETAIL_PAGINATION_MAX_PAGES = HF_TREE_SEARCH_PAGINATION_MAX_PAGES;
+const HF_TREE_PROJECTOR_PAGINATION_MAX_PAGES = HF_TREE_PAGINATION_MAX_PAGES;
 const HF_TREE_PREFERRED_LOOKAHEAD_PAGES = 2;
 const SEARCH_CACHE_MAX_ENTRIES = 120;
 const BUFFERED_SEARCH_CACHE_MAX_AGE = 20 * 60 * 1000; // 20 minutes
@@ -1287,6 +1288,15 @@ export class ModelCatalogService {
     });
   }
 
+  private isProjectorAwareModel(model: ModelMetadata): boolean {
+    return model.chatModalities?.includes('vision') === true
+      || Boolean(model.projectorCandidates?.length)
+      || Boolean(model.selectedProjectorId)
+      || model.multimodalReadiness?.support.includes('vision') === true
+      || model.visionSource !== undefined
+      || model.visionConfidence !== undefined;
+  }
+
   private async resolveMissingModelMetadata(
     models: ModelMetadata[],
     memoryFitContext: CatalogMemoryFitContext,
@@ -1303,17 +1313,28 @@ export class ModelCatalogService {
 
     const resolveModel = async (model: ModelMetadata): Promise<ModelMetadata | null> => {
       const hasKnownSize = typeof model.size === 'number' && model.size > 0;
+      const shouldCollectProjectorCandidates = this.isProjectorAwareModel(model);
       const requiresAuthValidation = requestContext.hasAuthToken && (
         model.accessState !== ModelAccessState.PUBLIC ||
         model.isGated ||
         model.isPrivate
       );
 
-      if (hasKnownSize && !requiresAuthValidation && model.requiresTreeProbe !== true) {
+      if (
+        hasKnownSize
+        && !requiresAuthValidation
+        && model.requiresTreeProbe !== true
+        && !shouldCollectProjectorCandidates
+      ) {
         return model;
       }
 
-      if (hasKnownSize && requiresAuthValidation && model.requiresTreeProbe !== true) {
+      if (
+        hasKnownSize
+        && requiresAuthValidation
+        && model.requiresTreeProbe !== true
+        && !shouldCollectProjectorCandidates
+      ) {
         const probedAccessState = await this.probeResolvedModelAccess(model, requestContext);
         if (probedAccessState) {
           return normalizePersistedModelMetadata({
@@ -1332,7 +1353,8 @@ export class ModelCatalogService {
         )
           ? REQUEST_AUTH_POLICY.OPTIONAL_AUTH
           : REQUEST_AUTH_POLICY.ANONYMOUS;
-        const useFullTreeProbe = options.treeProbeMode === 'full' && model.requiresTreeProbe === true;
+        const useFullTreeProbe = options.treeProbeMode === 'full';
+        const shouldScanForProjectorCandidates = useFullTreeProbe && shouldCollectProjectorCandidates;
         const treeResponse = await this.fetchHuggingFaceModelTree(
           model.id,
           model.hfRevision,
@@ -1340,8 +1362,10 @@ export class ModelCatalogService {
           treeAuthPolicy,
           {
             expectedFileName: model.resolvedFileName,
-            allowTargetEarlyStop: !useFullTreeProbe,
-            maxPages: useFullTreeProbe ? HF_TREE_DETAIL_PAGINATION_MAX_PAGES : HF_TREE_SEARCH_PAGINATION_MAX_PAGES,
+            allowTargetEarlyStop: !shouldScanForProjectorCandidates,
+            maxPages: shouldScanForProjectorCandidates
+              ? HF_TREE_PROJECTOR_PAGINATION_MAX_PAGES
+              : useFullTreeProbe ? HF_TREE_DETAIL_PAGINATION_MAX_PAGES : HF_TREE_SEARCH_PAGINATION_MAX_PAGES,
           },
         );
         const selectedEntry = selectTreeEntryForModel(model, treeResponse.entries);
@@ -1351,6 +1375,10 @@ export class ModelCatalogService {
             || treeResponse.stopReason === 'preferred_found'
             || treeResponse.stopReason === 'lookahead'
           )
+        );
+        const shouldKeepTreeProbe = !treeProbeIsFinal && (
+          model.requiresTreeProbe === true
+          || shouldCollectProjectorCandidates
         );
         const accessState = this.resolveTreeAccessState(
           model,
@@ -1371,10 +1399,22 @@ export class ModelCatalogService {
             return null;
           }
 
+          const projectorMetadataPatch = shouldCollectProjectorCandidates && !treeResponse.isComplete
+            ? this.mergeProjectorMetadataWithLocalState(
+              {
+                ...model,
+                projectorCandidates: model.projectorCandidates,
+              },
+              model,
+              false,
+            )
+            : {};
+
           return normalizePersistedModelMetadata({
             ...model,
             accessState,
-            requiresTreeProbe: model.requiresTreeProbe && !treeProbeIsFinal,
+            requiresTreeProbe: shouldKeepTreeProbe,
+            ...projectorMetadataPatch,
           });
         }
 
@@ -1408,12 +1448,14 @@ export class ModelCatalogService {
             variant,
           ),
         });
-        const projectorCandidates = buildProjectorCandidatesFromEntries(treeResponse.entries, {
+        const discoveredProjectorCandidates = buildProjectorCandidatesFromEntries(treeResponse.entries, {
           repoId: model.id,
           hfRevision: model.hfRevision,
           ownerModelId: model.id,
           ownerFileName: resolvedFileName,
         });
+        const projectorCandidates = discoveredProjectorCandidates
+          ?? (useFullTreeProbe && treeResponse.isComplete ? [] : undefined);
         const hasVisionCapability = model.chatModalities?.includes('vision') === true
           || Boolean(projectorCandidates?.length);
         const treeEntrySha256 = getFileSha(selectedEntry);
@@ -1468,6 +1510,7 @@ export class ModelCatalogService {
           },
           model,
           shouldResetLocalDownloadState,
+          projectorCandidates !== undefined && !treeResponse.isComplete && !shouldResetLocalDownloadState,
         );
         const resolvedMemoryFit = shouldPreserveVerifiedLocal
           ? null
@@ -1505,7 +1548,7 @@ export class ModelCatalogService {
           resolvedMemoryFit,
         );
 
-        if (model.requiresTreeProbe && !treeProbeIsFinal) {
+        if (shouldKeepTreeProbe) {
           return normalizePersistedModelMetadata({
             ...model,
             ...localDownloadStatePatch,
@@ -1912,6 +1955,7 @@ export class ModelCatalogService {
     remoteModel: ModelMetadata,
     localModel: ModelMetadata,
     shouldResetLocalDownloadState: boolean,
+    preserveUnmatchedLocalProjectors = false,
   ): ProjectorMetadataMerge {
     const remoteCandidates = remoteModel.projectorCandidates;
     const localCandidates = localModel.projectorCandidates ?? [];
@@ -1940,16 +1984,31 @@ export class ModelCatalogService {
     }
 
     if (!remoteCandidates) {
-      const localCandidateIds = new Set(localCandidates.map((projector) => projector.id));
+      const runtimeVariantId = this.resolveProjectorRuntimeVariantId(remoteModel, localModel);
+      const blockedLocalProjectorIds = new Set<string>();
+      const compatibleLocalCandidates = localCandidates.filter((localProjector) => {
+        const canPreserveLocalProjector = this.projectorAppliesToRuntimeVariant(
+          localProjector,
+          runtimeVariantId,
+        );
+        if (!canPreserveLocalProjector) {
+          blockedLocalProjectorIds.add(localProjector.id);
+        }
+
+        return canPreserveLocalProjector;
+      });
+      const localCandidateIds = new Set(compatibleLocalCandidates.map((projector) => projector.id));
       const selectedProjectorId = this.resolveMergedSelectedProjectorId(
         remoteModel.selectedProjectorId,
         localModel.selectedProjectorId,
         localCandidateIds,
         new Map(),
+        blockedLocalProjectorIds,
+        new Set(),
       );
 
       return {
-        projectorCandidates: localModel.projectorCandidates,
+        projectorCandidates: compatibleLocalCandidates.length > 0 ? compatibleLocalCandidates : remoteCandidates,
         selectedProjectorId,
         multimodalReadiness: this.resolveMergedMultimodalReadiness(
           remoteModel.id,
@@ -1958,6 +2017,8 @@ export class ModelCatalogService {
           localCandidateIds,
           new Map(),
           selectedProjectorId,
+          new Set(),
+          blockedLocalProjectorIds,
         ),
       };
     }
@@ -1968,6 +2029,7 @@ export class ModelCatalogService {
     const incompatibleRemoteReadinessProjectorIds = new Set<string>();
     const blockedLocalProjectorIds = new Set<string>();
     const blockedRemoteProjectorIds = new Set<string>();
+    const runtimeVariantId = this.resolveProjectorRuntimeVariantId(remoteModel, localModel);
     const mergedCandidates = remoteCandidates.map((remoteProjector) => {
       const exactLocalProjector = localCandidates.find((localProjector) => (
         !usedLocalProjectorIds.has(localProjector.id)
@@ -1975,7 +2037,7 @@ export class ModelCatalogService {
       ));
       if (
         exactLocalProjector
-        && !this.projectorsShareStableArtifact(remoteProjector, exactLocalProjector)
+        && !this.projectorsShareStableArtifact(remoteProjector, exactLocalProjector, runtimeVariantId)
       ) {
         blockedLocalProjectorIds.add(exactLocalProjector.id);
         blockedRemoteProjectorIds.add(remoteProjector.id);
@@ -1985,6 +2047,7 @@ export class ModelCatalogService {
         remoteProjector,
         localCandidates,
         usedLocalProjectorIds,
+        runtimeVariantId,
       );
 
       if (!localProjector) {
@@ -2001,6 +2064,24 @@ export class ModelCatalogService {
 
       return this.mergeProjectorRuntimeState(remoteProjector, localProjector);
     });
+    if (preserveUnmatchedLocalProjectors) {
+      for (const localProjector of localCandidates) {
+        if (
+          usedLocalProjectorIds.has(localProjector.id)
+          || blockedLocalProjectorIds.has(localProjector.id)
+          || mergedCandidates.some((candidate) => candidate.id === localProjector.id)
+        ) {
+          continue;
+        }
+
+        if (!this.projectorAppliesToRuntimeVariant(localProjector, runtimeVariantId)) {
+          blockedLocalProjectorIds.add(localProjector.id);
+          continue;
+        }
+
+        mergedCandidates.push(localProjector);
+      }
+    }
     const mergedCandidateIds = new Set(mergedCandidates.map((projector) => projector.id));
     const selectedProjectorId = this.resolveMergedSelectedProjectorId(
       remoteModel.selectedProjectorId,
@@ -2049,11 +2130,12 @@ export class ModelCatalogService {
     remoteProjector: ProjectorArtifact,
     localProjectors: ProjectorArtifact[],
     usedLocalProjectorIds: Set<string>,
+    runtimeVariantId?: string,
   ): ProjectorArtifact | undefined {
     const exactMatch = localProjectors.find((localProjector) => (
       !usedLocalProjectorIds.has(localProjector.id)
       && localProjector.id === remoteProjector.id
-      && this.projectorsShareStableArtifact(remoteProjector, localProjector)
+      && this.projectorsShareStableArtifact(remoteProjector, localProjector, runtimeVariantId)
     ));
     if (exactMatch) {
       return exactMatch;
@@ -2061,13 +2143,64 @@ export class ModelCatalogService {
 
     return localProjectors.find((localProjector) => (
       !usedLocalProjectorIds.has(localProjector.id)
-      && this.projectorsShareStableArtifact(remoteProjector, localProjector)
+      && this.projectorsShareStableArtifact(remoteProjector, localProjector, runtimeVariantId)
     ));
+  }
+
+  private resolveProjectorRuntimeVariantId(
+    remoteModel: ModelMetadata,
+    localModel: ModelMetadata,
+  ): string | undefined {
+    return remoteModel.activeVariantId
+      ?? remoteModel.resolvedFileName
+      ?? localModel.activeVariantId
+      ?? localModel.resolvedFileName;
+  }
+
+  private normalizeProjectorVariantId(value: string | undefined): string | undefined {
+    if (typeof value !== 'string') {
+      return undefined;
+    }
+
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
+  }
+
+  private projectorAppliesToRuntimeVariant(
+    projector: ProjectorArtifact,
+    runtimeVariantId: string | undefined,
+  ): boolean {
+    const projectorVariantId = this.normalizeProjectorVariantId(projector.ownerVariantId);
+    const activeVariantId = this.normalizeProjectorVariantId(runtimeVariantId);
+    return !projectorVariantId || !activeVariantId || projectorVariantId === activeVariantId;
+  }
+
+  private projectorsShareRuntimeVariantScope(
+    remoteProjector: ProjectorArtifact,
+    localProjector: ProjectorArtifact,
+    runtimeVariantId: string | undefined,
+  ): boolean {
+    const remoteVariantId = this.normalizeProjectorVariantId(remoteProjector.ownerVariantId);
+    const localVariantId = this.normalizeProjectorVariantId(localProjector.ownerVariantId);
+    if (remoteVariantId === localVariantId) {
+      return true;
+    }
+
+    if (remoteVariantId && localVariantId) {
+      return false;
+    }
+
+    const scopedVariantId = remoteVariantId ?? localVariantId;
+    return Boolean(
+      scopedVariantId
+      && this.normalizeProjectorVariantId(runtimeVariantId) === scopedVariantId,
+    );
   }
 
   private projectorsShareStableArtifact(
     remoteProjector: ProjectorArtifact,
     localProjector: ProjectorArtifact,
+    runtimeVariantId?: string,
   ): boolean {
     if (
       remoteProjector.ownerModelId !== localProjector.ownerModelId
@@ -2078,11 +2211,7 @@ export class ModelCatalogService {
       return false;
     }
 
-    return (
-      !remoteProjector.ownerVariantId
-      || !localProjector.ownerVariantId
-      || remoteProjector.ownerVariantId === localProjector.ownerVariantId
-    );
+    return this.projectorsShareRuntimeVariantScope(remoteProjector, localProjector, runtimeVariantId);
   }
 
   private projectorsHaveCompatibleRuntimeMetadata(

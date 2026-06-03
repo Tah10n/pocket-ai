@@ -415,6 +415,93 @@ describe('useChatImageAttachments', () => {
     expect(chatAttachmentStorageService.discardDraft).not.toHaveBeenCalled();
   });
 
+  it('hands off drafts for send so cleanup cannot delete in-flight files', async () => {
+    const initialDraft = {
+      id: 'draft-1',
+      pickerUri: 'ph://library-image-1',
+      previewUri: 'file:///document/chat-attachments/draft-1.jpg',
+      localUri: 'file:///document/chat-attachments/draft-1.jpg',
+      copyStatus: 'copied' as const,
+    };
+    const rendered = renderHarness({
+      enabled: true,
+      initialDrafts: [initialDraft],
+    });
+    let consumedDrafts: unknown[] = [];
+
+    await act(async () => {
+      consumedDrafts = latestHook?.consumeDraftsForSend() ?? [];
+      await Promise.resolve();
+    });
+
+    expect(consumedDrafts).toEqual([initialDraft]);
+    await waitFor(() => {
+      expect(latestHook?.drafts).toHaveLength(0);
+    });
+
+    rendered.unmount();
+
+    expect(chatAttachmentStorageService.discardDrafts).not.toHaveBeenCalled();
+    expect(chatAttachmentStorageService.discardDraft).not.toHaveBeenCalled();
+  });
+
+  it('can explicitly discard consumed drafts when send rolls back before append', async () => {
+    const initialDraft = {
+      id: 'draft-1',
+      pickerUri: 'ph://library-image-1',
+      previewUri: 'file:///document/chat-attachments/draft-1.jpg',
+      localUri: 'file:///document/chat-attachments/draft-1.jpg',
+      copyStatus: 'copied' as const,
+    };
+    renderHarness({
+      enabled: true,
+      initialDrafts: [initialDraft],
+    });
+    let consumedDrafts: typeof initialDraft[] = [];
+
+    await act(async () => {
+      consumedDrafts = latestHook?.consumeDraftsForSend() as typeof initialDraft[];
+      latestHook?.discardDrafts(consumedDrafts, 'send rollback');
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(chatAttachmentStorageService.discardDrafts).toHaveBeenCalledWith([initialDraft]);
+    });
+  });
+
+  it('can restore consumed drafts for retry and re-own cleanup responsibility', async () => {
+    const initialDraft = {
+      id: 'draft-1',
+      pickerUri: 'ph://library-image-1',
+      previewUri: 'file:///document/chat-attachments/draft-1.jpg',
+      localUri: 'file:///document/chat-attachments/draft-1.jpg',
+      copyStatus: 'copied' as const,
+    };
+    const rendered = renderHarness({
+      enabled: true,
+      initialDrafts: [initialDraft],
+    });
+    let consumedDrafts: typeof initialDraft[] = [];
+
+    await act(async () => {
+      consumedDrafts = latestHook?.consumeDraftsForSend() as typeof initialDraft[];
+      latestHook?.restoreDraftsForRetry(consumedDrafts);
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(latestHook?.drafts).toEqual([initialDraft]);
+    });
+    expect(chatAttachmentStorageService.discardDrafts).not.toHaveBeenCalled();
+
+    rendered.unmount();
+
+    await waitFor(() => {
+      expect(chatAttachmentStorageService.discardDrafts).toHaveBeenCalledWith([initialDraft]);
+    });
+  });
+
   it('clears and discards drafts when the attachment owner context changes', async () => {
     const initialDraft = {
       id: 'draft-1',
@@ -501,6 +588,73 @@ describe('useChatImageAttachments', () => {
     await waitFor(() => {
       expect(latestHook?.drafts).toHaveLength(0);
     });
+    expect(chatAttachmentStorageService.discardDrafts).toHaveBeenCalledWith([initialDraft]);
+  });
+
+  it('discards owned drafts once when the attachment owner changes and immediately unmounts', async () => {
+    const initialDraft = {
+      id: 'draft-owner-unmount',
+      pickerUri: 'ph://library-image-1',
+      previewUri: 'test-dir/chat-attachments/draft-owner-unmount.jpg',
+      localUri: 'test-dir/chat-attachments/draft-owner-unmount.jpg',
+      copyStatus: 'copied' as const,
+    };
+    const Harness = ({ ownerKey }: { ownerKey: string }) => {
+      const value = useChatImageAttachments({
+        enabled: true,
+        initialDrafts: [initialDraft],
+        ownerKey,
+      });
+      useEffect(() => {
+        latestHook = value;
+      }, [value]);
+      return null;
+    };
+
+    const { rerender, unmount } = render(<Harness ownerKey="thread-1:model-vision" />);
+
+    expect(latestHook?.drafts).toHaveLength(1);
+
+    await act(async () => {
+      rerender(<Harness ownerKey="thread-2:model-vision" />);
+      unmount();
+    });
+
+    expect(chatAttachmentStorageService.discardDrafts).toHaveBeenCalledTimes(1);
+    expect(chatAttachmentStorageService.discardDrafts).toHaveBeenCalledWith([initialDraft]);
+  });
+
+  it('discards owned drafts once when image attachments become disabled and immediately unmounts', async () => {
+    const initialDraft = {
+      id: 'draft-disabled-unmount',
+      pickerUri: 'ph://library-image-1',
+      previewUri: 'test-dir/chat-attachments/draft-disabled-unmount.jpg',
+      localUri: 'test-dir/chat-attachments/draft-disabled-unmount.jpg',
+      copyStatus: 'copied' as const,
+    };
+    const Harness = ({ enabled }: { enabled: boolean }) => {
+      const value = useChatImageAttachments({
+        enabled,
+        disabledReason: enabled ? 'chat.visionReadiness.ready' : 'chat.visionReadiness.textOnly',
+        initialDrafts: [initialDraft],
+        ownerKey: 'thread-1:model-vision',
+      });
+      useEffect(() => {
+        latestHook = value;
+      }, [value]);
+      return null;
+    };
+
+    const { rerender, unmount } = render(<Harness enabled />);
+
+    expect(latestHook?.drafts).toHaveLength(1);
+
+    await act(async () => {
+      rerender(<Harness enabled={false} />);
+      unmount();
+    });
+
+    expect(chatAttachmentStorageService.discardDrafts).toHaveBeenCalledTimes(1);
     expect(chatAttachmentStorageService.discardDrafts).toHaveBeenCalledWith([initialDraft]);
   });
 

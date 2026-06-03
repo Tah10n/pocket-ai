@@ -1,6 +1,10 @@
 import type { ProjectorArtifact, ProjectorMatchStatus } from '../types/multimodal';
 import { normalizeDownloadResumeData } from './downloadResumeData';
 
+export type ProjectorRuntimeIdentityOptions = {
+  activeVariantId?: string | null;
+};
+
 function normalizeComparableString(value: string | undefined): string | undefined {
   if (typeof value !== 'string') {
     return undefined;
@@ -41,6 +45,35 @@ function normalizeComparableRevision(value: string | undefined): string {
   return normalizeComparableString(value) ?? 'main';
 }
 
+function projectorsShareRuntimeVariantScope(
+  runtimeProjector: ProjectorArtifact,
+  nextProjector: ProjectorArtifact,
+  options: ProjectorRuntimeIdentityOptions = {},
+): boolean {
+  const runtimeVariantId = normalizeComparableString(runtimeProjector.ownerVariantId);
+  const nextVariantId = normalizeComparableString(nextProjector.ownerVariantId);
+  if (runtimeVariantId === nextVariantId) {
+    return true;
+  }
+
+  if (runtimeVariantId && nextVariantId) {
+    return false;
+  }
+
+  const scopedVariantId = runtimeVariantId ?? nextVariantId;
+  const activeVariantId = normalizeComparableString(options.activeVariantId ?? undefined);
+  return Boolean(scopedVariantId && activeVariantId === scopedVariantId);
+}
+
+function runtimeProjectorAppliesToActiveVariant(
+  runtimeProjector: ProjectorArtifact,
+  options: ProjectorRuntimeIdentityOptions = {},
+): boolean {
+  const runtimeVariantId = normalizeComparableString(runtimeProjector.ownerVariantId);
+  const activeVariantId = normalizeComparableString(options.activeVariantId ?? undefined);
+  return !runtimeVariantId || !activeVariantId || runtimeVariantId === activeVariantId;
+}
+
 function valuesConflict<T>(first: T | undefined, second: T | undefined): boolean {
   return first !== undefined && second !== undefined && first !== second;
 }
@@ -48,15 +81,13 @@ function valuesConflict<T>(first: T | undefined, second: T | undefined): boolean
 function projectorsShareStableArtifact(
   runtimeProjector: ProjectorArtifact,
   nextProjector: ProjectorArtifact,
+  options: ProjectorRuntimeIdentityOptions = {},
 ): boolean {
   return normalizeComparableString(runtimeProjector.ownerModelId) === normalizeComparableString(nextProjector.ownerModelId)
     && normalizeComparableString(runtimeProjector.repoId) === normalizeComparableString(nextProjector.repoId)
     && normalizeComparableString(runtimeProjector.fileName) === normalizeComparableString(nextProjector.fileName)
     && normalizeComparableRevision(runtimeProjector.hfRevision) === normalizeComparableRevision(nextProjector.hfRevision)
-    && !valuesConflict(
-      normalizeComparableString(runtimeProjector.ownerVariantId),
-      normalizeComparableString(nextProjector.ownerVariantId),
-    );
+    && projectorsShareRuntimeVariantScope(runtimeProjector, nextProjector, options);
 }
 
 function projectorsHaveCompatibleRuntimeMetadata(
@@ -86,8 +117,9 @@ function projectorsHaveCompatibleRuntimeMetadata(
 export function hasCompatibleProjectorRuntimeIdentity(
   runtimeProjector: ProjectorArtifact,
   nextProjector: ProjectorArtifact,
+  options: ProjectorRuntimeIdentityOptions = {},
 ): boolean {
-  if (!projectorsShareStableArtifact(runtimeProjector, nextProjector)) {
+  if (!projectorsShareStableArtifact(runtimeProjector, nextProjector, options)) {
     return false;
   }
 
@@ -147,16 +179,19 @@ export function mergeProjectorRuntimeState(
 export function mergeProjectorCandidatesWithRuntimeState(
   nextProjectors: ProjectorArtifact[] | undefined,
   runtimeProjectors: ProjectorArtifact[] | undefined,
+  options: ProjectorRuntimeIdentityOptions = {},
 ): ProjectorArtifact[] | undefined {
   return mergeProjectorCandidatesWithRuntimeStateAndIdMap(
     nextProjectors,
     runtimeProjectors,
+    options,
   ).projectorCandidates;
 }
 
 export function mergeProjectorCandidatesWithRuntimeStateAndIdMap(
   nextProjectors: ProjectorArtifact[] | undefined,
   runtimeProjectors: ProjectorArtifact[] | undefined,
+  options: ProjectorRuntimeIdentityOptions = {},
 ): ProjectorRuntimeStateMerge {
   const runtimeToNextProjectorIds = new Map<string, string>();
   const blockedRuntimeProjectorIds = new Set<string>();
@@ -177,11 +212,20 @@ export function mergeProjectorCandidatesWithRuntimeStateAndIdMap(
       return buildResult(nextProjectors);
     }
 
-    runtimeProjectors.forEach((runtimeProjector) => {
+    const compatibleRuntimeProjectors = runtimeProjectors.filter((runtimeProjector) => {
+      const canPreserveRuntimeProjector = runtimeProjectorAppliesToActiveVariant(runtimeProjector, options);
+      if (!canPreserveRuntimeProjector) {
+        blockedRuntimeProjectorIds.add(runtimeProjector.id);
+        blockedRuntimeReadinessProjectorIds.add(runtimeProjector.id);
+      }
+
+      return canPreserveRuntimeProjector;
+    });
+    compatibleRuntimeProjectors.forEach((runtimeProjector) => {
       runtimeToNextProjectorIds.set(runtimeProjector.id, runtimeProjector.id);
     });
 
-    return buildResult(runtimeProjectors);
+    return buildResult(compatibleRuntimeProjectors.length > 0 ? compatibleRuntimeProjectors : nextProjectors);
   }
 
   if (!runtimeProjectors?.length) {
@@ -197,7 +241,7 @@ export function mergeProjectorCandidatesWithRuntimeStateAndIdMap(
     ));
     if (
       exactSameIdRuntimeProjector
-      && !projectorsShareStableArtifact(exactSameIdRuntimeProjector, nextProjector)
+      && !projectorsShareStableArtifact(exactSameIdRuntimeProjector, nextProjector, options)
     ) {
       blockedRuntimeProjectorIds.add(exactSameIdRuntimeProjector.id);
       blockedNextProjectorIds.add(nextProjector.id);
@@ -206,12 +250,12 @@ export function mergeProjectorCandidatesWithRuntimeStateAndIdMap(
     const exactMatch = runtimeProjectors.find((runtimeProjector) => (
       !usedRuntimeProjectorIds.has(runtimeProjector.id)
       && runtimeProjector.id === nextProjector.id
-      && projectorsShareStableArtifact(runtimeProjector, nextProjector)
+      && projectorsShareStableArtifact(runtimeProjector, nextProjector, options)
     ));
     const runtimeProjector = exactMatch ?? runtimeProjectors.find((candidate) => (
       !usedRuntimeProjectorIds.has(candidate.id)
       && candidate.id !== nextProjector.id
-      && projectorsShareStableArtifact(candidate, nextProjector)
+      && projectorsShareStableArtifact(candidate, nextProjector, options)
     ));
 
     if (!runtimeProjector) {

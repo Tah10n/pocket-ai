@@ -328,16 +328,17 @@ describe('useChatSession', () => {
 
   it('persists copied image attachments on the user message and passes media paths to inference', async () => {
     const getSession = renderHookHarness();
+    const readyVision = {
+      modelId: 'author/model-q4',
+      status: 'ready' as const,
+      support: ['vision' as const],
+      checkedAt: 1,
+    };
 
     await act(async () => {
       await getSession()?.appendUserMessage('Describe this image', {
         attachmentDrafts: [copiedDraftImageAttachment],
-        multimodalReadiness: {
-          modelId: 'author/model-q4',
-          status: 'ready',
-          support: ['vision'],
-          checkedAt: 1,
-        },
+        multimodalReadiness: readyVision,
       });
     });
 
@@ -374,6 +375,8 @@ describe('useChatSession', () => {
     );
     expect(llmEngineService.countPromptTokens).toHaveBeenCalledWith(
       expect.objectContaining({
+        multimodalReadiness: readyVision,
+        expectedModelId: 'author/model-q4',
         messages: expect.arrayContaining([
           expect.objectContaining({
             role: 'user',
@@ -1295,6 +1298,27 @@ describe('useChatSession', () => {
           modelId: 'author/model-q4',
           status: 'text_only',
           support: [],
+          checkedAt: 1,
+        },
+      });
+    })).rejects.toMatchObject({
+      code: 'multimodal_not_ready',
+    });
+
+    expect(useChatStore.getState().getConversationIndex()).toHaveLength(0);
+    expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
+  });
+
+  it('blocks image attachments when ready vision state belongs to another model', async () => {
+    const getSession = renderHookHarness();
+
+    await expect(act(async () => {
+      await getSession()?.appendUserMessage('Describe this image', {
+        attachmentDrafts: [copiedDraftImageAttachment],
+        multimodalReadiness: {
+          modelId: 'other/model',
+          status: 'ready',
+          support: ['vision'],
           checkedAt: 1,
         },
       });

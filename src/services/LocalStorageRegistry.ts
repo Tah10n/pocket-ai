@@ -12,7 +12,7 @@ import { GgufValidationError, validateGgufFileHeader } from '../utils/ggufValida
 import { normalizeSha256Digest } from '../utils/sha256';
 import type { CalibrationRecord } from '../memory/types';
 import { getModelMemoryFitInputSizeBytes } from '../utils/memoryFit';
-import { getStoredProjectorArtifactsSizeBytes } from '../utils/modelSize';
+import { getStoredProjectorMemoryFitSizeBytes } from '../utils/modelSize';
 
 const REGISTRY_STORAGE_ID = 'models-registry';
 const MODEL_FILE_PRESERVATION_STORAGE_ID = 'model-file-preservation';
@@ -34,6 +34,7 @@ let modelFilePreservationStorage: MMKV | null = null;
 type PrivateResetModelFilePreservationState = {
   fileNames: Set<string>;
   scanComplete: boolean;
+  completedOnly: boolean;
 };
 
 type QuarantinedModelFile = {
@@ -245,6 +246,7 @@ function readPrivateResetPreservedModelFiles(): PrivateResetModelFilePreservatio
     return {
       fileNames: new Set(),
       scanComplete: true,
+      completedOnly: true,
     };
   }
 
@@ -254,23 +256,27 @@ function readPrivateResetPreservedModelFiles(): PrivateResetModelFilePreservatio
       return {
         fileNames: normalizeModelFileNames(parsed),
         scanComplete: true,
+        completedOnly: false,
       };
     }
 
     const state = parsed as {
       fileNames?: unknown;
       scanComplete?: unknown;
+      completedOnly?: unknown;
     };
 
     return {
       fileNames: normalizeModelFileNames(state.fileNames),
       scanComplete: state.scanComplete !== false,
+      completedOnly: state.completedOnly === true,
     };
   } catch {
     getModelFilePreservationStorage().remove(PRIVATE_RESET_PRESERVED_MODEL_FILES_KEY);
     return {
       fileNames: new Set(),
       scanComplete: true,
+      completedOnly: true,
     };
   }
 }
@@ -287,6 +293,7 @@ function writePrivateResetPreservedModelFiles(state: PrivateResetModelFilePreser
     JSON.stringify({
       fileNames,
       scanComplete: state.scanComplete,
+      completedOnly: state.completedOnly,
       updatedAt: Date.now(),
     }),
   );
@@ -585,6 +592,97 @@ function hasCompletedLocalModelFile(model: Pick<ModelMetadata, 'lifecycleStatus'
   );
 }
 
+function shouldPreserveGgufValidationReadFailure(error: unknown): boolean {
+  return error instanceof GgufValidationError && error.reason === 'read_failed';
+}
+
+async function isExistingCompletedModelFileForPrivateReset(
+  model: ModelMetadata,
+  modelsDir: string,
+): Promise<boolean> {
+  if (!hasCompletedLocalModelFile(model) || !isValidLocalFileName(model.localPath)) {
+    return false;
+  }
+
+  const localUri = safeJoinModelPath(modelsDir, model.localPath);
+  if (!localUri) {
+    return false;
+  }
+
+  let info: Awaited<ReturnType<typeof FileSystem.getInfoAsync>>;
+  try {
+    info = await FileSystem.getInfoAsync(localUri);
+  } catch (error) {
+    console.warn('[LocalStorageRegistry] Failed to inspect completed model file before private storage reset; preserving registry-owned file name', {
+      ...getModelStorageLogDetails('private_storage_reset_snapshot'),
+      artifactKind: 'model',
+      ...getSanitizedRegistryErrorDetails(error),
+    });
+    return true;
+  }
+  if (!info.exists || isFileSystemDirectory(info)) {
+    return false;
+  }
+
+  const expectedSizeBytes = getValidDownloadIntegritySizeBytes(model.downloadIntegrity)
+    ?? getFileInfoSizeBytes({ size: model.size ?? undefined });
+  const fileSizeBytes = getFileInfoSizeBytes(info);
+  if (expectedSizeBytes !== null && fileSizeBytes !== null && fileSizeBytes !== expectedSizeBytes) {
+    return false;
+  }
+
+  try {
+    await validateGgufFileHeader(localUri, info);
+  } catch (error) {
+    return shouldPreserveGgufValidationReadFailure(error);
+  }
+
+  return true;
+}
+
+async function isExistingCompletedProjectorFileForPrivateReset(
+  projector: ProjectorArtifact,
+  modelsDir: string,
+): Promise<boolean> {
+  if (!hasCompletedProjectorStatus(projector) || !isValidLocalFileName(projector.localPath)) {
+    return false;
+  }
+
+  const localUri = safeJoinModelPath(modelsDir, projector.localPath);
+  if (!localUri) {
+    return false;
+  }
+
+  let info: Awaited<ReturnType<typeof FileSystem.getInfoAsync>>;
+  try {
+    info = await FileSystem.getInfoAsync(localUri);
+  } catch (error) {
+    console.warn('[LocalStorageRegistry] Failed to inspect completed projector file before private storage reset; preserving registry-owned file name', {
+      ...getModelStorageLogDetails('private_storage_reset_snapshot'),
+      artifactKind: 'projector',
+      ...getSanitizedRegistryErrorDetails(error),
+    });
+    return true;
+  }
+  if (!info.exists || isFileSystemDirectory(info)) {
+    return false;
+  }
+
+  const expectedSizeBytes = getFileInfoSizeBytes({ size: projector.size ?? undefined });
+  const fileSizeBytes = getFileInfoSizeBytes(info);
+  if (expectedSizeBytes !== null && fileSizeBytes !== null && fileSizeBytes !== expectedSizeBytes) {
+    return false;
+  }
+
+  try {
+    await validateGgufFileHeader(localUri, info);
+  } catch (error) {
+    return shouldPreserveGgufValidationReadFailure(error);
+  }
+
+  return true;
+}
+
 type ModelAssetFileForRemoval = {
   fileName: string;
   kind: 'model' | 'projector';
@@ -709,38 +807,79 @@ export class LocalStorageRegistry {
   }
 
   public async preserveExistingModelFilesForPrivateStorageReset(): Promise<string[]> {
-    const currentState = readPrivateResetPreservedModelFiles();
     const modelsDir = getModelsDir();
+    const preservedFileNames = new Set<string>();
 
     if (!modelsDir) {
       writePrivateResetPreservedModelFiles({
-        fileNames: currentState.fileNames,
-        scanComplete: false,
+        fileNames: preservedFileNames,
+        scanComplete: true,
+        completedOnly: true,
       });
-      return Array.from(currentState.fileNames).sort((left, right) => left.localeCompare(right));
+      return [];
     }
 
     try {
-      const fileNames = normalizeModelFileNames(await FileSystem.readDirectoryAsync(modelsDir));
-      const nextFileNames = new Set([...currentState.fileNames, ...fileNames]);
+      for (const model of this.getModels()) {
+        if (await isExistingCompletedModelFileForPrivateReset(model, modelsDir) && isValidLocalFileName(model.localPath)) {
+          preservedFileNames.add(model.localPath);
+        }
+
+        for (const projector of model.projectorCandidates ?? []) {
+          if (
+            await isExistingCompletedProjectorFileForPrivateReset(projector, modelsDir)
+            && isValidLocalFileName(projector.localPath)
+          ) {
+            preservedFileNames.add(projector.localPath);
+          }
+        }
+      }
+
       writePrivateResetPreservedModelFiles({
-        fileNames: nextFileNames,
+        fileNames: preservedFileNames,
         scanComplete: true,
+        completedOnly: true,
       });
-      return Array.from(nextFileNames).sort((left, right) => left.localeCompare(right));
+      return Array.from(preservedFileNames).sort((left, right) => left.localeCompare(right));
     } catch (error) {
       console.warn(
-        '[LocalStorageRegistry] Failed to snapshot model files before private storage reset; suspending orphan cleanup until the next registry validation can rescan.',
+        '[LocalStorageRegistry] Failed to snapshot completed model files before private storage reset; falling back to fail-closed directory preservation.',
         {
           ...getModelStorageLogDetails('private_storage_reset_snapshot'),
           ...getSanitizedRegistryErrorDetails(error),
         },
       );
-      writePrivateResetPreservedModelFiles({
-        fileNames: currentState.fileNames,
-        scanComplete: false,
-      });
-      return Array.from(currentState.fileNames).sort((left, right) => left.localeCompare(right));
+
+      try {
+        const directoryFileNames = normalizeModelFileNames(await FileSystem.readDirectoryAsync(modelsDir));
+        const fallbackFileNames = new Set([...directoryFileNames, ...preservedFileNames]);
+        writePrivateResetPreservedModelFiles({
+          fileNames: fallbackFileNames,
+          scanComplete: false,
+          completedOnly: false,
+        });
+        return Array.from(fallbackFileNames).sort((left, right) => left.localeCompare(right));
+      } catch (directoryError) {
+        console.warn(
+          '[LocalStorageRegistry] Failed to snapshot model directory before private storage reset; preserving previous reset snapshot.',
+          {
+            ...getModelStorageLogDetails('private_storage_reset_snapshot'),
+            ...getSanitizedRegistryErrorDetails(directoryError),
+          },
+        );
+
+        if (preservedFileNames.size > 0) {
+          writePrivateResetPreservedModelFiles({
+            fileNames: preservedFileNames,
+            scanComplete: false,
+            completedOnly: false,
+          });
+          return Array.from(preservedFileNames).sort((left, right) => left.localeCompare(right));
+        }
+
+        return Array.from(readPrivateResetPreservedModelFiles().fileNames)
+          .sort((left, right) => left.localeCompare(right));
+      }
     }
   }
 
@@ -1190,7 +1329,7 @@ export class LocalStorageRegistry {
         if (sizeBytesForFit !== null) {
           const memoryFitInputSizeBytes = getModelMemoryFitInputSizeBytes({
             modelSizeBytes: sizeBytesForFit,
-            projectorSizeBytes: getStoredProjectorArtifactsSizeBytes(model.projectorCandidates),
+            projectorSizeBytes: getStoredProjectorMemoryFitSizeBytes(model.projectorCandidates),
           }) ?? sizeBytesForFit;
           const metadataTrustForFit = hasTrustedIntegrityMarker
             ? 'verified_local' as const
@@ -1464,10 +1603,33 @@ export class LocalStorageRegistry {
     const safeDirectoryFileNames = normalizeModelFileNames(directoryFileNames);
     const nextFileNames = new Set<string>();
 
-    if (!state.scanComplete) {
-      for (const fileName of safeDirectoryFileNames) {
-        state.fileNames.add(fileName);
+    if (!state.completedOnly) {
+      const legacyCandidateFileNames = !state.scanComplete && state.fileNames.size === 0
+        ? safeDirectoryFileNames
+        : state.fileNames;
+      for (const fileName of legacyCandidateFileNames) {
+        if (!safeDirectoryFileNames.has(fileName)) {
+          continue;
+        }
+
+        if (completedLocalPaths.has(fileName)) {
+          continue;
+        }
+
+        nextFileNames.add(fileName);
       }
+
+      const shouldPersistLegacy =
+        nextFileNames.size !== state.fileNames.size
+        || [...nextFileNames].some((fileName) => !state.fileNames.has(fileName));
+      if (shouldPersistLegacy) {
+        writePrivateResetPreservedModelFiles({
+          fileNames: nextFileNames,
+          scanComplete: state.scanComplete,
+          completedOnly: false,
+        });
+      }
+      return nextFileNames;
     }
 
     for (const fileName of state.fileNames) {
@@ -1491,6 +1653,7 @@ export class LocalStorageRegistry {
       writePrivateResetPreservedModelFiles({
         fileNames: nextFileNames,
         scanComplete: true,
+        completedOnly: true,
       });
     }
 

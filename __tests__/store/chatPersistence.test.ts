@@ -175,6 +175,8 @@ describe('chatPersistence', () => {
               threadId: 'stale-thread-id',
               messageId: 'stale-message-id',
               mediaType: 'IMAGE/JPEG',
+              thumbnailUri: 'test-dir/chat-attachments/thread-vision-1/attachment-image-1-thumb.jpg',
+              thumbnailFileName: 'attachment-image-1-thumb.jpg',
             },
             {
               ...secondCopiedImageAttachment,
@@ -182,6 +184,8 @@ describe('chatPersistence', () => {
               threadId: 'stale-thread-id',
               messageId: 'stale-message-id',
               mediaType: undefined,
+              thumbnailUri: 'test-dir/chat-attachments/thread-vision-1/mime-less-png-thumb.gif',
+              thumbnailFileName: 'mime-less-png-thumb.gif',
             },
           ],
         },
@@ -214,6 +218,8 @@ describe('chatPersistence', () => {
             threadId: thread.id,
             messageId: 'user-with-image',
             localUri: copiedImageAttachment.localUri,
+            thumbnailUri: 'test-dir/chat-attachments/thread-vision-1/attachment-image-1-thumb.jpg',
+            thumbnailFileName: 'attachment-image-1-thumb.jpg',
             mediaType: 'image/jpeg',
             pathCategory: 'chat_attachment',
             source: 'photo_library',
@@ -234,6 +240,8 @@ describe('chatPersistence', () => {
       source: 'photo_library',
     }));
     expect(record.value.thread.messages[0].attachments?.[1]).not.toHaveProperty('mediaType');
+    expect(record.value.thread.messages[0].attachments?.[1]).not.toHaveProperty('thumbnailUri');
+    expect(record.value.thread.messages[0].attachments?.[1]).not.toHaveProperty('thumbnailFileName');
     expect(record.value.thread.messages[1]).not.toHaveProperty('attachments');
   });
 

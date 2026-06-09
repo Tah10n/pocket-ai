@@ -1,4 +1,4 @@
-import { AppError, getErrorMessage, reportError, toAppError } from '../../src/services/AppError';
+import { AppError, getErrorMessage, getReportedErrorMessage, reportError, toAppError } from '../../src/services/AppError';
 
 describe('AppError', () => {
   it('keeps existing AppError instances', () => {
@@ -45,7 +45,7 @@ describe('AppError', () => {
     expect(getErrorMessage(new AppError('action_failed'), t)).toBe('t:common.actionFailed');
   });
 
-  it('reports to Sentry when not in dev mode', () => {
+  it('reports sanitized errors and extra to Sentry when not in dev mode', () => {
     const originalDevFlag = (globalThis as any).__DEV__;
     const originalSentry = (globalThis as any).Sentry;
     const reporter = { captureException: jest.fn() };
@@ -54,18 +54,118 @@ describe('AppError', () => {
       (globalThis as any).__DEV__ = false;
       (globalThis as any).Sentry = reporter;
 
-      const result = reportError('scope', new Error('Engine not ready'), { foo: 'bar' });
+      const result = reportError(
+        'scope',
+        new AppError('action_failed', 'Failed to copy content://media/external/images/media/12 with Bearer raw-token', {
+          details: {
+            pickerUri: 'ph://ABC/L0/001',
+            modelId: 'author/model-q4',
+          },
+        }),
+        {
+          foo: 'bar',
+          localUri: 'file:///sdcard/Download/private-model.gguf',
+          requestUrl: 'https://example.test/model.gguf?token=secret&ok=1',
+        },
+      );
 
       expect(result).toBeInstanceOf(AppError);
+      expect(result.message).toBe('Failed to copy [uri] with Bearer [redacted]');
       expect(reporter.captureException).toHaveBeenCalledTimes(1);
       expect(reporter.captureException).toHaveBeenCalledWith(
         expect.any(AppError),
         expect.objectContaining({
           tags: expect.objectContaining({ scope: 'scope' }),
-          extra: expect.objectContaining({ foo: 'bar' }),
+          extra: expect.objectContaining({
+            foo: 'bar',
+            modelId: 'author/model-q4',
+            requestUrl: 'https://example.test/model.gguf?token=[redacted]&ok=1',
+          }),
         }),
       );
+      const [, sentryOptions] = reporter.captureException.mock.calls[0];
+      const serializedSentryOptions = JSON.stringify(sentryOptions);
+      expect(serializedSentryOptions).not.toContain('content://');
+      expect(serializedSentryOptions).not.toContain('ph://');
+      expect(serializedSentryOptions).not.toContain('/sdcard');
+      expect(serializedSentryOptions).not.toContain('raw-token');
+      expect(serializedSentryOptions).not.toContain('token=secret');
     } finally {
+      (globalThis as any).__DEV__ = originalDevFlag;
+      (globalThis as any).Sentry = originalSentry;
+    }
+  });
+
+  it('uses the sanitized reported error for UI-facing fallback messages', () => {
+    const originalDevFlag = (globalThis as any).__DEV__;
+    const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    const t = ((key: string) => `t:${key}`) as any;
+
+    try {
+      (globalThis as any).__DEV__ = true;
+
+      const message = getReportedErrorMessage(
+        'scope',
+        new Error('Failed content://media/external/images/media/12 from /workspace/project/private.jpg?token=secret'),
+        t,
+      );
+
+      expect(message).toBe('Failed [uri] from [path]');
+      expect(message).not.toContain('content://');
+      expect(message).not.toContain('/workspace');
+      expect(message).not.toContain('token=secret');
+    } finally {
+      consoleSpy.mockRestore();
+      (globalThis as any).__DEV__ = originalDevFlag;
+    }
+  });
+
+  it('sanitizes console extra in dev mode', () => {
+    const originalDevFlag = (globalThis as any).__DEV__;
+    const originalSentry = (globalThis as any).Sentry;
+    const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    try {
+      (globalThis as any).__DEV__ = true;
+      (globalThis as any).Sentry = undefined;
+
+      const result = reportError(
+        'scope',
+        new AppError('action_failed', 'Preview failed for ph://ABC/L0/001 in /mnt/media/photo.jpg', {
+          details: {
+            publicUrl: 'https://huggingface.co/author/model/resolve/main/model.gguf?ok=1',
+            thumbnailUri: 'content://media/external/images/media/99',
+          },
+        }),
+        {
+          uri: 'content://media/external/images/media/12',
+          previewUri: 'ph://XYZ/L0/002',
+          token: 'raw-token',
+          nested: {
+            path: '/sdcard/DCIM/private photo.jpg',
+          },
+        },
+      );
+
+      expect(result.message).toBe('Preview failed for [uri] in [path]');
+      expect(consoleSpy).toHaveBeenCalledTimes(1);
+      const [, loggedError, loggedExtra] = consoleSpy.mock.calls[0];
+      expect(loggedError).toBe(result);
+      expect(loggedExtra).toEqual({
+        publicUrl: 'https://huggingface.co/author/model/resolve/main/model.gguf?ok=1',
+        token: '[redacted]',
+        nested: {
+          path: '[path]',
+        },
+      });
+      const serializedConsoleArgs = JSON.stringify(consoleSpy.mock.calls[0]);
+      expect(serializedConsoleArgs).not.toContain('content://');
+      expect(serializedConsoleArgs).not.toContain('ph://');
+      expect(serializedConsoleArgs).not.toContain('/sdcard');
+      expect(serializedConsoleArgs).not.toContain('/mnt');
+      expect(serializedConsoleArgs).not.toContain('raw-token');
+    } finally {
+      consoleSpy.mockRestore();
       (globalThis as any).__DEV__ = originalDevFlag;
       (globalThis as any).Sentry = originalSentry;
     }

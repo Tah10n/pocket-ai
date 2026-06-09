@@ -5,12 +5,13 @@ import * as Clipboard from 'expo-clipboard';
 import * as Sharing from 'expo-sharing';
 
 jest.mock('@/services/AppError', () => ({
-  toAppError: () => ({
+  toAppError: (error: unknown) => ({
     code: 'E_TEST',
-    message: 'Something went wrong',
+    message: error instanceof Error ? error.message : 'Something went wrong',
     details: {
       reason: 'unit-test',
       nested: { ok: true },
+      ...((error as { reportDetails?: Record<string, unknown> } | null)?.reportDetails ?? {}),
     },
   }),
 }));
@@ -173,6 +174,94 @@ describe('ErrorReportSheet', () => {
       'models.errorReport.failedTitle',
       'models.errorReport.copyFailedMessage',
     );
+  });
+
+  it('sanitizes sensitive paths, URLs, tokens, and diagnostics before copy/export', async () => {
+    const error = new Error(
+      'Load failed for file:///private/var/mobile/Containers/Data/model.gguf with Bearer abc.def',
+    );
+    error.stack = 'Error: boom\n    at load (C:\\Users\\alice\\dev\\pocket_ai\\specs\\secret.ts:10:2)\n    at native (/private/var/mobile/Containers/Data/model.gguf?token=secret)';
+    (error as any).reportDetails = {
+      localPath: 'file:///private/var/mobile/Containers/Data/model.gguf',
+      downloadUrl: 'https://example.test/model.gguf?token=secret',
+      pathCategory: 'model_storage',
+      status: 403,
+    };
+
+    const { getByText, getByPlaceholderText } = render(
+      <ErrorReportSheet
+        visible
+        scope="model-load"
+        error={error}
+        context={{
+          model: {
+            id: 'author/model-q4',
+            localPath: 'file:///private/var/mobile/Containers/Data/model.gguf',
+            downloadUrl: 'https://example.test/model.gguf?access_token=secret&safe=1',
+            pathCategory: 'model_storage',
+            artifactKind: 'model',
+            sizeBytes: 123,
+            nested: {
+              retryPath: 'C:\\Users\\alice\\Downloads\\model.gguf',
+              auth: 'Bearer native-token',
+            },
+          },
+          extra: {
+            url: 'https://example.test/model.gguf?token=secret&ok=1',
+            unsafeModelId: 'C:\\Users\\alice\\models\\private.gguf',
+          },
+        } as any}
+        onClose={jest.fn()}
+      />,
+    );
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    fireEvent.changeText(
+      getByPlaceholderText('models.errorReport.additionalInfoPlaceholder'),
+      'User note kept as typed',
+    );
+
+    await act(async () => {
+      fireEvent.press(getByText('models.errorReport.copy'));
+      await Promise.resolve();
+    });
+
+    const payload = parseLastClipboardJson();
+    const serialized = JSON.stringify(payload);
+
+    expect(payload.additionalInfo).toBe('User note kept as typed');
+    expect(payload.error.message).toContain('[file-uri]');
+    expect(payload.error.message).toContain('Bearer [redacted]');
+    expect(payload.error.stack).toContain('[path]');
+    expect(payload.model).toEqual(expect.objectContaining({
+      id: 'author/model-q4',
+      pathCategory: 'model_storage',
+      artifactKind: 'model',
+      sizeBytes: 123,
+    }));
+    expect(payload.model.localPath).toBeUndefined();
+    expect(payload.model.downloadUrl).toBeUndefined();
+    expect(payload.model.nested.retryPath).toBe('[path]');
+    expect(payload.model.nested.auth).toBe('Bearer [redacted]');
+    expect(payload.extra.url).toBe('https://example.test/model.gguf?token=[redacted]&ok=1');
+    expect(payload.diagnostics).toEqual(expect.objectContaining({
+      pathCategory: 'model_storage',
+      status: 403,
+    }));
+    expect(payload.diagnostics.localPath).toBeUndefined();
+    expect(payload.diagnostics.downloadUrl).toBeUndefined();
+
+    expect(serialized).not.toContain('file://');
+    expect(serialized).not.toContain('C:\\Users\\alice');
+    expect(serialized).not.toContain('/private/var/mobile');
+    expect(serialized).not.toContain('abc.def');
+    expect(serialized).not.toContain('native-token');
+    expect(serialized).not.toContain('token=secret');
+    expect(serialized).not.toContain('access_token=secret');
   });
 
   it('shares via expo-sharing when available; otherwise falls back to Share API', async () => {

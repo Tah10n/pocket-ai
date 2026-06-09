@@ -1220,6 +1220,43 @@ export class ModelCatalogService {
     return getProjectorMemoryFitSizeBytes(projectorCandidates, variant.selectedProjectorId);
   }
 
+  private resolveActiveVariantKeys(
+    model: Pick<ModelMetadata, 'activeVariantId' | 'resolvedFileName' | 'variants'>,
+  ): Set<string> {
+    const activeVariantId = this.normalizeProjectorVariantId(model.activeVariantId);
+    const resolvedFileName = this.normalizeProjectorVariantId(model.resolvedFileName);
+    const activeVariant = model.variants?.find((variant) => (
+      (activeVariantId && (variant.variantId === activeVariantId || variant.fileName === activeVariantId))
+      || (resolvedFileName && (variant.variantId === resolvedFileName || variant.fileName === resolvedFileName))
+    ));
+
+    return new Set([
+      activeVariantId,
+      resolvedFileName,
+      this.normalizeProjectorVariantId(activeVariant?.variantId),
+      this.normalizeProjectorVariantId(activeVariant?.fileName),
+    ].filter((value): value is string => typeof value === 'string'));
+  }
+
+  private resolveActiveVariantProjectorMemoryFitSizeBytes(
+    model: Pick<
+      ModelMetadata,
+      'id' | 'activeVariantId' | 'resolvedFileName' | 'variants' | 'projectorCandidates' | 'selectedProjectorId'
+    >,
+  ): number {
+    const activeVariantKeys = this.resolveActiveVariantKeys(model);
+    const compatibleCandidates = (model.projectorCandidates ?? []).filter((projector) => {
+      if (projector.ownerModelId !== model.id) {
+        return false;
+      }
+
+      const ownerVariantId = this.normalizeProjectorVariantId(projector.ownerVariantId);
+      return !ownerVariantId || activeVariantKeys.size === 0 || activeVariantKeys.has(ownerVariantId);
+    });
+
+    return getProjectorMemoryFitSizeBytes(compatibleCandidates, model.selectedProjectorId);
+  }
+
   private withActiveVariantResolvedMemoryFit(
     variants: ModelVariant[] | undefined,
     activeVariantId: string | undefined,
@@ -1259,7 +1296,7 @@ export class ModelCatalogService {
     memoryFitContext: CatalogMemoryFitContext | null = this.getRememberedMemoryFitContext(),
   ): ModelMetadata {
     const resolvedMemoryFit = resolveMemoryFitSummary(model, memoryFitContext, {
-      projectorSizeBytes: getProjectorMemoryFitSizeBytes(model.projectorCandidates, model.selectedProjectorId),
+      projectorSizeBytes: this.resolveActiveVariantProjectorMemoryFitSizeBytes(model),
     });
     const fitsInRam = resolvedMemoryFit?.fitsInRam ?? model.fitsInRam;
     const memoryFitDecision = resolvedMemoryFit?.decision ?? model.memoryFitDecision;
@@ -1515,10 +1552,14 @@ export class ModelCatalogService {
         const resolvedMemoryFit = shouldPreserveVerifiedLocal
           ? null
           : resolveMemoryFitSummary({ size, metadataTrust, gguf }, memoryFitContext, {
-            projectorSizeBytes: getProjectorMemoryFitSizeBytes(
-              projectorMetadataPatch.projectorCandidates,
-              projectorMetadataPatch.selectedProjectorId,
-            ),
+            projectorSizeBytes: this.resolveActiveVariantProjectorMemoryFitSizeBytes({
+              ...model,
+              resolvedFileName,
+              activeVariantId: resolvedFileName,
+              variants,
+              projectorCandidates: projectorMetadataPatch.projectorCandidates,
+              selectedProjectorId: projectorMetadataPatch.selectedProjectorId,
+            }),
           });
         const didChangeSize = size !== model.size;
         const fitsInRam = shouldPreserveVerifiedLocal
@@ -2552,10 +2593,12 @@ export class ModelCatalogService {
       shouldResetLocalDownloadState,
     );
     const resolvedMemoryFit = resolveMemoryFitSummary({ size: resolvedSize, metadataTrust, gguf }, memoryFitContext, {
-      projectorSizeBytes: getProjectorMemoryFitSizeBytes(
-        projectorMetadataPatch.projectorCandidates,
-        projectorMetadataPatch.selectedProjectorId,
-      ),
+      projectorSizeBytes: this.resolveActiveVariantProjectorMemoryFitSizeBytes({
+        ...remoteModel,
+        resolvedFileName: remoteModel.resolvedFileName ?? localModel.resolvedFileName,
+        projectorCandidates: projectorMetadataPatch.projectorCandidates,
+        selectedProjectorId: projectorMetadataPatch.selectedProjectorId,
+      }),
     });
     const fitsInRam = resolvedMemoryFit?.fitsInRam
       ?? remoteModel.fitsInRam

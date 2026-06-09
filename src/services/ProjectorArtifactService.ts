@@ -84,7 +84,9 @@ function getCompatibleProjectors(model: ModelMetadata): ProjectorArtifact[] {
     .filter((projector) => projector.ownerModelId === model.id);
   const activeVariantKeys = getActiveVariantKeys(model);
   const compatibleProjectors = ownedProjectors.filter((projector) => (
-    !projector.ownerVariantId || activeVariantKeys.has(projector.ownerVariantId)
+    !projector.ownerVariantId
+    || activeVariantKeys.size === 0
+    || activeVariantKeys.has(projector.ownerVariantId)
   ));
 
   return compatibleProjectors.map(cloneProjector);

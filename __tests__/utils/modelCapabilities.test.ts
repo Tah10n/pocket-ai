@@ -227,4 +227,88 @@ describe('modelCapabilities', () => {
       projectorCandidates: [projector],
     })).toBe(false);
   });
+
+  it('does not present inactive variant-scoped projector downloads as ready', () => {
+    const inactiveProjector = {
+      id: 'projector-q4',
+      ownerModelId: 'author/model',
+      ownerVariantId: 'model.Q4_K_M.gguf',
+      repoId: 'author/model',
+      fileName: 'mmproj-model-f16.gguf',
+      downloadUrl: 'https://huggingface.co/author/model/resolve/main/mmproj-model-f16.gguf',
+      size: 1,
+      lifecycleStatus: 'downloaded' as const,
+      matchStatus: 'matched' as const,
+    };
+    const model = {
+      id: 'author/model',
+      artifactRole: 'primary_chat_model' as const,
+      chatModalities: ['text', 'vision'] as Array<'text' | 'vision'>,
+      activeVariantId: 'model.Q8_0.gguf',
+      resolvedFileName: 'model.Q8_0.gguf',
+      variants: [
+        { variantId: 'model.Q4_K_M.gguf', fileName: 'model.Q4_K_M.gguf', quantizationLabel: 'Q4_K_M', size: 1 },
+        { variantId: 'model.Q8_0.gguf', fileName: 'model.Q8_0.gguf', quantizationLabel: 'Q8_0', size: 2 },
+      ],
+      projectorCandidates: [inactiveProjector],
+      selectedProjectorId: inactiveProjector.id,
+      multimodalReadiness: {
+        modelId: 'author/model',
+        variantId: 'model.Q4_K_M.gguf',
+        status: 'ready' as const,
+        projectorId: inactiveProjector.id,
+        support: ['vision' as const],
+        checkedAt: 1,
+      },
+    };
+
+    expect(modelSupportsVision(model)).toBe(true);
+    expect(getModelVisionCapabilityStatusLabelKey(model)).toBe('models.vision.projectorMissing');
+    expect(getModelVisionCapabilityBadgePresentation(model)).toEqual({
+      labelKey: 'models.vision.badge',
+      tone: 'warning',
+      iconName: 'visibility',
+    });
+  });
+
+  it('keeps model-wide downloaded projectors ready across variant selections', () => {
+    const modelWideProjector = {
+      id: 'projector-wide',
+      ownerModelId: 'author/model',
+      repoId: 'author/model',
+      fileName: 'mmproj-model-f16.gguf',
+      downloadUrl: 'https://huggingface.co/author/model/resolve/main/mmproj-model-f16.gguf',
+      size: 1,
+      lifecycleStatus: 'downloaded' as const,
+      matchStatus: 'matched' as const,
+    };
+
+    expect(getModelVisionCapabilityStatusLabelKey({
+      id: 'author/model',
+      artifactRole: 'primary_chat_model',
+      chatModalities: ['text', 'vision'],
+      activeVariantId: 'model.Q8_0.gguf',
+      resolvedFileName: 'model.Q8_0.gguf',
+      projectorCandidates: [modelWideProjector],
+    })).toBe('models.vision.capabilityReady');
+  });
+
+  it('keeps scoped projector downloads ready when active variant scope is unavailable', () => {
+    expect(getModelVisionCapabilityStatusLabelKey({
+      id: 'author/model',
+      artifactRole: 'primary_chat_model',
+      chatModalities: ['text', 'vision'],
+      projectorCandidates: [{
+        id: 'projector-q4',
+        ownerModelId: 'author/model',
+        ownerVariantId: 'model.Q4_K_M.gguf',
+        repoId: 'author/model',
+        fileName: 'mmproj-model-f16.gguf',
+        downloadUrl: 'https://huggingface.co/author/model/resolve/main/mmproj-model-f16.gguf',
+        size: 1,
+        lifecycleStatus: 'downloaded',
+        matchStatus: 'matched',
+      }],
+    })).toBe('models.vision.capabilityReady');
+  });
 });

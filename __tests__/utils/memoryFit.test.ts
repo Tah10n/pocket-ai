@@ -3,6 +3,7 @@ import {
   estimateModelRuntimeBytes,
   getModelMemoryFitInputSizeBytes,
   resolveConservativeAvailableMemoryBudget,
+  UNKNOWN_PROJECTOR_MEMORY_FIT_FALLBACK_BYTES,
 } from '../../src/utils/memoryFit';
 import { estimateAccurateMemoryFit, estimateFastMemoryFit, estimateMemoryFitFromModelSize } from '../../src/memory/estimator';
 
@@ -21,6 +22,12 @@ describe('memoryFit', () => {
       modelSizeBytes: 100,
       projectorSizeBytes: null,
     })).toBe(100);
+
+    expect(getModelMemoryFitInputSizeBytes({
+      modelSizeBytes: 100,
+      projectorSizeBytes: null,
+      hasUnknownSizeProjector: true,
+    })).toBe(100 + UNKNOWN_PROJECTOR_MEMORY_FIT_FALLBACK_BYTES);
   });
 
   it('derives conservative available memory budgets', () => {

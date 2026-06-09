@@ -1,4 +1,5 @@
 import * as FileSystem from 'expo-file-system/legacy';
+import { manipulateAsync } from 'expo-image-manipulator';
 import {
   ChatAttachmentStorageService,
   buildFailedAttachmentDraft,
@@ -25,6 +26,12 @@ describe('ChatAttachmentStorageService', () => {
     (FileSystem.makeDirectoryAsync as jest.Mock).mockResolvedValue(undefined);
     (FileSystem.copyAsync as jest.Mock).mockResolvedValue(undefined);
     (FileSystem.deleteAsync as jest.Mock).mockResolvedValue(undefined);
+    (FileSystem.moveAsync as jest.Mock).mockResolvedValue(undefined);
+    (manipulateAsync as jest.Mock).mockResolvedValue({
+      uri: 'test-cache/chat-attachment-thumbnail.jpg',
+      width: 512,
+      height: 384,
+    });
   });
 
   it('copies a picked gallery image into app-owned chat attachment storage', async () => {
@@ -53,14 +60,25 @@ describe('ChatAttachmentStorageService', () => {
       from: 'ph://library-image-1',
       to: 'test-dir/chat-attachments/draft-123-gez4w9.jpg',
     });
+    expect(manipulateAsync).toHaveBeenCalledWith(
+      'test-dir/chat-attachments/draft-123-gez4w9.jpg',
+      [{ resize: { width: 512 } }],
+      { compress: 0.72, format: 'jpeg' },
+    );
+    expect(FileSystem.moveAsync).toHaveBeenCalledWith({
+      from: 'test-cache/chat-attachment-thumbnail.jpg',
+      to: 'test-dir/chat-attachments/draft-123-gez4w9-thumb.jpg',
+    });
     expect(draft).toEqual({
       id: 'draft-123-gez4w9',
       pickerUri: 'ph://library-image-1',
-      previewUri: 'test-dir/chat-attachments/draft-123-gez4w9.jpg',
+      previewUri: 'test-dir/chat-attachments/draft-123-gez4w9-thumb.jpg',
       localUri: 'test-dir/chat-attachments/draft-123-gez4w9.jpg',
+      thumbnailUri: 'test-dir/chat-attachments/draft-123-gez4w9-thumb.jpg',
       pathCategory: 'chat_attachment',
       mediaType: 'image/jpeg',
       fileName: 'draft-123-gez4w9.jpg',
+      thumbnailFileName: 'draft-123-gez4w9-thumb.jpg',
       size: 1234,
       width: 1024,
       height: 768,
@@ -149,6 +167,18 @@ describe('ChatAttachmentStorageService', () => {
       width: 1024,
     }));
     expect(zeroHeightDraft.height).toBeUndefined();
+    expect(manipulateAsync).toHaveBeenNthCalledWith(
+      1,
+      'test-dir/chat-attachments/draft-123-gez4w9.jpg',
+      [{ resize: { height: 512 } }],
+      { compress: 0.72, format: 'jpeg' },
+    );
+    expect(manipulateAsync).toHaveBeenNthCalledWith(
+      2,
+      'test-dir/chat-attachments/draft-123-gez4w9.jpg',
+      [{ resize: { width: 512 } }],
+      { compress: 0.72, format: 'jpeg' },
+    );
     expect(FileSystem.copyAsync).toHaveBeenCalledTimes(2);
   });
 
@@ -257,6 +287,135 @@ describe('ChatAttachmentStorageService', () => {
     expect(FileSystem.getInfoAsync).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps copied originals when bounded thumbnail generation fails', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const thumbnailError = new Error('thumbnail failed');
+    (FileSystem.getInfoAsync as jest.Mock)
+      .mockResolvedValueOnce({ exists: true })
+      .mockResolvedValueOnce({ exists: true, size: 1234 });
+    (manipulateAsync as jest.Mock).mockRejectedValueOnce(thumbnailError);
+    const service = new ChatAttachmentStorageService({
+      now: () => 123,
+      random: () => 0.456,
+    });
+
+    try {
+      const draft = await service.copyImageAssetToDraft({
+        uri: 'ph://library-image-thumbnail-fail',
+        fileName: 'IMG_FAIL.JPG',
+        fileSize: 2048,
+        mimeType: 'image/jpeg',
+        width: 1024,
+        height: 768,
+        type: 'image',
+      });
+
+      expect(draft).toEqual(expect.objectContaining({
+        copyStatus: 'copied',
+        previewUri: 'test-dir/chat-attachments/draft-123-gez4w9.jpg',
+        localUri: 'test-dir/chat-attachments/draft-123-gez4w9.jpg',
+        fileName: 'draft-123-gez4w9.jpg',
+      }));
+      expect(draft.thumbnailUri).toBeUndefined();
+      expect(draft.thumbnailFileName).toBeUndefined();
+      expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/chat-attachments/draft-123-gez4w9.jpg', expect.anything());
+      expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/chat-attachments/draft-123-gez4w9-thumb.jpg', {
+        idempotent: true,
+      });
+      expect(warnSpy).toHaveBeenCalledWith(
+        '[ChatAttachmentStorage] Failed to create chat attachment thumbnail',
+        expect.objectContaining({
+          pathCategory: 'chat_attachment',
+          context: 'thumbnail_generation_failed',
+          errorName: 'Error',
+        }),
+      );
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('keeps copied originals when moving generated thumbnails fails', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    (FileSystem.moveAsync as jest.Mock).mockRejectedValueOnce(new Error('move failed file:///private/temp-thumb.jpg'));
+    const service = new ChatAttachmentStorageService({
+      now: () => 123,
+      random: () => 0.456,
+    });
+
+    try {
+      const draft = await service.copyImageAssetToDraft({
+        uri: 'ph://library-image-thumbnail-move-fail',
+        fileName: 'IMG_MOVE_FAIL.JPG',
+        fileSize: 2048,
+        mimeType: 'image/jpeg',
+        width: 1024,
+        height: 768,
+        type: 'image',
+      });
+
+      expect(FileSystem.moveAsync).toHaveBeenCalledWith({
+        from: 'test-cache/chat-attachment-thumbnail.jpg',
+        to: 'test-dir/chat-attachments/draft-123-gez4w9-thumb.jpg',
+      });
+      expect(draft.previewUri).toBe('test-dir/chat-attachments/draft-123-gez4w9.jpg');
+      expect(draft.thumbnailUri).toBeUndefined();
+      expect(draft.thumbnailFileName).toBeUndefined();
+      expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-cache/chat-attachment-thumbnail.jpg', {
+        idempotent: true,
+      });
+      expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/chat-attachments/draft-123-gez4w9-thumb.jpg', {
+        idempotent: true,
+      });
+      expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/chat-attachments/draft-123-gez4w9.jpg', expect.anything());
+      expect(JSON.stringify(warnSpy.mock.calls)).not.toContain('file:///private/temp-thumb.jpg');
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('keeps copied originals and cleans up thumbnail results that still exceed thumbnail bounds', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    (manipulateAsync as jest.Mock).mockResolvedValueOnce({
+      uri: 'test-cache/chat-attachment-too-tall-thumbnail.jpg',
+      width: 512,
+      height: 4096,
+    });
+    const service = new ChatAttachmentStorageService({
+      now: () => 123,
+      random: () => 0.456,
+    });
+
+    try {
+      const draft = await service.copyImageAssetToDraft({
+        uri: 'ph://library-image-unknown-tall-thumbnail',
+        fileName: 'IMG_UNKNOWN_TALL.JPG',
+        fileSize: 2048,
+        mimeType: 'image/jpeg',
+        type: 'image',
+      } as any);
+
+      expect(manipulateAsync).toHaveBeenCalledWith(
+        'test-dir/chat-attachments/draft-123-gez4w9.jpg',
+        [{ resize: { width: 512, height: 512 } }],
+        { compress: 0.72, format: 'jpeg' },
+      );
+      expect(draft.previewUri).toBe('test-dir/chat-attachments/draft-123-gez4w9.jpg');
+      expect(draft.thumbnailUri).toBeUndefined();
+      expect(draft.thumbnailFileName).toBeUndefined();
+      expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-cache/chat-attachment-too-tall-thumbnail.jpg', {
+        idempotent: true,
+      });
+      expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/chat-attachments/draft-123-gez4w9.jpg', expect.anything());
+      expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/chat-attachments/draft-123-gez4w9-thumb.jpg', {
+        idempotent: true,
+      });
+      expect(FileSystem.moveAsync).not.toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
   it('accepts MIME-less picked images only when the path has a supported extension', async () => {
     (FileSystem.getInfoAsync as jest.Mock)
       .mockResolvedValueOnce({ exists: false })
@@ -280,7 +439,13 @@ describe('ChatAttachmentStorageService', () => {
       from: 'file:///tmp/image.PNG',
       to: 'test-dir/chat-attachments/draft-123-gez4w9.png',
     });
+    expect(manipulateAsync).toHaveBeenCalledWith(
+      'test-dir/chat-attachments/draft-123-gez4w9.png',
+      [{ resize: { width: 512 } }],
+      { compress: 0.72, format: 'png' },
+    );
     expect(draft.fileName).toBe('draft-123-gez4w9.png');
+    expect(draft.thumbnailFileName).toBe('draft-123-gez4w9-thumb.png');
     expect(draft.mediaType).toBeUndefined();
   });
 
@@ -305,7 +470,12 @@ describe('ChatAttachmentStorageService', () => {
     expect(materializeAttachmentDraftsForMessage({
       threadId: chatAttachmentThreadId,
       messageId: chatAttachmentMessageId,
-      drafts: [copiedDraftImageAttachment],
+      drafts: [{
+        ...copiedDraftImageAttachment,
+        previewUri: 'test-dir/chat-attachments/draft-image-1-thumb.jpg',
+        thumbnailUri: 'test-dir/chat-attachments/draft-image-1-thumb.jpg',
+        thumbnailFileName: 'draft-image-1-thumb.jpg',
+      }],
       now: () => 1_780_000_000_000,
     })).toEqual([
       {
@@ -313,9 +483,11 @@ describe('ChatAttachmentStorageService', () => {
         threadId: chatAttachmentThreadId,
         messageId: chatAttachmentMessageId,
         localUri: 'test-dir/chat-attachments/draft-image-1.jpg',
+        thumbnailUri: 'test-dir/chat-attachments/draft-image-1-thumb.jpg',
         pathCategory: 'chat_attachment',
         mediaType: 'image/jpeg',
         fileName: 'draft-image-1.jpg',
+        thumbnailFileName: 'draft-image-1-thumb.jpg',
         size: 123_456,
         width: 1024,
         height: 768,
@@ -396,8 +568,9 @@ describe('ChatAttachmentStorageService', () => {
 
     await service.discardDraft({
       pickerUri: 'ph://library-image-1',
-      previewUri: 'test-dir/chat-attachments/draft-safe.jpg',
+      previewUri: 'test-dir/chat-attachments/draft-safe-thumb.jpg',
       localUri: 'test-dir/chat-attachments/draft-safe.jpg',
+      thumbnailUri: 'test-dir/chat-attachments/draft-safe-thumb.jpg',
       copyStatus: 'copied',
     });
     await service.discardDraft({
@@ -408,8 +581,11 @@ describe('ChatAttachmentStorageService', () => {
     });
 
     expect(getChatAttachmentsDir()).toBe('test-dir/chat-attachments/');
-    expect(FileSystem.deleteAsync).toHaveBeenCalledTimes(1);
+    expect(FileSystem.deleteAsync).toHaveBeenCalledTimes(2);
     expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/chat-attachments/draft-safe.jpg', {
+      idempotent: true,
+    });
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/chat-attachments/draft-safe-thumb.jpg', {
       idempotent: true,
     });
   });
@@ -433,6 +609,7 @@ describe('ChatAttachmentStorageService', () => {
             {
               id: 'attachment-1',
               localUri: 'test-dir/chat-attachments/attachment-1.jpg',
+              thumbnailUri: 'test-dir/chat-attachments/attachment-1-thumb.jpg',
             },
             {
               id: 'outside',
@@ -448,9 +625,11 @@ describe('ChatAttachmentStorageService', () => {
 
     expect(Array.from(collectReferencedChatAttachmentLocalUrisFromThreads([thread]))).toEqual([
       'test-dir/chat-attachments/attachment-1.jpg',
+      'test-dir/chat-attachments/attachment-1-thumb.jpg',
     ]);
     expect(Array.from(collectChatAttachmentLocalUrisFromUnknownThreadRecord({ thread }))).toEqual([
       'test-dir/chat-attachments/attachment-1.jpg',
+      'test-dir/chat-attachments/attachment-1-thumb.jpg',
     ]);
   });
 
@@ -543,6 +722,36 @@ describe('ChatAttachmentStorageService', () => {
     expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/chat-attachments/delete-me.jpg', {
       idempotent: true,
     });
+  });
+
+  it('preserves referenced nested attachment directories during directory reconciliation', async () => {
+    (FileSystem.readDirectoryAsync as jest.Mock).mockResolvedValueOnce([
+      'thread-1',
+      'orphan-dir',
+      'delete-me.jpg',
+    ]);
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => ({
+      exists: true,
+      size: uri.endsWith('/delete-me.jpg') ? 1234 : undefined,
+      isDirectory: uri.endsWith('/orphan-dir'),
+    }));
+    const service = new ChatAttachmentStorageService();
+
+    await expect(service.reconcileAttachmentDirectory([
+      'test-dir/chat-attachments/thread-1/message-1.jpg',
+    ])).resolves.toEqual(expect.objectContaining({
+      deletedCount: 1,
+      attemptedDeleteCount: 1,
+      candidateCount: 1,
+      hasMoreCandidates: false,
+    }));
+
+    expect(FileSystem.deleteAsync).toHaveBeenCalledTimes(1);
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/chat-attachments/delete-me.jpg', {
+      idempotent: true,
+    });
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/chat-attachments/thread-1', expect.anything());
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/chat-attachments/orphan-dir', expect.anything());
   });
 
   it('caps directory reconciliation deletes per pass and reports remaining bounded candidates', async () => {
@@ -663,8 +872,10 @@ describe('ChatAttachmentStorageService', () => {
   it('preserves draft files created at or after the reconciliation cutoff', async () => {
     (FileSystem.readDirectoryAsync as jest.Mock).mockResolvedValueOnce([
       'draft-99-before.jpg',
+      'draft-99-before-thumb.jpg',
       'draft-100-samems.jpg',
       'draft-101-after.png',
+      'draft-101-after-thumb.png',
       'draft-400101-beyondgrace.jpg',
       'legacy-orphan.jpg',
     ]);
@@ -673,14 +884,17 @@ describe('ChatAttachmentStorageService', () => {
     await expect(service.reconcileAttachmentDirectory([], {
       preserveDraftsCreatedAtOrAfter: 100,
     })).resolves.toEqual(expect.objectContaining({
-      deletedCount: 3,
-      attemptedDeleteCount: 3,
-      candidateCount: 3,
+      deletedCount: 4,
+      attemptedDeleteCount: 4,
+      candidateCount: 4,
       hasMoreCandidates: false,
     }));
 
-    expect(FileSystem.deleteAsync).toHaveBeenCalledTimes(3);
+    expect(FileSystem.deleteAsync).toHaveBeenCalledTimes(4);
     expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/chat-attachments/draft-99-before.jpg', {
+      idempotent: true,
+    });
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/chat-attachments/draft-99-before-thumb.jpg', {
       idempotent: true,
     });
     expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/chat-attachments/legacy-orphan.jpg', {
@@ -691,6 +905,7 @@ describe('ChatAttachmentStorageService', () => {
     });
     expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/chat-attachments/draft-100-samems.jpg', expect.anything());
     expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/chat-attachments/draft-101-after.png', expect.anything());
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/chat-attachments/draft-101-after-thumb.png', expect.anything());
   });
 
   it('deletes every direct child inside app-owned attachment storage for private storage reset while preserving the directory', async () => {
@@ -753,11 +968,12 @@ describe('ChatAttachmentStorageService', () => {
     });
   });
 
-  it('fails private storage reset after deleting safe files rather than skipping unsafe child names', async () => {
+  it('deletes safe private storage reset child names then fails closed on unsafe names', async () => {
     const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
     (FileSystem.readDirectoryAsync as jest.Mock).mockResolvedValueOnce([
       'delete-me.jpg',
       '../outside.jpg',
+      '..\\outside.jpg',
     ]);
     const service = new ChatAttachmentStorageService();
 
@@ -768,15 +984,17 @@ describe('ChatAttachmentStorageService', () => {
       idempotent: true,
     });
     expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/chat-attachments/..%2Foutside.jpg', expect.anything());
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/chat-attachments/..%5Coutside.jpg', expect.anything());
     expect(warnSpy).toHaveBeenCalledWith(
       '[ChatAttachmentStorage] Refusing unsafe chat attachment child during private reset',
       expect.objectContaining({
         pathCategory: 'chat_attachment',
         context: 'private_storage_reset_child_name_rejected',
-        rejectedCount: 1,
+        rejectedCount: 2,
       }),
     );
     expect(JSON.stringify(warnSpy.mock.calls)).not.toContain('../outside.jpg');
+    expect(JSON.stringify(warnSpy.mock.calls)).not.toContain('..\\outside.jpg');
     warnSpy.mockRestore();
   });
 

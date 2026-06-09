@@ -6,6 +6,7 @@ export const CHAT_ATTACHMENTS_DIR_NAME = 'chat-attachments/';
 export const MAX_CHAT_IMAGE_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 export const MAX_CHAT_IMAGE_ATTACHMENT_SIDE_PIXELS = 4096;
 export const MAX_CHAT_IMAGE_ATTACHMENT_TOTAL_PIXELS = 16_777_216;
+export const CHAT_IMAGE_ATTACHMENT_THUMBNAIL_MAX_SIDE_PIXELS = 512;
 
 export type SupportedChatImageExtension = 'jpg' | 'png';
 

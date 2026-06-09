@@ -2099,6 +2099,117 @@ describe('ModelCatalogService regressions', () => {
     }));
   });
 
+  it('uses active variant-compatible projector size when catalog registry merge recomputes memory fit', () => {
+    const modelId = 'org/active-variant-projector-memory-rv07';
+    const defaultModelFileName = 'model.Q4_K_M.gguf';
+    const activeModelFileName = 'model.Q8_0.gguf';
+    const defaultProjectorFileName = 'mmproj-default-f16.gguf';
+    const activeProjectorFileName = 'mmproj-active-f16.gguf';
+    const baseSizeBytes = 1 * 1024 * 1024 * 1024;
+    const inactiveProjectorSizeBytes = 4 * 1024 * 1024 * 1024;
+    const activeProjectorSizeBytes = 512 * 1024 * 1024;
+    const inactiveProjectorId = buildProjectorArtifactId({
+      repoId: modelId,
+      hfRevision: 'main',
+      ownerVariantId: defaultModelFileName,
+      fileName: defaultProjectorFileName,
+    });
+    const activeProjectorId = buildProjectorArtifactId({
+      repoId: modelId,
+      hfRevision: 'main',
+      ownerVariantId: activeModelFileName,
+      fileName: activeProjectorFileName,
+    });
+    const inactiveProjector: ProjectorArtifact = {
+      id: inactiveProjectorId,
+      ownerModelId: modelId,
+      ownerVariantId: defaultModelFileName,
+      repoId: modelId,
+      fileName: defaultProjectorFileName,
+      downloadUrl: `https://huggingface.co/${modelId}/resolve/main/${defaultProjectorFileName}`,
+      hfRevision: 'main',
+      size: inactiveProjectorSizeBytes,
+      lifecycleStatus: 'available',
+      matchStatus: 'matched',
+    };
+    const activeProjector: ProjectorArtifact = {
+      id: activeProjectorId,
+      ownerModelId: modelId,
+      ownerVariantId: activeModelFileName,
+      repoId: modelId,
+      fileName: activeProjectorFileName,
+      downloadUrl: `https://huggingface.co/${modelId}/resolve/main/${activeProjectorFileName}`,
+      hfRevision: 'main',
+      size: activeProjectorSizeBytes,
+      lifecycleStatus: 'available',
+      matchStatus: 'matched',
+    };
+    const remoteModel: ModelMetadata = {
+      id: modelId,
+      name: 'Active Variant Projector Memory RV07',
+      author: 'org',
+      size: baseSizeBytes,
+      downloadUrl: `https://huggingface.co/${modelId}/resolve/main/${activeModelFileName}`,
+      hfRevision: 'main',
+      resolvedFileName: activeModelFileName,
+      fitsInRam: true,
+      memoryFitDecision: 'fits_high_confidence',
+      memoryFitConfidence: 'high',
+      accessState: ModelAccessState.PUBLIC,
+      isGated: false,
+      isPrivate: false,
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+      metadataTrust: 'trusted_remote',
+      activeVariantId: activeModelFileName,
+      variants: [
+        {
+          variantId: defaultModelFileName,
+          fileName: defaultModelFileName,
+          quantizationLabel: 'Q4_K_M',
+          size: baseSizeBytes,
+        },
+        {
+          variantId: activeModelFileName,
+          fileName: activeModelFileName,
+          quantizationLabel: 'Q8_0',
+          size: baseSizeBytes,
+        },
+      ],
+      chatModalities: ['text', 'vision'],
+      projectorCandidates: [inactiveProjector, activeProjector],
+      selectedProjectorId: inactiveProjector.id,
+    };
+    const localModel: ModelMetadata = {
+      ...remoteModel,
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      localPath: activeModelFileName,
+      downloadedAt: 1234,
+    };
+    const mergeModelWithRegistry = (service as unknown as {
+      mergeModelWithRegistry: (
+        remoteModel: ModelMetadata,
+        memoryFitContext: { totalMemoryBytes: number; systemMemorySnapshot: null },
+      ) => ModelMetadata | undefined;
+    }).mergeModelWithRegistry.bind(service);
+
+    mockedRegistry.getModel.mockImplementation((id) => (id === modelId ? localModel : undefined));
+
+    const merged = mergeModelWithRegistry(remoteModel, {
+      totalMemoryBytes: 4 * 1024 * 1024 * 1024,
+      systemMemorySnapshot: null,
+    });
+
+    expect(merged).toEqual(expect.objectContaining({
+      id: modelId,
+      fitsInRam: true,
+    }));
+    expect(merged?.memoryFitDecision).not.toBe('likely_oom');
+    expect(merged?.variants?.find((variant) => variant.fileName === activeModelFileName)?.ramFit)
+      .not.toBe('likely_oom');
+  });
+
   it('keeps size-known gated repos authorized when access validation temporarily fails with a non-auth error', async () => {
     await huggingFaceTokenService.saveToken('hf_test_token');
 

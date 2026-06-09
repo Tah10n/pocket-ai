@@ -129,9 +129,12 @@ export function getProjectorDownloadFileName(
 
 export function getCandidateProjectorDownloadFileNames(
   projector: Pick<ProjectorArtifact, 'id' | 'repoId' | 'fileName' | 'hfRevision' | 'ownerModelId' | 'ownerVariantId'>,
+  options: { includeRawFileName?: boolean } = {},
 ): string[] {
+  const includeRawFileName = options.includeRawFileName !== false;
+
   return Array.from(new Set([
     getProjectorDownloadFileName(projector),
-    projector.fileName,
+    ...(includeRawFileName ? [projector.fileName] : []),
   ])).filter(isValidLocalFileName);
 }

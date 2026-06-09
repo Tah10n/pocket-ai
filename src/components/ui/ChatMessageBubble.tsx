@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Image, LayoutChangeEvent } from 'react-native';
 import { useTranslation } from 'react-i18next';
 import * as Clipboard from 'expo-clipboard';
@@ -48,9 +48,46 @@ function areChatImageAttachmentPropsEqual(
     return (
       attachment.id === nextAttachment.id
       && attachment.localUri === nextAttachment.localUri
+      && attachment.thumbnailUri === nextAttachment.thumbnailUri
       && attachment.fileName === nextAttachment.fileName
     );
   });
+}
+
+function getAttachmentPreferredPreviewUri(attachment: ChatImageAttachment): string {
+  return attachment.thumbnailUri ?? attachment.localUri;
+}
+
+type AttachmentPreviewProbe = {
+  id: string;
+  localUri: string;
+  thumbnailUri: string | null;
+};
+
+function getAttachmentPreviewUriCandidates(attachment: Pick<ChatImageAttachment, 'localUri' | 'thumbnailUri'> | AttachmentPreviewProbe): string[] {
+  return Array.from(new Set([
+    attachment.thumbnailUri,
+    attachment.localUri,
+  ].filter((uri): uri is string => typeof uri === 'string' && uri.length > 0)));
+}
+
+function getAttachmentPreviewProbeSignature(attachments: ChatImageAttachment[]): string {
+  return JSON.stringify(attachments.map((attachment) => ({
+    id: attachment.id,
+    localUri: attachment.localUri,
+    thumbnailUri: attachment.thumbnailUri ?? null,
+  })));
+}
+
+function areAttachmentPreviewUriMapsEqual(
+  prev: Record<string, string | null>,
+  next: Record<string, string | null>,
+) {
+  const prevKeys = Object.keys(prev);
+  const nextKeys = Object.keys(next);
+
+  return prevKeys.length === nextKeys.length
+    && nextKeys.every((key) => prev[key] === next[key]);
 }
 
 function areChatMessageBubblePropsEqual(prev: ChatMessageBubbleProps, next: ChatMessageBubbleProps) {
@@ -116,7 +153,8 @@ const ChatMessageBubbleComponent = ({
 }: ChatMessageBubbleProps) => {
   const [copied, setCopied] = useState(false);
   const [isThoughtExpanded, setThoughtExpanded] = useState(false);
-  const [attachmentAvailability, setAttachmentAvailability] = useState<Record<string, boolean>>({});
+  const [attachmentPreviewUris, setAttachmentPreviewUris] = useState<Record<string, string | null>>({});
+  const failedAttachmentPreviewUrisRef = useRef<Record<string, Set<string>>>({});
   const { t } = useTranslation();
   const appearance = useScreenAppearance();
   const hasExplicitThoughtContent = explicitThoughtContent !== undefined;
@@ -198,36 +236,92 @@ const ChatMessageBubbleComponent = ({
     () => (isUser ? attachments ?? [] : []),
     [attachments, isUser],
   );
-  const attachmentSignature = userAttachments
-    .map((attachment) => `${attachment.id}:${attachment.localUri}`)
-    .join('|');
+  const attachmentPreviewProbeSignature = getAttachmentPreviewProbeSignature(userAttachments);
 
   useEffect(() => {
-    if (userAttachments.length === 0) {
-      setAttachmentAvailability({});
+    const previewProbeAttachments = JSON.parse(attachmentPreviewProbeSignature) as AttachmentPreviewProbe[];
+    const nextAttachmentIds = new Set(previewProbeAttachments.map((attachment) => attachment.id));
+    failedAttachmentPreviewUrisRef.current = Object.fromEntries(
+      Object.entries(failedAttachmentPreviewUrisRef.current)
+        .filter(([attachmentId]) => nextAttachmentIds.has(attachmentId)),
+    );
+
+    if (previewProbeAttachments.length === 0) {
+      failedAttachmentPreviewUrisRef.current = {};
+      setAttachmentPreviewUris((current) => (
+        areAttachmentPreviewUriMapsEqual(current, {}) ? current : {}
+      ));
       return;
     }
 
     let cancelled = false;
-    void Promise.all(userAttachments.map(async (attachment) => {
-      try {
-        const info = await FileSystem.getInfoAsync(attachment.localUri);
-        return [attachment.id, info.exists === true] as const;
-      } catch {
-        return [attachment.id, false] as const;
+    void Promise.all(previewProbeAttachments.map(async (attachment) => {
+      for (const previewUri of getAttachmentPreviewUriCandidates(attachment)) {
+        if (failedAttachmentPreviewUrisRef.current[attachment.id]?.has(previewUri)) {
+          continue;
+        }
+
+        try {
+          const info = await FileSystem.getInfoAsync(previewUri);
+          if (info.exists === true && !failedAttachmentPreviewUrisRef.current[attachment.id]?.has(previewUri)) {
+            return [attachment.id, previewUri] as const;
+          }
+        } catch {
+          // Try the next candidate so a stale thumbnail does not hide an available original image.
+        }
       }
+
+      return [attachment.id, null] as const;
     })).then((entries) => {
       if (cancelled) {
         return;
       }
 
-      setAttachmentAvailability(Object.fromEntries(entries));
+      const nextPreviewUris: Record<string, string | null> = Object.fromEntries(entries);
+      setAttachmentPreviewUris((current) => (
+        areAttachmentPreviewUriMapsEqual(current, nextPreviewUris) ? current : nextPreviewUris
+      ));
     });
 
     return () => {
       cancelled = true;
     };
-  }, [attachmentSignature, userAttachments]);
+  }, [attachmentPreviewProbeSignature]);
+
+  const handleAttachmentPreviewError = (attachment: ChatImageAttachment, attemptedUri: string) => {
+    failedAttachmentPreviewUrisRef.current[attachment.id] ??= new Set<string>();
+    failedAttachmentPreviewUrisRef.current[attachment.id].add(attemptedUri);
+
+    const markUnavailableIfCurrent = () => {
+      setAttachmentPreviewUris((current) => {
+        const currentUri = current[attachment.id];
+        if (currentUri !== undefined && currentUri !== attemptedUri) {
+          return current;
+        }
+
+        return { ...current, [attachment.id]: null };
+      });
+    };
+
+    if (attemptedUri === attachment.localUri) {
+      markUnavailableIfCurrent();
+      return;
+    }
+
+    void FileSystem.getInfoAsync(attachment.localUri)
+      .then((info) => {
+        const fallbackUri = info.exists === true ? attachment.localUri : null;
+        setAttachmentPreviewUris((current) => {
+          const currentUri = current[attachment.id];
+          if (currentUri !== undefined && currentUri !== attemptedUri) {
+            return current;
+          }
+
+          return currentUri === fallbackUri ? current : { ...current, [attachment.id]: fallbackUri };
+        });
+      })
+      .catch(markUnavailableIfCurrent);
+  };
 
   return (
     <Box className={`w-full flex-col gap-0.5 ${isUser ? 'items-end' : 'items-start'}`} onLayout={onLayout}>
@@ -316,12 +410,14 @@ const ChatMessageBubbleComponent = ({
                   className={`${content ? 'mb-2 ' : ''}flex-row flex-wrap gap-1.5`}
                 >
                   {userAttachments.map((attachment, index) => {
-                    const isAvailable = attachmentAvailability[attachment.id] !== false;
-                    return isAvailable ? (
+                    const resolvedPreviewUri = attachmentPreviewUris[attachment.id];
+                    const previewUri = resolvedPreviewUri ?? getAttachmentPreferredPreviewUri(attachment);
+                    return resolvedPreviewUri !== null ? (
                       <Image
                         key={attachment.id}
                         testID={`message-attachment-image-${id}-${attachment.id}`}
-                        source={{ uri: attachment.localUri }}
+                        source={{ uri: previewUri }}
+                        onError={() => handleAttachmentPreviewError(attachment, previewUri)}
                         accessibilityLabel={t('chat.attachments.messagePreviewIndexedAccessibilityLabel', {
                           index: index + 1,
                           count: userAttachments.length,
@@ -335,6 +431,13 @@ const ChatMessageBubbleComponent = ({
                         testID={`message-attachment-unavailable-${id}-${attachment.id}`}
                         tone="default"
                         decorative="matte"
+                        accessible
+                        accessibilityRole="image"
+                        accessibilityLabel={t('chat.attachments.messageUnavailableIndexedAccessibilityLabel', {
+                          index: index + 1,
+                          count: userAttachments.length,
+                        })}
+                        accessibilityState={{ disabled: true }}
                         className="w-36 flex-row items-center gap-1.5 px-2 py-1.5"
                       >
                         <MaterialSymbols name="broken-image" size="sm" className="text-typography-500 dark:text-typography-300" />

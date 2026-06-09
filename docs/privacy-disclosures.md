@@ -1,6 +1,6 @@
 # Privacy & Disclosures
 
-Last updated: 2026-06-02
+Last updated: 2026-06-09
 
 ## Summary
 
@@ -25,7 +25,7 @@ This document summarizes the current behavior of the app as configured in this r
 
 When a user adds an image to a vision chat:
 
-- The app uses photo-library selection access only so the user can choose an image to attach. Depending on the platform and OS version, this may use the system photo picker or photo-library permission flow.
+- The app uses photo-library selection access only so the user can choose an image to attach. Depending on the platform and OS version, this may use the system photo picker or photo-library permission flow. On Android API 32 and lower, the app keeps the legacy read-only media permission available for gallery-picker compatibility; it is capped to those older OS versions.
 - The selected image is copied into app-managed local storage under `Documents/chat-attachments/` so the conversation can reopen the attachment later.
 - Chat history stores attachment metadata needed to render and manage the attachment, such as its local file reference, media type, dimensions, file size, and the draft, message, or conversation it belongs to.
 - Raw attachment files are local app-managed files. This document does not claim those image bytes are separately encrypted beyond the device and platform storage protections in use.
@@ -82,7 +82,8 @@ For the release configuration currently committed here:
   - `VIBRATE` (UI haptics)
   - `POST_NOTIFICATIONS` (Android 13+ notifications for download/inference status)
   - `FOREGROUND_SERVICE` and `FOREGROUND_SERVICE_DATA_SYNC` (keep long-running downloads/inference alive in the background via a foreground service)
-- Android gallery attachment support is configured for photo-library selection only. The app blocks merged `CAMERA`, `RECORD_AUDIO`, `READ_EXTERNAL_STORAGE`, and `WRITE_EXTERNAL_STORAGE` permissions from the Android manifest; it does not request camera capture, microphone capture, or broad external storage access for image attachments.
+  - `READ_EXTERNAL_STORAGE` with `android:maxSdkVersion="32"` (legacy Android gallery-picker compatibility for attaching selected images only)
+- Android gallery attachment support is configured for photo-library selection only. The app blocks merged `CAMERA`, `RECORD_AUDIO`, and `WRITE_EXTERNAL_STORAGE` permissions from the Android manifest; it does not request camera capture, microphone capture, write storage, or audio permissions for image attachments.
 
 ## Scope note
 

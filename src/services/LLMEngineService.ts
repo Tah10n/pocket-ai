@@ -47,7 +47,7 @@ import {
   createEmptyCalibrationRecord,
   serializeCalibrationKey,
 } from '../memory/calibration';
-import { DECIMAL_GIGABYTE } from '../utils/modelSize';
+import { DECIMAL_GIGABYTE, UNKNOWN_PROJECTOR_MEMORY_FIT_FALLBACK_BYTES } from '../utils/modelSize';
 import { isHighConfidenceLikelyOomMemoryFit } from '../utils/modelMemoryFitState';
 import {
   modelSupportsVision,
@@ -119,7 +119,10 @@ import {
   getChatImageAttachmentMediaPaths,
   summarizeChatImageAttachments,
 } from '../utils/chatImageAttachments';
-import { sanitizeMultimodalFailureReason } from '../utils/multimodalFailureReason';
+import {
+  sanitizeMultimodalFailureCategory,
+  sanitizeMultimodalFailureReason,
+} from '../utils/multimodalFailureReason';
 import type {
   MultimodalDiagnosticsSummary,
   MultimodalReadinessState,
@@ -153,6 +156,8 @@ const CONTEXT_OPERATION_UNLOAD_TIMEOUT_MESSAGE = 'Timed out waiting for active c
 const ACTIVE_COMPLETION_UNLOAD_TIMEOUT_MESSAGE = 'Timed out waiting for active completion during unload';
 const CONTEXT_OPERATION_STOP_MESSAGE = 'Prompt preparation was stopped before native completion started';
 const CONTEXT_OPERATION_COMPLETION_DRAIN_TIMEOUT_MESSAGE = 'Timed out waiting for prompt preparation before native completion started';
+const CONTEXT_OPERATION_PROMPT_COUNT_DRAIN_TIMEOUT_MESSAGE = 'Timed out waiting for background prompt preparation before counting prompt tokens';
+const CONTEXT_OPERATION_STOP_TIMEOUT_MESSAGE = 'Timed out waiting for prompt preparation to stop';
 const ACTIVE_COMPLETION_STOP_TIMEOUT_MESSAGE = 'Timed out waiting for active completion to stop';
 const MAX_UNLOAD_RECLAIM_FRACTION_OF_TOTAL_MEMORY = 0.25;
 const FALLBACK_STOP_WORDS = [
@@ -246,6 +251,8 @@ type ResolvedProjectorArtifactInfo = {
     modificationTime?: number | null;
   };
 };
+
+type ProjectorResolutionOperationCache = Map<string, Promise<ResolvedProjectorArtifactInfo>>;
 
 function normalizeMediaPaths(paths: readonly string[] | undefined): string[] {
   if (!paths || paths.length === 0) {
@@ -794,6 +801,7 @@ class LLMEngineService {
   private activeCalibrationSession: CalibrationSession | null = null;
   private loadedArtifactIdentity: LoadedModelArtifactIdentity | null = null;
   private activeMultimodalContext: ActiveMultimodalContext | null = null;
+  private loadedContextDisablesContextShiftForMultimodal = false;
   private pendingMultimodalReadinessRefresh: {
     modelId: string;
     context: LlamaContext;
@@ -897,6 +905,7 @@ class LLMEngineService {
     if (this.context !== context) {
       this.activeMultimodalContext = null;
       this.pendingMultimodalReadinessRefresh = null;
+      this.loadedContextDisablesContextShiftForMultimodal = false;
     }
     this.context = context;
     this.contextGeneration += 1;
@@ -1033,6 +1042,51 @@ class LLMEngineService {
       && activeMultimodalContext.projectorFallbackMarker === current.projectorFallbackMarker;
   }
 
+  private buildProjectorResolutionOperationCacheKey(modelId: string, projector: ProjectorArtifact): string {
+    return JSON.stringify([
+      modelId,
+      this.normalizeArtifactString(projector.id),
+      this.normalizeArtifactString(projector.localPath),
+      this.normalizeArtifactString(projector.fileName),
+      this.normalizeArtifactString(projector.sha256),
+      this.normalizeArtifactString(projector.downloadUrl),
+      this.normalizeArtifactString(projector.hfRevision),
+      this.normalizeArtifactString(projector.repoId),
+      this.normalizeArtifactString(projector.ownerModelId),
+      this.normalizeArtifactString(projector.ownerVariantId),
+    ]);
+  }
+
+  private resolveProjectorFilePathForOperation({
+    modelId,
+    projector,
+    operationCache,
+  }: {
+    modelId: string;
+    projector: ProjectorArtifact;
+    operationCache?: ProjectorResolutionOperationCache;
+  }): Promise<ResolvedProjectorArtifactInfo> {
+    if (!operationCache) {
+      return resolveProjectorFilePathOrThrow({ modelId, projector });
+    }
+
+    const cacheKey = this.buildProjectorResolutionOperationCacheKey(modelId, projector);
+    const cachedResolution = operationCache.get(cacheKey);
+    if (cachedResolution) {
+      return cachedResolution;
+    }
+
+    let resolutionPromise!: Promise<ResolvedProjectorArtifactInfo>;
+    resolutionPromise = resolveProjectorFilePathOrThrow({ modelId, projector }).catch((error) => {
+      if (operationCache.get(cacheKey) === resolutionPromise) {
+        operationCache.delete(cacheKey);
+      }
+      throw error;
+    });
+    operationCache.set(cacheKey, resolutionPromise);
+    return resolutionPromise;
+  }
+
   private isMultimodalReadinessInitializationCurrent({
     modelId,
     context,
@@ -1050,6 +1104,16 @@ class LLMEngineService {
         this.state.status === EngineStatus.READY
         || this.state.status === EngineStatus.INITIALIZING
       );
+  }
+
+  private isMultimodalReadinessRefreshCurrent(refresh: {
+    modelId: string;
+    context: LlamaContext;
+  }): boolean {
+    return !this.isUnloading
+      && this.context === refresh.context
+      && this.state.activeModelId === refresh.modelId
+      && this.state.status === EngineStatus.READY;
   }
 
   private resolveSnapshotAppUsedBytes(snapshot: SystemMemorySnapshot | null): number | null {
@@ -1245,7 +1309,7 @@ class LLMEngineService {
     );
   }
 
-  private waitForActiveContextOperations(options: { timeoutMs?: number } = {}): Promise<ContextOperationDrainResult> {
+  private waitForActiveContextOperations(options: { timeoutMs?: number; chatBlocking?: boolean } = {}): Promise<ContextOperationDrainResult> {
     return this.contextOperationRunner.waitForActive(options);
   }
 
@@ -1257,13 +1321,46 @@ class LLMEngineService {
     return this.contextOperationRunner.hasActiveChatBlocking();
   }
 
-  public async cancelActiveContextOperations(options: { timeoutMs?: number } = {}): Promise<ContextOperationDrainResult> {
+  public async cancelActiveContextOperations(options: { timeoutMs?: number; detachOnTimeout?: boolean } = {}): Promise<ContextOperationDrainResult> {
+    const hadChatBlockingOperation = this.hasActiveChatBlockingContextOperation();
+    const timeoutMs = options.timeoutMs ?? CONTEXT_OPERATION_STOP_DRAIN_TIMEOUT_MS;
     this.contextOperationRunner.cancelActive(
       new AppError('engine_busy', CONTEXT_OPERATION_STOP_MESSAGE),
     );
-    return this.waitForActiveContextOperations({
-      timeoutMs: options.timeoutMs ?? CONTEXT_OPERATION_STOP_DRAIN_TIMEOUT_MS,
+    const chatBlockingDrainPromise = hadChatBlockingOperation
+      ? this.waitForActiveContextOperations({ timeoutMs, chatBlocking: true })
+      : Promise.resolve<ContextOperationDrainResult>('drained');
+    const drainResult = await this.waitForActiveContextOperations({ timeoutMs });
+    const chatBlockingDrainResult = await chatBlockingDrainPromise;
+    if (chatBlockingDrainResult === 'timed_out' && options.detachOnTimeout !== false) {
+      this.detachCurrentContextAfterTimedOutStop(
+        this.state.activeModelId ?? null,
+        new AppError('engine_busy', CONTEXT_OPERATION_STOP_TIMEOUT_MESSAGE),
+      );
+    }
+    return drainResult;
+  }
+
+  private async cancelActiveChatBlockingContextOperationsForCompletionStop(): Promise<ContextOperationDrainResult> {
+    if (!this.hasActiveChatBlockingContextOperation()) {
+      return 'drained';
+    }
+
+    this.contextOperationRunner.cancelActive(
+      new AppError('engine_busy', CONTEXT_OPERATION_STOP_MESSAGE),
+      { chatBlocking: true },
+    );
+    const drainResult = await this.waitForActiveContextOperations({
+      timeoutMs: CONTEXT_OPERATION_STOP_DRAIN_TIMEOUT_MS,
+      chatBlocking: true,
     });
+    if (drainResult === 'timed_out') {
+      const timeoutError = new AppError('engine_busy', CONTEXT_OPERATION_STOP_TIMEOUT_MESSAGE);
+      this.completionRunner.rejectActive(timeoutError);
+      this.detachCurrentContextAfterTimedOutStop(this.state.activeModelId ?? null, timeoutError);
+    }
+
+    return drainResult;
   }
 
   private isContextOperationStopError(error: unknown): boolean {
@@ -1283,6 +1380,21 @@ class LLMEngineService {
 
     if (drainResult === 'timed_out') {
       throw new AppError('engine_busy', CONTEXT_OPERATION_COMPLETION_DRAIN_TIMEOUT_MESSAGE);
+    }
+  }
+
+  private async preemptBackgroundContextOperationsForPromptCount(): Promise<void> {
+    this.contextOperationRunner.cancelActive(
+      new AppError('engine_busy', CONTEXT_OPERATION_STOP_MESSAGE),
+      { chatBlocking: false },
+    );
+    const drainResult = await this.waitForActiveContextOperations({
+      timeoutMs: CONTEXT_OPERATION_STOP_DRAIN_TIMEOUT_MS,
+      chatBlocking: false,
+    });
+
+    if (drainResult === 'timed_out') {
+      throw new AppError('engine_busy', CONTEXT_OPERATION_PROMPT_COUNT_DRAIN_TIMEOUT_MESSAGE);
     }
   }
 
@@ -1313,6 +1425,50 @@ class LLMEngineService {
     if (process.env.NODE_ENV !== 'test') {
       console.warn('[LLMEngine] Deferred context release drain timed out; forcing context release', {
         message: timeoutMessage,
+      });
+    }
+  }
+
+  private detachCurrentContextAfterTimedOutStop(activeModelId: string | null, timeoutError: AppError): void {
+    const contextAtTimeout = this.context;
+    const drainPromise = this.waitForActiveContextOperations().then(() => undefined);
+    this.lastLifecycleEvent = 'context_operation_unload_timeout';
+    this.lastLifecycleError = timeoutError.message;
+    this.contextOperationRunner.reset(timeoutError);
+    this.completionRunner.reset();
+
+    if (contextAtTimeout) {
+      this.setContext(null);
+      this.loadedArtifactIdentity = null;
+      this.activeContextSize = DEFAULT_CONTEXT_SIZE;
+      this.activeGpuLayers = null;
+      this.safeModeLoadLimits = null;
+      this.resetRuntimeTelemetry();
+      updateSettings({ activeModelId: null });
+    }
+
+    this.updateState({
+      status: EngineStatus.ERROR,
+      activeModelId: activeModelId ?? undefined,
+      loadProgress: 0,
+      lastError: timeoutError.message,
+    });
+
+    void drainPromise.catch(() => undefined).then(async () => {
+      if (this.context !== null || this.state.activeModelId !== activeModelId) {
+        return;
+      }
+
+      await releaseAllLlamaContexts().catch((error) => {
+        if (process.env.NODE_ENV !== 'test') {
+          console.warn('[LLMEngine] Failed to release detached context after prompt preparation drain', buildSafeErrorLogDetails(error));
+        }
+      });
+    });
+
+    if (process.env.NODE_ENV !== 'test') {
+      console.warn('[LLMEngine] Prompt preparation stop timed out; detached active context', {
+        activeModelId,
       });
     }
   }
@@ -2162,6 +2318,14 @@ class LLMEngineService {
    * Initialize the llama.rn engine and load a GGUF model from disk.
    */
   public async load(modelId: string, options?: LoadModelOptions): Promise<void> {
+    await this.loadWithProjectorResolutionOperationCache(modelId, options, new Map());
+  }
+
+  private async loadWithProjectorResolutionOperationCache(
+    modelId: string,
+    options: LoadModelOptions | undefined,
+    projectorResolutionOperationCache: ProjectorResolutionOperationCache,
+  ): Promise<void> {
     await this.runExclusiveOperation(async () => {
       const model = registry.getModel(modelId);
       if (!model || !model.localPath) {
@@ -2190,15 +2354,26 @@ class LLMEngineService {
       const hasStaleLoadedContext = Boolean(
         this.context && (this.state.status !== EngineStatus.READY || !this.state.activeModelId),
       );
+      const shouldReloadLoadedContextForMultimodalContextShift = await this.shouldReloadLoadedContextForMultimodalContextShift(
+        model,
+        this.context,
+        projectorResolutionOperationCache,
+      );
       const shouldUnloadActiveModel = hasStaleLoadedContext || Boolean(
-        this.state.activeModelId && (this.state.activeModelId !== modelId || forceReload || !isCurrentLoadedArtifact),
+        this.state.activeModelId && (
+          this.state.activeModelId !== modelId
+          || forceReload
+          || !isCurrentLoadedArtifact
+          || shouldReloadLoadedContextForMultimodalContextShift
+        ),
       );
 
       if (
         this.state.status === EngineStatus.READY &&
         this.state.activeModelId === modelId &&
         !forceReload &&
-        isCurrentLoadedArtifact
+        isCurrentLoadedArtifact &&
+        !shouldReloadLoadedContextForMultimodalContextShift
       ) {
         if (this.context) {
           const refreshRequest = {
@@ -2220,7 +2395,11 @@ class LLMEngineService {
                   return;
                 }
 
-                await this.initializeMultimodalReadinessForLoadedContext(refreshRequest, cancellation);
+                await this.initializeMultimodalReadinessForLoadedContext(
+                  refreshRequest,
+                  cancellation,
+                  projectorResolutionOperationCache,
+                );
               }, { chatBlocking: false });
             } catch (error) {
               if (!this.isContextOperationStopError(error) || !this.activeCompletionPromise) {
@@ -2267,6 +2446,7 @@ class LLMEngineService {
         recentUnloadReclaim,
         fallbackDownloadMarker,
         resolvedArtifactInfo,
+        projectorResolutionOperationCache,
       );
       await this.initPromise;
     });
@@ -2372,12 +2552,19 @@ class LLMEngineService {
           this.assertCompletionNotInterrupted(interruptGeneration);
           const enableThinking = params?.enable_thinking ?? false;
           const reasoningFormat: ChatCompletionReasoningFormat = params?.reasoning_format ?? 'none';
-          const templateStopResolution = await this.resolveTemplateAdditionalStopWords({
-            context,
-            generation: contextGeneration,
-            messages: completionMessages,
-            enableThinking,
-            reasoningFormat,
+          const templateStopResolution = await this.trackContextOperation(async (cancellation) => {
+            cancellation.throwIfCancelled();
+            this.assertCompletionNotInterrupted(interruptGeneration);
+            const resolution = await this.resolveTemplateAdditionalStopWords({
+              context,
+              generation: contextGeneration,
+              messages: completionMessages,
+              enableThinking,
+              reasoningFormat,
+            });
+            cancellation.throwIfCancelled();
+            this.assertCompletionNotInterrupted(interruptGeneration);
+            return resolution;
           });
           strictRoleSystemNormalization = templateStopResolution.strictRoleSystemNormalization;
           this.assertCompletionNotInterrupted(interruptGeneration);
@@ -2482,9 +2669,15 @@ class LLMEngineService {
     return completionTask;
   }
 
-  private async probeThinkingCapability(context: LlamaContext): Promise<ModelThinkingCapabilitySnapshot | null> {
+  private async probeThinkingCapability(
+    context: LlamaContext,
+    cancellation: ContextOperationCancellationToken,
+  ): Promise<ModelThinkingCapabilitySnapshot | null> {
     const sampleMessages: LlmChatMessage[] = [{ role: 'user', content: 'ping' }];
-    const shouldAbort = () => this.isUnloading || this.context !== context || this.activeCompletionPromise !== null;
+    const shouldAbort = () => cancellation.isCancelled()
+      || this.isUnloading
+      || this.context !== context
+      || this.activeCompletionPromise !== null;
 
     const safeFormat = async ({
       enableThinking,
@@ -2498,6 +2691,7 @@ class LLMEngineService {
       }
 
       try {
+        cancellation.throwIfCancelled();
         const formatted = await getFormattedChatFromContext({
           context,
           messages: sampleMessages,
@@ -2509,6 +2703,7 @@ class LLMEngineService {
           },
         });
 
+        cancellation.throwIfCancelled();
         if (shouldAbort()) {
           return null;
         }
@@ -2637,24 +2832,32 @@ class LLMEngineService {
       && this.state.activeModelId === modelId
     );
 
-    void (async () => {
-      try {
-        const thinkingCapability = await this.probeThinkingCapability(contextAtProbeStart);
-        if (thinkingCapability && isProbeStillCurrent()) {
-          const model = registry.getModel(modelId);
-          if (model && isProbeStillCurrent() && !areThinkingCapabilitySnapshotsEqual(model.thinkingCapability, thinkingCapability)) {
-            registry.updateModel({
-              ...model,
-              thinkingCapability,
-            });
-          }
-        }
-      } catch (error) {
-        if (isProbeStillCurrent()) {
-          console.warn('[LLMEngine] Failed to persist chat template thinking capability', buildSafeErrorLogDetails(error));
+    void this.trackContextOperation(async (cancellation) => {
+      if (cancellation.isCancelled() || !isProbeStillCurrent()) {
+        return;
+      }
+
+      const thinkingCapability = await this.probeThinkingCapability(contextAtProbeStart, cancellation);
+      cancellation.throwIfCancelled();
+
+      if (thinkingCapability && isProbeStillCurrent()) {
+        const model = registry.getModel(modelId);
+        if (model && isProbeStillCurrent() && !areThinkingCapabilitySnapshotsEqual(model.thinkingCapability, thinkingCapability)) {
+          registry.updateModel({
+            ...model,
+            thinkingCapability,
+          });
         }
       }
-    })();
+    }, { chatBlocking: false }).catch((error) => {
+      if (this.isContextOperationStopError(error) || this.isUnloading) {
+        return;
+      }
+
+      if (isProbeStillCurrent()) {
+        console.warn('[LLMEngine] Failed to persist chat template thinking capability', buildSafeErrorLogDetails(error));
+      }
+    });
   }
 
   public async countPromptTokens({
@@ -2711,6 +2914,10 @@ class LLMEngineService {
     const requestMessages = shouldUseMediaPaths
       ? mediaAwareMessages
       : mediaAwareMessages.map(withoutMediaPaths);
+
+    if (chatBlocking !== false) {
+      await this.preemptBackgroundContextOperationsForPromptCount();
+    }
 
     return this.trackContextOperation(async (cancellation) => {
       if (this.state.status === EngineStatus.INITIALIZING && this.initPromise) {
@@ -2783,7 +2990,22 @@ class LLMEngineService {
   }
 
   public async stopCompletion(): Promise<void> {
+    await this.stopCompletionInternal({ drainPromptPreparation: true });
+  }
+
+  private async stopCompletionInternal({
+    drainPromptPreparation,
+  }: {
+    drainPromptPreparation: boolean;
+  }): Promise<void> {
     this.completionRunner.interruptIfActive();
+
+    if (drainPromptPreparation && this.hasActiveChatBlockingContextOperation()) {
+      const drainResult = await this.cancelActiveChatBlockingContextOperationsForCompletionStop();
+      if (drainResult === 'timed_out') {
+        return;
+      }
+    }
 
     if (this.context) {
       await this.context.stopCompletion();
@@ -2794,6 +3016,13 @@ class LLMEngineService {
     const activeCompletion = this.activeCompletionDriverPromise;
     if (!activeCompletion) {
       return;
+    }
+
+    if (this.hasActiveChatBlockingContextOperation()) {
+      const drainResult = await this.cancelActiveChatBlockingContextOperationsForCompletionStop();
+      if (drainResult === 'timed_out') {
+        return;
+      }
     }
 
     try {
@@ -2997,7 +3226,8 @@ class LLMEngineService {
 
   private async resolveLoadTimeProjectorMemoryInfo(
     model: ModelMetadata | null | undefined,
-  ): Promise<{ projectorId: string; sizeBytes: number } | null> {
+    projectorResolutionOperationCache?: ProjectorResolutionOperationCache,
+  ): Promise<{ projectorId: string; sizeBytes: number | null; memoryFitSizeBytes: number } | null> {
     if (!model || !this.isVisionCapableModel(model)) {
       return null;
     }
@@ -3009,11 +3239,19 @@ class LLMEngineService {
     }
 
     try {
-      const resolvedProjector = await resolveProjectorFilePathOrThrow({ modelId: model.id, projector });
+      const resolvedProjector = await this.resolveProjectorFilePathForOperation({
+        modelId: model.id,
+        projector,
+        operationCache: projectorResolutionOperationCache,
+      });
       const sizeBytes = this.toPositiveByteCount(resolvedProjector.fileInfo.size)
         ?? this.toPositiveByteCount(projector.size);
 
-      return sizeBytes ? { projectorId: projector.id, sizeBytes } : null;
+      return {
+        projectorId: projector.id,
+        sizeBytes,
+        memoryFitSizeBytes: sizeBytes ?? UNKNOWN_PROJECTOR_MEMORY_FIT_FALLBACK_BYTES,
+      };
     } catch (error) {
       if (process.env.NODE_ENV !== 'test') {
         console.warn('[LLMEngine] Failed to resolve projector size for load-time memory fit', {
@@ -3026,6 +3264,44 @@ class LLMEngineService {
     }
   }
 
+  private async shouldReloadLoadedContextForMultimodalContextShift(
+    model: ModelMetadata | null | undefined,
+    expectedContext: LlamaContext | null = this.context,
+    projectorResolutionOperationCache?: ProjectorResolutionOperationCache,
+  ): Promise<boolean> {
+    if (
+      !model
+      || !expectedContext
+      || this.context !== expectedContext
+      || this.state.activeModelId !== model.id
+      || this.state.status !== EngineStatus.READY
+      || this.activeCompletionPromise
+    ) {
+      return false;
+    }
+
+    const loadTimeProjector = await this.resolveLoadTimeProjectorMemoryInfo(model, projectorResolutionOperationCache);
+    const shouldDisableContextShiftForMultimodal = loadTimeProjector !== null;
+    return this.loadedContextDisablesContextShiftForMultimodal !== shouldDisableContextShiftForMultimodal
+      && this.context === expectedContext
+      && this.state.activeModelId === model.id
+      && this.state.status === EngineStatus.READY
+      && !this.activeCompletionPromise
+      && !this.isUnloading;
+  }
+
+  private async shouldReloadLoadedContextForMultimodalContextShiftByModelId(
+    modelId: string,
+    expectedContext: LlamaContext | null,
+    projectorResolutionOperationCache?: ProjectorResolutionOperationCache,
+  ): Promise<boolean> {
+    return this.shouldReloadLoadedContextForMultimodalContextShift(
+      registry.getModel(modelId),
+      expectedContext,
+      projectorResolutionOperationCache,
+    );
+  }
+
   private buildMultimodalReadinessState(
     model: ModelMetadata,
     status: MultimodalReadinessStatus,
@@ -3034,12 +3310,15 @@ class LLMEngineService {
       projectorSize?: number | null;
       support?: readonly MultimodalSupportModality[];
       failureReason?: string | null;
+      failureReasonPrivacy?: 'safe' | 'runtime';
     } = {},
   ): MultimodalReadinessState {
     const projectorSize = this.toPositiveByteCount(options.projectorSize)
       ?? this.toPositiveByteCount(options.projector?.size);
     const support = Array.from(new Set(options.support ?? []));
-    const failureReason = sanitizeMultimodalFailureReason(options.failureReason);
+    const failureReason = options.failureReasonPrivacy === 'runtime'
+      ? sanitizeMultimodalFailureCategory(options.failureReason)
+      : sanitizeMultimodalFailureReason(options.failureReason);
 
     return {
       modelId: model.id,
@@ -3125,24 +3404,53 @@ class LLMEngineService {
     }
 
     this.pendingMultimodalReadinessRefresh = null;
+    const projectorResolutionOperationCache: ProjectorResolutionOperationCache = new Map();
 
     try {
+      const shouldReloadForMultimodalContextShift = await this.shouldReloadLoadedContextForMultimodalContextShiftByModelId(
+        pendingRefresh.modelId,
+        pendingRefresh.context,
+        projectorResolutionOperationCache,
+      );
+
+      if (this.activeCompletionPromise) {
+        if (this.isMultimodalReadinessRefreshCurrent(pendingRefresh)) {
+          this.queueMultimodalReadinessRefreshAfterCompletion(pendingRefresh);
+        }
+        return;
+      }
+
+      if (!this.isMultimodalReadinessRefreshCurrent(pendingRefresh)) {
+        return;
+      }
+
+      if (shouldReloadForMultimodalContextShift) {
+        await this.loadWithProjectorResolutionOperationCache(
+          pendingRefresh.modelId,
+          undefined,
+          projectorResolutionOperationCache,
+        );
+        return;
+      }
+
       await this.trackContextOperation(async (cancellation) => {
         if (this.activeCompletionPromise) {
-          this.pendingMultimodalReadinessRefresh ??= pendingRefresh;
+          this.queueMultimodalReadinessRefreshAfterCompletion(pendingRefresh);
           return;
         }
 
         if (
           cancellation.isCancelled()
-          || this.context !== pendingRefresh.context
-          || this.state.activeModelId !== pendingRefresh.modelId
-          || this.state.status !== EngineStatus.READY
+          || !this.isMultimodalReadinessRefreshCurrent(pendingRefresh)
         ) {
           return;
         }
 
-        await this.initializeMultimodalReadinessForLoadedContext(pendingRefresh, cancellation);
+        await this.initializeMultimodalReadinessForLoadedContext(
+          pendingRefresh,
+          cancellation,
+          projectorResolutionOperationCache,
+        );
       }, { chatBlocking: false });
     } catch (error) {
       if (this.isContextOperationStopError(error) && this.activeCompletionPromise) {
@@ -3168,7 +3476,10 @@ class LLMEngineService {
     modelId: string;
     context: LlamaContext;
     useGpu: boolean;
-  }, cancellation?: ContextOperationCancellationToken): Promise<void> {
+  },
+  cancellation?: ContextOperationCancellationToken,
+  projectorResolutionOperationCache?: ProjectorResolutionOperationCache,
+  ): Promise<void> {
     const model = registry.getModel(modelId);
     if (!model) {
       return;
@@ -3236,7 +3547,11 @@ class LLMEngineService {
 
     let resolvedProjector: ResolvedProjectorArtifactInfo;
     try {
-      resolvedProjector = await resolveProjectorFilePathOrThrow({ modelId: model.id, projector });
+      resolvedProjector = await this.resolveProjectorFilePathForOperation({
+        modelId: model.id,
+        projector,
+        operationCache: projectorResolutionOperationCache,
+      });
     } catch (error) {
       if (!isCurrent()) {
         return;
@@ -3282,6 +3597,7 @@ class LLMEngineService {
             projector,
             support,
             failureReason: 'Runtime did not report vision support for the active projector.',
+            failureReasonPrivacy: 'runtime',
           });
 
         this.persistMultimodalReadiness(model.id, readiness);
@@ -3297,6 +3613,7 @@ class LLMEngineService {
           this.buildMultimodalReadinessState(model, this.getMultimodalRuntimeFailureStatus(error), {
             projector,
             failureReason: getErrorMessageText(error),
+            failureReasonPrivacy: 'runtime',
           }),
         );
         await this.releaseActiveMultimodalContext({ modelId: model.id, context });
@@ -3350,6 +3667,7 @@ class LLMEngineService {
             projector,
             projectorSize: resolvedProjector.fileInfo.size,
             failureReason: 'llama.rn did not initialize the multimodal projector.',
+            failureReasonPrivacy: 'runtime',
           }),
         );
         await this.releaseActiveMultimodalContext({ modelId: model.id, context });
@@ -3384,6 +3702,7 @@ class LLMEngineService {
           projectorSize: resolvedProjector.fileInfo.size,
           support,
           failureReason: 'Runtime did not report vision support after projector initialization.',
+          failureReasonPrivacy: 'runtime',
         });
 
       this.persistMultimodalReadiness(model.id, readiness);
@@ -3401,6 +3720,7 @@ class LLMEngineService {
           projector,
           projectorSize: resolvedProjector.fileInfo.size,
           failureReason: getErrorMessageText(error),
+          failureReasonPrivacy: 'runtime',
         }),
       );
       await this.releaseActiveMultimodalContext({ modelId: model.id, context });
@@ -3653,6 +3973,7 @@ class LLMEngineService {
     recentUnloadReclaim: ModelUnloadReclaimEstimate | null = null,
     fallbackDownloadMarker: number | null = null,
     resolvedArtifactInfo: ResolvedModelArtifactInfo | null = null,
+    projectorResolutionOperationCache: ProjectorResolutionOperationCache = new Map(),
   ): Promise<void> {
     const isDev = typeof __DEV__ !== 'undefined' && __DEV__;
     const nativeLogs: { level: string; text: string }[] = [];
@@ -3783,11 +4104,13 @@ class LLMEngineService {
       };
 
       const cachedModel = registry.getModel(modelId);
-      const loadTimeProjectorMemory = await this.resolveLoadTimeProjectorMemoryInfo(cachedModel);
-      const loadTimeProjectorSizeBytes = loadTimeProjectorMemory?.sizeBytes;
-      const hasLoadTimeMmproj = typeof loadTimeProjectorSizeBytes === 'number'
-        && Number.isFinite(loadTimeProjectorSizeBytes)
-        && loadTimeProjectorSizeBytes > 0;
+      const loadTimeProjectorMemory = await this.resolveLoadTimeProjectorMemoryInfo(
+        cachedModel,
+        projectorResolutionOperationCache,
+      );
+      const loadTimeProjectorSizeBytes = loadTimeProjectorMemory?.memoryFitSizeBytes;
+      const hasLoadTimeMmproj = loadTimeProjectorMemory !== null;
+      const shouldDisableContextShiftForMultimodal = hasLoadTimeMmproj;
       const ggufMetadata = modelInfo !== null || cachedModel?.gguf
         ? {
           ...(cachedModel?.gguf ?? {}),
@@ -4350,6 +4673,7 @@ class LLMEngineService {
             n_ctx: finalContextSize,
             n_gpu_layers: layers,
             n_parallel: nParallel,
+            ...(shouldDisableContextShiftForMultimodal ? { ctx_shift: false } : null),
             // llama.rn supports `no_gpu_devices` (iOS-only, deprecated). Prefer controlling
             // acceleration via `n_gpu_layers` and explicit `devices` when needed.
             ...(typeof nThreads === 'number' && Number.isFinite(nThreads) && nThreads > 0
@@ -4824,6 +5148,7 @@ class LLMEngineService {
           }
 
           this.setContext(context);
+          this.loadedContextDisablesContextShiftForMultimodal = shouldDisableContextShiftForMultimodal;
           gpuInitError = null;
           break;
         } catch (error) {
@@ -4936,7 +5261,7 @@ class LLMEngineService {
           modelId,
           context: this.context,
           useGpu: resolvedInitActualGpu === true,
-        });
+        }, undefined, projectorResolutionOperationCache);
       }
 
       if (resolvedInitProfile) {
@@ -5094,7 +5419,7 @@ class LLMEngineService {
       const activeCompletion = this.activeCompletionDriverPromise;
       if (activeCompletion) {
         let stopCompletionError: unknown;
-        const stopCompletionPromise = this.stopCompletion().catch((error) => {
+        const stopCompletionPromise = this.stopCompletionInternal({ drainPromptPreparation: false }).catch((error) => {
           stopCompletionError = error;
         });
         const completionAndStopDrainPromise = Promise.all([
@@ -5137,6 +5462,10 @@ class LLMEngineService {
       }
 
       if (!deferredContextReleaseError) {
+        this.contextOperationRunner.cancelActive(
+          new AppError('engine_unloading', CONTEXT_OPERATION_UNLOAD_TIMEOUT_MESSAGE),
+          { chatBlocking: false },
+        );
         const contextDrainResult = await this.waitForActiveContextOperations({
           timeoutMs: CONTEXT_OPERATION_UNLOAD_DRAIN_TIMEOUT_MS,
         });

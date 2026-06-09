@@ -1,10 +1,13 @@
 import {
   DECIMAL_GIGABYTE,
+  UNKNOWN_PROJECTOR_MEMORY_FIT_FALLBACK_BYTES,
   formatModelFileSize,
   getModelDisplayArtifactSizeBytes,
+  getModelStoredMemoryFitSizeBytes,
   getModelStoredArtifactsSizeBytes,
   getProjectorMemoryFitSizeBytes,
   getProjectorArtifactsSizeBytes,
+  getStoredProjectorMemoryFitSizeBytes,
   getStoredProjectorArtifactsSizeBytes,
   normalizePositiveByteSize,
 } from '../../src/utils/modelSize';
@@ -44,6 +47,30 @@ describe('modelSize', () => {
       { lifecycleStatus: 'available', size: 999 },
       { lifecycleStatus: 'failed', size: 999 },
     ])).toBe(150);
+  });
+
+  it('uses a memory-only fallback for stored projectors with unknown size', () => {
+    const projectorCandidates = [
+      { id: 'known', lifecycleStatus: 'downloaded' as const, localPath: 'known.gguf', size: 100 },
+      { id: 'unknown', lifecycleStatus: 'active' as const, localPath: 'unknown.gguf', size: null },
+      { id: 'available', lifecycleStatus: 'available' as const, localPath: 'available.gguf', size: null },
+    ];
+
+    expect(getStoredProjectorArtifactsSizeBytes(projectorCandidates)).toBe(100);
+    expect(getStoredProjectorMemoryFitSizeBytes(projectorCandidates)).toBe(
+      100 + UNKNOWN_PROJECTOR_MEMORY_FIT_FALLBACK_BYTES,
+    );
+    expect(getModelStoredMemoryFitSizeBytes({
+      size: 1_000,
+      projectorCandidates: projectorCandidates.map((projector) => ({
+        ...projector,
+        ownerModelId: 'model-a',
+        repoId: 'repo',
+        fileName: projector.localPath,
+        downloadUrl: `https://example.com/${projector.localPath}`,
+        matchStatus: 'matched' as const,
+      })),
+    })).toBe(1_100 + UNKNOWN_PROJECTOR_MEMORY_FIT_FALLBACK_BYTES);
   });
 
   it('includes downloaded projector artifacts in stored model artifact totals', () => {
@@ -109,6 +136,28 @@ describe('modelSize', () => {
       projectorCandidates,
       selectedProjectorId: 'projector-b',
     })).toBe(1_500);
+  });
+
+  it('uses a conservative memory-only fallback for resolvable projectors with unknown size', () => {
+    const projectorCandidates = [
+      {
+        id: 'projector-a',
+        ownerModelId: 'model-a',
+        repoId: 'repo',
+        fileName: 'projector-a.gguf',
+        downloadUrl: 'https://example.com/projector-a.gguf',
+        size: null,
+        lifecycleStatus: 'downloaded' as const,
+        matchStatus: 'matched' as const,
+        localPath: 'projector-a.gguf',
+      },
+    ];
+
+    expect(getProjectorMemoryFitSizeBytes(projectorCandidates)).toBe(UNKNOWN_PROJECTOR_MEMORY_FIT_FALLBACK_BYTES);
+    expect(getModelDisplayArtifactSizeBytes({
+      size: 1_000,
+      projectorCandidates,
+    })).toBe(1_000);
   });
 });
 

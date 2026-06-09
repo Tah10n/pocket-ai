@@ -79,9 +79,11 @@ export interface ChatImageAttachment {
   threadId: string;
   messageId: string;
   localUri: string;
+  thumbnailUri?: string;
   pathCategory: ChatImageAttachmentPathCategory;
   mediaType?: string;
   fileName: string;
+  thumbnailFileName?: string;
   size?: number;
   width?: number;
   height?: number;
@@ -96,8 +98,10 @@ export interface AttachmentDraft {
   pickerUri: string;
   previewUri: string;
   localUri?: string;
+  thumbnailUri?: string;
   pathCategory?: ChatImageAttachmentPathCategory;
   fileName?: string;
+  thumbnailFileName?: string;
   mediaType?: string;
   size?: number;
   width?: number;

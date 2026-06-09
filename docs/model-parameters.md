@@ -94,6 +94,12 @@ Resolved runtime inference profile selection lives in:
 - `src/services/resolveInferenceProfile.ts`
 - `src/services/LLMEngineService.ts`
 
+Vision-capable model loads also apply an internal multimodal safety rule when a compatible projector is available:
+
+- `llama.rn` context shifting is disabled when a vision projector is resolvable at load time so media markers stay aligned with the attached images.
+- If a vision-capable model is loaded before a projector is ready, the text-only context keeps the default `llama.rn` context-shifting behavior, then reloads with context shifting disabled before image chat becomes ready.
+- This is not exposed as a user setting; text-only model contexts and vision-capable contexts without a ready projector keep the default `llama.rn` behavior.
+
 ### Backend discovery (llama.rn)
 
 Pocket AI uses llama.rn backend discovery to decide whether it is safe to attempt GPU/NPU initialization:

@@ -100,6 +100,90 @@ export function getModeBannerGlassStyle(highlightColor: string, primaryStrong: s
     };
 }
 
+function getAttachmentDraftPreviewCandidates(draft: AttachmentDraft): string[] {
+    const seen = new Set<string>();
+
+    return [draft.thumbnailUri, draft.previewUri, draft.localUri].filter((uri): uri is string => {
+        if (!uri || uri.trim().length === 0 || seen.has(uri)) {
+            return false;
+        }
+
+        seen.add(uri);
+        return true;
+    });
+}
+
+type AttachmentDraftPreviewProps = {
+    draft: AttachmentDraft;
+    index: number;
+    accessibilityLabel: string;
+    unavailableAccessibilityLabel: string;
+};
+
+function AttachmentDraftUnavailablePreview({ index, accessibilityLabel }: Pick<AttachmentDraftPreviewProps, 'index' | 'accessibilityLabel'>) {
+    const { t } = useTranslation();
+
+    return (
+        <Box
+            testID={`chat-image-attachment-unavailable-preview-${index}`}
+            accessibilityRole="image"
+            accessibilityLabel={accessibilityLabel}
+            accessibilityState={{ disabled: true }}
+            className="h-full w-full items-center justify-center rounded-xl"
+        >
+            <ScreenIconTile
+                iconName="broken-image"
+                tone="neutral"
+                iconSize="sm"
+                size="sm"
+                className="h-8 w-8"
+            />
+            <Text role="status" className="sr-only">
+                {t('chat.attachments.unavailable')}
+            </Text>
+        </Box>
+    );
+}
+
+function AttachmentDraftPreview({ draft, index, accessibilityLabel, unavailableAccessibilityLabel }: AttachmentDraftPreviewProps) {
+    const previewCandidates = getAttachmentDraftPreviewCandidates(draft);
+    const previewCandidatesKey = previewCandidates.join('\u0000');
+    const [candidateIndex, setCandidateIndex] = useState(0);
+    const isUnavailable = previewCandidates.length === 0 || candidateIndex >= previewCandidates.length;
+    const previewUri = isUnavailable ? '' : previewCandidates[candidateIndex] ?? '';
+
+    useEffect(() => {
+        setCandidateIndex(0);
+    }, [previewCandidatesKey]);
+
+    if (isUnavailable) {
+        return (
+            <AttachmentDraftUnavailablePreview
+                index={index}
+                accessibilityLabel={unavailableAccessibilityLabel}
+            />
+        );
+    }
+
+    return (
+        <Image
+            testID={`chat-image-attachment-preview-${index}`}
+            accessibilityLabel={accessibilityLabel}
+            source={{ uri: previewUri }}
+            style={styles.attachmentPreviewImage}
+            onError={() => {
+                setCandidateIndex((currentIndex) => {
+                    if (currentIndex >= previewCandidates.length - 1) {
+                        return previewCandidates.length;
+                    }
+
+                    return currentIndex + 1;
+                });
+            }}
+        />
+    );
+}
+
 export const ChatInputBar = ({
     onSendMessage,
     onStopGeneration,
@@ -447,11 +531,11 @@ export const ChatInputBar = ({
                                             />
                                         </Box>
                                     ) : (
-                                        <Image
-                                            testID={`chat-image-attachment-preview-${index}`}
+                                        <AttachmentDraftPreview
+                                            draft={draft}
+                                            index={index}
                                             accessibilityLabel={t('chat.attachments.previewIndexedAccessibilityLabel', attachmentLabelOptions)}
-                                            source={{ uri: draft.previewUri }}
-                                            style={styles.attachmentPreviewImage}
+                                            unavailableAccessibilityLabel={t('chat.attachments.previewUnavailableIndexedAccessibilityLabel', attachmentLabelOptions)}
                                         />
                                     )}
                                 </ScreenSurface>

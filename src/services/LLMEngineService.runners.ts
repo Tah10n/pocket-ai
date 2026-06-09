@@ -10,6 +10,11 @@ type ContextOperationCancelOptions = {
   readonly chatBlocking?: boolean;
 };
 
+type ContextOperationWaitOptions = {
+  readonly timeoutMs?: number;
+  readonly chatBlocking?: boolean;
+};
+
 export type ContextOperationCancellationToken = {
   readonly isCancelled: () => boolean;
   readonly throwIfCancelled: () => void;
@@ -108,8 +113,8 @@ export class ContextOperationRunner {
     return operationPromise;
   }
 
-  public waitForActive(options: { timeoutMs?: number } = {}): Promise<ContextOperationDrainResult> {
-    const activeContextOperations = Array.from(this.rawActivePromises);
+  public waitForActive(options: ContextOperationWaitOptions = {}): Promise<ContextOperationDrainResult> {
+    const activeContextOperations = this.getRawActiveOperations(options.chatBlocking);
     if (activeContextOperations.length === 0) {
       return Promise.resolve('drained');
     }
@@ -163,6 +168,19 @@ export class ContextOperationRunner {
 
   public hasActiveChatBlocking(): boolean {
     return this.chatBlockingRawActivePromises.size > 0;
+  }
+
+  private getRawActiveOperations(chatBlocking?: boolean): Promise<unknown>[] {
+    if (chatBlocking === true) {
+      return Array.from(this.chatBlockingRawActivePromises);
+    }
+
+    if (chatBlocking === false) {
+      return Array.from(this.rawActivePromises)
+        .filter((promise) => !this.chatBlockingRawActivePromises.has(promise));
+    }
+
+    return Array.from(this.rawActivePromises);
   }
 
   private assertNotCancelled(isCancelled: () => boolean, getCancellationError: ErrorFactory): void {

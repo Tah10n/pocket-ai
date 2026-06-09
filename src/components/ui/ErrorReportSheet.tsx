@@ -13,6 +13,11 @@ import { ScrollView } from '@/components/ui/scroll-view';
 import { ScreenCard, ScreenIconButton, ScreenModalOverlay, ScreenSheet, ScreenStack } from '@/components/ui/ScreenShell';
 import { Text } from '@/components/ui/text';
 import { toAppError } from '@/services/AppError';
+import {
+  sanitizeErrorForReport,
+  sanitizeErrorReportContext,
+  sanitizeErrorReportString,
+} from '@/services/ErrorReportSanitizer';
 import type { ErrorReportContext } from '@/hooks/useErrorReportSheetController';
 import type { AndroidBlurTargetRef } from '@/utils/androidBlur';
 import { screenLayoutTokens } from '@/utils/themeTokens';
@@ -46,10 +51,11 @@ function safeJsonStringify(value: unknown, indent: number): string {
       }
 
       if (val instanceof Error) {
+        const sanitizedError = sanitizeErrorForReport(val, { includeStack: true });
         return {
-          name: val.name,
-          message: val.message,
-          stack: val.stack,
+          name: sanitizedError.name,
+          message: sanitizedError.message,
+          stack: sanitizedError.stack,
         };
       }
 
@@ -93,17 +99,18 @@ export function ErrorReportSheet({
 }: ErrorReportSheetProps) {
   const { t } = useTranslation();
   const appError = useMemo(() => toAppError(error), [error]);
+  const sanitizedAppError = useMemo(() => sanitizeErrorForReport(appError, { includeStack: false }), [appError]);
 
-  const modelContext = context?.model;
-  const engineContext = context?.engine;
-  const optionsContext = context?.options;
-  const extraContext = context?.extra;
+  const modelContext = useMemo(() => sanitizeErrorReportContext(context?.model), [context?.model]);
+  const engineContext = useMemo(() => sanitizeErrorReportContext(context?.engine), [context?.engine]);
+  const optionsContext = useMemo(() => sanitizeErrorReportContext(context?.options), [context?.options]);
+  const extraContext = useMemo(() => sanitizeErrorReportContext(context?.extra), [context?.extra]);
 
   const hasModelContext = isNonEmptySection(modelContext);
   const hasEngineContext = isNonEmptySection(engineContext);
   const hasOptionsContext = isNonEmptySection(optionsContext);
   const hasExtraContext = isNonEmptySection(extraContext);
-  const hasDiagnostics = isNonEmptySection(appError.details);
+  const hasDiagnostics = isNonEmptySection(sanitizedAppError.details);
 
   const [includeModelInfo, setIncludeModelInfo] = useState(true);
   const [includeEngineInfo, setIncludeEngineInfo] = useState(true);
@@ -203,10 +210,12 @@ export function ErrorReportSheet({
         version: getPlatformVersion(),
       },
       error: {
-        name: error instanceof Error ? error.name : undefined,
+        name: error instanceof Error ? sanitizeErrorReportString(error.name) : sanitizedAppError.name,
         code: appError.code,
-        message: appError.message,
-        stack: includeStackTrace && error instanceof Error ? error.stack : undefined,
+        message: sanitizedAppError.message,
+        stack: includeStackTrace && error instanceof Error && typeof error.stack === 'string'
+          ? sanitizeErrorReportString(error.stack)
+          : undefined,
       },
     };
 
@@ -231,7 +240,7 @@ export function ErrorReportSheet({
     }
 
     if (includeDiagnostics && hasDiagnostics) {
-      report.diagnostics = appError.details;
+      report.diagnostics = sanitizedAppError.details;
     }
 
     if (includeDeviceInfo && deviceData) {
@@ -242,8 +251,6 @@ export function ErrorReportSheet({
   }, [
     additionalInfo,
     appError.code,
-    appError.details,
-    appError.message,
     deviceData,
     error,
     hasDiagnostics,
@@ -261,6 +268,9 @@ export function ErrorReportSheet({
     engineContext,
     extraContext,
     optionsContext,
+    sanitizedAppError.details,
+    sanitizedAppError.message,
+    sanitizedAppError.name,
     scope,
     visible,
   ]);
@@ -411,7 +421,7 @@ export function ErrorReportSheet({
                   {t('models.errorReport.errorLabel')}
                 </Text>
                 <Text className="mt-2 text-sm leading-6 text-typography-700 dark:text-typography-200">
-                  {appError.message}
+                  {sanitizedAppError.message}
                 </Text>
               </ScreenCard>
 

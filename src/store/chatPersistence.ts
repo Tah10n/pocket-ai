@@ -117,6 +117,15 @@ function readOptionalPositiveInteger(value: unknown): number | undefined {
   return isPositiveFiniteNumber(value) ? Math.round(value) : undefined;
 }
 
+function readLastPathSegment(value: string): string | null {
+  return readRequiredString(
+    value
+      .split(/[/?#]/u)
+      .filter(Boolean)
+      .at(-1),
+  );
+}
+
 function sanitizePersistedChatImageAttachment(
   value: unknown,
   threadId: string,
@@ -130,6 +139,23 @@ function sanitizePersistedChatImageAttachment(
   const id = readRequiredString(attachment.id);
   const localUri = normalizeChatAttachmentLocalUri(readRequiredString(attachment.localUri));
   const fileName = readRequiredString(attachment.fileName);
+  const thumbnailUri = normalizeChatAttachmentLocalUri(attachment.thumbnailUri);
+  const thumbnailUriFileName = thumbnailUri ? readLastPathSegment(thumbnailUri) : null;
+  const requestedThumbnailFileName = readRequiredString(attachment.thumbnailFileName);
+  const thumbnailFileName = thumbnailUri && thumbnailUriFileName
+    ? requestedThumbnailFileName === thumbnailUriFileName
+      ? requestedThumbnailFileName
+      : thumbnailUriFileName
+    : null;
+  const thumbnailMetadata = thumbnailUri && thumbnailFileName && isSupportedChatImageDraftFormat({
+    mediaType: undefined,
+    fileName: thumbnailFileName,
+    localUri: thumbnailUri,
+    previewUri: thumbnailUri,
+    pickerUri: thumbnailUri,
+  })
+    ? { thumbnailUri, thumbnailFileName }
+    : null;
   const mediaType = typeof attachment.mediaType === 'string'
     ? attachment.mediaType.trim().toLowerCase()
     : undefined;
@@ -161,6 +187,7 @@ function sanitizePersistedChatImageAttachment(
     threadId,
     messageId,
     localUri,
+    ...thumbnailMetadata,
     pathCategory: CHAT_IMAGE_ATTACHMENT_PATH_CATEGORY,
     ...(mediaType ? { mediaType } : null),
     fileName,

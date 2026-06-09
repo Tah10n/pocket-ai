@@ -1,4 +1,5 @@
 import type { TFunction } from 'i18next';
+import { sanitizeErrorForReport, sanitizeErrorReportContext } from './ErrorReportSanitizer';
 
 export type AppErrorCode =
   | 'action_failed'
@@ -124,26 +125,32 @@ export function reportError(
   context?: Record<string, unknown>,
 ): AppError {
   const appError = toAppError(error);
+  const sanitizedReport = sanitizeErrorForReport(appError, { includeStack: true });
+  const sanitizedError = new AppError(appError.code, sanitizedReport.message, {
+    cause: sanitizedReport.cause,
+    details: sanitizedReport.details,
+  });
+  sanitizedError.name = sanitizedReport.name ?? appError.name;
+  if (sanitizedReport.stack) {
+    sanitizedError.stack = sanitizedReport.stack;
+  }
   const reporter = (globalThis as { Sentry?: { captureException?: (...args: unknown[]) => void } }).Sentry;
   const isDev = typeof __DEV__ === 'boolean' ? __DEV__ : process.env.NODE_ENV !== 'production';
-
-  if (!isDev && reporter?.captureException) {
-    reporter.captureException(appError, {
-      tags: { scope, code: appError.code },
-      extra: {
-        ...appError.details,
-        ...context,
-      },
-    });
-    return appError;
-  }
-
-  const extra = {
+  const extra = sanitizeErrorReportContext({
     ...appError.details,
     ...context,
-  };
-  console.error(`[${scope}]`, appError, Object.keys(extra).length > 0 ? extra : undefined);
-  return appError;
+  }) ?? {};
+
+  if (!isDev && reporter?.captureException) {
+    reporter.captureException(sanitizedError, {
+      tags: { scope, code: appError.code },
+      extra,
+    });
+    return sanitizedError;
+  }
+
+  console.error(`[${scope}]`, sanitizedError, Object.keys(extra).length > 0 ? extra : undefined);
+  return sanitizedError;
 }
 
 export function getErrorMessage(

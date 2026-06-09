@@ -191,6 +191,7 @@ export function useChatImageAttachments({
         allowsMultipleSelection: true,
         selectionLimit: pickerRemainingSlots,
         orderedSelection: true,
+        legacy: false,
         base64: false,
         exif: false,
         quality: 1,

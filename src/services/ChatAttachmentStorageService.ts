@@ -1,4 +1,5 @@
 import * as FileSystem from 'expo-file-system/legacy';
+import { SaveFormat, manipulateAsync } from 'expo-image-manipulator';
 import type { ImagePickerAsset } from 'expo-image-picker';
 import {
   CHAT_IMAGE_ATTACHMENT_PATH_CATEGORY,
@@ -7,6 +8,7 @@ import {
 } from '@/types/multimodal';
 import type { ChatThread } from '@/types/chat';
 import {
+  CHAT_IMAGE_ATTACHMENT_THUMBNAIL_MAX_SIDE_PIXELS,
   getChatAttachmentsDir,
   isSupportedChatImageDraftFormat,
   normalizeChatAttachmentLocalUri,
@@ -31,6 +33,7 @@ type ChatAttachmentStorageServiceOptions = {
 };
 
 const RECENT_DRAFT_FUTURE_GRACE_MS = 5 * 60 * 1000;
+const CHAT_IMAGE_ATTACHMENT_THUMBNAIL_JPEG_QUALITY = 0.72;
 
 type CopyableImageAsset = Pick<
   ImagePickerAsset,
@@ -78,7 +81,7 @@ function createDraftId(now: number, random: number): string {
 }
 
 function getDraftTimestampFromFileName(fileName: string): number | null {
-  const match = /^draft-(\d+)-[A-Za-z0-9]+\.(?:jpe?g|png)$/iu.exec(fileName.trim());
+  const match = /^draft-(\d+)-[A-Za-z0-9]+(?:-thumb)?\.(?:jpe?g|png)$/iu.exec(fileName.trim());
   if (!match) {
     return null;
   }
@@ -140,6 +143,19 @@ function resolveDraftFileName(draft: AttachmentDraft): string | null {
   return readNonEmptyString(uriLastSegment);
 }
 
+function resolveDraftThumbnailFileName(draft: AttachmentDraft): string | null {
+  const fileName = readNonEmptyString(draft.thumbnailFileName);
+  if (fileName) {
+    return fileName;
+  }
+
+  const uriLastSegment = readNonEmptyString(draft.thumbnailUri)
+    ?.split(/[/?#]/u)
+    .filter(Boolean)
+    .at(-1);
+  return readNonEmptyString(uriLastSegment);
+}
+
 export function materializeAttachmentDraftsForMessage({
   threadId,
   messageId,
@@ -167,14 +183,19 @@ export function materializeAttachmentDraftsForMessage({
       throw new Error(`Image attachment draft at index ${index} is not ready to send.`);
     }
 
+    const thumbnailUri = normalizeChatAttachmentLocalUri(draft.thumbnailUri);
+    const thumbnailFileName = thumbnailUri ? resolveDraftThumbnailFileName(draft) : null;
+
     return {
       id,
       threadId,
       messageId,
       localUri,
+      ...(thumbnailUri ? { thumbnailUri } : null),
       pathCategory: CHAT_IMAGE_ATTACHMENT_PATH_CATEGORY,
       ...(draft.mediaType ? { mediaType: draft.mediaType } : null),
       fileName,
+      ...(thumbnailUri && thumbnailFileName ? { thumbnailFileName } : null),
       size,
       ...(normalizePositiveInteger(draft.width) ? { width: normalizePositiveInteger(draft.width) } : null),
       ...(normalizePositiveInteger(draft.height) ? { height: normalizePositiveInteger(draft.height) } : null),
@@ -196,6 +217,11 @@ export function collectReferencedChatAttachmentLocalUrisFromThreads(
         const localUri = normalizeChatAttachmentLocalUri(attachment.localUri);
         if (localUri) {
           localUris.add(localUri);
+        }
+
+        const thumbnailUri = normalizeChatAttachmentLocalUri(attachment.thumbnailUri);
+        if (thumbnailUri) {
+          localUris.add(thumbnailUri);
         }
       });
     });
@@ -225,6 +251,11 @@ export function collectChatAttachmentLocalUrisFromUnknownThreadRecord(value: unk
       const localUri = normalizeChatAttachmentLocalUri(attachment.localUri);
       if (localUri) {
         localUris.add(localUri);
+      }
+
+      const thumbnailUri = normalizeChatAttachmentLocalUri(attachment.thumbnailUri);
+      if (thumbnailUri) {
+        localUris.add(thumbnailUri);
       }
     });
   });
@@ -273,6 +304,17 @@ function collectNormalizedChatAttachmentLocalUris(localUris: Iterable<string>): 
   return normalized;
 }
 
+function hasReferencedChatAttachmentDescendant(referenced: ReadonlySet<string>, localUri: string): boolean {
+  const directoryPrefix = localUri.endsWith('/') ? localUri : `${localUri}/`;
+  for (const referencedUri of referenced) {
+    if (referencedUri.startsWith(directoryPrefix)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 function assertChatImageAttachmentBounds(
   image: Pick<AttachmentDraft, 'size' | 'width' | 'height'>,
   options?: Parameters<typeof validateChatImageAttachmentBounds>[1],
@@ -281,6 +323,46 @@ function assertChatImageAttachmentBounds(
   if (!bounds.ok) {
     throw new ChatImageAttachmentTooLargeError();
   }
+}
+
+function resolveThumbnailResize(
+  image: Pick<AttachmentDraft, 'width' | 'height'>,
+): { width?: number; height?: number } {
+  const width = normalizePositiveInteger(image.width);
+  const height = normalizePositiveInteger(image.height);
+  const maxSide = CHAT_IMAGE_ATTACHMENT_THUMBNAIL_MAX_SIDE_PIXELS;
+
+  if (width && height) {
+    return width >= height
+      ? { width: Math.min(width, maxSide) }
+      : { height: Math.min(height, maxSide) };
+  }
+
+  if (width) {
+    return { width: Math.min(width, maxSide) };
+  }
+
+  if (height) {
+    return { height: Math.min(height, maxSide) };
+  }
+
+  return { width: maxSide, height: maxSide };
+}
+
+function assertThumbnailResultBounds(
+  thumbnail: Awaited<ReturnType<typeof manipulateAsync>>,
+): void {
+  const width = normalizePositiveInteger(thumbnail.width);
+  const height = normalizePositiveInteger(thumbnail.height);
+  const maxSide = CHAT_IMAGE_ATTACHMENT_THUMBNAIL_MAX_SIDE_PIXELS;
+
+  if (!width || !height || width > maxSide || height > maxSide) {
+    throw new ChatImageAttachmentTooLargeError();
+  }
+}
+
+function getThumbnailSaveFormat(extension: SupportedChatImageExtension): SaveFormat {
+  return extension === 'png' ? SaveFormat.PNG : SaveFormat.JPEG;
 }
 
 export function buildFailedAttachmentDraft(
@@ -322,6 +404,52 @@ export class ChatAttachmentStorageService {
     return directory;
   }
 
+  private async deleteLocalUriQuietly(localUri: string, context: string): Promise<void> {
+    try {
+      await FileSystem.deleteAsync(localUri, { idempotent: true });
+    } catch (cleanupError) {
+      console.warn('[ChatAttachmentStorage] Failed to delete chat attachment file', {
+        pathCategory: CHAT_IMAGE_ATTACHMENT_PATH_CATEGORY,
+        context,
+        ...getSanitizedErrorDetails(cleanupError),
+      });
+    }
+  }
+
+  private async createThumbnailForCopiedImage({
+    localUri,
+    thumbnailUri,
+    extension,
+    width,
+    height,
+  }: {
+    localUri: string;
+    thumbnailUri: string;
+    extension: SupportedChatImageExtension;
+    width?: number;
+    height?: number;
+  }): Promise<void> {
+    let generatedThumbnailUri: string | null = null;
+    try {
+      const thumbnail = await manipulateAsync(
+        localUri,
+        [{ resize: resolveThumbnailResize({ width, height }) }],
+        {
+          compress: CHAT_IMAGE_ATTACHMENT_THUMBNAIL_JPEG_QUALITY,
+          format: getThumbnailSaveFormat(extension),
+        },
+      );
+      generatedThumbnailUri = thumbnail.uri;
+      assertThumbnailResultBounds(thumbnail);
+      await FileSystem.moveAsync({ from: generatedThumbnailUri, to: thumbnailUri });
+      generatedThumbnailUri = null;
+    } finally {
+      if (generatedThumbnailUri && generatedThumbnailUri !== thumbnailUri) {
+        await this.deleteLocalUriQuietly(generatedThumbnailUri, 'thumbnail_temp_cleanup');
+      }
+    }
+  }
+
   public async copyImageAssetToDraft(asset: CopyableImageAsset): Promise<AttachmentDraft> {
     const sourceUri = asset.uri.trim();
     if (!sourceUri) {
@@ -346,7 +474,9 @@ export class ChatAttachmentStorageService {
     const directory = await this.ensureBaseDirectory();
     const draftId = createDraftId(this.now(), this.random());
     const fileName = `${draftId}.${extension}`;
+    const thumbnailFileName = `${draftId}-thumb.${extension}`;
     const localUri = `${directory}${fileName}`;
+    const thumbnailUri = `${directory}${thumbnailFileName}`;
 
     try {
       await FileSystem.copyAsync({ from: sourceUri, to: localUri });
@@ -422,14 +552,35 @@ export class ChatAttachmentStorageService {
       throw error;
     }
 
+    let thumbnailCreated = false;
+    try {
+      await this.createThumbnailForCopiedImage({
+        localUri,
+        thumbnailUri,
+        extension,
+        ...(normalizePositiveInteger(asset.width) ? { width: normalizePositiveInteger(asset.width) } : null),
+        ...(normalizePositiveInteger(asset.height) ? { height: normalizePositiveInteger(asset.height) } : null),
+      });
+      thumbnailCreated = true;
+    } catch (error) {
+      console.warn('[ChatAttachmentStorage] Failed to create chat attachment thumbnail', {
+        pathCategory: CHAT_IMAGE_ATTACHMENT_PATH_CATEGORY,
+        context: 'thumbnail_generation_failed',
+        ...getSanitizedErrorDetails(error),
+      });
+      await this.deleteLocalUriQuietly(thumbnailUri, 'thumbnail_generation_output_cleanup');
+    }
+
     return {
       id: draftId,
       pickerUri: sourceUri,
-      previewUri: localUri,
+      previewUri: thumbnailCreated ? thumbnailUri : localUri,
       localUri,
       pathCategory: CHAT_IMAGE_ATTACHMENT_PATH_CATEGORY,
+      ...(thumbnailCreated ? { thumbnailUri } : null),
       ...(asset.mimeType ? { mediaType: asset.mimeType } : null),
       fileName,
+      ...(thumbnailCreated ? { thumbnailFileName } : null),
       ...(copiedSize ?? fallbackSize ? { size: copiedSize ?? fallbackSize } : null),
       ...(normalizePositiveInteger(asset.width) ? { width: normalizePositiveInteger(asset.width) } : null),
       ...(normalizePositiveInteger(asset.height) ? { height: normalizePositiveInteger(asset.height) } : null),
@@ -439,11 +590,13 @@ export class ChatAttachmentStorageService {
 
   public async discardDraft(draft: AttachmentDraft): Promise<void> {
     const localUri = normalizeChatAttachmentLocalUri(draft.localUri);
-    if (draft.copyStatus !== 'copied' || !localUri) {
+    const thumbnailUri = normalizeChatAttachmentLocalUri(draft.thumbnailUri);
+    if (draft.copyStatus !== 'copied' || (!localUri && !thumbnailUri)) {
       return;
     }
 
-    await FileSystem.deleteAsync(localUri, { idempotent: true });
+    await Promise.all(Array.from(new Set([localUri, thumbnailUri].filter((uri): uri is string => Boolean(uri))))
+      .map((uri) => FileSystem.deleteAsync(uri, { idempotent: true })));
   }
 
   public async discardDrafts(drafts: readonly AttachmentDraft[]): Promise<void> {
@@ -617,7 +770,22 @@ export class ChatAttachmentStorageService {
       }
 
       const localUri = normalizeChatAttachmentLocalUri(`${directory}${fileName}`);
-      if (!localUri || referenced.has(localUri)) {
+      if (!localUri || referenced.has(localUri) || hasReferencedChatAttachmentDescendant(referenced, localUri)) {
+        continue;
+      }
+
+      let candidateInfo: FileSystem.FileInfo;
+      try {
+        candidateInfo = await FileSystem.getInfoAsync(localUri);
+      } catch (error) {
+        console.warn('[ChatAttachmentStorage] Failed to inspect chat attachment cleanup candidate', {
+          pathCategory: CHAT_IMAGE_ATTACHMENT_PATH_CATEGORY,
+          context: 'attachment_directory_reconciliation_candidate',
+          ...getSanitizedErrorDetails(error),
+        });
+        continue;
+      }
+      if (candidateInfo.exists && (candidateInfo as { isDirectory?: boolean }).isDirectory === true) {
         continue;
       }
       if (seenCandidateLocalUris.has(localUri)) {

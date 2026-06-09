@@ -12,7 +12,7 @@ import type {
   ProjectorPresenceDiagnostic,
   VisionCapabilityDiagnostic,
 } from '../types/multimodal';
-import { sanitizeMultimodalFailureReason } from '../utils/multimodalFailureReason';
+import { sanitizeMultimodalFailureCategory } from '../utils/multimodalFailureReason';
 
 function resolveVisionCapability(readiness: MultimodalReadinessState | null | undefined): VisionCapabilityDiagnostic {
   if (!readiness) {
@@ -94,7 +94,7 @@ export function buildMultimodalDiagnosticsSummary(source: {
     && Number.isFinite(source.attachmentTotalBytes)
     && source.attachmentTotalBytes > 0;
   const readiness = source.readiness ?? null;
-  const failureReason = sanitizeMultimodalFailureReason(source.failureReason ?? readiness?.failureReason);
+  const failureReason = sanitizeMultimodalFailureCategory(source.failureReason ?? readiness?.failureReason);
 
   if (!readiness && attachmentCount === 0 && !failureReason) {
     return undefined;

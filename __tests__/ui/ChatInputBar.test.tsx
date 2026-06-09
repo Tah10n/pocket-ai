@@ -316,6 +316,7 @@ describe('ChatInputBar', () => {
         id: 'draft-1',
         pickerUri: 'ph://library-image-1',
         previewUri: 'file:///document/chat-attachments/draft-1.jpg',
+        thumbnailUri: 'file:///document/chat-attachments/draft-1-thumb.jpg',
         mediaType: 'image/jpeg',
         width: 1024,
         height: 768,
@@ -334,12 +335,121 @@ describe('ChatInputBar', () => {
     );
 
     expect(getByTestId('chat-image-attachments-tray')).toBeTruthy();
-    expect(getByTestId('chat-image-attachment-preview-0')).toBeTruthy();
+    expect(getByTestId('chat-image-attachment-preview-0').props.source).toEqual({
+      uri: 'file:///document/chat-attachments/draft-1-thumb.jpg',
+    });
     expect(getByLabelText('Attached image 1 of 1 preview')).toBeTruthy();
 
     fireEvent.press(getByLabelText('Remove attached image 1 of 1'));
 
     expect(onRemoveAttachmentDraft).toHaveBeenCalledWith(drafts[0], 0);
+  });
+
+  it('falls back from a corrupt thumbnail to preview and local attachment URIs', () => {
+    reactI18nextMock.__setTranslationOverride(
+      'chat.attachments.previewUnavailableIndexedAccessibilityLabel',
+      'Attached image {{index}} of {{count}} preview unavailable',
+    );
+    const drafts: AttachmentDraft[] = [
+      {
+        id: 'draft-fallback',
+        pickerUri: 'ph://library-image-fallback',
+        thumbnailUri: 'file:///document/chat-attachments/draft-fallback-thumb.jpg',
+        previewUri: 'file:///document/chat-attachments/draft-fallback-preview.jpg',
+        localUri: 'file:///document/chat-attachments/draft-fallback-local.jpg',
+        mediaType: 'image/jpeg',
+        copyStatus: 'copied',
+      },
+    ];
+
+    const { getByLabelText, getByTestId, queryByTestId } = render(
+      <ChatInputBar
+        onSendMessage={jest.fn()}
+        onAttachImages={jest.fn()}
+        attachmentDrafts={drafts}
+        imageAttachmentsEnabled
+      />,
+    );
+
+    expect(getByTestId('chat-image-attachment-preview-0').props.source).toEqual({
+      uri: 'file:///document/chat-attachments/draft-fallback-thumb.jpg',
+    });
+
+    fireEvent(getByTestId('chat-image-attachment-preview-0'), 'error');
+
+    expect(getByTestId('chat-image-attachment-preview-0').props.source).toEqual({
+      uri: 'file:///document/chat-attachments/draft-fallback-preview.jpg',
+    });
+
+    fireEvent(getByTestId('chat-image-attachment-preview-0'), 'error');
+
+    expect(getByTestId('chat-image-attachment-preview-0').props.source).toEqual({
+      uri: 'file:///document/chat-attachments/draft-fallback-local.jpg',
+    });
+
+    fireEvent(getByTestId('chat-image-attachment-preview-0'), 'error');
+
+    expect(queryByTestId('chat-image-attachment-preview-0')).toBeNull();
+    expect(getByTestId('chat-image-attachment-unavailable-preview-0').props.accessibilityState).toEqual({ disabled: true });
+    expect(getByLabelText('Attached image 1 of 1 preview unavailable')).toBeTruthy();
+  });
+
+  it('skips empty preview candidates and collapses duplicate attachment URIs', () => {
+    reactI18nextMock.__setTranslationOverride(
+      'chat.attachments.previewUnavailableIndexedAccessibilityLabel',
+      'Attached image {{index}} of {{count}} preview unavailable',
+    );
+    const drafts: AttachmentDraft[] = [
+      {
+        id: 'draft-duplicate',
+        pickerUri: 'ph://library-image-duplicate',
+        thumbnailUri: ' ',
+        previewUri: 'file:///document/chat-attachments/draft-duplicate.jpg',
+        localUri: 'file:///document/chat-attachments/draft-duplicate.jpg',
+        mediaType: 'image/jpeg',
+        copyStatus: 'copied',
+      },
+      {
+        id: 'draft-local-only',
+        pickerUri: 'ph://library-image-local-only',
+        thumbnailUri: '',
+        previewUri: '',
+        localUri: 'file:///document/chat-attachments/draft-local-only.jpg',
+        mediaType: 'image/jpeg',
+        copyStatus: 'copied',
+      },
+      {
+        id: 'draft-empty',
+        pickerUri: 'ph://library-image-empty',
+        thumbnailUri: '',
+        previewUri: ' ',
+        mediaType: 'image/jpeg',
+        copyStatus: 'copied',
+      },
+    ];
+
+    const { getByLabelText, getByTestId, queryByTestId } = render(
+      <ChatInputBar
+        onSendMessage={jest.fn()}
+        onAttachImages={jest.fn()}
+        attachmentDrafts={drafts}
+        imageAttachmentsEnabled
+      />,
+    );
+
+    expect(getByTestId('chat-image-attachment-preview-0').props.source).toEqual({
+      uri: 'file:///document/chat-attachments/draft-duplicate.jpg',
+    });
+    expect(getByTestId('chat-image-attachment-preview-1').props.source).toEqual({
+      uri: 'file:///document/chat-attachments/draft-local-only.jpg',
+    });
+    expect(queryByTestId('chat-image-attachment-preview-2')).toBeNull();
+    expect(getByLabelText('Attached image 3 of 3 preview unavailable')).toBeTruthy();
+
+    fireEvent(getByTestId('chat-image-attachment-preview-0'), 'error');
+
+    expect(queryByTestId('chat-image-attachment-preview-0')).toBeNull();
+    expect(getByLabelText('Attached image 1 of 3 preview unavailable')).toBeTruthy();
   });
 
   it('marks failed attachment previews with a distinct id, localized label, and disabled state', () => {

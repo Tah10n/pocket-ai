@@ -123,6 +123,7 @@ describe('useChatImageAttachments', () => {
       mediaTypes: ['images'],
       allowsMultipleSelection: true,
       selectionLimit: MAX_CHAT_IMAGE_ATTACHMENTS,
+      legacy: false,
       base64: false,
       exif: false,
     }));

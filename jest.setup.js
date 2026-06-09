@@ -79,11 +79,25 @@ jest.mock('expo-file-system/legacy', () => ({
   readDirectoryAsync: jest.fn().mockResolvedValue([]),
   deleteAsync: jest.fn().mockResolvedValue(undefined),
   copyAsync: jest.fn().mockResolvedValue(undefined),
+  moveAsync: jest.fn().mockResolvedValue(undefined),
   getFreeDiskStorageAsync: jest.fn().mockResolvedValue(10 * 1024 * 1024 * 1024),
   getTotalDiskCapacityAsync: jest.fn().mockResolvedValue(100 * 1024 * 1024 * 1024),
   makeDirectoryAsync: jest.fn().mockResolvedValue(undefined),
   documentDirectory: 'test-dir/',
   cacheDirectory: 'test-cache/',
+}));
+
+jest.mock('expo-image-manipulator', () => ({
+  SaveFormat: {
+    JPEG: 'jpeg',
+    PNG: 'png',
+    WEBP: 'webp',
+  },
+  manipulateAsync: jest.fn().mockResolvedValue({
+    uri: 'test-cache/chat-attachment-thumbnail.jpg',
+    width: 512,
+    height: 384,
+  }),
 }));
 
 jest.mock('expo-file-system', () => ({

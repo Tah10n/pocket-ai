@@ -136,6 +136,22 @@ describe('ProjectorArtifactService', () => {
     expect(resolution.candidates).toEqual([]);
   });
 
+  it('keeps variant-scoped projector candidates when active variant scope is unavailable', () => {
+    const projector = createProjector(projectorFileName);
+    const service = new ProjectorArtifactService();
+
+    expect(service.resolveProjectorForModel(createVisionModel({
+      activeVariantId: undefined,
+      resolvedFileName: undefined,
+      variants: undefined,
+      projectorCandidates: [projector],
+    }))).toEqual(expect.objectContaining({
+      status: 'matched',
+      reason: 'single_projector_candidate',
+      selectedProjector: expect.objectContaining({ id: projector.id }),
+    }));
+  });
+
   it('uses deterministic filename affinity when multiple candidates are present', () => {
     const matchingProjector = createProjector(projectorFileName);
     const unrelatedProjector = createProjector('mmproj-unrelated-model-f16.gguf');

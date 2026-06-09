@@ -4,10 +4,12 @@ const { mergeContents } = require('@expo/config-plugins/build/utils/generateCode
 const BLOCKED_PERMISSIONS = new Set([
   'android.permission.CAMERA',
   'android.permission.RECORD_AUDIO',
-  'android.permission.READ_EXTERNAL_STORAGE',
   'android.permission.WRITE_EXTERNAL_STORAGE',
   'android.permission.SYSTEM_ALERT_WINDOW',
 ]);
+
+const LEGACY_GALLERY_READ_PERMISSION = 'android.permission.READ_EXTERNAL_STORAGE';
+const LEGACY_GALLERY_READ_MAX_SDK_VERSION = '32';
 
 function escapeGroovyDoubleQuotedString(value) {
   return String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
@@ -279,6 +281,10 @@ function applyAndroidManifestReleaseConfig(nextConfig) {
       const toolsNode = permission?.$?.['tools:node'];
       const isRemoveStub = typeof toolsNode === 'string' && toolsNode.trim().toLowerCase() === 'remove';
 
+      if (name === LEGACY_GALLERY_READ_PERMISSION && !isRemoveStub && permission?.$) {
+        permission.$['android:maxSdkVersion'] = LEGACY_GALLERY_READ_MAX_SDK_VERSION;
+      }
+
       return !BLOCKED_PERMISSIONS.has(name) || isRemoveStub;
     });
   }
@@ -309,4 +315,6 @@ module.exports = withAndroidReleaseConfig;
 module.exports._internal = {
   applyAndroidManifestReleaseConfig,
   BLOCKED_PERMISSIONS,
+  LEGACY_GALLERY_READ_PERMISSION,
+  LEGACY_GALLERY_READ_MAX_SDK_VERSION,
 };

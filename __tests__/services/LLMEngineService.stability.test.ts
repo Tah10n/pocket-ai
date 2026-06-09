@@ -70,6 +70,13 @@ function createMockContext(options?: { n_gpu_layers?: number }) {
     };
 }
 
+async function waitForMockCall(mock: jest.Mock, maxTicks = 50): Promise<void> {
+    for (let i = 0; i < maxTicks && mock.mock.calls.length === 0; i += 1) {
+        await Promise.resolve();
+    }
+    expect(mock).toHaveBeenCalled();
+}
+
 describe('LLMEngineService Stability', () => {
     const mockModel = {
         id: 'repo/model',
@@ -300,10 +307,7 @@ describe('LLMEngineService Stability', () => {
             params: { n_predict: 16 },
         });
 
-        for (let i = 0; i < 5 && completion.mock.calls.length === 0; i += 1) {
-            await Promise.resolve();
-        }
-        expect(completion).toHaveBeenCalled();
+        await waitForMockCall(completion);
 
         await llmEngineService.unload();
 
@@ -375,10 +379,7 @@ describe('LLMEngineService Stability', () => {
             });
             const observedCompletion = completionPromise.catch((error) => error);
 
-            for (let i = 0; i < 5 && completion.mock.calls.length === 0; i += 1) {
-                await Promise.resolve();
-            }
-            expect(completion).toHaveBeenCalled();
+            await waitForMockCall(completion);
 
             const unloadPromise = llmEngineService.unload();
             const observedUnload = unloadPromise.catch((error) => error);
@@ -490,6 +491,7 @@ describe('LLMEngineService Stability', () => {
             messages: [{ role: 'user', content: 'Hello' }],
             params: { n_predict: 16 },
         });
+        const observedCompletion = completionPromise.catch((error) => error);
 
         for (let i = 0; i < 5 && getFormattedChat.mock.calls.length === 0; i += 1) {
             await Promise.resolve();
@@ -497,15 +499,13 @@ describe('LLMEngineService Stability', () => {
         expect(getFormattedChat).toHaveBeenCalled();
 
         const stopPromise = llmEngineService.stopCompletion();
-        for (let i = 0; i < 5 && stopCompletion.mock.calls.length === 0; i += 1) {
-            await Promise.resolve();
-        }
-
-        expect(stopCompletion).toHaveBeenCalled();
-        await expect(stopPromise).resolves.toBeUndefined();
+        await Promise.resolve();
+        expect(stopCompletion).not.toHaveBeenCalled();
+        await expect(observedCompletion).resolves.toMatchObject({ code: 'engine_busy' });
 
         resolveFormatted?.();
-        await expect(completionPromise).rejects.toMatchObject({ code: 'engine_not_ready' });
+        await expect(stopPromise).resolves.toBeUndefined();
+        expect(stopCompletion).toHaveBeenCalled();
 
         expect(completion).not.toHaveBeenCalled();
     });
@@ -798,6 +798,106 @@ describe('LLMEngineService Stability', () => {
         }
     });
 
+    it('direct stopCompletion cancels a hung prompt token operation before native completion starts', async () => {
+        jest.useFakeTimers();
+        const getFormattedChat = jest.fn(() => new Promise(() => undefined));
+        const tokenize = jest.fn().mockResolvedValue({ tokens: [1, 2, 3] });
+        const stopCompletion = jest.fn().mockResolvedValue(undefined);
+
+        (initLlama as jest.Mock).mockImplementation(async (options?: { n_gpu_layers?: number }) => ({
+            ...createMockContext(options),
+            getFormattedChat,
+            stopCompletion,
+            tokenize,
+        }));
+
+        try {
+            await llmEngineService.load(mockModel.id);
+            const countPromise = llmEngineService.countPromptTokens({
+                messages: [{ role: 'user', content: 'Stop token prep' }],
+            });
+            const observedCount = countPromise.catch((error) => error);
+
+            for (let i = 0; i < 5 && getFormattedChat.mock.calls.length === 0; i += 1) {
+                await Promise.resolve();
+            }
+            expect(getFormattedChat).toHaveBeenCalled();
+            expect(llmEngineService.hasActiveCompletion()).toBe(false);
+            expect(llmEngineService.hasActiveChatBlockingContextOperation()).toBe(true);
+
+            const stopPromise = llmEngineService.stopCompletion();
+
+            await expect(observedCount).resolves.toMatchObject({ code: 'engine_busy' });
+            expect(stopCompletion).not.toHaveBeenCalled();
+            await jest.advanceTimersByTimeAsync(5000);
+            await expect(stopPromise).resolves.toBeUndefined();
+
+            expect(llmEngineService.hasActiveCompletion()).toBe(false);
+            expect(llmEngineService.hasActiveContextOperation()).toBe(false);
+            expect(llmEngineService.hasActiveChatBlockingContextOperation()).toBe(false);
+            expect(tokenize).not.toHaveBeenCalled();
+        } finally {
+            jest.useRealTimers();
+        }
+    });
+
+    it('does not detach the context when a stopped chat operation drains but a background operation is hung', async () => {
+        let resolvePromptPreparation: (() => void) | undefined;
+        const getFormattedChat = jest.fn(() => new Promise((resolve) => {
+            resolvePromptPreparation = () => resolve({ prompt: 'Prompt after stop', additional_stops: [] });
+        }));
+        const completion = jest.fn().mockResolvedValue({ text: 'Should not run after stop' });
+        const stopCompletion = jest.fn().mockResolvedValue(undefined);
+
+        (initLlama as jest.Mock).mockImplementation(async (options?: { n_gpu_layers?: number }) => ({
+            ...createMockContext(options),
+            completion,
+            getFormattedChat,
+            stopCompletion,
+        }));
+
+        await llmEngineService.load(mockModel.id);
+        const loadedContext = (llmEngineService as any).context;
+
+        const completionPromise = llmEngineService.chatCompletion({
+            messages: [{ role: 'user', content: 'Stop while prompt prep is active' }],
+            params: { n_predict: 16 },
+        });
+        const observedCompletion = completionPromise.catch((error) => error);
+
+        for (let i = 0; i < 5 && getFormattedChat.mock.calls.length === 0; i += 1) {
+            await Promise.resolve();
+        }
+        expect(getFormattedChat).toHaveBeenCalled();
+        expect(llmEngineService.hasActiveChatBlockingContextOperation()).toBe(true);
+
+        void (llmEngineService as any).trackContextOperation(
+            () => {
+                return new Promise(() => undefined);
+            },
+            { chatBlocking: false },
+        ).catch(() => undefined);
+        expect(llmEngineService.hasActiveContextOperation()).toBe(true);
+
+        const stopPromise = llmEngineService.stopCompletion();
+        await expect(observedCompletion).resolves.toMatchObject({ code: 'engine_busy' });
+        expect(completion).not.toHaveBeenCalled();
+
+        resolvePromptPreparation?.();
+        await expect(stopPromise).resolves.toBeUndefined();
+
+        expect(stopCompletion).toHaveBeenCalled();
+        expect(completion).not.toHaveBeenCalled();
+        expect((llmEngineService as any).context).toBe(loadedContext);
+        expect(llmEngineService.getState()).toEqual(expect.objectContaining({
+            status: 'ready',
+            activeModelId: mockModel.id,
+        }));
+        expect(llmEngineService.hasActiveChatBlockingContextOperation()).toBe(false);
+        expect(llmEngineService.hasActiveContextOperation()).toBe(true);
+        expect(releaseAllLlama).not.toHaveBeenCalled();
+    });
+
     it('bounds completion startup when a cancelled background context operation does not drain', async () => {
         jest.useFakeTimers();
         const completion = jest.fn().mockResolvedValue({ text: 'Should not run' });
@@ -880,6 +980,7 @@ describe('LLMEngineService Stability', () => {
             messages: [{ role: 'user', content: 'Hello' }],
             params: { n_predict: 16 },
         });
+        const observedCompletion = completionPromise.catch((error) => error);
         await expect(observedBackgroundCount).resolves.toMatchObject({ code: 'engine_busy' });
         expect(completion).not.toHaveBeenCalled();
 
@@ -929,7 +1030,7 @@ describe('LLMEngineService Stability', () => {
         expect(tokenize).toHaveBeenCalledTimes(2);
     });
 
-    it('releases llama during unload without waiting for the thinking capability probe', async () => {
+    it('waits for the tracked thinking capability probe before releasing llama during unload', async () => {
         const previousEnv = process.env.NODE_ENV;
         (process.env as any).NODE_ENV = 'development';
 
@@ -949,7 +1050,6 @@ describe('LLMEngineService Stability', () => {
 
         try {
             await llmEngineService.load(mockModel.id);
-            (llmEngineService as any).launchThinkingCapabilityProbe(mockModel.id);
             for (let i = 0; i < 5 && getFormattedChat.mock.calls.length === 0; i += 1) {
                 await Promise.resolve();
             }
@@ -957,17 +1057,14 @@ describe('LLMEngineService Stability', () => {
             (registry.updateModel as jest.Mock).mockClear();
 
             const unloadPromise = llmEngineService.unload();
-            for (let i = 0; i < 5 && (releaseAllLlama as jest.Mock).mock.calls.length === 0; i += 1) {
-                await Promise.resolve();
-            }
+            await Promise.resolve();
 
-            expect(releaseAllLlama).toHaveBeenCalled();
-            await unloadPromise;
+            expect(releaseAllLlama).not.toHaveBeenCalled();
 
             resolveProbeFormat?.();
-            for (let i = 0; i < 5; i += 1) {
-                await Promise.resolve();
-            }
+            await unloadPromise;
+
+            expect(releaseAllLlama).toHaveBeenCalled();
 
             expect(registry.updateModel).not.toHaveBeenCalledWith(expect.objectContaining({
                 thinkingCapability: expect.anything(),

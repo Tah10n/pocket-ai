@@ -6,6 +6,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 import DeviceInfo from 'react-native-device-info';
 import { getSystemMemorySnapshot } from '../../src/services/SystemMetricsService';
 import { assertPrivateStorageWritable, createStorage } from '../../src/services/storage';
+import { UNKNOWN_PROJECTOR_MEMORY_FIT_FALLBACK_BYTES } from '../../src/utils/modelSize';
 
 const mockStorage = {
   getString: jest.fn(),
@@ -1416,6 +1417,62 @@ describe('LocalStorageRegistry', () => {
     expect(updatedModels[0].memoryFitDecision).toBe('likely_oom');
   });
 
+  it.each(['downloaded', 'active'] as const)(
+    'uses the unknown %s projector fallback only for memory-fit recalculation',
+    async (lifecycleStatus) => {
+      const modelSizeBytes = 100_000_000;
+      (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(2_000_000_000);
+      (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([
+        createMockModel({
+          size: modelSizeBytes,
+          metadataTrust: 'trusted_remote',
+          localPath: 'model.gguf',
+          fitsInRam: true,
+          memoryFitDecision: 'fits_high_confidence',
+          memoryFitConfidence: 'high',
+          projectorCandidates: [createProjector({
+            size: null,
+            localPath: 'mmproj-model.gguf',
+            lifecycleStatus,
+          })],
+          downloadIntegrity: {
+            kind: 'size',
+            sizeBytes: modelSizeBytes,
+            checkedAt: 10,
+          },
+        }),
+      ]);
+      (registry.saveModels as jest.Mock) = jest.fn();
+      (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+        if (uri.endsWith('/model.gguf')) {
+          return { exists: true, size: modelSizeBytes };
+        }
+
+        if (uri.endsWith('/mmproj-model.gguf')) {
+          return { exists: true, size: UNKNOWN_PROJECTOR_MEMORY_FIT_FALLBACK_BYTES * 2 };
+        }
+
+        return { exists: false };
+      });
+      (FileSystem.readAsStringAsync as jest.Mock).mockImplementation(async (uri: string) => {
+        if (uri.endsWith('/mmproj-model.gguf')) {
+          throw new Error('transient projector read failed');
+        }
+
+        return mockValidGgufHeaderBase64;
+      });
+
+      await registry.validateRegistry();
+
+      const updatedModels = (registry.saveModels as jest.Mock).mock.calls[0][0];
+      expect(updatedModels[0].size).toBe(modelSizeBytes);
+      expect(updatedModels[0].projectorCandidates[0].size).toBeNull();
+      expect(updatedModels[0].projectorCandidates[0].lifecycleStatus).toBe('downloaded');
+      expect(updatedModels[0].fitsInRam).toBe(false);
+      expect(updatedModels[0].memoryFitDecision).toBe('likely_oom');
+    },
+  );
+
   it('recomputes a RAM warning decision for large verified downloaded models', async () => {
     (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(8_000_000_000);
     (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([
@@ -2269,7 +2326,7 @@ describe('LocalStorageRegistry', () => {
     expect(mockStorage.remove).toHaveBeenCalledWith('quarantined-model-files-v1');
   });
 
-  it('keeps private-reset-preserved files safe during final quarantine deletion', async () => {
+  it('keeps legacy private-reset-preserved files safe during final quarantine deletion', async () => {
     (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([]);
     mockStorage.getString.mockImplementation((key: string) => {
       if (key === 'private-reset-preserved-model-files-v1') {
@@ -2298,24 +2355,85 @@ describe('LocalStorageRegistry', () => {
     await expect(registry.deleteQuarantinedModelFiles()).resolves.toBe(1);
 
     expect(FileSystem.deleteAsync).toHaveBeenCalledTimes(1);
-    expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/models/orphan.gguf', { idempotent: true });
     expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/models/preserved.gguf', expect.anything());
-    expect(mockStorage.remove).toHaveBeenCalledWith('quarantined-model-files-v1');
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/models/orphan.gguf', { idempotent: true });
   });
 
-  it('preserves model files that existed before a private storage reset', async () => {
-    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([]);
+  it('preserves completed model and projector files before a private storage reset', async () => {
+    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([
+      createMockModel({
+        localPath: 'verified-model.gguf',
+        lifecycleStatus: LifecycleStatus.DOWNLOADED,
+        downloadIntegrity: {
+          kind: 'size',
+          sizeBytes: 1000,
+          checkedAt: 123,
+        },
+        projectorCandidates: [
+          createProjector({
+            localPath: 'verified-mmproj.gguf',
+            lifecycleStatus: 'downloaded',
+            size: 1000,
+          }),
+          createProjector({
+            id: 'projector-test-model-main-mmproj-partial.gguf',
+            localPath: 'partial-mmproj.gguf',
+            lifecycleStatus: 'paused',
+            resumeData: 'projector-resume-data',
+          }),
+        ],
+      }),
+      createMockModel({
+        id: 'test/partial',
+        localPath: 'partial-model.gguf',
+        lifecycleStatus: LifecycleStatus.PAUSED,
+        resumeData: 'model-resume-data',
+      }),
+      createMockModel({
+        id: 'test/completed-limited-verification',
+        localPath: 'limited-verification-model.gguf',
+        lifecycleStatus: LifecycleStatus.DOWNLOADED,
+        downloadIntegrity: undefined,
+        metadataTrust: undefined,
+      }),
+    ]);
     (FileSystem.readDirectoryAsync as jest.Mock)
-      .mockResolvedValueOnce(['pre-reset.gguf', '../bad'])
-      .mockResolvedValueOnce(['pre-reset.gguf', 'new-orphan.gguf']);
+      .mockResolvedValueOnce([
+        'verified-model.gguf',
+        'verified-mmproj.gguf',
+        'partial-model.gguf',
+        'partial-mmproj.gguf',
+        'limited-verification-model.gguf',
+        'new-orphan.gguf',
+      ]);
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (
+        uri.endsWith('/verified-model.gguf')
+        || uri.endsWith('/verified-mmproj.gguf')
+        || uri.endsWith('/partial-model.gguf')
+        || uri.endsWith('/partial-mmproj.gguf')
+        || uri.endsWith('/limited-verification-model.gguf')
+        || uri.endsWith('/new-orphan.gguf')
+      ) {
+        return { exists: true, size: 1000 };
+      }
+
+      return { exists: false, size: 0 };
+    });
 
     await registry.preserveExistingModelFilesForPrivateStorageReset();
     const preservationPayload = mockStorage.set.mock.calls.find(
       ([key]) => key === 'private-reset-preserved-model-files-v1',
     )?.[1];
+    expect(preservationPayload).toEqual(expect.stringContaining('verified-model.gguf'));
+    expect(preservationPayload).toEqual(expect.stringContaining('verified-mmproj.gguf'));
+    expect(preservationPayload).toEqual(expect.stringContaining('limited-verification-model.gguf'));
+    expect(preservationPayload).not.toEqual(expect.stringContaining('partial-model.gguf'));
+    expect(preservationPayload).not.toEqual(expect.stringContaining('partial-mmproj.gguf'));
     mockStorage.getString.mockImplementation((key: string) => (
       key === 'private-reset-preserved-model-files-v1' ? preservationPayload : null
     ));
+    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([]);
 
     await registry.validateRegistry([]);
 
@@ -2324,30 +2442,40 @@ describe('LocalStorageRegistry', () => {
       ([key]) => key === 'quarantined-model-files-v1',
     )?.[1];
     expect(quarantinePayload).toEqual(expect.stringContaining('new-orphan.gguf'));
-    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/models/pre-reset.gguf', expect.anything());
-    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/models/../bad', expect.anything());
+    expect(quarantinePayload).toEqual(expect.stringContaining('partial-model.gguf'));
+    expect(quarantinePayload).toEqual(expect.stringContaining('partial-mmproj.gguf'));
+    expect(quarantinePayload).not.toEqual(expect.stringContaining('verified-model.gguf'));
+    expect(quarantinePayload).not.toEqual(expect.stringContaining('verified-mmproj.gguf'));
+    expect(quarantinePayload).not.toEqual(expect.stringContaining('limited-verification-model.gguf'));
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalled();
   });
 
-  it('suspends orphan cleanup when reset-time model file snapshot fails', async () => {
-    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([]);
+  it('fails closed when reset-time completed file snapshot cannot read the private registry', async () => {
+    (registry.getModels as jest.Mock) = jest.fn(() => {
+      throw new Error('private registry unavailable');
+    });
     (FileSystem.readDirectoryAsync as jest.Mock)
-      .mockRejectedValueOnce(new Error('directory temporarily unavailable'))
       .mockResolvedValueOnce(['preserved-after-rescan.gguf', 'also-preserved.gguf']);
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: true, size: 1000 });
 
     await registry.preserveExistingModelFilesForPrivateStorageReset();
     const preservationPayload = mockStorage.set.mock.calls.find(
       ([key]) => key === 'private-reset-preserved-model-files-v1',
     )?.[1];
+    expect(preservationPayload).toEqual(expect.stringContaining('"scanComplete":false'));
+    expect(preservationPayload).toEqual(expect.stringContaining('"completedOnly":false'));
     mockStorage.getString.mockImplementation((key: string) => (
       key === 'private-reset-preserved-model-files-v1' ? preservationPayload : null
     ));
+    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([]);
 
     await registry.validateRegistry([]);
 
     expect(FileSystem.deleteAsync).not.toHaveBeenCalled();
-    expect(mockStorage.set).toHaveBeenLastCalledWith(
-      'private-reset-preserved-model-files-v1',
-      expect.stringContaining('preserved-after-rescan.gguf'),
-    );
+    const quarantinePayload = mockStorage.set.mock.calls.find(
+      ([key]) => key === 'quarantined-model-files-v1',
+    )?.[1];
+    expect(quarantinePayload ?? '').not.toEqual(expect.stringContaining('preserved-after-rescan.gguf'));
+    expect(quarantinePayload ?? '').not.toEqual(expect.stringContaining('also-preserved.gguf'));
   });
 });

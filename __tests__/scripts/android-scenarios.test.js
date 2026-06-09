@@ -59,19 +59,19 @@ describe('app image picker configuration', () => {
     expect(appConfig.expo.plugins).toContain('./plugins/withIosPhotoLibraryPermissionLocalization');
     expect(appConfig.expo.android.permissions).not.toContain('CAMERA');
     expect(appConfig.expo.android.permissions).not.toContain('RECORD_AUDIO');
-    expect(appConfig.expo.android.permissions).not.toContain('READ_EXTERNAL_STORAGE');
+    expect(appConfig.expo.android.permissions).toContain('READ_EXTERNAL_STORAGE');
     expect(appConfig.expo.android.permissions).not.toContain('WRITE_EXTERNAL_STORAGE');
     expect(appConfig.expo.android.blockedPermissions).toEqual(
       expect.arrayContaining([
         'android.permission.CAMERA',
         'android.permission.RECORD_AUDIO',
-        'android.permission.READ_EXTERNAL_STORAGE',
         'android.permission.WRITE_EXTERNAL_STORAGE',
       ])
     );
+    expect(appConfig.expo.android.blockedPermissions).not.toContain('android.permission.READ_EXTERNAL_STORAGE');
   });
 
-  it('release config plugin removes blocked Android capture and broad storage permissions', () => {
+  it('release config plugin removes blocked Android capture/write permissions and caps legacy gallery read', () => {
     const nextConfig = {
       modResults: {
         manifest: {
@@ -94,10 +94,20 @@ describe('app image picker configuration', () => {
     );
 
     expect(result.modResults.manifest.application[0].$['android:allowBackup']).toBe('false');
-    expect(permissionNames).toEqual(['android.permission.INTERNET', 'android.permission.CAMERA']);
+    expect(permissionNames).toEqual([
+      'android.permission.INTERNET',
+      'android.permission.CAMERA',
+      'android.permission.READ_EXTERNAL_STORAGE',
+    ]);
     expect(result.modResults.manifest['uses-permission']).toEqual([
       { $: { 'android:name': 'android.permission.INTERNET' } },
       { $: { 'android:name': 'android.permission.CAMERA', 'tools:node': 'remove' } },
+      {
+        $: {
+          'android:name': 'android.permission.READ_EXTERNAL_STORAGE',
+          'android:maxSdkVersion': '32',
+        },
+      },
     ]);
   });
 });

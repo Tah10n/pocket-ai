@@ -20,10 +20,14 @@ export interface ModelVisionCapabilityBadgePresentation {
 type ModelVisionCapabilityInput = Partial<Pick<
   ModelMetadata,
   | 'artifactRole'
+  | 'activeVariantId'
   | 'chatModalities'
+  | 'id'
   | 'projectorCandidates'
+  | 'resolvedFileName'
   | 'selectedProjectorId'
   | 'multimodalReadiness'
+  | 'variants'
 >>;
 
 type ModelCapabilityInput = Pick<
@@ -353,13 +357,47 @@ export function modelSupportsVision(model: ModelVisionCapabilityInput): boolean 
 }
 
 function hasReadyProjectorCandidate(
-  model: Pick<ModelMetadata, 'projectorCandidates' | 'selectedProjectorId'>,
+  model: ModelVisionCapabilityInput,
 ): boolean {
-  const candidates = model.projectorCandidates ?? [];
-  return candidates.some((candidate) => (
-    (model.selectedProjectorId === undefined || candidate.id === model.selectedProjectorId)
-    && (candidate.lifecycleStatus === 'downloaded' || candidate.lifecycleStatus === 'active')
+  const candidates = getCompatibleProjectorCandidates(model);
+  const selectedProjectorId = normalizeOptionalString(model.selectedProjectorId);
+  const readyCandidates = candidates.filter((candidate) => (
+    candidate.lifecycleStatus === 'downloaded' || candidate.lifecycleStatus === 'active'
   ));
+
+  return selectedProjectorId
+    ? readyCandidates.some((candidate) => candidate.id === selectedProjectorId)
+    : readyCandidates.length > 0;
+}
+
+function getActiveVariantKeys(model: ModelVisionCapabilityInput): Set<string> {
+  const activeVariantId = normalizeOptionalString(model.activeVariantId);
+  const resolvedFileName = normalizeOptionalString(model.resolvedFileName);
+  const activeVariant = model.variants?.find((variant) => (
+    (activeVariantId !== null && (variant.variantId === activeVariantId || variant.fileName === activeVariantId))
+    || (resolvedFileName !== null && (variant.variantId === resolvedFileName || variant.fileName === resolvedFileName))
+  ));
+
+  return new Set([
+    activeVariantId,
+    resolvedFileName,
+    normalizeOptionalString(activeVariant?.variantId),
+    normalizeOptionalString(activeVariant?.fileName),
+  ].filter((value): value is string => value !== null));
+}
+
+function getCompatibleProjectorCandidates(model: ModelVisionCapabilityInput): NonNullable<ModelMetadata['projectorCandidates']> {
+  const modelId = normalizeOptionalString(model.id);
+  const activeVariantKeys = getActiveVariantKeys(model);
+
+  return (model.projectorCandidates ?? []).filter((candidate) => {
+    if (modelId !== null && candidate.ownerModelId !== modelId) {
+      return false;
+    }
+
+    const ownerVariantId = normalizeOptionalString(candidate.ownerVariantId);
+    return ownerVariantId === null || activeVariantKeys.size === 0 || activeVariantKeys.has(ownerVariantId);
+  });
 }
 
 export function getModelVisionCapabilityStatusLabelKey(
@@ -373,7 +411,7 @@ export function getModelVisionCapabilityStatusLabelKey(
     return 'models.vision.capabilityReady';
   }
 
-  return Array.isArray(model.projectorCandidates) && model.projectorCandidates.length > 0
+  return getCompatibleProjectorCandidates(model).length > 0
     ? 'models.vision.capabilityNeedsProjector'
     : 'models.vision.projectorMissing';
 }

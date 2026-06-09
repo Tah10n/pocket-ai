@@ -1,9 +1,11 @@
 import * as FileSystem from 'expo-file-system/legacy';
+import * as RNFS from 'react-native-fs';
 import { getModelsDir } from './FileSystemSetup';
-import { safeJoinModelPath } from '../utils/safeFilePath';
+import { fileUriToNativePath, safeJoinModelPath } from '../utils/safeFilePath';
 import { AppError } from './AppError';
 import type { ProjectorArtifact } from '../types/multimodal';
 import { getCandidateProjectorDownloadFileNames } from '../utils/modelFiles';
+import { normalizeSha256Digest } from '../utils/sha256';
 
 type ExistingFileInfo = FileSystem.FileInfo & { exists: true; size?: number | null };
 
@@ -12,6 +14,22 @@ function toCandidateFileLabel(value: string): string {
     .split(/[\\/]/u)
     .filter(Boolean)
     .at(-1) ?? '[unknown]';
+}
+
+async function verifyProjectorRawFileIdentity(
+  projectorPath: string,
+  expectedSha256: string,
+): Promise<boolean> {
+  let actualSha256: string | undefined;
+  try {
+    actualSha256 = normalizeSha256Digest(
+      await RNFS.hash(fileUriToNativePath(projectorPath), 'sha256'),
+    );
+  } catch {
+    return false;
+  }
+
+  return actualSha256 === expectedSha256;
 }
 
 export async function resolveModelFilePathOrThrow({
@@ -59,6 +77,9 @@ export async function resolveProjectorFilePathOrThrow({
     });
   }
 
+  const explicitLocalPath = isValidProjectorLocalPath(projector.localPath) ? projector.localPath : undefined;
+  const rawFileName = projector.fileName;
+  const expectedSha256 = normalizeSha256Digest(projector.sha256);
   const candidates = Array.from(new Set([
     ...(typeof projector.localPath === 'string' ? [projector.localPath] : []),
     ...getCandidateProjectorDownloadFileNames(projector),
@@ -72,6 +93,20 @@ export async function resolveProjectorFilePathOrThrow({
 
     const fileInfo = await FileSystem.getInfoAsync(projectorPath);
     if (fileInfo.exists) {
+      const isRawUpstreamName = candidate === rawFileName;
+      const isExplicitLocalPath = explicitLocalPath === candidate;
+      if (isRawUpstreamName && expectedSha256) {
+        const isVerifiedRawFile = await verifyProjectorRawFileIdentity(
+          projectorPath,
+          expectedSha256,
+        );
+        if (!isVerifiedRawFile) {
+          continue;
+        }
+      } else if (isRawUpstreamName && !isExplicitLocalPath) {
+        continue;
+      }
+
       return {
         projectorPath,
         localPath: candidate,
@@ -87,4 +122,8 @@ export async function resolveProjectorFilePathOrThrow({
       candidates: candidates.map(toCandidateFileLabel),
     },
   });
+}
+
+function isValidProjectorLocalPath(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
 }

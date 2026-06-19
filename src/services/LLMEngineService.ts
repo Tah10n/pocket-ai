@@ -150,8 +150,7 @@ type StateListener = (state: EngineState) => void;
 type ChatCompletionReasoningFormat = NonNullable<NonNullable<LlmChatCompletionOptions['params']>['reasoning_format']>;
 const DEFAULT_CONTEXT_SIZE = 4096;
 const DEFAULT_LLAMA_NATIVE_MICRO_BATCH_TOKENS = 512;
-const DEFAULT_LLAMA_NATIVE_MULTIMODAL_BATCH_TOKENS = 2048;
-const MULTIMODAL_NON_CAUSAL_IMAGE_DECODE_MIN_BATCH_TOKENS = 1536;
+const DEFAULT_LLAMA_NATIVE_MULTIMODAL_BATCH_TOKENS = 512;
 const MULTIMODAL_IMAGE_MAX_TOKENS_CEILING = 384;
 const MULTIMODAL_IMAGE_MAX_TOKENS_N_UBATCH_HEADROOM_RATIO = 0.75;
 const MAX_NATIVE_LOG_LINES = 120;
@@ -2096,17 +2095,24 @@ class LLMEngineService {
       return configuredBatchParams;
     }
 
-    const roundedContextTokens = Math.max(1, Math.round(contextTokens));
+    const roundedContextTokens = Math.max(32, Math.round(contextTokens));
     const targetBatchTokens = Math.min(
       DEFAULT_LLAMA_NATIVE_MULTIMODAL_BATCH_TOKENS,
       roundedContextTokens,
     );
-    if (targetBatchTokens < MULTIMODAL_NON_CAUSAL_IMAGE_DECODE_MIN_BATCH_TOKENS) {
-      return configuredBatchParams;
-    }
 
-    const nUbatch = Math.max(configuredBatchParams?.nUbatch ?? targetBatchTokens, targetBatchTokens);
-    const nBatch = Math.max(configuredBatchParams?.nBatch ?? targetBatchTokens, nUbatch);
+    const configuredNBatch = configuredBatchParams?.nBatch;
+    const nBatch = typeof configuredNBatch === 'number' && Number.isFinite(configuredNBatch) && configuredNBatch > 0
+      ? Math.max(32, Math.round(configuredNBatch))
+      : targetBatchTokens;
+    // llama.rn's mtmd image path splits non-causal image decode by n_batch and then calls
+    // llama_decode(). llama.cpp aborts the process if n_ubatch is smaller than that chunk.
+    const nUbatch = Math.max(
+      typeof configuredBatchParams?.nUbatch === 'number' && Number.isFinite(configuredBatchParams.nUbatch)
+        ? Math.max(32, Math.round(configuredBatchParams.nUbatch))
+        : nBatch,
+      nBatch,
+    );
     return { nBatch, nUbatch };
   }
 
@@ -2127,11 +2133,20 @@ class LLMEngineService {
       : DEFAULT_LLAMA_NATIVE_MICRO_BATCH_TOKENS;
 
     return {
-      isSafe: nBatch >= MULTIMODAL_NON_CAUSAL_IMAGE_DECODE_MIN_BATCH_TOKENS
-        && nUbatch >= MULTIMODAL_NON_CAUSAL_IMAGE_DECODE_MIN_BATCH_TOKENS,
+      isSafe: nBatch > 0 && nUbatch >= nBatch,
       nBatch,
       nUbatch,
     };
+  }
+
+  private buildMultimodalNativeBatchFailureReason({
+    nBatch,
+    nUbatch,
+  }: {
+    nBatch: number;
+    nUbatch: number;
+  }): string {
+    return `Native multimodal image decoding requires n_ubatch (${nUbatch}) to be at least n_batch (${nBatch}).`;
   }
 
   private resolveMultimodalImageMaxTokens(): number {
@@ -3776,7 +3791,7 @@ class LLMEngineService {
         this.buildMultimodalReadinessState(model, 'unsupported', {
           projector,
           projectorSize: resolvedProjector.fileInfo.size,
-          failureReason: `Native multimodal image decoding requires n_batch and n_ubatch of at least ${MULTIMODAL_NON_CAUSAL_IMAGE_DECODE_MIN_BATCH_TOKENS}.`,
+          failureReason: this.buildMultimodalNativeBatchFailureReason(nativeBatchSafety),
         }),
       );
       await this.releaseActiveMultimodalContext({ modelId: model.id, context });
@@ -3977,6 +3992,36 @@ class LLMEngineService {
           readinessProjectorId: readiness.projectorId,
           runtimeProjectorId: activeMultimodal.projectorId,
           mediaPathCount: mediaPathOccurrenceCount,
+        },
+      });
+    }
+
+    const nativeBatchSafety = this.resolveMultimodalNativeBatchSafety();
+    if (!nativeBatchSafety.isSafe) {
+      const currentModel = this.state.activeModelId ? registry.getModel(this.state.activeModelId) : null;
+      const failureReason = this.buildMultimodalNativeBatchFailureReason(nativeBatchSafety);
+      if (currentModel && currentModel.id === activeMultimodal.modelId) {
+        this.persistMultimodalReadiness(
+          currentModel.id,
+          this.buildMultimodalReadinessState(currentModel, 'unsupported', {
+            projector: {
+              id: activeMultimodal.projectorId,
+              size: activeMultimodal.projectorSizeBytes,
+            },
+            projectorSize: activeMultimodal.projectorSizeBytes,
+            failureReason,
+          }),
+        );
+      }
+
+      throw new AppError('multimodal_not_ready', 'Multimodal runtime is not safe for image decoding on the active load profile.', {
+        details: {
+          activeModelId: this.state.activeModelId,
+          readinessStatus: readiness?.status,
+          runtimeProjectorId: activeMultimodal.projectorId,
+          mediaPathCount: mediaPathOccurrenceCount,
+          nBatch: nativeBatchSafety.nBatch,
+          nUbatch: nativeBatchSafety.nUbatch,
         },
       });
     }
@@ -4662,10 +4707,14 @@ class LLMEngineService {
       const lowMemoryBatchSize = lowMemoryBatchParams?.nBatch ?? null;
       const lowMemoryMicroBatchSize = lowMemoryBatchParams?.nUbatch ?? null;
       const effectiveBatchParams = shouldUseLowMemoryContextParams && lowMemoryBatchSize !== null && lowMemoryMicroBatchSize !== null
-        ? {
-            nBatch: lowMemoryBatchSize,
-            nUbatch: lowMemoryMicroBatchSize,
-          }
+        ? this.resolveMultimodalSafeBatchParams({
+            configuredBatchParams: {
+              nBatch: lowMemoryBatchSize,
+              nUbatch: lowMemoryMicroBatchSize,
+            },
+            hasLoadTimeMmproj,
+            contextTokens: finalContextSize,
+          })
         : this.resolveMultimodalSafeBatchParams({
             configuredBatchParams,
             hasLoadTimeMmproj,

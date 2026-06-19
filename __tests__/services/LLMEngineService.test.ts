@@ -3316,8 +3316,8 @@ describe('LLMEngineService', () => {
 
     expect(llamaRn.initLlama).toHaveBeenCalledWith(
       expect.objectContaining({
-        n_batch: 2048,
-        n_ubatch: 2048,
+        n_batch: 512,
+        n_ubatch: 512,
         ctx_shift: false,
       }),
       expect.any(Function),
@@ -3330,22 +3330,22 @@ describe('LLMEngineService', () => {
     );
   });
 
-  it('raises unsafe custom micro-batch settings for multimodal image decoding', async () => {
+  it('raises unsafe custom micro-batch settings to match the multimodal decode batch size', async () => {
     (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
     (getModelLoadParametersForModel as jest.Mock).mockReturnValueOnce({
       contextSize: 2048,
       gpuLayers: null,
       kvCacheType: 'auto',
       nBatch: 128,
-      nUbatch: 128,
+      nUbatch: 64,
     });
 
     await llmEngineService.load('test/model', { forceReload: true });
 
     expect(llamaRn.initLlama).toHaveBeenCalledWith(
       expect.objectContaining({
-        n_batch: 2048,
-        n_ubatch: 2048,
+        n_batch: 128,
+        n_ubatch: 128,
         ctx_shift: false,
       }),
       expect.any(Function),
@@ -3353,22 +3353,39 @@ describe('LLMEngineService', () => {
     expect(getInitMultimodalMock()).toHaveBeenCalledWith(
       expect.objectContaining({
         path: 'test-dir/models/mmproj-model.gguf',
-        image_max_tokens: 384,
+        image_max_tokens: 96,
       }),
     );
   });
 
-  it('does not initialize multimodal readiness when the context cannot hold a safe image decode batch', async () => {
+  it('keeps low-memory multimodal batch profiles safe for non-causal image decode', () => {
+    expect((llmEngineService as any).resolveMultimodalSafeBatchParams({
+      configuredBatchParams: { nBatch: 256, nUbatch: 128 },
+      hasLoadTimeMmproj: true,
+      contextTokens: 4096,
+    })).toEqual({ nBatch: 256, nUbatch: 256 });
+  });
+
+  it('blocks image completion before native media decode when the active multimodal batch profile is unsafe', async () => {
     (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
-    (getModelLoadParametersForModel as jest.Mock).mockReturnValueOnce({
-      contextSize: 1024,
-      gpuLayers: null,
-      kvCacheType: 'auto',
-    });
 
     await llmEngineService.load('test/model', { forceReload: true });
+    (llmEngineService as any).initNBatch = 256;
+    (llmEngineService as any).initNUbatch = 128;
 
-    expect(getInitMultimodalMock()).not.toHaveBeenCalled();
+    await expect(llmEngineService.chatCompletion({
+      messages: [{
+        role: 'user',
+        content: 'Describe this',
+        mediaPaths: ['test-dir/chat-attachments/image.jpg'],
+      }],
+      multimodalReadiness: createReadyMultimodalReadiness(),
+      params: { n_predict: 16 },
+    })).rejects.toMatchObject({
+      code: 'multimodal_not_ready',
+    });
+
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).not.toHaveBeenCalled();
     const unsupportedReadinessUpdate = (registry.updateModel as jest.Mock).mock.calls
       .map(([model]) => model)
       .find((model: { multimodalReadiness?: { status?: string } }) => model.multimodalReadiness?.status === 'unsupported');

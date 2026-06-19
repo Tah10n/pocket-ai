@@ -56,6 +56,8 @@ const FALLBACK_TOP_K = 40;
 const FALLBACK_MIN_P = 0.05;
 const FALLBACK_REPETITION_PENALTY = 1;
 const CHAT_STORE_STORAGE_KEY = LEGACY_CHAT_STORE_STORAGE_KEY;
+const UNREFERENCED_ATTACHMENT_CLEANUP_MAX_DELETES = 16;
+const UNREFERENCED_ATTACHMENT_CLEANUP_RETRY_DELAY_MS = 1_000;
 const HYDRATION_ATTACHMENT_RECONCILIATION_MAX_DELETES = 16;
 const HYDRATION_ATTACHMENT_RECONCILIATION_MAX_CANDIDATES = 16;
 const HYDRATION_ATTACHMENT_RECONCILIATION_RETRY_DELAY_MS = 1_000;
@@ -72,6 +74,11 @@ type ChatStoreSnapshot = Pick<ChatStoreState, 'threads' | 'activeThreadId'>;
 type HydrationAttachmentDirectoryReconciliationRequest = {
   preserveDraftsCreatedAtOrAfter: number;
   zeroProgressRetryCount: number;
+};
+
+type UnreferencedAttachmentCleanupRequest = {
+  candidateLocalUris: Set<string>;
+  referencedLocalUris: Set<string>;
 };
 
 interface ChatStoreHydrationResult {
@@ -172,6 +179,121 @@ function clearPersistedChatStoreIfEmpty(threads: Record<string, ChatThread>) {
   }
 }
 
+let unreferencedAttachmentCleanupInFlight = false;
+let queuedUnreferencedAttachmentCleanupRequest: UnreferencedAttachmentCleanupRequest | null = null;
+let unreferencedAttachmentCleanupRetryTimeout: ReturnType<typeof setTimeout> | null = null;
+
+function mergeUnreferencedAttachmentCleanupRequest(
+  current: UnreferencedAttachmentCleanupRequest | null,
+  next: UnreferencedAttachmentCleanupRequest,
+): UnreferencedAttachmentCleanupRequest {
+  if (!current) {
+    return next;
+  }
+
+  return {
+    candidateLocalUris: new Set([...current.candidateLocalUris, ...next.candidateLocalUris]),
+    referencedLocalUris: new Set([...current.referencedLocalUris, ...next.referencedLocalUris]),
+  };
+}
+
+function queueUnreferencedAttachmentCleanup(
+  request: UnreferencedAttachmentCleanupRequest,
+): void {
+  queuedUnreferencedAttachmentCleanupRequest = mergeUnreferencedAttachmentCleanupRequest(
+    queuedUnreferencedAttachmentCleanupRequest,
+    request,
+  );
+}
+
+function takeQueuedUnreferencedAttachmentCleanupRequest(): UnreferencedAttachmentCleanupRequest | null {
+  const request = queuedUnreferencedAttachmentCleanupRequest;
+  queuedUnreferencedAttachmentCleanupRequest = null;
+  return request;
+}
+
+function scheduleQueuedUnreferencedAttachmentCleanupRetry(): void {
+  if (unreferencedAttachmentCleanupRetryTimeout !== null) {
+    return;
+  }
+
+  unreferencedAttachmentCleanupRetryTimeout = setTimeout(() => {
+    unreferencedAttachmentCleanupRetryTimeout = null;
+    runQueuedUnreferencedAttachmentCleanup();
+  }, UNREFERENCED_ATTACHMENT_CLEANUP_RETRY_DELAY_MS);
+}
+
+function runQueuedUnreferencedAttachmentCleanup(): void {
+  if (unreferencedAttachmentCleanupInFlight || unreferencedAttachmentCleanupRetryTimeout !== null) {
+    return;
+  }
+
+  const request = takeQueuedUnreferencedAttachmentCleanupRequest();
+  if (!request || request.candidateLocalUris.size === 0) {
+    return;
+  }
+
+  unreferencedAttachmentCleanupInFlight = true;
+  let retryRequestAfterFailure: UnreferencedAttachmentCleanupRequest | null = null;
+
+  void Promise.resolve()
+    .then(async () => {
+      const candidates = Array.from(request.candidateLocalUris);
+      const batchCandidates = candidates.slice(0, UNREFERENCED_ATTACHMENT_CLEANUP_MAX_DELETES);
+      const remainingCandidates = candidates.slice(UNREFERENCED_ATTACHMENT_CLEANUP_MAX_DELETES);
+      const latestReferencedLocalUris = collectReferencedChatAttachmentLocalUrisFromThreads(
+        useChatStore.getState().threads,
+      );
+      const referencedLocalUris = new Set(request.referencedLocalUris);
+      // Queued cleanup requests can overlap: an attachment may be referenced in
+      // an older queued request and become a delete candidate in a later one.
+      // Only the latest store state should protect current candidates from
+      // deletion; stale queued references must not keep newly orphaned files.
+      batchCandidates.forEach((localUri) => referencedLocalUris.delete(localUri));
+      latestReferencedLocalUris.forEach((localUri) => referencedLocalUris.add(localUri));
+
+      if (batchCandidates.length > 0) {
+        try {
+          await chatAttachmentStorageService.deleteUnreferencedAttachmentFiles({
+            candidateLocalUris: batchCandidates,
+            referencedLocalUris,
+            maxDeletes: UNREFERENCED_ATTACHMENT_CLEANUP_MAX_DELETES,
+          });
+        } catch (error) {
+          retryRequestAfterFailure = {
+            candidateLocalUris: new Set([...batchCandidates, ...remainingCandidates]),
+            referencedLocalUris: request.referencedLocalUris,
+          };
+          throw error;
+        }
+      }
+
+      if (remainingCandidates.length > 0) {
+        queueUnreferencedAttachmentCleanup({
+          candidateLocalUris: new Set(remainingCandidates),
+          referencedLocalUris: request.referencedLocalUris,
+        });
+      }
+    })
+    .catch((error) => {
+      console.warn('[chatStore] Failed to clean up chat attachments', {
+        errorName: error instanceof Error ? error.name : typeof error,
+      });
+    })
+    .finally(() => {
+      unreferencedAttachmentCleanupInFlight = false;
+      if (retryRequestAfterFailure?.candidateLocalUris.size) {
+        queueUnreferencedAttachmentCleanup(retryRequestAfterFailure);
+        scheduleQueuedUnreferencedAttachmentCleanupRetry();
+        return;
+      }
+
+      if (queuedUnreferencedAttachmentCleanupRequest) {
+        runQueuedUnreferencedAttachmentCleanup();
+      }
+    });
+}
+
 function scheduleUnreferencedChatAttachmentCleanup({
   candidateLocalUris,
   referencedLocalUris,
@@ -184,14 +306,11 @@ function scheduleUnreferencedChatAttachmentCleanup({
     return;
   }
 
-  void chatAttachmentStorageService.deleteUnreferencedAttachmentFiles({
-    candidateLocalUris: candidates,
-    referencedLocalUris,
-  }).catch((error) => {
-    console.warn('[chatStore] Failed to clean up chat attachments', {
-      errorName: error instanceof Error ? error.name : typeof error,
-    });
+  queueUnreferencedAttachmentCleanup({
+    candidateLocalUris: new Set(candidates),
+    referencedLocalUris: new Set(referencedLocalUris),
   });
+  runQueuedUnreferencedAttachmentCleanup();
 }
 
 function scheduleChatAttachmentCleanupForSnapshots(
@@ -1161,6 +1280,66 @@ function withChatPersistenceContext<T>(
   }
 }
 
+function getErrorName(error: unknown): string {
+  return error instanceof Error ? error.name : typeof error;
+}
+
+function rollbackFailedChatPersistenceMutation(
+  previous: ChatStoreSnapshot,
+  next: ChatStoreSnapshot,
+  previousPersistenceIndex: ReturnType<typeof readChatPersistenceIndex>,
+): void {
+  const rollbackErrors: unknown[] = [];
+  const attemptRollbackStep = (operation: () => void) => {
+    try {
+      operation();
+    } catch (error) {
+      rollbackErrors.push(error);
+    }
+  };
+
+  try {
+    const storage = getAppStorage();
+    const previousThreadIds = Object.keys(previous.threads);
+    const nextThreadIds = Object.keys(next.threads);
+    const affectedThreadIds = new Set(
+      [...previousThreadIds, ...nextThreadIds]
+        .filter((threadId) => previous.threads[threadId] !== next.threads[threadId]),
+    );
+
+    attemptRollbackStep(() => removeChatPendingIndexCommit(storage));
+
+    affectedThreadIds.forEach((threadId) => {
+      const previousThread = previous.threads[threadId];
+      attemptRollbackStep(() => {
+        if (previousThread) {
+          writeChatThreadRecordForMutation(storage, previousThread);
+        } else {
+          removeChatThreadRecord(storage, threadId);
+        }
+      });
+      chatPersistenceScheduler.cancelThreadWrite(threadId);
+    });
+
+    attemptRollbackStep(() => {
+      if (previousPersistenceIndex.ok) {
+        writeChatPersistenceIndex(storage, previousPersistenceIndex.value);
+      } else {
+        writeChatPersistenceIndexForSnapshot(storage, previous);
+      }
+    });
+  } catch (error) {
+    rollbackErrors.push(error);
+  }
+
+  if (rollbackErrors.length > 0) {
+    console.warn('[ChatPersistence] Failed to fully roll back failed chat persistence mutation', {
+      errorCount: rollbackErrors.length,
+      firstErrorName: getErrorName(rollbackErrors[0]),
+    });
+  }
+}
+
 function persistChatStoreMutation(
   previous: ChatStoreSnapshot,
   next: ChatStoreSnapshot,
@@ -1248,15 +1427,26 @@ export const useChatStore = create<ChatStoreState>()(
     (set, get) => {
       const setWhenPrivateStorageWritable: typeof set = (partial, replace) => {
         assertPrivateStorageWritable();
+        const previousPersistenceIndex = readChatPersistenceIndex(getAppStorage());
         const previous = {
           threads: get().threads,
           activeThreadId: get().activeThreadId,
         };
         const result = (set as any)(partial, replace);
-        persistChatStoreMutation(previous, {
+        const next = {
           threads: get().threads,
           activeThreadId: get().activeThreadId,
-        }, chatPersistenceContext?.reason ?? 'thread_mutation');
+        };
+        try {
+          persistChatStoreMutation(previous, next, chatPersistenceContext?.reason ?? 'thread_mutation');
+        } catch (error) {
+          rollbackFailedChatPersistenceMutation(previous, next, previousPersistenceIndex);
+          (set as any)({
+            threads: previous.threads,
+            activeThreadId: previous.activeThreadId,
+          }, false);
+          throw error;
+        }
         return result;
       };
 

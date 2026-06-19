@@ -2,19 +2,28 @@ const REDACTED_TOKEN = '[redacted]';
 const REDACTED_PATH = '[path]';
 const REDACTED_FILE_URI = '[file-uri]';
 const REDACTED_URI = '[uri]';
+const REDACTED_PAYLOAD = '[redacted-payload]';
 const MAX_RECURSION_DEPTH = 8;
 
 const DROP_KEYS = new Set([
+  'base64',
+  'bytes',
+  'datauri',
   'downloadurl',
   'downloaduri',
   'fileuri',
   'filepath',
+  'imagedata',
   'localuri',
   'localpath',
   'nativepath',
   'pickeruri',
+  'prompt',
+  'prompts',
   'previewuri',
+  'systemprompt',
   'thumbnailuri',
+  'userprompt',
 ]);
 
 const TOKEN_KEYS = new Set([
@@ -30,10 +39,72 @@ const TOKEN_KEYS = new Set([
   'token',
 ]);
 
+const CHAT_PAYLOAD_CONTAINER_KEYS = new Set([
+  'chatmessages',
+  'completionmessages',
+  'formattedmessages',
+  'messages',
+  'promptmessages',
+  'requestmessages',
+]);
+
+const MODEL_CONTEXT_HASHED_KEYS = new Set([
+  'author',
+  'id',
+  'modelid',
+  'name',
+  'projectorid',
+  'selectedprojectorid',
+]);
+
+const MODEL_CONTEXT_SAFE_KEYS = new Set([
+  'accessstate',
+  'artifactkind',
+  'chatmodalities',
+  'downloadprogress',
+  'fitsinram',
+  'isgated',
+  'isprivate',
+  'lifecyclestatus',
+  'memoryfitconfidence',
+  'memoryfitdecision',
+  'metadatatrust',
+  'pathcategory',
+  'size',
+  'sizebytes',
+  'visionconfidence',
+  'visionsource',
+]);
+
+const MODEL_CONTEXT_SAFE_GGUF_KEYS = new Set([
+  'architecture',
+  'contextlengthtokens',
+  'nembdheadk',
+  'nembdheadv',
+  'nheadkv',
+  'nlayers',
+  'sizelabel',
+  'slidingwindowtokens',
+  'totalbytes',
+]);
+
+const CHAT_MESSAGE_ROLES = new Set(['assistant', 'system', 'tool', 'user']);
+
 const TOKEN_QUERY_PARAM_PATTERN = /([?&;](?:[^=&#;]*?(?:token|secret|signature|credential|authorization|apikey|api_key|access_key|x-amz-signature|x-amz-credential|x-amz-security-token)[^=&#;]*)=)([^&#;\s]+)/giu;
 const BEARER_PATTERN = /\bBearer\s+[^\s'"),;]+/giu;
+const LABELED_TOKEN_ASSIGNMENT_PATTERN = /\b((?:access[_-]?(?:token|key)|auth[_-]?token|api[_-]?key|apikey|authorization|bearer|secret|signature|credential|credentials|x-amz-(?:signature|credential|security-token)))\b(\s*[:=]\s*)(['"]?)(?:(?:Bearer|Basic|Token)\s+)?([^'"\s,;&|)]+)\3/giu;
 const FILE_URI_PATTERN = /\bfile:\/\/[^\s'"),;]+/giu;
-const PICKER_URI_PATTERN = /\b(?:content|ph):\/\/[^\s'"),;]+/giu;
+const PICKER_URI_PATTERN = /\b(?:content|ph|assets-library|gallery):\/\/[^\s'"),;]+/giu;
+const DATA_IMAGE_URI_PATTERN = /\bdata:image\/[a-z0-9.+-]+(?:;[a-z0-9.+_-]+=[a-z0-9.+_-]+)*;base64,[a-z0-9+/=_-]+/giu;
+const LABELED_SENSITIVE_PAYLOAD_PATTERN = /\b(base64|imageData|dataUri|bytes)\b(\s*[:=]\s*)(['"]?)(?:data:image\/[a-z0-9.+-]+(?:;[a-z0-9.+_-]+=[a-z0-9.+_-]+)*;base64,)?[a-z0-9+/=_-]{40,}\3/giu;
+const QUOTED_PROMPT_KEY_PATTERN = /(['"])((?:system|user)?prompt|prompts)\1(\s*:\s*)(['"])(?:\\[\s\S]|(?!\4)[^\\])*?\4/giu;
+const QUOTED_PROMPT_KEY_UNTERMINATED_PATTERN = /(['"])((?:system|user)?prompt|prompts)\1(\s*:\s*)(['"])(?:\\[\s\S]|(?!\4)(?!\r?\n\s+(?:at|at async)\s+)(?!\r?\nCaused by:)(?!\r?\n[A-Za-z]*Error:)[\s\S])*?(?=(?:\r?\n\s+(?:at|at async)\s+|\r?\nCaused by:|\r?\n[A-Za-z]*Error:)|$)/giu;
+const LABELED_PROMPT_PATTERN = /\b((?:system|user)?prompt|prompts)\b(\s*[:=]\s*)(?:['"]?)[\s\S]*?(?=(?:\r?\n\s+(?:at|at async)\s+|\r?\nCaused by:|\r?\n[A-Za-z]*Error:)|$)/giu;
+const PROMPT_LIKE_QUOTED_PAYLOAD_PATTERN = /\b((?:(?:system|user)\s*)?prompt|prompts|user\s+input|raw\s+message|message\s+content)\b(?!['"]\s*:)([^'"\r\n]{0,80})(['"])(?:\\[\s\S]|(?!\3)[^\\])*?\3/giu;
+const PROMPT_LIKE_UNTERMINATED_QUOTED_PAYLOAD_PATTERN = /\b((?:(?:system|user)\s*)?prompt|prompts|user\s+input|raw\s+message|message\s+content)\b(?!['"]\s*:)([^'"\r\n]{0,80})(['"])(?:\\[\s\S]|(?!\3)(?!\r?\n\s+(?:at|at async)\s+)(?!\r?\nCaused by:)(?!\r?\n[A-Za-z]*Error:)[\s\S])*?(?=(?:\r?\n\s+(?:at|at async)\s+|\r?\nCaused by:|\r?\n[A-Za-z]*Error:)|$)/giu;
+const QUOTED_CHAT_TEXT_KEY_PATTERN = /(['"])(content|text)\1(\s*:\s*)(['"])(?:\\[\s\S]|(?!\4)[^\\])*?\4/giu;
+const QUOTED_CHAT_TEXT_KEY_UNTERMINATED_PATTERN = /(['"])(content|text)\1(\s*:\s*)(['"])(?:\\[\s\S]|(?!\4)(?!\r?\n\s+(?:at|at async)\s+)(?!\r?\nCaused by:)(?!\r?\n[A-Za-z]*Error:)[\s\S])*?(?=(?:\r?\n\s+(?:at|at async)\s+|\r?\nCaused by:|\r?\n[A-Za-z]*Error:)|$)/giu;
+const LIKELY_BASE64_IMAGE_PATTERN = /(^|[^A-Za-z0-9+/=_-])((?:iVBORw0KGgo|\/9j\/|R0lGOD(?:lh|dh)|UklGR)[A-Za-z0-9+/=_-]{24,})/gu;
 const WINDOWS_EXTENDED_PATH_PATTERN = /\\\\\?\\(?:UNC\\[^\\/\s'"),;]+\\[^\\/\s'"),;]+(?:\\[^\s\r\n'"),;]+)*|[A-Za-z]:[\\/][^\s\r\n'"),;]+)/giu;
 const WINDOWS_UNC_PATH_PATTERN = /\\\\(?!\?\\)[^\\/\s'"),;]+\\[^\\/\s'"),;]+(?:\\[^\s\r\n'"),;]+)*/gu;
 const WINDOWS_EXTENDED_PATH_WITH_SPACES_PATTERN = /\\{2}[?]\\(?:UNC\\[^\\/\r\n'"),;|]+\\[^\\/\r\n'"),;|]+(?:\\[^\r\n'"),;|]+)*|[A-Za-z]:[\\/][^\r\n'"),;|]+)/giu;
@@ -98,6 +169,11 @@ function normalizeKey(key: string | undefined): string {
   return (key ?? '').replace(/[^A-Za-z0-9]/g, '').toLowerCase();
 }
 
+function isChatPayloadContainerKey(key: string | undefined): boolean {
+  const normalizedKey = normalizeKey(key);
+  return CHAT_PAYLOAD_CONTAINER_KEYS.has(normalizedKey);
+}
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   if (!value || typeof value !== 'object') {
     return false;
@@ -105,6 +181,32 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 
   const prototype = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null;
+}
+
+function isChatMessageObject(value: Record<string, unknown>): boolean {
+  return typeof value.role === 'string'
+    && CHAT_MESSAGE_ROLES.has(value.role.trim().toLowerCase());
+}
+
+function isMultimodalTextPartObject(value: Record<string, unknown>): boolean {
+  return typeof value.type === 'string'
+    && value.type.trim().toLowerCase() === 'text'
+    && Object.prototype.hasOwnProperty.call(value, 'text');
+}
+
+function shouldRedactChatTextField(
+  container: Record<string, unknown>,
+  key: string | undefined,
+  state: SanitizeState,
+): boolean {
+  const normalizedKey = normalizeKey(key);
+  return (
+    normalizedKey === 'content'
+    && (isChatMessageObject(container) || isChatPayloadContainerKey(state.parentKey))
+  ) || (
+    normalizedKey === 'text'
+    && isMultimodalTextPartObject(container)
+  );
 }
 
 function stableHash(value: string): string {
@@ -118,13 +220,6 @@ function stableHash(value: string): string {
   return (hash >>> 0).toString(36);
 }
 
-function isPublicSafeModelId(value: string): boolean {
-  const trimmed = value.trim();
-  return /^[A-Za-z0-9][A-Za-z0-9._-]*(\/[A-Za-z0-9][A-Za-z0-9._-]*){0,2}$/.test(trimmed)
-    && !/(?:^|\/)(?:private|users|home|tmp|models?|specs?)(?:\/|$)/i.test(trimmed)
-    && !/[\\:?&#]/.test(trimmed);
-}
-
 function isSafePublicHttpsUrl(value: unknown): value is string {
   if (typeof value !== 'string') {
     return false;
@@ -136,7 +231,7 @@ function isSafePublicHttpsUrl(value: unknown): value is string {
 
 function sanitizeModelIdentifier(value: string): string {
   const trimmed = value.trim();
-  return isPublicSafeModelId(trimmed) ? trimmed : `hash:${stableHash(trimmed)}`;
+  return `hash:${stableHash(trimmed)}`;
 }
 
 function isTokenKey(key: string | undefined): boolean {
@@ -152,19 +247,78 @@ function isTokenKey(key: string | undefined): boolean {
 function shouldDropKey(key: string | undefined, value: unknown): boolean {
   const normalizedKey = normalizeKey(key);
   return DROP_KEYS.has(normalizedKey)
+    || isChatPayloadContainerKey(key)
+    || normalizedKey.includes('base64')
+    || normalizedKey === 'imagebytes'
+    || normalizedKey.endsWith('prompt')
+    || normalizedKey.endsWith('prompts')
+    || normalizedKey.endsWith('prompttext')
+    || normalizedKey.endsWith('promptcontent')
     || normalizedKey.endsWith('downloadurl')
     || (normalizedKey.endsWith('uri') && !isSafePublicHttpsUrl(value))
     || normalizedKey.endsWith('localpath')
     || normalizedKey.endsWith('nativepath');
 }
 
+export function sanitizeErrorReportObjectKey(key: string): string {
+  const sanitizedKey = sanitizeErrorReportString(key).trim();
+  return sanitizedKey.length > 0 ? sanitizedKey : REDACTED_TOKEN;
+}
+
+function getUniqueSanitizedObjectKey(key: string, sanitized: Record<string, unknown>): string {
+  const sanitizedKey = sanitizeErrorReportObjectKey(key);
+  if (!Object.prototype.hasOwnProperty.call(sanitized, sanitizedKey)) {
+    return sanitizedKey;
+  }
+
+  let suffix = 2;
+  let candidate = `${sanitizedKey}#${suffix}`;
+  while (Object.prototype.hasOwnProperty.call(sanitized, candidate)) {
+    suffix += 1;
+    candidate = `${sanitizedKey}#${suffix}`;
+  }
+
+  return candidate;
+}
+
 function isModelIdentifierKey(key: string | undefined): boolean {
   const normalizedKey = normalizeKey(key);
-  return normalizedKey === 'modelid' || normalizedKey === 'ownermodelid';
+  return normalizedKey.endsWith('modelid') || normalizedKey.endsWith('projectorid');
+}
+
+function trySanitizeJsonPayloadString(value: string, key?: string): string | null {
+  const leadingWhitespace = value.match(/^\s*/u)?.[0] ?? '';
+  const trailingWhitespace = value.match(/\s*$/u)?.[0] ?? '';
+  const trimmed = value.trim();
+
+  if (!/^[\[{]/u.test(trimmed)) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    const sanitized = sanitizeErrorReportValue(parsed, {
+      seen: new WeakSet<object>(),
+      depth: 0,
+      parentKey: key,
+    });
+    return `${leadingWhitespace}${JSON.stringify(sanitized)}${trailingWhitespace}`;
+  } catch {
+    return null;
+  }
 }
 
 export function sanitizeErrorReportString(value: string, key?: string): string {
   const withRedactedTokens = value
+    .replace(DATA_IMAGE_URI_PATTERN, REDACTED_PAYLOAD)
+    .replace(LABELED_SENSITIVE_PAYLOAD_PATTERN, (_match, label: string, separator: string) => `${label}${separator}${REDACTED_PAYLOAD}`)
+    .replace(LIKELY_BASE64_IMAGE_PATTERN, (_match, prefix: string) => `${prefix}${REDACTED_PAYLOAD}`)
+    .replace(QUOTED_PROMPT_KEY_PATTERN, (_match, keyQuote: string, label: string, separator: string, valueQuote: string) => `${keyQuote}${label}${keyQuote}${separator}${valueQuote}${REDACTED_TOKEN}${valueQuote}`)
+    .replace(QUOTED_PROMPT_KEY_UNTERMINATED_PATTERN, (_match, keyQuote: string, label: string, separator: string, valueQuote: string) => `${keyQuote}${label}${keyQuote}${separator}${valueQuote}${REDACTED_TOKEN}`)
+    .replace(LABELED_PROMPT_PATTERN, (_match, label: string, separator: string) => `${label}${separator}${REDACTED_TOKEN}`)
+    .replace(PROMPT_LIKE_QUOTED_PAYLOAD_PATTERN, (_match, label: string, between: string, quote: string) => `${label}${between}${quote}${REDACTED_TOKEN}${quote}`)
+    .replace(PROMPT_LIKE_UNTERMINATED_QUOTED_PAYLOAD_PATTERN, (_match, label: string, between: string, quote: string) => `${label}${between}${quote}${REDACTED_TOKEN}`)
+    .replace(LABELED_TOKEN_ASSIGNMENT_PATTERN, (_match, label: string, separator: string, quote: string) => `${label}${separator}${quote}${REDACTED_TOKEN}${quote}`)
     .replace(BEARER_PATTERN, `Bearer ${REDACTED_TOKEN}`)
     .replace(TOKEN_QUERY_PARAM_PATTERN, (_match, prefix: string) => `${prefix}${REDACTED_TOKEN}`);
 
@@ -172,7 +326,13 @@ export function sanitizeErrorReportString(value: string, key?: string): string {
     return sanitizeModelIdentifier(withRedactedTokens);
   }
 
-  return withRedactedTokens
+  const withSanitizedJsonPayload = trySanitizeJsonPayloadString(withRedactedTokens, key) ?? withRedactedTokens;
+
+  const withRedactedChatText = withSanitizedJsonPayload
+    .replace(QUOTED_CHAT_TEXT_KEY_PATTERN, (_match, keyQuote: string, label: string, separator: string, valueQuote: string) => `${keyQuote}${label}${keyQuote}${separator}${valueQuote}${REDACTED_TOKEN}${valueQuote}`)
+    .replace(QUOTED_CHAT_TEXT_KEY_UNTERMINATED_PATTERN, (_match, keyQuote: string, label: string, separator: string, valueQuote: string) => `${keyQuote}${label}${keyQuote}${separator}${valueQuote}${REDACTED_TOKEN}`);
+
+  return withRedactedChatText
     .replace(FILE_URI_PATTERN, REDACTED_FILE_URI)
     .replace(PICKER_URI_PATTERN, REDACTED_URI)
     .replace(WINDOWS_EXTENDED_PATH_WITH_SPACES_PATTERN, REDACTED_PATH)
@@ -195,8 +355,15 @@ function sanitizeObjectEntries(
       continue;
     }
 
+    const sanitizedKey = getUniqueSanitizedObjectKey(key, sanitized);
+
     if (isTokenKey(key)) {
-      sanitized[key] = REDACTED_TOKEN;
+      sanitized[sanitizedKey] = REDACTED_TOKEN;
+      continue;
+    }
+
+    if (shouldRedactChatTextField(value, key, state)) {
+      sanitized[sanitizedKey] = REDACTED_TOKEN;
       continue;
     }
 
@@ -207,7 +374,7 @@ function sanitizeObjectEntries(
     });
 
     if (nextValue !== undefined) {
-      sanitized[key] = nextValue;
+      sanitized[sanitizedKey] = nextValue;
     }
   }
 
@@ -264,6 +431,54 @@ export function sanitizeErrorReportValue(
   return sanitizeObjectEntries(value, state);
 }
 
+function isSafeModelContextPrimitive(value: unknown): boolean {
+  return value === null
+    || value === undefined
+    || typeof value === 'string'
+    || typeof value === 'number'
+    || typeof value === 'boolean'
+    || typeof value === 'bigint';
+}
+
+function isSafeModelContextValue(value: unknown): boolean {
+  return isSafeModelContextPrimitive(value)
+    || (Array.isArray(value) && value.every(isSafeModelContextPrimitive));
+}
+
+function getModelContextHashKey(key: string, sanitized: Record<string, unknown>): string {
+  const sanitizedKey = sanitizeErrorReportObjectKey(key);
+  const hashKey = sanitizedKey.toLowerCase().endsWith('hash') ? sanitizedKey : `${sanitizedKey}Hash`;
+  if (!Object.prototype.hasOwnProperty.call(sanitized, hashKey)) {
+    return hashKey;
+  }
+
+  let suffix = 2;
+  let candidate = `${hashKey}#${suffix}`;
+  while (Object.prototype.hasOwnProperty.call(sanitized, candidate)) {
+    suffix += 1;
+    candidate = `${hashKey}#${suffix}`;
+  }
+
+  return candidate;
+}
+
+function sanitizeModelGgufContext(value: unknown): Record<string, unknown> | undefined {
+  if (!isPlainObject(value)) {
+    return undefined;
+  }
+
+  const safeGguf: Record<string, unknown> = {};
+  for (const [key, nestedValue] of Object.entries(value)) {
+    if (!MODEL_CONTEXT_SAFE_GGUF_KEYS.has(normalizeKey(key)) || !isSafeModelContextValue(nestedValue)) {
+      continue;
+    }
+
+    safeGguf[key] = nestedValue;
+  }
+
+  return sanitizeErrorReportContext(safeGguf);
+}
+
 export function sanitizeErrorReportContext(
   context: Record<string, unknown> | undefined,
 ): Record<string, unknown> | undefined {
@@ -273,6 +488,38 @@ export function sanitizeErrorReportContext(
 
   const sanitized = sanitizeErrorReportValue(context);
   return isPlainObject(sanitized) && Object.keys(sanitized).length > 0 ? sanitized : undefined;
+}
+
+export function sanitizeModelErrorReportContext(
+  context: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  if (!context) {
+    return undefined;
+  }
+
+  const safeModelContext: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(context)) {
+    const normalizedKey = normalizeKey(key);
+
+    if (MODEL_CONTEXT_HASHED_KEYS.has(normalizedKey) && typeof value === 'string' && value.trim().length > 0) {
+      safeModelContext[getModelContextHashKey(key, safeModelContext)] = sanitizeModelIdentifier(value);
+      continue;
+    }
+
+    if (normalizedKey === 'gguf') {
+      const gguf = sanitizeModelGgufContext(value);
+      if (gguf) {
+        safeModelContext.gguf = gguf;
+      }
+      continue;
+    }
+
+    if (MODEL_CONTEXT_SAFE_KEYS.has(normalizedKey) && isSafeModelContextValue(value)) {
+      safeModelContext[key] = value;
+    }
+  }
+
+  return sanitizeErrorReportContext(safeModelContext);
 }
 
 export function sanitizeErrorForReport(error: {

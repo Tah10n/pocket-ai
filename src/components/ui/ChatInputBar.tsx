@@ -231,15 +231,21 @@ export const ChatInputBar = ({
     const sendableAttachmentDrafts = imageAttachmentsEnabled
         ? getSendableDraftImageAttachments(attachmentDrafts)
         : [];
+    const nonFailedAttachmentDrafts = imageAttachmentsEnabled
+        ? attachmentDrafts.filter((attachmentDraft) => attachmentDraft.copyStatus !== 'failed')
+        : [];
+    const hasNonFailedAttachmentDraftsBlockedFromSend = imageAttachmentsEnabled
+        && nonFailedAttachmentDrafts.length > 0
+        && sendableAttachmentDrafts.length !== nonFailedAttachmentDrafts.length;
     const hasReadyAttachmentDrafts = imageAttachmentsEnabled
-        && attachmentDrafts.length > 0
-        && sendableAttachmentDrafts.length === attachmentDrafts.length;
+        && sendableAttachmentDrafts.length > 0
+        && sendableAttachmentDrafts.length === nonFailedAttachmentDrafts.length;
     const canSend = !disabled
         && !sendDisabled
         && !isSending
         && !isSubmitting
         && !isImageAttachmentActionBusy
-        && !hasAttachmentCopyFailures
+        && !hasNonFailedAttachmentDraftsBlockedFromSend
         && (message.trim().length > 0 || hasReadyAttachmentDrafts || allowEmptyMessageSend);
     const placeholder = disabled ? t('chat.inputPlaceholderDisabled') : t('chat.inputPlaceholder');
     const attachmentLimitReached = imageAttachmentsEnabled && attachmentDrafts.length >= MAX_CHAT_IMAGE_ATTACHMENTS;

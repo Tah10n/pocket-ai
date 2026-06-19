@@ -3,8 +3,10 @@ import {
   UNKNOWN_PROJECTOR_MEMORY_FIT_FALLBACK_BYTES,
   formatModelFileSize,
   getModelDisplayArtifactSizeBytes,
+  getModelDisplayProjectorCandidates,
   getModelStoredMemoryFitSizeBytes,
   getModelStoredArtifactsSizeBytes,
+  getModelDisplaySelectedProjectorId,
   getProjectorMemoryFitSizeBytes,
   getProjectorArtifactsSizeBytes,
   getStoredProjectorMemoryFitSizeBytes,
@@ -136,6 +138,116 @@ describe('modelSize', () => {
       projectorCandidates,
       selectedProjectorId: 'projector-b',
     })).toBe(1_500);
+  });
+
+  it('scopes display projector size to the active variant and ignores stale selections from another variant', () => {
+    const model: Parameters<typeof getModelDisplayArtifactSizeBytes>[0] = {
+      size: 1_000,
+      activeVariantId: 'model.Q4_K_M.gguf',
+      resolvedFileName: 'model.Q4_K_M.gguf',
+      selectedProjectorId: 'projector-q8',
+      variants: [
+        {
+          variantId: 'model.Q4_K_M.gguf',
+          fileName: 'model.Q4_K_M.gguf',
+          quantizationLabel: 'Q4_K_M',
+          size: 1_000,
+          selectedProjectorId: 'projector-q8',
+        },
+        {
+          variantId: 'model.Q8_0.gguf',
+          fileName: 'model.Q8_0.gguf',
+          quantizationLabel: 'Q8_0',
+          size: 2_000,
+        },
+      ],
+      projectorCandidates: [
+        {
+          id: 'projector-q4',
+          ownerModelId: 'model-a',
+          ownerVariantId: 'model.Q4_K_M.gguf',
+          repoId: 'repo',
+          fileName: 'mmproj-q4.gguf',
+          downloadUrl: 'https://example.com/mmproj-q4.gguf',
+          size: 250,
+          lifecycleStatus: 'available',
+          matchStatus: 'matched',
+        },
+        {
+          id: 'projector-q8',
+          ownerModelId: 'model-a',
+          ownerVariantId: 'model.Q8_0.gguf',
+          repoId: 'repo',
+          fileName: 'mmproj-q8.gguf',
+          downloadUrl: 'https://example.com/mmproj-q8.gguf',
+          size: 500,
+          lifecycleStatus: 'available',
+          matchStatus: 'user_selected',
+        },
+      ],
+    };
+
+    expect(getModelDisplaySelectedProjectorId(model)).toBeUndefined();
+    expect(getModelDisplayArtifactSizeBytes(model)).toBe(1_250);
+  });
+
+  it('enriches active variant projector candidates with matching top-level runtime state', () => {
+    const model: Parameters<typeof getModelDisplayArtifactSizeBytes>[0] = {
+      size: 1_000,
+      activeVariantId: 'model.Q4_K_M.gguf',
+      resolvedFileName: 'model.Q4_K_M.gguf',
+      selectedProjectorId: 'runtime-projector-q4',
+      variants: [
+        {
+          variantId: 'model.Q4_K_M.gguf',
+          fileName: 'model.Q4_K_M.gguf',
+          quantizationLabel: 'Q4_K_M',
+          size: 1_000,
+          projectorCandidates: [
+            {
+              id: 'variant-projector-q4',
+              ownerModelId: 'model-a',
+              ownerVariantId: 'model.Q4_K_M.gguf',
+              repoId: 'repo',
+              fileName: 'mmproj-q4.gguf',
+              downloadUrl: 'https://example.com/mmproj-q4.gguf',
+              size: 250,
+              lifecycleStatus: 'available',
+              matchStatus: 'matched',
+            },
+          ],
+        },
+      ],
+      projectorCandidates: [
+        {
+          id: 'runtime-projector-q4',
+          ownerModelId: 'model-a',
+          repoId: 'repo',
+          fileName: 'mmproj-q4.gguf',
+          downloadUrl: 'https://example.com/mmproj-q4.gguf',
+          size: 250,
+          lifecycleStatus: 'downloaded',
+          matchStatus: 'user_selected',
+          matchReason: 'user_selected_projector',
+          localPath: 'mmproj-q4.gguf',
+          downloadProgress: 1,
+        },
+      ],
+    };
+
+    const displayProjectorCandidates = getModelDisplayProjectorCandidates(model);
+
+    expect(displayProjectorCandidates).toEqual([
+      expect.objectContaining({
+        id: 'variant-projector-q4',
+        lifecycleStatus: 'downloaded',
+        localPath: 'mmproj-q4.gguf',
+        matchStatus: 'user_selected',
+      }),
+    ]);
+    expect(getModelDisplaySelectedProjectorId(model)).toBe('variant-projector-q4');
+    expect(getModelDisplaySelectedProjectorId(model, displayProjectorCandidates)).toBe('variant-projector-q4');
+    expect(getModelDisplayArtifactSizeBytes(model)).toBe(1_250);
   });
 
   it('uses a conservative memory-only fallback for resolvable projectors with unknown size', () => {

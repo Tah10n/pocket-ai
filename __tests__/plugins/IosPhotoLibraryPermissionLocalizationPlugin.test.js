@@ -17,6 +17,104 @@ describe('iOS photo library permission localization config plugin', () => {
     writeLocalizedPhotoLibraryPermissionFiles,
   } = withIosPhotoLibraryPermissionLocalization._internal;
 
+  function createXcodeProjectFixture() {
+    const groups = new Map();
+    const fileReferences = {
+      EN_STALE_REF: {
+        isa: 'PBXFileReference',
+        lastKnownFileType: 'text.plist.strings',
+        name: 'InfoPlist.strings',
+        path: 'en.lproj/InfoPlist.strings',
+        sourceTree: '<group>',
+      },
+    };
+    const buildFiles = {};
+    const resourcesBuildPhase = {
+      isa: 'PBXResourcesBuildPhase',
+      files: [],
+    };
+    const pbxProject = {
+      isa: 'PBXProject',
+      knownRegions: ['"en"', 'Base'],
+    };
+    const project = {
+      pbxFileReferenceSection: jest.fn(() => fileReferences),
+      pbxProjectSection: jest.fn(() => ({
+        PROJECT: pbxProject,
+        PROJECT_COMMENT: 'PBXProject',
+      })),
+    };
+
+    const ensureGroupRecursively = jest.fn((_project, groupName) => {
+      if (!groups.has(groupName)) {
+        groups.set(groupName, {
+          isa: 'PBXGroup',
+          name: path.posix.basename(groupName),
+          path: groupName,
+          sourceTree: '<group>',
+          children: [],
+        });
+      }
+
+      return groups.get(groupName);
+    });
+    ensureGroupRecursively(project, 'PocketAI/Supporting/en.lproj').children.push({
+      value: 'EN_STALE_REF',
+      comment: 'InfoPlist.strings',
+    });
+
+    const addResourceFileToGroup = jest.fn(({
+      filepath,
+      groupName,
+      project: nextProject,
+      isBuildFile,
+    }) => {
+      const group = ensureGroupRecursively(nextProject, groupName);
+      const fileRef = `FILE_REF_${Object.keys(fileReferences).length + 1}`;
+      fileReferences[fileRef] = {
+        isa: 'PBXFileReference',
+        lastKnownFileType: 'text.plist.strings',
+        name: path.posix.basename(filepath),
+        path: filepath,
+        sourceTree: '<group>',
+      };
+      group.children.push({
+        value: fileRef,
+        comment: path.posix.basename(filepath),
+      });
+
+      if (isBuildFile) {
+        const buildFile = `BUILD_FILE_${Object.keys(buildFiles).length + 1}`;
+        buildFiles[buildFile] = {
+          isa: 'PBXBuildFile',
+          fileRef,
+          fileRef_comment: path.posix.basename(filepath),
+        };
+        resourcesBuildPhase.files.push({
+          value: buildFile,
+          comment: `${path.posix.basename(filepath)} in Resources`,
+        });
+      }
+
+      return nextProject;
+    });
+
+    return {
+      project,
+      xcodeUtils: {
+        ensureGroupRecursively,
+        addResourceFileToGroup,
+      },
+      sections: {
+        buildFiles,
+        fileReferences,
+        pbxProject,
+        resourcesBuildPhase,
+      },
+      groups,
+    };
+  }
+
   it('builds escaped InfoPlist.strings entries', () => {
     expect(escapeInfoPlistString('Path "A"\\B\nnext')).toBe('Path \\"A\\"\\\\B\\nnext');
     expect(buildInfoPlistStringsContent({
@@ -84,10 +182,13 @@ describe('iOS photo library permission localization config plugin', () => {
     expect(russian).toContain('NSPhotoLibraryUsageDescription');
     expect(russian).toContain('медиатеку');
     expect(path.relative(platformProjectRoot, englishPath).replace(/\\/g, '/')).toBe(
-      getLocalizedInfoPlistStringsResourceFilepath(projectName, 'en'),
+      'PocketAI/Supporting/en.lproj/InfoPlist.strings',
     );
     expect(path.relative(platformProjectRoot, russianPath).replace(/\\/g, '/')).toBe(
-      getLocalizedInfoPlistStringsResourceFilepath(projectName, 'ru'),
+      'PocketAI/Supporting/ru.lproj/InfoPlist.strings',
+    );
+    expect(getLocalizedInfoPlistStringsResourceFilepath(projectName, 'en')).toBe(
+      'InfoPlist.strings',
     );
   });
 
@@ -138,12 +239,12 @@ describe('iOS photo library permission localization config plugin', () => {
     expect(ensureGroupRecursively).toHaveBeenCalledWith(project, 'PocketAI/Supporting/en.lproj');
     expect(ensureGroupRecursively).toHaveBeenCalledWith(project, 'PocketAI/Supporting/ru.lproj');
     expect(addResourceFileToGroup).toHaveBeenCalledWith(expect.objectContaining({
-      filepath: 'PocketAI/Supporting/en.lproj/InfoPlist.strings',
+      filepath: 'InfoPlist.strings',
       groupName: 'PocketAI/Supporting/en.lproj',
       isBuildFile: true,
     }));
     expect(addResourceFileToGroup).toHaveBeenCalledWith(expect.objectContaining({
-      filepath: 'PocketAI/Supporting/ru.lproj/InfoPlist.strings',
+      filepath: 'InfoPlist.strings',
       groupName: 'PocketAI/Supporting/ru.lproj',
       isBuildFile: true,
     }));
@@ -180,13 +281,59 @@ describe('iOS photo library permission localization config plugin', () => {
       },
     });
 
-    expect(fileReferences.EN_REF.path).toBe('PocketAI/Supporting/en.lproj/InfoPlist.strings');
+    expect(fileReferences.EN_REF.path).toBe('InfoPlist.strings');
     expect(addResourceFileToGroup).not.toHaveBeenCalledWith(expect.objectContaining({
-      filepath: 'PocketAI/Supporting/en.lproj/InfoPlist.strings',
+      filepath: 'InfoPlist.strings',
+      groupName: 'PocketAI/Supporting/en.lproj',
     }));
     expect(addResourceFileToGroup).toHaveBeenCalledWith(expect.objectContaining({
-      filepath: 'PocketAI/Supporting/ru.lproj/InfoPlist.strings',
+      filepath: 'InfoPlist.strings',
+      groupName: 'PocketAI/Supporting/ru.lproj',
     }));
+  });
+
+  it('registers real-ish Xcode resources idempotently while repairing stale localized paths', () => {
+    const { project, xcodeUtils, sections, groups } = createXcodeProjectFixture();
+
+    expect(addLocalizedPhotoLibraryPermissionResourcesToProject({
+      project,
+      projectName: 'PocketAI',
+      xcodeUtils,
+    })).toBe(project);
+
+    expect(sections.pbxProject.knownRegions).toEqual(['"en"', 'Base', 'ru']);
+    expect(sections.fileReferences.EN_STALE_REF.path).toBe(
+      'InfoPlist.strings',
+    );
+    expect(xcodeUtils.addResourceFileToGroup).toHaveBeenCalledTimes(1);
+    expect(xcodeUtils.addResourceFileToGroup).toHaveBeenCalledWith(expect.objectContaining({
+      filepath: 'InfoPlist.strings',
+      groupName: 'PocketAI/Supporting/ru.lproj',
+      isBuildFile: true,
+    }));
+
+    const countsAfterFirstRun = {
+      buildFiles: Object.keys(sections.buildFiles).length,
+      fileReferences: Object.keys(sections.fileReferences).length,
+      resources: sections.resourcesBuildPhase.files.length,
+      ruChildren: groups.get('PocketAI/Supporting/ru.lproj').children.length,
+    };
+
+    expect(addLocalizedPhotoLibraryPermissionResourcesToProject({
+      project,
+      projectName: 'PocketAI',
+      xcodeUtils,
+    })).toBe(project);
+
+    expect(xcodeUtils.addResourceFileToGroup).toHaveBeenCalledTimes(1);
+    expect(Object.keys(sections.buildFiles)).toHaveLength(countsAfterFirstRun.buildFiles);
+    expect(Object.keys(sections.fileReferences)).toHaveLength(countsAfterFirstRun.fileReferences);
+    expect(sections.resourcesBuildPhase.files).toHaveLength(countsAfterFirstRun.resources);
+    expect(groups.get('PocketAI/Supporting/en.lproj').children).toHaveLength(1);
+    expect(groups.get('PocketAI/Supporting/ru.lproj').children).toHaveLength(
+      countsAfterFirstRun.ruChildren,
+    );
+    expect(sections.pbxProject.knownRegions).toEqual(['"en"', 'Base', 'ru']);
   });
 
   it('adds localized permission languages to Xcode known regions', () => {

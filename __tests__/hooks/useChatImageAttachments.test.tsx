@@ -392,6 +392,36 @@ describe('useChatImageAttachments', () => {
     }));
   });
 
+  it('removes only the tapped duplicate failed draft when stable ids are absent', async () => {
+    const firstFailedDraft = {
+      pickerUri: 'ph://library-image-duplicate',
+      previewUri: 'ph://library-image-duplicate',
+      mediaType: 'image/jpeg',
+      copyStatus: 'failed' as const,
+      errorReason: 'copy_failed',
+    };
+    const secondFailedDraft = {
+      pickerUri: 'ph://library-image-duplicate',
+      previewUri: 'ph://library-image-duplicate',
+      mediaType: 'image/jpeg',
+      copyStatus: 'failed' as const,
+      errorReason: 'too_large',
+    };
+    renderHarness({
+      enabled: true,
+      initialDrafts: [firstFailedDraft, secondFailedDraft],
+    });
+
+    await act(async () => {
+      latestHook?.removeDraft(secondFailedDraft, 1);
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(latestHook?.drafts).toEqual([firstFailedDraft]);
+    });
+  });
+
   it('commits drafts without deleting copied attachment files', async () => {
     renderHarness({
       enabled: true,
@@ -420,8 +450,11 @@ describe('useChatImageAttachments', () => {
     const initialDraft = {
       id: 'draft-1',
       pickerUri: 'ph://library-image-1',
-      previewUri: 'file:///document/chat-attachments/draft-1.jpg',
-      localUri: 'file:///document/chat-attachments/draft-1.jpg',
+      previewUri: 'test-dir/chat-attachments/draft-1.jpg',
+      localUri: 'test-dir/chat-attachments/draft-1.jpg',
+      pathCategory: 'chat_attachment' as const,
+      fileName: 'draft-1.jpg',
+      size: 123,
       copyStatus: 'copied' as const,
     };
     const rendered = renderHarness({
@@ -446,12 +479,133 @@ describe('useChatImageAttachments', () => {
     expect(chatAttachmentStorageService.discardDraft).not.toHaveBeenCalled();
   });
 
+  it('hands off only sendable drafts for send and leaves failed drafts in the tray', async () => {
+    const copiedDraft = {
+      id: 'draft-copied',
+      pickerUri: 'ph://library-image-copied',
+      previewUri: 'test-dir/chat-attachments/draft-copied.jpg',
+      localUri: 'test-dir/chat-attachments/draft-copied.jpg',
+      mediaType: 'image/jpeg',
+      pathCategory: 'chat_attachment' as const,
+      fileName: 'draft-copied.jpg',
+      size: 123,
+      copyStatus: 'copied' as const,
+    };
+    const failedDraft = {
+      id: 'draft-failed',
+      pickerUri: 'ph://library-image-failed',
+      previewUri: 'ph://library-image-failed',
+      mediaType: 'image/jpeg',
+      copyStatus: 'failed' as const,
+      errorReason: 'copy_failed',
+    };
+    renderHarness({
+      enabled: true,
+      initialDrafts: [copiedDraft, failedDraft],
+    });
+    let consumedDrafts: unknown[] = [];
+
+    await act(async () => {
+      consumedDrafts = latestHook?.consumeDraftsForSend() ?? [];
+      await Promise.resolve();
+    });
+
+    expect(consumedDrafts).toEqual([copiedDraft]);
+    await waitFor(() => {
+      expect(latestHook?.drafts).toEqual([failedDraft]);
+    });
+    expect(chatAttachmentStorageService.discardDrafts).not.toHaveBeenCalled();
+    expect(chatAttachmentStorageService.discardDraft).not.toHaveBeenCalled();
+  });
+
+  it('clears failed leftovers after sendable drafts are successfully consumed', async () => {
+    const copiedDraft = {
+      id: 'draft-copied',
+      pickerUri: 'ph://library-image-copied',
+      previewUri: 'test-dir/chat-attachments/draft-copied.jpg',
+      localUri: 'test-dir/chat-attachments/draft-copied.jpg',
+      mediaType: 'image/jpeg',
+      pathCategory: 'chat_attachment' as const,
+      fileName: 'draft-copied.jpg',
+      size: 123,
+      copyStatus: 'copied' as const,
+    };
+    const failedDraft = {
+      id: 'draft-failed',
+      pickerUri: 'ph://library-image-failed',
+      previewUri: 'ph://library-image-failed',
+      mediaType: 'image/jpeg',
+      copyStatus: 'failed' as const,
+      errorReason: 'copy_failed',
+    };
+    renderHarness({
+      enabled: true,
+      initialDrafts: [copiedDraft, failedDraft],
+    });
+    let consumedDrafts: unknown[] = [];
+
+    await act(async () => {
+      consumedDrafts = latestHook?.consumeDraftsForSend() ?? [];
+      latestHook?.clearFailedDrafts();
+      await Promise.resolve();
+    });
+
+    expect(consumedDrafts).toEqual([copiedDraft]);
+    await waitFor(() => {
+      expect(latestHook?.drafts).toEqual([]);
+      expect(chatAttachmentStorageService.discardDrafts).toHaveBeenCalledWith([failedDraft]);
+    });
+    expect(chatAttachmentStorageService.discardDraft).not.toHaveBeenCalled();
+  });
+
+  it('restores copied drafts for retry while retaining failed leftovers on send failure', async () => {
+    const copiedDraft = {
+      id: 'draft-copied',
+      pickerUri: 'ph://library-image-copied',
+      previewUri: 'test-dir/chat-attachments/draft-copied.jpg',
+      localUri: 'test-dir/chat-attachments/draft-copied.jpg',
+      mediaType: 'image/jpeg',
+      pathCategory: 'chat_attachment' as const,
+      fileName: 'draft-copied.jpg',
+      size: 123,
+      copyStatus: 'copied' as const,
+    };
+    const failedDraft = {
+      id: 'draft-failed',
+      pickerUri: 'ph://library-image-failed',
+      previewUri: 'ph://library-image-failed',
+      mediaType: 'image/jpeg',
+      copyStatus: 'failed' as const,
+      errorReason: 'copy_failed',
+    };
+    renderHarness({
+      enabled: true,
+      initialDrafts: [copiedDraft, failedDraft],
+    });
+    let consumedDrafts: typeof copiedDraft[] = [];
+
+    await act(async () => {
+      consumedDrafts = latestHook?.consumeDraftsForSend() as typeof copiedDraft[];
+      latestHook?.restoreDraftsForRetry(consumedDrafts);
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(latestHook?.drafts).toEqual([failedDraft, copiedDraft]);
+    });
+    expect(chatAttachmentStorageService.discardDrafts).not.toHaveBeenCalled();
+    expect(chatAttachmentStorageService.discardDraft).not.toHaveBeenCalled();
+  });
+
   it('can explicitly discard consumed drafts when send rolls back before append', async () => {
     const initialDraft = {
       id: 'draft-1',
       pickerUri: 'ph://library-image-1',
-      previewUri: 'file:///document/chat-attachments/draft-1.jpg',
-      localUri: 'file:///document/chat-attachments/draft-1.jpg',
+      previewUri: 'test-dir/chat-attachments/draft-1.jpg',
+      localUri: 'test-dir/chat-attachments/draft-1.jpg',
+      pathCategory: 'chat_attachment' as const,
+      fileName: 'draft-1.jpg',
+      size: 123,
       copyStatus: 'copied' as const,
     };
     renderHarness({
@@ -475,8 +629,11 @@ describe('useChatImageAttachments', () => {
     const initialDraft = {
       id: 'draft-1',
       pickerUri: 'ph://library-image-1',
-      previewUri: 'file:///document/chat-attachments/draft-1.jpg',
-      localUri: 'file:///document/chat-attachments/draft-1.jpg',
+      previewUri: 'test-dir/chat-attachments/draft-1.jpg',
+      localUri: 'test-dir/chat-attachments/draft-1.jpg',
+      pathCategory: 'chat_attachment' as const,
+      fileName: 'draft-1.jpg',
+      size: 123,
       copyStatus: 'copied' as const,
     };
     const rendered = renderHarness({
@@ -545,6 +702,177 @@ describe('useChatImageAttachments', () => {
       expect(latestHook?.drafts).toHaveLength(0);
     });
     expect(chatAttachmentStorageService.discardDrafts).toHaveBeenCalledWith([initialDraft]);
+  });
+
+  it('does not preserve unarmed failed-only drafts across the new-thread owner transition', async () => {
+    const failedDraft = {
+      id: 'draft-failed-new-thread',
+      pickerUri: 'ph://library-image-1',
+      previewUri: 'ph://library-image-1',
+      copyStatus: 'failed' as const,
+      errorReason: 'copy_failed' as const,
+    };
+    const Harness = ({ ownerKey }: { ownerKey: string }) => {
+      const value = useChatImageAttachments({
+        enabled: true,
+        initialDrafts: [failedDraft],
+        ownerKey,
+        preserveFailedDraftsOnNewThreadCommit: true,
+      });
+      useEffect(() => {
+        latestHook = value;
+      }, [value]);
+      return null;
+    };
+
+    const { rerender } = render(<Harness ownerKey="new-thread|model-vision" />);
+
+    expect(latestHook?.drafts).toEqual([failedDraft]);
+
+    rerender(<Harness ownerKey="created-thread|model-vision" />);
+
+    await waitFor(() => {
+      expect(latestHook?.drafts).toHaveLength(0);
+    });
+    expect(chatAttachmentStorageService.discardDrafts).toHaveBeenCalledWith([failedDraft]);
+  });
+
+  it('preserves restored copied retry drafts across the new-thread owner transition', async () => {
+    const copiedDraft = {
+      id: 'draft-copied-new-thread-retry',
+      pickerUri: 'ph://library-image-copied',
+      previewUri: 'test-dir/chat-attachments/draft-copied-new-thread-retry.jpg',
+      localUri: 'test-dir/chat-attachments/draft-copied-new-thread-retry.jpg',
+      mediaType: 'image/jpeg',
+      pathCategory: 'chat_attachment' as const,
+      fileName: 'draft-copied-new-thread-retry.jpg',
+      size: 123,
+      copyStatus: 'copied' as const,
+    };
+    const failedDraft = {
+      id: 'draft-failed-new-thread-retry',
+      pickerUri: 'ph://library-image-failed',
+      previewUri: 'ph://library-image-failed',
+      mediaType: 'image/jpeg',
+      copyStatus: 'failed' as const,
+      errorReason: 'copy_failed' as const,
+    };
+    const Harness = ({ ownerKey }: { ownerKey: string }) => {
+      const value = useChatImageAttachments({
+        enabled: true,
+        initialDrafts: [copiedDraft, failedDraft],
+        ownerKey,
+        preserveFailedDraftsOnNewThreadCommit: true,
+      });
+      useEffect(() => {
+        latestHook = value;
+      }, [value]);
+      return null;
+    };
+    let consumedDrafts: typeof copiedDraft[] = [];
+
+    const { rerender } = render(<Harness ownerKey="new-thread|model-vision" />);
+
+    await act(async () => {
+      consumedDrafts = latestHook?.consumeDraftsForSend() as typeof copiedDraft[];
+      latestHook?.restoreDraftsForRetry(consumedDrafts, { preserveOwnerKey: 'created-thread|model-vision' });
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(latestHook?.drafts).toEqual([failedDraft, copiedDraft]);
+    });
+
+    rerender(<Harness ownerKey="created-thread|model-vision" />);
+
+    await waitFor(() => {
+      expect(latestHook?.drafts).toEqual([failedDraft, copiedDraft]);
+    });
+    expect(chatAttachmentStorageService.discardDrafts).not.toHaveBeenCalled();
+    expect(chatAttachmentStorageService.discardDraft).not.toHaveBeenCalled();
+  });
+
+  it('does not preserve restored retry drafts when switching to an unrelated same-model thread', async () => {
+    const copiedDraft = {
+      id: 'draft-copied-unrelated-thread-retry',
+      pickerUri: 'ph://library-image-copied',
+      previewUri: 'test-dir/chat-attachments/draft-copied-unrelated-thread-retry.jpg',
+      localUri: 'test-dir/chat-attachments/draft-copied-unrelated-thread-retry.jpg',
+      mediaType: 'image/jpeg',
+      pathCategory: 'chat_attachment' as const,
+      fileName: 'draft-copied-unrelated-thread-retry.jpg',
+      size: 123,
+      copyStatus: 'copied' as const,
+    };
+    const failedDraft = {
+      id: 'draft-failed-unrelated-thread-retry',
+      pickerUri: 'ph://library-image-failed',
+      previewUri: 'ph://library-image-failed',
+      mediaType: 'image/jpeg',
+      copyStatus: 'failed' as const,
+      errorReason: 'copy_failed' as const,
+    };
+    const Harness = ({ ownerKey }: { ownerKey: string }) => {
+      const value = useChatImageAttachments({
+        enabled: true,
+        initialDrafts: [copiedDraft, failedDraft],
+        ownerKey,
+        preserveFailedDraftsOnNewThreadCommit: true,
+      });
+      useEffect(() => {
+        latestHook = value;
+      }, [value]);
+      return null;
+    };
+    let consumedDrafts: typeof copiedDraft[] = [];
+
+    const { rerender } = render(<Harness ownerKey="new-thread|model-vision" />);
+
+    await act(async () => {
+      consumedDrafts = latestHook?.consumeDraftsForSend() as typeof copiedDraft[];
+      latestHook?.restoreDraftsForRetry(consumedDrafts, { preserveOwnerKey: 'created-thread|model-vision' });
+      await Promise.resolve();
+    });
+
+    rerender(<Harness ownerKey="existing-thread|model-vision" />);
+
+    await waitFor(() => {
+      expect(latestHook?.drafts).toHaveLength(0);
+    });
+    expect(chatAttachmentStorageService.discardDrafts).toHaveBeenCalledWith([failedDraft, copiedDraft]);
+  });
+
+  it('does not preserve failed-only drafts across unrelated owner changes', async () => {
+    const failedDraft = {
+      id: 'draft-failed-model-switch',
+      pickerUri: 'ph://library-image-1',
+      previewUri: 'ph://library-image-1',
+      copyStatus: 'failed' as const,
+      errorReason: 'copy_failed' as const,
+    };
+    const Harness = ({ ownerKey }: { ownerKey: string }) => {
+      const value = useChatImageAttachments({
+        enabled: true,
+        initialDrafts: [failedDraft],
+        ownerKey,
+        preserveFailedDraftsOnNewThreadCommit: true,
+      });
+      useEffect(() => {
+        latestHook = value;
+      }, [value]);
+      return null;
+    };
+
+    const { rerender } = render(<Harness ownerKey="new-thread|model-vision" />);
+
+    expect(latestHook?.drafts).toEqual([failedDraft]);
+
+    rerender(<Harness ownerKey="created-thread|other-model" />);
+
+    await waitFor(() => {
+      expect(latestHook?.drafts).toHaveLength(0);
+    });
+    expect(chatAttachmentStorageService.discardDrafts).toHaveBeenCalledWith([failedDraft]);
   });
 
   it('clears and discards drafts when image attachments become disabled', async () => {

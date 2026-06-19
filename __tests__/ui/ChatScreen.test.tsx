@@ -111,6 +111,7 @@ const mockRefreshModelMetadata = jest.fn((model) => Promise.resolve(model));
 const mockAttachImages = jest.fn();
 const mockRemoveAttachmentDraft = jest.fn();
 const mockClearAttachmentDrafts = jest.fn();
+const mockClearFailedAttachmentDrafts = jest.fn();
 const mockCommitAttachmentDrafts = jest.fn();
 const mockConsumeAttachmentDrafts = jest.fn();
 const mockRestoreAttachmentDrafts = jest.fn();
@@ -644,6 +645,20 @@ const consumedDraftImageAttachment = {
   previewUri: 'test-dir/chat-attachments/consumed-draft-image-1.jpg',
   fileName: 'consumed-draft-image-1.jpg',
 };
+const secondConsumedDraftImageAttachment = {
+  ...copiedDraftImageAttachment,
+  id: 'consumed-draft-image-2',
+  localUri: 'test-dir/chat-attachments/consumed-draft-image-2.jpg',
+  previewUri: 'test-dir/chat-attachments/consumed-draft-image-2.jpg',
+  fileName: 'consumed-draft-image-2.jpg',
+};
+const failedDraftImageAttachment = {
+  pickerUri: 'ph://library-image-failed',
+  previewUri: 'ph://library-image-failed',
+  mediaType: 'image/jpeg',
+  copyStatus: 'failed',
+  errorReason: 'copy_failed',
+};
 
 function createVisionProjector(overrides: Record<string, unknown> = {}) {
   return {
@@ -752,6 +767,7 @@ describe('ChatScreen', () => {
     mockAttachImages.mockResolvedValue(undefined);
     mockRemoveAttachmentDraft.mockClear();
     mockClearAttachmentDrafts.mockClear();
+    mockClearFailedAttachmentDrafts.mockClear();
     mockCommitAttachmentDrafts.mockClear();
     mockConsumeAttachmentDrafts.mockReset();
     mockConsumeAttachmentDrafts.mockReturnValue([]);
@@ -765,6 +781,7 @@ describe('ChatScreen', () => {
       attachImages: mockAttachImages,
       removeDraft: mockRemoveAttachmentDraft,
       clearDrafts: mockClearAttachmentDrafts,
+      clearFailedDrafts: mockClearFailedAttachmentDrafts,
       commitDrafts: mockCommitAttachmentDrafts,
       consumeDraftsForSend: mockConsumeAttachmentDrafts,
       restoreDraftsForRetry: mockRestoreAttachmentDrafts,
@@ -1235,7 +1252,78 @@ describe('ChatScreen', () => {
     expect(mockCommitAttachmentDrafts).not.toHaveBeenCalled();
   });
 
-  it('keeps consumed copied drafts when generation fails after the user message was appended', async () => {
+  it('sends only copied drafts and clears failed leftovers after success', async () => {
+    registry.saveModels([
+      createReadyVisionModel(),
+    ]);
+    mockUseChatImageAttachments.mockImplementation(() => ({
+      drafts: [copiedDraftImageAttachment, failedDraftImageAttachment],
+      isPicking: false,
+      remainingSlots: 2,
+      attachImages: mockAttachImages,
+      removeDraft: mockRemoveAttachmentDraft,
+      clearDrafts: mockClearAttachmentDrafts,
+      clearFailedDrafts: mockClearFailedAttachmentDrafts,
+      commitDrafts: mockCommitAttachmentDrafts,
+      consumeDraftsForSend: mockConsumeAttachmentDrafts,
+      restoreDraftsForRetry: mockRestoreAttachmentDrafts,
+      discardDrafts: mockDiscardAttachmentDrafts,
+    }));
+    mockConsumeAttachmentDrafts.mockReturnValueOnce([consumedDraftImageAttachment]);
+
+    render(React.createElement(ChatScreen));
+
+    await act(async () => {
+      await lastChatInputBarProps.onSendMessage('Describe this image');
+    });
+
+    expect(mockAppendUserMessage).toHaveBeenCalledWith(
+      'Describe this image',
+      expect.objectContaining({
+        attachmentDrafts: [consumedDraftImageAttachment],
+        multimodalReadiness: expect.objectContaining({ status: 'ready' }),
+      }),
+    );
+    expect(mockConsumeAttachmentDrafts).toHaveBeenCalledTimes(1);
+    expect(mockClearFailedAttachmentDrafts).toHaveBeenCalledTimes(1);
+  });
+
+  it('sends text without attachment options and clears failed drafts when only failed drafts remain', async () => {
+    registry.saveModels([
+      createReadyVisionModel(),
+    ]);
+    mockUseChatImageAttachments.mockImplementation(() => ({
+      drafts: [failedDraftImageAttachment],
+      isPicking: false,
+      remainingSlots: 3,
+      attachImages: mockAttachImages,
+      removeDraft: mockRemoveAttachmentDraft,
+      clearDrafts: mockClearAttachmentDrafts,
+      clearFailedDrafts: mockClearFailedAttachmentDrafts,
+      commitDrafts: mockCommitAttachmentDrafts,
+      consumeDraftsForSend: mockConsumeAttachmentDrafts,
+      restoreDraftsForRetry: mockRestoreAttachmentDrafts,
+      discardDrafts: mockDiscardAttachmentDrafts,
+    }));
+    mockConsumeAttachmentDrafts.mockReturnValueOnce([]);
+
+    render(React.createElement(ChatScreen));
+
+    await act(async () => {
+      await lastChatInputBarProps.onSendMessage('Send text only');
+    });
+
+    expect(mockAppendUserMessage).toHaveBeenCalledWith(
+      'Send text only',
+      expect.not.objectContaining({
+        attachmentDrafts: expect.anything(),
+      }),
+    );
+    expect(mockConsumeAttachmentDrafts).toHaveBeenCalledTimes(1);
+    expect(mockClearFailedAttachmentDrafts).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps consumed copied drafts and clears failed leftovers when generation fails after append', async () => {
     registry.saveModels([
       createReadyVisionModel(),
     ]);
@@ -1244,12 +1332,13 @@ describe('ChatScreen', () => {
       throw new Error('generation failed');
     });
     mockUseChatImageAttachments.mockImplementation(() => ({
-      drafts: [copiedDraftImageAttachment],
+      drafts: [copiedDraftImageAttachment, failedDraftImageAttachment],
       isPicking: false,
-      remainingSlots: 3,
+      remainingSlots: 2,
       attachImages: mockAttachImages,
       removeDraft: mockRemoveAttachmentDraft,
       clearDrafts: mockClearAttachmentDrafts,
+      clearFailedDrafts: mockClearFailedAttachmentDrafts,
       commitDrafts: mockCommitAttachmentDrafts,
       consumeDraftsForSend: mockConsumeAttachmentDrafts,
       restoreDraftsForRetry: mockRestoreAttachmentDrafts,
@@ -1275,22 +1364,24 @@ describe('ChatScreen', () => {
     expect(mockConsumeAttachmentDrafts).toHaveBeenCalledTimes(1);
     expect(mockCommitAttachmentDrafts).not.toHaveBeenCalled();
     expect(mockDiscardAttachmentDrafts).not.toHaveBeenCalled();
+    expect(mockClearFailedAttachmentDrafts).toHaveBeenCalledTimes(1);
     expect(mockClearAttachmentDrafts).not.toHaveBeenCalled();
     expect(lastChatInputBarProps.draft).toBe('');
   });
 
-  it('restores consumed copied drafts when attachment send fails before append', async () => {
+  it('restores consumed copied drafts and retains failed drafts when attachment send fails before append', async () => {
     registry.saveModels([
       createReadyVisionModel(),
     ]);
     mockAppendUserMessage.mockRejectedValueOnce(new Error('send failed'));
     mockUseChatImageAttachments.mockImplementation(() => ({
-      drafts: [copiedDraftImageAttachment],
+      drafts: [copiedDraftImageAttachment, failedDraftImageAttachment],
       isPicking: false,
-      remainingSlots: 3,
+      remainingSlots: 2,
       attachImages: mockAttachImages,
       removeDraft: mockRemoveAttachmentDraft,
       clearDrafts: mockClearAttachmentDrafts,
+      clearFailedDrafts: mockClearFailedAttachmentDrafts,
       commitDrafts: mockCommitAttachmentDrafts,
       consumeDraftsForSend: mockConsumeAttachmentDrafts,
       restoreDraftsForRetry: mockRestoreAttachmentDrafts,
@@ -1313,6 +1404,7 @@ describe('ChatScreen', () => {
     expect(mockConsumeAttachmentDrafts).toHaveBeenCalledTimes(1);
     expect(mockRestoreAttachmentDrafts).toHaveBeenCalledWith([consumedDraftImageAttachment]);
     expect(mockDiscardAttachmentDrafts).not.toHaveBeenCalled();
+    expect(mockClearFailedAttachmentDrafts).not.toHaveBeenCalled();
     expect(mockCommitAttachmentDrafts).not.toHaveBeenCalled();
     expect(mockClearAttachmentDrafts).not.toHaveBeenCalled();
   });
@@ -1322,7 +1414,12 @@ describe('ChatScreen', () => {
       createReadyVisionModel(),
     ]);
     mockAppendUserMessage.mockRejectedValueOnce(
-      new AppError('chat_attachment_missing', 'Attachment file is missing.'),
+      new AppError('chat_attachment_missing', 'Attachment file is missing.', {
+        details: {
+          attachmentId: consumedDraftImageAttachment.id,
+          attachmentIds: [consumedDraftImageAttachment.id],
+        },
+      }),
     );
     mockUseChatImageAttachments.mockImplementation(() => ({
       drafts: [copiedDraftImageAttachment],
@@ -1349,8 +1446,103 @@ describe('ChatScreen', () => {
     });
 
     expect(mockConsumeAttachmentDrafts).toHaveBeenCalledTimes(1);
-    expect(mockDiscardAttachmentDrafts).toHaveBeenCalledWith([consumedDraftImageAttachment], 'drafts after failed send');
+    expect(mockDiscardAttachmentDrafts).toHaveBeenCalledWith([consumedDraftImageAttachment], 'missing copied drafts after failed send');
     expect(mockRestoreAttachmentDrafts).not.toHaveBeenCalled();
+  });
+
+  it('discards id-less consumed copied drafts when a missing attachment error has no usable ids', async () => {
+    registry.saveModels([
+      createReadyVisionModel(),
+    ]);
+    const idlessConsumedDraft = {
+      ...consumedDraftImageAttachment,
+      id: undefined,
+      localUri: 'test-dir/chat-attachments/idless-draft.jpg',
+      previewUri: 'test-dir/chat-attachments/idless-draft-thumb.jpg',
+    };
+    mockAppendUserMessage.mockRejectedValueOnce(
+      new AppError('chat_attachment_missing', 'Attachment file is missing.', {
+        details: {
+          attachmentIds: [],
+          pathCategories: ['chat_attachment'],
+        },
+      }),
+    );
+    mockUseChatImageAttachments.mockImplementation(() => ({
+      drafts: [copiedDraftImageAttachment],
+      isPicking: false,
+      remainingSlots: 3,
+      attachImages: mockAttachImages,
+      removeDraft: mockRemoveAttachmentDraft,
+      clearDrafts: mockClearAttachmentDrafts,
+      commitDrafts: mockCommitAttachmentDrafts,
+      consumeDraftsForSend: mockConsumeAttachmentDrafts,
+      restoreDraftsForRetry: mockRestoreAttachmentDrafts,
+      discardDrafts: mockDiscardAttachmentDrafts,
+    }));
+    mockConsumeAttachmentDrafts.mockReturnValueOnce([idlessConsumedDraft]);
+
+    render(React.createElement(ChatScreen));
+
+    await act(async () => {
+      try {
+        await lastChatInputBarProps.onSendMessage('Describe this image');
+      } catch {
+        // expected
+      }
+    });
+
+    expect(mockConsumeAttachmentDrafts).toHaveBeenCalledTimes(1);
+    expect(mockDiscardAttachmentDrafts).toHaveBeenCalledWith(
+      [idlessConsumedDraft],
+      'missing copied drafts after failed send',
+    );
+    expect(mockRestoreAttachmentDrafts).not.toHaveBeenCalled();
+  });
+
+  it('only discards missing consumed drafts and restores remaining copied drafts before append', async () => {
+    registry.saveModels([
+      createReadyVisionModel(),
+    ]);
+    mockAppendUserMessage.mockRejectedValueOnce(
+      new AppError('chat_attachment_missing', 'Attachment file is missing.', {
+        details: {
+          attachmentIds: [consumedDraftImageAttachment.id],
+        },
+      }),
+    );
+    mockUseChatImageAttachments.mockImplementation(() => ({
+      drafts: [copiedDraftImageAttachment],
+      isPicking: false,
+      remainingSlots: 2,
+      attachImages: mockAttachImages,
+      removeDraft: mockRemoveAttachmentDraft,
+      clearDrafts: mockClearAttachmentDrafts,
+      commitDrafts: mockCommitAttachmentDrafts,
+      consumeDraftsForSend: mockConsumeAttachmentDrafts,
+      restoreDraftsForRetry: mockRestoreAttachmentDrafts,
+      discardDrafts: mockDiscardAttachmentDrafts,
+    }));
+    mockConsumeAttachmentDrafts.mockReturnValueOnce([
+      consumedDraftImageAttachment,
+      secondConsumedDraftImageAttachment,
+    ]);
+
+    render(React.createElement(ChatScreen));
+
+    await act(async () => {
+      try {
+        await lastChatInputBarProps.onSendMessage('Describe this image');
+      } catch {
+        // expected
+      }
+    });
+
+    expect(mockDiscardAttachmentDrafts).toHaveBeenCalledWith(
+      [consumedDraftImageAttachment],
+      'missing copied drafts after failed send',
+    );
+    expect(mockRestoreAttachmentDrafts).toHaveBeenCalledWith([secondConsumedDraftImageAttachment]);
   });
 
   it('sends text only without committing copied drafts when readiness turns off', async () => {

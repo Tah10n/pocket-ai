@@ -679,10 +679,18 @@ export class ModelCatalogService {
   ): ModelMetadata {
     const resolvedFileName = model.resolvedFileName?.trim();
     const downloadFileName = this.extractResolvedFileNameFromDownloadUrl(model.downloadUrl);
+    const fallbackFileName = this.isSupportedResolvedCatalogFileName(fallbackModel?.resolvedFileName)
+      ? fallbackModel?.resolvedFileName
+      : undefined;
     const hasSupportedResolvedFileName = this.isSupportedResolvedCatalogFileName(resolvedFileName);
     const hasUnsupportedDownloadFileName = Boolean(
       downloadFileName && !this.isSupportedResolvedCatalogFileName(downloadFileName),
     );
+
+    if (!resolvedFileName && model.requiresTreeProbe !== true && !fallbackFileName && !hasUnsupportedDownloadFileName) {
+      return model;
+    }
+
     const hasMismatchedDownloadFileName = Boolean(
       hasSupportedResolvedFileName
       && downloadFileName
@@ -697,9 +705,6 @@ export class ModelCatalogService {
       return model;
     }
 
-    const fallbackFileName = this.isSupportedResolvedCatalogFileName(fallbackModel?.resolvedFileName)
-      ? fallbackModel?.resolvedFileName
-      : undefined;
     const replacementFileName = fallbackFileName ?? (hasSupportedResolvedFileName ? resolvedFileName : undefined);
     const metadataSource = fallbackFileName ? fallbackModel : undefined;
 
@@ -746,6 +751,79 @@ export class ModelCatalogService {
       sha256: undefined,
       requiresTreeProbe: true,
     });
+  }
+
+  private createUnresolvedTreeProbeMissModel(model: ModelMetadata): ModelMetadata {
+    return normalizePersistedModelMetadata({
+      ...model,
+      size: null,
+      fitsInRam: null,
+      memoryFitDecision: undefined,
+      memoryFitConfidence: undefined,
+      metadataTrust: undefined,
+      gguf: undefined,
+      capabilitySnapshot: undefined,
+      maxContextTokens: undefined,
+      hasVerifiedContextWindow: false,
+      parameterSizeLabel: undefined,
+      variants: undefined,
+      activeVariantId: undefined,
+      resolvedFileName: undefined,
+      localPath: undefined,
+      downloadedAt: undefined,
+      downloadIntegrity: undefined,
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+      resumeData: undefined,
+      downloadErrorCode: undefined,
+      downloadErrorMessage: undefined,
+      downloadErrorAt: undefined,
+      downloadUrl: getHuggingFaceModelUrl(model.id),
+      sha256: undefined,
+      requiresTreeProbe: false,
+      chatModalities: model.chatModalities?.filter((modality) => modality !== 'vision'),
+      artifactRole: undefined,
+      visionSource: undefined,
+      visionConfidence: undefined,
+      projectorCandidates: undefined,
+      selectedProjectorId: undefined,
+      multimodalReadiness: undefined,
+    });
+  }
+
+  private finalizeUnresolvedTreeProbeMissModel(model: ModelMetadata): ModelMetadata {
+    const unresolvedModel = this.createUnresolvedTreeProbeMissModel(model);
+    this.evictModelFromCatalogCaches(model.id);
+
+    if (registry.getModel(model.id)) {
+      registry.updateModel(unresolvedModel);
+    }
+
+    return unresolvedModel;
+  }
+
+  private evictModelFromCatalogCaches(modelId: string, authScope?: CatalogCacheAuthScope): void {
+    const scopes = authScope ? [authScope] : (['anon', 'auth'] as const);
+    scopes.forEach((scope) => {
+      this.modelSnapshotCache.delete(this.buildModelSnapshotCacheKey(modelId, scope));
+      this.persistentCache.deleteModelSnapshots([modelId], scope);
+    });
+
+    for (const [key, entry] of this.searchCache.entries()) {
+      const nextModels = entry.result.models.filter((model) => model.id !== modelId);
+      if (nextModels.length === entry.result.models.length) {
+        continue;
+      }
+
+      this.searchCache.set(key, {
+        ...entry,
+        result: {
+          ...entry.result,
+          models: nextModels,
+        },
+      });
+    }
+    this.persistentCache.deleteSearchModels([modelId], authScope);
   }
 
   private sanitizeCachedCatalogModelsResolvedFiles(models: ModelMetadata[]): ModelMetadata[] {
@@ -981,6 +1059,10 @@ export class ModelCatalogService {
           requestContext,
           { treeProbeMode: 'full' },
         );
+        if (!resolvedModel && detailedModel.requiresTreeProbe === true) {
+          return this.finalizeUnresolvedTreeProbeMissModel(detailedModel);
+        }
+
         detailedModel = resolvedModel ?? detailedModel;
         hasVerifiedContextWindow = detailedModel.hasVerifiedContextWindow === true || typeof payloadMaxContextTokens === 'number';
       } else if (response.status === 401 || response.status === 403) {
@@ -1125,6 +1207,10 @@ export class ModelCatalogService {
         treeProbeMode: options.includeDetails ? 'full' : 'bounded',
       });
       this.assertRequestContextIsCurrent(requestContext);
+      if (!resolved && model.requiresTreeProbe === true) {
+        return this.finalizeUnresolvedTreeProbeMissModel(model);
+      }
+
       const refreshed = resolved ?? model;
       const snapshotAuthScope = this.getAuthScope(requestContext.hasAuthToken && (
         refreshed.accessState !== ModelAccessState.PUBLIC

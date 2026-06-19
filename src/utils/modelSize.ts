@@ -1,7 +1,17 @@
 import type { ProjectorArtifact } from '../types/multimodal';
-import type { ModelMetadata } from '../types/models';
+import type { ModelMetadata, ModelVariant } from '../types/models';
+import { mergeProjectorCandidatesWithRuntimeStateAndIdMap } from './projectorRuntimeState';
 
 type ProjectorArtifactSizeIdentity = Pick<ProjectorArtifact, 'size'> & Partial<Pick<ProjectorArtifact, 'id' | 'localPath'>>;
+type ProjectorArtifactDisplayIdentity = ProjectorArtifactSizeIdentity & Partial<Pick<ProjectorArtifact, 'ownerVariantId'>>;
+type ModelDisplayArtifactSizeInput = Pick<ModelMetadata, 'size' | 'projectorCandidates' | 'selectedProjectorId'> & Partial<Pick<
+  ModelMetadata,
+  'activeVariantId' | 'resolvedFileName' | 'variants'
+>>;
+type ModelDisplayProjectorCandidatesResult = {
+  candidates: ModelMetadata['projectorCandidates'];
+  runtimeToDisplayProjectorIds: Map<string, string>;
+};
 
 export const DECIMAL_GIGABYTE = 1000 * 1000 * 1000;
 export const UNKNOWN_PROJECTOR_MEMORY_FIT_FALLBACK_BYTES = DECIMAL_GIGABYTE;
@@ -73,6 +83,179 @@ function sumUniqueProjectorArtifactSizes(
 
     return sum + size;
   }, 0);
+}
+
+function normalizeOptionalString(value: string | null | undefined): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const normalized = value.trim();
+  return normalized.length > 0 ? normalized : null;
+}
+
+function resolveActiveVariant(
+  model: Pick<ModelDisplayArtifactSizeInput, 'activeVariantId' | 'resolvedFileName' | 'variants'>,
+): ModelVariant | undefined {
+  const variants = model.variants ?? [];
+  if (variants.length === 0) {
+    return undefined;
+  }
+
+  const activeVariantId = normalizeOptionalString(model.activeVariantId);
+  const resolvedFileName = normalizeOptionalString(model.resolvedFileName);
+
+  return variants.find((variant) => activeVariantId !== null && variant.variantId === activeVariantId)
+    ?? variants.find((variant) => resolvedFileName !== null && variant.fileName === resolvedFileName)
+    ?? variants[0];
+}
+
+function getVariantIdentityKeys(
+  model: ModelDisplayArtifactSizeInput,
+  activeVariant: ModelVariant | undefined,
+): Set<string> {
+  return new Set([
+    normalizeOptionalString(model.activeVariantId),
+    normalizeOptionalString(model.resolvedFileName),
+    normalizeOptionalString(activeVariant?.variantId),
+    normalizeOptionalString(activeVariant?.fileName),
+  ].filter((value): value is string => value !== null));
+}
+
+function isProjectorCompatibleWithVariant(
+  projector: ProjectorArtifactDisplayIdentity,
+  activeVariantKeys: Set<string>,
+): boolean {
+  const ownerVariantId = normalizeOptionalString(projector.ownerVariantId);
+  return ownerVariantId === null || activeVariantKeys.size === 0 || activeVariantKeys.has(ownerVariantId);
+}
+
+function resolveActiveVariantProjectorRuntimeScopeKey(
+  model: ModelDisplayArtifactSizeInput,
+  activeVariant: ModelVariant,
+): string | undefined {
+  return normalizeOptionalString(activeVariant.variantId)
+    ?? normalizeOptionalString(activeVariant.fileName)
+    ?? normalizeOptionalString(model.activeVariantId)
+    ?? normalizeOptionalString(model.resolvedFileName)
+    ?? undefined;
+}
+
+function filterProjectorsForActiveVariant(
+  candidates: ModelMetadata['projectorCandidates'],
+  model: ModelDisplayArtifactSizeInput,
+  activeVariant: ModelVariant | undefined,
+): ModelMetadata['projectorCandidates'] {
+  if (!activeVariant || !candidates || candidates.length === 0) {
+    return candidates;
+  }
+
+  const activeVariantKeys = getVariantIdentityKeys(model, activeVariant);
+  return candidates.filter((projector) => isProjectorCompatibleWithVariant(projector, activeVariantKeys));
+}
+
+function resolveModelDisplayProjectorCandidates(
+  model: ModelDisplayArtifactSizeInput,
+  projectorCandidates?: ModelMetadata['projectorCandidates'],
+): ModelDisplayProjectorCandidatesResult {
+  const activeVariant = resolveActiveVariant(model);
+  const emptyIdMap = new Map<string, string>();
+
+  if (projectorCandidates) {
+    const mergedProjectorIds = activeVariant && model.projectorCandidates?.length
+      ? mergeProjectorCandidatesWithRuntimeStateAndIdMap(
+        projectorCandidates,
+        model.projectorCandidates,
+        { activeVariantId: resolveActiveVariantProjectorRuntimeScopeKey(model, activeVariant) },
+      ).runtimeToNextProjectorIds
+      : emptyIdMap;
+
+    return {
+      candidates: filterProjectorsForActiveVariant(projectorCandidates, model, activeVariant),
+      runtimeToDisplayProjectorIds: mergedProjectorIds,
+    };
+  }
+
+  if (activeVariant?.projectorCandidates?.length) {
+    const mergedProjectors = mergeProjectorCandidatesWithRuntimeStateAndIdMap(
+      activeVariant.projectorCandidates,
+      model.projectorCandidates,
+      { activeVariantId: resolveActiveVariantProjectorRuntimeScopeKey(model, activeVariant) },
+    );
+
+    return {
+      candidates: filterProjectorsForActiveVariant(
+        mergedProjectors.projectorCandidates ?? activeVariant.projectorCandidates,
+        model,
+        activeVariant,
+      ),
+      runtimeToDisplayProjectorIds: mergedProjectors.runtimeToNextProjectorIds,
+    };
+  }
+
+  return {
+    candidates: filterProjectorsForActiveVariant(model.projectorCandidates, model, activeVariant),
+    runtimeToDisplayProjectorIds: emptyIdMap,
+  };
+}
+
+export function getModelDisplayProjectorCandidates(
+  model: ModelDisplayArtifactSizeInput,
+  projectorCandidates?: ModelMetadata['projectorCandidates'],
+): ModelMetadata['projectorCandidates'] {
+  return resolveModelDisplayProjectorCandidates(model, projectorCandidates).candidates;
+}
+
+function resolveDisplaySelectedProjectorId(
+  model: ModelDisplayArtifactSizeInput,
+  candidates: ModelMetadata['projectorCandidates'],
+  selectedProjectorId?: string,
+  runtimeToDisplayProjectorIds: Map<string, string> = new Map(),
+): string | undefined {
+  const activeVariant = resolveActiveVariant(model);
+  if (!activeVariant) {
+    const normalizedSelectedProjectorId = normalizeOptionalString(selectedProjectorId ?? model.selectedProjectorId);
+    return normalizedSelectedProjectorId
+      ? runtimeToDisplayProjectorIds.get(normalizedSelectedProjectorId) ?? normalizedSelectedProjectorId
+      : undefined;
+  }
+
+  const activeVariantSelectedProjectorId = normalizeOptionalString(activeVariant.selectedProjectorId);
+  const activeVariantKeys = getVariantIdentityKeys(model, activeVariant);
+  if (activeVariantSelectedProjectorId !== null) {
+    const activeVariantSelectedProjector = candidates?.find((projector) => projector.id === activeVariantSelectedProjectorId);
+    if (
+      activeVariantSelectedProjector
+      && isProjectorCompatibleWithVariant(activeVariantSelectedProjector, activeVariantKeys)
+    ) {
+      return activeVariantSelectedProjectorId;
+    }
+  }
+
+  const normalizedRuntimeSelectedProjectorId = normalizeOptionalString(selectedProjectorId ?? model.selectedProjectorId);
+  if (normalizedRuntimeSelectedProjectorId === null) {
+    return undefined;
+  }
+
+  const normalizedSelectedProjectorId = runtimeToDisplayProjectorIds.get(normalizedRuntimeSelectedProjectorId)
+    ?? normalizedRuntimeSelectedProjectorId;
+  const selectedProjector = candidates?.find((projector) => projector.id === normalizedSelectedProjectorId);
+  return selectedProjector && isProjectorCompatibleWithVariant(selectedProjector, activeVariantKeys)
+    ? normalizedSelectedProjectorId
+    : undefined;
+}
+
+export function getModelDisplaySelectedProjectorId(
+  model: ModelDisplayArtifactSizeInput,
+  projectorCandidates?: ModelMetadata['projectorCandidates'],
+): ModelMetadata['selectedProjectorId'] {
+  const displayProjectors = resolveModelDisplayProjectorCandidates(model, projectorCandidates);
+  return resolveDisplaySelectedProjectorId(
+    model,
+    displayProjectors.candidates,
+    undefined,
+    displayProjectors.runtimeToDisplayProjectorIds,
+  );
 }
 
 export function getProjectorArtifactsSizeBytes(
@@ -151,17 +334,31 @@ export function getModelStoredMemoryFitSizeBytes(
 }
 
 export function getModelDisplayArtifactSizeBytes(
-  model: Pick<ModelMetadata, 'size' | 'projectorCandidates' | 'selectedProjectorId'>,
-  baseSizeBytes: number | null | undefined = model.size,
-  projectorCandidates: ModelMetadata['projectorCandidates'] = model.projectorCandidates,
-  selectedProjectorId: ModelMetadata['selectedProjectorId'] = model.selectedProjectorId,
+  model: ModelDisplayArtifactSizeInput,
+  baseSizeBytes?: number | null,
+  projectorCandidates?: ModelMetadata['projectorCandidates'],
+  selectedProjectorId?: ModelMetadata['selectedProjectorId'],
 ): number | null {
-  const normalizedBaseSize = normalizePositiveByteSize(baseSizeBytes);
+  const activeVariant = resolveActiveVariant(model);
+  const resolvedBaseSizeBytes = baseSizeBytes !== undefined
+    ? baseSizeBytes
+    : (activeVariant?.size ?? model.size);
+  const normalizedBaseSize = normalizePositiveByteSize(
+    resolvedBaseSizeBytes,
+  );
   if (normalizedBaseSize === null) {
     return null;
   }
 
-  return normalizedBaseSize + getProjectorMemoryFitSizeBytes(projectorCandidates, selectedProjectorId, {
+  const displayProjectors = resolveModelDisplayProjectorCandidates(model, projectorCandidates);
+  const displaySelectedProjectorId = resolveDisplaySelectedProjectorId(
+    model,
+    displayProjectors.candidates,
+    selectedProjectorId,
+    displayProjectors.runtimeToDisplayProjectorIds,
+  );
+
+  return normalizedBaseSize + getProjectorMemoryFitSizeBytes(displayProjectors.candidates, displaySelectedProjectorId, {
     includeUnknownSizeFallback: false,
   });
 }

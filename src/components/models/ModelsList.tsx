@@ -484,6 +484,7 @@ export const ModelsList = ({
           activeModelId: engineState.activeModelId,
           loadProgress: engineState.loadProgress,
           lastError: engineState.lastError,
+          diagnostics: engineState.diagnostics,
         },
         options: allowUnsafeMemoryLoad !== undefined || forceReload !== undefined
           ? {
@@ -495,6 +496,7 @@ export const ModelsList = ({
     });
   }, [
     engineState.activeModelId,
+    engineState.diagnostics,
     engineState.lastError,
     engineState.loadProgress,
     engineState.status,

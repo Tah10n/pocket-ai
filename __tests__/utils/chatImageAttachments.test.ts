@@ -4,12 +4,14 @@ import {
   getRemainingChatImageAttachmentSlots,
   getSendableDraftImageAttachments,
   hasFailedDraftImageAttachments,
+  isChatAttachmentMediaPath,
   isSupportedChatImageDraftFormat,
   isSupportedChatImageMimeType,
   MAX_CHAT_IMAGE_ATTACHMENTS,
   MAX_CHAT_IMAGE_ATTACHMENT_BYTES,
   MAX_CHAT_IMAGE_ATTACHMENT_SIDE_PIXELS,
   MAX_CHAT_IMAGE_ATTACHMENT_TOTAL_PIXELS,
+  normalizeChatAttachmentMediaPath,
   summarizeChatImageAttachments,
   validateChatImageAttachmentBounds,
   validateChatImageAttachmentLimit,
@@ -128,6 +130,16 @@ describe('chatImageAttachments', () => {
       count: 2,
       totalBytes: 358_023,
     });
+  });
+
+  it('validates runtime media paths against app-owned chat attachment storage', () => {
+    expect(normalizeChatAttachmentMediaPath('test-dir/chat-attachments/thread-1/image.jpg')).toBe(
+      'test-dir/chat-attachments/thread-1/image.jpg',
+    );
+    expect(isChatAttachmentMediaPath('test-dir/chat-attachments/thread-1/image.png')).toBe(true);
+    expect(isChatAttachmentMediaPath('/private/tmp/image.jpg')).toBe(false);
+    expect(isChatAttachmentMediaPath('test-dir/chat-attachments/../models/model.gguf')).toBe(false);
+    expect(isChatAttachmentMediaPath('content://media/external/images/1')).toBe(false);
   });
 
   it('enforces app-level image attachment byte and pixel bounds while accepting unknown dimensions', () => {

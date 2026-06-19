@@ -1,9 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Image, LayoutChangeEvent } from 'react-native';
+import type { LayoutChangeEvent } from 'react-native';
 import { useTranslation } from 'react-i18next';
 import * as Clipboard from 'expo-clipboard';
-import * as FileSystem from 'expo-file-system/legacy';
 import { Box } from '@/components/ui/box';
+import { Image } from '@/components/ui/image';
 import { Pressable } from '@/components/ui/pressable';
 import { Text } from '@/components/ui/text';
 import type { ChatImageAttachment } from '@/types/multimodal';
@@ -58,25 +58,11 @@ function getAttachmentPreferredPreviewUri(attachment: ChatImageAttachment): stri
   return attachment.thumbnailUri ?? attachment.localUri;
 }
 
-type AttachmentPreviewProbe = {
-  id: string;
-  localUri: string;
-  thumbnailUri: string | null;
-};
-
-function getAttachmentPreviewUriCandidates(attachment: Pick<ChatImageAttachment, 'localUri' | 'thumbnailUri'> | AttachmentPreviewProbe): string[] {
+function getAttachmentPreviewUriCandidates(attachment: Pick<ChatImageAttachment, 'localUri' | 'thumbnailUri'>): string[] {
   return Array.from(new Set([
     attachment.thumbnailUri,
     attachment.localUri,
   ].filter((uri): uri is string => typeof uri === 'string' && uri.length > 0)));
-}
-
-function getAttachmentPreviewProbeSignature(attachments: ChatImageAttachment[]): string {
-  return JSON.stringify(attachments.map((attachment) => ({
-    id: attachment.id,
-    localUri: attachment.localUri,
-    thumbnailUri: attachment.thumbnailUri ?? null,
-  })));
 }
 
 function areAttachmentPreviewUriMapsEqual(
@@ -236,17 +222,15 @@ const ChatMessageBubbleComponent = ({
     () => (isUser ? attachments ?? [] : []),
     [attachments, isUser],
   );
-  const attachmentPreviewProbeSignature = getAttachmentPreviewProbeSignature(userAttachments);
 
   useEffect(() => {
-    const previewProbeAttachments = JSON.parse(attachmentPreviewProbeSignature) as AttachmentPreviewProbe[];
-    const nextAttachmentIds = new Set(previewProbeAttachments.map((attachment) => attachment.id));
+    const nextAttachmentsById = new Map(userAttachments.map((attachment) => [attachment.id, attachment]));
     failedAttachmentPreviewUrisRef.current = Object.fromEntries(
       Object.entries(failedAttachmentPreviewUrisRef.current)
-        .filter(([attachmentId]) => nextAttachmentIds.has(attachmentId)),
+        .filter(([attachmentId]) => nextAttachmentsById.has(attachmentId)),
     );
 
-    if (previewProbeAttachments.length === 0) {
+    if (userAttachments.length === 0) {
       failedAttachmentPreviewUrisRef.current = {};
       setAttachmentPreviewUris((current) => (
         areAttachmentPreviewUriMapsEqual(current, {}) ? current : {}
@@ -254,73 +238,49 @@ const ChatMessageBubbleComponent = ({
       return;
     }
 
-    let cancelled = false;
-    void Promise.all(previewProbeAttachments.map(async (attachment) => {
-      for (const previewUri of getAttachmentPreviewUriCandidates(attachment)) {
-        if (failedAttachmentPreviewUrisRef.current[attachment.id]?.has(previewUri)) {
+    setAttachmentPreviewUris((current) => {
+      const nextPreviewUris: Record<string, string | null> = {};
+
+      for (const [attachmentId, currentUri] of Object.entries(current)) {
+        const attachment = nextAttachmentsById.get(attachmentId);
+        if (!attachment) {
           continue;
         }
 
-        try {
-          const info = await FileSystem.getInfoAsync(previewUri);
-          if (info.exists === true && !failedAttachmentPreviewUrisRef.current[attachment.id]?.has(previewUri)) {
-            return [attachment.id, previewUri] as const;
+        const candidates = getAttachmentPreviewUriCandidates(attachment);
+        const failedUris = failedAttachmentPreviewUrisRef.current[attachmentId];
+        const nextPreviewUri = candidates.find((uri) => !failedUris?.has(uri)) ?? null;
+
+        if (currentUri === null) {
+          if (nextPreviewUri === null) {
+            nextPreviewUris[attachmentId] = null;
           }
-        } catch {
-          // Try the next candidate so a stale thumbnail does not hide an available original image.
+          continue;
         }
+
+        nextPreviewUris[attachmentId] = nextPreviewUri;
       }
 
-      return [attachment.id, null] as const;
-    })).then((entries) => {
-      if (cancelled) {
-        return;
-      }
-
-      const nextPreviewUris: Record<string, string | null> = Object.fromEntries(entries);
-      setAttachmentPreviewUris((current) => (
-        areAttachmentPreviewUriMapsEqual(current, nextPreviewUris) ? current : nextPreviewUris
-      ));
+      return areAttachmentPreviewUriMapsEqual(current, nextPreviewUris) ? current : nextPreviewUris;
     });
 
-    return () => {
-      cancelled = true;
-    };
-  }, [attachmentPreviewProbeSignature]);
+  }, [userAttachments]);
 
   const handleAttachmentPreviewError = (attachment: ChatImageAttachment, attemptedUri: string) => {
     failedAttachmentPreviewUrisRef.current[attachment.id] ??= new Set<string>();
     failedAttachmentPreviewUrisRef.current[attachment.id].add(attemptedUri);
 
-    const markUnavailableIfCurrent = () => {
-      setAttachmentPreviewUris((current) => {
-        const currentUri = current[attachment.id];
-        if (currentUri !== undefined && currentUri !== attemptedUri) {
-          return current;
-        }
+    const nextPreviewUri = getAttachmentPreviewUriCandidates(attachment)
+      .find((previewUri) => !failedAttachmentPreviewUrisRef.current[attachment.id]?.has(previewUri)) ?? null;
 
-        return { ...current, [attachment.id]: null };
-      });
-    };
+    setAttachmentPreviewUris((current) => {
+      const currentUri = current[attachment.id];
+      if (currentUri !== undefined && currentUri !== attemptedUri) {
+        return current;
+      }
 
-    if (attemptedUri === attachment.localUri) {
-      markUnavailableIfCurrent();
-      return;
-    }
-
-    void FileSystem.getInfoAsync(attachment.localUri)
-      .then((info) => {
-        const fallbackUri = info.exists === true ? attachment.localUri : null;
-        setAttachmentPreviewUris((current) => {
-          const currentUri = current[attachment.id];
-          if (currentUri !== undefined && currentUri !== attemptedUri) {
-            return current;
-          }
-
-          return currentUri === fallbackUri ? current : { ...current, [attachment.id]: fallbackUri };
-        });
-      })
-      .catch(markUnavailableIfCurrent);
+      return currentUri === nextPreviewUri ? current : { ...current, [attachment.id]: nextPreviewUri };
+    });
   };
 
   return (
@@ -423,7 +383,7 @@ const ChatMessageBubbleComponent = ({
                           count: userAttachments.length,
                         })}
                         resizeMode="cover"
-                        style={{ width: 72, height: 72, borderRadius: 8 }}
+                        className="h-[72px] w-[72px] rounded-lg"
                       />
                     ) : (
                       <ScreenSurface
@@ -458,12 +418,17 @@ const ChatMessageBubbleComponent = ({
           ) : shouldShowStreamingPlaceholder ? (
             <StreamingCursor compact />
           ) : isStreaming && assistantBodyContent ? (
-            <Text className="text-base leading-relaxed text-typography-900 dark:text-typography-100">
+            <Text
+              testID={`assistant-message-content-${id}`}
+              className="text-base leading-relaxed text-typography-900 dark:text-typography-100"
+            >
               {assistantBodyContent}
               <StreamingCursor />
             </Text>
           ) : assistantBodyContent ? (
-            <MarkdownRenderer content={assistantBodyContent} selectable />
+            <Box testID={`assistant-message-content-${id}`}>
+              <MarkdownRenderer content={assistantBodyContent} selectable />
+            </Box>
           ) : null}
 
           {hasErrorMessage ? (

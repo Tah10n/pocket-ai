@@ -78,7 +78,7 @@ describe('AppError', () => {
           tags: expect.objectContaining({ scope: 'scope' }),
           extra: expect.objectContaining({
             foo: 'bar',
-            modelId: 'author/model-q4',
+            modelId: expect.stringMatching(/^hash:[a-z0-9]+$/),
             requestUrl: 'https://example.test/model.gguf?token=[redacted]&ok=1',
           }),
         }),
@@ -88,6 +88,7 @@ describe('AppError', () => {
       expect(serializedSentryOptions).not.toContain('content://');
       expect(serializedSentryOptions).not.toContain('ph://');
       expect(serializedSentryOptions).not.toContain('/sdcard');
+      expect(serializedSentryOptions).not.toContain('author/model-q4');
       expect(serializedSentryOptions).not.toContain('raw-token');
       expect(serializedSentryOptions).not.toContain('token=secret');
     } finally {
@@ -117,6 +118,39 @@ describe('AppError', () => {
     } finally {
       consoleSpy.mockRestore();
       (globalThis as any).__DEV__ = originalDevFlag;
+    }
+  });
+
+  it('redacts prompt-like quoted payloads before reporting', () => {
+    const originalDevFlag = (globalThis as any).__DEV__;
+    const originalSentry = (globalThis as any).Sentry;
+    const reporter = { captureException: jest.fn() };
+
+    try {
+      (globalThis as any).__DEV__ = false;
+      (globalThis as any).Sentry = reporter;
+
+      const result = reportError(
+        'scope',
+        new Error('Native completion failed while processing prompt "Describe my private photo" for file:///private/mobile/photo.jpg'),
+        {
+          activeModelId: 'author/model-q4',
+          note: 'raw message "My private address" failed',
+        },
+      );
+
+      expect(result.message).toBe('Native completion failed while processing prompt "[redacted]" for [file-uri]');
+      expect(reporter.captureException).toHaveBeenCalledTimes(1);
+      const [, sentryOptions] = reporter.captureException.mock.calls[0];
+      const serializedSentryOptions = JSON.stringify(sentryOptions);
+      expect(serializedSentryOptions).toContain('raw message \\"[redacted]\\" failed');
+      expect(serializedSentryOptions).not.toContain('Describe my private photo');
+      expect(serializedSentryOptions).not.toContain('My private address');
+      expect(serializedSentryOptions).not.toContain('file:///private/mobile');
+      expect(serializedSentryOptions).not.toContain('author/model-q4');
+    } finally {
+      (globalThis as any).__DEV__ = originalDevFlag;
+      (globalThis as any).Sentry = originalSentry;
     }
   });
 

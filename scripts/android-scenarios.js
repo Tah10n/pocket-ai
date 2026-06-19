@@ -21,6 +21,9 @@ const CATALOG_SCENARIOS = [
   "variant-picker-smoke",
 ];
 const ATTACHMENT_SCENARIOS = [
+  "chat-attachment-current-state-smoke",
+];
+const PRECONDITIONED_ATTACHMENT_SCENARIOS = [
   "chat-attachment-text-only-fallback",
 ];
 const PREPARED_ATTACHMENT_SCENARIOS = [
@@ -33,6 +36,7 @@ const SCENARIO_PACK_SCENARIOS = {
   core: CORE_SCENARIOS,
   catalog: CATALOG_SCENARIOS,
   attachments: ATTACHMENT_SCENARIOS,
+  "attachments-preconditioned": PRECONDITIONED_ATTACHMENT_SCENARIOS,
   "attachments-prepared": PREPARED_ATTACHMENT_SCENARIOS,
   "attachments-prepared-send": PREPARED_ATTACHMENT_SEND_SCENARIOS,
   "dependency-ui": [
@@ -109,7 +113,7 @@ const MESSAGE_ATTACHMENT_PREVIEW_LABELS = [
 ];
 const CHAT_SEND_LABELS = ["Send message", "Отправить сообщение"];
 const PREPARED_ATTACHMENT_SEND_PROMPT_PREFIX = "Describe prepared image";
-const UNLOAD_MODEL_LABELS = ["Unload", "Выгрузить"];
+const TEXT_ONLY_FALLBACK_SEND_PROMPT_PREFIX = "Text fallback smoke";
 const REMOVE_ATTACHMENT_LABELS = [
   "Remove attached image 1 of 1",
   "Удалить прикрепленное изображение 1 из 1",
@@ -133,6 +137,121 @@ const IMAGE_ATTACHMENT_TEXT_ONLY_FALLBACK_LABELS = [
   "Выберите и загрузите модель с поддержкой изображений, прежде чем прикреплять изображения.",
   "Вложения с изображениями отключены при редактировании предыдущего сообщения.",
   "Чат с изображениями не поддерживается этим runtime.",
+];
+const LOADED_TEXT_ATTACHMENT_FALLBACK_LABELS = [
+  "This model supports text chat only.",
+  "Download the vision projector before attaching images.",
+  "Choose the matching vision projector before attaching images.",
+  "Vision support could not start. Text chat is still available.",
+  "Vision chat is not supported by this runtime.",
+  "Эта модель поддерживает только текстовый чат.",
+  "Скачайте vision-проектор, прежде чем прикреплять изображения.",
+  "Выберите подходящий vision-проектор, прежде чем прикреплять изображения.",
+  "Не удалось запустить поддержку изображений. Текстовый чат по-прежнему доступен.",
+  "Чат с изображениями не поддерживается этим runtime.",
+];
+const PREPARED_ASSISTANT_RESPONSE_ERROR_LABELS = [
+  "Action failed",
+  "Something went wrong",
+  "Unknown chat generation error",
+  "Engine not ready",
+  "Model is not loaded",
+  "Engine context changed during operation",
+  "Completion was interrupted before generation started",
+  "Private storage is unavailable.",
+  "Load a local model before continuing.",
+  "Finish or stop the current operation before starting another one.",
+  "The current model is unloading. Wait a moment and try again.",
+  "The selected model is no longer available on this device.",
+  "The model could not be loaded. Try again or choose a different profile.",
+  "This GGUF file cannot be loaded as a text model",
+  "Not enough memory to load this model.",
+  "This model may not fit in memory with the current settings.",
+  "There is not enough free storage to finish this download.",
+  "This model does not expose a reliable file size yet.",
+  "This model metadata could not be resolved yet.",
+  "The download failed because the remote server returned an error.",
+  "The downloaded file could not be verified.",
+  "The downloaded file could not be found on disk.",
+  "Type a message before sending.",
+  "This message is too long for the current context window.",
+  "The image could not be copied into app storage.",
+  "You can attach up to 4 images.",
+  "One attached image is no longer available on device.",
+  "Finish preparing or remove failed image attachments before sending.",
+  "Не удалось выполнить действие",
+  "Неизвестная ошибка генерации чата",
+  "Модель не готова",
+  "Модель не загружена",
+  "Приватное хранилище недоступно.",
+  "Загрузите локальную модель, прежде чем продолжить.",
+  "Завершите или остановите текущую операцию, прежде чем запускать новую.",
+  "Текущая модель выгружается. Подождите немного и повторите попытку.",
+  "Выбранная модель больше недоступна на этом устройстве.",
+  "Не удалось загрузить модель. Повторите попытку или выберите другой профиль.",
+  "Этот GGUF-файл нельзя загрузить как текстовую модель",
+  "Недостаточно памяти для загрузки этой модели.",
+  "Эта модель может не поместиться в память с текущими настройками.",
+  "Недостаточно свободного места, чтобы завершить загрузку.",
+  "Для этой модели пока не удалось получить надежный размер файла.",
+  "Не удалось получить метаданные модели.",
+  "Загрузка не удалась из-за ошибки удаленного сервера.",
+  "Не удалось проверить скачанный файл.",
+  "Скачанный файл не найден на диске.",
+  "Введите сообщение перед отправкой.",
+  "Сообщение слишком длинное для текущего окна контекста.",
+  "Не удалось скопировать изображение в хранилище приложения.",
+  "Можно прикрепить не больше 4 изображений.",
+  "Одно из прикрепленных изображений больше недоступно на устройстве.",
+  "Дождитесь подготовки изображений или удалите неудачные вложения перед отправкой.",
+];
+const PREPARED_ASSISTANT_RESPONSE_NON_ANSWER_LABEL_FRAGMENTS = [
+  ...CHAT_INPUT_LABELS,
+  ...CHAT_SEND_LABELS,
+  ...ATTACH_IMAGE_LABELS,
+  ...ATTACHMENT_PREVIEW_LABELS,
+  ...MESSAGE_ATTACHMENT_PREVIEW_LABELS,
+  ...REMOVE_ATTACHMENT_LABELS,
+  ...IMAGE_ATTACHMENT_TEXT_ONLY_FALLBACK_LABELS,
+  ...LOADED_TEXT_ATTACHMENT_FALLBACK_LABELS,
+  ...PREPARED_ASSISTANT_RESPONSE_ERROR_LABELS,
+  "Ask local AI",
+  "Спросите локальный ИИ",
+  "Copy message",
+  "Regenerate response",
+  "Delete message",
+  "Stop generating",
+  "Thinking",
+  "Thinking...",
+  "Generating response",
+  "Response failed",
+  "Something went wrong",
+  "Vision chat is not ready",
+  "Vision support could not start",
+  "Копировать сообщение",
+  "Повторить ответ",
+  "Удалить сообщение",
+  "Остановить генерацию",
+  "Думаю",
+  "Генерация ответа",
+  "Не удалось получить ответ",
+  "Что-то пошло не так",
+  "Чат с изображениями не готов",
+].map(normalizeUiLabel).filter(Boolean);
+const ASSISTANT_MESSAGE_CONTENT_RESOURCE_ID_FRAGMENT = "assistant-message-content-";
+const NO_MODEL_STATE_LABELS = [
+  "NO MODEL LOADED",
+  "МОДЕЛЬ НЕ ЗАГРУЖЕНА",
+  "Load a model to continue chatting",
+  "Загрузите модель, чтобы продолжить чат",
+  "Choose a local model",
+  "Выберите локальную модель",
+  "Load Model",
+  "Загрузить модель",
+  "Download Model",
+  "Скачать модель",
+  "Browse Models",
+  "Открыть каталог",
 ];
 const MODELS_TAB_LABELS = ["Models", "Модели"];
 const MODEL_CATALOG_LABELS = ["Model Catalog", "Каталог моделей"];
@@ -646,6 +765,10 @@ function buildPreparedAttachmentSendPrompt() {
   return `${PREPARED_ATTACHMENT_SEND_PROMPT_PREFIX} ${Date.now()} ${Math.floor(Math.random() * 1_000_000)}`;
 }
 
+function buildTextOnlyFallbackSendPrompt() {
+  return `${TEXT_ONLY_FALLBACK_SEND_PROMPT_PREFIX} ${Date.now()} ${Math.floor(Math.random() * 1_000_000)}`;
+}
+
 function clearFocusedTextInput(
   adbPath,
   serial,
@@ -792,18 +915,19 @@ function assertAttachmentTextOnlyFallbackState({
 } = {}) {
   if (!fallbackNode) {
     throw new ScenarioSkipError(
-      "Text-only attachment fallback was not visible after navigating to a no-model chat state; a deterministic text-only composer could not be established."
+      "Loaded text-only attachment fallback was not visible; prepare a loaded text-only model or a loaded vision model with missing/failed/ambiguous projector state."
     );
   }
 
   assertAttachmentActionBlocked(attachNode);
 }
 
-function assertAttachmentActionBlocked(attachNode) {
+function assertAttachmentActionBlocked(attachNode, options = {}) {
   const node = attachNode && attachNode.node ? attachNode.node : attachNode;
+  const stateDescription = options.stateDescription || "text-only fallback state";
 
   if (!node) {
-    throw new Error("Image attachment action was not visible in the text-only fallback state.");
+    throw new Error(`Image attachment action was not visible in the ${stateDescription}.`);
   }
 
   if (node.clickable && node.enabled !== false) {
@@ -902,11 +1026,63 @@ function buildScenarios() {
       },
     },
     {
+      id: "chat-attachment-current-state-smoke",
+      tier: "secondary",
+      description: "Verify image attachment composer affordance matches the current model state without requiring prepared storage.",
+      run: async (ctx) => {
+        await goToHome(ctx);
+        await ctx.tapAnyText(NEW_CHAT_LABELS);
+        await ctx.expectAnyText(CHAT_EMPTY_LABELS);
+
+        const adbPath = resolveAdbPath();
+        const noModelNode = await findAnyNodeNow(
+          adbPath,
+          ctx.serial,
+          NO_MODEL_STATE_LABELS,
+          { visibleOnly: true }
+        );
+        const fallbackNode = await findAnyNodeNow(
+          adbPath,
+          ctx.serial,
+          IMAGE_ATTACHMENT_TEXT_ONLY_FALLBACK_LABELS,
+          { visibleOnly: true }
+        );
+        const attachNode = await findAnyNodeNow(
+          adbPath,
+          ctx.serial,
+          ATTACH_IMAGE_LABELS,
+          { visibleOnly: true }
+        );
+
+        if (noModelNode) {
+          assertAttachmentActionBlocked(attachNode, { stateDescription: "no-model chat state" });
+          log(
+            "INFO chat-attachment-current-state-smoke: no loaded model detected; "
+            + "validated no-model image attachment affordance. Prepare a loaded text-only model "
+            + "or a loaded vision model with missing/failed/ambiguous projector state and run "
+            + "android:scenarios:attachments-preconditioned for required fallback-send coverage."
+          );
+        } else if (fallbackNode) {
+          assertAttachmentTextOnlyFallbackState({ fallbackNode, attachNode });
+          await sendTextOnlyFallbackSmokeMessage(ctx, adbPath, buildTextOnlyFallbackSendPrompt());
+          log(
+            "INFO chat-attachment-current-state-smoke: image attachment fallback detected; "
+            + "validated blocked image affordance and text-only fallback send."
+          );
+        } else {
+          assertAttachmentActionAvailable(attachNode);
+        }
+
+        await ctx.tapBottomTab(HOME_TAB_LABELS);
+        await ctx.expectAnyText(HOME_SECTION_LABELS);
+      },
+    },
+    {
       id: "chat-attachment-text-only-fallback",
       tier: "secondary",
-      description: "Verify the chat composer exposes image attachment state with text-only fallback copy.",
+      description: "Preconditioned check: verify a loaded text-capable non-vision chat blocks images while preserving assistant text responses.",
       run: async (ctx) => {
-        await ensureNoModelTextOnlyAttachmentState(ctx);
+        await ensureLoadedModelTextFallbackPrecondition(ctx);
         await ctx.tapAnyText(NEW_CHAT_LABELS);
         await ctx.expectAnyText(CHAT_EMPTY_LABELS);
         await ctx.expectAnyText(ATTACH_IMAGE_LABELS, { timeoutMs: 8_000 });
@@ -915,7 +1091,7 @@ function buildScenarios() {
         const fallbackNode = await findAnyNodeNow(
           adbPath,
           ctx.serial,
-          IMAGE_ATTACHMENT_TEXT_ONLY_FALLBACK_LABELS,
+          LOADED_TEXT_ATTACHMENT_FALLBACK_LABELS,
           { visibleOnly: true }
         );
 
@@ -927,6 +1103,7 @@ function buildScenarios() {
         );
 
         assertAttachmentTextOnlyFallbackState({ fallbackNode, attachNode });
+        await sendTextOnlyFallbackSmokeMessage(ctx, adbPath, buildTextOnlyFallbackSendPrompt());
 
         await ctx.tapBottomTab(HOME_TAB_LABELS);
         await ctx.expectAnyText(HOME_SECTION_LABELS);
@@ -943,7 +1120,7 @@ function buildScenarios() {
         const fallbackNode = await findAnyNodeNow(
           adbPath,
           ctx.serial,
-          IMAGE_ATTACHMENT_TEXT_ONLY_FALLBACK_LABELS,
+          LOADED_TEXT_ATTACHMENT_FALLBACK_LABELS,
           { visibleOnly: true }
         );
         const attachNode = await findAnyNodeNow(
@@ -1001,7 +1178,7 @@ function buildScenarios() {
         const fallbackNode = await findAnyNodeNow(
           adbPath,
           ctx.serial,
-          IMAGE_ATTACHMENT_TEXT_ONLY_FALLBACK_LABELS,
+          LOADED_TEXT_ATTACHMENT_FALLBACK_LABELS,
           { visibleOnly: true }
         );
         const attachNode = await findAnyNodeNow(
@@ -1069,7 +1246,9 @@ function buildScenarios() {
         await waitForNoAnyNode(adbPath, ctx.serial, REMOVE_ATTACHMENT_LABELS, { timeoutMs: 8_000 });
         await waitForPreparedSentMessageContext(adbPath, ctx.serial, preparedAttachmentSendPrompt, {
           timeoutMs: 10_000,
-        });
+        }).then((sentContext) => waitForPreparedAssistantResponse(adbPath, ctx.serial, sentContext, preparedAttachmentSendPrompt, {
+          timeoutMs: 30_000,
+        }));
         await ctx.expectAnyText([preparedAttachmentSendPrompt], { timeoutMs: 10_000 });
       },
     },
@@ -1375,39 +1554,148 @@ async function goToHome(ctx) {
   await ctx.expectAnyText(APP_TITLE_LABELS);
 }
 
-async function ensureNoModelTextOnlyAttachmentState(ctx) {
+async function ensureLoadedModelTextFallbackPrecondition(ctx) {
   await goToHome(ctx);
 
   const adbPath = resolveAdbPath();
-  const unloadNode = await findAnyNodeNow(adbPath, ctx.serial, UNLOAD_MODEL_LABELS, {
-    visibleOnly: true,
-  });
-
-  if (unloadNode?.node?.bounds) {
-    tapBounds(adbPath, ctx.serial, unloadNode.node.bounds);
-    await delay(2_500);
-    await goToHome(ctx);
-  }
-
   const noModelNode = await findAnyNodeNow(
     adbPath,
     ctx.serial,
-    [
-      "NO MODEL LOADED",
-      "МОДЕЛЬ НЕ ЗАГРУЖЕНА",
-      "Choose a local model",
-      "Выберите локальную модель",
-      "Browse Models",
-      "Открыть каталог",
-    ],
+    NO_MODEL_STATE_LABELS,
     { visibleOnly: true }
   );
 
-  if (!noModelNode) {
+  if (noModelNode) {
     throw new ScenarioSkipError(
-      "Could not establish a deterministic no-model chat state for the text-only attachment fallback smoke without resetting app data."
+      "Loaded text-only attachment fallback smoke requires an already loaded text-only model or a loaded vision model with missing/failed/ambiguous projector state. The no-model fallback is covered separately and is not sufficient for this vision gate."
     );
   }
+}
+
+async function sendTextOnlyFallbackSmokeMessage(ctx, adbPath, prompt) {
+  await ctx.tapAnyText(CHAT_INPUT_LABELS, {
+    allowBottomOverlay: true,
+    timeoutMs: 5_000,
+  });
+  clearFocusedTextInput(adbPath, ctx.serial);
+  runChecked(adbPath, [
+    "-s",
+    ctx.serial,
+    "shell",
+    "input",
+    "text",
+    escapeAdbInputText(prompt),
+  ], { timeout: ADB_INPUT_TEXT_TIMEOUT_MS });
+  await delay(500);
+  await waitForAnyNode(adbPath, ctx.serial, [prompt], {
+    timeoutMs: 5_000,
+    visibleOnly: true,
+  });
+
+  const sendNode = await findAnyNodeNow(
+    adbPath,
+    ctx.serial,
+    CHAT_SEND_LABELS,
+    { visibleOnly: true }
+  );
+  if (!sendNode || sendNode.node.enabled === false) {
+    throw new Error("Text-only fallback send button is not enabled after entering a text prompt.");
+  }
+
+  await ctx.tapAnyText(CHAT_SEND_LABELS, {
+    allowBottomOverlay: true,
+    timeoutMs: 5_000,
+    afterTapDelayMs: 1_000,
+  });
+  await waitForTextOnlyFallbackSentMessage(adbPath, ctx.serial, prompt, {
+    timeoutMs: 10_000,
+  }).then((sentMessageNode) => waitForTextOnlyFallbackAssistantResponse(adbPath, ctx.serial, sentMessageNode, prompt, {
+    timeoutMs: 45_000,
+  }));
+}
+
+async function waitForTextOnlyFallbackSentMessage(adbPath, serial, prompt, options = {}) {
+  const timeoutMs = options.timeoutMs ?? 10_000;
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const snapshot = createUiSnapshot(adbPath, serial);
+    const sentMessageNode = findTextOnlySentMessageNode(snapshot, prompt);
+    if (sentMessageNode && !findPromptInComposerInputNode(snapshot, prompt)) {
+      return sentMessageNode;
+    }
+
+    await delay(500);
+  }
+
+  throw new Error(
+    withUiSummary(
+      adbPath,
+      serial,
+      `Timed out waiting for text-only fallback prompt "${prompt}" to appear as a sent chat message with the composer cleared.`
+    )
+  );
+}
+
+function findTextOnlySentMessageNode(snapshot, prompt) {
+  return findMatchingNodes(snapshot, prompt, { visibleOnly: true })
+    .find((node) => !isComposerInputNode(node) && node.clickable !== true) ?? null;
+}
+
+async function waitForTextOnlyFallbackAssistantResponse(adbPath, serial, sentMessageNode, prompt, options = {}) {
+  const timeoutMs = options.timeoutMs ?? 45_000;
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const snapshot = createUiSnapshot(adbPath, serial);
+    const responseNode = findTextOnlyFallbackAssistantResponseNode(snapshot, sentMessageNode, prompt);
+    if (responseNode) {
+      return responseNode;
+    }
+
+    await delay(800);
+  }
+
+  throw new Error(
+    withUiSummary(
+      adbPath,
+      serial,
+      `Timed out waiting for a non-empty assistant response after text-only fallback prompt "${prompt}".`
+    )
+  );
+}
+
+function findTextOnlyFallbackAssistantResponseNode(snapshot, sentMessageNode, prompt) {
+  const sentBottom = sentMessageNode?.bounds?.bottom ?? 0;
+  const viewportBottom = snapshot.viewportBounds?.bottom ?? Number.POSITIVE_INFINITY;
+
+  return snapshot.nodes.find((node) => {
+    if (!node.bounds || node.bounds.top <= sentBottom) {
+      return false;
+    }
+
+    if (node.bounds.top > viewportBottom - DEFAULT_TAP_SAFE_BOTTOM_INSET_MIN_PX) {
+      return false;
+    }
+
+    if (!isPreparedAssistantResponseCandidateNode(node)) {
+      return false;
+    }
+
+    const hasResponseLabel = isPreparedAssistantResponseLabel(node.text, prompt)
+      || isPreparedAssistantResponseLabel(node.contentDesc, prompt);
+    return hasResponseLabel && isInsidePreparedAssistantResponseContent(snapshot, node, sentBottom);
+  }) ?? null;
+}
+
+function findPromptInComposerInputNode(snapshot, prompt) {
+  return findMatchingNodes(snapshot, prompt, { visibleOnly: true })
+    .find(isComposerInputNode) ?? null;
+}
+
+function isComposerInputNode(node) {
+  const contentDescription = normalizeUiLabel(node?.contentDesc);
+  return CHAT_INPUT_LABELS.some((label) => contentDescription.includes(normalizeUiLabel(label)));
 }
 
 async function tryReachHome(ctx, maxAttempts = 4) {
@@ -2052,6 +2340,136 @@ async function waitForPreparedSentMessageContext(adbPath, serial, prompt, option
   );
 }
 
+async function waitForPreparedAssistantResponse(adbPath, serial, sentContext, prompt, options = {}) {
+  const timeoutMs = options.timeoutMs ?? 45_000;
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const snapshot = createUiSnapshot(adbPath, serial);
+    const responseNode = findPreparedAssistantResponseNode(snapshot, sentContext, prompt);
+    if (responseNode) {
+      return responseNode;
+    }
+
+    await delay(800);
+  }
+
+  throw new Error(
+    withUiSummary(
+      adbPath,
+      serial,
+      `Timed out waiting for a non-empty assistant response after prepared image prompt "${prompt}".`
+    )
+  );
+}
+
+function findPreparedAssistantResponseNode(snapshot, sentContext, prompt) {
+  const sentBottom = Math.max(
+    sentContext?.promptMatch?.node?.bounds?.bottom ?? 0,
+    sentContext?.messagePreviewMatch?.node?.bounds?.bottom ?? 0
+  );
+  const viewportBottom = snapshot.viewportBounds?.bottom ?? Number.POSITIVE_INFINITY;
+
+  return snapshot.nodes.find((node) => {
+    if (!node.bounds || node.bounds.top <= sentBottom) {
+      return false;
+    }
+
+    if (node.bounds.top > viewportBottom - DEFAULT_TAP_SAFE_BOTTOM_INSET_MIN_PX) {
+      return false;
+    }
+
+    if (!isPreparedAssistantResponseCandidateNode(node)) {
+      return false;
+    }
+
+    const hasResponseLabel = isPreparedAssistantResponseLabel(node.text, prompt)
+      || isPreparedAssistantResponseLabel(node.contentDesc, prompt);
+    return hasResponseLabel && isInsidePreparedAssistantResponseContent(snapshot, node, sentBottom);
+  }) ?? null;
+}
+
+function isInsidePreparedAssistantResponseContent(snapshot, node, sentBottom) {
+  if (!node.bounds) {
+    return false;
+  }
+
+  return snapshot.nodes.some((container) => (
+    isPreparedAssistantResponseContentContainerNode(container)
+    && container.bounds
+    && container.bounds.top > sentBottom
+    && containsBounds(container.bounds, node.bounds)
+  ));
+}
+
+function isPreparedAssistantResponseContentContainerNode(node) {
+  return [node.resourceId, node.contentDesc]
+    .map(normalizeUiLabel)
+    .some((label) => label.includes(ASSISTANT_MESSAGE_CONTENT_RESOURCE_ID_FRAGMENT));
+}
+
+function containsBounds(containerBounds, childBounds) {
+  const tolerancePx = 2;
+  return childBounds.left >= containerBounds.left - tolerancePx
+    && childBounds.right <= containerBounds.right + tolerancePx
+    && childBounds.top >= containerBounds.top - tolerancePx
+    && childBounds.bottom <= containerBounds.bottom + tolerancePx;
+}
+
+function isPreparedAssistantResponseCandidateNode(node) {
+  if (node.clickable === true) {
+    return false;
+  }
+
+  const normalizedClassName = normalizeUiLabel(node.className);
+  const normalizedResourceId = normalizeUiLabel(node.resourceId);
+  const normalizedContentDesc = normalizeUiLabel(node.contentDesc);
+  const structuralLabel = `${normalizedClassName} ${normalizedResourceId}`;
+  const compactStructuralLabel = structuralLabel.replace(/[^a-z0-9]+/giu, "");
+  if (
+    /\b(?:tab|tabwidget|navigation|navbar|toolbar|actionbar|button|menu)\b/iu.test(structuralLabel)
+    || compactStructuralLabel.includes("bottomnavigation")
+    || compactStructuralLabel.includes("actionbar")
+  ) {
+    return false;
+  }
+
+  const navigationLabels = [
+    ...HOME_TAB_LABELS,
+    ...CHAT_TAB_LABELS,
+    ...MODELS_TAB_LABELS,
+    ...SETTINGS_TAB_LABELS,
+  ].map(normalizeUiLabel).filter(Boolean);
+  if (
+    /\btab\b/iu.test(normalizedContentDesc)
+    && navigationLabels.some((label) => normalizedContentDesc.includes(label))
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+function isPreparedAssistantResponseLabel(value, prompt) {
+  const label = normalizeUiLabel(value);
+  if (label.length < 2) {
+    return false;
+  }
+
+  const normalizedPrompt = normalizeUiLabel(prompt);
+  if (label === normalizedPrompt || label.includes(normalizedPrompt)) {
+    return false;
+  }
+
+  if (/^\d+(?:\.\d+)?\s*t\/s$/iu.test(label)) {
+    return false;
+  }
+
+  return !PREPARED_ASSISTANT_RESPONSE_NON_ANSWER_LABEL_FRAGMENTS.some((excludedLabel) => (
+    label === excludedLabel || label.includes(excludedLabel)
+  ));
+}
+
 function findPreparedSentMessageContext(snapshot, prompt) {
   const promptNodes = findMatchingNodes(snapshot, prompt, { visibleOnly: true });
   const previewMatches = MESSAGE_ATTACHMENT_PREVIEW_LABELS.flatMap((label) => (
@@ -2275,6 +2693,8 @@ function parseUiNodes(xml) {
     nodes.push({
       text: attributes.text || "",
       contentDesc: attributes["content-desc"] || "",
+      className: attributes.class || "",
+      resourceId: attributes["resource-id"] || "",
       packageName: attributes.package || "",
       clickable: attributes.clickable === "true",
       enabled: attributes.enabled !== "false",
@@ -3131,6 +3551,8 @@ module.exports = {
   findAnyNodeInSnapshot,
   findAnyNodeClearOfBottomOverlay,
   findPreparedSentMessageContext,
+  findPreparedAssistantResponseNode,
+  findTextOnlySentMessageNode,
   findNodeInSnapshot,
   isBoundsClearOfBottomOverlay,
   isAppForegroundSnapshot,
@@ -3151,4 +3573,5 @@ module.exports = {
   assertAttachmentActionAvailable,
   assertAttachmentPreviewRemovePreconditions,
   assertAttachmentTextOnlyFallbackState,
+  isPreparedAssistantResponseLabel,
 };

@@ -543,6 +543,38 @@ export class ModelCatalogCacheStore {
     }
   }
 
+  public deleteSearchModels(modelIds: string[], authScope?: CatalogCacheAuthScope): void {
+    const uniqueModelIds = new Set(modelIds.filter((modelId) => modelId.trim().length > 0));
+    if (uniqueModelIds.size === 0) {
+      return;
+    }
+
+    let didPersistedAnonChange = false;
+    for (const [key, entry] of this.searchEntries.entries()) {
+      if (authScope && entry.scope.authScope !== authScope) {
+        continue;
+      }
+
+      const nextModels = entry.result.models.filter((model) => !uniqueModelIds.has(model.id));
+      if (nextModels.length === entry.result.models.length) {
+        continue;
+      }
+
+      this.searchEntries.set(key, {
+        ...entry,
+        result: {
+          ...entry.result,
+          models: nextModels,
+        },
+      });
+      didPersistedAnonChange = didPersistedAnonChange || entry.scope.authScope === 'anon';
+    }
+
+    if (didPersistedAnonChange) {
+      this.persistSearchEntries();
+    }
+  }
+
   public reconcileAnonymousSearchModels(models: ModelMetadata[]): void {
     const replacements = new Map<string, ModelMetadata | null>();
     models.forEach((model) => {

@@ -490,6 +490,144 @@ describe('ModelCatalogService regressions', () => {
     expect(refreshed.chatModalities).toContain('vision');
   });
 
+  it('does not resurrect stale model.gguf fallback metadata after a final projector-only tree probe', async () => {
+    const modelId = 'test-org/projector-only-repo';
+    const staleModel: ModelMetadata = {
+      id: modelId,
+      name: 'Projector-only Repo',
+      author: 'test-org',
+      size: null,
+      downloadUrl: `https://huggingface.co/${modelId}/resolve/main/model.gguf`,
+      fitsInRam: null,
+      accessState: ModelAccessState.PUBLIC,
+      isGated: false,
+      isPrivate: false,
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      localPath: 'stale-model.gguf',
+      downloadedAt: 1234,
+      downloadIntegrity: {
+        kind: 'size',
+        sizeBytes: 2 * 1024 * 1024 * 1024,
+        checkedAt: 1234,
+      },
+      resumeData: 'stale-resume-data',
+      downloadErrorCode: 'stale_error',
+      downloadErrorMessage: 'stale error',
+      downloadErrorAt: 1235,
+      hfRevision: 'main',
+      resolvedFileName: 'model.gguf',
+      activeVariantId: 'model.gguf',
+      requiresTreeProbe: true,
+      chatModalities: ['text', 'vision'],
+      artifactRole: 'primary_chat_model',
+      visionSource: 'catalog_metadata',
+      visionConfidence: 'inferred',
+    };
+
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (!url.includes('/tree/main?recursive=true')) {
+        throw new Error(`Unexpected fetch ${url}`);
+      }
+
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: {
+          get: jest.fn(() => null),
+        },
+        json: () => Promise.resolve([
+          {
+            path: 'mmproj-model-f16.gguf',
+            size: 1024,
+            lfs: { sha256: PROJECTOR_SHA256 },
+          },
+        ]),
+      });
+    }) as jest.Mock;
+
+    const refreshed = await service.refreshModelMetadata(staleModel, { includeDetails: false });
+
+    expect(refreshed.resolvedFileName).toBeUndefined();
+    expect(refreshed.activeVariantId).toBeUndefined();
+    expect(refreshed.downloadUrl).toBe(`https://huggingface.co/${modelId}`);
+    expect(refreshed.requiresTreeProbe).toBe(false);
+    expect(refreshed.lifecycleStatus).toBe(LifecycleStatus.AVAILABLE);
+    expect(refreshed.downloadProgress).toBe(0);
+    expect(refreshed.localPath).toBeUndefined();
+    expect(refreshed.downloadedAt).toBeUndefined();
+    expect(refreshed.downloadIntegrity).toBeUndefined();
+    expect(refreshed.resumeData).toBeUndefined();
+    expect(refreshed.downloadErrorCode).toBeUndefined();
+    expect(refreshed.downloadErrorMessage).toBeUndefined();
+    expect(refreshed.downloadErrorAt).toBeUndefined();
+    expect(refreshed.projectorCandidates).toBeUndefined();
+    expect(refreshed.chatModalities).not.toContain('vision');
+    expect(service.getCachedModel(modelId)).toBeNull();
+  });
+
+  it('replaces stale local registry state after a final projector-only tree probe miss', async () => {
+    const modelId = 'test-org/projector-only-local-registry';
+    const { localModel } = makeDownloadedVisionModelWithProjector({ modelId });
+    const staleLocalModel: ModelMetadata = {
+      ...localModel,
+      requiresTreeProbe: true,
+      visionSource: 'catalog_metadata',
+      visionConfidence: 'inferred',
+    };
+    let registryModel: ModelMetadata | undefined = staleLocalModel;
+    mockedRegistry.getModel.mockImplementation((id: string) => (id === modelId ? registryModel : undefined));
+    mockedRegistry.updateModel.mockImplementation((model: ModelMetadata) => {
+      registryModel = model;
+    });
+
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (!url.includes('/tree/main?recursive=true')) {
+        throw new Error(`Unexpected fetch ${url}`);
+      }
+
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: {
+          get: jest.fn(() => null),
+        },
+        json: () => Promise.resolve([
+          {
+            path: 'mmproj-model-f16.gguf',
+            size: 1024,
+            lfs: { sha256: PROJECTOR_SHA256 },
+          },
+        ]),
+      });
+    }) as jest.Mock;
+
+    const refreshed = await service.refreshModelMetadata(staleLocalModel, { includeDetails: false });
+
+    expect(mockedRegistry.updateModel).toHaveBeenCalledWith(expect.objectContaining({
+      id: modelId,
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+      requiresTreeProbe: false,
+    }));
+    expect(registryModel).toEqual(expect.objectContaining({
+      id: modelId,
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+      requiresTreeProbe: false,
+    }));
+    expect(registryModel?.localPath).toBeUndefined();
+    expect(registryModel?.downloadedAt).toBeUndefined();
+    expect(registryModel?.downloadIntegrity).toBeUndefined();
+    expect(registryModel?.projectorCandidates).toBeUndefined();
+    expect(registryModel?.selectedProjectorId).toBeUndefined();
+    expect(registryModel?.multimodalReadiness).toBeUndefined();
+    expect(registryModel?.chatModalities).not.toContain('vision');
+    expect(refreshed).toEqual(registryModel);
+  });
+
   it('uses the full projector-aware tree budget even when primary metadata is already known', async () => {
     const modelId = 'org/deep-paged-vision-projector';
     const modelFileName = 'model.Q4_K_M.gguf';

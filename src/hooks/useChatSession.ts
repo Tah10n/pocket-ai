@@ -42,8 +42,8 @@ import {
   MAX_CHAT_IMAGE_ATTACHMENTS,
   getChatImageAttachmentMediaPaths,
   getSendableDraftImageAttachments,
-  hasFailedDraftImageAttachments,
   normalizeChatAttachmentLocalUri,
+  toAttachmentMediaPath,
   validateChatImageAttachmentLimit,
 } from '../utils/chatImageAttachments';
 
@@ -92,18 +92,19 @@ function resolveReadyAttachmentDrafts({
     return [];
   }
 
-  if (hasFailedDraftImageAttachments(drafts)) {
-    throw new AppError('chat_attachment_copy_failed', 'One or more image attachments failed to copy.');
+  const nonFailedDrafts = drafts.filter((draft) => draft.copyStatus !== 'failed');
+  if (nonFailedDrafts.length === 0) {
+    return [];
   }
 
-  const limit = validateChatImageAttachmentLimit(0, drafts.length);
+  const limit = validateChatImageAttachmentLimit(0, nonFailedDrafts.length);
   if (!limit.ok) {
     throw new AppError('chat_attachment_limit_exceeded', 'Too many image attachments.');
   }
 
-  const sendableDrafts = getSendableDraftImageAttachments(drafts);
+  const sendableDrafts = getSendableDraftImageAttachments(nonFailedDrafts);
   if (
-    sendableDrafts.length !== drafts.length
+    sendableDrafts.length !== nonFailedDrafts.length
     || sendableDrafts.some((draft) => draft.copyStatus !== 'copied')
   ) {
     throw new AppError('chat_attachment_not_ready', 'Image attachments are not ready to send.');
@@ -115,12 +116,39 @@ function resolveReadyAttachmentDrafts({
         readinessStatus: readiness?.status ?? 'unknown',
         readinessModelId: readiness?.modelId,
         expectedModelId: expectedModelId ?? undefined,
-        attachmentCount: drafts.length,
+        attachmentCount: sendableDrafts.length,
       },
     });
   }
 
   return sendableDrafts;
+}
+
+function assertActiveMultimodalReadyForAttachmentMediaPaths({
+  mediaPaths,
+  multimodalReadiness,
+  expectedModelId,
+  mediaPathOccurrenceCount = mediaPaths.length,
+}: {
+  mediaPaths: readonly string[];
+  multimodalReadiness?: MultimodalReadinessState;
+  expectedModelId?: string | null;
+  mediaPathOccurrenceCount?: number;
+}): MultimodalReadinessState | undefined {
+  return llmEngineService.assertActiveMultimodalReadyForMediaPaths({
+    mediaPaths,
+    multimodalReadiness,
+    expectedModelId,
+    mediaPathOccurrenceCount,
+  });
+}
+
+function getDraftImageAttachmentMediaPaths(drafts: readonly AttachmentDraft[]): string[] {
+  return Array.from(new Set(drafts
+    .map((draft) => normalizeChatAttachmentLocalUri(draft.localUri))
+    .filter((localUri): localUri is string => localUri !== null)
+    .map(toAttachmentMediaPath)
+    .filter((mediaPath): mediaPath is string => mediaPath !== null)));
 }
 
 function getSanitizedErrorDetails(error: unknown): { errorName: string } | { errorType: string } {
@@ -332,11 +360,34 @@ function getLlmInferenceMessagesMediaPaths(messages: readonly LlmChatMessage[]):
 }
 
 function buildLlmInferenceMessagesSignature(messages: readonly LlmChatMessage[]): string {
-  return JSON.stringify(messages.map((message) => ({
-    role: message.role,
-    content: message.content,
-    mediaPaths: getLlmInferenceMessageMediaPaths(message),
-  })));
+  let hash = 2166136261;
+
+  for (const message of messages) {
+    hash = updateLlmInferenceSignatureHash(hash, message.role);
+    hash = updateLlmInferenceSignatureHash(hash, '\u0000');
+    hash = updateLlmInferenceSignatureHash(hash, String(message.content.length));
+    hash = updateLlmInferenceSignatureHash(hash, '\u0001');
+    hash = updateLlmInferenceSignatureHash(hash, message.content);
+    hash = updateLlmInferenceSignatureHash(hash, '\u0002');
+    const mediaPaths = getLlmInferenceMessageMediaPaths(message);
+    hash = updateLlmInferenceSignatureHash(hash, String(mediaPaths.length));
+    hash = updateLlmInferenceSignatureHash(hash, '\u0003');
+    for (const mediaPath of mediaPaths) {
+      hash = updateLlmInferenceSignatureHash(hash, mediaPath);
+      hash = updateLlmInferenceSignatureHash(hash, '\u0004');
+    }
+  }
+
+  return `${messages.length}:${hash.toString(36)}`;
+}
+
+function updateLlmInferenceSignatureHash(hash: number, value: string): number {
+  let nextHash = hash >>> 0;
+  for (let index = 0; index < value.length; index += 1) {
+    nextHash ^= value.charCodeAt(index);
+    nextHash = Math.imul(nextHash, 16777619) >>> 0;
+  }
+  return nextHash;
 }
 
 function stripThreadInferenceAttachments(thread: ChatThread): ChatThread {
@@ -374,18 +425,24 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
-function throwMissingAttachment(
+function throwMissingAttachments(
   messageId: string | undefined,
-  attachment: Pick<AttachmentDraft, 'id' | 'pathCategory'>,
+  attachments: readonly Pick<AttachmentDraft, 'id' | 'pathCategory'>[],
 ): never {
+  const attachmentIds = attachments
+    .map((attachment) => attachment.id)
+    .filter((attachmentId): attachmentId is string => typeof attachmentId === 'string' && attachmentId.length > 0);
+  const pathCategories = Array.from(new Set(attachments.map((attachment) => attachment.pathCategory)));
   throw new AppError(
     'chat_attachment_missing',
     'One or more selected image attachments are no longer available. Remove the image and try again.',
     {
       details: {
         ...(messageId ? { messageId } : null),
-        attachmentId: attachment.id,
-        pathCategory: attachment.pathCategory,
+        ...(attachmentIds.length === 1 ? { attachmentId: attachmentIds[0] } : null),
+        attachmentIds,
+        ...(pathCategories.length === 1 ? { pathCategory: pathCategories[0] } : null),
+        pathCategories,
       },
     },
   );
@@ -409,13 +466,15 @@ async function assertDraftAttachmentFilesExist(drafts: readonly AttachmentDraft[
     },
   );
 
-  for (const { draft, localUri, exists } of attachmentChecks) {
-    if (!localUri || !exists) {
-      throwMissingAttachment(undefined, {
-        id: draft.id,
-        pathCategory: draft.pathCategory,
-      });
-    }
+  const missingDrafts = attachmentChecks
+    .filter(({ localUri, exists }) => !localUri || !exists)
+    .map(({ draft }) => ({
+      id: draft.id,
+      pathCategory: draft.pathCategory,
+    }));
+
+  if (missingDrafts.length > 0) {
+    throwMissingAttachments(undefined, missingDrafts);
   }
 }
 
@@ -438,10 +497,15 @@ async function assertMessageAttachmentFilesExist(message: ChatMessage): Promise<
     },
   );
 
-  for (const { attachment, localUri, exists } of attachmentChecks) {
-    if (!localUri || !exists) {
-      throwMissingAttachment(message.id, attachment);
-    }
+  const missingAttachments = attachmentChecks
+    .filter(({ localUri, exists }) => !localUri || !exists)
+    .map(({ attachment }) => ({
+      id: attachment.id,
+      pathCategory: attachment.pathCategory,
+    }));
+
+  if (missingAttachments.length > 0) {
+    throwMissingAttachments(message.id, missingAttachments);
   }
 }
 
@@ -449,13 +513,22 @@ async function assertUserMessageAttachmentsReadyForRegeneration(
   message: ChatMessage,
   readiness?: MultimodalReadinessState,
   expectedModelId?: string | null,
-): Promise<void> {
+): Promise<MultimodalReadinessState | undefined> {
   if (!messageHasAttachments(message)) {
-    return;
+    return readiness;
   }
 
   assertMultimodalReadyForInferenceAttachments([message], readiness, expectedModelId);
+  const attachments = message.attachments ?? [];
+  const mediaPaths = getChatImageAttachmentMediaPaths(attachments);
+  const latestReadiness = assertActiveMultimodalReadyForAttachmentMediaPaths({
+    mediaPaths,
+    multimodalReadiness: readiness,
+    expectedModelId,
+    mediaPathOccurrenceCount: attachments.length,
+  });
   await assertMessageAttachmentFilesExist(message);
+  return latestReadiness;
 }
 
 async function resolveLlmMessageAttachmentsForInference(
@@ -488,7 +561,7 @@ async function resolveLlmMessageAttachmentsForInference(
     if (!localUri || !exists) {
       didChangeAttachments = true;
       if (isLatestUserMessage) {
-        throwMissingAttachment(latestUserMessageId ?? undefined, attachment);
+        throwMissingAttachments(latestUserMessageId ?? undefined, [attachment]);
       }
       continue;
     }
@@ -1640,6 +1713,14 @@ export const useChatSession = () => {
     }
 
     await assertDraftAttachmentFilesExist(attachmentDrafts);
+    const effectiveMultimodalReadiness = attachmentDrafts.length > 0
+      ? assertActiveMultimodalReadyForAttachmentMediaPaths({
+          mediaPaths: getDraftImageAttachmentMediaPaths(attachmentDrafts),
+          multimodalReadiness: options.multimodalReadiness,
+          expectedModelId: activeModelId,
+          mediaPathOccurrenceCount: attachmentDrafts.length,
+        })
+      : options.multimodalReadiness;
 
     const threadId = activeThread?.id
       ?? createThread({
@@ -1691,7 +1772,7 @@ export const useChatSession = () => {
     const assistantMessageId = createAssistantPlaceholder(threadId, threadModelId);
 
     await runAssistantCompletion(threadId, assistantMessageId, {
-      multimodalReadiness: options.multimodalReadiness,
+      multimodalReadiness: effectiveMultimodalReadiness,
     });
   }, [activeThread, appendMessage, createAssistantPlaceholder, createThread, ensureThreadUsesModelForSend, runAssistantCompletion, setActiveThread, syncThreadParametersCallback]);
 
@@ -1747,7 +1828,7 @@ export const useChatSession = () => {
     ensureThreadCanGenerate(activeThread, 'regenerating this response');
     assertPrivateStorageWritableForChatMutation();
     const { activeModelId, model } = resolveThreadReasoningRuntimeConfig(activeThread);
-    await assertUserMessageAttachmentsReadyForRegeneration(
+    const effectiveMultimodalReadiness = await assertUserMessageAttachmentsReadyForRegeneration(
       targetMessage,
       options.multimodalReadiness ?? model?.multimodalReadiness,
       activeModelId,
@@ -1764,7 +1845,7 @@ export const useChatSession = () => {
     }
 
     await runAssistantCompletion(syncedThread.id, assistantMessageId, {
-      multimodalReadiness: options.multimodalReadiness,
+      multimodalReadiness: effectiveMultimodalReadiness,
     });
 
     return true;
@@ -1806,7 +1887,7 @@ export const useChatSession = () => {
     ensureThreadCanGenerate(activeThread, 'regenerating this response');
     assertPrivateStorageWritableForChatMutation();
     const { activeModelId, model } = resolveThreadReasoningRuntimeConfig(activeThread);
-    await assertUserMessageAttachmentsReadyForRegeneration(
+    const effectiveMultimodalReadiness = await assertUserMessageAttachmentsReadyForRegeneration(
       lastUserMessage,
       model?.multimodalReadiness,
       activeModelId,
@@ -1835,7 +1916,9 @@ export const useChatSession = () => {
       return regenerateFromUserMessage(lastUserMessage.id, lastUserMessage.content);
     }
 
-    await runAssistantCompletion(syncedThread.id, assistantMessageId);
+    await runAssistantCompletion(syncedThread.id, assistantMessageId, {
+      multimodalReadiness: effectiveMultimodalReadiness,
+    });
 
     return true;
   }, [

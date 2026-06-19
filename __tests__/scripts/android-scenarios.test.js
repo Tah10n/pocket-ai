@@ -17,7 +17,9 @@ const {
   escapeAdbInputText,
   findAnyNodeClearOfBottomOverlay,
   findAnyNodeInSnapshot,
+  findPreparedAssistantResponseNode,
   findPreparedSentMessageContext,
+  findTextOnlySentMessageNode,
   findNodeInSnapshot,
   isBoundsClearOfBottomOverlay,
   isAppForegroundSnapshot,
@@ -33,6 +35,7 @@ const {
   assertAttachmentActionBlocked,
   assertAttachmentActionAvailable,
   assertAttachmentTextOnlyFallbackState,
+  isPreparedAssistantResponseLabel,
   ScenarioSkipFailureError,
   serializeReportResults,
   shouldAppendRunnerFailure,
@@ -428,6 +431,9 @@ describe('android-scenarios npm defaults', () => {
   it('exposes targeted scenario packs for dependency checks', () => {
     expect(packageJson.scripts['android:scenarios:catalog']).toContain('--pack catalog');
     expect(packageJson.scripts['android:scenarios:attachments']).toContain('--pack attachments');
+    expect(packageJson.scripts['android:scenarios:attachments-preconditioned']).toContain('--pack attachments-preconditioned');
+    expect(packageJson.scripts['android:scenarios:attachments-preconditioned']).toContain('--preserve-running-app');
+    expect(packageJson.scripts['android:scenarios:attachments-preconditioned']).toContain('--fail-on-skip');
     expect(packageJson.scripts['android:scenarios:attachments-prepared']).toContain('--pack attachments-prepared');
     expect(packageJson.scripts['android:scenarios:attachments-prepared']).toContain('--preserve-running-app');
     expect(packageJson.scripts['android:scenarios:attachments-prepared']).toContain('--fail-on-skip');
@@ -440,7 +446,7 @@ describe('android-scenarios npm defaults', () => {
     expect(packageJson.scripts['android:scenarios:extended']).toContain('--pack extended');
   });
 
-  it('keeps vision verification self-contained and prepared send opt-in', () => {
+  it('keeps smoke verification on current-state attachments and prepared send opt-in', () => {
     const smokeScript = packageJson.scripts['verify:mobile-change:android:vision-smoke'];
     const preparedScript = packageJson.scripts['verify:mobile-change:android:vision-prepared'];
     const fullVisionScript = packageJson.scripts['verify:mobile-change:android:vision'];
@@ -450,12 +456,12 @@ describe('android-scenarios npm defaults', () => {
     expect(smokeScript).toContain('android:scenarios:catalog');
     expect(smokeScript).toContain('android:scenarios:attachments');
     expect(smokeScript).toContain('android:scenarios:attachments -- --fail-on-skip');
+    expect(smokeScript).not.toContain('android:scenarios:attachments-preconditioned');
     expect(smokeScript).not.toContain('android:scenarios:attachments-prepared');
     expect(smokeScript).not.toContain('android:scenarios:attachments-prepared-send');
     expect(preparedScript).toBe('npm run android:scenarios:attachments-prepared-send');
     expect(fullVisionScript).toBe('npm run verify:mobile-change:android:vision-smoke');
     expect(fullVisionScript).not.toContain('vision-prepared');
-    expect(fullVisionScript).not.toContain('android:scenarios:attachments-prepared-send');
   });
 
   it('keeps prepared send ADB text input constrained and escaped', () => {
@@ -1117,25 +1123,107 @@ describe('android-scenarios pack selection', () => {
 
   it('selects deterministic composer image attachment checks from the attachments pack', () => {
     expect(selectScenarios(scenarios, parseCliOptions(['--pack', 'attachments'])).map((scenario) => scenario.id)).toEqual([
+      'chat-attachment-current-state-smoke',
+    ]);
+  });
+
+  it('keeps loaded text-only fallback coverage in an explicit preconditioned pack', () => {
+    expect(selectScenarios(scenarios, parseCliOptions(['--pack', 'attachments-preconditioned'])).map((scenario) => scenario.id)).toEqual([
       'chat-attachment-text-only-fallback',
     ]);
   });
 
-  it('runs the text-only attachment fallback scenario against a mocked ADB hierarchy', async () => {
+  it('passes no-model current-state smoke without typing a fallback prompt', async () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-ai-adb-'));
     const previousAndroidHome = process.env.ANDROID_HOME;
     const previousAndroidSdkRoot = process.env.ANDROID_SDK_ROOT;
     const adbDir = path.join(tempDir, 'platform-tools');
     const adbPath = path.join(adbDir, process.platform === 'win32' ? 'adb.exe' : 'adb');
-    const textOnlyHierarchyXml = `
+    const noModelHierarchyXml = `
       <hierarchy>
         <node text="" content-desc="" clickable="false" enabled="true" bounds="[0,0][1080,2400]" />
         <node text="Pocket AI" content-desc="" clickable="false" enabled="true" bounds="[20,40][420,120]" />
         <node text="Recent Conversations" content-desc="" clickable="false" enabled="true" bounds="[20,160][720,240]" />
-        <node text="NO MODEL LOADED" content-desc="" clickable="false" enabled="true" bounds="[20,260][720,340]" />
-        <node text="" content-desc="New Chat" clickable="true" enabled="true" bounds="[800,1600][1040,1720]" />
-        <node text="This model supports text chat only." content-desc="" clickable="false" enabled="true" bounds="[40,1720][1040,1800]" />
+        <node text="Load a model to continue chatting" content-desc="" clickable="false" enabled="true" bounds="[40,500][1040,580]" />
+        <node text="Download Model" content-desc="" clickable="true" enabled="true" bounds="[360,620][720,720]" />
+        <node text="Choose and load a vision-capable model before attaching images." content-desc="" clickable="false" enabled="true" bounds="[40,1720][1040,1800]" />
         <node text="" content-desc="Attach an image from the photo library" clickable="true" enabled="false" bounds="[40,1840][180,1980]" />
+        <node text="" content-desc="Chat message input" clickable="true" enabled="true" bounds="[200,1840][860,1980]" />
+        <node text="" content-desc="Send message" clickable="true" enabled="false" bounds="[900,1840][1040,1980]" />
+      </hierarchy>
+    `;
+
+    fs.mkdirSync(adbDir, { recursive: true });
+    fs.writeFileSync(adbPath, '');
+    process.env.ANDROID_HOME = tempDir;
+    delete process.env.ANDROID_SDK_ROOT;
+
+    try {
+      const spawnSync = jest.fn((_command, args) => {
+        if (args.includes('text')) {
+          throw new Error('No-model smoke should not type a fallback prompt');
+        }
+        if (args.includes('exec-out')) {
+          return {
+            status: 0,
+            stdout: noModelHierarchyXml,
+            stderr: '',
+          };
+        }
+
+        return { status: 0, stdout: '', stderr: '' };
+      });
+      let isolatedBuildScenarios;
+      jest.isolateModules(() => {
+        jest.doMock('child_process', () => ({ spawnSync }));
+        ({ buildScenarios: isolatedBuildScenarios } = require('../../scripts/android-scenarios'));
+      });
+
+      const scenario = isolatedBuildScenarios().find((candidate) => candidate.id === 'chat-attachment-current-state-smoke');
+      const tapAnyText = jest.fn().mockResolvedValue(undefined);
+      const ctx = {
+        serial: 'device-1',
+        ensureAppVisible: jest.fn().mockResolvedValue(undefined),
+        dismissDebuggerBanner: jest.fn().mockResolvedValue(undefined),
+        expectAnyText: jest.fn().mockResolvedValue(undefined),
+        tapAnyText,
+        tapBottomTab: jest.fn().mockResolvedValue(undefined),
+      };
+
+      await scenario.run(ctx);
+
+      expect(ctx.tapAnyText).toHaveBeenCalledWith(expect.arrayContaining(['New Chat']));
+      expect(ctx.tapAnyText).not.toHaveBeenCalledWith(expect.arrayContaining(['Chat message input']), expect.anything());
+      expect(ctx.tapAnyText).not.toHaveBeenCalledWith(expect.arrayContaining(['Send message']), expect.anything());
+      expect(ctx.tapBottomTab).toHaveBeenCalledWith(expect.arrayContaining(['Home']));
+    } finally {
+      jest.dontMock('child_process');
+      if (previousAndroidHome === undefined) {
+        delete process.env.ANDROID_HOME;
+      } else {
+        process.env.ANDROID_HOME = previousAndroidHome;
+      }
+      if (previousAndroidSdkRoot === undefined) {
+        delete process.env.ANDROID_SDK_ROOT;
+      } else {
+        process.env.ANDROID_SDK_ROOT = previousAndroidSdkRoot;
+      }
+      fs.rmSync(tempDir, { force: true, recursive: true });
+    }
+  });
+
+  it('fails no-model current-state smoke when the attachment affordance is missing', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-ai-adb-'));
+    const previousAndroidHome = process.env.ANDROID_HOME;
+    const previousAndroidSdkRoot = process.env.ANDROID_SDK_ROOT;
+    const adbDir = path.join(tempDir, 'platform-tools');
+    const adbPath = path.join(adbDir, process.platform === 'win32' ? 'adb.exe' : 'adb');
+    const noModelHierarchyXml = `
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" enabled="true" bounds="[0,0][1080,2400]" />
+        <node text="Load a model to continue chatting" content-desc="" clickable="false" enabled="true" bounds="[40,500][1040,580]" />
+        <node text="Choose and load a vision-capable model before attaching images." content-desc="" clickable="false" enabled="true" bounds="[40,1720][1040,1800]" />
+        <node text="" content-desc="Chat message input" clickable="true" enabled="true" bounds="[200,1840][860,1980]" />
       </hierarchy>
     `;
 
@@ -1149,7 +1237,212 @@ describe('android-scenarios pack selection', () => {
         if (args.includes('exec-out')) {
           return {
             status: 0,
-            stdout: textOnlyHierarchyXml,
+            stdout: noModelHierarchyXml,
+            stderr: '',
+          };
+        }
+
+        return { status: 0, stdout: '', stderr: '' };
+      });
+      let isolatedBuildScenarios;
+      jest.isolateModules(() => {
+        jest.doMock('child_process', () => ({ spawnSync }));
+        ({ buildScenarios: isolatedBuildScenarios } = require('../../scripts/android-scenarios'));
+      });
+
+      const scenario = isolatedBuildScenarios().find((candidate) => candidate.id === 'chat-attachment-current-state-smoke');
+      const ctx = {
+        serial: 'device-1',
+        ensureAppVisible: jest.fn().mockResolvedValue(undefined),
+        dismissDebuggerBanner: jest.fn().mockResolvedValue(undefined),
+        expectAnyText: jest.fn().mockResolvedValue(undefined),
+        tapAnyText: jest.fn().mockResolvedValue(undefined),
+        tapBottomTab: jest.fn().mockResolvedValue(undefined),
+      };
+
+      await expect(scenario.run(ctx)).rejects.toThrow(/no-model chat state/);
+      expect(ctx.tapBottomTab).not.toHaveBeenCalled();
+    } finally {
+      jest.dontMock('child_process');
+      if (previousAndroidHome === undefined) {
+        delete process.env.ANDROID_HOME;
+      } else {
+        process.env.ANDROID_HOME = previousAndroidHome;
+      }
+      if (previousAndroidSdkRoot === undefined) {
+        delete process.env.ANDROID_SDK_ROOT;
+      } else {
+        process.env.ANDROID_SDK_ROOT = previousAndroidSdkRoot;
+      }
+      fs.rmSync(tempDir, { force: true, recursive: true });
+    }
+  });
+
+  it('sends a text prompt for current-state loaded fallback smoke', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-ai-adb-'));
+    const previousAndroidHome = process.env.ANDROID_HOME;
+    const previousAndroidSdkRoot = process.env.ANDROID_SDK_ROOT;
+    const adbDir = path.join(tempDir, 'platform-tools');
+    const adbPath = path.join(adbDir, process.platform === 'win32' ? 'adb.exe' : 'adb');
+    const events = [];
+    let prompt = null;
+    let sendTapped = false;
+    const textOnlyHierarchyXml = () => `
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" enabled="true" bounds="[0,0][1080,2400]" />
+        <node text="Pocket AI" content-desc="" clickable="false" enabled="true" bounds="[20,40][420,120]" />
+        <node text="Recent Conversations" content-desc="" clickable="false" enabled="true" bounds="[20,160][720,240]" />
+        <node text="Active model" content-desc="" clickable="false" enabled="true" bounds="[20,260][720,340]" />
+        <node text="This model supports text chat only." content-desc="" clickable="false" enabled="true" bounds="[40,1720][1040,1800]" />
+        <node text="" content-desc="Attach an image from the photo library" clickable="true" enabled="false" bounds="[40,1840][180,1980]" />
+        <node text="${prompt || ''}" content-desc="Chat message input" clickable="true" enabled="true" bounds="[200,1840][860,1980]" />
+        <node text="" content-desc="Send message" clickable="true" enabled="${prompt ? 'true' : 'false'}" bounds="[900,1840][1040,1980]" />
+      </hierarchy>
+    `;
+    const sentHierarchyXml = () => `
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" enabled="true" bounds="[0,0][1080,2400]" />
+        <node text="Pocket AI" content-desc="" clickable="false" enabled="true" bounds="[20,40][420,120]" />
+        <node text="Recent Conversations" content-desc="" clickable="false" enabled="true" bounds="[20,160][720,240]" />
+        <node text="${prompt || ''}" content-desc="" clickable="false" enabled="true" bounds="[40,1200][1040,1320]" />
+        <node text="" content-desc="" resource-id="com.pocketai:id/assistant-message-content-text-fallback" clickable="false" enabled="true" bounds="[40,1380][1040,1540]">
+          <node text="Fallback text response is visible." content-desc="" clickable="false" enabled="true" bounds="[60,1400][1020,1520]" />
+        </node>
+      </hierarchy>
+    `;
+
+    fs.mkdirSync(adbDir, { recursive: true });
+    fs.writeFileSync(adbPath, '');
+    process.env.ANDROID_HOME = tempDir;
+    delete process.env.ANDROID_SDK_ROOT;
+
+    try {
+      const spawnSync = jest.fn((_command, args) => {
+        if (args.includes('keycombination') && args.includes('KEYCODE_A')) {
+          events.push('clear-select-all');
+        }
+        if (args.includes('keyevent') && args.includes('KEYCODE_DEL')) {
+          events.push('clear-delete');
+        }
+        if (args.includes('text')) {
+          prompt = args[args.length - 1].replace(/%s/g, ' ');
+          events.push(`input-text:${prompt}`);
+        }
+        if (args.includes('exec-out')) {
+          return {
+            status: 0,
+            stdout: sendTapped ? sentHierarchyXml() : textOnlyHierarchyXml(),
+            stderr: '',
+          };
+        }
+
+        return { status: 0, stdout: '', stderr: '' };
+      });
+      let isolatedBuildScenarios;
+      jest.isolateModules(() => {
+        jest.doMock('child_process', () => ({ spawnSync }));
+        ({ buildScenarios: isolatedBuildScenarios } = require('../../scripts/android-scenarios'));
+      });
+
+      const scenario = isolatedBuildScenarios().find((candidate) => candidate.id === 'chat-attachment-current-state-smoke');
+      const tapAnyText = jest.fn((labels) => {
+        if (labels.includes('Chat message input')) {
+          events.push('tap-input');
+        }
+        if (labels.includes('Send message')) {
+          events.push('tap-send');
+          sendTapped = true;
+        }
+        return Promise.resolve();
+      });
+      const ctx = {
+        serial: 'device-1',
+        ensureAppVisible: jest.fn().mockResolvedValue(undefined),
+        dismissDebuggerBanner: jest.fn().mockResolvedValue(undefined),
+        expectAnyText: jest.fn().mockResolvedValue(undefined),
+        tapAnyText,
+        tapBottomTab: jest.fn().mockResolvedValue(undefined),
+      };
+
+      await scenario.run(ctx);
+
+      expect(prompt).toMatch(/^Text fallback smoke \d+ \d+$/);
+      expect(prompt).not.toBe('Text fallback smoke');
+      expect(ctx.tapAnyText).toHaveBeenCalledWith(expect.arrayContaining(['New Chat']));
+      expect(events).toEqual(expect.arrayContaining([
+        'tap-input',
+        'clear-select-all',
+        'clear-delete',
+        `input-text:${prompt}`,
+        'tap-send',
+      ]));
+      expect(ctx.tapBottomTab).toHaveBeenCalledWith(expect.arrayContaining(['Home']));
+    } finally {
+      jest.dontMock('child_process');
+      if (previousAndroidHome === undefined) {
+        delete process.env.ANDROID_HOME;
+      } else {
+        process.env.ANDROID_HOME = previousAndroidHome;
+      }
+      if (previousAndroidSdkRoot === undefined) {
+        delete process.env.ANDROID_SDK_ROOT;
+      } else {
+        process.env.ANDROID_SDK_ROOT = previousAndroidSdkRoot;
+      }
+      fs.rmSync(tempDir, { force: true, recursive: true });
+    }
+  });
+
+  it('runs the text-only attachment fallback scenario against a mocked ADB hierarchy', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-ai-adb-'));
+    const previousAndroidHome = process.env.ANDROID_HOME;
+    const previousAndroidSdkRoot = process.env.ANDROID_SDK_ROOT;
+    const adbDir = path.join(tempDir, 'platform-tools');
+    const adbPath = path.join(adbDir, process.platform === 'win32' ? 'adb.exe' : 'adb');
+    let typedPrompt = '';
+    let sendTapped = false;
+    const textOnlyHierarchyXml = () => `
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" enabled="true" bounds="[0,0][1080,2400]" />
+        <node text="Pocket AI" content-desc="" clickable="false" enabled="true" bounds="[20,40][420,120]" />
+        <node text="Recent Conversations" content-desc="" clickable="false" enabled="true" bounds="[20,160][720,240]" />
+        <node text="Active model" content-desc="" clickable="false" enabled="true" bounds="[20,260][720,340]" />
+        <node text="" content-desc="New Chat" clickable="true" enabled="true" bounds="[800,1600][1040,1720]" />
+        <node text="This model supports text chat only." content-desc="" clickable="false" enabled="true" bounds="[40,1720][1040,1800]" />
+        <node text="" content-desc="Attach an image from the photo library" clickable="true" enabled="false" bounds="[40,1840][180,1980]" />
+        <node text="${typedPrompt}" content-desc="Chat message input" clickable="true" enabled="true" bounds="[200,1840][860,1980]" />
+        <node text="" content-desc="Send message" clickable="true" enabled="true" bounds="[900,1840][1040,1980]" />
+      </hierarchy>
+    `;
+    const sentTextOnlyHierarchyXml = () => `
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" enabled="true" bounds="[0,0][1080,2400]" />
+        <node text="${typedPrompt}" content-desc="" clickable="false" enabled="true" bounds="[40,1200][1040,1320]" />
+        <node text="" content-desc="" resource-id="com.pocketai:id/assistant-message-content-text-only" clickable="false" enabled="true" bounds="[40,1340][1040,1520]">
+          <node text="Text fallback assistant response" content-desc="" clickable="false" enabled="true" bounds="[60,1360][1020,1500]" />
+        </node>
+        <node text="" content-desc="Chat message input" clickable="true" enabled="true" bounds="[200,1840][860,1980]" />
+        <node text="" content-desc="Send message" clickable="true" enabled="false" bounds="[900,1840][1040,1980]" />
+      </hierarchy>
+    `;
+
+    fs.mkdirSync(adbDir, { recursive: true });
+    fs.writeFileSync(adbPath, '');
+    process.env.ANDROID_HOME = tempDir;
+    delete process.env.ANDROID_SDK_ROOT;
+
+    try {
+      const spawnSync = jest.fn((_command, args) => {
+        if (args.includes('text')) {
+          typedPrompt = args[args.length - 1].replace(/%s/g, ' ');
+        }
+        if (args.includes('tap')) {
+          sendTapped = true;
+        }
+        if (args.includes('exec-out')) {
+          return {
+            status: 0,
+            stdout: sendTapped ? sentTextOnlyHierarchyXml() : textOnlyHierarchyXml(),
             stderr: '',
           };
         }
@@ -1163,12 +1456,18 @@ describe('android-scenarios pack selection', () => {
       });
 
       const scenario = isolatedBuildScenarios().find((candidate) => candidate.id === 'chat-attachment-text-only-fallback');
+      const tapAnyText = jest.fn((labels) => {
+        if (labels.includes('Send message')) {
+          sendTapped = true;
+        }
+        return Promise.resolve();
+      });
       const ctx = {
         serial: 'device-1',
         ensureAppVisible: jest.fn().mockResolvedValue(undefined),
         dismissDebuggerBanner: jest.fn().mockResolvedValue(undefined),
         expectAnyText: jest.fn().mockResolvedValue(undefined),
-        tapAnyText: jest.fn().mockResolvedValue(undefined),
+        tapAnyText,
         tapBottomTab: jest.fn().mockResolvedValue(undefined),
       };
 
@@ -1176,6 +1475,10 @@ describe('android-scenarios pack selection', () => {
 
       expect(ctx.ensureAppVisible).toHaveBeenCalled();
       expect(ctx.tapAnyText).toHaveBeenCalledWith(expect.arrayContaining(['New Chat']));
+      expect(ctx.tapAnyText).toHaveBeenCalledWith(expect.arrayContaining(['Chat message input']), expect.anything());
+      expect(ctx.tapAnyText).toHaveBeenCalledWith(expect.arrayContaining(['Send message']), expect.anything());
+      expect(typedPrompt).toMatch(/^Text fallback smoke \d+ \d+$/);
+      expect(typedPrompt).not.toBe('Text fallback smoke');
       expect(ctx.expectAnyText).toHaveBeenCalledWith(
         expect.arrayContaining(['Attach an image from the photo library']),
         expect.objectContaining({ timeoutMs: 8_000 })
@@ -1200,6 +1503,26 @@ describe('android-scenarios pack selection', () => {
       }
       fs.rmSync(tempDir, { force: true, recursive: true });
     }
+  });
+
+  it('does not treat text still in the composer input as a sent fallback message', () => {
+    const prompt = 'Text fallback smoke';
+    const inputOnlySnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" enabled="true" bounds="[0,0][1080,2400]" />
+        <node text="${prompt}" content-desc="Chat message input" clickable="true" enabled="true" bounds="[200,1840][860,1980]" />
+      </hierarchy>
+    `);
+    const sentSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" enabled="true" bounds="[0,0][1080,2400]" />
+        <node text="${prompt}" content-desc="" clickable="false" enabled="true" bounds="[40,1200][1040,1320]" />
+        <node text="" content-desc="Chat message input" clickable="true" enabled="true" bounds="[200,1840][860,1980]" />
+      </hierarchy>
+    `);
+
+    expect(findTextOnlySentMessageNode(inputOnlySnapshot, prompt)).toBeNull();
+    expect(findTextOnlySentMessageNode(sentSnapshot, prompt)).toEqual(expect.objectContaining({ text: prompt }));
   });
 
   it('keeps prepared image draft coverage in an explicit preserve-running-app pack', () => {
@@ -1519,6 +1842,9 @@ describe('android-scenarios pack selection', () => {
               <node text="Message image 1 of 1 preview" content-desc="" clickable="false" bounds="[40,120][1040,520]" />
               <node text="Message image 1 of 1 preview" content-desc="" clickable="false" bounds="[40,820][1040,1180]" />
               <node text="${preparedPrompt || ''}" content-desc="" clickable="false" bounds="[40,1200][1040,1320]" />
+              <node text="" content-desc="" resource-id="com.pocketai:id/assistant-message-content-prepared" clickable="false" bounds="[40,1380][1040,1540]">
+                <node text="The prepared image response is visible." content-desc="" clickable="false" bounds="[60,1400][1020,1520]" />
+              </node>
             </hierarchy>
           `;
           return {
@@ -1597,6 +1923,77 @@ describe('android-scenarios pack selection', () => {
     }
   });
 
+  it('does not treat generic status or error labels as a prepared assistant response', () => {
+    expect(isPreparedAssistantResponseLabel('Thinking...', 'Describe prepared image 123')).toBe(false);
+    expect(isPreparedAssistantResponseLabel('Response failed', 'Describe prepared image 123')).toBe(false);
+    expect(isPreparedAssistantResponseLabel('Vision chat is not ready for image attachments.', 'Describe prepared image 123')).toBe(false);
+    expect(isPreparedAssistantResponseLabel('Load a local model before continuing.', 'Describe prepared image 123')).toBe(false);
+    expect(isPreparedAssistantResponseLabel('The current model is unloading. Wait a moment and try again.', 'Describe prepared image 123')).toBe(false);
+    expect(isPreparedAssistantResponseLabel('Engine not ready', 'Describe prepared image 123')).toBe(false);
+    expect(isPreparedAssistantResponseLabel('Загрузите локальную модель, прежде чем продолжить.', 'Describe prepared image 123')).toBe(false);
+    expect(isPreparedAssistantResponseLabel('Native runtime aborted unexpectedly', 'Describe prepared image 123')).toBe(true);
+    expect(isPreparedAssistantResponseLabel('The photo shows a small red car.', 'Describe prepared image 123')).toBe(true);
+
+    const prompt = 'Describe prepared image 123';
+    const sentContext = {
+      promptMatch: { node: { bounds: { bottom: 1320 } } },
+      messagePreviewMatch: { node: { bounds: { bottom: 1180 } } },
+    };
+    const statusOnlySnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
+        <node text="${prompt}" content-desc="" clickable="false" bounds="[40,1200][1040,1320]" />
+        <node text="Thinking..." content-desc="" clickable="false" bounds="[40,1400][1040,1520]" />
+      </hierarchy>
+    `);
+    const answerSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
+        <node text="${prompt}" content-desc="" clickable="false" bounds="[40,1200][1040,1320]" />
+        <node text="" content-desc="" resource-id="com.pocketai:id/assistant-message-content-assistant-1" clickable="false" bounds="[40,1380][1040,1540]">
+          <node text="The photo shows a small red car." content-desc="" clickable="false" bounds="[60,1400][1020,1520]" />
+        </node>
+      </hierarchy>
+    `);
+    const unanchoredUnknownErrorSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
+        <node text="${prompt}" content-desc="" clickable="false" bounds="[40,1200][1040,1320]" />
+        <node text="Native runtime aborted unexpectedly" content-desc="" clickable="false" bounds="[40,1400][1040,1520]" />
+      </hierarchy>
+    `);
+    const clickableChromeSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
+        <node text="${prompt}" content-desc="" clickable="false" bounds="[40,1200][1040,1320]" />
+        <node text="The photo shows a small red car." content-desc="" class="android.widget.Button" resource-id="com.pocketai:id/bottom_navigation" clickable="true" bounds="[40,1400][1040,1520]" />
+      </hierarchy>
+    `);
+    const tabChromeSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
+        <node text="${prompt}" content-desc="" clickable="false" bounds="[40,1200][1040,1320]" />
+        <node text="" content-desc="Models, tab, 3 of 4" clickable="false" bounds="[40,1400][1040,1520]" />
+      </hierarchy>
+    `);
+    const errorOnlySnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
+        <node text="${prompt}" content-desc="" clickable="false" bounds="[40,1200][1040,1320]" />
+        <node text="Load a local model before continuing." content-desc="" clickable="false" bounds="[40,1400][1040,1520]" />
+      </hierarchy>
+    `);
+
+    expect(findPreparedAssistantResponseNode(statusOnlySnapshot, sentContext, prompt)).toBeNull();
+    expect(findPreparedAssistantResponseNode(clickableChromeSnapshot, sentContext, prompt)).toBeNull();
+    expect(findPreparedAssistantResponseNode(tabChromeSnapshot, sentContext, prompt)).toBeNull();
+    expect(findPreparedAssistantResponseNode(errorOnlySnapshot, sentContext, prompt)).toBeNull();
+    expect(findPreparedAssistantResponseNode(unanchoredUnknownErrorSnapshot, sentContext, prompt)).toBeNull();
+    expect(findPreparedAssistantResponseNode(answerSnapshot, sentContext, prompt)).toEqual(expect.objectContaining({
+      text: 'The photo shows a small red car.',
+    }));
+  });
+
   it('signals unmet prepared attachment preview/remove preconditions as skips', () => {
     expect(() => assertAttachmentPreviewRemovePreconditions({
       fallbackNode: { label: 'Text-only fallback' },
@@ -1658,7 +2055,7 @@ describe('android-scenarios pack selection', () => {
     expect(() => assertAttachmentTextOnlyFallbackState({
       fallbackNode: null,
       attachNode: { clickable: true, enabled: false },
-    })).toThrow(/deterministic text-only composer could not be established/);
+    })).toThrow(/prepare a loaded text-only model/);
 
     expect(() => assertAttachmentTextOnlyFallbackState({
       fallbackNode: { label: 'This model supports text chat only.' },
@@ -1774,6 +2171,7 @@ describe('android-scenarios pack selection', () => {
     expect(selectedIds).toEqual(
       expect.arrayContaining([
         'variant-picker-smoke',
+        'chat-attachment-current-state-smoke',
         'chat-attachment-text-only-fallback',
         'hf-catalog-hardening',
         'memory-fit-badges',

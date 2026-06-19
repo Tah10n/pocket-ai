@@ -43,6 +43,16 @@ export function getChatAttachmentsDir(): string | null {
   return resolveBaseDirectory(FileSystem.documentDirectory ?? null, CHAT_ATTACHMENTS_DIR_NAME);
 }
 
+function getChatAttachmentsMediaPathDir(): string | null {
+  const directory = getChatAttachmentsDir();
+  if (!directory) {
+    return null;
+  }
+
+  const mediaPath = toAttachmentMediaPath(directory);
+  return mediaPath ? mediaPath.replace(/\/?$/, '/') : null;
+}
+
 function isSafeChatAttachmentRelativePath(relativePath: string): boolean {
   if (
     relativePath.length === 0
@@ -86,6 +96,34 @@ export function normalizeChatAttachmentLocalUri(value: unknown): string | null {
 
 export function isChatAttachmentLocalUri(value: unknown): boolean {
   return normalizeChatAttachmentLocalUri(value) !== null;
+}
+
+export function normalizeChatAttachmentMediaPath(value: unknown): string | null {
+  const mediaPath = typeof value === 'string' ? value.trim() : '';
+  if (mediaPath.length === 0) {
+    return null;
+  }
+
+  const localUri = normalizeChatAttachmentLocalUri(mediaPath);
+  if (localUri) {
+    return toAttachmentMediaPath(localUri);
+  }
+
+  const directory = getChatAttachmentsMediaPathDir();
+  if (!directory || !mediaPath.startsWith(directory)) {
+    return null;
+  }
+
+  const relativePath = mediaPath.slice(directory.length);
+  if (!isSafeChatAttachmentRelativePath(relativePath)) {
+    return null;
+  }
+
+  return mediaPath;
+}
+
+export function isChatAttachmentMediaPath(value: unknown): boolean {
+  return normalizeChatAttachmentMediaPath(value) !== null;
 }
 
 export function isSupportedChatImageMimeType(mediaType: string | null | undefined): boolean {

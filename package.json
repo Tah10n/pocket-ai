@@ -44,6 +44,7 @@
     "android:scenarios:emulator": "node ./scripts/android-scenarios.js --emulator --pack core",
     "android:scenarios:catalog": "node ./scripts/android-scenarios.js --pack catalog",
     "android:scenarios:attachments": "node ./scripts/android-scenarios.js --pack attachments",
+    "android:scenarios:attachments-preconditioned": "node ./scripts/android-scenarios.js --pack attachments-preconditioned --preserve-running-app --fail-on-skip",
     "android:scenarios:attachments-prepared": "node ./scripts/android-scenarios.js --pack attachments-prepared --preserve-running-app --fail-on-skip",
     "android:scenarios:attachments-prepared-send": "node ./scripts/android-scenarios.js --pack attachments-prepared-send --preserve-running-app --fail-on-skip",
     "android:scenarios:dependency-ui": "node ./scripts/android-scenarios.js --pack dependency-ui",

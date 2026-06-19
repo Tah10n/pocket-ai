@@ -16,7 +16,7 @@ import {
   writeChatPersistenceIndex,
   writeChatThreadRecord,
 } from '../../src/store/chatPersistence';
-import { storage } from '../../src/store/storage';
+import { getAppStorage, storage } from '../../src/store/storage';
 import { chatAttachmentStorageService } from '../../src/services/ChatAttachmentStorageService';
 import { copiedImageAttachment } from '../fixtures/chatImageAttachmentFixtures';
 
@@ -158,6 +158,112 @@ describe('chatStore', () => {
         messageCount: 1,
       }),
     );
+  });
+
+  it('rolls back in-memory chat state when a persistence write fails', () => {
+    const threadId = useChatStore.getState().createThread({
+      modelId: 'author/model-q4',
+      presetId: 'preset-1',
+      presetSnapshot: {
+        id: 'preset-1',
+        name: 'Helpful Assistant',
+        systemPrompt: 'Be concise.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 1024,
+        seed: null,
+      },
+    });
+    const threadBeforeAppend = useChatStore.getState().getThread(threadId);
+    const appStorage = getAppStorage() as unknown as { set: jest.Mock };
+    const originalSet = appStorage.set;
+    const writeError = new Error('simulated thread write failure');
+    let threadWriteAttempts = 0;
+    appStorage.set = jest.fn(function setWithFailure(this: unknown, key: string, value: unknown) {
+      if (key === getChatThreadStorageKey(threadId) && threadWriteAttempts === 0) {
+        threadWriteAttempts += 1;
+        throw writeError;
+      }
+
+      return originalSet.call(this, key, value);
+    });
+
+    try {
+      expect(() => {
+        useChatStore.getState().appendMessage(threadId, {
+          id: 'user-after-failure',
+          role: 'user',
+          content: 'This write should roll back',
+          createdAt: Date.now(),
+          state: 'complete',
+        });
+      }).toThrow(writeError);
+
+      expect(useChatStore.getState().getThread(threadId)).toEqual(threadBeforeAppend);
+      expect(useChatStore.getState().getConversationIndex()[0]).toEqual(expect.objectContaining({
+        id: threadId,
+        messageCount: threadBeforeAppend?.messages.length ?? 0,
+      }));
+    } finally {
+      appStorage.set = originalSet;
+    }
+  });
+
+  it('rolls back partial durable chat records when a persistence index write fails', async () => {
+    const threadId = useChatStore.getState().createThread({
+      modelId: 'author/model-q4',
+      presetId: 'preset-1',
+      presetSnapshot: {
+        id: 'preset-1',
+        name: 'Helpful Assistant',
+        systemPrompt: 'Be concise.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 1024,
+        seed: null,
+      },
+    });
+    const threadBeforeAppend = useChatStore.getState().getThread(threadId);
+    const appStorage = getAppStorage() as unknown as { set: jest.Mock };
+    const originalSet = appStorage.set;
+    const writeError = new Error('simulated index write failure');
+    let indexWriteAttempts = 0;
+    appStorage.set = jest.fn(function setWithFailure(this: unknown, key: string, value: unknown) {
+      if (key === CHAT_PERSISTENCE_INDEX_KEY && indexWriteAttempts === 0) {
+        indexWriteAttempts += 1;
+        throw writeError;
+      }
+
+      return originalSet.call(this, key, value);
+    });
+
+    try {
+      expect(() => {
+        useChatStore.getState().appendMessage(threadId, {
+          id: 'user-after-durable-failure',
+          role: 'user',
+          content: 'This partial write should not survive rehydrate',
+          createdAt: Date.now(),
+          state: 'complete',
+        });
+      }).toThrow(writeError);
+    } finally {
+      appStorage.set = originalSet;
+    }
+
+    expect(useChatStore.getState().getThread(threadId)).toEqual(threadBeforeAppend);
+    expect(storage.getString(CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY)).toBeUndefined();
+    expect(storage.getString(getChatThreadStorageKey(threadId))).not.toContain('partial write should not survive');
+
+    useChatStore.setState({ threads: {}, activeThreadId: null });
+    await useChatStore.persist.rehydrate();
+
+    expect(useChatStore.getState().getThread(threadId)).toEqual(threadBeforeAppend);
+    expect(useChatStore.getState().getThread(threadId)?.messages).toEqual(threadBeforeAppend?.messages);
   });
 
   it('defaults kind and modelId when appending messages without metadata', () => {
@@ -2215,6 +2321,338 @@ describe('chatStore', () => {
 
     expect(cleanupSpy).not.toHaveBeenCalled();
     cleanupSpy.mockRestore();
+  });
+
+  it('serializes overlapping unreferenced attachment cleanup requests', async () => {
+    const firstCleanup = {
+      resolve: null as ((deletedCount: number) => void) | null,
+    };
+    const cleanupSpy = jest
+      .spyOn(chatAttachmentStorageService, 'deleteUnreferencedAttachmentFiles')
+      .mockImplementationOnce(() => new Promise<number>((resolve) => {
+        firstCleanup.resolve = resolve;
+      }))
+      .mockResolvedValue(0);
+    const firstAttachment = buildStoredAttachment('thread-cleanup-one', 'user-1', 'cleanup-one.jpg');
+    const secondAttachment = buildStoredAttachment('thread-cleanup-two', 'user-1', 'cleanup-two.jpg');
+    const firstThread: ChatThread = {
+      ...buildThread('thread-cleanup-one', 10),
+      messages: [{
+        id: 'user-1',
+        role: 'user',
+        content: 'First image prompt',
+        createdAt: 10,
+        state: 'complete',
+        attachments: [firstAttachment],
+      }],
+    };
+    const secondThread: ChatThread = {
+      ...buildThread('thread-cleanup-two', 20),
+      messages: [{
+        id: 'user-1',
+        role: 'user',
+        content: 'Second image prompt',
+        createdAt: 20,
+        state: 'complete',
+        attachments: [secondAttachment],
+      }],
+    };
+
+    try {
+      useChatStore.setState({
+        threads: {
+          [firstThread.id]: firstThread,
+          [secondThread.id]: secondThread,
+        },
+        activeThreadId: firstThread.id,
+      });
+
+      useChatStore.getState().deleteThread(firstThread.id);
+      await flushAttachmentCleanup();
+
+      expect(cleanupSpy).toHaveBeenCalledTimes(1);
+      expect(cleanupSpy).toHaveBeenLastCalledWith(expect.objectContaining({
+        candidateLocalUris: [firstAttachment.localUri],
+        maxDeletes: 16,
+      }));
+
+      useChatStore.getState().deleteThread(secondThread.id);
+      await flushAttachmentCleanup();
+
+      expect(cleanupSpy).toHaveBeenCalledTimes(1);
+
+      expect(firstCleanup.resolve).toEqual(expect.any(Function));
+      firstCleanup.resolve?.(0);
+      firstCleanup.resolve = null;
+      await flushAttachmentCleanup(6);
+
+      expect(cleanupSpy).toHaveBeenCalledTimes(2);
+      expect(cleanupSpy).toHaveBeenLastCalledWith(expect.objectContaining({
+        candidateLocalUris: [secondAttachment.localUri],
+        maxDeletes: 16,
+      }));
+    } finally {
+      if (firstCleanup.resolve) {
+        firstCleanup.resolve(0);
+      }
+      cleanupSpy.mockRestore();
+    }
+  });
+
+  it('does not let stale queued references protect later orphaned attachments', async () => {
+    const firstCleanup = {
+      resolve: null as ((deletedCount: number) => void) | null,
+    };
+    const cleanupSpy = jest
+      .spyOn(chatAttachmentStorageService, 'deleteUnreferencedAttachmentFiles')
+      .mockImplementationOnce(() => new Promise<number>((resolve) => {
+        firstCleanup.resolve = resolve;
+      }))
+      .mockResolvedValue(0);
+    const inFlightAttachment = buildStoredAttachment('thread-cleanup-in-flight', 'user-1', 'cleanup-in-flight.jpg');
+    const queuedAttachment = buildStoredAttachment('thread-cleanup-queued', 'user-1', 'cleanup-queued.jpg');
+    const laterOrphanedAttachment = buildStoredAttachment('thread-cleanup-later', 'user-1', 'cleanup-later.jpg');
+    const inFlightThread: ChatThread = {
+      ...buildThread('thread-cleanup-in-flight', 10),
+      messages: [{
+        id: 'user-1',
+        role: 'user',
+        content: 'In-flight cleanup image prompt',
+        createdAt: 10,
+        state: 'complete',
+        attachments: [inFlightAttachment],
+      }],
+    };
+    const queuedThread: ChatThread = {
+      ...buildThread('thread-cleanup-queued', 20),
+      messages: [{
+        id: 'user-1',
+        role: 'user',
+        content: 'Queued cleanup image prompt',
+        createdAt: 20,
+        state: 'complete',
+        attachments: [queuedAttachment],
+      }],
+    };
+    const laterOrphanedThread: ChatThread = {
+      ...buildThread('thread-cleanup-later', 30),
+      messages: [{
+        id: 'user-1',
+        role: 'user',
+        content: 'Later orphaned image prompt',
+        createdAt: 30,
+        state: 'complete',
+        attachments: [laterOrphanedAttachment],
+      }],
+    };
+
+    try {
+      useChatStore.setState({
+        threads: {
+          [inFlightThread.id]: inFlightThread,
+          [queuedThread.id]: queuedThread,
+          [laterOrphanedThread.id]: laterOrphanedThread,
+        },
+        activeThreadId: inFlightThread.id,
+      });
+
+      useChatStore.getState().deleteThread(inFlightThread.id);
+      await flushAttachmentCleanup();
+      expect(cleanupSpy).toHaveBeenCalledTimes(1);
+
+      useChatStore.getState().deleteThread(queuedThread.id);
+      useChatStore.getState().deleteThread(laterOrphanedThread.id);
+      await flushAttachmentCleanup();
+      expect(cleanupSpy).toHaveBeenCalledTimes(1);
+
+      expect(firstCleanup.resolve).toEqual(expect.any(Function));
+      firstCleanup.resolve?.(0);
+      firstCleanup.resolve = null;
+      await flushAttachmentCleanup(6);
+
+      expect(cleanupSpy).toHaveBeenCalledTimes(2);
+      const secondCleanupRequest = cleanupSpy.mock.calls[1][0];
+      expect(secondCleanupRequest).toEqual(expect.objectContaining({
+        candidateLocalUris: [queuedAttachment.localUri, laterOrphanedAttachment.localUri],
+        maxDeletes: 16,
+      }));
+      expect(secondCleanupRequest.referencedLocalUris).toBeDefined();
+      expect(Array.from(secondCleanupRequest.referencedLocalUris!)).not.toContain(laterOrphanedAttachment.localUri);
+    } finally {
+      if (firstCleanup.resolve) {
+        firstCleanup.resolve(0);
+      }
+      cleanupSpy.mockRestore();
+    }
+  });
+
+  it('bounds large unreferenced attachment cleanup batches', async () => {
+    const cleanupSpy = jest
+      .spyOn(chatAttachmentStorageService, 'deleteUnreferencedAttachmentFiles')
+      .mockResolvedValue(0);
+    const attachments = Array.from({ length: 18 }, (_, index) => (
+      buildStoredAttachment('thread-cleanup-large', `user-${index}`, `cleanup-large-${index}.jpg`)
+    ));
+    const removedThread: ChatThread = {
+      ...buildThread('thread-cleanup-large', 10),
+      messages: attachments.map((attachment, index) => ({
+        id: `user-${index}`,
+        role: 'user' as const,
+        content: `Large cleanup image prompt ${index}`,
+        createdAt: 10 + index,
+        state: 'complete' as const,
+        attachments: [attachment],
+      })),
+    };
+
+    useChatStore.setState({
+      threads: {
+        [removedThread.id]: removedThread,
+      },
+      activeThreadId: removedThread.id,
+    });
+
+    useChatStore.getState().deleteThread(removedThread.id);
+    await flushAttachmentCleanup(8);
+
+    expect(cleanupSpy).toHaveBeenCalledTimes(2);
+    expect(cleanupSpy.mock.calls[0][0]).toEqual(expect.objectContaining({
+      candidateLocalUris: attachments.slice(0, 16).map((attachment) => attachment.localUri),
+      maxDeletes: 16,
+    }));
+    expect(cleanupSpy.mock.calls[1][0]).toEqual(expect.objectContaining({
+      candidateLocalUris: attachments.slice(16).map((attachment) => attachment.localUri),
+      maxDeletes: 16,
+    }));
+    cleanupSpy.mockRestore();
+  });
+
+  it('retries rejected unreferenced attachment cleanup without dropping failed or remaining candidates', async () => {
+    const { callbacks, delays, setTimeoutSpy } = captureScheduledTimeouts();
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const cleanupSpy = jest
+      .spyOn(chatAttachmentStorageService, 'deleteUnreferencedAttachmentFiles')
+      .mockRejectedValueOnce(new Error('cleanup unavailable'))
+      .mockResolvedValue(0);
+    const attachments = Array.from({ length: 18 }, (_, index) => (
+      buildStoredAttachment('thread-cleanup-retry', `user-${index}`, `cleanup-retry-${index}.jpg`)
+    ));
+    const removedThread: ChatThread = {
+      ...buildThread('thread-cleanup-retry', 10),
+      messages: attachments.map((attachment, index) => ({
+        id: `user-${index}`,
+        role: 'user' as const,
+        content: `Retry cleanup image prompt ${index}`,
+        createdAt: 10 + index,
+        state: 'complete' as const,
+        attachments: [attachment],
+      })),
+    };
+
+    try {
+      useChatStore.setState({
+        threads: {
+          [removedThread.id]: removedThread,
+        },
+        activeThreadId: removedThread.id,
+      });
+
+      useChatStore.getState().deleteThread(removedThread.id);
+      await flushAttachmentCleanup(8);
+
+      expect(cleanupSpy).toHaveBeenCalledTimes(1);
+      expect(cleanupSpy.mock.calls[0][0]).toEqual(expect.objectContaining({
+        candidateLocalUris: attachments.slice(0, 16).map((attachment) => attachment.localUri),
+        maxDeletes: 16,
+      }));
+      expect(callbacks).toHaveLength(1);
+      expect(delays[0]).toBe(1000);
+
+      callbacks[0]?.();
+      await flushAttachmentCleanup(10);
+
+      expect(cleanupSpy).toHaveBeenCalledTimes(3);
+      expect(cleanupSpy.mock.calls[1][0]).toEqual(expect.objectContaining({
+        candidateLocalUris: attachments.slice(0, 16).map((attachment) => attachment.localUri),
+        maxDeletes: 16,
+      }));
+      expect(cleanupSpy.mock.calls[2][0]).toEqual(expect.objectContaining({
+        candidateLocalUris: attachments.slice(16).map((attachment) => attachment.localUri),
+        maxDeletes: 16,
+      }));
+      expect(warnSpy).toHaveBeenCalledWith('[chatStore] Failed to clean up chat attachments', { errorName: 'Error' });
+    } finally {
+      cleanupSpy.mockRestore();
+      warnSpy.mockRestore();
+      setTimeoutSpy.mockRestore();
+    }
+  });
+
+  it('honors cleanup retry backoff while merging new requests into the pending retry', async () => {
+    const { callbacks, delays, setTimeoutSpy } = captureScheduledTimeouts();
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const cleanupSpy = jest
+      .spyOn(chatAttachmentStorageService, 'deleteUnreferencedAttachmentFiles')
+      .mockRejectedValueOnce(new Error('cleanup unavailable'))
+      .mockResolvedValue(0);
+    const firstAttachment = buildStoredAttachment('thread-cleanup-retry-first', 'user-1', 'cleanup-retry-first.jpg');
+    const secondAttachment = buildStoredAttachment('thread-cleanup-retry-second', 'user-1', 'cleanup-retry-second.jpg');
+    const firstThread: ChatThread = {
+      ...buildThread('thread-cleanup-retry-first', 10),
+      messages: [{
+        id: 'user-1',
+        role: 'user',
+        content: 'First retry image prompt',
+        createdAt: 10,
+        state: 'complete',
+        attachments: [firstAttachment],
+      }],
+    };
+    const secondThread: ChatThread = {
+      ...buildThread('thread-cleanup-retry-second', 20),
+      messages: [{
+        id: 'user-1',
+        role: 'user',
+        content: 'Second retry image prompt',
+        createdAt: 20,
+        state: 'complete',
+        attachments: [secondAttachment],
+      }],
+    };
+
+    try {
+      useChatStore.setState({
+        threads: {
+          [firstThread.id]: firstThread,
+          [secondThread.id]: secondThread,
+        },
+        activeThreadId: firstThread.id,
+      });
+
+      useChatStore.getState().deleteThread(firstThread.id);
+      await flushAttachmentCleanup(8);
+      expect(cleanupSpy).toHaveBeenCalledTimes(1);
+      expect(callbacks).toHaveLength(1);
+      expect(delays[0]).toBe(1000);
+
+      useChatStore.getState().deleteThread(secondThread.id);
+      await flushAttachmentCleanup(8);
+      expect(cleanupSpy).toHaveBeenCalledTimes(1);
+
+      callbacks[0]?.();
+      await flushAttachmentCleanup(8);
+
+      expect(cleanupSpy).toHaveBeenCalledTimes(2);
+      expect(cleanupSpy.mock.calls[1][0]).toEqual(expect.objectContaining({
+        candidateLocalUris: [firstAttachment.localUri, secondAttachment.localUri],
+        maxDeletes: 16,
+      }));
+      expect(warnSpy).toHaveBeenCalledWith('[chatStore] Failed to clean up chat attachments', { errorName: 'Error' });
+    } finally {
+      cleanupSpy.mockRestore();
+      warnSpy.mockRestore();
+      setTimeoutSpy.mockRestore();
+    }
   });
 
   it('preserves live attachments dropped by persistence sanitization during store writes', async () => {

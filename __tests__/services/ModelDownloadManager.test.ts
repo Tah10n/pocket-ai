@@ -24,6 +24,7 @@ import {
   isPrivateStorageWritable,
 } from '../../src/services/storage';
 import { UNKNOWN_PROJECTOR_MEMORY_FIT_FALLBACK_BYTES } from '../../src/utils/modelSize';
+import { llmEngineService } from '../../src/services/LLMEngineService';
 
 let logSpy: jest.SpyInstance;
 let errorSpy: jest.SpyInstance;
@@ -126,6 +127,12 @@ jest.mock('../../src/services/storage', () => {
     isPrivateStorageWritable: jest.fn(() => true),
   };
 });
+
+jest.mock('../../src/services/LLMEngineService', () => ({
+  llmEngineService: {
+    requestActiveMultimodalReadinessRefresh: jest.fn(),
+  },
+}));
 
 const mockModel: ModelMetadata = {
   id: 'test/model',
@@ -710,6 +717,59 @@ describe('ModelDownloadManager Basic', () => {
     if (pauseAsync) {
       expect(pauseAsync).toHaveBeenCalledTimes(1);
     }
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/models/verified-base.gguf', expect.anything());
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/models/mmproj-partial.gguf', { idempotent: true });
+    expect(useDownloadStore.getState().activeDownloadId).toBeNull();
+    expect(useDownloadStore.getState().queue).toEqual([]);
+  });
+
+  it.each([
+    ['model', 'model' as const],
+    ['undefined', undefined],
+  ])('does not delete a verified base checkpoint while canceling during the base-to-projector transition with activeArtifact %s', async (_mode, activeArtifact) => {
+    const activeModel = {
+      ...mockModel,
+      lifecycleStatus: LifecycleStatus.DOWNLOADING,
+      localPath: 'verified-base.gguf',
+      downloadProgress: 1,
+      downloadIntegrity: {
+        kind: 'sha256' as const,
+        sha256: VALID_SHA256,
+        sizeBytes: 1000,
+        checkedAt: 1,
+      },
+      projectorCandidates: [{
+        ...mockProjector,
+        localPath: 'mmproj-partial.gguf',
+        lifecycleStatus: 'downloading' as const,
+      }],
+    };
+
+    (modelDownloadManager as any).activeJob = {
+      modelId: mockModel.id,
+      jobToken: 47,
+      resumable: null,
+      activeArtifact,
+      stopReason: null,
+    };
+    useDownloadStore.setState({
+      queue: [activeModel],
+      activeDownloadId: mockModel.id,
+    });
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (uri === 'test-dir/models/verified-base.gguf' || uri === 'test-dir/models/mmproj-partial.gguf') {
+        return { exists: true, size: 1000 };
+      }
+
+      if (uri.startsWith('test-dir/models/')) {
+        return { exists: false, size: 0 };
+      }
+
+      return { exists: true, size: 1000 };
+    });
+
+    await modelDownloadManager.cancelDownload(mockModel.id);
+
     expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/models/verified-base.gguf', expect.anything());
     expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/models/mmproj-partial.gguf', { idempotent: true });
     expect(useDownloadStore.getState().activeDownloadId).toBeNull();
@@ -1698,6 +1758,49 @@ describe('ModelDownloadManager Basic', () => {
     }));
   });
 
+  it('checks the required buffer for unknown-size projector preflight when the base model is reusable', async () => {
+    const unknownSizeProjector: ProjectorArtifact = {
+      ...mockProjector,
+      size: null,
+    };
+    (FileSystem.getFreeDiskStorageAsync as jest.Mock).mockResolvedValueOnce(1_000_000_000 - 1);
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (uri === 'test-dir/models/model.gguf') {
+        return { exists: true, size: 1000 };
+      }
+
+      return uri.startsWith('test-dir/models/')
+        ? { exists: false, size: 0 }
+        : { exists: true, size: 1000 };
+    });
+    useDownloadStore.setState({
+      queue: [{
+        ...mockModel,
+        localPath: 'model.gguf',
+        downloadProgress: 1,
+        projectorCandidates: [unknownSizeProjector],
+        lifecycleStatus: LifecycleStatus.QUEUED,
+      }],
+      activeDownloadId: mockModel.id,
+    });
+
+    await expect(
+      runDownloadModel({
+        localPath: 'model.gguf',
+        downloadProgress: 1,
+        projectorCandidates: [unknownSizeProjector],
+      }),
+    ).rejects.toMatchObject({
+      code: 'download_disk_space_low',
+      details: expect.objectContaining({
+        requiredBytes: 1_000_000_000,
+        artifactKind: 'projector',
+      }),
+    });
+
+    expect(FileSystem.createDownloadResumable).not.toHaveBeenCalled();
+  });
+
   it('uses remaining model bytes and preserves valid resume data on low-storage preflight failure', async () => {
     (FileSystem.getFreeDiskStorageAsync as jest.Mock).mockResolvedValueOnce(1_000_000_600 - 1);
     (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
@@ -2253,6 +2356,8 @@ describe('ModelDownloadManager Basic', () => {
       ...mockProjector,
       lifecycleStatus: 'downloaded',
       localPath: 'mmproj-model.gguf',
+      resumeData: 'stale-projector-resume-data',
+      downloadProgress: 0.4,
       size: 1000,
       sha256: VALID_SHA256,
     };
@@ -2302,8 +2407,11 @@ describe('ModelDownloadManager Basic', () => {
         id: mockProjector.id,
         lifecycleStatus: 'downloaded',
         localPath: 'mmproj-model.gguf',
+        downloadProgress: 1,
       })],
     }));
+    const completedProjector = (mockedRegistry.updateModel as jest.Mock).mock.calls.at(-1)?.[0]?.projectorCandidates?.[0];
+    expect(completedProjector?.resumeData).toBeUndefined();
   });
 
   it('counts unknown-size reusable projector fallback in memory fit without persisting the fallback size', async () => {
@@ -2422,6 +2530,43 @@ describe('ModelDownloadManager Basic', () => {
       }),
     );
     expect(useDownloadStore.getState().queue.some((model) => model.id === mockModel.id)).toBe(false);
+  });
+
+  it('requests active multimodal readiness refresh after successful projector completion', async () => {
+    let modelDownloaded = false;
+    let projectorDownloaded = false;
+    (FileSystem.createDownloadResumable as jest.Mock).mockImplementation((url: string, localUri: string) => ({
+      downloadAsync: jest.fn().mockImplementation(async () => {
+        if (url === mockProjector.downloadUrl || localUri.includes('mmproj')) {
+          projectorDownloaded = true;
+        } else {
+          modelDownloaded = true;
+        }
+        return { status: 200 };
+      }),
+      pauseAsync: jest.fn().mockResolvedValue(undefined),
+      savable: jest.fn(),
+    }));
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (!uri.startsWith('test-dir/models/')) {
+        return { exists: true, size: 1000 };
+      }
+
+      if (uri.includes('mmproj')) {
+        return projectorDownloaded ? { exists: true, size: 1000 } : { exists: false, size: 0 };
+      }
+
+      return modelDownloaded ? { exists: true, size: 1000 } : { exists: false, size: 0 };
+    });
+    useDownloadStore.setState({
+      queue: [{ ...mockModel, projectorCandidates: [mockProjector], lifecycleStatus: LifecycleStatus.QUEUED }],
+      activeDownloadId: mockModel.id,
+    });
+
+    await expect(runDownloadModel({ projectorCandidates: [mockProjector] })).resolves.toBeUndefined();
+
+    expect(llmEngineService.requestActiveMultimodalReadinessRefresh).toHaveBeenCalledTimes(1);
+    expect(llmEngineService.requestActiveMultimodalReadinessRefresh).toHaveBeenCalledWith(mockModel.id);
   });
 
   it('downloads a projector to the generated filename when the raw upstream filename already exists', async () => {
@@ -3130,6 +3275,100 @@ describe('ModelDownloadManager Basic', () => {
     }
   });
 
+  it('deletes and retries the same corrupted stored projector target for the same artifact', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const storedProjector: ProjectorArtifact = {
+      ...mockProjector,
+      lifecycleStatus: 'downloaded',
+      localPath: 'mmproj-model.gguf',
+      size: 1000,
+    };
+    let corruptedProjectorDeleted = false;
+    let projectorDownloaded = false;
+    mockedRegistry.getModels.mockReturnValue([
+      {
+        ...mockModel,
+        localPath: 'model.gguf',
+        lifecycleStatus: LifecycleStatus.DOWNLOADED,
+        projectorCandidates: [storedProjector],
+      },
+      {
+        ...mockModel,
+        id: 'other/completed-model',
+        localPath: 'other-completed.gguf',
+        lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      },
+    ]);
+    (FileSystem.deleteAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (uri === 'test-dir/models/mmproj-model.gguf') {
+        corruptedProjectorDeleted = true;
+      }
+    });
+    (FileSystem.createDownloadResumable as jest.Mock).mockImplementation((url: string, localUri: string) => ({
+      downloadAsync: jest.fn().mockImplementation(async () => {
+        if (url === mockProjector.downloadUrl || localUri.endsWith('/mmproj-model.gguf')) {
+          projectorDownloaded = true;
+        }
+        return { status: 200 };
+      }),
+      pauseAsync: jest.fn().mockResolvedValue(undefined),
+      savable: jest.fn(),
+    }));
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (uri === 'test-dir/models/model.gguf') {
+        return { exists: true, size: 1000 };
+      }
+
+      if (uri === 'test-dir/models/mmproj-model.gguf') {
+        if (projectorDownloaded) {
+          return { exists: true, size: 1000 };
+        }
+
+        return corruptedProjectorDeleted
+          ? { exists: false, size: 0 }
+          : { exists: true, size: 999 };
+      }
+
+      if (uri === 'test-dir/models/other-completed.gguf') {
+        return { exists: true, size: 1000 };
+      }
+
+      return uri.startsWith('test-dir/models/')
+        ? { exists: false, size: 0 }
+        : { exists: true, size: 1000 };
+    });
+    useDownloadStore.setState({
+      queue: [{
+        ...mockModel,
+        localPath: 'model.gguf',
+        downloadProgress: 1,
+        projectorCandidates: [storedProjector],
+        lifecycleStatus: LifecycleStatus.QUEUED,
+      }],
+      activeDownloadId: mockModel.id,
+    });
+
+    try {
+      await expect(runDownloadModel({
+        localPath: 'model.gguf',
+        downloadProgress: 1,
+        projectorCandidates: [storedProjector],
+      })).resolves.toBeUndefined();
+
+      expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/models/mmproj-model.gguf', { idempotent: true });
+      expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/models/other-completed.gguf', expect.anything());
+      expect(FileSystem.createDownloadResumable).toHaveBeenCalledWith(
+        mockProjector.downloadUrl,
+        'test-dir/models/mmproj-model.gguf',
+        {},
+        expect.any(Function),
+        undefined,
+      );
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
   it('checks disk space before fallback projector download after reusable projector is rejected', async () => {
     const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
     const storedProjector: ProjectorArtifact = {
@@ -3193,6 +3432,68 @@ describe('ModelDownloadManager Basic', () => {
           matchReason: 'download_disk_space_low',
         })],
       }));
+    } finally {
+      verifySpy.mockRestore();
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('checks the required buffer before fallback download for rejected unknown-size reusable projectors', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const storedProjector: ProjectorArtifact = {
+      ...mockProjector,
+      lifecycleStatus: 'downloaded',
+      localPath: 'mmproj-model.gguf',
+      size: null,
+    };
+    let rejectedReusableProjector = false;
+    const verifySpy = jest.spyOn(modelDownloadManager, 'verifyChecksum').mockImplementation(async (artifact, localUri) => {
+      if (!rejectedReusableProjector && artifact.id === storedProjector.id && localUri.endsWith('/mmproj-model.gguf')) {
+        rejectedReusableProjector = true;
+        throw new AppError('download_verification_failed', 'Projector checksum mismatch', {
+          details: { modelId: mockModel.id, projectorId: storedProjector.id },
+        });
+      }
+
+      return { integrity: 'size', sizeBytes: 1000 };
+    });
+    (FileSystem.getFreeDiskStorageAsync as jest.Mock)
+      .mockResolvedValueOnce(10 * 1024 * 1024 * 1024)
+      .mockResolvedValueOnce(1_000_000_000 - 1);
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (uri === 'test-dir/models/model.gguf' || uri === 'test-dir/models/mmproj-model.gguf') {
+        return { exists: true, size: 1000 };
+      }
+
+      return { exists: false, size: 0 };
+    });
+    useDownloadStore.setState({
+      queue: [{
+        ...mockModel,
+        localPath: 'model.gguf',
+        downloadProgress: 1,
+        projectorCandidates: [storedProjector],
+        lifecycleStatus: LifecycleStatus.QUEUED,
+      }],
+      activeDownloadId: mockModel.id,
+    });
+
+    try {
+      await expect(runDownloadModel({
+        localPath: 'model.gguf',
+        downloadProgress: 1,
+        projectorCandidates: [storedProjector],
+      })).rejects.toMatchObject({
+        code: 'download_disk_space_low',
+        details: expect.objectContaining({
+          modelId: mockModel.id,
+          artifactKind: 'projector',
+          requiredBytes: 1_000_000_000,
+        }),
+      });
+
+      expect(FileSystem.createDownloadResumable).not.toHaveBeenCalled();
+      expect(FileSystem.getFreeDiskStorageAsync).toHaveBeenCalledTimes(2);
     } finally {
       verifySpy.mockRestore();
       warnSpy.mockRestore();
@@ -3760,6 +4061,42 @@ describe('ModelDownloadManager Basic', () => {
     expect(entry?.lifecycleStatus).toBe(LifecycleStatus.PAUSED);
     expect(entry?.resumeData).toBe('model-resume-data');
     expect(JSON.stringify(entry)).not.toMatch(/Authorization|Bearer/);
+    expect(useDownloadStore.getState().activeDownloadId).toBeNull();
+  });
+
+  it('pauses the queued selected projector when pausing during the base model download', async () => {
+    const pauseAsync = jest.fn().mockResolvedValue({ resumeData: 'model-resume-data' });
+    (modelDownloadManager as any).activeJob = {
+      modelId: mockModel.id,
+      jobToken: 54,
+      resumable: { pauseAsync },
+      activeArtifact: 'model',
+      stopReason: null,
+    };
+    useDownloadStore.setState({
+      queue: [{
+        ...mockModel,
+        lifecycleStatus: LifecycleStatus.DOWNLOADING,
+        projectorCandidates: [{
+          ...mockProjector,
+          lifecycleStatus: 'queued',
+        }],
+      }],
+      activeDownloadId: mockModel.id,
+    });
+
+    await modelDownloadManager.pauseDownload(mockModel.id);
+
+    const entry = useDownloadStore.getState().queue.find((model) => model.id === mockModel.id);
+    expect(entry).toEqual(expect.objectContaining({
+      lifecycleStatus: LifecycleStatus.PAUSED,
+      resumeData: 'model-resume-data',
+    }));
+    expect(entry?.projectorCandidates?.[0]).toEqual(expect.objectContaining({
+      id: mockProjector.id,
+      lifecycleStatus: 'paused',
+    }));
+    expect(entry?.projectorCandidates?.[0]?.resumeData).toBeUndefined();
     expect(useDownloadStore.getState().activeDownloadId).toBeNull();
   });
 

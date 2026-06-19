@@ -467,6 +467,65 @@ describe('ModelCard', () => {
     expect(screen.getByText('Q4_K_M - 4.00 GB')).toBeTruthy();
   });
 
+  it('ignores a stale selected projector id from another variant when displaying active variant size', () => {
+    const screen = render(
+      <ModelCard
+        model={{
+          ...buildModel(ModelAccessState.PUBLIC),
+          size: 3_800_000_000,
+          activeVariantId: 'model.Q4_K_M.gguf',
+          resolvedFileName: 'model.Q4_K_M.gguf',
+          selectedProjectorId: 'projector-q8',
+          chatModalities: ['text', 'vision'],
+          artifactRole: 'primary_chat_model',
+          variants: [
+            {
+              variantId: 'model.Q4_K_M.gguf',
+              fileName: 'model.Q4_K_M.gguf',
+              quantizationLabel: 'Q4_K_M',
+              size: 3_800_000_000,
+            },
+            {
+              variantId: 'model.Q8_0.gguf',
+              fileName: 'model.Q8_0.gguf',
+              quantizationLabel: 'Q8_0',
+              size: 7_200_000_000,
+            },
+          ],
+          projectorCandidates: [
+            {
+              id: 'projector-q4',
+              ownerModelId: 'org/model',
+              ownerVariantId: 'model.Q4_K_M.gguf',
+              repoId: 'org/model',
+              fileName: 'mmproj-q4.gguf',
+              downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-q4.gguf',
+              size: 200_000_000,
+              lifecycleStatus: 'available',
+              matchStatus: 'matched',
+            },
+            {
+              id: 'projector-q8',
+              ownerModelId: 'org/model',
+              ownerVariantId: 'model.Q8_0.gguf',
+              repoId: 'org/model',
+              fileName: 'mmproj-q8.gguf',
+              downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-q8.gguf',
+              size: 500_000_000,
+              lifecycleStatus: 'available',
+              matchStatus: 'user_selected',
+            },
+          ],
+        }}
+        {...buildModelCardHandlers()}
+        isActive={false}
+      />,
+    );
+
+    expect(screen.getByText('Q4_K_M - 4.00 GB')).toBeTruthy();
+    expect(screen.queryByText('Q4_K_M - 4.30 GB')).toBeNull();
+  });
+
   it('rerenders when only selected projector runtime progress changes', () => {
     const createVisionDownloadModel = (projectorProgress: number): ModelMetadata => ({
       ...buildModel(ModelAccessState.PUBLIC),
@@ -656,6 +715,48 @@ describe('ModelCard', () => {
     expect(
       mockScreenBadge.mock.calls.some(([props]) => props.children === 'models.vision.badge'),
     ).toBe(false);
+  });
+
+  it('rerenders when only multimodal readiness changes vision badge support', () => {
+    const handlers = buildModelCardHandlers();
+    const createModel = (ready: boolean): ModelMetadata => ({
+      ...buildModel(ModelAccessState.PUBLIC),
+      multimodalReadiness: ready
+        ? {
+            modelId: 'org/model',
+            variantId: 'model.Q4_K_M.gguf',
+            status: 'ready',
+            projectorId: 'projector-q4',
+            support: ['vision'],
+            checkedAt: 2,
+          }
+        : {
+            modelId: 'org/model',
+            variantId: 'model.Q4_K_M.gguf',
+            status: 'text_only',
+            support: [],
+            checkedAt: 1,
+          },
+    });
+    const screen = render(
+      <ModelCard
+        model={createModel(false)}
+        {...handlers}
+        isActive={false}
+      />,
+    );
+
+    expect(screen.queryByText('models.vision.badge')).toBeNull();
+
+    screen.rerender(
+      <ModelCard
+        model={createModel(true)}
+        {...handlers}
+        isActive={false}
+      />,
+    );
+
+    expect(screen.getByText('models.vision.badge')).toBeTruthy();
   });
 
   it('renders the active quantization memory badge on the model card row', () => {

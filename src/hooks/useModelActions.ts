@@ -132,6 +132,7 @@ export function useModelActions({
           status: engineState.status,
           activeModelId: engineState.activeModelId,
           loadProgress: engineState.loadProgress,
+          diagnostics: engineState.diagnostics,
         },
         options: options ? {
           allowUnsafeMemoryLoad: options.allowUnsafeMemoryLoad,
@@ -143,6 +144,7 @@ export function useModelActions({
     }
   }, [
     engineState.activeModelId,
+    engineState.diagnostics,
     engineState.loadProgress,
     engineState.status,
     refreshDownloadedModels,

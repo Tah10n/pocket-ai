@@ -984,6 +984,119 @@ describe('ModelDetailsScreen', () => {
     expect(mockRouter.push).toHaveBeenCalledWith('/chat');
   });
 
+  it('uses active variant vision projector state for details badges and projector choice', async () => {
+    const variantVisionModel = createModel({
+      chatModalities: ['text'],
+      selectedProjectorId: 'projector-a',
+      projectorCandidates: [{
+        id: 'projector-a',
+        ownerModelId: 'org/model',
+        repoId: 'org/model',
+        fileName: 'mmproj-stale-a.gguf',
+        downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-stale-a.gguf',
+        size: 512_000_000,
+        lifecycleStatus: 'downloaded',
+        matchStatus: 'matched',
+      }],
+      activeVariantId: 'model.Q4_K_M.gguf',
+      resolvedFileName: 'model.Q4_K_M.gguf',
+      variants: [{
+        variantId: 'model.Q4_K_M.gguf',
+        fileName: 'model.Q4_K_M.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: 4_000_000_000,
+        chatModalities: ['text', 'vision'],
+        projectorCandidates: [
+          {
+            id: 'projector-b',
+            ownerModelId: 'org/model',
+            ownerVariantId: 'model.Q4_K_M.gguf',
+            repoId: 'org/model',
+            fileName: 'mmproj-variant-b.gguf',
+            downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-variant-b.gguf',
+            size: 256_000_000,
+            lifecycleStatus: 'available',
+            matchStatus: 'ambiguous',
+          },
+          {
+            id: 'projector-c',
+            ownerModelId: 'org/model',
+            ownerVariantId: 'model.Q4_K_M.gguf',
+            repoId: 'org/model',
+            fileName: 'mmproj-variant-c.gguf',
+            downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-variant-c.gguf',
+            size: 256_000_000,
+            lifecycleStatus: 'available',
+            matchStatus: 'ambiguous',
+          },
+        ],
+      }],
+    });
+    const { modelCatalogService } = jest.requireMock('../../src/services/ModelCatalogService');
+    modelCatalogService.getCachedModel.mockReturnValue(variantVisionModel);
+    modelCatalogService.getModelDetails.mockResolvedValue(variantVisionModel);
+
+    const screen = render(<ModelDetailsScreen />);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText('models.vision.badge')).toBeTruthy();
+    expect(screen.getByText('models.vision.projectorStatusAmbiguousTitle')).toBeTruthy();
+    expect(screen.queryByText('models.vision.projectorStatusReadyTitle')).toBeNull();
+
+    fireEvent.press(screen.getByText('models.vision.chooseProjectorAction'));
+
+    expect(lastProjectorChoiceSheetProps?.visible).toBe(true);
+    expect(lastProjectorChoiceSheetProps?.model?.selectedProjectorId).toBeUndefined();
+    expect(lastProjectorChoiceSheetProps?.model?.projectorCandidates?.map((projector: any) => projector.id)).toEqual([
+      'projector-b',
+      'projector-c',
+    ]);
+    expect(screen.getByText('mmproj-variant-b.gguf')).toBeTruthy();
+    expect(screen.queryByText('mmproj-stale-a.gguf')).toBeNull();
+  });
+
+  it('does not inherit stale top-level vision state for an active text-only variant', async () => {
+    const variantTextOnlyModel = createModel({
+      chatModalities: ['text', 'vision'],
+      selectedProjectorId: 'projector-a',
+      projectorCandidates: [{
+        id: 'projector-a',
+        ownerModelId: 'org/model',
+        repoId: 'org/model',
+        fileName: 'mmproj-stale-a.gguf',
+        downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-stale-a.gguf',
+        size: 512_000_000,
+        lifecycleStatus: 'downloaded',
+        matchStatus: 'matched',
+      }],
+      activeVariantId: 'model.Q4_K_M.gguf',
+      resolvedFileName: 'model.Q4_K_M.gguf',
+      variants: [{
+        variantId: 'model.Q4_K_M.gguf',
+        fileName: 'model.Q4_K_M.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: 4_000_000_000,
+        chatModalities: ['text'],
+      }],
+    });
+    const { modelCatalogService } = jest.requireMock('../../src/services/ModelCatalogService');
+    modelCatalogService.getCachedModel.mockReturnValue(variantTextOnlyModel);
+    modelCatalogService.getModelDetails.mockResolvedValue(variantTextOnlyModel);
+
+    const screen = render(<ModelDetailsScreen />);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(screen.queryByText('models.vision.badge')).toBeNull();
+    expect(screen.queryByText('models.vision.projectorStatusReadyTitle')).toBeNull();
+    expect(screen.queryByText('models.vision.chooseProjectorAction')).toBeNull();
+  });
+
   it('shows cancel action while download is in progress', async () => {
     const downloadingModel = createModel({
       lifecycleStatus: LifecycleStatus.AVAILABLE,

@@ -369,7 +369,7 @@ describe('LLMEngineService', () => {
     await llmEngineService.load('test/model');
 
     await llmEngineService.chatCompletion({
-      messages: [{ role: 'user', content: 'Describe this', mediaPaths: ['/document/image.jpg'] }],
+      messages: [{ role: 'user', content: 'Describe this', mediaPaths: ['test-dir/chat-attachments/image.jpg'] }],
       multimodalReadiness: {
         modelId: 'test/model',
         status: 'ready',
@@ -397,7 +397,7 @@ describe('LLMEngineService', () => {
         role: 'user',
         content: [
           { type: 'text', text: 'Describe this' },
-          { type: 'image_url', image_url: { url: '/document/image.jpg' } },
+          { type: 'image_url', image_url: { url: 'test-dir/chat-attachments/image.jpg' } },
         ],
       }],
       null,
@@ -405,12 +405,12 @@ describe('LLMEngineService', () => {
     );
     expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        media_paths: ['/document/image.jpg'],
+        media_paths: ['test-dir/chat-attachments/image.jpg'],
         messages: [{
           role: 'user',
           content: [
             { type: 'text', text: 'Describe this' },
-            { type: 'image_url', image_url: { url: '/document/image.jpg' } },
+            { type: 'image_url', image_url: { url: 'test-dir/chat-attachments/image.jpg' } },
           ],
         }],
       }),
@@ -424,9 +424,34 @@ describe('LLMEngineService', () => {
       attachmentCount: 1,
     }));
     const serializedDiagnostics = JSON.stringify(llmEngineService.getState().diagnostics);
-    expect(serializedDiagnostics).not.toContain('/document/image.jpg');
+    expect(serializedDiagnostics).not.toContain('test-dir/chat-attachments/image.jpg');
     expect(serializedDiagnostics).not.toContain('chat-attachments');
     expect(serializedDiagnostics).not.toContain('test-dir/models/mmproj-model.gguf');
+  });
+
+  it('rejects explicit media paths outside app-owned chat attachment storage', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+
+    await llmEngineService.load('test/model');
+
+    await expect(llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Describe this', mediaPaths: ['/private/tmp/image.jpg'] }],
+      multimodalReadiness: {
+        modelId: 'test/model',
+        status: 'ready',
+        projectorId: downloadedProjector.id,
+        support: ['vision'],
+        checkedAt: 1,
+      },
+      params: { n_predict: 32 },
+    })).rejects.toMatchObject({
+      code: 'chat_attachment_not_ready',
+      details: expect.objectContaining({
+        pathCategory: 'non_chat_attachment',
+      }),
+    });
+
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).not.toHaveBeenCalled();
   });
 
   it('rejects image media paths when readiness belongs to another model', async () => {
@@ -435,7 +460,7 @@ describe('LLMEngineService', () => {
     await llmEngineService.load('test/model');
 
     await expect(llmEngineService.chatCompletion({
-      messages: [{ role: 'user', content: 'Describe this', mediaPaths: ['/document/image.jpg'] }],
+      messages: [{ role: 'user', content: 'Describe this', mediaPaths: ['test-dir/chat-attachments/image.jpg'] }],
       multimodalReadiness: {
         modelId: 'other/model',
         status: 'ready',
@@ -459,13 +484,13 @@ describe('LLMEngineService', () => {
     await llmEngineService.chatCompletion({
       messages: [
         { role: 'system', content: 'Be concise.' },
-        { role: 'user', content: 'Earlier image', mediaPaths: ['/document/first.jpg'] },
+        { role: 'user', content: 'Earlier image', mediaPaths: ['test-dir/chat-attachments/first.jpg'] },
         { role: 'assistant', content: 'Earlier answer' },
-        { role: 'user', content: 'Now describe', mediaPaths: ['/document/latest-existing.jpg'] },
+        { role: 'user', content: 'Now describe', mediaPaths: ['test-dir/chat-attachments/latest-existing.jpg'] },
       ],
       mediaPaths: [
-        '/document/first.jpg',
-        '/document/top.jpg',
+        'test-dir/chat-attachments/first.jpg',
+        'test-dir/chat-attachments/top.jpg',
       ],
       multimodalReadiness: {
         modelId: 'test/model',
@@ -484,7 +509,7 @@ describe('LLMEngineService', () => {
           role: 'user',
           content: [
             { type: 'text', text: 'Earlier image' },
-            { type: 'image_url', image_url: { url: '/document/first.jpg' } },
+            { type: 'image_url', image_url: { url: 'test-dir/chat-attachments/first.jpg' } },
           ],
         },
         { role: 'assistant', content: 'Earlier answer' },
@@ -492,8 +517,8 @@ describe('LLMEngineService', () => {
           role: 'user',
           content: [
             { type: 'text', text: 'Now describe' },
-            { type: 'image_url', image_url: { url: '/document/latest-existing.jpg' } },
-            { type: 'image_url', image_url: { url: '/document/top.jpg' } },
+            { type: 'image_url', image_url: { url: 'test-dir/chat-attachments/latest-existing.jpg' } },
+            { type: 'image_url', image_url: { url: 'test-dir/chat-attachments/top.jpg' } },
           ],
         },
       ],
@@ -502,21 +527,21 @@ describe('LLMEngineService', () => {
     );
     expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        media_paths: ['/document/first.jpg', '/document/latest-existing.jpg', '/document/top.jpg'],
+        media_paths: ['test-dir/chat-attachments/first.jpg', 'test-dir/chat-attachments/latest-existing.jpg', 'test-dir/chat-attachments/top.jpg'],
         messages: expect.arrayContaining([
           expect.objectContaining({
             role: 'user',
             content: [
               { type: 'text', text: 'Earlier image' },
-              { type: 'image_url', image_url: { url: '/document/first.jpg' } },
+              { type: 'image_url', image_url: { url: 'test-dir/chat-attachments/first.jpg' } },
             ],
           }),
           expect.objectContaining({
             role: 'user',
             content: [
               { type: 'text', text: 'Now describe' },
-              { type: 'image_url', image_url: { url: '/document/latest-existing.jpg' } },
-              { type: 'image_url', image_url: { url: '/document/top.jpg' } },
+              { type: 'image_url', image_url: { url: 'test-dir/chat-attachments/latest-existing.jpg' } },
+              { type: 'image_url', image_url: { url: 'test-dir/chat-attachments/top.jpg' } },
             ],
           }),
         ]),
@@ -533,7 +558,7 @@ describe('LLMEngineService', () => {
     await llmEngineService.chatCompletion({
       messages: [
         { role: 'system', content: 'Be concise.' },
-        { role: 'user', content: 'Earlier image', mediaPaths: ['/document/first.jpg'] },
+        { role: 'user', content: 'Earlier image', mediaPaths: ['test-dir/chat-attachments/first.jpg'] },
         { role: 'assistant', content: 'Earlier answer' },
         { role: 'user', content: 'Continue with text only' },
       ],
@@ -554,7 +579,7 @@ describe('LLMEngineService', () => {
           role: 'user',
           content: [
             { type: 'text', text: 'Earlier image' },
-            { type: 'image_url', image_url: { url: '/document/first.jpg' } },
+            { type: 'image_url', image_url: { url: 'test-dir/chat-attachments/first.jpg' } },
           ],
         },
         { role: 'assistant', content: 'Earlier answer' },
@@ -565,14 +590,14 @@ describe('LLMEngineService', () => {
     );
     expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        media_paths: ['/document/first.jpg'],
+        media_paths: ['test-dir/chat-attachments/first.jpg'],
         messages: [
           { role: 'system', content: 'Be concise.' },
           {
             role: 'user',
             content: [
               { type: 'text', text: 'Earlier image' },
-              { type: 'image_url', image_url: { url: '/document/first.jpg' } },
+              { type: 'image_url', image_url: { url: 'test-dir/chat-attachments/first.jpg' } },
             ],
           },
           { role: 'assistant', content: 'Earlier answer' },
@@ -582,7 +607,7 @@ describe('LLMEngineService', () => {
       expect.any(Function),
     );
     const completionParams = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock.mock.calls.at(-1)?.[0];
-    expect(completionParams.media_paths).toEqual(['/document/first.jpg']);
+    expect(completionParams.media_paths).toEqual(['test-dir/chat-attachments/first.jpg']);
   });
 
   it('waits for in-flight multimodal runtime initialization before sending image media paths', async () => {
@@ -599,7 +624,7 @@ describe('LLMEngineService', () => {
     );
 
     const completionPromise = llmEngineService.chatCompletion({
-      messages: [{ role: 'user', content: 'Describe this', mediaPaths: ['/document/image.jpg'] }],
+      messages: [{ role: 'user', content: 'Describe this', mediaPaths: ['test-dir/chat-attachments/image.jpg'] }],
       multimodalReadiness: {
         modelId: 'test/model',
         status: 'ready',
@@ -619,7 +644,7 @@ describe('LLMEngineService', () => {
     await expect(completionPromise).resolves.toEqual({ text: 'Hello back' });
     expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        media_paths: ['/document/image.jpg'],
+        media_paths: ['test-dir/chat-attachments/image.jpg'],
       }),
       expect.any(Function),
     );
@@ -661,6 +686,39 @@ describe('LLMEngineService', () => {
     expect(JSON.stringify(persistedModel)).not.toContain('file:///private');
     expect(JSON.stringify(persistedModel)).not.toContain('Project for Client');
     expect(JSON.stringify(llmEngineService.getState().diagnostics?.multimodal)).not.toContain('Project for Client');
+  });
+
+  it('releases native contexts when multimodal readiness persistence fails during initialization', async () => {
+    await llmEngineService.unload().catch(() => undefined);
+    (llamaRn.initLlama as jest.Mock).mockClear();
+    (llamaRn.releaseAllLlama as jest.Mock).mockClear();
+    getInitMultimodalMock().mockClear();
+    getReleaseMultimodalMock().mockClear();
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+    const persistenceError = new Error('readiness persistence failed');
+    (registry.updateModel as jest.Mock).mockImplementation((model) => {
+      if (model?.multimodalReadiness) {
+        throw persistenceError;
+      }
+    });
+
+    await expect(llmEngineService.load('test/model')).rejects.toMatchObject({
+      code: 'model_load_failed',
+      message: persistenceError.message,
+      cause: persistenceError,
+    });
+
+    expect(llamaRn.initLlama).toHaveBeenCalled();
+    expect(getInitMultimodalMock()).toHaveBeenCalledTimes(1);
+    expect(getReleaseMultimodalMock()).toHaveBeenCalledTimes(1);
+    expect(llamaRn.releaseAllLlama).toHaveBeenCalledTimes(1);
+    expect((llmEngineService as any).context).toBeNull();
+    expect(llmEngineService.getState()).toMatchObject({
+      status: EngineStatus.ERROR,
+      activeModelId: undefined,
+      loadProgress: 0,
+      lastError: persistenceError.message,
+    });
   });
 
   it('releases initialized multimodal projector state when unloading the context', async () => {
@@ -921,6 +979,95 @@ describe('LLMEngineService', () => {
         path: 'test-dir/models/mmproj-model.gguf',
       }),
     );
+  });
+
+  it('requeues delayed projector reloads when a completion starts after reload is selected but before unload', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue({
+      ...createDownloadedVisionModel(),
+      projectorCandidates: [],
+      selectedProjectorId: undefined,
+    });
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    const context = (llmEngineService as any).context;
+    expect(context).toBeTruthy();
+    expect((llamaRn.initLlama as jest.Mock).mock.calls[0][0]).not.toHaveProperty('ctx_shift');
+
+    (llamaRn.initLlama as jest.Mock).mockClear();
+    (llamaRn.releaseAllLlama as jest.Mock).mockClear();
+    getInitMultimodalMock().mockClear();
+    (registry.updateModel as jest.Mock).mockClear();
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+
+    const completionMock = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock;
+    let releaseCompletion: (() => void) | undefined;
+    completionMock.mockImplementationOnce(() => new Promise((resolve) => {
+      releaseCompletion = () => resolve({ text: 'Done' });
+    }));
+
+    const completionState: { promise: Promise<unknown> | null } = { promise: null };
+    let shouldReloadCallCount = 0;
+    const originalShouldReload = (llmEngineService as any)
+      .shouldReloadLoadedContextForMultimodalContextShift
+      .bind(llmEngineService);
+    const shouldReloadSpy = jest.spyOn(
+      llmEngineService as any,
+      'shouldReloadLoadedContextForMultimodalContextShift',
+    ).mockImplementation(async (...args: unknown[]) => {
+      const shouldReload = await originalShouldReload(...args);
+      shouldReloadCallCount += 1;
+
+      if (shouldReloadCallCount === 2 && shouldReload && !completionState.promise) {
+        completionState.promise = llmEngineService.chatCompletion({
+          messages: [{ role: 'user', content: 'Hello before background unload' }],
+          params: { n_predict: 1 },
+        });
+        expect(llmEngineService.hasActiveCompletion()).toBe(true);
+      }
+
+      return shouldReload;
+    });
+
+    try {
+      (llmEngineService as any).pendingMultimodalReadinessRefresh = {
+        modelId: 'test/model',
+        context,
+        useGpu: false,
+      };
+
+      await (llmEngineService as any).runPendingMultimodalReadinessRefresh();
+
+      expect(shouldReloadCallCount).toBeGreaterThanOrEqual(2);
+      expect(completionState.promise).toBeTruthy();
+      expect(llamaRn.releaseAllLlama).not.toHaveBeenCalled();
+      expect(llamaRn.initLlama).not.toHaveBeenCalled();
+      expect(getInitMultimodalMock()).not.toHaveBeenCalled();
+      expect((llmEngineService as any).pendingMultimodalReadinessRefresh).toEqual(expect.objectContaining({
+        modelId: 'test/model',
+        context,
+      }));
+
+      await waitForMockCall(completionMock);
+      releaseCompletion?.();
+      await completionState.promise;
+
+      await waitForCondition(
+        () => (llamaRn.initLlama as jest.Mock).mock.calls
+          .some(([options]: [{ ctx_shift?: boolean }]) => options?.ctx_shift === false),
+        'delayed projector reload after completion',
+      );
+      expect(llamaRn.releaseAllLlama).toHaveBeenCalledTimes(1);
+      expect(getInitMultimodalMock()).toHaveBeenCalledWith(
+        expect.objectContaining({
+          path: 'test-dir/models/mmproj-model.gguf',
+        }),
+      );
+    } finally {
+      shouldReloadSpy.mockRestore();
+      releaseCompletion?.();
+      await completionState.promise?.catch(() => undefined);
+    }
   });
 
   it('drops queued multimodal readiness refreshes when unload cancels the active completion first', async () => {
@@ -1772,7 +1919,7 @@ describe('LLMEngineService', () => {
     await llmEngineService.load('test/model');
 
     await expect(llmEngineService.chatCompletion({
-      messages: [{ role: 'user', content: 'Describe this', mediaPaths: ['/document/image.jpg'] }],
+      messages: [{ role: 'user', content: 'Describe this', mediaPaths: ['test-dir/chat-attachments/image.jpg'] }],
       multimodalReadiness: {
         modelId: 'test/model',
         status: 'text_only',
@@ -1795,11 +1942,11 @@ describe('LLMEngineService', () => {
         role: 'user',
         content: 'Compare these images',
         mediaPaths: [
-          '/document/image-1.jpg',
-          '/document/image-2.jpg',
-          '/document/image-3.jpg',
-          '/document/image-4.jpg',
-          '/document/image-5.jpg',
+          'test-dir/chat-attachments/image-1.jpg',
+          'test-dir/chat-attachments/image-2.jpg',
+          'test-dir/chat-attachments/image-3.jpg',
+          'test-dir/chat-attachments/image-4.jpg',
+          'test-dir/chat-attachments/image-5.jpg',
         ],
       }],
       multimodalReadiness: {
@@ -1828,15 +1975,15 @@ describe('LLMEngineService', () => {
 
     await expect(llmEngineService.chatCompletion({
       messages: [
-        { role: 'user', content: 'First copy', mediaPaths: ['/document/same.jpg'] },
+        { role: 'user', content: 'First copy', mediaPaths: ['test-dir/chat-attachments/same.jpg'] },
         { role: 'assistant', content: 'Earlier answer' },
-        { role: 'user', content: 'Second copy', mediaPaths: ['/document/same.jpg'] },
+        { role: 'user', content: 'Second copy', mediaPaths: ['test-dir/chat-attachments/same.jpg'] },
         { role: 'assistant', content: 'Second answer' },
-        { role: 'user', content: 'Third copy', mediaPaths: ['/document/same.jpg'] },
+        { role: 'user', content: 'Third copy', mediaPaths: ['test-dir/chat-attachments/same.jpg'] },
         { role: 'assistant', content: 'Third answer' },
-        { role: 'user', content: 'Fourth copy', mediaPaths: ['/document/same.jpg'] },
+        { role: 'user', content: 'Fourth copy', mediaPaths: ['test-dir/chat-attachments/same.jpg'] },
         { role: 'assistant', content: 'Fourth answer' },
-        { role: 'user', content: 'Fifth copy', mediaPaths: ['/document/same.jpg'] },
+        { role: 'user', content: 'Fifth copy', mediaPaths: ['test-dir/chat-attachments/same.jpg'] },
       ],
       multimodalReadiness: {
         modelId: 'test/model',
@@ -1864,11 +2011,11 @@ describe('LLMEngineService', () => {
         role: 'user',
         content: 'Compare these repeated images',
         mediaPaths: [
-          '/document/same.jpg',
-          '/document/same.jpg',
-          '/document/same.jpg',
-          '/document/same.jpg',
-          '/document/same.jpg',
+          'test-dir/chat-attachments/same.jpg',
+          'test-dir/chat-attachments/same.jpg',
+          'test-dir/chat-attachments/same.jpg',
+          'test-dir/chat-attachments/same.jpg',
+          'test-dir/chat-attachments/same.jpg',
         ],
       }],
       multimodalReadiness: {
@@ -1898,11 +2045,11 @@ describe('LLMEngineService', () => {
     await expect(llmEngineService.chatCompletion({
       messages: [{ role: 'user', content: 'Compare these repeated top-level images' }],
       mediaPaths: [
-        '/document/top-level-same.jpg',
-        '/document/top-level-same.jpg',
-        '/document/top-level-same.jpg',
-        '/document/top-level-same.jpg',
-        '/document/top-level-same.jpg',
+        'test-dir/chat-attachments/top-level-same.jpg',
+        'test-dir/chat-attachments/top-level-same.jpg',
+        'test-dir/chat-attachments/top-level-same.jpg',
+        'test-dir/chat-attachments/top-level-same.jpg',
+        'test-dir/chat-attachments/top-level-same.jpg',
       ],
       multimodalReadiness: {
         modelId: 'test/model',
@@ -1933,9 +2080,9 @@ describe('LLMEngineService', () => {
         role: 'user',
         content: 'Compare explicit and attached images',
         mediaPaths: [
-          '/document/explicit-1.jpg',
-          '/document/explicit-2.jpg',
-          '/document/explicit-3.jpg',
+          'test-dir/chat-attachments/explicit-1.jpg',
+          'test-dir/chat-attachments/explicit-2.jpg',
+          'test-dir/chat-attachments/explicit-3.jpg',
         ],
         attachments: [
           createTestImageAttachment('attachment-1', 'test-dir/chat-attachments/attachment-1.jpg'),
@@ -2008,17 +2155,17 @@ describe('LLMEngineService', () => {
         role: 'user',
         content: 'Compare these mirrored images',
         mediaPaths: [
-          '/document/image-1.jpg',
-          '/document/image-2.jpg',
-          '/document/image-3.jpg',
-          '/document/image-4.jpg',
+          'test-dir/chat-attachments/image-1.jpg',
+          'test-dir/chat-attachments/image-2.jpg',
+          'test-dir/chat-attachments/image-3.jpg',
+          'test-dir/chat-attachments/image-4.jpg',
         ],
       }],
       mediaPaths: [
-        '/document/image-1.jpg',
-        '/document/image-2.jpg',
-        '/document/image-3.jpg',
-        '/document/image-4.jpg',
+        'test-dir/chat-attachments/image-1.jpg',
+        'test-dir/chat-attachments/image-2.jpg',
+        'test-dir/chat-attachments/image-3.jpg',
+        'test-dir/chat-attachments/image-4.jpg',
       ],
       multimodalReadiness: {
         modelId: 'test/model',
@@ -2033,10 +2180,10 @@ describe('LLMEngineService', () => {
     expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).toHaveBeenCalledWith(
       expect.objectContaining({
         media_paths: [
-          '/document/image-1.jpg',
-          '/document/image-2.jpg',
-          '/document/image-3.jpg',
-          '/document/image-4.jpg',
+          'test-dir/chat-attachments/image-1.jpg',
+          'test-dir/chat-attachments/image-2.jpg',
+          'test-dir/chat-attachments/image-3.jpg',
+          'test-dir/chat-attachments/image-4.jpg',
         ],
       }),
       expect.any(Function),
@@ -2056,9 +2203,9 @@ describe('LLMEngineService', () => {
         role: 'user',
         content: 'Describe this repeated image',
         mediaPaths: [
-          '/document/same.jpg',
-          '/document/same.jpg',
-          '/document/same.jpg',
+          'test-dir/chat-attachments/same.jpg',
+          'test-dir/chat-attachments/same.jpg',
+          'test-dir/chat-attachments/same.jpg',
         ],
       }],
       multimodalReadiness: {
@@ -2151,15 +2298,15 @@ describe('LLMEngineService', () => {
 
     const privatePromptText = 'Describe Project Orchid acquisition photos';
     (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock.mockRejectedValueOnce(
-      new Error(`Native completion failed while processing prompt "${privatePromptText}" at /document/image.jpg`),
+      new Error(`Native completion failed while processing prompt "${privatePromptText}" at file:///private/mobile/image.jpg`),
     );
 
     await expect(llmEngineService.chatCompletion({
       messages: [{
         role: 'user',
         content: privatePromptText,
-        mediaPaths: ['/document/image.jpg'],
-        attachments: [createTestImageAttachment('attachment-private', '/document/image.jpg', 8192)],
+        mediaPaths: ['test-dir/chat-attachments/image.jpg'],
+        attachments: [createTestImageAttachment('attachment-private', 'test-dir/chat-attachments/image.jpg', 8192)],
       }],
       multimodalReadiness: createReadyMultimodalReadiness(),
       params: { n_predict: 32 },
@@ -2173,27 +2320,28 @@ describe('LLMEngineService', () => {
       failureReason: 'runtime:completion_failed:path_redacted',
     }));
     expect(JSON.stringify(multimodalDiagnostics)).not.toContain(privatePromptText);
-    expect(JSON.stringify(multimodalDiagnostics)).not.toContain('/document/image.jpg');
+    expect(JSON.stringify(multimodalDiagnostics)).not.toContain('file:///private/mobile/image.jpg');
+    expect(JSON.stringify(multimodalDiagnostics)).not.toContain('test-dir/chat-attachments/image.jpg');
   });
 
   it('passes formatted media paths into prompt tokenization', async () => {
     getFormattedChatMock().mockResolvedValueOnce({
       prompt: 'Formatted prompt',
       has_media: true,
-      media_paths: ['/document/image.jpg'],
+      media_paths: ['test-dir/chat-attachments/image.jpg'],
       additional_stops: [],
     });
     await llmEngineService.load('test/model');
 
     await llmEngineService.countPromptTokens({
-      messages: [{ role: 'user', content: 'Describe this', mediaPaths: ['/document/image.jpg'] }],
+      messages: [{ role: 'user', content: 'Describe this', mediaPaths: ['test-dir/chat-attachments/image.jpg'] }],
       multimodalReadiness: createReadyMultimodalReadiness(),
       expectedModelId: 'test/model',
     });
 
     expect(getTokenizeMock()).toHaveBeenCalledWith(
       'Formatted prompt',
-      { media_paths: ['/document/image.jpg'] },
+      { media_paths: ['test-dir/chat-attachments/image.jpg'] },
     );
   });
 
@@ -2207,9 +2355,9 @@ describe('LLMEngineService', () => {
     await llmEngineService.countPromptTokens({
       messages: [
         { role: 'system', content: 'Be concise.' },
-        { role: 'user', content: 'Earlier image', mediaPaths: ['/document/first.jpg'] },
+        { role: 'user', content: 'Earlier image', mediaPaths: ['test-dir/chat-attachments/first.jpg'] },
         { role: 'assistant', content: 'Earlier answer' },
-        { role: 'user', content: 'Latest image', mediaPaths: ['/document/latest.jpg'] },
+        { role: 'user', content: 'Latest image', mediaPaths: ['test-dir/chat-attachments/latest.jpg'] },
       ],
       multimodalReadiness: createReadyMultimodalReadiness(),
       expectedModelId: 'test/model',
@@ -2217,7 +2365,7 @@ describe('LLMEngineService', () => {
 
     expect(getTokenizeMock()).toHaveBeenCalledWith(
       'Formatted prompt',
-      { media_paths: ['/document/first.jpg', '/document/latest.jpg'] },
+      { media_paths: ['test-dir/chat-attachments/first.jpg', 'test-dir/chat-attachments/latest.jpg'] },
     );
   });
 
@@ -2225,13 +2373,13 @@ describe('LLMEngineService', () => {
     getFormattedChatMock().mockResolvedValueOnce({
       prompt: 'Formatted prompt',
       has_media: true,
-      media_paths: ['/document/image.jpg'],
+        media_paths: ['test-dir/chat-attachments/image.jpg'],
       additional_stops: [],
     });
     await llmEngineService.load('test/model');
 
     await llmEngineService.countPromptTokens({
-      messages: [{ role: 'user', content: 'Describe this', mediaPaths: ['/document/image.jpg'] }],
+      messages: [{ role: 'user', content: 'Describe this', mediaPaths: ['test-dir/chat-attachments/image.jpg'] }],
       allowMediaFallback: true,
     });
 
@@ -2247,7 +2395,7 @@ describe('LLMEngineService', () => {
     await llmEngineService.load('test/model');
 
     await expect(llmEngineService.countPromptTokens({
-      messages: [{ role: 'user', content: 'Describe this', mediaPaths: ['/document/image.jpg'] }],
+      messages: [{ role: 'user', content: 'Describe this', mediaPaths: ['test-dir/chat-attachments/image.jpg'] }],
     })).rejects.toMatchObject({
       code: 'multimodal_not_ready',
     });
@@ -2264,11 +2412,11 @@ describe('LLMEngineService', () => {
         role: 'user',
         content: 'Describe these',
         mediaPaths: [
-          '/document/1.jpg',
-          '/document/2.jpg',
-          '/document/3.jpg',
-          '/document/4.jpg',
-          '/document/5.jpg',
+          'test-dir/chat-attachments/1.jpg',
+          'test-dir/chat-attachments/2.jpg',
+          'test-dir/chat-attachments/3.jpg',
+          'test-dir/chat-attachments/4.jpg',
+          'test-dir/chat-attachments/5.jpg',
         ],
       }],
       multimodalReadiness: createReadyMultimodalReadiness(),

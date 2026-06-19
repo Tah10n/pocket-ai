@@ -78,8 +78,8 @@ function getSupportingDirectory(platformProjectRoot, projectName) {
   return path.join(platformProjectRoot, projectName, 'Supporting');
 }
 
-function getLocalizedInfoPlistStringsResourceFilepath(projectName, locale) {
-  return path.posix.join(projectName, 'Supporting', `${locale}.lproj`, 'InfoPlist.strings');
+function getLocalizedInfoPlistStringsResourceFilepath() {
+  return 'InfoPlist.strings';
 }
 
 function writeLocalizedPhotoLibraryPermissionFiles({

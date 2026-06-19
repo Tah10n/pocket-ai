@@ -35,6 +35,7 @@ import {
   getFileSha,
   getFileSize,
   getProjectorCompanionEntries,
+  isProjectorFileName,
   isCatalogSummarySupported,
   isUnsupportedMtpFileName,
   rankCatalogGgufEntries,
@@ -532,6 +533,18 @@ function createTreeProbeCandidate(
   });
 }
 
+function hasOnlyProjectorOrUnsupportedGgufSiblings(
+  siblings: (HuggingFaceSibling | HuggingFaceTreeEntry)[],
+): boolean {
+  const ggufFileNames = siblings
+    .map(getFileName)
+    .filter((fileName) => fileName.trim().toLowerCase().endsWith('.gguf'));
+
+  return ggufFileNames.length > 0 && ggufFileNames.every((fileName) => (
+    isProjectorFileName(fileName) || isUnsupportedMtpFileName(fileName)
+  ));
+}
+
 export function transformHFResponse(
   data: HuggingFaceModelSummary[],
   memoryFitContext: MemoryFitContext,
@@ -563,6 +576,7 @@ export function transformHFResponse(
       return fileName.toLowerCase().endsWith('.gguf') && isUnsupportedMtpFileName(fileName);
     });
     const rankedGgufSiblings = rankCatalogGgufEntries(siblings);
+    const hasOnlyUnsupportedCompanionGgufSiblings = hasOnlyProjectorOrUnsupportedGgufSiblings(siblings);
     const variants = attachMemoryFitToVariants(buildCatalogModelVariantsFromRankedEntries(rankedGgufSiblings, {
       limit: CATALOG_SEARCH_VARIANT_LIMIT,
     }), memoryFitContext, {
@@ -576,7 +590,7 @@ export function transformHFResponse(
     });
     const ggufSibling = rankedGgufSiblings[0];
     if (!ggufSibling) {
-      if (!hasUnsupportedMtpGgufSibling && probeCandidate) {
+      if (!hasUnsupportedMtpGgufSibling && !hasOnlyUnsupportedCompanionGgufSiblings && probeCandidate) {
         results.push(probeCandidate);
       }
       continue;

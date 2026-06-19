@@ -3,7 +3,12 @@ import type { MaterialSymbolName } from '@/components/ui/MaterialSymbols';
 import { ModelAccessState, LifecycleStatus, type ModelMetadata } from '@/types/models';
 import { getModelVisionCapabilityStatusLabelKey, modelSupportsVision } from '@/utils/modelCapabilities';
 import { getShortModelLabel } from '@/utils/modelLabel';
-import { formatModelFileSize, getModelDisplayArtifactSizeBytes } from '@/utils/modelSize';
+import {
+  formatModelFileSize,
+  getModelDisplayArtifactSizeBytes,
+  getModelDisplayProjectorCandidates,
+  getModelDisplaySelectedProjectorId,
+} from '@/utils/modelSize';
 import { getActiveModelVariant } from '@/utils/modelVariants';
 
 export type ModelDetailsTone = 'neutral' | 'primary' | 'info' | 'success' | 'warning' | 'error';
@@ -174,13 +179,7 @@ export function buildModelDetailsHeroMetrics(
   model: ModelMetadata,
   t: Translate,
 ): ModelDetailsMetricItem[] {
-  const activeVariant = getActiveModelVariant(model);
-  const displaySize = getModelDisplayArtifactSizeBytes(
-    model,
-    activeVariant?.size ?? model.size,
-    activeVariant?.projectorCandidates ?? model.projectorCandidates,
-    activeVariant?.selectedProjectorId ?? model.selectedProjectorId,
-  );
+  const displaySize = getModelDisplayArtifactSizeBytes(model);
   const accessStateLabel = getModelDetailsAccessStateLabel(model.accessState, t);
   const accessTone: ModelDetailsTone = model.accessState === ModelAccessState.ACCESS_DENIED
     ? 'warning'
@@ -222,9 +221,23 @@ export function buildModelDetailsMetadataMetrics(
   model: ModelMetadata,
   t: Translate,
 ): ModelDetailsMetadataItem[] {
-  const visionStatusLabelKey = getModelVisionCapabilityStatusLabelKey(model);
-  const projectorCandidateNames = modelSupportsVision(model)
-    ? model.projectorCandidates
+  const activeVariant = getActiveModelVariant(model);
+  const projectorCandidates = getModelDisplayProjectorCandidates(model);
+  const selectedProjectorId = getModelDisplaySelectedProjectorId(model, projectorCandidates);
+  const visionPresentationModel = activeVariant
+    ? {
+        ...model,
+        chatModalities: activeVariant.chatModalities ?? model.chatModalities,
+        artifactRole: activeVariant.artifactRole ?? model.artifactRole,
+        visionSource: activeVariant.visionSource ?? model.visionSource,
+        visionConfidence: activeVariant.visionConfidence ?? model.visionConfidence,
+        projectorCandidates,
+        selectedProjectorId,
+      }
+    : model;
+  const visionStatusLabelKey = getModelVisionCapabilityStatusLabelKey(visionPresentationModel);
+  const projectorCandidateNames = modelSupportsVision(visionPresentationModel)
+    ? projectorCandidates
       ?.map((candidate) => candidate.fileName.trim())
       .filter((fileName) => fileName.length > 0)
       .join(', ')

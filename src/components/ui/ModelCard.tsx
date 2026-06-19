@@ -9,7 +9,12 @@ import { ModelAccessState, type ModelMetadata } from '../../types/models';
 import type { ProjectorArtifact } from '../../types/multimodal';
 import { getModelVisionCapabilityBadgePresentation } from '../../utils/modelCapabilities';
 import { getVariantMemoryBadgePresentation } from '../../utils/modelMemoryBadgePresentation';
-import { formatModelFileSize, getModelDisplayArtifactSizeBytes } from '../../utils/modelSize';
+import {
+  formatModelFileSize,
+  getModelDisplayArtifactSizeBytes,
+  getModelDisplayProjectorCandidates,
+  getModelDisplaySelectedProjectorId,
+} from '../../utils/modelSize';
 import { canSelectModelVariant, getActiveModelVariant } from '../../utils/modelVariants';
 
 interface ModelCardProps {
@@ -45,12 +50,7 @@ const ModelCardComponent = ({
 }: ModelCardProps) => {
   const { t } = useTranslation();
   const activeVariant = getActiveModelVariant(model);
-  const displaySize = getModelDisplayArtifactSizeBytes(
-    model,
-    activeVariant?.size ?? model.size,
-    activeVariant?.projectorCandidates ?? model.projectorCandidates,
-    activeVariant?.selectedProjectorId ?? model.selectedProjectorId,
-  );
+  const displaySize = getModelDisplayArtifactSizeBytes(model);
   const sizeLabel = formatModelFileSize(displaySize, t('models.sizeUnknown'));
   const quantizationLabel = activeVariant?.quantizationLabel ?? model.gguf?.sizeLabel?.trim();
   const hasKnownFileSize = typeof displaySize === 'number' && Number.isFinite(displaySize) && displaySize > 0;
@@ -64,7 +64,19 @@ const ModelCardComponent = ({
     || (memoryDecision === 'unknown' && displaySize !== null)
   );
   const canOpenVariantSelector = typeof onOpenVariantSelector === 'function' && canSelectModelVariant(model);
-  const visionBadge = getModelVisionCapabilityBadgePresentation(model);
+  const displayProjectorCandidates = getModelDisplayProjectorCandidates(model);
+  const displaySelectedProjectorId = getModelDisplaySelectedProjectorId(model, displayProjectorCandidates);
+  const visionBadge = getModelVisionCapabilityBadgePresentation(activeVariant
+    ? {
+        ...model,
+        chatModalities: activeVariant.chatModalities ?? model.chatModalities,
+        artifactRole: activeVariant.artifactRole ?? model.artifactRole,
+        visionSource: activeVariant.visionSource ?? model.visionSource,
+        visionConfidence: activeVariant.visionConfidence ?? model.visionConfidence,
+        projectorCandidates: displayProjectorCandidates,
+        selectedProjectorId: displaySelectedProjectorId,
+      }
+    : model);
   const accessBadge = model.accessState === ModelAccessState.AUTH_REQUIRED
     ? {
         text: t('models.requiresToken'),
@@ -198,6 +210,10 @@ function arrayFieldEqual<T>(
   next: readonly T[] | null | undefined,
   itemEqual: (prevItem: T, nextItem: T) => boolean,
 ): boolean {
+  if (prev === next) {
+    return true;
+  }
+
   const prevItems = prev ?? [];
   const nextItems = next ?? [];
   if (prevItems.length !== nextItems.length) {
@@ -212,6 +228,10 @@ function scalarArrayFieldEqual<T>(prev: readonly T[] | null | undefined, next: r
 }
 
 function projectorArtifactEqual(prev: ProjectorArtifact, next: ProjectorArtifact): boolean {
+  if (prev === next) {
+    return true;
+  }
+
   const prevRuntime = prev as RuntimeProjectorArtifact;
   const nextRuntime = next as RuntimeProjectorArtifact;
 
@@ -263,8 +283,32 @@ function modelVisionFieldsEqual(prevModel: ModelMetadata, nextModel: ModelMetada
     nullableFieldEqual(prevModel.selectedProjectorId, nextModel.selectedProjectorId);
 }
 
+function multimodalReadinessEqual(
+  prev: ModelMetadata['multimodalReadiness'],
+  next: ModelMetadata['multimodalReadiness'],
+): boolean {
+  if (prev === next) {
+    return true;
+  }
+
+  if (!prev || !next) {
+    return prev === next;
+  }
+
+  return prev.modelId === next.modelId &&
+    nullableFieldEqual(prev.variantId, next.variantId) &&
+    prev.status === next.status &&
+    nullableFieldEqual(prev.projectorId, next.projectorId) &&
+    nullableFieldEqual(prev.projectorSize, next.projectorSize) &&
+    scalarArrayFieldEqual(prev.support, next.support) &&
+    nullableFieldEqual(prev.failureReason, next.failureReason) &&
+    prev.checkedAt === next.checkedAt;
+}
+
 export const ModelCard = memo(ModelCardComponent, (prevProps, nextProps) => {
   // Custom comparison to ensure fast check since model is an object
+  const modelIdentityEqual = prevProps.model === nextProps.model;
+
   return prevProps.isActive === nextProps.isActive &&
          prevProps.onOpenDetails === nextProps.onOpenDetails &&
          prevProps.onDownload === nextProps.onDownload &&
@@ -277,34 +321,37 @@ export const ModelCard = memo(ModelCardComponent, (prevProps, nextProps) => {
          prevProps.onDelete === nextProps.onDelete &&
          prevProps.onCancel === nextProps.onCancel &&
          prevProps.onChat === nextProps.onChat &&
-         prevProps.model.id === nextProps.model.id &&
-         prevProps.model.name === nextProps.model.name &&
-         prevProps.model.author === nextProps.model.author &&
-         prevProps.model.downloadUrl === nextProps.model.downloadUrl &&
-         prevProps.model.resolvedFileName === nextProps.model.resolvedFileName &&
-         prevProps.model.sha256 === nextProps.model.sha256 &&
-         prevProps.model.hfRevision === nextProps.model.hfRevision &&
-         prevProps.model.requiresTreeProbe === nextProps.model.requiresTreeProbe &&
-         prevProps.model.allowUnknownSizeDownload === nextProps.model.allowUnknownSizeDownload &&
-         prevProps.model.lifecycleStatus === nextProps.model.lifecycleStatus &&
-         prevProps.model.downloadProgress === nextProps.model.downloadProgress &&
-         prevProps.model.downloadErrorAt === nextProps.model.downloadErrorAt &&
-         prevProps.model.downloadErrorCode === nextProps.model.downloadErrorCode &&
-         prevProps.model.downloadErrorMessage === nextProps.model.downloadErrorMessage &&
-         nullableFieldEqual(prevProps.model.resumeData, nextProps.model.resumeData) &&
-         prevProps.model.localPath === nextProps.model.localPath &&
-         prevProps.model.downloadedAt === nextProps.model.downloadedAt &&
-         prevProps.model.fitsInRam === nextProps.model.fitsInRam &&
-         prevProps.model.memoryFitDecision === nextProps.model.memoryFitDecision &&
-         prevProps.model.memoryFitConfidence === nextProps.model.memoryFitConfidence &&
-         prevProps.model.gguf?.sizeLabel === nextProps.model.gguf?.sizeLabel &&
-         prevProps.model.gguf?.totalBytes === nextProps.model.gguf?.totalBytes &&
-         prevProps.model.size === nextProps.model.size &&
-         modelVariantsEqual(prevProps.model, nextProps.model) &&
-         modelVisionFieldsEqual(prevProps.model, nextProps.model) &&
-         prevProps.model.activeVariantId === nextProps.model.activeVariantId &&
-         prevProps.model.accessState === nextProps.model.accessState &&
-         prevProps.model.isGated === nextProps.model.isGated &&
-         prevProps.model.isPrivate === nextProps.model.isPrivate;
+         (modelIdentityEqual || (
+           prevProps.model.id === nextProps.model.id &&
+           prevProps.model.name === nextProps.model.name &&
+           prevProps.model.author === nextProps.model.author &&
+           prevProps.model.downloadUrl === nextProps.model.downloadUrl &&
+           prevProps.model.resolvedFileName === nextProps.model.resolvedFileName &&
+           prevProps.model.sha256 === nextProps.model.sha256 &&
+           prevProps.model.hfRevision === nextProps.model.hfRevision &&
+           prevProps.model.requiresTreeProbe === nextProps.model.requiresTreeProbe &&
+           prevProps.model.allowUnknownSizeDownload === nextProps.model.allowUnknownSizeDownload &&
+           prevProps.model.lifecycleStatus === nextProps.model.lifecycleStatus &&
+           prevProps.model.downloadProgress === nextProps.model.downloadProgress &&
+           prevProps.model.downloadErrorAt === nextProps.model.downloadErrorAt &&
+           prevProps.model.downloadErrorCode === nextProps.model.downloadErrorCode &&
+           prevProps.model.downloadErrorMessage === nextProps.model.downloadErrorMessage &&
+           nullableFieldEqual(prevProps.model.resumeData, nextProps.model.resumeData) &&
+           prevProps.model.localPath === nextProps.model.localPath &&
+           prevProps.model.downloadedAt === nextProps.model.downloadedAt &&
+           prevProps.model.fitsInRam === nextProps.model.fitsInRam &&
+           prevProps.model.memoryFitDecision === nextProps.model.memoryFitDecision &&
+           prevProps.model.memoryFitConfidence === nextProps.model.memoryFitConfidence &&
+           prevProps.model.gguf?.sizeLabel === nextProps.model.gguf?.sizeLabel &&
+           prevProps.model.gguf?.totalBytes === nextProps.model.gguf?.totalBytes &&
+           prevProps.model.size === nextProps.model.size &&
+           modelVariantsEqual(prevProps.model, nextProps.model) &&
+           modelVisionFieldsEqual(prevProps.model, nextProps.model) &&
+           multimodalReadinessEqual(prevProps.model.multimodalReadiness, nextProps.model.multimodalReadiness) &&
+           prevProps.model.activeVariantId === nextProps.model.activeVariantId &&
+           prevProps.model.accessState === nextProps.model.accessState &&
+           prevProps.model.isGated === nextProps.model.isGated &&
+           prevProps.model.isPrivate === nextProps.model.isPrivate
+         ));
 });
 

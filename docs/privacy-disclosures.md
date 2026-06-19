@@ -1,6 +1,6 @@
 # Privacy & Disclosures
 
-Last updated: 2026-06-09
+Last updated: 2026-06-17
 
 ## Summary
 
@@ -12,7 +12,7 @@ This document summarizes the current behavior of the app as configured in this r
 
 - Chat prompts and generated responses stay on the device during local inference.
 - Vision chat image attachments stay on the device during local inference. They are not uploaded to a hosted chat-completion API.
-- Downloaded GGUF files and copied vision chat attachments are stored in app-managed local storage. Android release builds disable OS auto-backup, and iOS release builds mark the downloaded-model and chat-attachment storage directories as excluded from device and iCloud backups.
+- Downloaded GGUF files, required vision projector companion artifacts, and copied vision chat attachments are stored in app-managed local storage. Android release builds disable OS auto-backup, and iOS release builds mark the downloaded-model and chat-attachment storage directories as excluded from device and iCloud backups.
 - Conversation history is persisted locally on the device and encrypted at rest.
 - System prompt presets, generation settings, and model-specific load profiles are persisted locally on the device and encrypted at rest.
 - An optional Hugging Face access token can be stored locally in secure device storage for browsing and downloading gated or private models.
@@ -39,7 +39,7 @@ Pocket AI uses the network only for model-management flows:
 
 - Hugging Face model catalog search
 - Optional metadata, repository file lists, README summary, and config fetches used for model hints, GGUF variant lists, popularity sorting, size recovery, context-window recovery, and gated-model access checks
-- Model file downloads for the selected GGUF variant from remote hosting endpoints
+- Model file downloads for the selected GGUF variant and any required vision projector companion artifact from remote hosting endpoints
 - If a Hugging Face access token is configured, the app attaches it to Hugging Face API requests as needed to surface gated or private repositories (including catalog browsing). Some endpoints are still probed anonymously first and retried with auth only when required.
 - When a user taps through to Hugging Face from the token screen or a model detail view, the app opens the public Hugging Face site in the device browser
 
@@ -51,7 +51,7 @@ The current release flow in this repository does not send chat prompts to a host
 
 Users can manage local data directly in the app:
 
-- offload downloaded models while keeping or resetting saved per-model settings
+- offload downloaded models and associated vision projector companion artifacts while keeping or resetting saved per-model settings
 - unload the active model
 - clear persisted chat history
 - discard image drafts and delete messages or conversations, which attempts to remove their associated local attachment files when cleanup runs
@@ -76,7 +76,7 @@ For the release configuration currently committed here:
 
 - Android package name: `com.github.tah10n.pocketai`
 - Android auto-backup is disabled to avoid backing up local chat and model state
-- iOS excludes downloaded model files under the app-managed `Documents/models/` directory and local image attachments under `Documents/chat-attachments/` from device and iCloud backups
+- iOS excludes downloaded model files and vision projector companion artifacts under the app-managed `Documents/models/` directory, plus local image attachments under `Documents/chat-attachments/`, from device and iCloud backups
 - Android permissions include:
   - `INTERNET` (Hugging Face catalog and model downloads)
   - `VIBRATE` (UI haptics)

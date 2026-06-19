@@ -30,6 +30,7 @@ import { GgufValidationError, validateGgufFileHeader } from '../utils/ggufValida
 import { normalizeSha256Digest } from '../utils/sha256';
 import { normalizeDownloadResumeData } from '../utils/downloadResumeData';
 import { projectorArtifactService } from './ProjectorArtifactService';
+import { llmEngineService } from './LLMEngineService';
 
 function ignorePrivateStorageUnavailableDuringDownloadStop(error: unknown, scope: string): boolean {
   if (isPrivateStorageUnavailableError(error)) {
@@ -549,7 +550,7 @@ export class ModelDownloadManager {
     excludeProjector?: Pick<ProjectorArtifact, 'ownerModelId' | 'id'>;
   } = {}): Set<string> {
     return new Set([
-      ...this.getProtectedCompletedModelFileNames(),
+      ...this.getProtectedCompletedModelFileNames(options),
       ...this.getProtectedQueuedDownloadFileNames(options),
     ]);
   }
@@ -1206,13 +1207,21 @@ export class ModelDownloadManager {
         return;
       }
       const requiredModelBytes = modelResumeDiskPlanning?.requiredBytes ?? (reusableModelFile ? 0 : model.size ?? 0);
+      const selectedProjectorSizeBytes = selectedProjector
+        ? normalizePositiveByteSize(selectedProjector.size)
+        : null;
+      const hasUnknownProjectorDiskRequirement = selectedProjector !== null
+        && !reusableProjectorFile
+        && selectedProjectorSizeBytes === null;
       const requiredProjectorBytes = projectorResumeDiskPlanning?.requiredBytes ?? (
         selectedProjector && !reusableProjectorFile
-          ? normalizePositiveByteSize(selectedProjector.size) ?? 0
+          ? selectedProjectorSizeBytes ?? 0
           : 0
       );
       const requiredBytes = requiredModelBytes + requiredProjectorBytes + REQUIRED_DOWNLOAD_BUFFER_BYTES;
-      const hasKnownDiskRequirement = requiredModelBytes > 0 || requiredProjectorBytes > 0;
+      const hasKnownDiskRequirement = requiredModelBytes > 0
+        || requiredProjectorBytes > 0
+        || hasUnknownProjectorDiskRequirement;
       if (hasKnownDiskRequirement && freeSpace !== undefined && freeSpace < requiredBytes) {
         throw new AppError('download_disk_space_low', 'DISK_SPACE_LOW', {
           details: {
@@ -1619,6 +1628,16 @@ export class ModelDownloadManager {
       registry.updateModel(completedModel);
       assertPrivateStorageWritableForDownloadMutation();
       removeFromQueue(model.id);
+      if (projectorResult) {
+        try {
+          llmEngineService.requestActiveMultimodalReadinessRefresh(model.id);
+        } catch (refreshError) {
+          console.warn('[ModelDownloadManager] Failed to request active multimodal readiness refresh', {
+            modelId: model.id,
+            ...summarizeErrorForLog(refreshError),
+          });
+        }
+      }
 
       if (AppState.currentState !== 'active') {
         void notificationService.sendCompletionNotification('download', { modelName: model.name });
@@ -1762,7 +1781,8 @@ export class ModelDownloadManager {
       })
       : null;
     const requiredProjectorBytes = resumeDiskPlanning?.requiredBytes ?? expectedProjectorBytes ?? 0;
-    if (requiredProjectorBytes <= 0) {
+    const hasUnknownProjectorDiskRequirement = expectedProjectorBytes === null;
+    if (requiredProjectorBytes <= 0 && !hasUnknownProjectorDiskRequirement) {
       return;
     }
 
@@ -1873,7 +1893,9 @@ export class ModelDownloadManager {
     modelsDir: string,
   ): Promise<string> {
     const candidates = this.getProjectorDownloadFileNameCandidates(projector);
-    const protectedCompletedFileNames = this.getProtectedCompletedModelFileNames();
+    const protectedCompletedFileNames = this.getProtectedCompletedModelFileNames({
+      excludeProjector: projector,
+    });
     const protectedQueuedFileNames = this.getProtectedQueuedDownloadFileNames({
       excludeProjector: projector,
     });
@@ -1963,6 +1985,8 @@ export class ModelDownloadManager {
               ...projector,
               localPath: reusableProjectorFile.fileName,
               size: verification.sizeBytes,
+              resumeData: undefined,
+              downloadProgress: 1,
               lifecycleStatus: 'downloaded',
             },
             sizeBytes: verification.sizeBytes,
@@ -2296,14 +2320,23 @@ export class ModelDownloadManager {
       // No resumable yet (pre-download checks). Mark as paused and drop the active state.
     } finally {
       if (this.isCurrentJob(modelId, jobToken)) {
+        const latestQueuedModel = useDownloadStore.getState().queue.find((model) => model.id === modelId) ?? queuedModel;
         const updates: Partial<ModelMetadata> = { lifecycleStatus: LifecycleStatus.PAUSED };
         const resumeData = safeNormalizeResumeSnapshotValue(resumeSnapshot, { modelId, scope: 'pauseDownload' });
         if (resumeData && activeArtifact !== 'projector') {
           updates.resumeData = resumeData;
         }
-        if (queuedModel && activeProjectorId) {
-          const projectorResumeData = activeArtifact === 'projector' ? resumeData : undefined;
-          const projectorCandidates = this.updateProjectorCandidates(queuedModel, activeProjectorId, {
+        const fallbackQueuedProjector = !activeProjectorId && latestQueuedModel
+          ? this.resolveProjectorForDownload(latestQueuedModel)
+          : null;
+        const projectorIdToPause = activeProjectorId ?? (
+          fallbackQueuedProjector?.lifecycleStatus === 'queued'
+            ? fallbackQueuedProjector.id
+            : undefined
+        );
+        if (latestQueuedModel && projectorIdToPause) {
+          const projectorResumeData = activeArtifact === 'projector' && activeProjectorId ? resumeData : undefined;
+          const projectorCandidates = this.updateProjectorCandidates(latestQueuedModel, projectorIdToPause, {
             lifecycleStatus: 'paused',
             resumeData: projectorResumeData,
           });
@@ -2440,7 +2473,9 @@ export class ModelDownloadManager {
     const projectorCandidates = selectedProjector
       ? this.getProjectorDownloadFileNameCandidates(selectedProjector)
       : [];
-    const protectedBaseCheckpointFileName = options?.activeArtifact === 'projector' && queuedModel && this.hasVerifiedQueuedBaseCheckpoint(queuedModel)
+    const protectedBaseCheckpointFileName = queuedModel
+      && this.hasVerifiedQueuedBaseCheckpoint(queuedModel)
+      && (options?.activeArtifact === 'projector' || selectedProjector !== null)
       ? queuedModel.localPath
       : undefined;
     const safeModelCandidates = protectedBaseCheckpointFileName
@@ -2461,7 +2496,7 @@ export class ModelDownloadManager {
       && (model.downloadIntegrity !== undefined || model.metadataTrust === 'verified_local');
   }
 
-  private getProtectedCompletedModelFileNames(): Set<string> {
+  private getProtectedCompletedModelFileNames(options: CorruptedDownloadProtectionOptions = {}): Set<string> {
     return new Set(
       registry.getModels()
         .flatMap((model) => [
@@ -2473,6 +2508,11 @@ export class ModelDownloadManager {
           ),
           ...(model.projectorCandidates ?? [])
             .filter((projector) => isStoredProjectorArtifact(projector))
+            .filter((projector) => !(
+              options.excludeProjector
+              && projector.ownerModelId === options.excludeProjector.ownerModelId
+              && projector.id === options.excludeProjector.id
+            ))
             .map((projector) => projector.localPath),
         ])
         .filter((fileName): fileName is string => typeof fileName === 'string' && isValidLocalFileName(fileName)),
@@ -2633,7 +2673,7 @@ export class ModelDownloadManager {
       const modelsDir = getModelsDir();
       const protectedCompletedUris = modelsDir
         ? new Set(
-          Array.from(this.getProtectedCompletedModelFileNames())
+          Array.from(this.getProtectedCompletedModelFileNames(protectionOptions))
             .map((fileName) => safeJoinModelPath(modelsDir, fileName))
             .filter((uri): uri is string => typeof uri === 'string'),
         )

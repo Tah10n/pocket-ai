@@ -81,6 +81,66 @@ function preserveFreshProjectorSelection(
   };
 }
 
+type ProjectorCandidate = NonNullable<ModelMetadata['projectorCandidates']>[number];
+
+function normalizeChoiceScopeKey(value: string | null | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed && trimmed.length > 0 ? trimmed : undefined;
+}
+
+function getProjectorChoiceVariantScopeKeys(model: ModelMetadata): Set<string> {
+  const activeVariantId = normalizeChoiceScopeKey(model.activeVariantId);
+  const resolvedFileName = normalizeChoiceScopeKey(model.resolvedFileName);
+  const activeVariant = model.variants?.find((variant) => (
+    variant.variantId === activeVariantId
+    || variant.fileName === activeVariantId
+    || variant.variantId === resolvedFileName
+    || variant.fileName === resolvedFileName
+  ));
+
+  return new Set([
+    activeVariantId,
+    resolvedFileName,
+    normalizeChoiceScopeKey(activeVariant?.variantId),
+    normalizeChoiceScopeKey(activeVariant?.fileName),
+  ].filter((value): value is string => value !== undefined));
+}
+
+function isProjectorOutsideChoiceVariantScope(projector: ProjectorCandidate, activeVariantKeys: Set<string>): boolean {
+  const ownerVariantId = normalizeChoiceScopeKey(projector.ownerVariantId);
+  return ownerVariantId !== undefined && activeVariantKeys.size > 0 && !activeVariantKeys.has(ownerVariantId);
+}
+
+function mergeSelectedModelWithPersistedOutOfScopeProjectors(
+  selectedModel: ModelMetadata,
+  persistedModel: ModelMetadata | undefined,
+  sourceModel: ModelMetadata,
+): ModelMetadata {
+  if (!persistedModel?.projectorCandidates?.length) {
+    return selectedModel;
+  }
+
+  const selectedProjectorCandidates = selectedModel.projectorCandidates ?? [];
+  const selectedProjectorIds = new Set(selectedProjectorCandidates.map((projector) => projector.id));
+  const activeVariantKeys = getProjectorChoiceVariantScopeKeys(sourceModel);
+  const outOfScopePersistedProjectors = persistedModel.projectorCandidates.filter((projector) => (
+    !selectedProjectorIds.has(projector.id)
+    && isProjectorOutsideChoiceVariantScope(projector, activeVariantKeys)
+  ));
+
+  if (outOfScopePersistedProjectors.length === 0) {
+    return selectedModel;
+  }
+
+  return {
+    ...selectedModel,
+    projectorCandidates: [
+      ...selectedProjectorCandidates,
+      ...outOfScopePersistedProjectors,
+    ],
+  };
+}
+
 function isDownloadedOrActiveModel(model: Pick<ModelMetadata, 'lifecycleStatus'>): boolean {
   return model.lifecycleStatus === LifecycleStatus.DOWNLOADED
     || model.lifecycleStatus === LifecycleStatus.ACTIVE;
@@ -99,6 +159,84 @@ function shouldStartProjectorDownloadAfterDetailsSelection(model: ModelMetadata)
   return projectorState.status === 'available'
     || projectorState.status === 'failed'
     || projectorState.status === 'paused';
+}
+
+function normalizeReusedSelectedProjectorState(model: ModelMetadata): ModelMetadata {
+  if (!model.selectedProjectorId || !model.projectorCandidates?.length) {
+    return model;
+  }
+
+  let didUpdate = false;
+  const projectorCandidates = model.projectorCandidates.map((projector) => {
+    if (
+      projector.id !== model.selectedProjectorId
+      || (projector.lifecycleStatus !== 'downloaded' && projector.lifecycleStatus !== 'active')
+    ) {
+      return projector;
+    }
+
+    const nextProjector = {
+      ...projector,
+      resumeData: undefined,
+      downloadProgress: 1,
+    };
+    didUpdate = didUpdate
+      || projector.resumeData !== undefined
+      || projector.downloadProgress !== 1;
+
+    return nextProjector;
+  });
+
+  return didUpdate ? { ...model, projectorCandidates } : model;
+}
+
+function getSelectedProjector(model: ModelMetadata) {
+  if (!model.selectedProjectorId) {
+    return undefined;
+  }
+
+  return model.projectorCandidates?.find((projector) => projector.id === model.selectedProjectorId);
+}
+
+function isDownloadedProjector(projector: ReturnType<typeof getSelectedProjector>): boolean {
+  return projector?.lifecycleStatus === 'downloaded' || projector?.lifecycleStatus === 'active';
+}
+
+function getReadinessSignature(model: ModelMetadata): string | undefined {
+  const readiness = model.multimodalReadiness;
+  if (!readiness) {
+    return undefined;
+  }
+
+  return JSON.stringify({
+    failureReason: readiness.failureReason,
+    modelId: readiness.modelId,
+    projectorId: readiness.projectorId,
+    status: readiness.status,
+    support: readiness.support,
+    variantId: readiness.variantId,
+  });
+}
+
+function shouldRequestReadinessRefreshAfterProjectorSelection({
+  activeModelId,
+  nextModel,
+  sourceModel,
+}: {
+  activeModelId?: string;
+  nextModel: ModelMetadata;
+  sourceModel: ModelMetadata;
+}): boolean {
+  if (activeModelId !== sourceModel.id) {
+    return false;
+  }
+
+  if (!isDownloadedProjector(getSelectedProjector(nextModel))) {
+    return false;
+  }
+
+  return sourceModel.selectedProjectorId !== nextModel.selectedProjectorId
+    || getReadinessSignature(sourceModel) !== getReadinessSignature(nextModel);
 }
 
 export function useModelDetailsController(modelId: string, initialVariantId?: string) {
@@ -228,11 +366,11 @@ export function useModelDetailsController(modelId: string, initialVariantId?: st
     void runtimeRevision;
     void modelsRegistryRevision;
 
-    const runtimeModel = mergeModelWithRuntimeState(model, {
+    const runtimeModel = normalizeReusedSelectedProjectorState(mergeModelWithRuntimeState(model, {
       activeModelId: engineState.activeModelId,
       localModel: registry.getModel(model.id),
       queuedItem: queuedItem?.id === model.id ? queuedItem : undefined,
-    });
+    }));
 
     const selectedVariantId = selectedVariantIdRef.current;
     return shouldApplyVariantSelection(runtimeModel, selectedVariantId)
@@ -372,6 +510,7 @@ export function useModelDetailsController(modelId: string, initialVariantId?: st
           activeModelId: engineState.activeModelId,
           loadProgress: engineState.loadProgress,
           lastError: engineState.lastError,
+          diagnostics: engineState.diagnostics,
         },
         options: allowUnsafeMemoryLoad !== undefined || forceReload !== undefined
           ? {
@@ -383,6 +522,7 @@ export function useModelDetailsController(modelId: string, initialVariantId?: st
     });
   }, [
     engineState.activeModelId,
+    engineState.diagnostics,
     engineState.lastError,
     engineState.loadProgress,
     engineState.status,
@@ -441,16 +581,21 @@ export function useModelDetailsController(modelId: string, initialVariantId?: st
         ? selectedPersistedModel
         : persistedModelBeforeSelection;
     }
-    const nextModelWithRuntimeState = preserveFreshProjectorSelection(
+    const selectedModelForRuntimeState = mergeSelectedModelWithPersistedOutOfScopeProjectors(
+      selection.model,
+      persistedModelAfterSelection,
+      sourceModel,
+    );
+    const nextModelWithRuntimeState = normalizeReusedSelectedProjectorState(preserveFreshProjectorSelection(
       persistedModelAfterSelection
-        ? mergeModelWithRuntimeState(selection.model, {
+        ? mergeModelWithRuntimeState(selectedModelForRuntimeState, {
           activeModelId: engineState.activeModelId,
           localModel: persistedModelAfterSelection,
-          queuedItem: queuedItem?.id === selection.model.id ? queuedItem : undefined,
+          queuedItem: queuedItem?.id === selectedModelForRuntimeState.id ? queuedItem : undefined,
         })
         : selection.model,
       selection.model,
-    );
+    ));
     const selectedProjectorChangedForMemoryFit = shouldClearProjectorScopedMemoryFit(sourceModel, nextModelWithRuntimeState)
       || (persistedModelBeforeSelection
         ? shouldClearProjectorScopedMemoryFit(persistedModelBeforeSelection, nextModelWithRuntimeState)
@@ -466,6 +611,14 @@ export function useModelDetailsController(modelId: string, initialVariantId?: st
     pendingProjectorDownloadModelRef.current = null;
     setProjectorChoiceModel(null);
     setRuntimeRevision((current) => current + 1);
+
+    if (shouldRequestReadinessRefreshAfterProjectorSelection({
+      activeModelId: engineState.activeModelId,
+      nextModel,
+      sourceModel,
+    })) {
+      llmEngineService.requestActiveMultimodalReadinessRefresh(sourceModel.id);
+    }
 
     const shouldContinuePendingDownload = pendingDownloadModel?.id === sourceModel.id;
     const shouldStartDetailsProjectorDownload = !shouldContinuePendingDownload
@@ -591,6 +744,7 @@ export function useModelDetailsController(modelId: string, initialVariantId?: st
           status: engineState.status,
           activeModelId: engineState.activeModelId,
           loadProgress: engineState.loadProgress,
+          diagnostics: engineState.diagnostics,
         },
         options: options ? {
           allowUnsafeMemoryLoad: options.allowUnsafeMemoryLoad,
@@ -600,7 +754,7 @@ export function useModelDetailsController(modelId: string, initialVariantId?: st
 
       showModelActionError('ModelDetailsScreen.performLoad', error, reportContext);
     }
-  }, [displayModel, engineState.activeModelId, engineState.loadProgress, engineState.status, loadModel, showModelActionError, t]);
+  }, [displayModel, engineState.activeModelId, engineState.diagnostics, engineState.loadProgress, engineState.status, loadModel, showModelActionError, t]);
 
   const handleLoad = useCallback(async () => {
     if (!displayModel) {

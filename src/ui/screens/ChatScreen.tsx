@@ -47,7 +47,7 @@ import { useModelRegistryRevision } from '@/hooks/useModelRegistryRevision';
 import { useRouter } from 'expo-router';
 import { EngineStatus, LifecycleStatus, type ModelMetadata } from '../../types/models';
 import { ChatMessage, getThreadActiveModelId } from '../../types/chat';
-import type { MultimodalReadinessState, MultimodalReadinessStatus } from '../../types/multimodal';
+import type { AttachmentDraft, MultimodalReadinessState, MultimodalReadinessStatus } from '../../types/multimodal';
 import { getChatHardwareBannerInputs, hardwareListenerService } from '../../services/HardwareListenerService';
 import { registry } from '../../services/LocalStorageRegistry';
 import { useChatStore } from '../../store/chatStore';
@@ -85,8 +85,46 @@ const VISION_READINESS_TRANSLATION_KEYS: Record<MultimodalReadinessStatus, strin
     unsupported: 'chat.visionReadiness.unsupported',
 };
 
-function shouldDiscardConsumedDraftsAfterPreAppendFailure(error: unknown): boolean {
-    return toAppError(error).code === 'chat_attachment_missing';
+function getMissingAttachmentDraftIdsFromPreAppendFailure(error: unknown): Set<string> | null {
+    const appError = toAppError(error);
+    if (appError.code !== 'chat_attachment_missing') {
+        return null;
+    }
+
+    const details = appError.details;
+    const ids = new Set<string>();
+    const attachmentIds = details?.attachmentIds;
+    if (Array.isArray(attachmentIds)) {
+        attachmentIds.forEach((attachmentId) => {
+            if (typeof attachmentId === 'string' && attachmentId.length > 0) {
+                ids.add(attachmentId);
+            }
+        });
+    }
+
+    if (typeof details?.attachmentId === 'string' && details.attachmentId.length > 0) {
+        ids.add(details.attachmentId);
+    }
+
+    return ids;
+}
+
+function splitAttachmentDraftsById(
+    drafts: readonly AttachmentDraft[],
+    idsToMatch: ReadonlySet<string>,
+): { matchedDrafts: AttachmentDraft[]; remainingDrafts: AttachmentDraft[] } {
+    const matchedDrafts: AttachmentDraft[] = [];
+    const remainingDrafts: AttachmentDraft[] = [];
+
+    drafts.forEach((draft) => {
+        if (draft.id && idsToMatch.has(draft.id)) {
+            matchedDrafts.push(draft);
+        } else {
+            remainingDrafts.push(draft);
+        }
+    });
+
+    return { matchedDrafts, remainingDrafts };
 }
 const IMAGE_ATTACHMENTS_NO_MODEL_REASON_KEY = 'chat.visionReadiness.noModel';
 const IMAGE_ATTACHMENTS_EDITING_REASON_KEY = 'chat.visionReadiness.editingMessage';
@@ -477,6 +515,7 @@ export const ChatScreen = () => {
         enabled: imageAttachmentsEnabled,
         disabledReason: imageAttachmentsDisabledReason,
         ownerKey: imageAttachmentOwnerKey,
+        preserveFailedDraftsOnNewThreadCommit: true,
     });
     const retainedRegenerateAttachments = pendingRegenerateMessage?.attachments ?? [];
     const canSendRetainedRegenerateAttachments = retainedRegenerateAttachments.length > 0
@@ -645,6 +684,7 @@ export const ChatScreen = () => {
                                 activeModelId: engineState.activeModelId,
                                 loadProgress: engineState.loadProgress,
                                 lastError: engineState.lastError,
+                                diagnostics: engineState.diagnostics,
                             },
                         };
 
@@ -656,6 +696,7 @@ export const ChatScreen = () => {
     }, [
         configurableModelId,
         engineState.activeModelId,
+        engineState.diagnostics,
         engineState.lastError,
         engineState.loadProgress,
         engineState.status,
@@ -1240,9 +1281,30 @@ export const ChatScreen = () => {
             }
 
             const shouldSendAttachmentDrafts = imageAttachmentDrafts.drafts.length > 0 && imageAttachmentsEnabled;
+            const hasFailedAttachmentDrafts = shouldSendAttachmentDrafts
+                && imageAttachmentDrafts.drafts.some((draft) => draft.copyStatus === 'failed');
             const attachmentDrafts = shouldSendAttachmentDrafts
                 ? imageAttachmentDrafts.consumeDraftsForSend()
                 : [];
+            const hasSendableAttachmentDrafts = attachmentDrafts.length > 0;
+            const restoreAttachmentDraftsForRetry = (draftsToRestore: readonly AttachmentDraft[]) => {
+                if (draftsToRestore.length === 0) {
+                    return;
+                }
+
+                const retryThread = imageAttachmentOwnerKey.startsWith('new-thread|')
+                    ? useChatStore.getState().getActiveThread()
+                    : null;
+                const retryOwnerKey = retryThread
+                    ? [retryThread.id, getThreadActiveModelId(retryThread)].join('|')
+                    : null;
+
+                if (retryOwnerKey) {
+                    imageAttachmentDrafts.restoreDraftsForRetry(draftsToRestore, { preserveOwnerKey: retryOwnerKey });
+                } else {
+                    imageAttachmentDrafts.restoreDraftsForRetry(draftsToRestore);
+                }
+            };
 
             let userMessageAppended = false;
             setComposerDraft('');
@@ -1250,7 +1312,7 @@ export const ChatScreen = () => {
                 await appendUserMessage(
                     content,
                     {
-                        ...(shouldSendAttachmentDrafts
+                        ...(hasSendableAttachmentDrafts
                             ? {
                                 attachmentDrafts,
                                 multimodalReadiness,
@@ -1261,15 +1323,38 @@ export const ChatScreen = () => {
                         },
                     },
                 );
+                if (hasFailedAttachmentDrafts) {
+                    imageAttachmentDrafts.clearFailedDrafts();
+                }
             } catch (error) {
                 if (userMessageAppended) {
+                    if (hasFailedAttachmentDrafts) {
+                        imageAttachmentDrafts.clearFailedDrafts();
+                    }
                     throw markChatInputDraftConsumedError(error);
                 }
 
-                if (attachmentDrafts.length > 0 && shouldDiscardConsumedDraftsAfterPreAppendFailure(error)) {
-                    imageAttachmentDrafts.discardDrafts(attachmentDrafts, 'drafts after failed send');
+                const missingAttachmentDraftIds = getMissingAttachmentDraftIdsFromPreAppendFailure(error);
+                if (attachmentDrafts.length > 0 && missingAttachmentDraftIds) {
+                    if (missingAttachmentDraftIds.size > 0) {
+                        const { matchedDrafts, remainingDrafts } = splitAttachmentDraftsById(
+                            attachmentDrafts,
+                            missingAttachmentDraftIds,
+                        );
+                        if (matchedDrafts.length > 0) {
+                            imageAttachmentDrafts.discardDrafts(matchedDrafts, 'missing copied drafts after failed send');
+                        }
+                        if (remainingDrafts.length > 0) {
+                            restoreAttachmentDraftsForRetry(remainingDrafts);
+                        }
+                    } else {
+                        // Missing-attachment errors can omit ids for legacy or id-less drafts. Do not
+                        // restore consumed drafts that are known to point at unavailable copied files,
+                        // otherwise each retry can fail on the same stale attachment forever.
+                        imageAttachmentDrafts.discardDrafts(attachmentDrafts, 'missing copied drafts after failed send');
+                    }
                 } else if (attachmentDrafts.length > 0) {
-                    imageAttachmentDrafts.restoreDraftsForRetry(attachmentDrafts);
+                    restoreAttachmentDraftsForRetry(attachmentDrafts);
                 }
 
                 setComposerDraft(content);

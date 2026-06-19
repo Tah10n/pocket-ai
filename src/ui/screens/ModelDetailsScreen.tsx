@@ -34,7 +34,12 @@ import { useModelDetailsController } from '@/hooks/useModelDetailsController';
 import { EngineStatus, LifecycleStatus, ModelAccessState } from '@/types/models';
 import { getModelVisionCapabilityBadgePresentation } from '@/utils/modelCapabilities';
 import { getVariantMemoryBadgePresentation } from '@/utils/modelMemoryBadgePresentation';
-import { formatModelFileSize, getModelDisplayArtifactSizeBytes } from '@/utils/modelSize';
+import {
+  formatModelFileSize,
+  getModelDisplayArtifactSizeBytes,
+  getModelDisplayProjectorCandidates,
+  getModelDisplaySelectedProjectorId,
+} from '@/utils/modelSize';
 import { getModelDetailsTagTone } from '@/utils/modelDetailsPresentation';
 import { canSelectModelVariant, getActiveModelVariant } from '@/utils/modelVariants';
 import { selectModelProjectorLifecycleState } from '@/store/modelsStore';
@@ -108,6 +113,23 @@ export function ModelDetailsScreen() {
     className: 'max-w-full',
   })) ?? [];
   const activeVariant = displayModel ? getActiveModelVariant(displayModel) : undefined;
+  const detailsProjectorCandidates = displayModel
+    ? getModelDisplayProjectorCandidates(displayModel)
+    : undefined;
+  const detailsSelectedProjectorId = displayModel
+    ? getModelDisplaySelectedProjectorId(displayModel, detailsProjectorCandidates)
+    : undefined;
+  const detailsPresentationModel = displayModel
+    ? {
+        ...displayModel,
+        chatModalities: activeVariant?.chatModalities ?? displayModel.chatModalities,
+        artifactRole: activeVariant?.artifactRole ?? displayModel.artifactRole,
+        visionSource: activeVariant?.visionSource ?? displayModel.visionSource,
+        visionConfidence: activeVariant?.visionConfidence ?? displayModel.visionConfidence,
+        projectorCandidates: detailsProjectorCandidates,
+        selectedProjectorId: detailsSelectedProjectorId,
+      }
+    : null;
   const detailsMemoryBadge = displayModel
     ? getVariantMemoryBadgePresentation(displayModel, activeVariant, { useModelFallback: true })
     : null;
@@ -116,8 +138,8 @@ export function ModelDetailsScreen() {
     ? getModelDisplayArtifactSizeBytes(
       displayModel,
       activeVariant?.size ?? displayModel.size,
-      activeVariant?.projectorCandidates ?? displayModel.projectorCandidates,
-      activeVariant?.selectedProjectorId ?? displayModel.selectedProjectorId,
+      detailsProjectorCandidates,
+      detailsSelectedProjectorId,
     )
     : null;
   const shouldShowDetailsMemoryBadge = detailsMemoryBadge !== null && (
@@ -133,8 +155,8 @@ export function ModelDetailsScreen() {
     return `${detailsQuantizationLabel} - ${formatModelFileSize(detailsDisplaySize, t('models.sizeUnknown'))}`;
   }, [detailsDisplaySize, detailsQuantizationLabel, t]);
   const shouldShowStandaloneDetailsMemoryBadge = !variantSelectorValue && shouldShowDetailsMemoryBadge;
-  const detailsVisionBadge = displayModel ? getModelVisionCapabilityBadgePresentation(displayModel) : null;
-  const detailsProjectorLifecycle = displayModel ? selectModelProjectorLifecycleState(displayModel) : null;
+  const detailsVisionBadge = detailsPresentationModel ? getModelVisionCapabilityBadgePresentation(detailsPresentationModel) : null;
+  const detailsProjectorLifecycle = detailsPresentationModel ? selectModelProjectorLifecycleState(detailsPresentationModel) : null;
   const shouldShowProjectorStatus = detailsProjectorLifecycle !== null && detailsProjectorLifecycle.status !== 'text_only';
   const shouldShowDownloadProgress = Boolean(displayModel && (
     isModelDownloading(displayModel)
@@ -266,8 +288,8 @@ export function ModelDetailsScreen() {
                   )}
                   progress={shouldShowProjectorStatus || shouldShowDownloadProgress ? (
                     <Box className="gap-3">
-                      {shouldShowProjectorStatus ? (
-                        <ModelProjectorStatus model={displayModel} onChooseProjector={openProjectorChoice} />
+                      {shouldShowProjectorStatus && detailsPresentationModel ? (
+                        <ModelProjectorStatus model={detailsPresentationModel} onChooseProjector={openProjectorChoice} />
                       ) : null}
                       {shouldShowDownloadProgress ? <ModelDownloadProgress model={displayModel} /> : null}
                     </Box>

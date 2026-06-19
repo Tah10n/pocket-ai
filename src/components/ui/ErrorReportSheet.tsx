@@ -16,7 +16,9 @@ import { toAppError } from '@/services/AppError';
 import {
   sanitizeErrorForReport,
   sanitizeErrorReportContext,
+  sanitizeErrorReportObjectKey,
   sanitizeErrorReportString,
+  sanitizeModelErrorReportContext,
 } from '@/services/ErrorReportSanitizer';
 import type { ErrorReportContext } from '@/hooks/useErrorReportSheetController';
 import type { AndroidBlurTargetRef } from '@/utils/androidBlur';
@@ -30,6 +32,15 @@ type DeviceReportData = {
   cpuArch: string[];
   isEmulator: boolean | null;
 };
+
+type DeletableReportFile = File & {
+  delete?: () => void | Promise<void>;
+};
+
+const REPORT_PREVIEW_TEXT_LIMIT = 240;
+const REPORT_PREVIEW_KEY_LIMIT = 12;
+const REPORT_PREVIEW_ADDITIONAL_INFO_SANITIZE_LIMIT = 4096;
+const REPORT_SHARE_CACHE_CLEANUP_DELAY_MS = 5 * 60 * 1_000;
 
 export interface ErrorReportSheetProps {
   visible: boolean;
@@ -77,7 +88,64 @@ function isNonEmptySection(section: unknown): section is Record<string, unknown>
     return false;
   }
 
-  return Object.keys(section as Record<string, unknown>).length > 0;
+  for (const key in section as Record<string, unknown>) {
+    if (Object.prototype.hasOwnProperty.call(section, key)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function truncatePreviewText(value: string): string {
+  return value.length > REPORT_PREVIEW_TEXT_LIMIT
+    ? `${value.slice(0, REPORT_PREVIEW_TEXT_LIMIT)}…`
+    : value;
+}
+
+function buildSanitizedAdditionalInfoPreview(value: string): string | undefined {
+  // Keep preview work bounded on the render path. Copy/share still sanitizes the full text.
+  const previewSource = value
+    .slice(0, REPORT_PREVIEW_ADDITIONAL_INFO_SANITIZE_LIMIT)
+    .trim();
+  if (!previewSource) {
+    return undefined;
+  }
+
+  const sanitizedValue = sanitizeErrorReportString(previewSource);
+  if (!sanitizedValue) {
+    return undefined;
+  }
+
+  const preview = truncatePreviewText(sanitizedValue);
+  return value.length > REPORT_PREVIEW_ADDITIONAL_INFO_SANITIZE_LIMIT && !preview.endsWith('…')
+    ? `${preview}…`
+    : preview;
+}
+
+function previewSectionKeys(section: unknown): string[] | undefined {
+  if (!section || typeof section !== 'object') {
+    return undefined;
+  }
+
+  const keys: string[] = [];
+  let ownKeyCount = 0;
+  for (const key in section as Record<string, unknown>) {
+    if (!Object.prototype.hasOwnProperty.call(section, key)) {
+      continue;
+    }
+
+    ownKeyCount += 1;
+    if (keys.length < REPORT_PREVIEW_KEY_LIMIT) {
+      keys.push(sanitizeErrorReportObjectKey(key));
+      continue;
+    }
+
+    keys.push('…');
+    break;
+  }
+
+  return ownKeyCount > 0 ? keys : undefined;
 }
 
 function getPlatformVersion(): string {
@@ -101,7 +169,7 @@ export function ErrorReportSheet({
   const appError = useMemo(() => toAppError(error), [error]);
   const sanitizedAppError = useMemo(() => sanitizeErrorForReport(appError, { includeStack: false }), [appError]);
 
-  const modelContext = useMemo(() => sanitizeErrorReportContext(context?.model), [context?.model]);
+  const modelContext = useMemo(() => sanitizeModelErrorReportContext(context?.model), [context?.model]);
   const engineContext = useMemo(() => sanitizeErrorReportContext(context?.engine), [context?.engine]);
   const optionsContext = useMemo(() => sanitizeErrorReportContext(context?.options), [context?.options]);
   const extraContext = useMemo(() => sanitizeErrorReportContext(context?.extra), [context?.extra]);
@@ -115,7 +183,7 @@ export function ErrorReportSheet({
   const [includeModelInfo, setIncludeModelInfo] = useState(true);
   const [includeEngineInfo, setIncludeEngineInfo] = useState(true);
   const [includeOptionsInfo, setIncludeOptionsInfo] = useState(true);
-  const [includeDeviceInfo, setIncludeDeviceInfo] = useState(true);
+  const [includeDeviceInfo, setIncludeDeviceInfo] = useState(false);
   const [includeDiagnostics, setIncludeDiagnostics] = useState(true);
   const [includeStackTrace, setIncludeStackTrace] = useState(true);
   const [additionalInfo, setAdditionalInfo] = useState('');
@@ -166,7 +234,7 @@ export function ErrorReportSheet({
     setIncludeModelInfo(true);
     setIncludeEngineInfo(true);
     setIncludeOptionsInfo(true);
-    setIncludeDeviceInfo(true);
+    setIncludeDeviceInfo(false);
     setIncludeDiagnostics(true);
     setIncludeStackTrace(true);
     setAdditionalInfo('');
@@ -174,12 +242,11 @@ export function ErrorReportSheet({
     onClose();
   }, [onClose]);
 
-  const reportObject = useMemo(() => {
+  const reportBaseObject = useMemo(() => {
     if (!visible) {
       return null;
     }
 
-    const trimmedAdditionalInfo = additionalInfo.trim();
     const buildNumber = (() => {
       try {
         return DeviceInfo.getBuildNumber();
@@ -219,10 +286,6 @@ export function ErrorReportSheet({
       },
     };
 
-    if (trimmedAdditionalInfo) {
-      report.additionalInfo = trimmedAdditionalInfo;
-    }
-
     if (includeModelInfo && hasModelContext) {
       report.model = modelContext;
     }
@@ -249,7 +312,6 @@ export function ErrorReportSheet({
 
     return report;
   }, [
-    additionalInfo,
     appError.code,
     deviceData,
     error,
@@ -275,7 +337,89 @@ export function ErrorReportSheet({
     visible,
   ]);
 
-  const reportJson = useMemo(() => {
+  const buildReportObject = useCallback(() => {
+    if (!reportBaseObject) {
+      return null;
+    }
+
+    const report: Record<string, unknown> = { ...reportBaseObject };
+    const trimmedAdditionalInfo = additionalInfo.trim();
+    if (trimmedAdditionalInfo) {
+      report.additionalInfo = sanitizeErrorReportString(trimmedAdditionalInfo);
+    }
+
+    return report;
+  }, [additionalInfo, reportBaseObject]);
+
+  const reportPreviewJson = useMemo(() => {
+    if (!reportBaseObject) {
+      return '';
+    }
+
+    const sanitizedAdditionalInfoPreview = buildSanitizedAdditionalInfoPreview(additionalInfo);
+    const preview = {
+      schemaVersion: reportBaseObject.schemaVersion,
+      reportType: reportBaseObject.reportType,
+      scope: reportBaseObject.scope,
+      error: {
+        name: sanitizedAppError.name,
+        code: appError.code,
+        message: truncatePreviewText(sanitizedAppError.message),
+        stackIncluded: includeStackTrace && error instanceof Error && typeof error.stack === 'string',
+      },
+      includedSections: {
+        model: includeModelInfo && hasModelContext,
+        engine: includeEngineInfo && hasEngineContext,
+        options: includeOptionsInfo && hasOptionsContext,
+        extra: hasExtraContext,
+        diagnostics: includeDiagnostics && hasDiagnostics,
+        device: includeDeviceInfo && Boolean(deviceData),
+      },
+      sectionKeys: {
+        model: includeModelInfo ? previewSectionKeys(modelContext) : undefined,
+        engine: includeEngineInfo ? previewSectionKeys(engineContext) : undefined,
+        options: includeOptionsInfo ? previewSectionKeys(optionsContext) : undefined,
+        extra: previewSectionKeys(extraContext),
+        diagnostics: includeDiagnostics ? previewSectionKeys(sanitizedAppError.details) : undefined,
+      },
+      additionalInfoPreview: sanitizedAdditionalInfoPreview,
+    };
+
+    try {
+      return safeJsonStringify(preview, 2);
+    } catch {
+      return JSON.stringify({ error: t('models.errorReport.previewSerializeFailed') })
+        ?? '{"error":"models.errorReport.previewSerializeFailed"}';
+    }
+  }, [
+    additionalInfo,
+    appError.code,
+    deviceData,
+    engineContext,
+    error,
+    extraContext,
+    hasDiagnostics,
+    hasEngineContext,
+    hasExtraContext,
+    hasModelContext,
+    hasOptionsContext,
+    includeDeviceInfo,
+    includeDiagnostics,
+    includeEngineInfo,
+    includeModelInfo,
+    includeOptionsInfo,
+    includeStackTrace,
+    modelContext,
+    optionsContext,
+    reportBaseObject,
+    sanitizedAppError.details,
+    sanitizedAppError.message,
+    sanitizedAppError.name,
+    t,
+  ]);
+
+  const buildReportJson = useCallback(() => {
+    const reportObject = buildReportObject();
     if (!reportObject) {
       return '';
     }
@@ -285,35 +429,63 @@ export function ErrorReportSheet({
     } catch {
       return '{"error":"Failed to serialize report"}';
     }
-  }, [reportObject]);
+  }, [buildReportObject]);
 
   const writeReportToFile = useCallback(async (json: string) => {
     const fileName = `pocket-ai-model-load-report-${Date.now().toString(16)}.json`;
-    const file = new File(Paths.cache, fileName);
+    const file = new File(Paths.cache, fileName) as DeletableReportFile;
     file.create({ overwrite: true });
     file.write(json, { encoding: 'utf8' });
-    return { fileName, fileUri: file.uri };
+    return { file, fileName, fileUri: file.uri };
   }, []);
+
+  const deleteReportFile = useCallback(async (file: DeletableReportFile) => {
+    try {
+      if (typeof file.delete === 'function') {
+        await file.delete();
+      }
+    } catch {
+      // Best-effort cache cleanup must not block fallback sharing or mask share errors.
+    }
+  }, []);
+
+  const scheduleReportFileCleanup = useCallback((file: DeletableReportFile) => {
+    setTimeout(() => {
+      void deleteReportFile(file);
+    }, REPORT_SHARE_CACHE_CLEANUP_DELAY_MS);
+  }, [deleteReportFile]);
 
   const handleCopy = useCallback(async () => {
     try {
+      const reportJson = buildReportJson();
       await Clipboard.setStringAsync(reportJson);
       Alert.alert(t('models.errorReport.copiedTitle'), t('models.errorReport.copiedMessage'));
     } catch {
       Alert.alert(t('models.errorReport.failedTitle'), t('models.errorReport.copyFailedMessage'));
     }
-  }, [reportJson, t]);
+  }, [buildReportJson, t]);
 
   const handleShare = useCallback(async () => {
     try {
+      const reportJson = buildReportJson();
       let shared = false;
 
       try {
         const isAvailable = await Sharing.isAvailableAsync();
         if (isAvailable) {
-          const { fileUri } = await writeReportToFile(reportJson);
-          await Sharing.shareAsync(fileUri, { mimeType: 'application/json' });
-          shared = true;
+          const reportFile = await writeReportToFile(reportJson);
+          try {
+            await Sharing.shareAsync(reportFile.fileUri, { mimeType: 'application/json' });
+            shared = true;
+            // Keep the cache file after a successful native share. On Android, the chooser can
+            // resolve before the receiving app has opened the content URI; deleting here can turn
+            // an apparently successful share into a broken attachment for the recipient. Cache
+            // files are small JSON reports, so clean them up after a short grace period instead.
+            scheduleReportFileCleanup(reportFile.file);
+          } catch (nativeShareError) {
+            await deleteReportFile(reportFile.file);
+            throw nativeShareError;
+          }
         }
       } catch {
         // fall back to Share API
@@ -325,7 +497,7 @@ export function ErrorReportSheet({
     } catch {
       Alert.alert(t('models.errorReport.failedTitle'), t('models.errorReport.shareFailedMessage'));
     }
-  }, [reportJson, t, writeReportToFile]);
+  }, [buildReportJson, deleteReportFile, scheduleReportFileCleanup, t, writeReportToFile]);
 
   const renderIncludeToggle = useCallback((params: {
     label: string;
@@ -513,11 +685,14 @@ export function ErrorReportSheet({
                 <Text className="text-xs font-semibold uppercase tracking-wider text-primary-500">
                   {t('models.errorReport.previewTitle')}
                 </Text>
+                <Text className="mt-2 text-sm leading-6 text-typography-600 dark:text-typography-300">
+                  {t('models.errorReport.previewMessage')}
+                </Text>
                 <Text
                   selectable
                   className="mt-3 font-mono text-[11px] leading-5 text-typography-700 dark:text-typography-200"
                 >
-                  {reportJson}
+                  {reportPreviewJson}
                 </Text>
               </ScreenCard>
             </ScreenStack>

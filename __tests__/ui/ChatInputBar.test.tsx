@@ -890,7 +890,7 @@ describe('ChatInputBar', () => {
     });
   });
 
-  it('blocks send while a copied image draft failed and restores the message', async () => {
+  it('allows text send while failed-only image drafts remain visible', async () => {
     const onSendMessage = jest.fn();
     const failedDraft: AttachmentDraft = {
       pickerUri: 'ph://library-image-failed',
@@ -918,10 +918,74 @@ describe('ChatInputBar', () => {
     });
 
     await waitFor(() => {
-      expect(onSendMessage).not.toHaveBeenCalled();
+      expect(onSendMessage).toHaveBeenCalledWith('Describe this image');
     });
     expect(getByText('chat.attachments.copyFailed')).toBeTruthy();
-    expect(getByPlaceholderText('chat.inputPlaceholder').props.value).toBe('Describe this image');
+    expect(getByPlaceholderText('chat.inputPlaceholder').props.value).toBe('');
+  });
+
+  it('allows copied image sends when failed drafts are also present', async () => {
+    const onSendMessage = jest.fn();
+    const copiedDraft: AttachmentDraft = {
+      ...copiedDraftImageAttachment,
+    };
+    const failedDraft: AttachmentDraft = {
+      pickerUri: 'ph://library-image-failed',
+      previewUri: 'ph://library-image-failed',
+      mediaType: 'image/jpeg',
+      copyStatus: 'failed',
+      errorReason: 'copy_failed',
+    };
+
+    const { getByPlaceholderText } = render(
+      <ChatInputBar
+        onSendMessage={onSendMessage}
+        onAttachImages={jest.fn()}
+        attachmentDrafts={[copiedDraft, failedDraft]}
+        imageAttachmentsEnabled
+      />,
+    );
+
+    fireEvent(getByPlaceholderText('chat.inputPlaceholder'), 'submitEditing', {
+      nativeEvent: {
+        text: '',
+      },
+    });
+
+    await waitFor(() => {
+      expect(onSendMessage).toHaveBeenCalledWith('');
+    });
+  });
+
+  it('blocks text send while a nonfailed image draft is not sendable yet', async () => {
+    const onSendMessage = jest.fn();
+    const pendingDraft: AttachmentDraft = {
+      id: 'draft-pending',
+      pickerUri: 'ph://library-image-pending',
+      previewUri: 'ph://library-image-pending',
+      mediaType: 'image/jpeg',
+      copyStatus: 'pending',
+    };
+
+    const { getByPlaceholderText } = render(
+      <ChatInputBar
+        onSendMessage={onSendMessage}
+        onAttachImages={jest.fn()}
+        attachmentDrafts={[pendingDraft]}
+        imageAttachmentsEnabled
+      />,
+    );
+
+    const input = getByPlaceholderText('chat.inputPlaceholder');
+    fireEvent.changeText(input, 'Wait for this image');
+    fireEvent(input, 'submitEditing', {
+      nativeEvent: {
+        text: 'Wait for this image',
+      },
+    });
+
+    expect(onSendMessage).not.toHaveBeenCalled();
+    expect(getByPlaceholderText('chat.inputPlaceholder').props.value).toBe('Wait for this image');
   });
 
   it('derives glass primary action colors from the active primary token', () => {

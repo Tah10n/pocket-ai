@@ -5,6 +5,7 @@ import * as ImagePicker from 'expo-image-picker';
 import type { AttachmentDraft } from '@/types/multimodal';
 import {
   MAX_CHAT_IMAGE_ATTACHMENTS,
+  getSendableDraftImageAttachments,
   validateChatImageAttachmentLimit,
 } from '@/utils/chatImageAttachments';
 import {
@@ -18,6 +19,11 @@ export type UseChatImageAttachmentsOptions = {
   disabledReason?: string;
   initialDrafts?: AttachmentDraft[];
   ownerKey?: string | null;
+  preserveFailedDraftsOnNewThreadCommit?: boolean;
+};
+
+export type RestoreDraftsForRetryOptions = {
+  preserveOwnerKey?: string | null;
 };
 
 export type UseChatImageAttachmentsResult = {
@@ -25,16 +31,74 @@ export type UseChatImageAttachmentsResult = {
   isPicking: boolean;
   remainingSlots: number;
   attachImages: () => Promise<void>;
-  removeDraft: (draftOrId: AttachmentDraft | string) => void;
+  removeDraft: (draftOrId: AttachmentDraft | string, index?: number) => void;
   clearDrafts: () => void;
+  clearFailedDrafts: () => void;
   commitDrafts: () => void;
   consumeDraftsForSend: () => AttachmentDraft[];
-  restoreDraftsForRetry: (drafts: readonly AttachmentDraft[]) => void;
+  restoreDraftsForRetry: (drafts: readonly AttachmentDraft[], options?: RestoreDraftsForRetryOptions) => void;
   discardDrafts: (drafts: readonly AttachmentDraft[], context?: string) => void;
 };
 
 function getDraftKey(draft: AttachmentDraft): string {
   return draft.id ?? draft.localUri ?? draft.previewUri ?? draft.pickerUri;
+}
+
+function hasSameDraftReferences(left: readonly AttachmentDraft[], right: readonly AttachmentDraft[]): boolean {
+  return left.length === right.length && left.every((draft, index) => draft === right[index]);
+}
+
+function splitOwnerKey(ownerKey: string): { threadKey: string; modelKey: string } {
+  const separatorIndex = ownerKey.indexOf('|');
+  if (separatorIndex < 0) {
+    return { threadKey: ownerKey, modelKey: '' };
+  }
+
+  return {
+    threadKey: ownerKey.slice(0, separatorIndex),
+    modelKey: ownerKey.slice(separatorIndex + 1),
+  };
+}
+
+function shouldPreserveDraftsForNewThreadCommit({
+  drafts,
+  enabled,
+  expectedNextOwnerKey,
+  nextOwnerKey,
+  preservedDraftKeys,
+  preserveFailedDraftsOnNewThreadCommit,
+  previousOwnerKey,
+}: {
+  drafts: readonly AttachmentDraft[];
+  enabled: boolean;
+  expectedNextOwnerKey: string | null;
+  nextOwnerKey: string;
+  preservedDraftKeys: ReadonlySet<string>;
+  preserveFailedDraftsOnNewThreadCommit: boolean;
+  previousOwnerKey: string;
+}): boolean {
+  if (!preserveFailedDraftsOnNewThreadCommit || !enabled || drafts.length === 0) {
+    return false;
+  }
+
+  const previous = splitOwnerKey(previousOwnerKey);
+  const next = splitOwnerKey(nextOwnerKey);
+  const isNewThreadCommit = previous.threadKey === 'new-thread'
+    && next.threadKey !== 'new-thread'
+    && previous.modelKey === next.modelKey;
+
+  if (!isNewThreadCommit) {
+    return false;
+  }
+
+  if (expectedNextOwnerKey === null || nextOwnerKey !== expectedNextOwnerKey) {
+    return false;
+  }
+
+  return drafts.every((draft) => (
+    draft.copyStatus === 'failed'
+    || preservedDraftKeys.has(getDraftKey(draft))
+  ));
 }
 
 function getSanitizedErrorDetails(error: unknown): { errorName: string } | { errorType: string } {
@@ -89,6 +153,7 @@ export function useChatImageAttachments({
   disabledReason,
   initialDrafts = [],
   ownerKey = null,
+  preserveFailedDraftsOnNewThreadCommit = false,
 }: UseChatImageAttachmentsOptions): UseChatImageAttachmentsResult {
   const { t } = useTranslation();
   const normalizedOwnerKey = ownerKey ?? 'default';
@@ -108,6 +173,8 @@ export function useChatImageAttachments({
   const enabledRef = useRef(enabled);
   const ownerKeyRef = useRef(normalizedOwnerKey);
   const ownerGenerationRef = useRef(0);
+  const retryDraftKeysForNewThreadCommitRef = useRef<Set<string>>(new Set());
+  const retryDraftOwnerKeyForNewThreadCommitRef = useRef<string | null>(null);
 
   const drafts = enabled && draftState.ownerKey === normalizedOwnerKey
     ? draftState.drafts
@@ -135,13 +202,15 @@ export function useChatImageAttachments({
       return [];
     }
 
-    const releaseKeys = new Set(draftsToRelease.map(getDraftKey));
+    const remainingDraftsToRelease = [...draftsToRelease];
     const releasedDrafts: AttachmentDraft[] = [];
     ownedDraftsRef.current = ownedDraftsRef.current.filter((draft) => {
-      if (!releaseKeys.has(getDraftKey(draft))) {
+      const matchingReferenceIndex = remainingDraftsToRelease.findIndex((draftToRelease) => draftToRelease === draft);
+      if (matchingReferenceIndex < 0) {
         return true;
       }
 
+      remainingDraftsToRelease.splice(matchingReferenceIndex, 1);
       releasedDrafts.push(draft);
       return false;
     });
@@ -291,14 +360,39 @@ export function useChatImageAttachments({
     showAttachmentAlert,
   ]);
 
-  const removeDraft = useCallback((draftOrId: AttachmentDraft | string) => {
+  const removeDraft = useCallback((draftOrId: AttachmentDraft | string, index?: number) => {
     if (!mountedRef.current) {
       return;
     }
 
     const targetKey = typeof draftOrId === 'string' ? draftOrId : getDraftKey(draftOrId);
+    const targetIndex = (() => {
+      if (
+        typeof index === 'number'
+        && index >= 0
+        && index < draftsRef.current.length
+      ) {
+        const draftAtIndex = draftsRef.current[index];
+        if (
+          typeof draftOrId === 'string'
+            ? getDraftKey(draftAtIndex) === targetKey
+            : draftAtIndex === draftOrId || getDraftKey(draftAtIndex) === targetKey
+        ) {
+          return index;
+        }
+      }
 
-    const removedDraft = draftsRef.current.find((draft) => getDraftKey(draft) === targetKey);
+      if (typeof draftOrId !== 'string') {
+        const referenceIndex = draftsRef.current.findIndex((draft) => draft === draftOrId);
+        if (referenceIndex >= 0) {
+          return referenceIndex;
+        }
+      }
+
+      return draftsRef.current.findIndex((draft) => getDraftKey(draft) === targetKey);
+    })();
+
+    const removedDraft = targetIndex >= 0 ? draftsRef.current[targetIndex] : undefined;
     if (removedDraft) {
       releaseOwnedDrafts([removedDraft]).forEach((draftToDiscard) => {
         void chatAttachmentStorageService.discardDraft(draftToDiscard).catch((error) => {
@@ -310,7 +404,9 @@ export function useChatImageAttachments({
       });
     }
 
-    draftsRef.current = draftsRef.current.filter((draft) => getDraftKey(draft) !== targetKey);
+    draftsRef.current = targetIndex >= 0
+      ? draftsRef.current.filter((_, draftIndex) => draftIndex !== targetIndex)
+      : draftsRef.current;
     setDraftState({
       drafts: draftsRef.current,
       ownerKey: ownerKeyRef.current,
@@ -319,6 +415,8 @@ export function useChatImageAttachments({
 
   const clearDrafts = useCallback(() => {
     ownerGenerationRef.current += 1;
+    retryDraftKeysForNewThreadCommitRef.current.clear();
+    retryDraftOwnerKeyForNewThreadCommitRef.current = null;
     discardOwnedDraftsQuietly(ownedDraftsRef.current, 'drafts');
     draftsRef.current = [];
     if (mountedRef.current) {
@@ -329,8 +427,35 @@ export function useChatImageAttachments({
     }
   }, [discardOwnedDraftsQuietly]);
 
+  const clearFailedDrafts = useCallback(() => {
+    if (!mountedRef.current) {
+      return;
+    }
+
+    const failedDrafts = draftsRef.current.filter((draft) => draft.copyStatus === 'failed');
+    if (failedDrafts.length === 0) {
+      return;
+    }
+
+    ownerGenerationRef.current += 1;
+    discardOwnedDraftsQuietly(failedDrafts, 'failed drafts after successful send');
+    failedDrafts.forEach((draft) => {
+      retryDraftKeysForNewThreadCommitRef.current.delete(getDraftKey(draft));
+    });
+    if (retryDraftKeysForNewThreadCommitRef.current.size === 0) {
+      retryDraftOwnerKeyForNewThreadCommitRef.current = null;
+    }
+    draftsRef.current = draftsRef.current.filter((draft) => draft.copyStatus !== 'failed');
+    setDraftState({
+      drafts: draftsRef.current,
+      ownerKey: ownerKeyRef.current,
+    });
+  }, [discardOwnedDraftsQuietly]);
+
   const commitDrafts = useCallback(() => {
     ownerGenerationRef.current += 1;
+    retryDraftKeysForNewThreadCommitRef.current.clear();
+    retryDraftOwnerKeyForNewThreadCommitRef.current = null;
     releaseOwnedDrafts(draftsRef.current);
     draftsRef.current = [];
     if (mountedRef.current) {
@@ -342,17 +467,32 @@ export function useChatImageAttachments({
   }, [releaseOwnedDrafts]);
 
   const consumeDraftsForSend = useCallback((): AttachmentDraft[] => {
-    const draftsToConsume = [...draftsRef.current];
+    const draftsToConsume = getSendableDraftImageAttachments(draftsRef.current);
     if (draftsToConsume.length === 0) {
       return [];
     }
 
     ownerGenerationRef.current += 1;
+    draftsToConsume.forEach((draft) => {
+      retryDraftKeysForNewThreadCommitRef.current.delete(getDraftKey(draft));
+    });
+    if (retryDraftKeysForNewThreadCommitRef.current.size === 0) {
+      retryDraftOwnerKeyForNewThreadCommitRef.current = null;
+    }
     releaseOwnedDrafts(draftsToConsume);
-    draftsRef.current = [];
+    const draftsToConsumeQueue = [...draftsToConsume];
+    draftsRef.current = draftsRef.current.filter((draft) => {
+      const matchingReferenceIndex = draftsToConsumeQueue.findIndex((draftToConsume) => draftToConsume === draft);
+      if (matchingReferenceIndex >= 0) {
+        draftsToConsumeQueue.splice(matchingReferenceIndex, 1);
+        return false;
+      }
+
+      return true;
+    });
     if (mountedRef.current) {
       setDraftState({
-        drafts: [],
+        drafts: draftsRef.current,
         ownerKey: ownerKeyRef.current,
       });
     }
@@ -360,7 +500,10 @@ export function useChatImageAttachments({
     return draftsToConsume;
   }, [releaseOwnedDrafts]);
 
-  const restoreDraftsForRetry = useCallback((draftsToRestore: readonly AttachmentDraft[]) => {
+  const restoreDraftsForRetry = useCallback((
+    draftsToRestore: readonly AttachmentDraft[],
+    options: RestoreDraftsForRetryOptions = {},
+  ) => {
     if (draftsToRestore.length === 0 || !mountedRef.current) {
       return;
     }
@@ -383,12 +526,25 @@ export function useChatImageAttachments({
       ownedDraftsRef.current = [...ownedDraftsRef.current, ...restoredOwnedDrafts];
     }
 
+    const owner = splitOwnerKey(ownerKeyRef.current);
+    if (
+      preserveFailedDraftsOnNewThreadCommit
+      && owner.threadKey === 'new-thread'
+      && restoredDrafts.length > 0
+      && options.preserveOwnerKey
+    ) {
+      retryDraftOwnerKeyForNewThreadCommitRef.current = options.preserveOwnerKey;
+      nextDrafts.forEach((draft) => {
+        retryDraftKeysForNewThreadCommitRef.current.add(getDraftKey(draft));
+      });
+    }
+
     draftsRef.current = nextDrafts;
     setDraftState({
       drafts: nextDrafts,
       ownerKey: ownerKeyRef.current,
     });
-  }, []);
+  }, [preserveFailedDraftsOnNewThreadCommit]);
 
   const discardDrafts = useCallback((draftsToDiscard: readonly AttachmentDraft[], context = 'drafts after failed send') => {
     discardDraftsQuietly(draftsToDiscard, context);
@@ -407,19 +563,51 @@ export function useChatImageAttachments({
       return;
     }
 
+    if (shouldPreserveDraftsForNewThreadCommit({
+      drafts: draftState.drafts,
+      enabled,
+      expectedNextOwnerKey: retryDraftOwnerKeyForNewThreadCommitRef.current,
+      nextOwnerKey: normalizedOwnerKey,
+      preservedDraftKeys: retryDraftKeysForNewThreadCommitRef.current,
+      preserveFailedDraftsOnNewThreadCommit,
+      previousOwnerKey: draftState.ownerKey,
+    })) {
+      retryDraftKeysForNewThreadCommitRef.current.clear();
+      retryDraftOwnerKeyForNewThreadCommitRef.current = null;
+      draftsRef.current = draftState.drafts;
+      ownedDraftsRef.current = draftState.drafts;
+      setDraftState((current) => (
+        current === draftState || (
+          current.ownerKey === draftState.ownerKey
+          && hasSameDraftReferences(current.drafts, draftState.drafts)
+        )
+          ? {
+            drafts: draftState.drafts,
+            ownerKey: normalizedOwnerKey,
+          }
+          : current
+      ));
+      return;
+    }
+
     discardDraftsQuietly(
       releaseOwnedDrafts(draftState.drafts),
       enabled ? 'drafts from previous owner' : 'drafts while disabled',
     );
+    retryDraftKeysForNewThreadCommitRef.current.clear();
+    retryDraftOwnerKeyForNewThreadCommitRef.current = null;
     setDraftState((current) => (
-      current === draftState
+      current === draftState || (
+        current.ownerKey === draftState.ownerKey
+        && hasSameDraftReferences(current.drafts, draftState.drafts)
+      )
         ? {
           drafts: [],
           ownerKey: normalizedOwnerKey,
         }
         : current
     ));
-  }, [draftState, enabled, normalizedOwnerKey, releaseOwnedDrafts]);
+  }, [draftState, enabled, normalizedOwnerKey, preserveFailedDraftsOnNewThreadCommit, releaseOwnedDrafts]);
 
   useEffect(() => () => {
     mountedRef.current = false;
@@ -428,6 +616,8 @@ export function useChatImageAttachments({
     discardDraftsQuietly(ownedDraftsRef.current, 'drafts during cleanup');
     ownedDraftsRef.current = [];
     draftsRef.current = [];
+    retryDraftKeysForNewThreadCommitRef.current.clear();
+    retryDraftOwnerKeyForNewThreadCommitRef.current = null;
   }, []);
 
   return useMemo(() => ({
@@ -437,9 +627,10 @@ export function useChatImageAttachments({
     attachImages,
     removeDraft,
     clearDrafts,
+    clearFailedDrafts,
     commitDrafts,
     consumeDraftsForSend,
     restoreDraftsForRetry,
     discardDrafts,
-  }), [attachImages, clearDrafts, commitDrafts, consumeDraftsForSend, discardDrafts, drafts, isPicking, remainingSlots, removeDraft, restoreDraftsForRetry]);
+  }), [attachImages, clearDrafts, clearFailedDrafts, commitDrafts, consumeDraftsForSend, discardDrafts, drafts, isPicking, remainingSlots, removeDraft, restoreDraftsForRetry]);
 }

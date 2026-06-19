@@ -7,6 +7,7 @@ import { CATALOG_SEARCH_VARIANT_LIMIT } from '../../src/services/ModelCatalogFil
 import { LifecycleStatus } from '../../src/types/models';
 import {
   ambiguousProjectorCatalogSiblings,
+  projectorOnlyCatalogSiblings,
   projectorFileName,
   visionCatalogSiblings,
   visionModelFileName,
@@ -214,6 +215,23 @@ describe('ModelCatalogTransformer', () => {
         siblings: [
           { rfilename: 'model.MTP.Q4_K_M.gguf', size: REMOTE_SIZE },
         ],
+      },
+    ], null, null);
+
+    expect(models).toEqual([]);
+  });
+
+  it('drops projector-only sibling payloads instead of creating a fallback model.gguf tree-probe model', () => {
+    const models = transformHFResponse([
+      {
+        id: 'test-org/projector-only-repo',
+        author: 'test-org',
+        gated: 'manual',
+        tags: ['gguf', 'vision'],
+        siblings: [...projectorOnlyCatalogSiblings],
+        gguf: {
+          total: 1_000_000_000,
+        },
       },
     ], null, null);
 

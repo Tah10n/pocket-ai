@@ -3309,7 +3309,7 @@ describe('LLMEngineService', () => {
     );
   });
 
-  it('caps multimodal image tokens below the default llama.rn micro-batch size', async () => {
+  it('keeps multimodal projector image token limits native-controlled while setting safe batch params', async () => {
     (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
 
     await llmEngineService.load('test/model', { forceReload: true });
@@ -3325,9 +3325,10 @@ describe('LLMEngineService', () => {
     expect(getInitMultimodalMock()).toHaveBeenCalledWith(
       expect.objectContaining({
         path: 'test-dir/models/mmproj-model.gguf',
-        image_max_tokens: 384,
       }),
     );
+    expect(getInitMultimodalMock().mock.calls[0][0]).not.toHaveProperty('image_min_tokens');
+    expect(getInitMultimodalMock().mock.calls[0][0]).not.toHaveProperty('image_max_tokens');
   });
 
   it('raises unsafe custom micro-batch settings to match the multimodal decode batch size', async () => {
@@ -3353,9 +3354,10 @@ describe('LLMEngineService', () => {
     expect(getInitMultimodalMock()).toHaveBeenCalledWith(
       expect.objectContaining({
         path: 'test-dir/models/mmproj-model.gguf',
-        image_max_tokens: 96,
       }),
     );
+    expect(getInitMultimodalMock().mock.calls[0][0]).not.toHaveProperty('image_min_tokens');
+    expect(getInitMultimodalMock().mock.calls[0][0]).not.toHaveProperty('image_max_tokens');
   });
 
   it('keeps low-memory multimodal batch profiles safe for non-causal image decode', () => {

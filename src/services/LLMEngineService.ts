@@ -151,8 +151,6 @@ type ChatCompletionReasoningFormat = NonNullable<NonNullable<LlmChatCompletionOp
 const DEFAULT_CONTEXT_SIZE = 4096;
 const DEFAULT_LLAMA_NATIVE_MICRO_BATCH_TOKENS = 512;
 const DEFAULT_LLAMA_NATIVE_MULTIMODAL_BATCH_TOKENS = 512;
-const MULTIMODAL_IMAGE_MAX_TOKENS_CEILING = 384;
-const MULTIMODAL_IMAGE_MAX_TOKENS_N_UBATCH_HEADROOM_RATIO = 0.75;
 const MAX_NATIVE_LOG_LINES = 120;
 const MAX_ADDITIONAL_STOP_WORDS_CACHE_ENTRIES = 8;
 const CONTEXT_OPERATION_UNLOAD_DRAIN_TIMEOUT_MS = 5000;
@@ -2149,21 +2147,6 @@ class LLMEngineService {
     return `Native multimodal image decoding requires n_ubatch (${nUbatch}) to be at least n_batch (${nBatch}).`;
   }
 
-  private resolveMultimodalImageMaxTokens(): number {
-    const effectiveNUbatch = typeof this.initNUbatch === 'number'
-      && Number.isFinite(this.initNUbatch)
-      && this.initNUbatch > 0
-      ? Math.round(this.initNUbatch)
-      : DEFAULT_LLAMA_NATIVE_MICRO_BATCH_TOKENS;
-
-    // llama.cpp aborts non-causal image decode when the image chunk is larger than n_ubatch.
-    // Keep headroom for model-specific image position tokens.
-    const nUbatchBoundedLimit = Math.floor(
-      effectiveNUbatch * MULTIMODAL_IMAGE_MAX_TOKENS_N_UBATCH_HEADROOM_RATIO,
-    );
-    return Math.max(1, Math.min(MULTIMODAL_IMAGE_MAX_TOKENS_CEILING, nUbatchBoundedLimit));
-  }
-
   private persistHardBlockedMemoryFit(
     modelId: string,
     confidence: ModelMemoryFitConfidence = 'high',
@@ -3881,7 +3864,6 @@ class LLMEngineService {
         context,
         path: resolvedProjector.projectorPath,
         useGpu,
-        imageMaxTokens: this.resolveMultimodalImageMaxTokens(),
       });
 
       if (!didInitialize) {

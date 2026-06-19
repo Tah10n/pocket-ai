@@ -368,12 +368,23 @@ export async function initMultimodalOnContext({
     throw new LlamaRuntimeFeatureUnavailableError('initMultimodal');
   }
 
-  return maybeContext.initMultimodal({
+  const initOptions: {
+    path: string;
+    use_gpu?: boolean;
+    image_min_tokens?: number;
+    image_max_tokens?: number;
+  } = {
     path,
     use_gpu: useGpu,
-    image_min_tokens: imageMinTokens,
-    image_max_tokens: imageMaxTokens,
-  });
+  };
+  if (typeof imageMinTokens === 'number' && Number.isFinite(imageMinTokens)) {
+    initOptions.image_min_tokens = imageMinTokens;
+  }
+  if (typeof imageMaxTokens === 'number' && Number.isFinite(imageMaxTokens)) {
+    initOptions.image_max_tokens = imageMaxTokens;
+  }
+
+  return maybeContext.initMultimodal(initOptions);
 }
 
 export async function getMultimodalSupportFromContext(

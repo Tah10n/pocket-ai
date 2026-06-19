@@ -225,6 +225,22 @@ describe('LlamaRuntimeAdapter', () => {
     expect(releaseMultimodal).toHaveBeenCalledTimes(1);
   });
 
+  it('omits native multimodal image token overrides when they are not provided', async () => {
+    const initMultimodal = jest.fn().mockResolvedValue(true);
+    const context = createContext({ initMultimodal });
+
+    await expect(initMultimodalOnContext({
+      context,
+      path: 'file:///document/mmproj.gguf',
+      useGpu: true,
+    })).resolves.toBe(true);
+
+    expect(initMultimodal).toHaveBeenCalledWith({
+      path: 'file:///document/mmproj.gguf',
+      use_gpu: true,
+    });
+  });
+
   it('rejects unsupported chat roles before calling the native formatter', () => {
     expect(() => normalizeLlamaMessages([
       { role: 'tool' as never, content: 'Nope' },

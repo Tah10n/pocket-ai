@@ -3309,6 +3309,47 @@ describe('LLMEngineService', () => {
     );
   });
 
+  it('caps multimodal image tokens below the default llama.rn micro-batch size', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    expect(getInitMultimodalMock()).toHaveBeenCalledWith(
+      expect.objectContaining({
+        path: 'test-dir/models/mmproj-model.gguf',
+        image_max_tokens: 384,
+      }),
+    );
+  });
+
+  it('caps multimodal image tokens below a custom micro-batch size', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+    (getModelLoadParametersForModel as jest.Mock).mockReturnValueOnce({
+      contextSize: 2048,
+      gpuLayers: null,
+      kvCacheType: 'auto',
+      nBatch: 128,
+      nUbatch: 128,
+    });
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    expect(llamaRn.initLlama).toHaveBeenCalledWith(
+      expect.objectContaining({
+        n_batch: 128,
+        n_ubatch: 128,
+        ctx_shift: false,
+      }),
+      expect.any(Function),
+    );
+    expect(getInitMultimodalMock()).toHaveBeenCalledWith(
+      expect.objectContaining({
+        path: 'test-dir/models/mmproj-model.gguf',
+        image_max_tokens: 96,
+      }),
+    );
+  });
+
   it('disables llama.rn context shifting for resolvable vision projectors with unknown size', async () => {
     (registry.getModel as jest.Mock).mockReturnValue({
       ...createDownloadedVisionModel(),

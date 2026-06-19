@@ -3314,6 +3314,14 @@ describe('LLMEngineService', () => {
 
     await llmEngineService.load('test/model', { forceReload: true });
 
+    expect(llamaRn.initLlama).toHaveBeenCalledWith(
+      expect.objectContaining({
+        n_batch: 2048,
+        n_ubatch: 2048,
+        ctx_shift: false,
+      }),
+      expect.any(Function),
+    );
     expect(getInitMultimodalMock()).toHaveBeenCalledWith(
       expect.objectContaining({
         path: 'test-dir/models/mmproj-model.gguf',
@@ -3322,7 +3330,7 @@ describe('LLMEngineService', () => {
     );
   });
 
-  it('caps multimodal image tokens below a custom micro-batch size', async () => {
+  it('raises unsafe custom micro-batch settings for multimodal image decoding', async () => {
     (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
     (getModelLoadParametersForModel as jest.Mock).mockReturnValueOnce({
       contextSize: 2048,
@@ -3336,8 +3344,8 @@ describe('LLMEngineService', () => {
 
     expect(llamaRn.initLlama).toHaveBeenCalledWith(
       expect.objectContaining({
-        n_batch: 128,
-        n_ubatch: 128,
+        n_batch: 2048,
+        n_ubatch: 2048,
         ctx_shift: false,
       }),
       expect.any(Function),
@@ -3345,9 +3353,29 @@ describe('LLMEngineService', () => {
     expect(getInitMultimodalMock()).toHaveBeenCalledWith(
       expect.objectContaining({
         path: 'test-dir/models/mmproj-model.gguf',
-        image_max_tokens: 96,
+        image_max_tokens: 384,
       }),
     );
+  });
+
+  it('does not initialize multimodal readiness when the context cannot hold a safe image decode batch', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+    (getModelLoadParametersForModel as jest.Mock).mockReturnValueOnce({
+      contextSize: 1024,
+      gpuLayers: null,
+      kvCacheType: 'auto',
+    });
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    expect(getInitMultimodalMock()).not.toHaveBeenCalled();
+    const unsupportedReadinessUpdate = (registry.updateModel as jest.Mock).mock.calls
+      .map(([model]) => model)
+      .find((model: { multimodalReadiness?: { status?: string } }) => model.multimodalReadiness?.status === 'unsupported');
+    expect(unsupportedReadinessUpdate?.multimodalReadiness).toEqual(expect.objectContaining({
+      status: 'unsupported',
+      projectorId: downloadedProjector.id,
+    }));
   });
 
   it('disables llama.rn context shifting for resolvable vision projectors with unknown size', async () => {

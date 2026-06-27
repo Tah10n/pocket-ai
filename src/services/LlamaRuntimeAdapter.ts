@@ -5,6 +5,7 @@ import type {
   NativeBackendDeviceInfo,
   NativeCompletionResult,
   NativeTokenizeResult,
+  RNLlamaMessagePart,
   RNLlamaOAICompatibleMessage,
   TokenData,
 } from 'llama.rn';
@@ -14,6 +15,14 @@ import { requireLlamaModule, type LlamaModule } from './llamaRnModule';
 export type LlamaChatFormatOptions = NonNullable<Parameters<LlamaContext['getFormattedChat']>[2]>;
 export type LlamaContextInitParams = ContextParams;
 export type NativeLogListenerHandle = { remove: () => void };
+export type LlamaMultimodalSupport = { vision: boolean; audio: boolean };
+export type LlamaMultimodalInitOptions = {
+  context: LlamaContext;
+  path: string;
+  useGpu?: boolean;
+  imageMinTokens?: number;
+  imageMaxTokens?: number;
+};
 
 export type LlamaFormattedChatResult = {
   type: string | null;
@@ -99,6 +108,20 @@ function readStringArray(value: unknown): string[] | undefined {
   return strings.length > 0 ? strings : undefined;
 }
 
+function shouldNormalizeCompletionMessages(messages: unknown): messages is LlmChatMessage[] {
+  return Array.isArray(messages) && messages.every((message) => {
+    if (
+      !isRecord(message)
+      || typeof message.role !== 'string'
+      || typeof message.content !== 'string'
+    ) {
+      return false;
+    }
+
+    return message.contentParts === undefined || Array.isArray(message.contentParts);
+  });
+}
+
 function readGrammarTriggers(value: unknown): { type: number; value: string; token: number }[] | undefined {
   if (!Array.isArray(value)) {
     return undefined;
@@ -134,6 +157,80 @@ function assertRecord(value: unknown, label: string): Record<string, unknown> {
   return value;
 }
 
+function normalizeLlmContentParts(value: unknown, messageIndex: number): RNLlamaMessagePart[] {
+  if (value === undefined) {
+    return [];
+  }
+
+  if (!Array.isArray(value)) {
+    throw new Error(`[LLMEngine] Invalid chat message at index ${messageIndex}: contentParts must be an array`);
+  }
+
+  return value.map((entry, partIndex) => {
+    if (!isRecord(entry)) {
+      throw new Error(`[LLMEngine] Invalid chat message at index ${messageIndex}: contentParts[${partIndex}] must be an object`);
+    }
+
+    const type = readTrimmedString(entry.type);
+    if (type === 'text') {
+      const text = readString(entry.text);
+      if (text === undefined) {
+        throw new Error(`[LLMEngine] Invalid chat message at index ${messageIndex}: contentParts[${partIndex}].text must be a string`);
+      }
+
+      return { type, text };
+    }
+
+    if (type === 'image_url') {
+      const imageUrl = assertRecord(entry.image_url, `chat message ${messageIndex} contentParts[${partIndex}].image_url`);
+      const url = readTrimmedString(imageUrl.url);
+      if (!url) {
+        throw new Error(`[LLMEngine] Invalid chat message at index ${messageIndex}: contentParts[${partIndex}].image_url.url must be a non-empty string`);
+      }
+
+      return { type, image_url: { url } };
+    }
+
+    if (type === 'input_audio') {
+      const inputAudio = assertRecord(entry.input_audio, `chat message ${messageIndex} contentParts[${partIndex}].input_audio`);
+      const format = readTrimmedString(inputAudio.format);
+      if (format !== 'wav' && format !== 'mp3') {
+        throw new Error(`[LLMEngine] Invalid chat message at index ${messageIndex}: contentParts[${partIndex}].input_audio.format must be wav or mp3`);
+      }
+
+      const url = readTrimmedString(inputAudio.url);
+      const data = readTrimmedString(inputAudio.data);
+      if ((url ? 1 : 0) + (data ? 1 : 0) !== 1) {
+        throw new Error(`[LLMEngine] Invalid chat message at index ${messageIndex}: contentParts[${partIndex}].input_audio must include exactly one of url or data`);
+      }
+
+      return {
+        type,
+        input_audio: {
+          format,
+          ...(url ? { url } : null),
+          ...(data ? { data } : null),
+        },
+      };
+    }
+
+    throw new Error(`[LLMEngine] Invalid chat message at index ${messageIndex}: unsupported contentParts[${partIndex}] type`);
+  });
+}
+
+function hasNonTextContentParts(parts: readonly RNLlamaMessagePart[]): boolean {
+  return parts.some((part) => part.type !== 'text');
+}
+
+function hasEquivalentTextContentPart(parts: readonly RNLlamaMessagePart[], content: string): boolean {
+  const trimmedContent = content.trim();
+  return parts.some((part) => (
+    part.type === 'text'
+    && typeof part.text === 'string'
+    && part.text.trim() === trimmedContent
+  ));
+}
+
 export function normalizeLlamaMessages(messages: LlmChatMessage[]): RNLlamaOAICompatibleMessage[] {
   if (!Array.isArray(messages)) {
     throw new Error('[LLMEngine] Invalid chat messages: expected array');
@@ -152,6 +249,30 @@ export function normalizeLlamaMessages(messages: LlmChatMessage[]): RNLlamaOAICo
 
     if (role !== 'system' && role !== 'user' && role !== 'assistant') {
       throw new Error(`[LLMEngine] Invalid chat message at index ${index}: unsupported role`);
+    }
+
+    const contentParts = normalizeLlmContentParts((message as { contentParts?: unknown }).contentParts, index);
+    if (role !== 'user' && hasNonTextContentParts(contentParts)) {
+      throw new Error(`[LLMEngine] Invalid chat message at index ${index}: media contentParts are only supported for user messages`);
+    }
+
+    const mediaPaths = role === 'user'
+      ? readStringArray((message as { mediaPaths?: unknown }).mediaPaths)
+      : undefined;
+
+    if (contentParts.length > 0 || (mediaPaths && mediaPaths.length > 0)) {
+      const shouldUseContentFallback = content.trim().length > 0
+        && !hasEquivalentTextContentPart(contentParts, content);
+      const nativeContentParts: RNLlamaMessagePart[] = [
+        ...(shouldUseContentFallback ? [{ type: 'text', text: content }] : []),
+        ...contentParts,
+        ...(mediaPaths ?? []).map((url) => ({
+          type: 'image_url',
+          image_url: { url },
+        })),
+      ];
+
+      return { role, content: nativeContentParts };
     }
 
     return { role, content };
@@ -300,10 +421,82 @@ export async function runCompletionOnContext({
   params: CompletionParams;
   onToken?: (data: TokenData) => void;
 }): Promise<NativeCompletionResult> {
-  const result = await context.completion(params, onToken
+  const rawMessages = (params as { messages?: unknown }).messages;
+  const normalizedParams = shouldNormalizeCompletionMessages(rawMessages)
+    ? {
+        ...params,
+        messages: normalizeLlamaMessages(rawMessages),
+      }
+    : params;
+  const result = await context.completion(normalizedParams, onToken
     ? (data) => onToken(normalizeTokenData(data))
     : undefined);
   return normalizeCompletionResult(result);
+}
+
+function readMultimodalSupport(value: unknown): LlamaMultimodalSupport {
+  const record = assertRecord(value, 'multimodal support');
+  return {
+    vision: readBoolean(record.vision) ?? false,
+    audio: readBoolean(record.audio) ?? false,
+  };
+}
+
+export async function initMultimodalOnContext({
+  context,
+  path,
+  useGpu,
+  imageMinTokens,
+  imageMaxTokens,
+}: LlamaMultimodalInitOptions): Promise<boolean> {
+  const maybeContext = context as LlamaContext & {
+    initMultimodal?: unknown;
+  };
+  if (typeof maybeContext.initMultimodal !== 'function') {
+    throw new LlamaRuntimeFeatureUnavailableError('initMultimodal');
+  }
+
+  const initOptions: {
+    path: string;
+    use_gpu?: boolean;
+    image_min_tokens?: number;
+    image_max_tokens?: number;
+  } = {
+    path,
+    use_gpu: useGpu,
+  };
+  if (typeof imageMinTokens === 'number' && Number.isFinite(imageMinTokens)) {
+    initOptions.image_min_tokens = imageMinTokens;
+  }
+  if (typeof imageMaxTokens === 'number' && Number.isFinite(imageMaxTokens)) {
+    initOptions.image_max_tokens = imageMaxTokens;
+  }
+
+  return maybeContext.initMultimodal(initOptions);
+}
+
+export async function getMultimodalSupportFromContext(
+  context: LlamaContext,
+): Promise<LlamaMultimodalSupport> {
+  const maybeContext = context as LlamaContext & {
+    getMultimodalSupport?: unknown;
+  };
+  if (typeof maybeContext.getMultimodalSupport !== 'function') {
+    throw new LlamaRuntimeFeatureUnavailableError('getMultimodalSupport');
+  }
+
+  return readMultimodalSupport(await maybeContext.getMultimodalSupport());
+}
+
+export async function releaseMultimodalFromContext(context: LlamaContext): Promise<void> {
+  const maybeContext = context as LlamaContext & {
+    releaseMultimodal?: unknown;
+  };
+  if (typeof maybeContext.releaseMultimodal !== 'function') {
+    throw new LlamaRuntimeFeatureUnavailableError('releaseMultimodal');
+  }
+
+  await maybeContext.releaseMultimodal();
 }
 
 export async function tokenizeFormattedPrompt({

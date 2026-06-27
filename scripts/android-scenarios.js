@@ -20,9 +20,25 @@ const CORE_SCENARIOS = [
 const CATALOG_SCENARIOS = [
   "variant-picker-smoke",
 ];
+const ATTACHMENT_SCENARIOS = [
+  "chat-attachment-current-state-smoke",
+];
+const PRECONDITIONED_ATTACHMENT_SCENARIOS = [
+  "chat-attachment-text-only-fallback",
+];
+const PREPARED_ATTACHMENT_SCENARIOS = [
+  "chat-attachment-preview-remove",
+];
+const PREPARED_ATTACHMENT_SEND_SCENARIOS = [
+  "chat-attachment-prepared-send",
+];
 const SCENARIO_PACK_SCENARIOS = {
   core: CORE_SCENARIOS,
   catalog: CATALOG_SCENARIOS,
+  attachments: ATTACHMENT_SCENARIOS,
+  "attachments-preconditioned": PRECONDITIONED_ATTACHMENT_SCENARIOS,
+  "attachments-prepared": PREPARED_ATTACHMENT_SCENARIOS,
+  "attachments-prepared-send": PREPARED_ATTACHMENT_SEND_SCENARIOS,
   "dependency-ui": [
     ...CORE_SCENARIOS,
     "style-screenshots",
@@ -78,6 +94,176 @@ const CHAT_ROUTE_LABELS = [
   "Спросите локальный ИИ...",
   "Chat message input",
   "Поле ввода сообщения",
+];
+const CHAT_INPUT_LABELS = [
+  "Chat message input",
+  "Поле ввода сообщения",
+];
+const ATTACH_IMAGE_LABELS = [
+  "Attach an image from the photo library",
+  "Прикрепить изображение из медиатеки",
+];
+const ATTACH_MENU_LABELS = [
+  "Attach file",
+  "Прикрепить файл",
+];
+const ATTACH_MENU_BUTTON_RESOURCE_ID = "chat-attach-menu-button";
+const ATTACH_IMAGE_BUTTON_RESOURCE_ID = "chat-attach-image-button";
+const ATTACH_IMAGE_ACTION_SETTLE_TIMEOUT_MS = 8_000;
+const ATTACHMENT_ACTION_BUSY_LABEL_FRAGMENTS = [
+  "busy",
+  "занят",
+  "занято",
+];
+const ATTACHMENT_PREVIEW_LABELS = [
+  "Attached image 1 of 1 preview",
+  "Предпросмотр прикрепленного изображения 1 из 1",
+];
+const MESSAGE_ATTACHMENT_PREVIEW_LABELS = [
+  "Message image 1 of 1 preview",
+  "Предпросмотр изображения 1 из 1 в сообщении",
+];
+const CHAT_SEND_LABELS = ["Send message", "Отправить сообщение"];
+const PREPARED_ATTACHMENT_SEND_PROMPT_PREFIX = "Describe prepared image";
+const TEXT_ONLY_FALLBACK_SEND_PROMPT_PREFIX = "Text fallback smoke";
+const REMOVE_ATTACHMENT_LABELS = [
+  "Remove attached image 1 of 1",
+  "Удалить прикрепленное изображение 1 из 1",
+];
+const IMAGE_ATTACHMENT_TEXT_ONLY_FALLBACK_LABELS = [
+  "This model supports text chat only.",
+  "Download the vision projector before attaching images.",
+  "Choose the matching vision projector before attaching images.",
+  "The vision projector is still downloading.",
+  "Vision support is initializing.",
+  "Vision support could not start. Text chat is still available.",
+  "Choose and load a vision-capable model before attaching images.",
+  "Image attachments are disabled while editing an earlier message.",
+  "Vision chat is not supported by this runtime.",
+  "Эта модель поддерживает только текстовый чат.",
+  "Скачайте vision-проектор, прежде чем прикреплять изображения.",
+  "Выберите подходящий vision-проектор, прежде чем прикреплять изображения.",
+  "Vision-проектор еще скачивается.",
+  "Поддержка изображений инициализируется.",
+  "Не удалось запустить поддержку изображений. Текстовый чат по-прежнему доступен.",
+  "Выберите и загрузите модель с поддержкой изображений, прежде чем прикреплять изображения.",
+  "Вложения с изображениями отключены при редактировании предыдущего сообщения.",
+  "Чат с изображениями не поддерживается этим runtime.",
+];
+const LOADED_TEXT_ATTACHMENT_FALLBACK_LABELS = [
+  "This model supports text chat only.",
+  "Download the vision projector before attaching images.",
+  "Choose the matching vision projector before attaching images.",
+  "Vision support could not start. Text chat is still available.",
+  "Vision chat is not supported by this runtime.",
+  "Эта модель поддерживает только текстовый чат.",
+  "Скачайте vision-проектор, прежде чем прикреплять изображения.",
+  "Выберите подходящий vision-проектор, прежде чем прикреплять изображения.",
+  "Не удалось запустить поддержку изображений. Текстовый чат по-прежнему доступен.",
+  "Чат с изображениями не поддерживается этим runtime.",
+];
+const PREPARED_ASSISTANT_RESPONSE_ERROR_LABELS = [
+  "Action failed",
+  "Something went wrong",
+  "Unknown chat generation error",
+  "Engine not ready",
+  "Model is not loaded",
+  "Engine context changed during operation",
+  "Completion was interrupted before generation started",
+  "Private storage is unavailable.",
+  "Load a local model before continuing.",
+  "Finish or stop the current operation before starting another one.",
+  "The current model is unloading. Wait a moment and try again.",
+  "The selected model is no longer available on this device.",
+  "The model could not be loaded. Try again or choose a different profile.",
+  "This GGUF file cannot be loaded as a text model",
+  "Not enough memory to load this model.",
+  "This model may not fit in memory with the current settings.",
+  "There is not enough free storage to finish this download.",
+  "This model does not expose a reliable file size yet.",
+  "This model metadata could not be resolved yet.",
+  "The download failed because the remote server returned an error.",
+  "The downloaded file could not be verified.",
+  "The downloaded file could not be found on disk.",
+  "Type a message before sending.",
+  "This message is too long for the current context window.",
+  "The image could not be copied into app storage.",
+  "You can attach up to 4 images.",
+  "One attached image is no longer available on device.",
+  "Finish preparing or remove failed image attachments before sending.",
+  "Не удалось выполнить действие",
+  "Неизвестная ошибка генерации чата",
+  "Модель не готова",
+  "Модель не загружена",
+  "Приватное хранилище недоступно.",
+  "Загрузите локальную модель, прежде чем продолжить.",
+  "Завершите или остановите текущую операцию, прежде чем запускать новую.",
+  "Текущая модель выгружается. Подождите немного и повторите попытку.",
+  "Выбранная модель больше недоступна на этом устройстве.",
+  "Не удалось загрузить модель. Повторите попытку или выберите другой профиль.",
+  "Этот GGUF-файл нельзя загрузить как текстовую модель",
+  "Недостаточно памяти для загрузки этой модели.",
+  "Эта модель может не поместиться в память с текущими настройками.",
+  "Недостаточно свободного места, чтобы завершить загрузку.",
+  "Для этой модели пока не удалось получить надежный размер файла.",
+  "Не удалось получить метаданные модели.",
+  "Загрузка не удалась из-за ошибки удаленного сервера.",
+  "Не удалось проверить скачанный файл.",
+  "Скачанный файл не найден на диске.",
+  "Введите сообщение перед отправкой.",
+  "Сообщение слишком длинное для текущего окна контекста.",
+  "Не удалось скопировать изображение в хранилище приложения.",
+  "Можно прикрепить не больше 4 изображений.",
+  "Одно из прикрепленных изображений больше недоступно на устройстве.",
+  "Дождитесь подготовки изображений или удалите неудачные вложения перед отправкой.",
+];
+const PREPARED_ASSISTANT_RESPONSE_NON_ANSWER_LABEL_FRAGMENTS = [
+  ...CHAT_INPUT_LABELS,
+  ...CHAT_SEND_LABELS,
+  ...ATTACH_IMAGE_LABELS,
+  ...ATTACHMENT_PREVIEW_LABELS,
+  ...MESSAGE_ATTACHMENT_PREVIEW_LABELS,
+  ...REMOVE_ATTACHMENT_LABELS,
+  ...IMAGE_ATTACHMENT_TEXT_ONLY_FALLBACK_LABELS,
+  ...LOADED_TEXT_ATTACHMENT_FALLBACK_LABELS,
+  ...PREPARED_ASSISTANT_RESPONSE_ERROR_LABELS,
+  "Ask local AI",
+  "Спросите локальный ИИ",
+  "Copy message",
+  "Regenerate response",
+  "Delete message",
+  "Stop generating",
+  "Thinking",
+  "Thinking...",
+  "Generating response",
+  "Response failed",
+  "Something went wrong",
+  "Vision chat is not ready",
+  "Vision support could not start",
+  "Копировать сообщение",
+  "Повторить ответ",
+  "Удалить сообщение",
+  "Остановить генерацию",
+  "Думаю",
+  "Генерация ответа",
+  "Не удалось получить ответ",
+  "Что-то пошло не так",
+  "Чат с изображениями не готов",
+].map(normalizeUiLabel).filter(Boolean);
+const ASSISTANT_MESSAGE_CONTENT_RESOURCE_ID_FRAGMENT = "assistant-message-content-";
+const NO_MODEL_STATE_LABELS = [
+  "NO MODEL LOADED",
+  "МОДЕЛЬ НЕ ЗАГРУЖЕНА",
+  "Load a model to continue chatting",
+  "Загрузите модель, чтобы продолжить чат",
+  "Choose a local model",
+  "Выберите локальную модель",
+  "Load Model",
+  "Загрузить модель",
+  "Download Model",
+  "Скачать модель",
+  "Browse Models",
+  "Открыть каталог",
 ];
 const MODELS_TAB_LABELS = ["Models", "Модели"];
 const MODEL_CATALOG_LABELS = ["Model Catalog", "Каталог моделей"];
@@ -183,9 +369,16 @@ const DOWNLOAD_WARNING_CANCEL_LABELS = [
 const INITIAL_APP_VISIBLE_TIMEOUT_MS = 60_000;
 const HOME_ROUTE_TIMEOUT_MS = 90_000;
 const SETTINGS_ROUTE_TIMEOUT_MS = 60_000;
+const CLEAR_TEXT_INPUT_PRIMARY_TIMEOUT_MS = 2_000;
+const CLEAR_TEXT_INPUT_FALLBACK_TIMEOUT_MS = 2_000;
+const CLEAR_TEXT_INPUT_FALLBACK_TOTAL_TIMEOUT_MS = 5_000;
+const DEFAULT_CLEAR_TEXT_INPUT_MAX_DELETE_COUNT = 128;
+const ADB_INPUT_TEXT_TIMEOUT_MS = 5_000;
+const UI_HIERARCHY_DUMP_COMMAND_TIMEOUT_MS = 5_000;
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const SCREENSHOT_CAPTURE_MAX_ATTEMPTS = 4;
 const SCREENSHOT_CAPTURE_RETRY_DELAY_MS = 350;
+const REPORT_ARTIFACT_PATH_FIELDS = ["screenshotPath", "uiDumpPath", "logcatPath"];
 
 if (require.main === module) {
   main().catch((error) => {
@@ -215,13 +408,13 @@ async function main() {
   fs.mkdirSync(artifactsRoot, { recursive: true });
 
   const adbPath = resolveAdbPath();
-  const serialBeforeLaunch = cliOptions.emulator
-    ? null
-    : resolveTargetSerial(adbPath, cliOptions);
+  const launchPlan = buildScenarioLaunchPlan(cliOptions, () => resolveTargetSerial(adbPath, cliOptions));
 
-  launchApp(serialBeforeLaunch);
+  if (launchPlan.shouldLaunch) {
+    launchApp(launchPlan.serialBeforeLaunch);
+  }
 
-  const serial = serialBeforeLaunch || resolveTargetSerial(adbPath, cliOptions);
+  const serial = launchPlan.serialBeforeLaunch || resolveTargetSerial(adbPath, cliOptions);
   const context = createScenarioContext(adbPath, serial);
   const results = [];
 
@@ -237,14 +430,13 @@ async function main() {
         const outcome = await scenario.run(context);
 
         if (outcome && outcome.status === "skipped") {
-          results.push({
-            id: scenario.id,
-            tier: scenario.tier,
-            status: "skipped",
-            durationMs: Date.now() - startedAt,
+          recordScenarioSkip({
+            scenario,
+            results,
+            startedAt,
             reason: outcome.reason,
+            context,
           });
-          log(`SKIP ${scenario.id}: ${outcome.reason}`);
           continue;
         }
 
@@ -258,15 +450,18 @@ async function main() {
         });
         log(`PASS ${scenario.id}`);
       } catch (error) {
+        if (error instanceof ScenarioSkipFailureError) {
+          throw error;
+        }
+
         if (error instanceof ScenarioSkipError) {
-          results.push({
-            id: scenario.id,
-            tier: scenario.tier,
-            status: "skipped",
-            durationMs: Date.now() - startedAt,
+          recordScenarioSkip({
+            scenario,
+            results,
+            startedAt,
             reason: error.message,
+            context,
           });
-          log(`SKIP ${scenario.id}: ${error.message}`);
           continue;
         }
 
@@ -287,6 +482,10 @@ async function main() {
     writeReport(results);
     log(`Completed ${results.length} basic scenario(s).`);
   } catch (error) {
+    if (!shouldAppendRunnerFailure(error)) {
+      throw error;
+    }
+
     try {
       const screenshotPath = context.captureScreenshot("run-failed.png");
       const uiDumpPath = path.join(artifactsRoot, "run-failed.xml");
@@ -563,6 +762,71 @@ function tapBounds(adbPath, serial, bounds) {
   ]);
 }
 
+function escapeAdbInputText(value) {
+  const normalized = String(value).trim();
+  if (!/^[A-Za-z0-9 ]+$/.test(normalized)) {
+    throw new Error(`ADB text input supports only ASCII letters, numbers, and spaces: ${normalized}`);
+  }
+
+  return normalized
+    .replace(/%/g, "%25")
+    .replace(/\s+/g, "%s");
+}
+
+function buildPreparedAttachmentSendPrompt() {
+  return `${PREPARED_ATTACHMENT_SEND_PROMPT_PREFIX} ${Date.now()} ${Math.floor(Math.random() * 1_000_000)}`;
+}
+
+function buildTextOnlyFallbackSendPrompt() {
+  return `${TEXT_ONLY_FALLBACK_SEND_PROMPT_PREFIX} ${Date.now()} ${Math.floor(Math.random() * 1_000_000)}`;
+}
+
+function clearFocusedTextInput(
+  adbPath,
+  serial,
+  maxDeleteCount = DEFAULT_CLEAR_TEXT_INPUT_MAX_DELETE_COUNT,
+  runCommand = runChecked
+) {
+  const primaryCommandOptions = { timeout: CLEAR_TEXT_INPUT_PRIMARY_TIMEOUT_MS };
+  try {
+    runCommand(adbPath, ["-s", serial, "shell", "input", "keycombination", "KEYCODE_CTRL_LEFT", "KEYCODE_A"], primaryCommandOptions);
+    runCommand(adbPath, ["-s", serial, "shell", "input", "keyevent", "KEYCODE_DEL"], primaryCommandOptions);
+    return;
+  } catch (error) {
+    log(`Focused text select-all clear failed; falling back to repeated delete: ${error.message}`);
+  }
+
+  const boundedMaxDeleteCount = Number.isFinite(maxDeleteCount)
+    ? Math.max(0, Math.trunc(maxDeleteCount))
+    : DEFAULT_CLEAR_TEXT_INPUT_MAX_DELETE_COUNT;
+  const fallbackStartedAt = Date.now();
+  const buildFallbackCommandOptions = () => {
+    const remainingTimeoutMs = CLEAR_TEXT_INPUT_FALLBACK_TOTAL_TIMEOUT_MS - (Date.now() - fallbackStartedAt);
+    if (remainingTimeoutMs <= 0) {
+      return null;
+    }
+
+    return {
+      timeout: Math.min(CLEAR_TEXT_INPUT_FALLBACK_TIMEOUT_MS, remainingTimeoutMs),
+    };
+  };
+
+  const moveEndCommandOptions = buildFallbackCommandOptions();
+  if (!moveEndCommandOptions) {
+    return;
+  }
+
+  runCommand(adbPath, ["-s", serial, "shell", "input", "keyevent", "KEYCODE_MOVE_END"], moveEndCommandOptions);
+  for (let index = 0; index < boundedMaxDeleteCount; index += 1) {
+    const fallbackCommandOptions = buildFallbackCommandOptions();
+    if (!fallbackCommandOptions) {
+      break;
+    }
+
+    runCommand(adbPath, ["-s", serial, "shell", "input", "keyevent", "KEYCODE_DEL"], fallbackCommandOptions);
+  }
+}
+
 function findCatalogRiskModelCard(adbPath, serial, snapshot = null) {
   const resolvedSnapshot = snapshot || createUiSnapshot(adbPath, serial);
   const riskBadges = findNodesForLabelsInSnapshot(resolvedSnapshot, RAM_FIT_RISK_BADGE_LABELS, {
@@ -588,6 +852,248 @@ function findCatalogRiskModelCard(adbPath, serial, snapshot = null) {
 }
 
 class ScenarioSkipError extends Error {}
+
+class ScenarioSkipFailureError extends Error {}
+
+function shouldAppendRunnerFailure(error) {
+  return !(error instanceof ScenarioSkipFailureError);
+}
+
+function recordScenarioSkip({
+  scenario,
+  results,
+  startedAt,
+  reason,
+  context,
+}) {
+  const durationMs = Date.now() - startedAt;
+
+  if (cliOptions.failOnSkip) {
+    const screenshotPath = context.captureScreenshot(`${scenario.id}-skipped.png`);
+    const message = `Scenario ${scenario.id} skipped while --fail-on-skip is enabled: ${reason}`;
+    results.push({
+      id: scenario.id,
+      tier: scenario.tier,
+      status: "failed",
+      durationMs,
+      screenshotPath,
+      error: message,
+      skipReason: reason,
+    });
+    writeReport(results);
+    log(`FAIL ${scenario.id}: ${message}`);
+    throw new ScenarioSkipFailureError(message);
+  }
+
+  results.push({
+    id: scenario.id,
+    tier: scenario.tier,
+    status: "skipped",
+    durationMs,
+    reason,
+  });
+  log(`SKIP ${scenario.id}: ${reason}`);
+}
+
+function assertAttachmentPreviewRemovePreconditions({
+  fallbackNode = null,
+  previewNode = null,
+  removeNode = null,
+} = {}) {
+  if (fallbackNode) {
+    throw new ScenarioSkipError(
+      "Prepared image attachment preview/remove precondition failed: the composer is still showing text-only fallback copy. Open a running vision-ready chat composer, attach a gallery image, then rerun this scenario with --preserve-running-app."
+    );
+  }
+
+  if (!previewNode || !removeNode) {
+    const missingParts = [
+      !previewNode ? "attached image preview" : null,
+      !removeNode ? "remove attached image action" : null,
+    ].filter(Boolean).join(" and ");
+
+    throw new ScenarioSkipError(
+      `Prepared image attachment preview/remove precondition failed: missing ${missingParts}. Open a running vision-ready chat composer, attach a gallery image, then rerun this scenario with --preserve-running-app.`
+    );
+  }
+
+}
+
+function assertAttachmentTextOnlyFallbackState({
+  fallbackNode = null,
+  attachNode = null,
+} = {}) {
+  if (!fallbackNode) {
+    throw new ScenarioSkipError(
+      "Loaded text-only attachment fallback was not visible; prepare a loaded text-only model or a loaded vision model with missing/failed/ambiguous projector state."
+    );
+  }
+
+  assertAttachmentActionBlocked(attachNode);
+}
+
+function isResourceId(node, resourceId) {
+  return node.resourceId === resourceId || node.resourceId.endsWith(`:id/${resourceId}`);
+}
+
+function findAttachImageActionInSnapshot(snapshot, options = {}) {
+  const viewportBounds = options.visibleOnly ? snapshot.viewportBounds : null;
+  const matches = snapshot.nodes.filter((node) => {
+    if (!isResourceId(node, ATTACH_IMAGE_BUTTON_RESOURCE_ID)) {
+      return false;
+    }
+
+    if (!options.visibleOnly) {
+      return true;
+    }
+
+    return Boolean(node.bounds)
+      && (!viewportBounds || isBoundsInViewport(node.bounds, viewportBounds));
+  });
+
+  if (matches.length === 0) {
+    return findAnyNodeInSnapshot(snapshot, ATTACH_IMAGE_LABELS, options);
+  }
+
+  return {
+    label: ATTACH_IMAGE_LABELS[0],
+    node: pickBestNode(matches),
+  };
+}
+
+function findAttachMenuActionInSnapshot(snapshot, options = {}) {
+  const viewportBounds = options.visibleOnly ? snapshot.viewportBounds : null;
+  const matches = snapshot.nodes.filter((node) => {
+    if (!isResourceId(node, ATTACH_MENU_BUTTON_RESOURCE_ID)) {
+      return false;
+    }
+
+    if (!options.visibleOnly) {
+      return true;
+    }
+
+    return Boolean(node.bounds)
+      && (!viewportBounds || isBoundsInViewport(node.bounds, viewportBounds));
+  });
+
+  if (matches.length === 0) {
+    return findAnyNodeInSnapshot(snapshot, ATTACH_MENU_LABELS, options);
+  }
+
+  return {
+    label: ATTACH_MENU_LABELS[0],
+    node: pickBestNode(matches),
+  };
+}
+
+function isAttachmentActionBusy(attachNode) {
+  const node = attachNode && attachNode.node ? attachNode.node : attachNode;
+  if (!node) {
+    return false;
+  }
+
+  const contentDesc = normalizeUiLabel(node.contentDesc);
+  return ATTACHMENT_ACTION_BUSY_LABEL_FRAGMENTS.some((fragment) => (
+    contentDesc.includes(normalizeUiLabel(fragment))
+  ));
+}
+
+function dismissAttachmentMenu(adbPath, serial) {
+  runChecked(adbPath, [
+    "-s",
+    serial,
+    "shell",
+    "input",
+    "keyevent",
+    "KEYCODE_BACK",
+  ]);
+}
+
+async function waitForSettledAttachImageAction(adbPath, serial, options = {}) {
+  const timeoutMs = options.timeoutMs ?? ATTACH_IMAGE_ACTION_SETTLE_TIMEOUT_MS;
+  const startedAt = Date.now();
+  let lastMatch = null;
+  let openedAttachmentMenu = false;
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const snapshot = createUiSnapshot(adbPath, serial);
+    const match = findAttachImageActionInSnapshot(snapshot, { visibleOnly: true });
+    if (match && !isAttachmentActionBusy(match.node)) {
+      if (openedAttachmentMenu) {
+        dismissAttachmentMenu(adbPath, serial);
+        await delay(options.afterMenuDismissDelayMs ?? 300);
+      }
+      return match;
+    }
+
+    if (!match) {
+      const menuMatch = openedAttachmentMenu
+        ? null
+        : findAttachMenuActionInSnapshot(snapshot, { visibleOnly: true });
+
+      if (menuMatch?.node?.bounds) {
+        tapBounds(adbPath, serial, menuMatch.node.bounds);
+        openedAttachmentMenu = true;
+        await delay(options.afterMenuOpenDelayMs ?? 600);
+        continue;
+      }
+
+      if (openedAttachmentMenu) {
+        dismissAttachmentMenu(adbPath, serial);
+        await delay(options.afterMenuDismissDelayMs ?? 300);
+      }
+
+      return null;
+    }
+
+    lastMatch = match;
+    await delay(600);
+  }
+
+  if (openedAttachmentMenu) {
+    dismissAttachmentMenu(adbPath, serial);
+    await delay(options.afterMenuDismissDelayMs ?? 300);
+  }
+
+  return lastMatch;
+}
+
+function assertAttachmentActionBlocked(attachNode, options = {}) {
+  const node = attachNode && attachNode.node ? attachNode.node : attachNode;
+  const stateDescription = options.stateDescription || "text-only fallback state";
+
+  if (!node) {
+    throw new Error(`Image attachment action was not visible in the ${stateDescription}.`);
+  }
+
+  if (isAttachmentActionBusy(node)) {
+    throw new Error(`Image attachment action is still busy in the ${stateDescription}.`);
+  }
+
+  if (node.clickable && node.enabled !== false) {
+    throw new Error("Image attachment action is still enabled while the text-only fallback is visible.");
+  }
+}
+
+function assertAttachmentActionAvailable(attachNode) {
+  const node = attachNode && attachNode.node ? attachNode.node : attachNode;
+
+  if (!node) {
+    throw new Error("Image attachment action was not visible in the vision-ready composer state.");
+  }
+
+  if (isAttachmentActionBusy(node)) {
+    throw new Error("Image attachment action is still busy in the vision-ready composer state.");
+  }
+
+  if (node.enabled === false) {
+    throw new Error("Image attachment action is disabled while no text-only fallback is visible.");
+  }
+
+  if (!node.clickable) {
+    throw new Error("Image attachment action is not actionable while no text-only fallback is visible.");
+  }
+}
 
 function buildScenarios() {
   return [
@@ -661,6 +1167,198 @@ function buildScenarios() {
         await ctx.expectAnyText(CHAT_EMPTY_LABELS);
         await ctx.tapBottomTab(HOME_TAB_LABELS);
         await ctx.expectAnyText(NEW_CHAT_LABELS);
+      },
+    },
+    {
+      id: "chat-attachment-current-state-smoke",
+      tier: "secondary",
+      description: "Verify image attachment composer affordance matches the current model state without requiring prepared storage.",
+      run: async (ctx) => {
+        await goToHome(ctx);
+        await ctx.tapAnyText(NEW_CHAT_LABELS);
+        await ctx.expectAnyText(CHAT_EMPTY_LABELS);
+
+        const adbPath = resolveAdbPath();
+        const noModelNode = await findAnyNodeNow(
+          adbPath,
+          ctx.serial,
+          NO_MODEL_STATE_LABELS,
+          { visibleOnly: true }
+        );
+        const fallbackNode = await findAnyNodeNow(
+          adbPath,
+          ctx.serial,
+          IMAGE_ATTACHMENT_TEXT_ONLY_FALLBACK_LABELS,
+          { visibleOnly: true, matchMode: "fragment" }
+        );
+        const attachNode = await waitForSettledAttachImageAction(adbPath, ctx.serial);
+
+        if (noModelNode) {
+          assertAttachmentActionBlocked(attachNode, { stateDescription: "no-model chat state" });
+          log(
+            "INFO chat-attachment-current-state-smoke: no loaded model detected; "
+            + "validated no-model image attachment affordance. Prepare a loaded text-only model "
+            + "or a loaded vision model with missing/failed/ambiguous projector state and run "
+            + "android:scenarios:attachments-preconditioned for required fallback-send coverage."
+          );
+        } else if (fallbackNode) {
+          assertAttachmentTextOnlyFallbackState({ fallbackNode, attachNode });
+          await sendTextOnlyFallbackSmokeMessage(ctx, adbPath, buildTextOnlyFallbackSendPrompt());
+          log(
+            "INFO chat-attachment-current-state-smoke: image attachment fallback detected; "
+            + "validated blocked image affordance and text-only fallback send."
+          );
+        } else {
+          assertAttachmentActionAvailable(attachNode);
+        }
+
+        await ctx.tapBottomTab(HOME_TAB_LABELS);
+        await ctx.expectAnyText(HOME_SECTION_LABELS);
+      },
+    },
+    {
+      id: "chat-attachment-text-only-fallback",
+      tier: "secondary",
+      description: "Preconditioned check: verify a loaded text-capable non-vision chat blocks images while preserving assistant text responses.",
+      run: async (ctx) => {
+        await ensureLoadedModelTextFallbackPrecondition(ctx);
+        await ctx.tapAnyText(NEW_CHAT_LABELS);
+        await ctx.expectAnyText(CHAT_EMPTY_LABELS);
+
+        const adbPath = resolveAdbPath();
+        const fallbackNode = await findAnyNodeNow(
+          adbPath,
+          ctx.serial,
+          LOADED_TEXT_ATTACHMENT_FALLBACK_LABELS,
+          { visibleOnly: true, matchMode: "fragment" }
+        );
+
+        const attachNode = await waitForSettledAttachImageAction(adbPath, ctx.serial);
+
+        assertAttachmentTextOnlyFallbackState({ fallbackNode, attachNode });
+        await sendTextOnlyFallbackSmokeMessage(ctx, adbPath, buildTextOnlyFallbackSendPrompt());
+
+        await ctx.tapBottomTab(HOME_TAB_LABELS);
+        await ctx.expectAnyText(HOME_SECTION_LABELS);
+      },
+    },
+    {
+      id: "chat-attachment-preview-remove",
+      tier: "optional",
+      description: "Verify a prepared running vision-ready image attachment draft can be previewed and removed without restarting the app.",
+      run: async (ctx) => {
+        const adbPath = resolveAdbPath();
+        const fallbackNode = await findAnyNodeNow(
+          adbPath,
+          ctx.serial,
+          LOADED_TEXT_ATTACHMENT_FALLBACK_LABELS,
+          { visibleOnly: true, matchMode: "fragment" }
+        );
+        const previewNode = await findAnyNodeNow(
+          adbPath,
+          ctx.serial,
+          ATTACHMENT_PREVIEW_LABELS,
+          { visibleOnly: true }
+        );
+        const removeNode = await findAnyNodeNow(
+          adbPath,
+          ctx.serial,
+          REMOVE_ATTACHMENT_LABELS,
+          { visibleOnly: true }
+        );
+
+        assertAttachmentPreviewRemovePreconditions({
+          fallbackNode,
+          previewNode,
+          removeNode,
+        });
+
+        await ctx.tapAnyText(REMOVE_ATTACHMENT_LABELS, {
+          allowBottomOverlay: true,
+          timeoutMs: 5_000,
+        });
+        await waitForNoAnyNode(adbPath, ctx.serial, ATTACHMENT_PREVIEW_LABELS, { timeoutMs: 5_000 });
+        await waitForNoAnyNode(adbPath, ctx.serial, REMOVE_ATTACHMENT_LABELS, { timeoutMs: 5_000 });
+        const restoredAttachNode = await waitForSettledAttachImageAction(adbPath, ctx.serial, { timeoutMs: 5_000 });
+        assertAttachmentActionAvailable(restoredAttachNode);
+      },
+    },
+    {
+      id: "chat-attachment-prepared-send",
+      tier: "optional",
+      description: "Verify a manually prepared vision-ready image attachment draft can be sent without restarting the app.",
+      run: async (ctx) => {
+        const preparedAttachmentSendPrompt = buildPreparedAttachmentSendPrompt();
+
+        const adbPath = resolveAdbPath();
+        const fallbackNode = await findAnyNodeNow(
+          adbPath,
+          ctx.serial,
+          LOADED_TEXT_ATTACHMENT_FALLBACK_LABELS,
+          { visibleOnly: true, matchMode: "fragment" }
+        );
+        const previewNode = await findAnyNodeNow(
+          adbPath,
+          ctx.serial,
+          ATTACHMENT_PREVIEW_LABELS,
+          { visibleOnly: true }
+        );
+        const removeNode = await findAnyNodeNow(
+          adbPath,
+          ctx.serial,
+          REMOVE_ATTACHMENT_LABELS,
+          { visibleOnly: true }
+        );
+
+        assertAttachmentPreviewRemovePreconditions({
+          fallbackNode,
+          previewNode,
+          removeNode,
+        });
+
+        await ctx.tapAnyText(CHAT_INPUT_LABELS, {
+          allowBottomOverlay: true,
+          timeoutMs: 5_000,
+        });
+        clearFocusedTextInput(adbPath, ctx.serial);
+        runChecked(adbPath, [
+          "-s",
+          ctx.serial,
+          "shell",
+          "input",
+          "text",
+          escapeAdbInputText(preparedAttachmentSendPrompt),
+        ], { timeout: ADB_INPUT_TEXT_TIMEOUT_MS });
+        await delay(500);
+
+        await waitForAnyNode(adbPath, ctx.serial, [preparedAttachmentSendPrompt], {
+          timeoutMs: 5_000,
+          visibleOnly: true,
+        });
+
+        const sendNode = await findAnyNodeNow(
+          adbPath,
+          ctx.serial,
+          CHAT_SEND_LABELS,
+          { visibleOnly: true }
+        );
+        if (!sendNode || sendNode.node.enabled === false) {
+          throw new Error("Prepared attachment send button is not enabled after entering the prompt.");
+        }
+
+        await ctx.tapAnyText(CHAT_SEND_LABELS, {
+          allowBottomOverlay: true,
+          timeoutMs: 5_000,
+          afterTapDelayMs: 1_500,
+        });
+        await waitForNoAnyNode(adbPath, ctx.serial, ATTACHMENT_PREVIEW_LABELS, { timeoutMs: 8_000 });
+        await waitForNoAnyNode(adbPath, ctx.serial, REMOVE_ATTACHMENT_LABELS, { timeoutMs: 8_000 });
+        await waitForPreparedSentMessageContext(adbPath, ctx.serial, preparedAttachmentSendPrompt, {
+          timeoutMs: 10_000,
+        }).then((sentContext) => waitForPreparedAssistantResponse(adbPath, ctx.serial, sentContext, preparedAttachmentSendPrompt, {
+          timeoutMs: 30_000,
+        }));
+        await ctx.expectAnyText([preparedAttachmentSendPrompt], { timeoutMs: 10_000 });
       },
     },
     {
@@ -916,7 +1614,13 @@ function selectScenarios(scenarios, options) {
 
   const requestedPack = options.pack || DEFAULT_SCENARIO_PACK;
   if (requestedPack === "all") {
-    return scenarios;
+    // Prepared scenarios depend on in-memory app state set up manually by the tester, so keep
+    // them out of broad automated packs. They remain available by direct id or pack name.
+    const manualPreparedScenarioIds = new Set([
+      ...PREPARED_ATTACHMENT_SCENARIOS,
+      ...PREPARED_ATTACHMENT_SEND_SCENARIOS,
+    ]);
+    return scenarios.filter((scenario) => !manualPreparedScenarioIds.has(scenario.id));
   }
 
   const scenarioIds = SCENARIO_PACK_SCENARIOS[requestedPack];
@@ -957,6 +1661,150 @@ async function goToHome(ctx) {
   }
 
   await ctx.expectAnyText(APP_TITLE_LABELS);
+}
+
+async function ensureLoadedModelTextFallbackPrecondition(ctx) {
+  await goToHome(ctx);
+
+  const adbPath = resolveAdbPath();
+  const noModelNode = await findAnyNodeNow(
+    adbPath,
+    ctx.serial,
+    NO_MODEL_STATE_LABELS,
+    { visibleOnly: true }
+  );
+
+  if (noModelNode) {
+    throw new ScenarioSkipError(
+      "Loaded text-only attachment fallback smoke requires an already loaded text-only model or a loaded vision model with missing/failed/ambiguous projector state. The no-model fallback is covered separately and is not sufficient for this vision gate."
+    );
+  }
+}
+
+async function sendTextOnlyFallbackSmokeMessage(ctx, adbPath, prompt) {
+  await ctx.tapAnyText(CHAT_INPUT_LABELS, {
+    allowBottomOverlay: true,
+    timeoutMs: 5_000,
+  });
+  clearFocusedTextInput(adbPath, ctx.serial);
+  runChecked(adbPath, [
+    "-s",
+    ctx.serial,
+    "shell",
+    "input",
+    "text",
+    escapeAdbInputText(prompt),
+  ], { timeout: ADB_INPUT_TEXT_TIMEOUT_MS });
+  await delay(500);
+  await waitForAnyNode(adbPath, ctx.serial, [prompt], {
+    timeoutMs: 5_000,
+    visibleOnly: true,
+  });
+
+  const sendNode = await findAnyNodeNow(
+    adbPath,
+    ctx.serial,
+    CHAT_SEND_LABELS,
+    { visibleOnly: true }
+  );
+  if (!sendNode || sendNode.node.enabled === false) {
+    throw new Error("Text-only fallback send button is not enabled after entering a text prompt.");
+  }
+
+  await ctx.tapAnyText(CHAT_SEND_LABELS, {
+    allowBottomOverlay: true,
+    timeoutMs: 5_000,
+    afterTapDelayMs: 1_000,
+  });
+  await waitForTextOnlyFallbackSentMessage(adbPath, ctx.serial, prompt, {
+    timeoutMs: 10_000,
+  }).then((sentMessageNode) => waitForTextOnlyFallbackAssistantResponse(adbPath, ctx.serial, sentMessageNode, prompt, {
+    timeoutMs: 45_000,
+  }));
+}
+
+async function waitForTextOnlyFallbackSentMessage(adbPath, serial, prompt, options = {}) {
+  const timeoutMs = options.timeoutMs ?? 10_000;
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const snapshot = createUiSnapshot(adbPath, serial);
+    const sentMessageNode = findTextOnlySentMessageNode(snapshot, prompt);
+    if (sentMessageNode && !findPromptInComposerInputNode(snapshot, prompt)) {
+      return sentMessageNode;
+    }
+
+    await delay(500);
+  }
+
+  throw new Error(
+    withUiSummary(
+      adbPath,
+      serial,
+      `Timed out waiting for text-only fallback prompt "${prompt}" to appear as a sent chat message with the composer cleared.`
+    )
+  );
+}
+
+function findTextOnlySentMessageNode(snapshot, prompt) {
+  return findMatchingNodes(snapshot, prompt, { visibleOnly: true })
+    .find((node) => !isComposerInputNode(node) && node.clickable !== true) ?? null;
+}
+
+async function waitForTextOnlyFallbackAssistantResponse(adbPath, serial, sentMessageNode, prompt, options = {}) {
+  const timeoutMs = options.timeoutMs ?? 45_000;
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const snapshot = createUiSnapshot(adbPath, serial);
+    const responseNode = findTextOnlyFallbackAssistantResponseNode(snapshot, sentMessageNode, prompt);
+    if (responseNode) {
+      return responseNode;
+    }
+
+    await delay(800);
+  }
+
+  throw new Error(
+    withUiSummary(
+      adbPath,
+      serial,
+      `Timed out waiting for a non-empty assistant response after text-only fallback prompt "${prompt}".`
+    )
+  );
+}
+
+function findTextOnlyFallbackAssistantResponseNode(snapshot, sentMessageNode, prompt) {
+  const sentBottom = sentMessageNode?.bounds?.bottom ?? 0;
+  const viewportBottom = snapshot.viewportBounds?.bottom ?? Number.POSITIVE_INFINITY;
+
+  return snapshot.nodes.find((node) => {
+    if (!node.bounds || node.bounds.top <= sentBottom) {
+      return false;
+    }
+
+    if (node.bounds.top > viewportBottom - DEFAULT_TAP_SAFE_BOTTOM_INSET_MIN_PX) {
+      return false;
+    }
+
+    if (!isPreparedAssistantResponseCandidateNode(node)) {
+      return false;
+    }
+
+    const hasResponseLabel = isPreparedAssistantResponseLabel(node.text, prompt)
+      || isPreparedAssistantResponseLabel(node.contentDesc, prompt);
+    return hasResponseLabel && isInsidePreparedAssistantResponseContent(snapshot, node, sentBottom);
+  }) ?? null;
+}
+
+function findPromptInComposerInputNode(snapshot, prompt) {
+  return findMatchingNodes(snapshot, prompt, { visibleOnly: true })
+    .find(isComposerInputNode) ?? null;
+}
+
+function isComposerInputNode(node) {
+  const contentDescription = normalizeUiLabel(node?.contentDesc);
+  return CHAT_INPUT_LABELS.some((label) => contentDescription.includes(normalizeUiLabel(label)));
 }
 
 async function tryReachHome(ctx, maxAttempts = 4) {
@@ -1399,6 +2247,27 @@ function buildSmokeLaunchArgs(options, resolvedSerial) {
   return args;
 }
 
+function buildScenarioLaunchPlan(options, resolveSerial) {
+  if (options.preserveRunningApp) {
+    return {
+      shouldLaunch: false,
+      serialBeforeLaunch: resolveSerial(),
+    };
+  }
+
+  if (options.emulator) {
+    return {
+      shouldLaunch: true,
+      serialBeforeLaunch: null,
+    };
+  }
+
+  return {
+    shouldLaunch: true,
+    serialBeforeLaunch: resolveSerial(),
+  };
+}
+
 function resolveAdbPath() {
   const candidates = [
     process.env.ANDROID_HOME,
@@ -1530,6 +2399,252 @@ async function waitForAnyNode(adbPath, serial, labels, options = {}) {
   );
 }
 
+async function waitForNoAnyNode(adbPath, serial, labels, options = {}) {
+  const timeoutMs = options.timeoutMs ?? 20_000;
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const snapshot = createUiSnapshot(adbPath, serial);
+    const match = findAnyNodeInSnapshot(snapshot, labels, {
+      ...options,
+      visibleOnly: true,
+    });
+    if (!match) {
+      return;
+    }
+
+    await delay(600);
+  }
+
+  throw new Error(
+    withUiSummary(
+      adbPath,
+      serial,
+      `Timed out waiting for all of these nodes to disappear: ${labels.map((label) => `"${label}"`).join(", ")}.`
+    )
+  );
+}
+
+async function waitForPreparedSentMessageContext(adbPath, serial, prompt, options = {}) {
+  const timeoutMs = options.timeoutMs ?? 20_000;
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const snapshot = createUiSnapshot(adbPath, serial);
+    const sentContext = findPreparedSentMessageContext(snapshot, prompt);
+
+    if (sentContext) {
+      return sentContext;
+    }
+
+    await delay(600);
+  }
+
+  throw new Error(
+    withUiSummary(
+      adbPath,
+      serial,
+      `Timed out waiting for sent message context containing prompt "${prompt}" and an image preview.`
+    )
+  );
+}
+
+async function waitForPreparedAssistantResponse(adbPath, serial, sentContext, prompt, options = {}) {
+  const timeoutMs = options.timeoutMs ?? 45_000;
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const snapshot = createUiSnapshot(adbPath, serial);
+    const responseNode = findPreparedAssistantResponseNode(snapshot, sentContext, prompt);
+    if (responseNode) {
+      return responseNode;
+    }
+
+    await delay(800);
+  }
+
+  throw new Error(
+    withUiSummary(
+      adbPath,
+      serial,
+      `Timed out waiting for a non-empty assistant response after prepared image prompt "${prompt}".`
+    )
+  );
+}
+
+function findPreparedAssistantResponseNode(snapshot, sentContext, prompt) {
+  const sentBottom = Math.max(
+    sentContext?.promptMatch?.node?.bounds?.bottom ?? 0,
+    sentContext?.messagePreviewMatch?.node?.bounds?.bottom ?? 0
+  );
+  const viewportBottom = snapshot.viewportBounds?.bottom ?? Number.POSITIVE_INFINITY;
+
+  return snapshot.nodes.find((node) => {
+    if (!node.bounds || node.bounds.top <= sentBottom) {
+      return false;
+    }
+
+    if (node.bounds.top > viewportBottom - DEFAULT_TAP_SAFE_BOTTOM_INSET_MIN_PX) {
+      return false;
+    }
+
+    if (!isPreparedAssistantResponseCandidateNode(node)) {
+      return false;
+    }
+
+    const hasResponseLabel = isPreparedAssistantResponseLabel(node.text, prompt)
+      || isPreparedAssistantResponseLabel(node.contentDesc, prompt);
+    return hasResponseLabel && isInsidePreparedAssistantResponseContent(snapshot, node, sentBottom);
+  }) ?? null;
+}
+
+function isInsidePreparedAssistantResponseContent(snapshot, node, sentBottom) {
+  if (!node.bounds) {
+    return false;
+  }
+
+  return snapshot.nodes.some((container) => (
+    isPreparedAssistantResponseContentContainerNode(container)
+    && container.bounds
+    && container.bounds.top > sentBottom
+    && containsBounds(container.bounds, node.bounds)
+  ));
+}
+
+function isPreparedAssistantResponseContentContainerNode(node) {
+  return [node.resourceId, node.contentDesc]
+    .map(normalizeUiLabel)
+    .some((label) => label.includes(ASSISTANT_MESSAGE_CONTENT_RESOURCE_ID_FRAGMENT));
+}
+
+function containsBounds(containerBounds, childBounds) {
+  const tolerancePx = 2;
+  return childBounds.left >= containerBounds.left - tolerancePx
+    && childBounds.right <= containerBounds.right + tolerancePx
+    && childBounds.top >= containerBounds.top - tolerancePx
+    && childBounds.bottom <= containerBounds.bottom + tolerancePx;
+}
+
+function isPreparedAssistantResponseCandidateNode(node) {
+  if (node.clickable === true) {
+    return false;
+  }
+
+  const normalizedClassName = normalizeUiLabel(node.className);
+  const normalizedResourceId = normalizeUiLabel(node.resourceId);
+  const normalizedContentDesc = normalizeUiLabel(node.contentDesc);
+  const structuralLabel = `${normalizedClassName} ${normalizedResourceId}`;
+  const compactStructuralLabel = structuralLabel.replace(/[^a-z0-9]+/giu, "");
+  if (
+    /\b(?:tab|tabwidget|navigation|navbar|toolbar|actionbar|button|menu)\b/iu.test(structuralLabel)
+    || compactStructuralLabel.includes("bottomnavigation")
+    || compactStructuralLabel.includes("actionbar")
+  ) {
+    return false;
+  }
+
+  const navigationLabels = [
+    ...HOME_TAB_LABELS,
+    ...CHAT_TAB_LABELS,
+    ...MODELS_TAB_LABELS,
+    ...SETTINGS_TAB_LABELS,
+  ].map(normalizeUiLabel).filter(Boolean);
+  if (
+    /\btab\b/iu.test(normalizedContentDesc)
+    && navigationLabels.some((label) => normalizedContentDesc.includes(label))
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+function isPreparedAssistantResponseLabel(value, prompt) {
+  const label = normalizeUiLabel(value);
+  if (label.length < 2) {
+    return false;
+  }
+
+  const normalizedPrompt = normalizeUiLabel(prompt);
+  if (label === normalizedPrompt || label.includes(normalizedPrompt)) {
+    return false;
+  }
+
+  if (/^\d+(?:\.\d+)?\s*t\/s$/iu.test(label)) {
+    return false;
+  }
+
+  return !PREPARED_ASSISTANT_RESPONSE_NON_ANSWER_LABEL_FRAGMENTS.some((excludedLabel) => (
+    label === excludedLabel || label.includes(excludedLabel)
+  ));
+}
+
+function findPreparedSentMessageContext(snapshot, prompt) {
+  const promptNodes = findMatchingNodes(snapshot, prompt, { visibleOnly: true });
+  const previewMatches = MESSAGE_ATTACHMENT_PREVIEW_LABELS.flatMap((label) => (
+    findMatchingNodes(snapshot, label, { visibleOnly: true }).map((node) => ({ label, node }))
+  ));
+  let bestMatch = null;
+
+  for (const promptNode of promptNodes) {
+    for (const previewMatch of previewMatches) {
+      const score = scorePreparedSentMessagePair(promptNode.bounds, previewMatch.node.bounds);
+      if (score === null) {
+        continue;
+      }
+
+      if (!bestMatch || score < bestMatch.score) {
+        bestMatch = {
+          score,
+          promptMatch: { label: prompt, node: promptNode },
+          messagePreviewMatch: previewMatch,
+        };
+      }
+    }
+  }
+
+  return bestMatch
+    ? {
+        promptMatch: bestMatch.promptMatch,
+        messagePreviewMatch: bestMatch.messagePreviewMatch,
+      }
+    : null;
+}
+
+function scorePreparedSentMessagePair(promptBounds, previewBounds) {
+  if (!promptBounds || !previewBounds) {
+    return null;
+  }
+
+  const overlapWidth = Math.max(
+    0,
+    Math.min(promptBounds.right, previewBounds.right) - Math.max(promptBounds.left, previewBounds.left)
+  );
+  const minWidth = Math.max(1, Math.min(promptBounds.width, previewBounds.width));
+  const horizontalOverlapRatio = overlapWidth / minWidth;
+  if (horizontalOverlapRatio < 0.35) {
+    return null;
+  }
+
+  const verticalGap = previewBounds.bottom <= promptBounds.top
+    ? promptBounds.top - previewBounds.bottom
+    : promptBounds.bottom <= previewBounds.top
+      ? previewBounds.top - promptBounds.bottom
+      : 0;
+  if (verticalGap > 320) {
+    return null;
+  }
+
+  const centerXDelta = Math.abs(promptBounds.centerX - previewBounds.centerX);
+  const maxAllowedCenterXDelta = Math.max(promptBounds.width, previewBounds.width) * 0.75;
+  if (centerXDelta > maxAllowedCenterXDelta) {
+    return null;
+  }
+
+  const expectedImageAboveTextPenalty = previewBounds.bottom <= promptBounds.top ? 0 : 100;
+  return (verticalGap * 10) + centerXDelta + expectedImageAboveTextPenalty;
+}
+
 async function waitForAnyTappableNode(adbPath, serial, labels, options = {}) {
   const timeoutMs = options.timeoutMs ?? 20_000;
   const startedAt = Date.now();
@@ -1603,14 +2718,16 @@ function dumpUiHierarchy(adbPath, serial, options = {}) {
       {
         encoding: "utf8",
         stdio: ["ignore", "pipe", "pipe"],
+        timeout: UI_HIERARCHY_DUMP_COMMAND_TIMEOUT_MS,
       }
     );
 
     if (dumpResult.error) {
-      throw dumpResult.error;
-    }
-
-    if (dumpResult.status !== 0) {
+      if (!isRetryableSpawnError(dumpResult.error)) {
+        throw dumpResult.error;
+      }
+      failures.push(describeSpawnError("uiautomator dump", dumpResult.error));
+    } else if (dumpResult.status !== 0) {
       failures.push(describeSpawnResult("uiautomator dump", dumpResult));
       sawAdbDeviceUnavailable = sawAdbDeviceUnavailable || isAdbDeviceUnavailableResult(dumpResult);
     } else {
@@ -1620,19 +2737,21 @@ function dumpUiHierarchy(adbPath, serial, options = {}) {
         {
           encoding: "utf8",
           maxBuffer: 10 * 1024 * 1024,
+          timeout: UI_HIERARCHY_DUMP_COMMAND_TIMEOUT_MS,
         }
       );
 
       if (catResult.error) {
-        throw catResult.error;
-      }
-
-      if (catResult.status === 0 && typeof catResult.stdout === "string" && catResult.stdout.includes("<hierarchy")) {
+        if (!isRetryableSpawnError(catResult.error)) {
+          throw catResult.error;
+        }
+        failures.push(describeSpawnError("cat UI hierarchy", catResult.error));
+      } else if (catResult.status === 0 && typeof catResult.stdout === "string" && catResult.stdout.includes("<hierarchy")) {
         return catResult.stdout;
+      } else {
+        failures.push(describeSpawnResult("cat UI hierarchy", catResult));
+        sawAdbDeviceUnavailable = sawAdbDeviceUnavailable || isAdbDeviceUnavailableResult(catResult);
       }
-
-      failures.push(describeSpawnResult("cat UI hierarchy", catResult));
-      sawAdbDeviceUnavailable = sawAdbDeviceUnavailable || isAdbDeviceUnavailableResult(catResult);
     }
 
     if (attempt < maxAttempts) {
@@ -1683,8 +2802,11 @@ function parseUiNodes(xml) {
     nodes.push({
       text: attributes.text || "",
       contentDesc: attributes["content-desc"] || "",
+      className: attributes.class || "",
+      resourceId: attributes["resource-id"] || "",
       packageName: attributes.package || "",
       clickable: attributes.clickable === "true",
+      enabled: attributes.enabled !== "false",
       bounds: parseBounds(attributes.bounds),
     });
 
@@ -1771,9 +2893,10 @@ function findNodesForLabelsInSnapshot(snapshot, labels, options = {}) {
 
 function findMatchingNodes(snapshot, label, options = {}) {
   const viewportBounds = options.visibleOnly ? snapshot.viewportBounds : null;
+  const matchNode = options.matchMode === "fragment" ? matchesUiFragment : matchesLabel;
 
   return snapshot.nodes.filter((node) => {
-    if (!matchesLabel(node, label)) {
+    if (!matchNode(node, label)) {
       return false;
     }
 
@@ -2111,6 +3234,7 @@ function writeReport(results) {
     accumulator[result.status] = (accumulator[result.status] || 0) + 1;
     return accumulator;
   }, {});
+  const serializedResults = serializeReportResults(results);
   fs.writeFileSync(
     reportPath,
     JSON.stringify(
@@ -2120,13 +3244,60 @@ function writeReport(results) {
         selectedScenario: cliOptions.scenario,
         scenarioCount: results.length,
         summary,
-        results,
+        results: serializedResults,
       },
       null,
       2
     )
   );
   log(`Wrote scenario report to ${reportPath}`);
+}
+
+function serializeReportResults(results, roots = {}) {
+  const resolvedArtifactsRoot = path.resolve(roots.artifactsRoot || artifactsRoot);
+  const resolvedProjectRoot = path.resolve(roots.projectRoot || projectRoot);
+
+  return results.map((result) => {
+    const serializedResult = { ...result };
+
+    for (const field of REPORT_ARTIFACT_PATH_FIELDS) {
+      if (typeof serializedResult[field] === "string") {
+        serializedResult[field] = toReportRelativePath(serializedResult[field], {
+          artifactsRoot: resolvedArtifactsRoot,
+          projectRoot: resolvedProjectRoot,
+        });
+      }
+    }
+
+    return serializedResult;
+  });
+}
+
+function toReportRelativePath(filePath, roots) {
+  if (!path.isAbsolute(filePath)) {
+    return normalizeReportPath(filePath);
+  }
+
+  const resolvedPath = path.resolve(filePath);
+  const baseRoot = isPathInsideOrEqual(resolvedPath, roots.artifactsRoot)
+    ? roots.artifactsRoot
+    : roots.projectRoot;
+  const relativePath = path.relative(baseRoot, resolvedPath);
+
+  if (!relativePath || path.isAbsolute(relativePath) || /^[A-Za-z]:[\\/]/.test(relativePath)) {
+    return path.basename(resolvedPath);
+  }
+
+  return normalizeReportPath(relativePath);
+}
+
+function isPathInsideOrEqual(targetPath, rootPath) {
+  const relativePath = path.relative(rootPath, targetPath);
+  return relativePath === "" || (!relativePath.startsWith("..") && !path.isAbsolute(relativePath));
+}
+
+function normalizeReportPath(reportPath) {
+  return reportPath.replace(/\\/g, "/");
 }
 
 function printScenarioList(scenarios) {
@@ -2142,6 +3313,8 @@ function parseCliOptions(argv) {
   const options = {
     emulator: false,
     skipBuild: false,
+    failOnSkip: false,
+    preserveRunningApp: false,
     bootstrapScreenshot: false,
     list: false,
     pack: DEFAULT_SCENARIO_PACK,
@@ -2161,6 +3334,16 @@ function parseCliOptions(argv) {
 
     if (arg === "--skip-build") {
       options.skipBuild = true;
+      continue;
+    }
+
+    if (arg === "--fail-on-skip") {
+      options.failOnSkip = true;
+      continue;
+    }
+
+    if (arg === "--preserve-running-app") {
+      options.preserveRunningApp = true;
       continue;
     }
 
@@ -2235,12 +3418,14 @@ function printHelp() {
   console.log(`  --pack <${[...SCENARIO_PACKS].join("|")}> Run a scenario pack (default: ${DEFAULT_SCENARIO_PACK})`);
   console.log("  --scenario <id>            Run only one scenario");
   console.log("  --skip-build               Reuse the existing debug APK");
+  console.log("  --fail-on-skip             Treat skipped scenarios as verification failures");
+  console.log("  --preserve-running-app     Do not bootstrap or restart the app before scenarios");
   console.log("  --bootstrap-screenshot     Save a smoke bootstrap screenshot before scenarios");
   console.log("  --port <number>            Forward a specific Metro port to android-smoke");
   console.log("  --list                     Print available scenarios");
 }
 
-function runCapture(command, args) {
+function runCapture(command, args, options = {}) {
   const result = spawnSync(command, args, {
     cwd: projectRoot,
     encoding: "utf8",
@@ -2248,11 +3433,19 @@ function runCapture(command, args) {
   });
 
   if (result.error) {
+    if (options.allowFailure) {
+      return result.error.message || String(result.error);
+    }
+
     throw result.error;
   }
 
   if (result.status !== 0) {
     const stderr = (result.stderr || "").trim();
+    if (options.allowFailure) {
+      return result.stdout || stderr || "";
+    }
+
     throw new Error(
       `Command failed: ${command} ${args.join(" ")}${stderr ? `\n${stderr}` : ""}`
     );
@@ -2380,6 +3573,16 @@ function describeSpawnResult(label, result) {
   return `${label} status=${result.status} stdout=${stdoutLength} stderr=${stderr || "<empty>"}`;
 }
 
+function describeSpawnError(label, error) {
+  const code = typeof error?.code === "string" && error.code.length > 0 ? error.code : "unknown";
+  const message = typeof error?.message === "string" && error.message.length > 0 ? error.message : String(error);
+  return `${label} error=${code} message=${message}`;
+}
+
+function isRetryableSpawnError(error) {
+  return error?.code === "ETIMEDOUT";
+}
+
 function isAdbDeviceUnavailableResult(result) {
   return isAdbDeviceUnavailableMessage(String(result.stderr || ""))
     || isAdbDeviceUnavailableMessage(String(result.stdout || ""));
@@ -2418,6 +3621,7 @@ function runChecked(command, args, options = {}) {
     cwd: options.cwd || projectRoot,
     stdio: options.stdio || "inherit",
     env: options.env || process.env,
+    timeout: options.timeout,
   });
 
   if (result.error) {
@@ -2443,23 +3647,44 @@ function sleepSync(ms) {
 
 module.exports = {
   buildScenarios,
+  buildScenarioLaunchPlan,
   buildSmokeLaunchArgs,
   captureAndroidScreenshot,
+  clearFocusedTextInput,
+  CLEAR_TEXT_INPUT_FALLBACK_TOTAL_TIMEOUT_MS,
+  DEFAULT_CLEAR_TEXT_INPUT_MAX_DELETE_COUNT,
   dumpUiHierarchy,
   findCatalogRiskModelCard,
   findQuantizationSelectorNodeClearOfBottomOverlay,
   openFirstVisibleVariantPicker,
   prepareCatalogForVariantPickerSmokeScenario,
   findAnyNodeInSnapshot,
+  findAttachImageActionInSnapshot,
+  findAttachMenuActionInSnapshot,
   findAnyNodeClearOfBottomOverlay,
+  findPreparedSentMessageContext,
+  findPreparedAssistantResponseNode,
+  findTextOnlySentMessageNode,
   findNodeInSnapshot,
   isBoundsClearOfBottomOverlay,
   isAppForegroundSnapshot,
   findBlockingSystemDialogAction,
+  escapeAdbInputText,
   pickClosestNodePair,
   selectScenarios,
   parseCliOptions,
   parseUiSnapshot,
   restoreLanguageAfterScenario,
+  runCapture,
+  runChecked,
   ScenarioSkipError,
+  ScenarioSkipFailureError,
+  serializeReportResults,
+  shouldAppendRunnerFailure,
+  assertAttachmentActionBlocked,
+  assertAttachmentActionAvailable,
+  assertAttachmentPreviewRemovePreconditions,
+  assertAttachmentTextOnlyFallbackState,
+  isAttachmentActionBusy,
+  isPreparedAssistantResponseLabel,
 };

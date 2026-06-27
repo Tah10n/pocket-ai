@@ -1,4 +1,5 @@
 import type { TFunction } from 'i18next';
+import { sanitizeErrorForReport, sanitizeErrorReportContext } from './ErrorReportSanitizer';
 
 export type AppErrorCode =
   | 'action_failed'
@@ -19,7 +20,18 @@ export type AppErrorCode =
   | 'download_file_missing'
   | 'storage_private_unavailable'
   | 'message_empty'
-  | 'message_too_long';
+  | 'message_too_long'
+  | 'multimodal_not_ready'
+  | 'chat_attachment_copy_failed'
+  | 'chat_attachment_limit_exceeded'
+  | 'chat_attachment_missing'
+  | 'chat_attachment_not_ready'
+  | 'chat_attachment_unsupported_type'
+  | 'chat_attachment_corrupt'
+  | 'chat_attachment_parse_failed'
+  | 'chat_attachment_too_large_for_context'
+  | 'chat_attachment_document_encrypted'
+  | 'chat_attachment_document_no_extractable_text';
 
 const ERROR_MESSAGE_KEYS: Partial<Record<AppErrorCode, string>> = {
   engine_not_ready: 'common.errors.engineNotReady',
@@ -40,6 +52,11 @@ const ERROR_MESSAGE_KEYS: Partial<Record<AppErrorCode, string>> = {
   storage_private_unavailable: 'common.errors.storagePrivateUnavailable',
   message_empty: 'common.errors.messageEmpty',
   message_too_long: 'common.errors.messageTooLong',
+  multimodal_not_ready: 'common.errors.multimodalNotReady',
+  chat_attachment_copy_failed: 'common.errors.chatAttachmentCopyFailed',
+  chat_attachment_limit_exceeded: 'common.errors.chatAttachmentLimitExceeded',
+  chat_attachment_missing: 'common.errors.chatAttachmentMissing',
+  chat_attachment_not_ready: 'common.errors.chatAttachmentNotReady',
 };
 
 const ERROR_PATTERNS: { pattern: RegExp; code: AppErrorCode }[] = [
@@ -114,26 +131,32 @@ export function reportError(
   context?: Record<string, unknown>,
 ): AppError {
   const appError = toAppError(error);
+  const sanitizedReport = sanitizeErrorForReport(appError, { includeStack: true });
+  const sanitizedError = new AppError(appError.code, sanitizedReport.message, {
+    cause: sanitizedReport.cause,
+    details: sanitizedReport.details,
+  });
+  sanitizedError.name = sanitizedReport.name ?? appError.name;
+  if (sanitizedReport.stack) {
+    sanitizedError.stack = sanitizedReport.stack;
+  }
   const reporter = (globalThis as { Sentry?: { captureException?: (...args: unknown[]) => void } }).Sentry;
   const isDev = typeof __DEV__ === 'boolean' ? __DEV__ : process.env.NODE_ENV !== 'production';
-
-  if (!isDev && reporter?.captureException) {
-    reporter.captureException(appError, {
-      tags: { scope, code: appError.code },
-      extra: {
-        ...appError.details,
-        ...context,
-      },
-    });
-    return appError;
-  }
-
-  const extra = {
+  const extra = sanitizeErrorReportContext({
     ...appError.details,
     ...context,
-  };
-  console.error(`[${scope}]`, appError, Object.keys(extra).length > 0 ? extra : undefined);
-  return appError;
+  }) ?? {};
+
+  if (!isDev && reporter?.captureException) {
+    reporter.captureException(sanitizedError, {
+      tags: { scope, code: appError.code },
+      extra,
+    });
+    return sanitizedError;
+  }
+
+  console.error(`[${scope}]`, sanitizedError, Object.keys(extra).length > 0 ? extra : undefined);
+  return sanitizedError;
 }
 
 export function getErrorMessage(

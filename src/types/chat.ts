@@ -1,10 +1,17 @@
 import { getVisibleMessageContent } from '../utils/chatPresentation';
+import type {
+  ChatImageAttachment,
+  MultimodalReadinessState,
+} from './multimodal';
+import type { ChatAttachment, ChatDocumentAttachmentDraft, ChatMediaAttachmentDraft } from './attachments';
 import { normalizeReasoningEffort, type ReasoningEffort } from './reasoning';
 
 export type ChatMessageRole = 'system' | 'user' | 'assistant';
 export type ChatMessageState = 'complete' | 'streaming' | 'stopped' | 'error';
 export type ChatMessageKind = 'message' | 'model_switch';
 export type ChatThreadStatus = 'idle' | 'generating' | 'stopped' | 'error';
+
+export const DOCUMENT_ATTACHMENT_MESSAGE_PLACEHOLDER = '[Document attachment]';
 
 export interface GenerationParamsSnapshot {
   temperature: number;
@@ -45,6 +52,8 @@ export interface ChatMessage {
   modelId?: string | null;
   switchFromModelId?: string | null;
   switchToModelId?: string | null;
+  attachments?: (ChatImageAttachment | ChatAttachment)[];
+  contentParts?: LlmContentPart[];
 }
 
 export interface ChatThread {
@@ -77,10 +86,41 @@ export interface ConversationIndexItem {
 export interface LlmChatMessage {
   role: ChatMessageRole;
   content: string;
+  attachments?: (ChatImageAttachment | ChatAttachment)[];
+  mediaPaths?: string[];
+  contentParts?: LlmContentPart[];
 }
+
+export type LlmTextContentPart = {
+  type: 'text';
+  text: string;
+};
+
+export type LlmImageContentPart = {
+  type: 'image_url';
+  image_url: {
+    url: string;
+  };
+};
+
+export type LlmInputAudioContentPart = {
+  type: 'input_audio';
+  input_audio: {
+    format: 'wav' | 'mp3';
+    url?: string;
+    data?: string;
+  };
+};
+
+export type LlmContentPart =
+  | LlmTextContentPart
+  | LlmImageContentPart
+  | LlmInputAudioContentPart;
 
 export interface LlmChatCompletionOptions {
   messages: LlmChatMessage[];
+  mediaPaths?: string[];
+  multimodalReadiness?: MultimodalReadinessState;
   onToken?: (token: string | {
     token: string;
     content?: string;
@@ -100,6 +140,9 @@ export interface LlmChatCompletionOptions {
     reasoning_format?: 'none' | 'auto' | 'deepseek';
   };
 }
+
+export type AppendableChatDocumentAttachmentDraft = ChatDocumentAttachmentDraft;
+export type AppendableChatMediaAttachmentDraft = ChatMediaAttachmentDraft;
 
 export const DEFAULT_SYSTEM_PROMPT = 'You are a helpful AI assistant. Answer concisely and accurately.';
 export const DEFAULT_PRESET_SNAPSHOT: PresetSnapshot = {

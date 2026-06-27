@@ -1,6 +1,7 @@
 import { Alert } from 'react-native';
 import { startModelDownloadFlow } from '../../src/utils/modelDownloadFlow';
 import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../src/types/models';
+import type { ProjectorArtifact } from '../../src/types/multimodal';
 
 const mockGetCurrentStatus = jest.fn();
 const mockRefreshModelMetadata = jest.fn();
@@ -43,6 +44,20 @@ function createModel(overrides: Partial<ModelMetadata> = {}): ModelMetadata {
     isPrivate: false,
     lifecycleStatus: LifecycleStatus.AVAILABLE,
     downloadProgress: 0,
+    ...overrides,
+  };
+}
+
+function createProjector(overrides: Partial<ProjectorArtifact> = {}): ProjectorArtifact {
+  return {
+    id: 'projector-org-model-main-mmproj-a.gguf',
+    ownerModelId: 'org/model',
+    repoId: 'org/model',
+    fileName: 'mmproj-a.gguf',
+    downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-a.gguf',
+    size: 1024,
+    lifecycleStatus: 'available',
+    matchStatus: 'ambiguous',
     ...overrides,
   };
 }
@@ -133,6 +148,99 @@ describe('modelDownloadFlow', () => {
     }), { includeDetails: false });
     expect(onResolvedModel).toHaveBeenCalledWith(resolvedModel);
     expect(startDownload).toHaveBeenCalledWith(resolvedModel);
+  });
+
+  it('prompts for projector choice instead of silently downloading an ambiguous vision model', async () => {
+    const startDownload = jest.fn();
+    const onProjectorChoiceRequired = jest.fn();
+    const ambiguousModel = createModel({
+      chatModalities: ['text', 'vision'],
+      projectorCandidates: [
+        createProjector({ id: 'projector-a', fileName: 'mmproj-a.gguf' }),
+        createProjector({ id: 'projector-b', fileName: 'mmproj-b.gguf' }),
+      ],
+    });
+
+    startModelDownloadFlow({
+      model: ambiguousModel,
+      t: (key) => key,
+      startDownload,
+      openTokenSettings: jest.fn(),
+      openModelPage: jest.fn().mockResolvedValue(undefined),
+      onProjectorChoiceRequired,
+      onError: jest.fn(),
+    });
+
+    await Promise.resolve();
+
+    expect(onProjectorChoiceRequired).toHaveBeenCalledWith(ambiguousModel);
+    expect(alertSpy).not.toHaveBeenCalledWith(
+      'models.vision.projectorChoiceRequiredTitle',
+      'models.vision.projectorChoiceRequiredMessage',
+    );
+    expect(startDownload).not.toHaveBeenCalled();
+  });
+
+  it('starts projector download for a downloaded model with reusable local file but no resolved file name', async () => {
+    const startDownload = jest.fn();
+    const projector = createProjector({
+      id: 'projector-a',
+      lifecycleStatus: 'available',
+      matchStatus: 'user_selected',
+    });
+    const downloadedModel = createModel({
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 100,
+      localPath: '/documents/models/model.gguf',
+      resolvedFileName: undefined,
+      chatModalities: ['text', 'vision'],
+      selectedProjectorId: projector.id,
+      projectorCandidates: [projector],
+    });
+
+    startModelDownloadFlow({
+      model: downloadedModel,
+      t: (key) => key,
+      startDownload,
+      openTokenSettings: jest.fn(),
+      openModelPage: jest.fn().mockResolvedValue(undefined),
+      onError: jest.fn(),
+    });
+
+    await Promise.resolve();
+
+    expect(alertSpy).not.toHaveBeenCalledWith(
+      'models.actionFailedTitle',
+      'common.errors.downloadMetadataUnavailable',
+    );
+    expect(startDownload).toHaveBeenCalledWith(downloadedModel);
+  });
+
+  it('shows a fallback projector-choice alert when no choice handler is available', async () => {
+    const startDownload = jest.fn();
+
+    startModelDownloadFlow({
+      model: createModel({
+        chatModalities: ['text', 'vision'],
+        projectorCandidates: [
+          createProjector({ id: 'projector-a', fileName: 'mmproj-a.gguf' }),
+          createProjector({ id: 'projector-b', fileName: 'mmproj-b.gguf' }),
+        ],
+      }),
+      t: (key) => key,
+      startDownload,
+      openTokenSettings: jest.fn(),
+      openModelPage: jest.fn().mockResolvedValue(undefined),
+      onError: jest.fn(),
+    });
+
+    await Promise.resolve();
+
+    expect(alertSpy).toHaveBeenCalledWith(
+      'models.vision.projectorChoiceRequiredTitle',
+      'models.vision.projectorChoiceRequiredMessage',
+    );
+    expect(startDownload).not.toHaveBeenCalled();
   });
 
   it('blocks cellular downloads when disabled in settings', async () => {

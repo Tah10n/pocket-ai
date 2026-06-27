@@ -214,6 +214,534 @@ describe('ModelCatalogCacheStore', () => {
     expect(raw).not.toContain('resume-token');
   });
 
+  it('keeps vision catalog metadata but strips projector runtime from anonymous caches', () => {
+    const store = new ModelCatalogCacheStore();
+    const storage = createStorage(STORAGE_ID, { tier: 'cache' });
+    const anonScope = { query: 'q', cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };
+
+    store.putSearch(anonScope, {
+      models: [buildModel({
+        id: 'public/vision-model',
+        chatModalities: ['text', 'vision'],
+        artifactRole: 'primary_chat_model',
+        visionSource: 'catalog_metadata',
+        visionConfidence: 'trusted',
+        selectedProjectorId: 'projector-a',
+        multimodalReadiness: {
+          modelId: 'public/vision-model',
+          status: 'ready',
+          projectorId: 'projector-a',
+          support: ['vision'],
+          checkedAt: 123,
+        },
+        projectorCandidates: [{
+          id: 'projector-a',
+          ownerModelId: 'public/vision-model',
+          repoId: 'public/vision-model',
+          fileName: 'mmproj-model-f16.gguf',
+          downloadUrl: 'https://huggingface.co/public/vision-model/resolve/main/mmproj-model-f16.gguf',
+          size: 1024,
+          localPath: 'private-mmproj-model-f16.gguf',
+          resumeData: 'private-mmproj-resume-token',
+          lifecycleStatus: 'downloaded',
+          matchStatus: 'failed',
+          matchReason: 'download_verification_failed',
+        }],
+      })],
+      hasMore: false,
+      nextCursor: null,
+    });
+
+    const model = store.getSearch(anonScope, 1000)?.models[0];
+    const projector = model?.projectorCandidates?.[0];
+
+    expect(model).toEqual(expect.objectContaining({
+      chatModalities: ['text', 'vision'],
+      artifactRole: 'primary_chat_model',
+      visionSource: 'catalog_metadata',
+      visionConfidence: 'trusted',
+    }));
+    expect(model?.selectedProjectorId).toBeUndefined();
+    expect(model?.multimodalReadiness).toBeUndefined();
+    expect(projector).toEqual(expect.objectContaining({
+      id: 'projector-a',
+      lifecycleStatus: 'available',
+      matchStatus: 'missing',
+    }));
+    expect(projector?.localPath).toBeUndefined();
+    expect(projector?.resumeData).toBeUndefined();
+    expect(projector?.matchReason).toBeUndefined();
+
+    const raw = storage.getString(SEARCH_CACHE_KEY) as string;
+    expect(raw).toContain('public/vision-model');
+    expect(raw).toContain('mmproj-model-f16.gguf');
+    expect(raw).not.toContain('private-mmproj-model-f16.gguf');
+    expect(raw).not.toContain('private-mmproj-resume-token');
+    expect(raw).not.toContain('download_verification_failed');
+  });
+
+  it('keeps deterministic filename affinity ambiguity across anonymous cache roundtrips', () => {
+    const store = new ModelCatalogCacheStore();
+    const anonScope = { query: 'q', cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };
+    const model = buildModel({
+      id: 'public/vision-affinity-model',
+      chatModalities: ['text', 'vision'],
+      artifactRole: 'primary_chat_model',
+      visionSource: 'catalog_metadata',
+      visionConfidence: 'trusted',
+      selectedProjectorId: 'projector-selected',
+      projectorCandidates: [
+        {
+          id: 'projector-selected',
+          ownerModelId: 'public/vision-affinity-model',
+          repoId: 'public/vision-affinity-model',
+          fileName: 'mmproj-selected-f16.gguf',
+          downloadUrl: 'https://huggingface.co/public/vision-affinity-model/resolve/main/mmproj-selected-f16.gguf',
+          size: 1024,
+          localPath: 'private-mmproj-selected-f16.gguf',
+          resumeData: 'private-mmproj-selected-resume-token',
+          lifecycleStatus: 'downloaded',
+          matchStatus: 'matched',
+          matchReason: 'deterministic_filename_affinity',
+        },
+        {
+          id: 'projector-ambiguous',
+          ownerModelId: 'public/vision-affinity-model',
+          repoId: 'public/vision-affinity-model',
+          fileName: 'mmproj-ambiguous-f16.gguf',
+          downloadUrl: 'https://huggingface.co/public/vision-affinity-model/resolve/main/mmproj-ambiguous-f16.gguf',
+          size: 2048,
+          lifecycleStatus: 'available',
+          matchStatus: 'ambiguous',
+          matchReason: 'deterministic_filename_affinity',
+        },
+      ],
+    });
+    const expectSanitizedAffinityProjectors = (projectors: ModelMetadata['projectorCandidates']) => {
+      expect(projectors).toHaveLength(2);
+      const selected = projectors?.find((projector) => projector.id === 'projector-selected');
+      const ambiguous = projectors?.find((projector) => projector.id === 'projector-ambiguous');
+
+      expect(selected).toEqual(expect.objectContaining({
+        lifecycleStatus: 'available',
+        matchStatus: 'matched',
+        matchReason: 'deterministic_filename_affinity',
+      }));
+      expect(selected?.localPath).toBeUndefined();
+      expect(selected?.resumeData).toBeUndefined();
+      expect(ambiguous).toEqual(expect.objectContaining({
+        lifecycleStatus: 'available',
+        matchStatus: 'ambiguous',
+        matchReason: 'deterministic_filename_affinity',
+      }));
+    };
+
+    store.putSearch(anonScope, {
+      models: [model],
+      hasMore: false,
+      nextCursor: null,
+    });
+    store.putModelSnapshots([model], 'anon');
+
+    const reloadedStore = new ModelCatalogCacheStore();
+    const searchModel = reloadedStore.getSearch(anonScope, 1000)?.models[0];
+    const snapshotModel = reloadedStore.getModelSnapshot('public/vision-affinity-model', 'anon', 1000);
+
+    expect(searchModel?.selectedProjectorId).toBeUndefined();
+    expect(snapshotModel?.selectedProjectorId).toBeUndefined();
+    expectSanitizedAffinityProjectors(searchModel?.projectorCandidates);
+    expectSanitizedAffinityProjectors(snapshotModel?.projectorCandidates);
+  });
+
+  it('strips variant-level projector runtime from anonymous caches', () => {
+    const store = new ModelCatalogCacheStore();
+    const storage = createStorage(STORAGE_ID, { tier: 'cache' });
+    const anonScope = { query: 'q', cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };
+    const model = buildModel({
+      id: 'public/vision-variant-model',
+      variants: [
+        {
+          variantId: 'q4',
+          fileName: 'model-q4.gguf',
+          quantizationLabel: 'Q4_K_M',
+          size: 1024,
+          isLocal: true,
+          chatModalities: ['text', 'vision'],
+          artifactRole: 'primary_chat_model',
+          visionSource: 'catalog_metadata',
+          visionConfidence: 'trusted',
+          selectedProjectorId: 'variant-projector',
+          projectorCandidates: [
+            {
+              id: 'variant-projector',
+              ownerModelId: 'public/vision-variant-model',
+              ownerVariantId: 'q4',
+              repoId: 'public/vision-variant-model',
+              fileName: 'mmproj-model-q4.gguf',
+              downloadUrl: 'https://huggingface.co/public/vision-variant-model/resolve/main/mmproj-model-q4.gguf',
+              size: 2048,
+              localPath: 'private-mmproj-model-q4.gguf',
+              resumeData: 'private-mmproj-model-q4-resume-token',
+              lifecycleStatus: 'downloaded',
+              matchStatus: 'matched',
+              matchReason: 'single_projector_candidate',
+            },
+          ],
+        },
+      ],
+    });
+    const expectSanitizedVariant = (variant: NonNullable<ModelMetadata['variants']>[number] | undefined) => {
+      expect(variant?.isLocal).toBeUndefined();
+      expect(variant?.selectedProjectorId).toBeUndefined();
+      expect(variant?.chatModalities).toEqual(['text', 'vision']);
+      expect(variant?.visionSource).toBe('catalog_metadata');
+      expect(variant?.visionConfidence).toBe('trusted');
+      expect(variant?.projectorCandidates?.[0]).toEqual(expect.objectContaining({
+        id: 'variant-projector',
+        lifecycleStatus: 'available',
+        matchStatus: 'matched',
+        matchReason: 'single_projector_candidate',
+      }));
+      expect(variant?.projectorCandidates?.[0]?.localPath).toBeUndefined();
+      expect(variant?.projectorCandidates?.[0]?.resumeData).toBeUndefined();
+    };
+
+    store.putSearch(anonScope, {
+      models: [model],
+      hasMore: false,
+      nextCursor: null,
+    });
+    store.putModelSnapshots([model], 'anon');
+
+    const reloadedStore = new ModelCatalogCacheStore();
+    const searchVariant = reloadedStore.getSearch(anonScope, 1000)?.models[0]?.variants?.[0];
+    const snapshotVariant = reloadedStore.getModelSnapshot('public/vision-variant-model', 'anon', 1000)?.variants?.[0];
+
+    expectSanitizedVariant(searchVariant);
+    expectSanitizedVariant(snapshotVariant);
+    expect(storage.getString(SEARCH_CACHE_KEY)).not.toContain('private-mmproj-model-q4.gguf');
+    expect(storage.getString(SNAPSHOT_CACHE_KEY)).not.toContain('private-mmproj-model-q4.gguf');
+    expect(storage.getString(SEARCH_CACHE_KEY)).not.toContain('private-mmproj-model-q4-resume-token');
+    expect(storage.getString(SNAPSHOT_CACHE_KEY)).not.toContain('private-mmproj-model-q4-resume-token');
+  });
+
+  it('strips local-only vision provenance from anonymous snapshots', () => {
+    const store = new ModelCatalogCacheStore();
+
+    store.putModelSnapshots([buildModel({
+      id: 'public/local-runtime-vision-model',
+      chatModalities: ['text', 'vision'],
+      artifactRole: 'primary_chat_model',
+      visionSource: 'user_selected_projector',
+      visionConfidence: 'verified',
+      selectedProjectorId: 'local-projector',
+      multimodalReadiness: {
+        modelId: 'public/local-runtime-vision-model',
+        status: 'ready',
+        projectorId: 'local-projector',
+        support: ['vision'],
+        checkedAt: 123,
+      },
+    })], 'anon');
+
+    const snapshot = store.getModelSnapshot('public/local-runtime-vision-model', 'anon', 1000);
+
+    expect(snapshot?.chatModalities).toEqual(['text']);
+    expect(snapshot?.visionSource).toBeUndefined();
+    expect(snapshot?.visionConfidence).toBeUndefined();
+    expect(snapshot?.selectedProjectorId).toBeUndefined();
+    expect(snapshot?.multimodalReadiness).toBeUndefined();
+  });
+
+  it('drops unsafe projector candidates from anonymous caches', () => {
+    const store = new ModelCatalogCacheStore();
+    const storage = createStorage(STORAGE_ID, { tier: 'cache' });
+    const anonScope = { query: 'q', cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };
+
+    store.putSearch(anonScope, {
+      models: [buildModel({
+        id: 'public/local-projector-vision-model',
+        chatModalities: ['text', 'vision'],
+        artifactRole: 'primary_chat_model',
+        visionSource: 'user_selected_projector',
+        visionConfidence: 'verified',
+        projectorCandidates: [{
+          id: 'local-projector',
+          ownerModelId: 'public/local-projector-vision-model',
+          repoId: 'public/local-projector-vision-model',
+          fileName: 'local-mmproj.gguf',
+          downloadUrl: 'file:///private/local-mmproj.gguf',
+          size: 1024,
+          localPath: 'private-local-mmproj.gguf',
+          lifecycleStatus: 'downloaded',
+          matchStatus: 'user_selected',
+          matchReason: 'user_selected_projector',
+        }],
+      })],
+      hasMore: false,
+      nextCursor: null,
+    });
+
+    const model = store.getSearch(anonScope, 1000)?.models[0];
+    expect(model?.chatModalities).toEqual(['text']);
+    expect(model?.visionSource).toBeUndefined();
+    expect(model?.visionConfidence).toBeUndefined();
+    expect(model?.projectorCandidates).toBeUndefined();
+
+    const raw = storage.getString(SEARCH_CACHE_KEY) as string;
+    expect(raw).not.toContain('local-mmproj.gguf');
+    expect(raw).not.toContain('private-local-mmproj.gguf');
+    expect(raw).not.toContain('user_selected_projector');
+  });
+
+  it('rewrites existing anonymous payloads with unsafe vision provenance during hydration', () => {
+    const storage = createStorage(STORAGE_ID, { tier: 'cache' });
+    const searchScope = { query: 'q', cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };
+    const unsafeSearchModel = buildModel({
+      id: 'public/unsafe-search-vision',
+      chatModalities: ['text', 'vision'],
+      artifactRole: 'primary_chat_model',
+      visionSource: 'runtime_probe',
+      visionConfidence: 'verified',
+    });
+    const unsafeSnapshotModel = buildModel({
+      id: 'public/unsafe-snapshot-vision',
+      chatModalities: ['text', 'vision'],
+      artifactRole: 'primary_chat_model',
+      visionSource: 'user_selected_projector',
+      visionConfidence: 'trusted',
+    });
+
+    storage.set(SEARCH_CACHE_KEY, JSON.stringify({
+      version: 4,
+      entries: [{
+        key: 'q::__initial__::20::__default__::anon',
+        timestamp: Date.now(),
+        scope: searchScope,
+        result: {
+          models: [unsafeSearchModel],
+          hasMore: false,
+          nextCursor: null,
+        },
+      }],
+    }));
+    storage.set(SNAPSHOT_CACHE_KEY, JSON.stringify({
+      version: 4,
+      entries: [{
+        key: 'public/unsafe-snapshot-vision::anon',
+        id: 'public/unsafe-snapshot-vision',
+        authScope: 'anon',
+        timestamp: Date.now(),
+        model: unsafeSnapshotModel,
+      }],
+    }));
+
+    const store = new ModelCatalogCacheStore();
+    const searchModel = store.getSearch(searchScope, 1000)?.models[0];
+    const snapshotModel = store.getModelSnapshot('public/unsafe-snapshot-vision', 'anon', 1000);
+
+    expect(searchModel?.chatModalities).toEqual(['text']);
+    expect(searchModel?.visionSource).toBeUndefined();
+    expect(searchModel?.visionConfidence).toBeUndefined();
+    expect(snapshotModel?.chatModalities).toEqual(['text']);
+    expect(snapshotModel?.visionSource).toBeUndefined();
+    expect(snapshotModel?.visionConfidence).toBeUndefined();
+
+    const persistedSearch = JSON.parse(storage.getString(SEARCH_CACHE_KEY) as string) as any;
+    const persistedSnapshot = JSON.parse(storage.getString(SNAPSHOT_CACHE_KEY) as string) as any;
+    expect(persistedSearch.entries[0].result.models[0].chatModalities).toEqual(['text']);
+    expect(persistedSearch.entries[0].result.models[0].visionSource).toBeUndefined();
+    expect(persistedSearch.entries[0].result.models[0].visionConfidence).toBeUndefined();
+    expect(persistedSnapshot.entries[0].model.chatModalities).toEqual(['text']);
+    expect(persistedSnapshot.entries[0].model.visionSource).toBeUndefined();
+    expect(persistedSnapshot.entries[0].model.visionConfidence).toBeUndefined();
+  });
+
+  it('rewrites existing anonymous payloads with only projector resume data during hydration', () => {
+    const storage = createStorage(STORAGE_ID, { tier: 'cache' });
+    const searchScope = { query: 'q', cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };
+    const legacySearchModel = buildModel({
+      id: 'public/legacy-search-projector-resume',
+      chatModalities: ['text', 'vision'],
+      artifactRole: 'primary_chat_model',
+      visionSource: 'catalog_metadata',
+      visionConfidence: 'trusted',
+      projectorCandidates: [{
+        id: 'search-projector',
+        ownerModelId: 'public/legacy-search-projector-resume',
+        repoId: 'public/legacy-search-projector-resume',
+        fileName: 'mmproj-search-f16.gguf',
+        downloadUrl: 'https://huggingface.co/public/legacy-search-projector-resume/resolve/main/mmproj-search-f16.gguf',
+        size: 1024,
+        resumeData: 'legacy-search-projector-resume-token',
+        lifecycleStatus: 'available',
+        matchStatus: 'matched',
+        matchReason: 'single_projector_candidate',
+      }],
+    });
+    const legacySnapshotModel = buildModel({
+      id: 'public/legacy-variant-projector-resume',
+      variants: [{
+        variantId: 'q4',
+        fileName: 'model-q4.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: 1024,
+        chatModalities: ['text', 'vision'],
+        artifactRole: 'primary_chat_model',
+        visionSource: 'catalog_metadata',
+        visionConfidence: 'trusted',
+        projectorCandidates: [{
+          id: 'variant-projector',
+          ownerModelId: 'public/legacy-variant-projector-resume',
+          ownerVariantId: 'q4',
+          repoId: 'public/legacy-variant-projector-resume',
+          fileName: 'mmproj-variant-f16.gguf',
+          downloadUrl: 'https://huggingface.co/public/legacy-variant-projector-resume/resolve/main/mmproj-variant-f16.gguf',
+          size: 2048,
+          resumeData: 'legacy-variant-projector-resume-token',
+          lifecycleStatus: 'available',
+          matchStatus: 'matched',
+          matchReason: 'single_projector_candidate',
+        }],
+      }],
+    });
+
+    storage.set(SEARCH_CACHE_KEY, JSON.stringify({
+      version: 4,
+      entries: [{
+        key: 'q::__initial__::20::__default__::anon',
+        timestamp: Date.now(),
+        scope: searchScope,
+        result: {
+          models: [legacySearchModel],
+          hasMore: false,
+          nextCursor: null,
+        },
+      }],
+    }));
+    storage.set(SNAPSHOT_CACHE_KEY, JSON.stringify({
+      version: 4,
+      entries: [{
+        key: 'public/legacy-variant-projector-resume::anon',
+        id: 'public/legacy-variant-projector-resume',
+        authScope: 'anon',
+        timestamp: Date.now(),
+        model: legacySnapshotModel,
+      }],
+    }));
+
+    const store = new ModelCatalogCacheStore();
+    const searchProjector = store.getSearch(searchScope, 1000)?.models[0]?.projectorCandidates?.[0];
+    const snapshotVariantProjector = store
+      .getModelSnapshot('public/legacy-variant-projector-resume', 'anon', 1000)
+      ?.variants?.[0]
+      ?.projectorCandidates?.[0];
+
+    expect(searchProjector).toEqual(expect.objectContaining({
+      id: 'search-projector',
+      lifecycleStatus: 'available',
+      matchStatus: 'matched',
+    }));
+    expect(searchProjector?.resumeData).toBeUndefined();
+    expect(snapshotVariantProjector).toEqual(expect.objectContaining({
+      id: 'variant-projector',
+      lifecycleStatus: 'available',
+      matchStatus: 'matched',
+    }));
+    expect(snapshotVariantProjector?.resumeData).toBeUndefined();
+
+    expect(storage.getString(SEARCH_CACHE_KEY)).not.toContain('legacy-search-projector-resume-token');
+    expect(storage.getString(SNAPSHOT_CACHE_KEY)).not.toContain('legacy-variant-projector-resume-token');
+  });
+
+  it('rewrites existing anonymous payloads with only projector download progress during hydration', () => {
+    const storage = createStorage(STORAGE_ID, { tier: 'cache' });
+    const searchScope = { query: 'q', cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };
+    const legacySearchModel = buildModel({
+      id: 'public/legacy-search-projector-progress',
+      chatModalities: ['text', 'vision'],
+      artifactRole: 'primary_chat_model',
+      visionSource: 'catalog_metadata',
+      visionConfidence: 'trusted',
+      projectorCandidates: [{
+        id: 'search-projector',
+        ownerModelId: 'public/legacy-search-projector-progress',
+        repoId: 'public/legacy-search-projector-progress',
+        fileName: 'mmproj-search-f16.gguf',
+        downloadUrl: 'https://huggingface.co/public/legacy-search-projector-progress/resolve/main/mmproj-search-f16.gguf',
+        size: 1024,
+        downloadProgress: 0,
+        lifecycleStatus: 'available',
+        matchStatus: 'matched',
+        matchReason: 'single_projector_candidate',
+      }],
+    });
+    const legacySnapshotModel = buildModel({
+      id: 'public/legacy-variant-projector-progress',
+      variants: [{
+        variantId: 'q4',
+        fileName: 'model-q4.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: 1024,
+        chatModalities: ['text', 'vision'],
+        artifactRole: 'primary_chat_model',
+        visionSource: 'catalog_metadata',
+        visionConfidence: 'trusted',
+        projectorCandidates: [{
+          id: 'variant-projector',
+          ownerModelId: 'public/legacy-variant-projector-progress',
+          ownerVariantId: 'q4',
+          repoId: 'public/legacy-variant-projector-progress',
+          fileName: 'mmproj-variant-f16.gguf',
+          downloadUrl: 'https://huggingface.co/public/legacy-variant-projector-progress/resolve/main/mmproj-variant-f16.gguf',
+          size: 2048,
+          downloadProgress: 0,
+          lifecycleStatus: 'available',
+          matchStatus: 'matched',
+          matchReason: 'single_projector_candidate',
+        }],
+      }],
+    });
+
+    storage.set(SEARCH_CACHE_KEY, JSON.stringify({
+      version: 4,
+      entries: [{
+        key: 'q::__initial__::20::__default__::anon',
+        timestamp: Date.now(),
+        scope: searchScope,
+        result: {
+          models: [legacySearchModel],
+          hasMore: false,
+          nextCursor: null,
+        },
+      }],
+    }));
+    storage.set(SNAPSHOT_CACHE_KEY, JSON.stringify({
+      version: 4,
+      entries: [{
+        key: 'public/legacy-variant-projector-progress::anon',
+        id: 'public/legacy-variant-projector-progress',
+        authScope: 'anon',
+        timestamp: Date.now(),
+        model: legacySnapshotModel,
+      }],
+    }));
+
+    const store = new ModelCatalogCacheStore();
+    const searchProjector = store.getSearch(searchScope, 1000)?.models[0]?.projectorCandidates?.[0];
+    const snapshotVariantProjector = store
+      .getModelSnapshot('public/legacy-variant-projector-progress', 'anon', 1000)
+      ?.variants?.[0]
+      ?.projectorCandidates?.[0];
+    const persistedSearch = JSON.parse(storage.getString(SEARCH_CACHE_KEY) as string) as any;
+    const persistedSnapshot = JSON.parse(storage.getString(SNAPSHOT_CACHE_KEY) as string) as any;
+
+    expect(searchProjector?.downloadProgress).toBeUndefined();
+    expect(snapshotVariantProjector?.downloadProgress).toBeUndefined();
+    expect(persistedSearch.entries[0].result.models[0].projectorCandidates[0].downloadProgress).toBeUndefined();
+    expect(persistedSnapshot.entries[0].model.variants[0].projectorCandidates[0].downloadProgress).toBeUndefined();
+  });
+
   it('migrates version 3 search payloads to version 4 with variant limiting', () => {
     const storage = createStorage(STORAGE_ID, { tier: 'cache' });
     const scope = { query: 'q', cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };

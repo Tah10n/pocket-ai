@@ -10,15 +10,17 @@ import {
   ModelMetadata,
   LifecycleStatus,
 } from '../types/models';
+import type { ProjectorArtifact, ProjectorMatchStatus } from '../types/multimodal';
 import { registry } from './LocalStorageRegistry';
 import { getModelsDir } from './FileSystemSetup';
 import { AppError, toAppError } from './AppError';
 import { huggingFaceTokenService } from './HuggingFaceTokenService';
 import { isHuggingFaceUrl } from '../utils/huggingFaceUrls';
-import { getCandidateModelDownloadFileNames } from '../utils/modelFiles';
+import { getCandidateModelDownloadFileNames, getCandidateProjectorDownloadFileNames } from '../utils/modelFiles';
 import { estimateFastMemoryFit } from '../memory/estimator';
 import { fileUriToNativePath, isValidLocalFileName, safeJoinModelPath } from '../utils/safeFilePath';
-import { DECIMAL_GIGABYTE } from '../utils/modelSize';
+import { DECIMAL_GIGABYTE, isStoredProjectorArtifact, normalizePositiveByteSize } from '../utils/modelSize';
+import { getModelMemoryFitInputSizeBytes } from '../utils/memoryFit';
 import { hardwareListenerService, type HardwareStatus } from './HardwareListenerService';
 import { getSettings, subscribeSettings } from './SettingsStore';
 import { backgroundTaskService } from './BackgroundTaskService';
@@ -26,10 +28,14 @@ import { notificationService, type DownloadErrorReason } from './NotificationSer
 import { PrivateStorageUnavailableError, getPrivateStorageHealthSnapshot, isPrivateStorageWritable } from './storage';
 import { GgufValidationError, validateGgufFileHeader } from '../utils/ggufValidation';
 import { normalizeSha256Digest } from '../utils/sha256';
+import { normalizeDownloadResumeData } from '../utils/downloadResumeData';
+import { deriveArtifactsFromLegacyModel } from '../utils/modelArtifacts';
+import { projectorArtifactService } from './ProjectorArtifactService';
+import { llmEngineService } from './LLMEngineService';
 
 function ignorePrivateStorageUnavailableDuringDownloadStop(error: unknown, scope: string): boolean {
   if (isPrivateStorageUnavailableError(error)) {
-    console.warn(`[ModelDownloadManager] Skipped persisting ${scope} while private storage is blocked`, error);
+    console.warn(`[ModelDownloadManager] Skipped persisting ${scope} while private storage is blocked`, summarizeErrorForLog(error));
     return true;
   }
 
@@ -63,7 +69,7 @@ function assertPrivateStorageWritableForDownloadMutation(): void {
   throw new PrivateStorageUnavailableError(health.reason ?? 'unknown', health);
 }
 
-function safeSerializeResumeSnapshotValue(
+function safeNormalizeResumeSnapshotValue(
   snapshot: unknown,
   {
     modelId,
@@ -73,27 +79,19 @@ function safeSerializeResumeSnapshotValue(
     scope: string;
   },
 ): string | undefined {
-  if (snapshot == null) {
-    return undefined;
-  }
-
-  if (typeof snapshot === 'string') {
-    return snapshot;
-  }
-
-  try {
-    return JSON.stringify(snapshot);
-  } catch (error) {
+  const resumeData = normalizeDownloadResumeData(snapshot);
+  if (!resumeData && snapshot != null) {
     try {
-      console.warn(`[ModelDownloadManager] Failed to serialize resume snapshot for ${modelId} (${scope})`, error);
+      console.warn(`[ModelDownloadManager] Dropped unsafe or empty resume snapshot for ${modelId} (${scope})`);
     } catch {
       // ignore secondary logging errors
     }
-    return undefined;
   }
+
+  return resumeData;
 }
 
-function safeSerializeResumeSnapshot(
+function safeNormalizeResumeSnapshot(
   resumable: { savable?: () => unknown } | null | undefined,
   {
     modelId,
@@ -112,20 +110,73 @@ function safeSerializeResumeSnapshot(
     snapshot = resumable.savable();
   } catch (error) {
     try {
-      console.warn(`[ModelDownloadManager] Failed to snapshot resumable state for ${modelId} (${scope})`, error);
+      console.warn(`[ModelDownloadManager] Failed to snapshot resumable state for ${modelId} (${scope})`, summarizeErrorForLog(error));
     } catch {
       // ignore secondary logging errors
     }
     return undefined;
   }
 
-  return safeSerializeResumeSnapshotValue(snapshot, { modelId, scope });
+  return safeNormalizeResumeSnapshotValue(snapshot, { modelId, scope });
+}
+
+function decodeUrlPathSegment(segment: string): string | null {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return null;
+  }
+}
+
+function splitRepoIdPath(repoId: string): string[] {
+  return repoId
+    .trim()
+    .split('/')
+    .map((segment) => segment.trim())
+    .filter((segment) => segment.length > 0);
+}
+
+function isTrustedHuggingFaceResolveUrlForRepo(url: string, repoId: string): boolean {
+  if (!isHuggingFaceUrl(url)) {
+    return false;
+  }
+
+  const expectedRepoSegments = splitRepoIdPath(repoId);
+  if (expectedRepoSegments.length === 0) {
+    return false;
+  }
+
+  try {
+    const parsed = new URL(url);
+    const pathSegments = parsed.pathname
+      .split('/')
+      .filter((segment) => segment.length > 0)
+      .map(decodeUrlPathSegment);
+
+    if (pathSegments.some((segment) => segment === null)) {
+      return false;
+    }
+
+    if (pathSegments.length < expectedRepoSegments.length + 2) {
+      return false;
+    }
+
+    const repoMatches = expectedRepoSegments.every((segment, index) => (
+      pathSegments[index] === segment
+    ));
+
+    return repoMatches && pathSegments[expectedRepoSegments.length] === 'resolve';
+  } catch {
+    return false;
+  }
 }
 
 type ActiveDownloadJob = {
   modelId: string;
   jobToken: number;
   resumable: ReturnType<typeof FileSystem.createDownloadResumable> | null;
+  activeArtifact?: 'model' | 'projector';
+  activeProjectorId?: string;
   stopReason: 'pause' | 'cancel' | null;
   deferredCancelCleanupFileNames?: string[];
 };
@@ -135,6 +186,169 @@ type DownloadVerificationResult = {
   sha256?: string;
   sizeBytes: number;
 };
+
+type CorruptedDownloadProtectionOptions = {
+  excludeModelId?: string;
+  excludeProjector?: Pick<ProjectorArtifact, 'ownerModelId' | 'id'>;
+};
+
+type VerifyChecksumOptions = {
+  cleanupProtection?: CorruptedDownloadProtectionOptions;
+};
+
+type ProjectorDownloadResult = {
+  projector: ProjectorArtifact;
+  sizeBytes: number | null;
+};
+
+type DownloadMemoryFitSummary = {
+  fitsInRam: boolean | null;
+  decision: ModelMemoryFitDecision;
+  confidence: ModelMemoryFitConfidence;
+};
+
+type ReusableModelDownloadFile = {
+  fileName: string;
+  localUri: string;
+  verification: DownloadVerificationResult;
+};
+
+type ReusableProjectorDownloadFile = {
+  fileName: string;
+  sizeBytes: number | null;
+};
+
+type ResumeDiskPlanning = {
+  requiredBytes: number;
+  resumeData: string | undefined;
+};
+
+type PartialDownloadInspectionResult =
+  | { status: 'valid'; sizeBytes: number }
+  | { status: 'invalid' }
+  | { status: 'missing' };
+
+const SENSITIVE_ERROR_DETAIL_KEYS = new Set([
+  'uri',
+  'localuri',
+  'path',
+  'localpath',
+  'nativepath',
+  'filepath',
+  'absolutepath',
+  'filename',
+  'filenames',
+  'candidate',
+  'candidates',
+  'projectorid',
+  'artifactid',
+  'ownervariantid',
+]);
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isSensitiveErrorDetailKey(key: string): boolean {
+  const normalizedKey = key.toLowerCase();
+  return SENSITIVE_ERROR_DETAIL_KEYS.has(normalizedKey)
+    || normalizedKey.endsWith('uri')
+    || normalizedKey.endsWith('path');
+}
+
+function isSensitivePathLikeString(value: string): boolean {
+  const normalizedValue = value.replace(/\\/g, '/');
+  return /^file:\/\//i.test(normalizedValue)
+    || normalizedValue.includes('/models/')
+    || normalizedValue.includes('test-dir/models')
+    || /^[A-Za-z]:\//.test(normalizedValue);
+}
+
+function sanitizeDownloadErrorMessage(value: string): string {
+  return value
+    .replace(/file:\/\/[^'"),;\r\n]+?\.(?:gguf|bin|safetensors|tmp|part|download)\b/giu, '[path]')
+    .replace(/[A-Za-z]:[\\/][^'"),;\r\n]+?\.(?:gguf|bin|safetensors|tmp|part|download)\b/gu, '[path]')
+    .replace(/(?:\/data\/user|\/storage\/emulated|\/private|\/var\/mobile|test-dir\/models|test-cache\/models|[^\s'"),;]+\/models\/)[^'"),;\r\n]+?\.(?:gguf|bin|safetensors|tmp|part|download)\b/giu, '[path]')
+    .replace(/file:\/\/[^\s'"),]+/giu, '[path]')
+    .replace(/[A-Za-z]:[\\/][^\s'"),]+/gu, '[path]')
+    .replace(/(?:\/data\/user|\/storage\/emulated|\/private|\/var\/mobile|test-dir\/models|test-cache\/models|[^\s'"),]+\/models\/)[^\s'"),]+/giu, '[path]');
+}
+
+function sanitizeErrorLogValue(value: unknown): unknown {
+  if (typeof value === 'string') {
+    const sanitizedValue = sanitizeDownloadErrorMessage(value);
+    return isSensitivePathLikeString(sanitizedValue) ? '[redacted-path]' : sanitizedValue;
+  }
+
+  if (Array.isArray(value)) {
+    return value.map(sanitizeErrorLogValue);
+  }
+
+  if (isPlainObject(value)) {
+    return sanitizeErrorDetails(value);
+  }
+
+  return value;
+}
+
+function sanitizeErrorDetails(details: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+  if (!details) {
+    return undefined;
+  }
+
+  const sanitizedDetails: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(details)) {
+    if (isSensitiveErrorDetailKey(key)) {
+      continue;
+    }
+
+    sanitizedDetails[key] = sanitizeErrorLogValue(value);
+  }
+
+  return Object.keys(sanitizedDetails).length > 0 ? sanitizedDetails : undefined;
+}
+
+function getPathCategory(localUri: string): 'model_storage' | 'local_file' {
+  const modelsDir = getModelsDir();
+  return modelsDir && localUri.startsWith(modelsDir) ? 'model_storage' : 'local_file';
+}
+
+function buildVerificationErrorDetails(
+  artifact: Pick<ModelMetadata, 'id'>,
+  localUri: string,
+  details?: Record<string, unknown>,
+): Record<string, unknown> {
+  const projector = artifact as Partial<Pick<ProjectorArtifact, 'ownerModelId' | 'ownerVariantId'>>;
+  const isProjector = typeof projector.ownerModelId === 'string' && projector.ownerModelId.length > 0;
+  return {
+    modelId: projector.ownerModelId ?? artifact.id,
+    artifactKind: isProjector ? 'projector' : 'model',
+    ...(isProjector ? {} : { artifactId: artifact.id }),
+    pathCategory: getPathCategory(localUri),
+    ...(sanitizeErrorDetails(details) ?? {}),
+  };
+}
+
+function toSanitizedDownloadAppError(
+  error: unknown,
+  fallbackCode: Parameters<typeof toAppError>[1] = 'action_failed',
+): AppError {
+  const appError = toAppError(error, fallbackCode);
+  return new AppError(appError.code, sanitizeDownloadErrorMessage(appError.message), {
+    details: sanitizeErrorDetails(appError.details),
+  });
+}
+
+function summarizeErrorForLog(error: unknown): Record<string, unknown> {
+  const appError = toSanitizedDownloadAppError(error);
+  const details = appError.details;
+  return {
+    name: error instanceof Error ? error.name : appError.name,
+    code: appError.code,
+    message: sanitizeErrorLogValue(appError.message),
+    ...(details ? { details } : {}),
+  };
+}
 
 function buildDownloadIntegrityMarker(
   verification: DownloadVerificationResult,
@@ -158,6 +372,8 @@ function shouldDeleteInvalidGgufDownload(reason: GgufValidationError['reason']):
 function isFileSystemDirectory(info: { isDirectory?: boolean }): boolean {
   return info.isDirectory === true;
 }
+
+const REQUIRED_DOWNLOAD_BUFFER_BYTES = DECIMAL_GIGABYTE; // 1 GB
 
 export class ModelDownloadManager {
   private static instance: ModelDownloadManager | undefined;
@@ -212,8 +428,9 @@ export class ModelDownloadManager {
       return;
     }
 
-    ModelDownloadManager.instance.dispose();
-    await ModelDownloadManager.instance.stopActiveJobForPrivateStorageReset({ clearQueue: true });
+    const instance = ModelDownloadManager.instance;
+    await instance.stopActiveJobForPrivateStorageReset({ clearQueue: true });
+    instance.dispose();
     ModelDownloadManager.instance = undefined;
   }
 
@@ -239,7 +456,7 @@ export class ModelDownloadManager {
   }
 
   private getDownloadFailureUpdates(error: unknown, resumeData?: string): Partial<ModelMetadata> {
-    const appError = toAppError(error);
+    const appError = toSanitizedDownloadAppError(error);
     const shouldDiscardResumeData = appError.code === 'download_verification_failed'
       || appError.code === 'download_file_missing';
 
@@ -253,50 +470,441 @@ export class ModelDownloadManager {
     };
   }
 
-  private async stopActiveJobForPrivateStorageReset(options: { clearQueue: boolean }): Promise<void> {
-    const job = this.activeJob;
-    if (job) {
-      job.stopReason = 'cancel';
+  private resolveProjectorForDownload(model: ModelMetadata): ProjectorArtifact | null {
+    const resolution = projectorArtifactService.resolveProjectorForModel(model);
+
+    return resolution.selectedProjector
+      ? {
+        ...resolution.selectedProjector,
+        matchReason: resolution.reason,
+      }
+      : null;
+  }
+
+  private getProjectorDownloadFileNameCandidates(
+    projector: Pick<ProjectorArtifact, 'id' | 'repoId' | 'fileName' | 'hfRevision' | 'ownerModelId' | 'ownerVariantId' | 'localPath'>,
+  ): string[] {
+    return Array.from(new Set([
+      ...(isValidLocalFileName(projector.localPath) ? [projector.localPath] : []),
+      ...getCandidateProjectorDownloadFileNames(projector, { includeRawFileName: false }),
+    ]));
+  }
+
+  private getProjectorFileNameCandidatesForProtection(
+    projector: Pick<ProjectorArtifact, 'id' | 'repoId' | 'fileName' | 'hfRevision' | 'ownerModelId' | 'ownerVariantId' | 'localPath'>,
+  ): string[] {
+    return Array.from(new Set([
+      ...(isValidLocalFileName(projector.localPath) ? [projector.localPath] : []),
+      ...getCandidateProjectorDownloadFileNames(projector),
+    ]));
+  }
+
+  private isActiveQueuedModelFileOwner(model: Pick<ModelMetadata, 'lifecycleStatus'>): boolean {
+    return model.lifecycleStatus === LifecycleStatus.QUEUED
+      || model.lifecycleStatus === LifecycleStatus.PAUSED
+      || model.lifecycleStatus === LifecycleStatus.DOWNLOADING
+      || model.lifecycleStatus === LifecycleStatus.VERIFYING;
+  }
+
+  private isActiveQueuedProjectorFileOwner(projector: Pick<ProjectorArtifact, 'lifecycleStatus'>): boolean {
+    return projector.lifecycleStatus === 'queued'
+      || projector.lifecycleStatus === 'paused'
+      || projector.lifecycleStatus === 'downloading';
+  }
+
+  private getProtectedQueuedDownloadFileNames(options: {
+    excludeModelId?: string;
+    excludeProjector?: Pick<ProjectorArtifact, 'ownerModelId' | 'id'>;
+  } = {}): Set<string> {
+    const protectedFileNames = new Set<string>();
+
+    for (const model of useDownloadStore.getState().queue) {
+      if (this.isActiveQueuedModelFileOwner(model) && model.id !== options.excludeModelId) {
+        for (const fileName of this.getDownloadFileNameCandidates(model)) {
+          protectedFileNames.add(fileName);
+        }
+      }
+
+      for (const projector of model.projectorCandidates ?? []) {
+        if (model.id === options.excludeModelId) {
+          continue;
+        }
+
+        const isExcludedProjector = options.excludeProjector
+          && projector.ownerModelId === options.excludeProjector.ownerModelId
+          && projector.id === options.excludeProjector.id;
+        if (isExcludedProjector || !this.isActiveQueuedProjectorFileOwner(projector)) {
+          continue;
+        }
+
+        for (const fileName of this.getProjectorFileNameCandidatesForProtection(projector)) {
+          protectedFileNames.add(fileName);
+        }
+      }
     }
 
-    this.isProcessing = true;
-    this.nextJobToken += 1;
-    this.activeJob = null;
-    if (options.clearQueue) {
-      setDownloadRuntimeStateForStorageStop({ queue: [], activeDownloadId: null }, 'download reset state');
-    } else if (job) {
-      const currentState = useDownloadStore.getState();
-      setDownloadRuntimeStateForStorageStop({
-        activeDownloadId: null,
-        queue: currentState.queue.map((model) => (
-          model.id === job.modelId && (
-            model.lifecycleStatus === LifecycleStatus.DOWNLOADING
-            || model.lifecycleStatus === LifecycleStatus.VERIFYING
-          )
-            ? { ...model, lifecycleStatus: LifecycleStatus.QUEUED, downloadProgress: 0 }
-            : model
-        )),
-      }, 'download blocked state');
-    } else {
-      setDownloadRuntimeStateForStorageStop({ activeDownloadId: null }, 'download blocked idle state');
+    return protectedFileNames;
+  }
+
+  private getUnsafeResumeDownloadFileNames(options: {
+    excludeModelId?: string;
+    excludeProjector?: Pick<ProjectorArtifact, 'ownerModelId' | 'id'>;
+  } = {}): Set<string> {
+    return new Set([
+      ...this.getProtectedCompletedModelFileNames(options),
+      ...this.getProtectedQueuedDownloadFileNames(options),
+    ]);
+  }
+
+  private updateProjectorCandidates(
+    model: Pick<ModelMetadata, 'projectorCandidates'>,
+    projectorId: string,
+    updates: Partial<ProjectorArtifact>,
+  ): ProjectorArtifact[] | undefined {
+    if (!model.projectorCandidates?.length) {
+      return undefined;
+    }
+
+    return model.projectorCandidates.map((projector) => (
+      projector.id === projectorId
+        ? { ...projector, ...updates }
+        : projector
+    ));
+  }
+
+  private getQueuedModel(modelId: string, fallbackModel: ModelMetadata): ModelMetadata {
+    return useDownloadStore.getState().queue.find((queuedModel) => queuedModel.id === modelId) ?? fallbackModel;
+  }
+
+  private getSafePartialDownloadSizeBytes(info: { exists?: boolean; isDirectory?: boolean; size?: number }): number | null {
+    if (!info.exists || isFileSystemDirectory(info)) {
+      return null;
+    }
+
+    return typeof info.size === 'number' && Number.isFinite(info.size) && info.size > 0
+      ? Math.round(info.size)
+      : null;
+  }
+
+  private async findExistingPartialDownloadSizeBytes(
+    modelsDir: string,
+    fileNameCandidates: string[],
+    unsafeFileNames: ReadonlySet<string> = new Set<string>(),
+  ): Promise<PartialDownloadInspectionResult> {
+    let foundUnsafeExistingPartial = false;
+
+    for (const fileName of Array.from(new Set(fileNameCandidates))) {
+      const localUri = safeJoinModelPath(modelsDir, fileName);
+      if (!localUri) {
+        continue;
+      }
+
+      try {
+        const info = await FileSystem.getInfoAsync(localUri);
+        const partialSizeBytes = this.getSafePartialDownloadSizeBytes(info);
+        if (partialSizeBytes !== null) {
+          if (unsafeFileNames.has(fileName)) {
+            foundUnsafeExistingPartial = true;
+            continue;
+          }
+
+          return { status: 'valid', sizeBytes: partialSizeBytes };
+        }
+      } catch (error) {
+        console.warn('[ModelDownloadManager] Failed to inspect resumable partial during disk planning', {
+          artifactKind: 'model',
+          pathCategory: 'model_storage',
+          ...summarizeErrorForLog(error),
+        });
+      }
+    }
+
+    return foundUnsafeExistingPartial ? { status: 'invalid' } : { status: 'missing' };
+  }
+
+  private async planResumeDiskRequirement({
+    expectedSizeBytes,
+    fileNameCandidates,
+    modelsDir,
+    resumeData,
+    unsafeFileNames = new Set<string>(),
+  }: {
+    expectedSizeBytes: number | null;
+    fileNameCandidates: string[];
+    modelsDir: string;
+    resumeData: unknown;
+    unsafeFileNames?: ReadonlySet<string>;
+  }): Promise<ResumeDiskPlanning> {
+    const fullRequiredBytes = expectedSizeBytes ?? 0;
+    const normalizedResumeData = normalizeDownloadResumeData(resumeData);
+    if (!normalizedResumeData) {
+      return { requiredBytes: fullRequiredBytes, resumeData: undefined };
+    }
+
+    const partialInspection = await this.findExistingPartialDownloadSizeBytes(modelsDir, fileNameCandidates, unsafeFileNames);
+    if (
+      partialInspection.status !== 'valid'
+      || (expectedSizeBytes !== null && partialInspection.sizeBytes > expectedSizeBytes)
+    ) {
+      return { requiredBytes: fullRequiredBytes, resumeData: undefined };
+    }
+
+    return {
+      requiredBytes: expectedSizeBytes === null
+        ? 0
+        : Math.max(0, expectedSizeBytes - partialInspection.sizeBytes),
+      resumeData: normalizedResumeData,
+    };
+  }
+
+  private hasPartialResumeOrProgressState(artifact: {
+    resumeData?: unknown;
+    downloadProgress?: number;
+  }): boolean {
+    return artifact.resumeData != null
+      || (
+        typeof artifact.downloadProgress === 'number'
+        && Number.isFinite(artifact.downloadProgress)
+        && artifact.downloadProgress > 0
+        && artifact.downloadProgress < 1
+      );
+  }
+
+  private async resolveReusableModelFile(
+    model: Pick<ModelMetadata, 'id' | 'localPath' | 'size' | 'sha256' | 'downloadProgress' | 'downloadIntegrity' | 'metadataTrust'>,
+    modelsDir: string,
+  ): Promise<ReusableModelDownloadFile | null> {
+    if (!isValidLocalFileName(model.localPath)) {
+      return null;
+    }
+
+    const hasVerifiedCheckpoint = model.downloadProgress === 1
+      || model.downloadIntegrity !== undefined
+      || model.metadataTrust === 'verified_local';
+    if (!hasVerifiedCheckpoint) {
+      return null;
+    }
+
+    const localUri = safeJoinModelPath(modelsDir, model.localPath);
+    if (!localUri) {
+      return null;
+    }
+
+    const fileInfo = await FileSystem.getInfoAsync(localUri);
+    if (!fileInfo.exists || isFileSystemDirectory(fileInfo)) {
+      return null;
     }
 
     try {
+      return {
+        fileName: model.localPath,
+        localUri,
+        verification: await this.verifyChecksum(model, localUri),
+      };
+    } catch (error) {
+      console.warn(`[ModelDownloadManager] Existing model artifact for ${model.id} cannot be reused`, summarizeErrorForLog(error));
+      return null;
+    }
+  }
+
+  private buildBaseModelCheckpointUpdates({
+    model,
+    fileName,
+    downloadedSize,
+    verification,
+    preserveExistingVerifiedLocalMetadata,
+  }: {
+    model: ModelMetadata;
+    fileName: string;
+    downloadedSize: number | null;
+    verification: DownloadVerificationResult;
+    preserveExistingVerifiedLocalMetadata: boolean;
+  }): Partial<ModelMetadata> {
+    const hasTrustedIntegrity = verification.integrity === 'sha256';
+    const hasPositiveDownloadedSize = typeof downloadedSize === 'number' && Number.isFinite(downloadedSize) && downloadedSize > 0;
+    const existingVerifiedLocalSha256 = preserveExistingVerifiedLocalMetadata && model.metadataTrust === 'verified_local'
+      ? normalizeSha256Digest(model.downloadIntegrity?.sha256)
+      : undefined;
+    const metadataTrust = hasTrustedIntegrity && hasPositiveDownloadedSize
+      ? 'verified_local' as const
+      : preserveExistingVerifiedLocalMetadata && model.metadataTrust === 'verified_local'
+        ? 'verified_local' as const
+        : model.metadataTrust === 'verified_local'
+          ? undefined
+          : model.metadataTrust;
+    const shouldCarryForwardGgufMetadata = hasTrustedIntegrity
+      || model.metadataTrust === 'trusted_remote'
+      || (preserveExistingVerifiedLocalMetadata && model.metadataTrust === 'verified_local');
+    const ggufMetadata = shouldCarryForwardGgufMetadata ? model.gguf : undefined;
+    const downloadIntegrity = buildDownloadIntegrityMarker(verification);
+    const strongestDownloadIntegrity = preserveExistingVerifiedLocalMetadata
+      && model.downloadIntegrity?.kind === 'sha256'
+      && verification.integrity !== 'sha256'
+      ? model.downloadIntegrity
+      : downloadIntegrity ?? (preserveExistingVerifiedLocalMetadata ? model.downloadIntegrity : undefined);
+
+    return {
+      size: downloadedSize ?? null,
+      metadataTrust,
+      downloadIntegrity: strongestDownloadIntegrity,
+      gguf: shouldCarryForwardGgufMetadata && hasPositiveDownloadedSize
+        ? {
+          ...(ggufMetadata ?? {}),
+          totalBytes: Math.round(downloadedSize),
+        }
+        : ggufMetadata,
+      localPath: fileName,
+      downloadProgress: 1,
+      allowUnknownSizeDownload: false,
+      resumeData: undefined,
+      downloadErrorAt: undefined,
+      downloadErrorCode: undefined,
+      downloadErrorMessage: undefined,
+      sha256: verification.sha256 ?? normalizeSha256Digest(model.sha256) ?? existingVerifiedLocalSha256,
+    };
+  }
+
+  private buildProjectorQueueUpdates(
+    model: ModelMetadata,
+    projector: ProjectorArtifact,
+    updates: Partial<ProjectorArtifact>,
+  ): Partial<ModelMetadata> {
+    const projectorCandidates = this.updateProjectorCandidates(model, projector.id, {
+      matchStatus: projector.matchStatus,
+      matchReason: projector.matchReason,
+      ...updates,
+    });
+
+    return projectorCandidates ? { projectorCandidates } : {};
+  }
+
+  private updateQueuedProjector(
+    modelId: string,
+    fallbackModel: ModelMetadata,
+    projector: ProjectorArtifact,
+    updates: Partial<ProjectorArtifact>,
+  ): void {
+    const { updateModelInQueue } = useDownloadStore.getState();
+    const queuedModel = this.getQueuedModel(modelId, fallbackModel);
+    const queueUpdates = this.buildProjectorQueueUpdates(queuedModel, projector, updates);
+    if (queueUpdates.projectorCandidates) {
+      updateModelInQueue(modelId, queueUpdates);
+    }
+  }
+
+  private getProjectorFailureUpdates(
+    model: ModelMetadata,
+    projectorId: string | undefined,
+    error: unknown,
+    resumeData?: string,
+  ): Partial<ModelMetadata> {
+    if (!projectorId) {
+      return {};
+    }
+
+    const appError = toSanitizedDownloadAppError(error);
+    const shouldDiscardResumeData = appError.code === 'download_verification_failed'
+      || appError.code === 'download_file_missing';
+    const normalizedResumeData = shouldDiscardResumeData ? undefined : resumeData;
+    const shouldClearLocalPath = shouldDiscardResumeData
+      || (appError.code === 'download_disk_space_low' && normalizedResumeData === undefined);
+    const projectorCandidates = this.updateProjectorCandidates(model, projectorId, {
+      lifecycleStatus: 'failed',
+      matchStatus: 'failed',
+      matchReason: appError.code,
+      resumeData: normalizedResumeData,
+      ...(normalizedResumeData
+        ? {}
+        : {
+          ...(shouldClearLocalPath ? { localPath: undefined } : {}),
+          downloadProgress: undefined,
+        }),
+    });
+
+    return projectorCandidates ? { projectorCandidates } : {};
+  }
+
+  private buildTextReadyModelAfterProjectorFailure({
+    model,
+    projectorFailureUpdates,
+    memoryFit,
+  }: {
+    model: ModelMetadata;
+    projectorFailureUpdates: Partial<ModelMetadata>;
+    memoryFit: DownloadMemoryFitSummary;
+  }): ModelMetadata {
+    return {
+      ...model,
+      ...projectorFailureUpdates,
+      fitsInRam: memoryFit.fitsInRam,
+      memoryFitDecision: memoryFit.decision,
+      memoryFitConfidence: memoryFit.confidence,
+      downloadedAt: Date.now(),
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      resumeData: undefined,
+      downloadErrorAt: undefined,
+      downloadErrorCode: undefined,
+      downloadErrorMessage: undefined,
+    };
+  }
+
+  private withSynchronizedArtifacts(model: ModelMetadata): ModelMetadata {
+    const artifacts = deriveArtifactsFromLegacyModel(model, { preferLegacyRuntimeState: true });
+    return artifacts.length > 0 ? { ...model, artifacts } : model;
+  }
+
+  private async stopActiveJobForPrivateStorageReset(options: { clearQueue: boolean }): Promise<void> {
+    const job = this.activeJob;
+
+    this.isProcessing = true;
+
+    try {
+      if (job) {
+        job.stopReason = 'cancel';
+      }
+
+      this.nextJobToken += 1;
+      if (!job || this.activeJob === job) {
+        this.activeJob = null;
+      }
+
+      if (options.clearQueue) {
+        setDownloadRuntimeStateForStorageStop({ queue: [], activeDownloadId: null }, 'download reset state');
+      } else if (job) {
+        const currentState = useDownloadStore.getState();
+        setDownloadRuntimeStateForStorageStop({
+          activeDownloadId: null,
+          queue: currentState.queue.map((model) => (
+            model.id === job.modelId && (
+              model.lifecycleStatus === LifecycleStatus.DOWNLOADING
+              || model.lifecycleStatus === LifecycleStatus.VERIFYING
+            )
+              ? { ...model, lifecycleStatus: LifecycleStatus.QUEUED, downloadProgress: 0 }
+              : model
+          )),
+        }, 'download blocked state');
+      } else {
+        setDownloadRuntimeStateForStorageStop({ activeDownloadId: null }, 'download blocked idle state');
+      }
+
       if (job?.resumable) {
         try {
           await job.resumable.pauseAsync();
         } catch (error) {
-          console.warn(`[ModelDownloadManager] Failed to pause active download during private storage reset for ${job.modelId}`, error);
+          console.warn(`[ModelDownloadManager] Failed to pause active download during private storage reset for ${job.modelId}`, summarizeErrorForLog(error));
         }
       }
 
       if (backgroundTaskService.isTaskActive('download')) {
         await backgroundTaskService.stopBackgroundTask('download').catch((error) => {
-          console.warn('[ModelDownloadManager] Failed to stop background download task during private storage reset', error);
+          console.warn('[ModelDownloadManager] Failed to stop background download task during private storage reset', summarizeErrorForLog(error));
         });
       }
     } finally {
-      this.isProcessing = false;
+      if (!job || this.activeJob !== job) {
+        this.isProcessing = false;
+      }
     }
   }
 
@@ -393,7 +1001,7 @@ export class ModelDownloadManager {
     try {
       useDownloadStore.setState({ activeDownloadId: null });
     } catch (error) {
-      console.warn(`[ModelDownloadManager] Failed to clear active download after queue start failure for ${modelId}`, error);
+      console.warn(`[ModelDownloadManager] Failed to clear active download after queue start failure for ${modelId}`, summarizeErrorForLog(error));
     } finally {
       this.queueProcessingHoldCount = Math.max(0, this.queueProcessingHoldCount - 1);
     }
@@ -455,7 +1063,7 @@ export class ModelDownloadManager {
 
       await this.downloadModel(model, jobToken);
     } catch (e) {
-      console.error(`[ModelDownloadManager] Failed to download ${model.id}`, e);
+      console.error(`[ModelDownloadManager] Failed to download ${model.id}`, summarizeErrorForLog(e));
 
       if (this.isCurrentJob(model.id, jobToken)) {
         await this.persistDownloadStoreMutation(() => {
@@ -481,7 +1089,7 @@ export class ModelDownloadManager {
         try {
           await this.deleteDownloadFiles(deferredCancelCleanupFileNames, model.id);
         } catch (error) {
-          console.error(`[ModelDownloadManager] Failed to delete deferred canceled partial file for ${model.id}`, error);
+          console.error(`[ModelDownloadManager] Failed to delete deferred canceled partial file for ${model.id}`, summarizeErrorForLog(error));
         }
       }
 
@@ -513,7 +1121,7 @@ export class ModelDownloadManager {
       try {
         await this.pauseDownload(activeDownloadId);
       } catch (error) {
-        console.warn('[ModelDownloadManager] Failed to pause download after cellular transition', error);
+        console.warn('[ModelDownloadManager] Failed to pause download after cellular transition', summarizeErrorForLog(error));
       }
 
       // Update the foreground-service notification (Android) / cached notification details (iOS)
@@ -533,6 +1141,14 @@ export class ModelDownloadManager {
   private async downloadModel(model: ModelMetadata, jobToken: number) {
     const { updateModelInQueue, removeFromQueue, setActiveDownload } = useDownloadStore.getState();
     let resumable: ActiveDownloadJob['resumable'] = null;
+    const modelsDir = getModelsDir();
+    const selectedProjector = this.resolveProjectorForDownload(model);
+    let reusableModelFile: ReusableModelDownloadFile | null = null;
+    let reusableProjectorFile: ReusableProjectorDownloadFile | null = null;
+    let baseModelMemoryFit: DownloadMemoryFitSummary | null = null;
+    let downloadStage: 'base' | 'projector' | 'finalizing' = 'base';
+    let modelResumeDiskPlanning: ResumeDiskPlanning | null = null;
+    let projectorResumeDiskPlanning: ResumeDiskPlanning | null = null;
 
     try {
       if (!this.isCurrentJob(model.id, jobToken)) {
@@ -549,25 +1165,81 @@ export class ModelDownloadManager {
         });
       }
 
-      if (model.size === null && !model.allowUnknownSizeDownload) {
+      if (!modelsDir) {
+        throw new AppError('action_failed', 'Local file system is unavailable on this platform.', {
+          details: { modelId: model.id },
+        });
+      }
+
+      reusableModelFile = await this.resolveReusableModelFile(model, modelsDir);
+      modelResumeDiskPlanning = reusableModelFile
+        ? { requiredBytes: 0, resumeData: undefined }
+        : await this.planResumeDiskRequirement({
+          expectedSizeBytes: normalizePositiveByteSize(model.size),
+          fileNameCandidates: this.getDownloadFileNameCandidates(model),
+          modelsDir,
+          resumeData: model.resumeData,
+          unsafeFileNames: this.getUnsafeResumeDownloadFileNames({ excludeModelId: model.id }),
+        });
+      if (!reusableModelFile && model.size === null && !model.allowUnknownSizeDownload) {
         throw new AppError('download_size_unknown', 'MODEL_SIZE_UNKNOWN', {
           details: { modelId: model.id },
         });
+      }
+
+      if (selectedProjector) {
+        reusableProjectorFile = await this.resolveReusableProjectorFile(selectedProjector, modelsDir);
+        projectorResumeDiskPlanning = reusableProjectorFile
+          ? { requiredBytes: 0, resumeData: undefined }
+          : await this.planResumeDiskRequirement({
+            expectedSizeBytes: normalizePositiveByteSize(selectedProjector.size),
+            fileNameCandidates: this.getProjectorDownloadFileNameCandidates(selectedProjector),
+            modelsDir,
+            resumeData: selectedProjector.resumeData,
+            unsafeFileNames: this.getUnsafeResumeDownloadFileNames({ excludeProjector: selectedProjector }),
+          });
+
+        if (!this.isCurrentJob(model.id, jobToken)) {
+          return;
+        }
+
+        if (this.getStopReason(model.id, jobToken)) {
+          return;
+        }
       }
 
       const freeSpace = await FileSystem.getFreeDiskStorageAsync();
       if (this.getStopReason(model.id, jobToken)) {
         return;
       }
-      const REQUIRED_BUFFER_BYTES = DECIMAL_GIGABYTE; // 1 GB
-      const requiredModelBytes = model.size ?? 0;
-      if (model.size !== null && freeSpace !== undefined && freeSpace < requiredModelBytes + REQUIRED_BUFFER_BYTES) {
+      const requiredModelBytes = modelResumeDiskPlanning?.requiredBytes ?? (reusableModelFile ? 0 : model.size ?? 0);
+      const selectedProjectorSizeBytes = selectedProjector
+        ? normalizePositiveByteSize(selectedProjector.size)
+        : null;
+      const hasUnknownProjectorDiskRequirement = selectedProjector !== null
+        && !reusableProjectorFile
+        && selectedProjectorSizeBytes === null;
+      const requiredProjectorBytes = projectorResumeDiskPlanning?.requiredBytes ?? (
+        selectedProjector && !reusableProjectorFile
+          ? selectedProjectorSizeBytes ?? 0
+          : 0
+      );
+      const requiredBytes = requiredModelBytes + requiredProjectorBytes + REQUIRED_DOWNLOAD_BUFFER_BYTES;
+      const hasKnownDiskRequirement = requiredModelBytes > 0
+        || requiredProjectorBytes > 0
+        || hasUnknownProjectorDiskRequirement;
+      if (hasKnownDiskRequirement && freeSpace !== undefined && freeSpace < requiredBytes) {
         throw new AppError('download_disk_space_low', 'DISK_SPACE_LOW', {
-          details: { modelId: model.id, freeSpace, requiredBytes: requiredModelBytes + REQUIRED_BUFFER_BYTES },
+          details: {
+            modelId: model.id,
+            ...(selectedProjector ? { artifactKind: 'projector' } : null),
+            freeSpace,
+            requiredBytes,
+          },
         });
       }
     } catch (e: any) {
-      console.error(`[ModelDownloadManager] Pre-download check failed for ${model.id}:`, e.message);
+      console.error(`[ModelDownloadManager] Pre-download check failed for ${model.id}:`, summarizeErrorForLog(e));
 
       const stopReason = this.getStopReason(model.id, jobToken);
       if (stopReason) {
@@ -581,7 +1253,28 @@ export class ModelDownloadManager {
       if (this.isCurrentJob(model.id, jobToken)) {
         try {
           assertPrivateStorageWritableForDownloadMutation();
-          updateModelInQueue(model.id, this.getDownloadFailureUpdates(e));
+          const currentModel = this.getQueuedModel(model.id, model);
+          const preflightError = toSanitizedDownloadAppError(e);
+          const failedProjectorId = preflightError.code === 'download_disk_space_low'
+            ? selectedProjector?.id
+            : undefined;
+          const failedProjector = failedProjectorId
+            ? currentModel.projectorCandidates?.find((projector) => projector.id === failedProjectorId)
+            : undefined;
+          const modelResumeDataForFailure = modelResumeDiskPlanning
+            ? modelResumeDiskPlanning.resumeData
+            : normalizeDownloadResumeData(currentModel.resumeData);
+          const projectorResumeDataForFailure = projectorResumeDiskPlanning
+            ? projectorResumeDiskPlanning.resumeData
+            : normalizeDownloadResumeData(failedProjector?.resumeData);
+          const shouldClearInvalidModelPartialState = modelResumeDiskPlanning !== null
+            && modelResumeDiskPlanning.resumeData === undefined
+            && this.hasPartialResumeOrProgressState(currentModel);
+          updateModelInQueue(model.id, {
+            ...this.getDownloadFailureUpdates(e, modelResumeDataForFailure),
+            ...(shouldClearInvalidModelPartialState ? { localPath: undefined, downloadProgress: 0 } : {}),
+            ...this.getProjectorFailureUpdates(currentModel, failedProjectorId, e, projectorResumeDataForFailure),
+          });
           setActiveDownload(null);
         } catch (storageError) {
           if (await this.handlePrivateStorageUnavailable(storageError)) {
@@ -598,22 +1291,15 @@ export class ModelDownloadManager {
       return;
     }
 
-    const modelsDir = getModelsDir();
-    if (!modelsDir) {
-      throw new AppError('action_failed', 'Local file system is unavailable on this platform.', {
-        details: { modelId: model.id },
-      });
-    }
-
-    const fileName = await this.resolveDownloadFileName(model, modelsDir);
+    const fileName = reusableModelFile?.fileName ?? await this.resolveDownloadFileName(model, modelsDir);
     if (this.getStopReason(model.id, jobToken)) {
       return;
     }
 
-    const localUri = safeJoinModelPath(modelsDir, fileName);
+    const localUri = reusableModelFile?.localUri ?? safeJoinModelPath(modelsDir, fileName);
     if (!localUri) {
-      throw new AppError('action_failed', `Invalid download file name: ${fileName}`, {
-        details: { modelId: model.id },
+      throw new AppError('action_failed', 'Invalid download file name', {
+        details: { modelId: model.id, artifactKind: 'model' },
       });
     }
 
@@ -675,7 +1361,7 @@ export class ModelDownloadManager {
           } catch (error) {
             void this.handlePrivateStorageUnavailable(error).then((handled) => {
               if (!handled) {
-                console.warn(`[ModelDownloadManager] Failed to persist progress for ${model.id}`, error);
+                console.warn(`[ModelDownloadManager] Failed to persist progress for ${model.id}`, summarizeErrorForLog(error));
               }
             });
           }
@@ -700,28 +1386,23 @@ export class ModelDownloadManager {
       }
     };
 
-    // Extract actual resumeData string from saved state if it exists
-    let resumeString: string | undefined = undefined;
-    if (model.resumeData) {
-      try {
-        const pauseState = JSON.parse(model.resumeData);
-        resumeString = pauseState.resumeData || model.resumeData;
-      } catch {
-        resumeString = model.resumeData;
+    const resumeString = modelResumeDiskPlanning?.resumeData;
+
+    if (!reusableModelFile) {
+      // Prepare DownloadResumable
+      resumable = FileSystem.createDownloadResumable(
+        model.downloadUrl,
+        localUri,
+        await this.buildDownloadOptions(model, model.downloadUrl, model.id),
+        callback,
+        resumeString
+      );
+
+      if (this.isCurrentJob(model.id, jobToken) && this.activeJob) {
+        this.activeJob.resumable = resumable;
+        this.activeJob.activeArtifact = 'model';
+        this.activeJob.activeProjectorId = undefined;
       }
-    }
-
-    // Prepare DownloadResumable
-    resumable = FileSystem.createDownloadResumable(
-      model.downloadUrl,
-      localUri,
-      await this.buildDownloadOptions(model),
-      callback,
-      resumeString
-    );
-
-    if (this.isCurrentJob(model.id, jobToken) && this.activeJob) {
-      this.activeJob.resumable = resumable;
     }
 
     try {
@@ -734,63 +1415,84 @@ export class ModelDownloadManager {
       }
 
       assertPrivateStorageWritableForDownloadMutation();
+      const latestQueuedModel = this.getQueuedModel(model.id, model);
+      const shouldClearModelPartialStateForCleanStart = !reusableModelFile
+        && resumeString === undefined
+        && this.hasPartialResumeOrProgressState(latestQueuedModel);
       updateModelInQueue(model.id, {
         lifecycleStatus: LifecycleStatus.DOWNLOADING,
-        downloadIntegrity: undefined,
+        ...(resumeString !== undefined
+          ? { resumeData: resumeString }
+          : shouldClearModelPartialStateForCleanStart
+            ? { resumeData: undefined, localPath: undefined, downloadProgress: 0 }
+            : {}),
+        ...(reusableModelFile ? {} : { downloadIntegrity: undefined }),
         downloadErrorAt: undefined,
         downloadErrorCode: undefined,
         downloadErrorMessage: undefined,
+        ...(selectedProjector
+          ? this.buildProjectorQueueUpdates(latestQueuedModel, selectedProjector, { lifecycleStatus: 'queued' })
+          : {}),
       });
       
-      const result = await resumable.downloadAsync();
+      let verification = reusableModelFile?.verification ?? null;
+      if (!reusableModelFile) {
+        const result = await resumable?.downloadAsync();
 
-      if (!this.isCurrentJob(model.id, jobToken)) {
-        return;
-      }
+        if (!this.isCurrentJob(model.id, jobToken)) {
+          return;
+        }
 
-      if (this.getStopReason(model.id, jobToken)) {
-        return;
-      }
-      
-      if (!result) {
-        console.warn(`[ModelDownloadManager] downloadAsync returned undefined. Marking ${model.id} as paused to avoid a stuck queue.`);
+        if (this.getStopReason(model.id, jobToken)) {
+          return;
+        }
 
-        const updates: Partial<ModelMetadata> = { lifecycleStatus: LifecycleStatus.PAUSED };
-        const resumeData = safeSerializeResumeSnapshot(resumable as any, { modelId: model.id, scope: 'downloadAsync(undefined)' });
-        if (resumeData) {
-          updates.resumeData = resumeData;
+        if (!result) {
+          console.warn(`[ModelDownloadManager] downloadAsync returned undefined. Marking ${model.id} as paused to avoid a stuck queue.`);
+
+          const updates: Partial<ModelMetadata> = { lifecycleStatus: LifecycleStatus.PAUSED };
+          const resumeData = safeNormalizeResumeSnapshot(resumable as any, { modelId: model.id, scope: 'downloadAsync(undefined)' });
+          if (resumeData) {
+            updates.resumeData = resumeData;
+          }
+
+          assertPrivateStorageWritableForDownloadMutation();
+          updateModelInQueue(model.id, updates);
+          setActiveDownload(null);
+
+          void backgroundTaskService.startBackgroundDownload({ type: 'downloadPaused' }).catch((error) => {
+            console.warn('[ModelDownloadManager] Failed to update paused download notification', summarizeErrorForLog(error));
+          });
+
+          return;
+        }
+
+        // On some Android environments, status might be missing from result
+        if (result.status && result.status >= 400) {
+          throw new AppError('download_http_error', `Download failed with HTTP status ${result.status}`, {
+            details: { modelId: model.id, status: result.status },
+          });
         }
 
         assertPrivateStorageWritableForDownloadMutation();
-        updateModelInQueue(model.id, updates);
-        setActiveDownload(null);
+        updateModelInQueue(model.id, { lifecycleStatus: LifecycleStatus.VERIFYING });
 
-        void backgroundTaskService.startBackgroundDownload({ type: 'downloadPaused' }).catch((error) => {
-          console.warn('[ModelDownloadManager] Failed to update paused download notification', error);
+        if (!this.isCurrentJob(model.id, jobToken)) {
+          return;
+        }
+
+        if (this.getStopReason(model.id, jobToken)) {
+          return;
+        }
+
+        verification = await this.verifyChecksum(model, localUri);
+      }
+
+      if (!verification) {
+        throw new AppError('download_verification_failed', 'Download verification result is unavailable', {
+          details: { modelId: model.id },
         });
-
-        return;
       }
-
-      // On some Android environments, status might be missing from result
-      if (result.status && result.status >= 400) {
-        throw new AppError('download_http_error', `Download failed with HTTP status ${result.status}`, {
-          details: { modelId: model.id, status: result.status },
-        });
-      }
-
-      assertPrivateStorageWritableForDownloadMutation();
-      updateModelInQueue(model.id, { lifecycleStatus: LifecycleStatus.VERIFYING });
-
-      if (!this.isCurrentJob(model.id, jobToken)) {
-        return;
-      }
-
-      if (this.getStopReason(model.id, jobToken)) {
-        return;
-      }
-
-      const verification = await this.verifyChecksum(model, localUri);
 
       if (!this.isCurrentJob(model.id, jobToken)) {
         return;
@@ -815,7 +1517,7 @@ export class ModelDownloadManager {
             ? 'Downloaded path became a directory before completion'
             : 'Downloaded file disappeared before completion',
           {
-            details: { modelId: model.id, localUri },
+            details: buildVerificationErrorDetails(model, localUri),
           },
         );
       }
@@ -828,15 +1530,81 @@ export class ModelDownloadManager {
       )
         ? Math.round(downloadedFileInfo.size)
         : model.size;
-      const hasTrustedIntegrity = verification.integrity === 'sha256';
-      const metadataTrust = hasTrustedIntegrity && typeof downloadedSize === 'number' && Number.isFinite(downloadedSize) && downloadedSize > 0
-        ? 'verified_local' as const
-        : model.metadataTrust === 'verified_local'
-          ? undefined
-          : model.metadataTrust;
-      const shouldCarryForwardGgufMetadata = hasTrustedIntegrity || model.metadataTrust === 'trusted_remote';
-      const ggufMetadata = shouldCarryForwardGgufMetadata ? model.gguf : undefined;
-      const memoryFit = await this.resolveMemoryFit(downloadedSize, metadataTrust, ggufMetadata);
+      const latestBaseQueueModel = this.getQueuedModel(model.id, model);
+      const baseCheckpointUpdates = this.buildBaseModelCheckpointUpdates({
+        model: latestBaseQueueModel,
+        fileName,
+        downloadedSize,
+        verification,
+        preserveExistingVerifiedLocalMetadata: reusableModelFile !== null,
+      });
+
+      assertPrivateStorageWritableForDownloadMutation();
+      updateModelInQueue(model.id, {
+        ...baseCheckpointUpdates,
+        lifecycleStatus: selectedProjector ? LifecycleStatus.DOWNLOADING : LifecycleStatus.VERIFYING,
+      });
+
+      const metadataTrust = baseCheckpointUpdates.metadataTrust;
+      const ggufMetadata = baseCheckpointUpdates.gguf;
+      baseModelMemoryFit = await this.resolveMemoryFit(downloadedSize, metadataTrust, ggufMetadata);
+
+      if (!this.isCurrentJob(model.id, jobToken)) {
+        return;
+      }
+
+      if (this.getStopReason(model.id, jobToken)) {
+        return;
+      }
+
+      if (selectedProjector) {
+        downloadStage = 'projector';
+
+        if (!this.isCurrentJob(model.id, jobToken)) {
+          return;
+        }
+
+        if (this.getStopReason(model.id, jobToken)) {
+          return;
+        }
+      }
+
+      const projectorResult = selectedProjector
+        ? await this.downloadProjectorArtifact(
+          this.getQueuedModel(model.id, model),
+          selectedProjector,
+          modelsDir,
+          jobToken,
+          await this.buildDownloadOptions(model, selectedProjector.downloadUrl, selectedProjector.repoId),
+          reusableProjectorFile,
+          projectorResumeDiskPlanning,
+        )
+        : null;
+
+      if (!this.isCurrentJob(model.id, jobToken)) {
+        return;
+      }
+      if (this.getStopReason(model.id, jobToken)) {
+        return;
+      }
+      if (selectedProjector && projectorResult === null) {
+        return;
+      }
+
+      downloadStage = 'finalizing';
+      const normalizedProjectorMemoryFitSize = projectorResult
+        ? normalizePositiveByteSize(projectorResult.sizeBytes)
+        : null;
+      const memoryFitInputSize = typeof downloadedSize === 'number'
+        ? getModelMemoryFitInputSizeBytes({
+          modelSizeBytes: downloadedSize,
+          projectorSizeBytes: projectorResult ? normalizedProjectorMemoryFitSize : undefined,
+          hasUnknownSizeProjector: projectorResult !== null && normalizedProjectorMemoryFitSize === null,
+        }) ?? downloadedSize
+        : downloadedSize;
+      const memoryFit = projectorResult
+        ? await this.resolveMemoryFit(memoryFitInputSize, metadataTrust, ggufMetadata)
+        : baseModelMemoryFit ?? await this.resolveMemoryFit(memoryFitInputSize, metadataTrust, ggufMetadata);
 
       if (!this.isCurrentJob(model.id, jobToken)) {
         return;
@@ -847,36 +1615,35 @@ export class ModelDownloadManager {
       }
 
       // Success
-      const completedModel: ModelMetadata = {
-        ...model,
-        size: downloadedSize ?? null,
+      const latestCompletedQueueModel = this.getQueuedModel(model.id, model);
+      const completedProjectorCandidates = projectorResult
+        ? this.updateProjectorCandidates(latestCompletedQueueModel, projectorResult.projector.id, projectorResult.projector)
+        : latestCompletedQueueModel.projectorCandidates;
+      const completedModel: ModelMetadata = this.withSynchronizedArtifacts({
+        ...latestCompletedQueueModel,
+        ...baseCheckpointUpdates,
         fitsInRam: memoryFit.fitsInRam,
         memoryFitDecision: memoryFit.decision,
         memoryFitConfidence: memoryFit.confidence,
-        metadataTrust,
-        downloadIntegrity: buildDownloadIntegrityMarker(verification),
-        gguf: shouldCarryForwardGgufMetadata && typeof downloadedSize === 'number' && Number.isFinite(downloadedSize) && downloadedSize > 0
-          ? {
-            ...(ggufMetadata ?? {}),
-            totalBytes: Math.round(downloadedSize),
-          }
-          : ggufMetadata,
-        localPath: fileName,
         downloadedAt: Date.now(),
         lifecycleStatus: LifecycleStatus.DOWNLOADED,
-        downloadProgress: 1,
-        allowUnknownSizeDownload: false,
-        resumeData: undefined,
-        downloadErrorAt: undefined,
-        downloadErrorCode: undefined,
-        downloadErrorMessage: undefined,
-        sha256: verification.sha256 ?? normalizeSha256Digest(model.sha256),
-      };
+        projectorCandidates: completedProjectorCandidates,
+      });
 
       assertPrivateStorageWritableForDownloadMutation();
       registry.updateModel(completedModel);
       assertPrivateStorageWritableForDownloadMutation();
       removeFromQueue(model.id);
+      if (projectorResult) {
+        try {
+          llmEngineService.requestActiveMultimodalReadinessRefresh(model.id);
+        } catch (refreshError) {
+          console.warn('[ModelDownloadManager] Failed to request active multimodal readiness refresh', {
+            modelId: model.id,
+            ...summarizeErrorForLog(refreshError),
+          });
+        }
+      }
 
       if (AppState.currentState !== 'active') {
         void notificationService.sendCompletionNotification('download', { modelName: model.name });
@@ -897,14 +1664,53 @@ export class ModelDownloadManager {
         return;
       }
 
-      console.error(`[ModelDownloadManager] Error during download: ${model.id}`, e);
+      console.error(`[ModelDownloadManager] Download error for ${model.id}`, summarizeErrorForLog(e));
 
       // If it fails, keep the entry in the queue with explicit failed state.
       // This avoids infinite retry loops while preserving retry and resume context.
-      const resumeData = safeSerializeResumeSnapshot(resumable as any, { modelId: model.id, scope: 'downloadError' });
+      const failedProjectorId = this.activeJob?.activeArtifact === 'projector'
+        ? this.activeJob.activeProjectorId
+        : undefined;
+      const isProjectorFailure = this.activeJob?.activeArtifact === 'projector';
+      const resumeData = isProjectorFailure
+        ? undefined
+        : safeNormalizeResumeSnapshot(resumable as any, { modelId: model.id, scope: 'downloadError' });
+      const projectorResumeData = isProjectorFailure
+        ? safeNormalizeResumeSnapshot(this.activeJob?.resumable as any, { modelId: model.id, scope: 'projectorDownloadError' })
+        : undefined;
       try {
         assertPrivateStorageWritableForDownloadMutation();
-        updateModelInQueue(model.id, this.getDownloadFailureUpdates(e, resumeData));
+        const currentModel = this.getQueuedModel(model.id, model);
+        const failureProjectorId = failedProjectorId ?? (downloadStage === 'projector' ? selectedProjector?.id : undefined);
+        const currentFailedProjector = failureProjectorId
+          ? currentModel.projectorCandidates?.find((projector) => projector.id === failureProjectorId)
+          : undefined;
+        const resumeDataForFailure = resumeData ?? normalizeDownloadResumeData(currentModel.resumeData);
+        const projectorResumeDataForFailure = projectorResumeData
+          ?? normalizeDownloadResumeData(currentFailedProjector?.resumeData);
+        const projectorStageFailedAfterBaseVerified = downloadStage === 'projector'
+          && selectedProjector !== null
+          && baseModelMemoryFit !== null;
+        const projectorFailureUpdates = this.getProjectorFailureUpdates(
+          currentModel,
+          failedProjectorId ?? (projectorStageFailedAfterBaseVerified ? selectedProjector?.id : undefined),
+          e,
+          projectorResumeDataForFailure,
+        );
+
+        if (projectorStageFailedAfterBaseVerified && baseModelMemoryFit) {
+          registry.updateModel(this.withSynchronizedArtifacts(this.buildTextReadyModelAfterProjectorFailure({
+            model: currentModel,
+            projectorFailureUpdates,
+            memoryFit: baseModelMemoryFit,
+          })));
+          removeFromQueue(model.id);
+        } else {
+          updateModelInQueue(model.id, {
+            ...this.getDownloadFailureUpdates(e, resumeDataForFailure),
+            ...projectorFailureUpdates,
+          });
+        }
         setActiveDownload(null);
       } catch (storageError) {
         if (await this.handlePrivateStorageUnavailable(storageError)) {
@@ -915,7 +1721,7 @@ export class ModelDownloadManager {
       }
 
       if (AppState.currentState !== 'active') {
-        const appError = toAppError(e);
+        const appError = toSanitizedDownloadAppError(e);
         const reason: DownloadErrorReason = appError.code === 'download_disk_space_low'
           ? 'storageFull'
           : appError.code === 'download_verification_failed'
@@ -931,24 +1737,436 @@ export class ModelDownloadManager {
     } finally {
       if (this.isCurrentJob(model.id, jobToken) && this.activeJob) {
         this.activeJob.resumable = null;
+        this.activeJob.activeArtifact = undefined;
+        this.activeJob.activeProjectorId = undefined;
       }
     }
     }
 
+  private async resolveReusableProjectorFile(
+    projector: ProjectorArtifact,
+    modelsDir: string,
+  ): Promise<ReusableProjectorDownloadFile | null> {
+    if (!isStoredProjectorArtifact(projector) || !isValidLocalFileName(projector.localPath)) {
+      return null;
+    }
+
+    const localUri = safeJoinModelPath(modelsDir, projector.localPath);
+    if (!localUri) {
+      return null;
+    }
+
+    const fileInfo = await FileSystem.getInfoAsync(localUri);
+    if (!fileInfo.exists || isFileSystemDirectory(fileInfo)) {
+      return null;
+    }
+
+    const sizeBytes = typeof fileInfo.size === 'number' && Number.isFinite(fileInfo.size) && fileInfo.size > 0
+      ? Math.round(fileInfo.size)
+      : null;
+
+    return {
+      fileName: projector.localPath,
+      sizeBytes,
+    };
+  }
+
+  private async assertSufficientDiskSpaceForProjectorDownload(
+    model: ModelMetadata,
+    projector: ProjectorArtifact,
+  ): Promise<void> {
+    const expectedProjectorBytes = normalizePositiveByteSize(projector.size);
+    const modelsDir = getModelsDir();
+    const resumeDiskPlanning = modelsDir
+      ? await this.planResumeDiskRequirement({
+        expectedSizeBytes: expectedProjectorBytes,
+        fileNameCandidates: this.getProjectorDownloadFileNameCandidates(projector),
+        modelsDir,
+        resumeData: projector.resumeData,
+        unsafeFileNames: this.getUnsafeResumeDownloadFileNames({ excludeProjector: projector }),
+      })
+      : null;
+    const requiredProjectorBytes = resumeDiskPlanning?.requiredBytes ?? expectedProjectorBytes ?? 0;
+    const hasUnknownProjectorDiskRequirement = expectedProjectorBytes === null;
+    if (requiredProjectorBytes <= 0 && !hasUnknownProjectorDiskRequirement) {
+      return;
+    }
+
+    const freeSpace = await FileSystem.getFreeDiskStorageAsync();
+    const requiredBytes = requiredProjectorBytes + REQUIRED_DOWNLOAD_BUFFER_BYTES;
+    if (freeSpace !== undefined && freeSpace < requiredBytes) {
+      throw new AppError('download_disk_space_low', 'DISK_SPACE_LOW', {
+        details: {
+          modelId: model.id,
+          artifactKind: 'projector',
+          freeSpace,
+          requiredBytes,
+        },
+      });
+    }
+  }
+
+  private createProjectorProgressCallback(
+    model: ModelMetadata,
+    projector: ProjectorArtifact,
+    jobToken: number,
+  ): (downloadProgress: any) => void {
+    const PROGRESS_UPDATE_MIN_INTERVAL_MS = 500;
+    const PROGRESS_UPDATE_MIN_DELTA = 0.005;
+    const NOTIFICATION_UPDATE_MIN_INTERVAL_MS = 2000;
+    const NOTIFICATION_UPDATE_MIN_DELTA_PERCENT = 1;
+    let lastProgressUpdatedAt = 0;
+    let lastProgress = -1;
+    let lastNotificationUpdatedAt = 0;
+    let lastNotifiedPercent = -1;
+    let lastSpeedSampleWrittenBytes = 0;
+    let lastSpeedSampleAt = 0;
+    let lastSpeedBytesPerSec = 0;
+
+    return (downloadProgress: any) => {
+      if (!this.isCurrentJob(model.id, jobToken)) {
+        return;
+      }
+
+      const writtenBytes = typeof downloadProgress?.totalBytesWritten === 'number'
+        ? downloadProgress.totalBytesWritten
+        : 0;
+      const expectedBytes = typeof downloadProgress?.totalBytesExpectedToWrite === 'number'
+        ? downloadProgress.totalBytesExpectedToWrite
+        : 0;
+      const progress = expectedBytes > 0 ? writtenBytes / expectedBytes : 0;
+      const clampedProgress = Math.min(Math.max(progress, 0), 1);
+      const now = Date.now();
+      const delta = Math.abs(clampedProgress - lastProgress);
+      const percent = Math.round(clampedProgress * 100);
+
+      if (lastSpeedSampleAt === 0) {
+        lastSpeedSampleAt = now;
+        lastSpeedSampleWrittenBytes = writtenBytes;
+      } else {
+        const sampleDeltaMs = now - lastSpeedSampleAt;
+        if (sampleDeltaMs >= 1000 && writtenBytes >= lastSpeedSampleWrittenBytes) {
+          const deltaBytes = writtenBytes - lastSpeedSampleWrittenBytes;
+          lastSpeedBytesPerSec = sampleDeltaMs > 0 ? (deltaBytes * 1000) / sampleDeltaMs : lastSpeedBytesPerSec;
+          lastSpeedSampleAt = now;
+          lastSpeedSampleWrittenBytes = writtenBytes;
+        }
+      }
+
+      if (
+        clampedProgress === 1 ||
+        now - lastProgressUpdatedAt >= PROGRESS_UPDATE_MIN_INTERVAL_MS ||
+        delta >= PROGRESS_UPDATE_MIN_DELTA
+      ) {
+        lastProgressUpdatedAt = now;
+        lastProgress = clampedProgress;
+        if (isPrivateStorageWritable()) {
+          try {
+            assertPrivateStorageWritableForDownloadMutation();
+            const currentModel = this.getQueuedModel(model.id, model);
+            this.updateQueuedProjector(model.id, currentModel, projector, { downloadProgress: clampedProgress });
+          } catch (error) {
+            void this.handlePrivateStorageUnavailable(error).then((handled) => {
+              if (!handled) {
+                console.warn(`[ModelDownloadManager] Failed to persist projector progress for ${model.id}`, summarizeErrorForLog(error));
+              }
+            });
+          }
+        }
+      }
+
+      if (
+        (percent === 100 && lastNotifiedPercent !== 100) ||
+        (
+          now - lastNotificationUpdatedAt >= NOTIFICATION_UPDATE_MIN_INTERVAL_MS
+          && percent - lastNotifiedPercent >= NOTIFICATION_UPDATE_MIN_DELTA_PERCENT
+        )
+      ) {
+        lastNotificationUpdatedAt = now;
+        lastNotifiedPercent = percent;
+        void backgroundTaskService.startBackgroundDownload({
+          type: 'downloadProgress',
+          modelName: model.name,
+          progressPercent: percent,
+          speedBytesPerSec: lastSpeedBytesPerSec,
+        });
+      }
+    };
+  }
+
+  private async resolveProjectorDownloadFileName(
+    projector: ProjectorArtifact,
+    modelsDir: string,
+  ): Promise<string> {
+    const candidates = this.getProjectorDownloadFileNameCandidates(projector);
+    const protectedCompletedFileNames = this.getProtectedCompletedModelFileNames({
+      excludeProjector: projector,
+    });
+    const protectedQueuedFileNames = this.getProtectedQueuedDownloadFileNames({
+      excludeProjector: projector,
+    });
+    let firstAvailableCandidate: string | undefined;
+
+    for (const candidate of candidates) {
+      if (protectedCompletedFileNames.has(candidate)) {
+        console.warn('[ModelDownloadManager] Projector download candidate is already completed, skipping overwrite', {
+          artifactKind: 'projector',
+          pathCategory: 'model_storage',
+        });
+        continue;
+      }
+      if (protectedQueuedFileNames.has(candidate)) {
+        console.warn('[ModelDownloadManager] Projector download candidate is already owned by another queued download, skipping', {
+          artifactKind: 'projector',
+          pathCategory: 'model_storage',
+        });
+        continue;
+      }
+
+      const candidatePath = safeJoinModelPath(modelsDir, candidate);
+      if (!candidatePath) {
+        continue;
+      }
+
+      const info = await FileSystem.getInfoAsync(candidatePath);
+      if (!info.exists) {
+        firstAvailableCandidate ??= candidate;
+        continue;
+      }
+      if (isFileSystemDirectory(info)) {
+        console.warn('[ModelDownloadManager] Projector download candidate is a directory, skipping', {
+          artifactKind: 'projector',
+          pathCategory: 'model_storage',
+        });
+        continue;
+      }
+
+      return candidate;
+    }
+
+    if (firstAvailableCandidate) {
+      return firstAvailableCandidate;
+    }
+
+    throw new AppError('download_file_missing', 'No safe projector download file target is available', {
+      details: { artifactKind: 'projector', candidateCount: candidates.length },
+    });
+  }
+
+  private async downloadProjectorArtifact(
+    model: ModelMetadata,
+    projector: ProjectorArtifact,
+    modelsDir: string,
+    jobToken: number,
+    downloadOptions: { headers?: Record<string, string> },
+    reusableProjectorFile: ReusableProjectorDownloadFile | null,
+    projectorResumeDiskPlanning: ResumeDiskPlanning | null,
+  ): Promise<ProjectorDownloadResult | null> {
+    let reusableProjectorRejected = false;
+
+    if (reusableProjectorFile) {
+      if (!this.isCurrentJob(model.id, jobToken) || this.getStopReason(model.id, jobToken)) {
+        return null;
+      }
+
+      const reusableLocalUri = safeJoinModelPath(modelsDir, reusableProjectorFile.fileName);
+      if (reusableLocalUri) {
+        try {
+          if (this.isCurrentJob(model.id, jobToken) && this.activeJob) {
+            this.activeJob.resumable = null;
+            this.activeJob.activeArtifact = 'projector';
+            this.activeJob.activeProjectorId = projector.id;
+          }
+
+          const verification = await this.verifyChecksum(projector, reusableLocalUri, {
+            cleanupProtection: { excludeProjector: projector },
+          });
+
+          if (!this.isCurrentJob(model.id, jobToken) || this.getStopReason(model.id, jobToken)) {
+            return null;
+          }
+
+          return {
+            projector: {
+              ...projector,
+              localPath: reusableProjectorFile.fileName,
+              size: verification.sizeBytes,
+              resumeData: undefined,
+              downloadProgress: 1,
+              lifecycleStatus: 'downloaded',
+            },
+            sizeBytes: verification.sizeBytes,
+          };
+        } catch (error) {
+          if (!this.isCurrentJob(model.id, jobToken) || this.getStopReason(model.id, jobToken)) {
+            return null;
+          }
+
+          console.warn('[ModelDownloadManager] Existing projector artifact cannot be reused', {
+            artifactKind: 'projector',
+            ...summarizeErrorForLog(error),
+          });
+          reusableProjectorRejected = true;
+        }
+      }
+    }
+
+    if (!this.isCurrentJob(model.id, jobToken) || this.getStopReason(model.id, jobToken)) {
+      return null;
+    }
+
+    if (reusableProjectorRejected) {
+      await this.assertSufficientDiskSpaceForProjectorDownload(model, projector);
+
+      if (!this.isCurrentJob(model.id, jobToken) || this.getStopReason(model.id, jobToken)) {
+        return null;
+      }
+    }
+
+    const fileName = await this.resolveProjectorDownloadFileName(projector, modelsDir);
+    const localUri = safeJoinModelPath(modelsDir, fileName);
+    if (!localUri) {
+      throw new AppError('action_failed', 'Invalid projector download file name', {
+        details: { modelId: model.id, artifactKind: 'projector' },
+      });
+    }
+
+    const projectorResumeData = projector.lifecycleStatus === 'paused'
+      ? projectorResumeDiskPlanning?.resumeData
+      : undefined;
+    const shouldClearProjectorPartialStateForCleanStart = projector.lifecycleStatus === 'paused'
+      && projectorResumeData === undefined
+      && this.hasPartialResumeOrProgressState(projector);
+
+    this.updateQueuedProjector(model.id, model, projector, {
+      lifecycleStatus: 'downloading',
+      localPath: fileName,
+      downloadProgress: 0,
+      ...(projectorResumeData !== undefined
+        ? { resumeData: projectorResumeData }
+        : shouldClearProjectorPartialStateForCleanStart
+          ? { resumeData: undefined }
+          : {}),
+    });
+
+    if (!this.isCurrentJob(model.id, jobToken) || this.getStopReason(model.id, jobToken)) {
+      return null;
+    }
+
+    const projectorResumable = FileSystem.createDownloadResumable(
+      projector.downloadUrl,
+      localUri,
+      downloadOptions,
+      this.createProjectorProgressCallback(model, projector, jobToken),
+      projectorResumeData,
+    );
+
+    if (this.isCurrentJob(model.id, jobToken) && this.activeJob) {
+      this.activeJob.resumable = projectorResumable;
+      this.activeJob.activeArtifact = 'projector';
+      this.activeJob.activeProjectorId = projector.id;
+    }
+
+    const result = await projectorResumable.downloadAsync();
+
+    if (!this.isCurrentJob(model.id, jobToken) || this.getStopReason(model.id, jobToken)) {
+      return null;
+    }
+
+    if (!result) {
+      console.warn(`[ModelDownloadManager] projector downloadAsync returned undefined. Marking ${model.id} as paused to avoid a stuck queue.`);
+
+      const { updateModelInQueue, setActiveDownload } = useDownloadStore.getState();
+      const currentModel = this.getQueuedModel(model.id, model);
+      const resumeData = safeNormalizeResumeSnapshot(projectorResumable as any, { modelId: model.id, scope: 'projectorDownloadAsync(undefined)' });
+      assertPrivateStorageWritableForDownloadMutation();
+      updateModelInQueue(model.id, {
+        lifecycleStatus: LifecycleStatus.PAUSED,
+        ...this.buildProjectorQueueUpdates(currentModel, projector, {
+          lifecycleStatus: 'paused',
+          resumeData,
+        }),
+      });
+      setActiveDownload(null);
+
+      void backgroundTaskService.startBackgroundDownload({ type: 'downloadPaused' }).catch((error) => {
+        console.warn('[ModelDownloadManager] Failed to update paused projector download notification', summarizeErrorForLog(error));
+      });
+
+      return null;
+    }
+
+    if (result.status && result.status >= 400) {
+      throw new AppError('download_http_error', `Projector download failed with HTTP status ${result.status}`, {
+        details: { modelId: model.id, artifactKind: 'projector', status: result.status },
+      });
+    }
+
+    if (this.isCurrentJob(model.id, jobToken) && this.activeJob) {
+      // Projector bytes are fully downloaded now; checksum/GGUF validation is not
+      // resumable. Keep activeArtifact metadata so verification failures are
+      // recorded against the projector, but clear the resumable and move the
+      // queue into VERIFYING so pause requests are ignored instead of persisting
+      // stale resume data for an already-complete artifact.
+      this.activeJob.resumable = null;
+      this.activeJob.activeArtifact = 'projector';
+      this.activeJob.activeProjectorId = projector.id;
+    }
+
+    assertPrivateStorageWritableForDownloadMutation();
+    const currentModelBeforeVerification = this.getQueuedModel(model.id, model);
+    const { updateModelInQueue } = useDownloadStore.getState();
+    updateModelInQueue(model.id, {
+      lifecycleStatus: LifecycleStatus.VERIFYING,
+      ...this.buildProjectorQueueUpdates(currentModelBeforeVerification, projector, {
+        localPath: fileName,
+        resumeData: undefined,
+        downloadProgress: 1,
+      }),
+    });
+
+    const verification = await this.verifyChecksum(projector, localUri, {
+      cleanupProtection: { excludeProjector: projector },
+    });
+
+    if (!this.isCurrentJob(model.id, jobToken) || this.getStopReason(model.id, jobToken)) {
+      return null;
+    }
+
+    const downloadedProjector: ProjectorArtifact = {
+      ...projector,
+      size: verification.sizeBytes,
+      localPath: fileName,
+      resumeData: undefined,
+      downloadProgress: 1,
+      lifecycleStatus: 'downloaded',
+      matchStatus: projector.matchStatus as ProjectorMatchStatus,
+    };
+
+    this.updateQueuedProjector(model.id, model, downloadedProjector, downloadedProjector);
+
+    return {
+      projector: downloadedProjector,
+      sizeBytes: verification.sizeBytes,
+    };
+  }
+
   public async verifyChecksum(
     model: Pick<ModelMetadata, 'id' | 'size' | 'sha256'>,
     localUri: string,
+    options: VerifyChecksumOptions = {},
   ): Promise<DownloadVerificationResult> {
+    const cleanupProtection = options.cleanupProtection ?? { excludeModelId: model.id };
     try {
       const fileInfo = await FileSystem.getInfoAsync(localUri);
       if (!fileInfo.exists) {
         throw new AppError('download_file_missing', 'File does not exist after download', {
-          details: { modelId: model.id, localUri },
+          details: buildVerificationErrorDetails(model, localUri),
         });
       }
       if (isFileSystemDirectory(fileInfo)) {
         throw new AppError('download_file_missing', 'Downloaded path is a directory, not a model file', {
-          details: { modelId: model.id, localUri },
+          details: buildVerificationErrorDetails(model, localUri),
         });
       }
 
@@ -956,12 +2174,12 @@ export class ModelDownloadManager {
       const expectedSize = model.size;
 
       if (typeof expectedSize === 'number' && expectedSize > 0 && downloadedSize !== expectedSize) {
-        await this.deleteCorruptedDownload(localUri, model.id);
+        await this.deleteCorruptedDownload(localUri, model.id, cleanupProtection);
         throw new AppError(
           'download_verification_failed',
           `Size mismatch: Expected ${expectedSize} but got ${downloadedSize}`,
           {
-            details: { modelId: model.id, expectedSize, downloadedSize, localUri },
+            details: buildVerificationErrorDetails(model, localUri, { expectedSize, downloadedSize }),
           },
         );
       }
@@ -975,17 +2193,16 @@ export class ModelDownloadManager {
       } catch (error) {
         if (error instanceof GgufValidationError) {
           if (shouldDeleteInvalidGgufDownload(error.reason)) {
-            await this.deleteCorruptedDownload(localUri, model.id);
+            await this.deleteCorruptedDownload(localUri, model.id, cleanupProtection);
           }
           throw new AppError(
             'download_verification_failed',
             error.message,
             {
               details: {
-                modelId: model.id,
-                localUri,
+                ...buildVerificationErrorDetails(model, localUri),
                 reason: error.reason,
-                ...(error.details ?? {}),
+                ...(sanitizeErrorDetails(error.details) ?? {}),
               },
             },
           );
@@ -1006,27 +2223,31 @@ export class ModelDownloadManager {
         await RNFS.hash(this.toNativeFilePath(localUri), 'sha256'),
       );
       if (!actualHash || actualHash !== expectedHash) {
-        await this.deleteCorruptedDownload(localUri, model.id);
+        await this.deleteCorruptedDownload(localUri, model.id, cleanupProtection);
         throw new AppError(
           'download_verification_failed',
           `Checksum mismatch for ${model.id}`,
           {
-            details: { modelId: model.id, expectedHash, actualHash, localUri },
+            details: buildVerificationErrorDetails(model, localUri, { expectedHash, actualHash }),
           },
         );
       }
 
       return { integrity: 'sha256', sha256: actualHash, sizeBytes: downloadedSize };
     } catch (error) {
-      throw toAppError(error, 'download_verification_failed');
+      throw toSanitizedDownloadAppError(error, 'download_verification_failed');
     }
   }
 
-  private async buildDownloadOptions(model: ModelMetadata): Promise<{ headers?: Record<string, string> }> {
+  private async buildDownloadOptions(
+    model: ModelMetadata,
+    targetUrl: string,
+    expectedRepoId: string,
+  ): Promise<{ headers?: Record<string, string> }> {
     const requiresAuth = model.accessState !== ModelAccessState.PUBLIC || model.isGated || model.isPrivate;
-    const isHuggingFaceDownload = isHuggingFaceUrl(model.downloadUrl);
+    const isTrustedHuggingFaceDownload = isTrustedHuggingFaceResolveUrlForRepo(targetUrl, expectedRepoId);
 
-    if (!requiresAuth || !isHuggingFaceDownload) {
+    if (!requiresAuth || !isTrustedHuggingFaceDownload) {
       return {};
     }
 
@@ -1051,6 +2272,17 @@ export class ModelDownloadManager {
       return;
     }
 
+    const activeJobForPauseGuard = this.activeJob?.modelId === modelId
+      ? this.activeJob
+      : null;
+    if (activeJobForPauseGuard?.activeArtifact === 'projector' && activeJobForPauseGuard.resumable === null) {
+      // Reusable projector checksum/GGUF verification is not resumable, even if
+      // the owning model queue row still says DOWNLOADING after the base model
+      // phase. Treat it like VERIFYING so pause cannot persist stale resume data.
+      console.warn(`[ModelDownloadManager] pauseDownload(${modelId}) ignored during projector verification`);
+      return;
+    }
+
     if (!(await this.canPersistDownloadMutation())) {
       return;
     }
@@ -1059,12 +2291,20 @@ export class ModelDownloadManager {
     if (!job || job.modelId !== modelId) {
       // Best-effort: allow pausing a queued download before it becomes active.
       await this.persistDownloadStoreMutation(() => {
-        updateModelInQueue(modelId, { lifecycleStatus: LifecycleStatus.PAUSED });
+        const queuedProjector = queuedModel ? this.resolveProjectorForDownload(queuedModel) : null;
+        updateModelInQueue(modelId, {
+          lifecycleStatus: LifecycleStatus.PAUSED,
+          ...(queuedModel && queuedProjector
+            ? this.buildProjectorQueueUpdates(queuedModel, queuedProjector, { lifecycleStatus: 'paused' })
+            : {}),
+        });
       });
       return;
     }
 
     const jobToken = job.jobToken;
+    const activeArtifact = job.activeArtifact;
+    const activeProjectorId = job.activeProjectorId;
     let resumeSnapshot: unknown | null = null;
 
     try {
@@ -1073,7 +2313,7 @@ export class ModelDownloadManager {
         try {
           resumeSnapshot = await job.resumable.pauseAsync();
         } catch (error) {
-          console.warn(`[ModelDownloadManager] pauseAsync failed for ${modelId}`, error);
+          console.warn(`[ModelDownloadManager] pauseAsync failed for ${modelId}`, summarizeErrorForLog(error));
 
           try {
             resumeSnapshot = job.resumable.savable?.() ?? null;
@@ -1086,10 +2326,29 @@ export class ModelDownloadManager {
       // No resumable yet (pre-download checks). Mark as paused and drop the active state.
     } finally {
       if (this.isCurrentJob(modelId, jobToken)) {
+        const latestQueuedModel = useDownloadStore.getState().queue.find((model) => model.id === modelId) ?? queuedModel;
         const updates: Partial<ModelMetadata> = { lifecycleStatus: LifecycleStatus.PAUSED };
-        const resumeData = safeSerializeResumeSnapshotValue(resumeSnapshot, { modelId, scope: 'pauseDownload' });
-        if (resumeData) {
+        const resumeData = safeNormalizeResumeSnapshotValue(resumeSnapshot, { modelId, scope: 'pauseDownload' });
+        if (resumeData && activeArtifact !== 'projector') {
           updates.resumeData = resumeData;
+        }
+        const fallbackQueuedProjector = !activeProjectorId && latestQueuedModel
+          ? this.resolveProjectorForDownload(latestQueuedModel)
+          : null;
+        const projectorIdToPause = activeProjectorId ?? (
+          fallbackQueuedProjector?.lifecycleStatus === 'queued'
+            ? fallbackQueuedProjector.id
+            : undefined
+        );
+        if (latestQueuedModel && projectorIdToPause) {
+          const projectorResumeData = activeArtifact === 'projector' && activeProjectorId ? resumeData : undefined;
+          const projectorCandidates = this.updateProjectorCandidates(latestQueuedModel, projectorIdToPause, {
+            lifecycleStatus: 'paused',
+            resumeData: projectorResumeData,
+          });
+          if (projectorCandidates) {
+            updates.projectorCandidates = projectorCandidates;
+          }
         }
 
         await this.persistDownloadStoreMutation(() => {
@@ -1108,6 +2367,7 @@ export class ModelDownloadManager {
     let safeToDeletePartialFiles = true;
     let shouldWaitForActiveJobToSettle = false;
     let cancelJob: ActiveDownloadJob | null = null;
+    let cancelActiveArtifact: ActiveDownloadJob['activeArtifact'] = undefined;
 
     this.queueProcessingHoldCount += 1;
     try {
@@ -1119,17 +2379,21 @@ export class ModelDownloadManager {
         ? this.activeJob
         : null;
       cancelJob = job;
+      cancelActiveArtifact = job?.activeArtifact;
+      const canInvalidateActiveJobImmediately = job !== null && job.resumable === null;
       if (job) {
         job.stopReason = 'cancel';
       }
 
       if (job?.resumable) {
-        job.deferredCancelCleanupFileNames = this.getCancelCleanupFileNameCandidates(queuedModel, modelId);
+        job.deferredCancelCleanupFileNames = this.getCancelCleanupFileNameCandidates(queuedModel, modelId, {
+          activeArtifact: job.activeArtifact,
+        });
         try {
           await job.resumable.pauseAsync(); // Stop active one
           job.deferredCancelCleanupFileNames = undefined;
         } catch (error) {
-          console.warn(`[ModelDownloadManager] Failed to pause active download during cancel for ${modelId}`, error);
+          console.warn(`[ModelDownloadManager] Failed to pause active download during cancel for ${modelId}`, summarizeErrorForLog(error));
           const activeJobStillCurrent = this.activeJob === job && this.isCurrentJob(modelId, job.jobToken);
           safeToDeletePartialFiles = !activeJobStillCurrent;
           shouldWaitForActiveJobToSettle = activeJobStillCurrent;
@@ -1157,6 +2421,10 @@ export class ModelDownloadManager {
       if (!didPersistQueueRemoval) {
         return;
       }
+      if (canInvalidateActiveJobImmediately && job !== null && this.activeJob === job && this.isCurrentJob(modelId, job.jobToken)) {
+        this.activeJob = null;
+        this.isProcessing = false;
+      }
       shouldDeletePartialFiles = safeToDeletePartialFiles;
 
     } finally {
@@ -1165,12 +2433,14 @@ export class ModelDownloadManager {
           // Delete the partial file to free up disk space before allowing any requeued
           // item for the same filename to create a new resumable.
           await this.deleteDownloadFiles(
-            this.getCancelCleanupFileNameCandidates(queuedModel, modelId),
+            this.getCancelCleanupFileNameCandidates(queuedModel, modelId, {
+              activeArtifact: cancelActiveArtifact,
+            }),
             modelId,
           );
         }
       } catch (error) {
-        console.error(`[ModelDownloadManager] Failed to delete partial file for ${modelId}`, error);
+        console.error(`[ModelDownloadManager] Failed to delete partial file for ${modelId}`, summarizeErrorForLog(error));
       } finally {
         this.queueProcessingHoldCount = Math.max(0, this.queueProcessingHoldCount - 1);
         const activeCancelJobStillCurrent = shouldWaitForActiveJobToSettle
@@ -1194,26 +2464,63 @@ export class ModelDownloadManager {
   }
 
   private getCancelCleanupFileNameCandidates(
-    queuedModel: Pick<ModelMetadata, 'id' | 'resolvedFileName' | 'hfRevision' | 'localPath'> | undefined,
+    queuedModel: ModelMetadata | undefined,
     modelId: string,
+    options?: { activeArtifact?: ActiveDownloadJob['activeArtifact'] },
   ): string[] {
-    return queuedModel
+    const modelCandidates = queuedModel
       ? this.getDownloadFileNameCandidates(queuedModel)
       : getCandidateModelDownloadFileNames({
         id: modelId,
         resolvedFileName: undefined,
         hfRevision: undefined,
       });
+    const selectedProjector = queuedModel ? this.resolveProjectorForDownload(queuedModel) : null;
+    const projectorCandidates = selectedProjector
+      ? this.getProjectorDownloadFileNameCandidates(selectedProjector)
+      : [];
+    const protectedBaseCheckpointFileName = queuedModel
+      && this.hasVerifiedQueuedBaseCheckpoint(queuedModel)
+      && (options?.activeArtifact === 'projector' || selectedProjector !== null)
+      ? queuedModel.localPath
+      : undefined;
+    const safeModelCandidates = protectedBaseCheckpointFileName
+      ? modelCandidates.filter((candidate) => candidate !== protectedBaseCheckpointFileName)
+      : modelCandidates;
+    const safeProjectorCandidates = protectedBaseCheckpointFileName
+      ? projectorCandidates.filter((candidate) => candidate !== protectedBaseCheckpointFileName)
+      : projectorCandidates;
+
+    return Array.from(new Set([...safeModelCandidates, ...safeProjectorCandidates]));
   }
 
-  private getProtectedCompletedModelFileNames(): Set<string> {
+  private hasVerifiedQueuedBaseCheckpoint(
+    model: Pick<ModelMetadata, 'localPath' | 'downloadProgress' | 'downloadIntegrity' | 'metadataTrust'>,
+  ): model is typeof model & { localPath: string } {
+    return isValidLocalFileName(model.localPath)
+      && model.downloadProgress === 1
+      && (model.downloadIntegrity !== undefined || model.metadataTrust === 'verified_local');
+  }
+
+  private getProtectedCompletedModelFileNames(options: CorruptedDownloadProtectionOptions = {}): Set<string> {
     return new Set(
       registry.getModels()
-        .filter((model) => (
-          model.lifecycleStatus === LifecycleStatus.DOWNLOADED
-          || model.lifecycleStatus === LifecycleStatus.ACTIVE
-        ))
-        .map((model) => model.localPath)
+        .flatMap((model) => [
+          ...(
+            model.lifecycleStatus === LifecycleStatus.DOWNLOADED
+            || model.lifecycleStatus === LifecycleStatus.ACTIVE
+              ? [model.localPath]
+              : []
+          ),
+          ...(model.projectorCandidates ?? [])
+            .filter((projector) => isStoredProjectorArtifact(projector))
+            .filter((projector) => !(
+              options.excludeProjector
+              && projector.ownerModelId === options.excludeProjector.ownerModelId
+              && projector.id === options.excludeProjector.id
+            ))
+            .map((projector) => projector.localPath),
+        ])
         .filter((fileName): fileName is string => typeof fileName === 'string' && isValidLocalFileName(fileName)),
     );
   }
@@ -1224,11 +2531,22 @@ export class ModelDownloadManager {
   ): Promise<string> {
     const candidates = this.getDownloadFileNameCandidates(model);
     const protectedCompletedFileNames = this.getProtectedCompletedModelFileNames();
+    const protectedQueuedFileNames = this.getProtectedQueuedDownloadFileNames({ excludeModelId: model.id });
     let firstAvailableCandidate: string | undefined;
 
     for (const candidate of candidates) {
       if (protectedCompletedFileNames.has(candidate)) {
-        console.warn(`[ModelDownloadManager] Download candidate for ${model.id} is a completed model file, skipping: ${candidate}`);
+        console.warn('[ModelDownloadManager] Download candidate is a completed model file, skipping', {
+          artifactKind: 'model',
+          pathCategory: 'model_storage',
+        });
+        continue;
+      }
+      if (protectedQueuedFileNames.has(candidate)) {
+        console.warn('[ModelDownloadManager] Download candidate is still owned by another queued download, skipping', {
+          artifactKind: 'model',
+          pathCategory: 'model_storage',
+        });
         continue;
       }
 
@@ -1242,7 +2560,10 @@ export class ModelDownloadManager {
         continue;
       }
       if (isFileSystemDirectory(info)) {
-        console.warn(`[ModelDownloadManager] Download candidate for ${model.id} is a directory, skipping: ${candidate}`);
+        console.warn('[ModelDownloadManager] Download candidate is a directory, skipping', {
+          artifactKind: 'model',
+          pathCategory: 'model_storage',
+        });
         continue;
       }
       if (info.exists) {
@@ -1255,7 +2576,7 @@ export class ModelDownloadManager {
     }
 
     throw new AppError('download_file_missing', `No safe download file target is available for ${model.id}`, {
-      details: { modelId: model.id, candidates },
+      details: { modelId: model.id, artifactKind: 'model', candidateCount: candidates.length },
     });
   }
 
@@ -1267,10 +2588,21 @@ export class ModelDownloadManager {
 
     let deletedAnyFile = false;
     const protectedCompletedFileNames = this.getProtectedCompletedModelFileNames();
+    const protectedQueuedFileNames = this.getProtectedQueuedDownloadFileNames({ excludeModelId: modelId });
 
     for (const fileName of Array.from(new Set(fileNames))) {
       if (protectedCompletedFileNames.has(fileName)) {
-        console.warn(`[ModelDownloadManager] Partial download candidate for ${modelId} is a completed model file, skipping: ${fileName}`);
+        console.warn('[ModelDownloadManager] Partial download candidate is a completed model file, skipping', {
+          artifactKind: 'model',
+          pathCategory: 'model_storage',
+        });
+        continue;
+      }
+      if (protectedQueuedFileNames.has(fileName)) {
+        console.warn('[ModelDownloadManager] Partial download candidate is still owned by another queued download, skipping', {
+          artifactKind: 'model',
+          pathCategory: 'model_storage',
+        });
         continue;
       }
 
@@ -1283,7 +2615,10 @@ export class ModelDownloadManager {
         continue;
       }
       if (isFileSystemDirectory(fileInfo)) {
-        console.warn(`[ModelDownloadManager] Partial download candidate for ${modelId} is a directory, skipping: ${fileName}`);
+        console.warn('[ModelDownloadManager] Partial download candidate is a directory, skipping', {
+          artifactKind: 'model',
+          pathCategory: 'model_storage',
+        });
         continue;
       }
 
@@ -1335,18 +2670,33 @@ export class ModelDownloadManager {
     };
   }
 
-  private async deleteCorruptedDownload(localUri: string, modelId: string): Promise<void> {
+  private async deleteCorruptedDownload(
+    localUri: string,
+    modelId: string,
+    protectionOptions: CorruptedDownloadProtectionOptions = { excludeModelId: modelId },
+  ): Promise<void> {
     try {
       const modelsDir = getModelsDir();
       const protectedCompletedUris = modelsDir
         ? new Set(
-          Array.from(this.getProtectedCompletedModelFileNames())
+          Array.from(this.getProtectedCompletedModelFileNames(protectionOptions))
+            .map((fileName) => safeJoinModelPath(modelsDir, fileName))
+            .filter((uri): uri is string => typeof uri === 'string'),
+        )
+        : new Set<string>();
+      const protectedQueuedUris = modelsDir
+        ? new Set(
+          Array.from(this.getProtectedQueuedDownloadFileNames(protectionOptions))
             .map((fileName) => safeJoinModelPath(modelsDir, fileName))
             .filter((uri): uri is string => typeof uri === 'string'),
         )
         : new Set<string>();
       if (protectedCompletedUris.has(localUri)) {
         console.warn(`[ModelDownloadManager] Corrupted download path for ${modelId} is a completed model file, skipping delete`);
+        return;
+      }
+      if (protectedQueuedUris.has(localUri)) {
+        console.warn(`[ModelDownloadManager] Corrupted download path for ${modelId} is still owned by another queued download, skipping delete`);
         return;
       }
 
@@ -1359,7 +2709,7 @@ export class ModelDownloadManager {
       }
       await FileSystem.deleteAsync(localUri, { idempotent: true });
     } catch (error) {
-      console.warn(`[ModelDownloadManager] Failed to delete corrupted download for ${modelId}`, error);
+      console.warn(`[ModelDownloadManager] Failed to delete corrupted download for ${modelId}`, summarizeErrorForLog(error));
     }
   }
 }

@@ -22,7 +22,13 @@
       "permissions": [
         "INTERNET",
         "POST_NOTIFICATIONS",
+        "READ_EXTERNAL_STORAGE",
         "VIBRATE"
+      ],
+      "blockedPermissions": [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.WRITE_EXTERNAL_STORAGE"
       ],
       "softwareKeyboardLayoutMode": "resize",
       "adaptiveIcon": {
@@ -82,8 +88,17 @@
       "./plugins/withAndroidGpuInfo",
       "./plugins/withIosSystemMetrics",
       "./plugins/withIosModelBackupExclusion",
+      "./plugins/withIosPhotoLibraryPermissionLocalization",
       "expo-secure-store",
       "expo-image",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Pocket AI uses your photo library so you can attach images to local chats.",
+          "cameraPermission": false,
+          "microphonePermission": false
+        }
+      ],
       "expo-sharing",
       "expo-web-browser"
     ],

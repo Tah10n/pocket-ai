@@ -11,6 +11,7 @@ This folder contains the public maintainer-facing documentation for Pocket AI.
 - [`new-architecture.md`](./new-architecture.md): notes about React Native New Architecture, native-module expectations, and troubleshooting direction
 - [`ui-architecture.md`](./ui-architecture.md): conventions for UI structure, imports, layout, styling, and localization
 - [`model-parameters.md`](./model-parameters.md): how generation/load parameters are stored, snapshotted, and mapped to runtime engine settings
+- [`multimodal-attachments.md`](./multimodal-attachments.md): runtime media payload contracts, local attachment lifecycle boundaries, and privacy constraints
 - [`android-build.md`](./android-build.md): Android release signing, bundling, and Play Store versioning
 - [`ios-build.md`](./ios-build.md): iOS archive, Xcode distribution, signing, and TestFlight upload
 
@@ -21,6 +22,7 @@ Review this folder whenever you change:
 - product messaging in the public `README`
 - privacy or network behavior
 - model discovery, variant selection, or download behavior
+- multimodal runtime, attachment lifecycle, or media diagnostics behavior
 - release flow or build metadata
 - native architecture assumptions
 - UI component conventions or localization rules

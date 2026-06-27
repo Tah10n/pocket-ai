@@ -1,5 +1,6 @@
 import DeviceInfo from 'react-native-device-info';
-import { LifecycleStatus, ModelAccessState, ModelMetadata } from '../types/models';
+import { LifecycleStatus, ModelAccessState, type ModelMetadata, type ModelVariant } from '../types/models';
+import type { MultimodalReadinessState, ProjectorArtifact } from '../types/multimodal';
 import { hardwareListenerService } from './HardwareListenerService';
 import { registry } from './LocalStorageRegistry';
 import { huggingFaceTokenService } from './HuggingFaceTokenService';
@@ -10,6 +11,7 @@ import { uniqueByKey } from '../utils/uniqueBy';
 import {
   ModelCatalogCacheStore,
   sanitizeAnonymousCatalogModel,
+  sanitizeCatalogModelRuntimeState,
   type CatalogCacheAuthScope,
   type CatalogCacheScope,
 } from './ModelCatalogCacheStore';
@@ -38,6 +40,7 @@ import {
 } from './ModelCatalogFileSelector';
 import {
   attachMemoryFitToVariants,
+  buildProjectorCandidatesFromEntries,
   buildModelMetadataFromPayload,
   createFallbackModel,
   resolveMemoryFitSummary,
@@ -56,6 +59,9 @@ import {
   HF_BASE_URL,
 } from '../utils/huggingFaceUrls';
 import { applyModelVariantSelectionIfAvailable } from '../utils/modelVariants';
+import { normalizeSha256Digest } from '../utils/sha256';
+import { getProjectorMemoryFitSizeBytes } from '../utils/modelSize';
+import { mergeProjectorRuntimeState as mergeCompatibleProjectorRuntimeState } from '../utils/projectorRuntimeState';
 import {
   getCompatibleLocalDownloadStatePatch,
   resolveVerifiedLocalShaCompatibility,
@@ -93,6 +99,7 @@ const CATALOG_PREFETCH_MAX_LIMIT = 60;
 const HF_TREE_PAGINATION_MAX_PAGES = 20;
 const HF_TREE_SEARCH_PAGINATION_MAX_PAGES = 4;
 const HF_TREE_DETAIL_PAGINATION_MAX_PAGES = HF_TREE_SEARCH_PAGINATION_MAX_PAGES;
+const HF_TREE_PROJECTOR_PAGINATION_MAX_PAGES = HF_TREE_PAGINATION_MAX_PAGES;
 const HF_TREE_PREFERRED_LOOKAHEAD_PAGES = 2;
 const SEARCH_CACHE_MAX_ENTRIES = 120;
 const BUFFERED_SEARCH_CACHE_MAX_AGE = 20 * 60 * 1000; // 20 minutes
@@ -134,6 +141,8 @@ type CatalogMemoryFitContext = {
   totalMemoryBytes: number | null;
   systemMemorySnapshot: SystemMemorySnapshot | null;
 };
+
+type ProjectorMetadataMerge = Pick<ModelMetadata, 'projectorCandidates' | 'selectedProjectorId' | 'multimodalReadiness'>;
 
 export class ModelCatalogService {
   private searchCache: Map<string, CatalogCacheEntry<Omit<ModelCatalogSearchResult, 'warning'>>> = new Map();
@@ -670,10 +679,18 @@ export class ModelCatalogService {
   ): ModelMetadata {
     const resolvedFileName = model.resolvedFileName?.trim();
     const downloadFileName = this.extractResolvedFileNameFromDownloadUrl(model.downloadUrl);
+    const fallbackFileName = this.isSupportedResolvedCatalogFileName(fallbackModel?.resolvedFileName)
+      ? fallbackModel?.resolvedFileName
+      : undefined;
     const hasSupportedResolvedFileName = this.isSupportedResolvedCatalogFileName(resolvedFileName);
     const hasUnsupportedDownloadFileName = Boolean(
       downloadFileName && !this.isSupportedResolvedCatalogFileName(downloadFileName),
     );
+
+    if (!resolvedFileName && model.requiresTreeProbe !== true && !fallbackFileName && !hasUnsupportedDownloadFileName) {
+      return model;
+    }
+
     const hasMismatchedDownloadFileName = Boolean(
       hasSupportedResolvedFileName
       && downloadFileName
@@ -688,9 +705,6 @@ export class ModelCatalogService {
       return model;
     }
 
-    const fallbackFileName = this.isSupportedResolvedCatalogFileName(fallbackModel?.resolvedFileName)
-      ? fallbackModel?.resolvedFileName
-      : undefined;
     const replacementFileName = fallbackFileName ?? (hasSupportedResolvedFileName ? resolvedFileName : undefined);
     const metadataSource = fallbackFileName ? fallbackModel : undefined;
 
@@ -737,6 +751,79 @@ export class ModelCatalogService {
       sha256: undefined,
       requiresTreeProbe: true,
     });
+  }
+
+  private createUnresolvedTreeProbeMissModel(model: ModelMetadata): ModelMetadata {
+    return normalizePersistedModelMetadata({
+      ...model,
+      size: null,
+      fitsInRam: null,
+      memoryFitDecision: undefined,
+      memoryFitConfidence: undefined,
+      metadataTrust: undefined,
+      gguf: undefined,
+      capabilitySnapshot: undefined,
+      maxContextTokens: undefined,
+      hasVerifiedContextWindow: false,
+      parameterSizeLabel: undefined,
+      variants: undefined,
+      activeVariantId: undefined,
+      resolvedFileName: undefined,
+      localPath: undefined,
+      downloadedAt: undefined,
+      downloadIntegrity: undefined,
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+      resumeData: undefined,
+      downloadErrorCode: undefined,
+      downloadErrorMessage: undefined,
+      downloadErrorAt: undefined,
+      downloadUrl: getHuggingFaceModelUrl(model.id),
+      sha256: undefined,
+      requiresTreeProbe: false,
+      chatModalities: model.chatModalities?.filter((modality) => modality !== 'vision'),
+      artifactRole: undefined,
+      visionSource: undefined,
+      visionConfidence: undefined,
+      projectorCandidates: undefined,
+      selectedProjectorId: undefined,
+      multimodalReadiness: undefined,
+    });
+  }
+
+  private finalizeUnresolvedTreeProbeMissModel(model: ModelMetadata): ModelMetadata {
+    const unresolvedModel = this.createUnresolvedTreeProbeMissModel(model);
+    this.evictModelFromCatalogCaches(model.id);
+
+    if (registry.getModel(model.id)) {
+      registry.updateModel(unresolvedModel);
+    }
+
+    return unresolvedModel;
+  }
+
+  private evictModelFromCatalogCaches(modelId: string, authScope?: CatalogCacheAuthScope): void {
+    const scopes = authScope ? [authScope] : (['anon', 'auth'] as const);
+    scopes.forEach((scope) => {
+      this.modelSnapshotCache.delete(this.buildModelSnapshotCacheKey(modelId, scope));
+      this.persistentCache.deleteModelSnapshots([modelId], scope);
+    });
+
+    for (const [key, entry] of this.searchCache.entries()) {
+      const nextModels = entry.result.models.filter((model) => model.id !== modelId);
+      if (nextModels.length === entry.result.models.length) {
+        continue;
+      }
+
+      this.searchCache.set(key, {
+        ...entry,
+        result: {
+          ...entry.result,
+          models: nextModels,
+        },
+      });
+    }
+    this.persistentCache.deleteSearchModels([modelId], authScope);
   }
 
   private sanitizeCachedCatalogModelsResolvedFiles(models: ModelMetadata[]): ModelMetadata[] {
@@ -972,6 +1059,10 @@ export class ModelCatalogService {
           requestContext,
           { treeProbeMode: 'full' },
         );
+        if (!resolvedModel && detailedModel.requiresTreeProbe === true) {
+          return this.finalizeUnresolvedTreeProbeMissModel(detailedModel);
+        }
+
         detailedModel = resolvedModel ?? detailedModel;
         hasVerifiedContextWindow = detailedModel.hasVerifiedContextWindow === true || typeof payloadMaxContextTokens === 'number';
       } else if (response.status === 401 || response.status === 403) {
@@ -1116,6 +1207,10 @@ export class ModelCatalogService {
         treeProbeMode: options.includeDetails ? 'full' : 'bounded',
       });
       this.assertRequestContextIsCurrent(requestContext);
+      if (!resolved && model.requiresTreeProbe === true) {
+        return this.finalizeUnresolvedTreeProbeMissModel(model);
+      }
+
       const refreshed = resolved ?? model;
       const snapshotAuthScope = this.getAuthScope(requestContext.hasAuthToken && (
         refreshed.accessState !== ModelAccessState.PUBLIC
@@ -1194,19 +1289,115 @@ export class ModelCatalogService {
     return this.lastMemoryFitContext;
   }
 
+  private resolveVariantProjectorMemoryFitSizeBytes(
+    entries: HuggingFaceTreeEntry[],
+    repoId: string,
+    hfRevision: string | undefined,
+    variant: ModelVariant,
+  ): number {
+    const projectorCandidates = buildProjectorCandidatesFromEntries(entries, {
+      repoId,
+      hfRevision,
+      ownerModelId: repoId,
+      ownerVariantId: variant.variantId,
+      ownerFileName: variant.fileName,
+    });
+
+    return getProjectorMemoryFitSizeBytes(projectorCandidates, variant.selectedProjectorId);
+  }
+
+  private resolveActiveVariantKeys(
+    model: Pick<ModelMetadata, 'activeVariantId' | 'resolvedFileName' | 'variants'>,
+  ): Set<string> {
+    const activeVariantId = this.normalizeProjectorVariantId(model.activeVariantId);
+    const resolvedFileName = this.normalizeProjectorVariantId(model.resolvedFileName);
+    const activeVariant = model.variants?.find((variant) => (
+      (activeVariantId && (variant.variantId === activeVariantId || variant.fileName === activeVariantId))
+      || (resolvedFileName && (variant.variantId === resolvedFileName || variant.fileName === resolvedFileName))
+    ));
+
+    return new Set([
+      activeVariantId,
+      resolvedFileName,
+      this.normalizeProjectorVariantId(activeVariant?.variantId),
+      this.normalizeProjectorVariantId(activeVariant?.fileName),
+    ].filter((value): value is string => typeof value === 'string'));
+  }
+
+  private resolveActiveVariantProjectorMemoryFitSizeBytes(
+    model: Pick<
+      ModelMetadata,
+      'id' | 'activeVariantId' | 'resolvedFileName' | 'variants' | 'projectorCandidates' | 'selectedProjectorId'
+    >,
+  ): number {
+    const activeVariantKeys = this.resolveActiveVariantKeys(model);
+    const compatibleCandidates = (model.projectorCandidates ?? []).filter((projector) => {
+      if (projector.ownerModelId !== model.id) {
+        return false;
+      }
+
+      const ownerVariantId = this.normalizeProjectorVariantId(projector.ownerVariantId);
+      return !ownerVariantId || activeVariantKeys.size === 0 || activeVariantKeys.has(ownerVariantId);
+    });
+
+    return getProjectorMemoryFitSizeBytes(compatibleCandidates, model.selectedProjectorId);
+  }
+
+  private withActiveVariantResolvedMemoryFit(
+    variants: ModelVariant[] | undefined,
+    activeVariantId: string | undefined,
+    resolvedMemoryFit: ReturnType<typeof resolveMemoryFitSummary>,
+  ): ModelVariant[] | undefined {
+    if (!variants?.length || !activeVariantId || !resolvedMemoryFit) {
+      return variants;
+    }
+
+    let didUpdate = false;
+    const nextVariants = variants.map((variant) => {
+      const isActiveVariant = variant.variantId === activeVariantId || variant.fileName === activeVariantId;
+      if (!isActiveVariant) {
+        return variant;
+      }
+
+      if (
+        variant.ramFit === resolvedMemoryFit.decision
+        && variant.ramFitConfidence === resolvedMemoryFit.confidence
+      ) {
+        return variant;
+      }
+
+      didUpdate = true;
+      return {
+        ...variant,
+        ramFit: resolvedMemoryFit.decision,
+        ramFitConfidence: resolvedMemoryFit.confidence,
+      };
+    });
+
+    return didUpdate ? nextVariants : variants;
+  }
+
   private withResolvedMemoryFit(
     model: ModelMetadata,
     memoryFitContext: CatalogMemoryFitContext | null = this.getRememberedMemoryFitContext(),
   ): ModelMetadata {
-    const resolvedMemoryFit = resolveMemoryFitSummary(model, memoryFitContext);
+    const resolvedMemoryFit = resolveMemoryFitSummary(model, memoryFitContext, {
+      projectorSizeBytes: this.resolveActiveVariantProjectorMemoryFitSizeBytes(model),
+    });
     const fitsInRam = resolvedMemoryFit?.fitsInRam ?? model.fitsInRam;
     const memoryFitDecision = resolvedMemoryFit?.decision ?? model.memoryFitDecision;
     const memoryFitConfidence = resolvedMemoryFit?.confidence ?? model.memoryFitConfidence;
+    const variants = this.withActiveVariantResolvedMemoryFit(
+      model.variants,
+      model.activeVariantId ?? model.resolvedFileName,
+      resolvedMemoryFit,
+    );
 
     if (
       fitsInRam === model.fitsInRam
       && memoryFitDecision === model.memoryFitDecision
       && memoryFitConfidence === model.memoryFitConfidence
+      && variants === model.variants
     ) {
       return model;
     }
@@ -1216,7 +1407,17 @@ export class ModelCatalogService {
       fitsInRam,
       memoryFitDecision,
       memoryFitConfidence,
+      variants,
     });
+  }
+
+  private isProjectorAwareModel(model: ModelMetadata): boolean {
+    return model.chatModalities?.includes('vision') === true
+      || Boolean(model.projectorCandidates?.length)
+      || Boolean(model.selectedProjectorId)
+      || model.multimodalReadiness?.support.includes('vision') === true
+      || model.visionSource !== undefined
+      || model.visionConfidence !== undefined;
   }
 
   private async resolveMissingModelMetadata(
@@ -1235,17 +1436,28 @@ export class ModelCatalogService {
 
     const resolveModel = async (model: ModelMetadata): Promise<ModelMetadata | null> => {
       const hasKnownSize = typeof model.size === 'number' && model.size > 0;
+      const shouldCollectProjectorCandidates = this.isProjectorAwareModel(model);
       const requiresAuthValidation = requestContext.hasAuthToken && (
         model.accessState !== ModelAccessState.PUBLIC ||
         model.isGated ||
         model.isPrivate
       );
 
-      if (hasKnownSize && !requiresAuthValidation && model.requiresTreeProbe !== true) {
+      if (
+        hasKnownSize
+        && !requiresAuthValidation
+        && model.requiresTreeProbe !== true
+        && !shouldCollectProjectorCandidates
+      ) {
         return model;
       }
 
-      if (hasKnownSize && requiresAuthValidation && model.requiresTreeProbe !== true) {
+      if (
+        hasKnownSize
+        && requiresAuthValidation
+        && model.requiresTreeProbe !== true
+        && !shouldCollectProjectorCandidates
+      ) {
         const probedAccessState = await this.probeResolvedModelAccess(model, requestContext);
         if (probedAccessState) {
           return normalizePersistedModelMetadata({
@@ -1264,7 +1476,8 @@ export class ModelCatalogService {
         )
           ? REQUEST_AUTH_POLICY.OPTIONAL_AUTH
           : REQUEST_AUTH_POLICY.ANONYMOUS;
-        const useFullTreeProbe = options.treeProbeMode === 'full' && model.requiresTreeProbe === true;
+        const useFullTreeProbe = options.treeProbeMode === 'full';
+        const shouldScanForProjectorCandidates = useFullTreeProbe && shouldCollectProjectorCandidates;
         const treeResponse = await this.fetchHuggingFaceModelTree(
           model.id,
           model.hfRevision,
@@ -1272,8 +1485,10 @@ export class ModelCatalogService {
           treeAuthPolicy,
           {
             expectedFileName: model.resolvedFileName,
-            allowTargetEarlyStop: !useFullTreeProbe,
-            maxPages: useFullTreeProbe ? HF_TREE_DETAIL_PAGINATION_MAX_PAGES : HF_TREE_SEARCH_PAGINATION_MAX_PAGES,
+            allowTargetEarlyStop: !shouldScanForProjectorCandidates,
+            maxPages: shouldScanForProjectorCandidates
+              ? HF_TREE_PROJECTOR_PAGINATION_MAX_PAGES
+              : useFullTreeProbe ? HF_TREE_DETAIL_PAGINATION_MAX_PAGES : HF_TREE_SEARCH_PAGINATION_MAX_PAGES,
           },
         );
         const selectedEntry = selectTreeEntryForModel(model, treeResponse.entries);
@@ -1283,6 +1498,10 @@ export class ModelCatalogService {
             || treeResponse.stopReason === 'preferred_found'
             || treeResponse.stopReason === 'lookahead'
           )
+        );
+        const shouldKeepTreeProbe = !treeProbeIsFinal && (
+          model.requiresTreeProbe === true
+          || shouldCollectProjectorCandidates
         );
         const accessState = this.resolveTreeAccessState(
           model,
@@ -1303,10 +1522,22 @@ export class ModelCatalogService {
             return null;
           }
 
+          const projectorMetadataPatch = shouldCollectProjectorCandidates && !treeResponse.isComplete
+            ? this.mergeProjectorMetadataWithLocalState(
+              {
+                ...model,
+                projectorCandidates: model.projectorCandidates,
+              },
+              model,
+              false,
+            )
+            : {};
+
           return normalizePersistedModelMetadata({
             ...model,
             accessState,
-            requiresTreeProbe: model.requiresTreeProbe && !treeProbeIsFinal,
+            requiresTreeProbe: shouldKeepTreeProbe,
+            ...projectorMetadataPatch,
           });
         }
 
@@ -1332,7 +1563,24 @@ export class ModelCatalogService {
           limit: CATALOG_SEARCH_VARIANT_LIMIT,
           includeFileNames: [resolvedFileName, model.resolvedFileName, model.activeVariantId],
           includeVariantIds: [model.activeVariantId],
-        }), memoryFitContext);
+        }), memoryFitContext, {
+          resolveProjectorSizeBytes: (variant) => this.resolveVariantProjectorMemoryFitSizeBytes(
+            treeResponse.entries,
+            model.id,
+            model.hfRevision,
+            variant,
+          ),
+        });
+        const discoveredProjectorCandidates = buildProjectorCandidatesFromEntries(treeResponse.entries, {
+          repoId: model.id,
+          hfRevision: model.hfRevision,
+          ownerModelId: model.id,
+          ownerFileName: resolvedFileName,
+        });
+        const projectorCandidates = discoveredProjectorCandidates
+          ?? (useFullTreeProbe && treeResponse.isComplete ? [] : undefined);
+        const hasVisionCapability = model.chatModalities?.includes('vision') === true
+          || Boolean(projectorCandidates?.length);
         const treeEntrySha256 = getFileSha(selectedEntry);
         const treeEntrySize = getFileSize(selectedEntry);
         const {
@@ -1370,9 +1618,35 @@ export class ModelCatalogService {
             : Object.keys(existingGguf).length > 0
               ? existingGguf
               : undefined;
+        const canCarryForwardLocalSha256 = !shouldResetLocalDownloadState
+          && model.metadataTrust !== 'verified_local';
+        const sha256 = treeEntrySha256
+          ?? (shouldPreserveVerifiedLocal
+            ? localVerifiedSha256
+            : canCarryForwardLocalSha256 ? model.sha256 : undefined);
+        const projectorCandidatesForMerge = projectorCandidates
+          ?? (shouldResetLocalDownloadState ? undefined : model.projectorCandidates);
+        const projectorMetadataPatch = this.mergeProjectorMetadataWithLocalState(
+          {
+            ...model,
+            projectorCandidates: projectorCandidatesForMerge,
+          },
+          model,
+          shouldResetLocalDownloadState,
+          projectorCandidates !== undefined && !treeResponse.isComplete && !shouldResetLocalDownloadState,
+        );
         const resolvedMemoryFit = shouldPreserveVerifiedLocal
           ? null
-          : resolveMemoryFitSummary({ size, metadataTrust, gguf }, memoryFitContext);
+          : resolveMemoryFitSummary({ size, metadataTrust, gguf }, memoryFitContext, {
+            projectorSizeBytes: this.resolveActiveVariantProjectorMemoryFitSizeBytes({
+              ...model,
+              resolvedFileName,
+              activeVariantId: resolvedFileName,
+              variants,
+              projectorCandidates: projectorMetadataPatch.projectorCandidates,
+              selectedProjectorId: projectorMetadataPatch.selectedProjectorId,
+            }),
+          });
         const didChangeSize = size !== model.size;
         const fitsInRam = shouldPreserveVerifiedLocal
           ? model.fitsInRam
@@ -1395,14 +1669,13 @@ export class ModelCatalogService {
             : didChangeSize
               ? undefined
               : model.memoryFitConfidence;
-        const canCarryForwardLocalSha256 = !shouldResetLocalDownloadState
-          && model.metadataTrust !== 'verified_local';
-        const sha256 = treeEntrySha256
-          ?? (shouldPreserveVerifiedLocal
-            ? localVerifiedSha256
-            : canCarryForwardLocalSha256 ? model.sha256 : undefined);
+        const variantsWithResolvedActiveMemoryFit = this.withActiveVariantResolvedMemoryFit(
+          variants,
+          resolvedFileName,
+          resolvedMemoryFit,
+        );
 
-        if (model.requiresTreeProbe && !treeProbeIsFinal) {
+        if (shouldKeepTreeProbe) {
           return normalizePersistedModelMetadata({
             ...model,
             ...localDownloadStatePatch,
@@ -1418,8 +1691,13 @@ export class ModelCatalogService {
             resolvedFileName,
             downloadUrl: buildHuggingFaceResolveUrl(model.id, resolvedFileName, model.hfRevision),
             sha256,
-            variants,
+            variants: variantsWithResolvedActiveMemoryFit,
             activeVariantId: resolvedFileName,
+            chatModalities: hasVisionCapability ? ['text', 'vision'] : model.chatModalities,
+            artifactRole: 'primary_chat_model',
+            visionSource: projectorCandidates?.length ? 'tree_probe' : model.visionSource,
+            visionConfidence: projectorCandidates?.length ? 'trusted' : model.visionConfidence,
+            ...projectorMetadataPatch,
           });
         }
 
@@ -1438,8 +1716,13 @@ export class ModelCatalogService {
           resolvedFileName,
           downloadUrl: buildHuggingFaceResolveUrl(model.id, resolvedFileName, model.hfRevision),
           sha256,
-          variants,
+          variants: variantsWithResolvedActiveMemoryFit,
           activeVariantId: resolvedFileName,
+          chatModalities: hasVisionCapability ? ['text', 'vision'] : model.chatModalities,
+          artifactRole: 'primary_chat_model',
+          visionSource: projectorCandidates?.length ? 'tree_probe' : model.visionSource,
+          visionConfidence: projectorCandidates?.length ? 'trusted' : model.visionConfidence,
+          ...projectorMetadataPatch,
         });
       } catch (error) {
         if (error instanceof StaleCatalogAuthError) {
@@ -1795,6 +2078,488 @@ export class ModelCatalogService {
     return merged;
   }
 
+  private mergeProjectorMetadataWithLocalState(
+    remoteModel: ModelMetadata,
+    localModel: ModelMetadata,
+    shouldResetLocalDownloadState: boolean,
+    preserveUnmatchedLocalProjectors = false,
+  ): ProjectorMetadataMerge {
+    const remoteCandidates = remoteModel.projectorCandidates;
+    const localCandidates = localModel.projectorCandidates ?? [];
+
+    if (shouldResetLocalDownloadState) {
+      const remoteCandidateIds = new Set((remoteCandidates ?? []).map((projector) => projector.id));
+      const selectedProjectorId = this.resolveMergedSelectedProjectorId(
+        remoteModel.selectedProjectorId,
+        undefined,
+        remoteCandidateIds,
+        new Map(),
+      );
+
+      return {
+        projectorCandidates: remoteCandidates,
+        selectedProjectorId,
+        multimodalReadiness: this.resolveMergedMultimodalReadiness(
+          remoteModel.id,
+          remoteModel.multimodalReadiness,
+          undefined,
+          remoteCandidateIds,
+          new Map(),
+          selectedProjectorId,
+        ),
+      };
+    }
+
+    if (!remoteCandidates) {
+      const runtimeVariantId = this.resolveProjectorRuntimeVariantId(remoteModel, localModel);
+      const blockedLocalProjectorIds = new Set<string>();
+      const compatibleLocalCandidates = localCandidates.filter((localProjector) => {
+        const canPreserveLocalProjector = this.projectorAppliesToRuntimeVariant(
+          localProjector,
+          runtimeVariantId,
+        );
+        if (!canPreserveLocalProjector) {
+          blockedLocalProjectorIds.add(localProjector.id);
+        }
+
+        return canPreserveLocalProjector;
+      });
+      const localCandidateIds = new Set(compatibleLocalCandidates.map((projector) => projector.id));
+      const selectedProjectorId = this.resolveMergedSelectedProjectorId(
+        remoteModel.selectedProjectorId,
+        localModel.selectedProjectorId,
+        localCandidateIds,
+        new Map(),
+        blockedLocalProjectorIds,
+        new Set(),
+      );
+
+      return {
+        projectorCandidates: compatibleLocalCandidates.length > 0 ? compatibleLocalCandidates : remoteCandidates,
+        selectedProjectorId,
+        multimodalReadiness: this.resolveMergedMultimodalReadiness(
+          remoteModel.id,
+          remoteModel.multimodalReadiness,
+          localModel.multimodalReadiness,
+          localCandidateIds,
+          new Map(),
+          selectedProjectorId,
+          new Set(),
+          blockedLocalProjectorIds,
+        ),
+      };
+    }
+
+    const usedLocalProjectorIds = new Set<string>();
+    const localToRemoteProjectorIds = new Map<string, string>();
+    const incompatibleLocalReadinessProjectorIds = new Set<string>();
+    const incompatibleRemoteReadinessProjectorIds = new Set<string>();
+    const blockedLocalProjectorIds = new Set<string>();
+    const blockedRemoteProjectorIds = new Set<string>();
+    const runtimeVariantId = this.resolveProjectorRuntimeVariantId(remoteModel, localModel);
+    const mergedCandidates = remoteCandidates.map((remoteProjector) => {
+      const exactLocalProjector = localCandidates.find((localProjector) => (
+        !usedLocalProjectorIds.has(localProjector.id)
+        && localProjector.id === remoteProjector.id
+      ));
+      if (
+        exactLocalProjector
+        && !this.projectorsShareStableArtifact(remoteProjector, exactLocalProjector, runtimeVariantId)
+      ) {
+        blockedLocalProjectorIds.add(exactLocalProjector.id);
+        blockedRemoteProjectorIds.add(remoteProjector.id);
+      }
+
+      const localProjector = this.findLocalProjectorForRemote(
+        remoteProjector,
+        localCandidates,
+        usedLocalProjectorIds,
+        runtimeVariantId,
+      );
+
+      if (!localProjector) {
+        return remoteProjector;
+      }
+
+      usedLocalProjectorIds.add(localProjector.id);
+      localToRemoteProjectorIds.set(localProjector.id, remoteProjector.id);
+
+      if (!this.projectorsHaveCompatibleRuntimeMetadata(remoteProjector, localProjector)) {
+        incompatibleLocalReadinessProjectorIds.add(localProjector.id);
+        incompatibleRemoteReadinessProjectorIds.add(remoteProjector.id);
+      }
+
+      return this.mergeProjectorRuntimeState(remoteProjector, localProjector);
+    });
+    if (preserveUnmatchedLocalProjectors) {
+      for (const localProjector of localCandidates) {
+        if (
+          usedLocalProjectorIds.has(localProjector.id)
+          || blockedLocalProjectorIds.has(localProjector.id)
+          || mergedCandidates.some((candidate) => candidate.id === localProjector.id)
+        ) {
+          continue;
+        }
+
+        if (!this.projectorAppliesToRuntimeVariant(localProjector, runtimeVariantId)) {
+          blockedLocalProjectorIds.add(localProjector.id);
+          continue;
+        }
+
+        mergedCandidates.push(localProjector);
+      }
+    }
+    const mergedCandidateIds = new Set(mergedCandidates.map((projector) => projector.id));
+    const selectedProjectorId = this.resolveMergedSelectedProjectorId(
+      remoteModel.selectedProjectorId,
+      localModel.selectedProjectorId,
+      mergedCandidateIds,
+      localToRemoteProjectorIds,
+      blockedLocalProjectorIds,
+      blockedRemoteProjectorIds,
+    );
+    const blockedRemoteReadinessProjectorIds = new Set([
+      ...incompatibleRemoteReadinessProjectorIds,
+      ...blockedRemoteProjectorIds,
+    ]);
+    const blockedLocalReadinessProjectorIds = new Set([
+      ...incompatibleLocalReadinessProjectorIds,
+      ...blockedLocalProjectorIds,
+    ]);
+    const blockedLocalResolvedReadinessProjectorIds = new Set([
+      ...incompatibleRemoteReadinessProjectorIds,
+    ]);
+    const shouldSuppressLocalReadinessFallback = (
+      typeof remoteModel.selectedProjectorId === 'string'
+      && blockedRemoteProjectorIds.has(remoteModel.selectedProjectorId)
+      && selectedProjectorId === undefined
+    );
+
+    return {
+      projectorCandidates: mergedCandidates,
+      selectedProjectorId,
+      multimodalReadiness: this.resolveMergedMultimodalReadiness(
+        remoteModel.id,
+        remoteModel.multimodalReadiness,
+        localModel.multimodalReadiness,
+        mergedCandidateIds,
+        localToRemoteProjectorIds,
+        selectedProjectorId,
+        blockedRemoteReadinessProjectorIds,
+        blockedLocalReadinessProjectorIds,
+        blockedLocalResolvedReadinessProjectorIds,
+        shouldSuppressLocalReadinessFallback,
+      ),
+    };
+  }
+
+  private findLocalProjectorForRemote(
+    remoteProjector: ProjectorArtifact,
+    localProjectors: ProjectorArtifact[],
+    usedLocalProjectorIds: Set<string>,
+    runtimeVariantId?: string,
+  ): ProjectorArtifact | undefined {
+    const exactMatch = localProjectors.find((localProjector) => (
+      !usedLocalProjectorIds.has(localProjector.id)
+      && localProjector.id === remoteProjector.id
+      && this.projectorsShareStableArtifact(remoteProjector, localProjector, runtimeVariantId)
+    ));
+    if (exactMatch) {
+      return exactMatch;
+    }
+
+    return localProjectors.find((localProjector) => (
+      !usedLocalProjectorIds.has(localProjector.id)
+      && this.projectorsShareStableArtifact(remoteProjector, localProjector, runtimeVariantId)
+    ));
+  }
+
+  private resolveProjectorRuntimeVariantId(
+    remoteModel: ModelMetadata,
+    localModel: ModelMetadata,
+  ): string | undefined {
+    return remoteModel.activeVariantId
+      ?? remoteModel.resolvedFileName
+      ?? localModel.activeVariantId
+      ?? localModel.resolvedFileName;
+  }
+
+  private normalizeProjectorVariantId(value: string | undefined): string | undefined {
+    if (typeof value !== 'string') {
+      return undefined;
+    }
+
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
+  }
+
+  private projectorAppliesToRuntimeVariant(
+    projector: ProjectorArtifact,
+    runtimeVariantId: string | undefined,
+  ): boolean {
+    const projectorVariantId = this.normalizeProjectorVariantId(projector.ownerVariantId);
+    const activeVariantId = this.normalizeProjectorVariantId(runtimeVariantId);
+    return !projectorVariantId || !activeVariantId || projectorVariantId === activeVariantId;
+  }
+
+  private projectorsShareRuntimeVariantScope(
+    remoteProjector: ProjectorArtifact,
+    localProjector: ProjectorArtifact,
+    runtimeVariantId: string | undefined,
+  ): boolean {
+    const remoteVariantId = this.normalizeProjectorVariantId(remoteProjector.ownerVariantId);
+    const localVariantId = this.normalizeProjectorVariantId(localProjector.ownerVariantId);
+    if (remoteVariantId === localVariantId) {
+      return true;
+    }
+
+    if (remoteVariantId && localVariantId) {
+      return false;
+    }
+
+    const scopedVariantId = remoteVariantId ?? localVariantId;
+    return Boolean(
+      scopedVariantId
+      && this.normalizeProjectorVariantId(runtimeVariantId) === scopedVariantId,
+    );
+  }
+
+  private projectorsShareStableArtifact(
+    remoteProjector: ProjectorArtifact,
+    localProjector: ProjectorArtifact,
+    runtimeVariantId?: string,
+  ): boolean {
+    if (
+      remoteProjector.ownerModelId !== localProjector.ownerModelId
+      || remoteProjector.repoId !== localProjector.repoId
+      || remoteProjector.fileName !== localProjector.fileName
+      || (remoteProjector.hfRevision ?? 'main') !== (localProjector.hfRevision ?? 'main')
+    ) {
+      return false;
+    }
+
+    return this.projectorsShareRuntimeVariantScope(remoteProjector, localProjector, runtimeVariantId);
+  }
+
+  private projectorsHaveCompatibleRuntimeMetadata(
+    remoteProjector: ProjectorArtifact,
+    localProjector: ProjectorArtifact,
+  ): boolean {
+    if (this.projectorComparableValuesConflict(
+      normalizeSha256Digest(remoteProjector.sha256),
+      normalizeSha256Digest(localProjector.sha256),
+    )) {
+      return false;
+    }
+
+    if (this.projectorComparableValuesConflict(
+      this.normalizeComparableProjectorSize(remoteProjector.size),
+      this.normalizeComparableProjectorSize(localProjector.size),
+    )) {
+      return false;
+    }
+
+    return !this.projectorComparableValuesConflict(
+      this.normalizeComparableProjectorDownloadUrl(remoteProjector.downloadUrl),
+      this.normalizeComparableProjectorDownloadUrl(localProjector.downloadUrl),
+    );
+  }
+
+  private projectorComparableValuesConflict<T>(
+    remoteValue: T | undefined,
+    localValue: T | undefined,
+  ): boolean {
+    return remoteValue !== undefined && localValue !== undefined && remoteValue !== localValue;
+  }
+
+  private normalizeComparableProjectorSize(size: number | null | undefined): number | undefined {
+    return typeof size === 'number' && Number.isFinite(size) && size >= 0
+      ? Math.round(size)
+      : undefined;
+  }
+
+  private normalizeComparableProjectorDownloadUrl(
+    downloadUrl: string | undefined,
+  ): string | undefined {
+    if (typeof downloadUrl !== 'string') {
+      return undefined;
+    }
+
+    const trimmed = downloadUrl.trim();
+    if (!trimmed) {
+      return undefined;
+    }
+
+    try {
+      const parsed = new URL(trimmed);
+      parsed.hash = '';
+      parsed.protocol = parsed.protocol.toLowerCase();
+      parsed.hostname = parsed.hostname.toLowerCase();
+      return parsed.toString();
+    } catch {
+      return trimmed;
+    }
+  }
+
+  private mergeProjectorRuntimeState(
+    remoteProjector: ProjectorArtifact,
+    localProjector: ProjectorArtifact,
+  ): ProjectorArtifact {
+    const hasLocalRuntimeState = (
+      typeof localProjector.localPath === 'string'
+      || typeof localProjector.resumeData === 'string'
+      || typeof localProjector.downloadProgress === 'number'
+      || localProjector.lifecycleStatus !== 'available'
+      || localProjector.matchStatus !== remoteProjector.matchStatus
+      || localProjector.matchReason !== remoteProjector.matchReason
+    );
+
+    if (
+      !hasLocalRuntimeState
+      || !this.projectorsHaveCompatibleRuntimeMetadata(remoteProjector, localProjector)
+    ) {
+      return remoteProjector;
+    }
+
+    const mergedProjector = mergeCompatibleProjectorRuntimeState(remoteProjector, localProjector);
+
+    return {
+      ...mergedProjector,
+      downloadProgress: localProjector.downloadProgress ?? mergedProjector.downloadProgress,
+    };
+  }
+
+  private resolveMergedSelectedProjectorId(
+    remoteSelectedProjectorId: string | undefined,
+    localSelectedProjectorId: string | undefined,
+    candidateIds: Set<string>,
+    localToRemoteProjectorIds: Map<string, string>,
+    blockedLocalProjectorIds: Set<string> = new Set(),
+    blockedRemoteProjectorIds: Set<string> = blockedLocalProjectorIds,
+  ): string | undefined {
+    const blockedRemoteSelectedProjectorId = remoteSelectedProjectorId
+      && candidateIds.has(remoteSelectedProjectorId)
+      && blockedRemoteProjectorIds.has(remoteSelectedProjectorId)
+      ? remoteSelectedProjectorId
+      : undefined;
+
+    if (remoteSelectedProjectorId && candidateIds.has(remoteSelectedProjectorId)) {
+      if (candidateIds.has(remoteSelectedProjectorId) && !blockedRemoteSelectedProjectorId) {
+        return remoteSelectedProjectorId;
+      }
+
+      if (!localSelectedProjectorId || blockedLocalProjectorIds.has(localSelectedProjectorId)) {
+        return undefined;
+      }
+
+      const selectedProjectorId = localToRemoteProjectorIds.get(localSelectedProjectorId)
+        ?? localSelectedProjectorId;
+
+      if (blockedRemoteSelectedProjectorId) {
+        return selectedProjectorId === blockedRemoteSelectedProjectorId
+          && localSelectedProjectorId !== selectedProjectorId
+          && candidateIds.has(selectedProjectorId)
+          ? selectedProjectorId
+          : undefined;
+      }
+
+      return selectedProjectorId === remoteSelectedProjectorId && candidateIds.has(selectedProjectorId)
+        ? selectedProjectorId
+        : undefined;
+    }
+
+    if (!localSelectedProjectorId) {
+      return undefined;
+    }
+
+    if (blockedLocalProjectorIds.has(localSelectedProjectorId)) {
+      return undefined;
+    }
+
+    const selectedProjectorId = localToRemoteProjectorIds.get(localSelectedProjectorId)
+      ?? localSelectedProjectorId;
+
+    return candidateIds.has(selectedProjectorId) ? selectedProjectorId : undefined;
+  }
+
+  private resolveMergedMultimodalReadiness(
+    modelId: string,
+    remoteReadiness: MultimodalReadinessState | undefined,
+    localReadiness: MultimodalReadinessState | undefined,
+    candidateIds: Set<string>,
+    localToRemoteProjectorIds: Map<string, string>,
+    selectedProjectorId?: string,
+    blockedRemoteReadinessProjectorIds: Set<string> = new Set(),
+    blockedLocalReadinessProjectorIds: Set<string> = blockedRemoteReadinessProjectorIds,
+    blockedLocalResolvedReadinessProjectorIds: Set<string> = blockedLocalReadinessProjectorIds,
+    suppressLocalReadinessFallback = false,
+  ): MultimodalReadinessState | undefined {
+    const remoteMergedReadiness = this.remapMultimodalReadiness(
+      modelId,
+      remoteReadiness,
+      candidateIds,
+      localToRemoteProjectorIds,
+      selectedProjectorId,
+      blockedRemoteReadinessProjectorIds,
+      blockedRemoteReadinessProjectorIds,
+    );
+
+    if (remoteMergedReadiness || suppressLocalReadinessFallback) {
+      return remoteMergedReadiness;
+    }
+
+    return this.remapMultimodalReadiness(
+      modelId,
+      localReadiness,
+      candidateIds,
+      localToRemoteProjectorIds,
+      selectedProjectorId,
+      blockedLocalReadinessProjectorIds,
+      blockedLocalResolvedReadinessProjectorIds,
+    );
+  }
+
+  private remapMultimodalReadiness(
+    modelId: string,
+    readiness: MultimodalReadinessState | undefined,
+    candidateIds: Set<string>,
+    localToRemoteProjectorIds: Map<string, string>,
+    selectedProjectorId?: string,
+    blockedSourceProjectorIds: Set<string> = new Set(),
+    blockedResolvedProjectorIds: Set<string> = blockedSourceProjectorIds,
+  ): MultimodalReadinessState | undefined {
+    if (!readiness || readiness.modelId !== modelId) {
+      return undefined;
+    }
+
+    if (!readiness.projectorId) {
+      return readiness;
+    }
+
+    if (blockedSourceProjectorIds.has(readiness.projectorId)) {
+      return undefined;
+    }
+
+    const projectorId = localToRemoteProjectorIds.get(readiness.projectorId)
+      ?? readiness.projectorId;
+
+    if (blockedResolvedProjectorIds.has(projectorId)) {
+      return undefined;
+    }
+
+    if (!candidateIds.has(projectorId)) {
+      return undefined;
+    }
+
+    if (selectedProjectorId && projectorId !== selectedProjectorId) {
+      return undefined;
+    }
+
+    return projectorId === readiness.projectorId
+      ? readiness
+      : { ...readiness, projectorId };
+  }
+
   private mergeModelWithRegistry(
     remoteModel?: ModelMetadata,
     memoryFitContext: CatalogMemoryFitContext | null = this.getRememberedMemoryFitContext(),
@@ -1821,21 +2586,18 @@ export class ModelCatalogService {
         || typeof remoteModel.downloadErrorAt === 'number'
         || typeof remoteModel.downloadErrorCode === 'string'
         || typeof remoteModel.downloadErrorMessage === 'string'
+        || typeof remoteModel.selectedProjectorId === 'string'
+        || remoteModel.multimodalReadiness !== undefined
+        || (remoteModel.projectorCandidates?.some((projector) => (
+          typeof projector.localPath === 'string'
+          || projector.lifecycleStatus !== 'available'
+          || projector.matchStatus === 'failed'
+          || projector.matchStatus === 'user_selected'
+        )) ?? false)
       );
 
       const sanitized = needsRuntimeReset
-        ? normalizePersistedModelMetadata({
-            ...remoteModel,
-            localPath: undefined,
-            downloadedAt: undefined,
-            downloadIntegrity: undefined,
-            resumeData: undefined,
-            downloadErrorAt: undefined,
-            downloadErrorCode: undefined,
-            downloadErrorMessage: undefined,
-            downloadProgress: 0,
-            lifecycleStatus: LifecycleStatus.AVAILABLE,
-          })
+        ? sanitizeCatalogModelRuntimeState(remoteModel)
         : remoteModel;
 
       return this.withResolvedMemoryFit(sanitized, memoryFitContext);
@@ -1892,7 +2654,38 @@ export class ModelCatalogService {
           ...(remoteModel.gguf ?? {}),
         }
       : undefined;
-    const resolvedMemoryFit = resolveMemoryFitSummary({ size: resolvedSize, metadataTrust }, memoryFitContext);
+    const remoteHasVisionEvidence = remoteModel.chatModalities?.includes('vision') === true
+      || Boolean(remoteModel.projectorCandidates?.length)
+      || remoteModel.visionSource !== undefined;
+    const shouldPreserveLocalVisionMetadata = !shouldResetLocalDownloadState
+      && !remoteHasVisionEvidence
+      && localModel.chatModalities?.includes('vision') === true;
+    const canUseLocalVisionFallback = !shouldResetLocalDownloadState;
+    const chatModalities = shouldPreserveLocalVisionMetadata
+      ? localModel.chatModalities
+      : remoteModel.chatModalities ?? (canUseLocalVisionFallback ? localModel.chatModalities : undefined);
+    const artifactRole = shouldPreserveLocalVisionMetadata
+      ? localModel.artifactRole ?? remoteModel.artifactRole
+      : remoteModel.artifactRole ?? (canUseLocalVisionFallback ? localModel.artifactRole : undefined);
+    const visionSource = shouldPreserveLocalVisionMetadata
+      ? localModel.visionSource ?? remoteModel.visionSource
+      : remoteModel.visionSource ?? (canUseLocalVisionFallback ? localModel.visionSource : undefined);
+    const visionConfidence = shouldPreserveLocalVisionMetadata
+      ? localModel.visionConfidence ?? remoteModel.visionConfidence
+      : remoteModel.visionConfidence ?? (canUseLocalVisionFallback ? localModel.visionConfidence : undefined);
+    const projectorMetadataPatch = this.mergeProjectorMetadataWithLocalState(
+      remoteModel,
+      localModel,
+      shouldResetLocalDownloadState,
+    );
+    const resolvedMemoryFit = resolveMemoryFitSummary({ size: resolvedSize, metadataTrust, gguf }, memoryFitContext, {
+      projectorSizeBytes: this.resolveActiveVariantProjectorMemoryFitSizeBytes({
+        ...remoteModel,
+        resolvedFileName: remoteModel.resolvedFileName ?? localModel.resolvedFileName,
+        projectorCandidates: projectorMetadataPatch.projectorCandidates,
+        selectedProjectorId: projectorMetadataPatch.selectedProjectorId,
+      }),
+    });
     const fitsInRam = resolvedMemoryFit?.fitsInRam
       ?? remoteModel.fitsInRam
       ?? (allowLocalVerifiedDerivedMetadata ? localModel.fitsInRam : null);
@@ -1902,6 +2695,11 @@ export class ModelCatalogService {
     const memoryFitConfidence = resolvedMemoryFit?.confidence
       ?? remoteModel.memoryFitConfidence
       ?? (allowLocalVerifiedDerivedMetadata ? localModel.memoryFitConfidence : undefined);
+    const variants = this.withActiveVariantResolvedMemoryFit(
+      remoteModel.variants,
+      remoteModel.activeVariantId ?? remoteModel.resolvedFileName,
+      resolvedMemoryFit,
+    );
 
     return normalizePersistedModelMetadata({
       ...remoteModel,
@@ -1919,6 +2717,7 @@ export class ModelCatalogService {
       fitsInRam,
       memoryFitDecision,
       memoryFitConfidence,
+      variants,
       accessState: remoteModel.accessState,
       isGated: remoteModel.isGated,
       isPrivate: remoteModel.isPrivate,
@@ -1943,6 +2742,11 @@ export class ModelCatalogService {
       likes: remoteModel.likes ?? localModel.likes ?? null,
       tags: remoteModel.tags ?? localModel.tags,
       description: remoteModel.description ?? localModel.description,
+      chatModalities,
+      artifactRole,
+      visionSource,
+      visionConfidence,
+      ...projectorMetadataPatch,
     });
   }
 

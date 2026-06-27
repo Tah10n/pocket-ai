@@ -123,7 +123,9 @@ export type StorageFallbackReport = {
 const PRIVATE_STORAGE_ENCRYPTION_KEY_ID = 'pocket-ai-private-mmkv-key-v1';
 const PRIVATE_STORAGE_MIGRATION_VERSION_ID = 'pocket-ai-private-mmkv-migration-version';
 const PRIVATE_STORAGE_MIGRATION_IN_PROGRESS_ID = 'pocket-ai-private-mmkv-migration-in-progress';
+const PRIVATE_STORAGE_RESET_FAILURE_MARKER_ID = 'pocket-ai-private-mmkv-reset-failed-v1';
 const PRIVATE_STORAGE_MIGRATION_VERSION = 1;
+const PRIVATE_STORAGE_RESET_FAILURE_MARKER_SCHEMA_VERSION = 1;
 const PRIVATE_STORAGE_ENCRYPTION_TYPE = 'AES-256' as const;
 
 const PRIVATE_STORAGE_INSTANCE_IDS = [
@@ -206,6 +208,49 @@ function throwPrivateStorageUnavailable(reason: PrivateStorageBlockReason, healt
 
 export function getPrivateStorageHealthSnapshot(): PrivateStorageHealthSnapshot {
     return snapshotPrivateStorageHealth();
+}
+
+async function persistPrivateStorageResetFailureMarker(): Promise<void> {
+    try {
+        await SecureStore.setItemAsync(
+            PRIVATE_STORAGE_RESET_FAILURE_MARKER_ID,
+            JSON.stringify({
+                schemaVersion: PRIVATE_STORAGE_RESET_FAILURE_MARKER_SCHEMA_VERSION,
+                reason: 'reset_failed',
+            }),
+        );
+    } catch {
+        if (!IS_TESTING) {
+            console.warn('[Storage] Failed to persist private storage reset failure marker.');
+        }
+    }
+}
+
+async function clearPrivateStorageResetFailureMarker(): Promise<void> {
+    try {
+        await SecureStore.deleteItemAsync(PRIVATE_STORAGE_RESET_FAILURE_MARKER_ID);
+    } catch {
+        if (!IS_TESTING) {
+            console.warn('[Storage] Failed to clear private storage reset failure marker.');
+        }
+    }
+}
+
+async function hasPrivateStorageResetFailureMarker(): Promise<boolean> {
+    try {
+        const marker = await SecureStore.getItemAsync(PRIVATE_STORAGE_RESET_FAILURE_MARKER_ID);
+        return typeof marker === 'string' && marker.trim().length > 0;
+    } catch {
+        return false;
+    }
+}
+
+export async function blockPrivateStorageAfterResetFailure(): Promise<PrivateStorageHealthSnapshot> {
+    await persistPrivateStorageResetFailureMarker();
+    return blockPrivateStorage('reset_failed', {
+        retryable: true,
+        requiresExplicitReset: true,
+    });
 }
 
 export function isPrivateStorageWritable(): boolean {
@@ -964,6 +1009,13 @@ async function initializePrivateStorageEncryptionInternal(
             return blockPrivateStorage('secure_key_unavailable');
         }
 
+        if (await hasPrivateStorageResetFailureMarker()) {
+            return blockPrivateStorage('reset_failed', {
+                retryable: true,
+                requiresExplicitReset: true,
+            });
+        }
+
         let key: string | null = null;
         try {
             key = await SecureStore.getItemAsync(PRIVATE_STORAGE_ENCRYPTION_KEY_ID);
@@ -1067,6 +1119,7 @@ export async function resetPrivateAppStorageAfterConfirmation(): Promise<Private
             } catch {
                 // SecureStore cleanup may be unavailable in unsupported environments; initialization will re-check below.
             }
+            await clearPrivateStorageResetFailureMarker();
 
             privateEncryptionState = 'uninitialized';
             privateEncryptionKey = null;
@@ -1074,10 +1127,7 @@ export async function resetPrivateAppStorageAfterConfirmation(): Promise<Private
 
             return initializePrivateStorageEncryptionInternal(true);
         } catch {
-            return blockPrivateStorage('reset_failed', {
-                retryable: true,
-                requiresExplicitReset: true,
-            });
+            return blockPrivateStorageAfterResetFailure();
         }
     })().finally(() => {
         privateStorageResetPromise = null;

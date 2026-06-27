@@ -1,3 +1,4 @@
+import * as FileSystem from 'expo-file-system/legacy';
 import { ChatThread } from '../../src/types/chat';
 import {
   findMostRecentThreadId,
@@ -15,7 +16,9 @@ import {
   writeChatPersistenceIndex,
   writeChatThreadRecord,
 } from '../../src/store/chatPersistence';
-import { storage } from '../../src/store/storage';
+import { getAppStorage, storage } from '../../src/store/storage';
+import { chatAttachmentStorageService } from '../../src/services/ChatAttachmentStorageService';
+import { copiedImageAttachment } from '../fixtures/chatImageAttachmentFixtures';
 
 function buildThread(id: string, updatedAt: number): ChatThread {
   return {
@@ -67,8 +70,41 @@ function expectPersistedChatClearTombstone() {
   expect(index.updatedAt).toBe(index.clearedAt);
 }
 
+function buildStoredAttachment(threadId: string, messageId: string, fileName: string) {
+  return {
+    ...copiedImageAttachment,
+    id: fileName.replace(/\.[^.]+$/u, ''),
+    threadId,
+    messageId,
+    localUri: `test-dir/chat-attachments/${fileName}`,
+    fileName,
+  };
+}
+
+async function flushAttachmentCleanup(cycles = 2) {
+  for (let cycle = 0; cycle < cycles; cycle += 1) {
+    await Promise.resolve();
+  }
+}
+
+function captureScheduledTimeouts() {
+  const callbacks: Array<() => void> = [];
+  const delays: Array<number | undefined> = [];
+  const setTimeoutSpy = jest
+    .spyOn(global, 'setTimeout')
+    .mockImplementation((callback, delay) => {
+      callbacks.push(callback as () => void);
+      delays.push(typeof delay === 'number' ? delay : undefined);
+      return callbacks.length as unknown as ReturnType<typeof setTimeout>;
+    });
+
+  return { callbacks, delays, setTimeoutSpy };
+}
+
 describe('chatStore', () => {
   beforeEach(() => {
+    jest.clearAllMocks();
+    (FileSystem.deleteAsync as jest.Mock).mockResolvedValue(undefined);
     flushPendingChatPersistenceWrites('background');
     useChatStore.setState({ threads: {}, activeThreadId: null });
     storage.getAllKeys().forEach((key) => storage.remove(key));
@@ -122,6 +158,112 @@ describe('chatStore', () => {
         messageCount: 1,
       }),
     );
+  });
+
+  it('rolls back in-memory chat state when a persistence write fails', () => {
+    const threadId = useChatStore.getState().createThread({
+      modelId: 'author/model-q4',
+      presetId: 'preset-1',
+      presetSnapshot: {
+        id: 'preset-1',
+        name: 'Helpful Assistant',
+        systemPrompt: 'Be concise.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 1024,
+        seed: null,
+      },
+    });
+    const threadBeforeAppend = useChatStore.getState().getThread(threadId);
+    const appStorage = getAppStorage() as unknown as { set: jest.Mock };
+    const originalSet = appStorage.set;
+    const writeError = new Error('simulated thread write failure');
+    let threadWriteAttempts = 0;
+    appStorage.set = jest.fn(function setWithFailure(this: unknown, key: string, value: unknown) {
+      if (key === getChatThreadStorageKey(threadId) && threadWriteAttempts === 0) {
+        threadWriteAttempts += 1;
+        throw writeError;
+      }
+
+      return originalSet.call(this, key, value);
+    });
+
+    try {
+      expect(() => {
+        useChatStore.getState().appendMessage(threadId, {
+          id: 'user-after-failure',
+          role: 'user',
+          content: 'This write should roll back',
+          createdAt: Date.now(),
+          state: 'complete',
+        });
+      }).toThrow(writeError);
+
+      expect(useChatStore.getState().getThread(threadId)).toEqual(threadBeforeAppend);
+      expect(useChatStore.getState().getConversationIndex()[0]).toEqual(expect.objectContaining({
+        id: threadId,
+        messageCount: threadBeforeAppend?.messages.length ?? 0,
+      }));
+    } finally {
+      appStorage.set = originalSet;
+    }
+  });
+
+  it('rolls back partial durable chat records when a persistence index write fails', async () => {
+    const threadId = useChatStore.getState().createThread({
+      modelId: 'author/model-q4',
+      presetId: 'preset-1',
+      presetSnapshot: {
+        id: 'preset-1',
+        name: 'Helpful Assistant',
+        systemPrompt: 'Be concise.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 1024,
+        seed: null,
+      },
+    });
+    const threadBeforeAppend = useChatStore.getState().getThread(threadId);
+    const appStorage = getAppStorage() as unknown as { set: jest.Mock };
+    const originalSet = appStorage.set;
+    const writeError = new Error('simulated index write failure');
+    let indexWriteAttempts = 0;
+    appStorage.set = jest.fn(function setWithFailure(this: unknown, key: string, value: unknown) {
+      if (key === CHAT_PERSISTENCE_INDEX_KEY && indexWriteAttempts === 0) {
+        indexWriteAttempts += 1;
+        throw writeError;
+      }
+
+      return originalSet.call(this, key, value);
+    });
+
+    try {
+      expect(() => {
+        useChatStore.getState().appendMessage(threadId, {
+          id: 'user-after-durable-failure',
+          role: 'user',
+          content: 'This partial write should not survive rehydrate',
+          createdAt: Date.now(),
+          state: 'complete',
+        });
+      }).toThrow(writeError);
+    } finally {
+      appStorage.set = originalSet;
+    }
+
+    expect(useChatStore.getState().getThread(threadId)).toEqual(threadBeforeAppend);
+    expect(storage.getString(CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY)).toBeUndefined();
+    expect(storage.getString(getChatThreadStorageKey(threadId))).not.toContain('partial write should not survive');
+
+    useChatStore.setState({ threads: {}, activeThreadId: null });
+    await useChatStore.persist.rehydrate();
+
+    expect(useChatStore.getState().getThread(threadId)).toEqual(threadBeforeAppend);
+    expect(useChatStore.getState().getThread(threadId)?.messages).toEqual(threadBeforeAppend?.messages);
   });
 
   it('defaults kind and modelId when appending messages without metadata', () => {
@@ -722,6 +864,63 @@ describe('chatStore', () => {
     expect(useChatStore.getState().getThread(threadId)).toBe(beforeEmptyEdit);
   });
 
+  it('preserves image-only user attachments when regenerating a branch with empty text', () => {
+    const threadId = useChatStore.getState().createThread({
+      modelId: 'author/model-q4',
+      presetId: null,
+      presetSnapshot: {
+        id: null,
+        name: 'Default',
+        systemPrompt: 'You are helpful.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 1024,
+        seed: null,
+      },
+    });
+    const attachment = buildStoredAttachment(threadId, 'user-1', 'image-only.jpg');
+
+    useChatStore.getState().appendMessage(threadId, {
+      id: 'user-1',
+      role: 'user',
+      content: '',
+      attachments: [attachment],
+      createdAt: 1,
+      state: 'complete',
+    });
+    useChatStore.getState().appendMessage(threadId, {
+      id: 'assistant-1',
+      role: 'assistant',
+      content: 'First reply',
+      createdAt: 2,
+      state: 'complete',
+    });
+
+    const replacementAssistantId = useChatStore.getState().replaceBranchFromUserMessage(
+      threadId,
+      'user-1',
+      '   ',
+    );
+
+    expect(replacementAssistantId).toBeTruthy();
+    expect(useChatStore.getState().getThread(threadId)?.messages).toEqual([
+      expect.objectContaining({
+        id: 'user-1',
+        role: 'user',
+        content: '',
+        attachments: [attachment],
+      }),
+      expect.objectContaining({
+        id: replacementAssistantId,
+        role: 'assistant',
+        content: '',
+        state: 'streaming',
+      }),
+    ]);
+  });
+
   it('replaces an older user branch with the active switched model metadata', () => {
     const threadId = useChatStore.getState().createThread({
       modelId: 'author/model-q4',
@@ -961,6 +1160,103 @@ describe('chatStore', () => {
     ]);
   });
 
+  it('cleans attachments removed by branch deletion without deleting surviving references', async () => {
+    const retainedAttachment = buildStoredAttachment('thread-branch-cleanup', 'user-1', 'shared.jpg');
+    const removedAttachment = buildStoredAttachment('thread-branch-cleanup', 'user-2', 'removed-branch.jpg');
+    const thread: ChatThread = {
+      ...buildThread('thread-branch-cleanup', 10),
+      messages: [
+        {
+          id: 'user-1',
+          role: 'user',
+          content: 'Keep this image',
+          createdAt: 10,
+          state: 'complete',
+          attachments: [retainedAttachment],
+        },
+        {
+          id: 'assistant-1',
+          role: 'assistant',
+          content: 'First reply',
+          createdAt: 11,
+          state: 'complete',
+        },
+        {
+          id: 'user-2',
+          role: 'user',
+          content: 'Remove this branch image',
+          createdAt: 12,
+          state: 'complete',
+          attachments: [removedAttachment],
+        },
+      ],
+    };
+
+    useChatStore.setState({
+      threads: { [thread.id]: thread },
+      activeThreadId: thread.id,
+    });
+
+    expect(useChatStore.getState().deleteMessageBranch(thread.id, 'user-2')).toBe(true);
+    await flushAttachmentCleanup();
+
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith(removedAttachment.localUri, {
+      idempotent: true,
+    });
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith(retainedAttachment.localUri, expect.anything());
+  });
+
+  it('cleans attachments removed by retry or edit branch replacement', async () => {
+    const retainedAttachment = buildStoredAttachment('thread-edit-cleanup', 'user-1', 'edited-kept.jpg');
+    const removedAttachment = buildStoredAttachment('thread-edit-cleanup', 'user-2', 'edited-removed.jpg');
+    const thread: ChatThread = {
+      ...buildThread('thread-edit-cleanup', 10),
+      messages: [
+        {
+          id: 'user-1',
+          role: 'user',
+          content: 'Original image prompt',
+          createdAt: 10,
+          state: 'complete',
+          attachments: [retainedAttachment],
+        },
+        {
+          id: 'assistant-1',
+          role: 'assistant',
+          content: 'First reply',
+          createdAt: 11,
+          state: 'complete',
+        },
+        {
+          id: 'user-2',
+          role: 'user',
+          content: 'Later image prompt',
+          createdAt: 12,
+          state: 'complete',
+          attachments: [removedAttachment],
+        },
+      ],
+    };
+
+    useChatStore.setState({
+      threads: { [thread.id]: thread },
+      activeThreadId: thread.id,
+    });
+
+    expect(useChatStore.getState().replaceBranchFromUserMessage(
+      thread.id,
+      'user-1',
+      'Edited original image prompt',
+    )).toBeTruthy();
+    await flushAttachmentCleanup();
+
+    expect(useChatStore.getState().getThread(thread.id)?.messages[0]?.attachments).toEqual([retainedAttachment]);
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith(removedAttachment.localUri, {
+      idempotent: true,
+    });
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith(retainedAttachment.localUri, expect.anything());
+  });
+
   it('recomputes activeModelId from the surviving history when deleting an older branch after multiple switches', () => {
     const threadId = useChatStore.getState().createThread({
       modelId: 'author/model-q4',
@@ -1076,6 +1372,53 @@ describe('chatStore', () => {
     expect(useChatStore.getState().activeThreadId).toBe(firstThreadId);
   });
 
+  it('cleans attachment files when deleting full threads', async () => {
+    const removedAttachment = buildStoredAttachment('thread-delete-cleanup', 'user-1', 'thread-delete.jpg');
+    const retainedAttachment = buildStoredAttachment('thread-retained-cleanup', 'user-1', 'thread-retained.jpg');
+    const removedThread: ChatThread = {
+      ...buildThread('thread-delete-cleanup', 10),
+      messages: [
+        {
+          id: 'user-1',
+          role: 'user',
+          content: 'Remove thread attachment',
+          createdAt: 10,
+          state: 'complete',
+          attachments: [removedAttachment],
+        },
+      ],
+    };
+    const retainedThread: ChatThread = {
+      ...buildThread('thread-retained-cleanup', 20),
+      messages: [
+        {
+          id: 'user-1',
+          role: 'user',
+          content: 'Keep thread attachment',
+          createdAt: 20,
+          state: 'complete',
+          attachments: [retainedAttachment],
+        },
+      ],
+    };
+
+    useChatStore.setState({
+      threads: {
+        [removedThread.id]: removedThread,
+        [retainedThread.id]: retainedThread,
+      },
+      activeThreadId: removedThread.id,
+    });
+
+    useChatStore.getState().deleteThread(removedThread.id);
+    await flushAttachmentCleanup();
+
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith(removedAttachment.localUri, {
+      idempotent: true,
+    });
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith(retainedAttachment.localUri, expect.anything());
+  });
+
   it('persists an explicit blank active thread selection across rehydrate', async () => {
     const firstThreadId = useChatStore.getState().createThread({
       modelId: 'author/model-q4',
@@ -1163,6 +1506,61 @@ describe('chatStore', () => {
       revision: 2,
     }));
     expect(storage.getString(CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY)).toBeUndefined();
+  });
+
+  it('cleans attachment files dropped while recovering a pending thread commit', async () => {
+    const keptAttachment = buildStoredAttachment('thread-pending-sanitized-attachment', 'user-1', 'pending-kept.jpg');
+    const droppedAttachment = {
+      ...buildStoredAttachment('thread-pending-sanitized-attachment', 'user-1', 'pending-dropped.txt'),
+      mediaType: 'text/plain',
+    };
+    const thread: ChatThread = {
+      ...buildThread('thread-pending-sanitized-attachment', 20),
+      messages: [
+        {
+          id: 'user-1',
+          role: 'user',
+          content: 'Pending sanitized attachment',
+          createdAt: 20,
+          state: 'complete',
+          attachments: [keptAttachment, droppedAttachment],
+        },
+      ],
+    };
+
+    writeChatPersistenceIndex(storage, {
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      activeThreadId: null,
+      threadIds: [],
+      updatedAt: 10,
+      revision: 1,
+    });
+    storage.set(getChatThreadStorageKey(thread.id), JSON.stringify({
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      thread,
+      persistedAt: 21,
+      commitRevision: 2,
+    }));
+    writeChatPendingIndexCommit(storage, {
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      revision: 2,
+      activeThreadId: thread.id,
+      threadIds: [thread.id],
+      updatedAt: 22,
+      reason: 'thread_mutation',
+      changedThreadIds: [thread.id],
+      requiresChangedThreadCommitRevision: true,
+    });
+
+    useChatStore.setState({ threads: {}, activeThreadId: null });
+    await useChatStore.persist.rehydrate();
+    await flushAttachmentCleanup();
+
+    expect(useChatStore.getState().getThread(thread.id)?.messages[0]?.attachments).toEqual([keptAttachment]);
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith(droppedAttachment.localUri, {
+      idempotent: true,
+    });
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith(keptAttachment.localUri, expect.anything());
   });
 
   it('recovers legacy pending commits whose changed records predate commit revision markers', async () => {
@@ -1626,6 +2024,35 @@ describe('chatStore', () => {
     expectPersistedChatClearTombstone();
   });
 
+  it('cleans attachment files when clearing all chat history', async () => {
+    const attachment = buildStoredAttachment('thread-clear-cleanup', 'user-1', 'clear-history.jpg');
+    const thread: ChatThread = {
+      ...buildThread('thread-clear-cleanup', 10),
+      messages: [
+        {
+          id: 'user-1',
+          role: 'user',
+          content: 'Clear history image',
+          createdAt: 10,
+          state: 'complete',
+          attachments: [attachment],
+        },
+      ],
+    };
+
+    useChatStore.setState({
+      threads: { [thread.id]: thread },
+      activeThreadId: thread.id,
+    });
+
+    expect(useChatStore.getState().clearAllThreads()).toBe(1);
+    await flushAttachmentCleanup();
+
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith(attachment.localUri, {
+      idempotent: true,
+    });
+  });
+
   it('leaves a clear tombstone when resetting chat state for private storage recovery', () => {
     const threadId = useChatStore.getState().createThread({
       modelId: 'author/model-q4',
@@ -1859,6 +2286,421 @@ describe('chatStore', () => {
     );
   });
 
+  it('does not schedule attachment cleanup for metadata-only thread mutations', async () => {
+    const cleanupSpy = jest
+      .spyOn(chatAttachmentStorageService, 'deleteUnreferencedAttachmentFiles')
+      .mockResolvedValue(0);
+    const threadId = useChatStore.getState().createThread({
+      modelId: 'author/model-q4',
+      presetId: null,
+      presetSnapshot: {
+        id: null,
+        name: 'Default',
+        systemPrompt: 'You are helpful.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 1024,
+        seed: null,
+      },
+    });
+    useChatStore.getState().appendMessage(threadId, {
+      id: 'user-with-attachment',
+      role: 'user',
+      content: 'Image prompt',
+      createdAt: Date.now(),
+      state: 'complete',
+      attachments: [buildStoredAttachment(threadId, 'user-with-attachment', 'metadata-kept.jpg')],
+    });
+    await flushAttachmentCleanup();
+    cleanupSpy.mockClear();
+
+    expect(useChatStore.getState().renameThread(threadId, 'Renamed')).toBe(true);
+    await flushAttachmentCleanup();
+
+    expect(cleanupSpy).not.toHaveBeenCalled();
+    cleanupSpy.mockRestore();
+  });
+
+  it('serializes overlapping unreferenced attachment cleanup requests', async () => {
+    const firstCleanup = {
+      resolve: null as ((deletedCount: number) => void) | null,
+    };
+    const cleanupSpy = jest
+      .spyOn(chatAttachmentStorageService, 'deleteUnreferencedAttachmentFiles')
+      .mockImplementationOnce(() => new Promise<number>((resolve) => {
+        firstCleanup.resolve = resolve;
+      }))
+      .mockResolvedValue(0);
+    const firstAttachment = buildStoredAttachment('thread-cleanup-one', 'user-1', 'cleanup-one.jpg');
+    const secondAttachment = buildStoredAttachment('thread-cleanup-two', 'user-1', 'cleanup-two.jpg');
+    const firstThread: ChatThread = {
+      ...buildThread('thread-cleanup-one', 10),
+      messages: [{
+        id: 'user-1',
+        role: 'user',
+        content: 'First image prompt',
+        createdAt: 10,
+        state: 'complete',
+        attachments: [firstAttachment],
+      }],
+    };
+    const secondThread: ChatThread = {
+      ...buildThread('thread-cleanup-two', 20),
+      messages: [{
+        id: 'user-1',
+        role: 'user',
+        content: 'Second image prompt',
+        createdAt: 20,
+        state: 'complete',
+        attachments: [secondAttachment],
+      }],
+    };
+
+    try {
+      useChatStore.setState({
+        threads: {
+          [firstThread.id]: firstThread,
+          [secondThread.id]: secondThread,
+        },
+        activeThreadId: firstThread.id,
+      });
+
+      useChatStore.getState().deleteThread(firstThread.id);
+      await flushAttachmentCleanup();
+
+      expect(cleanupSpy).toHaveBeenCalledTimes(1);
+      expect(cleanupSpy).toHaveBeenLastCalledWith(expect.objectContaining({
+        candidateLocalUris: [firstAttachment.localUri],
+        maxDeletes: 16,
+      }));
+
+      useChatStore.getState().deleteThread(secondThread.id);
+      await flushAttachmentCleanup();
+
+      expect(cleanupSpy).toHaveBeenCalledTimes(1);
+
+      expect(firstCleanup.resolve).toEqual(expect.any(Function));
+      firstCleanup.resolve?.(0);
+      firstCleanup.resolve = null;
+      await flushAttachmentCleanup(6);
+
+      expect(cleanupSpy).toHaveBeenCalledTimes(2);
+      expect(cleanupSpy).toHaveBeenLastCalledWith(expect.objectContaining({
+        candidateLocalUris: [secondAttachment.localUri],
+        maxDeletes: 16,
+      }));
+    } finally {
+      if (firstCleanup.resolve) {
+        firstCleanup.resolve(0);
+      }
+      cleanupSpy.mockRestore();
+    }
+  });
+
+  it('does not let stale queued references protect later orphaned attachments', async () => {
+    const firstCleanup = {
+      resolve: null as ((deletedCount: number) => void) | null,
+    };
+    const cleanupSpy = jest
+      .spyOn(chatAttachmentStorageService, 'deleteUnreferencedAttachmentFiles')
+      .mockImplementationOnce(() => new Promise<number>((resolve) => {
+        firstCleanup.resolve = resolve;
+      }))
+      .mockResolvedValue(0);
+    const inFlightAttachment = buildStoredAttachment('thread-cleanup-in-flight', 'user-1', 'cleanup-in-flight.jpg');
+    const queuedAttachment = buildStoredAttachment('thread-cleanup-queued', 'user-1', 'cleanup-queued.jpg');
+    const laterOrphanedAttachment = buildStoredAttachment('thread-cleanup-later', 'user-1', 'cleanup-later.jpg');
+    const inFlightThread: ChatThread = {
+      ...buildThread('thread-cleanup-in-flight', 10),
+      messages: [{
+        id: 'user-1',
+        role: 'user',
+        content: 'In-flight cleanup image prompt',
+        createdAt: 10,
+        state: 'complete',
+        attachments: [inFlightAttachment],
+      }],
+    };
+    const queuedThread: ChatThread = {
+      ...buildThread('thread-cleanup-queued', 20),
+      messages: [{
+        id: 'user-1',
+        role: 'user',
+        content: 'Queued cleanup image prompt',
+        createdAt: 20,
+        state: 'complete',
+        attachments: [queuedAttachment],
+      }],
+    };
+    const laterOrphanedThread: ChatThread = {
+      ...buildThread('thread-cleanup-later', 30),
+      messages: [{
+        id: 'user-1',
+        role: 'user',
+        content: 'Later orphaned image prompt',
+        createdAt: 30,
+        state: 'complete',
+        attachments: [laterOrphanedAttachment],
+      }],
+    };
+
+    try {
+      useChatStore.setState({
+        threads: {
+          [inFlightThread.id]: inFlightThread,
+          [queuedThread.id]: queuedThread,
+          [laterOrphanedThread.id]: laterOrphanedThread,
+        },
+        activeThreadId: inFlightThread.id,
+      });
+
+      useChatStore.getState().deleteThread(inFlightThread.id);
+      await flushAttachmentCleanup();
+      expect(cleanupSpy).toHaveBeenCalledTimes(1);
+
+      useChatStore.getState().deleteThread(queuedThread.id);
+      useChatStore.getState().deleteThread(laterOrphanedThread.id);
+      await flushAttachmentCleanup();
+      expect(cleanupSpy).toHaveBeenCalledTimes(1);
+
+      expect(firstCleanup.resolve).toEqual(expect.any(Function));
+      firstCleanup.resolve?.(0);
+      firstCleanup.resolve = null;
+      await flushAttachmentCleanup(6);
+
+      expect(cleanupSpy).toHaveBeenCalledTimes(2);
+      const secondCleanupRequest = cleanupSpy.mock.calls[1][0];
+      expect(secondCleanupRequest).toEqual(expect.objectContaining({
+        candidateLocalUris: [queuedAttachment.localUri, laterOrphanedAttachment.localUri],
+        maxDeletes: 16,
+      }));
+      expect(secondCleanupRequest.referencedLocalUris).toBeDefined();
+      expect(Array.from(secondCleanupRequest.referencedLocalUris!)).not.toContain(laterOrphanedAttachment.localUri);
+    } finally {
+      if (firstCleanup.resolve) {
+        firstCleanup.resolve(0);
+      }
+      cleanupSpy.mockRestore();
+    }
+  });
+
+  it('bounds large unreferenced attachment cleanup batches', async () => {
+    const cleanupSpy = jest
+      .spyOn(chatAttachmentStorageService, 'deleteUnreferencedAttachmentFiles')
+      .mockResolvedValue(0);
+    const attachments = Array.from({ length: 18 }, (_, index) => (
+      buildStoredAttachment('thread-cleanup-large', `user-${index}`, `cleanup-large-${index}.jpg`)
+    ));
+    const removedThread: ChatThread = {
+      ...buildThread('thread-cleanup-large', 10),
+      messages: attachments.map((attachment, index) => ({
+        id: `user-${index}`,
+        role: 'user' as const,
+        content: `Large cleanup image prompt ${index}`,
+        createdAt: 10 + index,
+        state: 'complete' as const,
+        attachments: [attachment],
+      })),
+    };
+
+    useChatStore.setState({
+      threads: {
+        [removedThread.id]: removedThread,
+      },
+      activeThreadId: removedThread.id,
+    });
+
+    useChatStore.getState().deleteThread(removedThread.id);
+    await flushAttachmentCleanup(8);
+
+    expect(cleanupSpy).toHaveBeenCalledTimes(2);
+    expect(cleanupSpy.mock.calls[0][0]).toEqual(expect.objectContaining({
+      candidateLocalUris: attachments.slice(0, 16).map((attachment) => attachment.localUri),
+      maxDeletes: 16,
+    }));
+    expect(cleanupSpy.mock.calls[1][0]).toEqual(expect.objectContaining({
+      candidateLocalUris: attachments.slice(16).map((attachment) => attachment.localUri),
+      maxDeletes: 16,
+    }));
+    cleanupSpy.mockRestore();
+  });
+
+  it('retries rejected unreferenced attachment cleanup without dropping failed or remaining candidates', async () => {
+    const { callbacks, delays, setTimeoutSpy } = captureScheduledTimeouts();
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const cleanupSpy = jest
+      .spyOn(chatAttachmentStorageService, 'deleteUnreferencedAttachmentFiles')
+      .mockRejectedValueOnce(new Error('cleanup unavailable'))
+      .mockResolvedValue(0);
+    const attachments = Array.from({ length: 18 }, (_, index) => (
+      buildStoredAttachment('thread-cleanup-retry', `user-${index}`, `cleanup-retry-${index}.jpg`)
+    ));
+    const removedThread: ChatThread = {
+      ...buildThread('thread-cleanup-retry', 10),
+      messages: attachments.map((attachment, index) => ({
+        id: `user-${index}`,
+        role: 'user' as const,
+        content: `Retry cleanup image prompt ${index}`,
+        createdAt: 10 + index,
+        state: 'complete' as const,
+        attachments: [attachment],
+      })),
+    };
+
+    try {
+      useChatStore.setState({
+        threads: {
+          [removedThread.id]: removedThread,
+        },
+        activeThreadId: removedThread.id,
+      });
+
+      useChatStore.getState().deleteThread(removedThread.id);
+      await flushAttachmentCleanup(8);
+
+      expect(cleanupSpy).toHaveBeenCalledTimes(1);
+      expect(cleanupSpy.mock.calls[0][0]).toEqual(expect.objectContaining({
+        candidateLocalUris: attachments.slice(0, 16).map((attachment) => attachment.localUri),
+        maxDeletes: 16,
+      }));
+      expect(callbacks).toHaveLength(1);
+      expect(delays[0]).toBe(1000);
+
+      callbacks[0]?.();
+      await flushAttachmentCleanup(10);
+
+      expect(cleanupSpy).toHaveBeenCalledTimes(3);
+      expect(cleanupSpy.mock.calls[1][0]).toEqual(expect.objectContaining({
+        candidateLocalUris: attachments.slice(0, 16).map((attachment) => attachment.localUri),
+        maxDeletes: 16,
+      }));
+      expect(cleanupSpy.mock.calls[2][0]).toEqual(expect.objectContaining({
+        candidateLocalUris: attachments.slice(16).map((attachment) => attachment.localUri),
+        maxDeletes: 16,
+      }));
+      expect(warnSpy).toHaveBeenCalledWith('[chatStore] Failed to clean up chat attachments', { errorName: 'Error' });
+    } finally {
+      cleanupSpy.mockRestore();
+      warnSpy.mockRestore();
+      setTimeoutSpy.mockRestore();
+    }
+  });
+
+  it('honors cleanup retry backoff while merging new requests into the pending retry', async () => {
+    const { callbacks, delays, setTimeoutSpy } = captureScheduledTimeouts();
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const cleanupSpy = jest
+      .spyOn(chatAttachmentStorageService, 'deleteUnreferencedAttachmentFiles')
+      .mockRejectedValueOnce(new Error('cleanup unavailable'))
+      .mockResolvedValue(0);
+    const firstAttachment = buildStoredAttachment('thread-cleanup-retry-first', 'user-1', 'cleanup-retry-first.jpg');
+    const secondAttachment = buildStoredAttachment('thread-cleanup-retry-second', 'user-1', 'cleanup-retry-second.jpg');
+    const firstThread: ChatThread = {
+      ...buildThread('thread-cleanup-retry-first', 10),
+      messages: [{
+        id: 'user-1',
+        role: 'user',
+        content: 'First retry image prompt',
+        createdAt: 10,
+        state: 'complete',
+        attachments: [firstAttachment],
+      }],
+    };
+    const secondThread: ChatThread = {
+      ...buildThread('thread-cleanup-retry-second', 20),
+      messages: [{
+        id: 'user-1',
+        role: 'user',
+        content: 'Second retry image prompt',
+        createdAt: 20,
+        state: 'complete',
+        attachments: [secondAttachment],
+      }],
+    };
+
+    try {
+      useChatStore.setState({
+        threads: {
+          [firstThread.id]: firstThread,
+          [secondThread.id]: secondThread,
+        },
+        activeThreadId: firstThread.id,
+      });
+
+      useChatStore.getState().deleteThread(firstThread.id);
+      await flushAttachmentCleanup(8);
+      expect(cleanupSpy).toHaveBeenCalledTimes(1);
+      expect(callbacks).toHaveLength(1);
+      expect(delays[0]).toBe(1000);
+
+      useChatStore.getState().deleteThread(secondThread.id);
+      await flushAttachmentCleanup(8);
+      expect(cleanupSpy).toHaveBeenCalledTimes(1);
+
+      callbacks[0]?.();
+      await flushAttachmentCleanup(8);
+
+      expect(cleanupSpy).toHaveBeenCalledTimes(2);
+      expect(cleanupSpy.mock.calls[1][0]).toEqual(expect.objectContaining({
+        candidateLocalUris: [firstAttachment.localUri, secondAttachment.localUri],
+        maxDeletes: 16,
+      }));
+      expect(warnSpy).toHaveBeenCalledWith('[chatStore] Failed to clean up chat attachments', { errorName: 'Error' });
+    } finally {
+      cleanupSpy.mockRestore();
+      warnSpy.mockRestore();
+      setTimeoutSpy.mockRestore();
+    }
+  });
+
+  it('preserves live attachments dropped by persistence sanitization during store writes', async () => {
+    const threadId = useChatStore.getState().createThread({
+      modelId: 'author/model-q4',
+      presetId: null,
+      presetSnapshot: {
+        id: null,
+        name: 'Default',
+        systemPrompt: 'You are helpful.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 1024,
+        seed: null,
+      },
+    });
+    const attachments = [
+      buildStoredAttachment(threadId, 'user-over-limit', 'limit-kept-1.jpg'),
+      buildStoredAttachment(threadId, 'user-over-limit', 'limit-kept-2.jpg'),
+      buildStoredAttachment(threadId, 'user-over-limit', 'limit-kept-3.jpg'),
+      buildStoredAttachment(threadId, 'user-over-limit', 'limit-kept-4.jpg'),
+      buildStoredAttachment(threadId, 'user-over-limit', 'limit-dropped-5.jpg'),
+    ];
+
+    useChatStore.getState().appendMessage(threadId, {
+      id: 'user-over-limit',
+      role: 'user',
+      content: 'Image prompt over the persistence limit',
+      createdAt: Date.now(),
+      state: 'complete',
+      attachments,
+    });
+    await flushAttachmentCleanup();
+
+    const persistedRecord = JSON.parse(storage.getString(getChatThreadStorageKey(threadId)) ?? '{}') as {
+      thread?: ChatThread;
+    };
+
+    expect(useChatStore.getState().getThread(threadId)?.messages[0]?.attachments).toEqual(attachments);
+    expect(persistedRecord.thread?.messages[0]?.attachments).toEqual(attachments.slice(0, 4));
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith(attachments[4].localUri, expect.anything());
+    attachments.slice(0, 4).forEach((attachment) => {
+      expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith(attachment.localUri, expect.anything());
+    });
+  });
+
   it('prunes inactive threads that fall outside the retention window', () => {
     const now = 100 * 24 * 60 * 60 * 1000;
     const staleThread = buildThread('thread-stale', now - 95 * 24 * 60 * 60 * 1000);
@@ -1911,6 +2753,54 @@ describe('chatStore', () => {
     expect(index.threadIds).toEqual([recentThread.id]);
     expect(index.revision).toEqual(expect.any(Number));
     expect(storage.getString(CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY)).toBeUndefined();
+  });
+
+  it('cleans attachment files removed by retention pruning', async () => {
+    const now = 100 * 24 * 60 * 60 * 1000;
+    const staleAttachment = buildStoredAttachment('thread-stale-attachment', 'user-1', 'retention-stale.jpg');
+    const recentAttachment = buildStoredAttachment('thread-recent-attachment', 'user-1', 'retention-recent.jpg');
+    const staleThread: ChatThread = {
+      ...buildThread('thread-stale-attachment', now - 95 * 24 * 60 * 60 * 1000),
+      messages: [
+        {
+          id: 'user-1',
+          role: 'user',
+          content: 'Expired image prompt',
+          createdAt: now - 95 * 24 * 60 * 60 * 1000,
+          state: 'complete',
+          attachments: [staleAttachment],
+        },
+      ],
+    };
+    const recentThread: ChatThread = {
+      ...buildThread('thread-recent-attachment', now - 10 * 24 * 60 * 60 * 1000),
+      messages: [
+        {
+          id: 'user-1',
+          role: 'user',
+          content: 'Recent image prompt',
+          createdAt: now - 10 * 24 * 60 * 60 * 1000,
+          state: 'complete',
+          attachments: [recentAttachment],
+        },
+      ],
+    };
+
+    useChatStore.setState({
+      threads: {
+        [staleThread.id]: staleThread,
+        [recentThread.id]: recentThread,
+      },
+      activeThreadId: recentThread.id,
+    });
+
+    expect(useChatStore.getState().pruneExpiredThreads(90, now)).toBe(1);
+    await flushAttachmentCleanup();
+
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith(staleAttachment.localUri, {
+      idempotent: true,
+    });
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith(recentAttachment.localUri, expect.anything());
   });
 
   it('moves activeThreadId to the most recent remaining thread when pruning runs with a missing activeThreadId', () => {
@@ -2294,6 +3184,7 @@ describe('chatStore', () => {
   it('keeps newer corrupt v2 records isolated after a clear tombstone', async () => {
     const staleLegacyThread = buildThread('thread-legacy-behind-corrupt-clear', 30);
     const corruptThreadId = 'thread-corrupt-after-clear';
+    const corruptAttachment = buildStoredAttachment(corruptThreadId, 'user-1', 'corrupt-after-clear.jpg');
     const clearedAt = 40;
 
     writeChatPersistenceIndex(storage, {
@@ -2307,6 +3198,12 @@ describe('chatStore', () => {
       schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
       thread: {
         id: corruptThreadId,
+        messages: [
+          {
+            id: 'user-1',
+            attachments: [corruptAttachment],
+          },
+        ],
       },
       persistedAt: clearedAt + 1,
     }));
@@ -2325,6 +3222,7 @@ describe('chatStore', () => {
 
     useChatStore.setState({ threads: {}, activeThreadId: null });
     await useChatStore.persist.rehydrate();
+    await flushAttachmentCleanup();
 
     const index = readPersistedChatIndex();
     expect(useChatStore.getState().getThread(staleLegacyThread.id)).toBeNull();
@@ -2335,6 +3233,9 @@ describe('chatStore', () => {
     expect(index.corruptThreadIds).toEqual([corruptThreadId]);
     expect(storage.getString('chat-store')).toBeUndefined();
     expect(storage.getString(getChatThreadStorageKey(corruptThreadId))).toContain(corruptThreadId);
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith(corruptAttachment.localUri, {
+      idempotent: true,
+    });
   });
 
   it('recovers v2 thread records when the v2 index is missing', async () => {
@@ -2519,6 +3420,527 @@ describe('chatStore', () => {
     expect(storage.getString(getChatThreadStorageKey('thread-corrupt-v2'))).toContain('thread-corrupt-v2');
     expect(index.threadIds).toEqual([validThread.id]);
     expect(index.corruptThreadIds).toEqual(['thread-corrupt-v2']);
+  });
+
+  it('cleans unreferenced attachment files from corrupt persisted thread recovery', async () => {
+    const sharedAttachment = buildStoredAttachment('thread-valid-shared', 'user-1', 'shared-corrupt.jpg');
+    const corruptOnlyAttachment = buildStoredAttachment('thread-corrupt-with-image', 'user-1', 'corrupt-only.jpg');
+    const validThread: ChatThread = {
+      ...buildThread('thread-valid-shared', 20),
+      messages: [
+        {
+          id: 'user-1',
+          role: 'user',
+          content: 'Still references shared image',
+          createdAt: 20,
+          state: 'complete',
+          attachments: [sharedAttachment],
+        },
+      ],
+    };
+
+    writeChatThreadRecord(storage, validThread, 20);
+    storage.set(
+      getChatThreadStorageKey('thread-corrupt-with-image'),
+      JSON.stringify({
+        schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+        thread: {
+          id: 'thread-corrupt-with-image',
+          messages: [
+            {
+              id: 'user-1',
+              attachments: [sharedAttachment, corruptOnlyAttachment],
+            },
+          ],
+        },
+        persistedAt: 21,
+      }),
+    );
+    writeChatPersistenceIndex(storage, {
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      activeThreadId: 'thread-corrupt-with-image',
+      threadIds: [validThread.id, 'thread-corrupt-with-image'],
+      updatedAt: 22,
+    });
+
+    useChatStore.setState({ threads: {}, activeThreadId: null });
+    await useChatStore.persist.rehydrate();
+    await flushAttachmentCleanup();
+
+    expect(useChatStore.getState().getThread(validThread.id)).toEqual(
+      expect.objectContaining({ id: validThread.id }),
+    );
+    expect(useChatStore.getState().getThread('thread-corrupt-with-image')).toBeNull();
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith(corruptOnlyAttachment.localUri, {
+      idempotent: true,
+    });
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith(sharedAttachment.localUri, expect.anything());
+  });
+
+  it('cleans attachment files dropped by hydration sanitization', async () => {
+    const validAttachment = buildStoredAttachment('thread-sanitized-attachments', 'user-1', 'kept.jpg');
+    const droppedAttachment = {
+      ...buildStoredAttachment('thread-sanitized-attachments', 'user-1', 'dropped.txt'),
+      mediaType: 'text/plain',
+    };
+    const thread: ChatThread = {
+      ...buildThread('thread-sanitized-attachments', 20),
+      messages: [
+        {
+          id: 'user-1',
+          role: 'user',
+          content: 'Hydrate attachments',
+          createdAt: 20,
+          state: 'complete',
+          attachments: [validAttachment, droppedAttachment],
+        },
+      ],
+    };
+
+    storage.set(getChatThreadStorageKey(thread.id), JSON.stringify({
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      thread,
+      persistedAt: 20,
+    }));
+    writeChatPersistenceIndex(storage, {
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      activeThreadId: thread.id,
+      threadIds: [thread.id],
+      updatedAt: 21,
+    });
+
+    useChatStore.setState({ threads: {}, activeThreadId: null });
+    await useChatStore.persist.rehydrate();
+    await flushAttachmentCleanup();
+
+    expect(useChatStore.getState().getThread(thread.id)?.messages[0]?.attachments).toEqual([validAttachment]);
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith(droppedAttachment.localUri, {
+      idempotent: true,
+    });
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith(validAttachment.localUri, expect.anything());
+  });
+
+  it('reconciles the attachment directory on hydration with no referenced attachments', async () => {
+    const reconcileSpy = jest
+      .spyOn(chatAttachmentStorageService, 'reconcileAttachmentDirectory')
+      .mockResolvedValue({
+        deletedCount: 1,
+        attemptedDeleteCount: 1,
+        candidateCount: 1,
+        hasMoreCandidates: false,
+      });
+
+    try {
+      useChatStore.setState({ threads: {}, activeThreadId: null });
+      await useChatStore.persist.rehydrate();
+      await flushAttachmentCleanup();
+
+      expect(reconcileSpy).toHaveBeenCalledTimes(1);
+      expect(Array.from(reconcileSpy.mock.calls[0]?.[0] as Iterable<string>)).toEqual([]);
+      expect(reconcileSpy.mock.calls[0]?.[1]).toEqual(expect.objectContaining({
+        preserveDraftsCreatedAtOrAfter: expect.any(Number),
+        maxCandidates: 16,
+        maxDeletes: 16,
+      }));
+    } finally {
+      reconcileSpy.mockRestore();
+    }
+  });
+
+  it('passes referenced attachment uris to hydration directory reconciliation', async () => {
+    const referencedAttachment = buildStoredAttachment('thread-reconcile-referenced', 'user-1', 'preserve.jpg');
+    const thread: ChatThread = {
+      ...buildThread('thread-reconcile-referenced', 20),
+      messages: [
+        {
+          id: 'user-1',
+          role: 'user',
+          content: 'Preserve this hydrated attachment',
+          createdAt: 20,
+          state: 'complete',
+          attachments: [referencedAttachment],
+        },
+      ],
+    };
+    const reconcileSpy = jest
+      .spyOn(chatAttachmentStorageService, 'reconcileAttachmentDirectory')
+      .mockResolvedValue({
+        deletedCount: 0,
+        attemptedDeleteCount: 0,
+        candidateCount: 0,
+        hasMoreCandidates: false,
+      });
+
+    try {
+      writeChatThreadRecord(storage, thread, 20);
+      writeChatPersistenceIndex(storage, {
+        schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+        activeThreadId: thread.id,
+        threadIds: [thread.id],
+        updatedAt: 21,
+      });
+
+      useChatStore.setState({ threads: {}, activeThreadId: null });
+      await useChatStore.persist.rehydrate();
+      await flushAttachmentCleanup();
+
+      expect(reconcileSpy).toHaveBeenCalledTimes(1);
+      expect(new Set(reconcileSpy.mock.calls[0]?.[0] as Iterable<string>)).toEqual(
+        new Set([referencedAttachment.localUri]),
+      );
+      expect(reconcileSpy.mock.calls[0]?.[1]).toEqual(expect.objectContaining({
+        preserveDraftsCreatedAtOrAfter: expect.any(Number),
+        maxCandidates: 16,
+        maxDeletes: 16,
+      }));
+    } finally {
+      reconcileSpy.mockRestore();
+    }
+  });
+
+  it('schedules a later hydration directory reconciliation pass when candidates remain', async () => {
+    const referencedAttachment = buildStoredAttachment('thread-reconcile-reschedule', 'user-1', 'keep.jpg');
+    const thread: ChatThread = {
+      ...buildThread('thread-reconcile-reschedule', 20),
+      messages: [
+        {
+          id: 'user-1',
+          role: 'user',
+          content: 'Preserve referenced attachment during rescheduled cleanup',
+          createdAt: 20,
+          state: 'complete',
+          attachments: [referencedAttachment],
+        },
+      ],
+    };
+    const reconcileSpy = jest
+      .spyOn(chatAttachmentStorageService, 'reconcileAttachmentDirectory')
+      .mockResolvedValueOnce({
+        deletedCount: 16,
+        attemptedDeleteCount: 16,
+        candidateCount: 17,
+        hasMoreCandidates: true,
+      })
+      .mockResolvedValue({
+        deletedCount: 0,
+        attemptedDeleteCount: 0,
+        candidateCount: 0,
+        hasMoreCandidates: false,
+      });
+    const { callbacks, delays, setTimeoutSpy } = captureScheduledTimeouts();
+
+    try {
+      writeChatThreadRecord(storage, thread, 20);
+      writeChatPersistenceIndex(storage, {
+        schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+        activeThreadId: thread.id,
+        threadIds: [thread.id],
+        updatedAt: 21,
+      });
+
+      useChatStore.setState({ threads: {}, activeThreadId: null });
+      await useChatStore.persist.rehydrate();
+      await flushAttachmentCleanup();
+
+      expect(reconcileSpy).toHaveBeenCalledTimes(1);
+      reconcileSpy.mock.calls.forEach(([referencedLocalUris, options]) => {
+        expect(new Set(referencedLocalUris as Iterable<string>)).toEqual(
+          new Set([referencedAttachment.localUri]),
+        );
+        expect(options).toEqual(expect.objectContaining({
+          preserveDraftsCreatedAtOrAfter: expect.any(Number),
+          maxCandidates: 16,
+          maxDeletes: 16,
+        }));
+      });
+      expect(setTimeoutSpy).toHaveBeenCalledTimes(1);
+      expect(delays[0]).toBe(1_000);
+    } finally {
+      const pendingRetry = callbacks.shift();
+      if (pendingRetry) {
+        pendingRetry();
+        await flushAttachmentCleanup();
+      }
+      setTimeoutSpy.mockRestore();
+      reconcileSpy.mockRestore();
+    }
+  });
+
+  it('keeps the original draft cutoff across hydration directory reconciliation retries', async () => {
+    let now = 100;
+    const dateNowSpy = jest.spyOn(Date, 'now').mockImplementation(() => now);
+    (FileSystem.readDirectoryAsync as jest.Mock)
+      .mockResolvedValueOnce(Array.from({ length: 17 }, (_, index) => `orphan-${index}.jpg`))
+      .mockResolvedValueOnce(['draft-150-between.jpg']);
+    const setTimeoutSpy = jest
+      .spyOn(global, 'setTimeout')
+      .mockImplementation((callback) => {
+        now = 200;
+        (callback as () => void)();
+        return 0 as unknown as ReturnType<typeof setTimeout>;
+      });
+
+    try {
+      useChatStore.setState({ threads: {}, activeThreadId: null });
+      await useChatStore.persist.rehydrate();
+      await flushAttachmentCleanup(80);
+
+      expect(FileSystem.readDirectoryAsync).toHaveBeenCalledTimes(2);
+      expect(setTimeoutSpy).toHaveBeenCalledTimes(1);
+      expect(FileSystem.deleteAsync).toHaveBeenCalledTimes(16);
+      expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith(
+        'test-dir/chat-attachments/draft-150-between.jpg',
+        expect.anything(),
+      );
+    } finally {
+      setTimeoutSpy.mockRestore();
+      dateNowSpy.mockRestore();
+    }
+  });
+
+  it('retries zero-progress hydration directory reconciliation only within a bounded budget', async () => {
+    const reconcileSpy = jest
+      .spyOn(chatAttachmentStorageService, 'reconcileAttachmentDirectory')
+      .mockResolvedValue({
+        deletedCount: 0,
+        attemptedDeleteCount: 16,
+        candidateCount: 17,
+        hasMoreCandidates: true,
+      });
+    const { callbacks, delays, setTimeoutSpy } = captureScheduledTimeouts();
+
+    try {
+      useChatStore.setState({ threads: {}, activeThreadId: null });
+      await useChatStore.persist.rehydrate();
+      await flushAttachmentCleanup();
+
+      expect(reconcileSpy).toHaveBeenCalledTimes(1);
+      expect(setTimeoutSpy).toHaveBeenCalledTimes(1);
+      expect(delays[0]).toBe(1_000);
+
+      callbacks.shift()?.();
+      await flushAttachmentCleanup();
+
+      expect(reconcileSpy).toHaveBeenCalledTimes(2);
+      expect(setTimeoutSpy).toHaveBeenCalledTimes(2);
+      expect(delays[1]).toBe(2_000);
+
+      callbacks.shift()?.();
+      await flushAttachmentCleanup();
+
+      expect(reconcileSpy).toHaveBeenCalledTimes(3);
+      expect(setTimeoutSpy).toHaveBeenCalledTimes(2);
+      expect(callbacks).toHaveLength(0);
+    } finally {
+      while (callbacks.length > 0) {
+        callbacks.shift()?.();
+        await flushAttachmentCleanup();
+      }
+      setTimeoutSpy.mockRestore();
+      reconcileSpy.mockRestore();
+    }
+  });
+
+  it('retries transient final-batch hydration directory delete failures', async () => {
+    const reconcileSpy = jest
+      .spyOn(chatAttachmentStorageService, 'reconcileAttachmentDirectory')
+      .mockResolvedValueOnce({
+        deletedCount: 0,
+        attemptedDeleteCount: 2,
+        candidateCount: 2,
+        hasMoreCandidates: false,
+      })
+      .mockResolvedValue({
+        deletedCount: 2,
+        attemptedDeleteCount: 2,
+        candidateCount: 2,
+        hasMoreCandidates: false,
+      });
+    const { callbacks, delays, setTimeoutSpy } = captureScheduledTimeouts();
+
+    try {
+      useChatStore.setState({ threads: {}, activeThreadId: null });
+      await useChatStore.persist.rehydrate();
+      await flushAttachmentCleanup();
+
+      expect(reconcileSpy).toHaveBeenCalledTimes(1);
+      expect(setTimeoutSpy).toHaveBeenCalledTimes(1);
+      expect(delays[0]).toBe(1_000);
+
+      callbacks.shift()?.();
+      await flushAttachmentCleanup();
+
+      expect(reconcileSpy).toHaveBeenCalledTimes(2);
+      expect(setTimeoutSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      while (callbacks.length > 0) {
+        callbacks.shift()?.();
+        await flushAttachmentCleanup();
+      }
+      setTimeoutSpy.mockRestore();
+      reconcileSpy.mockRestore();
+    }
+  });
+
+  it('deduplicates hydration directory reconciliation retry timers across repeated rehydrate', async () => {
+    const reconcileSpy = jest
+      .spyOn(chatAttachmentStorageService, 'reconcileAttachmentDirectory')
+      .mockResolvedValueOnce({
+        deletedCount: 0,
+        attemptedDeleteCount: 16,
+        candidateCount: 17,
+        hasMoreCandidates: true,
+      })
+      .mockResolvedValue({
+        deletedCount: 0,
+        attemptedDeleteCount: 0,
+        candidateCount: 0,
+        hasMoreCandidates: false,
+      });
+    const { callbacks, setTimeoutSpy } = captureScheduledTimeouts();
+
+    try {
+      useChatStore.setState({ threads: {}, activeThreadId: null });
+      await useChatStore.persist.rehydrate();
+      await flushAttachmentCleanup();
+
+      expect(reconcileSpy).toHaveBeenCalledTimes(1);
+      expect(setTimeoutSpy).toHaveBeenCalledTimes(1);
+      expect(callbacks).toHaveLength(1);
+
+      await useChatStore.persist.rehydrate();
+      await flushAttachmentCleanup();
+
+      expect(reconcileSpy).toHaveBeenCalledTimes(1);
+      expect(setTimeoutSpy).toHaveBeenCalledTimes(1);
+      expect(callbacks).toHaveLength(1);
+
+      callbacks.shift()?.();
+      await flushAttachmentCleanup();
+
+      expect(reconcileSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      while (callbacks.length > 0) {
+        callbacks.shift()?.();
+        await flushAttachmentCleanup();
+      }
+      setTimeoutSpy.mockRestore();
+      reconcileSpy.mockRestore();
+    }
+  });
+
+  it('uses current store threads when hydration directory reconciliation retries', async () => {
+    const firstAttachment = buildStoredAttachment('thread-reconcile-first', 'user-1', 'first.jpg');
+    const secondAttachment = buildStoredAttachment('thread-reconcile-second', 'user-1', 'second.jpg');
+    const firstThread: ChatThread = {
+      ...buildThread('thread-reconcile-first', 20),
+      messages: [
+        {
+          id: 'user-1',
+          role: 'user',
+          content: 'First referenced attachment',
+          createdAt: 20,
+          state: 'complete',
+          attachments: [firstAttachment],
+        },
+      ],
+    };
+    const secondThread: ChatThread = {
+      ...buildThread('thread-reconcile-second', 30),
+      messages: [
+        {
+          id: 'user-1',
+          role: 'user',
+          content: 'Second referenced attachment',
+          createdAt: 30,
+          state: 'complete',
+          attachments: [secondAttachment],
+        },
+      ],
+    };
+    const reconcileSpy = jest
+      .spyOn(chatAttachmentStorageService, 'reconcileAttachmentDirectory')
+      .mockResolvedValueOnce({
+        deletedCount: 16,
+        attemptedDeleteCount: 16,
+        candidateCount: 17,
+        hasMoreCandidates: true,
+      })
+      .mockResolvedValue({
+        deletedCount: 0,
+        attemptedDeleteCount: 0,
+        candidateCount: 0,
+        hasMoreCandidates: false,
+      });
+    const { callbacks, setTimeoutSpy } = captureScheduledTimeouts();
+
+    try {
+      writeChatThreadRecord(storage, firstThread, 20);
+      writeChatPersistenceIndex(storage, {
+        schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+        activeThreadId: firstThread.id,
+        threadIds: [firstThread.id],
+        updatedAt: 21,
+      });
+
+      useChatStore.setState({ threads: {}, activeThreadId: null });
+      await useChatStore.persist.rehydrate();
+      await flushAttachmentCleanup();
+
+      expect(new Set(reconcileSpy.mock.calls[0]?.[0] as Iterable<string>)).toEqual(
+        new Set([firstAttachment.localUri]),
+      );
+      expect(setTimeoutSpy).toHaveBeenCalledTimes(1);
+
+      useChatStore.setState({
+        threads: { [secondThread.id]: secondThread },
+        activeThreadId: secondThread.id,
+      });
+
+      callbacks.shift()?.();
+      await flushAttachmentCleanup();
+
+      expect(reconcileSpy).toHaveBeenCalledTimes(2);
+      expect(new Set(reconcileSpy.mock.calls[1]?.[0] as Iterable<string>)).toEqual(
+        new Set([secondAttachment.localUri]),
+      );
+    } finally {
+      while (callbacks.length > 0) {
+        callbacks.shift()?.();
+        await flushAttachmentCleanup();
+      }
+      setTimeoutSpy.mockRestore();
+      reconcileSpy.mockRestore();
+    }
+  });
+
+  it('does not perform unbounded hydration attachment directory deletion in one scheduled pass', async () => {
+    const fileNames = Array.from({ length: 40 }, (_, index) => `orphan-${index}.jpg`);
+    (FileSystem.readDirectoryAsync as jest.Mock).mockResolvedValueOnce(fileNames);
+    const { callbacks, delays, setTimeoutSpy } = captureScheduledTimeouts();
+
+    try {
+      useChatStore.setState({ threads: {}, activeThreadId: null });
+      await useChatStore.persist.rehydrate();
+      await flushAttachmentCleanup(80);
+
+      expect(FileSystem.readDirectoryAsync).toHaveBeenCalledTimes(1);
+      expect(FileSystem.readDirectoryAsync).toHaveBeenCalledWith('test-dir/chat-attachments/');
+      expect(FileSystem.deleteAsync).toHaveBeenCalledTimes(16);
+      expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/chat-attachments/orphan-15.jpg', {
+        idempotent: true,
+      });
+      expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/chat-attachments/orphan-16.jpg', expect.anything());
+      expect(setTimeoutSpy).toHaveBeenCalledTimes(1);
+      expect(delays[0]).toBe(1_000);
+    } finally {
+      const pendingRetry = callbacks.shift();
+      if (pendingRetry) {
+        pendingRetry();
+        await flushAttachmentCleanup();
+      }
+      setTimeoutSpy.mockRestore();
+    }
   });
 
   it('recovers hydrated streaming assistant messages as stopped while preserving partial content', async () => {
@@ -2848,6 +4270,52 @@ describe('chatStore', () => {
     expect(storage.getString(getChatThreadStorageKey(archivedThread.id))).toBe(archivedRecordBefore);
     expect(storage.getString(getChatThreadStorageKey(secondArchivedThread.id))).toBe(secondArchivedRecordBefore);
     jest.useRealTimers();
+  });
+
+  it('does not run attachment cleanup for streaming content patches when references are unchanged', async () => {
+    const attachment = buildStoredAttachment('thread-streaming-attachment', 'user-1', 'streaming-kept.jpg');
+    const thread: ChatThread = {
+      ...buildThread('thread-streaming-attachment', 20),
+      messages: [
+        {
+          id: 'user-1',
+          role: 'user',
+          content: 'Describe this image',
+          createdAt: 20,
+          state: 'complete',
+          attachments: [attachment],
+        },
+        {
+          id: 'assistant-1',
+          role: 'assistant',
+          content: '',
+          createdAt: 21,
+          state: 'streaming',
+        },
+      ],
+      status: 'generating',
+    };
+    const cleanupSpy = jest
+      .spyOn(chatAttachmentStorageService, 'deleteUnreferencedAttachmentFiles')
+      .mockResolvedValue(0);
+
+    try {
+      useChatStore.setState({
+        threads: { [thread.id]: thread },
+        activeThreadId: thread.id,
+      });
+
+      useChatStore.getState().patchAssistantMessage(thread.id, 'assistant-1', {
+        content: 'Streaming token',
+        state: 'streaming',
+      });
+      await flushAttachmentCleanup();
+
+      expect(useChatStore.getState().getThread(thread.id)?.messages[0]?.attachments).toEqual([attachment]);
+      expect(cleanupSpy).not.toHaveBeenCalled();
+    } finally {
+      cleanupSpy.mockRestore();
+    }
   });
 
   it('persists activeModelId, model switches, and per-message model metadata across rehydration', async () => {

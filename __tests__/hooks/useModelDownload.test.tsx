@@ -6,6 +6,7 @@ import { notificationService } from '../../src/services/NotificationService';
 import { isPrivateStorageWritable } from '../../src/services/storage';
 import { useDownloadStore } from '../../src/store/downloadStore';
 import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../src/types/models';
+import type { ProjectorArtifact } from '../../src/types/multimodal';
 
 jest.mock('../../src/services/NotificationService', () => ({
   notificationService: {
@@ -52,6 +53,21 @@ function createModel(overrides: Partial<ModelMetadata> = {}): ModelMetadata {
     isPrivate: false,
     lifecycleStatus: LifecycleStatus.AVAILABLE,
     downloadProgress: 0,
+    ...overrides,
+  };
+}
+
+function createProjector(overrides: Partial<ProjectorArtifact> = {}): ProjectorArtifact {
+  return {
+    id: 'projector-org-model-main-mmproj-model.gguf',
+    ownerModelId: 'org/model',
+    repoId: 'org/model',
+    fileName: 'mmproj-model.gguf',
+    downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-model.gguf',
+    size: 1024,
+    lifecycleStatus: 'downloaded',
+    matchStatus: 'user_selected',
+    localPath: 'mmproj-model.gguf',
     ...overrides,
   };
 }
@@ -155,5 +171,31 @@ describe('useModelDownload', () => {
       'storageRecovery.privateUnavailableMessage',
     );
     expect(useDownloadStore.getState().queue).toEqual([]);
+  });
+
+  it('queues selected projector metadata with the model download request', async () => {
+    const projector = createProjector();
+    const { getCurrentValue } = renderHookHarness();
+
+    await waitFor(() => {
+      expect(getCurrentValue()).not.toBeNull();
+    });
+
+    await act(async () => {
+      getCurrentValue()?.startDownload(createModel({
+        chatModalities: ['text', 'vision'],
+        selectedProjectorId: projector.id,
+        projectorCandidates: [projector],
+      }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(useDownloadStore.getState().queue[0]).toEqual(expect.objectContaining({
+      id: 'org/model',
+      selectedProjectorId: projector.id,
+      projectorCandidates: [expect.objectContaining({ id: projector.id, localPath: 'mmproj-model.gguf' })],
+    }));
+    expect(getCurrentValue()?.getProjectorLifecycleState(useDownloadStore.getState().queue[0]).isReady).toBe(true);
   });
 });

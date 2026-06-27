@@ -115,7 +115,11 @@ Or use **Transporter** (available on the Mac App Store) for a graphical upload f
 
 ## Native plugins
 
-The Expo config plugin `withIosSystemMetrics` injects a native Objective-C module (`SystemMetrics.m`) into the Xcode project during prebuild. This module provides real-time device memory snapshots used by the RAM-fit subsystem. It is added automatically — no manual Xcode configuration is needed.
+Expo config plugins inject app-owned Objective-C native modules into the Xcode project during prebuild:
+
+- `withIosSystemMetrics` adds `SystemMetrics.m` for real-time device memory snapshots used by the RAM-fit subsystem.
+
+These modules are added automatically — no manual Xcode configuration is needed after running `npx expo prebuild --platform ios`.
 
 ## Troubleshooting
 

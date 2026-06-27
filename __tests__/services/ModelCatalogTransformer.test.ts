@@ -5,6 +5,13 @@ import {
 } from '../../src/services/ModelCatalogTransformer';
 import { CATALOG_SEARCH_VARIANT_LIMIT } from '../../src/services/ModelCatalogFileSelector';
 import { LifecycleStatus } from '../../src/types/models';
+import {
+  ambiguousProjectorCatalogSiblings,
+  projectorOnlyCatalogSiblings,
+  projectorFileName,
+  visionCatalogSiblings,
+  visionModelFileName,
+} from '../fixtures/multimodalCatalogFixtures';
 
 const LOCAL_SHA256 = 'b'.repeat(64);
 const OTHER_SHA256 = 'c'.repeat(64);
@@ -101,6 +108,162 @@ describe('ModelCatalogTransformer', () => {
     ]);
   });
 
+  it('marks vision-capable catalog models and preserves projector candidates as companions', () => {
+    const models = transformHFResponse([
+      {
+        id: 'test-org/vision-chat-model',
+        author: 'test-org',
+        pipeline_tag: 'image-text-to-text',
+        tags: ['gguf', 'vision'],
+        siblings: [...visionCatalogSiblings],
+        sha: 'main',
+      },
+    ], null, null);
+
+    expect(models).toHaveLength(1);
+    expect(models[0]).toEqual(expect.objectContaining({
+      resolvedFileName: visionModelFileName,
+      activeVariantId: visionModelFileName,
+      artifactRole: 'primary_chat_model',
+      chatModalities: ['text', 'vision'],
+      visionSource: 'catalog_metadata',
+      visionConfidence: 'trusted',
+      inputCapabilities: expect.objectContaining({
+        declared: expect.objectContaining({
+          image: 'supported',
+        }),
+      }),
+    }));
+    expect(models[0].inputCapabilities?.evidence).toEqual(expect.arrayContaining([
+      { source: 'pipeline_tag', value: 'image-text-to-text', confidence: 'high' },
+      { source: 'projector', value: projectorFileName, confidence: 'medium' },
+    ]));
+    expect(models[0].variants?.map((variant) => variant.fileName)).toEqual([visionModelFileName]);
+    expect(models[0].projectorCandidates).toEqual([
+      expect.objectContaining({
+        ownerModelId: 'test-org/vision-chat-model',
+        fileName: projectorFileName,
+        lifecycleStatus: 'available',
+        matchStatus: 'matched',
+      }),
+    ]);
+    expect(models[0].artifacts).toEqual([
+      expect.objectContaining({
+        kind: 'main_model',
+        requiredFor: ['text'],
+        remoteFileName: visionModelFileName,
+        installState: 'remote',
+      }),
+      expect.objectContaining({
+        id: models[0].projectorCandidates?.[0].id,
+        kind: 'multimodal_projector',
+        requiredFor: ['image'],
+        remoteFileName: projectorFileName,
+        installState: 'remote',
+      }),
+    ]);
+    expect(models[0].projectorCandidates?.[0].ownerVariantId).toBeUndefined();
+  });
+
+  it('persists declared audio capability evidence without treating it as runtime support', () => {
+    const models = transformHFResponse([
+      {
+        id: 'test-org/audio-chat-model-gguf',
+        author: 'test-org',
+        pipeline_tag: 'automatic-speech-recognition',
+        tags: ['gguf', 'audio'],
+        siblings: [
+          { rfilename: 'audio-model.Q4_K_M.gguf', size: REMOTE_SIZE },
+        ],
+      },
+    ], null, null);
+
+    expect(models).toHaveLength(1);
+    expect(models[0].inputCapabilities).toEqual(expect.objectContaining({
+      declared: {
+        image: 'unknown',
+        audio: 'supported',
+        video: 'unknown',
+      },
+      evidence: expect.arrayContaining([
+        { source: 'pipeline_tag', value: 'automatic-speech-recognition', confidence: 'high' },
+        { source: 'tag', value: 'audio', confidence: 'medium' },
+      ]),
+    }));
+    expect(models[0].multimodalReadiness).toBeUndefined();
+    expect(models[0].artifacts).toEqual([
+      expect.objectContaining({
+        kind: 'main_model',
+        requiredFor: ['text'],
+        installState: 'remote',
+      }),
+    ]);
+  });
+
+  it('includes matched projector bytes in catalog memory-fit estimates', () => {
+    const models = transformHFResponse([
+      {
+        id: 'test-org/vision-chat-model',
+        author: 'test-org',
+        tags: ['gguf', 'vision'],
+        siblings: [
+          { rfilename: 'vision-model.Q4_K_M.gguf', size: 100_000_000 },
+          { rfilename: 'vision-model.mmproj.gguf', size: 1_600_000_000 },
+        ],
+      },
+    ], { totalMemoryBytes: 2_000_000_000 }, null);
+
+    expect(models).toHaveLength(1);
+    expect(models[0].fitsInRam).toBe(false);
+    expect(models[0].memoryFitDecision).toBe('likely_oom');
+    expect(models[0].variants?.[0]).toEqual(expect.objectContaining({
+      fileName: 'vision-model.Q4_K_M.gguf',
+      ramFit: 'likely_oom',
+    }));
+  });
+
+  it('does not advertise non-GGUF projector-like siblings as downloadable projector artifacts', () => {
+    const models = transformHFResponse([
+      {
+        id: 'test-org/vision-chat-model',
+        author: 'test-org',
+        tags: ['gguf', 'vision'],
+        siblings: [
+          { rfilename: 'mmproj-config.json', size: 2_048 },
+          { rfilename: 'clip_projector.txt', size: 2_048 },
+          { rfilename: 'adapter.mmproj.safetensors', size: 2_048 },
+          { rfilename: visionModelFileName, size: REMOTE_SIZE },
+        ],
+      },
+    ], null, null);
+
+    expect(models).toHaveLength(1);
+    expect(models[0]).toEqual(expect.objectContaining({
+      resolvedFileName: visionModelFileName,
+      activeVariantId: visionModelFileName,
+    }));
+    expect(models[0].projectorCandidates).toBeUndefined();
+  });
+
+  it('keeps ambiguous projector candidates unresolved instead of silently selecting one', () => {
+    const models = transformHFResponse([
+      {
+        id: 'test-org/vision-chat-model',
+        author: 'test-org',
+        tags: ['gguf', 'vision'],
+        siblings: [...ambiguousProjectorCatalogSiblings],
+      },
+    ], null, null);
+
+    expect(models).toHaveLength(1);
+    expect(models[0].projectorCandidates).toHaveLength(2);
+    expect(models[0].selectedProjectorId).toBeUndefined();
+    expect(models[0].projectorCandidates?.map((candidate) => candidate.matchStatus)).toEqual([
+      'ambiguous',
+      'ambiguous',
+    ]);
+  });
+
   it('drops MTP-only sibling payloads instead of creating a fallback tree-probe model', () => {
     const models = transformHFResponse([
       {
@@ -111,6 +274,23 @@ describe('ModelCatalogTransformer', () => {
         siblings: [
           { rfilename: 'model.MTP.Q4_K_M.gguf', size: REMOTE_SIZE },
         ],
+      },
+    ], null, null);
+
+    expect(models).toEqual([]);
+  });
+
+  it('drops projector-only sibling payloads instead of creating a fallback model.gguf tree-probe model', () => {
+    const models = transformHFResponse([
+      {
+        id: 'test-org/projector-only-repo',
+        author: 'test-org',
+        gated: 'manual',
+        tags: ['gguf', 'vision'],
+        siblings: [...projectorOnlyCatalogSiblings],
+        gguf: {
+          total: 1_000_000_000,
+        },
       },
     ], null, null);
 

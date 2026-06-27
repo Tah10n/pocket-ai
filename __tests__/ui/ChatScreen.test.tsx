@@ -1,6 +1,6 @@
 import React from 'react';
 import { act, fireEvent, render, waitFor } from '@testing-library/react-native';
-import { Alert } from 'react-native';
+import { Alert, Platform } from 'react-native';
 
 jest.mock('react-native-css-interop', () => {
   const mockReact = require('react');
@@ -91,6 +91,7 @@ beforeAll(() => {
 });
 
 const mockRegenerateFromUserMessage = jest.fn();
+const mockAppendUserMessage = jest.fn();
 const mockDeleteMessage = jest.fn();
 const mockStop = jest.fn();
 const mockCreateSummaryPlaceholder = jest.fn();
@@ -107,6 +108,15 @@ const mockGetRecommendedLoadProfile = jest.fn<Promise<{ recommendedGpuLayers: nu
 const mockLoadModel = jest.fn().mockResolvedValue(undefined);
 const mockGetTotalMemory = jest.fn().mockResolvedValue(8 * 1024 * 1024 * 1024);
 const mockRefreshModelMetadata = jest.fn((model) => Promise.resolve(model));
+const mockAttachImages = jest.fn();
+const mockRemoveAttachmentDraft = jest.fn();
+const mockClearAttachmentDrafts = jest.fn();
+const mockClearFailedAttachmentDrafts = jest.fn();
+const mockCommitAttachmentDrafts = jest.fn();
+const mockConsumeAttachmentDrafts = jest.fn();
+const mockRestoreAttachmentDrafts = jest.fn();
+const mockDiscardAttachmentDrafts = jest.fn();
+const mockUseChatImageAttachments = jest.fn();
 let lastPresetSelectorProps: any = null;
 let lastModelParametersSheetProps: any = null;
 let lastErrorReportSheetProps: any = null;
@@ -168,6 +178,10 @@ jest.mock('../../src/hooks/useLLMEngine', () => ({
     state: mockEngineState,
     loadModel: (modelId: string, options?: any) => mockLoadModel(modelId, options),
   }),
+}));
+
+jest.mock('../../src/hooks/useChatImageAttachments', () => ({
+  useChatImageAttachments: (options: any) => mockUseChatImageAttachments(options),
 }));
 
 jest.mock('../../src/services/LLMEngineService', () => ({
@@ -333,21 +347,29 @@ jest.mock('../../src/components/ui/ChatInputBar', () => {
   const { Pressable, Text, View } = require('react-native');
 
   return {
-    ChatInputBar: ({ isSending, onStopGeneration, onSendMessage, androidContentBlurTargetRef, modeLabel, leadingActions, attachmentsTray }: any) => {
-      lastChatInputBarProps = {
+    markChatInputDraftConsumedError: (error: unknown) => {
+      if (error && typeof error === 'object') {
+        (error as { chatInputDraftConsumed?: true }).chatInputDraftConsumed = true;
+      }
+      return error;
+    },
+    ChatInputBar: (props: any) => {
+      const {
         isSending,
         onStopGeneration,
         onSendMessage,
-        androidContentBlurTargetRef,
         modeLabel,
-        leadingActions,
         attachmentsTray,
+      } = props;
+      lastChatInputBarProps = {
+        ...props,
       };
 
       return mockReact.createElement(
         View,
         { testID: 'chat-input-bar' },
         modeLabel ? mockReact.createElement(Text, null, modeLabel) : null,
+        attachmentsTray ?? null,
         mockReact.createElement(
           Pressable,
           { testID: 'send-button', onPress: () => onSendMessage('Edited from test') },
@@ -527,7 +549,7 @@ jest.mock('../../src/hooks/useChatSession', () => ({
       (require('../../src/store/chatStore').useChatStore.getState().getActiveThread()?.messages?.length ?? 0) - 24,
       0,
     ),
-    appendUserMessage: jest.fn(),
+    appendUserMessage: mockAppendUserMessage,
     deleteMessage: mockDeleteMessage,
     deleteThread: jest.fn(),
     stopGeneration: mockStop,
@@ -586,10 +608,14 @@ const {
   ChatScreen,
   getFlashListAutoScrollBottomThreshold,
   getNextShouldStickToBottom,
+  getAndroidFloatingComposerBottomOffset,
   getAndroidKeyboardOverlapCompensation,
   getAndroidKeyboardSpacerHeight,
+  getChatListBottomChromeInset,
   getChatWarmupBannerBottomOffset,
   handleAndroidBackNavigation,
+  resolveFallbackMultimodalReadiness,
+  shouldRenderAndroidKeyboardSpacer,
   shouldFloatAndroidComposerOverContent,
 } = require('../../src/ui/screens/ChatScreen');
 const { useChatStore } = require('../../src/store/chatStore');
@@ -599,10 +625,130 @@ const {
   updateSettings,
 } = require('../../src/services/SettingsStore');
 const { registry } = require('../../src/services/LocalStorageRegistry');
+const { AppError } = require('../../src/services/AppError');
 const { buildModelCapabilitySnapshot } = require('../../src/utils/modelCapabilities');
 const VERIFIED_LOCAL_SHA256 = 'f'.repeat(64);
+const copiedDraftImageAttachment = {
+  id: 'draft-image-1',
+  pickerUri: 'ph://library-image-1',
+  previewUri: 'test-dir/chat-attachments/draft-image-1.jpg',
+  localUri: 'test-dir/chat-attachments/draft-image-1.jpg',
+  pathCategory: 'chat_attachment',
+  mediaType: 'image/jpeg',
+  fileName: 'draft-image-1.jpg',
+  size: 123_456,
+  width: 1024,
+  height: 768,
+  copyStatus: 'copied',
+};
+const consumedDraftImageAttachment = {
+  ...copiedDraftImageAttachment,
+  id: 'consumed-draft-image-1',
+  localUri: 'test-dir/chat-attachments/consumed-draft-image-1.jpg',
+  previewUri: 'test-dir/chat-attachments/consumed-draft-image-1.jpg',
+  fileName: 'consumed-draft-image-1.jpg',
+};
+const secondConsumedDraftImageAttachment = {
+  ...copiedDraftImageAttachment,
+  id: 'consumed-draft-image-2',
+  localUri: 'test-dir/chat-attachments/consumed-draft-image-2.jpg',
+  previewUri: 'test-dir/chat-attachments/consumed-draft-image-2.jpg',
+  fileName: 'consumed-draft-image-2.jpg',
+};
+const failedDraftImageAttachment = {
+  pickerUri: 'ph://library-image-failed',
+  previewUri: 'ph://library-image-failed',
+  mediaType: 'image/jpeg',
+  copyStatus: 'failed',
+  errorReason: 'copy_failed',
+};
+
+function createVisionProjector(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 'author/model-q4-mmproj',
+    ownerModelId: 'author/model-q4',
+    repoId: 'author/model-q4',
+    fileName: 'mmproj.gguf',
+    downloadUrl: 'https://example.com/mmproj.gguf',
+    size: 32 * 1024 * 1024,
+    localPath: 'author-model-q4-mmproj.gguf',
+    lifecycleStatus: 'downloaded',
+    matchStatus: 'matched',
+    ...overrides,
+  };
+}
+
+function createVisionModel(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 'author/model-q4',
+    name: 'Vision model',
+    author: 'Test',
+    size: 512 * 1024 * 1024,
+    localPath: 'author-model-q4.gguf',
+    lifecycleStatus: 'downloaded',
+    chatModalities: ['text', 'vision'],
+    ...overrides,
+  };
+}
+
+function createReadyVisionModel(overrides: Record<string, unknown> = {}) {
+  const projector = createVisionProjector();
+
+  return createVisionModel({
+    selectedProjectorId: projector.id,
+    projectorCandidates: [projector],
+    multimodalReadiness: {
+      modelId: 'author/model-q4',
+      status: 'ready',
+      projectorId: projector.id,
+      support: ['vision'],
+      checkedAt: 1,
+    },
+    ...overrides,
+  });
+}
+
+function setImageOnlyRegenerateThread() {
+  useChatStore.setState({
+    threads: {
+      'thread-1': {
+        ...useChatStore.getState().threads['thread-1'],
+        messages: [
+          {
+            id: 'message-image-only',
+            role: 'user',
+            content: '',
+            attachments: [{
+              id: 'attachment-image-only',
+              threadId: 'thread-1',
+              messageId: 'message-image-only',
+              localUri: 'test-dir/chat-attachments/image-only.jpg',
+              pathCategory: 'chat_attachment',
+              mediaType: 'image/jpeg',
+              fileName: 'image-only.jpg',
+              size: 123_456,
+              source: 'photo_library',
+              createdAt: 1,
+            }],
+            createdAt: 1,
+            state: 'complete',
+          },
+          {
+            id: 'message-2',
+            role: 'assistant',
+            content: 'Saved assistant reply',
+            createdAt: 2,
+            state: 'complete',
+          },
+        ],
+      },
+    },
+    activeThreadId: 'thread-1',
+  });
+}
 
 describe('ChatScreen', () => {
+  const originalPlatformOS = Platform.OS;
   let alertSpy: jest.SpyInstance;
 
   beforeAll(() => {
@@ -615,10 +761,37 @@ describe('ChatScreen', () => {
 
   beforeEach(() => {
     reactI18nextMock.__resetTranslations();
+    Object.defineProperty(Platform, 'OS', { configurable: true, get: () => originalPlatformOS });
     mockRegenerateFromUserMessage.mockClear();
+    mockAppendUserMessage.mockReset();
+    mockAppendUserMessage.mockResolvedValue(undefined);
     mockDeleteMessage.mockClear();
     mockStop.mockClear();
     mockCreateSummaryPlaceholder.mockClear();
+    mockAttachImages.mockReset();
+    mockAttachImages.mockResolvedValue(undefined);
+    mockRemoveAttachmentDraft.mockClear();
+    mockClearAttachmentDrafts.mockClear();
+    mockClearFailedAttachmentDrafts.mockClear();
+    mockCommitAttachmentDrafts.mockClear();
+    mockConsumeAttachmentDrafts.mockReset();
+    mockConsumeAttachmentDrafts.mockReturnValue([]);
+    mockRestoreAttachmentDrafts.mockClear();
+    mockDiscardAttachmentDrafts.mockClear();
+    mockUseChatImageAttachments.mockReset();
+    mockUseChatImageAttachments.mockImplementation(() => ({
+      drafts: [],
+      isPicking: false,
+      remainingSlots: 4,
+      attachImages: mockAttachImages,
+      removeDraft: mockRemoveAttachmentDraft,
+      clearDrafts: mockClearAttachmentDrafts,
+      clearFailedDrafts: mockClearFailedAttachmentDrafts,
+      commitDrafts: mockCommitAttachmentDrafts,
+      consumeDraftsForSend: mockConsumeAttachmentDrafts,
+      restoreDraftsForRetry: mockRestoreAttachmentDrafts,
+      discardDrafts: mockDiscardAttachmentDrafts,
+    }));
     mockRouterNavigate.mockClear();
     mockRouterPush.mockClear();
     mockRunBackendAutotune.mockReset();
@@ -723,6 +896,717 @@ describe('ChatScreen', () => {
       },
       activeThreadId: 'thread-1',
     });
+  });
+
+  it('enables ready vision attachments and sends copied drafts with multimodal readiness', async () => {
+    registry.saveModels([
+      createReadyVisionModel(),
+    ]);
+    mockUseChatImageAttachments.mockImplementation((options) => ({
+      drafts: [copiedDraftImageAttachment],
+      isPicking: false,
+      remainingSlots: 3,
+      attachImages: mockAttachImages,
+      removeDraft: mockRemoveAttachmentDraft,
+      clearDrafts: mockClearAttachmentDrafts,
+      commitDrafts: mockCommitAttachmentDrafts,
+      consumeDraftsForSend: mockConsumeAttachmentDrafts,
+      restoreDraftsForRetry: mockRestoreAttachmentDrafts,
+      discardDrafts: mockDiscardAttachmentDrafts,
+      options,
+    }));
+    mockConsumeAttachmentDrafts.mockReturnValueOnce([consumedDraftImageAttachment]);
+    mockAppendUserMessage.mockImplementationOnce(async (_content, options) => {
+      options?.onUserMessageAppended?.({ id: 'message-appended' });
+    });
+
+    render(React.createElement(ChatScreen));
+
+    expect(mockUseChatImageAttachments.mock.calls[mockUseChatImageAttachments.mock.calls.length - 1][0]).toEqual(
+      expect.objectContaining({
+        enabled: true,
+        disabledReason: 'chat.visionReadiness.ready',
+      }),
+    );
+    expect(lastChatInputBarProps).toEqual(expect.objectContaining({
+      attachmentDrafts: [copiedDraftImageAttachment],
+      imageAttachmentsEnabled: true,
+      imageAttachmentsDisabledReason: 'chat.visionReadiness.ready',
+      isImageAttachmentActionBusy: false,
+    }));
+
+    await act(async () => {
+      await lastChatInputBarProps.onSendMessage('Describe this image');
+    });
+
+    expect(mockAppendUserMessage).toHaveBeenCalledWith(
+      'Describe this image',
+      expect.objectContaining({
+        attachmentDrafts: [consumedDraftImageAttachment],
+        multimodalReadiness: expect.objectContaining({
+          status: 'ready',
+          support: ['vision'],
+        }),
+        onUserMessageAppended: expect.any(Function),
+      }),
+    );
+    expect(mockConsumeAttachmentDrafts).toHaveBeenCalledTimes(1);
+    expect(mockCommitAttachmentDrafts).not.toHaveBeenCalled();
+  });
+
+  it('uses initializing fallback for vision models with a selected downloaded projector and no persisted readiness', () => {
+    registry.saveModels([
+      createVisionModel({
+        selectedProjectorId: 'author/model-q4-mmproj',
+        projectorCandidates: [
+          createVisionProjector({
+            matchStatus: 'user_selected',
+          }),
+        ],
+      }),
+    ]);
+    mockUseChatImageAttachments.mockImplementation((options) => ({
+      drafts: [],
+      isPicking: false,
+      remainingSlots: 4,
+      attachImages: mockAttachImages,
+      removeDraft: mockRemoveAttachmentDraft,
+      clearDrafts: mockClearAttachmentDrafts,
+      commitDrafts: mockCommitAttachmentDrafts,
+      consumeDraftsForSend: mockConsumeAttachmentDrafts,
+      restoreDraftsForRetry: mockRestoreAttachmentDrafts,
+      discardDrafts: mockDiscardAttachmentDrafts,
+      options,
+    }));
+    mockConsumeAttachmentDrafts.mockReturnValueOnce([consumedDraftImageAttachment]);
+
+    render(React.createElement(ChatScreen));
+
+    expect(mockUseChatImageAttachments.mock.calls[mockUseChatImageAttachments.mock.calls.length - 1][0]).toEqual(
+      expect.objectContaining({
+        enabled: false,
+        disabledReason: 'chat.visionReadiness.initializing',
+      }),
+    );
+    expect(lastChatInputBarProps).toEqual(expect.objectContaining({
+      imageAttachmentsEnabled: false,
+      imageAttachmentsDisabledReason: 'chat.visionReadiness.initializing',
+    }));
+    expect(lastChatInputBarProps.imageAttachmentsDisabledReason).not.toBe('chat.visionReadiness.missingProjector');
+    expect(resolveFallbackMultimodalReadiness(registry.getModel('author/model-q4'), 'author/model-q4')).toEqual(
+      expect.objectContaining({
+        status: 'initializing',
+        projectorId: 'author/model-q4-mmproj',
+      }),
+    );
+  });
+
+  it('uses initializing fallback for a single downloaded projector without a selected projector id', () => {
+    const model = createVisionModel({
+      projectorCandidates: [createVisionProjector()],
+    });
+
+    expect(resolveFallbackMultimodalReadiness(model, 'author/model-q4')).toEqual(
+      expect.objectContaining({
+        modelId: 'author/model-q4',
+        status: 'initializing',
+        projectorId: 'author/model-q4-mmproj',
+      }),
+    );
+
+    registry.saveModels([model]);
+    render(React.createElement(ChatScreen));
+
+    expect(lastChatInputBarProps).toEqual(expect.objectContaining({
+      imageAttachmentsEnabled: false,
+      imageAttachmentsDisabledReason: 'chat.visionReadiness.initializing',
+    }));
+  });
+
+  it('uses runtime-compatible fallback when projector metadata is present before chat modalities hydrate', () => {
+    const model = createVisionModel({
+      chatModalities: undefined,
+      projectorCandidates: [createVisionProjector()],
+    });
+
+    expect(resolveFallbackMultimodalReadiness(model, 'author/model-q4')).toEqual(
+      expect.objectContaining({
+        modelId: 'author/model-q4',
+        status: 'initializing',
+        projectorId: 'author/model-q4-mmproj',
+      }),
+    );
+  });
+
+  it('refreshes stale persisted missing-projector readiness when projector metadata hydrates', () => {
+    const model = createVisionModel({
+      multimodalReadiness: {
+        modelId: 'author/model-q4',
+        status: 'missing_projector',
+        support: [],
+        checkedAt: 1,
+      },
+      projectorCandidates: [createVisionProjector()],
+    });
+
+    expect(resolveFallbackMultimodalReadiness(model, 'author/model-q4')).toEqual(
+      expect.objectContaining({
+        modelId: 'author/model-q4',
+        status: 'initializing',
+        projectorId: 'author/model-q4-mmproj',
+      }),
+    );
+  });
+
+  it('does not preserve stale ready readiness when current projector resolution is missing', () => {
+    const model = createVisionModel({
+      multimodalReadiness: {
+        modelId: 'author/model-q4',
+        status: 'ready',
+        projectorId: 'author/model-q4-mmproj',
+        support: ['vision'],
+        checkedAt: 1,
+      },
+    });
+
+    expect(resolveFallbackMultimodalReadiness(model, 'author/model-q4')).toEqual(
+      expect.objectContaining({
+        modelId: 'author/model-q4',
+        status: 'missing_projector',
+        support: [],
+      }),
+    );
+  });
+
+  it('does not preserve stale ready readiness when current projector resolution is ambiguous', () => {
+    const model = createVisionModel({
+      multimodalReadiness: {
+        modelId: 'author/model-q4',
+        status: 'ready',
+        projectorId: 'author/model-q4-mmproj-a',
+        support: ['vision'],
+        checkedAt: 1,
+      },
+      projectorCandidates: [
+        createVisionProjector({ id: 'author/model-q4-mmproj-a' }),
+        createVisionProjector({ id: 'author/model-q4-mmproj-b' }),
+      ],
+    });
+
+    expect(resolveFallbackMultimodalReadiness(model, 'author/model-q4')).toEqual(
+      expect.objectContaining({
+        modelId: 'author/model-q4',
+        status: 'ambiguous_projector',
+        support: [],
+      }),
+    );
+  });
+
+  it.each([
+    ['available', 'missing_projector'],
+    ['queued', 'projector_downloading'],
+    ['downloading', 'projector_downloading'],
+    ['paused', 'projector_downloading'],
+    ['failed', 'failed'],
+  ] as const)(
+    'does not preserve stale ready readiness for a %s selected projector',
+    (lifecycleStatus, expectedStatus) => {
+      const model = createVisionModel({
+        selectedProjectorId: 'author/model-q4-mmproj',
+        multimodalReadiness: {
+          modelId: 'author/model-q4',
+          status: 'ready',
+          projectorId: 'author/model-q4-mmproj',
+          support: ['vision'],
+          checkedAt: 1,
+        },
+        projectorCandidates: [
+          createVisionProjector({
+            lifecycleStatus,
+            matchReason: lifecycleStatus === 'failed' ? 'Checksum mismatch' : undefined,
+          }),
+        ],
+      });
+
+      expect(resolveFallbackMultimodalReadiness(model, 'author/model-q4')).toEqual(
+        expect.objectContaining({
+          modelId: 'author/model-q4',
+          status: expectedStatus,
+          support: [],
+        }),
+      );
+    },
+  );
+
+  it('preserves unsupported runtime readiness only for the same downloaded projector', () => {
+    const model = createVisionModel({
+      selectedProjectorId: 'author/model-q4-mmproj',
+      multimodalReadiness: {
+        modelId: 'author/model-q4',
+        status: 'unsupported',
+        projectorId: 'author/model-q4-mmproj',
+        support: [],
+        checkedAt: 1,
+      },
+      projectorCandidates: [createVisionProjector()],
+    });
+
+    expect(resolveFallbackMultimodalReadiness(model, 'author/model-q4')).toEqual(
+      expect.objectContaining({
+        status: 'unsupported',
+        projectorId: 'author/model-q4-mmproj',
+      }),
+    );
+  });
+
+  it('preserves a runtime failure for the same downloaded projector until runtime refresh succeeds', () => {
+    const model = createVisionModel({
+      multimodalReadiness: {
+        modelId: 'author/model-q4',
+        status: 'failed',
+        projectorId: 'author/model-q4-mmproj',
+        support: ['vision'],
+        failureReason: 'Runtime init failed',
+        checkedAt: 1,
+      },
+      projectorCandidates: [createVisionProjector()],
+    });
+
+    expect(resolveFallbackMultimodalReadiness(model, 'author/model-q4')).toEqual(
+      expect.objectContaining({
+        status: 'failed',
+        projectorId: 'author/model-q4-mmproj',
+        failureReason: 'Runtime init failed',
+      }),
+    );
+  });
+
+  it.each(['downloading', 'paused'] as const)(
+    'uses projector_downloading fallback for a %s projector',
+    (lifecycleStatus) => {
+      const model = createVisionModel({
+        projectorCandidates: [createVisionProjector({ lifecycleStatus })],
+      });
+
+      expect(resolveFallbackMultimodalReadiness(model, 'author/model-q4')).toEqual(
+        expect.objectContaining({
+          modelId: 'author/model-q4',
+          status: 'projector_downloading',
+          projectorId: 'author/model-q4-mmproj',
+        }),
+      );
+    },
+  );
+
+  it('uses failed fallback with projector id and failure reason for a failed projector', () => {
+    const model = createVisionModel({
+      projectorCandidates: [
+        createVisionProjector({
+          lifecycleStatus: 'failed',
+          matchReason: 'Checksum mismatch',
+        }),
+      ],
+    });
+
+    expect(resolveFallbackMultimodalReadiness(model, 'author/model-q4')).toEqual(
+      expect.objectContaining({
+        modelId: 'author/model-q4',
+        status: 'failed',
+        projectorId: 'author/model-q4-mmproj',
+        failureReason: 'Checksum mismatch',
+      }),
+    );
+  });
+
+  it('sends copied drafts for an image-only composer submission', async () => {
+    registry.saveModels([
+      createReadyVisionModel(),
+    ]);
+    mockUseChatImageAttachments.mockImplementation(() => ({
+      drafts: [copiedDraftImageAttachment],
+      isPicking: false,
+      remainingSlots: 3,
+      attachImages: mockAttachImages,
+      removeDraft: mockRemoveAttachmentDraft,
+      clearDrafts: mockClearAttachmentDrafts,
+      commitDrafts: mockCommitAttachmentDrafts,
+      consumeDraftsForSend: mockConsumeAttachmentDrafts,
+      restoreDraftsForRetry: mockRestoreAttachmentDrafts,
+      discardDrafts: mockDiscardAttachmentDrafts,
+    }));
+    mockConsumeAttachmentDrafts.mockReturnValueOnce([consumedDraftImageAttachment]);
+    mockAppendUserMessage.mockImplementationOnce(async (_content, options) => {
+      options?.onUserMessageAppended?.({ id: 'message-appended' });
+    });
+
+    render(React.createElement(ChatScreen));
+
+    await act(async () => {
+      await lastChatInputBarProps.onSendMessage('');
+    });
+
+    expect(mockAppendUserMessage).toHaveBeenCalledWith(
+      '',
+      expect.objectContaining({
+        attachmentDrafts: [consumedDraftImageAttachment],
+        multimodalReadiness: expect.objectContaining({ status: 'ready' }),
+        onUserMessageAppended: expect.any(Function),
+      }),
+    );
+    expect(mockConsumeAttachmentDrafts).toHaveBeenCalledTimes(1);
+    expect(mockCommitAttachmentDrafts).not.toHaveBeenCalled();
+  });
+
+  it('sends only copied drafts and clears failed leftovers after success', async () => {
+    registry.saveModels([
+      createReadyVisionModel(),
+    ]);
+    mockUseChatImageAttachments.mockImplementation(() => ({
+      drafts: [copiedDraftImageAttachment, failedDraftImageAttachment],
+      isPicking: false,
+      remainingSlots: 2,
+      attachImages: mockAttachImages,
+      removeDraft: mockRemoveAttachmentDraft,
+      clearDrafts: mockClearAttachmentDrafts,
+      clearFailedDrafts: mockClearFailedAttachmentDrafts,
+      commitDrafts: mockCommitAttachmentDrafts,
+      consumeDraftsForSend: mockConsumeAttachmentDrafts,
+      restoreDraftsForRetry: mockRestoreAttachmentDrafts,
+      discardDrafts: mockDiscardAttachmentDrafts,
+    }));
+    mockConsumeAttachmentDrafts.mockReturnValueOnce([consumedDraftImageAttachment]);
+
+    render(React.createElement(ChatScreen));
+
+    await act(async () => {
+      await lastChatInputBarProps.onSendMessage('Describe this image');
+    });
+
+    expect(mockAppendUserMessage).toHaveBeenCalledWith(
+      'Describe this image',
+      expect.objectContaining({
+        attachmentDrafts: [consumedDraftImageAttachment],
+        multimodalReadiness: expect.objectContaining({ status: 'ready' }),
+      }),
+    );
+    expect(mockConsumeAttachmentDrafts).toHaveBeenCalledTimes(1);
+    expect(mockClearFailedAttachmentDrafts).toHaveBeenCalledTimes(1);
+  });
+
+  it('sends text without attachment options and clears failed drafts when only failed drafts remain', async () => {
+    registry.saveModels([
+      createReadyVisionModel(),
+    ]);
+    mockUseChatImageAttachments.mockImplementation(() => ({
+      drafts: [failedDraftImageAttachment],
+      isPicking: false,
+      remainingSlots: 3,
+      attachImages: mockAttachImages,
+      removeDraft: mockRemoveAttachmentDraft,
+      clearDrafts: mockClearAttachmentDrafts,
+      clearFailedDrafts: mockClearFailedAttachmentDrafts,
+      commitDrafts: mockCommitAttachmentDrafts,
+      consumeDraftsForSend: mockConsumeAttachmentDrafts,
+      restoreDraftsForRetry: mockRestoreAttachmentDrafts,
+      discardDrafts: mockDiscardAttachmentDrafts,
+    }));
+    mockConsumeAttachmentDrafts.mockReturnValueOnce([]);
+
+    render(React.createElement(ChatScreen));
+
+    await act(async () => {
+      await lastChatInputBarProps.onSendMessage('Send text only');
+    });
+
+    expect(mockAppendUserMessage).toHaveBeenCalledWith(
+      'Send text only',
+      expect.not.objectContaining({
+        attachmentDrafts: expect.anything(),
+      }),
+    );
+    expect(mockConsumeAttachmentDrafts).toHaveBeenCalledTimes(1);
+    expect(mockClearFailedAttachmentDrafts).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps consumed copied drafts and clears failed leftovers when generation fails after append', async () => {
+    registry.saveModels([
+      createReadyVisionModel(),
+    ]);
+    mockAppendUserMessage.mockImplementationOnce(async (_content, options) => {
+      options?.onUserMessageAppended?.({ id: 'message-appended' });
+      throw new Error('generation failed');
+    });
+    mockUseChatImageAttachments.mockImplementation(() => ({
+      drafts: [copiedDraftImageAttachment, failedDraftImageAttachment],
+      isPicking: false,
+      remainingSlots: 2,
+      attachImages: mockAttachImages,
+      removeDraft: mockRemoveAttachmentDraft,
+      clearDrafts: mockClearAttachmentDrafts,
+      clearFailedDrafts: mockClearFailedAttachmentDrafts,
+      commitDrafts: mockCommitAttachmentDrafts,
+      consumeDraftsForSend: mockConsumeAttachmentDrafts,
+      restoreDraftsForRetry: mockRestoreAttachmentDrafts,
+      discardDrafts: mockDiscardAttachmentDrafts,
+    }));
+    mockConsumeAttachmentDrafts.mockReturnValueOnce([consumedDraftImageAttachment]);
+
+    render(React.createElement(ChatScreen));
+
+    let thrown: unknown;
+    await act(async () => {
+      try {
+        await lastChatInputBarProps.onSendMessage('Describe this image');
+      } catch (error) {
+        thrown = error;
+      }
+    });
+
+    expect(thrown).toEqual(expect.objectContaining({
+      message: 'generation failed',
+      chatInputDraftConsumed: true,
+    }));
+    expect(mockConsumeAttachmentDrafts).toHaveBeenCalledTimes(1);
+    expect(mockCommitAttachmentDrafts).not.toHaveBeenCalled();
+    expect(mockDiscardAttachmentDrafts).not.toHaveBeenCalled();
+    expect(mockClearFailedAttachmentDrafts).toHaveBeenCalledTimes(1);
+    expect(mockClearAttachmentDrafts).not.toHaveBeenCalled();
+    expect(lastChatInputBarProps.draft).toBe('');
+  });
+
+  it('restores consumed copied drafts and retains failed drafts when attachment send fails before append', async () => {
+    registry.saveModels([
+      createReadyVisionModel(),
+    ]);
+    mockAppendUserMessage.mockRejectedValueOnce(new Error('send failed'));
+    mockUseChatImageAttachments.mockImplementation(() => ({
+      drafts: [copiedDraftImageAttachment, failedDraftImageAttachment],
+      isPicking: false,
+      remainingSlots: 2,
+      attachImages: mockAttachImages,
+      removeDraft: mockRemoveAttachmentDraft,
+      clearDrafts: mockClearAttachmentDrafts,
+      clearFailedDrafts: mockClearFailedAttachmentDrafts,
+      commitDrafts: mockCommitAttachmentDrafts,
+      consumeDraftsForSend: mockConsumeAttachmentDrafts,
+      restoreDraftsForRetry: mockRestoreAttachmentDrafts,
+      discardDrafts: mockDiscardAttachmentDrafts,
+    }));
+    mockConsumeAttachmentDrafts.mockReturnValueOnce([consumedDraftImageAttachment]);
+
+    render(React.createElement(ChatScreen));
+
+    let thrown: unknown;
+    await act(async () => {
+      try {
+        await lastChatInputBarProps.onSendMessage('Describe this image');
+      } catch (error) {
+        thrown = error;
+      }
+    });
+
+    expect(thrown).toEqual(expect.objectContaining({ message: 'send failed' }));
+    expect(mockConsumeAttachmentDrafts).toHaveBeenCalledTimes(1);
+    expect(mockRestoreAttachmentDrafts).toHaveBeenCalledWith([consumedDraftImageAttachment]);
+    expect(mockDiscardAttachmentDrafts).not.toHaveBeenCalled();
+    expect(mockClearFailedAttachmentDrafts).not.toHaveBeenCalled();
+    expect(mockCommitAttachmentDrafts).not.toHaveBeenCalled();
+    expect(mockClearAttachmentDrafts).not.toHaveBeenCalled();
+  });
+
+  it('discards consumed copied drafts when their copied file is missing before append', async () => {
+    registry.saveModels([
+      createReadyVisionModel(),
+    ]);
+    mockAppendUserMessage.mockRejectedValueOnce(
+      new AppError('chat_attachment_missing', 'Attachment file is missing.', {
+        details: {
+          attachmentId: consumedDraftImageAttachment.id,
+          attachmentIds: [consumedDraftImageAttachment.id],
+        },
+      }),
+    );
+    mockUseChatImageAttachments.mockImplementation(() => ({
+      drafts: [copiedDraftImageAttachment],
+      isPicking: false,
+      remainingSlots: 3,
+      attachImages: mockAttachImages,
+      removeDraft: mockRemoveAttachmentDraft,
+      clearDrafts: mockClearAttachmentDrafts,
+      commitDrafts: mockCommitAttachmentDrafts,
+      consumeDraftsForSend: mockConsumeAttachmentDrafts,
+      restoreDraftsForRetry: mockRestoreAttachmentDrafts,
+      discardDrafts: mockDiscardAttachmentDrafts,
+    }));
+    mockConsumeAttachmentDrafts.mockReturnValueOnce([consumedDraftImageAttachment]);
+
+    render(React.createElement(ChatScreen));
+
+    await act(async () => {
+      try {
+        await lastChatInputBarProps.onSendMessage('Describe this image');
+      } catch {
+        // expected
+      }
+    });
+
+    expect(mockConsumeAttachmentDrafts).toHaveBeenCalledTimes(1);
+    expect(mockDiscardAttachmentDrafts).toHaveBeenCalledWith([consumedDraftImageAttachment], 'missing copied drafts after failed send');
+    expect(mockRestoreAttachmentDrafts).not.toHaveBeenCalled();
+  });
+
+  it('discards id-less consumed copied drafts when a missing attachment error has no usable ids', async () => {
+    registry.saveModels([
+      createReadyVisionModel(),
+    ]);
+    const idlessConsumedDraft = {
+      ...consumedDraftImageAttachment,
+      id: undefined,
+      localUri: 'test-dir/chat-attachments/idless-draft.jpg',
+      previewUri: 'test-dir/chat-attachments/idless-draft-thumb.jpg',
+    };
+    mockAppendUserMessage.mockRejectedValueOnce(
+      new AppError('chat_attachment_missing', 'Attachment file is missing.', {
+        details: {
+          attachmentIds: [],
+          pathCategories: ['chat_attachment'],
+        },
+      }),
+    );
+    mockUseChatImageAttachments.mockImplementation(() => ({
+      drafts: [copiedDraftImageAttachment],
+      isPicking: false,
+      remainingSlots: 3,
+      attachImages: mockAttachImages,
+      removeDraft: mockRemoveAttachmentDraft,
+      clearDrafts: mockClearAttachmentDrafts,
+      commitDrafts: mockCommitAttachmentDrafts,
+      consumeDraftsForSend: mockConsumeAttachmentDrafts,
+      restoreDraftsForRetry: mockRestoreAttachmentDrafts,
+      discardDrafts: mockDiscardAttachmentDrafts,
+    }));
+    mockConsumeAttachmentDrafts.mockReturnValueOnce([idlessConsumedDraft]);
+
+    render(React.createElement(ChatScreen));
+
+    await act(async () => {
+      try {
+        await lastChatInputBarProps.onSendMessage('Describe this image');
+      } catch {
+        // expected
+      }
+    });
+
+    expect(mockConsumeAttachmentDrafts).toHaveBeenCalledTimes(1);
+    expect(mockDiscardAttachmentDrafts).toHaveBeenCalledWith(
+      [idlessConsumedDraft],
+      'missing copied drafts after failed send',
+    );
+    expect(mockRestoreAttachmentDrafts).not.toHaveBeenCalled();
+  });
+
+  it('only discards missing consumed drafts and restores remaining copied drafts before append', async () => {
+    registry.saveModels([
+      createReadyVisionModel(),
+    ]);
+    mockAppendUserMessage.mockRejectedValueOnce(
+      new AppError('chat_attachment_missing', 'Attachment file is missing.', {
+        details: {
+          attachmentIds: [consumedDraftImageAttachment.id],
+        },
+      }),
+    );
+    mockUseChatImageAttachments.mockImplementation(() => ({
+      drafts: [copiedDraftImageAttachment],
+      isPicking: false,
+      remainingSlots: 2,
+      attachImages: mockAttachImages,
+      removeDraft: mockRemoveAttachmentDraft,
+      clearDrafts: mockClearAttachmentDrafts,
+      commitDrafts: mockCommitAttachmentDrafts,
+      consumeDraftsForSend: mockConsumeAttachmentDrafts,
+      restoreDraftsForRetry: mockRestoreAttachmentDrafts,
+      discardDrafts: mockDiscardAttachmentDrafts,
+    }));
+    mockConsumeAttachmentDrafts.mockReturnValueOnce([
+      consumedDraftImageAttachment,
+      secondConsumedDraftImageAttachment,
+    ]);
+
+    render(React.createElement(ChatScreen));
+
+    await act(async () => {
+      try {
+        await lastChatInputBarProps.onSendMessage('Describe this image');
+      } catch {
+        // expected
+      }
+    });
+
+    expect(mockDiscardAttachmentDrafts).toHaveBeenCalledWith(
+      [consumedDraftImageAttachment],
+      'missing copied drafts after failed send',
+    );
+    expect(mockRestoreAttachmentDrafts).toHaveBeenCalledWith([secondConsumedDraftImageAttachment]);
+  });
+
+  it('sends text only without committing copied drafts when readiness turns off', async () => {
+    registry.saveModels([
+      {
+        id: 'author/model-q4',
+        name: 'Text model',
+        author: 'Test',
+        size: 512 * 1024 * 1024,
+        localPath: 'author-model-q4.gguf',
+        lifecycleStatus: 'downloaded',
+        chatModalities: ['text'],
+        multimodalReadiness: {
+          modelId: 'author/model-q4',
+          status: 'text_only',
+          support: [],
+          checkedAt: 1,
+        },
+      },
+    ]);
+    mockUseChatImageAttachments.mockImplementation((options) => ({
+      drafts: [copiedDraftImageAttachment],
+      isPicking: false,
+      remainingSlots: 3,
+      attachImages: mockAttachImages,
+      removeDraft: mockRemoveAttachmentDraft,
+      clearDrafts: mockClearAttachmentDrafts,
+      commitDrafts: mockCommitAttachmentDrafts,
+      consumeDraftsForSend: mockConsumeAttachmentDrafts,
+      restoreDraftsForRetry: mockRestoreAttachmentDrafts,
+      discardDrafts: mockDiscardAttachmentDrafts,
+      options,
+    }));
+
+    render(React.createElement(ChatScreen));
+
+    expect(mockUseChatImageAttachments.mock.calls[mockUseChatImageAttachments.mock.calls.length - 1][0]).toEqual(
+      expect.objectContaining({
+        enabled: false,
+        disabledReason: 'chat.visionReadiness.textOnly',
+      }),
+    );
+    expect(lastChatInputBarProps).toEqual(expect.objectContaining({
+      imageAttachmentsEnabled: false,
+      imageAttachmentsDisabledReason: 'chat.visionReadiness.textOnly',
+    }));
+
+    await act(async () => {
+      await lastChatInputBarProps.onSendMessage('Describe this image');
+    });
+
+    expect(mockAppendUserMessage).toHaveBeenCalledWith(
+      'Describe this image',
+      expect.not.objectContaining({
+        attachmentDrafts: expect.anything(),
+      }),
+    );
+    expect(mockCommitAttachmentDrafts).not.toHaveBeenCalled();
+    expect(mockClearAttachmentDrafts).not.toHaveBeenCalled();
   });
 
   it('keeps auto-scroll armed when content grows without user dragging the list', () => {
@@ -988,7 +1872,7 @@ describe('ChatScreen', () => {
     })).toBe(48);
   });
 
-  it('floats the Android composer only for glass chrome while the keyboard is hidden', () => {
+  it('keeps the Android glass composer floating across keyboard visibility changes', () => {
     expect(shouldFloatAndroidComposerOverContent({
       platform: 'android',
       surfaceKind: 'glass',
@@ -1003,11 +1887,92 @@ describe('ChatScreen', () => {
       platform: 'android',
       surfaceKind: 'glass',
       isKeyboardVisible: true,
-    })).toBe(false);
+    })).toBe(true);
     expect(shouldFloatAndroidComposerOverContent({
       platform: 'ios',
       surfaceKind: 'glass',
       isKeyboardVisible: false,
+    })).toBe(false);
+  });
+
+  it('uses the tab bar inset for the hidden-keyboard Android floating composer position', () => {
+    expect(getAndroidFloatingComposerBottomOffset({
+      tabBarInset: 92,
+      androidKeyboardInset: 0,
+      isKeyboardVisible: false,
+      gap: 12,
+    })).toBe(92);
+  });
+
+  it('uses the measured keyboard inset for the visible-keyboard Android floating composer position', () => {
+    expect(getAndroidFloatingComposerBottomOffset({
+      tabBarInset: 92,
+      androidKeyboardInset: 220,
+      isKeyboardVisible: true,
+      gap: 12,
+    })).toBe(220);
+  });
+
+  it('keeps a minimum keyboard gap before the first Android composer measurement settles', () => {
+    expect(getAndroidFloatingComposerBottomOffset({
+      tabBarInset: 92,
+      androidKeyboardInset: 0,
+      isKeyboardVisible: true,
+      gap: 12,
+    })).toBe(12);
+  });
+
+  it('reserves stable list padding for the floating Android composer while the keyboard is hidden', () => {
+    expect(getChatListBottomChromeInset({
+      composerContainerHeight: 64,
+      tabBarInset: 92,
+      androidKeyboardInset: 0,
+      shouldFloatComposerOverContent: true,
+      isKeyboardVisible: false,
+      gap: 12,
+    })).toBe(168);
+  });
+
+  it('reserves stable list padding for the floating Android composer while the keyboard is visible', () => {
+    expect(getChatListBottomChromeInset({
+      composerContainerHeight: 64,
+      tabBarInset: 92,
+      androidKeyboardInset: 220,
+      shouldFloatComposerOverContent: true,
+      isKeyboardVisible: true,
+      gap: 12,
+    })).toBe(296);
+  });
+
+  it('does not reserve composer height in list padding when the composer is in normal flow', () => {
+    expect(getChatListBottomChromeInset({
+      composerContainerHeight: 64,
+      tabBarInset: 92,
+      androidKeyboardInset: 220,
+      shouldFloatComposerOverContent: false,
+      isKeyboardVisible: true,
+      gap: 12,
+    })).toBe(92);
+  });
+
+  it('does not render an Android keyboard spacer when the composer already floats above the keyboard', () => {
+    expect(shouldRenderAndroidKeyboardSpacer({
+      platform: 'android',
+      shouldFloatComposerOverContent: true,
+      androidKeyboardInset: 220,
+    })).toBe(false);
+  });
+
+  it('renders an Android keyboard spacer only for normal-flow composer positioning', () => {
+    expect(shouldRenderAndroidKeyboardSpacer({
+      platform: 'android',
+      shouldFloatComposerOverContent: false,
+      androidKeyboardInset: 220,
+    })).toBe(true);
+    expect(shouldRenderAndroidKeyboardSpacer({
+      platform: 'ios',
+      shouldFloatComposerOverContent: false,
+      androidKeyboardInset: 220,
     })).toBe(false);
   });
 
@@ -1018,6 +1983,16 @@ describe('ChatScreen', () => {
       androidKeyboardInset: 0,
       shouldFloatComposerOverContent: true,
     })).toBe(156);
+  });
+
+  it('keeps the warmup banner above the floating Android composer and keyboard', () => {
+    expect(getChatWarmupBannerBottomOffset({
+      composerContainerHeight: 64,
+      tabBarInset: 92,
+      androidKeyboardInset: 220,
+      shouldFloatComposerOverContent: true,
+      isKeyboardVisible: true,
+    })).toBe(284);
   });
 
   it('keeps the warmup banner above the Android keyboard spacer when the composer is not floating', () => {
@@ -1817,12 +2792,155 @@ describe('ChatScreen', () => {
 
     fireEvent.press(getByTestId('regenerate-message-message-1'));
     expect(getByText('chat.editEarlierMessage')).toBeTruthy();
+    expect(lastChatInputBarProps.allowEmptyMessageSend).toBe(false);
+    expect(lastChatInputBarProps.imageAttachmentsDisabledReason).toBe('chat.visionReadiness.editingMessage');
 
     await act(async () => {
       fireEvent.press(getByTestId('send-button'));
     });
     expect(mockRegenerateFromUserMessage).toHaveBeenCalledWith('message-1', 'Edited from test');
     expect(queryByText('chat.editEarlierMessage')).toBeNull();
+  });
+
+  it('clears regenerate composer mode when deleting an earlier message removes the pending target branch', async () => {
+    useChatStore.setState({
+      threads: {
+        'thread-1': {
+          ...useChatStore.getState().threads['thread-1'],
+          messages: [
+            {
+              id: 'message-earlier',
+              role: 'user',
+              content: 'Earlier user prompt',
+              createdAt: 1,
+              state: 'complete',
+            },
+            {
+              id: 'message-earlier-assistant',
+              role: 'assistant',
+              content: 'Earlier assistant reply',
+              createdAt: 2,
+              state: 'complete',
+            },
+            ...useChatStore.getState().threads['thread-1'].messages,
+          ],
+        },
+      },
+      activeThreadId: 'thread-1',
+    });
+    mockDeleteMessage.mockReturnValueOnce(true);
+    const { getByTestId, getByText, queryByText } = render(React.createElement(ChatScreen));
+
+    fireEvent.press(getByTestId('regenerate-message-message-1'));
+    expect(getByText('chat.editEarlierMessage')).toBeTruthy();
+    expect(lastChatInputBarProps.draft).toBe('Saved user prompt');
+
+    fireEvent.press(getByTestId('delete-message-message-earlier'));
+    const deleteAlertButtons = alertSpy.mock.calls.find((call) => call[0] === 'chat.deleteMessageTitle')?.[2] as Array<{ onPress?: () => void }> | undefined;
+    const confirmDelete = deleteAlertButtons?.find((button) => button.onPress)?.onPress;
+    expect(confirmDelete).toBeTruthy();
+
+    await act(async () => {
+      confirmDelete?.();
+    });
+
+    expect(mockDeleteMessage).toHaveBeenCalledWith('message-earlier');
+    expect(queryByText('chat.editEarlierMessage')).toBeNull();
+    expect(lastChatInputBarProps.draft).toBe('');
+  });
+
+  it('submits image-only regenerate flow with current multimodal readiness', async () => {
+    const readyReadiness = {
+      modelId: 'author/model-q4',
+      status: 'ready',
+      projectorId: 'author/model-q4-mmproj',
+      support: ['vision'],
+      checkedAt: 1,
+    };
+    registry.saveModels([
+      createVisionModel({
+        selectedProjectorId: 'author/model-q4-mmproj',
+        projectorCandidates: [createVisionProjector()],
+        multimodalReadiness: readyReadiness,
+      }),
+    ]);
+    setImageOnlyRegenerateThread();
+    const { getByTestId } = render(React.createElement(ChatScreen));
+
+    fireEvent.press(getByTestId('regenerate-message-message-image-only'));
+    expect(lastChatInputBarProps.allowEmptyMessageSend).toBe(true);
+    expect(lastChatInputBarProps.sendDisabled).toBe(false);
+    expect(getByTestId('chat-regenerate-retained-attachments')).toBeTruthy();
+    expect(lastChatInputBarProps.attachmentsTray).toBeTruthy();
+
+    await act(async () => {
+      await lastChatInputBarProps.onSendMessage('');
+    });
+
+    expect(mockRegenerateFromUserMessage).toHaveBeenCalledWith(
+      'message-image-only',
+      '',
+      { multimodalReadiness: expect.objectContaining({ status: 'ready', support: ['vision'] }) },
+    );
+  });
+
+  it.each([
+    [
+      'text-only model',
+      () => [{
+        id: 'author/model-q4',
+        name: 'Text model',
+        author: 'Test',
+        size: 512 * 1024 * 1024,
+        localPath: 'author-model-q4.gguf',
+        lifecycleStatus: 'downloaded',
+        chatModalities: ['text'],
+        multimodalReadiness: {
+          modelId: 'author/model-q4',
+          status: 'text_only',
+          support: [],
+          checkedAt: 1,
+        },
+      }],
+      'chat.visionReadiness.textOnly',
+    ],
+    [
+      'initializing vision model',
+      () => [createVisionModel({
+        selectedProjectorId: 'author/model-q4-mmproj',
+        projectorCandidates: [createVisionProjector()],
+      })],
+      'chat.visionReadiness.initializing',
+    ],
+  ])('keeps image-only regenerate empty send disabled for %s', async (_label, getModels, expectedReadinessReason) => {
+    registry.saveModels(getModels());
+    setImageOnlyRegenerateThread();
+
+    const { getByTestId } = render(React.createElement(ChatScreen));
+
+    expect(lastChatInputBarProps.allowEmptyMessageSend).toBe(false);
+    expect(lastChatInputBarProps.imageAttachmentsEnabled).toBe(false);
+    expect(lastChatInputBarProps.imageAttachmentsDisabledReason).toBe(expectedReadinessReason);
+
+    fireEvent.press(getByTestId('regenerate-message-message-image-only'));
+
+    expect(lastChatInputBarProps.allowEmptyMessageSend).toBe(false);
+    expect(lastChatInputBarProps.sendDisabled).toBe(true);
+    expect(lastChatInputBarProps.attachmentsTray).toBeTruthy();
+    expect(getByTestId('chat-regenerate-retained-attachments')).toBeTruthy();
+    expect(lastChatInputBarProps.imageAttachmentsDisabledReason).toBe('chat.visionReadiness.editingMessage');
+
+    await act(async () => {
+      await lastChatInputBarProps.onSendMessage('');
+    });
+
+    expect(mockRegenerateFromUserMessage).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await lastChatInputBarProps.onSendMessage('Edited text should still wait for vision');
+    });
+
+    expect(mockRegenerateFromUserMessage).not.toHaveBeenCalled();
   });
 
   it('renders model switch system events as a dedicated row', () => {
@@ -1910,6 +3028,7 @@ describe('ChatScreen', () => {
       activeModelId: null,
       status: 'idle',
     };
+    updateSettings({ activeModelId: null });
     useChatStore.setState({
       threads: {},
       activeThreadId: null,
@@ -1919,6 +3038,7 @@ describe('ChatScreen', () => {
 
     expect(getByText('chat.loadModelWarning')).toBeTruthy();
     expect(queryByText('chat.noMessages')).toBeNull();
+    expect(lastChatInputBarProps.imageAttachmentsDisabledReason).toBe('chat.visionReadiness.noModel');
   });
 
   it('shows inline warmup progress in the empty chat recovery card', () => {

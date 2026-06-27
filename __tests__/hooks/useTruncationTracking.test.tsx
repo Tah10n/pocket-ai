@@ -1,9 +1,15 @@
 import React, { useEffect } from 'react';
 import { render, waitFor } from '@testing-library/react-native';
 import { registry } from '../../src/services/LocalStorageRegistry';
+import { llmEngineService } from '../../src/services/LLMEngineService';
 import { useTruncationTracking } from '../../src/hooks/useTruncationTracking';
 import { type ChatThread } from '../../src/types/chat';
-import { createTruncationState, getThreadInferenceWindow, resolveThreadInferenceWindowOptions } from '../../src/utils/inferenceWindow';
+import {
+  buildInferenceWindowWithAccurateTokenCounts,
+  createTruncationState,
+  getThreadInferenceWindow,
+  resolveThreadInferenceWindowOptions,
+} from '../../src/utils/inferenceWindow';
 import { resolveModelReasoningCapability, resolveReasoningRuntimeConfig } from '../../src/utils/modelReasoningCapabilities';
 
 jest.mock('../../src/services/LocalStorageRegistry', () => ({
@@ -14,6 +20,12 @@ jest.mock('../../src/services/LocalStorageRegistry', () => ({
 
 jest.mock('../../src/hooks/useModelRegistryRevision', () => ({
   useModelRegistryRevision: () => 0,
+}));
+
+jest.mock('../../src/services/LLMEngineService', () => ({
+  llmEngineService: {
+    countPromptTokens: jest.fn(),
+  },
 }));
 
 jest.mock('../../src/utils/inferenceWindow', () => {
@@ -121,6 +133,7 @@ describe('useTruncationTracking', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     (registry.getModel as jest.Mock).mockImplementation((modelId: string) => getMockModel(modelId));
+    (llmEngineService.countPromptTokens as jest.Mock).mockResolvedValue(64);
   });
 
   it('uses the active thread model when computing truncation state', async () => {
@@ -142,5 +155,84 @@ describe('useTruncationTracking', () => {
       expect(hook.getState()).toEqual(expectedBaseState);
     });
     expect(registry.getModel).toHaveBeenCalledWith('author/model-q4');
+  });
+
+  it('marks passive accurate truncation probes as non-chat-blocking', async () => {
+    const buildAccurateWindow = buildInferenceWindowWithAccurateTokenCounts as jest.Mock;
+    buildAccurateWindow.mockImplementationOnce(async (
+      _thread: unknown,
+      _options: unknown,
+      countPromptTokens: (messages: Array<{ role: 'user'; content: string }>) => Promise<number>,
+    ) => {
+      await countPromptTokens([{ role: 'user', content: 'Probe' }]);
+      return { messages: [], promptTokens: 64, promptSafetyMarginTokens: 0, truncatedMessageIds: [] };
+    });
+
+    renderHookHarness(buildThread('author/model-q4'), 1600);
+
+    await waitFor(() => {
+      expect(llmEngineService.countPromptTokens).toHaveBeenCalledWith(expect.objectContaining({
+        chatBlocking: false,
+        allowMediaFallback: true,
+      }));
+    });
+  });
+
+  it('passes multimodal readiness and expected model id to passive media token probes', async () => {
+    const readiness = {
+      modelId: 'author/model-q4',
+      status: 'ready',
+      projectorId: 'author/model-q4-mmproj',
+      support: ['vision'],
+      checkedAt: 1,
+    };
+    (registry.getModel as jest.Mock).mockImplementation((modelId: string) => ({
+      ...getMockModel(modelId),
+      multimodalReadiness: readiness,
+    }));
+    const buildAccurateWindow = buildInferenceWindowWithAccurateTokenCounts as jest.Mock;
+    buildAccurateWindow.mockImplementationOnce(async (
+      _thread: unknown,
+      _options: unknown,
+      countPromptTokens: (messages: Array<{ role: 'user'; content: string; mediaPaths?: string[] }>) => Promise<number>,
+    ) => {
+      await countPromptTokens([{ role: 'user', content: 'Probe image', mediaPaths: ['file:///chat-attachments/image.jpg'] }]);
+      return { messages: [], promptTokens: 64, promptSafetyMarginTokens: 0, truncatedMessageIds: [] };
+    });
+
+    renderHookHarness(buildThread('author/model-q4'), 1600);
+
+    await waitFor(() => {
+      expect(llmEngineService.countPromptTokens).toHaveBeenCalledWith(expect.objectContaining({
+        expectedModelId: 'author/model-q4',
+        multimodalReadiness: readiness,
+        chatBlocking: false,
+        allowMediaFallback: true,
+      }));
+    });
+  });
+
+  it('passes cancellation control to stale accurate truncation probes', async () => {
+    const buildAccurateWindow = buildInferenceWindowWithAccurateTokenCounts as jest.Mock;
+    let firstProbeControl: { throwIfCancelled?: () => void } | undefined;
+    buildAccurateWindow.mockImplementationOnce(async (
+      _thread: unknown,
+      _options: unknown,
+      _countPromptTokens: unknown,
+      control: { throwIfCancelled?: () => void },
+    ) => {
+      firstProbeControl = control;
+      return new Promise(() => undefined);
+    });
+
+    const hook = renderHookHarness(buildThread('author/model-q4'), 1600);
+
+    await waitFor(() => {
+      expect(firstProbeControl?.throwIfCancelled).toEqual(expect.any(Function));
+    });
+
+    hook.rerender(buildThread('author/model-q8'), 1600);
+
+    expect(() => firstProbeControl?.throwIfCancelled?.()).toThrow('Accurate truncation probe was cancelled.');
   });
 });

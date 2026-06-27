@@ -1,10 +1,13 @@
-import React, { useEffect, useState } from 'react';
-import { LayoutChangeEvent } from 'react-native';
+import React, { useEffect, useRef, useState } from 'react';
+import type { LayoutChangeEvent } from 'react-native';
 import { useTranslation } from 'react-i18next';
 import * as Clipboard from 'expo-clipboard';
 import { Box } from '@/components/ui/box';
+import { Image } from '@/components/ui/image';
 import { Pressable } from '@/components/ui/pressable';
 import { Text } from '@/components/ui/text';
+import type { ChatAttachment } from '@/types/attachments';
+import type { ChatImageAttachment } from '@/types/multimodal';
 import { MaterialSymbols } from './MaterialSymbols';
 import { ScreenBadge, ScreenIconButton, ScreenIconTile, ScreenSurface, useScreenAppearance } from './ScreenShell';
 import { StreamingCursor } from './StreamingCursor';
@@ -17,6 +20,7 @@ export interface ChatMessageBubbleProps {
   id: string;
   isUser: boolean;
   content: string;
+  attachments?: (ChatImageAttachment | ChatAttachment)[];
   thoughtContent?: string;
   errorMessage?: string;
   isStreaming?: boolean;
@@ -28,11 +32,104 @@ export interface ChatMessageBubbleProps {
   onLayout?: (event: LayoutChangeEvent) => void;
 }
 
+function areChatImageAttachmentPropsEqual(
+  prev: (ChatImageAttachment | ChatAttachment)[] | undefined,
+  next: (ChatImageAttachment | ChatAttachment)[] | undefined,
+) {
+  if (prev === next) {
+    return true;
+  }
+
+  if (!prev || !next || prev.length !== next.length) {
+    return false;
+  }
+
+  return prev.every((attachment, index) => {
+    const nextAttachment = next[index];
+    return (
+      attachment.id === nextAttachment.id
+      && ('kind' in attachment ? attachment.kind : 'image') === ('kind' in nextAttachment ? nextAttachment.kind : 'image')
+      && attachment.localUri === nextAttachment.localUri
+      && getAttachmentPreferredPreviewUri(attachment) === getAttachmentPreferredPreviewUri(nextAttachment)
+      && attachment.fileName === nextAttachment.fileName
+    );
+  });
+}
+
+function isImageMessageAttachment(
+  attachment: ChatImageAttachment | ChatAttachment,
+): boolean {
+  return !('kind' in attachment) || attachment.kind === 'image';
+}
+
+function getAttachmentPreferredPreviewUri(attachment: ChatImageAttachment | ChatAttachment): string {
+  if ('kind' in attachment) {
+    return attachment.kind === 'image'
+      ? attachment.image?.thumbnailUri ?? attachment.localUri
+      : attachment.localUri;
+  }
+
+  return attachment.thumbnailUri ?? attachment.localUri;
+}
+
+function getAttachmentPreviewUriCandidates(attachment: ChatImageAttachment | ChatAttachment): string[] {
+  const previewUri = 'kind' in attachment && attachment.kind !== 'image'
+    ? undefined
+    : 'kind' in attachment
+      ? attachment.image?.thumbnailUri
+      : attachment.thumbnailUri;
+
+  return Array.from(new Set([
+    previewUri,
+    attachment.localUri,
+  ].filter((uri): uri is string => typeof uri === 'string' && uri.length > 0)));
+}
+
+function getAttachmentIconName(attachment: ChatAttachment): React.ComponentProps<typeof MaterialSymbols>['name'] {
+  switch (attachment.kind) {
+    case 'audio':
+      return 'graphic-eq';
+    case 'document':
+      return 'description';
+    case 'video':
+      return 'movie';
+    case 'image':
+    default:
+      return 'image';
+  }
+}
+
+function getAttachmentLabel(attachment: ChatAttachment): string {
+  switch (attachment.kind) {
+    case 'audio':
+      return 'Audio';
+    case 'document':
+      return 'Document';
+    case 'video':
+      return 'Video';
+    case 'image':
+    default:
+      return 'Image';
+  }
+}
+
+function areAttachmentPreviewUriMapsEqual(
+  prev: Record<string, string | null>,
+  next: Record<string, string | null>,
+) {
+  const prevKeys = Object.keys(prev);
+  const nextKeys = Object.keys(next);
+
+  return prevKeys.length === nextKeys.length
+    && nextKeys.every((key) => prev[key] === next[key]);
+}
+
 function areChatMessageBubblePropsEqual(prev: ChatMessageBubbleProps, next: ChatMessageBubbleProps) {
   return (
     prev.id === next.id
     && prev.isUser === next.isUser
     && prev.content === next.content
+    && areChatImageAttachmentPropsEqual(prev.attachments, next.attachments)
     && prev.thoughtContent === next.thoughtContent
     && prev.errorMessage === next.errorMessage
     && prev.isStreaming === next.isStreaming
@@ -77,6 +174,7 @@ const ChatMessageBubbleComponent = ({
   id,
   isUser,
   content,
+  attachments,
   thoughtContent: explicitThoughtContent,
   errorMessage,
   isStreaming,
@@ -89,6 +187,8 @@ const ChatMessageBubbleComponent = ({
 }: ChatMessageBubbleProps) => {
   const [copied, setCopied] = useState(false);
   const [isThoughtExpanded, setThoughtExpanded] = useState(false);
+  const [attachmentPreviewUris, setAttachmentPreviewUris] = useState<Record<string, string | null>>({});
+  const failedAttachmentPreviewUrisRef = useRef<Record<string, Set<string>>>({});
   const { t } = useTranslation();
   const appearance = useScreenAppearance();
   const hasExplicitThoughtContent = explicitThoughtContent !== undefined;
@@ -166,6 +266,70 @@ const ChatMessageBubbleComponent = ({
   const shouldUseGlassBubble = appearance.surfaceKind === 'glass';
   const shouldUseAssistantGlass = appearance.surfaceKind === 'glass' && !isUser;
   const userTextClassName = getThemeActionContentClassName(appearance, 'primary');
+  const userAttachments = React.useMemo(
+    () => (isUser ? attachments ?? [] : []),
+    [attachments, isUser],
+  );
+
+  useEffect(() => {
+    const nextAttachmentsById = new Map(userAttachments.map((attachment) => [attachment.id, attachment]));
+    failedAttachmentPreviewUrisRef.current = Object.fromEntries(
+      Object.entries(failedAttachmentPreviewUrisRef.current)
+        .filter(([attachmentId]) => nextAttachmentsById.has(attachmentId)),
+    );
+
+    if (userAttachments.length === 0) {
+      failedAttachmentPreviewUrisRef.current = {};
+      setAttachmentPreviewUris((current) => (
+        areAttachmentPreviewUriMapsEqual(current, {}) ? current : {}
+      ));
+      return;
+    }
+
+    setAttachmentPreviewUris((current) => {
+      const nextPreviewUris: Record<string, string | null> = {};
+
+      for (const [attachmentId, currentUri] of Object.entries(current)) {
+        const attachment = nextAttachmentsById.get(attachmentId);
+        if (!attachment) {
+          continue;
+        }
+
+        const candidates = getAttachmentPreviewUriCandidates(attachment);
+        const failedUris = failedAttachmentPreviewUrisRef.current[attachmentId];
+        const nextPreviewUri = candidates.find((uri) => !failedUris?.has(uri)) ?? null;
+
+        if (currentUri === null) {
+          if (nextPreviewUri === null) {
+            nextPreviewUris[attachmentId] = null;
+          }
+          continue;
+        }
+
+        nextPreviewUris[attachmentId] = nextPreviewUri;
+      }
+
+      return areAttachmentPreviewUriMapsEqual(current, nextPreviewUris) ? current : nextPreviewUris;
+    });
+
+  }, [userAttachments]);
+
+  const handleAttachmentPreviewError = (attachment: ChatImageAttachment | ChatAttachment, attemptedUri: string) => {
+    failedAttachmentPreviewUrisRef.current[attachment.id] ??= new Set<string>();
+    failedAttachmentPreviewUrisRef.current[attachment.id].add(attemptedUri);
+
+    const nextPreviewUri = getAttachmentPreviewUriCandidates(attachment)
+      .find((previewUri) => !failedAttachmentPreviewUrisRef.current[attachment.id]?.has(previewUri)) ?? null;
+
+    setAttachmentPreviewUris((current) => {
+      const currentUri = current[attachment.id];
+      if (currentUri !== undefined && currentUri !== attemptedUri) {
+        return current;
+      }
+
+      return currentUri === nextPreviewUri ? current : { ...current, [attachment.id]: nextPreviewUri };
+    });
+  };
 
   return (
     <Box className={`w-full flex-col gap-0.5 ${isUser ? 'items-end' : 'items-start'}`} onLayout={onLayout}>
@@ -247,18 +411,99 @@ const ChatMessageBubbleComponent = ({
           ) : null}
 
           {isUser ? (
-            <Text selectable className={`text-base leading-relaxed ${userTextClassName}`}>
-              {content}
-            </Text>
+            <>
+              {userAttachments.length > 0 ? (
+                <Box
+                  testID={`message-attachments-${id}`}
+                  className={`${content ? 'mb-2 ' : ''}flex-row flex-wrap gap-1.5`}
+                >
+                  {userAttachments.map((attachment, index) => {
+                    const attachmentLabelOptions = {
+                      index: index + 1,
+                      count: userAttachments.length,
+                    };
+                    if (!isImageMessageAttachment(attachment) && 'kind' in attachment) {
+                      return (
+                        <ScreenSurface
+                          key={attachment.id}
+                          testID={`message-attachment-${attachment.kind}-${id}-${attachment.id}`}
+                          tone="default"
+                          decorative="matte"
+                          accessible
+                          accessibilityRole="summary"
+                          accessibilityLabel={t('chat.attachments.messageFileIndexedAccessibilityLabel', {
+                            ...attachmentLabelOptions,
+                            kind: getAttachmentLabel(attachment),
+                            name: attachment.fileName,
+                          })}
+                          className="w-44 flex-row items-center gap-2 px-2.5 py-2"
+                        >
+                          <ScreenIconTile iconName={getAttachmentIconName(attachment)} tone="neutral" size="sm" iconSize="sm" className="h-8 w-8" />
+                          <Box className="min-w-0 flex-1">
+                            <Text numberOfLines={1} className="text-xs font-semibold text-typography-800 dark:text-typography-100">
+                              {attachment.fileName}
+                            </Text>
+                            <Text numberOfLines={1} className="mt-0.5 text-xs leading-4 text-typography-500 dark:text-typography-300">
+                              {getAttachmentLabel(attachment)}
+                            </Text>
+                          </Box>
+                        </ScreenSurface>
+                      );
+                    }
+
+                    const resolvedPreviewUri = attachmentPreviewUris[attachment.id];
+                    const previewUri = resolvedPreviewUri ?? getAttachmentPreferredPreviewUri(attachment);
+                    return resolvedPreviewUri !== null ? (
+                      <Image
+                        key={attachment.id}
+                        testID={`message-attachment-image-${id}-${attachment.id}`}
+                        source={{ uri: previewUri }}
+                        onError={() => handleAttachmentPreviewError(attachment, previewUri)}
+                        accessibilityLabel={t('chat.attachments.messagePreviewIndexedAccessibilityLabel', attachmentLabelOptions)}
+                        resizeMode="cover"
+                        className="h-[72px] w-[72px] rounded-lg"
+                      />
+                    ) : (
+                      <ScreenSurface
+                        key={attachment.id}
+                        testID={`message-attachment-unavailable-${id}-${attachment.id}`}
+                        tone="default"
+                        decorative="matte"
+                        accessible
+                        accessibilityRole="image"
+                        accessibilityLabel={t('chat.attachments.messageUnavailableIndexedAccessibilityLabel', attachmentLabelOptions)}
+                        accessibilityState={{ disabled: true }}
+                        className="w-36 flex-row items-center gap-1.5 px-2 py-1.5"
+                      >
+                        <MaterialSymbols name="broken-image" size="sm" className="text-typography-500 dark:text-typography-300" />
+                        <Text className="min-w-0 flex-1 text-xs leading-4 text-typography-700 dark:text-typography-200">
+                          {t('chat.attachments.unavailable')}
+                        </Text>
+                      </ScreenSurface>
+                    );
+                  })}
+                </Box>
+              ) : null}
+              {content ? (
+                <Text selectable className={`text-base leading-relaxed ${userTextClassName}`}>
+                  {content}
+                </Text>
+              ) : null}
+            </>
           ) : shouldShowStreamingPlaceholder ? (
             <StreamingCursor compact />
           ) : isStreaming && assistantBodyContent ? (
-            <Text className="text-base leading-relaxed text-typography-900 dark:text-typography-100">
+            <Text
+              testID={`assistant-message-content-${id}`}
+              className="text-base leading-relaxed text-typography-900 dark:text-typography-100"
+            >
               {assistantBodyContent}
               <StreamingCursor />
             </Text>
           ) : assistantBodyContent ? (
-            <MarkdownRenderer content={assistantBodyContent} selectable />
+            <Box testID={`assistant-message-content-${id}`}>
+              <MarkdownRenderer content={assistantBodyContent} selectable />
+            </Box>
           ) : null}
 
           {hasErrorMessage ? (

@@ -1,5 +1,6 @@
 import { mergeModelWithRuntimeState } from '../../src/utils/modelRuntimeState';
 import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../src/types/models';
+import type { ProjectorArtifact } from '../../src/types/multimodal';
 
 const LOCAL_SHA256 = 'b'.repeat(64);
 const REMOTE_SHA256 = 'c'.repeat(64);
@@ -17,6 +18,20 @@ function makeModel(overrides: Partial<ModelMetadata> = {}): ModelMetadata {
     isPrivate: false,
     lifecycleStatus: LifecycleStatus.AVAILABLE,
     downloadProgress: 0,
+    ...overrides,
+  };
+}
+
+function makeProjector(overrides: Partial<ProjectorArtifact> = {}): ProjectorArtifact {
+  return {
+    id: 'org/model:mmproj',
+    ownerModelId: 'org/model',
+    repoId: 'org/model',
+    fileName: 'mmproj-model.gguf',
+    downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-model.gguf',
+    size: 256,
+    lifecycleStatus: 'available',
+    matchStatus: 'matched',
     ...overrides,
   };
 }
@@ -440,6 +455,697 @@ describe('modelRuntimeState', () => {
       lifecycleStatus: LifecycleStatus.PAUSED,
       downloadProgress: 0.5,
       resumeData: JSON.stringify({ resumeData: 'resume' }),
+    }));
+  });
+
+  it('preserves compatible queued projector resume state across catalog refreshes', () => {
+    const merged = mergeModelWithRuntimeState(
+      makeModel({
+        size: 3 * 1024 * 1024 * 1024,
+        resolvedFileName: 'model.Q4_K_M.gguf',
+        projectorCandidates: [makeProjector({ id: 'org/model:mmproj-v2' })],
+      }),
+      {
+        queuedItem: makeModel({
+          size: 3 * 1024 * 1024 * 1024,
+          resolvedFileName: 'model.Q4_K_M.gguf',
+          lifecycleStatus: LifecycleStatus.PAUSED,
+          downloadProgress: 0.5,
+          selectedProjectorId: 'org/model:mmproj-v1',
+          multimodalReadiness: {
+            modelId: 'org/model',
+            status: 'ready',
+            projectorId: 'org/model:mmproj-v1',
+            projectorSize: 256,
+            support: ['vision'],
+            checkedAt: 123,
+          },
+          projectorCandidates: [makeProjector({
+            id: 'org/model:mmproj-v1',
+            localPath: 'partial-mmproj-model.gguf',
+            resumeData: JSON.stringify({ resumeData: 'projector-resume' }),
+            downloadProgress: 0.42,
+            lifecycleStatus: 'paused',
+            matchStatus: 'user_selected',
+            matchReason: 'user_selected_projector',
+          })],
+        }),
+      },
+    );
+
+    expect(merged.projectorCandidates?.[0]).toEqual(expect.objectContaining({
+      id: 'org/model:mmproj-v2',
+      localPath: 'partial-mmproj-model.gguf',
+      resumeData: 'projector-resume',
+      downloadProgress: 0.42,
+      lifecycleStatus: 'paused',
+      matchStatus: 'user_selected',
+      matchReason: 'user_selected_projector',
+    }));
+    expect(merged.selectedProjectorId).toBe('org/model:mmproj-v2');
+    expect(merged.multimodalReadiness).toEqual(expect.objectContaining({
+      status: 'ready',
+      projectorId: 'org/model:mmproj-v2',
+    }));
+  });
+
+  it('preserves runtime projector candidates when the refreshed model lacks candidates', () => {
+    const merged = mergeModelWithRuntimeState(
+      makeModel({
+        size: 3 * 1024 * 1024 * 1024,
+        resolvedFileName: 'model.Q4_K_M.gguf',
+      }),
+      {
+        localModel: makeModel({
+          size: 3 * 1024 * 1024 * 1024,
+          resolvedFileName: 'model.Q4_K_M.gguf',
+          lifecycleStatus: LifecycleStatus.DOWNLOADED,
+          downloadProgress: 1,
+          selectedProjectorId: 'org/model:mmproj-runtime',
+          multimodalReadiness: {
+            modelId: 'org/model',
+            status: 'ready',
+            projectorId: 'org/model:mmproj-runtime',
+            projectorSize: 256,
+            support: ['vision'],
+            checkedAt: 456,
+          },
+          projectorCandidates: [makeProjector({
+            id: 'org/model:mmproj-runtime',
+            localPath: 'mmproj-model.gguf',
+            lifecycleStatus: 'downloaded',
+            matchStatus: 'user_selected',
+            matchReason: 'user_selected_projector',
+          })],
+        }),
+      },
+    );
+
+    expect(merged.projectorCandidates).toEqual([
+      expect.objectContaining({
+        id: 'org/model:mmproj-runtime',
+        localPath: 'mmproj-model.gguf',
+        lifecycleStatus: 'downloaded',
+        matchStatus: 'user_selected',
+      }),
+    ]);
+    expect(merged.selectedProjectorId).toBe('org/model:mmproj-runtime');
+    expect(merged.multimodalReadiness?.projectorId).toBe('org/model:mmproj-runtime');
+  });
+
+  it('does not inherit projector resume state when projector identity conflicts', () => {
+    const merged = mergeModelWithRuntimeState(
+      makeModel({
+        size: 3 * 1024 * 1024 * 1024,
+        resolvedFileName: 'model.Q4_K_M.gguf',
+        projectorCandidates: [makeProjector({
+          fileName: 'mmproj-new.gguf',
+          downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-new.gguf',
+          sha256: 'd'.repeat(64),
+        })],
+      }),
+      {
+        queuedItem: makeModel({
+          size: 3 * 1024 * 1024 * 1024,
+          resolvedFileName: 'model.Q4_K_M.gguf',
+          lifecycleStatus: LifecycleStatus.PAUSED,
+          downloadProgress: 0.5,
+          selectedProjectorId: 'org/model:mmproj',
+          multimodalReadiness: {
+            modelId: 'org/model',
+            status: 'ready',
+            projectorId: 'org/model:mmproj',
+            support: ['vision'],
+            checkedAt: 123,
+          },
+          projectorCandidates: [makeProjector({
+            fileName: 'mmproj-old.gguf',
+            downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-old.gguf',
+            sha256: 'e'.repeat(64),
+            localPath: 'partial-mmproj-old.gguf',
+            resumeData: JSON.stringify({ resumeData: 'stale-projector-resume' }),
+            lifecycleStatus: 'paused',
+          })],
+        }),
+      },
+    );
+
+    expect(merged.projectorCandidates?.[0]).toEqual(expect.objectContaining({
+      fileName: 'mmproj-new.gguf',
+      downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-new.gguf',
+      lifecycleStatus: 'available',
+    }));
+    expect(merged.projectorCandidates?.[0]?.resumeData).toBeUndefined();
+    expect(merged.projectorCandidates?.[0]?.localPath).toBeUndefined();
+    expect(merged.selectedProjectorId).toBeUndefined();
+    expect(merged.multimodalReadiness).toBeUndefined();
+  });
+
+  it('preserves legacy runtime projector selection while clearing stale readiness on metadata conflict', () => {
+    const merged = mergeModelWithRuntimeState(
+      makeModel({
+        size: 3 * 1024 * 1024 * 1024,
+        resolvedFileName: 'model.Q4_K_M.gguf',
+        projectorCandidates: [makeProjector({
+          sha256: 'd'.repeat(64),
+        })],
+      }),
+      {
+        queuedItem: makeModel({
+          size: 3 * 1024 * 1024 * 1024,
+          resolvedFileName: 'model.Q4_K_M.gguf',
+          lifecycleStatus: LifecycleStatus.PAUSED,
+          downloadProgress: 0.5,
+          selectedProjectorId: 'org/model:mmproj',
+          multimodalReadiness: {
+            modelId: 'org/model',
+            status: 'ready',
+            projectorId: 'org/model:mmproj',
+            support: ['vision'],
+            checkedAt: 123,
+          },
+          projectorCandidates: [makeProjector({
+            sha256: 'e'.repeat(64),
+            localPath: 'partial-mmproj.gguf',
+            resumeData: JSON.stringify({ resumeData: 'stale-projector-resume' }),
+            lifecycleStatus: 'paused',
+          })],
+        }),
+      },
+    );
+
+    expect(merged.projectorCandidates?.[0]).toEqual(expect.objectContaining({
+      lifecycleStatus: 'available',
+      sha256: 'd'.repeat(64),
+    }));
+    expect(merged.projectorCandidates?.[0]?.resumeData).toBeUndefined();
+    expect(merged.projectorCandidates?.[0]?.localPath).toBeUndefined();
+    expect(merged.selectedProjectorId).toBe('org/model:mmproj');
+    expect(merged.multimodalReadiness).toBeUndefined();
+  });
+
+  it('preserves projector-scoped memory fit when a legacy projector id remaps to the same artifact', () => {
+    const projectorSha = 'd'.repeat(64);
+    const merged = mergeModelWithRuntimeState(
+      makeModel({
+        size: 3 * 1024 * 1024 * 1024,
+        resolvedFileName: 'model.Q4_K_M.gguf',
+        projectorCandidates: [makeProjector({
+          id: 'org/model:mmproj-current',
+          sha256: projectorSha,
+          size: 256,
+        })],
+      }),
+      {
+        queuedItem: makeModel({
+          size: 3 * 1024 * 1024 * 1024,
+          resolvedFileName: 'model.Q4_K_M.gguf',
+          lifecycleStatus: LifecycleStatus.PAUSED,
+          downloadProgress: 0.5,
+          fitsInRam: true,
+          memoryFitDecision: 'fits_high_confidence',
+          memoryFitConfidence: 'high',
+          variants: [{
+            variantId: 'model.Q4_K_M.gguf',
+            fileName: 'model.Q4_K_M.gguf',
+            quantizationLabel: 'Q4_K_M',
+            size: 3 * 1024 * 1024 * 1024,
+            ramFit: 'fits_high_confidence',
+            ramFitConfidence: 'high',
+          }],
+          selectedProjectorId: 'org/model:mmproj-legacy',
+          projectorCandidates: [makeProjector({
+            id: 'org/model:mmproj-legacy',
+            sha256: projectorSha,
+            size: 256,
+            localPath: 'partial-mmproj.gguf',
+            resumeData: JSON.stringify({ resumeData: 'projector-resume' }),
+            lifecycleStatus: 'paused',
+          })],
+        }),
+      },
+    );
+
+    expect(merged.selectedProjectorId).toBe('org/model:mmproj-current');
+    expect(merged.fitsInRam).toBe(true);
+    expect(merged.memoryFitDecision).toBe('fits_high_confidence');
+    expect(merged.memoryFitConfidence).toBe('high');
+    expect(merged.variants?.[0]).toEqual(expect.objectContaining({
+      ramFit: 'fits_high_confidence',
+      ramFitConfidence: 'high',
+    }));
+  });
+
+  it('remaps legacy runtime projector selection while clearing stale readiness on metadata conflict', () => {
+    const merged = mergeModelWithRuntimeState(
+      makeModel({
+        size: 3 * 1024 * 1024 * 1024,
+        resolvedFileName: 'model.Q4_K_M.gguf',
+        projectorCandidates: [makeProjector({
+          id: 'org/model:mmproj-current',
+          sha256: 'd'.repeat(64),
+          size: 512,
+          downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-model.gguf?download=true',
+        })],
+      }),
+      {
+        queuedItem: makeModel({
+          size: 3 * 1024 * 1024 * 1024,
+          resolvedFileName: 'model.Q4_K_M.gguf',
+          lifecycleStatus: LifecycleStatus.PAUSED,
+          downloadProgress: 0.5,
+          fitsInRam: false,
+          memoryFitDecision: 'likely_oom',
+          memoryFitConfidence: 'high',
+          variants: [{
+            variantId: 'model.Q4_K_M.gguf',
+            fileName: 'model.Q4_K_M.gguf',
+            quantizationLabel: 'Q4_K_M',
+            size: 3 * 1024 * 1024 * 1024,
+            ramFit: 'likely_oom',
+            ramFitConfidence: 'high',
+          }],
+          selectedProjectorId: 'org/model:mmproj-legacy',
+          multimodalReadiness: {
+            modelId: 'org/model',
+            status: 'ready',
+            projectorId: 'org/model:mmproj-legacy',
+            support: ['vision'],
+            checkedAt: 123,
+          },
+          projectorCandidates: [makeProjector({
+            id: 'org/model:mmproj-legacy',
+            sha256: 'e'.repeat(64),
+            size: 256,
+            downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-model.gguf',
+            localPath: 'partial-mmproj.gguf',
+            resumeData: JSON.stringify({ resumeData: 'stale-projector-resume' }),
+            lifecycleStatus: 'paused',
+          })],
+        }),
+      },
+    );
+
+    expect(merged.projectorCandidates?.[0]).toEqual(expect.objectContaining({
+      id: 'org/model:mmproj-current',
+      lifecycleStatus: 'available',
+      sha256: 'd'.repeat(64),
+      size: 512,
+    }));
+    expect(merged.projectorCandidates?.[0]?.resumeData).toBeUndefined();
+    expect(merged.projectorCandidates?.[0]?.localPath).toBeUndefined();
+    expect(merged.selectedProjectorId).toBe('org/model:mmproj-current');
+    expect(merged.multimodalReadiness).toBeUndefined();
+    expect(merged.fitsInRam).toBeNull();
+    expect(merged.memoryFitDecision).toBeUndefined();
+    expect(merged.memoryFitConfidence).toBeUndefined();
+    expect(merged.variants?.[0]).toEqual(expect.objectContaining({
+      ramFit: undefined,
+      ramFitConfidence: undefined,
+    }));
+  });
+
+  it('clears projector-scoped memory fit when a same-id projector artifact changes', () => {
+    const merged = mergeModelWithRuntimeState(
+      makeModel({
+        size: 3 * 1024 * 1024 * 1024,
+        resolvedFileName: 'model.Q4_K_M.gguf',
+        selectedProjectorId: 'org/model:mmproj',
+        projectorCandidates: [makeProjector({
+          sha256: 'd'.repeat(64),
+          size: 512,
+          matchStatus: 'user_selected',
+          matchReason: 'user_selected_projector',
+        })],
+      }),
+      {
+        localModel: makeModel({
+          size: 3 * 1024 * 1024 * 1024,
+          resolvedFileName: 'model.Q4_K_M.gguf',
+          lifecycleStatus: LifecycleStatus.DOWNLOADED,
+          downloadProgress: 1,
+          localPath: 'model.gguf',
+          fitsInRam: true,
+          memoryFitDecision: 'fits_high_confidence',
+          memoryFitConfidence: 'high',
+          variants: [{
+            variantId: 'model.Q4_K_M.gguf',
+            fileName: 'model.Q4_K_M.gguf',
+            quantizationLabel: 'Q4_K_M',
+            size: 3 * 1024 * 1024 * 1024,
+            ramFit: 'fits_high_confidence',
+            ramFitConfidence: 'high',
+          }],
+          selectedProjectorId: 'org/model:mmproj',
+          projectorCandidates: [makeProjector({
+            sha256: 'e'.repeat(64),
+            size: 256,
+            localPath: 'stale-mmproj.gguf',
+            lifecycleStatus: 'downloaded',
+            matchStatus: 'user_selected',
+            matchReason: 'user_selected_projector',
+          })],
+        }),
+      },
+    );
+
+    expect(merged.selectedProjectorId).toBe('org/model:mmproj');
+    expect(merged.projectorCandidates?.[0]).toEqual(expect.objectContaining({
+      sha256: 'd'.repeat(64),
+      size: 512,
+    }));
+    expect(merged.fitsInRam).toBeNull();
+    expect(merged.memoryFitDecision).toBeUndefined();
+    expect(merged.memoryFitConfidence).toBeUndefined();
+    expect(merged.variants?.[0]).toEqual(expect.objectContaining({
+      ramFit: undefined,
+      ramFitConfidence: undefined,
+    }));
+  });
+
+  it('preserves explicit runtime projector selection while clearing stale readiness on metadata conflict', () => {
+    const merged = mergeModelWithRuntimeState(
+      makeModel({
+        size: 3 * 1024 * 1024 * 1024,
+        resolvedFileName: 'model.Q4_K_M.gguf',
+        projectorCandidates: [makeProjector({
+          sha256: 'd'.repeat(64),
+        })],
+      }),
+      {
+        queuedItem: makeModel({
+          size: 3 * 1024 * 1024 * 1024,
+          resolvedFileName: 'model.Q4_K_M.gguf',
+          lifecycleStatus: LifecycleStatus.PAUSED,
+          downloadProgress: 0.5,
+          selectedProjectorId: 'org/model:mmproj',
+          multimodalReadiness: {
+            modelId: 'org/model',
+            status: 'ready',
+            projectorId: 'org/model:mmproj',
+            support: ['vision'],
+            checkedAt: 123,
+          },
+          projectorCandidates: [makeProjector({
+            sha256: 'e'.repeat(64),
+            localPath: 'partial-mmproj.gguf',
+            resumeData: JSON.stringify({ resumeData: 'stale-projector-resume' }),
+            lifecycleStatus: 'paused',
+            matchStatus: 'user_selected',
+            matchReason: 'user_selected_projector',
+          })],
+        }),
+      },
+    );
+
+    expect(merged.projectorCandidates?.[0]).toEqual(expect.objectContaining({
+      lifecycleStatus: 'available',
+      sha256: 'd'.repeat(64),
+    }));
+    expect(merged.projectorCandidates?.[0]?.resumeData).toBeUndefined();
+    expect(merged.projectorCandidates?.[0]?.localPath).toBeUndefined();
+    expect(merged.selectedProjectorId).toBe('org/model:mmproj');
+    expect(merged.multimodalReadiness).toBeUndefined();
+  });
+
+  it('does not preserve variant-scoped projector runtime state for a different active variant without catalog candidates', () => {
+    const merged = mergeModelWithRuntimeState(
+      makeModel({
+        size: 8 * 1024 * 1024 * 1024,
+        resolvedFileName: 'model.Q8_0.gguf',
+        activeVariantId: 'model.Q8_0.gguf',
+        variants: [
+          { variantId: 'model.Q4_K_M.gguf', fileName: 'model.Q4_K_M.gguf', quantizationLabel: 'Q4_K_M', size: 3 * 1024 * 1024 * 1024 },
+          { variantId: 'model.Q8_0.gguf', fileName: 'model.Q8_0.gguf', quantizationLabel: 'Q8_0', size: 8 * 1024 * 1024 * 1024 },
+        ],
+      }),
+      {
+        queuedItem: makeModel({
+          size: 8 * 1024 * 1024 * 1024,
+          resolvedFileName: 'model.Q8_0.gguf',
+          lifecycleStatus: LifecycleStatus.PAUSED,
+          downloadProgress: 0.5,
+          selectedProjectorId: 'org/model:mmproj-q4',
+          multimodalReadiness: {
+            modelId: 'org/model',
+            variantId: 'model.Q4_K_M.gguf',
+            status: 'ready',
+            projectorId: 'org/model:mmproj-q4',
+            support: ['vision'],
+            checkedAt: 123,
+          },
+          projectorCandidates: [makeProjector({
+            id: 'org/model:mmproj-q4',
+            ownerVariantId: 'model.Q4_K_M.gguf',
+            localPath: 'partial-mmproj-q4.gguf',
+            resumeData: JSON.stringify({ resumeData: 'stale-projector-resume' }),
+            lifecycleStatus: 'paused',
+            matchStatus: 'user_selected',
+            matchReason: 'user_selected_projector',
+          })],
+        }),
+      },
+    );
+
+    expect(merged.projectorCandidates).toBeUndefined();
+    expect(merged.selectedProjectorId).toBeUndefined();
+    expect(merged.multimodalReadiness).toBeUndefined();
+  });
+
+  it('does not preserve explicit runtime projector selection when stable artifact identity conflicts', () => {
+    const merged = mergeModelWithRuntimeState(
+      makeModel({
+        size: 3 * 1024 * 1024 * 1024,
+        resolvedFileName: 'model.Q4_K_M.gguf',
+        projectorCandidates: [makeProjector({
+          fileName: 'mmproj-new.gguf',
+          downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-new.gguf',
+          sha256: 'd'.repeat(64),
+        })],
+      }),
+      {
+        queuedItem: makeModel({
+          size: 3 * 1024 * 1024 * 1024,
+          resolvedFileName: 'model.Q4_K_M.gguf',
+          lifecycleStatus: LifecycleStatus.PAUSED,
+          downloadProgress: 0.5,
+          selectedProjectorId: 'org/model:mmproj',
+          multimodalReadiness: {
+            modelId: 'org/model',
+            status: 'ready',
+            projectorId: 'org/model:mmproj',
+            support: ['vision'],
+            checkedAt: 123,
+          },
+          projectorCandidates: [makeProjector({
+            fileName: 'mmproj-old.gguf',
+            downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-old.gguf',
+            sha256: 'd'.repeat(64),
+            localPath: 'partial-mmproj-old.gguf',
+            resumeData: JSON.stringify({ resumeData: 'stale-projector-resume' }),
+            lifecycleStatus: 'paused',
+            matchStatus: 'user_selected',
+            matchReason: 'user_selected_projector',
+          })],
+        }),
+      },
+    );
+
+    expect(merged.projectorCandidates?.[0]).toEqual(expect.objectContaining({
+      fileName: 'mmproj-new.gguf',
+      lifecycleStatus: 'available',
+    }));
+    expect(merged.projectorCandidates?.[0]?.resumeData).toBeUndefined();
+    expect(merged.projectorCandidates?.[0]?.localPath).toBeUndefined();
+    expect(merged.selectedProjectorId).toBeUndefined();
+    expect(merged.multimodalReadiness).toBeUndefined();
+  });
+
+  it('clears a selected projector when a same-id stable artifact conflict blocks the candidate', () => {
+    const merged = mergeModelWithRuntimeState(
+      makeModel({
+        size: 3 * 1024 * 1024 * 1024,
+        resolvedFileName: 'model.Q4_K_M.gguf',
+        selectedProjectorId: 'org/model:mmproj',
+        visionSource: 'user_selected_projector',
+        projectorCandidates: [makeProjector({
+          fileName: 'mmproj-new.gguf',
+          downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-new.gguf',
+          sha256: 'd'.repeat(64),
+          matchStatus: 'user_selected',
+          matchReason: 'user_selected_projector',
+        })],
+      }),
+      {
+        localModel: makeModel({
+          size: 3 * 1024 * 1024 * 1024,
+          resolvedFileName: 'model.Q4_K_M.gguf',
+          lifecycleStatus: LifecycleStatus.DOWNLOADED,
+          downloadProgress: 1,
+          localPath: 'model.gguf',
+          selectedProjectorId: 'org/model:mmproj',
+          projectorCandidates: [makeProjector({
+            fileName: 'mmproj-old.gguf',
+            downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-old.gguf',
+            sha256: 'e'.repeat(64),
+            localPath: 'stale-mmproj-old.gguf',
+            lifecycleStatus: 'downloaded',
+            matchStatus: 'user_selected',
+            matchReason: 'user_selected_projector',
+          })],
+        }),
+      },
+    );
+
+    expect(merged.projectorCandidates?.[0]).toEqual(expect.objectContaining({
+      fileName: 'mmproj-new.gguf',
+      lifecycleStatus: 'available',
+      matchStatus: 'user_selected',
+    }));
+    expect(merged.projectorCandidates?.[0]?.localPath).toBeUndefined();
+    expect(merged.selectedProjectorId).toBeUndefined();
+    expect(merged.multimodalReadiness).toBeUndefined();
+  });
+
+  it('does not fall back to a different runtime projector when the incoming selection is blocked', () => {
+    const merged = mergeModelWithRuntimeState(
+      makeModel({
+        size: 3 * 1024 * 1024 * 1024,
+        resolvedFileName: 'model.Q4_K_M.gguf',
+        selectedProjectorId: 'org/model:mmproj-b',
+        projectorCandidates: [
+          makeProjector({
+            id: 'org/model:mmproj-a',
+            fileName: 'mmproj-a.gguf',
+          }),
+          makeProjector({
+            id: 'org/model:mmproj-b',
+            fileName: 'fresh-mmproj-b.gguf',
+          }),
+        ],
+      }),
+      {
+        queuedItem: makeModel({
+          size: 3 * 1024 * 1024 * 1024,
+          resolvedFileName: 'model.Q4_K_M.gguf',
+          lifecycleStatus: LifecycleStatus.PAUSED,
+          downloadProgress: 0.5,
+          selectedProjectorId: 'org/model:mmproj-a',
+          multimodalReadiness: {
+            modelId: 'org/model',
+            status: 'ready',
+            projectorId: 'org/model:mmproj-a',
+            support: ['vision'],
+            checkedAt: 123,
+          },
+          projectorCandidates: [
+            makeProjector({
+              id: 'org/model:mmproj-a',
+              fileName: 'mmproj-a.gguf',
+              localPath: 'partial-mmproj-a.gguf',
+              resumeData: JSON.stringify({ resumeData: 'projector-a-resume' }),
+              lifecycleStatus: 'paused',
+              matchStatus: 'user_selected',
+              matchReason: 'user_selected_projector',
+            }),
+            makeProjector({
+              id: 'org/model:mmproj-b',
+              fileName: 'stale-mmproj-b.gguf',
+              localPath: 'partial-stale-mmproj-b.gguf',
+              resumeData: JSON.stringify({ resumeData: 'stale-projector-b-resume' }),
+              lifecycleStatus: 'paused',
+            }),
+          ],
+        }),
+      },
+    );
+
+    const projectorA = merged.projectorCandidates?.find((projector) => projector.id === 'org/model:mmproj-a');
+    const projectorB = merged.projectorCandidates?.find((projector) => projector.id === 'org/model:mmproj-b');
+    expect(projectorA).toEqual(expect.objectContaining({
+      id: 'org/model:mmproj-a',
+      localPath: 'partial-mmproj-a.gguf',
+    }));
+    expect(projectorB).toEqual(expect.objectContaining({
+      id: 'org/model:mmproj-b',
+      fileName: 'fresh-mmproj-b.gguf',
+    }));
+    expect(projectorB?.localPath).toBeUndefined();
+    expect(merged.selectedProjectorId).toBeUndefined();
+    expect(merged.multimodalReadiness).toBeUndefined();
+  });
+
+  it('preserves a compatible runtime projector remapped to the blocked incoming selected projector', () => {
+    const merged = mergeModelWithRuntimeState(
+      makeModel({
+        size: 3 * 1024 * 1024 * 1024,
+        resolvedFileName: 'model.Q4_K_M.gguf',
+        selectedProjectorId: 'org/model:mmproj',
+        multimodalReadiness: {
+          modelId: 'org/model',
+          status: 'ready',
+          projectorId: 'org/model:mmproj',
+          support: ['vision'],
+          checkedAt: 456,
+        },
+        projectorCandidates: [makeProjector({
+          id: 'org/model:mmproj',
+          fileName: 'mmproj-new.gguf',
+          downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-new.gguf',
+          sha256: 'd'.repeat(64),
+        })],
+      }),
+      {
+        localModel: makeModel({
+          size: 3 * 1024 * 1024 * 1024,
+          resolvedFileName: 'model.Q4_K_M.gguf',
+          lifecycleStatus: LifecycleStatus.DOWNLOADED,
+          downloadProgress: 1,
+          localPath: 'model.gguf',
+          selectedProjectorId: 'org/model:mmproj-legacy',
+          multimodalReadiness: {
+            modelId: 'org/model',
+            status: 'ready',
+            projectorId: 'org/model:mmproj-legacy',
+            support: ['vision'],
+            checkedAt: 123,
+          },
+          projectorCandidates: [
+            makeProjector({
+              id: 'org/model:mmproj',
+              fileName: 'mmproj-old-conflict.gguf',
+              downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-old-conflict.gguf',
+              sha256: 'e'.repeat(64),
+              localPath: 'stale-mmproj-old.gguf',
+              lifecycleStatus: 'downloaded',
+            }),
+            makeProjector({
+              id: 'org/model:mmproj-legacy',
+              fileName: 'mmproj-new.gguf',
+              downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-new.gguf',
+              sha256: 'd'.repeat(64),
+              localPath: 'mmproj-new.gguf',
+              lifecycleStatus: 'downloaded',
+              matchStatus: 'user_selected',
+              matchReason: 'user_selected_projector',
+            }),
+          ],
+        }),
+      },
+    );
+
+    expect(merged.projectorCandidates?.[0]).toEqual(expect.objectContaining({
+      id: 'org/model:mmproj',
+      fileName: 'mmproj-new.gguf',
+      localPath: 'mmproj-new.gguf',
+      lifecycleStatus: 'downloaded',
+      matchStatus: 'user_selected',
+    }));
+    expect(merged.selectedProjectorId).toBe('org/model:mmproj');
+    expect(merged.multimodalReadiness).toEqual(expect.objectContaining({
+      status: 'ready',
+      projectorId: 'org/model:mmproj',
+      checkedAt: 123,
     }));
   });
 });

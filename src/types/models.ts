@@ -1,3 +1,14 @@
+import type {
+  ModelArtifactRole,
+  ModelChatModality,
+  MultimodalDiagnosticsSummary,
+  MultimodalReadinessState,
+  ProjectorArtifact,
+  VisionCapabilityConfidence,
+  VisionCapabilitySource,
+} from './multimodal';
+import type { ModelInputCapabilitySnapshot } from './modelInputCapabilities';
+
 export enum LifecycleStatus {
   AVAILABLE = 'available',
   DOWNLOADING = 'downloading',
@@ -62,6 +73,12 @@ export interface ModelVariant {
   ramFit?: ModelMemoryFitDecision;
   ramFitConfidence?: ModelMemoryFitConfidence;
   isLocal?: boolean;
+  chatModalities?: ModelChatModality[];
+  artifactRole?: ModelArtifactRole;
+  visionSource?: VisionCapabilitySource;
+  visionConfidence?: VisionCapabilityConfidence;
+  projectorCandidates?: ProjectorArtifact[];
+  selectedProjectorId?: string;
 }
 
 export interface ModelThinkingCapabilitySnapshot {
@@ -77,6 +94,40 @@ export interface ModelFileIntegrityMarker {
   sizeBytes: number;
   checkedAt: number;
   sha256?: string;
+}
+
+export type ModelArtifactKind =
+  | 'main_model'
+  | 'multimodal_projector';
+
+export type ModelArtifactRequiredInput = 'text' | 'image' | 'audio';
+
+export type ModelArtifactInstallState =
+  | 'remote'
+  | 'queued'
+  | 'downloading'
+  | 'verifying'
+  | 'installed'
+  | 'failed'
+  | 'missing';
+
+export interface ModelArtifactMetadata {
+  id: string;
+  kind: ModelArtifactKind;
+  requiredFor: ModelArtifactRequiredInput[];
+  hfRevision?: string;
+  remoteFileName: string;
+  downloadUrl: string;
+  sizeBytes: number | null;
+  sha256?: string;
+  localPath?: string;
+  installState: ModelArtifactInstallState;
+  downloadProgress?: number;
+  resumeData?: string;
+  integrity?: ModelFileIntegrityMarker;
+  errorCode?: string;
+  errorMessage?: string;
+  updatedAt?: number;
 }
 
 export interface ModelMetadata {
@@ -127,6 +178,15 @@ export interface ModelMetadata {
   variants?: ModelVariant[];
   activeVariantId?: string;
   thinkingCapability?: ModelThinkingCapabilitySnapshot;
+  artifacts?: ModelArtifactMetadata[];
+  chatModalities?: ModelChatModality[];
+  inputCapabilities?: ModelInputCapabilitySnapshot;
+  artifactRole?: ModelArtifactRole;
+  visionSource?: VisionCapabilitySource;
+  visionConfidence?: VisionCapabilityConfidence;
+  projectorCandidates?: ProjectorArtifact[];
+  selectedProjectorId?: string;
+  multimodalReadiness?: MultimodalReadinessState;
 }
 
 export enum EngineStatus {
@@ -184,6 +244,7 @@ export interface EngineDiagnostics {
   initKvUnified?: boolean;
   lastLifecycleEvent?: EngineLifecycleEvent;
   lastLifecycleError?: string;
+  multimodal?: MultimodalDiagnosticsSummary;
 }
 
 export interface EngineState {

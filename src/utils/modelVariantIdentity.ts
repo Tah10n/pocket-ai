@@ -34,6 +34,8 @@ function getVariantActiveRank(
 
 function getVariantCompletenessScore(variant: ModelVariant): number {
   return (variant.isLocal === true ? 16 : 0)
+    + (variant.chatModalities?.includes('vision') ? 8 : 0)
+    + (variant.projectorCandidates?.length ? 4 : 0)
     + (variant.sha256 ? 4 : 0)
     + (typeof variant.size === 'number' ? 2 : 0)
     + (variant.ramFit ? 1 : 0)

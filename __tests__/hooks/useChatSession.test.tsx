@@ -1,5 +1,6 @@
 import React, { useEffect } from 'react';
 import { act, render, waitFor } from '@testing-library/react-native';
+import * as FileSystem from 'expo-file-system/legacy';
 import { useChatSession } from '../../src/hooks/useChatSession';
 import { llmEngineService } from '../../src/services/LLMEngineService';
 import { getGenerationParametersForModel, getSettings } from '../../src/services/SettingsStore';
@@ -18,11 +19,22 @@ import {
   shouldFlushAssistantStreamPatchOnBoundary,
   stopActiveChatGenerationForPrivateStorageBlocked,
 } from '../../src/hooks/useChatSession';
+import { DOCUMENT_ATTACHMENT_MESSAGE_PLACEHOLDER } from '../../src/types/chat';
 import { presetManager } from '../../src/services/PresetManager';
+import { AppError } from '../../src/services/AppError';
 import { backgroundTaskService } from '../../src/services/BackgroundTaskService';
 import { notificationService } from '../../src/services/NotificationService';
 import { registry } from '../../src/services/LocalStorageRegistry';
 import { PrivateStorageUnavailableError, getPrivateStorageHealthSnapshot, isPrivateStorageWritable } from '../../src/services/storage';
+import {
+  copiedDraftImageAttachment,
+  copiedImageAttachment,
+  draftImageAttachment,
+  failedDraftImageAttachment,
+} from '../fixtures/chatImageAttachmentFixtures';
+import type { ChatAttachment, ChatDocumentAttachmentDraft, ChatMediaAttachmentDraft } from '../../src/types/attachments';
+import type { AttachmentDraft, MultimodalReadinessState } from '../../src/types/multimodal';
+import { buildInferenceWindowWithAccurateTokenCounts } from '../../src/utils/inferenceWindow';
 
 jest.mock('../../src/services/LLMEngineService', () => ({
   llmEngineService: {
@@ -31,9 +43,13 @@ jest.mock('../../src/services/LLMEngineService', () => ({
     getContextSize: jest.fn(),
     chatCompletion: jest.fn(),
     countPromptTokens: jest.fn(),
+    assertActiveMultimodalReadyForMediaPaths: jest.fn(),
     stopCompletion: jest.fn(),
+    cancelActiveContextOperations: jest.fn(),
     interruptActiveCompletion: jest.fn(),
     hasActiveCompletion: jest.fn(),
+    hasActiveContextOperation: jest.fn(),
+    hasActiveChatBlockingContextOperation: jest.fn(),
   },
 }));
 
@@ -186,11 +202,18 @@ describe('useChatSession', () => {
     (llmEngineService.countPromptTokens as jest.Mock).mockImplementation(
       async ({ messages }: { messages: any[] }) => estimateLlmMessagesTokens(messages as any),
     );
+    (llmEngineService.assertActiveMultimodalReadyForMediaPaths as jest.Mock).mockImplementation(
+      ({ multimodalReadiness }: { multimodalReadiness?: MultimodalReadinessState }) => multimodalReadiness,
+    );
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: true, size: 123_456 });
     (llmEngineService.stopCompletion as jest.Mock).mockResolvedValue(undefined);
+    (llmEngineService.cancelActiveContextOperations as jest.Mock).mockResolvedValue('drained');
     (llmEngineService.interruptActiveCompletion as jest.Mock).mockImplementation(
       async () => (llmEngineService.stopCompletion as jest.Mock)(),
     );
     (llmEngineService.hasActiveCompletion as jest.Mock).mockReturnValue(false);
+    (llmEngineService.hasActiveContextOperation as jest.Mock).mockReturnValue(false);
+    (llmEngineService.hasActiveChatBlockingContextOperation as jest.Mock).mockReturnValue(false);
     jest.spyOn(AppState, 'addEventListener').mockImplementation((type: any, listener: any) => {
       if (type === 'change') {
         appStateListeners.push(listener);
@@ -218,6 +241,69 @@ describe('useChatSession', () => {
         status?: string;
         messages?: Array<Record<string, unknown>>;
       };
+    };
+  }
+
+  function saveAuthorModelWithMultimodalReadiness(multimodalReadiness: MultimodalReadinessState) {
+    registry.saveModels([
+      {
+        id: 'author/model-q4',
+        name: 'Vision test model',
+        author: 'Test',
+        size: 512 * 1024 * 1024,
+        downloadUrl: 'https://example.com/author/model-q4.gguf',
+        localPath: 'author-model-q4.gguf',
+        fitsInRam: true,
+        accessState: ModelAccessState.PUBLIC,
+        isGated: false,
+        isPrivate: false,
+        lifecycleStatus: LifecycleStatus.DOWNLOADED,
+        downloadProgress: 1,
+        chatModalities: ['text', 'vision'],
+        multimodalReadiness,
+      },
+    ]);
+  }
+
+  function buildCopiedAudioDraft(overrides: Partial<ChatMediaAttachmentDraft> = {}): ChatMediaAttachmentDraft {
+    return {
+      id: 'audio-1',
+      kind: 'audio',
+      pickerUri: 'content://audio/audio-1.mp3',
+      localUri: 'test-dir/chat-attachments/audio-1.mp3',
+      pathCategory: 'chat_attachment',
+      fileName: 'audio-1.mp3',
+      displayName: 'Meeting audio.mp3',
+      mimeType: 'audio/mpeg',
+      sizeBytes: 4096,
+      source: 'document_picker',
+      createdAt: 1,
+      copyStatus: 'copied',
+      audio: {
+        format: 'mp3',
+      },
+      ...overrides,
+    };
+  }
+
+  function buildPersistedAudioAttachment(overrides: Partial<Extract<ChatAttachment, { kind: 'audio' }>> = {}): Extract<ChatAttachment, { kind: 'audio' }> {
+    return {
+      id: 'audio-1',
+      kind: 'audio',
+      state: 'ready',
+      threadId: 'thread-audio-history',
+      messageId: 'message-audio-history',
+      localUri: 'test-dir/chat-attachments/audio-1.mp3',
+      pathCategory: 'chat_attachment',
+      fileName: 'audio-1.mp3',
+      mimeType: 'audio/mpeg',
+      sizeBytes: 4096,
+      source: 'document_picker',
+      createdAt: 1,
+      audio: {
+        format: 'mp3',
+      },
+      ...overrides,
     };
   }
 
@@ -263,6 +349,1220 @@ describe('useChatSession', () => {
     expect(thread?.messages.at(-1)?.content).toBe('Hello back');
   });
 
+  it('sanitizes prompt token fallback warnings without logging raw attachment paths', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    (llmEngineService.countPromptTokens as jest.Mock).mockRejectedValueOnce(
+      new Error('native tokenize failed for file:///private/chat-attachments/image.jpg'),
+    );
+    const getSession = renderHookHarness();
+
+    try {
+      await act(async () => {
+        await getSession()?.appendUserMessage('Hello there');
+      });
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        '[ChatSession] Failed to count prompt tokens accurately, falling back to heuristics',
+        expect.objectContaining({
+          context: 'prompt_token_count_fallback',
+          errorName: 'Error',
+        }),
+      );
+      expect(warnSpy.mock.calls.flat().some((argument) => argument instanceof Error)).toBe(false);
+      expect(JSON.stringify(warnSpy.mock.calls)).not.toContain('file:///private/chat-attachments/image.jpg');
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('persists copied image attachments on the user message and passes media paths to inference', async () => {
+    const getSession = renderHookHarness();
+    const readyVision = {
+      modelId: 'author/model-q4',
+      status: 'ready' as const,
+      support: ['vision' as const],
+      checkedAt: 1,
+    };
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Describe this image', {
+        attachmentDrafts: [copiedDraftImageAttachment],
+        multimodalReadiness: readyVision,
+      });
+    });
+
+    const thread = useChatStore.getState().getActiveThread();
+    const userMessage = thread?.messages[0];
+
+    expect(userMessage).toEqual(expect.objectContaining({
+      role: 'user',
+      content: 'Describe this image',
+      attachments: [
+        expect.objectContaining({
+          id: 'draft-image-1',
+          threadId: thread?.id,
+          messageId: userMessage?.id,
+          localUri: 'test-dir/chat-attachments/draft-image-1.jpg',
+        }),
+      ],
+    }));
+    expect(llmEngineService.chatCompletion).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        multimodalReadiness: expect.objectContaining({
+          status: 'ready',
+          support: ['vision'],
+        }),
+        messages: expect.arrayContaining([
+          expect.objectContaining({
+            role: 'user',
+            content: 'Describe this image',
+            mediaPaths: ['test-dir/chat-attachments/draft-image-1.jpg'],
+            attachments: expect.any(Array),
+          }),
+        ]),
+      }),
+    );
+    const generationCountCalls = (llmEngineService.countPromptTokens as jest.Mock).mock.calls
+      .filter(([call]) => call.chatBlocking !== false && call.allowMediaFallback !== true);
+    expect(generationCountCalls).toEqual(expect.arrayContaining([
+      [
+        expect.objectContaining({
+          multimodalReadiness: readyVision,
+          expectedModelId: 'author/model-q4',
+          messages: expect.arrayContaining([
+            expect.objectContaining({
+              role: 'user',
+              content: 'Describe this image',
+            }),
+          ]),
+        }),
+      ],
+    ]));
+    expect(generationCountCalls.some(([call]) => (
+      call.messages.flatMap((message: any) => message.mediaPaths ?? []).length > 0
+    ))).toBe(false);
+  });
+
+  it('processes copied document drafts into persisted attachments and text content parts for inference', async () => {
+    const getSession = renderHookHarness();
+    const documentDraft: ChatDocumentAttachmentDraft = {
+      id: 'document-1',
+      pickerUri: 'content://documents/document-1.txt',
+      localUri: 'test-dir/chat-attachments/document-1.txt',
+      pathCategory: 'chat_attachment',
+      fileName: 'document-1.txt',
+      displayName: 'Meeting notes.txt',
+      mimeType: 'text/plain',
+      sizeBytes: 128,
+      source: 'document_picker',
+      createdAt: 1,
+      copyStatus: 'copied',
+    };
+    (FileSystem.readAsStringAsync as jest.Mock).mockResolvedValue('Doc line\r\nNext line');
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('', {
+        documentAttachmentDrafts: [documentDraft],
+      });
+    });
+
+    const thread = useChatStore.getState().getActiveThread();
+    const userMessage = thread?.messages[0];
+
+    expect(userMessage).toEqual(expect.objectContaining({
+      role: 'user',
+      content: DOCUMENT_ATTACHMENT_MESSAGE_PLACEHOLDER,
+      attachments: [
+        expect.objectContaining({
+          id: 'document-1',
+          kind: 'document',
+          state: 'ready',
+          threadId: thread?.id,
+          messageId: userMessage?.id,
+          localUri: 'test-dir/chat-attachments/document-1.txt',
+          mimeType: 'text/plain',
+          sizeBytes: 128,
+          document: expect.objectContaining({
+            processorId: 'document-text',
+            processorVersion: 1,
+            extractedCharCount: 'Doc line\nNext line'.length,
+            isScanned: false,
+          }),
+        }),
+      ],
+      contentParts: [
+        expect.objectContaining({
+          type: 'text',
+          text: expect.stringContaining('Doc line\nNext line'),
+        }),
+      ],
+    }));
+    expect(llmEngineService.chatCompletion).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        messages: expect.arrayContaining([
+          expect.objectContaining({
+            role: 'user',
+            content: '',
+            contentParts: [
+              expect.objectContaining({
+                type: 'text',
+                text: expect.stringContaining('Doc line\nNext line'),
+              }),
+            ],
+          }),
+        ]),
+      }),
+    );
+  });
+
+  it('revalidates retained attachments before completion and recounts changed final payloads', async () => {
+    const getSession = renderHookHarness();
+    const readyVision = {
+      modelId: 'author/model-q4',
+      status: 'ready' as const,
+      support: ['vision' as const],
+      checkedAt: 1,
+    };
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Describe this image', {
+        attachmentDrafts: [copiedDraftImageAttachment],
+        multimodalReadiness: readyVision,
+      });
+    });
+
+    (llmEngineService.chatCompletion as jest.Mock).mockClear();
+    (llmEngineService.countPromptTokens as jest.Mock).mockClear();
+    (FileSystem.getInfoAsync as jest.Mock).mockClear();
+    (llmEngineService.getContextSize as jest.Mock).mockReturnValue(1900);
+
+    let retainedImageChecks = 0;
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (uri.includes('draft-image-1.jpg')) {
+        retainedImageChecks += 1;
+        return { exists: retainedImageChecks === 1, size: 123_456 };
+      }
+
+      return { exists: true, size: 123_456 };
+    });
+    const tokenCountSnapshots: Array<{
+      attachmentChecks: number;
+      signature: string;
+      mediaPaths: string[];
+    }> = [];
+    const toTokenCountSignature = (messages: any[]) => JSON.stringify(messages.map((message) => ({
+      role: message.role,
+      content: message.content,
+      mediaPaths: message.mediaPaths ?? [],
+    })));
+    (llmEngineService.countPromptTokens as jest.Mock).mockImplementation(
+      async ({ messages }: { messages: any[] }) => {
+        tokenCountSnapshots.push({
+          attachmentChecks: retainedImageChecks,
+          signature: toTokenCountSignature(messages),
+          mediaPaths: messages.flatMap((message) => message.mediaPaths ?? []),
+        });
+        return messages.flatMap((message) => message.mediaPaths ?? []).length > 0 ? 900 : 100;
+      },
+    );
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Follow up using the same image', {
+        multimodalReadiness: { ...readyVision, checkedAt: 2 },
+      });
+    });
+
+    const completionCall = (llmEngineService.chatCompletion as jest.Mock).mock.calls.at(-1)?.[0];
+    const completionMediaPaths = completionCall?.messages.flatMap((message: any) => message.mediaPaths ?? []);
+    const mediaTokenCountCalls = (llmEngineService.countPromptTokens as jest.Mock).mock.calls.filter(([call]) => (
+      call.messages.flatMap((message: any) => message.mediaPaths ?? []).length > 0
+    ));
+
+    expect(retainedImageChecks).toBe(2);
+    expect(completionMediaPaths).toEqual([]);
+    expect(mediaTokenCountCalls.length).toBeGreaterThan(0);
+    const finalRecountSnapshots = tokenCountSnapshots.filter((snapshot) => (
+      snapshot.attachmentChecks >= 2
+      && snapshot.signature === toTokenCountSignature(completionCall.messages)
+    ));
+    expect(finalRecountSnapshots).toHaveLength(1);
+    expect(finalRecountSnapshots[0]?.mediaPaths).toEqual([]);
+    expect(completionCall?.params.n_predict).toBe(1024);
+  });
+
+  it('does not final-recount or complete when stopped during retained attachment revalidation', async () => {
+    const getSession = renderHookHarness();
+    const readyVision = {
+      modelId: 'author/model-q4',
+      status: 'ready' as const,
+      support: ['vision' as const],
+      checkedAt: 1,
+    };
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Describe this image', {
+        attachmentDrafts: [copiedDraftImageAttachment],
+        multimodalReadiness: readyVision,
+      });
+    });
+
+    (llmEngineService.chatCompletion as jest.Mock).mockClear();
+    (llmEngineService.countPromptTokens as jest.Mock).mockClear();
+    (FileSystem.getInfoAsync as jest.Mock).mockClear();
+
+    let retainedImageChecks = 0;
+    let stopPromise: Promise<void> | undefined;
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (uri.includes('draft-image-1.jpg')) {
+        retainedImageChecks += 1;
+        if (retainedImageChecks === 2) {
+          (llmEngineService.getState as jest.Mock).mockReturnValue({
+            status: EngineStatus.IDLE,
+            activeModelId: 'author/model-q4',
+          });
+          stopPromise = getSession()?.stopGeneration();
+        }
+        return { exists: retainedImageChecks === 1, size: 123_456 };
+      }
+
+      return { exists: true, size: 123_456 };
+    });
+    const tokenCountSnapshots: Array<{
+      attachmentChecks: number;
+      mediaPaths: string[];
+    }> = [];
+    (llmEngineService.countPromptTokens as jest.Mock).mockImplementation(
+      async ({ messages }: { messages: any[] }) => {
+        tokenCountSnapshots.push({
+          attachmentChecks: retainedImageChecks,
+          mediaPaths: messages.flatMap((message) => message.mediaPaths ?? []),
+        });
+        return messages.flatMap((message) => message.mediaPaths ?? []).length > 0 ? 900 : 100;
+      },
+    );
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Follow up using the same image', {
+        multimodalReadiness: { ...readyVision, checkedAt: 2 },
+      });
+      await stopPromise;
+    });
+
+    expect(retainedImageChecks).toBe(2);
+    expect(llmEngineService.stopCompletion).toHaveBeenCalled();
+    expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
+    expect(tokenCountSnapshots.filter((snapshot) => (
+      snapshot.attachmentChecks >= 2 && snapshot.mediaPaths.length === 0
+    ))).toHaveLength(0);
+    expect(useChatStore.getState().getActiveThread()?.status).toBe('stopped');
+  });
+
+  it('uses estimated media prompt tokens while fitting an image prompt with room to spare', async () => {
+    const chatState = useChatStore.getState();
+    const threadId = chatState.createThread({
+      modelId: 'author/model-q4',
+      presetId: 'preset-1',
+      presetSnapshot: {
+        id: 'preset-1',
+        name: 'Helpful Assistant',
+        systemPrompt: 'Be concise.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 1024,
+        seed: null,
+      },
+    });
+
+    for (let index = 0; index < 4; index += 1) {
+      chatState.appendMessage(threadId, {
+        id: `history-${index + 1}`,
+        role: index % 2 === 0 ? 'user' : 'assistant',
+        content: `Earlier chat turn ${index + 1}`,
+        createdAt: index + 1,
+        state: 'complete',
+        kind: 'message',
+        modelId: 'author/model-q4',
+      });
+    }
+    chatState.setActiveThread(threadId);
+    (llmEngineService.getContextSize as jest.Mock).mockReturnValue(2300);
+    (llmEngineService.countPromptTokens as jest.Mock).mockImplementation(
+      async ({ messages }: { messages: any[] }) => messages.reduce(
+        (total, message) => total + (message.role === 'system' ? 20 : 80),
+        0,
+      ) + messages.flatMap((message) => message.mediaPaths ?? []).length * 700,
+    );
+    (llmEngineService.countPromptTokens as jest.Mock).mockClear();
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Describe this new image', {
+        attachmentDrafts: [copiedDraftImageAttachment],
+        multimodalReadiness: {
+          modelId: 'author/model-q4',
+          status: 'ready',
+          support: ['vision'],
+          checkedAt: 1,
+        },
+      });
+    });
+
+    const countCalls = (llmEngineService.countPromptTokens as jest.Mock).mock.calls;
+    const generationCountCalls = countCalls.filter(([call]) => !call.messages.some(
+      (message: any) => message.role === 'assistant' && message.content === 'Hello back',
+    ));
+    const mediaAwareCountCalls = generationCountCalls.filter(([call]) => (
+      call.messages.flatMap((message: any) => message.mediaPaths ?? []).length > 0
+    ));
+    const completionCall = (llmEngineService.chatCompletion as jest.Mock).mock.calls.at(-1)?.[0];
+
+    expect(generationCountCalls.filter(([call]) => (
+      call.messages.some((message: any) => message.content === 'Describe this new image')
+      && call.messages.flatMap((message: any) => message.mediaPaths ?? []).length === 0
+    )).length).toBeGreaterThan(0);
+    expect(mediaAwareCountCalls).toHaveLength(0);
+    expect(completionCall?.messages.map((message: any) => message.content)).toEqual([
+      'Be concise.',
+      'Earlier chat turn 1',
+      'Earlier chat turn 2',
+      'Earlier chat turn 3',
+      'Earlier chat turn 4',
+      'Describe this new image',
+    ]);
+    expect(completionCall?.messages.at(-1)?.mediaPaths).toEqual(['test-dir/chat-attachments/draft-image-1.jpg']);
+  });
+
+  it('runs one exact native media prompt recount for an image-only prompt near the context limit', async () => {
+    const chatState = useChatStore.getState();
+    const threadId = chatState.createThread({
+      modelId: 'author/model-q4',
+      presetId: 'preset-1',
+      presetSnapshot: {
+        id: 'preset-1',
+        name: 'Helpful Assistant',
+        systemPrompt: 'Be concise.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 1024,
+        seed: null,
+      },
+    });
+
+    for (let index = 0; index < 4; index += 1) {
+      chatState.appendMessage(threadId, {
+        id: `history-${index + 1}`,
+        role: index % 2 === 0 ? 'user' : 'assistant',
+        content: `Earlier chat turn ${index + 1}`,
+        createdAt: index + 1,
+        state: 'complete',
+        kind: 'message',
+        modelId: 'author/model-q4',
+      });
+    }
+    chatState.setActiveThread(threadId);
+    (llmEngineService.getContextSize as jest.Mock).mockReturnValue(1600);
+    (llmEngineService.countPromptTokens as jest.Mock).mockImplementation(
+      async ({ messages }: { messages: any[] }) => messages.reduce(
+        (total, message) => total + (message.role === 'system'
+          ? 20
+          : message.content.trim().length > 0
+            ? 80
+            : 30),
+        0,
+      ) + messages.flatMap((message) => message.mediaPaths ?? []).length * 700,
+    );
+    (llmEngineService.countPromptTokens as jest.Mock).mockClear();
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('', {
+        attachmentDrafts: [copiedDraftImageAttachment],
+        multimodalReadiness: {
+          modelId: 'author/model-q4',
+          status: 'ready',
+          support: ['vision'],
+          checkedAt: 1,
+        },
+      });
+    });
+
+    const countCalls = (llmEngineService.countPromptTokens as jest.Mock).mock.calls;
+    const generationCountCalls = countCalls.filter(([call]) => !call.messages.some(
+      (message: any) => message.role === 'assistant' && message.content === 'Hello back',
+    ));
+    const mediaAwareCountCalls = generationCountCalls.filter(([call]) => (
+      call.messages.flatMap((message: any) => message.mediaPaths ?? []).length > 0
+    ));
+    const completionCall = (llmEngineService.chatCompletion as jest.Mock).mock.calls.at(-1)?.[0];
+
+    expect(generationCountCalls.filter(([call]) => (
+      call.messages.some((message: any) => message.role === 'user' && message.content === '')
+      && call.messages.flatMap((message: any) => message.mediaPaths ?? []).length === 0
+    )).length).toBeGreaterThan(0);
+    expect(mediaAwareCountCalls).toHaveLength(1);
+    expect(mediaAwareCountCalls.every(([call]) => (
+      call.messages.flatMap((message: any) => message.mediaPaths ?? []).join('|') === 'test-dir/chat-attachments/draft-image-1.jpg'
+    ))).toBe(true);
+    expect(completionCall?.messages.map((message: any) => message.content)).toEqual([
+      'Be concise.',
+      '',
+    ]);
+    expect(completionCall?.messages.at(-1)?.mediaPaths).toEqual(['test-dir/chat-attachments/draft-image-1.jpg']);
+  });
+
+  it('strips retained historical images for failed-readiness text-only sends without mutating storage', async () => {
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Describe this image', {
+        attachmentDrafts: [copiedDraftImageAttachment],
+        multimodalReadiness: {
+          modelId: 'author/model-q4',
+          status: 'ready',
+          support: ['vision'],
+          checkedAt: 1,
+        },
+      });
+    });
+
+    const persistedAttachmentBefore = useChatStore.getState().getActiveThread()?.messages[0]?.attachments;
+    (llmEngineService.chatCompletion as jest.Mock).mockClear();
+    (llmEngineService.countPromptTokens as jest.Mock).mockClear();
+    (FileSystem.getInfoAsync as jest.Mock).mockClear();
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => ({
+      exists: !uri.includes('draft-image-1.jpg'),
+      size: 123_456,
+    }));
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Continue with text only', {
+        multimodalReadiness: {
+          modelId: 'author/model-q4',
+          status: 'failed',
+          support: [],
+          checkedAt: 2,
+          failureReason: 'projector_missing',
+        },
+      });
+    });
+
+    const completionCall = (llmEngineService.chatCompletion as jest.Mock).mock.calls.at(-1)?.[0];
+    expect(completionCall?.messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: 'user',
+          content: 'Describe this image',
+        }),
+        expect.objectContaining({
+          role: 'user',
+          content: 'Continue with text only',
+        }),
+      ]),
+    );
+    expect(completionCall?.messages.flatMap((message: any) => message.mediaPaths ?? [])).toEqual([]);
+    expect(completionCall?.messages.flatMap((message: any) => [
+      ...(message.mediaPaths ?? []),
+      ...(message.attachments ?? []),
+    ])).toEqual([]);
+    expect((llmEngineService.countPromptTokens as jest.Mock).mock.calls.some(([call]) => (
+      call.messages.some((message: any) => message.content === 'Continue with text only')
+      && call.messages.flatMap((message: any) => [
+        ...(message.mediaPaths ?? []),
+        ...(message.attachments ?? []),
+      ]).length === 0
+    ))).toBe(true);
+    expect(FileSystem.getInfoAsync).not.toHaveBeenCalled();
+    expect(useChatStore.getState().getActiveThread()?.messages[0]?.attachments).toBe(persistedAttachmentBefore);
+  });
+
+  it('throws chat_attachment_missing for missing latest draft image before appending', async () => {
+    const onUserMessageAppended = jest.fn();
+    const chatState = useChatStore.getState();
+    const createThreadSpy = jest.spyOn(chatState, 'createThread');
+    const appendMessageSpy = jest.spyOn(chatState, 'appendMessage');
+    const createAssistantPlaceholderSpy = jest.spyOn(chatState, 'createAssistantPlaceholder');
+    const getSession = renderHookHarness();
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: false });
+    let thrown: unknown;
+
+    try {
+      await act(async () => {
+        try {
+          await getSession()?.appendUserMessage('Describe this image', {
+            attachmentDrafts: [copiedDraftImageAttachment],
+            multimodalReadiness: {
+              modelId: 'author/model-q4',
+              status: 'ready',
+              support: ['vision'],
+              checkedAt: 1,
+            },
+            onUserMessageAppended,
+          });
+        } catch (error) {
+          thrown = error;
+        }
+      });
+
+      expect(thrown).toEqual(expect.objectContaining({
+        code: 'chat_attachment_missing',
+        details: expect.objectContaining({
+          attachmentId: copiedDraftImageAttachment.id,
+          attachmentIds: [copiedDraftImageAttachment.id],
+        }),
+      }));
+      expect(createThreadSpy).not.toHaveBeenCalled();
+      expect(appendMessageSpy).not.toHaveBeenCalled();
+      expect(createAssistantPlaceholderSpy).not.toHaveBeenCalled();
+      expect(onUserMessageAppended).not.toHaveBeenCalled();
+      expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
+      expect(useChatStore.getState().getConversationIndex()).toHaveLength(0);
+    } finally {
+      createThreadSpy.mockRestore();
+      appendMessageSpy.mockRestore();
+      createAssistantPlaceholderSpy.mockRestore();
+    }
+  });
+
+  it('rechecks latest active multimodal readiness before mutating attached sends', async () => {
+    const onUserMessageAppended = jest.fn();
+    const chatState = useChatStore.getState();
+    const createThreadSpy = jest.spyOn(chatState, 'createThread');
+    const appendMessageSpy = jest.spyOn(chatState, 'appendMessage');
+    const createAssistantPlaceholderSpy = jest.spyOn(chatState, 'createAssistantPlaceholder');
+    const getSession = renderHookHarness();
+    const staleReadinessError = new AppError('multimodal_not_ready', 'Vision chat is not ready for image attachments.');
+    (llmEngineService.assertActiveMultimodalReadyForMediaPaths as jest.Mock).mockImplementationOnce(() => {
+      throw staleReadinessError;
+    });
+    let thrown: unknown;
+
+    try {
+      await act(async () => {
+        try {
+          await getSession()?.appendUserMessage('Describe this image', {
+            attachmentDrafts: [copiedDraftImageAttachment],
+            multimodalReadiness: {
+              modelId: 'author/model-q4',
+              status: 'ready',
+              support: ['vision'],
+              checkedAt: 1,
+            },
+            onUserMessageAppended,
+          });
+        } catch (error) {
+          thrown = error;
+        }
+      });
+
+      expect(thrown).toBe(staleReadinessError);
+      expect(llmEngineService.assertActiveMultimodalReadyForMediaPaths).toHaveBeenCalledWith(expect.objectContaining({
+        mediaPaths: [copiedDraftImageAttachment.localUri],
+        mediaPathOccurrenceCount: 1,
+        expectedModelId: 'author/model-q4',
+      }));
+      expect(createThreadSpy).not.toHaveBeenCalled();
+      expect(appendMessageSpy).not.toHaveBeenCalled();
+      expect(createAssistantPlaceholderSpy).not.toHaveBeenCalled();
+      expect(onUserMessageAppended).not.toHaveBeenCalled();
+      expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
+      expect(useChatStore.getState().getConversationIndex()).toHaveLength(0);
+    } finally {
+      createThreadSpy.mockRestore();
+      appendMessageSpy.mockRestore();
+      createAssistantPlaceholderSpy.mockRestore();
+    }
+  });
+
+  it('sends text without materializing failed-only draft images', async () => {
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Send text despite failed image', {
+        attachmentDrafts: [failedDraftImageAttachment],
+        multimodalReadiness: {
+          modelId: 'author/model-q4',
+          status: 'ready',
+          support: ['vision'],
+          checkedAt: 1,
+        },
+      });
+    });
+
+    const thread = useChatStore.getState().getActiveThread();
+    expect(thread?.messages[0]).toEqual(expect.objectContaining({
+      role: 'user',
+      content: 'Send text despite failed image',
+    }));
+    expect(thread?.messages[0]?.attachments).toBeUndefined();
+    expect(llmEngineService.chatCompletion).toHaveBeenCalled();
+    expect(llmEngineService.assertActiveMultimodalReadyForMediaPaths).not.toHaveBeenCalled();
+  });
+
+  it('materializes only copied drafts when failed drafts are mixed in', async () => {
+    const getSession = renderHookHarness();
+    const readyVision = {
+      modelId: 'author/model-q4',
+      status: 'ready' as const,
+      support: ['vision' as const],
+      checkedAt: 1,
+    };
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Describe copied image only', {
+        attachmentDrafts: [copiedDraftImageAttachment, failedDraftImageAttachment],
+        multimodalReadiness: readyVision,
+      });
+    });
+
+    const thread = useChatStore.getState().getActiveThread();
+    const userMessage = thread?.messages[0];
+    expect(userMessage?.attachments).toEqual([
+      expect.objectContaining({
+        id: copiedDraftImageAttachment.id,
+        localUri: copiedDraftImageAttachment.localUri,
+      }),
+    ]);
+    expect(llmEngineService.assertActiveMultimodalReadyForMediaPaths).toHaveBeenCalledWith(expect.objectContaining({
+      mediaPaths: [copiedDraftImageAttachment.localUri],
+      mediaPathOccurrenceCount: 1,
+      multimodalReadiness: readyVision,
+      expectedModelId: 'author/model-q4',
+    }));
+  });
+
+  it.each([
+    ['pending', draftImageAttachment, 'chat_attachment_not_ready'],
+  ] as const)('throws %s draft image error before appending', async (_label, draft, expectedCode) => {
+    const onUserMessageAppended = jest.fn();
+    const chatState = useChatStore.getState();
+    const createThreadSpy = jest.spyOn(chatState, 'createThread');
+    const appendMessageSpy = jest.spyOn(chatState, 'appendMessage');
+    const createAssistantPlaceholderSpy = jest.spyOn(chatState, 'createAssistantPlaceholder');
+    const getSession = renderHookHarness();
+    let thrown: unknown;
+
+    try {
+      await act(async () => {
+        try {
+          await getSession()?.appendUserMessage('Describe this image', {
+            attachmentDrafts: [draft as AttachmentDraft],
+            multimodalReadiness: {
+              modelId: 'author/model-q4',
+              status: 'ready',
+              support: ['vision'],
+              checkedAt: 1,
+            },
+            onUserMessageAppended,
+          });
+        } catch (error) {
+          thrown = error;
+        }
+      });
+
+      expect(thrown).toEqual(expect.objectContaining({ code: expectedCode }));
+      expect(createThreadSpy).not.toHaveBeenCalled();
+      expect(appendMessageSpy).not.toHaveBeenCalled();
+      expect(createAssistantPlaceholderSpy).not.toHaveBeenCalled();
+      expect(onUserMessageAppended).not.toHaveBeenCalled();
+      expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
+      expect(llmEngineService.countPromptTokens).not.toHaveBeenCalled();
+      expect(FileSystem.getInfoAsync).not.toHaveBeenCalled();
+      expect(useChatStore.getState().getConversationIndex()).toHaveLength(0);
+    } finally {
+      createThreadSpy.mockRestore();
+      appendMessageSpy.mockRestore();
+      createAssistantPlaceholderSpy.mockRestore();
+    }
+  });
+
+  it('retains historical images for a vision-ready text-only follow-up without mutating storage', async () => {
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Describe this image', {
+        attachmentDrafts: [copiedDraftImageAttachment],
+        multimodalReadiness: {
+          modelId: 'author/model-q4',
+          status: 'ready',
+          support: ['vision'],
+          checkedAt: 1,
+        },
+      });
+    });
+
+    const persistedAttachmentBefore = useChatStore.getState().getActiveThread()?.messages[0]?.attachments;
+    (llmEngineService.chatCompletion as jest.Mock).mockClear();
+    (llmEngineService.countPromptTokens as jest.Mock).mockClear();
+    (FileSystem.getInfoAsync as jest.Mock).mockClear();
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: true, size: 123_456 });
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Continue with text only', {
+        multimodalReadiness: {
+          modelId: 'author/model-q4',
+          status: 'ready',
+          support: ['vision'],
+          checkedAt: 2,
+        },
+      });
+    });
+
+    const completionCall = (llmEngineService.chatCompletion as jest.Mock).mock.calls.at(-1)?.[0];
+    expect(FileSystem.getInfoAsync).toHaveBeenCalledWith('test-dir/chat-attachments/draft-image-1.jpg');
+    expect(completionCall?.messages.flatMap((message: any) => message.mediaPaths ?? [])).toEqual([
+      'test-dir/chat-attachments/draft-image-1.jpg',
+    ]);
+    expect(completionCall?.messages.flatMap((message: any) => [
+      ...(message.mediaPaths ?? []),
+      ...(message.attachments ?? []),
+    ])).toEqual([
+      'test-dir/chat-attachments/draft-image-1.jpg',
+      expect.objectContaining({
+        id: 'draft-image-1',
+        localUri: 'test-dir/chat-attachments/draft-image-1.jpg',
+      }),
+    ]);
+    expect((llmEngineService.countPromptTokens as jest.Mock).mock.calls.some(([call]) => (
+      call.messages.some((message: any) => message.content === 'Continue with text only')
+      && call.messages.flatMap((message: any) => [
+        ...(message.mediaPaths ?? []),
+        ...(message.attachments ?? []),
+      ]).length > 0
+    ))).toBe(true);
+    expect(useChatStore.getState().getActiveThread()?.messages[0]?.attachments).toBe(persistedAttachmentBefore);
+  });
+
+  it('caps retained inference images to the latest four attachments before validating files', async () => {
+    const chatState = useChatStore.getState();
+    const threadId = chatState.createThread({
+      modelId: 'author/model-q4',
+      presetId: 'preset-1',
+      presetSnapshot: {
+        id: 'preset-1',
+        name: 'Helpful Assistant',
+        systemPrompt: 'Be concise.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 1024,
+        seed: null,
+      },
+    });
+    chatState.appendMessage(threadId, {
+      id: 'message-old-images',
+      role: 'user',
+      content: 'Older images',
+      createdAt: 1,
+      state: 'complete',
+      kind: 'message',
+      modelId: 'author/model-q4',
+      attachments: Array.from({ length: 3 }, (_, index) => ({
+        ...copiedImageAttachment,
+        id: `old-image-${index + 1}`,
+        threadId,
+        messageId: 'message-old-images',
+        localUri: `test-dir/chat-attachments/old-image-${index + 1}.jpg`,
+        fileName: `old-image-${index + 1}.jpg`,
+      })),
+    });
+    chatState.setActiveThread(threadId);
+    (llmEngineService.getContextSize as jest.Mock).mockReturnValue(8192);
+    const latestDrafts = Array.from({ length: 4 }, (_, index) => ({
+      ...copiedDraftImageAttachment,
+      id: `latest-draft-${index + 1}`,
+      pickerUri: `ph://latest-${index + 1}`,
+      previewUri: `test-dir/chat-attachments/latest-${index + 1}.jpg`,
+      localUri: `test-dir/chat-attachments/latest-${index + 1}.jpg`,
+      fileName: `latest-${index + 1}.jpg`,
+    }));
+    (FileSystem.getInfoAsync as jest.Mock).mockClear();
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: true, size: 123_456 });
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Use these latest images', {
+        attachmentDrafts: latestDrafts,
+        multimodalReadiness: {
+          modelId: 'author/model-q4',
+          status: 'ready',
+          support: ['vision'],
+          checkedAt: 3,
+        },
+      });
+    });
+
+    const completionCall = (llmEngineService.chatCompletion as jest.Mock).mock.calls.at(-1)?.[0];
+    const mediaPaths = completionCall?.messages.flatMap((message: any) => message.mediaPaths ?? []);
+    expect(mediaPaths).toEqual([
+      'test-dir/chat-attachments/latest-1.jpg',
+      'test-dir/chat-attachments/latest-2.jpg',
+      'test-dir/chat-attachments/latest-3.jpg',
+      'test-dir/chat-attachments/latest-4.jpg',
+    ]);
+    expect(FileSystem.getInfoAsync).not.toHaveBeenCalledWith('test-dir/chat-attachments/old-image-1.jpg');
+    expect(FileSystem.getInfoAsync).not.toHaveBeenCalledWith('test-dir/chat-attachments/old-image-2.jpg');
+    expect(FileSystem.getInfoAsync).not.toHaveBeenCalledWith('test-dir/chat-attachments/old-image-3.jpg');
+    expect((llmEngineService.countPromptTokens as jest.Mock).mock.calls.some(([call]) => (
+      call.messages.some((message: any) => message.content === 'Use these latest images')
+      && call.messages.flatMap((message: any) => message.mediaPaths ?? []).join('|') === mediaPaths.join('|')
+    ))).toBe(true);
+    expect(useChatStore.getState().getThread(threadId)?.messages[0]?.attachments).toHaveLength(3);
+  });
+
+  it('omits missing retained historical images from vision-ready text follow-ups without mutating storage', async () => {
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Describe this image', {
+        attachmentDrafts: [copiedDraftImageAttachment],
+        multimodalReadiness: {
+          modelId: 'author/model-q4',
+          status: 'ready',
+          support: ['vision'],
+          checkedAt: 1,
+        },
+      });
+    });
+
+    const persistedAttachmentBefore = useChatStore.getState().getActiveThread()?.messages[0]?.attachments;
+    (llmEngineService.chatCompletion as jest.Mock).mockClear();
+    (llmEngineService.countPromptTokens as jest.Mock).mockClear();
+    (FileSystem.getInfoAsync as jest.Mock).mockClear();
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => ({
+      exists: !uri.includes('draft-image-1.jpg'),
+      size: 123_456,
+    }));
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Continue without the missing image file', {
+        multimodalReadiness: {
+          modelId: 'author/model-q4',
+          status: 'ready',
+          support: ['vision'],
+          checkedAt: 2,
+        },
+      });
+    });
+
+    const completionCall = (llmEngineService.chatCompletion as jest.Mock).mock.calls.at(-1)?.[0];
+    expect(FileSystem.getInfoAsync).toHaveBeenCalledWith('test-dir/chat-attachments/draft-image-1.jpg');
+    expect(completionCall?.messages.flatMap((message: any) => message.mediaPaths ?? [])).toEqual([]);
+    expect((llmEngineService.countPromptTokens as jest.Mock).mock.calls.some(([call]) => (
+      call.messages.some((message: any) => message.content === 'Continue without the missing image file')
+      && call.messages.flatMap((message: any) => message.mediaPaths ?? []).length === 0
+    ))).toBe(true);
+    expect(useChatStore.getState().getActiveThread()?.messages[0]?.attachments).toBe(persistedAttachmentBefore);
+  });
+
+  it('does not block a latest text-only prompt when an older retained image is missing', async () => {
+    const chatState = useChatStore.getState();
+    const threadId = chatState.createThread({
+      modelId: 'author/model-q4',
+      presetId: 'preset-1',
+      presetSnapshot: {
+        id: 'preset-1',
+        name: 'Helpful Assistant',
+        systemPrompt: 'Be concise.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 1024,
+        seed: null,
+      },
+    });
+
+    chatState.appendMessage(threadId, {
+      id: 'message-old-image-outside',
+      role: 'user',
+      content: 'Old image outside the retained window',
+      createdAt: 1,
+      state: 'complete',
+      kind: 'message',
+      modelId: 'author/model-q4',
+      attachments: [{
+        ...copiedImageAttachment,
+        id: 'old-image-outside',
+        threadId,
+        messageId: 'message-old-image-outside',
+        localUri: 'test-dir/chat-attachments/missing-outside.jpg',
+      }],
+    });
+    chatState.appendMessage(threadId, {
+      id: 'message-large-assistant',
+      role: 'assistant',
+      content: 'older assistant '.repeat(400),
+      createdAt: 2,
+      state: 'complete',
+      kind: 'message',
+      modelId: 'author/model-q4',
+    });
+    chatState.setActiveThread(threadId);
+    (llmEngineService.getContextSize as jest.Mock).mockReturnValue(256);
+    (FileSystem.getInfoAsync as jest.Mock).mockClear();
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: false });
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Fresh short text', {
+        multimodalReadiness: {
+          modelId: 'author/model-q4',
+          status: 'ready',
+          support: ['vision'],
+          checkedAt: 3,
+        },
+      });
+    });
+
+    expect(FileSystem.getInfoAsync).toHaveBeenCalledWith('test-dir/chat-attachments/missing-outside.jpg');
+    expect(llmEngineService.chatCompletion).toHaveBeenCalled();
+    expect(useChatStore.getState().getThread(threadId)?.messages[0]?.attachments?.[0]?.localUri)
+      .toBe('test-dir/chat-attachments/missing-outside.jpg');
+  });
+
+  it('drops empty historical image-only turns when their retained image is missing', async () => {
+    const chatState = useChatStore.getState();
+    const threadId = chatState.createThread({
+      modelId: 'author/model-q4',
+      presetId: 'preset-1',
+      presetSnapshot: {
+        id: 'preset-1',
+        name: 'Helpful Assistant',
+        systemPrompt: 'Be concise.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 1024,
+        seed: null,
+      },
+    });
+
+    chatState.appendMessage(threadId, {
+      id: 'message-image-only-missing',
+      role: 'user',
+      content: '',
+      createdAt: 1,
+      state: 'complete',
+      kind: 'message',
+      modelId: 'author/model-q4',
+      attachments: [{
+        ...copiedImageAttachment,
+        id: 'image-only-missing',
+        threadId,
+        messageId: 'message-image-only-missing',
+        localUri: 'test-dir/chat-attachments/missing-image-only.jpg',
+      }],
+    });
+    chatState.setActiveThread(threadId);
+    (FileSystem.getInfoAsync as jest.Mock).mockClear();
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: false });
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Fresh text after missing image-only turn', {
+        multimodalReadiness: {
+          modelId: 'author/model-q4',
+          status: 'ready',
+          support: ['vision'],
+          checkedAt: 4,
+        },
+      });
+    });
+
+    const completionCall = (llmEngineService.chatCompletion as jest.Mock).mock.calls.at(-1)?.[0];
+    expect(FileSystem.getInfoAsync).toHaveBeenCalledWith('test-dir/chat-attachments/missing-image-only.jpg');
+    expect(completionCall?.messages).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: 'user',
+          content: '',
+        }),
+      ]),
+    );
+    expect(completionCall?.messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: 'user',
+          content: 'Fresh text after missing image-only turn',
+        }),
+      ]),
+    );
+    expect(useChatStore.getState().getThread(threadId)?.messages[0]?.attachments?.[0]?.localUri)
+      .toBe('test-dir/chat-attachments/missing-image-only.jpg');
+  });
+
+  it('drops assistant replies orphaned by missing historical image-only turns', async () => {
+    const chatState = useChatStore.getState();
+    const threadId = chatState.createThread({
+      modelId: 'author/model-q4',
+      presetId: 'preset-1',
+      presetSnapshot: {
+        id: 'preset-1',
+        name: 'Helpful Assistant',
+        systemPrompt: 'Be concise.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 1024,
+        seed: null,
+      },
+    });
+
+    chatState.appendMessage(threadId, {
+      id: 'message-image-only-missing-with-reply',
+      role: 'user',
+      content: '',
+      createdAt: 1,
+      state: 'complete',
+      kind: 'message',
+      modelId: 'author/model-q4',
+      attachments: [{
+        ...copiedImageAttachment,
+        id: 'image-only-missing-with-reply',
+        threadId,
+        messageId: 'message-image-only-missing-with-reply',
+        localUri: 'test-dir/chat-attachments/missing-image-only-with-reply.jpg',
+      }],
+    });
+    chatState.appendMessage(threadId, {
+      id: 'assistant-orphaned-by-missing-image',
+      role: 'assistant',
+      content: 'This answer depended on the missing image.',
+      createdAt: 2,
+      state: 'complete',
+      kind: 'message',
+      modelId: 'author/model-q4',
+    });
+    chatState.setActiveThread(threadId);
+    (FileSystem.getInfoAsync as jest.Mock).mockClear();
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: false });
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Fresh text after orphaned image reply', {
+        multimodalReadiness: {
+          modelId: 'author/model-q4',
+          status: 'ready',
+          support: ['vision'],
+          checkedAt: 4,
+        },
+      });
+    });
+
+    const completionCall = (llmEngineService.chatCompletion as jest.Mock).mock.calls.at(-1)?.[0];
+    expect(FileSystem.getInfoAsync).toHaveBeenCalledWith('test-dir/chat-attachments/missing-image-only-with-reply.jpg');
+    expect(completionCall?.messages).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          content: 'This answer depended on the missing image.',
+        }),
+      ]),
+    );
+    expect(completionCall?.messages.filter((message: any) => message.role !== 'system').map((message: any) => message.role))
+      .toEqual(['user']);
+    expect(completionCall?.messages.at(-1)).toEqual(expect.objectContaining({
+      role: 'user',
+      content: 'Fresh text after orphaned image reply',
+    }));
+  });
+
+  it('notifies when an attached user message is materialized before generation failures', async () => {
+    const generationError = new Error('vision generation failed after append');
+    const onUserMessageAppended = jest.fn();
+    (llmEngineService.chatCompletion as jest.Mock).mockRejectedValueOnce(generationError);
+    const getSession = renderHookHarness();
+    let thrown: unknown;
+
+    await act(async () => {
+      try {
+        await getSession()?.appendUserMessage('Describe this image', {
+          attachmentDrafts: [copiedDraftImageAttachment],
+          multimodalReadiness: {
+            modelId: 'author/model-q4',
+            status: 'ready',
+            support: ['vision'],
+            checkedAt: 1,
+          },
+          onUserMessageAppended,
+        });
+      } catch (error) {
+        thrown = error;
+      }
+    });
+
+    expect(thrown).toEqual(expect.objectContaining({
+      code: 'action_failed',
+      message: generationError.message,
+    }));
+    expect((thrown as { cause?: unknown } | undefined)?.cause).toBeUndefined();
+    expect(onUserMessageAppended).toHaveBeenCalledWith(expect.objectContaining({
+      role: 'user',
+      content: 'Describe this image',
+      attachments: [
+        expect.objectContaining({
+          id: 'draft-image-1',
+          localUri: 'test-dir/chat-attachments/draft-image-1.jpg',
+        }),
+      ],
+    }));
+    expect(useChatStore.getState().getActiveThread()?.messages[0]).toEqual(expect.objectContaining({
+      attachments: [
+        expect.objectContaining({
+          localUri: 'test-dir/chat-attachments/draft-image-1.jpg',
+        }),
+      ],
+    }));
+  });
+
+  it('blocks image attachments before mutating chat state when vision is not ready', async () => {
+    const getSession = renderHookHarness();
+
+    await expect(act(async () => {
+      await getSession()?.appendUserMessage('Describe this image', {
+        attachmentDrafts: [copiedDraftImageAttachment],
+        multimodalReadiness: {
+          modelId: 'author/model-q4',
+          status: 'text_only',
+          support: [],
+          checkedAt: 1,
+        },
+      });
+    })).rejects.toMatchObject({
+      code: 'multimodal_not_ready',
+    });
+
+    expect(useChatStore.getState().getConversationIndex()).toHaveLength(0);
+    expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
+  });
+
+  it('blocks image attachments when ready vision state belongs to another model', async () => {
+    const getSession = renderHookHarness();
+
+    await expect(act(async () => {
+      await getSession()?.appendUserMessage('Describe this image', {
+        attachmentDrafts: [copiedDraftImageAttachment],
+        multimodalReadiness: {
+          modelId: 'other/model',
+          status: 'ready',
+          support: ['vision'],
+          checkedAt: 1,
+        },
+      });
+    })).rejects.toMatchObject({
+      code: 'multimodal_not_ready',
+    });
+
+    expect(useChatStore.getState().getConversationIndex()).toHaveLength(0);
+    expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
+  });
+
   it('persists errored generation terminal state into bounded storage', async () => {
     const generationError = new Error('native generation failed');
     (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
@@ -283,7 +1583,11 @@ describe('useChatSession', () => {
       }
     });
 
-    expect(thrown).toBe(generationError);
+    expect(thrown).toEqual(expect.objectContaining({
+      code: 'action_failed',
+      message: generationError.message,
+    }));
+    expect((thrown as { cause?: unknown } | undefined)?.cause).toBeUndefined();
 
     const thread = useChatStore.getState().getActiveThread();
     expect(thread).toEqual(expect.objectContaining({ status: 'error' }));
@@ -307,6 +1611,67 @@ describe('useChatSession', () => {
     }));
     expect(record.thread?.messages?.some((message) => message.state === 'streaming')).toBe(false);
     expect(storage.getString('chat-store') ?? '').not.toContain('Partial before failure');
+  });
+
+  it('redacts native multimodal paths from persisted and thrown assistant generation errors', async () => {
+    const rawErrorMessage = 'native multimodal failed for file:///data/user/0/com.pocket/cache/image.jpg while opening /data/user/0/com.pocket/files/projector.dat from C:\\Users\\tester\\Projector\\image.png';
+    const generationError = new Error(rawErrorMessage);
+    (llmEngineService.chatCompletion as jest.Mock).mockRejectedValueOnce(generationError);
+    const getSession = renderHookHarness();
+    let thrown: unknown;
+
+    await act(async () => {
+      try {
+        await getSession()?.appendUserMessage('Describe this image', {
+          attachmentDrafts: [copiedDraftImageAttachment],
+          multimodalReadiness: {
+            modelId: 'author/model-q4',
+            status: 'ready',
+            support: ['vision'],
+            checkedAt: 1,
+          },
+        });
+      } catch (error) {
+        thrown = error;
+      }
+    });
+
+    expect(thrown).toEqual(expect.objectContaining({
+      code: 'action_failed',
+      message: expect.stringContaining('[path]'),
+    }));
+    expect((thrown as { cause?: unknown } | undefined)?.cause).toBeUndefined();
+    expect((thrown as Error | undefined)?.message).not.toContain('file://');
+    expect((thrown as Error | undefined)?.message).not.toContain('/data/user');
+    expect((thrown as Error | undefined)?.message).not.toContain('C:\\Users');
+    expect(generationError.message).toBe(rawErrorMessage);
+
+    const thread = useChatStore.getState().getActiveThread();
+    const assistantMessage = thread?.messages.at(-1);
+    expect(assistantMessage).toEqual(expect.objectContaining({
+      role: 'assistant',
+      state: 'error',
+      errorCode: 'generation_failed',
+      errorMessage: expect.stringContaining('[path]'),
+    }));
+    expect(assistantMessage?.errorMessage).not.toContain('file://');
+    expect(assistantMessage?.errorMessage).not.toContain('/data/user');
+    expect(assistantMessage?.errorMessage).not.toContain('C:\\Users');
+    expect(assistantMessage?.errorMessage).not.toContain('Projector');
+
+    const record = readPersistedThreadRecord(thread?.id);
+    const serializedRecord = JSON.stringify(record);
+    const persistedAssistant = record.thread?.messages?.at(-1);
+    expect(persistedAssistant).toEqual(expect.objectContaining({
+      role: 'assistant',
+      state: 'error',
+      errorCode: 'generation_failed',
+      errorMessage: assistantMessage?.errorMessage,
+    }));
+    expect(serializedRecord).not.toContain('file://');
+    expect(serializedRecord).not.toContain('/data/user');
+    expect(serializedRecord).not.toContain('C:\\Users');
+    expect(serializedRecord).not.toContain('Projector');
   });
 
   it('blocks sending before persisted chat mutations when private storage is unavailable', async () => {
@@ -1152,6 +2517,7 @@ describe('useChatSession', () => {
     });
 
     let thread = useChatStore.getState().getActiveThread();
+    expect(llmEngineService.cancelActiveContextOperations).toHaveBeenCalledTimes(1);
     expect(llmEngineService.stopCompletion).toHaveBeenCalled();
     expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
     expect(thread?.status).toBe('stopped');
@@ -1172,6 +2538,165 @@ describe('useChatSession', () => {
       role: 'assistant',
       state: 'stopped',
     }));
+  });
+
+  it('blocks a new send after prompt-preparation stop times out until the context operation settles', async () => {
+    let resolvePromptCount: (() => void) | undefined;
+    (llmEngineService.countPromptTokens as jest.Mock).mockImplementationOnce(
+      () => new Promise((resolve) => {
+        resolvePromptCount = () => resolve(16);
+      }),
+    );
+    (llmEngineService.cancelActiveContextOperations as jest.Mock).mockResolvedValueOnce('timed_out');
+    const getSession = renderHookHarness();
+    let sendPromise: Promise<void> | undefined;
+
+    await act(async () => {
+      sendPromise = getSession()?.appendUserMessage('Stop before native generation timeout');
+    });
+
+    await waitFor(() => {
+      expect(llmEngineService.countPromptTokens).toHaveBeenCalled();
+    });
+
+    await act(async () => {
+      await getSession()?.stopGeneration();
+    });
+    (llmEngineService.hasActiveChatBlockingContextOperation as jest.Mock).mockReturnValue(true);
+
+    let sendError: unknown;
+    await act(async () => {
+      try {
+        await getSession()?.appendUserMessage('Too soon after prompt timeout');
+      } catch (error) {
+        sendError = error;
+      }
+    });
+
+    expect(sendError).toEqual(expect.objectContaining({
+      message: expect.stringContaining('finish stopping'),
+    }));
+    expect(useChatStore.getState().getActiveThread()?.messages.map((message) => message.content)).toEqual([
+      'Stop before native generation timeout',
+      '',
+    ]);
+    expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
+
+    await act(async () => {
+      (llmEngineService.hasActiveChatBlockingContextOperation as jest.Mock).mockReturnValue(false);
+      resolvePromptCount?.();
+      await sendPromise;
+    });
+
+    let retryError: unknown;
+    await act(async () => {
+      try {
+        await getSession()?.appendUserMessage('After prompt timeout settled');
+      } catch (error) {
+        retryError = error;
+      }
+    });
+
+    expect(retryError).toBeUndefined();
+    expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1);
+    expect(useChatStore.getState().getActiveThread()?.messages.map((message) => message.content)).toEqual([
+      'Stop before native generation timeout',
+      '',
+      'After prompt timeout settled',
+      'Hello back',
+    ]);
+  });
+
+  it('allows a new send while only a non-chat-blocking context operation is active', async () => {
+    (llmEngineService.hasActiveContextOperation as jest.Mock).mockReturnValue(true);
+    (llmEngineService.hasActiveChatBlockingContextOperation as jest.Mock).mockReturnValue(false);
+
+    const getSession = renderHookHarness();
+
+    let sendError: unknown;
+    await act(async () => {
+      try {
+        await getSession()?.appendUserMessage('Send during readiness refresh');
+      } catch (error) {
+        sendError = error;
+      }
+    });
+
+    expect(sendError).toBeUndefined();
+    expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1);
+    expect(useChatStore.getState().getActiveThread()?.messages.map((message) => message.content)).toEqual([
+      'Send during readiness refresh',
+      'Hello back',
+    ]);
+  });
+
+  it('stops accurate prompt-window probes after preflight cancellation', async () => {
+    const thread = {
+      id: 'thread-cancel-probes',
+      title: 'Cancel probes',
+      modelId: 'author/model-q4',
+      presetId: 'preset-1',
+      presetSnapshot: {
+        id: 'preset-1',
+        name: 'Helpful Assistant',
+        systemPrompt: 'Be concise.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 1024,
+        seed: null,
+      },
+      messages: [
+        {
+          id: 'history-user-1',
+          role: 'user',
+          content: 'Earlier prompt',
+          createdAt: 1,
+          state: 'complete',
+        },
+        {
+          id: 'history-assistant-1',
+          role: 'assistant',
+          content: 'Earlier answer',
+          createdAt: 2,
+          state: 'complete',
+        },
+        {
+          id: 'latest-user',
+          role: 'user',
+          content: 'Latest prompt',
+          createdAt: 3,
+          state: 'complete',
+        },
+      ],
+      createdAt: 1,
+      updatedAt: 3,
+      status: 'idle',
+    } as any;
+    let cancelled = false;
+    const countPromptTokens = jest.fn(async () => {
+      cancelled = true;
+      return 16;
+    });
+
+    await expect(buildInferenceWindowWithAccurateTokenCounts(
+      thread,
+      {
+        maxContextMessages: Number.MAX_SAFE_INTEGER,
+        maxContextTokens: 2048,
+        responseReserveTokens: 256,
+      },
+      countPromptTokens,
+      {
+        throwIfCancelled: () => {
+          if (cancelled) {
+            throw new Error('cancelled preflight');
+          }
+        },
+      },
+    )).rejects.toThrow('cancelled preflight');
+    expect(countPromptTokens).toHaveBeenCalledTimes(1);
   });
 
   it('cleans up background inference when pre-native stopCompletion rejects', async () => {
@@ -1392,6 +2917,236 @@ describe('useChatSession', () => {
     );
   });
 
+  it('appends a new assistant when the last image-only user has no following assistant', async () => {
+    const readyVision = {
+      modelId: 'author/model-q4',
+      status: 'ready' as const,
+      support: ['vision' as const],
+      checkedAt: 1,
+    };
+    saveAuthorModelWithMultimodalReadiness(readyVision);
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('First prompt');
+    });
+
+    const threadAfterFirstTurn = useChatStore.getState().getActiveThread();
+    expect(threadAfterFirstTurn?.messages).toHaveLength(2);
+    const firstAssistant = threadAfterFirstTurn?.messages[1];
+    const imageOnlyUserMessageId = 'message-image-only-tail';
+    const imageOnlyUserAttachment = {
+      ...copiedImageAttachment,
+      id: 'attachment-image-only-tail',
+      threadId: threadAfterFirstTurn?.id ?? '',
+      messageId: imageOnlyUserMessageId,
+      localUri: copiedDraftImageAttachment.localUri,
+      fileName: copiedDraftImageAttachment.fileName,
+      mediaType: copiedDraftImageAttachment.mediaType,
+      size: copiedDraftImageAttachment.size,
+      width: copiedDraftImageAttachment.width,
+      height: copiedDraftImageAttachment.height,
+      createdAt: Date.now(),
+    };
+
+    await act(async () => {
+      useChatStore.getState().appendMessage(threadAfterFirstTurn?.id ?? '', {
+        id: imageOnlyUserMessageId,
+        role: 'user',
+        content: '',
+        createdAt: Date.now(),
+        state: 'complete',
+        kind: 'message',
+        modelId: 'author/model-q4',
+        attachments: [imageOnlyUserAttachment],
+      });
+    });
+
+    const replaceLastAssistantSpy = jest.spyOn(useChatStore.getState(), 'replaceLastAssistantMessage');
+    const getRegenerateSession = renderHookHarness();
+    (llmEngineService.chatCompletion as jest.Mock).mockClear();
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      async ({ onToken }: { onToken?: (token: string) => void }) => {
+        onToken?.('Fresh image tail reply');
+        return { text: 'Fresh image tail reply' };
+      },
+    );
+
+    try {
+      await act(async () => {
+        await getRegenerateSession()?.regenerateLastResponse();
+      });
+
+      const thread = useChatStore.getState().getActiveThread();
+      expect(replaceLastAssistantSpy).not.toHaveBeenCalled();
+      expect(thread?.messages).toHaveLength(4);
+      expect(thread?.messages[1]).toEqual(firstAssistant);
+      expect(thread?.messages[2]).toEqual(expect.objectContaining({
+        id: imageOnlyUserMessageId,
+        role: 'user',
+        content: '',
+        attachments: [imageOnlyUserAttachment],
+      }));
+      expect(thread?.messages[3]).toEqual(expect.objectContaining({
+        role: 'assistant',
+        content: 'Fresh image tail reply',
+        state: 'complete',
+      }));
+      expect(llmEngineService.chatCompletion).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          multimodalReadiness: readyVision,
+          messages: expect.arrayContaining([
+            expect.objectContaining({
+              role: 'user',
+              content: '',
+              mediaPaths: [copiedDraftImageAttachment.localUri],
+              attachments: [imageOnlyUserAttachment],
+            }),
+          ]),
+        }),
+      );
+    } finally {
+      replaceLastAssistantSpy.mockRestore();
+    }
+  });
+
+  it('blocks regenerating the last assistant when the last user image is missing before replacing it', async () => {
+    const readyVision = {
+      modelId: 'author/model-q4',
+      status: 'ready' as const,
+      support: ['vision' as const],
+      checkedAt: 1,
+    };
+    saveAuthorModelWithMultimodalReadiness(readyVision);
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Describe this image', {
+        attachmentDrafts: [copiedDraftImageAttachment],
+        multimodalReadiness: readyVision,
+      });
+    });
+
+    const threadBeforeRegenerate = useChatStore.getState().getActiveThread();
+    const completionCallsBeforeRegenerate = (llmEngineService.chatCompletion as jest.Mock).mock.calls.length;
+    const replaceLastAssistantSpy = jest.spyOn(useChatStore.getState(), 'replaceLastAssistantMessage');
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: false });
+    const getRegenerateSession = renderHookHarness();
+    let thrown: unknown;
+
+    try {
+      await act(async () => {
+        try {
+          await getRegenerateSession()?.regenerateLastResponse();
+        } catch (error) {
+          thrown = error;
+        }
+      });
+
+      expect(thrown).toEqual(expect.objectContaining({ code: 'chat_attachment_missing' }));
+      expect(replaceLastAssistantSpy).not.toHaveBeenCalled();
+      expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(completionCallsBeforeRegenerate);
+      expect(useChatStore.getState().getActiveThread()?.messages).toEqual(threadBeforeRegenerate?.messages);
+    } finally {
+      replaceLastAssistantSpy.mockRestore();
+    }
+  });
+
+  it('blocks regenerating the last assistant when vision is not ready before replacing it', async () => {
+    const readyVision = {
+      modelId: 'author/model-q4',
+      status: 'ready' as const,
+      support: ['vision' as const],
+      checkedAt: 1,
+    };
+    saveAuthorModelWithMultimodalReadiness({
+      modelId: 'author/model-q4',
+      status: 'text_only',
+      support: [],
+      checkedAt: 2,
+    });
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Describe this image', {
+        attachmentDrafts: [copiedDraftImageAttachment],
+        multimodalReadiness: readyVision,
+      });
+    });
+
+    const threadBeforeRegenerate = useChatStore.getState().getActiveThread();
+    const completionCallsBeforeRegenerate = (llmEngineService.chatCompletion as jest.Mock).mock.calls.length;
+    const replaceLastAssistantSpy = jest.spyOn(useChatStore.getState(), 'replaceLastAssistantMessage');
+    (FileSystem.getInfoAsync as jest.Mock).mockClear();
+    const getRegenerateSession = renderHookHarness();
+    let thrown: unknown;
+
+    try {
+      await act(async () => {
+        try {
+          await getRegenerateSession()?.regenerateLastResponse();
+        } catch (error) {
+          thrown = error;
+        }
+      });
+
+      expect(thrown).toEqual(expect.objectContaining({ code: 'multimodal_not_ready' }));
+      expect(FileSystem.getInfoAsync).not.toHaveBeenCalled();
+      expect(replaceLastAssistantSpy).not.toHaveBeenCalled();
+      expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(completionCallsBeforeRegenerate);
+      expect(useChatStore.getState().getActiveThread()?.messages).toEqual(threadBeforeRegenerate?.messages);
+    } finally {
+      replaceLastAssistantSpy.mockRestore();
+    }
+  });
+
+  it('rechecks latest active multimodal readiness before regenerating retained attachments', async () => {
+    const readyVision = {
+      modelId: 'author/model-q4',
+      status: 'ready' as const,
+      support: ['vision' as const],
+      checkedAt: 1,
+    };
+    saveAuthorModelWithMultimodalReadiness(readyVision);
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Describe this image', {
+        attachmentDrafts: [copiedDraftImageAttachment],
+        multimodalReadiness: readyVision,
+      });
+    });
+
+    const threadBeforeRegenerate = useChatStore.getState().getActiveThread();
+    const completionCallsBeforeRegenerate = (llmEngineService.chatCompletion as jest.Mock).mock.calls.length;
+    const replaceLastAssistantSpy = jest.spyOn(useChatStore.getState(), 'replaceLastAssistantMessage');
+    const staleReadinessError = new AppError('multimodal_not_ready', 'Vision chat is not ready for image attachments.');
+    (llmEngineService.assertActiveMultimodalReadyForMediaPaths as jest.Mock).mockImplementationOnce(() => {
+      throw staleReadinessError;
+    });
+    (FileSystem.getInfoAsync as jest.Mock).mockClear();
+    const getRegenerateSession = renderHookHarness();
+    let thrown: unknown;
+
+    try {
+      await act(async () => {
+        try {
+          await getRegenerateSession()?.regenerateLastResponse();
+        } catch (error) {
+          thrown = error;
+        }
+      });
+
+      expect(thrown).toBe(staleReadinessError);
+      expect(FileSystem.getInfoAsync).not.toHaveBeenCalled();
+      expect(replaceLastAssistantSpy).not.toHaveBeenCalled();
+      expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(completionCallsBeforeRegenerate);
+      expect(useChatStore.getState().getActiveThread()?.messages).toEqual(threadBeforeRegenerate?.messages);
+    } finally {
+      replaceLastAssistantSpy.mockRestore();
+    }
+  });
+
   it('regenerates from a selected user message after editing it', async () => {
     const getSession = renderHookHarness();
 
@@ -1436,6 +3191,331 @@ describe('useChatSession', () => {
         ],
       }),
     );
+  });
+
+  it('regenerates an image-only user message while preserving media paths', async () => {
+    const getSession = renderHookHarness();
+    const readyVision = {
+      modelId: 'author/model-q4',
+      status: 'ready' as const,
+      support: ['vision' as const],
+      checkedAt: 1,
+    };
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('', {
+        attachmentDrafts: [copiedDraftImageAttachment],
+        multimodalReadiness: readyVision,
+      });
+    });
+
+    const userMessage = useChatStore.getState().getActiveThread()?.messages[0];
+    const persistedAttachments = userMessage?.attachments;
+    (llmEngineService.chatCompletion as jest.Mock).mockClear();
+    (llmEngineService.countPromptTokens as jest.Mock).mockClear();
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      async ({ onToken }: { onToken?: (token: string) => void }) => {
+        onToken?.('Fresh image reply');
+        return { text: 'Fresh image reply' };
+      },
+    );
+
+    await act(async () => {
+      await getSession()?.regenerateFromUserMessage(userMessage?.id ?? '', '', {
+        multimodalReadiness: readyVision,
+      });
+    });
+
+    const thread = useChatStore.getState().getActiveThread();
+    expect(thread?.messages[0]).toEqual(expect.objectContaining({
+      id: userMessage?.id,
+      role: 'user',
+      content: '',
+      attachments: persistedAttachments,
+    }));
+    expect(thread?.messages[1]).toEqual(expect.objectContaining({
+      role: 'assistant',
+      content: 'Fresh image reply',
+      state: 'complete',
+    }));
+    expect(llmEngineService.chatCompletion).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        multimodalReadiness: readyVision,
+        messages: expect.arrayContaining([
+          expect.objectContaining({
+            role: 'user',
+            content: '',
+            mediaPaths: ['test-dir/chat-attachments/draft-image-1.jpg'],
+            attachments: persistedAttachments,
+          }),
+        ]),
+      }),
+    );
+  });
+
+  it('regenerates an audio-only user message without requiring vision readiness', async () => {
+    const readyAudio = {
+      modelId: 'author/model-q4',
+      status: 'ready' as const,
+      support: ['audio' as const],
+      checkedAt: 1,
+    };
+    saveAuthorModelWithMultimodalReadiness(readyAudio);
+    const getSession = renderHookHarness();
+    const audioDraft = buildCopiedAudioDraft();
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('', {
+        mediaAttachmentDrafts: [audioDraft],
+        multimodalReadiness: readyAudio,
+      });
+    });
+
+    const userMessage = useChatStore.getState().getActiveThread()?.messages[0];
+    const persistedAttachments = userMessage?.attachments;
+    (llmEngineService.chatCompletion as jest.Mock).mockClear();
+    (llmEngineService.countPromptTokens as jest.Mock).mockClear();
+    (llmEngineService.assertActiveMultimodalReadyForMediaPaths as jest.Mock).mockClear();
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      async ({ onToken }: { onToken?: (token: string) => void }) => {
+        onToken?.('Fresh audio reply');
+        return { text: 'Fresh audio reply' };
+      },
+    );
+
+    await act(async () => {
+      await getSession()?.regenerateFromUserMessage(userMessage?.id ?? '', '', {
+        multimodalReadiness: readyAudio,
+      });
+    });
+
+    const completionCall = (llmEngineService.chatCompletion as jest.Mock).mock.calls.at(-1)?.[0];
+    const audioMessage = completionCall?.messages.find((message: any) => message.role === 'user');
+    expect(audioMessage).toEqual(expect.objectContaining({
+      role: 'user',
+      content: '',
+      attachments: persistedAttachments,
+      contentParts: [
+        expect.objectContaining({
+          type: 'input_audio',
+          input_audio: {
+            format: 'mp3',
+            url: 'test-dir/chat-attachments/audio-1.mp3',
+          },
+        }),
+      ],
+    }));
+    expect(audioMessage.mediaPaths).toBeUndefined();
+    expect(llmEngineService.assertActiveMultimodalReadyForMediaPaths).not.toHaveBeenCalled();
+    expect(useChatStore.getState().getActiveThread()?.messages[1]).toEqual(expect.objectContaining({
+      role: 'assistant',
+      content: 'Fresh audio reply',
+      state: 'complete',
+    }));
+  });
+
+  it('removes stale audio content parts when a retained audio file is missing', async () => {
+    const threadId = 'thread-audio-history';
+    const userMessageId = 'message-audio-history';
+    const missingAudioPath = 'test-dir/chat-attachments/missing-audio.mp3';
+    const audioAttachment = buildPersistedAudioAttachment({
+      id: 'missing-audio',
+      threadId,
+      messageId: userMessageId,
+      localUri: missingAudioPath,
+      fileName: 'missing-audio.mp3',
+    });
+    const textOnlyReadiness = {
+      modelId: 'author/model-q4',
+      status: 'text_only' as const,
+      support: [],
+      checkedAt: 1,
+    };
+
+    useChatStore.setState({
+      threads: {
+        [threadId]: {
+          id: threadId,
+          title: 'Audio history',
+          modelId: 'author/model-q4',
+          presetId: 'preset-1',
+          presetSnapshot: {
+            id: 'preset-1',
+            name: 'Helpful Assistant',
+            systemPrompt: 'Be concise.',
+          },
+          paramsSnapshot: {
+            temperature: 0.7,
+            topP: 0.9,
+            maxTokens: 1024,
+            seed: null,
+          },
+          messages: [
+            {
+              id: userMessageId,
+              role: 'user',
+              content: 'Transcribe this audio.',
+              createdAt: 1,
+              state: 'complete',
+              kind: 'message',
+              modelId: 'author/model-q4',
+              attachments: [audioAttachment],
+              contentParts: [
+                {
+                  type: 'input_audio',
+                  input_audio: {
+                    format: 'mp3',
+                    url: missingAudioPath,
+                  },
+                },
+              ],
+            },
+            {
+              id: 'message-audio-history-assistant',
+              role: 'assistant',
+              content: 'Old audio answer.',
+              createdAt: 2,
+              state: 'complete',
+              kind: 'message',
+              modelId: 'author/model-q4',
+            },
+          ],
+          createdAt: 1,
+          updatedAt: 2,
+          status: 'idle',
+        },
+      },
+      activeThreadId: threadId,
+    });
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => (
+      uri === missingAudioPath
+        ? { exists: false, size: 0 }
+        : { exists: true, size: 123_456 }
+    ));
+    (llmEngineService.chatCompletion as jest.Mock).mockClear();
+    (llmEngineService.countPromptTokens as jest.Mock).mockClear();
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Continue after missing audio', {
+        multimodalReadiness: textOnlyReadiness,
+      });
+    });
+
+    const completionCall = (llmEngineService.chatCompletion as jest.Mock).mock.calls.at(-1)?.[0];
+    const serializedCompletionMessages = JSON.stringify(completionCall?.messages ?? []);
+    const serializedTokenCountMessages = JSON.stringify(
+      (llmEngineService.countPromptTokens as jest.Mock).mock.calls.map(([call]) => call.messages),
+    );
+
+    expect(serializedCompletionMessages).not.toContain(missingAudioPath);
+    expect(serializedTokenCountMessages).not.toContain(missingAudioPath);
+    expect(serializedCompletionMessages).not.toContain('input_audio');
+    expect(serializedCompletionMessages).toContain('Transcribe this audio.');
+    expect(completionCall?.messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        role: 'user',
+        content: 'Transcribe this audio.',
+      }),
+      expect.objectContaining({
+        role: 'user',
+        content: 'Continue after missing audio',
+      }),
+    ]));
+  });
+
+  it('blocks regenerating an attached user message with a missing image before replacing the branch', async () => {
+    const getSession = renderHookHarness();
+    const readyVision = {
+      modelId: 'author/model-q4',
+      status: 'ready' as const,
+      support: ['vision' as const],
+      checkedAt: 1,
+    };
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Describe this image', {
+        attachmentDrafts: [copiedDraftImageAttachment],
+        multimodalReadiness: readyVision,
+      });
+    });
+
+    const threadBeforeRegenerate = useChatStore.getState().getActiveThread();
+    const userMessageId = threadBeforeRegenerate?.messages[0]?.id ?? '';
+    const completionCallsBeforeRegenerate = (llmEngineService.chatCompletion as jest.Mock).mock.calls.length;
+    const replaceBranchSpy = jest.spyOn(useChatStore.getState(), 'replaceBranchFromUserMessage');
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: false });
+    const getRegenerateSession = renderHookHarness();
+    let thrown: unknown;
+
+    try {
+      await act(async () => {
+        try {
+          await getRegenerateSession()?.regenerateFromUserMessage(userMessageId, 'Describe this missing image', {
+            multimodalReadiness: readyVision,
+          });
+        } catch (error) {
+          thrown = error;
+        }
+      });
+
+      expect(thrown).toEqual(expect.objectContaining({ code: 'chat_attachment_missing' }));
+      expect(replaceBranchSpy).not.toHaveBeenCalled();
+      expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(completionCallsBeforeRegenerate);
+      expect(useChatStore.getState().getActiveThread()?.messages).toEqual(threadBeforeRegenerate?.messages);
+    } finally {
+      replaceBranchSpy.mockRestore();
+    }
+  });
+
+  it('blocks regenerating an attached user message when vision is not ready before replacing the branch', async () => {
+    const getSession = renderHookHarness();
+    const readyVision = {
+      modelId: 'author/model-q4',
+      status: 'ready' as const,
+      support: ['vision' as const],
+      checkedAt: 1,
+    };
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Describe this image', {
+        attachmentDrafts: [copiedDraftImageAttachment],
+        multimodalReadiness: readyVision,
+      });
+    });
+
+    const threadBeforeRegenerate = useChatStore.getState().getActiveThread();
+    const userMessageId = threadBeforeRegenerate?.messages[0]?.id ?? '';
+    const completionCallsBeforeRegenerate = (llmEngineService.chatCompletion as jest.Mock).mock.calls.length;
+    const replaceBranchSpy = jest.spyOn(useChatStore.getState(), 'replaceBranchFromUserMessage');
+    (FileSystem.getInfoAsync as jest.Mock).mockClear();
+    const getRegenerateSession = renderHookHarness();
+    let thrown: unknown;
+
+    try {
+      await act(async () => {
+        try {
+          await getRegenerateSession()?.regenerateFromUserMessage(userMessageId, 'Describe this image', {
+            multimodalReadiness: {
+              modelId: 'author/model-q4',
+              status: 'text_only',
+              support: [],
+              checkedAt: 2,
+            },
+          });
+        } catch (error) {
+          thrown = error;
+        }
+      });
+
+      expect(thrown).toEqual(expect.objectContaining({ code: 'multimodal_not_ready' }));
+      expect(FileSystem.getInfoAsync).not.toHaveBeenCalled();
+      expect(replaceBranchSpy).not.toHaveBeenCalled();
+      expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(completionCallsBeforeRegenerate);
+      expect(useChatStore.getState().getActiveThread()?.messages).toEqual(threadBeforeRegenerate?.messages);
+    } finally {
+      replaceBranchSpy.mockRestore();
+    }
   });
 
   it('blocks edited regeneration before replacing a persisted branch when private storage is unavailable', async () => {
@@ -1914,6 +3994,55 @@ describe('useChatSession', () => {
     } finally {
       warnSpy.mockRestore();
     }
+  });
+
+  it('cancels prompt preparation when background expiration fires before native completion starts', async () => {
+    let resolvePromptCount: (() => void) | undefined;
+    const interruptedSpy = jest.spyOn(notificationService, 'sendInterruptedNotification').mockResolvedValue(undefined);
+
+    Object.defineProperty(AppState, 'currentState', {
+      configurable: true,
+      value: 'background',
+    });
+    (llmEngineService.countPromptTokens as jest.Mock).mockImplementationOnce(
+      () => new Promise((resolve) => {
+        resolvePromptCount = () => resolve(16);
+      }),
+    );
+
+    const getSession = renderHookHarness();
+    let sendPromise: Promise<void> | undefined;
+
+    await act(async () => {
+      sendPromise = getSession()?.appendUserMessage('Expire during prompt prep');
+    });
+
+    await waitFor(() => {
+      expect(BackgroundTaskServiceOnExpirationHandler()).toEqual(expect.any(Function));
+      expect(llmEngineService.countPromptTokens).toHaveBeenCalled();
+    });
+
+    await act(async () => {
+      BackgroundTaskServiceOnExpirationHandler()?.();
+      await Promise.resolve();
+    });
+
+    expect(llmEngineService.cancelActiveContextOperations).toHaveBeenCalledTimes(1);
+    expect(llmEngineService.stopCompletion).toHaveBeenCalledTimes(1);
+    expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
+    expect(interruptedSpy).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolvePromptCount?.();
+      await sendPromise;
+    });
+
+    const thread = useChatStore.getState().getActiveThread();
+    expect(thread?.status).toBe('stopped');
+    expect(thread?.messages.at(-1)).toEqual(expect.objectContaining({
+      role: 'assistant',
+      state: 'stopped',
+    }));
   });
 
   it('builds inference context from frozen preset snapshot, history, and params', async () => {

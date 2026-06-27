@@ -2,15 +2,47 @@ export type ContextOperationDrainResult = 'drained' | 'timed_out';
 
 type ErrorFactory = () => unknown;
 
+type ContextOperationOptions = {
+  readonly chatBlocking?: boolean;
+};
+
+type ContextOperationCancelOptions = {
+  readonly chatBlocking?: boolean;
+};
+
+type ContextOperationWaitOptions = {
+  readonly timeoutMs?: number;
+  readonly chatBlocking?: boolean;
+};
+
+export type ContextOperationCancellationToken = {
+  readonly isCancelled: () => boolean;
+  readonly throwIfCancelled: () => void;
+};
+
+type ActiveContextOperation = {
+  readonly promise: Promise<unknown>;
+  readonly chatBlocking: boolean;
+  readonly cancel: (error: unknown) => void;
+};
+
 export class ContextOperationRunner {
   public queue: Promise<void> = Promise.resolve();
   public activePromises: Set<Promise<unknown>> = new Set();
+  public rawActivePromises: Set<Promise<unknown>> = new Set();
+  public chatBlockingRawActivePromises: Set<Promise<unknown>> = new Set();
   public activeRejects: Map<Promise<unknown>, (error: unknown) => void> = new Map();
+  private activeOperations: Map<Promise<unknown>, ActiveContextOperation> = new Map();
   public cancelGeneration = 0;
 
-  public track<T>(operation: () => Promise<T>, createCancellationError: ErrorFactory): Promise<T> {
+  public track<T>(
+    operation: (cancellation: ContextOperationCancellationToken) => Promise<T>,
+    createCancellationError: ErrorFactory,
+    options: ContextOperationOptions = {},
+  ): Promise<T> {
     const previousOperation = this.queue;
     const operationGeneration = this.cancelGeneration;
+    const isChatBlocking = options.chatBlocking !== false;
     let releaseQueue: () => void = () => undefined;
     let didReleaseQueue = false;
     const queueSlot = new Promise<void>((resolve) => {
@@ -26,28 +58,52 @@ export class ContextOperationRunner {
     this.queue = previousOperation.catch(() => undefined).then(() => queueSlot);
 
     let rejectCancellation: (error: unknown) => void = () => undefined;
+    let operationCancelled = false;
+    let operationCancellationError: unknown | undefined;
     const cancellationPromise = new Promise<never>((_, reject) => {
       rejectCancellation = reject;
     });
+    const isOperationCancelled = () => this.cancelGeneration !== operationGeneration || operationCancelled;
+    const getCancellationError = () => operationCancellationError ?? createCancellationError();
+    const cancellationToken: ContextOperationCancellationToken = {
+      isCancelled: isOperationCancelled,
+      throwIfCancelled: () => this.assertNotCancelled(isOperationCancelled, getCancellationError),
+    };
 
     const rawOperationPromise = (async () => {
       await previousOperation.catch(() => undefined);
-      this.assertNotCancelled(operationGeneration, createCancellationError);
 
       try {
-        const result = await operation();
-        this.assertNotCancelled(operationGeneration, createCancellationError);
+        this.assertNotCancelled(isOperationCancelled, getCancellationError);
+        const result = await operation(cancellationToken);
+        this.assertNotCancelled(isOperationCancelled, getCancellationError);
         return result;
       } finally {
         releaseOperationQueue();
       }
     })();
     void rawOperationPromise.catch(() => undefined);
+    this.rawActivePromises.add(rawOperationPromise);
+    if (isChatBlocking) {
+      this.chatBlockingRawActivePromises.add(rawOperationPromise);
+    }
+    void rawOperationPromise.then(
+      () => this.clearRawActiveOperation(rawOperationPromise),
+      () => this.clearRawActiveOperation(rawOperationPromise),
+    );
 
-    const operationPromise = Promise.race([rawOperationPromise, cancellationPromise])
-      .finally(releaseOperationQueue);
+    const operationPromise = Promise.race([rawOperationPromise, cancellationPromise]);
     this.activePromises.add(operationPromise);
     this.activeRejects.set(operationPromise, rejectCancellation);
+    this.activeOperations.set(operationPromise, {
+      promise: operationPromise,
+      chatBlocking: isChatBlocking,
+      cancel: (error) => {
+        operationCancelled = true;
+        operationCancellationError = error;
+        rejectCancellation(error);
+      },
+    });
 
     void operationPromise.then(
       () => this.clearActiveOperation(operationPromise),
@@ -57,8 +113,8 @@ export class ContextOperationRunner {
     return operationPromise;
   }
 
-  public waitForActive(options: { timeoutMs?: number } = {}): Promise<ContextOperationDrainResult> {
-    const activeContextOperations = Array.from(this.activePromises);
+  public waitForActive(options: ContextOperationWaitOptions = {}): Promise<ContextOperationDrainResult> {
+    const activeContextOperations = this.getRawActiveOperations(options.chatBlocking);
     if (activeContextOperations.length === 0) {
       return Promise.resolve('drained');
     }
@@ -71,34 +127,88 @@ export class ContextOperationRunner {
     return waitForPromiseWithTimeout(drainPromise, options.timeoutMs);
   }
 
-  public cancelActive(error: unknown): void {
+  public cancelActive(error: unknown, options: ContextOperationCancelOptions = {}): void {
+    const hasChatBlockingFilter = typeof options.chatBlocking === 'boolean';
+    if (!hasChatBlockingFilter) {
+      this.cancelGeneration += 1;
+    }
+
+    const operationsToCancel = Array.from(this.activeOperations.values()).filter((operation) => (
+      !hasChatBlockingFilter || operation.chatBlocking === options.chatBlocking
+    ));
+
+    for (const operation of operationsToCancel) {
+      this.activeRejects.delete(operation.promise);
+      operation.cancel(error);
+    }
+
+    if (!hasChatBlockingFilter) {
+      this.activeOperations.clear();
+      this.activeRejects.clear();
+    }
+  }
+
+  public reset(error?: unknown): void {
     this.cancelGeneration += 1;
     const rejectActiveOperations = Array.from(this.activeRejects.values());
     this.activeRejects.clear();
-    rejectActiveOperations.forEach((reject) => reject(error));
-    this.queue = Promise.resolve();
+    if (error !== undefined) {
+      rejectActiveOperations.forEach((reject) => reject(error));
+    }
     this.activePromises.clear();
+    this.activeOperations.clear();
+    this.rawActivePromises.clear();
+    this.chatBlockingRawActivePromises.clear();
+    this.queue = Promise.resolve();
   }
 
-  private assertNotCancelled(generation: number, createCancellationError: ErrorFactory): void {
-    if (this.cancelGeneration !== generation) {
-      throw createCancellationError();
+  public hasActive(): boolean {
+    return this.rawActivePromises.size > 0;
+  }
+
+  public hasActiveChatBlocking(): boolean {
+    return this.chatBlockingRawActivePromises.size > 0;
+  }
+
+  private getRawActiveOperations(chatBlocking?: boolean): Promise<unknown>[] {
+    if (chatBlocking === true) {
+      return Array.from(this.chatBlockingRawActivePromises);
+    }
+
+    if (chatBlocking === false) {
+      return Array.from(this.rawActivePromises)
+        .filter((promise) => !this.chatBlockingRawActivePromises.has(promise));
+    }
+
+    return Array.from(this.rawActivePromises);
+  }
+
+  private assertNotCancelled(isCancelled: () => boolean, getCancellationError: ErrorFactory): void {
+    if (isCancelled()) {
+      throw getCancellationError();
     }
   }
 
   private clearActiveOperation(operationPromise: Promise<unknown>): void {
     this.activePromises.delete(operationPromise);
     this.activeRejects.delete(operationPromise);
+    this.activeOperations.delete(operationPromise);
+  }
+
+  private clearRawActiveOperation(rawOperationPromise: Promise<unknown>): void {
+    this.rawActivePromises.delete(rawOperationPromise);
+    this.chatBlockingRawActivePromises.delete(rawOperationPromise);
   }
 }
 
 export class ActiveCompletionRunner<T> {
   public activePromise: Promise<T> | null = null;
+  public activeDriverPromise: Promise<unknown> | null = null;
   public activeReject: ((error: unknown) => void) | null = null;
   public interruptGeneration = 0;
 
   public hasActive(): boolean {
-    return this.activePromise !== null;
+    return this.activePromise !== null || this.activeDriverPromise !== null;
   }
 
   public start(promise: Promise<T>, reject: (error: unknown) => void): number {
@@ -107,11 +217,22 @@ export class ActiveCompletionRunner<T> {
     return this.interruptGeneration;
   }
 
+  public attachDriver(activePromise: Promise<T>, driverPromise: Promise<unknown>): void {
+    if (this.activePromise === activePromise) {
+      this.activeDriverPromise = driverPromise;
+    }
+  }
+
   public clearIfActive(promise: Promise<T>): void {
     if (this.activePromise === promise) {
       this.activePromise = null;
+      this.activeDriverPromise = null;
       this.activeReject = null;
     }
+  }
+
+  public getActiveDriverPromise(): Promise<unknown> | null {
+    return this.activeDriverPromise ?? this.activePromise;
   }
 
   public interruptIfActive(): void {
@@ -132,6 +253,7 @@ export class ActiveCompletionRunner<T> {
 
   public reset(): void {
     this.activePromise = null;
+    this.activeDriverPromise = null;
     this.activeReject = null;
   }
 }

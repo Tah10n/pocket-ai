@@ -2,9 +2,12 @@ import { create } from 'zustand';
 import { persist, createJSONStorage, subscribeWithSelector } from 'zustand/middleware';
 import { mmkvStorage } from '../lib/mmkv';
 import { ModelMetadata, LifecycleStatus } from '../types/models';
+import type { ProjectorArtifact } from '../types/multimodal';
 import { normalizePersistedModelMetadata } from '../services/ModelMetadataNormalizer';
-import { getCandidateModelDownloadFileNames } from '../utils/modelFiles';
+import { getCandidateModelDownloadFileNames, getCandidateProjectorDownloadFileNames } from '../utils/modelFiles';
 import { isValidLocalFileName } from '../utils/safeFilePath';
+import { mergeProjectorCandidatesWithRuntimeStateAndIdMap } from '../utils/projectorRuntimeState';
+import { normalizeDownloadResumeData } from '../utils/downloadResumeData';
 import { createInstrumentedStateStorage } from './persistStateStorage';
 import { assertPrivateStorageWritable } from '../services/storage';
 
@@ -67,8 +70,180 @@ function hasCompatibleQueuedFileIdentity(existing: ModelMetadata, model: ModelMe
     && nextSize !== undefined;
 }
 
+function resolveMergedSelectedProjectorId(
+  nextSelectedProjectorId: string | undefined,
+  existingSelectedProjectorId: string | undefined,
+  candidateIds: Set<string>,
+  existingToNextProjectorIds: Map<string, string>,
+  blockedExistingProjectorIds: Set<string> = new Set(),
+  blockedNextProjectorIds: Set<string> = blockedExistingProjectorIds,
+): string | undefined {
+  const blockedIncomingSelectedProjectorId = nextSelectedProjectorId
+    && candidateIds.has(nextSelectedProjectorId)
+    && blockedNextProjectorIds.has(nextSelectedProjectorId)
+    ? nextSelectedProjectorId
+    : undefined;
+
+  if (
+    nextSelectedProjectorId
+    && candidateIds.has(nextSelectedProjectorId)
+    && !blockedIncomingSelectedProjectorId
+  ) {
+    return nextSelectedProjectorId;
+  }
+
+  if (!existingSelectedProjectorId) {
+    return undefined;
+  }
+
+  if (blockedExistingProjectorIds.has(existingSelectedProjectorId)) {
+    return undefined;
+  }
+
+  const selectedProjectorId = existingToNextProjectorIds.get(existingSelectedProjectorId)
+    ?? existingSelectedProjectorId;
+
+  if (blockedIncomingSelectedProjectorId) {
+    return selectedProjectorId === blockedIncomingSelectedProjectorId
+      && existingSelectedProjectorId !== selectedProjectorId
+      && candidateIds.has(selectedProjectorId)
+      ? selectedProjectorId
+      : undefined;
+  }
+
+  if (blockedNextProjectorIds.has(selectedProjectorId)) {
+    return undefined;
+  }
+
+  return candidateIds.has(selectedProjectorId) ? selectedProjectorId : undefined;
+}
+
+function shouldSuppressReadinessForBlockedIncomingProjector(
+  nextSelectedProjectorId: string | undefined,
+  selectedProjectorId: string | undefined,
+  candidateIds: Set<string>,
+  blockedNextProjectorIds: Set<string>,
+): boolean {
+  return Boolean(
+    nextSelectedProjectorId
+    && candidateIds.has(nextSelectedProjectorId)
+    && blockedNextProjectorIds.has(nextSelectedProjectorId)
+    && selectedProjectorId !== nextSelectedProjectorId,
+  );
+}
+
+function remapMultimodalReadiness(
+  modelId: string,
+  readiness: ModelMetadata['multimodalReadiness'],
+  candidateIds: Set<string>,
+  existingToNextProjectorIds: Map<string, string>,
+  selectedProjectorId: string | undefined,
+  blockedSourceProjectorIds: Set<string> = new Set(),
+  blockedResolvedProjectorIds: Set<string> = blockedSourceProjectorIds,
+): ModelMetadata['multimodalReadiness'] {
+  if (!readiness || readiness.modelId !== modelId) {
+    return undefined;
+  }
+
+  if (!readiness.projectorId) {
+    return readiness;
+  }
+
+  if (blockedSourceProjectorIds.has(readiness.projectorId)) {
+    return undefined;
+  }
+
+  const projectorId = existingToNextProjectorIds.get(readiness.projectorId)
+    ?? readiness.projectorId;
+
+  if (blockedResolvedProjectorIds.has(projectorId)) {
+    return undefined;
+  }
+
+  if (!candidateIds.has(projectorId)) {
+    return undefined;
+  }
+
+  if (selectedProjectorId && projectorId !== selectedProjectorId) {
+    return undefined;
+  }
+
+  return projectorId === readiness.projectorId
+    ? readiness
+    : { ...readiness, projectorId };
+}
+
 function buildRetryableQueueEntry(existing: ModelMetadata, model: ModelMetadata): ModelMetadata {
   const canPreserveResumeState = hasCompatibleQueuedFileIdentity(existing, model);
+  const activeProjectorVariantId = model.activeVariantId
+    ?? model.resolvedFileName
+    ?? existing.activeVariantId
+    ?? existing.resolvedFileName;
+  const projectorRuntimeMerge = canPreserveResumeState
+    ? mergeProjectorCandidatesWithRuntimeStateAndIdMap(model.projectorCandidates, existing.projectorCandidates, {
+      activeVariantId: activeProjectorVariantId,
+    })
+    : {
+      projectorCandidates: model.projectorCandidates,
+      runtimeToNextProjectorIds: new Map<string, string>(),
+      blockedRuntimeProjectorIds: new Set<string>(),
+      blockedNextProjectorIds: new Set<string>(),
+      blockedRuntimeReadinessProjectorIds: new Set<string>(),
+      blockedNextReadinessProjectorIds: new Set<string>(),
+    };
+  const projectorCandidates = normalizePersistedProjectorDownloadStates(
+    projectorRuntimeMerge.projectorCandidates,
+  );
+  const candidateIds = new Set((projectorCandidates ?? []).map((projector) => projector.id));
+  const blockedNextReadinessProjectorIds = new Set<string>([
+    ...projectorRuntimeMerge.blockedNextReadinessProjectorIds,
+    ...projectorRuntimeMerge.blockedNextProjectorIds,
+  ]);
+  const blockedExistingReadinessProjectorIds = new Set<string>([
+    ...projectorRuntimeMerge.blockedRuntimeReadinessProjectorIds,
+    ...projectorRuntimeMerge.blockedRuntimeProjectorIds,
+  ]);
+  const blockedExistingResolvedReadinessProjectorIds = new Set(
+    projectorRuntimeMerge.blockedNextReadinessProjectorIds,
+  );
+  const selectedProjectorId = canPreserveResumeState
+    ? resolveMergedSelectedProjectorId(
+      model.selectedProjectorId,
+      existing.selectedProjectorId,
+      candidateIds,
+      projectorRuntimeMerge.runtimeToNextProjectorIds,
+      projectorRuntimeMerge.blockedRuntimeProjectorIds,
+      projectorRuntimeMerge.blockedNextProjectorIds,
+    )
+    : model.selectedProjectorId;
+  const shouldSuppressMultimodalReadiness = canPreserveResumeState
+    && shouldSuppressReadinessForBlockedIncomingProjector(
+      model.selectedProjectorId,
+      selectedProjectorId,
+      candidateIds,
+      projectorRuntimeMerge.blockedNextProjectorIds,
+    );
+  const multimodalReadiness = canPreserveResumeState
+    ? shouldSuppressMultimodalReadiness
+      ? undefined
+      : remapMultimodalReadiness(
+        model.id,
+        model.multimodalReadiness,
+        candidateIds,
+        projectorRuntimeMerge.runtimeToNextProjectorIds,
+        selectedProjectorId,
+        blockedNextReadinessProjectorIds,
+        blockedNextReadinessProjectorIds,
+      ) ?? remapMultimodalReadiness(
+        model.id,
+        existing.multimodalReadiness,
+        candidateIds,
+        projectorRuntimeMerge.runtimeToNextProjectorIds,
+        selectedProjectorId,
+        blockedExistingReadinessProjectorIds,
+        blockedExistingResolvedReadinessProjectorIds,
+      )
+    : model.multimodalReadiness;
   const retryableBaseModel = canPreserveResumeState
     ? { ...existing, ...model }
     : model;
@@ -84,11 +259,74 @@ function buildRetryableQueueEntry(existing: ModelMetadata, model: ModelMetadata)
     allowUnknownSizeDownload: canPreserveResumeState
       ? existing.allowUnknownSizeDownload === true || model.allowUnknownSizeDownload === true
       : model.allowUnknownSizeDownload === true,
+    projectorCandidates,
+    selectedProjectorId,
+    multimodalReadiness,
     lifecycleStatus: LifecycleStatus.QUEUED,
     downloadErrorAt: undefined,
     downloadErrorCode: undefined,
     downloadErrorMessage: undefined,
   });
+}
+
+function getQueuedProjectorFileNames(model: ModelMetadata): string[] {
+  return (model.projectorCandidates ?? []).flatMap((projector) => [
+    ...(projector.localPath && isValidLocalFileName(projector.localPath) ? [projector.localPath] : []),
+    ...getCandidateProjectorDownloadFileNames(projector),
+  ]);
+}
+
+function normalizePersistedProjectorDownloadState(
+  projector: ProjectorArtifact,
+  options: { clearVolatileProgress?: boolean } = {},
+): ProjectorArtifact {
+  const resumeData = normalizeDownloadResumeData(projector.resumeData);
+  const isDownloading = projector.lifecycleStatus === 'downloading';
+  const shouldPauseQueuedWithResumeData = projector.lifecycleStatus === 'queued'
+    && resumeData !== undefined;
+  const lifecycleStatus = isDownloading
+    ? resumeData !== undefined ? 'paused' as const : 'queued' as const
+    : shouldPauseQueuedWithResumeData ? 'paused' as const : projector.lifecycleStatus;
+  const shouldNormalizeResumeData = resumeData !== projector.resumeData;
+  const shouldClearProgress = options.clearVolatileProgress === true
+    || isDownloading
+    || projector.lifecycleStatus === 'queued'
+    || lifecycleStatus === 'queued'
+    || lifecycleStatus === 'available';
+  const base = shouldClearProgress || shouldNormalizeResumeData
+    ? (() => {
+      const { downloadProgress: _downloadProgress, resumeData: _resumeData, ...withoutVolatileState } = projector;
+      return {
+        ...withoutVolatileState,
+        ...(resumeData !== undefined ? { resumeData } : {}),
+      };
+    })()
+    : projector;
+
+  return lifecycleStatus === projector.lifecycleStatus
+    ? base
+    : {
+      ...base,
+      lifecycleStatus,
+    };
+}
+
+function normalizePersistedProjectorDownloadStates(
+  projectors: ModelMetadata['projectorCandidates'],
+  options: { clearVolatileProgress?: boolean } = {},
+): ModelMetadata['projectorCandidates'] {
+  if (!projectors?.length) {
+    return projectors;
+  }
+
+  let didChange = false;
+  const normalized = projectors.map((projector) => {
+    const nextProjector = normalizePersistedProjectorDownloadState(projector, options);
+    didChange ||= nextProjector !== projector;
+    return nextProjector;
+  });
+
+  return didChange ? normalized : projectors;
 }
 
 interface DownloadState {
@@ -104,13 +342,27 @@ interface DownloadState {
 export function normalizePersistedDownloadQueue(queue: ModelMetadata[]): ModelMetadata[] {
   return queue.map((model) => {
     const normalizedModel = normalizePersistedModelMetadata(model);
+    const wasInFlight = normalizedModel.lifecycleStatus === LifecycleStatus.DOWNLOADING
+      || normalizedModel.lifecycleStatus === LifecycleStatus.VERIFYING;
+    const projectorCandidates = normalizePersistedProjectorDownloadStates(
+      normalizedModel.projectorCandidates,
+      { clearVolatileProgress: wasInFlight },
+    );
     if (
-      normalizedModel.lifecycleStatus === LifecycleStatus.DOWNLOADING ||
-      normalizedModel.lifecycleStatus === LifecycleStatus.VERIFYING
+      normalizedModel.lifecycleStatus === LifecycleStatus.DOWNLOADING
+      || normalizedModel.lifecycleStatus === LifecycleStatus.VERIFYING
     ) {
       return {
         ...normalizedModel,
         lifecycleStatus: LifecycleStatus.QUEUED,
+        ...(projectorCandidates !== normalizedModel.projectorCandidates ? { projectorCandidates } : {}),
+      };
+    }
+
+    if (projectorCandidates !== normalizedModel.projectorCandidates) {
+      return {
+        ...normalizedModel,
+        projectorCandidates,
       };
     }
 
@@ -209,6 +461,9 @@ export const useDownloadStore = create<DownloadState>()(
             return {
               ...model,
               downloadProgress: shouldZeroProgress ? 0 : model.downloadProgress,
+              projectorCandidates: normalizePersistedProjectorDownloadStates(model.projectorCandidates, {
+                clearVolatileProgress: shouldZeroProgress,
+              }),
             };
           }),
         }),
@@ -233,6 +488,7 @@ export function getQueuedDownloadFileNames(): string[] {
       .flatMap((model) => [
         ...(model.localPath && isValidLocalFileName(model.localPath) ? [model.localPath] : []),
         ...getCandidateModelDownloadFileNames(model),
+        ...getQueuedProjectorFileNames(model),
       ]),
   ));
 }

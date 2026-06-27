@@ -24,7 +24,7 @@ import { ChatStatusBanner } from '@/components/ui/ChatStatusBanner';
 import { ChatMessageBubble } from '@/components/ui/ChatMessageBubble';
 import { ChatSystemEventRow } from '@/components/ui/ChatSystemEventRow';
 import { ChatModelSelectorSheet } from '@/components/ui/ChatModelSelectorSheet';
-import { ChatInputBar } from '@/components/ui/ChatInputBar';
+import { ChatInputBar, markChatInputDraftConsumedError } from '@/components/ui/ChatInputBar';
 import { ErrorReportSheet } from '@/components/ui/ErrorReportSheet';
 import {
     MODEL_WARMUP_BANNER_RESERVED_HEIGHT,
@@ -41,11 +41,16 @@ import { resolvePresetSnapshot, useChatSession } from '../../hooks/useChatSessio
 import { useLLMEngine } from '../../hooks/useLLMEngine';
 import { useErrorReportSheetController, type ErrorReportContext } from '@/hooks/useErrorReportSheetController';
 import { useFloatingScrollInsets } from '../../hooks/useTabBarContentInset';
+import { useChatImageAttachments } from '../../hooks/useChatImageAttachments';
+import { useChatDocumentAttachments } from '../../hooks/useChatDocumentAttachments';
+import { useChatMediaAttachments } from '../../hooks/useChatMediaAttachments';
 import { useModelParametersSheetController } from '@/hooks/useModelParametersSheetController';
 import { useModelRegistryRevision } from '@/hooks/useModelRegistryRevision';
 import { useRouter } from 'expo-router';
-import { EngineStatus, LifecycleStatus } from '../../types/models';
+import { EngineStatus, LifecycleStatus, type ModelMetadata } from '../../types/models';
 import { ChatMessage, getThreadActiveModelId } from '../../types/chat';
+import type { ChatDocumentAttachmentDraft, ChatMediaAttachmentDraft } from '../../types/attachments';
+import type { AttachmentDraft, MultimodalReadinessState, MultimodalReadinessStatus } from '../../types/multimodal';
 import { getChatHardwareBannerInputs, hardwareListenerService } from '../../services/HardwareListenerService';
 import { registry } from '../../services/LocalStorageRegistry';
 import { useChatStore } from '../../store/chatStore';
@@ -62,6 +67,7 @@ import {
 import { getThemeActionContentClassName, screenLayoutMetrics } from '../../utils/themeTokens';
 import { handleModelLoadMemoryPolicyError } from '../../utils/modelLoadMemoryPolicyPrompt';
 import type { LoadModelOptions } from '../../services/LLMEngineService';
+import { getReadinessStatusForProjectorLifecycle, projectorArtifactService } from '../../services/ProjectorArtifactService';
 
 const AUTO_SCROLL_REARM_THRESHOLD_PX = 32;
 const AUTO_SCROLL_DISARM_THRESHOLD_PX = 64;
@@ -71,8 +77,170 @@ const FALLBACK_MIN_P = 0.05;
 const FALLBACK_REPETITION_PENALTY = 1;
 const SHOULD_USE_KEYBOARD_AVOIDING_VIEW = Platform.OS === 'ios';
 const KEYBOARD_SPACER_SETTLE_EPSILON = 0.5;
+const VISION_READINESS_TRANSLATION_KEYS: Record<MultimodalReadinessStatus, string> = {
+    ready: 'chat.visionReadiness.ready',
+    text_only: 'chat.visionReadiness.textOnly',
+    missing_projector: 'chat.visionReadiness.missingProjector',
+    ambiguous_projector: 'chat.visionReadiness.ambiguousProjector',
+    projector_downloading: 'chat.visionReadiness.projectorDownloading',
+    initializing: 'chat.visionReadiness.initializing',
+    failed: 'chat.visionReadiness.failed',
+    unsupported: 'chat.visionReadiness.unsupported',
+};
+
+function getMissingAttachmentDraftIdsFromPreAppendFailure(error: unknown): Set<string> | null {
+    const appError = toAppError(error);
+    if (appError.code !== 'chat_attachment_missing') {
+        return null;
+    }
+
+    const details = appError.details;
+    const ids = new Set<string>();
+    const attachmentIds = details?.attachmentIds;
+    if (Array.isArray(attachmentIds)) {
+        attachmentIds.forEach((attachmentId) => {
+            if (typeof attachmentId === 'string' && attachmentId.length > 0) {
+                ids.add(attachmentId);
+            }
+        });
+    }
+
+    if (typeof details?.attachmentId === 'string' && details.attachmentId.length > 0) {
+        ids.add(details.attachmentId);
+    }
+
+    return ids;
+}
+
+function splitAttachmentDraftsById<T extends { id?: string }>(
+    drafts: readonly T[],
+    idsToMatch: ReadonlySet<string>,
+): { matchedDrafts: T[]; remainingDrafts: T[] } {
+    const matchedDrafts: T[] = [];
+    const remainingDrafts: T[] = [];
+
+    drafts.forEach((draft) => {
+        if (draft.id && idsToMatch.has(draft.id)) {
+            matchedDrafts.push(draft);
+        } else {
+            remainingDrafts.push(draft);
+        }
+    });
+
+    return { matchedDrafts, remainingDrafts };
+}
+const IMAGE_ATTACHMENTS_NO_MODEL_REASON_KEY = 'chat.visionReadiness.noModel';
+const IMAGE_ATTACHMENTS_EDITING_REASON_KEY = 'chat.visionReadiness.editingMessage';
+const DOCUMENT_ATTACHMENTS_EDITING_REASON_KEY = 'chat.attachments.documentEditingDisabled';
+const MEDIA_ATTACHMENTS_EDITING_REASON_KEY = 'chat.attachments.mediaEditingDisabled';
+
+function canSendRetainedAttachment(
+    attachment: NonNullable<ChatMessage['attachments']>[number],
+    readiness: MultimodalReadinessState,
+): boolean {
+    if ('kind' in attachment) {
+        if (attachment.kind === 'audio') {
+            return readiness.status === 'ready' && readiness.support.includes('audio');
+        }
+
+        if (attachment.kind === 'document') {
+            return true;
+        }
+
+        return readiness.status === 'ready' && readiness.support.includes('vision');
+    }
+
+    return readiness.status === 'ready' && readiness.support.includes('vision');
+}
 
 type ScrollMetrics = Pick<NativeScrollEvent, 'contentOffset' | 'contentSize' | 'layoutMeasurement'>;
+
+function getVisionReadinessTranslationKey(status: MultimodalReadinessStatus): string {
+    return VISION_READINESS_TRANSLATION_KEYS[status];
+}
+
+function canPreserveReadyOrUnsupportedReadiness(
+    readiness: MultimodalReadinessState | undefined,
+    selectedProjectorId: string | undefined,
+    lifecycleReadiness: MultimodalReadinessStatus | null,
+): boolean {
+    return (
+        (readiness?.status === 'ready' || readiness?.status === 'unsupported')
+        && readiness.projectorId === selectedProjectorId
+        && lifecycleReadiness === null
+    );
+}
+
+export function resolveFallbackMultimodalReadiness(
+    model: ModelMetadata | undefined,
+    modelId: string | null,
+): MultimodalReadinessState {
+    const resolvedModelId = modelId ?? model?.id ?? '';
+    const supportsVision = model?.chatModalities?.includes('vision') === true
+        || Boolean(model?.projectorCandidates?.length);
+
+    if (!supportsVision || !model) {
+        return {
+            modelId: resolvedModelId,
+            status: 'text_only',
+            support: [],
+            checkedAt: 0,
+        };
+    }
+
+    const resolution = projectorArtifactService.resolveProjectorForModel(model);
+    const selectedProjector = resolution.selectedProjector;
+    const persistedReadiness = model.multimodalReadiness;
+
+    if (!selectedProjector) {
+        const fallbackReadiness: MultimodalReadinessState = {
+            modelId: resolvedModelId,
+            status: resolution.status === 'ambiguous'
+                ? 'ambiguous_projector'
+                : resolution.status === 'failed'
+                    ? 'failed'
+                    : 'missing_projector',
+            support: [],
+            failureReason: resolution.status === 'failed' ? resolution.reason : undefined,
+            checkedAt: 0,
+        };
+
+        return fallbackReadiness;
+    }
+
+    const lifecycleReadiness = getReadinessStatusForProjectorLifecycle(selectedProjector);
+    const status = lifecycleReadiness ?? 'initializing';
+
+    const fallbackReadiness: MultimodalReadinessState = {
+        modelId: resolvedModelId,
+        status,
+        projectorId: selectedProjector.id,
+        projectorSize: selectedProjector.size ?? undefined,
+        support: [],
+        failureReason: status === 'failed'
+            ? selectedProjector.matchReason ?? resolution.reason
+            : undefined,
+        checkedAt: 0,
+    };
+
+    if (persistedReadiness && canPreserveReadyOrUnsupportedReadiness(
+        persistedReadiness,
+        selectedProjector.id,
+        lifecycleReadiness,
+    )) {
+        return persistedReadiness;
+    }
+
+    if (
+        persistedReadiness?.status === 'failed'
+        && persistedReadiness.projectorId === selectedProjector.id
+        && status === 'initializing'
+    ) {
+        return persistedReadiness;
+    }
+
+    return fallbackReadiness;
+}
 
 function snapshotScrollMetrics(metrics: ScrollMetrics): ScrollMetrics {
     return {
@@ -135,13 +303,67 @@ export function getAndroidKeyboardSpacerHeight({
 export function shouldFloatAndroidComposerOverContent({
     platform,
     surfaceKind,
-    isKeyboardVisible,
 }: {
     platform: typeof Platform.OS;
     surfaceKind: 'solid' | 'glass';
-    isKeyboardVisible: boolean;
+    isKeyboardVisible?: boolean;
 }) {
-    return platform === 'android' && surfaceKind === 'glass' && !isKeyboardVisible;
+    return platform === 'android' && surfaceKind === 'glass';
+}
+
+export function getAndroidFloatingComposerBottomOffset({
+    tabBarInset,
+    androidKeyboardInset,
+    isKeyboardVisible,
+    gap = screenLayoutMetrics.keyboardComposerGap,
+}: {
+    tabBarInset: number;
+    androidKeyboardInset: number;
+    isKeyboardVisible: boolean;
+    gap?: number;
+}) {
+    return isKeyboardVisible
+        ? Math.max(androidKeyboardInset, gap)
+        : tabBarInset;
+}
+
+export function getChatListBottomChromeInset({
+    composerContainerHeight,
+    tabBarInset,
+    androidKeyboardInset,
+    shouldFloatComposerOverContent,
+    isKeyboardVisible,
+    gap = screenLayoutMetrics.keyboardComposerGap,
+}: {
+    composerContainerHeight: number;
+    tabBarInset: number;
+    androidKeyboardInset: number;
+    shouldFloatComposerOverContent: boolean;
+    isKeyboardVisible: boolean;
+    gap?: number;
+}) {
+    if (!shouldFloatComposerOverContent) {
+        return tabBarInset;
+    }
+
+    return composerContainerHeight + getAndroidFloatingComposerBottomOffset({
+        tabBarInset,
+        androidKeyboardInset,
+        isKeyboardVisible,
+        gap,
+    }) + gap;
+}
+
+export function shouldRenderAndroidKeyboardSpacer({
+    platform,
+    shouldFloatComposerOverContent,
+    androidKeyboardInset,
+}: {
+    platform: typeof Platform.OS;
+    shouldFloatComposerOverContent: boolean;
+    androidKeyboardInset: number;
+}) {
+    return platform === 'android' && !shouldFloatComposerOverContent && androidKeyboardInset > 0;
 }
 
 export function getChatWarmupBannerBottomOffset({
@@ -149,13 +371,21 @@ export function getChatWarmupBannerBottomOffset({
     tabBarInset,
     androidKeyboardInset,
     shouldFloatComposerOverContent,
+    isKeyboardVisible = false,
 }: {
     composerContainerHeight: number;
     tabBarInset: number;
     androidKeyboardInset: number;
     shouldFloatComposerOverContent: boolean;
+    isKeyboardVisible?: boolean;
 }) {
-    return composerContainerHeight + (shouldFloatComposerOverContent ? tabBarInset : androidKeyboardInset);
+    return composerContainerHeight + (shouldFloatComposerOverContent
+        ? getAndroidFloatingComposerBottomOffset({
+            tabBarInset,
+            androidKeyboardInset,
+            isKeyboardVisible,
+        })
+        : androidKeyboardInset);
 }
 
 export function getNextShouldStickToBottom(
@@ -255,6 +485,7 @@ export const ChatScreen = () => {
     const [pendingRegenerateMessage, setPendingRegenerateMessage] = useState<{
         messageId: string;
         originalContent: string;
+        attachments: ChatMessage['attachments'];
     } | null>(null);
     const updateThreadPresetSnapshot = useChatStore((state) => state.updateThreadPresetSnapshot);
     const updateThreadParamsSnapshot = useChatStore((state) => state.updateThreadParamsSnapshot);
@@ -280,6 +511,7 @@ export const ChatScreen = () => {
     const dragStartOffsetYRef = useRef<number | null>(null);
     const momentumStartOffsetYRef = useRef<number | null>(null);
     const shouldStickToBottomRef = useRef(true);
+    const sendMessageInFlightRef = useRef(false);
     const hasActiveModel = Boolean(engineState.activeModelId);
     const isEngineReady = engineState.status === EngineStatus.READY;
     const isModelInitializing = engineState.status === EngineStatus.INITIALIZING;
@@ -302,14 +534,24 @@ export const ChatScreen = () => {
         // coupling the screen to unrelated HardwareStatus fields.
         hardwareStatus,
     );
+    const isAndroidKeyboardOpen = Platform.OS === 'android' && isAndroidKeyboardVisible;
     const shouldFloatComposerOverContent = shouldFloatAndroidComposerOverContent({
         platform: Platform.OS,
         surfaceKind: appearance.surfaceKind,
         isKeyboardVisible: isAndroidKeyboardVisible,
     });
-    const bottomChromeInset = shouldFloatComposerOverContent
-        ? composerContainerHeight + tabBarInset + screenLayoutMetrics.keyboardComposerGap
-        : tabBarInset;
+    const androidFloatingComposerBottomOffset = getAndroidFloatingComposerBottomOffset({
+        tabBarInset,
+        androidKeyboardInset,
+        isKeyboardVisible: isAndroidKeyboardOpen,
+    });
+    const bottomChromeInset = getChatListBottomChromeInset({
+        composerContainerHeight,
+        tabBarInset,
+        androidKeyboardInset,
+        shouldFloatComposerOverContent,
+        isKeyboardVisible: isAndroidKeyboardOpen,
+    });
     const listBottomPadding =
         (hardwareBannerInputs.showLowMemoryWarning || hardwareBannerInputs.showThermalWarning ? 22 : 14)
         + (isModelInitializing ? MODEL_WARMUP_BANNER_RESERVED_HEIGHT : 0)
@@ -337,6 +579,115 @@ export const ChatScreen = () => {
     const displayedChatActiveModelId = isPendingModelSelectionForCurrentThread
         ? pendingModelSelection.modelId
         : currentChatActiveModelId;
+    const activeChatModel = useMemo(() => {
+        void modelRegistryRevision;
+
+        return displayedChatActiveModelId ? registry.getModel(displayedChatActiveModelId) : undefined;
+    }, [displayedChatActiveModelId, modelRegistryRevision]);
+    const multimodalReadiness = useMemo(
+        () => resolveFallbackMultimodalReadiness(activeChatModel, displayedChatActiveModelId),
+        [activeChatModel, displayedChatActiveModelId],
+    );
+    const hasReadyVisionSupport = multimodalReadiness.status === 'ready'
+        && multimodalReadiness.support.includes('vision');
+    const hasReadyAudioSupport = multimodalReadiness.status === 'ready'
+        && multimodalReadiness.support.includes('audio');
+    const visionAttachmentReadinessReason = !displayedChatActiveModelId
+        ? IMAGE_ATTACHMENTS_NO_MODEL_REASON_KEY
+        : !isEngineReady || engineState.activeModelId !== displayedChatActiveModelId
+            ? 'chat.visionReadiness.initializing'
+            : getVisionReadinessTranslationKey(multimodalReadiness.status);
+    const imageAttachmentsDisabledReason = pendingRegenerateMessage
+        ? IMAGE_ATTACHMENTS_EDITING_REASON_KEY
+        : visionAttachmentReadinessReason;
+    const imageAttachmentsEnabled =
+        !isInputDisabled
+        && !pendingRegenerateMessage
+        && engineState.activeModelId === displayedChatActiveModelId
+        && hasReadyVisionSupport;
+    const imageAttachmentOwnerKey = [
+        activeThread?.id ?? 'new-thread',
+        displayedChatActiveModelId ?? 'no-displayed-model',
+    ].join('|');
+    const imageAttachmentDrafts = useChatImageAttachments({
+        enabled: imageAttachmentsEnabled,
+        disabledReason: imageAttachmentsDisabledReason,
+        ownerKey: imageAttachmentOwnerKey,
+        preserveFailedDraftsOnNewThreadCommit: true,
+    });
+    const documentAttachmentsDisabledReason = pendingRegenerateMessage
+        ? DOCUMENT_ATTACHMENTS_EDITING_REASON_KEY
+        : undefined;
+    const documentAttachmentsEnabled =
+        !isInputDisabled
+        && !pendingRegenerateMessage
+        && engineState.activeModelId === displayedChatActiveModelId;
+    const documentAttachmentOwnerKey = [
+        activeThread?.id ?? 'new-thread',
+        displayedChatActiveModelId ?? 'no-displayed-model',
+    ].join('|');
+    const documentAttachmentDrafts = useChatDocumentAttachments({
+        enabled: documentAttachmentsEnabled,
+        disabledReason: documentAttachmentsDisabledReason,
+        ownerKey: documentAttachmentOwnerKey,
+    });
+    const mediaAttachmentOwnerKey = [
+        activeThread?.id ?? 'new-thread',
+        displayedChatActiveModelId ?? 'no-displayed-model',
+    ].join('|');
+    const audioAttachmentsEnabled =
+        !isInputDisabled
+        && !pendingRegenerateMessage
+        && engineState.activeModelId === displayedChatActiveModelId
+        && hasReadyAudioSupport;
+    const audioAttachmentsDisabledReason = pendingRegenerateMessage
+        ? MEDIA_ATTACHMENTS_EDITING_REASON_KEY
+        : !hasReadyAudioSupport
+            ? 'chat.attachments.audioRuntimeUnavailable'
+            : undefined;
+    const mediaAttachmentDrafts = useChatMediaAttachments({
+        audioEnabled: audioAttachmentsEnabled,
+        audioDisabledReason: audioAttachmentsDisabledReason,
+        ownerKey: mediaAttachmentOwnerKey,
+    });
+    const retainedRegenerateAttachments = pendingRegenerateMessage?.attachments ?? [];
+    const canSendRetainedRegenerateAttachments = retainedRegenerateAttachments.length > 0
+        && !isInputDisabled
+        && engineState.activeModelId === displayedChatActiveModelId
+        && retainedRegenerateAttachments.every((attachment) => canSendRetainedAttachment(attachment, multimodalReadiness));
+    const retainedRegenerateAttachmentsSendBlocked = retainedRegenerateAttachments.length > 0
+        && !canSendRetainedRegenerateAttachments;
+    const retainedRegenerateAttachmentsTray = retainedRegenerateAttachments.length > 0 ? (
+        <ScreenSurface
+            testID="chat-regenerate-retained-attachments"
+            tone="accent"
+            withControlTint
+            className="rounded-2xl px-3 py-2"
+        >
+            <Box className="flex-row items-start gap-3">
+                <ScreenIconTile
+                    iconName="image"
+                    tone="accent"
+                    size="sm"
+                    iconSize="xs"
+                    className="mt-0.5 h-6 w-6"
+                    iconClassName="text-primary-500"
+                />
+                <Box className="min-w-0 flex-1">
+                    <Text className="text-xs font-semibold leading-4 text-primary-700 dark:text-primary-300">
+                        {t('chat.attachments.retainedForRegenerate', { count: retainedRegenerateAttachments.length })}
+                    </Text>
+                    <Text className="mt-0.5 text-xs leading-4 text-primary-700/80 dark:text-primary-300/80">
+                        {retainedRegenerateAttachmentsSendBlocked
+                            ? t('chat.attachments.retainedForRegenerateBlockedDescription', {
+                                reason: t(visionAttachmentReadinessReason),
+                            })
+                            : t('chat.attachments.retainedForRegenerateDescription')}
+                    </Text>
+                </Box>
+            </Box>
+        </ScreenSurface>
+    ) : undefined;
 
     const headerTitle = activeThread?.title ?? t('chat.newChatTitle');
     const configurableModelId = currentChatActiveModelId;
@@ -382,19 +733,24 @@ export const ChatScreen = () => {
     const shouldShowRecoveryBanner = isInputDisabled && hasMessages;
     const shouldShowRecoveryCard = isInputDisabled && !hasMessages;
     const shouldShowFloatingWarmupBanner = isModelInitializing && !shouldShowRecoveryCard;
-    const isAndroidKeyboardOpen = Platform.OS === 'android' && isAndroidKeyboardVisible;
     const shouldReserveComposerTabBarInset = !shouldFloatComposerOverContent && !isAndroidKeyboardOpen;
     const composerBottomInsetStyle = shouldReserveComposerTabBarInset && tabBarInset > 0
         ? { paddingBottom: tabBarInset }
         : undefined;
     const androidComposerContainerStyle = shouldFloatComposerOverContent
-        ? [styles.androidFloatingComposer, { bottom: tabBarInset }]
+        ? [styles.androidFloatingComposer, { bottom: androidFloatingComposerBottomOffset }]
         : composerBottomInsetStyle;
+    const shouldRenderAndroidKeyboardSpacerAfterComposer = shouldRenderAndroidKeyboardSpacer({
+        platform: Platform.OS,
+        shouldFloatComposerOverContent,
+        androidKeyboardInset,
+    });
     const warmupBannerBottomOffset = getChatWarmupBannerBottomOffset({
         composerContainerHeight,
         tabBarInset,
         androidKeyboardInset,
         shouldFloatComposerOverContent,
+        isKeyboardVisible: isAndroidKeyboardOpen,
     });
     const hasDownloadedModels = downloadedModels.length > 0;
     const modelRecoveryActionRoute = hasDownloadedModels
@@ -466,6 +822,7 @@ export const ChatScreen = () => {
                                 activeModelId: engineState.activeModelId,
                                 loadProgress: engineState.loadProgress,
                                 lastError: engineState.lastError,
+                                diagnostics: engineState.diagnostics,
                             },
                         };
 
@@ -477,6 +834,7 @@ export const ChatScreen = () => {
     }, [
         configurableModelId,
         engineState.activeModelId,
+        engineState.diagnostics,
         engineState.lastError,
         engineState.loadProgress,
         engineState.status,
@@ -1027,29 +1385,210 @@ export const ChatScreen = () => {
     ]);
 
     const handleSendMessage = async (content: string) => {
-        armFollowLatestMessage(false);
-        if (pendingRegenerateMessage) {
-            const targetMessage = pendingRegenerateMessage;
-            setPendingRegenerateMessage(null);
-            setComposerDraft('');
-
-            try {
-                await regenerateFromUserMessage(targetMessage.messageId, content);
-            } catch (error) {
-                setPendingRegenerateMessage(targetMessage);
-                setComposerDraft(content);
-                throw error;
-            }
-
+        if (sendMessageInFlightRef.current) {
             return;
         }
 
-        setComposerDraft('');
+        sendMessageInFlightRef.current = true;
+        armFollowLatestMessage(false);
         try {
-            await appendUserMessage(content);
-        } catch (error) {
-            setComposerDraft(content);
-            throw error;
+            if (pendingRegenerateMessage) {
+                const targetMessage = pendingRegenerateMessage;
+                const hasRetainedAttachments = (targetMessage.attachments?.length ?? 0) > 0;
+
+                if (hasRetainedAttachments && !canSendRetainedRegenerateAttachments) {
+                    return;
+                }
+
+                setPendingRegenerateMessage(null);
+                setComposerDraft('');
+
+                try {
+                    if (hasRetainedAttachments) {
+                        await regenerateFromUserMessage(targetMessage.messageId, content, { multimodalReadiness });
+                    } else {
+                        await regenerateFromUserMessage(targetMessage.messageId, content);
+                    }
+                } catch (error) {
+                    setPendingRegenerateMessage(targetMessage);
+                    setComposerDraft(content);
+                    throw error;
+                }
+
+                return;
+            }
+
+            const shouldSendAttachmentDrafts = imageAttachmentDrafts.drafts.length > 0 && imageAttachmentsEnabled;
+            const shouldSendDocumentAttachmentDrafts = documentAttachmentDrafts.drafts.length > 0 && documentAttachmentsEnabled;
+            const shouldSendMediaAttachmentDrafts = mediaAttachmentDrafts.drafts.length > 0;
+            const hasFailedAttachmentDrafts = shouldSendAttachmentDrafts
+                && imageAttachmentDrafts.drafts.some((draft) => draft.copyStatus === 'failed');
+            const hasFailedDocumentAttachmentDrafts = shouldSendDocumentAttachmentDrafts
+                && documentAttachmentDrafts.drafts.some((draft) => draft.copyStatus === 'failed');
+            const hasFailedMediaAttachmentDrafts = shouldSendMediaAttachmentDrafts
+                && mediaAttachmentDrafts.drafts.some((draft) => draft.copyStatus === 'failed');
+            const attachmentDrafts = shouldSendAttachmentDrafts
+                ? imageAttachmentDrafts.consumeDraftsForSend()
+                : [];
+            const documentDrafts = shouldSendDocumentAttachmentDrafts
+                ? documentAttachmentDrafts.consumeDraftsForSend()
+                : [];
+            const mediaDrafts = shouldSendMediaAttachmentDrafts
+                ? mediaAttachmentDrafts.consumeDraftsForSend({
+                    includeAudio: audioAttachmentsEnabled,
+                })
+                : [];
+            const hasSendableAttachmentDrafts = attachmentDrafts.length > 0;
+            const hasSendableDocumentAttachmentDrafts = documentDrafts.length > 0;
+            const hasSendableMediaAttachmentDrafts = mediaDrafts.length > 0;
+            const restoreAttachmentDraftsForRetry = (draftsToRestore: readonly AttachmentDraft[]) => {
+                if (draftsToRestore.length === 0) {
+                    return;
+                }
+
+                const retryThread = imageAttachmentOwnerKey.startsWith('new-thread|')
+                    ? useChatStore.getState().getActiveThread()
+                    : null;
+                const retryOwnerKey = retryThread
+                    ? [retryThread.id, getThreadActiveModelId(retryThread)].join('|')
+                    : null;
+
+                if (retryOwnerKey) {
+                    imageAttachmentDrafts.restoreDraftsForRetry(draftsToRestore, { preserveOwnerKey: retryOwnerKey });
+                } else {
+                    imageAttachmentDrafts.restoreDraftsForRetry(draftsToRestore);
+                }
+            };
+            const restoreDocumentDraftsForRetry = (draftsToRestore: readonly ChatDocumentAttachmentDraft[]) => {
+                if (draftsToRestore.length === 0) {
+                    return;
+                }
+
+                documentAttachmentDrafts.restoreDraftsForRetry(draftsToRestore);
+            };
+            const restoreMediaDraftsForRetry = (draftsToRestore: readonly ChatMediaAttachmentDraft[]) => {
+                if (draftsToRestore.length === 0) {
+                    return;
+                }
+
+                mediaAttachmentDrafts.restoreDraftsForRetry(draftsToRestore);
+            };
+
+            let userMessageAppended = false;
+            setComposerDraft('');
+            try {
+                await appendUserMessage(
+                    content,
+                    {
+                        ...(hasSendableAttachmentDrafts
+                            ? {
+                                attachmentDrafts,
+                                multimodalReadiness,
+                            }
+                            : null),
+                        ...(hasSendableDocumentAttachmentDrafts
+                            ? {
+                                documentAttachmentDrafts: documentDrafts,
+                            }
+                            : null),
+                        ...(hasSendableMediaAttachmentDrafts
+                            ? {
+                                mediaAttachmentDrafts: mediaDrafts,
+                                multimodalReadiness,
+                            }
+                            : null),
+                        onUserMessageAppended: () => {
+                            userMessageAppended = true;
+                        },
+                    },
+                );
+                if (hasFailedAttachmentDrafts) {
+                    imageAttachmentDrafts.clearFailedDrafts();
+                }
+                if (hasFailedDocumentAttachmentDrafts) {
+                    documentAttachmentDrafts.clearFailedDrafts();
+                }
+                if (hasFailedMediaAttachmentDrafts) {
+                    mediaAttachmentDrafts.clearFailedDrafts();
+                }
+            } catch (error) {
+                if (userMessageAppended) {
+                    if (hasFailedAttachmentDrafts) {
+                        imageAttachmentDrafts.clearFailedDrafts();
+                    }
+                    if (hasFailedDocumentAttachmentDrafts) {
+                        documentAttachmentDrafts.clearFailedDrafts();
+                    }
+                    if (hasFailedMediaAttachmentDrafts) {
+                        mediaAttachmentDrafts.clearFailedDrafts();
+                    }
+                    throw markChatInputDraftConsumedError(error);
+                }
+
+                const missingAttachmentDraftIds = getMissingAttachmentDraftIdsFromPreAppendFailure(error);
+                if (attachmentDrafts.length > 0 && missingAttachmentDraftIds) {
+                    if (missingAttachmentDraftIds.size > 0) {
+                        const { matchedDrafts, remainingDrafts } = splitAttachmentDraftsById(
+                            attachmentDrafts,
+                            missingAttachmentDraftIds,
+                        );
+                        if (matchedDrafts.length > 0) {
+                            imageAttachmentDrafts.discardDrafts(matchedDrafts, 'missing copied drafts after failed send');
+                        }
+                        if (remainingDrafts.length > 0) {
+                            restoreAttachmentDraftsForRetry(remainingDrafts);
+                        }
+                    } else {
+                        // Missing-attachment errors can omit ids for legacy or id-less drafts. Do not
+                        // restore consumed drafts that are known to point at unavailable copied files,
+                        // otherwise each retry can fail on the same stale attachment forever.
+                        imageAttachmentDrafts.discardDrafts(attachmentDrafts, 'missing copied drafts after failed send');
+                    }
+                } else if (attachmentDrafts.length > 0) {
+                    restoreAttachmentDraftsForRetry(attachmentDrafts);
+                }
+                if (documentDrafts.length > 0 && missingAttachmentDraftIds) {
+                    if (missingAttachmentDraftIds.size > 0) {
+                        const { matchedDrafts, remainingDrafts } = splitAttachmentDraftsById(
+                            documentDrafts,
+                            missingAttachmentDraftIds,
+                        );
+                        if (matchedDrafts.length > 0) {
+                            documentAttachmentDrafts.discardDrafts(matchedDrafts, 'missing copied document drafts after failed send');
+                        }
+                        if (remainingDrafts.length > 0) {
+                            restoreDocumentDraftsForRetry(remainingDrafts);
+                        }
+                    } else {
+                        documentAttachmentDrafts.discardDrafts(documentDrafts, 'missing copied document drafts after failed send');
+                    }
+                } else if (documentDrafts.length > 0) {
+                    restoreDocumentDraftsForRetry(documentDrafts);
+                }
+                if (mediaDrafts.length > 0 && missingAttachmentDraftIds) {
+                    if (missingAttachmentDraftIds.size > 0) {
+                        const { matchedDrafts, remainingDrafts } = splitAttachmentDraftsById(
+                            mediaDrafts,
+                            missingAttachmentDraftIds,
+                        );
+                        if (matchedDrafts.length > 0) {
+                            mediaAttachmentDrafts.discardDrafts(matchedDrafts, 'missing copied media drafts after failed send');
+                        }
+                        if (remainingDrafts.length > 0) {
+                            restoreMediaDraftsForRetry(remainingDrafts);
+                        }
+                    } else {
+                        mediaAttachmentDrafts.discardDrafts(mediaDrafts, 'missing copied media drafts after failed send');
+                    }
+                } else if (mediaDrafts.length > 0) {
+                    restoreMediaDraftsForRetry(mediaDrafts);
+                }
+
+                setComposerDraft(content);
+                throw error;
+            }
+        } finally {
+            sendMessageInFlightRef.current = false;
         }
     };
 
@@ -1063,14 +1602,21 @@ export const ChatScreen = () => {
         setPendingRegenerateMessage({
             messageId: message.id,
             originalContent: message.content,
+            attachments: message.attachments ?? [],
         });
         setComposerDraft(message.content);
-    }, []);
+        imageAttachmentDrafts.clearDrafts();
+        documentAttachmentDrafts.clearDrafts();
+        mediaAttachmentDrafts.clearDrafts();
+    }, [documentAttachmentDrafts, imageAttachmentDrafts, mediaAttachmentDrafts]);
 
     const handleCancelComposerMode = useCallback(() => {
         setPendingRegenerateMessage(null);
         setComposerDraft('');
-    }, []);
+        imageAttachmentDrafts.clearDrafts();
+        documentAttachmentDrafts.clearDrafts();
+        mediaAttachmentDrafts.clearDrafts();
+    }, [documentAttachmentDrafts, imageAttachmentDrafts, mediaAttachmentDrafts]);
 
     const handleDeleteMessage = useCallback((messageId: string) => {
         const activeThread = useChatStore.getState().getActiveThread();
@@ -1091,8 +1637,16 @@ export const ChatScreen = () => {
                     style: 'destructive',
                     onPress: () => {
                         try {
+                            const deletedMessageIndex = activeThread?.messages.findIndex((entry) => entry.id === messageId) ?? -1;
+                            const pendingRegenerateMessageIndex = pendingRegenerateMessage
+                                ? activeThread?.messages.findIndex((entry) => entry.id === pendingRegenerateMessage.messageId) ?? -1
+                                : -1;
                             const deleted = deleteMessage(messageId);
-                            if (deleted && pendingRegenerateMessage?.messageId === messageId) {
+                            const didDeletePendingRegenerateTarget = pendingRegenerateMessageIndex >= 0
+                                && deletedMessageIndex >= 0
+                                && pendingRegenerateMessageIndex >= deletedMessageIndex;
+
+                            if (deleted && didDeletePendingRegenerateTarget) {
                                 handleCancelComposerMode();
                             }
                         } catch (error: any) {
@@ -1102,7 +1656,7 @@ export const ChatScreen = () => {
                 },
             ],
         );
-    }, [deleteMessage, pendingRegenerateMessage?.messageId, showAlertForError, t, handleCancelComposerMode]);
+    }, [deleteMessage, pendingRegenerateMessage, showAlertForError, t, handleCancelComposerMode]);
 
     useEffect(() => {
         return hardwareListenerService.subscribe((nextStatus) => {
@@ -1278,6 +1832,7 @@ export const ChatScreen = () => {
                 id={msg.id}
                 isUser={msg.role === 'user'}
                 content={msg.content}
+                attachments={msg.attachments}
                 thoughtContent={msg.thoughtContent}
                 errorMessage={msg.errorMessage}
                 isStreaming={msg.state === 'streaming'}
@@ -1561,11 +2116,32 @@ export const ChatScreen = () => {
                             <ChatInputBar
                                 draft={composerDraft}
                                 onDraftChange={setComposerDraft}
+                                allowEmptyMessageSend={canSendRetainedRegenerateAttachments}
                                 onSendMessage={handleSendMessage}
+                                sendDisabled={retainedRegenerateAttachmentsSendBlocked}
                                 onStopGeneration={stopGeneration}
                                 disabled={isInputDisabled}
                                 isSending={isGenerating}
                                 androidContentBlurTargetRef={warmupContentBlurTargetRef}
+                                attachmentDrafts={imageAttachmentDrafts.drafts}
+                                documentAttachmentDrafts={documentAttachmentDrafts.drafts}
+                                mediaAttachmentDrafts={mediaAttachmentDrafts.drafts}
+                                onAttachImages={imageAttachmentDrafts.attachImages}
+                                onAttachDocuments={documentAttachmentDrafts.attachDocuments}
+                                onAttachAudio={mediaAttachmentDrafts.attachAudio}
+                                onRemoveAttachmentDraft={imageAttachmentDrafts.removeDraft}
+                                onRemoveDocumentAttachmentDraft={documentAttachmentDrafts.removeDraft}
+                                onRemoveMediaAttachmentDraft={mediaAttachmentDrafts.removeDraft}
+                                imageAttachmentsEnabled={imageAttachmentsEnabled}
+                                documentAttachmentsEnabled={documentAttachmentsEnabled}
+                                audioAttachmentsEnabled={audioAttachmentsEnabled}
+                                imageAttachmentsDisabledReason={imageAttachmentsDisabledReason}
+                                documentAttachmentsDisabledReason={documentAttachmentsDisabledReason}
+                                audioAttachmentsDisabledReason={audioAttachmentsDisabledReason}
+                                isImageAttachmentActionBusy={imageAttachmentDrafts.isPicking}
+                                isDocumentAttachmentActionBusy={documentAttachmentDrafts.isPicking}
+                                isAudioAttachmentActionBusy={mediaAttachmentDrafts.isPickingAudio}
+                                attachmentsTray={retainedRegenerateAttachmentsTray}
                                 modeLabel={pendingRegenerateMessage ? t('chat.editEarlierMessage') : undefined}
                                 modeDescription={pendingRegenerateMessage
                                     ? t('chat.editEarlierMessageDescription')
@@ -1586,11 +2162,32 @@ export const ChatScreen = () => {
                             <ChatInputBar
                                 draft={composerDraft}
                                 onDraftChange={setComposerDraft}
+                                allowEmptyMessageSend={canSendRetainedRegenerateAttachments}
                                 onSendMessage={handleSendMessage}
+                                sendDisabled={retainedRegenerateAttachmentsSendBlocked}
                                 onStopGeneration={stopGeneration}
                                 disabled={isInputDisabled}
                                 isSending={isGenerating}
                                 androidContentBlurTargetRef={warmupContentBlurTargetRef}
+                                attachmentDrafts={imageAttachmentDrafts.drafts}
+                                documentAttachmentDrafts={documentAttachmentDrafts.drafts}
+                                mediaAttachmentDrafts={mediaAttachmentDrafts.drafts}
+                                onAttachImages={imageAttachmentDrafts.attachImages}
+                                onAttachDocuments={documentAttachmentDrafts.attachDocuments}
+                                onAttachAudio={mediaAttachmentDrafts.attachAudio}
+                                onRemoveAttachmentDraft={imageAttachmentDrafts.removeDraft}
+                                onRemoveDocumentAttachmentDraft={documentAttachmentDrafts.removeDraft}
+                                onRemoveMediaAttachmentDraft={mediaAttachmentDrafts.removeDraft}
+                                imageAttachmentsEnabled={imageAttachmentsEnabled}
+                                documentAttachmentsEnabled={documentAttachmentsEnabled}
+                                audioAttachmentsEnabled={audioAttachmentsEnabled}
+                                imageAttachmentsDisabledReason={imageAttachmentsDisabledReason}
+                                documentAttachmentsDisabledReason={documentAttachmentsDisabledReason}
+                                audioAttachmentsDisabledReason={audioAttachmentsDisabledReason}
+                                isImageAttachmentActionBusy={imageAttachmentDrafts.isPicking}
+                                isDocumentAttachmentActionBusy={documentAttachmentDrafts.isPicking}
+                                isAudioAttachmentActionBusy={mediaAttachmentDrafts.isPickingAudio}
+                                attachmentsTray={retainedRegenerateAttachmentsTray}
                                 modeLabel={pendingRegenerateMessage ? t('chat.editEarlierMessage') : undefined}
                                 modeDescription={pendingRegenerateMessage
                                     ? t('chat.editEarlierMessageDescription')
@@ -1598,7 +2195,7 @@ export const ChatScreen = () => {
                                 onCancelMode={pendingRegenerateMessage ? handleCancelComposerMode : undefined}
                             />
                         </View>
-                        {androidKeyboardInset > 0 ? (
+                        {shouldRenderAndroidKeyboardSpacerAfterComposer ? (
                             <Box testID="chat-android-keyboard-spacer" style={{ height: androidKeyboardInset }} />
                         ) : null}
                     </View>
@@ -1608,6 +2205,7 @@ export const ChatScreen = () => {
                 <ModelWarmupBanner
                     androidContentBlurTargetRef={warmupContentBlurTargetRef}
                     engineState={engineState}
+                    multimodalReadiness={multimodalReadiness}
                     bottomOffset={warmupBannerBottomOffset}
                 />
             ) : null}

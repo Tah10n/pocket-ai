@@ -2,10 +2,14 @@ const { withAndroidManifest, withAppBuildGradle } = require('expo/config-plugins
 const { mergeContents } = require('@expo/config-plugins/build/utils/generateCode');
 
 const BLOCKED_PERMISSIONS = new Set([
-  'android.permission.READ_EXTERNAL_STORAGE',
+  'android.permission.CAMERA',
+  'android.permission.RECORD_AUDIO',
   'android.permission.WRITE_EXTERNAL_STORAGE',
   'android.permission.SYSTEM_ALERT_WINDOW',
 ]);
+
+const LEGACY_GALLERY_READ_PERMISSION = 'android.permission.READ_EXTERNAL_STORAGE';
+const LEGACY_GALLERY_READ_MAX_SDK_VERSION = '32';
 
 function escapeGroovyDoubleQuotedString(value) {
   return String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
@@ -263,28 +267,39 @@ function applyBuildGradleReleaseConfig(buildGradle, configDefaults) {
   return contents;
 }
 
-module.exports = function withAndroidReleaseConfig(config) {
+function applyAndroidManifestReleaseConfig(nextConfig) {
+  const manifest = nextConfig.modResults.manifest;
+  const application = manifest.application?.[0];
+
+  if (application?.$) {
+    application.$['android:allowBackup'] = 'false';
+  }
+
+  if (Array.isArray(manifest['uses-permission'])) {
+    manifest['uses-permission'] = manifest['uses-permission'].filter((permission) => {
+      const name = permission?.$?.['android:name'];
+      const toolsNode = permission?.$?.['tools:node'];
+      const isRemoveStub = typeof toolsNode === 'string' && toolsNode.trim().toLowerCase() === 'remove';
+
+      if (name === LEGACY_GALLERY_READ_PERMISSION && !isRemoveStub && permission?.$) {
+        permission.$['android:maxSdkVersion'] = LEGACY_GALLERY_READ_MAX_SDK_VERSION;
+      }
+
+      return !BLOCKED_PERMISSIONS.has(name) || isRemoveStub;
+    });
+  }
+
+  return nextConfig;
+}
+
+function withAndroidReleaseConfig(config) {
   const configDefaults = {
     fallbackVersionCode: config.android?.versionCode,
     fallbackVersionName: config.version,
   };
 
   config = withAndroidManifest(config, (nextConfig) => {
-    const manifest = nextConfig.modResults.manifest;
-    const application = manifest.application?.[0];
-
-    if (application?.$) {
-      application.$['android:allowBackup'] = 'false';
-    }
-
-    if (Array.isArray(manifest['uses-permission'])) {
-      manifest['uses-permission'] = manifest['uses-permission'].filter((permission) => {
-        const name = permission?.$?.['android:name'];
-        return !BLOCKED_PERMISSIONS.has(name);
-      });
-    }
-
-    return nextConfig;
+    return applyAndroidManifestReleaseConfig(nextConfig);
   });
 
   return withAppBuildGradle(config, (nextConfig) => {
@@ -294,4 +309,12 @@ module.exports = function withAndroidReleaseConfig(config) {
 
     return nextConfig;
   });
+}
+
+module.exports = withAndroidReleaseConfig;
+module.exports._internal = {
+  applyAndroidManifestReleaseConfig,
+  BLOCKED_PERMISSIONS,
+  LEGACY_GALLERY_READ_PERMISSION,
+  LEGACY_GALLERY_READ_MAX_SDK_VERSION,
 };

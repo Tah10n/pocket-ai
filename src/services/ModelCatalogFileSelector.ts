@@ -5,7 +5,12 @@ import type {
   HuggingFaceSibling,
   HuggingFaceTreeEntry,
 } from '../types/huggingFace';
+import {
+  isProjectorFileName,
+} from '../utils/modelProjectors';
 import { normalizeSha256Digest } from '../utils/sha256';
+
+export { isProjectorFileName } from '../utils/modelProjectors';
 
 const MIN_GGUF_BYTES = 50 * 1024 * 1024;
 
@@ -70,6 +75,15 @@ const EXCLUDED_CATALOG_PIPELINE_TAGS = new Set([
   'automatic-speech-recognition',
 ]);
 
+const MULTIMODAL_CHAT_PIPELINE_TAGS = new Set([
+  'image-text-to-text',
+  'visual-question-answering',
+  'document-question-answering',
+  'audio-text-to-text',
+  'automatic-speech-recognition',
+  'video-text-to-text',
+]);
+
 const EXCLUDED_CATALOG_SIGNAL_EXACT_MATCHES = new Set([
   'diffusers',
   'stable-diffusion',
@@ -105,6 +119,8 @@ export function filterCatalogSearchModels(models: ModelMetadata[]): ModelMetadat
 }
 
 export function isCatalogSummarySupported(item: HuggingFaceModelSummary): boolean {
+  const allowMultimodalChatPipelineTag = hasGgufSummarySignal(item);
+
   return !hasUnsupportedCatalogSignals({
     identifiers: [item.id, item.modelId],
     pipelineTag: item.pipeline_tag,
@@ -116,6 +132,7 @@ export function isCatalogSummarySupported(item: HuggingFaceModelSummary): boolea
     ],
     architectures: item.config?.architectures,
     config: item.config,
+    allowMultimodalChatPipelineTag,
   });
 }
 
@@ -137,9 +154,10 @@ function hasUnsupportedCatalogSignals(options: {
   architectures?: string[];
   config?: HuggingFaceModelConfig;
   ggufMetadata?: Record<string, unknown>;
+  allowMultimodalChatPipelineTag?: boolean;
 }): boolean {
   const pipelineTag = normalizeCatalogSignal(options.pipelineTag);
-  if (pipelineTag && EXCLUDED_CATALOG_PIPELINE_TAGS.has(pipelineTag)) {
+  if (pipelineTag && isExcludedCatalogPipelineSignal(pipelineTag, options.allowMultimodalChatPipelineTag)) {
     return true;
   }
 
@@ -158,11 +176,16 @@ function hasUnsupportedCatalogSignals(options: {
   ];
 
   return signals.some((signal) => (
-    EXCLUDED_CATALOG_PIPELINE_TAGS.has(signal)
+    isExcludedCatalogPipelineSignal(signal, options.allowMultimodalChatPipelineTag)
     || EXCLUDED_CATALOG_SIGNAL_EXACT_MATCHES.has(signal)
     || EXCLUDED_CATALOG_SIGNAL_FRAGMENTS.some((fragment) => signal.includes(fragment))
     || hasUnsupportedMtpSignal(signal)
   ));
+}
+
+function isExcludedCatalogPipelineSignal(signal: string, allowMultimodalChatPipelineTag: boolean | undefined): boolean {
+  return EXCLUDED_CATALOG_PIPELINE_TAGS.has(signal)
+    && !(allowMultimodalChatPipelineTag === true && MULTIMODAL_CHAT_PIPELINE_TAGS.has(signal));
 }
 
 function normalizeCatalogSignal(value: string | null | undefined): string | null {
@@ -278,6 +301,31 @@ export function rankCatalogGgufEntries<T extends HuggingFaceSibling | HuggingFac
   return entries
     .filter((entry) => isEligibleGgufEntry(entry))
     .sort(compareCatalogGgufEntries);
+}
+
+function hasGgufSummarySignal(item: HuggingFaceModelSummary): boolean {
+  if (item.gguf) {
+    return true;
+  }
+
+  const directSignals = [
+    item.id,
+    item.modelId,
+    ...(item.tags ?? []),
+  ];
+  if (directSignals.some((value) => normalizeCatalogSignal(value)?.includes('gguf'))) {
+    return true;
+  }
+
+  return (item.siblings ?? []).some((entry) => getFileName(entry).toLowerCase().endsWith('.gguf'));
+}
+
+export function getProjectorCompanionEntries<T extends HuggingFaceSibling | HuggingFaceTreeEntry>(entries: T[]): T[] {
+  return entries.filter((entry) => isProjectorFileName(getFileName(entry)));
+}
+
+export function hasProjectorCompanionEntries(entries: (HuggingFaceSibling | HuggingFaceTreeEntry)[]): boolean {
+  return getProjectorCompanionEntries(entries).length > 0;
 }
 
 export function buildCatalogModelVariantsFromRankedEntries(
@@ -413,12 +461,6 @@ export function resolveQuantizationLabel(fileName: string): string | null {
   }
 
   return null;
-}
-
-export function isProjectorFileName(fileName: string): boolean {
-  const normalizedPath = fileName.trim().toLowerCase();
-  const normalized = normalizedPath.split(/[\\/]/).pop() ?? normalizedPath;
-  return /(^|[._-])(mmproj|mm_projector|clip-projector|clip_projector)([._-]|$)/.test(normalized);
 }
 
 export function isUnsupportedMtpFileName(fileName: string): boolean {

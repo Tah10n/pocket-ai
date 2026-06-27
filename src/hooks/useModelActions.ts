@@ -21,6 +21,7 @@ type UseModelActionsInput = {
   unloadModel: () => Promise<void>;
   startDownload: (model: ModelMetadata) => void;
   cancelDownload: (modelId: string) => void;
+  openProjectorChoice?: (model: ModelMetadata) => void;
   refreshDownloadedModels: () => void;
   requestCatalogRefresh: () => void;
   showError: (scope: string, error: unknown, reportContext?: ErrorReportContext) => void;
@@ -35,6 +36,7 @@ export function useModelActions({
   unloadModel,
   startDownload,
   cancelDownload,
+  openProjectorChoice,
   refreshDownloadedModels,
   requestCatalogRefresh,
   showError,
@@ -76,11 +78,12 @@ export function useModelActions({
       startDownload,
       openTokenSettings,
       openModelPage,
+      onProjectorChoiceRequired: openProjectorChoice,
       onError: (error) => {
         showError('ModelsList.handleDownload', error);
       },
     });
-  }, [openModelPage, openTokenSettings, showError, startDownload, t]);
+  }, [openModelPage, openProjectorChoice, openTokenSettings, showError, startDownload, t]);
 
   const performLoad = useCallback(async (modelId: string, options?: LoadModelOptions) => {
     try {
@@ -129,6 +132,7 @@ export function useModelActions({
           status: engineState.status,
           activeModelId: engineState.activeModelId,
           loadProgress: engineState.loadProgress,
+          diagnostics: engineState.diagnostics,
         },
         options: options ? {
           allowUnsafeMemoryLoad: options.allowUnsafeMemoryLoad,
@@ -140,6 +144,7 @@ export function useModelActions({
     }
   }, [
     engineState.activeModelId,
+    engineState.diagnostics,
     engineState.loadProgress,
     engineState.status,
     refreshDownloadedModels,

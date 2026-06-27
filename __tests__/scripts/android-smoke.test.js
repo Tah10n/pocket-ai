@@ -1,5 +1,6 @@
 const {
   buildMetroBundlePath,
+  buildMetroReverseSpecs,
   evaluateApkReuse,
   evaluateInstallReuse,
   isInsufficientStorageInstallFailure,
@@ -25,6 +26,30 @@ describe('android-smoke Metro prewarm', () => {
     expect(buildMetroBundlePath('./src/index.ts')).toBe(
       '/src/index.bundle?platform=android&dev=true&lazy=true&minify=false&app=com.github.tah10n.pocketai&modulesOnly=false&runModule=true&excludeSource=true&sourcePaths=url-server',
     );
+  });
+});
+
+describe('android-smoke Metro adb reverse specs', () => {
+  it('uses the standard React Native device Metro port when Metro is on the default host port', () => {
+    expect(buildMetroReverseSpecs(8081)).toEqual([
+      {
+        devicePort: 8081,
+        hostPort: 8081,
+      },
+    ]);
+  });
+
+  it('maps the standard device Metro port to the selected host port when Metro moves', () => {
+    expect(buildMetroReverseSpecs('8082')).toEqual([
+      {
+        devicePort: 8081,
+        hostPort: 8082,
+      },
+      {
+        devicePort: 8082,
+        hostPort: 8082,
+      },
+    ]);
   });
 });
 

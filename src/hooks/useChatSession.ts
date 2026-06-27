@@ -1,5 +1,6 @@
 import { AppState, AppStateStatus } from 'react-native';
 import { useCallback, useEffect, useRef } from 'react';
+import * as FileSystem from 'expo-file-system/legacy';
 import { llmEngineService } from '../services/LLMEngineService';
 import { performanceMonitor } from '../services/PerformanceMonitor';
 import { GenerationParameters, getGenerationParametersForModel, getSettings } from '../services/SettingsStore';
@@ -13,12 +14,18 @@ import {
   ChatMessage,
   ChatThread,
   LlmChatMessage,
+  LlmContentPart,
+  LlmInputAudioContentPart,
+  LlmTextContentPart,
   DEFAULT_PRESET_SNAPSHOT,
   DEFAULT_SYSTEM_PROMPT,
+  DOCUMENT_ATTACHMENT_MESSAGE_PLACEHOLDER,
   PresetSnapshot,
   createChatId,
   getThreadActiveModelId,
 } from '../types/chat';
+import type { ChatAttachment, ChatDocumentAttachmentDraft, ChatMediaAttachmentDraft } from '../types/attachments';
+import type { AttachmentDraft, MultimodalReadinessState } from '../types/multimodal';
 import { flushPendingChatPersistenceWrites, useChatStore } from '../store/chatStore';
 import {
   DEFAULT_INFERENCE_PROMPT_SAFETY_MARGIN_TOKENS,
@@ -34,6 +41,32 @@ import { resolveModelReasoningCapability, resolveReasoningRuntimeConfig } from '
 import { syncThreadParameters } from '../utils/chatThreadParameters';
 import { PrivateStorageUnavailableError, getPrivateStorageHealthSnapshot, isPrivateStorageWritable } from '../services/storage';
 import { useTruncationTracking } from './useTruncationTracking';
+import {
+  materializeAttachmentDraftsForMessage,
+  materializeDocumentDraftsForProcessing,
+  materializeMediaDraftsForMessage,
+} from '../services/ChatAttachmentStorageService';
+import {
+  buildDocumentAttachmentTextPart,
+  chatAttachmentProcessorRegistry,
+  withProcessedDocumentAttachmentMetadata,
+} from '../services/ChatAttachmentProcessorRegistry';
+import { sanitizeMultimodalFailureReason } from '../utils/multimodalFailureReason';
+import {
+  MAX_CHAT_IMAGE_ATTACHMENTS,
+  getChatImageAttachmentMediaPaths,
+  getSendableDraftImageAttachments,
+  normalizeChatAttachmentLocalUri,
+  toAttachmentMediaPath,
+  validateChatImageAttachmentLimit,
+} from '../utils/chatImageAttachments';
+import {
+  getSendableDraftDocumentAttachments,
+  getSendableDraftMediaAttachments,
+  validateChatDocumentAttachmentLimit,
+  validateChatMediaAttachmentLimit,
+} from '../utils/chatAttachments';
+import { getLlmContentPartSignatureEntry } from '../utils/llmContentPartSignature';
 
 export { SUMMARY_AFFORDANCE_MIN_TRUNCATED_MESSAGES } from '../utils/inferenceWindow';
 const DEFAULT_CONTEXT_SIZE = 4096;
@@ -43,6 +76,14 @@ export const LONG_STREAM_PATCH_INTERVAL_MS = 320;
 export const LONG_STREAM_PATCH_TOKEN_THRESHOLD = 64;
 export const LONG_STREAM_PATCH_CHAR_THRESHOLD = 1200;
 const STREAM_BOUNDARY_PATTERN = /[.!?。！？](?:["')\]}]|[\s])*$/;
+const ATTACHMENT_FILE_CHECK_CONCURRENCY = 8;
+const ESTIMATED_MEDIA_PROMPT_TOKENS_PER_INPUT = 576;
+const EXACT_MEDIA_PROMPT_RECOUNT_MARGIN_TOKENS_PER_INPUT = 1024;
+
+type ProcessedDocumentAttachmentDraftsForInference = {
+  attachments: Extract<ChatAttachment, { kind: 'document' }>[];
+  contentParts: LlmTextContentPart[];
+};
 
 interface ActiveGenerationState {
   threadId: string;
@@ -52,9 +93,209 @@ interface ActiveGenerationState {
   flushPendingAssistantPatch?: () => void;
 }
 
+export type AppendUserMessageOptions = {
+  attachmentDrafts?: readonly AttachmentDraft[];
+  documentAttachmentDrafts?: readonly ChatDocumentAttachmentDraft[];
+  mediaAttachmentDrafts?: readonly ChatMediaAttachmentDraft[];
+  multimodalReadiness?: MultimodalReadinessState;
+  onUserMessageAppended?: (message: ChatMessage) => void;
+};
+
+export type RegenerateUserMessageOptions = {
+  multimodalReadiness?: MultimodalReadinessState;
+};
+
 const sharedGenerationState: { current: ActiveGenerationState | null } = {
   current: null,
 };
+
+function resolveReadyAttachmentDrafts({
+  drafts,
+  readiness,
+  expectedModelId,
+}: {
+  drafts: readonly AttachmentDraft[];
+  readiness?: MultimodalReadinessState;
+  expectedModelId?: string | null;
+}): AttachmentDraft[] {
+  if (drafts.length === 0) {
+    return [];
+  }
+
+  const nonFailedDrafts = drafts.filter((draft) => draft.copyStatus !== 'failed');
+  if (nonFailedDrafts.length === 0) {
+    return [];
+  }
+
+  const limit = validateChatImageAttachmentLimit(0, nonFailedDrafts.length);
+  if (!limit.ok) {
+    throw new AppError('chat_attachment_limit_exceeded', 'Too many image attachments.');
+  }
+
+  const sendableDrafts = getSendableDraftImageAttachments(nonFailedDrafts);
+  if (
+    sendableDrafts.length !== nonFailedDrafts.length
+    || sendableDrafts.some((draft) => draft.copyStatus !== 'copied')
+  ) {
+    throw new AppError('chat_attachment_not_ready', 'Image attachments are not ready to send.');
+  }
+
+  if (!isVisionReady(readiness, expectedModelId)) {
+    throw new AppError('multimodal_not_ready', 'Vision chat is not ready for image attachments.', {
+      details: {
+        readinessStatus: readiness?.status ?? 'unknown',
+        readinessModelId: readiness?.modelId,
+        expectedModelId: expectedModelId ?? undefined,
+        attachmentCount: sendableDrafts.length,
+      },
+    });
+  }
+
+  return sendableDrafts;
+}
+
+function resolveReadyDocumentAttachmentDrafts(
+  drafts: readonly ChatDocumentAttachmentDraft[],
+): ChatDocumentAttachmentDraft[] {
+  if (drafts.length === 0) {
+    return [];
+  }
+
+  const nonFailedDrafts = drafts.filter((draft) => draft.copyStatus !== 'failed');
+  if (nonFailedDrafts.length === 0) {
+    return [];
+  }
+
+  const limit = validateChatDocumentAttachmentLimit(0, nonFailedDrafts.length);
+  if (!limit.ok) {
+    throw new AppError('chat_attachment_limit_exceeded', 'Too many document attachments.');
+  }
+
+  const sendableDrafts = getSendableDraftDocumentAttachments(nonFailedDrafts);
+  if (
+    sendableDrafts.length !== nonFailedDrafts.length
+    || sendableDrafts.some((draft) => draft.copyStatus !== 'copied')
+  ) {
+    throw new AppError('chat_attachment_not_ready', 'Document attachments are not ready to send.');
+  }
+
+  return sendableDrafts;
+}
+
+function resolveReadyMediaAttachmentDrafts({
+  drafts,
+  readiness,
+  expectedModelId,
+}: {
+  drafts: readonly ChatMediaAttachmentDraft[];
+  readiness?: MultimodalReadinessState;
+  expectedModelId?: string | null;
+}): ChatMediaAttachmentDraft[] {
+  if (drafts.length === 0) {
+    return [];
+  }
+
+  const nonFailedDrafts = drafts.filter((draft) => draft.copyStatus !== 'failed');
+  if (nonFailedDrafts.length === 0) {
+    return [];
+  }
+
+  const audioCount = nonFailedDrafts.filter((draft) => draft.kind === 'audio').length;
+  const audioLimit = validateChatMediaAttachmentLimit('audio', 0, audioCount);
+  if (!audioLimit.ok) {
+    throw new AppError('chat_attachment_limit_exceeded', 'Too many media attachments.');
+  }
+
+  const sendableDrafts = getSendableDraftMediaAttachments(nonFailedDrafts);
+  if (
+    sendableDrafts.length !== nonFailedDrafts.length
+    || sendableDrafts.some((draft) => draft.copyStatus !== 'copied')
+  ) {
+    throw new AppError('chat_attachment_not_ready', 'Media attachments are not ready to send.');
+  }
+
+  if (sendableDrafts.some((draft) => draft.kind === 'audio')) {
+    if (
+      readiness?.status !== 'ready'
+      || !readiness.support.includes('audio')
+      || (expectedModelId && readiness.modelId !== expectedModelId)
+    ) {
+      throw new AppError('multimodal_not_ready', 'Audio chat is not ready for audio attachments.', {
+        details: {
+          readinessStatus: readiness?.status ?? 'unknown',
+          readinessModelId: readiness?.modelId,
+          expectedModelId: expectedModelId ?? undefined,
+          attachmentKind: 'audio',
+        },
+      });
+    }
+  }
+
+  return sendableDrafts;
+}
+
+async function processDocumentAttachmentDraftsForInference(
+  drafts: readonly ChatDocumentAttachmentDraft[],
+): Promise<ProcessedDocumentAttachmentDraftsForInference> {
+  if (drafts.length === 0) {
+    return { attachments: [], contentParts: [] };
+  }
+
+  const processingAttachments = materializeDocumentDraftsForProcessing({
+    threadId: 'pending',
+    messageId: 'pending',
+    drafts,
+  });
+  const results = await mapWithConcurrency(
+    processingAttachments,
+    ATTACHMENT_FILE_CHECK_CONCURRENCY,
+    async (attachment: Extract<ChatAttachment, { kind: 'document' }>) => {
+      const result = await chatAttachmentProcessorRegistry.processDocumentTextAttachment(attachment);
+      return {
+        attachment: withProcessedDocumentAttachmentMetadata(attachment, result),
+        contentPart: buildDocumentAttachmentTextPart(result),
+      };
+    },
+  );
+
+  return {
+    attachments: results.map((result) => result.attachment),
+    contentParts: results.map((result) => result.contentPart),
+  };
+}
+
+function assertActiveMultimodalReadyForAttachmentMediaPaths({
+  mediaPaths,
+  multimodalReadiness,
+  expectedModelId,
+  mediaPathOccurrenceCount = mediaPaths.length,
+}: {
+  mediaPaths: readonly string[];
+  multimodalReadiness?: MultimodalReadinessState;
+  expectedModelId?: string | null;
+  mediaPathOccurrenceCount?: number;
+}): MultimodalReadinessState | undefined {
+  return llmEngineService.assertActiveMultimodalReadyForMediaPaths({
+    mediaPaths,
+    multimodalReadiness,
+    expectedModelId,
+    mediaPathOccurrenceCount,
+  });
+}
+
+function getDraftImageAttachmentMediaPaths(drafts: readonly AttachmentDraft[]): string[] {
+  return Array.from(new Set(drafts
+    .map((draft) => normalizeChatAttachmentLocalUri(draft.localUri))
+    .filter((localUri): localUri is string => localUri !== null)
+    .map(toAttachmentMediaPath)
+    .filter((mediaPath): mediaPath is string => mediaPath !== null)));
+}
+
+function getSanitizedErrorDetails(error: unknown): { errorName: string } | { errorType: string } {
+  return error instanceof Error
+    ? { errorName: error.name || 'Error' }
+    : { errorType: typeof error };
+}
 
 function isMatchingGeneration(threadId: string, messageId: string) {
   return (
@@ -170,6 +411,985 @@ function assertPrivateStorageWritableForChatMutation() {
   });
 }
 
+function isFileSystemDirectory(info: { isDirectory?: boolean }): boolean {
+  return info.isDirectory === true;
+}
+
+function resolvePersistedAssistantErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : 'Unknown chat generation error';
+  return sanitizeMultimodalFailureReason(message) ?? message;
+}
+
+function resolveUserFacingGenerationError(error: unknown, message: string): AppError {
+  const appError = toAppError(error);
+  return new AppError(appError.code, message);
+}
+
+function findLatestUserMessageIdBeforeAssistant(thread: ChatThread, assistantMessageId: string): string | null {
+  const assistantIndex = thread.messages.findIndex((message) => message.id === assistantMessageId);
+  const startIndex = assistantIndex >= 0 ? assistantIndex - 1 : thread.messages.length - 1;
+
+  for (let index = startIndex; index >= 0; index -= 1) {
+    const message = thread.messages[index];
+    if (message.role === 'user' && (message.kind ?? 'message') === 'message') {
+      return message.id;
+    }
+  }
+
+  return null;
+}
+
+async function doesChatAttachmentFileExist(localUri: string): Promise<boolean> {
+  try {
+    const info = await FileSystem.getInfoAsync(localUri);
+    return info.exists === true && !isFileSystemDirectory(info);
+  } catch {
+    return false;
+  }
+}
+
+function isVisionReady(readiness?: MultimodalReadinessState, expectedModelId?: string | null): boolean {
+  return readiness?.status === 'ready'
+    && readiness.support.includes('vision')
+    && (!expectedModelId || readiness.modelId === expectedModelId);
+}
+
+function isAudioReady(readiness?: MultimodalReadinessState, expectedModelId?: string | null): boolean {
+  return readiness?.status === 'ready'
+    && readiness.support.includes('audio')
+    && (!expectedModelId || readiness.modelId === expectedModelId);
+}
+
+function messageHasAttachments(message: ChatMessage | undefined): boolean {
+  return (message?.attachments?.length ?? 0) > 0;
+}
+
+function isGenericChatAttachment(
+  attachment: NonNullable<ChatMessage['attachments']>[number],
+): attachment is ChatAttachment {
+  return 'kind' in attachment;
+}
+
+function isInferenceAudioAttachment(
+  attachment: NonNullable<ChatMessage['attachments']>[number],
+): attachment is Extract<ChatAttachment, { kind: 'audio' }> {
+  return isGenericChatAttachment(attachment)
+    && attachment.kind === 'audio'
+    && attachment.state === 'ready';
+}
+
+function getAudioAttachmentMediaPath(
+  attachment: NonNullable<ChatMessage['attachments']>[number],
+): string | null {
+  if (!isInferenceAudioAttachment(attachment)) {
+    return null;
+  }
+
+  const localUri = normalizeChatAttachmentLocalUri(attachment.localUri);
+  return localUri ? toAttachmentMediaPath(localUri) : null;
+}
+
+function getAudioContentPartsFromAttachments(
+  attachments: ChatMessage['attachments'] | undefined,
+): LlmInputAudioContentPart[] {
+  return (attachments ?? []).flatMap((attachment) => {
+    if (!isInferenceAudioAttachment(attachment)) {
+      return [];
+    }
+
+    const mediaPath = getAudioAttachmentMediaPath(attachment);
+    if (!mediaPath) {
+      return [];
+    }
+
+    return [{
+      type: 'input_audio',
+      input_audio: {
+        format: attachment.audio.format,
+        url: mediaPath,
+      },
+    }];
+  });
+}
+
+function resolveLlmContentPartsForResolvedAttachments(
+  message: LlmChatMessage,
+  _originalAttachments: NonNullable<ChatMessage['attachments']>,
+  resolvedAttachments: NonNullable<ChatMessage['attachments']>,
+): LlmContentPart[] | undefined {
+  const retainedContentParts = message.contentParts?.filter((part) => {
+    return part.type !== 'input_audio';
+  }) ?? [];
+  const resolvedAudioContentParts = getAudioContentPartsFromAttachments(resolvedAttachments);
+  const contentParts = [
+    ...retainedContentParts,
+    ...resolvedAudioContentParts,
+  ];
+
+  return contentParts.length > 0 ? contentParts : undefined;
+}
+
+function omitInputAudioContentParts(message: Pick<ChatMessage, 'contentParts'>): LlmContentPart[] | undefined {
+  const retainedContentParts = message.contentParts?.filter((part) => part.type !== 'input_audio') ?? [];
+  return retainedContentParts.length > 0 ? retainedContentParts : undefined;
+}
+
+function shouldRetainAttachmentForInference(
+  attachment: NonNullable<ChatMessage['attachments']>[number],
+  readiness?: MultimodalReadinessState,
+  expectedModelId?: string | null,
+): boolean {
+  if (!isGenericChatAttachment(attachment)) {
+    return isVisionReady(readiness, expectedModelId);
+  }
+
+  switch (attachment.kind) {
+    case 'audio':
+      return isAudioReady(readiness, expectedModelId);
+    case 'document':
+      return true;
+    case 'image':
+      return isVisionReady(readiness, expectedModelId);
+    case 'video':
+    default:
+      return false;
+  }
+}
+
+function omitLlmInferenceAttachments(message: LlmChatMessage): LlmChatMessage {
+  if (!message.attachments?.length && !message.mediaPaths?.length && !message.contentParts?.length) {
+    return message;
+  }
+
+  const {
+    attachments: _attachments,
+    mediaPaths: _mediaPaths,
+    ...messageWithoutAttachments
+  } = message;
+  const retainedContentParts = message.contentParts?.filter((part) => part.type === 'text') ?? [];
+  return {
+    ...messageWithoutAttachments,
+    ...(retainedContentParts.length > 0 ? { contentParts: retainedContentParts } : null),
+  };
+}
+
+function resolveLlmMessageSupportedInferenceContent(
+  message: LlmChatMessage,
+  readiness?: MultimodalReadinessState,
+  expectedModelId?: string | null,
+): LlmChatMessage {
+  const attachments = message.attachments;
+  if (!attachments?.length) {
+    if (!message.contentParts?.some((part) => part.type === 'input_audio')) {
+      return message;
+    }
+
+    const {
+      contentParts: _contentParts,
+      ...messageWithoutContentParts
+    } = message;
+    const contentParts = omitInputAudioContentParts(message);
+    return {
+      ...messageWithoutContentParts,
+      ...(contentParts && contentParts.length > 0 ? { contentParts } : null),
+    };
+  }
+
+  const retainedAttachments = attachments.filter((attachment) => (
+    shouldRetainAttachmentForInference(attachment, readiness, expectedModelId)
+  ));
+  const mediaPaths = getChatImageAttachmentMediaPaths(retainedAttachments);
+  const contentParts = resolveLlmContentPartsForResolvedAttachments(message, attachments, retainedAttachments);
+  const {
+    attachments: _attachments,
+    mediaPaths: _mediaPaths,
+    contentParts: _contentParts,
+    ...messageWithoutInferenceContent
+  } = message;
+
+  return {
+    ...messageWithoutInferenceContent,
+    ...(retainedAttachments.length > 0 ? { attachments: retainedAttachments } : null),
+    ...(mediaPaths.length > 0 ? { mediaPaths } : null),
+    ...(contentParts && contentParts.length > 0 ? { contentParts } : null),
+  };
+}
+
+function normalizeLlmInferenceMediaPaths(paths: readonly string[] | undefined): string[] {
+  if (!paths?.length) {
+    return [];
+  }
+
+  return Array.from(new Set(paths
+    .map((path) => path.trim())
+    .filter((path) => path.length > 0)));
+}
+
+function getLlmInferenceMessageMediaPaths(message: LlmChatMessage): string[] {
+  return normalizeLlmInferenceMediaPaths([
+    ...(message.mediaPaths ?? []),
+    ...(message.contentParts
+      ?.filter((part) => part.type === 'image_url')
+      .map((part) => part.image_url.url) ?? []),
+    ...getChatImageAttachmentMediaPaths(message.attachments),
+  ]);
+}
+
+function getInferenceImageAttachmentCount(attachments: ChatMessage['attachments'] | undefined): number {
+  return getChatImageAttachmentMediaPaths(attachments).length;
+}
+
+function getLlmInferenceMessagesMediaPaths(messages: readonly LlmChatMessage[]): string[] {
+  return normalizeLlmInferenceMediaPaths(messages.flatMap(getLlmInferenceMessageMediaPaths));
+}
+
+function estimateLlmInferenceMediaPromptTokens(messages: readonly LlmChatMessage[]): number {
+  return getLlmInferenceMessagesMediaPaths(messages).length * ESTIMATED_MEDIA_PROMPT_TOKENS_PER_INPUT;
+}
+
+function resolveExactMediaPromptRecountMarginTokens(messages: readonly LlmChatMessage[]): number {
+  const mediaPathCount = getLlmInferenceMessagesMediaPaths(messages).length;
+  if (mediaPathCount === 0) {
+    return 0;
+  }
+
+  return Math.max(
+    EXACT_MEDIA_PROMPT_RECOUNT_MARGIN_TOKENS_PER_INPUT,
+    mediaPathCount * EXACT_MEDIA_PROMPT_RECOUNT_MARGIN_TOKENS_PER_INPUT,
+  );
+}
+
+function getLlmInferenceMessageContentPartSignatureEntries(message: LlmChatMessage): string[] {
+  return message.contentParts?.map(getLlmContentPartSignatureEntry) ?? [];
+}
+
+function getLlmInferenceMessageContentPartMediaCount(message: LlmChatMessage): number {
+  return message.contentParts?.filter((part) => part.type !== 'text').length ?? 0;
+}
+
+function getLlmInferenceMessageContentPartTextCount(message: LlmChatMessage): number {
+  return message.contentParts?.filter((part) => part.type === 'text' && part.text.trim().length > 0).length ?? 0;
+}
+
+function buildLlmInferenceMessagesSignature(messages: readonly LlmChatMessage[]): string {
+  let hash = 2166136261;
+
+  for (const message of messages) {
+    hash = updateLlmInferenceSignatureHash(hash, message.role);
+    hash = updateLlmInferenceSignatureHash(hash, '\u0000');
+    hash = updateLlmInferenceSignatureHash(hash, String(message.content.length));
+    hash = updateLlmInferenceSignatureHash(hash, '\u0001');
+    hash = updateLlmInferenceSignatureHash(hash, message.content);
+    hash = updateLlmInferenceSignatureHash(hash, '\u0002');
+    const mediaPaths = getLlmInferenceMessageMediaPaths(message);
+    hash = updateLlmInferenceSignatureHash(hash, String(mediaPaths.length));
+    hash = updateLlmInferenceSignatureHash(hash, '\u0003');
+    for (const mediaPath of mediaPaths) {
+      hash = updateLlmInferenceSignatureHash(hash, mediaPath);
+      hash = updateLlmInferenceSignatureHash(hash, '\u0004');
+    }
+    const contentPartEntries = getLlmInferenceMessageContentPartSignatureEntries(message);
+    hash = updateLlmInferenceSignatureHash(hash, String(contentPartEntries.length));
+    hash = updateLlmInferenceSignatureHash(hash, '\u0005');
+    for (const contentPartEntry of contentPartEntries) {
+      hash = updateLlmInferenceSignatureHash(hash, contentPartEntry);
+      hash = updateLlmInferenceSignatureHash(hash, '\u0006');
+    }
+  }
+
+  return `${messages.length}:${hash.toString(36)}`;
+}
+
+function updateLlmInferenceSignatureHash(hash: number, value: string): number {
+  let nextHash = hash >>> 0;
+  for (let index = 0; index < value.length; index += 1) {
+    nextHash ^= value.charCodeAt(index);
+    nextHash = Math.imul(nextHash, 16777619) >>> 0;
+  }
+  return nextHash;
+}
+
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  limit: number,
+  mapper: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  if (items.length === 0) {
+    return [];
+  }
+
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  const workerCount = Math.max(1, Math.min(limit, items.length));
+
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (nextIndex < items.length) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      results[currentIndex] = await mapper(items[currentIndex], currentIndex);
+    }
+  }));
+
+  return results;
+}
+
+function throwMissingAttachments(
+  messageId: string | undefined,
+  attachments: readonly Pick<AttachmentDraft, 'id' | 'pathCategory'>[],
+): never {
+  const attachmentIds = attachments
+    .map((attachment) => attachment.id)
+    .filter((attachmentId): attachmentId is string => typeof attachmentId === 'string' && attachmentId.length > 0);
+  const pathCategories = Array.from(new Set(attachments.map((attachment) => attachment.pathCategory)));
+  throw new AppError(
+    'chat_attachment_missing',
+    'One or more selected image attachments are no longer available. Remove the image and try again.',
+    {
+      details: {
+        ...(messageId ? { messageId } : null),
+        ...(attachmentIds.length === 1 ? { attachmentId: attachmentIds[0] } : null),
+        attachmentIds,
+        ...(pathCategories.length === 1 ? { pathCategory: pathCategories[0] } : null),
+        pathCategories,
+      },
+    },
+  );
+}
+
+async function assertDraftAttachmentFilesExist(drafts: readonly AttachmentDraft[]): Promise<void> {
+  if (drafts.length === 0) {
+    return;
+  }
+
+  const attachmentChecks = await mapWithConcurrency(
+    drafts,
+    ATTACHMENT_FILE_CHECK_CONCURRENCY,
+    async (draft) => {
+      const localUri = normalizeChatAttachmentLocalUri(draft.localUri);
+      return {
+        draft,
+        localUri,
+        exists: localUri ? await doesChatAttachmentFileExist(localUri) : false,
+      };
+    },
+  );
+
+  const missingDrafts = attachmentChecks
+    .filter(({ localUri, exists }) => !localUri || !exists)
+    .map(({ draft }) => ({
+      id: draft.id,
+      pathCategory: draft.pathCategory,
+    }));
+
+  if (missingDrafts.length > 0) {
+    throwMissingAttachments(undefined, missingDrafts);
+  }
+}
+
+async function assertMediaDraftAttachmentFilesExist(drafts: readonly ChatMediaAttachmentDraft[]): Promise<void> {
+  if (drafts.length === 0) {
+    return;
+  }
+
+  const fileDrafts = drafts.map((draft) => ({
+    id: draft.id,
+    pathCategory: draft.pathCategory,
+    localUri: draft.localUri,
+  }));
+  const attachmentChecks = await mapWithConcurrency(
+    fileDrafts,
+    ATTACHMENT_FILE_CHECK_CONCURRENCY,
+    async (draft) => {
+      const localUri = normalizeChatAttachmentLocalUri(draft.localUri);
+      return {
+        draft,
+        localUri,
+        exists: localUri ? await doesChatAttachmentFileExist(localUri) : false,
+      };
+    },
+  );
+
+  const missingDrafts = attachmentChecks
+    .filter(({ localUri, exists }) => !localUri || !exists)
+    .map(({ draft }) => ({
+      id: draft.id,
+      pathCategory: draft.pathCategory,
+    }));
+
+  if (missingDrafts.length > 0) {
+    throwMissingAttachments(undefined, missingDrafts);
+  }
+}
+
+async function assertMessageAttachmentFilesExist(message: ChatMessage): Promise<void> {
+  const attachments = message.attachments;
+  if (!attachments?.length) {
+    return;
+  }
+
+  const attachmentChecks = await mapWithConcurrency(
+    attachments,
+    ATTACHMENT_FILE_CHECK_CONCURRENCY,
+    async (attachment) => {
+      const localUri = normalizeChatAttachmentLocalUri(attachment.localUri);
+      return {
+        attachment,
+        localUri,
+        exists: localUri ? await doesChatAttachmentFileExist(localUri) : false,
+      };
+    },
+  );
+
+  const missingAttachments = attachmentChecks
+    .filter(({ localUri, exists }) => !localUri || !exists)
+    .map(({ attachment }) => ({
+      id: attachment.id,
+      pathCategory: attachment.pathCategory,
+    }));
+
+  if (missingAttachments.length > 0) {
+    throwMissingAttachments(message.id, missingAttachments);
+  }
+}
+
+function withResolvedChatMessageInferenceContent(
+  message: ChatMessage,
+  attachments: NonNullable<ChatMessage['attachments']> | undefined,
+): ChatMessage {
+  const contentParts = omitInputAudioContentParts(message);
+  const {
+    attachments: _attachments,
+    contentParts: _contentParts,
+    ...messageWithoutInferenceContent
+  } = message;
+
+  return {
+    ...messageWithoutInferenceContent,
+    ...(attachments && attachments.length > 0 ? { attachments } : null),
+    ...(contentParts && contentParts.length > 0 ? { contentParts } : null),
+  };
+}
+
+function omitUnsupportedChatMessageInferenceAttachments(
+  message: ChatMessage,
+  readiness?: MultimodalReadinessState,
+  expectedModelId?: string | null,
+): ChatMessage {
+  const attachments = message.attachments;
+  const hasInputAudioContentParts = message.contentParts?.some((part) => part.type === 'input_audio') === true;
+  if (!attachments?.length) {
+    return hasInputAudioContentParts
+      ? withResolvedChatMessageInferenceContent(message, undefined)
+      : message;
+  }
+
+  const retainedAttachments = attachments.filter((attachment) => (
+    shouldRetainAttachmentForInference(attachment, readiness, expectedModelId)
+  ));
+  if (retainedAttachments.length === attachments.length && !hasInputAudioContentParts) {
+    return message;
+  }
+
+  return withResolvedChatMessageInferenceContent(message, retainedAttachments);
+}
+
+function stripUnsupportedThreadInferenceAttachments(
+  thread: ChatThread,
+  readiness?: MultimodalReadinessState,
+  expectedModelId?: string | null,
+): ChatThread {
+  if (!thread.messages.some((message) => message.attachments?.length || message.contentParts?.some((part) => part.type === 'input_audio'))) {
+    return thread;
+  }
+
+  return {
+    ...thread,
+    messages: thread.messages.map((message) => omitUnsupportedChatMessageInferenceAttachments(
+      message,
+      readiness,
+      expectedModelId,
+    )),
+  };
+}
+
+async function resolveChatMessageAudioAttachmentsForInference(
+  message: ChatMessage,
+  isLatestUserMessage: boolean,
+  latestUserMessageId?: string | null,
+  resolveAttachmentExists: (localUri: string) => Promise<boolean> = doesChatAttachmentFileExist,
+  readiness?: MultimodalReadinessState,
+  expectedModelId?: string | null,
+): Promise<ChatMessage> {
+  const attachments = message.attachments;
+  const hasInputAudioContentParts = message.contentParts?.some((part) => part.type === 'input_audio') === true;
+  if (!attachments?.length) {
+    return hasInputAudioContentParts
+      ? withResolvedChatMessageInferenceContent(message, undefined)
+      : message;
+  }
+
+  const nextAttachments: NonNullable<ChatMessage['attachments']> = [];
+  let didInspectAudioAttachments = false;
+  for (const attachment of attachments) {
+    if (!isGenericChatAttachment(attachment) || attachment.kind !== 'audio') {
+      nextAttachments.push(attachment);
+      continue;
+    }
+
+    didInspectAudioAttachments = true;
+    const localUri = normalizeChatAttachmentLocalUri(attachment.localUri);
+    const exists = localUri ? await resolveAttachmentExists(localUri) : false;
+    if (!localUri || !exists) {
+      if (isLatestUserMessage) {
+        throwMissingAttachments(latestUserMessageId ?? undefined, [attachment]);
+      }
+      continue;
+    }
+
+    const resolvedAttachment = localUri !== attachment.localUri
+      ? { ...attachment, localUri }
+      : attachment;
+    if (!shouldRetainAttachmentForInference(resolvedAttachment, readiness, expectedModelId)) {
+      continue;
+    }
+
+    nextAttachments.push(resolvedAttachment);
+  }
+
+  return didInspectAudioAttachments || hasInputAudioContentParts
+    ? withResolvedChatMessageInferenceContent(message, nextAttachments)
+    : message;
+}
+
+async function assertUserMessageAttachmentsReadyForRegeneration(
+  message: ChatMessage,
+  readiness?: MultimodalReadinessState,
+  expectedModelId?: string | null,
+): Promise<MultimodalReadinessState | undefined> {
+  if (!messageHasAttachments(message)) {
+    return readiness;
+  }
+
+  assertMultimodalReadyForInferenceAttachments([message], readiness, expectedModelId);
+  assertAudioReadyForInferenceAttachments([message], readiness, expectedModelId);
+  const attachments = message.attachments ?? [];
+  const mediaPaths = getChatImageAttachmentMediaPaths(attachments);
+  if (mediaPaths.length === 0) {
+    await assertMessageAttachmentFilesExist(message);
+    return readiness;
+  }
+
+  const latestReadiness = assertActiveMultimodalReadyForAttachmentMediaPaths({
+    mediaPaths,
+    multimodalReadiness: readiness,
+    expectedModelId,
+    mediaPathOccurrenceCount: mediaPaths.length,
+  });
+  await assertMessageAttachmentFilesExist(message);
+  return latestReadiness;
+}
+
+async function resolveLlmMessageAttachmentsForInference(
+  message: LlmChatMessage,
+  isLatestUserMessage: boolean,
+  latestUserMessageId?: string | null,
+  resolveAttachmentExists: (localUri: string) => Promise<boolean> = doesChatAttachmentFileExist,
+  readiness?: MultimodalReadinessState,
+  expectedModelId?: string | null,
+): Promise<LlmChatMessage> {
+  const attachments = message.attachments;
+  if (!attachments?.length) {
+    if (!message.contentParts?.some((part) => part.type === 'input_audio')) {
+      return message;
+    }
+
+    const {
+      contentParts: _contentParts,
+      ...messageWithoutContentParts
+    } = message;
+    const contentParts = omitInputAudioContentParts(message);
+    return {
+      ...messageWithoutContentParts,
+      ...(contentParts && contentParts.length > 0 ? { contentParts } : null),
+    };
+  }
+
+  let didChangeAttachments = false;
+  const attachmentChecks = await mapWithConcurrency(
+    attachments,
+    ATTACHMENT_FILE_CHECK_CONCURRENCY,
+    async (attachment) => {
+      const localUri = normalizeChatAttachmentLocalUri(attachment.localUri);
+      return {
+        attachment,
+        localUri,
+        exists: localUri ? await resolveAttachmentExists(localUri) : false,
+      };
+    },
+  );
+
+  const nextAttachments: NonNullable<ChatMessage['attachments']> = [];
+  for (const { attachment, localUri, exists } of attachmentChecks) {
+    if (!localUri || !exists) {
+      didChangeAttachments = true;
+      if (isLatestUserMessage) {
+        throwMissingAttachments(latestUserMessageId ?? undefined, [attachment]);
+      }
+      continue;
+    }
+
+    const resolvedAttachment = localUri !== attachment.localUri
+      ? { ...attachment, localUri }
+      : attachment;
+    if (!shouldRetainAttachmentForInference(resolvedAttachment, readiness, expectedModelId)) {
+      didChangeAttachments = true;
+      continue;
+    }
+
+    if (resolvedAttachment !== attachment) {
+      didChangeAttachments = true;
+    }
+    nextAttachments.push(resolvedAttachment);
+  }
+
+  if (!didChangeAttachments && nextAttachments.length === attachments.length) {
+    return message;
+  }
+
+  const mediaPaths = getChatImageAttachmentMediaPaths(nextAttachments);
+
+  return {
+    ...message,
+    attachments: nextAttachments.length > 0 ? nextAttachments : undefined,
+    mediaPaths: mediaPaths.length > 0 ? mediaPaths : undefined,
+    contentParts: resolveLlmContentPartsForResolvedAttachments(message, attachments, nextAttachments),
+  };
+}
+
+function getLatestUserLlmMessageIndex(messages: readonly LlmChatMessage[]): number {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === 'user') {
+      return index;
+    }
+  }
+
+  return -1;
+}
+
+function hasLlmMessageInferenceContent(message: LlmChatMessage): boolean {
+  return message.role === 'system'
+    || message.content.trim().length > 0
+    || getLlmInferenceMessageContentPartTextCount(message) > 0
+    || (message.mediaPaths?.length ?? 0) > 0
+    || getLlmInferenceMessageContentPartMediaCount(message) > 0
+    || getChatImageAttachmentMediaPaths(message.attachments).length > 0;
+}
+
+function filterEmptyLlmInferenceMessages(messages: readonly LlmChatMessage[]): LlmChatMessage[] {
+  return messages.filter(hasLlmMessageInferenceContent);
+}
+
+function normalizeLlmInferenceMessagePairs(messages: readonly LlmChatMessage[]): LlmChatMessage[] {
+  const normalized: LlmChatMessage[] = [];
+  let lastNonSystemRole: LlmChatMessage['role'] | null = null;
+
+  messages.forEach((message) => {
+    if (message.role === 'system') {
+      normalized.push(message);
+      return;
+    }
+
+    if (message.role === 'assistant' && lastNonSystemRole !== 'user') {
+      return;
+    }
+
+    normalized.push(message);
+    lastNonSystemRole = message.role;
+  });
+
+  return normalized;
+}
+
+function createChatAttachmentExistenceResolver(): (localUri: string) => Promise<boolean> {
+  const cache = new Map<string, Promise<boolean>>();
+
+  return (localUri: string) => {
+    const existing = cache.get(localUri);
+    if (existing) {
+      return existing;
+    }
+
+    const result = doesChatAttachmentFileExist(localUri);
+    cache.set(localUri, result);
+    return result;
+  };
+}
+
+async function resolveRetainedMessagesForInferenceAttachments(
+  messages: readonly LlmChatMessage[],
+  multimodalReadiness?: MultimodalReadinessState,
+  latestUserMessageId?: string | null,
+  resolveAttachmentExists: (localUri: string) => Promise<boolean> = doesChatAttachmentFileExist,
+  expectedModelId?: string | null,
+): Promise<LlmChatMessage[]> {
+  const boundedMessages = constrainInferenceAttachmentsToRequestLimit(messages);
+  if (!boundedMessages.some((message) => message.attachments?.length)) {
+    assertAudioReadyForLlmMessages(boundedMessages, multimodalReadiness, expectedModelId);
+    return normalizeLlmInferenceMessagePairs(filterEmptyLlmInferenceMessages(boundedMessages));
+  }
+
+  const latestUserMessageIndex = getLatestUserLlmMessageIndex(boundedMessages);
+  const resolvedMessages = await mapWithConcurrency(
+    boundedMessages,
+    ATTACHMENT_FILE_CHECK_CONCURRENCY,
+    (message, index) => resolveLlmMessageAttachmentsForInference(
+      message,
+      index === latestUserMessageIndex,
+      latestUserMessageId,
+      resolveAttachmentExists,
+      multimodalReadiness,
+      expectedModelId,
+    ),
+  );
+
+  assertMultimodalReadyForInferenceAttachments(resolvedMessages, multimodalReadiness, expectedModelId);
+  assertAudioReadyForLlmMessages(resolvedMessages, multimodalReadiness, expectedModelId);
+  return normalizeLlmInferenceMessagePairs(filterEmptyLlmInferenceMessages(resolvedMessages));
+}
+
+async function resolveLatestUserMessageAttachmentsForInference(
+  message: ChatMessage | undefined,
+  readiness?: MultimodalReadinessState,
+  expectedModelId?: string | null,
+): Promise<void> {
+  if (!message || !messageHasAttachments(message)) {
+    return;
+  }
+
+  assertMultimodalReadyForInferenceAttachments([message], readiness, expectedModelId);
+  assertAudioReadyForInferenceAttachments([message], readiness, expectedModelId);
+  await assertMessageAttachmentFilesExist(message);
+}
+
+function assertMultimodalReadyForInferenceAttachments(
+  messages: readonly Pick<ChatMessage, 'attachments'>[],
+  readiness?: MultimodalReadinessState,
+  expectedModelId?: string | null,
+): void {
+  const attachmentCount = messages.reduce(
+    (count, message) => count + getInferenceImageAttachmentCount(message.attachments),
+    0,
+  );
+
+  if (attachmentCount === 0 || isVisionReady(readiness, expectedModelId)) {
+    return;
+  }
+
+  throw new AppError('multimodal_not_ready', 'Vision chat is not ready for image attachments.', {
+    details: {
+      readinessStatus: readiness?.status ?? 'unknown',
+      readinessModelId: readiness?.modelId,
+      expectedModelId: expectedModelId ?? undefined,
+      attachmentCount,
+    },
+  });
+}
+
+function getInferenceAudioAttachmentCount(attachments: ChatMessage['attachments'] | undefined): number {
+  return attachments?.filter(isInferenceAudioAttachment).length ?? 0;
+}
+
+function getLlmInferenceAudioInputCount(message: Pick<LlmChatMessage, 'contentParts'>): number {
+  return message.contentParts?.filter((part) => {
+    if (part.type !== 'input_audio') {
+      return false;
+    }
+
+    const url = part.input_audio.url?.trim() ?? '';
+    const data = part.input_audio.data?.trim() ?? '';
+    return url.length > 0 || data.length > 0;
+  }).length ?? 0;
+}
+
+function assertAudioReadyForInferenceAttachments(
+  messages: readonly Pick<ChatMessage, 'attachments'>[],
+  readiness?: MultimodalReadinessState,
+  expectedModelId?: string | null,
+): void {
+  const attachmentCount = messages.reduce(
+    (count, message) => count + getInferenceAudioAttachmentCount(message.attachments),
+    0,
+  );
+
+  if (attachmentCount === 0 || isAudioReady(readiness, expectedModelId)) {
+    return;
+  }
+
+  throw new AppError('multimodal_not_ready', 'Audio chat is not ready for audio attachments.', {
+    details: {
+      readinessStatus: readiness?.status ?? 'unknown',
+      readinessModelId: readiness?.modelId,
+      expectedModelId: expectedModelId ?? undefined,
+      attachmentCount,
+    },
+  });
+}
+
+function assertAudioReadyForLlmMessages(
+  messages: readonly Pick<LlmChatMessage, 'contentParts'>[],
+  readiness?: MultimodalReadinessState,
+  expectedModelId?: string | null,
+): void {
+  const audioInputCount = messages.reduce(
+    (count, message) => count + getLlmInferenceAudioInputCount(message),
+    0,
+  );
+
+  if (audioInputCount === 0 || isAudioReady(readiness, expectedModelId)) {
+    return;
+  }
+
+  throw new AppError('multimodal_not_ready', 'Audio chat is not ready for audio attachments.', {
+    details: {
+      readinessStatus: readiness?.status ?? 'unknown',
+      readinessModelId: readiness?.modelId,
+      expectedModelId: expectedModelId ?? undefined,
+      audioInputCount,
+    },
+  });
+}
+
+type InferenceAttachmentMessage = {
+  attachments?: NonNullable<ChatMessage['attachments']>;
+  mediaPaths?: string[];
+};
+
+function withConstrainedInferenceAttachments<T extends InferenceAttachmentMessage>(
+  message: T,
+  attachments: NonNullable<ChatMessage['attachments']> | undefined,
+): T {
+  const mediaPaths = getChatImageAttachmentMediaPaths(attachments);
+  return {
+    ...message,
+    attachments: attachments && attachments.length > 0 ? attachments : undefined,
+    ...(message.mediaPaths ? { mediaPaths: mediaPaths.length > 0 ? mediaPaths : undefined } : null),
+  };
+}
+
+function isInferenceImageAttachment(
+  attachment: NonNullable<ChatMessage['attachments']>[number],
+): boolean {
+  return getChatImageAttachmentMediaPaths([attachment]).length > 0;
+}
+
+function constrainMessageAttachmentsToRemainingImageSlots(
+  attachments: NonNullable<ChatMessage['attachments']>,
+  remainingSlots: number,
+): {
+  attachments: NonNullable<ChatMessage['attachments']> | undefined;
+  retainedImageCount: number;
+  didConstrain: boolean;
+} {
+  if (remainingSlots <= 0) {
+    const retained = attachments.filter((attachment) => !isInferenceImageAttachment(attachment));
+    return {
+      attachments: retained.length > 0 ? retained : undefined,
+      retainedImageCount: 0,
+      didConstrain: retained.length !== attachments.length,
+    };
+  }
+
+  let retainedImageCount = 0;
+  let didConstrain = false;
+  const reversedRetained: NonNullable<ChatMessage['attachments']> = [];
+  for (let index = attachments.length - 1; index >= 0; index -= 1) {
+    const attachment = attachments[index];
+    if (!isInferenceImageAttachment(attachment)) {
+      reversedRetained.push(attachment);
+      continue;
+    }
+
+    if (retainedImageCount < remainingSlots) {
+      retainedImageCount += 1;
+      reversedRetained.push(attachment);
+    } else {
+      didConstrain = true;
+    }
+  }
+
+  const retained = reversedRetained.reverse();
+  return {
+    attachments: retained.length > 0 ? retained : undefined,
+    retainedImageCount,
+    didConstrain,
+  };
+}
+
+function constrainInferenceAttachmentsToRequestLimit<T extends InferenceAttachmentMessage>(messages: readonly T[]): T[] {
+  let retainedAttachmentCount = 0;
+  let didConstrain = false;
+  const nextMessages = [...messages];
+
+  for (let index = nextMessages.length - 1; index >= 0; index -= 1) {
+    const message = nextMessages[index];
+    const attachments = message.attachments;
+    if (!attachments?.length) {
+      continue;
+    }
+
+    const remainingSlots = MAX_CHAT_IMAGE_ATTACHMENTS - retainedAttachmentCount;
+    const constrained = constrainMessageAttachmentsToRemainingImageSlots(attachments, remainingSlots);
+    if (constrained.didConstrain) {
+      didConstrain = true;
+      nextMessages[index] = withConstrainedInferenceAttachments(message, constrained.attachments);
+    }
+
+    retainedAttachmentCount += constrained.retainedImageCount;
+  }
+
+  return didConstrain ? nextMessages : messages as T[];
+}
+
+async function resolveThreadForInferenceAttachments({
+  thread,
+  latestUserMessageId,
+  multimodalReadiness,
+  expectedModelId,
+}: {
+  thread: ChatThread;
+  latestUserMessageId: string | null;
+  multimodalReadiness?: MultimodalReadinessState;
+  expectedModelId?: string | null;
+}): Promise<ChatThread> {
+  const latestUserMessage = latestUserMessageId
+    ? thread.messages.find((message) => message.id === latestUserMessageId)
+    : undefined;
+  await resolveLatestUserMessageAttachmentsForInference(latestUserMessage, multimodalReadiness, expectedModelId);
+  const readinessFilteredThread = stripUnsupportedThreadInferenceAttachments(
+    thread,
+    multimodalReadiness,
+    expectedModelId,
+  );
+  const resolveAttachmentExists = createChatAttachmentExistenceResolver();
+  const resolvedMessages = await mapWithConcurrency(
+    readinessFilteredThread.messages,
+    ATTACHMENT_FILE_CHECK_CONCURRENCY,
+    (message) => resolveChatMessageAudioAttachmentsForInference(
+      message,
+      Boolean(latestUserMessageId && message.id === latestUserMessageId),
+      latestUserMessageId,
+      resolveAttachmentExists,
+      multimodalReadiness,
+      expectedModelId,
+    ),
+  );
+
+  return {
+    ...readinessFilteredThread,
+    messages: resolvedMessages,
+  };
+}
+
 export function resolvePresetSnapshot(presetId: string | null): PresetSnapshot {
   if (!presetId) {
     return { ...DEFAULT_PRESET_SNAPSHOT };
@@ -203,6 +1423,7 @@ function resolveThreadReasoningRuntimeConfig(thread: Pick<ChatThread, 'modelId' 
   });
 
   return {
+    activeModelId,
     model,
     modelName,
     capability,
@@ -335,13 +1556,20 @@ export const useChatSession = () => {
     };
   }, []);
 
-  const runAssistantCompletion = useCallback(async (threadId: string, assistantMessageId: string) => {
-    const thread = useChatStore.getState().getThread(threadId);
-    if (!thread) {
+  const runAssistantCompletion = useCallback(async (
+    threadId: string,
+    assistantMessageId: string,
+    completionOptions: { multimodalReadiness?: MultimodalReadinessState } = {},
+  ) => {
+    const storedThread = useChatStore.getState().getThread(threadId);
+    if (!storedThread) {
       throw new Error('Thread not found');
     }
 
-    const modelId = getThreadActiveModelId(thread);
+    const latestUserMessageId = findLatestUserMessageIdBeforeAssistant(storedThread, assistantMessageId);
+    let thread = storedThread;
+
+    const modelId = getThreadActiveModelId(storedThread);
 
     performanceMonitor.mark('chat.send.start', { modelId });
     const generationSpan = performanceMonitor.startSpan('chat.generation', { modelId });
@@ -519,9 +1747,13 @@ export const useChatSession = () => {
 
     try {
       const {
+        activeModelId,
+        model,
         modelName,
         runtimeConfig: reasoningRuntimeConfig,
-      } = resolveThreadReasoningRuntimeConfig(thread);
+      } = resolveThreadReasoningRuntimeConfig(storedThread);
+      const effectiveMultimodalReadiness = completionOptions.multimodalReadiness
+        ?? model?.multimodalReadiness;
 
       await backgroundTaskService.startBackgroundInference(modelName);
 
@@ -537,7 +1769,20 @@ export const useChatSession = () => {
           generationState.stopRequested = true;
           sendOutcomeNotificationOnce('interrupted');
         } finally {
-          void llmEngineService.stopCompletion().catch((error) => {
+          void (async () => {
+            if (generationState.nativeCompletionStarted) {
+              await llmEngineService.interruptActiveCompletion();
+              return;
+            }
+
+            if (typeof llmEngineService.cancelActiveContextOperations === 'function') {
+              const drainResult = await llmEngineService.cancelActiveContextOperations();
+              if (drainResult === 'timed_out') {
+                console.warn('[ChatSession] Timed out waiting for expired prompt preparation to stop');
+              }
+            }
+            await llmEngineService.stopCompletion();
+          })().catch((error) => {
             console.warn('[ChatSession] Failed to stop expired completion', error);
           });
         }
@@ -548,6 +1793,13 @@ export const useChatSession = () => {
         responseReserveTokens: reasoningRuntimeConfig.responseReserveTokens,
       });
 
+      thread = await resolveThreadForInferenceAttachments({
+        thread: storedThread,
+        latestUserMessageId,
+        multimodalReadiness: effectiveMultimodalReadiness,
+        expectedModelId: activeModelId,
+      });
+
       const MESSAGE_TOO_LONG_ERROR_MESSAGE =
         'This message is too long for the current context window. Shorten it or increase the context size in Model Controls.';
 
@@ -555,30 +1807,120 @@ export const useChatSession = () => {
       let messages: LlmChatMessage[] = [];
       let promptTokens = 0;
       let promptSafetyMarginTokens = 0;
+      const resolveAttachmentExistsForTokenCount = createChatAttachmentExistenceResolver();
+      const exactPromptTokenCache = new Map<string, Promise<number>>();
+      let selectedTokenCountParams = {
+        enable_thinking: reasoningRuntimeConfig.enableThinking,
+        reasoning_format: reasoningRuntimeConfig.reasoningFormat,
+      };
+      let didUseHeuristicPromptTokens = false;
+      let didUseEstimatedMediaPromptTokens = false;
+
+      const throwIfGenerationStopped = () => {
+        if (generationState.stopRequested) {
+          throw new Error('Generation was stopped before native completion started.');
+        }
+      };
+      const buildPromptTokenCacheKey = (
+        messagesToCount: LlmChatMessage[],
+        params: { enable_thinking: boolean; reasoning_format: 'none' | 'auto' | 'deepseek' },
+      ) => [
+        params.enable_thinking ? 'thinking' : 'plain',
+        params.reasoning_format,
+        buildLlmInferenceMessagesSignature(messagesToCount),
+      ].join('\u0001');
+      const countExactPromptTokens = async (
+        messagesToCount: LlmChatMessage[],
+        params: { enable_thinking: boolean; reasoning_format: 'none' | 'auto' | 'deepseek' },
+        options: { bypassCache?: boolean } = {},
+      ) => {
+        throwIfGenerationStopped();
+        const sanitizedMessagesToCount = messagesToCount.map((message) => (
+          resolveLlmMessageSupportedInferenceContent(message, effectiveMultimodalReadiness, activeModelId)
+        ));
+        const cacheKey = buildPromptTokenCacheKey(sanitizedMessagesToCount, params);
+        let cachedCount = options.bypassCache ? undefined : exactPromptTokenCache.get(cacheKey);
+        if (!cachedCount) {
+          cachedCount = llmEngineService.countPromptTokens({
+            messages: sanitizedMessagesToCount,
+            params,
+            multimodalReadiness: effectiveMultimodalReadiness,
+            expectedModelId: activeModelId,
+          }).catch((error) => {
+            exactPromptTokenCache.delete(cacheKey);
+            throw error;
+          });
+          exactPromptTokenCache.set(cacheKey, cachedCount);
+        }
+
+        const tokens = await cachedCount;
+        throwIfGenerationStopped();
+        return tokens;
+      };
+
+      const countResolvedPromptTokens = async (
+        resolvedWindowMessages: LlmChatMessage[],
+        params: { enable_thinking: boolean; reasoning_format: 'none' | 'auto' | 'deepseek' },
+        options: { bypassCache?: boolean } = {},
+      ) => {
+        throwIfGenerationStopped();
+
+        const mediaPaths = getLlmInferenceMessagesMediaPaths(resolvedWindowMessages);
+        if (mediaPaths.length > 0) {
+          const textOnlyMessages = resolvedWindowMessages.map(omitLlmInferenceAttachments);
+          let textOnlyPromptTokens: number;
+          try {
+            textOnlyPromptTokens = await countExactPromptTokens(textOnlyMessages, params);
+          } catch {
+            return countExactPromptTokens(resolvedWindowMessages, params, options);
+          }
+
+          didUseEstimatedMediaPromptTokens = true;
+          throwIfGenerationStopped();
+          return textOnlyPromptTokens + estimateLlmInferenceMediaPromptTokens(resolvedWindowMessages);
+        }
+
+        return countExactPromptTokens(resolvedWindowMessages, params, options);
+      };
 
       const countPromptTokens = async (
         windowMessages: LlmChatMessage[],
         params: { enable_thinking: boolean; reasoning_format: 'none' | 'auto' | 'deepseek' },
-      ) => llmEngineService.countPromptTokens({
-        messages: windowMessages,
-        params,
-      });
+      ) => {
+        throwIfGenerationStopped();
+        const resolvedWindowMessages = await resolveRetainedMessagesForInferenceAttachments(
+          windowMessages,
+          effectiveMultimodalReadiness,
+          latestUserMessageId,
+          resolveAttachmentExistsForTokenCount,
+          activeModelId,
+        );
+        throwIfGenerationStopped();
+
+        return countResolvedPromptTokens(resolvedWindowMessages, params);
+      };
 
       try {
         const tokenCountParams = {
           enable_thinking: reasoningRuntimeConfig.enableThinking,
           reasoning_format: reasoningRuntimeConfig.reasoningFormat,
         };
+        selectedTokenCountParams = tokenCountParams;
 
         const result = await buildInferenceWindowWithAccurateTokenCounts(
           thread,
           windowOptions,
           async (windowMessages) => countPromptTokens(windowMessages, tokenCountParams),
+          { throwIfCancelled: throwIfGenerationStopped },
         );
         messages = result.messages;
         promptTokens = result.promptTokens;
         promptSafetyMarginTokens = result.promptSafetyMarginTokens;
       } catch (error) {
+        if (generationState.stopRequested) {
+          throw error;
+        }
+
         const appError = toAppError(error);
 
         if (appError.code === 'message_too_long' && reasoningRuntimeConfig.enableThinking) {
@@ -592,11 +1934,13 @@ export const useChatSession = () => {
             enable_thinking: false,
             reasoning_format: 'none' as const,
           };
+          selectedTokenCountParams = tokenCountParams;
 
           const result = await buildInferenceWindowWithAccurateTokenCounts(
             thread,
             noThinkingWindowOptions,
             async (windowMessages) => countPromptTokens(windowMessages, tokenCountParams),
+            { throwIfCancelled: throwIfGenerationStopped },
           );
           messages = result.messages;
           promptTokens = result.promptTokens;
@@ -604,8 +1948,18 @@ export const useChatSession = () => {
         } else if (appError.code === 'message_too_long') {
           throw appError;
         } else {
-          console.warn('[ChatSession] Failed to count prompt tokens accurately, falling back to heuristics', error);
-          messages = getThreadInferenceWindow(thread, windowOptions).messages;
+          console.warn('[ChatSession] Failed to count prompt tokens accurately, falling back to heuristics', {
+            context: 'prompt_token_count_fallback',
+            ...getSanitizedErrorDetails(error),
+          });
+          didUseHeuristicPromptTokens = true;
+          messages = await resolveRetainedMessagesForInferenceAttachments(
+            getThreadInferenceWindow(thread, windowOptions).messages,
+            effectiveMultimodalReadiness,
+            latestUserMessageId,
+            resolveAttachmentExistsForTokenCount,
+            activeModelId,
+          );
           promptTokens = estimateLlmMessagesTokens(messages);
           promptSafetyMarginTokens = Math.max(
             0,
@@ -613,6 +1967,40 @@ export const useChatSession = () => {
           );
         }
       }
+
+      throwIfGenerationStopped();
+      const tokenCountResolvedMessages = await resolveRetainedMessagesForInferenceAttachments(
+        messages,
+        effectiveMultimodalReadiness,
+        latestUserMessageId,
+        resolveAttachmentExistsForTokenCount,
+        activeModelId,
+      );
+      throwIfGenerationStopped();
+      const finalMessages = await resolveRetainedMessagesForInferenceAttachments(
+        messages,
+        effectiveMultimodalReadiness,
+        latestUserMessageId,
+        doesChatAttachmentFileExist,
+        activeModelId,
+      );
+      throwIfGenerationStopped();
+      const finalMessagesSignature = buildLlmInferenceMessagesSignature(finalMessages);
+      const tokenCountResolvedMessagesSignature = buildLlmInferenceMessagesSignature(tokenCountResolvedMessages);
+      const finalPromptTokenCacheKey = buildPromptTokenCacheKey(finalMessages, selectedTokenCountParams);
+      const shouldRecountFinalPrompt = finalMessagesSignature !== tokenCountResolvedMessagesSignature;
+      if (shouldRecountFinalPrompt) {
+        if (didUseHeuristicPromptTokens) {
+          promptTokens = estimateLlmMessagesTokens(finalMessages);
+        } else {
+          throwIfGenerationStopped();
+          promptTokens = await countResolvedPromptTokens(finalMessages, selectedTokenCountParams, {
+            bypassCache: finalMessagesSignature !== tokenCountResolvedMessagesSignature,
+          });
+          throwIfGenerationStopped();
+        }
+      }
+      messages = finalMessages;
 
       const nonSystemMessages = messages.filter((message) => message.role !== 'system');
       const lastNonSystemRole = nonSystemMessages.length > 0
@@ -622,7 +2010,20 @@ export const useChatSession = () => {
         throw new AppError('message_too_long', MESSAGE_TOO_LONG_ERROR_MESSAGE);
       }
 
-      const availablePredictTokens = maxContextSize - promptTokens - promptSafetyMarginTokens;
+      let availablePredictTokens = maxContextSize - promptTokens - promptSafetyMarginTokens;
+      if (
+        !didUseHeuristicPromptTokens
+        && didUseEstimatedMediaPromptTokens
+        && getLlmInferenceMessagesMediaPaths(messages).length > 0
+        && availablePredictTokens <= resolveExactMediaPromptRecountMarginTokens(messages)
+        && !exactPromptTokenCache.has(finalPromptTokenCacheKey)
+      ) {
+        throwIfGenerationStopped();
+        promptTokens = await countExactPromptTokens(messages, selectedTokenCountParams);
+        throwIfGenerationStopped();
+        availablePredictTokens = maxContextSize - promptTokens - promptSafetyMarginTokens;
+      }
+
       if (availablePredictTokens <= 0) {
         throw new AppError('message_too_long', MESSAGE_TOO_LONG_ERROR_MESSAGE, {
           details: {
@@ -666,6 +2067,7 @@ export const useChatSession = () => {
       generationState.nativeCompletionStarted = true;
       const completion = await llmEngineService.chatCompletion({
         messages,
+        multimodalReadiness: effectiveMultimodalReadiness,
         params: {
           temperature: thread.paramsSnapshot.temperature,
           top_p: thread.paramsSnapshot.topP,
@@ -797,8 +2199,8 @@ export const useChatSession = () => {
         return;
       }
 
-      const message =
-        error instanceof Error ? error.message : 'Unknown chat generation error';
+      const message = resolvePersistedAssistantErrorMessage(error);
+      const userFacingError = resolveUserFacingGenerationError(error, message);
 
       flushAssistantPatch();
       patchAssistantMessage(threadId, assistantMessageId, {
@@ -812,7 +2214,7 @@ export const useChatSession = () => {
       recordCompletionStats('error');
 
       sendOutcomeNotificationOnce('error');
-      throw error;
+      throw userFacingError;
     } finally {
       if (flushTimeout) {
         clearTimeout(flushTimeout);
@@ -857,7 +2259,11 @@ export const useChatSession = () => {
       throw new Error(`Load ${threadModelId} before ${actionLabel}.`);
     }
 
-    if (llmEngineService.hasActiveCompletion() || isNativeCompletionSettlingAfterStop()) {
+    if (
+      llmEngineService.hasActiveCompletion()
+      || llmEngineService.hasActiveChatBlockingContextOperation()
+      || isNativeCompletionSettlingAfterStop()
+    ) {
       throw new Error(`Wait for the current response to finish stopping before ${actionLabel}.`);
     }
   }, []);
@@ -872,12 +2278,22 @@ export const useChatSession = () => {
     updateThreadParamsSnapshot(thread.id, getGenerationParametersForModel(nextModelId));
   }, [switchThreadModel, updateThreadParamsSnapshot]);
 
-  const appendUserMessage = useCallback(async (text: string) => {
+  const appendUserMessage = useCallback(async (text: string, options: AppendUserMessageOptions = {}) => {
     assertPrivateStorageWritableForChatMutation();
-
     const settings = getSettings();
     const activeModelId = settings.activeModelId;
     const activeModelParams = getGenerationParametersForModel(activeModelId);
+    const attachmentDrafts = resolveReadyAttachmentDrafts({
+      drafts: options.attachmentDrafts ?? [],
+      readiness: options.multimodalReadiness,
+      expectedModelId: activeModelId,
+    });
+    const documentAttachmentDrafts = resolveReadyDocumentAttachmentDrafts(options.documentAttachmentDrafts ?? []);
+    const mediaAttachmentDrafts = resolveReadyMediaAttachmentDrafts({
+      drafts: options.mediaAttachmentDrafts ?? [],
+      readiness: options.multimodalReadiness,
+      expectedModelId: activeModelId,
+    });
 
     if (!activeModelId) {
       throw new Error('Model is not loaded or engine is not ready. Please select and load a model in the Models tab.');
@@ -896,9 +2312,27 @@ export const useChatSession = () => {
       throw new Error('A response is already being generated for this thread.');
     }
 
-    if (llmEngineService.hasActiveCompletion() || isNativeCompletionSettlingAfterStop()) {
+    if (
+      llmEngineService.hasActiveCompletion()
+      || llmEngineService.hasActiveChatBlockingContextOperation()
+      || isNativeCompletionSettlingAfterStop()
+    ) {
       throw new Error('Wait for the current response to finish stopping before sending another message.');
     }
+
+    await assertDraftAttachmentFilesExist(attachmentDrafts);
+    await assertMediaDraftAttachmentFilesExist(mediaAttachmentDrafts);
+    const processedDocumentAttachments = await processDocumentAttachmentDraftsForInference(documentAttachmentDrafts);
+    const documentContentParts = processedDocumentAttachments.contentParts;
+    const imageAttachmentMediaPaths = getDraftImageAttachmentMediaPaths(attachmentDrafts);
+    const effectiveMultimodalReadiness = imageAttachmentMediaPaths.length > 0
+      ? assertActiveMultimodalReadyForAttachmentMediaPaths({
+          mediaPaths: imageAttachmentMediaPaths,
+          multimodalReadiness: options.multimodalReadiness,
+          expectedModelId: activeModelId,
+          mediaPathOccurrenceCount: imageAttachmentMediaPaths.length,
+        })
+      : options.multimodalReadiness;
 
     const threadId = activeThread?.id
       ?? createThread({
@@ -924,21 +2358,50 @@ export const useChatSession = () => {
       ? getThreadActiveModelId(threadAfterPossibleSwitch)
       : activeModelId;
 
+    const userMessageId = createChatId('message');
+    const normalizedText = text.trim();
+    const userMessageContent = normalizedText.length > 0 || documentContentParts.length === 0
+      ? normalizedText
+      : DOCUMENT_ATTACHMENT_MESSAGE_PLACEHOLDER;
+    const messageAttachments = [
+      ...materializeAttachmentDraftsForMessage({
+        threadId,
+        messageId: userMessageId,
+        drafts: attachmentDrafts,
+      }),
+      ...processedDocumentAttachments.attachments.map((attachment) => ({
+        ...attachment,
+        threadId,
+        messageId: userMessageId,
+      })),
+      ...materializeMediaDraftsForMessage({
+        threadId,
+        messageId: userMessageId,
+        drafts: mediaAttachmentDrafts,
+      }),
+    ];
     const userMessage: ChatMessage = {
-      id: createChatId('message'),
+      id: userMessageId,
       role: 'user',
-      content: text,
+      content: userMessageContent,
       createdAt: Date.now(),
       state: 'complete',
       kind: 'message',
       modelId: threadModelId,
+      ...(documentContentParts.length > 0 ? { contentParts: documentContentParts } : null),
+      ...(messageAttachments.length > 0
+        ? { attachments: messageAttachments }
+        : null),
     };
 
     appendMessage(threadId, userMessage);
+    options.onUserMessageAppended?.(userMessage);
 
     const assistantMessageId = createAssistantPlaceholder(threadId, threadModelId);
 
-    await runAssistantCompletion(threadId, assistantMessageId);
+    await runAssistantCompletion(threadId, assistantMessageId, {
+      multimodalReadiness: effectiveMultimodalReadiness,
+    });
   }, [activeThread, appendMessage, createAssistantPlaceholder, createThread, ensureThreadUsesModelForSend, runAssistantCompletion, setActiveThread, syncThreadParametersCallback]);
 
   const stopGeneration = useCallback(async () => {
@@ -956,6 +2419,12 @@ export const useChatSession = () => {
       if (generation.nativeCompletionStarted) {
         await llmEngineService.interruptActiveCompletion();
       } else {
+        if (typeof llmEngineService.cancelActiveContextOperations === 'function') {
+          const drainResult = await llmEngineService.cancelActiveContextOperations();
+          if (drainResult === 'timed_out') {
+            console.warn('[ChatSession] Timed out waiting for prompt preparation to stop');
+          }
+        }
         await llmEngineService.stopCompletion();
       }
     } finally {
@@ -965,18 +2434,33 @@ export const useChatSession = () => {
     }
   }, [finalizeThreadStatus, stopAssistantMessage]);
 
-  const regenerateFromUserMessage = useCallback(async (messageId: string, nextContent: string) => {
+  const regenerateFromUserMessage = useCallback(async (
+    messageId: string,
+    nextContent: string,
+    options: RegenerateUserMessageOptions = {},
+  ) => {
     if (!activeThread) {
       return false;
     }
 
+    const targetMessage = activeThread.messages.find((message) => message.id === messageId);
+    if (!targetMessage || targetMessage.role !== 'user') {
+      throw new Error('The selected message could not be regenerated.');
+    }
+
     const normalizedContent = nextContent.trim();
-    if (!normalizedContent) {
+    if (!normalizedContent && !messageHasAttachments(targetMessage)) {
       throw new Error('Message cannot be empty.');
     }
 
     ensureThreadCanGenerate(activeThread, 'regenerating this response');
     assertPrivateStorageWritableForChatMutation();
+    const { activeModelId, model } = resolveThreadReasoningRuntimeConfig(activeThread);
+    const effectiveMultimodalReadiness = await assertUserMessageAttachmentsReadyForRegeneration(
+      targetMessage,
+      options.multimodalReadiness ?? model?.multimodalReadiness,
+      activeModelId,
+    );
     const syncedThread = syncThreadParametersCallback(activeThread);
 
     const assistantMessageId = replaceBranchFromUserMessage(
@@ -988,7 +2472,9 @@ export const useChatSession = () => {
       throw new Error('The selected message could not be regenerated.');
     }
 
-    await runAssistantCompletion(syncedThread.id, assistantMessageId);
+    await runAssistantCompletion(syncedThread.id, assistantMessageId, {
+      multimodalReadiness: effectiveMultimodalReadiness,
+    });
 
     return true;
   }, [activeThread, ensureThreadCanGenerate, replaceBranchFromUserMessage, runAssistantCompletion, syncThreadParametersCallback]);
@@ -998,9 +2484,22 @@ export const useChatSession = () => {
       return false;
     }
 
-    const lastUserMessage = [...activeThread.messages]
-      .reverse()
-      .find((message) => message.role === 'user' && message.content.trim().length > 0);
+    const lastUserMessageIndex = (() => {
+      for (let index = activeThread.messages.length - 1; index >= 0; index -= 1) {
+        const message = activeThread.messages[index];
+        if (!message) {
+          continue;
+        }
+        if (message.role === 'user' && (message.content.trim().length > 0 || messageHasAttachments(message))) {
+          return index;
+        }
+      }
+
+      return -1;
+    })();
+    const lastUserMessage = lastUserMessageIndex >= 0
+      ? activeThread.messages[lastUserMessageIndex]
+      : undefined;
     if (!lastUserMessage) {
       return false;
     }
@@ -1015,14 +2514,39 @@ export const useChatSession = () => {
 
     ensureThreadCanGenerate(activeThread, 'regenerating this response');
     assertPrivateStorageWritableForChatMutation();
+    const { activeModelId, model } = resolveThreadReasoningRuntimeConfig(activeThread);
+    const effectiveMultimodalReadiness = await assertUserMessageAttachmentsReadyForRegeneration(
+      lastUserMessage,
+      model?.multimodalReadiness,
+      activeModelId,
+    );
     const syncedThread = syncThreadParametersCallback(activeThread);
+
+    const lastAssistantMessageIndex = (() => {
+      for (let index = syncedThread.messages.length - 1; index >= 0; index -= 1) {
+        if (syncedThread.messages[index]?.role === 'assistant') {
+          return index;
+        }
+      }
+
+      return -1;
+    })();
+    const canReplaceCurrentTurnAssistant =
+      lastAssistantMessageIndex > lastUserMessageIndex &&
+      lastAssistantMessageIndex === syncedThread.messages.length - 1;
+
+    if (!canReplaceCurrentTurnAssistant) {
+      return regenerateFromUserMessage(lastUserMessage.id, lastUserMessage.content);
+    }
 
     const assistantMessageId = replaceLastAssistantMessage(syncedThread.id);
     if (!assistantMessageId) {
       return regenerateFromUserMessage(lastUserMessage.id, lastUserMessage.content);
     }
 
-    await runAssistantCompletion(syncedThread.id, assistantMessageId);
+    await runAssistantCompletion(syncedThread.id, assistantMessageId, {
+      multimodalReadiness: effectiveMultimodalReadiness,
+    });
 
     return true;
   }, [

@@ -47,9 +47,10 @@ import {
   createEmptyCalibrationRecord,
   serializeCalibrationKey,
 } from '../memory/calibration';
-import { DECIMAL_GIGABYTE } from '../utils/modelSize';
+import { DECIMAL_GIGABYTE, UNKNOWN_PROJECTOR_MEMORY_FIT_FALLBACK_BYTES } from '../utils/modelSize';
 import { isHighConfidenceLikelyOomMemoryFit } from '../utils/modelMemoryFitState';
 import {
+  modelSupportsVision,
   resolveModelCapabilitySnapshot,
   resolveModelLayerCountFromGgufMetadata,
 } from '../utils/modelCapabilities';
@@ -66,13 +67,19 @@ import {
   isProbableMemoryFailure,
   readNumericMetadata,
 } from './LLMEngineService.helpers';
-import { buildEngineDiagnosticsSnapshot } from './LLMEngineService.diagnostics';
+import {
+  buildEngineDiagnosticsSnapshot,
+  buildMultimodalDiagnosticsSummary,
+} from './LLMEngineService.diagnostics';
 import {
   hasNpuRuntimeSignal as hasNpuRuntimeSignalHelper,
   resolveBackendMode as resolveBackendModeHelper,
   resolveBackendTelemetry,
 } from './LLMEngineService.backend';
-import { resolveModelFilePathOrThrow } from './LLMEngineService.modelFile';
+import {
+  resolveModelFilePathOrThrow,
+  resolveProjectorFilePathOrThrow,
+} from './LLMEngineService.modelFile';
 import {
   resolveSafeLoadPolicyOrThrow,
 } from './LLMEngineService.safeLoadPolicy';
@@ -82,6 +89,7 @@ import {
 } from './LLMEngineService.safeLoadSearch';
 import {
   ActiveCompletionRunner,
+  type ContextOperationCancellationToken,
   ContextOperationRunner,
   waitForPromiseWithTimeout,
   type ContextOperationDrainResult,
@@ -91,15 +99,39 @@ import {
   addNativeLlamaLogListener,
   getFormattedChatFromContext,
   getLlamaBuildInfo,
+  getMultimodalSupportFromContext,
+  initMultimodalOnContext,
   initLlamaContext,
   loadLlamaModelInfo,
   releaseAllLlamaContexts,
+  releaseMultimodalFromContext,
   runCompletionOnContext,
   tokenizeFormattedPrompt,
   toggleNativeLlamaLogs,
+  LlamaRuntimeFeatureUnavailableError,
   type LlamaContextInitParams,
   type LlamaFormattedChatResult,
+  type LlamaMultimodalSupport,
 } from './LlamaRuntimeAdapter';
+import { getReadinessStatusForProjectorLifecycle, projectorArtifactService } from './ProjectorArtifactService';
+import {
+  MAX_CHAT_IMAGE_ATTACHMENTS,
+  normalizeChatAttachmentMediaPath,
+  getChatImageAttachmentMediaPaths,
+  summarizeChatImageAttachments,
+} from '../utils/chatImageAttachments';
+import {
+  sanitizeMultimodalFailureCategory,
+  sanitizeMultimodalFailureReason,
+} from '../utils/multimodalFailureReason';
+import { getLlmContentPartSignatureEntry } from '../utils/llmContentPartSignature';
+import type {
+  MultimodalDiagnosticsSummary,
+  MultimodalReadinessState,
+  MultimodalReadinessStatus,
+  MultimodalSupportModality,
+  ProjectorArtifact,
+} from '../types/multimodal';
 
 export interface LoadModelOptions {
   forceReload?: boolean;
@@ -118,11 +150,20 @@ export type BackendAvailability = {
 type StateListener = (state: EngineState) => void;
 type ChatCompletionReasoningFormat = NonNullable<NonNullable<LlmChatCompletionOptions['params']>['reasoning_format']>;
 const DEFAULT_CONTEXT_SIZE = 4096;
+const DEFAULT_LLAMA_NATIVE_MICRO_BATCH_TOKENS = 512;
+const DEFAULT_LLAMA_NATIVE_MULTIMODAL_BATCH_TOKENS = 512;
+const DEFAULT_LLAMA_NATIVE_MULTIMODAL_IMAGE_MAX_TOKENS = 512;
 const MAX_NATIVE_LOG_LINES = 120;
 const MAX_ADDITIONAL_STOP_WORDS_CACHE_ENTRIES = 8;
 const CONTEXT_OPERATION_UNLOAD_DRAIN_TIMEOUT_MS = 5000;
+const CONTEXT_OPERATION_STOP_DRAIN_TIMEOUT_MS = 5000;
 const CONTEXT_OPERATION_UNLOAD_TIMEOUT_MESSAGE = 'Timed out waiting for active context operations during unload';
 const ACTIVE_COMPLETION_UNLOAD_TIMEOUT_MESSAGE = 'Timed out waiting for active completion during unload';
+const CONTEXT_OPERATION_STOP_MESSAGE = 'Prompt preparation was stopped before native completion started';
+const CONTEXT_OPERATION_COMPLETION_DRAIN_TIMEOUT_MESSAGE = 'Timed out waiting for prompt preparation before native completion started';
+const CONTEXT_OPERATION_PROMPT_COUNT_DRAIN_TIMEOUT_MESSAGE = 'Timed out waiting for background prompt preparation before counting prompt tokens';
+const CONTEXT_OPERATION_STOP_TIMEOUT_MESSAGE = 'Timed out waiting for prompt preparation to stop';
+const ACTIVE_COMPLETION_STOP_TIMEOUT_MESSAGE = 'Timed out waiting for active completion to stop';
 const MAX_UNLOAD_RECLAIM_FRACTION_OF_TOTAL_MEMORY = 0.25;
 const FALLBACK_STOP_WORDS = [
   '</s>',
@@ -183,6 +224,22 @@ type LoadedModelArtifactIdentity = {
   fallbackDownloadMarker: number | null;
 };
 
+type ActiveMultimodalContext = {
+  modelId: string;
+  projectorId: string;
+  projectorRepoId: string | null;
+  projectorOwnerVariantId: string | null;
+  projectorFileName: string | null;
+  projectorDownloadUrl: string | null;
+  projectorHfRevision: string | null;
+  projectorSha256: string | null;
+  projectorLocalPath: string | null;
+  projectorResolvedPath: string | null;
+  projectorSizeBytes: number | null;
+  projectorModificationTime: number | null;
+  projectorFallbackMarker: string | null;
+};
+
 type ResolvedModelArtifactInfo = {
   modelPath: string;
   fileInfo: {
@@ -190,6 +247,368 @@ type ResolvedModelArtifactInfo = {
     modificationTime?: number | null;
   };
 };
+
+type ResolvedProjectorArtifactInfo = {
+  projectorPath: string;
+  localPath: string;
+  fileInfo: {
+    size?: number | null;
+    modificationTime?: number | null;
+  };
+};
+
+type ProjectorResolutionOperationCache = Map<string, Promise<ResolvedProjectorArtifactInfo>>;
+
+type MultimodalReadinessRefreshRequest = {
+  readonly modelId: string;
+  readonly context: LlamaContext;
+  readonly useGpu: boolean;
+};
+
+type InternalLoadOptions = {
+  readonly requeueReadinessRefreshOnActiveCompletion?: MultimodalReadinessRefreshRequest;
+};
+
+function normalizeMediaPaths(paths: readonly string[] | undefined): string[] {
+  if (!paths || paths.length === 0) {
+    return [];
+  }
+
+  return Array.from(new Set(paths
+    .map(normalizeMediaPathOrThrow)
+    .filter((path) => path.length > 0)));
+}
+
+function normalizeMediaPathOccurrences(paths: readonly string[] | undefined): string[] {
+  if (!paths || paths.length === 0) {
+    return [];
+  }
+
+  return paths
+    .map(normalizeMediaPathOrThrow)
+    .filter((path) => path.length > 0);
+}
+
+function normalizeMediaPathOrThrow(path: string): string {
+  const mediaPath = normalizeChatAttachmentMediaPath(path);
+  if (!mediaPath) {
+    throw new AppError('chat_attachment_not_ready', 'Image attachments must be copied into app storage before inference.', {
+      details: {
+        pathCategory: 'non_chat_attachment',
+      },
+    });
+  }
+
+  return mediaPath;
+}
+
+function getMessageContentPartImagePaths(message: LlmChatMessage): string[] {
+  return normalizeMediaPaths(
+    message.contentParts
+      ?.filter((part) => part.type === 'image_url')
+      .map((part) => part.image_url.url),
+  );
+}
+
+function getMessageContentPartImagePathOccurrences(message: LlmChatMessage): string[] {
+  return normalizeMediaPathOccurrences(
+    message.contentParts
+      ?.filter((part) => part.type === 'image_url')
+      .map((part) => part.image_url.url),
+  );
+}
+
+function countMessageAudioInputOccurrences(message: LlmChatMessage): number {
+  return message.contentParts?.filter((part) => {
+    if (part.type !== 'input_audio') {
+      return false;
+    }
+
+    const url = part.input_audio.url?.trim() ?? '';
+    const data = part.input_audio.data?.trim() ?? '';
+    return url.length > 0 || data.length > 0;
+  }).length ?? 0;
+}
+
+function getMessageTextContentParts(message: LlmChatMessage) {
+  return message.contentParts?.filter((part) => part.type === 'text' && part.text.trim().length > 0) ?? [];
+}
+
+function countMessageTextContentOccurrences(message: LlmChatMessage): number {
+  return getMessageTextContentParts(message).length;
+}
+
+function getMessageContentPartSignatureEntries(message: LlmChatMessage): string[] {
+  return message.contentParts?.map(getLlmContentPartSignatureEntry) ?? [];
+}
+
+function getMessageLegacyMediaPaths(message: LlmChatMessage): string[] {
+  return normalizeMediaPaths([
+    ...(message.mediaPaths ?? []),
+    ...getChatImageAttachmentMediaPaths(message.attachments),
+  ]);
+}
+
+function getMessageMediaPaths(message: LlmChatMessage): string[] {
+  return normalizeMediaPaths([
+    ...getMessageLegacyMediaPaths(message),
+    ...getMessageContentPartImagePaths(message),
+  ]);
+}
+
+function getMessageMediaPathOccurrences(message: LlmChatMessage): string[] {
+  const explicitMediaPaths = normalizeMediaPathOccurrences([
+    ...(message.mediaPaths ?? []),
+    ...getMessageContentPartImagePathOccurrences(message),
+  ]);
+  const attachmentMediaPaths = normalizeMediaPathOccurrences(
+    getChatImageAttachmentMediaPaths(message.attachments),
+  );
+  if (explicitMediaPaths.length === 0) {
+    return attachmentMediaPaths;
+  }
+  if (attachmentMediaPaths.length === 0) {
+    return explicitMediaPaths;
+  }
+
+  const explicitCounts = new Map<string, number>();
+  for (const mediaPath of explicitMediaPaths) {
+    explicitCounts.set(mediaPath, (explicitCounts.get(mediaPath) ?? 0) + 1);
+  }
+
+  const attachmentCounts = new Map<string, number>();
+  const occurrences = [...explicitMediaPaths];
+  for (const mediaPath of attachmentMediaPaths) {
+    const attachmentCount = (attachmentCounts.get(mediaPath) ?? 0) + 1;
+    attachmentCounts.set(mediaPath, attachmentCount);
+    if (attachmentCount > (explicitCounts.get(mediaPath) ?? 0)) {
+      occurrences.push(mediaPath);
+    }
+  }
+
+  return occurrences;
+}
+
+function getMessagesMediaPaths(messages: readonly LlmChatMessage[]): string[] {
+  return normalizeMediaPaths(messages.flatMap((message) => getMessageMediaPaths(message)));
+}
+
+function countMessageMediaPathOccurrences(messages: readonly LlmChatMessage[]): number {
+  return messages.reduce(
+    (count, message) => count + getMessageMediaPathOccurrences(message).length,
+    0,
+  );
+}
+
+function countMessageAudioInputOccurrencesInMessages(messages: readonly LlmChatMessage[]): number {
+  return messages.reduce(
+    (count, message) => count + countMessageAudioInputOccurrences(message),
+    0,
+  );
+}
+
+function countMergedRequestMediaPathOccurrences(
+  originalMessages: readonly LlmChatMessage[],
+  topLevelMediaPaths: readonly string[] | undefined,
+): number {
+  const latestUserMessageIndex = getLatestUserMessageIndex(originalMessages);
+  if (latestUserMessageIndex < 0) {
+    return countMessageMediaPathOccurrences(originalMessages);
+  }
+
+  const existingMessageMediaPaths = new Set(getMessagesMediaPaths(originalMessages));
+  const appendedTopLevelMediaPathCount = normalizeMediaPathOccurrences(topLevelMediaPaths)
+    .filter((mediaPath) => !existingMessageMediaPaths.has(mediaPath))
+    .length;
+  return countMessageMediaPathOccurrences(originalMessages) + appendedTopLevelMediaPathCount;
+}
+
+function getLatestUserMessageIndex(messages: readonly LlmChatMessage[]): number {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index].role === 'user') {
+      return index;
+    }
+  }
+
+  return -1;
+}
+
+function withResolvedMediaPaths(message: LlmChatMessage): LlmChatMessage {
+  const mediaPaths = getMessageLegacyMediaPaths(message);
+  const { mediaPaths: _mediaPaths, ...messageWithoutMediaPaths } = message;
+  return {
+    ...messageWithoutMediaPaths,
+    ...(mediaPaths.length > 0 ? { mediaPaths } : null),
+  };
+}
+
+function withoutMediaPaths(message: LlmChatMessage): LlmChatMessage {
+  const {
+    attachments: _attachments,
+    contentParts,
+    mediaPaths: _mediaPaths,
+    ...messageWithoutMedia
+  } = message;
+  const textContentParts = getMessageTextContentParts({ ...message, contentParts });
+  return {
+    ...messageWithoutMedia,
+    ...(textContentParts.length > 0 ? { contentParts: textContentParts } : null),
+  };
+}
+
+function sanitizeErrorMessageForDiagnostics(error: unknown): string {
+  return sanitizeMultimodalFailureReason(getErrorMessageText(error), 512)
+    ?? (error instanceof Error ? error.name : typeof error);
+}
+
+function sanitizeDiagnosticValue(value: unknown): unknown {
+  if (typeof value === 'string') {
+    return sanitizeMultimodalFailureReason(value, 512) ?? '[redacted]';
+  }
+
+  if (Array.isArray(value)) {
+    return value.map(sanitizeDiagnosticValue);
+  }
+
+  if (!value || typeof value !== 'object') {
+    return value;
+  }
+
+  if (value instanceof Error) {
+    return {
+      errorName: value.name,
+      message: sanitizeErrorMessageForDiagnostics(value),
+    };
+  }
+
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .map(([key, entry]) => [key, sanitizeDiagnosticValue(entry)]),
+  );
+}
+
+function buildSafeErrorLogDetails(error: unknown): Record<string, unknown> {
+  if (error instanceof AppError) {
+    return {
+      code: error.code,
+      message: sanitizeErrorMessageForDiagnostics(error),
+      ...(error.details ? { details: sanitizeDiagnosticValue(error.details) } : null),
+    };
+  }
+
+  return error instanceof Error
+    ? { errorName: error.name, message: sanitizeErrorMessageForDiagnostics(error) }
+    : { errorType: typeof error };
+}
+
+function mergeTopLevelMediaPathsIntoLatestUserMessage(
+  messages: readonly LlmChatMessage[],
+  mediaPaths: readonly string[] | undefined,
+): LlmChatMessage[] {
+  const normalizedTopLevelMediaPaths = normalizeMediaPaths(mediaPaths);
+  const resolvedMessages = messages.map(withResolvedMediaPaths);
+  const latestUserMessageIndex = getLatestUserMessageIndex(resolvedMessages);
+
+  if (latestUserMessageIndex < 0) {
+    return resolvedMessages;
+  }
+
+  const existingMessageMediaPaths = new Set(getMessagesMediaPaths(resolvedMessages));
+  const mediaPathsToAppend = normalizedTopLevelMediaPaths.filter(
+    (mediaPath) => !existingMessageMediaPaths.has(mediaPath),
+  );
+
+  return resolvedMessages.map((message, index) => {
+    if (index !== latestUserMessageIndex) {
+      return message;
+    }
+
+    return withResolvedMediaPaths({
+      ...message,
+      mediaPaths: normalizeMediaPaths([
+        ...getMessageLegacyMediaPaths(message),
+        ...mediaPathsToAppend,
+      ]),
+    });
+  });
+}
+
+function assertMultimodalReadyForMediaPaths(
+  mediaPaths: readonly string[],
+  readiness: LlmChatCompletionOptions['multimodalReadiness'],
+  mediaPathOccurrenceCount = mediaPaths.length,
+  expectedModelId?: string | null,
+): void {
+  if (mediaPathOccurrenceCount === 0) {
+    return;
+  }
+
+  if (mediaPathOccurrenceCount > MAX_CHAT_IMAGE_ATTACHMENTS) {
+    throw new AppError('chat_attachment_limit_exceeded', 'Too many image attachments.', {
+      details: {
+        mediaPathCount: mediaPathOccurrenceCount,
+        limit: MAX_CHAT_IMAGE_ATTACHMENTS,
+      },
+    });
+  }
+
+  if (
+    readiness?.status === 'ready'
+    && readiness.support.includes('vision')
+    && (!expectedModelId || readiness.modelId === expectedModelId)
+  ) {
+    return;
+  }
+
+  throw new AppError('multimodal_not_ready', 'Vision chat is not ready for image attachments.', {
+    details: {
+      readinessStatus: readiness?.status ?? 'unknown',
+      readinessModelId: readiness?.modelId,
+      expectedModelId: expectedModelId ?? undefined,
+      mediaPathCount: mediaPathOccurrenceCount,
+    },
+  });
+}
+
+function assertMultimodalReadyForAudioInputs(
+  audioInputCount: number,
+  readiness: LlmChatCompletionOptions['multimodalReadiness'],
+  expectedModelId?: string | null,
+): void {
+  if (audioInputCount === 0) {
+    return;
+  }
+
+  if (
+    readiness?.status === 'ready'
+    && readiness.support.includes('audio')
+    && (!expectedModelId || readiness.modelId === expectedModelId)
+  ) {
+    return;
+  }
+
+  throw new AppError('multimodal_not_ready', 'Audio chat is not ready for audio attachments.', {
+    details: {
+      readinessStatus: readiness?.status ?? 'unknown',
+      readinessModelId: readiness?.modelId,
+      expectedModelId: expectedModelId ?? undefined,
+      audioInputCount,
+    },
+  });
+}
+
+function getSanitizedTemplateFormatterErrorMetadata(error: unknown): Record<string, unknown> {
+  if (error instanceof Error) {
+    return {
+      errorType: error.name || 'Error',
+      hasMessage: error.message.length > 0,
+    };
+  }
+
+  return {
+    errorType: typeof error,
+  };
+}
 
 function normalizeArchitecturePrefix(value: unknown): string | null {
   if (typeof value !== 'string') {
@@ -307,21 +726,37 @@ function mergeConsecutiveMessages(messages: LlmChatMessage[]): LlmChatMessage[] 
   const merged: LlmChatMessage[] = [];
 
   for (const message of messages) {
+    const normalizedMessage = withResolvedMediaPaths(message);
     if (merged.length === 0) {
-      merged.push({ ...message });
+      merged.push(normalizedMessage);
       continue;
     }
 
     const lastMessage = merged[merged.length - 1];
     if (lastMessage.role === message.role) {
+      const mediaPaths = normalizeMediaPaths([
+        ...getMessageLegacyMediaPaths(lastMessage),
+        ...getMessageLegacyMediaPaths(normalizedMessage),
+      ]);
+      const contentParts = [
+        ...(lastMessage.contentParts ?? []),
+        ...(normalizedMessage.contentParts ?? []),
+      ];
       merged[merged.length - 1] = {
+        ...lastMessage,
         role: lastMessage.role,
-        content: `${lastMessage.content}\n\n${message.content}`,
+        content: `${lastMessage.content}\n\n${normalizedMessage.content}`,
+        attachments: [
+          ...(lastMessage.attachments ?? []),
+          ...(normalizedMessage.attachments ?? []),
+        ],
+        ...(contentParts.length > 0 ? { contentParts } : null),
+        ...(mediaPaths.length > 0 ? { mediaPaths } : null),
       };
       continue;
     }
 
-    merged.push({ ...message });
+    merged.push(normalizedMessage);
   }
 
   return merged;
@@ -371,16 +806,21 @@ function normalizeMessagesForStrictRoleAlternation(
 
   for (const message of messages) {
     const content = message.content ?? '';
-    if (content.trim().length === 0) {
+    const mediaInputCount = getMessageMediaPathOccurrences(message).length
+      + countMessageAudioInputOccurrences(message);
+    const textContentPartCount = countMessageTextContentOccurrences(message);
+    if (content.trim().length === 0 && mediaInputCount === 0 && textContentPartCount === 0) {
       continue;
     }
 
     if (message.role === 'system') {
-      systemParts.push(content);
+      if (content.trim().length > 0) {
+        systemParts.push(content);
+      }
       continue;
     }
 
-    nonSystemMessages.push({ role: message.role, content });
+    nonSystemMessages.push(withResolvedMediaPaths({ ...message, content }));
   }
 
   let merged = mergeConsecutiveMessages(nonSystemMessages);
@@ -420,7 +860,7 @@ function normalizeMessagesForStrictRoleAlternation(
     if (merged.length === 0) {
       merged = [{ role: 'user', content: normalizedSystemContent }];
     } else if (merged[0].role === 'user') {
-      merged[0] = { role: 'user', content: `${normalizedSystemContent}\n\n${merged[0].content}` };
+      merged[0] = { ...merged[0], role: 'user', content: `${normalizedSystemContent}\n\n${merged[0].content}` };
     } else {
       merged.unshift({ role: 'user', content: normalizedSystemContent });
     }
@@ -484,8 +924,14 @@ class LLMEngineService {
   private isUnloading = false;
   private activeCalibrationSession: CalibrationSession | null = null;
   private loadedArtifactIdentity: LoadedModelArtifactIdentity | null = null;
+  private activeMultimodalContext: ActiveMultimodalContext | null = null;
+  private loadedContextDisablesContextShiftForMultimodal = false;
+  private pendingMultimodalReadinessRefresh: MultimodalReadinessRefreshRequest | null = null;
+  private pendingMultimodalReadinessRefreshPromise: Promise<void> | null = null;
+  private deferredContextReleasePromise: Promise<void> | null = null;
   private lastLifecycleEvent: EngineLifecycleEvent | null = null;
   private lastLifecycleError: string | null = null;
+  private recentMultimodalDiagnostics: MultimodalDiagnosticsSummary | null = null;
 
   private get contextOperationQueue(): Promise<void> {
     return this.contextOperationRunner.queue;
@@ -515,8 +961,15 @@ class LLMEngineService {
     return this.completionRunner.activePromise;
   }
 
+  private get activeCompletionDriverPromise(): Promise<unknown> | null {
+    return this.completionRunner.getActiveDriverPromise();
+  }
+
   private set activeCompletionPromise(value: Promise<NativeCompletionResult> | null) {
     this.completionRunner.activePromise = value;
+    if (value === null) {
+      this.completionRunner.activeDriverPromise = null;
+    }
   }
 
   private get activeCompletionReject(): ((error: unknown) => void) | null {
@@ -563,12 +1016,17 @@ class LLMEngineService {
       });
 
       if (process.env.NODE_ENV !== 'test') {
-        console.warn('[LLMEngine] Failed to unload model after low memory warning', error);
+        console.warn('[LLMEngine] Failed to unload model after low memory warning', buildSafeErrorLogDetails(error));
       }
     });
   }
 
   private setContext(context: LlamaContext | null): void {
+    if (this.context !== context) {
+      this.activeMultimodalContext = null;
+      this.pendingMultimodalReadinessRefresh = null;
+      this.loadedContextDisablesContextShiftForMultimodal = false;
+    }
     this.context = context;
     this.contextGeneration += 1;
     this.additionalStopWordsCache.clear();
@@ -630,6 +1088,171 @@ class LLMEngineService {
       && previous.sizeBytes === current.sizeBytes
       && previous.modificationTime === current.modificationTime
       && previous.fallbackDownloadMarker === current.fallbackDownloadMarker;
+  }
+
+  private buildActiveMultimodalContext({
+    modelId,
+    projector,
+    resolvedProjector,
+  }: {
+    modelId: string;
+    projector: ProjectorArtifact;
+    resolvedProjector: ResolvedProjectorArtifactInfo;
+  }): ActiveMultimodalContext {
+    const modificationTime = this.toArtifactTimestamp(resolvedProjector.fileInfo.modificationTime);
+
+    return {
+      modelId,
+      projectorId: projector.id,
+      projectorRepoId: this.normalizeArtifactString(projector.repoId),
+      projectorOwnerVariantId: this.normalizeArtifactString(projector.ownerVariantId),
+      projectorFileName: this.normalizeArtifactString(projector.fileName),
+      projectorDownloadUrl: this.normalizeArtifactString(projector.downloadUrl),
+      projectorHfRevision: this.normalizeArtifactString(projector.hfRevision),
+      projectorSha256: this.normalizeArtifactString(projector.sha256),
+      projectorLocalPath: this.normalizeArtifactString(resolvedProjector.localPath),
+      projectorResolvedPath: this.normalizeArtifactString(resolvedProjector.projectorPath),
+      projectorSizeBytes: this.toPositiveByteCount(resolvedProjector.fileInfo.size),
+      projectorModificationTime: modificationTime,
+      projectorFallbackMarker: modificationTime === null
+        ? this.resolveProjectorFallbackMarker(projector, resolvedProjector)
+        : null,
+    };
+  }
+
+  private resolveProjectorFallbackMarker(
+    projector: ProjectorArtifact,
+    resolvedProjector: ResolvedProjectorArtifactInfo,
+  ): string {
+    return JSON.stringify([
+      this.normalizeArtifactString(projector.sha256),
+      this.normalizeArtifactString(projector.downloadUrl),
+      this.normalizeArtifactString(projector.hfRevision),
+      this.normalizeArtifactString(projector.fileName),
+      this.normalizeArtifactString(projector.repoId),
+      this.normalizeArtifactString(projector.ownerModelId),
+      this.normalizeArtifactString(projector.ownerVariantId),
+      this.normalizeArtifactString(resolvedProjector.localPath),
+      this.normalizeArtifactString(resolvedProjector.projectorPath),
+    ]);
+  }
+
+  private isActiveMultimodalContextForResolvedProjector({
+    activeMultimodalContext,
+    modelId,
+    projector,
+    resolvedProjector,
+  }: {
+    activeMultimodalContext: ActiveMultimodalContext | null;
+    modelId: string;
+    projector: ProjectorArtifact;
+    resolvedProjector: ResolvedProjectorArtifactInfo;
+  }): boolean {
+    if (!activeMultimodalContext) {
+      return false;
+    }
+
+    const current = this.buildActiveMultimodalContext({ modelId, projector, resolvedProjector });
+    return activeMultimodalContext.modelId === current.modelId
+      && activeMultimodalContext.projectorId === current.projectorId
+      && activeMultimodalContext.projectorLocalPath === current.projectorLocalPath
+      && activeMultimodalContext.projectorResolvedPath === current.projectorResolvedPath
+      && activeMultimodalContext.projectorSizeBytes === current.projectorSizeBytes
+      && activeMultimodalContext.projectorModificationTime === current.projectorModificationTime
+      && activeMultimodalContext.projectorFallbackMarker === current.projectorFallbackMarker;
+  }
+
+  private buildProjectorResolutionOperationCacheKey(modelId: string, projector: ProjectorArtifact): string {
+    return JSON.stringify([
+      modelId,
+      this.normalizeArtifactString(projector.id),
+      this.normalizeArtifactString(projector.localPath),
+      this.normalizeArtifactString(projector.fileName),
+      this.normalizeArtifactString(projector.sha256),
+      this.normalizeArtifactString(projector.downloadUrl),
+      this.normalizeArtifactString(projector.hfRevision),
+      this.normalizeArtifactString(projector.repoId),
+      this.normalizeArtifactString(projector.ownerModelId),
+      this.normalizeArtifactString(projector.ownerVariantId),
+    ]);
+  }
+
+  private resolveProjectorFilePathForOperation({
+    modelId,
+    projector,
+    operationCache,
+  }: {
+    modelId: string;
+    projector: ProjectorArtifact;
+    operationCache?: ProjectorResolutionOperationCache;
+  }): Promise<ResolvedProjectorArtifactInfo> {
+    if (!operationCache) {
+      return resolveProjectorFilePathOrThrow({ modelId, projector });
+    }
+
+    const cacheKey = this.buildProjectorResolutionOperationCacheKey(modelId, projector);
+    const cachedResolution = operationCache.get(cacheKey);
+    if (cachedResolution) {
+      return cachedResolution;
+    }
+
+    let resolutionPromise!: Promise<ResolvedProjectorArtifactInfo>;
+    resolutionPromise = resolveProjectorFilePathOrThrow({ modelId, projector }).catch((error) => {
+      if (operationCache.get(cacheKey) === resolutionPromise) {
+        operationCache.delete(cacheKey);
+      }
+      throw error;
+    });
+    operationCache.set(cacheKey, resolutionPromise);
+    return resolutionPromise;
+  }
+
+  private isMultimodalReadinessInitializationCurrent({
+    modelId,
+    context,
+    cancellation,
+  }: {
+    modelId: string;
+    context: LlamaContext;
+    cancellation?: ContextOperationCancellationToken;
+  }): boolean {
+    return cancellation?.isCancelled() !== true
+      && !this.isUnloading
+      && this.context === context
+      && this.state.activeModelId === modelId
+      && (
+        this.state.status === EngineStatus.READY
+        || this.state.status === EngineStatus.INITIALIZING
+      );
+  }
+
+  private isMultimodalReadinessRefreshCurrent(refresh: {
+    modelId: string;
+    context: LlamaContext;
+  }): boolean {
+    return !this.isUnloading
+      && this.context === refresh.context
+      && this.state.activeModelId === refresh.modelId
+      && this.state.status === EngineStatus.READY;
+  }
+
+  private shouldAbortBackgroundReadinessReloadBeforeUnload(
+    refresh: MultimodalReadinessRefreshRequest | undefined,
+  ): boolean {
+    if (!refresh) {
+      return false;
+    }
+
+    if (!this.isMultimodalReadinessRefreshCurrent(refresh)) {
+      return true;
+    }
+
+    if (!this.activeCompletionPromise) {
+      return false;
+    }
+
+    this.queueMultimodalReadinessRefreshAfterCompletion(refresh);
+    return true;
   }
 
   private resolveSnapshotAppUsedBytes(snapshot: SystemMemorySnapshot | null): number | null {
@@ -814,15 +1437,104 @@ class LLMEngineService {
     );
   }
 
-  private trackContextOperation<T>(operation: () => Promise<T>): Promise<T> {
+  private trackContextOperation<T>(
+    operation: (cancellation: ContextOperationCancellationToken) => Promise<T>,
+    options: { readonly chatBlocking?: boolean } = {},
+  ): Promise<T> {
     return this.contextOperationRunner.track(
       operation,
       () => new AppError('engine_unloading', CONTEXT_OPERATION_UNLOAD_TIMEOUT_MESSAGE),
+      options,
     );
   }
 
-  private waitForActiveContextOperations(options: { timeoutMs?: number } = {}): Promise<ContextOperationDrainResult> {
+  private waitForActiveContextOperations(options: { timeoutMs?: number; chatBlocking?: boolean } = {}): Promise<ContextOperationDrainResult> {
     return this.contextOperationRunner.waitForActive(options);
+  }
+
+  public hasActiveContextOperation(): boolean {
+    return this.contextOperationRunner.hasActive();
+  }
+
+  public hasActiveChatBlockingContextOperation(): boolean {
+    return this.contextOperationRunner.hasActiveChatBlocking();
+  }
+
+  public async cancelActiveContextOperations(options: { timeoutMs?: number; detachOnTimeout?: boolean } = {}): Promise<ContextOperationDrainResult> {
+    const hadChatBlockingOperation = this.hasActiveChatBlockingContextOperation();
+    const timeoutMs = options.timeoutMs ?? CONTEXT_OPERATION_STOP_DRAIN_TIMEOUT_MS;
+    this.contextOperationRunner.cancelActive(
+      new AppError('engine_busy', CONTEXT_OPERATION_STOP_MESSAGE),
+    );
+    const chatBlockingDrainPromise = hadChatBlockingOperation
+      ? this.waitForActiveContextOperations({ timeoutMs, chatBlocking: true })
+      : Promise.resolve<ContextOperationDrainResult>('drained');
+    const drainResult = await this.waitForActiveContextOperations({ timeoutMs });
+    const chatBlockingDrainResult = await chatBlockingDrainPromise;
+    if (chatBlockingDrainResult === 'timed_out' && options.detachOnTimeout !== false) {
+      this.detachCurrentContextAfterTimedOutStop(
+        this.state.activeModelId ?? null,
+        new AppError('engine_busy', CONTEXT_OPERATION_STOP_TIMEOUT_MESSAGE),
+      );
+    }
+    return drainResult;
+  }
+
+  private async cancelActiveChatBlockingContextOperationsForCompletionStop(): Promise<ContextOperationDrainResult> {
+    if (!this.hasActiveChatBlockingContextOperation()) {
+      return 'drained';
+    }
+
+    this.contextOperationRunner.cancelActive(
+      new AppError('engine_busy', CONTEXT_OPERATION_STOP_MESSAGE),
+      { chatBlocking: true },
+    );
+    const drainResult = await this.waitForActiveContextOperations({
+      timeoutMs: CONTEXT_OPERATION_STOP_DRAIN_TIMEOUT_MS,
+      chatBlocking: true,
+    });
+    if (drainResult === 'timed_out') {
+      const timeoutError = new AppError('engine_busy', CONTEXT_OPERATION_STOP_TIMEOUT_MESSAGE);
+      this.completionRunner.rejectActive(timeoutError);
+      this.detachCurrentContextAfterTimedOutStop(this.state.activeModelId ?? null, timeoutError);
+    }
+
+    return drainResult;
+  }
+
+  private isContextOperationStopError(error: unknown): boolean {
+    return error instanceof AppError
+      && error.code === 'engine_busy'
+      && error.message === CONTEXT_OPERATION_STOP_MESSAGE;
+  }
+
+  private async preemptBackgroundContextOperationsForCompletion(): Promise<void> {
+    this.contextOperationRunner.cancelActive(
+      new AppError('engine_busy', CONTEXT_OPERATION_STOP_MESSAGE),
+      { chatBlocking: false },
+    );
+    const drainResult = await this.waitForActiveContextOperations({
+      timeoutMs: CONTEXT_OPERATION_STOP_DRAIN_TIMEOUT_MS,
+    });
+
+    if (drainResult === 'timed_out') {
+      throw new AppError('engine_busy', CONTEXT_OPERATION_COMPLETION_DRAIN_TIMEOUT_MESSAGE);
+    }
+  }
+
+  private async preemptBackgroundContextOperationsForPromptCount(): Promise<void> {
+    this.contextOperationRunner.cancelActive(
+      new AppError('engine_busy', CONTEXT_OPERATION_STOP_MESSAGE),
+      { chatBlocking: false },
+    );
+    const drainResult = await this.waitForActiveContextOperations({
+      timeoutMs: CONTEXT_OPERATION_STOP_DRAIN_TIMEOUT_MS,
+      chatBlocking: false,
+    });
+
+    if (drainResult === 'timed_out') {
+      throw new AppError('engine_busy', CONTEXT_OPERATION_PROMPT_COUNT_DRAIN_TIMEOUT_MESSAGE);
+    }
   }
 
   private waitForUnloadPromise(
@@ -832,35 +1544,205 @@ class LLMEngineService {
     return waitForPromiseWithTimeout(promise, timeoutMs);
   }
 
-  private recordContextOperationUnloadTimeout(): void {
+  private async waitForDeferredContextReleaseDrain(
+    drainPromise: Promise<unknown>,
+    timeoutMessage: string,
+  ): Promise<void> {
+    const drainResult = await this.waitForUnloadPromise(
+      drainPromise.catch(() => undefined),
+      CONTEXT_OPERATION_UNLOAD_DRAIN_TIMEOUT_MS,
+    );
+
+    if (drainResult !== 'timed_out') {
+      return;
+    }
+
+    const timeoutError = new AppError('engine_unloading', timeoutMessage);
+    this.contextOperationRunner.reset(timeoutError);
+    this.completionRunner.reset();
+
+    if (process.env.NODE_ENV !== 'test') {
+      console.warn('[LLMEngine] Deferred context release drain timed out; forcing context release', {
+        message: timeoutMessage,
+      });
+    }
+  }
+
+  private detachCurrentContextAfterTimedOutStop(activeModelId: string | null, timeoutError: AppError): void {
+    const contextAtTimeout = this.context;
+    const drainPromise = this.waitForActiveContextOperations().then(() => undefined);
+    this.lastLifecycleEvent = 'context_operation_unload_timeout';
+    this.lastLifecycleError = timeoutError.message;
+    this.contextOperationRunner.reset(timeoutError);
+    this.completionRunner.reset();
+
+    if (contextAtTimeout) {
+      this.setContext(null);
+      this.loadedArtifactIdentity = null;
+      this.activeContextSize = DEFAULT_CONTEXT_SIZE;
+      this.activeGpuLayers = null;
+      this.safeModeLoadLimits = null;
+      this.resetRuntimeTelemetry();
+      updateSettings({ activeModelId: null });
+    }
+
+    this.updateState({
+      status: EngineStatus.ERROR,
+      activeModelId: activeModelId ?? undefined,
+      loadProgress: 0,
+      lastError: timeoutError.message,
+    });
+
+    void drainPromise.catch(() => undefined).then(async () => {
+      if (this.context !== null || this.state.activeModelId !== activeModelId) {
+        return;
+      }
+
+      await releaseAllLlamaContexts().catch((error) => {
+        if (process.env.NODE_ENV !== 'test') {
+          console.warn('[LLMEngine] Failed to release detached context after prompt preparation drain', buildSafeErrorLogDetails(error));
+        }
+      });
+    });
+
+    if (process.env.NODE_ENV !== 'test') {
+      console.warn('[LLMEngine] Prompt preparation stop timed out; detached active context', {
+        activeModelId,
+      });
+    }
+  }
+
+  private recordContextOperationUnloadTimeout(activeModelId: string | null): AppError {
     this.lastLifecycleEvent = 'context_operation_unload_timeout';
     this.lastLifecycleError = CONTEXT_OPERATION_UNLOAD_TIMEOUT_MESSAGE;
     const timeoutError = new AppError('engine_unloading', CONTEXT_OPERATION_UNLOAD_TIMEOUT_MESSAGE);
     this.contextOperationRunner.cancelActive(timeoutError);
     this.updateState({
       ...this.state,
+      status: EngineStatus.ERROR,
+      activeModelId: activeModelId ?? this.state.activeModelId,
+      loadProgress: 0,
       lastError: CONTEXT_OPERATION_UNLOAD_TIMEOUT_MESSAGE,
     });
 
     if (process.env.NODE_ENV !== 'test') {
       console.warn(`[LLMEngine] ${CONTEXT_OPERATION_UNLOAD_TIMEOUT_MESSAGE}`);
     }
+
+    return timeoutError;
   }
 
-  private recordActiveCompletionUnloadTimeout(): void {
+  private recordActiveCompletionUnloadTimeout(activeModelId: string | null): AppError {
     this.lastLifecycleEvent = 'active_completion_unload_timeout';
     this.lastLifecycleError = ACTIVE_COMPLETION_UNLOAD_TIMEOUT_MESSAGE;
+    const timeoutError = new AppError('engine_unloading', ACTIVE_COMPLETION_UNLOAD_TIMEOUT_MESSAGE);
     this.completionRunner.rejectActive(
-      new AppError('engine_unloading', ACTIVE_COMPLETION_UNLOAD_TIMEOUT_MESSAGE),
+      timeoutError,
     );
     this.updateState({
       ...this.state,
+      status: EngineStatus.ERROR,
+      activeModelId: activeModelId ?? this.state.activeModelId,
+      loadProgress: 0,
       lastError: ACTIVE_COMPLETION_UNLOAD_TIMEOUT_MESSAGE,
     });
 
     if (process.env.NODE_ENV !== 'test') {
       console.warn(`[LLMEngine] ${ACTIVE_COMPLETION_UNLOAD_TIMEOUT_MESSAGE}`);
     }
+
+    return timeoutError;
+  }
+
+  private scheduleDeferredContextReleaseAfterCompletionDrain({
+    drainPromise,
+    context,
+    generation,
+  }: {
+    drainPromise: Promise<unknown>;
+    context: LlamaContext;
+    generation: number;
+  }): void {
+    if (this.deferredContextReleasePromise) {
+      return;
+    }
+
+    const deferredRelease = this.waitForDeferredContextReleaseDrain(
+      drainPromise,
+      ACTIVE_COMPLETION_UNLOAD_TIMEOUT_MESSAGE,
+    )
+      .then(() => this.runExclusiveOperation(async () => {
+        if (this.context !== context || this.contextGeneration !== generation) {
+          return;
+        }
+
+        await this.unloadInternal();
+        this.lastLifecycleEvent = 'active_completion_unload_timeout';
+        this.lastLifecycleError = ACTIVE_COMPLETION_UNLOAD_TIMEOUT_MESSAGE;
+        this.updateState(this.state);
+      }))
+      .catch((error) => {
+        if (process.env.NODE_ENV !== 'test') {
+          console.warn(
+            '[LLMEngine] Deferred context release after active completion unload timeout failed',
+            buildSafeErrorLogDetails(error),
+          );
+        }
+      })
+      .finally(() => {
+        if (this.deferredContextReleasePromise === deferredRelease) {
+          this.deferredContextReleasePromise = null;
+        }
+      });
+
+    this.deferredContextReleasePromise = deferredRelease;
+  }
+
+  private cancelActiveContextOperationsForDeferredUnload(error: unknown): Promise<void> {
+    this.contextOperationRunner.cancelActive(error);
+    return this.waitForActiveContextOperations().then(() => undefined);
+  }
+
+  private scheduleDeferredContextReleaseAfterDrain({
+    context,
+    generation,
+  }: {
+    context: LlamaContext;
+    generation: number;
+  }): void {
+    if (this.deferredContextReleasePromise) {
+      return;
+    }
+
+    const deferredRelease = this.waitForDeferredContextReleaseDrain(
+      this.waitForActiveContextOperations(),
+      CONTEXT_OPERATION_UNLOAD_TIMEOUT_MESSAGE,
+    )
+      .then(() => this.runExclusiveOperation(async () => {
+        if (this.context !== context || this.contextGeneration !== generation) {
+          return;
+        }
+
+        await this.unloadInternal();
+        this.lastLifecycleEvent = 'context_operation_unload_timeout';
+        this.lastLifecycleError = CONTEXT_OPERATION_UNLOAD_TIMEOUT_MESSAGE;
+        this.updateState(this.state);
+      }))
+      .catch((error) => {
+        if (process.env.NODE_ENV !== 'test') {
+          console.warn(
+            '[LLMEngine] Deferred context release after unload timeout failed',
+            buildSafeErrorLogDetails(error),
+          );
+        }
+      })
+      .finally(() => {
+        if (this.deferredContextReleasePromise === deferredRelease) {
+          this.deferredContextReleasePromise = null;
+        }
+      });
+
+    this.deferredContextReleasePromise = deferredRelease;
   }
 
   private buildAdditionalStopWordsCacheKey({
@@ -893,6 +1775,20 @@ class LLMEngineService {
       hash = this.updateCacheHash(hash, '\u0001');
       hash = this.updateCacheHash(hash, message.content);
       hash = this.updateCacheHash(hash, '\u0002');
+      const mediaPaths = getMessageMediaPaths(message);
+      hash = this.updateCacheHash(hash, String(mediaPaths.length));
+      hash = this.updateCacheHash(hash, '\u0003');
+      for (const mediaPath of mediaPaths) {
+        hash = this.updateCacheHash(hash, mediaPath);
+        hash = this.updateCacheHash(hash, '\u0004');
+      }
+      const contentPartEntries = getMessageContentPartSignatureEntries(message);
+      hash = this.updateCacheHash(hash, String(contentPartEntries.length));
+      hash = this.updateCacheHash(hash, '\u0005');
+      for (const contentPartEntry of contentPartEntries) {
+        hash = this.updateCacheHash(hash, contentPartEntry);
+        hash = this.updateCacheHash(hash, '\u0006');
+      }
     }
 
     return `${messages.length}:${hash.toString(36)}`;
@@ -1041,7 +1937,10 @@ class LLMEngineService {
     } catch (error) {
       this.assertContextStillCurrent(context, generation);
       if (process.env.NODE_ENV !== 'test') {
-        console.warn('[LLMEngine] Failed to resolve template stop tokens', error);
+        console.warn(
+          '[LLMEngine] Failed to resolve template stop tokens',
+          getSanitizedTemplateFormatterErrorMetadata(error),
+        );
       }
       return {
         stopWords: [],
@@ -1286,6 +2185,73 @@ class LLMEngineService {
     return { nBatch, nUbatch };
   }
 
+  private resolveMultimodalSafeBatchParams({
+    configuredBatchParams,
+    hasLoadTimeMmproj,
+    contextTokens,
+  }: {
+    configuredBatchParams: { nBatch: number; nUbatch: number } | null;
+    hasLoadTimeMmproj: boolean;
+    contextTokens: number;
+  }): { nBatch: number; nUbatch: number } | null {
+    if (!hasLoadTimeMmproj) {
+      return configuredBatchParams;
+    }
+
+    const roundedContextTokens = Math.max(32, Math.round(contextTokens));
+    const targetBatchTokens = Math.min(
+      DEFAULT_LLAMA_NATIVE_MULTIMODAL_BATCH_TOKENS,
+      roundedContextTokens,
+    );
+
+    const configuredNBatch = configuredBatchParams?.nBatch;
+    const nBatch = typeof configuredNBatch === 'number' && Number.isFinite(configuredNBatch) && configuredNBatch > 0
+      ? Math.max(32, Math.round(configuredNBatch))
+      : targetBatchTokens;
+    // llama.rn's mtmd image path splits non-causal image decode by n_batch and then calls
+    // llama_decode(). llama.cpp aborts the process if n_ubatch is smaller than that chunk.
+    const nUbatch = Math.max(
+      typeof configuredBatchParams?.nUbatch === 'number' && Number.isFinite(configuredBatchParams.nUbatch)
+        ? Math.max(32, Math.round(configuredBatchParams.nUbatch))
+        : nBatch,
+      nBatch,
+    );
+    return { nBatch, nUbatch };
+  }
+
+  private resolveMultimodalNativeBatchSafety(): {
+    isSafe: boolean;
+    nBatch: number;
+    nUbatch: number;
+  } {
+    const nBatch = typeof this.initNBatch === 'number'
+      && Number.isFinite(this.initNBatch)
+      && this.initNBatch > 0
+      ? Math.round(this.initNBatch)
+      : DEFAULT_LLAMA_NATIVE_MULTIMODAL_BATCH_TOKENS;
+    const nUbatch = typeof this.initNUbatch === 'number'
+      && Number.isFinite(this.initNUbatch)
+      && this.initNUbatch > 0
+      ? Math.round(this.initNUbatch)
+      : DEFAULT_LLAMA_NATIVE_MICRO_BATCH_TOKENS;
+
+    return {
+      isSafe: nBatch > 0 && nUbatch >= nBatch,
+      nBatch,
+      nUbatch,
+    };
+  }
+
+  private buildMultimodalNativeBatchFailureReason({
+    nBatch,
+    nUbatch,
+  }: {
+    nBatch: number;
+    nUbatch: number;
+  }): string {
+    return `Native multimodal image decoding requires n_ubatch (${nUbatch}) to be at least n_batch (${nBatch}).`;
+  }
+
   private persistHardBlockedMemoryFit(
     modelId: string,
     confidence: ModelMemoryFitConfidence = 'high',
@@ -1323,6 +2289,8 @@ class LLMEngineService {
     cacheTypeK,
     cacheTypeV,
     useMmap,
+    multimodalSizeBytes,
+    hasMmproj = false,
     preferGpuLayers = false,
   }: {
     ggufMetadata?: Record<string, unknown>;
@@ -1336,6 +2304,8 @@ class LLMEngineService {
     cacheTypeK: string;
     cacheTypeV: string;
     useMmap: boolean;
+    multimodalSizeBytes?: number;
+    hasMmproj?: boolean;
     preferGpuLayers?: boolean;
   }): { safeLoadProfile: { contextTokens: number; gpuLayers: number }; safeMemoryFit: MemoryFitResult } {
     const normalizedContextCeiling = clampContextWindowTokens(
@@ -1348,7 +2318,7 @@ class LLMEngineService {
     const estimateFit = (contextTokens: number, gpuLayers: number): MemoryFitResult => {
       const normalizedContext = clampContextWindowTokens(contextTokens, normalizedContextCeiling);
       const normalizedGpuLayers = Math.max(0, Math.min(normalizedGpuCeiling, Math.round(gpuLayers)));
-      const cacheKey = `${normalizedContext}:${normalizedGpuLayers}:${cacheTypeK}:${cacheTypeV}:${useMmap ? 'mmap' : 'nommap'}`;
+      const cacheKey = `${normalizedContext}:${normalizedGpuLayers}:${cacheTypeK}:${cacheTypeV}:${useMmap ? 'mmap' : 'nommap'}:${hasMmproj ? 'mmproj' : 'text'}:${multimodalSizeBytes ?? 0}`;
       const cached = fitCache.get(cacheKey);
       if (cached) {
         return cached;
@@ -1367,7 +2337,7 @@ class LLMEngineService {
             cacheTypeK,
             cacheTypeV,
             useMmap,
-            hasMmproj: false,
+            hasMmproj,
             nBatch: lowMemoryBatchParams?.nBatch,
             nUbatch: lowMemoryBatchParams?.nUbatch,
           })
@@ -1378,6 +2348,7 @@ class LLMEngineService {
         input: {
           modelSizeBytes: resolvedModelSizeBytes,
           verifiedFileSizeBytes: verifiedFileSizeBytes ?? undefined,
+          ...(multimodalSizeBytes ? { multimodalSizeBytes } : null),
           metadataTrust,
           ggufMetadata,
           runtimeParams: {
@@ -1560,6 +2531,15 @@ class LLMEngineService {
    * Initialize the llama.rn engine and load a GGUF model from disk.
    */
   public async load(modelId: string, options?: LoadModelOptions): Promise<void> {
+    await this.loadWithProjectorResolutionOperationCache(modelId, options, new Map());
+  }
+
+  private async loadWithProjectorResolutionOperationCache(
+    modelId: string,
+    options: LoadModelOptions | undefined,
+    projectorResolutionOperationCache: ProjectorResolutionOperationCache,
+    internalOptions: InternalLoadOptions = {},
+  ): Promise<void> {
     await this.runExclusiveOperation(async () => {
       const model = registry.getModel(modelId);
       if (!model || !model.localPath) {
@@ -1585,16 +2565,65 @@ class LLMEngineService {
           currentArtifactIdentity,
         );
       }
-      const shouldUnloadActiveModel = Boolean(
-        this.state.activeModelId && (this.state.activeModelId !== modelId || forceReload || !isCurrentLoadedArtifact),
+      const hasStaleLoadedContext = Boolean(
+        this.context && (this.state.status !== EngineStatus.READY || !this.state.activeModelId),
+      );
+      const shouldReloadLoadedContextForMultimodalContextShift = await this.shouldReloadLoadedContextForMultimodalContextShift(
+        model,
+        this.context,
+        projectorResolutionOperationCache,
+      );
+      const shouldUnloadActiveModel = hasStaleLoadedContext || Boolean(
+        this.state.activeModelId && (
+          this.state.activeModelId !== modelId
+          || forceReload
+          || !isCurrentLoadedArtifact
+          || shouldReloadLoadedContextForMultimodalContextShift
+        ),
       );
 
       if (
         this.state.status === EngineStatus.READY &&
         this.state.activeModelId === modelId &&
         !forceReload &&
-        isCurrentLoadedArtifact
+        isCurrentLoadedArtifact &&
+        !shouldReloadLoadedContextForMultimodalContextShift
       ) {
+        if (this.context) {
+          const refreshRequest = {
+            modelId,
+            context: this.context,
+            useGpu: this.actualGpuAccelerated === true,
+          };
+          if (this.activeCompletionPromise) {
+            this.queueMultimodalReadinessRefreshAfterCompletion(refreshRequest);
+          } else {
+            try {
+              await this.trackContextOperation(async (cancellation) => {
+                if (
+                  cancellation.isCancelled()
+                  || this.context !== refreshRequest.context
+                  || this.state.activeModelId !== refreshRequest.modelId
+                  || this.state.status !== EngineStatus.READY
+                ) {
+                  return;
+                }
+
+                await this.initializeMultimodalReadinessForLoadedContext(
+                  refreshRequest,
+                  cancellation,
+                  projectorResolutionOperationCache,
+                );
+              }, { chatBlocking: false });
+            } catch (error) {
+              if (!this.isContextOperationStopError(error) || !this.activeCompletionPromise) {
+                throw error;
+              }
+
+              this.queueMultimodalReadinessRefreshAfterCompletion(refreshRequest);
+            }
+          }
+        }
         return;
       }
 
@@ -1617,6 +2646,14 @@ class LLMEngineService {
 
       let recentUnloadReclaim: ModelUnloadReclaimEstimate | null = null;
       if (shouldUnloadActiveModel) {
+        // Deferred readiness reloads are background work; they must not preempt a chat that
+        // starts after the reload decision but before this load path reaches unloadInternal().
+        if (this.shouldAbortBackgroundReadinessReloadBeforeUnload(
+          internalOptions.requeueReadinessRefreshOnActiveCompletion,
+        )) {
+          return;
+        }
+
         recentUnloadReclaim = await this.unloadInternal();
       }
 
@@ -1631,6 +2668,7 @@ class LLMEngineService {
         recentUnloadReclaim,
         fallbackDownloadMarker,
         resolvedArtifactInfo,
+        projectorResolutionOperationCache,
       );
       await this.initPromise;
     });
@@ -1644,6 +2682,8 @@ class LLMEngineService {
 
   public async chatCompletion({
     messages,
+    mediaPaths,
+    multimodalReadiness,
     onToken,
     params,
   }: LlmChatCompletionOptions): Promise<NativeCompletionResult> {
@@ -1655,6 +2695,45 @@ class LLMEngineService {
       throw new AppError('engine_busy', 'A response is already being generated.');
     }
 
+    const requestMessages = mergeTopLevelMediaPathsIntoLatestUserMessage(messages, mediaPaths);
+    const requestMediaPaths = getMessagesMediaPaths(requestMessages);
+    const requestMediaPathOccurrenceCount = countMergedRequestMediaPathOccurrences(messages, mediaPaths);
+    const requestAudioInputOccurrenceCount = countMessageAudioInputOccurrencesInMessages(requestMessages);
+    const requestMediaInputOccurrenceCount = requestMediaPathOccurrenceCount + requestAudioInputOccurrenceCount;
+    const effectiveMultimodalReadiness = this.resolveLatestMultimodalReadinessForRequest(multimodalReadiness);
+    const shouldRecordMultimodalDiagnostics = requestMediaInputOccurrenceCount > 0
+      || (effectiveMultimodalReadiness !== undefined && effectiveMultimodalReadiness.status !== 'ready');
+    if (shouldRecordMultimodalDiagnostics) {
+      this.recordRecentMultimodalDiagnostics({
+        messages: requestMessages,
+        mediaPaths: requestMediaPaths,
+        mediaPathOccurrenceCount: requestMediaInputOccurrenceCount,
+        readiness: effectiveMultimodalReadiness,
+      });
+    }
+    try {
+      assertMultimodalReadyForMediaPaths(
+        requestMediaPaths,
+        effectiveMultimodalReadiness,
+        requestMediaPathOccurrenceCount,
+        this.state.activeModelId,
+      );
+      assertMultimodalReadyForAudioInputs(
+        requestAudioInputOccurrenceCount,
+        effectiveMultimodalReadiness,
+        this.state.activeModelId,
+      );
+    } catch (error) {
+      this.recordRecentMultimodalDiagnostics({
+        messages: requestMessages,
+        mediaPaths: requestMediaPaths,
+        mediaPathOccurrenceCount: requestMediaInputOccurrenceCount,
+        readiness: effectiveMultimodalReadiness,
+        failureReason: effectiveMultimodalReadiness?.failureReason ?? getErrorMessageText(error),
+      });
+      throw error;
+    }
+
     let resolveCompletion!: (result: NativeCompletionResult) => void;
     let rejectCompletion!: (error: unknown) => void;
     const completionTask = new Promise<NativeCompletionResult>((resolve, reject) => {
@@ -1664,15 +2743,35 @@ class LLMEngineService {
 
     const interruptGeneration = this.completionRunner.start(completionTask, rejectCompletion);
 
-    void (async () => {
+    const completionDriver = (async () => {
       try {
         if (this.state.status === EngineStatus.INITIALIZING && this.initPromise) {
           await this.initPromise;
         }
 
-        await this.waitForActiveContextOperations();
+        await this.preemptBackgroundContextOperationsForCompletion();
 
         const { context, generation: contextGeneration } = this.getReadyContextOrThrow();
+        try {
+          this.assertActiveMultimodalRuntimeReadyForMediaPaths(
+            requestMediaPaths,
+            effectiveMultimodalReadiness,
+            requestMediaPathOccurrenceCount,
+          );
+          this.assertActiveMultimodalRuntimeReadyForAudioInputs(
+            requestAudioInputOccurrenceCount,
+            effectiveMultimodalReadiness,
+          );
+        } catch (error) {
+          this.recordRecentMultimodalDiagnostics({
+            messages: requestMessages,
+            mediaPaths: requestMediaPaths,
+            mediaPathOccurrenceCount: requestMediaInputOccurrenceCount,
+            readiness: effectiveMultimodalReadiness,
+            failureReason: effectiveMultimodalReadiness?.failureReason ?? getErrorMessageText(error),
+          });
+          throw error;
+        }
 
         let hasStreamedTokens = false;
         const markTokensStreamed = () => {
@@ -1687,12 +2786,19 @@ class LLMEngineService {
           this.assertCompletionNotInterrupted(interruptGeneration);
           const enableThinking = params?.enable_thinking ?? false;
           const reasoningFormat: ChatCompletionReasoningFormat = params?.reasoning_format ?? 'none';
-          const templateStopResolution = await this.resolveTemplateAdditionalStopWords({
-            context,
-            generation: contextGeneration,
-            messages: completionMessages,
-            enableThinking,
-            reasoningFormat,
+          const templateStopResolution = await this.trackContextOperation(async (cancellation) => {
+            cancellation.throwIfCancelled();
+            this.assertCompletionNotInterrupted(interruptGeneration);
+            const resolution = await this.resolveTemplateAdditionalStopWords({
+              context,
+              generation: contextGeneration,
+              messages: completionMessages,
+              enableThinking,
+              reasoningFormat,
+            });
+            cancellation.throwIfCancelled();
+            this.assertCompletionNotInterrupted(interruptGeneration);
+            return resolution;
           });
           strictRoleSystemNormalization = templateStopResolution.strictRoleSystemNormalization;
           this.assertCompletionNotInterrupted(interruptGeneration);
@@ -1712,6 +2818,10 @@ class LLMEngineService {
             reasoning_format: reasoningFormat,
             stop: resolvedStops.stopWords,
           };
+
+          if (requestMediaPaths.length > 0) {
+            completionParams.media_paths = requestMediaPaths;
+          }
 
           if (typeof params?.seed === 'number' && Number.isFinite(params.seed)) {
             completionParams.seed = Math.round(params.seed);
@@ -1749,7 +2859,7 @@ class LLMEngineService {
 
         try {
           hasStreamedTokens = false;
-          resolveCompletion(await runCompletion(messages, markTokensStreamed));
+          resolveCompletion(await runCompletion(requestMessages, markTokensStreamed));
         } catch (error) {
           if (isConversationAlternationError(error)) {
             if (hasStreamedTokens && onToken) {
@@ -1760,7 +2870,7 @@ class LLMEngineService {
             }
 
             console.warn('[LLMEngine] Retrying completion after normalizing chat roles for strict templates');
-            const normalizedMessages = normalizeMessagesForStrictRoleAlternation(messages, {
+            const normalizedMessages = normalizeMessagesForStrictRoleAlternation(requestMessages, {
               systemNormalization: strictRoleSystemNormalization,
             });
             hasStreamedTokens = false;
@@ -1771,18 +2881,37 @@ class LLMEngineService {
           throw error;
         }
       } catch (error) {
+        if (requestMediaInputOccurrenceCount > 0) {
+          this.recordRecentMultimodalDiagnostics({
+            messages: requestMessages,
+            mediaPaths: requestMediaPaths,
+            mediaPathOccurrenceCount: requestMediaInputOccurrenceCount,
+            readiness: effectiveMultimodalReadiness,
+            failureReason: getErrorMessageText(error),
+          });
+        }
         rejectCompletion(error);
       } finally {
         this.completionRunner.clearIfActive(completionTask);
+        if (this.pendingMultimodalReadinessRefresh) {
+          this.schedulePendingMultimodalReadinessRefresh();
+        }
       }
     })();
+    this.completionRunner.attachDriver(completionTask, completionDriver);
 
     return completionTask;
   }
 
-  private async probeThinkingCapability(context: LlamaContext): Promise<ModelThinkingCapabilitySnapshot | null> {
+  private async probeThinkingCapability(
+    context: LlamaContext,
+    cancellation: ContextOperationCancellationToken,
+  ): Promise<ModelThinkingCapabilitySnapshot | null> {
     const sampleMessages: LlmChatMessage[] = [{ role: 'user', content: 'ping' }];
-    const shouldAbort = () => this.isUnloading || this.context !== context || this.activeCompletionPromise !== null;
+    const shouldAbort = () => cancellation.isCancelled()
+      || this.isUnloading
+      || this.context !== context
+      || this.activeCompletionPromise !== null;
 
     const safeFormat = async ({
       enableThinking,
@@ -1796,6 +2925,7 @@ class LLMEngineService {
       }
 
       try {
+        cancellation.throwIfCancelled();
         const formatted = await getFormattedChatFromContext({
           context,
           messages: sampleMessages,
@@ -1807,6 +2937,7 @@ class LLMEngineService {
           },
         });
 
+        cancellation.throwIfCancelled();
         if (shouldAbort()) {
           return null;
         }
@@ -1814,7 +2945,7 @@ class LLMEngineService {
         return formatted;
       } catch (error) {
         if (!shouldAbort() && process.env.NODE_ENV !== 'test') {
-          console.warn('[LLMEngine] Failed to probe chat template thinking capability', error);
+          console.warn('[LLMEngine] Failed to probe chat template thinking capability', buildSafeErrorLogDetails(error));
         }
         return null;
       }
@@ -1935,29 +3066,41 @@ class LLMEngineService {
       && this.state.activeModelId === modelId
     );
 
-    void (async () => {
-      try {
-        const thinkingCapability = await this.probeThinkingCapability(contextAtProbeStart);
-        if (thinkingCapability && isProbeStillCurrent()) {
-          const model = registry.getModel(modelId);
-          if (model && isProbeStillCurrent() && !areThinkingCapabilitySnapshotsEqual(model.thinkingCapability, thinkingCapability)) {
-            registry.updateModel({
-              ...model,
-              thinkingCapability,
-            });
-          }
-        }
-      } catch (error) {
-        if (isProbeStillCurrent()) {
-          console.warn('[LLMEngine] Failed to persist chat template thinking capability', error);
+    void this.trackContextOperation(async (cancellation) => {
+      if (cancellation.isCancelled() || !isProbeStillCurrent()) {
+        return;
+      }
+
+      const thinkingCapability = await this.probeThinkingCapability(contextAtProbeStart, cancellation);
+      cancellation.throwIfCancelled();
+
+      if (thinkingCapability && isProbeStillCurrent()) {
+        const model = registry.getModel(modelId);
+        if (model && isProbeStillCurrent() && !areThinkingCapabilitySnapshotsEqual(model.thinkingCapability, thinkingCapability)) {
+          registry.updateModel({
+            ...model,
+            thinkingCapability,
+          });
         }
       }
-    })();
+    }, { chatBlocking: false }).catch((error) => {
+      if (this.isContextOperationStopError(error) || this.isUnloading) {
+        return;
+      }
+
+      if (isProbeStillCurrent()) {
+        console.warn('[LLMEngine] Failed to persist chat template thinking capability', buildSafeErrorLogDetails(error));
+      }
+    });
   }
 
   public async countPromptTokens({
     messages,
     params,
+    multimodalReadiness,
+    expectedModelId,
+    chatBlocking = true,
+    allowMediaFallback = false,
   }: {
     messages: LlmChatMessage[];
     params?: {
@@ -1965,6 +3108,10 @@ class LLMEngineService {
       reasoning_format?: 'none' | 'auto' | 'deepseek';
       add_generation_prompt?: boolean;
     };
+    multimodalReadiness?: MultimodalReadinessState;
+    expectedModelId?: string | null;
+    chatBlocking?: boolean;
+    allowMediaFallback?: boolean;
   }): Promise<number> {
     if (this.isUnloading) {
       throw new AppError('engine_unloading', 'The model engine is unloading. Please wait a moment.');
@@ -1974,10 +3121,54 @@ class LLMEngineService {
       throw new AppError('engine_busy', 'A response is already being generated.');
     }
 
-    return this.trackContextOperation(async () => {
+    const mediaAwareMessages = messages.map(withResolvedMediaPaths);
+    const mediaPaths = getMessagesMediaPaths(mediaAwareMessages);
+    const mediaPathOccurrenceCount = countMessageMediaPathOccurrences(mediaAwareMessages);
+    const audioInputOccurrenceCount = countMessageAudioInputOccurrencesInMessages(mediaAwareMessages);
+    const mediaInputOccurrenceCount = mediaPathOccurrenceCount + audioInputOccurrenceCount;
+    const effectiveMultimodalReadiness = this.resolveLatestMultimodalReadinessForRequest(
+      multimodalReadiness,
+      expectedModelId,
+    );
+    const shouldUseMediaPaths = (() => {
+      if (mediaInputOccurrenceCount === 0) {
+        return false;
+      }
+
+      try {
+        assertMultimodalReadyForMediaPaths(
+          mediaPaths,
+          effectiveMultimodalReadiness,
+          mediaPathOccurrenceCount,
+          expectedModelId,
+        );
+        assertMultimodalReadyForAudioInputs(
+          audioInputOccurrenceCount,
+          effectiveMultimodalReadiness,
+          expectedModelId,
+        );
+        return true;
+      } catch (error) {
+        if (!allowMediaFallback || toAppError(error).code === 'chat_attachment_limit_exceeded') {
+          throw error;
+        }
+
+        return false;
+      }
+    })();
+    const requestMessages = shouldUseMediaPaths
+      ? mediaAwareMessages
+      : mediaAwareMessages.map(withoutMediaPaths);
+
+    if (chatBlocking !== false) {
+      await this.preemptBackgroundContextOperationsForPromptCount();
+    }
+
+    return this.trackContextOperation(async (cancellation) => {
       if (this.state.status === EngineStatus.INITIALIZING && this.initPromise) {
         await this.initPromise;
       }
+      cancellation.throwIfCancelled();
 
       if (this.activeCompletionPromise) {
         throw new AppError('engine_busy', 'A response is already being generated.');
@@ -2004,6 +3195,7 @@ class LLMEngineService {
           throw error;
         }
 
+        cancellation.throwIfCancelled();
         strictRoleSystemNormalization = resolveStrictRoleSystemNormalization(formatted);
         this.assertContextStillCurrent(context, contextGeneration);
         let tokenized: Awaited<ReturnType<LlamaContext['tokenize']>>;
@@ -2011,7 +3203,11 @@ class LLMEngineService {
           tokenized = await tokenizeFormattedPrompt({
             context,
             prompt: formatted.prompt,
-            mediaPaths: formatted.media_paths,
+            mediaPaths: shouldUseMediaPaths
+              ? formatted.media_paths && formatted.media_paths.length > 0
+                ? formatted.media_paths
+                : getMessagesMediaPaths(promptMessages)
+              : undefined,
           });
         } catch (error) {
           this.assertContextStillCurrent(context, contextGeneration);
@@ -2023,11 +3219,11 @@ class LLMEngineService {
       };
 
       try {
-        return await countTokens(messages);
+        return await countTokens(requestMessages);
       } catch (error) {
         if (isConversationAlternationError(error)) {
           console.warn('[LLMEngine] Retrying prompt token count after normalizing chat roles for strict templates');
-          const normalizedMessages = normalizeMessagesForStrictRoleAlternation(messages, {
+          const normalizedMessages = normalizeMessagesForStrictRoleAlternation(requestMessages, {
             systemNormalization: strictRoleSystemNormalization,
           });
           return await countTokens(normalizedMessages);
@@ -2035,11 +3231,26 @@ class LLMEngineService {
 
         throw error;
       }
-    });
+    }, { chatBlocking });
   }
 
   public async stopCompletion(): Promise<void> {
+    await this.stopCompletionInternal({ drainPromptPreparation: true });
+  }
+
+  private async stopCompletionInternal({
+    drainPromptPreparation,
+  }: {
+    drainPromptPreparation: boolean;
+  }): Promise<void> {
     this.completionRunner.interruptIfActive();
+
+    if (drainPromptPreparation && this.hasActiveChatBlockingContextOperation()) {
+      const drainResult = await this.cancelActiveChatBlockingContextOperationsForCompletionStop();
+      if (drainResult === 'timed_out') {
+        return;
+      }
+    }
 
     if (this.context) {
       await this.context.stopCompletion();
@@ -2047,19 +3258,31 @@ class LLMEngineService {
   }
 
   public async interruptActiveCompletion(): Promise<void> {
-    const activeCompletion = this.completionRunner.activePromise;
+    const activeCompletion = this.activeCompletionDriverPromise;
     if (!activeCompletion) {
       return;
+    }
+
+    if (this.hasActiveChatBlockingContextOperation()) {
+      const drainResult = await this.cancelActiveChatBlockingContextOperationsForCompletionStop();
+      if (drainResult === 'timed_out') {
+        return;
+      }
     }
 
     try {
       await this.stopCompletion();
     } catch (error) {
-      console.warn('[LLMEngine] Failed to interrupt active completion', error);
+      console.warn('[LLMEngine] Failed to interrupt active completion', buildSafeErrorLogDetails(error));
     }
 
     try {
-      await activeCompletion;
+      const stopResult = await this.waitForUnloadPromise(activeCompletion, CONTEXT_OPERATION_STOP_DRAIN_TIMEOUT_MS);
+      if (stopResult === 'timed_out') {
+        this.completionRunner.rejectActive(
+          new AppError('engine_busy', ACTIVE_COMPLETION_STOP_TIMEOUT_MESSAGE),
+        );
+      }
     } catch {
       // Completion failures are handled by the chat flow that initiated them.
     }
@@ -2075,6 +3298,59 @@ class LLMEngineService {
 
   public getContextSize(): number {
     return this.activeContextSize;
+  }
+
+  public assertActiveMultimodalReadyForMediaPaths({
+    mediaPaths,
+    multimodalReadiness,
+    expectedModelId,
+    mediaPathOccurrenceCount = mediaPaths.length,
+  }: {
+    mediaPaths: readonly string[];
+    multimodalReadiness?: MultimodalReadinessState;
+    expectedModelId?: string | null;
+    mediaPathOccurrenceCount?: number;
+  }): MultimodalReadinessState | undefined {
+    const effectiveReadiness = this.resolveLatestMultimodalReadinessForRequest(
+      multimodalReadiness,
+      expectedModelId,
+      { requirePersistedReadinessForExpectedModel: true },
+    );
+
+    if (mediaPathOccurrenceCount === 0 && mediaPaths.length === 0) {
+      return effectiveReadiness;
+    }
+
+    assertMultimodalReadyForMediaPaths(
+      mediaPaths,
+      effectiveReadiness,
+      mediaPathOccurrenceCount,
+      expectedModelId ?? this.state.activeModelId,
+    );
+    this.assertActiveMultimodalRuntimeReadyForMediaPaths(
+      mediaPaths,
+      effectiveReadiness,
+      mediaPathOccurrenceCount,
+    );
+
+    return effectiveReadiness;
+  }
+
+  public requestActiveMultimodalReadinessRefresh(modelId: string): void {
+    if (
+      this.state.status !== EngineStatus.READY
+      || this.state.activeModelId !== modelId
+      || !this.context
+      || this.isUnloading
+    ) {
+      return;
+    }
+
+    this.queueMultimodalReadinessRefreshAfterCompletion({
+      modelId,
+      context: this.context,
+      useGpu: this.actualGpuAccelerated === true,
+    });
   }
 
   public getLoadedGpuLayers(): number | null {
@@ -2121,7 +3397,7 @@ class LLMEngineService {
     try {
       totalMemoryBytes = await DeviceInfo.getTotalMemory();
     } catch (error) {
-      console.warn('[LLMEngine] Failed to resolve total device memory for GPU layer recommendation', error);
+      console.warn('[LLMEngine] Failed to resolve total device memory for GPU layer recommendation', buildSafeErrorLogDetails(error));
     }
 
     const snapshot = await getFreshMemorySnapshot(350).catch(() => null);
@@ -2203,7 +3479,781 @@ class LLMEngineService {
       initKvUnified: this.initKvUnified,
       lastLifecycleEvent: this.lastLifecycleEvent,
       lastLifecycleError: this.lastLifecycleError,
+      multimodalDiagnostics: this.recentMultimodalDiagnostics,
     });
+  }
+
+  private recordRecentMultimodalDiagnostics({
+    messages,
+    mediaPaths,
+    mediaPathOccurrenceCount,
+    readiness,
+    failureReason,
+  }: {
+    messages: readonly LlmChatMessage[];
+    mediaPaths: readonly string[];
+    mediaPathOccurrenceCount?: number;
+    readiness: MultimodalReadinessState | undefined;
+    failureReason?: string | null;
+  }): void {
+    const attachmentSummary = summarizeChatImageAttachments(
+      messages.flatMap((message) => message.attachments ?? []),
+    );
+    const multimodalDiagnostics = buildMultimodalDiagnosticsSummary({
+      readiness,
+      attachmentCount: Math.max(attachmentSummary.count, mediaPathOccurrenceCount ?? mediaPaths.length),
+      attachmentTotalBytes: attachmentSummary.totalBytes,
+      failureReason,
+    });
+
+    if (!multimodalDiagnostics) {
+      return;
+    }
+
+    this.recentMultimodalDiagnostics = multimodalDiagnostics;
+    this.updateState(this.state);
+  }
+
+  private getMultimodalVariantId(model: ModelMetadata): string | undefined {
+    return model.activeVariantId ?? model.resolvedFileName;
+  }
+
+  private isVisionCapableModel(model: ModelMetadata): boolean {
+    return modelSupportsVision(model);
+  }
+
+  private async resolveLoadTimeProjectorMemoryInfo(
+    model: ModelMetadata | null | undefined,
+    projectorResolutionOperationCache?: ProjectorResolutionOperationCache,
+  ): Promise<{ projectorId: string; sizeBytes: number | null; memoryFitSizeBytes: number } | null> {
+    if (!model || !this.isVisionCapableModel(model)) {
+      return null;
+    }
+
+    const resolution = projectorArtifactService.resolveProjectorForModel(model);
+    const projector = resolution.selectedProjector;
+    if (!projector || (projector.lifecycleStatus !== 'downloaded' && projector.lifecycleStatus !== 'active')) {
+      return null;
+    }
+
+    try {
+      const resolvedProjector = await this.resolveProjectorFilePathForOperation({
+        modelId: model.id,
+        projector,
+        operationCache: projectorResolutionOperationCache,
+      });
+      const sizeBytes = this.toPositiveByteCount(resolvedProjector.fileInfo.size)
+        ?? this.toPositiveByteCount(projector.size);
+
+      return {
+        projectorId: projector.id,
+        sizeBytes,
+        memoryFitSizeBytes: sizeBytes ?? UNKNOWN_PROJECTOR_MEMORY_FIT_FALLBACK_BYTES,
+      };
+    } catch (error) {
+      if (process.env.NODE_ENV !== 'test') {
+        console.warn('[LLMEngine] Failed to resolve projector size for load-time memory fit', {
+          modelId: model.id,
+          projectorId: projector.id,
+          errorName: error instanceof Error ? error.name : typeof error,
+        });
+      }
+      return null;
+    }
+  }
+
+  private async shouldReloadLoadedContextForMultimodalContextShift(
+    model: ModelMetadata | null | undefined,
+    expectedContext: LlamaContext | null = this.context,
+    projectorResolutionOperationCache?: ProjectorResolutionOperationCache,
+  ): Promise<boolean> {
+    if (
+      !model
+      || !expectedContext
+      || this.context !== expectedContext
+      || this.state.activeModelId !== model.id
+      || this.state.status !== EngineStatus.READY
+      || this.activeCompletionPromise
+    ) {
+      return false;
+    }
+
+    const loadTimeProjector = await this.resolveLoadTimeProjectorMemoryInfo(model, projectorResolutionOperationCache);
+    const shouldDisableContextShiftForMultimodal = loadTimeProjector !== null;
+    return this.loadedContextDisablesContextShiftForMultimodal !== shouldDisableContextShiftForMultimodal
+      && this.context === expectedContext
+      && this.state.activeModelId === model.id
+      && this.state.status === EngineStatus.READY
+      && !this.activeCompletionPromise
+      && !this.isUnloading;
+  }
+
+  private async shouldReloadLoadedContextForMultimodalContextShiftByModelId(
+    modelId: string,
+    expectedContext: LlamaContext | null,
+    projectorResolutionOperationCache?: ProjectorResolutionOperationCache,
+  ): Promise<boolean> {
+    return this.shouldReloadLoadedContextForMultimodalContextShift(
+      registry.getModel(modelId),
+      expectedContext,
+      projectorResolutionOperationCache,
+    );
+  }
+
+  private resolveLatestMultimodalReadinessForRequest(
+    readiness?: MultimodalReadinessState,
+    expectedModelId?: string | null,
+    options: { requirePersistedReadinessForExpectedModel?: boolean } = {},
+  ): MultimodalReadinessState | undefined {
+    const modelId = expectedModelId ?? readiness?.modelId ?? this.state.activeModelId;
+    if (!modelId) {
+      return readiness;
+    }
+
+    const currentModel = registry.getModel(modelId);
+    if (!currentModel) {
+      return readiness;
+    }
+
+    if (currentModel.multimodalReadiness !== undefined) {
+      return currentModel.multimodalReadiness;
+    }
+
+    return options.requirePersistedReadinessForExpectedModel && expectedModelId
+      ? undefined
+      : readiness;
+  }
+
+  private buildMultimodalReadinessState(
+    model: ModelMetadata,
+    status: MultimodalReadinessStatus,
+    options: {
+      projector?: Pick<ProjectorArtifact, 'id' | 'size'> | null;
+      projectorSize?: number | null;
+      support?: readonly MultimodalSupportModality[];
+      failureReason?: string | null;
+      failureReasonPrivacy?: 'safe' | 'runtime';
+    } = {},
+  ): MultimodalReadinessState {
+    const projectorSize = this.toPositiveByteCount(options.projectorSize)
+      ?? this.toPositiveByteCount(options.projector?.size);
+    const support = Array.from(new Set(options.support ?? []));
+    const failureReason = options.failureReasonPrivacy === 'runtime'
+      ? sanitizeMultimodalFailureCategory(options.failureReason)
+      : sanitizeMultimodalFailureReason(options.failureReason);
+
+    return {
+      modelId: model.id,
+      ...(this.getMultimodalVariantId(model) ? { variantId: this.getMultimodalVariantId(model) } : null),
+      status,
+      ...(options.projector?.id ? { projectorId: options.projector.id } : null),
+      ...(projectorSize ? { projectorSize } : null),
+      support,
+      ...(failureReason ? { failureReason } : null),
+      checkedAt: Date.now(),
+    };
+  }
+
+  private persistMultimodalReadiness(modelId: string, readiness: MultimodalReadinessState): void {
+    const currentModel = registry.getModel(modelId);
+    if (!currentModel) {
+      return;
+    }
+
+    registry.updateModel({
+      ...currentModel,
+      multimodalReadiness: readiness,
+    });
+
+    this.recordRecentMultimodalDiagnostics({
+      messages: [],
+      mediaPaths: [],
+      readiness,
+      failureReason: readiness.failureReason,
+    });
+  }
+
+  private resolveMultimodalSupportList(support: LlamaMultimodalSupport): MultimodalSupportModality[] {
+    return [
+      ...(support.vision ? ['vision' as const] : []),
+      ...(support.audio ? ['audio' as const] : []),
+    ];
+  }
+
+  private getMultimodalRuntimeFailureStatus(error: unknown): MultimodalReadinessStatus {
+    return error instanceof LlamaRuntimeFeatureUnavailableError ? 'unsupported' : 'failed';
+  }
+
+  private queueMultimodalReadinessRefreshAfterCompletion(refresh: MultimodalReadinessRefreshRequest): void {
+    this.pendingMultimodalReadinessRefresh = refresh;
+    const activeCompletion = this.activeCompletionPromise;
+    if (activeCompletion) {
+      void activeCompletion.catch(() => undefined).then(() => {
+        this.schedulePendingMultimodalReadinessRefresh();
+      });
+      return;
+    }
+
+    this.schedulePendingMultimodalReadinessRefresh();
+  }
+
+  private schedulePendingMultimodalReadinessRefresh(): void {
+    if (this.pendingMultimodalReadinessRefreshPromise) {
+      return;
+    }
+
+    const refreshPromise = this.runPendingMultimodalReadinessRefresh();
+    this.pendingMultimodalReadinessRefreshPromise = refreshPromise;
+    void refreshPromise.finally(() => {
+      if (this.pendingMultimodalReadinessRefreshPromise === refreshPromise) {
+        this.pendingMultimodalReadinessRefreshPromise = null;
+      }
+
+      if (this.pendingMultimodalReadinessRefresh && !this.activeCompletionPromise && !this.isUnloading) {
+        this.schedulePendingMultimodalReadinessRefresh();
+      }
+    });
+  }
+
+  private async runPendingMultimodalReadinessRefresh(): Promise<void> {
+    const pendingRefresh = this.pendingMultimodalReadinessRefresh;
+    if (!pendingRefresh || this.activeCompletionPromise || this.isUnloading) {
+      return;
+    }
+
+    this.pendingMultimodalReadinessRefresh = null;
+    const projectorResolutionOperationCache: ProjectorResolutionOperationCache = new Map();
+
+    try {
+      const shouldReloadForMultimodalContextShift = await this.shouldReloadLoadedContextForMultimodalContextShiftByModelId(
+        pendingRefresh.modelId,
+        pendingRefresh.context,
+        projectorResolutionOperationCache,
+      );
+
+      if (this.activeCompletionPromise) {
+        if (this.isMultimodalReadinessRefreshCurrent(pendingRefresh)) {
+          this.queueMultimodalReadinessRefreshAfterCompletion(pendingRefresh);
+        }
+        return;
+      }
+
+      if (!this.isMultimodalReadinessRefreshCurrent(pendingRefresh)) {
+        return;
+      }
+
+      if (shouldReloadForMultimodalContextShift) {
+        await this.loadWithProjectorResolutionOperationCache(
+          pendingRefresh.modelId,
+          undefined,
+          projectorResolutionOperationCache,
+          { requeueReadinessRefreshOnActiveCompletion: pendingRefresh },
+        );
+        return;
+      }
+
+      await this.trackContextOperation(async (cancellation) => {
+        if (this.activeCompletionPromise) {
+          this.queueMultimodalReadinessRefreshAfterCompletion(pendingRefresh);
+          return;
+        }
+
+        if (
+          cancellation.isCancelled()
+          || !this.isMultimodalReadinessRefreshCurrent(pendingRefresh)
+        ) {
+          return;
+        }
+
+        await this.initializeMultimodalReadinessForLoadedContext(
+          pendingRefresh,
+          cancellation,
+          projectorResolutionOperationCache,
+        );
+      }, { chatBlocking: false });
+    } catch (error) {
+      if (this.isContextOperationStopError(error) && this.activeCompletionPromise) {
+        this.queueMultimodalReadinessRefreshAfterCompletion(pendingRefresh);
+        return;
+      }
+
+      if (process.env.NODE_ENV !== 'test') {
+        console.warn('[LLMEngine] Deferred multimodal readiness refresh failed', {
+          modelId: pendingRefresh.modelId,
+          error: sanitizeMultimodalFailureReason(getErrorMessageText(error))
+            ?? (error instanceof Error ? error.name : typeof error),
+        });
+      }
+    }
+  }
+
+  private async initializeMultimodalReadinessForLoadedContext({
+    modelId,
+    context,
+    useGpu,
+  }: {
+    modelId: string;
+    context: LlamaContext;
+    useGpu: boolean;
+  },
+  cancellation?: ContextOperationCancellationToken,
+  projectorResolutionOperationCache?: ProjectorResolutionOperationCache,
+  ): Promise<void> {
+    const model = registry.getModel(modelId);
+    if (!model) {
+      return;
+    }
+
+    const isCurrent = () => this.isMultimodalReadinessInitializationCurrent({
+      modelId,
+      context,
+      cancellation,
+    });
+    if (!isCurrent()) {
+      return;
+    }
+
+    if (!this.isVisionCapableModel(model)) {
+      if (!isCurrent()) {
+        return;
+      }
+      if (model.multimodalReadiness) {
+        this.persistMultimodalReadiness(
+          model.id,
+          this.buildMultimodalReadinessState(model, 'text_only'),
+        );
+      }
+      await this.releaseActiveMultimodalContext({ modelId: model.id, context });
+      return;
+    }
+
+    const resolution = projectorArtifactService.resolveProjectorForModel(model);
+    const projector = resolution.selectedProjector;
+    if (!projector) {
+      if (!isCurrent()) {
+        return;
+      }
+      const status: MultimodalReadinessStatus = resolution.status === 'ambiguous'
+        ? 'ambiguous_projector'
+        : resolution.status === 'failed'
+          ? 'failed'
+          : 'missing_projector';
+      this.persistMultimodalReadiness(
+        model.id,
+        this.buildMultimodalReadinessState(model, status, {
+          failureReason: resolution.reason,
+        }),
+      );
+      await this.releaseActiveMultimodalContext({ modelId: model.id, context });
+      return;
+    }
+
+    const lifecycleReadiness = getReadinessStatusForProjectorLifecycle(projector);
+    if (lifecycleReadiness) {
+      if (!isCurrent()) {
+        return;
+      }
+      this.persistMultimodalReadiness(
+        model.id,
+        this.buildMultimodalReadinessState(model, lifecycleReadiness, {
+          projector,
+          failureReason: lifecycleReadiness === 'failed' ? projector.matchReason ?? 'projector_download_failed' : undefined,
+        }),
+      );
+      await this.releaseActiveMultimodalContext({ modelId: model.id, context });
+      return;
+    }
+
+    let resolvedProjector: ResolvedProjectorArtifactInfo;
+    try {
+      resolvedProjector = await this.resolveProjectorFilePathForOperation({
+        modelId: model.id,
+        projector,
+        operationCache: projectorResolutionOperationCache,
+      });
+    } catch (error) {
+      if (!isCurrent()) {
+        return;
+      }
+      this.persistMultimodalReadiness(
+        model.id,
+        this.buildMultimodalReadinessState(model, 'failed', {
+          projector,
+          failureReason: getErrorMessageText(error),
+        }),
+      );
+      await this.releaseActiveMultimodalContext({ modelId: model.id, context });
+      return;
+    }
+
+    if (!isCurrent()) {
+      return;
+    }
+
+    const nativeBatchSafety = this.resolveMultimodalNativeBatchSafety();
+    if (!nativeBatchSafety.isSafe) {
+      this.persistMultimodalReadiness(
+        model.id,
+        this.buildMultimodalReadinessState(model, 'unsupported', {
+          projector,
+          projectorSize: resolvedProjector.fileInfo.size,
+          failureReason: this.buildMultimodalNativeBatchFailureReason(nativeBatchSafety),
+        }),
+      );
+      await this.releaseActiveMultimodalContext({ modelId: model.id, context });
+      return;
+    }
+
+    const hasActiveMatchingProjectorArtifact = this.isActiveMultimodalContextForResolvedProjector({
+      activeMultimodalContext: this.activeMultimodalContext,
+      modelId: model.id,
+      projector,
+      resolvedProjector,
+    });
+
+    if (hasActiveMatchingProjectorArtifact) {
+      if (model.multimodalReadiness?.status === 'ready') {
+        return;
+      }
+
+      try {
+        const support = this.resolveMultimodalSupportList(await getMultimodalSupportFromContext(context));
+        if (!isCurrent()) {
+          return;
+        }
+        const readiness = support.includes('vision')
+          ? this.buildMultimodalReadinessState(model, 'ready', {
+            projector,
+            support,
+          })
+          : this.buildMultimodalReadinessState(model, 'unsupported', {
+            projector,
+            support,
+            failureReason: 'Runtime did not report vision support for the active projector.',
+            failureReasonPrivacy: 'runtime',
+          });
+
+        this.persistMultimodalReadiness(model.id, readiness);
+        if (readiness.status !== 'ready') {
+          await this.releaseActiveMultimodalContext({ modelId: model.id, context });
+        }
+      } catch (error) {
+        if (!isCurrent()) {
+          return;
+        }
+        this.persistMultimodalReadiness(
+          model.id,
+          this.buildMultimodalReadinessState(model, this.getMultimodalRuntimeFailureStatus(error), {
+            projector,
+            failureReason: getErrorMessageText(error),
+            failureReasonPrivacy: 'runtime',
+          }),
+        );
+        await this.releaseActiveMultimodalContext({ modelId: model.id, context });
+      }
+      return;
+    }
+
+    if (
+      this.activeMultimodalContext
+      && this.activeMultimodalContext.modelId === model.id
+      && !hasActiveMatchingProjectorArtifact
+    ) {
+      const didReleasePreviousProjector = await this.releaseActiveMultimodalContext({ modelId: model.id, context });
+      if (!isCurrent()) {
+        return;
+      }
+      if (!didReleasePreviousProjector) {
+        this.persistMultimodalReadiness(
+          model.id,
+          this.buildMultimodalReadinessState(model, 'failed', {
+            projector,
+            failureReason: 'Failed to release the previously initialized multimodal projector.',
+          }),
+        );
+        return;
+      }
+    }
+
+    let initializedMultimodalContext: ActiveMultimodalContext | undefined;
+    const releaseActiveInitializedMultimodalContext = () => this.releaseActiveMultimodalContext({
+      modelId: model.id,
+      context,
+      ...(initializedMultimodalContext ? { activeMultimodalContext: initializedMultimodalContext } : {}),
+    });
+
+    try {
+      const didInitialize = await initMultimodalOnContext({
+        context,
+        path: resolvedProjector.projectorPath,
+        useGpu,
+        imageMaxTokens: DEFAULT_LLAMA_NATIVE_MULTIMODAL_IMAGE_MAX_TOKENS,
+      });
+
+      if (!didInitialize) {
+        if (!isCurrent()) {
+          return;
+        }
+
+        this.persistMultimodalReadiness(
+          model.id,
+          this.buildMultimodalReadinessState(model, 'failed', {
+            projector,
+            projectorSize: resolvedProjector.fileInfo.size,
+            failureReason: 'llama.rn did not initialize the multimodal projector.',
+            failureReasonPrivacy: 'runtime',
+          }),
+        );
+        await this.releaseActiveMultimodalContext({ modelId: model.id, context });
+        return;
+      }
+
+      initializedMultimodalContext = this.buildActiveMultimodalContext({
+        modelId: model.id,
+        projector,
+        resolvedProjector,
+      });
+      this.activeMultimodalContext = initializedMultimodalContext;
+
+      if (!isCurrent()) {
+        await releaseActiveInitializedMultimodalContext();
+        return;
+      }
+
+      const support = this.resolveMultimodalSupportList(await getMultimodalSupportFromContext(context));
+      if (!isCurrent()) {
+        await releaseActiveInitializedMultimodalContext();
+        return;
+      }
+      const readiness = support.includes('vision')
+        ? this.buildMultimodalReadinessState(model, 'ready', {
+          projector,
+          projectorSize: resolvedProjector.fileInfo.size,
+          support,
+        })
+        : this.buildMultimodalReadinessState(model, 'unsupported', {
+          projector,
+          projectorSize: resolvedProjector.fileInfo.size,
+          support,
+          failureReason: 'Runtime did not report vision support after projector initialization.',
+          failureReasonPrivacy: 'runtime',
+        });
+
+      this.persistMultimodalReadiness(model.id, readiness);
+      if (readiness.status !== 'ready') {
+        await this.releaseActiveMultimodalContext({ modelId: model.id, context });
+      }
+    } catch (error) {
+      if (!isCurrent()) {
+        await releaseActiveInitializedMultimodalContext();
+        return;
+      }
+      this.persistMultimodalReadiness(
+        model.id,
+        this.buildMultimodalReadinessState(model, this.getMultimodalRuntimeFailureStatus(error), {
+          projector,
+          projectorSize: resolvedProjector.fileInfo.size,
+          failureReason: getErrorMessageText(error),
+          failureReasonPrivacy: 'runtime',
+        }),
+      );
+      await this.releaseActiveMultimodalContext({ modelId: model.id, context });
+    }
+  }
+
+  private assertActiveMultimodalRuntimeReadyForMediaPaths(
+    mediaPaths: readonly string[],
+    readiness: MultimodalReadinessState | undefined,
+    mediaPathOccurrenceCount = mediaPaths.length,
+  ): void {
+    if (mediaPaths.length === 0) {
+      return;
+    }
+
+    const activeMultimodal = this.activeMultimodalContext;
+    if (!activeMultimodal || activeMultimodal.modelId !== this.state.activeModelId) {
+      throw new AppError('multimodal_not_ready', 'Multimodal runtime is not initialized for the active model.', {
+        details: {
+          activeModelId: this.state.activeModelId,
+          readinessStatus: readiness?.status,
+          mediaPathCount: mediaPathOccurrenceCount,
+        },
+      });
+    }
+
+    if (readiness?.modelId && readiness.modelId !== activeMultimodal.modelId) {
+      throw new AppError('multimodal_not_ready', 'Multimodal readiness belongs to a different model.', {
+        details: {
+          activeModelId: this.state.activeModelId,
+          readinessModelId: readiness.modelId,
+          mediaPathCount: mediaPathOccurrenceCount,
+        },
+      });
+    }
+
+    if (readiness?.projectorId && readiness.projectorId !== activeMultimodal.projectorId) {
+      throw new AppError('multimodal_not_ready', 'Multimodal runtime is initialized with a different projector.', {
+        details: {
+          activeModelId: this.state.activeModelId,
+          readinessProjectorId: readiness.projectorId,
+          runtimeProjectorId: activeMultimodal.projectorId,
+          mediaPathCount: mediaPathOccurrenceCount,
+        },
+      });
+    }
+
+    const nativeBatchSafety = this.resolveMultimodalNativeBatchSafety();
+    if (!nativeBatchSafety.isSafe) {
+      const currentModel = this.state.activeModelId ? registry.getModel(this.state.activeModelId) : null;
+      const failureReason = this.buildMultimodalNativeBatchFailureReason(nativeBatchSafety);
+      if (currentModel && currentModel.id === activeMultimodal.modelId) {
+        this.persistMultimodalReadiness(
+          currentModel.id,
+          this.buildMultimodalReadinessState(currentModel, 'unsupported', {
+            projector: {
+              id: activeMultimodal.projectorId,
+              size: activeMultimodal.projectorSizeBytes,
+            },
+            projectorSize: activeMultimodal.projectorSizeBytes,
+            failureReason,
+          }),
+        );
+      }
+
+      throw new AppError('multimodal_not_ready', 'Multimodal runtime is not safe for image decoding on the active load profile.', {
+        details: {
+          activeModelId: this.state.activeModelId,
+          readinessStatus: readiness?.status,
+          runtimeProjectorId: activeMultimodal.projectorId,
+          mediaPathCount: mediaPathOccurrenceCount,
+          nBatch: nativeBatchSafety.nBatch,
+          nUbatch: nativeBatchSafety.nUbatch,
+        },
+      });
+    }
+  }
+
+  private assertActiveMultimodalRuntimeReadyForAudioInputs(
+    audioInputCount: number,
+    readiness: MultimodalReadinessState | undefined,
+  ): void {
+    if (audioInputCount === 0) {
+      return;
+    }
+
+    const activeMultimodal = this.activeMultimodalContext;
+    if (!activeMultimodal || activeMultimodal.modelId !== this.state.activeModelId) {
+      throw new AppError('multimodal_not_ready', 'Multimodal runtime is not initialized for the active model.', {
+        details: {
+          activeModelId: this.state.activeModelId,
+          readinessStatus: readiness?.status,
+          audioInputCount,
+        },
+      });
+    }
+
+    if (readiness?.modelId && readiness.modelId !== activeMultimodal.modelId) {
+      throw new AppError('multimodal_not_ready', 'Multimodal readiness belongs to a different model.', {
+        details: {
+          activeModelId: this.state.activeModelId,
+          readinessModelId: readiness.modelId,
+          audioInputCount,
+        },
+      });
+    }
+
+    if (readiness?.projectorId && readiness.projectorId !== activeMultimodal.projectorId) {
+      throw new AppError('multimodal_not_ready', 'Multimodal runtime is initialized with a different projector.', {
+        details: {
+          activeModelId: this.state.activeModelId,
+          readinessProjectorId: readiness.projectorId,
+          runtimeProjectorId: activeMultimodal.projectorId,
+          audioInputCount,
+        },
+      });
+    }
+  }
+
+  private async releaseActiveMultimodalContext(expected?: {
+    modelId?: string;
+    context?: LlamaContext;
+    activeMultimodalContext?: ActiveMultimodalContext;
+  }): Promise<boolean> {
+    const activeMultimodal = this.activeMultimodalContext;
+    if (!activeMultimodal) {
+      return true;
+    }
+
+    if (expected?.activeMultimodalContext && activeMultimodal !== expected.activeMultimodalContext) {
+      return true;
+    }
+
+    if (expected?.modelId && activeMultimodal.modelId !== expected.modelId) {
+      return true;
+    }
+
+    const context = this.context;
+    if (expected?.context && context !== expected.context) {
+      if (expected.activeMultimodalContext && activeMultimodal === expected.activeMultimodalContext) {
+        this.activeMultimodalContext = null;
+      }
+      return true;
+    }
+
+    if (!context) {
+      this.activeMultimodalContext = null;
+      return true;
+    }
+
+    this.activeMultimodalContext = null;
+    try {
+      await releaseMultimodalFromContext(context);
+      return true;
+    } catch (error) {
+      if (this.context === context && this.state.activeModelId === activeMultimodal.modelId) {
+        this.activeMultimodalContext = activeMultimodal;
+      }
+      if (process.env.NODE_ENV !== 'test') {
+        const sanitizedErrorMessage = sanitizeMultimodalFailureReason(getErrorMessageText(error));
+        console.warn('[LLMEngine] Failed to release multimodal context', {
+          modelId: activeMultimodal.modelId,
+          projectorId: activeMultimodal.projectorId,
+          error: sanitizedErrorMessage ?? (error instanceof Error ? error.name : typeof error),
+        });
+      }
+      return false;
+    }
+  }
+
+  private async releaseActiveContextsAfterFailedInitialize({
+    modelId,
+    context,
+  }: {
+    modelId: string;
+    context: LlamaContext;
+  }): Promise<void> {
+    try {
+      const didReleaseMultimodal = await this.releaseActiveMultimodalContext({ modelId, context });
+      if (!didReleaseMultimodal) {
+        console.warn('[LLMEngine] Failed to release active multimodal context after failed initialize', {
+          modelId,
+        });
+      }
+    } catch (cleanupError) {
+      console.warn('[LLMEngine] Failed to release active multimodal context after failed initialize', {
+        modelId,
+        ...buildSafeErrorLogDetails(cleanupError),
+      });
+    }
+
+    try {
+      await releaseAllLlamaContexts();
+    } catch (cleanupError) {
+      console.warn('[LLMEngine] Failed to release llama contexts after failed initialize', {
+        modelId,
+        ...buildSafeErrorLogDetails(cleanupError),
+      });
+    }
   }
 
   private updateState(newState: EngineState) {
@@ -2225,6 +4275,7 @@ class LLMEngineService {
 
   private resetRuntimeTelemetry(): void {
     this.resetBackendTelemetry();
+    this.recentMultimodalDiagnostics = null;
     this.requestedGpuLayers = null;
     this.requestedBackendPolicy = null;
     this.effectiveBackendPolicy = null;
@@ -2316,7 +4367,7 @@ class LLMEngineService {
     try {
       totalMemoryBytes = await DeviceInfo.getTotalMemory();
     } catch (error) {
-      console.warn('[LLMEngine] Failed to resolve total device memory for fit estimate', error);
+      console.warn('[LLMEngine] Failed to resolve total device memory for fit estimate', buildSafeErrorLogDetails(error));
     }
 
     // This is a cheap UI-facing estimate: it must never depend on live "available memory" snapshots.
@@ -2358,6 +4409,7 @@ class LLMEngineService {
     recentUnloadReclaim: ModelUnloadReclaimEstimate | null = null,
     fallbackDownloadMarker: number | null = null,
     resolvedArtifactInfo: ResolvedModelArtifactInfo | null = null,
+    projectorResolutionOperationCache: ProjectorResolutionOperationCache = new Map(),
   ): Promise<void> {
     const isDev = typeof __DEV__ !== 'undefined' && __DEV__;
     const nativeLogs: { level: string; text: string }[] = [];
@@ -2410,7 +4462,7 @@ class LLMEngineService {
       try {
         totalMemoryBytes = await DeviceInfo.getTotalMemory();
       } catch (error) {
-        console.warn('[LLMEngine] Failed to resolve total device memory', error);
+        console.warn('[LLMEngine] Failed to resolve total device memory', buildSafeErrorLogDetails(error));
       }
 
       const resolvedTotalMemoryBytes = systemMemorySnapshot?.totalBytes ?? totalMemoryBytes;
@@ -2449,7 +4501,7 @@ class LLMEngineService {
         modelInfo = await loadLlamaModelInfo(modelPath);
       } catch (error) {
         if (process.env.NODE_ENV !== 'test') {
-          console.warn('[LLMEngine] Failed to read GGUF metadata', error);
+          console.warn('[LLMEngine] Failed to read GGUF metadata', buildSafeErrorLogDetails(error));
         }
       }
 
@@ -2488,6 +4540,13 @@ class LLMEngineService {
       };
 
       const cachedModel = registry.getModel(modelId);
+      const loadTimeProjectorMemory = await this.resolveLoadTimeProjectorMemoryInfo(
+        cachedModel,
+        projectorResolutionOperationCache,
+      );
+      const loadTimeProjectorSizeBytes = loadTimeProjectorMemory?.memoryFitSizeBytes;
+      const hasLoadTimeMmproj = loadTimeProjectorMemory !== null;
+      const shouldDisableContextShiftForMultimodal = hasLoadTimeMmproj;
       const ggufMetadata = modelInfo !== null || cachedModel?.gguf
         ? {
           ...(cachedModel?.gguf ?? {}),
@@ -2559,12 +4618,18 @@ class LLMEngineService {
           size: verifiedFileSizeBytes ?? cachedModel.size,
         })
         : null;
+      const baseLoadProfileModelSizeBytes = verifiedFileSizeBytes ?? resolvedModelSizeBytes;
+      const loadProfileModelSizeBytes = typeof baseLoadProfileModelSizeBytes === 'number'
+        && Number.isFinite(baseLoadProfileModelSizeBytes)
+        && baseLoadProfileModelSizeBytes > 0
+        ? baseLoadProfileModelSizeBytes + (loadTimeProjectorSizeBytes ?? 0)
+        : baseLoadProfileModelSizeBytes;
       const { recommendedGpuLayers, gpuLayersCeiling } = this.resolveRecommendedLoadProfile({
         totalMemoryBytes: typeof resolvedTotalMemoryBytes === 'number' && Number.isFinite(resolvedTotalMemoryBytes) && resolvedTotalMemoryBytes > 0
           ? resolvedTotalMemoryBytes
           : null,
         systemMemorySnapshot,
-        modelSizeBytes: verifiedFileSizeBytes ?? resolvedModelSizeBytes,
+        modelSizeBytes: loadProfileModelSizeBytes,
         ggufMetadata,
         modelLayerCount: stableCapability?.modelLayerCount,
         gpuLayersCeilingOverride: stableCapability?.gpuLayersCeiling,
@@ -2636,6 +4701,7 @@ class LLMEngineService {
         input: {
           modelSizeBytes: resolvedModelSizeBytes,
           verifiedFileSizeBytes: verifiedFileSizeBytes ?? undefined,
+          ...(loadTimeProjectorSizeBytes ? { multimodalSizeBytes: loadTimeProjectorSizeBytes } : null),
           metadataTrust: metadataTrustForEstimator,
           ggufMetadata,
           runtimeParams: {
@@ -2661,7 +4727,7 @@ class LLMEngineService {
           cacheTypeK,
           cacheTypeV,
           useMmap: requestedUseMmap,
-          hasMmproj: false,
+          hasMmproj: hasLoadTimeMmproj,
           nBatch: configuredBatchParams?.nBatch,
           nUbatch: configuredBatchParams?.nUbatch,
         })
@@ -2672,6 +4738,7 @@ class LLMEngineService {
       const requestedEstimatorInput = {
         modelSizeBytes: resolvedModelSizeBytes,
         verifiedFileSizeBytes: verifiedFileSizeBytes ?? undefined,
+        ...(loadTimeProjectorSizeBytes ? { multimodalSizeBytes: loadTimeProjectorSizeBytes } : null),
         metadataTrust: metadataTrustForEstimator,
         ggufMetadata,
         runtimeParams: {
@@ -2750,6 +4817,8 @@ class LLMEngineService {
             cacheTypeK,
             cacheTypeV,
             useMmap: requestedUseMmap,
+            ...(loadTimeProjectorSizeBytes ? { multimodalSizeBytes: loadTimeProjectorSizeBytes } : null),
+            hasMmproj: hasLoadTimeMmproj,
             preferGpuLayers: requestedBackendPolicy === 'gpu' || requestedBackendPolicy === 'npu',
           }),
           onHardBlock: (confidence) => this.persistHardBlockedMemoryFit(modelId, confidence),
@@ -2785,11 +4854,19 @@ class LLMEngineService {
       const lowMemoryBatchSize = lowMemoryBatchParams?.nBatch ?? null;
       const lowMemoryMicroBatchSize = lowMemoryBatchParams?.nUbatch ?? null;
       const effectiveBatchParams = shouldUseLowMemoryContextParams && lowMemoryBatchSize !== null && lowMemoryMicroBatchSize !== null
-        ? {
-            nBatch: lowMemoryBatchSize,
-            nUbatch: lowMemoryMicroBatchSize,
-          }
-        : configuredBatchParams;
+        ? this.resolveMultimodalSafeBatchParams({
+            configuredBatchParams: {
+              nBatch: lowMemoryBatchSize,
+              nUbatch: lowMemoryMicroBatchSize,
+            },
+            hasLoadTimeMmproj,
+            contextTokens: finalContextSize,
+          })
+        : this.resolveMultimodalSafeBatchParams({
+            configuredBatchParams,
+            hasLoadTimeMmproj,
+            contextTokens: finalContextSize,
+          });
 
       if (process.env.NODE_ENV !== 'test' && memoryFit) {
         const shouldWarnNearLimit = (
@@ -2852,7 +4929,7 @@ class LLMEngineService {
           cacheTypeK,
           cacheTypeV,
           useMmap: requestedUseMmap,
-          hasMmproj: false,
+          hasMmproj: hasLoadTimeMmproj,
           nBatch: effectiveBatchParams?.nBatch,
           nUbatch: effectiveBatchParams?.nUbatch,
         })
@@ -2928,7 +5005,7 @@ class LLMEngineService {
           await toggleNativeLlamaLogs(true);
           didEnableNativeLogs = true;
         } catch (error) {
-          console.warn('[LLMEngine] Failed to enable native llama logs', error);
+          console.warn('[LLMEngine] Failed to enable native llama logs', buildSafeErrorLogDetails(error));
         }
       }
 
@@ -2967,7 +5044,7 @@ class LLMEngineService {
               cacheTypeK,
               cacheTypeV,
               useMmap: requestedUseMmap,
-              hasMmproj: false,
+              hasMmproj: hasLoadTimeMmproj,
               nBatch: effectiveBatchParams?.nBatch,
               nUbatch: effectiveBatchParams?.nUbatch,
             })
@@ -3040,6 +5117,7 @@ class LLMEngineService {
             n_ctx: finalContextSize,
             n_gpu_layers: layers,
             n_parallel: nParallel,
+            ...(shouldDisableContextShiftForMultimodal ? { ctx_shift: false } : null),
             // llama.rn supports `no_gpu_devices` (iOS-only, deprecated). Prefer controlling
             // acceleration via `n_gpu_layers` and explicit `devices` when needed.
             ...(typeof nThreads === 'number' && Number.isFinite(nThreads) && nThreads > 0
@@ -3093,7 +5171,7 @@ class LLMEngineService {
             nGpuLayers: normalizedLayers,
             devices,
             outcome: 'error',
-            error: getErrorMessageText(error),
+            error: sanitizeErrorMessageForDiagnostics(error),
           });
 
           const isOomLikely = isProbableMemoryFailure(error);
@@ -3121,7 +5199,7 @@ class LLMEngineService {
             const logLabel = retryCandidates.length > 0
               ? `[LLMEngine] ${candidate.toUpperCase()} init failed, retrying with fewer layers`
               : `[LLMEngine] ${candidate.toUpperCase()} init failed`;
-            console.warn(logLabel, error);
+            console.warn(logLabel, buildSafeErrorLogDetails(error));
           }
 
           let lastError: unknown = error;
@@ -3135,7 +5213,7 @@ class LLMEngineService {
                   cacheTypeK,
                   cacheTypeV,
                   useMmap: requestedUseMmap,
-                  hasMmproj: false,
+                  hasMmproj: hasLoadTimeMmproj,
                   nBatch: effectiveBatchParams?.nBatch,
                   nUbatch: effectiveBatchParams?.nUbatch,
                 })
@@ -3151,7 +5229,7 @@ class LLMEngineService {
                 nGpuLayers: candidateLayers,
                 devices,
                 outcome: 'error',
-                error: getErrorMessageText(retryError),
+                error: sanitizeErrorMessageForDiagnostics(retryError),
               });
               lastError = retryError;
               if (candidateCalibrationKey && isProbableMemoryFailure(retryError)) {
@@ -3514,6 +5592,7 @@ class LLMEngineService {
           }
 
           this.setContext(context);
+          this.loadedContextDisablesContextShiftForMultimodal = shouldDisableContextShiftForMultimodal;
           gpuInitError = null;
           break;
         } catch (error) {
@@ -3524,7 +5603,7 @@ class LLMEngineService {
               nGpuLayers: Math.max(0, Math.round(nGpuLayers)),
               devices,
               outcome: 'error',
-              error: getErrorMessageText(error),
+              error: sanitizeErrorMessageForDiagnostics(error),
             });
           }
 
@@ -3621,6 +5700,14 @@ class LLMEngineService {
         ? { maxContextTokens: finalContextSize, requestedGpuLayers, loadedGpuLayers: reportedLoadedGpuLayers }
         : null;
 
+      if (this.context) {
+        await this.initializeMultimodalReadinessForLoadedContext({
+          modelId,
+          context: this.context,
+          useGpu: resolvedInitActualGpu === true,
+        }, undefined, projectorResolutionOperationCache);
+      }
+
       if (resolvedInitProfile) {
         const isAcceleratorRequested = normalizedBackendPolicy === 'auto'
           || normalizedBackendPolicy === 'gpu'
@@ -3672,15 +5759,17 @@ class LLMEngineService {
       };
 
       if (gpuInitError) {
-        extraDetails.gpuInitError = getErrorMessageText(gpuInitError);
+        extraDetails.gpuInitError = sanitizeErrorMessageForDiagnostics(gpuInitError);
       }
 
       if (cpuInitError) {
-        extraDetails.cpuInitError = getErrorMessageText(cpuInitError);
+        extraDetails.cpuInitError = sanitizeErrorMessageForDiagnostics(cpuInitError);
       }
 
       if (isDev && nativeLogs.length > 0) {
-        extraDetails.nativeLogs = nativeLogs.map((line) => `${line.level}: ${line.text}`);
+        extraDetails.nativeLogs = nativeLogs.map((line) => (
+          sanitizeMultimodalFailureReason(`${line.level}: ${line.text}`, 512) ?? `${line.level}: [redacted]`
+        ));
       }
 
       const errorCause = baseError.cause ?? (error instanceof AppError ? error.cause : error);
@@ -3690,6 +5779,14 @@ class LLMEngineService {
             details: extraDetails,
           })
         : baseError;
+
+      const contextToReleaseAfterFailedInitialize = this.context;
+      if (contextToReleaseAfterFailedInitialize) {
+        await this.releaseActiveContextsAfterFailedInitialize({
+          modelId: this.state.activeModelId ?? modelId,
+          context: contextToReleaseAfterFailedInitialize,
+        });
+      }
 
       if (
         appError.code === 'model_memory_warning'
@@ -3701,7 +5798,10 @@ class LLMEngineService {
           : appError.code === 'model_memory_insufficient'
             ? '[LLMEngine] Insufficient memory during initialize'
             : '[LLMEngine] Memory warning during initialize';
-        console.warn(logLabel, appError, Object.keys(extraDetails).length > 0 ? extraDetails : undefined);
+        console.warn(logLabel, {
+          ...buildSafeErrorLogDetails(appError),
+          ...(Object.keys(extraDetails).length > 0 ? { details: sanitizeDiagnosticValue(extraDetails) } : null),
+        });
         this.setContext(null);
         this.loadedArtifactIdentity = null;
         this.activeContextSize = DEFAULT_CONTEXT_SIZE;
@@ -3717,7 +5817,10 @@ class LLMEngineService {
         throw appError;
       }
 
-      console.error('[LLMEngine] Failed to initialize', appError, Object.keys(extraDetails).length > 0 ? extraDetails : undefined);
+      console.error('[LLMEngine] Failed to initialize', {
+        ...buildSafeErrorLogDetails(appError),
+        ...(Object.keys(extraDetails).length > 0 ? { details: sanitizeDiagnosticValue(extraDetails) } : null),
+      });
       this.lastModelLoadError = appError;
       this.lastModelLoadErrorScope = 'LLMEngineService.load';
       this.setContext(null);
@@ -3754,6 +5857,7 @@ class LLMEngineService {
       : null;
     let beforeUnloadSnapshot: SystemMemorySnapshot | null = null;
     let unloadReclaimEstimate: ModelUnloadReclaimEstimate | null = null;
+    let deferredContextReleaseError: AppError | null = null;
     this.isUnloading = true;
     this.resetRuntimeTelemetry();
     this.updateState({
@@ -3764,86 +5868,128 @@ class LLMEngineService {
     });
 
     try {
-      const activeCompletion = this.activeCompletionPromise;
+      const activeCompletion = this.activeCompletionDriverPromise;
       if (activeCompletion) {
         let stopCompletionError: unknown;
-        const stopCompletionPromise = this.stopCompletion().catch((error) => {
+        const stopCompletionPromise = this.stopCompletionInternal({ drainPromptPreparation: false }).catch((error) => {
           stopCompletionError = error;
         });
+        const completionAndStopDrainPromise = Promise.all([
+          stopCompletionPromise,
+          activeCompletion.catch(() => undefined),
+        ]).then(() => undefined);
         const stopCompletionResult = await this.waitForUnloadPromise(
           stopCompletionPromise,
           CONTEXT_OPERATION_UNLOAD_DRAIN_TIMEOUT_MS,
         );
         if (stopCompletionResult === 'timed_out') {
-          this.recordActiveCompletionUnloadTimeout();
+          deferredContextReleaseError = this.recordActiveCompletionUnloadTimeout(previousModelId);
         } else if (stopCompletionError) {
-          console.warn('[LLMEngine] Failed to stop completion before unload', stopCompletionError);
+          console.warn('[LLMEngine] Failed to stop completion before unload', buildSafeErrorLogDetails(stopCompletionError));
         }
 
-        const activeCompletionResult = await this.waitForUnloadPromise(
-          activeCompletion.catch(() => undefined),
-          CONTEXT_OPERATION_UNLOAD_DRAIN_TIMEOUT_MS,
-        );
-        if (activeCompletionResult === 'timed_out') {
-          this.recordActiveCompletionUnloadTimeout();
+        if (!deferredContextReleaseError) {
+          const activeCompletionResult = await this.waitForUnloadPromise(
+            activeCompletion.catch(() => undefined),
+            CONTEXT_OPERATION_UNLOAD_DRAIN_TIMEOUT_MS,
+          );
+          if (activeCompletionResult === 'timed_out') {
+            deferredContextReleaseError = this.recordActiveCompletionUnloadTimeout(previousModelId);
+          }
         }
-      }
 
-      const contextDrainResult = await this.waitForActiveContextOperations({
-        timeoutMs: CONTEXT_OPERATION_UNLOAD_DRAIN_TIMEOUT_MS,
-      });
-      if (contextDrainResult === 'timed_out') {
-        this.recordContextOperationUnloadTimeout();
-      }
-
-      if (this.context) {
-        if (activeContextReclaimEstimate) {
-          beforeUnloadSnapshot = await getFreshMemorySnapshot(0).catch(() => null);
-        }
-        await releaseAllLlamaContexts();
-      }
-    } finally {
-      const calibrationSession = this.activeCalibrationSession;
-      this.activeCalibrationSession = null;
-
-      if (calibrationSession && !calibrationSession.didRecordSuccess) {
-        this.persistCalibrationSuccess({
-          calibrationKey: calibrationSession.calibrationKey,
-          predictedFit: calibrationSession.predictedFit,
-          beforeLoadSnapshot: calibrationSession.beforeLoadSnapshot,
-          observedSnapshot: calibrationSession.afterModelInitSnapshot,
-          observedRawBudgetBytes: calibrationSession.observedRawBudgetBytes,
-        });
-        calibrationSession.didRecordSuccess = true;
-      }
-
-      if (calibrationSession || activeContextReclaimEstimate) {
-        const afterUnloadSnapshot = await getFreshMemorySnapshot(0).catch(() => null);
-        if (calibrationSession) {
-          calibrationSession.afterUnloadSnapshot = afterUnloadSnapshot;
-        }
-        if (activeContextReclaimEstimate) {
-          unloadReclaimEstimate = this.buildModelUnloadReclaimEstimate({
-            previousModelId,
-            estimatedReclaimableBytes: activeContextReclaimEstimate.bytes,
-            source: activeContextReclaimEstimate.source,
-            beforeUnloadSnapshot,
-            afterUnloadSnapshot,
+        if (deferredContextReleaseError && this.context) {
+          const contextOperationDrainPromise = this.cancelActiveContextOperationsForDeferredUnload(
+            deferredContextReleaseError,
+          );
+          this.scheduleDeferredContextReleaseAfterCompletionDrain({
+            drainPromise: Promise.all([
+              completionAndStopDrainPromise,
+              contextOperationDrainPromise,
+            ]).then(() => undefined),
+            context: this.context,
+            generation: this.contextGeneration,
           });
         }
       }
 
-      this.setContext(null);
-      this.loadedArtifactIdentity = null;
-      this.activeContextSize = DEFAULT_CONTEXT_SIZE;
-      this.activeGpuLayers = null;
-      this.safeModeLoadLimits = null;
-      this.resetRuntimeTelemetry();
+      if (!deferredContextReleaseError) {
+        this.contextOperationRunner.cancelActive(
+          new AppError('engine_unloading', CONTEXT_OPERATION_UNLOAD_TIMEOUT_MESSAGE),
+          { chatBlocking: false },
+        );
+        const contextDrainResult = await this.waitForActiveContextOperations({
+          timeoutMs: CONTEXT_OPERATION_UNLOAD_DRAIN_TIMEOUT_MS,
+        });
+        if (contextDrainResult === 'timed_out') {
+          const contextAtTimeout = this.context;
+          const contextGenerationAtTimeout = this.contextGeneration;
+          deferredContextReleaseError = this.recordContextOperationUnloadTimeout(previousModelId);
+          if (contextAtTimeout) {
+            this.scheduleDeferredContextReleaseAfterDrain({
+              context: contextAtTimeout,
+              generation: contextGenerationAtTimeout,
+            });
+          }
+        } else if (this.context) {
+          if (activeContextReclaimEstimate) {
+            beforeUnloadSnapshot = await getFreshMemorySnapshot(0).catch(() => null);
+          }
+          await this.releaseActiveMultimodalContext();
+          await releaseAllLlamaContexts();
+        }
+      }
+    } finally {
+      if (!deferredContextReleaseError) {
+        const calibrationSession = this.activeCalibrationSession;
+        this.activeCalibrationSession = null;
+
+        if (calibrationSession && !calibrationSession.didRecordSuccess) {
+          this.persistCalibrationSuccess({
+            calibrationKey: calibrationSession.calibrationKey,
+            predictedFit: calibrationSession.predictedFit,
+            beforeLoadSnapshot: calibrationSession.beforeLoadSnapshot,
+            observedSnapshot: calibrationSession.afterModelInitSnapshot,
+            observedRawBudgetBytes: calibrationSession.observedRawBudgetBytes,
+          });
+          calibrationSession.didRecordSuccess = true;
+        }
+
+        if (calibrationSession || activeContextReclaimEstimate) {
+          const afterUnloadSnapshot = await getFreshMemorySnapshot(0).catch(() => null);
+          if (calibrationSession) {
+            calibrationSession.afterUnloadSnapshot = afterUnloadSnapshot;
+          }
+          if (activeContextReclaimEstimate) {
+            unloadReclaimEstimate = this.buildModelUnloadReclaimEstimate({
+              previousModelId,
+              estimatedReclaimableBytes: activeContextReclaimEstimate.bytes,
+              source: activeContextReclaimEstimate.source,
+              beforeUnloadSnapshot,
+              afterUnloadSnapshot,
+            });
+          }
+        }
+
+        this.setContext(null);
+        this.loadedArtifactIdentity = null;
+        this.activeContextSize = DEFAULT_CONTEXT_SIZE;
+        this.activeGpuLayers = null;
+        this.safeModeLoadLimits = null;
+        this.resetRuntimeTelemetry();
+        updateSettings({ activeModelId: null });
+        hardwareListenerService.resetLowMemoryFlag();
+      }
+
       this.initPromise = null;
-      this.completionRunner.reset();
+      if (!deferredContextReleaseError || !this.activeCompletionDriverPromise) {
+        this.completionRunner.reset();
+      }
       this.isUnloading = false;
-      updateSettings({ activeModelId: null });
-      hardwareListenerService.resetLowMemoryFlag();
+    }
+
+    if (deferredContextReleaseError) {
+      throw deferredContextReleaseError;
     }
 
     return unloadReclaimEstimate;

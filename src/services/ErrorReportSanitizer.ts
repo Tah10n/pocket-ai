@@ -244,10 +244,15 @@ function isTokenKey(key: string | undefined): boolean {
     || normalizedKey.endsWith('apikey');
 }
 
-function shouldDropKey(key: string | undefined, value: unknown): boolean {
+function isInputAudioPayloadKey(key: string | undefined, parentKey: string | undefined): boolean {
+  return normalizeKey(parentKey) === 'inputaudio' && normalizeKey(key) === 'data';
+}
+
+function shouldDropKey(key: string | undefined, value: unknown, state: SanitizeState): boolean {
   const normalizedKey = normalizeKey(key);
   return DROP_KEYS.has(normalizedKey)
     || isChatPayloadContainerKey(key)
+    || isInputAudioPayloadKey(key, state.parentKey)
     || normalizedKey.includes('base64')
     || normalizedKey === 'imagebytes'
     || normalizedKey.endsWith('prompt')
@@ -351,7 +356,7 @@ function sanitizeObjectEntries(
   const sanitized: Record<string, unknown> = {};
 
   for (const [key, nestedValue] of Object.entries(value)) {
-    if (shouldDropKey(key, nestedValue)) {
+    if (shouldDropKey(key, nestedValue, state)) {
       continue;
     }
 

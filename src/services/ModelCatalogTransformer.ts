@@ -28,6 +28,8 @@ import {
 import { normalizeSha256Digest } from '../utils/sha256';
 import { getModelMemoryFitInputSizeBytes } from '../utils/memoryFit';
 import { getProjectorMemoryFitSizeBytes } from '../utils/modelSize';
+import { inferDeclaredInputCapabilities } from '../utils/modelInputCapabilities';
+import { deriveArtifactsFromLegacyModel } from '../utils/modelArtifacts';
 import {
   buildCatalogModelVariantsFromRankedEntries,
   CATALOG_SEARCH_VARIANT_LIMIT,
@@ -440,6 +442,56 @@ function getVisionMetadataPatch(options: {
   };
 }
 
+function getInputCapabilityMetadataPatch(options: {
+  item: HuggingFaceModelSummary;
+  entries?: (HuggingFaceSibling | HuggingFaceTreeEntry)[];
+  detectedAt?: number;
+}): Partial<Pick<ModelMetadata, 'inputCapabilities'>> {
+  const inputCapabilities = inferDeclaredInputCapabilities(options.item, options.entries ?? [], {
+    detectedAt: options.detectedAt ?? 0,
+  });
+
+  return inputCapabilities.evidence.length > 0 ? { inputCapabilities } : {};
+}
+
+function buildArtifactMetadataPatch(options: {
+  id: string;
+  downloadUrl: string;
+  hfRevision?: string;
+  inputCapabilities?: ModelMetadata['inputCapabilities'];
+  lifecycleStatus?: LifecycleStatus;
+  localPath?: string;
+  projectorCandidates?: ProjectorArtifact[];
+  resolvedFileName?: string;
+  selectedProjectorId?: string;
+  sha256?: string;
+  size: number | null;
+}): Pick<ModelMetadata, 'artifacts'> {
+  return {
+    artifacts: deriveArtifactsFromLegacyModel({
+      artifacts: undefined,
+      downloadErrorAt: undefined,
+      downloadErrorCode: undefined,
+      downloadErrorMessage: undefined,
+      downloadIntegrity: undefined,
+      downloadProgress: 0,
+      downloadUrl: options.downloadUrl,
+      hfRevision: options.hfRevision,
+      id: options.id,
+      inputCapabilities: options.inputCapabilities,
+      lifecycleStatus: options.lifecycleStatus ?? LifecycleStatus.AVAILABLE,
+      localPath: options.localPath,
+      multimodalReadiness: undefined,
+      projectorCandidates: options.projectorCandidates,
+      resolvedFileName: options.resolvedFileName,
+      resumeData: undefined,
+      selectedProjectorId: options.selectedProjectorId,
+      sha256: options.sha256,
+      size: options.size,
+    }, { includeRemoteMain: true }),
+  };
+}
+
 export function createFallbackModel(modelId: string): ModelMetadata {
   return normalizePersistedModelMetadata({
     id: modelId,
@@ -506,6 +558,10 @@ function createTreeProbeCandidate(
     item,
     source: 'catalog_metadata',
   });
+  const inputCapabilityMetadata = getInputCapabilityMetadataPatch({
+    item,
+    detectedAt: lastModifiedAt,
+  });
 
   return normalizePersistedModelMetadata({
     id: repoId,
@@ -530,6 +586,7 @@ function createTreeProbeCandidate(
     downloads: item.downloads ?? null,
     likes: item.likes ?? null,
     ...visionMetadata,
+    ...inputCapabilityMetadata,
   });
 }
 
@@ -644,16 +701,32 @@ export function transformHFResponse(
       source: 'catalog_metadata',
     });
     const lastModifiedAt = parseHuggingFaceLastModifiedAt(item.lastModified);
+    const inputCapabilityMetadata = getInputCapabilityMetadataPatch({
+      item,
+      entries: siblings,
+      detectedAt: lastModifiedAt,
+    });
     const requiresAuth = Boolean(item.gated) || item.private === true;
     const requiresTreeProbe = shouldRevalidateCatalogSummarySelection(ggufSibling);
     const accessState = resolveDetailAccessState(requiresAuth, authToken);
+    const downloadUrl = buildHuggingFaceResolveUrl(repoId, fileName, hfRevision);
+    const artifactMetadata = buildArtifactMetadataPatch({
+      id: repoId,
+      downloadUrl,
+      hfRevision,
+      inputCapabilities: inputCapabilityMetadata.inputCapabilities,
+      projectorCandidates,
+      resolvedFileName: fileName,
+      sha256: getFileSha(ggufSibling),
+      size,
+    });
 
     results.push(normalizePersistedModelMetadata({
       id: repoId,
       name: getShortModelLabel(repoId) || repoId,
       author: item.author || repoId.split('/')[0],
       size,
-      downloadUrl: buildHuggingFaceResolveUrl(repoId, fileName, hfRevision),
+      downloadUrl,
       hfRevision,
       resolvedFileName: fileName,
       lastModifiedAt,
@@ -675,6 +748,8 @@ export function transformHFResponse(
       variants,
       activeVariantId: fileName,
       ...visionMetadata,
+      ...inputCapabilityMetadata,
+      ...artifactMetadata,
     }));
   }
 
@@ -722,6 +797,11 @@ export function buildModelMetadataFromPayload(
     item: payload,
     projectorCandidates,
     source: 'catalog_metadata',
+  });
+  const inputCapabilityMetadata = getInputCapabilityMetadataPatch({
+    item: payload,
+    entries: siblings,
+    detectedAt: parseHuggingFaceLastModifiedAt(payload.lastModified),
   });
   const fallbackSha256 = normalizeSha256Digest(fallbackModel.sha256);
   const fallbackShaCompatibility = resolveVerifiedLocalShaCompatibility(fallbackModel, selectedEntry
@@ -794,6 +874,24 @@ export function buildModelMetadataFromPayload(
   const requiresTreeProbe = selectedEntry
     ? selectedEntrySize === null
     : fallbackModel.requiresTreeProbe === true;
+  const downloadUrl = resolvedFileName
+    ? buildHuggingFaceResolveUrl(repoId, resolvedFileName, hfRevision)
+    : fallbackModel.downloadUrl;
+  const artifactMetadata = buildArtifactMetadataPatch({
+    id: repoId,
+    downloadUrl,
+    hfRevision,
+    inputCapabilities: inputCapabilityMetadata.inputCapabilities,
+    lifecycleStatus: localDownloadStatePatch.lifecycleStatus ?? fallbackModel.lifecycleStatus,
+    localPath: localDownloadStatePatch.localPath ?? fallbackModel.localPath,
+    projectorCandidates,
+    resolvedFileName,
+    selectedProjectorId: fallbackModel.selectedProjectorId,
+    sha256: selectedEntry
+      ? selectedEntrySha256 ?? (shouldPreserveFallbackVerifiedLocal ? fallbackShaCompatibility.localVerifiedSha256 : undefined)
+      : canUseFallbackVerifiedDerivedMetadata ? fallbackSha256 : undefined,
+    size,
+  });
 
   return normalizePersistedModelMetadata({
     ...fallbackModel,
@@ -802,9 +900,7 @@ export function buildModelMetadataFromPayload(
     name: getShortModelLabel(repoId) || repoId,
     author: payload.author || repoId.split('/')[0],
     size,
-    downloadUrl: resolvedFileName
-      ? buildHuggingFaceResolveUrl(repoId, resolvedFileName, hfRevision)
-      : fallbackModel.downloadUrl,
+    downloadUrl,
     hfRevision,
     resolvedFileName,
     lastModifiedAt,
@@ -842,6 +938,8 @@ export function buildModelMetadataFromPayload(
     variants: variants.length > 0 ? variants : fallbackModel.variants,
     activeVariantId: resolvedFileName ?? fallbackModel.activeVariantId,
     ...visionMetadata,
+    ...inputCapabilityMetadata,
+    ...artifactMetadata,
   });
 }
 

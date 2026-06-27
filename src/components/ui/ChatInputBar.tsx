@@ -7,12 +7,20 @@ import { getThemeActionContentClassName, screenChromeTokens, withAlpha, type Res
 import { useTheme } from '../../providers/ThemeProvider';
 import { useTranslation } from 'react-i18next';
 import { getReportedErrorMessage } from '../../services/AppError';
+import { ListPickerSheet, type ListPickerSheetItem } from './ListPickerSheet';
 import {
     MAX_CHAT_IMAGE_ATTACHMENTS,
     getSendableDraftImageAttachments,
     hasFailedDraftImageAttachments,
 } from '../../utils/chatImageAttachments';
+import {
+    MAX_CHAT_ATTACHMENTS_BY_KIND,
+    getSendableDraftMediaAttachments,
+    getSendableDraftDocumentAttachments,
+    hasFailedDraftDocumentAttachments,
+} from '../../utils/chatAttachments';
 import type { AttachmentDraft } from '../../types/multimodal';
+import type { ChatDocumentAttachmentDraft, ChatMediaAttachmentDraft } from '../../types/attachments';
 import type { AndroidBlurTargetRef } from '../../utils/androidBlur';
 
 interface ChatInputBarProps {
@@ -32,11 +40,23 @@ interface ChatInputBarProps {
     trailingActions?: React.ReactNode;
     attachmentsTray?: React.ReactNode;
     attachmentDrafts?: AttachmentDraft[];
+    documentAttachmentDrafts?: ChatDocumentAttachmentDraft[];
+    mediaAttachmentDrafts?: ChatMediaAttachmentDraft[];
     onAttachImages?: () => Promise<void> | void;
+    onAttachDocuments?: () => Promise<void> | void;
+    onAttachAudio?: () => Promise<void> | void;
     onRemoveAttachmentDraft?: (draft: AttachmentDraft, index: number) => void;
+    onRemoveDocumentAttachmentDraft?: (draft: ChatDocumentAttachmentDraft, index: number) => void;
+    onRemoveMediaAttachmentDraft?: (draft: ChatMediaAttachmentDraft, index: number) => void;
     imageAttachmentsEnabled?: boolean;
+    documentAttachmentsEnabled?: boolean;
+    audioAttachmentsEnabled?: boolean;
     imageAttachmentsDisabledReason?: string;
+    documentAttachmentsDisabledReason?: string;
+    audioAttachmentsDisabledReason?: string;
     isImageAttachmentActionBusy?: boolean;
+    isDocumentAttachmentActionBusy?: boolean;
+    isAudioAttachmentActionBusy?: boolean;
 }
 
 const CHAT_INPUT_DRAFT_CONSUMED_ERROR_KEY = 'chatInputDraftConsumed';
@@ -184,6 +204,35 @@ function AttachmentDraftPreview({ draft, index, accessibilityLabel, unavailableA
     );
 }
 
+function formatDocumentAttachmentSize(sizeBytes: number | undefined): string | null {
+    if (typeof sizeBytes !== 'number' || !Number.isFinite(sizeBytes) || sizeBytes <= 0) {
+        return null;
+    }
+
+    if (sizeBytes < 1024) {
+        return `${Math.round(sizeBytes)} B`;
+    }
+
+    if (sizeBytes < 1024 * 1024) {
+        return `${Math.max(1, Math.round(sizeBytes / 1024))} KB`;
+    }
+
+    return `${Math.max(1, Math.round(sizeBytes / (1024 * 1024)))} MB`;
+}
+
+function getDocumentAttachmentDisplayName(draft: ChatDocumentAttachmentDraft): string {
+    return draft.displayName ?? draft.fileName ?? draft.id ?? 'Document';
+}
+
+function getMediaAttachmentDisplayName(draft: ChatMediaAttachmentDraft): string {
+    return draft.displayName ?? draft.fileName ?? draft.id ?? 'Audio';
+}
+
+function joinUniqueHelperTexts(entries: (string | null)[]): string | null {
+    const uniqueEntries = Array.from(new Set(entries.filter((entry): entry is string => Boolean(entry))));
+    return uniqueEntries.join(' ') || null;
+}
+
 export const ChatInputBar = ({
     onSendMessage,
     onStopGeneration,
@@ -201,14 +250,27 @@ export const ChatInputBar = ({
     trailingActions,
     attachmentsTray,
     attachmentDrafts = [],
+    documentAttachmentDrafts = [],
+    mediaAttachmentDrafts = [],
     onAttachImages,
+    onAttachDocuments,
+    onAttachAudio,
     onRemoveAttachmentDraft,
+    onRemoveDocumentAttachmentDraft,
+    onRemoveMediaAttachmentDraft,
     imageAttachmentsEnabled = false,
+    documentAttachmentsEnabled = false,
+    audioAttachmentsEnabled = false,
     imageAttachmentsDisabledReason,
+    documentAttachmentsDisabledReason,
+    audioAttachmentsDisabledReason,
     isImageAttachmentActionBusy = false,
+    isDocumentAttachmentActionBusy = false,
+    isAudioAttachmentActionBusy = false,
 }: ChatInputBarProps) => {
     const [internalMessage, setInternalMessage] = useState('');
     const [isSubmitting, setIsSubmitting] = useState(false);
+    const [isAttachmentMenuVisible, setIsAttachmentMenuVisible] = useState(false);
     const submitLockRef = useRef(false);
     const lastIosAttachmentAnnouncementRef = useRef<string | null>(null);
     const { t } = useTranslation();
@@ -218,37 +280,98 @@ export const ChatInputBar = ({
     const isControlled = typeof draft === 'string';
     const message = isControlled ? draft : internalMessage;
     const hasAttachmentCopyFailures = imageAttachmentsEnabled && hasFailedDraftImageAttachments(attachmentDrafts);
+    const hasDocumentAttachmentCopyFailures = documentAttachmentsEnabled
+        && hasFailedDraftDocumentAttachments(documentAttachmentDrafts);
     const hasTooLargeAttachmentFailures = imageAttachmentsEnabled
         && attachmentDrafts.some((attachmentDraft) => (
             attachmentDraft.copyStatus === 'failed'
             && attachmentDraft.errorReason === 'too_large'
+        ));
+    const hasTooLargeDocumentAttachmentFailures = documentAttachmentsEnabled
+        && documentAttachmentDrafts.some((attachmentDraft) => (
+            attachmentDraft.copyStatus === 'failed'
+            && attachmentDraft.errorReason === 'too_large'
+        ));
+    const hasUnsupportedDocumentAttachmentFailures = documentAttachmentsEnabled
+        && documentAttachmentDrafts.some((attachmentDraft) => (
+            attachmentDraft.copyStatus === 'failed'
+            && attachmentDraft.errorReason === 'unsupported_type'
         ));
     const hasCopyOrStorageAttachmentFailures = imageAttachmentsEnabled
         && attachmentDrafts.some((attachmentDraft) => (
             attachmentDraft.copyStatus === 'failed'
             && attachmentDraft.errorReason !== 'too_large'
         ));
+    const hasCopyOrParseDocumentAttachmentFailures = documentAttachmentsEnabled
+        && documentAttachmentDrafts.some((attachmentDraft) => (
+            attachmentDraft.copyStatus === 'failed'
+            && attachmentDraft.errorReason !== 'too_large'
+            && attachmentDraft.errorReason !== 'unsupported_type'
+        ));
+    const audioMediaAttachmentDrafts = mediaAttachmentDrafts.filter((attachmentDraft) => attachmentDraft.kind === 'audio');
+    const hasTooLargeAudioAttachmentFailures = audioMediaAttachmentDrafts.some((attachmentDraft) => (
+        attachmentDraft.copyStatus === 'failed'
+        && attachmentDraft.errorReason === 'too_large'
+    ));
+    const hasUnsupportedAudioAttachmentFailures = audioMediaAttachmentDrafts.some((attachmentDraft) => (
+        attachmentDraft.copyStatus === 'failed'
+        && attachmentDraft.errorReason === 'unsupported_type'
+    ));
+    const hasAudioAttachmentCopyFailures = audioMediaAttachmentDrafts.some((attachmentDraft) => (
+        attachmentDraft.copyStatus === 'failed'
+        && attachmentDraft.errorReason !== 'too_large'
+        && attachmentDraft.errorReason !== 'unsupported_type'
+    ));
     const sendableAttachmentDrafts = imageAttachmentsEnabled
         ? getSendableDraftImageAttachments(attachmentDrafts)
         : [];
+    const sendableDocumentAttachmentDrafts = documentAttachmentsEnabled
+        ? getSendableDraftDocumentAttachments(documentAttachmentDrafts)
+        : [];
+    const mediaAttachmentDraftsWithEnabledCapability = mediaAttachmentDrafts.filter((attachmentDraft) => (
+        (attachmentDraft.kind === 'audio' && audioAttachmentsEnabled)
+    ));
+    const sendableMediaAttachmentDrafts = getSendableDraftMediaAttachments(mediaAttachmentDraftsWithEnabledCapability);
     const nonFailedAttachmentDrafts = imageAttachmentsEnabled
         ? attachmentDrafts.filter((attachmentDraft) => attachmentDraft.copyStatus !== 'failed')
         : [];
+    const nonFailedDocumentAttachmentDrafts = documentAttachmentsEnabled
+        ? documentAttachmentDrafts.filter((attachmentDraft) => attachmentDraft.copyStatus !== 'failed')
+        : [];
+    const nonFailedMediaAttachmentDrafts = mediaAttachmentDraftsWithEnabledCapability
+        .filter((attachmentDraft) => attachmentDraft.copyStatus !== 'failed');
     const hasNonFailedAttachmentDraftsBlockedFromSend = imageAttachmentsEnabled
         && nonFailedAttachmentDrafts.length > 0
         && sendableAttachmentDrafts.length !== nonFailedAttachmentDrafts.length;
+    const hasNonFailedDocumentAttachmentDraftsBlockedFromSend = documentAttachmentsEnabled
+        && nonFailedDocumentAttachmentDrafts.length > 0
+        && sendableDocumentAttachmentDrafts.length !== nonFailedDocumentAttachmentDrafts.length;
+    const hasNonFailedMediaAttachmentDraftsBlockedFromSend = nonFailedMediaAttachmentDrafts.length > 0
+        && sendableMediaAttachmentDrafts.length !== nonFailedMediaAttachmentDrafts.length;
     const hasReadyAttachmentDrafts = imageAttachmentsEnabled
         && sendableAttachmentDrafts.length > 0
         && sendableAttachmentDrafts.length === nonFailedAttachmentDrafts.length;
+    const hasReadyDocumentAttachmentDrafts = documentAttachmentsEnabled
+        && sendableDocumentAttachmentDrafts.length > 0
+        && sendableDocumentAttachmentDrafts.length === nonFailedDocumentAttachmentDrafts.length;
+    const hasReadyMediaAttachmentDrafts = sendableMediaAttachmentDrafts.length > 0
+        && sendableMediaAttachmentDrafts.length === nonFailedMediaAttachmentDrafts.length;
     const canSend = !disabled
         && !sendDisabled
         && !isSending
         && !isSubmitting
         && !isImageAttachmentActionBusy
+        && !isDocumentAttachmentActionBusy
+        && !isAudioAttachmentActionBusy
         && !hasNonFailedAttachmentDraftsBlockedFromSend
-        && (message.trim().length > 0 || hasReadyAttachmentDrafts || allowEmptyMessageSend);
+        && !hasNonFailedDocumentAttachmentDraftsBlockedFromSend
+        && !hasNonFailedMediaAttachmentDraftsBlockedFromSend
+        && (message.trim().length > 0 || hasReadyAttachmentDrafts || hasReadyDocumentAttachmentDrafts || hasReadyMediaAttachmentDrafts || allowEmptyMessageSend);
     const placeholder = disabled ? t('chat.inputPlaceholderDisabled') : t('chat.inputPlaceholder');
     const attachmentLimitReached = imageAttachmentsEnabled && attachmentDrafts.length >= MAX_CHAT_IMAGE_ATTACHMENTS;
+    const documentAttachmentLimitReached = documentAttachmentsEnabled
+        && documentAttachmentDrafts.length >= MAX_CHAT_ATTACHMENTS_BY_KIND.document;
+    const audioAttachmentLimitReached = audioMediaAttachmentDrafts.length >= MAX_CHAT_ATTACHMENTS_BY_KIND.audio;
     const canAttachImages = Boolean(onAttachImages)
         && imageAttachmentsEnabled
         && !disabled
@@ -256,7 +379,20 @@ export const ChatInputBar = ({
         && !isSubmitting
         && !isImageAttachmentActionBusy
         && !attachmentLimitReached;
-
+    const canAttachDocuments = Boolean(onAttachDocuments)
+        && documentAttachmentsEnabled
+        && !disabled
+        && !isSending
+        && !isSubmitting
+        && !isDocumentAttachmentActionBusy
+        && !documentAttachmentLimitReached;
+    const canAttachAudio = Boolean(onAttachAudio)
+        && audioAttachmentsEnabled
+        && !disabled
+        && !isSending
+        && !isSubmitting
+        && !isAudioAttachmentActionBusy
+        && !audioAttachmentLimitReached;
     const setMessage = (value: string) => {
         if (isControlled) {
             onDraftChange?.(value);
@@ -320,6 +456,45 @@ export const ChatInputBar = ({
         }
     };
 
+    const handleAttachDocuments = async () => {
+        if (!canAttachDocuments) {
+            return;
+        }
+
+        try {
+            await onAttachDocuments?.();
+        } catch (error: any) {
+            Alert.alert(
+                t('chat.attachments.attachDocument'),
+                getReportedErrorMessage('ChatInputBar.handleAttachDocuments', error, t),
+            );
+        }
+    };
+
+    const handleAttachAudio = async () => {
+        if (!canAttachAudio) {
+            return;
+        }
+
+        try {
+            await onAttachAudio?.();
+        } catch (error: any) {
+            Alert.alert(
+                t('chat.attachments.attachAudio'),
+                getReportedErrorMessage('ChatInputBar.handleAttachAudio', error, t),
+            );
+        }
+    };
+
+    const closeAttachmentMenu = () => {
+        setIsAttachmentMenuVisible(false);
+    };
+
+    const selectAttachmentMenuAction = (handler: () => Promise<void>) => {
+        setIsAttachmentMenuVisible(false);
+        void handler();
+    };
+
     const primaryActionEnabled = isSending || canSend;
     const primaryActionClassName = appearance.surfaceKind === 'glass'
         ? 'bg-primary-500/8'
@@ -355,7 +530,7 @@ export const ChatInputBar = ({
             style={primaryActionStyle}
         />
     );
-    const attachmentHelperText = (() => {
+    const imageAttachmentHelperText = (() => {
         if (hasTooLargeAttachmentFailures && hasCopyOrStorageAttachmentFailures) {
             return t('chat.attachments.mixedFailures');
         }
@@ -378,9 +553,71 @@ export const ChatInputBar = ({
 
         return null;
     })();
+    const documentAttachmentHelperText = (() => {
+        if (hasTooLargeDocumentAttachmentFailures) {
+            return t('chat.attachments.documentTooLarge');
+        }
+
+        if (hasUnsupportedDocumentAttachmentFailures) {
+            return t('chat.attachments.documentUnsupported');
+        }
+
+        if (hasDocumentAttachmentCopyFailures || hasCopyOrParseDocumentAttachmentFailures) {
+            return t('chat.attachments.documentCopyFailed');
+        }
+
+        if (documentAttachmentLimitReached) {
+            return t('chat.attachments.documentLimitReached', { count: MAX_CHAT_ATTACHMENTS_BY_KIND.document });
+        }
+
+        if (!documentAttachmentsEnabled && documentAttachmentsDisabledReason) {
+            return t(documentAttachmentsDisabledReason);
+        }
+
+        return null;
+    })();
+    const audioAttachmentHelperText = (() => {
+        if (hasTooLargeAudioAttachmentFailures) {
+            return t('chat.attachments.audioTooLarge');
+        }
+
+        if (hasUnsupportedAudioAttachmentFailures) {
+            return t('chat.attachments.audioUnsupported');
+        }
+
+        if (hasAudioAttachmentCopyFailures) {
+            return t('chat.attachments.audioCopyFailed');
+        }
+
+        if (audioAttachmentLimitReached) {
+            return t('chat.attachments.audioLimitReached', { count: MAX_CHAT_ATTACHMENTS_BY_KIND.audio });
+        }
+
+        if (!audioAttachmentsEnabled && audioAttachmentsDisabledReason) {
+            return t(audioAttachmentsDisabledReason);
+        }
+
+        return null;
+    })();
+    const mediaAttachmentHelperText = audioAttachmentHelperText;
+    const attachmentHelperText = joinUniqueHelperTexts([imageAttachmentHelperText, documentAttachmentHelperText, mediaAttachmentHelperText]);
     const attachImageDisabledContext = [
         isImageAttachmentActionBusy ? t('chat.attachments.preparingImage') : null,
-        attachmentHelperText,
+        imageAttachmentHelperText,
+        disabled ? placeholder : null,
+    ]
+        .filter((entry): entry is string => Boolean(entry))
+        .join(' ');
+    const attachDocumentDisabledContext = [
+        isDocumentAttachmentActionBusy ? t('chat.attachments.preparingDocument') : null,
+        documentAttachmentHelperText,
+        disabled ? placeholder : null,
+    ]
+        .filter((entry): entry is string => Boolean(entry))
+        .join(' ');
+    const attachAudioDisabledContext = [
+        isAudioAttachmentActionBusy ? t('chat.attachments.preparingAudio') : null,
+        audioAttachmentHelperText,
         disabled ? placeholder : null,
     ]
         .filter((entry): entry is string => Boolean(entry))
@@ -388,9 +625,22 @@ export const ChatInputBar = ({
     const attachImageAccessibilityState = isImageAttachmentActionBusy
         ? { disabled: !canAttachImages, busy: true }
         : { disabled: !canAttachImages };
+    const attachDocumentAccessibilityState = isDocumentAttachmentActionBusy
+        ? { disabled: !canAttachDocuments, busy: true }
+        : { disabled: !canAttachDocuments };
+    const attachAudioAccessibilityState = isAudioAttachmentActionBusy
+        ? { disabled: !canAttachAudio, busy: true }
+        : { disabled: !canAttachAudio };
+    const isAnyAttachmentActionBusy = isImageAttachmentActionBusy
+        || isDocumentAttachmentActionBusy
+        || isAudioAttachmentActionBusy;
     const attachmentStatusAnnouncement = isImageAttachmentActionBusy
         ? t('chat.attachments.preparingImage')
-        : attachmentHelperText;
+        : isDocumentAttachmentActionBusy
+            ? t('chat.attachments.preparingDocument')
+            : isAudioAttachmentActionBusy
+                ? t('chat.attachments.preparingAudio')
+                : attachmentHelperText;
 
     useEffect(() => {
         if (Platform.OS !== 'ios') {
@@ -411,19 +661,66 @@ export const ChatInputBar = ({
         AccessibilityInfo.announceForAccessibility(announcement);
     }, [attachmentStatusAnnouncement]);
 
-    const attachmentAction = onAttachImages ? (
+    const attachmentMenuItems = ([
+        onAttachImages ? {
+            key: 'image',
+            title: t('chat.attachments.attachImage'),
+            description: !canAttachImages && attachImageDisabledContext ? attachImageDisabledContext : undefined,
+            iconName: 'image',
+            disabled: !canAttachImages,
+            onPress: () => selectAttachmentMenuAction(handleAttachImages),
+            accessibilityLabel: t('chat.attachments.attachImageAccessibilityLabel'),
+            accessibilityHint: !canAttachImages && attachImageDisabledContext ? attachImageDisabledContext : undefined,
+            accessibilityState: attachImageAccessibilityState,
+            testID: 'chat-attach-image-button',
+        } : null,
+        onAttachDocuments ? {
+            key: 'document',
+            title: t('chat.attachments.attachDocument'),
+            description: !canAttachDocuments && attachDocumentDisabledContext ? attachDocumentDisabledContext : undefined,
+            iconName: 'description',
+            disabled: !canAttachDocuments,
+            onPress: () => selectAttachmentMenuAction(handleAttachDocuments),
+            accessibilityLabel: t('chat.attachments.attachDocumentAccessibilityLabel'),
+            accessibilityHint: !canAttachDocuments && attachDocumentDisabledContext ? attachDocumentDisabledContext : undefined,
+            accessibilityState: attachDocumentAccessibilityState,
+            testID: 'chat-attach-document-button',
+        } : null,
+        onAttachAudio ? {
+            key: 'audio',
+            title: t('chat.attachments.attachAudio'),
+            description: !canAttachAudio && attachAudioDisabledContext ? attachAudioDisabledContext : undefined,
+            iconName: 'graphic-eq',
+            disabled: !canAttachAudio,
+            onPress: () => selectAttachmentMenuAction(handleAttachAudio),
+            accessibilityLabel: t('chat.attachments.attachAudioAccessibilityLabel'),
+            accessibilityHint: !canAttachAudio && attachAudioDisabledContext ? attachAudioDisabledContext : undefined,
+            accessibilityState: attachAudioAccessibilityState,
+            testID: 'chat-attach-audio-button',
+        } : null,
+    ] as (ListPickerSheetItem | null)[]).filter((item): item is ListPickerSheetItem => item !== null);
+    const hasAttachmentMenuItems = attachmentMenuItems.length > 0;
+    const attachmentAction = hasAttachmentMenuItems ? (
         <ScreenIconButton
-            onPress={() => {
-                void handleAttachImages();
-            }}
-            disabled={!canAttachImages}
-            accessibilityLabel={t('chat.attachments.attachImageAccessibilityLabel')}
-            accessibilityHint={!canAttachImages && attachImageDisabledContext ? attachImageDisabledContext : undefined}
-            accessibilityState={attachImageAccessibilityState}
-            iconName="image"
+            onPress={() => setIsAttachmentMenuVisible(true)}
+            accessibilityLabel={t('chat.attachments.attachMenuAccessibilityLabel')}
+            accessibilityHint={attachmentStatusAnnouncement ?? undefined}
+            accessibilityState={isAnyAttachmentActionBusy ? { busy: true } : undefined}
+            iconName="attach-file"
             iconSize="sm"
             size="compact"
-            testID="chat-attach-image-button"
+            testID="chat-attach-menu-button"
+        />
+    ) : null;
+    const attachmentMenuSheet = hasAttachmentMenuItems && isAttachmentMenuVisible ? (
+        <ListPickerSheet
+            visible={isAttachmentMenuVisible}
+            onClose={closeAttachmentMenu}
+            title={t('chat.attachments.attachMenuTitle')}
+            androidContentBlurTargetRef={androidContentBlurTargetRef}
+            items={attachmentMenuItems}
+            testID="chat-attachment-menu-sheet"
+            sheetClassName="max-h-[76%]"
         />
     ) : null;
     const inputRow = (
@@ -470,7 +767,13 @@ export const ChatInputBar = ({
         </Box>
     );
 
-    const builtInAttachmentsTray = attachmentDrafts.length > 0 || attachmentHelperText || isImageAttachmentActionBusy ? (
+    const builtInAttachmentsTray = attachmentDrafts.length > 0
+        || documentAttachmentDrafts.length > 0
+        || mediaAttachmentDrafts.length > 0
+        || attachmentHelperText
+        || isImageAttachmentActionBusy
+        || isDocumentAttachmentActionBusy
+        || isAudioAttachmentActionBusy ? (
         <Box testID="chat-image-attachments-tray" className="gap-2">
             {isImageAttachmentActionBusy ? (
                 <Box
@@ -496,7 +799,54 @@ export const ChatInputBar = ({
                 </Box>
             ) : null}
 
-            {attachmentDrafts.length > 0 ? (
+            {isDocumentAttachmentActionBusy ? (
+                <Box
+                    testID="chat-document-attachment-busy-indicator"
+                    accessibilityRole="progressbar"
+                    accessibilityLabel={t('chat.attachments.preparingDocument')}
+                    accessibilityLiveRegion={Platform.OS === 'android' ? 'polite' : undefined}
+                    accessibilityState={{ busy: true }}
+                    className="flex-row items-center gap-2 self-start rounded-full border border-primary-500/20 bg-primary-500/10 px-3 py-1.5"
+                >
+                    <ScreenIconTile
+                        testID="chat-document-attachment-busy-spinner"
+                        iconName="hourglass-empty"
+                        iconSize="xs"
+                        size="sm"
+                        tone="accent"
+                        className="h-6 w-6 border-0 bg-transparent"
+                        iconClassName="text-primary-500"
+                    />
+                    <Text className="text-xs font-semibold text-primary-700 dark:text-primary-300">
+                        {t('chat.attachments.preparingDocument')}
+                    </Text>
+                </Box>
+            ) : null}
+
+            {isAudioAttachmentActionBusy ? (
+                <Box
+                    testID="chat-audio-attachment-busy-indicator"
+                    accessibilityRole="progressbar"
+                    accessibilityLabel={t('chat.attachments.preparingAudio')}
+                    accessibilityLiveRegion={Platform.OS === 'android' ? 'polite' : undefined}
+                    accessibilityState={{ busy: true }}
+                    className="flex-row items-center gap-2 self-start rounded-full border border-primary-500/20 bg-primary-500/10 px-3 py-1.5"
+                >
+                    <ScreenIconTile
+                        iconName="hourglass-empty"
+                        iconSize="xs"
+                        size="sm"
+                        tone="accent"
+                        className="h-6 w-6 border-0 bg-transparent"
+                        iconClassName="text-primary-500"
+                    />
+                    <Text className="text-xs font-semibold text-primary-700 dark:text-primary-300">
+                        {t('chat.attachments.preparingAudio')}
+                    </Text>
+                </Box>
+            ) : null}
+
+            {attachmentDrafts.length > 0 || documentAttachmentDrafts.length > 0 || mediaAttachmentDrafts.length > 0 ? (
                 <ScrollView
                     horizontal
                     showsHorizontalScrollIndicator={false}
@@ -555,6 +905,143 @@ export const ChatInputBar = ({
                                             iconSize="xs"
                                             size="micro"
                                             testID={`chat-image-attachment-remove-${index}`}
+                                        />
+                                    </Box>
+                                ) : null}
+                            </Box>
+                        );
+                    })}
+                    {documentAttachmentDrafts.map((draft, index) => {
+                        const draftKey = getDocumentAttachmentDisplayName(draft);
+                        const isFailed = draft.copyStatus === 'failed';
+                        const attachmentLabelOptions = { index: index + 1, count: documentAttachmentDrafts.length };
+                        const failedAttachmentReason = draft.errorReason === 'too_large'
+                            ? t('chat.attachments.documentTooLarge')
+                            : draft.errorReason === 'unsupported_type'
+                                ? t('chat.attachments.documentUnsupported')
+                                : t('chat.attachments.documentCopyFailed');
+                        const title = getDocumentAttachmentDisplayName(draft);
+                        const subtitle = isFailed
+                            ? failedAttachmentReason
+                            : formatDocumentAttachmentSize(draft.sizeBytes) ?? t('chat.attachments.documentReady');
+                        const accessibilityLabel = isFailed
+                            ? t('chat.attachments.failedDocumentPreviewIndexedAccessibilityLabel', {
+                                ...attachmentLabelOptions,
+                                reason: failedAttachmentReason,
+                            })
+                            : t('chat.attachments.documentPreviewIndexedAccessibilityLabel', {
+                                ...attachmentLabelOptions,
+                                name: title,
+                            });
+
+                        return (
+                            <Box key={`${draftKey}-${index}`} className="mr-2">
+                                <ScreenSurface
+                                    tone={isFailed ? 'danger' : 'default'}
+                                    className="relative h-16 w-44 rounded-2xl px-3 py-2"
+                                    accessibilityRole="summary"
+                                    accessibilityLabel={accessibilityLabel}
+                                    testID={`chat-document-attachment-chip-${index}`}
+                                >
+                                    <Box className="min-w-0 flex-1 flex-row items-center gap-2">
+                                        <ScreenIconTile
+                                            iconName={isFailed ? 'warning' : 'description'}
+                                            tone={isFailed ? 'error' : 'neutral'}
+                                            iconSize="sm"
+                                            size="sm"
+                                            className="h-8 w-8"
+                                        />
+                                        <Box className="min-w-0 flex-1">
+                                            <Text numberOfLines={1} className="text-xs font-semibold text-typography-800 dark:text-typography-100">
+                                                {title}
+                                            </Text>
+                                            <Text numberOfLines={1} className="mt-0.5 text-xs leading-4 text-typography-500 dark:text-typography-300">
+                                                {subtitle}
+                                            </Text>
+                                        </Box>
+                                    </Box>
+                                </ScreenSurface>
+
+                                {onRemoveDocumentAttachmentDraft ? (
+                                    <Box className="absolute -right-1 -top-1">
+                                        <ScreenIconButton
+                                            onPress={() => onRemoveDocumentAttachmentDraft(draft, index)}
+                                            accessibilityLabel={t('chat.attachments.removeDocumentIndexedAccessibilityLabel', attachmentLabelOptions)}
+                                            iconName="close"
+                                            iconSize="xs"
+                                            size="micro"
+                                            testID={`chat-document-attachment-remove-${index}`}
+                                        />
+                                    </Box>
+                                ) : null}
+                            </Box>
+                        );
+                    })}
+                    {mediaAttachmentDrafts.map((draft, index) => {
+                        const draftKey = getMediaAttachmentDisplayName(draft);
+                        const isFailed = draft.copyStatus === 'failed';
+                        const attachmentLabelOptions = { index: index + 1, count: mediaAttachmentDrafts.length };
+                        const failedAttachmentReason = draft.errorReason === 'too_large'
+                            ? t('chat.attachments.audioTooLarge')
+                            : draft.errorReason === 'unsupported_type'
+                                ? t('chat.attachments.audioUnsupported')
+                                : t('chat.attachments.audioCopyFailed');
+                        const title = getMediaAttachmentDisplayName(draft);
+                        const subtitle = isFailed
+                            ? failedAttachmentReason
+                            : formatDocumentAttachmentSize(draft.sizeBytes) ?? t('chat.attachments.audioReady');
+                        const accessibilityLabel = isFailed
+                            ? t('chat.attachments.failedMediaPreviewIndexedAccessibilityLabel', {
+                                ...attachmentLabelOptions,
+                                kind: draft.kind,
+                                reason: failedAttachmentReason,
+                            })
+                            : t('chat.attachments.mediaPreviewIndexedAccessibilityLabel', {
+                                ...attachmentLabelOptions,
+                                kind: draft.kind,
+                                name: title,
+                            });
+
+                        return (
+                            <Box key={`${draftKey}-${index}`} className="mr-2">
+                                <ScreenSurface
+                                    tone={isFailed ? 'danger' : 'default'}
+                                    className="relative h-16 w-44 rounded-2xl px-3 py-2"
+                                    accessibilityRole="summary"
+                                    accessibilityLabel={accessibilityLabel}
+                                    testID={`chat-media-attachment-chip-${index}`}
+                                >
+                                    <Box className="min-w-0 flex-1 flex-row items-center gap-2">
+                                        <ScreenIconTile
+                                            iconName={isFailed ? 'warning' : 'graphic-eq'}
+                                            tone={isFailed ? 'error' : 'neutral'}
+                                            iconSize="sm"
+                                            size="sm"
+                                            className="h-8 w-8"
+                                        />
+                                        <Box className="min-w-0 flex-1">
+                                            <Text numberOfLines={1} className="text-xs font-semibold text-typography-800 dark:text-typography-100">
+                                                {title}
+                                            </Text>
+                                            <Text numberOfLines={1} className="mt-0.5 text-xs leading-4 text-typography-500 dark:text-typography-300">
+                                                {subtitle}
+                                            </Text>
+                                        </Box>
+                                    </Box>
+                                </ScreenSurface>
+
+                                {onRemoveMediaAttachmentDraft ? (
+                                    <Box className="absolute -right-1 -top-1">
+                                        <ScreenIconButton
+                                            onPress={() => onRemoveMediaAttachmentDraft(draft, index)}
+                                            accessibilityLabel={t('chat.attachments.removeMediaIndexedAccessibilityLabel', {
+                                                ...attachmentLabelOptions,
+                                                kind: draft.kind,
+                                            })}
+                                            iconName="close"
+                                            iconSize="xs"
+                                            size="micro"
+                                            testID={`chat-media-attachment-remove-${index}`}
                                         />
                                     </Box>
                                 ) : null}
@@ -636,6 +1123,7 @@ export const ChatInputBar = ({
                 {modeBanner}
                 {attachmentsContent}
                 {inputRow}
+                {attachmentMenuSheet}
             </Box>
         );
     }
@@ -657,6 +1145,7 @@ export const ChatInputBar = ({
             >
                 {inputRow}
             </ScreenSurface>
+            {attachmentMenuSheet}
         </Box>
     );
 };

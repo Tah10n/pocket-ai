@@ -94,7 +94,7 @@
       [
         "expo-image-picker",
         {
-          "photosPermission": "Pocket AI uses your photo library so you can attach images to vision-capable local chats.",
+          "photosPermission": "Pocket AI uses your photo library so you can attach images to local chats.",
           "cameraPermission": false,
           "microphonePermission": false
         }

@@ -1,7 +1,18 @@
-import type { ChatMessage, ChatThread, LlmChatMessage } from '../types/chat';
+import {
+  DOCUMENT_ATTACHMENT_MESSAGE_PLACEHOLDER,
+  type ChatMessage,
+  type ChatThread,
+  type LlmChatMessage,
+  type LlmTextContentPart,
+  type LlmInputAudioContentPart,
+} from '../types/chat';
 import { AppError } from '../services/AppError';
 import { getVisibleMessageContent } from './chatPresentation';
-import { getChatImageAttachmentMediaPaths } from './chatImageAttachments';
+import {
+  getChatImageAttachmentMediaPaths,
+  normalizeChatAttachmentLocalUri,
+  toAttachmentMediaPath,
+} from './chatImageAttachments';
 
 export interface ThreadInferenceWindow {
   messages: LlmChatMessage[];
@@ -23,8 +34,11 @@ const RESPONSE_RESERVE_BALANCING_MIN_TOKENS = 256;
 const MAX_RESPONSE_RESERVE_SHARE_OF_PROMPT_BUDGET = 0.5;
 
 export function estimateLlmMessageTokens(message: LlmChatMessage) {
-  const mediaPathCount = getLlmMessageMediaPaths(message).length;
-  return Math.max(1, Math.ceil(message.content.trim().length / CHARS_PER_ESTIMATED_TOKEN))
+  const textContentPartChars = message.contentParts
+    ?.filter((part) => part.type === 'text')
+    .reduce((total, part) => total + part.text.trim().length, 0) ?? 0;
+  const mediaPathCount = getLlmMessageMediaPaths(message).length + getLlmMessageAudioInputCount(message);
+  return Math.max(1, Math.ceil((message.content.trim().length + textContentPartChars) / CHARS_PER_ESTIMATED_TOKEN))
     + MESSAGE_TOKEN_OVERHEAD
     + (mediaPathCount * IMAGE_ATTACHMENT_ESTIMATED_TOKENS);
 }
@@ -94,19 +108,80 @@ function normalizeMediaPaths(paths: readonly string[] | undefined): string[] {
 function getLlmMessageMediaPaths(message: LlmChatMessage): string[] {
   return normalizeMediaPaths([
     ...(message.mediaPaths ?? []),
+    ...(message.contentParts
+      ?.filter((part) => part.type === 'image_url')
+      .map((part) => part.image_url.url) ?? []),
     ...getChatImageAttachmentMediaPaths(message.attachments),
   ]);
+}
+
+function getLlmMessageAudioInputCount(message: LlmChatMessage): number {
+  return message.contentParts?.filter((part) => {
+    if (part.type !== 'input_audio') {
+      return false;
+    }
+
+    const url = part.input_audio.url?.trim() ?? '';
+    const data = part.input_audio.data?.trim() ?? '';
+    return url.length > 0 || data.length > 0;
+  }).length ?? 0;
+}
+
+function getAudioContentPartsFromAttachments(
+  attachments: ChatMessage['attachments'],
+): LlmInputAudioContentPart[] {
+  if (!attachments?.length) {
+    return [];
+  }
+
+  return attachments.flatMap((attachment) => {
+    if (!('kind' in attachment) || attachment.kind !== 'audio' || attachment.state !== 'ready') {
+      return [];
+    }
+
+    const localUri = normalizeChatAttachmentLocalUri(attachment.localUri);
+    const mediaPath = localUri ? toAttachmentMediaPath(localUri) : null;
+    if (!mediaPath) {
+      return [];
+    }
+
+    return [{
+      type: 'input_audio',
+      input_audio: {
+        format: attachment.audio.format,
+        url: mediaPath,
+      },
+    } satisfies LlmInputAudioContentPart];
+  });
+}
+
+function hasAudioAttachmentInput(attachments: ChatMessage['attachments']): boolean {
+  return getAudioContentPartsFromAttachments(attachments).length > 0;
 }
 
 function toLlmChatMessage(message: ChatMessage): LlmChatMessage {
   const content = getVisibleMessageContent(message.role, message.content);
   const mediaPaths = getChatImageAttachmentMediaPaths(message.attachments);
+  const attachmentAudioContentParts = getAudioContentPartsFromAttachments(message.attachments);
+  const storedContentParts = [
+    ...(message.contentParts ?? []),
+    ...attachmentAudioContentParts,
+  ];
+  const contentParts = storedContentParts.length
+    ? [
+        ...(content.trim().length > 0 && content !== DOCUMENT_ATTACHMENT_MESSAGE_PLACEHOLDER
+          ? [{ type: 'text', text: content } satisfies LlmTextContentPart]
+          : []),
+        ...storedContentParts,
+      ]
+    : undefined;
 
   return {
     role: message.role,
-    content,
+    content: content === DOCUMENT_ATTACHMENT_MESSAGE_PLACEHOLDER && contentParts?.length ? '' : content,
     ...(message.attachments && message.attachments.length > 0 ? { attachments: message.attachments } : null),
     ...(mediaPaths.length > 0 ? { mediaPaths } : null),
+    ...(contentParts && contentParts.length > 0 ? { contentParts } : null),
   };
 }
 
@@ -142,7 +217,9 @@ export function getThreadInferenceWindow(
       && (message.kind ?? 'message') !== 'model_switch'
       && (
         getVisibleMessageContent(message.role, message.content).trim().length > 0
+        || (message.contentParts?.length ?? 0) > 0
         || getChatImageAttachmentMediaPaths(message.attachments).length > 0
+        || hasAudioAttachmentInput(message.attachments)
       ),
   );
   const historyMessages = eligibleMessages.map<LlmChatMessage>(toLlmChatMessage);
@@ -308,7 +385,9 @@ export function getEligibleThreadMessages(thread: ChatThread): ChatMessage[] {
       && (message.kind ?? 'message') !== 'model_switch'
       && (
         getVisibleMessageContent(message.role, message.content).trim().length > 0
+        || (message.contentParts?.length ?? 0) > 0
         || getChatImageAttachmentMediaPaths(message.attachments).length > 0
+        || hasAudioAttachmentInput(message.attachments)
       ),
   );
 }

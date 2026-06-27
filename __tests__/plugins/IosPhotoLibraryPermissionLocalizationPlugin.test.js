@@ -158,7 +158,9 @@ describe('iOS photo library permission localization config plugin', () => {
 
   it('ships English and Russian photo permission copy', () => {
     expect(LOCALIZED_PHOTO_LIBRARY_USAGE_DESCRIPTIONS.en).toContain('photo library');
+    expect(LOCALIZED_PHOTO_LIBRARY_USAGE_DESCRIPTIONS.en).toContain('attach images');
     expect(LOCALIZED_PHOTO_LIBRARY_USAGE_DESCRIPTIONS.ru).toContain('медиатеку');
+    expect(LOCALIZED_PHOTO_LIBRARY_USAGE_DESCRIPTIONS.ru).toContain('прикреплять изображения');
   });
 
   it('resolves the Expo iOS project name with a safe fallback', () => {

@@ -1,8 +1,9 @@
 import React, { useEffect } from 'react';
-import { Alert } from 'react-native';
+import { Alert, Platform } from 'react-native';
 import { act, render, waitFor } from '@testing-library/react-native';
 import * as ImagePicker from 'expo-image-picker';
 import {
+  PENDING_IMAGE_PICKER_RECOVERY_TIMEOUT_MS,
   useChatImageAttachments,
   type UseChatImageAttachmentsResult,
 } from '../../src/hooks/useChatImageAttachments';
@@ -65,6 +66,15 @@ describe('useChatImageAttachments', () => {
     return render(<Harness />);
   }
 
+  function mockPlatformOS(nextPlatform: 'android' | 'ios' | 'web') {
+    const originalPlatform = Platform.OS;
+    Object.defineProperty(Platform, 'OS', { configurable: true, get: () => nextPlatform });
+
+    return () => {
+      Object.defineProperty(Platform, 'OS', { configurable: true, get: () => originalPlatform });
+    };
+  }
+
   beforeEach(() => {
     jest.clearAllMocks();
     reactI18nextMock.__resetTranslations();
@@ -91,6 +101,7 @@ describe('useChatImageAttachments', () => {
         type: 'image',
       }],
     });
+    (ImagePicker.getPendingResultAsync as jest.Mock).mockResolvedValue(null);
     (chatAttachmentStorageService.copyImageAssetToDraft as jest.Mock).mockResolvedValue({
       id: 'draft-1',
       pickerUri: 'ph://library-image-1',
@@ -136,6 +147,332 @@ describe('useChatImageAttachments', () => {
       copyStatus: 'copied',
       localUri: 'file:///document/chat-attachments/draft-1.jpg',
     }));
+  });
+
+  it('recovers Android pending image picker results into app-owned drafts', async () => {
+    const restorePlatform = mockPlatformOS('android');
+    try {
+      (ImagePicker.getPendingResultAsync as jest.Mock).mockResolvedValueOnce({
+        canceled: false,
+        assets: [{
+          uri: 'ph://pending-library-image-1',
+          width: 640,
+          height: 480,
+          mimeType: 'image/jpeg',
+          fileName: 'pending-image.jpg',
+          fileSize: 2048,
+          type: 'image',
+        }],
+      });
+      (chatAttachmentStorageService.copyImageAssetToDraft as jest.Mock).mockResolvedValueOnce({
+        id: 'pending-draft-1',
+        pickerUri: 'ph://pending-library-image-1',
+        previewUri: 'file:///document/chat-attachments/pending-draft-1.jpg',
+        localUri: 'file:///document/chat-attachments/pending-draft-1.jpg',
+        mediaType: 'image/jpeg',
+        width: 640,
+        height: 480,
+        copyStatus: 'copied',
+      });
+
+      renderHarness({ enabled: true, ownerKey: 'thread-1|model-vision' });
+
+      await waitFor(() => {
+        expect(ImagePicker.getPendingResultAsync).toHaveBeenCalledTimes(1);
+        expect(chatAttachmentStorageService.copyImageAssetToDraft).toHaveBeenCalledWith(expect.objectContaining({
+          uri: 'ph://pending-library-image-1',
+        }));
+      });
+      await waitFor(() => {
+        expect(latestHook?.drafts).toEqual([expect.objectContaining({
+          id: 'pending-draft-1',
+          copyStatus: 'copied',
+          localUri: 'file:///document/chat-attachments/pending-draft-1.jpg',
+        })]);
+      });
+      expect(ImagePicker.launchImageLibraryAsync).not.toHaveBeenCalled();
+      expect(Alert.alert).not.toHaveBeenCalled();
+    } finally {
+      restorePlatform();
+    }
+  });
+
+  it('does not recover pending image picker results while image attachments are disabled', async () => {
+    const restorePlatform = mockPlatformOS('android');
+    try {
+      renderHarness({
+        enabled: false,
+        disabledReason: 'chat.visionReadiness.textOnly',
+        ownerKey: 'thread-1|model-text',
+      });
+
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      expect(ImagePicker.getPendingResultAsync).not.toHaveBeenCalled();
+      expect(chatAttachmentStorageService.copyImageAssetToDraft).not.toHaveBeenCalled();
+      expect(latestHook?.drafts).toEqual([]);
+    } finally {
+      restorePlatform();
+    }
+  });
+
+  it('does not recover pending image picker results on iOS', async () => {
+    const restorePlatform = mockPlatformOS('ios');
+    try {
+      renderHarness({ enabled: true, ownerKey: 'thread-1|model-vision' });
+
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      expect(ImagePicker.getPendingResultAsync).not.toHaveBeenCalled();
+      expect(chatAttachmentStorageService.copyImageAssetToDraft).not.toHaveBeenCalled();
+      expect(latestHook?.drafts).toEqual([]);
+    } finally {
+      restorePlatform();
+    }
+  });
+
+  it('unblocks Android image picking when pending result recovery does not settle', async () => {
+    const restorePlatform = mockPlatformOS('android');
+    jest.useFakeTimers();
+    try {
+      (ImagePicker.getPendingResultAsync as jest.Mock).mockReturnValueOnce(new Promise(() => undefined));
+
+      renderHarness({ enabled: true, ownerKey: 'thread-1|model-vision' });
+
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(latestHook?.isPicking).toBe(false);
+
+      await act(async () => {
+        await latestHook?.attachImages();
+      });
+
+      expect(ImagePicker.launchImageLibraryAsync).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        jest.advanceTimersByTime(PENDING_IMAGE_PICKER_RECOVERY_TIMEOUT_MS);
+        await Promise.resolve();
+      });
+      expect(consoleWarnSpy).toHaveBeenCalledWith(
+        '[useChatImageAttachments] Timed out recovering pending image picker result',
+        expect.objectContaining({
+          context: 'recover_pending_image_picker_result',
+          timeoutMs: PENDING_IMAGE_PICKER_RECOVERY_TIMEOUT_MS,
+        }),
+      );
+    } finally {
+      jest.useRealTimers();
+      restorePlatform();
+    }
+  });
+
+  it('unblocks Android image picking when recovered pending asset copy does not settle', async () => {
+    const restorePlatform = mockPlatformOS('android');
+    jest.useFakeTimers();
+    try {
+      (ImagePicker.getPendingResultAsync as jest.Mock).mockResolvedValueOnce({
+        canceled: false,
+        assets: [{
+          uri: 'ph://pending-library-image-hanging-copy',
+          width: 640,
+          height: 480,
+          mimeType: 'image/jpeg',
+          fileName: 'pending-hanging-copy.jpg',
+          fileSize: 2048,
+          type: 'image',
+        }],
+      });
+      (chatAttachmentStorageService.copyImageAssetToDraft as jest.Mock).mockReturnValueOnce(new Promise(() => undefined));
+
+      renderHarness({ enabled: true, ownerKey: 'thread-1|model-vision' });
+
+      await waitFor(() => {
+        expect(chatAttachmentStorageService.copyImageAssetToDraft).toHaveBeenCalledWith(expect.objectContaining({
+          uri: 'ph://pending-library-image-hanging-copy',
+        }));
+      });
+      expect(latestHook?.isPicking).toBe(false);
+
+      await act(async () => {
+        await latestHook?.attachImages();
+      });
+
+      expect(ImagePicker.launchImageLibraryAsync).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        jest.advanceTimersByTime(PENDING_IMAGE_PICKER_RECOVERY_TIMEOUT_MS);
+        await Promise.resolve();
+      });
+
+      expect(latestHook?.isPicking).toBe(false);
+    } finally {
+      jest.useRealTimers();
+      restorePlatform();
+    }
+  });
+
+  it('reports Android pending image picker native errors without logging private messages', async () => {
+    const restorePlatform = mockPlatformOS('android');
+    try {
+      (ImagePicker.getPendingResultAsync as jest.Mock).mockResolvedValueOnce({
+        code: 'E_IMAGE_PICKER_PRIVATE_FAILURE',
+        message: 'failed for content://media/external/images/media/private-id',
+      });
+
+      renderHarness({ enabled: true, ownerKey: 'thread-1|model-vision' });
+
+      await waitFor(() => {
+        expect(ImagePicker.getPendingResultAsync).toHaveBeenCalledTimes(1);
+        expect(Alert.alert).toHaveBeenCalledWith(
+          'chat.attachments.attachImage',
+          'chat.attachments.pickerFailed',
+        );
+      });
+      expect(chatAttachmentStorageService.copyImageAssetToDraft).not.toHaveBeenCalled();
+      expect(consoleWarnSpy).toHaveBeenCalledWith(
+        '[useChatImageAttachments] Failed to recover pending image picker result',
+        expect.objectContaining({
+          context: 'recover_pending_image_picker_result',
+          errorCode: 'E_IMAGE_PICKER_PRIVATE_FAILURE',
+        }),
+      );
+      expect(JSON.stringify(consoleWarnSpy.mock.calls)).not.toContain('content://media/external/images/media/private-id');
+    } finally {
+      restorePlatform();
+    }
+  });
+
+  it('discards recovered pending drafts if the owner changes during copy', async () => {
+    const restorePlatform = mockPlatformOS('android');
+    try {
+      const stalePendingDraft = {
+        id: 'pending-stale-draft',
+        pickerUri: 'ph://pending-library-image-1',
+        previewUri: 'test-dir/chat-attachments/pending-stale-draft.jpg',
+        localUri: 'test-dir/chat-attachments/pending-stale-draft.jpg',
+        copyStatus: 'copied' as const,
+      };
+      const copyGate: { resolve?: (draft: typeof stalePendingDraft) => void } = {};
+      (ImagePicker.getPendingResultAsync as jest.Mock).mockResolvedValueOnce({
+        canceled: false,
+        assets: [{
+          uri: 'ph://pending-library-image-1',
+          width: 640,
+          height: 480,
+          mimeType: 'image/jpeg',
+          fileName: 'pending-image.jpg',
+          fileSize: 2048,
+          type: 'image',
+        }],
+      });
+      (chatAttachmentStorageService.copyImageAssetToDraft as jest.Mock).mockImplementationOnce(
+        () => new Promise((resolve) => {
+          copyGate.resolve = resolve;
+        }),
+      );
+      const Harness = ({ ownerKey }: { ownerKey: string }) => {
+        const value = useChatImageAttachments({ enabled: true, ownerKey });
+        useEffect(() => {
+          latestHook = value;
+        }, [value]);
+        return null;
+      };
+
+      const { rerender } = render(<Harness ownerKey="thread-1|model-vision" />);
+
+      await waitFor(() => {
+        expect(copyGate.resolve).toBeDefined();
+      });
+
+      await act(async () => {
+        rerender(<Harness ownerKey="thread-2|model-vision" />);
+      });
+
+      await act(async () => {
+        copyGate.resolve?.(stalePendingDraft);
+        await Promise.resolve();
+      });
+
+      await waitFor(() => {
+        expect(latestHook?.drafts).toHaveLength(0);
+      });
+      expect(chatAttachmentStorageService.discardDrafts).toHaveBeenCalledWith([stalePendingDraft]);
+    } finally {
+      restorePlatform();
+    }
+  });
+
+  it('does not restart Android pending recovery after an owner change', async () => {
+    const restorePlatform = mockPlatformOS('android');
+    try {
+      const firstCopy = createDeferred<{
+        id: string;
+        pickerUri: string;
+        previewUri: string;
+        localUri: string;
+        copyStatus: 'copied';
+      }>();
+      const staleDraft = {
+        id: 'pending-draft-a',
+        pickerUri: 'ph://pending-library-image-a',
+        previewUri: 'test-dir/chat-attachments/pending-draft-a.jpg',
+        localUri: 'test-dir/chat-attachments/pending-draft-a.jpg',
+        copyStatus: 'copied' as const,
+      };
+
+      (ImagePicker.getPendingResultAsync as jest.Mock).mockResolvedValueOnce({
+        canceled: false,
+        assets: [{
+          uri: 'ph://pending-library-image-a',
+          width: 640,
+          height: 480,
+          mimeType: 'image/jpeg',
+          fileName: 'pending-a.jpg',
+          fileSize: 2048,
+          type: 'image',
+        }],
+      });
+      (chatAttachmentStorageService.copyImageAssetToDraft as jest.Mock).mockReturnValueOnce(firstCopy.promise);
+      const Harness = ({ ownerKey }: { ownerKey: string }) => {
+        const value = useChatImageAttachments({ enabled: true, ownerKey });
+        useEffect(() => {
+          latestHook = value;
+        }, [value]);
+        return null;
+      };
+
+      const { rerender } = render(<Harness ownerKey="thread-1|model-vision" />);
+
+      await waitFor(() => {
+        expect(chatAttachmentStorageService.copyImageAssetToDraft).toHaveBeenCalledWith(expect.objectContaining({
+          uri: 'ph://pending-library-image-a',
+        }));
+      });
+
+      await act(async () => {
+        rerender(<Harness ownerKey="thread-2|model-vision" />);
+      });
+
+      expect(ImagePicker.getPendingResultAsync).toHaveBeenCalledTimes(1);
+      expect(latestHook?.isPicking).toBe(false);
+
+      await act(async () => {
+        firstCopy.resolve(staleDraft);
+        await Promise.resolve();
+      });
+
+      await waitFor(() => {
+        expect(chatAttachmentStorageService.discardDrafts).toHaveBeenCalledWith([staleDraft]);
+      });
+      expect(chatAttachmentStorageService.copyImageAssetToDraft).toHaveBeenCalledTimes(1);
+    } finally {
+      restorePlatform();
+    }
   });
 
   it('ignores rapid duplicate attach calls before picking state renders', async () => {

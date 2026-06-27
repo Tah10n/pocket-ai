@@ -1,12 +1,24 @@
 import * as FileSystem from 'expo-file-system/legacy';
 import { SaveFormat, manipulateAsync } from 'expo-image-manipulator';
+import type { DocumentPickerAsset } from 'expo-document-picker';
 import type { ImagePickerAsset } from 'expo-image-picker';
 import {
   CHAT_IMAGE_ATTACHMENT_PATH_CATEGORY,
   type AttachmentDraft,
   type ChatImageAttachment,
 } from '@/types/multimodal';
+import type { ChatAttachment, ChatDocumentAttachmentDraft, ChatMediaAttachmentDraft } from '@/types/attachments';
 import type { ChatThread } from '@/types/chat';
+import {
+  MAX_CHAT_AUDIO_ATTACHMENT_BYTES,
+  MAX_CHAT_PDF_DOCUMENT_ATTACHMENT_BYTES,
+  MAX_CHAT_TEXT_DOCUMENT_ATTACHMENT_BYTES,
+  isSupportedChatDocumentDraftFormat,
+  resolveChatAttachmentExtension,
+  resolveChatAudioFormatFromMimeType,
+  resolveChatAudioFormatFromPath,
+  resolveChatProcessableDocumentMimeType,
+} from '@/utils/chatAttachments';
 import {
   CHAT_IMAGE_ATTACHMENT_THUMBNAIL_MAX_SIDE_PIXELS,
   getChatAttachmentsDir,
@@ -40,6 +52,11 @@ type CopyableImageAsset = Pick<
   'uri' | 'fileName' | 'fileSize' | 'mimeType' | 'width' | 'height' | 'type'
 >;
 
+type CopyableDocumentAsset = Pick<
+  DocumentPickerAsset,
+  'uri' | 'name' | 'size' | 'mimeType'
+>;
+
 export type MaterializeAttachmentDraftsOptions = {
   threadId: string;
   messageId: string;
@@ -62,6 +79,69 @@ function resolveSupportedExtension(asset: CopyableImageAsset): SupportedChatImag
     ?? resolveSupportedChatImageExtensionFromPath(asset.uri);
 }
 
+const TEXT_DOCUMENT_MIME_TYPE_EXTENSION = new Map([
+  ['application/json', 'json'],
+  ['application/pdf', 'pdf'],
+  ['text/csv', 'csv'],
+  ['text/markdown', 'md'],
+  ['text/plain', 'txt'],
+  ['text/tab-separated-values', 'tsv'],
+]);
+
+const AUDIO_MIME_TYPE_EXTENSION = new Map([
+  ['audio/mpeg', 'mp3'],
+  ['audio/mp3', 'mp3'],
+  ['audio/wav', 'wav'],
+  ['audio/wave', 'wav'],
+  ['audio/x-wav', 'wav'],
+]);
+
+function resolveDocumentCopyFormat(asset: CopyableDocumentAsset): { extension: string; mimeType: string } | null {
+  const mimeType = resolveChatProcessableDocumentMimeType({
+    mimeType: asset.mimeType,
+    fileName: asset.name,
+    localUri: asset.uri,
+  });
+  if (!mimeType) {
+    return null;
+  }
+
+  return {
+    mimeType,
+    extension: TEXT_DOCUMENT_MIME_TYPE_EXTENSION.get(mimeType)
+      ?? resolveChatAttachmentExtension(asset.name)
+      ?? 'txt',
+  };
+}
+
+function resolveDocumentMaxBytes(mimeType: string): number {
+  return mimeType === 'application/pdf'
+    ? MAX_CHAT_PDF_DOCUMENT_ATTACHMENT_BYTES
+    : MAX_CHAT_TEXT_DOCUMENT_ATTACHMENT_BYTES;
+}
+
+function resolveAudioCopyFormat(asset: CopyableDocumentAsset): { extension: string; mimeType: string; format: 'wav' | 'mp3' } | null {
+  const format = resolveChatAudioFormatFromMimeType(asset.mimeType)
+    ?? resolveChatAudioFormatFromPath(asset.name)
+    ?? resolveChatAudioFormatFromPath(asset.uri);
+  if (!format) {
+    return null;
+  }
+
+  const normalizedMimeType = asset.mimeType?.trim().toLowerCase();
+  return {
+    format,
+    mimeType: normalizedMimeType && AUDIO_MIME_TYPE_EXTENSION.has(normalizedMimeType)
+      ? normalizedMimeType
+      : format === 'mp3'
+        ? 'audio/mpeg'
+        : 'audio/wav',
+    extension: normalizedMimeType
+      ? AUDIO_MIME_TYPE_EXTENSION.get(normalizedMimeType) ?? format
+      : resolveChatAttachmentExtension(asset.name) ?? format,
+  };
+}
+
 export class ChatImageAttachmentTooLargeError extends Error {
   constructor() {
     super('Selected image exceeds chat attachment size limits.');
@@ -72,6 +152,58 @@ export class ChatImageAttachmentTooLargeError extends Error {
 
 export function isChatImageAttachmentTooLargeError(error: unknown): error is ChatImageAttachmentTooLargeError {
   return error instanceof ChatImageAttachmentTooLargeError;
+}
+
+export class ChatDocumentAttachmentTooLargeError extends Error {
+  constructor() {
+    super('Selected document exceeds chat attachment size limits.');
+    this.name = 'ChatDocumentAttachmentTooLargeError';
+    Object.setPrototypeOf(this, ChatDocumentAttachmentTooLargeError.prototype);
+  }
+}
+
+export function isChatDocumentAttachmentTooLargeError(error: unknown): error is ChatDocumentAttachmentTooLargeError {
+  return error instanceof ChatDocumentAttachmentTooLargeError;
+}
+
+export class ChatDocumentAttachmentUnsupportedTypeError extends Error {
+  constructor() {
+    super('Selected document format is unsupported.');
+    this.name = 'ChatDocumentAttachmentUnsupportedTypeError';
+    Object.setPrototypeOf(this, ChatDocumentAttachmentUnsupportedTypeError.prototype);
+  }
+}
+
+export function isChatDocumentAttachmentUnsupportedTypeError(
+  error: unknown,
+): error is ChatDocumentAttachmentUnsupportedTypeError {
+  return error instanceof ChatDocumentAttachmentUnsupportedTypeError;
+}
+
+export class ChatMediaAttachmentTooLargeError extends Error {
+  constructor(kind: 'audio') {
+    super(`Selected ${kind} exceeds chat attachment size limits.`);
+    this.name = 'ChatMediaAttachmentTooLargeError';
+    Object.setPrototypeOf(this, ChatMediaAttachmentTooLargeError.prototype);
+  }
+}
+
+export function isChatMediaAttachmentTooLargeError(error: unknown): error is ChatMediaAttachmentTooLargeError {
+  return error instanceof ChatMediaAttachmentTooLargeError;
+}
+
+export class ChatMediaAttachmentUnsupportedTypeError extends Error {
+  constructor(kind: 'audio') {
+    super(`Selected ${kind} format is unsupported.`);
+    this.name = 'ChatMediaAttachmentUnsupportedTypeError';
+    Object.setPrototypeOf(this, ChatMediaAttachmentUnsupportedTypeError.prototype);
+  }
+}
+
+export function isChatMediaAttachmentUnsupportedTypeError(
+  error: unknown,
+): error is ChatMediaAttachmentUnsupportedTypeError {
+  return error instanceof ChatMediaAttachmentUnsupportedTypeError;
 }
 
 function createDraftId(now: number, random: number): string {
@@ -219,9 +351,18 @@ export function collectReferencedChatAttachmentLocalUrisFromThreads(
           localUris.add(localUri);
         }
 
-        const thumbnailUri = normalizeChatAttachmentLocalUri(attachment.thumbnailUri);
+        const thumbnailUri = normalizeChatAttachmentLocalUri(
+          'thumbnailUri' in attachment ? attachment.thumbnailUri : undefined,
+        );
         if (thumbnailUri) {
           localUris.add(thumbnailUri);
+        }
+
+        if ('image' in attachment) {
+          const genericThumbnailUri = normalizeChatAttachmentLocalUri(attachment.image?.thumbnailUri);
+          if (genericThumbnailUri) {
+            localUris.add(genericThumbnailUri);
+          }
         }
       });
     });
@@ -253,9 +394,17 @@ export function collectChatAttachmentLocalUrisFromUnknownThreadRecord(value: unk
         localUris.add(localUri);
       }
 
-      const thumbnailUri = normalizeChatAttachmentLocalUri(attachment.thumbnailUri);
+      const thumbnailUri = normalizeChatAttachmentLocalUri(
+        'thumbnailUri' in attachment ? attachment.thumbnailUri : undefined,
+      );
       if (thumbnailUri) {
         localUris.add(thumbnailUri);
+      }
+
+      const image = isRecord(attachment.image) ? attachment.image : null;
+      const genericThumbnailUri = normalizeChatAttachmentLocalUri(image?.thumbnailUri);
+      if (genericThumbnailUri) {
+        localUris.add(genericThumbnailUri);
       }
     });
   });
@@ -379,6 +528,165 @@ export function buildFailedAttachmentDraft(
     copyStatus: 'failed',
     errorReason: reason,
   };
+}
+
+export function buildFailedDocumentAttachmentDraft(
+  asset: Pick<CopyableDocumentAsset, 'uri' | 'name' | 'mimeType' | 'size'>,
+  reason: NonNullable<ChatDocumentAttachmentDraft['errorReason']>,
+): ChatDocumentAttachmentDraft {
+  return {
+    pickerUri: asset.uri,
+    displayName: readNonEmptyString(asset.name) ?? undefined,
+    fileName: readNonEmptyString(asset.name) ?? undefined,
+    ...(asset.mimeType ? { mimeType: asset.mimeType } : null),
+    ...(normalizePositiveInteger(asset.size) ? { sizeBytes: normalizePositiveInteger(asset.size) } : null),
+    copyStatus: 'failed',
+    errorReason: reason,
+  };
+}
+
+export function buildFailedMediaAttachmentDraft(
+  kind: 'audio',
+  asset: Pick<CopyableDocumentAsset, 'uri' | 'name' | 'mimeType' | 'size'>,
+  reason: NonNullable<ChatMediaAttachmentDraft['errorReason']>,
+): ChatMediaAttachmentDraft {
+  const displayName = readNonEmptyString(asset.name);
+  const sizeBytes = normalizePositiveInteger(asset.size);
+
+  return {
+    kind,
+    pickerUri: asset.uri,
+    ...(displayName ? { displayName, fileName: displayName } : null),
+    ...(asset.mimeType ? { mimeType: asset.mimeType } : null),
+    ...(sizeBytes ? { sizeBytes } : null),
+    copyStatus: 'failed',
+    errorReason: reason,
+  };
+}
+
+export function materializeDocumentDraftsForProcessing({
+  threadId,
+  messageId,
+  drafts,
+  now = Date.now,
+}: {
+  threadId: string;
+  messageId: string;
+  drafts: readonly ChatDocumentAttachmentDraft[];
+  now?: () => number;
+}): Extract<ChatAttachment, { kind: 'document' }>[] {
+  const createdAt = now();
+
+  return drafts.map((draft, index) => {
+    const id = readNonEmptyString(draft.id);
+    const localUri = normalizeChatAttachmentLocalUri(draft.localUri);
+    const fileName = readNonEmptyString(draft.fileName);
+    const sizeBytes = normalizePositiveInteger(draft.sizeBytes);
+    const mimeType = resolveChatProcessableDocumentMimeType({
+      mimeType: draft.mimeType,
+      fileName: draft.fileName,
+      localUri: draft.localUri,
+    });
+
+    if (
+      draft.copyStatus !== 'copied'
+      || !id
+      || !localUri
+      || draft.pathCategory !== CHAT_IMAGE_ATTACHMENT_PATH_CATEGORY
+      || !fileName
+      || !sizeBytes
+      || !mimeType
+      || !isSupportedChatDocumentDraftFormat(draft)
+    ) {
+      throw new Error(`Document attachment draft at index ${index} is not ready to send.`);
+    }
+
+    return {
+      id,
+      kind: 'document',
+      state: 'processing',
+      threadId,
+      messageId,
+      localUri,
+      pathCategory: CHAT_IMAGE_ATTACHMENT_PATH_CATEGORY,
+      fileName,
+      mimeType,
+      sizeBytes,
+      source: 'document_picker',
+      createdAt: draft.createdAt ?? createdAt,
+      document: {
+        processorId: 'pending',
+        processorVersion: 1,
+      },
+    };
+  });
+}
+
+export function materializeMediaDraftsForMessage({
+  threadId,
+  messageId,
+  drafts,
+  now = Date.now,
+}: {
+  threadId: string;
+  messageId: string;
+  drafts: readonly ChatMediaAttachmentDraft[];
+  now?: () => number;
+}): ChatAttachment[] {
+  const createdAt = now();
+  const attachments: ChatAttachment[] = [];
+
+  drafts.forEach((draft, index) => {
+    const id = readNonEmptyString(draft.id);
+    const localUri = normalizeChatAttachmentLocalUri(draft.localUri);
+    const fileName = readNonEmptyString(draft.fileName);
+    const sizeBytes = normalizePositiveInteger(draft.sizeBytes);
+    const mimeType = readNonEmptyString(draft.mimeType);
+    if (
+      draft.copyStatus !== 'copied'
+      || !id
+      || !localUri
+      || draft.pathCategory !== CHAT_IMAGE_ATTACHMENT_PATH_CATEGORY
+      || !fileName
+      || !sizeBytes
+      || !mimeType
+    ) {
+      throw new Error(`Media attachment draft at index ${index} is not ready to send.`);
+    }
+
+    if (draft.kind === 'audio') {
+      const format = draft.audio?.format
+        ?? resolveChatAudioFormatFromMimeType(mimeType)
+        ?? resolveChatAudioFormatFromPath(fileName);
+      if (!format) {
+        throw new Error(`Audio attachment draft at index ${index} is not ready to send.`);
+      }
+
+      attachments.push({
+        id,
+        kind: 'audio',
+        state: 'ready',
+        threadId,
+        messageId,
+        localUri,
+        pathCategory: CHAT_IMAGE_ATTACHMENT_PATH_CATEGORY,
+        fileName,
+        mimeType,
+        sizeBytes,
+        source: 'document_picker',
+        createdAt: draft.createdAt ?? createdAt,
+        audio: {
+          format,
+          ...(normalizePositiveInteger(draft.audio?.durationMs) ? { durationMs: normalizePositiveInteger(draft.audio?.durationMs) } : null),
+        },
+      });
+      return;
+    }
+
+    throw new Error(`Media attachment draft at index ${index} is not ready to send.`);
+  });
+
+  return attachments;
 }
 
 export class ChatAttachmentStorageService {
@@ -599,8 +907,183 @@ export class ChatAttachmentStorageService {
       .map((uri) => FileSystem.deleteAsync(uri, { idempotent: true })));
   }
 
+  public async copyDocumentAssetToDraft(asset: CopyableDocumentAsset): Promise<ChatDocumentAttachmentDraft> {
+    const sourceUri = asset.uri.trim();
+    if (!sourceUri) {
+      throw new Error('Selected document URI is empty.');
+    }
+
+    const copyFormat = resolveDocumentCopyFormat(asset);
+    if (!copyFormat) {
+      throw new ChatDocumentAttachmentUnsupportedTypeError();
+    }
+
+    const assetSize = normalizePositiveInteger(asset.size);
+    const maxBytes = resolveDocumentMaxBytes(copyFormat.mimeType);
+    if (assetSize && assetSize > maxBytes) {
+      throw new ChatDocumentAttachmentTooLargeError();
+    }
+
+    const directory = await this.ensureBaseDirectory();
+    const draftId = createDraftId(this.now(), this.random());
+    const fileName = `${draftId}.${copyFormat.extension}`;
+    const localUri = `${directory}${fileName}`;
+
+    try {
+      await FileSystem.copyAsync({ from: sourceUri, to: localUri });
+    } catch (error) {
+      try {
+        await FileSystem.deleteAsync(localUri, { idempotent: true });
+      } catch (cleanupError) {
+        console.warn('[ChatAttachmentStorage] Failed to delete partial copied document attachment', {
+          pathCategory: CHAT_IMAGE_ATTACHMENT_PATH_CATEGORY,
+          context: 'partial_document_copy_cleanup',
+          ...getSanitizedErrorDetails(cleanupError),
+        });
+      }
+
+      throw error;
+    }
+
+    let copiedInfo: Awaited<ReturnType<typeof FileSystem.getInfoAsync>>;
+    try {
+      copiedInfo = await FileSystem.getInfoAsync(localUri);
+    } catch (error) {
+      await this.deleteLocalUriQuietly(localUri, 'unknown_size_document_copy_cleanup');
+      console.warn('[ChatAttachmentStorage] Failed to inspect copied document attachment', {
+        pathCategory: CHAT_IMAGE_ATTACHMENT_PATH_CATEGORY,
+        context: 'copied_document_file_size_inspection',
+        ...getSanitizedErrorDetails(error),
+      });
+      throw new Error('Copied chat document file size is unknown.');
+    }
+
+    const copiedSize = copiedInfo.exists ? normalizePositiveInteger(copiedInfo.size) : undefined;
+    if (!copiedSize) {
+      await this.deleteLocalUriQuietly(localUri, 'unknown_size_document_copy_cleanup');
+      throw new Error('Copied chat document file size is unknown.');
+    }
+
+    if (copiedSize > maxBytes) {
+      await this.deleteLocalUriQuietly(localUri, 'oversized_document_copy_cleanup');
+      throw new ChatDocumentAttachmentTooLargeError();
+    }
+
+    return {
+      id: draftId,
+      pickerUri: sourceUri,
+      localUri,
+      pathCategory: CHAT_IMAGE_ATTACHMENT_PATH_CATEGORY,
+      fileName,
+      displayName: readNonEmptyString(asset.name) ?? fileName,
+      mimeType: copyFormat.mimeType,
+      sizeBytes: copiedSize,
+      source: 'document_picker',
+      createdAt: this.now(),
+      copyStatus: 'copied',
+    };
+  }
+
+  public async copyAudioAssetToDraft(asset: CopyableDocumentAsset): Promise<ChatMediaAttachmentDraft> {
+    const sourceUri = asset.uri.trim();
+    if (!sourceUri) {
+      throw new Error('Selected audio URI is empty.');
+    }
+
+    const copyFormat = resolveAudioCopyFormat(asset);
+    if (!copyFormat) {
+      throw new ChatMediaAttachmentUnsupportedTypeError('audio');
+    }
+
+    const assetSize = normalizePositiveInteger(asset.size);
+    if (assetSize && assetSize > MAX_CHAT_AUDIO_ATTACHMENT_BYTES) {
+      throw new ChatMediaAttachmentTooLargeError('audio');
+    }
+
+    const directory = await this.ensureBaseDirectory();
+    const draftId = createDraftId(this.now(), this.random());
+    const fileName = `${draftId}.${copyFormat.extension}`;
+    const localUri = `${directory}${fileName}`;
+
+    try {
+      await FileSystem.copyAsync({ from: sourceUri, to: localUri });
+    } catch (error) {
+      await this.deleteLocalUriQuietly(localUri, 'partial_audio_copy_cleanup');
+      throw error;
+    }
+
+    let copiedInfo: Awaited<ReturnType<typeof FileSystem.getInfoAsync>>;
+    try {
+      copiedInfo = await FileSystem.getInfoAsync(localUri);
+    } catch (error) {
+      await this.deleteLocalUriQuietly(localUri, 'unknown_size_audio_copy_cleanup');
+      console.warn('[ChatAttachmentStorage] Failed to inspect copied audio attachment', {
+        pathCategory: CHAT_IMAGE_ATTACHMENT_PATH_CATEGORY,
+        context: 'copied_audio_file_size_inspection',
+        ...getSanitizedErrorDetails(error),
+      });
+      throw new Error('Copied chat audio file size is unknown.');
+    }
+
+    const copiedSize = copiedInfo.exists ? normalizePositiveInteger(copiedInfo.size) : undefined;
+    if (!copiedSize) {
+      await this.deleteLocalUriQuietly(localUri, 'unknown_size_audio_copy_cleanup');
+      throw new Error('Copied chat audio file size is unknown.');
+    }
+
+    if (copiedSize > MAX_CHAT_AUDIO_ATTACHMENT_BYTES) {
+      await this.deleteLocalUriQuietly(localUri, 'oversized_audio_copy_cleanup');
+      throw new ChatMediaAttachmentTooLargeError('audio');
+    }
+
+    return {
+      id: draftId,
+      kind: 'audio',
+      pickerUri: sourceUri,
+      localUri,
+      pathCategory: CHAT_IMAGE_ATTACHMENT_PATH_CATEGORY,
+      fileName,
+      displayName: readNonEmptyString(asset.name) ?? fileName,
+      mimeType: copyFormat.mimeType,
+      sizeBytes: copiedSize,
+      source: 'document_picker',
+      createdAt: this.now(),
+      copyStatus: 'copied',
+      audio: {
+        format: copyFormat.format,
+      },
+    };
+  }
+
   public async discardDrafts(drafts: readonly AttachmentDraft[]): Promise<void> {
     await Promise.all(drafts.map((draft) => this.discardDraft(draft)));
+  }
+
+  public async discardDocumentDraft(draft: ChatDocumentAttachmentDraft): Promise<void> {
+    const localUri = normalizeChatAttachmentLocalUri(draft.localUri);
+    if (draft.copyStatus !== 'copied' || !localUri) {
+      return;
+    }
+
+    await FileSystem.deleteAsync(localUri, { idempotent: true });
+  }
+
+  public async discardDocumentDrafts(drafts: readonly ChatDocumentAttachmentDraft[]): Promise<void> {
+    await Promise.all(drafts.map((draft) => this.discardDocumentDraft(draft)));
+  }
+
+  public async discardMediaDraft(draft: ChatMediaAttachmentDraft): Promise<void> {
+    const localUri = normalizeChatAttachmentLocalUri(draft.localUri);
+
+    if (draft.copyStatus !== 'copied' || !localUri) {
+      return;
+    }
+
+    await FileSystem.deleteAsync(localUri, { idempotent: true });
+  }
+
+  public async discardMediaDrafts(drafts: readonly ChatMediaAttachmentDraft[]): Promise<void> {
+    await Promise.all(drafts.map((draft) => this.discardMediaDraft(draft)));
   }
 
   public async deleteAllAttachmentFilesForPrivateStorageReset(): Promise<void> {

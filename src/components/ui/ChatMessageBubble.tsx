@@ -6,6 +6,7 @@ import { Box } from '@/components/ui/box';
 import { Image } from '@/components/ui/image';
 import { Pressable } from '@/components/ui/pressable';
 import { Text } from '@/components/ui/text';
+import type { ChatAttachment } from '@/types/attachments';
 import type { ChatImageAttachment } from '@/types/multimodal';
 import { MaterialSymbols } from './MaterialSymbols';
 import { ScreenBadge, ScreenIconButton, ScreenIconTile, ScreenSurface, useScreenAppearance } from './ScreenShell';
@@ -19,7 +20,7 @@ export interface ChatMessageBubbleProps {
   id: string;
   isUser: boolean;
   content: string;
-  attachments?: ChatImageAttachment[];
+  attachments?: (ChatImageAttachment | ChatAttachment)[];
   thoughtContent?: string;
   errorMessage?: string;
   isStreaming?: boolean;
@@ -32,8 +33,8 @@ export interface ChatMessageBubbleProps {
 }
 
 function areChatImageAttachmentPropsEqual(
-  prev: ChatImageAttachment[] | undefined,
-  next: ChatImageAttachment[] | undefined,
+  prev: (ChatImageAttachment | ChatAttachment)[] | undefined,
+  next: (ChatImageAttachment | ChatAttachment)[] | undefined,
 ) {
   if (prev === next) {
     return true;
@@ -47,22 +48,69 @@ function areChatImageAttachmentPropsEqual(
     const nextAttachment = next[index];
     return (
       attachment.id === nextAttachment.id
+      && ('kind' in attachment ? attachment.kind : 'image') === ('kind' in nextAttachment ? nextAttachment.kind : 'image')
       && attachment.localUri === nextAttachment.localUri
-      && attachment.thumbnailUri === nextAttachment.thumbnailUri
+      && getAttachmentPreferredPreviewUri(attachment) === getAttachmentPreferredPreviewUri(nextAttachment)
       && attachment.fileName === nextAttachment.fileName
     );
   });
 }
 
-function getAttachmentPreferredPreviewUri(attachment: ChatImageAttachment): string {
+function isImageMessageAttachment(
+  attachment: ChatImageAttachment | ChatAttachment,
+): boolean {
+  return !('kind' in attachment) || attachment.kind === 'image';
+}
+
+function getAttachmentPreferredPreviewUri(attachment: ChatImageAttachment | ChatAttachment): string {
+  if ('kind' in attachment) {
+    return attachment.kind === 'image'
+      ? attachment.image?.thumbnailUri ?? attachment.localUri
+      : attachment.localUri;
+  }
+
   return attachment.thumbnailUri ?? attachment.localUri;
 }
 
-function getAttachmentPreviewUriCandidates(attachment: Pick<ChatImageAttachment, 'localUri' | 'thumbnailUri'>): string[] {
+function getAttachmentPreviewUriCandidates(attachment: ChatImageAttachment | ChatAttachment): string[] {
+  const previewUri = 'kind' in attachment && attachment.kind !== 'image'
+    ? undefined
+    : 'kind' in attachment
+      ? attachment.image?.thumbnailUri
+      : attachment.thumbnailUri;
+
   return Array.from(new Set([
-    attachment.thumbnailUri,
+    previewUri,
     attachment.localUri,
   ].filter((uri): uri is string => typeof uri === 'string' && uri.length > 0)));
+}
+
+function getAttachmentIconName(attachment: ChatAttachment): React.ComponentProps<typeof MaterialSymbols>['name'] {
+  switch (attachment.kind) {
+    case 'audio':
+      return 'graphic-eq';
+    case 'document':
+      return 'description';
+    case 'video':
+      return 'movie';
+    case 'image':
+    default:
+      return 'image';
+  }
+}
+
+function getAttachmentLabel(attachment: ChatAttachment): string {
+  switch (attachment.kind) {
+    case 'audio':
+      return 'Audio';
+    case 'document':
+      return 'Document';
+    case 'video':
+      return 'Video';
+    case 'image':
+    default:
+      return 'Image';
+  }
 }
 
 function areAttachmentPreviewUriMapsEqual(
@@ -266,7 +314,7 @@ const ChatMessageBubbleComponent = ({
 
   }, [userAttachments]);
 
-  const handleAttachmentPreviewError = (attachment: ChatImageAttachment, attemptedUri: string) => {
+  const handleAttachmentPreviewError = (attachment: ChatImageAttachment | ChatAttachment, attemptedUri: string) => {
     failedAttachmentPreviewUrisRef.current[attachment.id] ??= new Set<string>();
     failedAttachmentPreviewUrisRef.current[attachment.id].add(attemptedUri);
 
@@ -370,6 +418,39 @@ const ChatMessageBubbleComponent = ({
                   className={`${content ? 'mb-2 ' : ''}flex-row flex-wrap gap-1.5`}
                 >
                   {userAttachments.map((attachment, index) => {
+                    const attachmentLabelOptions = {
+                      index: index + 1,
+                      count: userAttachments.length,
+                    };
+                    if (!isImageMessageAttachment(attachment) && 'kind' in attachment) {
+                      return (
+                        <ScreenSurface
+                          key={attachment.id}
+                          testID={`message-attachment-${attachment.kind}-${id}-${attachment.id}`}
+                          tone="default"
+                          decorative="matte"
+                          accessible
+                          accessibilityRole="summary"
+                          accessibilityLabel={t('chat.attachments.messageFileIndexedAccessibilityLabel', {
+                            ...attachmentLabelOptions,
+                            kind: getAttachmentLabel(attachment),
+                            name: attachment.fileName,
+                          })}
+                          className="w-44 flex-row items-center gap-2 px-2.5 py-2"
+                        >
+                          <ScreenIconTile iconName={getAttachmentIconName(attachment)} tone="neutral" size="sm" iconSize="sm" className="h-8 w-8" />
+                          <Box className="min-w-0 flex-1">
+                            <Text numberOfLines={1} className="text-xs font-semibold text-typography-800 dark:text-typography-100">
+                              {attachment.fileName}
+                            </Text>
+                            <Text numberOfLines={1} className="mt-0.5 text-xs leading-4 text-typography-500 dark:text-typography-300">
+                              {getAttachmentLabel(attachment)}
+                            </Text>
+                          </Box>
+                        </ScreenSurface>
+                      );
+                    }
+
                     const resolvedPreviewUri = attachmentPreviewUris[attachment.id];
                     const previewUri = resolvedPreviewUri ?? getAttachmentPreferredPreviewUri(attachment);
                     return resolvedPreviewUri !== null ? (
@@ -378,10 +459,7 @@ const ChatMessageBubbleComponent = ({
                         testID={`message-attachment-image-${id}-${attachment.id}`}
                         source={{ uri: previewUri }}
                         onError={() => handleAttachmentPreviewError(attachment, previewUri)}
-                        accessibilityLabel={t('chat.attachments.messagePreviewIndexedAccessibilityLabel', {
-                          index: index + 1,
-                          count: userAttachments.length,
-                        })}
+                        accessibilityLabel={t('chat.attachments.messagePreviewIndexedAccessibilityLabel', attachmentLabelOptions)}
                         resizeMode="cover"
                         className="h-[72px] w-[72px] rounded-lg"
                       />
@@ -393,10 +471,7 @@ const ChatMessageBubbleComponent = ({
                         decorative="matte"
                         accessible
                         accessibilityRole="image"
-                        accessibilityLabel={t('chat.attachments.messageUnavailableIndexedAccessibilityLabel', {
-                          index: index + 1,
-                          count: userAttachments.length,
-                        })}
+                        accessibilityLabel={t('chat.attachments.messageUnavailableIndexedAccessibilityLabel', attachmentLabelOptions)}
                         accessibilityState={{ disabled: true }}
                         className="w-36 flex-row items-center gap-1.5 px-2 py-1.5"
                       >

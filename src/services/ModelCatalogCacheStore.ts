@@ -1,4 +1,11 @@
-import { LifecycleStatus, ModelAccessState, type ModelMetadata, type ModelVariant } from '../types/models';
+import {
+  LifecycleStatus,
+  ModelAccessState,
+  type ModelArtifactMetadata,
+  type ModelArtifactRequiredInput,
+  type ModelMetadata,
+  type ModelVariant,
+} from '../types/models';
 import type { ProjectorArtifact, ProjectorMatchStatus, VisionCapabilitySource } from '../types/multimodal';
 import { CATALOG_SEARCH_VARIANT_LIMIT, limitModelVariants } from './ModelCatalogFileSelector';
 import { normalizePersistedModelMetadata } from './ModelMetadataNormalizer';
@@ -59,6 +66,7 @@ const MAX_PERSISTED_SEARCH_ENTRIES = 6;
 const MAX_PERSISTED_SNAPSHOT_ENTRIES = 40;
 const PERSISTED_CACHE_KEYS = [SEARCH_CACHE_KEY, SNAPSHOT_CACHE_KEY] as const;
 const CATALOG_SAFE_VISION_SOURCES = new Set<VisionCapabilitySource>(['catalog_metadata', 'tree_probe']);
+const CATALOG_SAFE_ARTIFACT_REQUIRED_INPUTS = new Set<ModelArtifactRequiredInput>(['text', 'image', 'audio']);
 
 type CatalogVisionRuntimeSource = Pick<ModelMetadata | ModelVariant, 'visionSource'> & Partial<Pick<
   ModelMetadata | ModelVariant,
@@ -97,6 +105,92 @@ function sanitizeCatalogProjectorMatchReason(projector: ProjectorArtifact): stri
 
 function modelHasCatalogSafeVisionSource(model: Pick<ModelMetadata, 'visionSource'>): boolean {
   return Boolean(model.visionSource && CATALOG_SAFE_VISION_SOURCES.has(model.visionSource));
+}
+
+function getRemoteFileNameFromDownloadUrl(downloadUrl: string): string | undefined {
+  try {
+    const url = new URL(downloadUrl);
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') {
+      return undefined;
+    }
+
+    const encodedName = url.pathname.split('/').filter(Boolean).pop();
+    if (!encodedName) {
+      return undefined;
+    }
+
+    const decodedName = decodeURIComponent(encodedName).trim();
+    return decodedName.length > 0 ? decodedName : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeArtifactRequiredFor(requiredFor: ModelArtifactMetadata['requiredFor']): ModelArtifactRequiredInput[] {
+  return [...new Set(requiredFor.filter((entry): entry is ModelArtifactRequiredInput => (
+    CATALOG_SAFE_ARTIFACT_REQUIRED_INPUTS.has(entry)
+  )))];
+}
+
+function sanitizeCatalogArtifactRemoteFileName(
+  artifact: ModelArtifactMetadata,
+  model: Pick<ModelMetadata, 'resolvedFileName' | 'projectorCandidates'>,
+): string | undefined {
+  if (artifact.kind === 'main_model') {
+    return model.resolvedFileName ?? getRemoteFileNameFromDownloadUrl(artifact.downloadUrl);
+  }
+
+  return model.projectorCandidates?.find((projector) => (
+    projector.id === artifact.id
+    || projector.downloadUrl === artifact.downloadUrl
+    || projector.fileName === artifact.remoteFileName
+  ))?.fileName ?? getRemoteFileNameFromDownloadUrl(artifact.downloadUrl);
+}
+
+function sanitizeCatalogModelArtifacts(
+  model: Pick<ModelMetadata, 'artifacts' | 'metadataTrust' | 'projectorCandidates' | 'resolvedFileName' | 'visionSource'>,
+): ModelMetadata['artifacts'] {
+  if (!model.artifacts?.length) {
+    return undefined;
+  }
+
+  const hasCatalogSafeVisionSource = modelHasCatalogSafeVisionSource(model);
+  const artifacts = model.artifacts.flatMap((artifact): ModelArtifactMetadata[] => {
+    if (artifact.kind === 'multimodal_projector' && !hasCatalogSafeVisionSource) {
+      return [];
+    }
+
+    const remoteFileName = sanitizeCatalogArtifactRemoteFileName(artifact, model);
+    const requiredFor = normalizeArtifactRequiredFor(artifact.requiredFor);
+    if (!remoteFileName || !getRemoteFileNameFromDownloadUrl(artifact.downloadUrl) || requiredFor.length === 0) {
+      return [];
+    }
+
+    return [{
+      id: artifact.id,
+      kind: artifact.kind,
+      requiredFor,
+      ...(artifact.hfRevision ? { hfRevision: artifact.hfRevision } : {}),
+      remoteFileName,
+      downloadUrl: artifact.downloadUrl,
+      sizeBytes: artifact.sizeBytes,
+      ...(artifact.kind !== 'main_model' || model.metadataTrust !== 'verified_local'
+        ? { ...(artifact.sha256 ? { sha256: artifact.sha256 } : {}) }
+        : {}),
+      installState: 'remote',
+    }];
+  });
+
+  return artifacts.length > 0 ? artifacts : undefined;
+}
+
+function hasAnonymousArtifactRuntimeFields(model: ModelMetadata): boolean {
+  if (!model.artifacts?.length) {
+    return false;
+  }
+
+  const sanitizedArtifacts = sanitizeCatalogModelArtifacts(model);
+  return JSON.stringify(model.artifacts) !== JSON.stringify(sanitizedArtifacts ?? []);
 }
 
 function hasProjectorRuntimeFields(projectors: ModelMetadata['projectorCandidates']): boolean {
@@ -175,6 +269,7 @@ export function sanitizeCatalogModelRuntimeState(model: ModelMetadata): ModelMet
       sha256: undefined,
       capabilitySnapshot: undefined,
     } : {}),
+    artifacts: sanitizeCatalogModelArtifacts(model),
     chatModalities,
     visionSource: hasCatalogSafeVisionSource ? model.visionSource : undefined,
     visionConfidence: hasCatalogSafeVisionSource ? model.visionConfidence : undefined,
@@ -271,6 +366,7 @@ function hasAnonymousRuntimeFields(model: ModelMetadata): boolean {
     || model.metadataTrust === 'verified_local'
     || (model.variants?.some(hasAnonymousVariantRuntimeFields) ?? false)
     || hasUnsafeAnonymousVisionProvenance(model)
+    || hasAnonymousArtifactRuntimeFields(model)
     || typeof model.selectedProjectorId === 'string'
     || model.multimodalReadiness !== undefined
     || hasProjectorRuntimeFields(model.projectorCandidates);

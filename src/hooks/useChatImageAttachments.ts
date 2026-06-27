@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Alert } from 'react-native';
+import { Alert, Platform } from 'react-native';
 import { useTranslation } from 'react-i18next';
 import * as ImagePicker from 'expo-image-picker';
+import type { ImagePickerAsset, ImagePickerErrorResult, ImagePickerResult } from 'expo-image-picker';
 import type { AttachmentDraft } from '@/types/multimodal';
 import {
   MAX_CHAT_IMAGE_ATTACHMENTS,
@@ -21,6 +22,8 @@ export type UseChatImageAttachmentsOptions = {
   ownerKey?: string | null;
   preserveFailedDraftsOnNewThreadCommit?: boolean;
 };
+
+export const PENDING_IMAGE_PICKER_RECOVERY_TIMEOUT_MS = 3_000;
 
 export type RestoreDraftsForRetryOptions = {
   preserveOwnerKey?: string | null;
@@ -148,6 +151,26 @@ function isImagePickerPermissionDeniedError(error: unknown): boolean {
   ));
 }
 
+function isImagePickerErrorResult(value: unknown): value is ImagePickerErrorResult {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const record = value as Record<string, unknown>;
+  return typeof record.code === 'string'
+    && typeof record.message === 'string'
+    && !Object.prototype.hasOwnProperty.call(record, 'canceled');
+}
+
+function isSuccessfulImagePickerResult(
+  result: ImagePickerResult | ImagePickerErrorResult | null | undefined,
+): result is Extract<ImagePickerResult, { canceled: false }> {
+  return Boolean(result)
+    && !isImagePickerErrorResult(result)
+    && result?.canceled === false
+    && Array.isArray(result.assets);
+}
+
 export function useChatImageAttachments({
   enabled,
   disabledReason,
@@ -170,11 +193,13 @@ export function useChatImageAttachments({
   const ownedDraftsRef = useRef<AttachmentDraft[]>(draftState.drafts);
   const mountedRef = useRef(true);
   const pickingLockRef = useRef(false);
+  const pickingOperationIdRef = useRef(0);
   const enabledRef = useRef(enabled);
   const ownerKeyRef = useRef(normalizedOwnerKey);
   const ownerGenerationRef = useRef(0);
   const retryDraftKeysForNewThreadCommitRef = useRef<Set<string>>(new Set());
   const retryDraftOwnerKeyForNewThreadCommitRef = useRef<string | null>(null);
+  const pendingRecoveryAttemptedRef = useRef(false);
 
   const drafts = enabled && draftState.ownerKey === normalizedOwnerKey
     ? draftState.drafts
@@ -222,6 +247,108 @@ export function useChatImageAttachments({
     discardDraftsQuietly(releaseOwnedDrafts(draftsToDiscard), context);
   }, [releaseOwnedDrafts]);
 
+  const beginPickingOperation = useCallback((): number => {
+    const operationId = pickingOperationIdRef.current + 1;
+    pickingOperationIdRef.current = operationId;
+    pickingLockRef.current = true;
+    setIsPicking(true);
+    return operationId;
+  }, []);
+
+  const finishPickingOperation = useCallback((operationId: number) => {
+    if (pickingOperationIdRef.current !== operationId) {
+      return;
+    }
+
+    pickingLockRef.current = false;
+    if (mountedRef.current) {
+      setIsPicking(false);
+    }
+  }, []);
+
+  const appendPickedImageAssets = useCallback(async ({
+    assets,
+    isCurrentFlow,
+    staleContext,
+  }: {
+    assets: readonly ImagePickerAsset[];
+    isCurrentFlow: () => boolean;
+    staleContext: string;
+  }): Promise<void> => {
+    const pickerRemainingSlots = Math.max(0, MAX_CHAT_IMAGE_ATTACHMENTS - draftsRef.current.length);
+    if (pickerRemainingSlots < 1) {
+      showAttachmentAlert('chat.attachments.limitReached');
+      return;
+    }
+
+    const selectedAssets = assets.slice(0, pickerRemainingSlots);
+    if (selectedAssets.length === 0) {
+      return;
+    }
+
+    const nextDrafts: AttachmentDraft[] = [];
+    for (const asset of selectedAssets) {
+      if (!isCurrentFlow()) {
+        discardDraftsQuietly(nextDrafts, staleContext);
+        return;
+      }
+
+      let nextDraft: AttachmentDraft;
+      try {
+        nextDraft = await chatAttachmentStorageService.copyImageAssetToDraft(asset);
+      } catch (error) {
+        const isTooLarge = isChatImageAttachmentTooLargeError(error);
+        const logMessage = isTooLarge
+          ? '[useChatImageAttachments] Rejected selected image attachment'
+          : '[useChatImageAttachments] Failed to copy selected image';
+        console.warn(logMessage, {
+          context: 'copy_selected_image',
+          reason: isTooLarge ? 'too_large' : 'copy_failed',
+          ...getSanitizedErrorDetails(error),
+        });
+        nextDraft = buildFailedAttachmentDraft(asset, isTooLarge ? 'too_large' : 'copy_failed');
+      }
+
+      if (!isCurrentFlow()) {
+        discardDraftsQuietly([...nextDrafts, nextDraft], staleContext);
+        return;
+      }
+
+      nextDrafts.push(nextDraft);
+    }
+
+    if (!isCurrentFlow()) {
+      discardDraftsQuietly(nextDrafts, staleContext);
+      return;
+    }
+
+    const availableSlots = Math.max(0, MAX_CHAT_IMAGE_ATTACHMENTS - draftsRef.current.length);
+    const draftsToAppend = nextDrafts.slice(0, availableSlots);
+    const draftsToDiscard = nextDrafts.slice(availableSlots);
+
+    if (draftsToAppend.length === 0) {
+      discardDraftsQuietly(nextDrafts, 'overflow picked drafts');
+      return;
+    }
+
+    draftsRef.current = [
+      ...draftsRef.current,
+      ...draftsToAppend,
+    ];
+    ownedDraftsRef.current = draftsRef.current;
+    setDraftState({
+      drafts: draftsRef.current,
+      ownerKey: ownerKeyRef.current,
+    });
+    discardDraftsQuietly(draftsToDiscard, 'overflow picked drafts');
+
+    if (draftsToAppend.some((draft) => draft.copyStatus === 'failed' && draft.errorReason === 'too_large')) {
+      showAttachmentAlert('chat.attachments.tooLarge');
+    } else if (draftsToAppend.some((draft) => draft.copyStatus === 'failed')) {
+      showAttachmentAlert('chat.attachments.copyFailed');
+    }
+  }, [showAttachmentAlert]);
+
   const attachImages = useCallback(async () => {
     if (!mountedRef.current || pickingLockRef.current) {
       return;
@@ -246,19 +373,12 @@ export function useChatImageAttachments({
       && ownerGenerationRef.current === ownerGenerationAtPickStart
     );
 
-    pickingLockRef.current = true;
-    setIsPicking(true);
+    const pickingOperationId = beginPickingOperation();
     try {
-      const pickerRemainingSlots = Math.max(0, MAX_CHAT_IMAGE_ATTACHMENTS - draftsRef.current.length);
-      if (pickerRemainingSlots < 1) {
-        showAttachmentAlert('chat.attachments.limitReached');
-        return;
-      }
-
       const result = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: ['images'],
         allowsMultipleSelection: true,
-        selectionLimit: pickerRemainingSlots,
+        selectionLimit: Math.max(0, MAX_CHAT_IMAGE_ATTACHMENTS - draftsRef.current.length),
         orderedSelection: true,
         legacy: false,
         base64: false,
@@ -274,68 +394,11 @@ export function useChatImageAttachments({
         return;
       }
 
-      const selectedAssets = result.assets.slice(0, pickerRemainingSlots);
-      const nextDrafts: AttachmentDraft[] = [];
-      for (const asset of selectedAssets) {
-        if (!isCurrentFlow()) {
-          discardDraftsQuietly(nextDrafts, 'stale picked drafts');
-          return;
-        }
-
-        let nextDraft: AttachmentDraft;
-        try {
-          nextDraft = await chatAttachmentStorageService.copyImageAssetToDraft(asset);
-        } catch (error) {
-          const isTooLarge = isChatImageAttachmentTooLargeError(error);
-          const logMessage = isTooLarge
-            ? '[useChatImageAttachments] Rejected selected image attachment'
-            : '[useChatImageAttachments] Failed to copy selected image';
-          console.warn(logMessage, {
-            context: 'copy_selected_image',
-            reason: isTooLarge ? 'too_large' : 'copy_failed',
-            ...getSanitizedErrorDetails(error),
-          });
-          nextDraft = buildFailedAttachmentDraft(asset, isTooLarge ? 'too_large' : 'copy_failed');
-        }
-
-        if (!isCurrentFlow()) {
-          discardDraftsQuietly([...nextDrafts, nextDraft], 'stale picked drafts');
-          return;
-        }
-
-        nextDrafts.push(nextDraft);
-      }
-
-      if (!isCurrentFlow()) {
-        discardDraftsQuietly(nextDrafts, 'stale picked drafts');
-        return;
-      }
-
-      const availableSlots = Math.max(0, MAX_CHAT_IMAGE_ATTACHMENTS - draftsRef.current.length);
-      const draftsToAppend = nextDrafts.slice(0, availableSlots);
-      const draftsToDiscard = nextDrafts.slice(availableSlots);
-
-      if (draftsToAppend.length === 0) {
-        discardDraftsQuietly(nextDrafts, 'overflow picked drafts');
-        return;
-      }
-
-      draftsRef.current = [
-        ...draftsRef.current,
-        ...draftsToAppend,
-      ];
-      ownedDraftsRef.current = draftsRef.current;
-      setDraftState({
-        drafts: draftsRef.current,
-        ownerKey: ownerKeyRef.current,
+      await appendPickedImageAssets({
+        assets: result.assets,
+        isCurrentFlow,
+        staleContext: 'stale picked drafts',
       });
-      discardDraftsQuietly(draftsToDiscard, 'overflow picked drafts');
-
-      if (draftsToAppend.some((draft) => draft.copyStatus === 'failed' && draft.errorReason === 'too_large')) {
-        showAttachmentAlert('chat.attachments.tooLarge');
-      } else if (draftsToAppend.some((draft) => draft.copyStatus === 'failed')) {
-        showAttachmentAlert('chat.attachments.copyFailed');
-      }
     } catch (error) {
       console.warn('[useChatImageAttachments] Failed to open image picker', {
         context: 'open_image_picker',
@@ -349,14 +412,14 @@ export function useChatImageAttachments({
         );
       }
     } finally {
-      pickingLockRef.current = false;
-      if (mountedRef.current) {
-        setIsPicking(false);
-      }
+      finishPickingOperation(pickingOperationId);
     }
   }, [
+    appendPickedImageAssets,
+    beginPickingOperation,
     disabledReason,
     enabled,
+    finishPickingOperation,
     showAttachmentAlert,
   ]);
 
@@ -553,6 +616,88 @@ export function useChatImageAttachments({
   useEffect(() => {
     draftsRef.current = drafts;
   }, [drafts]);
+
+  useEffect(() => {
+    if (!enabled || Platform.OS !== 'android') {
+      return;
+    }
+
+    if (
+      pendingRecoveryAttemptedRef.current
+      || typeof ImagePicker.getPendingResultAsync !== 'function'
+    ) {
+      return;
+    }
+
+    pendingRecoveryAttemptedRef.current = true;
+    const ownerKeyAtRecoveryStart = ownerKeyRef.current;
+    const ownerGenerationAtRecoveryStart = ownerGenerationRef.current;
+    const isCurrentFlow = () => (
+      mountedRef.current
+      && ownerKeyRef.current === ownerKeyAtRecoveryStart
+      && ownerGenerationRef.current === ownerGenerationAtRecoveryStart
+    );
+
+    let didRecoveryTimeout = false;
+    const isCurrentRecoveryFlow = () => !didRecoveryTimeout && !pickingLockRef.current && isCurrentFlow();
+    const timeoutId = setTimeout(() => {
+      didRecoveryTimeout = true;
+      console.warn('[useChatImageAttachments] Timed out recovering pending image picker result', {
+        context: 'recover_pending_image_picker_result',
+        timeoutMs: PENDING_IMAGE_PICKER_RECOVERY_TIMEOUT_MS,
+      });
+    }, PENDING_IMAGE_PICKER_RECOVERY_TIMEOUT_MS);
+
+    void (async () => {
+      try {
+        const pendingResult = await ImagePicker.getPendingResultAsync();
+        if (!isCurrentRecoveryFlow() || !pendingResult) {
+          return;
+        }
+
+        if (isImagePickerErrorResult(pendingResult)) {
+          console.warn('[useChatImageAttachments] Failed to recover pending image picker result', {
+            context: 'recover_pending_image_picker_result',
+            errorCode: pendingResult.code,
+          });
+          showAttachmentAlert('chat.attachments.pickerFailed');
+          return;
+        }
+
+        if (!isSuccessfulImagePickerResult(pendingResult) || pendingResult.assets.length === 0) {
+          return;
+        }
+
+        await appendPickedImageAssets({
+          assets: pendingResult.assets,
+          isCurrentFlow: isCurrentRecoveryFlow,
+          staleContext: 'stale pending picked drafts',
+        });
+      } catch (error) {
+        if (!didRecoveryTimeout) {
+          console.warn('[useChatImageAttachments] Failed to recover pending image picker result', {
+            context: 'recover_pending_image_picker_result',
+            ...getSanitizedErrorDetails(error),
+          });
+        }
+        if (isCurrentRecoveryFlow()) {
+          showAttachmentAlert('chat.attachments.pickerFailed');
+        }
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    })();
+
+    return () => {
+      didRecoveryTimeout = true;
+      clearTimeout(timeoutId);
+    };
+  }, [
+    appendPickedImageAssets,
+    enabled,
+    normalizedOwnerKey,
+    showAttachmentAlert,
+  ]);
 
   useEffect(() => {
     if (draftState.drafts.length === 0) {

@@ -16,8 +16,10 @@ import {
   writeChatThreadRecord,
 } from '../../src/store/chatPersistence';
 import { storage } from '../../src/store/storage';
+import type { ChatAttachment } from '../../src/types/attachments';
 import type { ChatThread } from '../../src/types/chat';
 import {
+  MAX_CHAT_IMAGE_ATTACHMENTS,
   MAX_CHAT_IMAGE_ATTACHMENT_BYTES,
   MAX_CHAT_IMAGE_ATTACHMENT_SIDE_PIXELS,
 } from '../../src/utils/chatImageAttachments';
@@ -25,6 +27,8 @@ import {
   copiedImageAttachment,
   secondCopiedImageAttachment,
 } from '../fixtures/chatImageAttachmentFixtures';
+
+const LEGACY_MAX_CHAT_VIDEO_DERIVED_FRAME_ATTACHMENTS = 8;
 
 function buildThread(id: string): ChatThread {
   return {
@@ -316,6 +320,198 @@ describe('chatPersistence', () => {
         ],
       }),
     );
+  });
+
+  it('normalizes generic images while preserving processable non-image attachments', () => {
+    const thread: ChatThread = {
+      ...buildThread('thread-generic-attachment-migration'),
+      messages: [
+        {
+          id: 'user-generic-attachments',
+          role: 'user',
+          content: 'Generic image prompt',
+          createdAt: 1,
+          state: 'complete',
+          attachments: [
+            {
+              id: 'generic-image-1',
+              kind: 'image',
+              state: 'ready',
+              threadId: 'spoofed-thread',
+              messageId: 'spoofed-message',
+              localUri: 'test-dir/chat-attachments/thread-generic-attachment-migration/generic-image-1.png',
+              pathCategory: 'chat_attachment',
+              fileName: 'generic-image-1.png',
+              mimeType: 'image/png',
+              sizeBytes: 123_456,
+              source: 'photo_library',
+              createdAt: 10,
+              image: {
+                width: 640,
+                height: 480,
+              },
+            },
+            {
+              id: 'generic-document-1',
+              kind: 'document',
+              state: 'ready',
+              threadId: 'thread-generic-attachment-migration',
+              messageId: 'user-generic-attachments',
+              localUri: 'test-dir/chat-attachments/thread-generic-attachment-migration/generic-document-1.pdf',
+              pathCategory: 'chat_attachment',
+              fileName: 'generic-document-1.pdf',
+              mimeType: 'application/pdf',
+              sizeBytes: 456_789,
+              source: 'document_picker',
+              createdAt: 10,
+              document: {
+                processorId: 'pdf-text-v1',
+                processorVersion: 1,
+              },
+            },
+          ] as never,
+        },
+      ],
+      status: 'idle',
+    };
+
+    const sanitizedMessage = sanitizeChatThreadForPersistence(thread).messages[0];
+    expect(sanitizedMessage.attachments).toEqual([
+      expect.objectContaining({
+        id: 'generic-image-1',
+        threadId: thread.id,
+        messageId: 'user-generic-attachments',
+        localUri: 'test-dir/chat-attachments/thread-generic-attachment-migration/generic-image-1.png',
+        mediaType: 'image/png',
+        fileName: 'generic-image-1.png',
+        size: 123_456,
+        width: 640,
+        height: 480,
+        source: 'photo_library',
+      }),
+      expect.objectContaining({
+        id: 'generic-document-1',
+        kind: 'document',
+        state: 'ready',
+        threadId: thread.id,
+        messageId: 'user-generic-attachments',
+        localUri: 'test-dir/chat-attachments/thread-generic-attachment-migration/generic-document-1.pdf',
+        fileName: 'generic-document-1.pdf',
+        mimeType: 'application/pdf',
+        sizeBytes: 456_789,
+        source: 'document_picker',
+        document: expect.objectContaining({
+          processorId: 'pdf-text-v1',
+          processorVersion: 1,
+        }),
+      }),
+    ]);
+    expect(sanitizedMessage.attachments?.[0]).not.toHaveProperty('kind');
+    expect(sanitizedMessage.attachments?.[0]).not.toHaveProperty('state');
+    expect(sanitizedMessage.attachments?.[0]).not.toHaveProperty('sizeBytes');
+  });
+
+  it('persists video-derived frame images without consuming the normal image attachment limit', () => {
+    const threadId = 'thread-video-frames';
+    const messageId = 'user-video-frames';
+    const videoId = 'video-attachment-1';
+    const derivedFrameIds = Array.from({ length: LEGACY_MAX_CHAT_VIDEO_DERIVED_FRAME_ATTACHMENTS }, (_, index) => (
+      `video-attachment-1-frame-${index + 1}`
+    ));
+    const videoAttachment: ChatAttachment = {
+      id: videoId,
+      kind: 'video',
+      state: 'ready',
+      threadId: 'stale-thread',
+      messageId: 'stale-message',
+      localUri: `test-dir/chat-attachments/${threadId}/video-attachment-1.mp4`,
+      pathCategory: 'chat_attachment',
+      fileName: 'video-attachment-1.mp4',
+      mimeType: 'video/mp4',
+      sizeBytes: 1_234_567,
+      source: 'photo_library',
+      createdAt: 10,
+      video: {
+        durationMs: 42_000,
+        width: 1280,
+        height: 720,
+        derivedAttachmentIds: derivedFrameIds,
+        samplingVersion: 1,
+      },
+    };
+    const derivedFrameAttachments: ChatAttachment[] = derivedFrameIds.map((frameId, index) => ({
+      id: frameId,
+      kind: 'image',
+      state: 'ready',
+      threadId: 'stale-thread',
+      messageId: 'stale-message',
+      localUri: `test-dir/chat-attachments/${threadId}/${frameId}.jpg`,
+      pathCategory: 'chat_attachment',
+      fileName: `${frameId}.jpg`,
+      mimeType: 'image/jpeg',
+      sizeBytes: 12_000 + index,
+      source: 'derived_processor',
+      createdAt: 10,
+      derivedFromAttachmentId: videoId,
+      image: {
+        width: 1024,
+        height: 576,
+      },
+    }));
+    const orphanDerivedFrameAttachment: ChatAttachment = {
+      ...derivedFrameAttachments[0],
+      id: 'orphan-derived-frame',
+      localUri: `test-dir/chat-attachments/${threadId}/orphan-derived-frame.jpg`,
+      fileName: 'orphan-derived-frame.jpg',
+      derivedFromAttachmentId: 'missing-video',
+    };
+    const standaloneImages = Array.from({ length: MAX_CHAT_IMAGE_ATTACHMENTS + 1 }, (_, index) => ({
+      ...copiedImageAttachment,
+      id: `standalone-image-${index + 1}`,
+      localUri: `test-dir/chat-attachments/${threadId}/standalone-image-${index + 1}.jpg`,
+      fileName: `standalone-image-${index + 1}.jpg`,
+    }));
+    const thread: ChatThread = {
+      ...buildThread(threadId),
+      messages: [
+        {
+          id: messageId,
+          role: 'user',
+          content: 'Describe the video and these images.',
+          createdAt: 1,
+          state: 'complete',
+          attachments: [
+            videoAttachment,
+            ...derivedFrameAttachments,
+            orphanDerivedFrameAttachment,
+            ...standaloneImages,
+          ],
+        },
+      ],
+      status: 'idle',
+    };
+
+    const sanitizedMessage = sanitizeChatThreadForPersistence(thread).messages[0];
+    const attachments = sanitizedMessage.attachments ?? [];
+    const retainedVideo = attachments.find((attachment): attachment is Extract<ChatAttachment, { kind: 'video' }> => (
+      'kind' in attachment && attachment.kind === 'video'
+    ));
+    const retainedFrames = attachments.filter((attachment): attachment is Extract<ChatAttachment, { kind: 'image' }> => (
+      'kind' in attachment
+      && attachment.kind === 'image'
+      && attachment.derivedFromAttachmentId === videoId
+    ));
+    const retainedStandaloneImages = attachments.filter((attachment) => !('kind' in attachment));
+
+    expect(retainedVideo?.video.derivedAttachmentIds).toEqual(derivedFrameIds);
+    expect(retainedFrames.map((attachment) => attachment.id)).toEqual(derivedFrameIds);
+    expect(retainedFrames).toHaveLength(LEGACY_MAX_CHAT_VIDEO_DERIVED_FRAME_ATTACHMENTS);
+    expect(retainedStandaloneImages.map((attachment) => attachment.id)).toEqual(
+      standaloneImages.slice(0, MAX_CHAT_IMAGE_ATTACHMENTS).map((attachment) => attachment.id),
+    );
+    expect(retainedStandaloneImages).toHaveLength(MAX_CHAT_IMAGE_ATTACHMENTS);
+    expect(JSON.stringify(attachments)).not.toContain('standalone-image-5');
+    expect(JSON.stringify(attachments)).not.toContain('orphan-derived-frame');
   });
 
   it('omits empty assistant progress placeholders from durable thread records', () => {

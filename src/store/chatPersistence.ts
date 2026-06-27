@@ -1,4 +1,5 @@
-import type { ChatMessage, ChatThread } from '../types/chat';
+import type { ChatMessage, ChatThread, LlmContentPart } from '../types/chat';
+import type { ChatAttachment } from '../types/attachments';
 import {
   CHAT_IMAGE_ATTACHMENT_PATH_CATEGORY,
   type ChatImageAttachment,
@@ -9,6 +10,11 @@ import {
   normalizeChatAttachmentLocalUri,
   validateChatImageAttachmentBounds,
 } from '../utils/chatImageAttachments';
+import {
+  normalizePersistedChatAttachment,
+  MAX_CHAT_ATTACHMENTS_BY_KIND,
+  toLegacyChatImageAttachment,
+} from '../utils/chatAttachments';
 import type { AppStorageFacade } from './storage';
 
 export const LEGACY_CHAT_STORE_STORAGE_KEY = 'chat-store';
@@ -17,6 +23,7 @@ export const CHAT_PERSISTENCE_INDEX_KEY = 'chat-store:v2:index';
 export const CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY = 'chat-store:v2:index:pending';
 export const CHAT_THREAD_STORAGE_KEY_PREFIX = 'chat-store:v2:thread:';
 export const DEFAULT_STREAMING_PERSISTENCE_DEBOUNCE_MS = 750;
+const LEGACY_MAX_CHAT_VIDEO_DERIVED_FRAME_ATTACHMENTS = 8;
 
 export type ChatPersistenceWriteReason =
   | 'streaming_patch'
@@ -131,6 +138,11 @@ function sanitizePersistedChatImageAttachment(
   threadId: string,
   messageId: string,
 ): ChatImageAttachment | null {
+  const genericAttachment = normalizePersistedChatAttachment(value, { threadId, messageId });
+  if (genericAttachment) {
+    return toLegacyChatImageAttachment(genericAttachment);
+  }
+
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return null;
   }
@@ -199,30 +211,182 @@ function sanitizePersistedChatImageAttachment(
   };
 }
 
-function sanitizePersistedChatMessageAttachments(message: ChatMessage, threadId: string): ChatImageAttachment[] | undefined {
+type PersistedChatAttachment = ChatImageAttachment | ChatAttachment;
+type PersistedAttachmentKind = 'image' | 'audio' | 'document' | 'video';
+
+function sanitizePersistedChatAttachmentValue(
+  value: unknown,
+  threadId: string,
+  messageId: string,
+): PersistedChatAttachment | null {
+  const genericAttachment = normalizePersistedChatAttachment(value, { threadId, messageId });
+  if (genericAttachment) {
+    return toLegacyChatImageAttachment(genericAttachment) ?? genericAttachment;
+  }
+
+  return sanitizePersistedChatImageAttachment(value, threadId, messageId);
+}
+
+function resolvePersistedAttachmentKind(attachment: PersistedChatAttachment): PersistedAttachmentKind {
+  return 'kind' in attachment ? attachment.kind : 'image';
+}
+
+function isGenericChatAttachment(attachment: PersistedChatAttachment): attachment is ChatAttachment {
+  return 'kind' in attachment;
+}
+
+function isVideoAttachment(attachment: PersistedChatAttachment): attachment is Extract<ChatAttachment, { kind: 'video' }> {
+  return isGenericChatAttachment(attachment) && attachment.kind === 'video';
+}
+
+function isDerivedProcessorImageAttachment(attachment: PersistedChatAttachment): attachment is Extract<ChatAttachment, { kind: 'image' }> {
+  return isGenericChatAttachment(attachment)
+    && attachment.kind === 'image'
+    && attachment.source === 'derived_processor';
+}
+
+function isVideoDerivedImageAttachment(
+  attachment: PersistedChatAttachment,
+  retainedVideoFrameIdsByVideoId: ReadonlyMap<string, ReadonlySet<string>>,
+): attachment is Extract<ChatAttachment, { kind: 'image' }> & { derivedFromAttachmentId: string } {
+  if (
+    !isDerivedProcessorImageAttachment(attachment)
+    || !attachment.derivedFromAttachmentId
+  ) {
+    return false;
+  }
+
+  return retainedVideoFrameIdsByVideoId.get(attachment.derivedFromAttachmentId)?.has(attachment.id) === true;
+}
+
+function getRetainedVideoFrameIdsByVideoId(attachments: readonly PersistedChatAttachment[]): Map<string, Set<string>> {
+  const retainedVideoFrameIdsByVideoId = new Map<string, Set<string>>();
+
+  attachments.forEach((attachment) => {
+    if (!isVideoAttachment(attachment) || retainedVideoFrameIdsByVideoId.size >= MAX_CHAT_ATTACHMENTS_BY_KIND.video) {
+      return;
+    }
+
+    retainedVideoFrameIdsByVideoId.set(attachment.id, new Set(attachment.video.derivedAttachmentIds));
+  });
+
+  return retainedVideoFrameIdsByVideoId;
+}
+
+function withRetainedVideoFrameIds(
+  attachment: PersistedChatAttachment,
+  retainedFrameIdsByVideoId: ReadonlyMap<string, ReadonlySet<string>>,
+): PersistedChatAttachment {
+  if (!isVideoAttachment(attachment)) {
+    return attachment;
+  }
+
+  const retainedFrameIds = retainedFrameIdsByVideoId.get(attachment.id);
+  const derivedAttachmentIds = attachment.video.derivedAttachmentIds.filter((frameId) => (
+    retainedFrameIds?.has(frameId) === true
+  ));
+
+  if (derivedAttachmentIds.length === attachment.video.derivedAttachmentIds.length) {
+    return attachment;
+  }
+
+  return {
+    ...attachment,
+    video: {
+      ...attachment.video,
+      derivedAttachmentIds,
+    },
+  };
+}
+
+function sanitizePersistedChatMessageAttachments(message: ChatMessage, threadId: string): PersistedChatAttachment[] | undefined {
   if (message.role !== 'user' || !Array.isArray(message.attachments)) {
     return undefined;
   }
 
-  const attachments = message.attachments
-    .flatMap((attachment) => {
-      const sanitized = sanitizePersistedChatImageAttachment(attachment, threadId, message.id);
-      return sanitized ? [sanitized] : [];
-    })
-    .slice(0, MAX_CHAT_IMAGE_ATTACHMENTS);
+  const sanitizedAttachments = message.attachments.flatMap((attachment) => {
+    const sanitized = sanitizePersistedChatAttachmentValue(attachment, threadId, message.id);
+    return sanitized ? [sanitized] : [];
+  });
+  const retainedVideoFrameIdsByVideoId = getRetainedVideoFrameIdsByVideoId(sanitizedAttachments);
+  const retainedDerivedFrameIdsByVideoId = new Map<string, Set<string>>();
+  const counts: Record<PersistedAttachmentKind, number> = {
+    image: 0,
+    audio: 0,
+    document: 0,
+    video: 0,
+  };
+  const limits: Record<PersistedAttachmentKind, number> = {
+    image: MAX_CHAT_IMAGE_ATTACHMENTS,
+    audio: MAX_CHAT_ATTACHMENTS_BY_KIND.audio,
+    document: MAX_CHAT_ATTACHMENTS_BY_KIND.document,
+    video: MAX_CHAT_ATTACHMENTS_BY_KIND.video,
+  };
+  const attachments = sanitizedAttachments.flatMap((sanitized): PersistedChatAttachment[] => {
+    const kind = resolvePersistedAttachmentKind(sanitized);
+    if (isVideoDerivedImageAttachment(sanitized, retainedVideoFrameIdsByVideoId)) {
+      const videoId = sanitized.derivedFromAttachmentId;
+      const retainedFrameIds = retainedDerivedFrameIdsByVideoId.get(videoId) ?? new Set<string>();
+      if (retainedFrameIds.size >= LEGACY_MAX_CHAT_VIDEO_DERIVED_FRAME_ATTACHMENTS) {
+        return [];
+      }
 
-  return attachments.length > 0 ? attachments : undefined;
+      retainedFrameIds.add(sanitized.id);
+      retainedDerivedFrameIdsByVideoId.set(videoId, retainedFrameIds);
+      return [sanitized];
+    }
+
+    if (isDerivedProcessorImageAttachment(sanitized)) {
+      return [];
+    }
+
+    if (counts[kind] >= limits[kind]) {
+      return [];
+    }
+
+    counts[kind] += 1;
+    return [sanitized];
+  });
+
+  const retainedAttachments = attachments.map((attachment) => (
+    withRetainedVideoFrameIds(attachment, retainedDerivedFrameIdsByVideoId)
+  ));
+
+  return retainedAttachments.length > 0 ? retainedAttachments : undefined;
+}
+
+function sanitizePersistedChatMessageContentParts(message: ChatMessage): LlmContentPart[] | undefined {
+  if (message.role !== 'user' || !Array.isArray(message.contentParts)) {
+    return undefined;
+  }
+
+  const contentParts = message.contentParts.flatMap((part): LlmContentPart[] => {
+    if (!part || typeof part !== 'object' || part.type !== 'text') {
+      return [];
+    }
+
+    const text = typeof part.text === 'string' ? part.text.trim() : '';
+    if (text.length === 0 || text.length > 200_000) {
+      return [];
+    }
+
+    return [{ type: 'text', text }];
+  });
+
+  return contentParts.length > 0 ? contentParts : undefined;
 }
 
 function sanitizeChatMessageForPersistence(message: ChatMessage, threadId: string): ChatMessage {
   const attachments = sanitizePersistedChatMessageAttachments(message, threadId);
-  if (attachments === message.attachments) {
+  const contentParts = sanitizePersistedChatMessageContentParts(message);
+  if (attachments === message.attachments && contentParts === message.contentParts) {
     return message;
   }
 
   return {
     ...message,
     ...(attachments ? { attachments } : { attachments: undefined }),
+    ...(contentParts ? { contentParts } : { contentParts: undefined }),
   };
 }
 

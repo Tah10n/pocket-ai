@@ -11,6 +11,7 @@ import {
 import { screenChromeTokens } from '../../src/utils/themeTokens';
 import { getSendableDraftImageAttachments } from '../../src/utils/chatImageAttachments';
 import type { AttachmentDraft } from '../../src/types/multimodal';
+import type { ChatDocumentAttachmentDraft, ChatMediaAttachmentDraft } from '../../src/types/attachments';
 import { copiedDraftImageAttachment } from '../fixtures/chatImageAttachmentFixtures';
 
 const reactI18nextMock = jest.requireMock('react-i18next') as {
@@ -24,6 +25,10 @@ jest.mock('react-native-css-interop', () => {
     createInteropElement: mockReact.createElement,
   };
 });
+
+jest.mock('react-native-safe-area-context', () => ({
+  useSafeAreaInsets: () => ({ top: 0, right: 0, bottom: 0, left: 0 }),
+}));
 
 jest.mock('@/components/ui/box', () => {
   const mockReact = require('react');
@@ -247,6 +252,156 @@ describe('ChatInputBar', () => {
     expect(getByTestId('chat-input-bar-attachments-tray')).toBeTruthy();
     expect(getByTestId('chat-input-bar-row').props.className).toContain('flex-row');
     expect(queryByText('arrow-upward')).toBeNull();
+  });
+
+  it('collapses built-in attachment actions behind a single menu button', () => {
+    const onAttachImages = jest.fn();
+    const onAttachDocuments = jest.fn();
+    const onAttachAudio = jest.fn();
+    const { getByTestId, queryByTestId } = render(
+      <ChatInputBar
+        onSendMessage={jest.fn()}
+        onAttachImages={onAttachImages}
+        onAttachDocuments={onAttachDocuments}
+        onAttachAudio={onAttachAudio}
+        imageAttachmentsEnabled
+        documentAttachmentsEnabled
+        audioAttachmentsEnabled
+      />,
+    );
+
+    expect(getByTestId('chat-attach-menu-button')).toBeTruthy();
+    expect(queryByTestId('chat-attach-image-button')).toBeNull();
+    expect(queryByTestId('chat-attach-document-button')).toBeNull();
+    expect(queryByTestId('chat-attach-audio-button')).toBeNull();
+    expect(queryByTestId('chat-attach-video-button')).toBeNull();
+
+    fireEvent.press(getByTestId('chat-attach-menu-button'));
+
+    expect(getByTestId('chat-attachment-menu-sheet')).toBeTruthy();
+    expect(getByTestId('chat-attach-image-button')).toBeTruthy();
+    expect(getByTestId('chat-attach-document-button')).toBeTruthy();
+    expect(getByTestId('chat-attach-audio-button')).toBeTruthy();
+    expect(queryByTestId('chat-attach-video-button')).toBeNull();
+
+    fireEvent.press(getByTestId('chat-attach-image-button'));
+
+    expect(onAttachImages).toHaveBeenCalledTimes(1);
+    expect(onAttachDocuments).not.toHaveBeenCalled();
+    expect(onAttachAudio).not.toHaveBeenCalled();
+    expect(queryByTestId('chat-attachment-menu-sheet')).toBeNull();
+  });
+
+  it('renders document attachment chips and allows attachment-only sends', async () => {
+    const onSendMessage = jest.fn().mockResolvedValue(undefined);
+    const onAttachDocuments = jest.fn();
+    const onRemoveDocumentAttachmentDraft = jest.fn();
+    const documentDraft: ChatDocumentAttachmentDraft = {
+      id: 'document-1',
+      pickerUri: 'content://documents/document-1.txt',
+      localUri: 'test-dir/chat-attachments/document-1.txt',
+      pathCategory: 'chat_attachment',
+      fileName: 'document-1.txt',
+      displayName: 'Meeting notes.txt',
+      mimeType: 'text/plain',
+      sizeBytes: 1536,
+      source: 'document_picker',
+      createdAt: 1,
+      copyStatus: 'copied',
+    };
+
+    const { getByLabelText, getByTestId, getByText } = render(
+      <ChatInputBar
+        onSendMessage={onSendMessage}
+        documentAttachmentDrafts={[documentDraft]}
+        onAttachDocuments={onAttachDocuments}
+        onRemoveDocumentAttachmentDraft={onRemoveDocumentAttachmentDraft}
+        documentAttachmentsEnabled
+      />,
+    );
+
+    fireEvent.press(getByTestId('chat-attach-menu-button'));
+    fireEvent.press(getByLabelText('chat.attachments.attachDocumentAccessibilityLabel'));
+    expect(onAttachDocuments).toHaveBeenCalledTimes(1);
+    expect(getByTestId('chat-document-attachment-chip-0')).toBeTruthy();
+    expect(getByText('Meeting notes.txt')).toBeTruthy();
+    expect(getByText('2 KB')).toBeTruthy();
+
+    fireEvent.press(getByTestId('chat-document-attachment-remove-0'));
+    expect(onRemoveDocumentAttachmentDraft).toHaveBeenCalledWith(documentDraft, 0);
+
+    fireEvent.press(getByLabelText('chat.sendAccessibilityLabel'));
+    await waitFor(() => {
+      expect(onSendMessage).toHaveBeenCalledWith('');
+    });
+  });
+
+  it('blocks media attachment-only sends while preserving text fallback when the draft modality is disabled', async () => {
+    const onSendMessage = jest.fn().mockResolvedValue(undefined);
+    const audioDraft: ChatMediaAttachmentDraft = {
+      id: 'audio-1',
+      kind: 'audio',
+      pickerUri: 'content://audio/audio-1.mp3',
+      localUri: 'test-dir/chat-attachments/audio-1.mp3',
+      pathCategory: 'chat_attachment',
+      fileName: 'audio-1.mp3',
+      displayName: 'Meeting audio.mp3',
+      mimeType: 'audio/mpeg',
+      sizeBytes: 4096,
+      source: 'document_picker',
+      createdAt: 1,
+      copyStatus: 'copied',
+      audio: {
+        format: 'mp3',
+      },
+    };
+
+    const { getByPlaceholderText, getByLabelText } = render(
+      <ChatInputBar
+        onSendMessage={onSendMessage}
+        mediaAttachmentDrafts={[audioDraft]}
+        onAttachAudio={jest.fn()}
+        audioAttachmentsEnabled={false}
+        audioAttachmentsDisabledReason="chat.attachments.audioRuntimeUnavailable"
+      />,
+    );
+
+    const input = getByPlaceholderText('chat.inputPlaceholder');
+    fireEvent(input, 'submitEditing', {
+      nativeEvent: {
+        text: '',
+      },
+    });
+    fireEvent.press(getByLabelText('chat.sendAccessibilityLabel'));
+
+    expect(onSendMessage).not.toHaveBeenCalled();
+
+    fireEvent.changeText(input, 'Send text without audio');
+    fireEvent(input, 'submitEditing', {
+      nativeEvent: {
+        text: 'Send text without audio',
+      },
+    });
+
+    await waitFor(() => {
+      expect(onSendMessage).toHaveBeenCalledWith('Send text without audio');
+    });
+  });
+
+  it('keeps audio disabled hints scoped to the audio menu action', () => {
+    const { getByLabelText, getByTestId } = render(
+      <ChatInputBar
+        onSendMessage={jest.fn()}
+        onAttachAudio={jest.fn()}
+        audioAttachmentsEnabled={false}
+        audioAttachmentsDisabledReason="chat.attachments.audioRuntimeUnavailable"
+      />,
+    );
+
+    fireEvent.press(getByTestId('chat-attach-menu-button'));
+
+    expect(getByLabelText('chat.attachments.attachAudioAccessibilityLabel').props.accessibilityHint)
+      .toBe('chat.attachments.audioRuntimeUnavailable');
   });
 
   it('renders a retained attachments tray and allows blank sends when explicitly enabled', async () => {
@@ -571,7 +726,7 @@ describe('ChatInputBar', () => {
     }));
 
     try {
-      const { getByLabelText, getByTestId, getByText } = render(
+      const { getByLabelText, getByTestId, getAllByText } = render(
         <ChatInputBar
           onSendMessage={jest.fn()}
           onAttachImages={onAttachImages}
@@ -580,13 +735,14 @@ describe('ChatInputBar', () => {
         />,
       );
 
+      fireEvent.press(getByTestId('chat-attach-menu-button'));
       const attachButton = getByLabelText('chat.attachments.attachImageAccessibilityLabel');
 
-      expect(attachButton.props.accessibilityState).toEqual({ disabled: true });
+      expect(attachButton.props.accessibilityState).toEqual({ selected: false, disabled: true });
       expect(attachButton.props.accessibilityHint).toBe('chat.attachments.limitReached');
       expect(getByTestId('chat-image-attachment-readiness-text').props.accessibilityLiveRegion).toBe('polite');
       expect(getByTestId('chat-image-attachment-readiness-text').props.role).toBe('status');
-      expect(getByText('chat.attachments.limitReached')).toBeTruthy();
+      expect(getAllByText('chat.attachments.limitReached').length).toBeGreaterThan(0);
 
       fireEvent.press(attachButton);
 
@@ -612,7 +768,7 @@ describe('ChatInputBar', () => {
     try {
       for (const readinessKey of readinessKeys) {
         const onAttachImages = jest.fn();
-        const { getByLabelText, getByTestId, getByText, unmount } = render(
+        const { getByLabelText, getByTestId, getAllByText, unmount } = render(
           <ChatInputBar
             onSendMessage={jest.fn()}
             onAttachImages={onAttachImages}
@@ -621,14 +777,15 @@ describe('ChatInputBar', () => {
           />,
         );
 
+        fireEvent.press(getByTestId('chat-attach-menu-button'));
         const attachButton = getByLabelText('chat.attachments.attachImageAccessibilityLabel');
 
-        expect(attachButton.props.accessibilityState).toEqual({ disabled: true });
+        expect(attachButton.props.accessibilityState).toEqual({ selected: false, disabled: true });
         expect(attachButton.props.accessibilityHint).toBe(readinessKey);
         expect(getByTestId('chat-image-attachment-readiness-text')).toBeTruthy();
         expect(getByTestId('chat-image-attachment-readiness-text').props.accessibilityLiveRegion).toBe('polite');
         expect(getByTestId('chat-image-attachment-readiness-text').props.role).toBe('status');
-        expect(getByText(readinessKey)).toBeTruthy();
+        expect(getAllByText(readinessKey).length).toBeGreaterThan(0);
 
         fireEvent.press(attachButton);
 
@@ -645,7 +802,7 @@ describe('ChatInputBar', () => {
     const onAttachImages = jest.fn();
 
     try {
-      const { getByLabelText, getByTestId, getByText } = render(
+      const { getByLabelText, getByTestId, getAllByText } = render(
         <ChatInputBar
           onSendMessage={jest.fn()}
           onAttachImages={onAttachImages}
@@ -654,15 +811,16 @@ describe('ChatInputBar', () => {
         />,
       );
 
+      fireEvent.press(getByTestId('chat-attach-menu-button'));
       const attachButton = getByLabelText('chat.attachments.attachImageAccessibilityLabel');
 
       expect(attachButton.props.accessibilityHint).toBe('chat.attachments.preparingImage');
-      expect(attachButton.props.accessibilityState).toEqual({ disabled: true, busy: true });
+      expect(attachButton.props.accessibilityState).toEqual({ selected: false, disabled: true, busy: true });
       expect(getByTestId('chat-image-attachment-busy-indicator')).toBeTruthy();
       expect(getByTestId('chat-image-attachment-busy-indicator').props.accessibilityLiveRegion).toBe('polite');
       expect(getByTestId('chat-image-attachment-busy-indicator').props.accessibilityState).toEqual({ busy: true });
       expect(getByTestId('chat-image-attachment-busy-spinner')).toBeTruthy();
-      expect(getByText('chat.attachments.preparingImage')).toBeTruthy();
+      expect(getAllByText('chat.attachments.preparingImage').length).toBeGreaterThan(0);
 
       fireEvent.press(attachButton);
 

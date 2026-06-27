@@ -15,6 +15,8 @@ const {
   findQuantizationSelectorNodeClearOfBottomOverlay,
   findBlockingSystemDialogAction,
   escapeAdbInputText,
+  findAttachImageActionInSnapshot,
+  findAttachMenuActionInSnapshot,
   findAnyNodeClearOfBottomOverlay,
   findAnyNodeInSnapshot,
   findPreparedAssistantResponseNode,
@@ -35,6 +37,7 @@ const {
   assertAttachmentActionBlocked,
   assertAttachmentActionAvailable,
   assertAttachmentTextOnlyFallbackState,
+  isAttachmentActionBusy,
   isPreparedAssistantResponseLabel,
   ScenarioSkipFailureError,
   serializeReportResults,
@@ -54,7 +57,7 @@ describe('app image picker configuration', () => {
     expect(imagePickerPlugin).toEqual([
       'expo-image-picker',
       expect.objectContaining({
-        photosPermission: expect.stringContaining('photo library'),
+        photosPermission: expect.stringContaining('attach images'),
         cameraPermission: false,
         microphonePermission: false,
       }),
@@ -558,6 +561,35 @@ describe('android-scenarios UI snapshot matching', () => {
 
     expect(node).toBeTruthy();
     expect(node.clickable).toBe(true);
+  });
+
+  it('finds image attachment action by resource id but rejects lingering busy state', () => {
+    const attachmentSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
+        <node resource-id="chat-attach-image-button" text="" content-desc="Attach an image from the photo library, busy" clickable="true" enabled="true" bounds="[58,1981][142,2065]" />
+      </hierarchy>
+    `);
+
+    const match = findAttachImageActionInSnapshot(attachmentSnapshot, { visibleOnly: true });
+
+    expect(match).toBeTruthy();
+    expect(isAttachmentActionBusy(match.node)).toBe(true);
+    expect(() => assertAttachmentActionAvailable(match)).toThrow(/still busy/);
+  });
+
+  it('finds the collapsed attachment menu action by resource id', () => {
+    const attachmentSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
+        <node resource-id="chat-attach-menu-button" text="" content-desc="Attach file" clickable="true" enabled="true" bounds="[58,1981][142,2065]" />
+      </hierarchy>
+    `);
+
+    const match = findAttachMenuActionInSnapshot(attachmentSnapshot, { visibleOnly: true });
+
+    expect(match).toBeTruthy();
+    expect(match.node.resourceId).toBe('chat-attach-menu-button');
   });
 
   it('treats any visible Pocket AI route as app foreground', () => {
@@ -1139,7 +1171,7 @@ describe('android-scenarios pack selection', () => {
     const previousAndroidSdkRoot = process.env.ANDROID_SDK_ROOT;
     const adbDir = path.join(tempDir, 'platform-tools');
     const adbPath = path.join(adbDir, process.platform === 'win32' ? 'adb.exe' : 'adb');
-    const noModelHierarchyXml = `
+    const noModelClosedHierarchyXml = `
       <hierarchy>
         <node text="" content-desc="" clickable="false" enabled="true" bounds="[0,0][1080,2400]" />
         <node text="Pocket AI" content-desc="" clickable="false" enabled="true" bounds="[20,40][420,120]" />
@@ -1147,9 +1179,16 @@ describe('android-scenarios pack selection', () => {
         <node text="Load a model to continue chatting" content-desc="" clickable="false" enabled="true" bounds="[40,500][1040,580]" />
         <node text="Download Model" content-desc="" clickable="true" enabled="true" bounds="[360,620][720,720]" />
         <node text="Choose and load a vision-capable model before attaching images." content-desc="" clickable="false" enabled="true" bounds="[40,1720][1040,1800]" />
-        <node text="" content-desc="Attach an image from the photo library" clickable="true" enabled="false" bounds="[40,1840][180,1980]" />
+        <node resource-id="chat-attach-menu-button" text="" content-desc="Attach file" clickable="true" enabled="true" bounds="[40,1840][180,1980]" />
         <node text="" content-desc="Chat message input" clickable="true" enabled="true" bounds="[200,1840][860,1980]" />
         <node text="" content-desc="Send message" clickable="true" enabled="false" bounds="[900,1840][1040,1980]" />
+      </hierarchy>
+    `;
+    const noModelOpenHierarchyXml = `
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" enabled="true" bounds="[0,0][1080,2400]" />
+        <node text="Choose and load a vision-capable model before attaching images." content-desc="" clickable="false" enabled="true" bounds="[40,1720][1040,1800]" />
+        <node resource-id="chat-attach-image-button" text="" content-desc="Attach an image from the photo library" clickable="false" enabled="false" bounds="[40,1480][1040,1620]" />
       </hierarchy>
     `;
 
@@ -1159,14 +1198,21 @@ describe('android-scenarios pack selection', () => {
     delete process.env.ANDROID_SDK_ROOT;
 
     try {
+      let attachmentMenuOpened = false;
       const spawnSync = jest.fn((_command, args) => {
         if (args.includes('text')) {
           throw new Error('No-model smoke should not type a fallback prompt');
         }
+        if (args.includes('tap')) {
+          attachmentMenuOpened = true;
+        }
+        if (args.includes('keyevent') && args.includes('KEYCODE_BACK')) {
+          attachmentMenuOpened = false;
+        }
         if (args.includes('exec-out')) {
           return {
             status: 0,
-            stdout: noModelHierarchyXml,
+            stdout: attachmentMenuOpened ? noModelOpenHierarchyXml : noModelClosedHierarchyXml,
             stderr: '',
           };
         }
@@ -1287,16 +1333,24 @@ describe('android-scenarios pack selection', () => {
     const events = [];
     let prompt = null;
     let sendTapped = false;
+    let attachmentMenuOpened = false;
     const textOnlyHierarchyXml = () => `
       <hierarchy>
         <node text="" content-desc="" clickable="false" enabled="true" bounds="[0,0][1080,2400]" />
         <node text="Pocket AI" content-desc="" clickable="false" enabled="true" bounds="[20,40][420,120]" />
         <node text="Recent Conversations" content-desc="" clickable="false" enabled="true" bounds="[20,160][720,240]" />
         <node text="Active model" content-desc="" clickable="false" enabled="true" bounds="[20,260][720,340]" />
-        <node text="This model supports text chat only." content-desc="" clickable="false" enabled="true" bounds="[40,1720][1040,1800]" />
-        <node text="" content-desc="Attach an image from the photo library" clickable="true" enabled="false" bounds="[40,1840][180,1980]" />
+        <node text="This model supports text chat only. Load an audio-capable model before attaching audio." content-desc="" clickable="false" enabled="true" bounds="[40,1720][1040,1800]" />
+        <node resource-id="chat-attach-menu-button" text="" content-desc="Attach file" clickable="true" enabled="true" bounds="[40,1840][180,1980]" />
         <node text="${prompt || ''}" content-desc="Chat message input" clickable="true" enabled="true" bounds="[200,1840][860,1980]" />
         <node text="" content-desc="Send message" clickable="true" enabled="${prompt ? 'true' : 'false'}" bounds="[900,1840][1040,1980]" />
+      </hierarchy>
+    `;
+    const textOnlyMenuHierarchyXml = () => `
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" enabled="true" bounds="[0,0][1080,2400]" />
+        <node text="This model supports text chat only. Load an audio-capable model before attaching audio." content-desc="" clickable="false" enabled="true" bounds="[40,1720][1040,1800]" />
+        <node resource-id="chat-attach-image-button" text="" content-desc="Attach an image from the photo library" clickable="false" enabled="false" bounds="[40,1480][1040,1620]" />
       </hierarchy>
     `;
     const sentHierarchyXml = () => `
@@ -1328,10 +1382,20 @@ describe('android-scenarios pack selection', () => {
           prompt = args[args.length - 1].replace(/%s/g, ' ');
           events.push(`input-text:${prompt}`);
         }
+        if (args.includes('tap')) {
+          attachmentMenuOpened = true;
+        }
+        if (args.includes('keyevent') && args.includes('KEYCODE_BACK')) {
+          attachmentMenuOpened = false;
+        }
         if (args.includes('exec-out')) {
           return {
             status: 0,
-            stdout: sendTapped ? sentHierarchyXml() : textOnlyHierarchyXml(),
+            stdout: sendTapped
+              ? sentHierarchyXml()
+              : attachmentMenuOpened
+                ? textOnlyMenuHierarchyXml()
+                : textOnlyHierarchyXml(),
             stderr: '',
           };
         }
@@ -1401,6 +1465,7 @@ describe('android-scenarios pack selection', () => {
     const adbPath = path.join(adbDir, process.platform === 'win32' ? 'adb.exe' : 'adb');
     let typedPrompt = '';
     let sendTapped = false;
+    let attachmentMenuOpened = false;
     const textOnlyHierarchyXml = () => `
       <hierarchy>
         <node text="" content-desc="" clickable="false" enabled="true" bounds="[0,0][1080,2400]" />
@@ -1408,10 +1473,17 @@ describe('android-scenarios pack selection', () => {
         <node text="Recent Conversations" content-desc="" clickable="false" enabled="true" bounds="[20,160][720,240]" />
         <node text="Active model" content-desc="" clickable="false" enabled="true" bounds="[20,260][720,340]" />
         <node text="" content-desc="New Chat" clickable="true" enabled="true" bounds="[800,1600][1040,1720]" />
-        <node text="This model supports text chat only." content-desc="" clickable="false" enabled="true" bounds="[40,1720][1040,1800]" />
-        <node text="" content-desc="Attach an image from the photo library" clickable="true" enabled="false" bounds="[40,1840][180,1980]" />
+        <node text="This model supports text chat only. Load an audio-capable model before attaching audio." content-desc="" clickable="false" enabled="true" bounds="[40,1720][1040,1800]" />
+        <node resource-id="chat-attach-menu-button" text="" content-desc="Attach file" clickable="true" enabled="true" bounds="[40,1840][180,1980]" />
         <node text="${typedPrompt}" content-desc="Chat message input" clickable="true" enabled="true" bounds="[200,1840][860,1980]" />
         <node text="" content-desc="Send message" clickable="true" enabled="true" bounds="[900,1840][1040,1980]" />
+      </hierarchy>
+    `;
+    const textOnlyMenuHierarchyXml = () => `
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" enabled="true" bounds="[0,0][1080,2400]" />
+        <node text="This model supports text chat only. Load an audio-capable model before attaching audio." content-desc="" clickable="false" enabled="true" bounds="[40,1720][1040,1800]" />
+        <node resource-id="chat-attach-image-button" text="" content-desc="Attach an image from the photo library" clickable="false" enabled="false" bounds="[40,1480][1040,1620]" />
       </hierarchy>
     `;
     const sentTextOnlyHierarchyXml = () => `
@@ -1437,12 +1509,19 @@ describe('android-scenarios pack selection', () => {
           typedPrompt = args[args.length - 1].replace(/%s/g, ' ');
         }
         if (args.includes('tap')) {
-          sendTapped = true;
+          attachmentMenuOpened = true;
+        }
+        if (args.includes('keyevent') && args.includes('KEYCODE_BACK')) {
+          attachmentMenuOpened = false;
         }
         if (args.includes('exec-out')) {
           return {
             status: 0,
-            stdout: sendTapped ? sentTextOnlyHierarchyXml() : textOnlyHierarchyXml(),
+            stdout: sendTapped
+              ? sentTextOnlyHierarchyXml()
+              : attachmentMenuOpened
+                ? textOnlyMenuHierarchyXml()
+                : textOnlyHierarchyXml(),
             stderr: '',
           };
         }
@@ -1479,10 +1558,6 @@ describe('android-scenarios pack selection', () => {
       expect(ctx.tapAnyText).toHaveBeenCalledWith(expect.arrayContaining(['Send message']), expect.anything());
       expect(typedPrompt).toMatch(/^Text fallback smoke \d+ \d+$/);
       expect(typedPrompt).not.toBe('Text fallback smoke');
-      expect(ctx.expectAnyText).toHaveBeenCalledWith(
-        expect.arrayContaining(['Attach an image from the photo library']),
-        expect.objectContaining({ timeoutMs: 8_000 })
-      );
       expect(ctx.tapBottomTab).toHaveBeenCalledWith(expect.arrayContaining(['Home']));
       expect(spawnSync).toHaveBeenCalledWith(
         adbPath,
@@ -1624,10 +1699,7 @@ describe('android-scenarios pack selection', () => {
         { hasPreview: false, hasRemove: false },
         { hasPreview: false, hasRemove: false },
       ]);
-      expect(expectAnyText).toHaveBeenLastCalledWith(
-        expect.arrayContaining(['Attach an image from the photo library']),
-        expect.objectContaining({ timeoutMs: 5_000 })
-      );
+      expect(expectAnyText).not.toHaveBeenCalled();
     } finally {
       jest.dontMock('child_process');
       if (previousAndroidHome === undefined) {
@@ -1644,65 +1716,19 @@ describe('android-scenarios pack selection', () => {
     }
   });
 
-  it('fails prepared attachment preview/remove when the attach action is disabled', async () => {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-ai-adb-'));
-    const previousAndroidHome = process.env.ANDROID_HOME;
-    const previousAndroidSdkRoot = process.env.ANDROID_SDK_ROOT;
-    const adbDir = path.join(tempDir, 'platform-tools');
-    const adbPath = path.join(adbDir, process.platform === 'win32' ? 'adb.exe' : 'adb');
-    const disabledPreparedDraftHierarchyXml = `
-      <hierarchy>
-        <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
-        <node text="" content-desc="Attach an image from the photo library" clickable="true" enabled="false" bounds="[40,1800][180,1940]" />
-        <node text="Attached image 1 of 1 preview" content-desc="" clickable="false" bounds="[40,500][1040,900]" />
-        <node text="Remove attached image 1 of 1" content-desc="" clickable="true" enabled="true" bounds="[900,500][1040,640]" />
-      </hierarchy>
-    `;
-
-    fs.mkdirSync(adbDir, { recursive: true });
-    fs.writeFileSync(adbPath, '');
-    process.env.ANDROID_HOME = tempDir;
-    delete process.env.ANDROID_SDK_ROOT;
-
-    try {
-      const spawnSync = jest.fn((_command, args) => {
-        if (args.includes('exec-out')) {
-          return {
-            status: 0,
-            stdout: disabledPreparedDraftHierarchyXml,
-            stderr: '',
-          };
-        }
-
-        return { status: 0, stdout: '', stderr: '' };
-      });
-      let isolatedBuildScenarios;
-      jest.isolateModules(() => {
-        jest.doMock('child_process', () => ({ spawnSync }));
-        ({ buildScenarios: isolatedBuildScenarios } = require('../../scripts/android-scenarios'));
-      });
-
-      const scenario = isolatedBuildScenarios().find((candidate) => candidate.id === 'chat-attachment-preview-remove');
-
-      await expect(scenario.run({
-        serial: 'device-1',
-        expectAnyText: jest.fn().mockResolvedValue(undefined),
-        tapAnyText: jest.fn().mockResolvedValue(undefined),
-      })).rejects.toThrow(/disabled/);
-    } finally {
-      jest.dontMock('child_process');
-      if (previousAndroidHome === undefined) {
-        delete process.env.ANDROID_HOME;
-      } else {
-        process.env.ANDROID_HOME = previousAndroidHome;
-      }
-      if (previousAndroidSdkRoot === undefined) {
-        delete process.env.ANDROID_SDK_ROOT;
-      } else {
-        process.env.ANDROID_SDK_ROOT = previousAndroidSdkRoot;
-      }
-      fs.rmSync(tempDir, { force: true, recursive: true });
-    }
+  it('accepts prepared preview/remove preconditions when the add-image action is busy from the attachment limit', () => {
+    expect(() => assertAttachmentPreviewRemovePreconditions({
+      fallbackNode: null,
+      attachNode: {
+        node: {
+          clickable: true,
+          enabled: true,
+          contentDesc: 'Attach an image from the photo library, busy',
+        },
+      },
+      previewNode: { label: 'Attached image preview' },
+      removeNode: { label: 'Remove image attachment' },
+    })).not.toThrow();
   });
 
   it('fails prepared attachment preview/remove when post-remove attach action is not actionable', async () => {
@@ -1714,7 +1740,7 @@ describe('android-scenarios pack selection', () => {
     const preparedDraftHierarchyXml = `
       <hierarchy>
         <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
-        <node text="" content-desc="Attach an image from the photo library" clickable="true" enabled="true" bounds="[40,1800][180,1940]" />
+        <node text="" content-desc="Attach an image from the photo library, busy" clickable="true" enabled="true" bounds="[40,1800][180,1940]" />
         <node text="Attached image 1 of 1 preview" content-desc="" clickable="false" bounds="[40,500][1040,900]" />
         <node text="Remove attached image 1 of 1" content-desc="" clickable="true" enabled="true" bounds="[900,500][1040,640]" />
       </hierarchy>
@@ -1829,7 +1855,7 @@ describe('android-scenarios pack selection', () => {
           const composerHierarchyXml = `
             <hierarchy>
               <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
-              <node text="" content-desc="Attach an image from the photo library" clickable="true" enabled="true" bounds="[40,1800][180,1940]" />
+              <node text="" content-desc="Attach an image from the photo library, busy" clickable="true" enabled="true" bounds="[40,1800][180,1940]" />
               <node text="Attached image 1 of 1 preview" content-desc="" clickable="false" bounds="[40,500][1040,900]" />
               <node text="Remove attached image 1 of 1" content-desc="" clickable="true" bounds="[900,500][1040,640]" />
               <node text="${preparedPrompt || ''}" content-desc="" clickable="true" bounds="[40,1900][900,2050]" />
@@ -2039,7 +2065,7 @@ describe('android-scenarios pack selection', () => {
       attachNode: { clickable: true, enabled: false },
       previewNode: { label: 'Attached image preview' },
       removeNode: { label: 'Remove image attachment' },
-    })).toThrow(/disabled/);
+    })).not.toThrow();
   });
 
   it('requires known fallback copy and a blocked affordance for text-only attachment smoke', () => {

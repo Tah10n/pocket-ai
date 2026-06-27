@@ -183,4 +183,20 @@ describe('buildInferenceWindowWithAccurateTokenCounts', () => {
       content: 'Describe this image',
     }));
   });
+
+  it('adds structured media content overhead to heuristic token estimates', () => {
+    const textOnlyEstimate = estimateLlmMessageTokens({
+      role: 'user',
+      content: 'Analyze these inputs',
+    });
+
+    expect(estimateLlmMessageTokens({
+      role: 'user',
+      content: 'Analyze these inputs',
+      contentParts: [
+        { type: 'image_url', image_url: { url: '/document/image.jpg' } },
+        { type: 'input_audio', input_audio: { format: 'wav', url: 'file:///document/audio.wav' } },
+      ],
+    })).toBeGreaterThan(textOnlyEstimate);
+  });
 });

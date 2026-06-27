@@ -103,6 +103,18 @@ const ATTACH_IMAGE_LABELS = [
   "Attach an image from the photo library",
   "Прикрепить изображение из медиатеки",
 ];
+const ATTACH_MENU_LABELS = [
+  "Attach file",
+  "Прикрепить файл",
+];
+const ATTACH_MENU_BUTTON_RESOURCE_ID = "chat-attach-menu-button";
+const ATTACH_IMAGE_BUTTON_RESOURCE_ID = "chat-attach-image-button";
+const ATTACH_IMAGE_ACTION_SETTLE_TIMEOUT_MS = 8_000;
+const ATTACHMENT_ACTION_BUSY_LABEL_FRAGMENTS = [
+  "busy",
+  "занят",
+  "занято",
+];
 const ATTACHMENT_PREVIEW_LABELS = [
   "Attached image 1 of 1 preview",
   "Предпросмотр прикрепленного изображения 1 из 1",
@@ -884,7 +896,6 @@ function recordScenarioSkip({
 }
 
 function assertAttachmentPreviewRemovePreconditions({
-  attachNode = null,
   fallbackNode = null,
   previewNode = null,
   removeNode = null,
@@ -906,7 +917,6 @@ function assertAttachmentPreviewRemovePreconditions({
     );
   }
 
-  assertAttachmentActionAvailable(attachNode);
 }
 
 function assertAttachmentTextOnlyFallbackState({
@@ -922,12 +932,142 @@ function assertAttachmentTextOnlyFallbackState({
   assertAttachmentActionBlocked(attachNode);
 }
 
+function isResourceId(node, resourceId) {
+  return node.resourceId === resourceId || node.resourceId.endsWith(`:id/${resourceId}`);
+}
+
+function findAttachImageActionInSnapshot(snapshot, options = {}) {
+  const viewportBounds = options.visibleOnly ? snapshot.viewportBounds : null;
+  const matches = snapshot.nodes.filter((node) => {
+    if (!isResourceId(node, ATTACH_IMAGE_BUTTON_RESOURCE_ID)) {
+      return false;
+    }
+
+    if (!options.visibleOnly) {
+      return true;
+    }
+
+    return Boolean(node.bounds)
+      && (!viewportBounds || isBoundsInViewport(node.bounds, viewportBounds));
+  });
+
+  if (matches.length === 0) {
+    return findAnyNodeInSnapshot(snapshot, ATTACH_IMAGE_LABELS, options);
+  }
+
+  return {
+    label: ATTACH_IMAGE_LABELS[0],
+    node: pickBestNode(matches),
+  };
+}
+
+function findAttachMenuActionInSnapshot(snapshot, options = {}) {
+  const viewportBounds = options.visibleOnly ? snapshot.viewportBounds : null;
+  const matches = snapshot.nodes.filter((node) => {
+    if (!isResourceId(node, ATTACH_MENU_BUTTON_RESOURCE_ID)) {
+      return false;
+    }
+
+    if (!options.visibleOnly) {
+      return true;
+    }
+
+    return Boolean(node.bounds)
+      && (!viewportBounds || isBoundsInViewport(node.bounds, viewportBounds));
+  });
+
+  if (matches.length === 0) {
+    return findAnyNodeInSnapshot(snapshot, ATTACH_MENU_LABELS, options);
+  }
+
+  return {
+    label: ATTACH_MENU_LABELS[0],
+    node: pickBestNode(matches),
+  };
+}
+
+function isAttachmentActionBusy(attachNode) {
+  const node = attachNode && attachNode.node ? attachNode.node : attachNode;
+  if (!node) {
+    return false;
+  }
+
+  const contentDesc = normalizeUiLabel(node.contentDesc);
+  return ATTACHMENT_ACTION_BUSY_LABEL_FRAGMENTS.some((fragment) => (
+    contentDesc.includes(normalizeUiLabel(fragment))
+  ));
+}
+
+function dismissAttachmentMenu(adbPath, serial) {
+  runChecked(adbPath, [
+    "-s",
+    serial,
+    "shell",
+    "input",
+    "keyevent",
+    "KEYCODE_BACK",
+  ]);
+}
+
+async function waitForSettledAttachImageAction(adbPath, serial, options = {}) {
+  const timeoutMs = options.timeoutMs ?? ATTACH_IMAGE_ACTION_SETTLE_TIMEOUT_MS;
+  const startedAt = Date.now();
+  let lastMatch = null;
+  let openedAttachmentMenu = false;
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const snapshot = createUiSnapshot(adbPath, serial);
+    const match = findAttachImageActionInSnapshot(snapshot, { visibleOnly: true });
+    if (match && !isAttachmentActionBusy(match.node)) {
+      if (openedAttachmentMenu) {
+        dismissAttachmentMenu(adbPath, serial);
+        await delay(options.afterMenuDismissDelayMs ?? 300);
+      }
+      return match;
+    }
+
+    if (!match) {
+      const menuMatch = openedAttachmentMenu
+        ? null
+        : findAttachMenuActionInSnapshot(snapshot, { visibleOnly: true });
+
+      if (menuMatch?.node?.bounds) {
+        tapBounds(adbPath, serial, menuMatch.node.bounds);
+        openedAttachmentMenu = true;
+        await delay(options.afterMenuOpenDelayMs ?? 600);
+        continue;
+      }
+
+      if (openedAttachmentMenu) {
+        dismissAttachmentMenu(adbPath, serial);
+        await delay(options.afterMenuDismissDelayMs ?? 300);
+      }
+
+      return null;
+    }
+
+    lastMatch = match;
+    await delay(600);
+  }
+
+  if (openedAttachmentMenu) {
+    dismissAttachmentMenu(adbPath, serial);
+    await delay(options.afterMenuDismissDelayMs ?? 300);
+  }
+
+  return lastMatch;
+}
+
 function assertAttachmentActionBlocked(attachNode, options = {}) {
   const node = attachNode && attachNode.node ? attachNode.node : attachNode;
   const stateDescription = options.stateDescription || "text-only fallback state";
 
   if (!node) {
     throw new Error(`Image attachment action was not visible in the ${stateDescription}.`);
+  }
+
+  if (isAttachmentActionBusy(node)) {
+    throw new Error(`Image attachment action is still busy in the ${stateDescription}.`);
   }
 
   if (node.clickable && node.enabled !== false) {
@@ -940,6 +1080,10 @@ function assertAttachmentActionAvailable(attachNode) {
 
   if (!node) {
     throw new Error("Image attachment action was not visible in the vision-ready composer state.");
+  }
+
+  if (isAttachmentActionBusy(node)) {
+    throw new Error("Image attachment action is still busy in the vision-ready composer state.");
   }
 
   if (node.enabled === false) {
@@ -1045,14 +1189,9 @@ function buildScenarios() {
           adbPath,
           ctx.serial,
           IMAGE_ATTACHMENT_TEXT_ONLY_FALLBACK_LABELS,
-          { visibleOnly: true }
+          { visibleOnly: true, matchMode: "fragment" }
         );
-        const attachNode = await findAnyNodeNow(
-          adbPath,
-          ctx.serial,
-          ATTACH_IMAGE_LABELS,
-          { visibleOnly: true }
-        );
+        const attachNode = await waitForSettledAttachImageAction(adbPath, ctx.serial);
 
         if (noModelNode) {
           assertAttachmentActionBlocked(attachNode, { stateDescription: "no-model chat state" });
@@ -1085,22 +1224,16 @@ function buildScenarios() {
         await ensureLoadedModelTextFallbackPrecondition(ctx);
         await ctx.tapAnyText(NEW_CHAT_LABELS);
         await ctx.expectAnyText(CHAT_EMPTY_LABELS);
-        await ctx.expectAnyText(ATTACH_IMAGE_LABELS, { timeoutMs: 8_000 });
 
         const adbPath = resolveAdbPath();
         const fallbackNode = await findAnyNodeNow(
           adbPath,
           ctx.serial,
           LOADED_TEXT_ATTACHMENT_FALLBACK_LABELS,
-          { visibleOnly: true }
+          { visibleOnly: true, matchMode: "fragment" }
         );
 
-        const attachNode = await findAnyNodeNow(
-          adbPath,
-          ctx.serial,
-          ATTACH_IMAGE_LABELS,
-          { visibleOnly: true }
-        );
+        const attachNode = await waitForSettledAttachImageAction(adbPath, ctx.serial);
 
         assertAttachmentTextOnlyFallbackState({ fallbackNode, attachNode });
         await sendTextOnlyFallbackSmokeMessage(ctx, adbPath, buildTextOnlyFallbackSendPrompt());
@@ -1114,22 +1247,13 @@ function buildScenarios() {
       tier: "optional",
       description: "Verify a prepared running vision-ready image attachment draft can be previewed and removed without restarting the app.",
       run: async (ctx) => {
-        await ctx.expectAnyText(ATTACH_IMAGE_LABELS, { timeoutMs: 8_000 });
-
         const adbPath = resolveAdbPath();
         const fallbackNode = await findAnyNodeNow(
           adbPath,
           ctx.serial,
           LOADED_TEXT_ATTACHMENT_FALLBACK_LABELS,
-          { visibleOnly: true }
+          { visibleOnly: true, matchMode: "fragment" }
         );
-        const attachNode = await findAnyNodeNow(
-          adbPath,
-          ctx.serial,
-          ATTACH_IMAGE_LABELS,
-          { visibleOnly: true }
-        );
-
         const previewNode = await findAnyNodeNow(
           adbPath,
           ctx.serial,
@@ -1144,7 +1268,6 @@ function buildScenarios() {
         );
 
         assertAttachmentPreviewRemovePreconditions({
-          attachNode,
           fallbackNode,
           previewNode,
           removeNode,
@@ -1156,13 +1279,7 @@ function buildScenarios() {
         });
         await waitForNoAnyNode(adbPath, ctx.serial, ATTACHMENT_PREVIEW_LABELS, { timeoutMs: 5_000 });
         await waitForNoAnyNode(adbPath, ctx.serial, REMOVE_ATTACHMENT_LABELS, { timeoutMs: 5_000 });
-        await ctx.expectAnyText(ATTACH_IMAGE_LABELS, { timeoutMs: 5_000 });
-        const restoredAttachNode = await findAnyNodeNow(
-          adbPath,
-          ctx.serial,
-          ATTACH_IMAGE_LABELS,
-          { visibleOnly: true }
-        );
+        const restoredAttachNode = await waitForSettledAttachImageAction(adbPath, ctx.serial, { timeoutMs: 5_000 });
         assertAttachmentActionAvailable(restoredAttachNode);
       },
     },
@@ -1172,20 +1289,13 @@ function buildScenarios() {
       description: "Verify a manually prepared vision-ready image attachment draft can be sent without restarting the app.",
       run: async (ctx) => {
         const preparedAttachmentSendPrompt = buildPreparedAttachmentSendPrompt();
-        await ctx.expectAnyText(ATTACH_IMAGE_LABELS, { timeoutMs: 8_000 });
 
         const adbPath = resolveAdbPath();
         const fallbackNode = await findAnyNodeNow(
           adbPath,
           ctx.serial,
           LOADED_TEXT_ATTACHMENT_FALLBACK_LABELS,
-          { visibleOnly: true }
-        );
-        const attachNode = await findAnyNodeNow(
-          adbPath,
-          ctx.serial,
-          ATTACH_IMAGE_LABELS,
-          { visibleOnly: true }
+          { visibleOnly: true, matchMode: "fragment" }
         );
         const previewNode = await findAnyNodeNow(
           adbPath,
@@ -1201,7 +1311,6 @@ function buildScenarios() {
         );
 
         assertAttachmentPreviewRemovePreconditions({
-          attachNode,
           fallbackNode,
           previewNode,
           removeNode,
@@ -2784,9 +2893,10 @@ function findNodesForLabelsInSnapshot(snapshot, labels, options = {}) {
 
 function findMatchingNodes(snapshot, label, options = {}) {
   const viewportBounds = options.visibleOnly ? snapshot.viewportBounds : null;
+  const matchNode = options.matchMode === "fragment" ? matchesUiFragment : matchesLabel;
 
   return snapshot.nodes.filter((node) => {
-    if (!matchesLabel(node, label)) {
+    if (!matchNode(node, label)) {
       return false;
     }
 
@@ -3549,6 +3659,8 @@ module.exports = {
   openFirstVisibleVariantPicker,
   prepareCatalogForVariantPickerSmokeScenario,
   findAnyNodeInSnapshot,
+  findAttachImageActionInSnapshot,
+  findAttachMenuActionInSnapshot,
   findAnyNodeClearOfBottomOverlay,
   findPreparedSentMessageContext,
   findPreparedAssistantResponseNode,
@@ -3573,5 +3685,6 @@ module.exports = {
   assertAttachmentActionAvailable,
   assertAttachmentPreviewRemovePreconditions,
   assertAttachmentTextOnlyFallbackState,
+  isAttachmentActionBusy,
   isPreparedAssistantResponseLabel,
 };

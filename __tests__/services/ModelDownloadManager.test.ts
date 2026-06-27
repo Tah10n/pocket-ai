@@ -2518,6 +2518,22 @@ describe('ModelDownloadManager Basic', () => {
       expect.objectContaining({
         id: mockModel.id,
         lifecycleStatus: LifecycleStatus.DOWNLOADED,
+        artifacts: expect.arrayContaining([
+          expect.objectContaining({
+            kind: 'main_model',
+            installState: 'installed',
+            localPath: expect.stringMatching(/^model-main-[a-z0-9]+\.gguf$/),
+            downloadProgress: 1,
+            integrity: expect.objectContaining({ kind: 'size', sizeBytes: 1000 }),
+          }),
+          expect.objectContaining({
+            id: mockProjector.id,
+            kind: 'multimodal_projector',
+            installState: 'installed',
+            localPath: expect.stringMatching(/^model-mmproj-model-main-[a-z0-9]+\.gguf$/),
+            sizeBytes: 1000,
+          }),
+        ]),
         projectorCandidates: [
           expect.objectContaining({
             id: mockProjector.id,
@@ -3542,6 +3558,21 @@ describe('ModelDownloadManager Basic', () => {
       downloadErrorAt: undefined,
       downloadErrorCode: undefined,
       downloadErrorMessage: undefined,
+      artifacts: expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'main_model',
+          installState: 'installed',
+          localPath: expect.stringMatching(/^model-main-[a-z0-9]+\.gguf$/),
+          downloadProgress: 1,
+          integrity: expect.objectContaining({ kind: 'size', sizeBytes: 1000 }),
+        }),
+        expect.objectContaining({
+          id: mockProjector.id,
+          kind: 'multimodal_projector',
+          installState: 'failed',
+          errorMessage: 'download_http_error',
+        }),
+      ]),
       projectorCandidates: [expect.objectContaining({
         id: mockProjector.id,
         lifecycleStatus: 'failed',
@@ -3957,6 +3988,14 @@ describe('ModelDownloadManager Basic', () => {
       lifecycleStatus: 'paused',
       resumeData: 'projector-resume-data',
     }));
+    expect(entry?.artifacts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: mockProjector.id,
+        kind: 'multimodal_projector',
+        installState: 'downloading',
+        resumeData: 'projector-resume-data',
+      }),
+    ]));
     expect(JSON.stringify(entry)).not.toMatch(/Authorization|Bearer/);
     expect(useDownloadStore.getState().activeDownloadId).toBeNull();
   });

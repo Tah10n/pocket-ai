@@ -76,6 +76,7 @@ jest.mock('expo-file-system/legacy', () => ({
     savable: jest.fn().mockReturnValue({ resumeData: 'resume-data' }),
   }),
   getInfoAsync: jest.fn().mockResolvedValue({ exists: true, size: 1024 }),
+  readAsStringAsync: jest.fn().mockResolvedValue(''),
   readDirectoryAsync: jest.fn().mockResolvedValue([]),
   deleteAsync: jest.fn().mockResolvedValue(undefined),
   copyAsync: jest.fn().mockResolvedValue(undefined),
@@ -83,8 +84,16 @@ jest.mock('expo-file-system/legacy', () => ({
   getFreeDiskStorageAsync: jest.fn().mockResolvedValue(10 * 1024 * 1024 * 1024),
   getTotalDiskCapacityAsync: jest.fn().mockResolvedValue(100 * 1024 * 1024 * 1024),
   makeDirectoryAsync: jest.fn().mockResolvedValue(undefined),
+  EncodingType: { Base64: 'base64', UTF8: 'utf8' },
   documentDirectory: 'test-dir/',
   cacheDirectory: 'test-cache/',
+}));
+
+jest.mock('expo-document-picker', () => ({
+  getDocumentAsync: jest.fn().mockResolvedValue({
+    canceled: true,
+    assets: null,
+  }),
 }));
 
 jest.mock('expo-image-manipulator', () => ({
@@ -147,6 +156,7 @@ jest.mock('expo-image-picker', () => ({
     canceled: false,
     assets: [],
   }),
+  getPendingResultAsync: jest.fn().mockResolvedValue(null),
 }));
 
 jest.mock('expo-notifications', () => ({

@@ -1792,11 +1792,38 @@ describe('LocalStorageRegistry', () => {
 
   it('persists and deep-clones projector associations on model records', () => {
     const projector = createProjector({ localPath: 'mmproj-model.gguf' });
+    const projectorArtifact = {
+      id: 'projector-extra-artifact',
+      kind: 'multimodal_projector' as const,
+      requiredFor: ['image' as const],
+      remoteFileName: projector.fileName,
+      downloadUrl: projector.downloadUrl,
+      sizeBytes: projector.size,
+      localPath: projector.localPath,
+      installState: 'installed' as const,
+      integrity: {
+        kind: 'size' as const,
+        sizeBytes: 1000,
+        checkedAt: 10,
+      },
+    };
     const freshRegistry = new (LocalStorageRegistry as any)();
     (freshRegistry as any).storage = mockStorage;
 
     freshRegistry.updateModel(createMockModel({
       chatModalities: ['text', 'vision'],
+      inputCapabilities: {
+        detectedAt: 100,
+        declared: {
+          image: 'supported',
+          audio: 'unknown',
+          video: 'unsupported',
+        },
+        evidence: [
+          { source: 'projector', value: projector.id, confidence: 'high' },
+        ],
+      },
+      artifacts: [projectorArtifact],
       projectorCandidates: [projector],
       selectedProjectorId: projector.id,
     }));
@@ -1808,13 +1835,47 @@ describe('LocalStorageRegistry', () => {
 
     const firstRead = freshRegistry.getModel(mockModel.id);
     firstRead?.projectorCandidates?.push(createProjector({ id: 'mutated-projector' }));
+    firstRead?.artifacts?.[0]?.requiredFor.push('audio');
+    if (firstRead?.artifacts?.[0]?.integrity) {
+      firstRead.artifacts[0].integrity.checkedAt = 999;
+    }
+    if (firstRead?.inputCapabilities) {
+      firstRead.inputCapabilities.declared.image = 'unsupported';
+      firstRead.inputCapabilities.evidence.push({
+        source: 'runtime',
+        value: 'mutated',
+        confidence: 'low',
+      });
+    }
 
     const secondRead = freshRegistry.getModel(mockModel.id);
+    const secondReadArtifact = secondRead?.artifacts?.find((
+      artifact: NonNullable<ModelMetadata['artifacts']>[number],
+    ) => artifact.id === projectorArtifact.id);
     expect(secondRead?.projectorCandidates).toHaveLength(1);
     expect(secondRead?.projectorCandidates?.[0]).toEqual(expect.objectContaining({
       id: projector.id,
       localPath: 'mmproj-model.gguf',
       lifecycleStatus: 'downloaded',
+    }));
+    expect(secondReadArtifact).toEqual(expect.objectContaining({
+      id: projectorArtifact.id,
+      requiredFor: ['image'],
+      integrity: {
+        kind: 'size',
+        sizeBytes: 1000,
+        checkedAt: 10,
+      },
+    }));
+    expect(secondRead?.inputCapabilities).toEqual(expect.objectContaining({
+      declared: {
+        image: 'supported',
+        audio: 'unknown',
+        video: 'unsupported',
+      },
+      evidence: [
+        { source: 'projector', value: projector.id, confidence: 'high' },
+      ],
     }));
   });
 

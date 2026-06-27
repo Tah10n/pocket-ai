@@ -104,6 +104,21 @@ describe('ModelCatalogFileSelector', () => {
     })).toBe(true);
   });
 
+  it.each([
+    'audio-text-to-text',
+    'automatic-speech-recognition',
+    'video-text-to-text',
+  ])('keeps GGUF multimodal chat catalog summaries eligible for %s', (pipelineTag) => {
+    expect(isCatalogSummarySupported({
+      id: `test-org/${pipelineTag}-model`,
+      pipeline_tag: pipelineTag,
+      tags: ['gguf'],
+      siblings: [
+        { rfilename: 'model.Q4_K_M.gguf', size: largeFileSize },
+      ],
+    })).toBe(true);
+  });
+
   it('still excludes GGUF catalog summaries with non-vision unsupported tags', () => {
     expect(isCatalogSummarySupported({
       id: 'test-org/audio-model',

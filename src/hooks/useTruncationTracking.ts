@@ -3,6 +3,7 @@ import { getThreadActiveModelId, type ChatThread, type LlmChatMessage } from '..
 import { llmEngineService } from '../services/LLMEngineService';
 import { registry } from '../services/LocalStorageRegistry';
 import { useModelRegistryRevision } from './useModelRegistryRevision';
+import type { MultimodalReadinessState } from '../types/multimodal';
 import {
   buildInferenceWindowWithAccurateTokenCounts,
   createTruncationState,
@@ -17,6 +18,53 @@ const EMPTY_TRUNCATION_STATE: TruncationState = {
   truncatedMessageIds: [],
   shouldOfferSummary: false,
 };
+
+function isAudioReady(readiness: MultimodalReadinessState | undefined, expectedModelId: string | null): boolean {
+  return readiness?.status === 'ready'
+    && readiness.support.includes('audio')
+    && (!expectedModelId || readiness.modelId === expectedModelId);
+}
+
+function sanitizeTruncationProbeMessages(
+  messages: LlmChatMessage[],
+  readiness: MultimodalReadinessState | undefined,
+  expectedModelId: string | null,
+): LlmChatMessage[] {
+  const retainAudio = isAudioReady(readiness, expectedModelId);
+
+  return messages.map((message) => {
+    const retainedAttachments = message.attachments?.filter((attachment) => {
+      if (!('kind' in attachment)) {
+        return true;
+      }
+
+      if (attachment.kind === 'audio') {
+        return retainAudio;
+      }
+
+      return attachment.kind !== 'video';
+    }) ?? [];
+    const retainedContentParts = message.contentParts?.filter((part) => (
+      part.type === 'input_audio'
+        ? false
+        : true
+    )) ?? [];
+    const retainedMediaPaths = message.mediaPaths ?? [];
+    const {
+      attachments: _attachments,
+      mediaPaths: _mediaPaths,
+      contentParts: _contentParts,
+      ...messageWithoutAudioInput
+    } = message;
+
+    return {
+      ...messageWithoutAudioInput,
+      ...(retainedAttachments.length > 0 ? { attachments: retainedAttachments } : null),
+      ...(retainedMediaPaths.length > 0 ? { mediaPaths: retainedMediaPaths } : null),
+      ...(retainedContentParts.length > 0 ? { contentParts: retainedContentParts } : null),
+    };
+  });
+}
 
 export function useTruncationTracking(
   activeThread: ChatThread | null,
@@ -135,7 +183,11 @@ export function useTruncationTracking(
 
     const countPromptTokens = async (messages: LlmChatMessage[]) =>
       llmEngineService.countPromptTokens({
-        messages,
+        messages: sanitizeTruncationProbeMessages(
+          messages,
+          activeThreadMultimodalReadiness,
+          activeThreadModelId,
+        ),
         params: tokenCountParams,
         multimodalReadiness: activeThreadMultimodalReadiness,
         expectedModelId: activeThreadModelId,

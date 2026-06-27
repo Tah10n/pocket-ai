@@ -464,6 +464,14 @@ describe('ErrorReportSanitizer', () => {
         type: 'text',
         text: 'Loose private text part',
       },
+      looseAudioPart: {
+        type: 'input_audio',
+        input_audio: {
+          format: 'mp3',
+          data: 'QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo1234567890',
+          url: 'file:///private/var/mobile/audio.mp3',
+        },
+      },
       safeMetadata: {
         role: 'user',
         tokenCount: 42,
@@ -481,6 +489,7 @@ describe('ErrorReportSanitizer', () => {
     expect(serialized).not.toContain('Describe my private photo');
     expect(serialized).not.toContain('Hidden multimodal user text');
     expect(serialized).not.toContain('Loose private text part');
+    expect(serialized).not.toContain('QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo');
     expect(serialized).not.toContain('file:///private/var/mobile');
   });
 

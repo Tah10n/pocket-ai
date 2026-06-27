@@ -25,7 +25,13 @@ export type AppErrorCode =
   | 'chat_attachment_copy_failed'
   | 'chat_attachment_limit_exceeded'
   | 'chat_attachment_missing'
-  | 'chat_attachment_not_ready';
+  | 'chat_attachment_not_ready'
+  | 'chat_attachment_unsupported_type'
+  | 'chat_attachment_corrupt'
+  | 'chat_attachment_parse_failed'
+  | 'chat_attachment_too_large_for_context'
+  | 'chat_attachment_document_encrypted'
+  | 'chat_attachment_document_no_extractable_text';
 
 const ERROR_MESSAGE_KEYS: Partial<Record<AppErrorCode, string>> = {
   engine_not_ready: 'common.errors.engineNotReady',

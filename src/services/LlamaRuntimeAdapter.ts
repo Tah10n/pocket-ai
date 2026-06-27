@@ -109,11 +109,17 @@ function readStringArray(value: unknown): string[] | undefined {
 }
 
 function shouldNormalizeCompletionMessages(messages: unknown): messages is LlmChatMessage[] {
-  return Array.isArray(messages) && messages.every((message) => (
-    isRecord(message)
-    && typeof message.role === 'string'
-    && typeof message.content === 'string'
-  ));
+  return Array.isArray(messages) && messages.every((message) => {
+    if (
+      !isRecord(message)
+      || typeof message.role !== 'string'
+      || typeof message.content !== 'string'
+    ) {
+      return false;
+    }
+
+    return message.contentParts === undefined || Array.isArray(message.contentParts);
+  });
 }
 
 function readGrammarTriggers(value: unknown): { type: number; value: string; token: number }[] | undefined {
@@ -151,6 +157,80 @@ function assertRecord(value: unknown, label: string): Record<string, unknown> {
   return value;
 }
 
+function normalizeLlmContentParts(value: unknown, messageIndex: number): RNLlamaMessagePart[] {
+  if (value === undefined) {
+    return [];
+  }
+
+  if (!Array.isArray(value)) {
+    throw new Error(`[LLMEngine] Invalid chat message at index ${messageIndex}: contentParts must be an array`);
+  }
+
+  return value.map((entry, partIndex) => {
+    if (!isRecord(entry)) {
+      throw new Error(`[LLMEngine] Invalid chat message at index ${messageIndex}: contentParts[${partIndex}] must be an object`);
+    }
+
+    const type = readTrimmedString(entry.type);
+    if (type === 'text') {
+      const text = readString(entry.text);
+      if (text === undefined) {
+        throw new Error(`[LLMEngine] Invalid chat message at index ${messageIndex}: contentParts[${partIndex}].text must be a string`);
+      }
+
+      return { type, text };
+    }
+
+    if (type === 'image_url') {
+      const imageUrl = assertRecord(entry.image_url, `chat message ${messageIndex} contentParts[${partIndex}].image_url`);
+      const url = readTrimmedString(imageUrl.url);
+      if (!url) {
+        throw new Error(`[LLMEngine] Invalid chat message at index ${messageIndex}: contentParts[${partIndex}].image_url.url must be a non-empty string`);
+      }
+
+      return { type, image_url: { url } };
+    }
+
+    if (type === 'input_audio') {
+      const inputAudio = assertRecord(entry.input_audio, `chat message ${messageIndex} contentParts[${partIndex}].input_audio`);
+      const format = readTrimmedString(inputAudio.format);
+      if (format !== 'wav' && format !== 'mp3') {
+        throw new Error(`[LLMEngine] Invalid chat message at index ${messageIndex}: contentParts[${partIndex}].input_audio.format must be wav or mp3`);
+      }
+
+      const url = readTrimmedString(inputAudio.url);
+      const data = readTrimmedString(inputAudio.data);
+      if ((url ? 1 : 0) + (data ? 1 : 0) !== 1) {
+        throw new Error(`[LLMEngine] Invalid chat message at index ${messageIndex}: contentParts[${partIndex}].input_audio must include exactly one of url or data`);
+      }
+
+      return {
+        type,
+        input_audio: {
+          format,
+          ...(url ? { url } : null),
+          ...(data ? { data } : null),
+        },
+      };
+    }
+
+    throw new Error(`[LLMEngine] Invalid chat message at index ${messageIndex}: unsupported contentParts[${partIndex}] type`);
+  });
+}
+
+function hasNonTextContentParts(parts: readonly RNLlamaMessagePart[]): boolean {
+  return parts.some((part) => part.type !== 'text');
+}
+
+function hasEquivalentTextContentPart(parts: readonly RNLlamaMessagePart[], content: string): boolean {
+  const trimmedContent = content.trim();
+  return parts.some((part) => (
+    part.type === 'text'
+    && typeof part.text === 'string'
+    && part.text.trim() === trimmedContent
+  ));
+}
+
 export function normalizeLlamaMessages(messages: LlmChatMessage[]): RNLlamaOAICompatibleMessage[] {
   if (!Array.isArray(messages)) {
     throw new Error('[LLMEngine] Invalid chat messages: expected array');
@@ -171,20 +251,28 @@ export function normalizeLlamaMessages(messages: LlmChatMessage[]): RNLlamaOAICo
       throw new Error(`[LLMEngine] Invalid chat message at index ${index}: unsupported role`);
     }
 
+    const contentParts = normalizeLlmContentParts((message as { contentParts?: unknown }).contentParts, index);
+    if (role !== 'user' && hasNonTextContentParts(contentParts)) {
+      throw new Error(`[LLMEngine] Invalid chat message at index ${index}: media contentParts are only supported for user messages`);
+    }
+
     const mediaPaths = role === 'user'
       ? readStringArray((message as { mediaPaths?: unknown }).mediaPaths)
       : undefined;
 
-    if (mediaPaths && mediaPaths.length > 0) {
-      const contentParts: RNLlamaMessagePart[] = [
-        ...(content.trim().length > 0 ? [{ type: 'text', text: content }] : []),
-        ...mediaPaths.map((url) => ({
+    if (contentParts.length > 0 || (mediaPaths && mediaPaths.length > 0)) {
+      const shouldUseContentFallback = content.trim().length > 0
+        && !hasEquivalentTextContentPart(contentParts, content);
+      const nativeContentParts: RNLlamaMessagePart[] = [
+        ...(shouldUseContentFallback ? [{ type: 'text', text: content }] : []),
+        ...contentParts,
+        ...(mediaPaths ?? []).map((url) => ({
           type: 'image_url',
           image_url: { url },
         })),
       ];
 
-      return { role, content: contentParts };
+      return { role, content: nativeContentParts };
     }
 
     return { role, content };

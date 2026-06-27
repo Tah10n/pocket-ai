@@ -429,6 +429,44 @@ describe('LLMEngineService', () => {
     expect(serializedDiagnostics).not.toContain('test-dir/models/mmproj-model.gguf');
   });
 
+  it('forwards structured image content parts without duplicating them as legacy media paths', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+
+    await llmEngineService.load('test/model');
+
+    await llmEngineService.chatCompletion({
+      messages: [{
+        role: 'user',
+        content: 'Describe this',
+        contentParts: [
+          { type: 'image_url', image_url: { url: 'test-dir/chat-attachments/image.jpg' } },
+        ],
+      }],
+      multimodalReadiness: {
+        modelId: 'test/model',
+        status: 'ready',
+        projectorId: downloadedProjector.id,
+        support: ['vision'],
+        checkedAt: 1,
+      },
+      params: { n_predict: 32 },
+    });
+
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        media_paths: ['test-dir/chat-attachments/image.jpg'],
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: 'Describe this' },
+            { type: 'image_url', image_url: { url: 'test-dir/chat-attachments/image.jpg' } },
+          ],
+        }],
+      }),
+      expect.any(Function),
+    );
+  });
+
   it('rejects explicit media paths outside app-owned chat attachment storage', async () => {
     (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
 
@@ -436,6 +474,37 @@ describe('LLMEngineService', () => {
 
     await expect(llmEngineService.chatCompletion({
       messages: [{ role: 'user', content: 'Describe this', mediaPaths: ['/private/tmp/image.jpg'] }],
+      multimodalReadiness: {
+        modelId: 'test/model',
+        status: 'ready',
+        projectorId: downloadedProjector.id,
+        support: ['vision'],
+        checkedAt: 1,
+      },
+      params: { n_predict: 32 },
+    })).rejects.toMatchObject({
+      code: 'chat_attachment_not_ready',
+      details: expect.objectContaining({
+        pathCategory: 'non_chat_attachment',
+      }),
+    });
+
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects structured image content parts outside app-owned chat attachment storage', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+
+    await llmEngineService.load('test/model');
+
+    await expect(llmEngineService.chatCompletion({
+      messages: [{
+        role: 'user',
+        content: 'Describe this',
+        contentParts: [
+          { type: 'image_url', image_url: { url: '/private/tmp/image.jpg' } },
+        ],
+      }],
       multimodalReadiness: {
         modelId: 'test/model',
         status: 'ready',
@@ -1934,6 +2003,75 @@ describe('LLMEngineService', () => {
     expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).not.toHaveBeenCalled();
   });
 
+  it('rejects structured audio content parts when runtime audio readiness is missing', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+
+    await llmEngineService.load('test/model');
+
+    await expect(llmEngineService.chatCompletion({
+      messages: [{
+        role: 'user',
+        content: 'Transcribe this',
+        contentParts: [
+          { type: 'input_audio', input_audio: { format: 'wav', url: 'file:///document/audio.wav' } },
+        ],
+      }],
+      multimodalReadiness: {
+        modelId: 'test/model',
+        status: 'ready',
+        projectorId: downloadedProjector.id,
+        support: ['vision'],
+        checkedAt: 1,
+      },
+      params: { n_predict: 32 },
+    })).rejects.toMatchObject({
+      code: 'multimodal_not_ready',
+      details: expect.objectContaining({
+        audioInputCount: 1,
+      }),
+    });
+
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).not.toHaveBeenCalled();
+  });
+
+  it('forwards structured audio content parts when runtime audio readiness is available', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+    getMultimodalSupportMock().mockResolvedValue({ vision: true, audio: true });
+
+    await llmEngineService.load('test/model');
+
+    await llmEngineService.chatCompletion({
+      messages: [{
+        role: 'user',
+        content: 'Transcribe this',
+        contentParts: [
+          { type: 'input_audio', input_audio: { format: 'wav', url: 'file:///document/audio.wav' } },
+        ],
+      }],
+      multimodalReadiness: {
+        modelId: 'test/model',
+        status: 'ready',
+        projectorId: downloadedProjector.id,
+        support: ['audio'],
+        checkedAt: 1,
+      },
+      params: { n_predict: 32 },
+    });
+
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: 'Transcribe this' },
+            { type: 'input_audio', input_audio: { format: 'wav', url: 'file:///document/audio.wav' } },
+          ],
+        }],
+      }),
+      expect.any(Function),
+    );
+  });
+
   it('rejects requests with more than the supported image attachment limit before native completion', async () => {
     await llmEngineService.load('test/model');
 
@@ -2389,6 +2527,38 @@ describe('LLMEngineService', () => {
       expect.any(Object),
     );
     expect(getTokenizeMock()).toHaveBeenCalledWith('Formatted prompt', undefined);
+  });
+
+  it('preserves text content parts when prompt tokenization strips media inputs', async () => {
+    getFormattedChatMock().mockResolvedValueOnce({
+      prompt: 'Formatted document prompt',
+      has_media: false,
+      additional_stops: [],
+    });
+    await llmEngineService.load('test/model');
+
+    await llmEngineService.countPromptTokens({
+      messages: [{
+        role: 'user',
+        content: '',
+        contentParts: [
+          { type: 'text', text: 'Document attachment text\n\nImportant notes' },
+        ],
+      }],
+      allowMediaFallback: true,
+    });
+
+    expect(getFormattedChatMock()).toHaveBeenCalledWith(
+      [{
+        role: 'user',
+        content: [
+          { type: 'text', text: 'Document attachment text\n\nImportant notes' },
+        ],
+      }],
+      null,
+      expect.any(Object),
+    );
+    expect(getTokenizeMock()).toHaveBeenCalledWith('Formatted document prompt', undefined);
   });
 
   it('rejects prompt tokenization with media when multimodal readiness is not ready by default', async () => {
@@ -3222,6 +3392,50 @@ describe('LLMEngineService', () => {
     );
   });
 
+  it('preserves document text content parts when retrying strict alternation normalization', async () => {
+    const completionMock = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock;
+    getFormattedChatMock().mockResolvedValue({
+      type: 'jinja',
+      prompt: '<|user|>\nHello',
+      additional_stops: [],
+    });
+    completionMock
+      .mockRejectedValueOnce(new Error('Conversation roles must alternate user/assistant'))
+      .mockResolvedValueOnce({ text: 'Recovered reply' });
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    await expect(llmEngineService.chatCompletion({
+      messages: [
+        { role: 'user', content: 'Previous question.' },
+        {
+          role: 'user',
+          content: '',
+          contentParts: [
+            { type: 'text', text: 'Document attachment text\n\nImportant notes' },
+          ],
+        },
+      ],
+      params: { n_predict: 64 },
+    })).resolves.toEqual({ text: 'Recovered reply' });
+
+    expect(completionMock).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        messages: [
+          expect.objectContaining({
+            role: 'user',
+            content: expect.arrayContaining([
+              { type: 'text', text: 'Previous question.\n\n' },
+              { type: 'text', text: 'Document attachment text\n\nImportant notes' },
+            ]),
+          }),
+        ],
+      }),
+      expect.any(Function),
+    );
+  });
+
   it('falls back to Llama system wrapping for legacy formatted payloads without type metadata', async () => {
     const completionMock = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock;
     getFormattedChatMock().mockResolvedValue({
@@ -3309,7 +3523,7 @@ describe('LLMEngineService', () => {
     );
   });
 
-  it('keeps multimodal projector image token limits native-controlled while setting safe batch params', async () => {
+  it('caps multimodal projector image tokens while setting safe batch params', async () => {
     (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
 
     await llmEngineService.load('test/model', { forceReload: true });
@@ -3325,10 +3539,10 @@ describe('LLMEngineService', () => {
     expect(getInitMultimodalMock()).toHaveBeenCalledWith(
       expect.objectContaining({
         path: 'test-dir/models/mmproj-model.gguf',
+        image_max_tokens: 512,
       }),
     );
     expect(getInitMultimodalMock().mock.calls[0][0]).not.toHaveProperty('image_min_tokens');
-    expect(getInitMultimodalMock().mock.calls[0][0]).not.toHaveProperty('image_max_tokens');
   });
 
   it('raises unsafe custom micro-batch settings to match the multimodal decode batch size', async () => {
@@ -3354,10 +3568,10 @@ describe('LLMEngineService', () => {
     expect(getInitMultimodalMock()).toHaveBeenCalledWith(
       expect.objectContaining({
         path: 'test-dir/models/mmproj-model.gguf',
+        image_max_tokens: 512,
       }),
     );
     expect(getInitMultimodalMock().mock.calls[0][0]).not.toHaveProperty('image_min_tokens');
-    expect(getInitMultimodalMock().mock.calls[0][0]).not.toHaveProperty('image_max_tokens');
   });
 
   it('keeps low-memory multimodal batch profiles safe for non-causal image decode', () => {

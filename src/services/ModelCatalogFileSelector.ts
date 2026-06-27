@@ -75,10 +75,13 @@ const EXCLUDED_CATALOG_PIPELINE_TAGS = new Set([
   'automatic-speech-recognition',
 ]);
 
-const VISION_CHAT_PIPELINE_TAGS = new Set([
+const MULTIMODAL_CHAT_PIPELINE_TAGS = new Set([
   'image-text-to-text',
   'visual-question-answering',
   'document-question-answering',
+  'audio-text-to-text',
+  'automatic-speech-recognition',
+  'video-text-to-text',
 ]);
 
 const EXCLUDED_CATALOG_SIGNAL_EXACT_MATCHES = new Set([
@@ -116,7 +119,7 @@ export function filterCatalogSearchModels(models: ModelMetadata[]): ModelMetadat
 }
 
 export function isCatalogSummarySupported(item: HuggingFaceModelSummary): boolean {
-  const allowVisionPipelineTag = hasGgufSummarySignal(item);
+  const allowMultimodalChatPipelineTag = hasGgufSummarySignal(item);
 
   return !hasUnsupportedCatalogSignals({
     identifiers: [item.id, item.modelId],
@@ -129,7 +132,7 @@ export function isCatalogSummarySupported(item: HuggingFaceModelSummary): boolea
     ],
     architectures: item.config?.architectures,
     config: item.config,
-    allowVisionPipelineTag,
+    allowMultimodalChatPipelineTag,
   });
 }
 
@@ -151,10 +154,10 @@ function hasUnsupportedCatalogSignals(options: {
   architectures?: string[];
   config?: HuggingFaceModelConfig;
   ggufMetadata?: Record<string, unknown>;
-  allowVisionPipelineTag?: boolean;
+  allowMultimodalChatPipelineTag?: boolean;
 }): boolean {
   const pipelineTag = normalizeCatalogSignal(options.pipelineTag);
-  if (pipelineTag && isExcludedCatalogPipelineSignal(pipelineTag, options.allowVisionPipelineTag)) {
+  if (pipelineTag && isExcludedCatalogPipelineSignal(pipelineTag, options.allowMultimodalChatPipelineTag)) {
     return true;
   }
 
@@ -173,16 +176,16 @@ function hasUnsupportedCatalogSignals(options: {
   ];
 
   return signals.some((signal) => (
-    isExcludedCatalogPipelineSignal(signal, options.allowVisionPipelineTag)
+    isExcludedCatalogPipelineSignal(signal, options.allowMultimodalChatPipelineTag)
     || EXCLUDED_CATALOG_SIGNAL_EXACT_MATCHES.has(signal)
     || EXCLUDED_CATALOG_SIGNAL_FRAGMENTS.some((fragment) => signal.includes(fragment))
     || hasUnsupportedMtpSignal(signal)
   ));
 }
 
-function isExcludedCatalogPipelineSignal(signal: string, allowVisionPipelineTag: boolean | undefined): boolean {
+function isExcludedCatalogPipelineSignal(signal: string, allowMultimodalChatPipelineTag: boolean | undefined): boolean {
   return EXCLUDED_CATALOG_PIPELINE_TAGS.has(signal)
-    && !(allowVisionPipelineTag === true && VISION_CHAT_PIPELINE_TAGS.has(signal));
+    && !(allowMultimodalChatPipelineTag === true && MULTIMODAL_CHAT_PIPELINE_TAGS.has(signal));
 }
 
 function normalizeCatalogSignal(value: string | null | undefined): string | null {

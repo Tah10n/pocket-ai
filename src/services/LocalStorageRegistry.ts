@@ -45,6 +45,9 @@ type QuarantinedModelFile = {
 
 type QueuedModelFileNamesInput = string[] | (() => string[]);
 
+type ModelArtifact = NonNullable<ModelMetadata['artifacts']>[number];
+type ModelInputCapabilities = NonNullable<ModelMetadata['inputCapabilities']>;
+
 type ModelDirectoryEntryInspection =
   | { kind: 'file'; fileUri: string }
   | { kind: 'directory' | 'missing' | 'unknown'; fileUri?: string };
@@ -55,6 +58,22 @@ function cloneCalibrationRecord(record: CalibrationRecord): CalibrationRecord {
 
 function cloneProjectorArtifact(projector: ProjectorArtifact): ProjectorArtifact {
   return { ...projector };
+}
+
+function cloneModelArtifact(artifact: ModelArtifact): ModelArtifact {
+  return {
+    ...artifact,
+    requiredFor: [...artifact.requiredFor],
+    integrity: artifact.integrity ? { ...artifact.integrity } : undefined,
+  };
+}
+
+function cloneInputCapabilities(inputCapabilities: ModelInputCapabilities): ModelInputCapabilities {
+  return {
+    ...inputCapabilities,
+    declared: { ...inputCapabilities.declared },
+    evidence: inputCapabilities.evidence.map((entry) => ({ ...entry })),
+  };
 }
 
 function cloneMultimodalReadinessState(readiness: MultimodalReadinessState): MultimodalReadinessState {
@@ -454,7 +473,11 @@ function cloneModelMetadata(model: ModelMetadata): ModelMetadata {
     languages: model.languages ? [...model.languages] : undefined,
     tags: model.tags ? [...model.tags] : undefined,
     variants: model.variants?.map(cloneModelVariant),
+    artifacts: model.artifacts?.map(cloneModelArtifact),
     chatModalities: model.chatModalities ? [...model.chatModalities] : undefined,
+    inputCapabilities: model.inputCapabilities
+      ? cloneInputCapabilities(model.inputCapabilities)
+      : undefined,
     projectorCandidates: model.projectorCandidates?.map(cloneProjectorArtifact),
     multimodalReadiness: model.multimodalReadiness
       ? cloneMultimodalReadinessState(model.multimodalReadiness)

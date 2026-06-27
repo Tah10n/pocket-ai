@@ -264,13 +264,21 @@ export function toAttachmentMediaPath(localUri: string): string | null {
 }
 
 export function getChatImageAttachmentMediaPaths(
-  attachments: readonly Pick<ChatImageAttachment, 'localUri'>[] | undefined,
+  attachments: readonly (Pick<ChatImageAttachment, 'localUri'> & { kind?: unknown; state?: unknown })[] | undefined,
 ): string[] {
   if (!attachments || attachments.length === 0) {
     return [];
   }
 
   return attachments.flatMap((attachment) => {
+    if ('kind' in attachment && attachment.kind !== undefined && attachment.kind !== 'image') {
+      return [];
+    }
+
+    if ('state' in attachment && attachment.state !== undefined && attachment.state !== 'ready') {
+      return [];
+    }
+
     const localUri = normalizeChatAttachmentLocalUri(attachment.localUri);
     const mediaPath = localUri ? toAttachmentMediaPath(localUri) : null;
     return mediaPath ? [mediaPath] : [];
@@ -278,21 +286,24 @@ export function getChatImageAttachmentMediaPaths(
 }
 
 export function summarizeChatImageAttachments(
-  attachments: readonly Pick<ChatImageAttachment, 'size'>[] | undefined,
+  attachments: readonly (Pick<ChatImageAttachment, 'size'> & { kind?: unknown; sizeBytes?: unknown })[] | undefined,
 ): { count: number; totalBytes?: number } {
   if (!attachments || attachments.length === 0) {
     return { count: 0 };
   }
 
-  const totalBytes = attachments.reduce((sum, attachment) => {
-    const size = attachment.size;
+  const imageAttachments = attachments.filter((attachment) => (
+    !('kind' in attachment) || attachment.kind === undefined || attachment.kind === 'image'
+  ));
+  const totalBytes = imageAttachments.reduce((sum, attachment) => {
+    const size = typeof attachment.sizeBytes === 'number' ? attachment.sizeBytes : attachment.size;
     return typeof size === 'number' && Number.isFinite(size) && size > 0
       ? sum + Math.round(size)
       : sum;
   }, 0);
 
   return {
-    count: attachments.length,
+    count: imageAttachments.length,
     ...(totalBytes > 0 ? { totalBytes } : null),
   };
 }

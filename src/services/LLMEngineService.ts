@@ -124,6 +124,7 @@ import {
   sanitizeMultimodalFailureCategory,
   sanitizeMultimodalFailureReason,
 } from '../utils/multimodalFailureReason';
+import { getLlmContentPartSignatureEntry } from '../utils/llmContentPartSignature';
 import type {
   MultimodalDiagnosticsSummary,
   MultimodalReadinessState,
@@ -151,6 +152,7 @@ type ChatCompletionReasoningFormat = NonNullable<NonNullable<LlmChatCompletionOp
 const DEFAULT_CONTEXT_SIZE = 4096;
 const DEFAULT_LLAMA_NATIVE_MICRO_BATCH_TOKENS = 512;
 const DEFAULT_LLAMA_NATIVE_MULTIMODAL_BATCH_TOKENS = 512;
+const DEFAULT_LLAMA_NATIVE_MULTIMODAL_IMAGE_MAX_TOKENS = 512;
 const MAX_NATIVE_LOG_LINES = 120;
 const MAX_ADDITIONAL_STOP_WORDS_CACHE_ENTRIES = 8;
 const CONTEXT_OPERATION_UNLOAD_DRAIN_TIMEOUT_MS = 5000;
@@ -300,15 +302,65 @@ function normalizeMediaPathOrThrow(path: string): string {
   return mediaPath;
 }
 
-function getMessageMediaPaths(message: LlmChatMessage): string[] {
+function getMessageContentPartImagePaths(message: LlmChatMessage): string[] {
+  return normalizeMediaPaths(
+    message.contentParts
+      ?.filter((part) => part.type === 'image_url')
+      .map((part) => part.image_url.url),
+  );
+}
+
+function getMessageContentPartImagePathOccurrences(message: LlmChatMessage): string[] {
+  return normalizeMediaPathOccurrences(
+    message.contentParts
+      ?.filter((part) => part.type === 'image_url')
+      .map((part) => part.image_url.url),
+  );
+}
+
+function countMessageAudioInputOccurrences(message: LlmChatMessage): number {
+  return message.contentParts?.filter((part) => {
+    if (part.type !== 'input_audio') {
+      return false;
+    }
+
+    const url = part.input_audio.url?.trim() ?? '';
+    const data = part.input_audio.data?.trim() ?? '';
+    return url.length > 0 || data.length > 0;
+  }).length ?? 0;
+}
+
+function getMessageTextContentParts(message: LlmChatMessage) {
+  return message.contentParts?.filter((part) => part.type === 'text' && part.text.trim().length > 0) ?? [];
+}
+
+function countMessageTextContentOccurrences(message: LlmChatMessage): number {
+  return getMessageTextContentParts(message).length;
+}
+
+function getMessageContentPartSignatureEntries(message: LlmChatMessage): string[] {
+  return message.contentParts?.map(getLlmContentPartSignatureEntry) ?? [];
+}
+
+function getMessageLegacyMediaPaths(message: LlmChatMessage): string[] {
   return normalizeMediaPaths([
     ...(message.mediaPaths ?? []),
     ...getChatImageAttachmentMediaPaths(message.attachments),
   ]);
 }
 
+function getMessageMediaPaths(message: LlmChatMessage): string[] {
+  return normalizeMediaPaths([
+    ...getMessageLegacyMediaPaths(message),
+    ...getMessageContentPartImagePaths(message),
+  ]);
+}
+
 function getMessageMediaPathOccurrences(message: LlmChatMessage): string[] {
-  const explicitMediaPaths = normalizeMediaPathOccurrences(message.mediaPaths);
+  const explicitMediaPaths = normalizeMediaPathOccurrences([
+    ...(message.mediaPaths ?? []),
+    ...getMessageContentPartImagePathOccurrences(message),
+  ]);
   const attachmentMediaPaths = normalizeMediaPathOccurrences(
     getChatImageAttachmentMediaPaths(message.attachments),
   );
@@ -348,6 +400,13 @@ function countMessageMediaPathOccurrences(messages: readonly LlmChatMessage[]): 
   );
 }
 
+function countMessageAudioInputOccurrencesInMessages(messages: readonly LlmChatMessage[]): number {
+  return messages.reduce(
+    (count, message) => count + countMessageAudioInputOccurrences(message),
+    0,
+  );
+}
+
 function countMergedRequestMediaPathOccurrences(
   originalMessages: readonly LlmChatMessage[],
   topLevelMediaPaths: readonly string[] | undefined,
@@ -375,7 +434,7 @@ function getLatestUserMessageIndex(messages: readonly LlmChatMessage[]): number 
 }
 
 function withResolvedMediaPaths(message: LlmChatMessage): LlmChatMessage {
-  const mediaPaths = getMessageMediaPaths(message);
+  const mediaPaths = getMessageLegacyMediaPaths(message);
   const { mediaPaths: _mediaPaths, ...messageWithoutMediaPaths } = message;
   return {
     ...messageWithoutMediaPaths,
@@ -386,10 +445,15 @@ function withResolvedMediaPaths(message: LlmChatMessage): LlmChatMessage {
 function withoutMediaPaths(message: LlmChatMessage): LlmChatMessage {
   const {
     attachments: _attachments,
+    contentParts,
     mediaPaths: _mediaPaths,
     ...messageWithoutMedia
   } = message;
-  return messageWithoutMedia;
+  const textContentParts = getMessageTextContentParts({ ...message, contentParts });
+  return {
+    ...messageWithoutMedia,
+    ...(textContentParts.length > 0 ? { contentParts: textContentParts } : null),
+  };
 }
 
 function sanitizeErrorMessageForDiagnostics(error: unknown): string {
@@ -462,7 +526,7 @@ function mergeTopLevelMediaPathsIntoLatestUserMessage(
     return withResolvedMediaPaths({
       ...message,
       mediaPaths: normalizeMediaPaths([
-        ...getMessageMediaPaths(message),
+        ...getMessageLegacyMediaPaths(message),
         ...mediaPathsToAppend,
       ]),
     });
@@ -502,6 +566,33 @@ function assertMultimodalReadyForMediaPaths(
       readinessModelId: readiness?.modelId,
       expectedModelId: expectedModelId ?? undefined,
       mediaPathCount: mediaPathOccurrenceCount,
+    },
+  });
+}
+
+function assertMultimodalReadyForAudioInputs(
+  audioInputCount: number,
+  readiness: LlmChatCompletionOptions['multimodalReadiness'],
+  expectedModelId?: string | null,
+): void {
+  if (audioInputCount === 0) {
+    return;
+  }
+
+  if (
+    readiness?.status === 'ready'
+    && readiness.support.includes('audio')
+    && (!expectedModelId || readiness.modelId === expectedModelId)
+  ) {
+    return;
+  }
+
+  throw new AppError('multimodal_not_ready', 'Audio chat is not ready for audio attachments.', {
+    details: {
+      readinessStatus: readiness?.status ?? 'unknown',
+      readinessModelId: readiness?.modelId,
+      expectedModelId: expectedModelId ?? undefined,
+      audioInputCount,
     },
   });
 }
@@ -644,9 +735,13 @@ function mergeConsecutiveMessages(messages: LlmChatMessage[]): LlmChatMessage[] 
     const lastMessage = merged[merged.length - 1];
     if (lastMessage.role === message.role) {
       const mediaPaths = normalizeMediaPaths([
-        ...getMessageMediaPaths(lastMessage),
-        ...getMessageMediaPaths(normalizedMessage),
+        ...getMessageLegacyMediaPaths(lastMessage),
+        ...getMessageLegacyMediaPaths(normalizedMessage),
       ]);
+      const contentParts = [
+        ...(lastMessage.contentParts ?? []),
+        ...(normalizedMessage.contentParts ?? []),
+      ];
       merged[merged.length - 1] = {
         ...lastMessage,
         role: lastMessage.role,
@@ -655,6 +750,7 @@ function mergeConsecutiveMessages(messages: LlmChatMessage[]): LlmChatMessage[] 
           ...(lastMessage.attachments ?? []),
           ...(normalizedMessage.attachments ?? []),
         ],
+        ...(contentParts.length > 0 ? { contentParts } : null),
         ...(mediaPaths.length > 0 ? { mediaPaths } : null),
       };
       continue;
@@ -710,8 +806,10 @@ function normalizeMessagesForStrictRoleAlternation(
 
   for (const message of messages) {
     const content = message.content ?? '';
-    const mediaPaths = getMessageMediaPaths(message);
-    if (content.trim().length === 0 && mediaPaths.length === 0) {
+    const mediaInputCount = getMessageMediaPathOccurrences(message).length
+      + countMessageAudioInputOccurrences(message);
+    const textContentPartCount = countMessageTextContentOccurrences(message);
+    if (content.trim().length === 0 && mediaInputCount === 0 && textContentPartCount === 0) {
       continue;
     }
 
@@ -1684,6 +1782,13 @@ class LLMEngineService {
         hash = this.updateCacheHash(hash, mediaPath);
         hash = this.updateCacheHash(hash, '\u0004');
       }
+      const contentPartEntries = getMessageContentPartSignatureEntries(message);
+      hash = this.updateCacheHash(hash, String(contentPartEntries.length));
+      hash = this.updateCacheHash(hash, '\u0005');
+      for (const contentPartEntry of contentPartEntries) {
+        hash = this.updateCacheHash(hash, contentPartEntry);
+        hash = this.updateCacheHash(hash, '\u0006');
+      }
     }
 
     return `${messages.length}:${hash.toString(36)}`;
@@ -2593,14 +2698,16 @@ class LLMEngineService {
     const requestMessages = mergeTopLevelMediaPathsIntoLatestUserMessage(messages, mediaPaths);
     const requestMediaPaths = getMessagesMediaPaths(requestMessages);
     const requestMediaPathOccurrenceCount = countMergedRequestMediaPathOccurrences(messages, mediaPaths);
+    const requestAudioInputOccurrenceCount = countMessageAudioInputOccurrencesInMessages(requestMessages);
+    const requestMediaInputOccurrenceCount = requestMediaPathOccurrenceCount + requestAudioInputOccurrenceCount;
     const effectiveMultimodalReadiness = this.resolveLatestMultimodalReadinessForRequest(multimodalReadiness);
-    const shouldRecordMultimodalDiagnostics = requestMediaPaths.length > 0
+    const shouldRecordMultimodalDiagnostics = requestMediaInputOccurrenceCount > 0
       || (effectiveMultimodalReadiness !== undefined && effectiveMultimodalReadiness.status !== 'ready');
     if (shouldRecordMultimodalDiagnostics) {
       this.recordRecentMultimodalDiagnostics({
         messages: requestMessages,
         mediaPaths: requestMediaPaths,
-        mediaPathOccurrenceCount: requestMediaPathOccurrenceCount,
+        mediaPathOccurrenceCount: requestMediaInputOccurrenceCount,
         readiness: effectiveMultimodalReadiness,
       });
     }
@@ -2611,11 +2718,16 @@ class LLMEngineService {
         requestMediaPathOccurrenceCount,
         this.state.activeModelId,
       );
+      assertMultimodalReadyForAudioInputs(
+        requestAudioInputOccurrenceCount,
+        effectiveMultimodalReadiness,
+        this.state.activeModelId,
+      );
     } catch (error) {
       this.recordRecentMultimodalDiagnostics({
         messages: requestMessages,
         mediaPaths: requestMediaPaths,
-        mediaPathOccurrenceCount: requestMediaPathOccurrenceCount,
+        mediaPathOccurrenceCount: requestMediaInputOccurrenceCount,
         readiness: effectiveMultimodalReadiness,
         failureReason: effectiveMultimodalReadiness?.failureReason ?? getErrorMessageText(error),
       });
@@ -2646,11 +2758,15 @@ class LLMEngineService {
             effectiveMultimodalReadiness,
             requestMediaPathOccurrenceCount,
           );
+          this.assertActiveMultimodalRuntimeReadyForAudioInputs(
+            requestAudioInputOccurrenceCount,
+            effectiveMultimodalReadiness,
+          );
         } catch (error) {
           this.recordRecentMultimodalDiagnostics({
             messages: requestMessages,
             mediaPaths: requestMediaPaths,
-            mediaPathOccurrenceCount: requestMediaPathOccurrenceCount,
+            mediaPathOccurrenceCount: requestMediaInputOccurrenceCount,
             readiness: effectiveMultimodalReadiness,
             failureReason: effectiveMultimodalReadiness?.failureReason ?? getErrorMessageText(error),
           });
@@ -2765,11 +2881,11 @@ class LLMEngineService {
           throw error;
         }
       } catch (error) {
-        if (requestMediaPaths.length > 0) {
+        if (requestMediaInputOccurrenceCount > 0) {
           this.recordRecentMultimodalDiagnostics({
             messages: requestMessages,
             mediaPaths: requestMediaPaths,
-            mediaPathOccurrenceCount: requestMediaPathOccurrenceCount,
+            mediaPathOccurrenceCount: requestMediaInputOccurrenceCount,
             readiness: effectiveMultimodalReadiness,
             failureReason: getErrorMessageText(error),
           });
@@ -3008,12 +3124,14 @@ class LLMEngineService {
     const mediaAwareMessages = messages.map(withResolvedMediaPaths);
     const mediaPaths = getMessagesMediaPaths(mediaAwareMessages);
     const mediaPathOccurrenceCount = countMessageMediaPathOccurrences(mediaAwareMessages);
+    const audioInputOccurrenceCount = countMessageAudioInputOccurrencesInMessages(mediaAwareMessages);
+    const mediaInputOccurrenceCount = mediaPathOccurrenceCount + audioInputOccurrenceCount;
     const effectiveMultimodalReadiness = this.resolveLatestMultimodalReadinessForRequest(
       multimodalReadiness,
       expectedModelId,
     );
     const shouldUseMediaPaths = (() => {
-      if (mediaPathOccurrenceCount === 0) {
+      if (mediaInputOccurrenceCount === 0) {
         return false;
       }
 
@@ -3022,6 +3140,11 @@ class LLMEngineService {
           mediaPaths,
           effectiveMultimodalReadiness,
           mediaPathOccurrenceCount,
+          expectedModelId,
+        );
+        assertMultimodalReadyForAudioInputs(
+          audioInputOccurrenceCount,
+          effectiveMultimodalReadiness,
           expectedModelId,
         );
         return true;
@@ -3864,6 +3987,7 @@ class LLMEngineService {
         context,
         path: resolvedProjector.projectorPath,
         useGpu,
+        imageMaxTokens: DEFAULT_LLAMA_NATIVE_MULTIMODAL_IMAGE_MAX_TOKENS,
       });
 
       if (!didInitialize) {
@@ -4004,6 +4128,47 @@ class LLMEngineService {
           mediaPathCount: mediaPathOccurrenceCount,
           nBatch: nativeBatchSafety.nBatch,
           nUbatch: nativeBatchSafety.nUbatch,
+        },
+      });
+    }
+  }
+
+  private assertActiveMultimodalRuntimeReadyForAudioInputs(
+    audioInputCount: number,
+    readiness: MultimodalReadinessState | undefined,
+  ): void {
+    if (audioInputCount === 0) {
+      return;
+    }
+
+    const activeMultimodal = this.activeMultimodalContext;
+    if (!activeMultimodal || activeMultimodal.modelId !== this.state.activeModelId) {
+      throw new AppError('multimodal_not_ready', 'Multimodal runtime is not initialized for the active model.', {
+        details: {
+          activeModelId: this.state.activeModelId,
+          readinessStatus: readiness?.status,
+          audioInputCount,
+        },
+      });
+    }
+
+    if (readiness?.modelId && readiness.modelId !== activeMultimodal.modelId) {
+      throw new AppError('multimodal_not_ready', 'Multimodal readiness belongs to a different model.', {
+        details: {
+          activeModelId: this.state.activeModelId,
+          readinessModelId: readiness.modelId,
+          audioInputCount,
+        },
+      });
+    }
+
+    if (readiness?.projectorId && readiness.projectorId !== activeMultimodal.projectorId) {
+      throw new AppError('multimodal_not_ready', 'Multimodal runtime is initialized with a different projector.', {
+        details: {
+          activeModelId: this.state.activeModelId,
+          readinessProjectorId: readiness.projectorId,
+          runtimeProjectorId: activeMultimodal.projectorId,
+          audioInputCount,
         },
       });
     }

@@ -1,5 +1,6 @@
 import { normalizePersistedModelMetadata } from '../../src/services/ModelMetadataNormalizer';
 import { LifecycleStatus, ModelAccessState } from '../../src/types/models';
+import { buildMainModelArtifactId } from '../../src/utils/modelArtifacts';
 
 const VALID_SHA256 = 'a'.repeat(64);
 const OTHER_VALID_SHA256 = 'b'.repeat(64);
@@ -50,6 +51,9 @@ describe('ModelMetadataNormalizer', () => {
       lifecycleStatus: LifecycleStatus.DOWNLOADED,
       downloadProgress: 1,
       localPath: 'legacy_model.gguf',
+      resolvedFileName: 'legacy_model.gguf',
+      size: 2048,
+      downloadUrl: 'https://huggingface.co/legacy/model/resolve/main/legacy_model.gguf',
       downloadIntegrity: {
         kind: 'size',
         sizeBytes: 2048,
@@ -62,6 +66,117 @@ describe('ModelMetadataNormalizer', () => {
       sizeBytes: 2048,
       checkedAt: 10,
     });
+    expect(normalized.artifacts).toEqual([
+      expect.objectContaining({
+        kind: 'main_model',
+        requiredFor: ['text'],
+        remoteFileName: 'legacy_model.gguf',
+        localPath: 'legacy_model.gguf',
+        installState: 'installed',
+        integrity: {
+          kind: 'size',
+          sizeBytes: 2048,
+          checkedAt: 10,
+        },
+      }),
+    ]);
+  });
+
+  it('syncs main artifact runtime state from normalized legacy download fields', () => {
+    const resolvedFileName = 'legacy_model.Q4_K_M.gguf';
+    const mainArtifactId = buildMainModelArtifactId({
+      id: 'legacy/model',
+      hfRevision: 'main',
+      resolvedFileName,
+    });
+
+    const normalized = normalizePersistedModelMetadata({
+      id: 'legacy/model',
+      hfRevision: 'main',
+      resolvedFileName,
+      lifecycleStatus: LifecycleStatus.DOWNLOADING,
+      downloadProgress: 0.58,
+      resumeData: JSON.stringify({ resumeData: 'fresh-main-resume' }),
+      artifacts: [
+        {
+          id: mainArtifactId,
+          kind: 'main_model',
+          requiredFor: ['text'],
+          hfRevision: 'main',
+          remoteFileName: resolvedFileName,
+          downloadUrl: 'https://example.com/legacy_model.Q4_K_M.gguf',
+          sizeBytes: 2048,
+          localPath: 'stale-partial.gguf',
+          installState: 'remote',
+          downloadProgress: 0.9,
+          resumeData: 'stale-main-resume',
+          errorCode: 'download_http_error',
+          errorMessage: 'stale failure',
+          updatedAt: 20,
+        },
+      ],
+    });
+
+    const mainArtifact = normalized.artifacts?.find((artifact) => artifact.id === mainArtifactId);
+    expect(mainArtifact).toEqual(expect.objectContaining({
+      installState: 'downloading',
+      downloadProgress: 0.58,
+      resumeData: 'fresh-main-resume',
+    }));
+    expect(mainArtifact?.localPath).toBeUndefined();
+    expect(mainArtifact?.errorCode).toBeUndefined();
+    expect(mainArtifact?.errorMessage).toBeUndefined();
+    expect(mainArtifact?.updatedAt).toBeUndefined();
+  });
+
+  it('syncs projector artifact runtime state from normalized projector candidates', () => {
+    const normalized = normalizePersistedModelMetadata({
+      id: 'author/vision-model',
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      localPath: 'vision-model.Q4_K_M.gguf',
+      resolvedFileName: 'vision-model.Q4_K_M.gguf',
+      artifacts: [
+        {
+          id: 'projector-a',
+          kind: 'multimodal_projector',
+          requiredFor: ['image'],
+          remoteFileName: 'stale-mmproj.gguf',
+          downloadUrl: 'https://example.com/stale-mmproj.gguf',
+          sizeBytes: 100,
+          localPath: 'stale-partial-mmproj.gguf',
+          installState: 'downloading',
+          downloadProgress: 0.9,
+          resumeData: 'stale-projector-resume',
+        },
+      ],
+      projectorCandidates: [
+        {
+          id: 'projector-a',
+          ownerModelId: 'author/vision-model',
+          repoId: 'author/vision-model',
+          fileName: 'fresh-mmproj.gguf',
+          downloadUrl: 'https://example.com/fresh-mmproj.gguf',
+          size: 200,
+          lifecycleStatus: 'failed',
+          matchStatus: 'failed',
+          matchReason: 'projector download failed',
+        },
+      ],
+    });
+
+    const projectorArtifact = normalized.artifacts?.find((artifact) => artifact.id === 'projector-a');
+    expect(projectorArtifact).toEqual(expect.objectContaining({
+      id: 'projector-a',
+      remoteFileName: 'fresh-mmproj.gguf',
+      downloadUrl: 'https://example.com/fresh-mmproj.gguf',
+      sizeBytes: 200,
+      installState: 'failed',
+      errorMessage: 'projector download failed',
+    }));
+    expect(projectorArtifact?.localPath).toBeUndefined();
+    expect(projectorArtifact?.downloadProgress).toBeUndefined();
+    expect(projectorArtifact?.resumeData).toBeUndefined();
   });
 
   it('drops invalid sha integrity markers without a digest', () => {
@@ -185,6 +300,7 @@ describe('ModelMetadataNormalizer', () => {
     expect(normalized.downloadErrorAt).toBeUndefined();
     expect(normalized.downloadErrorCode).toBeUndefined();
     expect(normalized.downloadErrorMessage).toBeUndefined();
+    expect(normalized.artifacts).toBeUndefined();
   });
 
   it('preserves prefixed GGUF metadata keys needed by memory-fit estimation', () => {
@@ -289,6 +405,19 @@ describe('ModelMetadataNormalizer', () => {
       artifactRole: 'primary_chat_model',
       visionSource: 'tree_probe',
       visionConfidence: 'trusted',
+      inputCapabilities: {
+        detectedAt: 123.8,
+        declared: {
+          image: 'supported',
+          audio: 'maybe' as never,
+          video: 'unsupported',
+        },
+        evidence: [
+          { source: 'pipeline_tag', value: ' image-text-to-text ', confidence: 'high' },
+          { source: 'pipeline_tag', value: 'image-text-to-text', confidence: 'high' },
+          { source: 'unknown_source' as never, value: 'vision', confidence: 'high' },
+        ],
+      },
       selectedProjectorId: 'projector-author-vision-model-main-vision-model.Q4_K_M.gguf-mmproj-vision-model-f16.gguf',
       projectorCandidates: [
         {
@@ -324,6 +453,17 @@ describe('ModelMetadataNormalizer', () => {
       artifactRole: 'primary_chat_model',
       visionSource: 'tree_probe',
       visionConfidence: 'trusted',
+      inputCapabilities: {
+        detectedAt: 124,
+        declared: {
+          image: 'supported',
+          audio: 'unknown',
+          video: 'unsupported',
+        },
+        evidence: [
+          { source: 'pipeline_tag', value: 'image-text-to-text', confidence: 'high' },
+        ],
+      },
       selectedProjectorId: 'projector-author-vision-model-main-vision-model.Q4_K_M.gguf-mmproj-vision-model-f16.gguf',
     }));
     expect(normalized.projectorCandidates).toEqual([
@@ -339,6 +479,17 @@ describe('ModelMetadataNormalizer', () => {
         variantId: 'vision-model.Q4_K_M.gguf',
         chatModalities: ['text', 'vision'],
         artifactRole: 'primary_chat_model',
+      }),
+    ]);
+    expect(normalized.artifacts).toEqual([
+      expect.objectContaining({
+        kind: 'multimodal_projector',
+        id: 'projector-author-vision-model-main-vision-model.Q4_K_M.gguf-mmproj-vision-model-f16.gguf',
+        requiredFor: ['image'],
+        remoteFileName: 'mmproj-vision-model-f16.gguf',
+        localPath: 'mmproj-vision-model-f16.gguf',
+        installState: 'installed',
+        sizeBytes: 536_870_912,
       }),
     ]);
   });

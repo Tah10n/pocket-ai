@@ -7,6 +7,7 @@ import type {
   VisionCapabilityConfidence,
   VisionCapabilitySource,
 } from './multimodal';
+import type { ModelInputCapabilitySnapshot } from './modelInputCapabilities';
 
 export enum LifecycleStatus {
   AVAILABLE = 'available',
@@ -95,6 +96,40 @@ export interface ModelFileIntegrityMarker {
   sha256?: string;
 }
 
+export type ModelArtifactKind =
+  | 'main_model'
+  | 'multimodal_projector';
+
+export type ModelArtifactRequiredInput = 'text' | 'image' | 'audio';
+
+export type ModelArtifactInstallState =
+  | 'remote'
+  | 'queued'
+  | 'downloading'
+  | 'verifying'
+  | 'installed'
+  | 'failed'
+  | 'missing';
+
+export interface ModelArtifactMetadata {
+  id: string;
+  kind: ModelArtifactKind;
+  requiredFor: ModelArtifactRequiredInput[];
+  hfRevision?: string;
+  remoteFileName: string;
+  downloadUrl: string;
+  sizeBytes: number | null;
+  sha256?: string;
+  localPath?: string;
+  installState: ModelArtifactInstallState;
+  downloadProgress?: number;
+  resumeData?: string;
+  integrity?: ModelFileIntegrityMarker;
+  errorCode?: string;
+  errorMessage?: string;
+  updatedAt?: number;
+}
+
 export interface ModelMetadata {
   id: string;
   name: string;
@@ -143,7 +178,9 @@ export interface ModelMetadata {
   variants?: ModelVariant[];
   activeVariantId?: string;
   thinkingCapability?: ModelThinkingCapabilitySnapshot;
+  artifacts?: ModelArtifactMetadata[];
   chatModalities?: ModelChatModality[];
+  inputCapabilities?: ModelInputCapabilitySnapshot;
   artifactRole?: ModelArtifactRole;
   visionSource?: VisionCapabilitySource;
   visionConfidence?: VisionCapabilityConfidence;

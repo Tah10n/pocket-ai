@@ -3,10 +3,14 @@ import { manipulateAsync } from 'expo-image-manipulator';
 import {
   ChatAttachmentStorageService,
   buildFailedAttachmentDraft,
+  buildFailedDocumentAttachmentDraft,
+  buildFailedMediaAttachmentDraft,
   collectChatAttachmentLocalUrisFromUnknownThreadRecord,
   collectReferencedChatAttachmentLocalUrisFromThreads,
   getChatAttachmentsDir,
   materializeAttachmentDraftsForMessage,
+  materializeDocumentDraftsForProcessing,
+  materializeMediaDraftsForMessage,
 } from '../../src/services/ChatAttachmentStorageService';
 import {
   chatAttachmentMessageId,
@@ -18,6 +22,10 @@ import {
   MAX_CHAT_IMAGE_ATTACHMENT_BYTES,
   MAX_CHAT_IMAGE_ATTACHMENT_SIDE_PIXELS,
 } from '../../src/utils/chatImageAttachments';
+import {
+  MAX_CHAT_PDF_DOCUMENT_ATTACHMENT_BYTES,
+  MAX_CHAT_TEXT_DOCUMENT_ATTACHMENT_BYTES,
+} from '../../src/utils/chatAttachments';
 
 describe('ChatAttachmentStorageService', () => {
   beforeEach(() => {
@@ -101,6 +109,218 @@ describe('ChatAttachmentStorageService', () => {
 
     expect(FileSystem.makeDirectoryAsync).not.toHaveBeenCalled();
     expect(FileSystem.copyAsync).not.toHaveBeenCalled();
+  });
+
+  it('copies a picked text document into app-owned chat attachment storage', async () => {
+    (FileSystem.getInfoAsync as jest.Mock)
+      .mockResolvedValueOnce({ exists: false })
+      .mockResolvedValueOnce({ exists: true, size: 120 });
+    const service = new ChatAttachmentStorageService({
+      now: () => 123,
+      random: () => 0.456,
+    });
+
+    const draft = await service.copyDocumentAssetToDraft({
+      uri: 'content://documents/notes',
+      name: 'Meeting notes.md',
+      size: 120,
+      mimeType: 'text/markdown',
+    });
+
+    expect(FileSystem.makeDirectoryAsync).toHaveBeenCalledWith('test-dir/chat-attachments/', {
+      intermediates: true,
+    });
+    expect(FileSystem.copyAsync).toHaveBeenCalledWith({
+      from: 'content://documents/notes',
+      to: 'test-dir/chat-attachments/draft-123-gez4w9.md',
+    });
+    expect(draft).toEqual({
+      id: 'draft-123-gez4w9',
+      pickerUri: 'content://documents/notes',
+      localUri: 'test-dir/chat-attachments/draft-123-gez4w9.md',
+      pathCategory: 'chat_attachment',
+      fileName: 'draft-123-gez4w9.md',
+      displayName: 'Meeting notes.md',
+      mimeType: 'text/markdown',
+      sizeBytes: 120,
+      source: 'document_picker',
+      createdAt: 123,
+      copyStatus: 'copied',
+    });
+
+    await service.discardDocumentDraft(draft);
+
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/chat-attachments/draft-123-gez4w9.md', {
+      idempotent: true,
+    });
+  });
+
+  it('copies picked PDFs into app-owned chat attachment storage for local processing', async () => {
+    (FileSystem.getInfoAsync as jest.Mock)
+      .mockResolvedValueOnce({ exists: false })
+      .mockResolvedValueOnce({ exists: true, size: 1024 });
+    const service = new ChatAttachmentStorageService({
+      now: () => 123,
+      random: () => 0.456,
+    });
+
+    const draft = await service.copyDocumentAssetToDraft({
+      uri: 'content://documents/contract.pdf',
+      name: 'contract.pdf',
+      size: 1024,
+      mimeType: 'application/pdf',
+    });
+
+    expect(FileSystem.copyAsync).toHaveBeenCalledWith({
+      from: 'content://documents/contract.pdf',
+      to: 'test-dir/chat-attachments/draft-123-gez4w9.pdf',
+    });
+    expect(draft).toEqual(expect.objectContaining({
+      fileName: 'draft-123-gez4w9.pdf',
+      displayName: 'contract.pdf',
+      mimeType: 'application/pdf',
+      sizeBytes: 1024,
+      copyStatus: 'copied',
+    }));
+  });
+
+  it('rejects unsupported and oversized picked documents before copying into storage', async () => {
+    const service = new ChatAttachmentStorageService();
+
+    await expect(service.copyDocumentAssetToDraft({
+      uri: 'content://documents/contract.docx',
+      name: 'contract.docx',
+      size: 120,
+      mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    })).rejects.toThrow('unsupported');
+
+    await expect(service.copyDocumentAssetToDraft({
+      uri: 'content://documents/large.txt',
+      name: 'large.txt',
+      size: MAX_CHAT_TEXT_DOCUMENT_ATTACHMENT_BYTES + 1,
+      mimeType: 'text/plain',
+    })).rejects.toThrow('size limits');
+
+    await expect(service.copyDocumentAssetToDraft({
+      uri: 'content://documents/large.pdf',
+      name: 'large.pdf',
+      size: MAX_CHAT_PDF_DOCUMENT_ATTACHMENT_BYTES + 1,
+      mimeType: 'application/pdf',
+    })).rejects.toThrow('size limits');
+
+    expect(FileSystem.copyAsync).not.toHaveBeenCalled();
+  });
+
+  it('copies picked WAV/MP3 audio into app-owned chat attachment storage', async () => {
+    (FileSystem.getInfoAsync as jest.Mock)
+      .mockResolvedValueOnce({ exists: false })
+      .mockResolvedValueOnce({ exists: true, size: 4096 });
+    const service = new ChatAttachmentStorageService({
+      now: () => 123,
+      random: () => 0.456,
+    });
+
+    const draft = await service.copyAudioAssetToDraft({
+      uri: 'content://documents/voice',
+      name: 'voice.mp3',
+      size: 4096,
+      mimeType: 'audio/mpeg',
+    });
+
+    expect(FileSystem.copyAsync).toHaveBeenCalledWith({
+      from: 'content://documents/voice',
+      to: 'test-dir/chat-attachments/draft-123-gez4w9.mp3',
+    });
+    expect(draft).toEqual(expect.objectContaining({
+      kind: 'audio',
+      localUri: 'test-dir/chat-attachments/draft-123-gez4w9.mp3',
+      mimeType: 'audio/mpeg',
+      sizeBytes: 4096,
+      copyStatus: 'copied',
+      audio: { format: 'mp3' },
+    }));
+
+    expect(materializeMediaDraftsForMessage({
+      threadId: 'thread-1',
+      messageId: 'message-1',
+      drafts: [draft],
+      now: () => 200,
+    })).toEqual([
+      expect.objectContaining({
+        id: 'draft-123-gez4w9',
+        kind: 'audio',
+        threadId: 'thread-1',
+        messageId: 'message-1',
+        localUri: 'test-dir/chat-attachments/draft-123-gez4w9.mp3',
+        mimeType: 'audio/mpeg',
+        source: 'document_picker',
+        audio: { format: 'mp3' },
+      }),
+    ]);
+  });
+
+  it('materializes copied document drafts for processor input and failed metadata for previews', () => {
+    const copiedDraft = {
+      id: 'document-1',
+      pickerUri: 'content://documents/notes.txt',
+      localUri: 'test-dir/chat-attachments/document-1.txt',
+      pathCategory: 'chat_attachment' as const,
+      fileName: 'document-1.txt',
+      displayName: 'notes.txt',
+      mimeType: 'text/plain',
+      sizeBytes: 120,
+      source: 'document_picker' as const,
+      createdAt: 7,
+      copyStatus: 'copied' as const,
+    };
+
+    expect(materializeDocumentDraftsForProcessing({
+      threadId: 'thread-1',
+      messageId: 'message-1',
+      drafts: [copiedDraft],
+      now: () => 10,
+    })).toEqual([
+      expect.objectContaining({
+        id: 'document-1',
+        kind: 'document',
+        state: 'processing',
+        threadId: 'thread-1',
+        messageId: 'message-1',
+        localUri: 'test-dir/chat-attachments/document-1.txt',
+        mimeType: 'text/plain',
+        sizeBytes: 120,
+        source: 'document_picker',
+        document: {
+          processorId: 'pending',
+          processorVersion: 1,
+        },
+      }),
+    ]);
+
+    expect(buildFailedDocumentAttachmentDraft({
+      uri: 'content://documents/broken.pdf',
+      name: 'broken.pdf',
+      mimeType: 'application/pdf',
+      size: 120,
+    }, 'unsupported_type')).toEqual(expect.objectContaining({
+      pickerUri: 'content://documents/broken.pdf',
+      fileName: 'broken.pdf',
+      mimeType: 'application/pdf',
+      sizeBytes: 120,
+      copyStatus: 'failed',
+      errorReason: 'unsupported_type',
+    }));
+    expect(buildFailedMediaAttachmentDraft('audio', {
+      uri: 'content://documents/broken.aac',
+      name: 'broken.aac',
+      mimeType: 'audio/aac',
+      size: 120,
+    }, 'unsupported_type')).toEqual(expect.objectContaining({
+      kind: 'audio',
+      pickerUri: 'content://documents/broken.aac',
+      copyStatus: 'failed',
+      errorReason: 'unsupported_type',
+    }));
   });
 
   it('rejects oversized picked image metadata before copying into storage', async () => {

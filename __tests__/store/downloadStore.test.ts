@@ -5,6 +5,7 @@ import {
 } from '../../src/store/downloadStore';
 import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../src/types/models';
 import type { ProjectorArtifact } from '../../src/types/multimodal';
+import { buildMainModelArtifactId } from '../../src/utils/modelArtifacts';
 
 function buildQueuedModel(
   id: string,
@@ -728,6 +729,48 @@ describe('downloadStore', () => {
     useDownloadStore.getState().addToQueue(buildQueuedModel('new', LifecycleStatus.AVAILABLE));
     const entry = useDownloadStore.getState().queue.find((model) => model.id === 'new');
     expect(entry?.lifecycleStatus).toBe(LifecycleStatus.QUEUED);
+  });
+
+  it('keeps queued main artifact runtime state synchronized with queue updates', () => {
+    const resolvedFileName = 'artifact-model.Q4_K_M.gguf';
+    const modelId = 'artifact/model';
+    const mainArtifactId = buildMainModelArtifactId({
+      id: modelId,
+      hfRevision: 'main',
+      resolvedFileName,
+    });
+
+    useDownloadStore.getState().addToQueue({
+      ...buildQueuedModel(modelId, LifecycleStatus.AVAILABLE),
+      hfRevision: 'main',
+      resolvedFileName,
+      artifacts: [
+        {
+          id: mainArtifactId,
+          kind: 'main_model',
+          requiredFor: ['text'],
+          hfRevision: 'main',
+          remoteFileName: resolvedFileName,
+          downloadUrl: 'https://example.com/artifact-model.Q4_K_M.gguf',
+          sizeBytes: 1024,
+          installState: 'remote',
+        },
+      ],
+    });
+
+    useDownloadStore.getState().updateModelInQueue(modelId, {
+      lifecycleStatus: LifecycleStatus.DOWNLOADING,
+      downloadProgress: 0.5,
+      resumeData: 'main-resume-data',
+    });
+
+    const entry = useDownloadStore.getState().queue.find((model) => model.id === modelId);
+    const mainArtifact = entry?.artifacts?.find((artifact) => artifact.id === mainArtifactId);
+    expect(mainArtifact).toEqual(expect.objectContaining({
+      installState: 'downloading',
+      downloadProgress: 0.5,
+      resumeData: 'main-resume-data',
+    }));
   });
 
   it('ignores addToQueue when the model is already queued or in-flight', () => {

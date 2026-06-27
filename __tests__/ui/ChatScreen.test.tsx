@@ -1,6 +1,6 @@
 import React from 'react';
 import { act, fireEvent, render, waitFor } from '@testing-library/react-native';
-import { Alert } from 'react-native';
+import { Alert, Platform } from 'react-native';
 
 jest.mock('react-native-css-interop', () => {
   const mockReact = require('react');
@@ -608,11 +608,14 @@ const {
   ChatScreen,
   getFlashListAutoScrollBottomThreshold,
   getNextShouldStickToBottom,
+  getAndroidFloatingComposerBottomOffset,
   getAndroidKeyboardOverlapCompensation,
   getAndroidKeyboardSpacerHeight,
+  getChatListBottomChromeInset,
   getChatWarmupBannerBottomOffset,
   handleAndroidBackNavigation,
   resolveFallbackMultimodalReadiness,
+  shouldRenderAndroidKeyboardSpacer,
   shouldFloatAndroidComposerOverContent,
 } = require('../../src/ui/screens/ChatScreen');
 const { useChatStore } = require('../../src/store/chatStore');
@@ -745,6 +748,7 @@ function setImageOnlyRegenerateThread() {
 }
 
 describe('ChatScreen', () => {
+  const originalPlatformOS = Platform.OS;
   let alertSpy: jest.SpyInstance;
 
   beforeAll(() => {
@@ -757,6 +761,7 @@ describe('ChatScreen', () => {
 
   beforeEach(() => {
     reactI18nextMock.__resetTranslations();
+    Object.defineProperty(Platform, 'OS', { configurable: true, get: () => originalPlatformOS });
     mockRegenerateFromUserMessage.mockClear();
     mockAppendUserMessage.mockReset();
     mockAppendUserMessage.mockResolvedValue(undefined);
@@ -1867,7 +1872,7 @@ describe('ChatScreen', () => {
     })).toBe(48);
   });
 
-  it('floats the Android composer only for glass chrome while the keyboard is hidden', () => {
+  it('keeps the Android glass composer floating across keyboard visibility changes', () => {
     expect(shouldFloatAndroidComposerOverContent({
       platform: 'android',
       surfaceKind: 'glass',
@@ -1882,11 +1887,92 @@ describe('ChatScreen', () => {
       platform: 'android',
       surfaceKind: 'glass',
       isKeyboardVisible: true,
-    })).toBe(false);
+    })).toBe(true);
     expect(shouldFloatAndroidComposerOverContent({
       platform: 'ios',
       surfaceKind: 'glass',
       isKeyboardVisible: false,
+    })).toBe(false);
+  });
+
+  it('uses the tab bar inset for the hidden-keyboard Android floating composer position', () => {
+    expect(getAndroidFloatingComposerBottomOffset({
+      tabBarInset: 92,
+      androidKeyboardInset: 0,
+      isKeyboardVisible: false,
+      gap: 12,
+    })).toBe(92);
+  });
+
+  it('uses the measured keyboard inset for the visible-keyboard Android floating composer position', () => {
+    expect(getAndroidFloatingComposerBottomOffset({
+      tabBarInset: 92,
+      androidKeyboardInset: 220,
+      isKeyboardVisible: true,
+      gap: 12,
+    })).toBe(220);
+  });
+
+  it('keeps a minimum keyboard gap before the first Android composer measurement settles', () => {
+    expect(getAndroidFloatingComposerBottomOffset({
+      tabBarInset: 92,
+      androidKeyboardInset: 0,
+      isKeyboardVisible: true,
+      gap: 12,
+    })).toBe(12);
+  });
+
+  it('reserves stable list padding for the floating Android composer while the keyboard is hidden', () => {
+    expect(getChatListBottomChromeInset({
+      composerContainerHeight: 64,
+      tabBarInset: 92,
+      androidKeyboardInset: 0,
+      shouldFloatComposerOverContent: true,
+      isKeyboardVisible: false,
+      gap: 12,
+    })).toBe(168);
+  });
+
+  it('reserves stable list padding for the floating Android composer while the keyboard is visible', () => {
+    expect(getChatListBottomChromeInset({
+      composerContainerHeight: 64,
+      tabBarInset: 92,
+      androidKeyboardInset: 220,
+      shouldFloatComposerOverContent: true,
+      isKeyboardVisible: true,
+      gap: 12,
+    })).toBe(296);
+  });
+
+  it('does not reserve composer height in list padding when the composer is in normal flow', () => {
+    expect(getChatListBottomChromeInset({
+      composerContainerHeight: 64,
+      tabBarInset: 92,
+      androidKeyboardInset: 220,
+      shouldFloatComposerOverContent: false,
+      isKeyboardVisible: true,
+      gap: 12,
+    })).toBe(92);
+  });
+
+  it('does not render an Android keyboard spacer when the composer already floats above the keyboard', () => {
+    expect(shouldRenderAndroidKeyboardSpacer({
+      platform: 'android',
+      shouldFloatComposerOverContent: true,
+      androidKeyboardInset: 220,
+    })).toBe(false);
+  });
+
+  it('renders an Android keyboard spacer only for normal-flow composer positioning', () => {
+    expect(shouldRenderAndroidKeyboardSpacer({
+      platform: 'android',
+      shouldFloatComposerOverContent: false,
+      androidKeyboardInset: 220,
+    })).toBe(true);
+    expect(shouldRenderAndroidKeyboardSpacer({
+      platform: 'ios',
+      shouldFloatComposerOverContent: false,
+      androidKeyboardInset: 220,
     })).toBe(false);
   });
 
@@ -1897,6 +1983,16 @@ describe('ChatScreen', () => {
       androidKeyboardInset: 0,
       shouldFloatComposerOverContent: true,
     })).toBe(156);
+  });
+
+  it('keeps the warmup banner above the floating Android composer and keyboard', () => {
+    expect(getChatWarmupBannerBottomOffset({
+      composerContainerHeight: 64,
+      tabBarInset: 92,
+      androidKeyboardInset: 220,
+      shouldFloatComposerOverContent: true,
+      isKeyboardVisible: true,
+    })).toBe(284);
   });
 
   it('keeps the warmup banner above the Android keyboard spacer when the composer is not floating', () => {

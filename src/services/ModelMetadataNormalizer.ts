@@ -23,7 +23,12 @@ import type {
   VisionCapabilityConfidence,
   VisionCapabilitySource,
 } from '../types/multimodal';
+import {
+  deriveArtifactsFromLegacyModel,
+  normalizePersistedModelArtifacts,
+} from '../utils/modelArtifacts';
 import { normalizePersistedModelCapabilitySnapshot } from '../utils/modelCapabilities';
+import { normalizePersistedInputCapabilitySnapshot } from '../utils/modelInputCapabilities';
 import { dedupeModelVariantsByIdentity } from '../utils/modelVariantIdentity';
 import { getShortModelLabel } from '../utils/modelLabel';
 import { buildHuggingFaceResolveUrl } from '../utils/huggingFaceUrls';
@@ -595,12 +600,18 @@ export function normalizePersistedModelMetadata(
   );
   const activeVariantId = resolveActiveVariantId(normalizedActiveVariantId, normalizedResolvedFileName, variants);
   const chatModalities = normalizeChatModalities(model.chatModalities);
+  const inputCapabilities = normalizePersistedInputCapabilitySnapshot(
+    (model as PersistedModelMetadata & { inputCapabilities?: unknown }).inputCapabilities,
+  );
   const artifactRole = normalizeModelArtifactRole(model.artifactRole)
     ?? (normalizedResolvedFileName ? resolveModelArtifactRole(normalizedResolvedFileName) : undefined);
   const visionSource = normalizeVisionCapabilitySource(model.visionSource);
   const visionConfidence = normalizeVisionCapabilityConfidence(model.visionConfidence);
   const projectorCandidates = normalizeProjectorArtifacts(model.projectorCandidates);
   const selectedProjectorId = normalizeNonEmptyString(model.selectedProjectorId);
+  const persistedArtifacts = normalizePersistedModelArtifacts(
+    (model as PersistedModelMetadata & { artifacts?: unknown }).artifacts,
+  );
   const multimodalReadiness = normalizeMultimodalReadinessState(
     (model as PersistedModelMetadata & { multimodalReadiness?: unknown }).multimodalReadiness,
   );
@@ -662,6 +673,31 @@ export function normalizePersistedModelMetadata(
     sha256: normalizedSha256,
     size,
   }, (model as PersistedModelMetadata & { capabilitySnapshot?: ModelCapabilitySnapshot }).capabilitySnapshot);
+  const artifacts = deriveArtifactsFromLegacyModel({
+    artifacts: persistedArtifacts,
+    downloadErrorAt,
+    downloadErrorCode,
+    downloadErrorMessage,
+    downloadIntegrity,
+    downloadProgress,
+    downloadUrl,
+    hfRevision: normalizedRevision,
+    id: model.id,
+    inputCapabilities,
+    lifecycleStatus,
+    localPath,
+    multimodalReadiness,
+    projectorCandidates,
+    resolvedFileName: normalizeNonEmptyString(model.resolvedFileName),
+    resumeData,
+    selectedProjectorId,
+    sha256: normalizedSha256,
+    size,
+  }, {
+    preferLegacyRuntimeState: true,
+  });
+  const shouldPersistArtifacts = artifacts.length > 0
+    && (persistedArtifacts !== undefined || localPath !== undefined || projectorCandidates !== undefined);
 
   return {
     id: model.id,
@@ -720,6 +756,8 @@ export function normalizePersistedModelMetadata(
     variants,
     activeVariantId,
     ...(chatModalities !== undefined ? { chatModalities } : {}),
+    ...(shouldPersistArtifacts ? { artifacts } : {}),
+    ...(inputCapabilities !== undefined ? { inputCapabilities } : {}),
     ...(artifactRole !== undefined ? { artifactRole } : {}),
     ...(visionSource !== undefined ? { visionSource } : {}),
     ...(visionConfidence !== undefined ? { visionConfidence } : {}),

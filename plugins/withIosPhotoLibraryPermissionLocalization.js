@@ -4,8 +4,8 @@ const { IOSConfig, withDangerousMod, withXcodeProject } = require('expo/config-p
 
 const PHOTO_LIBRARY_USAGE_DESCRIPTION_KEY = 'NSPhotoLibraryUsageDescription';
 const LOCALIZED_PHOTO_LIBRARY_USAGE_DESCRIPTIONS = Object.freeze({
-  en: 'Pocket AI uses your photo library so you can attach images to vision-capable local chats.',
-  ru: 'Pocket AI использует медиатеку, чтобы вы могли прикреплять изображения к локальным чатам с поддержкой зрения.',
+  en: 'Pocket AI uses your photo library so you can attach images to local chats.',
+  ru: 'Pocket AI использует медиатеку, чтобы вы могли прикреплять изображения к локальным чатам.',
 });
 
 function escapeInfoPlistString(value) {

@@ -19,6 +19,7 @@ import {
   shouldFlushAssistantStreamPatchOnBoundary,
   stopActiveChatGenerationForPrivateStorageBlocked,
 } from '../../src/hooks/useChatSession';
+import { DOCUMENT_ATTACHMENT_MESSAGE_PLACEHOLDER } from '../../src/types/chat';
 import { presetManager } from '../../src/services/PresetManager';
 import { AppError } from '../../src/services/AppError';
 import { backgroundTaskService } from '../../src/services/BackgroundTaskService';
@@ -31,6 +32,7 @@ import {
   draftImageAttachment,
   failedDraftImageAttachment,
 } from '../fixtures/chatImageAttachmentFixtures';
+import type { ChatAttachment, ChatDocumentAttachmentDraft, ChatMediaAttachmentDraft } from '../../src/types/attachments';
 import type { AttachmentDraft, MultimodalReadinessState } from '../../src/types/multimodal';
 import { buildInferenceWindowWithAccurateTokenCounts } from '../../src/utils/inferenceWindow';
 
@@ -263,6 +265,48 @@ describe('useChatSession', () => {
     ]);
   }
 
+  function buildCopiedAudioDraft(overrides: Partial<ChatMediaAttachmentDraft> = {}): ChatMediaAttachmentDraft {
+    return {
+      id: 'audio-1',
+      kind: 'audio',
+      pickerUri: 'content://audio/audio-1.mp3',
+      localUri: 'test-dir/chat-attachments/audio-1.mp3',
+      pathCategory: 'chat_attachment',
+      fileName: 'audio-1.mp3',
+      displayName: 'Meeting audio.mp3',
+      mimeType: 'audio/mpeg',
+      sizeBytes: 4096,
+      source: 'document_picker',
+      createdAt: 1,
+      copyStatus: 'copied',
+      audio: {
+        format: 'mp3',
+      },
+      ...overrides,
+    };
+  }
+
+  function buildPersistedAudioAttachment(overrides: Partial<Extract<ChatAttachment, { kind: 'audio' }>> = {}): Extract<ChatAttachment, { kind: 'audio' }> {
+    return {
+      id: 'audio-1',
+      kind: 'audio',
+      state: 'ready',
+      threadId: 'thread-audio-history',
+      messageId: 'message-audio-history',
+      localUri: 'test-dir/chat-attachments/audio-1.mp3',
+      pathCategory: 'chat_attachment',
+      fileName: 'audio-1.mp3',
+      mimeType: 'audio/mpeg',
+      sizeBytes: 4096,
+      source: 'document_picker',
+      createdAt: 1,
+      audio: {
+        format: 'mp3',
+      },
+      ...overrides,
+    };
+  }
+
   it('resolves adaptive stream patch cadence for short and long rendered buffers', () => {
     expect(resolveAssistantStreamPatchInterval({
       tokensCount: 1,
@@ -378,14 +422,93 @@ describe('useChatSession', () => {
         ]),
       }),
     );
-    expect(llmEngineService.countPromptTokens).toHaveBeenCalledWith(
+    const generationCountCalls = (llmEngineService.countPromptTokens as jest.Mock).mock.calls
+      .filter(([call]) => call.chatBlocking !== false && call.allowMediaFallback !== true);
+    expect(generationCountCalls).toEqual(expect.arrayContaining([
+      [
+        expect.objectContaining({
+          multimodalReadiness: readyVision,
+          expectedModelId: 'author/model-q4',
+          messages: expect.arrayContaining([
+            expect.objectContaining({
+              role: 'user',
+              content: 'Describe this image',
+            }),
+          ]),
+        }),
+      ],
+    ]));
+    expect(generationCountCalls.some(([call]) => (
+      call.messages.flatMap((message: any) => message.mediaPaths ?? []).length > 0
+    ))).toBe(false);
+  });
+
+  it('processes copied document drafts into persisted attachments and text content parts for inference', async () => {
+    const getSession = renderHookHarness();
+    const documentDraft: ChatDocumentAttachmentDraft = {
+      id: 'document-1',
+      pickerUri: 'content://documents/document-1.txt',
+      localUri: 'test-dir/chat-attachments/document-1.txt',
+      pathCategory: 'chat_attachment',
+      fileName: 'document-1.txt',
+      displayName: 'Meeting notes.txt',
+      mimeType: 'text/plain',
+      sizeBytes: 128,
+      source: 'document_picker',
+      createdAt: 1,
+      copyStatus: 'copied',
+    };
+    (FileSystem.readAsStringAsync as jest.Mock).mockResolvedValue('Doc line\r\nNext line');
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('', {
+        documentAttachmentDrafts: [documentDraft],
+      });
+    });
+
+    const thread = useChatStore.getState().getActiveThread();
+    const userMessage = thread?.messages[0];
+
+    expect(userMessage).toEqual(expect.objectContaining({
+      role: 'user',
+      content: DOCUMENT_ATTACHMENT_MESSAGE_PLACEHOLDER,
+      attachments: [
+        expect.objectContaining({
+          id: 'document-1',
+          kind: 'document',
+          state: 'ready',
+          threadId: thread?.id,
+          messageId: userMessage?.id,
+          localUri: 'test-dir/chat-attachments/document-1.txt',
+          mimeType: 'text/plain',
+          sizeBytes: 128,
+          document: expect.objectContaining({
+            processorId: 'document-text',
+            processorVersion: 1,
+            extractedCharCount: 'Doc line\nNext line'.length,
+            isScanned: false,
+          }),
+        }),
+      ],
+      contentParts: [
+        expect.objectContaining({
+          type: 'text',
+          text: expect.stringContaining('Doc line\nNext line'),
+        }),
+      ],
+    }));
+    expect(llmEngineService.chatCompletion).toHaveBeenLastCalledWith(
       expect.objectContaining({
-        multimodalReadiness: readyVision,
-        expectedModelId: 'author/model-q4',
         messages: expect.arrayContaining([
           expect.objectContaining({
             role: 'user',
-            mediaPaths: ['test-dir/chat-attachments/draft-image-1.jpg'],
+            content: '',
+            contentParts: [
+              expect.objectContaining({
+                type: 'text',
+                text: expect.stringContaining('Doc line\nNext line'),
+              }),
+            ],
           }),
         ]),
       }),
@@ -534,7 +657,7 @@ describe('useChatSession', () => {
     expect(useChatStore.getState().getActiveThread()?.status).toBe('stopped');
   });
 
-  it('bounds native media prompt counts while fitting an image prompt', async () => {
+  it('uses estimated media prompt tokens while fitting an image prompt with room to spare', async () => {
     const chatState = useChatStore.getState();
     const threadId = chatState.createThread({
       modelId: 'author/model-q4',
@@ -599,10 +722,7 @@ describe('useChatSession', () => {
       call.messages.some((message: any) => message.content === 'Describe this new image')
       && call.messages.flatMap((message: any) => message.mediaPaths ?? []).length === 0
     )).length).toBeGreaterThan(0);
-    expect(mediaAwareCountCalls).toHaveLength(2);
-    expect(mediaAwareCountCalls.every(([call]) => (
-      call.messages.flatMap((message: any) => message.mediaPaths ?? []).join('|') === 'test-dir/chat-attachments/draft-image-1.jpg'
-    ))).toBe(true);
+    expect(mediaAwareCountCalls).toHaveLength(0);
     expect(completionCall?.messages.map((message: any) => message.content)).toEqual([
       'Be concise.',
       'Earlier chat turn 1',
@@ -614,7 +734,7 @@ describe('useChatSession', () => {
     expect(completionCall?.messages.at(-1)?.mediaPaths).toEqual(['test-dir/chat-attachments/draft-image-1.jpg']);
   });
 
-  it('bounds native media prompt counts while fitting an image-only prompt', async () => {
+  it('runs one exact native media prompt recount for an image-only prompt near the context limit', async () => {
     const chatState = useChatStore.getState();
     const threadId = chatState.createThread({
       modelId: 'author/model-q4',
@@ -644,7 +764,7 @@ describe('useChatSession', () => {
       });
     }
     chatState.setActiveThread(threadId);
-    (llmEngineService.getContextSize as jest.Mock).mockReturnValue(2300);
+    (llmEngineService.getContextSize as jest.Mock).mockReturnValue(1600);
     (llmEngineService.countPromptTokens as jest.Mock).mockImplementation(
       async ({ messages }: { messages: any[] }) => messages.reduce(
         (total, message) => total + (message.role === 'system'
@@ -683,16 +803,12 @@ describe('useChatSession', () => {
       call.messages.some((message: any) => message.role === 'user' && message.content === '')
       && call.messages.flatMap((message: any) => message.mediaPaths ?? []).length === 0
     )).length).toBeGreaterThan(0);
-    expect(mediaAwareCountCalls).toHaveLength(2);
+    expect(mediaAwareCountCalls).toHaveLength(1);
     expect(mediaAwareCountCalls.every(([call]) => (
       call.messages.flatMap((message: any) => message.mediaPaths ?? []).join('|') === 'test-dir/chat-attachments/draft-image-1.jpg'
     ))).toBe(true);
     expect(completionCall?.messages.map((message: any) => message.content)).toEqual([
       'Be concise.',
-      'Earlier chat turn 1',
-      'Earlier chat turn 2',
-      'Earlier chat turn 3',
-      'Earlier chat turn 4',
       '',
     ]);
     expect(completionCall?.messages.at(-1)?.mediaPaths).toEqual(['test-dir/chat-attachments/draft-image-1.jpg']);
@@ -3135,6 +3251,177 @@ describe('useChatSession', () => {
         ]),
       }),
     );
+  });
+
+  it('regenerates an audio-only user message without requiring vision readiness', async () => {
+    const readyAudio = {
+      modelId: 'author/model-q4',
+      status: 'ready' as const,
+      support: ['audio' as const],
+      checkedAt: 1,
+    };
+    saveAuthorModelWithMultimodalReadiness(readyAudio);
+    const getSession = renderHookHarness();
+    const audioDraft = buildCopiedAudioDraft();
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('', {
+        mediaAttachmentDrafts: [audioDraft],
+        multimodalReadiness: readyAudio,
+      });
+    });
+
+    const userMessage = useChatStore.getState().getActiveThread()?.messages[0];
+    const persistedAttachments = userMessage?.attachments;
+    (llmEngineService.chatCompletion as jest.Mock).mockClear();
+    (llmEngineService.countPromptTokens as jest.Mock).mockClear();
+    (llmEngineService.assertActiveMultimodalReadyForMediaPaths as jest.Mock).mockClear();
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      async ({ onToken }: { onToken?: (token: string) => void }) => {
+        onToken?.('Fresh audio reply');
+        return { text: 'Fresh audio reply' };
+      },
+    );
+
+    await act(async () => {
+      await getSession()?.regenerateFromUserMessage(userMessage?.id ?? '', '', {
+        multimodalReadiness: readyAudio,
+      });
+    });
+
+    const completionCall = (llmEngineService.chatCompletion as jest.Mock).mock.calls.at(-1)?.[0];
+    const audioMessage = completionCall?.messages.find((message: any) => message.role === 'user');
+    expect(audioMessage).toEqual(expect.objectContaining({
+      role: 'user',
+      content: '',
+      attachments: persistedAttachments,
+      contentParts: [
+        expect.objectContaining({
+          type: 'input_audio',
+          input_audio: {
+            format: 'mp3',
+            url: 'test-dir/chat-attachments/audio-1.mp3',
+          },
+        }),
+      ],
+    }));
+    expect(audioMessage.mediaPaths).toBeUndefined();
+    expect(llmEngineService.assertActiveMultimodalReadyForMediaPaths).not.toHaveBeenCalled();
+    expect(useChatStore.getState().getActiveThread()?.messages[1]).toEqual(expect.objectContaining({
+      role: 'assistant',
+      content: 'Fresh audio reply',
+      state: 'complete',
+    }));
+  });
+
+  it('removes stale audio content parts when a retained audio file is missing', async () => {
+    const threadId = 'thread-audio-history';
+    const userMessageId = 'message-audio-history';
+    const missingAudioPath = 'test-dir/chat-attachments/missing-audio.mp3';
+    const audioAttachment = buildPersistedAudioAttachment({
+      id: 'missing-audio',
+      threadId,
+      messageId: userMessageId,
+      localUri: missingAudioPath,
+      fileName: 'missing-audio.mp3',
+    });
+    const textOnlyReadiness = {
+      modelId: 'author/model-q4',
+      status: 'text_only' as const,
+      support: [],
+      checkedAt: 1,
+    };
+
+    useChatStore.setState({
+      threads: {
+        [threadId]: {
+          id: threadId,
+          title: 'Audio history',
+          modelId: 'author/model-q4',
+          presetId: 'preset-1',
+          presetSnapshot: {
+            id: 'preset-1',
+            name: 'Helpful Assistant',
+            systemPrompt: 'Be concise.',
+          },
+          paramsSnapshot: {
+            temperature: 0.7,
+            topP: 0.9,
+            maxTokens: 1024,
+            seed: null,
+          },
+          messages: [
+            {
+              id: userMessageId,
+              role: 'user',
+              content: 'Transcribe this audio.',
+              createdAt: 1,
+              state: 'complete',
+              kind: 'message',
+              modelId: 'author/model-q4',
+              attachments: [audioAttachment],
+              contentParts: [
+                {
+                  type: 'input_audio',
+                  input_audio: {
+                    format: 'mp3',
+                    url: missingAudioPath,
+                  },
+                },
+              ],
+            },
+            {
+              id: 'message-audio-history-assistant',
+              role: 'assistant',
+              content: 'Old audio answer.',
+              createdAt: 2,
+              state: 'complete',
+              kind: 'message',
+              modelId: 'author/model-q4',
+            },
+          ],
+          createdAt: 1,
+          updatedAt: 2,
+          status: 'idle',
+        },
+      },
+      activeThreadId: threadId,
+    });
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => (
+      uri === missingAudioPath
+        ? { exists: false, size: 0 }
+        : { exists: true, size: 123_456 }
+    ));
+    (llmEngineService.chatCompletion as jest.Mock).mockClear();
+    (llmEngineService.countPromptTokens as jest.Mock).mockClear();
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Continue after missing audio', {
+        multimodalReadiness: textOnlyReadiness,
+      });
+    });
+
+    const completionCall = (llmEngineService.chatCompletion as jest.Mock).mock.calls.at(-1)?.[0];
+    const serializedCompletionMessages = JSON.stringify(completionCall?.messages ?? []);
+    const serializedTokenCountMessages = JSON.stringify(
+      (llmEngineService.countPromptTokens as jest.Mock).mock.calls.map(([call]) => call.messages),
+    );
+
+    expect(serializedCompletionMessages).not.toContain(missingAudioPath);
+    expect(serializedTokenCountMessages).not.toContain(missingAudioPath);
+    expect(serializedCompletionMessages).not.toContain('input_audio');
+    expect(serializedCompletionMessages).toContain('Transcribe this audio.');
+    expect(completionCall?.messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        role: 'user',
+        content: 'Transcribe this audio.',
+      }),
+      expect.objectContaining({
+        role: 'user',
+        content: 'Continue after missing audio',
+      }),
+    ]));
   });
 
   it('blocks regenerating an attached user message with a missing image before replacing the branch', async () => {

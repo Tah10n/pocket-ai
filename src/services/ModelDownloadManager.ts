@@ -29,6 +29,7 @@ import { PrivateStorageUnavailableError, getPrivateStorageHealthSnapshot, isPriv
 import { GgufValidationError, validateGgufFileHeader } from '../utils/ggufValidation';
 import { normalizeSha256Digest } from '../utils/sha256';
 import { normalizeDownloadResumeData } from '../utils/downloadResumeData';
+import { deriveArtifactsFromLegacyModel } from '../utils/modelArtifacts';
 import { projectorArtifactService } from './ProjectorArtifactService';
 import { llmEngineService } from './LLMEngineService';
 
@@ -848,6 +849,11 @@ export class ModelDownloadManager {
     };
   }
 
+  private withSynchronizedArtifacts(model: ModelMetadata): ModelMetadata {
+    const artifacts = deriveArtifactsFromLegacyModel(model, { preferLegacyRuntimeState: true });
+    return artifacts.length > 0 ? { ...model, artifacts } : model;
+  }
+
   private async stopActiveJobForPrivateStorageReset(options: { clearQueue: boolean }): Promise<void> {
     const job = this.activeJob;
 
@@ -1613,7 +1619,7 @@ export class ModelDownloadManager {
       const completedProjectorCandidates = projectorResult
         ? this.updateProjectorCandidates(latestCompletedQueueModel, projectorResult.projector.id, projectorResult.projector)
         : latestCompletedQueueModel.projectorCandidates;
-      const completedModel: ModelMetadata = {
+      const completedModel: ModelMetadata = this.withSynchronizedArtifacts({
         ...latestCompletedQueueModel,
         ...baseCheckpointUpdates,
         fitsInRam: memoryFit.fitsInRam,
@@ -1622,7 +1628,7 @@ export class ModelDownloadManager {
         downloadedAt: Date.now(),
         lifecycleStatus: LifecycleStatus.DOWNLOADED,
         projectorCandidates: completedProjectorCandidates,
-      };
+      });
 
       assertPrivateStorageWritableForDownloadMutation();
       registry.updateModel(completedModel);
@@ -1693,11 +1699,11 @@ export class ModelDownloadManager {
         );
 
         if (projectorStageFailedAfterBaseVerified && baseModelMemoryFit) {
-          registry.updateModel(this.buildTextReadyModelAfterProjectorFailure({
+          registry.updateModel(this.withSynchronizedArtifacts(this.buildTextReadyModelAfterProjectorFailure({
             model: currentModel,
             projectorFailureUpdates,
             memoryFit: baseModelMemoryFit,
-          }));
+          })));
           removeFromQueue(model.id);
         } else {
           updateModelInQueue(model.id, {

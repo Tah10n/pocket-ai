@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > Note: This file is maintained automatically by Release Please based on Conventional Commits (PR titles).
 > Avoid editing it manually unless you are bootstrapping or fixing the release history.
 
+## [1.6.0](https://github.com/Tah10n/pocket-ai/compare/v1.5.0...v1.6.0) (2026-06-27)
+
+
+### Features
+
+* **multimodal:** add local attachment pipeline ([#119](https://github.com/Tah10n/pocket-ai/issues/119)) ([17ebd17](https://github.com/Tah10n/pocket-ai/commit/17ebd172942897b2d0e692c0fc2f4a5a5589071c))
+
+
+### Bug Fixes
+
+* harden model parameters sheet layout ([4c568da](https://github.com/Tah10n/pocket-ai/commit/4c568da0cf9ca53acf59558104fa3d0c63786d0f))
+
 ## [1.5.0](https://github.com/Tah10n/pocket-ai/compare/v1.4.0...v1.5.0) (2026-05-24)
 
 

@@ -76,13 +76,37 @@ jest.mock('expo-file-system/legacy', () => ({
     savable: jest.fn().mockReturnValue({ resumeData: 'resume-data' }),
   }),
   getInfoAsync: jest.fn().mockResolvedValue({ exists: true, size: 1024 }),
+  readAsStringAsync: jest.fn().mockResolvedValue(''),
   readDirectoryAsync: jest.fn().mockResolvedValue([]),
   deleteAsync: jest.fn().mockResolvedValue(undefined),
+  copyAsync: jest.fn().mockResolvedValue(undefined),
+  moveAsync: jest.fn().mockResolvedValue(undefined),
   getFreeDiskStorageAsync: jest.fn().mockResolvedValue(10 * 1024 * 1024 * 1024),
   getTotalDiskCapacityAsync: jest.fn().mockResolvedValue(100 * 1024 * 1024 * 1024),
   makeDirectoryAsync: jest.fn().mockResolvedValue(undefined),
+  EncodingType: { Base64: 'base64', UTF8: 'utf8' },
   documentDirectory: 'test-dir/',
   cacheDirectory: 'test-cache/',
+}));
+
+jest.mock('expo-document-picker', () => ({
+  getDocumentAsync: jest.fn().mockResolvedValue({
+    canceled: true,
+    assets: null,
+  }),
+}));
+
+jest.mock('expo-image-manipulator', () => ({
+  SaveFormat: {
+    JPEG: 'jpeg',
+    PNG: 'png',
+    WEBP: 'webp',
+  },
+  manipulateAsync: jest.fn().mockResolvedValue({
+    uri: 'test-cache/chat-attachment-thumbnail.jpg',
+    width: 512,
+    height: 384,
+  }),
 }));
 
 jest.mock('expo-file-system', () => ({
@@ -105,6 +129,34 @@ jest.mock('expo-clipboard', () => ({
 
 jest.mock('expo-linking', () => ({
   createURL: jest.fn((path) => `pocketai://${path ?? ''}`),
+}));
+
+jest.mock('expo-image-picker', () => ({
+  MediaTypeOptions: {
+    Images: 'Images',
+    All: 'All',
+    Videos: 'Videos',
+  },
+  PermissionStatus: {
+    GRANTED: 'granted',
+    DENIED: 'denied',
+    UNDETERMINED: 'undetermined',
+  },
+  getMediaLibraryPermissionsAsync: jest.fn().mockResolvedValue({
+    status: 'granted',
+    granted: true,
+    canAskAgain: true,
+  }),
+  requestMediaLibraryPermissionsAsync: jest.fn().mockResolvedValue({
+    status: 'granted',
+    granted: true,
+    canAskAgain: true,
+  }),
+  launchImageLibraryAsync: jest.fn().mockResolvedValue({
+    canceled: false,
+    assets: [],
+  }),
+  getPendingResultAsync: jest.fn().mockResolvedValue(null),
 }));
 
 jest.mock('expo-notifications', () => ({

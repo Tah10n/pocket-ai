@@ -3,6 +3,7 @@ import { getThreadActiveModelId, type ChatThread, type LlmChatMessage } from '..
 import { llmEngineService } from '../services/LLMEngineService';
 import { registry } from '../services/LocalStorageRegistry';
 import { useModelRegistryRevision } from './useModelRegistryRevision';
+import type { MultimodalReadinessState } from '../types/multimodal';
 import {
   buildInferenceWindowWithAccurateTokenCounts,
   createTruncationState,
@@ -17,6 +18,53 @@ const EMPTY_TRUNCATION_STATE: TruncationState = {
   truncatedMessageIds: [],
   shouldOfferSummary: false,
 };
+
+function isAudioReady(readiness: MultimodalReadinessState | undefined, expectedModelId: string | null): boolean {
+  return readiness?.status === 'ready'
+    && readiness.support.includes('audio')
+    && (!expectedModelId || readiness.modelId === expectedModelId);
+}
+
+function sanitizeTruncationProbeMessages(
+  messages: LlmChatMessage[],
+  readiness: MultimodalReadinessState | undefined,
+  expectedModelId: string | null,
+): LlmChatMessage[] {
+  const retainAudio = isAudioReady(readiness, expectedModelId);
+
+  return messages.map((message) => {
+    const retainedAttachments = message.attachments?.filter((attachment) => {
+      if (!('kind' in attachment)) {
+        return true;
+      }
+
+      if (attachment.kind === 'audio') {
+        return retainAudio;
+      }
+
+      return attachment.kind !== 'video';
+    }) ?? [];
+    const retainedContentParts = message.contentParts?.filter((part) => (
+      part.type === 'input_audio'
+        ? false
+        : true
+    )) ?? [];
+    const retainedMediaPaths = message.mediaPaths ?? [];
+    const {
+      attachments: _attachments,
+      mediaPaths: _mediaPaths,
+      contentParts: _contentParts,
+      ...messageWithoutAudioInput
+    } = message;
+
+    return {
+      ...messageWithoutAudioInput,
+      ...(retainedAttachments.length > 0 ? { attachments: retainedAttachments } : null),
+      ...(retainedMediaPaths.length > 0 ? { mediaPaths: retainedMediaPaths } : null),
+      ...(retainedContentParts.length > 0 ? { contentParts: retainedContentParts } : null),
+    };
+  });
+}
 
 export function useTruncationTracking(
   activeThread: ChatThread | null,
@@ -38,13 +86,15 @@ export function useTruncationTracking(
     state: EMPTY_TRUNCATION_STATE,
   });
 
+  const activeThreadModelId = activeThread ? getThreadActiveModelId(activeThread) : null;
+  const activeThreadModel = activeThreadModelId ? registry.getModel(activeThreadModelId) : undefined;
+  const activeThreadMultimodalReadiness = activeThreadModel?.multimodalReadiness;
+
   let activeThreadReasoningEnabled = false;
   let activeThreadReasoningFormat: 'none' | 'auto' | 'deepseek' = 'none';
   let activeThreadResponseReserveTokens: number | undefined;
-  if (activeThread) {
-    const modelId = getThreadActiveModelId(activeThread);
-    const model = registry.getModel(modelId);
-    const capability = resolveModelReasoningCapability(model, modelId, model?.name);
+  if (activeThread && activeThreadModelId) {
+    const capability = resolveModelReasoningCapability(activeThreadModel, activeThreadModelId, activeThreadModel?.name);
     const runtimeConfig = resolveReasoningRuntimeConfig({
       reasoningEffort: activeThread.paramsSnapshot.reasoningEffort,
       capability,
@@ -92,13 +142,28 @@ export function useTruncationTracking(
       windowOptions.promptSafetyMarginTokens ?? null,
       activeThreadReasoningEnabled ? 1 : 0,
       activeThreadReasoningFormat,
+      activeThreadModelId,
+      activeThreadMultimodalReadiness?.modelId ?? null,
+      activeThreadMultimodalReadiness?.status ?? null,
+      activeThreadMultimodalReadiness?.projectorId ?? null,
+      activeThreadMultimodalReadiness?.support.join(',') ?? null,
+      activeThread.messages
+        .map((message) => `${message.id}:${message.attachments?.map((attachment) => attachment.localUri).join(',') ?? ''}`)
+        .join('|'),
       modelRegistryRevision,
     ].join(':');
 
     if (accurateTruncationCacheRef.current.key === cacheKey) {
-      setAccurateTruncationState({
-        threadId: activeThread.id,
-        state: accurateTruncationCacheRef.current.state,
+      const cachedState = accurateTruncationCacheRef.current.state;
+      setAccurateTruncationState((currentState) => {
+        if (currentState?.threadId === activeThread.id && currentState.state === cachedState) {
+          return currentState;
+        }
+
+        return {
+          threadId: activeThread.id,
+          state: cachedState,
+        };
       });
       return;
     }
@@ -110,13 +175,27 @@ export function useTruncationTracking(
       reasoning_format: activeThreadReasoningFormat,
     };
 
+    const throwIfCancelled = () => {
+      if (isCancelled) {
+        throw new Error('Accurate truncation probe was cancelled.');
+      }
+    };
+
     const countPromptTokens = async (messages: LlmChatMessage[]) =>
       llmEngineService.countPromptTokens({
-        messages,
+        messages: sanitizeTruncationProbeMessages(
+          messages,
+          activeThreadMultimodalReadiness,
+          activeThreadModelId,
+        ),
         params: tokenCountParams,
+        multimodalReadiness: activeThreadMultimodalReadiness,
+        expectedModelId: activeThreadModelId,
+        chatBlocking: false,
+        allowMediaFallback: true,
       });
 
-    void buildInferenceWindowWithAccurateTokenCounts(activeThread, windowOptions, countPromptTokens)
+    void buildInferenceWindowWithAccurateTokenCounts(activeThread, windowOptions, countPromptTokens, { throwIfCancelled })
       .then(({ truncatedMessageIds }) => {
         if (!isCancelled) {
           const state = createTruncationState(truncatedMessageIds);
@@ -161,7 +240,7 @@ export function useTruncationTracking(
     return () => {
       isCancelled = true;
     };
-  }, [activeContextTokenBudget, activeThread, activeThreadReasoningEnabled, activeThreadReasoningFormat, activeThreadResponseReserveTokens, modelRegistryRevision]);
+  }, [activeContextTokenBudget, activeThread, activeThreadModelId, activeThreadMultimodalReadiness, activeThreadReasoningEnabled, activeThreadReasoningFormat, activeThreadResponseReserveTokens, modelRegistryRevision]);
 
   const truncationState = useMemo(() => {
     if (!activeThread) {

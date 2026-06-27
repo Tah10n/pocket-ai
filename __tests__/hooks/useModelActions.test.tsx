@@ -4,8 +4,19 @@ import { router } from 'expo-router';
 import { useModelActions } from '../../src/hooks/useModelActions';
 import { EngineStatus, type EngineState, type ModelMetadata } from '../../src/types/models';
 
-function renderHookHarness(models: ModelMetadata[] = []) {
+const mockStartModelDownloadFlow = jest.fn();
+
+jest.mock('../../src/utils/modelDownloadFlow', () => ({
+  startModelDownloadFlow: (...args: any[]) => mockStartModelDownloadFlow(...args),
+}));
+
+function renderHookHarness(
+  models: ModelMetadata[] = [],
+  overrides: Partial<Parameters<typeof useModelActions>[0]> = {},
+) {
   let currentValue: ReturnType<typeof useModelActions> | null = null;
+  const startDownload = jest.fn();
+  const openProjectorChoice = jest.fn();
 
   const engineState: EngineState = {
     activeModelId: undefined,
@@ -21,12 +32,14 @@ function renderHookHarness(models: ModelMetadata[] = []) {
       engineState,
       loadModel: jest.fn(),
       unloadModel: jest.fn(),
-      startDownload: jest.fn(),
+      startDownload,
       cancelDownload: jest.fn(),
+      openProjectorChoice,
       refreshDownloadedModels: jest.fn(),
       requestCatalogRefresh: jest.fn(),
       showError: jest.fn(),
       t: ((key: string) => key) as any,
+      ...overrides,
     });
 
     useEffect(() => {
@@ -40,6 +53,8 @@ function renderHookHarness(models: ModelMetadata[] = []) {
 
   return {
     getCurrentValue: () => currentValue,
+    openProjectorChoice,
+    startDownload,
     ...rendered,
   };
 }
@@ -93,5 +108,20 @@ describe('useModelActions', () => {
       pathname: '/model-details',
       params: { modelId: 'org/model' },
     });
+  });
+
+  it('passes projector-choice handling into the download flow', () => {
+    const { getCurrentValue, openProjectorChoice, startDownload } = renderHookHarness();
+    const model = { id: 'org/model' } as ModelMetadata;
+
+    act(() => {
+      getCurrentValue()?.handleDownload(model);
+    });
+
+    expect(mockStartModelDownloadFlow).toHaveBeenCalledWith(expect.objectContaining({
+      model,
+      startDownload,
+      onProjectorChoiceRequired: openProjectorChoice,
+    }));
   });
 });

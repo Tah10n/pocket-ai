@@ -1,6 +1,6 @@
 # Privacy & Disclosures
 
-Last updated: 2026-05-24
+Last updated: 2026-06-19
 
 ## Summary
 
@@ -11,7 +11,8 @@ This document summarizes the current behavior of the app as configured in this r
 ## What stays on-device
 
 - Chat prompts and generated responses stay on the device during local inference.
-- Downloaded GGUF files are stored in app-managed local storage. Android release builds disable OS auto-backup, and iOS release builds mark the downloaded-model storage directory as excluded from device and iCloud backups.
+- Chat attachments selected from the device stay on the device during local inference. They are not uploaded to a hosted chat-completion API.
+- Downloaded GGUF files, required multimodal projector companion artifacts, and copied chat attachments are stored in app-managed local storage. Android release builds disable OS auto-backup, and iOS release builds mark the downloaded-model and chat-attachment storage directories as excluded from device and iCloud backups.
 - Conversation history is persisted locally on the device and encrypted at rest.
 - System prompt presets, generation settings, and model-specific load profiles are persisted locally on the device and encrypted at rest.
 - An optional Hugging Face access token can be stored locally in secure device storage for browsing and downloading gated or private models.
@@ -20,13 +21,26 @@ This document summarizes the current behavior of the app as configured in this r
 - Hugging Face popularity metadata, tag summaries, and routed model-detail state are cached locally only to improve catalog browsing on this device.
 - Storage cleanup controls are available in-app through `Storage Manager` and `All Conversations`, including model removal that can keep or reset saved per-model settings.
 
+## Chat attachments
+
+When a user adds an attachment to a chat:
+
+- The app uses system picker flows so the user can choose files to attach. Depending on the attachment kind and platform, this may use the photo-library picker or document picker. On Android API 32 and lower, the app keeps the legacy read-only media permission available for gallery-picker compatibility; it is capped to those older OS versions.
+- Selected files are copied into app-managed local storage under `Documents/chat-attachments/` so the conversation can reopen the attachment later.
+- Chat history stores attachment metadata needed to render and manage the attachment, such as its local file reference, media type, dimensions or duration when available, file size, processor metadata, and the draft, message, or conversation it belongs to.
+- Raw attachment files are local app-managed files. This document does not claim those attachment bytes are separately encrypted beyond the device and platform storage protections in use.
+- The app attempts to clean up attachments when the related draft is discarded, the related message or chat history is deleted, or the user resets private app storage. Cleanup failures are logged without exposing raw file paths.
+- Image inference uses the local model on the device when the active model and projector support vision. Audio inference uses the local model only when runtime audio support is confirmed. Document text extraction runs locally.
+- Video attachment processing is disabled. The app does not accept new video attachments, sample video frames, claim direct-video understanding, or extract video audio tracks.
+- Backup behavior follows the app's platform configuration: Android release builds disable OS auto-backup, and iOS release builds exclude downloaded model files and local chat attachments from device and iCloud backups.
+
 ## When the app uses the network
 
 Pocket AI uses the network only for model-management flows:
 
 - Hugging Face model catalog search
 - Optional metadata, repository file lists, README summary, and config fetches used for model hints, GGUF variant lists, popularity sorting, size recovery, context-window recovery, and gated-model access checks
-- Model file downloads for the selected GGUF variant from remote hosting endpoints
+- Model file downloads for the selected GGUF variant and any required multimodal projector companion artifact from remote hosting endpoints
 - If a Hugging Face access token is configured, the app attaches it to Hugging Face API requests as needed to surface gated or private repositories (including catalog browsing). Some endpoints are still probed anonymously first and retried with auth only when required.
 - When a user taps through to Hugging Face from the token screen or a model detail view, the app opens the public Hugging Face site in the device browser
 
@@ -38,10 +52,12 @@ The current release flow in this repository does not send chat prompts to a host
 
 Users can manage local data directly in the app:
 
-- offload downloaded models while keeping or resetting saved per-model settings
+- offload downloaded models and associated multimodal projector companion artifacts while keeping or resetting saved per-model settings
 - unload the active model
 - clear persisted chat history
+- discard attachment drafts and delete messages or conversations, which attempts to remove their associated local attachment files when cleanup runs
 - reset settings
+- reset private app storage, including a best-effort cleanup of local chat attachments
 - manage retention for older conversations
 
 ## Device and resource limits
@@ -61,12 +77,14 @@ For the release configuration currently committed here:
 
 - Android package name: `com.github.tah10n.pocketai`
 - Android auto-backup is disabled to avoid backing up local chat and model state
-- iOS excludes downloaded model files under the app-managed `Documents/models/` directory from device and iCloud backups
+- iOS excludes downloaded model files and multimodal projector companion artifacts under the app-managed `Documents/models/` directory, plus local chat attachments under `Documents/chat-attachments/`, from device and iCloud backups
 - Android permissions include:
   - `INTERNET` (Hugging Face catalog and model downloads)
   - `VIBRATE` (UI haptics)
   - `POST_NOTIFICATIONS` (Android 13+ notifications for download/inference status)
   - `FOREGROUND_SERVICE` and `FOREGROUND_SERVICE_DATA_SYNC` (keep long-running downloads/inference alive in the background via a foreground service)
+  - `READ_EXTERNAL_STORAGE` with `android:maxSdkVersion="32"` (legacy Android gallery-picker compatibility for selected media)
+- Android gallery attachment support is configured for picker-based selection only. The app blocks merged `CAMERA`, `RECORD_AUDIO`, and `WRITE_EXTERNAL_STORAGE` permissions from the Android manifest; it does not request camera capture, microphone capture, write storage, or audio-recording permissions for attachments.
 
 ## Scope note
 

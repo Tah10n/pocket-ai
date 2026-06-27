@@ -6,6 +6,9 @@ import {
 import type { MemoryBudgetSnapshot } from '../memory/budget';
 import { isFinitePositiveNumber } from '../memory/guards';
 import { estimateModelRuntimeBytes } from '../memory/estimator';
+import { UNKNOWN_PROJECTOR_MEMORY_FIT_FALLBACK_BYTES, normalizePositiveByteSize } from './modelSize';
+
+export { UNKNOWN_PROJECTOR_MEMORY_FIT_FALLBACK_BYTES };
 
 export {
   FITS_IN_RAM_HEADROOM_RATIO,
@@ -22,20 +25,49 @@ export interface MemoryFitAssessment {
   fitsInRam: boolean;
 }
 
+export function getModelMemoryFitInputSizeBytes({
+  modelSizeBytes,
+  projectorSizeBytes,
+  hasUnknownSizeProjector = false,
+}: {
+  modelSizeBytes: number;
+  projectorSizeBytes?: number | null;
+  hasUnknownSizeProjector?: boolean;
+}): number | null {
+  const normalizedModelSize = normalizePositiveByteSize(modelSizeBytes);
+  if (normalizedModelSize === null) {
+    return null;
+  }
+
+  const normalizedProjectorSize = normalizePositiveByteSize(projectorSizeBytes);
+  const projectorMemoryFitSize = normalizedProjectorSize
+    ?? (hasUnknownSizeProjector ? UNKNOWN_PROJECTOR_MEMORY_FIT_FALLBACK_BYTES : 0);
+  return normalizedModelSize + projectorMemoryFitSize;
+}
+
 export function assessModelMemoryFit({
   modelSizeBytes,
+  projectorSizeBytes,
+  hasUnknownSizeProjector,
   totalMemoryBytes,
   systemMemorySnapshot,
 }: {
   modelSizeBytes: number;
+  projectorSizeBytes?: number | null;
+  hasUnknownSizeProjector?: boolean;
   totalMemoryBytes: number;
   systemMemorySnapshot?: MemoryBudgetSnapshot | null;
 }): MemoryFitAssessment | null {
-  if (!isFinitePositiveNumber(modelSizeBytes) || !isFinitePositiveNumber(totalMemoryBytes)) {
+  const memoryFitInputSizeBytes = getModelMemoryFitInputSizeBytes({
+    modelSizeBytes,
+    projectorSizeBytes,
+    hasUnknownSizeProjector,
+  });
+  if (memoryFitInputSizeBytes === null || !isFinitePositiveNumber(totalMemoryBytes)) {
     return null;
   }
 
-  const estimatedRuntimeBytes = estimateModelRuntimeBytes(modelSizeBytes);
+  const estimatedRuntimeBytes = estimateModelRuntimeBytes(memoryFitInputSizeBytes);
   const { totalBudgetBytes, availableBudgetBytes, effectiveBudgetBytes } = createMemoryBudget({
     totalMemoryBytes,
     systemMemorySnapshot,

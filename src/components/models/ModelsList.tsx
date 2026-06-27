@@ -8,6 +8,7 @@ import { ModelCard } from '@/components/ui/ModelCard';
 import { ModelVariantPickerSheet } from '@/components/ui/ModelVariantPickerSheet';
 import { MODEL_WARMUP_BANNER_RESERVED_HEIGHT, ModelWarmupBanner } from '@/components/ui/ModelWarmupBanner';
 import { ModelParametersSheet } from '@/components/ui/ModelParametersSheet';
+import { ProjectorChoiceSheet } from '@/components/ui/ProjectorChoiceSheet';
 import { ScreenAndroidContentBlurTarget, ScreenBanner, ScreenCard, ScreenStack } from '@/components/ui/ScreenShell';
 import { Spinner } from '@/components/ui/spinner';
 import { Text } from '@/components/ui/text';
@@ -22,6 +23,7 @@ import { getReportedErrorMessage, toAppError } from '@/services/AppError';
 import { registry } from '@/services/LocalStorageRegistry';
 import { llmEngineService } from '@/services/LLMEngineService';
 import { performanceMonitor } from '@/services/PerformanceMonitor';
+import { projectorArtifactService } from '@/services/ProjectorArtifactService';
 import {
   useModelsStore,
   MODELS_PAGE_SIZE,
@@ -277,6 +279,8 @@ export const ModelsList = ({
   const warmupContentBlurTargetRef = androidContentBlurTargetRef ?? localContentBlurTargetRef;
   const [selectedVariantIds, setSelectedVariantIds] = useState<Record<string, string>>({});
   const [variantPickerModelId, setVariantPickerModelId] = useState<string | null>(null);
+  const [projectorChoiceModel, setProjectorChoiceModel] = useState<ModelMetadata | null>(null);
+  const [projectorSelectionOverrides, setProjectorSelectionOverrides] = useState<Record<string, ModelMetadata>>({});
   const catalogFilterVariantProjectionCacheRef = useRef(createCatalogFilterVariantProjectionCache());
 
   const {
@@ -328,12 +332,18 @@ export const ModelsList = ({
       ? uniqueByKey([...models, ...registryModels, ...queuedItems], (model) => model.id)
       : models;
 
-    return baseModels.map((model) => mergeModelWithRuntimeState(model, {
-      activeModelId: engineState.activeModelId,
-      localModel: localModelsById.get(model.id),
-      queuedItem: queuedItemsById.get(model.id),
-    }));
-  }, [activeTab, engineState.activeModelId, models, modelsRegistryRevision, queueLifecycleSignature]);
+    return baseModels.map((model) => {
+      const modelWithProjectorSelection = projectorSelectionOverrides[model.id]
+        ? { ...model, ...projectorSelectionOverrides[model.id] }
+        : model;
+
+      return mergeModelWithRuntimeState(modelWithProjectorSelection, {
+        activeModelId: engineState.activeModelId,
+        localModel: localModelsById.get(model.id),
+        queuedItem: queuedItemsById.get(model.id),
+      });
+    });
+  }, [activeTab, engineState.activeModelId, models, modelsRegistryRevision, projectorSelectionOverrides, queueLifecycleSignature]);
 
   useEffect(() => {
     setSelectedVariantIds((current) => {
@@ -474,6 +484,7 @@ export const ModelsList = ({
           activeModelId: engineState.activeModelId,
           loadProgress: engineState.loadProgress,
           lastError: engineState.lastError,
+          diagnostics: engineState.diagnostics,
         },
         options: allowUnsafeMemoryLoad !== undefined || forceReload !== undefined
           ? {
@@ -485,6 +496,7 @@ export const ModelsList = ({
     });
   }, [
     engineState.activeModelId,
+    engineState.diagnostics,
     engineState.lastError,
     engineState.loadProgress,
     engineState.status,
@@ -548,6 +560,18 @@ export const ModelsList = ({
     onAfterActiveModelReload: refreshDownloadedModels,
   });
 
+  const openProjectorChoice = useCallback((targetModel: ModelMetadata) => {
+    setProjectorSelectionOverrides((current) => ({
+      ...current,
+      [targetModel.id]: targetModel,
+    }));
+    setProjectorChoiceModel(targetModel);
+  }, []);
+
+  const closeProjectorChoice = useCallback(() => {
+    setProjectorChoiceModel(null);
+  }, []);
+
   const {
     cancelDownload: cancelModelDownload,
     openChat,
@@ -566,11 +590,56 @@ export const ModelsList = ({
     unloadModel,
     startDownload,
     cancelDownload,
+    openProjectorChoice,
     refreshDownloadedModels,
     requestCatalogRefresh,
     showError: showModelActionError,
     t,
   });
+
+  const handleSelectProjector = useCallback((projectorId: string) => {
+    if (!projectorChoiceModel) {
+      setProjectorChoiceModel(null);
+      return;
+    }
+
+    const selection = projectorArtifactService.selectProjectorForModel(projectorChoiceModel, projectorId);
+    if (!selection.model) {
+      Alert.alert(t('models.actionFailedTitle'), t('models.vision.projectorChoiceFailedMessage'));
+      return;
+    }
+
+    const persistedModel = registry.getModel(projectorChoiceModel.id);
+    let nextModel = selection.model;
+    if (persistedModel) {
+      const persistedSelection = projectorArtifactService.selectProjector(projectorChoiceModel.id, projectorId);
+      const persistedAfterSelection = registry.getModel(projectorChoiceModel.id);
+      if (persistedSelection.status !== 'failed' && persistedAfterSelection?.selectedProjectorId === projectorId) {
+        nextModel = persistedAfterSelection;
+      } else {
+        const mergedPersistedModel: ModelMetadata = {
+          ...selection.model,
+          ...persistedModel,
+          artifactRole: selection.model.artifactRole,
+          chatModalities: selection.model.chatModalities,
+          selectedProjectorId: selection.model.selectedProjectorId,
+          visionSource: selection.model.visionSource,
+          visionConfidence: selection.model.visionConfidence,
+          projectorCandidates: selection.model.projectorCandidates,
+          multimodalReadiness: selection.model.multimodalReadiness,
+        };
+        registry.updateModel(mergedPersistedModel);
+        nextModel = registry.getModel(projectorChoiceModel.id) ?? mergedPersistedModel;
+      }
+    }
+
+    setProjectorSelectionOverrides((current) => ({
+      ...current,
+      [projectorChoiceModel.id]: nextModel,
+    }));
+    setProjectorChoiceModel(null);
+    handleDownload(nextModel);
+  }, [handleDownload, projectorChoiceModel, t]);
 
   useEffect(() => {
     if (activeTab !== 'all') {
@@ -889,6 +958,13 @@ export const ModelsList = ({
         androidContentBlurTargetRef={warmupContentBlurTargetRef}
         onSelectVariant={selectVariant}
         onClose={closeVariantPicker}
+      />
+      <ProjectorChoiceSheet
+        visible={projectorChoiceModel !== null}
+        model={projectorChoiceModel}
+        androidContentBlurTargetRef={warmupContentBlurTargetRef}
+        onSelectProjector={handleSelectProjector}
+        onClose={closeProjectorChoice}
       />
       <ErrorReportSheet
         {...errorReportSheetProps}

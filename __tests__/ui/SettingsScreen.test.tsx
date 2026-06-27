@@ -1,7 +1,10 @@
 import React from 'react';
+import { Alert } from 'react-native';
 import { act, fireEvent, render } from '@testing-library/react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { SettingsScreen } from '../../src/ui/screens/SettingsScreen';
+import { llmEngineService } from '../../src/services/LLMEngineService';
+import { AppError } from '../../src/services/AppError';
 import { getAppStorageMetrics } from '../../src/services/StorageManagerService';
 import { screenLayoutMetrics } from '../../src/utils/themeTokens';
 
@@ -15,6 +18,8 @@ let mockDeviceMetricsResult: {
   metrics: Record<string, any>;
   refresh: jest.Mock;
 };
+let mockEngineState: Record<string, any>;
+let mockEngineIsReady: boolean;
 
 function createStorageMetrics() {
   return {
@@ -144,8 +149,8 @@ jest.mock('../../src/hooks/useDeviceMetrics', () => ({
 
 jest.mock('../../src/hooks/useLLMEngine', () => ({
   useLLMEngine: () => ({
-    state: { activeModelId: null },
-    isReady: false,
+    state: mockEngineState,
+    isReady: mockEngineIsReady,
   }),
 }));
 
@@ -185,7 +190,10 @@ describe('SettingsScreen', () => {
     mockSetTheme.mockReset();
     mockSetThemeId.mockReset();
     mockCanGoBack = true;
+    mockEngineState = { activeModelId: null };
+    mockEngineIsReady = false;
     (getAppStorageMetrics as jest.Mock).mockResolvedValue({ appFilesBytes: 12_000_000_000 });
+    (llmEngineService.unload as jest.Mock).mockResolvedValue(undefined);
     mockDeviceMetricsResult = {
       metrics: {
         ram: createSystemRamMetrics(),
@@ -299,6 +307,27 @@ describe('SettingsScreen', () => {
 
     expect(flattenStyle(getByTestId('settings-screen-content').props.style).paddingBottom)
       .toBe(screenLayoutMetrics.contentBottomInset);
+  });
+
+  it('reports force-unload failures and refreshes metrics', async () => {
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => undefined);
+    mockEngineState = { activeModelId: 'author/model' };
+    mockEngineIsReady = true;
+    (llmEngineService.unload as jest.Mock).mockRejectedValueOnce(
+      new AppError('engine_unloading', 'Prompt preparation is still stopping'),
+    );
+
+    const { getByText } = await renderScreen();
+
+    await act(async () => {
+      fireEvent.press(getByText('settings.forceUnloadModel'));
+      await Promise.resolve();
+    });
+
+    expect(llmEngineService.unload).toHaveBeenCalledTimes(1);
+    expect(mockDeviceMetricsResult.refresh).toHaveBeenCalled();
+    expect(alertSpy).toHaveBeenCalledWith('common.actionFailed', 'common.errors.engineUnloading');
+    alertSpy.mockRestore();
   });
 
   it('renders separate color mode and visual theme controls', async () => {

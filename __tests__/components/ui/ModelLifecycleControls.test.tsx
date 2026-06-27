@@ -1,8 +1,9 @@
 import React from 'react';
-import { render } from '@testing-library/react-native';
-import { ModelDownloadProgress } from '../../../src/components/ui/ModelLifecycleControls';
+import { fireEvent, render } from '@testing-library/react-native';
+import { ModelDownloadProgress, ModelLifecycleActionRow, ModelProjectorStatus } from '../../../src/components/ui/ModelLifecycleControls';
 import { useDownloadStore } from '../../../src/store/downloadStore';
 import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../../src/types/models';
+import type { ProjectorArtifact } from '../../../src/types/multimodal';
 
 jest.mock('../../../src/components/ui/box', () => {
   const mockReact = jest.requireActual('react');
@@ -41,6 +42,20 @@ function buildModel(overrides: Partial<ModelMetadata> = {}): ModelMetadata {
     isPrivate: false,
     lifecycleStatus: LifecycleStatus.DOWNLOADING,
     downloadProgress: 0,
+    ...overrides,
+  };
+}
+
+function buildProjector(overrides: Partial<ProjectorArtifact> = {}): ProjectorArtifact {
+  return {
+    id: 'projector-org-model-main-mmproj-a.gguf',
+    ownerModelId: 'org/model',
+    repoId: 'org/model',
+    fileName: 'mmproj-a.gguf',
+    downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-a.gguf',
+    size: 1024,
+    lifecycleStatus: 'available',
+    matchStatus: 'ambiguous',
     ...overrides,
   };
 }
@@ -87,6 +102,52 @@ describe('ModelDownloadProgress', () => {
     expect(getByTestId('model-download-progress-org/model').props.className).toContain('bg-error-500/10');
   });
 
+  it.each([
+    ['queued', 'models.vision.projectorQueued', undefined, '0%'],
+    ['downloading', 'models.vision.projectorDownloading', 0.37, '37%'],
+    ['paused', 'models.vision.projectorPaused', 0.58, '58%'],
+  ] as const)('labels %s projector work instead of generic model verification', (projectorLifecycleStatus, expectedLabel, projectorProgress, expectedPercent) => {
+    const queuedModel = buildModel({
+      lifecycleStatus: LifecycleStatus.VERIFYING,
+      downloadProgress: 1,
+      chatModalities: ['text', 'vision'],
+      artifactRole: 'primary_chat_model',
+      projectorCandidates: [buildProjector({
+        lifecycleStatus: projectorLifecycleStatus,
+        matchStatus: 'matched',
+        downloadProgress: projectorProgress,
+      })],
+    });
+    useDownloadStore.setState({ queue: [queuedModel], activeDownloadId: queuedModel.id });
+
+    const { queryByText, getByText } = render(
+      <ModelDownloadProgress model={queuedModel} />,
+    );
+
+    expect(getByText(expectedLabel)).toBeTruthy();
+    expect(getByText(expectedPercent)).toBeTruthy();
+    expect(queryByText('models.verifying')).toBeNull();
+  });
+
+  it('keeps showing base model progress while the selected projector is only queued before base completion', () => {
+    const queuedModel = buildModel({
+      lifecycleStatus: LifecycleStatus.DOWNLOADING,
+      downloadProgress: 0.42,
+      chatModalities: ['text', 'vision'],
+      artifactRole: 'primary_chat_model',
+      projectorCandidates: [buildProjector({ lifecycleStatus: 'queued', matchStatus: 'matched' })],
+    });
+    useDownloadStore.setState({ queue: [queuedModel], activeDownloadId: queuedModel.id });
+
+    const { getByText, queryByText } = render(
+      <ModelDownloadProgress model={queuedModel} />,
+    );
+
+    expect(getByText('models.downloading')).toBeTruthy();
+    expect(getByText('42%')).toBeTruthy();
+    expect(queryByText('models.vision.projectorQueued')).toBeNull();
+  });
+
   it('can render a compact layout for catalog cards', () => {
     const { getByTestId } = render(
       <ModelDownloadProgress density="compact" model={buildModel({ downloadProgress: 0.33 })} />,
@@ -95,5 +156,121 @@ describe('ModelDownloadProgress', () => {
     expect(getByTestId('model-download-progress-org/model').props.className).toContain('px-2.5');
     expect(getByTestId('model-download-progress-track-org/model').props.className).toContain('h-3.5');
     expect(getByTestId('model-download-progress-fill-org/model').props.style).toEqual({ width: '33%' });
+  });
+});
+
+describe('ModelProjectorStatus', () => {
+  it('surfaces ambiguous projector status and keeps text fallback action separate', () => {
+    const model = buildModel({
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      chatModalities: ['text', 'vision'],
+      projectorCandidates: [
+        buildProjector({ id: 'projector-a', fileName: 'mmproj-a.gguf' }),
+        buildProjector({ id: 'projector-b', fileName: 'mmproj-b.gguf' }),
+      ],
+    });
+    const onChooseProjector = jest.fn();
+
+    const { getByTestId, getByText } = render(
+      <ModelProjectorStatus model={model} onChooseProjector={onChooseProjector} />,
+    );
+
+    expect(getByTestId('model-projector-status-org/model')).toBeTruthy();
+    expect(getByText('models.vision.projectorStatusAmbiguousTitle')).toBeTruthy();
+    expect(getByText('models.vision.projectorStatusAmbiguousDescription')).toBeTruthy();
+
+    fireEvent.press(getByText('models.vision.chooseProjectorAction'));
+
+    expect(onChooseProjector).toHaveBeenCalledWith(model);
+  });
+
+  it('does not render projector status for text-only models', () => {
+    const { queryByTestId } = render(<ModelProjectorStatus model={buildModel()} />);
+
+    expect(queryByTestId('model-projector-status-org/model')).toBeNull();
+  });
+});
+
+describe('ModelLifecycleActionRow projector actions', () => {
+  function renderActionRow(model: ModelMetadata) {
+    const props = {
+      model,
+      onDownload: jest.fn(),
+      onConfigureToken: jest.fn(),
+      onOpenModelPage: jest.fn(),
+      onLoad: jest.fn(),
+      onOpenSettings: jest.fn(),
+      onUnload: jest.fn(),
+      onDelete: jest.fn(),
+      onCancel: jest.fn(),
+      onChat: jest.fn(),
+    };
+
+    return {
+      props,
+      ...render(<ModelLifecycleActionRow {...props} />),
+    };
+  }
+
+  it.each([
+    ['available', 'models.vision.downloadProjector', 'model-projector-download-org/model'],
+    ['failed', 'models.vision.retryProjectorDownload', 'model-projector-retry-org/model'],
+    ['paused', 'models.vision.resumeProjectorDownload', 'model-projector-resume-org/model'],
+  ] as const)('shows %s selected projector recovery action for downloaded vision models', (projectorLifecycleStatus, expectedLabel, testID) => {
+    const model = buildModel({
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      chatModalities: ['text', 'vision'],
+      artifactRole: 'primary_chat_model',
+      projectorCandidates: [buildProjector({ lifecycleStatus: projectorLifecycleStatus, matchStatus: 'matched' })],
+    });
+
+    const { getByTestId, getByText, props } = renderActionRow(model);
+
+    expect(getByText(expectedLabel)).toBeTruthy();
+
+    fireEvent.press(getByTestId(testID));
+
+    expect(props.onDownload).toHaveBeenCalledWith(model);
+  });
+
+  it('keeps the base model load action visible when the selected projector failed', () => {
+    const model = buildModel({
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      chatModalities: ['text', 'vision'],
+      artifactRole: 'primary_chat_model',
+      projectorCandidates: [buildProjector({
+        lifecycleStatus: 'failed',
+        matchStatus: 'matched',
+        matchReason: 'download_http_error',
+      })],
+    });
+
+    const { getByTestId, getByText, props } = renderActionRow(model);
+
+    expect(getByText('models.load')).toBeTruthy();
+    expect(getByTestId('model-projector-retry-org/model')).toBeTruthy();
+
+    fireEvent.press(getByText('models.load'));
+
+    expect(props.onLoad).toHaveBeenCalledWith(model.id);
+  });
+
+  it.each([
+    ['downloaded', 'model-projector-download-org/model'],
+    ['active', 'model-projector-download-org/model'],
+  ] as const)('does not show a projector download action when the selected projector is already %s', (projectorLifecycleStatus, testID) => {
+    const model = buildModel({
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      chatModalities: ['text', 'vision'],
+      artifactRole: 'primary_chat_model',
+      projectorCandidates: [buildProjector({ lifecycleStatus: projectorLifecycleStatus, matchStatus: 'matched' })],
+    });
+
+    const { queryByTestId } = renderActionRow(model);
+
+    expect(queryByTestId(testID)).toBeNull();
   });
 });

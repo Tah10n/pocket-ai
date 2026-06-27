@@ -1,9 +1,11 @@
 import React from 'react';
 import { StyleSheet } from 'react-native';
-import { act, fireEvent, render, within } from '@testing-library/react-native';
+import { act, fireEvent, render, waitFor, within } from '@testing-library/react-native';
 import * as Clipboard from 'expo-clipboard';
+import * as FileSystem from 'expo-file-system/legacy';
 import { ChatMessageBubble } from '../../src/components/ui/ChatMessageBubble';
 import { StaticThemeProvider } from '../../src/providers/ThemeProvider';
+import { copiedImageAttachment, secondCopiedImageAttachment } from '../fixtures/chatImageAttachmentFixtures';
 
 jest.mock('react-native-css-interop', () => {
   const mockReact = require('react');
@@ -83,6 +85,7 @@ jest.mock('@/components/ui/pressable', () => {
 describe('ChatMessageBubble', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: true, size: 1024 });
   });
 
   it('keeps user messages as plain text', () => {
@@ -293,5 +296,134 @@ describe('ChatMessageBubble', () => {
 
     expect(onRegenerate).toHaveBeenCalledTimes(1);
     expect(onDelete).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders persisted user attachment thumbnails from local storage', async () => {
+    const { __setTranslationOverride } = jest.requireMock('react-i18next') as {
+      __setTranslationOverride: (key: string, value: string) => void;
+    };
+    __setTranslationOverride(
+      'chat.attachments.messagePreviewIndexedAccessibilityLabel',
+      'Message image {{index}} of {{count}} preview',
+    );
+    const attachmentWithThumbnail = {
+      ...copiedImageAttachment,
+      thumbnailUri: 'test-dir/chat-attachments/thread-vision-1/attachment-image-1-thumb.jpg',
+    };
+    const { findByTestId, getByLabelText, getByText } = render(
+      <ChatMessageBubble
+        id="user-attachment"
+        isUser
+        content="Describe this"
+        attachments={[attachmentWithThumbnail]}
+      />,
+    );
+
+    expect(getByText('Describe this')).toBeTruthy();
+    expect((await findByTestId(`message-attachment-image-user-attachment-${copiedImageAttachment.id}`)).props.source).toEqual({
+      uri: attachmentWithThumbnail.thumbnailUri,
+    });
+    expect(getByLabelText('Message image 1 of 1 preview')).toBeTruthy();
+    expect(FileSystem.getInfoAsync).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the original persisted attachment when thumbnail decoding fails', async () => {
+    const attachmentWithCorruptThumbnail = {
+      ...copiedImageAttachment,
+      thumbnailUri: 'test-dir/chat-attachments/thread-vision-1/attachment-image-1-thumb.jpg',
+    };
+
+    const { findByTestId, getByTestId, queryByTestId } = render(
+      <ChatMessageBubble
+        id="user-attachment-thumbnail-corrupt"
+        isUser
+        content="Describe this"
+        attachments={[attachmentWithCorruptThumbnail]}
+      />,
+    );
+
+    const imageTestId = `message-attachment-image-user-attachment-thumbnail-corrupt-${copiedImageAttachment.id}`;
+    expect((await findByTestId(imageTestId)).props.source).toEqual({
+      uri: attachmentWithCorruptThumbnail.thumbnailUri,
+    });
+
+    fireEvent(getByTestId(imageTestId), 'error');
+
+    await waitFor(() => {
+      expect(getByTestId(imageTestId).props.source).toEqual({
+        uri: copiedImageAttachment.localUri,
+      });
+    });
+
+    expect(queryByTestId(`message-attachment-unavailable-user-attachment-thumbnail-corrupt-${copiedImageAttachment.id}`)).toBeNull();
+    expect(FileSystem.getInfoAsync).not.toHaveBeenCalled();
+  });
+
+  it('does not re-probe equivalent persisted attachment props after rerender', async () => {
+    const attachmentWithThumbnail = {
+      ...copiedImageAttachment,
+      thumbnailUri: 'test-dir/chat-attachments/thread-vision-1/attachment-image-1-thumb.jpg',
+    };
+    const { findByTestId, rerender } = render(
+      <ChatMessageBubble
+        id="user-attachment-stable"
+        isUser
+        content="Describe this"
+        attachments={[attachmentWithThumbnail]}
+      />,
+    );
+
+    await findByTestId(`message-attachment-image-user-attachment-stable-${copiedImageAttachment.id}`);
+    expect(FileSystem.getInfoAsync).not.toHaveBeenCalled();
+
+    rerender(
+      <ChatMessageBubble
+        id="user-attachment-stable"
+        isUser
+        content="Describe this again"
+        attachments={[{ ...attachmentWithThumbnail }]}
+      />,
+    );
+
+    await act(async () => {});
+
+    expect(FileSystem.getInfoAsync).not.toHaveBeenCalled();
+  });
+
+  it('renders indexed localized unavailable states when persisted attachment files fail to load', async () => {
+    const { __setTranslationOverride } = jest.requireMock('react-i18next') as {
+      __setTranslationOverride: (key: string, value: string) => void;
+    };
+    __setTranslationOverride(
+      'chat.attachments.messageUnavailableIndexedAccessibilityLabel',
+      'Message image {{index}} of {{count}} unavailable',
+    );
+    const { getAllByText, getByLabelText, getByTestId, queryByTestId } = render(
+      <ChatMessageBubble
+        id="user-missing-attachment"
+        isUser
+        content="Describe this"
+        attachments={[copiedImageAttachment, secondCopiedImageAttachment]}
+      />,
+    );
+
+    fireEvent(getByTestId(`message-attachment-image-user-missing-attachment-${copiedImageAttachment.id}`), 'error');
+    fireEvent(getByTestId(`message-attachment-image-user-missing-attachment-${secondCopiedImageAttachment.id}`), 'error');
+
+    await waitFor(() => {
+      expect(queryByTestId(`message-attachment-image-user-missing-attachment-${copiedImageAttachment.id}`)).toBeNull();
+      expect(queryByTestId(`message-attachment-image-user-missing-attachment-${secondCopiedImageAttachment.id}`)).toBeNull();
+    });
+
+    const firstUnavailable = getByTestId(`message-attachment-unavailable-user-missing-attachment-${copiedImageAttachment.id}`);
+    const secondUnavailable = getByTestId(`message-attachment-unavailable-user-missing-attachment-${secondCopiedImageAttachment.id}`);
+
+    expect(firstUnavailable).toBeTruthy();
+    expect(secondUnavailable.props.accessibilityRole).toBe('image');
+    expect(secondUnavailable.props.accessibilityState).toEqual({ disabled: true });
+    expect(getByLabelText('Message image 1 of 2 unavailable')).toBeTruthy();
+    expect(getByLabelText('Message image 2 of 2 unavailable')).toBeTruthy();
+    expect(getAllByText('chat.attachments.unavailable')).toHaveLength(2);
+    expect(FileSystem.getInfoAsync).not.toHaveBeenCalled();
   });
 });

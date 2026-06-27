@@ -23,11 +23,13 @@ const mockGetCachedModel = jest.fn();
 const mockGetModelDetails = jest.fn();
 const mockGetModelCatalogErrorMessage = jest.fn((_: unknown) => 'catalog-error');
 const mockRegistryGetModel = jest.fn();
+const mockRegistryUpdateModel = jest.fn();
 const mockOffloadModel = jest.fn();
 const mockPromptModelLoadMemoryPolicyIfNeeded = jest.fn();
 const mockHandleModelLoadMemoryPolicyError = jest.fn();
 const mockGetLastModelLoadError = jest.fn();
 const mockClearLastModelLoadError = jest.fn();
+const mockRequestActiveMultimodalReadinessRefresh = jest.fn();
 
 let mockDownloadQueue: ModelMetadata[] = [];
 const mockEngineState = {
@@ -35,6 +37,7 @@ const mockEngineState = {
   activeModelId: undefined as string | undefined,
   loadProgress: 0,
   lastError: null as string | null,
+  diagnostics: undefined as Record<string, unknown> | undefined,
 };
 
 jest.mock('expo-router', () => ({
@@ -95,6 +98,7 @@ jest.mock('@/services/StorageManagerService', () => ({
 jest.mock('@/services/LocalStorageRegistry', () => ({
   registry: {
     getModel: (...args: Parameters<typeof mockRegistryGetModel>) => mockRegistryGetModel(...args),
+    updateModel: (...args: Parameters<typeof mockRegistryUpdateModel>) => mockRegistryUpdateModel(...args),
   },
 }));
 
@@ -102,6 +106,9 @@ jest.mock('@/services/LLMEngineService', () => ({
   llmEngineService: {
     getLastModelLoadError: () => mockGetLastModelLoadError(),
     clearLastModelLoadError: () => mockClearLastModelLoadError(),
+    requestActiveMultimodalReadinessRefresh: (...args: Parameters<typeof mockRequestActiveMultimodalReadinessRefresh>) => (
+      mockRequestActiveMultimodalReadinessRefresh(...args)
+    ),
   },
 }));
 
@@ -181,11 +188,13 @@ describe('useModelDetailsController', () => {
     mockEngineState.activeModelId = undefined;
     mockEngineState.loadProgress = 0;
     mockEngineState.lastError = null;
+    mockEngineState.diagnostics = undefined;
     mockLoadModel.mockResolvedValue(undefined);
     mockUnloadModel.mockResolvedValue(undefined);
     mockGetCachedModel.mockImplementation((modelId: string) => buildModel({ id: modelId }));
     mockGetModelDetails.mockImplementation((modelId: string) => Promise.resolve(buildModel({ id: modelId })));
     mockRegistryGetModel.mockReturnValue(undefined);
+    mockRegistryUpdateModel.mockImplementation(jest.fn());
     mockOffloadModel.mockResolvedValue(undefined);
     mockPromptModelLoadMemoryPolicyIfNeeded.mockReturnValue(false);
     mockHandleModelLoadMemoryPolicyError.mockReturnValue(false);
@@ -597,6 +606,728 @@ describe('useModelDetailsController', () => {
     });
   });
 
+  it('continues a pending download after choosing a projector from the details choice sheet', async () => {
+    const ambiguousVisionModel = buildModel({
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+      chatModalities: ['text', 'vision'],
+      projectorCandidates: [
+        {
+          id: 'projector-a',
+          ownerModelId: 'org/model',
+          repoId: 'org/model',
+          fileName: 'mmproj-a.gguf',
+          downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-a.gguf',
+          size: 512_000_000,
+          lifecycleStatus: 'available',
+          matchStatus: 'ambiguous',
+        },
+        {
+          id: 'projector-b',
+          ownerModelId: 'org/model',
+          repoId: 'org/model',
+          fileName: 'mmproj-b.gguf',
+          downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-b.gguf',
+          size: 256_000_000,
+          lifecycleStatus: 'available',
+          matchStatus: 'ambiguous',
+        },
+      ],
+    });
+    const { startModelDownloadFlow } = jest.requireMock('../../src/utils/modelDownloadFlow') as {
+      startModelDownloadFlow: jest.Mock;
+    };
+    startModelDownloadFlow.mockImplementationOnce(({ onProjectorChoiceRequired }) => {
+      onProjectorChoiceRequired?.(ambiguousVisionModel);
+    });
+    mockGetCachedModel.mockReturnValue(ambiguousVisionModel);
+    mockGetModelDetails.mockResolvedValue(ambiguousVisionModel);
+
+    const { getCurrentValue } = renderHookHarness();
+
+    await waitFor(() => {
+      expect(getCurrentValue()?.loading).toBe(false);
+    });
+
+    act(() => {
+      getCurrentValue()?.handleDownload(getCurrentValue()?.displayModel as ModelMetadata);
+    });
+
+    expect(getCurrentValue()?.isProjectorChoiceVisible).toBe(true);
+    expect(startModelDownloadFlow).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      getCurrentValue()?.handleSelectProjector('projector-b');
+    });
+
+    expect(startModelDownloadFlow).toHaveBeenCalledTimes(2);
+    expect(startModelDownloadFlow).toHaveBeenLastCalledWith(expect.objectContaining({
+      model: expect.objectContaining({
+        id: 'org/model',
+        selectedProjectorId: 'projector-b',
+        projectorCandidates: expect.arrayContaining([
+          expect.objectContaining({
+            id: 'projector-b',
+            matchStatus: 'user_selected',
+            matchReason: 'user_selected_projector',
+          }),
+        ]),
+      }),
+    }));
+  });
+
+  it('starts projector download after choosing an undownloaded projector for a downloaded model', async () => {
+    const { startModelDownloadFlow } = jest.requireMock('../../src/utils/modelDownloadFlow') as {
+      startModelDownloadFlow: jest.Mock;
+    };
+    const freshVisionModel = buildModel({
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+      fitsInRam: true,
+      memoryFitDecision: 'fits_high_confidence',
+      memoryFitConfidence: 'high',
+      chatModalities: ['text', 'vision'],
+      visionSource: 'catalog_metadata',
+      projectorCandidates: [
+        {
+          id: 'projector-a',
+          ownerModelId: 'org/model',
+          repoId: 'org/model',
+          fileName: 'fresh-mmproj-a.gguf',
+          downloadUrl: 'https://huggingface.co/org/model/resolve/main/fresh-mmproj-a.gguf',
+          size: 512_000_000,
+          lifecycleStatus: 'available',
+          matchStatus: 'ambiguous',
+        },
+        {
+          id: 'projector-b',
+          ownerModelId: 'org/model',
+          repoId: 'org/model',
+          fileName: 'fresh-mmproj-b.gguf',
+          downloadUrl: 'https://huggingface.co/org/model/resolve/main/fresh-mmproj-b.gguf',
+          size: 256_000_000,
+          lifecycleStatus: 'available',
+          matchStatus: 'ambiguous',
+        },
+      ],
+    });
+    let persistedModel = buildModel({
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      localPath: 'models/model.gguf',
+      downloadProgress: 1,
+      fitsInRam: false,
+      memoryFitDecision: 'likely_oom',
+      memoryFitConfidence: 'high',
+      chatModalities: ['text', 'vision'],
+      visionSource: 'tree_probe',
+      projectorCandidates: [
+        {
+          id: 'projector-a',
+          ownerModelId: 'org/model',
+          repoId: 'org/model',
+          fileName: 'stale-mmproj-a.gguf',
+          downloadUrl: 'https://huggingface.co/org/model/resolve/main/stale-mmproj-a.gguf',
+          size: 111_000_000,
+          lifecycleStatus: 'available',
+          matchStatus: 'ambiguous',
+        },
+        {
+          id: 'projector-b',
+          ownerModelId: 'org/model',
+          repoId: 'org/model',
+          fileName: 'stale-mmproj-b.gguf',
+          downloadUrl: 'https://huggingface.co/org/model/resolve/main/stale-mmproj-b.gguf',
+          size: 222_000_000,
+          lifecycleStatus: 'downloaded',
+          localPath: 'models/stale-mmproj-b.gguf',
+          matchStatus: 'ambiguous',
+        },
+      ],
+    });
+    mockRegistryGetModel.mockImplementation(() => persistedModel);
+    mockRegistryUpdateModel.mockImplementation((nextModel: ModelMetadata) => {
+      persistedModel = nextModel;
+    });
+    mockGetCachedModel.mockReturnValue(freshVisionModel);
+    mockGetModelDetails.mockResolvedValue(freshVisionModel);
+
+    const { getCurrentValue } = renderHookHarness();
+
+    await waitFor(() => {
+      expect(getCurrentValue()?.loading).toBe(false);
+    });
+
+    act(() => {
+      getCurrentValue()?.openProjectorChoice();
+    });
+
+    act(() => {
+      getCurrentValue()?.handleSelectProjector('projector-b');
+    });
+
+    const selectedProjector = getCurrentValue()?.displayModel?.projectorCandidates?.find((projector) => (
+      projector.id === 'projector-b'
+    ));
+
+    expect(getCurrentValue()?.displayModel).toEqual(expect.objectContaining({
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      localPath: 'models/model.gguf',
+      selectedProjectorId: 'projector-b',
+      fitsInRam: null,
+      memoryFitDecision: undefined,
+      memoryFitConfidence: undefined,
+      visionSource: 'user_selected_projector',
+    }));
+    expect(mockRegistryUpdateModel).toHaveBeenLastCalledWith(expect.objectContaining({
+      selectedProjectorId: 'projector-b',
+      fitsInRam: null,
+      memoryFitDecision: undefined,
+      memoryFitConfidence: undefined,
+    }));
+    expect(selectedProjector).toEqual(expect.objectContaining({
+      fileName: 'fresh-mmproj-b.gguf',
+      downloadUrl: 'https://huggingface.co/org/model/resolve/main/fresh-mmproj-b.gguf',
+      size: 256_000_000,
+      lifecycleStatus: 'available',
+      matchStatus: 'user_selected',
+      matchReason: 'user_selected_projector',
+    }));
+    expect(selectedProjector?.localPath).toBeUndefined();
+    expect(startModelDownloadFlow).toHaveBeenCalledTimes(1);
+    expect(startModelDownloadFlow).toHaveBeenCalledWith(expect.objectContaining({
+      model: expect.objectContaining({
+        id: 'org/model',
+        lifecycleStatus: LifecycleStatus.DOWNLOADED,
+        localPath: 'models/model.gguf',
+        selectedProjectorId: 'projector-b',
+        fitsInRam: null,
+        memoryFitDecision: undefined,
+        memoryFitConfidence: undefined,
+        projectorCandidates: expect.arrayContaining([
+          expect.objectContaining({
+            id: 'projector-b',
+            fileName: 'fresh-mmproj-b.gguf',
+            downloadUrl: 'https://huggingface.co/org/model/resolve/main/fresh-mmproj-b.gguf',
+            lifecycleStatus: 'available',
+            matchStatus: 'user_selected',
+          }),
+        ]),
+      }),
+    }));
+  });
+
+  it('retains inactive variant projector runtime state when choosing from a scoped details model', async () => {
+    const q4ProjectorA = {
+      id: 'projector-q4-a',
+      ownerModelId: 'org/model',
+      ownerVariantId: 'variant-q4',
+      repoId: 'org/model',
+      fileName: 'mmproj-q4-a.gguf',
+      downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-q4-a.gguf',
+      size: 256_000_000,
+      lifecycleStatus: 'available' as const,
+      matchStatus: 'ambiguous' as const,
+    };
+    const q4ProjectorB = {
+      id: 'projector-q4-b',
+      ownerModelId: 'org/model',
+      ownerVariantId: 'variant-q4',
+      repoId: 'org/model',
+      fileName: 'mmproj-q4-b.gguf',
+      downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-q4-b.gguf',
+      size: 300_000_000,
+      lifecycleStatus: 'available' as const,
+      matchStatus: 'ambiguous' as const,
+    };
+    const inactiveQ8Projector = {
+      id: 'projector-q8-downloaded',
+      ownerModelId: 'org/model',
+      ownerVariantId: 'variant-q8',
+      repoId: 'org/model',
+      fileName: 'mmproj-q8.gguf',
+      downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-q8.gguf',
+      size: 512_000_000,
+      lifecycleStatus: 'downloaded' as const,
+      localPath: 'mmproj-q8.gguf',
+      matchStatus: 'ambiguous' as const,
+    };
+    const variantVisionModel = buildModel({
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      localPath: 'models/model-q4.gguf',
+      activeVariantId: 'variant-q4',
+      resolvedFileName: 'model-q4.gguf',
+      chatModalities: ['text', 'vision'],
+      projectorCandidates: [q4ProjectorA, q4ProjectorB, inactiveQ8Projector],
+      variants: [
+        {
+          variantId: 'variant-q4',
+          fileName: 'model-q4.gguf',
+          quantizationLabel: 'Q4_K_M',
+          size: 4_000_000_000,
+          chatModalities: ['text', 'vision'],
+          projectorCandidates: [q4ProjectorA, q4ProjectorB],
+        },
+        {
+          variantId: 'variant-q8',
+          fileName: 'model-q8.gguf',
+          quantizationLabel: 'Q8_0',
+          size: 8_000_000_000,
+          chatModalities: ['text', 'vision'],
+          projectorCandidates: [inactiveQ8Projector],
+        },
+      ],
+    });
+    let persistedModel = variantVisionModel;
+    mockRegistryGetModel.mockImplementation(() => persistedModel);
+    mockRegistryUpdateModel.mockImplementation((nextModel: ModelMetadata) => {
+      persistedModel = nextModel;
+    });
+    mockGetCachedModel.mockReturnValue(variantVisionModel);
+    mockGetModelDetails.mockResolvedValue(variantVisionModel);
+
+    const { getCurrentValue } = renderHookHarness();
+
+    await waitFor(() => {
+      expect(getCurrentValue()?.loading).toBe(false);
+    });
+
+    const scopedDetailsChoiceModel = {
+      ...(getCurrentValue()?.displayModel as ModelMetadata),
+      projectorCandidates: [q4ProjectorA, q4ProjectorB],
+      selectedProjectorId: undefined,
+    };
+
+    act(() => {
+      getCurrentValue()?.openProjectorChoice(scopedDetailsChoiceModel);
+    });
+
+    act(() => {
+      getCurrentValue()?.handleSelectProjector('projector-q4-b');
+    });
+
+    const lastPersistedModel = mockRegistryUpdateModel.mock.calls.at(-1)?.[0] as ModelMetadata;
+    expect(lastPersistedModel).toEqual(expect.objectContaining({
+      selectedProjectorId: 'projector-q4-b',
+      projectorCandidates: expect.arrayContaining([
+        expect.objectContaining({
+          id: 'projector-q4-b',
+          matchStatus: 'user_selected',
+          matchReason: 'user_selected_projector',
+        }),
+        expect.objectContaining({
+          id: 'projector-q8-downloaded',
+          ownerVariantId: 'variant-q8',
+          lifecycleStatus: 'downloaded',
+          localPath: 'mmproj-q8.gguf',
+          size: 512_000_000,
+        }),
+      ]),
+    }));
+    expect(lastPersistedModel.projectorCandidates?.map((projector) => projector.id)).toEqual([
+      'projector-q4-a',
+      'projector-q4-b',
+      'projector-q8-downloaded',
+    ]);
+  });
+
+  it('clears stale persisted memory fit when the registry cannot select the fresh projector id', async () => {
+    const { startModelDownloadFlow } = jest.requireMock('../../src/utils/modelDownloadFlow') as {
+      startModelDownloadFlow: jest.Mock;
+    };
+    const freshVisionModel = buildModel({
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+      fitsInRam: true,
+      memoryFitDecision: 'fits_high_confidence',
+      memoryFitConfidence: 'high',
+      chatModalities: ['text', 'vision'],
+      projectorCandidates: [
+        {
+          id: 'fresh-projector-b',
+          ownerModelId: 'org/model',
+          repoId: 'org/model',
+          fileName: 'fresh-mmproj-b.gguf',
+          downloadUrl: 'https://huggingface.co/org/model/resolve/main/fresh-mmproj-b.gguf',
+          size: 256_000_000,
+          lifecycleStatus: 'available',
+          matchStatus: 'ambiguous',
+        },
+      ],
+    });
+    const persistedModel = buildModel({
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      localPath: 'models/model.gguf',
+      downloadProgress: 1,
+      fitsInRam: false,
+      memoryFitDecision: 'likely_oom',
+      memoryFitConfidence: 'high',
+      chatModalities: ['text', 'vision'],
+      projectorCandidates: [
+        {
+          id: 'stale-projector-a',
+          ownerModelId: 'org/model',
+          repoId: 'org/model',
+          fileName: 'stale-mmproj-a.gguf',
+          downloadUrl: 'https://huggingface.co/org/model/resolve/main/stale-mmproj-a.gguf',
+          size: 512_000_000,
+          lifecycleStatus: 'downloaded',
+          localPath: 'models/stale-mmproj-a.gguf',
+          matchStatus: 'user_selected',
+        },
+      ],
+      selectedProjectorId: 'stale-projector-a',
+    });
+    mockRegistryGetModel.mockReturnValue(persistedModel);
+    mockGetCachedModel.mockReturnValue(freshVisionModel);
+    mockGetModelDetails.mockResolvedValue(freshVisionModel);
+
+    const { getCurrentValue } = renderHookHarness();
+
+    await waitFor(() => {
+      expect(getCurrentValue()?.loading).toBe(false);
+    });
+
+    act(() => {
+      getCurrentValue()?.openProjectorChoice();
+    });
+
+    act(() => {
+      getCurrentValue()?.handleSelectProjector('fresh-projector-b');
+    });
+
+    expect(mockRegistryUpdateModel).toHaveBeenLastCalledWith(expect.objectContaining({
+      selectedProjectorId: 'fresh-projector-b',
+      fitsInRam: null,
+      memoryFitDecision: undefined,
+      memoryFitConfidence: undefined,
+    }));
+    expect(startModelDownloadFlow).toHaveBeenCalledWith(expect.objectContaining({
+      model: expect.objectContaining({
+        selectedProjectorId: 'fresh-projector-b',
+        fitsInRam: null,
+        memoryFitDecision: undefined,
+        memoryFitConfidence: undefined,
+      }),
+    }));
+  });
+
+  it('clears stale memory fit when the same selected projector id points to a changed artifact', async () => {
+    const freshVisionModel = buildModel({
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      localPath: 'models/model.gguf',
+      downloadProgress: 1,
+      selectedProjectorId: 'projector-a',
+      fitsInRam: true,
+      memoryFitDecision: 'fits_high_confidence',
+      memoryFitConfidence: 'high',
+      chatModalities: ['text', 'vision'],
+      projectorCandidates: [
+        {
+          id: 'projector-a',
+          ownerModelId: 'org/model',
+          repoId: 'org/model',
+          fileName: 'mmproj-a.gguf',
+          downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-a.gguf',
+          size: 768_000_000,
+          lifecycleStatus: 'available',
+          matchStatus: 'user_selected',
+          matchReason: 'user_selected_projector',
+        },
+      ],
+    });
+    const persistedModel = buildModel({
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      localPath: 'models/model.gguf',
+      downloadProgress: 1,
+      selectedProjectorId: 'projector-a',
+      fitsInRam: false,
+      memoryFitDecision: 'likely_oom',
+      memoryFitConfidence: 'high',
+      chatModalities: ['text', 'vision'],
+      projectorCandidates: [
+        {
+          id: 'projector-a',
+          ownerModelId: 'org/model',
+          repoId: 'org/model',
+          fileName: 'mmproj-a.gguf',
+          downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-a.gguf',
+          size: 256_000_000,
+          lifecycleStatus: 'downloaded',
+          localPath: 'models/mmproj-a.gguf',
+          matchStatus: 'user_selected',
+          matchReason: 'user_selected_projector',
+        },
+      ],
+    });
+    mockRegistryGetModel.mockReturnValue(persistedModel);
+    mockGetCachedModel.mockReturnValue(freshVisionModel);
+    mockGetModelDetails.mockResolvedValue(freshVisionModel);
+
+    const { getCurrentValue } = renderHookHarness();
+
+    await waitFor(() => {
+      expect(getCurrentValue()?.loading).toBe(false);
+    });
+
+    act(() => {
+      getCurrentValue()?.openProjectorChoice();
+    });
+
+    act(() => {
+      getCurrentValue()?.handleSelectProjector('projector-a');
+    });
+
+    expect(mockRegistryUpdateModel).toHaveBeenLastCalledWith(expect.objectContaining({
+      selectedProjectorId: 'projector-a',
+      fitsInRam: null,
+      memoryFitDecision: undefined,
+      memoryFitConfidence: undefined,
+    }));
+    expect(getCurrentValue()?.displayModel).toEqual(expect.objectContaining({
+      selectedProjectorId: 'projector-a',
+      fitsInRam: null,
+      memoryFitDecision: undefined,
+      memoryFitConfidence: undefined,
+    }));
+  });
+
+  it('does not start projector download after choosing an already active projector', async () => {
+    const { startModelDownloadFlow } = jest.requireMock('../../src/utils/modelDownloadFlow') as {
+      startModelDownloadFlow: jest.Mock;
+    };
+    const visionModel = buildModel({
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      localPath: 'models/model.gguf',
+      downloadProgress: 1,
+      selectedProjectorId: 'projector-a',
+      fitsInRam: false,
+      memoryFitDecision: 'likely_oom',
+      memoryFitConfidence: 'high',
+      chatModalities: ['text', 'vision'],
+      projectorCandidates: [
+        {
+          id: 'projector-a',
+          ownerModelId: 'org/model',
+          repoId: 'org/model',
+          fileName: 'mmproj-a.gguf',
+          downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-a.gguf',
+          size: 512_000_000,
+          lifecycleStatus: 'active',
+          localPath: 'models/mmproj-a.gguf',
+          matchStatus: 'ambiguous',
+        },
+        {
+          id: 'projector-b',
+          ownerModelId: 'org/model',
+          repoId: 'org/model',
+          fileName: 'mmproj-b.gguf',
+          downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-b.gguf',
+          size: 256_000_000,
+          lifecycleStatus: 'available',
+          matchStatus: 'ambiguous',
+        },
+      ],
+    });
+    mockGetCachedModel.mockReturnValue(visionModel);
+    mockGetModelDetails.mockResolvedValue(visionModel);
+
+    const { getCurrentValue } = renderHookHarness();
+
+    await waitFor(() => {
+      expect(getCurrentValue()?.loading).toBe(false);
+    });
+
+    act(() => {
+      getCurrentValue()?.openProjectorChoice();
+    });
+
+    act(() => {
+      getCurrentValue()?.handleSelectProjector('projector-a');
+    });
+
+    expect(getCurrentValue()?.displayModel?.selectedProjectorId).toBe('projector-a');
+    expect(getCurrentValue()?.displayModel).toEqual(expect.objectContaining({
+      fitsInRam: false,
+      memoryFitDecision: 'likely_oom',
+      memoryFitConfidence: 'high',
+    }));
+    expect(startModelDownloadFlow).not.toHaveBeenCalled();
+  });
+
+  it('refreshes active multimodal readiness after choosing a different downloaded projector', async () => {
+    const { startModelDownloadFlow } = jest.requireMock('../../src/utils/modelDownloadFlow') as {
+      startModelDownloadFlow: jest.Mock;
+    };
+    mockEngineState.status = EngineStatus.READY;
+    mockEngineState.activeModelId = 'org/model';
+
+    const visionModel = buildModel({
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      localPath: 'models/model.gguf',
+      downloadProgress: 1,
+      selectedProjectorId: 'projector-a',
+      multimodalReadiness: {
+        modelId: 'org/model',
+        status: 'ready',
+        projectorId: 'projector-a',
+        support: ['vision'],
+        checkedAt: 1,
+      },
+      chatModalities: ['text', 'vision'],
+      projectorCandidates: [
+        {
+          id: 'projector-a',
+          ownerModelId: 'org/model',
+          repoId: 'org/model',
+          fileName: 'mmproj-a.gguf',
+          downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-a.gguf',
+          size: 512_000_000,
+          lifecycleStatus: 'downloaded',
+          localPath: 'models/mmproj-a.gguf',
+          matchStatus: 'user_selected',
+          matchReason: 'user_selected_projector',
+        },
+        {
+          id: 'projector-b',
+          ownerModelId: 'org/model',
+          repoId: 'org/model',
+          fileName: 'mmproj-b.gguf',
+          downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-b.gguf',
+          size: 256_000_000,
+          lifecycleStatus: 'downloaded',
+          localPath: 'models/mmproj-b.gguf',
+          resumeData: 'stale-projector-resume-data',
+          downloadProgress: 0.4,
+          matchStatus: 'ambiguous',
+        },
+      ],
+    });
+    let persistedModel = visionModel;
+    mockRegistryGetModel.mockImplementation(() => persistedModel);
+    mockRegistryUpdateModel.mockImplementation((nextModel: ModelMetadata) => {
+      persistedModel = nextModel;
+    });
+    mockGetCachedModel.mockReturnValue(visionModel);
+    mockGetModelDetails.mockResolvedValue(visionModel);
+
+    const { getCurrentValue } = renderHookHarness();
+
+    await waitFor(() => {
+      expect(getCurrentValue()?.loading).toBe(false);
+    });
+
+    act(() => {
+      getCurrentValue()?.openProjectorChoice();
+    });
+
+    act(() => {
+      getCurrentValue()?.handleSelectProjector('projector-b');
+    });
+
+    const selectedProjector = getCurrentValue()?.displayModel?.projectorCandidates?.find((projector) => (
+      projector.id === 'projector-b'
+    ));
+    const finalUpdateCallOrder = mockRegistryUpdateModel.mock.invocationCallOrder.at(-1);
+    const refreshCallOrder = mockRequestActiveMultimodalReadinessRefresh.mock.invocationCallOrder[0];
+
+    expect(mockRegistryUpdateModel).toHaveBeenLastCalledWith(expect.objectContaining({
+      selectedProjectorId: 'projector-b',
+      multimodalReadiness: undefined,
+    }));
+    expect(selectedProjector).toEqual(expect.objectContaining({
+      id: 'projector-b',
+      lifecycleStatus: 'downloaded',
+      localPath: 'models/mmproj-b.gguf',
+      downloadProgress: 1,
+      matchStatus: 'user_selected',
+    }));
+    expect(selectedProjector?.resumeData).toBeUndefined();
+    expect(mockRequestActiveMultimodalReadinessRefresh).toHaveBeenCalledTimes(1);
+    expect(mockRequestActiveMultimodalReadinessRefresh).toHaveBeenCalledWith('org/model');
+    expect(refreshCallOrder).toBeGreaterThan(finalUpdateCallOrder ?? 0);
+    expect(startModelDownloadFlow).not.toHaveBeenCalled();
+  });
+
+  it('preserves projector runtime state when registry uses a legacy id for the same artifact', async () => {
+    const { startModelDownloadFlow } = jest.requireMock('../../src/utils/modelDownloadFlow') as {
+      startModelDownloadFlow: jest.Mock;
+    };
+    const freshProjectorId = 'projector-org-model-main-path-projectors-mmproj-b';
+    const legacyProjectorId = 'projector-org-model-main-mmproj-b.gguf';
+    const projectorFileName = 'projectors/mmproj-b.gguf';
+    const projectorDownloadUrl = `https://huggingface.co/org/model/resolve/main/${projectorFileName}`;
+    const freshVisionModel = buildModel({
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+      chatModalities: ['text', 'vision'],
+      visionSource: 'catalog_metadata',
+      projectorCandidates: [{
+        id: freshProjectorId,
+        ownerModelId: 'org/model',
+        repoId: 'org/model',
+        fileName: projectorFileName,
+        downloadUrl: projectorDownloadUrl,
+        hfRevision: 'main',
+        size: 256_000_000,
+        lifecycleStatus: 'available',
+        matchStatus: 'ambiguous',
+      }],
+    });
+    const persistedModel = buildModel({
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      localPath: 'models/model.gguf',
+      downloadProgress: 1,
+      chatModalities: ['text', 'vision'],
+      projectorCandidates: [{
+        id: legacyProjectorId,
+        ownerModelId: 'org/model',
+        repoId: 'org/model',
+        fileName: projectorFileName,
+        downloadUrl: projectorDownloadUrl,
+        hfRevision: 'main',
+        size: 256_000_000,
+        lifecycleStatus: 'downloaded',
+        localPath: 'models/projectors-mmproj-b.gguf',
+        resumeData: 'legacy-projector-resume-data',
+        downloadProgress: 0.4,
+        matchStatus: 'ambiguous',
+      }],
+    });
+    mockRegistryGetModel.mockReturnValue(persistedModel);
+    mockGetCachedModel.mockReturnValue(freshVisionModel);
+    mockGetModelDetails.mockResolvedValue(freshVisionModel);
+
+    const { getCurrentValue } = renderHookHarness();
+
+    await waitFor(() => {
+      expect(getCurrentValue()?.loading).toBe(false);
+    });
+
+    act(() => {
+      getCurrentValue()?.openProjectorChoice();
+    });
+
+    act(() => {
+      getCurrentValue()?.handleSelectProjector(freshProjectorId);
+    });
+
+    const selectedProjector = getCurrentValue()?.displayModel?.projectorCandidates?.[0];
+
+    expect(getCurrentValue()?.displayModel?.selectedProjectorId).toBe(freshProjectorId);
+    expect(selectedProjector).toEqual(expect.objectContaining({
+      id: freshProjectorId,
+      fileName: projectorFileName,
+      downloadUrl: projectorDownloadUrl,
+      lifecycleStatus: 'downloaded',
+      localPath: 'models/projectors-mmproj-b.gguf',
+      downloadProgress: 1,
+      matchStatus: 'user_selected',
+      matchReason: 'user_selected_projector',
+    }));
+    expect(selectedProjector?.resumeData).toBeUndefined();
+    expect(startModelDownloadFlow).not.toHaveBeenCalled();
+  });
+
   it('offloads the model with preserved settings and applies the deleted state', async () => {
     const model = buildModel({
       lifecycleStatus: LifecycleStatus.DOWNLOADED,
@@ -674,6 +1405,16 @@ describe('useModelDetailsController', () => {
     mockEngineState.activeModelId = 'org/loaded-model';
     mockEngineState.status = EngineStatus.ERROR;
     mockEngineState.lastError = 'Model load failed';
+    mockEngineState.diagnostics = {
+      multimodal: {
+        visionCapability: 'vision_capable',
+        projectorPresence: 'downloaded',
+        projectorPathCategory: 'models',
+        readinessStatus: 'failed',
+        failureReason: 'runtime:initialization_failed:path_redacted',
+        attachmentCount: 1,
+      },
+    };
     mockRegistryGetModel.mockReturnValue(model);
     mockGetLastModelLoadError.mockReturnValue({
       scope: 'LLMEngineService.load',
@@ -701,7 +1442,16 @@ describe('useModelDetailsController', () => {
       error: expect.any(AppError),
       context: expect.objectContaining({
         model: expect.objectContaining({ id: 'org/loaded-model', name: 'Loaded Model' }),
-        engine: expect.objectContaining({ status: EngineStatus.ERROR, activeModelId: 'org/loaded-model' }),
+        engine: expect.objectContaining({
+          status: EngineStatus.ERROR,
+          activeModelId: 'org/loaded-model',
+          diagnostics: expect.objectContaining({
+            multimodal: expect.objectContaining({
+              readinessStatus: 'failed',
+              attachmentCount: 1,
+            }),
+          }),
+        }),
         options: {
           allowUnsafeMemoryLoad: true,
           forceReload: false,

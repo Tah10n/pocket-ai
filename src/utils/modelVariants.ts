@@ -113,6 +113,22 @@ function normalizePositiveSize(value: ModelMetadata['size'] | undefined): number
     : undefined;
 }
 
+function resetUserSelectedProjectorCandidatesForVariantChange(
+  projectorCandidates: ModelMetadata['projectorCandidates'],
+): ModelMetadata['projectorCandidates'] {
+  return projectorCandidates?.map((projector) => {
+    if (projector.matchStatus !== 'user_selected') {
+      return projector;
+    }
+
+    return {
+      ...projector,
+      matchStatus: 'ambiguous' as const,
+      matchReason: 'variant_selection_changed',
+    };
+  });
+}
+
 function hasResolvedFileNameFallbackIdentityEvidence(
   model: ModelMetadata,
   selection: ModelVariantSelectionSource,
@@ -289,6 +305,9 @@ export function applyModelVariantSelectionIfAvailable(
       maxContextTokens: undefined,
       hasVerifiedContextWindow: false,
       capabilitySnapshot: undefined,
+      multimodalReadiness: undefined,
+      selectedProjectorId: undefined,
+      projectorCandidates: resetUserSelectedProjectorCandidatesForVariantChange(model.projectorCandidates),
       lifecycleStatus: LifecycleStatus.AVAILABLE,
       downloadProgress: 0,
     } : {}),
@@ -380,6 +399,9 @@ export function applyModelVariantSelection(model: ModelMetadata, variantId: stri
       maxContextTokens: undefined,
       hasVerifiedContextWindow: false,
       capabilitySnapshot: undefined,
+      multimodalReadiness: undefined,
+      selectedProjectorId: undefined,
+      projectorCandidates: resetUserSelectedProjectorCandidatesForVariantChange(model.projectorCandidates),
       lifecycleStatus: LifecycleStatus.AVAILABLE,
       downloadProgress: 0,
     } : {}),

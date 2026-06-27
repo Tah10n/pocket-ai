@@ -2,7 +2,8 @@ import DeviceInfo from 'react-native-device-info';
 import * as FileSystem from 'expo-file-system/legacy';
 import type { MMKV } from 'react-native-mmkv';
 import { assertPrivateStorageWritable, createStorage } from './storage';
-import { ModelMetadata, LifecycleStatus } from '../types/models';
+import { ModelMetadata, LifecycleStatus, type ModelVariant } from '../types/models';
+import type { MultimodalReadinessState, ProjectorArtifact } from '../types/multimodal';
 import { getModelsDir } from './FileSystemSetup';
 import { normalizePersistedModelMetadata } from './ModelMetadataNormalizer';
 import { estimateFastMemoryFit } from '../memory/estimator';
@@ -10,6 +11,8 @@ import { isValidLocalFileName, safeJoinModelPath } from '../utils/safeFilePath';
 import { GgufValidationError, validateGgufFileHeader } from '../utils/ggufValidation';
 import { normalizeSha256Digest } from '../utils/sha256';
 import type { CalibrationRecord } from '../memory/types';
+import { getModelMemoryFitInputSizeBytes } from '../utils/memoryFit';
+import { getStoredProjectorMemoryFitSizeBytes } from '../utils/modelSize';
 
 const REGISTRY_STORAGE_ID = 'models-registry';
 const MODEL_FILE_PRESERVATION_STORAGE_ID = 'model-file-preservation';
@@ -31,6 +34,7 @@ let modelFilePreservationStorage: MMKV | null = null;
 type PrivateResetModelFilePreservationState = {
   fileNames: Set<string>;
   scanComplete: boolean;
+  completedOnly: boolean;
 };
 
 type QuarantinedModelFile = {
@@ -41,12 +45,64 @@ type QuarantinedModelFile = {
 
 type QueuedModelFileNamesInput = string[] | (() => string[]);
 
+type ModelArtifact = NonNullable<ModelMetadata['artifacts']>[number];
+type ModelInputCapabilities = NonNullable<ModelMetadata['inputCapabilities']>;
+
 type ModelDirectoryEntryInspection =
   | { kind: 'file'; fileUri: string }
   | { kind: 'directory' | 'missing' | 'unknown'; fileUri?: string };
 
 function cloneCalibrationRecord(record: CalibrationRecord): CalibrationRecord {
   return { ...record };
+}
+
+function cloneProjectorArtifact(projector: ProjectorArtifact): ProjectorArtifact {
+  return { ...projector };
+}
+
+function cloneModelArtifact(artifact: ModelArtifact): ModelArtifact {
+  return {
+    ...artifact,
+    requiredFor: [...artifact.requiredFor],
+    integrity: artifact.integrity ? { ...artifact.integrity } : undefined,
+  };
+}
+
+function cloneInputCapabilities(inputCapabilities: ModelInputCapabilities): ModelInputCapabilities {
+  return {
+    ...inputCapabilities,
+    declared: { ...inputCapabilities.declared },
+    evidence: inputCapabilities.evidence.map((entry) => ({ ...entry })),
+  };
+}
+
+function cloneMultimodalReadinessState(readiness: MultimodalReadinessState): MultimodalReadinessState {
+  return {
+    ...readiness,
+    support: [...readiness.support],
+  };
+}
+
+function cloneModelVariant(variant: ModelVariant): ModelVariant {
+  return {
+    ...variant,
+    chatModalities: variant.chatModalities ? [...variant.chatModalities] : undefined,
+    projectorCandidates: variant.projectorCandidates?.map(cloneProjectorArtifact),
+  };
+}
+
+function getSanitizedRegistryErrorDetails(error: unknown): { errorName: string } | { errorType: string } {
+  if (error instanceof Error) {
+    return {
+      errorName: error.name,
+    };
+  }
+
+  return { errorType: typeof error };
+}
+
+function getModelStorageLogDetails(scope: string): { pathCategory: 'model_storage'; scope: string } {
+  return { pathCategory: 'model_storage', scope };
 }
 
 function normalizeModelId(value: unknown): string {
@@ -193,8 +249,11 @@ async function inspectModelDirectoryEntry(
     return { kind: 'file', fileUri };
   } catch (error) {
     console.warn(
-      `[LocalStorageRegistry] Failed to inspect model directory entry during ${scope}: ${fileName}`,
-      error,
+      '[LocalStorageRegistry] Failed to inspect model directory entry',
+      {
+        ...getModelStorageLogDetails(scope),
+        ...getSanitizedRegistryErrorDetails(error),
+      },
     );
     return { kind: 'unknown', fileUri };
   }
@@ -206,6 +265,7 @@ function readPrivateResetPreservedModelFiles(): PrivateResetModelFilePreservatio
     return {
       fileNames: new Set(),
       scanComplete: true,
+      completedOnly: true,
     };
   }
 
@@ -215,23 +275,27 @@ function readPrivateResetPreservedModelFiles(): PrivateResetModelFilePreservatio
       return {
         fileNames: normalizeModelFileNames(parsed),
         scanComplete: true,
+        completedOnly: false,
       };
     }
 
     const state = parsed as {
       fileNames?: unknown;
       scanComplete?: unknown;
+      completedOnly?: unknown;
     };
 
     return {
       fileNames: normalizeModelFileNames(state.fileNames),
       scanComplete: state.scanComplete !== false,
+      completedOnly: state.completedOnly === true,
     };
   } catch {
     getModelFilePreservationStorage().remove(PRIVATE_RESET_PRESERVED_MODEL_FILES_KEY);
     return {
       fileNames: new Set(),
       scanComplete: true,
+      completedOnly: true,
     };
   }
 }
@@ -248,6 +312,7 @@ function writePrivateResetPreservedModelFiles(state: PrivateResetModelFilePreser
     JSON.stringify({
       fileNames,
       scanComplete: state.scanComplete,
+      completedOnly: state.completedOnly,
       updatedAt: Date.now(),
     }),
   );
@@ -407,7 +472,124 @@ function cloneModelMetadata(model: ModelMetadata): ModelMetadata {
     datasets: model.datasets ? [...model.datasets] : undefined,
     languages: model.languages ? [...model.languages] : undefined,
     tags: model.tags ? [...model.tags] : undefined,
+    variants: model.variants?.map(cloneModelVariant),
+    artifacts: model.artifacts?.map(cloneModelArtifact),
+    chatModalities: model.chatModalities ? [...model.chatModalities] : undefined,
+    inputCapabilities: model.inputCapabilities
+      ? cloneInputCapabilities(model.inputCapabilities)
+      : undefined,
+    projectorCandidates: model.projectorCandidates?.map(cloneProjectorArtifact),
+    multimodalReadiness: model.multimodalReadiness
+      ? cloneMultimodalReadinessState(model.multimodalReadiness)
+      : undefined,
   };
+}
+
+function hasCompletedProjectorStatus(projector: Pick<ProjectorArtifact, 'lifecycleStatus'>): boolean {
+  return projector.lifecycleStatus === 'downloaded' || projector.lifecycleStatus === 'active';
+}
+
+function hasResumableProjectorStatus(projector: Pick<ProjectorArtifact, 'lifecycleStatus'>): boolean {
+  return projector.lifecycleStatus === 'queued'
+    || projector.lifecycleStatus === 'downloading'
+    || projector.lifecycleStatus === 'paused'
+    || projector.lifecycleStatus === 'failed';
+}
+
+function collectProtectedModelAssetLocalPaths(models: ModelMetadata[]): Set<string> {
+  const localPaths = new Set<string>();
+
+  for (const model of models) {
+    if (hasCompletedLocalModelFile(model) && isValidLocalFileName(model.localPath)) {
+      localPaths.add(model.localPath);
+    }
+
+    for (const projector of model.projectorCandidates ?? []) {
+      if (
+        (hasCompletedProjectorStatus(projector) || hasResumableProjectorStatus(projector))
+        && isValidLocalFileName(projector.localPath)
+      ) {
+        localPaths.add(projector.localPath);
+      }
+    }
+  }
+
+  return localPaths;
+}
+
+function collectProtectedProjectorLocalPaths(models: ModelMetadata[]): Set<string> {
+  const localPaths = new Set<string>();
+
+  for (const model of models) {
+    for (const projector of model.projectorCandidates ?? []) {
+      const localPath = projector.localPath;
+      if (
+        (hasCompletedProjectorStatus(projector) || hasResumableProjectorStatus(projector))
+        && isValidLocalFileName(localPath)
+      ) {
+        localPaths.add(localPath);
+      }
+    }
+  }
+
+  return localPaths;
+}
+
+function resetProjectorDownloadState(projector: ProjectorArtifact): boolean {
+  let changed = false;
+
+  if (projector.lifecycleStatus !== 'available') {
+    projector.lifecycleStatus = 'available';
+    changed = true;
+  }
+
+  if (projector.localPath !== undefined) {
+    projector.localPath = undefined;
+    changed = true;
+  }
+
+  if (projector.resumeData !== undefined) {
+    projector.resumeData = undefined;
+    changed = true;
+  }
+
+  if (projector.downloadProgress !== undefined) {
+    projector.downloadProgress = undefined;
+    changed = true;
+  }
+
+  return changed;
+}
+
+function clearMultimodalReadinessForProjector(
+  model: ModelMetadata,
+  projector: Pick<ProjectorArtifact, 'id'>,
+): boolean {
+  const readiness = model.multimodalReadiness;
+  if (!readiness || readiness.projectorId !== projector.id) {
+    return false;
+  }
+
+  model.multimodalReadiness = undefined;
+  return true;
+}
+
+function resetProjectorDownloadStateForModel(
+  model: ModelMetadata,
+  projector: ProjectorArtifact,
+): boolean {
+  const changed = resetProjectorDownloadState(projector);
+  return (changed && clearMultimodalReadinessForProjector(model, projector)) || changed;
+}
+
+function resetProjectorDownloadStates(model: ModelMetadata): boolean {
+  let changed = false;
+
+  for (const projector of model.projectorCandidates ?? []) {
+    changed = resetProjectorDownloadStateForModel(model, projector) || changed;
+  }
+
+  return changed;
 }
 
 function resetLocalDownloadState(model: ModelMetadata): void {
@@ -422,6 +604,7 @@ function resetLocalDownloadState(model: ModelMetadata): void {
   model.downloadErrorCode = undefined;
   model.downloadErrorMessage = undefined;
   model.downloadProgress = 0;
+  resetProjectorDownloadStates(model);
 }
 
 function hasCompletedLocalModelFile(model: Pick<ModelMetadata, 'lifecycleStatus' | 'localPath'>): boolean {
@@ -430,6 +613,136 @@ function hasCompletedLocalModelFile(model: Pick<ModelMetadata, 'lifecycleStatus'
       || model.lifecycleStatus === LifecycleStatus.ACTIVE)
     && typeof model.localPath === 'string'
   );
+}
+
+function shouldPreserveGgufValidationReadFailure(error: unknown): boolean {
+  return error instanceof GgufValidationError && error.reason === 'read_failed';
+}
+
+async function isExistingCompletedModelFileForPrivateReset(
+  model: ModelMetadata,
+  modelsDir: string,
+): Promise<boolean> {
+  if (!hasCompletedLocalModelFile(model) || !isValidLocalFileName(model.localPath)) {
+    return false;
+  }
+
+  const localUri = safeJoinModelPath(modelsDir, model.localPath);
+  if (!localUri) {
+    return false;
+  }
+
+  let info: Awaited<ReturnType<typeof FileSystem.getInfoAsync>>;
+  try {
+    info = await FileSystem.getInfoAsync(localUri);
+  } catch (error) {
+    console.warn('[LocalStorageRegistry] Failed to inspect completed model file before private storage reset; preserving registry-owned file name', {
+      ...getModelStorageLogDetails('private_storage_reset_snapshot'),
+      artifactKind: 'model',
+      ...getSanitizedRegistryErrorDetails(error),
+    });
+    return true;
+  }
+  if (!info.exists || isFileSystemDirectory(info)) {
+    return false;
+  }
+
+  const expectedSizeBytes = getValidDownloadIntegritySizeBytes(model.downloadIntegrity)
+    ?? getFileInfoSizeBytes({ size: model.size ?? undefined });
+  const fileSizeBytes = getFileInfoSizeBytes(info);
+  if (expectedSizeBytes !== null && fileSizeBytes !== null && fileSizeBytes !== expectedSizeBytes) {
+    return false;
+  }
+
+  try {
+    await validateGgufFileHeader(localUri, info);
+  } catch (error) {
+    return shouldPreserveGgufValidationReadFailure(error);
+  }
+
+  return true;
+}
+
+async function isExistingCompletedProjectorFileForPrivateReset(
+  projector: ProjectorArtifact,
+  modelsDir: string,
+): Promise<boolean> {
+  if (!hasCompletedProjectorStatus(projector) || !isValidLocalFileName(projector.localPath)) {
+    return false;
+  }
+
+  const localUri = safeJoinModelPath(modelsDir, projector.localPath);
+  if (!localUri) {
+    return false;
+  }
+
+  let info: Awaited<ReturnType<typeof FileSystem.getInfoAsync>>;
+  try {
+    info = await FileSystem.getInfoAsync(localUri);
+  } catch (error) {
+    console.warn('[LocalStorageRegistry] Failed to inspect completed projector file before private storage reset; preserving registry-owned file name', {
+      ...getModelStorageLogDetails('private_storage_reset_snapshot'),
+      artifactKind: 'projector',
+      ...getSanitizedRegistryErrorDetails(error),
+    });
+    return true;
+  }
+  if (!info.exists || isFileSystemDirectory(info)) {
+    return false;
+  }
+
+  const expectedSizeBytes = getFileInfoSizeBytes({ size: projector.size ?? undefined });
+  const fileSizeBytes = getFileInfoSizeBytes(info);
+  if (expectedSizeBytes !== null && fileSizeBytes !== null && fileSizeBytes !== expectedSizeBytes) {
+    return false;
+  }
+
+  try {
+    await validateGgufFileHeader(localUri, info);
+  } catch (error) {
+    return shouldPreserveGgufValidationReadFailure(error);
+  }
+
+  return true;
+}
+
+type ModelAssetFileForRemoval = {
+  fileName: string;
+  kind: 'model' | 'projector';
+};
+
+function getModelAssetFilesForRemoval(
+  model: ModelMetadata | undefined,
+  remainingModels: ModelMetadata[],
+): ModelAssetFileForRemoval[] {
+  if (!model) {
+    return [];
+  }
+
+  const protectedLocalPaths = collectProtectedModelAssetLocalPaths(remainingModels);
+  const seen = new Set<string>();
+  const files: ModelAssetFileForRemoval[] = [];
+  const addFile = (fileName: string | undefined, kind: ModelAssetFileForRemoval['kind']) => {
+    if (!isValidLocalFileName(fileName) || seen.has(fileName) || protectedLocalPaths.has(fileName)) {
+      return;
+    }
+
+    seen.add(fileName);
+    files.push({ fileName, kind });
+  };
+
+  addFile(model.localPath, 'model');
+
+  for (const projector of model.projectorCandidates ?? []) {
+    const localPath = projector.localPath;
+    if (!isValidLocalFileName(localPath)) {
+      continue;
+    }
+
+    addFile(localPath, 'projector');
+  }
+
+  return files;
 }
 
 export class LocalStorageRegistry {
@@ -517,32 +830,79 @@ export class LocalStorageRegistry {
   }
 
   public async preserveExistingModelFilesForPrivateStorageReset(): Promise<string[]> {
-    const currentState = readPrivateResetPreservedModelFiles();
     const modelsDir = getModelsDir();
+    const preservedFileNames = new Set<string>();
 
     if (!modelsDir) {
       writePrivateResetPreservedModelFiles({
-        fileNames: currentState.fileNames,
-        scanComplete: false,
+        fileNames: preservedFileNames,
+        scanComplete: true,
+        completedOnly: true,
       });
-      return Array.from(currentState.fileNames).sort((left, right) => left.localeCompare(right));
+      return [];
     }
 
     try {
-      const fileNames = normalizeModelFileNames(await FileSystem.readDirectoryAsync(modelsDir));
-      const nextFileNames = new Set([...currentState.fileNames, ...fileNames]);
+      for (const model of this.getModels()) {
+        if (await isExistingCompletedModelFileForPrivateReset(model, modelsDir) && isValidLocalFileName(model.localPath)) {
+          preservedFileNames.add(model.localPath);
+        }
+
+        for (const projector of model.projectorCandidates ?? []) {
+          if (
+            await isExistingCompletedProjectorFileForPrivateReset(projector, modelsDir)
+            && isValidLocalFileName(projector.localPath)
+          ) {
+            preservedFileNames.add(projector.localPath);
+          }
+        }
+      }
+
       writePrivateResetPreservedModelFiles({
-        fileNames: nextFileNames,
+        fileNames: preservedFileNames,
         scanComplete: true,
+        completedOnly: true,
       });
-      return Array.from(nextFileNames).sort((left, right) => left.localeCompare(right));
+      return Array.from(preservedFileNames).sort((left, right) => left.localeCompare(right));
     } catch (error) {
-      console.warn('[LocalStorageRegistry] Failed to snapshot model files before private storage reset; suspending orphan cleanup until the next registry validation can rescan.', error);
-      writePrivateResetPreservedModelFiles({
-        fileNames: currentState.fileNames,
-        scanComplete: false,
-      });
-      return Array.from(currentState.fileNames).sort((left, right) => left.localeCompare(right));
+      console.warn(
+        '[LocalStorageRegistry] Failed to snapshot completed model files before private storage reset; falling back to fail-closed directory preservation.',
+        {
+          ...getModelStorageLogDetails('private_storage_reset_snapshot'),
+          ...getSanitizedRegistryErrorDetails(error),
+        },
+      );
+
+      try {
+        const directoryFileNames = normalizeModelFileNames(await FileSystem.readDirectoryAsync(modelsDir));
+        const fallbackFileNames = new Set([...directoryFileNames, ...preservedFileNames]);
+        writePrivateResetPreservedModelFiles({
+          fileNames: fallbackFileNames,
+          scanComplete: false,
+          completedOnly: false,
+        });
+        return Array.from(fallbackFileNames).sort((left, right) => left.localeCompare(right));
+      } catch (directoryError) {
+        console.warn(
+          '[LocalStorageRegistry] Failed to snapshot model directory before private storage reset; preserving previous reset snapshot.',
+          {
+            ...getModelStorageLogDetails('private_storage_reset_snapshot'),
+            ...getSanitizedRegistryErrorDetails(directoryError),
+          },
+        );
+
+        if (preservedFileNames.size > 0) {
+          writePrivateResetPreservedModelFiles({
+            fileNames: preservedFileNames,
+            scanComplete: false,
+            completedOnly: false,
+          });
+          return Array.from(preservedFileNames).sort((left, right) => left.localeCompare(right));
+        }
+
+        return Array.from(readPrivateResetPreservedModelFiles().fileNames)
+          .sort((left, right) => left.localeCompare(right));
+      }
     }
   }
 
@@ -638,6 +998,145 @@ export class LocalStorageRegistry {
     this.emitModelsChanged();
   }
 
+  private async deleteModelAssetFile(
+    modelsDir: string,
+    file: ModelAssetFileForRemoval,
+  ): Promise<void> {
+    try {
+      const fileUri = safeJoinModelPath(modelsDir, file.fileName);
+      if (!fileUri) {
+        console.warn('[LocalStorageRegistry] Invalid localPath while deleting model asset file', {
+          ...getModelStorageLogDetails('model_asset_delete'),
+          fileKind: file.kind,
+        });
+        return;
+      }
+
+      const info = await FileSystem.getInfoAsync(fileUri);
+      if (info.exists && !isFileSystemDirectory(info)) {
+        await FileSystem.deleteAsync(fileUri);
+      } else if (info.exists) {
+        console.warn('[LocalStorageRegistry] Model asset localPath points to a directory, skipping file deletion', {
+          ...getModelStorageLogDetails('model_asset_delete'),
+          fileKind: file.kind,
+        });
+      }
+    } catch (e) {
+      console.error('[LocalStorageRegistry] Failed to delete model asset file', {
+        ...getModelStorageLogDetails('model_asset_delete'),
+        fileKind: file.kind,
+        ...getSanitizedRegistryErrorDetails(e),
+      });
+    }
+  }
+
+  private async validateProjectorLocalState(model: ModelMetadata, modelsDir: string): Promise<boolean> {
+    let changed = false;
+
+    for (const projector of model.projectorCandidates ?? []) {
+      const localPath = projector.localPath;
+      const hasCompletedStatus = hasCompletedProjectorStatus(projector);
+      if (!isValidLocalFileName(localPath)) {
+        if (hasCompletedStatus || projector.localPath !== undefined) {
+          changed = resetProjectorDownloadStateForModel(model, projector) || changed;
+        }
+        continue;
+      }
+
+      const fileUri = safeJoinModelPath(modelsDir, localPath);
+      if (!fileUri) {
+        console.warn('[LocalStorageRegistry] Invalid projector localPath, resetting projector to available', {
+          ...getModelStorageLogDetails('projector_local_state_validation'),
+          artifactKind: 'projector',
+        });
+        changed = resetProjectorDownloadStateForModel(model, projector) || changed;
+        continue;
+      }
+
+      const info = await FileSystem.getInfoAsync(fileUri);
+      if (!info.exists) {
+        console.warn('[LocalStorageRegistry] Projector localPath missing, resetting projector to available', {
+          ...getModelStorageLogDetails('projector_local_state_validation'),
+          artifactKind: 'projector',
+        });
+        changed = resetProjectorDownloadStateForModel(model, projector) || changed;
+        continue;
+      }
+
+      if (isFileSystemDirectory(info)) {
+        console.warn('[LocalStorageRegistry] Projector localPath points to a directory, resetting projector to available', {
+          ...getModelStorageLogDetails('projector_local_state_validation'),
+          artifactKind: 'projector',
+        });
+        changed = resetProjectorDownloadStateForModel(model, projector) || changed;
+        continue;
+      }
+
+      if (!hasCompletedStatus) {
+        if (hasResumableProjectorStatus(projector)) {
+          continue;
+        }
+
+        changed = resetProjectorDownloadStateForModel(model, projector) || changed;
+        continue;
+      }
+
+      if (projector.lifecycleStatus === 'active') {
+        projector.lifecycleStatus = 'downloaded';
+        changed = true;
+      }
+
+      const fileSizeBytes = getFileInfoSizeBytes(info);
+      const expectedSizeBytes = getFileInfoSizeBytes({ size: projector.size ?? undefined });
+      if (expectedSizeBytes !== null && fileSizeBytes !== null && fileSizeBytes !== expectedSizeBytes) {
+        console.warn('[LocalStorageRegistry] Projector file size mismatch, resetting projector to available', {
+          ...getModelStorageLogDetails('projector_local_state_validation'),
+          artifactKind: 'projector',
+        });
+        changed = resetProjectorDownloadStateForModel(model, projector) || changed;
+        continue;
+      }
+
+      try {
+        const ggufValidation = await validateGgufFileHeader(fileUri, info);
+        if (projector.size !== ggufValidation.sizeBytes) {
+          projector.size = ggufValidation.sizeBytes;
+          changed = true;
+        }
+      } catch (error) {
+        if (error instanceof GgufValidationError && error.reason === 'read_failed') {
+          console.warn(
+            '[LocalStorageRegistry] Projector GGUF validation could not read file, preserving downloaded projector state',
+            {
+              ...getModelStorageLogDetails('projector_local_state_validation'),
+              artifactKind: 'projector',
+              ...getSanitizedRegistryErrorDetails(error),
+            },
+          );
+          continue;
+        }
+
+        console.warn(
+          '[LocalStorageRegistry] Projector GGUF validation failed, resetting projector to available',
+          {
+            ...getModelStorageLogDetails('projector_local_state_validation'),
+            artifactKind: 'projector',
+            ...getSanitizedRegistryErrorDetails(error),
+          },
+        );
+        changed = resetProjectorDownloadStateForModel(model, projector) || changed;
+        continue;
+      }
+
+      if (fileSizeBytes !== null && projector.size === null) {
+        projector.size = fileSizeBytes;
+        changed = true;
+      }
+    }
+
+    return changed;
+  }
+
   /**
    * Remove a model from the registry and delete its local files.
    */
@@ -648,35 +1147,23 @@ export class LocalStorageRegistry {
     }
 
     assertPrivateStorageWritable();
-    const model = this.getModel(normalizedId);
+    const state = this.getCachedModelsState();
+    const model = state.modelsById.get(normalizedId);
+    const nextModelsById = new Map(state.modelsById);
+    const nextIds = state.ids.filter((id) => id !== normalizedId);
+    nextModelsById.delete(normalizedId);
+
     const modelsDir = getModelsDir();
-    if (model && model.localPath) {
-      try {
-        if (modelsDir) {
-          const fileUri = safeJoinModelPath(modelsDir, model.localPath);
-          if (!fileUri) {
-            console.warn(`[LocalStorageRegistry] Invalid localPath for ${modelId}, skipping file deletion`);
-          } else {
-            const info = await FileSystem.getInfoAsync(fileUri);
-            if (info.exists && !isFileSystemDirectory(info)) {
-              await FileSystem.deleteAsync(fileUri);
-            } else if (info.exists) {
-              console.warn(`[LocalStorageRegistry] Local path for ${modelId} points to a directory, skipping file deletion`);
-            }
-          }
-        }
-      } catch (e) {
-        console.error(`[LocalStorageRegistry] Failed to delete file for ${modelId}`, e);
+    if (model && modelsDir) {
+      const remainingModels = Array.from(nextModelsById.values());
+      const filesForRemoval = getModelAssetFilesForRemoval(model, remainingModels);
+
+      for (const file of filesForRemoval) {
+        await this.deleteModelAssetFile(modelsDir, file);
       }
     }
 
-    const state = this.getCachedModelsState();
-    const existing = state.modelsById.get(normalizedId);
-    const hadCompletedLocalFile = existing ? hasCompletedLocalModelFile(existing) : false;
-    const nextModelsById = new Map(state.modelsById);
-    const nextIds = state.ids.filter((id) => id !== normalizedId);
-
-    nextModelsById.delete(normalizedId);
+    const hadCompletedLocalFile = model ? hasCompletedLocalModelFile(model) : false;
 
     this.getStorage().remove(getModelStorageKey(normalizedId));
     this.persistModelsIndex(nextIds);
@@ -712,6 +1199,8 @@ export class LocalStorageRegistry {
         if (model.localPath || hasDownloadedState) {
           resetLocalDownloadState(model);
           changed = true;
+        } else {
+          changed = resetProjectorDownloadStates(model) || changed;
         }
       }
 
@@ -726,6 +1215,7 @@ export class LocalStorageRegistry {
     for (const model of models) {
       const hasDownloadedState = model.lifecycleStatus === LifecycleStatus.DOWNLOADED
         || model.lifecycleStatus === LifecycleStatus.ACTIVE;
+      let didValidateProjectors = false;
 
       if (!hasDownloadedState && model.localPath) {
         resetLocalDownloadState(model);
@@ -735,7 +1225,7 @@ export class LocalStorageRegistry {
 
       if (hasDownloadedState) {
         if (!model.localPath) {
-          console.warn(`[LocalStorageRegistry] Missing localPath for ${model.id}, resetting to available`);
+          console.warn('[LocalStorageRegistry] Missing localPath, resetting model to available', getModelStorageLogDetails('model_local_state_validation'));
           resetLocalDownloadState(model);
           changed = true;
           continue;
@@ -743,19 +1233,19 @@ export class LocalStorageRegistry {
 
         const fileUri = safeJoinModelPath(modelsDir, model.localPath);
         if (!fileUri) {
-          console.warn(`[LocalStorageRegistry] Invalid localPath for ${model.id}, resetting to available`);
+          console.warn('[LocalStorageRegistry] Invalid localPath, resetting model to available', getModelStorageLogDetails('model_local_state_validation'));
           resetLocalDownloadState(model);
           changed = true;
           continue;
         }
         const info = await FileSystem.getInfoAsync(fileUri);
         if (!info.exists) {
-          console.warn(`[LocalStorageRegistry] File missing for ${model.id}, resetting to available`);
+          console.warn('[LocalStorageRegistry] Local file missing, resetting model to available', getModelStorageLogDetails('model_local_state_validation'));
           resetLocalDownloadState(model);
           changed = true;
           continue;
         } else if (isFileSystemDirectory(info)) {
-          console.warn(`[LocalStorageRegistry] Local path for ${model.id} points to a directory, resetting to available`);
+          console.warn('[LocalStorageRegistry] Local path points to a directory, resetting model to available', getModelStorageLogDetails('model_local_state_validation'));
           resetLocalDownloadState(model);
           changed = true;
           continue;
@@ -769,7 +1259,7 @@ export class LocalStorageRegistry {
         if (model.downloadIntegrity?.kind === 'sha256') {
           const markerSha256 = getSha256IntegrityMarkerDigest(model.downloadIntegrity);
           if (!markerSha256) {
-            console.warn(`[LocalStorageRegistry] SHA-256 integrity marker is invalid for ${model.id}, resetting to available`);
+            console.warn('[LocalStorageRegistry] SHA-256 integrity marker is invalid, resetting model to available', getModelStorageLogDetails('model_local_state_validation'));
             resetLocalDownloadState(model);
             changed = true;
             continue;
@@ -785,7 +1275,7 @@ export class LocalStorageRegistry {
 
           const expectedSha256 = getModelSha256Digest(model);
           if (model.sha256 !== undefined && expectedSha256 === undefined) {
-            console.warn(`[LocalStorageRegistry] Expected SHA-256 digest is invalid for ${model.id}, downgrading local trust`);
+            console.warn('[LocalStorageRegistry] Expected SHA-256 digest is invalid, downgrading local trust', getModelStorageLogDetails('model_local_state_validation'));
             model.sha256 = undefined;
             changed = true;
           } else if (expectedSha256 !== undefined && model.sha256 !== expectedSha256) {
@@ -794,7 +1284,7 @@ export class LocalStorageRegistry {
           }
 
           if (expectedSha256 !== undefined && markerSha256 !== expectedSha256) {
-            console.warn(`[LocalStorageRegistry] SHA-256 integrity marker no longer matches expected digest for ${model.id}, resetting to available`);
+            console.warn('[LocalStorageRegistry] SHA-256 integrity marker no longer matches expected digest, resetting model to available', getModelStorageLogDetails('model_local_state_validation'));
             resetLocalDownloadState(model);
             changed = true;
             continue;
@@ -806,7 +1296,7 @@ export class LocalStorageRegistry {
           && fileSizeBytes !== null
           && fileSizeBytes === integritySizeBytes;
         if (integritySizeBytes !== null && !hasMatchingIntegrityMarker) {
-          console.warn(`[LocalStorageRegistry] Integrity marker size mismatch for ${model.id}, resetting to available`);
+          console.warn('[LocalStorageRegistry] Integrity marker size mismatch, resetting model to available', getModelStorageLogDetails('model_local_state_validation'));
           resetLocalDownloadState(model);
           changed = true;
           continue;
@@ -818,12 +1308,18 @@ export class LocalStorageRegistry {
           localSizeBytesForRegistry = ggufValidation.sizeBytes;
         } catch (error) {
           if (error instanceof GgufValidationError && error.reason === 'read_failed') {
-            console.warn(`[LocalStorageRegistry] Local GGUF validation could not read ${model.id}, preserving downloaded state`, error);
+            console.warn('[LocalStorageRegistry] Local GGUF validation could not read file, preserving downloaded state', {
+              ...getModelStorageLogDetails('model_local_state_validation'),
+              ...getSanitizedRegistryErrorDetails(error),
+            });
             changed = clearVerifiedLocalDerivedMetadata(model) || changed;
             continue;
           }
 
-          console.warn(`[LocalStorageRegistry] Local GGUF validation failed for ${model.id}, resetting to available`, error);
+          console.warn('[LocalStorageRegistry] Local GGUF validation failed, resetting model to available', {
+            ...getModelStorageLogDetails('model_local_state_validation'),
+            ...getSanitizedRegistryErrorDetails(error),
+          });
           resetLocalDownloadState(model);
           changed = true;
           continue;
@@ -841,6 +1337,9 @@ export class LocalStorageRegistry {
           changed = true;
         }
 
+        changed = await this.validateProjectorLocalState(model, modelsDir) || changed;
+        didValidateProjectors = true;
+
         const persistedSizeBytes = (
           typeof model.size === 'number'
           && Number.isFinite(model.size)
@@ -851,11 +1350,15 @@ export class LocalStorageRegistry {
         const sizeBytesForFit = localSizeBytesForRegistry ?? persistedSizeBytes;
 
         if (sizeBytesForFit !== null) {
+          const memoryFitInputSizeBytes = getModelMemoryFitInputSizeBytes({
+            modelSizeBytes: sizeBytesForFit,
+            projectorSizeBytes: getStoredProjectorMemoryFitSizeBytes(model.projectorCandidates),
+          }) ?? sizeBytesForFit;
           const metadataTrustForFit = hasTrustedIntegrityMarker
             ? 'verified_local' as const
             : model.metadataTrust;
           const fit = estimateFastMemoryFit({
-            modelSizeBytes: sizeBytesForFit,
+            modelSizeBytes: memoryFitInputSizeBytes,
             totalMemoryBytes,
             metadataTrust: metadataTrustForFit,
             ggufMetadata: model.gguf as Record<string, unknown> | undefined,
@@ -901,6 +1404,10 @@ export class LocalStorageRegistry {
           }
         }
       }
+
+      if (!didValidateProjectors) {
+        changed = await this.validateProjectorLocalState(model, modelsDir) || changed;
+      }
     }
 
     if (changed) {
@@ -927,6 +1434,7 @@ export class LocalStorageRegistry {
         return inspection;
       };
       let quarantineChanged = false;
+      let newlyQuarantinedCount = 0;
 
       for (const fileName of Array.from(quarantinedFileNames.keys())) {
         if (
@@ -956,21 +1464,31 @@ export class LocalStorageRegistry {
           continue;
         }
         if (!quarantinedFileNames.has(filename)) {
-          console.warn(`[LocalStorageRegistry] Quarantining orphaned model file: ${filename}`);
           quarantinedFileNames.set(filename, {
             fileName: filename,
             detectedAt: Date.now(),
             reason: 'orphaned',
           });
           quarantineChanged = true;
+          newlyQuarantinedCount += 1;
         }
+      }
+
+      if (newlyQuarantinedCount > 0) {
+        console.warn('[LocalStorageRegistry] Quarantined orphaned model files', {
+          ...getModelStorageLogDetails('orphan_quarantine_scan'),
+          count: newlyQuarantinedCount,
+        });
       }
 
       if (quarantineChanged) {
         writeQuarantinedModelFiles(quarantinedFileNames);
       }
     } catch (e) {
-      console.warn('[LocalStorageRegistry] Orphan quarantine scan failed', e);
+      console.warn('[LocalStorageRegistry] Orphan quarantine scan failed', {
+        ...getModelStorageLogDetails('orphan_quarantine_scan'),
+        ...getSanitizedRegistryErrorDetails(e),
+      });
     }
   }
 
@@ -1082,16 +1600,18 @@ export class LocalStorageRegistry {
         .map((model) => model.localPath)
         .filter((localPath): localPath is string => isValidLocalFileName(localPath)),
     );
+    const protectedProjectorLocalPaths = collectProtectedProjectorLocalPaths(models);
     const queuedFileNamesSet = normalizeModelFileNames(queuedFileNames);
     const privateResetPreservedFileNames = this.getPreservedModelFileNamesForCleanup(
       directoryFileNames,
-      completedLocalPaths,
+      new Set([...completedLocalPaths, ...protectedProjectorLocalPaths]),
     );
 
     return {
       currentSafeDirectoryFileNames,
       protectedFileNames: new Set([
         ...completedLocalPaths,
+        ...protectedProjectorLocalPaths,
         ...queuedFileNamesSet,
         ...privateResetPreservedFileNames,
       ]),
@@ -1106,10 +1626,33 @@ export class LocalStorageRegistry {
     const safeDirectoryFileNames = normalizeModelFileNames(directoryFileNames);
     const nextFileNames = new Set<string>();
 
-    if (!state.scanComplete) {
-      for (const fileName of safeDirectoryFileNames) {
-        state.fileNames.add(fileName);
+    if (!state.completedOnly) {
+      const legacyCandidateFileNames = !state.scanComplete && state.fileNames.size === 0
+        ? safeDirectoryFileNames
+        : state.fileNames;
+      for (const fileName of legacyCandidateFileNames) {
+        if (!safeDirectoryFileNames.has(fileName)) {
+          continue;
+        }
+
+        if (completedLocalPaths.has(fileName)) {
+          continue;
+        }
+
+        nextFileNames.add(fileName);
       }
+
+      const shouldPersistLegacy =
+        nextFileNames.size !== state.fileNames.size
+        || [...nextFileNames].some((fileName) => !state.fileNames.has(fileName));
+      if (shouldPersistLegacy) {
+        writePrivateResetPreservedModelFiles({
+          fileNames: nextFileNames,
+          scanComplete: state.scanComplete,
+          completedOnly: false,
+        });
+      }
+      return nextFileNames;
     }
 
     for (const fileName of state.fileNames) {
@@ -1133,6 +1676,7 @@ export class LocalStorageRegistry {
       writePrivateResetPreservedModelFiles({
         fileNames: nextFileNames,
         scanComplete: true,
+        completedOnly: true,
       });
     }
 
@@ -1145,7 +1689,7 @@ export class LocalStorageRegistry {
       try {
         listener();
       } catch (error) {
-        console.warn('[LocalStorageRegistry] Model registry listener failed', error);
+        console.warn('[LocalStorageRegistry] Model registry listener failed', getSanitizedRegistryErrorDetails(error));
       }
     });
   }
@@ -1309,7 +1853,7 @@ export class LocalStorageRegistry {
 
       return sanitized;
     } catch (e) {
-      console.warn('[LocalStorageRegistry] Failed to parse models index, rebuilding', e);
+      console.warn('[LocalStorageRegistry] Failed to parse models index, rebuilding', getSanitizedRegistryErrorDetails(e));
       this.getStorage().remove(MODELS_INDEX_KEY);
       return null;
     }
@@ -1365,7 +1909,7 @@ export class LocalStorageRegistry {
         modelsById.set(modelId, normalized);
         ids.push(modelId);
       } catch (e) {
-        console.warn('[LocalStorageRegistry] Failed to parse model metadata, dropping entry', modelId, e);
+        console.warn('[LocalStorageRegistry] Failed to parse model metadata, dropping entry', getSanitizedRegistryErrorDetails(e));
         storage.remove(getModelStorageKey(modelId));
       }
     }
@@ -1405,7 +1949,7 @@ export class LocalStorageRegistry {
         .filter((record): record is CalibrationRecord => record !== null);
       return new Map(normalized.map((record) => [record.key, record]));
     } catch (e) {
-      console.error('[LocalStorageRegistry] Failed to parse calibration records', e);
+      console.error('[LocalStorageRegistry] Failed to parse calibration records', getSanitizedRegistryErrorDetails(e));
       return new Map();
     }
   }
@@ -1430,7 +1974,7 @@ export class LocalStorageRegistry {
         ))
         .map((entry) => normalizePersistedModelMetadata(entry));
     } catch (e) {
-      console.error('[LocalStorageRegistry] Failed to parse legacy registry data', e);
+      console.error('[LocalStorageRegistry] Failed to parse legacy registry data', getSanitizedRegistryErrorDetails(e));
       return null;
     }
   }

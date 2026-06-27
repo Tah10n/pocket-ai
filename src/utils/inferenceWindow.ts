@@ -1,6 +1,18 @@
-import type { ChatMessage, ChatThread, LlmChatMessage } from '../types/chat';
+import {
+  DOCUMENT_ATTACHMENT_MESSAGE_PLACEHOLDER,
+  type ChatMessage,
+  type ChatThread,
+  type LlmChatMessage,
+  type LlmTextContentPart,
+  type LlmInputAudioContentPart,
+} from '../types/chat';
 import { AppError } from '../services/AppError';
 import { getVisibleMessageContent } from './chatPresentation';
+import {
+  getChatImageAttachmentMediaPaths,
+  normalizeChatAttachmentLocalUri,
+  toAttachmentMediaPath,
+} from './chatImageAttachments';
 
 export interface ThreadInferenceWindow {
   messages: LlmChatMessage[];
@@ -16,12 +28,19 @@ export interface ThreadInferenceWindowOptions {
 
 const CHARS_PER_ESTIMATED_TOKEN = 4;
 const MESSAGE_TOKEN_OVERHEAD = 6;
+const IMAGE_ATTACHMENT_ESTIMATED_TOKENS = 576;
 export const DEFAULT_INFERENCE_PROMPT_SAFETY_MARGIN_TOKENS = 64;
 const RESPONSE_RESERVE_BALANCING_MIN_TOKENS = 256;
 const MAX_RESPONSE_RESERVE_SHARE_OF_PROMPT_BUDGET = 0.5;
 
 export function estimateLlmMessageTokens(message: LlmChatMessage) {
-  return Math.max(1, Math.ceil(message.content.trim().length / CHARS_PER_ESTIMATED_TOKEN)) + MESSAGE_TOKEN_OVERHEAD;
+  const textContentPartChars = message.contentParts
+    ?.filter((part) => part.type === 'text')
+    .reduce((total, part) => total + part.text.trim().length, 0) ?? 0;
+  const mediaPathCount = getLlmMessageMediaPaths(message).length + getLlmMessageAudioInputCount(message);
+  return Math.max(1, Math.ceil((message.content.trim().length + textContentPartChars) / CHARS_PER_ESTIMATED_TOKEN))
+    + MESSAGE_TOKEN_OVERHEAD
+    + (mediaPathCount * IMAGE_ATTACHMENT_ESTIMATED_TOKENS);
 }
 
 export function estimateLlmMessagesTokens(messages: LlmChatMessage[]) {
@@ -76,6 +95,96 @@ function resolveInferenceWindowOptions(
   return optionsOrMaxContextMessages;
 }
 
+function normalizeMediaPaths(paths: readonly string[] | undefined): string[] {
+  if (!paths || paths.length === 0) {
+    return [];
+  }
+
+  return Array.from(new Set(paths
+    .map((path) => path.trim())
+    .filter((path) => path.length > 0)));
+}
+
+function getLlmMessageMediaPaths(message: LlmChatMessage): string[] {
+  return normalizeMediaPaths([
+    ...(message.mediaPaths ?? []),
+    ...(message.contentParts
+      ?.filter((part) => part.type === 'image_url')
+      .map((part) => part.image_url.url) ?? []),
+    ...getChatImageAttachmentMediaPaths(message.attachments),
+  ]);
+}
+
+function getLlmMessageAudioInputCount(message: LlmChatMessage): number {
+  return message.contentParts?.filter((part) => {
+    if (part.type !== 'input_audio') {
+      return false;
+    }
+
+    const url = part.input_audio.url?.trim() ?? '';
+    const data = part.input_audio.data?.trim() ?? '';
+    return url.length > 0 || data.length > 0;
+  }).length ?? 0;
+}
+
+function getAudioContentPartsFromAttachments(
+  attachments: ChatMessage['attachments'],
+): LlmInputAudioContentPart[] {
+  if (!attachments?.length) {
+    return [];
+  }
+
+  return attachments.flatMap((attachment) => {
+    if (!('kind' in attachment) || attachment.kind !== 'audio' || attachment.state !== 'ready') {
+      return [];
+    }
+
+    const localUri = normalizeChatAttachmentLocalUri(attachment.localUri);
+    const mediaPath = localUri ? toAttachmentMediaPath(localUri) : null;
+    if (!mediaPath) {
+      return [];
+    }
+
+    return [{
+      type: 'input_audio',
+      input_audio: {
+        format: attachment.audio.format,
+        url: mediaPath,
+      },
+    } satisfies LlmInputAudioContentPart];
+  });
+}
+
+function hasAudioAttachmentInput(attachments: ChatMessage['attachments']): boolean {
+  return getAudioContentPartsFromAttachments(attachments).length > 0;
+}
+
+function toLlmChatMessage(message: ChatMessage): LlmChatMessage {
+  const content = getVisibleMessageContent(message.role, message.content);
+  const mediaPaths = getChatImageAttachmentMediaPaths(message.attachments);
+  const attachmentAudioContentParts = getAudioContentPartsFromAttachments(message.attachments);
+  const storedContentParts = [
+    ...(message.contentParts ?? []),
+    ...attachmentAudioContentParts,
+  ];
+  const contentParts = storedContentParts.length
+    ? [
+        ...(content.trim().length > 0 && content !== DOCUMENT_ATTACHMENT_MESSAGE_PLACEHOLDER
+          ? [{ type: 'text', text: content } satisfies LlmTextContentPart]
+          : []),
+        ...storedContentParts,
+      ]
+    : undefined;
+
+  return {
+    role: message.role,
+    content: content === DOCUMENT_ATTACHMENT_MESSAGE_PLACEHOLDER && contentParts?.length ? '' : content,
+    ...(message.attachments && message.attachments.length > 0 ? { attachments: message.attachments } : null),
+    ...(mediaPaths.length > 0 ? { mediaPaths } : null),
+    ...(contentParts && contentParts.length > 0 ? { contentParts } : null),
+  };
+}
+
 export function getThreadInferenceWindow(
   thread: ChatThread,
   optionsOrMaxContextMessages: number | ThreadInferenceWindowOptions,
@@ -106,21 +215,20 @@ export function getThreadInferenceWindow(
     (message) =>
       message.state !== 'error'
       && (message.kind ?? 'message') !== 'model_switch'
-      && getVisibleMessageContent(message.role, message.content).trim().length > 0,
+      && (
+        getVisibleMessageContent(message.role, message.content).trim().length > 0
+        || (message.contentParts?.length ?? 0) > 0
+        || getChatImageAttachmentMediaPaths(message.attachments).length > 0
+        || hasAudioAttachmentInput(message.attachments)
+      ),
   );
-  const historyMessages = eligibleMessages.map<LlmChatMessage>((message) => ({
-    role: message.role,
-    content: getVisibleMessageContent(message.role, message.content),
-  }));
+  const historyMessages = eligibleMessages.map<LlmChatMessage>(toLlmChatMessage);
 
   if (
     latestUserMessage &&
-    !historyMessages.some((message) => message.content === latestUserMessage.content && message.role === 'user')
+    !thread.messages.some((message) => message.id === latestUserMessage.id)
   ) {
-    historyMessages.push({
-      role: 'user',
-      content: latestUserMessage.content,
-    });
+    historyMessages.push(toLlmChatMessage(latestUserMessage));
   }
 
   const reservedSlots = Math.min(systemMessages.length, options.maxContextMessages);
@@ -275,7 +383,12 @@ export function getEligibleThreadMessages(thread: ChatThread): ChatMessage[] {
     (message) =>
       message.state !== 'error'
       && (message.kind ?? 'message') !== 'model_switch'
-      && getVisibleMessageContent(message.role, message.content).trim().length > 0,
+      && (
+        getVisibleMessageContent(message.role, message.content).trim().length > 0
+        || (message.contentParts?.length ?? 0) > 0
+        || getChatImageAttachmentMediaPaths(message.attachments).length > 0
+        || hasAudioAttachmentInput(message.attachments)
+      ),
   );
 }
 
@@ -291,12 +404,20 @@ export async function buildInferenceWindowWithAccurateTokenCounts(
   thread: ChatThread,
   options: ThreadInferenceWindowOptions,
   countPromptTokens: (messages: LlmChatMessage[]) => Promise<number>,
+  control: { throwIfCancelled?: () => void } = {},
 ): Promise<{
   messages: LlmChatMessage[];
   promptTokens: number;
   promptSafetyMarginTokens: number;
   truncatedMessageIds: string[];
 }> {
+  const countPromptTokensWithCancellation = async (messages: LlmChatMessage[]) => {
+    control.throwIfCancelled?.();
+    const tokens = await countPromptTokens(messages);
+    control.throwIfCancelled?.();
+    return tokens;
+  };
+
   const maxContextTokens =
     typeof options.maxContextTokens === 'number' && options.maxContextTokens > 0
       ? Math.round(options.maxContextTokens)
@@ -318,7 +439,7 @@ export async function buildInferenceWindowWithAccurateTokenCounts(
   if (maxContextTokens === null) {
     return {
       messages: fullMessages,
-      promptTokens: await countPromptTokens(fullMessages),
+      promptTokens: await countPromptTokensWithCancellation(fullMessages),
       promptSafetyMarginTokens,
       truncatedMessageIds: baseTruncatedMessageIds,
     };
@@ -346,7 +467,7 @@ export async function buildInferenceWindowWithAccurateTokenCounts(
   if (historyMessages.length === 0) {
     return {
       messages: fullMessages,
-      promptTokens: await countPromptTokens(fullMessages),
+      promptTokens: await countPromptTokensWithCancellation(fullMessages),
       promptSafetyMarginTokens,
       truncatedMessageIds: baseTruncatedMessageIds,
     };
@@ -368,7 +489,7 @@ export async function buildInferenceWindowWithAccurateTokenCounts(
     }
 
     const tryCount = async (startIndex: number) => {
-      const tokens = await countPromptTokens([
+      const tokens = await countPromptTokensWithCancellation([
         ...systemMessages,
         ...historyMessages.slice(startIndex),
       ]);
@@ -485,7 +606,7 @@ export async function buildInferenceWindowWithAccurateTokenCounts(
       effectiveHistoryStartIndex -= 1;
       normalizedHistoryMessages = historyMessages.slice(effectiveHistoryStartIndex);
     } else if (normalizedHistoryMessages.length === 1) {
-      const userOnlyTokens = await countPromptTokens([...systemMessages, leadingUserMessage]);
+      const userOnlyTokens = await countPromptTokensWithCancellation([...systemMessages, leadingUserMessage]);
       if (userOnlyTokens <= promptTokenBudget) {
         effectiveHistoryStartIndex -= 1;
         normalizedHistoryMessages = [leadingUserMessage];

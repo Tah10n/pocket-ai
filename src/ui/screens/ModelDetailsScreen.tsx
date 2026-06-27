@@ -13,10 +13,16 @@ import {
 import { Box } from '@/components/ui/box';
 import { Button, ButtonText } from '@/components/ui/button';
 import { HeaderBar } from '@/components/ui/HeaderBar';
-import { ModelDownloadProgress, ModelLifecycleActionRow } from '@/components/ui/ModelLifecycleControls';
+import {
+  isModelDownloading,
+  ModelDownloadProgress,
+  ModelLifecycleActionRow,
+  ModelProjectorStatus,
+} from '@/components/ui/ModelLifecycleControls';
 import { MaterialSymbols } from '@/components/ui/MaterialSymbols';
 import { ErrorReportSheet } from '@/components/ui/ErrorReportSheet';
 import { ModelVariantPickerSheet } from '@/components/ui/ModelVariantPickerSheet';
+import { ProjectorChoiceSheet } from '@/components/ui/ProjectorChoiceSheet';
 import { MODEL_WARMUP_BANNER_RESERVED_HEIGHT, ModelWarmupBanner } from '@/components/ui/ModelWarmupBanner';
 import { ModelParametersSheet } from '@/components/ui/ModelParametersSheet';
 import { ScreenAndroidContentBlurTarget, ScreenBadge, ScreenCard, ScreenContent, ScreenRoot, ScreenStack } from '@/components/ui/ScreenShell';
@@ -26,10 +32,17 @@ import { Text } from '@/components/ui/text';
 import { ValueSelectorRow } from '@/components/ui/ValueSelectorRow';
 import { useModelDetailsController } from '@/hooks/useModelDetailsController';
 import { EngineStatus, LifecycleStatus, ModelAccessState } from '@/types/models';
+import { getModelVisionCapabilityBadgePresentation } from '@/utils/modelCapabilities';
 import { getVariantMemoryBadgePresentation } from '@/utils/modelMemoryBadgePresentation';
-import { formatModelFileSize } from '@/utils/modelSize';
+import {
+  formatModelFileSize,
+  getModelDisplayArtifactSizeBytes,
+  getModelDisplayProjectorCandidates,
+  getModelDisplaySelectedProjectorId,
+} from '@/utils/modelSize';
 import { getModelDetailsTagTone } from '@/utils/modelDetailsPresentation';
 import { canSelectModelVariant, getActiveModelVariant } from '@/utils/modelVariants';
+import { selectModelProjectorLifecycleState } from '@/store/modelsStore';
 
 export function ModelDetailsScreen() {
   const router = useRouter();
@@ -51,13 +64,18 @@ export function ModelDetailsScreen() {
     handleLoad,
     handleOpenModelPage,
     handleOpenTokenSettings,
+    handleSelectProjector,
     handleSelectVariant,
     handleUnload,
     heroMetrics,
+    isProjectorChoiceVisible,
     loading,
     metadataMetrics,
     modelParametersSheetProps,
     openModelParameters,
+    openProjectorChoice,
+    projectorChoiceModel,
+    closeProjectorChoice,
     reportEngineError,
   } = useModelDetailsController(modelId, variantId);
   const warmupContentBlurTargetRef = useRef<View | null>(null);
@@ -95,11 +113,35 @@ export function ModelDetailsScreen() {
     className: 'max-w-full',
   })) ?? [];
   const activeVariant = displayModel ? getActiveModelVariant(displayModel) : undefined;
+  const detailsProjectorCandidates = displayModel
+    ? getModelDisplayProjectorCandidates(displayModel)
+    : undefined;
+  const detailsSelectedProjectorId = displayModel
+    ? getModelDisplaySelectedProjectorId(displayModel, detailsProjectorCandidates)
+    : undefined;
+  const detailsPresentationModel = displayModel
+    ? {
+        ...displayModel,
+        chatModalities: activeVariant?.chatModalities ?? displayModel.chatModalities,
+        artifactRole: activeVariant?.artifactRole ?? displayModel.artifactRole,
+        visionSource: activeVariant?.visionSource ?? displayModel.visionSource,
+        visionConfidence: activeVariant?.visionConfidence ?? displayModel.visionConfidence,
+        projectorCandidates: detailsProjectorCandidates,
+        selectedProjectorId: detailsSelectedProjectorId,
+      }
+    : null;
   const detailsMemoryBadge = displayModel
     ? getVariantMemoryBadgePresentation(displayModel, activeVariant, { useModelFallback: true })
     : null;
   const detailsMemoryDecision = activeVariant?.ramFit ?? displayModel?.memoryFitDecision;
-  const detailsDisplaySize = activeVariant?.size ?? displayModel?.size ?? null;
+  const detailsDisplaySize = displayModel
+    ? getModelDisplayArtifactSizeBytes(
+      displayModel,
+      activeVariant?.size ?? displayModel.size,
+      detailsProjectorCandidates,
+      detailsSelectedProjectorId,
+    )
+    : null;
   const shouldShowDetailsMemoryBadge = detailsMemoryBadge !== null && (
     detailsMemoryBadge.tone !== 'neutral'
     || (detailsMemoryDecision === 'unknown' && detailsDisplaySize !== null)
@@ -113,6 +155,14 @@ export function ModelDetailsScreen() {
     return `${detailsQuantizationLabel} - ${formatModelFileSize(detailsDisplaySize, t('models.sizeUnknown'))}`;
   }, [detailsDisplaySize, detailsQuantizationLabel, t]);
   const shouldShowStandaloneDetailsMemoryBadge = !variantSelectorValue && shouldShowDetailsMemoryBadge;
+  const detailsVisionBadge = detailsPresentationModel ? getModelVisionCapabilityBadgePresentation(detailsPresentationModel) : null;
+  const detailsProjectorLifecycle = detailsPresentationModel ? selectModelProjectorLifecycleState(detailsPresentationModel) : null;
+  const shouldShowProjectorStatus = detailsProjectorLifecycle !== null && detailsProjectorLifecycle.status !== 'text_only';
+  const shouldShowDownloadProgress = Boolean(displayModel && (
+    isModelDownloading(displayModel)
+    || displayModel.lifecycleStatus === LifecycleStatus.PAUSED
+    || displayModel.lifecycleStatus === LifecycleStatus.FAILED
+  ));
   const canOpenVariantPicker = displayModel ? canSelectModelVariant(displayModel) : false;
   const closeVariantPicker = useCallback(() => {
     setVariantPickerVisible(false);
@@ -204,6 +254,11 @@ export function ModelDetailsScreen() {
                           {t('common.active')}
                         </ScreenBadge>
                       ) : null}
+                      {detailsVisionBadge ? (
+                        <ScreenBadge tone={detailsVisionBadge.tone} size="micro" iconName={detailsVisionBadge.iconName}>
+                          {t(detailsVisionBadge.labelKey)}
+                        </ScreenBadge>
+                      ) : null}
                       {shouldShowStandaloneDetailsMemoryBadge && detailsMemoryBadge ? (
                         <ScreenBadge tone={detailsMemoryBadge.tone} size="micro" iconName={detailsMemoryBadge.iconName}>
                           {t(detailsMemoryBadge.labelKey)}
@@ -231,7 +286,14 @@ export function ModelDetailsScreen() {
                       pillClassName="min-w-[124px] flex-1"
                     />
                   )}
-                  progress={<ModelDownloadProgress model={displayModel} />}
+                  progress={shouldShowProjectorStatus || shouldShowDownloadProgress ? (
+                    <Box className="gap-3">
+                      {shouldShowProjectorStatus && detailsPresentationModel ? (
+                        <ModelProjectorStatus model={detailsPresentationModel} onChooseProjector={openProjectorChoice} />
+                      ) : null}
+                      {shouldShowDownloadProgress ? <ModelDownloadProgress model={displayModel} /> : null}
+                    </Box>
+                  ) : undefined}
                   variantSelector={variantSelectorValue ? (
                     <ValueSelectorRow
                       value={variantSelectorValue}
@@ -316,6 +378,13 @@ export function ModelDetailsScreen() {
         androidContentBlurTargetRef={warmupContentBlurTargetRef}
         onSelectVariant={selectVariant}
         onClose={closeVariantPicker}
+      />
+      <ProjectorChoiceSheet
+        visible={isProjectorChoiceVisible}
+        model={projectorChoiceModel ?? displayModel}
+        androidContentBlurTargetRef={warmupContentBlurTargetRef}
+        onSelectProjector={handleSelectProjector}
+        onClose={closeProjectorChoice}
       />
       <ErrorReportSheet
         {...errorReportSheetProps}

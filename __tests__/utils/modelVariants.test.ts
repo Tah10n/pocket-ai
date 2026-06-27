@@ -125,6 +125,38 @@ describe('modelVariants', () => {
           metadataTrust: 'trusted_remote',
           sizeBytes: 4_000_000_000,
         },
+        multimodalReadiness: {
+          modelId: 'org/model',
+          variantId: 'model.Q4_K_M.gguf',
+          status: 'ready',
+          projectorId: 'projector-1',
+          support: ['vision'],
+          checkedAt: 1,
+        },
+        selectedProjectorId: 'projector-q4',
+        projectorCandidates: [
+          {
+            id: 'projector-q4',
+            ownerModelId: 'org/model',
+            repoId: 'org/model',
+            fileName: 'mmproj-q4.gguf',
+            downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-q4.gguf',
+            size: 1000,
+            lifecycleStatus: 'downloaded',
+            matchStatus: 'user_selected',
+            matchReason: 'user_selected_projector',
+          },
+          {
+            id: 'projector-q8',
+            ownerModelId: 'org/model',
+            repoId: 'org/model',
+            fileName: 'mmproj-q8.gguf',
+            downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-q8.gguf',
+            size: 1000,
+            lifecycleStatus: 'available',
+            matchStatus: 'ambiguous',
+          },
+        ],
       }),
       'model.Q8_0.gguf',
     );
@@ -147,6 +179,19 @@ describe('modelVariants', () => {
       hasVerifiedContextWindow: false,
       capabilitySnapshot: undefined,
     }));
+    expect(selected.multimodalReadiness).toBeUndefined();
+    expect(selected.selectedProjectorId).toBeUndefined();
+    expect(selected.projectorCandidates).toEqual([
+      expect.objectContaining({
+        id: 'projector-q4',
+        matchStatus: 'ambiguous',
+        matchReason: 'variant_selection_changed',
+      }),
+      expect.objectContaining({
+        id: 'projector-q8',
+        matchStatus: 'ambiguous',
+      }),
+    ]);
     expect(selected.gguf).toEqual(expect.objectContaining({
       sizeLabel: 'Q8_0',
       totalBytes: 8_000_000_000,

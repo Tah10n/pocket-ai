@@ -70,6 +70,7 @@
 ### Chat & History
 
 - Persistent on-device chat history, encrypted at rest
+- Capability-gated chat attachments for images, audio, and local documents
 - In-chat model switching keeps one conversation thread while recording when the active model changes
 - Per-message model metadata keeps edits, regeneration, and history restoration aligned with the model that produced each turn
 - System prompt presets for different assistant behaviors
@@ -148,6 +149,7 @@ This project uses Conventional Commit-style **PR titles** to drive automated ver
 |----------|-------------|
 | [Changelog](CHANGELOG.md) | Release history |
 | [Privacy & Disclosures](docs/privacy-disclosures.md) | Data handling and privacy policies |
+| [Multimodal Attachments](docs/multimodal-attachments.md) | Local attachment lifecycle, runtime media contracts, and privacy boundaries |
 | [Model Parameters](docs/model-parameters.md) | Generation settings, load profiles, and chat snapshot behavior |
 | [Android Build Guide](docs/android-build.md) | Android release signing and bundling |
 | [iOS Build Guide](docs/ios-build.md) | iOS archive, distribution, and signing |

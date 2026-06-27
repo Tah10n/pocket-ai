@@ -49,6 +49,7 @@ const preferredPort = parsePositiveInteger(
   cliOptions.port ?? process.env.ANDROID_SMOKE_PORT ?? "8081",
   "Metro port"
 );
+const defaultDeviceMetroPort = 8081;
 const maxPort = preferredPort + 9;
 const screenshotTarget =
   cliOptions.screenshot ?? process.env.ANDROID_SMOKE_SCREENSHOT ?? null;
@@ -1351,11 +1352,40 @@ function isInsufficientStorageInstallFailure(output) {
     || normalizedOutput.includes("not enough space");
 }
 
-function reverseMetroPort(adbPath, serial, port) {
-  log(`Reversing device port ${port} to localhost:${port}...`);
-  runChecked(adbPath, ["-s", serial, "reverse", `tcp:${port}`, `tcp:${port}`], {
-    stdio: "inherit",
-  });
+function buildMetroReverseSpecs(hostPort, devicePort = defaultDeviceMetroPort) {
+  const normalizedHostPort = parsePositiveInteger(hostPort, "host Metro port");
+  const normalizedDevicePort = parsePositiveInteger(devicePort, "device Metro port");
+  const specsByDevicePort = new Map([
+    [
+      normalizedDevicePort,
+      {
+        devicePort: normalizedDevicePort,
+        hostPort: normalizedHostPort,
+      },
+    ],
+  ]);
+
+  if (normalizedHostPort !== normalizedDevicePort) {
+    specsByDevicePort.set(normalizedHostPort, {
+      devicePort: normalizedHostPort,
+      hostPort: normalizedHostPort,
+    });
+  }
+
+  return Array.from(specsByDevicePort.values());
+}
+
+function reverseMetroPort(adbPath, serial, hostPort) {
+  for (const spec of buildMetroReverseSpecs(hostPort)) {
+    log(`Reversing device port ${spec.devicePort} to localhost:${spec.hostPort}...`);
+    runChecked(
+      adbPath,
+      ["-s", serial, "reverse", `tcp:${spec.devicePort}`, `tcp:${spec.hostPort}`],
+      {
+        stdio: "inherit",
+      }
+    );
+  }
 }
 
 function launchInstalledApp(adbPath, serial, appPackage) {
@@ -1697,6 +1727,7 @@ function wakeAndUnlockDevice(adbPath, serial) {
 
 module.exports = {
   buildMetroBundlePath,
+  buildMetroReverseSpecs,
   evaluateApkReuse,
   evaluateInstallReuse,
   isInsufficientStorageInstallFailure,

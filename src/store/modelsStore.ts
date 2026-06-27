@@ -3,6 +3,10 @@ import { createJSONStorage, persist } from 'zustand/middleware';
 import { mmkvStorage } from '../lib/mmkv';
 import type { ModelsCatalogTab } from './modelsCatalogTabs';
 import { assertPrivateStorageWritable } from '../services/storage';
+import { projectorArtifactService, type ProjectorResolutionReason } from '../services/ProjectorArtifactService';
+import type { ModelMetadata } from '../types/models';
+import type { ProjectorArtifact, ProjectorLifecycleStatus } from '../types/multimodal';
+import { modelSupportsVision } from '../utils/modelCapabilities';
 
 export type ModelSizeRange = 'small' | 'medium' | 'large';
 export type ModelSortField = 'name' | 'lastModified' | 'downloaded' | 'downloads' | 'likes';
@@ -26,6 +30,23 @@ export interface ModelsCatalogTabPreferences {
   filters: ModelFilterCriteria;
   sort: ModelSortPreference;
   discoveryMode: CatalogDiscoveryMode;
+}
+
+export type ModelProjectorLifecycleStatus =
+  | 'text_only'
+  | 'missing'
+  | 'ambiguous'
+  | ProjectorLifecycleStatus;
+
+export interface ModelProjectorLifecycleState {
+  modelId: string;
+  status: ModelProjectorLifecycleStatus;
+  reason: ProjectorResolutionReason | 'text_only';
+  candidates: ProjectorArtifact[];
+  selectedProjector?: ProjectorArtifact;
+  shouldPromptForChoice: boolean;
+  isReady: boolean;
+  isDownloading: boolean;
 }
 
 interface ModelsStoreState {
@@ -174,6 +195,68 @@ function resolvePersistedDiscoveryMode(
     )
     : persistedDiscoveryMode
       ?? (hasNonDefaultPreferences(filters, sort) ? 'custom' : 'uninitialized');
+}
+
+export function selectModelProjectorLifecycleState(model: ModelMetadata): ModelProjectorLifecycleState {
+  if (!modelSupportsVision(model)) {
+    return {
+      modelId: model.id,
+      status: 'text_only',
+      reason: 'text_only',
+      candidates: [],
+      shouldPromptForChoice: false,
+      isReady: false,
+      isDownloading: false,
+    };
+  }
+
+  const resolution = projectorArtifactService.resolveProjectorForModel(model);
+  if (resolution.status === 'ambiguous') {
+    return {
+      modelId: model.id,
+      status: 'ambiguous',
+      reason: resolution.reason,
+      candidates: resolution.candidates,
+      shouldPromptForChoice: true,
+      isReady: false,
+      isDownloading: false,
+    };
+  }
+
+  const selectedProjector = resolution.selectedProjector;
+  const status = selectedProjector?.lifecycleStatus ?? 'missing';
+
+  return {
+    modelId: model.id,
+    status,
+    reason: resolution.reason,
+    candidates: resolution.candidates,
+    selectedProjector,
+    shouldPromptForChoice: false,
+    isReady: status === 'downloaded' || status === 'active',
+    isDownloading: status === 'queued' || status === 'downloading' || status === 'paused',
+  };
+}
+
+export function clearModelProjectorLocalState(model: ModelMetadata): ModelMetadata {
+  if (!model.projectorCandidates?.length && !model.multimodalReadiness) {
+    return model;
+  }
+
+  return {
+    ...model,
+    multimodalReadiness: undefined,
+    projectorCandidates: model.projectorCandidates?.map((projector) => ({
+      ...projector,
+      localPath: undefined,
+      resumeData: undefined,
+      downloadProgress: undefined,
+      lifecycleStatus: 'available',
+      ...(projector.matchStatus === 'failed'
+        ? { matchStatus: 'matched' as const, matchReason: undefined }
+        : {}),
+    })),
+  };
 }
 
 export const useModelsStore = create<ModelsStoreState>()(

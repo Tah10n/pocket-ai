@@ -1,5 +1,6 @@
 import * as llamaRn from 'llama.rn';
 import * as FileSystem from 'expo-file-system/legacy';
+import * as RNFS from 'react-native-fs';
 import DeviceInfo from 'react-native-device-info';
 import { llmEngineService } from '../../src/services/LLMEngineService';
 import { inferenceBackendService } from '../../src/services/InferenceBackendService';
@@ -10,17 +11,25 @@ import { getModelLoadParametersForModel, updateSettings } from '../../src/servic
 import { getFreshMemorySnapshot } from '../../src/services/SystemMetricsService';
 import { performanceMonitor } from '../../src/services/PerformanceMonitor';
 import { EngineStatus, LifecycleStatus } from '../../src/types/models';
+import type { ProjectorArtifact } from '../../src/types/multimodal';
+import { UNKNOWN_PROJECTOR_MEMORY_FIT_FALLBACK_BYTES } from '../../src/utils/memoryFit';
 
 jest.mock('llama.rn', () => {
   const completion = jest.fn();
   const getFormattedChat = jest.fn().mockResolvedValue({ prompt: 'Formatted prompt', additional_stops: [] });
   const tokenize = jest.fn().mockResolvedValue({ tokens: [] });
+  const initMultimodal = jest.fn().mockResolvedValue(true);
+  const getMultimodalSupport = jest.fn().mockResolvedValue({ vision: true, audio: false });
+  const releaseMultimodal = jest.fn().mockResolvedValue(undefined);
   const removeNativeLogListener = jest.fn();
   return {
     initLlama: jest.fn().mockImplementation(async (options?: { n_gpu_layers?: number }) => ({
       completion,
       getFormattedChat,
       tokenize,
+      initMultimodal,
+      getMultimodalSupport,
+      releaseMultimodal,
       stopCompletion: jest.fn().mockResolvedValue(undefined),
       gpu: (options?.n_gpu_layers ?? 0) > 0,
       devices: (options?.n_gpu_layers ?? 0) > 0 ? ['Adreno GPU'] : [],
@@ -43,6 +52,9 @@ jest.mock('llama.rn', () => {
     __completionMock: completion,
     __getFormattedChatMock: getFormattedChat,
     __tokenizeMock: tokenize,
+    __initMultimodalMock: initMultimodal,
+    __getMultimodalSupportMock: getMultimodalSupport,
+    __releaseMultimodalMock: releaseMultimodal,
   };
 });
 
@@ -70,6 +82,44 @@ function getFormattedChatMock(): jest.Mock {
   return (llamaRn as unknown as { __getFormattedChatMock: jest.Mock }).__getFormattedChatMock;
 }
 
+function getTokenizeMock(): jest.Mock {
+  return (llamaRn as unknown as { __tokenizeMock: jest.Mock }).__tokenizeMock;
+}
+
+function getInitMultimodalMock(): jest.Mock {
+  return (llamaRn as unknown as { __initMultimodalMock: jest.Mock }).__initMultimodalMock;
+}
+
+function getMultimodalSupportMock(): jest.Mock {
+  return (llamaRn as unknown as { __getMultimodalSupportMock: jest.Mock }).__getMultimodalSupportMock;
+}
+
+function getReleaseMultimodalMock(): jest.Mock {
+  return (llamaRn as unknown as { __releaseMultimodalMock: jest.Mock }).__releaseMultimodalMock;
+}
+
+async function waitForMockCall(mock: jest.Mock, count = 1): Promise<void> {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    if (mock.mock.calls.length >= count) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  throw new Error(`Expected mock to be called at least ${count} time(s).`);
+}
+
+async function waitForCondition(assertion: () => boolean, label: string): Promise<void> {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    if (assertion()) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  throw new Error(`Timed out waiting for ${label}.`);
+}
+
 function allowThinkingCapabilityProbe() {
   (registry.getModel as jest.Mock).mockReturnValue({
     id: 'test/model',
@@ -78,6 +128,127 @@ function allowThinkingCapabilityProbe() {
     thinkingCapability: undefined,
   });
 }
+
+const downloadedProjector: ProjectorArtifact = {
+  id: 'projector-test-model-main-mmproj-model.gguf',
+  ownerModelId: 'test/model',
+  repoId: 'test/model',
+  fileName: 'mmproj-model.gguf',
+  downloadUrl: 'https://huggingface.co/test/model/resolve/main/mmproj-model.gguf',
+  size: 24_000_000,
+  lifecycleStatus: 'downloaded',
+  matchStatus: 'matched',
+  localPath: 'mmproj-model.gguf',
+};
+
+function createReadyMultimodalReadiness() {
+  return {
+    modelId: 'test/model',
+    status: 'ready' as const,
+    projectorId: downloadedProjector.id,
+    support: ['vision' as const],
+    checkedAt: 1,
+  };
+}
+
+function createDownloadedVisionModel() {
+  return {
+    id: 'test/model',
+    localPath: 'model.gguf',
+    lifecycleStatus: LifecycleStatus.DOWNLOADED,
+    chatModalities: ['text', 'vision'],
+    projectorCandidates: [downloadedProjector],
+    selectedProjectorId: downloadedProjector.id,
+    thinkingCapability: {
+      detectedAt: 1,
+      supportsThinking: false,
+      canDisableThinking: true,
+    },
+  };
+}
+
+function createReadyVisionModel() {
+  return {
+    ...createDownloadedVisionModel(),
+    multimodalReadiness: createReadyMultimodalReadiness(),
+  };
+}
+
+type TestActiveMultimodalContext = {
+  modelId: string;
+  projectorId: string;
+  projectorFallbackMarker: string | null;
+};
+
+function getActiveMultimodalContext(): TestActiveMultimodalContext | null {
+  return (llmEngineService as unknown as {
+    activeMultimodalContext: TestActiveMultimodalContext | null;
+  }).activeMultimodalContext;
+}
+
+function createTestImageAttachment(id: string, localUri: string, size = 4096) {
+  return {
+    id,
+    threadId: 'thread-1',
+    messageId: 'message-1',
+    localUri,
+    pathCategory: 'chat_attachment' as const,
+    fileName: `${id}.jpg`,
+    mediaType: 'image/jpeg',
+    size,
+    source: 'photo_library' as const,
+    createdAt: 1,
+  };
+}
+
+const multimodalDowngradeCases = [
+  {
+    label: 'missing projector',
+    expectedStatus: 'missing_projector',
+    createModel: () => ({
+      ...createDownloadedVisionModel(),
+      projectorCandidates: [],
+      selectedProjectorId: undefined,
+      multimodalReadiness: createReadyMultimodalReadiness(),
+    }),
+  },
+  {
+    label: 'downloading projector',
+    expectedStatus: 'projector_downloading',
+    createModel: () => ({
+      ...createDownloadedVisionModel(),
+      projectorCandidates: [{
+        ...downloadedProjector,
+        lifecycleStatus: 'downloading' as const,
+      }],
+      multimodalReadiness: createReadyMultimodalReadiness(),
+    }),
+  },
+  {
+    label: 'failed projector',
+    expectedStatus: 'failed',
+    createModel: () => ({
+      ...createDownloadedVisionModel(),
+      projectorCandidates: [{
+        ...downloadedProjector,
+        lifecycleStatus: 'failed' as const,
+        matchReason: 'projector_download_failed',
+      }],
+      multimodalReadiness: createReadyMultimodalReadiness(),
+    }),
+  },
+  {
+    label: 'text-only model',
+    expectedStatus: 'text_only',
+    createModel: () => ({
+      ...createDownloadedVisionModel(),
+      chatModalities: ['text'],
+      projectorCandidates: [],
+      selectedProjectorId: undefined,
+      multimodalReadiness: createReadyMultimodalReadiness(),
+    }),
+  },
+];
 
 describe('LLMEngineService', () => {
   let consoleErrorSpy: jest.SpyInstance;
@@ -101,10 +272,12 @@ describe('LLMEngineService', () => {
     createStorage('pocket-ai-autotune', { tier: 'private' }).clearAll();
     inferenceBackendService.clearCache();
     (llmEngineService as any).contextOperationQueue = Promise.resolve();
+    (llmEngineService as any).contextOperationRunner?.reset?.(new Error('test reset'));
     (llmEngineService as any).activeContextOperationPromises?.clear?.();
     (llmEngineService as any).activeContextOperationRejects?.clear?.();
-    (llmEngineService as any).contextOperationCancelGeneration = 0;
     (llmEngineService as any).activeCompletionReject = null;
+    (llmEngineService as any).activeMultimodalContext = null;
+    (llmEngineService as any).loadedContextDisablesContextShiftForMultimodal = false;
     (llmEngineService as any).additionalStopWordsCache?.clear?.();
     getBackendDevicesInfoMock().mockResolvedValue([
       {
@@ -115,10 +288,17 @@ describe('LLMEngineService', () => {
       },
     ]);
     (getFreshMemorySnapshot as jest.Mock).mockResolvedValue(null);
+    getInitMultimodalMock().mockResolvedValue(true);
+    getMultimodalSupportMock().mockResolvedValue({ vision: true, audio: false });
+    getReleaseMultimodalMock().mockResolvedValue(undefined);
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: true, size: 1024 });
     (llamaRn.initLlama as jest.Mock).mockImplementation(async (options?: { n_gpu_layers?: number }) => ({
       completion: (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock,
       getFormattedChat: getFormattedChatMock(),
       tokenize: (llamaRn as unknown as { __tokenizeMock: jest.Mock }).__tokenizeMock,
+      initMultimodal: getInitMultimodalMock(),
+      getMultimodalSupport: getMultimodalSupportMock(),
+      releaseMultimodal: getReleaseMultimodalMock(),
       stopCompletion: jest.fn().mockResolvedValue(undefined),
       gpu: (options?.n_gpu_layers ?? 0) > 0,
       devices: (options?.n_gpu_layers ?? 0) > 0 ? ['Adreno GPU'] : [],
@@ -183,6 +363,2243 @@ describe('LLMEngineService', () => {
     );
   });
 
+  it('forwards ready image media paths to llama.rn completion', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+
+    await llmEngineService.load('test/model');
+
+    await llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Describe this', mediaPaths: ['test-dir/chat-attachments/image.jpg'] }],
+      multimodalReadiness: {
+        modelId: 'test/model',
+        status: 'ready',
+        projectorId: downloadedProjector.id,
+        support: ['vision'],
+        checkedAt: 1,
+      },
+      params: { n_predict: 32 },
+    });
+
+    expect(getInitMultimodalMock()).toHaveBeenCalledWith(expect.objectContaining({
+      path: 'test-dir/models/mmproj-model.gguf',
+    }));
+    expect(getMultimodalSupportMock()).toHaveBeenCalledTimes(1);
+    expect(registry.updateModel).toHaveBeenCalledWith(expect.objectContaining({
+      multimodalReadiness: expect.objectContaining({
+        status: 'ready',
+        projectorId: downloadedProjector.id,
+        projectorSize: 1024,
+        support: ['vision'],
+      }),
+    }));
+    expect(getFormattedChatMock()).toHaveBeenCalledWith(
+      [{
+        role: 'user',
+        content: [
+          { type: 'text', text: 'Describe this' },
+          { type: 'image_url', image_url: { url: 'test-dir/chat-attachments/image.jpg' } },
+        ],
+      }],
+      null,
+      expect.any(Object),
+    );
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        media_paths: ['test-dir/chat-attachments/image.jpg'],
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: 'Describe this' },
+            { type: 'image_url', image_url: { url: 'test-dir/chat-attachments/image.jpg' } },
+          ],
+        }],
+      }),
+      expect.any(Function),
+    );
+    expect(llmEngineService.getState().diagnostics?.multimodal).toEqual(expect.objectContaining({
+      visionCapability: 'vision_capable',
+      projectorPresence: 'downloaded',
+      projectorPathCategory: 'models',
+      readinessStatus: 'ready',
+      attachmentCount: 1,
+    }));
+    const serializedDiagnostics = JSON.stringify(llmEngineService.getState().diagnostics);
+    expect(serializedDiagnostics).not.toContain('test-dir/chat-attachments/image.jpg');
+    expect(serializedDiagnostics).not.toContain('chat-attachments');
+    expect(serializedDiagnostics).not.toContain('test-dir/models/mmproj-model.gguf');
+  });
+
+  it('forwards structured image content parts without duplicating them as legacy media paths', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+
+    await llmEngineService.load('test/model');
+
+    await llmEngineService.chatCompletion({
+      messages: [{
+        role: 'user',
+        content: 'Describe this',
+        contentParts: [
+          { type: 'image_url', image_url: { url: 'test-dir/chat-attachments/image.jpg' } },
+        ],
+      }],
+      multimodalReadiness: {
+        modelId: 'test/model',
+        status: 'ready',
+        projectorId: downloadedProjector.id,
+        support: ['vision'],
+        checkedAt: 1,
+      },
+      params: { n_predict: 32 },
+    });
+
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        media_paths: ['test-dir/chat-attachments/image.jpg'],
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: 'Describe this' },
+            { type: 'image_url', image_url: { url: 'test-dir/chat-attachments/image.jpg' } },
+          ],
+        }],
+      }),
+      expect.any(Function),
+    );
+  });
+
+  it('rejects explicit media paths outside app-owned chat attachment storage', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+
+    await llmEngineService.load('test/model');
+
+    await expect(llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Describe this', mediaPaths: ['/private/tmp/image.jpg'] }],
+      multimodalReadiness: {
+        modelId: 'test/model',
+        status: 'ready',
+        projectorId: downloadedProjector.id,
+        support: ['vision'],
+        checkedAt: 1,
+      },
+      params: { n_predict: 32 },
+    })).rejects.toMatchObject({
+      code: 'chat_attachment_not_ready',
+      details: expect.objectContaining({
+        pathCategory: 'non_chat_attachment',
+      }),
+    });
+
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects structured image content parts outside app-owned chat attachment storage', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+
+    await llmEngineService.load('test/model');
+
+    await expect(llmEngineService.chatCompletion({
+      messages: [{
+        role: 'user',
+        content: 'Describe this',
+        contentParts: [
+          { type: 'image_url', image_url: { url: '/private/tmp/image.jpg' } },
+        ],
+      }],
+      multimodalReadiness: {
+        modelId: 'test/model',
+        status: 'ready',
+        projectorId: downloadedProjector.id,
+        support: ['vision'],
+        checkedAt: 1,
+      },
+      params: { n_predict: 32 },
+    })).rejects.toMatchObject({
+      code: 'chat_attachment_not_ready',
+      details: expect.objectContaining({
+        pathCategory: 'non_chat_attachment',
+      }),
+    });
+
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects image media paths when readiness belongs to another model', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+
+    await llmEngineService.load('test/model');
+
+    await expect(llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Describe this', mediaPaths: ['test-dir/chat-attachments/image.jpg'] }],
+      multimodalReadiness: {
+        modelId: 'other/model',
+        status: 'ready',
+        projectorId: downloadedProjector.id,
+        support: ['vision'],
+        checkedAt: 1,
+      },
+      params: { n_predict: 32 },
+    })).rejects.toMatchObject({
+      code: 'multimodal_not_ready',
+    });
+
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).not.toHaveBeenCalled();
+  });
+
+  it('forwards retained historical and latest user media paths before llama normalization', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+
+    await llmEngineService.load('test/model');
+
+    await llmEngineService.chatCompletion({
+      messages: [
+        { role: 'system', content: 'Be concise.' },
+        { role: 'user', content: 'Earlier image', mediaPaths: ['test-dir/chat-attachments/first.jpg'] },
+        { role: 'assistant', content: 'Earlier answer' },
+        { role: 'user', content: 'Now describe', mediaPaths: ['test-dir/chat-attachments/latest-existing.jpg'] },
+      ],
+      mediaPaths: [
+        'test-dir/chat-attachments/first.jpg',
+        'test-dir/chat-attachments/top.jpg',
+      ],
+      multimodalReadiness: {
+        modelId: 'test/model',
+        status: 'ready',
+        projectorId: downloadedProjector.id,
+        support: ['vision'],
+        checkedAt: 1,
+      },
+      params: { n_predict: 32 },
+    });
+
+    expect(getFormattedChatMock()).toHaveBeenCalledWith(
+      [
+        { role: 'system', content: 'Be concise.' },
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'Earlier image' },
+            { type: 'image_url', image_url: { url: 'test-dir/chat-attachments/first.jpg' } },
+          ],
+        },
+        { role: 'assistant', content: 'Earlier answer' },
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'Now describe' },
+            { type: 'image_url', image_url: { url: 'test-dir/chat-attachments/latest-existing.jpg' } },
+            { type: 'image_url', image_url: { url: 'test-dir/chat-attachments/top.jpg' } },
+          ],
+        },
+      ],
+      null,
+      expect.any(Object),
+    );
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        media_paths: ['test-dir/chat-attachments/first.jpg', 'test-dir/chat-attachments/latest-existing.jpg', 'test-dir/chat-attachments/top.jpg'],
+        messages: expect.arrayContaining([
+          expect.objectContaining({
+            role: 'user',
+            content: [
+              { type: 'text', text: 'Earlier image' },
+              { type: 'image_url', image_url: { url: 'test-dir/chat-attachments/first.jpg' } },
+            ],
+          }),
+          expect.objectContaining({
+            role: 'user',
+            content: [
+              { type: 'text', text: 'Now describe' },
+              { type: 'image_url', image_url: { url: 'test-dir/chat-attachments/latest-existing.jpg' } },
+              { type: 'image_url', image_url: { url: 'test-dir/chat-attachments/top.jpg' } },
+            ],
+          }),
+        ]),
+      }),
+      expect.any(Function),
+    );
+  });
+
+  it('forwards retained historical image media paths for a latest text-only follow-up', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+
+    await llmEngineService.load('test/model');
+
+    await llmEngineService.chatCompletion({
+      messages: [
+        { role: 'system', content: 'Be concise.' },
+        { role: 'user', content: 'Earlier image', mediaPaths: ['test-dir/chat-attachments/first.jpg'] },
+        { role: 'assistant', content: 'Earlier answer' },
+        { role: 'user', content: 'Continue with text only' },
+      ],
+      multimodalReadiness: {
+        modelId: 'test/model',
+        status: 'ready',
+        projectorId: downloadedProjector.id,
+        support: ['vision'],
+        checkedAt: 1,
+      },
+      params: { n_predict: 32 },
+    });
+
+    expect(getFormattedChatMock()).toHaveBeenCalledWith(
+      [
+        { role: 'system', content: 'Be concise.' },
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'Earlier image' },
+            { type: 'image_url', image_url: { url: 'test-dir/chat-attachments/first.jpg' } },
+          ],
+        },
+        { role: 'assistant', content: 'Earlier answer' },
+        { role: 'user', content: 'Continue with text only' },
+      ],
+      null,
+      expect.any(Object),
+    );
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        media_paths: ['test-dir/chat-attachments/first.jpg'],
+        messages: [
+          { role: 'system', content: 'Be concise.' },
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: 'Earlier image' },
+              { type: 'image_url', image_url: { url: 'test-dir/chat-attachments/first.jpg' } },
+            ],
+          },
+          { role: 'assistant', content: 'Earlier answer' },
+          { role: 'user', content: 'Continue with text only' },
+        ],
+      }),
+      expect.any(Function),
+    );
+    const completionParams = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock.mock.calls.at(-1)?.[0];
+    expect(completionParams.media_paths).toEqual(['test-dir/chat-attachments/first.jpg']);
+  });
+
+  it('waits for in-flight multimodal runtime initialization before sending image media paths', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+    let resolveInitMultimodal!: (value: boolean) => void;
+    getInitMultimodalMock().mockImplementationOnce(() => new Promise<boolean>((resolve) => {
+      resolveInitMultimodal = resolve;
+    }));
+
+    const loadPromise = llmEngineService.load('test/model', { forceReload: true });
+    await waitForCondition(
+      () => llmEngineService.getState().status === EngineStatus.INITIALIZING,
+      'engine initialization',
+    );
+
+    const completionPromise = llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Describe this', mediaPaths: ['test-dir/chat-attachments/image.jpg'] }],
+      multimodalReadiness: {
+        modelId: 'test/model',
+        status: 'ready',
+        projectorId: downloadedProjector.id,
+        support: ['vision'],
+        checkedAt: 1,
+      },
+      params: { n_predict: 32 },
+    });
+
+    await Promise.resolve();
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).not.toHaveBeenCalled();
+
+    await waitForMockCall(getInitMultimodalMock());
+    resolveInitMultimodal(true);
+    await loadPromise;
+    await expect(completionPromise).resolves.toEqual({ text: 'Hello back' });
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        media_paths: ['test-dir/chat-attachments/image.jpg'],
+      }),
+      expect.any(Function),
+    );
+  });
+
+  it('keeps text inference ready and records failure when projector init fails', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+    getInitMultimodalMock().mockResolvedValueOnce(false);
+
+    await llmEngineService.load('test/model');
+
+    expect(llmEngineService.getState().status).toBe(EngineStatus.READY);
+    expect(registry.updateModel).toHaveBeenCalledWith(expect.objectContaining({
+      multimodalReadiness: expect.objectContaining({
+        status: 'failed',
+        projectorId: downloadedProjector.id,
+        projectorSize: 1024,
+      }),
+    }));
+  });
+
+  it('sanitizes multimodal runtime failure reasons before persistence', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+    getInitMultimodalMock().mockRejectedValueOnce(
+      new Error('Native init failed for file:///private/mobile/Project for Client/mmproj file.gguf after retry'),
+    );
+
+    await llmEngineService.load('test/model');
+
+    const persistedModel = (registry.updateModel as jest.Mock).mock.calls
+      .map(([model]) => model)
+      .find((model) => model?.multimodalReadiness?.status === 'failed');
+    expect(persistedModel).toEqual(expect.objectContaining({
+      multimodalReadiness: expect.objectContaining({
+        status: 'failed',
+        failureReason: 'runtime:initialization_failed:path_redacted:retry',
+      }),
+    }));
+    expect(JSON.stringify(persistedModel)).not.toContain('file:///private');
+    expect(JSON.stringify(persistedModel)).not.toContain('Project for Client');
+    expect(JSON.stringify(llmEngineService.getState().diagnostics?.multimodal)).not.toContain('Project for Client');
+  });
+
+  it('releases native contexts when multimodal readiness persistence fails during initialization', async () => {
+    await llmEngineService.unload().catch(() => undefined);
+    (llamaRn.initLlama as jest.Mock).mockClear();
+    (llamaRn.releaseAllLlama as jest.Mock).mockClear();
+    getInitMultimodalMock().mockClear();
+    getReleaseMultimodalMock().mockClear();
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+    const persistenceError = new Error('readiness persistence failed');
+    (registry.updateModel as jest.Mock).mockImplementation((model) => {
+      if (model?.multimodalReadiness) {
+        throw persistenceError;
+      }
+    });
+
+    await expect(llmEngineService.load('test/model')).rejects.toMatchObject({
+      code: 'model_load_failed',
+      message: persistenceError.message,
+      cause: persistenceError,
+    });
+
+    expect(llamaRn.initLlama).toHaveBeenCalled();
+    expect(getInitMultimodalMock()).toHaveBeenCalledTimes(1);
+    expect(getReleaseMultimodalMock()).toHaveBeenCalledTimes(1);
+    expect(llamaRn.releaseAllLlama).toHaveBeenCalledTimes(1);
+    expect((llmEngineService as any).context).toBeNull();
+    expect(llmEngineService.getState()).toMatchObject({
+      status: EngineStatus.ERROR,
+      activeModelId: undefined,
+      loadProgress: 0,
+      lastError: persistenceError.message,
+    });
+  });
+
+  it('releases initialized multimodal projector state when unloading the context', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+
+    await llmEngineService.load('test/model');
+    await llmEngineService.unload();
+
+    expect(getReleaseMultimodalMock()).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(multimodalDowngradeCases)(
+    'releases initialized multimodal projector state when readiness downgrades to $label',
+    async ({ createModel, expectedStatus }) => {
+      (registry.getModel as jest.Mock).mockReturnValue(createReadyVisionModel());
+
+      await llmEngineService.load('test/model');
+      expect(getInitMultimodalMock()).toHaveBeenCalledTimes(1);
+
+      getReleaseMultimodalMock().mockClear();
+      getInitMultimodalMock().mockClear();
+      (registry.getModel as jest.Mock).mockReturnValue(createModel());
+
+      await llmEngineService.load('test/model');
+
+      expect(getReleaseMultimodalMock()).toHaveBeenCalledTimes(1);
+      expect(getInitMultimodalMock()).not.toHaveBeenCalled();
+      expect(registry.updateModel).toHaveBeenLastCalledWith(expect.objectContaining({
+        multimodalReadiness: expect.objectContaining({
+          status: expectedStatus,
+        }),
+      }));
+    },
+  );
+
+  it('does not release initialized multimodal projector state for unchanged ready same-projector reloads', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createReadyVisionModel());
+
+    await llmEngineService.load('test/model');
+
+    getReleaseMultimodalMock().mockClear();
+    getInitMultimodalMock().mockClear();
+
+    await llmEngineService.load('test/model');
+
+    expect(getReleaseMultimodalMock()).not.toHaveBeenCalled();
+    expect(getInitMultimodalMock()).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      label: 'missing persisted readiness',
+      createReloadedModel: () => createDownloadedVisionModel(),
+    },
+    {
+      label: 'downgraded persisted readiness',
+      createReloadedModel: () => ({
+        ...createDownloadedVisionModel(),
+        multimodalReadiness: {
+          ...createReadyMultimodalReadiness(),
+          status: 'failed' as const,
+          support: [],
+        },
+      }),
+    },
+  ])(
+    'refreshes active same-projector multimodal readiness without reinitializing when $label',
+    async ({ createReloadedModel }) => {
+      (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+
+      await llmEngineService.load('test/model');
+      expect(getInitMultimodalMock()).toHaveBeenCalledTimes(1);
+      const context = (llmEngineService as any).context;
+      expect(context).toBeTruthy();
+
+      getInitMultimodalMock().mockClear();
+      getReleaseMultimodalMock().mockClear();
+      getMultimodalSupportMock().mockClear();
+      (registry.updateModel as jest.Mock).mockClear();
+      (registry.getModel as jest.Mock).mockReturnValue(createReloadedModel());
+
+      await llmEngineService.load('test/model');
+
+      expect((llmEngineService as any).context).toBe(context);
+      expect(getInitMultimodalMock()).not.toHaveBeenCalled();
+      expect(getReleaseMultimodalMock()).not.toHaveBeenCalled();
+      expect(getMultimodalSupportMock()).toHaveBeenCalledTimes(1);
+      expect(registry.updateModel).toHaveBeenLastCalledWith(expect.objectContaining({
+        multimodalReadiness: expect.objectContaining({
+          status: 'ready',
+          projectorId: downloadedProjector.id,
+          support: ['vision'],
+        }),
+      }));
+    },
+  );
+
+  it('defers same-model multimodal readiness refresh until an active completion settles', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+
+    await llmEngineService.load('test/model');
+    expect(getInitMultimodalMock()).toHaveBeenCalledTimes(1);
+
+    getInitMultimodalMock().mockClear();
+    getReleaseMultimodalMock().mockClear();
+    getMultimodalSupportMock().mockClear();
+    (registry.updateModel as jest.Mock).mockClear();
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+
+    const completionMock = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock;
+    let releaseCompletion!: () => void;
+    completionMock.mockImplementationOnce(() => new Promise((resolve) => {
+      releaseCompletion = () => resolve({ text: 'Done' });
+    }));
+
+    const completionPromise = llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Hello' }],
+      params: { n_predict: 1 },
+    });
+
+    expect(llmEngineService.hasActiveCompletion()).toBe(true);
+    await expect(llmEngineService.load('test/model')).resolves.toBeUndefined();
+
+    expect(getInitMultimodalMock()).not.toHaveBeenCalled();
+    expect(getReleaseMultimodalMock()).not.toHaveBeenCalled();
+    expect(getMultimodalSupportMock()).not.toHaveBeenCalled();
+    expect(registry.updateModel).not.toHaveBeenCalled();
+
+    await waitForMockCall(completionMock);
+    await waitForMockCall(completionMock);
+    releaseCompletion();
+    await completionPromise;
+
+    await waitForMockCall(getMultimodalSupportMock());
+    expect(getInitMultimodalMock()).not.toHaveBeenCalled();
+    expect(getReleaseMultimodalMock()).not.toHaveBeenCalled();
+    expect(registry.updateModel).toHaveBeenLastCalledWith(expect.objectContaining({
+      multimodalReadiness: expect.objectContaining({
+        status: 'ready',
+        projectorId: downloadedProjector.id,
+      }),
+    }));
+  });
+
+  it('contains deferred projector reload failures when a queued refresh becomes reload-required', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue({
+      ...createDownloadedVisionModel(),
+      projectorCandidates: [],
+      selectedProjectorId: undefined,
+    });
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    const context = (llmEngineService as any).context;
+    expect(context).toBeTruthy();
+    expect((llamaRn.initLlama as jest.Mock).mock.calls[0][0]).not.toHaveProperty('ctx_shift');
+
+    (llmEngineService as any).pendingMultimodalReadinessRefresh = {
+      modelId: 'test/model',
+      context,
+      useGpu: false,
+    };
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+    (llamaRn.initLlama as jest.Mock).mockRejectedValue(new Error('reload failed'));
+
+    await expect((llmEngineService as any).runPendingMultimodalReadinessRefresh()).resolves.toBeUndefined();
+
+    expect((llmEngineService as any).pendingMultimodalReadinessRefresh).toBeNull();
+    expect((llamaRn.initLlama as jest.Mock).mock.calls.length).toBeGreaterThan(1);
+  });
+
+  it('requeues delayed projector reloads when a completion starts during projector resolution', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue({
+      ...createDownloadedVisionModel(),
+      projectorCandidates: [],
+      selectedProjectorId: undefined,
+    });
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    const context = (llmEngineService as any).context;
+    expect(context).toBeTruthy();
+    expect((llamaRn.initLlama as jest.Mock).mock.calls[0][0]).not.toHaveProperty('ctx_shift');
+
+    (llamaRn.initLlama as jest.Mock).mockClear();
+    (llamaRn.releaseAllLlama as jest.Mock).mockClear();
+    getInitMultimodalMock().mockClear();
+    (registry.updateModel as jest.Mock).mockClear();
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+
+    let releaseProjectorLookup!: () => void;
+    let didHoldProjectorLookup = false;
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (!uri.includes('mmproj')) {
+        return { exists: true, size: 1024 };
+      }
+
+      if (!didHoldProjectorLookup) {
+        didHoldProjectorLookup = true;
+        return new Promise((resolve) => {
+          releaseProjectorLookup = () => resolve({ exists: true, size: 1024 });
+        });
+      }
+
+      return { exists: true, size: 1024 };
+    });
+
+    (llmEngineService as any).pendingMultimodalReadinessRefresh = {
+      modelId: 'test/model',
+      context,
+      useGpu: false,
+    };
+
+    const refreshPromise = (llmEngineService as any).runPendingMultimodalReadinessRefresh();
+    await waitForCondition(
+      () => didHoldProjectorLookup,
+      'deferred projector resolution to start',
+    );
+
+    const completionMock = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock;
+    let releaseCompletion!: () => void;
+    completionMock.mockImplementationOnce(() => new Promise((resolve) => {
+      releaseCompletion = () => resolve({ text: 'Done' });
+    }));
+
+    const completionPromise = llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Hello while projector resolves' }],
+      params: { n_predict: 1 },
+    });
+    await waitForCondition(
+      () => llmEngineService.hasActiveCompletion(),
+      'active completion during deferred projector resolution',
+    );
+
+    releaseProjectorLookup();
+    await refreshPromise;
+
+    expect(llamaRn.releaseAllLlama).not.toHaveBeenCalled();
+    expect(llamaRn.initLlama).not.toHaveBeenCalled();
+    expect(getInitMultimodalMock()).not.toHaveBeenCalled();
+    expect((llmEngineService as any).pendingMultimodalReadinessRefresh).toEqual(expect.objectContaining({
+      modelId: 'test/model',
+      context,
+    }));
+
+    await waitForMockCall(completionMock);
+    releaseCompletion();
+    await completionPromise;
+
+    await waitForCondition(
+      () => (llamaRn.initLlama as jest.Mock).mock.calls
+        .some(([options]: [{ ctx_shift?: boolean }]) => options?.ctx_shift === false),
+      'delayed projector reload after completion',
+    );
+    expect(llamaRn.releaseAllLlama).toHaveBeenCalledTimes(1);
+    expect(getInitMultimodalMock()).toHaveBeenCalledWith(
+      expect.objectContaining({
+        path: 'test-dir/models/mmproj-model.gguf',
+      }),
+    );
+  });
+
+  it('requeues delayed projector reloads when a completion starts after reload is selected but before unload', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue({
+      ...createDownloadedVisionModel(),
+      projectorCandidates: [],
+      selectedProjectorId: undefined,
+    });
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    const context = (llmEngineService as any).context;
+    expect(context).toBeTruthy();
+    expect((llamaRn.initLlama as jest.Mock).mock.calls[0][0]).not.toHaveProperty('ctx_shift');
+
+    (llamaRn.initLlama as jest.Mock).mockClear();
+    (llamaRn.releaseAllLlama as jest.Mock).mockClear();
+    getInitMultimodalMock().mockClear();
+    (registry.updateModel as jest.Mock).mockClear();
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+
+    const completionMock = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock;
+    let releaseCompletion: (() => void) | undefined;
+    completionMock.mockImplementationOnce(() => new Promise((resolve) => {
+      releaseCompletion = () => resolve({ text: 'Done' });
+    }));
+
+    const completionState: { promise: Promise<unknown> | null } = { promise: null };
+    let shouldReloadCallCount = 0;
+    const originalShouldReload = (llmEngineService as any)
+      .shouldReloadLoadedContextForMultimodalContextShift
+      .bind(llmEngineService);
+    const shouldReloadSpy = jest.spyOn(
+      llmEngineService as any,
+      'shouldReloadLoadedContextForMultimodalContextShift',
+    ).mockImplementation(async (...args: unknown[]) => {
+      const shouldReload = await originalShouldReload(...args);
+      shouldReloadCallCount += 1;
+
+      if (shouldReloadCallCount === 2 && shouldReload && !completionState.promise) {
+        completionState.promise = llmEngineService.chatCompletion({
+          messages: [{ role: 'user', content: 'Hello before background unload' }],
+          params: { n_predict: 1 },
+        });
+        expect(llmEngineService.hasActiveCompletion()).toBe(true);
+      }
+
+      return shouldReload;
+    });
+
+    try {
+      (llmEngineService as any).pendingMultimodalReadinessRefresh = {
+        modelId: 'test/model',
+        context,
+        useGpu: false,
+      };
+
+      await (llmEngineService as any).runPendingMultimodalReadinessRefresh();
+
+      expect(shouldReloadCallCount).toBeGreaterThanOrEqual(2);
+      expect(completionState.promise).toBeTruthy();
+      expect(llamaRn.releaseAllLlama).not.toHaveBeenCalled();
+      expect(llamaRn.initLlama).not.toHaveBeenCalled();
+      expect(getInitMultimodalMock()).not.toHaveBeenCalled();
+      expect((llmEngineService as any).pendingMultimodalReadinessRefresh).toEqual(expect.objectContaining({
+        modelId: 'test/model',
+        context,
+      }));
+
+      await waitForMockCall(completionMock);
+      releaseCompletion?.();
+      await completionState.promise;
+
+      await waitForCondition(
+        () => (llamaRn.initLlama as jest.Mock).mock.calls
+          .some(([options]: [{ ctx_shift?: boolean }]) => options?.ctx_shift === false),
+        'delayed projector reload after completion',
+      );
+      expect(llamaRn.releaseAllLlama).toHaveBeenCalledTimes(1);
+      expect(getInitMultimodalMock()).toHaveBeenCalledWith(
+        expect.objectContaining({
+          path: 'test-dir/models/mmproj-model.gguf',
+        }),
+      );
+    } finally {
+      shouldReloadSpy.mockRestore();
+      releaseCompletion?.();
+      await completionState.promise?.catch(() => undefined);
+    }
+  });
+
+  it('drops queued multimodal readiness refreshes when unload cancels the active completion first', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+
+    await llmEngineService.load('test/model');
+    expect(getInitMultimodalMock()).toHaveBeenCalledTimes(1);
+
+    getInitMultimodalMock().mockClear();
+    getReleaseMultimodalMock().mockClear();
+    getMultimodalSupportMock().mockClear();
+    (registry.updateModel as jest.Mock).mockClear();
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+
+    const completionMock = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock;
+    let releaseCompletion!: () => void;
+    completionMock.mockImplementationOnce(() => new Promise((resolve) => {
+      releaseCompletion = () => resolve({ text: 'Done' });
+    }));
+
+    const completionPromise = llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Hello before unload' }],
+      params: { n_predict: 1 },
+    });
+    await waitForMockCall(completionMock);
+
+    await expect(llmEngineService.load('test/model')).resolves.toBeUndefined();
+    expect(getMultimodalSupportMock()).not.toHaveBeenCalled();
+    expect(registry.updateModel).not.toHaveBeenCalled();
+
+    const unloadPromise = llmEngineService.unload();
+    await Promise.resolve();
+    releaseCompletion();
+    await completionPromise;
+    await unloadPromise;
+    await Promise.resolve();
+
+    expect(getMultimodalSupportMock()).not.toHaveBeenCalled();
+    expect(getInitMultimodalMock()).not.toHaveBeenCalled();
+    expect(registry.updateModel).not.toHaveBeenCalled();
+    expect(getReleaseMultimodalMock()).toHaveBeenCalledTimes(1);
+    expect(getActiveMultimodalContext()).toBeNull();
+    expect(llmEngineService.getState().status).toBe(EngineStatus.IDLE);
+  });
+
+  it('defers context release when active completion does not drain during unload', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+
+    await llmEngineService.load('test/model');
+    expect(getActiveMultimodalContext()).not.toBeNull();
+
+    getReleaseMultimodalMock().mockClear();
+    (llamaRn.releaseAllLlama as jest.Mock).mockClear();
+
+    const completionMock = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock;
+    let releaseCompletion!: () => void;
+    completionMock.mockImplementationOnce(() => new Promise((resolve) => {
+      releaseCompletion = () => resolve({ text: 'Done' });
+    }));
+    const completionPromise = llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Hello before unload' }],
+      params: { n_predict: 1 },
+    }).catch((error) => error);
+    await waitForMockCall(completionMock);
+
+    jest.useFakeTimers();
+    try {
+      const unloadPromise = llmEngineService.unload();
+      for (let tick = 0; tick < 3; tick += 1) {
+        await Promise.resolve();
+        jest.advanceTimersByTime(5000);
+      }
+      await Promise.resolve();
+
+      await expect(unloadPromise).rejects.toMatchObject({
+        code: 'engine_unloading',
+      });
+      expect(getReleaseMultimodalMock()).not.toHaveBeenCalled();
+      expect(llamaRn.releaseAllLlama).not.toHaveBeenCalled();
+      expect(getActiveMultimodalContext()).not.toBeNull();
+      expect(llmEngineService.hasActiveCompletion()).toBe(true);
+
+      const completionError = await completionPromise;
+      expect(completionError).toEqual(expect.objectContaining({
+        code: 'engine_unloading',
+      }));
+    } finally {
+      jest.useRealTimers();
+    }
+
+    releaseCompletion();
+    await waitForCondition(
+      () => (llamaRn.releaseAllLlama as jest.Mock).mock.calls.length === 1,
+      'deferred releaseAllLlama after active completion drain',
+    );
+    expect(getReleaseMultimodalMock()).toHaveBeenCalledTimes(1);
+    expect(getActiveMultimodalContext()).toBeNull();
+    expect(llmEngineService.getState().status).toBe(EngineStatus.IDLE);
+  });
+
+  it('cancels context operations when an active completion times out during unload', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+
+    await llmEngineService.load('test/model');
+    expect(getActiveMultimodalContext()).not.toBeNull();
+
+    let releaseContextOperation!: () => void;
+    const contextOperationPromise = (llmEngineService as any).trackContextOperation(
+      async () => new Promise<void>((resolve) => {
+        releaseContextOperation = resolve;
+      }),
+      { chatBlocking: true },
+    ).catch((error: unknown) => error);
+    await waitForCondition(
+      () => llmEngineService.hasActiveContextOperation(),
+      'active context operation before completion',
+    );
+
+    getReleaseMultimodalMock().mockClear();
+    (llamaRn.releaseAllLlama as jest.Mock).mockClear();
+
+    const completionPromise = llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Hello while context op is stuck' }],
+      params: { n_predict: 1 },
+    }).catch((error) => error);
+    await waitForCondition(
+      () => llmEngineService.hasActiveCompletion(),
+      'active completion waiting on context operation',
+    );
+
+    jest.useFakeTimers();
+    try {
+      const unloadPromise = llmEngineService.unload();
+      for (let tick = 0; tick < 3; tick += 1) {
+        await Promise.resolve();
+        jest.advanceTimersByTime(5000);
+      }
+      await Promise.resolve();
+
+      await expect(unloadPromise).rejects.toMatchObject({
+        code: 'engine_unloading',
+      });
+      expect(llmEngineService.getState()).toEqual(expect.objectContaining({
+        status: EngineStatus.ERROR,
+        activeModelId: 'test/model',
+        lastError: 'Timed out waiting for active completion during unload',
+      }));
+      expect(getReleaseMultimodalMock()).not.toHaveBeenCalled();
+      expect(llamaRn.releaseAllLlama).not.toHaveBeenCalled();
+      expect(llmEngineService.hasActiveContextOperation()).toBe(true);
+
+      await expect(contextOperationPromise).resolves.toMatchObject({
+        code: 'engine_unloading',
+      });
+      await expect(completionPromise).resolves.toMatchObject({
+        code: 'engine_unloading',
+      });
+    } finally {
+      jest.useRealTimers();
+    }
+
+    releaseContextOperation();
+    await waitForCondition(
+      () => (llamaRn.releaseAllLlama as jest.Mock).mock.calls.length === 1,
+      'deferred releaseAllLlama after context operation drain',
+    );
+    expect(getReleaseMultimodalMock()).toHaveBeenCalledTimes(1);
+    expect(getActiveMultimodalContext()).toBeNull();
+    expect(llmEngineService.hasActiveContextOperation()).toBe(false);
+    expect(llmEngineService.getState().status).toBe(EngineStatus.IDLE);
+  });
+
+  it('detaches the active context when prompt preparation does not drain after stop', async () => {
+    await llmEngineService.load('test/model');
+
+    let releasePromptPreparation!: () => void;
+    getFormattedChatMock().mockImplementationOnce(() => new Promise((resolve) => {
+      releasePromptPreparation = () => resolve({ prompt: 'Late formatted prompt', additional_stops: [] });
+    }));
+
+    const completionPromise = llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Stop during prompt prep' }],
+      params: { n_predict: 1 },
+    }).catch((error) => error);
+
+    await waitForCondition(
+      () => llmEngineService.hasActiveChatBlockingContextOperation(),
+      'chat-blocking prompt preparation',
+    );
+
+    jest.useFakeTimers();
+    try {
+      const interruptPromise = llmEngineService.interruptActiveCompletion();
+      await Promise.resolve();
+      jest.advanceTimersByTime(5000);
+      await interruptPromise;
+    } finally {
+      jest.useRealTimers();
+    }
+
+    await expect(completionPromise).resolves.toMatchObject({
+      code: 'engine_busy',
+    });
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).not.toHaveBeenCalled();
+    expect(llmEngineService.hasActiveCompletion()).toBe(false);
+    expect(llmEngineService.hasActiveChatBlockingContextOperation()).toBe(false);
+    expect(llmEngineService.getState()).toEqual(expect.objectContaining({
+      status: EngineStatus.ERROR,
+      activeModelId: 'test/model',
+      lastError: 'Timed out waiting for prompt preparation to stop',
+    }));
+    await expect(llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Second request after detach' }],
+      params: { n_predict: 1 },
+    })).rejects.toMatchObject({
+      code: 'engine_not_ready',
+    });
+    expect(llmEngineService.hasActiveCompletion()).toBe(false);
+
+    releasePromptPreparation();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).not.toHaveBeenCalled();
+    expect(llmEngineService.hasActiveCompletion()).toBe(false);
+    expect(llmEngineService.hasActiveChatBlockingContextOperation()).toBe(false);
+  });
+
+  it('detaches the active context when direct stop does not drain prompt preparation', async () => {
+    await llmEngineService.load('test/model');
+
+    let releasePromptPreparation!: () => void;
+    getFormattedChatMock().mockImplementationOnce(() => new Promise((resolve) => {
+      releasePromptPreparation = () => resolve({ prompt: 'Late formatted prompt', additional_stops: [] });
+    }));
+
+    const completionPromise = llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Direct stop during prompt prep' }],
+      params: { n_predict: 1 },
+    }).catch((error) => error);
+
+    await waitForCondition(
+      () => llmEngineService.hasActiveChatBlockingContextOperation(),
+      'chat-blocking prompt preparation before direct stop',
+    );
+
+    jest.useFakeTimers();
+    try {
+      const stopPromise = llmEngineService.stopCompletion();
+      await Promise.resolve();
+      jest.advanceTimersByTime(5000);
+      await stopPromise;
+    } finally {
+      jest.useRealTimers();
+    }
+
+    await expect(completionPromise).resolves.toMatchObject({
+      code: 'engine_busy',
+    });
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).not.toHaveBeenCalled();
+    expect(llmEngineService.hasActiveCompletion()).toBe(false);
+    expect(llmEngineService.hasActiveChatBlockingContextOperation()).toBe(false);
+    expect(llmEngineService.getState()).toEqual(expect.objectContaining({
+      status: EngineStatus.ERROR,
+      activeModelId: 'test/model',
+      lastError: 'Timed out waiting for prompt preparation to stop',
+    }));
+
+    await expect(llmEngineService.load('test/model')).resolves.toBeUndefined();
+    releasePromptPreparation();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).not.toHaveBeenCalled();
+    expect(llmEngineService.hasActiveCompletion()).toBe(false);
+    expect(llmEngineService.hasActiveChatBlockingContextOperation()).toBe(false);
+    expect(llmEngineService.getState().status).toBe(EngineStatus.READY);
+  });
+
+  it('ignores active multimodal readiness refresh results after context operation cancellation', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+
+    await llmEngineService.load('test/model');
+    expect(getInitMultimodalMock()).toHaveBeenCalledTimes(1);
+
+    getMultimodalSupportMock().mockClear();
+    (registry.updateModel as jest.Mock).mockClear();
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+
+    const supportGate: { resolve?: () => void } = {};
+    getMultimodalSupportMock().mockImplementationOnce(() => new Promise((resolve) => {
+      supportGate.resolve = () => resolve({ vision: true, audio: false });
+    }));
+
+    const loadPromise = llmEngineService.load('test/model');
+    try {
+      await waitForMockCall(getMultimodalSupportMock());
+      expect(llmEngineService.hasActiveContextOperation()).toBe(true);
+
+      const cancelPromise = llmEngineService.cancelActiveContextOperations({ timeoutMs: 1000 });
+      supportGate.resolve?.();
+      supportGate.resolve = undefined;
+      await cancelPromise;
+      await loadPromise.catch(() => undefined);
+
+      expect(registry.updateModel).not.toHaveBeenCalled();
+    } finally {
+      supportGate.resolve?.();
+      await loadPromise.catch(() => undefined);
+    }
+  });
+
+  it('preempts a background thinking capability probe before starting completion', async () => {
+    allowThinkingCapabilityProbe();
+    await llmEngineService.load('test/model');
+
+    (registry.updateModel as jest.Mock).mockClear();
+    getFormattedChatMock().mockClear();
+    let releaseProbeFormat!: () => void;
+    getFormattedChatMock()
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        releaseProbeFormat = () => resolve({
+          prompt: '<think>probe</think>',
+          type: 'jinja',
+          thinking_start_tag: '<think>',
+          thinking_end_tag: '</think>',
+          additional_stops: [],
+        });
+      }))
+      .mockResolvedValue({ prompt: 'Formatted prompt', additional_stops: [] });
+
+    (llmEngineService as any).launchThinkingCapabilityProbe('test/model');
+    await waitForMockCall(getFormattedChatMock());
+
+    expect(llmEngineService.hasActiveContextOperation()).toBe(true);
+    expect(llmEngineService.hasActiveChatBlockingContextOperation()).toBe(false);
+
+    const completionPromise = llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Hello while probe is active' }],
+      params: { n_predict: 1 },
+    });
+    await waitForCondition(
+      () => llmEngineService.hasActiveCompletion(),
+      'active completion waiting for thinking probe preemption',
+    );
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).not.toHaveBeenCalled();
+
+    releaseProbeFormat();
+    await completionPromise;
+
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).toHaveBeenCalledTimes(1);
+    expect(registry.updateModel).not.toHaveBeenCalledWith(expect.objectContaining({
+      thinkingCapability: expect.anything(),
+    }));
+    expect(llmEngineService.hasActiveContextOperation()).toBe(false);
+  });
+
+  it('releases a newly initialized projector when readiness refresh is canceled before support resolves', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createReadyVisionModel());
+
+    await llmEngineService.load('test/model');
+    expect(getInitMultimodalMock()).toHaveBeenCalledTimes(1);
+
+    const replacementProjector: ProjectorArtifact = {
+      ...downloadedProjector,
+      id: 'projector-test-model-main-cancelled-mmproj-model.gguf',
+      fileName: 'cancelled-mmproj-model.gguf',
+      localPath: 'cancelled-mmproj-model.gguf',
+    };
+    getInitMultimodalMock().mockClear();
+    getReleaseMultimodalMock().mockClear();
+    getMultimodalSupportMock().mockClear();
+    (registry.updateModel as jest.Mock).mockClear();
+    (registry.getModel as jest.Mock).mockReturnValue({
+      ...createReadyVisionModel(),
+      projectorCandidates: [replacementProjector],
+      selectedProjectorId: replacementProjector.id,
+      multimodalReadiness: {
+        ...createReadyMultimodalReadiness(),
+        projectorId: replacementProjector.id,
+      },
+    });
+
+    const supportGate: { resolve?: () => void } = {};
+    getMultimodalSupportMock().mockImplementationOnce(() => new Promise((resolve) => {
+      supportGate.resolve = () => resolve({ vision: true, audio: false });
+    }));
+
+    const loadPromise = llmEngineService.load('test/model');
+    try {
+      await waitForMockCall(getMultimodalSupportMock());
+      expect(getInitMultimodalMock()).toHaveBeenCalledTimes(1);
+      expect(getActiveMultimodalContext()).toEqual(expect.objectContaining({
+        modelId: 'test/model',
+        projectorId: replacementProjector.id,
+      }));
+
+      const cancelPromise = llmEngineService.cancelActiveContextOperations({ timeoutMs: 1000 });
+      supportGate.resolve?.();
+      supportGate.resolve = undefined;
+      await cancelPromise;
+      await loadPromise.catch(() => undefined);
+
+      expect(getReleaseMultimodalMock()).toHaveBeenCalledTimes(2);
+      expect(getActiveMultimodalContext()).toBeNull();
+      expect(registry.updateModel).not.toHaveBeenCalled();
+    } finally {
+      supportGate.resolve?.();
+      await loadPromise.catch(() => undefined);
+    }
+  });
+
+  it('clears a newly initialized projector identity when the llama context changes before init resolves', async () => {
+    await llmEngineService.unload().catch(() => undefined);
+    (registry.getModel as jest.Mock).mockReturnValue(createReadyVisionModel());
+    getInitMultimodalMock().mockClear();
+    getReleaseMultimodalMock().mockClear();
+    getMultimodalSupportMock().mockClear();
+    (registry.updateModel as jest.Mock).mockClear();
+
+    let didResolveInit = false;
+    let resolveInit: ((didInitialize: boolean) => void) | undefined;
+    getInitMultimodalMock().mockImplementationOnce(() => new Promise<boolean>((resolve) => {
+      resolveInit = (didInitialize) => {
+        didResolveInit = true;
+        resolve(didInitialize);
+      };
+    }));
+
+    const loadPromise = llmEngineService.load('test/model');
+    try {
+      await waitForMockCall(getInitMultimodalMock());
+      expect(getActiveMultimodalContext()).toBeNull();
+
+      (llmEngineService as any).setContext({ __testReplacementContext: true });
+      resolveInit?.(true);
+      await loadPromise;
+
+      expect(getActiveMultimodalContext()).toBeNull();
+      expect(getMultimodalSupportMock()).not.toHaveBeenCalled();
+      expect(getReleaseMultimodalMock()).not.toHaveBeenCalled();
+    } finally {
+      if (!didResolveInit) {
+        resolveInit?.(true);
+      }
+      await loadPromise.catch(() => undefined);
+      await llmEngineService.unload().catch(() => undefined);
+    }
+  });
+
+  it('preempts active same-model multimodal readiness refreshes and retries them after completion', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+
+    await llmEngineService.load('test/model');
+    expect(getInitMultimodalMock()).toHaveBeenCalledTimes(1);
+
+    getMultimodalSupportMock().mockClear();
+    (registry.updateModel as jest.Mock).mockClear();
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+
+    const supportGate: { resolve?: () => void } = {};
+    getMultimodalSupportMock().mockImplementationOnce(() => new Promise((resolve) => {
+      supportGate.resolve = () => resolve({ vision: true, audio: false });
+    }));
+
+    const loadPromise = llmEngineService.load('test/model');
+    try {
+      await waitForMockCall(getMultimodalSupportMock());
+      expect(llmEngineService.hasActiveContextOperation()).toBe(true);
+
+      const completionMock = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock;
+      completionMock.mockClear();
+      const completionPromise = llmEngineService.chatCompletion({
+        messages: [{ role: 'user', content: 'Hello while refreshing' }],
+        params: { n_predict: 1 },
+      });
+
+      await Promise.resolve();
+      expect(completionMock).not.toHaveBeenCalled();
+
+      supportGate.resolve?.();
+      supportGate.resolve = undefined;
+      await loadPromise;
+      await completionPromise;
+
+      expect(completionMock).toHaveBeenCalledTimes(1);
+      await waitForMockCall(registry.updateModel as jest.Mock);
+      expect(registry.updateModel).toHaveBeenLastCalledWith(expect.objectContaining({
+        multimodalReadiness: expect.objectContaining({
+          status: 'ready',
+          projectorId: downloadedProjector.id,
+        }),
+      }));
+    } finally {
+      supportGate.resolve?.();
+      await loadPromise.catch(() => undefined);
+    }
+  });
+
+  it('requeues deferred same-model multimodal readiness refreshes preempted by a later completion', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+
+    await llmEngineService.load('test/model');
+    expect(getInitMultimodalMock()).toHaveBeenCalledTimes(1);
+
+    getMultimodalSupportMock().mockClear();
+    (registry.updateModel as jest.Mock).mockClear();
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+
+    const completionMock = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock;
+    completionMock.mockClear();
+
+    let releaseFirstCompletion!: () => void;
+    completionMock.mockImplementationOnce(() => new Promise((resolve) => {
+      releaseFirstCompletion = () => resolve({ text: 'First done' });
+    }));
+
+    const firstCompletionPromise = llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'First request' }],
+      params: { n_predict: 1 },
+    });
+    await waitForMockCall(completionMock);
+
+    await expect(llmEngineService.load('test/model')).resolves.toBeUndefined();
+    expect(getMultimodalSupportMock()).not.toHaveBeenCalled();
+
+    const supportGate: { resolve?: () => void } = {};
+    getMultimodalSupportMock().mockImplementationOnce(() => new Promise((resolve) => {
+      supportGate.resolve = () => resolve({ vision: true, audio: false });
+    }));
+
+    releaseFirstCompletion();
+    await firstCompletionPromise;
+    await waitForMockCall(getMultimodalSupportMock());
+    expect(llmEngineService.hasActiveContextOperation()).toBe(true);
+
+    let releaseSecondCompletion: (() => void) | undefined;
+    completionMock.mockImplementationOnce(() => new Promise((resolve) => {
+      releaseSecondCompletion = () => resolve({ text: 'Second done' });
+    }));
+
+    const secondCompletionPromise = llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Second request' }],
+      params: { n_predict: 1 },
+    });
+
+    try {
+      await Promise.resolve();
+      expect(completionMock).toHaveBeenCalledTimes(1);
+
+      supportGate.resolve?.();
+      supportGate.resolve = undefined;
+      await waitForMockCall(completionMock, 2);
+      expect(registry.updateModel).not.toHaveBeenCalled();
+
+      releaseSecondCompletion?.();
+      releaseSecondCompletion = undefined;
+      await secondCompletionPromise;
+
+      await waitForMockCall(getMultimodalSupportMock(), 2);
+      expect(registry.updateModel).toHaveBeenLastCalledWith(expect.objectContaining({
+        multimodalReadiness: expect.objectContaining({
+          status: 'ready',
+          projectorId: downloadedProjector.id,
+        }),
+      }));
+    } finally {
+      supportGate.resolve?.();
+      releaseSecondCompletion?.();
+      await secondCompletionPromise.catch(() => undefined);
+    }
+  });
+
+  it('reinitializes same-id projectors when the resolved local artifact changes', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createReadyVisionModel());
+
+    await llmEngineService.load('test/model');
+    getReleaseMultimodalMock().mockClear();
+    getInitMultimodalMock().mockClear();
+
+    const replacedProjector: ProjectorArtifact = {
+      ...downloadedProjector,
+      localPath: 'fresh-mmproj-model.gguf',
+      fileName: 'fresh-mmproj-model.gguf',
+    };
+    (registry.getModel as jest.Mock).mockReturnValue({
+      ...createReadyVisionModel(),
+      projectorCandidates: [replacedProjector],
+      selectedProjectorId: replacedProjector.id,
+      multimodalReadiness: {
+        ...createReadyMultimodalReadiness(),
+        projectorId: replacedProjector.id,
+      },
+    });
+
+    await llmEngineService.load('test/model');
+
+    expect(getReleaseMultimodalMock()).toHaveBeenCalledTimes(1);
+    expect(getInitMultimodalMock()).toHaveBeenCalledTimes(1);
+    expect((llmEngineService as any).activeMultimodalContext).toEqual(expect.objectContaining({
+      modelId: 'test/model',
+      projectorId: replacedProjector.id,
+      projectorLocalPath: 'fresh-mmproj-model.gguf',
+    }));
+  });
+
+  it('reinitializes same active projector when stable artifact metadata changes without mtime', async () => {
+    const originalProjector: ProjectorArtifact = {
+      ...downloadedProjector,
+      hfRevision: 'revision-a',
+      sha256: 'sha256-a',
+    };
+    (registry.getModel as jest.Mock).mockReturnValue({
+      ...createReadyVisionModel(),
+      projectorCandidates: [originalProjector],
+      selectedProjectorId: originalProjector.id,
+      multimodalReadiness: {
+        ...createReadyMultimodalReadiness(),
+        projectorId: originalProjector.id,
+      },
+    });
+
+    await llmEngineService.load('test/model');
+    const originalActiveMultimodalContext = getActiveMultimodalContext();
+    expect(originalActiveMultimodalContext).toEqual(expect.objectContaining({
+      modelId: 'test/model',
+      projectorId: originalProjector.id,
+      projectorLocalPath: downloadedProjector.localPath,
+      projectorResolvedPath: 'test-dir/models/mmproj-model.gguf',
+      projectorSizeBytes: 1024,
+      projectorModificationTime: null,
+      projectorFallbackMarker: expect.any(String),
+      projectorFileName: downloadedProjector.fileName,
+      projectorHfRevision: 'revision-a',
+      projectorSha256: 'sha256-a',
+    }));
+
+    getReleaseMultimodalMock().mockClear();
+    getInitMultimodalMock().mockClear();
+    (registry.updateModel as jest.Mock).mockClear();
+
+    const updatedProjector: ProjectorArtifact = {
+      ...originalProjector,
+      fileName: 'renamed-mmproj-model.gguf',
+      downloadUrl: 'https://huggingface.co/test/model/resolve/revision-b/renamed-mmproj-model.gguf',
+      hfRevision: 'revision-b',
+      sha256: 'sha256-b',
+    };
+    (registry.getModel as jest.Mock).mockReturnValue({
+      ...createReadyVisionModel(),
+      projectorCandidates: [updatedProjector],
+      selectedProjectorId: updatedProjector.id,
+      multimodalReadiness: {
+        ...createReadyMultimodalReadiness(),
+        projectorId: updatedProjector.id,
+      },
+    });
+
+    await llmEngineService.load('test/model');
+
+    expect(getReleaseMultimodalMock()).toHaveBeenCalledTimes(1);
+    expect(getInitMultimodalMock()).toHaveBeenCalledTimes(1);
+    expect(registry.updateModel).toHaveBeenLastCalledWith(expect.objectContaining({
+      multimodalReadiness: expect.objectContaining({
+        status: 'ready',
+        projectorId: updatedProjector.id,
+      }),
+    }));
+    const updatedActiveMultimodalContext = getActiveMultimodalContext();
+    expect(updatedActiveMultimodalContext).toEqual(expect.objectContaining({
+      modelId: 'test/model',
+      projectorId: updatedProjector.id,
+      projectorLocalPath: downloadedProjector.localPath,
+      projectorResolvedPath: 'test-dir/models/mmproj-model.gguf',
+      projectorSizeBytes: 1024,
+      projectorModificationTime: null,
+      projectorFallbackMarker: expect.any(String),
+      projectorFileName: 'renamed-mmproj-model.gguf',
+      projectorDownloadUrl: updatedProjector.downloadUrl,
+      projectorHfRevision: 'revision-b',
+      projectorSha256: 'sha256-b',
+    }));
+    expect(updatedActiveMultimodalContext?.projectorFallbackMarker)
+      .not.toBe(originalActiveMultimodalContext?.projectorFallbackMarker);
+  });
+
+  it('marks multimodal runtime unavailable while native release is pending', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+
+    await llmEngineService.load('test/model');
+    const context = (llmEngineService as any).context;
+    expect((llmEngineService as any).activeMultimodalContext).toEqual(expect.objectContaining({
+      modelId: 'test/model',
+      projectorId: downloadedProjector.id,
+    }));
+
+    let resolveRelease!: () => void;
+    getReleaseMultimodalMock().mockImplementationOnce(() => new Promise<void>((resolve) => {
+      resolveRelease = resolve;
+    }));
+
+    const releasePromise = (llmEngineService as any).releaseActiveMultimodalContext({
+      modelId: 'test/model',
+      context,
+    });
+
+    await waitForMockCall(getReleaseMultimodalMock());
+    expect((llmEngineService as any).activeMultimodalContext).toBeNull();
+
+    resolveRelease();
+    await expect(releasePromise).resolves.toBe(true);
+    expect((llmEngineService as any).activeMultimodalContext).toBeNull();
+  });
+
+  it('releases initialized multimodal projector state when projector file resolution fails', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createReadyVisionModel());
+
+    await llmEngineService.load('test/model');
+    const context = (llmEngineService as any).context;
+    expect(context).toBeTruthy();
+
+    getReleaseMultimodalMock().mockClear();
+    getInitMultimodalMock().mockClear();
+    const replacementProjector: ProjectorArtifact = {
+      ...downloadedProjector,
+      id: 'projector-test-model-main-replacement-mmproj-model.gguf',
+      fileName: 'replacement-mmproj-model.gguf',
+      localPath: 'replacement-mmproj-model.gguf',
+    };
+    (llmEngineService as any).activeMultimodalContext = {
+      modelId: 'test/model',
+      projectorId: downloadedProjector.id,
+      projectorLocalPath: downloadedProjector.localPath,
+    };
+    (registry.getModel as jest.Mock).mockReturnValue({
+      ...createDownloadedVisionModel(),
+      projectorCandidates: [replacementProjector],
+      selectedProjectorId: replacementProjector.id,
+      multimodalReadiness: {
+        ...createReadyMultimodalReadiness(),
+        status: 'missing_projector' as const,
+      },
+    });
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: false, size: 0 });
+
+    await (llmEngineService as any).initializeMultimodalReadinessForLoadedContext({
+      modelId: 'test/model',
+      context,
+      useGpu: false,
+    });
+
+    expect(getReleaseMultimodalMock()).toHaveBeenCalledTimes(1);
+    expect(getInitMultimodalMock()).not.toHaveBeenCalled();
+    expect(registry.updateModel).toHaveBeenLastCalledWith(expect.objectContaining({
+      multimodalReadiness: expect.objectContaining({
+        status: 'failed',
+        projectorId: replacementProjector.id,
+      }),
+    }));
+  });
+
+  it('keeps active multimodal JS state when native release fails with a live context', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+
+    await llmEngineService.load('test/model');
+    const context = (llmEngineService as any).context;
+    const activeMultimodalContext = (llmEngineService as any).activeMultimodalContext;
+    expect(context).toBeTruthy();
+    expect(activeMultimodalContext).toEqual(expect.objectContaining({
+      modelId: 'test/model',
+      projectorId: downloadedProjector.id,
+    }));
+
+    getReleaseMultimodalMock().mockRejectedValueOnce(new Error('native release failed'));
+
+    await expect((llmEngineService as any).releaseActiveMultimodalContext({
+      modelId: 'test/model',
+      context,
+    })).resolves.toBe(false);
+
+    expect(getReleaseMultimodalMock()).toHaveBeenCalledTimes(1);
+    expect((llmEngineService as any).activeMultimodalContext).toBe(activeMultimodalContext);
+
+    await llmEngineService.unload();
+  });
+
+  it('clears active multimodal JS state without native release when no context is loaded', async () => {
+    (llmEngineService as any).setContext(null);
+    (llmEngineService as any).activeMultimodalContext = {
+      modelId: 'test/model',
+      projectorId: downloadedProjector.id,
+      projectorLocalPath: downloadedProjector.localPath,
+    };
+
+    await expect((llmEngineService as any).releaseActiveMultimodalContext()).resolves.toBe(true);
+
+    expect(getReleaseMultimodalMock()).not.toHaveBeenCalled();
+    expect((llmEngineService as any).activeMultimodalContext).toBeNull();
+
+    await llmEngineService.unload().catch(() => undefined);
+  });
+
+  it('omits projector and native error paths from multimodal release warning logs', async () => {
+    const previousNodeEnv = process.env.NODE_ENV;
+    const projectorLocalPath = 'Projector Files/mmproj model.gguf';
+    const fileUriPath = 'file:///storage/emulated/0/Download/mmproj.gguf';
+    const androidDataPath = '/data/user/0/com.pocketai/files/models/mmproj.gguf';
+    const projectorWithSpacedPath: ProjectorArtifact = {
+      ...downloadedProjector,
+      localPath: projectorLocalPath,
+    };
+    (registry.getModel as jest.Mock).mockReturnValue({
+      ...createDownloadedVisionModel(),
+      projectorCandidates: [projectorWithSpacedPath],
+      selectedProjectorId: projectorWithSpacedPath.id,
+    });
+    getReleaseMultimodalMock().mockRejectedValueOnce(
+      new Error(`release failed for ${fileUriPath} and ${androidDataPath}`),
+    );
+    (process.env as any).NODE_ENV = 'production';
+
+    try {
+      await llmEngineService.load('test/model');
+      await llmEngineService.unload();
+    } finally {
+      (process.env as any).NODE_ENV = previousNodeEnv;
+    }
+
+    const releaseWarning = consoleWarnSpy.mock.calls.find(
+      ([message]) => message === '[LLMEngine] Failed to release multimodal context',
+    );
+    expect(releaseWarning).toBeDefined();
+    expect(releaseWarning?.[1]).toEqual(expect.objectContaining({
+      modelId: 'test/model',
+      projectorId: downloadedProjector.id,
+      error: 'release failed for [path] and [path]',
+    }));
+    expect(releaseWarning?.[1]).toEqual(expect.not.objectContaining({
+      projectorLocalPath: expect.anything(),
+    }));
+    expect(JSON.stringify(releaseWarning?.[1])).not.toContain(projectorLocalPath);
+    expect(JSON.stringify(releaseWarning?.[1])).not.toContain(fileUriPath);
+    expect(JSON.stringify(releaseWarning?.[1])).not.toContain(androidDataPath);
+    expect(JSON.stringify(releaseWarning?.[1])).not.toContain('file:///storage');
+    expect(JSON.stringify(releaseWarning?.[1])).not.toContain('/data/user');
+  });
+
+  it('rejects image media paths when multimodal readiness is not ready', async () => {
+    await llmEngineService.load('test/model');
+
+    await expect(llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Describe this', mediaPaths: ['test-dir/chat-attachments/image.jpg'] }],
+      multimodalReadiness: {
+        modelId: 'test/model',
+        status: 'text_only',
+        support: [],
+        checkedAt: 1,
+      },
+      params: { n_predict: 32 },
+    })).rejects.toMatchObject({
+      code: 'multimodal_not_ready',
+    });
+
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects structured audio content parts when runtime audio readiness is missing', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+
+    await llmEngineService.load('test/model');
+
+    await expect(llmEngineService.chatCompletion({
+      messages: [{
+        role: 'user',
+        content: 'Transcribe this',
+        contentParts: [
+          { type: 'input_audio', input_audio: { format: 'wav', url: 'file:///document/audio.wav' } },
+        ],
+      }],
+      multimodalReadiness: {
+        modelId: 'test/model',
+        status: 'ready',
+        projectorId: downloadedProjector.id,
+        support: ['vision'],
+        checkedAt: 1,
+      },
+      params: { n_predict: 32 },
+    })).rejects.toMatchObject({
+      code: 'multimodal_not_ready',
+      details: expect.objectContaining({
+        audioInputCount: 1,
+      }),
+    });
+
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).not.toHaveBeenCalled();
+  });
+
+  it('forwards structured audio content parts when runtime audio readiness is available', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+    getMultimodalSupportMock().mockResolvedValue({ vision: true, audio: true });
+
+    await llmEngineService.load('test/model');
+
+    await llmEngineService.chatCompletion({
+      messages: [{
+        role: 'user',
+        content: 'Transcribe this',
+        contentParts: [
+          { type: 'input_audio', input_audio: { format: 'wav', url: 'file:///document/audio.wav' } },
+        ],
+      }],
+      multimodalReadiness: {
+        modelId: 'test/model',
+        status: 'ready',
+        projectorId: downloadedProjector.id,
+        support: ['audio'],
+        checkedAt: 1,
+      },
+      params: { n_predict: 32 },
+    });
+
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: 'Transcribe this' },
+            { type: 'input_audio', input_audio: { format: 'wav', url: 'file:///document/audio.wav' } },
+          ],
+        }],
+      }),
+      expect.any(Function),
+    );
+  });
+
+  it('rejects requests with more than the supported image attachment limit before native completion', async () => {
+    await llmEngineService.load('test/model');
+
+    await expect(llmEngineService.chatCompletion({
+      messages: [{
+        role: 'user',
+        content: 'Compare these images',
+        mediaPaths: [
+          'test-dir/chat-attachments/image-1.jpg',
+          'test-dir/chat-attachments/image-2.jpg',
+          'test-dir/chat-attachments/image-3.jpg',
+          'test-dir/chat-attachments/image-4.jpg',
+          'test-dir/chat-attachments/image-5.jpg',
+        ],
+      }],
+      multimodalReadiness: {
+        modelId: 'test/model',
+        status: 'ready',
+        support: ['vision'],
+        checkedAt: 1,
+      },
+      params: { n_predict: 32 },
+    })).rejects.toMatchObject({
+      code: 'chat_attachment_limit_exceeded',
+      details: expect.objectContaining({
+        mediaPathCount: 5,
+        limit: 4,
+      }),
+    });
+
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).not.toHaveBeenCalled();
+    expect(llmEngineService.getState().diagnostics?.multimodal).toEqual(expect.objectContaining({
+      attachmentCount: 5,
+    }));
+  });
+
+  it('counts duplicate media path occurrences before de-duping native media paths for the image limit', async () => {
+    await llmEngineService.load('test/model');
+
+    await expect(llmEngineService.chatCompletion({
+      messages: [
+        { role: 'user', content: 'First copy', mediaPaths: ['test-dir/chat-attachments/same.jpg'] },
+        { role: 'assistant', content: 'Earlier answer' },
+        { role: 'user', content: 'Second copy', mediaPaths: ['test-dir/chat-attachments/same.jpg'] },
+        { role: 'assistant', content: 'Second answer' },
+        { role: 'user', content: 'Third copy', mediaPaths: ['test-dir/chat-attachments/same.jpg'] },
+        { role: 'assistant', content: 'Third answer' },
+        { role: 'user', content: 'Fourth copy', mediaPaths: ['test-dir/chat-attachments/same.jpg'] },
+        { role: 'assistant', content: 'Fourth answer' },
+        { role: 'user', content: 'Fifth copy', mediaPaths: ['test-dir/chat-attachments/same.jpg'] },
+      ],
+      multimodalReadiness: {
+        modelId: 'test/model',
+        status: 'ready',
+        support: ['vision'],
+        checkedAt: 1,
+      },
+      params: { n_predict: 32 },
+    })).rejects.toMatchObject({
+      code: 'chat_attachment_limit_exceeded',
+      details: expect.objectContaining({
+        mediaPathCount: 5,
+        limit: 4,
+      }),
+    });
+
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).not.toHaveBeenCalled();
+  });
+
+  it('counts duplicate media path occurrences within one message before native de-dupe', async () => {
+    await llmEngineService.load('test/model');
+
+    await expect(llmEngineService.chatCompletion({
+      messages: [{
+        role: 'user',
+        content: 'Compare these repeated images',
+        mediaPaths: [
+          'test-dir/chat-attachments/same.jpg',
+          'test-dir/chat-attachments/same.jpg',
+          'test-dir/chat-attachments/same.jpg',
+          'test-dir/chat-attachments/same.jpg',
+          'test-dir/chat-attachments/same.jpg',
+        ],
+      }],
+      multimodalReadiness: {
+        modelId: 'test/model',
+        status: 'ready',
+        support: ['vision'],
+        checkedAt: 1,
+      },
+      params: { n_predict: 32 },
+    })).rejects.toMatchObject({
+      code: 'chat_attachment_limit_exceeded',
+      details: expect.objectContaining({
+        mediaPathCount: 5,
+        limit: 4,
+      }),
+    });
+
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).not.toHaveBeenCalled();
+    expect(llmEngineService.getState().diagnostics?.multimodal).toEqual(expect.objectContaining({
+      attachmentCount: 5,
+    }));
+  });
+
+  it('counts duplicate top-level-only mediaPaths before native de-dupe for the image limit', async () => {
+    await llmEngineService.load('test/model');
+
+    await expect(llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Compare these repeated top-level images' }],
+      mediaPaths: [
+        'test-dir/chat-attachments/top-level-same.jpg',
+        'test-dir/chat-attachments/top-level-same.jpg',
+        'test-dir/chat-attachments/top-level-same.jpg',
+        'test-dir/chat-attachments/top-level-same.jpg',
+        'test-dir/chat-attachments/top-level-same.jpg',
+      ],
+      multimodalReadiness: {
+        modelId: 'test/model',
+        status: 'ready',
+        support: ['vision'],
+        checkedAt: 1,
+      },
+      params: { n_predict: 32 },
+    })).rejects.toMatchObject({
+      code: 'chat_attachment_limit_exceeded',
+      details: expect.objectContaining({
+        mediaPathCount: 5,
+        limit: 4,
+      }),
+    });
+
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).not.toHaveBeenCalled();
+    expect(llmEngineService.getState().diagnostics?.multimodal).toEqual(expect.objectContaining({
+      attachmentCount: 5,
+    }));
+  });
+
+  it('counts distinct explicit and attachment media paths together for the image limit', async () => {
+    await llmEngineService.load('test/model');
+
+    await expect(llmEngineService.chatCompletion({
+      messages: [{
+        role: 'user',
+        content: 'Compare explicit and attached images',
+        mediaPaths: [
+          'test-dir/chat-attachments/explicit-1.jpg',
+          'test-dir/chat-attachments/explicit-2.jpg',
+          'test-dir/chat-attachments/explicit-3.jpg',
+        ],
+        attachments: [
+          createTestImageAttachment('attachment-1', 'test-dir/chat-attachments/attachment-1.jpg'),
+          createTestImageAttachment('attachment-2', 'test-dir/chat-attachments/attachment-2.jpg'),
+        ],
+      }],
+      multimodalReadiness: {
+        modelId: 'test/model',
+        status: 'ready',
+        support: ['vision'],
+        checkedAt: 1,
+      },
+      params: { n_predict: 32 },
+    })).rejects.toMatchObject({
+      code: 'chat_attachment_limit_exceeded',
+      details: expect.objectContaining({
+        mediaPathCount: 5,
+        limit: 4,
+      }),
+    });
+
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).not.toHaveBeenCalled();
+    expect(llmEngineService.getState().diagnostics?.multimodal).toEqual(expect.objectContaining({
+      attachmentCount: 5,
+    }));
+  });
+
+  it('does not double-count mirrored explicit and attachment media paths', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+
+    await llmEngineService.load('test/model');
+
+    await llmEngineService.chatCompletion({
+      messages: [{
+        role: 'user',
+        content: 'Describe this mirrored image',
+        mediaPaths: ['test-dir/chat-attachments/mirrored.jpg'],
+        attachments: [
+          createTestImageAttachment('mirrored', 'test-dir/chat-attachments/mirrored.jpg'),
+        ],
+      }],
+      multimodalReadiness: {
+        modelId: 'test/model',
+        status: 'ready',
+        projectorId: downloadedProjector.id,
+        support: ['vision'],
+        checkedAt: 1,
+      },
+      params: { n_predict: 32 },
+    });
+
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        media_paths: ['test-dir/chat-attachments/mirrored.jpg'],
+      }),
+      expect.any(Function),
+    );
+    expect(llmEngineService.getState().diagnostics?.multimodal).toEqual(expect.objectContaining({
+      attachmentCount: 1,
+    }));
+  });
+
+  it('does not double-count mirrored top-level media paths for limits or diagnostics', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+
+    await llmEngineService.load('test/model');
+
+    await llmEngineService.chatCompletion({
+      messages: [{
+        role: 'user',
+        content: 'Compare these mirrored images',
+        mediaPaths: [
+          'test-dir/chat-attachments/image-1.jpg',
+          'test-dir/chat-attachments/image-2.jpg',
+          'test-dir/chat-attachments/image-3.jpg',
+          'test-dir/chat-attachments/image-4.jpg',
+        ],
+      }],
+      mediaPaths: [
+        'test-dir/chat-attachments/image-1.jpg',
+        'test-dir/chat-attachments/image-2.jpg',
+        'test-dir/chat-attachments/image-3.jpg',
+        'test-dir/chat-attachments/image-4.jpg',
+      ],
+      multimodalReadiness: {
+        modelId: 'test/model',
+        status: 'ready',
+        projectorId: downloadedProjector.id,
+        support: ['vision'],
+        checkedAt: 1,
+      },
+      params: { n_predict: 32 },
+    });
+
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        media_paths: [
+          'test-dir/chat-attachments/image-1.jpg',
+          'test-dir/chat-attachments/image-2.jpg',
+          'test-dir/chat-attachments/image-3.jpg',
+          'test-dir/chat-attachments/image-4.jpg',
+        ],
+      }),
+      expect.any(Function),
+    );
+    expect(llmEngineService.getState().diagnostics?.multimodal).toEqual(expect.objectContaining({
+      attachmentCount: 4,
+    }));
+  });
+
+  it('records raw media occurrence count in runtime-not-ready diagnostics', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+    await llmEngineService.load('test/model');
+    (llmEngineService as any).activeMultimodalContext = null;
+
+    await expect(llmEngineService.chatCompletion({
+      messages: [{
+        role: 'user',
+        content: 'Describe this repeated image',
+        mediaPaths: [
+          'test-dir/chat-attachments/same.jpg',
+          'test-dir/chat-attachments/same.jpg',
+          'test-dir/chat-attachments/same.jpg',
+        ],
+      }],
+      multimodalReadiness: {
+        modelId: 'test/model',
+        status: 'ready',
+        projectorId: downloadedProjector.id,
+        support: ['vision'],
+        checkedAt: 1,
+      },
+      params: { n_predict: 32 },
+    })).rejects.toMatchObject({
+      code: 'multimodal_not_ready',
+      details: expect.objectContaining({
+        mediaPathCount: 3,
+      }),
+    });
+
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).not.toHaveBeenCalled();
+    expect(llmEngineService.getState().diagnostics?.multimodal).toEqual(expect.objectContaining({
+      readinessStatus: 'ready',
+      attachmentCount: 3,
+    }));
+  });
+
+  it('records sanitized multimodal diagnostics when readiness blocks image send', async () => {
+    await llmEngineService.load('test/model');
+    const failureReason = [
+      'Projector failed at file:///private/mobile/Project Files/mmproj file.gguf',
+      'and C:\\Users\\tester\\Model Files\\mmproj file.gguf;',
+      'then /private/mobile/Model Files/mmproj file.gguf',
+      'with content://media/external/images/My Photo.jpg',
+      'and ph://ABC DEF after retry',
+    ].join(' ');
+
+    await expect(llmEngineService.chatCompletion({
+      messages: [{
+        role: 'user',
+        content: 'Describe this',
+        attachments: [{
+          id: 'attachment-1',
+          threadId: 'thread-1',
+          messageId: 'message-1',
+          localUri: 'test-dir/chat-attachments/attachment-1.jpg',
+          pathCategory: 'chat_attachment',
+          fileName: 'attachment-1.jpg',
+          mediaType: 'image/jpeg',
+          size: 4096,
+          source: 'photo_library',
+          createdAt: 1,
+        }],
+      }],
+      multimodalReadiness: {
+        modelId: 'test/model',
+        status: 'failed',
+        projectorId: 'projector-1',
+        projectorSize: 24_000_000,
+        support: ['vision'],
+        failureReason,
+        checkedAt: 1,
+      },
+      params: { n_predict: 32 },
+    })).rejects.toMatchObject({
+      code: 'multimodal_not_ready',
+    });
+
+    const multimodalDiagnostics = llmEngineService.getState().diagnostics?.multimodal;
+    expect(multimodalDiagnostics).toEqual(expect.objectContaining({
+      visionCapability: 'vision_capable',
+      projectorPresence: 'failed',
+      projectorPathCategory: 'models',
+      projectorSize: 24_000_000,
+      readinessStatus: 'failed',
+      attachmentCount: 1,
+      attachmentTotalBytes: 4096,
+      failureReason: 'multimodal:projector_unavailable:path_redacted:retry',
+    }));
+    expect(JSON.stringify(multimodalDiagnostics)).not.toContain('file:///private');
+    expect(JSON.stringify(multimodalDiagnostics)).not.toContain('Project Files');
+    expect(JSON.stringify(multimodalDiagnostics)).not.toContain('C:\\Users\\tester');
+    expect(JSON.stringify(multimodalDiagnostics)).not.toContain('Model Files');
+    expect(JSON.stringify(multimodalDiagnostics)).not.toContain('/private/mobile');
+    expect(JSON.stringify(multimodalDiagnostics)).not.toContain('content://media');
+    expect(JSON.stringify(multimodalDiagnostics)).not.toContain('ph://ABC');
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).not.toHaveBeenCalled();
+  });
+
+  it('stores only coarse multimodal diagnostics when native media completion errors include prompt text', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+    await llmEngineService.load('test/model');
+
+    const privatePromptText = 'Describe Project Orchid acquisition photos';
+    (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock.mockRejectedValueOnce(
+      new Error(`Native completion failed while processing prompt "${privatePromptText}" at file:///private/mobile/image.jpg`),
+    );
+
+    await expect(llmEngineService.chatCompletion({
+      messages: [{
+        role: 'user',
+        content: privatePromptText,
+        mediaPaths: ['test-dir/chat-attachments/image.jpg'],
+        attachments: [createTestImageAttachment('attachment-private', 'test-dir/chat-attachments/image.jpg', 8192)],
+      }],
+      multimodalReadiness: createReadyMultimodalReadiness(),
+      params: { n_predict: 32 },
+    })).rejects.toThrow('Native completion failed');
+
+    const multimodalDiagnostics = llmEngineService.getState().diagnostics?.multimodal;
+    expect(multimodalDiagnostics).toEqual(expect.objectContaining({
+      readinessStatus: 'ready',
+      attachmentCount: 1,
+      attachmentTotalBytes: 8192,
+      failureReason: 'runtime:completion_failed:path_redacted',
+    }));
+    expect(JSON.stringify(multimodalDiagnostics)).not.toContain(privatePromptText);
+    expect(JSON.stringify(multimodalDiagnostics)).not.toContain('file:///private/mobile/image.jpg');
+    expect(JSON.stringify(multimodalDiagnostics)).not.toContain('test-dir/chat-attachments/image.jpg');
+  });
+
+  it('passes formatted media paths into prompt tokenization', async () => {
+    getFormattedChatMock().mockResolvedValueOnce({
+      prompt: 'Formatted prompt',
+      has_media: true,
+      media_paths: ['test-dir/chat-attachments/image.jpg'],
+      additional_stops: [],
+    });
+    await llmEngineService.load('test/model');
+
+    await llmEngineService.countPromptTokens({
+      messages: [{ role: 'user', content: 'Describe this', mediaPaths: ['test-dir/chat-attachments/image.jpg'] }],
+      multimodalReadiness: createReadyMultimodalReadiness(),
+      expectedModelId: 'test/model',
+    });
+
+    expect(getTokenizeMock()).toHaveBeenCalledWith(
+      'Formatted prompt',
+      { media_paths: ['test-dir/chat-attachments/image.jpg'] },
+    );
+  });
+
+  it('falls back to all retained message media paths for prompt tokenization', async () => {
+    getFormattedChatMock().mockResolvedValueOnce({
+      prompt: 'Formatted prompt',
+      additional_stops: [],
+    });
+    await llmEngineService.load('test/model');
+
+    await llmEngineService.countPromptTokens({
+      messages: [
+        { role: 'system', content: 'Be concise.' },
+        { role: 'user', content: 'Earlier image', mediaPaths: ['test-dir/chat-attachments/first.jpg'] },
+        { role: 'assistant', content: 'Earlier answer' },
+        { role: 'user', content: 'Latest image', mediaPaths: ['test-dir/chat-attachments/latest.jpg'] },
+      ],
+      multimodalReadiness: createReadyMultimodalReadiness(),
+      expectedModelId: 'test/model',
+    });
+
+    expect(getTokenizeMock()).toHaveBeenCalledWith(
+      'Formatted prompt',
+      { media_paths: ['test-dir/chat-attachments/first.jpg', 'test-dir/chat-attachments/latest.jpg'] },
+    );
+  });
+
+  it('strips media paths from prompt tokenization only when media fallback is explicit', async () => {
+    getFormattedChatMock().mockResolvedValueOnce({
+      prompt: 'Formatted prompt',
+      has_media: true,
+        media_paths: ['test-dir/chat-attachments/image.jpg'],
+      additional_stops: [],
+    });
+    await llmEngineService.load('test/model');
+
+    await llmEngineService.countPromptTokens({
+      messages: [{ role: 'user', content: 'Describe this', mediaPaths: ['test-dir/chat-attachments/image.jpg'] }],
+      allowMediaFallback: true,
+    });
+
+    expect(getFormattedChatMock()).toHaveBeenCalledWith(
+      [{ role: 'user', content: 'Describe this' }],
+      null,
+      expect.any(Object),
+    );
+    expect(getTokenizeMock()).toHaveBeenCalledWith('Formatted prompt', undefined);
+  });
+
+  it('preserves text content parts when prompt tokenization strips media inputs', async () => {
+    getFormattedChatMock().mockResolvedValueOnce({
+      prompt: 'Formatted document prompt',
+      has_media: false,
+      additional_stops: [],
+    });
+    await llmEngineService.load('test/model');
+
+    await llmEngineService.countPromptTokens({
+      messages: [{
+        role: 'user',
+        content: '',
+        contentParts: [
+          { type: 'text', text: 'Document attachment text\n\nImportant notes' },
+        ],
+      }],
+      allowMediaFallback: true,
+    });
+
+    expect(getFormattedChatMock()).toHaveBeenCalledWith(
+      [{
+        role: 'user',
+        content: [
+          { type: 'text', text: 'Document attachment text\n\nImportant notes' },
+        ],
+      }],
+      null,
+      expect.any(Object),
+    );
+    expect(getTokenizeMock()).toHaveBeenCalledWith('Formatted document prompt', undefined);
+  });
+
+  it('rejects prompt tokenization with media when multimodal readiness is not ready by default', async () => {
+    await llmEngineService.load('test/model');
+
+    await expect(llmEngineService.countPromptTokens({
+      messages: [{ role: 'user', content: 'Describe this', mediaPaths: ['test-dir/chat-attachments/image.jpg'] }],
+    })).rejects.toMatchObject({
+      code: 'multimodal_not_ready',
+    });
+
+    expect(getFormattedChatMock()).not.toHaveBeenCalled();
+    expect(getTokenizeMock()).not.toHaveBeenCalled();
+  });
+
+  it('rejects prompt tokenization when media attachments exceed the chat limit even with fallback enabled', async () => {
+    await llmEngineService.load('test/model');
+
+    await expect(llmEngineService.countPromptTokens({
+      messages: [{
+        role: 'user',
+        content: 'Describe these',
+        mediaPaths: [
+          'test-dir/chat-attachments/1.jpg',
+          'test-dir/chat-attachments/2.jpg',
+          'test-dir/chat-attachments/3.jpg',
+          'test-dir/chat-attachments/4.jpg',
+          'test-dir/chat-attachments/5.jpg',
+        ],
+      }],
+      multimodalReadiness: createReadyMultimodalReadiness(),
+      expectedModelId: 'test/model',
+      allowMediaFallback: true,
+    })).rejects.toMatchObject({
+      code: 'chat_attachment_limit_exceeded',
+    });
+
+    expect(getFormattedChatMock()).not.toHaveBeenCalled();
+    expect(getTokenizeMock()).not.toHaveBeenCalled();
+  });
+
   it('forwards template-specific additional stop tokens to llama.rn completion', async () => {
     getFormattedChatMock().mockResolvedValueOnce({
       prompt: 'Formatted prompt',
@@ -211,6 +2628,41 @@ describe('LLMEngineService', () => {
       }),
       expect.any(Function),
     );
+  });
+
+  it('logs sanitized metadata when template stop formatting fails', async () => {
+    const previousNodeEnv = process.env.NODE_ENV;
+    (process.env as any).NODE_ENV = 'development';
+    const sensitiveFormatterError = new Error(
+      'formatter failed for prompt "secret prompt" at /document/private-image.jpg',
+    );
+    sensitiveFormatterError.name = 'FormatterError';
+    getFormattedChatMock().mockRejectedValueOnce(sensitiveFormatterError);
+
+    try {
+      await llmEngineService.load('test/model');
+
+      await llmEngineService.chatCompletion({
+        messages: [{ role: 'user', content: 'Hello' }],
+        params: { n_predict: 32 },
+      });
+    } finally {
+      (process.env as any).NODE_ENV = previousNodeEnv;
+    }
+
+    const formatterWarning = consoleWarnSpy.mock.calls.find(
+      (call) => call[0] === '[LLMEngine] Failed to resolve template stop tokens',
+    );
+    expect(formatterWarning).toEqual([
+      '[LLMEngine] Failed to resolve template stop tokens',
+      {
+        errorType: 'FormatterError',
+        hasMessage: true,
+      },
+    ]);
+    expect(formatterWarning?.some((arg: unknown) => arg instanceof Error)).toBe(false);
+    expect(JSON.stringify(formatterWarning)).not.toContain('secret prompt');
+    expect(JSON.stringify(formatterWarning)).not.toContain('/document/private-image.jpg');
   });
 
   it('reuses cached template additional stop tokens for the same loaded context, messages, and options', async () => {
@@ -381,7 +2833,7 @@ describe('LLMEngineService', () => {
       params: { n_predict: 16 },
     });
 
-    await Promise.resolve();
+    await waitForMockCall(getFormattedChatMock());
     expect(getFormattedChatMock()).toHaveBeenCalledTimes(1);
 
     await expect(llmEngineService.chatCompletion({
@@ -504,9 +2956,10 @@ describe('LLMEngineService', () => {
       });
 
       await llmEngineService.load('test/model', { forceReload: true });
-      await Promise.resolve();
-      await Promise.resolve();
-      await Promise.resolve();
+      await waitForCondition(
+        () => (registry.updateModel as jest.Mock).mock.calls.some(([model]) => model.thinkingCapability),
+        'thinking capability probe persistence',
+      );
 
       expect(getFormattedChatMock()).toHaveBeenCalledWith(
         expect.anything(),
@@ -563,9 +3016,10 @@ describe('LLMEngineService', () => {
       });
 
       await llmEngineService.load('test/model', { forceReload: true });
-      await Promise.resolve();
-      await Promise.resolve();
-      await Promise.resolve();
+      await waitForCondition(
+        () => (registry.updateModel as jest.Mock).mock.calls.some(([model]) => model.thinkingCapability),
+        'thinking capability probe persistence',
+      );
 
       expect(registry.updateModel).toHaveBeenCalledWith(expect.objectContaining({
         id: 'test/model',
@@ -582,7 +3036,7 @@ describe('LLMEngineService', () => {
     }
   });
 
-  it('starts chat completion without waiting for a slow thinking capability probe', async () => {
+  it('waits for a tracked thinking capability probe before starting chat completion', async () => {
     const previousEnv = process.env.NODE_ENV;
     (process.env as any).NODE_ENV = 'development';
     allowThinkingCapabilityProbe();
@@ -633,28 +3087,27 @@ describe('LLMEngineService', () => {
         params: { n_predict: 16 },
       });
 
-      for (let i = 0; i < 10 && completionMock.mock.calls.length === 0; i += 1) {
-        await Promise.resolve();
-      }
-      expect(completionMock).toHaveBeenCalled();
+      await Promise.resolve();
+      expect(completionMock).not.toHaveBeenCalled();
       expect(probeFormatCalls).toBe(1);
 
       expect(registry.updateModel).not.toHaveBeenCalledWith(expect.objectContaining({
         thinkingCapability: expect.anything(),
       }));
 
-      resolveNativeCompletion();
-      await expect(completionPromise).resolves.toEqual({ text: 'Hello back' });
-
       resolveProbeFormat();
       await Promise.resolve();
+      await waitForMockCall(completionMock);
+
+      resolveNativeCompletion();
+      await expect(completionPromise).resolves.toEqual({ text: 'Hello back' });
       await llmEngineService.unload();
     } finally {
       (process.env as any).NODE_ENV = previousEnv;
     }
   });
 
-  it('counts prompt tokens without waiting for a slow thinking capability probe', async () => {
+  it('preempts a background thinking capability probe before counting prompt tokens', async () => {
     const previousEnv = process.env.NODE_ENV;
     (process.env as any).NODE_ENV = 'development';
     allowThinkingCapabilityProbe();
@@ -700,17 +3153,86 @@ describe('LLMEngineService', () => {
         messages: [{ role: 'user', content: 'Hello' }],
       });
 
-      await expect(countPromise).resolves.toBe(4);
-      expect(tokenizeMock).toHaveBeenCalled();
+      await Promise.resolve();
+      expect(tokenizeMock).not.toHaveBeenCalled();
       expect(probeFormatCalls).toBe(1);
 
       expect(registry.updateModel).not.toHaveBeenCalledWith(expect.objectContaining({
         thinkingCapability: expect.anything(),
       }));
 
-      await llmEngineService.unload();
       resolveProbeFormat();
+      await expect(countPromise).resolves.toBe(4);
+      expect(tokenizeMock).toHaveBeenCalled();
+      expect(probeFormatCalls).toBe(1);
+      expect(registry.updateModel).not.toHaveBeenCalledWith(expect.objectContaining({
+        thinkingCapability: expect.anything(),
+      }));
+      await llmEngineService.unload();
+    } finally {
+      (process.env as any).NODE_ENV = previousEnv;
+    }
+  });
+
+  it('keeps passive prompt token counts queued behind background thinking probes', async () => {
+    const previousEnv = process.env.NODE_ENV;
+    (process.env as any).NODE_ENV = 'development';
+    allowThinkingCapabilityProbe();
+
+    const tokenizeMock = (llamaRn as unknown as { __tokenizeMock: jest.Mock }).__tokenizeMock;
+    let resolveProbeFormat!: () => void;
+    let probeFormatCalls = 0;
+
+    try {
+      tokenizeMock.mockResolvedValueOnce({ tokens: [1, 2, 3] });
+      getFormattedChatMock().mockImplementation((_messages, _tools, formattingOptions) => {
+        if (formattingOptions?.jinja === true) {
+          probeFormatCalls += 1;
+
+          if (probeFormatCalls === 1) {
+            return new Promise((resolve) => {
+              resolveProbeFormat = () => resolve({
+                type: 'jinja',
+                prompt: 'Formatted prompt <think>reasoning</think>',
+                thinking_start_tag: '<think>',
+                thinking_end_tag: '</think>',
+              });
+            });
+          }
+
+          return Promise.resolve({
+            type: 'jinja',
+            prompt: 'Formatted prompt',
+            thinking_forced_open: false,
+          });
+        }
+
+        return Promise.resolve({ prompt: 'Passive count prompt', additional_stops: [] });
+      });
+
+      await llmEngineService.load('test/model', { forceReload: true });
+      for (let i = 0; i < 5 && probeFormatCalls === 0; i += 1) {
+        await Promise.resolve();
+      }
+      expect(probeFormatCalls).toBe(1);
+
+      const countPromise = llmEngineService.countPromptTokens({
+        messages: [{ role: 'user', content: 'Hello' }],
+        chatBlocking: false,
+      });
+
       await Promise.resolve();
+      expect(tokenizeMock).not.toHaveBeenCalled();
+
+      resolveProbeFormat();
+      await expect(countPromise).resolves.toBe(3);
+      expect(probeFormatCalls).toBe(2);
+      expect(registry.updateModel).toHaveBeenCalledWith(expect.objectContaining({
+        thinkingCapability: expect.objectContaining({
+          supportsThinking: true,
+        }),
+      }));
+      await llmEngineService.unload();
     } finally {
       (process.env as any).NODE_ENV = previousEnv;
     }
@@ -730,8 +3252,7 @@ describe('LLMEngineService', () => {
       params: { n_predict: 1 },
     });
 
-    await Promise.resolve();
-    await Promise.resolve();
+    await waitForMockCall(completionMock);
 
     await expect(
       llmEngineService.countPromptTokens({ messages: [{ role: 'user', content: 'Hello' }] }),
@@ -871,6 +3392,50 @@ describe('LLMEngineService', () => {
     );
   });
 
+  it('preserves document text content parts when retrying strict alternation normalization', async () => {
+    const completionMock = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock;
+    getFormattedChatMock().mockResolvedValue({
+      type: 'jinja',
+      prompt: '<|user|>\nHello',
+      additional_stops: [],
+    });
+    completionMock
+      .mockRejectedValueOnce(new Error('Conversation roles must alternate user/assistant'))
+      .mockResolvedValueOnce({ text: 'Recovered reply' });
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    await expect(llmEngineService.chatCompletion({
+      messages: [
+        { role: 'user', content: 'Previous question.' },
+        {
+          role: 'user',
+          content: '',
+          contentParts: [
+            { type: 'text', text: 'Document attachment text\n\nImportant notes' },
+          ],
+        },
+      ],
+      params: { n_predict: 64 },
+    })).resolves.toEqual({ text: 'Recovered reply' });
+
+    expect(completionMock).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        messages: [
+          expect.objectContaining({
+            role: 'user',
+            content: expect.arrayContaining([
+              { type: 'text', text: 'Previous question.\n\n' },
+              { type: 'text', text: 'Document attachment text\n\nImportant notes' },
+            ]),
+          }),
+        ],
+      }),
+      expect.any(Function),
+    );
+  });
+
   it('falls back to Llama system wrapping for legacy formatted payloads without type metadata', async () => {
     const completionMock = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock;
     getFormattedChatMock().mockResolvedValue({
@@ -923,6 +3488,279 @@ describe('LLMEngineService', () => {
     );
     expect(llmEngineService.getContextSize()).toBe(4096);
     expect(llmEngineService.getLoadedGpuLayers()).toBe(12);
+  });
+
+  it('keeps llama.rn context shifting at the default for text-only model loads', async () => {
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    expect(llamaRn.initLlama).toHaveBeenCalledTimes(1);
+    expect((llamaRn.initLlama as jest.Mock).mock.calls[0][0]).not.toHaveProperty('ctx_shift');
+  });
+
+  it('keeps llama.rn context shifting at the default for vision-capable text-only loads without a ready projector', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue({
+      ...createDownloadedVisionModel(),
+      projectorCandidates: [],
+      selectedProjectorId: undefined,
+    });
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    expect(llamaRn.initLlama).toHaveBeenCalledTimes(1);
+    expect((llamaRn.initLlama as jest.Mock).mock.calls[0][0]).not.toHaveProperty('ctx_shift');
+  });
+
+  it('disables llama.rn context shifting when a vision projector is resolvable at load time', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    expect(llamaRn.initLlama).toHaveBeenCalledWith(
+      expect.objectContaining({
+        ctx_shift: false,
+      }),
+      expect.any(Function),
+    );
+  });
+
+  it('caps multimodal projector image tokens while setting safe batch params', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    expect(llamaRn.initLlama).toHaveBeenCalledWith(
+      expect.objectContaining({
+        n_batch: 512,
+        n_ubatch: 512,
+        ctx_shift: false,
+      }),
+      expect.any(Function),
+    );
+    expect(getInitMultimodalMock()).toHaveBeenCalledWith(
+      expect.objectContaining({
+        path: 'test-dir/models/mmproj-model.gguf',
+        image_max_tokens: 512,
+      }),
+    );
+    expect(getInitMultimodalMock().mock.calls[0][0]).not.toHaveProperty('image_min_tokens');
+  });
+
+  it('raises unsafe custom micro-batch settings to match the multimodal decode batch size', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+    (getModelLoadParametersForModel as jest.Mock).mockReturnValueOnce({
+      contextSize: 2048,
+      gpuLayers: null,
+      kvCacheType: 'auto',
+      nBatch: 128,
+      nUbatch: 64,
+    });
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    expect(llamaRn.initLlama).toHaveBeenCalledWith(
+      expect.objectContaining({
+        n_batch: 128,
+        n_ubatch: 128,
+        ctx_shift: false,
+      }),
+      expect.any(Function),
+    );
+    expect(getInitMultimodalMock()).toHaveBeenCalledWith(
+      expect.objectContaining({
+        path: 'test-dir/models/mmproj-model.gguf',
+        image_max_tokens: 512,
+      }),
+    );
+    expect(getInitMultimodalMock().mock.calls[0][0]).not.toHaveProperty('image_min_tokens');
+  });
+
+  it('keeps low-memory multimodal batch profiles safe for non-causal image decode', () => {
+    expect((llmEngineService as any).resolveMultimodalSafeBatchParams({
+      configuredBatchParams: { nBatch: 256, nUbatch: 128 },
+      hasLoadTimeMmproj: true,
+      contextTokens: 4096,
+    })).toEqual({ nBatch: 256, nUbatch: 256 });
+  });
+
+  it('blocks image completion before native media decode when the active multimodal batch profile is unsafe', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+
+    await llmEngineService.load('test/model', { forceReload: true });
+    (llmEngineService as any).initNBatch = 256;
+    (llmEngineService as any).initNUbatch = 128;
+
+    await expect(llmEngineService.chatCompletion({
+      messages: [{
+        role: 'user',
+        content: 'Describe this',
+        mediaPaths: ['test-dir/chat-attachments/image.jpg'],
+      }],
+      multimodalReadiness: createReadyMultimodalReadiness(),
+      params: { n_predict: 16 },
+    })).rejects.toMatchObject({
+      code: 'multimodal_not_ready',
+    });
+
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).not.toHaveBeenCalled();
+    const unsupportedReadinessUpdate = (registry.updateModel as jest.Mock).mock.calls
+      .map(([model]) => model)
+      .find((model: { multimodalReadiness?: { status?: string } }) => model.multimodalReadiness?.status === 'unsupported');
+    expect(unsupportedReadinessUpdate?.multimodalReadiness).toEqual(expect.objectContaining({
+      status: 'unsupported',
+      projectorId: downloadedProjector.id,
+    }));
+  });
+
+  it('disables llama.rn context shifting for resolvable vision projectors with unknown size', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue({
+      ...createDownloadedVisionModel(),
+      projectorCandidates: [{
+        ...downloadedProjector,
+        size: null,
+      }],
+    });
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => (
+      uri.includes('mmproj')
+        ? { exists: true }
+        : { exists: true, size: 1024 }
+    ));
+
+    await expect((llmEngineService as any).resolveLoadTimeProjectorMemoryInfo(
+      registry.getModel('test/model'),
+    )).resolves.toEqual(expect.objectContaining({
+      projectorId: downloadedProjector.id,
+      sizeBytes: null,
+      memoryFitSizeBytes: UNKNOWN_PROJECTOR_MEMORY_FIT_FALLBACK_BYTES,
+    }));
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    expect(llamaRn.initLlama).toHaveBeenCalledWith(
+      expect.objectContaining({
+        ctx_shift: false,
+      }),
+      expect.any(Function),
+    );
+    expect(getInitMultimodalMock()).toHaveBeenCalledWith(
+      expect.objectContaining({
+        path: 'test-dir/models/mmproj-model.gguf',
+      }),
+    );
+    const readinessUpdate = (registry.updateModel as jest.Mock).mock.calls
+      .map(([model]) => model)
+      .find((model: { multimodalReadiness?: { status?: string } }) => model.multimodalReadiness?.status === 'ready');
+    expect(readinessUpdate?.multimodalReadiness).toEqual(expect.not.objectContaining({
+      projectorSize: expect.anything(),
+    }));
+  });
+
+  it('reuses raw projector SHA verification within a single load and readiness operation', async () => {
+    const sha256 = 'a'.repeat(64);
+    const modelSizeBytes = 1_000_000_000;
+    const projectorSizeBytes = 24_000_000;
+
+    (registry.getModel as jest.Mock).mockReturnValue({
+      ...createDownloadedVisionModel(),
+      projectorCandidates: [{
+        ...downloadedProjector,
+        sha256,
+      }],
+    });
+    (RNFS.hash as jest.Mock).mockResolvedValue(sha256);
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => ({
+      exists: true,
+      size: uri.includes('mmproj') ? projectorSizeBytes : modelSizeBytes,
+    }));
+
+    await llmEngineService.load('test/model', { forceReload: true, allowUnsafeMemoryLoad: true });
+
+    expect(RNFS.hash).toHaveBeenCalledTimes(1);
+    expect(getInitMultimodalMock()).toHaveBeenCalledWith(
+      expect.objectContaining({
+        path: 'test-dir/models/mmproj-model.gguf',
+      }),
+    );
+  });
+
+  it('reloads a same-model context with context shifting disabled when a projector becomes resolvable later', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue({
+      ...createDownloadedVisionModel(),
+      projectorCandidates: [],
+      selectedProjectorId: undefined,
+    });
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    const textOnlyContext = (llmEngineService as any).context;
+    expect(textOnlyContext).toBeTruthy();
+    expect(llamaRn.initLlama).toHaveBeenCalledTimes(1);
+    expect((llamaRn.initLlama as jest.Mock).mock.calls[0][0]).not.toHaveProperty('ctx_shift');
+    expect(getInitMultimodalMock()).not.toHaveBeenCalled();
+
+    (llamaRn.initLlama as jest.Mock).mockClear();
+    (llamaRn.releaseAllLlama as jest.Mock).mockClear();
+    getInitMultimodalMock().mockClear();
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+
+    await llmEngineService.load('test/model');
+
+    expect(llamaRn.releaseAllLlama).toHaveBeenCalledTimes(1);
+    expect((llmEngineService as any).context).not.toBe(textOnlyContext);
+    expect(llamaRn.initLlama).toHaveBeenCalledWith(
+      expect.objectContaining({
+        ctx_shift: false,
+      }),
+      expect.any(Function),
+    );
+    expect(getInitMultimodalMock()).toHaveBeenCalledWith(
+      expect.objectContaining({
+        path: 'test-dir/models/mmproj-model.gguf',
+      }),
+    );
+  });
+
+  it('reloads a same-model projector context back to default context shifting when the projector is unavailable', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    const multimodalContext = (llmEngineService as any).context;
+    expect(multimodalContext).toBeTruthy();
+    expect(llamaRn.initLlama).toHaveBeenCalledWith(
+      expect.objectContaining({
+        ctx_shift: false,
+      }),
+      expect.any(Function),
+    );
+    expect(getInitMultimodalMock()).toHaveBeenCalledTimes(1);
+
+    (llamaRn.initLlama as jest.Mock).mockClear();
+    (llamaRn.releaseAllLlama as jest.Mock).mockClear();
+    getInitMultimodalMock().mockClear();
+    getReleaseMultimodalMock().mockClear();
+    (registry.updateModel as jest.Mock).mockClear();
+    (registry.getModel as jest.Mock).mockReturnValue({
+      ...createDownloadedVisionModel(),
+      projectorCandidates: [],
+      selectedProjectorId: undefined,
+      multimodalReadiness: createReadyMultimodalReadiness(),
+    });
+
+    await llmEngineService.load('test/model');
+
+    expect(llamaRn.releaseAllLlama).toHaveBeenCalledTimes(1);
+    expect(getReleaseMultimodalMock()).toHaveBeenCalledTimes(1);
+    expect((llmEngineService as any).context).not.toBe(multimodalContext);
+    expect(llamaRn.initLlama).toHaveBeenCalledTimes(1);
+    expect((llamaRn.initLlama as jest.Mock).mock.calls[0][0]).not.toHaveProperty('ctx_shift');
+    expect(getInitMultimodalMock()).not.toHaveBeenCalled();
+    expect(getActiveMultimodalContext()).toBeNull();
+    expect(registry.updateModel).toHaveBeenLastCalledWith(expect.objectContaining({
+      multimodalReadiness: expect.objectContaining({
+        status: 'missing_projector',
+        support: [],
+      }),
+    }));
   });
 
   it('starts automatic first GPU loads with a small conservative probe profile', async () => {
@@ -1069,6 +3907,24 @@ describe('LLMEngineService', () => {
         backendInitAttempts: thrown.details.backendInitAttempts,
       }),
     );
+  });
+
+  it('redacts private paths from backend init diagnostics', async () => {
+    (getModelLoadParametersForModel as jest.Mock).mockReturnValueOnce({
+      contextSize: 4096,
+      gpuLayers: 1,
+      kvCacheType: 'f16',
+    });
+    (llamaRn.initLlama as jest.Mock).mockImplementation(async () => {
+      throw new Error('Failed to initialize C:\\Users\\tester\\Model Files\\model.gguf with file:///private/mobile/mmproj.gguf');
+    });
+
+    const thrown = await llmEngineService.load('test/model', { forceReload: true }).catch((error) => error);
+    const serializedDetails = JSON.stringify(thrown.details);
+
+    expect(serializedDetails).toContain('[path]');
+    expect(serializedDetails).not.toContain('C:\\Users\\tester');
+    expect(serializedDetails).not.toContain('file:///private');
   });
 
   it('reports CPU runtime honestly when upstream does not enable GPU acceleration', async () => {
@@ -2421,6 +5277,54 @@ describe('LLMEngineService', () => {
         }
       });
     expect(lowMemoryCalibrationLookup).toBeDefined();
+
+    getCalibrationRecordSpy.mockRestore();
+  });
+
+  it('separates load-time memory calibration keys for downloaded multimodal projectors', async () => {
+    const getCalibrationRecordSpy = jest.spyOn(registry, 'getCalibrationRecord');
+    const modelSizeBytes = 1_000_000_000;
+    const projectorSizeBytes = 24_000_000;
+
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+    (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(8_000_000_000);
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => ({
+      exists: true,
+      size: uri.includes('mmproj') ? projectorSizeBytes : modelSizeBytes,
+    }));
+    (getFreshMemorySnapshot as jest.Mock).mockResolvedValue({
+      timestampMs: Date.now(),
+      platform: 'android',
+      totalBytes: 8_000_000_000,
+      availableBytes: 4_000_000_000,
+      freeBytes: 4_000_000_000,
+      usedBytes: 4_000_000_000,
+      appUsedBytes: 250_000_000,
+      lowMemory: false,
+      pressureLevel: 'normal',
+      thresholdBytes: 0,
+    });
+
+    await expect(
+      llmEngineService.load('test/model', { forceReload: true, allowUnsafeMemoryLoad: true }),
+    ).resolves.toBeUndefined();
+
+    const parsedCalibrationKeys = getCalibrationRecordSpy.mock.calls.flatMap(([key]) => {
+      if (typeof key !== 'string') {
+        return [];
+      }
+
+      try {
+        return [JSON.parse(key)];
+      } catch {
+        return [];
+      }
+    });
+    expect(parsedCalibrationKeys).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ hasMmproj: true }),
+      ]),
+    );
 
     getCalibrationRecordSpy.mockRestore();
   });

@@ -68,6 +68,11 @@ jest.mock('@/components/ui/ScreenShell', () => ({
     const { Pressable } = require('react-native');
     return mockReact.createElement(Pressable, { onPress, accessibilityLabel });
   },
+  ScreenIconTile: ({ iconName, ...props }: any) => {
+    const mockReact = require('react');
+    const { Text, View } = require('react-native');
+    return mockReact.createElement(View, props, mockReact.createElement(Text, null, iconName));
+  },
   ScreenModalOverlay: ({ children }: any) => {
     const mockReact = require('react');
     const { View } = require('react-native');
@@ -116,6 +121,77 @@ describe('ListPickerSheetContent', () => {
       disabled: false,
     });
     expect(selectedRow.props.accessibilityHint).toBe('Keeps the selected item and closes the picker.');
+  });
+
+  it('keeps disabled action rows exposed as disabled buttons', () => {
+    const onPress = jest.fn();
+
+    render(
+      <ListPickerSheetContent
+        title="Pick one"
+        onClose={jest.fn()}
+        items={[
+          {
+            key: 'disabled-action',
+            title: 'Disabled action',
+            description: 'Unavailable right now.',
+            disabled: true,
+            onPress,
+            iconName: 'image',
+            testID: 'disabled-action-row',
+            accessibilityLabel: 'Disabled action label',
+            accessibilityHint: 'Unavailable right now.',
+          },
+        ]}
+      />,
+    );
+
+    const disabledRow = screen.getByTestId('disabled-action-row');
+    expect(disabledRow.props.accessibilityRole).toBe('button');
+    expect(disabledRow.props.accessibilityState).toEqual({
+      selected: false,
+      disabled: true,
+    });
+    expect(disabledRow.props.accessibilityHint).toBe('Unavailable right now.');
+    expect(screen.getByText('image')).toBeTruthy();
+  });
+
+  it('centers single-line row icons with their labels without changing multi-line rows', () => {
+    render(
+      <ListPickerSheetContent
+        title="Add attachment"
+        onClose={jest.fn()}
+        items={[
+          {
+            key: 'single-line',
+            title: 'Attach image',
+            iconName: 'image',
+            onPress: jest.fn(),
+            testID: 'single-line-row',
+          },
+          {
+            key: 'with-description',
+            title: 'Attach audio',
+            description: 'Unavailable right now.',
+            iconName: 'graphic-eq',
+            onPress: jest.fn(),
+            testID: 'described-row',
+          },
+        ]}
+      />,
+    );
+
+    const singleLineIcon = screen.getByTestId('single-line-row-leading-icon');
+    expect(singleLineIcon.props.className).toContain('self-center');
+    expect(singleLineIcon.props.className).not.toContain('mt-0.5');
+    expect(screen.getByTestId('single-line-row-content').props.className).toContain('items-center');
+    expect(screen.getByTestId('single-line-row-body').props.className).toContain('items-center');
+
+    const describedIcon = screen.getByTestId('described-row-leading-icon');
+    expect(describedIcon.props.className).toContain('mt-0.5');
+    expect(describedIcon.props.className).not.toContain('self-center');
+    expect(screen.getByTestId('described-row-content').props.className).toContain('items-start');
+    expect(screen.getByTestId('described-row-body').props.className).toContain('items-start');
   });
 
   it('renders supporting text inside picker rows', () => {

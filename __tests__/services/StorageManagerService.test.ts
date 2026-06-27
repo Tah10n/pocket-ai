@@ -88,6 +88,7 @@ import { getQueuedDownloadFileNames } from '../../src/store/downloadStore';
 import { storage as appStorage } from '../../src/store/storage';
 import { CHAT_PERSISTENCE_INDEX_KEY, getChatThreadStorageKey } from '../../src/store/chatPersistence';
 import * as FileSystem from 'expo-file-system/legacy';
+import type { ProjectorArtifact } from '../../src/types/multimodal';
 import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../src/types/models';
 
 const mockedRegistry = registry as jest.Mocked<typeof registry>;
@@ -110,6 +111,21 @@ function createDownloadedModel(overrides: Partial<ModelMetadata> = {}): ModelMet
     isPrivate: false,
     lifecycleStatus: LifecycleStatus.DOWNLOADED,
     downloadProgress: 1,
+    ...overrides,
+  };
+}
+
+function createDownloadedProjector(overrides: Partial<ProjectorArtifact> = {}): ProjectorArtifact {
+  return {
+    id: 'org/model:projector',
+    ownerModelId: 'org/model',
+    repoId: 'org/model',
+    fileName: 'mmproj-model.gguf',
+    downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-model.gguf',
+    size: 1024,
+    localPath: 'mmproj-model.gguf',
+    lifecycleStatus: 'downloaded',
+    matchStatus: 'matched',
     ...overrides,
   };
 }
@@ -171,6 +187,250 @@ describe('StorageManagerService', () => {
     expect(metrics.downloadedModels).toHaveLength(1);
     expect(metrics.downloadedModels[0].size).toBe(4096);
     expect(metrics.modelsBytes).toBe(4096);
+  });
+
+  it('logs directory size failures without raw paths or throwable objects', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    (FileSystem.getInfoAsync as jest.Mock).mockRejectedValueOnce(new Error('secret test-cache/cache-entry.bin'));
+
+    try {
+      const metrics = await getAppStorageMetrics();
+
+      expect(metrics.cacheBytes).toBe(0);
+      expect(warnSpy).toHaveBeenCalledWith(
+        '[StorageManagerService] Failed to read directory size',
+        expect.objectContaining({
+          pathCategory: 'cache_storage',
+          scope: 'directory_size',
+          errorName: 'Error',
+        }),
+      );
+      expect(warnSpy.mock.calls.flat().some((argument) => argument instanceof Error)).toBe(false);
+      expect(JSON.stringify(warnSpy.mock.calls)).not.toContain('test-cache/cache-entry.bin');
+      expect(JSON.stringify(warnSpy.mock.calls)).not.toContain('test-cache/');
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('includes downloaded projector file sizes in model storage metrics', async () => {
+    mockedRegistry.getModels.mockReturnValue([
+      createDownloadedModel({
+        projectorCandidates: [
+          createDownloadedProjector({ size: 1024, localPath: 'mmproj-model.gguf' }),
+          createDownloadedProjector({
+            id: 'org/model:remote-projector',
+            fileName: 'remote-mmproj.gguf',
+            localPath: undefined,
+            size: 8192,
+            lifecycleStatus: 'available',
+          }),
+        ],
+      }),
+    ]);
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (uri === 'test-cache/') {
+        return { exists: false };
+      }
+
+      if (uri === 'test-models/org_model.gguf') {
+        return { exists: true, size: 4096 };
+      }
+
+      if (uri === 'test-models/mmproj-model.gguf') {
+        return { exists: true, size: 2048 };
+      }
+
+      return { exists: false };
+    });
+
+    const metrics = await getAppStorageMetrics();
+
+    expect(FileSystem.getInfoAsync).toHaveBeenCalledWith('test-models/mmproj-model.gguf');
+    expect(metrics.downloadedModels[0].size).toBe(4096);
+    expect(metrics.modelsBytes).toBe(6144);
+    expect(metrics.downloadedModels[0].projectorCandidates?.[0]).toEqual(
+      expect.objectContaining({
+        id: 'org/model:projector',
+        size: 2048,
+      }),
+    );
+  });
+
+  it('includes existing failed projector partial files in model storage metrics', async () => {
+    mockedRegistry.getModels.mockReturnValue([
+      createDownloadedModel({
+        projectorCandidates: [
+          createDownloadedProjector({
+            id: 'org/model:failed-projector',
+            lifecycleStatus: 'failed',
+            matchStatus: 'failed',
+            localPath: 'mmproj-partial.gguf',
+            size: 1024,
+            resumeData: 'projector-resume-data',
+          }),
+        ],
+      }),
+    ]);
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (uri === 'test-cache/') {
+        return { exists: false };
+      }
+
+      if (uri === 'test-models/org_model.gguf') {
+        return { exists: true, size: 4096 };
+      }
+
+      if (uri === 'test-models/mmproj-partial.gguf') {
+        return { exists: true, size: 1536 };
+      }
+
+      return { exists: false };
+    });
+
+    const metrics = await getAppStorageMetrics();
+
+    expect(FileSystem.getInfoAsync).toHaveBeenCalledWith('test-models/mmproj-partial.gguf');
+    expect(metrics.modelsBytes).toBe(5632);
+    expect(metrics.downloadedModels[0].projectorCandidates?.[0]).toEqual(
+      expect.objectContaining({
+        id: 'org/model:failed-projector',
+        size: 1536,
+        localPath: 'mmproj-partial.gguf',
+      }),
+    );
+  });
+
+  it('does not count missing failed projector partial files in model storage metrics', async () => {
+    mockedRegistry.getModels.mockReturnValue([
+      createDownloadedModel({
+        projectorCandidates: [
+          createDownloadedProjector({
+            id: 'org/model:failed-projector',
+            lifecycleStatus: 'failed',
+            matchStatus: 'failed',
+            localPath: 'mmproj-missing-partial.gguf',
+            size: 4096,
+          }),
+        ],
+      }),
+    ]);
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (uri === 'test-cache/') {
+        return { exists: false };
+      }
+
+      if (uri === 'test-models/org_model.gguf') {
+        return { exists: true, size: 4096 };
+      }
+
+      if (uri === 'test-models/mmproj-missing-partial.gguf') {
+        return { exists: false };
+      }
+
+      return { exists: false };
+    });
+
+    const metrics = await getAppStorageMetrics();
+
+    expect(metrics.modelsBytes).toBe(4096);
+    expect(metrics.downloadedModels[0].projectorCandidates?.[0]?.id).toBe('org/model:failed-projector');
+    expect(metrics.downloadedModels[0].projectorCandidates?.[0]?.localPath).toBeUndefined();
+  });
+
+  it('deduplicates shared downloaded projector files across model storage metrics', async () => {
+    mockedRegistry.getModels.mockReturnValue([
+      createDownloadedModel({
+        id: 'org/model-a',
+        localPath: undefined,
+        size: 1000,
+        projectorCandidates: [
+          createDownloadedProjector({
+            id: 'org/model-a:projector',
+            ownerModelId: 'org/model-a',
+            localPath: 'shared-mmproj.gguf',
+            size: 500,
+          }),
+        ],
+      }),
+      createDownloadedModel({
+        id: 'org/model-b',
+        localPath: undefined,
+        size: 2000,
+        projectorCandidates: [
+          createDownloadedProjector({
+            id: 'org/model-b:projector',
+            ownerModelId: 'org/model-b',
+            localPath: 'shared-mmproj.gguf',
+            size: 500,
+          }),
+        ],
+      }),
+    ]);
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (uri === 'test-cache/') {
+        return { exists: false };
+      }
+
+      if (uri === 'test-models/shared-mmproj.gguf') {
+        return { exists: true, size: 500 };
+      }
+
+      return { exists: false };
+    });
+
+    const metrics = await getAppStorageMetrics();
+
+    expect(metrics.modelsBytes).toBe(3500);
+  });
+
+  it('limits concurrent model and projector file stats while resolving storage metrics', async () => {
+    const modelCount = 12;
+    const downloadedModels = Array.from({ length: modelCount }, (_, index) => createDownloadedModel({
+      id: `org/model-${index}`,
+      localPath: `org_model_${index}.gguf`,
+      projectorCandidates: [
+        createDownloadedProjector({
+          id: `org/model-${index}:projector`,
+          ownerModelId: `org/model-${index}`,
+          localPath: `mmproj-model-${index}.gguf`,
+          fileName: `mmproj-model-${index}.gguf`,
+        }),
+      ],
+    }));
+    let activeArtifactStats = 0;
+    let maxActiveArtifactStats = 0;
+
+    mockedRegistry.getModels.mockReturnValue(downloadedModels);
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (uri === 'test-cache/') {
+        return { exists: false };
+      }
+
+      const modelMatch = uri.match(/^test-models\/org_model_(\d+)\.gguf$/);
+      const projectorMatch = uri.match(/^test-models\/mmproj-model-(\d+)\.gguf$/);
+      const artifactIndex = modelMatch?.[1] ?? projectorMatch?.[1];
+      if (artifactIndex === undefined) {
+        return { exists: false };
+      }
+
+      activeArtifactStats += 1;
+      maxActiveArtifactStats = Math.max(maxActiveArtifactStats, activeArtifactStats);
+      await Promise.resolve();
+      activeArtifactStats -= 1;
+
+      const index = Number(artifactIndex);
+      return {
+        exists: true,
+        size: modelMatch ? 1000 + index : 100 + index,
+      };
+    });
+
+    const metrics = await getAppStorageMetrics();
+
+    expect(metrics.downloadedModels).toHaveLength(modelCount);
+    expect(metrics.modelsBytes).toBe(13332);
+    expect(maxActiveArtifactStats).toBeLessThanOrEqual(8);
   });
 
   it('falls back to persisted model size when the localPath is unsafe', async () => {
@@ -238,6 +498,43 @@ describe('StorageManagerService', () => {
     expect(metrics.appFilesBytes).toBe(2060);
   });
 
+  it('limits concurrent quarantined model file stats while resolving storage metrics', async () => {
+    const quarantinedFileNames = Array.from({ length: 24 }, (_, index) => `orphan-${index}.gguf`);
+    let activeQuarantineStats = 0;
+    let maxActiveQuarantineStats = 0;
+
+    mockedRegistry.getQuarantinedModelFileNames.mockReturnValue(quarantinedFileNames);
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (uri === 'test-cache/') {
+        return { exists: false };
+      }
+
+      const quarantineMatch = uri.match(/^test-models\/orphan-(\d+)\.gguf$/);
+      if (!quarantineMatch) {
+        return { exists: false };
+      }
+
+      activeQuarantineStats += 1;
+      maxActiveQuarantineStats = Math.max(maxActiveQuarantineStats, activeQuarantineStats);
+      await Promise.resolve();
+      activeQuarantineStats -= 1;
+
+      return {
+        exists: true,
+        size: Number(quarantineMatch[1]) + 1,
+      };
+    });
+
+    const metrics = await getAppStorageMetrics();
+
+    expect(metrics.quarantinedModelFiles).toEqual({
+      fileNames: quarantinedFileNames,
+      count: quarantinedFileNames.length,
+      bytes: 300,
+    });
+    expect(maxActiveQuarantineStats).toBeLessThanOrEqual(8);
+  });
+
   it('refreshes model file quarantine before building metrics when requested', async () => {
     mockedGetQueuedDownloadFileNames.mockReturnValue(['queued.gguf']);
     mockedRegistry.validateRegistry.mockImplementation(async () => {
@@ -301,8 +598,13 @@ describe('StorageManagerService', () => {
     });
     expect(warnSpy).toHaveBeenCalledWith(
       '[StorageManagerService] Failed to refresh model file quarantine',
-      refreshError,
+      expect.objectContaining({
+        pathCategory: 'model_storage',
+        scope: 'orphan_quarantine_refresh',
+        errorName: 'Error',
+      }),
     );
+    expect(warnSpy.mock.calls.flat().some((argument) => argument instanceof Error)).toBe(false);
 
     warnSpy.mockRestore();
   });
@@ -329,6 +631,17 @@ describe('StorageManagerService', () => {
     );
     const queuedProvider = mockedRegistry.deleteQuarantinedModelFiles.mock.calls[0][1] as () => string[];
     expect(queuedProvider()).toEqual(['queued.gguf']);
+  });
+
+  it('passes queued projector downloads into quarantine validation and deletion guards', async () => {
+    mockedGetQueuedDownloadFileNames.mockReturnValue(['queued-main.gguf', 'queued-mmproj.gguf']);
+    mockedRegistry.getQuarantinedModelFileNames.mockReturnValue(['queued-mmproj.gguf']);
+
+    await expect(cleanupQuarantinedModelFiles()).resolves.toBe(0);
+
+    expect(mockedRegistry.validateRegistry).toHaveBeenCalledWith(['queued-main.gguf', 'queued-mmproj.gguf']);
+    const queuedProvider = mockedRegistry.deleteQuarantinedModelFiles.mock.calls[0][1] as () => string[];
+    expect(queuedProvider()).toEqual(['queued-main.gguf', 'queued-mmproj.gguf']);
   });
 
   it('passes the latest queued downloads into final quarantine deletion guard', async () => {
@@ -374,10 +687,16 @@ describe('StorageManagerService', () => {
       expect.any(Function),
     );
     expect(warnSpy).toHaveBeenCalledWith(
-      '[StorageManagerService] Failed to delete quarantined model file',
-      'locked.gguf',
-      deleteError,
+      '[StorageManagerService] Failed to delete quarantined model files',
+      expect.objectContaining({
+        pathCategory: 'model_storage',
+        scope: 'quarantined_model_cleanup',
+        failedCount: 1,
+        errorName: 'Error',
+      }),
     );
+    expect(warnSpy.mock.calls.flat().some((argument) => argument instanceof Error)).toBe(false);
+    expect(JSON.stringify(warnSpy.mock.calls)).not.toContain('locked.gguf');
 
     warnSpy.mockRestore();
   });
@@ -598,6 +917,44 @@ describe('StorageManagerService', () => {
     );
   });
 
+  it('includes downloaded projector bytes when estimating active model memory usage', async () => {
+    const downloadedModel = createDownloadedModel({
+      id: 'org/active-model',
+      localPath: 'org_model.gguf',
+      projectorCandidates: [
+        createDownloadedProjector({
+          ownerModelId: 'org/active-model',
+          localPath: 'active-mmproj.gguf',
+          size: 512,
+        }),
+      ],
+    });
+    mockedRegistry.getModels.mockReturnValue([downloadedModel]);
+    mockedRegistry.getModel.mockReturnValue(downloadedModel);
+    (llmEngineService.getState as jest.Mock).mockReturnValue({ activeModelId: 'org/active-model' });
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (uri === 'test-cache/') {
+        return { exists: false };
+      }
+
+      if (uri === 'test-models/org_model.gguf') {
+        return { exists: true, size: 4096 };
+      }
+
+      if (uri === 'test-models/active-mmproj.gguf') {
+        return { exists: true, size: 512 };
+      }
+
+      return { exists: false };
+    });
+
+    const metrics = await getAppStorageMetrics();
+
+    expect(metrics.activeModelEstimateBytes).toBe(
+      Math.round((4096 + 512) * 1.2 + 64 * 1024 * 1024),
+    );
+  });
+
   it('clears persisted catalog cache even when the file cache directory is empty', async () => {
     await expect(clearActiveCache()).resolves.toBe(0);
 
@@ -640,10 +997,16 @@ describe('StorageManagerService', () => {
 
     expect(mockedModelCatalogService.clearCache).toHaveBeenCalledWith('manual');
     expect(warnSpy).toHaveBeenCalledWith(
-      '[StorageManagerService] Failed to delete cache entry',
-      'broken.bin',
-      deleteError,
+      '[StorageManagerService] Failed to delete cache entries',
+      expect.objectContaining({
+        pathCategory: 'cache_storage',
+        scope: 'active_cache_clear',
+        failedCount: 1,
+        errorName: 'Error',
+      }),
     );
+    expect(warnSpy.mock.calls.flat().some((argument) => argument instanceof Error)).toBe(false);
+    expect(JSON.stringify(warnSpy.mock.calls)).not.toContain('broken.bin');
 
     warnSpy.mockRestore();
   });

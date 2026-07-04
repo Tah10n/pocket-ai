@@ -27,9 +27,24 @@ function resolveVisionCapability(readiness: MultimodalReadinessState | null | un
     return 'unsupported';
   }
 
+  if (readiness.support.includes('vision')) {
+    return 'vision_capable';
+  }
+
+  if (readiness.status === 'ready') {
+    return 'unknown';
+  }
+
+  if (readiness.requestedSupport?.includes('vision') === true) {
+    return 'vision_capable';
+  }
+
+  if ((readiness.requestedSupport?.length ?? 0) > 0) {
+    return 'unknown';
+  }
+
   if (
-    readiness.support.includes('vision')
-    || readiness.projectorId
+    readiness.projectorId
     || typeof readiness.projectorSize === 'number'
     || readiness.status === 'missing_projector'
     || readiness.status === 'ambiguous_projector'

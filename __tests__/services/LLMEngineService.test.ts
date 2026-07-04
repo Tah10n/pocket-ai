@@ -3,6 +3,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 import * as RNFS from 'react-native-fs';
 import DeviceInfo from 'react-native-device-info';
 import { llmEngineService } from '../../src/services/LLMEngineService';
+import { buildMultimodalDiagnosticsSummary } from '../../src/services/LLMEngineService.diagnostics';
 import { inferenceBackendService } from '../../src/services/InferenceBackendService';
 import { registry } from '../../src/services/LocalStorageRegistry';
 import { writeAutotuneResult } from '../../src/services/InferenceAutotuneStore';
@@ -164,6 +165,13 @@ function createDownloadedVisionModel() {
       supportsThinking: false,
       canDisableThinking: true,
     },
+  };
+}
+
+function createDownloadedAudioModel() {
+  return {
+    ...createDownloadedVisionModel(),
+    chatModalities: ['text', 'audio'],
   };
 }
 
@@ -731,6 +739,7 @@ describe('LLMEngineService', () => {
         status: 'failed',
         projectorId: downloadedProjector.id,
         projectorSize: 1024,
+        requestedSupport: ['vision'],
       }),
     }));
   });
@@ -749,6 +758,7 @@ describe('LLMEngineService', () => {
     expect(persistedModel).toEqual(expect.objectContaining({
       multimodalReadiness: expect.objectContaining({
         status: 'failed',
+        requestedSupport: ['vision'],
         failureReason: 'runtime:initialization_failed:path_redacted:retry',
       }),
     }));
@@ -2368,6 +2378,50 @@ describe('LLMEngineService', () => {
     }));
   });
 
+  it('does not report ready audio-only multimodal diagnostics as vision-capable', () => {
+    expect(buildMultimodalDiagnosticsSummary({
+      readiness: {
+        modelId: 'test/model',
+        status: 'ready',
+        projectorId: downloadedProjector.id,
+        support: ['audio'],
+        requestedSupport: ['audio'],
+        checkedAt: 1,
+      },
+      attachmentCount: 1,
+      attachmentTotalBytes: 4096,
+    })).toEqual(expect.objectContaining({
+      visionCapability: 'unknown',
+      projectorPresence: 'downloaded',
+      projectorPathCategory: 'models',
+      readinessStatus: 'ready',
+      attachmentCount: 1,
+      attachmentTotalBytes: 4096,
+    }));
+  });
+
+  it('does not report partial mixed audio readiness as vision-capable', () => {
+    expect(buildMultimodalDiagnosticsSummary({
+      readiness: {
+        modelId: 'test/model',
+        status: 'ready',
+        projectorId: downloadedProjector.id,
+        support: ['audio'],
+        requestedSupport: ['vision', 'audio'],
+        checkedAt: 1,
+      },
+      attachmentCount: 1,
+      attachmentTotalBytes: 4096,
+    })).toEqual(expect.objectContaining({
+      visionCapability: 'unknown',
+      projectorPresence: 'downloaded',
+      projectorPathCategory: 'models',
+      readinessStatus: 'ready',
+      attachmentCount: 1,
+      attachmentTotalBytes: 4096,
+    }));
+  });
+
   it('records sanitized multimodal diagnostics when readiness blocks image send', async () => {
     await llmEngineService.load('test/model');
     const failureReason = [
@@ -3608,6 +3662,7 @@ describe('LLMEngineService', () => {
     expect(unsupportedReadinessUpdate?.multimodalReadiness).toEqual(expect.objectContaining({
       status: 'unsupported',
       projectorId: downloadedProjector.id,
+      requestedSupport: ['vision'],
     }));
   });
 
@@ -3652,6 +3707,88 @@ describe('LLMEngineService', () => {
     expect(readinessUpdate?.multimodalReadiness).toEqual(expect.not.objectContaining({
       projectorSize: expect.anything(),
     }));
+  });
+
+  it('initializes multimodal readiness for audio-only models', async () => {
+    getMultimodalSupportMock().mockResolvedValue({ vision: false, audio: true });
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedAudioModel());
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    expect(getInitMultimodalMock()).toHaveBeenCalledWith(
+      expect.objectContaining({
+        path: 'test-dir/models/mmproj-model.gguf',
+      }),
+    );
+    const readinessUpdate = (registry.updateModel as jest.Mock).mock.calls
+      .map(([model]) => model)
+      .find((model: { multimodalReadiness?: { status?: string } }) => model.multimodalReadiness?.status === 'ready');
+    expect(readinessUpdate?.multimodalReadiness).toEqual(expect.objectContaining({
+      status: 'ready',
+      projectorId: downloadedProjector.id,
+      support: ['audio'],
+      requestedSupport: ['audio'],
+    }));
+  });
+
+  it('rechecks active projector readiness when requested modalities expand beyond a legacy cache', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+
+    await llmEngineService.load('test/model', { forceReload: true });
+    const context = (llmEngineService as any).context;
+    expect(context).toBeTruthy();
+
+    getMultimodalSupportMock().mockClear();
+    getMultimodalSupportMock().mockResolvedValue({ vision: true, audio: true });
+    (registry.getModel as jest.Mock).mockReturnValue({
+      ...createDownloadedVisionModel(),
+      chatModalities: ['text', 'vision', 'audio'],
+      multimodalReadiness: createReadyMultimodalReadiness(),
+    });
+
+    await (llmEngineService as any).initializeMultimodalReadinessForLoadedContext({
+      modelId: 'test/model',
+      context,
+      useGpu: false,
+    });
+
+    expect(getMultimodalSupportMock()).toHaveBeenCalledTimes(1);
+    const readinessUpdate = (registry.updateModel as jest.Mock).mock.calls
+      .map(([model]) => model)
+      .find((model: { multimodalReadiness?: { support?: string[] } }) => (
+        model.multimodalReadiness?.support?.includes('audio')
+      ));
+    expect(readinessUpdate?.multimodalReadiness).toEqual(expect.objectContaining({
+      status: 'ready',
+      support: ['vision', 'audio'],
+      requestedSupport: ['vision', 'audio'],
+    }));
+  });
+
+  it('reuses partial active projector readiness after all requested modalities were checked', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+
+    await llmEngineService.load('test/model', { forceReload: true });
+    const context = (llmEngineService as any).context;
+    expect(context).toBeTruthy();
+
+    getMultimodalSupportMock().mockClear();
+    (registry.getModel as jest.Mock).mockReturnValue({
+      ...createDownloadedVisionModel(),
+      chatModalities: ['text', 'vision', 'audio'],
+      multimodalReadiness: {
+        ...createReadyMultimodalReadiness(),
+        requestedSupport: ['vision', 'audio'],
+      },
+    });
+
+    await (llmEngineService as any).initializeMultimodalReadinessForLoadedContext({
+      modelId: 'test/model',
+      context,
+      useGpu: false,
+    });
+
+    expect(getMultimodalSupportMock()).not.toHaveBeenCalled();
   });
 
   it('reuses raw projector SHA verification within a single load and readiness operation', async () => {

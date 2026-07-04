@@ -129,6 +129,13 @@ function addEvidence(
   accumulator.declared[modality] = 'supported';
 }
 
+function addPassiveEvidence(
+  accumulator: DeclaredInputCapabilityAccumulator,
+  evidence: CapabilityEvidence,
+): void {
+  accumulator.evidence.push(evidence);
+}
+
 function addPipelineEvidence(
   accumulator: DeclaredInputCapabilityAccumulator,
   pipelineTag: string | null,
@@ -228,6 +235,41 @@ export function mergeCapabilityEvidence(evidence: readonly CapabilityEvidence[])
   });
 }
 
+function mergeCapabilityState(left: CapabilityState, right: CapabilityState): CapabilityState {
+  if (left === 'supported' || right === 'supported') {
+    return 'supported';
+  }
+
+  if (left === 'unsupported' || right === 'unsupported') {
+    return 'unsupported';
+  }
+
+  return 'unknown';
+}
+
+export function mergeInputCapabilitySnapshots(
+  ...snapshots: (ModelInputCapabilitySnapshot | undefined)[]
+): ModelInputCapabilitySnapshot | undefined {
+  const validSnapshots = snapshots.filter((snapshot): snapshot is ModelInputCapabilitySnapshot => (
+    snapshot !== undefined
+  ));
+  if (validSnapshots.length === 0) {
+    return undefined;
+  }
+
+  return {
+    detectedAt: Math.max(...validSnapshots.map((snapshot) => normalizeDetectedAt(snapshot.detectedAt))),
+    declared: NATIVE_INPUT_MODALITIES.reduce<Record<NativeInputModality, CapabilityState>>((acc, modality) => {
+      acc[modality] = validSnapshots.reduce<CapabilityState>(
+        (state, snapshot) => mergeCapabilityState(state, snapshot.declared[modality]),
+        'unknown',
+      );
+      return acc;
+    }, { ...UNKNOWN_DECLARED_CAPABILITIES }),
+    evidence: mergeCapabilityEvidence(validSnapshots.flatMap((snapshot) => snapshot.evidence)),
+  };
+}
+
 export function inferDeclaredInputCapabilities(
   payload: Partial<HuggingFaceModelSummary> | null | undefined,
   treeEntries: readonly (HuggingFaceSibling | HuggingFaceTreeEntry)[] = [],
@@ -262,7 +304,7 @@ export function inferDeclaredInputCapabilities(
       continue;
     }
 
-    addEvidence(accumulator, 'image', {
+    addPassiveEvidence(accumulator, {
       source: 'projector',
       value: fileName,
       confidence: 'medium',

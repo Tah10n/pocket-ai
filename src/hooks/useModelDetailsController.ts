@@ -566,7 +566,7 @@ export function useModelDetailsController(modelId: string, initialVariantId?: st
 
     const selection = projectorArtifactService.selectProjectorForModel(sourceModel, projectorId);
     if (!selection.model) {
-      Alert.alert(t('models.actionFailedTitle'), t('models.vision.projectorChoiceFailedMessage'));
+      Alert.alert(t('models.actionFailedTitle'), t('models.multimodal.projectorChoiceFailedMessage'));
       return;
     }
 

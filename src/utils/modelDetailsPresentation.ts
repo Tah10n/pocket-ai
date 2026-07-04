@@ -245,7 +245,7 @@ export function buildModelDetailsMetadataMetrics(
 
   return [
     { label: t('models.vision.capabilityLabel'), value: visionStatusLabelKey ? t(visionStatusLabelKey) : undefined },
-    { label: t('models.vision.projectorCandidates'), value: projectorCandidateNames },
+    { label: t('models.multimodal.projectorCandidates'), value: projectorCandidateNames },
     { label: t('models.modelSizeLabel'), value: getModelParameterSizeLabel(model) },
     { label: t('models.quantFileLabel'), value: getQuantFileLabel(model) },
     { label: t('models.typeLabel'), value: getModelTypeLabel(model) },

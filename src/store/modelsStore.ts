@@ -6,7 +6,7 @@ import { assertPrivateStorageWritable } from '../services/storage';
 import { projectorArtifactService, type ProjectorResolutionReason } from '../services/ProjectorArtifactService';
 import type { ModelMetadata } from '../types/models';
 import type { ProjectorArtifact, ProjectorLifecycleStatus } from '../types/multimodal';
-import { modelSupportsVision } from '../utils/modelCapabilities';
+import { resolveModelNativeMultimodalSupport } from '../utils/modelCapabilities';
 
 export type ModelSizeRange = 'small' | 'medium' | 'large';
 export type ModelSortField = 'name' | 'lastModified' | 'downloaded' | 'downloads' | 'likes';
@@ -198,7 +198,8 @@ function resolvePersistedDiscoveryMode(
 }
 
 export function selectModelProjectorLifecycleState(model: ModelMetadata): ModelProjectorLifecycleState {
-  if (!modelSupportsVision(model)) {
+  const nativeSupport = resolveModelNativeMultimodalSupport(model);
+  if (!nativeSupport.vision && !nativeSupport.audio) {
     return {
       modelId: model.id,
       status: 'text_only',

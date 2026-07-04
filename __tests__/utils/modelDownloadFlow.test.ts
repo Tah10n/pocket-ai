@@ -175,8 +175,8 @@ describe('modelDownloadFlow', () => {
 
     expect(onProjectorChoiceRequired).toHaveBeenCalledWith(ambiguousModel);
     expect(alertSpy).not.toHaveBeenCalledWith(
-      'models.vision.projectorChoiceRequiredTitle',
-      'models.vision.projectorChoiceRequiredMessage',
+      'models.multimodal.projectorChoiceRequiredTitle',
+      'models.multimodal.projectorChoiceRequiredMessage',
     );
     expect(startDownload).not.toHaveBeenCalled();
   });
@@ -237,8 +237,8 @@ describe('modelDownloadFlow', () => {
     await Promise.resolve();
 
     expect(alertSpy).toHaveBeenCalledWith(
-      'models.vision.projectorChoiceRequiredTitle',
-      'models.vision.projectorChoiceRequiredMessage',
+      'models.multimodal.projectorChoiceRequiredTitle',
+      'models.multimodal.projectorChoiceRequiredMessage',
     );
     expect(startDownload).not.toHaveBeenCalled();
   });

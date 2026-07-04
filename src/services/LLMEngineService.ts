@@ -50,9 +50,9 @@ import {
 import { DECIMAL_GIGABYTE, UNKNOWN_PROJECTOR_MEMORY_FIT_FALLBACK_BYTES } from '../utils/modelSize';
 import { isHighConfidenceLikelyOomMemoryFit } from '../utils/modelMemoryFitState';
 import {
-  modelSupportsVision,
   resolveModelCapabilitySnapshot,
   resolveModelLayerCountFromGgufMetadata,
+  resolveModelNativeMultimodalSupport,
 } from '../utils/modelCapabilities';
 import { resolveKvCacheTypes } from '../utils/kvCache';
 import { inferenceBackendService } from './InferenceBackendService';
@@ -3518,15 +3518,20 @@ class LLMEngineService {
     return model.activeVariantId ?? model.resolvedFileName;
   }
 
-  private isVisionCapableModel(model: ModelMetadata): boolean {
-    return modelSupportsVision(model);
+  private resolveRequestedNativeMultimodalSupport(model: ModelMetadata): { vision: boolean; audio: boolean } {
+    return resolveModelNativeMultimodalSupport(model);
+  }
+
+  private hasRequestedNativeMultimodalSupport(model: ModelMetadata): boolean {
+    const support = this.resolveRequestedNativeMultimodalSupport(model);
+    return support.vision || support.audio;
   }
 
   private async resolveLoadTimeProjectorMemoryInfo(
     model: ModelMetadata | null | undefined,
     projectorResolutionOperationCache?: ProjectorResolutionOperationCache,
   ): Promise<{ projectorId: string; sizeBytes: number | null; memoryFitSizeBytes: number } | null> {
-    if (!model || !this.isVisionCapableModel(model)) {
+    if (!model || !this.hasRequestedNativeMultimodalSupport(model)) {
       return null;
     }
 
@@ -3630,6 +3635,7 @@ class LLMEngineService {
     options: {
       projector?: Pick<ProjectorArtifact, 'id' | 'size'> | null;
       projectorSize?: number | null;
+      requestedSupport?: readonly MultimodalSupportModality[];
       support?: readonly MultimodalSupportModality[];
       failureReason?: string | null;
       failureReasonPrivacy?: 'safe' | 'runtime';
@@ -3638,6 +3644,7 @@ class LLMEngineService {
     const projectorSize = this.toPositiveByteCount(options.projectorSize)
       ?? this.toPositiveByteCount(options.projector?.size);
     const support = Array.from(new Set(options.support ?? []));
+    const requestedSupport = Array.from(new Set(options.requestedSupport ?? []));
     const failureReason = options.failureReasonPrivacy === 'runtime'
       ? sanitizeMultimodalFailureCategory(options.failureReason)
       : sanitizeMultimodalFailureReason(options.failureReason);
@@ -3649,6 +3656,7 @@ class LLMEngineService {
       ...(options.projector?.id ? { projectorId: options.projector.id } : null),
       ...(projectorSize ? { projectorSize } : null),
       support,
+      ...(requestedSupport.length > 0 ? { requestedSupport } : null),
       ...(failureReason ? { failureReason } : null),
       checkedAt: Date.now(),
     };
@@ -3678,6 +3686,46 @@ class LLMEngineService {
       ...(support.vision ? ['vision' as const] : []),
       ...(support.audio ? ['audio' as const] : []),
     ];
+  }
+
+  private resolveRequestedMultimodalSupportList(
+    requestedSupport: { vision: boolean; audio: boolean },
+  ): MultimodalSupportModality[] {
+    return [
+      ...(requestedSupport.vision ? ['vision' as const] : []),
+      ...(requestedSupport.audio ? ['audio' as const] : []),
+    ];
+  }
+
+  private resolveEffectiveRequestedMultimodalSupport(
+    runtimeSupport: readonly MultimodalSupportModality[],
+    requestedSupport: { vision: boolean; audio: boolean },
+  ): MultimodalSupportModality[] {
+    return runtimeSupport.filter((modality) => (
+      (modality === 'vision' && requestedSupport.vision)
+      || (modality === 'audio' && requestedSupport.audio)
+    ));
+  }
+
+  private hasReadinessCheckedRequestedMultimodalSupport(
+    readiness: MultimodalReadinessState | undefined,
+    requestedSupport: { vision: boolean; audio: boolean },
+  ): boolean {
+    const requested = this.resolveRequestedMultimodalSupportList(requestedSupport);
+    if (requested.length === 0) {
+      return true;
+    }
+
+    const checkedSupport = readiness?.requestedSupport ?? readiness?.support ?? [];
+    return requested.every((modality) => checkedSupport.includes(modality));
+  }
+
+  private buildMissingRequestedMultimodalSupportReason(requestedSupport: { vision: boolean; audio: boolean }): string {
+    const requested = [
+      ...(requestedSupport.vision ? ['vision'] : []),
+      ...(requestedSupport.audio ? ['audio'] : []),
+    ].join('/');
+    return `Runtime did not report ${requested || 'requested'} multimodal support for the active projector.`;
   }
 
   private getMultimodalRuntimeFailureStatus(error: unknown): MultimodalReadinessStatus {
@@ -3813,7 +3861,8 @@ class LLMEngineService {
       return;
     }
 
-    if (!this.isVisionCapableModel(model)) {
+    const requestedNativeModalities = this.resolveRequestedNativeMultimodalSupport(model);
+    if (!requestedNativeModalities.vision && !requestedNativeModalities.audio) {
       if (!isCurrent()) {
         return;
       }
@@ -3826,6 +3875,7 @@ class LLMEngineService {
       await this.releaseActiveMultimodalContext({ modelId: model.id, context });
       return;
     }
+    const requestedNativeSupportList = this.resolveRequestedMultimodalSupportList(requestedNativeModalities);
 
     const resolution = projectorArtifactService.resolveProjectorForModel(model);
     const projector = resolution.selectedProjector;
@@ -3841,6 +3891,7 @@ class LLMEngineService {
       this.persistMultimodalReadiness(
         model.id,
         this.buildMultimodalReadinessState(model, status, {
+          requestedSupport: requestedNativeSupportList,
           failureReason: resolution.reason,
         }),
       );
@@ -3857,6 +3908,7 @@ class LLMEngineService {
         model.id,
         this.buildMultimodalReadinessState(model, lifecycleReadiness, {
           projector,
+          requestedSupport: requestedNativeSupportList,
           failureReason: lifecycleReadiness === 'failed' ? projector.matchReason ?? 'projector_download_failed' : undefined,
         }),
       );
@@ -3879,6 +3931,7 @@ class LLMEngineService {
         model.id,
         this.buildMultimodalReadinessState(model, 'failed', {
           projector,
+          requestedSupport: requestedNativeSupportList,
           failureReason: getErrorMessageText(error),
         }),
       );
@@ -3897,6 +3950,7 @@ class LLMEngineService {
         this.buildMultimodalReadinessState(model, 'unsupported', {
           projector,
           projectorSize: resolvedProjector.fileInfo.size,
+          requestedSupport: requestedNativeSupportList,
           failureReason: this.buildMultimodalNativeBatchFailureReason(nativeBatchSafety),
         }),
       );
@@ -3912,7 +3966,10 @@ class LLMEngineService {
     });
 
     if (hasActiveMatchingProjectorArtifact) {
-      if (model.multimodalReadiness?.status === 'ready') {
+      if (
+        model.multimodalReadiness?.status === 'ready'
+        && this.hasReadinessCheckedRequestedMultimodalSupport(model.multimodalReadiness, requestedNativeModalities)
+      ) {
         return;
       }
 
@@ -3921,15 +3978,18 @@ class LLMEngineService {
         if (!isCurrent()) {
           return;
         }
-        const readiness = support.includes('vision')
+        const effectiveSupport = this.resolveEffectiveRequestedMultimodalSupport(support, requestedNativeModalities);
+        const readiness = effectiveSupport.length > 0
           ? this.buildMultimodalReadinessState(model, 'ready', {
             projector,
-            support,
+            requestedSupport: requestedNativeSupportList,
+            support: effectiveSupport,
           })
           : this.buildMultimodalReadinessState(model, 'unsupported', {
             projector,
-            support,
-            failureReason: 'Runtime did not report vision support for the active projector.',
+            requestedSupport: requestedNativeSupportList,
+            support: effectiveSupport,
+            failureReason: this.buildMissingRequestedMultimodalSupportReason(requestedNativeModalities),
             failureReasonPrivacy: 'runtime',
           });
 
@@ -3945,6 +4005,7 @@ class LLMEngineService {
           model.id,
           this.buildMultimodalReadinessState(model, this.getMultimodalRuntimeFailureStatus(error), {
             projector,
+            requestedSupport: requestedNativeSupportList,
             failureReason: getErrorMessageText(error),
             failureReasonPrivacy: 'runtime',
           }),
@@ -3968,6 +4029,7 @@ class LLMEngineService {
           model.id,
           this.buildMultimodalReadinessState(model, 'failed', {
             projector,
+            requestedSupport: requestedNativeSupportList,
             failureReason: 'Failed to release the previously initialized multimodal projector.',
           }),
         );
@@ -4000,6 +4062,7 @@ class LLMEngineService {
           this.buildMultimodalReadinessState(model, 'failed', {
             projector,
             projectorSize: resolvedProjector.fileInfo.size,
+            requestedSupport: requestedNativeSupportList,
             failureReason: 'llama.rn did not initialize the multimodal projector.',
             failureReasonPrivacy: 'runtime',
           }),
@@ -4025,17 +4088,20 @@ class LLMEngineService {
         await releaseActiveInitializedMultimodalContext();
         return;
       }
-      const readiness = support.includes('vision')
+      const effectiveSupport = this.resolveEffectiveRequestedMultimodalSupport(support, requestedNativeModalities);
+      const readiness = effectiveSupport.length > 0
         ? this.buildMultimodalReadinessState(model, 'ready', {
           projector,
           projectorSize: resolvedProjector.fileInfo.size,
-          support,
+          requestedSupport: requestedNativeSupportList,
+          support: effectiveSupport,
         })
         : this.buildMultimodalReadinessState(model, 'unsupported', {
           projector,
           projectorSize: resolvedProjector.fileInfo.size,
-          support,
-          failureReason: 'Runtime did not report vision support after projector initialization.',
+          requestedSupport: requestedNativeSupportList,
+          support: effectiveSupport,
+          failureReason: this.buildMissingRequestedMultimodalSupportReason(requestedNativeModalities),
           failureReasonPrivacy: 'runtime',
         });
 
@@ -4053,6 +4119,7 @@ class LLMEngineService {
         this.buildMultimodalReadinessState(model, this.getMultimodalRuntimeFailureStatus(error), {
           projector,
           projectorSize: resolvedProjector.fileInfo.size,
+          requestedSupport: requestedNativeSupportList,
           failureReason: getErrorMessageText(error),
           failureReasonPrivacy: 'runtime',
         }),
@@ -4107,6 +4174,9 @@ class LLMEngineService {
       const currentModel = this.state.activeModelId ? registry.getModel(this.state.activeModelId) : null;
       const failureReason = this.buildMultimodalNativeBatchFailureReason(nativeBatchSafety);
       if (currentModel && currentModel.id === activeMultimodal.modelId) {
+        const requestedSupport = this.resolveRequestedMultimodalSupportList(
+          this.resolveRequestedNativeMultimodalSupport(currentModel),
+        );
         this.persistMultimodalReadiness(
           currentModel.id,
           this.buildMultimodalReadinessState(currentModel, 'unsupported', {
@@ -4115,6 +4185,7 @@ class LLMEngineService {
               size: activeMultimodal.projectorSizeBytes,
             },
             projectorSize: activeMultimodal.projectorSizeBytes,
+            requestedSupport,
             failureReason,
           }),
         );

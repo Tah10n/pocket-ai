@@ -82,19 +82,19 @@ describe('ProjectorChoiceSheet', () => {
 
     const [firstItem, secondItem] = mockLastListPickerProps.items;
 
-    expect(mockLastListPickerProps.title).toBe('models.vision.projectorChoiceTitle');
+    expect(mockLastListPickerProps.title).toBe('models.multimodal.projectorChoiceTitle');
     expect(mockLastListPickerProps.testID).toBe('projector-choice-sheet');
     expect(firstItem.title).toBe('mmproj-a.gguf - 0.51 GB');
     expect(secondItem.title).toBe('mmproj-b.gguf - 0.26 GB');
     expect(firstItem.badges).toEqual([
       expect.objectContaining({
         key: 'lifecycle',
-        label: 'models.vision.projectorAvailable',
+        label: 'models.multimodal.projectorAvailable',
         tone: 'neutral',
       }),
     ]);
-    expect(firstItem.accessibilityLabel).toBe('models.vision.projectorChoiceItemAccessibilityLabel');
-    expect(mockT).toHaveBeenCalledWith('models.vision.projectorChoiceItemAccessibilityLabel', {
+    expect(firstItem.accessibilityLabel).toBe('models.multimodal.projectorChoiceItemAccessibilityLabel');
+    expect(mockT).toHaveBeenCalledWith('models.multimodal.projectorChoiceItemAccessibilityLabel', {
       modelName: 'Model',
       title: 'mmproj-a.gguf - 0.51 GB',
       fileName: 'mmproj-a.gguf',

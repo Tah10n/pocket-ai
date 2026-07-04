@@ -127,6 +127,41 @@ describe('modelArtifacts', () => {
     expect(getRequiredDownloadArtifacts(modelWithArtifacts)).toEqual([]);
   });
 
+  it('derives audio-only projector required inputs without adding image', () => {
+    const artifacts = deriveArtifactsFromLegacyModel(makeModel({
+      chatModalities: ['text', 'audio'],
+      inputCapabilities: {
+        detectedAt: 1,
+        declared: {
+          image: 'unknown',
+          audio: 'supported',
+          video: 'unknown',
+        },
+        evidence: [{ source: 'pipeline_tag', value: 'automatic-speech-recognition', confidence: 'high' }],
+      },
+      projectorCandidates: [
+        {
+          id: 'projector-audio',
+          ownerModelId: 'test-org/model',
+          repoId: 'test-org/model',
+          fileName: 'mmproj-audio-model-f16.gguf',
+          downloadUrl: 'https://huggingface.co/test-org/model/resolve/main/mmproj-audio-model-f16.gguf',
+          size: 500,
+          lifecycleStatus: 'available',
+          matchStatus: 'matched',
+        },
+      ],
+    }));
+
+    expect(artifacts).toEqual([
+      expect.objectContaining({
+        id: 'projector-audio',
+        kind: 'multimodal_projector',
+        requiredFor: ['audio'],
+      }),
+    ]);
+  });
+
   it('prefers legacy main download runtime state over stale persisted artifact state', () => {
     const resolvedFileName = 'model.Q4_K_M.gguf';
     const mainArtifactId = buildMainModelArtifactId({

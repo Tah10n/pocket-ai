@@ -22,6 +22,7 @@ type LegacyModelArtifactInput = Pick<
   | 'downloadUrl'
   | 'hfRevision'
   | 'id'
+  | 'chatModalities'
   | 'inputCapabilities'
   | 'lifecycleStatus'
   | 'localPath'
@@ -195,16 +196,27 @@ function installStateFromProjectorLifecycle(projector: Pick<ProjectorArtifact, '
   return 'remote';
 }
 
-function inferProjectorRequiredInputs(model: Pick<ModelMetadata, 'inputCapabilities' | 'multimodalReadiness'>): ModelArtifactRequiredInput[] {
-  const requiredFor = new Set<ModelArtifactRequiredInput>(['image']);
+function inferProjectorRequiredInputs(model: Pick<ModelMetadata, 'chatModalities' | 'inputCapabilities' | 'multimodalReadiness'>): ModelArtifactRequiredInput[] {
+  const requiredFor = new Set<ModelArtifactRequiredInput>();
   if (
-    model.inputCapabilities?.declared.audio === 'supported'
+    model.chatModalities?.includes('vision') === true
+    || model.inputCapabilities?.declared.image === 'supported'
+    || model.multimodalReadiness?.support.includes('vision') === true
+    || model.multimodalReadiness?.requestedSupport?.includes('vision') === true
+  ) {
+    requiredFor.add('image');
+  }
+
+  if (
+    model.chatModalities?.includes('audio') === true
+    || model.inputCapabilities?.declared.audio === 'supported'
     || model.multimodalReadiness?.support.includes('audio')
+    || model.multimodalReadiness?.requestedSupport?.includes('audio') === true
   ) {
     requiredFor.add('audio');
   }
 
-  return Array.from(requiredFor);
+  return requiredFor.size > 0 ? Array.from(requiredFor) : ['image'];
 }
 
 function deriveMainModelArtifact(model: LegacyModelArtifactInput): ModelArtifactMetadata {
@@ -238,7 +250,7 @@ function deriveMainModelArtifact(model: LegacyModelArtifactInput): ModelArtifact
 
 function deriveProjectorArtifact(
   projector: ProjectorArtifact,
-  model: Pick<ModelMetadata, 'inputCapabilities' | 'multimodalReadiness'>,
+  model: Pick<ModelMetadata, 'chatModalities' | 'inputCapabilities' | 'multimodalReadiness'>,
 ): ModelArtifactMetadata {
   const localPath = normalizeLocalFileName(projector.localPath);
 

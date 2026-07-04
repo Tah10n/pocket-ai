@@ -150,7 +150,7 @@ function normalizeChatModalities(value: unknown): ModelChatModality[] | undefine
   }
 
   const modalities = value.filter((entry): entry is ModelChatModality => (
-    entry === 'text' || entry === 'vision'
+    entry === 'text' || entry === 'vision' || entry === 'audio'
   ));
   const deduped = [...new Set(modalities)];
 
@@ -198,6 +198,9 @@ function normalizeMultimodalReadinessState(value: unknown): MultimodalReadinessS
   const projectorSize = typeof record.projectorSize === 'number' && Number.isFinite(record.projectorSize) && record.projectorSize > 0
     ? Math.round(record.projectorSize)
     : undefined;
+  const requestedSupport = Array.isArray(record.requestedSupport)
+    ? normalizeMultimodalSupport(record.requestedSupport)
+    : undefined;
   const failureReason = sanitizeMultimodalFailureReason(normalizeNonEmptyString(record.failureReason));
 
   return {
@@ -207,6 +210,7 @@ function normalizeMultimodalReadinessState(value: unknown): MultimodalReadinessS
     ...(normalizeNonEmptyString(record.projectorId) ? { projectorId: normalizeNonEmptyString(record.projectorId) } : {}),
     ...(projectorSize !== undefined ? { projectorSize } : {}),
     support: normalizeMultimodalSupport(record.support),
+    ...(requestedSupport && requestedSupport.length > 0 ? { requestedSupport } : {}),
     ...(failureReason ? { failureReason } : {}),
     checkedAt,
   };
@@ -683,6 +687,7 @@ export function normalizePersistedModelMetadata(
     downloadUrl,
     hfRevision: normalizedRevision,
     id: model.id,
+    chatModalities,
     inputCapabilities,
     lifecycleStatus,
     localPath,

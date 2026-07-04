@@ -192,6 +192,17 @@ describe('modelsStore', () => {
       shouldPromptForChoice: false,
     }));
 
+    expect(selectModelProjectorLifecycleState(createModel({
+      chatModalities: ['text', 'audio'],
+      projectorCandidates: [readyProjector],
+      selectedProjectorId: readyProjector.id,
+    }))).toEqual(expect.objectContaining({
+      status: 'downloaded',
+      selectedProjector: expect.objectContaining({ id: readyProjector.id }),
+      isReady: true,
+      shouldPromptForChoice: false,
+    }));
+
     const ambiguousState = selectModelProjectorLifecycleState(createModel({
       chatModalities: ['text', 'vision'],
       projectorCandidates: [
@@ -204,6 +215,19 @@ describe('modelsStore', () => {
       shouldPromptForChoice: true,
     }));
     expect(ambiguousState.selectedProjector).toBeUndefined();
+
+    const audioAmbiguousState = selectModelProjectorLifecycleState(createModel({
+      chatModalities: ['text', 'audio'],
+      projectorCandidates: [
+        createProjector({ id: 'projector-a', fileName: 'mmproj-a.gguf', matchStatus: 'ambiguous' }),
+        createProjector({ id: 'projector-b', fileName: 'mmproj-b.gguf', matchStatus: 'ambiguous' }),
+      ],
+    }));
+    expect(audioAmbiguousState).toEqual(expect.objectContaining({
+      status: 'ambiguous',
+      shouldPromptForChoice: true,
+    }));
+    expect(audioAmbiguousState.selectedProjector).toBeUndefined();
 
     expect(selectModelProjectorLifecycleState(createModel({
       projectorCandidates: [readyProjector],

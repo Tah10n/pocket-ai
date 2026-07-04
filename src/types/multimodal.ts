@@ -1,6 +1,6 @@
 export const CHAT_IMAGE_ATTACHMENT_PATH_CATEGORY = 'chat_attachment' as const;
 
-export type ModelChatModality = 'text' | 'vision';
+export type ModelChatModality = 'text' | 'vision' | 'audio';
 
 export type ModelArtifactRole = 'primary_chat_model' | 'projector_companion';
 
@@ -66,6 +66,7 @@ export interface MultimodalReadinessState {
   projectorId?: string;
   projectorSize?: number;
   support: MultimodalSupportModality[];
+  requestedSupport?: MultimodalSupportModality[];
   failureReason?: string;
   checkedAt: number;
 }

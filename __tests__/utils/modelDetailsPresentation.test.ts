@@ -121,11 +121,11 @@ describe('modelDetailsPresentation', () => {
 
     expect(heroMetrics[0]).toEqual(expect.objectContaining({ value: '4.00 GB' }));
     expect(metadataMetrics).toContainEqual(expect.objectContaining({
-      label: 'models.vision.projectorCandidates',
+      label: 'models.multimodal.projectorCandidates',
       value: 'mmproj-q4.gguf',
     }));
     expect(metadataMetrics).not.toContainEqual(expect.objectContaining({
-      label: 'models.vision.projectorCandidates',
+      label: 'models.multimodal.projectorCandidates',
       value: expect.stringContaining('mmproj-q8.gguf'),
     }));
   });

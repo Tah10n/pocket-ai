@@ -6,6 +6,7 @@ import {
   getActiveModelVariant,
   getDefaultCatalogModelVariant,
 } from '../../src/utils/modelVariants';
+import { dedupeModelVariantsByIdentity } from '../../src/utils/modelVariantIdentity';
 import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../src/types/models';
 
 function createModel(overrides: Partial<ModelMetadata> = {}): ModelMetadata {
@@ -630,6 +631,32 @@ describe('modelVariants', () => {
       resolvedFileName: 'model.Q8_0.gguf',
       activeVariantId: 'legacy-q8-selection',
     }));
+  });
+
+  it('preserves audio modality when deduping duplicate variants for the same file', () => {
+    expect(dedupeModelVariantsByIdentity([
+      {
+        variantId: 'model.Q4_K_M.gguf',
+        fileName: 'model.Q4_K_M.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: 4_000_000_000,
+        sha256: 'a'.repeat(64),
+      },
+      {
+        variantId: 'audio-q4',
+        fileName: 'model.Q4_K_M.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: null,
+        chatModalities: ['text', 'audio'],
+      },
+    ])).toEqual([
+      expect.objectContaining({
+        variantId: 'audio-q4',
+        size: 4_000_000_000,
+        sha256: 'a'.repeat(64),
+        chatModalities: ['text', 'audio'],
+      }),
+    ]);
   });
 
   it('clears stale gguf total bytes when the selected variant has unknown size', () => {

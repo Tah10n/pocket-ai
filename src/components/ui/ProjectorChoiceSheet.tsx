@@ -29,37 +29,37 @@ function getProjectorLifecycleBadge(
     }
   > = {
     available: {
-      labelKey: 'models.vision.projectorAvailable',
+      labelKey: 'models.multimodal.projectorAvailable',
       tone: 'neutral',
       iconName: 'extension',
     },
     queued: {
-      labelKey: 'models.vision.projectorQueued',
+      labelKey: 'models.multimodal.projectorQueued',
       tone: 'info',
       iconName: 'schedule',
     },
     downloading: {
-      labelKey: 'models.vision.projectorDownloading',
+      labelKey: 'models.multimodal.projectorDownloading',
       tone: 'info',
       iconName: 'download',
     },
     paused: {
-      labelKey: 'models.vision.projectorPaused',
+      labelKey: 'models.multimodal.projectorPaused',
       tone: 'warning',
       iconName: 'pause-circle-outline',
     },
     failed: {
-      labelKey: 'models.vision.projectorFailed',
+      labelKey: 'models.multimodal.projectorFailed',
       tone: 'error',
       iconName: 'error-outline',
     },
     downloaded: {
-      labelKey: 'models.vision.projectorDownloaded',
+      labelKey: 'models.multimodal.projectorDownloaded',
       tone: 'success',
       iconName: 'check-circle',
     },
     active: {
-      labelKey: 'models.vision.projectorActive',
+      labelKey: 'models.multimodal.projectorActive',
       tone: 'success',
       iconName: 'visibility',
     },
@@ -99,14 +99,14 @@ export function ProjectorChoiceSheet({
         description: projector.ownerVariantId ?? projector.repoId,
         badges: [getProjectorLifecycleBadge(projector, t)],
         selected,
-        accessibilityLabel: t('models.vision.projectorChoiceItemAccessibilityLabel', {
+        accessibilityLabel: t('models.multimodal.projectorChoiceItemAccessibilityLabel', {
           modelName: model.name,
           title,
           fileName: projector.fileName,
         }),
         accessibilityHint: selected
-          ? t('models.vision.projectorChoiceItemSelectedAccessibilityHint')
-          : t('models.vision.projectorChoiceItemAccessibilityHint'),
+          ? t('models.multimodal.projectorChoiceItemSelectedAccessibilityHint')
+          : t('models.multimodal.projectorChoiceItemAccessibilityHint'),
         accessibilityState: { selected },
         onPress: () => {
           if (selected) {
@@ -123,15 +123,15 @@ export function ProjectorChoiceSheet({
   return (
     <ListPickerSheet
       visible={visible}
-      title={t('models.vision.projectorChoiceTitle')}
-      subtitle={t('models.vision.projectorChoiceSubtitle')}
+      title={t('models.multimodal.projectorChoiceTitle')}
+      subtitle={t('models.multimodal.projectorChoiceSubtitle')}
       items={items}
       onClose={onClose}
       androidContentBlurTargetRef={androidContentBlurTargetRef}
       testID="projector-choice-sheet"
       emptyState={{
-        title: t('models.vision.projectorChoiceEmptyTitle'),
-        description: t('models.vision.projectorChoiceEmptyDescription'),
+        title: t('models.multimodal.projectorChoiceEmptyTitle'),
+        description: t('models.multimodal.projectorChoiceEmptyDescription'),
         iconName: 'extension',
       }}
     />

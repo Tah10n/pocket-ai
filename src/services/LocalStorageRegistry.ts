@@ -80,6 +80,7 @@ function cloneMultimodalReadinessState(readiness: MultimodalReadinessState): Mul
   return {
     ...readiness,
     support: [...readiness.support],
+    requestedSupport: readiness.requestedSupport ? [...readiness.requestedSupport] : undefined,
   };
 }
 

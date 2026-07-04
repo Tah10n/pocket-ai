@@ -975,8 +975,8 @@ describe('ModelDetailsScreen', () => {
       await Promise.resolve();
     });
 
-    expect(screen.getByText('models.vision.projectorStatusAmbiguousTitle')).toBeTruthy();
-    expect(screen.getByText('models.vision.projectorStatusAmbiguousDescription')).toBeTruthy();
+    expect(screen.getByText('models.multimodal.projectorStatusAmbiguousTitle')).toBeTruthy();
+    expect(screen.getByText('models.multimodal.projectorStatusAmbiguousDescription')).toBeTruthy();
     expect(screen.getByText('models.chat')).toBeTruthy();
 
     fireEvent.press(screen.getByText('models.chat'));
@@ -1043,10 +1043,10 @@ describe('ModelDetailsScreen', () => {
     });
 
     expect(screen.getByText('models.vision.badge')).toBeTruthy();
-    expect(screen.getByText('models.vision.projectorStatusAmbiguousTitle')).toBeTruthy();
-    expect(screen.queryByText('models.vision.projectorStatusReadyTitle')).toBeNull();
+    expect(screen.getByText('models.multimodal.projectorStatusAmbiguousTitle')).toBeTruthy();
+    expect(screen.queryByText('models.multimodal.projectorStatusReadyTitle')).toBeNull();
 
-    fireEvent.press(screen.getByText('models.vision.chooseProjectorAction'));
+    fireEvent.press(screen.getByText('models.multimodal.chooseProjectorAction'));
 
     expect(lastProjectorChoiceSheetProps?.visible).toBe(true);
     expect(lastProjectorChoiceSheetProps?.model?.selectedProjectorId).toBeUndefined();
@@ -1056,6 +1056,25 @@ describe('ModelDetailsScreen', () => {
     ]);
     expect(screen.getByText('mmproj-variant-b.gguf')).toBeTruthy();
     expect(screen.queryByText('mmproj-stale-a.gguf')).toBeNull();
+  });
+
+  it('renders an audio badge for native-audio model details', async () => {
+    const audioModel = createModel({
+      chatModalities: ['text', 'audio'],
+      artifactRole: 'primary_chat_model',
+    });
+    const { modelCatalogService } = jest.requireMock('../../src/services/ModelCatalogService');
+    modelCatalogService.getCachedModel.mockReturnValue(audioModel);
+    modelCatalogService.getModelDetails.mockResolvedValue(audioModel);
+
+    const screen = render(<ModelDetailsScreen />);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText('models.audio.badge')).toBeTruthy();
+    expect(screen.queryByText('models.vision.badge')).toBeNull();
   });
 
   it('does not inherit stale top-level vision state for an active text-only variant', async () => {
@@ -1093,8 +1112,35 @@ describe('ModelDetailsScreen', () => {
     });
 
     expect(screen.queryByText('models.vision.badge')).toBeNull();
-    expect(screen.queryByText('models.vision.projectorStatusReadyTitle')).toBeNull();
-    expect(screen.queryByText('models.vision.chooseProjectorAction')).toBeNull();
+    expect(screen.queryByText('models.multimodal.projectorStatusReadyTitle')).toBeNull();
+    expect(screen.queryByText('models.multimodal.chooseProjectorAction')).toBeNull();
+  });
+
+  it('does not inherit stale top-level audio state for an active text-only variant', async () => {
+    const variantTextOnlyModel = createModel({
+      chatModalities: ['text', 'audio'],
+      activeVariantId: 'model.Q4_K_M.gguf',
+      resolvedFileName: 'model.Q4_K_M.gguf',
+      variants: [{
+        variantId: 'model.Q4_K_M.gguf',
+        fileName: 'model.Q4_K_M.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: 4_000_000_000,
+        chatModalities: ['text'],
+      }],
+    });
+    const { modelCatalogService } = jest.requireMock('../../src/services/ModelCatalogService');
+    modelCatalogService.getCachedModel.mockReturnValue(variantTextOnlyModel);
+    modelCatalogService.getModelDetails.mockResolvedValue(variantTextOnlyModel);
+
+    const screen = render(<ModelDetailsScreen />);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(screen.queryByText('models.audio.badge')).toBeNull();
+    expect(screen.queryByText('models.vision.badge')).toBeNull();
   });
 
   it('shows cancel action while download is in progress', async () => {
@@ -1178,7 +1224,7 @@ describe('ModelDetailsScreen', () => {
       await Promise.resolve();
     });
 
-    expect(screen.getByText('models.vision.projectorStatusAmbiguousTitle')).toBeTruthy();
+    expect(screen.getByText('models.multimodal.projectorStatusAmbiguousTitle')).toBeTruthy();
 
     await act(async () => {
       fireEvent.press(screen.getByText('models.download'));
@@ -1238,7 +1284,7 @@ describe('ModelDetailsScreen', () => {
     expect(screen.getByText('models.vision.badge')).toBeTruthy();
     expect(screen.getByText('models.vision.capabilityLabel')).toBeTruthy();
     expect(screen.getByText('models.vision.capabilityNeedsProjector')).toBeTruthy();
-    expect(screen.getByText('models.vision.projectorCandidates')).toBeTruthy();
+    expect(screen.getByText('models.multimodal.projectorCandidates')).toBeTruthy();
     expect(screen.getByText('mmproj-model-f16.gguf')).toBeTruthy();
   });
 

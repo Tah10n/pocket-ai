@@ -743,7 +743,7 @@ function throwMissingAttachments(
   const pathCategories = Array.from(new Set(attachments.map((attachment) => attachment.pathCategory)));
   throw new AppError(
     'chat_attachment_missing',
-    'One or more selected image attachments are no longer available. Remove the image and try again.',
+    'One or more selected attachments are no longer available. Remove the missing attachment and try again.',
     {
       details: {
         ...(messageId ? { messageId } : null),

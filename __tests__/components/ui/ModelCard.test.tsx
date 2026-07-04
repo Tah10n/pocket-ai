@@ -332,6 +332,91 @@ describe('ModelCard', () => {
     ).toBe(true);
   });
 
+  it('renders an audio badge for native-audio primary chat models', () => {
+    const screen = render(
+      <ModelCard
+        model={{
+          ...buildModel(ModelAccessState.PUBLIC),
+          chatModalities: ['text', 'audio'],
+          artifactRole: 'primary_chat_model',
+        }}
+        {...buildModelCardHandlers()}
+        isActive={false}
+      />,
+    );
+
+    expect(
+      mockScreenBadge.mock.calls.some(([props]) => (
+        props.tone === 'info'
+        && props.iconName === 'graphic-eq'
+        && props.children === 'models.audio.badge'
+      )),
+    ).toBe(true);
+    expect(screen.queryByText('models.vision.badge')).toBeNull();
+  });
+
+  it('rerenders when discovered audio capability changes the model card badge', () => {
+    const handlers = buildModelCardHandlers();
+    const createModel = (audio: 'unknown' | 'supported'): ModelMetadata => ({
+      ...buildModel(ModelAccessState.PUBLIC),
+      artifactRole: 'primary_chat_model',
+      inputCapabilities: {
+        detectedAt: audio === 'supported' ? 2 : 1,
+        declared: {
+          image: 'unknown',
+          audio,
+          video: 'unknown',
+        },
+        evidence: audio === 'supported'
+          ? [{ source: 'tag', value: 'audio', confidence: 'medium' }]
+          : [],
+      },
+    });
+    const screen = render(
+      <ModelCard
+        model={createModel('unknown')}
+        {...handlers}
+        isActive={false}
+      />,
+    );
+
+    expect(screen.queryByText('models.audio.badge')).toBeNull();
+
+    screen.rerender(
+      <ModelCard
+        model={createModel('supported')}
+        {...handlers}
+        isActive={false}
+      />,
+    );
+
+    expect(screen.getByText('models.audio.badge')).toBeTruthy();
+  });
+
+  it('does not inherit a top-level audio badge for an active text-only variant', () => {
+    const screen = render(
+      <ModelCard
+        model={{
+          ...buildModel(ModelAccessState.PUBLIC),
+          chatModalities: ['text', 'audio'],
+          activeVariantId: 'model.Q4_K_M.gguf',
+          resolvedFileName: 'model.Q4_K_M.gguf',
+          variants: [{
+            variantId: 'model.Q4_K_M.gguf',
+            fileName: 'model.Q4_K_M.gguf',
+            quantizationLabel: 'Q4_K_M',
+            size: 4_000_000_000,
+            chatModalities: ['text'],
+          }],
+        }}
+        {...buildModelCardHandlers()}
+        isActive={false}
+      />,
+    );
+
+    expect(screen.queryByText('models.audio.badge')).toBeNull();
+  });
+
   it('includes matched projector bytes in the displayed vision model size', () => {
     const screen = render(
       <ModelCard
@@ -560,7 +645,7 @@ describe('ModelCard', () => {
       />,
     );
 
-    expect(screen.getByText('models.vision.projectorDownloading')).toBeTruthy();
+    expect(screen.getByText('models.multimodal.projectorDownloading')).toBeTruthy();
     expect(screen.getByText('25%')).toBeTruthy();
 
     screen.rerender(

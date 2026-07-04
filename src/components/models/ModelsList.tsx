@@ -605,7 +605,7 @@ export const ModelsList = ({
 
     const selection = projectorArtifactService.selectProjectorForModel(projectorChoiceModel, projectorId);
     if (!selection.model) {
-      Alert.alert(t('models.actionFailedTitle'), t('models.vision.projectorChoiceFailedMessage'));
+      Alert.alert(t('models.actionFailedTitle'), t('models.multimodal.projectorChoiceFailedMessage'));
       return;
     }
 

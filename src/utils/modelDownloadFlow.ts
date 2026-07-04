@@ -132,8 +132,8 @@ export function startModelDownloadFlow({
           onProjectorChoiceRequired(resolvedModel);
         } else {
           Alert.alert(
-            t('models.vision.projectorChoiceRequiredTitle'),
-            t('models.vision.projectorChoiceRequiredMessage'),
+            t('models.multimodal.projectorChoiceRequiredTitle'),
+            t('models.multimodal.projectorChoiceRequiredMessage'),
           );
         }
         return;

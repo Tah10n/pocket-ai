@@ -30,6 +30,7 @@ import { getModelMemoryFitInputSizeBytes } from '../utils/memoryFit';
 import { getProjectorMemoryFitSizeBytes } from '../utils/modelSize';
 import { inferDeclaredInputCapabilities } from '../utils/modelInputCapabilities';
 import { deriveArtifactsFromLegacyModel } from '../utils/modelArtifacts';
+import { resolveModelChatModalities } from '../utils/modelCapabilities';
 import {
   buildCatalogModelVariantsFromRankedEntries,
   CATALOG_SEARCH_VARIANT_LIMIT,
@@ -427,15 +428,26 @@ function resolveVariantProjectorMemoryFitSizeBytes({
 
 function getVisionMetadataPatch(options: {
   item: HuggingFaceModelSummary;
+  inputCapabilities?: ModelMetadata['inputCapabilities'];
   projectorCandidates?: ProjectorArtifact[];
   source: VisionCapabilitySource;
 }): Pick<ModelMetadata, 'artifactRole' | 'chatModalities' | 'visionSource' | 'visionConfidence' | 'projectorCandidates'> {
   const hasProjectorCandidates = Boolean(options.projectorCandidates?.length);
-  const hasVisionSignal = hasProjectorCandidates || hasVisionCatalogSignal(options.item);
+  const hasAudioOnlyDeclaredCapability = options.inputCapabilities?.declared.audio === 'supported'
+    && options.inputCapabilities.declared.image !== 'supported';
+  const hasVisionSignal = hasVisionCatalogSignal(options.item)
+    || options.inputCapabilities?.declared.image === 'supported'
+    || (hasProjectorCandidates && !hasAudioOnlyDeclaredCapability);
+  const baseChatModalities = hasVisionSignal ? ['text' as const, 'vision' as const] : ['text' as const];
 
   return {
     artifactRole: 'primary_chat_model',
-    chatModalities: hasVisionSignal ? ['text', 'vision'] : ['text'],
+    chatModalities: resolveModelChatModalities({
+      artifactRole: 'primary_chat_model',
+      chatModalities: hasVisionSignal ? baseChatModalities : undefined,
+      inputCapabilities: options.inputCapabilities,
+      projectorCandidates: options.projectorCandidates,
+    }),
     ...(hasVisionSignal ? { visionSource: options.source } : {}),
     ...(hasVisionSignal ? { visionConfidence: hasProjectorCandidates ? 'trusted' : 'inferred' } : {}),
     ...(options.projectorCandidates ? { projectorCandidates: options.projectorCandidates } : {}),
@@ -455,6 +467,7 @@ function getInputCapabilityMetadataPatch(options: {
 }
 
 function buildArtifactMetadataPatch(options: {
+  chatModalities?: ModelMetadata['chatModalities'];
   id: string;
   downloadUrl: string;
   hfRevision?: string;
@@ -478,6 +491,7 @@ function buildArtifactMetadataPatch(options: {
       downloadUrl: options.downloadUrl,
       hfRevision: options.hfRevision,
       id: options.id,
+      chatModalities: options.chatModalities,
       inputCapabilities: options.inputCapabilities,
       lifecycleStatus: options.lifecycleStatus ?? LifecycleStatus.AVAILABLE,
       localPath: options.localPath,
@@ -554,13 +568,14 @@ function createTreeProbeCandidate(
   const resolvedMemoryFit = resolveMemoryFitSummary({ size, metadataTrust }, memoryFitContext);
   const fitsInRam = resolvedMemoryFit?.fitsInRam ?? null;
   const lastModifiedAt = parseHuggingFaceLastModifiedAt(item.lastModified);
-  const visionMetadata = getVisionMetadataPatch({
-    item,
-    source: 'catalog_metadata',
-  });
   const inputCapabilityMetadata = getInputCapabilityMetadataPatch({
     item,
     detectedAt: lastModifiedAt,
+  });
+  const visionMetadata = getVisionMetadataPatch({
+    item,
+    inputCapabilities: inputCapabilityMetadata.inputCapabilities,
+    source: 'catalog_metadata',
   });
 
   return normalizePersistedModelMetadata({
@@ -695,16 +710,17 @@ export function transformHFResponse(
       { projectorSizeBytes: getProjectorMemoryFitSizeBytes(projectorCandidates) },
     );
     const fitsInRam = resolvedMemoryFit?.fitsInRam ?? null;
-    const visionMetadata = getVisionMetadataPatch({
-      item,
-      projectorCandidates,
-      source: 'catalog_metadata',
-    });
     const lastModifiedAt = parseHuggingFaceLastModifiedAt(item.lastModified);
     const inputCapabilityMetadata = getInputCapabilityMetadataPatch({
       item,
       entries: siblings,
       detectedAt: lastModifiedAt,
+    });
+    const visionMetadata = getVisionMetadataPatch({
+      item,
+      inputCapabilities: inputCapabilityMetadata.inputCapabilities,
+      projectorCandidates,
+      source: 'catalog_metadata',
     });
     const requiresAuth = Boolean(item.gated) || item.private === true;
     const requiresTreeProbe = shouldRevalidateCatalogSummarySelection(ggufSibling);
@@ -714,6 +730,7 @@ export function transformHFResponse(
       id: repoId,
       downloadUrl,
       hfRevision,
+      chatModalities: visionMetadata.chatModalities,
       inputCapabilities: inputCapabilityMetadata.inputCapabilities,
       projectorCandidates,
       resolvedFileName: fileName,
@@ -793,15 +810,16 @@ export function buildModelMetadataFromPayload(
     ownerModelId: repoId,
     ownerFileName: selectedEntryFileName ?? fallbackModel.resolvedFileName,
   });
-  const visionMetadata = getVisionMetadataPatch({
-    item: payload,
-    projectorCandidates,
-    source: 'catalog_metadata',
-  });
   const inputCapabilityMetadata = getInputCapabilityMetadataPatch({
     item: payload,
     entries: siblings,
     detectedAt: parseHuggingFaceLastModifiedAt(payload.lastModified),
+  });
+  const visionMetadata = getVisionMetadataPatch({
+    item: payload,
+    inputCapabilities: inputCapabilityMetadata.inputCapabilities,
+    projectorCandidates,
+    source: 'catalog_metadata',
   });
   const fallbackSha256 = normalizeSha256Digest(fallbackModel.sha256);
   const fallbackShaCompatibility = resolveVerifiedLocalShaCompatibility(fallbackModel, selectedEntry
@@ -881,6 +899,7 @@ export function buildModelMetadataFromPayload(
     id: repoId,
     downloadUrl,
     hfRevision,
+    chatModalities: visionMetadata.chatModalities,
     inputCapabilities: inputCapabilityMetadata.inputCapabilities,
     lifecycleStatus: localDownloadStatePatch.lifecycleStatus ?? fallbackModel.lifecycleStatus,
     localPath: localDownloadStatePatch.localPath ?? fallbackModel.localPath,

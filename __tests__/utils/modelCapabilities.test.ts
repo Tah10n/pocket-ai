@@ -5,9 +5,12 @@ import {
 } from '../../src/services/SettingsStore';
 import {
   buildModelCapabilitySnapshot,
+  getModelAudioCapabilityBadgePresentation,
   getModelVisionCapabilityBadgePresentation,
   getModelVisionCapabilityStatusLabelKey,
+  modelSupportsAudio,
   modelSupportsVision,
+  resolveModelChatModalities,
   resolveModelCapabilitySnapshot,
 } from '../../src/utils/modelCapabilities';
 
@@ -168,6 +171,74 @@ describe('modelCapabilities', () => {
     })).toBe(false);
   });
 
+  it('presents audio capability only for primary chat models', () => {
+    const audioModel = {
+      artifactRole: 'primary_chat_model' as const,
+      chatModalities: ['text', 'audio'] as Array<'text' | 'audio'>,
+    };
+
+    expect(modelSupportsAudio(audioModel)).toBe(true);
+    expect(getModelAudioCapabilityBadgePresentation(audioModel)).toEqual({
+      labelKey: 'models.audio.badge',
+      tone: 'info',
+      iconName: 'graphic-eq',
+    });
+    expect(modelSupportsAudio({
+      ...audioModel,
+      artifactRole: 'projector_companion',
+    })).toBe(false);
+    expect(getModelAudioCapabilityBadgePresentation({
+      artifactRole: 'primary_chat_model',
+      chatModalities: ['text'],
+      inputCapabilities: {
+        detectedAt: 1,
+        declared: {
+          image: 'unknown',
+          audio: 'supported',
+          video: 'unknown',
+        },
+        evidence: [{ source: 'tag', value: 'audio', confidence: 'medium' }],
+      },
+    })).toBeNull();
+  });
+
+  it('treats requested audio readiness as audio support when catalog modalities are stale', () => {
+    expect(modelSupportsAudio({
+      artifactRole: 'primary_chat_model',
+      multimodalReadiness: {
+        modelId: 'author/model',
+        status: 'unsupported',
+        projectorId: 'projector-audio',
+        support: [],
+        requestedSupport: ['audio'],
+        checkedAt: 1,
+      },
+    })).toBe(true);
+    expect(resolveModelChatModalities({
+      artifactRole: 'primary_chat_model',
+      multimodalReadiness: {
+        modelId: 'author/model',
+        status: 'unsupported',
+        projectorId: 'projector-audio',
+        support: [],
+        requestedSupport: ['audio'],
+        checkedAt: 1,
+      },
+    })).toEqual(['text', 'audio']);
+    expect(modelSupportsAudio({
+      artifactRole: 'primary_chat_model',
+      chatModalities: ['text'],
+      multimodalReadiness: {
+        modelId: 'author/model',
+        status: 'unsupported',
+        projectorId: 'projector-audio',
+        support: [],
+        requestedSupport: ['audio'],
+        checkedAt: 1,
+      },
+    })).toBe(false);
+  });
+
   it('treats persisted projector evidence as vision support when modalities are stale', () => {
     const projector = {
       id: 'projector-1',
@@ -218,6 +289,19 @@ describe('modelCapabilities', () => {
         checkedAt: 1,
       },
     })).toBe(false);
+    expect(modelSupportsVision({
+      artifactRole: 'primary_chat_model',
+      chatModalities: ['text', 'audio'],
+      selectedProjectorId: projector.id,
+      multimodalReadiness: {
+        modelId: 'author/model',
+        status: 'ready',
+        projectorId: projector.id,
+        support: ['audio'],
+        requestedSupport: ['audio'],
+        checkedAt: 1,
+      },
+    })).toBe(false);
     expect(getModelVisionCapabilityStatusLabelKey({
       artifactRole: 'primary_chat_model',
       projectorCandidates: [projector],
@@ -226,6 +310,64 @@ describe('modelCapabilities', () => {
       artifactRole: 'projector_companion',
       projectorCandidates: [projector],
     })).toBe(false);
+  });
+
+  it('unions explicit native modalities with newly discovered native evidence', () => {
+    const projector = {
+      id: 'projector-1',
+      ownerModelId: 'author/model',
+      repoId: 'author/model',
+      fileName: 'mmproj-model-f16.gguf',
+      downloadUrl: 'https://huggingface.co/author/model/resolve/main/mmproj-model-f16.gguf',
+      size: 1,
+      lifecycleStatus: 'available' as const,
+      matchStatus: 'matched' as const,
+    };
+    const audioCapabilities = {
+      detectedAt: 1,
+      declared: {
+        image: 'unknown' as const,
+        audio: 'supported' as const,
+        video: 'unknown' as const,
+      },
+      evidence: [{ source: 'tag' as const, value: 'audio', confidence: 'medium' as const }],
+    };
+    const imageCapabilities = {
+      detectedAt: 1,
+      declared: {
+        image: 'supported' as const,
+        audio: 'unknown' as const,
+        video: 'unknown' as const,
+      },
+      evidence: [{ source: 'tag' as const, value: 'vision', confidence: 'medium' as const }],
+    };
+
+    expect(resolveModelChatModalities({
+      artifactRole: 'primary_chat_model',
+      chatModalities: ['text', 'vision'] as Array<'text' | 'vision'>,
+      inputCapabilities: audioCapabilities,
+    })).toEqual(['text', 'vision', 'audio']);
+    expect(resolveModelChatModalities({
+      artifactRole: 'primary_chat_model',
+      chatModalities: ['text', 'audio'] as Array<'text' | 'audio'>,
+      projectorCandidates: [projector],
+    })).toEqual(['text', 'audio']);
+    expect(resolveModelChatModalities({
+      artifactRole: 'primary_chat_model',
+      chatModalities: ['text', 'audio'] as Array<'text' | 'audio'>,
+      inputCapabilities: imageCapabilities,
+    })).toEqual(['text', 'vision', 'audio']);
+    expect(resolveModelChatModalities({
+      artifactRole: 'primary_chat_model',
+      inputCapabilities: audioCapabilities,
+      projectorCandidates: [projector],
+    })).toEqual(['text', 'audio']);
+    expect(resolveModelChatModalities({
+      artifactRole: 'primary_chat_model',
+      chatModalities: ['text'] as Array<'text'>,
+      inputCapabilities: audioCapabilities,
+      projectorCandidates: [projector],
+    })).toEqual(['text']);
   });
 
   it('does not present inactive variant-scoped projector downloads as ready', () => {

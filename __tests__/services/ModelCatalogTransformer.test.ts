@@ -179,6 +179,7 @@ describe('ModelCatalogTransformer', () => {
     ], null, null);
 
     expect(models).toHaveLength(1);
+    expect(models[0].chatModalities).toEqual(['text', 'audio']);
     expect(models[0].inputCapabilities).toEqual(expect.objectContaining({
       declared: {
         image: 'unknown',
@@ -198,6 +199,67 @@ describe('ModelCatalogTransformer', () => {
         installState: 'remote',
       }),
     ]);
+  });
+
+  it('preserves vision and audio chat modalities when catalog metadata exposes both', () => {
+    const models = transformHFResponse([
+      {
+        id: 'test-org/vision-audio-chat-model',
+        author: 'test-org',
+        pipeline_tag: 'image-text-to-text',
+        tags: ['gguf', 'vision', 'audio'],
+        siblings: [...visionCatalogSiblings],
+        sha: 'main',
+      },
+    ], null, null);
+
+    expect(models).toHaveLength(1);
+    expect(models[0].chatModalities).toEqual(['text', 'vision', 'audio']);
+    expect(models[0].inputCapabilities?.declared).toEqual(expect.objectContaining({
+      image: 'supported',
+      audio: 'supported',
+    }));
+    expect(models[0].artifacts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'multimodal_projector',
+        requiredFor: ['image', 'audio'],
+      }),
+    ]));
+  });
+
+  it('preserves audio chat modalities from detailed payload input capabilities', () => {
+    const result = buildModelMetadataFromPayload(
+      {
+        id: 'test-org/audio-detail-model',
+        author: 'test-org',
+        pipeline_tag: 'automatic-speech-recognition',
+        tags: ['gguf'],
+        siblings: [
+          { rfilename: 'audio-model.Q4_K_M.gguf', size: REMOTE_SIZE },
+          { rfilename: 'mmproj-audio-model-f16.gguf', size: 1_000_000 },
+        ],
+      },
+      null,
+      null,
+      createFallbackModel('test-org/audio-detail-model'),
+    );
+
+    expect(result.chatModalities).toEqual(['text', 'audio']);
+    expect(result.inputCapabilities?.declared.audio).toBe('supported');
+    expect(result.inputCapabilities?.evidence).toEqual(expect.arrayContaining([
+      { source: 'pipeline_tag', value: 'automatic-speech-recognition', confidence: 'high' },
+      { source: 'projector', value: 'mmproj-audio-model-f16.gguf', confidence: 'medium' },
+    ]));
+    expect(result.projectorCandidates?.[0]).toEqual(expect.objectContaining({
+      fileName: 'mmproj-audio-model-f16.gguf',
+    }));
+    expect(result.artifacts?.find((artifact) => artifact.kind === 'multimodal_projector')).toEqual(
+      expect.objectContaining({
+        requiredFor: ['audio'],
+      }),
+    );
+    expect(result.visionSource).toBeUndefined();
+    expect(result.visionConfidence).toBeUndefined();
   });
 
   it('includes matched projector bytes in catalog memory-fit estimates', () => {

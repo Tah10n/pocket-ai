@@ -2,6 +2,7 @@ import { EngineStatus, LifecycleStatus } from '../../src/types/models';
 import {
   canSendAttachments,
   inferDeclaredInputCapabilities,
+  mergeInputCapabilitySnapshots,
   normalizePersistedInputCapabilitySnapshot,
   resolveEffectiveInputCapabilities,
 } from '../../src/utils/modelInputCapabilities';
@@ -34,6 +35,29 @@ describe('modelInputCapabilities', () => {
       { source: 'architecture', value: 'qwen2vlforconditionalgeneration', confidence: 'medium' },
       { source: 'projector', value: 'mmproj-model-f16.gguf', confidence: 'medium' },
     ]));
+  });
+
+  it('merges catalog and tree-probe capability snapshots without losing earlier modalities', () => {
+    const catalogSnapshot = inferDeclaredInputCapabilities({
+      pipeline_tag: 'automatic-speech-recognition',
+    }, [], { detectedAt: 100 });
+    const treeSnapshot = inferDeclaredInputCapabilities(null, [
+      { path: 'model.Q4_K_M.gguf', size: 100 },
+      { path: 'mmproj-model-f16.gguf', size: 50 },
+    ], { detectedAt: 200 });
+
+    expect(mergeInputCapabilitySnapshots(catalogSnapshot, treeSnapshot)).toEqual({
+      detectedAt: 200,
+      declared: {
+        image: 'unknown',
+        audio: 'supported',
+        video: 'unknown',
+      },
+      evidence: expect.arrayContaining([
+        { source: 'pipeline_tag', value: 'automatic-speech-recognition', confidence: 'high' },
+        { source: 'projector', value: 'mmproj-model-f16.gguf', confidence: 'medium' },
+      ]),
+    });
   });
 
   it('normalizes persisted snapshots and drops malformed evidence', () => {

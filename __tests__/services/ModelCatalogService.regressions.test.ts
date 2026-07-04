@@ -490,6 +490,110 @@ describe('ModelCatalogService regressions', () => {
     expect(refreshed.chatModalities).toContain('vision');
   });
 
+  it('preserves audio capability evidence while full tree refresh collects projector candidates', async () => {
+    const modelId = 'org/audio-projector-refresh';
+    const modelFileName = 'audio-model.Q4_K_M.gguf';
+    const projectorFileName = 'mmproj-audio-model-f16.gguf';
+    const treePage2Cursor = 'tree-page-2';
+    const model: ModelMetadata = {
+      id: modelId,
+      name: 'Audio Projector Refresh',
+      author: 'org',
+      size: 2 * 1024 * 1024 * 1024,
+      downloadUrl: `https://huggingface.co/${modelId}/resolve/main/${modelFileName}`,
+      fitsInRam: true,
+      accessState: ModelAccessState.PUBLIC,
+      isGated: false,
+      isPrivate: false,
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+      hfRevision: 'main',
+      resolvedFileName: modelFileName,
+      chatModalities: ['text'],
+      hasVerifiedContextWindow: true,
+      inputCapabilities: {
+        detectedAt: 100,
+        declared: {
+          image: 'unknown',
+          audio: 'supported',
+          video: 'unknown',
+        },
+        evidence: [
+          { source: 'pipeline_tag', value: 'automatic-speech-recognition', confidence: 'high' },
+        ],
+      },
+    };
+
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.includes(`cursor=${treePage2Cursor}`)) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          headers: {
+            get: jest.fn(() => null),
+          },
+          json: () => Promise.resolve([
+            {
+              path: projectorFileName,
+              size: 1024,
+              lfs: { sha256: PROJECTOR_SHA256 },
+            },
+          ]),
+        });
+      }
+
+      if (url.includes('/tree/main?recursive=true')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          headers: {
+            get: jest.fn((headerName: string) => (
+              headerName === 'link'
+                ? `<https://huggingface.co/api/models/${modelId}/tree/main?recursive=true&cursor=${treePage2Cursor}>; rel="next"`
+                : null
+            )),
+          },
+          json: () => Promise.resolve([
+            {
+              path: modelFileName,
+              size: model.size,
+              lfs: { sha256: TREE_SHA256 },
+            },
+          ]),
+        });
+      }
+
+      throw new Error(`Unexpected fetch ${url}`);
+    }) as jest.Mock;
+
+    const refreshed = await service.refreshModelMetadata(model);
+    const projectorArtifact = refreshed.artifacts?.find((artifact) => artifact.kind === 'multimodal_projector');
+
+    expect(global.fetch).toHaveBeenCalledWith(
+      expect.stringContaining(`cursor=${treePage2Cursor}`),
+      expect.any(Object),
+    );
+    expect(refreshed.chatModalities).toEqual(['text', 'audio']);
+    expect(refreshed.inputCapabilities?.declared).toEqual({
+      image: 'unknown',
+      audio: 'supported',
+      video: 'unknown',
+    });
+    expect(refreshed.inputCapabilities?.evidence).toEqual(expect.arrayContaining([
+      { source: 'pipeline_tag', value: 'automatic-speech-recognition', confidence: 'high' },
+      { source: 'projector', value: projectorFileName, confidence: 'medium' },
+    ]));
+    expect(refreshed.projectorCandidates?.[0]).toEqual(expect.objectContaining({
+      fileName: projectorFileName,
+      matchStatus: 'matched',
+    }));
+    expect(projectorArtifact?.requiredFor).toEqual(['audio']);
+    expect(refreshed.visionSource).toBeUndefined();
+    expect(refreshed.visionConfidence).toBeUndefined();
+  });
+
   it('does not resurrect stale model.gguf fallback metadata after a final projector-only tree probe', async () => {
     const modelId = 'test-org/projector-only-repo';
     const staleModel: ModelMetadata = {

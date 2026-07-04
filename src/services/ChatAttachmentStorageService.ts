@@ -213,7 +213,7 @@ function createDraftId(now: number, random: number): string {
 }
 
 function getDraftTimestampFromFileName(fileName: string): number | null {
-  const match = /^draft-(\d+)-[A-Za-z0-9]+(?:-thumb)?\.(?:jpe?g|png)$/iu.exec(fileName.trim());
+  const match = /^draft-(\d+)-[A-Za-z0-9]+(?:-thumb)?(?:\.[A-Za-z0-9][A-Za-z0-9._-]*)?$/u.exec(fileName.trim());
   if (!match) {
     return null;
   }

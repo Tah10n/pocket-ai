@@ -4,31 +4,45 @@ import type {
   ModelMetadata,
   ModelMetadataTrust,
 } from '../types/models';
+import type { ModelChatModality } from '../types/multimodal';
 import { UNKNOWN_MODEL_GPU_LAYERS_CEILING } from './modelLimits';
 import { normalizeSha256Digest } from './sha256';
 
 export const MODEL_CAPABILITY_HEURISTIC_VERSION = 1;
 
-export type ModelVisionCapabilityBadgeTone = 'info' | 'warning';
+export type ModelNativeCapabilityBadgeTone = 'info' | 'warning';
 
-export interface ModelVisionCapabilityBadgePresentation {
+export interface ModelNativeCapabilityBadgePresentation {
   labelKey: string;
-  tone: ModelVisionCapabilityBadgeTone;
-  iconName: 'visibility' | 'extension';
+  tone: ModelNativeCapabilityBadgeTone;
+  iconName: 'visibility' | 'graphic-eq';
 }
 
-type ModelVisionCapabilityInput = Partial<Pick<
+export type ModelVisionCapabilityBadgeTone = ModelNativeCapabilityBadgeTone;
+export type ModelVisionCapabilityBadgePresentation = ModelNativeCapabilityBadgePresentation;
+export type ModelAudioCapabilityBadgePresentation = ModelNativeCapabilityBadgePresentation;
+
+export type ModelNativeMultimodalSupport = {
+  vision: boolean;
+  audio: boolean;
+};
+
+type ModelNativeCapabilityInput = Partial<Pick<
   ModelMetadata,
   | 'artifactRole'
   | 'activeVariantId'
+  | 'artifacts'
   | 'chatModalities'
   | 'id'
+  | 'inputCapabilities'
   | 'projectorCandidates'
   | 'resolvedFileName'
   | 'selectedProjectorId'
   | 'multimodalReadiness'
   | 'variants'
 >>;
+
+type ModelVisionCapabilityInput = ModelNativeCapabilityInput;
 
 type ModelCapabilityInput = Pick<
   ModelMetadata,
@@ -332,28 +346,130 @@ export function resolveModelCapabilitySnapshot(
 
 function hasPersistedVisionReadinessEvidence(
   readiness: ModelVisionCapabilityInput['multimodalReadiness'],
+  options: { allowLegacyEvidence: boolean },
 ): boolean {
   if (!readiness) {
     return false;
   }
 
-  return readiness.support.includes('vision')
-    || typeof readiness.projectorId === 'string'
-    || readiness.status !== 'text_only';
-}
+  if (readiness.support.includes('vision') || readiness.requestedSupport?.includes('vision') === true) {
+    return true;
+  }
 
-export function modelSupportsVision(model: ModelVisionCapabilityInput): boolean {
-  if (model.artifactRole === 'projector_companion') {
+  if (!options.allowLegacyEvidence || readiness.requestedSupport !== undefined) {
     return false;
   }
 
-  if (Array.isArray(model.chatModalities)) {
-    return model.chatModalities.includes('vision');
+  return typeof readiness.projectorId === 'string' || readiness.status !== 'text_only';
+}
+
+const IMAGE_CAPABILITY_PIPELINE_TAGS = new Set([
+  'image-text-to-text',
+  'visual-question-answering',
+  'document-question-answering',
+]);
+const IMAGE_CAPABILITY_SIGNAL_PATTERN = /\b(?:vision|visual|multimodal|vlm|llava|bakllava|moondream|pixtral|qwen2(?:\.5)?-?vl|qwen2vl|qwen25vl)/u;
+
+function hasImageSpecificCapabilityEvidence(
+  inputCapabilities: ModelNativeCapabilityInput['inputCapabilities'],
+): boolean {
+  return inputCapabilities?.evidence.some((entry) => {
+    const value = entry.value.trim().toLowerCase();
+    if (!value || entry.source === 'projector') {
+      return false;
+    }
+
+    if (entry.source === 'pipeline_tag') {
+      return IMAGE_CAPABILITY_PIPELINE_TAGS.has(value);
+    }
+
+    return IMAGE_CAPABILITY_SIGNAL_PATTERN.test(value);
+  }) === true;
+}
+
+function hasDeclaredImageInputSupport(
+  model: ModelNativeCapabilityInput,
+  options: { allowProjectorOnlyEvidence: boolean },
+): boolean {
+  if (model.inputCapabilities?.declared.image !== 'supported') {
+    return false;
   }
 
-  return Boolean(model.projectorCandidates?.length)
-    || (typeof model.selectedProjectorId === 'string' && model.selectedProjectorId.trim().length > 0)
-    || hasPersistedVisionReadinessEvidence(model.multimodalReadiness);
+  return options.allowProjectorOnlyEvidence || hasImageSpecificCapabilityEvidence(model.inputCapabilities);
+}
+
+function hasAudioOnlyDeclaredCapabilityEvidence(model: ModelNativeCapabilityInput): boolean {
+  return model.inputCapabilities?.declared.audio === 'supported'
+    && model.inputCapabilities.declared.image !== 'supported'
+    && !hasImageSpecificCapabilityEvidence(model.inputCapabilities);
+}
+
+function modelArtifactsRequireInput(
+  artifacts: ModelNativeCapabilityInput['artifacts'],
+  input: 'image' | 'audio',
+): boolean {
+  return artifacts?.some((artifact) => (
+    artifact.kind === 'multimodal_projector' && artifact.requiredFor.includes(input)
+  )) === true;
+}
+
+function hasPersistedAudioReadinessEvidence(
+  readiness: ModelNativeCapabilityInput['multimodalReadiness'],
+): boolean {
+  return readiness?.support.includes('audio') === true
+    || readiness?.requestedSupport?.includes('audio') === true;
+}
+
+export function resolveModelNativeMultimodalSupport(model: ModelNativeCapabilityInput): ModelNativeMultimodalSupport {
+  if (model.artifactRole === 'projector_companion') {
+    return { vision: false, audio: false };
+  }
+
+  const chatSupportsVision = model.chatModalities?.includes('vision') === true;
+  const chatSupportsAudio = model.chatModalities?.includes('audio') === true;
+  const hasExplicitChatModalities = Array.isArray(model.chatModalities);
+  const hasExplicitNativeChatModalities = chatSupportsVision || chatSupportsAudio;
+  const canUseNativeCapabilityEvidence = !hasExplicitChatModalities || hasExplicitNativeChatModalities;
+  const canUseLegacyVisionEvidence = (!hasExplicitChatModalities || chatSupportsVision)
+    && !hasAudioOnlyDeclaredCapabilityEvidence(model);
+  const hasExplicitNativeModalityExcludingVision = hasExplicitNativeChatModalities && !chatSupportsVision;
+  const vision = chatSupportsVision
+    || (canUseNativeCapabilityEvidence && hasDeclaredImageInputSupport(model, {
+      allowProjectorOnlyEvidence: !hasExplicitNativeModalityExcludingVision,
+    }))
+    || (canUseLegacyVisionEvidence && (
+      Boolean(model.projectorCandidates?.length)
+      || (typeof model.selectedProjectorId === 'string' && model.selectedProjectorId.trim().length > 0)
+      || modelArtifactsRequireInput(model.artifacts, 'image')
+      || hasPersistedVisionReadinessEvidence(model.multimodalReadiness, {
+        allowLegacyEvidence: canUseLegacyVisionEvidence,
+      })
+    ));
+  const audio = chatSupportsAudio
+    || (canUseNativeCapabilityEvidence && (
+      model.inputCapabilities?.declared.audio === 'supported'
+      || modelArtifactsRequireInput(model.artifacts, 'audio')
+      || hasPersistedAudioReadinessEvidence(model.multimodalReadiness)
+    ));
+
+  return { vision, audio };
+}
+
+export function modelSupportsVision(model: ModelVisionCapabilityInput): boolean {
+  return resolveModelNativeMultimodalSupport(model).vision;
+}
+
+export function modelSupportsAudio(model: ModelNativeCapabilityInput): boolean {
+  return resolveModelNativeMultimodalSupport(model).audio;
+}
+
+export function resolveModelChatModalities(model: ModelNativeCapabilityInput): ModelChatModality[] {
+  const support = resolveModelNativeMultimodalSupport(model);
+  return [
+    'text',
+    ...(support.vision ? ['vision' as const] : []),
+    ...(support.audio ? ['audio' as const] : []),
+  ];
 }
 
 function hasReadyProjectorCandidate(
@@ -427,5 +543,19 @@ export function getModelVisionCapabilityBadgePresentation(
     labelKey: 'models.vision.badge',
     tone: hasReadyProjectorCandidate(model) ? 'info' : 'warning',
     iconName: 'visibility',
+  };
+}
+
+export function getModelAudioCapabilityBadgePresentation(
+  model: ModelNativeCapabilityInput,
+): ModelAudioCapabilityBadgePresentation | null {
+  if (!modelSupportsAudio(model)) {
+    return null;
+  }
+
+  return {
+    labelKey: 'models.audio.badge',
+    tone: 'info',
+    iconName: 'graphic-eq',
   };
 }

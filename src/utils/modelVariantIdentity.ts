@@ -35,11 +35,37 @@ function getVariantActiveRank(
 function getVariantCompletenessScore(variant: ModelVariant): number {
   return (variant.isLocal === true ? 16 : 0)
     + (variant.chatModalities?.includes('vision') ? 8 : 0)
+    + (variant.chatModalities?.includes('audio') ? 8 : 0)
     + (variant.projectorCandidates?.length ? 4 : 0)
     + (variant.sha256 ? 4 : 0)
     + (typeof variant.size === 'number' ? 2 : 0)
     + (variant.ramFit ? 1 : 0)
     + (variant.ramFitConfidence ? 1 : 0);
+}
+
+function mergeVariantChatModalities(
+  preferred: ModelVariant['chatModalities'],
+  fallback: ModelVariant['chatModalities'],
+): ModelVariant['chatModalities'] {
+  const modalities = [...new Set([...(preferred ?? []), ...(fallback ?? [])])];
+  return modalities.length > 0 ? modalities : undefined;
+}
+
+function mergeDedupeVariantMetadata(preferred: ModelVariant, fallback: ModelVariant): ModelVariant {
+  return {
+    ...preferred,
+    size: preferred.size ?? fallback.size,
+    sha256: preferred.sha256 ?? fallback.sha256,
+    ramFit: preferred.ramFit ?? fallback.ramFit,
+    ramFitConfidence: preferred.ramFitConfidence ?? fallback.ramFitConfidence,
+    isLocal: preferred.isLocal ?? fallback.isLocal,
+    chatModalities: mergeVariantChatModalities(preferred.chatModalities, fallback.chatModalities),
+    artifactRole: preferred.artifactRole ?? fallback.artifactRole,
+    visionSource: preferred.visionSource ?? fallback.visionSource,
+    visionConfidence: preferred.visionConfidence ?? fallback.visionConfidence,
+    projectorCandidates: preferred.projectorCandidates ?? fallback.projectorCandidates,
+    selectedProjectorId: preferred.selectedProjectorId ?? fallback.selectedProjectorId,
+  };
 }
 
 function shouldReplaceVariant(
@@ -78,8 +104,11 @@ function dedupeModelVariantsByKey(
       return;
     }
 
-    if (shouldReplaceVariant(deduped[existingIndex], variant, options)) {
-      deduped[existingIndex] = variant;
+    const existingVariant = deduped[existingIndex];
+    if (shouldReplaceVariant(existingVariant, variant, options)) {
+      deduped[existingIndex] = mergeDedupeVariantMetadata(variant, existingVariant);
+    } else {
+      deduped[existingIndex] = mergeDedupeVariantMetadata(existingVariant, variant);
     }
   });
 

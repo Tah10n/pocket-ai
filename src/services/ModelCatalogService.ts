@@ -61,6 +61,14 @@ import {
 import { applyModelVariantSelectionIfAvailable } from '../utils/modelVariants';
 import { normalizeSha256Digest } from '../utils/sha256';
 import { getProjectorMemoryFitSizeBytes } from '../utils/modelSize';
+import {
+  inferDeclaredInputCapabilities,
+  mergeInputCapabilitySnapshots,
+} from '../utils/modelInputCapabilities';
+import {
+  resolveModelChatModalities,
+  resolveModelNativeMultimodalSupport,
+} from '../utils/modelCapabilities';
 import { mergeProjectorRuntimeState as mergeCompatibleProjectorRuntimeState } from '../utils/projectorRuntimeState';
 import {
   getCompatibleLocalDownloadStatePatch,
@@ -1412,10 +1420,15 @@ export class ModelCatalogService {
   }
 
   private isProjectorAwareModel(model: ModelMetadata): boolean {
-    return model.chatModalities?.includes('vision') === true
+    const nativeSupport = resolveModelNativeMultimodalSupport(model);
+    return nativeSupport.vision
+      || nativeSupport.audio
+      || model.inputCapabilities?.declared.image === 'supported'
+      || model.inputCapabilities?.declared.audio === 'supported'
       || Boolean(model.projectorCandidates?.length)
       || Boolean(model.selectedProjectorId)
       || model.multimodalReadiness?.support.includes('vision') === true
+      || model.multimodalReadiness?.support.includes('audio') === true
       || model.visionSource !== undefined
       || model.visionConfidence !== undefined;
   }
@@ -1579,8 +1592,40 @@ export class ModelCatalogService {
         });
         const projectorCandidates = discoveredProjectorCandidates
           ?? (useFullTreeProbe && treeResponse.isComplete ? [] : undefined);
-        const hasVisionCapability = model.chatModalities?.includes('vision') === true
-          || Boolean(projectorCandidates?.length);
+        const inferredInputCapabilities = inferDeclaredInputCapabilities({
+          id: model.id,
+          modelId: model.id,
+          tags: model.tags,
+          config: {
+            model_type: model.modelType,
+            architectures: model.architectures,
+          },
+          gguf: {
+            architecture: model.gguf?.architecture,
+          },
+        }, treeResponse.entries, { detectedAt: model.lastModifiedAt ?? Date.now() });
+        const inputCapabilities = mergeInputCapabilitySnapshots(
+          model.inputCapabilities,
+          inferredInputCapabilities.evidence.length > 0 ? inferredInputCapabilities : undefined,
+        );
+        const existingNativeChatModalities = model.chatModalities?.some((modality) => modality !== 'text') === true
+          ? model.chatModalities
+          : undefined;
+        const chatModalities = resolveModelChatModalities({
+          ...model,
+          chatModalities: existingNativeChatModalities,
+          inputCapabilities,
+          projectorCandidates: projectorCandidates ?? model.projectorCandidates,
+        });
+        const hasRefreshedVisionSupport = chatModalities.includes('vision');
+        const hasFreshProjectorMetadata = projectorCandidates !== undefined;
+        const shouldClearVisionMetadata = hasFreshProjectorMetadata && !hasRefreshedVisionSupport;
+        const visionSource = hasRefreshedVisionSupport
+          ? projectorCandidates?.length ? 'tree_probe' as const : model.visionSource
+          : shouldClearVisionMetadata ? undefined : model.visionSource;
+        const visionConfidence = hasRefreshedVisionSupport
+          ? projectorCandidates?.length ? 'trusted' as const : model.visionConfidence
+          : shouldClearVisionMetadata ? undefined : model.visionConfidence;
         const treeEntrySha256 = getFileSha(selectedEntry);
         const treeEntrySize = getFileSize(selectedEntry);
         const {
@@ -1693,10 +1738,11 @@ export class ModelCatalogService {
             sha256,
             variants: variantsWithResolvedActiveMemoryFit,
             activeVariantId: resolvedFileName,
-            chatModalities: hasVisionCapability ? ['text', 'vision'] : model.chatModalities,
+            inputCapabilities,
+            chatModalities,
             artifactRole: 'primary_chat_model',
-            visionSource: projectorCandidates?.length ? 'tree_probe' : model.visionSource,
-            visionConfidence: projectorCandidates?.length ? 'trusted' : model.visionConfidence,
+            visionSource,
+            visionConfidence,
             ...projectorMetadataPatch,
           });
         }
@@ -1718,10 +1764,11 @@ export class ModelCatalogService {
           sha256,
           variants: variantsWithResolvedActiveMemoryFit,
           activeVariantId: resolvedFileName,
-          chatModalities: hasVisionCapability ? ['text', 'vision'] : model.chatModalities,
+          inputCapabilities,
+          chatModalities,
           artifactRole: 'primary_chat_model',
-          visionSource: projectorCandidates?.length ? 'tree_probe' : model.visionSource,
-          visionConfidence: projectorCandidates?.length ? 'trusted' : model.visionConfidence,
+          visionSource,
+          visionConfidence,
           ...projectorMetadataPatch,
         });
       } catch (error) {

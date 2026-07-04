@@ -179,6 +179,35 @@ describe('ModelMetadataNormalizer', () => {
     expect(projectorArtifact?.resumeData).toBeUndefined();
   });
 
+  it('uses normalized audio chat modalities when deriving projector artifact requirements', () => {
+    const normalized = normalizePersistedModelMetadata({
+      id: 'author/audio-model',
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      localPath: 'audio-model.Q4_K_M.gguf',
+      resolvedFileName: 'audio-model.Q4_K_M.gguf',
+      chatModalities: ['text', 'audio'],
+      projectorCandidates: [
+        {
+          id: 'projector-audio',
+          ownerModelId: 'author/audio-model',
+          repoId: 'author/audio-model',
+          fileName: 'mmproj-audio-model-f16.gguf',
+          downloadUrl: 'https://example.com/mmproj-audio-model-f16.gguf',
+          size: 200,
+          lifecycleStatus: 'available',
+          matchStatus: 'matched',
+        },
+      ],
+    });
+
+    const projectorArtifact = normalized.artifacts?.find((artifact) => artifact.id === 'projector-audio');
+    expect(projectorArtifact).toEqual(expect.objectContaining({
+      kind: 'multimodal_projector',
+      requiredFor: ['audio'],
+    }));
+  });
+
   it('drops invalid sha integrity markers without a digest', () => {
     const normalized = normalizePersistedModelMetadata({
       id: 'legacy/model',
@@ -494,6 +523,27 @@ describe('ModelMetadataNormalizer', () => {
     ]);
   });
 
+  it('preserves audio chat modalities on models and variants', () => {
+    const normalized = normalizePersistedModelMetadata({
+      id: 'author/audio-model',
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+      chatModalities: ['text', 'audio', 'audio'],
+      variants: [
+        {
+          variantId: 'audio-model.Q4_K_M.gguf',
+          fileName: 'audio-model.Q4_K_M.gguf',
+          quantizationLabel: 'Q4_K_M',
+          size: 2_000_000_000,
+          chatModalities: ['text', 'vision', 'audio'],
+        },
+      ],
+    });
+
+    expect(normalized.chatModalities).toEqual(['text', 'audio']);
+    expect(normalized.variants?.[0]?.chatModalities).toEqual(['text', 'vision', 'audio']);
+  });
+
   it('dedupes persisted variants by file while preserving active legacy variant metadata', () => {
     const normalized = normalizePersistedModelMetadata({
       id: 'author/model-q4',
@@ -707,5 +757,23 @@ describe('ModelMetadataNormalizer', () => {
     expect(extensionless.multimodalReadiness?.failureReason).toBe('Native init failed for [path]');
     expect(JSON.stringify(extensionless.multimodalReadiness)).not.toContain('Project for Client');
     expect(JSON.stringify(extensionless.multimodalReadiness)).not.toContain('C:\\Users\\tester');
+  });
+
+  it('normalizes requested multimodal support on persisted readiness snapshots', () => {
+    const normalized = normalizePersistedModelMetadata({
+      id: 'author/vision-model',
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      multimodalReadiness: {
+        modelId: 'author/vision-model',
+        status: 'ready',
+        support: ['vision', 'bogus' as never, 'vision'],
+        requestedSupport: ['vision', 'audio', 'bogus' as never, 'audio'],
+        checkedAt: 10,
+      },
+    });
+
+    expect(normalized.multimodalReadiness?.support).toEqual(['vision']);
+    expect(normalized.multimodalReadiness?.requestedSupport).toEqual(['vision', 'audio']);
   });
 });

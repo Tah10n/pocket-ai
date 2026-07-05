@@ -280,6 +280,242 @@ describe('ModelCatalogCacheStore', () => {
     expect(raw).not.toContain('download_verification_failed');
   });
 
+  it('keeps audio-only catalog projector metadata across anonymous cache roundtrips', () => {
+    const store = new ModelCatalogCacheStore();
+    const storage = createStorage(STORAGE_ID, { tier: 'cache' });
+    const anonScope = { query: 'q', cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };
+    const model = buildModel({
+      id: 'public/audio-only-model',
+      resolvedFileName: 'audio-model.Q4_K_M.gguf',
+      chatModalities: ['text', 'audio'],
+      artifactRole: 'primary_chat_model',
+      inputCapabilities: {
+        detectedAt: 1,
+        declared: {
+          image: 'unknown',
+          audio: 'supported',
+          video: 'unknown',
+        },
+        evidence: [
+          { source: 'pipeline_tag', value: 'automatic-speech-recognition', confidence: 'high' },
+          { source: 'projector', value: 'mmproj-audio-model-f16.gguf', confidence: 'medium' },
+        ],
+      },
+      selectedProjectorId: 'projector-audio',
+      multimodalReadiness: {
+        modelId: 'public/audio-only-model',
+        status: 'ready',
+        projectorId: 'projector-audio',
+        support: ['audio'],
+        requestedSupport: ['audio'],
+        checkedAt: 123,
+      },
+      projectorCandidates: [{
+        id: 'projector-audio',
+        ownerModelId: 'public/audio-only-model',
+        repoId: 'public/audio-only-model',
+        fileName: 'mmproj-audio-model-f16.gguf',
+        downloadUrl: 'https://huggingface.co/public/audio-only-model/resolve/main/mmproj-audio-model-f16.gguf',
+        size: 1024,
+        localPath: 'private-mmproj-audio-model-f16.gguf',
+        resumeData: 'private-mmproj-audio-resume-token',
+        downloadProgress: 0.5,
+        lifecycleStatus: 'downloaded',
+        matchStatus: 'failed',
+        matchReason: 'download_verification_failed',
+      }],
+      artifacts: [
+        {
+          id: 'main-audio-model',
+          kind: 'main_model',
+          requiredFor: ['text'],
+          remoteFileName: 'audio-model.Q4_K_M.gguf',
+          downloadUrl: 'https://huggingface.co/public/audio-only-model/resolve/main/audio-model.Q4_K_M.gguf',
+          sizeBytes: 2048,
+          localPath: 'private-main-audio-model.gguf',
+          installState: 'installed',
+          resumeData: 'private-main-audio-resume-token',
+          downloadProgress: 1,
+          errorCode: 'private-main-error',
+          errorMessage: 'private main error',
+        },
+        {
+          id: 'projector-audio',
+          kind: 'multimodal_projector',
+          requiredFor: ['audio'],
+          remoteFileName: 'mmproj-audio-model-f16.gguf',
+          downloadUrl: 'https://huggingface.co/public/audio-only-model/resolve/main/mmproj-audio-model-f16.gguf',
+          sizeBytes: 1024,
+          localPath: 'private-artifact-mmproj-audio-model-f16.gguf',
+          installState: 'installed',
+          resumeData: 'private-artifact-mmproj-audio-resume-token',
+          downloadProgress: 1,
+          errorCode: 'private-projector-error',
+          errorMessage: 'private projector error',
+        },
+      ],
+    } as any);
+
+    store.putSearch(anonScope, {
+      models: [model],
+      hasMore: false,
+      nextCursor: null,
+    });
+    store.putModelSnapshots([model], 'anon');
+
+    const reloadedStore = new ModelCatalogCacheStore();
+    const searchModel = reloadedStore.getSearch(anonScope, 1000)?.models[0];
+    const snapshotModel = reloadedStore.getModelSnapshot('public/audio-only-model', 'anon', 1000);
+    const assertSanitizedAudioModel = (cachedModel: ModelMetadata | undefined | null) => {
+      expect(cachedModel?.chatModalities).toEqual(['text', 'audio']);
+      expect(cachedModel?.visionSource).toBeUndefined();
+      expect(cachedModel?.visionConfidence).toBeUndefined();
+      expect(cachedModel?.selectedProjectorId).toBeUndefined();
+      expect(cachedModel?.multimodalReadiness).toBeUndefined();
+      expect(cachedModel?.projectorCandidates).toHaveLength(1);
+      expect(cachedModel?.projectorCandidates?.[0]).toEqual(expect.objectContaining({
+        id: 'projector-audio',
+        fileName: 'mmproj-audio-model-f16.gguf',
+        lifecycleStatus: 'available',
+        matchStatus: 'missing',
+      }));
+      expect(cachedModel?.projectorCandidates?.[0]?.localPath).toBeUndefined();
+      expect(cachedModel?.projectorCandidates?.[0]?.resumeData).toBeUndefined();
+      expect(cachedModel?.projectorCandidates?.[0]?.downloadProgress).toBeUndefined();
+      expect(cachedModel?.projectorCandidates?.[0]?.matchReason).toBeUndefined();
+
+      const projectorArtifact = cachedModel?.artifacts?.find((artifact) => artifact.kind === 'multimodal_projector');
+      expect(projectorArtifact).toEqual(expect.objectContaining({
+        id: 'projector-audio',
+        remoteFileName: 'mmproj-audio-model-f16.gguf',
+        requiredFor: ['audio'],
+        installState: 'remote',
+      }));
+      expect(projectorArtifact?.localPath).toBeUndefined();
+      expect(projectorArtifact?.resumeData).toBeUndefined();
+      expect(projectorArtifact?.downloadProgress).toBeUndefined();
+      expect((projectorArtifact as any)?.errorCode).toBeUndefined();
+      expect((projectorArtifact as any)?.errorMessage).toBeUndefined();
+    };
+
+    assertSanitizedAudioModel(searchModel);
+    assertSanitizedAudioModel(snapshotModel);
+
+    const rawSearch = storage.getString(SEARCH_CACHE_KEY) as string;
+    const rawSnapshot = storage.getString(SNAPSHOT_CACHE_KEY) as string;
+    expect(rawSearch).toContain('mmproj-audio-model-f16.gguf');
+    expect(rawSnapshot).toContain('mmproj-audio-model-f16.gguf');
+    for (const raw of [rawSearch, rawSnapshot]) {
+      expect(raw).not.toContain('private-mmproj-audio-model-f16.gguf');
+      expect(raw).not.toContain('private-mmproj-audio-resume-token');
+      expect(raw).not.toContain('private-artifact-mmproj-audio-model-f16.gguf');
+      expect(raw).not.toContain('private-artifact-mmproj-audio-resume-token');
+      expect(raw).not.toContain('private-projector-error');
+      expect(raw).not.toContain('download_verification_failed');
+    }
+  });
+
+  it('drops audio projector metadata when anonymous provenance is runtime-only or lacks projector evidence', () => {
+    const store = new ModelCatalogCacheStore();
+    const storage = createStorage(STORAGE_ID, { tier: 'cache' });
+    const anonScope = { query: 'q', cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };
+    const projectorCandidate = (modelId: string, fileName: string) => ({
+      id: `${modelId}-projector`,
+      ownerModelId: modelId,
+      repoId: modelId,
+      fileName,
+      downloadUrl: `https://huggingface.co/${modelId}/resolve/main/${fileName}`,
+      size: 1024,
+      localPath: `private-${fileName}`,
+      resumeData: `private-${fileName}-resume-token`,
+      downloadProgress: 0.5,
+      lifecycleStatus: 'downloaded' as const,
+      matchStatus: 'matched' as const,
+      matchReason: 'single_projector_candidate',
+    });
+    const projectorArtifact = (modelId: string, fileName: string) => ({
+      id: `${modelId}-projector`,
+      kind: 'multimodal_projector' as const,
+      requiredFor: ['audio' as const],
+      remoteFileName: fileName,
+      downloadUrl: `https://huggingface.co/${modelId}/resolve/main/${fileName}`,
+      sizeBytes: 1024,
+      localPath: `private-artifact-${fileName}`,
+      installState: 'installed' as const,
+      resumeData: `private-artifact-${fileName}-resume-token`,
+      downloadProgress: 1,
+      errorCode: `private-${fileName}-error`,
+    });
+    const runtimeOnlyModel = buildModel({
+      id: 'public/runtime-only-audio-model',
+      chatModalities: ['text', 'audio'],
+      inputCapabilities: {
+        detectedAt: 1,
+        declared: {
+          image: 'unknown',
+          audio: 'supported',
+          video: 'unknown',
+        },
+        evidence: [
+          { source: 'runtime', value: 'audio', confidence: 'high' },
+          { source: 'projector', value: 'mmproj-runtime-audio-model-f16.gguf', confidence: 'medium' },
+        ],
+      },
+      projectorCandidates: [projectorCandidate('public/runtime-only-audio-model', 'mmproj-runtime-audio-model-f16.gguf')],
+      artifacts: [projectorArtifact('public/runtime-only-audio-model', 'mmproj-runtime-audio-model-f16.gguf')],
+    } as any);
+    const missingProjectorEvidenceModel = buildModel({
+      id: 'public/missing-projector-evidence-audio-model',
+      chatModalities: ['text', 'audio'],
+      inputCapabilities: {
+        detectedAt: 1,
+        declared: {
+          image: 'unknown',
+          audio: 'supported',
+          video: 'unknown',
+        },
+        evidence: [
+          { source: 'pipeline_tag', value: 'automatic-speech-recognition', confidence: 'high' },
+        ],
+      },
+      projectorCandidates: [projectorCandidate('public/missing-projector-evidence-audio-model', 'mmproj-missing-projector-evidence-f16.gguf')],
+      artifacts: [projectorArtifact('public/missing-projector-evidence-audio-model', 'mmproj-missing-projector-evidence-f16.gguf')],
+    } as any);
+
+    store.putSearch(anonScope, {
+      models: [runtimeOnlyModel, missingProjectorEvidenceModel],
+      hasMore: false,
+      nextCursor: null,
+    });
+    store.putModelSnapshots([runtimeOnlyModel, missingProjectorEvidenceModel], 'anon');
+
+    const reloadedStore = new ModelCatalogCacheStore();
+    const searchModels = reloadedStore.getSearch(anonScope, 1000)?.models ?? [];
+    const snapshotModels = [
+      reloadedStore.getModelSnapshot('public/runtime-only-audio-model', 'anon', 1000),
+      reloadedStore.getModelSnapshot('public/missing-projector-evidence-audio-model', 'anon', 1000),
+    ];
+    for (const cachedModel of [...searchModels, ...snapshotModels]) {
+      expect(cachedModel?.chatModalities).toEqual(['text', 'audio']);
+      expect(cachedModel?.projectorCandidates).toBeUndefined();
+      expect(cachedModel?.artifacts?.some((artifact) => artifact.kind === 'multimodal_projector')).not.toBe(true);
+      expect(cachedModel?.selectedProjectorId).toBeUndefined();
+      expect(cachedModel?.multimodalReadiness).toBeUndefined();
+    }
+
+    const rawSearch = storage.getString(SEARCH_CACHE_KEY) as string;
+    const rawSnapshot = storage.getString(SNAPSHOT_CACHE_KEY) as string;
+    for (const raw of [rawSearch, rawSnapshot]) {
+      expect(raw).not.toContain('projectorCandidates');
+      expect(raw).not.toContain('multimodal_projector');
+      expect(raw).not.toContain('mmproj-missing-projector-evidence-f16.gguf');
+      expect(raw).not.toContain('private-mmproj-runtime-audio-model-f16.gguf');
+      expect(raw).not.toContain('private-mmproj-missing-projector-evidence-f16.gguf');
+      expect(raw).not.toContain('private-artifact-mmproj-runtime-audio-model-f16.gguf');
+      expect(raw).not.toContain('private-artifact-mmproj-missing-projector-evidence-f16.gguf');
+    }
+  });
+
   it('keeps deterministic filename affinity ambiguity across anonymous cache roundtrips', () => {
     const store = new ModelCatalogCacheStore();
     const anonScope = { query: 'q', cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };

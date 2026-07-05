@@ -66,12 +66,24 @@ const MAX_PERSISTED_SEARCH_ENTRIES = 6;
 const MAX_PERSISTED_SNAPSHOT_ENTRIES = 40;
 const PERSISTED_CACHE_KEYS = [SEARCH_CACHE_KEY, SNAPSHOT_CACHE_KEY] as const;
 const CATALOG_SAFE_VISION_SOURCES = new Set<VisionCapabilitySource>(['catalog_metadata', 'tree_probe']);
+const CATALOG_SAFE_AUDIO_CAPABILITY_EVIDENCE_SOURCES = new Set<string>([
+  'pipeline_tag',
+  'tag',
+  'architecture',
+  'config',
+  'repository_tree',
+]);
+const CATALOG_SAFE_AUDIO_PIPELINE_TAGS = new Set([
+  'audio-text-to-text',
+  'automatic-speech-recognition',
+]);
+const CATALOG_SAFE_AUDIO_SIGNAL_PATTERN = /\b(?:audio|speech|asr|whisper|qwen2-audio)\b/u;
 const CATALOG_SAFE_ARTIFACT_REQUIRED_INPUTS = new Set<ModelArtifactRequiredInput>(['text', 'image', 'audio']);
 
 type CatalogVisionRuntimeSource = Pick<ModelMetadata | ModelVariant, 'visionSource'> & Partial<Pick<
   ModelMetadata | ModelVariant,
   'chatModalities' | 'projectorCandidates' | 'visionConfidence'
->>;
+>> & Partial<Pick<ModelMetadata, 'artifacts' | 'inputCapabilities'>>;
 
 function isPublicAnonymousModel(model: ModelMetadata): boolean {
   return model.accessState === ModelAccessState.PUBLIC
@@ -105,6 +117,58 @@ function sanitizeCatalogProjectorMatchReason(projector: ProjectorArtifact): stri
 
 function modelHasCatalogSafeVisionSource(model: Pick<ModelMetadata, 'visionSource'>): boolean {
   return Boolean(model.visionSource && CATALOG_SAFE_VISION_SOURCES.has(model.visionSource));
+}
+
+function modelArtifactsRequireAudioProjector(artifacts: ModelMetadata['artifacts']): boolean {
+  return artifacts?.some((artifact) => (
+    artifact.kind === 'multimodal_projector' && artifact.requiredFor.includes('audio')
+  )) === true;
+}
+
+function modelHasCatalogAudioCapabilitySignal(
+  model: Partial<Pick<ModelMetadata, 'artifacts' | 'chatModalities' | 'inputCapabilities'>>,
+): boolean {
+  return model.chatModalities?.includes('audio') === true
+    || model.inputCapabilities?.declared.audio === 'supported'
+    || modelArtifactsRequireAudioProjector(model.artifacts);
+}
+
+function modelHasCatalogSafeAudioCapabilityEvidence(
+  model: Partial<Pick<ModelMetadata, 'inputCapabilities'>>,
+): boolean {
+  return model.inputCapabilities?.evidence.some((entry) => {
+    const value = entry.value.trim().toLowerCase();
+    if (
+      !value
+      || entry.source === 'runtime'
+      || entry.source === 'projector'
+      || !CATALOG_SAFE_AUDIO_CAPABILITY_EVIDENCE_SOURCES.has(entry.source)
+    ) {
+      return false;
+    }
+
+    return entry.source === 'pipeline_tag'
+      ? CATALOG_SAFE_AUDIO_PIPELINE_TAGS.has(value)
+      : CATALOG_SAFE_AUDIO_SIGNAL_PATTERN.test(value);
+  }) === true;
+}
+
+function modelHasCatalogProjectorEvidence(
+  model: Partial<Pick<ModelMetadata, 'inputCapabilities'>>,
+): boolean {
+  return model.inputCapabilities?.evidence.some((entry) => entry.source === 'projector') === true;
+}
+
+function modelHasCatalogSafeAudioProjectorSource(
+  model: Partial<Pick<ModelMetadata, 'artifacts' | 'chatModalities' | 'inputCapabilities'>>,
+): boolean {
+  return modelHasCatalogAudioCapabilitySignal(model)
+    && modelHasCatalogSafeAudioCapabilityEvidence(model)
+    && modelHasCatalogProjectorEvidence(model);
+}
+
+function modelHasCatalogSafeProjectorSource(model: CatalogVisionRuntimeSource): boolean {
+  return modelHasCatalogSafeVisionSource(model) || modelHasCatalogSafeAudioProjectorSource(model);
 }
 
 function getRemoteFileNameFromDownloadUrl(downloadUrl: string): string | undefined {
@@ -148,20 +212,32 @@ function sanitizeCatalogArtifactRemoteFileName(
 }
 
 function sanitizeCatalogModelArtifacts(
-  model: Pick<ModelMetadata, 'artifacts' | 'metadataTrust' | 'projectorCandidates' | 'resolvedFileName' | 'visionSource'>,
+  model: Pick<
+    ModelMetadata,
+    'artifacts'
+      | 'chatModalities'
+      | 'inputCapabilities'
+      | 'metadataTrust'
+      | 'projectorCandidates'
+      | 'resolvedFileName'
+      | 'visionSource'
+  >,
 ): ModelMetadata['artifacts'] {
   if (!model.artifacts?.length) {
     return undefined;
   }
 
   const hasCatalogSafeVisionSource = modelHasCatalogSafeVisionSource(model);
+  const hasCatalogSafeProjectorSource = modelHasCatalogSafeProjectorSource(model);
   const artifacts = model.artifacts.flatMap((artifact): ModelArtifactMetadata[] => {
-    if (artifact.kind === 'multimodal_projector' && !hasCatalogSafeVisionSource) {
+    if (artifact.kind === 'multimodal_projector' && !hasCatalogSafeProjectorSource) {
       return [];
     }
 
     const remoteFileName = sanitizeCatalogArtifactRemoteFileName(artifact, model);
-    const requiredFor = normalizeArtifactRequiredFor(artifact.requiredFor);
+    const requiredFor = artifact.kind === 'multimodal_projector' && !hasCatalogSafeVisionSource
+      ? normalizeArtifactRequiredFor(artifact.requiredFor).filter((entry) => entry === 'audio')
+      : normalizeArtifactRequiredFor(artifact.requiredFor);
     if (!remoteFileName || !getRemoteFileNameFromDownloadUrl(artifact.downloadUrl) || requiredFor.length === 0) {
       return [];
     }
@@ -208,8 +284,9 @@ function hasProjectorRuntimeFields(projectors: ModelMetadata['projectorCandidate
 
 function hasUnsafeAnonymousVisionProvenance(model: CatalogVisionRuntimeSource): boolean {
   const hasSafeVisionSource = modelHasCatalogSafeVisionSource(model);
+  const hasSafeProjectorSource = modelHasCatalogSafeProjectorSource(model);
   const hasVisionModality = Array.isArray(model.chatModalities) && model.chatModalities.includes('vision');
-  const hasUnsafeProjectorCandidates = Boolean(model.projectorCandidates?.length && !hasSafeVisionSource);
+  const hasUnsafeProjectorCandidates = Boolean(model.projectorCandidates?.length && !hasSafeProjectorSource);
   const hasCatalogVisionEvidence = hasSafeVisionSource;
 
   return Boolean(
@@ -220,10 +297,15 @@ function hasUnsafeAnonymousVisionProvenance(model: CatalogVisionRuntimeSource): 
   );
 }
 
-function hasAnonymousVariantRuntimeFields(variant: ModelVariant): boolean {
+function hasAnonymousVariantRuntimeFields(variant: ModelVariant, model?: ModelMetadata): boolean {
   return variant.isLocal === true
     || typeof variant.selectedProjectorId === 'string'
-    || hasUnsafeAnonymousVisionProvenance(variant)
+    || hasUnsafeAnonymousVisionProvenance({
+      ...variant,
+      chatModalities: variant.chatModalities ?? model?.chatModalities,
+      artifacts: model?.artifacts,
+      inputCapabilities: model?.inputCapabilities,
+    })
     || hasProjectorRuntimeFields(variant.projectorCandidates);
 }
 
@@ -245,7 +327,8 @@ export function sanitizeCatalogProjectorRuntimeState(projectors: ModelMetadata['
 
 export function sanitizeCatalogModelRuntimeState(model: ModelMetadata): ModelMetadata {
   const hasCatalogSafeVisionSource = modelHasCatalogSafeVisionSource(model);
-  const projectorCandidates = hasCatalogSafeVisionSource
+  const hasCatalogSafeProjectorSource = modelHasCatalogSafeProjectorSource(model);
+  const projectorCandidates = hasCatalogSafeProjectorSource
     ? sanitizeCatalogProjectorRuntimeState(model.projectorCandidates)
     : undefined;
   const hasCatalogVisionEvidence = hasCatalogSafeVisionSource;
@@ -279,9 +362,15 @@ export function sanitizeCatalogModelRuntimeState(model: ModelMetadata): ModelMet
   });
 }
 
-function sanitizeCatalogVariantRuntimeState(variant: ModelVariant): ModelVariant {
+function sanitizeCatalogVariantRuntimeState(variant: ModelVariant, model?: ModelMetadata): ModelVariant {
   const hasCatalogSafeVisionSource = modelHasCatalogSafeVisionSource(variant);
-  const projectorCandidates = hasCatalogSafeVisionSource
+  const hasCatalogSafeProjectorSource = modelHasCatalogSafeProjectorSource({
+    ...variant,
+    chatModalities: variant.chatModalities ?? model?.chatModalities,
+    artifacts: model?.artifacts,
+    inputCapabilities: model?.inputCapabilities,
+  });
+  const projectorCandidates = hasCatalogSafeProjectorSource
     ? sanitizeCatalogProjectorRuntimeState(variant.projectorCandidates)
     : undefined;
   const hasCatalogVisionEvidence = hasCatalogSafeVisionSource;
@@ -331,9 +420,9 @@ function limitAnonymousCatalogModelVariants(model: ModelMetadata): ModelMetadata
     includeVariantIds: [model.activeVariantId],
   });
   const hasLocalVariantMarker = variants?.some((variant) => variant.isLocal === true) ?? false;
-  const hasVariantRuntimeFields = variants?.some(hasAnonymousVariantRuntimeFields) ?? false;
+  const hasVariantRuntimeFields = variants?.some((variant) => hasAnonymousVariantRuntimeFields(variant, model)) ?? false;
   const sanitizedVariants = variants?.map(({ isLocal: _isLocal, ...variant }) => (
-    sanitizeCatalogVariantRuntimeState(variant)
+    sanitizeCatalogVariantRuntimeState(variant, model)
   ));
 
   if (variants === model.variants && !hasLocalVariantMarker && !hasVariantRuntimeFields) {
@@ -364,7 +453,7 @@ function hasAnonymousRuntimeFields(model: ModelMetadata): boolean {
     || model.lifecycleStatus !== LifecycleStatus.AVAILABLE
     || model.downloadProgress !== 0
     || model.metadataTrust === 'verified_local'
-    || (model.variants?.some(hasAnonymousVariantRuntimeFields) ?? false)
+    || (model.variants?.some((variant) => hasAnonymousVariantRuntimeFields(variant, model)) ?? false)
     || hasUnsafeAnonymousVisionProvenance(model)
     || hasAnonymousArtifactRuntimeFields(model)
     || typeof model.selectedProjectorId === 'string'

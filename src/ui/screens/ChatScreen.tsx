@@ -243,10 +243,7 @@ function canPreserveReadyOrUnsupportedReadiness(
     lifecycleReadiness: MultimodalReadinessStatus | null,
     requestedNativeModalities: { vision: boolean; audio: boolean },
 ): boolean {
-    const requestedSupport: MultimodalSupportModality[] = [
-        ...(requestedNativeModalities.vision ? ['vision' as const] : []),
-        ...(requestedNativeModalities.audio ? ['audio' as const] : []),
-    ];
+    const requestedSupport = resolveRequestedSupportFromNativeModalities(requestedNativeModalities);
     const checkedSupport = readiness?.requestedSupport ?? readiness?.support ?? [];
 
     return (
@@ -255,6 +252,15 @@ function canPreserveReadyOrUnsupportedReadiness(
         && lifecycleReadiness === null
         && requestedSupport.every((modality) => checkedSupport.includes(modality))
     );
+}
+
+function resolveRequestedSupportFromNativeModalities(
+    requestedNativeModalities: { vision: boolean; audio: boolean },
+): MultimodalSupportModality[] {
+    return [
+        ...(requestedNativeModalities.vision ? ['vision' as const] : []),
+        ...(requestedNativeModalities.audio ? ['audio' as const] : []),
+    ];
 }
 
 export function resolveFallbackMultimodalReadiness(
@@ -281,6 +287,8 @@ export function resolveFallbackMultimodalReadiness(
             checkedAt: 0,
         };
     }
+    const requestedSupport = resolveRequestedSupportFromNativeModalities(requestedNativeModalities);
+    const requestedSupportPayload = requestedSupport.length > 0 ? { requestedSupport } : null;
 
     const resolution = projectorArtifactService.resolveProjectorForModel(model);
     const selectedProjector = resolution.selectedProjector;
@@ -295,6 +303,7 @@ export function resolveFallbackMultimodalReadiness(
                     ? 'failed'
                     : 'missing_projector',
             support: [],
+            ...requestedSupportPayload,
             failureReason: resolution.status === 'failed' ? resolution.reason : undefined,
             checkedAt: 0,
         };
@@ -311,6 +320,7 @@ export function resolveFallbackMultimodalReadiness(
         projectorId: selectedProjector.id,
         projectorSize: selectedProjector.size ?? undefined,
         support: [],
+        ...requestedSupportPayload,
         failureReason: status === 'failed'
             ? selectedProjector.matchReason ?? resolution.reason
             : undefined,

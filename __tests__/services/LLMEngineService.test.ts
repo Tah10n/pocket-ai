@@ -2422,6 +2422,84 @@ describe('LLMEngineService', () => {
     }));
   });
 
+  it('does not report unsupported audio-only readiness as vision unsupported', () => {
+    expect(buildMultimodalDiagnosticsSummary({
+      readiness: {
+        modelId: 'test/model',
+        status: 'unsupported',
+        projectorId: downloadedProjector.id,
+        projectorSize: downloadedProjector.size ?? undefined,
+        support: [],
+        requestedSupport: ['audio'],
+        checkedAt: 1,
+      },
+      attachmentCount: 0,
+    })).toEqual(expect.objectContaining({
+      visionCapability: 'unknown',
+      projectorPresence: 'downloaded',
+      projectorPathCategory: 'models',
+      projectorSize: downloadedProjector.size,
+      readinessStatus: 'unsupported',
+      attachmentCount: 0,
+    }));
+
+    expect(buildMultimodalDiagnosticsSummary({
+      readiness: {
+        modelId: 'test/model',
+        status: 'unsupported',
+        projectorSize: downloadedProjector.size ?? undefined,
+        support: [],
+        requestedSupport: ['audio'],
+        checkedAt: 1,
+      },
+      attachmentCount: 0,
+    })).toEqual(expect.objectContaining({
+      visionCapability: 'unknown',
+      projectorPresence: 'downloaded',
+      projectorPathCategory: 'models',
+      projectorSize: downloadedProjector.size,
+      readinessStatus: 'unsupported',
+    }));
+  });
+
+  it('keeps mixed vision and audio unsupported readiness reported as vision unsupported', () => {
+    expect(buildMultimodalDiagnosticsSummary({
+      readiness: {
+        modelId: 'test/model',
+        status: 'unsupported',
+        projectorId: downloadedProjector.id,
+        projectorSize: downloadedProjector.size ?? undefined,
+        support: [],
+        requestedSupport: ['vision', 'audio'],
+        checkedAt: 1,
+      },
+      attachmentCount: 0,
+    })).toEqual(expect.objectContaining({
+      visionCapability: 'unsupported',
+      projectorPresence: 'downloaded',
+      projectorPathCategory: 'models',
+      projectorSize: downloadedProjector.size,
+      readinessStatus: 'unsupported',
+    }));
+  });
+
+  it('preserves legacy unsupported diagnostics when requested support is absent', () => {
+    expect(buildMultimodalDiagnosticsSummary({
+      readiness: {
+        modelId: 'test/model',
+        status: 'unsupported',
+        support: [],
+        checkedAt: 1,
+      },
+      attachmentCount: 0,
+    })).toEqual(expect.objectContaining({
+      visionCapability: 'unsupported',
+      projectorPresence: 'missing',
+      projectorPathCategory: 'missing',
+      readinessStatus: 'unsupported',
+    }));
+  });
+
   it('records sanitized multimodal diagnostics when readiness blocks image send', async () => {
     await llmEngineService.load('test/model');
     const failureReason = [

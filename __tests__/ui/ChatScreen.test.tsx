@@ -1068,6 +1068,7 @@ describe('ChatScreen', () => {
       expect.objectContaining({
         status: 'initializing',
         projectorId: 'author/model-q4-mmproj',
+        requestedSupport: ['vision'],
       }),
     );
   });
@@ -1082,6 +1083,7 @@ describe('ChatScreen', () => {
         modelId: 'author/model-q4',
         status: 'initializing',
         projectorId: 'author/model-q4-mmproj',
+        requestedSupport: ['vision'],
       }),
     );
 
@@ -1108,6 +1110,7 @@ describe('ChatScreen', () => {
         status: 'initializing',
         projectorId: projector.id,
         support: [],
+        requestedSupport: ['audio'],
       }),
     );
   });
@@ -1161,6 +1164,7 @@ describe('ChatScreen', () => {
         status: 'initializing',
         projectorId: projector.id,
         support: [],
+        requestedSupport: ['vision', 'audio'],
       }),
     );
   });
@@ -1203,6 +1207,7 @@ describe('ChatScreen', () => {
         modelId: 'author/model-q4',
         status: 'initializing',
         projectorId: 'author/model-q4-mmproj',
+        requestedSupport: ['vision'],
       }),
     );
   });
@@ -1223,6 +1228,7 @@ describe('ChatScreen', () => {
         modelId: 'author/model-q4',
         status: 'initializing',
         projectorId: 'author/model-q4-mmproj',
+        requestedSupport: ['vision'],
       }),
     );
   });
@@ -1243,6 +1249,7 @@ describe('ChatScreen', () => {
         modelId: 'author/model-q4',
         status: 'missing_projector',
         support: [],
+        requestedSupport: ['vision'],
       }),
     );
   });
@@ -1267,6 +1274,7 @@ describe('ChatScreen', () => {
         modelId: 'author/model-q4',
         status: 'ambiguous_projector',
         support: [],
+        requestedSupport: ['vision'],
       }),
     );
   });
@@ -1302,6 +1310,7 @@ describe('ChatScreen', () => {
           modelId: 'author/model-q4',
           status: expectedStatus,
           support: [],
+          requestedSupport: ['vision'],
         }),
       );
     },
@@ -1363,6 +1372,7 @@ describe('ChatScreen', () => {
           modelId: 'author/model-q4',
           status: 'projector_downloading',
           projectorId: 'author/model-q4-mmproj',
+          requestedSupport: ['vision'],
         }),
       );
     },
@@ -1384,6 +1394,7 @@ describe('ChatScreen', () => {
         status: 'failed',
         projectorId: 'author/model-q4-mmproj',
         failureReason: 'Checksum mismatch',
+        requestedSupport: ['vision'],
       }),
     );
   });

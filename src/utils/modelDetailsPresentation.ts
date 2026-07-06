@@ -1,7 +1,7 @@
 import { getHuggingFaceModelUrl } from '@/services/ModelCatalogService';
 import type { MaterialSymbolName } from '@/components/ui/MaterialSymbols';
 import { ModelAccessState, LifecycleStatus, type ModelMetadata } from '@/types/models';
-import { getModelVisionCapabilityStatusLabelKey, modelSupportsVision } from '@/utils/modelCapabilities';
+import { getModelVisionCapabilityStatusLabelKey, resolveModelNativeMultimodalSupport } from '@/utils/modelCapabilities';
 import { getShortModelLabel } from '@/utils/modelLabel';
 import {
   formatModelFileSize,
@@ -224,7 +224,7 @@ export function buildModelDetailsMetadataMetrics(
   const activeVariant = getActiveModelVariant(model);
   const projectorCandidates = getModelDisplayProjectorCandidates(model);
   const selectedProjectorId = getModelDisplaySelectedProjectorId(model, projectorCandidates);
-  const visionPresentationModel = activeVariant
+  const capabilityPresentationModel = activeVariant
     ? {
         ...model,
         chatModalities: activeVariant.chatModalities ?? model.chatModalities,
@@ -235,8 +235,13 @@ export function buildModelDetailsMetadataMetrics(
         selectedProjectorId,
       }
     : model;
-  const visionStatusLabelKey = getModelVisionCapabilityStatusLabelKey(visionPresentationModel);
-  const projectorCandidateNames = modelSupportsVision(visionPresentationModel)
+  const visionStatusLabelKey = getModelVisionCapabilityStatusLabelKey(capabilityPresentationModel);
+  const nativeSupport = resolveModelNativeMultimodalSupport(capabilityPresentationModel);
+  const shouldShowProjectorCandidates = (
+    (nativeSupport.vision || nativeSupport.audio)
+    && (projectorCandidates?.length ?? 0) > 0
+  );
+  const projectorCandidateNames = shouldShowProjectorCandidates
     ? projectorCandidates
       ?.map((candidate) => candidate.fileName.trim())
       .filter((fileName) => fileName.length > 0)

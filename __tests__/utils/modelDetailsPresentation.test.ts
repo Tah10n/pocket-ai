@@ -1,9 +1,44 @@
+import type { ProjectorArtifact } from '../../src/types/multimodal';
+import type { ModelMetadata } from '../../src/types/models';
 import { ModelAccessState, LifecycleStatus } from '../../src/types/models';
 import {
   buildModelDetailsHeroMetrics,
   buildModelDetailsMetadataMetrics,
   createModelDetailsPlaceholder,
 } from '../../src/utils/modelDetailsPresentation';
+
+const t = (key: string) => (key === 'models.sizeUnknown' ? 'Unknown' : key);
+
+function createModel(overrides: Partial<ModelMetadata> = {}): ModelMetadata {
+  return {
+    id: 'org/model',
+    name: 'Model',
+    author: 'org',
+    size: 3_800_000_000,
+    downloadUrl: 'https://huggingface.co/org/model/resolve/main/model.gguf',
+    fitsInRam: true,
+    accessState: ModelAccessState.PUBLIC,
+    isGated: false,
+    isPrivate: false,
+    lifecycleStatus: LifecycleStatus.AVAILABLE,
+    downloadProgress: 0,
+    ...overrides,
+  };
+}
+
+function createProjectorArtifact(
+  projector: Pick<ProjectorArtifact, 'id' | 'fileName'> & Partial<ProjectorArtifact>,
+): ProjectorArtifact {
+  return {
+    ownerModelId: 'org/model',
+    repoId: 'org/model',
+    downloadUrl: `https://huggingface.co/org/model/resolve/main/${projector.fileName}`,
+    size: 200_000_000,
+    lifecycleStatus: 'available',
+    matchStatus: 'matched',
+    ...projector,
+  };
+}
 
 describe('modelDetailsPresentation', () => {
   it('uses the short repo label in placeholder model details', () => {
@@ -115,7 +150,6 @@ describe('modelDetailsPresentation', () => {
       ],
     };
 
-    const t = (key: string) => (key === 'models.sizeUnknown' ? 'Unknown' : key);
     const heroMetrics = buildModelDetailsHeroMetrics(model, t);
     const metadataMetrics = buildModelDetailsMetadataMetrics(model, t);
 
@@ -127,6 +161,108 @@ describe('modelDetailsPresentation', () => {
     expect(metadataMetrics).not.toContainEqual(expect.objectContaining({
       label: 'models.multimodal.projectorCandidates',
       value: expect.stringContaining('mmproj-q8.gguf'),
+    }));
+  });
+
+  it('shows projector candidates for audio-only native multimodal models without vision status', () => {
+    const model = createModel({
+      chatModalities: ['text', 'audio'],
+      artifactRole: 'primary_chat_model',
+      projectorCandidates: [
+        createProjectorArtifact({
+          id: 'projector-audio',
+          fileName: 'mmproj-audio.gguf',
+        }),
+      ],
+    });
+
+    const metadataMetrics = buildModelDetailsMetadataMetrics(model, t);
+
+    expect(metadataMetrics).toContainEqual({
+      label: 'models.multimodal.projectorCandidates',
+      value: 'mmproj-audio.gguf',
+    });
+    expect(metadataMetrics).not.toContainEqual(expect.objectContaining({
+      label: 'models.vision.capabilityLabel',
+    }));
+  });
+
+  it('hides projector candidates for text-only models without native multimodal support', () => {
+    const model = createModel({
+      chatModalities: ['text'],
+      artifactRole: 'primary_chat_model',
+      projectorCandidates: [
+        createProjectorArtifact({
+          id: 'projector-stale',
+          fileName: 'mmproj-stale.gguf',
+        }),
+      ],
+    });
+
+    const metadataMetrics = buildModelDetailsMetadataMetrics(model, t);
+
+    expect(metadataMetrics).not.toContainEqual(expect.objectContaining({
+      label: 'models.multimodal.projectorCandidates',
+    }));
+  });
+
+  it('uses only active-variant compatible projectors for audio-only variant details', () => {
+    const model = createModel({
+      chatModalities: ['text', 'audio'],
+      artifactRole: 'primary_chat_model',
+      activeVariantId: 'model-audio.Q4_K_M.gguf',
+      resolvedFileName: 'model-audio.Q4_K_M.gguf',
+      selectedProjectorId: 'projector-audio-q8',
+      variants: [
+        {
+          variantId: 'model-audio.Q4_K_M.gguf',
+          fileName: 'model-audio.Q4_K_M.gguf',
+          quantizationLabel: 'Q4_K_M',
+          size: 3_800_000_000,
+          chatModalities: ['text', 'audio'],
+          artifactRole: 'primary_chat_model',
+          projectorCandidates: [
+            createProjectorArtifact({
+              id: 'projector-audio-q4',
+              ownerVariantId: 'model-audio.Q4_K_M.gguf',
+              fileName: 'mmproj-audio-q4.gguf',
+            }),
+          ],
+        },
+        {
+          variantId: 'model-audio.Q8_0.gguf',
+          fileName: 'model-audio.Q8_0.gguf',
+          quantizationLabel: 'Q8_0',
+          size: 7_200_000_000,
+          chatModalities: ['text', 'audio'],
+          artifactRole: 'primary_chat_model',
+          projectorCandidates: [
+            createProjectorArtifact({
+              id: 'projector-audio-q8',
+              ownerVariantId: 'model-audio.Q8_0.gguf',
+              fileName: 'mmproj-audio-q8.gguf',
+            }),
+          ],
+        },
+      ],
+      projectorCandidates: [
+        createProjectorArtifact({
+          id: 'projector-audio-q8',
+          ownerVariantId: 'model-audio.Q8_0.gguf',
+          fileName: 'mmproj-audio-q8.gguf',
+        }),
+      ],
+    });
+
+    const metadataMetrics = buildModelDetailsMetadataMetrics(model, t);
+
+    expect(metadataMetrics).toContainEqual({
+      label: 'models.multimodal.projectorCandidates',
+      value: 'mmproj-audio-q4.gguf',
+    });
+    expect(metadataMetrics).not.toContainEqual(expect.objectContaining({
+      label: 'models.multimodal.projectorCandidates',
+      value: expect.stringContaining('mmproj-audio-q8.gguf'),
     }));
   });
 });

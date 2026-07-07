@@ -47,11 +47,19 @@ function mergeVariantChatModalities(
   preferred: ModelVariant['chatModalities'],
   fallback: ModelVariant['chatModalities'],
 ): ModelVariant['chatModalities'] {
-  const modalities = [...new Set([...(preferred ?? []), ...(fallback ?? [])])];
+  const source = preferred ?? fallback;
+  const modalities = [...new Set(source ?? [])];
   return modalities.length > 0 ? modalities : undefined;
 }
 
+function isExplicitTextOnlyVariant(variant: ModelVariant): boolean {
+  return Array.isArray(variant.chatModalities)
+    && !variant.chatModalities.some((modality) => modality !== 'text');
+}
+
 function mergeDedupeVariantMetadata(preferred: ModelVariant, fallback: ModelVariant): ModelVariant {
+  const canUseFallbackProjectorMetadata = !isExplicitTextOnlyVariant(preferred);
+
   return {
     ...preferred,
     size: preferred.size ?? fallback.size,
@@ -63,8 +71,12 @@ function mergeDedupeVariantMetadata(preferred: ModelVariant, fallback: ModelVari
     artifactRole: preferred.artifactRole ?? fallback.artifactRole,
     visionSource: preferred.visionSource ?? fallback.visionSource,
     visionConfidence: preferred.visionConfidence ?? fallback.visionConfidence,
-    projectorCandidates: preferred.projectorCandidates ?? fallback.projectorCandidates,
-    selectedProjectorId: preferred.selectedProjectorId ?? fallback.selectedProjectorId,
+    projectorCandidates: preferred.projectorCandidates ?? (
+      canUseFallbackProjectorMetadata ? fallback.projectorCandidates : undefined
+    ),
+    selectedProjectorId: preferred.selectedProjectorId ?? (
+      canUseFallbackProjectorMetadata ? fallback.selectedProjectorId : undefined
+    ),
   };
 }
 

@@ -5,6 +5,7 @@ import { hardwareListenerService } from '../../src/services/HardwareListenerServ
 import { registry } from '../../src/services/LocalStorageRegistry';
 import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../src/types/models';
 import type { MultimodalReadinessState, ProjectorArtifact } from '../../src/types/multimodal';
+import { resolveModelNativeMultimodalSupport } from '../../src/utils/modelCapabilities';
 import { buildProjectorArtifactId } from '../../src/utils/modelProjectors';
 
 jest.mock('../../src/services/HardwareListenerService', () => ({
@@ -165,6 +166,94 @@ function makeDownloadedVisionModelWithProjector(options: {
       status: 'ready',
       projectorId: localProjector.id,
       support: ['vision'],
+      checkedAt: 1234,
+    },
+  };
+
+  return { localModel, localProjector, modelFileName, projectorFileName };
+}
+
+function makeDownloadedAudioModelWithProjector(options: {
+  modelId: string;
+  modelFileName?: string;
+  projectorFileName?: string;
+  projectorSize?: number;
+  projectorSha256?: string;
+}): {
+  localModel: ModelMetadata;
+  localProjector: ProjectorArtifact;
+  modelFileName: string;
+  projectorFileName: string;
+} {
+  const modelFileName = options.modelFileName ?? 'audio-model.Q4_K_M.gguf';
+  const projectorFileName = options.projectorFileName ?? 'mmproj-audio-model-f16.gguf';
+  const projectorId = buildProjectorArtifactId({
+    repoId: options.modelId,
+    hfRevision: 'main',
+    fileName: projectorFileName,
+  });
+  const projectorDownloadUrl = `https://huggingface.co/${options.modelId}/resolve/main/${projectorFileName}`;
+  const localProjector: ProjectorArtifact = {
+    id: projectorId,
+    ownerModelId: options.modelId,
+    repoId: options.modelId,
+    fileName: projectorFileName,
+    downloadUrl: projectorDownloadUrl,
+    hfRevision: 'main',
+    ...(options.projectorSha256 ? { sha256: options.projectorSha256 } : {}),
+    size: options.projectorSize ?? 1024,
+    localPath: `local-${projectorFileName}`,
+    lifecycleStatus: 'downloaded',
+    matchStatus: 'matched',
+  };
+  const localModel: ModelMetadata = {
+    id: options.modelId,
+    name: 'Downloaded Audio Model',
+    author: 'org',
+    size: 2 * 1024 * 1024 * 1024,
+    downloadUrl: `https://huggingface.co/${options.modelId}/resolve/main/${modelFileName}`,
+    hfRevision: 'main',
+    resolvedFileName: modelFileName,
+    localPath: modelFileName,
+    downloadedAt: 1234,
+    fitsInRam: true,
+    accessState: ModelAccessState.PUBLIC,
+    isGated: false,
+    isPrivate: false,
+    lifecycleStatus: LifecycleStatus.DOWNLOADED,
+    downloadProgress: 1,
+    chatModalities: ['text', 'audio'],
+    inputCapabilities: {
+      detectedAt: 1234,
+      declared: {
+        image: 'unknown',
+        audio: 'supported',
+        video: 'unknown',
+      },
+      evidence: [{ source: 'pipeline_tag', value: 'automatic-speech-recognition', confidence: 'high' }],
+    },
+    artifactRole: 'primary_chat_model',
+    artifacts: [{
+      id: projectorId,
+      kind: 'multimodal_projector',
+      requiredFor: ['audio'],
+      hfRevision: 'main',
+      remoteFileName: projectorFileName,
+      downloadUrl: projectorDownloadUrl,
+      sizeBytes: options.projectorSize ?? 1024,
+      ...(options.projectorSha256 ? { sha256: options.projectorSha256 } : {}),
+      localPath: `local-${projectorFileName}`,
+      installState: 'installed',
+    }],
+    projectorCandidates: [localProjector],
+    selectedProjectorId: localProjector.id,
+    multimodalReadiness: {
+      modelId: options.modelId,
+      variantId: modelFileName,
+      status: 'ready',
+      projectorId: localProjector.id,
+      support: ['audio'],
+      requestedSupport: ['audio'],
       checkedAt: 1234,
     },
   };
@@ -669,6 +758,53 @@ describe('ModelCatalogService regressions', () => {
     expect(refreshed.projectorCandidates).toBeUndefined();
     expect(refreshed.chatModalities).not.toContain('vision');
     expect(service.getCachedModel(modelId)).toBeNull();
+  });
+
+  it('clears audio modality and projector artifacts after a final audio-only tree probe miss', async () => {
+    const modelId = 'test-org/audio-tree-probe-miss';
+    const { localModel } = makeDownloadedAudioModelWithProjector({ modelId });
+    const staleModel: ModelMetadata = {
+      ...localModel,
+      requiresTreeProbe: true,
+      visionSource: undefined,
+      visionConfidence: undefined,
+    };
+
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (!url.includes('/tree/main?recursive=true')) {
+        throw new Error(`Unexpected fetch ${url}`);
+      }
+
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: {
+          get: jest.fn(() => null),
+        },
+        json: () => Promise.resolve([
+          {
+            path: 'mmproj-audio-model-f16.gguf',
+            size: 1024,
+            lfs: { sha256: PROJECTOR_SHA256 },
+          },
+        ]),
+      });
+    }) as jest.Mock;
+
+    const refreshed = await service.refreshModelMetadata(staleModel, { includeDetails: false });
+    const nativeSupport = resolveModelNativeMultimodalSupport(refreshed);
+
+    expect(refreshed.resolvedFileName).toBeUndefined();
+    expect(refreshed.projectorCandidates).toBeUndefined();
+    expect(refreshed.selectedProjectorId).toBeUndefined();
+    expect(refreshed.multimodalReadiness).toBeUndefined();
+    expect(refreshed.artifacts?.some((artifact) => artifact.kind === 'multimodal_projector')).not.toBe(true);
+    expect(refreshed.chatModalities).toEqual(['text']);
+    expect(refreshed.chatModalities).not.toContain('audio');
+    expect(refreshed.chatModalities).not.toContain('vision');
+    expect(refreshed.inputCapabilities?.declared.audio).toBe('supported');
+    expect(nativeSupport).toEqual({ vision: false, audio: false });
   });
 
   it('replaces stale local registry state after a final projector-only tree probe miss', async () => {
@@ -2098,6 +2234,95 @@ describe('ModelCatalogService regressions', () => {
       visionConfidence: 'verified',
       localPath: localModel.localPath,
     }));
+  });
+
+  it('preserves downloaded local audio metadata when remote catalog is explicit text-only', () => {
+    const modelId = 'org/local-runtime-audio';
+    const { localModel, localProjector } = makeDownloadedAudioModelWithProjector({ modelId });
+    const remoteModel: ModelMetadata = {
+      ...localModel,
+      name: 'Local Runtime Audio Remote',
+      localPath: undefined,
+      downloadedAt: undefined,
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+      chatModalities: ['text'],
+      inputCapabilities: undefined,
+      artifacts: undefined,
+      projectorCandidates: undefined,
+      selectedProjectorId: undefined,
+      multimodalReadiness: undefined,
+    };
+    const mergeModelWithRegistry = (service as unknown as {
+      mergeModelWithRegistry: (
+        remoteModel: ModelMetadata,
+        memoryFitContext: { totalMemoryBytes: number; systemMemorySnapshot: null },
+      ) => ModelMetadata | undefined;
+    }).mergeModelWithRegistry.bind(service);
+
+    mockedRegistry.getModel.mockImplementation((id) => (id === modelId ? localModel : undefined));
+
+    const merged = mergeModelWithRegistry(remoteModel, {
+      totalMemoryBytes: 4 * 1024 * 1024 * 1024,
+      systemMemorySnapshot: null,
+    });
+
+    expect(merged?.chatModalities).toEqual(['text', 'audio']);
+    expect(merged?.artifactRole).toBe('primary_chat_model');
+    expect(merged?.projectorCandidates?.[0]).toEqual(expect.objectContaining({
+      id: localProjector.id,
+      localPath: localProjector.localPath,
+      lifecycleStatus: 'downloaded',
+    }));
+    expect(merged?.selectedProjectorId).toBe(localProjector.id);
+    expect(merged?.multimodalReadiness).toEqual(expect.objectContaining({
+      projectorId: localProjector.id,
+      support: ['audio'],
+      requestedSupport: ['audio'],
+    }));
+    expect(resolveModelNativeMultimodalSupport(merged!)).toEqual({ vision: false, audio: true });
+  });
+
+  it('drops local audio metadata when remote catalog identity resets local download state', () => {
+    const modelId = 'org/reset-local-audio';
+    const { localModel } = makeDownloadedAudioModelWithProjector({ modelId });
+    const remoteModel: ModelMetadata = {
+      ...localModel,
+      name: 'Reset Local Audio Remote',
+      size: localModel.size! + 1024,
+      localPath: undefined,
+      downloadedAt: undefined,
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+      chatModalities: ['text'],
+      inputCapabilities: undefined,
+      artifacts: undefined,
+      projectorCandidates: undefined,
+      selectedProjectorId: undefined,
+      multimodalReadiness: undefined,
+    };
+    const mergeModelWithRegistry = (service as unknown as {
+      mergeModelWithRegistry: (
+        remoteModel: ModelMetadata,
+        memoryFitContext: { totalMemoryBytes: number; systemMemorySnapshot: null },
+      ) => ModelMetadata | undefined;
+    }).mergeModelWithRegistry.bind(service);
+
+    mockedRegistry.getModel.mockImplementation((id) => (id === modelId ? localModel : undefined));
+
+    const merged = mergeModelWithRegistry(remoteModel, {
+      totalMemoryBytes: 4 * 1024 * 1024 * 1024,
+      systemMemorySnapshot: null,
+    });
+
+    expect(merged?.chatModalities).toEqual(['text']);
+    expect(merged?.projectorCandidates).toBeUndefined();
+    expect(merged?.selectedProjectorId).toBeUndefined();
+    expect(merged?.multimodalReadiness).toBeUndefined();
+    expect(merged?.localPath).toBeUndefined();
+    expect(merged?.downloadedAt).toBeUndefined();
+    expect(merged?.lifecycleStatus).toBe(LifecycleStatus.AVAILABLE);
+    expect(resolveModelNativeMultimodalSupport(merged!)).toEqual({ vision: false, audio: false });
   });
 
   it('drops stale local-only vision metadata when catalog identity resets local download state', async () => {

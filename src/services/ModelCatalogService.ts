@@ -1,6 +1,6 @@
 import DeviceInfo from 'react-native-device-info';
 import { LifecycleStatus, ModelAccessState, type ModelMetadata, type ModelVariant } from '../types/models';
-import type { MultimodalReadinessState, ProjectorArtifact } from '../types/multimodal';
+import type { ModelChatModality, MultimodalReadinessState, ProjectorArtifact } from '../types/multimodal';
 import { hardwareListenerService } from './HardwareListenerService';
 import { registry } from './LocalStorageRegistry';
 import { huggingFaceTokenService } from './HuggingFaceTokenService';
@@ -789,7 +789,8 @@ export class ModelCatalogService {
       downloadUrl: getHuggingFaceModelUrl(model.id),
       sha256: undefined,
       requiresTreeProbe: false,
-      chatModalities: model.chatModalities?.filter((modality) => modality !== 'vision'),
+      artifacts: undefined,
+      chatModalities: model.chatModalities ? ['text'] : undefined,
       artifactRole: undefined,
       visionSource: undefined,
       visionConfidence: undefined,
@@ -2607,6 +2608,105 @@ export class ModelCatalogService {
       : { ...readiness, projectorId };
   }
 
+  private readinessIncludesModality(
+    readiness: MultimodalReadinessState | undefined,
+    modality: Exclude<ModelChatModality, 'text'>,
+  ): boolean {
+    return readiness?.support.includes(modality) === true
+      || readiness?.requestedSupport?.includes(modality) === true;
+  }
+
+  private modelArtifactsRequireInput(
+    model: Pick<ModelMetadata, 'artifacts'>,
+    input: 'image' | 'audio',
+  ): boolean {
+    return model.artifacts?.some((artifact) => (
+      artifact.kind === 'multimodal_projector' && artifact.requiredFor.includes(input)
+    )) === true;
+  }
+
+  private hasAudioEvidence(model: ModelMetadata): boolean {
+    return model.chatModalities?.includes('audio') === true
+      || model.inputCapabilities?.declared.audio === 'supported'
+      || this.modelArtifactsRequireInput(model, 'audio')
+      || this.readinessIncludesModality(model.multimodalReadiness, 'audio');
+  }
+
+  private hasLocalAudioRuntimeMetadata(
+    localModel: ModelMetadata,
+    projectorMetadataPatch: ProjectorMetadataMerge,
+  ): boolean {
+    if (!this.hasAudioEvidence(localModel)) {
+      return false;
+    }
+
+    if (this.readinessIncludesModality(projectorMetadataPatch.multimodalReadiness, 'audio')) {
+      return true;
+    }
+
+    const mergedProjectorIds = new Set((projectorMetadataPatch.projectorCandidates ?? []).map((projector) => projector.id));
+    const localProjectorIds = new Set((localModel.projectorCandidates ?? []).map((projector) => projector.id));
+    if (mergedProjectorIds.size === 0) {
+      return localModel.chatModalities?.includes('audio') === true
+        && localProjectorIds.size === 0
+        && !this.modelArtifactsRequireInput(localModel, 'audio');
+    }
+
+    if (localModel.artifacts?.some((artifact) => (
+      artifact.kind === 'multimodal_projector'
+      && artifact.requiredFor.includes('audio')
+      && mergedProjectorIds.has(artifact.id)
+    )) === true) {
+      return true;
+    }
+
+    if (
+      localModel.selectedProjectorId
+      && mergedProjectorIds.has(localModel.selectedProjectorId)
+      && localModel.chatModalities?.includes('audio') === true
+    ) {
+      return true;
+    }
+
+    return localModel.chatModalities?.includes('audio') === true
+      && Array.from(localProjectorIds).some((projectorId) => mergedProjectorIds.has(projectorId));
+  }
+
+  private mergeChatModalitiesPreservingLocalNative(
+    remoteModel: ModelMetadata,
+    localModel: ModelMetadata,
+    options: {
+      canUseLocalFallback: boolean;
+      preserveLocalVision: boolean;
+      preserveLocalAudio: boolean;
+    },
+  ): ModelMetadata['chatModalities'] {
+    const modalities = new Set<ModelChatModality>();
+    const baseModalities = remoteModel.chatModalities
+      ?? (options.canUseLocalFallback ? localModel.chatModalities : undefined);
+
+    for (const modality of baseModalities ?? []) {
+      modalities.add(modality);
+    }
+
+    if (options.preserveLocalVision && localModel.chatModalities?.includes('vision') === true) {
+      modalities.add('vision');
+    }
+
+    if (options.preserveLocalAudio) {
+      modalities.add('audio');
+    }
+
+    if ((modalities.has('vision') || modalities.has('audio')) && !modalities.has('text')) {
+      modalities.add('text');
+    }
+
+    const orderedModalities = (['text', 'vision', 'audio'] as const)
+      .filter((modality) => modalities.has(modality));
+
+    return orderedModalities.length > 0 ? orderedModalities : undefined;
+  }
+
   private mergeModelWithRegistry(
     remoteModel?: ModelMetadata,
     memoryFitContext: CatalogMemoryFitContext | null = this.getRememberedMemoryFitContext(),
@@ -2701,30 +2801,39 @@ export class ModelCatalogService {
           ...(remoteModel.gguf ?? {}),
         }
       : undefined;
-    const remoteHasVisionEvidence = remoteModel.chatModalities?.includes('vision') === true
-      || Boolean(remoteModel.projectorCandidates?.length)
-      || remoteModel.visionSource !== undefined;
-    const shouldPreserveLocalVisionMetadata = !shouldResetLocalDownloadState
-      && !remoteHasVisionEvidence
-      && localModel.chatModalities?.includes('vision') === true;
-    const canUseLocalVisionFallback = !shouldResetLocalDownloadState;
-    const chatModalities = shouldPreserveLocalVisionMetadata
-      ? localModel.chatModalities
-      : remoteModel.chatModalities ?? (canUseLocalVisionFallback ? localModel.chatModalities : undefined);
-    const artifactRole = shouldPreserveLocalVisionMetadata
-      ? localModel.artifactRole ?? remoteModel.artifactRole
-      : remoteModel.artifactRole ?? (canUseLocalVisionFallback ? localModel.artifactRole : undefined);
-    const visionSource = shouldPreserveLocalVisionMetadata
-      ? localModel.visionSource ?? remoteModel.visionSource
-      : remoteModel.visionSource ?? (canUseLocalVisionFallback ? localModel.visionSource : undefined);
-    const visionConfidence = shouldPreserveLocalVisionMetadata
-      ? localModel.visionConfidence ?? remoteModel.visionConfidence
-      : remoteModel.visionConfidence ?? (canUseLocalVisionFallback ? localModel.visionConfidence : undefined);
     const projectorMetadataPatch = this.mergeProjectorMetadataWithLocalState(
       remoteModel,
       localModel,
       shouldResetLocalDownloadState,
     );
+    const remoteHasVisionEvidence = remoteModel.chatModalities?.includes('vision') === true
+      || Boolean(remoteModel.projectorCandidates?.length)
+      || this.modelArtifactsRequireInput(remoteModel, 'image')
+      || this.readinessIncludesModality(remoteModel.multimodalReadiness, 'vision')
+      || remoteModel.visionSource !== undefined;
+    const remoteHasAudioEvidence = this.hasAudioEvidence(remoteModel);
+    const shouldPreserveLocalVisionMetadata = !shouldResetLocalDownloadState
+      && !remoteHasVisionEvidence
+      && localModel.chatModalities?.includes('vision') === true;
+    const shouldPreserveLocalAudioMetadata = !shouldResetLocalDownloadState
+      && !remoteHasAudioEvidence
+      && this.hasLocalAudioRuntimeMetadata(localModel, projectorMetadataPatch);
+    const canUseLocalNativeFallback = !shouldResetLocalDownloadState;
+    const chatModalities = this.mergeChatModalitiesPreservingLocalNative(remoteModel, localModel, {
+      canUseLocalFallback: canUseLocalNativeFallback,
+      preserveLocalVision: shouldPreserveLocalVisionMetadata,
+      preserveLocalAudio: shouldPreserveLocalAudioMetadata,
+    });
+    const shouldPreserveLocalNativeMetadata = shouldPreserveLocalVisionMetadata || shouldPreserveLocalAudioMetadata;
+    const artifactRole = shouldPreserveLocalNativeMetadata
+      ? localModel.artifactRole ?? remoteModel.artifactRole
+      : remoteModel.artifactRole ?? (canUseLocalNativeFallback ? localModel.artifactRole : undefined);
+    const visionSource = shouldPreserveLocalVisionMetadata
+      ? localModel.visionSource ?? remoteModel.visionSource
+      : remoteModel.visionSource ?? (canUseLocalNativeFallback ? localModel.visionSource : undefined);
+    const visionConfidence = shouldPreserveLocalVisionMetadata
+      ? localModel.visionConfidence ?? remoteModel.visionConfidence
+      : remoteModel.visionConfidence ?? (canUseLocalNativeFallback ? localModel.visionConfidence : undefined);
     const resolvedMemoryFit = resolveMemoryFitSummary({ size: resolvedSize, metadataTrust, gguf }, memoryFitContext, {
       projectorSizeBytes: this.resolveActiveVariantProjectorMemoryFitSizeBytes({
         ...remoteModel,

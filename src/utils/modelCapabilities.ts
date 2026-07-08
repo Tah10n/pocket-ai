@@ -420,6 +420,11 @@ function hasPersistedAudioReadinessEvidence(
     || readiness?.requestedSupport?.includes('audio') === true;
 }
 
+function hasProjectorPathEvidence(model: ModelNativeCapabilityInput): boolean {
+  return Boolean(model.projectorCandidates?.length)
+    || (typeof model.selectedProjectorId === 'string' && model.selectedProjectorId.trim().length > 0);
+}
+
 export function resolveModelNativeMultimodalSupport(model: ModelNativeCapabilityInput): ModelNativeMultimodalSupport {
   if (model.artifactRole === 'projector_companion') {
     return { vision: false, audio: false };
@@ -430,9 +435,14 @@ export function resolveModelNativeMultimodalSupport(model: ModelNativeCapability
   const hasExplicitChatModalities = Array.isArray(model.chatModalities);
   const hasExplicitNativeChatModalities = chatSupportsVision || chatSupportsAudio;
   const canUseNativeCapabilityEvidence = !hasExplicitChatModalities || hasExplicitNativeChatModalities;
+  const canUseAudioReadinessEvidence = !hasExplicitChatModalities || chatSupportsAudio;
   const canUseLegacyVisionEvidence = (!hasExplicitChatModalities || chatSupportsVision)
     && !hasAudioOnlyDeclaredCapabilityEvidence(model);
   const hasExplicitNativeModalityExcludingVision = hasExplicitNativeChatModalities && !chatSupportsVision;
+  const hasAudioArtifactEvidence = modelArtifactsRequireInput(model.artifacts, 'audio');
+  const hasAudioReadinessEvidence = canUseAudioReadinessEvidence
+    && hasPersistedAudioReadinessEvidence(model.multimodalReadiness);
+  const hasAudioCatalogDeclaration = chatSupportsAudio || model.inputCapabilities?.declared.audio === 'supported';
   const vision = chatSupportsVision
     || (canUseNativeCapabilityEvidence && hasDeclaredImageInputSupport(model, {
       allowProjectorOnlyEvidence: !hasExplicitNativeModalityExcludingVision,
@@ -447,9 +457,9 @@ export function resolveModelNativeMultimodalSupport(model: ModelNativeCapability
     ));
   const audio = chatSupportsAudio
     || (canUseNativeCapabilityEvidence && (
-      model.inputCapabilities?.declared.audio === 'supported'
-      || modelArtifactsRequireInput(model.artifacts, 'audio')
-      || hasPersistedAudioReadinessEvidence(model.multimodalReadiness)
+      hasAudioArtifactEvidence
+      || hasAudioReadinessEvidence
+      || (hasAudioCatalogDeclaration && hasProjectorPathEvidence(model))
     ));
 
   return { vision, audio };

@@ -1,6 +1,11 @@
 import DeviceInfo from 'react-native-device-info';
 import { LifecycleStatus, ModelAccessState, type ModelMetadata, type ModelVariant } from '../types/models';
-import type { ModelChatModality, MultimodalReadinessState, ProjectorArtifact } from '../types/multimodal';
+import type {
+  ModelChatModality,
+  MultimodalReadinessState,
+  MultimodalSupportModality,
+  ProjectorArtifact,
+} from '../types/multimodal';
 import { hardwareListenerService } from './HardwareListenerService';
 import { registry } from './LocalStorageRegistry';
 import { huggingFaceTokenService } from './HuggingFaceTokenService';
@@ -1681,6 +1686,10 @@ export class ModelCatalogService {
           shouldResetLocalDownloadState,
           projectorCandidates !== undefined && !treeResponse.isComplete && !shouldResetLocalDownloadState,
         );
+        const filteredProjectorMetadataPatch = this.filterProjectorMetadataMergeForChatModalities(
+          projectorMetadataPatch,
+          chatModalities,
+        );
         const resolvedMemoryFit = shouldPreserveVerifiedLocal
           ? null
           : resolveMemoryFitSummary({ size, metadataTrust, gguf }, memoryFitContext, {
@@ -1689,8 +1698,8 @@ export class ModelCatalogService {
               resolvedFileName,
               activeVariantId: resolvedFileName,
               variants,
-              projectorCandidates: projectorMetadataPatch.projectorCandidates,
-              selectedProjectorId: projectorMetadataPatch.selectedProjectorId,
+              projectorCandidates: filteredProjectorMetadataPatch.projectorCandidates,
+              selectedProjectorId: filteredProjectorMetadataPatch.selectedProjectorId,
             }),
           });
         const didChangeSize = size !== model.size;
@@ -1744,7 +1753,7 @@ export class ModelCatalogService {
             artifactRole: 'primary_chat_model',
             visionSource,
             visionConfidence,
-            ...projectorMetadataPatch,
+            ...filteredProjectorMetadataPatch,
           });
         }
 
@@ -1770,7 +1779,7 @@ export class ModelCatalogService {
           artifactRole: 'primary_chat_model',
           visionSource,
           visionConfidence,
-          ...projectorMetadataPatch,
+          ...filteredProjectorMetadataPatch,
         });
       } catch (error) {
         if (error instanceof StaleCatalogAuthError) {
@@ -2567,6 +2576,54 @@ export class ModelCatalogService {
     );
   }
 
+  private filterMultimodalReadinessForChatModalities(
+    readiness: MultimodalReadinessState | undefined,
+    chatModalities: ModelMetadata['chatModalities'],
+  ): MultimodalReadinessState | undefined {
+    if (!readiness) {
+      return undefined;
+    }
+
+    const allowedSupport = new Set<MultimodalSupportModality>();
+    if (chatModalities?.includes('vision') === true) {
+      allowedSupport.add('vision');
+    }
+    if (chatModalities?.includes('audio') === true) {
+      allowedSupport.add('audio');
+    }
+
+    if (allowedSupport.size === 0) {
+      return undefined;
+    }
+
+    const support = readiness.support.filter((modality) => allowedSupport.has(modality));
+    if (readiness.status === 'ready' && support.length === 0) {
+      return undefined;
+    }
+
+    const requestedSupport = readiness.requestedSupport?.filter((modality) => allowedSupport.has(modality));
+    const { requestedSupport: _staleRequestedSupport, ...readinessWithoutRequestedSupport } = readiness;
+
+    return {
+      ...readinessWithoutRequestedSupport,
+      support,
+      ...(requestedSupport && requestedSupport.length > 0 ? { requestedSupport } : {}),
+    };
+  }
+
+  private filterProjectorMetadataMergeForChatModalities(
+    metadata: ProjectorMetadataMerge,
+    chatModalities: ModelMetadata['chatModalities'],
+  ): ProjectorMetadataMerge {
+    return {
+      ...metadata,
+      multimodalReadiness: this.filterMultimodalReadinessForChatModalities(
+        metadata.multimodalReadiness,
+        chatModalities,
+      ),
+    };
+  }
+
   private remapMultimodalReadiness(
     modelId: string,
     readiness: MultimodalReadinessState | undefined,
@@ -2626,8 +2683,14 @@ export class ModelCatalogService {
   }
 
   private hasAudioEvidence(model: ModelMetadata): boolean {
-    return model.chatModalities?.includes('audio') === true
-      || model.inputCapabilities?.declared.audio === 'supported'
+    const hasExplicitAudioModality = model.chatModalities?.includes('audio') === true;
+    const hasProjectorPathEvidence = Boolean(model.projectorCandidates?.length)
+      || (typeof model.selectedProjectorId === 'string' && model.selectedProjectorId.trim().length > 0);
+    const hasAudioCapabilityWithRuntimePath = model.inputCapabilities?.declared.audio === 'supported'
+      && hasProjectorPathEvidence;
+
+    return hasExplicitAudioModality
+      || hasAudioCapabilityWithRuntimePath
       || this.modelArtifactsRequireInput(model, 'audio')
       || this.readinessIncludesModality(model.multimodalReadiness, 'audio');
   }
@@ -2683,7 +2746,8 @@ export class ModelCatalogService {
   ): ModelMetadata['chatModalities'] {
     const modalities = new Set<ModelChatModality>();
     const baseModalities = remoteModel.chatModalities
-      ?? (options.canUseLocalFallback ? localModel.chatModalities : undefined);
+      ? resolveModelChatModalities(remoteModel)
+      : options.canUseLocalFallback ? localModel.chatModalities : undefined;
 
     for (const modality of baseModalities ?? []) {
       modalities.add(modality);
@@ -2812,8 +2876,12 @@ export class ModelCatalogService {
       || this.readinessIncludesModality(remoteModel.multimodalReadiness, 'vision')
       || remoteModel.visionSource !== undefined;
     const remoteHasAudioEvidence = this.hasAudioEvidence(remoteModel);
+    const remoteExplicitlyExcludesVision = Array.isArray(remoteModel.chatModalities)
+      && remoteModel.chatModalities.some((modality) => modality !== 'text')
+      && !remoteModel.chatModalities.includes('vision');
     const shouldPreserveLocalVisionMetadata = !shouldResetLocalDownloadState
       && !remoteHasVisionEvidence
+      && !remoteExplicitlyExcludesVision
       && localModel.chatModalities?.includes('vision') === true;
     const shouldPreserveLocalAudioMetadata = !shouldResetLocalDownloadState
       && !remoteHasAudioEvidence
@@ -2824,22 +2892,27 @@ export class ModelCatalogService {
       preserveLocalVision: shouldPreserveLocalVisionMetadata,
       preserveLocalAudio: shouldPreserveLocalAudioMetadata,
     });
+    const filteredProjectorMetadataPatch = this.filterProjectorMetadataMergeForChatModalities(
+      projectorMetadataPatch,
+      chatModalities,
+    );
     const shouldPreserveLocalNativeMetadata = shouldPreserveLocalVisionMetadata || shouldPreserveLocalAudioMetadata;
     const artifactRole = shouldPreserveLocalNativeMetadata
       ? localModel.artifactRole ?? remoteModel.artifactRole
       : remoteModel.artifactRole ?? (canUseLocalNativeFallback ? localModel.artifactRole : undefined);
+    const canUseLocalVisionFallback = canUseLocalNativeFallback && !remoteExplicitlyExcludesVision;
     const visionSource = shouldPreserveLocalVisionMetadata
       ? localModel.visionSource ?? remoteModel.visionSource
-      : remoteModel.visionSource ?? (canUseLocalNativeFallback ? localModel.visionSource : undefined);
+      : remoteModel.visionSource ?? (canUseLocalVisionFallback ? localModel.visionSource : undefined);
     const visionConfidence = shouldPreserveLocalVisionMetadata
       ? localModel.visionConfidence ?? remoteModel.visionConfidence
-      : remoteModel.visionConfidence ?? (canUseLocalNativeFallback ? localModel.visionConfidence : undefined);
+      : remoteModel.visionConfidence ?? (canUseLocalVisionFallback ? localModel.visionConfidence : undefined);
     const resolvedMemoryFit = resolveMemoryFitSummary({ size: resolvedSize, metadataTrust, gguf }, memoryFitContext, {
       projectorSizeBytes: this.resolveActiveVariantProjectorMemoryFitSizeBytes({
         ...remoteModel,
         resolvedFileName: remoteModel.resolvedFileName ?? localModel.resolvedFileName,
-        projectorCandidates: projectorMetadataPatch.projectorCandidates,
-        selectedProjectorId: projectorMetadataPatch.selectedProjectorId,
+        projectorCandidates: filteredProjectorMetadataPatch.projectorCandidates,
+        selectedProjectorId: filteredProjectorMetadataPatch.selectedProjectorId,
       }),
     });
     const fitsInRam = resolvedMemoryFit?.fitsInRam
@@ -2902,7 +2975,7 @@ export class ModelCatalogService {
       artifactRole,
       visionSource,
       visionConfidence,
-      ...projectorMetadataPatch,
+      ...filteredProjectorMetadataPatch,
     });
   }
 

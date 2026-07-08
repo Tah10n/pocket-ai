@@ -2325,6 +2325,75 @@ describe('ModelCatalogService regressions', () => {
     expect(resolveModelNativeMultimodalSupport(merged!)).toEqual({ vision: false, audio: false });
   });
 
+  it('drops stale local vision readiness when remote catalog is explicit audio-only', () => {
+    const modelId = 'org/local-mixed-remote-audio';
+    const { localModel, localProjector } = makeDownloadedAudioModelWithProjector({ modelId });
+    const mixedLocalModel: ModelMetadata = {
+      ...localModel,
+      chatModalities: ['text', 'vision', 'audio'],
+      visionSource: 'gguf_metadata',
+      visionConfidence: 'verified',
+      artifacts: localModel.artifacts?.map((artifact) => (
+        artifact.kind === 'multimodal_projector'
+          ? { ...artifact, requiredFor: ['image' as const, 'audio' as const] }
+          : artifact
+      )),
+      multimodalReadiness: {
+        modelId,
+        variantId: localModel.resolvedFileName,
+        status: 'ready',
+        projectorId: localProjector.id,
+        support: ['vision', 'audio'],
+        requestedSupport: ['vision', 'audio'],
+        checkedAt: 1234,
+      },
+    };
+    const remoteModel: ModelMetadata = {
+      ...mixedLocalModel,
+      name: 'Remote Audio Only',
+      localPath: undefined,
+      downloadedAt: undefined,
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+      chatModalities: ['text', 'audio'],
+      artifacts: undefined,
+      projectorCandidates: undefined,
+      selectedProjectorId: undefined,
+      multimodalReadiness: undefined,
+      visionSource: undefined,
+      visionConfidence: undefined,
+    };
+    const mergeModelWithRegistry = (service as unknown as {
+      mergeModelWithRegistry: (
+        remoteModel: ModelMetadata,
+        memoryFitContext: { totalMemoryBytes: number; systemMemorySnapshot: null },
+      ) => ModelMetadata | undefined;
+    }).mergeModelWithRegistry.bind(service);
+
+    mockedRegistry.getModel.mockImplementation((id) => (id === modelId ? mixedLocalModel : undefined));
+
+    const merged = mergeModelWithRegistry(remoteModel, {
+      totalMemoryBytes: 4 * 1024 * 1024 * 1024,
+      systemMemorySnapshot: null,
+    });
+
+    expect(merged?.chatModalities).toEqual(['text', 'audio']);
+    expect(merged?.visionSource).toBeUndefined();
+    expect(merged?.visionConfidence).toBeUndefined();
+    expect(merged?.projectorCandidates?.[0]).toEqual(expect.objectContaining({
+      id: localProjector.id,
+      localPath: localProjector.localPath,
+      lifecycleStatus: 'downloaded',
+    }));
+    expect(merged?.multimodalReadiness).toEqual(expect.objectContaining({
+      status: 'ready',
+      projectorId: localProjector.id,
+      support: ['audio'],
+      requestedSupport: ['audio'],
+    }));
+    expect(resolveModelNativeMultimodalSupport(merged!)).toEqual({ vision: false, audio: true });
+  });
+
   it('drops stale local-only vision metadata when catalog identity resets local download state', async () => {
     const modelId = 'org/reset-local-metadata';
     const localModel: ModelMetadata = {

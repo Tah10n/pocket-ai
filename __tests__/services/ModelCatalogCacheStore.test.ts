@@ -496,7 +496,7 @@ describe('ModelCatalogCacheStore', () => {
       reloadedStore.getModelSnapshot('public/missing-projector-evidence-audio-model', 'anon', 1000),
     ];
     for (const cachedModel of [...searchModels, ...snapshotModels]) {
-      expect(cachedModel?.chatModalities).toEqual(['text', 'audio']);
+      expect(cachedModel?.chatModalities).toEqual(['text']);
       expect(cachedModel?.projectorCandidates).toBeUndefined();
       expect(cachedModel?.artifacts?.some((artifact) => artifact.kind === 'multimodal_projector')).not.toBe(true);
       expect(cachedModel?.selectedProjectorId).toBeUndefined();

@@ -245,12 +245,16 @@ function canPreserveReadyOrUnsupportedReadiness(
 ): boolean {
     const requestedSupport = resolveRequestedSupportFromNativeModalities(requestedNativeModalities);
     const checkedSupport = readiness?.requestedSupport ?? readiness?.support ?? [];
+    const checkedRequestedSupport = checkedSupport.length === requestedSupport.length
+        && requestedSupport.every((modality) => checkedSupport.includes(modality));
+    const supportMatchesCurrentRequest = readiness?.support.every((modality) => requestedSupport.includes(modality)) === true;
 
     return (
         (readiness?.status === 'ready' || readiness?.status === 'unsupported')
         && readiness.projectorId === selectedProjectorId
         && lifecycleReadiness === null
-        && requestedSupport.every((modality) => checkedSupport.includes(modality))
+        && checkedRequestedSupport
+        && supportMatchesCurrentRequest
     );
 }
 

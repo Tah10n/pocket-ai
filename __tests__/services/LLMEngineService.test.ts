@@ -3843,6 +3843,47 @@ describe('LLMEngineService', () => {
     }));
   });
 
+  it('rechecks active projector readiness when requested modalities contract from stale mixed readiness', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+
+    await llmEngineService.load('test/model', { forceReload: true });
+    const context = (llmEngineService as any).context;
+    expect(context).toBeTruthy();
+
+    getMultimodalSupportMock().mockClear();
+    getMultimodalSupportMock().mockResolvedValue({ vision: false, audio: true });
+    (registry.updateModel as jest.Mock).mockClear();
+    (registry.getModel as jest.Mock).mockReturnValue({
+      ...createDownloadedAudioModel(),
+      multimodalReadiness: {
+        modelId: 'test/model',
+        status: 'ready',
+        projectorId: downloadedProjector.id,
+        support: ['vision', 'audio'],
+        requestedSupport: ['vision', 'audio'],
+        checkedAt: 1,
+      },
+    });
+
+    await (llmEngineService as any).initializeMultimodalReadinessForLoadedContext({
+      modelId: 'test/model',
+      context,
+      useGpu: false,
+    });
+
+    expect(getMultimodalSupportMock()).toHaveBeenCalledTimes(1);
+    const readinessUpdate = (registry.updateModel as jest.Mock).mock.calls
+      .map(([model]) => model)
+      .find((model: { multimodalReadiness?: { requestedSupport?: string[] } }) => (
+        model.multimodalReadiness?.requestedSupport?.length === 1
+      ));
+    expect(readinessUpdate?.multimodalReadiness).toEqual(expect.objectContaining({
+      status: 'ready',
+      support: ['audio'],
+      requestedSupport: ['audio'],
+    }));
+  });
+
   it('reuses partial active projector readiness after all requested modalities were checked', async () => {
     (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
 

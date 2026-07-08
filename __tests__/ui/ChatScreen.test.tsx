@@ -998,30 +998,40 @@ describe('ChatScreen', () => {
     expect(mockCommitAttachmentDrafts).not.toHaveBeenCalled();
   });
 
-  it('does not report image attachments as ready when only audio runtime support is ready', () => {
+  it('does not reuse stale mixed readiness for audio-only model metadata', () => {
     const projector = createVisionProjector();
-    registry.saveModels([
-      createVisionModel({
-        chatModalities: ['text', 'audio'],
-        selectedProjectorId: projector.id,
-        projectorCandidates: [projector],
-        multimodalReadiness: {
-          modelId: 'author/model-q4',
-          status: 'ready',
-          projectorId: projector.id,
-          support: ['audio'],
-          requestedSupport: ['vision', 'audio'],
-          checkedAt: 1,
-        },
+    const model = createVisionModel({
+      chatModalities: ['text', 'audio'],
+      selectedProjectorId: projector.id,
+      projectorCandidates: [projector],
+      multimodalReadiness: {
+        modelId: 'author/model-q4',
+        status: 'ready',
+        projectorId: projector.id,
+        support: ['audio'],
+        requestedSupport: ['vision', 'audio'],
+        checkedAt: 1,
+      },
+    });
+
+    expect(resolveFallbackMultimodalReadiness(model, 'author/model-q4')).toEqual(
+      expect.objectContaining({
+        modelId: 'author/model-q4',
+        status: 'initializing',
+        projectorId: projector.id,
+        support: [],
+        requestedSupport: ['audio'],
       }),
-    ]);
+    );
+
+    registry.saveModels([model]);
 
     render(React.createElement(ChatScreen));
 
     expect(lastChatInputBarProps).toEqual(expect.objectContaining({
       imageAttachmentsEnabled: false,
-      imageAttachmentsDisabledReason: 'chat.visionReadiness.unsupported',
-      audioAttachmentsEnabled: true,
+      imageAttachmentsDisabledReason: 'chat.visionReadiness.initializing',
+      audioAttachmentsEnabled: false,
     }));
   });
 

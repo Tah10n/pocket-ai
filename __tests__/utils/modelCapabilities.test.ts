@@ -172,9 +172,20 @@ describe('modelCapabilities', () => {
   });
 
   it('presents audio capability only for primary chat models', () => {
+    const audioProjector = {
+      id: 'projector-audio',
+      ownerModelId: 'author/model',
+      repoId: 'author/model',
+      fileName: 'mmproj-audio-model-f16.gguf',
+      downloadUrl: 'https://huggingface.co/author/model/resolve/main/mmproj-audio-model-f16.gguf',
+      size: 1,
+      lifecycleStatus: 'available' as const,
+      matchStatus: 'matched' as const,
+    };
     const audioModel = {
       artifactRole: 'primary_chat_model' as const,
       chatModalities: ['text', 'audio'] as Array<'text' | 'audio'>,
+      projectorCandidates: [audioProjector],
     };
 
     expect(modelSupportsAudio(audioModel)).toBe(true);
@@ -237,6 +248,30 @@ describe('modelCapabilities', () => {
         checkedAt: 1,
       },
     })).toBe(false);
+    expect(modelSupportsAudio({
+      artifactRole: 'primary_chat_model',
+      chatModalities: ['text', 'vision'],
+      multimodalReadiness: {
+        modelId: 'author/model',
+        status: 'unsupported',
+        projectorId: 'projector-audio',
+        support: [],
+        requestedSupport: ['audio'],
+        checkedAt: 1,
+      },
+    })).toBe(false);
+    expect(resolveModelChatModalities({
+      artifactRole: 'primary_chat_model',
+      chatModalities: ['text', 'vision'],
+      multimodalReadiness: {
+        modelId: 'author/model',
+        status: 'ready',
+        projectorId: 'projector-audio',
+        support: ['audio'],
+        requestedSupport: ['audio'],
+        checkedAt: 1,
+      },
+    })).toEqual(['text', 'vision']);
   });
 
   it('treats persisted projector evidence as vision support when modalities are stale', () => {
@@ -346,6 +381,12 @@ describe('modelCapabilities', () => {
       artifactRole: 'primary_chat_model',
       chatModalities: ['text', 'vision'] as Array<'text' | 'vision'>,
       inputCapabilities: audioCapabilities,
+    })).toEqual(['text', 'vision']);
+    expect(resolveModelChatModalities({
+      artifactRole: 'primary_chat_model',
+      chatModalities: ['text', 'vision'] as Array<'text' | 'vision'>,
+      inputCapabilities: audioCapabilities,
+      projectorCandidates: [projector],
     })).toEqual(['text', 'vision', 'audio']);
     expect(resolveModelChatModalities({
       artifactRole: 'primary_chat_model',

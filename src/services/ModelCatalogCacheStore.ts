@@ -297,6 +297,23 @@ function hasUnsafeAnonymousVisionProvenance(model: CatalogVisionRuntimeSource): 
   );
 }
 
+function sanitizeCatalogChatModalities(
+  chatModalities: ModelMetadata['chatModalities'],
+  options: { hasSafeVision: boolean; hasSafeAudio: boolean },
+): ModelMetadata['chatModalities'] {
+  if (!Array.isArray(chatModalities)) {
+    return chatModalities;
+  }
+
+  const sanitized = chatModalities.filter((modality) => (
+    modality === 'text'
+    || (modality === 'vision' && options.hasSafeVision)
+    || (modality === 'audio' && options.hasSafeAudio)
+  ));
+
+  return sanitized.length > 0 ? sanitized : undefined;
+}
+
 function hasAnonymousVariantRuntimeFields(variant: ModelVariant, model?: ModelMetadata): boolean {
   return variant.isLocal === true
     || typeof variant.selectedProjectorId === 'string'
@@ -328,13 +345,14 @@ export function sanitizeCatalogProjectorRuntimeState(projectors: ModelMetadata['
 export function sanitizeCatalogModelRuntimeState(model: ModelMetadata): ModelMetadata {
   const hasCatalogSafeVisionSource = modelHasCatalogSafeVisionSource(model);
   const hasCatalogSafeProjectorSource = modelHasCatalogSafeProjectorSource(model);
+  const hasCatalogSafeAudioProjectorSource = modelHasCatalogSafeAudioProjectorSource(model);
   const projectorCandidates = hasCatalogSafeProjectorSource
     ? sanitizeCatalogProjectorRuntimeState(model.projectorCandidates)
     : undefined;
-  const hasCatalogVisionEvidence = hasCatalogSafeVisionSource;
-  const chatModalities = Array.isArray(model.chatModalities) && !hasCatalogVisionEvidence
-    ? model.chatModalities.filter((modality) => modality !== 'vision')
-    : model.chatModalities;
+  const chatModalities = sanitizeCatalogChatModalities(model.chatModalities, {
+    hasSafeVision: hasCatalogSafeVisionSource,
+    hasSafeAudio: hasCatalogSafeAudioProjectorSource,
+  });
 
   return normalizePersistedModelMetadata({
     ...model,
@@ -370,13 +388,19 @@ function sanitizeCatalogVariantRuntimeState(variant: ModelVariant, model?: Model
     artifacts: model?.artifacts,
     inputCapabilities: model?.inputCapabilities,
   });
+  const hasCatalogSafeAudioProjectorSource = modelHasCatalogSafeAudioProjectorSource({
+    ...variant,
+    chatModalities: variant.chatModalities ?? model?.chatModalities,
+    artifacts: model?.artifacts,
+    inputCapabilities: model?.inputCapabilities,
+  });
   const projectorCandidates = hasCatalogSafeProjectorSource
     ? sanitizeCatalogProjectorRuntimeState(variant.projectorCandidates)
     : undefined;
-  const hasCatalogVisionEvidence = hasCatalogSafeVisionSource;
-  const chatModalities = Array.isArray(variant.chatModalities) && !hasCatalogVisionEvidence
-    ? variant.chatModalities.filter((modality) => modality !== 'vision')
-    : variant.chatModalities;
+  const chatModalities = sanitizeCatalogChatModalities(variant.chatModalities, {
+    hasSafeVision: hasCatalogSafeVisionSource,
+    hasSafeAudio: hasCatalogSafeAudioProjectorSource,
+  });
 
   return {
     ...variant,

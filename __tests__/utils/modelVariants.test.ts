@@ -725,6 +725,17 @@ describe('modelVariants', () => {
   });
 
   it('uses fallback modalities when the preferred variant has none', () => {
+    const audioProjector = {
+      id: 'audio-projector',
+      ownerModelId: 'org/model',
+      repoId: 'org/model',
+      fileName: 'mmproj-audio-model-f16.gguf',
+      downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-audio-model-f16.gguf',
+      size: 1024,
+      lifecycleStatus: 'available' as const,
+      matchStatus: 'matched' as const,
+    };
+
     expect(dedupeModelVariantsByIdentity([
       {
         variantId: 'preferred-q4',
@@ -739,16 +750,31 @@ describe('modelVariants', () => {
         quantizationLabel: 'Q4_K_M',
         size: null,
         chatModalities: ['text', 'audio'],
+        projectorCandidates: [audioProjector],
+        selectedProjectorId: audioProjector.id,
       },
     ], { activeVariantId: 'preferred-q4' })).toEqual([
       expect.objectContaining({
         variantId: 'preferred-q4',
         chatModalities: ['text', 'audio'],
+        projectorCandidates: [audioProjector],
+        selectedProjectorId: audioProjector.id,
       }),
     ]);
   });
 
   it('does not add fallback vision metadata to an explicit audio preferred variant', () => {
+    const visionProjector = {
+      id: 'vision-projector',
+      ownerModelId: 'org/model',
+      repoId: 'org/model',
+      fileName: 'mmproj-vision-model-f16.gguf',
+      downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-vision-model-f16.gguf',
+      size: 1024,
+      lifecycleStatus: 'available' as const,
+      matchStatus: 'matched' as const,
+    };
+
     expect(dedupeModelVariantsByIdentity([
       {
         variantId: 'vision-q4',
@@ -756,6 +782,10 @@ describe('modelVariants', () => {
         quantizationLabel: 'Q4_K_M',
         size: null,
         chatModalities: ['text', 'vision'],
+        visionSource: 'catalog_metadata',
+        visionConfidence: 'trusted',
+        projectorCandidates: [visionProjector],
+        selectedProjectorId: visionProjector.id,
       },
       {
         variantId: 'audio-q4',
@@ -769,6 +799,62 @@ describe('modelVariants', () => {
       expect.objectContaining({
         variantId: 'audio-q4',
         chatModalities: ['text', 'audio'],
+        visionSource: undefined,
+        visionConfidence: undefined,
+        projectorCandidates: undefined,
+        selectedProjectorId: undefined,
+      }),
+    ]);
+  });
+
+  it('preserves an explicit audio preferred variant own projector metadata', () => {
+    const audioProjector = {
+      id: 'audio-projector',
+      ownerModelId: 'org/model',
+      repoId: 'org/model',
+      fileName: 'mmproj-audio-model-f16.gguf',
+      downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-audio-model-f16.gguf',
+      size: 1024,
+      lifecycleStatus: 'available' as const,
+      matchStatus: 'matched' as const,
+    };
+    const visionProjector = {
+      id: 'vision-projector',
+      ownerModelId: 'org/model',
+      repoId: 'org/model',
+      fileName: 'mmproj-vision-model-f16.gguf',
+      downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-vision-model-f16.gguf',
+      size: 1024,
+      lifecycleStatus: 'available' as const,
+      matchStatus: 'matched' as const,
+    };
+
+    expect(dedupeModelVariantsByIdentity([
+      {
+        variantId: 'vision-q4',
+        fileName: 'model.Q4_K_M.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: null,
+        chatModalities: ['text', 'vision'],
+        projectorCandidates: [visionProjector],
+        selectedProjectorId: visionProjector.id,
+      },
+      {
+        variantId: 'audio-q4',
+        fileName: 'model.Q4_K_M.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: 4_000_000_000,
+        sha256: 'a'.repeat(64),
+        chatModalities: ['text', 'audio'],
+        projectorCandidates: [audioProjector],
+        selectedProjectorId: audioProjector.id,
+      },
+    ], { activeVariantId: 'audio-q4' })).toEqual([
+      expect.objectContaining({
+        variantId: 'audio-q4',
+        chatModalities: ['text', 'audio'],
+        projectorCandidates: [audioProjector],
+        selectedProjectorId: audioProjector.id,
       }),
     ]);
   });

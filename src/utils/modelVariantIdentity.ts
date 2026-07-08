@@ -52,13 +52,47 @@ function mergeVariantChatModalities(
   return modalities.length > 0 ? modalities : undefined;
 }
 
-function isExplicitTextOnlyVariant(variant: ModelVariant): boolean {
-  return Array.isArray(variant.chatModalities)
-    && !variant.chatModalities.some((modality) => modality !== 'text');
+function getNativeVariantModalities(variant: ModelVariant): Set<'vision' | 'audio'> {
+  return new Set((variant.chatModalities ?? []).filter((modality): modality is 'vision' | 'audio' => modality !== 'text'));
+}
+
+function canUseFallbackProjectorMetadata(preferred: ModelVariant, fallback: ModelVariant): boolean {
+  if (!Array.isArray(preferred.chatModalities)) {
+    return true;
+  }
+
+  const preferredNativeModalities = getNativeVariantModalities(preferred);
+  if (preferredNativeModalities.size === 0) {
+    return false;
+  }
+
+  if (!Array.isArray(fallback.chatModalities)) {
+    return preferredNativeModalities.has('vision');
+  }
+
+  const fallbackNativeModalities = getNativeVariantModalities(fallback);
+  if (fallbackNativeModalities.size === 0) {
+    return false;
+  }
+
+  return Array.from(fallbackNativeModalities).every((modality) => preferredNativeModalities.has(modality));
+}
+
+function canUseFallbackVisionMetadata(preferred: ModelVariant, fallback: ModelVariant): boolean {
+  if (!Array.isArray(preferred.chatModalities)) {
+    return true;
+  }
+
+  if (!preferred.chatModalities.includes('vision')) {
+    return false;
+  }
+
+  return !Array.isArray(fallback.chatModalities) || fallback.chatModalities.includes('vision');
 }
 
 function mergeDedupeVariantMetadata(preferred: ModelVariant, fallback: ModelVariant): ModelVariant {
-  const canUseFallbackProjectorMetadata = !isExplicitTextOnlyVariant(preferred);
+  const shouldUseFallbackProjectorMetadata = canUseFallbackProjectorMetadata(preferred, fallback);
+  const shouldUseFallbackVisionMetadata = canUseFallbackVisionMetadata(preferred, fallback);
 
   return {
     ...preferred,
@@ -69,13 +103,13 @@ function mergeDedupeVariantMetadata(preferred: ModelVariant, fallback: ModelVari
     isLocal: preferred.isLocal ?? fallback.isLocal,
     chatModalities: mergeVariantChatModalities(preferred.chatModalities, fallback.chatModalities),
     artifactRole: preferred.artifactRole ?? fallback.artifactRole,
-    visionSource: preferred.visionSource ?? fallback.visionSource,
-    visionConfidence: preferred.visionConfidence ?? fallback.visionConfidence,
+    visionSource: preferred.visionSource ?? (shouldUseFallbackVisionMetadata ? fallback.visionSource : undefined),
+    visionConfidence: preferred.visionConfidence ?? (shouldUseFallbackVisionMetadata ? fallback.visionConfidence : undefined),
     projectorCandidates: preferred.projectorCandidates ?? (
-      canUseFallbackProjectorMetadata ? fallback.projectorCandidates : undefined
+      shouldUseFallbackProjectorMetadata ? fallback.projectorCandidates : undefined
     ),
     selectedProjectorId: preferred.selectedProjectorId ?? (
-      canUseFallbackProjectorMetadata ? fallback.selectedProjectorId : undefined
+      shouldUseFallbackProjectorMetadata ? fallback.selectedProjectorId : undefined
     ),
   };
 }

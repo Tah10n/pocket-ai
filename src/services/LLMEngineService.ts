@@ -3717,7 +3717,9 @@ class LLMEngineService {
     }
 
     const checkedSupport = readiness?.requestedSupport ?? readiness?.support ?? [];
-    return requested.every((modality) => checkedSupport.includes(modality));
+    return checkedSupport.length === requested.length
+      && requested.every((modality) => checkedSupport.includes(modality))
+      && readiness?.support.every((modality) => requested.includes(modality)) === true;
   }
 
   private buildMissingRequestedMultimodalSupportReason(requestedSupport: { vision: boolean; audio: boolean }): string {

@@ -5,6 +5,7 @@ import {
 } from '../../src/services/ModelCatalogTransformer';
 import { CATALOG_SEARCH_VARIANT_LIMIT } from '../../src/services/ModelCatalogFileSelector';
 import { LifecycleStatus } from '../../src/types/models';
+import { resolveModelNativeMultimodalSupport } from '../../src/utils/modelCapabilities';
 import {
   ambiguousProjectorCatalogSiblings,
   projectorOnlyCatalogSiblings,
@@ -179,7 +180,8 @@ describe('ModelCatalogTransformer', () => {
     ], null, null);
 
     expect(models).toHaveLength(1);
-    expect(models[0].chatModalities).toEqual(['text', 'audio']);
+    expect(models[0].chatModalities).toEqual(['text']);
+    expect(resolveModelNativeMultimodalSupport(models[0])).toEqual({ vision: false, audio: false });
     expect(models[0].inputCapabilities).toEqual(expect.objectContaining({
       declared: {
         image: 'unknown',

@@ -371,6 +371,18 @@ describe('ModelCard', () => {
           ? [{ source: 'tag', value: 'audio', confidence: 'medium' }]
           : [],
       },
+      projectorCandidates: audio === 'supported'
+        ? [{
+          id: 'audio-projector',
+          ownerModelId: 'org/model',
+          repoId: 'org/model',
+          fileName: 'mmproj-audio-model-f16.gguf',
+          downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-audio-model-f16.gguf',
+          size: 1024,
+          lifecycleStatus: 'available',
+          matchStatus: 'matched',
+        }]
+        : undefined,
     });
     const screen = render(
       <ModelCard

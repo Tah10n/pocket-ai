@@ -1340,7 +1340,7 @@ describe('android-scenarios pack selection', () => {
         <node text="Pocket AI" content-desc="" clickable="false" enabled="true" bounds="[20,40][420,120]" />
         <node text="Recent Conversations" content-desc="" clickable="false" enabled="true" bounds="[20,160][720,240]" />
         <node text="Active model" content-desc="" clickable="false" enabled="true" bounds="[20,260][720,340]" />
-        <node text="This model supports text chat only. Load an audio-capable model before attaching audio." content-desc="" clickable="false" enabled="true" bounds="[40,1720][1040,1800]" />
+        <node text="This model supports text chat only." content-desc="" clickable="false" enabled="true" bounds="[40,1720][1040,1800]" />
         <node resource-id="chat-attach-menu-button" text="" content-desc="Attach file" clickable="true" enabled="true" bounds="[40,1840][180,1980]" />
         <node text="${prompt || ''}" content-desc="Chat message input" clickable="true" enabled="true" bounds="[200,1840][860,1980]" />
         <node text="" content-desc="Send message" clickable="true" enabled="${prompt ? 'true' : 'false'}" bounds="[900,1840][1040,1980]" />
@@ -1349,7 +1349,7 @@ describe('android-scenarios pack selection', () => {
     const textOnlyMenuHierarchyXml = () => `
       <hierarchy>
         <node text="" content-desc="" clickable="false" enabled="true" bounds="[0,0][1080,2400]" />
-        <node text="This model supports text chat only. Load an audio-capable model before attaching audio." content-desc="" clickable="false" enabled="true" bounds="[40,1720][1040,1800]" />
+        <node text="This model supports text chat only." content-desc="" clickable="false" enabled="true" bounds="[40,1720][1040,1800]" />
         <node resource-id="chat-attach-image-button" text="" content-desc="Attach an image from the photo library" clickable="false" enabled="false" bounds="[40,1480][1040,1620]" />
       </hierarchy>
     `;
@@ -1473,7 +1473,7 @@ describe('android-scenarios pack selection', () => {
         <node text="Recent Conversations" content-desc="" clickable="false" enabled="true" bounds="[20,160][720,240]" />
         <node text="Active model" content-desc="" clickable="false" enabled="true" bounds="[20,260][720,340]" />
         <node text="" content-desc="New Chat" clickable="true" enabled="true" bounds="[800,1600][1040,1720]" />
-        <node text="This model supports text chat only. Load an audio-capable model before attaching audio." content-desc="" clickable="false" enabled="true" bounds="[40,1720][1040,1800]" />
+        <node text="This model supports text chat only." content-desc="" clickable="false" enabled="true" bounds="[40,1720][1040,1800]" />
         <node resource-id="chat-attach-menu-button" text="" content-desc="Attach file" clickable="true" enabled="true" bounds="[40,1840][180,1980]" />
         <node text="${typedPrompt}" content-desc="Chat message input" clickable="true" enabled="true" bounds="[200,1840][860,1980]" />
         <node text="" content-desc="Send message" clickable="true" enabled="true" bounds="[900,1840][1040,1980]" />
@@ -1482,7 +1482,7 @@ describe('android-scenarios pack selection', () => {
     const textOnlyMenuHierarchyXml = () => `
       <hierarchy>
         <node text="" content-desc="" clickable="false" enabled="true" bounds="[0,0][1080,2400]" />
-        <node text="This model supports text chat only. Load an audio-capable model before attaching audio." content-desc="" clickable="false" enabled="true" bounds="[40,1720][1040,1800]" />
+        <node text="This model supports text chat only." content-desc="" clickable="false" enabled="true" bounds="[40,1720][1040,1800]" />
         <node resource-id="chat-attach-image-button" text="" content-desc="Attach an image from the photo library" clickable="false" enabled="false" bounds="[40,1480][1040,1620]" />
       </hierarchy>
     `;

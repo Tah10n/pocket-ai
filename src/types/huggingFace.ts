@@ -57,6 +57,8 @@ export type HuggingFaceModelConfig = {
   num_ctx?: number;
   original_max_position_embeddings?: number;
   text_config?: HuggingFaceModelConfig;
+  vision_config?: HuggingFaceModelConfig;
+  audio_config?: HuggingFaceModelConfig;
   rope_scaling?: {
     original_max_position_embeddings?: number;
     max_position_embeddings?: number;

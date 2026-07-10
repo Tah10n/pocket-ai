@@ -375,6 +375,45 @@ describe('ModelCard', () => {
     expect(screen.queryByText('models.vision.badge')).toBeNull();
   });
 
+  it('renders vision and audio badges together for a dual-capability model', () => {
+    const dualProjector = {
+      id: 'dual-projector',
+      ownerModelId: 'org/model',
+      repoId: 'org/model',
+      fileName: 'mmproj-vision-audio.gguf',
+      downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-vision-audio.gguf',
+      size: 536_870_912,
+      lifecycleStatus: 'available' as const,
+      matchStatus: 'matched' as const,
+    };
+    const screen = render(
+      <ModelCard
+        model={{
+          ...buildModel(ModelAccessState.PUBLIC),
+          chatModalities: ['text', 'vision', 'audio'],
+          artifactRole: 'primary_chat_model',
+          projectorCandidates: [dualProjector],
+          artifacts: [{
+            id: dualProjector.id,
+            kind: 'multimodal_projector',
+            requiredFor: ['image', 'audio'],
+            remoteFileName: dualProjector.fileName,
+            downloadUrl: dualProjector.downloadUrl,
+            sizeBytes: dualProjector.size,
+            installState: 'remote',
+          }],
+        }}
+        {...buildModelCardHandlers()}
+        isActive={false}
+      />,
+    );
+
+    const visionBadge = screen.getByText('models.vision.badge');
+    const audioBadge = screen.getByText('models.audio.badge');
+    expect(visionBadge).toBeTruthy();
+    expect(audioBadge).toBeTruthy();
+  });
+
   it('rerenders when discovered audio capability changes the model card badge', () => {
     const handlers = buildModelCardHandlers();
     const createModel = (audio: 'unknown' | 'supported'): ModelMetadata => ({

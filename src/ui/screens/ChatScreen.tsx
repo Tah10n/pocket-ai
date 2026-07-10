@@ -685,6 +685,9 @@ export const ChatScreen = () => {
     );
     const hasReadyVisionSupport = isVisionReadinessReady(multimodalReadiness);
     const hasReadyAudioSupport = isAudioReadinessReady(multimodalReadiness);
+    const audioAttachmentsSupported = activeChatModel
+        ? resolveEffectiveActiveVariantNativeSupport(activeChatModel).audio
+        : false;
     const visionAttachmentReadinessReason = resolveImageAttachmentReadinessReason({
         activeModelId: engineState.activeModelId,
         displayedModelId: displayedChatActiveModelId,
@@ -733,10 +736,15 @@ export const ChatScreen = () => {
         !isInputDisabled
         && !pendingRegenerateMessage
         && engineState.activeModelId === displayedChatActiveModelId
+        && audioAttachmentsSupported
         && hasReadyAudioSupport;
-    const audioAttachmentReadinessReason = hasReadyAudioSupport
-        ? undefined
-        : 'chat.attachments.audioRuntimeUnavailable';
+    const audioAttachmentReadinessReason = !activeChatModel
+        ? 'chat.attachments.audioPickerDisabled'
+        : !audioAttachmentsSupported
+            ? 'chat.attachments.audioModelUnsupported'
+            : hasReadyAudioSupport
+                ? undefined
+                : 'chat.attachments.audioRuntimeUnavailable';
     const audioAttachmentsDisabledReason = pendingRegenerateMessage
         ? MEDIA_ATTACHMENTS_EDITING_REASON_KEY
         : audioAttachmentReadinessReason;
@@ -2237,6 +2245,7 @@ export const ChatScreen = () => {
                                 onRemoveMediaAttachmentDraft={mediaAttachmentDrafts.removeDraft}
                                 imageAttachmentsEnabled={imageAttachmentsEnabled}
                                 documentAttachmentsEnabled={documentAttachmentsEnabled}
+                                audioAttachmentsSupported={audioAttachmentsSupported}
                                 audioAttachmentsEnabled={audioAttachmentsEnabled}
                                 imageAttachmentsDisabledReason={imageAttachmentsDisabledReason}
                                 documentAttachmentsDisabledReason={documentAttachmentsDisabledReason}
@@ -2283,6 +2292,7 @@ export const ChatScreen = () => {
                                 onRemoveMediaAttachmentDraft={mediaAttachmentDrafts.removeDraft}
                                 imageAttachmentsEnabled={imageAttachmentsEnabled}
                                 documentAttachmentsEnabled={documentAttachmentsEnabled}
+                                audioAttachmentsSupported={audioAttachmentsSupported}
                                 audioAttachmentsEnabled={audioAttachmentsEnabled}
                                 imageAttachmentsDisabledReason={imageAttachmentsDisabledReason}
                                 documentAttachmentsDisabledReason={documentAttachmentsDisabledReason}

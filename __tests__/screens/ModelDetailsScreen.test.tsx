@@ -1088,6 +1088,45 @@ describe('ModelDetailsScreen', () => {
     expect(screen.queryByText('models.vision.badge')).toBeNull();
   });
 
+  it('renders vision and audio badges together for dual-capability model details', async () => {
+    const dualProjector = {
+      id: 'dual-projector',
+      ownerModelId: 'org/model',
+      repoId: 'org/model',
+      fileName: 'mmproj-vision-audio.gguf',
+      downloadUrl: 'https://example.com/mmproj-vision-audio.gguf',
+      size: 1,
+      lifecycleStatus: 'available' as const,
+      matchStatus: 'matched' as const,
+    };
+    const dualModel = createModel({
+      chatModalities: ['text', 'vision', 'audio'],
+      artifactRole: 'primary_chat_model',
+      projectorCandidates: [dualProjector],
+      artifacts: [{
+        id: dualProjector.id,
+        kind: 'multimodal_projector',
+        requiredFor: ['image', 'audio'],
+        remoteFileName: dualProjector.fileName,
+        downloadUrl: dualProjector.downloadUrl,
+        sizeBytes: dualProjector.size,
+        installState: 'remote',
+      }],
+    });
+    const { modelCatalogService } = jest.requireMock('../../src/services/ModelCatalogService');
+    modelCatalogService.getCachedModel.mockReturnValue(dualModel);
+    modelCatalogService.getModelDetails.mockResolvedValue(dualModel);
+
+    const screen = render(<ModelDetailsScreen />);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText('models.vision.badge')).toBeTruthy();
+    expect(screen.getByText('models.audio.badge')).toBeTruthy();
+  });
+
   it('does not inherit stale top-level vision state for an active text-only variant', async () => {
     const variantTextOnlyModel = createModel({
       chatModalities: ['text', 'vision'],

@@ -976,6 +976,9 @@ describe('ChatScreen', () => {
       attachmentDrafts: [copiedDraftImageAttachment],
       imageAttachmentsEnabled: true,
       imageAttachmentsDisabledReason: 'chat.visionReadiness.ready',
+      audioAttachmentsSupported: false,
+      audioAttachmentsEnabled: false,
+      audioAttachmentsDisabledReason: 'chat.attachments.audioModelUnsupported',
       isImageAttachmentActionBusy: false,
     }));
 
@@ -1031,7 +1034,9 @@ describe('ChatScreen', () => {
     expect(lastChatInputBarProps).toEqual(expect.objectContaining({
       imageAttachmentsEnabled: false,
       imageAttachmentsDisabledReason: 'chat.visionReadiness.initializing',
+      audioAttachmentsSupported: true,
       audioAttachmentsEnabled: false,
+      audioAttachmentsDisabledReason: 'chat.attachments.audioRuntimeUnavailable',
     }));
   });
 
@@ -1069,6 +1074,7 @@ describe('ChatScreen', () => {
     expect(lastChatInputBarProps).toEqual(expect.objectContaining({
       imageAttachmentsEnabled: false,
       imageAttachmentsDisabledReason: 'chat.visionReadiness.unsupported',
+      audioAttachmentsSupported: true,
       audioAttachmentsEnabled: true,
     }));
   });
@@ -1164,6 +1170,7 @@ describe('ChatScreen', () => {
     expect(lastChatInputBarProps).toEqual(expect.objectContaining({
       imageAttachmentsEnabled: expectedImageEnabled,
       imageAttachmentsDisabledReason: 'chat.visionReadiness.ready',
+      audioAttachmentsSupported: expectedAudioEnabled,
       audioAttachmentsEnabled: expectedAudioEnabled,
     }));
   });
@@ -3209,12 +3216,15 @@ describe('ChatScreen', () => {
     );
   });
 
-  it('uses audio-specific blocked reason when retained audio cannot be regenerated', () => {
+  it('uses the unsupported-model reason when retained audio cannot be regenerated', () => {
     reactI18nextMock.__setTranslationOverride(
       'chat.attachments.retainedForRegenerateBlockedDescription',
       'blocked: {{reason}}',
     );
-    reactI18nextMock.__setTranslationOverride('chat.attachments.audioRuntimeUnavailable', 'Audio runtime unavailable');
+    reactI18nextMock.__setTranslationOverride(
+      'chat.attachments.audioModelUnsupported',
+      'Current model does not support audio',
+    );
     reactI18nextMock.__setTranslationOverride('chat.visionReadiness.ready', 'Vision ready');
     registry.saveModels([
       createReadyVisionModel(),
@@ -3227,7 +3237,7 @@ describe('ChatScreen', () => {
 
     expect(lastChatInputBarProps.allowEmptyMessageSend).toBe(false);
     expect(lastChatInputBarProps.sendDisabled).toBe(true);
-    expect(getByText('blocked: Audio runtime unavailable')).toBeTruthy();
+    expect(getByText('blocked: Current model does not support audio')).toBeTruthy();
   });
 
   it.each([

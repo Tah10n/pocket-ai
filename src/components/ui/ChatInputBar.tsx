@@ -50,6 +50,7 @@ interface ChatInputBarProps {
     onRemoveMediaAttachmentDraft?: (draft: ChatMediaAttachmentDraft, index: number) => void;
     imageAttachmentsEnabled?: boolean;
     documentAttachmentsEnabled?: boolean;
+    audioAttachmentsSupported?: boolean;
     audioAttachmentsEnabled?: boolean;
     imageAttachmentsDisabledReason?: string;
     documentAttachmentsDisabledReason?: string;
@@ -260,6 +261,7 @@ export const ChatInputBar = ({
     onRemoveMediaAttachmentDraft,
     imageAttachmentsEnabled = false,
     documentAttachmentsEnabled = false,
+    audioAttachmentsSupported = false,
     audioAttachmentsEnabled = false,
     imageAttachmentsDisabledReason,
     documentAttachmentsDisabledReason,
@@ -387,6 +389,7 @@ export const ChatInputBar = ({
         && !isDocumentAttachmentActionBusy
         && !documentAttachmentLimitReached;
     const canAttachAudio = Boolean(onAttachAudio)
+        && audioAttachmentsSupported
         && audioAttachmentsEnabled
         && !disabled
         && !isSending
@@ -576,7 +579,7 @@ export const ChatInputBar = ({
 
         return null;
     })();
-    const audioAttachmentHelperText = (() => {
+    const audioAttachmentIssueText = (() => {
         if (hasTooLargeAudioAttachmentFailures) {
             return t('chat.attachments.audioTooLarge');
         }
@@ -593,13 +596,23 @@ export const ChatInputBar = ({
             return t('chat.attachments.audioLimitReached', { count: MAX_CHAT_ATTACHMENTS_BY_KIND.audio });
         }
 
-        if (!audioAttachmentsEnabled && audioAttachmentsDisabledReason) {
+        return null;
+    })();
+    const audioAttachmentHelperText = (() => {
+        if (audioAttachmentIssueText) {
+            return audioAttachmentIssueText;
+        }
+
+        if (audioAttachmentsSupported && !audioAttachmentsEnabled && audioAttachmentsDisabledReason) {
             return t(audioAttachmentsDisabledReason);
         }
 
         return null;
     })();
-    const mediaAttachmentHelperText = audioAttachmentHelperText;
+    // Readiness for an optional modality belongs to that menu action. The
+    // composer-level status is reserved for an attachment the user already
+    // selected or an actionable preparation/validation failure.
+    const mediaAttachmentHelperText = audioAttachmentIssueText;
     const attachmentHelperText = joinUniqueHelperTexts([imageAttachmentHelperText, documentAttachmentHelperText, mediaAttachmentHelperText]);
     const attachImageDisabledContext = [
         isImageAttachmentActionBusy ? t('chat.attachments.preparingImage') : null,
@@ -631,14 +644,15 @@ export const ChatInputBar = ({
     const attachAudioAccessibilityState = isAudioAttachmentActionBusy
         ? { disabled: !canAttachAudio, busy: true }
         : { disabled: !canAttachAudio };
+    const isSupportedAudioAttachmentActionBusy = audioAttachmentsSupported && isAudioAttachmentActionBusy;
     const isAnyAttachmentActionBusy = isImageAttachmentActionBusy
         || isDocumentAttachmentActionBusy
-        || isAudioAttachmentActionBusy;
+        || isSupportedAudioAttachmentActionBusy;
     const attachmentStatusAnnouncement = isImageAttachmentActionBusy
         ? t('chat.attachments.preparingImage')
         : isDocumentAttachmentActionBusy
             ? t('chat.attachments.preparingDocument')
-            : isAudioAttachmentActionBusy
+            : isSupportedAudioAttachmentActionBusy
                 ? t('chat.attachments.preparingAudio')
                 : attachmentHelperText;
 
@@ -686,7 +700,7 @@ export const ChatInputBar = ({
             accessibilityState: attachDocumentAccessibilityState,
             testID: 'chat-attach-document-button',
         } : null,
-        onAttachAudio ? {
+        onAttachAudio && audioAttachmentsSupported ? {
             key: 'audio',
             title: t('chat.attachments.attachAudio'),
             description: !canAttachAudio && attachAudioDisabledContext ? attachAudioDisabledContext : undefined,
@@ -773,7 +787,7 @@ export const ChatInputBar = ({
         || attachmentHelperText
         || isImageAttachmentActionBusy
         || isDocumentAttachmentActionBusy
-        || isAudioAttachmentActionBusy ? (
+        || isSupportedAudioAttachmentActionBusy ? (
         <Box testID="chat-image-attachments-tray" className="gap-2">
             {isImageAttachmentActionBusy ? (
                 <Box
@@ -823,7 +837,7 @@ export const ChatInputBar = ({
                 </Box>
             ) : null}
 
-            {isAudioAttachmentActionBusy ? (
+            {isSupportedAudioAttachmentActionBusy ? (
                 <Box
                     testID="chat-audio-attachment-busy-indicator"
                     accessibilityRole="progressbar"

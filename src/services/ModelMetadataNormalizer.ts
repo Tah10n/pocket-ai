@@ -27,8 +27,18 @@ import {
   deriveArtifactsFromLegacyModel,
   normalizePersistedModelArtifacts,
 } from '../utils/modelArtifacts';
-import { normalizePersistedModelCapabilitySnapshot } from '../utils/modelCapabilities';
-import { normalizePersistedInputCapabilitySnapshot } from '../utils/modelInputCapabilities';
+import {
+  normalizePersistedModelCapabilitySnapshot,
+  projectorArtifactMatchesCandidate,
+  resolveModelChatModalities,
+} from '../utils/modelCapabilities';
+import {
+  inferDeclaredInputCapabilities,
+  inputCapabilityEvidenceSupportsModality,
+  isKnownGemma4AudioProfileModelId,
+  mergeInputCapabilitySnapshots,
+  normalizePersistedInputCapabilitySnapshot,
+} from '../utils/modelInputCapabilities';
 import { dedupeModelVariantsByIdentity } from '../utils/modelVariantIdentity';
 import { getShortModelLabel } from '../utils/modelLabel';
 import { buildHuggingFaceResolveUrl } from '../utils/huggingFaceUrls';
@@ -591,21 +601,23 @@ export function normalizePersistedModelMetadata(
   const normalizedMemoryFitDecision = size === null ? undefined : normalizeMemoryFitDecision(model.memoryFitDecision);
   const normalizedMemoryFitConfidence = size === null ? undefined : normalizeMemoryFitConfidence(model.memoryFitConfidence);
   const normalizedGguf = normalizeGgufMetadata(model.gguf);
+  const normalizedModelType = normalizeNonEmptyString(model.modelType);
+  const normalizedArchitectures = normalizeStringArray(model.architectures);
+  const normalizedTags = normalizeStringArray(model.tags);
   const thinkingCapability = normalizeThinkingCapabilitySnapshot(
     (model as PersistedModelMetadata & { thinkingCapability?: unknown }).thinkingCapability,
   );
   const normalizedActiveVariantId = normalizeNonEmptyString(model.activeVariantId);
   const normalizedResolvedFileName = normalizeNonEmptyString(model.resolvedFileName);
-  const variants = normalizeModelVariants(
+  const normalizedVariants = normalizeModelVariants(
     (model as PersistedModelMetadata & { variants?: unknown }).variants,
     {
       activeVariantId: normalizedActiveVariantId,
       resolvedFileName: normalizedResolvedFileName,
     },
   );
-  const activeVariantId = resolveActiveVariantId(normalizedActiveVariantId, normalizedResolvedFileName, variants);
-  const chatModalities = normalizeChatModalities(model.chatModalities);
-  const inputCapabilities = normalizePersistedInputCapabilitySnapshot(
+  const persistedChatModalities = normalizeChatModalities(model.chatModalities);
+  const persistedInputCapabilities = normalizePersistedInputCapabilitySnapshot(
     (model as PersistedModelMetadata & { inputCapabilities?: unknown }).inputCapabilities,
   );
   const artifactRole = normalizeModelArtifactRole(model.artifactRole)
@@ -642,6 +654,66 @@ export function normalizePersistedModelMetadata(
     : undefined;
   const maxContextTokens = shouldClearVerifiedLocalTrust ? undefined : normalizedMaxContextTokens;
   const hasVerifiedContextWindow = !shouldClearVerifiedLocalTrust && model.hasVerifiedContextWindow === true;
+  const shouldInferKnownAudioProfile = isKnownGemma4AudioProfileModelId(model.id);
+  const inferredProfileInputCapabilities = shouldInferKnownAudioProfile
+    ? inferDeclaredInputCapabilities({
+        id: model.id,
+        modelId: model.id,
+        config: {
+          ...(normalizedModelType ? { model_type: normalizedModelType } : {}),
+          ...(normalizedArchitectures ? { architectures: normalizedArchitectures } : {}),
+        },
+        ...(gguf?.architecture ? { gguf: { architecture: gguf.architecture } } : {}),
+      }, [
+        normalizedResolvedFileName,
+        localPath,
+        ...(normalizedVariants?.map((variant) => variant.fileName) ?? []),
+        ...(projectorCandidates?.map((candidate) => candidate.fileName) ?? []),
+      ].flatMap((path) => path ? [{ path }] : []), {
+        detectedAt: persistedInputCapabilities?.detectedAt ?? 0,
+      })
+    : undefined;
+  const hasTrustedAudioProfile = inferredProfileInputCapabilities?.evidence.some((entry) => (
+    (entry.source === 'architecture' || entry.source === 'repository_tree')
+    && entry.confidence === 'high'
+    && inputCapabilityEvidenceSupportsModality(entry, 'audio')
+  )) === true;
+  const inputCapabilities = hasTrustedAudioProfile
+    ? mergeInputCapabilitySnapshots(persistedInputCapabilities, inferredProfileInputCapabilities)
+    : persistedInputCapabilities;
+  const shouldReconcileParentChatModalities = hasTrustedAudioProfile
+    && (
+      persistedChatModalities?.includes('vision') === true
+      || Boolean(projectorCandidates?.length)
+    );
+  const chatModalities = shouldReconcileParentChatModalities
+    ? resolveModelChatModalities({
+        artifactRole,
+        chatModalities: persistedChatModalities,
+        inputCapabilities,
+        projectorCandidates,
+        selectedProjectorId,
+      })
+    : persistedChatModalities;
+  const variants = hasTrustedAudioProfile
+    ? normalizedVariants?.map((variant) => {
+        if (variant.chatModalities?.includes('vision') !== true) {
+          return variant;
+        }
+
+        return {
+          ...variant,
+          chatModalities: resolveModelChatModalities({
+            artifactRole: variant.artifactRole ?? artifactRole,
+            chatModalities: variant.chatModalities,
+            inputCapabilities,
+            projectorCandidates: variant.projectorCandidates ?? projectorCandidates,
+            selectedProjectorId: variant.selectedProjectorId ?? selectedProjectorId,
+          }),
+        };
+      })
+    : normalizedVariants;
+  const activeVariantId = resolveActiveVariantId(normalizedActiveVariantId, normalizedResolvedFileName, variants);
   const downloadIntegrity = shouldDropDownloadedState || hasMismatchedSha256Integrity
     ? undefined
     : normalizedDownloadIntegrity;
@@ -678,8 +750,21 @@ export function normalizePersistedModelMetadata(
     sha256: normalizedSha256,
     size,
   }, (model as PersistedModelMetadata & { capabilitySnapshot?: ModelCapabilitySnapshot }).capabilitySnapshot);
+  const hasReconciledAudioModality = chatModalities?.includes('audio') === true
+    || variants?.some((variant) => variant.chatModalities?.includes('audio') === true) === true;
+  const reconciledPersistedArtifacts = hasTrustedAudioProfile && hasReconciledAudioModality
+    ? persistedArtifacts?.map((artifact) => {
+        const matchesKnownProjector = artifact.kind === 'multimodal_projector'
+          && artifact.requiredFor.includes('image')
+          && !artifact.requiredFor.includes('audio')
+          && projectorCandidates?.some((candidate) => projectorArtifactMatchesCandidate(artifact, candidate)) === true;
+        return matchesKnownProjector
+          ? { ...artifact, requiredFor: [...artifact.requiredFor, 'audio' as const] }
+          : artifact;
+      })
+    : persistedArtifacts;
   const artifacts = deriveArtifactsFromLegacyModel({
-    artifacts: persistedArtifacts,
+    artifacts: reconciledPersistedArtifacts,
     downloadErrorAt,
     downloadErrorCode,
     downloadErrorMessage,
@@ -747,8 +832,8 @@ export function normalizePersistedModelMetadata(
     hasVerifiedContextWindow,
     capabilitySnapshot,
     parameterSizeLabel: normalizeNonEmptyString(model.parameterSizeLabel),
-    modelType: normalizeNonEmptyString(model.modelType),
-    architectures: normalizeStringArray(model.architectures),
+    modelType: normalizedModelType,
+    architectures: normalizedArchitectures,
     baseModels: normalizeStringArray(model.baseModels),
     license: normalizeNonEmptyString(model.license),
     languages: normalizeStringArray(model.languages),
@@ -757,7 +842,7 @@ export function normalizePersistedModelMetadata(
     modelCreator: normalizeNonEmptyString(model.modelCreator),
     downloads: normalizeNullableCount(model.downloads),
     likes: normalizeNullableCount(model.likes),
-    tags: normalizeStringArray(model.tags),
+    tags: normalizedTags,
     description: normalizeNonEmptyString(model.description),
     variants,
     activeVariantId,

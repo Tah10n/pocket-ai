@@ -87,6 +87,13 @@ function normalizeSignal(value: unknown): string | null {
   return normalized.length > 0 ? normalized : null;
 }
 
+function normalizeSignalForPatternMatching(value: string): string {
+  // Hugging Face config identifiers commonly use underscores (for example
+  // `gemma4_audio`). JavaScript treats `_` as a word character, so a regular
+  // word boundary before `audio` would otherwise miss an explicit modality.
+  return value.replace(/[_/]+/gu, '-');
+}
+
 /**
  * Classifies normalized capability evidence using the same rules as catalog
  * inference. Projector filenames are intentionally passive evidence: their
@@ -104,8 +111,9 @@ export function getInputCapabilityEvidenceModalities(
     return [...(PIPELINE_MODALITY_SIGNALS[value] ?? [])];
   }
 
+  const matchableValue = normalizeSignalForPatternMatching(value);
   return SIGNAL_PATTERNS.flatMap((signal) => (
-    signal.pattern.test(value) ? [signal.modality] : []
+    signal.pattern.test(matchableValue) ? [signal.modality] : []
   ));
 }
 
@@ -194,8 +202,9 @@ function addSignalEvidence(
     return;
   }
 
+  const matchableValue = normalizeSignalForPatternMatching(value);
   for (const signal of SIGNAL_PATTERNS) {
-    if (!signal.pattern.test(value)) {
+    if (!signal.pattern.test(matchableValue)) {
       continue;
     }
 
@@ -212,19 +221,125 @@ function collectConfigSignals(config: HuggingFaceModelConfig | undefined): {
   value: string;
 }[] {
   const signals: { source: CapabilityEvidence['source']; value: string }[] = [];
-  const modelType = normalizeSignal(config?.model_type);
-  if (modelType) {
-    signals.push({ source: 'config', value: modelType });
-  }
+  const configs = [config, config?.text_config, config?.vision_config, config?.audio_config];
+  for (const nestedConfig of configs) {
+    const modelType = normalizeSignal(nestedConfig?.model_type);
+    if (modelType) {
+      signals.push({ source: 'config', value: modelType });
+    }
 
-  for (const architecture of config?.architectures ?? []) {
-    const normalized = normalizeSignal(architecture);
-    if (normalized) {
-      signals.push({ source: 'architecture', value: normalized });
+    for (const architecture of nestedConfig?.architectures ?? []) {
+      const normalized = normalizeSignal(architecture);
+      if (normalized) {
+        signals.push({ source: 'architecture', value: normalized });
+      }
     }
   }
 
   return signals;
+}
+
+function isGemma4ArchitectureSignal(value: string | null): boolean {
+  if (!value) {
+    return false;
+  }
+
+  const compact = value.replace(/[^a-z0-9]/gu, '');
+  return compact === 'gemma4' || compact.startsWith('gemma4for');
+}
+
+function resolveGemma4AudioProfileSize(
+  payload: Partial<HuggingFaceModelSummary>,
+): 'e2b' | 'e4b' | '12b' | null {
+  const repoNames = [payload.id, payload.modelId].flatMap((value) => {
+    const normalized = normalizeSignal(value);
+    return normalized ? [normalized.split('/').filter(Boolean).pop() ?? normalized] : [];
+  });
+
+  for (const repoName of repoNames) {
+    const match = repoName.match(/(?:^|[-_.])(e2b|e4b|12b)(?:[-_.]|$)/u);
+    if (match?.[1] === 'e2b' || match?.[1] === 'e4b' || match?.[1] === '12b') {
+      return match[1];
+    }
+  }
+
+  return null;
+}
+
+function hasGemma4FamilyToken(value: string): boolean {
+  return /(?:^|[-_.])gemma[-_.]?4(?:[-_.]|$)/u.test(value);
+}
+
+export function isKnownGemma4AudioProfileModelId(value: unknown): boolean {
+  const normalized = normalizeSignal(value);
+  if (!normalized) {
+    return false;
+  }
+
+  const repoName = normalized.split('/').filter(Boolean).pop() ?? normalized;
+  return hasGemma4FamilyToken(repoName)
+    && resolveGemma4AudioProfileSize({ id: normalized }) !== null;
+}
+
+function hasGemma4ProfileSizeToken(value: string, size: 'e2b' | 'e4b' | '12b'): boolean {
+  return new RegExp(`(?:^|[-_.])${size}(?:[-_.]|$)`, 'u').test(value);
+}
+
+function hasGemma4RepositoryArtifactProfile(
+  payload: Partial<HuggingFaceModelSummary>,
+  treeEntries: readonly (HuggingFaceSibling | HuggingFaceTreeEntry)[],
+  size: 'e2b' | 'e4b' | '12b',
+): boolean {
+  const repoNames = [payload.id, payload.modelId].flatMap((value) => {
+    const normalized = normalizeSignal(value);
+    return normalized ? [normalized.split('/').filter(Boolean).pop() ?? normalized] : [];
+  });
+  if (!repoNames.some((name) => hasGemma4FamilyToken(name) && hasGemma4ProfileSizeToken(name, size))) {
+    return false;
+  }
+
+  const fileNames = treeEntries.flatMap((entry) => {
+    const fileName = getTreeEntryFileName(entry);
+    return fileName ? [fileName] : [];
+  });
+  const hasMatchingModelFile = fileNames.some((fileName) => (
+    !isProjectorFileName(fileName)
+    && hasGemma4FamilyToken(fileName)
+    && hasGemma4ProfileSizeToken(fileName, size)
+  ));
+  const hasProjectorFile = fileNames.some(isProjectorFileName);
+  return hasMatchingModelFile && hasProjectorFile;
+}
+
+function addKnownInputProfileEvidence(
+  accumulator: DeclaredInputCapabilityAccumulator,
+  payload: Partial<HuggingFaceModelSummary>,
+  treeEntries: readonly (HuggingFaceSibling | HuggingFaceTreeEntry)[],
+): void {
+  const architectureSignals = [
+    payload.config?.model_type,
+    ...(payload.config?.architectures ?? []),
+    payload.gguf?.architecture,
+  ].map(normalizeSignal);
+  const hasArchitectureSignal = architectureSignals.some(isGemma4ArchitectureSignal);
+
+  // Gemma 4 audio input is model-size-specific. E2B, E4B, and 12B expose
+  // native audio input; A4B and 31B do not. Require an exact supported size
+  // plus either Gemma 4 architecture metadata or matching repo, model-file,
+  // and projector evidence. A display name alone is never sufficient.
+  const size = resolveGemma4AudioProfileSize(payload);
+  if (!size || (
+    !hasArchitectureSignal
+    && !hasGemma4RepositoryArtifactProfile(payload, treeEntries, size)
+  )) {
+    return;
+  }
+
+  addEvidence(accumulator, 'audio', {
+    source: hasArchitectureSignal ? 'architecture' : 'repository_tree',
+    value: `gemma4-${size}-audio-profile`,
+    confidence: 'high',
+  });
 }
 
 function collectCardSignals(payload: Partial<HuggingFaceModelSummary>): {
@@ -328,6 +443,8 @@ export function inferDeclaredInputCapabilities(
   ]) {
     addSignalEvidence(accumulator, signal.source, signal.value);
   }
+
+  addKnownInputProfileEvidence(accumulator, payload ?? {}, treeEntries);
 
   for (const entry of treeEntries) {
     const fileName = getTreeEntryFileName(entry);

@@ -1,6 +1,7 @@
 import { normalizePersistedModelMetadata } from '../../src/services/ModelMetadataNormalizer';
 import { LifecycleStatus, ModelAccessState } from '../../src/types/models';
 import { buildMainModelArtifactId } from '../../src/utils/modelArtifacts';
+import { resolveEffectiveActiveVariantNativeSupport } from '../../src/utils/modelCapabilities';
 
 const VALID_SHA256 = 'a'.repeat(64);
 const OTHER_VALID_SHA256 = 'b'.repeat(64);
@@ -614,6 +615,121 @@ describe('ModelMetadataNormalizer', () => {
         sizeBytes: 536_870_912,
       }),
     ]);
+  });
+
+  it('repairs legacy downloaded Gemma 4 E2B audio metadata without flattened architecture fields', () => {
+    const modelId = 'unsloth/gemma-4-E2B-it-GGUF';
+    const modelFileName = 'gemma-4-E2B-it-Q4_K_M.gguf';
+    const projectorId = 'projector-gemma-4-e2b-mmproj-bf16';
+    const projectorFileName = 'mmproj-BF16.gguf';
+    const projectorUrl = `https://huggingface.co/${modelId}/resolve/main/${projectorFileName}`;
+    const normalized = normalizePersistedModelMetadata({
+      id: modelId,
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      localPath: modelFileName,
+      resolvedFileName: modelFileName,
+      activeVariantId: modelFileName,
+      chatModalities: ['text', 'vision'],
+      artifactRole: 'primary_chat_model',
+      inputCapabilities: {
+        detectedAt: 100,
+        declared: {
+          image: 'supported',
+          audio: 'unknown',
+          video: 'unknown',
+        },
+        evidence: [
+          { source: 'config', value: 'gemma4_vision', confidence: 'medium' },
+        ],
+      },
+      projectorCandidates: [
+        {
+          id: projectorId,
+          ownerModelId: modelId,
+          ownerVariantId: modelFileName,
+          repoId: modelId,
+          fileName: projectorFileName,
+          downloadUrl: projectorUrl,
+          hfRevision: 'main',
+          size: 1_000_000,
+          lifecycleStatus: 'downloaded',
+          matchStatus: 'matched',
+          localPath: projectorFileName,
+        },
+      ],
+      artifacts: [
+        {
+          id: projectorId,
+          kind: 'multimodal_projector',
+          requiredFor: ['image'],
+          hfRevision: 'main',
+          remoteFileName: projectorFileName,
+          downloadUrl: projectorUrl,
+          sizeBytes: 1_000_000,
+          localPath: projectorFileName,
+          installState: 'installed',
+        },
+      ],
+      variants: [
+        {
+          variantId: modelFileName,
+          fileName: modelFileName,
+          quantizationLabel: 'Q4_K_M',
+          size: 3_000_000_000,
+          chatModalities: ['text', 'vision'],
+          artifactRole: 'primary_chat_model',
+        },
+      ],
+    });
+
+    expect(normalized.chatModalities).toEqual(['text', 'vision', 'audio']);
+    expect(normalized.inputCapabilities).toEqual(expect.objectContaining({
+      detectedAt: 100,
+      declared: expect.objectContaining({ audio: 'supported' }),
+      evidence: expect.arrayContaining([
+        {
+          source: 'repository_tree',
+          value: 'gemma4-e2b-audio-profile',
+          confidence: 'high',
+        },
+      ]),
+    }));
+    expect(normalized.variants?.[0]?.chatModalities).toEqual(['text', 'vision', 'audio']);
+    expect(normalized.artifacts?.find((artifact) => artifact.id === projectorId)?.requiredFor)
+      .toEqual(['image', 'audio']);
+    expect(resolveEffectiveActiveVariantNativeSupport(normalized)).toEqual({
+      vision: true,
+      audio: true,
+    });
+  });
+
+  it('keeps legacy Gemma 4 31B metadata vision-only', () => {
+    const normalized = normalizePersistedModelMetadata({
+      id: 'unsloth/gemma-4-31B-it-GGUF',
+      modelType: 'gemma4',
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      chatModalities: ['text', 'vision'],
+      projectorCandidates: [
+        {
+          id: 'projector-gemma-4-31b',
+          ownerModelId: 'unsloth/gemma-4-31B-it-GGUF',
+          repoId: 'unsloth/gemma-4-31B-it-GGUF',
+          fileName: 'mmproj-BF16.gguf',
+          downloadUrl: 'https://example.com/mmproj-BF16.gguf',
+          size: 1_000_000,
+          lifecycleStatus: 'available',
+          matchStatus: 'matched',
+        },
+      ],
+    });
+
+    expect(normalized.chatModalities).toEqual(['text', 'vision']);
+    expect(normalized.inputCapabilities).toBeUndefined();
+    expect(resolveEffectiveActiveVariantNativeSupport(normalized)).toEqual({
+      vision: true,
+      audio: false,
+    });
   });
 
   it('preserves audio chat modalities on models and variants', () => {

@@ -5,7 +5,10 @@ import {
 } from '../../src/services/ModelCatalogTransformer';
 import { CATALOG_SEARCH_VARIANT_LIMIT } from '../../src/services/ModelCatalogFileSelector';
 import { LifecycleStatus } from '../../src/types/models';
-import { resolveModelNativeMultimodalSupport } from '../../src/utils/modelCapabilities';
+import {
+  resolveEffectiveActiveVariantNativeSupport,
+  resolveModelNativeMultimodalSupport,
+} from '../../src/utils/modelCapabilities';
 import {
   ambiguousProjectorCatalogSiblings,
   projectorOnlyCatalogSiblings,
@@ -227,6 +230,54 @@ describe('ModelCatalogTransformer', () => {
         requiredFor: ['image', 'audio'],
       }),
     ]));
+  });
+
+  it('maps the Gemma 4 E2B nested config to deployable vision and audio support', () => {
+    const modelFileName = 'gemma-4-E2B-it-Q4_K_M.gguf';
+    const projectorFileName = 'mmproj-BF16.gguf';
+    const models = transformHFResponse([
+      {
+        id: 'unsloth/gemma-4-E2B-it-GGUF',
+        author: 'unsloth',
+        tags: ['gguf', 'image-text-to-text'],
+        config: {
+          model_type: 'gemma4',
+          architectures: ['Gemma4ForConditionalGeneration'],
+          vision_config: { model_type: 'gemma4_vision' },
+          audio_config: { model_type: 'gemma4_audio' },
+        },
+        gguf: { architecture: 'gemma4' },
+        siblings: [
+          { rfilename: modelFileName, size: REMOTE_SIZE },
+          { rfilename: projectorFileName, size: 1_000_000 },
+        ],
+        sha: 'main',
+      },
+    ], null, null);
+
+    expect(models).toHaveLength(1);
+    expect(models[0]).toEqual(expect.objectContaining({
+      chatModalities: ['text', 'vision', 'audio'],
+      activeVariantId: modelFileName,
+    }));
+    expect(models[0].inputCapabilities?.declared).toEqual(expect.objectContaining({
+      image: 'supported',
+      audio: 'supported',
+    }));
+    expect(models[0].projectorCandidates).toEqual([
+      expect.objectContaining({ fileName: projectorFileName }),
+    ]);
+    expect(models[0].artifacts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'multimodal_projector',
+        remoteFileName: projectorFileName,
+        requiredFor: ['image', 'audio'],
+      }),
+    ]));
+    expect(resolveEffectiveActiveVariantNativeSupport(models[0])).toEqual({
+      vision: true,
+      audio: true,
+    });
   });
 
   it('preserves audio chat modalities from detailed payload input capabilities', () => {

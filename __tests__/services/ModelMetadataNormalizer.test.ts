@@ -704,6 +704,127 @@ describe('ModelMetadataNormalizer', () => {
     });
   });
 
+  it('repairs legacy Voxtral metadata as audio-only without retaining projector-derived vision', () => {
+    const modelId = 'community/Voxtral-Mini-3B-GGUF';
+    const modelFileName = 'Voxtral-Mini-3B-Q4_K_M.gguf';
+    const projectorId = 'projector-voxtral-mmproj-f16';
+    const projectorFileName = 'mmproj-Voxtral-Mini-3B-f16.gguf';
+    const projectorUrl = `https://huggingface.co/${modelId}/resolve/main/${projectorFileName}`;
+    const normalized = normalizePersistedModelMetadata({
+      id: modelId,
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      localPath: modelFileName,
+      resolvedFileName: modelFileName,
+      activeVariantId: modelFileName,
+      chatModalities: ['text', 'vision'],
+      artifactRole: 'primary_chat_model',
+      visionSource: 'tree_probe',
+      visionConfidence: 'trusted',
+      inputCapabilities: {
+        detectedAt: 100,
+        declared: {
+          image: 'supported',
+          audio: 'unknown',
+          video: 'unknown',
+        },
+        evidence: [
+          { source: 'tag', value: 'vision', confidence: 'medium' },
+        ],
+      },
+      projectorCandidates: [
+        {
+          id: projectorId,
+          ownerModelId: modelId,
+          ownerVariantId: modelFileName,
+          repoId: modelId,
+          fileName: projectorFileName,
+          downloadUrl: projectorUrl,
+          hfRevision: 'main',
+          size: 1_000_000,
+          lifecycleStatus: 'downloaded',
+          matchStatus: 'matched',
+          localPath: projectorFileName,
+        },
+      ],
+      artifacts: [
+        {
+          id: projectorId,
+          kind: 'multimodal_projector',
+          requiredFor: ['image'],
+          hfRevision: 'main',
+          remoteFileName: projectorFileName,
+          downloadUrl: projectorUrl,
+          sizeBytes: 1_000_000,
+          localPath: projectorFileName,
+          installState: 'installed',
+        },
+      ],
+      variants: [
+        {
+          variantId: modelFileName,
+          fileName: modelFileName,
+          quantizationLabel: 'Q4_K_M',
+          size: 3_000_000_000,
+          chatModalities: ['text', 'vision'],
+          artifactRole: 'primary_chat_model',
+          visionSource: 'tree_probe',
+          visionConfidence: 'trusted',
+        },
+      ],
+    });
+
+    expect(normalized.chatModalities).toEqual(['text', 'audio']);
+    expect(normalized.inputCapabilities).toEqual(expect.objectContaining({
+      detectedAt: 100,
+      declared: {
+        image: 'unknown',
+        audio: 'supported',
+        video: 'unknown',
+      },
+      evidence: expect.arrayContaining([
+        {
+          source: 'repository_tree',
+          value: 'voxtral-audio-profile',
+          confidence: 'high',
+        },
+      ]),
+    }));
+    expect(normalized.inputCapabilities?.evidence).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ value: 'vision' }),
+    ]));
+    expect(normalized.visionSource).toBeUndefined();
+    expect(normalized.visionConfidence).toBeUndefined();
+    expect(normalized.variants?.[0]).toEqual(expect.objectContaining({
+      chatModalities: ['text', 'audio'],
+      visionSource: undefined,
+      visionConfidence: undefined,
+    }));
+    expect(normalized.artifacts?.find((artifact) => artifact.id === projectorId)?.requiredFor)
+      .toEqual(['audio']);
+    expect(resolveEffectiveActiveVariantNativeSupport(normalized)).toEqual({
+      vision: false,
+      audio: true,
+    });
+  });
+
+  it('does not repair a known audio family from its model id without matching projector artifacts', () => {
+    const normalized = normalizePersistedModelMetadata({
+      id: 'community/Voxtral-Mini-3B-GGUF',
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      localPath: 'Voxtral-Mini-3B-Q4_K_M.gguf',
+      resolvedFileName: 'Voxtral-Mini-3B-Q4_K_M.gguf',
+      chatModalities: ['text'],
+    });
+
+    expect(normalized.chatModalities).toEqual(['text']);
+    expect(normalized.inputCapabilities).toBeUndefined();
+    expect(resolveEffectiveActiveVariantNativeSupport(normalized)).toEqual({
+      vision: false,
+      audio: false,
+    });
+  });
+
   it('keeps legacy Gemma 4 31B metadata vision-only', () => {
     const normalized = normalizePersistedModelMetadata({
       id: 'unsloth/gemma-4-31B-it-GGUF',

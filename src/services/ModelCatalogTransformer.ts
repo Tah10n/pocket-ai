@@ -331,7 +331,6 @@ function hasVisionCatalogSignal(item: HuggingFaceModelSummary): boolean {
     signal === 'image-text-to-text'
     || signal === 'visual-question-answering'
     || signal.includes('vision')
-    || signal.includes('multimodal')
     || signal.includes('vlm')
     || signal.includes('llava')
     || signal.includes('bakllava')
@@ -435,9 +434,10 @@ function getVisionMetadataPatch(options: {
   const hasProjectorCandidates = Boolean(options.projectorCandidates?.length);
   const hasAudioOnlyDeclaredCapability = options.inputCapabilities?.declared.audio === 'supported'
     && options.inputCapabilities.declared.image !== 'supported';
-  const hasVisionSignal = hasVisionCatalogSignal(options.item)
-    || options.inputCapabilities?.declared.image === 'supported'
-    || (hasProjectorCandidates && !hasAudioOnlyDeclaredCapability);
+  const hasVisionSignal = options.inputCapabilities?.declared.image === 'supported'
+    || (!hasAudioOnlyDeclaredCapability && (
+      hasVisionCatalogSignal(options.item) || hasProjectorCandidates
+    ));
   const baseChatModalities = hasVisionSignal ? ['text' as const, 'vision' as const] : ['text' as const];
 
   return {

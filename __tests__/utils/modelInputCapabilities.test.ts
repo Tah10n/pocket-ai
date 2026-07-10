@@ -14,6 +14,11 @@ describe('modelInputCapabilities', () => {
     ['tag image', { source: 'tag', value: 'Qwen2.5-VL' }, ['image']],
     ['runtime audio', { source: 'runtime', value: 'audio' }, ['audio']],
     ['nested config audio', { source: 'config', value: 'gemma4_audio' }, ['audio']],
+    ['Phi-4 multimodal architecture', { source: 'architecture', value: 'Phi4MMForCausalLM' }, ['image', 'audio']],
+    ['Qwen 2.5 Omni config', { source: 'config', value: 'qwen2_5_omni' }, ['image', 'audio']],
+    ['Voxtral architecture', { source: 'architecture', value: 'VoxtralForConditionalGeneration' }, ['audio']],
+    ['Qwen 3 VL architecture', { source: 'architecture', value: 'Qwen3VLForConditionalGeneration' }, ['image']],
+    ['image generation tag', { source: 'tag', value: 'text-to-image' }, []],
     ['catalog video', { source: 'repository_tree', value: 'video adapter' }, ['video']],
     ['passive projector', { source: 'projector', value: 'mmproj-audio.gguf' }, []],
   ] as const)('classifies %s evidence with the catalog inference rules', (_label, evidence, expected) => {
@@ -44,7 +49,7 @@ describe('modelInputCapabilities', () => {
       { source: 'pipeline_tag', value: 'audio-text-to-text', confidence: 'high' },
       { source: 'tag', value: 'vision', confidence: 'medium' },
       { source: 'tag', value: 'video', confidence: 'low' },
-      { source: 'architecture', value: 'qwen2vlforconditionalgeneration', confidence: 'medium' },
+      { source: 'architecture', value: 'qwen2vlforconditionalgeneration', confidence: 'high' },
       { source: 'projector', value: 'mmproj-model-f16.gguf', confidence: 'medium' },
     ]));
   });
@@ -70,6 +75,150 @@ describe('modelInputCapabilities', () => {
       { source: 'config', value: 'gemma4_audio', confidence: 'medium' },
       { source: 'architecture', value: 'gemma4-e2b-audio-profile', confidence: 'high' },
     ]));
+  });
+
+  it('walks deep Omni config blocks and records explicit input sections', () => {
+    const snapshot = inferDeclaredInputCapabilities({
+      id: 'example/deep-omni-config',
+      config: {
+        model_type: 'custom_omni',
+        thinker_config: {
+          audio_config: { model_type: 'whisper_encoder' },
+          vision_config: { model_type: 'siglip' },
+        },
+      },
+    }, [], { detectedAt: 0 });
+
+    expect(snapshot.declared).toEqual({
+      image: 'supported',
+      audio: 'supported',
+      video: 'unknown',
+    });
+    expect(snapshot.evidence).toEqual(expect.arrayContaining([
+      { source: 'config', value: 'audio_config', confidence: 'medium' },
+      { source: 'config', value: 'vision_config', confidence: 'medium' },
+    ]));
+  });
+
+  it('recognizes Phi-4-style processor and embedding blocks without relying on its family name', () => {
+    const snapshot = inferDeclaredInputCapabilities({
+      id: 'example/custom-conversion',
+      config: {
+        model_type: 'custom',
+        audio_processor: { config: { input_size: 80 } },
+        embd_layer: {
+          audio_embd_layer: { embedding_cls: 'audio' },
+          image_embd_layer: { embedding_cls: 'image' },
+        },
+      },
+    }, [], { detectedAt: 0 });
+
+    expect(snapshot.declared).toEqual({
+      image: 'supported',
+      audio: 'supported',
+      video: 'unknown',
+    });
+    expect(snapshot.evidence).toEqual(expect.arrayContaining([
+      { source: 'config', value: 'audio_processor', confidence: 'medium' },
+      { source: 'config', value: 'audio_embd_layer', confidence: 'medium' },
+      { source: 'config', value: 'image_embd_layer', confidence: 'medium' },
+    ]));
+  });
+
+  it('does not treat output flags and token ids as input capability blocks', () => {
+    const snapshot = inferDeclaredInputCapabilities({
+      id: 'example/output-only-signals',
+      config: {
+        model_type: 'text_model',
+        enable_audio_output: true,
+        audio_token_index: 100,
+        image_token_index: 101,
+      },
+    }, [], { detectedAt: 0 });
+
+    expect(snapshot.declared).toEqual({
+      image: 'unknown',
+      audio: 'unknown',
+      video: 'unknown',
+    });
+  });
+
+  it('bounds recursive config discovery when a malformed payload contains cycles', () => {
+    const config: { model_type: string; nested?: unknown } = { model_type: 'text_model' };
+    config.nested = { self: config };
+
+    expect(inferDeclaredInputCapabilities({ config }, [], { detectedAt: 0 }).declared).toEqual({
+      image: 'unknown',
+      audio: 'unknown',
+      video: 'unknown',
+    });
+  });
+
+  it.each([
+    {
+      name: 'Phi-4 multimodal',
+      id: 'community/Phi-4-multimodal-instruct-GGUF',
+      modelFile: 'Phi-4-multimodal-instruct-Q4_K_M.gguf',
+      declared: { image: 'supported', audio: 'supported', video: 'unknown' },
+    },
+    {
+      name: 'Qwen 2.5 Omni',
+      id: 'community/Qwen2.5-Omni-7B-GGUF',
+      modelFile: 'Qwen2.5-Omni-7B-Q4_K_M.gguf',
+      declared: { image: 'supported', audio: 'supported', video: 'unknown' },
+    },
+    {
+      name: 'Gemma 3n',
+      id: 'community/gemma-3n-E4B-it-GGUF',
+      modelFile: 'gemma-3n-E4B-it-Q4_K_M.gguf',
+      declared: { image: 'supported', audio: 'supported', video: 'unknown' },
+    },
+    {
+      name: 'Voxtral',
+      id: 'community/Voxtral-Mini-3B-GGUF',
+      modelFile: 'Voxtral-Mini-3B-Q4_K_M.gguf',
+      declared: { image: 'unknown', audio: 'supported', video: 'unknown' },
+    },
+    {
+      name: 'Ultravox',
+      id: 'community/Ultravox-v0.5-GGUF',
+      modelFile: 'Ultravox-v0.5-Q4_K_M.gguf',
+      declared: { image: 'unknown', audio: 'supported', video: 'unknown' },
+    },
+    {
+      name: 'Qwen 3 VL',
+      id: 'community/Qwen3-VL-4B-GGUF',
+      modelFile: 'Qwen3-VL-4B-Q4_K_M.gguf',
+      declared: { image: 'supported', audio: 'unknown', video: 'unknown' },
+    },
+  ])('repairs sparse $name GGUF metadata only when model and projector artifacts agree', ({
+    id,
+    modelFile,
+    declared,
+  }) => {
+    const snapshot = inferDeclaredInputCapabilities({ id }, [
+      { path: modelFile },
+      { path: 'mmproj-model-f16.gguf' },
+    ], { detectedAt: 0 });
+
+    expect(snapshot.declared).toEqual(declared);
+    expect(snapshot.evidence).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        source: 'repository_tree',
+        confidence: 'high',
+      }),
+    ]));
+  });
+
+  it('does not trust a known family name when the GGUF artifact belongs to another family', () => {
+    const snapshot = inferDeclaredInputCapabilities({
+      id: 'community/Voxtral-lookalike-GGUF',
+    }, [
+      { path: 'plain-text-model-Q4_K_M.gguf' },
+      { path: 'mmproj-model-f16.gguf' },
+    ], { detectedAt: 0 });
+
+    expect(snapshot.declared.audio).toBe('unknown');
   });
 
   it.each(['E2B', 'E4B', '12B'])('recognizes the Gemma 4 %s audio architecture profile', (size) => {

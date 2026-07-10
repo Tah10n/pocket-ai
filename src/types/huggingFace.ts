@@ -45,6 +45,7 @@ export type HuggingFaceModelCardData = {
 };
 
 export type HuggingFaceModelConfig = {
+  [key: string]: unknown;
   max_position_embeddings?: number;
   n_positions?: number;
   max_sequence_length?: number;

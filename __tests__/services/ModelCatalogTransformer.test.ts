@@ -280,6 +280,117 @@ describe('ModelCatalogTransformer', () => {
     });
   });
 
+  it('maps a sparse Phi-4 multimodal GGUF conversion to vision and audio support', () => {
+    const modelFileName = 'Phi-4-multimodal-instruct-Q4_K_M.gguf';
+    const projectorFileName = 'mmproj-Phi-4-multimodal-f16.gguf';
+    const models = transformHFResponse([
+      {
+        id: 'community/Phi-4-multimodal-instruct-GGUF',
+        tags: ['gguf'],
+        siblings: [
+          { rfilename: modelFileName, size: REMOTE_SIZE },
+          { rfilename: projectorFileName, size: 1_000_000 },
+        ],
+      },
+    ], null, null);
+
+    expect(models).toHaveLength(1);
+    expect(models[0].chatModalities).toEqual(['text', 'vision', 'audio']);
+    expect(models[0].inputCapabilities?.declared).toEqual({
+      image: 'supported',
+      audio: 'supported',
+      video: 'unknown',
+    });
+    expect(models[0].artifacts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'multimodal_projector',
+        requiredFor: ['image', 'audio'],
+      }),
+    ]));
+  });
+
+  it('keeps sparse audio-only GGUF models out of vision when metadata only says multimodal', () => {
+    const modelFileName = 'Voxtral-Mini-3B-Q4_K_M.gguf';
+    const projectorFileName = 'mmproj-Voxtral-Mini-3B-f16.gguf';
+    const models = transformHFResponse([
+      {
+        id: 'community/Voxtral-Mini-3B-multimodal-GGUF',
+        tags: ['gguf', 'multimodal'],
+        siblings: [
+          { rfilename: modelFileName, size: REMOTE_SIZE },
+          { rfilename: projectorFileName, size: 1_000_000 },
+        ],
+      },
+    ], null, null);
+
+    expect(models).toHaveLength(1);
+    expect(models[0].chatModalities).toEqual(['text', 'audio']);
+    expect(models[0].inputCapabilities?.declared).toEqual({
+      image: 'unknown',
+      audio: 'supported',
+      video: 'unknown',
+    });
+    expect(models[0].visionSource).toBeUndefined();
+    expect(models[0].visionConfidence).toBeUndefined();
+    expect(models[0].artifacts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'multimodal_projector',
+        requiredFor: ['audio'],
+      }),
+    ]));
+    expect(resolveEffectiveActiveVariantNativeSupport(models[0])).toEqual({
+      vision: false,
+      audio: true,
+    });
+  });
+
+  it('keeps an ambiguous multimodal label passive without image or projector evidence', () => {
+    const models = transformHFResponse([
+      {
+        id: 'community/generic-multimodal-model-GGUF',
+        tags: ['gguf', 'multimodal'],
+        siblings: [
+          { rfilename: 'generic-model-Q4_K_M.gguf', size: REMOTE_SIZE },
+        ],
+      },
+    ], null, null);
+
+    expect(models).toHaveLength(1);
+    expect(models[0].chatModalities).toEqual(['text']);
+    expect(models[0].inputCapabilities).toBeUndefined();
+    expect(resolveEffectiveActiveVariantNativeSupport(models[0])).toEqual({
+      vision: false,
+      audio: false,
+    });
+  });
+
+  it('recognizes sparse Qwen 3 VL conversions from matching repository artifacts', () => {
+    const modelFileName = 'Qwen3-VL-4B-Q4_K_M.gguf';
+    const projectorFileName = 'mmproj-Qwen3-VL-4B-f16.gguf';
+    const models = transformHFResponse([
+      {
+        id: 'community/Qwen3-VL-4B-GGUF',
+        tags: ['gguf'],
+        siblings: [
+          { rfilename: modelFileName, size: REMOTE_SIZE },
+          { rfilename: projectorFileName, size: 1_000_000 },
+        ],
+      },
+    ], null, null);
+
+    expect(models).toHaveLength(1);
+    expect(models[0].chatModalities).toEqual(['text', 'vision']);
+    expect(models[0].inputCapabilities?.declared).toEqual({
+      image: 'supported',
+      audio: 'unknown',
+      video: 'unknown',
+    });
+    expect(resolveEffectiveActiveVariantNativeSupport(models[0])).toEqual({
+      vision: true,
+      audio: false,
+    });
+  });
+
   it('preserves audio chat modalities from detailed payload input capabilities', () => {
     const result = buildModelMetadataFromPayload(
       {

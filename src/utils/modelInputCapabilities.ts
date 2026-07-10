@@ -62,7 +62,7 @@ const SIGNAL_PATTERNS: {
   {
     modality: 'image',
     confidence: 'medium',
-    pattern: /\b(?:vision|visual|multimodal|vlm|llava|bakllava|moondream|pixtral|qwen2(?:\.5)?-?vl|qwen2vl|qwen25vl)/u,
+    pattern: /\b(?:vision|visual|vlm|llava|bakllava|moondream|pixtral|qwen2(?:\.5)?-?vl|qwen2vl|qwen25vl)/u,
   },
   {
     modality: 'audio',
@@ -75,6 +75,119 @@ const SIGNAL_PATTERNS: {
     pattern: /\bvideo\b/u,
   },
 ];
+
+type KnownInputProfile = {
+  id: string;
+  aliases: readonly string[];
+  modalities: readonly NativeInputModality[];
+};
+
+// These aliases mirror model families with explicit multimodal projector
+// support in the bundled runtime. Runtime probing remains authoritative; this
+// table only repairs incomplete catalog/config metadata before a model is run.
+const KNOWN_INPUT_PROFILES: readonly KnownInputProfile[] = [
+  {
+    id: 'phi4-vision-audio',
+    aliases: ['phi4mm', 'phi4multimodal'],
+    modalities: ['image', 'audio'],
+  },
+  {
+    id: 'qwen25-omni-vision-audio',
+    aliases: ['qwen25omni', 'qwen25o'],
+    modalities: ['image', 'audio'],
+  },
+  {
+    id: 'gemma3n-vision-audio',
+    aliases: ['gemma3n'],
+    modalities: ['image', 'audio'],
+  },
+  {
+    id: 'voxtral-audio',
+    aliases: ['voxtral'],
+    modalities: ['audio'],
+  },
+  {
+    id: 'ultravox-audio',
+    aliases: ['ultravox'],
+    modalities: ['audio'],
+  },
+  {
+    id: 'meralion-audio',
+    aliases: ['meralion'],
+    modalities: ['audio'],
+  },
+  {
+    id: 'music-flamingo-audio',
+    aliases: ['musicflamingo'],
+    modalities: ['audio'],
+  },
+  {
+    id: 'lfm2-audio',
+    aliases: ['lfm2audio'],
+    modalities: ['audio'],
+  },
+  {
+    id: 'granite-speech-audio',
+    aliases: ['granitespeech'],
+    modalities: ['audio'],
+  },
+  {
+    id: 'qwen-audio',
+    aliases: ['qwen2audio', 'qwen3audio'],
+    modalities: ['audio'],
+  },
+  {
+    id: 'glm-asr-audio',
+    aliases: ['glmasr', 'glmaudio'],
+    modalities: ['audio'],
+  },
+  {
+    id: 'runtime-vision',
+    aliases: [
+      'minicpmv',
+      'qwen2vl',
+      'qwen25vl',
+      'qwen3vl',
+      'step3vl',
+      'idefics3',
+      'pixtral',
+      'internvl',
+      'llama4',
+      'lfm2vl',
+      'kimivl',
+      'kimik25',
+      'cogvlm',
+      'januspro',
+      'glm4v',
+      'paddleocr',
+      'lightonocr',
+      'dotsocr',
+      'deepseekocr',
+      'youtuvl',
+      'nemotronv2vl',
+      'hunyuanvl',
+      'granite4vision',
+      'mimovl',
+    ],
+    modalities: ['image'],
+  },
+];
+
+const CONFIG_SIGNAL_MAX_DEPTH = 8;
+const CONFIG_SIGNAL_MAX_OBJECTS = 256;
+const CONFIG_BLOCK_KIND_TOKENS = new Set([
+  'adapter',
+  'config',
+  'embd',
+  'embedding',
+  'encoder',
+  'layer',
+  'model',
+  'processor',
+  'projector',
+  'tokenizer',
+  'tower',
+]);
 
 type CapabilityEvidenceIdentity = Pick<CapabilityEvidence, 'source' | 'value'>;
 
@@ -94,6 +207,90 @@ function normalizeSignalForPatternMatching(value: string): string {
   return value.replace(/[_/]+/gu, '-');
 }
 
+function compactSignal(value: string): string {
+  return value.replace(/[^a-z0-9]/gu, '');
+}
+
+function getKnownInputProfiles(value: string): KnownInputProfile[] {
+  const compact = compactSignal(value);
+  return KNOWN_INPUT_PROFILES.filter((profile) => (
+    profile.aliases.some((alias) => compact.includes(alias))
+  ));
+}
+
+function getConfigBlockModalities(key: string): NativeInputModality[] {
+  const tokens = normalizeSignalForPatternMatching(key)
+    .split(/[^a-z0-9]+/gu)
+    .filter(Boolean);
+  if (!tokens.some((token) => CONFIG_BLOCK_KIND_TOKENS.has(token))) {
+    return [];
+  }
+
+  const modalities: NativeInputModality[] = [];
+  if (tokens.some((token) => token === 'image' || token === 'vision' || token === 'visual')) {
+    modalities.push('image');
+  }
+  if (tokens.some((token) => token === 'audio' || token === 'speech')) {
+    modalities.push('audio');
+  }
+  if (tokens.includes('video')) {
+    modalities.push('video');
+  }
+
+  return modalities;
+}
+
+function isConfigObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isTraversableConfigValue(value: unknown): boolean {
+  return isConfigObject(value)
+    || (Array.isArray(value) && value.some(isConfigObject));
+}
+
+function resolveSignalMatches(
+  source: CapabilityEvidence['source'],
+  value: string,
+): { modality: NativeInputModality; confidence: CapabilityConfidence }[] {
+  const matches = new Map<NativeInputModality, CapabilityConfidence>();
+  const confidenceRank: Record<CapabilityConfidence, number> = {
+    low: 0,
+    medium: 1,
+    high: 2,
+  };
+  const recordMatch = (modality: NativeInputModality, confidence: CapabilityConfidence) => {
+    const current = matches.get(modality);
+    if (!current || confidenceRank[confidence] > confidenceRank[current]) {
+      matches.set(modality, confidence);
+    }
+  };
+
+  const matchableValue = normalizeSignalForPatternMatching(value);
+  for (const signal of SIGNAL_PATTERNS) {
+    if (signal.pattern.test(matchableValue)) {
+      recordMatch(signal.modality, signal.confidence);
+    }
+  }
+
+  if (source === 'config') {
+    for (const modality of getConfigBlockModalities(value)) {
+      recordMatch(modality, 'medium');
+    }
+  }
+
+  const profileConfidence: CapabilityConfidence = source === 'config' || source === 'architecture'
+    ? 'high'
+    : 'medium';
+  for (const profile of getKnownInputProfiles(value)) {
+    for (const modality of profile.modalities) {
+      recordMatch(modality, profileConfidence);
+    }
+  }
+
+  return Array.from(matches, ([modality, confidence]) => ({ modality, confidence }));
+}
+
 /**
  * Classifies normalized capability evidence using the same rules as catalog
  * inference. Projector filenames are intentionally passive evidence: their
@@ -111,10 +308,7 @@ export function getInputCapabilityEvidenceModalities(
     return [...(PIPELINE_MODALITY_SIGNALS[value] ?? [])];
   }
 
-  const matchableValue = normalizeSignalForPatternMatching(value);
-  return SIGNAL_PATTERNS.flatMap((signal) => (
-    signal.pattern.test(matchableValue) ? [signal.modality] : []
-  ));
+  return resolveSignalMatches(evidence.source, value).map((match) => match.modality);
 }
 
 export function inputCapabilityEvidenceSupportsModality(
@@ -202,16 +396,11 @@ function addSignalEvidence(
     return;
   }
 
-  const matchableValue = normalizeSignalForPatternMatching(value);
-  for (const signal of SIGNAL_PATTERNS) {
-    if (!signal.pattern.test(matchableValue)) {
-      continue;
-    }
-
-    addEvidence(accumulator, signal.modality, {
+  for (const match of resolveSignalMatches(source, value)) {
+    addEvidence(accumulator, match.modality, {
       source,
       value,
-      confidence: signal.confidence,
+      confidence: match.confidence,
     });
   }
 }
@@ -221,20 +410,62 @@ function collectConfigSignals(config: HuggingFaceModelConfig | undefined): {
   value: string;
 }[] {
   const signals: { source: CapabilityEvidence['source']; value: string }[] = [];
-  const configs = [config, config?.text_config, config?.vision_config, config?.audio_config];
-  for (const nestedConfig of configs) {
-    const modelType = normalizeSignal(nestedConfig?.model_type);
+  const visited = new WeakSet<object>();
+  let objectCount = 0;
+
+  const visit = (value: unknown, depth: number): void => {
+    if (depth > CONFIG_SIGNAL_MAX_DEPTH || objectCount >= CONFIG_SIGNAL_MAX_OBJECTS) {
+      return;
+    }
+
+    if (Array.isArray(value)) {
+      if (visited.has(value)) {
+        return;
+      }
+      visited.add(value);
+      objectCount += 1;
+      for (const entry of value) {
+        if (isConfigObject(entry)) {
+          visit(entry, depth + 1);
+        }
+      }
+      return;
+    }
+
+    if (!isConfigObject(value) || visited.has(value)) {
+      return;
+    }
+    visited.add(value);
+    objectCount += 1;
+
+    const modelType = normalizeSignal(value.model_type);
     if (modelType) {
       signals.push({ source: 'config', value: modelType });
     }
 
-    for (const architecture of nestedConfig?.architectures ?? []) {
-      const normalized = normalizeSignal(architecture);
-      if (normalized) {
-        signals.push({ source: 'architecture', value: normalized });
+    if (Array.isArray(value.architectures)) {
+      for (const architecture of value.architectures) {
+        const normalized = normalizeSignal(architecture);
+        if (normalized) {
+          signals.push({ source: 'architecture', value: normalized });
+        }
       }
     }
-  }
+
+    for (const [key, nestedValue] of Object.entries(value)) {
+      if (!isTraversableConfigValue(nestedValue)) {
+        continue;
+      }
+
+      const normalizedKey = normalizeSignal(key);
+      if (normalizedKey && getConfigBlockModalities(normalizedKey).length > 0) {
+        signals.push({ source: 'config', value: normalizedKey });
+      }
+      visit(nestedValue, depth + 1);
+    }
+  };
+
+  visit(config, 0);
 
   return signals;
 }
@@ -281,6 +512,38 @@ export function isKnownGemma4AudioProfileModelId(value: unknown): boolean {
     && resolveGemma4AudioProfileSize({ id: normalized }) !== null;
 }
 
+export function isKnownAudioInputProfileSignal(value: unknown): boolean {
+  const normalized = normalizeSignal(value);
+  if (!normalized) {
+    return false;
+  }
+
+  return isKnownGemma4AudioProfileModelId(normalized)
+    || getKnownInputProfiles(normalized).some((profile) => profile.modalities.includes('audio'));
+}
+
+export function isKnownAudioOnlyInputProfileSignal(value: unknown): boolean {
+  const normalized = normalizeSignal(value);
+  if (!normalized) {
+    return false;
+  }
+
+  return getKnownInputProfiles(normalized).some((profile) => (
+    profile.modalities.includes('audio') && !profile.modalities.includes('image')
+  ));
+}
+
+export function isKnownVisionAudioInputProfileSignal(value: unknown): boolean {
+  const normalized = normalizeSignal(value);
+  if (!normalized) {
+    return false;
+  }
+
+  return getKnownInputProfiles(normalized).some((profile) => (
+    profile.modalities.includes('image') && profile.modalities.includes('audio')
+  ));
+}
+
 function hasGemma4ProfileSizeToken(value: string, size: 'e2b' | 'e4b' | '12b'): boolean {
   return new RegExp(`(?:^|[-_.])${size}(?:[-_.]|$)`, 'u').test(value);
 }
@@ -311,11 +574,49 @@ function hasGemma4RepositoryArtifactProfile(
   return hasMatchingModelFile && hasProjectorFile;
 }
 
+function addKnownRepositoryProfileEvidence(
+  accumulator: DeclaredInputCapabilityAccumulator,
+  payload: Partial<HuggingFaceModelSummary>,
+  treeEntries: readonly (HuggingFaceSibling | HuggingFaceTreeEntry)[],
+): void {
+  const repositoryNames = [payload.id, payload.modelId]
+    .map(normalizeSignal)
+    .filter((value): value is string => value !== null);
+  const fileNames = treeEntries.flatMap((entry) => {
+    const fileName = getTreeEntryFileName(entry);
+    return fileName ? [fileName] : [];
+  });
+  if (!fileNames.some(isProjectorFileName)) {
+    return;
+  }
+
+  const modelFileNames = fileNames.filter((fileName) => (
+    !isProjectorFileName(fileName) && /\.gguf$/iu.test(fileName)
+  ));
+  for (const profile of KNOWN_INPUT_PROFILES) {
+    const repositoryMatches = repositoryNames.some((name) => getKnownInputProfiles(name).includes(profile));
+    const modelFileMatches = modelFileNames.some((fileName) => getKnownInputProfiles(fileName).includes(profile));
+    if (!repositoryMatches || !modelFileMatches) {
+      continue;
+    }
+
+    for (const modality of profile.modalities) {
+      addEvidence(accumulator, modality, {
+        source: 'repository_tree',
+        value: `${profile.id}-profile`,
+        confidence: 'high',
+      });
+    }
+  }
+}
+
 function addKnownInputProfileEvidence(
   accumulator: DeclaredInputCapabilityAccumulator,
   payload: Partial<HuggingFaceModelSummary>,
   treeEntries: readonly (HuggingFaceSibling | HuggingFaceTreeEntry)[],
 ): void {
+  addKnownRepositoryProfileEvidence(accumulator, payload, treeEntries);
+
   const architectureSignals = [
     payload.config?.model_type,
     ...(payload.config?.architectures ?? []),

@@ -23,6 +23,7 @@ import type {
   VisionCapabilityConfidence,
   VisionCapabilitySource,
 } from '../types/multimodal';
+import type { ModelInputCapabilitySnapshot } from '../types/modelInputCapabilities';
 import {
   deriveArtifactsFromLegacyModel,
   normalizePersistedModelArtifacts,
@@ -191,6 +192,27 @@ function reconcileChatModalitiesWithTrustedProfile(
     ...(modalities.has('vision') ? ['vision' as const] : []),
     ...(modalities.has('audio') ? ['audio' as const] : []),
   ];
+}
+
+function hasExplicitTextOnlyChatModalities(chatModalities: ModelChatModality[] | undefined): boolean {
+  return Array.isArray(chatModalities)
+    && chatModalities.includes('text')
+    && !chatModalities.includes('vision')
+    && !chatModalities.includes('audio');
+}
+
+function hasTrustedPersistedImageEvidence(
+  inputCapabilities: ModelInputCapabilitySnapshot | undefined,
+): boolean {
+  return inputCapabilities?.evidence.some((entry) => (
+    inputCapabilityEvidenceSupportsModality(entry, 'image')
+    && (
+      entry.source === 'runtime'
+      || entry.source === 'architecture'
+      || entry.source === 'config'
+      || entry.confidence === 'high'
+    )
+  )) === true;
 }
 
 function normalizeMultimodalReadinessStatus(value: unknown): MultimodalReadinessStatus | undefined {
@@ -713,15 +735,31 @@ export function normalizePersistedModelMetadata(
     )) === true
   );
   const hasTrustedAudioProfile = hasTrustedProfileEvidenceFor('audio');
+  const hasTrustedInferredImageProfile = hasTrustedProfileEvidenceFor('image');
+  const hasTrustedPersistedImageProfile = hasTrustedPersistedImageEvidence(persistedInputCapabilities);
   const hasRuntimeVisionSupport = multimodalReadiness?.support.includes('vision') === true;
   const hasKnownVisionAudioProfile = knownAudioProfileSignals.some(isKnownVisionAudioInputProfileSignal);
+  const hasVerifiedPersistedVision = persistedChatModalities?.includes('vision') === true
+    && visionConfidence === 'verified';
+  const hasVerifiedVariantVision = normalizedVariants?.some((variant) => (
+    variant.chatModalities?.includes('vision') === true
+    && variant.visionConfidence === 'verified'
+  )) === true;
   const trustedProfileIsAudioOnly = hasTrustedAudioProfile
     && knownAudioProfileSignals.some(isKnownAudioOnlyInputProfileSignal)
     && !hasKnownVisionAudioProfile
-    && !hasRuntimeVisionSupport;
+    && !hasTrustedInferredImageProfile
+    && !hasTrustedPersistedImageProfile
+    && !hasRuntimeVisionSupport
+    && !hasVerifiedPersistedVision
+    && !hasVerifiedVariantVision;
   const trustedProfileSupport = {
     image: !trustedProfileIsAudioOnly && (
-      hasTrustedProfileEvidenceFor('image')
+      hasTrustedInferredImageProfile
+      || hasTrustedPersistedImageProfile
+      || hasRuntimeVisionSupport
+      || hasVerifiedPersistedVision
+      || hasVerifiedVariantVision
       || persistedInputCapabilities?.declared.image === 'supported'
     ),
     audio: hasTrustedAudioProfile,
@@ -755,7 +793,11 @@ export function normalizePersistedModelMetadata(
             || candidate.ownerVariantId === variant.variantId
             || candidate.ownerVariantId === variant.fileName
           )) === true;
-        if (!variantHasProjector || variant.artifactRole === 'projector_companion') {
+        if (
+          !variantHasProjector
+          || variant.artifactRole === 'projector_companion'
+          || hasExplicitTextOnlyChatModalities(variant.chatModalities)
+        ) {
           return variant;
         }
 
@@ -810,16 +852,37 @@ export function normalizePersistedModelMetadata(
   }, (model as PersistedModelMetadata & { capabilitySnapshot?: ModelCapabilitySnapshot }).capabilitySnapshot);
   const hasReconciledAudioModality = chatModalities?.includes('audio') === true
     || variants?.some((variant) => variant.chatModalities?.includes('audio') === true) === true;
-  const trustedProfileRequiredFor = [
-    ...(trustedProfileSupport.image ? ['image' as const] : []),
-    ...(trustedProfileSupport.audio ? ['audio' as const] : []),
-  ];
+  const matchingPersistedProjectorCount = persistedArtifacts?.filter((artifact) => (
+    artifact.kind === 'multimodal_projector'
+    && projectorCandidates?.some((candidate) => projectorArtifactMatchesCandidate(artifact, candidate)) === true
+  )).length ?? 0;
+  // Multiple projectors can intentionally split image and audio requirements.
+  // Only rewrite a single stable legacy projector whose scope came from model-wide metadata.
+  const hasSingleStableLegacyProjector = projectorCandidates?.length === 1
+    && matchingPersistedProjectorCount === 1;
+  const canRepairAudioOnlyLegacyProjector = hasSingleStableLegacyProjector
+    && trustedProfileIsAudioOnly;
+  const canRepairUnifiedLegacyProjector = hasSingleStableLegacyProjector
+    && trustedProfileSupport.image
+    && trustedProfileSupport.audio;
   const reconciledPersistedArtifacts = hasTrustedAudioProfile && hasReconciledAudioModality
     ? persistedArtifacts?.map((artifact) => {
         const matchesKnownProjector = artifact.kind === 'multimodal_projector'
           && projectorCandidates?.some((candidate) => projectorArtifactMatchesCandidate(artifact, candidate)) === true;
-        return matchesKnownProjector && trustedProfileRequiredFor.length > 0
-          ? { ...artifact, requiredFor: trustedProfileRequiredFor }
+        if (!matchesKnownProjector) {
+          return artifact;
+        }
+
+        if (canRepairAudioOnlyLegacyProjector && (
+          artifact.requiredFor.includes('image') || artifact.requiredFor.includes('audio')
+        )) {
+          return { ...artifact, requiredFor: ['audio' as const] };
+        }
+
+        const hasLegacyImageOnlyRequirement = artifact.requiredFor.length === 1
+          && artifact.requiredFor[0] === 'image';
+        return canRepairUnifiedLegacyProjector && hasLegacyImageOnlyRequirement
+          ? { ...artifact, requiredFor: ['image' as const, 'audio' as const] }
           : artifact;
       })
     : persistedArtifacts;

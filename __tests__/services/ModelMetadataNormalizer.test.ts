@@ -6,6 +6,36 @@ import { resolveEffectiveActiveVariantNativeSupport } from '../../src/utils/mode
 const VALID_SHA256 = 'a'.repeat(64);
 const OTHER_VALID_SHA256 = 'b'.repeat(64);
 
+function buildAvailableProjectorCandidate(modelId: string, id: string, fileName: string) {
+  return {
+    id,
+    ownerModelId: modelId,
+    repoId: modelId,
+    fileName,
+    downloadUrl: `https://huggingface.co/${modelId}/resolve/main/${fileName}`,
+    hfRevision: 'main',
+    size: 1_000_000,
+    lifecycleStatus: 'available' as const,
+    matchStatus: 'matched' as const,
+  };
+}
+
+function buildRemoteProjectorArtifact(
+  candidate: ReturnType<typeof buildAvailableProjectorCandidate>,
+  requiredFor: Array<'image' | 'audio'>,
+) {
+  return {
+    id: candidate.id,
+    kind: 'multimodal_projector' as const,
+    requiredFor,
+    hfRevision: candidate.hfRevision,
+    remoteFileName: candidate.fileName,
+    downloadUrl: candidate.downloadUrl,
+    sizeBytes: candidate.size,
+    installState: 'remote' as const,
+  };
+}
+
 describe('ModelMetadataNormalizer', () => {
   it('removes persisted support outside the requested modality set', () => {
     const normalized = normalizePersistedModelMetadata({
@@ -804,6 +834,204 @@ describe('ModelMetadataNormalizer', () => {
       .toEqual(['audio']);
     expect(resolveEffectiveActiveVariantNativeSupport(normalized)).toEqual({
       vision: false,
+      audio: true,
+    });
+  });
+
+  it('keeps explicit text-only variants authoritative during trusted profile repair', () => {
+    const modelId = 'community/Phi-4-multimodal-instruct-GGUF';
+    const textVariantFileName = 'Phi-4-text-Q4_K_M.gguf';
+    const legacyVariantFileName = 'Phi-4-legacy-Q5_K_M.gguf';
+    const projector = buildAvailableProjectorCandidate(
+      modelId,
+      'projector-phi-4-mmproj-f16',
+      'mmproj-Phi-4-multimodal-f16.gguf',
+    );
+    const normalized = normalizePersistedModelMetadata({
+      id: modelId,
+      modelType: 'phi4mm',
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      resolvedFileName: textVariantFileName,
+      activeVariantId: 'text-only',
+      chatModalities: ['text'],
+      projectorCandidates: [projector],
+      artifacts: [buildRemoteProjectorArtifact(projector, ['image', 'audio'])],
+      variants: [
+        {
+          variantId: 'text-only',
+          fileName: textVariantFileName,
+          quantizationLabel: 'Q4_K_M',
+          size: 2_000_000_000,
+          chatModalities: ['text'],
+        },
+        {
+          variantId: 'legacy-unknown',
+          fileName: legacyVariantFileName,
+          quantizationLabel: 'Q5_K_M',
+          size: 2_500_000_000,
+        },
+      ],
+    });
+
+    expect(normalized.chatModalities).toEqual(['text', 'vision', 'audio']);
+    expect(normalized.variants?.find((variant) => variant.variantId === 'text-only')?.chatModalities)
+      .toEqual(['text']);
+    expect(normalized.variants?.find((variant) => variant.variantId === 'legacy-unknown')?.chatModalities)
+      .toEqual(['text', 'vision', 'audio']);
+    expect(resolveEffectiveActiveVariantNativeSupport(normalized)).toEqual({
+      vision: false,
+      audio: false,
+    });
+  });
+
+  it('preserves separate image and audio projector requirements for trusted dual-modality profiles', () => {
+    const modelId = 'community/Phi-4-multimodal-instruct-GGUF';
+    const imageProjector = buildAvailableProjectorCandidate(
+      modelId,
+      'projector-phi-4-vision',
+      'vision-projector-f16.gguf',
+    );
+    const audioProjector = buildAvailableProjectorCandidate(
+      modelId,
+      'projector-phi-4-audio',
+      'audio-projector-f16.gguf',
+    );
+    const normalized = normalizePersistedModelMetadata({
+      id: modelId,
+      modelType: 'phi4mm',
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      chatModalities: ['text', 'vision', 'audio'],
+      projectorCandidates: [imageProjector, audioProjector],
+      artifacts: [
+        buildRemoteProjectorArtifact(imageProjector, ['image']),
+        buildRemoteProjectorArtifact(audioProjector, ['audio']),
+      ],
+    });
+
+    expect(normalized.artifacts?.find((artifact) => artifact.id === imageProjector.id)?.requiredFor)
+      .toEqual(['image']);
+    expect(normalized.artifacts?.find((artifact) => artifact.id === audioProjector.id)?.requiredFor)
+      .toEqual(['audio']);
+  });
+
+  it('preserves separate projector requirements during an audio-only family fallback', () => {
+    const modelId = 'community/Voxtral-Mini-3B-GGUF';
+    const imageProjector = buildAvailableProjectorCandidate(
+      modelId,
+      'projector-voxtral-vision',
+      'vision-projector-f16.gguf',
+    );
+    const audioProjector = buildAvailableProjectorCandidate(
+      modelId,
+      'projector-voxtral-audio',
+      'audio-projector-f16.gguf',
+    );
+    const normalized = normalizePersistedModelMetadata({
+      id: modelId,
+      modelType: 'voxtral',
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      chatModalities: ['text', 'vision'],
+      projectorCandidates: [imageProjector, audioProjector],
+      artifacts: [
+        buildRemoteProjectorArtifact(imageProjector, ['image']),
+        buildRemoteProjectorArtifact(audioProjector, ['audio']),
+      ],
+    });
+
+    expect(normalized.chatModalities).toEqual(['text', 'audio']);
+    expect(normalized.artifacts?.find((artifact) => artifact.id === imageProjector.id)?.requiredFor)
+      .toEqual(['image']);
+    expect(normalized.artifacts?.find((artifact) => artifact.id === audioProjector.id)?.requiredFor)
+      .toEqual(['audio']);
+    expect(resolveEffectiveActiveVariantNativeSupport(normalized)).toEqual({
+      vision: false,
+      audio: true,
+    });
+  });
+
+  it.each([
+    ['config', { source: 'config', value: 'vision_config', confidence: 'medium' }],
+    ['architecture', {
+      source: 'architecture',
+      value: 'qwen2vlforconditionalgeneration',
+      confidence: 'high',
+    }],
+    ['runtime', { source: 'runtime', value: 'vision', confidence: 'high' }],
+  ] as const)('keeps explicit %s vision evidence stronger than an audio-only family fallback', (
+    _evidenceKind,
+    imageEvidence,
+  ) => {
+    const modelId = 'community/Voxtral-Mini-3B-GGUF';
+    const projector = buildAvailableProjectorCandidate(
+      modelId,
+      'projector-voxtral-vision-audio',
+      'mmproj-Voxtral-Mini-3B-f16.gguf',
+    );
+    const normalized = normalizePersistedModelMetadata({
+      id: modelId,
+      modelType: 'voxtral',
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      chatModalities: ['text', 'vision'],
+      visionSource: 'tree_probe',
+      visionConfidence: 'trusted',
+      inputCapabilities: {
+        detectedAt: 100,
+        declared: {
+          image: 'supported',
+          audio: 'unknown',
+          video: 'unknown',
+        },
+        evidence: [
+          imageEvidence,
+        ],
+      },
+      projectorCandidates: [projector],
+      artifacts: [buildRemoteProjectorArtifact(projector, ['image'])],
+    });
+
+    expect(normalized.chatModalities).toEqual(['text', 'vision', 'audio']);
+    expect(normalized.inputCapabilities).toEqual(expect.objectContaining({
+      declared: {
+        image: 'supported',
+        audio: 'supported',
+        video: 'unknown',
+      },
+      evidence: expect.arrayContaining([
+        imageEvidence,
+        { source: 'config', value: 'voxtral', confidence: 'high' },
+      ]),
+    }));
+    expect(normalized.visionSource).toBe('tree_probe');
+    expect(normalized.visionConfidence).toBe('trusted');
+    expect(resolveEffectiveActiveVariantNativeSupport(normalized)).toEqual({
+      vision: true,
+      audio: true,
+    });
+  });
+
+  it('keeps verified vision provenance stronger than an audio-only family fallback', () => {
+    const modelId = 'community/Voxtral-Mini-3B-GGUF';
+    const projector = buildAvailableProjectorCandidate(
+      modelId,
+      'projector-voxtral-user-verified',
+      'mmproj-Voxtral-user-verified-f16.gguf',
+    );
+    const normalized = normalizePersistedModelMetadata({
+      id: modelId,
+      modelType: 'voxtral',
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      chatModalities: ['text', 'vision'],
+      visionSource: 'user_selected_projector',
+      visionConfidence: 'verified',
+      projectorCandidates: [projector],
+      artifacts: [buildRemoteProjectorArtifact(projector, ['image'])],
+    });
+
+    expect(normalized.chatModalities).toEqual(['text', 'vision', 'audio']);
+    expect(normalized.visionSource).toBe('user_selected_projector');
+    expect(normalized.visionConfidence).toBe('verified');
+    expect(resolveEffectiveActiveVariantNativeSupport(normalized)).toEqual({
+      vision: true,
       audio: true,
     });
   });

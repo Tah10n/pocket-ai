@@ -1,17 +1,28 @@
 import DeviceInfo from 'react-native-device-info';
+import { ModelCatalogCacheStore } from '../../src/services/ModelCatalogCacheStore';
 import { ModelCatalogService } from '../../src/services/ModelCatalogService';
 import { huggingFaceTokenService } from '../../src/services/HuggingFaceTokenService';
 import { hardwareListenerService } from '../../src/services/HardwareListenerService';
 import { registry } from '../../src/services/LocalStorageRegistry';
+import { normalizePersistedModelMetadata } from '../../src/services/ModelMetadataNormalizer';
+import {
+  getReadinessStatusForProjectorLifecycle,
+  projectorArtifactService,
+} from '../../src/services/ProjectorArtifactService';
+import { createStorage } from '../../src/services/storage';
 import { EngineStatus, LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../src/types/models';
 import type { MultimodalReadinessState, ProjectorArtifact } from '../../src/types/multimodal';
 import {
+  getEffectiveActiveVariantProjectorCandidates,
+  getEffectiveActiveVariantSelectedProjectorId,
   resolveEffectiveActiveVariantNativeSupport,
   resolveModelNativeMultimodalSupport,
 } from '../../src/utils/modelCapabilities';
+import { resolveActiveModelVariant } from '../../src/utils/activeModelVariant';
 import { resolveEffectiveInputCapabilities } from '../../src/utils/modelInputCapabilities';
 import { buildProjectorArtifactId } from '../../src/utils/modelProjectors';
 import { applyModelVariantSelection } from '../../src/utils/modelVariants';
+import { isMultimodalReadinessReusableForModel } from '../../src/utils/multimodalReadiness';
 
 jest.mock('../../src/services/HardwareListenerService', () => ({
   hardwareListenerService: {
@@ -294,6 +305,612 @@ function resolveComposerNativeInputs(model: ModelMetadata): { image: boolean; au
   return { image: capabilities.image, audio: capabilities.audio };
 }
 
+const MATRIX_CACHE_STORAGE_ID = 'model-catalog-cache';
+const MATRIX_SNAPSHOT_CACHE_KEY = 'catalog-snapshot-cache-v1';
+
+type UnifiedNativeStateMatrixCase = {
+  name: string;
+  scope: 'model-wide' | 'active-text' | 'active-vision' | 'active-audio' | 'active-mixed';
+  evidence: 'catalog-safe' | 'runtime-only' | 'stale-persisted' | 'absent';
+  projector: 'absent' | 'remote-matching' | 'remote-mismatched' | 'installed-matching' | 'variant-incompatible';
+  readiness: 'none' | 'ready-valid' | 'ready-empty' | 'unsupported' | 'failed' | 'wrong-variant' | 'wrong-requested-support';
+  persistence: 'direct' | 'anonymous-search' | 'anonymous-snapshot' | 'v4-to-v5' | 'local-catalog-merge';
+  build: () => {
+    sourceModel: ModelMetadata;
+    localModel?: ModelMetadata;
+  };
+  expected: {
+    modelChatModalities: ModelMetadata['chatModalities'];
+    activeVariantChatModalities?: ModelMetadata['chatModalities'];
+    rawProjectorIds: string[];
+    effectiveProjectorIds: string[];
+    selectedProjectorId?: string;
+    artifactRequiredFor: string[][];
+    support: { vision: boolean; audio: boolean };
+    readinessDecision: 'reuse' | 'recheck' | 'none';
+    composer: { image: boolean; audio: boolean };
+  };
+};
+
+function makeUnifiedMatrixProjector({
+  modelId,
+  id,
+  fileName,
+  ownerVariantId,
+  lifecycleStatus = 'available',
+}: {
+  modelId: string;
+  id: string;
+  fileName: string;
+  ownerVariantId?: string;
+  lifecycleStatus?: ProjectorArtifact['lifecycleStatus'];
+}): ProjectorArtifact {
+  return {
+    id,
+    ownerModelId: modelId,
+    ...(ownerVariantId ? { ownerVariantId } : {}),
+    repoId: modelId,
+    fileName,
+    downloadUrl: `https://huggingface.co/${modelId}/resolve/main/${fileName}`,
+    hfRevision: 'main',
+    size: 1024,
+    ...(lifecycleStatus === 'downloaded' || lifecycleStatus === 'active'
+      ? { localPath: `models/${fileName}` }
+      : {}),
+    lifecycleStatus,
+    matchStatus: 'matched',
+  };
+}
+
+function makeUnifiedMatrixArtifact(
+  projector: ProjectorArtifact,
+  requiredFor: Array<'image' | 'audio'>,
+): NonNullable<ModelMetadata['artifacts']>[number] {
+  const installed = projector.lifecycleStatus === 'downloaded' || projector.lifecycleStatus === 'active';
+  return {
+    id: projector.id,
+    kind: 'multimodal_projector',
+    requiredFor,
+    hfRevision: projector.hfRevision,
+    remoteFileName: projector.fileName,
+    downloadUrl: projector.downloadUrl,
+    sizeBytes: projector.size,
+    ...(installed ? { localPath: projector.localPath } : {}),
+    installState: installed ? 'installed' : 'remote',
+  };
+}
+
+function makeUnifiedMatrixModel(id: string, overrides: Partial<ModelMetadata>): ModelMetadata {
+  const fileName = 'model.Q4_K_M.gguf';
+  return {
+    id,
+    name: `Matrix ${id}`,
+    author: 'matrix',
+    size: 1024,
+    downloadUrl: `https://huggingface.co/${id}/resolve/main/${fileName}`,
+    hfRevision: 'main',
+    resolvedFileName: fileName,
+    fitsInRam: true,
+    accessState: ModelAccessState.PUBLIC,
+    isGated: false,
+    isPrivate: false,
+    lifecycleStatus: LifecycleStatus.DOWNLOADED,
+    downloadProgress: 1,
+    ...overrides,
+  };
+}
+
+const UNIFIED_NATIVE_STATE_MATRIX: UnifiedNativeStateMatrixCase[] = [
+  {
+    name: 'model-wide catalog vision keeps checked unsupported state',
+    scope: 'model-wide',
+    evidence: 'catalog-safe',
+    projector: 'installed-matching',
+    readiness: 'unsupported',
+    persistence: 'direct',
+    build: () => {
+      const id = 'matrix/model-wide-unsupported';
+      const projector = makeUnifiedMatrixProjector({
+        modelId: id,
+        id: 'vision-projector',
+        fileName: 'mmproj-vision.gguf',
+        lifecycleStatus: 'downloaded',
+      });
+      return {
+        sourceModel: makeUnifiedMatrixModel(id, {
+          chatModalities: ['text', 'vision'],
+          visionSource: 'catalog_metadata',
+          visionConfidence: 'trusted',
+          inputCapabilities: {
+            detectedAt: 1,
+            declared: { image: 'supported', audio: 'unknown', video: 'unknown' },
+            evidence: [{ source: 'tag', value: 'vision', confidence: 'medium' }],
+          },
+          artifacts: [makeUnifiedMatrixArtifact(projector, ['image'])],
+          projectorCandidates: [projector],
+          selectedProjectorId: projector.id,
+          multimodalReadiness: {
+            modelId: id,
+            status: 'unsupported',
+            projectorId: projector.id,
+            support: [],
+            requestedSupport: ['vision'],
+            checkedAt: 1,
+          },
+        }),
+      };
+    },
+    expected: {
+      modelChatModalities: ['text', 'vision'],
+      rawProjectorIds: ['vision-projector'],
+      effectiveProjectorIds: ['vision-projector'],
+      selectedProjectorId: 'vision-projector',
+      artifactRequiredFor: [['image']],
+      support: { vision: true, audio: false },
+      readinessDecision: 'reuse',
+      composer: { image: false, audio: false },
+    },
+  },
+  {
+    name: 'active text variant rejects stale projector readiness',
+    scope: 'active-text',
+    evidence: 'stale-persisted',
+    projector: 'variant-incompatible',
+    readiness: 'wrong-variant',
+    persistence: 'direct',
+    build: () => {
+      const id = 'matrix/active-text';
+      const projector = makeUnifiedMatrixProjector({
+        modelId: id,
+        id: 'stale-projector',
+        fileName: 'mmproj-stale.gguf',
+        ownerVariantId: 'vision-old',
+        lifecycleStatus: 'downloaded',
+      });
+      return {
+        sourceModel: makeUnifiedMatrixModel(id, {
+          chatModalities: ['text', 'vision', 'audio'],
+          activeVariantId: 'text-q4',
+          variants: [{
+            variantId: 'text-q4',
+            fileName: 'model.Q4_K_M.gguf',
+            quantizationLabel: 'Q4_K_M',
+            size: 1024,
+            chatModalities: ['text'],
+          }],
+          artifacts: [makeUnifiedMatrixArtifact(projector, ['image', 'audio'])],
+          projectorCandidates: [projector],
+          selectedProjectorId: projector.id,
+          multimodalReadiness: {
+            modelId: id,
+            variantId: 'vision-old',
+            status: 'ready',
+            projectorId: projector.id,
+            support: ['vision'],
+            requestedSupport: ['vision'],
+            checkedAt: 1,
+          },
+        }),
+      };
+    },
+    expected: {
+      modelChatModalities: ['text', 'vision', 'audio'],
+      activeVariantChatModalities: ['text'],
+      rawProjectorIds: ['stale-projector'],
+      effectiveProjectorIds: [],
+      artifactRequiredFor: [['image', 'audio']],
+      support: { vision: false, audio: false },
+      readinessDecision: 'recheck',
+      composer: { image: false, audio: false },
+    },
+  },
+  {
+    name: 'active vision variant rejects ready-empty runtime evidence',
+    scope: 'active-vision',
+    evidence: 'runtime-only',
+    projector: 'remote-matching',
+    readiness: 'ready-empty',
+    persistence: 'direct',
+    build: () => {
+      const id = 'matrix/active-vision';
+      const variantId = 'vision-q4';
+      const projector = makeUnifiedMatrixProjector({
+        modelId: id,
+        id: 'vision-remote-projector',
+        fileName: 'mmproj-vision-remote.gguf',
+        ownerVariantId: variantId,
+      });
+      return {
+        sourceModel: makeUnifiedMatrixModel(id, {
+          chatModalities: ['text', 'audio'],
+          activeVariantId: variantId,
+          inputCapabilities: {
+            detectedAt: 1,
+            declared: { image: 'supported', audio: 'unknown', video: 'unknown' },
+            evidence: [{ source: 'runtime', value: 'vision', confidence: 'high' }],
+          },
+          variants: [{
+            variantId,
+            fileName: 'model.Q4_K_M.gguf',
+            quantizationLabel: 'Q4_K_M',
+            size: 1024,
+            chatModalities: ['text', 'vision'],
+            projectorCandidates: [projector],
+            selectedProjectorId: projector.id,
+          }],
+          artifacts: [makeUnifiedMatrixArtifact(projector, ['image'])],
+          projectorCandidates: [projector],
+          selectedProjectorId: projector.id,
+          multimodalReadiness: {
+            modelId: id,
+            variantId,
+            status: 'ready',
+            projectorId: projector.id,
+            support: [],
+            requestedSupport: ['vision'],
+            checkedAt: 1,
+          },
+        }),
+      };
+    },
+    expected: {
+      modelChatModalities: ['text', 'audio'],
+      activeVariantChatModalities: ['text', 'vision'],
+      rawProjectorIds: ['vision-remote-projector'],
+      effectiveProjectorIds: ['vision-remote-projector'],
+      selectedProjectorId: 'vision-remote-projector',
+      artifactRequiredFor: [['image']],
+      support: { vision: true, audio: false },
+      readinessDecision: 'recheck',
+      composer: { image: false, audio: false },
+    },
+  },
+  {
+    name: 'active audio variant preserves exact installed runtime through catalog merge',
+    scope: 'active-audio',
+    evidence: 'catalog-safe',
+    projector: 'installed-matching',
+    readiness: 'ready-valid',
+    persistence: 'local-catalog-merge',
+    build: () => {
+      const id = 'matrix/active-audio-merge';
+      const variantId = 'audio-q4';
+      const { localModel: baseLocalModel, localProjector, modelFileName } = makeDownloadedAudioModelWithProjector({
+        modelId: id,
+        projectorSha256: PROJECTOR_SHA256,
+      });
+      const projector = { ...localProjector, ownerVariantId: variantId };
+      const localModel: ModelMetadata = {
+        ...baseLocalModel,
+        activeVariantId: variantId,
+        resolvedFileName: modelFileName,
+        projectorCandidates: [projector],
+        selectedProjectorId: projector.id,
+        variants: [{
+          variantId,
+          fileName: modelFileName,
+          quantizationLabel: 'Q4_K_M',
+          size: baseLocalModel.size,
+          chatModalities: ['text', 'audio'],
+          projectorCandidates: [projector],
+          selectedProjectorId: projector.id,
+        }],
+        multimodalReadiness: {
+          ...baseLocalModel.multimodalReadiness!,
+          variantId,
+        },
+      };
+      return {
+        localModel,
+        sourceModel: {
+          ...localModel,
+          name: 'Matrix remote active audio',
+          localPath: undefined,
+          downloadedAt: undefined,
+          lifecycleStatus: LifecycleStatus.AVAILABLE,
+          downloadProgress: 0,
+          chatModalities: ['text'],
+          inputCapabilities: undefined,
+          artifacts: undefined,
+          projectorCandidates: undefined,
+          selectedProjectorId: undefined,
+          multimodalReadiness: undefined,
+          variants: [{
+            variantId,
+            fileName: modelFileName,
+            quantizationLabel: 'Q4_K_M',
+            size: baseLocalModel.size,
+          }],
+        },
+      };
+    },
+    expected: {
+      modelChatModalities: ['text', 'audio'],
+      activeVariantChatModalities: ['text', 'audio'],
+      rawProjectorIds: ['projector-matrix-active-audio-merge-main-mmproj-audio-model-f16.gguf'],
+      effectiveProjectorIds: ['projector-matrix-active-audio-merge-main-mmproj-audio-model-f16.gguf'],
+      selectedProjectorId: 'projector-matrix-active-audio-merge-main-mmproj-audio-model-f16.gguf',
+      artifactRequiredFor: [['audio']],
+      support: { vision: false, audio: true },
+      readinessDecision: 'reuse',
+      composer: { image: false, audio: true },
+    },
+  },
+  {
+    name: 'active mixed variant cache strips failed runtime readiness only',
+    scope: 'active-mixed',
+    evidence: 'catalog-safe',
+    projector: 'remote-matching',
+    readiness: 'failed',
+    persistence: 'anonymous-search',
+    build: () => {
+      const id = 'matrix/active-mixed-cache';
+      const variantId = 'mixed-q4';
+      const projector = makeUnifiedMatrixProjector({
+        modelId: id,
+        id: 'mixed-remote-projector',
+        fileName: 'mmproj-mixed.gguf',
+        ownerVariantId: variantId,
+      });
+      return {
+        sourceModel: makeUnifiedMatrixModel(id, {
+          chatModalities: ['text', 'vision', 'audio'],
+          activeVariantId: variantId,
+          visionSource: 'catalog_metadata',
+          visionConfidence: 'trusted',
+          inputCapabilities: {
+            detectedAt: 1,
+            declared: { image: 'supported', audio: 'supported', video: 'unknown' },
+            evidence: [
+              { source: 'tag', value: 'vision', confidence: 'medium' },
+              { source: 'pipeline_tag', value: 'audio-text-to-text', confidence: 'high' },
+              { source: 'projector', value: projector.fileName, confidence: 'medium' },
+            ],
+          },
+          variants: [{
+            variantId,
+            fileName: 'model.Q4_K_M.gguf',
+            quantizationLabel: 'Q4_K_M',
+            size: 1024,
+            chatModalities: ['text', 'vision', 'audio'],
+            projectorCandidates: [projector],
+            selectedProjectorId: projector.id,
+          }],
+          artifacts: [makeUnifiedMatrixArtifact(projector, ['image', 'audio'])],
+          projectorCandidates: [projector],
+          selectedProjectorId: projector.id,
+          multimodalReadiness: {
+            modelId: id,
+            variantId,
+            status: 'failed',
+            projectorId: projector.id,
+            support: [],
+            requestedSupport: ['vision', 'audio'],
+            checkedAt: 1,
+          },
+        }),
+      };
+    },
+    expected: {
+      modelChatModalities: ['text', 'vision', 'audio'],
+      activeVariantChatModalities: ['text', 'vision', 'audio'],
+      rawProjectorIds: ['mixed-remote-projector'],
+      effectiveProjectorIds: ['mixed-remote-projector'],
+      artifactRequiredFor: [['image', 'audio']],
+      support: { vision: true, audio: true },
+      readinessDecision: 'none',
+      composer: { image: false, audio: false },
+    },
+  },
+  {
+    name: 'anonymous snapshot strips runtime audio with mismatched projector evidence',
+    scope: 'model-wide',
+    evidence: 'runtime-only',
+    projector: 'remote-mismatched',
+    readiness: 'wrong-requested-support',
+    persistence: 'anonymous-snapshot',
+    build: () => {
+      const id = 'matrix/runtime-audio-snapshot';
+      const projector = makeUnifiedMatrixProjector({
+        modelId: id,
+        id: 'mismatched-projector',
+        fileName: 'mmproj-b.gguf',
+      });
+      return {
+        sourceModel: makeUnifiedMatrixModel(id, {
+          chatModalities: ['text', 'audio'],
+          inputCapabilities: {
+            detectedAt: 1,
+            declared: { image: 'unknown', audio: 'supported', video: 'unknown' },
+            evidence: [
+              { source: 'runtime', value: 'audio', confidence: 'high' },
+              { source: 'projector', value: 'mmproj-a.gguf', confidence: 'medium' },
+            ],
+          },
+          artifacts: [makeUnifiedMatrixArtifact(projector, ['audio'])],
+          projectorCandidates: [projector],
+          selectedProjectorId: projector.id,
+          multimodalReadiness: {
+            modelId: id,
+            status: 'ready',
+            projectorId: projector.id,
+            support: ['audio'],
+            requestedSupport: ['vision'],
+            checkedAt: 1,
+          },
+        }),
+      };
+    },
+    expected: {
+      modelChatModalities: ['text'],
+      rawProjectorIds: [],
+      effectiveProjectorIds: [],
+      artifactRequiredFor: [],
+      support: { vision: false, audio: false },
+      readinessDecision: 'none',
+      composer: { image: false, audio: false },
+    },
+  },
+  {
+    name: 'v4 migration removes unsupported active audio without evidence or projector',
+    scope: 'active-audio',
+    evidence: 'absent',
+    projector: 'absent',
+    readiness: 'none',
+    persistence: 'v4-to-v5',
+    build: () => {
+      const id = 'matrix/v4-active-audio';
+      const variantId = 'audio-q4';
+      return {
+        sourceModel: makeUnifiedMatrixModel(id, {
+          chatModalities: ['text', 'audio'],
+          activeVariantId: variantId,
+          inputCapabilities: {
+            detectedAt: 1,
+            declared: { image: 'unknown', audio: 'supported', video: 'unknown' },
+            evidence: [],
+          },
+          variants: [{
+            variantId,
+            fileName: 'model.Q4_K_M.gguf',
+            quantizationLabel: 'Q4_K_M',
+            size: 1024,
+            chatModalities: ['text', 'audio'],
+          }],
+        }),
+      };
+    },
+    expected: {
+      modelChatModalities: ['text'],
+      activeVariantChatModalities: ['text'],
+      rawProjectorIds: [],
+      effectiveProjectorIds: [],
+      artifactRequiredFor: [],
+      support: { vision: false, audio: false },
+      readinessDecision: 'none',
+      composer: { image: false, audio: false },
+    },
+  },
+];
+
+function materializeUnifiedNativeStateMatrixCase(
+  testCase: UnifiedNativeStateMatrixCase,
+  service: ModelCatalogService,
+): ModelMetadata {
+  const { sourceModel, localModel } = testCase.build();
+
+  if (testCase.persistence === 'direct') {
+    return normalizePersistedModelMetadata(sourceModel);
+  }
+
+  if (testCase.persistence === 'local-catalog-merge') {
+    if (!localModel) {
+      throw new Error(`Matrix case ${testCase.name} is missing its local model`);
+    }
+    mockedRegistry.getModel.mockImplementation((id) => (id === localModel.id ? localModel : undefined));
+    const merged = mergeModelWithRegistryForTest(service, sourceModel);
+    if (!merged) {
+      throw new Error(`Matrix case ${testCase.name} did not produce a merged model`);
+    }
+    return merged;
+  }
+
+  const storage = createStorage(MATRIX_CACHE_STORAGE_ID, { tier: 'cache' });
+  storage.clearAll();
+
+  if (testCase.persistence === 'anonymous-search') {
+    const scope = {
+      query: sourceModel.id,
+      cursor: null,
+      pageSize: 20,
+      sort: null,
+      authScope: 'anon' as const,
+    };
+    const store = new ModelCatalogCacheStore();
+    store.putSearch(scope, { models: [sourceModel], hasMore: false, nextCursor: null });
+    const model = new ModelCatalogCacheStore().getSearch(scope, 1000)?.models[0];
+    if (!model) {
+      throw new Error(`Matrix case ${testCase.name} was not restored from anonymous search`);
+    }
+    return model;
+  }
+
+  if (testCase.persistence === 'anonymous-snapshot') {
+    const store = new ModelCatalogCacheStore();
+    store.putModelSnapshots([sourceModel], 'anon');
+    const model = new ModelCatalogCacheStore().getModelSnapshot(sourceModel.id, 'anon', 1000);
+    if (!model) {
+      throw new Error(`Matrix case ${testCase.name} was not restored from anonymous snapshot`);
+    }
+    return model;
+  }
+
+  storage.set(MATRIX_SNAPSHOT_CACHE_KEY, JSON.stringify({
+    version: 4,
+    entries: [{
+      key: `${sourceModel.id}::anon`,
+      id: sourceModel.id,
+      authScope: 'anon',
+      timestamp: Date.now(),
+      model: sourceModel,
+    }],
+  }));
+  const store = new ModelCatalogCacheStore();
+  const persistedSnapshot = JSON.parse(storage.getString(MATRIX_SNAPSHOT_CACHE_KEY) as string) as { version: number };
+  expect(persistedSnapshot.version).toBe(5);
+  const model = store.getModelSnapshot(sourceModel.id, 'anon', 1000);
+  if (!model) {
+    throw new Error(`Matrix case ${testCase.name} was not restored from v4 migration`);
+  }
+  return model;
+}
+
+function getUnifiedMatrixRawProjectorIds(model: ModelMetadata): string[] {
+  const activeVariant = resolveActiveModelVariant(model);
+  return [...new Set([
+    ...(model.projectorCandidates ?? []),
+    ...(activeVariant?.projectorCandidates ?? []),
+  ].map((projector) => projector.id))].sort();
+}
+
+function resolveUnifiedMatrixReadinessDecision(
+  model: ModelMetadata,
+): 'reuse' | 'recheck' | 'none' {
+  if (!model.multimodalReadiness) {
+    return 'none';
+  }
+
+  const support = resolveEffectiveActiveVariantNativeSupport(model);
+  const requestedSupport = [
+    ...(support.vision ? ['vision' as const] : []),
+    ...(support.audio ? ['audio' as const] : []),
+  ];
+  const resolution = projectorArtifactService.resolveProjectorForModel(model);
+  const selectedProjector = resolution.selectedProjector;
+  const isReusable = isMultimodalReadinessReusableForModel({
+    model,
+    readiness: model.multimodalReadiness,
+    projectorId: selectedProjector?.id,
+    requestedSupport,
+    projectorCandidates: resolution.candidates,
+  });
+  const lifecycleAllowsReuse = selectedProjector !== undefined
+    && getReadinessStatusForProjectorLifecycle(selectedProjector) === null;
+  return isReusable && lifecycleAllowsReuse ? 'reuse' : 'recheck';
+}
+
+function resolveUnifiedMatrixComposerInputs(
+  model: ModelMetadata,
+  readinessDecision: 'reuse' | 'recheck' | 'none',
+): { image: boolean; audio: boolean } {
+  return resolveComposerNativeInputs({
+    ...model,
+    multimodalReadiness: readinessDecision === 'reuse'
+      ? model.multimodalReadiness
+      : undefined,
+  });
+}
+
 function makeImageGenerationRepo(id: string) {
   return {
     id,
@@ -337,6 +954,72 @@ describe('ModelCatalogService regressions', () => {
   afterEach(() => {
     service.dispose();
   });
+
+  it('covers every required unified native state matrix axis', () => {
+    expect(new Set(UNIFIED_NATIVE_STATE_MATRIX.map((testCase) => testCase.scope))).toEqual(new Set([
+      'model-wide',
+      'active-text',
+      'active-vision',
+      'active-audio',
+      'active-mixed',
+    ]));
+    expect(new Set(UNIFIED_NATIVE_STATE_MATRIX.map((testCase) => testCase.evidence))).toEqual(new Set([
+      'catalog-safe',
+      'runtime-only',
+      'stale-persisted',
+      'absent',
+    ]));
+    expect(new Set(UNIFIED_NATIVE_STATE_MATRIX.map((testCase) => testCase.projector))).toEqual(new Set([
+      'absent',
+      'remote-matching',
+      'remote-mismatched',
+      'installed-matching',
+      'variant-incompatible',
+    ]));
+    expect(new Set(UNIFIED_NATIVE_STATE_MATRIX.map((testCase) => testCase.readiness))).toEqual(new Set([
+      'none',
+      'ready-valid',
+      'ready-empty',
+      'unsupported',
+      'failed',
+      'wrong-variant',
+      'wrong-requested-support',
+    ]));
+    expect(new Set(UNIFIED_NATIVE_STATE_MATRIX.map((testCase) => testCase.persistence))).toEqual(new Set([
+      'direct',
+      'anonymous-search',
+      'anonymous-snapshot',
+      'v4-to-v5',
+      'local-catalog-merge',
+    ]));
+  });
+
+  it.each(UNIFIED_NATIVE_STATE_MATRIX)(
+    'enforces unified native state matrix: $scope / $evidence / $projector / $readiness / $persistence',
+    (testCase) => {
+      const model = materializeUnifiedNativeStateMatrixCase(testCase, service);
+      const activeVariant = resolveActiveModelVariant(model);
+      const effectiveProjectors = getEffectiveActiveVariantProjectorCandidates(model);
+      const readinessDecision = resolveUnifiedMatrixReadinessDecision(model);
+      const projectorArtifactRequirements = (model.artifacts ?? [])
+        .filter((artifact) => artifact.kind === 'multimodal_projector')
+        .sort((left, right) => left.id.localeCompare(right.id))
+        .map((artifact) => [...artifact.requiredFor]);
+
+      expect(model.chatModalities).toEqual(testCase.expected.modelChatModalities);
+      expect(activeVariant?.chatModalities).toEqual(testCase.expected.activeVariantChatModalities);
+      expect(getUnifiedMatrixRawProjectorIds(model)).toEqual(testCase.expected.rawProjectorIds);
+      expect(effectiveProjectors.map((projector) => projector.id).sort())
+        .toEqual(testCase.expected.effectiveProjectorIds);
+      expect(getEffectiveActiveVariantSelectedProjectorId(model, effectiveProjectors))
+        .toBe(testCase.expected.selectedProjectorId);
+      expect(projectorArtifactRequirements).toEqual(testCase.expected.artifactRequiredFor);
+      expect(resolveEffectiveActiveVariantNativeSupport(model)).toEqual(testCase.expected.support);
+      expect(readinessDecision).toBe(testCase.expected.readinessDecision);
+      expect(resolveUnifiedMatrixComposerInputs(model, readinessDecision))
+        .toEqual(testCase.expected.composer);
+    },
+  );
 
   it('keeps gated GGUF repos visible when tree access is forbidden and size cannot be resolved', async () => {
     global.fetch = jest.fn((input: RequestInfo | URL) => {
